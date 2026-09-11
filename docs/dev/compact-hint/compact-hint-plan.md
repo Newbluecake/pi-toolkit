@@ -39,7 +39,7 @@ pi turn_end ──▶ createCompactHintHook ──读──▶ ctx.getContextUsa
                     effective = min(threshold, maxThresholdPercent(contextWindow, reserveTokens))
                     percent >= effective 且闩锁不匹配当前 (effective, contextWindow) 且未冷却
                                                       ▼
-              pi.sendMessage({customType:"subagent:compact-hint", display:false, …}, {triggerTurn:false})
+              pi.sendMessage({customType:"subagent:compact-hint", display:true, …}, {triggerTurn:false})
                     + ctx.hasUI 时 ui.notify toast
 ```
 
@@ -143,7 +143,7 @@ on turn_end(event, ctx):
   if (state.lastHintAt > 0 && now() - state.lastHintAt < COMPACT_HINT_COOLDOWN_MS) return  // 冷却窗；lastHintAt=0 是"从未发过"哨兵，必须跳过判定——否则测试时钟从 0 起步时首个 hint 被误判在冷却窗内（三审指摘）
   try:
       deps.sendMessage({ customType: COMPACT_HINT_CUSTOM_TYPE, content: buildCompactHintText(percent, effective),
-                         display: false, details: { percent, thresholdPercent: effective } },
+                         display: true, details: { percent, thresholdPercent: effective } },
                        { triggerTurn: false })
   catch (e):
       console.warn(`[pi-subagent] compact-hint send failed: ${e}`)
@@ -239,7 +239,7 @@ export function resolveReserveTokens(override: number | undefined, cwd: string):
 本提示仅为提醒，不会强制执行。若当前任务正处关键阶段，可忽略本提示继续工作。
 ```
 
-**定死的决策（维持 v2 Minor 7 结论）**：消息 `display: false`；toast 发（`ctx.hasUI` 门控，try/catch 吞错，不影响状态置位）；print/json 模式 hook 整体跳过（不发消息、不发 toast、不动状态）；triggerTurn:false 语义 = streaming 中当前 turn_end 后追加进上下文、下一轮可见；run 已结束则只落历史、不自动起新 turn、等未来触发。
+**定死的决策**：消息 `display: true`（v3.3 起改为可见——像 subagent 通知一样持久展示在对话流中，用户与模型看到同一条文案；v2 Minor 7 的 `display: false` 决策作废）；toast 发（`ctx.hasUI` 门控，try/catch 吞错，不影响状态置位）；print/json 模式 hook 整体跳过（不发消息、不发 toast、不动状态）；triggerTurn:false 语义 = streaming 中当前 turn_end 后追加进上下文、下一轮可见（必须保持 false，否则 turn_end 钩子里触发新 turn 有循环风险）；run 已结束则只落历史、不自动起新 turn、等未来触发。L2 强制压缩前同样注入一条可见通知（`buildCompactForceText`，details.forced=true）。
 
 ## 6. settings 字段（src/config/settings.ts）
 
@@ -314,7 +314,7 @@ export function resolveReserveTokens(override: number | undefined, cwd: string):
 （fakePi 的 ctx 假对象提供可编程 `getContextUsage()`；stack 用 settings.compact.assumedReserveTokens=16384 固定 reserve，绕开真实文件读取——文件路径解析由 8.2 覆盖。）
 
 1. **阈值下不发**：40% < 75 → sent 空；
-2. **越阈发一次**：200000 窗口 80% → sent 恰 1 条（customType / display:false / triggerTurn:false / details.effective=75）；再 emit → 不发（闩锁匹配）；
+2. **越阈发一次**：200000 窗口 80% → sent 恰 1 条（customType / display:true / triggerTurn:false / details.effective=75）；再 emit → 不发（闩锁匹配）；
 3. **边界 `>=`**：percent == 75 发；74.5 不发；
 4. **冷却**：回落清闩锁后再越阈但在窗内 → 不发；推进 now 超 10 min → 发；
 5. **hinted 置位 → 置零 → 重设 → 高 usage**：发过 → 工具置零 → 重设 → 下一 turn_end 立即再发（不受旧冷却压制）；
@@ -447,7 +447,7 @@ percent ≥ L1 阈值但 < L2 强制线                  → L1 警告照发一�
 percent ≥ L2 强制线                              → L2 强制压缩接管，tick 止步
 ```
 
-- 通报文案（`buildUsageTickText`，customType `subagent:usage-tick`，display:false + triggerTurn:false，
+- 通报文案（`buildUsageTickText`，customType `subagent:usage-tick`，display:true + triggerTurn:false，
   与 L1 同通道）：低于 L1 阈值时
   `[pi-subagent 上下文通报] 上下文已使用约 X%。达到 Y% 时会再提醒你考虑 compact_context；现在无需操作。`；
   已达/超过 L1 阈值时改为 `已超过提醒阈值 Y%；如果你正在收尾一个子任务，请尽快调用 compact_context。`
@@ -474,7 +474,7 @@ percent ≥ L2 强制线                              → L2 强制压缩接管�
 ### 12.4 测试增量
 
 - 纯函数：usageTickStep 首阶梯以下/天花板/自定义步长/0 关闭；buildUsageTickText 低于/超过/无 ceiling 三形态。
-- wiring：10% 起逐阶梯通报且消息契约精确（customType/display:false/triggerTurn:false/details.tickStep）/
+- wiring：10% 起逐阶梯通报且消息契约精确（customType/display:true/triggerTurn:false/details.tickStep）/
   同阶梯不重复 / 边界抖动不重报、真实回落（压缩级）后重新武装 / 75% 处 L1 接管（customType 切换）、
   L1 区域 tick 继续通报（80% 阶梯、超阈值文案）/
   threshold=0 时 tick 续命至 force 线 / tickStepPercent=0 全静默。

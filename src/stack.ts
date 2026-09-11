@@ -6,6 +6,7 @@ import {
   COMPACT_HINT_CUSTOM_TYPE,
   USAGE_TICK_CUSTOM_TYPE,
   USAGE_TICK_HYSTERESIS_PERCENT,
+  buildCompactForceText,
   buildCompactHintText,
   buildUsageTickText,
   effectiveThresholdPercent,
@@ -482,7 +483,9 @@ export function createCompactHintHook(
   holder: { current?: Stack },
   deps: {
     sendMessage: (
-      message: { customType: string; content: string; display: false; details: unknown },
+      // Visible by default (like subagent notifications): the user sees the
+      // same message the model receives, persisted in the transcript.
+      message: { customType: string; content: string; display: boolean; details: unknown },
       options: { triggerTurn: false },
     ) => void;
     now?: () => number;
@@ -528,6 +531,19 @@ export function createCompactHintHook(
         } catch {}
       }
       try {
+        deps.sendMessage(
+          {
+            customType: COMPACT_HINT_CUSTOM_TYPE,
+            content: buildCompactForceText(percent, effectiveForce),
+            display: true,
+            details: { percent, thresholdPercent: effectiveForce, forced: true },
+          },
+          { triggerTurn: false },
+        );
+      } catch (error) {
+        console.warn(`[pi-subagent] compact-hint force notice send failed: ${String(error)}`);
+      }
+      try {
         ctx.compact({
           onComplete: () => {
             forcing = false;
@@ -564,7 +580,7 @@ export function createCompactHintHook(
           {
             customType: USAGE_TICK_CUSTOM_TYPE,
             content: buildUsageTickText(percent, effective > 0 ? effective : 0),
-            display: false,
+            display: true,
             details: { percent, tickStep: tick },
           },
           { triggerTurn: false },
@@ -594,7 +610,7 @@ export function createCompactHintHook(
         {
           customType: COMPACT_HINT_CUSTOM_TYPE,
           content: buildCompactHintText(percent, effective, effectiveForce),
-          display: false,
+          display: true,
           details: { percent, thresholdPercent: effective },
         },
         { triggerTurn: false },

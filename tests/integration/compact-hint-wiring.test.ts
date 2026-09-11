@@ -99,7 +99,7 @@ describe("compact hint turn_end wiring", () => {
     expect(h.sent).toHaveLength(0);
     h.hook({}, ctx(75));
     expect(h.sent[0]).toMatchObject({
-      message: { customType: "subagent:compact-hint", display: false, details: { thresholdPercent: 75 } },
+      message: { customType: "subagent:compact-hint", display: true, details: { thresholdPercent: 75 } },
       options: { triggerTurn: false },
     });
   });
@@ -285,7 +285,8 @@ describe("compact hint turn_end wiring", () => {
     hook({}, ctx(74));
     clock = 600_001;
     hook({}, ctx(75));
-    expect(sent).toHaveLength(2);
+    // L1 hint + L2 force notice + re-armed L1 hint.
+    expect(sent).toHaveLength(3);
     expect(resume).toHaveBeenCalledOnce();
   });
 
@@ -331,16 +332,22 @@ describe("compact hint turn_end wiring", () => {
     const compact = vi.fn((options: { onComplete: () => void }) => options.onComplete());
     const resume = vi.fn();
     const forceContext = { ...ctx(88, "interactive", true), compact } as never;
+    const sent: unknown[] = [];
     const hook = createCompactHintHook(
       { current: { compactHint: state } as Stack },
       {
-        sendMessage: () => undefined,
+        sendMessage: (message) => sent.push(message),
         sendUserMessage: resume,
         now: () => 1,
       },
     );
     hook({}, forceContext);
     expect(compact).toHaveBeenCalledOnce();
+    expect(sent[0]).toMatchObject({
+      customType: "subagent:compact-hint",
+      display: true,
+      details: { thresholdPercent: 88, forced: true },
+    });
     expect(resume).toHaveBeenCalledWith(expect.stringContaining("Context compaction completed successfully"));
     hook({}, forceContext);
     expect(compact).toHaveBeenCalledOnce();
@@ -368,7 +375,7 @@ describe("compact hint turn_end wiring", () => {
     h.hook({}, ctx(12));
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]).toMatchObject({
-      message: { customType: "subagent:usage-tick", display: false, details: { tickStep: 10 } },
+      message: { customType: "subagent:usage-tick", display: true, details: { tickStep: 10 } },
       options: { triggerTurn: false },
     });
     expect((h.sent[0]?.message.content as string) ?? "").toContain("无需操作");
@@ -421,7 +428,8 @@ describe("compact hint turn_end wiring", () => {
     expect(h.sent[1]?.message.customType).toBe("subagent:usage-tick");
     h.hook({}, withCompact(51)); // at the force ceiling: L2 owns this zone
     expect(compact).toHaveBeenCalledOnce();
-    expect(h.sent).toHaveLength(2);
+    // L2 force now also emits a visible notice message.
+    expect(h.sent).toHaveLength(3);
   });
 
   it("does not tick when tickStepPercent is 0", () => {

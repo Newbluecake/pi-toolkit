@@ -48,6 +48,13 @@ export function effectiveThresholdPercent(
   return Math.min(thresholdPercent, maxThresholdPercent(contextWindow, reserveTokens));
 }
 
+export function buildCompactForceText(percent: number, forceAt: number): string {
+  return (
+    `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%，达到强制阈值 ${forceAt}%，` +
+    "正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。"
+  );
+}
+
 export function buildCompactHintText(percent: number, effective: number, forceAt = 0): string {
   const forceLine =
     forceAt > 0 ? `若用量继续涨至 ${forceAt}%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n` : "";

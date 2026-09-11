@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCompactForceText,
   buildCompactHintText,
   buildUsageTickText,
   effectiveThresholdPercent,
@@ -38,6 +39,12 @@ describe("compact hint thresholds", () => {
     expect(buildCompactHintText(80, 75, 88)).toContain("- 若用量继续涨至 88%");
     expect(buildCompactHintText(80, 75, 88)).toContain("- 压缩不是终止");
     expect(buildCompactHintText(80, 75, 0)).not.toContain("强制压缩");
+  });
+
+  it("builds the force notice text", () => {
+    expect(buildCompactForceText(88, 88)).toContain("88%");
+    expect(buildCompactForceText(88, 88)).toContain("强制压缩");
+    expect(buildCompactForceText(88, 88)).toContain("压缩不是终止");
   });
 
   it("computes usage tick steps from the first step up to the ceiling", () => {
