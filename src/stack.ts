@@ -9,8 +9,7 @@ import {
   buildCompactForceText,
   buildCompactHintText,
   buildUsageTickText,
-  effectiveThresholdPercent,
-  maxThresholdPercent,
+  effectiveThresholdPercentWithTokens,
   usageTickStep,
 } from "./compact-hint/threshold.js";
 import { homedir } from "node:os";
@@ -413,6 +412,10 @@ export interface WorkflowSupport {
 export interface CompactHintState {
   thresholdPercent: number;
   forceAtPercent: number;
+  /** Absolute thresholds in units of k tokens (0 = off); combined with the
+   *  percent lines via min — whichever fires first wins. */
+  thresholdTokens: number;
+  forceAtTokens: number;
   reserveTokens: number;
   lastHintAt: number;
   hintedAt: { effectivePercent: number; contextWindow: number } | undefined;
@@ -498,7 +501,15 @@ export function createCompactHintHook(
   return (_event, ctx) => {
     if (ctx.mode === "print" || ctx.mode === "json") return;
     const state = holder.current?.compactHint;
-    if (!state || (state.thresholdPercent <= 0 && state.forceAtPercent <= 0 && state.tickStepPercent <= 0)) return;
+    if (
+      !state ||
+      (state.thresholdPercent <= 0 &&
+        state.forceAtPercent <= 0 &&
+        state.thresholdTokens <= 0 &&
+        state.forceAtTokens <= 0 &&
+        state.tickStepPercent <= 0)
+    )
+      return;
     const usage = ctx.getContextUsage();
     const percent = usage?.percent;
     const debug = process.env.PI_SUBAGENT_DEBUG_COMPACT_HINT === "1";
@@ -510,10 +521,17 @@ export function createCompactHintHook(
       state.hintedAt = undefined;
       return;
     }
-    const effective = effectiveThresholdPercent(state.thresholdPercent, usage.contextWindow, state.reserveTokens);
-    const effectiveForce = Math.min(
+    const effective = effectiveThresholdPercentWithTokens(
+      state.thresholdPercent,
+      state.thresholdTokens,
+      usage.contextWindow,
+      state.reserveTokens,
+    );
+    const effectiveForce = effectiveThresholdPercentWithTokens(
       state.forceAtPercent,
-      maxThresholdPercent(usage.contextWindow, state.reserveTokens),
+      state.forceAtTokens,
+      usage.contextWindow,
+      state.reserveTokens,
     );
     if (effectiveForce > 0 && percent >= effectiveForce) {
       const timestamp = now();
@@ -682,6 +700,8 @@ export function buildSessionStack(
   const compactHint: CompactHintState = {
     thresholdPercent: settings.compact.enabled ? settings.compact.hintThresholdPercent : 0,
     forceAtPercent: settings.compact.enabled ? settings.compact.forceAtPercent : 0,
+    thresholdTokens: settings.compact.enabled ? settings.compact.hintThresholdTokens : 0,
+    forceAtTokens: settings.compact.enabled ? settings.compact.forceAtTokens : 0,
     reserveTokens: resolveReserveTokens(settings.compact.assumedReserveTokens, ctx.cwd),
     lastHintAt: 0,
     hintedAt: undefined,

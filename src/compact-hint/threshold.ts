@@ -48,6 +48,56 @@ export function effectiveThresholdPercent(
   return Math.min(thresholdPercent, maxThresholdPercent(contextWindow, reserveTokens));
 }
 
+/** Combined trigger line in absolute tokens (0 = no line): the min of the
+ *  percent-derived line (needs a known window) and the absolute line
+ *  (`tokensK` is in units of k, i.e. `tokensK * 1000` tokens). The absolute
+ *  line auto-disables when it strictly exceeds the context window. Exported
+ *  for the set_compact_threshold tool's cross-validation. */
+export function thresholdLineTokens(
+  thresholdPercent: number,
+  thresholdTokensK: number,
+  contextWindow?: number,
+): number {
+  const lines: number[] = [];
+  if (thresholdPercent > 0 && contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow > 0)
+    lines.push(Math.floor((thresholdPercent / 100) * contextWindow));
+  if (thresholdTokensK > 0 && (contextWindow === undefined || !tokenLineExceedsWindow(thresholdTokensK, contextWindow)))
+    lines.push(Math.floor(thresholdTokensK * 1000));
+  return lines.length === 0 ? 0 : Math.min(...lines);
+}
+
+/** An absolute token line (unit k) auto-disables when it STRICTLY exceeds the
+ *  context window — a line the context can never reach. Distinct from the
+ *  reserve clamp: a line <= window but > (window − reserve) still applies via
+ *  clamping; only > window drops out entirely. */
+export function tokenLineExceedsWindow(thresholdTokensK: number, contextWindow: number): boolean {
+  return Number.isFinite(contextWindow) && contextWindow > 0 && thresholdTokensK * 1000 > contextWindow;
+}
+
+/** Absolute-token-aware threshold: combines a percent threshold with an
+ *  absolute token threshold (unit k) — whichever fires first (min in token
+ *  space) wins — then clamps to the dynamic reserve cap and converts back to
+ *  the percent coordinate (floor) used by the hook/ticks. The absolute line
+ *  auto-disables when `tokensK * 1000 > contextWindow` (strictly). With
+ *  `thresholdTokensK <= 0` (or auto-disabled) this degenerates exactly to
+ *  `effectiveThresholdPercent` (floor distributes over min, so the
+ *  percent-only path is bit-identical); with `thresholdPercent <= 0` the
+ *  absolute line alone decides. */
+export function effectiveThresholdPercentWithTokens(
+  thresholdPercent: number,
+  thresholdTokensK: number,
+  contextWindow: number,
+  reserveTokens: number,
+): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return 0;
+  const tokenActive = thresholdTokensK > 0 && !tokenLineExceedsWindow(thresholdTokensK, contextWindow);
+  if (thresholdPercent <= 0 && !tokenActive) return 0;
+  let result = maxThresholdPercent(contextWindow, reserveTokens);
+  if (thresholdPercent > 0) result = Math.min(result, thresholdPercent);
+  if (tokenActive) result = Math.min(result, Math.floor(((thresholdTokensK * 1000) / contextWindow) * 100));
+  return result;
+}
+
 export function buildCompactForceText(percent: number, forceAt: number): string {
   return (
     `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%，达到强制阈值 ${forceAt}%，` +

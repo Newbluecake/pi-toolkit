@@ -479,3 +479,47 @@ percent ≥ L2 强制线                              → L2 强制压缩接管�
   L1 区域 tick 继续通报（80% 阶梯、超阈值文案）/
   threshold=0 时 tick 续命至 force 线 / tickStepPercent=0 全静默。
 - settings：usageTickStepPercent 解析（0、15、非法值回落默认）。
+
+## 13. v3.5 增量：绝对 token 阈值（单位 k，用户拍板 2026-09）
+
+### 13.1 语义
+
+- 两级阈值在百分比之外各新增一条**绝对已用 token 线**，单位 k（配置写 `400` = 400k tokens，
+  已用 tokens ≥ N×1000 触发）：
+  - `compact.hintThresholdTokens`：number，**默认 400**；`0` = 不限制（绝对值不参与，纯百分比）。
+  - `compact.forceAtTokens`：number，**默认 0**（不限制）；其余规则同 hint。
+- **取 min**：百分比换算成 tokens（`floor(percent/100 × contextWindow)`）与绝对值取 min 作为触发线
+  （谁更严格谁先生效），再统一受 reserve 动态上限钳制（`maxThresholdPercent`），最后 floor 换算回
+  percent 供现有 percent 坐标系的 hook/tick 使用（`effectiveThresholdPercentWithTokens`）。
+  floor 对 min 满足分配律，因此 tokens=0（或失效）时与旧 `effectiveThresholdPercent` **逐位一致**，零回归。
+- **自动失效**：绝对线严格大于 contextWindow（`tokensK × 1000 > window`）时整条不参与判定
+  （`tokenLineExceedsWindow`）。与 reserve 钳制不同：≤ window 但 > (window−reserve) 仍走 clamp，
+  只有 > window 才失效。推论：1M 窗口默认 min(75%×1M, 400k)=400k → 40% 触发；256k/372k 窗口
+  400k 默认线自动失效，行为与 v3.4 完全一致。
+- percent=0 但 tokens>0 时绝对线单独生效；两者皆 0/失效 → 该级阈值关闭。
+
+### 13.2 settings / 状态
+
+- `CompactSettings` 加 `hintThresholdTokens`（默认 400）/ `forceAtTokens`（默认 0）；
+  `parseCompactSettings`：非有限/<0 回退默认；`forceAtTokens > 0` 时必须大于已配置的
+  `hintThresholdTokens`（镜像现有 force>hint 校验），否则回退默认 0。
+- `CompactHintState` 加 `thresholdTokens` / `forceAtTokens`（compact.enabled=false 时归零）；
+  hook 的 effective / effectiveForce 改用 `effectiveThresholdPercentWithTokens`，早退条件纳入两条 token 线。
+
+### 13.3 工具（set_compact_threshold）
+
+- 新增可选参数 `tokens` / `forceTokens`（number，单位 k；0=禁用，省略=不动）。
+- 校验镜像 percent：非有限/<0 拒绝；`forceTokens > 0` 时必须大于**生效的 hint tokens 线**
+  （`thresholdLineTokens`：百分比线与绝对线在 token 空间取 min，已考虑自动失效）。
+- 写入任一参数即重置 hintedAt/lastHintAt（与 percent 路径一致）；`percent=0 且 tokens=0` 才算 "off"。
+- query（无参）输出带绝对值信息：`75%/400k (effective 40%)`；绝对线当前失效时标注
+  `(absolute line inactive: exceeds window)`。
+
+### 13.4 测试增量
+
+- 纯函数：min 语义（1M 窗口 40%）、tokens-only、与旧 percent-only 路径逐位一致矩阵、
+  严格大于才失效（等于 window 不失效）、≤window 但超 reserve 走 clamp、thresholdLineTokens 全形态。
+- settings：默认 400/0 钉死、显式值/0/非法值回退、forceTokens>hintTokens 校验。
+- 工具：tokens 设置/查询/禁用、forceTokens 生效线校验、失效标注、大窗口 min 生效。
+- wiring：1M 窗口 400k 提前触发（effective 40）、256k 窗口自动失效（hint/force 纯百分比）、
+  settings → stack 默认 400 透传、enabled=false 时 tokens 归零。

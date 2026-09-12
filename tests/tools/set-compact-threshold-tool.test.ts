@@ -6,6 +6,8 @@ function state(): CompactHintState {
   return {
     thresholdPercent: 75,
     forceAtPercent: 88,
+    thresholdTokens: 0,
+    forceAtTokens: 0,
     reserveTokens: 16384,
     lastHintAt: 123,
     hintedAt: { effectivePercent: 75, contextWindow: 200000 },
@@ -120,5 +122,72 @@ describe("set_compact_threshold", () => {
     expect(
       (await tool.execute("1", { percent: 50 }, undefined, undefined, ctx({ mode: "json" }))).details,
     ).toMatchObject({ reason: "non_interactive_mode" });
+  });
+
+  it("sets and queries absolute token thresholds with min semantics", async () => {
+    const current = state();
+    const tool = createSetCompactThresholdTool({ getState: () => current, compactToolEnabled: () => true });
+    // 100k on a 200k window is stricter than 75% → effective 50%.
+    const set = await tool.execute("1", { tokens: 100 }, undefined, undefined, ctx());
+    expect(set.details).toMatchObject({ ok: true, action: "set", thresholdTokens: 100, effectivePercent: 50 });
+    expect(current).toMatchObject({ thresholdTokens: 100, lastHintAt: 0, hintedAt: undefined });
+    expect(set.content[0]?.text).toContain("75%/100k");
+    const query = await tool.execute("2", {}, undefined, undefined, ctx());
+    expect(query.details).toMatchObject({ ok: true, action: "query", thresholdTokens: 100, effectivePercent: 50 });
+    expect(query.content[0]?.text).toContain("75%/100k");
+    // 0 disables the absolute line again, percent-only.
+    const off = await tool.execute("3", { tokens: 0 }, undefined, undefined, ctx());
+    expect(off.details).toMatchObject({ ok: true, thresholdTokens: 0, effectivePercent: 75 });
+    expect(off.content[0]?.text).not.toContain("/0k");
+  });
+
+  it("rejects invalid and force-conflicting token thresholds", async () => {
+    const current = state();
+    const tool = createSetCompactThresholdTool({ getState: () => current, compactToolEnabled: () => true });
+    for (const tokens of [-1, Number.NaN])
+      expect((await tool.execute("1", { tokens }, undefined, undefined, ctx())).details).toMatchObject({
+        ok: false,
+        reason: "invalid",
+      });
+    for (const forceTokens of [-1, Number.NaN])
+      expect((await tool.execute("1", { forceTokens }, undefined, undefined, ctx())).details).toMatchObject({
+        ok: false,
+        reason: "invalid",
+      });
+    // Effective hint line on a 200k window is 75% → 150k; forceTokens must exceed it.
+    expect((await tool.execute("2", { forceTokens: 100 }, undefined, undefined, ctx())).details).toMatchObject({
+      ok: false,
+      reason: "invalid",
+    });
+    expect((await tool.execute("3", { forceTokens: 150 }, undefined, undefined, ctx())).details).toMatchObject({
+      ok: false,
+      reason: "invalid",
+    });
+    expect((await tool.execute("4", { forceTokens: 160 }, undefined, undefined, ctx())).details).toMatchObject({
+      ok: true,
+      forceAtTokens: 160,
+    });
+    expect(current).toMatchObject({ thresholdPercent: 75, thresholdTokens: 0, forceAtTokens: 160 });
+  });
+
+  it("annotates an absolute line that auto-disables above the window", async () => {
+    const current = state();
+    current.thresholdTokens = 400;
+    const tool = createSetCompactThresholdTool({ getState: () => current, compactToolEnabled: () => true });
+    // 400k > 200k window → inactive, effective falls back to pure percent.
+    const query = await tool.execute("1", {}, undefined, undefined, ctx());
+    expect(query.details).toMatchObject({ ok: true, effectivePercent: 75 });
+    expect(query.content[0]?.text).toContain("75%/400k");
+    expect(query.content[0]?.text).toContain("inactive");
+    // On a 1M window the same 400k line is active and wins the min → 40%.
+    const big = await tool.execute(
+      "2",
+      {},
+      undefined,
+      undefined,
+      ctx({ getContextUsage: () => ({ percent: 30, contextWindow: 1_000_000, tokens: 1 }) }),
+    );
+    expect(big.details).toMatchObject({ ok: true, effectivePercent: 40 });
+    expect(big.content[0]?.text).not.toContain("inactive");
   });
 });

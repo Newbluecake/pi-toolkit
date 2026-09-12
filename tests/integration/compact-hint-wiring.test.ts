@@ -19,6 +19,8 @@ function harness(initial: Partial<CompactHintState> = {}) {
   const state: CompactHintState = {
     thresholdPercent: 75,
     forceAtPercent: 88,
+    thresholdTokens: 0,
+    forceAtTokens: 0,
     reserveTokens: 16384,
     lastHintAt: 0,
     hintedAt: undefined,
@@ -73,6 +75,8 @@ describe("compact hint turn_end wiring", () => {
     const state: CompactHintState = {
       thresholdPercent: 75,
       forceAtPercent: 88,
+      thresholdTokens: 0,
+      forceAtTokens: 0,
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
@@ -191,6 +195,8 @@ describe("compact hint turn_end wiring", () => {
     const state: CompactHintState = {
       thresholdPercent: 75,
       forceAtPercent: 88,
+      thresholdTokens: 0,
+      forceAtTokens: 0,
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
@@ -215,7 +221,13 @@ describe("compact hint turn_end wiring", () => {
       ...DEFAULT_SETTINGS,
       fleetWidget: false,
       bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
-      compact: { enabled: true, hintThresholdPercent: 75, assumedReserveTokens: 16384 },
+      compact: {
+        enabled: true,
+        hintThresholdPercent: 75,
+        hintThresholdTokens: 0,
+        forceAtTokens: 0,
+        assumedReserveTokens: 16384,
+      },
     };
     const holder: { current?: Stack } = {};
     const first = buildSessionStack(host.pi, stackContext(cwd), settings, emptyTypes, []);
@@ -230,7 +242,13 @@ describe("compact hint turn_end wiring", () => {
     expect(first.compactHint.thresholdPercent).toBe(60);
     first.scheduler.stop();
     first.rpc.close();
-    settings.compact = { enabled: true, hintThresholdPercent: 75, assumedReserveTokens: 32768 };
+    settings.compact = {
+      enabled: true,
+      hintThresholdPercent: 75,
+      hintThresholdTokens: 0,
+      forceAtTokens: 0,
+      assumedReserveTokens: 32768,
+    };
     const second = buildSessionStack(host.pi, stackContext(cwd), settings, emptyTypes, []);
     holder.current = second;
     expect(second.compactHint.thresholdPercent).toBe(75);
@@ -246,7 +264,13 @@ describe("compact hint turn_end wiring", () => {
       ...DEFAULT_SETTINGS,
       fleetWidget: false,
       bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
-      compact: { enabled: false, hintThresholdPercent: 75, assumedReserveTokens: 16384 },
+      compact: {
+        enabled: false,
+        hintThresholdPercent: 75,
+        hintThresholdTokens: 400,
+        forceAtTokens: 0,
+        assumedReserveTokens: 16384,
+      },
     };
     const stack = buildSessionStack(
       fakePi().pi,
@@ -256,6 +280,7 @@ describe("compact hint turn_end wiring", () => {
       [],
     );
     expect(stack.compactHint.thresholdPercent).toBe(0);
+    expect(stack.compactHint.thresholdTokens).toBe(0);
     stack.scheduler.stop();
     stack.rpc.close();
   });
@@ -263,6 +288,8 @@ describe("compact hint turn_end wiring", () => {
     const state: CompactHintState = {
       thresholdPercent: 75,
       forceAtPercent: 88,
+      thresholdTokens: 0,
+      forceAtTokens: 0,
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
@@ -296,6 +323,8 @@ describe("compact hint turn_end wiring", () => {
       const state: CompactHintState = {
         thresholdPercent: 75,
         forceAtPercent,
+        thresholdTokens: 0,
+        forceAtTokens: 0,
         reserveTokens: 16384,
         lastHintAt: 0,
         hintedAt: undefined,
@@ -323,6 +352,8 @@ describe("compact hint turn_end wiring", () => {
     const state: CompactHintState = {
       thresholdPercent: 75,
       forceAtPercent: 88,
+      thresholdTokens: 0,
+      forceAtTokens: 0,
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
@@ -357,6 +388,8 @@ describe("compact hint turn_end wiring", () => {
     const state: CompactHintState = {
       thresholdPercent: 75,
       forceAtPercent: 88,
+      thresholdTokens: 0,
+      forceAtTokens: 0,
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
@@ -438,5 +471,51 @@ describe("compact hint turn_end wiring", () => {
     h.hook({}, ctx(50));
     h.hook({}, ctx(70));
     expect(h.sent).toHaveLength(0);
+  });
+
+  it("fires the default 400k absolute line early on a 1M window (min semantics)", () => {
+    const h = harness({ thresholdTokens: 400 });
+    h.hook({}, ctx(39, "interactive", false, 1_000_000));
+    expect(h.sent).toHaveLength(0);
+    h.hook({}, ctx(40, "interactive", false, 1_000_000));
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]).toMatchObject({
+      message: { customType: "subagent:compact-hint", details: { thresholdPercent: 40 } },
+    });
+  });
+
+  it("auto-disables a 400k absolute line above the window, keeping percent-only behavior", () => {
+    const h = harness({ thresholdTokens: 400 });
+    h.hook({}, ctx(74, "interactive", false, 256_000));
+    expect(h.sent).toHaveLength(0);
+    h.hook({}, ctx(75, "interactive", false, 256_000));
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]).toMatchObject({
+      message: { customType: "subagent:compact-hint", details: { thresholdPercent: 75 } },
+    });
+    // Same for the force line: 400k > 256k window → force stays percent-only.
+    const compact = vi.fn();
+    const f = harness({ thresholdPercent: 0, thresholdTokens: 0, forceAtPercent: 0, forceAtTokens: 400 });
+    f.hook({}, { ...ctx(95, "interactive", false, 256_000), compact } as never);
+    expect(compact).not.toHaveBeenCalled();
+  });
+
+  it("threads the settings absolute lines into the session stack", () => {
+    const settings: AgentSettings = {
+      ...DEFAULT_SETTINGS,
+      fleetWidget: false,
+      bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
+    };
+    const stack = buildSessionStack(
+      fakePi().pi,
+      stackContext("/tmp/pi-subagent-compact-tokens"),
+      settings,
+      emptyTypes,
+      [],
+    );
+    expect(stack.compactHint.thresholdTokens).toBe(400);
+    expect(stack.compactHint.forceAtTokens).toBe(0);
+    stack.scheduler.stop();
+    stack.rpc.close();
   });
 });

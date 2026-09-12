@@ -5,7 +5,14 @@ const defaults = DEFAULT_SETTINGS.compact;
 
 describe("compact settings", () => {
   it("pins the enabled-by-default value", () => {
-    expect(defaults).toEqual({ enabled: true, hintThresholdPercent: 75, forceAtPercent: 88, usageTickStepPercent: 10 });
+    expect(defaults).toEqual({
+      enabled: true,
+      hintThresholdPercent: 75,
+      forceAtPercent: 88,
+      hintThresholdTokens: 400,
+      forceAtTokens: 0,
+      usageTickStepPercent: 10,
+    });
   });
 
   it("falls back for missing and non-object blocks", () => {
@@ -23,8 +30,37 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
+      hintThresholdTokens: 400,
+      forceAtTokens: 0,
       usageTickStepPercent: 10,
     });
+  });
+
+  it("parses absolute token thresholds with 0=off and force>hint validation", () => {
+    // Explicit values pass through (floored).
+    expect(parseCompactSettings({ hintThresholdTokens: 300, forceAtTokens: 500 })).toMatchObject({
+      hintThresholdTokens: 300,
+      forceAtTokens: 500,
+    });
+    expect(parseCompactSettings({ hintThresholdTokens: 250.9 }).hintThresholdTokens).toBe(250);
+    // 0 disables the absolute line explicitly.
+    expect(parseCompactSettings({ hintThresholdTokens: 0 }).hintThresholdTokens).toBe(0);
+    // Invalid values fall back to the 400k default.
+    for (const invalid of [-1, Number.NaN, "400", null, Infinity]) {
+      expect(parseCompactSettings({ hintThresholdTokens: invalid }).hintThresholdTokens).toBe(400);
+    }
+    // forceAtTokens defaults to 0 and accepts 0.
+    expect(parseCompactSettings({}).forceAtTokens).toBe(0);
+    expect(parseCompactSettings({ forceAtTokens: 0 }).forceAtTokens).toBe(0);
+    // forceAtTokens > 0 must exceed the configured hint token line (mirror of
+    // the force>hint percent rule): 300 <= 400 default → falls back to 0;
+    // but 300 is fine when the hint line is explicitly lowered.
+    expect(parseCompactSettings({ forceAtTokens: 300 }).forceAtTokens).toBe(0);
+    expect(parseCompactSettings({ hintThresholdTokens: 200, forceAtTokens: 300 }).forceAtTokens).toBe(300);
+    expect(parseCompactSettings({ hintThresholdTokens: 0, forceAtTokens: 300 }).forceAtTokens).toBe(300);
+    for (const invalid of [-5, Number.NaN, "500"]) {
+      expect(parseCompactSettings({ forceAtTokens: invalid }).forceAtTokens).toBe(0);
+    }
   });
 
   it("returns a fresh object and is wired into loadSettings", () => {
@@ -36,6 +72,8 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
+      hintThresholdTokens: 400,
+      forceAtTokens: 0,
       usageTickStepPercent: 10,
     });
     expect(loadSettings({ compact: "invalid" }).compact).toEqual(defaults);
@@ -43,6 +81,8 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 60,
       forceAtPercent: 88,
+      hintThresholdTokens: 400,
+      forceAtTokens: 0,
       usageTickStepPercent: 10,
       assumedReserveTokens: 32768,
     });
@@ -50,6 +90,8 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 0,
       forceAtPercent: 88,
+      hintThresholdTokens: 400,
+      forceAtTokens: 0,
       usageTickStepPercent: 10,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0.5 })).toEqual(defaults);

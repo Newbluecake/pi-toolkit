@@ -86,6 +86,14 @@ export interface CompactSettings {
   enabled: boolean;
   hintThresholdPercent: number;
   forceAtPercent: number;
+  /** Absolute hint threshold in units of k tokens (default 400 = 400k used
+   *  tokens). 0 = no absolute limit (percent only). Auto-disabled when the
+   *  line strictly exceeds the model's context window. When both the percent
+   *  and the absolute line apply, whichever fires first wins. */
+  hintThresholdTokens: number;
+  /** Absolute force threshold in units of k tokens; 0 = no absolute limit
+   *  (default). Same auto-disable rule as hintThresholdTokens. */
+  forceAtTokens: number;
   /** Step (percent points) between lightweight usage-tick reports; ticks cover
    *  the whole range below the force ceiling. 0 disables ticks. Keeps the model
    *  aware of context usage before the reminder fires. */
@@ -231,6 +239,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     enabled: true,
     hintThresholdPercent: DEFAULT_HINT_THRESHOLD_PERCENT,
     forceAtPercent: DEFAULT_FORCE_THRESHOLD_PERCENT,
+    hintThresholdTokens: 400,
+    forceAtTokens: 0,
     usageTickStepPercent: DEFAULT_USAGE_TICK_STEP_PERCENT,
   },
   fabric: {
@@ -524,12 +534,27 @@ export function parseCompactSettings(input: unknown): CompactSettings {
     (force === 0 || Math.floor(force) > hintThresholdPercent)
       ? Math.floor(force)
       : defaults.forceAtPercent;
+  const hintTokens = value.hintThresholdTokens;
+  const hintThresholdTokens =
+    typeof hintTokens === "number" && Number.isFinite(hintTokens) && hintTokens >= 0
+      ? Math.floor(hintTokens)
+      : defaults.hintThresholdTokens;
+  const forceTokens = value.forceAtTokens;
+  const forceAtTokens =
+    typeof forceTokens === "number" &&
+    Number.isFinite(forceTokens) &&
+    forceTokens >= 0 &&
+    (forceTokens === 0 || Math.floor(forceTokens) > hintThresholdTokens)
+      ? Math.floor(forceTokens)
+      : defaults.forceAtTokens;
   const reserve = value.assumedReserveTokens;
   const tick = value.usageTickStepPercent;
   return {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
     hintThresholdPercent,
     forceAtPercent,
+    hintThresholdTokens,
+    forceAtTokens,
     usageTickStepPercent:
       typeof tick === "number" && Number.isFinite(tick) && (tick === 0 || (tick >= 5 && tick <= 100))
         ? Math.floor(tick)
