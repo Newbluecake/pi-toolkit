@@ -30,12 +30,8 @@ export interface Config {
   subagentDeliveryGraceMs?: number;
   /** 是否把纯前台（spawnAndWait，无通道 B 投递）run 也纳入汇总卡。默认 false。 */
   subagentForegroundSummary?: boolean;
-  /** 是否要求后台 subagent/bash 空闲后发送完成类通知。默认 true。 */
+  /** 是否要求后台 subagent/bash 空闲后才允许发送完成类通知；忙时直接抑制（不补发）。默认 true。 */
   requireBackgroundIdle?: boolean;
-  /** 后台忙时 defer 的复检间隔（毫秒）。<=0 表示不轮询。 */
-  backgroundIdleRecheckMs?: number;
-  /** defer 最长等待时间（毫秒），到期仍会补发并加注记。 */
-  backgroundDeferCapMs?: number;
   /** 新会话是否默认开启 /watch（会话级关注）。默认 false。 */
   watchDefault?: boolean;
 }
@@ -46,8 +42,6 @@ export const DEFAULT_HEARTBEAT_INTERVAL_SEC = 600;
 export const DEFAULT_IDLE_NOTIFY_TIMEOUT_SEC = 300;
 export const DEFAULT_SUBAGENT_FLUSH_DEBOUNCE_MS = 1500;
 export const DEFAULT_SUBAGENT_DELIVERY_GRACE_MS = 6000;
-export const DEFAULT_BACKGROUND_IDLE_RECHECK_MS = 5000;
-export const DEFAULT_BACKGROUND_DEFER_CAP_MS = 600000;
 
 /** 陈旧保护：started 超过此时长仍未 settle，不计入 runningCount，并可被 prune。 */
 export const STALE_RUN_MS = 30 * 60 * 1000;
@@ -78,8 +72,6 @@ export function parseConfig(fileConfig: Config, env: NodeJS.ProcessEnv): Config 
     subagentDeliveryGraceMs: normalizeNumber(fileConfig.subagentDeliveryGraceMs, DEFAULT_SUBAGENT_DELIVERY_GRACE_MS),
     subagentForegroundSummary: fileConfig.subagentForegroundSummary === true,
     requireBackgroundIdle: fileConfig.requireBackgroundIdle !== false,
-    backgroundIdleRecheckMs: normalizeNumber(fileConfig.backgroundIdleRecheckMs, DEFAULT_BACKGROUND_IDLE_RECHECK_MS),
-    backgroundDeferCapMs: normalizeNumber(fileConfig.backgroundDeferCapMs, DEFAULT_BACKGROUND_DEFER_CAP_MS),
     watchDefault: fileConfig.watchDefault === true,
   };
 }
@@ -242,23 +234,6 @@ export interface BackgroundTaskStatusLike {
 /** Missing status is intentionally busy: gated notifications fail closed. */
 export function isBackgroundIdle(status: BackgroundTaskStatusLike | undefined): boolean {
   return status !== undefined && status.runningSubagents === 0 && (status.runningBashJobs ?? 0) === 0;
-}
-
-export type PendingKind = "result" | "subagents";
-export interface FrozenCardInput {
-  status: CardStatus;
-  summary: string;
-  errorMessage?: string | undefined;
-  overrides?: BuildCardOverrides | undefined;
-  statsOverride?: Record<string, unknown> | undefined;
-}
-export interface PendingNotification {
-  key: string;
-  kind: PendingKind;
-  card?: FrozenCardInput | undefined;
-  createdAt: number;
-  deadlineAt: number;
-  state: "pending" | "sending" | "sent" | "failed";
 }
 
 // ---------------------------------------------------------------------------

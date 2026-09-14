@@ -145,21 +145,9 @@ describe("parseConfig", () => {
     expect(parseConfig({ watchDefault: 1 as never }, {}).watchDefault).toBe(false);
   });
 
-  it("parses the background gating settings and falls back for invalid values", () => {
-    expect(
-      parseConfig(
-        {
-          requireBackgroundIdle: false,
-          backgroundIdleRecheckMs: 123,
-          backgroundDeferCapMs: 456,
-        },
-        {},
-      ),
-    ).toMatchObject({ requireBackgroundIdle: false, backgroundIdleRecheckMs: 123, backgroundDeferCapMs: 456 });
-    expect(parseConfig({ backgroundIdleRecheckMs: "bad" as never, backgroundDeferCapMs: NaN }, {})).toMatchObject({
-      backgroundIdleRecheckMs: 5000,
-      backgroundDeferCapMs: 600000,
-    });
+  it("parses the background gating setting", () => {
+    expect(parseConfig({}, {}).requireBackgroundIdle).toBe(true);
+    expect(parseConfig({ requireBackgroundIdle: false }, {}).requireBackgroundIdle).toBe(false);
   });
 
   it("webhookUrl/secret fall back to env vars", () => {

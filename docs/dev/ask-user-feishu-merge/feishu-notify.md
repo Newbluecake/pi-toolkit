@@ -17,9 +17,10 @@
 
 主扩展通过 `Symbol.for("pi-subagent:background-status")` 发布当前 session 的
 后台 subagent 和后台 bash 数量。默认情况下，结果卡、subagent 汇总卡和空闲提醒
-只有在两项均为零时才发送。结果卡与汇总卡在后台忙时暂存于内存，空闲后补发；达到
-`backgroundDeferCapMs` 后会补发并在卡片中注明后台任务尚未结束。空闲提醒在忙时
-直接丢弃，并在定时器触发时再次检查。
+只有在两项均为零时才发送。**主会话停下时若后台仍在忙，说明任务尚未结束，
+完成类通知直接抑制，不暂存、不补发**：结果卡就这样丢弃；subagent 汇总卡保留
+记录，等后台空闲后的下一个自然触发点（settle / 投递 / agent_start 补偿）再组卡；
+空闲提醒本身只在真·空闲时才 arm，后台忙时不会启动。
 
 心跳卡、等待输入卡以及 `/feishu-test`、`/watch` 等显式触发不受
 后台门控影响。`bashJobs.autoBackgroundS` 为零时，后台 bash 计数为 `null`，该条件
@@ -31,13 +32,12 @@
 ```json
 {
   "watchDefault": false,
-  "requireBackgroundIdle": true,
-  "backgroundIdleRecheckMs": 5000,
-  "backgroundDeferCapMs": 600000
+  "requireBackgroundIdle": true
 }
 ```
 
-defer 仅存于当前扩展实例内，reload、退出或切换 session 时未发送项会丢弃。当前实现只由 unref 的轮询定时器驱动补发，不在 subagent/bash 事件上额外复检；这是为降低接线复杂度而接受的简化，最坏延迟为一个 `backgroundIdleRecheckMs` 周期。
+`requireBackgroundIdle: false` 表示不要求后台空闲，完成类通知在主会话停下时
+立即发送（即使仍有 subagent/后台 bash 在跑）。
 
 ## 从独立包迁移
 

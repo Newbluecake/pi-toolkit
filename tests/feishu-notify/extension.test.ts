@@ -187,7 +187,7 @@ describe("background gating", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("defers a result card while busy and sends it after the provider becomes idle", async () => {
+  it("suppresses a result card while busy and never sends it after the provider becomes idle", async () => {
     const { fetchMock } = installFetchMock();
     const { emit, setBackgroundStatus } = setup();
     const ctx = makeCtx();
@@ -197,25 +197,10 @@ describe("background gating", () => {
     await emit("agent_start", {}, ctx);
     await emit("agent_settled", {}, ctx);
     expect(fetchMock).not.toHaveBeenCalled();
+    // 主会话停下时后台仍在忙 ≠ 任务结束：抑制且不补发
     setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 0 });
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]![1].body).toContain("任务完成");
-  });
-
-  it("sends at the defer cap and annotates the card", async () => {
-    writeTestConfigFile({ backgroundIdleRecheckMs: 100, backgroundDeferCapMs: 500 });
-    const { fetchMock } = installFetchMock();
-    const { emit, setBackgroundStatus } = setup();
-    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
-    const ctx = makeCtx();
-    await emit("session_start", {}, ctx);
-    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
-    await emit("agent_start", {}, ctx);
-    await emit("agent_settled", {}, ctx);
-    await vi.advanceTimersByTimeAsync(500);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]![1].body).toContain("后台任务超时未结束");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("drops an armed idle reminder if the provider becomes busy before fire", async () => {
@@ -248,7 +233,7 @@ describe("background gating", () => {
     expect(fetchMock.mock.calls.some((call) => call[1].body.includes("后台任务：subagent 1 个，bash 1 个"))).toBe(true);
   });
 
-  it("keeps multiple result keys and sends each exactly once", async () => {
+  it("suppresses result cards for repeated busy tasks without retroactive sends", async () => {
     const { fetchMock } = installFetchMock();
     const { emit, setBackgroundStatus } = setup();
     setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
@@ -261,13 +246,11 @@ describe("background gating", () => {
       await vi.advanceTimersByTimeAsync(1);
     }
     setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 0 });
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("clears pending notifications on session shutdown", async () => {
+  it("does not send suppressed cards after session shutdown", async () => {
     const { fetchMock } = installFetchMock();
     const { emit, setBackgroundStatus } = setup();
     setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });

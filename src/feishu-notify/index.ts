@@ -4,8 +4,11 @@
  * 任务结束时发送飞书机器人通知（显式开启，无时间阈值），
  * 并新增三个触发场景：长任务心跳、subagent 完成汇总、会话空闲提醒。
  *
- * 详见 docs/dev/feishu-notify/feishu-notify-v2-plan.md（唯一权威规格）与
- * docs/dev/feishu-notify/feishu-notify-extension.md（用户文档）。
+ * 详见 docs/dev/ask-user-feishu-merge/ask-user-feishu-merge-plan.md 与
+ * docs/dev/ask-user-feishu-merge/feishu-notify.md（用户文档）。
+ *
+ * 后台门控：主会话停下时若仍有 subagent 在跑或后台 bash 在执行，
+ * 完成类卡片（结果卡/汇总卡/空闲提醒）直接抑制——这不是任务结束状态。
  *
  * 两种开启方式（均为被动触发，不提供 AI 主动调用工具）：
  *   1. 任务描述里带 @notify 关键词
@@ -34,8 +37,6 @@ import {
   sendToFeishu,
   truncate,
   isBackgroundIdle,
-  type FrozenCardInput,
-  type PendingNotification,
 } from "./core.js";
 import { getGitBranch } from "./git.js";
 import { readBackgroundStatus } from "../service/background-status.js";
@@ -113,8 +114,6 @@ export default function (pi: ExtensionAPI) {
   // ---- subagent 汇总 ----
   const subagents = new SubagentTracker();
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
-  let backgroundTimer: ReturnType<typeof setTimeout> | undefined;
-  const pendings = new Map<string, PendingNotification>();
   let missingStatusWarned = false;
 
   // ---- 等待输入提醒：交互工具打开后长时间未结束 → 飞书提醒（按 toolCallId 跟踪） ----
@@ -141,57 +140,10 @@ export default function (pi: ExtensionAPI) {
     const status = readBackgroundStatus();
     if (!status && !missingStatusWarned) {
       missingStatusWarned = true;
-      log("background status provider missing; gated notification held");
-      if (lastCtx?.hasUI) lastCtx.ui.notify("后台任务状态不可用，已暂缓完成类飞书通知", "warning");
+      log("background status provider missing; gated notification suppressed");
+      if (lastCtx?.hasUI) lastCtx.ui.notify("后台任务状态不可用，已抑制完成类飞书通知", "warning");
     }
     return isBackgroundIdle(status);
-  }
-
-  function scheduleBackgroundCheck(): void {
-    if (backgroundTimer || pendings.size === 0) return;
-    const delay = config.backgroundIdleRecheckMs ?? 5000;
-    if (delay <= 0) return;
-    backgroundTimer = setTimeout(() => {
-      backgroundTimer = undefined;
-      void drainPending();
-    }, delay);
-    backgroundTimer.unref?.();
-  }
-
-  function queuePending(entry: PendingNotification): void {
-    pendings.set(entry.key, entry);
-    scheduleBackgroundCheck();
-  }
-
-  async function drainPending(): Promise<void> {
-    const now = Date.now();
-    for (const [key, entry] of pendings) {
-      if (entry.state !== "pending") continue;
-      if (!backgroundIdle() && now < entry.deadlineAt) continue;
-      entry.state = "sending";
-      if (entry.kind === "subagents") {
-        if (lastCtx) doFlushSubagentSummary(lastCtx, true);
-        entry.state = "sent";
-        pendings.delete(key);
-        continue;
-      }
-      const card = entry.card;
-      const result = card
-        ? await sendCard(
-            lastCtx,
-            card.status,
-            card.summary,
-            card.errorMessage,
-            card.overrides,
-            card.statsOverride as Partial<ReturnType<typeof currentStats>>,
-            false,
-            now >= entry.deadlineAt,
-          )
-        : { ok: false, error: "pending card unavailable" };
-      entry.state = result.ok ? "sent" : "failed";
-      pendings.delete(key);
-    }
-    if (pendings.size > 0) scheduleBackgroundCheck();
   }
 
   // ------------------------------------------------------------------
@@ -303,7 +255,7 @@ export default function (pi: ExtensionAPI) {
     flushTimer.unref?.();
   }
 
-  function doFlushSubagentSummary(ctx: ExtensionContext, fromDeadline = false): void {
+  function doFlushSubagentSummary(ctx: ExtensionContext): void {
     const now = Date.now();
     if (subagents.runningCount(now) > 0 || !subagents.hasFinished()) return; // 复检
 
@@ -318,16 +270,9 @@ export default function (pi: ExtensionAPI) {
       subagents.discardFinished();
       return;
     }
-    if (!fromDeadline && config.requireBackgroundIdle !== false && !backgroundIdle()) {
-      queuePending({
-        key: "subagents:batch",
-        kind: "subagents",
-        createdAt: now,
-        deadlineAt: now + Math.max(0, config.backgroundDeferCapMs ?? 600000),
-        state: "pending",
-      });
-      return;
-    }
+    // 后台忙（如 bash job 还在跑）→ 当下不发，但保留记录：
+    // 这不是任务结束状态；等后台空闲后的下一个自然触发点（settle/投递/agent_start 补偿）再组卡。
+    if (config.requireBackgroundIdle !== false && !backgroundIdle()) return;
 
     const recs = subagents.drainFinished();
     // 🟡-C 混合批次规则：批次内只要存在 hadDelivery 记录 → 整批入卡；
@@ -446,15 +391,9 @@ export default function (pi: ExtensionAPI) {
     errMsg?: string,
     overrides?: BuildCardOverrides,
     statsOverride?: Partial<ReturnType<typeof currentStats>>,
-    gated = false,
-    deferredNote = false,
   ): Promise<{ ok: boolean; error?: string }> {
     if (!ctx) return { ok: false, error: "no active context" };
     if (conflictInert) return { ok: false, error: "feishu-notify conflict detected" };
-    if (gated && config.requireBackgroundIdle !== false && !backgroundIdle()) {
-      return { ok: false, error: "background tasks still running" };
-    }
-    if (deferredNote) overrides = { ...overrides, details: `${overrides?.details ?? ""}\n后台任务超时未结束` };
     if (!config.webhookUrl) return { ok: false, error: "webhookUrl 未配置" };
     const stats = { ...currentStats(ctx), ...statsOverride };
     // best-effort 取分支：失败/超时/非 git 仓库 → undefined，不阻塞通知
@@ -519,11 +458,6 @@ export default function (pi: ExtensionAPI) {
       clearTimeout(flushTimer);
       flushTimer = undefined;
     }
-    if (backgroundTimer) {
-      clearTimeout(backgroundTimer);
-      backgroundTimer = undefined;
-    }
-    pendings.clear();
     subagents.clear();
     if (global[hostKey] === claim) delete global[hostKey];
   });
@@ -631,24 +565,11 @@ export default function (pi: ExtensionAPI) {
     maybeFlushSubagentSummary(ctx); // 触发点 ③
 
     const shouldNotify = gateOpen(); // 🔴-3：统一门控
-    // 结果卡：仅用户发起的 run；续跑 run 抑制（/watch 不再刷屏）
-    if (isUserRun && shouldNotify) {
-      const status = hadError ? "error" : "success";
-      const summary = extractSummary(ctx);
-      if (config.requireBackgroundIdle !== false && !backgroundIdle()) {
-        const now = Date.now();
-        const card: FrozenCardInput = { status, summary, errorMessage };
-        queuePending({
-          key: `result:${taskStartedAt}`,
-          kind: "result",
-          card,
-          createdAt: now,
-          deadlineAt: now + Math.max(0, config.backgroundDeferCapMs ?? 600000),
-          state: "pending",
-        });
-      } else {
-        await sendCard(ctx, status, summary, errorMessage);
-      }
+    // 结果卡：仅用户发起的 run；续跑 run 抑制（/watch 不再刷屏）。
+    // 后台还有 subagent/后台 bash 在跑时同样抑制且不补发——主会话停下 ≠ 任务结束，
+    // 真正的结束信号由后续触发点承担（🤖 汇总卡 / 真·空闲后的 💤 空闲提醒）。
+    if (isUserRun && shouldNotify && (config.requireBackgroundIdle === false || backgroundIdle())) {
+      await sendCard(ctx, hadError ? "error" : "success", extractSummary(ctx), errorMessage);
     }
     notifyRequested = false; // 单次关键词消费掉；/watch 与 taskGate 保持
     isUserRun = false;
