@@ -23,13 +23,14 @@ the settings file `~/.pi/agent/pi-subagent.json`, `Symbol.for("pi-subagent:*")` 
 `subagent:*` customTypes/event channels, widget/status keys and the `[pi-subagent]` log prefix all
 carry existing session data and cross-module contracts. Do NOT "finish the rename" inside `src/`.
 
-It also absorbs six formerly-standalone plugins (see `docs/dev/plugin-merge/merge-plan.md`), all
+It also absorbs seven formerly-standalone plugins (see `docs/dev/plugin-merge/merge-plan.md`), all
 settings-gated and all wired from the single `pi.extensions` entry (`src/index.ts`): a HUD footer
 (`src/hud/`, `hud.enabled`, main-session TUI only), the `web_search` tool (`src/web-search/`,
 `webSearch.enabled`), Claude Code-style task tools (`src/todo/`, `todo.enabled`), the interactive
 `ask_user` tool (`src/ask-user/`, `askUser.enabled`), Feishu notification cards
-(`src/feishu-notify/`, `feishuNotify.enabled`), and session-navigation enhancements
-(`src/session-nav/`, `sessionNav.enabled`). web_search / todo / ask_user register **before**
+(`src/feishu-notify/`, `feishuNotify.enabled`), session-navigation enhancements
+(`src/session-nav/`, `sessionNav.enabled`), and cwd-keyed project memory (`src/memory/`,
+`memory.enabled`). web_search / todo / ask_user / memory register **before**
 the HOST_KEY guard so child sessions keep them; hud / feishu-notify / session-nav are post-guard
 (main-session only).
 
@@ -60,7 +61,9 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/stack.ts` — the per-session stack builder (`buildSessionStack`): constructs
   stores/services/watchdog/reaper/scheduler/widget from `ExtensionContext`. The previous
   session's pieces are disposed at the top of the next build (no stack dispose hook).
-- `src/core/` — pure domain: state machine, deadline budgets, ids, types. No pi imports.
+- `src/core/` — pure domain: state machine, deadline budgets, ids, types, and the worktree-origin
+  registry (`worktree-origin.ts`: worktree path → original cwd, `Symbol.for` global, FIFO-capped;
+  written by `src/extensions/worktree.ts`, read by `src/memory/`). No pi imports.
 - `src/runtime/` — runner, session driver, watchdog, reaper, slot pool (concurrency), dynamic
   tool scoping.
 - `src/service/` — spawn/query services, run registry, target resolution (exact → prefix → label), and the global background-status provider shared with feishu-notify.
@@ -88,6 +91,13 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/todo/` — merged pi-claude-todo: TaskCreate/List/Get/Update/Delete + aboveEditor widget
   (key `claude-code-todo`, coexists with the fleet widget) + `/tasks`. Persists via the
   `claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only.
+- `src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`.
+  `before_agent_start` injects a budgeted `## Memory` block (pin frontmatter, agent-source fence,
+  tail sentinel, fingerprint-keyed render cache); the `memory` tool lists/writes/appends (child
+  sessions read-only by default, writes carry `source: agent` provenance); `/mem` covers
+  list/path/import from Claude Code. `paths|frontmatter|store|render` are pi-free; `index.ts`
+  (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure;
+  registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
 - `src/session-nav/` — merged session-nav: `/resume-recent` (48h window, `--all` for full history),
   `/clear`, bare `exit` interception, a pre-submit rewriting editor, and resume-list title
   cleaning (skill envelopes + `[sub:type]` subagent marks driven by our own `subagent:run`

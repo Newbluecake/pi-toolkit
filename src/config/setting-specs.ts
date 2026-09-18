@@ -196,6 +196,33 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "sessionNav.enabled",
     "Session navigation: /resume-recent 48h window, /clear, bare exit, resume-list titles",
   ),
+  // Merged armory-memory (memory-plan §3.3): all nine keys are non-live
+  // (captured at activate; change → /reload). byteCap needs a max that
+  // count() cannot express (Nit 1) ⇒ spread + override.
+  "memory.enabled": bool("memory.enabled", "Merged project memory: injection + memory tool + /mem"),
+  "memory.injectInChildSessions": bool(
+    "memory.injectInChildSessions",
+    "Inject the ## Memory block in child subagent sessions too",
+  ),
+  "memory.allowWriteInChildSessions": bool(
+    "memory.allowWriteInChildSessions",
+    "Allow memory write/append in child sessions (default read-only)",
+  ),
+  "memory.freezeInjectionAfterWrite": bool(
+    "memory.freezeInjectionAfterWrite",
+    "Freeze the injected block after a write (takes effect next session; keeps prompt cache stable)",
+  ),
+  "memory.inlineMax": count("memory.inlineMax", 0, "Memory files inlined in full (pinned first); 0 = index only"),
+  "memory.byteCap": {
+    // Nit 1: count() has no max parameter ⇒ spread the count spec and add max.
+    // (cast: spreading the SettingSpec union distributes `max` onto non-number
+    // variants; the runtime object is always the number variant.)
+    ...count("memory.byteCap", 0, "Total UTF-8 byte budget for inlined memory bodies; 0 = index only"),
+    max: 65_536,
+  } as SettingSpec,
+  "memory.indexMax": count("memory.indexMax", 1, "Memory index entries before the … +N more fold"),
+  "memory.maxFileBytes": count("memory.maxFileBytes", 1024, "Per-memory-file size cap in bytes"),
+  "memory.maxWriteBytes": count("memory.maxWriteBytes", 256, "Single memory write/append content cap in bytes"),
   "extend.notify": choice(
     "extend.notify",
     ["background", "always", "off"],

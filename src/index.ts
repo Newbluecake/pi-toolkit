@@ -61,6 +61,7 @@ import { persistGoalRecord } from "./goal/store.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
 import { registerWebSearchTool } from "./web-search/index.js";
 import { wireTodo } from "./todo/index.js";
+import { wireMemory } from "./memory/index.js";
 import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
 import wireFeishuNotify from "./feishu-notify/index.js";
@@ -104,8 +105,21 @@ export default function activate(pi: ExtensionAPI): void {
   // on ctx.hasUI for headless sessions.
   if (preGuardSettings.askUser.enabled) wireAskUser(pi);
 
+  // HOST_KEY/g 上移到 pre-guard 区（Symbol.for 幂等，与下方守卫同一个 symbol），
+  // 因为 memory 装配需要知道本次激活是否在子会话里（memory-plan §4.2）。
   const HOST_KEY = Symbol.for("pi-subagent:host");
   const g = globalThis as Record<symbol, unknown>;
+  // 此刻 HOST_KEY 已被认领 ⇒ 本次激活发生在子会话（主会话 /reload 先
+  // session_shutdown 释放再 re-activate，此刻必然未认领）。已知边界（§4.3）：
+  // 若未来 pi 改成「先 activate 再 shutdown」，主会话重载瞬间此值误为 true，
+  // 后果仅限该瞬间 memory 注入/拒写走子会话策略，有明确报错文案。
+  const isChildSession = Boolean(g[HOST_KEY]);
+
+  // Merged armory-memory (memory-plan §4.1): pre-guard like web_search/todo/
+  // ask_user so child sessions keep the injection hook and the memory tool
+  // (default injectInChildSessions=true, aligned with the original plugin).
+  if (preGuardSettings.memory.enabled) wireMemory(pi, { settings: preGuardSettings.memory, isChildSession });
+
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
   // re-activates this extension inside every child. Without a guard, the
   // child instance registers its own Agent/SubagentWorkflow tools backed by

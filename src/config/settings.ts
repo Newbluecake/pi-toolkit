@@ -45,6 +45,34 @@ export const DEFAULT_WORKFLOW_BUDGET: WorkflowBudget = {
  * never the hard termination guarantee (that's the absolute workflowTotalMs
  * deadline, CC4). "diagnose_only" (default) never terminates on stall alone.
  */
+/**
+ * Merged armory-memory (memory-plan §3.1): cwd-keyed project memory under
+ * `~/.pi/agent/memory/<slug>/` — auto-injection, the `memory` tool, `/mem`.
+ * Field-by-field tolerant parsing in `parseMemorySettings` (never throws,
+ * parseBashJobsSettings 同款风格）。No duration fields ⇒ not in
+ * TIME_SETTING_MS_PATHS.
+ */
+export interface MemorySettings {
+  /** 总开关。false = 不注册注入 hook、memory 工具、/mem 命令。Default true（融合后原插件被卸载，默认关=升级即功能消失，merge-plan D2 哲学）。 */
+  enabled: boolean;
+  /** 子会话是否注入。Default true（对齐原插件：所有会话注入）。仅影响注入 hook；工具可见性仍由 agent type tools allowlist 决定。 */
+  injectInChildSessions: boolean;
+  /** 子会话是否允许 write/append。Default false（子会话只读；内置 Plan 类型的只读语义由此保证，无需改 agent-types.ts）。list 不受限。 */
+  allowWriteInChildSessions: boolean;
+  /** 写入成功后是否冻结本会话的注入块（true = 本会话后续轮次继续注入写入前的旧块、下个会话生效；false = 下轮立即重渲染生效）。Default false。取舍见 memory-plan §5.5。 */
+  freezeInjectionAfterWrite: boolean;
+  /** 内联全文的文件数上限（pin 优先）。0 = 只出索引。Default 3。 */
+  inlineMax: number;
+  /** 内联区总字节预算（UTF-8 字节）。0 = 只出索引。Default 4000。 */
+  byteCap: number;
+  /** 索引条数上限，超出出 "… +N more"。Default 15。 */
+  indexMax: number;
+  /** 单文件体积上限（write 替换后 / append 累加后）。Default 262_144（256KB）。 */
+  maxFileBytes: number;
+  /** 单次 write/append 的 content 字节上限。Default 65_536（64KB）；解析时 clamp 到 ≤ maxFileBytes。 */
+  maxWriteBytes: number;
+}
+
 export type RunawayPolicy = "diagnose_only" | "terminate_on_stall";
 export interface WorkflowSettings {
   /** Master switch; the workflow engine (M3.1+) is entirely inert while false. */
@@ -197,6 +225,8 @@ export interface AgentSettings {
   feishuNotify: EnabledGroup;
   /** Session navigation enhancements (/resume-recent, /clear, bare exit, resume-list titles). Main-session TUI only. Default on. */
   sessionNav: EnabledGroup;
+  /** Merged plugins: cwd-keyed project memory (injection + memory tool + /mem). Pre-guard, child sessions included. Default on. */
+  memory: MemorySettings;
 }
 
 /** Simple on/off settings group shared by the merged plugins (hud / webSearch / todo). */
@@ -293,6 +323,17 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   askUser: { enabled: true },
   feishuNotify: { enabled: true },
   sessionNav: { enabled: true },
+  memory: {
+    enabled: true,
+    injectInChildSessions: true,
+    allowWriteInChildSessions: false,
+    freezeInjectionAfterWrite: false,
+    inlineMax: 3,
+    byteCap: 4000,
+    indexMax: 15,
+    maxFileBytes: 262_144,
+    maxWriteBytes: 65_536,
+  },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
@@ -465,6 +506,7 @@ export function loadSettings(source: unknown): AgentSettings {
     askUser: parseEnabledGroup(value.askUser, DEFAULT_SETTINGS.askUser),
     feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),
     sessionNav: parseEnabledGroup(value.sessionNav, DEFAULT_SETTINGS.sessionNav),
+    memory: parseMemorySettings(value.memory),
   });
 }
 
@@ -534,6 +576,34 @@ function parseEnabledGroup(input: unknown, defaults: EnabledGroup): EnabledGroup
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const enabled = (input as Record<string, unknown>).enabled;
   return { enabled: typeof enabled === "boolean" ? enabled : defaults.enabled };
+}
+
+/**
+ * Parse the optional `memory` settings block (memory-plan §3.2). Malformed or
+ * missing input falls back field-by-field to DEFAULT_SETTINGS.memory; never
+ * throws (parseBashJobsSettings 同款）。Numbers must be finite and inside
+ * their documented range; `maxWriteBytes` is additionally clamped to
+ * ≤ maxFileBytes so a single write can never exceed the per-file cap.
+ */
+export function parseMemorySettings(input: unknown): MemorySettings {
+  const defaults = DEFAULT_SETTINGS.memory;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const bool = (raw: unknown, fallback: boolean): boolean => (typeof raw === "boolean" ? raw : fallback);
+  const num = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? Math.floor(raw) : fallback;
+  const maxFileBytes = num(value.maxFileBytes, defaults.maxFileBytes, 1024, 4 * 1024 * 1024);
+  return {
+    enabled: bool(value.enabled, defaults.enabled),
+    injectInChildSessions: bool(value.injectInChildSessions, defaults.injectInChildSessions),
+    allowWriteInChildSessions: bool(value.allowWriteInChildSessions, defaults.allowWriteInChildSessions),
+    freezeInjectionAfterWrite: bool(value.freezeInjectionAfterWrite, defaults.freezeInjectionAfterWrite),
+    inlineMax: num(value.inlineMax, defaults.inlineMax, 0, 50),
+    byteCap: num(value.byteCap, defaults.byteCap, 0, 65_536),
+    indexMax: num(value.indexMax, defaults.indexMax, 1, 100),
+    maxFileBytes,
+    maxWriteBytes: Math.min(num(value.maxWriteBytes, defaults.maxWriteBytes, 256, 4 * 1024 * 1024), maxFileBytes),
+  };
 }
 
 /** Parse the optional timeout grace/extension settings block（parseCacheTtlSettings 同款容错，never throws）。 */

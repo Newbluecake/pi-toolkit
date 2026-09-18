@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import activate from "../../src/index.js";
@@ -21,6 +21,17 @@ const HOST_KEY = Symbol.for("pi-subagent:host");
 const fakeHome = mkdtempSync(join(tmpdir(), "pi-subagent-home-"));
 const realHome = process.env.HOME;
 process.env.HOME = fakeHome;
+// memory-merge (memory-plan §4.2): the memory module wires its inject hook
+// PRE-GUARD (child sessions included, by design), so it now sits ahead of the
+// core agent-types hook asserted below and fires in child sessions too. This
+// suite scopes itself to the core agent-types/models wiring, so it disables
+// memory via the settings file; memory wiring is covered by tests/memory/*.
+mkdirSync(join(fakeHome, ".pi", "agent"), { recursive: true });
+writeFileSync(
+  join(fakeHome, ".pi", "agent", "pi-subagent.json"),
+  JSON.stringify({ memory: { enabled: false } }) + "\n",
+  "utf8",
+);
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 

@@ -104,6 +104,21 @@ can_message: [parent, child, ancestor]
 5. 会话数据无损：todo 的 `claude-code-todo-state` 与 HUD 的 `pi-hud-llm-time` 等持久化键原样保留，fork/resume 旧会话直接继承。
 6. 可选：在 `~/.pi/agent/pi-subagent.json` 里设 `"hud": {"enabled": false}` 等关闭单个模块。
 
+## 从 armory-memory 迁移
+
+`@getpipher/armory-memory`（Claude Code 风格 cwd-keyed 项目记忆）已融合进本包，默认开启（`memory.enabled`）。迁移步骤：
+
+1. 升级 pi-toolkit 到融合版本。
+2. `pi remove @getpipher/armory-memory`。
+3. `/reload` 或重启 pi。
+4. 验证：裸 `/mem` 可用（无 `:2` 后缀）；有 memory 的项目 system prompt 只含**一份** `## Memory` 块且尾部带 `<!-- pi-toolkit:memory … -->` 哨兵；`memory` 工具 description 含 write/append。
+5. 数据零迁移：`~/.pi/agent/memory/**` 原样生效；旧文案 drift-header 仍被自动剥离。
+6. 可选调参：`/agent settings` 改 `memory.*`（注入预算 `inlineMax`/`byteCap`/`indexMax`、写上限 `maxFileBytes`/`maxWriteBytes`、子会话开关等；改后 `/reload`）。
+
+共存期提醒：两插件同时加载会双注入/命令加后缀，**必须显式二选一**——测融合版就先卸载原插件；想对照原版就在 `~/.pi/agent/pi-subagent.json` 设 `"memory": {"enabled": false}`。看到 `/mem:1` `/mem:2` 即有残留。
+
+新增能力（相对原插件）：`memory` 工具支持 `write`/`append`（目录围栏 + 双字节上限 + 0600；子会话默认只读，`memory.allowWriteInChildSessions` 放开；agent 写入自动带 `source: agent` 溯源并在注入时加围栏行）；frontmatter `pin: true` 优先内联；空目录不再注入；注入结果按目录指纹缓存。
+
 ## 命令
 
 | 命令                    | 内容                                                           |
