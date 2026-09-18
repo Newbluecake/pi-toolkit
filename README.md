@@ -1,12 +1,14 @@
-# pi-subagent
+# pi-toolkit
 
 **中文** | [English](README.en.md)
 
-[pi](https://github.com/earendil-works/pi) 的防卡死 subagent 扩展 —— `@tintinweb/pi-subagents` 核心(`Agent` / `get_subagent_result` / `steer_subagent`)的即插即用替代实现。整个项目围绕一条显式的 run 状态机重建,让卡住的子 agent 始终**可见、可诊断、有硬边界**——绝不无声挂死。
+[pi](https://github.com/earendil-works/pi) 的工具箱扩展 —— 一个包補齐 pi 日常缺失的基础设施：**防卡死 subagent 系统**（旗舰能力，`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`，`@tintinweb/pi-subagents` 核心的即插即用替代）、**HUD footer**、**`web_search`** 多供应商搜索、**任务工具**（TaskCreate 等）、交互式 **`ask_user`**、bash 自动转后台、定时任务、消息 fabric、`/goal` 目标循环等。除 subagent 核心外各模块均可 settings 门控、独立开关。
+
+> 曾用名 `pi-subagent`：随着 ask-user / feishu-notify / pi-hud / web-search / pi-claude-todo 陆续并入，仓库更名为 **pi-toolkit**。运行时标识（设置文件 `~/.pi/agent/pi-subagent.json`、日志前缀 `[pi-subagent]`、会话数据键与事件频道）**保持不变**，既有配置与历史会话无损。
 
 ## 为什么
 
-子 agent 的失败方式,"spawn + await" 式的简单封装根本看不见:模型 API 在 turn 中途停滞、工具调用永不返回、session 在 abort 时拒绝退出。pi-subagent 把每个 run 当作带分相 deadline 的状态机:看门狗负责触发,升级阶梯负责物理回收资源——同时把这一切实时流式呈现在编辑器上方的 **agent tree** 里。
+子 agent 的失败方式,"spawn + await" 式的简单封装根本看不见:模型 API 在 turn 中途停滞、工具调用永不返回、session 在 abort 时拒绝退出。pi-toolkit 把每个 run 当作带分相 deadline 的状态机:看门狗负责触发,升级阶梯负责物理回收资源——同时把这一切实时流式呈现在编辑器上方的 **agent tree** 里。
 
 ## 功能
 
@@ -267,12 +269,12 @@ queue_wait → resolve_config → session_create → extension_bind
 pi 直接加载 TypeScript 源码（经 jiti），无需构建：
 
 ```sh
-pi install git:github.com/Newbluecake/pi-subagent
+pi install git:github.com/Newbluecake/pi-toolkit
 # 更新：
-pi update --extension git:github.com/Newbluecake/pi-subagent
+pi update --extension git:github.com/Newbluecake/pi-toolkit
 ```
 
-也可以从 [GitHub Releases](https://github.com/Newbluecake/pi-subagent/releases) 下载 zip（已含编译产物），解压后 `pi install ./pi-subagent`（本地路径方式，不参与 `pi update`）。
+也可以从 [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases) 下载 zip（已含编译产物），解压后 `pi install ./pi-toolkit`（本地路径方式，不参与 `pi update`）。
 
 ## 开发
 

@@ -1,14 +1,14 @@
 {
-  "name": "pi-subagent",
+  "name": "pi-toolkit",
   "version": "0.2.1",
-  "description": "Anti-hang subagent extension for pi — drop-in replacement for @tintinweb/pi-subagents core (Agent / get_subagent_result / steer_subagent)",
+  "description": "Toolbox extension for pi — anti-hang subagents (Agent / get_subagent_result / steer_subagent), HUD footer, web_search failover, task tools, ask_user, bash auto-background, scheduler, message fabric, /goal loop",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Newbluecake/pi-subagent.git"
+    "url": "git+https://github.com/Newbluecake/pi-toolkit.git"
   },
-  "homepage": "https://github.com/Newbluecake/pi-subagent#readme",
-  "bugs": "https://github.com/Newbluecake/pi-subagent/issues",
+  "homepage": "https://github.com/Newbluecake/pi-toolkit#readme",
+  "bugs": "https://github.com/Newbluecake/pi-toolkit/issues",
   "files": [
     "index.js",
     "index.ts",

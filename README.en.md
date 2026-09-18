@@ -1,12 +1,14 @@
-# pi-subagent
+# pi-toolkit
 
 **中文** | [English](README.md)
 
-Anti-hang subagent extension for [pi](https://github.com/earendil-works/pi) — a drop-in replacement for `@tintinweb/pi-subagents` core (`Agent` / `get_subagent_result` / `steer_subagent`), rebuilt around an explicit run state machine so a stuck subagent is always **visible, diagnosable, and terminally bounded** — never silently hanging.
+A toolbox extension for [pi](https://github.com/earendil-works/pi) — one package that fills in pi's missing everyday infrastructure: the flagship **anti-hang subagent system** (`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`, a drop-in replacement for `@tintinweb/pi-subagents` core), a **HUD footer**, multi-provider **`web_search`**, **task tools** (TaskCreate & friends), interactive **`ask_user`**, bash auto-backgrounding, a cron scheduler, the message fabric, the `/goal` objective loop and more. Everything beyond the subagent core is settings-gated and can be toggled independently.
+
+> Formerly `pi-subagent`: as ask-user / feishu-notify / pi-hud / web-search / pi-claude-todo were merged in, the repo was renamed to **pi-toolkit**. Runtime identifiers (the `~/.pi/agent/pi-subagent.json` settings file, the `[pi-subagent]` log prefix, session data keys and event channels) are **unchanged** — existing configuration and session history carry over losslessly.
 
 ## Why
 
-Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model API stalls mid-turn, a tool call never returns, a session refuses to die on abort. pi-subagent treats every run as a state machine with per-phase deadlines, a watchdog that fires them, and an escalation ladder that physically reclaims resources — while streaming all of it to a live **agent tree** above your editor.
+Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model API stalls mid-turn, a tool call never returns, a session refuses to die on abort. pi-toolkit treats every run as a state machine with per-phase deadlines, a watchdog that fires them, and an escalation ladder that physically reclaims resources — while streaming all of it to a live **agent tree** above your editor.
 
 ## Features
 
@@ -215,12 +217,12 @@ User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, n
 pi loads TypeScript source directly (via jiti) — no build step required:
 
 ```sh
-pi install git:github.com/Newbluecake/pi-subagent
+pi install git:github.com/Newbluecake/pi-toolkit
 # Update later with:
-pi update --extension git:github.com/Newbluecake/pi-subagent
+pi update --extension git:github.com/Newbluecake/pi-toolkit
 ```
 
-Alternatively download the zip from [GitHub Releases](https://github.com/Newbluecake/pi-subagent/releases) (prebuilt `dist/` included), unzip, and `pi install ./pi-subagent` (local-path install; not covered by `pi update`).
+Alternatively download the zip from [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases) (prebuilt `dist/` included), unzip, and `pi install ./pi-toolkit` (local-path install; not covered by `pi update`).
 
 ## Development
 

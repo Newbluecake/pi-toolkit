@@ -4,9 +4,9 @@ Guidance for AI coding agents working in this repository.
 
 ## What this is
 
-`pi-subagent` — an anti-hang subagent extension for [pi](https://github.com/earendil-works/pi)
-(the `@earendil-works/pi-coding-agent` CLI). It is a drop-in replacement for the core of
-`@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
+`pi-toolkit` (formerly `pi-subagent`) — a toolbox extension for [pi](https://github.com/earendil-works/pi)
+(the `@earendil-works/pi-coding-agent` CLI) whose flagship is an anti-hang subagent system: a drop-in
+replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
 `abort_subagent` tools, the `SubagentWorkflow` orchestration tool, the `/agent` command, a live
 fleet widget (agent tree), a notification delivery subsystem, and a cron scheduler. Beyond that
 core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus
@@ -17,6 +17,11 @@ fire-and-forget inter-agent messaging routed along the agent tree).
 The whole point of the project is **zero-hang guarantees**: every run has layered deadlines
 (watchdog sub-phase budgets + total budget), an escalating reaper for orphans, and persistent,
 acknowledgeable delivery of results. Preserve these invariants when editing.
+
+Renamed `pi-subagent` → `pi-toolkit` (2026-09): runtime identifiers keep the old name on purpose —
+the settings file `~/.pi/agent/pi-subagent.json`, `Symbol.for("pi-subagent:*")` host guards,
+`subagent:*` customTypes/event channels, widget/status keys and the `[pi-subagent]` log prefix all
+carry existing session data and cross-module contracts. Do NOT "finish the rename" inside `src/`.
 
 It also absorbs three formerly-standalone plugins (see `docs/dev/plugin-merge/merge-plan.md`),
 each settings-gated: a HUD footer (`src/hud/`, `hud.enabled`, main-session TUI only), the
