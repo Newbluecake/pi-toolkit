@@ -37,7 +37,7 @@
 合并版与独立 `@bluecake/pi-ask-user` 不支持同时安装。迁移步骤：
 
 1. 执行 `pi uninstall @bluecake/pi-ask-user`，或从 pi 配置的 packages 中移除旧包。
-2. 升级/安装本包；`pi.extensions` 已包含 `index.ts`、`ask-user.ts` 和 `feishu-notify.ts` 三个入口。
+2. 升级/安装本包；`pi.extensions` 只有 `index.ts` 一个入口，ask_user 与飞书通知由主装配统一接线（`askUser.enabled` / `feishuNotify.enabled` 门控）。
 3. 保留原有 `~/.pi/agent/feishu-notify.json` 配置；新增门控项 `requireBackgroundIdle`、`backgroundIdleRecheckMs`、`backgroundDeferCapMs` 可按需调整。
 4. 若首次 `session_start` 时看到冲突 warning，说明旧包仍被加载；完成卸载并重新 `/reload`。
 
@@ -238,6 +238,8 @@ queue_wait → resolve_config → session_create → extension_bind
   "hud": { "enabled": true }, // 融合的 HUD footer；false 还原 pi 内置 footer
   "webSearch": { "enabled": true }, // 融合的 web_search 工具
   "todo": { "enabled": true }, // 融合的 Task* 任务工具 + /tasks
+  "askUser": { "enabled": true }, // ask_user 交互提问工具（子会话也可用）
+  "feishuNotify": { "enabled": true }, // 飞书通知卡片（仅主会话）
   "workflow": { "enabled": false },
   "goal": {
     "enabled": true, // /goal 总开关

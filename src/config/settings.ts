@@ -191,6 +191,10 @@ export interface AgentSettings {
   webSearch: EnabledGroup;
   /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasks + aboveEditor widget. Default on. */
   todo: EnabledGroup;
+  /** ask_user interactive question tool (available in child sessions too). Default on. */
+  askUser: EnabledGroup;
+  /** Feishu notification cards (main-session singleton). Default on. */
+  feishuNotify: EnabledGroup;
 }
 
 /** Simple on/off settings group shared by the merged plugins (hud / webSearch / todo). */
@@ -284,6 +288,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   hud: { enabled: true },
   webSearch: { enabled: true },
   todo: { enabled: true },
+  askUser: { enabled: true },
+  feishuNotify: { enabled: true },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
@@ -453,6 +459,8 @@ export function loadSettings(source: unknown): AgentSettings {
     hud: parseEnabledGroup(value.hud, DEFAULT_SETTINGS.hud),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
     todo: parseEnabledGroup(value.todo, DEFAULT_SETTINGS.todo),
+    askUser: parseEnabledGroup(value.askUser, DEFAULT_SETTINGS.askUser),
+    feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),
   });
 }
 

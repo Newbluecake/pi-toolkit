@@ -23,11 +23,14 @@ the settings file `~/.pi/agent/pi-subagent.json`, `Symbol.for("pi-subagent:*")` 
 `subagent:*` customTypes/event channels, widget/status keys and the `[pi-subagent]` log prefix all
 carry existing session data and cross-module contracts. Do NOT "finish the rename" inside `src/`.
 
-It also absorbs three formerly-standalone plugins (see `docs/dev/plugin-merge/merge-plan.md`),
-each settings-gated: a HUD footer (`src/hud/`, `hud.enabled`, main-session TUI only), the
-`web_search` tool (`src/web-search/`, `webSearch.enabled`), and Claude Code-style task tools
-(`src/todo/`, `todo.enabled`). The latter two register **before** the HOST_KEY guard so child
-sessions keep them.
+It also absorbs five formerly-standalone plugins (see `docs/dev/plugin-merge/merge-plan.md`), all
+settings-gated and all wired from the single `pi.extensions` entry (`src/index.ts`): a HUD footer
+(`src/hud/`, `hud.enabled`, main-session TUI only), the `web_search` tool (`src/web-search/`,
+`webSearch.enabled`), Claude Code-style task tools (`src/todo/`, `todo.enabled`), the interactive
+`ask_user` tool (`src/ask-user/`, `askUser.enabled`), and Feishu notification cards
+(`src/feishu-notify/`, `feishuNotify.enabled`). web_search / todo / ask_user register **before**
+the HOST_KEY guard so child sessions keep them; hud / feishu-notify are post-guard
+(main-session only).
 
 ## Commands
 
@@ -45,7 +48,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 
 ## Repository layout
 
-- `index.ts` — package-root entry **for pi** (the `pi.extensions` manifest target). pi loads
+- `index.ts` — package-root entry **for pi** (the sole `pi.extensions` manifest target). pi loads
   extensions through jiti (runtime TypeScript), so git installs need no build step. Thin
   re-export of `./src/index.js` (jiti maps the `.js` suffix to the `.ts` file). Keep it thin.
 - `index.js` — companion entry for plain Node consumers, re-exporting `./dist/index.js`

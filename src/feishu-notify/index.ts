@@ -443,10 +443,13 @@ export default function (pi: ExtensionAPI) {
       clearTimeout(flushTimer);
       flushTimer = undefined;
     }
-    if (!config.webhookUrl && ctx.hasUI) {
-      ctx.ui.setStatus("feishu-notify", "飞书通知: 未配置 webhook");
-    } else if (ctx.hasUI) {
-      ctx.ui.setStatus("feishu-notify", watched ? "✨ watching" : "");
+    // Capability-gated (graceful degradation): bare/rpc test contexts may
+    // carry hasUI without a functional status bridge.
+    const setStatus = typeof ctx.ui?.setStatus === "function" ? ctx.ui.setStatus.bind(ctx.ui) : undefined;
+    if (!config.webhookUrl && setStatus) {
+      setStatus("feishu-notify", "飞书通知: 未配置 webhook");
+    } else if (setStatus) {
+      setStatus("feishu-notify", watched ? "✨ watching" : "");
     }
   });
 

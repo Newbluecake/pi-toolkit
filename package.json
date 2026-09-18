@@ -12,8 +12,6 @@
   "files": [
     "index.js",
     "index.ts",
-    "ask-user.ts",
-    "feishu-notify.ts",
     "src",
     "dist",
     "README.md",
@@ -28,9 +26,7 @@
   "main": "dist/index.js",
   "pi": {
     "extensions": [
-      "./index.ts",
-      "./ask-user.ts",
-      "./feishu-notify.ts"
+      "./index.ts"
     ]
   },
   "exports": {

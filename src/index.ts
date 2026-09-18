@@ -62,6 +62,8 @@ import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/work
 import { registerWebSearchTool } from "./web-search/index.js";
 import { wireTodo } from "./todo/index.js";
 import { wireHud } from "./hud/index.js";
+import wireAskUser from "./ask-user/index.js";
+import wireFeishuNotify from "./feishu-notify/index.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
 import type { WorkflowActivityRegistry } from "./workflow/activity.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
@@ -96,6 +98,10 @@ export default function activate(pi: ExtensionAPI): void {
   const preGuardSettings = readSettingsNoMigrate();
   if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
   if (preGuardSettings.todo.enabled) wireTodo(pi);
+  // ask_user must also stay available in child sessions (a subagent should be
+  // able to ask the user) — pre-guard, same as the merged tools. It self-gates
+  // on ctx.hasUI for headless sessions.
+  if (preGuardSettings.askUser.enabled) wireAskUser(pi);
 
   const HOST_KEY = Symbol.for("pi-subagent:host");
   const g = globalThis as Record<symbol, unknown>;
@@ -139,10 +145,6 @@ export default function activate(pi: ExtensionAPI): void {
   });
 
   wireCacheTtl(pi, settings);
-  // Merged HUD (plugin-merge): main-session TUI only — wireHud self-gates on
-  // ctx.mode === "tui" (single HudSession.live flag) and cleans up its event
-  // bus subscriptions on session_shutdown.
-  if (settings.hud.enabled) wireHud(pi);
   // Built FRESH per activate(): depending on pi's version, /reload either
   // re-runs activate on the cached module or re-imports a FRESH module (jiti
   // moduleCache:false). A module-level mutable array would accumulate
@@ -449,6 +451,19 @@ export default function activate(pi: ExtensionAPI): void {
       await killBashJobsBounded(stack.bashJobs, settings.budget.abortGraceMs);
     }
   });
+
+  // Merged main-session modules are wired LAST: as standalone extensions
+  // (pi.extensions order / user extensions dir) their hooks always ran after
+  // the core ones, and tests (and possibly behavior) rely on the core
+  // before_agent_start/session_start handlers staying first.
+  // Merged HUD (plugin-merge): main-session TUI only — wireHud self-gates on
+  // ctx.mode === "tui" (single HudSession.live flag) and cleans up its event
+  // bus subscriptions on session_shutdown.
+  if (settings.hud.enabled) wireHud(pi);
+  // Feishu notifications: main-session singleton (its own host guard stays as
+  // defense-in-depth, now strictly redundant with the outer one). Post-guard
+  // so child sessions never even load the card machinery.
+  if (settings.feishuNotify.enabled) wireFeishuNotify(pi);
 }
 
 /** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */

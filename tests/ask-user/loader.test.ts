@@ -17,7 +17,7 @@ const loadExtensions =
 
 describe("Pi host loader integration", () => {
   test("loads and registers ask_user", { timeout: 30_000 }, async () => {
-    const loaded = await loadExtensions([resolve(packageRoot, "ask-user.ts")], packageRoot);
+    const loaded = await loadExtensions([resolve(packageRoot, "src/ask-user/index.ts")], packageRoot);
     expect(loaded.errors).toEqual([]);
     expect(loaded.extensions).toHaveLength(1);
     const tool = loaded.extensions[0]?.tools.get("ask_user");

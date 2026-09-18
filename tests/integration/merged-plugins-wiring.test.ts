@@ -20,6 +20,7 @@ import activate from "../../src/index.js";
  * mention-autocomplete-wiring.test.ts).
  */
 const HOST_KEY = Symbol.for("pi-subagent:host");
+const FEISHU_HOST_KEY = Symbol.for("pi-subagent:feishu-notify:host");
 const fakeHome = mkdtempSync(join(tmpdir(), "pi-subagent-merge-home-"));
 const realHome = process.env.HOME;
 process.env.HOME = fakeHome;
@@ -57,10 +58,12 @@ function writeSettings(raw: unknown): void {
 
 beforeEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
+  delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
   rmSync(settingsPath, { force: true });
 });
 afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
+  delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
   rmSync(settingsPath, { force: true });
 });
 afterAll(() => {
@@ -69,7 +72,7 @@ afterAll(() => {
   rmSync(fakeHome, { recursive: true, force: true });
 });
 
-const MERGED_TOOLS = ["web_search", "TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskDelete"];
+const MERGED_TOOLS = ["web_search", "TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskDelete", "ask_user"];
 
 describe("merged plugins wiring (plugin-merge)", () => {
   it("child session (HOST_KEY claimed): merged tools register pre-guard, host surface stays inert", () => {
@@ -82,6 +85,8 @@ describe("merged plugins wiring (plugin-merge)", () => {
     expect(tools.has("Agent")).toBe(false);
     expect(commands.has("agent")).toBe(false);
     expect(commands.has("pi-hud-refresh")).toBe(false);
+    expect(commands.has("watch")).toBe(false);
+    expect(commands.has("feishu-test")).toBe(false);
   });
 
   it("host session: merged tools + subagent surface + HUD command all present", () => {
@@ -92,15 +97,25 @@ describe("merged plugins wiring (plugin-merge)", () => {
     expect(commands.has("tasks")).toBe(true);
     expect(commands.has("agent")).toBe(true);
     expect(commands.has("pi-hud-refresh")).toBe(true);
+    expect(commands.has("watch")).toBe(true);
+    expect(commands.has("feishu-test")).toBe(true);
   });
 
-  it("gates: webSearch/todo/hud disabled in settings file suppress their surfaces", () => {
-    writeSettings({ webSearch: { enabled: false }, todo: { enabled: false }, hud: { enabled: false } });
+  it("gates: webSearch/todo/hud/askUser/feishuNotify disabled in settings file suppress their surfaces", () => {
+    writeSettings({
+      webSearch: { enabled: false },
+      todo: { enabled: false },
+      hud: { enabled: false },
+      askUser: { enabled: false },
+      feishuNotify: { enabled: false },
+    });
     const { pi, tools, commands } = fakePi();
     activate(pi);
     for (const name of MERGED_TOOLS) expect(tools.has(name), `tool ${name}`).toBe(false);
     expect(commands.has("tasks")).toBe(false);
     expect(commands.has("pi-hud-refresh")).toBe(false);
+    expect(commands.has("watch")).toBe(false);
+    expect(commands.has("feishu-test")).toBe(false);
     // the subagent host surface is unaffected by merged-plugin gates
     expect(tools.has("Agent")).toBe(true);
     expect(commands.has("agent")).toBe(true);
