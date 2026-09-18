@@ -87,6 +87,8 @@ describe("merged plugins wiring (plugin-merge)", () => {
     expect(commands.has("pi-hud-refresh")).toBe(false);
     expect(commands.has("watch")).toBe(false);
     expect(commands.has("feishu-test")).toBe(false);
+    expect(commands.has("resume-recent")).toBe(false);
+    expect(commands.has("clear")).toBe(false);
   });
 
   it("host session: merged tools + subagent surface + HUD command all present", () => {
@@ -99,6 +101,8 @@ describe("merged plugins wiring (plugin-merge)", () => {
     expect(commands.has("pi-hud-refresh")).toBe(true);
     expect(commands.has("watch")).toBe(true);
     expect(commands.has("feishu-test")).toBe(true);
+    expect(commands.has("resume-recent")).toBe(true);
+    expect(commands.has("clear")).toBe(true);
   });
 
   it("gates: webSearch/todo/hud/askUser/feishuNotify disabled in settings file suppress their surfaces", () => {
@@ -108,6 +112,7 @@ describe("merged plugins wiring (plugin-merge)", () => {
       hud: { enabled: false },
       askUser: { enabled: false },
       feishuNotify: { enabled: false },
+      sessionNav: { enabled: false },
     });
     const { pi, tools, commands } = fakePi();
     activate(pi);
@@ -116,6 +121,8 @@ describe("merged plugins wiring (plugin-merge)", () => {
     expect(commands.has("pi-hud-refresh")).toBe(false);
     expect(commands.has("watch")).toBe(false);
     expect(commands.has("feishu-test")).toBe(false);
+    expect(commands.has("resume-recent")).toBe(false);
+    expect(commands.has("clear")).toBe(false);
     // the subagent host surface is unaffected by merged-plugin gates
     expect(tools.has("Agent")).toBe(true);
     expect(commands.has("agent")).toBe(true);

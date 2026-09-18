@@ -195,6 +195,8 @@ export interface AgentSettings {
   askUser: EnabledGroup;
   /** Feishu notification cards (main-session singleton). Default on. */
   feishuNotify: EnabledGroup;
+  /** Session navigation enhancements (/resume-recent, /clear, bare exit, resume-list titles). Main-session TUI only. Default on. */
+  sessionNav: EnabledGroup;
 }
 
 /** Simple on/off settings group shared by the merged plugins (hud / webSearch / todo). */
@@ -290,6 +292,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   todo: { enabled: true },
   askUser: { enabled: true },
   feishuNotify: { enabled: true },
+  sessionNav: { enabled: true },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
@@ -461,6 +464,7 @@ export function loadSettings(source: unknown): AgentSettings {
     todo: parseEnabledGroup(value.todo, DEFAULT_SETTINGS.todo),
     askUser: parseEnabledGroup(value.askUser, DEFAULT_SETTINGS.askUser),
     feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),
+    sessionNav: parseEnabledGroup(value.sessionNav, DEFAULT_SETTINGS.sessionNav),
   });
 }
 

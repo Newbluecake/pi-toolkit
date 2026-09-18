@@ -31,6 +31,7 @@
 - **HUD footer** —— **安装即接管 pi 的底部 footer（设 `hud.enabled: false` + `/reload` 一行还原内置 footer）**。显示 pwd/git 分支与工作树、token/费用统计（含 subagent 实时费用 `+agents`）、上下文用量、模型与 thinking 档位、LLM 计时与生成速率（滑动窗口）。
 - **`web_search` 工具** —— Codex / SerpAPI / Bocha / Tavily 四供应商自动 failover（网络错误/超时/429/5xx 指数退避重试后切换），主会话与子 agent 会话均可用；凭证见「配置」。
 - **任务工具（Claude Code 风格）** —— `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` 五个工具 + 编辑器上方的任务 widget + `/tasks` 面板命令，状态持久化在会话文件里（fork/resume 无损恢复）。
+- **会话导航增强** —— `/resume`（或裸输入 `resume`）默认只扫最近 48 小时的会话（Tab / `--all` 加载全部），skill 启动的会话标题清洗为 `[skill名] 真实输入`，subagent 会话标注为 `[sub:类型] 派单描述`；`/clear`（或裸 `clear`）开新会话；裸 `exit` 直接退出。
 
 ## 从旧 pi-ask-user 迁移
 
@@ -96,7 +97,7 @@ can_message: [parent, child, ancestor]
 
 这三个独立插件已融合进本包。**升级前必须先删除旧插件**，否则同面双份：
 
-1. 删除 `~/.pi/agent/extensions/` 下的 `pi-hud.ts`、`web-search.ts`、`claude-todo/`（含指向 `pi-claude-todo` 仓库的符号链接）。
+1. 删除 `~/.pi/agent/extensions/` 下的 `pi-hud.ts`、`web-search.ts`、`claude-todo/`（含指向 `pi-claude-todo` 仓库的符号链接）、`session-nav/`。
 2. 升级本包，`/reload`（或重启 pi）。
 3. 验证：footer 出现 HUD；`web_search` 可用；`/tasks` 可用。
 4. **残留识别**：pi 对重名命令会全部加后缀——看到 `/tasks:1` `/tasks:2`、`/pi-hud-refresh:1` 而**裸 `/tasks` 消失**，即说明旧插件仍在加载；同名工具则是 first-wins 静默遮蔽（行为取决于加载顺序）。todo 残留的隐蔽症状：任务 widget 冻结在旧快照、与 `TaskList` 输出不一致。
@@ -105,13 +106,15 @@ can_message: [parent, child, ancestor]
 
 ## 命令
 
-| 命令                    | 内容                                                         |
-| ----------------------- | ------------------------------------------------------------ |
-| `/agent status`         | 所有非终态 run 的诊断:相位、最近事件、空闲时长、孤儿 session |
-| `/agent status <runId>` | 单个 run 的完整工具时间线                                    |
-| `/agent costs`          | 按花费降序的逐 run 明细                                      |
-| `/tasks`                | 任务列表面板（`/tasks clear` 清空）                          |
-| `/pi-hud-refresh`       | git fetch 并刷新 HUD footer                                  |
+| 命令                    | 内容                                                           |
+| ----------------------- | -------------------------------------------------------------- |
+| `/agent status`         | 所有非终态 run 的诊断:相位、最近事件、空闲时长、孤儿 session   |
+| `/agent status <runId>` | 单个 run 的完整工具时间线                                      |
+| `/agent costs`          | 按花费降序的逐 run 明细                                        |
+| `/tasks`                | 任务列表面板（`/tasks clear` 清空）                            |
+| `/pi-hud-refresh`       | git fetch 并刷新 HUD footer                                    |
+| `/resume-recent`        | 恢复最近 48 小时的会话（`--all` 全量历史；裸输 `resume` 等效） |
+| `/clear`                | 开新会话（`/new` 别名；裸输 `clear` 等效）                     |
 
 ## bash 自动转后台
 
@@ -240,6 +243,7 @@ queue_wait → resolve_config → session_create → extension_bind
   "todo": { "enabled": true }, // 融合的 Task* 任务工具 + /tasks
   "askUser": { "enabled": true }, // ask_user 交互提问工具（子会话也可用）
   "feishuNotify": { "enabled": true }, // 飞书通知卡片（仅主会话）
+  "sessionNav": { "enabled": true }, // 会话导航增强（/resume-recent、/clear、裸 exit）
   "workflow": { "enabled": false },
   "goal": {
     "enabled": true, // /goal 总开关

@@ -64,6 +64,7 @@ import { wireTodo } from "./todo/index.js";
 import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
 import wireFeishuNotify from "./feishu-notify/index.js";
+import { wireSessionNav } from "./session-nav/index.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
 import type { WorkflowActivityRegistry } from "./workflow/activity.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
@@ -464,6 +465,9 @@ export default function activate(pi: ExtensionAPI): void {
   // defense-in-depth, now strictly redundant with the outer one). Post-guard
   // so child sessions never even load the card machinery.
   if (settings.feishuNotify.enabled) wireFeishuNotify(pi);
+  // Session navigation: main-session TUI only (custom editor, session picker).
+  // Post-guard like the HUD; self-gates the editor install on ctx.mode.
+  if (settings.sessionNav.enabled) wireSessionNav(pi);
 }
 
 /** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */

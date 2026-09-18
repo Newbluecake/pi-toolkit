@@ -192,6 +192,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasks widget)"),
   "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (child sessions included)"),
   "feishuNotify.enabled": bool("feishuNotify.enabled", "Feishu notification cards (main session only)"),
+  "sessionNav.enabled": bool(
+    "sessionNav.enabled",
+    "Session navigation: /resume-recent 48h window, /clear, bare exit, resume-list titles",
+  ),
   "extend.notify": choice(
     "extend.notify",
     ["background", "always", "off"],
