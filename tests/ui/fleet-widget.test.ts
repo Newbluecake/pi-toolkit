@@ -959,7 +959,11 @@ describe("view-model: background bash rows", () => {
   it("renders running bash main/activity rows and bash-only visibility", () => {
     const model = buildFleetViewModel([], OPTS);
     const lines = buildFleetWidgetLines(model, { bashJobs: [bash({ logTail: "added 42 files" })] })!;
-    expect(lines).toEqual(["● 1 background bash", "  $ npm run build · running · 12s · 45KB", "  ╰ » added 42 files"]);
+    expect(lines).toEqual([
+      "● 1 background bash",
+      "  $ npm run build · running · 12s · log 45KB",
+      "  ╰ » added 42 files",
+    ]);
   });
 
   it("shares the main-row pool and counts hidden run/bash identities precisely", () => {
@@ -981,9 +985,9 @@ describe("view-model: background bash rows", () => {
     const lines = buildFleetWidgetLines(buildFleetViewModel([], OPTS), { bashJobs: rows });
     expect(lines).toEqual([
       "● 0 active Agents",
-      "✓ $ npm run build · completed · 12s · 45KB",
-      "✗ $ npm run build · failed · 12s · 45KB",
-      "! $ npm run build · killed · 12s · 45KB",
+      "✓ $ npm run build · completed · 12s · log 45KB",
+      "✗ $ npm run build · failed · 12s · log 45KB",
+      "! $ npm run build · killed · 12s · log 45KB",
     ]);
     expect(
       buildFleetWidgetLines(buildFleetViewModel([], OPTS), {

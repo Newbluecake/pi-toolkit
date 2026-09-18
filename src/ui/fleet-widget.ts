@@ -322,7 +322,7 @@ function renderRunLines(row: FleetRow, indent: string, color: FleetColorize, wid
 }
 
 function widgetBashRowMain(row: BashJobViewInput, color: FleetColorize): string {
-  const meta = `$ ${row.commandPreview} · ${row.status} · ${formatDuration(row.elapsedMs)} · ${formatLogSize(row.logBytes)}`;
+  const meta = `$ ${row.commandPreview} · ${row.status} · ${formatDuration(row.elapsedMs)} · log ${formatLogSize(row.logBytes)}`;
   return row.highlight === "none" ? `  ${meta}` : color(row.highlight, `${WIDGET_MARK[row.highlight]} ${meta}`);
 }
 
@@ -331,7 +331,7 @@ function widgetBashRowActivity(row: BashJobViewInput, color: FleetColorize): str
 }
 
 function widgetBashTerminalDetail(row: BashJobViewInput): string {
-  return `$ ${row.commandPreview} · ${row.status} · ${formatDuration(row.elapsedMs)} · ${formatLogSize(row.logBytes)}`;
+  return `$ ${row.commandPreview} · ${row.status} · ${formatDuration(row.elapsedMs)} · log ${formatLogSize(row.logBytes)}`;
 }
 
 /**
