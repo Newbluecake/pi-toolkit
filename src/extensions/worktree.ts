@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { forgetWorktreeOrigin, recordWorktreeOrigin } from "../core/worktree-origin.js";
 import type { SessionSpec, SpawnRequest, SubagentExtensionPoints, RunOutcome } from "../core/types.js";
 import { DEFAULT_WORKTREE_SETTINGS, type WorktreeSettings } from "./worktree-settings.js";
 
@@ -82,6 +83,7 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
         throw commandError("git worktree add", add);
       }
       records.set(requestRunId(request), { path, repo, branch });
+      recordWorktreeOrigin(path, cwd);
       return { ...spec, cwd: path };
     },
 
@@ -114,6 +116,7 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
           options.onDiagnostic?.({ runId: outcome.runId, phase: "cleanup", message: "worktree cleanup failed", error });
         } finally {
           records.delete(outcome.runId);
+          forgetWorktreeOrigin(record.path);
         }
       }
     },

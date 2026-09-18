@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RunOutcome, SpawnRequest } from "../../src/core/types.js";
+import { forgetWorktreeOrigin, resolveWorktreeOrigin } from "../../src/core/worktree-origin.js";
 import { createWorktreeExtension, type ExecResult, type WorktreeExec } from "../../src/extensions/worktree.js";
 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
@@ -132,5 +133,53 @@ describe("worktree extension", () => {
       phase: "cleanup",
       message: "worktree cleanup failed",
     });
+  });
+});
+
+describe("worktree-origin wiring (B3, 方案 §5.6/§7.9)", () => {
+  it("records worktree path → original cwd on resolveSessionSpec; beforeReap forgets it", async () => {
+    const fake = fakeGit();
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    const spec = await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-origin"));
+    const worktreePath = spec?.cwd;
+    expect(worktreePath).toBe("/tmp/test-worktrees/r-origin");
+    // memory's inject/tool cwd chain resolves the worktree back to the main repo
+    expect(resolveWorktreeOrigin(worktreePath!)).toBe("/repo");
+
+    await ext.beforeReap?.(outcome("r-origin"), { cwd: worktreePath!, deadlineMs: 1000 });
+    expect(resolveWorktreeOrigin(worktreePath!)).toBeUndefined(); // reap cleans the entry
+  });
+
+  it("does not record anything for non-worktree requests", async () => {
+    const fake = fakeGit();
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    const spec = await ext.resolveSessionSpec?.({ cwd: "/repo" }, { type: "worker", prompt: "work" });
+    expect(spec).toEqual({ cwd: "/repo" });
+    expect(resolveWorktreeOrigin("/repo")).toBeUndefined();
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("does not record when worktree creation fails", async () => {
+    const fake = fakeGit({ addCode: 1 });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await expect(ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-origin-fail"))).rejects.toThrow();
+    expect(resolveWorktreeOrigin("/tmp/test-worktrees/r-origin-fail")).toBeUndefined();
+  });
+
+  it("forget is idempotent", () => {
+    forgetWorktreeOrigin("/tmp/test-worktrees/never-recorded");
+    expect(resolveWorktreeOrigin("/tmp/test-worktrees/never-recorded")).toBeUndefined();
   });
 });
