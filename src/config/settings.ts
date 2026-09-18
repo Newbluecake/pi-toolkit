@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
@@ -185,6 +185,17 @@ export interface AgentSettings {
   cacheTtl: CacheTtlSettings;
   /** /goal 目标驱动持续运行（goal-plan v4）。 */
   goal: GoalSettings;
+  /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `false` leaves pi's built-in footer untouched. */
+  hud: EnabledGroup;
+  /** Merged plugins: web_search tool (Codex/SerpAPI/Bocha/Tavily failover). Default on. */
+  webSearch: EnabledGroup;
+  /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasks + aboveEditor widget. Default on. */
+  todo: EnabledGroup;
+}
+
+/** Simple on/off settings group shared by the merged plugins (hud / webSearch / todo). */
+export interface EnabledGroup {
+  enabled: boolean;
 }
 
 export interface FabricSettings {
@@ -270,6 +281,9 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     untilCmdTimeoutMs: 300_000,
     deliveryWatchdogMs: 30_000,
   },
+  hud: { enabled: true },
+  webSearch: { enabled: true },
+  todo: { enabled: true },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
@@ -436,6 +450,9 @@ export function loadSettings(source: unknown): AgentSettings {
     cacheTtl: parseCacheTtlSettings(value.cacheTtl),
     extend: parseExtendSettings(value.extend),
     goal: parseGoalSettings(value.goal),
+    hud: parseEnabledGroup(value.hud, DEFAULT_SETTINGS.hud),
+    webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
+    todo: parseEnabledGroup(value.todo, DEFAULT_SETTINGS.todo),
   });
 }
 
@@ -500,6 +517,13 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
   const mode = (input as Record<string, unknown>).mode;
   return mode === "auto" || mode === "on" || mode === "off" ? { mode } : { ...defaults };
 }
+/** Parse an `{enabled}` on/off group (merged plugins); field-level fallback to defaults, never throws. */
+function parseEnabledGroup(input: unknown, defaults: EnabledGroup): EnabledGroup {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const enabled = (input as Record<string, unknown>).enabled;
+  return { enabled: typeof enabled === "boolean" ? enabled : defaults.enabled };
+}
+
 /** Parse the optional timeout grace/extension settings block（parseCacheTtlSettings 同款容错，never throws）。 */
 export function parseExtendSettings(input: unknown): ExtendSettings {
   const defaults = DEFAULT_SETTINGS.extend;
@@ -655,7 +679,12 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
     let writeSucceeded = true;
     if (changed) {
       try {
-        writeFileSync(path, JSON.stringify(cache.value, null, 2) + "\n", "utf8");
+        // Atomic write (tmp + rename): this file is shared by every session in
+        // the process tree, so a torn write would read back as malformed JSON
+        // and silently reset all settings to defaults (review B1).
+        const tmpPath = `${path}.${process.pid}.tmp`;
+        writeFileSync(tmpPath, JSON.stringify(cache.value, null, 2) + "\n", "utf8");
+        renameSync(tmpPath, path);
       } catch (error) {
         writeSucceeded = false;
         console.warn(
@@ -686,6 +715,28 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
     console.warn(
       `[pi-subagent] failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}; using defaults.`,
     );
+    return loadSettings(undefined);
+  }
+}
+
+/**
+ * Read-only settings load (plugin-merge review B1): parses the file and
+ * returns the effective settings but NEVER migrates, writes, or deletes
+ * anything. This is the only loader safe to call before the HOST_KEY guard —
+ * child subagent sessions re-activate this extension too, and the full
+ * loadSettingsFromFile would concurrently write the shared settings file
+ * (~/.pi/agent/pi-subagent.json) from every child. Malformed/missing file →
+ * defaults, silently: child sessions must not spam stderr with warnings the
+ * main session already emitted. Legacy `*Ms` keys are still tolerated
+ * (normalizeTimeUnits handles them in memory); the on-disk rewrite stays the
+ * host's job via loadSettingsFromFile.
+ */
+export function readSettingsNoMigrate(path: string = defaultSettingsPath()): AgentSettings {
+  try {
+    if (!existsSync(path)) return loadSettings(undefined);
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    return loadSettings(parsed);
+  } catch {
     return loadSettings(undefined);
   }
 }

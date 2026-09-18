@@ -161,7 +161,10 @@ describe("settings file time-unit migration", () => {
 
   it("still applies the migration in memory when the file cannot be rewritten", () => {
     write({ budget: { idleMs: 600_000 } });
-    chmodSync(path, 0o444);
+    // The write-back is atomic (tmp + rename, review B1): a read-only *file*
+    // no longer blocks it — rename(2) replaces the target. A genuinely
+    // unwritable target needs a read-only *directory*.
+    chmodSync(dir, 0o555);
     try {
       const s = loadSettingsFromFile(path);
       expect(s.budget.idleMs).toBe(600_000);
@@ -169,7 +172,7 @@ describe("settings file time-unit migration", () => {
       // untouched on disk — the migration is retried on the next load
       expect(readBack()).toEqual({ budget: { idleMs: 600_000 } });
     } finally {
-      chmodSync(path, 0o644);
+      chmodSync(dir, 0o755);
     }
   });
 

@@ -18,6 +18,12 @@ The whole point of the project is **zero-hang guarantees**: every run has layere
 (watchdog sub-phase budgets + total budget), an escalating reaper for orphans, and persistent,
 acknowledgeable delivery of results. Preserve these invariants when editing.
 
+It also absorbs three formerly-standalone plugins (see `docs/dev/plugin-merge/merge-plan.md`),
+each settings-gated: a HUD footer (`src/hud/`, `hud.enabled`, main-session TUI only), the
+`web_search` tool (`src/web-search/`, `webSearch.enabled`), and Claude Code-style task tools
+(`src/todo/`, `todo.enabled`). The latter two register **before** the HOST_KEY guard so child
+sessions keep them.
+
 ## Commands
 
 ```sh
@@ -64,6 +70,15 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
   frontmatter (default: parent only).
+- `src/hud/` — merged pi-hud: full footer takeover (git/worktrees, token & cost stats incl.
+  live subagent cost, LLM timing/speed) + status key `pi-hud` + `/pi-hud-refresh`. State lives
+  in a per-session `HudSession` (single `live` flag, all timers unref'd, all `pi.events`
+  subscriptions unsubscribed on session_shutdown — the bus survives /reload).
+- `src/web-search/` — merged web_search tool: Codex/SerpAPI/Bocha/Tavily failover with retry
+  policy; credentials from env or `~/.config/pi/web-search.env`; registered pre-guard.
+- `src/todo/` — merged pi-claude-todo: TaskCreate/List/Get/Update/Delete + aboveEditor widget
+  (key `claude-code-todo`, coexists with the fleet widget) + `/tasks`. Persists via the
+  `claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/schedule/` — cron parser, scheduler, persisted schedule store.
 - `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), text builders,

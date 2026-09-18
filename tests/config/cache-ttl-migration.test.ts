@@ -57,14 +57,16 @@ describe("legacy cache TTL migration", () => {
   it("keeps the legacy file when the settings write-back fails", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { path, legacy } = files({}, { mode: "on" });
-    chmodSync(path, 0o444);
+    // 原子写（tmp + rename，review B1）下只读文件会被 rename 直接替换，
+    // 模拟不可写必须上只读目录。
+    chmodSync(dir!, 0o555);
     try {
       expect(loadSettingsFromFile(path).cacheTtl).toEqual({ mode: "on" });
       expect(existsSync(legacy)).toBe(true);
       expect(readFileSync(path, "utf8")).not.toContain("cacheTtl");
       expect(warn).toHaveBeenCalled();
     } finally {
-      chmodSync(path, 0o644);
+      chmodSync(dir!, 0o755);
     }
     // 恢复可写后重试成功并清理 legacy
     expect(loadSettingsFromFile(path).cacheTtl).toEqual({ mode: "on" });

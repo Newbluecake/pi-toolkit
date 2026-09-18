@@ -18,6 +18,7 @@ import {
   defaultSettingsPath,
   loadSettingsFromFile,
   persistSettingOverride,
+  readSettingsNoMigrate,
   type AgentSettings,
 } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
@@ -58,6 +59,9 @@ import { createGoalCommand } from "./goal/command.js";
 import { createGoalLoopHook } from "./goal/hook.js";
 import { persistGoalRecord } from "./goal/store.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
+import { registerWebSearchTool } from "./web-search/index.js";
+import { wireTodo } from "./todo/index.js";
+import { wireHud } from "./hud/index.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
 import type { WorkflowActivityRegistry } from "./workflow/activity.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
@@ -82,6 +86,19 @@ function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): SubagentExtens
  * through to the current session's stack. session_shutdown drains bounded.
  */
 export default function activate(pi: ExtensionAPI): void {
+  // Merged plugins (plugin-merge) that must stay available in EVERY session,
+  // child subagent sessions included — they register BEFORE the HOST_KEY
+  // guard below. Settings here come from the read-only loader: the full
+  // loadSettingsFromFile migrates/writes the shared settings file, which must
+  // never run concurrently from N child sessions (review B1). Visibility in a
+  // child session is still subject to the agent type's `tools` allowlist
+  // (tool-scope), and neither tool is in RESERVED_TOOL_NAMES.
+  const preGuardSettings = readSettingsNoMigrate();
+  if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
+  if (preGuardSettings.todo.enabled) wireTodo(pi);
+
+  const HOST_KEY = Symbol.for("pi-subagent:host");
+  const g = globalThis as Record<symbol, unknown>;
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
   // re-activates this extension inside every child. Without a guard, the
   // child instance registers its own Agent/SubagentWorkflow tools backed by
@@ -97,8 +114,6 @@ export default function activate(pi: ExtensionAPI): void {
   // extension (Agent tool, /agent, hooks) silently disappears until pi is
   // restarted. Only the owning activation releases it, so a child session that
   // shuts down cannot hand the host role away.
-  const HOST_KEY = Symbol.for("pi-subagent:host");
-  const g = globalThis as Record<symbol, unknown>;
   if (g[HOST_KEY]) return;
   const claim = { activatedAt: Date.now() };
   g[HOST_KEY] = claim;
@@ -124,6 +139,10 @@ export default function activate(pi: ExtensionAPI): void {
   });
 
   wireCacheTtl(pi, settings);
+  // Merged HUD (plugin-merge): main-session TUI only — wireHud self-gates on
+  // ctx.mode === "tui" (single HudSession.live flag) and cleans up its event
+  // bus subscriptions on session_shutdown.
+  if (settings.hud.enabled) wireHud(pi);
   // Built FRESH per activate(): depending on pi's version, /reload either
   // re-runs activate on the cached module or re-imports a FRESH module (jiti
   // moduleCache:false). A module-level mutable array would accumulate

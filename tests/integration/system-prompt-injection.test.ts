@@ -200,7 +200,13 @@ describe("wiring: available agent types are injected into the system prompt", ()
     activate(host.pi as never);
     const child = fakePi();
     activate(child.pi as never);
-    expect(child.handlers.size, "inert child registers nothing at all").toBe(0);
+    // plugin-merge: a child session registers ONLY the pre-guard merged
+    // surface (todo's session hooks) — never the host-only hooks/tools.
+    expect(child.handlers.has("before_agent_start")).toBe(false);
+    expect(child.handlers.has("agent_settled")).toBe(false);
+    for (const event of child.handlers.keys()) {
+      expect(["session_start", "session_tree", "session_compact", "session_shutdown"]).toContain(event);
+    }
 
     // Host still owns the claim, so a later activation stays inert.
     const another = fakePi();

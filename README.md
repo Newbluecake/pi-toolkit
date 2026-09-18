@@ -26,6 +26,9 @@
 - **Agent 类型** —— 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义;注入系统提示词,让模型知道合法的 `subagent_type` 取值。frontmatter `model:` 支持严格 `provider/id` 或模糊 hint(如 `sonnet`)。
 - **`ask_user` 工具** —— 合并版交互式澄清工具，仅主会话注册；TUI/RPC 均支持，并在用户输入时发出 `ask-user:activity` 事件。
 - **飞书通知** —— `@notify` 关键词、`/watch`、`/feishu-test` 与结果/汇总/心跳/等待输入卡片（均为被动触发，不提供 AI 主动调用工具）。完成类通知默认等待后台 subagent 和后台 bash 全部空闲；心跳、等待输入和显式触发不等待。
+- **HUD footer** —— **安装即接管 pi 的底部 footer（设 `hud.enabled: false` + `/reload` 一行还原内置 footer）**。显示 pwd/git 分支与工作树、token/费用统计（含 subagent 实时费用 `+agents`）、上下文用量、模型与 thinking 档位、LLM 计时与生成速率（滑动窗口）。
+- **`web_search` 工具** —— Codex / SerpAPI / Bocha / Tavily 四供应商自动 failover（网络错误/超时/429/5xx 指数退避重试后切换），主会话与子 agent 会话均可用；凭证见「配置」。
+- **任务工具（Claude Code 风格）** —— `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` 五个工具 + 编辑器上方的任务 widget + `/tasks` 面板命令，状态持久化在会话文件里（fork/resume 无损恢复）。
 
 ## 从旧 pi-ask-user 迁移
 
@@ -87,6 +90,17 @@ can_message: [parent, child, ancestor]
 - run 处于工具调用或思考中时,追加一行**活动行**:近期工具轨迹(`bash×3→read`)+ 高亮的在途 `▸工具` 及参数预览,或模型流式文本的一行 `»` 尾部。工具调用 vs 模型请求的状态始终准确——包括并行工具调用。
 - 高亮:`!` 黄 = 空闲超过 idle 预算一半(可疑地安静);`✗` 红 = 停止中或超过总 deadline。终态 run 分三段处理:通知待进入上下文时保留待处理行并预览派单 prompt;通知进入上下文后按短暂驻留时间淡出;通知发不出去时最多保留 10 分钟硬兜底后淡出。
 
+## 从独立插件迁移（pi-hud / web-search / pi-claude-todo）
+
+这三个独立插件已融合进本包。**升级前必须先删除旧插件**，否则同面双份：
+
+1. 删除 `~/.pi/agent/extensions/` 下的 `pi-hud.ts`、`web-search.ts`、`claude-todo/`（含指向 `pi-claude-todo` 仓库的符号链接）。
+2. 升级本包，`/reload`（或重启 pi）。
+3. 验证：footer 出现 HUD；`web_search` 可用；`/tasks` 可用。
+4. **残留识别**：pi 对重名命令会全部加后缀——看到 `/tasks:1` `/tasks:2`、`/pi-hud-refresh:1` 而**裸 `/tasks` 消失**，即说明旧插件仍在加载；同名工具则是 first-wins 静默遮蔽（行为取决于加载顺序）。todo 残留的隐蔽症状：任务 widget 冻结在旧快照、与 `TaskList` 输出不一致。
+5. 会话数据无损：todo 的 `claude-code-todo-state` 与 HUD 的 `pi-hud-llm-time` 等持久化键原样保留，fork/resume 旧会话直接继承。
+6. 可选：在 `~/.pi/agent/pi-subagent.json` 里设 `"hud": {"enabled": false}` 等关闭单个模块。
+
 ## 命令
 
 | 命令                    | 内容                                                         |
@@ -94,6 +108,8 @@ can_message: [parent, child, ancestor]
 | `/agent status`         | 所有非终态 run 的诊断:相位、最近事件、空闲时长、孤儿 session |
 | `/agent status <runId>` | 单个 run 的完整工具时间线                                    |
 | `/agent costs`          | 按花费降序的逐 run 明细                                      |
+| `/tasks`                | 任务列表面板（`/tasks clear` 清空）                          |
+| `/pi-hud-refresh`       | git fetch 并刷新 HUD footer                                  |
 
 ## bash 自动转后台
 
@@ -217,6 +233,9 @@ queue_wait → resolve_config → session_create → extension_bind
   "foregroundAutoBackgroundS": 600, // 前台调用自动转后台；0 关闭
   "resultMaxChars": 8000, // 结果文本上限；0 不限，live 生效
   "worktree": { "enabled": false },
+  "hud": { "enabled": true }, // 融合的 HUD footer；false 还原 pi 内置 footer
+  "webSearch": { "enabled": true }, // 融合的 web_search 工具
+  "todo": { "enabled": true }, // 融合的 Task* 任务工具 + /tasks
   "workflow": { "enabled": false },
   "goal": {
     "enabled": true, // /goal 总开关
@@ -240,6 +259,8 @@ queue_wait → resolve_config → session_create → extension_bind
   },
 }
 ```
+
+**`web_search` 的供应商凭证在另一处**（不进上面的设置文件）：环境变量，或 `~/.config/pi/web-search.env`（建议 0600）：`CODEX_SEARCH_API_KEY` + `CODEX_SEARCH_BASE_URL`（可选 `CODEX_SEARCH_MODEL`、`CODEX_SEARCH_TLS_INSECURE`）、`SERPAPI_API_KEY`、`BOCHA_API_KEY`、`TAVILY_API_KEY`，至少配一家；`PI_WEB_SEARCH_ENV_FILE` 可覆盖该路径。
 
 ## 安装
 
