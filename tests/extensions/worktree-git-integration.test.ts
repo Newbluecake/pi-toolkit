@@ -80,4 +80,36 @@ describe("X1 worktree against real git", () => {
     const list = await realExec("git", ["worktree", "list", "--porcelain"], { cwd: repo });
     expect(list.stdout).not.toContain(".wt2");
   });
+
+  it("preserves the worktree (and its uncommitted files) when the commit is rejected by a hook", async () => {
+    const repo = await makeRepo();
+    // a pre-commit hook that always fails forces the commit chain to break
+    await writeFile(join(repo, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const wtRoot = join(repo, ".wt3");
+    const diagnostics: Array<{ message: string }> = [];
+    const ext = createWorktreeExtension({
+      exec: realExec,
+      settings: { enabled: true },
+      worktreeRoot: wtRoot,
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    const rewritten = await ext.resolveSessionSpec!(spec(repo), req("r-hook"));
+    await writeFile(join(rewritten.cwd!, "made-by-agent.txt"), "precious");
+    await ext.beforeReap!(outcome("r-hook"), { cwd: rewritten.cwd!, deadlineMs: 10_000 });
+
+    // worktree still on disk, uncommitted file intact, no branch created
+    const list = await realExec("git", ["worktree", "list", "--porcelain"], { cwd: repo });
+    expect(list.stdout).toContain(".wt3");
+    const content = await realExec("git", ["status", "--porcelain"], { cwd: rewritten.cwd! });
+    expect(content.stdout).toContain("made-by-agent.txt");
+    // the branch ref exists (created by `git switch -c`) but points at HEAD —
+    // it must NOT contain the uncommitted file
+    const files = await realExec("git", ["show", "--name-only", "--format=", "pi-agent-r-hook"], { cwd: repo });
+    expect(files.stdout).not.toContain("made-by-agent.txt");
+    expect(diagnostics.some((d) => d.message.includes(`preserved at ${rewritten.cwd!}`))).toBe(true);
+
+    // manual recovery path works: remove the preserved worktree ourselves
+    const remove = await realExec("git", ["worktree", "remove", "--force", rewritten.cwd!], { cwd: repo });
+    expect(remove.code).toBe(0);
+  });
 });

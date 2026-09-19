@@ -19,7 +19,16 @@ const request = (runId: string): SpawnRequest => ({
   isolation: "worktree",
 });
 
-function fakeGit(opts: { dirty?: boolean; addCode?: number; removeCode?: number } = {}) {
+function fakeGit(
+  opts: {
+    dirty?: boolean;
+    addCode?: number;
+    removeCode?: number;
+    statusCode?: number;
+    switchCode?: number;
+    commitCode?: number;
+  } = {},
+) {
   const calls: Array<{ args: string[]; cwd?: string }> = [];
   const branches = new Set<string>();
   const exec: WorktreeExec = async (_cmd, args, commandOpts) => {
@@ -27,11 +36,17 @@ function fakeGit(opts: { dirty?: boolean; addCode?: number; removeCode?: number 
     if (args[0] === "rev-parse") return ok("/repo\n");
     if (args[0] === "worktree" && args[1] === "add")
       return opts.addCode ? { code: opts.addCode, stdout: "", stderr: "cannot create" } : ok();
-    if (args[0] === "status") return ok(opts.dirty ? " M file.txt\n" : "");
+    if (args[0] === "status")
+      return opts.statusCode
+        ? { code: opts.statusCode, stdout: "", stderr: "status failed" }
+        : ok(opts.dirty ? " M file.txt\n" : "");
     if (args[0] === "switch") {
+      if (opts.switchCode) return { code: opts.switchCode, stdout: "", stderr: "branch exists" };
       branches.add(args[2]);
       return ok();
     }
+    if (args[0] === "commit")
+      return opts.commitCode ? { code: opts.commitCode, stdout: "", stderr: "hook rejected" } : ok();
     if (args[0] === "worktree" && args[1] === "remove")
       return { code: opts.removeCode ?? 0, stdout: "", stderr: opts.removeCode ? "cannot remove" : "" };
     return ok();
@@ -133,6 +148,42 @@ describe("worktree extension", () => {
       phase: "cleanup",
       message: "worktree cleanup failed",
     });
+  });
+
+  it.each([
+    ["commit fails", { commitCode: 1 }],
+    ["branch switch fails", { switchCode: 1 }],
+  ])("preserves a dirty worktree when %s — never force-removes uncommitted work", async (_label, opts) => {
+    const fake = fakeGit({ dirty: true, ...opts });
+    const diagnostics: Array<{ message: string }> = [];
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-preserve"));
+    await ext.beforeReap?.(outcome("r-preserve"), { cwd: "/tmp/test-worktrees/r-preserve", deadlineMs: 1000 });
+    expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(false);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.message).toContain("worktree preserved at /tmp/test-worktrees/r-preserve");
+    // bookkeeping is still dropped — the preserved directory is for manual recovery
+    expect(resolveWorktreeOrigin("/tmp/test-worktrees/r-preserve")).toBeUndefined();
+  });
+
+  it("preserves the worktree when the status check itself fails (cleanliness unknown)", async () => {
+    const fake = fakeGit({ statusCode: 1 });
+    const diagnostics: Array<{ message: string }> = [];
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-status-fail"));
+    await ext.beforeReap?.(outcome("r-status-fail"), { cwd: "/tmp/test-worktrees/r-status-fail", deadlineMs: 1000 });
+    expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(false);
+    expect(diagnostics[0]?.message).toContain("worktree preserved at /tmp/test-worktrees/r-status-fail");
   });
 });
 

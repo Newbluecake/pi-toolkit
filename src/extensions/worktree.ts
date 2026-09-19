@@ -90,34 +90,43 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
     async beforeReap(outcome: RunOutcome, ctx: { cwd: string; deadlineMs: number }): Promise<void> {
       const record = records.get(outcome.runId);
       if (!record) return;
+      // Safety gate: the worktree is only removed when it was clean or its
+      // changes were successfully committed to the pi-agent branch. Any
+      // failure in the commit chain preserves the worktree on disk so
+      // uncommitted work is never destroyed by the force-remove below.
+      let safeToRemove = false;
       try {
         const status = await git(["status", "--porcelain"], record.path, ctx.deadlineMs);
         if (status.code !== 0) throw commandError("git status --porcelain", status);
-        if (!isClean(status)) {
+        if (isClean(status)) {
+          safeToRemove = true;
+        } else {
           const checkout = await git(["switch", "-c", record.branch], record.path, ctx.deadlineMs);
           if (checkout.code !== 0) throw commandError("git switch -c", checkout);
           const add = await git(["add", "-A"], record.path, ctx.deadlineMs);
           if (add.code !== 0) throw commandError("git add -A", add);
           const commit = await git(["commit", "-m", `pi-agent ${outcome.runId}`], record.path, ctx.deadlineMs);
           if (commit.code !== 0) throw commandError("git commit", commit);
+          safeToRemove = true;
         }
       } catch (error) {
         options.onDiagnostic?.({
           runId: outcome.runId,
           phase: "cleanup",
-          message: "worktree changes could not be committed",
+          message: `worktree changes could not be committed; worktree preserved at ${record.path} to avoid losing uncommitted work`,
           error,
         });
-      } finally {
-        try {
+      }
+      try {
+        if (safeToRemove) {
           const remove = await git(["worktree", "remove", "--force", record.path], record.repo, ctx.deadlineMs);
           if (remove.code !== 0) throw commandError("git worktree remove", remove);
-        } catch (error) {
-          options.onDiagnostic?.({ runId: outcome.runId, phase: "cleanup", message: "worktree cleanup failed", error });
-        } finally {
-          records.delete(outcome.runId);
-          forgetWorktreeOrigin(record.path);
         }
+      } catch (error) {
+        options.onDiagnostic?.({ runId: outcome.runId, phase: "cleanup", message: "worktree cleanup failed", error });
+      } finally {
+        records.delete(outcome.runId);
+        forgetWorktreeOrigin(record.path);
       }
     },
   };
@@ -141,5 +150,12 @@ export function createPiWorktreeExtension(
         ...(opts.cwd ? { cwd: opts.cwd } : {}),
         ...(opts.timeout ? { timeout: opts.timeout } : {}),
       }),
+    // Diagnostics must stay visible in production: a preserved worktree means
+    // uncommitted agent work is sitting on disk and the user must recover it.
+    onDiagnostic: (event) => {
+      const detail =
+        event.error instanceof Error ? ` (${event.error.message})` : event.error ? ` (${String(event.error)})` : "";
+      console.warn(`[pi-subagent] worktree ${event.phase} [${event.runId}]: ${event.message}${detail}`);
+    },
   });
 }
