@@ -376,6 +376,15 @@ export interface RunDiagnostics {
   phaseEnteredAt: Millis;
   lastEventAt?: Millis;
   lastEventType?: string;
+  /**
+   * X6b: sticky timestamp of the most recent `turn_start` session event.
+   * Unlike lastEventType (which the very next event — message_end of the
+   * steered user message, text_delta, tool_start … — overwrites within the
+   * same event burst), this is written only on turn_start and survives until
+   * the next one, so a 1Hz widget poll can reliably observe "a fresh model
+   * turn started after T". Drives mention-note self-clearing (mention/notes.ts).
+   */
+  lastTurnStartAt?: Millis;
   currentTool?: { name: string; toolCallId: string; startedAt: Millis };
   pendingTools: number;
   turns: number;

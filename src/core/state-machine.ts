@@ -643,6 +643,11 @@ export function reduce(
     const base: Partial<RunDiagnostics> = {
       lastEventAt: input.at,
       lastEventType: e.t,
+      // X6b: sticky turn_start stamp — lastEventType above is clobbered by the
+      // very next event in the same burst (the steered user message's
+      // message_end lands microseconds after turn_start), so mention notes
+      // cannot key off it. This one persists until the NEXT turn_start.
+      ...(e.t === "turn_start" ? { lastTurnStartAt: input.at } : {}),
       // turn_end drives the turns counter (G4 diagnostics + outcome.turns);
       // without this branch every run reported turns: 0.
       ...(e.t === "turn_end" ? { turns: state.diag.turns + 1 } : {}),

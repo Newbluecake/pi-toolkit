@@ -1962,6 +1962,36 @@ describe("turn counter (regression: turns was always 0)", () => {
   });
 });
 
+describe("lastTurnStartAt (sticky turn_start stamp powering X6b mention notes)", () => {
+  it("stamps on turn_start and survives every trailing event until the next turn_start", () => {
+    let s = enqueued();
+    s = apply(s, { kind: "slot_acquired" }, 1).state;
+    s = apply(s, { kind: "phase_entered", phase: "prompt_dispatch" }, 2).state;
+    expect(s.diag.lastTurnStartAt).toBeUndefined();
+    // turn_start at 2.5 (structural event: prompt_dispatch → model_turn)
+    s = apply(s, { kind: "session_event", event: { t: "turn_start" } }, 2.5).state;
+    expect(s.diag.lastTurnStartAt).toBe(2.5);
+    // pi emits message_end for the steered user message microseconds after
+    // turn_start, then text deltas / tool calls — lastEventType moves on
+    // instantly, the stamp must not.
+    s = apply(s, { kind: "session_event", event: { t: "message_end" } }, 2.6).state;
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "x" } }, 3).state;
+    expect(s.diag.lastEventType).toBe("text_delta");
+    expect(s.diag.lastTurnStartAt).toBe(2.5);
+    s = apply(s, { kind: "session_event", event: { t: "tool_start", toolCallId: "a", toolName: "bash" } }, 4).state;
+    s = apply(
+      s,
+      { kind: "session_event", event: { t: "tool_end", toolCallId: "a", toolName: "bash", isError: false } },
+      5,
+    ).state;
+    s = apply(s, { kind: "session_event", event: { t: "turn_end", toolResults: 1 } }, 6).state;
+    expect(s.diag.lastTurnStartAt).toBe(2.5);
+    // Only the NEXT turn_start moves the stamp.
+    s = apply(s, { kind: "session_event", event: { t: "turn_start" } }, 7).state;
+    expect(s.diag.lastTurnStartAt).toBe(7);
+  });
+});
+
 describe("thinking stream (thinking_delta → diag.thinkingText)", () => {
   function inModelTurn(): RunState {
     const s = apply(enqueued(), { kind: "slot_acquired" }).state;
