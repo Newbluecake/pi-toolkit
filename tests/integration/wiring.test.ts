@@ -22,6 +22,7 @@ import { createLiveRunRegistry } from "../../src/service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "../../src/service/runtime-adapter.js";
 import { createQueryService } from "../../src/service/query-service.js";
 import { createSpawnService } from "../../src/service/spawn-service.js";
+import { createMentionNotes } from "../../src/mention/notes.js";
 
 /**
  * True cross-layer wiring: a real SingleSlotPool, a real RuntimeRunner (via
@@ -364,5 +365,59 @@ describe("wiring: cross-layer smoke", () => {
     const snap = stack.registry.get(spawned.runId);
     expect(snap?.status).toBe("timed_out");
     expect(snap?.diag.timeoutReason).toBe("idle");
+  });
+});
+
+describe("wiring: mention notes (X6b) clear via the LIVE registry, not the terminal-only store", () => {
+  // Regression for the 2026-09 @-note-stuck bug: stack.ts originally wired
+  // mentionNotes' diagOf to store.get(). persist_snapshot is a terminal-only
+  // effect (I4), so the store never carries in-flight diag — lastTurnStartAt
+  // stayed undefined forever and steered @ notes never cleared in production
+  // (unit tests fed live diags directly, so they passed). This test assembles
+  // the full driver → runner → reducer → live registry → query path the way
+  // stack.ts now does, and drives real turn_start events through it.
+  it("steer-path pending note self-clears on a fresh turn_start past the baseline", async () => {
+    const clock = new FakeClock();
+    let emitEvent: ((e: DriverEvent) => void) | undefined;
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }), // prompt hangs: run stays alive across emitted events
+      bind: async (_h, onEvent) => {
+        emitEvent = onEvent;
+      },
+      onLateArrival: () => undefined,
+    };
+    const emit = (e: DriverEvent) => emitEvent?.(e);
+    const stack = buildStack(clock, driver);
+    // Same wiring as stack.ts: diagOf goes through QueryService (live registry).
+    const notes = createMentionNotes({ diagOf: (runId) => stack.queryService.get(runId)?.diag });
+
+    const spawned = await stack.spawnService.spawn({ type: "worker", prompt: "long running task" });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+
+    await drain(clock, 30); // bound, prompt dispatched
+    emit({ t: "turn_start" }); // first model turn
+    await drain(clock, 5);
+
+    // I4 guard: the durable store only has the ENQUEUE-time snapshot —
+    // persist_snapshot is terminal-only, so its diag never receives the
+    // in-flight turn_start stamp. A store-backed diagOf (the bug) would keep
+    // the note forever.
+    expect(stack.store.get(spawned.runId)?.diag.lastTurnStartAt).toBeUndefined();
+
+    // User @'s the running run: baseline = live lastEventAt, exactly what
+    // mention.ts captures after the steer lands.
+    const baseline = stack.queryService.get(spawned.runId)?.diag.lastEventAt ?? 0;
+    notes.set(spawned.runId, "回复我一条消息", baseline);
+    expect(notes.get(spawned.runId)).toBe("回复我一条消息");
+
+    // pi picks up the steered message: message_end lands microseconds after
+    // turn_start in the same burst (agent-loop), then the next turn starts.
+    // The sticky stamp must survive the burst and clear the note.
+    emit({ t: "turn_start" });
+    emit({ t: "message_end" });
+    await drain(clock, 5);
+
+    expect(stack.queryService.get(spawned.runId)?.diag.lastTurnStartAt).toBeGreaterThan(baseline);
+    expect(notes.get(spawned.runId)).toBeUndefined();
   });
 });

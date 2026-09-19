@@ -782,9 +782,13 @@ export function buildSessionStack(
   // X6b: session-scoped, capped FIFO — notes are one-line previews, never read
   // back into context. Pending (steer-path) notes self-clear once the target run
   // starts a fresh model turn past the recorded baseline (see mention/notes.ts).
-  const mentionNotes = createMentionNotes({ diagOf: (runId) => store.get(runId)?.diag });
-  const mentionRef = { current: mention };
+  // diagOf MUST go through the live run registry (query.get): persist_snapshot
+  // is a terminal-only effect (I4), so store.get never sees in-flight diag
+  // updates — a store-backed diagOf freezes lastTurnStartAt/lastEventAt at
+  // enqueue time and pending notes would never clear.
   let query: QueryService;
+  const mentionNotes = createMentionNotes({ diagOf: (runId) => query.get(runId)?.diag });
+  const mentionRef = { current: mention };
   const fabric = settings.fabric.enabled
     ? buildFabric(pi, ctx, settings, prefetchedEntries, readBack, runnerRef)
     : undefined;
