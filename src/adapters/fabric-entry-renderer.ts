@@ -31,7 +31,13 @@ export function createFabricEntryRenderer(resolveSender?: FabricSenderResolver):
     if (data?.state !== "delivered") return undefined;
     const text = data.payload?.text ?? "";
     const sender = formatSender(data.from, resolveSender);
-    return new Text(theme.fg("muted", `[fabric ${data.kind ?? "message"}${sender}] ${text}`), 0, 0);
+    const prefix = `[fabric ${data.kind ?? "message"}${sender}] `;
+    // Multi-line payload: indent continuation lines to the prefix width so
+    // they align under the first line's text instead of hugging column 0
+    // (the message is one plain Text, not markdown — no block indentation).
+    const indent = " ".repeat(prefix.length);
+    const body = text.includes("\n") ? text.replace(/\n/g, `\n${indent}`) : text;
+    return new Text(theme.fg("muted", `${prefix}${body}`), 0, 0);
   };
 }
 

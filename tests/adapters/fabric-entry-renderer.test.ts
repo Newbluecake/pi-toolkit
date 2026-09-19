@@ -64,6 +64,21 @@ describe("renderFabricEntry", () => {
     expect(renderFabricEntry(entry({ payload: { text: "x" } }), { expanded: false }, theme)).toBeUndefined();
   });
 
+  it("indents continuation lines of a multi-line payload under the first line's text", () => {
+    const render = createFabricEntryRenderer((runId) => (runId === "r_ABCDEFGH" ? "watcher" : undefined));
+    const component = render(
+      entry(record({ state: "delivered", deliveredAt: 2, payload: { text: "line1\nline2\n  line3" } })),
+      { expanded: false },
+      theme,
+    );
+    const lines = component!.render(200).map((l) => l.trimEnd());
+    const prefix = "[fabric finding @watcher] ";
+    expect(lines[0]).toBe(`${prefix}line1`);
+    expect(lines[1]).toBe(`${" ".repeat(prefix.length)}line2`);
+    // Payload-internal indentation is preserved on top of the alignment indent.
+    expect(lines[2]).toBe(`${" ".repeat(prefix.length)}  line3`);
+  });
+
   it("falls back to a generic label when kind is absent on a delivered record", () => {
     const component = renderFabricEntry(
       entry({ state: "delivered", payload: { text: "x" } }),
