@@ -513,7 +513,7 @@ describe("compact hint turn_end wiring", () => {
       emptyTypes,
       [],
     );
-    expect(stack.compactHint.thresholdTokens).toBe(400);
+    expect(stack.compactHint.thresholdTokens).toBe(500);
     expect(stack.compactHint.forceAtTokens).toBe(0);
     stack.scheduler.stop();
     stack.rpc.close();

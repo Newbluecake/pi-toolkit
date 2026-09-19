@@ -114,7 +114,7 @@ export interface CompactSettings {
   enabled: boolean;
   hintThresholdPercent: number;
   forceAtPercent: number;
-  /** Absolute hint threshold in units of k tokens (default 400 = 400k used
+  /** Absolute hint threshold in units of k tokens (default 500 = 500k used
    *  tokens). 0 = no absolute limit (percent only). Auto-disabled when the
    *  line strictly exceeds the model's context window. When both the percent
    *  and the absolute line apply, whichever fires first wins. */
@@ -286,7 +286,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     enabled: true,
     hintThresholdPercent: DEFAULT_HINT_THRESHOLD_PERCENT,
     forceAtPercent: DEFAULT_FORCE_THRESHOLD_PERCENT,
-    hintThresholdTokens: 400,
+    hintThresholdTokens: 500,
     forceAtTokens: 0,
     usageTickStepPercent: DEFAULT_USAGE_TICK_STEP_PERCENT,
   },

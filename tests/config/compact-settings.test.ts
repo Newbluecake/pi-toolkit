@@ -9,7 +9,7 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
-      hintThresholdTokens: 400,
+      hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
     });
@@ -30,7 +30,7 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
-      hintThresholdTokens: 400,
+      hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
     });
@@ -45,15 +45,15 @@ describe("compact settings", () => {
     expect(parseCompactSettings({ hintThresholdTokens: 250.9 }).hintThresholdTokens).toBe(250);
     // 0 disables the absolute line explicitly.
     expect(parseCompactSettings({ hintThresholdTokens: 0 }).hintThresholdTokens).toBe(0);
-    // Invalid values fall back to the 400k default.
+    // Invalid values fall back to the 500k default.
     for (const invalid of [-1, Number.NaN, "400", null, Infinity]) {
-      expect(parseCompactSettings({ hintThresholdTokens: invalid }).hintThresholdTokens).toBe(400);
+      expect(parseCompactSettings({ hintThresholdTokens: invalid }).hintThresholdTokens).toBe(500);
     }
     // forceAtTokens defaults to 0 and accepts 0.
     expect(parseCompactSettings({}).forceAtTokens).toBe(0);
     expect(parseCompactSettings({ forceAtTokens: 0 }).forceAtTokens).toBe(0);
     // forceAtTokens > 0 must exceed the configured hint token line (mirror of
-    // the force>hint percent rule): 300 <= 400 default → falls back to 0;
+    // the force>hint percent rule): 300 <= 500 default → falls back to 0;
     // but 300 is fine when the hint line is explicitly lowered.
     expect(parseCompactSettings({ forceAtTokens: 300 }).forceAtTokens).toBe(0);
     expect(parseCompactSettings({ hintThresholdTokens: 200, forceAtTokens: 300 }).forceAtTokens).toBe(300);
@@ -72,7 +72,7 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
-      hintThresholdTokens: 400,
+      hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
     });
@@ -81,7 +81,7 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 60,
       forceAtPercent: 88,
-      hintThresholdTokens: 400,
+      hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
       assumedReserveTokens: 32768,
@@ -90,7 +90,7 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 0,
       forceAtPercent: 88,
-      hintThresholdTokens: 400,
+      hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
     });

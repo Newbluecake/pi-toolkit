@@ -42,7 +42,7 @@ function result(text: string, reason: string, extra: Record<string, unknown> = {
 }
 
 /** Display helper: `75%` stays `75%`; with an absolute line configured it
- *  shows `75%/400k`, annotated when the line currently auto-disables because
+ *  shows `75%/500k`, annotated when the line currently auto-disables because
  *  it exceeds the model's context window. */
 function formatThreshold(percent: number, tokensK: number, window?: number): string {
   if (tokensK <= 0) return `${percent}%`;
@@ -65,7 +65,7 @@ export function createSetCompactThresholdTool(
     promptGuidelines: [
       "This is a reminder threshold, never forced compression; use compact_context when you decide to compact.",
       "Use 0 to disable, omit percent to query, or use a value of at least 1; the effective value stays below pi's automatic line.",
-      "tokens/forceTokens are absolute used-token lines in units of k (default hint line 400 = 400k); 0 disables them, and a line exceeding the model's context window auto-disables. When both percent and tokens apply, whichever fires first wins.",
+      "tokens/forceTokens are absolute used-token lines in units of k (default hint line 500 = 500k); 0 disables them, and a line exceeding the model's context window auto-disables. When both percent and tokens apply, whichever fires first wins.",
     ],
     parameters: SetCompactThresholdParams,
     async execute(_id, params, _signal, _update, ctx: ExtensionContext) {
