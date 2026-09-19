@@ -60,13 +60,17 @@ describe("renderMemoryBlock — index", () => {
     expect(block).toContain("- … +2 more");
   });
 
-  it("formats sizes as B / kB", () => {
+  it("formats sizes as B / kB / MB (auto-scaling unit)", () => {
     const { paths, dir } = fixture();
     writeMem(dir, "small.md", "x".repeat(100));
+    writeMem(dir, "edge.md", "e".repeat(1024));
     writeMem(dir, "big.md", "y".repeat(2048));
+    writeMem(dir, "huge.md", "z".repeat(2 * 1024 * 1024));
     const block = renderMemoryBlock(CWD, budget({ inlineMax: 0 }), paths);
     expect(block).toContain("small.md (100B)");
+    expect(block).toContain("edge.md (1.0kB)"); // 1024 归入 kB 档
     expect(block).toContain("big.md (2.0kB)");
+    expect(block).toContain("huge.md (2.0MB)");
   });
 });
 

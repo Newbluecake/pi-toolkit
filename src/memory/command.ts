@@ -11,6 +11,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
+import { formatSize } from "./render.js";
 
 export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
@@ -35,7 +36,9 @@ export function createMemCommand(deps: { paths?: MemoryPaths }): { description: 
         }
         if (sub === "list") {
           const files = listMemory(cwd, deps.paths);
-          const msg = files.length ? files.map((f) => `  ${f.name} (${f.size}B)`).join("\n") : `(no memory for ${cwd})`;
+          const msg = files.length
+            ? files.map((f) => `  ${f.name} (${formatSize(f.size)})`).join("\n")
+            : `(no memory for ${cwd})`;
           if (ctx.hasUI) ctx.ui.notify(msg, "info");
           return;
         }
@@ -71,7 +74,7 @@ export function createMemCommand(deps: { paths?: MemoryPaths }): { description: 
         // default: list
         const files = listMemory(cwd, deps.paths);
         const msg = files.length
-          ? files.map((f) => `  ${f.name} (${f.size}B)`).join("\n")
+          ? files.map((f) => `  ${f.name} (${formatSize(f.size)})`).join("\n")
           : `(no memory for ${cwd} — run /mem import to bring in Claude Code memory)`;
         if (ctx.hasUI) ctx.ui.notify(msg, "info");
       } catch (err) {

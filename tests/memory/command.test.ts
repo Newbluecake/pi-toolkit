@@ -65,6 +65,10 @@ describe("/mem command (§7.6)", () => {
     await cmd.handler("list", ctx);
     expect(notifications[0]!.message).toContain("a.md");
     expect(notifications[0]!.message).toContain("5B");
+    // auto-scaling unit: a >1KiB file renders as kB, not raw bytes
+    writeFileSync(join(dir, "big.md"), "x".repeat(5626));
+    await cmd.handler("list", ctx);
+    expect(notifications[1]!.message).toContain("big.md (5.5kB)");
   });
 
   test("path prints the memory dir", async () => {

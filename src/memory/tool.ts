@@ -22,6 +22,7 @@ import type { MemorySettings } from "../config/settings.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "./paths.js";
 import { listMemory, writeMemoryFile } from "./store.js";
+import { formatSize } from "./render.js";
 
 export const MemoryToolParams = Type.Object({
   action: Type.Optional(Type.Union([Type.Literal("list"), Type.Literal("write"), Type.Literal("append")])),
@@ -84,7 +85,7 @@ export function createMemoryTool(deps: MemoryToolDeps): ToolDefinition {
           return text(`No memory for ${cwd} yet. Add *.md to ${memoryDirFor(cwd, deps.paths)}/ or run /mem import.`);
         }
         const out = files
-          .map((f) => `${f.name} (${f.size}B, ${new Date(f.mtimeMs).toISOString().slice(0, 10)})`)
+          .map((f) => `${f.name} (${formatSize(f.size)}, ${new Date(f.mtimeMs).toISOString().slice(0, 10)})`)
           .join("\n");
         return text(`Memory for ${cwd} (${toSlug(cwd)}):\n${out}`);
       }
@@ -116,9 +117,11 @@ export function createMemoryTool(deps: MemoryToolDeps): ToolDefinition {
       deps.onAfterWrite(cwd);
       // B1 user-visible signal: rpc/headless sessions (hasUI=false) stay silent.
       if (ctx?.hasUI) {
-        ctx.ui.notify(`memory ${action}: ${name} (+${result.bytesWritten}B → ${result.path})`, "info");
+        ctx.ui.notify(`memory ${action}: ${name} (+${formatSize(result.bytesWritten)} → ${result.path})`, "info");
       }
-      return text(`memory ${action}: ${name} (+${result.bytesWritten}B, total ${result.totalBytes}B → ${result.path})`);
+      return text(
+        `memory ${action}: ${name} (+${formatSize(result.bytesWritten)}, total ${formatSize(result.totalBytes)} → ${result.path})`,
+      );
     },
   };
 }

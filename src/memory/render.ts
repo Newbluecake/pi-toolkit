@@ -101,8 +101,12 @@ export function memoryFingerprint(cwd: string, paths?: MemoryPaths): string {
   return parts.sort().join("\n");
 }
 
-function fmtSize(size: number): string {
-  return size > 1024 ? `${(size / 1024).toFixed(1)}kB` : `${size}B`;
+/** Human-friendly size with auto-scaling unit: 100B / 2.0kB / 1.5MB.
+ *  Shared by the injection index, the memory tool and /mem listings. */
+export function formatSize(size: number): string {
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)}MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)}kB`;
+  return `${size}B`;
 }
 
 /** First `bytes` of a file as utf8 (pin detection reads heads only, §5.1.2).
@@ -144,7 +148,7 @@ export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: Mem
 
   const indexLines = files.slice(0, budget.indexMax).map((f) => {
     const mark = pinOf.get(f.path) ? "📌 " : "";
-    return `- ${mark}${f.name} (${fmtSize(f.size)})`;
+    return `- ${mark}${f.name} (${formatSize(f.size)})`;
   });
   const overflow = files.length > budget.indexMax ? `\n- … +${files.length - budget.indexMax} more` : "";
   const header = `## Memory (${slug}) — ${files.length} file(s)\nIndex:\n${indexLines.join("\n")}${overflow}`;
