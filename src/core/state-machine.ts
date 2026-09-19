@@ -72,11 +72,20 @@ function appendThinkingText(prev: string | undefined, delta: string): string {
  * Fold a text_delta/thinking_delta into a diag copy: answer text accumulates
  * into `text` (and clears the turn's thinking preview — the answer is the
  * fresher stream), thinking accumulates into the capped `thinkingText` tail.
+ *
+ * Rollback fix: `text` has no per-turn reset anywhere else, so on a
+ * thinking → answer transition the first text_delta must START a fresh
+ * segment instead of appending to the previous turn's stale tail. Otherwise
+ * the agent-tree `»` preview (lastTextLine(text) fallback the moment
+ * thinkingText clears) flashes the PREVIOUS turn's last line until the new
+ * answer grows a line of its own — a visible rollback. Resetting on segment
+ * start also self-limits text's size (no unbounded cross-turn growth), while
+ * mid-segment deltas (thinkingText already cleared) keep appending.
  */
 function streamPatch(diag: RunDiagnostics, e: { t: "text_delta" | "thinking_delta"; delta: string }): RunDiagnostics {
   const d = { ...diag };
   if (e.t === "text_delta") {
-    d.text = (diag.text ?? "") + e.delta;
+    d.text = diag.thinkingText === undefined ? (diag.text ?? "") + e.delta : e.delta;
     delete d.thinkingText;
   } else {
     d.thinkingText = appendThinkingText(diag.thinkingText, e.delta);

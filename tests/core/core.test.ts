@@ -2012,6 +2012,21 @@ describe("thinking stream (thinking_delta → diag.thinkingText)", () => {
     expect(s.diag.text).toBe("answer");
     expect(s.diag.thinkingText).toBeUndefined();
   });
+  it("starts a fresh text segment on thinking → answer transition (no `»` preview rollback)", () => {
+    let s = inModelTurn();
+    // turn 1: thinking, then a full two-line answer
+    s = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "t1 think" } }).state;
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "turn1 answer\nline2" } }).state;
+    // turn 2: fresh thinking, then the answer's first delta — it must NOT
+    // append to turn 1's stale tail (the tree preview would flash "line2")
+    s = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "t2 think" } }).state;
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "turn2" } }).state;
+    expect(s.diag.text).toBe("turn2");
+    expect(s.diag.thinkingText).toBeUndefined();
+    // mid-segment deltas (thinkingText already cleared) keep appending
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: " answer" } }).state;
+    expect(s.diag.text).toBe("turn2 answer");
+  });
   it("caps the thinking tail at THINKING_TEXT_CAP", () => {
     let s = inModelTurn();
     s = apply(s, {
