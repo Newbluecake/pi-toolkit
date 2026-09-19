@@ -232,6 +232,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "0 disables the deadline warn tier",
     description: "Fleet row turns warn when remaining time drops below this",
   }),
+  "reload.defer": bool("reload.defer", "Defer /reload until running subagents settle"),
   "cacheTtl.mode": choice(
     "cacheTtl.mode",
     ["auto", "on", "off"],

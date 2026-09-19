@@ -24,6 +24,7 @@ import { isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/typ
 import { describeJobStatus } from "../tools/bash-job-tool.js";
 import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
+import { countActiveRuns } from "../reload/defer.js";
 
 /** Live settings object + persistence port (see config/setting-specs.ts). */
 export type SettingsCommandDeps = SettingsStore;
@@ -46,6 +47,12 @@ export interface StatusCommandDeps {
   mention?: { entries(): readonly MentionAutocompleteEntry[] };
   /** `/agent settings` (+ `/agent budget` alias) — absent only in tests/minimal hosts. */
   settings?: SettingsCommandDeps;
+  /**
+   * Deferred /reload controller (src/reload/): `/agent reload` parks the
+   * reload while runs are active and the controller fires once they settle.
+   * Absent ⇒ the reload subcommand degrades to a hint to use built-in /reload.
+   */
+  reload?: { arm(activeCount: number): void; disarm(): void; readonly pending: boolean };
 }
 
 /**
@@ -58,7 +65,7 @@ export interface StatusCommandDeps {
 export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
-      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend; `/agent settings` opens an interactive settings editor (`settings list` / `set <key> <value>` / `reset <key>` stay available for scripts; budget.* applies to new runs immediately, the rest after /reload). Durations are configured in seconds. The live agent tree is pinned above the editor while runs are active.",
+      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend; `/agent settings` opens an interactive settings editor (`settings list` / `set <key> <value>` / `reset <key>` stay available for scripts; budget.* applies to new runs immediately, the rest after /reload). `/agent reload` reloads pi, deferred until running subagents settle (`reload now` forces, `reload cancel` cancels). Durations are configured in seconds. The live agent tree is pinned above the editor while runs are active.",
     getArgumentCompletions: (argumentPrefix: string) => {
       const settingsAction = argumentPrefix.trimStart().match(/^(settings|budget)\s+(set|reset)\s+(\S*)$/);
       if (settingsAction) {
@@ -76,6 +83,7 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
         { value: "costs", label: "costs", description: "Per-run cost breakdown" },
         { value: "settings", label: "settings", description: "Interactive settings editor (or set/reset/list)" },
         { value: "budget", label: "budget", description: "Alias: settings scoped to budget.*" },
+        { value: "reload", label: "reload", description: "Reload pi, deferred until subagents settle (now/cancel)" },
       ].filter((item) => item.value.startsWith(argumentPrefix.trim()));
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
@@ -91,6 +99,10 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
       }
       if (sub === "costs") {
         ctx.ui.notify(renderCosts(deps.query), "info");
+        return;
+      }
+      if (sub === "reload") {
+        await handleReload(deps, tokens[1], ctx);
         return;
       }
       if (sub === "settings" || sub === "budget") {
@@ -122,6 +134,86 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
       ctx.ui.notify(renderStatus(deps), "info");
     },
   };
+}
+
+/** Active subagent runs + active workflows (a non-empty workflow activity list also counts as busy). */
+function countBusy(deps: StatusCommandDeps): number {
+  const runs = countActiveRuns(deps.query.list());
+  const workflows = deps.workflow?.activity.list().length ?? 0;
+  return runs + workflows;
+}
+
+/** True when this pi build exposes ctx.reload (older builds do not — degrade to a manual-/reload hint). */
+function canReload(ctx: ExtensionCommandContext): boolean {
+  return typeof ctx.reload === "function";
+}
+
+/**
+ * `/agent reload [now|cancel|fire]` — deferred reload entry point. The editor
+ * wrapper rewrites exact `/reload` submissions to here; `fire` is the internal
+ * action the controller's followUp message sends once the fleet settles.
+ */
+async function handleReload(
+  deps: StatusCommandDeps,
+  action: string | undefined,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  const ctl = deps.reload;
+  if (!ctl) {
+    ctx.ui.notify("Deferred reload is not wired in this host; use pi's built-in /reload.", "warning");
+    return;
+  }
+  if (action === "now") {
+    ctl.disarm();
+    if (!canReload(ctx)) {
+      ctx.ui.notify("This pi build cannot reload programmatically — run /reload manually.", "warning");
+      return;
+    }
+    await ctx.reload();
+    return;
+  }
+  if (action === "cancel") {
+    const wasPending = ctl.pending;
+    ctl.disarm();
+    ctx.ui.notify(wasPending ? "Deferred reload cancelled." : "No deferred reload was pending.", "info");
+    return;
+  }
+  if (action === "fire") {
+    // Internal: the deferred fire re-counts rather than trusting the event
+    // count — a run spawned between settle and fire keeps the reload parked.
+    const busy = countBusy(deps);
+    if (busy > 0) {
+      ctl.arm(busy);
+      ctx.ui.notify(`${busy} run(s) still active — reload stays deferred.`, "info");
+      return;
+    }
+    ctl.disarm();
+    if (!canReload(ctx)) {
+      ctx.ui.notify("This pi build cannot reload programmatically — run /reload manually.", "warning");
+      return;
+    }
+    ctx.ui.notify("Subagents settled — reloading.", "info");
+    await ctx.reload();
+    return;
+  }
+  if (action !== undefined) {
+    ctx.ui.notify(`Unknown reload action "${action}". Usage: /agent reload [now|cancel]`, "warning");
+    return;
+  }
+  const busy = countBusy(deps);
+  if (busy > 0) {
+    ctl.arm(busy);
+    ctx.ui.notify(
+      `${busy} run(s) active — reload deferred until they settle. \`/agent reload now\` to force, \`/agent reload cancel\` to cancel.`,
+      "info",
+    );
+    return;
+  }
+  if (!canReload(ctx)) {
+    ctx.ui.notify("This pi build cannot reload programmatically — run /reload manually.", "warning");
+    return;
+  }
+  await ctx.reload();
 }
 
 function renderSettings(store: SettingsStore, budgetOnly: boolean): string {

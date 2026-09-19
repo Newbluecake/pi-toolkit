@@ -104,6 +104,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   entries, disk-cached under `<agent>/cache/session-nav/`). Post-guard, TUI-only.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/schedule/` — cron parser, scheduler, persisted schedule store.
+- `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): an editor wrapper rewrites exact
+  `/reload` submissions to `/agent reload`, which parks the reload while subagents/workflows are active and
+  fires it (via a followUp `/agent reload fire` message) once the fleet settles; `now` forces, `cancel`
+  cancels.
 - `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), text builders,
   appendEntry session store, `agent_settled` loop hook (until-cmd via `pi.exec`, verifier via
   `spawnAndWait` + schema, delivery/eval watchdogs), `/goal` command. See

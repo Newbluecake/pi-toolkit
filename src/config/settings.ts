@@ -173,6 +173,16 @@ export interface GoalSettings {
   deliveryWatchdogMs: number;
 }
 
+/**
+ * Deferred /reload (src/reload/): intercept exact `/reload` submissions while
+ * subagents are still running and fire the real reload once the fleet settles.
+ * Field-by-field tolerant parsing (parseReloadSettings), never throws.
+ */
+export interface ReloadSettings {
+  /** Gate for the editor interception only; `/agent reload` works regardless. Default true. */
+  defer: boolean;
+}
+
 export interface AgentSettings {
   concurrencyLimit: number;
   budget: DeadlineBudget;
@@ -227,6 +237,8 @@ export interface AgentSettings {
   sessionNav: EnabledGroup;
   /** Merged plugins: cwd-keyed project memory (injection + memory tool + /mem). Pre-guard, child sessions included. Default on. */
   memory: MemorySettings;
+  /** Deferred /reload while subagents are running. */
+  reload: ReloadSettings;
 }
 
 /** Simple on/off settings group shared by the merged plugins (hud / webSearch / todo). */
@@ -334,6 +346,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     maxFileBytes: 262_144,
     maxWriteBytes: 65_536,
   },
+  reload: { defer: true },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
@@ -507,6 +520,7 @@ export function loadSettings(source: unknown): AgentSettings {
     feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),
     sessionNav: parseEnabledGroup(value.sessionNav, DEFAULT_SETTINGS.sessionNav),
     memory: parseMemorySettings(value.memory),
+    reload: parseReloadSettings(value.reload),
   });
 }
 
@@ -604,6 +618,14 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     maxFileBytes,
     maxWriteBytes: Math.min(num(value.maxWriteBytes, defaults.maxWriteBytes, 256, 4 * 1024 * 1024), maxFileBytes),
   };
+}
+
+/** Parse the optional deferred-reload settings block (parseCacheTtlSettings 同款容错, never throws). */
+export function parseReloadSettings(input: unknown): ReloadSettings {
+  const defaults = DEFAULT_SETTINGS.reload;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const defer = (input as Record<string, unknown>).defer;
+  return { defer: typeof defer === "boolean" ? defer : defaults.defer };
 }
 
 /** Parse the optional timeout grace/extension settings block（parseCacheTtlSettings 同款容错，never throws）。 */

@@ -66,6 +66,8 @@ import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
 import wireFeishuNotify from "./feishu-notify/index.js";
 import { wireSessionNav } from "./session-nav/index.js";
+import { wireDeferredReload, type DeferredReloadDeps } from "./reload/index.js";
+import type { DeferredReloadController } from "./reload/defer.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
 import type { WorkflowActivityRegistry } from "./workflow/activity.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
@@ -367,6 +369,14 @@ export default function activate(pi: ExtensionAPI): void {
     "goal",
     createGoalCommand({ goal: () => holder.current?.goal, persist: (record) => persistGoalRecord(pi, record) }),
   );
+  // Deferred /reload (src/reload/): the controller itself is wired at the
+  // bottom of activate() — its session_start handler must run AFTER
+  // session-nav's so the editor wrapper layers on top of SessionNavEditor —
+  // but /agent needs it now, so the command gets a facade over this ref.
+  const reloadRef: { current?: DeferredReloadController } = {};
+  const activeSubagentRunCount: DeferredReloadDeps["activeRunCount"] = () =>
+    holder.current?.query.list().filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status))
+      .length ?? 0;
   pi.registerCommand(
     "agent",
     createStatusCommand({
@@ -388,6 +398,13 @@ export default function activate(pi: ExtensionAPI): void {
         current: settings,
         persist: (key, value) => persistSettingOverride(key, value),
         path: defaultSettingsPath(),
+      },
+      reload: {
+        arm: (n) => reloadRef.current?.arm(n),
+        disarm: () => reloadRef.current?.disarm(),
+        get pending() {
+          return reloadRef.current?.pending ?? false;
+        },
       },
     }),
   );
@@ -482,6 +499,11 @@ export default function activate(pi: ExtensionAPI): void {
   // Session navigation: main-session TUI only (custom editor, session picker).
   // Post-guard like the HUD; self-gates the editor install on ctx.mode.
   if (settings.sessionNav.enabled) wireSessionNav(pi);
+  // Deferred /reload: main-session only (post-guard). MUST be wired after
+  // wireSessionNav — pi dispatches session_start handlers in registration
+  // order, and this one's editor install reads getEditorComponent() to wrap
+  // whatever session-nav installed (registration order = wrapping order).
+  reloadRef.current = wireDeferredReload(pi, { settings, activeRunCount: activeSubagentRunCount });
 }
 
 /** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */
