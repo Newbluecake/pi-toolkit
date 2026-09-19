@@ -1,146 +1,66 @@
 # pi-toolkit
 
-**中文** | [English](README.md)
+[中文](README.md) | **English**
 
-A toolbox extension for [pi](https://github.com/earendil-works/pi) — one package that fills in pi's missing everyday infrastructure: the flagship **anti-hang subagent system** (`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`, a drop-in replacement for `@tintinweb/pi-subagents` core), a **HUD footer**, multi-provider **`web_search`**, **task tools** (TaskCreate & friends), interactive **`ask_user`**, bash auto-backgrounding, a cron scheduler, the message fabric, the `/goal` objective loop and more. Everything beyond the subagent core is settings-gated and can be toggled independently.
+A toolbox extension for [pi](https://github.com/earendil-works/pi): the flagship is a **zero-hang subagent system** (`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`), plus nine everyday-infrastructure modules you can toggle independently — project memory, a HUD footer, `web_search`, task tools, `ask_user`, Feishu notifications, bash auto-backgrounding, session navigation, and the `/goal` objective loop. One install entry, one settings gate.
 
-> Formerly `pi-subagent`: as ask-user / feishu-notify / pi-hud / web-search / pi-claude-todo were merged in, the repo was renamed to **pi-toolkit**. Runtime identifiers (the `~/.pi/agent/pi-subagent.json` settings file, the `[pi-subagent]` log prefix, session data keys and event channels) are **unchanged** — existing configuration and session history carry over losslessly.
+## Why pi-toolkit
 
-## Why
+1. **Zero-hang guarantee** — every subagent run is a pure state machine with per-phase deadlines: a 1Hz watchdog fires them, an escalation ladder (cancel → steer → abort → dispose) physically reclaims resources, and anything that still refuses to die is registered as an orphan, never forgotten. **Every run reaches a terminal state** — the failure modes a naive "spawn + await" wrapper cannot see (model API stalling mid-turn, tool calls that never return, sessions that refuse to exit) all have a defined death and a defined cleanup here.
+2. **Fully observable** — while runs are active, a live **agent tree** sits above your editor: phase, in-flight tool calls, model streaming tails, real-time cost. `/agent status` gives a per-run tool timeline.
+3. **Results always delivered** — completion notifications flow through a persistent, acknowledgeable pipeline (staged → delivered → consumed): a notification that can't enter context is retried with a 10-minute hard backstop, never silently dropped.
+4. **Foreground/background freedom** — a foreground `Agent` call auto-backgrounds after 10 minutes (the run keeps going); bash commands do the same (default threshold 290s, deliberately under the 5-minute prompt-cache TTL). Dispatch and walk away — completion notifications drive the next step.
+5. **A toolbox, not a monolith** — every module beyond the subagent core has its own switch (`hud.enabled`, `memory.enabled`, `webSearch.enabled`, …). Install one package, take what you need.
 
-Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model API stalls mid-turn, a tool call never returns, a session refuses to die on abort. pi-toolkit treats every run as a state machine with per-phase deadlines, a watchdog that fires them, and an escalation ladder that physically reclaims resources — while streaming all of it to a live **agent tree** above your editor.
+## Install
 
-## Features
+pi loads TypeScript source directly (via jiti) — no build step:
 
-- **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (strict `provider/id` or a fuzzy hint like `sonnet` / `kimi-k3`, resolved against pi's available models), `run_in_background`, `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_s` (seconds; an explicit timeout is a hard cap — no grace, no extension), and `schema` (structured, schema-validated output).
-- **`get_subagent_result`** — non-blocking poll by default; `wait: true` + `wait_ms` for bounded blocking.
-- **`steer_subagent`** — send a follow-up instruction into a running subagent.
-- **`abort_subagent`** — stop a running subagent, including one auto-backgrounded from a foreground call; terminal runs are handled idempotently.
-- **`extend_subagent_timeout`** — extend a running run's total deadline (capped by `budget.maxExtensions` and a hard ceiling at `budget.maxTotalFactor`× the total budget). Default-budget runs get a grace window at expiry (`budget.totalGraceS`) with a notification to the main session instead of an instant kill; only an unattended grace elapse terminates the run.
-- **`set_model`** — switch models mid-run (takes effect on the next LLM call, without interrupting the current turn): defaults to your own session (main session or the calling subagent itself), or targets a running subagent by run id / unique prefix / label; `model` accepts a strict `provider/id` or a fuzzy hint (same resolution as `Agent`), with an optional `thinking` level (unspecified = keep the current level, clamped by pi); the switch is written to the transcript and survives resume.
-- **Foreground auto-backgrounding** — after `foregroundAutoBackgroundS` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
-- **bash auto-backgrounding** — overrides pi's built-in `bash` tool: a command that outlives `bashJobs.autoBackgroundS` (default 290s = 4m50s — just under the 5-minute prompt-cache TTL, so the early return rarely costs a cache miss) returns early with a `job_id` while **the process keeps running** with its output captured to a log, and a completion notice arrives when it exits; manage it with `bash_job` (status / wait / kill / list) — and the log is a plain file you can read/tail/grep directly. POSIX only — see below.
-- **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
-- **Scheduled tasks** — cron / interval / once schedules that spawn subagent runs when due (see "Scheduled tasks" below).
-- **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
-- **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
-- **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown. Background usage is attached on the first terminal result read.
-- **Agent types** — `.md` definitions discovered from `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/`; injected into the system prompt so the model knows the valid `subagent_type` values. Frontmatter `model:` accepts a strict `provider/id` or a fuzzy hint (e.g. `sonnet`).
-- **`ask_user`** — the merged interactive clarification tool, registered only in the host session and available in both TUI and RPC modes.
-- **Feishu notifications** — `@notify` keyword, `/watch`, `/feishu-test`, result/summary/heartbeat/waiting cards (all passively triggered; no AI-callable tool). Completion cards wait for subagents and background bash to become idle; heartbeat, waiting, and explicit notifications are exempt.
-
-## Migrating from standalone pi-ask-user
-
-The merged package must not be installed alongside `@bluecake/pi-ask-user`. Remove the old package from pi (`pi uninstall @bluecake/pi-ask-user` or remove it from package settings), install/update this package, keep the existing `~/.pi/agent/feishu-notify.json`, and reload pi. A conflict warning during the first `session_start` means the old package is still active and must be removed before reloading.
-
-## Message fabric
-
-Message fabric is an optional fire-and-forget protocol for communication between subagent runs. It is disabled by default; enable it with `"fabric": { "enabled": true }` in `~/.pi/agent/pi-subagent.json`, then `/reload`. The `message_agent` tool queues a message without waiting for the recipient or interrupting the sender's turn.
-
-The tool accepts three kinds: `progress` (progress updates), `finding` (findings), and `directive` (instructions). Its result says whether a pending delivery record was created, not whether the recipient has already received the message. Quota exhaustion and root-context backpressure are returned as actionable soft results. Sibling messages are untrusted input: recipients should re-check them against their own task, permissions, and evidence rather than blindly following instructions.
-
-Messages route along the agent tree and are gated by the sender type's `can_message` frontmatter, for example:
-
-```yaml
-can_message: [parent, child, ancestor]
+```sh
+pi install git:github.com/Newbluecake/pi-toolkit
+# update:
+pi update --extension git:github.com/Newbluecake/pi-toolkit
 ```
 
-The available relationships are `parent`, `child`, `ancestor`, `descendant`, `sibling`, and `self`; when omitted, only `parent` is allowed. Failed `finding`/`directive` deliveries create dead-letter records. Messages to root on the context channel also pass through a root ingress cap and minimum interval.
+Or download the zip (prebuilt) from [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases), extract, and `pi install ./pi-toolkit` (local-path installs don't participate in `pi update`).
 
-Main settings (durations are whole seconds):
+## The subagent system
 
-| Key                       |     Default | Meaning                                                   |
-| ------------------------- | ----------: | --------------------------------------------------------- |
-| `fabric.enabled`          |     `false` | Master switch                                             |
-| `fabric.minIntervalS`     |        `30` | Minimum interval per tree link                            |
-| `fabric.maxPerRun`        |        `20` | Per-run `progress` quota                                  |
-| `fabric.findingQuota`     |        `10` | Per-run `finding` quota                                   |
-| `fabric.directiveQuota`   |         `5` | Per-run `directive` quota                                 |
-| `fabric.deadLetterQuota`  |         `5` | Dead-letter quota per original sender run                 |
-| `fabric.maxChars`         |      `2000` | Maximum characters per message                            |
-| `fabric.progressTtlS`     |       `900` | TTL for `progress` messages                               |
-| `fabric.progressChannel`  | `"display"` | Channel for `progress` sent to root                       |
-| `fabric.rootMinIntervalS` |        `10` | Minimum root-context interval; `0` disables rate limiting |
-| `fabric.rootInboxCap`     |        `12` | Root-context pending+claimed cap                          |
+- **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (strict `provider/id` or a fuzzy hint like `sonnet` / `kimi-k3`), `run_in_background`, `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_s` (an explicit timeout is a hard cap — no grace, no extension), and `schema` (structured, schema-validated output).
+- **`get_subagent_result`** — non-blocking poll by default; `wait: true` + `wait_ms` for bounded blocking.
+- **`steer_subagent`** — send a follow-up instruction into a running subagent.
+- **`abort_subagent`** — stop a running subagent (including auto-backgrounded ones); idempotent on terminal runs.
+- **`extend_subagent_timeout`** — extend a running run's total deadline (capped in count and by a hard ceiling). Default-budget runs enter a grace window at expiry with a notification to the main session; only an unattended grace elapse terminates the run.
+- **`set_model`** — switch models mid-run (takes effect on the next LLM call, without interrupting the current turn): defaults to your own session, or targets a running subagent by run id / unique prefix / label; optional `thinking` level; the switch is written to the transcript and survives resume.
+- **Agent types** — discovered from `.md` definitions in `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/` and injected into the system prompt; frontmatter `model:` accepts strict ids or fuzzy hints.
+- **`@mention` steering** — type `@<label> <message>` in the editor to steer a running subagent, or revive a finished one.
+- **Cost accounting** — every run's usage rolls into the session total; `/agent costs` for the breakdown.
 
-The design and invariants are documented in [`docs/dev/subagent-push/subagent-push-plan.md`](docs/dev/subagent-push/subagent-push-plan.md).
+### SubagentWorkflow
 
-## The agent tree
+Sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget, runaway detection, and a replayable journal. Off by default (`workflow.enabled`).
+
+### Agent tree
 
 ```
 ● 4 active Agents · $0.92
-  后端实现 surface 截断 #6b7201c9 general-purpose cloudrouter-response/gpt-5.6-sol 🔧工具 3m32s $0.91
+  后端实现 surface 截断 #6b7201c9 general-purpose 🔧工具 3m32s $0.91
   TaskUpdate→edit✗→read→edit×3 ▸edit src/core/quota-bucket.ts
   ↳ 并行检索候选实现 #c3d4e5f6 explore 🔧工具 48s
     bash ▸grep monthlyQuota
-  前端联调 #d4e5f607 · ♻重试2/3 1m15s
-  修订方案:月额度纳入调度 #81ab2a94 Plan droid-completion/kimi-k3 🧠思考 6s $0.0021
-  » 调度模块需要支持月额度,我倾向于在 quota-bucket 里加一个 monthly 窗口,然后
+  修订方案:月额度纳入调度 #81ab2a94 Plan kimi-k3 🧠思考 6s $0.0021
+  » 调度模块需要支持月额度,我倾向于在 quota-bucket 里加一个 monthly 窗口
 ✓ 单元测试补齐 #0718293a test completed 40s $0.11
 ```
 
-- Header: bullet colored by the worst highlight, active count, live spend, `+N more` overflow.
-- One main row per run: label, `#id`, type, `provider/id` model, human-friendly phase (`🧠思考` / `🔧工具` / `♻重试2/3` / `⏸排队` / `🗜压缩` / `⏹停止中`), elapsed, cost. Nested runs indent under their parent (`↳`); in-flight workflows render as `⚙` group headers.
-- A second **activity line** when the run is mid-tool or mid-thought: the recent tool trail (`bash×3→read`) with the in-flight `▸tool` + args preview highlighted, or a one-line `»` tail of the model's streaming text. Tool-call vs model-request state is always accurate, including parallel tool calls.
-- Highlights: `!` yellow = idle past half the idle budget (suspiciously quiet); `✗` red = stopping or past the total deadline. Terminal runs follow three stages: while a notification awaits context entry, the muted row remains with a task-prompt preview; after it enters context, the row fades after the short linger; if delivery cannot complete, a hard 10-minute fallback prevents it from remaining forever.
+- The header bullet takes the most severe highlight on the field, with the active count and live spend.
+- One main line per run: label, `#id`, type, model, a humanized phase (`🧠思考` / `🔧工具` / `♻重试2/3` / `⏸排队` / `🗜压缩` / `⏹停止中`), elapsed time, cost. Nested runs indent under their parent (`↳`); workflows render as `⚙` group headers.
+- While a run is in a tool call or thinking, an **activity line** follows: a recent tool trail plus the highlighted in-flight `▸tool`, or a one-line `»` tail of the model's streaming text. Parallel tool calls are tracked accurately.
+- Highlights: `!` yellow = idle past half the idle budget; `✗` red = stopping or past the total deadline. Terminal lines linger briefly, with a 10-minute hard backstop when the notification can't be delivered.
 
-## Commands
+### Scheduled tasks
 
-| Command                 | What it shows                                                                 |
-| ----------------------- | ----------------------------------------------------------------------------- |
-| `/agent status`         | Diagnostics for every non-terminal run: phase, last event, idle time, orphans |
-| `/agent status <runId>` | One run's full tool timeline                                                  |
-| `/agent costs`          | Per-run spend, cost-descending                                                |
-
-## bash auto-backgrounding
-
-When enabled (on by default, POSIX only) the extension overrides pi's built-in `bash` tool by name. Short commands are **byte-for-byte identical** to the built-in: the foreground path delegates to pi's own bash implementation, so output accumulation, truncation, the temp-file footer and `Command exited with code N` are produced by pi's code, not a lookalike. Only commands that outlive the threshold behave differently — the call returns early with a `job_id`, the process keeps running in its own process group, stdout/stderr are merged into a log file, and when it exits a `bash-job:notification` message is injected with the output tail (triggering a fresh turn). The command's own `timeout` parameter keeps its meaning: it still kills the process tree when it expires, background or not.
-
-The `bash` tool takes one extra parameter, `run_in_background: true` — background it immediately instead of waiting out the threshold.
-
-The `bash_job` tool manages those jobs (`job_id` accepts a unique prefix):
-
-| Action   | What it does                                                                                                          |
-| -------- | --------------------------------------------------------------------------------------------------------------------- |
-| `status` | State summary (running/terminal, elapsed, pid, log size) **plus the log tail** (last 20 lines / 2KB) and the log path |
-| `wait`   | Bounded block (default 30s, hard cap 120s); returns the current status on timeout                                     |
-| `kill`   | Terminate the whole process group (SIGTERM → grace → SIGKILL); idempotent, with pid-reuse guards                      |
-| `list`   | Known jobs (id · state · command preview · age); backgrounded jobs only                                               |
-
-**There is deliberately no `output` action.** The log is an ordinary file at
-`~/.pi/agent/bash-jobs/<job>.log`, and reading it with the `read` tool or with `tail`/`grep`/`awk` is strictly more
-capable than any parameter set a tool could offer (grep a large log instead of reading it whole). The tail in
-`status` is only a "what is it doing / how did it end" snapshot; anything full or targeted goes straight to the file.
-
-Settings (durations are whole seconds, like everywhere else):
-
-| Key                          | Default                         | Meaning                                                                                                            |
-| ---------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `bashJobs.autoBackgroundS`   | `290`                           | Background a foreground bash call after this; `0` turns the whole feature off (no override registered at all)      |
-| `bashJobs.maxLogBytes`       | `10485760`                      | Per-job log cap; once hit the log stops growing and is flagged truncated — **the process keeps running**           |
-| `bashJobs.maxBackgroundJobs` | `8`                             | Concurrent background jobs; when full the threshold keeps waiting in the foreground and an explicit request errors |
-| `bashJobs.retentionS`        | `86400`                         | How long terminal job records/logs are kept; expired files go in the root cleanup sweep (below); `<=0` disables it |
-| `bashJobs.shutdownPolicy`    | `"keep"`                        | Running jobs on a real `quit`: `keep` or `kill`. reload/new/resume/fork always keep them                           |
-| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`         | Job/log root, partitioned below by `<sessionId>` (**breaking**, JSON file only)                                    |
-| `bashJobs.shellPath`         | `$SHELL` (whitelisted) → `bash` | Shell used for job commands; `$SHELL` is honoured only when its basename ∈ {bash, zsh, sh} (**JSON file only**)    |
-
-Behaviour notes:
-
-- **Not overridden on win32**: no process-group semantics there, so the built-in `bash` is left alone and neither `bash` nor `bash_job` is registered.
-- **Same-name override conflicts**: in pi the first registration of a tool name wins. If another extension also overrides `bash` and registers first, this feature is simply inert (it never breaks the other one); to disable the override deliberately, set `bashJobs.autoBackgroundS` to `0`.
-- **Directory cleanup**: the sweep runs once at session start and then, at most **once per 10 minutes**, whenever a new bash job is created (**no timer is ever armed** — a session left open for days still cleans up). One sweep handles four things: expired terminal jobs (JSON + log); `.json` files that cannot be read at all (illegal name / corrupt JSON / failed schema check), aged by **file mtime** and deleted together with a same-named `.log`; orphan `.log` files with no `.json` beside them (same mtime rule, and never while that job is still tracked in memory); and `.tmp` debris from an interrupted atomic write (fixed 1-hour TTL). Safety boundary: **only the `.json` / `.log` / `.tmp` suffixes are ever touched** — anything else you put in that directory is left alone; a **non-terminal record is never pruned**; and whenever a file's mtime cannot be compared against the clock (e.g. it lies in the future), the file is kept. Every non-record deletion is WARNed.
-- **Logs and sensitive output**: job records and logs live in `~/.pi/agent/bash-jobs/<sessionId>/` (files mode 0600, directories mode 0700, same threat model as pi's session files). This is visibility isolation, not an OS security boundary: the same user can still read another session's directory. Secrets printed by a command **land on disk** until `retentionS` prunes them — redirect sensitive output.
-- **Self-contained logs**: when a job reaches a terminal state, one footer line is appended to its log —
-  `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s` (no exit code is invented for killed / timed-out /
-  exit-code-lost jobs). `tail -3 <log>` therefore answers "how did this end?" without a tool call. The line is written
-  exactly once, counts towards the log's byte total, and is appended even when the log already hit `maxLogBytes` — the
-  conclusion must not be swallowed by a capacity policy, so the file may end up slightly over the cap.
-- **Adoption across restarts**: still-running jobs are re-adopted by the next session and still get their completion notice; in-process reload/new/fork transfers the live handle, while cold starts adopt owner-dead orphans. A job whose pid ownership cannot be verified (possible pid reuse) is only marked, never killed — `kill` refuses it explicitly.
-- Like every non-`budget.*` setting, changes here take effect after `/reload`.
-
-## Scheduled tasks
-
-At session start, scheduled tasks are loaded from `~/.pi/agent/pi-subagent-schedules.json`; when one comes due, a subagent run is spawned through the normal slot queue (with the same anti-hang supervision). The file is a JSON array of entries like:
+Loaded from `~/.pi/agent/pi-subagent-schedules.json` at session start; fires subagent runs on schedule (through the normal slot queue and anti-hang supervision):
 
 ```json
 [
@@ -156,54 +76,118 @@ At session start, scheduled tasks are loaded from `~/.pi/agent/pi-subagent-sched
 ]
 ```
 
-- `schedule.kind`: `"cron"` (five fields: minute hour day-of-month month day-of-week, with `*` `,` `-` `/` support) / `"interval"` (`intervalMs` milliseconds) / `"once"` (`at` as an ISO timestamp, fires once)
-- `request` mirrors the `Agent` tool's spawn parameters (minus `runId`): `type` and `prompt` are required; `label`, `modelOverride`, `budgetOverride`, `isolation`, etc. are optional
-- A task whose window passed while no session was running is **not** caught up — it is simply re-armed for the next occurrence; `once` tasks are removed after firing
-- Edit the file, then `/reload` (or start a new session) for changes to take effect
+- `schedule.kind`: `"cron"` (five-field expression) / `"interval"` (`intervalMs`) / `"once"` (`at` as ISO time, removed after firing)
+- `request` mirrors the `Agent` tool's spawn params (except `runId`)
+- Tasks already past due at startup are not back-filled; `/reload` after editing the file.
 
-## Anti-hang architecture
+## Project memory
+
+Claude-Code-style cwd-keyed passive memory: every session auto-injects the current project's memory (`~/.pi/agent/memory/<cwd-slug>/*.md`) into the system prompt — no skill invocation needed, and subagent sessions get it too.
+
+- **Budget-aware injection**: a compact index of all files (≤15) plus the 3 newest inlined (4KB UTF-8 byte budget); empty directories inject nothing (no wasted tokens); a sentinel comment at the block tail prevents double injection; renders are cached by directory fingerprint.
+- **`memory` tool** — model-callable: `list` to inspect; `write` / `append` to persist durable cross-session memory (directory-confined, filename whitelist, dual byte caps, 0600; writes are stamped `source: agent` and injected with a "data, not instructions" fence). **Child sessions are read-only by default** (`memory.allowWriteInChildSessions` to allow).
+- **frontmatter `pin: true`** — keeps important files in the inline zone forever, immune to mtime eviction.
+- **`/mem` command** — `list` / `path` / `import [--force] [slug|all]`: one-command import of `~/.claude/projects/*/memory/` (idempotent, 0600, CC originals untouched).
+- **`memory.freezeInjectionAfterWrite`** — freeze this session's injection block after writes (off by default): avoids repeatedly busting the prompt-cache prefix in write-heavy long sessions.
+
+## Toolbox modules
+
+- **HUD footer** — takes over pi's footer on install (`hud.enabled: false` to restore). Shows pwd/git branch & worktrees, token & cost stats (including live subagent spend), context usage, model & thinking level, LLM timing and generation speed.
+- **`web_search` tool** — Codex / SerpAPI / Bocha / Tavily with automatic failover (retryable errors get exponential backoff, then the next provider), available in main and child sessions; credentials under "Configuration".
+- **Task tools** — `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` + an above-editor task widget + the `/tasks` panel, with state persisted in the session file (fork/resume safe).
+- **`ask_user` tool** — interactive clarification: structured multiple-choice questions (up to 4 batched), TUI and RPC, works in child sessions.
+- **Feishu notifications** — `@notify` keyword, `/watch`, `/feishu-test`, plus result/summary/heartbeat/waiting-for-input cards (passive triggers only). Completion cards wait for background subagents and background bash to drain first (`requireBackgroundIdle`; suppressed, not deferred, while busy).
+- **Session navigation** — `/resume` scans only the last 48 hours by default (Tab / `--all` for everything), skill-session title cleaning, subagent sessions tagged `[sub:type]`; `/clear` starts a new session; bare `exit` quits.
+- **`/goal` objective loop** — give an objective and a finish condition; each turn is evaluated and followed up until done or capped (see below).
+- **Cache TTL** — `/cache-ttl on|off|auto` switches Anthropic prompt-cache TTL handling live (`on` forces `ttl: "1h"`), `/cache-ttl save` persists; the status bar shows `⏱ cache: 1h|5m`.
+
+## Bash auto-backgrounding
+
+On by default (POSIX only): overrides pi's built-in `bash` under the same name — short commands behave **byte-for-byte identically** (the foreground path reuses pi's own implementation). Only commands crossing the threshold change behavior: the call returns early with a `job_id`, the **process keeps running** in its own process group, output keeps flowing to a log file, and completion arrives as a `bash-job:notification` (with the output tail, triggering a new turn). Pass `run_in_background: true` to background immediately.
+
+The `bash_job` tool manages jobs (`job_id` accepts a unique prefix): `status` (state + log tail + path) / `wait` (bounded, 30s default, 120s hard cap) / `kill` (whole process group, idempotent, pid-reuse safe) / `list`. **No `output` action** — the log is a plain file at `~/.pi/agent/bash-jobs/<sessionId>/<job>.log`; analyze it with `read`/`tail`/`grep` directly.
+
+| Key                          | Default                     | Meaning                                                                              |
+| ---------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
+| `bashJobs.autoBackgroundS`   | `290`                       | Foreground bash auto-backgrounds past this; `0` = feature off (built-in untouched)   |
+| `bashJobs.maxLogBytes`       | `10485760`                  | Per-job log cap; writing stops with a truncation mark, **the process keeps running** |
+| `bashJobs.maxBackgroundJobs` | `8`                         | Concurrent background job cap                                                        |
+| `bashJobs.retentionS`        | `86400`                     | Retention for terminal job JSON/logs; `<=0` disables cleanup                         |
+| `bashJobs.shutdownPolicy`    | `"keep"`                    | On real pi quit, keep or kill running jobs; reload/new/resume/fork always keep       |
+| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`     | Job state/log root (laid out per `<sessionId>/`)                                     |
+| `bashJobs.shellPath`         | `$SHELL`(whitelist)→ `bash` | Shell for commands (`$SHELL` only when basename ∈ {bash, zsh, sh})                   |
+
+Behavior notes:
+
+- **No override on win32** (no process-group semantics; built-in `bash` stays).
+- **Directory cleanup**: one scan at session start, then at most every 10 minutes when new jobs are created (no timers added). Only touches `.json` / `.log` / `.tmp`; non-terminal jobs are never deleted.
+- **Sensitive output lands on disk** (0600/0700, same threat model as session files) until `retentionS` expiry — redirect secrets away.
+- **Self-contained logs**: when a process reaches a terminal state, a conclusion line is appended (e.g. `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s`) — `tail -3` tells you the ending; appended even past `maxLogBytes`.
+- **Adoption after restart/reload**: still-running jobs are re-adopted in the next session and keep notifying; jobs whose pid ownership can't be confirmed are marked, never killed.
+
+## /goal — objective-driven loop
+
+```
+/goal fix issue #42 with tests --until-cmd "npm test" --max-turns 15
+/goal finish the orders-module refactor --until "npm run build passes and the old api dir is gone" --budget-tokens 2000000
+/goal                  # status
+/goal pause | resume | clear
+```
+
+- **Two composable finish judges** (AND semantics): `--until-cmd` runs a deterministic command each turn (exit 0 = pass, zero model cost, short-circuits first); `--until "<natural-language condition>"` is evaluated by an independent verifier subagent (default `claude-sonnet-5`, isolated from the working model, read-only evidence + schema-validated verdict); its gap analysis feeds the next turn.
+- **Braking system**: turns (default 20), token/cost budgets, wall-clock (default 120 minutes). Hitting a cap injects a wrap-up instruction so the agent summarizes progress and blockers — never a silent stop.
+- **E-stop**: Ctrl+C auto-pauses the goal (no follow-up), `/goal resume` continues.
+- **Persistence**: the goal lives in the session file; after a crash/`/reload` it is restored **as paused** (never auto-resumed).
+- The status bar shows `🎯 goal 3/20`; while a goal runs, the model is barred from `ask_user`.
+
+## Message fabric
+
+An optional fire-and-forget messaging protocol between subagents (`"fabric": { "enabled": true }` + `/reload`). `message_agent` supports three kinds: `progress`, `finding`, `directive`; the return value means the message entered the delivery queue, not that the target received it. Messages route along agent-tree edges, gated by the sender type's `can_message` frontmatter (`parent`/`child`/`ancestor`/`descendant`/`sibling`/`self`, default `parent` only). Sibling messages are untrusted input — receivers should re-verify them as external advice. Full settings (quotas, TTLs, dead letters, root backpressure) in [`docs/dev/subagent-push/subagent-push-plan.md`](docs/dev/subagent-push/subagent-push-plan.md).
+
+## The anti-hang architecture
 
 Every run is a pure state machine (`src/core/state-machine.ts`) driven by session events:
 
 ```
 queue_wait → resolve_config → session_create → extension_bind
   → prompt_dispatch → model_turn ⇄ tool_exec (⇄ retry_backoff, compaction)
-  → settled        (timeout/stop: → abort_grace → reap → settled)
+  → settled        (timeout/stop:→ abort_grace → reap → settled)
 ```
 
 1. **Signal**: every session event (text delta, tool start/end/update, retry, compaction) refreshes `lastEventAt`. Idle = `now - lastEventAt` — a streaming model or a heartbeating tool is never "stuck".
-2. **Deadlines**: each phase arms a timer (`dueAtFor`) — startup 30s, first event 120s, model turn idle 240s, single tool 600s, compaction 300s, total 30min (all configurable). `EventWatchdog` ticks 1Hz and dispatches `deadline_fired`.
-3. **Escalation**: timeout in a running phase → `cancel_signal` + `soft_steer` ("wrap up now", the agent gets to finish gracefully) → 10s abort grace → forced abort. If that fails, `EscalatingReaper` climbs L0 cancel → L1 steer → L2 requestAbort → L3 dispose (kill process handles) → anything unkillable is registered as an **orphan** instead of being forgotten.
+2. **Deadlines**: each phase carries its own timer — startup 30s, first event 120s, model-turn idle 240s, single tool 600s, compaction 300s, total 30min (all configurable). The `EventWatchdog` ticks at 1Hz and dispatches `deadline_fired`.
+3. **Escalation**: a running phase timing out → `cancel_signal` + `soft_steer` ("wrap up now" — a chance to finish gracefully) → 10s abort grace → forced abort. If that still fails, the `EscalatingReaper` climbs L0 cancel → L1 steer → L2 requestAbort → L3 dispose (kill the process handle) → anything unkillable is registered as an **orphan**, never forgotten.
 
-Retries get their own backoff phase and don't trip the idle timer; parallel tool calls keep the run in `tool_exec` until the _last_ sibling settles.
-
-## Cache TTL
-
-`/cache-ttl on|off|auto` changes Anthropic prompt-cache handling immediately for the current process only. `on` forces `ttl: "1h"`, `off` removes explicit TTL so the provider default (currently 5 minutes) applies, and `auto` leaves the request unchanged. Run `/cache-ttl save` to persist the current mode in `~/.pi/agent/pi-subagent.json` as `cacheTtl.mode`; a failed save leaves the unsaved marker in place. The status bar shows `⏱ cache: 1h` or `⏱ cache: 5m`, with `*` for unsaved changes.
-
-`/agent settings set cacheTtl.mode on|off|auto` edits the persistent settings value and follows the normal `/reload` behavior; it is distinct from the session-level `/cache-ttl` switch. This feature is registered only in the main session, not child agents. Persistence is explicit via `/cache-ttl save`; no keyboard shortcut is used.
+Retries get their own backoff phase so they never trip the idle timer; parallel tool calls keep the run in `tool_exec` until the **last** sibling finishes.
 
 ## Configuration
 
-User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, never throws).
+User settings: `~/.pi/agent/pi-subagent.json` (the filename keeps its historical name; a missing or malformed file falls back to defaults, never throws).
 
-`/agent settings` opens an **interactive settings editor** (overlay: ↑↓ to move, Enter to edit/toggle, Space to flip booleans, `r` to reset to the default, Esc to close; every accepted change is persisted immediately). The text forms stay available for scripting: `/agent settings list` / `set <key> <value>` / `reset <key>`, plus `/agent budget` as a `budget.*`-scoped alias.
+`/agent settings` opens an **interactive settings editor** (↑↓ to select, Enter to edit, Space to toggle booleans, `r` to reset, Esc to close; changes persist immediately). For scripts: `/agent settings list` / `set <key> <value>` / `reset <key>`; `/agent budget` is an alias scoped to `budget.*`.
 
-**Every duration is configured in whole seconds** (keys end in `S`). Legacy millisecond keys (`*Ms`) are migrated on first load: values divisible by 1000 are converted, written back and WARNed about; anything else is dropped in favour of the default (the loader never throws).
+**All time fields are integer seconds** (keys end in `S`); legacy millisecond keys (`*Ms`) migrate automatically on first load.
 
 ```jsonc
 {
   "concurrencyLimit": 6,
   "fleetWidget": true, // the agent tree above the editor
-  "fleetTerminalLingerS": 5, // terminal-row linger after context entry
-  "fleetAwaitNotificationS": 600, // hard fallback while notification awaits context entry
-  "maxNestedDepth": 2, // subagent spawning subagents
-  "foregroundAutoBackgroundS": 600, // foreground auto-background threshold; 0 disables
-  "resultMaxChars": 8000, // result text cap; 0 means unlimited, live-effective
+  "maxNestedDepth": 2, // depth cap for subagents spawning subagents
+  "foregroundAutoBackgroundS": 600, // foreground Agent auto-background; 0 = off
+  "resultMaxChars": 8000, // result text cap; 0 = unlimited, live
   "worktree": { "enabled": false },
+  "memory": { "enabled": true }, // project memory (injection + memory tool + /mem)
+  "hud": { "enabled": true }, // HUD footer; false restores pi's built-in footer
+  "webSearch": { "enabled": true }, // web_search tool
+  "todo": { "enabled": true }, // Task* tools + /tasks
+  "askUser": { "enabled": true }, // ask_user interactive questions
+  "feishuNotify": { "enabled": true }, // Feishu cards (main session only)
+  "sessionNav": { "enabled": true }, // session navigation enhancements
   "workflow": { "enabled": false },
+  "goal": { "enabled": true }, // /goal (sub-keys: maxTurns/maxMinutes/budget*/verifier*…)
   "budget": {
     "idleS": 240, // model-turn silence before timeout
+    "modelTurnS": 900, // hard cap on a single model turn
     "toolS": 600, // single tool call cap
     "totalS": 1800, // whole-run cap
     // … queueWaitS, startupS, bindS, firstEventS, compactionS,
@@ -212,36 +196,51 @@ User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, n
 }
 ```
 
-## Installation
+**`web_search` credentials live elsewhere**: environment variables, or `~/.config/pi/web-search.env` (0600 recommended): `CODEX_SEARCH_API_KEY` + `CODEX_SEARCH_BASE_URL` (optional `CODEX_SEARCH_MODEL`, `CODEX_SEARCH_TLS_INSECURE`), `SERPAPI_API_KEY`, `BOCHA_API_KEY`, `TAVILY_API_KEY` — at least one provider; `PI_WEB_SEARCH_ENV_FILE` overrides the path.
 
-pi loads TypeScript source directly (via jiti) — no build step required:
+## Commands
 
-```sh
-pi install git:github.com/Newbluecake/pi-toolkit
-# Update later with:
-pi update --extension git:github.com/Newbluecake/pi-toolkit
-```
+| Command                 | What it does                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `/agent status`         | Diagnostics for all non-terminal runs: phase, last event, idle time, orphans   |
+| `/agent status <runId>` | Full tool timeline of one run                                                  |
+| `/agent costs`          | Per-run cost breakdown, most expensive first                                   |
+| `/agent settings`       | Interactive settings editor                                                    |
+| `/mem`                  | Project memory: `list` / `path` / `import [--force] [slug\|all]`               |
+| `/tasks`                | Task list panel (`/tasks clear` to wipe)                                       |
+| `/goal`                 | Objective loop (status / pause / resume / clear)                               |
+| `/watch`                | Watch this session; notify Feishu on every task end                            |
+| `/pi-hud-refresh`       | git fetch and refresh the HUD footer                                           |
+| `/cache-ttl`            | Prompt-cache TTL mode (on/off/auto/save)                                       |
+| `/resume-recent`        | Resume a session from the last 48h (`--all` for everything; bare `resume` too) |
+| `/clear`                | New session (bare `clear` works too)                                           |
 
-Alternatively download the zip from [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases) (prebuilt `dist/` included), unzip, and `pi install ./pi-toolkit` (local-path install; not covered by `pi update`).
+## Migrating from standalone plugins
+
+These standalone plugins have been merged into this package one by one. Migration = **remove the old package + upgrade this one + `/reload`**:
+
+- `@getpipher/armory-memory` → just `pi remove` it; memory data (`~/.pi/agent/memory/**`) keeps working untouched.
+- `@bluecake/pi-ask-user` → `pi uninstall` it; the Feishu config `~/.pi/agent/feishu-notify.json` is preserved.
+- Loose extensions like pi-hud / web-search / pi-claude-todo / session-nav → delete the corresponding files/dirs under `~/.pi/agent/extensions/`.
+
+**Leftover detection**: pi suffixes duplicate command names — seeing `/mem:1` `/mem:2` or `/tasks:1` `/tasks:2` while the **bare command disappears** means an old plugin is still loaded; duplicate tools are first-wins silent shadowing (check the tool description for the new capabilities to tell which one won).
 
 ## Development
 
 ```sh
 npm install
 npm run build        # tsc → dist/
-npm test             # vitest: 1500+ tests — state-machine transition matrix,
-                     # seeded property invariants, widget rendering, …
+npm test             # vitest: 2600+ tests — state-machine transition
+                     # matrix, seeded property invariants, rendering…
 npm run typecheck
 npm run format
 ```
 
-Versioned pre-commit hook (prettier on staged files):
+Versioned pre-commit hook (prettier on staged files): `git config core.hooksPath .githooks`
 
-```sh
-git config core.hooksPath .githooks
-```
+Layout: `core/` pure state machine + deadlines (no I/O) · `runtime/` watchdog, session driver, reaper · `service/` spawn/query/registry · `tools/` LLM-facing tool surface · `ui/` agent tree + settings editor · `workflow/` sandboxed orchestrator · `memory/` project memory · `fabric/` message fabric · `goal/` objective loop · `bash/` bash auto-background · `delivery/` notification pipeline · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|cache-ttl/` toolbox modules · `adapters/` pi-facing glue.
 
-Layout: `core/` pure state machine + deadlines (no I/O) · `runtime/` watchdog, session driver, reaper · `service/` spawn/query/registry · `tools/` the eight LLM-facing tools · `ui/` agent-tree view-model + widget (pure, unit-tested) · `workflow/` sandboxed orchestrator · `adapters/` pi-facing glue.
+Node.js ≥ 22 (uses `fs.globSync`).
 
 ## License
 
