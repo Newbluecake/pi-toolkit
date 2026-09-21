@@ -205,3 +205,56 @@ describe("hud lifecycle (S3/S4)", () => {
     await fire(hooks, "session_shutdown", ctx);
   });
 });
+
+describe("hud auto-fetch (hud.autoFetchMinutes)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** exec mock 调用中参数含 "fetch" 的次数。 */
+  const fetchCallCount = (pi: ExtensionAPI): number =>
+    vi.mocked(pi.exec).mock.calls.filter(([, args]) => (args as string[]).includes("fetch")).length;
+
+  it("fetches once on session start, then again only after the configured interval", async () => {
+    const bus = makeBus();
+    const { pi, hooks } = makePi(bus);
+    wireHud(pi, { autoFetchMinutes: 5 });
+    const ctx = makeCtx("tui");
+    await fire(hooks, "session_start", ctx); // 首个 refresh 即补一次 fetch（lastAutoFetchAt=0）
+    expect(fetchCallCount(pi)).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(25_000); // 5 个 refresh tick，间隔内不再 fetch
+    expect(fetchCallCount(pi)).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000); // 越过间隔 → 再 fetch 一次
+    expect(fetchCallCount(pi)).toBe(2);
+    await fire(hooks, "session_shutdown", ctx);
+  });
+
+  it("never auto-fetches when autoFetchMinutes is omitted (0 = off)", async () => {
+    const bus = makeBus();
+    const { pi, hooks } = makePi(bus);
+    wireHud(pi);
+    const ctx = makeCtx("tui");
+    await fire(hooks, "session_start", ctx);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchCallCount(pi)).toBe(0);
+    await fire(hooks, "session_shutdown", ctx);
+  });
+
+  it("backs off to the next interval after a fetch failure (no 5s hammering while offline)", async () => {
+    const bus = makeBus();
+    const { pi, hooks } = makePi(bus);
+    vi.mocked(pi.exec).mockRejectedValueOnce(new Error("spawn git failed"));
+    wireHud(pi, { autoFetchMinutes: 5 });
+    const ctx = makeCtx("tui");
+    await fire(hooks, "session_start", ctx); // fetch 抛错被静默吞掉，时间戳照记
+    expect(fetchCallCount(pi)).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000); // 退避：周期内不重试
+    expect(fetchCallCount(pi)).toBe(1);
+    await fire(hooks, "session_shutdown", ctx);
+  });
+});

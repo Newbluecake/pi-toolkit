@@ -83,7 +83,9 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
   frontmatter (default: parent only).
 - `src/hud/` — merged pi-hud: full footer takeover (git/worktrees, token & cost stats incl.
-  live subagent cost, LLM timing/speed) + status key `pi-hud` + `/pi-hud-refresh`. State lives
+  live subagent cost, LLM timing/speed) + status key `pi-hud` + `/pi-hud-refresh` + settings-gated
+  periodic `git fetch` (`hud.autoFetchMinutes`, default 5, 0 = off — the ↑/↓ counts compare against
+  the local remote-tracking ref, so without fetch they never see remote commits pushed elsewhere). State lives
   in a per-session `HudSession` (single `live` flag, all timers unref'd, all `pi.events`
   subscriptions unsubscribed on session_shutdown — the bus survives /reload).
 - `src/web-search/` — merged web_search tool: Codex/SerpAPI/Bocha/Tavily failover with retry

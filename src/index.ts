@@ -491,7 +491,7 @@ export default function activate(pi: ExtensionAPI): void {
   // Merged HUD (plugin-merge): main-session TUI only — wireHud self-gates on
   // ctx.mode === "tui" (single HudSession.live flag) and cleans up its event
   // bus subscriptions on session_shutdown.
-  if (settings.hud.enabled) wireHud(pi);
+  if (settings.hud.enabled) wireHud(pi, { autoFetchMinutes: settings.hud.autoFetchMinutes });
   // Feishu notifications: main-session singleton (its own host guard stays as
   // defense-in-depth, now strictly redundant with the outer one). Post-guard
   // so child sessions never even load the card machinery.

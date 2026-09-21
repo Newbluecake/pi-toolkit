@@ -43,6 +43,16 @@ import {
 const STATUS_ID = "pi-hud";
 const REFRESH_INTERVAL_MS = 5_000;
 const LLM_TIMER_INTERVAL_MS = 1_000;
+const AUTO_FETCH_TIMEOUT_MS = 30_000;
+
+export interface HudOptions {
+  /**
+   * 周期 `git fetch --quiet --prune` 的间隔（分钟，settings `hud.autoFetchMinutes`）。
+   * ↑/↓ 对比的是本地 remote-tracking ref，不 fetch 就永远看不到别处推进的远程
+   * 提交；0 = 关闭（只保留手动 /pi-hud-refresh）。
+   */
+  autoFetchMinutes?: number;
+}
 
 export interface HudSession {
   /** session_start 判定一次：ctx.mode === "tui"。所有 handler 的唯一门（S3）。 */
@@ -59,6 +69,8 @@ export interface HudSession {
   refreshing: boolean;
   gitState: GitState | undefined;
   worktrees: WorktreeInfo[] | undefined;
+  /** 上次自动 fetch 的 Date.now() 时间戳；0 = 尚未 fetch（首个 refresh 即补一次）。 */
+  lastAutoFetchAt: number;
   userInputs: number;
   llmRequests: number;
   totalToolCalls: number;
@@ -94,6 +106,7 @@ function createHudSession(ctx: ExtensionContext): HudSession {
     refreshing: false,
     gitState: undefined,
     worktrees: undefined,
+    lastAutoFetchAt: 0,
     userInputs: 0,
     llmRequests: 0,
     totalToolCalls: 0,
@@ -109,7 +122,8 @@ function createHudSession(ctx: ExtensionContext): HudSession {
   };
 }
 
-export function wireHud(pi: ExtensionAPI): void {
+export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
+  const autoFetchMs = Math.max(0, (options.autoFetchMinutes ?? 0) * 60_000);
   let session: HudSession | undefined;
   // S4：pi.events 退订收集。事件总线跨 /reload 存活，不收集就每次 reload 泄漏一套。
   const busUnsubscribers: Array<() => void> = [];
@@ -145,12 +159,31 @@ export function wireHud(pi: ExtensionAPI): void {
     s.footerRequestRender?.();
   }
 
+  /**
+   * 周期 git fetch：HUD 的 ↑/↓ 来自本地 remote-tracking ref（branch.ab），只有
+   * fetch/push/pull 会推进它；不周期 fetch，别处推到远程的提交永远不会体现在
+   * 计数上。成败都记时间戳——失败（离线/无凭据）退避到下个周期，而不是每 5s 猛打。
+   */
+  async function maybeAutoFetch(s: HudSession, cwd: string): Promise<void> {
+    if (autoFetchMs <= 0) return;
+    const now = Date.now();
+    if (now - s.lastAutoFetchAt < autoFetchMs) return;
+    s.lastAutoFetchAt = now;
+    try {
+      await exec("git", ["-C", cwd, "fetch", "--quiet", "--prune"], { timeout: AUTO_FETCH_TIMEOUT_MS });
+    } catch {
+      /* exec 自身 reject（spawn 失败等）：静默，HUD 继续用本地缓存的 remote ref */
+    }
+  }
+
   async function refresh(s: HudSession, ctx: ExtensionContext): Promise<void> {
     if (s.refreshing || !s.active || !s.live) return;
     s.refreshing = true;
     // cwd 在 await 前快照：await 期间会话可能被替换，之后读 ctx.cwd 会抛。
     const cwd = ctx.cwd;
     try {
+      await maybeAutoFetch(s, cwd);
+      if (!s.active) return;
       const state = await readRepoState(exec, cwd);
       if (!s.active) return;
       const trees = state ? await readWorktrees(exec, cwd) : undefined;
@@ -459,11 +492,13 @@ export function wireHud(pi: ExtensionAPI): void {
       ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("dim", "git fetching…"));
       const result = await exec("git", ["fetch", "--quiet", "--prune"], {
         cwd: ctx.cwd,
-        timeout: 30_000,
+        timeout: AUTO_FETCH_TIMEOUT_MS,
       });
       if (result.code !== 0) {
         ctx.ui.notify(result.stderr.trim() || "git fetch failed", "error");
       }
+      // 手动 fetch 后重记自动 fetch 时间戳，避免紧跟着又来一次冗余 fetch。
+      s.lastAutoFetchAt = Date.now();
       await refresh(s, ctx);
     },
   });

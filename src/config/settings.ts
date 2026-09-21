@@ -223,8 +223,8 @@ export interface AgentSettings {
   cacheTtl: CacheTtlSettings;
   /** /goal 目标驱动持续运行（goal-plan v4）。 */
   goal: GoalSettings;
-  /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `false` leaves pi's built-in footer untouched. */
-  hud: EnabledGroup;
+  /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `enabled:false` leaves pi's built-in footer untouched. */
+  hud: HudSettings;
   /** Merged plugins: web_search tool (Codex/SerpAPI/Bocha/Tavily failover). Default on. */
   webSearch: EnabledGroup;
   /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasks + aboveEditor widget. Default on. */
@@ -241,9 +241,18 @@ export interface AgentSettings {
   reload: ReloadSettings;
 }
 
-/** Simple on/off settings group shared by the merged plugins (hud / webSearch / todo). */
+/** Simple on/off settings group shared by the merged plugins (webSearch / todo). */
 export interface EnabledGroup {
   enabled: boolean;
+}
+
+/**
+ * HUD settings group. `autoFetchMinutes`: HUD 周期 `git fetch --quiet --prune`
+ * 的间隔（分钟）——↑/↓ 计数对比的是本地 remote-tracking ref，不 fetch 就永远
+ * 看不到别处推进的远程提交；0 = 关闭（只保留手动 /pi-hud-refresh）。
+ */
+export interface HudSettings extends EnabledGroup {
+  autoFetchMinutes: number;
 }
 
 export interface FabricSettings {
@@ -329,7 +338,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     untilCmdTimeoutMs: 300_000,
     deliveryWatchdogMs: 30_000,
   },
-  hud: { enabled: true },
+  hud: { enabled: true, autoFetchMinutes: 5 },
   webSearch: { enabled: true },
   todo: { enabled: true },
   askUser: { enabled: true },
@@ -513,7 +522,7 @@ export function loadSettings(source: unknown): AgentSettings {
     cacheTtl: parseCacheTtlSettings(value.cacheTtl),
     extend: parseExtendSettings(value.extend),
     goal: parseGoalSettings(value.goal),
-    hud: parseEnabledGroup(value.hud, DEFAULT_SETTINGS.hud),
+    hud: parseHudSettings(value.hud),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
     todo: parseEnabledGroup(value.todo, DEFAULT_SETTINGS.todo),
     askUser: parseEnabledGroup(value.askUser, DEFAULT_SETTINGS.askUser),
@@ -590,6 +599,19 @@ function parseEnabledGroup(input: unknown, defaults: EnabledGroup): EnabledGroup
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const enabled = (input as Record<string, unknown>).enabled;
   return { enabled: typeof enabled === "boolean" ? enabled : defaults.enabled };
+}
+
+/** HUD 设置块解析：enabled 复用 EnabledGroup 语义，autoFetchMinutes 须 finite 且 ≥ 0；逐字段回落默认，never throws。 */
+function parseHudSettings(input: unknown): HudSettings {
+  const defaults = DEFAULT_SETTINGS.hud;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const record = input as Record<string, unknown>;
+  const minutes = record.autoFetchMinutes;
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
+    autoFetchMinutes:
+      typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 0 ? minutes : defaults.autoFetchMinutes,
+  };
 }
 
 /**
