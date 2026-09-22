@@ -22,6 +22,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { basename, join } from "node:path";
 import {
   type BuildCardOverrides,
@@ -40,6 +41,20 @@ import {
 } from "./core.js";
 import { getGitBranch } from "./git.js";
 import { readBackgroundStatus } from "../service/background-status.js";
+
+/**
+ * 本扩展所在包的根目录（<root>/src/feishu-notify 或 <root>/dist/feishu-notify → <root>/）。
+ * 冲突检测据此识别"本包自己注册的 ask_user/feishu_notify 工具"，
+ * 不能用硬编码路径片段（如 /pi-subagent/）：包改名 pi-subagent → pi-toolkit 后
+ * 安装路径不再含旧名，会把合并版自己的工具误判为旧版冲突。
+ */
+function ownPackageRoot(): string {
+  try {
+    return fileURLToPath(new URL("../..", import.meta.url));
+  } catch {
+    return "";
+  }
+}
 
 const CONFIG_DIR = join(homedir(), ".pi", "agent");
 const LOG_PATH = join(CONFIG_DIR, "feishu-notify.log");
@@ -417,13 +432,23 @@ export default function (pi: ExtensionAPI) {
       typeof (pi as ExtensionAPI & { getAllTools?: () => unknown[] }).getAllTools === "function"
         ? (pi as ExtensionAPI & { getAllTools: () => unknown[] }).getAllTools()
         : [];
-    const ownPath = "/pi-subagent/";
+    const ownRoot = ownPackageRoot();
     conflictInert = tools.some((tool) => {
       if (!tool || typeof tool !== "object") return false;
       const info = (tool as { sourceInfo?: unknown }).sourceInfo;
-      const source = typeof info === "string" ? info : JSON.stringify(info ?? "");
+      const toolPath =
+        typeof info === "string"
+          ? info
+          : typeof (info as { path?: unknown } | null | undefined)?.path === "string"
+            ? (info as { path: string }).path
+            : JSON.stringify(info ?? "");
       const name = (tool as { name?: unknown }).name;
-      return (name === "feishu_notify" || name === "ask_user") && source.length > 0 && !source.includes(ownPath);
+      if (name !== "feishu_notify" && name !== "ask_user") return false;
+      if (toolPath.length === 0) return false;
+      // 来源路径在本包根目录内 → 合并版自己注册的工具，不算冲突；
+      // 无法确定本包根目录时 fail-open（通知功能不因自检失败而自我禁用）。
+      if (ownRoot.length === 0 || toolPath.startsWith(ownRoot)) return false;
+      return true;
     });
     if (conflictInert) {
       log("旧 pi-ask-user/feishu-notify detected; notifications disabled");

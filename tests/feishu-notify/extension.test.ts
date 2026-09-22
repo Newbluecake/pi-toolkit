@@ -1,6 +1,7 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -271,10 +272,54 @@ describe("background gating", () => {
     const fake = createFakePi([oldTool]);
     releaseBackgroundStatus = publishBackgroundStatus(() => backgroundStatus);
     extensionModule.default(fake.pi);
+    activeHarness = { emit: fake.emit }; // 让 afterEach 发 session_shutdown 释放 host claim，避免泄漏给后续测试
     const ctx = makeCtx();
     await fake.emit("session_start", {}, ctx);
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("卸载旧包"), "warning");
     // 冲突惰性：即使被动触发（@notify + 任务结束）也不发送任何通知
+    await fake.emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await fake.emit("agent_start", {}, ctx);
+    await fake.emit("agent_settled", {}, ctx);
+    expect(fetchState.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not warn when ask_user/feishu_notify come from this package (merged edition)", async () => {
+    const { fetchMock } = installFetchMock();
+    // 模拟 pi 真实的 sourceInfo 结构（对象），路径指向本包根目录内的入口
+    const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const ownAskUser = {
+      name: "ask_user",
+      sourceInfo: { path: join(repoRoot, "index.ts"), source: "local", scope: "user", origin: "top-level" },
+    };
+    const fake = createFakePi([ownAskUser]);
+    releaseBackgroundStatus = publishBackgroundStatus(() => backgroundStatus);
+    extensionModule.default(fake.pi);
+    activeHarness = { emit: fake.emit };
+    const ctx = makeCtx();
+    await fake.emit("session_start", {}, ctx);
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("卸载旧包"), "warning");
+    // 未误判冲突：@notify + 任务结束应正常发送通知
+    await fake.emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await fake.emit("agent_start", {}, ctx);
+    await fake.emit("agent_settled", {}, ctx);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("still warns when an external old tool coexists with this package's own tools", async () => {
+    const fetchState = installFetchMock();
+    const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const ownTool = {
+      name: "ask_user",
+      sourceInfo: { path: join(repoRoot, "index.ts"), source: "local", scope: "user", origin: "top-level" },
+    };
+    const oldTool = { name: "feishu_notify", sourceInfo: "/home/user/.pi/agent/npm/node_modules/old-feishu/index.ts" };
+    const fake = createFakePi([ownTool, oldTool]);
+    releaseBackgroundStatus = publishBackgroundStatus(() => backgroundStatus);
+    extensionModule.default(fake.pi);
+    activeHarness = { emit: fake.emit };
+    const ctx = makeCtx();
+    await fake.emit("session_start", {}, ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("卸载旧包"), "warning");
     await fake.emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
     await fake.emit("agent_start", {}, ctx);
     await fake.emit("agent_settled", {}, ctx);
