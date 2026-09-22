@@ -15,7 +15,7 @@ import {
   formatTokens,
   sanitizeStatusText,
 } from "./format.js";
-import type { GitState } from "./git.js";
+import type { GitState, WorktreeInfo } from "./git.js";
 import type { HudSession } from "./index.js";
 
 const MAX_VISIBLE_WORKTREES = 10;
@@ -39,21 +39,25 @@ function renderWorktreeLines(session: HudSession, ctx: ExtensionContext, width: 
   const theme = ctx.ui.theme;
   const cwd = resolve(ctx.cwd);
   const home = process.env.HOME || process.env.USERPROFILE;
-  const lines = worktrees.slice(0, MAX_VISIBLE_WORKTREES).map((wt) => {
-    const current = cwd === wt.path || cwd.startsWith(`${wt.path}${sep}`);
-    const marker = current ? theme.fg("accent", "●") : theme.fg("dim", "○");
-    const wtPath = theme.fg(current ? "text" : "muted", formatCwdForFooter(wt.path, home));
+  const isCurrent = (wt: WorktreeInfo) => cwd === wt.path || cwd.startsWith(`${wt.path}${sep}`);
+  // 当前 worktree 已在 pwdLine（cwd + git 状态）里展示过，列表里只列其余 worktree，
+  // 避免 "~/repo | git dev@xxx" 与 "● ~/repo dev@xxx" 两行信息重复。
+  const others = worktrees.filter((wt) => !isCurrent(wt));
+  if (others.length === 0) return [];
+  const lines = others.slice(0, MAX_VISIBLE_WORKTREES).map((wt) => {
+    const marker = theme.fg("dim", "○");
+    const wtPath = theme.fg("muted", formatCwdForFooter(wt.path, home));
     let refPart: string;
     if (wt.state) {
       refPart = ` ${renderRepoState(ctx, wt.state)}`;
     } else {
       const ref = wt.branch ?? (wt.oid ? `@${wt.oid}` : undefined);
-      refPart = ref ? ` ${theme.fg(current ? "accent" : "dim", ref)}` : "";
+      refPart = ref ? ` ${theme.fg("dim", ref)}` : "";
     }
     return truncateToWidth(`${marker} ${wtPath}${refPart}`, width, theme.fg("dim", "..."));
   });
-  if (worktrees.length > MAX_VISIBLE_WORKTREES) {
-    lines.push(theme.fg("dim", `… +${worktrees.length - MAX_VISIBLE_WORKTREES} more`));
+  if (others.length > MAX_VISIBLE_WORKTREES) {
+    lines.push(theme.fg("dim", `… +${others.length - MAX_VISIBLE_WORKTREES} more`));
   }
   return lines;
 }
