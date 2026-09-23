@@ -292,7 +292,12 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
         const extensionStatuses = footerData.getExtensionStatuses();
         const statusLine = Array.from(extensionStatuses.entries())
           .sort(([a], [b]) => a.localeCompare(b))
-          .map(([, text]) => sanitizeStatusText(text))
+          .map(([key, text]) => {
+            const sanitized = sanitizeStatusText(text);
+            // feishu-notify supplies plain status text; keep its active marker in
+            // the same subdued palette as the other footer status labels.
+            return key === "feishu-notify" ? theme.fg("muted", sanitized) : sanitized;
+          })
           .join(" ");
         const lines = [
           truncateToWidth(pwdLine, width, theme.fg("dim", "...")),
