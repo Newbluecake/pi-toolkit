@@ -308,6 +308,10 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
           lines.push(truncateToWidth(timeParts.join(theme.fg("dim", " │ ")), width, ""));
         }
         if (statusLine) lines.push(...wrapTextWithAnsi(statusLine, width));
+        // tools 统计独占一行：它的宽度随工具种类增长，挤在 status 行里会把
+        // 前面的扩展状态（cache / watching / input·rounds）押到折行外。
+        // 一次工具都没调过时不占行（旧版与 status 合行，空内容不费版面）。
+        if (session.totalToolCalls > 0) lines.push(...wrapTextWithAnsi(renderToolStats(session, ctx), width));
         return lines;
       },
     };

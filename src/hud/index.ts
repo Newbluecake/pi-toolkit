@@ -27,7 +27,7 @@
  */
 import { performance } from "node:perf_hooks";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { installFooter, renderConversationStats, renderToolStats } from "./footer.js";
+import { installFooter, renderConversationStats } from "./footer.js";
 import { readRepoState, readWorktrees, type ExecFn, type GitState, type WorktreeInfo } from "./git.js";
 import { SpeedTracker } from "./speed.js";
 import {
@@ -152,10 +152,9 @@ export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
 
   function updateHud(s: HudSession, ctx: ExtensionContext): void {
     if (!s.active || !s.live) return;
-    const parts = [renderConversationStats(s, ctx), renderToolStats(s, ctx)].filter((part): part is string =>
-      Boolean(part),
-    );
-    ctx.ui.setStatus(STATUS_ID, parts.join(ctx.ui.theme.fg("dim", " │ ")));
+    // 只放会话计数；tools 统计由 footer 单独占一行渲染（footer.ts render()），
+    // 否则两段会和其它扩展的 status 挤在同一行。
+    ctx.ui.setStatus(STATUS_ID, renderConversationStats(s, ctx));
     s.footerRequestRender?.();
   }
 
