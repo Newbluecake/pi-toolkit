@@ -4,7 +4,11 @@ import type { FabricRecord } from "../core/message.js";
 
 export const FABRIC_ENTRY_CUSTOM_TYPE = "subagent:fabric";
 
-/** Left padding of the rendered payload, so the body reads as a block under its header. */
+/**
+ * Left padding shared by the header and the payload, so a fabric entry reads as
+ * one uniformly indented block (the header used to sit flush left while the body
+ * was indented, which broke the visual grouping).
+ */
 const FABRIC_BODY_INDENT = 2;
 
 /**
@@ -63,12 +67,14 @@ export function createFabricEntryRenderer(resolveSender?: FabricSenderResolver):
     if (data?.state !== "delivered") return undefined;
     const text = data.payload?.text ?? "";
     const sender = formatSender(data.from, resolveSender);
-    const header = new Text(theme.fg("muted", `[fabric ${data.kind ?? "message"}${sender}]`), 0, 0);
+    const header = new Text(theme.fg("muted", `[fabric ${data.kind ?? "message"}${sender}]`), FABRIC_BODY_INDENT, 0);
     if (text.trim() === "") return header;
-    // Header on its own line + the payload as an indented markdown block:
-    // fabric payloads are model-written prose (progress reports, findings) that
-    // routinely span lines and carry lists/code. Prefixing them inline into one
-    // plain Text left wrapped lines hugging column 0 and swallowed all markup.
+    // Header on its own line + the payload as a markdown block, both at
+    // FABRIC_BODY_INDENT: fabric payloads are model-written prose (progress
+    // reports, findings) that routinely span lines and carry lists/code.
+    // Prefixing them inline into one plain Text left wrapped lines hugging
+    // column 0 and swallowed all markup; leaving the header flush left while
+    // the body was indented split one entry into two indentation levels.
     const container = new Container();
     container.addChild(header);
     container.addChild(

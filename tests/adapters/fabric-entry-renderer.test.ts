@@ -50,7 +50,7 @@ describe("renderFabricEntry", () => {
     );
     expect(component).toBeInstanceOf(Container);
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("[fabric finding r_ABCDEFGH]");
+    expect(lines[0]).toBe("  [fabric finding r_ABCDEFGH]");
     expect(lines[1]).toBe("  hello <bold>fabric</bold>");
   });
 
@@ -58,7 +58,7 @@ describe("renderFabricEntry", () => {
     const render = createFabricEntryRenderer((runId) => (runId === "r_ABCDEFGH" ? "watcher" : undefined));
     const component = render(entry(record({ state: "delivered", deliveredAt: 2 })), { expanded: false }, theme);
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("[fabric finding @watcher]");
+    expect(lines[0]).toBe("  [fabric finding @watcher]");
     expect(lines[1]).toBe("  hello fabric");
   });
 
@@ -88,10 +88,22 @@ describe("renderFabricEntry", () => {
       theme,
     );
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("[fabric finding @watcher]");
+    expect(lines[0]).toBe("  [fabric finding @watcher]");
     expect(lines[1]).toBe("  line1");
     expect(lines[2]).toBe("  - <bold>line2</bold>");
     expect(lines[3]).toBe("      - line3");
+  });
+
+  it("indents a header-only entry (blank payload) to the body's left margin", () => {
+    const component = renderFabricEntry(
+      entry(record({ state: "delivered", deliveredAt: 2, payload: { text: "   " } })),
+      { expanded: false },
+      theme,
+    );
+    expect(component).not.toBeInstanceOf(Container);
+    const lines = component!.render(200).map((line) => line.trimEnd());
+    expect(lines[0]).toBe("  [fabric finding r_ABCDEFGH]");
+    expect(lines[1]).toBeUndefined();
   });
 
   it("falls back to a generic label when kind is absent on a delivered record", () => {
@@ -101,7 +113,7 @@ describe("renderFabricEntry", () => {
       theme,
     );
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("[fabric message]");
+    expect(lines[0]).toBe("  [fabric message]");
     expect(lines[1]).toBe("  x");
   });
 });
