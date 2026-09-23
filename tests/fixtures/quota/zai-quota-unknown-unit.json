@@ -1,0 +1,38 @@
+{
+  "code": 200,
+  "data": {
+    "level": "pro",
+    "limits": [
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "usage": 28000,
+        "currentValue": 7000,
+        "remaining": 21000,
+        "percentage": 25,
+        "nextResetTime": 1790187105217
+      },
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 9,
+        "number": 7,
+        "usage": 999,
+        "currentValue": 1,
+        "remaining": 998,
+        "percentage": 0,
+        "nextResetTime": 1790187105218
+      },
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 6,
+        "number": 1,
+        "usage": 140000,
+        "currentValue": 20486,
+        "remaining": 119513,
+        "percentage": 14,
+        "nextResetTime": 1790754528987
+      }
+    ]
+  }
+}

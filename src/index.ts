@@ -51,6 +51,8 @@ import { createExtendTimeoutTool } from "./tools/extend-timeout-tool.js";
 import { createCompactTool } from "./tools/compact-tool.js";
 import { createSwitchContextTool } from "./tools/switch-context-tool.js";
 import { PendingHandoffStore } from "./context-switch/store.js";
+import { createQuotaHintHook } from "./quota/index.js";
+import { pickAlternatives } from "./quota/gate.js";
 import { createSwitchContextCompactHook } from "./context-switch/hook.js";
 import { createSessionFactsProvider } from "./context-switch/session-facts.js";
 import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-tool.js";
@@ -203,6 +205,24 @@ export default function activate(pi: ExtensionAPI): void {
       sendMessage: (message, options) => pi.sendMessage(message, options),
       sendUserMessage: (text) => pi.sendUserMessage(text),
       handoffPending: () => handoffStore.hasFresh(),
+    }),
+  );
+  // 额度感知派单（docs/dev/quota/quota-plan.md §4.2 / §5）：与 compact-hint 同一
+  // turn_end 通道、同一 sendMessage 形状；状态在 stack 里（每次 session_start 重建，
+  // 经 holder 读当前会话——/reload 存活）。alternatives 由 gate.ts 的
+  // pickAlternatives 供给（Pack D 偏差 1：hook deps 的可选注入）。
+  pi.on(
+    "turn_end",
+    createQuotaHintHook({
+      state: () => holder.current?.quotaHint,
+      verdicts: () => holder.current?.quota?.verdicts() ?? [],
+      refresh: () => holder.current?.quota?.refreshIfStale(),
+      sendMessage: (message, options) => pi.sendMessage(message, options),
+      alternatives: (provider) =>
+        pickAlternatives(provider, {
+          verdictFor: (p) => holder.current?.quota?.verdictFor(p),
+          available: () => holder.current?.models.available() ?? [],
+        }),
     }),
   );
 
@@ -479,6 +499,7 @@ export default function activate(pi: ExtensionAPI): void {
       holder.current.fleetWidget?.dispose();
       holder.current.keepalive?.dispose();
       holder.current.adaptive?.dispose();
+      holder.current.quota?.dispose();
       holder.current.scheduler.stop();
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
@@ -512,6 +533,7 @@ export default function activate(pi: ExtensionAPI): void {
     stack.fleetWidget?.dispose();
     stack.keepalive?.dispose();
     stack.adaptive?.dispose();
+    stack.quota?.dispose();
     stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
     // Fabric must freeze before run shutdown so late verdicts from the old

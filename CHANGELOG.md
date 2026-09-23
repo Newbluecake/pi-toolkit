@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **额度感知派单（`src/quota/`）** — 定时拉取 GLM / Kimi 订阅额度（懒触发、TTL 缓存，零周期定时器），turn_end 注入阶梯预警（L1 tick `[quota]` 合并行 → L2 建议「回退链降一位」 → L3 禁用建议），spawn 阶段对越过 `quota.gateLevel` 的 provider 快速失败（不消耗 run；陈旧快照只提示不阻断），HUD 常驻状态行（`·stale`/`⤓demoted` 标记）；降位标记持久化到 `~/.pi/agent/quota-state.json`，跨重启存活到窗口重置。`quota.*` settings 全量可关，设计见 `docs/dev/quota/`。
+
 - **`switch_context` tool（上下文切换）** — 模型把「要带到下一段上下文的状态」直接写进工具参数（`goal` / `progress` / `next_steps` / `decisions` / `key_files` / `pitfalls` / `open_questions`），这段文本经 `session_before_compact` 直接成为 pi 压缩条目的 summary：**不再跑第二次摘要 LLM**，保留什么完全由模型决定。`keep_recent:false` 时压缩点之前的消息全部丢弃（真正的「换到下一个会话」语义），但会话文件、在跑的 subagent、后台 bash 任务、todo 与成本统计都不受影响。扩展还会自动补一段机械附录：本段读/改过的文件、仍在跑的 subagent 与 bash 任务、未完成的 todo、上一段会话文件路径。交接内容过短或缺必填字段会被工具当场打回，不触发压缩。
 
 - **Merged `ask_user` and Feishu notifications** — the package now exposes the interactive clarification tool and Feishu notification extension through three pi entries. Completion, subagent-summary, and idle cards wait for a background-idle session; heartbeat, waiting-input, and explicit notifications remain immediate.

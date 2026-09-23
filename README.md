@@ -96,6 +96,7 @@ Claude Code 风格的 cwd-keyed 被动记忆：每个会话自动把当前项目
 - **会话导航** — `/resume` 默认只扫最近 48 小时（Tab / `--all` 全量），skill 会话标题清洗、subagent 会话标注 `[sub:类型]`；`/clear` 开新会话；裸 `exit` 直接退出。
 - **`/goal` 目标循环** — 给一个目标和结束条件，每轮结束自动评估并续跑直到达成或撞线（详见下文）。
 - **cache TTL** — `/cache-ttl on|off|auto` 即时切换 Anthropic prompt cache 的 TTL 处理（`on` 强制 `ttl: "1h"`），`/cache-ttl save` 持久化；状态栏显示 `⏱ cache: 1h|5m`。adaptive 模式下的 1h 升级受**双写预算**约束：美元边际成本主闸 `cacheTtl.adaptiveWriteBudgetUsd`（默认 `1.0`，`0` = 关闭美元闸；口径 = 账本 `cost.cacheWrite` × 0.375，即 1h 写 2.0× 对 5m 写 1.25× 的边际差）+ token 兜底 `adaptiveWriteBudgetTokens`（200k 不变，`0` = 禁止一切升级），任一撞线即整会话熔断。探针地板随实测前缀缩放（`min(64k, max(4k, 0.5×P))`）：小前缀路由上一次近全量重写即熔断，P ≥ 128k 时与原固定 64k 地板行为完全一致。
+- **额度感知派单（quota）** — 拉取 GLM / Kimi 订阅额度（TTL 缓存、零周期定时器），turn_end 阶梯预警（L1 `[quota]` tick 行 → L2 回退链降位建议 → L3 禁用建议），spawn 阶段对超额 provider 快速失败（陈旧快照只提示不阻断），HUD 带状态行；降位标记持久化到 `~/.pi/agent/quota-state.json`，`quota.*` settings 可关，设计见 `docs/dev/quota/`。
 
 ## bash 自动转后台
 

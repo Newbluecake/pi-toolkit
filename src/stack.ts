@@ -80,6 +80,9 @@ import {
   computeAdaptiveSignals,
   type CacheAdaptiveService,
 } from "./service/cache-adaptive.js";
+import { createQuotaStack, type QuotaHintState, type QuotaService, type QuotaStack } from "./quota/index.js";
+import { readQuotaStatusTheme } from "./quota/render.js";
+import { evaluateQuotaGate, quotaAnnotation, toLadderLevel } from "./quota/gate.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
 import { createMentionNotes, type MentionNotes } from "./mention/notes.js";
@@ -127,6 +130,10 @@ let previousFabricMailbox: ReturnType<typeof createFabricMailbox> | undefined;
 let previousKeepalive: CacheKeepaliveService | undefined;
 /** cache-ttl adaptive (adaptive plan.md §9): same rebuild-dispose pattern as the keepalive service. */
 let previousAdaptive: CacheAdaptiveService | undefined;
+/** quota（quota-plan §4.1）：与 keepalive/adaptive 同款「下一次 build 顶部 dispose」
+ *  交接。`/reload` 走 session_shutdown dispose Stack.quota（M3：QuotaService.dispose
+ *  是唯一清理所有者且幂等），与 previousFleetWidget 同一套双路径纪律。 */
+let previousQuota: QuotaStack | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -496,6 +503,10 @@ export interface Stack {
   keepalive?: CacheKeepaliveService;
   /** 自适应 1h TTL 决策器（adaptive plan.md §9）；settings.cacheTtl.adaptiveEnabled=false 时缺席。 */
   adaptive?: CacheAdaptiveService;
+  /** 额度感知派单（docs/dev/quota/quota-plan.md）：同步缓存判定面。settings.quota.enabled=false 时缺席（R11）。 */
+  quota?: QuotaService;
+  /** turn_end 注入的会话级闩锁状态；与 quota 同生共死（M3：dispose 的唯一所有者是 QuotaService）。 */
+  quotaHint?: QuotaHintState;
   /** /goal 目标驱动持续运行的 session 级运行态（goal-plan v4）。无持久 timer，纯数据。 */
   goal: GoalSession;
 }
@@ -743,6 +754,19 @@ export function createNotificationReceiptHook(holder: {
   };
 }
 
+/**
+ * quota-plan §4.1：HUD status key `"quota"`（与 `cache-ttl`/`goal` 并列分槽，
+ * integration-map §8）。逐字照抄 cache-keepalive 的 safeSetStatus：try/catch +
+ * `ctx.ui.setStatus` 双探测——陈旧 ctx / print 模式下静默（R8）。
+ */
+function safeSetQuotaStatus(ctx: ExtensionContext, text: string | undefined): void {
+  try {
+    if (ctx.ui && typeof ctx.ui.setStatus === "function") ctx.ui.setStatus("quota", text);
+  } catch {
+    // ui not ready / stale ctx — never let visibility break the feature (R8).
+  }
+}
+
 export function buildSessionStack(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -773,6 +797,8 @@ export function buildSessionStack(
   previousKeepalive = undefined;
   previousAdaptive?.dispose();
   previousAdaptive = undefined;
+  previousQuota?.dispose();
+  previousQuota = undefined;
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
@@ -863,6 +889,10 @@ export function buildSessionStack(
     console.warn("[pi-subagent] outbox list failed; runId uniqueness degrades to process-local (M17)");
   }
   const spawnRef: { current?: SpawnService } = {};
+  // quota-plan §4.1 / integration-map §7：spawn 闸门（下方 createSpawnService）
+  // 需要 quota，而 quota 按计划构造在 keepalive/adaptive 之后——晚绑定 ref
+  // 解决「A 需要还没构造出来的 B」（runnerRef/widgetRef 同款）。
+  const quotaRef: { current?: QuotaStack | undefined } = {};
   const mention = createMentionRegistry();
   // X6b: session-scoped, capped FIFO — notes are one-line previews, never read
   // back into context. Pending (steer-path) notes self-clear once the target run
@@ -1066,6 +1096,31 @@ export function buildSessionStack(
     // feeds self-correcting unknown-hint errors.
     resolveModelHint: models.resolveHint,
     availableModels: models.available,
+    // quota-plan §4.1/§6：额度闸门注入（同步、只读缓存、零 IO、零 await——
+    // QuotaGateDeps 的类型就杜绝了 spawn 路径发请求）。enabled=false ⇒
+    // quotaRef.current 为空 ⇒ 恒放行（R11）；gate=false ⇒ 整个不注入。
+    ...(settings.quota.gate
+      ? {
+          quotaGate: (model: { provider: string; id: string }) => {
+            const quota = quotaRef.current;
+            if (quota === undefined) return undefined;
+            return evaluateQuotaGate(model, {
+              verdictFor: (p) => quota.service.verdictFor(p),
+              available: models.available,
+              // E 包 Minor 8：settings 的 number 经 toLadderLevel 收窄，无裸 as。
+              blockAtLevel: toLadderLevel(settings.quota.gateLevel),
+              now: systemClock.now(),
+            });
+          },
+        }
+      : {}),
+    // quota-plan §6「候选标记」：unknown-hint 错误的 Available 列表附额度标记
+    // （L0 无标记，输出与今天逐字节相同）；enabled=false 时恒 undefined。
+    quotaAnnotate: (candidate) => {
+      const quota = quotaRef.current;
+      if (quota === undefined) return undefined;
+      return quotaAnnotation(candidate, (p) => quota.service.verdictFor(p));
+    },
     onLabel: (label, target, info) =>
       info.resumed ? mentionRef.current?.reassign(label, target) : mentionRef.current?.register(label, target),
     ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),
@@ -1194,6 +1249,29 @@ export function buildSessionStack(
       })
     : undefined;
   previousAdaptive = adaptive;
+
+  // quota（quota-plan §4.1）：额度感知派单——与 keepalive/adaptive 同款可选构造 +
+  // previous* 交接。构造零副作用（demotion store 惰性加载）；providers="" 时
+  // 零 adapter ⇒ 零网络（测试隔离位）。
+  const quota = settings.quota.enabled
+    ? createQuotaStack({
+        settings: settings.quota,
+        clock: systemClock,
+        statePath: join(getAgentDir(), "quota-state.json"),
+        ...(settings.quota.hud
+          ? {
+              setStatus: (text: string | undefined) => safeSetQuotaStatus(ctx, text),
+              theme: () => readQuotaStatusTheme(ctx),
+            }
+          : {}),
+        warn: (message) => console.warn(`[pi-subagent] ${message}`),
+      })
+    : undefined;
+  previousQuota = quota;
+  quotaRef.current = quota;
+  // 预热：fire-and-forget，绝不 await（session_start 必须保持同步快）；
+  // refreshIfStale 永不返回被拒 Promise，失败静默降级（R1）。
+  quota?.service.refreshIfStale();
 
   // X7b: always-on fleet widget above the editor. The controller self-probes
   // ctx.ui.setWidget and goes inert (no timer, no throw) in non-interactive
@@ -1376,6 +1454,7 @@ export function buildSessionStack(
     ...(bashJobs ? { bashJobs } : {}),
     ...(keepalive ? { keepalive } : {}),
     ...(adaptive ? { adaptive } : {}),
+    ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
   };
 }

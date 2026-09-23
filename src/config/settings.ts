@@ -190,6 +190,53 @@ export interface CacheTtlSettings {
 }
 
 /**
+ * 额度感知派单（docs/dev/quota/quota-plan.md §8.1）：阶梯预警 + spawn 闸门 +
+ * HUD 的设置块。逐字段容错解析见 parseQuotaSettings（never throws）。时长
+ * 字段（*Ms 内部毫秒、文件存 *S 秒）登记在 TIME_SETTING_MS_PATHS；阈值
+ * 单调性（l1 <= l2 <= l3）在解析层钳制（§8.3）。baseUrl / userAgent 是
+ * JSON-file-only 逃生阀，刻意不进 SETTING_SPECS（与 bashJobs.dir 同款）。
+ */
+export interface QuotaSettings {
+  /** 总开关。false = 无 service、无钩子、无闸门（全特性一键回退，plan R11）。Default true。 */
+  enabled: boolean;
+  /** 逗号分隔的 provider id 白名单；空串 = 全部关闭。未知 id 静默忽略。 */
+  providers: string;
+  /** 快照 TTL：早于此不重新请求。 */
+  refreshMs: number;
+  /** 超过此龄的快照视为陈旧：只提示、闸门不阻断。 */
+  staleAfterMs: number;
+  /** L1 提示阈值（used %）。 */
+  l1Percent: number;
+  /** L2 建议阈值（used %）。 */
+  l2Percent: number;
+  /** L3 强烈阈值（used %）。 */
+  l3Percent: number;
+  /** ETA 低于此值直接判 L3。 */
+  l3EtaMs: number;
+  /** L1 tick 的 usedPct 网格步；0 = 关闭网格闸（只剩等级闩锁）。 */
+  tickStepPercent: number;
+  /** 两条 quota 消息之间的全局最小间隔（L3 不受限）。 */
+  minIntervalMs: number;
+  /** L2+ 的复读周期。 */
+  repeatMs: number;
+  /** 注入消息是否在 transcript 可见。 */
+  display: boolean;
+  /** spawn 闸门总开关。 */
+  gate: boolean;
+  /** 触发阻断的最低等级（2 = 更激进，3 = 默认）。 */
+  gateLevel: number;
+  /** HUD status key。 */
+  hud: boolean;
+  /** 单次 HTTP 超时。 */
+  requestTimeoutMs: number;
+  zaiBaseUrl: string;
+  zaiOverseasBaseUrl: string;
+  kimiBaseUrl: string;
+  /** Cloudflare 需要浏览器 UA（Kimi 实测）。空串 = 用内置默认。 */
+  userAgent: string;
+}
+
+/**
  * timeout-notify：超时宽限 + 延长设置（arch §7.2）。逐字段容错解析见
  * parseExtendSettings。
  */
@@ -276,6 +323,8 @@ export interface AgentSettings {
   /** Message fabric settings; disabled by default for the MVP gray rollout. */
   fabric: FabricSettings;
   cacheTtl: CacheTtlSettings;
+  /** 额度感知派单（quota-plan §8.1）。 */
+  quota: QuotaSettings;
   /** /goal 目标驱动持续运行（goal-plan v4）。 */
   goal: GoalSettings;
   /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `enabled:false` leaves pi's built-in footer untouched. */
@@ -402,6 +451,28 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     adaptiveColdMinHorizonMs: 600_000,
     adaptiveHistoryGapSignal: true,
   },
+  quota: {
+    enabled: true,
+    providers: "zai-coding-cn,zai,kimi-coding",
+    refreshMs: 600_000, // 10min（简报的 refreshMinutes: 10）
+    staleAfterMs: 3_600_000, // 1h
+    l1Percent: 50,
+    l2Percent: 75,
+    l3Percent: 90,
+    l3EtaMs: 1_800_000, // 30min（简报的 ETA < 30min）
+    tickStepPercent: 10,
+    minIntervalMs: 300_000, // 5min
+    repeatMs: 1_800_000, // 30min
+    display: true,
+    gate: true,
+    gateLevel: 3,
+    hud: true,
+    requestTimeoutMs: 10_000,
+    zaiBaseUrl: "https://open.bigmodel.cn",
+    zaiOverseasBaseUrl: "https://api.z.ai",
+    kimiBaseUrl: "https://api.kimi.com",
+    userAgent: "",
+  },
   extend: { enabled: true, notify: "background" },
   goal: {
     enabled: true,
@@ -493,6 +564,12 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "cacheTtl.keepaliveIntervalMs",
   "cacheTtl.adaptiveColdCooldownMs",
   "cacheTtl.adaptiveColdMinHorizonMs",
+  "quota.refreshMs",
+  "quota.staleAfterMs",
+  "quota.l3EtaMs",
+  "quota.minIntervalMs",
+  "quota.repeatMs",
+  "quota.requestTimeoutMs",
 ];
 
 const TIME_SETTING_SECONDS_PATHS: ReadonlySet<string> = new Set(TIME_SETTING_MS_PATHS.map(secondsKeyOf));
@@ -600,6 +677,7 @@ export function loadSettings(source: unknown): AgentSettings {
     compact: parseCompactSettings(value.compact),
     fabric: parseFabricSettings(value.fabric),
     cacheTtl: parseCacheTtlSettings(value.cacheTtl),
+    quota: parseQuotaSettings(value.quota),
     extend: parseExtendSettings(value.extend),
     goal: parseGoalSettings(value.goal),
     hud: parseHudSettings(value.hud),
@@ -734,6 +812,54 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
     adaptiveHistoryGapSignal: bool(value.adaptiveHistoryGapSignal, defaults.adaptiveHistoryGapSignal),
   };
 }
+/**
+ * Parse the optional `quota` settings block (quota-plan §8.3). Field-by-field
+ * tolerant (parseCacheTtlSettings 同款 bool()/num() 手法), never throws.
+ * Threshold monotonicity is clamped (l1 <= l2 <= l3 — a config written backwards
+ * is pushed up, not silently ignored); `providers` keeps empty strings (empty
+ * = all providers off); base URLs must be http(s) and lose trailing slashes.
+ */
+export function parseQuotaSettings(input: unknown): QuotaSettings {
+  const defaults = DEFAULT_SETTINGS.quota;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const bool = (raw: unknown, fallback: boolean): boolean => (typeof raw === "boolean" ? raw : fallback);
+  const num = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? Math.floor(raw) : fallback;
+  // 注意：providers 允许空串（空串 = 全部关闭），userAgent 同理（空串 = 内置默认）。
+  const str = (raw: unknown, fallback: string): string => (typeof raw === "string" ? raw : fallback);
+  const url = (raw: unknown, fallback: string): string => {
+    const v = typeof raw === "string" ? raw.trim() : "";
+    return /^https?:\/\//i.test(v) ? v.replace(/\/+$/, "") : fallback; // 非 http(s) 一律回落默认
+  };
+  // 阈值单调性钳制：l1 <= l2 <= l3，越界者被后者顶上去（配置写反不会静默失效）。
+  const l1 = num(value.l1Percent, defaults.l1Percent, 1, 100);
+  const l2 = Math.max(l1, num(value.l2Percent, defaults.l2Percent, 1, 100));
+  const l3 = Math.max(l2, num(value.l3Percent, defaults.l3Percent, 1, 100));
+  return {
+    enabled: bool(value.enabled, defaults.enabled),
+    providers: str(value.providers, defaults.providers),
+    refreshMs: num(value.refreshMs, defaults.refreshMs, 60_000, 86_400_000),
+    staleAfterMs: num(value.staleAfterMs, defaults.staleAfterMs, 60_000, 604_800_000),
+    l1Percent: l1,
+    l2Percent: l2,
+    l3Percent: l3,
+    l3EtaMs: num(value.l3EtaMs, defaults.l3EtaMs, 0, 86_400_000),
+    tickStepPercent: num(value.tickStepPercent, defaults.tickStepPercent, 0, 50),
+    minIntervalMs: num(value.minIntervalMs, defaults.minIntervalMs, 0, 86_400_000),
+    repeatMs: num(value.repeatMs, defaults.repeatMs, 0, 86_400_000),
+    display: bool(value.display, defaults.display),
+    gate: bool(value.gate, defaults.gate),
+    gateLevel: num(value.gateLevel, defaults.gateLevel, 1, 3),
+    hud: bool(value.hud, defaults.hud),
+    requestTimeoutMs: num(value.requestTimeoutMs, defaults.requestTimeoutMs, 1_000, 60_000),
+    zaiBaseUrl: url(value.zaiBaseUrl, defaults.zaiBaseUrl),
+    zaiOverseasBaseUrl: url(value.zaiOverseasBaseUrl, defaults.zaiOverseasBaseUrl),
+    kimiBaseUrl: url(value.kimiBaseUrl, defaults.kimiBaseUrl),
+    userAgent: str(value.userAgent, defaults.userAgent),
+  };
+}
+
 /** Parse an `{enabled}` on/off group (merged plugins); field-level fallback to defaults, never throws. */
 function parseEnabledGroup(input: unknown, defaults: EnabledGroup): EnabledGroup {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };

@@ -100,6 +100,7 @@ Claude-Code-style cwd-keyed passive memory: every session auto-injects the curre
 - **Session navigation** — `/resume` scans only the last 48 hours by default (Tab / `--all` for everything), skill-session title cleaning, subagent sessions tagged `[sub:type]`; `/clear` starts a new session; bare `exit` quits.
 - **`/goal` objective loop** — give an objective and a finish condition; each turn is evaluated and followed up until done or capped (see below).
 - **Cache TTL** — `/cache-ttl on|off|auto` switches Anthropic prompt-cache TTL handling live (`on` forces `ttl: "1h"`), `/cache-ttl save` persists; the status bar shows `⏱ cache: 1h|5m`.
+- **Quota-aware dispatch** — fetches GLM / Kimi subscription quotas (TTL-cached, zero periodic timers), injects laddered turn_end warnings (L1 `[quota]` tick line → L2 demote-in-fallback-chain advice → L3 skip-provider advice), fast-fails spawns to over-quota providers (stale snapshots warn but never block), and adds a HUD status line; demotion marks persist in `~/.pi/agent/quota-state.json`. Toggled by `quota.*` settings; design in `docs/dev/quota/`.
 
 ## Bash auto-backgrounding
 

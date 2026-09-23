@@ -1,11 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sandboxHome } from "./helpers/home-sandbox.js";
 import { buildSessionStack, type Stack } from "../../src/stack.js";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import { createGoalCommand } from "../../src/goal/command.js";
 import { createGoalLoopHook } from "../../src/goal/hook.js";
 import { GOAL_ENTRY_TYPE, persistGoalRecord } from "../../src/goal/store.js";
 import { createGoalRecord } from "../../src/goal/state.js";
+
+let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
+beforeEach(() => {
+  homeSandbox = sandboxHome();
+});
+afterEach(() => {
+  homeSandbox?.restore();
+  homeSandbox = undefined;
+});
 
 const flush = async () => {
   for (let i = 0; i < 40; i++) await Promise.resolve();

@@ -1,0 +1,14 @@
+{
+  "usage": { "limit": "100", "used": "100", "resetTime": "2026-09-28T01:06:33.380237Z" },
+  "limits": [
+    {
+      "window": { "duration": 300, "timeUnit": "TIME_UNIT_MINUTE" },
+      "detail": { "limit": "100", "remaining": "100", "resetTime": "2026-09-23T18:06:33.380237Z" }
+    }
+  ],
+  "usages": {
+    "limit_5h": { "used_ratio": 0, "reset_time": "2026-09-23T18:06:32Z" },
+    "limit_7d": { "used_ratio": 1, "reset_time": "2026-09-28T01:06:32Z" }
+  },
+  "totalQuota": 99
+}

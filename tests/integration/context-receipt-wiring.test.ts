@@ -1,9 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { sandboxHome } from "./helpers/home-sandbox.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import type { DeliveryPayload } from "../../src/core/types.js";
 import { buildSessionStack, createNotificationReceiptHook } from "../../src/stack.js";
+
+let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
+beforeEach(() => {
+  homeSandbox = sandboxHome();
+});
+afterEach(() => {
+  homeSandbox?.restore();
+  homeSandbox = undefined;
+});
 
 function fakePi() {
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();

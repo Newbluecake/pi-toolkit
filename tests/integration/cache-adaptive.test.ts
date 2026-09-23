@@ -1,9 +1,19 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sandboxHome } from "./helpers/home-sandbox.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildSessionStack } from "../../src/stack.js";
 import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
+
+let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
+beforeEach(() => {
+  homeSandbox = sandboxHome();
+});
+afterEach(() => {
+  homeSandbox?.restore();
+  homeSandbox = undefined;
+});
 
 /**
  * End-to-end wiring for the adaptive TTL decider: a real `buildSessionStack` +

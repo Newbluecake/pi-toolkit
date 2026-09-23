@@ -1,6 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sandboxHome } from "./helpers/home-sandbox.js";
 import { buildSessionStack } from "../../src/stack.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
+
+let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
+beforeEach(() => {
+  homeSandbox = sandboxHome();
+});
+afterEach(() => {
+  homeSandbox?.restore();
+  homeSandbox = undefined;
+});
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import type { DeliveryPayload } from "../../src/core/types.js";
 import { FakeClock } from "../../src/core/clock.js";

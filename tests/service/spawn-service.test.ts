@@ -638,3 +638,141 @@ describe("SpawnService: CC4 CP1 (deadlineAt admission check)", () => {
     expect(svc.getLabel?.("x")).toEqual({ runId: real.runId, type: "worker", parent: "root" });
   });
 });
+
+/**
+ * Quota gate (quota-plan §4.4 / §6): deps.quotaGate is an optional admission
+ * check — synchronous, read-only, undefined = pass. It sits in the same
+ * zero-side-effect admission zone as the model-hint check (after
+ * admittedModel is settled, before any mutable bookkeeping), so a blocked
+ * spawn writes no state at all. Unwired (or passing) gate = today's behavior.
+ */
+describe("SpawnService: quota gate (quota-plan §6)", () => {
+  const blockedGate = {
+    level: 3 as const,
+    message: "quota gate: zai-coding-cn 的 5h 配额已用尽（98%），本次 spawn 已快速失败，未消耗任何 run。",
+    alternatives: ["kimi-coding/kimi-k3"],
+  };
+  // Local mirror of the model-hints describe's hintedDeps (that helper is
+  // scoped there): a "hinted" agent type whose frontmatter model is a hint.
+  const hintedType: AgentTypeConfig = { ...type, name: "hinted", modelHint: "sonnet" };
+  const hintedDeps = (
+    runner: Runner,
+    resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined,
+    availableModels?: () => readonly { provider: string; id: string; name?: string }[],
+  ) => ({
+    ...deps(runner),
+    types: {
+      get: (n: string) => (n === "hinted" ? hintedType : type),
+      list: () => [hintedType],
+      reload: async () => ({ types: [hintedType], errors: [] }),
+    },
+    ...(resolveModelHint ? { resolveModelHint } : {}),
+    ...(availableModels ? { availableModels } : {}),
+  });
+  it("fast-fails with a config error and zero mutable state when the gate blocks", async () => {
+    let called = false;
+    const service = createSpawnService({
+      ...deps({
+        run: async () => {
+          called = true;
+          return outcome;
+        },
+      }),
+      quotaGate: () => blockedGate,
+    });
+    const result = await service.spawn({
+      type: "worker",
+      prompt: "x",
+      modelOverride: { provider: "zai-coding-cn", id: "glm-5.3" },
+    });
+    expect(called).toBe(false);
+    expect(result).toEqual({ error: { kind: "config", message: blockedGate.message, retryable: false } });
+    // Zero mutable-state writes: no snapshot, no label, nothing registered.
+    expect(service.snapshots()).toEqual([]);
+    expect(service.getLabel?.("x")).toBeUndefined();
+  });
+  it("evaluates the gate on the resolved admittedModel (fuzzy hint), not the raw hint string", async () => {
+    let seen: { provider: string; id: string } | undefined;
+    const service = createSpawnService({
+      ...deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }),
+      resolveModelHint: () => ({ provider: "zai-coding-cn", id: "glm-5.3" }),
+      quotaGate: (model) => {
+        seen = model;
+        return blockedGate;
+      },
+    });
+    const result = await service.spawn({ type: "worker", prompt: "x", modelHintOverride: "glm" });
+    expect(seen).toEqual({ provider: "zai-coding-cn", id: "glm-5.3" });
+    expect("error" in result && result.error.retryable).toBe(false);
+  });
+  it("passes through untouched when the gate returns undefined", async () => {
+    let gateCalls = 0;
+    const result = await createSpawnService({
+      ...deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }),
+      quotaGate: () => {
+        gateCalls += 1;
+        return undefined;
+      },
+    }).spawnAndWait({ type: "worker", prompt: "x", modelOverride: { provider: "zai-coding-cn", id: "glm-5.3" } });
+    expect(gateCalls).toBe(1);
+    expect(result.status).toBe("completed");
+  });
+  it("behaves exactly like today when no gate is wired", async () => {
+    let called = false;
+    const result = await createSpawnService(
+      deps({
+        run: async (spec) => {
+          called = true;
+          return { ...outcome, runId: spec.runId };
+        },
+      }),
+    ).spawn({ type: "worker", prompt: "x", modelOverride: { provider: "zai-coding-cn", id: "glm-5.3" } });
+    expect(called).toBe(true);
+    expect("runId" in result).toBe(true);
+  });
+  it("keeps the gate inside the admission zone: a passing spawn still registers a label", async () => {
+    const service = createSpawnService({
+      ...deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }),
+      quotaGate: () => undefined,
+    });
+    const started = await service.spawn({
+      type: "worker",
+      prompt: "x",
+      label: "gated",
+      modelOverride: { provider: "zai-coding-cn", id: "glm-5.3" },
+    });
+    expect("runId" in started).toBe(true);
+    expect(service.getLabel?.("gated")?.runId).toBe("runId" in started ? started.runId : undefined);
+  });
+  it("annotates unknown-hint candidates through deps.quotaAnnotate", async () => {
+    const result = await createSpawnService({
+      ...hintedDeps(
+        { run: async () => outcome },
+        () => undefined,
+        () => [
+          { provider: "zai-coding-cn", id: "glm-5.3" },
+          { provider: "kimi-coding", id: "kimi-k3" },
+        ],
+      ),
+      quotaAnnotate: (candidate) => (candidate.provider === "zai-coding-cn" ? " [5h 93% ⛔]" : undefined),
+    }).spawn({ type: "hinted", prompt: "x" });
+    expect("error" in result && result.error.message).toContain(
+      "Available: zai-coding-cn/glm-5.3 [5h 93% ⛔], kimi-coding/kimi-k3",
+    );
+  });
+  it("keeps the unknown-hint error byte-identical when quotaAnnotate is absent", async () => {
+    const result = await createSpawnService(
+      hintedDeps(
+        { run: async () => outcome },
+        () => undefined,
+        () => [
+          { provider: "zai-coding-cn", id: "glm-5.3" },
+          { provider: "kimi-coding", id: "kimi-k3" },
+        ],
+      ),
+    ).spawn({ type: "hinted", prompt: "x" });
+    expect("error" in result && result.error.message).toContain(
+      "Available: zai-coding-cn/glm-5.3, kimi-coding/kimi-k3",
+    );
+  });
+});

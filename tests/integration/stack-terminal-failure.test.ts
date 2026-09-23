@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sandboxHome } from "./helpers/home-sandbox.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import type { RunOutcome } from "../../src/core/types.js";
 import type { PersistedDelivery } from "../../src/delivery/notifier.js";
 import type { SpawnServiceDeps } from "../../src/service/spawn-service.js";
+
+let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
 
 const harness = vi.hoisted(() => ({
   records: new Map<string, PersistedDelivery>(),
@@ -123,9 +126,15 @@ function existing(state?: PersistedDelivery["state"]): PersistedDelivery {
 }
 
 beforeEach(() => {
+  homeSandbox = sandboxHome();
   harness.records.clear();
   harness.listError = undefined;
   harness.spawnDeps = undefined;
+});
+
+afterEach(() => {
+  homeSandbox?.restore();
+  homeSandbox = undefined;
 });
 
 describe("terminal failure notification deduplication", () => {

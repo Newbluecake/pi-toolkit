@@ -5,6 +5,7 @@ import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core
 import { toErrorInfo } from "../core/errors.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import { formatModelCandidates, type ModelCandidate } from "../config/model-hint.js";
+import type { QuotaGateVerdict } from "../quota/gate.js";
 import type {
   DeadlineBudget,
   ErrorInfo,
@@ -80,6 +81,13 @@ export interface SpawnServiceDeps {
   resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
   /** Optional live candidate list for self-correcting unknown-hint errors. */
   availableModels?: () => readonly ModelCandidate[];
+  /**
+   * 额度闸门（quota-plan §6）：**同步**、只读缓存、返回 undefined 放行。
+   * 未注入时行为与今天完全一致（全特性可一键回退，plan R11）。
+   */
+  quotaGate?: (model: { provider: string; id: string }) => QuotaGateVerdict | undefined;
+  /** unknown-hint 错误里给候选模型附额度标记（quota-plan §4.3）。缺省时错误文案逐字节不变。 */
+  quotaAnnotate?: (candidate: ModelCandidate) => string | undefined;
   /**
    * timeout-notify 总开关（D-16，settings.extend.enabled）。false 时合并后钳
    * maxExtensions = 0——宽限与延长一并关闭，agent-type / per-spawn 的覆盖都盖不回来
@@ -289,7 +297,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         if (modelHint) {
           const resolved = deps.resolveModelHint?.(modelHint);
           if (!resolved) {
-            const suffix = formatModelCandidates(deps.availableModels?.() ?? []);
+            const suffix = formatModelCandidates(deps.availableModels?.() ?? [], 8, deps.quotaAnnotate);
             return {
               error: {
                 kind: "config",
@@ -302,6 +310,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           }
           admittedModel = resolved;
         }
+      }
+      // 额度闸门（quota-plan §6）：admittedModel 定型之后、任何可变状态写入
+      // （resumeLocks/labels/nesting/…）之前——与 CC4/unknown-type/model-hint
+      // 同一「零副作用准入区」。只读同步缓存，绝不发网络请求；越线 ⇒ 快速
+      // 失败并直接给替代模型，不烧一个注定 429 的 run。
+      if (admittedModel && deps.quotaGate) {
+        const gate = deps.quotaGate(admittedModel);
+        if (gate) return { error: { kind: "config", message: gate.message, retryable: false } };
       }
       // X3: nesting depth + canSpawn whitelist. Authoritative for real
       // nested chains produced by the injected nested Agent tool, whose

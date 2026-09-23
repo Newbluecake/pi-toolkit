@@ -408,6 +408,50 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "no new run observed within this window => retry once, then stop the goal",
     description: "Continuation delivery watchdog",
   }),
+  // Quota-aware dispatch (quota-plan §8.5): all non-live — captured at
+  // activate, change ⇒ /reload. baseUrl / userAgent stay JSON-file-only
+  // (same treatment as bashJobs.dir / bashJobs.shellPath): they are escape
+  // hatches, not knobs the editor should invite users to touch.
+  "quota.enabled": bool("quota.enabled", "Quota-aware dispatch: ladder warnings + spawn gate + HUD"),
+  "quota.providers": {
+    kind: "string",
+    path: "quota.providers",
+    description: "Comma-separated quota providers (zai-coding-cn,zai,kimi-coding); empty = none",
+  },
+  "quota.refreshS": seconds("quota.refreshMs", { min: 60, max: 86_400, description: "Quota snapshot TTL" }),
+  "quota.staleAfterS": seconds("quota.staleAfterMs", {
+    min: 60,
+    max: 604_800,
+    hint: "older snapshots warn but never block a spawn",
+    description: "Snapshot age after which the gate stops blocking",
+  }),
+  "quota.l1Percent": count("quota.l1Percent", 1, "L1 hint threshold (used %)"),
+  "quota.l2Percent": count("quota.l2Percent", 1, "L2 advise threshold (used %)"),
+  "quota.l3Percent": count("quota.l3Percent", 1, "L3 strong threshold (used %)"),
+  "quota.l3EtaS": seconds("quota.l3EtaMs", { max: 86_400, description: "Predicted exhaustion horizon that forces L3" }),
+  "quota.tickStepPercent": count("quota.tickStepPercent", 0, "Used-% grid between L1 ticks; 0 = level latch only"),
+  "quota.minIntervalS": seconds("quota.minIntervalMs", {
+    max: 86_400,
+    hint: "L3 bypasses this floor",
+    description: "Global minimum interval between quota messages",
+  }),
+  "quota.repeatS": seconds("quota.repeatMs", { max: 86_400, description: "L2+ re-announce period" }),
+  "quota.display": bool("quota.display", "Show the injected quota line in the transcript"),
+  "quota.gate": bool("quota.gate", "Fail spawns fast when the target provider's quota is exhausted"),
+  "quota.gateLevel": {
+    kind: "number",
+    path: "quota.gateLevel",
+    min: 1,
+    max: 3,
+    integer: true,
+    description: "Minimum ladder level that blocks a spawn (3 = exhausted only, 2 = aggressive)",
+  },
+  "quota.hud": bool("quota.hud", "Show the quota line in the status bar"),
+  "quota.requestTimeoutS": seconds("quota.requestTimeoutMs", {
+    min: 1,
+    max: 60,
+    description: "Quota HTTP request timeout",
+  }),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

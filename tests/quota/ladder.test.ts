@@ -1,0 +1,165 @@
+// quota-plan §9.2 ladder.test.ts — threshold grid, forecast raising, provider
+// aggregation (Kimi week trap), demotion floor, gridStep, stale.
+
+import { describe, expect, it } from "vitest";
+import { DEFAULT_THRESHOLDS, gridStep, providerVerdict, windowLevel } from "../../src/quota/ladder.js";
+import type { QuotaWindowsSnapshot } from "../../src/quota/types.js";
+
+const NOW = 1_000_000;
+const HOUR = 3_600_000;
+const STALE_AFTER_MS = HOUR;
+
+function win(usedPct: number, resetAt?: number) {
+  return { scope: "5h" as const, usedPct, ...(resetAt === undefined ? {} : { resetAt }) };
+}
+
+function windowsSnapshot(provider: QuotaWindowsSnapshot["provider"], windows: QuotaWindowsSnapshot["windows"]) {
+  return { provider, kind: "windows" as const, windows, fetchedAt: NOW };
+}
+
+describe("windowLevel", () => {
+  it("maps the threshold grid 49/50/74/75/89/90 → L0/L1/L1/L2/L2/L3", () => {
+    const cases: readonly [number, 0 | 1 | 2 | 3][] = [
+      [49, 0],
+      [50, 1],
+      [74, 1],
+      [75, 2],
+      [89, 2],
+      [90, 3],
+    ];
+    for (const [pct, level] of cases) {
+      expect(windowLevel(win(pct), { now: NOW, thresholds: DEFAULT_THRESHOLDS })).toMatchObject({
+        level,
+        reason: level === 0 ? "none" : "pct",
+      });
+    }
+  });
+
+  it("treats usedPct >= 100 as L3 exhausted (and clamps out-of-range input)", () => {
+    for (const pct of [100, 100.5, 120]) {
+      expect(windowLevel(win(pct), { now: NOW, thresholds: DEFAULT_THRESHOLDS })).toMatchObject({
+        level: 3,
+        reason: "exhausted",
+        usedPct: 100,
+      });
+    }
+  });
+
+  it("raises 62% to L2 when the forecast exhausts before the window resets (#forecast-before-reset)", () => {
+    const resetAt = NOW + 3 * HOUR;
+    const v = windowLevel(win(62, resetAt), { now: NOW, etaMs: HOUR, thresholds: DEFAULT_THRESHOLDS });
+    expect(v).toMatchObject({ level: 2, reason: "forecast-before-reset" });
+    expect(v.resetAt).toBe(resetAt);
+    expect(v.etaMs).toBe(HOUR);
+  });
+
+  it("raises 62% to L3 when ETA < 30min even with resetAt unknown", () => {
+    const v = windowLevel(win(62), { now: NOW, etaMs: 20 * 60_000, thresholds: DEFAULT_THRESHOLDS });
+    expect(v).toMatchObject({ level: 3, reason: "forecast-eta" });
+  });
+
+  it("does NOT downgrade 90% that is about to reset (no reverse rule)", () => {
+    const v = windowLevel(win(90, NOW + 60_000), { now: NOW, thresholds: DEFAULT_THRESHOLDS });
+    expect(v).toMatchObject({ level: 3, reason: "pct" });
+  });
+
+  it("skips forecast-before-reset when resetAt is undefined (only rule 3a applies)", () => {
+    const v = windowLevel(win(62), { now: NOW, etaMs: 2 * HOUR, thresholds: DEFAULT_THRESHOLDS });
+    expect(v).toMatchObject({ level: 1, reason: "pct" });
+  });
+
+  it("ignores negative etaMs", () => {
+    const v = windowLevel(win(62, NOW + 3 * HOUR), { now: NOW, etaMs: -5, thresholds: DEFAULT_THRESHOLDS });
+    expect(v).toMatchObject({ level: 1, reason: "pct" });
+  });
+});
+
+describe("providerVerdict", () => {
+  it("takes the max window level: week 100% beats idle 5h #kimi-week-trap", () => {
+    const snap = windowsSnapshot("kimi-coding", [
+      { scope: "5h", usedPct: 0 },
+      { scope: "week", usedPct: 100 },
+    ]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: false,
+    });
+    expect(v.level).toBe(3);
+    expect(v.windows).toHaveLength(2);
+    expect(v.windows[1]).toMatchObject({ scope: "week", level: 3, reason: "exhausted" });
+  });
+
+  it("pins a demoted provider at level >= 2 even when windows compute L1 (demotion floor)", () => {
+    const snap = windowsSnapshot("zai-coding-cn", [win(60)]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: true,
+    });
+    expect(v.level).toBe(2);
+    expect(v.demoted).toBe(true);
+  });
+
+  it("injects etaOf(scope) per window", () => {
+    const snap = windowsSnapshot("zai-coding-cn", [win(62, NOW + 3 * HOUR)]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: (scope) => (scope === "5h" ? HOUR : undefined),
+      demoted: false,
+    });
+    expect(v.level).toBe(2);
+    expect(v.windows[0]?.reason).toBe("forecast-before-reset");
+  });
+
+  it("marks stale only when age exceeds staleAfterMs (strictly)", () => {
+    const snap = windowsSnapshot("zai-coding-cn", [win(10)]);
+    const base = {
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: false,
+    } as const;
+    expect(providerVerdict({ ...snap, fetchedAt: NOW - STALE_AFTER_MS }, { now: NOW, ...base }).stale).toBe(false);
+    expect(providerVerdict({ ...snap, fetchedAt: NOW - STALE_AFTER_MS - 1 }, { now: NOW, ...base }).stale).toBe(true);
+  });
+
+  it("carries plan through for HUD display", () => {
+    const snap: QuotaWindowsSnapshot = {
+      provider: "zai-coding-cn",
+      kind: "windows",
+      windows: [win(10)],
+      fetchedAt: NOW,
+      plan: "max",
+    };
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: false,
+    });
+    expect(v.plan).toBe("max");
+  });
+});
+
+describe("gridStep", () => {
+  it("floors to the linear grid", () => {
+    expect(gridStep(62, 10)).toBe(60);
+    expect(gridStep(49, 10)).toBe(40);
+    expect(gridStep(100, 10)).toBe(100);
+    expect(gridStep(0, 10)).toBe(0);
+  });
+
+  it("returns 0 when step <= 0 (grid gate disabled) or input is NaN", () => {
+    expect(gridStep(62, 0)).toBe(0);
+    expect(gridStep(62, -5)).toBe(0);
+    expect(gridStep(Number.NaN, 10)).toBe(0);
+  });
+});

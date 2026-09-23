@@ -1,9 +1,18 @@
-import { describe, expect, it } from "vitest";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { sandboxHome } from "./helpers/home-sandbox.js";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import { buildSessionStack } from "../../src/stack.js";
 import { makeMessageKey, type FabricRecord } from "../../src/core/message.js";
+
+let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
+beforeEach(() => {
+  homeSandbox = sandboxHome();
+});
+afterEach(() => {
+  homeSandbox?.restore();
+  homeSandbox = undefined;
+});
 
 const run = "r_ABCDEFGH" as const;
 const target = "r_12345678" as const;

@@ -131,6 +131,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   cleaning (skill envelopes + `[sub:type]` subagent marks driven by our own `subagent:run`
   entries, disk-cached under `<agent>/cache/session-nav/`). Post-guard, TUI-only.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
+- `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate (design: `docs/dev/quota/`).
 - `src/schedule/` — cron parser, scheduler, persisted schedule store.
 - `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): an editor wrapper rewrites exact
   `/reload` submissions to `/agent reload`, which parks the reload while subagents/workflows are active and
@@ -159,6 +160,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   suffix (`import { x } from "./foo.js"`).
 - **Prettier** formats everything; a versioned pre-commit hook does it automatically —
   enable once with `git config core.hooksPath .githooks`.
+- **UI text language split**: compact inline markers — HUD status lines, tick lines,
+  badge/suffix fragments — use English tokens only (`5h 62%`, `·stale 12m`, `⤓demoted`);
+  never mix Chinese words into them. Chinese is reserved for prose blocks aimed at the
+  user/model (multi-line advice/warning copy).
 - **Conventional Commits** (`feat|fix|docs|refactor|perf|test|chore|ci(scope): ...`); the
   CHANGELOG is generated from them.
 - Tool parameters use `@sinclair/typebox` schemas (the only runtime dependency).

@@ -96,6 +96,40 @@ function renderBgAgents(session: HudSession, ctx: ExtensionContext): string | un
   return `${theme.fg("dim", "bg ")}${theme.fg("accent", `●${session.bgAgents.size}`)}${theme.fg("muted", ` ${elapsed}`)}`;
 }
 
+/**
+ * 扩展状态行组装（纯函数，可单测）：
+ * - quota 条目独占一行，放在最后（多 provider + stale 标记的宽度随时间增长，
+ *   挤在 status 行里会把 cache/watching 等状态押到折行外；且额度是调度参考值，
+ *   与 keepalive 心跳不是同一关注面）。
+ * - 其余条目按 key localeCompare 排序、sanitize 后 join(" ") 合并为一行。
+ * - feishu-notify 条目用 theme.fg("muted", ...) 包裹，与其余 footer 状态标签同色调。
+ * - 空文本条目跳过；两行都可能缺席（返回数组不含空串）。
+ */
+export function renderExtensionStatusLines(
+  entries: readonly [string, string][],
+  theme: { fg(color: string, text: string): string },
+): string[] {
+  const others = entries
+    .filter(([key]) => key !== "quota")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, text]) => {
+      const sanitized = sanitizeStatusText(text);
+      if (!sanitized) return undefined;
+      // feishu-notify supplies plain status text; keep its active marker in
+      // the same subdued palette as the other footer status labels.
+      return key === "feishu-notify" ? theme.fg("muted", sanitized) : sanitized;
+    })
+    .filter((part): part is string => part !== undefined);
+  const lines: string[] = [];
+  if (others.length > 0) lines.push(others.join(" "));
+  const quotaText = entries.find(([key]) => key === "quota")?.[1];
+  if (quotaText !== undefined) {
+    const sanitized = sanitizeStatusText(quotaText);
+    if (sanitized) lines.push(sanitized);
+  }
+  return lines;
+}
+
 function renderLlmTiming(session: HudSession, ctx: ExtensionContext): string {
   const timing = session.timing;
   const activeLlmDurationMs = timing.llmStartedAt === undefined ? undefined : performance.now() - timing.llmStartedAt;
@@ -290,15 +324,6 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
         }
 
         const extensionStatuses = footerData.getExtensionStatuses();
-        const statusLine = Array.from(extensionStatuses.entries())
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([key, text]) => {
-            const sanitized = sanitizeStatusText(text);
-            // feishu-notify supplies plain status text; keep its active marker in
-            // the same subdued palette as the other footer status labels.
-            return key === "feishu-notify" ? theme.fg("muted", sanitized) : sanitized;
-          })
-          .join(" ");
         const lines = [
           truncateToWidth(pwdLine, width, theme.fg("dim", "...")),
           ...renderWorktreeLines(session, ctx, width),
@@ -312,7 +337,10 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
         if (timeParts.length > 0) {
           lines.push(truncateToWidth(timeParts.join(theme.fg("dim", " │ ")), width, ""));
         }
-        if (statusLine) lines.push(...wrapTextWithAnsi(statusLine, width));
+        // 扩展状态行（status 行 + quota 独占行），随后 tools 统计独占一行。
+        for (const statusLine of renderExtensionStatusLines(Array.from(extensionStatuses.entries()), theme)) {
+          lines.push(...wrapTextWithAnsi(statusLine, width));
+        }
         // tools 统计独占一行：它的宽度随工具种类增长，挤在 status 行里会把
         // 前面的扩展状态（cache / watching / input·rounds）押到折行外。
         // 一次工具都没调过时不占行（旧版与 status 合行，空内容不费版面）。

@@ -20,14 +20,26 @@ export interface ModelCandidate extends ModelRef {
   name?: string;
 }
 
-/** Short, self-correcting candidate list for config errors. Empty input → empty string. */
-export function formatModelCandidates(candidates: readonly ModelCandidate[], limit = 8): string {
+/**
+ * Short, self-correcting candidate list for config errors. Empty input → empty string.
+ *
+ * `annotate` (quota-plan §4.3) appends an optional per-candidate suffix (the
+ * quota mark, e.g. " [5h 93% ⛔]"). Returning undefined marks nothing; when
+ * `annotate` is omitted — or returns undefined for every visible candidate —
+ * the output is byte-for-byte identical to the pre-quota implementation
+ * (locked by tests/config/model-hint.test.ts).
+ */
+export function formatModelCandidates(
+  candidates: readonly ModelCandidate[],
+  limit = 8,
+  annotate?: (candidate: ModelCandidate) => string | undefined,
+): string {
   const visible = candidates.slice(0, limit);
   if (visible.length === 0) return "";
   const rest = candidates.length - visible.length;
-  return `Available: ${visible.map((candidate) => `${candidate.provider}/${candidate.id}`).join(", ")}${
-    rest > 0 ? `, … +${rest} more` : ""
-  }`;
+  return `Available: ${visible
+    .map((candidate) => `${candidate.provider}/${candidate.id}${annotate?.(candidate) ?? ""}`)
+    .join(", ")}${rest > 0 ? `, … +${rest} more` : ""}`;
 }
 
 /**
