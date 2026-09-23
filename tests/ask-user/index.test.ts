@@ -102,6 +102,36 @@ describe("ask_user entry orchestration", () => {
     ).rejects.toThrow(/not strings/);
   });
 
+  it("derives tab headers for a multi-question call instead of failing, and reports the note", async () => {
+    const { tool } = capture();
+    const params = {
+      questions: [
+        { question: "Which DB?", options: [{ label: "Postgres" }, { label: "SQLite" }] },
+        { question: "Which region?", options: [{ label: "us-east-1" }, { label: "eu-west-1" }] },
+      ],
+    };
+    const result = await tool.execute(
+      "id",
+      params,
+      undefined,
+      undefined,
+      tuiContext((component) => {
+        component.handleInput("\r");
+        component.handleInput("\r");
+        component.handleInput("\r"); // confirm q1, confirm q2, submit on the summary tab
+      }),
+    );
+    expect(result.details.cancelled).toBe(false);
+    expect(result.details.questions.map((question: { header?: string }) => question.header)).toEqual([
+      "Which DB",
+      "Which region",
+    ]);
+    expect(result.content).toHaveLength(2);
+    expect(result.content[0].text).toContain('"Which DB?" = "Postgres"');
+    expect(result.content[1].text).toContain("2 tab header(s) were auto-derived");
+    expect(result.content[1].text).toContain("<=12 chars");
+  });
+
   it("disables ask_user before throwing in headless mode", async () => {
     const captured = capture();
     await expect(

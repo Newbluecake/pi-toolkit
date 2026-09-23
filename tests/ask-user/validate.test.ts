@@ -1,7 +1,7 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
-import { HEADER_MAX_CHARS, InputSchema, type Question } from "../../src/ask-user/types.js";
+import { InputSchema, type Question } from "../../src/ask-user/types.js";
 import { validateInput } from "../../src/ask-user/validate.js";
 
 const question = (overrides: Partial<Question> = {}): Question => ({
@@ -18,7 +18,7 @@ describe("validateInput", () => {
     ).toBeNull();
   });
 
-  it("runs question length before control, duplicate, option, and header checks", () => {
+  it("runs question length before duplicate, option, and header checks", () => {
     const tooLong = "x".repeat(QUESTION_LIMIT + 1);
     const result = validateInput([
       { question: tooLong, header: "same header", options: ["A", "B"] },
@@ -32,8 +32,7 @@ describe("validateInput", () => {
     expect(result).toContain("Question text exceeds");
   });
 
-  it("rejects control characters and duplicate questions", () => {
-    expect(validateInput([question({ question: "line1\nline2" })])).toContain("control characters");
+  it("rejects duplicate questions", () => {
     expect(
       validateInput([question({ question: "Same", header: "A" }), question({ question: "Same", header: "B" })]),
     ).toContain("Duplicate question");
@@ -64,18 +63,10 @@ describe("validateInput", () => {
     );
   });
 
-  it("requires unique non-empty headers for multiple questions", () => {
-    expect(validateInput([question({ question: "Q1", header: "First" }), question({ question: "Q2" })])).toContain(
-      "requires a non-empty header",
-    );
+  it("requires unique headers for multiple questions", () => {
     expect(
       validateInput([question({ question: "Q1", header: "Same" }), question({ question: "Q2", header: " Same " })]),
     ).toContain("Duplicate header");
-  });
-
-  it("checks the header length last and honors the boundary", () => {
-    expect(validateInput([question({ header: "1".repeat(HEADER_MAX_CHARS) })])).toBeNull();
-    expect(validateInput([question({ header: "1".repeat(HEADER_MAX_CHARS + 1) })])).toContain("Header exceeds");
   });
 });
 

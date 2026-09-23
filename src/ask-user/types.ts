@@ -24,11 +24,12 @@ export const OptionSchema = Type.Object({
 export const QuestionSchema = Type.Object({
   question: Type.String({
     description:
-      "Full question text. Must be one self-contained decision; avoid multi-part questions. <=1000 chars; plain single-line text only (no newlines or control characters).",
+      "Full question text. Must be one self-contained decision; avoid multi-part questions. <=1000 chars; newlines are collapsed to single spaces.",
   }),
   header: Type.Optional(
     Type.String({
-      description: "Tab label, <=12 chars, required when questions.length > 1. Omit for a single question.",
+      description:
+        "Tab label, <=12 chars. Recommended whenever you send more than one question; an omitted or over-long header is auto-derived/truncated from the question text.",
     }),
   ),
   context: Type.Optional(

@@ -8,7 +8,7 @@ const EXPECTED_DESCRIPTION = `Ask the user to resolve ambiguity you cannot resol
 
 Do NOT use this tool to outsource judgment you should make — if you can form a defensible recommendation from the codebase, proceed and state your choice. Do NOT use for trivia answerable by reading code/docs, or for simple confirmations ("I'll delete X") where plain text suffices. You cannot use this tool to collect free-form requirements, long-form feedback, or multi-paragraph input — it returns short selections only.
 
-If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text.
+If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text. In multi-question mode give each question a short header (<=12 chars) for the tab bar; if you omit it, one is derived from the question text.
 
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
@@ -17,13 +17,13 @@ Examples:
 
 Don't:
 - Passing options as a string array ("options":["A","B"]) — each option must be {"label","description"}.
-- Forgetting header in multi-question mode (questions.length > 1).
 - Flattening question/header/options to the top level — wrap them in questions:[...].
 - Including an "Other" option — it is added automatically.`;
 const EXPECTED_GUIDELINES = [
   "Use ask_user only when the request has ≥2 reasonable approaches you cannot resolve from context. Models over-ask because asking feels safer than deciding — resist this: if context makes the answer clear, proceed without asking.",
   "Gather context first (read/grep) and pass a short summary via the context field — don't ask blind. If the answer becomes clear after gathering context, proceed and state your choice.",
   "Ask focused questions; each question = one decision with mutually exclusive options. Batch related decisions into one call (1-4 questions).",
+  "In multi-question mode (2-4 questions) give each question a short header (<=12 chars) — it labels the tab; an omitted header is auto-derived from the question text.",
   "Do NOT use ask_user for trivia answerable by reading code/docs, or to confirm simple actions ('I'll delete X') — plain text suffices there.",
   "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
   "Do NOT include an 'Other' option yourself — it is always available automatically.",
@@ -48,7 +48,7 @@ describe("registered prompt quality", () => {
     expect(tool.description).toContain('"options":[{"label"');
     expect(tool.description).toContain("Don't:");
     expect(tool.description).toContain('Passing options as a string array ("options":["A","B"])');
-    expect(tool.description).toContain("Forgetting header in multi-question mode");
+    expect(tool.description).toContain("give each question a short header (<=12 chars)");
     expect(tool.description).toContain("Flattening question/header/options to the top level");
     expect(tool.description).toContain('Including an "Other" option');
   });

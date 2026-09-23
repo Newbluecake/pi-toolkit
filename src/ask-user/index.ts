@@ -9,7 +9,8 @@ import type {
 import { type Static } from "@sinclair/typebox";
 
 import { askUserInteract, protoAnswersToResult, toProtoQuestions } from "./channel-handler.js";
-import type { AskUserDetails, AnswerValue, Option, Question, Result, ThemeLike } from "./types.js";
+import { normalizeQuestions } from "./normalize.js";
+import type { AskUserDetails, AnswerValue, InputQuestion, Option, Question, Result, ThemeLike } from "./types.js";
 import { HEADER_MAX_CHARS, InputSchema } from "./types.js";
 import { AskUserComponent } from "./component.js";
 import { answerValueText } from "./submit-view.js";
@@ -110,7 +111,7 @@ const DESCRIPTION = `Ask the user to resolve ambiguity you cannot resolve yourse
 
 Do NOT use this tool to outsource judgment you should make — if you can form a defensible recommendation from the codebase, proceed and state your choice. Do NOT use for trivia answerable by reading code/docs, or for simple confirmations ("I'll delete X") where plain text suffices. You cannot use this tool to collect free-form requirements, long-form feedback, or multi-paragraph input — it returns short selections only.
 
-If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text.
+If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text. In multi-question mode give each question a short header (<=12 chars) for the tab bar; if you omit it, one is derived from the question text.
 
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
@@ -119,7 +120,6 @@ Examples:
 
 Don't:
 - Passing options as a string array ("options":["A","B"]) — each option must be {"label","description"}.
-- Forgetting header in multi-question mode (questions.length > 1).
 - Flattening question/header/options to the top level — wrap them in questions:[...].
 - Including an "Other" option — it is added automatically.`;
 
@@ -134,6 +134,7 @@ export default function (pi: ExtensionAPI): void {
       "Use ask_user only when the request has ≥2 reasonable approaches you cannot resolve from context. Models over-ask because asking feels safer than deciding — resist this: if context makes the answer clear, proceed without asking.",
       "Gather context first (read/grep) and pass a short summary via the context field — don't ask blind. If the answer becomes clear after gathering context, proceed and state your choice.",
       "Ask focused questions; each question = one decision with mutually exclusive options. Batch related decisions into one call (1-4 questions).",
+      "In multi-question mode (2-4 questions) give each question a short header (<=12 chars) — it labels the tab; an omitted header is auto-derived from the question text.",
       "Do NOT use ask_user for trivia answerable by reading code/docs, or to confirm simple actions ('I'll delete X') — plain text suffices there.",
       "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
       "Do NOT include an 'Other' option yourself — it is always available automatically.",
@@ -147,9 +148,10 @@ export default function (pi: ExtensionAPI): void {
       _onUpdate: AgentToolUpdateCallback<AskUserDetails> | undefined,
       ctx: ExtensionContext,
     ): Promise<ExecuteResult> {
-      const questions = params.questions as Question[];
-      const validationError = validateInput(params.questions);
+      const normalized = normalizeQuestions(params.questions as InputQuestion[]);
+      const validationError = validateInput(normalized.questions);
       if (validationError) throw new Error(`Error: ${validationError}`);
+      const questions = normalized.questions as Question[];
 
       if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
         disableAskUser(pi);
@@ -179,18 +181,25 @@ export default function (pi: ExtensionAPI): void {
       if (outcome.kind === "user-cancelled") return cancelledResult(questions, USER_CANCELLED_TEXT);
 
       const result = outcome.result;
+      const content: ExecuteResult["content"] = [
+        {
+          type: "text",
+          text: result.questions
+            .map((question) => {
+              const answer = result.answers[question.question];
+              return `"${question.question}" = "${answer ? answerValueText(answer) : "(no answer)"}"`;
+            })
+            .join("\n"),
+        },
+      ];
+      if (normalized.derivedHeaders > 0) {
+        content.push({
+          type: "text",
+          text: `(note: ${normalized.derivedHeaders} tab header(s) were auto-derived from the question text — pass a short "header" (<=${HEADER_MAX_CHARS} chars) per question next time.)`,
+        });
+      }
       return {
-        content: [
-          {
-            type: "text",
-            text: result.questions
-              .map((question) => {
-                const answer = result.answers[question.question];
-                return `"${question.question}" = "${answer ? answerValueText(answer) : "(no answer)"}"`;
-              })
-              .join("\n"),
-          },
-        ],
+        content,
         details: result satisfies Result,
       };
     },
