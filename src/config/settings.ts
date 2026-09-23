@@ -168,6 +168,13 @@ export interface CacheTtlSettings {
    *  累计口径：结算账本的 cost.cacheWrite × 0.375（5m→1h 边际占比，推导见 adaptive.ts
    *  MARGINAL_WRITE_FRACTION）。Default 1.0。 */
   adaptiveWriteBudgetUsd: number;
+  /** 每会话「入场费」预算（tokens）：未被 1h 覆盖的首次升级会整条前缀重写，单列一档预算，
+   *  不与 adaptiveWriteBudgetTokens（稳态边际）混算。0 = 永不开新前缀 ⇒ 整条升级路径关闭。
+   *  Default 600000。 */
+  adaptiveFeeBudgetTokens: number;
+  /** 入场费的美元预算（0 = 关闭美元闸）。累计口径：cost.cacheWrite × 0.95（推导见 adaptive.ts
+   *  ENTRY_FEE_MARGINAL_WRITE_FRACTION）。Default 3.0。 */
+  adaptiveFeeBudgetUsd: number;
   /** 热升级允许的预测增量 Δ̂ 上限（tokens）。Default 32000。 */
   adaptiveMaxDeltaTokens: number;
   /** 距上次 1h 升级累计写入超过该值才允许再次热升级（tokens）。Default 16000。 */
@@ -386,6 +393,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     adaptiveEnabled: true,
     adaptiveWriteBudgetTokens: 200_000,
     adaptiveWriteBudgetUsd: 1.0,
+    adaptiveFeeBudgetTokens: 600_000,
+    adaptiveFeeBudgetUsd: 3.0,
     adaptiveMaxDeltaTokens: 32_000,
     adaptiveRefreshAfterTokens: 16_000,
     adaptiveColdUpgrades: 1,
@@ -700,6 +709,13 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
       Number.MAX_SAFE_INTEGER,
     ),
     adaptiveWriteBudgetUsd: usd(value.adaptiveWriteBudgetUsd, defaults.adaptiveWriteBudgetUsd, 0, 100),
+    adaptiveFeeBudgetTokens: num(
+      value.adaptiveFeeBudgetTokens,
+      defaults.adaptiveFeeBudgetTokens,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    adaptiveFeeBudgetUsd: usd(value.adaptiveFeeBudgetUsd, defaults.adaptiveFeeBudgetUsd, 0, 100),
     adaptiveMaxDeltaTokens: num(
       value.adaptiveMaxDeltaTokens,
       defaults.adaptiveMaxDeltaTokens,

@@ -98,7 +98,12 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   fallback for routes that report no cost split; either one trips `write-budget` for the rest of
   the session. The M2 probe floor scales with the measured prefix — `min(64k, max(4k, 0.5×P))` —
   so a near-full prefix rewrite is caught at small prefixes while P ≥ 128k keeps the old fixed
-  64k floor. Design: `docs/dev/cache-ttl-adaptive/plan.md`.
+  64k floor. **Entry fee** (plan §16.3, field-measured): a `ttl:"1h"` request does not read a
+  5m-written prefix, so the FIRST upgrade of a prefix rewrites all of it as 1h. That one-time
+  cost has its own budget (`adaptiveFeeBudgetTokens` 600k / `adaptiveFeeBudgetUsd` $3, accrued at
+  0.95× `cost.cacheWrite`; `0` tokens = feature off) and the warm probes (`warm-miss` /
+  `warm-write-too-expensive`) only judge COVERED 1h→1h settlements — judging the transition
+  false-tripped every session on its first upgrade. Design: `docs/dev/cache-ttl-adaptive/plan.md`.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`

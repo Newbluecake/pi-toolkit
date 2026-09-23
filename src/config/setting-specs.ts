@@ -282,6 +282,20 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description:
       "Per-session USD budget (marginal 1h-upgrade write cost) for adaptive upgrades; 0 disables the USD gate (unlike adaptiveWriteBudgetTokens, where 0 disables upgrading entirely)",
   },
+  "cacheTtl.adaptiveFeeBudgetTokens": count(
+    "cacheTtl.adaptiveFeeBudgetTokens",
+    0,
+    "Per-session entry-fee budget (tokens) for the first, full-prefix 1h write of a prefix; 0 disables opening any prefix",
+  ),
+  "cacheTtl.adaptiveFeeBudgetUsd": {
+    kind: "number",
+    path: "cacheTtl.adaptiveFeeBudgetUsd",
+    min: 0,
+    // Same mirror-the-parser rule as adaptiveWriteBudgetUsd above.
+    max: 100,
+    description:
+      "Per-session USD budget for entry fees (first full-prefix 1h write); 0 disables the USD fee gate (tokens still apply)",
+  },
   "cacheTtl.adaptiveMaxDeltaTokens": count(
     "cacheTtl.adaptiveMaxDeltaTokens",
     0,

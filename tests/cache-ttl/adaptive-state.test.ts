@@ -23,6 +23,8 @@ const NOW = 1_000_000;
 const CONFIG: AdaptiveConfig = {
   writeBudgetTokens: 200_000,
   writeBudgetUsd: 1,
+  feeBudgetTokens: 600_000,
+  feeBudgetUsd: 3,
   maxDeltaTokens: 32_000,
   refreshAfterTokens: 16_000,
   coldUpgrades: 1,
@@ -402,7 +404,9 @@ describe("M1: ledger anchoring against compaction / model switch", () => {
       CONFIG,
     );
     expect(after.breaker).toBeUndefined();
-    expect(after.upgradeWriteTokens).toBe(55_000);
+    // Uncovered ⇒ the rewrite is the entry fee, booked to the fee budget (plan.md §16.3).
+    expect(after.feeWriteTokens).toBe(55_000);
+    expect(after.upgradeWriteTokens).toBe(0);
     expect(after.unconfirmed1hWrites).toBe(1);
   });
 
@@ -430,7 +434,8 @@ describe("M1: ledger anchoring against compaction / model switch", () => {
     expect(after.pending).toBeUndefined();
     expect(after.oneHourCoverUntil).toBeUndefined();
     expect(after.droppedPending).toBe(1);
-    expect(after.upgradeWriteTokens).toBe(5_000); // m1 pre-booked predictedDeltaTokens
+    expect(after.feeWriteTokens).toBe(5_000); // m1 pre-book, on the fee side (the dropped upgrade was uncovered)
+    expect(after.upgradeWriteTokens).toBe(0);
     expect(after.breaker?.reason).toBe("warm-miss"); // breaker survives
     expect(after.lastInvalidateSeq).toBe(8);
   });
@@ -440,10 +445,21 @@ describe("M1: ledger anchoring against compaction / model switch", () => {
 // F. Probes / breaker reducers (incl. M2 composite predicate)
 // ---------------------------------------------------------------------------
 
+/** Steady-state (1h→1h) warm pending: the prefix is already 1h-backed, so the probes apply. */
 function warmPendingState(predictedDeltaTokens = 5_000): AdaptiveState {
   return state({
     lastRequestStartedAt: NOW,
-    pending: { requestSeq: 1, minEntrySeq: 6, at: NOW, class: "warm", predictedDeltaTokens },
+    pending: { requestSeq: 1, minEntrySeq: 6, at: NOW, class: "warm", predictedDeltaTokens, covered1h: true },
+    oneHourCoverUntil: NOW + 3_600_000,
+    lastUpgradeAt: NOW,
+  });
+}
+
+/** Entry-fee (uncovered 5m→1h transition) warm pending — the shape every session starts with. */
+function feePendingState(predictedDeltaTokens = 5_000): AdaptiveState {
+  return state({
+    lastRequestStartedAt: NOW,
+    pending: { requestSeq: 1, minEntrySeq: 6, at: NOW, class: "warm", predictedDeltaTokens, covered1h: false },
     oneHourCoverUntil: NOW + 3_600_000,
     lastUpgradeAt: NOW,
   });
@@ -533,7 +549,7 @@ describe("onLedgerObserved probes and breaker", () => {
     expect(after.breaker).toBeUndefined();
   });
 
-  it("warm probe with cacheRead=0 ⇒ warm-miss", () => {
+  it("warm probe with cacheRead=0 ⇒ warm-miss (steady state only)", () => {
     const after = onLedgerObserved(
       warmPendingState(),
       ledger({ entrySeq: 6, cacheRead: 0, cacheWrite: 30_000 }),
@@ -543,9 +559,150 @@ describe("onLedgerObserved probes and breaker", () => {
     expect(after.breaker?.reason).toBe("warm-miss");
   });
 
+  // -------------------------------------------------------------------------
+  // Entry fee (plan.md §16.3) — field-evidence regressions. Numbers taken from a
+  // real audit trail: warm pending Δ̂=966 settling as read=0 / write=83139 /
+  // cacheWrite1h=83139 (the upstream honored ttl:1h and rewrote the prefix).
+  // -------------------------------------------------------------------------
+
+  it("entry fee: an UNCOVERED warm settlement with cacheRead=0 and a full rewrite does NOT trip", () => {
+    const after = onLedgerObserved(
+      feePendingState(966),
+      ledger({ entrySeq: 6, cacheRead: 0, cacheWrite: 83_139, cacheWrite1h: 83_139, cacheWriteUsd: 0.83139 }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(after.breaker).toBeUndefined();
+    expect(after.feeUpgrades).toBe(1);
+    expect(after.feeWriteTokens).toBe(83_139);
+    expect(after.feeWriteUsd).toBeCloseTo(0.95 * 0.83139, 10);
+    // The marginal budget is untouched — that is what keeps `write-budget` from
+    // firing on the very first upgrade of a large-prefix session.
+    expect(after.upgradeWriteTokens).toBe(0);
+    expect(after.upgradeWriteUsd).toBe(0);
+    expect(after.confirmed1hWrites).toBe(1);
+  });
+
+  it("entry fee: the same shape one upgrade later (COVERED) still trips — the probe is deferred, not removed", () => {
+    const after = onLedgerObserved(
+      warmPendingState(966),
+      ledger({ entrySeq: 6, cacheRead: 0, cacheWrite: 83_139, cacheWrite1h: 83_139 }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(after.breaker?.reason).toBe("warm-miss");
+  });
+
+  it("entry fee: a 265k transition no longer trips write-budget (W=200k) on its own settlement", () => {
+    const after = onLedgerObserved(
+      feePendingState(4_712),
+      ledger({ entrySeq: 6, cacheRead: 0, cacheWrite: 265_875, cacheWrite1h: 265_875, cacheWriteUsd: 2.65875 }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(after.breaker).toBeUndefined();
+    expect(after.feeWriteTokens).toBe(265_875);
+  });
+
+  it("entry fee: once the fee budget is gone a NEW prefix is refused, steady state still upgrades", () => {
+    const spent = state({
+      lastRequestStartedAt: NOW - 60_000,
+      feeWriteTokens: 700_000,
+      feeUpgrades: 2,
+    });
+    const refused = decideAdaptiveTtl(
+      decideInput({ signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * 60_000 }), state: spent }),
+    );
+    expect(refused.upgrade).toBe(false);
+    expect(refused.reason).toBe("fee-budget");
+
+    const covered = decideAdaptiveTtl(
+      decideInput({
+        signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * 60_000 }),
+        state: { ...spent, oneHourCoverUntil: NOW + 1_800_000, confirmed1hWrites: 1 },
+      }),
+    );
+    expect(covered.upgrade).toBe(true);
+    expect(covered.class).toBe("warm");
+  });
+
+  it("entry fee: a short-horizon signal with no long-gap history cannot open a prefix", () => {
+    const d = decideAdaptiveTtl(
+      decideInput({ signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 90_000 }) }), // 90s ≪ coldMinHorizon
+    );
+    expect(d.upgrade).toBe(false);
+    expect(d.reason).toBe("fee-horizon-too-short");
+    // ...but the same signal upgrades freely once the prefix is already 1h-backed.
+    const covered = decideAdaptiveTtl(
+      decideInput({
+        signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 90_000 }),
+        state: state({
+          lastRequestStartedAt: NOW - 60_000,
+          oneHourCoverUntil: NOW + 1_800_000,
+          confirmed1hWrites: 1,
+        }),
+      }),
+    );
+    expect(covered.upgrade).toBe(true);
+  });
+
+  it("entry fee: full session arc — pay once, then three cheap steady-state upgrades, no breaker", () => {
+    // Reproduces the one audited session that survived (its first upgrade was a
+    // cold one, which the old code never probed) — now the warm path behaves the same.
+    let s = state({ lastRequestStartedAt: NOW - 60_000 });
+    const strong = signals({ subagentRuns: 1, maxSubagentHorizonMs: 4 * 3_600_000 });
+    let seq = 6;
+    let now = NOW;
+
+    const fee = decideAdaptiveTtl(decideInput({ now, signals: strong, state: s, ledger: ledger({ entrySeq: seq }) }));
+    expect(fee.upgrade).toBe(true);
+    s = noteDecision(s, fee, { now, gapMs: 60_000, entriesLength: seq, strongSignals: 1 });
+    expect(s.pending?.covered1h).toBe(false);
+    s = onLedgerObserved(
+      s,
+      ledger({ entrySeq: seq, cacheRead: 0, cacheWrite: 174_109, cacheWrite1h: 174_109 }),
+      now,
+      CONFIG,
+    );
+    expect(s.breaker).toBeUndefined();
+
+    for (const [read, write] of [
+      [185_040, 3_334],
+      [208_214, 268],
+      [225_049, 897],
+    ] as const) {
+      now += 120_000;
+      seq += 1;
+      s = { ...s, tokensSinceLast1hWrite: 20_000 }; // past the refresh throttle
+      const d = decideAdaptiveTtl(
+        decideInput({
+          now,
+          signals: strong,
+          state: { ...s, lastRequestStartedAt: now - 60_000 },
+          ledger: ledger({ entrySeq: seq, cacheRead: read, cacheWrite: write }),
+        }),
+      );
+      expect(d.upgrade).toBe(true);
+      expect(d.class).toBe("warm");
+      s = noteDecision(s, d, { now, gapMs: 60_000, entriesLength: seq, strongSignals: 1 });
+      expect(s.pending?.covered1h).toBe(true); // steady state from here on
+      s = onLedgerObserved(s, ledger({ entrySeq: seq, cacheRead: read, cacheWrite: write }), now, CONFIG);
+      expect(s.breaker).toBeUndefined();
+    }
+    expect(s.feeUpgrades).toBe(1);
+    expect(s.upgradeWriteTokens).toBe(3_334 + 268 + 897); // only increments hit the marginal budget
+  });
+
   it("cold probes never run the warm checks (M1 companion)", () => {
     const s = state({
-      pending: { requestSeq: 1, minEntrySeq: 6, at: NOW, class: "cold", predictedDeltaTokens: 410_000 },
+      pending: {
+        requestSeq: 1,
+        minEntrySeq: 6,
+        at: NOW,
+        class: "cold",
+        predictedDeltaTokens: 410_000,
+        covered1h: true,
+      },
     });
     const after = onLedgerObserved(s, ledger({ entrySeq: 6, cacheRead: 0, cacheWrite: 400_000 }), NOW + 5_000, {
       ...CONFIG,

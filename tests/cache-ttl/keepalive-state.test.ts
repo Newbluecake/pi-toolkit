@@ -1091,6 +1091,12 @@ function adaptiveSnapshot(overrides: Partial<AdaptiveSnapshot> = {}): AdaptiveSn
     upgradeWriteUsd: 0,
     writeBudgetUsd: 1,
     usdFraction: 0,
+    feeUpgrades: 0,
+    feeWriteTokens: 0,
+    feeBudgetTokens: 600_000,
+    feeWriteUsd: 0,
+    feeBudgetUsd: 3,
+    feeBudgetExhausted: false,
     warmUpgrades: 0,
     coldUpgradesUsed: 0,
     coldUpgradeCap: 1,
@@ -1183,6 +1189,10 @@ describe("renderCacheStatus — adaptive segments", () => {
       writeBudgetTokens: 200_000,
       upgradeWriteUsd: 0,
       writeBudgetUsd: 1,
+      feeWriteTokens: 0,
+      feeBudgetTokens: 600_000,
+      feeWriteUsd: 0,
+      feeBudgetUsd: 3,
     });
     expect(snapshot.segments.find((s) => s.id === "adaptive:breaker")?.detail).toMatchObject({
       reason: "warm-write-too-expensive",
@@ -1306,5 +1316,25 @@ describe("renderAdaptiveReportLines — dual write budget line", () => {
     const line = budgetLine({ upgradeWriteTokens: 1_000, upgradeWriteUsd: 2.5, writeBudgetUsd: 0 });
     expect(line).toContain("$2.50/off");
     expect(line).toContain("write 1k/200k tok"); // token fallback stays the visible gate
+  });
+
+  it("reports the entry fee on its own line, never mixed into the marginal budget", () => {
+    const lines = renderAdaptiveReportLines(
+      adaptiveSnapshot({ feeUpgrades: 1, feeWriteTokens: 265_875, feeWriteUsd: 2.52, upgradeWriteTokens: 4_499 }),
+    );
+    const fee = lines.find((line) => line.startsWith("adaptive entry fee:")) ?? "";
+    expect(fee).toContain("paid 1×");
+    expect(fee).toContain("266k/600k tok");
+    expect(fee).toContain("$2.52/$3.00");
+    expect(fee).not.toContain("exhausted");
+    expect(lines.find((line) => line.startsWith("adaptive budget:"))).toContain("write 4k/200k tok");
+  });
+
+  it("flags an exhausted fee budget (no new prefix can be opened)", () => {
+    const fee =
+      renderAdaptiveReportLines(adaptiveSnapshot({ feeWriteTokens: 700_000, feeBudgetExhausted: true })).find((line) =>
+        line.startsWith("adaptive entry fee:"),
+      ) ?? "";
+    expect(fee).toContain("exhausted (no new prefix)");
   });
 });

@@ -182,6 +182,68 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
     }
   });
 
+  it("entry fee (plan.md §16.3): the first upgrade may rewrite the whole prefix without tripping; the second may not", async () => {
+    // Field trace (audited session): warm upgrade Δ̂≈966 settles as
+    // cacheRead=0 / cacheWrite=83139 / cacheWrite1h=83139 — the upstream honored
+    // ttl:"1h" and rewrote the prefix because a 1h request does not read a
+    // 5m-written entry. That is the entry fee, not a route pathology.
+    const { pi, emit } = fakePi();
+    const settings = settingsWith();
+    const entries: unknown[] = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          model: "claude-x",
+          usage: { cacheRead: 77_096, cacheWrite: 966, input: 5, output: 5, cost: { total: 0 } },
+        },
+      },
+    ];
+    const ctx = fakeCtx();
+    (ctx as unknown as { sessionManager: { getEntries: () => unknown[] } }).sessionManager.getEntries = () => entries;
+    const settle = (usage: Record<string, unknown>) =>
+      entries.push({ type: "message", message: { role: "assistant", model: "claude-x", usage } });
+
+    const stack = buildSessionStack(pi, ctx, settings, emptyTypes, []);
+    try {
+      const holder: { current?: { adaptive?: typeof stack.adaptive } } = { current: stack };
+      wireCacheTtl(pi, settings, { adaptive: () => holder.current?.adaptive });
+      const sid = "session-under-test";
+
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx); // records lastRequestStartedAt
+      stack.adaptive?.noteUiPromptStart(sid, stack.adaptive.instanceId);
+
+      // 1) The transition: upgraded, then settles as a full-prefix 1h rewrite.
+      const [fee] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(fee)).toBe("1h");
+      settle({ cacheRead: 0, cacheWrite: 83_139, cacheWrite1h: 83_139, input: 5, output: 5, cost: { total: 0 } });
+      await emit("turn_end", {}, ctx);
+
+      let snap = stack.adaptive?.snapshot();
+      expect(snap?.breaker).toBeUndefined(); // used to be `warm-miss` here
+      expect(snap?.feeUpgrades).toBe(1);
+      expect(snap?.feeWriteTokens).toBe(83_139);
+      expect(snap?.upgradeWriteTokens).toBe(0);
+
+      // 2) Steady state: the prefix is 1h-backed now, so the same shape IS a
+      //    real violation and must still disable the session.
+      settle({ cacheRead: 84_000, cacheWrite: 20_000, input: 5, output: 5, cost: { total: 0 } });
+      await emit("turn_end", {}, ctx);
+      const [second] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(second)).toBe("1h");
+      settle({ cacheRead: 0, cacheWrite: 90_000, cacheWrite1h: 90_000, input: 5, output: 5, cost: { total: 0 } });
+      await emit("turn_end", {}, ctx);
+
+      snap = stack.adaptive?.snapshot();
+      expect(snap?.breaker?.reason).toBe("warm-miss");
+    } finally {
+      stack.adaptive?.dispose();
+      stack.keepalive?.dispose();
+      stack.scheduler.stop();
+      stack.rpc.close();
+    }
+  });
+
   it("adaptiveEnabled:false leaves the service unbuilt and never writes a ttl", async () => {
     const { pi, emit } = fakePi();
     const settings = settingsWith({ adaptiveEnabled: false });

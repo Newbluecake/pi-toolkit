@@ -23,6 +23,24 @@
  *   `0.5 × measured prefix` for small prefixes, so a full-prefix rewrite on a
  *   pathological route trips at P=40k too (the fixed 64k floor could never see
  *   it); large prefixes are clamped back to 64k — byte-identical to before.
+ * - ENTRY FEE (field-evidence revision, plan.md §16.3): measured on real routes,
+ *   a request carrying `ttl:"1h"` does NOT read a prefix that was cached at 5m —
+ *   the first upgrade of a prefix rewrites the WHOLE prefix as 1h (`cacheRead = 0`
+ *   or a tiny residue, `cacheWrite1h = cacheWrite ≈ P`), and only the FOLLOWING
+ *   1h→1h upgrades bill the increment (§0.4 corollary 1). That one-time cost is
+ *   the "entry fee". Consequences baked in here:
+ *     (a) the warm probes only judge COVERED (1h→1h) settlements — judging the
+ *         transition made `warm-miss` / `warm-write-too-expensive` fire on the
+ *         very first upgrade of every session, killing the feature before it
+ *         could ever amortize the fee it had just paid;
+ *     (b) the fee is accounted against its OWN budget (`feeWriteTokens/Usd`),
+ *         so the marginal budget `W` keeps measuring what it was designed for
+ *         (steady-state 1h premiums) instead of tripping `write-budget` on the
+ *         first transition of any session with P > W;
+ *     (c) paying a fee requires a quantified horizon (`fee-horizon-too-short`).
+ *   The structural "this route ignores ttl:1h" detector is unchanged: it is the
+ *   §4.3 `1h-ineffective` probe, which by construction observes the state AFTER
+ *   the fee was paid.
  *
  * Hard rule (same as keepalive-state.ts): no pi imports, no module-level mutable
  * state, no implicit clock reads — `now` is always an input. Value-imports
@@ -76,6 +94,13 @@ export const ADAPTIVE_COVER_MS: Millis = 3_600_000;
  *  ledger reports. Applied only when the route reports `cost.cacheWrite` — missing
  *  data is never guessed. */
 export const MARGINAL_WRITE_FRACTION = 0.375;
+/** Same idea for the ENTRY FEE (the first, uncovered 5m→1h upgrade of a prefix), where the
+ *  counterfactual is different: without the upgrade the request would have HIT the 5m entry
+ *  (0.1× base for P) and written only the increment; with it, P is rewritten at 2.0× base.
+ *  Marginal ≈ (2.0 − 0.1)/2.0 = 0.95 of what the ledger reports as `cost.cacheWrite`.
+ *  Using 0.375 here would under-report the fee by ~2.5× and let it hide inside the
+ *  marginal budget. */
+export const ENTRY_FEE_MARGINAL_WRITE_FRACTION = 0.95;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,6 +117,10 @@ export type AdaptiveDeclineReason =
   | "already-1h"
   | "breaker"
   | "write-budget"
+  /** The entry fee (first, uncovered 1h write of a prefix) has no budget left this session. */
+  | "fee-budget"
+  /** An uncovered upgrade would pay the entry fee, but nothing quantifies a horizon long enough to amortize it. */
+  | "fee-horizon-too-short"
   | "no-signal"
   | "delta-too-large"
   | "refresh-throttled"
@@ -125,6 +154,11 @@ export interface AdaptiveConfig {
   writeBudgetTokens: number;
   /** USD marginal-write budget per session (primary gate); 0 = USD gate off (tokens only). */
   writeBudgetUsd: number;
+  /** Per-session budget for ENTRY FEES (uncovered 5m→1h transitions), measured cacheWrite tokens.
+   *  0 = no fee may ever be paid ⇒ no prefix can ever be opened ⇒ the feature is off (rollback switch). */
+  feeBudgetTokens: number;
+  /** USD counterpart of `feeBudgetTokens` (accrued with ENTRY_FEE_MARGINAL_WRITE_FRACTION); 0 = USD fee gate off. */
+  feeBudgetUsd: number;
   maxDeltaTokens: number;
   refreshAfterTokens: number;
   coldUpgrades: number;
@@ -147,6 +181,10 @@ export interface AdaptivePending {
   at: Millis;
   class: AdaptiveUpgradeClass;
   predictedDeltaTokens: number;
+  /** Was the prefix already under a settled 1h entry when this upgrade was decided?
+   *  false ⇒ this upgrade pays the ENTRY FEE (full-prefix 1h rewrite): it is accounted
+   *  against the fee budget and is NOT judged by the warm probes (see the header note). */
+  covered1h: boolean;
 }
 
 export interface AdaptiveReconcileRecord {
@@ -173,6 +211,13 @@ export interface AdaptiveState {
   /** MARGINAL USD cost attributed to upgrades: MARGINAL_WRITE_FRACTION × the settled
    *  ledger's `cost.cacheWrite`, accumulated only when the route reports it (never guessed). */
   upgradeWriteUsd: number;
+  /** Measured cacheWrite of settled ENTRY FEES (uncovered transitions) — kept out of
+   *  `upgradeWriteTokens` so the marginal budget is not spent on a one-time capital cost. */
+  feeWriteTokens: number;
+  /** USD counterpart of `feeWriteTokens` (ENTRY_FEE_MARGINAL_WRITE_FRACTION × `cost.cacheWrite`). */
+  feeWriteUsd: number;
+  /** Count of settled entry fees (observability; a healthy session pays exactly one). */
+  feeUpgrades: number;
   warmUpgrades: number;
   coldUpgradesUsed: number;
   lastColdUpgradeAt: Millis | undefined;
@@ -206,6 +251,9 @@ export function createInitialAdaptiveState(): AdaptiveState {
     breaker: undefined,
     upgradeWriteTokens: 0,
     upgradeWriteUsd: 0,
+    feeWriteTokens: 0,
+    feeWriteUsd: 0,
+    feeUpgrades: 0,
     warmUpgrades: 0,
     coldUpgradesUsed: 0,
     lastColdUpgradeAt: undefined,
@@ -242,6 +290,40 @@ export function createInitialAdaptiveState(): AdaptiveState {
 function budgetExhausted(state: AdaptiveState, config: AdaptiveConfig): boolean {
   if (state.upgradeWriteTokens >= config.writeBudgetTokens) return true;
   return config.writeBudgetUsd > 0 && state.upgradeWriteUsd >= config.writeBudgetUsd;
+}
+
+/**
+ * Same dual predicate for the ENTRY FEE budget. Only uncovered (transition)
+ * upgrades are gated by it; a steady-state 1h→1h upgrade stays available even
+ * after the fee budget is gone — the fee is a capital cost already paid, and
+ * refusing the cheap follow-ups would throw away exactly what it bought.
+ * `feeBudgetTokens = 0` therefore means "never open a prefix" ⇒ the adaptive
+ * upgrade path is off end to end (rollback switch, same spirit as W = 0).
+ */
+function feeBudgetExhausted(state: AdaptiveState, config: AdaptiveConfig): boolean {
+  if (state.feeWriteTokens >= config.feeBudgetTokens) return true;
+  return config.feeBudgetUsd > 0 && state.feeWriteUsd >= config.feeBudgetUsd;
+}
+
+/**
+ * Is the outgoing prefix already backed by a 1h entry this session paid for?
+ *
+ * Two conjuncts, both load-bearing: the §4.3 cover window must still be open
+ * (`invalidateAdaptive` clears it on any prefix drift, so a post-compact prefix
+ * correctly counts as uncovered again) AND at least one upgrade must have
+ * actually SETTLED with a write (`confirmed + unconfirmed`). The second guard
+ * exists because the cover is armed optimistically at decision time (m4): a
+ * second request fired before the first settled would otherwise be judged
+ * "covered" and handed to the warm probes while it is in fact still a
+ * transition. Erring toward "uncovered" only ever costs probe coverage, never
+ * money — the budgets bound both paths.
+ */
+export function isPrefix1hCovered(state: AdaptiveState, now: Millis): boolean {
+  return (
+    state.oneHourCoverUntil !== undefined &&
+    now < state.oneHourCoverUntil &&
+    state.confirmed1hWrites + state.unconfirmed1hWrites > 0
+  );
 }
 
 export interface AdaptiveDecideInput {
@@ -281,6 +363,11 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
   if (shape.ttl1h) return no("already-1h"); // G-E (pi already wrote 1h)
   if (state.breaker !== undefined) return no("breaker"); // G-F (§4.2, session-permanent)
   if (budgetExhausted(state, config)) return no("write-budget"); // G-G / I-A6 (USD primary, tokens fallback)
+  // G-H (entry fee): an upgrade whose prefix is not already 1h-backed rewrites the
+  // whole prefix on real routes. Refuse a NEW fee once its budget is gone; the
+  // steady-state path below stays open.
+  const covered1h = isPrefix1hCovered(state, now);
+  if (!covered1h && feeBudgetExhausted(state, config)) return no("fee-budget");
 
   // ── Group B: horizon signals ────────────────────────────────────────────
   const strong: AdaptiveSignalKind[] = [];
@@ -304,10 +391,23 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     state.lastRequestStartedAt !== undefined &&
     now - state.lastRequestStartedAt < ASSUMED_TTL_MS - TTL_SAFETY_MARGIN_MS;
 
+  // Quantified horizon (shared): a bash job or a human gate that outlived a cold
+  // window is long by construction; a subagent must show enough remaining budget.
+  const horizonOk =
+    signals.backgroundBashJobs > 0 ||
+    signals.uiPrompts > 0 ||
+    (signals.subagentRuns > 0 &&
+      (signals.maxSubagentHorizonMs === undefined || signals.maxSubagentHorizonMs >= config.coldMinHorizonMs));
+
   if (warm) {
     // Warm: marginal cost 0.75 × Δ (baseline: same request unrewritten). Wide
     // signals (strong or weak), but Δ and refresh rate are controlled.
     if (ledger.cacheWrite > config.maxDeltaTokens) return no("delta-too-large", seen);
+    // ...unless this warm request is also the prefix's FIRST 1h write, in which
+    // case it is economically a cold upgrade (full-prefix rewrite) and has to
+    // earn the fee: either a quantified live horizon, or S4's demonstrated
+    // long-gap habit — which is itself the payback condition.
+    if (!covered1h && !horizonOk && weak.length === 0) return no("fee-horizon-too-short", seen);
     const episodeJustArmed = strong.length > 0 && !state.armedEpisode; // signal just opened: always upgrade
     // The throttle only guards REPEAT purchases after an upgrade; before the
     // session's first upgrade there is nothing to refresh (otherwise a
@@ -332,11 +432,6 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
   // Cold (incl. M1 stale ledger): marginal 0.75 × P. Strong signals only, plus
   // a quantified horizon, a per-session cap and a cooldown.
   if (strong.length === 0) return no("cold-signal-too-weak", seen);
-  const horizonOk =
-    signals.backgroundBashJobs > 0 || // a bash job that outlived a cold window is a long job by construction
-    signals.uiPrompts > 0 || // a human gate that outlived a cold window is AFK by construction
-    (signals.subagentRuns > 0 &&
-      (signals.maxSubagentHorizonMs === undefined || signals.maxSubagentHorizonMs >= config.coldMinHorizonMs));
   if (!horizonOk) return no("cold-signal-too-weak", seen);
   if (state.coldUpgradesUsed >= config.coldUpgrades) return no("cold-budget", seen);
   if (state.lastColdUpgradeAt !== undefined && now - state.lastColdUpgradeAt < config.coldCooldownMs)
@@ -392,6 +487,9 @@ export function noteDecision(
       at: input.now,
       class: decision.class,
       predictedDeltaTokens: decision.predictedDeltaTokens,
+      // Read from `state` (pre-arm) on purpose: the cover armed just below
+      // belongs to THIS upgrade and must not make it look like its own successor.
+      covered1h: isPrefix1hCovered(state, input.now),
     },
     oneHourCoverUntil: input.now + ADAPTIVE_COVER_MS,
     lastUpgradeAt: input.now,
@@ -448,7 +546,10 @@ export function onLedgerObserved(
       ...next,
       pending: undefined,
       droppedPending: next.droppedPending + 1,
-      upgradeWriteTokens: next.upgradeWriteTokens + expired.predictedDeltaTokens,
+      // Pre-book into the same budget the settlement would have used.
+      ...(expired.covered1h
+        ? { upgradeWriteTokens: next.upgradeWriteTokens + expired.predictedDeltaTokens }
+        : { feeWriteTokens: next.feeWriteTokens + expired.predictedDeltaTokens }),
     };
     // No USD accrual here: a dropped pending has no ledger, and cost is never guessed.
     if (budgetExhausted(next, config)) next = tripBreaker(next, "write-budget", now);
@@ -477,20 +578,36 @@ export function onLedgerObserved(
     next = {
       ...next,
       pending: undefined,
-      upgradeWriteTokens: next.upgradeWriteTokens + ledger.cacheWrite,
-      // USD gate accrual: the MARGINAL cost of the 5m→1h upgrade, i.e.
-      // MARGINAL_WRITE_FRACTION (0.375) of pi's 1h-inclusive `cost.cacheWrite`.
-      // Missing cost data (`cacheWriteUsd === undefined`) accrues nothing — the
-      // token budget alone still bounds this session (never guess a cost).
-      upgradeWriteUsd:
-        next.upgradeWriteUsd +
-        (ledger.cacheWriteUsd === undefined ? 0 : MARGINAL_WRITE_FRACTION * ledger.cacheWriteUsd),
       confirmed1hWrites: next.confirmed1hWrites + (confirmed ? 1 : 0),
       unconfirmed1hWrites: next.unconfirmed1hWrites + (!confirmed && ledger.cacheWrite > 0 ? 1 : 0),
+      // Two budgets, one settlement: the ENTRY FEE (uncovered transition) is a
+      // one-time capital cost with its own cap and its own USD fraction; only a
+      // covered 1h→1h upgrade spends the marginal budget the §4.4 bound is about.
+      // Missing cost data (`cacheWriteUsd === undefined`) accrues nothing on either
+      // side — the token budgets still bound the session (never guess a cost).
+      ...(pending.covered1h
+        ? {
+            upgradeWriteTokens: next.upgradeWriteTokens + ledger.cacheWrite,
+            upgradeWriteUsd:
+              next.upgradeWriteUsd +
+              (ledger.cacheWriteUsd === undefined ? 0 : MARGINAL_WRITE_FRACTION * ledger.cacheWriteUsd),
+          }
+        : {
+            feeUpgrades: next.feeUpgrades + 1,
+            feeWriteTokens: next.feeWriteTokens + ledger.cacheWrite,
+            feeWriteUsd:
+              next.feeWriteUsd +
+              (ledger.cacheWriteUsd === undefined ? 0 : ENTRY_FEE_MARGINAL_WRITE_FRACTION * ledger.cacheWriteUsd),
+          }),
     };
-    if (pending.class === "warm") {
+    // The warm probes test §0.4 corollary 1 — "a warm 1h upgrade bills only the
+    // increment" — which is a claim about 1h→1h. On a transition the full-prefix
+    // rewrite IS the expected shape (field evidence, plan.md §16.3), so judging it
+    // here produced a guaranteed false trip on the first upgrade of every session.
+    if (pending.class === "warm" && pending.covered1h) {
       if (ledger.cacheRead === 0) {
-        // Judged warm, actually missed — the warm/cold judgement is unreliable on this route.
+        // Covered by a settled 1h entry, still a total miss: the prefix drifted
+        // under us (or the cover is a lie) ⇒ the warm judgement is unreliable here.
         next = tripBreaker(next, "warm-miss", now);
       } else if (
         ledger.cacheWrite >
@@ -546,7 +663,9 @@ export function invalidateAdaptive(
       ...next,
       pending: undefined,
       droppedPending: next.droppedPending + 1,
-      upgradeWriteTokens: next.upgradeWriteTokens + pending.predictedDeltaTokens,
+      ...(pending.covered1h
+        ? { upgradeWriteTokens: next.upgradeWriteTokens + pending.predictedDeltaTokens }
+        : { feeWriteTokens: next.feeWriteTokens + pending.predictedDeltaTokens }),
     };
   }
   return next;
@@ -573,6 +692,14 @@ export interface AdaptiveSnapshot {
   writeBudgetUsd: number;
   /** `upgradeWriteUsd / writeBudgetUsd`; 0 while the USD gate is off (`writeBudgetUsd = 0`). */
   usdFraction: number;
+  /** ENTRY FEE accounting (uncovered 5m→1h transitions) — separate from the marginal budget. */
+  feeUpgrades: number;
+  feeWriteTokens: number;
+  feeBudgetTokens: number;
+  feeWriteUsd: number;
+  feeBudgetUsd: number;
+  /** True when no NEW prefix can be opened this session (steady-state upgrades are unaffected). */
+  feeBudgetExhausted: boolean;
   warmUpgrades: number;
   coldUpgradesUsed: number;
   coldUpgradeCap: number;
@@ -600,6 +727,12 @@ export function buildAdaptiveSnapshot(state: AdaptiveState, config: AdaptiveConf
     upgradeWriteUsd: state.upgradeWriteUsd,
     writeBudgetUsd: config.writeBudgetUsd,
     usdFraction: config.writeBudgetUsd > 0 ? state.upgradeWriteUsd / config.writeBudgetUsd : 0,
+    feeUpgrades: state.feeUpgrades,
+    feeWriteTokens: state.feeWriteTokens,
+    feeBudgetTokens: config.feeBudgetTokens,
+    feeWriteUsd: state.feeWriteUsd,
+    feeBudgetUsd: config.feeBudgetUsd,
+    feeBudgetExhausted: feeBudgetExhausted(state, config),
     warmUpgrades: state.warmUpgrades,
     coldUpgradesUsed: state.coldUpgradesUsed,
     coldUpgradeCap: config.coldUpgrades,

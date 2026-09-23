@@ -940,6 +940,10 @@ function adaptiveSegments(snapshot: AdaptiveSnapshot): CacheStatusSegment[] {
         writeBudgetTokens: snapshot.writeBudgetTokens,
         upgradeWriteUsd: snapshot.upgradeWriteUsd,
         writeBudgetUsd: snapshot.writeBudgetUsd,
+        feeWriteTokens: snapshot.feeWriteTokens,
+        feeBudgetTokens: snapshot.feeBudgetTokens,
+        feeWriteUsd: snapshot.feeWriteUsd,
+        feeBudgetUsd: snapshot.feeBudgetUsd,
       },
     });
   }
@@ -1026,6 +1030,16 @@ export function renderAdaptiveReportLines(snapshot: AdaptiveSnapshot): string[] 
       : `$${snapshot.upgradeWriteUsd.toFixed(2)}/off`;
   lines.push(
     `adaptive budget: write ${formatTokenCount(snapshot.upgradeWriteTokens)}/${formatTokenCount(snapshot.writeBudgetTokens)} tok · ${budgetUsd} · warm ${snapshot.warmUpgrades} · cold ${snapshot.coldUpgradesUsed}/${snapshot.coldUpgradeCap} · ${cooldown} · longGaps=${snapshot.longGapCount}`,
+  );
+  // Entry fee (plan.md §16.3): the one-time full-prefix 1h write. Shown as its own
+  // line because it is a different KIND of spend from the marginal budget above
+  // — reading them as one number is exactly the mistake the split fixes.
+  const feeUsd =
+    snapshot.feeBudgetUsd > 0
+      ? `$${snapshot.feeWriteUsd.toFixed(2)}/$${snapshot.feeBudgetUsd.toFixed(2)}`
+      : `$${snapshot.feeWriteUsd.toFixed(2)}/off`;
+  lines.push(
+    `adaptive entry fee: paid ${snapshot.feeUpgrades}× · ${formatTokenCount(snapshot.feeWriteTokens)}/${formatTokenCount(snapshot.feeBudgetTokens)} tok · ${feeUsd}${snapshot.feeBudgetExhausted ? " · exhausted (no new prefix)" : ""}`,
   );
   const cover =
     snapshot.coverRemainingMs !== undefined

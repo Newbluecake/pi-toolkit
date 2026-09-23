@@ -1341,3 +1341,68 @@ MIN   = ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS = 4_000
 - **极小前缀（P < 8k）**：4k 硬下限防止地板缩进普通增量噪声区、误伤合法增量。
 
 `probeWriteFactor = 3` 不变；M2「探针只抓路由级结构性违例，不抓单次大重写」的定性不变。
+
+### 16.3 入场费：§0.4 推论 1 只在 1h→1h 成立（实测推翻，热探针口径修订）
+
+**取证**（26 个真实会话的 `subagent:cache-adaptive` 审计条目，15 次升级结算）：
+
+```
+UP warm Δ̂=966    → settle read 0      write 83139  w1h 83139  ⇒ warm-miss
+UP warm Δ̂=1652   → settle read 0      write 70735  w1h 70735  ⇒ warm-miss
+UP warm Δ̂=4712   → settle read 0      write 265875 w1h 265875 ⇒ warm-miss
+UP warm Δ̂=920    → settle read 11356  write 80462             ⇒ warm-write-too-expensive
+UP warm Δ̂=440    → settle read 10966  write 211413            ⇒ warm-write-too-expensive
+UP warm Δ̂=3841   → settle read 10931  write 249482            ⇒ warm-write-too-expensive
+--- 唯一活下来的会话：首升是 cold（冷路径本来就不过探针），交完费之后 ---
+UP cold Δ̂=184103 → settle read 10931  write 174109            ⇒ 无熔断
+UP warm Δ̂=580    → settle read 185040 write 3334              ⇒ 无熔断（推论 1 成立）
+UP warm Δ̂=490    → settle read 208214 write 268               ⇒ 无熔断
+UP warm Δ̂=1255   → settle read 225049 write 897               ⇒ 无熔断
+```
+
+**结论**：带 `ttl:"1h"` 的请求**读不到以 5m 写入的缓存条目**。一条前缀的**首次**升级必然
+整条重写为 1h（`cacheRead = 0` 或只剩早先就是 1h 的小残块，`cacheWrite1h = cacheWrite ≈ P`，
+即上游**确实 honor 了 ttl**），此后 1h→1h 的热升级才符合 §0.4 推论 1（只计增量）。这一次性
+成本称为**入场费（entry fee）**。
+
+§4.2 的两个热探针恰恰只观测那一次过渡请求，于是：
+
+1. 入场费的形态（read≈0 或 read≪P、write≈P）与「路由级病态」在**单次观测**下不可区分 ⇒
+   每个会话的第一次热升级必然误熔断；
+2. 熔断发生在回本之前 ⇒ 特性永远走不到上表最后三行那种白菜价升级；
+3. `warm-miss` 的判据排在写入探针之前，把一次 `cacheWrite1h = cacheWrite`（**明确确认 1h
+   生效**）的结算判成「冷热判据不可靠」，诊断完全反向；
+4. 熔断是会话级的，学费每会话重交一次（有成本数据的几笔合计约 $7，零回报）。
+
+**修订（本节为准）**：
+
+- **新概念 `covered1h`**（`isPrefix1hCovered(state, now)`）：§4.3 的 cover 窗口仍开着
+  **且**本会话至少已有一次升级结算出写入（`confirmed + unconfirmed > 0`）。写进
+  `AdaptivePending`，决策时刻取值（`noteDecision` 读**武装前**的 state）。
+  `invalidateAdaptive` 清 cover ⇒ 前缀漂移后的下一次升级重新算作过渡，与 M1 同构。
+- **探针只判稳态**：`warm-miss` / `warm-write-too-expensive` 仅在 `pending.covered1h === true`
+  时运行。过渡请求不判——「这条路由结构性地不认 1h」的检测交给 §4.3 的 `1h-ineffective`，
+  它按构造观测的就是**交费之后**的状态（真正的二次确认）。
+- **入场费单列预算**：过渡结算累计到 `feeWriteTokens` / `feeWriteUsd` / `feeUpgrades`，
+  受 `feeBudgetTokens`（设置 `cacheTtl.adaptiveFeeBudgetTokens`，默认 600k）与
+  `feeBudgetUsd`（`cacheTtl.adaptiveFeeBudgetUsd`，默认 $3）约束；边际预算 `W` 回归它本来
+  的口径（稳态 1h 溢价）。不分列的话，P > W 的会话只是把瞬时误熔断的理由从 `warm-miss`
+  换成 `write-budget`，问题原样存在。
+- **入场费的美元口径不是 0.375**：过渡的反事实是「本可命中 5m（0.1×P）+ 只写增量」，
+  实际是「整条 P 按 2.0× 重写」⇒ 边际 ≈ (2.0−0.1)/2.0 = **0.95 × `cost.cacheWrite`**
+  （`ENTRY_FEE_MARGINAL_WRITE_FRACTION`）。沿用 0.375 会把学费低报约 2.5 倍。
+- **交费要有时域**：未覆盖的热升级额外要求「可量化的时域」——`horizonOk`（长 bash/UI 门/
+  足够剩余时域的 subagent）**或** S4 弱信号（本会话已证实有长空档，正是回本条件）；否则
+  `fee-horizon-too-short`。费预算耗尽 ⇒ `fee-budget`，且**只挡新前缀**，稳态升级照常
+  （学费已经交过，掐掉后续廉价升级等于把买到的东西扔掉）。
+- **熔断语义不变**：`fee-budget` / `fee-horizon-too-short` 都是 decline 理由，不是熔断；
+  熔断集合仍是 §4.2 的四个。
+
+**上界修订**：每会话额外支出 ≤ 入场费预算（tokens `F` 或美元 `Fu`，先撞者为准，且允许最后
+一次结算冲过线）+ §4.4 原有的 `0.75 × (W + P) × R`。`feeBudgetTokens = 0` 是新的整体回滚
+开关（永不开新前缀 ⇒ 升级路径整体关闭），与 `adaptiveWriteBudgetTokens = 0` 并列。
+
+**可观测性**：审计 `decision` 增加 `covered1h`，`reconcile` 增加 `pendingCovered1h` /
+`feeWriteTokens` / `feeWriteUsd`；`/cache-ttl status` 新增独立一行
+`adaptive entry fee: paid N× · <tok>/<budget> tok · $x/$y[ · exhausted (no new prefix)]`
+——与边际预算分行呈现，把两者读成一个数正是本次修订要纠正的错误。

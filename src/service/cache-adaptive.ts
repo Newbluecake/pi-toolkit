@@ -32,6 +32,7 @@ import {
   decideAdaptiveTtl,
   endArmedEpisode,
   invalidateAdaptive as invalidateReducer,
+  isPrefix1hCovered,
   noteDecision,
   onLedgerObserved,
   type AdaptiveConfig,
@@ -178,6 +179,8 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     return {
       writeBudgetTokens: s.adaptiveWriteBudgetTokens,
       writeBudgetUsd: s.adaptiveWriteBudgetUsd,
+      feeBudgetTokens: s.adaptiveFeeBudgetTokens,
+      feeBudgetUsd: s.adaptiveFeeBudgetUsd,
       maxDeltaTokens: s.adaptiveMaxDeltaTokens,
       refreshAfterTokens: s.adaptiveRefreshAfterTokens,
       coldUpgrades: s.adaptiveColdUpgrades,
@@ -263,6 +266,9 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       state: this.state,
     });
     const strongSignals = decision.signals.filter((s) => s !== "history-gap").length;
+    // Captured BEFORE noteDecision arms this upgrade's own cover (plan.md §16.3):
+    // false ⇒ the upgrade pays the entry fee and is exempt from the warm probes.
+    const covered1h = isPrefix1hCovered(this.state, now);
     this.state = noteDecision(this.state, decision, {
       now,
       gapMs,
@@ -272,6 +278,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     this.audit("decision", {
       upgrade: decision.upgrade,
       class: decision.class,
+      covered1h,
       reason: decision.reason,
       signals: decision.signals,
       signalCounts: {
@@ -288,6 +295,10 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
         writeBudgetTokens: this.config().writeBudgetTokens,
         upgradeWriteUsd: this.state.upgradeWriteUsd,
         writeBudgetUsd: this.config().writeBudgetUsd,
+        feeWriteTokens: this.state.feeWriteTokens,
+        feeBudgetTokens: this.config().feeBudgetTokens,
+        feeWriteUsd: this.state.feeWriteUsd,
+        feeBudgetUsd: this.config().feeBudgetUsd,
         coldUpgrades: this.state.coldUpgradesUsed,
         coldUpgradeCap: this.config().coldUpgrades,
       },
@@ -310,6 +321,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
           : "n/a";
     this.audit("reconcile", {
       pendingClass: before.pending?.class,
+      pendingCovered1h: before.pending?.covered1h,
       cacheRead: ledger.cacheRead,
       cacheWrite: ledger.cacheWrite,
       cacheWrite1h: ledger.cacheWrite1h,
@@ -317,6 +329,8 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       cacheWriteUsd: ledger.cacheWriteUsd,
       ttl1h,
       upgradeWriteTokens: this.state.upgradeWriteTokens,
+      feeWriteTokens: this.state.feeWriteTokens,
+      feeWriteUsd: this.state.feeWriteUsd,
       breaker: this.state.breaker?.reason,
     });
     if (this.state.breaker !== undefined && before.breaker === undefined) {
