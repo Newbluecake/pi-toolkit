@@ -163,6 +163,23 @@ export interface WindowState {
   requestInFlight: boolean;
   pingInFlight: boolean;
   pingStartedAt: Millis | undefined;
+  /**
+   * Start time of the most recent PROVEN cache read in this window — i.e. the
+   * `pingStartedAt` of the last `proven-hit` ping. Unlike `lastReadStartedAt`
+   * (which `onRealRequest` sets optimistically at request start, before any
+   * hit is known) this is only ever written by evidence: a ping that came
+   * back with `cache_read > 0 && cache_creation === 0`.
+   *
+   * Why it exists (field incident, see docs/dev/cache-ttl-adaptive/plan.md
+   * §17): the adaptive predictor's warm/cold split used to key off the last
+   * REAL request alone, so a window kept demonstrably alive by 13 minutes of
+   * successful pings was still classified `cold` — "the prefix is dead
+   * anyway" — and upgraded to 1h, which cannot read the 5m entries the pings
+   * had just refreshed. That turned a free full hit into a full-prefix 1h
+   * rewrite. `CacheKeepaliveService.provenCacheReadAt()` exports this field
+   * so the predictor can see the proof.
+   */
+  lastProvenPingStartedAt: Millis | undefined;
   upgradePending: boolean;
   /**
    * Non-plan addition (documented deviation, see final reply): the reason the
@@ -186,6 +203,7 @@ export function createInitialWindowState(): WindowState {
     requestInFlight: false,
     pingInFlight: false,
     pingStartedAt: undefined,
+    lastProvenPingStartedAt: undefined,
     upgradePending: false,
     lastStopReason: undefined,
   };
@@ -209,6 +227,18 @@ export interface SessionTotals {
   loadBearingWindows: number;
   loadBearingPings: number;
   avoidedMissTokens: number;
+  /**
+   * D5 (field incident): windows whose pings were provably thrown away because
+   * the very next real request went out as a `ttl:"1h"` write. A 1h request
+   * resumes from the last 1h-written prefix point and cannot read the 5m
+   * entries the pings refreshed (measured 13/13 on cloudrouter-anthropic), so
+   * such a window is neither "load-bearing" nor merely "unnecessary" — its
+   * cost was incurred AND its benefit was discarded. Counting it as
+   * load-bearing (the pre-fix behaviour) made `/cache-ttl status` claim it had
+   * avoided a rewrite the session then paid for anyway.
+   */
+  discardedWindows: number;
+  discardedPings: number;
 }
 
 export function createInitialSessionTotals(): SessionTotals {
@@ -225,6 +255,8 @@ export function createInitialSessionTotals(): SessionTotals {
     loadBearingWindows: 0,
     loadBearingPings: 0,
     avoidedMissTokens: 0,
+    discardedWindows: 0,
+    discardedPings: 0,
   };
 }
 
@@ -545,8 +577,19 @@ export function closeWindowAccounting(
   session: SessionTotals,
   now: Millis,
   assumedTtlMs: Millis = ASSUMED_TTL_MS,
+  nextRequestIs1h = false,
 ): SessionTotals {
   if (window.pings === 0 || window.windowStartAt === undefined) return session;
+  // D5: a 1h next request discards this window's work regardless of timing —
+  // judged BEFORE the alive/expired split, because "the cache was still alive"
+  // is exactly the case where the discard hurts most.
+  if (nextRequestIs1h) {
+    return {
+      ...session,
+      discardedWindows: session.discardedWindows + 1,
+      discardedPings: session.discardedPings + window.pings,
+    };
+  }
   const cameBackBeforeExpiry = now < window.windowStartAt + assumedTtlMs;
   if (cameBackBeforeExpiry) {
     return {
@@ -580,7 +623,7 @@ export function onRealRequest(
   intervalMs: Millis,
   assumedTtlMs: Millis = ASSUMED_TTL_MS,
 ): { window: WindowState; session: SessionTotals } {
-  const closedSession = closeWindowAccounting(window, session, now, assumedTtlMs);
+  const closedSession = closeWindowAccounting(window, session, now, assumedTtlMs, captured.shape.ttl1h);
   const newWindow: WindowState = {
     windowEpoch: window.windowEpoch + 1, // I-K8: any ping in flight for the old window is now unreachable.
     capture: captured,
@@ -592,6 +635,7 @@ export function onRealRequest(
     requestInFlight: true,
     pingInFlight: false,
     pingStartedAt: undefined,
+    lastProvenPingStartedAt: undefined,
     upgradePending: false,
     lastStopReason: undefined,
   };
@@ -637,6 +681,7 @@ export function onProvenHit(
     ...window,
     pingInFlight: false,
     lastReadStartedAt: pingStartedAt,
+    lastProvenPingStartedAt: pingStartedAt,
     aliveUntil: pingStartedAt + assumedTtlMs,
     nextPingAt: pingStartedAt + intervalMs,
     lastStopReason: undefined,
@@ -1164,7 +1209,7 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
   if (report.prefixSource !== undefined) lines.push(`prefix source: ${report.prefixSource}`);
   lines.push(`long cache retention (1h) supported: ${report.supportsLongCacheRetention ? "yes" : "no"}`);
   lines.push(
-    `audit: load-bearing ${session.loadBearingWindows} window/${session.loadBearingPings} ping · unnecessary ${session.unnecessaryWindows} window/${session.unnecessaryPings} ping · avoided rewrite ${session.avoidedMissTokens} tok`,
+    `audit: load-bearing ${session.loadBearingWindows} window/${session.loadBearingPings} ping · unnecessary ${session.unnecessaryWindows} window/${session.unnecessaryPings} ping · discarded-by-1h ${session.discardedWindows} window/${session.discardedPings} ping · avoided rewrite ${session.avoidedMissTokens} tok`,
   );
   if (session.lastUnproven !== undefined)
     lines.push(`last outcome: ${session.lastUnproven.kind} @ ${session.lastUnproven.at}`);

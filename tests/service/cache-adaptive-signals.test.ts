@@ -188,3 +188,116 @@ describe("signals() failure degrades to all-zero", () => {
     }
   });
 });
+
+/**
+ * D1 wiring (field incident, 2026-09-23): `buildSessionStack` injects
+ * `provenCacheReadAt: () => keepalive?.provenCacheReadAt()`. These tests pin
+ * the service's half of that contract — that the closure is actually consulted
+ * on every decision, and that an absent/throwing one degrades to exactly the
+ * pre-fix behaviour rather than breaking the request.
+ */
+describe("provenCacheReadAt is consulted by the adaptive decision", () => {
+  const SHAPE = { ephemeralBreakpoints: 1, ttl1h: false, hasThinking: false, maxTokens: 512 } as const;
+  const LEDGER = {
+    source: "usage",
+    cacheRead: 249_006,
+    cacheWrite: 3_046,
+    cacheWrite1h: undefined,
+    costTotalUsd: undefined,
+    cacheWriteUsd: undefined,
+    entrySeq: 0,
+    entriesLength: 1,
+    modelId: "claude-x",
+  } as const;
+
+  const T0 = 1_000_000 as Millis;
+  /** The incident's shape: 809s since the last real request, a ping proven 69s ago. */
+  const LONG_GAP = 809_034;
+  const PROOF_AGE = 69_000;
+
+  function serviceAt(
+    nowRef: { value: Millis },
+    busyRef: { value: boolean },
+    provenCacheReadAt?: () => Millis | undefined,
+  ) {
+    const ctx = {
+      sessionManager: { getEntries: () => [], getSessionId: () => "s1", getBranch: () => [] },
+      model: { provider: "anthropic", api: "anthropic-messages", id: "claude-x" },
+    } as unknown as ExtensionContext;
+    return createCacheAdaptiveService({
+      clock: { now: () => nowRef.value, setTimer: () => 0 as never, clearTimer: () => {} },
+      ctx,
+      sessionId: "s1",
+      settings: { ...DEFAULT_SETTINGS.cacheTtl, mode: "adaptive", adaptiveEnabled: true },
+      signals: () =>
+        busyRef.value
+          ? { subagentRuns: 1, maxSubagentHorizonMs: 1_800_000, backgroundBashJobs: 0 }
+          : { subagentRuns: 0, maxSubagentHorizonMs: undefined, backgroundBashJobs: 0 },
+      isCurrent: () => true,
+      appendEntry: vi.fn(),
+      ...(provenCacheReadAt ? { provenCacheReadAt } : {}),
+    });
+  }
+
+  /**
+   * Establishes `lastRequestStartedAt` with a signal-free (therefore
+   * non-upgrading) request, then reproduces the incident's setup: the fleet
+   * goes busy and 809s pass with no further real request.
+   */
+  function primeThenSkip(
+    service: ReturnType<typeof serviceAt>,
+    nowRef: { value: Millis },
+    busyRef: { value: boolean },
+  ) {
+    const first = service.decide("s1", service.instanceId, { shape: SHAPE, ledger: { ...LEDGER } });
+    expect(first.upgrade).toBe(false);
+    expect(first.reason).toBe("no-signal");
+    busyRef.value = true;
+    nowRef.value = (T0 + LONG_GAP) as Millis;
+  }
+
+  it("keeps the decision on the warm branch when the pinger proved the prefix alive", () => {
+    const nowRef = { value: T0 };
+    const busyRef = { value: false };
+    const service = serviceAt(nowRef, busyRef, () => (nowRef.value - PROOF_AGE) as Millis);
+    try {
+      primeThenSkip(service, nowRef, busyRef);
+      const decision = service.decide("s1", service.instanceId, { shape: SHAPE, ledger: { ...LEDGER } });
+      expect(decision.class).toBe("warm");
+      // Warm prices the INCREMENT; cold prices the whole prefix. This one
+      // number is the difference between ~$0.03 and the incident's $2.40.
+      expect(decision.predictedDeltaTokens).toBe(3_046);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("control: the identical request goes cold with no pinger wired", () => {
+    const nowRef = { value: T0 };
+    const busyRef = { value: false };
+    const service = serviceAt(nowRef, busyRef);
+    try {
+      primeThenSkip(service, nowRef, busyRef);
+      const decision = service.decide("s1", service.instanceId, { shape: SHAPE, ledger: { ...LEDGER } });
+      expect(decision.class).toBe("cold");
+      expect(decision.predictedDeltaTokens).toBe(252_052);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("a throwing pinger degrades to the no-pinger path instead of failing the request", () => {
+    const nowRef = { value: T0 };
+    const busyRef = { value: false };
+    const service = serviceAt(nowRef, busyRef, () => {
+      throw new Error("keepalive disposed mid-decision");
+    });
+    try {
+      primeThenSkip(service, nowRef, busyRef);
+      const decision = service.decide("s1", service.instanceId, { shape: SHAPE, ledger: { ...LEDGER } });
+      expect(decision.class).toBe("cold");
+    } finally {
+      service.dispose();
+    }
+  });
+});

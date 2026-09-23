@@ -1406,3 +1406,63 @@ UP warm Δ̂=1255   → settle read 225049 write 897               ⇒ 无熔断
 `feeWriteTokens` / `feeWriteUsd`；`/cache-ttl status` 新增独立一行
 `adaptive entry fee: paid N× · <tok>/<budget> tok · $x/$y[ · exhausted (no new prefix)]`
 ——与边际预算分行呈现，把两者读成一个数正是本次修订要纠正的错误。
+
+---
+
+## 17. 现场事故复盘：保活与自适应互相拆台（2026-09-23，v1 后修订）
+
+> 上文 §6「与保活的衔接」认定两个子系统正交，只在 gate #7（捕获到 1h 载荷就停 ping）处
+> 交接。现场数据证明这个判断是错的：它们不是正交，而是**反相关**——保活最有价值的
+> 长空档，恰好就是自适应判 cold 并整块升 1h 的时刻，而升级会把保活刚续上的缓存作废。
+
+### 17.1 现场（session `01a0cf02-8569`，cloudrouter-anthropic / claude-opus-5）
+
+```
+16:51:08  1h 写入 7,799 tok      → 1h 链尾停在 prefix 248,705
+16:51:52  5m 写入   301 tok      （adaptive: refresh-throttled）
+16:52:15  5m 写入 3,046 tok      ← 最后一次真实请求，保活窗口开启
+16:56:11  ping proven-hit read=249,006
+17:00:11  ping proven-hit read=249,006
+17:04:12  ping proven-hit read=249,006   ← 缓存被证明活着
+17:05:21  subagent 完成通知触发 turn；decision: upgrade=true class=cold
+                                       predictedDeltaTokens=252,052
+17:05:30  read=11,356  write=239,709（全 1h）  $2.40  → write-budget 熔断
+```
+
+三次 ping 全部成功，最后一次距那次 turn 只有 69 秒。
+
+### 17.2 实测事实：1h 请求只能读 1h 写过的前缀
+
+同一会话内 **13/13 精确命中**：每一次 `cacheWrite1h > 0` 的请求，其 `cacheRead` 都**恰好**
+等于上一个 1h 写入点（read + write），期间所有 5m 写入的增量对它不可见，会被按 1h 重写。
+最直接的一例：16:51:03 的 5m 请求写了 2,064 tok，5 秒后 16:51:08 的 1h 请求 `cacheRead`
+仍是 240,906 而非 242,970。
+
+推论：**保活 ping 回放的是上一次真实请求的载荷**，而自适应绝大多数请求是 declined（5m），
+所以 ping 续的一直是 **5m 命名空间**；真正花了钱的 1h 链（本会话 477,058 tok / $4.77）
+因为 gate #7 的 1h 豁免而无人保活。本会话观测到的 1h 实际存活期落在 **7–13.6 分钟之间**
+（7.0 分钟的间隔命中，13.6 分钟的间隔全丢），远不是一小时——§4.3 的 `ADAPTIVE_COVER_MS`
+= 1h 这个假设在该路由上不成立。
+
+### 17.3 四个缺陷与修复
+
+| 编号 | 缺陷                                                                                                                                                            | 修复                                                                                                                                                                                                                                   |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1   | `decideAdaptiveTtl` 的 warm/cold 判据只看 `state.lastRequestStartedAt`，ping 不更新它 ⇒ 保活 13.5 分钟后仍判 cold，而 cold 分支的定价前提是「前缀反正已经死了」 | 新增 `AdaptiveDecideInput.lastProvenCacheReadAt`（来自 `CacheKeepaliveService.provenCacheReadAt()`），warm 窗口按 `max(lastRequestStartedAt, lastProvenCacheReadAt)` 计；cold 分支入口加硬闸 `cold-cache-alive`                        |
+| D3   | `1h-ineffective` 探针以 `cacheRead > 0` 为成功判据 ⇒ 读了 11,356/252,052（4.5%，只是跨会话共享的 system/tools 块）被记成 `indirect1hConfirm`                    | 改为与**上一次结算的前缀**（新状态字段 `lastPrefixTokens`）比：`cacheRead < ADAPTIVE_COVER_HIT_FRACTION(0.5) × prevPrefix` 即判 collapse。锚定旧前缀而非当前前缀，所以「合法的大增量」不会误伤（同会话健康长空档命中率实测 81.5%–91%） |
+| D4   | 结算按 `pending.covered1h` 这个**决策时刻的声明**分账 ⇒ 239,709 tok / $1.36 记进边际预算，一次请求打爆 $1 上限                                                  | 以账单为准：读崩塌即视为全量重写，走入场费预算                                                                                                                                                                                         |
+| D5   | `closeWindowAccounting` 把该窗口记为 load-bearing、`avoidedMissTokens += 248,705`，而这三次 ping 的成果被下一条请求原地扔掉                                     | `onRealRequest` 把新捕获的 `shape.ttl1h` 透给会计；1h 后继请求 ⇒ 记入新增的 `discardedWindows` / `discardedPings`，不再冒充 load-bearing                                                                                               |
+
+反事实（D1 修复后的同一现场）：判 warm ⇒ `tokensSinceLast1hWrite = 3,347 < refreshAfterTokens
+16,000` ⇒ `refresh-throttled` ⇒ 保持 5m ⇒ 命中 249,006。**$0.14 取代 $2.40。**
+
+回归测试：`tests/cache-ttl/adaptive-keepalive-incident.test.ts`（直接用现场真实数字），
+`tests/service/cache-adaptive-signals.test.ts` 末尾的 `provenCacheReadAt` 接线三例。
+每组都配了「不接 pinger ⇒ 仍走 cold」的对照，保证测试可证伪。
+
+### 17.4 未决（留给数据）
+
+D2 —— 「1h 在该路由上实际只活约 10 分钟」——本次**不改** `ADAPTIVE_COVER_MS`，也不取消
+gate #7 的 1h 豁免。理由：D3 修完之后，`1h-ineffective` 才第一次具备真实的鉴别力，
+cover 窗口内的长空档请求会自己把证据打出来（trip 或 confirm）。先收数据，再决定是
+(a) 让保活按实测存活期去续 1h 前缀，还是 (b) 在该路由上直接关掉 adaptive。

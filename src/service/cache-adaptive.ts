@@ -135,6 +135,14 @@ export interface CacheAdaptiveDeps {
   /** Reference, not a snapshot — knobs are re-read per decision so `/agent settings` changes apply live. */
   settings: CacheTtlSettings;
   signals: () => AdaptiveExternalSignals;
+  /**
+   * D1: reads the keepalive service's `provenCacheReadAt()` (stack.ts passes
+   * `() => keepalive?.provenCacheReadAt()`). Absent / throwing / `undefined`
+   * ⇒ the predictor behaves exactly as before this fix (warm window measured
+   * from the last real request only), so a session with keepalive disabled is
+   * bit-for-bit unchanged.
+   */
+  provenCacheReadAt?: () => Millis | undefined;
   /** I-A7: whether `self` is still the holder's current instance (stack.ts passes `(self) => previousAdaptive === self`). */
   isCurrent: (self: CacheAdaptiveService) => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
@@ -220,6 +228,19 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     return { ...external, uiPrompts: this.uiPrompts, activeTools: this.activeTools };
   }
 
+  /**
+   * D1: same degradation policy as `safeSignals` — a throwing or absent
+   * keepalive port yields `undefined`, which the predictor reads as "no proof
+   * of liveness" (pre-fix behaviour). Never let the pinger break a decision.
+   */
+  private safeProvenCacheReadAt(): Millis | undefined {
+    try {
+      return this.deps.provenCacheReadAt?.();
+    } catch {
+      return undefined;
+    }
+  }
+
   private audit(kind: string, extra: Record<string, unknown> = {}): void {
     try {
       this.deps.appendEntry?.(AUDIT_CUSTOM_TYPE, { kind, at: this.clock.now(), ...extra });
@@ -252,6 +273,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     const model = this.safeModel();
     const signals = this.safeSignals();
     const gapMs = this.state.lastRequestStartedAt !== undefined ? now - this.state.lastRequestStartedAt : undefined;
+    const lastProvenCacheReadAt = this.safeProvenCacheReadAt();
     const decision = decideAdaptiveTtl({
       now,
       mode: "adaptive", // the caller (cache-ttl.ts) already gated on the mode setting.
@@ -264,6 +286,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       ledger: request.ledger,
       config: this.config(),
       state: this.state,
+      lastProvenCacheReadAt,
     });
     const strongSignals = decision.signals.filter((s) => s !== "history-gap").length;
     // Captured BEFORE noteDecision arms this upgrade's own cover (plan.md §16.3):
@@ -289,6 +312,9 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
         maxSubagentHorizonMs: signals.maxSubagentHorizonMs,
       },
       gapBeforeMs: gapMs,
+      // D1 audit trail: how stale the last REAL request was vs. how stale the
+      // last PROVEN read was. In the incident these were 809s and 69s.
+      provenReadAgeMs: lastProvenCacheReadAt === undefined ? undefined : now - lastProvenCacheReadAt,
       predictedDeltaTokens: decision.predictedDeltaTokens,
       budget: {
         upgradeWriteTokens: this.state.upgradeWriteTokens,

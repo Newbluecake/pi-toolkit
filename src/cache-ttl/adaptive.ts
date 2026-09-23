@@ -87,6 +87,37 @@ export const ADAPTIVE_PENDING_TTL_MS: Millis = 120_000;
 export const ADAPTIVE_GAP_RING_SIZE = 20;
 /** §4.3: an upgrade claims 1h of coverage from its decision time. */
 export const ADAPTIVE_COVER_MS: Millis = 3_600_000;
+/**
+ * D3: what counts as "the 1h entry survived" when a long-gap request lands
+ * inside the cover window, and as "this settlement was a real increment"
+ * when a pending upgrade settles.
+ *
+ * The anchor is the PREVIOUS settlement's prefix (`state.lastPrefixTokens`),
+ * not the current request's own prefix: a request that legitimately appends a
+ * huge delta still reads the whole old prefix, so anchoring on the old prefix
+ * never punishes a large increment — only a genuine collapse of the read.
+ *
+ * Why it exists: the probe used to accept `cacheRead > 0`. In the field
+ * incident a request that read 11,356 of an expected 252,052 tokens (4.5% —
+ * just the cross-session-shared system/tools block) and rewrote 239,709 at the
+ * 1h rate was scored as an `indirect1hConfirm`, i.e. as PROOF that 1h worked.
+ * Measured healthy long-gap hits in the same session ran 81.5%–91%, so 0.5
+ * separates the two populations with a wide margin on both sides.
+ */
+export const ADAPTIVE_COVER_HIT_FRACTION = 0.5;
+/**
+ * How long after a demonstrated read a prefix still counts as "warm" (cheap to
+ * extend). Same value as before this change — the assumed 5m TTL minus the
+ * keepalive safety margin — named here because D1 gave it a second caller.
+ */
+export const WARM_WINDOW_MS: Millis = ASSUMED_TTL_MS - TTL_SAFETY_MARGIN_MS;
+
+/** `Math.max` over two possibly-undefined timestamps; `undefined` only when both are. */
+function maxDefined(a: Millis | undefined, b: Millis | undefined): Millis | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.max(a, b);
+}
 /** Fraction of the ledger's 1h-inclusive `cost.cacheWrite` that is the MARGINAL cost of
  *  upgrading a write from 5m to 1h. Derivation (plan.md §0.3/§0.4 pricing): 1h write
  *  bills 2.0× base input, 5m write bills 1.25× ⇒ marginal 0.75×. pi prices a full 1h
@@ -126,7 +157,9 @@ export type AdaptiveDeclineReason =
   | "refresh-throttled"
   | "cold-signal-too-weak"
   | "cold-budget"
-  | "cold-cooldown";
+  | "cold-cooldown"
+  /** D1: the cold branch's premise ("the prefix is dead anyway") is false — keepalive has proven it alive. */
+  | "cold-cache-alive";
 
 export type AdaptiveBreakerReason = "warm-write-too-expensive" | "warm-miss" | "write-budget" | "1h-ineffective";
 
@@ -237,6 +270,8 @@ export interface AdaptiveState {
   unconfirmed1hWrites: number;
   indirect1hConfirms: number;
   ineffective1h: number;
+  /** D3 anchor: `cacheRead + cacheWrite` of the previous settled ledger entry (0 before the first). */
+  lastPrefixTokens: number;
   droppedPending: number;
   lastDecision: AdaptiveDecision | undefined;
   lastReconcile: AdaptiveReconcileRecord | undefined;
@@ -268,6 +303,7 @@ export function createInitialAdaptiveState(): AdaptiveState {
     unconfirmed1hWrites: 0,
     indirect1hConfirms: 0,
     ineffective1h: 0,
+    lastPrefixTokens: 0,
     droppedPending: 0,
     lastDecision: undefined,
     lastReconcile: undefined,
@@ -340,11 +376,34 @@ export interface AdaptiveDecideInput {
   ledger: LedgerUsage;
   config: AdaptiveConfig;
   state: AdaptiveState;
+  /**
+   * D1: start time of the most recent PROVEN cache read from the keepalive
+   * pinger (`CacheKeepaliveService.provenCacheReadAt()`), or `undefined` when
+   * keepalive is off / has never proven a hit / the window was invalidated.
+   *
+   * The warm window is measured from the later of this and
+   * `state.lastRequestStartedAt`: a ping that came back `cache_read > 0,
+   * cache_creation === 0` is strictly better evidence that the prefix is live
+   * than "a real request went out", which is only an assumption.
+   */
+  lastProvenCacheReadAt: Millis | undefined;
 }
 
 export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision {
-  const { now, mode, api, provider, modelId, supportsLongCacheRetention, shape, signals, ledger, config, state } =
-    input;
+  const {
+    now,
+    mode,
+    api,
+    provider,
+    modelId,
+    supportsLongCacheRetention,
+    shape,
+    signals,
+    ledger,
+    config,
+    state,
+    lastProvenCacheReadAt,
+  } = input;
   const no = (reason: AdaptiveDeclineReason, signalsSeen: AdaptiveSignalKind[] = []): AdaptiveDecision => ({
     upgrade: false,
     class: undefined,
@@ -385,11 +444,12 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     ledger.entrySeq > state.lastInvalidateSeq &&
     ledger.modelId !== "" &&
     ledger.modelId === modelId;
-  const warm =
-    ledgerFresh &&
-    ledger.cacheRead > 0 &&
-    state.lastRequestStartedAt !== undefined &&
-    now - state.lastRequestStartedAt < ASSUMED_TTL_MS - TTL_SAFETY_MARGIN_MS;
+  // D1: the warm window runs from the last DEMONSTRATED read, which a keepalive
+  // proven-hit establishes just as well as (better than) a real request.
+  const lastReadAt = maxDefined(state.lastRequestStartedAt, lastProvenCacheReadAt);
+  const cacheProvenAlive =
+    lastProvenCacheReadAt !== undefined && now - lastProvenCacheReadAt < ASSUMED_TTL_MS - TTL_SAFETY_MARGIN_MS;
+  const warm = ledgerFresh && ledger.cacheRead > 0 && lastReadAt !== undefined && now - lastReadAt < WARM_WINDOW_MS;
 
   // Quantified horizon (shared): a bash job or a human gate that outlived a cold
   // window is long by construction; a subagent must show enough remaining budget.
@@ -431,6 +491,16 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
 
   // Cold (incl. M1 stale ledger): marginal 0.75 × P. Strong signals only, plus
   // a quantified horizon, a per-session cap and a cooldown.
+  //
+  // D1 hard gate (field incident): the cold branch prices a full-prefix 1h
+  // rewrite as cheap because it assumes the prefix is already dead. When the
+  // keepalive pinger has PROVEN it alive within the TTL window that premise is
+  // simply false, and upgrading destroys a live cache: a `ttl:"1h"` request
+  // resumes from the last 1h-written prefix point and cannot read the 5m
+  // entries the pings refreshed, so the "free" rewrite is a full-price one.
+  // Reached only when `warm` was false for another reason (stale ledger,
+  // `cacheRead === 0`); the warm test above already absorbs the common case.
+  if (cacheProvenAlive) return no("cold-cache-alive", seen);
   if (strong.length === 0) return no("cold-signal-too-weak", seen);
   if (!horizonOk) return no("cold-signal-too-weak", seen);
   if (state.coldUpgradesUsed >= config.coldUpgrades) return no("cold-budget", seen);
@@ -558,10 +628,17 @@ export function onLedgerObserved(
   // m2 watermark: every ledger-driven side effect below requires a strictly newer entry.
   if (ledger.source !== "usage" || ledger.entrySeq <= next.lastReconciledEntrySeq) return next;
 
+  // D3/D4 anchor: the prefix as of the PREVIOUS settlement, captured before it
+  // is overwritten below. `0` (nothing observed yet) disables both judgements
+  // that depend on it — they fall back to the pre-fix `cacheRead > 0` test.
+  const prevPrefixTokens = next.lastPrefixTokens;
+  const readCollapsed = prevPrefixTokens > 0 && ledger.cacheRead < ADAPTIVE_COVER_HIT_FRACTION * prevPrefixTokens;
+
   next = {
     ...next,
     lastReconciledEntrySeq: ledger.entrySeq,
     tokensSinceLast1hWrite: next.tokensSinceLast1hWrite + ledger.cacheWrite,
+    lastPrefixTokens: ledger.cacheRead + ledger.cacheWrite,
     lastReconcile: {
       at: now,
       cacheRead: ledger.cacheRead,
@@ -575,6 +652,13 @@ export function onLedgerObserved(
   const pending = next.pending;
   if (pending !== undefined && ledger.entrySeq >= pending.minEntrySeq) {
     const confirmed = ledger.cacheWrite1h !== undefined && ledger.cacheWrite1h > 0;
+    // D4: `pending.covered1h` is a CLAIM made at decision time from the cover
+    // window; the ledger is the fact. When the read collapsed, this settlement
+    // rewrote the whole prefix no matter what the cover said — that is an entry
+    // fee (one-time capital cost), not a marginal 1h→1h increment, and booking
+    // it as marginal both misprices it and can blow the marginal budget in a
+    // single request (observed: 239,709 tok / $1.36 in one settlement).
+    const paysEntryFee = !pending.covered1h || readCollapsed;
     next = {
       ...next,
       pending: undefined,
@@ -585,7 +669,7 @@ export function onLedgerObserved(
       // covered 1h→1h upgrade spends the marginal budget the §4.4 bound is about.
       // Missing cost data (`cacheWriteUsd === undefined`) accrues nothing on either
       // side — the token budgets still bound the session (never guess a cost).
-      ...(pending.covered1h
+      ...(!paysEntryFee
         ? {
             upgradeWriteTokens: next.upgradeWriteTokens + ledger.cacheWrite,
             upgradeWriteUsd:
@@ -629,7 +713,13 @@ export function onLedgerObserved(
     next.lastGapMs !== undefined &&
     next.lastGapMs > ASSUMED_TTL_MS
   ) {
-    if (ledger.cacheRead > 0) {
+    // D3: `cacheRead > 0` was far too weak a success criterion — a request that
+    // read only the tiny cross-session-shared system/tools block (4.5% of the
+    // expected prefix) and rewrote everything else at the 1h rate was scored as
+    // an indirect CONFIRMATION that 1h works. Judge against the previously
+    // measured prefix instead; see ADAPTIVE_COVER_HIT_FRACTION.
+    const hit = prevPrefixTokens > 0 ? !readCollapsed : ledger.cacheRead > 0;
+    if (hit) {
       next = { ...next, indirect1hConfirms: next.indirect1hConfirms + 1 };
     } else {
       next = { ...next, ineffective1h: next.ineffective1h + 1 };

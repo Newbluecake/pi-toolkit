@@ -1243,6 +1243,10 @@ export function buildSessionStack(
         sessionId: currentSessionId(ctx),
         settings: settings.cacheTtl,
         signals: () => computeAdaptiveSignals(query.list(), bashJobs?.backgroundJobCount() ?? 0, systemClock.now()),
+        // D1: the predictor's warm/cold split must see the pinger's evidence —
+        // `keepalive` is constructed just above, so this is a direct read (the
+        // reverse direction needs the lazy `previousAdaptive` closure instead).
+        provenCacheReadAt: () => keepalive?.provenCacheReadAt(),
         isCurrent: (self) => previousAdaptive === self,
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),

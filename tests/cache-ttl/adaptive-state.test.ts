@@ -82,6 +82,7 @@ function decideInput(overrides: Partial<AdaptiveDecideInput> = {}): AdaptiveDeci
     ledger: ledger(),
     config: CONFIG,
     state: state({ lastRequestStartedAt: NOW - 60_000 }),
+    lastProvenCacheReadAt: undefined,
     ...overrides,
   };
 }

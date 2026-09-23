@@ -103,7 +103,12 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   cost has its own budget (`adaptiveFeeBudgetTokens` 600k / `adaptiveFeeBudgetUsd` $3, accrued at
   0.95× `cost.cacheWrite`; `0` tokens = feature off) and the warm probes (`warm-miss` /
   `warm-write-too-expensive`) only judge COVERED 1h→1h settlements — judging the transition
-  false-tripped every session on its first upgrade. Design: `docs/dev/cache-ttl-adaptive/plan.md`.
+  false-tripped every session on its first upgrade. **保活与自适应不是正交的**（现场事故
+  2026-09-23，plan §17）：`decideAdaptiveTtl` 的 warm/cold 判据必须把 keepalive 的
+  `provenCacheReadAt()`（最近一次 proven-hit 的读起点）算进来，否则一段被 ping 证明活着的
+  前缀会被判 cold 并整块升 1h——而 1h 请求读不到 5m 条目（同会话 13/13 实测），那是一次
+  全价重写。`1h-ineffective` 探针同理只认「读占上一次前缀的比例」，不认 `cacheRead > 0`。
+  Design: `docs/dev/cache-ttl-adaptive/plan.md`.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`

@@ -50,6 +50,7 @@ import {
 import { buildPingRequest, preparePingPayload, sendKeepalivePing, type PingOutcome } from "../cache-ttl/ping-client.js";
 import type { CacheTtlSettings } from "../config/settings.js";
 import type { AdaptiveSnapshot } from "../cache-ttl/adaptive.js";
+import type { Millis } from "../core/types.js";
 
 /** pi-free-ish subset of what this module needs from `ctx.model` (structurally satisfied by pi-ai's `Model`). */
 interface KeepaliveModelInfo {
@@ -94,6 +95,18 @@ export interface KeepalivePort {
    */
   consumeUpgrade(sessionId: string, instance: string, now?: number): boolean;
   report(): KeepaliveReport;
+  /**
+   * D1: start time of the most recent PROVEN cache read in the CURRENT window
+   * (`WindowState.lastProvenPingStartedAt`), or `undefined` when nothing has
+   * been proven or the window was invalidated / stopped by an unproven ping
+   * (both clear `capture`, which is the liveness guard used here).
+   *
+   * Consumed by the adaptive predictor's warm/cold split so a window kept
+   * alive by pings is never mistaken for a dead one. Identity-free on purpose:
+   * it reports this instance's own state and the caller (stack wiring) already
+   * holds the current instance.
+   */
+  provenCacheReadAt(): Millis | undefined;
   setEnabled(on: boolean): void;
   /**
    * plan.md merge note (UI cleanup): `cache-ttl.ts` owns the mode/dirty
@@ -554,6 +567,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       supportsLongCacheRetention: this.supportsLongCacheRetention(),
       lastPingDiagnostics: this.lastPingDiagnostics,
     };
+  }
+
+  provenCacheReadAt(): Millis | undefined {
+    // `capture === undefined` means the window was invalidated (prefix drift)
+    // or stopped by an unproven ping — in both cases an older proven hit is no
+    // longer evidence about the CURRENT prefix, so report nothing.
+    if (this.window.capture === undefined) return undefined;
+    return this.window.lastProvenPingStartedAt;
   }
 
   setEnabled(on: boolean): void {
