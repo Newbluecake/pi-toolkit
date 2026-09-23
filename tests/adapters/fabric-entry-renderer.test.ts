@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { CustomEntry, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Container } from "@earendil-works/pi-tui";
 import { createFabricEntryRenderer, renderFabricEntry } from "../../src/adapters/fabric-entry-renderer.js";
 import { makeMessageKey, type FabricDeliveryState, type FabricRecord } from "../../src/core/message.js";
 
-const theme = { fg: (_color: string, text: string) => text } as unknown as Theme;
+const theme = {
+  fg: (_color: string, text: string) => text,
+  bold: (text: string) => `<bold>${text}</bold>`,
+  italic: (text: string) => `<italic>${text}</italic>`,
+  underline: (text: string) => `<underline>${text}</underline>`,
+  strikethrough: (text: string) => `<strike>${text}</strike>`,
+} as unknown as Theme;
 
 function record(patch: Partial<FabricRecord> = {}): FabricRecord {
   return {
@@ -36,20 +42,24 @@ function entry(data: unknown): CustomEntry {
 }
 
 describe("renderFabricEntry", () => {
-  it("renders a delivered record as a one-line muted Text with the sender runId", () => {
+  it("renders a delivered record with a muted header and markdown body", () => {
     const component = renderFabricEntry(
-      entry(record({ state: "delivered", deliveredAt: 2 })),
+      entry(record({ state: "delivered", deliveredAt: 2, payload: { text: "hello **fabric**" } })),
       { expanded: false },
       theme,
     );
-    expect(component).toBeInstanceOf(Text);
-    expect(component!.render(200).join("\n")).toContain("[fabric finding r_ABCDEFGH] hello fabric");
+    expect(component).toBeInstanceOf(Container);
+    const lines = component!.render(200).map((line) => line.trimEnd());
+    expect(lines[0]).toBe("[fabric finding r_ABCDEFGH]");
+    expect(lines[1]).toBe("  hello <bold>fabric</bold>");
   });
 
   it("prefers the mention label over the runId when a resolver is provided", () => {
     const render = createFabricEntryRenderer((runId) => (runId === "r_ABCDEFGH" ? "watcher" : undefined));
     const component = render(entry(record({ state: "delivered", deliveredAt: 2 })), { expanded: false }, theme);
-    expect(component!.render(200).join("\n")).toContain("[fabric finding @watcher] hello fabric");
+    const lines = component!.render(200).map((line) => line.trimEnd());
+    expect(lines[0]).toBe("[fabric finding @watcher]");
+    expect(lines[1]).toBe("  hello fabric");
   });
 
   it("renders nothing for every non-delivered state (append-per-transition would duplicate the message)", () => {
@@ -64,19 +74,24 @@ describe("renderFabricEntry", () => {
     expect(renderFabricEntry(entry({ payload: { text: "x" } }), { expanded: false }, theme)).toBeUndefined();
   });
 
-  it("indents continuation lines of a multi-line payload under the first line's text", () => {
+  it("renders markdown lists and keeps every payload line at a small fixed indent", () => {
     const render = createFabricEntryRenderer((runId) => (runId === "r_ABCDEFGH" ? "watcher" : undefined));
     const component = render(
-      entry(record({ state: "delivered", deliveredAt: 2, payload: { text: "line1\nline2\n  line3" } })),
+      entry(
+        record({
+          state: "delivered",
+          deliveredAt: 2,
+          payload: { text: "line1\n- **line2**\n  - line3" },
+        }),
+      ),
       { expanded: false },
       theme,
     );
-    const lines = component!.render(200).map((l) => l.trimEnd());
-    const prefix = "[fabric finding @watcher] ";
-    expect(lines[0]).toBe(`${prefix}line1`);
-    expect(lines[1]).toBe(`${" ".repeat(prefix.length)}line2`);
-    // Payload-internal indentation is preserved on top of the alignment indent.
-    expect(lines[2]).toBe(`${" ".repeat(prefix.length)}  line3`);
+    const lines = component!.render(200).map((line) => line.trimEnd());
+    expect(lines[0]).toBe("[fabric finding @watcher]");
+    expect(lines[1]).toBe("  line1");
+    expect(lines[2]).toBe("  - <bold>line2</bold>");
+    expect(lines[3]).toBe("      - line3");
   });
 
   it("falls back to a generic label when kind is absent on a delivered record", () => {
@@ -85,6 +100,8 @@ describe("renderFabricEntry", () => {
       { expanded: false },
       theme,
     );
-    expect(component!.render(200).join("\n")).toContain("[fabric message] x");
+    const lines = component!.render(200).map((line) => line.trimEnd());
+    expect(lines[0]).toBe("[fabric message]");
+    expect(lines[1]).toBe("  x");
   });
 });
