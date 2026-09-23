@@ -136,6 +136,15 @@ export interface CompactSettings {
    *  context usage before the reminder fires. */
   usageTickStepPercent: number;
   assumedReserveTokens?: number;
+  /** 注册 `switch_context`（模型自写交接内容的上下文切换工具），并让 hint/force 层改为催它。
+   *  Default true。false = 回到纯 compact_context 行为（docs/dev/context-switch/context-switch-plan.md §6）。 */
+  switchTool: boolean;
+  /** switchTool 开启时是否**同时**保留 `compact_context` 工具。Default false（彻底替换）。
+   *  switchTool=false 时本项无意义：compact_context 总是注册。 */
+  keepCompactTool: boolean;
+  /** 越过强制线后，先硬性要求模型调用 `switch_context` 的次数；用完仍越线才回落到通用强制压缩。
+   *  Default 1；0 = 不给机会，直接强制通用压缩。 */
+  forceDemandTurns: number;
 }
 
 export type CacheTtlMode = "auto" | "on" | "off" | "adaptive";
@@ -350,6 +359,9 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     hintThresholdTokens: 500,
     forceAtTokens: 0,
     usageTickStepPercent: DEFAULT_USAGE_TICK_STEP_PERCENT,
+    switchTool: true,
+    keepCompactTool: false,
+    forceDemandTurns: 1,
   },
   fabric: {
     enabled: false,
@@ -811,7 +823,14 @@ export function parseCompactSettings(input: unknown): CompactSettings {
       : defaults.forceAtTokens;
   const reserve = value.assumedReserveTokens;
   const tick = value.usageTickStepPercent;
+  const demandTurns = value.forceDemandTurns;
   return {
+    switchTool: typeof value.switchTool === "boolean" ? value.switchTool : defaults.switchTool,
+    keepCompactTool: typeof value.keepCompactTool === "boolean" ? value.keepCompactTool : defaults.keepCompactTool,
+    forceDemandTurns:
+      typeof demandTurns === "number" && Number.isFinite(demandTurns) && demandTurns >= 0 && demandTurns <= 5
+        ? Math.floor(demandTurns)
+        : defaults.forceDemandTurns,
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
     hintThresholdPercent,
     forceAtPercent,

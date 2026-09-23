@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildCompactForceText,
   buildCompactHintText,
+  buildSwitchDemandText,
+  buildSwitchHintText,
   buildUsageTickText,
   effectiveThresholdPercent,
   effectiveThresholdPercentWithTokens,
@@ -156,5 +158,35 @@ describe("compact hint thresholds", () => {
     expect(buildUsageTickText(80, 75)).toContain("已超过提醒阈值 75%");
     expect(buildUsageTickText(80, 75)).toContain("compact_context");
     expect(buildUsageTickText(42, 0)).not.toContain("compact_context");
+  });
+});
+
+describe("switch_context 模式文案", () => {
+  it("L1 提示强调交接内容由模型自己写，并预告强制线", () => {
+    const text = buildSwitchHintText(80, 75, 88);
+    expect(text).toContain("80%");
+    expect(text).toContain("阈值 75%");
+    expect(text).toContain("switch_context");
+    expect(text).toContain("没有摘要模型替你补救");
+    expect(text).toContain("88%");
+    expect(text).not.toContain("compact_context");
+    expect(buildSwitchHintText(80, 75, 0)).not.toContain("通用摘要压缩");
+    expect(buildSwitchHintText(80, 75)).toContain("切换不是终止");
+  });
+
+  it("L2 硬性要求说明后果（不照办就回落通用摘要）", () => {
+    const text = buildSwitchDemandText(90, 88);
+    expect(text).toContain("90%");
+    expect(text).toContain("强制线 88%");
+    expect(text).toContain("本回合");
+    expect(text).toContain("switch_context");
+    expect(text).toContain("不再由你决定");
+  });
+
+  it("usage tick 按工具名参数化，默认仍是 compact_context", () => {
+    expect(buildUsageTickText(42, 75, "switch_context")).toContain("switch_context");
+    expect(buildUsageTickText(80, 75, "switch_context")).toContain("已超过提醒阈值 75%");
+    expect(buildUsageTickText(80, 75, "switch_context")).not.toContain("compact_context");
+    expect(buildUsageTickText(80, 75)).toContain("compact_context");
   });
 });

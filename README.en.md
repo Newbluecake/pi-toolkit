@@ -238,7 +238,7 @@ npm run format
 
 Versioned pre-commit hook (prettier on staged files): `git config core.hooksPath .githooks`
 
-Layout: `core/` pure state machine + deadlines (no I/O) · `runtime/` watchdog, session driver, reaper · `service/` spawn/query/registry · `tools/` LLM-facing tool surface · `ui/` agent tree + settings editor · `workflow/` sandboxed orchestrator · `memory/` project memory · `fabric/` message fabric · `goal/` objective loop · `bash/` bash auto-background · `delivery/` notification pipeline · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|cache-ttl/` toolbox modules · `adapters/` pi-facing glue.
+Layout: `core/` pure state machine + deadlines (no I/O) · `runtime/` watchdog, session driver, reaper · `service/` spawn/query/registry · `tools/` LLM-facing tool surface · `ui/` agent tree + settings editor · `workflow/` sandboxed orchestrator · `memory/` project memory · `fabric/` message fabric · `goal/` objective loop · `bash/` bash auto-background · `delivery/` notification pipeline · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|context-switch|cache-ttl/` toolbox modules · `adapters/` pi-facing glue.
 
 Node.js ≥ 22 (uses `fs.globSync`).
 

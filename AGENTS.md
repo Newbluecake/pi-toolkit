@@ -10,9 +10,9 @@ replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` /
 `abort_subagent` tools, the `SubagentWorkflow` orchestration tool, the `/agent` command, a live
 fleet widget (agent tree), a notification delivery subsystem, and a cron scheduler. Beyond that
 core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus
-a `bash_job` manager tool, provides `compact_context` / `set_compact_threshold` for manual and
-threshold-triggered context compaction, and implements the message fabric (`message_agent`,
-fire-and-forget inter-agent messaging routed along the agent tree).
+a `bash_job` manager tool, provides `switch_context` / `compact_context` / `set_compact_threshold`
+for model-authored context handoff, manual and threshold-triggered compaction, and implements the
+message fabric (`message_agent`, fire-and-forget inter-agent messaging routed along the agent tree).
 
 The whole point of the project is **zero-hang guarantees**: every run has layered deadlines
 (watchdog sub-phase budgets + total budget), an escalating reaper for orphans, and persistent,
@@ -73,14 +73,24 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →
   log tee → settle → notify → recover after restart), persisted job store. POSIX only; when the
   setting is off, pi's built-in bash stays untouched.
-- `src/compact-hint/` — turn_end hook that watches context usage and nudges the model toward
-  `compact_context` at a configurable threshold (with a forced-compaction warning level), plus
-  stepped usage-tick reports so the model can perceive context usage at all. The tick grid is
+- `src/compact-hint/` — turn_end hook that watches context usage and nudges the model toward a
+  context handoff (`switch_context`, or `compact_context` when `compact.switchTool` is off) at a
+  configurable threshold, plus stepped usage-tick reports so the model can perceive context usage at
+  all. The tick grid is
   non-linear (default step 10 far away, densifying to step/2 and step/5 near the force ceiling —
   reminders get more frequent as the threshold approaches) and the force line is window-scaled
   (`forceScaling`, default on: the configured percent is a 1M-window anchor, rising 5 points per
   decade of shrinkage — 1M→88, 200k→91≈pi's own reserve line, 37k→95 — before the reserve cap
-  clamps it below pi's automatic line).
+  clamps it below pi's automatic line). In `switch_context` mode the force layer is 先礼后兵: it first
+  _demands_ a self-authored handoff (`compact.forceDemandTurns`, default 1) and only falls back to
+  the generic forced compaction when the model ignores it — the safety net is never removed.
+- `src/context-switch/` — model-authored context handoff: `handoff.ts` (validation + markdown
+  rendering + mechanical appendix), `store.ts` (TTL'd, consume-once pending slot), `hook.ts`
+  (`session_before_compact` returns `{ compaction }` so pi skips its summarizer and uses the model's
+  text verbatim; `firstKeptEntryId` is pi's cut point, or a sentinel that drops everything before it
+  for `keep_recent:false`), `session-facts.ts` (live runs / bash jobs / open todos / session file —
+  every port degrades silently). Tool surface: `src/tools/switch-context-tool.ts`. Design:
+  `docs/dev/context-switch/context-switch-plan.md`.
 - `src/cache-ttl/` — prompt-cache TTL mode (auto/on/off) wiring: status-bar indicator plus
   persisted settings override. Adaptive 1h upgrades are bounded by two write budgets — a USD
   marginal-cost gate (`adaptiveWriteBudgetUsd`, default $1, `0` = gate off) as the primary and

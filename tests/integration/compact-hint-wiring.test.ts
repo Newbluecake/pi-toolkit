@@ -554,4 +554,131 @@ describe("compact hint turn_end wiring", () => {
     literal.scheduler.stop();
     literal.rpc.close();
   });
+
+  // ── switch_context 模式（context-switch plan §3）：L2 先礼后兵 ──────────────
+  describe("switch_context mode (L2 demand before generic force)", () => {
+    function switchState(overrides: Partial<CompactHintState> = {}): CompactHintState {
+      return {
+        thresholdPercent: 75,
+        forceAtPercent: 88,
+        thresholdTokens: 0,
+        forceAtTokens: 0,
+        reserveTokens: 16384,
+        lastHintAt: 0,
+        hintedAt: undefined,
+        tickStepPercent: 0,
+        lastTickStep: 0,
+        switchTool: true,
+        forceDemandTurns: 1,
+        demandCount: 0,
+        ...overrides,
+      };
+    }
+
+    it("demands a switch first and only forces a generic compaction if the model ignores it", () => {
+      const state = switchState();
+      const compact = vi.fn((options: { onComplete: () => void }) => options.onComplete());
+      const sent: Array<Record<string, unknown>> = [];
+      const hook = createCompactHintHook(holder(state), {
+        sendMessage: (message) => sent.push(message as Record<string, unknown>),
+        now: () => 1,
+      });
+      const forceCtx = { ...ctx(90, "interactive", true), compact } as never;
+      hook({}, forceCtx);
+      expect(compact).not.toHaveBeenCalled();
+      expect(state.demandCount).toBe(1);
+      expect(sent[0]).toMatchObject({ details: { demand: true, attempt: 1 } });
+      expect(String(sent[0]?.content)).toContain("switch_context");
+      // 模型没照办 ⇒ 下一轮回落到通用强制压缩。
+      hook({}, forceCtx);
+      expect(compact).toHaveBeenCalledOnce();
+      expect(sent[1]).toMatchObject({ details: { forced: true } });
+      expect(state.demandCount).toBe(0);
+    });
+
+    it("never demands while a handoff is in flight, and never force-compacts over it", () => {
+      const state = switchState();
+      const compact = vi.fn();
+      const sent: unknown[] = [];
+      const hook = createCompactHintHook(holder(state), {
+        sendMessage: (message) => sent.push(message),
+        now: () => 1,
+        handoffPending: () => true,
+      });
+      hook({}, { ...ctx(95), compact } as never);
+      hook({}, { ...ctx(95), compact } as never);
+      expect(compact).not.toHaveBeenCalled();
+      expect(sent).toHaveLength(0);
+      expect(state.demandCount).toBe(0);
+    });
+
+    it("re-arms the demand after usage falls back below the force line", () => {
+      const state = switchState();
+      const compact = vi.fn();
+      const sent: unknown[] = [];
+      const hook = createCompactHintHook(holder(state), {
+        sendMessage: (message) => sent.push(message),
+        now: () => 1,
+      });
+      hook({}, { ...ctx(90), compact } as never);
+      expect(state.demandCount).toBe(1);
+      hook({}, ctx(40));
+      expect(state.demandCount).toBe(0);
+      hook({}, { ...ctx(90), compact } as never);
+      expect(state.demandCount).toBe(1);
+      expect(compact).not.toHaveBeenCalled();
+    });
+
+    it("forceDemandTurns=0 keeps the legacy behaviour (force immediately)", () => {
+      const state = switchState({ forceDemandTurns: 0 });
+      const compact = vi.fn((options: { onComplete: () => void }) => options.onComplete());
+      const hook = createCompactHintHook(holder(state), { sendMessage: () => undefined, now: () => 1 });
+      hook({}, { ...ctx(90), compact } as never);
+      expect(compact).toHaveBeenCalledOnce();
+    });
+
+    it("routes the L1 hint and usage ticks to switch_context", () => {
+      const state = switchState({ tickStepPercent: 10 });
+      const sent: Array<{ content?: unknown }> = [];
+      const hook = createCompactHintHook(holder(state), {
+        sendMessage: (message) => sent.push(message as { content?: unknown }),
+        now: () => 1,
+      });
+      hook({}, ctx(42));
+      hook({}, ctx(80));
+      expect(String(sent[0]?.content)).toContain("switch_context");
+      expect(String(sent[1]?.content)).toContain("switch_context");
+      expect(String(sent[1]?.content)).not.toContain("compact_context");
+    });
+
+    it("buildSessionStack maps the settings block onto the state", () => {
+      const base: AgentSettings = {
+        ...DEFAULT_SETTINGS,
+        fleetWidget: false,
+        bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
+      };
+      const stack = buildSessionStack(
+        fakePi().pi,
+        stackContext("/tmp/pi-subagent-switch-mode"),
+        { ...base, compact: { ...DEFAULT_SETTINGS.compact, forceDemandTurns: 2 } },
+        emptyTypes,
+        [],
+      );
+      expect(stack.compactHint.switchTool).toBe(true);
+      expect(stack.compactHint.forceDemandTurns).toBe(2);
+      expect(stack.compactHint.demandCount).toBe(0);
+      stack.scheduler.stop();
+      stack.rpc.close();
+      const off = buildSessionStack(
+        fakePi().pi,
+        stackContext("/tmp/pi-subagent-switch-off"),
+        { ...base, compact: { ...DEFAULT_SETTINGS.compact, switchTool: false } },
+        emptyTypes,
+        [],
+      );
+      expect(off.compactHint.switchTool).toBe(false);
+      off.scheduler.stop();
+      off.rpc.close();
+    });
+  });
 });

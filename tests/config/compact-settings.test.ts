@@ -13,6 +13,9 @@ describe("compact settings", () => {
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
+      switchTool: true,
+      keepCompactTool: false,
+      forceDemandTurns: 1,
     });
   });
 
@@ -35,6 +38,9 @@ describe("compact settings", () => {
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
+      switchTool: true,
+      keepCompactTool: false,
+      forceDemandTurns: 1,
     });
   });
 
@@ -78,6 +84,9 @@ describe("compact settings", () => {
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
+      switchTool: true,
+      keepCompactTool: false,
+      forceDemandTurns: 1,
     });
     expect(loadSettings({ compact: "invalid" }).compact).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 60, assumedReserveTokens: 32768 })).toEqual({
@@ -88,6 +97,9 @@ describe("compact settings", () => {
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
+      switchTool: true,
+      keepCompactTool: false,
+      forceDemandTurns: 1,
       assumedReserveTokens: 32768,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0 })).toEqual({
@@ -98,6 +110,9 @@ describe("compact settings", () => {
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
+      switchTool: true,
+      keepCompactTool: false,
+      forceDemandTurns: 1,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0.5 })).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: 0 })).toMatchObject({ forceAtPercent: 0 });
@@ -133,6 +148,23 @@ describe("compact settings", () => {
     expect(parseCompactSettings({ usageTickStepPercent: 15 }).usageTickStepPercent).toBe(15);
     for (const invalid of [1, 4, -10, 101, "10", null, Number.NaN]) {
       expect(parseCompactSettings({ usageTickStepPercent: invalid }).usageTickStepPercent).toBe(10);
+    }
+  });
+
+  it("parses the context-switch block: switchTool / keepCompactTool / forceDemandTurns", () => {
+    expect(parseCompactSettings({}).switchTool).toBe(true);
+    expect(parseCompactSettings({}).keepCompactTool).toBe(false);
+    expect(parseCompactSettings({}).forceDemandTurns).toBe(1);
+    expect(parseCompactSettings({ switchTool: false }).switchTool).toBe(false);
+    expect(parseCompactSettings({ keepCompactTool: true }).keepCompactTool).toBe(true);
+    for (const invalid of [undefined, null, 0, "false", [], {}]) {
+      expect(parseCompactSettings({ switchTool: invalid }).switchTool).toBe(true);
+      expect(parseCompactSettings({ keepCompactTool: invalid }).keepCompactTool).toBe(false);
+    }
+    expect(parseCompactSettings({ forceDemandTurns: 0 }).forceDemandTurns).toBe(0);
+    expect(parseCompactSettings({ forceDemandTurns: 2.9 }).forceDemandTurns).toBe(2);
+    for (const invalid of [-1, 6, Number.NaN, "2", null, Infinity]) {
+      expect(parseCompactSettings({ forceDemandTurns: invalid }).forceDemandTurns).toBe(1);
     }
   });
 });

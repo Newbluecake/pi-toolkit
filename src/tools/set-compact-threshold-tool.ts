@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
+  type CompactToolName,
   effectiveThresholdPercentWithTokens,
   maxThresholdPercent,
   thresholdLineTokens,
@@ -36,6 +37,8 @@ export type SetCompactThresholdParams = Static<typeof SetCompactThresholdParams>
 export interface SetCompactThresholdToolDeps {
   getState: () => CompactHintState | undefined;
   compactToolEnabled: () => boolean;
+  /** 文案里推荐的压缩/切换工具名（注册时即已确定）。默认 compact_context。 */
+  toolName?: CompactToolName;
 }
 
 function result(text: string, reason: string, extra: Record<string, unknown> = {}) {
@@ -54,17 +57,18 @@ function formatThreshold(percent: number, tokensK: number, window?: number): str
 export function createSetCompactThresholdTool(
   deps: SetCompactThresholdToolDeps,
 ): ToolDefinition<typeof SetCompactThresholdParams> {
+  const toolName = deps.toolName ?? "compact_context";
   return {
     name: "set_compact_threshold",
     label: "Set Compact Threshold",
     description:
       "Query, set, or disable the context-usage percentage (or absolute used-token line, unit k) at which " +
-      "pi-subagent reminds you to call compact_context. Calling it with no arguments reports the current " +
+      `pi-subagent reminds you to call ${toolName}. Calling it with no arguments reports the current ` +
       "context usage and thresholds without changing anything.",
     promptSnippet:
       "set_compact_threshold(percent?, tokens?) - query or set the model-triggered compaction reminder threshold",
     promptGuidelines: [
-      "This is a reminder threshold, never forced compression; use compact_context when you decide to compact.",
+      `This is a reminder threshold, never forced compression; use ${toolName} when you decide to compact.`,
       "Use 0 to disable, omit percent to query, or use a value of at least 1; the effective value stays below pi's automatic line.",
       "tokens/forceTokens are absolute used-token lines in units of k (default hint line 500 = 500k); 0 disables them, and a line exceeding the model's context window auto-disables. When both percent and tokens apply, whichever fires first wins.",
     ],

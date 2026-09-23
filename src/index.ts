@@ -49,6 +49,10 @@ import { createSetModelTool } from "./tools/set-model-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
 import { createExtendTimeoutTool } from "./tools/extend-timeout-tool.js";
 import { createCompactTool } from "./tools/compact-tool.js";
+import { createSwitchContextTool } from "./tools/switch-context-tool.js";
+import { PendingHandoffStore } from "./context-switch/store.js";
+import { createSwitchContextCompactHook } from "./context-switch/hook.js";
+import { createSessionFactsProvider } from "./context-switch/session-facts.js";
 import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-tool.js";
 import { createBashTool } from "./tools/bash-tool.js";
 import { createBashJobTool } from "./tools/bash-job-tool.js";
@@ -190,11 +194,15 @@ export default function activate(pi: ExtensionAPI): void {
   // rebuilt per session_start and would accumulate duplicate handlers).
   // Handler lives in stack.ts so integration tests cover the real filter path.
   pi.on("message_start", createNotificationReceiptHook(holder));
+  // context-switch（docs/dev/context-switch/context-switch-plan.md）：工具与
+  // session_before_compact 钩子之间的交接槽。每次 activate() 新建（/reload 后必须干净）。
+  const handoffStore = new PendingHandoffStore();
   pi.on(
     "turn_end",
     createCompactHintHook(holder, {
       sendMessage: (message, options) => pi.sendMessage(message, options),
       sendUserMessage: (text) => pi.sendUserMessage(text),
+      handoffPending: () => handoffStore.hasFresh(),
     }),
   );
 
@@ -309,11 +317,36 @@ export default function activate(pi: ExtensionAPI): void {
   }
   // HOST_KEY guard above means this registration is visible only in the main session.
   if (settings.compact.enabled) {
-    pi.registerTool(createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text) }));
+    if (settings.compact.switchTool) {
+      pi.registerTool(
+        createSwitchContextTool({
+          store: handoffStore,
+          sendUserMessage: (text) => pi.sendUserMessage(text),
+        }),
+      );
+      // 模型自写的交接文本在这里变成 pi 压缩条目的 summary（零摘要 LLM 调用）。
+      pi.on(
+        "session_before_compact",
+        createSwitchContextCompactHook({
+          store: handoffStore,
+          sessionFacts: createSessionFactsProvider(holder, settings),
+          debug: process.env.PI_SUBAGENT_DEBUG_COMPACT_HINT === "1",
+        }),
+      );
+      // 压缩失败/被取消：交接文本作废，绝不能留给下一次（可能是几十轮后）的压缩。
+      pi.on("session_compact_failed", () => handoffStore.clear());
+      pi.on("session_shutdown", () => handoffStore.clear());
+    }
+    // 彻底替换为默认：switchTool 开启时不再暴露 compact_context，
+    // 除非显式 compact.keepCompactTool=true（回退开关）。
+    if (!settings.compact.switchTool || settings.compact.keepCompactTool) {
+      pi.registerTool(createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text) }));
+    }
     pi.registerTool(
       createSetCompactThresholdTool({
         getState: () => holder.current?.compactHint,
         compactToolEnabled: () => settings.compact.enabled,
+        toolName: settings.compact.switchTool ? "switch_context" : "compact_context",
       }),
     );
   }

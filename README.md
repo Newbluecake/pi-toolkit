@@ -234,7 +234,7 @@ npm run format
 
 版本化 pre-commit hook（对暂存文件跑 prettier）：`git config core.hooksPath .githooks`
 
-目录结构：`core/` 纯状态机 + deadline（无 I/O）· `runtime/` 看门狗、会话驱动、回收器 · `service/` spawn/query/registry · `tools/` 面向 LLM 的工具面 · `ui/` agent-tree 视图 + 设置编辑器 · `workflow/` 沙箱编排器 · `memory/` 项目记忆 · `fabric/` 消息 fabric · `goal/` 目标循环 · `bash/` bash 自动后台 · `delivery/` 通知投递管线 · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|cache-ttl/` 工具箱模块 · `adapters/` 面向 pi 的胶水层。
+目录结构：`core/` 纯状态机 + deadline（无 I/O）· `runtime/` 看门狗、会话驱动、回收器 · `service/` spawn/query/registry · `tools/` 面向 LLM 的工具面 · `ui/` agent-tree 视图 + 设置编辑器 · `workflow/` 沙箱编排器 · `memory/` 项目记忆 · `fabric/` 消息 fabric · `goal/` 目标循环 · `bash/` bash 自动后台 · `delivery/` 通知投递管线 · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|context-switch|cache-ttl/` 工具箱模块 · `adapters/` 面向 pi 的胶水层。
 
 Node.js ≥ 22（用了 `fs.globSync`）。
 

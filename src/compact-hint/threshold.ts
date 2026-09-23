@@ -77,12 +77,19 @@ export function usageTickStep(percent: number, step: number, ceiling: number): n
   return 0;
 }
 
-export function buildUsageTickText(percent: number, hintCeiling: number): string {
+/** hint/tick 文案里推荐的工具名：switch_context（模型自写交接）或 compact_context（通用摘要）。 */
+export type CompactToolName = "switch_context" | "compact_context";
+
+export function buildUsageTickText(
+  percent: number,
+  hintCeiling: number,
+  tool: CompactToolName = "compact_context",
+): string {
   const hintLine =
     hintCeiling > 0 && hintCeiling <= 100
       ? percent >= hintCeiling
-        ? `已超过提醒阈值 ${hintCeiling}%；如果你正在收尾一个子任务，请尽快调用 compact_context。`
-        : `达到 ${hintCeiling}% 时会再提醒你考虑 compact_context；现在无需操作。`
+        ? `已超过提醒阈值 ${hintCeiling}%；如果你正在收尾一个子任务，请尽快调用 ${tool}。`
+        : `达到 ${hintCeiling}% 时会再提醒你考虑 ${tool}；现在无需操作。`
       : "现在无需操作。";
   return `[pi-subagent 上下文通报] 上下文已使用约 ${Math.round(percent)}%。${hintLine}`;
 }
@@ -168,5 +175,38 @@ export function buildCompactHintText(percent: number, effective: number, forceAt
     "  这是只有自主压缩才有的控制权；\n" +
     (forceAt > 0 ? `- ${forceLine}` : forceLine) +
     "- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。"
+  );
+}
+
+/**
+ * switch_context 模式的 L1 提示（替代 buildCompactHintText）：重点不是"去压缩"，
+ * 而是"交接内容由你来写，写漏即永久丢失" —— 这是自主切换相对通用摘要的唯一优势，
+ * 也是模型最容易敷衍的地方。
+ */
+export function buildSwitchHintText(percent: number, effective: number, forceAt = 0): string {
+  const forceLine =
+    forceAt > 0
+      ? `- 若用量继续涨至 ${forceAt}%，系统会先硬性要求你切换；仍不照办就回落到通用摘要压缩，\n  届时保留什么由摘要模型决定，你会失去控制权；\n`
+      : "";
+  return (
+    `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%（阈值 ${effective}%）。\n\n` +
+    "建议在当前子任务告一段落后调用 switch_context 主动切换上下文：\n" +
+    "- 你在参数里写下的 goal / progress / next_steps / decisions / key_files 就是切换后的全部上下文，\n" +
+    "  没有摘要模型替你补救——写全才不丢；\n" +
+    forceLine +
+    "- 切换不是终止：切换后你会带着自己写的交接内容自动继续当前任务。"
+  );
+}
+
+/**
+ * switch_context 模式的 L2 硬性要求（先礼后兵的"礼"）：越过强制线时先让模型自己交接，
+ * 只有它不照办，下一轮才回落到 buildCompactForceText 的通用强制压缩。
+ */
+export function buildSwitchDemandText(percent: number, forceAt: number): string {
+  return (
+    `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%，已达强制线 ${forceAt}%。\n\n` +
+    "请在本回合内调用 switch_context 完成上下文切换（先把手头这一步收尾，不要开新工作）：\n" +
+    "- 把目标、进展、下一步、已定决策、关键文件写进参数，这些就是切换后你能看到的全部内容；\n" +
+    "- 如果本回合结束时仍未切换，系统将改为强制通用摘要压缩，保留什么将不再由你决定。"
   );
 }

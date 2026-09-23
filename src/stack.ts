@@ -8,6 +8,8 @@ import {
   USAGE_TICK_HYSTERESIS_PERCENT,
   buildCompactForceText,
   buildCompactHintText,
+  buildSwitchDemandText,
+  buildSwitchHintText,
   buildUsageTickText,
   effectiveThresholdPercentWithTokens,
   usageTickStep,
@@ -441,6 +443,12 @@ export interface CompactHintState {
    *  a real drop larger than USAGE_TICK_HYSTERESIS_PERCENT (e.g. compaction),
    *  so boundary wobble never re-notifies. */
   lastTickStep: number;
+  /** switch_context 模式（settings.compact.switchTool）：hint/force 层改为催模型自写交接。 */
+  switchTool: boolean;
+  /** 越线后先硬性要求切换的次数上限；用完仍越线才回落通用强制压缩。 */
+  forceDemandTurns: number;
+  /** 本轮高位期内已发出的硬性切换要求次数；用量回落到强制线以下即归零。 */
+  demandCount: number;
 }
 
 /** set_model (plan §4.10): single model-registry port shared by spawn admission,
@@ -512,6 +520,8 @@ export function createCompactHintHook(
     ) => void;
     now?: () => number;
     sendUserMessage?: (text: string) => void;
+    /** switch_context 已暂存交接文本、压缩尚未完成 —— 此时既不再催，也不抢先强制压缩。 */
+    handoffPending?: () => boolean;
   },
 ): (event: unknown, ctx: ExtensionContext) => void {
   const now = deps.now ?? (() => Date.now());
@@ -554,12 +564,50 @@ export function createCompactHintHook(
     );
     if (effectiveForce > 0 && percent >= effectiveForce) {
       const timestamp = now();
+      // switch_context 模式（先礼后兵）：越线先硬性要求模型自己写交接内容，
+      // 只有它不照办（下一次 turn_end 仍越线）才回落到通用强制压缩——安全网不能拆。
+      if (state.switchTool) {
+        if (deps.handoffPending?.()) {
+          if (debug) console.warn("[pi-subagent] compact-hint force skipped: handoff pending");
+          return;
+        }
+        if (state.demandCount < state.forceDemandTurns) {
+          state.demandCount += 1;
+          if (debug)
+            console.warn(
+              `[pi-subagent] switch-context demand percent=${percent} force=${effectiveForce} attempt=${state.demandCount}`,
+            );
+          if (ctx.hasUI) {
+            try {
+              ctx.ui.notify(
+                `Context ${Math.round(percent)}% ≥ ${effectiveForce}% — demanding switch_context`,
+                "warning",
+              );
+            } catch {}
+          }
+          try {
+            deps.sendMessage(
+              {
+                customType: COMPACT_HINT_CUSTOM_TYPE,
+                content: buildSwitchDemandText(percent, effectiveForce),
+                display: true,
+                details: { percent, thresholdPercent: effectiveForce, demand: true, attempt: state.demandCount },
+              },
+              { triggerTurn: false },
+            );
+          } catch (error) {
+            console.warn(`[pi-subagent] switch-context demand send failed: ${String(error)}`);
+          }
+          return;
+        }
+      }
       if (forcing || (lastForcedAt > 0 && timestamp - lastForcedAt < COMPACT_HINT_COOLDOWN_MS)) {
         if (debug) console.warn(`[pi-subagent] compact-hint force skipped: ${forcing ? "in-flight" : "cooldown"}`);
         return;
       }
       forcing = true;
       lastForcedAt = timestamp;
+      state.demandCount = 0;
       if (debug)
         console.warn(`[pi-subagent] compact-hint force triggered percent=${percent} effective=${effectiveForce}`);
       if (ctx.hasUI) {
@@ -608,6 +656,8 @@ export function createCompactHintHook(
     // step; re-armed only by a real drop larger than the hysteresis (e.g.
     // compaction), never by boundary wobble.
     const tickCeiling = effectiveForce > 0 ? effectiveForce : 100;
+    // 回到强制线以下：硬性切换要求的计数归零（下次越线重新先礼后兵）。
+    state.demandCount = 0;
     const tick = usageTickStep(percent, state.tickStepPercent, tickCeiling);
     if (tick < state.lastTickStep && percent <= state.lastTickStep - USAGE_TICK_HYSTERESIS_PERCENT) {
       state.lastTickStep = tick;
@@ -618,7 +668,11 @@ export function createCompactHintHook(
         deps.sendMessage(
           {
             customType: USAGE_TICK_CUSTOM_TYPE,
-            content: buildUsageTickText(percent, effective > 0 ? effective : 0),
+            content: buildUsageTickText(
+              percent,
+              effective > 0 ? effective : 0,
+              state.switchTool ? "switch_context" : "compact_context",
+            ),
             display: true,
             details: { percent, tickStep: tick },
           },
@@ -648,7 +702,9 @@ export function createCompactHintHook(
       deps.sendMessage(
         {
           customType: COMPACT_HINT_CUSTOM_TYPE,
-          content: buildCompactHintText(percent, effective, effectiveForce),
+          content: state.switchTool
+            ? buildSwitchHintText(percent, effective, effectiveForce)
+            : buildCompactHintText(percent, effective, effectiveForce),
           display: true,
           details: { percent, thresholdPercent: effective },
         },
@@ -733,6 +789,9 @@ export function buildSessionStack(
     hintedAt: undefined,
     tickStepPercent: settings.compact.enabled ? settings.compact.usageTickStepPercent : 0,
     lastTickStep: 0,
+    switchTool: settings.compact.enabled && settings.compact.switchTool,
+    forceDemandTurns: settings.compact.forceDemandTurns,
+    demandCount: 0,
   };
   const widgetRef: { current?: FleetWidgetController } = {};
   const widgetPoints: SubagentExtensionPoints = { onLifecycle: () => widgetRef.current?.refresh() };
