@@ -190,4 +190,28 @@ describe("set_compact_threshold", () => {
     expect(big.details).toMatchObject({ ok: true, effectivePercent: 40 });
     expect(big.content[0]?.text).not.toContain("inactive");
   });
+
+  it("reports the window-scaled force line when forceScaling is on", async () => {
+    const current = { ...state(), forceScaling: true };
+    const tool = createSetCompactThresholdTool({ getState: () => current, compactToolEnabled: () => true });
+    // 200k window: the 88 anchor scales to 91 (= the reserve cap there).
+    const query = await tool.execute("1", {}, undefined, undefined, ctx());
+    expect(query.details).toMatchObject({ ok: true, effectiveForcePercent: 91 });
+    // A 1M window takes the anchor literally.
+    const big = await tool.execute(
+      "2",
+      {},
+      undefined,
+      undefined,
+      ctx({ getContextUsage: () => ({ percent: 30, contextWindow: 1_000_000, tokens: 1 }) }),
+    );
+    expect(big.details).toMatchObject({ ok: true, effectiveForcePercent: 88 });
+    // With scaling off the same query stays literal on every window.
+    const literal = { ...state(), forceScaling: false };
+    const literalTool = createSetCompactThresholdTool({ getState: () => literal, compactToolEnabled: () => true });
+    expect((await literalTool.execute("3", {}, undefined, undefined, ctx())).details).toMatchObject({
+      ok: true,
+      effectiveForcePercent: 88,
+    });
+  });
 });

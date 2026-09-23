@@ -473,6 +473,31 @@ describe("compact hint turn_end wiring", () => {
     expect(h.sent).toHaveLength(0);
   });
 
+  it("scales the force line with the window and densifies ticks near it", () => {
+    const h = harness({ thresholdPercent: 0, forceAtPercent: 88, forceScaling: true, tickStepPercent: 10 });
+    const compact = vi.fn((options: { onComplete: () => void }) => options.onComplete());
+    const withCompact = (percent: number, window = 200_000) =>
+      ({ ...ctx(percent, "interactive", false, window), compact }) as never;
+    // 200k window: the 88 anchor scales up to 91 — right at pi's own reserve
+    // line — so 88 alone no longer forces.
+    h.hook({}, withCompact(88));
+    expect(compact).not.toHaveBeenCalled();
+    // Densified grid below the 91 ceiling: 87 fires, then 89 (step/2 band).
+    expect(h.sent[0]?.message.details).toMatchObject({ tickStep: 87 });
+    h.hook({}, withCompact(90));
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.message.details).toMatchObject({ tickStep: 89 });
+    h.hook({}, withCompact(91)); // at the scaled line: L2 owns this zone
+    expect(compact).toHaveBeenCalledOnce();
+    h.setNow(1_000_001);
+    // 37k window: the anchor asks for 95, but the reserve cap clamps the
+    // effective line to 55 — it never crosses pi's automatic compaction line.
+    h.hook({}, withCompact(54, 37_000));
+    expect(compact).toHaveBeenCalledOnce(); // still once (below the clamped line)
+    h.hook({}, withCompact(55, 37_000));
+    expect(compact).toHaveBeenCalledTimes(2);
+  });
+
   it("fires the default 400k absolute line early on a 1M window (min semantics)", () => {
     const h = harness({ thresholdTokens: 400 });
     h.hook({}, ctx(39, "interactive", false, 1_000_000));
@@ -515,7 +540,18 @@ describe("compact hint turn_end wiring", () => {
     );
     expect(stack.compactHint.thresholdTokens).toBe(500);
     expect(stack.compactHint.forceAtTokens).toBe(0);
+    expect(stack.compactHint.forceScaling).toBe(true); // default on
     stack.scheduler.stop();
     stack.rpc.close();
+    const literal = buildSessionStack(
+      fakePi().pi,
+      stackContext("/tmp/pi-subagent-compact-literal"),
+      { ...settings, compact: { ...DEFAULT_SETTINGS.compact, forceScaling: false } },
+      emptyTypes,
+      [],
+    );
+    expect(literal.compactHint.forceScaling).toBe(false);
+    literal.scheduler.stop();
+    literal.rpc.close();
   });
 });

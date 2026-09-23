@@ -113,7 +113,14 @@ export interface BashJobsSettings {
 export interface CompactSettings {
   enabled: boolean;
   hintThresholdPercent: number;
+  /** Force-compaction line. With `forceScaling` on (the default) this is the
+   *  anchor for a 1M-token window; the effective line rises 5 points per
+   *  decade of window shrinkage (1M→88, 200k→91, 37k→95) before the reserve
+   *  cap clamps it below pi's own automatic compaction line. */
   forceAtPercent: number;
+  /** Scale `forceAtPercent` with the model's context window. Default true;
+   *  set false to use the configured percentage literally on every window. */
+  forceScaling: boolean;
   /** Absolute hint threshold in units of k tokens (default 500 = 500k used
    *  tokens). 0 = no absolute limit (percent only). Auto-disabled when the
    *  line strictly exceeds the model's context window. When both the percent
@@ -122,9 +129,11 @@ export interface CompactSettings {
   /** Absolute force threshold in units of k tokens; 0 = no absolute limit
    *  (default). Same auto-disable rule as hintThresholdTokens. */
   forceAtTokens: number;
-  /** Step (percent points) between lightweight usage-tick reports; ticks cover
-   *  the whole range below the force ceiling. 0 disables ticks. Keeps the model
-   *  aware of context usage before the reminder fires. */
+  /** Coarsest step (percent points) between lightweight usage-tick reports.
+   *  The grid is non-linear — it densifies toward the force ceiling (step/2
+   *  within 2 steps of it, step/5 within 1) so reminders get more frequent as
+   *  the threshold approaches. 0 disables ticks. Keeps the model aware of
+   *  context usage before the reminder fires. */
   usageTickStepPercent: number;
   assumedReserveTokens?: number;
 }
@@ -337,6 +346,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     enabled: true,
     hintThresholdPercent: DEFAULT_HINT_THRESHOLD_PERCENT,
     forceAtPercent: DEFAULT_FORCE_THRESHOLD_PERCENT,
+    forceScaling: true,
     hintThresholdTokens: 500,
     forceAtTokens: 0,
     usageTickStepPercent: DEFAULT_USAGE_TICK_STEP_PERCENT,
@@ -805,6 +815,7 @@ export function parseCompactSettings(input: unknown): CompactSettings {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
     hintThresholdPercent,
     forceAtPercent,
+    forceScaling: typeof value.forceScaling === "boolean" ? value.forceScaling : defaults.forceScaling,
     hintThresholdTokens,
     forceAtTokens,
     usageTickStepPercent:

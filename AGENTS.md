@@ -75,8 +75,12 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   setting is off, pi's built-in bash stays untouched.
 - `src/compact-hint/` — turn_end hook that watches context usage and nudges the model toward
   `compact_context` at a configurable threshold (with a forced-compaction warning level), plus
-  stepped usage-tick reports (every 10% by default, from the first step up to the force
-  ceiling) so the model can perceive context usage at all.
+  stepped usage-tick reports so the model can perceive context usage at all. The tick grid is
+  non-linear (default step 10 far away, densifying to step/2 and step/5 near the force ceiling —
+  reminders get more frequent as the threshold approaches) and the force line is window-scaled
+  (`forceScaling`, default on: the configured percent is a 1M-window anchor, rising 5 points per
+  decade of shrinkage — 1M→88, 200k→91≈pi's own reserve line, 37k→95 — before the reserve cap
+  clamps it below pi's automatic line).
 - `src/cache-ttl/` — prompt-cache TTL mode (auto/on/off) wiring: status-bar indicator plus
   persisted settings override. Adaptive 1h upgrades are bounded by two write budgets — a USD
   marginal-cost gate (`adaptiveWriteBudgetUsd`, default $1, `0` = gate off) as the primary and

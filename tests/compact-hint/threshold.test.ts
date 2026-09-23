@@ -8,7 +8,9 @@ import {
   maxThresholdPercent,
   thresholdLineTokens,
   tokenLineExceedsWindow,
+  usageTickMarks,
   usageTickStep,
+  windowScaledForcePercent,
 } from "../../src/compact-hint/threshold.js";
 
 describe("compact hint thresholds", () => {
@@ -112,10 +114,39 @@ describe("compact hint thresholds", () => {
     expect(usageTickStep(25, 10, 75)).toBe(20); // no floor: ticks start at 10%
     expect(usageTickStep(30, 10, 75)).toBe(30);
     expect(usageTickStep(39.9, 10, 75)).toBe(30);
-    expect(usageTickStep(70, 10, 75)).toBe(70);
+    expect(usageTickStep(70, 10, 75)).toBe(69); // near-ceiling fine grid
     expect(usageTickStep(75, 10, 75)).toBe(0); // at/above the ceiling (force zone)
     expect(usageTickStep(45, 15, 75)).toBe(45); // custom step grid
     expect(usageTickStep(50, 0, 75)).toBe(0); // disabled
+  });
+
+  it("densifies the tick grid toward the ceiling (non-linear cadence)", () => {
+    // Far region keeps plain multiples of the step; the last two steps before
+    // the ceiling densify (mid = step/2, fine = step/5 next to the line), so
+    // reminders get more frequent as the threshold approaches.
+    expect(usageTickMarks(10, 88)).toEqual([10, 20, 30, 40, 50, 60, 73, 78, 80, 82, 84, 86]);
+    expect(usageTickMarks(10, 75)).toEqual([10, 20, 30, 40, 50, 60, 65, 67, 69, 71, 73]);
+    expect(usageTickMarks(15, 75)).toEqual([15, 30, 45, 52, 60, 63, 66, 69, 72]);
+    // No force line → ticks run toward 100% and still densify at the top.
+    expect(usageTickMarks(10, 100)).toEqual([10, 20, 30, 40, 50, 60, 70, 80, 85, 90, 92, 94, 96, 98]);
+    // Degenerate inputs: disabled step or a ceiling at/below the step.
+    expect(usageTickMarks(0, 88)).toEqual([]);
+    expect(usageTickMarks(10, 8)).toEqual([]);
+    expect(usageTickStep(87, 10, 88)).toBe(86);
+    expect(usageTickStep(61, 10, 88)).toBe(60);
+  });
+
+  it("scales the force anchor with the context window", () => {
+    // The configured value is the anchor for a 1M window; smaller windows run
+    // the line higher (5 points per decade of shrinkage), larger ones lower.
+    expect(windowScaledForcePercent(88, 1_000_000)).toBe(88);
+    expect(windowScaledForcePercent(88, 200_000)).toBe(91); // ≈ pi's own reserve line at 200k
+    expect(windowScaledForcePercent(88, 37_000)).toBe(95);
+    expect(windowScaledForcePercent(88, 128_000)).toBe(92);
+    expect(windowScaledForcePercent(88, 2_000_000)).toBe(86);
+    expect(windowScaledForcePercent(95, 200_000)).toBe(98); // clamped at the hard max
+    expect(windowScaledForcePercent(0, 200_000)).toBe(0); // disabled stays disabled
+    expect(windowScaledForcePercent(88, Number.NaN)).toBe(88); // unknown window → anchor
   });
 
   it("builds the usage tick text below, at/above the hint ceiling, and without one", () => {

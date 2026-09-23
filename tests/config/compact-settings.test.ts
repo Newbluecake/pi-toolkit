@@ -9,6 +9,7 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
+      forceScaling: true,
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
@@ -30,6 +31,7 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
+      forceScaling: true,
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
@@ -72,6 +74,7 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
+      forceScaling: true,
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
@@ -81,6 +84,7 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 60,
       forceAtPercent: 88,
+      forceScaling: true,
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
@@ -90,6 +94,7 @@ describe("compact settings", () => {
       enabled: true,
       hintThresholdPercent: 0,
       forceAtPercent: 88,
+      forceScaling: true,
       hintThresholdTokens: 500,
       forceAtTokens: 0,
       usageTickStepPercent: 10,
@@ -98,14 +103,29 @@ describe("compact settings", () => {
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: 0 })).toMatchObject({ forceAtPercent: 0 });
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: 88 })).toMatchObject({
       forceAtPercent: 88,
+      forceScaling: true,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: 75 })).toMatchObject({
       forceAtPercent: 88,
+      forceScaling: true,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: "88" })).toMatchObject({
       forceAtPercent: 88,
+      forceScaling: true,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 101, assumedReserveTokens: -1 })).toEqual(defaults);
+  });
+
+  it("parses forceScaling with a true default and literal opt-out", () => {
+    // Default on: the configured forceAtPercent is a 1M-window anchor.
+    expect(parseCompactSettings({}).forceScaling).toBe(true);
+    expect(parseCompactSettings({ forceAtPercent: 90 }).forceScaling).toBe(true);
+    // Explicit opt-out keeps the percentage literal on every window.
+    expect(parseCompactSettings({ forceScaling: false }).forceScaling).toBe(false);
+    expect(parseCompactSettings({ forceAtPercent: 90, forceScaling: false }).forceScaling).toBe(false);
+    for (const invalid of ["true", 1, null, [], {}, undefined]) {
+      expect(parseCompactSettings({ forceScaling: invalid }).forceScaling).toBe(true);
+    }
   });
 
   it("parses usageTickStepPercent with 0=off and a 5% minimum", () => {

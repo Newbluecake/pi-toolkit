@@ -523,3 +523,46 @@ percent ≥ L2 强制线                              → L2 强制压缩接管�
 - 工具：tokens 设置/查询/禁用、forceTokens 生效线校验、失效标注、大窗口 min 生效。
 - wiring：1M 窗口 400k 提前触发（effective 40）、256k 窗口自动失效（hint/force 纯百分比）、
   settings → stack 默认 400 透传、enabled=false 时 tokens 归零。
+
+## 14. v3.6 增量：非线性通报密度 + 窗口自适应强制线（2026-09-23）
+
+**两条需求**：① 上下文压缩提醒应是非线性的——越接近阈值，提醒频率越高；② 88% 强制线应随
+上下文窗口调整（200k 接近 pi 内生值，1M 就是 88，37k 可以到 95）。
+
+### 14.1 非线性 tick 网格（usageTickMarks/usageTickStep 重写）
+
+- 原：`percent/step` 取整的均匀网格（默认 10% 一档，10/20/…/80），接近阈值与远离阈值一样稀疏。
+- 新（`usageTickMarks(step, ceiling)` 升序网格）：
+  - **远区**（距 ceiling > 2×step）：保持 step 的整数倍刻度（10/20/…），低用量行为与旧版一致；
+  - **近区**（2×step 以内）：从 ceiling 向下按带加密——距线 < step 用 step/5、< 2×step 用 step/2；
+  - 例（step=10, ceiling=88）：`10,20,30,40,50,60,73,78,80,82,84,86` —— 73 以后间距 5→2 递减，
+    **越接近线通报越密**，正好落在信息最有行动价值的区间。
+- 不变量：刻度严格递增、不含 0 与 ceiling 本身（≥ceiling 归 L2）；`lastTickStep` 闩锁与 5 点
+  滞回复位（USAGE_TICK_HYSTERESIS_PERCENT）原样保留——近区细刻度下抖动（±1–2 点）绝不重报。
+- `usageTickStep(percent, step, ceiling)` 语义改为"≤percent 的最高刻度"（0=首刻度以下/已到 ceiling）。
+
+### 14.2 窗口自适应强制线（forceScaling，默认开）
+
+- **锚点语义**：`compact.forceAtPercent`（默认 88）成为 **1M 窗口的锚点值**；
+  `windowScaledForcePercent(anchor, window) = round(anchor + 5×log10(1M/window))`，钳到 [1, 98]。
+  - 实测：1M→88、200k→91（≈200k 的 pi 内生 reserve 线 91.8）、128k→92、37k→95、2M→86。
+  - 依据：强制线的目的是"赶在 pi 自动压缩前、用我们带 resume 的压缩接管"。窗口越大，同样的
+    百分比对应越大的绝对余量，可以更早压；小窗口每一点百分比都很贵，应尽量贴着 pi 的线走。
+- **安全边界不变**：缩放结果仍经 `effectiveThresholdPercentWithTokens`（reserve 钳制）——37k 窗口
+  锚点 95 会被 `maxThresholdPercent(37000,16384)=55` 压到 55，即"贴着 pi 的线"，永不超过
+  pi 自动压缩线（`contextTokens > window − reserveTokens`）。
+- **配置面**：`compact.forceScaling`（boolean，默认 true）。false = 字面百分比，所有窗口一视同仁
+  （旧语义）。工具侧：`set_compact_threshold` 查询/设定回显的 effective force 与 hook 同口径
+  （先缩放再钳制）；force 的 above_cap 校验仅在 scaling 关闭时按字面值判（锚点在被钳制语义下
+  允许超 cap）。
+- **状态**：`CompactHintState.forceScaling`（session_start 从 settings 透传）；hook 每 turn 用
+  `usage.contextWindow` 现算（/model 切窗口即时跟随）。
+
+### 14.3 测试增量
+
+- threshold：tick 网格矩阵（88/75/15/100 四种 ceiling）、densify 断言、退化输入；
+  windowScaledForcePercent 锚点矩阵（1M/200k/128k/37k/2M/钳 98/0/NaN）。
+- wiring：scaling 开时 200k 窗口 88 不再强制、91 强制、tick 在 87/89 加密档位触发；
+  37k 窗口锚点 95 被钳到 55；settings → stack 的 forceScaling 透传（默认 true/false）。
+- settings：forceScaling 默认 true、显式 false、非法值回落。
+- 工具：scaling 开/关时查询回显的 effectiveForcePercent（200k→91 / 1M→88 / 字面 88）。

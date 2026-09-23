@@ -11,6 +11,7 @@ import {
   buildUsageTickText,
   effectiveThresholdPercentWithTokens,
   usageTickStep,
+  windowScaledForcePercent,
 } from "./compact-hint/threshold.js";
 import { homedir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -421,7 +422,11 @@ export interface WorkflowSupport {
 
 export interface CompactHintState {
   thresholdPercent: number;
+  /** Force line anchor. With `forceScaling` on this is the value for a 1M
+   *  window and is scaled per decade against the real one; otherwise literal. */
   forceAtPercent: number;
+  /** Scale `forceAtPercent` with the context window (default on). */
+  forceScaling: boolean;
   /** Absolute thresholds in units of k tokens (0 = off); combined with the
    *  percent lines via min — whichever fires first wins. */
   thresholdTokens: number;
@@ -429,8 +434,8 @@ export interface CompactHintState {
   reserveTokens: number;
   lastHintAt: number;
   hintedAt: { effectivePercent: number; contextWindow: number } | undefined;
-  /** Step (percent points) between lightweight usage-tick reports; ticks cover
-   *  the whole range below the force ceiling. 0 disables ticks. */
+  /** Coarsest step (percent points) between lightweight usage-tick reports;
+   *  the grid densifies toward the force ceiling. 0 disables ticks. */
   tickStepPercent: number;
   /** Highest tick step already reported (0 = none). Re-armed downward only by
    *  a real drop larger than USAGE_TICK_HYSTERESIS_PERCENT (e.g. compaction),
@@ -542,7 +547,7 @@ export function createCompactHintHook(
       state.reserveTokens,
     );
     const effectiveForce = effectiveThresholdPercentWithTokens(
-      state.forceAtPercent,
+      state.forceScaling ? windowScaledForcePercent(state.forceAtPercent, usage.contextWindow) : state.forceAtPercent,
       state.forceAtTokens,
       usage.contextWindow,
       state.reserveTokens,
@@ -597,7 +602,9 @@ export function createCompactHintHook(
     // Usage ticks: lightweight stepped reports at every step so the model
     // stays aware of context usage across the whole range — including the L1
     // hint zone (the hint fires only once, ticks keep the visibility alive);
-    // the force zone (L2) owns the range at/above its ceiling. Latched per
+    // the force zone (L2) owns the range at/above its ceiling. The grid is
+    // non-linear: it densifies as usage approaches the ceiling, so reminders
+    // get more frequent exactly where acting on them matters. Latched per
     // step; re-armed only by a real drop larger than the hysteresis (e.g.
     // compaction), never by boundary wobble.
     const tickCeiling = effectiveForce > 0 ? effectiveForce : 100;
@@ -718,6 +725,7 @@ export function buildSessionStack(
   const compactHint: CompactHintState = {
     thresholdPercent: settings.compact.enabled ? settings.compact.hintThresholdPercent : 0,
     forceAtPercent: settings.compact.enabled ? settings.compact.forceAtPercent : 0,
+    forceScaling: settings.compact.forceScaling,
     thresholdTokens: settings.compact.enabled ? settings.compact.hintThresholdTokens : 0,
     forceAtTokens: settings.compact.enabled ? settings.compact.forceAtTokens : 0,
     reserveTokens: resolveReserveTokens(settings.compact.assumedReserveTokens, ctx.cwd),

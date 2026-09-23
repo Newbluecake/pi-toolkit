@@ -5,6 +5,7 @@ import {
   maxThresholdPercent,
   thresholdLineTokens,
   tokenLineExceedsWindow,
+  windowScaledForcePercent,
 } from "../compact-hint/threshold.js";
 import type { CompactHintState } from "../stack.js";
 
@@ -86,8 +87,13 @@ export function createSetCompactThresholdTool(
         window === undefined
           ? percent
           : effectiveThresholdPercentWithTokens(percent, tokensK, window, state.reserveTokens);
+      // Mirror the hook: the force anchor is window-scaled before clamping.
+      const forceAnchor = () =>
+        state.forceScaling && window !== undefined
+          ? windowScaledForcePercent(state.forceAtPercent, window)
+          : state.forceAtPercent;
       const effective = effectiveOf(state.thresholdPercent, state.thresholdTokens);
-      const effectiveForce = effectiveOf(state.forceAtPercent, state.forceAtTokens);
+      const effectiveForce = effectiveOf(forceAnchor(), state.forceAtTokens);
       if (
         params.percent === undefined &&
         params.force === undefined &&
@@ -147,7 +153,15 @@ export function createSetCompactThresholdTool(
           `Threshold exceeds the current dynamic cap of ${maxThresholdPercent(window, state.reserveTokens)}%.`,
           "above_cap",
         );
-      if (force !== undefined && window !== undefined && nextForce > maxThresholdPercent(window, state.reserveTokens))
+      // With scaling on, `force` is a 1M-window anchor rather than a literal
+      // line (on a small window the scaled value legitimately exceeds the cap
+      // and gets clamped), so only a literal anchor is cap-checked here.
+      if (
+        force !== undefined &&
+        !state.forceScaling &&
+        window !== undefined &&
+        nextForce > maxThresholdPercent(window, state.reserveTokens)
+      )
         return result(
           `Force threshold exceeds the current dynamic cap of ${maxThresholdPercent(window, state.reserveTokens)}%.`,
           "above_cap",
@@ -160,7 +174,7 @@ export function createSetCompactThresholdTool(
       state.lastHintAt = 0;
       const action = state.thresholdPercent === 0 && state.thresholdTokens === 0 ? "off" : "set";
       const nextEffective = effectiveOf(state.thresholdPercent, state.thresholdTokens);
-      const nextEffectiveForce = effectiveOf(state.forceAtPercent, state.forceAtTokens);
+      const nextEffectiveForce = effectiveOf(forceAnchor(), state.forceAtTokens);
       return {
         content: [
           {

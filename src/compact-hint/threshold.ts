@@ -10,18 +10,71 @@ export const PI_DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_FORCE_THRESHOLD_PERCENT = 88;
 /** Usage-tick message custom type (lightweight stepped usage reports, no action urged). */
 export const USAGE_TICK_CUSTOM_TYPE = "subagent:usage-tick";
-/** Default step between usage-tick reports. 0 disables ticks. */
+/** Default (coarsest) step between usage-tick reports. 0 disables ticks. */
 export const DEFAULT_USAGE_TICK_STEP_PERCENT = 10;
 /** Drop (in percent points) below the last tick step that re-arms the latch.
  *  Distinguishes a real context drop (compaction) from boundary wobble. */
 export const USAGE_TICK_HYSTERESIS_PERCENT = 5;
+/** Reference window (tokens) at which a configured force anchor is taken
+ *  literally; smaller windows scale the line up, larger ones down. */
+export const FORCE_SCALE_REFERENCE_WINDOW = 1_000_000;
+/** Percentage points the force line rises per decade of window shrinkage.
+ *  Anchored on the default 88: 1M→88, 200k→91 (≈ pi's own reserve line),
+ *  37k→95. Rationale: headroom should be a bounded absolute amount, so a
+ *  small window must be allowed to run much closer to full. */
+export const FORCE_SCALE_POINTS_PER_DECADE = 5;
+/** Hard ceiling for a scaled force line; the reserve cap clamps further. */
+export const FORCE_SCALE_MAX_PERCENT = 98;
 
-/** Current tick step for a usage percent: multiples of `step` (0 below the
- *  first step, so ticks start at `step`% itself). Ticks never fire at/above
- *  `ceiling` — the force-compaction zone owns that range. */
+/** Window-scaled force line: `anchorPercent` is the value for a
+ *  FORCE_SCALE_REFERENCE_WINDOW-token window and rises by
+ *  FORCE_SCALE_POINTS_PER_DECADE for every decade the real window is smaller
+ *  (falls for larger ones). 0 (disabled) stays 0. The result is still subject
+ *  to the reserve cap via `effectiveThresholdPercentWithTokens`, which is what
+ *  keeps small windows below pi's own automatic line. */
+export function windowScaledForcePercent(anchorPercent: number, contextWindow: number): number {
+  if (anchorPercent <= 0) return 0;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return anchorPercent;
+  const decades = Math.log10(FORCE_SCALE_REFERENCE_WINDOW / contextWindow);
+  const scaled = Math.round(anchorPercent + FORCE_SCALE_POINTS_PER_DECADE * decades);
+  return Math.min(FORCE_SCALE_MAX_PERCENT, Math.max(1, scaled));
+}
+
+/** Non-linear tick grid, ascending. Far from the ceiling the marks stay
+ *  on the plain multiples of `step`; within two steps of the ceiling the grid
+ *  densifies (step/2, then step/5 next to the line), so reporting frequency
+ *  rises exactly as usage approaches the threshold. Marks never include 0
+ *  or the ceiling itself (the force zone owns at/above it). */
+export function usageTickMarks(step: number, ceiling: number): number[] {
+  if (step <= 0 || !Number.isFinite(ceiling) || ceiling <= 0) return [];
+  const fine = Math.max(1, Math.round(step / 5));
+  const mid = Math.max(1, Math.round(step / 2));
+  const nearFloor = ceiling - 2 * step;
+  const marks: number[] = [];
+  for (let mark = step; mark <= nearFloor && mark <= 100; mark += step) marks.push(mark);
+  const near: number[] = [];
+  let mark = ceiling;
+  // Bounded: every delta is >= 1 and the ceiling is a percentage.
+  for (let guard = 0; guard < 256 && mark > nearFloor; guard += 1) {
+    const remaining = ceiling - mark;
+    const delta = remaining < step ? fine : mid;
+    mark -= delta;
+    if (mark > nearFloor && mark >= step) near.push(mark);
+  }
+  return [...marks, ...near.reverse()];
+}
+
+/** Current tick step for a usage percent: the highest grid mark at or below
+ *  `percent` (0 below the first mark). Ticks never fire at/above `ceiling` —
+ *  the force-compaction zone owns that range. */
 export function usageTickStep(percent: number, step: number, ceiling: number): number {
   if (step <= 0 || percent >= ceiling) return 0;
-  return Math.floor(percent / step) * step;
+  const marks = usageTickMarks(step, ceiling);
+  for (let i = marks.length - 1; i >= 0; i -= 1) {
+    const mark = marks[i] as number;
+    if (percent >= mark) return mark;
+  }
+  return 0;
 }
 
 export function buildUsageTickText(percent: number, hintCeiling: number): string {
