@@ -9,24 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`switch_context` tool（上下文切换）** — 模型把「要带到下一段上下文的状态」直接写进工具参数（`goal` / `progress` / `next_steps` / `decisions` / `key_files` / `pitfalls` / `open_questions`），这段文本经 `session_before_compact` 直接成为 pi 压缩条目的 summary：**不再跑第二次摘要 LLM**，保留什么完全由模型决定。`keep_recent:false` 时压缩点之前的消息全部丢弃（真正的「换到下一个会话」语义），但会话文件、在跑的 subagent、后台 bash 任务、todo 与成本统计都不受影响。扩展还会自动补一段机械附录：本段读/改过的文件、仍在跑的 subagent 与 bash 任务、未完成的 todo、上一段会话文件路径。交接内容过短或缺必填字段会被工具当场打回，不触发压缩。
+
 - **Merged `ask_user` and Feishu notifications** — the package now exposes the interactive clarification tool and Feishu notification extension through three pi entries. Completion, subagent-summary, and idle cards wait for a background-idle session; heartbeat, waiting-input, and explicit notifications remain immediate.
 - **Background status provider** — the host publishes live subagent and background-bash counts through a reload-safe global provider.
 
+- **Background status provider** — the host publishes live subagent and background-bash counts through a reload-safe global provider.
+
+- **`compact_context` tool** — the model can proactively trigger context compaction (equivalent to `/compact`) instead of waiting for the automatic threshold. Registered only in the host session; an in-flight guard plus cooldown refuses back-to-back triggers, and an optional follow-up message resumes the task on the summarized context. Configured via `compact.enabled` (default on).
+
+- **message fabric** — an opt-in, fire-and-forget message protocol for subagent runs. The `message_agent` tool sends `progress`, `finding`, or `directive` messages through tree-edge routing with `canMessage` relationship gating; delivery is bounded by per-link quotas and throttling, with dead-letter handling for failed actionable messages and a root ingress gate for context traffic. Agent-type frontmatter can declare allowed relationships, and the 11-key `fabric.*` configuration surface is disabled by default for gradual rollout.
+
 ### Breaking / Migration
+
+- **`compact_context` 默认不再注册**：`compact.switchTool`（默认 `true`）开启后，模型面只暴露 `switch_context`。需要旧工具并存时设 `compact.keepCompactTool: true`；要完全回到旧行为设 `compact.switchTool: false`。强制压缩安全网不受影响——它在扩展内部直接调用 pi 的压缩，不依赖工具是否注册。
 
 - Remove the standalone `@bluecake/pi-ask-user` package before enabling the merged entries. Existing Feishu configuration is reused; a startup conflict warning indicates the old package is still loaded.
 
 ### Changed
 
+- **compact-hint 三层改为催「自写交接」** — usage tick 与 L1 提示改为推荐 `switch_context`；L2 强制层改为先礼后兵：越过强制线时先硬性要求模型在本回合调用 `switch_context`（次数由 `compact.forceDemandTurns` 控制，默认 1），只有它不照办才回落到原来的通用强制压缩。交接文本已暂存、压缩尚未完成时，既不再催也不会抢先强制压缩。
+
 - **`get_subagent_result` description** — now states the poll-guard contract explicitly (reads never consume the run; rapid repeated polling of the same run returns a warning — await the completion notification), matching the wording `bash_job` has carried since the guard landed.
 
 - **poll guard retuned to real loop shapes** — the frequency window for non-blocking reads (`get_subagent_result` without wait, `bash_job` status) is now 120s/3 calls per key, up from 10s: each poll costs a full model turn (seconds to tens of seconds), so a 10s window only ever caught same-message bursts and never a real cross-turn polling loop. Blocking waits are no longer frequency-counted at all; instead a consecutive-timeout streak guards them — a wait blocks up to its budget by design, so the loop signal is the same run/job timing out again and again. The first timeout already states the two ways out (raise `wait_ms`, or end the turn and await the completion notification); from the 2nd consecutive timeout the message escalates with the streak count and cumulative time spent blocked, and any terminal outcome resets the streak.
-
-### Added
-
-- **`compact_context` tool** — the model can proactively trigger context compaction (equivalent to `/compact`) instead of waiting for the automatic threshold. Registered only in the host session; an in-flight guard plus cooldown refuses back-to-back triggers, and an optional follow-up message resumes the task on the summarized context. Configured via `compact.enabled` (default on).
-
-- **message fabric** — an opt-in, fire-and-forget message protocol for subagent runs. The `message_agent` tool sends `progress`, `finding`, or `directive` messages through tree-edge routing with `canMessage` relationship gating; delivery is bounded by per-link quotas and throttling, with dead-letter handling for failed actionable messages and a root ingress gate for context traffic. Agent-type frontmatter can declare allowed relationships, and the 11-key `fabric.*` configuration surface is disabled by default for gradual rollout.
 
 ## [0.2.1] - 2026-09-05
 
