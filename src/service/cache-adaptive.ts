@@ -24,6 +24,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock } from "../core/clock.js";
 import {
   ADAPTIVE_PROBE_WRITE_FACTOR,
+  ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION,
+  ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS,
   ADAPTIVE_PROBE_WRITE_FLOOR_TOKENS,
   buildAdaptiveSnapshot,
   createInitialAdaptiveState,
@@ -175,6 +177,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     const s = this.deps.settings;
     return {
       writeBudgetTokens: s.adaptiveWriteBudgetTokens,
+      writeBudgetUsd: s.adaptiveWriteBudgetUsd,
       maxDeltaTokens: s.adaptiveMaxDeltaTokens,
       refreshAfterTokens: s.adaptiveRefreshAfterTokens,
       coldUpgrades: s.adaptiveColdUpgrades,
@@ -183,6 +186,8 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       historyGapSignal: s.adaptiveHistoryGapSignal,
       probeWriteFactor: ADAPTIVE_PROBE_WRITE_FACTOR,
       probeWriteFloorTokens: ADAPTIVE_PROBE_WRITE_FLOOR_TOKENS,
+      probeWriteFloorFraction: ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION,
+      probeWriteFloorMinTokens: ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS,
     };
   }
 
@@ -281,6 +286,8 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       budget: {
         upgradeWriteTokens: this.state.upgradeWriteTokens,
         writeBudgetTokens: this.config().writeBudgetTokens,
+        upgradeWriteUsd: this.state.upgradeWriteUsd,
+        writeBudgetUsd: this.config().writeBudgetUsd,
         coldUpgrades: this.state.coldUpgradesUsed,
         coldUpgradeCap: this.config().coldUpgrades,
       },
@@ -307,6 +314,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       cacheWrite: ledger.cacheWrite,
       cacheWrite1h: ledger.cacheWrite1h,
       costTotalUsd: ledger.costTotalUsd,
+      cacheWriteUsd: ledger.cacheWriteUsd,
       ttl1h,
       upgradeWriteTokens: this.state.upgradeWriteTokens,
       breaker: this.state.breaker?.reason,

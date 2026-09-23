@@ -20,6 +20,7 @@ import {
   onRealRequest,
   onRequestSettled,
   onUnproven,
+  renderAdaptiveReportLines,
   renderCacheStatus,
   renderKeepaliveReportLines,
   type AdaptiveSnapshot,
@@ -1087,6 +1088,9 @@ function adaptiveSnapshot(overrides: Partial<AdaptiveSnapshot> = {}): AdaptiveSn
     upgradeWriteTokens: 0,
     writeBudgetTokens: 200_000,
     budgetFraction: 0,
+    upgradeWriteUsd: 0,
+    writeBudgetUsd: 1,
+    usdFraction: 0,
     warmUpgrades: 0,
     coldUpgradesUsed: 0,
     coldUpgradeCap: 1,
@@ -1135,6 +1139,34 @@ describe("renderCacheStatus — adaptive segments", () => {
     expect(text).toContain("budget 99%");
   });
 
+  it("shows the USD budget percentage when IT is the budget closer to its cap", () => {
+    const text = renderCacheStatus({
+      mode: "adaptive",
+      dirty: false,
+      report: undefined,
+      adaptive: adaptiveSnapshot({
+        upgradeWriteTokens: 20_000,
+        budgetFraction: 0.1,
+        upgradeWriteUsd: 0.96,
+        usdFraction: 0.96,
+      }),
+    });
+    expect(text).toContain("budget 96%");
+  });
+
+  it("keeps the USD pair in the structured detail even when only the token side is hot", () => {
+    const snapshot = buildCacheStatusSnapshot({
+      mode: "adaptive",
+      dirty: false,
+      report: undefined,
+      adaptive: adaptiveSnapshot({ upgradeWriteTokens: 198_000, budgetFraction: 0.99, upgradeWriteUsd: 0.02 }),
+    });
+    expect(snapshot.segments.find((s) => s.id === "adaptive:budget")?.detail).toMatchObject({
+      upgradeWriteUsd: 0.02,
+      writeBudgetUsd: 1,
+    });
+  });
+
   it("keeps the exact tokens and the raw breaker id in the structured detail", () => {
     const snapshot = buildCacheStatusSnapshot({
       mode: "adaptive",
@@ -1149,6 +1181,8 @@ describe("renderCacheStatus — adaptive segments", () => {
     expect(snapshot.segments.find((s) => s.id === "adaptive:budget")?.detail).toEqual({
       upgradeWriteTokens: 198_000,
       writeBudgetTokens: 200_000,
+      upgradeWriteUsd: 0,
+      writeBudgetUsd: 1,
     });
     expect(snapshot.segments.find((s) => s.id === "adaptive:breaker")?.detail).toMatchObject({
       reason: "warm-write-too-expensive",
@@ -1250,5 +1284,27 @@ describe("renderKeepaliveReportLines", () => {
     expect(text).toContain("baseUrl=https://cloudrouter-anthropic.example.com");
     // Never a header/auth VALUE (secrets) in the rendered text — only key names.
     expect(text).not.toMatch(/sk-ant/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N2 (v1 review): the `/cache-ttl status` budget line is the only place that
+// surfaces the USD gate's raw accrual, and it had no direct test.
+// ---------------------------------------------------------------------------
+
+describe("renderAdaptiveReportLines — dual write budget line", () => {
+  const budgetLine = (overrides: Partial<AdaptiveSnapshot>): string =>
+    renderAdaptiveReportLines(adaptiveSnapshot(overrides)).find((line) => line.startsWith("adaptive budget:")) ?? "";
+
+  it("shows both budgets with the USD gate armed", () => {
+    const line = budgetLine({ upgradeWriteTokens: 48_000, upgradeWriteUsd: 0.4, writeBudgetUsd: 1 });
+    expect(line).toContain("write 48k/200k tok");
+    expect(line).toContain("$0.40/$1.00");
+  });
+
+  it("renders the USD side as /off when the gate is disabled, still reporting the accrual", () => {
+    const line = budgetLine({ upgradeWriteTokens: 1_000, upgradeWriteUsd: 2.5, writeBudgetUsd: 0 });
+    expect(line).toContain("$2.50/off");
+    expect(line).toContain("write 1k/200k tok"); // token fallback stays the visible gate
   });
 });

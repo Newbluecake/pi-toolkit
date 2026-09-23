@@ -1278,3 +1278,66 @@ adaptive dropped: sessionMismatch=0 instanceMismatch=0 pending=0
 | R6  | 新 service 与保活 service 的守卫代码重复（~60 行）      | 维护成本                        | 两者注释互相引用；若第三个出现再抽公共 `accept()` 工厂                        | 可接受           |
 | R7  | `query.list()` / `bashJobs` 在极端路径抛异常            | 信号读取失败                    | `signals()` 整体 try/catch ⇒ 全 0 ⇒ 不升级（用例 44）                         | 无               |
 | R8  | 订阅制（OAuth）用户没有按 token 计费                    | 成本模型换算成配额              | 比值不变（0.75Δ vs 1.25P）；沿用保活 §15 R7 的用户裁决                        | 用户已裁决       |
+
+---
+
+## 16. 后续修订（post-v1，不改写上文历史结论）
+
+### 16.1 双预算熔断：美元主闸 + token 兜底（修订 §4.4 的 `W` 口径）
+
+**问题**（实测确认，非论证）：`adaptiveWriteBudgetTokens`（默认 200_000）是 token 绝对值，
+但它要防的是钱。同样 200k 在不同模型间差 3–5 倍；而升级只发生在 Anthropic 路由。实测会话
+前缀 P：中位 105k、p75 162k、p90 267k——200k 在中位前缀下只兜得住约 1.9 次全量重写（p90 连
+一次都不够）；同时健康路由上它只够 12–25 次增量升级，长会话中途被烧穿后**静默**退回 5m。
+
+**修订**：
+
+- `LedgerUsage` 新增 `cacheWriteUsd`（读 `usage.cost.cacheWrite`，与 `costTotalUsd` 同一
+  `finite()` 守卫；§5.1 已取证 pi 对 1h 写入按 2× 计价进 `cost.cacheWrite`）。
+- `AdaptiveState` 新增 `upgradeWriteUsd`：在 pending 结账处累加**边际成本**
+  `0.375 × ledger.cacheWriteUsd`。推导：1h 写 2.0× vs 5m 写 1.25× ⇒ 升级边际 0.75×；pi 把
+  1h 写按 2.0× 计入 `cost.cacheWrite`，故边际占实付 1h 写入的 `0.75/2.0 = 0.375`
+  （`MARGINAL_WRITE_FRACTION`）。`cacheWriteUsd === undefined` 不累加——缺数据不猜，
+  该会话由 token 预算单独兜底。
+- 熔断判据改为**任一预算撞线**即 `write-budget`（`budgetExhausted()`）：美元主闸 +
+  token 兜底（成本数据缺失的路由）。decide 前置检查与两处结账后熔断同步换用。
+- 新设置 `cacheTtl.adaptiveWriteBudgetUsd`：默认 **1.0**，解析范围 [0, 100]（不取整——0.5
+  被 floor 成 0 会把「半美元」误读成「关闭」），**0 = 关闭美元闸**（纯 token 判据）。
+  `adaptiveWriteBudgetTokens` 默认值 200_000 不变（纯新增键，无迁移）。
+  ⚠️ `SETTING_SPECS` 的 `min/max` 必须与 `usd()` 的 [0, 100] **保持一致**：编辑器与
+  `set` 命令只按 spec 校验，而 reload 走 `usd()`——后者对越界值是**回落默认**而非钳位，
+  且 `setPath` 改的就是 adaptive service 正在读的同一个对象，spec 漏写上限会造成
+  「当前会话立刻按越界值生效、reload 后静默变回 1.0」的静默漂移（v1 审查 M1）。
+- **丢弃型 pending 只预记 token、不预记 USD**（TTL 超时丢弃与前缀漂移 invalidate 两条路径）：
+  这与「`cacheWriteUsd` 缺失不累加」是同一条原则——成本从不靠猜。等价于把丢弃 pending 视作
+  「该路由未报成本」，由 token 兜底覆盖；USD 侧因此是**保守低估**，不是记账漏洞。
+- 观测：`AdaptiveSnapshot` 增加 `upgradeWriteUsd` / `writeBudgetUsd` / `usdFraction`；
+  budget 状态段显示两者中**更接近上限**者的百分比，`detail` 同时给两组数字；
+  `/cache-ttl status` 预算行追加 `· $x.xx/$y.yy`（闸关时 `$x.xx/off`）。
+
+与 §4.4 上界的关系：USD 闸收紧的是「典型会话 $0.1–0.25」这一行的**单位一致性**，最坏上界
+（一次超出 ≤ 0.75×(W+P)×R + 1.25×P×R）不变，只是现在直接以美元度量。
+
+### 16.2 探针地板挂钩实测前缀（修订 §4.2 M2 复合判据的地板项）
+
+**问题**：固定地板 `ADAPTIVE_PROBE_WRITE_FLOOR_TOKENS = 64_000` 与预算没有共同坐标系——
+前缀 P < 64k 的病态路由每次全量重写都不触发探针，可以一路烧到撞预算才熔断。
+
+**修订**：判据 `cacheWrite > max(factor × Δ̂, floor)` 中
+
+```
+floor = min(ADAPTIVE_PROBE_WRITE_FLOOR_TOKENS, max(ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS, fraction × P))
+P     = 结账时刻实测前缀（cacheRead + cacheWrite，复用 prefixFromLedger）
+fraction = ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION = 0.5
+MIN   = ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS = 4_000
+```
+
+三个常数的关系（「只在需要的地方收紧」）：
+
+- **大前缀（P ≥ 128k）**：0.5P ≥ 64k，被 `min` 夹回 64k ⇒ 行为与修订前**逐字节一致**，
+  不引入新的误熔断；
+- **小前缀（如 P = 40k）**：地板降到 20k，才能**一次**识别「整个前缀被重写」（旧逻辑下
+  该路由每次全量重写都不触发探针，只能烧预算）；
+- **极小前缀（P < 8k）**：4k 硬下限防止地板缩进普通增量噪声区、误伤合法增量。
+
+`probeWriteFactor = 3` 不变；M2「探针只抓路由级结构性违例，不抓单次大重写」的定性不变。

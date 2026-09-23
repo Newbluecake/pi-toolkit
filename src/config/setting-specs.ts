@@ -267,6 +267,21 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     0,
     "Per-session measured cacheWrite budget for adaptive upgrades; 0 disables upgrading",
   ),
+  "cacheTtl.adaptiveWriteBudgetUsd": {
+    kind: "number",
+    path: "cacheTtl.adaptiveWriteBudgetUsd",
+    min: 0,
+    // MUST mirror the `usd(value, default, 0, 100)` bound in settings.ts: the
+    // editor / `set` path validates against this spec only, while a reload
+    // re-parses through usd(), which FALLS BACK TO THE DEFAULT (it does not
+    // clamp) for out-of-range values. Without max the editor would accept
+    // e.g. 500, apply it live (settings.cacheTtl is the same object the
+    // adaptive service reads) and then silently revert to 1.0 on the next
+    // reload.
+    max: 100,
+    description:
+      "Per-session USD budget (marginal 1h-upgrade write cost) for adaptive upgrades; 0 disables the USD gate (unlike adaptiveWriteBudgetTokens, where 0 disables upgrading entirely)",
+  },
   "cacheTtl.adaptiveMaxDeltaTokens": count(
     "cacheTtl.adaptiveMaxDeltaTokens",
     0,

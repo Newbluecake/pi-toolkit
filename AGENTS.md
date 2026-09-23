@@ -78,7 +78,13 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   stepped usage-tick reports (every 10% by default, from the first step up to the force
   ceiling) so the model can perceive context usage at all.
 - `src/cache-ttl/` — prompt-cache TTL mode (auto/on/off) wiring: status-bar indicator plus
-  persisted settings override.
+  persisted settings override. Adaptive 1h upgrades are bounded by two write budgets — a USD
+  marginal-cost gate (`adaptiveWriteBudgetUsd`, default $1, `0` = gate off) as the primary and
+  the legacy token budget (`adaptiveWriteBudgetTokens`, 200k, `0` = no upgrades at all) as the
+  fallback for routes that report no cost split; either one trips `write-budget` for the rest of
+  the session. The M2 probe floor scales with the measured prefix — `min(64k, max(4k, 0.5×P))` —
+  so a near-full prefix rewrite is caught at small prefixes while P ≥ 128k keeps the old fixed
+  64k floor. Design: `docs/dev/cache-ttl-adaptive/plan.md`.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`

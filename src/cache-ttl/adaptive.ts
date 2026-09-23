@@ -14,6 +14,15 @@
  *   the §4.4 ≤0.75×(W+P)×R bound holds on every path.
  * - m2: `lastReconciledEntrySeq` idempotency watermark — one ledger observation
  *   is accounted exactly once no matter how many of message_end/turn_end/agent_end fire.
+ * - USD budget gate: `upgradeWriteUsd` accumulates the MARGINAL cost of upgrading
+ *   (MARGINAL_WRITE_FRACTION × the ledger's `cost.cacheWrite`), and the breaker
+ *   fires when EITHER the token or the USD budget is exhausted — the USD gate is
+ *   primary (same 200k tokens spans 3–5× in dollars across models), tokens stay
+ *   as the fallback for routes that report no cost split. See plan.md 后续修订.
+ * - Prefix-scaled probe floor: the floor of the M2 composite probe clamps to
+ *   `0.5 × measured prefix` for small prefixes, so a full-prefix rewrite on a
+ *   pathological route trips at P=40k too (the fixed 64k floor could never see
+ *   it); large prefixes are clamped back to 64k — byte-identical to before.
  *
  * Hard rule (same as keepalive-state.ts): no pi imports, no module-level mutable
  * state, no implicit clock reads — `now` is always an input. Value-imports
@@ -31,6 +40,7 @@ import {
   type PayloadShape,
 } from "./keepalive-state.js";
 import type { LedgerUsage } from "./usage-ledger.js";
+import { prefixFromLedger } from "./usage-ledger.js";
 
 // ---------------------------------------------------------------------------
 // Constants (plan.md §7.2 — guardrails, deliberately NOT settings).
@@ -40,12 +50,32 @@ import type { LedgerUsage } from "./usage-ledger.js";
 export const ADAPTIVE_PROBE_WRITE_FACTOR = 3;
 /** ...AND this absolute floor (one partially-hit post-compact rewrite can legitimately reach 50k+; the probe catches structural route-level violations, not a single large rewrite). */
 export const ADAPTIVE_PROBE_WRITE_FLOOR_TOKENS = 64_000;
+/** ...AND the floor is prefix-scaled: for a small prefix P the effective floor drops to
+ *  `min(FLOOR_TOKENS, max(FLOOR_MIN_TOKENS, fraction × P))`.
+ *
+ *  Design intent — tighten ONLY where needed: at P ≥ 128k we have 0.5·P ≥ 64k, so the
+ *  clamp folds back to the fixed 64k floor and behaviour is byte-identical to the M2
+ *  composite probe (no new false trips on healthy large-prefix routes). At a small
+ *  prefix (P = 40k) the floor drops to 20k, which is what lets the probe recognize
+ *  "the ENTIRE prefix was rewritten" in one settlement — under the fixed 64k floor
+ *  such a route burned the whole budget before anything tripped. */
+export const ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION = 0.5;
+/** Hard lower bound of the prefix-scaled floor: keeps a tiny prefix (P < 8k) from
+ *  scaling the floor into noise where ordinary increments would false-trip. */
+export const ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS = 4_000;
 /** plan.md §6.1a: a pending probe whose ledger never arrives is dropped (and pre-booked, m1) after this. */
 export const ADAPTIVE_PENDING_TTL_MS: Millis = 120_000;
 /** S4 ring buffer size (plan.md §3.2). */
 export const ADAPTIVE_GAP_RING_SIZE = 20;
 /** §4.3: an upgrade claims 1h of coverage from its decision time. */
 export const ADAPTIVE_COVER_MS: Millis = 3_600_000;
+/** Fraction of the ledger's 1h-inclusive `cost.cacheWrite` that is the MARGINAL cost of
+ *  upgrading a write from 5m to 1h. Derivation (plan.md §0.3/§0.4 pricing): 1h write
+ *  bills 2.0× base input, 5m write bills 1.25× ⇒ marginal 0.75×. pi prices a full 1h
+ *  write into `cost.cacheWrite` at 2.0×, so marginal = 0.75/2.0 = 0.375 of what the
+ *  ledger reports. Applied only when the route reports `cost.cacheWrite` — missing
+ *  data is never guessed. */
+export const MARGINAL_WRITE_FRACTION = 0.375;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,6 +123,8 @@ export interface AdaptiveSignals {
 
 export interface AdaptiveConfig {
   writeBudgetTokens: number;
+  /** USD marginal-write budget per session (primary gate); 0 = USD gate off (tokens only). */
+  writeBudgetUsd: number;
   maxDeltaTokens: number;
   refreshAfterTokens: number;
   coldUpgrades: number;
@@ -102,6 +134,10 @@ export interface AdaptiveConfig {
   /** M2 composite probe inputs — filled from the constants above by the service, injectable for tests. */
   probeWriteFactor: number;
   probeWriteFloorTokens: number;
+  /** Prefix-scaled floor fraction (see ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION). */
+  probeWriteFloorFraction: number;
+  /** Prefix-scaled floor hard minimum (see ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS). */
+  probeWriteFloorMinTokens: number;
 }
 
 export interface AdaptivePending {
@@ -119,6 +155,8 @@ export interface AdaptiveReconcileRecord {
   cacheWrite: number;
   cacheWrite1h: number | undefined;
   costTotalUsd: number | undefined;
+  /** `cost.cacheWrite` of the observed entry (the USD gate's raw input); undefined when unreported. */
+  cacheWriteUsd: number | undefined;
 }
 
 export interface AdaptiveState {
@@ -132,6 +170,9 @@ export interface AdaptiveState {
   breaker: { reason: AdaptiveBreakerReason; at: Millis } | undefined;
   /** I-A6: measured cacheWrite total attributed to upgrades (m1: includes pre-booked dropped pendings). */
   upgradeWriteTokens: number;
+  /** MARGINAL USD cost attributed to upgrades: MARGINAL_WRITE_FRACTION × the settled
+   *  ledger's `cost.cacheWrite`, accumulated only when the route reports it (never guessed). */
+  upgradeWriteUsd: number;
   warmUpgrades: number;
   coldUpgradesUsed: number;
   lastColdUpgradeAt: Millis | undefined;
@@ -164,6 +205,7 @@ export function createInitialAdaptiveState(): AdaptiveState {
     gaps: [],
     breaker: undefined,
     upgradeWriteTokens: 0,
+    upgradeWriteUsd: 0,
     warmUpgrades: 0,
     coldUpgradesUsed: 0,
     lastColdUpgradeAt: undefined,
@@ -187,6 +229,20 @@ export function createInitialAdaptiveState(): AdaptiveState {
 // ---------------------------------------------------------------------------
 // decideAdaptiveTtl (plan.md §3.5)
 // ---------------------------------------------------------------------------
+
+/**
+ * Dual write-budget predicate (G-G / I-A6): the breaker fires when EITHER budget
+ * is exhausted. The USD budget is the PRIMARY gate — it measures what we actually
+ * try to protect (money), and a fixed token count spans 3–5× in dollars across
+ * models. The token budget stays as the fallback for routes that report no cost
+ * split; `writeBudgetUsd = 0` turns the USD gate off (tokens only). Note the token
+ * side keeps its legacy `>=` semantics, so `writeBudgetTokens = 0` still means
+ * "no upgrades at all" (the plan.md §4.4 rollback switch).
+ */
+function budgetExhausted(state: AdaptiveState, config: AdaptiveConfig): boolean {
+  if (state.upgradeWriteTokens >= config.writeBudgetTokens) return true;
+  return config.writeBudgetUsd > 0 && state.upgradeWriteUsd >= config.writeBudgetUsd;
+}
 
 export interface AdaptiveDecideInput {
   now: Millis;
@@ -224,7 +280,7 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
   if (shape.ephemeralBreakpoints === 0) return no("no-cache-control"); // G-D
   if (shape.ttl1h) return no("already-1h"); // G-E (pi already wrote 1h)
   if (state.breaker !== undefined) return no("breaker"); // G-F (§4.2, session-permanent)
-  if (state.upgradeWriteTokens >= config.writeBudgetTokens) return no("write-budget"); // G-G / I-A6
+  if (budgetExhausted(state, config)) return no("write-budget"); // G-G / I-A6 (USD primary, tokens fallback)
 
   // ── Group B: horizon signals ────────────────────────────────────────────
   const strong: AdaptiveSignalKind[] = [];
@@ -351,6 +407,24 @@ function tripBreaker(state: AdaptiveState, reason: AdaptiveBreakerReason, at: Mi
 }
 
 /**
+ * Effective floor of the M2 composite probe, scaled by the prefix measured AT
+ * SETTLEMENT TIME: `min(FLOOR_TOKENS, max(FLOOR_MIN_TOKENS, fraction × P))` with
+ * `P = cacheRead + cacheWrite` (`prefixFromLedger`). The clamp keeps large
+ * prefixes (P ≥ 128k ⇒ 0.5P ≥ 64k) on the fixed 64k floor — byte-identical to
+ * the pre-revision probe — while letting small prefixes (P = 40k ⇒ 20k) still
+ * recognize "the whole prefix was rewritten" in one settlement. The 4k hard
+ * minimum keeps tiny prefixes from scaling the floor into ordinary-increment
+ * noise. See ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION for the design intent.
+ */
+function probeWriteFloorTokens(ledger: LedgerUsage, config: AdaptiveConfig): number {
+  const prefix = prefixFromLedger(ledger).tokens;
+  return Math.min(
+    config.probeWriteFloorTokens,
+    Math.max(config.probeWriteFloorMinTokens, config.probeWriteFloorFraction * prefix),
+  );
+}
+
+/**
  * plan.md §4.2/§4.3/§5.2: account one observed ledger entry. Idempotent (m2):
  * a ledger at or below `lastReconciledEntrySeq` is a duplicate observation
  * (message_end + turn_end + agent_end all fire for one turn) and is ignored.
@@ -376,7 +450,8 @@ export function onLedgerObserved(
       droppedPending: next.droppedPending + 1,
       upgradeWriteTokens: next.upgradeWriteTokens + expired.predictedDeltaTokens,
     };
-    if (next.upgradeWriteTokens >= config.writeBudgetTokens) next = tripBreaker(next, "write-budget", now);
+    // No USD accrual here: a dropped pending has no ledger, and cost is never guessed.
+    if (budgetExhausted(next, config)) next = tripBreaker(next, "write-budget", now);
   }
 
   // m2 watermark: every ledger-driven side effect below requires a strictly newer entry.
@@ -392,6 +467,7 @@ export function onLedgerObserved(
       cacheWrite: ledger.cacheWrite,
       cacheWrite1h: ledger.cacheWrite1h,
       costTotalUsd: ledger.costTotalUsd,
+      cacheWriteUsd: ledger.cacheWriteUsd,
     },
   };
 
@@ -402,6 +478,13 @@ export function onLedgerObserved(
       ...next,
       pending: undefined,
       upgradeWriteTokens: next.upgradeWriteTokens + ledger.cacheWrite,
+      // USD gate accrual: the MARGINAL cost of the 5m→1h upgrade, i.e.
+      // MARGINAL_WRITE_FRACTION (0.375) of pi's 1h-inclusive `cost.cacheWrite`.
+      // Missing cost data (`cacheWriteUsd === undefined`) accrues nothing — the
+      // token budget alone still bounds this session (never guess a cost).
+      upgradeWriteUsd:
+        next.upgradeWriteUsd +
+        (ledger.cacheWriteUsd === undefined ? 0 : MARGINAL_WRITE_FRACTION * ledger.cacheWriteUsd),
       confirmed1hWrites: next.confirmed1hWrites + (confirmed ? 1 : 0),
       unconfirmed1hWrites: next.unconfirmed1hWrites + (!confirmed && ledger.cacheWrite > 0 ? 1 : 0),
     };
@@ -411,10 +494,11 @@ export function onLedgerObserved(
         next = tripBreaker(next, "warm-miss", now);
       } else if (
         ledger.cacheWrite >
-        Math.max(config.probeWriteFactor * pending.predictedDeltaTokens, config.probeWriteFloorTokens)
+        Math.max(config.probeWriteFactor * pending.predictedDeltaTokens, probeWriteFloorTokens(ledger, config))
       ) {
-        // M2 composite probe: the "warm" upgrade rewrote far more than the
-        // predicted increment — corollary 1 (plan.md §0.4) does not hold here.
+        // M2 composite probe with a prefix-scaled floor: the "warm" upgrade
+        // rewrote far more than the predicted increment — corollary 1 (plan.md
+        // §0.4) does not hold here.
         next = tripBreaker(next, "warm-write-too-expensive", now);
       }
     }
@@ -436,7 +520,7 @@ export function onLedgerObserved(
     }
   }
 
-  if (next.upgradeWriteTokens >= config.writeBudgetTokens) next = tripBreaker(next, "write-budget", now);
+  if (budgetExhausted(next, config)) next = tripBreaker(next, "write-budget", now);
   return next;
 }
 
@@ -484,6 +568,11 @@ export interface AdaptiveSnapshot {
   upgradeWriteTokens: number;
   writeBudgetTokens: number;
   budgetFraction: number;
+  /** USD-gate counterparts: marginal USD accrued vs the USD budget (primary gate). */
+  upgradeWriteUsd: number;
+  writeBudgetUsd: number;
+  /** `upgradeWriteUsd / writeBudgetUsd`; 0 while the USD gate is off (`writeBudgetUsd = 0`). */
+  usdFraction: number;
   warmUpgrades: number;
   coldUpgradesUsed: number;
   coldUpgradeCap: number;
@@ -508,6 +597,9 @@ export function buildAdaptiveSnapshot(state: AdaptiveState, config: AdaptiveConf
     upgradeWriteTokens: state.upgradeWriteTokens,
     writeBudgetTokens: config.writeBudgetTokens,
     budgetFraction: config.writeBudgetTokens > 0 ? state.upgradeWriteTokens / config.writeBudgetTokens : 1,
+    upgradeWriteUsd: state.upgradeWriteUsd,
+    writeBudgetUsd: config.writeBudgetUsd,
+    usdFraction: config.writeBudgetUsd > 0 ? state.upgradeWriteUsd / config.writeBudgetUsd : 0,
     warmUpgrades: state.warmUpgrades,
     coldUpgradesUsed: state.coldUpgradesUsed,
     coldUpgradeCap: config.coldUpgrades,

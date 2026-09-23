@@ -28,10 +28,30 @@ describe("readLatestAssistantUsage", () => {
       cacheWrite: 5,
       cacheWrite1h: undefined,
       costTotalUsd: undefined,
+      cacheWriteUsd: undefined,
       entrySeq: 3,
       entriesLength: 4,
       modelId: "claude-y",
     });
+  });
+
+  it("reads cost.cacheWrite into cacheWriteUsd with the same finite() guard as costTotalUsd", () => {
+    const withCost = readLatestAssistantUsage(
+      ctxWith([assistantEntry({ cacheRead: 100, cacheWrite: 20, cost: { total: 0.42, cacheWrite: 0.16 } })]),
+    );
+    expect(withCost.costTotalUsd).toBe(0.42);
+    expect(withCost.cacheWriteUsd).toBe(0.16);
+    // malformed / absent cost object ⇒ undefined (the USD gate then falls back to tokens)
+    expect(
+      readLatestAssistantUsage(ctxWith([assistantEntry({ cacheRead: 1, cacheWrite: 2, cost: "nope" })])).cacheWriteUsd,
+    ).toBeUndefined();
+    expect(
+      readLatestAssistantUsage(ctxWith([assistantEntry({ cacheRead: 1, cacheWrite: 2, cost: { total: 0.1 } })]))
+        .cacheWriteUsd,
+    ).toBeUndefined();
+    expect(
+      readLatestAssistantUsage(ctxWith([assistantEntry({ cacheRead: 1, cacheWrite: 2 })])).cacheWriteUsd,
+    ).toBeUndefined();
   });
 
   it("cacheWrite1h missing ⇒ undefined (distinguishable from a reported 0)", () => {

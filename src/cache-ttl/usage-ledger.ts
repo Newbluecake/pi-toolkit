@@ -28,6 +28,10 @@ export interface LedgerUsage {
   cacheWrite1h: number | undefined;
   /** `usage.cost.total` of the same entry, when present. */
   costTotalUsd: number | undefined;
+  /** `usage.cost.cacheWrite` of the same entry, when present — the USD input of the
+   *  adaptive write-budget gate. `undefined` ⇒ no cost data ⇒ the gate falls back to
+   *  tokens only (never guess a cost). */
+  cacheWriteUsd: number | undefined;
   /** M1 anchor: index of the assistant entry within `getEntries()`; -1 when unknown. */
   entrySeq: number;
   /** `getEntries().length` at read time (0 when unreadable) — pending records snapshot it as `minEntrySeq`. */
@@ -42,6 +46,7 @@ const UNKNOWN_LEDGER: LedgerUsage = {
   cacheWrite: 0,
   cacheWrite1h: undefined,
   costTotalUsd: undefined,
+  cacheWriteUsd: undefined,
   entrySeq: -1,
   entriesLength: 0,
   modelId: "",
@@ -81,6 +86,7 @@ export function readLatestAssistantUsage(ctx: LedgerCtxLike | undefined): Ledger
           cacheWrite: finite(usage.cacheWrite) ?? 0,
           cacheWrite1h: finite(usage.cacheWrite1h),
           costTotalUsd: finite(isObjectRecord(usage.cost) ? usage.cost.total : undefined),
+          cacheWriteUsd: finite(isObjectRecord(usage.cost) ? usage.cost.cacheWrite : undefined),
           entrySeq: i,
           entriesLength: entries.length,
           modelId: typeof entry.message.model === "string" ? entry.message.model : "",

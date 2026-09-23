@@ -920,16 +920,27 @@ function adaptiveSegments(snapshot: AdaptiveSnapshot): CacheStatusSegment[] {
       detail: { coverRemainingMs: snapshot.coverRemainingMs },
     });
   }
-  if (snapshot.writeBudgetTokens > 0 && snapshot.budgetFraction >= 0.8) {
+  // Dual budget gate: USD is primary, tokens are the fallback for routes without
+  // cost data. The segment shows whichever budget is CLOSER to its cap (the one
+  // about to fire), while `detail` keeps both pairs of exact numbers.
+  const tokenFraction = snapshot.writeBudgetTokens > 0 ? snapshot.budgetFraction : 0;
+  const usdFraction = snapshot.writeBudgetUsd > 0 ? snapshot.usdFraction : 0;
+  const worstFraction = Math.max(tokenFraction, usdFraction);
+  if (worstFraction >= 0.8) {
     segments.push({
       kind: "adaptive",
       id: "adaptive:budget",
       // Percentage, not `198k/200k`: the segment only appears at ≥80% so the
-      // question it answers is "how close to the cap", and the exact tokens stay
-      // in `detail` (HUD expansion) + `/cache-ttl status`.
-      text: `budget ${Math.floor(snapshot.budgetFraction * 100)}%`,
+      // question it answers is "how close to the cap", and the exact tokens
+      // stay in `detail` (HUD expansion) + `/cache-ttl status`.
+      text: `budget ${Math.floor(worstFraction * 100)}%`,
       tone: "warn",
-      detail: { upgradeWriteTokens: snapshot.upgradeWriteTokens, writeBudgetTokens: snapshot.writeBudgetTokens },
+      detail: {
+        upgradeWriteTokens: snapshot.upgradeWriteTokens,
+        writeBudgetTokens: snapshot.writeBudgetTokens,
+        upgradeWriteUsd: snapshot.upgradeWriteUsd,
+        writeBudgetUsd: snapshot.writeBudgetUsd,
+      },
     });
   }
   if (snapshot.breaker !== undefined) {
@@ -1009,8 +1020,12 @@ export function renderAdaptiveReportLines(snapshot: AdaptiveSnapshot): string[] 
     snapshot.coldCooldownRemainingMs === undefined || snapshot.coldCooldownRemainingMs === 0
       ? "cooldown ready"
       : `cooldown ${Math.ceil(snapshot.coldCooldownRemainingMs / 60_000)}m`;
+  const budgetUsd =
+    snapshot.writeBudgetUsd > 0
+      ? `$${snapshot.upgradeWriteUsd.toFixed(2)}/$${snapshot.writeBudgetUsd.toFixed(2)}`
+      : `$${snapshot.upgradeWriteUsd.toFixed(2)}/off`;
   lines.push(
-    `adaptive budget: write ${formatTokenCount(snapshot.upgradeWriteTokens)}/${formatTokenCount(snapshot.writeBudgetTokens)} tok · warm ${snapshot.warmUpgrades} · cold ${snapshot.coldUpgradesUsed}/${snapshot.coldUpgradeCap} · ${cooldown} · longGaps=${snapshot.longGapCount}`,
+    `adaptive budget: write ${formatTokenCount(snapshot.upgradeWriteTokens)}/${formatTokenCount(snapshot.writeBudgetTokens)} tok · ${budgetUsd} · warm ${snapshot.warmUpgrades} · cold ${snapshot.coldUpgradesUsed}/${snapshot.coldUpgradeCap} · ${cooldown} · longGaps=${snapshot.longGapCount}`,
   );
   const cover =
     snapshot.coverRemainingMs !== undefined
@@ -1022,7 +1037,7 @@ export function renderAdaptiveReportLines(snapshot: AdaptiveSnapshot): string[] 
   if (snapshot.lastReconcile !== undefined) {
     const r = snapshot.lastReconcile;
     lines.push(
-      `adaptive last reconcile: cacheRead=${formatTokenCount(r.cacheRead)} cacheWrite=${formatTokenCount(r.cacheWrite)} cacheWrite1h=${r.cacheWrite1h ?? "n/a"} cost=${r.costTotalUsd !== undefined ? `$${r.costTotalUsd.toFixed(3)}` : "n/a"}`,
+      `adaptive last reconcile: cacheRead=${formatTokenCount(r.cacheRead)} cacheWrite=${formatTokenCount(r.cacheWrite)} cacheWrite1h=${r.cacheWrite1h ?? "n/a"} cacheWrite$=${r.cacheWriteUsd !== undefined ? `$${r.cacheWriteUsd.toFixed(3)}` : "n/a"} cost=${r.costTotalUsd !== undefined ? `$${r.costTotalUsd.toFixed(3)}` : "n/a"}`,
     );
   }
   lines.push(

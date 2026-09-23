@@ -22,6 +22,7 @@ const NOW = 1_000_000;
 
 const CONFIG: AdaptiveConfig = {
   writeBudgetTokens: 200_000,
+  writeBudgetUsd: 1,
   maxDeltaTokens: 32_000,
   refreshAfterTokens: 16_000,
   coldUpgrades: 1,
@@ -30,6 +31,8 @@ const CONFIG: AdaptiveConfig = {
   historyGapSignal: true,
   probeWriteFactor: 3,
   probeWriteFloorTokens: 64_000,
+  probeWriteFloorFraction: 0.5,
+  probeWriteFloorMinTokens: 4_000,
 };
 
 const NO_SIGNALS: AdaptiveSignals = {
@@ -51,6 +54,7 @@ function ledger(overrides: Partial<LedgerUsage> = {}): LedgerUsage {
     cacheWrite: 5_000,
     cacheWrite1h: undefined,
     costTotalUsd: undefined,
+    cacheWriteUsd: undefined,
     entrySeq: 5,
     entriesLength: 6,
     modelId: "claude-x",
@@ -271,6 +275,26 @@ describe("decideAdaptiveTtl capability gates", () => {
       decideAdaptiveTtl(decideInput({ signals: warmStrong, config: { ...CONFIG, writeBudgetTokens: 0 } })).reason,
     ).toBe("write-budget");
   });
+  it("USD budget exhausted alone ⇒ write-budget even with tokens to spare (primary gate)", () => {
+    const d = decideAdaptiveTtl(
+      decideInput({
+        signals: warmStrong,
+        config: { ...CONFIG, writeBudgetUsd: 0.5 },
+        state: state({ lastRequestStartedAt: NOW - 60_000, upgradeWriteTokens: 10_000, upgradeWriteUsd: 0.5 }),
+      }),
+    );
+    expect(d.reason).toBe("write-budget");
+  });
+  it("writeBudgetUsd = 0 keeps deciding while upgradeWriteUsd is far beyond any cap (gate off)", () => {
+    const d = decideAdaptiveTtl(
+      decideInput({
+        signals: warmStrong,
+        config: { ...CONFIG, writeBudgetUsd: 0 },
+        state: state({ lastRequestStartedAt: NOW - 60_000, upgradeWriteUsd: 999 }),
+      }),
+    );
+    expect(d.upgrade).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -459,6 +483,56 @@ describe("onLedgerObserved probes and breaker", () => {
     expect(after.breaker?.reason).toBe("warm-write-too-expensive");
   });
 
+  it("prefix-scaled floor: P≈43k full-prefix rewrite TRIPS (the fixed 64k floor could never see it)", () => {
+    const after = onLedgerObserved(
+      warmPendingState(4_000),
+      ledger({ entrySeq: 6, cacheRead: 5_000, cacheWrite: 38_000 }), // P = 43k
+      NOW + 5_000,
+      CONFIG,
+    );
+    // old predicate: 38k > max(3×4k, 64k) = false ⇒ silent burn until the budget;
+    // new floor = min(64k, max(4k, 0.5×43k)) = 21.5k ⇒ 38k > max(12k, 21.5k) trips.
+    expect(after.breaker?.reason).toBe("warm-write-too-expensive");
+  });
+
+  it("prefix-scaled floor: P=300k normal increment does NOT trip — identical to the fixed floor", () => {
+    const after = onLedgerObserved(
+      warmPendingState(8_000),
+      ledger({ entrySeq: 6, cacheRead: 290_000, cacheWrite: 10_000 }), // P = 300k ⇒ floor 64k
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(after.breaker).toBeUndefined();
+  });
+
+  it("prefix-scaled floor: P ≥ 128k keeps the fixed 64k floor byte-identically (0.5P ≥ 64k clamps back)", () => {
+    const trips = onLedgerObserved(
+      warmPendingState(500),
+      ledger({ entrySeq: 6, cacheRead: 100_000, cacheWrite: 65_000 }), // P = 165k ⇒ floor 64k
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(trips.breaker?.reason).toBe("warm-write-too-expensive");
+    const noTrip = onLedgerObserved(
+      warmPendingState(500),
+      ledger({ entrySeq: 6, cacheRead: 100_000, cacheWrite: 63_999 }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(noTrip.breaker).toBeUndefined();
+  });
+
+  it("prefix-scaled floor: tiny P is protected by the 4k hard minimum", () => {
+    const after = onLedgerObserved(
+      warmPendingState(500),
+      ledger({ entrySeq: 6, cacheRead: 1_000, cacheWrite: 2_500 }), // P = 3.5k ⇒ 0.5P = 1.75k < 4k
+      NOW + 5_000,
+      CONFIG,
+    );
+    // without the 4k minimum, 2.5k > max(1.5k, 1.75k) would false-trip an ordinary increment
+    expect(after.breaker).toBeUndefined();
+  });
+
   it("warm probe with cacheRead=0 ⇒ warm-miss", () => {
     const after = onLedgerObserved(
       warmPendingState(),
@@ -533,6 +607,40 @@ describe("onLedgerObserved probes and breaker", () => {
     expect(after.breaker?.reason).toBe("write-budget");
     const d = decideAdaptiveTtl(decideInput({ signals: signals({ subagentRuns: 1 }), state: after }));
     expect(d.reason).toBe("breaker"); // breaker gate fires first (session-permanent)
+  });
+
+  it("USD gate: the USD budget trips write-budget before the token budget is anywhere near exhausted", () => {
+    const after = onLedgerObserved(
+      warmPendingState(5_000),
+      ledger({ entrySeq: 6, cacheWrite: 5_000, cacheWriteUsd: 1.6 }),
+      NOW + 5_000,
+      { ...CONFIG, writeBudgetUsd: 0.5 },
+    );
+    expect(after.breaker?.reason).toBe("write-budget");
+    expect(after.upgradeWriteTokens).toBe(5_000); // tokens are at 2.5% — USD fired first
+    expect(after.upgradeWriteUsd).toBeCloseTo(0.6, 10); // MARGINAL_WRITE_FRACTION 0.375 × 1.6
+  });
+
+  it("USD gate: cacheWriteUsd missing ⇒ pure token judgement, cost is never guessed", () => {
+    const after = onLedgerObserved(
+      { ...warmPendingState(), upgradeWriteTokens: 190_000 },
+      ledger({ entrySeq: 6, cacheWrite: 15_000, cacheWriteUsd: undefined }),
+      NOW + 5_000,
+      { ...CONFIG, writeBudgetUsd: 0.01 }, // would trip instantly if 0 were guessed as a cost
+    );
+    expect(after.upgradeWriteUsd).toBe(0);
+    expect(after.breaker?.reason).toBe("write-budget"); // still bounded — via the token fallback (205k ≥ 200k)
+  });
+
+  it("USD gate: writeBudgetUsd = 0 disables the trip while still tracking the accrual", () => {
+    const after = onLedgerObserved(
+      warmPendingState(5_000),
+      ledger({ entrySeq: 6, cacheWrite: 5_000, cacheWriteUsd: 5 }),
+      NOW + 5_000,
+      { ...CONFIG, writeBudgetUsd: 0 },
+    );
+    expect(after.breaker).toBeUndefined();
+    expect(after.upgradeWriteUsd).toBeCloseTo(1.875, 10); // observable in /cache-ttl status
   });
 
   it("m1: a pending dropped after ADAPTIVE_PENDING_TTL_MS pre-books predictedDeltaTokens into the budget", () => {
@@ -671,9 +779,17 @@ describe("buildAdaptiveSnapshot", () => {
     const cover = buildAdaptiveSnapshot(state({ oneHourCoverUntil: NOW + 2_220_000 }), CONFIG, NOW);
     expect(cover.coverRemainingMs).toBe(2_220_000);
 
-    const budget = buildAdaptiveSnapshot(state({ upgradeWriteTokens: 180_000 }), CONFIG, NOW);
+    const budget = buildAdaptiveSnapshot(state({ upgradeWriteTokens: 180_000, upgradeWriteUsd: 0.9 }), CONFIG, NOW);
     expect(budget.budgetFraction).toBeCloseTo(0.9);
     expect(budget.writeBudgetTokens).toBe(200_000);
+    expect(budget.upgradeWriteUsd).toBeCloseTo(0.9);
+    expect(budget.writeBudgetUsd).toBe(1);
+    expect(budget.usdFraction).toBeCloseTo(0.9);
+    // USD gate off ⇒ the fraction is meaningless and reports 0 (the segment logic skips it).
+    const usdOff = buildAdaptiveSnapshot(state({ upgradeWriteUsd: 1.875 }), { ...CONFIG, writeBudgetUsd: 0 }, NOW);
+    expect(usdOff.usdFraction).toBe(0);
+    expect(usdOff.writeBudgetUsd).toBe(0);
+    expect(usdOff.upgradeWriteUsd).toBeCloseTo(1.875, 10);
 
     const tripped = buildAdaptiveSnapshot(state({ breaker: { reason: "1h-ineffective", at: NOW } }), CONFIG, NOW);
     expect(tripped.breaker?.reason).toBe("1h-ineffective");

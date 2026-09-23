@@ -146,6 +146,10 @@ export interface CacheTtlSettings {
   adaptiveEnabled: boolean;
   /** 每会话 adaptive 升级引发的实测 cacheWrite 总预算（tokens）。Default 200000。 */
   adaptiveWriteBudgetTokens: number;
+  /** 每会话 adaptive 升级的边际支出预算（美元，主闸；0 = 关闭美元闸、只看 token 预算）。
+   *  累计口径：结算账本的 cost.cacheWrite × 0.375（5m→1h 边际占比，推导见 adaptive.ts
+   *  MARGINAL_WRITE_FRACTION）。Default 1.0。 */
+  adaptiveWriteBudgetUsd: number;
   /** 热升级允许的预测增量 Δ̂ 上限（tokens）。Default 32000。 */
   adaptiveMaxDeltaTokens: number;
   /** 距上次 1h 升级累计写入超过该值才允许再次热升级（tokens）。Default 16000。 */
@@ -359,6 +363,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     keepaliveUpgradeAfterBudget: true,
     adaptiveEnabled: true,
     adaptiveWriteBudgetTokens: 200_000,
+    adaptiveWriteBudgetUsd: 1.0,
     adaptiveMaxDeltaTokens: 32_000,
     adaptiveRefreshAfterTokens: 16_000,
     adaptiveColdUpgrades: 1,
@@ -641,6 +646,9 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
   const bool = (raw: unknown, fallback: boolean): boolean => (typeof raw === "boolean" ? raw : fallback);
   const num = (raw: unknown, fallback: number, min: number, max: number): number =>
     typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? Math.floor(raw) : fallback;
+  // USD 变体：不取整——0.5 的预算被 floor 成 0 会把「半美元」误读成「关闭」，方向不可接受。
+  const usd = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? raw : fallback;
   const mode = value.mode;
   const adaptiveEnabled = bool(value.adaptiveEnabled, defaults.adaptiveEnabled);
   return {
@@ -669,6 +677,7 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
       0,
       Number.MAX_SAFE_INTEGER,
     ),
+    adaptiveWriteBudgetUsd: usd(value.adaptiveWriteBudgetUsd, defaults.adaptiveWriteBudgetUsd, 0, 100),
     adaptiveMaxDeltaTokens: num(
       value.adaptiveMaxDeltaTokens,
       defaults.adaptiveMaxDeltaTokens,

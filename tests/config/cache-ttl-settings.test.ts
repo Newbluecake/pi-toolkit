@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, isTimeSettingKey, loadSettings, parseCacheTtlSettings } from "../../src/config/settings.js";
-import { SETTING_SPECS } from "../../src/config/setting-specs.js";
+import { SETTING_SPECS, parseSettingValue } from "../../src/config/setting-specs.js";
 
 const PROMOTED_DEFAULT = { ...DEFAULT_SETTINGS.cacheTtl, mode: "adaptive" as const };
 
@@ -15,6 +15,7 @@ describe("cache-ttl keepalive settings", () => {
       keepaliveUpgradeAfterBudget: true,
       adaptiveEnabled: true,
       adaptiveWriteBudgetTokens: 200_000,
+      adaptiveWriteBudgetUsd: 1.0,
       adaptiveMaxDeltaTokens: 32_000,
       adaptiveRefreshAfterTokens: 16_000,
       adaptiveColdUpgrades: 1,
@@ -38,6 +39,7 @@ describe("cache-ttl keepalive settings", () => {
         keepaliveUpgradeAfterBudget: 1,
         adaptiveEnabled: "nope",
         adaptiveWriteBudgetTokens: -1,
+        adaptiveWriteBudgetUsd: -1,
         adaptiveMaxDeltaTokens: "nope",
         adaptiveRefreshAfterTokens: NaN,
         adaptiveColdUpgrades: -3,
@@ -58,6 +60,7 @@ describe("cache-ttl keepalive settings", () => {
         keepaliveUpgradeAfterBudget: false,
         adaptiveEnabled: false,
         adaptiveWriteBudgetTokens: 0,
+        adaptiveWriteBudgetUsd: 0.25,
         adaptiveMaxDeltaTokens: 10_000,
         adaptiveRefreshAfterTokens: 4_000,
         adaptiveColdUpgrades: 3,
@@ -75,6 +78,7 @@ describe("cache-ttl keepalive settings", () => {
       keepaliveUpgradeAfterBudget: false,
       adaptiveEnabled: false,
       adaptiveWriteBudgetTokens: 0,
+      adaptiveWriteBudgetUsd: 0.25,
       adaptiveMaxDeltaTokens: 10_000,
       adaptiveRefreshAfterTokens: 4_000,
       adaptiveColdUpgrades: 3,
@@ -82,6 +86,19 @@ describe("cache-ttl keepalive settings", () => {
       adaptiveColdMinHorizonMs: 0,
       adaptiveHistoryGapSignal: false,
     });
+  });
+
+  it("parses adaptiveWriteBudgetUsd without flooring: fractional budgets survive, 0 = gate off, >100 falls back", () => {
+    // 0.5 must stay 0.5 — flooring it to 0 would silently DISABLE the USD gate.
+    expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: 0.5 }).adaptiveWriteBudgetUsd).toBe(0.5);
+    expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: 0 }).adaptiveWriteBudgetUsd).toBe(0);
+    expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: 100 }).adaptiveWriteBudgetUsd).toBe(100);
+    expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: 100.5 }).adaptiveWriteBudgetUsd).toBe(
+      DEFAULT_SETTINGS.cacheTtl.adaptiveWriteBudgetUsd,
+    );
+    expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: NaN }).adaptiveWriteBudgetUsd).toBe(
+      DEFAULT_SETTINGS.cacheTtl.adaptiveWriteBudgetUsd,
+    );
   });
 
   it("clamps keepaliveIntervalMs into [60s, 280s]", () => {
@@ -169,6 +186,11 @@ describe("cache-ttl adaptive settings (adaptive plan.md §7)", () => {
       kind: "number",
       path: "cacheTtl.adaptiveWriteBudgetTokens",
     });
+    expect(SETTING_SPECS["cacheTtl.adaptiveWriteBudgetUsd"]).toMatchObject({
+      kind: "number",
+      path: "cacheTtl.adaptiveWriteBudgetUsd",
+      min: 0,
+    });
     expect(SETTING_SPECS["cacheTtl.adaptiveMaxDeltaTokens"]).toMatchObject({
       kind: "number",
       path: "cacheTtl.adaptiveMaxDeltaTokens",
@@ -197,5 +219,38 @@ describe("cache-ttl adaptive settings (adaptive plan.md §7)", () => {
       kind: "boolean",
       path: "cacheTtl.adaptiveHistoryGapSignal",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1 review M1: the editor / `set` path validates against SETTING_SPECS only,
+// while a reload re-parses through parseCacheTtlSettings — whose out-of-range
+// handling is FALL BACK TO DEFAULT, not clamp. If the two bounds drift apart,
+// an accepted value applies live (settings.cacheTtl is the very object the
+// adaptive service reads) and then silently reverts on the next reload.
+// ---------------------------------------------------------------------------
+
+describe("adaptiveWriteBudgetUsd — spec bounds must mirror the parser", () => {
+  const spec = SETTING_SPECS["cacheTtl.adaptiveWriteBudgetUsd"]!;
+
+  it("declares the same [0, 100] range the parser enforces", () => {
+    expect(spec.min).toBe(0);
+    expect(spec.max).toBe(100);
+  });
+
+  it("rejects in the editor exactly what the parser would silently drop", () => {
+    for (const raw of ["500", "-1"]) {
+      expect(parseSettingValue(spec, raw).ok, `editor must reject ${raw}`).toBe(false);
+      // …and the parser would have fallen back to the default rather than clamp.
+      expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: Number(raw) }).adaptiveWriteBudgetUsd).toBe(
+        DEFAULT_SETTINGS.cacheTtl.adaptiveWriteBudgetUsd,
+      );
+    }
+  });
+
+  it("accepts a fractional budget without flooring it to the 0 = gate-off sentinel", () => {
+    const parsed = parseSettingValue(spec, "0.5");
+    expect(parsed.ok).toBe(true);
+    expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: 0.5 }).adaptiveWriteBudgetUsd).toBe(0.5);
   });
 });

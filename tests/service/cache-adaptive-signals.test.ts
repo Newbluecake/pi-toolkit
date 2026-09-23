@@ -137,6 +137,7 @@ describe("signals() failure degrades to all-zero", () => {
     cacheWrite: 4_000,
     cacheWrite1h: undefined,
     costTotalUsd: undefined,
+    cacheWriteUsd: undefined,
     entrySeq: 0,
     entriesLength: 1,
     modelId: "claude-x",
