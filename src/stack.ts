@@ -71,6 +71,12 @@ import {
 } from "./delivery/deadline-notice.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
+import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
+import {
+  createCacheAdaptiveService,
+  computeAdaptiveSignals,
+  type CacheAdaptiveService,
+} from "./service/cache-adaptive.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
 import { createMentionNotes, type MentionNotes } from "./mention/notes.js";
@@ -114,6 +120,10 @@ let previousAckHold: Coalescer | undefined;
  */
 let previousBashJobs: BashJobManager | undefined;
 let previousFabricMailbox: ReturnType<typeof createFabricMailbox> | undefined;
+/** cache-ttl keepalive (plan.md §2.2): same rebuild-dispose pattern as the usage broadcaster. */
+let previousKeepalive: CacheKeepaliveService | undefined;
+/** cache-ttl adaptive (adaptive plan.md §9): same rebuild-dispose pattern as the keepalive service. */
+let previousAdaptive: CacheAdaptiveService | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -469,6 +479,10 @@ export interface Stack {
   /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
   bashJobs?: BashJobManager;
   fabric?: { dispose(): void; pump(): void };
+  /** 提示词缓存保活调度器（plan.md §2）；settings.cacheTtl.keepalive=false 时缺席。 */
+  keepalive?: CacheKeepaliveService;
+  /** 自适应 1h TTL 决策器（adaptive plan.md §9）；settings.cacheTtl.adaptiveEnabled=false 时缺席。 */
+  adaptive?: CacheAdaptiveService;
   /** /goal 目标驱动持续运行的 session 级运行态（goal-plan v4）。无持久 timer，纯数据。 */
   goal: GoalSession;
 }
@@ -692,6 +706,10 @@ export function buildSessionStack(
   previousBashJobs = undefined;
   previousFabricMailbox?.dispose();
   previousFabricMailbox = undefined;
+  previousKeepalive?.dispose();
+  previousKeepalive = undefined;
+  previousAdaptive?.dispose();
+  previousAdaptive = undefined;
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
@@ -1073,6 +1091,43 @@ export function buildSessionStack(
   const bashJobs = bashJobsEnabled(settings) ? buildBashJobManager(pi, ctx, settings) : undefined;
   previousBashJobs = bashJobs;
 
+  const keepalive = settings.cacheTtl.keepalive
+    ? createCacheKeepaliveService({
+        clock: systemClock,
+        ctx,
+        sessionId: currentSessionId(ctx),
+        settings: settings.cacheTtl,
+        backgroundBusy: () =>
+          query.list().some((s) => ["queued", "starting", "running", "stopping"].includes(s.status)) ||
+          (bashJobs?.backgroundJobCount() ?? 0) > 0,
+        isCurrent: (self) => previousKeepalive === self,
+        // Lazily read: `adaptive` is constructed below, so this closure must
+        // resolve at publish time, not at construction time.
+        adaptiveSnapshot: () => previousAdaptive?.snapshot(),
+        appendEntry: (type, data) => pi.appendEntry(type, data),
+        emit: (channel, payload) => pi.events.emit(channel, payload),
+      })
+    : undefined;
+  previousKeepalive = keepalive;
+
+  // adaptive plan.md §3.2: the three strong signals are injected as one closure
+  // (same pattern as keepalive's `backgroundBusy`). `uiPrompts` / `activeTools`
+  // are counted inside the service itself from forwarded events. A throwing
+  // `signals()` degrades to all-zero ⇒ never upgrades (§15 R7).
+  const adaptive = settings.cacheTtl.adaptiveEnabled
+    ? createCacheAdaptiveService({
+        clock: systemClock,
+        ctx,
+        sessionId: currentSessionId(ctx),
+        settings: settings.cacheTtl,
+        signals: () => computeAdaptiveSignals(query.list(), bashJobs?.backgroundJobCount() ?? 0, systemClock.now()),
+        isCurrent: (self) => previousAdaptive === self,
+        appendEntry: (type, data) => pi.appendEntry(type, data),
+        emit: (channel, payload) => pi.events.emit(channel, payload),
+      })
+    : undefined;
+  previousAdaptive = adaptive;
+
   // X7b: always-on fleet widget above the editor. The controller self-probes
   // ctx.ui.setWidget and goes inert (no timer, no throw) in non-interactive
   // modes; settings.fleetWidget=false skips it entirely.
@@ -1252,6 +1307,8 @@ export function buildSessionStack(
     goal,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
+    ...(keepalive ? { keepalive } : {}),
+    ...(adaptive ? { adaptive } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
   };
 }

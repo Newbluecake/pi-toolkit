@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
@@ -161,7 +161,10 @@ export default function activate(pi: ExtensionAPI): void {
     if (g[HOST_KEY] === claim) delete g[HOST_KEY];
   });
 
-  wireCacheTtl(pi, settings);
+  wireCacheTtl(pi, settings, {
+    keepalive: () => holder.current?.keepalive,
+    adaptive: () => holder.current?.adaptive,
+  });
   // Built FRESH per activate(): depending on pi's version, /reload either
   // re-runs activate on the cached module or re-imports a FRESH module (jiti
   // moduleCache:false). A module-level mutable array would accumulate
@@ -190,6 +193,10 @@ export default function activate(pi: ExtensionAPI): void {
       sendUserMessage: (text) => pi.sendUserMessage(text),
     }),
   );
+
+  // cache-ttl keepalive (plan.md §4): the armed-signal / drift-invalidation
+  // event forwarders now live in `wireCacheTtl` (src/cache-ttl/cache-ttl.ts,
+  // `wireKeepaliveEvents`) — assembly-only here, per AGENTS.md (M2 fix).
 
   if (!compat.ok) {
     pi.registerTool({
@@ -433,6 +440,8 @@ export default function activate(pi: ExtensionAPI): void {
     // stop the previous stack's timer/RPC surfaces so they cannot double-fire.
     if (holder.current) {
       holder.current.fleetWidget?.dispose();
+      holder.current.keepalive?.dispose();
+      holder.current.adaptive?.dispose();
       holder.current.scheduler.stop();
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
@@ -464,6 +473,8 @@ export default function activate(pi: ExtensionAPI): void {
     // setWidget(undefined) over the new session's frames: the agent tree
     // blinks off/on at the combined tick rate, worse with every reload.
     stack.fleetWidget?.dispose();
+    stack.keepalive?.dispose();
+    stack.adaptive?.dispose();
     stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
     // Fabric must freeze before run shutdown so late verdicts from the old

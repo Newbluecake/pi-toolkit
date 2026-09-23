@@ -235,8 +235,65 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "reload.defer": bool("reload.defer", "Defer /reload until running subagents settle"),
   "cacheTtl.mode": choice(
     "cacheTtl.mode",
-    ["auto", "on", "off"],
-    "Anthropic prompt-cache TTL: auto=follow pi/env, on=force 1h, off=provider default (5m)",
+    ["auto", "on", "off", "adaptive"],
+    "Anthropic prompt-cache TTL: auto=follow pi/env, on=force 1h, off=provider default (5m), adaptive=predict 1h before long gaps",
+  ),
+  "cacheTtl.keepalive": bool("cacheTtl.keepalive", "Master switch for prompt-cache keepalive pings"),
+  "cacheTtl.keepaliveIntervalS": seconds("cacheTtl.keepaliveIntervalMs", {
+    min: 60,
+    max: 280,
+    description: "Interval between keepalive pings",
+  }),
+  "cacheTtl.keepaliveMaxPings": count(
+    "cacheTtl.keepaliveMaxPings",
+    0,
+    "Hard cap on keepalive pings per window; 0 disables",
+  ),
+  "cacheTtl.keepaliveMinPrefixTokens": count(
+    "cacheTtl.keepaliveMinPrefixTokens",
+    0,
+    "Minimum measured prefix tokens required before keepalive engages",
+  ),
+  "cacheTtl.keepaliveUpgradeAfterBudget": bool(
+    "cacheTtl.keepaliveUpgradeAfterBudget",
+    "Allow the next must-write request to upgrade the session to 1h TTL",
+  ),
+  "cacheTtl.adaptiveEnabled": bool(
+    "cacheTtl.adaptiveEnabled",
+    "Master switch for adaptive 1h prediction; when on, an unset mode resolves to adaptive",
+  ),
+  "cacheTtl.adaptiveWriteBudgetTokens": count(
+    "cacheTtl.adaptiveWriteBudgetTokens",
+    0,
+    "Per-session measured cacheWrite budget for adaptive upgrades; 0 disables upgrading",
+  ),
+  "cacheTtl.adaptiveMaxDeltaTokens": count(
+    "cacheTtl.adaptiveMaxDeltaTokens",
+    0,
+    "Max predicted increment (tokens) allowed for a warm adaptive upgrade",
+  ),
+  "cacheTtl.adaptiveRefreshAfterTokens": count(
+    "cacheTtl.adaptiveRefreshAfterTokens",
+    0,
+    "Tokens written since the last 1h upgrade before another warm upgrade is allowed",
+  ),
+  "cacheTtl.adaptiveColdUpgrades": count(
+    "cacheTtl.adaptiveColdUpgrades",
+    0,
+    "Cold adaptive upgrades allowed per session; 0 disables cold upgrades",
+  ),
+  "cacheTtl.adaptiveColdCooldownS": seconds("cacheTtl.adaptiveColdCooldownMs", {
+    min: 60,
+    max: 7200,
+    description: "Minimum interval between two cold adaptive upgrades",
+  }),
+  "cacheTtl.adaptiveColdMinHorizonS": seconds("cacheTtl.adaptiveColdMinHorizonMs", {
+    max: 7200,
+    description: "Minimum remaining subagent horizon required for a cold upgrade",
+  }),
+  "cacheTtl.adaptiveHistoryGapSignal": bool(
+    "cacheTtl.adaptiveHistoryGapSignal",
+    "Allow the weak history-long-gap signal to arm warm adaptive upgrades",
   ),
 
   "worktree.gitTimeoutS": seconds("worktree.gitTimeoutMs", { description: "Git command timeout for worktree ops" }),
