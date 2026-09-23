@@ -837,15 +837,28 @@ export function renderCacheStatus(input: CacheStatusInput): string | undefined;
 
 ### 8.2 状态栏文案（单 key `"cache-ttl"`，两写入方不变）
 
-| 情形                                     | 文案                                       | segment ids                      |
-| ---------------------------------------- | ------------------------------------------ | -------------------------------- |
-| adaptive，当前请求写 1h（后台 subagent） | `⏱ cache adaptive · →1h (subagent)`        | `mode:adaptive`, `ttl-now:1h`    |
-| adaptive，当前请求 5m（密集交互）        | `⏱ cache adaptive · 5m`                    | `mode:adaptive`, `ttl-now:5m`    |
-| adaptive，1h 覆盖生效中（剩余 37min）    | `⏱ cache adaptive · 1h cover 37m`          | + `adaptive:cover`               |
-| adaptive + 预算快到                      | `⏱ cache adaptive · 5m · budget 180k/200k` | + `adaptive:budget`（tone=warn） |
-| adaptive 熔断                            | `⏱ cache adaptive · off:1h-ineffective`    | `adaptive:breaker`（tone=bad）   |
-| 未确认 1h（代理吞字段）                  | `⏱ cache adaptive · →1h?`（问号=未确认）   | `ttl-now:1h`（tone=warn）        |
-| 其余（auto/on/off）                      | **与现状逐字一致**                         | —                                |
+| 情形                                     | 文案                                     | segment ids                      |
+| ---------------------------------------- | ---------------------------------------- | -------------------------------- |
+| adaptive，当前请求写 1h（后台 subagent） | `⏱ cache adaptive · →1h (subagent)`      | `mode:adaptive`, `ttl-now:1h`    |
+| adaptive，当前请求 5m（密集交互）        | `⏱ cache adaptive · 5m`                  | `mode:adaptive`, `ttl-now:5m`    |
+| adaptive，1h 覆盖生效中（剩余 37min）    | `⏱ cache adaptive · 1h cover 37m`        | + `adaptive:cover`               |
+| adaptive + 预算快到                      | `⏱ cache adaptive · 5m · budget 90%`     | + `adaptive:budget`（tone=warn） |
+| adaptive 熔断                            | `⏱ cache adaptive · off:1h-ineffective`  | `adaptive:breaker`（tone=bad）   |
+| 未确认 1h（代理吞字段）                  | `⏱ cache adaptive · →1h?`（问号=未确认） | `ttl-now:1h`（tone=warn）        |
+| 其余（auto/on/off）                      | **与现状逐字一致**                       | —                                |
+
+**字数预算（后续修订）**：状态栏是与其它扩展 status 共享的**同一行**，cache-ttl 是其中最长的一段，
+实测 `cache adaptive · 5m · budget 198k/200k · off:warm-write-too-expensive · ping disabled:proven-write ×1`
+（101 字符）会把「watching / input·rounds」挤到折行处只留一个 `443` 孤儿行。因此做了三步压缩，
+**只改显示文本，不改语义**（精确值一律留在结构化 `detail` 与 `/cache-ttl status`）：
+
+1. `adaptive:budget` 显示百分比（`budget 99%`，向下取整以免在触顶前自称 100%），精确 token 数留在 `detail`。
+2. 熔断原因在状态栏用短别名（`warm-write-too-expensive` → `warm-write-costly`，`BREAKER_DISPLAY` 对
+   `AdaptiveBreakerReason` 穷举，新增原因会编译失败而不是回落成长文本）；`detail.reason` 与命令输出仍用原文。
+3. 熔断期间不再显示 `ttl-now` 细分段（`off:<reason>` 已蕴含），且 `ping disabled:` → `ping off:`。
+
+压缩后该行 78 字符（整行 134 → 111，130 列终端有余量）。注意这只是「缩短」；终端再窄或再加一个
+扩展 status 仍会折行——真要根治要走 §8.1 说的 HUD 原生渲染（cache 独立成行）。
 
 `effectiveTtl` 在每次 `before_provider_request` 后由 `updateStatus` 刷新（adaptive 决策已产出）。
 

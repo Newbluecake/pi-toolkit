@@ -20,7 +20,7 @@ import type { Millis } from "../core/types.js";
 import type { PingHeaderSource, PingOutcome } from "./ping-client.js";
 // Type-only back-reference (adaptive.ts value-imports constants from THIS
 // module): erased at runtime ⇒ no ESM cycle (adaptive plan.md §3.5).
-import type { AdaptiveSnapshot } from "./adaptive.js";
+import type { AdaptiveBreakerReason, AdaptiveSnapshot } from "./adaptive.js";
 
 // ---------------------------------------------------------------------------
 // Constants (plan.md §6.1/§6.2/§7.5/§10.1 — safety knobs, deliberately not
@@ -873,22 +873,43 @@ export interface CacheStatusSnapshot {
   adaptive?: AdaptiveSnapshot;
 }
 
+/**
+ * Status-bar abbreviations for the breaker reasons. The merged status line is a
+ * single terminal row shared with every other extension's status (cache-ttl is
+ * its longest contributor), so the longest reason gets a shorter display form.
+ * Only the display text is abbreviated: `detail.reason` keeps the machine id and
+ * `/cache-ttl status` still prints it in full. The map is exhaustive over
+ * `AdaptiveBreakerReason` on purpose — a new reason fails to compile here rather
+ * than silently reverting to a raw name of unbounded length.
+ */
+const BREAKER_DISPLAY: Record<AdaptiveBreakerReason, string> = {
+  "warm-write-too-expensive": "warm-write-costly",
+  "warm-miss": "warm-miss",
+  "write-budget": "write-budget",
+  "1h-ineffective": "1h-ineffective",
+};
+
 /** adaptive plan.md §8.2: the ttl-now / cover / budget / breaker segments (only in adaptive mode with a snapshot). */
 function adaptiveSegments(snapshot: AdaptiveSnapshot): CacheStatusSegment[] {
   const segments: CacheStatusSegment[] = [];
   const last = snapshot.lastDecision;
-  if (last?.upgrade === true) {
-    // "→1h?" (warn) while every 1h write so far is unconfirmed (proxy may be
-    // dropping the cache_creation split — plan.md §5.2).
-    const unconfirmedOnly = snapshot.unconfirmed1hWrites > 0 && snapshot.confirmed1hWrites === 0;
-    segments.push({
-      kind: "ttl-now",
-      id: "ttl-now:1h",
-      text: `→1h${unconfirmedOnly ? "?" : ""}${last.signals.length > 0 ? ` (${last.signals.join("+")})` : ""}`,
-      tone: unconfirmedOnly ? "warn" : "good",
-    });
-  } else {
-    segments.push({ kind: "ttl-now", id: "ttl-now:5m", text: "5m", tone: "neutral" });
+  // A tripped breaker short-circuits the upgrade, so the ttl-now segment is
+  // derivable from `off:<reason>` and only spends status-line width (plan.md
+  // §8.2's breaker row is `cache adaptive · off:<reason>`): drop it.
+  if (snapshot.breaker === undefined) {
+    if (last?.upgrade === true) {
+      // "→1h?" (warn) while every 1h write so far is unconfirmed (proxy may be
+      // dropping the cache_creation split — plan.md §5.2).
+      const unconfirmedOnly = snapshot.unconfirmed1hWrites > 0 && snapshot.confirmed1hWrites === 0;
+      segments.push({
+        kind: "ttl-now",
+        id: "ttl-now:1h",
+        text: `→1h${unconfirmedOnly ? "?" : ""}${last.signals.length > 0 ? ` (${last.signals.join("+")})` : ""}`,
+        tone: unconfirmedOnly ? "warn" : "good",
+      });
+    } else {
+      segments.push({ kind: "ttl-now", id: "ttl-now:5m", text: "5m", tone: "neutral" });
+    }
   }
   if (snapshot.coverRemainingMs !== undefined) {
     segments.push({
@@ -903,7 +924,10 @@ function adaptiveSegments(snapshot: AdaptiveSnapshot): CacheStatusSegment[] {
     segments.push({
       kind: "adaptive",
       id: "adaptive:budget",
-      text: `budget ${formatTokenCount(snapshot.upgradeWriteTokens)}/${formatTokenCount(snapshot.writeBudgetTokens)}`,
+      // Percentage, not `198k/200k`: the segment only appears at ≥80% so the
+      // question it answers is "how close to the cap", and the exact tokens stay
+      // in `detail` (HUD expansion) + `/cache-ttl status`.
+      text: `budget ${Math.floor(snapshot.budgetFraction * 100)}%`,
       tone: "warn",
       detail: { upgradeWriteTokens: snapshot.upgradeWriteTokens, writeBudgetTokens: snapshot.writeBudgetTokens },
     });
@@ -912,7 +936,7 @@ function adaptiveSegments(snapshot: AdaptiveSnapshot): CacheStatusSegment[] {
     segments.push({
       kind: "adaptive",
       id: "adaptive:breaker",
-      text: `off:${snapshot.breaker.reason}`,
+      text: `off:${BREAKER_DISPLAY[snapshot.breaker.reason]}`,
       tone: "bad",
       detail: { reason: snapshot.breaker.reason, at: snapshot.breaker.at },
     });
@@ -1021,7 +1045,7 @@ function renderPingSegment(mode: CacheDisplayMode, report: KeepaliveReport | und
   const { session, window, config } = report;
 
   if (session.disabled !== undefined) {
-    return `ping disabled:${session.disabled.reason} ×${session.pings}`;
+    return `ping off:${session.disabled.reason} ×${session.pings}`;
   }
   if (window.pings > 0 && window.pings >= config.maxPings) {
     // I-K5: mode !== "auto" means the caller (cache-ttl.ts) never lets

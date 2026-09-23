@@ -5,6 +5,7 @@ import {
   UNPROVEN_STREAK_LIMIT,
   UNPROVEN_TOTAL_LIMIT,
   buildFingerprint,
+  buildCacheStatusSnapshot,
   cacheReadCostUsd,
   closeWindowAccounting,
   compareFingerprint,
@@ -21,6 +22,7 @@ import {
   onUnproven,
   renderCacheStatus,
   renderKeepaliveReportLines,
+  type AdaptiveSnapshot,
   type CaptureFingerprint,
   type CapturedRequest,
   type KeepaliveConfig,
@@ -1068,7 +1070,110 @@ describe("renderCacheStatus", () => {
       dirty: false,
       report: report({ session: baseSession({ disabled: { reason: "proven-write", at: 1 }, pings: 4 }) }),
     });
-    expect(text).toBe("ping disabled:proven-write ×4");
+    expect(text).toBe("ping off:proven-write ×4");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adaptive segments: the status line is one terminal row shared with every
+// other extension's status, so the adaptive segments are kept as short as they
+// can be without losing a fact (structured `detail` keeps the exact values).
+// ---------------------------------------------------------------------------
+
+function adaptiveSnapshot(overrides: Partial<AdaptiveSnapshot> = {}): AdaptiveSnapshot {
+  return {
+    lastDecision: undefined,
+    coverRemainingMs: undefined,
+    upgradeWriteTokens: 0,
+    writeBudgetTokens: 200_000,
+    budgetFraction: 0,
+    warmUpgrades: 0,
+    coldUpgradesUsed: 0,
+    coldUpgradeCap: 1,
+    coldCooldownRemainingMs: undefined,
+    longGapCount: 0,
+    confirmed1hWrites: 0,
+    unconfirmed1hWrites: 0,
+    indirect1hConfirms: 0,
+    ineffective1h: 0,
+    droppedPending: 0,
+    breaker: undefined,
+    lastReconcile: undefined,
+    ...overrides,
+  };
+}
+
+describe("renderCacheStatus — adaptive segments", () => {
+  it("keeps the plain 5m mode segment while adaptive is healthy", () => {
+    expect(renderCacheStatus({ mode: "adaptive", dirty: false, report: undefined, adaptive: adaptiveSnapshot() })).toBe(
+      "cache adaptive · 5m",
+    );
+  });
+
+  it("abbreviates the near-cap budget as a percentage and the breaker reason", () => {
+    const text = renderCacheStatus({
+      mode: "adaptive",
+      dirty: false,
+      report: undefined,
+      adaptive: adaptiveSnapshot({
+        upgradeWriteTokens: 198_000,
+        budgetFraction: 0.99,
+        breaker: { reason: "warm-write-too-expensive", at: 1 },
+      }),
+    });
+    // The `5m` segment is dropped: `off:<reason>` already implies it.
+    expect(text).toBe("cache adaptive · budget 99% · off:warm-write-costly");
+  });
+
+  it("never rounds the budget percentage up to 100% before the cap is hit", () => {
+    const text = renderCacheStatus({
+      mode: "adaptive",
+      dirty: false,
+      report: undefined,
+      adaptive: adaptiveSnapshot({ upgradeWriteTokens: 199_600, budgetFraction: 0.998 }),
+    });
+    expect(text).toContain("budget 99%");
+  });
+
+  it("keeps the exact tokens and the raw breaker id in the structured detail", () => {
+    const snapshot = buildCacheStatusSnapshot({
+      mode: "adaptive",
+      dirty: false,
+      report: undefined,
+      adaptive: adaptiveSnapshot({
+        upgradeWriteTokens: 198_000,
+        budgetFraction: 0.99,
+        breaker: { reason: "warm-write-too-expensive", at: 1 },
+      }),
+    });
+    expect(snapshot.segments.find((s) => s.id === "adaptive:budget")?.detail).toEqual({
+      upgradeWriteTokens: 198_000,
+      writeBudgetTokens: 200_000,
+    });
+    expect(snapshot.segments.find((s) => s.id === "adaptive:breaker")?.detail).toMatchObject({
+      reason: "warm-write-too-expensive",
+      at: 1,
+    });
+  });
+
+  it("keeps the upgrade / cover segments unchanged", () => {
+    const text = renderCacheStatus({
+      mode: "adaptive",
+      dirty: false,
+      report: undefined,
+      adaptive: adaptiveSnapshot({
+        lastDecision: {
+          upgrade: true,
+          class: "warm",
+          reason: undefined,
+          signals: ["subagent"],
+          predictedDeltaTokens: 0,
+          at: 1,
+        },
+        coverRemainingMs: 2_220_000,
+      }),
+    });
+    expect(text).toBe("cache adaptive · →1h (subagent) · 1h cover 37m");
   });
 });
 
