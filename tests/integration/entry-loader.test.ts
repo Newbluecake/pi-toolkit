@@ -31,7 +31,8 @@ describe("pi-toolkit extension entry", () => {
     expect(loaded.errors).toEqual([]);
     expect(loaded.extensions).toHaveLength(1);
     const tools = loaded.extensions.flatMap((extension: any) => [...extension.tools.keys()]);
-    // subagent core + pre-guard merged plugins, all from the one entry
+    // subagent core + host-session merged plugins, all from the one entry
+    // (this is a host activation, so post-guard ask_user is present)
     expect(tools).toContain("Agent");
     expect(tools).toContain("ask_user");
     expect(tools).toContain("web_search");

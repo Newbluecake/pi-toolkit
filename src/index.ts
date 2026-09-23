@@ -98,14 +98,10 @@ export default function activate(pi: ExtensionAPI): void {
   // loadSettingsFromFile migrates/writes the shared settings file, which must
   // never run concurrently from N child sessions (review B1). Visibility in a
   // child session is still subject to the agent type's `tools` allowlist
-  // (tool-scope), and neither tool is in RESERVED_TOOL_NAMES.
+  // (tool-scope), and none of these names is in RESERVED_TOOL_NAMES.
   const preGuardSettings = readSettingsNoMigrate();
   if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
   if (preGuardSettings.todo.enabled) wireTodo(pi);
-  // ask_user must also stay available in child sessions (a subagent should be
-  // able to ask the user) — pre-guard, same as the merged tools. It self-gates
-  // on ctx.hasUI for headless sessions.
-  if (preGuardSettings.askUser.enabled) wireAskUser(pi);
 
   // HOST_KEY/g 上移到 pre-guard 区（Symbol.for 幂等，与下方守卫同一个 symbol），
   // 因为 memory 装配需要知道本次激活是否在子会话里（memory-plan §4.2）。
@@ -117,9 +113,9 @@ export default function activate(pi: ExtensionAPI): void {
   // 后果仅限该瞬间 memory 注入/拒写走子会话策略，有明确报错文案。
   const isChildSession = Boolean(g[HOST_KEY]);
 
-  // Merged armory-memory (memory-plan §4.1): pre-guard like web_search/todo/
-  // ask_user so child sessions keep the injection hook and the memory tool
-  // (default injectInChildSessions=true, aligned with the original plugin).
+  // Merged armory-memory (memory-plan §4.1): pre-guard like web_search/todo so
+  // child sessions keep the injection hook and the memory tool (default
+  // injectInChildSessions=true, aligned with the original plugin).
   if (preGuardSettings.memory.enabled) wireMemory(pi, { settings: preGuardSettings.memory, isChildSession });
 
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
@@ -160,6 +156,14 @@ export default function activate(pi: ExtensionAPI): void {
     releaseBackgroundStatus();
     if (g[HOST_KEY] === claim) delete g[HOST_KEY];
   });
+
+  // Merged ask_user (plugin-merge): HOST-SESSION ONLY. A child subagent session
+  // runs in print mode (createAgentSession never binds a UI/mode), so the tool
+  // could only ever return the headless error there — registering it merely put
+  // a doomed tool in every subagent's tool list. Deliberately placed BEFORE the
+  // compat gate: ask_user is independent of the subagent core, so a disabled
+  // core (bad pi version) must not take it down.
+  if (settings.askUser.enabled) wireAskUser(pi);
 
   wireCacheTtl(pi, settings, {
     keepalive: () => holder.current?.keepalive,

@@ -555,6 +555,9 @@ npm run format:check && npm run typecheck && npm test && npm run build
   feishu-notify 靠 §5.2 的 host claim 在子会话完全 inert。另注意子会话工具面还受
   `src/runtime/tool-scope.ts` 的 allow-list 管控，ask_user 不会出现在声明了 `tools` 白名单的
   agent type 里，行为可控。
+  - **后续修订**：ask_user 已由 pre-guard 改为 post-guard（仅主会话注册）——子会话 print 模式下
+    它只会返回 headless 错误，不应出现在子 agent 的工具面；上面「首次被调用即自禁用」的描述对
+    `pi -p` 主会话仍然成立（`src/ask-user/index.ts` 的 headless 分支保留）。
 - **R9 定时器**：新增 defer 轮询必须 `.unref()`（AGENTS.md 明确：ref'd timer 会 wedge `pi -p`）。
   feishu 现有定时器已全部带 `unref?.()`，新增代码沿用该写法，M4 测试用 fake timers 验证计数。
 - **R10 pi.events 能力**：feishu-notify 依赖 `pi.events.on/emit`（subagent 生命周期、ask-user:activity）。

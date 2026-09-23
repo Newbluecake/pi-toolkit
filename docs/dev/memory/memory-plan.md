@@ -142,7 +142,7 @@ memory: {
 
 ## 4. 装配与注册顺序
 
-### 4.1 决策：**pre-guard**（与 web_search / todo / ask_user 同区）
+### 4.1 决策：**pre-guard**（与 web_search / todo / ask_user 同区；注：ask_user 后续已改为 post-guard、仅主会话注册）
 
 1. 需求 h 默认行为对齐原插件（含子会话注入）⇒ 必须在 HOST_KEY 守卫前注册，否则子会话提前 return 拿不到注入与工具。
 2. 先例一致（merge-plan D2）。

@@ -30,9 +30,10 @@ settings-gated and all wired from the single `pi.extensions` entry (`src/index.t
 `ask_user` tool (`src/ask-user/`, `askUser.enabled`), Feishu notification cards
 (`src/feishu-notify/`, `feishuNotify.enabled`), session-navigation enhancements
 (`src/session-nav/`, `sessionNav.enabled`), and cwd-keyed project memory (`src/memory/`,
-`memory.enabled`). web_search / todo / ask_user / memory register **before**
-the HOST_KEY guard so child sessions keep them; hud / feishu-notify / session-nav are post-guard
-(main-session only).
+`memory.enabled`). web_search / todo / memory register **before**
+the HOST_KEY guard so child sessions keep them; hud / feishu-notify / session-nav / ask_user are
+post-guard (main-session only — a subagent runs in print mode, so ask_user could only ever return
+its headless error there and is therefore not registered in child sessions at all).
 
 ## Commands
 

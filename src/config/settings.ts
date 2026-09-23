@@ -255,7 +255,7 @@ export interface AgentSettings {
   webSearch: EnabledGroup;
   /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasks + aboveEditor widget. Default on. */
   todo: EnabledGroup;
-  /** ask_user interactive question tool (available in child sessions too). Default on. */
+  /** ask_user interactive question tool (main session only — child subagent sessions never see it). Default on. */
   askUser: EnabledGroup;
   /** Feishu notification cards (main-session singleton). Default on. */
   feishuNotify: EnabledGroup;

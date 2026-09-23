@@ -91,7 +91,7 @@ Claude Code 风格的 cwd-keyed 被动记忆：每个会话自动把当前项目
 - **HUD footer** — 安装即接管 pi 底部 footer（`hud.enabled: false` 一键还原）。显示 pwd/git 分支与工作树、token/费用统计（含 subagent 实时费用）、上下文用量、模型与 thinking 档位、LLM 计时与生成速率。
 - **`web_search` 工具** — Codex / SerpAPI / Bocha / Tavily 四供应商自动 failover（网络错误/超时/429/5xx 指数退避后切换），主会话与子会话均可用；凭证见「配置」。
 - **任务工具** — `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` + 编辑器上方的任务 widget + `/tasks` 面板，状态持久化在会话文件里（fork/resume 无损恢复）。
-- **`ask_user` 工具** — 交互式澄清：结构化多选问题（≤4 题批量），TUI/RPC 均支持，子会话也可用。
+- **`ask_user` 工具** — 交互式澄清：结构化多选问题（≤4 题批量），TUI/RPC 均支持；仅主会话可用（子 agent 会话是 print 模式，注册了也只能返回 headless 错误，因此不对子会话注册）。
 - **飞书通知** — `@notify` 关键词、`/watch`、`/feishu-test` 与结果/汇总/心跳/等待输入卡片（被动触发，无 AI 主动调用面）。完成类通知默认等后台 subagent 与后台 bash 全部空闲才发（`requireBackgroundIdle`，忙时抑制不补发）。
 - **会话导航** — `/resume` 默认只扫最近 48 小时（Tab / `--all` 全量），skill 会话标题清洗、subagent 会话标注 `[sub:类型]`；`/clear` 开新会话；裸 `exit` 直接退出。
 - **`/goal` 目标循环** — 给一个目标和结束条件，每轮结束自动评估并续跑直到达成或撞线（详见下文）。

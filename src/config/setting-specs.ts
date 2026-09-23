@@ -190,7 +190,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "hud.enabled": bool("hud.enabled", "Merged HUD: take over the footer (off restores pi's built-in footer)"),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasks widget)"),
-  "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (child sessions included)"),
+  "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (main session only)"),
   "feishuNotify.enabled": bool("feishuNotify.enabled", "Feishu notification cards (main session only)"),
   "sessionNav.enabled": bool(
     "sessionNav.enabled",
