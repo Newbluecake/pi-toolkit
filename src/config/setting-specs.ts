@@ -483,6 +483,20 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     max: 60,
     description: "Quota HTTP request timeout",
   }),
+  // systemPrompt（sysprompt-stable plan §3.2/§3.5）：三态模式与唤醒回放。
+  "systemPrompt.mode": choice(
+    "systemPrompt.mode",
+    ["stable", "live", "legacy"],
+    "System prompt sections: stable=frozen snapshot, live=refresh every turn, legacy=raw live behavior",
+  ),
+  "systemPrompt.wakeReplay": bool(
+    "systemPrompt.wakeReplay",
+    "Replay the user run's forced system-prompt bytes onto notification wake runs (cache-stable request head)",
+  ),
+  "systemPrompt.adoptForeignForcedPrompt": bool(
+    "systemPrompt.adoptForeignForcedPrompt",
+    "Adopt text appended by a later extension to the forced system prompt",
+  ),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

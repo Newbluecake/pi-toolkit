@@ -98,8 +98,13 @@ describe("wiring: available agent types are injected into the system prompt", ()
 
     const hook = first("before_agent_start");
     expect(hook, "before_agent_start must be hooked").toBeTypeOf("function");
-    expect(hook!({ systemPrompt: "BASE" }, { modelRegistry: { getAvailable: () => [] } })).toBeUndefined();
 
+    // M2: the hub freezes a section's first successful render as its
+    // snapshot (stable mode). A single call already carrying the models
+    // exercises the ctx.modelRegistry fallback (holder.current is only
+    // assigned after session_start) without crossing into the
+    // freeze-vs-update-message distinction, which tests/sysprompt/hub.test.ts
+    // covers exhaustively on its own.
     const result = hook!(
       { systemPrompt: "BASE" },
       {
@@ -176,12 +181,23 @@ describe("wiring: available agent types are injected into the system prompt", ()
     await emit("session_shutdown", { reason: "exit" });
   });
 
-  it("stays inert inside child sessions (HOST_KEY guard: no duplicate hook)", () => {
+  it("stays inert inside child sessions (HOST_KEY guard: no duplicate host-only surface)", () => {
     const first = fakePi();
     activate(first.pi as never);
     const child = fakePi();
     activate(child.pi as never); // re-activation inside a spawned child session
-    expect(child.handlers.has("before_agent_start")).toBe(false);
+
+    // M2 (plan D6): the prompt-section hub is created PRE-guard so child
+    // sessions share the identical hook set -- `before_agent_start` DOES
+    // register here now, but with zero post-guard sections (types/models
+    // register only past the HOST_KEY guard below) it is functionally inert.
+    const hook = child.handlers.get("before_agent_start")?.[0];
+    expect(hook, "the hub's before_agent_start registers even in a child session (D6)").toBeTypeOf("function");
+    expect(hook!({ systemPrompt: "BASE" }, {})).toBeUndefined();
+
+    // The strictly host-only surface (registered only past the guard, e.g.
+    // /goal's agent_end hook) never duplicates into a child session.
+    expect(child.handlers.has("agent_end")).toBe(false);
   });
 
   it("re-activates after /reload (the host claim is released on session_shutdown)", async () => {
@@ -192,18 +208,22 @@ describe("wiring: available agent types are injected into the system prompt", ()
     const first = fakePi();
     activate(first.pi as never);
     expect(first.handlers.has("before_agent_start")).toBe(true);
+    expect(first.handlers.has("agent_end")).toBe(true); // host-only surface is up
 
     await first.emit("session_shutdown", { reason: "reload" });
 
     const reloaded = fakePi();
     activate(reloaded.pi as never);
     expect(reloaded.handlers.has("before_agent_start"), "post-reload instance must take over").toBe(true);
+    expect(reloaded.handlers.has("agent_end"), "post-reload instance owns the host-only surface").toBe(true);
 
     // ...and the fresh instance owns the claim: a child session spawned after
-    // the reload is still inert.
+    // the reload still gets only the hub's (inert) hook, never the host-only surface.
     const child = fakePi();
     activate(child.pi as never);
-    expect(child.handlers.has("before_agent_start")).toBe(false);
+    expect(child.handlers.has("agent_end")).toBe(false);
+    const childHook = child.handlers.get("before_agent_start")?.[0];
+    expect(childHook!({ systemPrompt: "BASE" }, {})).toBeUndefined();
   });
 
   it("a child session's shutdown cannot steal the host claim", async () => {
@@ -211,17 +231,32 @@ describe("wiring: available agent types are injected into the system prompt", ()
     activate(host.pi as never);
     const child = fakePi();
     activate(child.pi as never);
-    // plugin-merge: a child session registers ONLY the pre-guard merged
-    // surface (todo's session hooks) — never the host-only hooks/tools.
-    expect(child.handlers.has("before_agent_start")).toBe(false);
-    expect(child.handlers.has("agent_settled")).toBe(false);
+    // plugin-merge + M2 (D6): a child session registers the pre-guard merged
+    // surface (todo's session hooks) AND the prompt-section hub's full hook
+    // set (before_agent_start / context_with_system / session_start /
+    // session_compact / model_select / session_tree / turn_start /
+    // agent_settled) — but never the strictly host-only hooks/tools that
+    // register past the HOST_KEY guard (e.g. /goal's agent_end).
+    expect(child.handlers.has("agent_end")).toBe(false);
+    const childHook = child.handlers.get("before_agent_start")?.[0];
+    expect(childHook!({ systemPrompt: "BASE" }, {})).toBeUndefined(); // present but inert (no sections registered)
     for (const event of child.handlers.keys()) {
-      expect(["session_start", "session_tree", "session_compact", "session_shutdown"]).toContain(event);
+      expect([
+        "session_start",
+        "session_tree",
+        "session_compact",
+        "session_shutdown",
+        "before_agent_start",
+        "context_with_system",
+        "model_select",
+        "turn_start",
+        "agent_settled",
+      ]).toContain(event);
     }
 
     // Host still owns the claim, so a later activation stays inert.
     const another = fakePi();
     activate(another.pi as never);
-    expect(another.handlers.has("before_agent_start")).toBe(false);
+    expect(another.handlers.has("agent_end")).toBe(false);
   });
 });

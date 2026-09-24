@@ -8,12 +8,7 @@ import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
-import {
-  appendAvailableModelsToSystemPrompt,
-  availableModelsFromRegistry,
-  readScopedModels,
-} from "./config/available-models.js";
-import { appendAgentTypesToSystemPrompt, createAgentTypeRegistry } from "./config/agent-types.js";
+import { createAgentTypeRegistry } from "./config/agent-types.js";
 import {
   defaultSettingsPath,
   loadSettingsFromFile,
@@ -68,6 +63,8 @@ import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/work
 import { registerWebSearchTool } from "./web-search/index.js";
 import { wireTodo } from "./todo/index.js";
 import { wireMemory } from "./memory/index.js";
+import { createPromptSectionHub } from "./sysprompt/hub.js";
+import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sections.js";
 import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
 import wireFeishuNotify from "./feishu-notify/index.js";
@@ -123,6 +120,16 @@ export default function activate(pi: ExtensionAPI): void {
   // child sessions keep the injection hook and the memory tool (default
   // injectInChildSessions=true, aligned with the original plugin).
   if (preGuardSettings.memory.enabled) wireMemory(pi, { settings: preGuardSettings.memory, isChildSession });
+
+  // Sysprompt M2: register the hub after the legacy memory hook so the
+  // resulting order remains memory -> agent types -> models during M2. The
+  // child-session guard below leaves the hub alive but with no post-guard
+  // sections, matching today's child prompt behavior until M3 migrates memory.
+  const promptHub = createPromptSectionHub(pi, {
+    mode: () => preGuardSettings.systemPrompt.mode,
+    wakeReplay: preGuardSettings.systemPrompt.wakeReplay,
+    adoptForeignForcedPrompt: preGuardSettings.systemPrompt.adoptForeignForcedPrompt,
+  });
 
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
   // re-activates this extension inside every child. Without a guard, the
@@ -385,33 +392,23 @@ export default function activate(pi: ExtensionAPI): void {
     );
     pi.registerTool(createBashJobTool({ manager: forwardBashJobs(holder) }));
   }
-  // Inject the registered agent types into the system prompt: the model has
-  // no other way to learn valid `subagent_type` values and otherwise burns
-  // turns on trial-and-error "unknown agent type" failures. `types` reloads
-  // on every session_start; list() is read at event time so .md edits are
-  // picked up on the next turn. Child sessions never see this hook — their
-  // activate() returns early on the HOST_KEY guard above.
-  pi.on("before_agent_start", (event, ctx) => {
-    let systemPrompt = appendAgentTypesToSystemPrompt(event.systemPrompt, types.list(), {
+  // Inject the registered agent types and available models through the M2 hub.
+  // The hub owns the stable/live/legacy mode, persistence, updates, and wake
+  // replay capture. Its registration order is the existing types -> models
+  // order; the memory hook above has already contributed the first section.
+  promptHub.register(
+    "pi_subagent_types",
+    agentTypesSection({
+      types,
       foregroundAutoBackgroundMs: settings.foregroundAutoBackgroundMs,
-    });
-    // Model list source, in priority order:
-    //  1. ctx.scopedModels — the session's `--models`/`enabledModels` scope. This
-    //     is the ONLY source that stays listable in full: an unscoped install can
-    //     expose 500+ models, of which MAX_PROMPT_MODELS shows 30 in registry
-    //     order, so the models the user actually spawns with were silently cut
-    //     (and set_model/Agent need the exact provider/id, not a guess).
-    //  2. the stack's model port (available registry snapshot).
-    //  3. the event ctx registry — holder.current is only assigned after
-    //     session_start builds the stack, so the very first prompt needs this.
-    const scoped = readScopedModels(ctx?.scopedModels);
-    const models =
-      scoped.length > 0
-        ? scoped
-        : (holder.current?.models.available() ?? availableModelsFromRegistry(ctx?.modelRegistry));
-    systemPrompt = appendAvailableModelsToSystemPrompt(systemPrompt, models);
-    return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
-  });
+    }),
+  );
+  promptHub.register(
+    "pi_subagent_models",
+    availableModelsSection({
+      stackAvailable: () => holder.current?.models.available(),
+    }),
+  );
   // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear
   // error message) unless settings.workflow.enabled — decided once here
   // rather than per-session, since `settings` itself is loaded once.
