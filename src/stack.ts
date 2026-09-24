@@ -34,7 +34,13 @@ import { previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
 import { formatDuration } from "./ui/fleet-panel.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { DeadlineNotice, DeliveryPayload, SubagentExtensionPoints } from "./core/types.js";
+import type {
+  DeadlineNotice,
+  DeliveryPayload,
+  RunId,
+  SubagentExtensionPoints,
+  WorktreeDisposal,
+} from "./core/types.js";
 import { probeReadBackEntries } from "./adapters/pi-compat.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE } from "./adapters/pi-outbox-store.js";
@@ -1086,6 +1092,11 @@ export function buildSessionStack(
       return recommendableModels(scoped, availableEntries());
     },
   };
+  // X1 (agent tree): late-bound holder — the adapter is created below but
+  // spawn-service (whose live records the worktree marker must reach) only
+  // exists afterwards; filled in right after createSpawnService, same
+  // ref-holder pattern as spawnRef/nestedSpawn.
+  const worktreeDiag: { current?: (runId: RunId, disposition: WorktreeDisposal) => void } = {};
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,
     driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
@@ -1108,6 +1119,7 @@ export function buildSessionStack(
     nestedSpawn: () => spawnRef.current,
     resultMaxChars: () => settings.resultMaxChars,
     onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
+    worktreeDiag,
     resolveModelHint: models.resolveHint,
     availableModels: models.available,
     onDeadlineNotice: sendDeadlineNotice,
@@ -1220,6 +1232,7 @@ export function buildSessionStack(
     },
   });
   spawnRef.current = spawn;
+  worktreeDiag.current = (runId, disposition) => spawn.markWorktreeDisposition?.(runId, disposition);
   // Static fallback for the dynamic per-run wait default (only reached when a
   // snapshot has no deadlineAt yet): the configured run budget + abort grace +
   // settlement headroom, so it tracks `/agent settings` budget changes.

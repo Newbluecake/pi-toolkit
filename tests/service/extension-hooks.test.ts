@@ -49,7 +49,12 @@ function handle(overrides: Partial<SessionHandle> = {}): SessionHandle {
     ...overrides,
   };
 }
-function buildAdapter(clock: FakeClock, driver: SessionDriver, extensions: SubagentExtensionPoints[]) {
+function buildAdapter(
+  clock: FakeClock,
+  driver: SessionDriver,
+  extensions: SubagentExtensionPoints[],
+  extra: Partial<Parameters<typeof createRuntimeRunnerAdapter>[0]> = {},
+) {
   const pool = new SingleSlotPool(clock, 1);
   const store = new MemoryRunStore();
   const reaper = new EscalatingReaper(clock);
@@ -67,8 +72,18 @@ function buildAdapter(clock: FakeClock, driver: SessionDriver, extensions: Subag
     stats: { pending: 0, delivered: 0, consumed: 0, dropped: 0, abandoned: 0 },
     degraded: [],
   };
-  const runner = createRuntimeRunnerAdapter({ clock, driver, pool, store, watchdog, reaper, notifier, extensions });
-  return { runner, pool };
+  const runner = createRuntimeRunnerAdapter({
+    clock,
+    driver,
+    pool,
+    store,
+    watchdog,
+    reaper,
+    notifier,
+    extensions,
+    ...extra,
+  });
+  return { runner, pool, store };
 }
 function spec(overrides: Partial<RunnerSpec> = {}): RunnerSpec {
   return { runId: "r1", type, request: { type: "worker", prompt: "hi" }, budget: fastBudget(), ...overrides };
@@ -198,6 +213,70 @@ describe("H3 beforeReap wiring", () => {
     await drain(clock, 60);
     expect(disposed).toBe(true);
     expect(warn.mock.calls.some((c) => String(c[0]).includes("beforeReap"))).toBe(true);
+    warn.mockRestore();
+  });
+});
+describe("H3 beforeReap worktree disposition write-back (X1)", () => {
+  it("folds the active marker for isolation spawns, injects setWorktreeDisposition, and patches store + live sink", async () => {
+    const clock = new FakeClock();
+    const seenInHook: unknown[] = [];
+    const sinkCalls: Array<{ runId: string; disposition: unknown }> = [];
+    const worktreeDiag: { current?: (runId: string, disposition: never) => void } = {};
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const ext: SubagentExtensionPoints = {
+      beforeReap: async (outcome, ctx) => {
+        seenInHook.push(outcome.diag.worktree);
+        ctx.setWorktreeDisposition?.({ state: "committed", branch: "pi-agent-r-wt" });
+      },
+    };
+    const { runner, store } = buildAdapter(clock, driver, [ext], { worktreeDiag });
+    worktreeDiag.current = (runId, disposition) => sinkCalls.push({ runId, disposition });
+    const p = runner.run(spec({ runId: "r-wt", request: { type: "worker", prompt: "hi", isolation: "worktree" } }));
+    await drain(clock, 30);
+    const outcome = await p;
+    expect(outcome.status).toBe("completed");
+    await drain(clock, 30);
+
+    // the hook saw the enqueue-time active marker on the settled outcome's diag
+    expect(seenInHook).toEqual([{ state: "active" }]);
+    // the write-back reached the late-bound live-records sink (spawn-service)
+    expect(sinkCalls).toEqual([{ runId: "r-wt", disposition: { state: "committed", branch: "pi-agent-r-wt" } }]);
+    // ... and the durable store snapshot, without losing its terminal status
+    const snap = store.get("r-wt");
+    expect(snap?.status).toBe("completed");
+    expect(snap?.diag.worktree).toEqual({ state: "committed", branch: "pi-agent-r-wt" });
+  });
+
+  it("keeps the H3 chain best-effort when the write-back throws", async () => {
+    const clock = new FakeClock();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let disposed = false;
+    const worktreeDiag: { current?: (runId: string, disposition: never) => void } = {
+      current: () => {
+        throw new Error("sink exploded");
+      },
+    };
+    const driver: SessionDriver = {
+      create: async () => handle({ dispose: () => ((disposed = true), { returned: true, killed: 0, unkillable: [] }) }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const ext: SubagentExtensionPoints = {
+      beforeReap: (_outcome, ctx) => {
+        ctx.setWorktreeDisposition?.({ state: "clean" });
+      },
+    };
+    const { runner } = buildAdapter(clock, driver, [ext], { worktreeDiag });
+    const p = runner.run(spec());
+    await drain(clock, 30);
+    const outcome = await p;
+    expect(outcome.status).toBe("completed");
+    await drain(clock, 60);
+    expect(disposed).toBe(true); // the physical reap still ran
     warn.mockRestore();
   });
 });

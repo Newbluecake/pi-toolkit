@@ -13,6 +13,8 @@ import type {
   SessionSpec,
   StopCause,
   SubagentExtensionPoints,
+  WorktreeDisposal,
+  Millis,
 } from "../core/types.js";
 import { deliveryKey } from "../core/delivery-key.js";
 import type { Notifier } from "../delivery/notifier.js";
@@ -53,6 +55,16 @@ export interface RuntimeAdapterDeps {
   onLifecycle?: LifecycleSink;
   /** M2 Wave 1: the four documented extension hooks (architecture §7.1), pre-merged or raw — mergeExtensionPoints() is idempotent over a single already-merged entry. */
   extensions?: readonly SubagentExtensionPoints[];
+  /**
+   * X1 (agent tree): late-bound sink for post-settlement worktree display
+   * state (beforeReap → spawn-service live records). A holder rather than a
+   * value for the same reason as nestedSpawn: the adapter is constructed
+   * before createSpawnService exists (spawn needs the runner as its own dep);
+   * stack.ts fills `.current` once spawn is up. The durable store is patched
+   * directly by the wrapper below — only the live records need this sink,
+   * because the live registry shadows the store for the current session.
+   */
+  worktreeDiag?: { current?: (runId: RunId, disposition: WorktreeDisposal) => void };
   /**
    * X3: lazily-resolved narrow spawn port used to build the nested Agent
    * tool injected into a child session's own SessionSpec.customTools. A
@@ -263,7 +275,35 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     // through `effects` above); kept as inert no-ops to satisfy RunnerDeps.
     emit: () => undefined,
     deliver: () => undefined,
-    ...(merged.beforeReap ? { beforeReap: merged.beforeReap } : {}), // H3
+    ...(merged.beforeReap
+      ? {
+          // H3, X1-wrapped: enrich the ctx with the post-settlement diag
+          // write-back the worktree extension uses to report its disposal
+          // outcome (agent-tree `⎇` marker). Patches BOTH the durable store
+          // snapshot and — via the late-bound worktreeDiag holder — the
+          // spawn-service live record, which shadows the store in the live
+          // registry. Best-effort by design: a failure here must never reach
+          // the hook (the marker just stays "⎇ wt").
+          beforeReap: (outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }) => {
+            const hook = merged.beforeReap!;
+            const setWorktreeDisposition = (disposition: WorktreeDisposal): void => {
+              deps.worktreeDiag?.current?.(outcome.runId, disposition);
+              try {
+                const snapshot = deps.store.get(outcome.runId);
+                if (snapshot)
+                  deps.store.put({
+                    ...snapshot,
+                    diag: { ...snapshot.diag, worktree: disposition },
+                    updatedAt: deps.clock.now(),
+                  });
+              } catch {
+                /* best effort — see comment above */
+              }
+            };
+            return hook(outcome, { ...ctx, setWorktreeDisposition });
+          },
+        }
+      : {}), // H3
     onStateChange: (runId, state) => {
       const cb = perRun.get(runId)?.onSnapshot;
       if (!cb) return;
@@ -523,6 +563,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             ...(spec.request.label === undefined ? {} : { label: spec.request.label }),
             agentType: spec.type.name,
             taskPrompt: spec.request.prompt.slice(0, TASK_PROMPT_CAP),
+            // X1 (agent tree): `⎇ wt` on the row while the run is in flight;
+            // keyed off the request's declared intent. H2 failure paths
+            // (disabled/uncreatable worktree) never fold displayMeta, so a
+            // failed(config) row shows no marker at all.
+            ...(spec.request.isolation === "worktree" ? { worktree: { state: "active" } } : {}),
           },
         };
         let outcome = await runtime.run(req, spec.budget);

@@ -11,6 +11,7 @@ import {
   phaseLabel,
   THINKING_FRAMES,
   thinkingFrame,
+  worktreeMarker,
 } from "../../src/ui/fleet-panel.js";
 
 function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
@@ -360,5 +361,42 @@ describe("view-model: streamLine (» thinking/answer preview)", () => {
     const s = snapshot({ diag: diag({ thinkingText: `  a   b\n${"z".repeat(100)}  ` }) });
     const row = buildFleetViewModel([s], opts).rows[0]!;
     expect(row.streamLine).toBe(`${"z".repeat(59)}…`);
+  });
+});
+
+describe("view-model: worktree isolation marker (X1)", () => {
+  const opts = { now: 10_000, idleBudgetMs: 1000 };
+
+  it("maps every disposition state to its marker text", () => {
+    expect(worktreeMarker(undefined)).toBeUndefined();
+    expect(worktreeMarker({ state: "active" })).toBe("⎇ wt");
+    expect(worktreeMarker({ state: "kept" })).toBe("⎇ kept");
+    expect(worktreeMarker({ state: "clean" })).toBe("⎇ clean");
+    expect(worktreeMarker({ state: "committed", branch: "pi-agent-r_ABCDEFGH" })).toBe("⎇ pi-agent-r_ABCDEFGH");
+  });
+
+  it("truncates over-long branch names (marker stays compact)", () => {
+    const marker = worktreeMarker({ state: "committed", branch: "pi-agent-a-very-long-run-handle" })!;
+    expect(marker).toBe("⎇ pi-agent-a-very-lon…");
+    expect(visibleWidth(marker)).toBeLessThanOrEqual(22);
+  });
+
+  it("carries diag.worktree onto rows for both active and terminal runs", () => {
+    const active = snapshot({ diag: diag({ worktree: { state: "active" } }) });
+    expect(buildFleetViewModel([active], opts).rows[0]!.worktree).toEqual({ state: "active" });
+
+    const settled = snapshot({
+      status: "completed",
+      phase: "settled",
+      diag: diag({ worktree: { state: "committed", branch: "pi-agent-r_ABC12345" } }),
+    });
+    expect(buildFleetViewModel([settled], { ...opts, recentTerminal: 1 }).rows[0]!.worktree).toEqual({
+      state: "committed",
+      branch: "pi-agent-r_ABC12345",
+    });
+  });
+
+  it("leaves worktree undefined for non-isolated runs", () => {
+    expect(buildFleetViewModel([snapshot()], opts).rows[0]!.worktree).toBeUndefined();
   });
 });

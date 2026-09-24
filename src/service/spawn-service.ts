@@ -14,6 +14,7 @@ import type {
   RunSnapshot,
   SpawnRequest,
   StopCause,
+  WorktreeDisposal,
 } from "../core/types.js";
 import type { LifecycleSink, Runner, RunnerSpec, SlotPool } from "./ports.js";
 import { TombstoneStore } from "./tombstone.js";
@@ -36,6 +37,14 @@ export interface SpawnService {
   waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
   expectsAck(runId: RunId): boolean;
   markAutoBackgrounded(runId: RunId): void;
+  /**
+   * X1 (agent tree): post-settlement worktree display state. beforeReap runs
+   * AFTER finish() built the terminal snapshot, so the disposal outcome can
+   * only land by patching the settled record here (the live registry shadows
+   * the durable store for the current session — patching the store alone
+   * would never converge). Optional so test fakes of SpawnService stay valid.
+   */
+  markWorktreeDisposition?(runId: RunId, disposition: WorktreeDisposal): void;
   abort(runId: RunId, cause?: StopCause): Promise<boolean>;
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
   /** Resolve a label without exposing the mutable internal index. */
@@ -517,6 +526,19 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         live.diag.autoBackgroundedAt = markedAt;
         deps.onSnapshot?.(live);
       }
+    },
+    // X1: no running.has guard — by the time beforeReap reports, the run is
+    // already terminal and finish() has replaced the live record with the
+    // settled snapshot. Mutate exactly that record; the widget's 1Hz tick
+    // re-reads QueryService, so no re-emit is needed (and re-firing
+    // onSnapshot for a settled run would ping fabric/usage for nothing).
+    markWorktreeDisposition(runId, disposition) {
+      const live = records.get(runId);
+      if (!live) return;
+      live.diag.worktree = {
+        state: disposition.state,
+        ...(disposition.branch === undefined ? {} : { branch: disposition.branch }),
+      };
     },
     async abort(runId, cause = "user_stop") {
       if (!running.has(runId)) return false;

@@ -236,7 +236,25 @@ export interface RunDisplayMeta {
   agentType?: string;
   /** Truncated dispatch prompt for agent-tree previews and /agent status. */
   taskPrompt?: string;
+  /** X1 (agent tree): set for `isolation:"worktree"` spawns as `{ state: "active" }`;
+   *  beforeReap later replaces it with the disposal outcome via setWorktreeDisposition. */
+  worktree?: WorktreeDisposition;
 }
+
+/**
+ * X1 (agent tree): display-only worktree isolation state behind the fleet
+ * rows' `⎇` marker. "active" is folded in at enqueue (the run was spawned
+ * with isolation:"worktree" and is in flight); the terminal states are the
+ * post-reap disposal outcome reported by the worktree extension.
+ */
+export interface WorktreeDisposition {
+  state: "active" | "committed" | "kept" | "clean";
+  /** Branch the worktree changes were committed to (state "committed"), e.g. `pi-agent-<runId>`. */
+  branch?: string;
+}
+
+/** X1: the post-reap subset an extension may report back (no "active"). */
+export type WorktreeDisposal = { state: "committed" | "kept" | "clean"; branch?: string };
 
 export interface UsageDelta {
   input: number;
@@ -409,6 +427,8 @@ export interface RunDiagnostics {
   taskPrompt?: string;
   /** M-A: bounded ring of observed tool calls (cap: state-machine TOOL_HISTORY_CAP). */
   toolHistory?: ToolCallRecord[];
+  /** X1: worktree isolation marker state (display only; see WorktreeDisposition). */
+  worktree?: WorktreeDisposition;
   /** M-A: lifetime per-tool-name counters — unaffected by toolHistory ring eviction. */
   toolCounts?: Record<string, number>;
   stopRequestedAt?: Millis;
@@ -652,6 +672,18 @@ export interface OrphanRecord {
 export interface SubagentExtensionPoints {
   onLifecycle?(e: LifecycleEvent): void;
   resolveSessionSpec?(spec: SessionSpec, req: SpawnRequest): Promise<SessionSpec> | SessionSpec;
-  beforeReap?(outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }): Promise<void> | void;
+  beforeReap?(
+    outcome: RunOutcome,
+    ctx: {
+      cwd: string;
+      deadlineMs: Millis;
+      /**
+       * X1: post-settlement display-state write-back (worktree disposal
+       * outcome → diag.worktree). Best-effort: absent in tests/legacy wiring,
+       * and it must never influence the run outcome itself.
+       */
+      setWorktreeDisposition?(disposition: WorktreeDisposal): void;
+    },
+  ): Promise<void> | void;
   onDelivery?(p: DeliveryPayload, state: string): void;
 }

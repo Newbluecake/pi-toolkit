@@ -2,7 +2,13 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { forgetWorktreeOrigin, recordWorktreeOrigin } from "../core/worktree-origin.js";
-import type { SessionSpec, SpawnRequest, SubagentExtensionPoints, RunOutcome } from "../core/types.js";
+import type {
+  SessionSpec,
+  SpawnRequest,
+  SubagentExtensionPoints,
+  RunOutcome,
+  WorktreeDisposal,
+} from "../core/types.js";
 import { DEFAULT_WORKTREE_SETTINGS, type WorktreeSettings } from "./worktree-settings.js";
 
 export interface ExecOptions {
@@ -87,9 +93,23 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
       return { ...spec, cwd: path };
     },
 
-    async beforeReap(outcome: RunOutcome, ctx: { cwd: string; deadlineMs: number }): Promise<void> {
+    async beforeReap(
+      outcome: RunOutcome,
+      ctx: {
+        cwd: string;
+        deadlineMs: number;
+        setWorktreeDisposition?(disposition: WorktreeDisposal): void;
+      },
+    ): Promise<void> {
       const record = records.get(outcome.runId);
       if (!record) return;
+      // X1: report the disposal outcome back into diag.worktree (agent-tree
+      // `⎇` marker) so the terminal row converges from `⎇ wt` to its final
+      // state. Best-effort: absent callback (tests/legacy wiring) is fine.
+      // Note a failed `worktree remove` after a SUCCESSFUL commit chain still
+      // reports "committed" — the work is safe on the branch and the leftover
+      // directory is surfaced through onDiagnostic instead.
+      const report = (disposition: WorktreeDisposal) => ctx.setWorktreeDisposition?.(disposition);
       // Safety gate: the worktree is only removed when it was clean or its
       // changes were successfully committed to the pi-agent branch. Any
       // failure in the commit chain preserves the worktree on disk so
@@ -100,6 +120,7 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
         if (status.code !== 0) throw commandError("git status --porcelain", status);
         if (isClean(status)) {
           safeToRemove = true;
+          report({ state: "clean" });
         } else {
           const checkout = await git(["switch", "-c", record.branch], record.path, ctx.deadlineMs);
           if (checkout.code !== 0) throw commandError("git switch -c", checkout);
@@ -108,8 +129,10 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
           const commit = await git(["commit", "-m", `pi-agent ${outcome.runId}`], record.path, ctx.deadlineMs);
           if (commit.code !== 0) throw commandError("git commit", commit);
           safeToRemove = true;
+          report({ state: "committed", branch: record.branch });
         }
       } catch (error) {
+        report({ state: "kept" });
         options.onDiagnostic?.({
           runId: outcome.runId,
           phase: "cleanup",

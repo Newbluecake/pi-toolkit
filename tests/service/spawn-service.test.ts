@@ -776,3 +776,46 @@ describe("SpawnService: quota gate (quota-plan §6)", () => {
     );
   });
 });
+
+describe("SpawnService.markWorktreeDisposition (X1)", () => {
+  it("patches the settled record's diag.worktree — the live registry shadows the durable store", async () => {
+    const service = createSpawnService(deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }));
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    if ("error" in started) throw new Error(started.error.message);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(service.snapshots().find((s) => s.runId === started.runId)?.diag.worktree).toBeUndefined();
+    service.markWorktreeDisposition!(started.runId, { state: "committed", branch: "pi-agent-x" });
+    expect(service.snapshots().find((s) => s.runId === started.runId)?.diag.worktree).toEqual({
+      state: "committed",
+      branch: "pi-agent-x",
+    });
+  });
+
+  it("replaces an earlier disposition and is a no-op for unknown runs", async () => {
+    const service = createSpawnService(deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }));
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    if ("error" in started) throw new Error(started.error.message);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    service.markWorktreeDisposition!(started.runId, { state: "committed", branch: "pi-agent-x" });
+    service.markWorktreeDisposition!(started.runId, { state: "kept" });
+    expect(service.snapshots().find((s) => s.runId === started.runId)?.diag.worktree).toEqual({ state: "kept" });
+
+    expect(() => service.markWorktreeDisposition!("never-spawned", { state: "clean" })).not.toThrow();
+  });
+
+  it("does not re-emit onSnapshot for settled runs", async () => {
+    const snapshots: unknown[] = [];
+    const service = createSpawnService({
+      ...deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }),
+      onSnapshot: (s) => snapshots.push(s),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    if ("error" in started) throw new Error(started.error.message);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const count = snapshots.length;
+    service.markWorktreeDisposition!(started.runId, { state: "clean" });
+    expect(snapshots).toHaveLength(count);
+  });
+});

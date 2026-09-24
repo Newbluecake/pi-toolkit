@@ -1293,3 +1293,58 @@ describe("M9: workflow group headers in the tree", () => {
     expect(lines[1]).toContain("↳ child-a0");
   });
 });
+
+describe("worktree isolation marker rendering (X1)", () => {
+  it("active isolated runs show ⎇ wt on the main row; non-isolated runs show no marker", () => {
+    const isolated = snapshot({ diag: diag({ label: "isolate", worktree: { state: "active" } }) });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([isolated], OPTS), { width: 120 })!;
+    expect(lines.join("\n")).toContain("⎇ wt");
+
+    const plain = snapshot({ diag: diag({ label: "plain" }) });
+    const plainLines = buildFleetWidgetLines(buildFleetViewModel([plain], OPTS), { width: 120 })!;
+    expect(plainLines.join("\n")).not.toContain("⎇");
+  });
+
+  it.each([
+    ["committed branch", { state: "committed", branch: "pi-agent-r_ABC12345" } as const, "⎇ pi-agent-r_ABC12345"],
+    ["kept worktree", { state: "kept" } as const, "⎇ kept"],
+    ["clean removal", { state: "clean" } as const, "⎇ clean"],
+    // beforeReap runs after settlement: a just-settled row can still carry the
+    // active marker — acceptable, it converges on the next 1Hz tick.
+    ["pre-report active", { state: "active" } as const, "⎇ wt"],
+  ])("terminal rows render the %s marker", (_label, wt, expected) => {
+    const done = snapshot({
+      runId: "wt-run-0000",
+      status: "completed",
+      phase: "settled",
+      updatedAt: NOW - 100,
+      diag: diag({ label: "isolate", worktree: wt }),
+    });
+    const model = buildFleetViewModel([done], { ...OPTS, recentTerminal: 1 });
+    const lines = buildFleetWidgetLines(model, {
+      terminalLingerMs: 5_000,
+      receiptOf: () => ({ kind: "untracked" as const }),
+    })!;
+    expect(lines.join("\n")).toContain(expected);
+  });
+
+  it("truncates an over-long branch name on the terminal marker", () => {
+    const done = snapshot({
+      runId: "wt-run-0000",
+      status: "completed",
+      phase: "settled",
+      updatedAt: NOW - 100,
+      diag: diag({
+        label: "isolate",
+        worktree: { state: "committed", branch: "pi-agent-extremely-long-run-identifier" },
+      }),
+    });
+    const model = buildFleetViewModel([done], { ...OPTS, recentTerminal: 1 });
+    const lines = buildFleetWidgetLines(model, {
+      terminalLingerMs: 5_000,
+      receiptOf: () => ({ kind: "untracked" as const }),
+    })!;
+    expect(lines.join("\n")).toContain("⎇ pi-agent-extremely-…");
+    expect(lines.join("\n")).not.toContain("pi-agent-extremely-long-run-identifier");
+  });
+});

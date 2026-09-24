@@ -234,3 +234,88 @@ describe("worktree-origin wiring (B3, 方案 §5.6/§7.9)", () => {
     expect(resolveWorktreeOrigin("/tmp/test-worktrees/never-recorded")).toBeUndefined();
   });
 });
+
+describe("worktree disposition reporting (X1 agent-tree marker)", () => {
+  const reported = () => {
+    const calls: Array<{ state: string; branch?: string }> = [];
+    return {
+      calls,
+      ctx: {
+        cwd: "/tmp/test-worktrees/r-x",
+        deadlineMs: 1000,
+        setWorktreeDisposition: (d: { state: "committed" | "kept" | "clean"; branch?: string }) => calls.push(d),
+      },
+    };
+  };
+
+  it("reports committed (with the pi-agent branch) for a dirty worktree", async () => {
+    const fake = fakeGit({ dirty: true });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-report-dirty"));
+    const { calls, ctx } = reported();
+    await ext.beforeReap?.(outcome("r-report-dirty"), ctx);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-report-dirty" }]);
+  });
+
+  it("reports clean for an untouched worktree", async () => {
+    const fake = fakeGit();
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-report-clean"));
+    const { calls, ctx } = reported();
+    await ext.beforeReap?.(outcome("r-report-clean"), ctx);
+    expect(calls).toEqual([{ state: "clean" }]);
+  });
+
+  it.each([
+    ["the commit is rejected", { commitCode: 1 }],
+    ["the branch switch fails", { switchCode: 1 }],
+    ["the status check itself fails (cleanliness unknown)", { statusCode: 1 }],
+  ])("reports kept when %s — the worktree stays on disk", async (_label, opts) => {
+    const fake = fakeGit({ dirty: true, ...opts });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-report-kept"));
+    const { calls, ctx } = reported();
+    await ext.beforeReap?.(outcome("r-report-kept"), ctx);
+    expect(calls).toEqual([{ state: "kept" }]);
+  });
+
+  it("still reports committed when only the final remove fails — the work is safe on the branch", async () => {
+    const fake = fakeGit({ dirty: true, removeCode: 1 });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-remove-fail"));
+    const { calls, ctx } = reported();
+    await ext.beforeReap?.(outcome("r-remove-fail"), ctx);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-remove-fail" }]);
+  });
+
+  it("reports nothing for a run without a worktree record and tolerates a legacy ctx", async () => {
+    const fake = fakeGit();
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    const { calls, ctx } = reported();
+    // no resolveSessionSpec → no record → beforeReap is a no-op
+    await ext.beforeReap?.(outcome("r-unknown"), ctx);
+    expect(calls).toEqual([]);
+    // legacy ctx (no callback at all) must not throw
+    await expect(ext.beforeReap?.(outcome("r-unknown"), { cwd: "/repo", deadlineMs: 1000 })).resolves.toBeUndefined();
+  });
+});

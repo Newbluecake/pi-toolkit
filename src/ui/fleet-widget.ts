@@ -10,6 +10,7 @@ import {
   colorizeToolTrail,
   formatContextUsage,
   formatDuration,
+  worktreeMarker,
   type FleetColorize,
   type FleetHighlight,
   type FleetRow,
@@ -188,8 +189,12 @@ function widgetRowMain(
   const modelBase = modelFull?.slice(modelFull.lastIndexOf("/") + 1);
   const fixed = `${compactPhaseLabel(row.phaseLabel)} ${formatDuration(row.phaseMs)}`;
   const label = row.label ?? row.shortRunId;
+  // X1: worktree isolation marker (⎇ wt / ⎇ branch / ⎇ kept / ⎇ clean) —
+  // identity-adjacent, so it sits right after the agent type.
+  const wt = worktreeMarker(row.worktree);
   const fields: Array<{ name: string; value: string }> = [
     { name: "type", value: row.type ?? "·" },
+    ...(wt === undefined ? [] : [{ name: "wt", value: wt }]),
     ...(modelFull ? [{ name: "model", value: modelFull }] : []),
     { name: "phase", value: fixed },
     // deadline sits with phase ("is this run healthy?"), ahead of the resource
@@ -217,6 +222,7 @@ function widgetRowMain(
       if (!fits()) drop("model");
     }
     if (!fits()) drop("context");
+    if (!fits()) drop("wt");
     if (!fits()) drop("cost");
     if (!fits()) drop("background");
     if (!fits()) drop("total");
@@ -262,6 +268,7 @@ function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): 
 function widgetTerminalDetail(row: FleetRow, width: number): string {
   const label = row.label ?? row.shortRunId;
   const type = row.type ?? "·";
+  const wt = worktreeMarker(row.worktree);
   const model = row.model;
   const modelBase = model?.slice(model.lastIndexOf("/") + 1);
   const suffix = [row.status, formatDuration(row.elapsedMs)];
@@ -269,12 +276,12 @@ function widgetTerminalDetail(row: FleetRow, width: number): string {
   if (row.usage) suffix.push(formatWidgetCost(row.usage.costUsd));
   const candidates = [model, modelBase, undefined];
   const fits = (candidate: string | undefined, labelText: string) =>
-    visibleWidth([labelText, type, candidate, ...suffix].filter(Boolean).join(" ")) <= width;
+    visibleWidth([labelText, type, wt, candidate, ...suffix].filter(Boolean).join(" ")) <= width;
   const chosen = candidates.find((candidate) => fits(candidate, label));
-  const modelWidth = visibleWidth([type, chosen, ...suffix].filter(Boolean).join(" "));
+  const modelWidth = visibleWidth([type, wt, chosen, ...suffix].filter(Boolean).join(" "));
   const labelWidth = Math.max(1, width - modelWidth - 1);
   const finalLabel = visibleWidth(label) > labelWidth ? truncateToWidth(label, labelWidth) : label;
-  return [finalLabel, type, chosen, ...suffix].filter(Boolean).join(" ");
+  return [finalLabel, type, wt, chosen, ...suffix].filter(Boolean).join(" ");
 }
 
 /** M-C: order active rows as a forest — severity-ordered roots, each followed by its children (depth-first). */

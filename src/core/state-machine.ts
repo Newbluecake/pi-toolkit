@@ -556,6 +556,7 @@ export function reduce(
         ...(input.meta?.label === undefined ? {} : { label: input.meta.label }),
         ...(input.meta?.agentType === undefined ? {} : { agentType: input.meta.agentType }),
         ...(input.meta?.taskPrompt === undefined ? {} : { taskPrompt: input.meta.taskPrompt }),
+        ...(input.meta?.worktree === undefined ? {} : { worktree: input.meta.worktree }),
       },
       armedTimers,
     };

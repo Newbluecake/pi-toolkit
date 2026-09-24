@@ -7,6 +7,7 @@ import type {
   RunSnapshot,
   RunStatus,
   UsageDelta,
+  WorktreeDisposition,
 } from "../core/types.js";
 import { formatDuration } from "../core/format.js";
 
@@ -94,6 +95,8 @@ export interface FleetRow {
   inGrace: boolean;
   /** Approved deadline extensions so far (0 = never extended). */
   extensions: number;
+  /** X1: worktree isolation display state (agent-tree `⎇` marker); undefined = not isolated. */
+  worktree: WorktreeDisposition | undefined;
   highlight: FleetHighlight;
 }
 
@@ -249,6 +252,31 @@ export function formatUsage(u: UsageDelta): string {
   return `in:${u.input} out:${u.output} $${u.costUsd.toFixed(4)}`;
 }
 
+/** Max rendered branch-name length (the `pi-agent-<runId>` prefix alone is 9). */
+const WORKTREE_BRANCH_MAX = 20;
+
+/**
+ * X1: the agent tree's worktree-isolation marker — `⎇ wt` while the run is
+ * in flight, the disposal outcome afterwards (`⎇ clean`, `⎇ kept`, or the
+ * committed branch name, truncated). English tokens only (UI text language
+ * split); undefined = the run is not isolated (no marker at all).
+ */
+export function worktreeMarker(w: WorktreeDisposition | undefined): string | undefined {
+  if (w === undefined) return undefined;
+  switch (w.state) {
+    case "active":
+      return "⎇ wt";
+    case "kept":
+      return "⎇ kept";
+    case "clean":
+      return "⎇ clean";
+    case "committed": {
+      const branch = w.branch ?? "committed";
+      return `⎇ ${branch.length > WORKTREE_BRANCH_MAX ? `${branch.slice(0, WORKTREE_BRANCH_MAX - 1)}…` : branch}`;
+    }
+  }
+}
+
 /**
  * Last non-empty line of the run's streamed text, whitespace-collapsed and
  * truncated — the agent tree's one-line "thinking" preview. The accumulated
@@ -401,6 +429,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     remainingMs: terminal || eff === undefined ? undefined : Math.max(0, eff - opts.now),
     inGrace: !terminal && snapshot.deadlines.graceUntil !== undefined,
     extensions: snapshot.diag.overtime?.extensions ?? 0,
+    worktree: snapshot.diag.worktree,
     highlight: highlightOf(snapshot, opts),
   };
 }
