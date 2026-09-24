@@ -8,7 +8,7 @@
  *   `refresh()`（本轮用旧值，新值给下一轮）；顺序由测试锁死。
  * - M1（评审修订）：stale 快照不进注入流——不闩锁、不复读（stale 时闸门放行
  *   （R5），任何「会被拦下」的承诺都是假的，宁可静默；stale 只进 HUD）。
- * - 三闸 shouldAnnounce（D4）：等级抬升 / usedPct 网格前进 / L2+ 复读；
+ * - 三闸 shouldAnnounce（D4）：等级抬升 / usedPct 网格前进 / L3 复读；
  *   L0 清闩锁。每轮**至多一条**合并消息（所有 provider 拼一个块）。
  * - 闩锁回滚（Minor 1/2）：被 `minIntervalMs` 吞掉的一步、以及 send 失败的
  *   一轮，都把闩锁滚回本轮前的值（首次进入者用 `delete` 而非 set 脏值）——
@@ -67,7 +67,7 @@ export interface QuotaHintDeps {
 
 /**
  * 防噪音判定（§5.4，纯函数，单测直打不经钩子）：
- * 闸① 等级抬升；闸② 网格前进；闸③ L2+ 复读。重新武装：等级下降且百分比
+ * 闸① 等级抬升；闸② 网格前进；闸③ L3 复读（L2 纯提示不复读）。重新武装：等级下降且百分比
  * 真实回落 ≥ QUOTA_HYSTERESIS_PCT（窗口重置 ⇒ 旧闩锁作废）。
  */
 export function shouldAnnounce(
@@ -92,7 +92,8 @@ export function shouldAnnounce(
 
   if (verdict.level > latch.level) return { announce: true, next }; // 闸① 等级抬升
   if (step > latch.step) return { announce: true, next }; // 闸② 网格前进
-  if (verdict.level >= 2 && input.now - latch.at >= input.repeatMs) return { announce: true, next }; // 闸③ L2+ 复读
+  // 闸③ 复读只给 L3：L2 是纯提示（订阅优先用完），复读只会刷屏。
+  if (verdict.level >= 3 && input.now - latch.at >= input.repeatMs) return { announce: true, next };
   return { announce: false, next: latch };
 }
 

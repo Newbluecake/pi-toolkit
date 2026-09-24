@@ -1391,3 +1391,9 @@ moonshot-balance-positive.json
 - **同池去重（评审 Minor 9 落地）**：`zai-coding-cn` 与 `zai` 常配同一把 key（同账号同配额池），展示层经 `dedupeVerdicts` 折叠为一行（usedPct 取整 + resetAt 分钟桶容差）；gate 仍按 provider id 独立判定。
 - **紧凑标记去除 ⛔（用户要求）**：L2/L3 统一 ` ⚠`，HUD 侧严重度由颜色表达（warning / error）。
 - **moonshot 余额检测移除（用户决策）**：`QuotaSnapshot` 收敛为纯窗口型（`export type QuotaSnapshot = QuotaWindowsSnapshot`），adapter / 凭据回退 / 阶梯 / 渲染 / 闸门 / settings 里的 balance 语义全链路摘除，`QuotaProviderId` 收窄为 `zai-coding-cn | zai | kimi-coding`。
+- **订阅优先用完（2026-09 用户决策，推翻 L2 导流）**：受管 provider 都是**订阅额度**——窗口内不用就作废，提前把流量导向按量计费模型方向是反的。落地：
+  - L2 变为**纯提示**：文案只报用量/ETA/重置时刻并声明「订阅额度照常优先使用，派单不变」，不再列替代模型、不再「降一位」；闸③ 复读只对 L3（`shouldAnnounce`）。
+  - **降位标记只在 L3 写入**（`service.applySnapshot`），L2 不再写 `quota-state.json`；`providerVerdict` 的降位地板（≥2）语义不变。
+  - `pickAlternatives` 排序键前置**订阅层**：带窗口数据的受管 provider（含 stale）排在非受管（按量计费/中转，无额度数据）之前，其后才是 `level asc, maxUsedPct asc, 注册表顺序 asc`。原「非受管视作 L0/pct 0 排最前」（Minor 3）作废。
+  - `formatResetAt` 跨天输出 `M/D HH:MM`——7d 窗口只报 `HH:MM` 会被读成「今天」。
+- **同池合并注入（2026-09 用户确认）**：`buildQuotaMessage` 对 L2/L3 块按「等级 + `dedupeVerdicts` 同一池签名」分组，同池的 `zai-coding-cn` 与 `zai` 合并为一段（标签 `zai-coding-cn / zai`），替代链剔除组内成员；L1 tick 沿用 `dedupeVerdicts` 折叠。

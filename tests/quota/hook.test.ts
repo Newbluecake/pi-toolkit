@@ -111,7 +111,7 @@ describe("shouldAnnounce (pure, plan §5.4)", () => {
     expect(decision.next).toMatchObject({ level: 1, step: 60, usedPct: 62 });
   });
 
-  it("gate 1 level raise / gate 2 grid advance / gate 3 L2+ repeat", () => {
+  it("gate 1 level raise / gate 2 grid advance / gate 3 L3-only repeat", () => {
     const latch: QuotaAnnounceLatch = { level: 1, step: 60, at: 1_000, usedPct: 62 };
     expect(shouldAnnounce(verdict({ level: 2, windows: [w("5h", 62, 2)] }), latch, input).announce).toBe(true); // 闸①
     expect(shouldAnnounce(verdict({ windows: [w("5h", 71, 1)] }), latch, input).announce).toBe(true); // 闸② 60→70
@@ -119,10 +119,15 @@ describe("shouldAnnounce (pure, plan §5.4)", () => {
     expect(
       shouldAnnounce(verdict({ level: 2, windows: [w("5h", 71, 2)] }), l2, { ...input, now: 1_799_999 }).announce,
     ).toBe(false);
+    // L2 是纯提示（订阅优先用完）：repeatMs 到期也不复读。
     expect(
       shouldAnnounce(verdict({ level: 2, windows: [w("5h", 71, 2)] }), l2, { ...input, now: 1_801_000 }).announce,
+    ).toBe(false);
+    const l3: QuotaAnnounceLatch = { level: 3, step: 90, at: 1_000, usedPct: 92 };
+    expect(
+      shouldAnnounce(verdict({ level: 3, windows: [w("5h", 92, 3)] }), l3, { ...input, now: 1_801_000 }).announce,
     ).toBe(true); // 闸③
-    // L1 不复读（闸③ 只对 level >= 2）。
+    // L1 不复读（闸③ 只对 level >= 3）。
     const l1: QuotaAnnounceLatch = { level: 1, step: 70, at: 1_000, usedPct: 71 };
     expect(shouldAnnounce(verdict(), l1, { ...input, now: 10_000_000 }).announce).toBe(false);
   });
@@ -242,9 +247,9 @@ describe("createQuotaHintHook", () => {
     expect(h.sent[1]?.message.details).toMatchObject({ level: 3 });
   });
 
-  it("L2 re-announces after repeatMs, not before", () => {
-    const l2 = () => verdict({ level: 2, windows: [w("5h", 80, 2)] });
-    const h = harness({ verdicts: [l2()] });
+  it("L3 re-announces after repeatMs, not before; L2 announces once and stays quiet", () => {
+    const l3 = () => verdict({ level: 3, windows: [w("5h", 92, 3)] });
+    const h = harness({ verdicts: [l3()] });
     h.hook({}, ctx()); // t=1_000 首发
     expect(h.sent).toHaveLength(1);
     h.clock += 1_700_000; // 28.3min < 30min
@@ -253,6 +258,14 @@ describe("createQuotaHintHook", () => {
     h.clock += 200_000; // 累计 31.7min ≥ repeatMs（间隔 5min 也早已过）
     h.hook({}, ctx());
     expect(h.sent).toHaveLength(2);
+
+    const l2 = () => verdict({ level: 2, windows: [w("5h", 80, 2)] });
+    const h2 = harness({ verdicts: [l2()] });
+    h2.hook({}, ctx());
+    expect(h2.sent).toHaveLength(1);
+    h2.clock += 3_600_000; // 远超 repeatMs
+    h2.hook({}, ctx());
+    expect(h2.sent).toHaveLength(1);
   });
 
   it("merges multiple providers into a single message per turn", () => {

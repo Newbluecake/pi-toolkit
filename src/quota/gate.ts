@@ -57,9 +57,14 @@ export function evaluateQuotaGate(model: ModelRef, deps: QuotaGateDeps): QuotaGa
 }
 
 /**
- * 按额度健康度给候选排序后取前 n 个「provider/id」（plan §6 排序键：
- * `level asc, maxUsedPct asc, 注册表顺序 asc`）。已 block 的 provider
+ * 按额度健康度给候选排序后取前 n 个「provider/id」。排序键：
+ * `订阅层 asc, level asc, maxUsedPct asc, 注册表顺序 asc`。已 block 的 provider
  * （自身或任何 level >= gateLevel 的 provider）一律排除。
+ *
+ * 订阅层（2026-09 口径修订）：受管且带窗口数据的 provider 是**订阅额度**——窗口
+ * 内不用就作废，所以只要没被排除，一律排在非受管 provider（按量计费/中转，
+ * 无额度数据）之前。旧口径把非受管视作 level 0 / pct 0 排在最前，等于一有预警
+ * 就把流量从「已付费的订阅」推向「按 token 计费」的模型，方向反了。
  */
 export function pickAlternatives(
   blocked: string,
@@ -69,7 +74,7 @@ export function pickAlternatives(
   const cap = limit === undefined ? DEFAULT_ALTERNATIVE_LIMIT : Math.max(0, limit);
   if (cap === 0) return [];
   const exclusion = exclusionLevel(deps);
-  const scored: { key: string; level: LadderLevel; pct: number; order: number }[] = [];
+  const scored: { key: string; tier: number; level: LadderLevel; pct: number; order: number }[] = [];
   let order = 0;
   for (const candidate of deps.available()) {
     // 注册表顺序是最后一层 tie-break，先占号再谈排除。
@@ -83,15 +88,18 @@ export function pickAlternatives(
       if (verdict.level >= exclusion) continue;
       scored.push({
         key: `${candidate.provider}/${candidate.id}`,
+        tier: verdict.windows.length > 0 ? 0 : 1,
         level: verdict.level,
         pct: maxUsedPct(verdict),
         order: rank,
       });
       continue;
     }
-    scored.push({ key: `${candidate.provider}/${candidate.id}`, level: 0, pct: 0, order: rank });
+    // 无 verdict / stale：有窗口数据的 stale 快照仍是订阅（只是数据旧），归订阅层。
+    const tier = verdict !== undefined && verdict.windows.length > 0 ? 0 : 1;
+    scored.push({ key: `${candidate.provider}/${candidate.id}`, tier, level: 0, pct: 0, order: rank });
   }
-  scored.sort((a, b) => a.level - b.level || a.pct - b.pct || a.order - b.order);
+  scored.sort((a, b) => a.tier - b.tier || a.level - b.level || a.pct - b.pct || a.order - b.order);
   return scored.slice(0, cap).map((s) => s.key);
 }
 

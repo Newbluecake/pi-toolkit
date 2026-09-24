@@ -52,14 +52,16 @@ describe("formatScope / formatResetAt / formatEta", () => {
     expect(formatScope("week")).toBe("7d");
   });
 
-  it("formatResetAt renders HH:MM, survives crossing midnight, and says 未知 when unknown", () => {
+  it("formatResetAt renders HH:MM same-day, M/D HH:MM across days, and says 未知 when unknown", () => {
     expect(formatResetAt(RESET, NOW)).toBe("02:11");
     expect(formatResetAt(undefined, NOW)).toBe("未知");
     expect(formatResetAt(Number.NaN, NOW)).toBe("未知");
+    // A 7d window resetting days away must not read as "today".
     const nextDay = formatResetAt(NOW + 26 * 3_600_000, NOW);
-    expect(nextDay).toMatch(/^\d{2}:\d{2}$/);
     const d = new Date(NOW + 26 * 3_600_000);
-    expect(nextDay).toBe(`${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`);
+    expect(nextDay).toBe(
+      `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
+    );
   });
 
   it("formatEta rounds minutes and composes hours", () => {
@@ -103,18 +105,15 @@ describe("L1 tick block", () => {
 });
 
 describe("L2 warn block", () => {
-  const alternatives = ["kimi-coding/kimi-k3", "cloudrouter-anthropic/claude-opus-5"];
-
   it("matches the plan §5.5 template (pct + eta before reset)", () => {
     const v = verdict({
       level: 2,
       windows: [w("5h", 78, 2, "pct", { resetAt: RESET, etaMs: 41 * 60_000 }), w("week", 21, 0, "none")],
     });
-    expect(buildQuotaWarnText(v, alternatives, NOW)).toBe(
+    expect(buildQuotaWarnText(v, NOW)).toBe(
       [
         "[quota 预警] zai-coding-cn 5h 已用 78%（阈值 75%），按当前速率约 41 分钟后耗尽，早于窗口重置（02:11）。",
-        "本轮派单建议：把新任务优先交给 kimi-coding/kimi-k3、cloudrouter-anthropic/claude-opus-5；",
-        "zai-coding-cn 在回退链中降一位（已标记，持续到窗口重置）。",
+        "订阅额度照常优先使用，派单不变；到 L3（≥90% 或即将耗尽）才会切换。",
       ].join("\n"),
     );
   });
@@ -124,16 +123,19 @@ describe("L2 warn block", () => {
       level: 2,
       windows: [w("5h", 10, 0, "none"), w("week", 62, 2, "forecast-before-reset", { etaMs: 3 * 3_600_000 })],
     });
-    const text = buildQuotaWarnText(v, alternatives, NOW);
+    const text = buildQuotaWarnText(v, NOW);
     expect(text).toContain("zai-coding-cn 7d 已用 62%");
     expect(text).not.toContain("阈值"); // forecast-raised: no pct tier crossed
     expect(text).toContain("按当前速率约 3 小时后耗尽");
     expect(text).not.toContain("早于窗口重置"); // resetAt unknown
   });
 
-  it("falls back to an explicit no-alternative advisory", () => {
+  it("is advisory only: never redirects to other models nor announces a demotion", () => {
     const v = verdict({ level: 2, windows: [w("5h", 78, 2, "pct")] });
-    expect(buildQuotaWarnText(v, [], NOW)).toContain("无更优替代模型，请检查 pi /model");
+    const text = buildQuotaWarnText(v, NOW);
+    expect(text).not.toContain("优先交给");
+    expect(text).not.toContain("降一位");
+    expect(text).toContain("订阅额度照常优先使用");
   });
 });
 
@@ -180,6 +182,54 @@ describe("buildQuotaMessage", () => {
     expect(parts[0]).toBe("[quota] kimi-coding 5h 55%");
     expect(parts[1]).toContain("[quota 预警]");
     expect(parts[2]).toContain("[quota 严重]");
+  });
+
+  it("merges same-pool providers (zai-coding-cn / zai) into one L2/L3 block", () => {
+    const pool = [w("5h", 20, 0, "none"), w("week", 28, 2, "forecast-before-reset", { resetAt: RESET })];
+    const cn = verdict({ provider: "zai-coding-cn", level: 2, windows: pool });
+    const intl = verdict({ provider: "zai", level: 2, windows: pool });
+    const warn = buildQuotaMessage(
+      [
+        { verdict: cn, alternatives: [] },
+        { verdict: intl, alternatives: [] },
+      ],
+      NOW,
+    );
+    expect(warn.split("\n\n")).toHaveLength(1);
+    expect(warn).toContain("[quota 预警] zai-coding-cn / zai 7d 已用 28%");
+
+    // L3：合并后替代链剔除同池成员（同池的另一个名字不是替代）。
+    const hot = [w("5h", 93, 3, "pct", { resetAt: RESET })];
+    const block = buildQuotaMessage(
+      [
+        {
+          verdict: verdict({ provider: "zai-coding-cn", level: 3, windows: hot }),
+          alternatives: ["zai/glm-5.3", "deepseek/x"],
+        },
+        {
+          verdict: verdict({ provider: "zai", level: 3, windows: hot }),
+          alternatives: ["zai-coding-cn/glm-5.3", "deepseek/x"],
+        },
+      ],
+      NOW,
+    );
+    expect(block.split("\n\n")).toHaveLength(1);
+    expect(block).toContain("本轮禁止把新任务派给 zai-coding-cn / zai —— 直接使用：deepseek/x。");
+  });
+
+  it("keeps different pools (or same data at different levels) as separate blocks", () => {
+    const a = verdict({ provider: "zai-coding-cn", level: 2, windows: [w("5h", 78, 2, "pct")] });
+    const b = verdict({ provider: "zai", level: 2, windows: [w("5h", 80, 2, "pct")] });
+    const text = buildQuotaMessage(
+      [
+        { verdict: a, alternatives: [] },
+        { verdict: b, alternatives: [] },
+      ],
+      NOW,
+    );
+    expect(text.split("\n\n")).toHaveLength(2);
+    expect(text).toContain("[quota 预警] zai-coding-cn 5h");
+    expect(text).toContain("[quota 预警] zai 5h");
   });
 
   it("returns empty string for no sections", () => {

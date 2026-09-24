@@ -182,15 +182,17 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       }
     }
     const verdict = verdictOf(id, now);
-    if (verdict !== undefined && verdict.level >= 2) {
-      // §5.3 写入：触发窗口（level ≥ 2 者）里最早的 resetAt；未知 ⇒ demotion 层用 6h TTL。
+    if (verdict !== undefined && verdict.level >= 3) {
+      // §5.3 写入（2026-09 口径修订：仅 L3 才降位）：L2 只是提示——订阅额度窗口内不用
+      // 就作废，提前降位等于把流量推向按量计费模型。触发窗口（level ≥ 3 者）里最早的
+      // resetAt；未知 ⇒ demotion 层用 6h TTL。
       const resets: Millis[] = [];
       for (const w of verdict.windows) {
-        if (w.level >= 2 && w.resetAt !== undefined) resets.push(w.resetAt);
+        if (w.level >= 3 && w.resetAt !== undefined) resets.push(w.resetAt);
       }
       const earliest = resets.length > 0 ? Math.min(...resets) : undefined;
       try {
-        deps.demotions.mark(id, verdict.level === 3 ? 3 : 2, earliest, now);
+        deps.demotions.mark(id, 3, earliest, now);
       } catch {
         // 契约永不抛，兜注入桩。
       }

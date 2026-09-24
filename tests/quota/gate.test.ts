@@ -157,25 +157,23 @@ describe("evaluateQuotaGate", () => {
 });
 
 describe("pickAlternatives", () => {
-  it("5. sorts by (level asc, maxUsedPct asc, registry order asc); excludes self, blocked providers, and honors limit", () => {
+  it("5. sorts by (subscription tier asc, level asc, maxUsedPct asc, registry order asc); excludes self, blocked providers, and honors limit", () => {
     const verdicts: Record<string, ProviderVerdict> = {
       "zai-coding-cn": makeVerdict({ provider: "zai-coding-cn", level: 3, windows: [win("5h", 98, 3)] }),
       "kimi-coding": makeVerdict({ provider: "kimi-coding", level: 1, windows: [win("5h", 20, 1)] }),
       zai: makeVerdict({ provider: "zai", level: 1, windows: [win("5h", 50, 1)] }),
-      // cloudrouter-anthropic: unmanaged (no verdict) → Minor 3: level 0 / pct 0.
+      // cloudrouter-anthropic: unmanaged (no verdict) → pay-per-use tier.
     };
     const deps = gateDeps((p) => verdicts[p]);
-    // Unmanaged cloudrouter (L0/pct 0) sorts ahead of every managed provider.
+    // Subscriptions with headroom come first (use them up); unmanaged
+    // pay-per-use cloudrouter goes last even though it has no quota pressure.
     expect(pickAlternatives("zai-coding-cn", deps)).toEqual([
-      "cloudrouter-anthropic/claude-opus-5",
       "kimi-coding/kimi-k3",
       "zai/glm-5.3-air",
+      "cloudrouter-anthropic/claude-opus-5",
     ]);
     // Same level (L1) → lower usedPct first (kimi 20% before zai 50%).
-    expect(pickAlternatives("zai-coding-cn", deps, 2)).toEqual([
-      "cloudrouter-anthropic/claude-opus-5",
-      "kimi-coding/kimi-k3",
-    ]);
+    expect(pickAlternatives("zai-coding-cn", deps, 2)).toEqual(["kimi-coding/kimi-k3", "zai/glm-5.3-air"]);
   });
 
   it("excludes providers at/above the gate line while stale ones stay selectable", () => {
@@ -199,8 +197,8 @@ describe("pickAlternatives", () => {
     // No blockAtLevel in the deps → exclusion defaults to 3, so an L2 provider
     // stays recommendable even though an aggressive gateLevel=2 gate would block it.
     expect(pickAlternatives("zai-coding-cn", hookDeps)).toEqual([
-      "cloudrouter-anthropic/claude-opus-5",
       "zai/glm-5.3-air",
+      "cloudrouter-anthropic/claude-opus-5",
     ]);
   });
 
@@ -210,7 +208,7 @@ describe("pickAlternatives", () => {
       zai: makeVerdict({ provider: "zai", level: 1, windows: [win("5h", 55, 1)] }),
     };
     const full = gateDeps((p) => verdicts[p], 2);
-    expect(pickAlternatives("zai-coding-cn", full)).toEqual(["cloudrouter-anthropic/claude-opus-5", "zai/glm-5.3-air"]);
+    expect(pickAlternatives("zai-coding-cn", full)).toEqual(["zai/glm-5.3-air", "cloudrouter-anthropic/claude-opus-5"]);
   });
 
   it("returns [] for limit 0 and keeps registry order among equal scores", () => {

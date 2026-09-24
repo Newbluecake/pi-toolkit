@@ -21,13 +21,22 @@ export function formatScope(scope: WindowScope): string {
   return scope === "week" ? "7d" : "5h";
 }
 
-/** "02:11"（本地钟面时刻）；`resetAt` 未知/非法 ⇒ "未知"。跨天也只报 HH:MM，不炸。 */
+/**
+ * "02:11"（本地钟面时刻，与 now 同一天）或 "9/30 15:48"（跨天带日期——7d 窗口只报
+ * HH:MM 会被读成「今天」）；`resetAt` 未知/非法 ⇒ "未知"。
+ */
 export function formatResetAt(resetAt: Millis | undefined, now: Millis): string {
   if (resetAt === undefined || !Number.isFinite(resetAt)) return "未知";
   const d = new Date(resetAt);
   const hh = String(d.getHours()).padStart(2, "0");
   const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm}`;
+  const n = Number.isFinite(now) ? new Date(now) : undefined;
+  const sameDay =
+    n !== undefined &&
+    n.getFullYear() === d.getFullYear() &&
+    n.getMonth() === d.getMonth() &&
+    n.getDate() === d.getDate();
+  return sameDay ? `${hh}:${mm}` : `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
 }
 
 function etaSpanText(etaMs: number): string {
@@ -94,10 +103,6 @@ function thresholdText(level: number): number {
   return level >= 3 ? DEFAULT_THRESHOLDS.l3 : level === 2 ? DEFAULT_THRESHOLDS.l2 : DEFAULT_THRESHOLDS.l1;
 }
 
-function alternativesText(alternatives: readonly string[]): string {
-  return alternatives.length > 0 ? alternatives.join("、") : "无更优替代模型，请检查 pi /model";
-}
-
 function directUseText(provider: string, alternatives: readonly string[]): string {
   return alternatives.length > 0
     ? `本轮禁止把新任务派给 ${provider} —— 直接使用：${alternatives.join(" → ")}。`
@@ -106,15 +111,18 @@ function directUseText(provider: string, alternatives: readonly string[]): strin
 
 const GATE_PROMISE_LINE = "继续派给该 provider 会在 spawn 阶段被快速失败拦下（不会消耗 run）。";
 
-/** L2 建议块（含 ETA / reset / 降位建议）。 */
-export function buildQuotaWarnText(v: ProviderVerdict, alternatives: readonly string[], now: Millis): string {
+/**
+ * L2 提示块（含 ETA / reset）。2026-09 口径修订：订阅额度窗口内不用就作废，L2 不再建议
+ * 改派其它模型、不再降位——只告知走势，明确「照常优先用」，切换留给 L3。
+ */
+export function buildQuotaWarnText(v: ProviderVerdict, now: Millis, label: string = v.provider): string {
   const w = triggerWindow(v);
   let head: string;
   if (w === undefined) {
     // 防御分支：无窗口数据（适配器层不产出，仅类型层面可表达）。
-    head = `[quota 预警] ${v.provider}`;
+    head = `[quota 预警] ${label}`;
   } else {
-    head = `[quota 预警] ${v.provider} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
+    head = `[quota 预警] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
     if (w.reason === "pct") head += `（阈值 ${thresholdText(w.level)}%）`;
     const etaMs = w.etaMs !== undefined && w.etaMs >= 0 ? w.etaMs : undefined;
     if (etaMs !== undefined) head += `，按当前速率${formatEta(etaMs)}后耗尽`;
@@ -126,31 +134,55 @@ export function buildQuotaWarnText(v: ProviderVerdict, alternatives: readonly st
       }
     }
   }
-  const demotionNote = "（已标记，持续到窗口重置）";
-  return `${head}。\n本轮派单建议：把新任务优先交给 ${alternativesText(alternatives)}；\n${v.provider} 在回退链中降一位${demotionNote}。`;
+  return `${head}。\n订阅额度照常优先使用，派单不变；到 L3（≥${DEFAULT_THRESHOLDS.l3}% 或即将耗尽）才会切换。`;
 }
 
 /** L3 强烈块（含本轮禁用 + 明确替代链 + 降位标记说明）。 */
-export function buildQuotaBlockText(v: ProviderVerdict, alternatives: readonly string[], now: Millis): string {
+export function buildQuotaBlockText(
+  v: ProviderVerdict,
+  alternatives: readonly string[],
+  now: Millis,
+  label: string = v.provider,
+): string {
   const w = triggerWindow(v);
   let head: string;
   if (w === undefined) {
     // 防御分支：无窗口数据（适配器层不产出，仅类型层面可表达）。
-    head = `[quota 严重] ${v.provider}`;
+    head = `[quota 严重] ${label}`;
   } else {
-    head = `[quota 严重] ${v.provider} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
+    head = `[quota 严重] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
     const etaMs = w.etaMs !== undefined && w.etaMs >= 0 ? w.etaMs : undefined;
     if (etaMs !== undefined) head += `，预计 ${etaSpanText(etaMs)}内耗尽`;
     if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
-  return `${head}。\n${directUseText(v.provider, alternatives)}\n${GATE_PROMISE_LINE}`;
+  return `${head}。\n${directUseText(label, alternatives)}\n${GATE_PROMISE_LINE}`;
+}
+
+type QuotaSection = { readonly verdict: ProviderVerdict; readonly alternatives: readonly string[] };
+
+/**
+ * 同池合并（L2/L3 注入块，与 HUD/tick 的 `dedupeVerdicts` 同一签名）：`zai-coding-cn`
+ * 与 `zai` 同 key 同池时两段文案逐字相同，合并为一段，标签写成 `zai-coding-cn / zai`。
+ * 等级也纳入分组键——同池但等级不同（闩锁/陈旧度差异）宁可分开说。替代链剔除组内
+ * 全部成员（同池的另一个名字不是替代）。
+ */
+function groupSamePool(sections: readonly QuotaSection[]): { section: QuotaSection; label: string }[] {
+  const groups = new Map<string, { section: QuotaSection; providers: string[] }>();
+  for (const s of sections) {
+    const key = `${s.verdict.level}#${poolSignature(s.verdict)}`;
+    const g = groups.get(key);
+    if (g === undefined) groups.set(key, { section: s, providers: [s.verdict.provider] });
+    else g.providers.push(s.verdict.provider);
+  }
+  return [...groups.values()].map(({ section, providers }) => {
+    const members = new Set(providers);
+    const alternatives = section.alternatives.filter((a) => !members.has(a.split("/")[0] ?? a));
+    return { section: { verdict: section.verdict, alternatives }, label: providers.join(" / ") };
+  });
 }
 
 /** 一次 turn 的完整注入文本：至多一条，内部按各 provider 的等级分段拼装（L1 合并 tick 在前）。 */
-export function buildQuotaMessage(
-  sections: readonly { readonly verdict: ProviderVerdict; readonly alternatives: readonly string[] }[],
-  now: Millis,
-): string {
+export function buildQuotaMessage(sections: readonly QuotaSection[], now: Millis): string {
   const parts: string[] = [];
   const l1 = sections.filter((s) => s.verdict.level === 1);
   if (l1.length > 0)
@@ -160,11 +192,12 @@ export function buildQuotaMessage(
         now,
       ),
     );
-  for (const s of sections) {
-    if (s.verdict.level === 2) parts.push(buildQuotaWarnText(s.verdict, s.alternatives, now));
+  const grouped = groupSamePool(sections);
+  for (const { section: s, label } of grouped) {
+    if (s.verdict.level === 2) parts.push(buildQuotaWarnText(s.verdict, now, label));
   }
-  for (const s of sections) {
-    if (s.verdict.level === 3) parts.push(buildQuotaBlockText(s.verdict, s.alternatives, now));
+  for (const { section: s, label } of grouped) {
+    if (s.verdict.level === 3) parts.push(buildQuotaBlockText(s.verdict, s.alternatives, now, label));
   }
   return parts.join("\n\n");
 }
@@ -196,15 +229,17 @@ export function readQuotaStatusTheme(ctx: unknown): QuotaStatusTheme | undefined
  * 独立跟踪（verdicts 本身不动）。容差：usedPct 取整、resetAt 按分钟分桶，
  * 两次独立拉取间的微小漂移不会分成两行。
  */
+function poolSignature(v: ProviderVerdict): string {
+  return `${v.plan ?? ""}/${v.windows
+    .map((w) => `${w.scope}:${Math.round(w.usedPct)}@${w.resetAt === undefined ? "?" : Math.floor(w.resetAt / 60_000)}`)
+    .join("|")}`;
+}
+
 export function dedupeVerdicts(verdicts: readonly ProviderVerdict[]): readonly ProviderVerdict[] {
   const seen = new Set<string>();
   const out: ProviderVerdict[] = [];
   for (const v of verdicts) {
-    const sig = `${v.plan ?? ""}/${v.windows
-      .map(
-        (w) => `${w.scope}:${Math.round(w.usedPct)}@${w.resetAt === undefined ? "?" : Math.floor(w.resetAt / 60_000)}`,
-      )
-      .join("|")}`;
+    const sig = poolSignature(v);
     if (seen.has(sig)) continue;
     seen.add(sig);
     out.push(v);

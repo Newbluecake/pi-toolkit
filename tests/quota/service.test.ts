@@ -188,14 +188,21 @@ describe("createQuotaService", () => {
     f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 80 }], f.clock.now()));
     f.service.refreshIfStale();
     await f.service.whenIdle();
-    // 80% ⇒ L2 ⇒ 降位标记；环 [60@t0, 80@t1] ⇒ eta = (100-80)/(20/10min) = 10min。
-    expect(f.demotions.get("zai-coding-cn", f.clock.now())?.level).toBe(2);
+    // 80% ⇒ L2 只提示、不降位（订阅优先用完）；环 [60@t0, 80@t1] ⇒ eta = (100-80)/(20/10min) = 10min。
+    expect(f.demotions.get("zai-coding-cn", f.clock.now())).toBeUndefined();
     expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(600_000);
+    f.clock.advance(600_000);
+    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 92 }], f.clock.now()));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    // 92% ⇒ L3 ⇒ 降位标记；环 [60@t0, 92@t2] ⇒ eta = (100-92)/(32/20min) = 5min。
+    expect(f.demotions.get("zai-coding-cn", f.clock.now())?.level).toBe(3);
+    expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(300_000);
     f.clock.advance(600_000);
     f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 5 }], f.clock.now()));
     f.service.refreshIfStale();
     await f.service.whenIdle();
-    // 全部窗口跌幅 80→5（≥15）⇒ 观测重置：clear 降位 + 清环。
+    // 全部窗口跌幅 92→5（≥15）⇒ 观测重置：clear 降位 + 清环。
     expect(f.demotions.get("zai-coding-cn", f.clock.now())).toBeUndefined();
     const after = f.service.verdictFor("zai-coding-cn");
     expect(after?.level).toBe(0);
