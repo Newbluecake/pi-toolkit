@@ -132,6 +132,12 @@ export const MARGINAL_WRITE_FRACTION = 0.375;
  *  Using 0.375 here would under-report the fee by ~2.5× and let it hide inside the
  *  marginal budget. */
 export const ENTRY_FEE_MARGINAL_WRITE_FRACTION = 0.95;
+/** plan.md §18: the 5m TAIL a covered 1h→1h refresh has to rewrite. A `ttl:"1h"` request
+ *  resumes from the last 1h write point and cannot read the 5m entries written since, so
+ *  that tail — which the same request at 5m would have READ (0.1×) — is rewritten at 2.0×.
+ *  Same counterfactual as the entry fee ⇒ same (2.0 − 0.1)/2.0 fraction; only the genuinely
+ *  new increment keeps the 0.375 of MARGINAL_WRITE_FRACTION. */
+export const TAIL_REWRITE_MARGINAL_WRITE_FRACTION = ENTRY_FEE_MARGINAL_WRITE_FRACTION;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -218,6 +224,12 @@ export interface AdaptivePending {
    *  false ⇒ this upgrade pays the ENTRY FEE (full-prefix 1h rewrite): it is accounted
    *  against the fee budget and is NOT judged by the warm probes (see the header note). */
   covered1h: boolean;
+  /** plan.md §18: `state.tokensSinceLast1hWrite` at decision time — the 5m tail written
+   *  since the last 1h write point, invisible to a `ttl:"1h"` request. Used to split the
+   *  settlement's USD cost (tail at 0.95, increment at 0.375) and to restore the tail
+   *  counter when the upgrade demonstrably did not land (`cacheWrite1h === 0`).
+   *  Absent ⇒ 0 (records created before this field existed). */
+  tail5mTokens?: number;
 }
 
 export interface AdaptiveReconcileRecord {
@@ -255,7 +267,9 @@ export interface AdaptiveState {
   coldUpgradesUsed: number;
   lastColdUpgradeAt: Millis | undefined;
   lastUpgradeAt: Millis | undefined;
-  /** Measured tokens written since the last 1h upgrade (refresh throttle input). */
+  /** Measured 5m-written tokens since the last 1h write point (plan.md §18): exactly the tail
+   *  a `ttl:"1h"` request cannot read and must rewrite. Refresh-throttle input and part of a
+   *  covered warm upgrade's predicted 1h write. The upgrade's own 1h write is NOT counted. */
   tokensSinceLast1hWrite: number;
   /** True while a strong-signal episode is open (first upgrade of an episode bypasses the refresh throttle). */
   armedEpisode: boolean;
@@ -462,7 +476,16 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
   if (warm) {
     // Warm: marginal cost 0.75 × Δ (baseline: same request unrewritten). Wide
     // signals (strong or weak), but Δ and refresh rate are controlled.
-    if (ledger.cacheWrite > config.maxDeltaTokens) return no("delta-too-large", seen);
+    //
+    // plan.md §18: on a COVERED prefix the 1h write is not just Δ — a `ttl:"1h"`
+    // request resumes from the last 1h write point and cannot read the 5m tail
+    // written since, so it rewrites `tail + Δ`. Field data (session 01a0cf02):
+    // pred Δ=1,829 with a 15,532 tail settled at 17,094. Gate and predict on the
+    // real quantity. (Uncovered: the whole prefix is rewritten — that is the entry
+    // fee, gated by its own budget/horizon below; Δ stays the delta gate there.)
+    const tail5m = covered1h ? state.tokensSinceLast1hWrite : 0;
+    const predicted1hWrite = tail5m + ledger.cacheWrite;
+    if (predicted1hWrite > config.maxDeltaTokens) return no("delta-too-large", seen);
     // ...unless this warm request is also the prefix's FIRST 1h write, in which
     // case it is economically a cold upgrade (full-prefix rewrite) and has to
     // earn the fee: either a quantified live horizon, or S4's demonstrated
@@ -484,7 +507,7 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
       class: "warm",
       reason: undefined,
       signals: seen,
-      predictedDeltaTokens: ledger.cacheWrite,
+      predictedDeltaTokens: predicted1hWrite,
       at: now,
     };
   }
@@ -560,6 +583,7 @@ export function noteDecision(
       // Read from `state` (pre-arm) on purpose: the cover armed just below
       // belongs to THIS upgrade and must not make it look like its own successor.
       covered1h: isPrefix1hCovered(state, input.now),
+      tail5mTokens: state.tokensSinceLast1hWrite,
     },
     oneHourCoverUntil: input.now + ADAPTIVE_COVER_MS,
     lastUpgradeAt: input.now,
@@ -572,6 +596,22 @@ export function noteDecision(
 
 function tripBreaker(state: AdaptiveState, reason: AdaptiveBreakerReason, at: Millis): AdaptiveState {
   return state.breaker !== undefined ? state : { ...state, breaker: { reason, at } };
+}
+
+/**
+ * plan.md §18: marginal fraction of `cost.cacheWrite` for a COVERED 1h→1h
+ * settlement. The part of the write that re-covers the 5m tail (which the same
+ * request at 5m would have read at 0.1×) costs TAIL_REWRITE_MARGINAL_WRITE_FRACTION;
+ * only the genuinely new increment costs MARGINAL_WRITE_FRACTION. The tail share is
+ * capped at the measured write (a partially-landed refresh cannot rewrite more tail
+ * than it wrote at all).
+ */
+function coveredMarginalFraction(cacheWrite: number, tail5mTokens: number): number {
+  if (cacheWrite <= 0) return MARGINAL_WRITE_FRACTION;
+  const tailPart = Math.min(Math.max(0, tail5mTokens), cacheWrite);
+  return (
+    (TAIL_REWRITE_MARGINAL_WRITE_FRACTION * tailPart + MARGINAL_WRITE_FRACTION * (cacheWrite - tailPart)) / cacheWrite
+  );
 }
 
 /**
@@ -659,9 +699,21 @@ export function onLedgerObserved(
     // it as marginal both misprices it and can blow the marginal budget in a
     // single request (observed: 239,709 tok / $1.36 in one settlement).
     const paysEntryFee = !pending.covered1h || readCollapsed;
+    // §18 tail bookkeeping: a landed 1h write moves the 1h write point to the end
+    // of this prefix, so the invisible tail is whatever this request itself wrote
+    // at 5m (normally 0). An explicit `cacheWrite1h === 0` means the upgrade did
+    // not land (the request went out as 5m) ⇒ the pre-decision tail was never
+    // absorbed and is restored. Unreported split ⇒ assume it landed (as before).
+    const tailAfter =
+      ledger.cacheWrite1h === undefined
+        ? 0
+        : ledger.cacheWrite1h > 0
+          ? Math.max(0, ledger.cacheWrite - ledger.cacheWrite1h)
+          : (pending.tail5mTokens ?? 0) + next.tokensSinceLast1hWrite;
     next = {
       ...next,
       pending: undefined,
+      tokensSinceLast1hWrite: tailAfter,
       confirmed1hWrites: next.confirmed1hWrites + (confirmed ? 1 : 0),
       unconfirmed1hWrites: next.unconfirmed1hWrites + (!confirmed && ledger.cacheWrite > 0 ? 1 : 0),
       // Two budgets, one settlement: the ENTRY FEE (uncovered transition) is a
@@ -674,7 +726,9 @@ export function onLedgerObserved(
             upgradeWriteTokens: next.upgradeWriteTokens + ledger.cacheWrite,
             upgradeWriteUsd:
               next.upgradeWriteUsd +
-              (ledger.cacheWriteUsd === undefined ? 0 : MARGINAL_WRITE_FRACTION * ledger.cacheWriteUsd),
+              (ledger.cacheWriteUsd === undefined
+                ? 0
+                : coveredMarginalFraction(ledger.cacheWrite, pending.tail5mTokens ?? 0) * ledger.cacheWriteUsd),
           }
         : {
             feeUpgrades: next.feeUpgrades + 1,

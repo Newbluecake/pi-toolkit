@@ -237,7 +237,9 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
 
       // 2) Steady state: the prefix is 1h-backed now, so the same shape IS a
       //    real violation and must still disable the session.
-      settle({ cacheRead: 84_000, cacheWrite: 20_000, input: 5, output: 5, cost: { total: 0 } });
+      //    16k = past the refresh throttle (16k) while the covered prediction
+      //    tail + Δ = 16k + 16k stays within maxDeltaTokens (32k) — plan.md §18.
+      settle({ cacheRead: 84_000, cacheWrite: 16_000, input: 5, output: 5, cost: { total: 0 } });
       await emit("turn_end", {}, ctx);
       const [second] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
       expect(ttlOf(second)).toBe("1h");

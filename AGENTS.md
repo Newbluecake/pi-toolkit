@@ -108,6 +108,8 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `provenCacheReadAt()`（最近一次 proven-hit 的读起点）算进来，否则一段被 ping 证明活着的
   前缀会被判 cold 并整块升 1h——而 1h 请求读不到 5m 条目（同会话 13/13 实测），那是一次
   全价重写。`1h-ineffective` 探针同理只认「读占上一次前缀的比例」，不认 `cacheRead > 0`。
+  同理，已覆盖前缀的续 1h 也要重写升级后累积的 5m 尾巴（`tokensSinceLast1hWrite`）：warm
+  预测/`delta-too-large` 按「尾巴 + Δ」判，尾巴部分美元边际按 0.95 计（plan §18）。
   Design: `docs/dev/cache-ttl-adaptive/plan.md`.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via

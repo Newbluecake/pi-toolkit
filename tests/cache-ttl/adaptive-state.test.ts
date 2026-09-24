@@ -829,7 +829,9 @@ describe("onLedgerObserved probes and breaker", () => {
     expect(twice).toBe(once); // same reference — pure no-op
     expect(twice.upgradeWriteTokens).toBe(5_000);
     expect(twice.confirmed1hWrites).toBe(1);
-    expect(twice.tokensSinceLast1hWrite).toBe(5_000);
+    // §18: a fully-landed 1h write moves the 1h write point to the end of this
+    // prefix — its own write is not part of the invisible 5m tail.
+    expect(twice.tokensSinceLast1hWrite).toBe(0);
   });
 
   it("breaker is permanent: no further upgrades after a trip", () => {
@@ -954,5 +956,136 @@ describe("buildAdaptiveSnapshot", () => {
 
     const cooldown = buildAdaptiveSnapshot(state({ lastColdUpgradeAt: NOW - 600_000 }), CONFIG, NOW);
     expect(cooldown.coldCooldownRemainingMs).toBe(600_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §18: a ttl:"1h" request cannot read the 5m tail — covered refreshes rewrite it
+// (field numbers from session 01a0cf02, cloudrouter-anthropic / claude-opus-5)
+// ---------------------------------------------------------------------------
+
+describe("§18 covered refresh rewrites the invisible 5m tail", () => {
+  const strong = signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * 60_000 });
+  /** A prefix already 1h-backed by a settled upgrade, `tail` 5m tokens written since. */
+  function coveredState(tail: number, overrides: Partial<AdaptiveState> = {}): AdaptiveState {
+    return state({
+      lastRequestStartedAt: NOW - 60_000,
+      oneHourCoverUntil: NOW + 3_000_000,
+      confirmed1hWrites: 1,
+      lastUpgradeAt: NOW - 120_000,
+      // Episode not yet armed ⇒ a strong signal opens one and bypasses the refresh
+      // throttle (the field rows were exactly such episode openings).
+      armedEpisode: false,
+      tokensSinceLast1hWrite: tail,
+      ...overrides,
+    });
+  }
+
+  it("predicts tail + Δ, not Δ (field: Δ=1,829, tail=15,532 settled at 17,094)", () => {
+    const d = decideAdaptiveTtl(
+      decideInput({
+        signals: strong,
+        state: coveredState(15_532),
+        ledger: ledger({ cacheRead: 223_504, cacheWrite: 1_829 }),
+      }),
+    );
+    expect(d.reason).toBeUndefined();
+    expect(d.upgrade).toBe(true);
+    expect(d.class).toBe("warm");
+    expect(d.predictedDeltaTokens).toBe(15_532 + 1_829);
+    // within the M2 factor of the measured settlement (the old Δ-only prediction was 9.3× off)
+    expect(17_094).toBeLessThan(3 * d.predictedDeltaTokens);
+  });
+
+  it("delta gate judges tail + Δ on a covered prefix, Δ alone on an uncovered one", () => {
+    const l = ledger({ cacheRead: 200_000, cacheWrite: 5_000 });
+    const covered = decideAdaptiveTtl(decideInput({ signals: strong, state: coveredState(30_000), ledger: l }));
+    expect(covered.upgrade).toBe(false);
+    expect(covered.reason).toBe("delta-too-large");
+    // control: same numbers without a 1h entry — the tail concept does not apply (entry-fee path)
+    const uncovered = decideAdaptiveTtl(
+      decideInput({ signals: strong, state: coveredState(30_000, { confirmed1hWrites: 0 }), ledger: l }),
+    );
+    expect(uncovered.reason).not.toBe("delta-too-large");
+  });
+
+  it("settlement: tail priced at 0.95, increment at 0.375; landed 1h write resets the tail", () => {
+    let s = coveredState(15_532);
+    const d = decideAdaptiveTtl(
+      decideInput({ signals: strong, state: s, ledger: ledger({ cacheRead: 223_504, cacheWrite: 1_829 }) }),
+    );
+    s = applyDecision(s, d, { now: NOW, gapMs: 60_000, entriesLength: 6, strongSignals: 1 });
+    expect(s.pending?.tail5mTokens).toBe(15_532);
+    expect(s.pending?.covered1h).toBe(true);
+    s = { ...s, lastPrefixTokens: 223_504 + 15_532 };
+    const after = onLedgerObserved(
+      s,
+      ledger({ entrySeq: 6, cacheRead: 223_504, cacheWrite: 17_094, cacheWrite1h: 17_094, cacheWriteUsd: 0.1 }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(after.breaker).toBeUndefined();
+    expect(after.feeUpgrades).toBe(0);
+    expect(after.upgradeWriteTokens).toBe(17_094);
+    const expectedFraction = (0.95 * 15_532 + 0.375 * (17_094 - 15_532)) / 17_094;
+    expect(after.upgradeWriteUsd).toBeCloseTo(expectedFraction * 0.1, 10);
+    expect(after.upgradeWriteUsd).toBeGreaterThan(0.375 * 0.1); // the old flat pricing under-reported
+    expect(after.tokensSinceLast1hWrite).toBe(0);
+  });
+
+  it("an upgrade that did not land (cacheWrite1h === 0) restores the pre-decision tail", () => {
+    // field: pred=4,685 tail=11,502 → read=125,333 write=4,685 w1h=0 (request went out as 5m)
+    let s = coveredState(11_502);
+    const d = decideAdaptiveTtl(
+      decideInput({
+        signals: strong,
+        state: s,
+        ledger: ledger({ cacheRead: 111_407, cacheWrite: 4_685 }),
+        config: { ...CONFIG, refreshAfterTokens: 10_000 },
+      }),
+    );
+    expect(d.upgrade).toBe(true);
+    s = applyDecision(s, d, { now: NOW, gapMs: 60_000, entriesLength: 6, strongSignals: 1 });
+    expect(s.tokensSinceLast1hWrite).toBe(0); // optimistic reset at decision time
+    const after = onLedgerObserved(
+      s,
+      ledger({ entrySeq: 6, cacheRead: 125_333, cacheWrite: 4_685, cacheWrite1h: 0 }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(after.tokensSinceLast1hWrite).toBe(11_502 + 4_685);
+  });
+
+  it("partially landed 1h write leaves its 5m remainder as the new tail; unreported split assumes landed", () => {
+    const pending = {
+      requestSeq: 1,
+      minEntrySeq: 6,
+      at: NOW,
+      class: "warm" as const,
+      predictedDeltaTokens: 8_000,
+      covered1h: true,
+      tail5mTokens: 6_000,
+    };
+    const s = coveredState(0, { pending, lastPrefixTokens: 100_000 });
+    const mixed = onLedgerObserved(
+      s,
+      ledger({ entrySeq: 6, cacheRead: 94_000, cacheWrite: 8_000, cacheWrite1h: 5_000 }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(mixed.tokensSinceLast1hWrite).toBe(3_000);
+    const unknown = onLedgerObserved(
+      s,
+      ledger({ entrySeq: 6, cacheRead: 94_000, cacheWrite: 8_000, cacheWrite1h: undefined }),
+      NOW + 5_000,
+      CONFIG,
+    );
+    expect(unknown.tokensSinceLast1hWrite).toBe(0);
+  });
+
+  it("plain 5m settlements keep accumulating the tail (no pending)", () => {
+    const s = coveredState(1_000, { lastReconciledEntrySeq: 4 });
+    const after = onLedgerObserved(s, ledger({ entrySeq: 5, cacheWrite: 2_500 }), NOW, CONFIG);
+    expect(after.tokensSinceLast1hWrite).toBe(3_500);
   });
 });
