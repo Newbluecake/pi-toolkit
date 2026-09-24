@@ -24,7 +24,7 @@ import type { ModelCandidate, ModelRef } from "../config/model-hint.js";
 import type { Millis } from "../core/types.js";
 import type { ProviderVerdict, WindowVerdict } from "./ladder.js";
 import type { LadderLevel } from "./types.js";
-import { formatResetAt, formatScope } from "./render.js";
+import { alternativesAdvice, formatResetAt, formatScope } from "./render.js";
 
 export interface QuotaGateVerdict {
   readonly level: LadderLevel;
@@ -227,8 +227,8 @@ function buildGateMessage(
 ): string {
   const altLine =
     alternatives.length > 0
-      ? `改用这些模型之一：${alternatives.join("、")}。`
-      : `无更优替代，请检查 pi /model（窗口重置后自动恢复）。`;
+      ? alternativesAdvice(alternatives)
+      : "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。";
   return (
     `quota gate: ${provider} 的 ${windowClause(verdict, now)}，本次 spawn 已快速失败，未消耗任何 run。\n` +
     `${altLine}\n` +

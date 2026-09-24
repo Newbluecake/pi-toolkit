@@ -123,7 +123,7 @@ describe("evaluateQuotaGate", () => {
     expect(evaluateQuotaGate({ provider: "kimi-coding", id: "kimi-k3" }, deps)).toBeUndefined();
   });
 
-  it("6. no viable alternative → message says 无更优替代，请检查 pi /model", () => {
+  it("6. no viable alternative → message says 暂无替代候选 + 检查 pi /model", () => {
     // Only blocked-provider candidates in the registry → empty alternatives.
     const exhausted = makeVerdict({
       provider: "zai-coding-cn",
@@ -138,7 +138,7 @@ describe("evaluateQuotaGate", () => {
     };
     const verdict = evaluateQuotaGate({ provider: "zai-coding-cn", id: "glm-5.3" }, deps);
     expect(verdict?.alternatives).toEqual([]);
-    expect(verdict?.message).toContain("无更优替代，请检查 pi /model");
+    expect(verdict?.message).toContain("暂无替代候选，按路由表另选合适模型（可检查 pi /model");
   });
 
   it("copy references 「settings 文件」 without hard-coding the settings path (Minor 6)", () => {

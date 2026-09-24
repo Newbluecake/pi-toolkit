@@ -103,10 +103,19 @@ function thresholdText(level: number): number {
   return level >= 3 ? DEFAULT_THRESHOLDS.l3 : level === 2 ? DEFAULT_THRESHOLDS.l2 : DEFAULT_THRESHOLDS.l1;
 }
 
-function directUseText(provider: string, alternatives: readonly string[]): string {
+/**
+ * 替代建议（L3 块与 spawn 闸门共用）。额度层只知道「谁还有额度」，不知道当前任务
+ * 要什么能力——所以只给**候选**（订阅优先排序），由派单方结合任务需求取舍：候选
+ * 胜任就优先用（订阅额度不用会作废），不胜任就按路由表另选，不硬凑。
+ */
+export function alternativesAdvice(alternatives: readonly string[]): string {
   return alternatives.length > 0
-    ? `本轮禁止把新任务派给 ${provider} —— 直接使用：${alternatives.join(" → ")}。`
-    : `本轮禁止把新任务派给 ${provider}（暂无更优替代，请检查 pi /model）。`;
+    ? `替代候选（订阅优先）：${alternatives.join("、")}。\n按任务需求选：候选能胜任就优先用（订阅额度不用会作废）；不胜任就按路由表另选合适模型，不必硬凑。`
+    : "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。";
+}
+
+function directUseText(provider: string, alternatives: readonly string[]): string {
+  return `本轮不要把新任务派给 ${provider}。${alternativesAdvice(alternatives)}`;
 }
 
 const GATE_PROMISE_LINE = "继续派给该 provider 会在 spawn 阶段被快速失败拦下（不会消耗 run）。";
@@ -137,7 +146,7 @@ export function buildQuotaWarnText(v: ProviderVerdict, now: Millis, label: strin
   return `${head}。\n订阅额度照常优先使用，派单不变；到 L3（≥${DEFAULT_THRESHOLDS.l3}% 或即将耗尽）才会切换。`;
 }
 
-/** L3 强烈块（含本轮禁用 + 明确替代链 + 降位标记说明）。 */
+/** L3 强烈块（含本轮禁用 + 替代候选 + 按需取舍说明）。 */
 export function buildQuotaBlockText(
   v: ProviderVerdict,
   alternatives: readonly string[],

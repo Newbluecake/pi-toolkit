@@ -142,7 +142,7 @@ describe("L2 warn block", () => {
 describe("L3 block", () => {
   const alternatives = ["kimi-coding/kimi-k3", "cloudrouter-anthropic/claude-opus-5"];
 
-  it("matches the plan §5.5 template (forbid + alternative chain + gate promise)", () => {
+  it("matches the template (forbid + candidates to weigh against the task + gate promise)", () => {
     const v = verdict({
       level: 3,
       windows: [w("5h", 93, 3, "pct", { resetAt: RESET, etaMs: 18 * 60_000 })],
@@ -150,7 +150,8 @@ describe("L3 block", () => {
     expect(buildQuotaBlockText(v, alternatives, NOW)).toBe(
       [
         "[quota 严重] zai-coding-cn 5h 已用 93%，预计 18 分钟内耗尽（窗口 02:11 重置）。",
-        "本轮禁止把新任务派给 zai-coding-cn —— 直接使用：kimi-coding/kimi-k3 → cloudrouter-anthropic/claude-opus-5。",
+        "本轮不要把新任务派给 zai-coding-cn。替代候选（订阅优先）：kimi-coding/kimi-k3、cloudrouter-anthropic/claude-opus-5。",
+        "按任务需求选：候选能胜任就优先用（订阅额度不用会作废）；不胜任就按路由表另选合适模型，不必硬凑。",
         "继续派给该 provider 会在 spawn 阶段被快速失败拦下（不会消耗 run）。",
       ].join("\n"),
     );
@@ -160,7 +161,9 @@ describe("L3 block", () => {
     const v = verdict({ level: 3, windows: [w("week", 100, 3, "exhausted")] });
     const text = buildQuotaBlockText(v, [], NOW);
     expect(text).toContain("[quota 严重] zai-coding-cn 7d 已用 100%。");
-    expect(text).toContain("（暂无更优替代，请检查 pi /model）。");
+    expect(text).toContain(
+      "本轮不要把新任务派给 zai-coding-cn。暂无替代候选，按路由表另选合适模型（可检查 pi /model）。",
+    );
   });
 });
 
@@ -214,7 +217,7 @@ describe("buildQuotaMessage", () => {
       NOW,
     );
     expect(block.split("\n\n")).toHaveLength(1);
-    expect(block).toContain("本轮禁止把新任务派给 zai-coding-cn / zai —— 直接使用：deepseek/x。");
+    expect(block).toContain("本轮不要把新任务派给 zai-coding-cn / zai。替代候选（订阅优先）：deepseek/x。");
   });
 
   it("keeps different pools (or same data at different levels) as separate blocks", () => {
