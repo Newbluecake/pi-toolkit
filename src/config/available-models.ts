@@ -125,3 +125,23 @@ export function appendAvailableModelsToSystemPrompt(
   const section = formatAvailableModelsForPrompt(models);
   return section ? `${systemPrompt}\n\n${section}` : systemPrompt;
 }
+
+/**
+ * Priority used for the "Available models" prompt section (sysprompt-stable
+ * plan.md §4.6): session-scoped models first (the set the user actually
+ * cycles through), then the session stack's model port (`holder.current`,
+ * only populated post `session_start`), then a fresh registry snapshot.
+ * `stackAvailable` is the already-evaluated array (or `undefined` before the
+ * stack exists) — callers resolve `ctx.scopedModels` / `ctx.modelRegistry`
+ * themselves (property access on the live ExtensionContext can throw, and
+ * that has to happen at the call site, not inside this pure function).
+ */
+export function resolvePromptModels(
+  scoped: readonly ScopedModelLike[] | undefined,
+  stackAvailable: readonly AvailableModelEntry[] | undefined,
+  registry: ModelRegistryLike | undefined,
+): AvailableModelEntry[] {
+  const scopedEntries = readScopedModels(scoped);
+  if (scopedEntries.length > 0) return scopedEntries;
+  return [...(stackAvailable ?? availableModelsFromRegistry(registry))];
+}

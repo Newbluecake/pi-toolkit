@@ -5,7 +5,9 @@ import {
   formatAvailableModelsForPrompt,
   readScopedModels,
   recommendableModels,
+  resolvePromptModels,
   type AvailableModelEntry,
+  type ScopedModelLike,
 } from "../../src/config/available-models.js";
 
 const model = (entry: Partial<AvailableModelEntry> = {}): AvailableModelEntry => ({
@@ -153,6 +155,35 @@ describe("availableModelsFromRegistry", () => {
     expect(availableModelsFromRegistry(registry)).toEqual([
       { provider: "anthropic", id: "claude-sonnet", name: "Claude Sonnet", reasoning: true, contextWindow: 200_000 },
     ]);
+  });
+});
+
+describe("resolvePromptModels (sysprompt-stable plan.md §4.6 priority: scoped > stack port > registry)", () => {
+  const scoped: ScopedModelLike[] = [{ model: model({ provider: "droid-completion", id: "kimi-k3" }) }];
+  const stack: AvailableModelEntry[] = [model({ provider: "stack", id: "from-holder" })];
+  const registry = { getAvailable: () => [model({ provider: "registry", id: "from-registry" })] };
+
+  it("prefers session-scoped models over the stack port and the registry", () => {
+    expect(resolvePromptModels(scoped, stack, registry)).toEqual([{ provider: "droid-completion", id: "kimi-k3" }]);
+  });
+
+  it("falls back to the session stack's model port when nothing is scoped", () => {
+    expect(resolvePromptModels(undefined, stack, registry)).toEqual(stack);
+    expect(resolvePromptModels([], stack, registry)).toEqual(stack);
+  });
+
+  it("falls back to a fresh registry snapshot when neither scope nor stack is available", () => {
+    expect(resolvePromptModels(undefined, undefined, registry)).toEqual([
+      { provider: "registry", id: "from-registry" },
+    ]);
+  });
+
+  it("returns an empty list when nothing is available anywhere", () => {
+    expect(resolvePromptModels(undefined, undefined, undefined)).toEqual([]);
+  });
+
+  it("treats an empty stack array as present (not a signal to fall back to the registry)", () => {
+    expect(resolvePromptModels(undefined, [], registry)).toEqual([]);
   });
 });
 

@@ -97,6 +97,7 @@ Claude Code 风格的 cwd-keyed 被动记忆：每个会话自动把当前项目
 - **`/goal` 目标循环** — 给一个目标和结束条件，每轮结束自动评估并续跑直到达成或撞线（详见下文）。
 - **cache TTL** — `/cache-ttl on|off|auto` 即时切换 Anthropic prompt cache 的 TTL 处理（`on` 强制 `ttl: "1h"`），`/cache-ttl save` 持久化；状态栏显示 `⏱ cache: 1h|5m`。adaptive 模式下的 1h 升级受**双写预算**约束：美元边际成本主闸 `cacheTtl.adaptiveWriteBudgetUsd`（默认 `1.0`，`0` = 关闭美元闸；口径 = 账本 `cost.cacheWrite` × 0.375，即 1h 写 2.0× 对 5m 写 1.25× 的边际差）+ token 兜底 `adaptiveWriteBudgetTokens`（200k 不变，`0` = 禁止一切升级），任一撞线即整会话熔断。探针地板随实测前缀缩放（`min(64k, max(4k, 0.5×P))`）：小前缀路由上一次近全量重写即熔断，P ≥ 128k 时与原固定 64k 地板行为完全一致。
 - **额度感知派单（quota）** — 拉取 GLM / Kimi 订阅额度（TTL 缓存、零周期定时器），turn_end 阶梯预警（L1 `[quota]` tick 行 → L2 回退链降位建议 → L3 禁用建议），spawn 阶段对超额 provider 快速失败（陈旧快照只提示不阻断），HUD 带状态行；降位标记持久化到 `~/.pi/agent/quota-state.json`，`quota.*` settings 可关，设计见 `docs/dev/quota/`。
+- **system prompt 稳定化** — 三段动态内容（项目记忆 / agent 类型 / 可用模型）折叠成冻结快照折叠进开头，真实变化改走对话尾部的更新消息，不再让开头字节每轮变化而使整段 prompt cache 失效；通知唤醒轮（`triggerTurn`）默认回放最近一次用户轮的开头，消除「用户轮/唤醒轮」两条前缀交替失效的问题。`systemPrompt.mode`（`stable`/`live`/`legacy`）、`systemPrompt.wakeReplay`、`systemPrompt.adoptForeignForcedPrompt` 三键可调；**回滚到今天的逐字节行为**：`{ "systemPrompt": { "mode": "legacy", "wakeReplay": false } }`。设计见 `docs/dev/sysprompt-stable/plan.md`，手工验收见 `docs/dev/sysprompt-stable/acceptance.md`。
 
 ## bash 自动转后台
 
@@ -235,7 +236,7 @@ npm run format
 
 版本化 pre-commit hook（对暂存文件跑 prettier）：`git config core.hooksPath .githooks`
 
-目录结构：`core/` 纯状态机 + deadline（无 I/O）· `runtime/` 看门狗、会话驱动、回收器 · `service/` spawn/query/registry · `tools/` 面向 LLM 的工具面 · `ui/` agent-tree 视图 + 设置编辑器 · `workflow/` 沙箱编排器 · `memory/` 项目记忆 · `fabric/` 消息 fabric · `goal/` 目标循环 · `bash/` bash 自动后台 · `delivery/` 通知投递管线 · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|context-switch|cache-ttl/` 工具箱模块 · `adapters/` 面向 pi 的胶水层。
+目录结构：`core/` 纯状态机 + deadline（无 I/O）· `runtime/` 看门狗、会话驱动、回收器 · `service/` spawn/query/registry · `tools/` 面向 LLM 的工具面 · `ui/` agent-tree 视图 + 设置编辑器 · `workflow/` 沙箱编排器 · `memory/` 项目记忆 · `fabric/` 消息 fabric · `goal/` 目标循环 · `bash/` bash 自动后台 · `delivery/` 通知投递管线 · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|context-switch|cache-ttl/` 工具箱模块 · `sysprompt/` + `prompt-sections/` system prompt 稳定化 hub · `adapters/` 面向 pi 的胶水层。
 
 Node.js ≥ 22（用了 `fs.globSync`）。
 

@@ -242,6 +242,8 @@ Pinned & recent:                 ★ 原 "Recent:" 改名（pin 后语义不再�
 
 ### 5.2 注入 hook（`inject.ts`）
 
+> **M3 更正（`docs/dev/sysprompt-stable/plan.md` v3.1 §4.6/§7.1）**：以下 `createMemoryInjectHook` 描述是本文档冻结时（memory-merge v2）的原始设计，已被 sysprompt-stable M3 取代——`inject.ts` 不再导出 `createMemoryInjectHook`/`before_agent_start` handler，改为导出 `memorySection(deps): SectionRegistration`（provider 只做第 1–4 步：算 cwd、取块、判定 skip），注册进 `src/index.ts` 在 `wireMemory` 之前创建的共享 `PromptSectionHub`（`src/sysprompt/hub.ts`）。第 5 步的双重注入防护变成 `SectionRegistration.skipIf`；第 6 步的字符串拼接由 hub 的 `foldSections`（`src/prompt-sections/fold.ts`）统一完成，逐字节等于原 `event.systemPrompt + "\n\n" + block`。`freezeInjectionAfterWrite` 语义不变：为 true 时 provider 返回冻结块，此时 hub 认为 live 值等于 snapshot，不发尾部更新消息。渲染逐字节相同，唯一变化是**谁**往 `before_agent_start` 的返回值里拼字符串、以及 stable 模式下真实变化改走尾部消息而不是直接改开头。详见 AGENTS.md `src/memory/` / `src/sysprompt/` 条目。
+
 ```
 createMemoryInjectHook({ settings, isChildSession, cache, frozenBlocks })
   → async (event, ctx) => BeforeAgentStartEventResult | undefined

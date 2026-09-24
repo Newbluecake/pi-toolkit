@@ -1,8 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  availableModelsFromRegistry,
   formatAvailableModelsForPrompt,
-  readScopedModels,
+  resolvePromptModels,
   type AvailableModelEntry,
   type ModelRegistryLike,
   type ScopedModelLike,
@@ -32,17 +31,18 @@ function promptModels(
   input: SectionProviderInput,
   stackAvailable: () => readonly AvailableModelEntry[] | undefined,
 ): string {
+  // `ctx.scopedModels` is a live ExtensionContext getter (plan.md §4.6:
+  // "ctx.scopedModels 抛错视为空") — the try/catch has to sit here, at the
+  // property access, not inside resolvePromptModels (by the time a value
+  // reaches that pure function, a throw already happened).
   let scoped: readonly ScopedModelLike[] | undefined;
   try {
     scoped = input.ctx.scopedModels as unknown as readonly ScopedModelLike[];
   } catch {
     scoped = undefined;
   }
-  const scopedEntries = readScopedModels(scoped);
-  if (scopedEntries.length > 0) return formatAvailableModelsForPrompt(scopedEntries);
-  const stack = stackAvailable();
   return formatAvailableModelsForPrompt(
-    stack ?? availableModelsFromRegistry(input.ctx.modelRegistry as ModelRegistryLike),
+    resolvePromptModels(scoped, stackAvailable(), input.ctx.modelRegistry as ModelRegistryLike),
   );
 }
 

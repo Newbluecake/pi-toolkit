@@ -127,12 +127,45 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   (key `claude-code-todo`, coexists with the fleet widget) + `/tasks`. Persists via the
   `claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only.
 - `src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`.
-  `before_agent_start` injects a budgeted `## Memory` block (pin frontmatter, agent-source fence,
-  tail sentinel, fingerprint-keyed render cache); the `memory` tool lists/writes/appends (child
-  sessions read-only by default, writes carry `source: agent` provenance); `/mem` covers
-  list/path/import from Claude Code. `paths|frontmatter|store|render` are pi-free; `index.ts`
+  Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`,
+  pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead
+  of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail
+  update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin
+  frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The `memory` tool
+  lists/writes/appends (child sessions read-only by default, writes carry `source: agent` provenance);
+  `/mem` covers list/path/import from Claude Code. `paths|frontmatter|store|render` are pi-free; `index.ts`
   (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure;
   registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
+- `src/sysprompt/` + `src/prompt-sections/` — system-prompt stabilization: the three dynamic sections
+  (project memory, agent types, available models) that used to get re-appended to `before_agent_start`'s
+  `{ systemPrompt }` every turn — invalidating the whole cached prefix on every write — now fold a
+  **frozen snapshot** instead, with real changes surfacing as a bounded tail `message` (≤3 chunks / ≤32KB
+  per section since the last refresh, then a pointer). `src/prompt-sections/` is the pi-free half (no pi
+  imports): `stable-section.ts` (the per-section state machine: snapshot/announced/stale, `SKIP` sentinel
+  for a failed provider, `POINTED` for the post-limit pointer state), `fold.ts` (byte-identical to the old
+  three-hook append chain), `update-message.ts` (renders the tail message), `store.ts` (serialize/sanitize/
+  read-back for the persisted snapshot). `src/sysprompt/` is the pi-facing half: `hub.ts`
+  (`createPromptSectionHub` — one `before_agent_start` handler per activate that every section registers
+  into via `hub.register(name, registration)`; also owns `context_with_system`/`session_start`/
+  `session_compact`/`model_select`/`session_tree`/`turn_start`/`agent_settled`), `core-sections.ts` (the
+  agent-types / available-models `SectionRegistration` factories — `resolvePromptModels`'s scoped → stack
+  port → registry priority itself lives in `src/config/available-models.ts`, kept there as its long-term
+  home per plan §4.6), `wake-replay.ts` (mirrors pi's own forced-prompt projection shape onto notification
+  wake runs), `compat.ts` (the only place touching the 0.87 `context_with_system` event / `forceSystemPrompt`
+  / pi-ai's `getCurrentSystemMessage`). Three states, not two: `systemPrompt.mode` is `stable` (frozen
+  snapshot + tail updates, default) / `live` (refresh every turn through the hub, no freezing) / `legacy`
+  (raw append, byte-identical to pre-hub behavior, never persists). `systemPrompt.wakeReplay` (default
+  true) independently gates the notification-wake-run replay (`false` = not registered at all, not
+  registered-but-inert); `systemPrompt.adoptForeignForcedPrompt` (default false) gates whether a later
+  extension's forced-prompt text gets adopted into the replay instead of just WARNed about. A snapshot's
+  state persists via a `subagent:prompt-sections` session entry (`pi.appendEntry`, read back through
+  `getBranch()` — never `getEntries()`, which can resurrect a stale fork's snapshot) so it survives
+  `/reload` and cross-process resume; the hub itself holds no module-scope state (all closure-local, per
+  `activate()`). Registered pre-guard — child sessions share the identical hook set, it is simply inert
+  with zero sections registered until `src/index.ts`'s post-guard call adds agent-types/models (memory
+  registers pre-guard too, so child sessions with memory enabled get that section). Design + the full
+  decision log (three review rounds): `docs/dev/sysprompt-stable/plan.md`; manual acceptance steps (traffic.db
+  system-prompt byte-stability checks): `docs/dev/sysprompt-stable/acceptance.md`.
 - `src/session-nav/` — merged session-nav: `/resume-recent` (48h window, `--all` for full history),
   `/clear`, bare `exit` interception, a pre-submit rewriting editor, and resume-list title
   cleaning (skill envelopes + `[sub:type]` subagent marks driven by our own `subagent:run`
@@ -157,7 +190,8 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
 - `docs/dev/` — per-feature design docs (auto-background, delivery v2, bash-auto-background,
-  subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), ...); read the matching one before changing that subsystem.
+  subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), sysprompt-stable (system prompt
+  冻结快照 + 唤醒回放), ...); read the matching one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).
 
 ## Conventions
