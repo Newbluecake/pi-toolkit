@@ -130,6 +130,43 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
     );
     expect(port.seen?.schema).toEqual(schema);
   });
+
+  // Regression: models serialize object args as JSON strings; a string schema
+  // used to reach Type.Unsafe and crash pi's typebox 1.x at session
+  // construction ("Object.defineProperty called on non-object", 0ms, no stack).
+  it("parses a JSON-string schema into an object before spawning", async () => {
+    const port = fakePort();
+    const tool = createAgentTool({ spawn: port });
+    const schema = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] };
+    await tool.execute(
+      "tc-str",
+      { description: "d", prompt: "p", subagent_type: "worker", schema: JSON.stringify(schema) },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen?.schema).toEqual(schema);
+  });
+
+  it.each([
+    ["an unparseable string", "{not json", /not valid JSON/],
+    ["a JSON array", "[1,2]", /got array/],
+    ["a number", 42, /got number/],
+    ["null", null, /got null/],
+  ])("rejects %s with an actionable error and never spawns", async (_label, bad, message) => {
+    const port = fakePort();
+    const tool = createAgentTool({ spawn: port });
+    await expect(
+      tool.execute(
+        "tc-bad",
+        { description: "d", prompt: "p", subagent_type: "worker", schema: bad },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(message);
+    expect(port.seen).toBeUndefined();
+  });
 });
 
 describe("tools/agent-tool: foreground failure diagnostics", () => {

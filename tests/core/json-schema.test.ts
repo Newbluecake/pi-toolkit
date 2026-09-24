@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { applyStructuredOutputPolicy, validateAgainstSchema } from "../../src/core/json-schema.js";
+import {
+  applyStructuredOutputPolicy,
+  normalizeSchemaInput,
+  validateAgainstSchema,
+} from "../../src/core/json-schema.js";
 import type { RunOutcome } from "../../src/core/types.js";
 
 const objSchema = {
@@ -113,5 +117,30 @@ describe("core/json-schema: applyStructuredOutputPolicy (X10 host-side / second 
     expect(result.error?.kind).toBe("schema");
     expect(result.error?.message).toMatch(/host-side re-validation/);
     expect(result.structuredResult).toBeUndefined();
+  });
+});
+
+describe("core/json-schema: normalizeSchemaInput", () => {
+  it("passes a plain object through unchanged", () => {
+    const schema = { type: "object" };
+    expect(normalizeSchemaInput(schema)).toEqual({ ok: true, schema });
+  });
+  it("parses a JSON string into an object", () => {
+    expect(normalizeSchemaInput('{"type":"object","required":["a"]}')).toEqual({
+      ok: true,
+      schema: { type: "object", required: ["a"] },
+    });
+  });
+  it.each([
+    ["{bad", /not valid JSON/],
+    ['"just a string"', /got string/],
+    ["[]", /got array/],
+    ["null", /got null/],
+    [7, /got number/],
+    [undefined, /got undefined/],
+  ])("rejects %j", (raw, message) => {
+    const r = normalizeSchemaInput(raw);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(message);
   });
 });

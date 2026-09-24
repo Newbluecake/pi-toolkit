@@ -13,6 +13,16 @@ export function createStructuredOutputTool(deps: {
   schema: JsonSchema;
   onSubmit: (value: unknown) => ValidationResult;
 }) {
+  // Defensive: every entry point should have normalized already (see
+  // core/json-schema.ts#normalizeSchemaInput). Fail here with a readable
+  // message rather than letting pi's typebox throw an opaque
+  // "Object.defineProperty called on non-object" from Type.Unsafe.
+  const schema: unknown = deps.schema;
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new Error(
+      `StructuredOutput: schema must be a JSON Schema object, got ${Array.isArray(schema) ? "array" : schema === null ? "null" : typeof schema}`,
+    );
+  }
   return {
     name: "StructuredOutput",
     label: "Structured Output",

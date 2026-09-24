@@ -21,6 +21,41 @@ export interface ValidationResult {
  * than throwing — acceptable for the P2 scope (architecture \u00a77.2 X10),
  * but callers should not assume full draft-07 coverage.
  */
+export type SchemaInputResult = { ok: true; schema: JsonSchema } | { ok: false; error: string };
+
+/**
+ * Normalize a caller-supplied `schema` argument into a JSON Schema object.
+ *
+ * Models routinely serialize object-valued tool arguments as a JSON string
+ * (the Agent tool declares `schema` as `Type.Unknown`, so nothing coerces
+ * it). A string that reaches `Type.Unsafe` is fatal under the typebox pi
+ * aliases at runtime (typebox 1.x: `Object.defineProperty called on
+ * non-object`, thrown before any session exists — undiagnosable), while the
+ * `@sinclair/typebox` 0.34 used by our tests silently turns it into a
+ * char-indexed object instead. So: parse strings, then insist on a plain
+ * object, and report anything else with an actionable message.
+ */
+export function normalizeSchemaInput(raw: unknown): SchemaInputResult {
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch (err) {
+      return {
+        ok: false,
+        error: `schema must be a JSON Schema object; got a string that is not valid JSON (${(err as Error).message})`,
+      };
+    }
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      ok: false,
+      error: `schema must be a JSON Schema object, e.g. {"type":"object","properties":{...}}; got ${jsonTypeOf(value)}`,
+    };
+  }
+  return { ok: true, schema: value as JsonSchema };
+}
+
 export function validateAgainstSchema(schema: JsonSchema | undefined, data: unknown): ValidationResult {
   const errors: string[] = [];
   walk("$", schema, data, errors);

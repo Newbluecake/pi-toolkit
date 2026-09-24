@@ -1,7 +1,8 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ErrorInfo, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
+import type { ErrorInfo, JsonSchema, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
+import { normalizeSchemaInput } from "../core/json-schema.js";
 import type { BoundedWaitResult } from "../service/spawn-service.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
@@ -262,6 +263,15 @@ export function createAgentTool(deps: {
           `nested delegation is not permitted: this agent may only spawn [${deps.allowedTypes.join(", ")}], not "${params.subagent_type}"`,
         );
       }
+      // Normalize before anything is admitted: a string/non-object schema would
+      // otherwise crash pi's typebox at session construction with an opaque
+      // "Object.defineProperty called on non-object" (see normalizeSchemaInput).
+      let schema: JsonSchema | undefined;
+      if (params.schema !== undefined) {
+        const normalized = normalizeSchemaInput(params.schema);
+        if (!normalized.ok) throw new Error(normalized.error);
+        schema = normalized.schema;
+      }
       const modelOverride = parseModel(params.model);
       const baseRequest = {
         type: params.subagent_type,
@@ -278,7 +288,7 @@ export function createAgentTool(deps: {
         ...(params.resume ? { resumeFrom: params.resume } : {}),
         ...(typeof params.timeout_s === "number" ? { budgetOverride: { totalMs: params.timeout_s * 1000 } } : {}),
         ...(params.isolation ? { isolation: params.isolation } : {}),
-        ...(params.schema !== undefined ? { schema: params.schema as Record<string, unknown> } : {}),
+        ...(schema !== undefined ? { schema } : {}),
       };
       if (params.run_in_background) {
         // detachSignalOnStart: background runs are fire-and-forget — the
