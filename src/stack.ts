@@ -81,6 +81,7 @@ import {
   computeAdaptiveSignals,
   type CacheAdaptiveService,
 } from "./service/cache-adaptive.js";
+import { readBackAdaptiveSessionState } from "./cache-ttl/adaptive.js";
 import { createQuotaStack, type QuotaHintState, type QuotaService, type QuotaStack } from "./quota/index.js";
 import { readQuotaStatusTheme } from "./quota/render.js";
 import { evaluateQuotaGate, parseSubscriptionProviders, quotaAnnotation, toLadderLevel } from "./quota/gate.js";
@@ -1282,6 +1283,14 @@ export function buildSessionStack(
         isCurrent: (self) => previousAdaptive === self,
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),
+        // field-2026-09-24 §3.1: budgets/breaker are session-permanent — a rebuild
+        // (`/reload`) rehydrates them from this branch's own audit entries.
+        // getBranch() (not getEntries) so an abandoned fork's trips don't leak.
+        restoredState: readBack
+          ? readBackAdaptiveSessionState(
+              (ctx.sessionManager as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [],
+            )
+          : undefined,
       })
     : undefined;
   previousAdaptive = adaptive;

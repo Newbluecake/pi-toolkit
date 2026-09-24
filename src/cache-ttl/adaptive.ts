@@ -324,6 +324,87 @@ export function createInitialAdaptiveState(): AdaptiveState {
   };
 }
 
+/** customType of the service's audit entries (the writer side aliases this in ../service/cache-adaptive.ts). */
+export const ADAPTIVE_AUDIT_CUSTOM_TYPE = "subagent:cache-adaptive";
+
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Session-state read-back (field-2026-09-24 §3.1): the write/fee budgets and the
+ * breaker are session-permanent by design (G-F §4.2), but the service object is
+ * rebuilt on every session_start (`/reload` included), which used to reset them
+ * to zero — one reload after an 11-hour breaker re-armed the upgrade path and
+ * paid ~$5 of entry fees within two minutes. Rehydrate the SESSION-LEVEL fields
+ * from the current branch's own `subagent:cache-adaptive` audit entries:
+ * decision entries carry a full `budget` snapshot, reconcile entries carry the
+ * post-settlement counters plus `breaker` (its timestamp is the entry's `at`).
+ * Entries are applied in branch order, so the LAST one wins.
+ *
+ * Prefix-bound transients (warm/cold timestamps, `lastPrefixTokens`, the 5m
+ * tail counter, the pending probe, the 1h cover, gap ring) are deliberately NOT
+ * restored — the prefix may have changed across the reload, so the rebuilt
+ * predictor must re-measure it. Starting from `createInitialAdaptiveState()`
+ * makes that structural rather than a field-by-field decision.
+ *
+ * Never throws; corrupt/partial entries fall back field-by-field to the initial
+ * value, and a branch with no usable entries yields `undefined` (caller falls
+ * back to a fully initial state). `/resume` into another session reads THAT
+ * session's entries (correct by construction); `/new` has none.
+ */
+export function readBackAdaptiveSessionState(branch: readonly unknown[]): AdaptiveState | undefined {
+  try {
+    let restored: AdaptiveState | undefined;
+    for (const raw of branch) {
+      const entry = asRecord(raw);
+      if (entry?.type !== "custom" || entry.customType !== ADAPTIVE_AUDIT_CUSTOM_TYPE) continue;
+      const data = asRecord(entry.data);
+      if (data === undefined) continue;
+      const base = restored ?? createInitialAdaptiveState();
+      if (data.kind === "decision") {
+        const budget = asRecord(data.budget);
+        if (budget === undefined) continue;
+        restored = {
+          ...base,
+          upgradeWriteTokens: asFiniteNumber(budget.upgradeWriteTokens) ?? base.upgradeWriteTokens,
+          upgradeWriteUsd: asFiniteNumber(budget.upgradeWriteUsd) ?? base.upgradeWriteUsd,
+          feeWriteTokens: asFiniteNumber(budget.feeWriteTokens) ?? base.feeWriteTokens,
+          feeWriteUsd: asFiniteNumber(budget.feeWriteUsd) ?? base.feeWriteUsd,
+          coldUpgradesUsed: asFiniteNumber(budget.coldUpgrades) ?? base.coldUpgradesUsed,
+        };
+      } else if (data.kind === "reconcile") {
+        // Reconcile counters are the POST-settlement truth — fresher than the
+        // budget snapshot of any earlier decision entry. The breaker is
+        // session-permanent: once seen it is kept with its FIRST trip time.
+        const reason = typeof data.breaker === "string" && data.breaker.length > 0 ? data.breaker : undefined;
+        const at = asFiniteNumber(data.at);
+        restored = {
+          ...base,
+          upgradeWriteTokens: asFiniteNumber(data.upgradeWriteTokens) ?? base.upgradeWriteTokens,
+          upgradeWriteUsd: asFiniteNumber(data.upgradeWriteUsd) ?? base.upgradeWriteUsd,
+          feeWriteTokens: asFiniteNumber(data.feeWriteTokens) ?? base.feeWriteTokens,
+          feeWriteUsd: asFiniteNumber(data.feeWriteUsd) ?? base.feeWriteUsd,
+          breaker:
+            base.breaker ??
+            (reason !== undefined && at !== undefined
+              ? { reason: reason as AdaptiveBreakerReason, at: at as Millis }
+              : undefined),
+        };
+      }
+    }
+    return restored;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // decideAdaptiveTtl (plan.md §3.5)
 // ---------------------------------------------------------------------------

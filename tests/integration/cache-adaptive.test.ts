@@ -248,6 +248,31 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
 
       snap = stack.adaptive?.snapshot();
       expect(snap?.breaker?.reason).toBe("warm-miss");
+
+      // 3) `/reload` (field-2026-09-24 §3.1): session_start rebuilds the whole
+      //    stack. The breaker and the spent fee budget are session-permanent, so
+      //    the rebuilt service must rehydrate them from the audit entries this
+      //    stack wrote — it used to start from zero and pay a fresh entry fee.
+      const branch = vi
+        .mocked(pi.appendEntry)
+        .mock.calls.map(([customType, data]) => ({ type: "custom", customType, data }));
+      (ctx as unknown as { sessionManager: { getBranch: () => unknown[] } }).sessionManager.getBranch = () => branch;
+      const reloaded = buildSessionStack(pi, ctx, settings, emptyTypes, []);
+      try {
+        const after = reloaded.adaptive?.snapshot();
+        expect(after?.breaker?.reason).toBe("warm-miss");
+        expect(after?.feeWriteTokens).toBe(snap?.feeWriteTokens); // identical to the pre-reload counters
+        expect(after?.upgradeWriteTokens).toBe(snap?.upgradeWriteTokens);
+        holder.current = reloaded;
+        reloaded.adaptive?.noteUiPromptStart(sid, reloaded.adaptive.instanceId);
+        const [again] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+        expect(ttlOf(again)).toBeUndefined(); // still refused after the rebuild
+      } finally {
+        reloaded.adaptive?.dispose();
+        reloaded.keepalive?.dispose();
+        reloaded.scheduler.stop();
+        reloaded.rpc.close();
+      }
     } finally {
       stack.adaptive?.dispose();
       stack.keepalive?.dispose();

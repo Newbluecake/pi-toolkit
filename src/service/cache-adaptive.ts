@@ -8,7 +8,10 @@
  * and tool activity via its own counters), ledger reconcile on turn events,
  * audit entries, and the status snapshot. Constructed once per
  * `buildSessionStack` and disposed at the top of the next build /
- * `session_shutdown` (same lifecycle as the keepalive service).
+ * `session_shutdown` (same lifecycle as the keepalive service). The rebuild
+ * does NOT reset the session-level budgets/breaker: stack.ts rehydrates them
+ * from the branch's own audit entries via `readBackAdaptiveSessionState`
+ * (field-2026-09-24 §3.1 — a `/reload` must not re-arm a tripped breaker).
  *
  * I-A8: this service holds ZERO timers and zero in-flight work — it is purely
  * event-driven, so there is nothing to wedge `pi -p` and no window-epoch
@@ -23,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock } from "../core/clock.js";
 import {
+  ADAPTIVE_AUDIT_CUSTOM_TYPE,
   ADAPTIVE_PROBE_WRITE_FACTOR,
   ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION,
   ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS,
@@ -147,9 +151,17 @@ export interface CacheAdaptiveDeps {
   isCurrent: (self: CacheAdaptiveService) => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
   emit?: (channel: string, payload: unknown) => void;
+  /**
+   * Session-level budgets/breaker rehydrated from the branch's audit entries
+   * (`readBackAdaptiveSessionState` in ../cache-ttl/adaptive.ts — field
+   * 2026-09-24 §3.1). Absent ⇒ fully initial state (new session, read-back
+   * unavailable, or no usable entries). Prefix-bound transients are never in
+   * here by construction.
+   */
+  restoredState?: AdaptiveState | undefined;
 }
 
-const AUDIT_CUSTOM_TYPE = "subagent:cache-adaptive";
+const AUDIT_CUSTOM_TYPE = ADAPTIVE_AUDIT_CUSTOM_TYPE;
 
 class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
   readonly instanceId: string;
@@ -158,13 +170,14 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
   private disposed = false;
   private activeTools = 0;
   private uiPrompts = 0;
-  private state: AdaptiveState = createInitialAdaptiveState();
+  private state: AdaptiveState;
   private dropped = { sessionMismatch: 0, instanceMismatch: 0 };
 
   constructor(private readonly deps: CacheAdaptiveDeps) {
     this.clock = deps.clock ?? systemClock;
     this.ownSessionId = deps.sessionId;
     this.instanceId = `${deps.sessionId}#${this.clock.now()}#${randomUUID().slice(0, 8)}`;
+    this.state = deps.restoredState ?? createInitialAdaptiveState();
   }
 
   // -- I-A7: unified entry guard (mirror of cache-keepalive.ts's accept()) --
@@ -355,6 +368,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       cacheWriteUsd: ledger.cacheWriteUsd,
       ttl1h,
       upgradeWriteTokens: this.state.upgradeWriteTokens,
+      upgradeWriteUsd: this.state.upgradeWriteUsd,
       feeWriteTokens: this.state.feeWriteTokens,
       feeWriteUsd: this.state.feeWriteUsd,
       breaker: this.state.breaker?.reason,
