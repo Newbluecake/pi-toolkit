@@ -59,7 +59,10 @@ export interface MemorySettings {
   injectInChildSessions: boolean;
   /** 子会话是否允许 write/append。Default false（子会话只读；内置 Plan 类型的只读语义由此保证，无需改 agent-types.ts）。list 不受限。 */
   allowWriteInChildSessions: boolean;
-  /** 写入成功后是否冻结本会话的注入块（true = 本会话后续轮次继续注入写入前的旧块、下个会话生效；false = 下轮立即重渲染生效）。Default false。取舍见 memory-plan §5.5。 */
+  /** 写入成功后是否冻结本会话的注入块（true = 本会话后续轮次继续注入写入前的旧块、下个会话生效；false = 下轮立即重渲染生效）。Default false。取舍见 memory-plan §5.5。
+   *  sysprompt-stable M3（plan §4.6）：保留为独立开关，不并入 hub 的快照冻结——二者作用在不同层：这个开关钳的是 provider 每轮返回的 Live 值本身
+   *  （section provider 层），hub 的 stable snapshot 钳的是「Live 值折叠进开头的时机」（hub 层）。true 时 provider 连续多轮返回同一字节，hub 的
+   *  resolveAtTurn 因 live === announced 天然不产生尾部更新消息，snapshot 会在下一次合法刷新点（如新会话）自然追上冻结内容——不需要额外接线。 */
   freezeInjectionAfterWrite: boolean;
   /** 内联全文的文件数上限（pin 优先）。0 = 只出索引。Default 3。 */
   inlineMax: number;

@@ -1,9 +1,16 @@
 /**
  * Entry contract for the merged armory-memory module (merge-plan D6):
- * `wireMemory(pi, opts)` registers the `before_agent_start` injection hook,
- * the `memory` tool, and the `/mem` command. It does NOT read settings —
- * the `memory.enabled` gate lives at the call site (src/index.ts, pre-guard
- * so child sessions keep injection, §4.1).
+ * `wireMemory(pi, opts)` registers the `pi_project_memory` section into the
+ * shared `PromptSectionHub`, the `memory` tool, and the `/mem` command. It
+ * does NOT read settings — the `memory.enabled` gate lives at the call site
+ * (src/index.ts, pre-guard so child sessions keep injection, §4.1).
+ *
+ * M3 (sysprompt-stable plan §4.6/§7.1): memory no longer owns a
+ * `before_agent_start` hook of its own — it registers a `SectionRegistration`
+ * (src/memory/inject.ts `memorySection`) into the hub created by
+ * `src/index.ts` before this call, so the hub's single pre-guard handler
+ * folds memory -> agent types -> models in one pass (same order pre-M3
+ * produced by chaining separate hooks).
  *
  * All mutable state (the RenderCache and the freezeInjectionAfterWrite
  * frozenBlocks map) lives in THIS closure (§5.2/§5.5: no module-scope
@@ -14,14 +21,19 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
+import type { PromptSectionHub } from "../sysprompt/hub.js";
 import { createMemCommand } from "./command.js";
-import { createMemoryInjectHook } from "./inject.js";
+import { memorySection } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
 import { createMemoryTool } from "./tool.js";
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
   isChildSession: boolean;
+  /** The shared PromptSectionHub (sysprompt-stable §4.6) that folds this
+   *  section into the system prompt; created by src/index.ts before memory
+   *  is wired so registration order == fold order (memory first). */
+  sections: PromptSectionHub;
 }
 
 export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): void {
@@ -47,9 +59,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): void {
   pi.on("session_start", () => {
     frozenBlocks.clear();
   });
-  pi.on(
-    "before_agent_start",
-    createMemoryInjectHook({
+  opts.sections.register(
+    "pi_project_memory",
+    memorySection({
       settings: opts.settings,
       isChildSession: opts.isChildSession,
       cache,

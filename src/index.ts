@@ -116,20 +116,23 @@ export default function activate(pi: ExtensionAPI): void {
   // 后果仅限该瞬间 memory 注入/拒写走子会话策略，有明确报错文案。
   const isChildSession = Boolean(g[HOST_KEY]);
 
-  // Merged armory-memory (memory-plan §4.1): pre-guard like web_search/todo so
-  // child sessions keep the injection hook and the memory tool (default
-  // injectInChildSessions=true, aligned with the original plugin).
-  if (preGuardSettings.memory.enabled) wireMemory(pi, { settings: preGuardSettings.memory, isChildSession });
-
-  // Sysprompt M2: register the hub after the legacy memory hook so the
-  // resulting order remains memory -> agent types -> models during M2. The
-  // child-session guard below leaves the hub alive but with no post-guard
-  // sections, matching today's child prompt behavior until M3 migrates memory.
+  // Sysprompt M2/M3: the hub is created before memory registers into it so
+  // the memory section lands first in the fold order (registration order ==
+  // fold order, §4.5/§4.6). It owns the single pre-guard before_agent_start /
+  // context_with_system handler set for the whole session (main and child).
   const promptHub = createPromptSectionHub(pi, {
     mode: () => preGuardSettings.systemPrompt.mode,
     wakeReplay: preGuardSettings.systemPrompt.wakeReplay,
     adoptForeignForcedPrompt: preGuardSettings.systemPrompt.adoptForeignForcedPrompt,
   });
+
+  // Merged armory-memory (memory-plan §4.1): pre-guard like web_search/todo so
+  // child sessions keep the memory section and the memory tool (default
+  // injectInChildSessions=true, aligned with the original plugin). M3: memory
+  // registers a section into the hub instead of its own before_agent_start
+  // hook — the hub folds memory -> agent types -> models in one handler.
+  if (preGuardSettings.memory.enabled)
+    wireMemory(pi, { settings: preGuardSettings.memory, isChildSession, sections: promptHub });
 
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
   // re-activates this extension inside every child. Without a guard, the
@@ -392,10 +395,11 @@ export default function activate(pi: ExtensionAPI): void {
     );
     pi.registerTool(createBashJobTool({ manager: forwardBashJobs(holder) }));
   }
-  // Inject the registered agent types and available models through the M2 hub.
+  // Inject the registered agent types and available models through the hub.
   // The hub owns the stable/live/legacy mode, persistence, updates, and wake
   // replay capture. Its registration order is the existing types -> models
-  // order; the memory hook above has already contributed the first section.
+  // order; the memory section (registered pre-guard by wireMemory, M3) has
+  // already contributed the first section.
   promptHub.register(
     "pi_subagent_types",
     agentTypesSection({
