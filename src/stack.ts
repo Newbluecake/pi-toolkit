@@ -80,7 +80,16 @@ import {
   TIMEOUT_NOTICE_TYPE,
 } from "./delivery/deadline-notice.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
-import { consultSessionDir, FORK_TTL_MS, sweepForkDir } from "./consult/fork-store.js";
+import {
+  consultSessionDir,
+  forkExpertSession,
+  FORK_TTL_MS,
+  removeForkFile,
+  resolveForkCwd,
+  sweepForkDir,
+} from "./consult/fork-store.js";
+import { wireConsult, type ConsultWiring } from "./consult/index.js";
+import type { ConsultForkStore } from "./consult/tool.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
 import {
@@ -529,6 +538,10 @@ export interface Stack {
   quotaHint?: QuotaHintState;
   /** /goal 目标驱动持续运行的 session 级运行态（goal-plan v4）。无持久 timer，纯数据。 */
   goal: GoalSession;
+  /** consult (plan §6 D-14/D-16): always constructed (even with consult.enabled=false — the
+   *  wiring itself degrades to no-op resolveExperts/depsFactory, matching the existing
+   *  unconditional sweep). index.ts's top-level Agent tool forwards `resolveExperts` off this. */
+  consult: ConsultWiring;
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -1130,6 +1143,11 @@ export function buildSessionStack(
   // exists afterwards; filled in right after createSpawnService, same
   // ref-holder pattern as spawnRef/nestedSpawn.
   const worktreeDiag: { current?: (runId: RunId, disposition: WorktreeDisposal) => void } = {};
+  // consult (plan §6 D-14): same lazy-ref pattern as worktreeDiag/nestedSpawn —
+  // wireConsult itself needs the live SpawnService + QueryService, both of
+  // which are only constructed after this runner, so the adapter deps below
+  // are indirections through this ref, filled in once wireConsult runs.
+  const consultRef: { current?: ConsultWiring } = {};
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,
     driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
@@ -1156,6 +1174,15 @@ export function buildSessionStack(
     resolveModelHint: models.resolveHint,
     availableModels: models.available,
     onDeadlineNotice: sendDeadlineNotice,
+    // consult (plan §6 C-12/D-14): per-run tool factory + nested-Agent-tool
+    // whitelist resolver + physical-reap cleanup callback, all forwarded
+    // through consultRef so the adapter compiles before wireConsult exists.
+    consult: (selfRunId, selfCwd, whitelist) => consultRef.current?.depsFactory(selfRunId, selfCwd, whitelist),
+    consultResolveExperts: (refs) => {
+      if (!consultRef.current) throw new Error("consult is not wired yet");
+      return consultRef.current.resolveExperts(refs);
+    },
+    onReaped: (runId, forkSessionFrom) => consultRef.current?.onReaped(runId, forkSessionFrom),
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const spawn = createSpawnService({
@@ -1262,6 +1289,10 @@ export function buildSessionStack(
         if (["completed", "failed", "timed_out", "aborted"].includes(snapshot.status))
           fabric.mailbox.onRunSettled(snapshot.runId);
       }
+      // consult (plan §6 D-14): cap-watcher fan-out tap — no timer, purely
+      // snapshot-driven; consultRef is unset for the brief window before
+      // wireConsult runs below, during which no consult run can exist yet.
+      consultRef.current?.dispatchSnapshot(snapshot);
     },
   });
   spawnRef.current = spawn;
@@ -1277,6 +1308,43 @@ export function buildSessionStack(
     clock: systemClock,
     defaultWaitMs: settings.budget.totalMs + settings.budget.abortGraceMs + 30_000,
   });
+  // consult (plan §6 D-14/D-16): wired now that both `spawn` and `query`
+  // exist — consultRef.current is filled synchronously before this
+  // buildSessionStack call returns, so every dispatch/consult path above
+  // (adapter deps, onSnapshot tap) sees a live wiring by the time any run
+  // can actually reach them. Unconditional (mirrors the sweepForkDir call
+  // above): the wiring itself degrades to a no-op resolveExperts/depsFactory
+  // when settings.consult.enabled is false (src/consult/index.ts).
+  const priceOf = (
+    m: { provider: string; id: string },
+    contextTokens: number,
+  ): { input: number; cacheWrite: number } | undefined => {
+    const cost = ctx.modelRegistry.find(m.provider, m.id)?.cost;
+    if (!cost) return undefined;
+    // review-3 #7①: request-wide tiered pricing — the highest tier whose
+    // `inputTokensAbove` the estimate exceeds applies to the full request.
+    const tier =
+      [...(cost.tiers ?? [])]
+        .filter((t) => contextTokens > t.inputTokensAbove)
+        .sort((a, b) => b.inputTokensAbove - a.inputTokensAbove)[0] ?? cost;
+    return { input: tier.input, cacheWrite: tier.cacheWrite };
+  };
+  const consultForkStore: ConsultForkStore = {
+    forkExpertSession,
+    removeForkFile,
+    resolveForkCwd,
+    sweepForkDir: () => sweepForkDir(consultSessionDir(), FORK_TTL_MS),
+  };
+  const consult = wireConsult({
+    settings: () => settings.consult,
+    query,
+    spawnService: spawn,
+    priceOf,
+    forkStore: consultForkStore,
+    consultDir: consultSessionDir(),
+    prefetchedEntries,
+  });
+  consultRef.current = consult;
   // M9: created early — the fleet widget below lists in-flight workflows.
   const workflowActivity = createWorkflowActivityRegistry();
   // M-E: live usage broadcaster (channel "subagent:usage", 1Hz while active).
@@ -1541,6 +1609,7 @@ export function buildSessionStack(
     rpc,
     workflow,
     goal,
+    consult,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
     ...(keepalive ? { keepalive } : {}),

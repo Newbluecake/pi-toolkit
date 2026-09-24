@@ -302,6 +302,11 @@ export default function activate(pi: ExtensionAPI): void {
         markAutoBackgrounded: (runId) => requireStack(holder).spawn.markAutoBackgrounded(runId),
       },
       markdownTheme: resolveMarkdownTheme,
+      // consult (plan §6 D-16): dispatch-time `experts` resolution for the
+      // top-level Agent tool — the main session itself never gets the
+      // consult tool (§4.2/§5.2), but it CAN authorize a whitelist for a
+      // dispatched child (agent-tool.ts throws on failure to resolve).
+      resolveExperts: (refs) => requireStack(holder).consult.resolveExperts(refs),
     }),
   );
   pi.registerTool(
