@@ -83,7 +83,14 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   decade of shrinkage — 1M→88, 200k→91≈pi's own reserve line, 37k→95 — before the reserve cap
   clamps it below pi's automatic line). In `switch_context` mode the force layer is 先礼后兵: it first
   _demands_ a self-authored handoff (`compact.forceDemandTurns`, default 1) and only falls back to
-  the generic forced compaction when the model ignores it — the safety net is never removed.
+  the generic forced compaction when the model ignores it — the safety net is never removed. On top
+  of that, a price-aware dynamic hint line (`dynamic/` subdirectory: pure-function layer + telemetry
+  - the pi-facing wire; plan: `docs/dev/compact-hint/dynamic-threshold-plan.md`) is on by default
+    (`compact.dynamicThreshold.mode=on`) and composes with the static line via `min` — it can only
+    fire earlier, never later; `off` restores byte-identical pre-feature behavior, pinned by the
+    golden fixture `tests/fixtures/compact-hint-golden.json` (never regenerate it). Its switch
+    telemetry (`~/.pi/agent/telemetry/compact-switch.jsonl`, 0600, append-only, 2 MiB rotation)
+    records aggregate numbers only — never any paths.
 - `src/context-switch/` — model-authored context handoff: `handoff.ts` (validation + markdown
   rendering + mechanical appendix), `store.ts` (TTL'd, consume-once pending slot), `hook.ts`
   (`session_before_compact` returns `{ compaction }` so pi skips its summarizer and uses the model's

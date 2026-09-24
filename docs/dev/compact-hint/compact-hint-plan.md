@@ -566,3 +566,19 @@ percent ≥ L2 强制线                              → L2 强制压缩接管�
   37k 窗口锚点 95 被钳到 55；settings → stack 的 forceScaling 透传（默认 true/false）。
 - settings：forceScaling 默认 true、显式 false、非法值回落。
 - 工具：scaling 开/关时查询回显的 effectiveForcePercent（200k→91 / 1M→88 / 字面 88）。
+
+## 15. 后继：价格与缓存感知的动态阈值（已上线，2026-09-25）
+
+hint 线在本方案 v3.6 之后又进了一步：从「写死的百分比 + 绝对 token 线」变成按模型价格（含
+分档）、窗口与在线实测增长算出的 token 线，**默认开启**（`compact.dynamicThreshold.mode=on`，
+D1 拍板）。设计、施工口径与全部决策记录见 `docs/dev/compact-hint/dynamic-threshold-plan.md`
+（v2.1），研究输入见同目录 `switch-threshold-research.md`，真机验收步骤见
+`docs/dev/compact-hint/dynamic-threshold-acceptance.md`。
+
+与本文各节的关系（一句话版）：本文 §2（`threshold.ts` 纯函数）、§14.1（tick 网格）与
+§14.2（forceScaling）**全部保持原语义**——动态层只与静态 hint 线按 `min` 合成（只能提前
+提醒，永不推迟），force 线与 `forceScaling` 一字未动；`compact.dynamicThreshold.mode=off`
+时行为与本文描述逐字节一致（由黄金 fixture `tests/fixtures/compact-hint-golden.json` 把关，
+该 fixture 永远不许重新生成）。实现位于 `src/compact-hint/dynamic/`（纯函数层 + 遥测 +
+pi-facing wire），切换遥测落在 `~/.pi/agent/telemetry/compact-switch.jsonl`（0600，只记聚合
+数值，不含任何路径）。
