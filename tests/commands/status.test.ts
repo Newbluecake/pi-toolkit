@@ -729,3 +729,86 @@ describe("S7 /agent status bash jobs section", () => {
     expect(notified[0]).toContain('Ambiguous "b_AA" — matches: b_AA1, b_AA2');
   });
 });
+
+// ── compact-hint dynamic（dynamic-threshold-plan.md §10.3 · T-D3-STATUS-VIEW）──
+
+describe("dynamic threshold status section (P1-11)", () => {
+  function dynamicDeps(view: unknown, facts?: unknown) {
+    const base = deps([]) as Record<string, unknown>;
+    base.dynamic = {
+      view: () => view,
+      ...(facts !== undefined ? { facts: () => facts } : {}),
+    };
+    return base as never;
+  }
+  const usableView = {
+    mode: "on",
+    usable: true,
+    degradeReason: null,
+    hintPercent: 41,
+    basis: "cost",
+    lowerBoundPercent: 35,
+    capPercent: 60,
+    cStarPercent: 16,
+    g: 1200,
+    sigma: 900,
+    s0: 98_000,
+    rUsd: 10,
+    rEquivalentTurns: 96,
+    priceReadPerM: 0.2,
+    priceWritePerM: 5,
+    priceOutputPerM: 20,
+    writePricingApproximate: true,
+    subscriptionPressure: null,
+    telemetryCount: 12,
+    telemetryPath: "~/.pi/agent/telemetry/compact-switch.jsonl",
+  };
+
+  it("port absent ⇒ output is byte-identical to today", () => {
+    const without = renderStatus(deps([]) as never, 1_000_000);
+    const withAbsentView = renderStatus(dynamicDeps(undefined), 1_000_000);
+    const withOffView = renderStatus(dynamicDeps({ ...usableView, mode: "off" }), 1_000_000);
+    expect(withAbsentView).toBe(without);
+    expect(withOffView).toBe(without);
+  });
+
+  it("on ⇒ three lines: thresholds/price/R (English tokens only)", () => {
+    const text = renderStatus(
+      dynamicDeps(usableView, { forceAtPercent: 88, forceAtTokens: 0, forceScaling: true, reserveTokens: 16_384 }),
+      1_000_000,
+    );
+    const lines = text.split("\n").slice(-3);
+    expect(lines[0]).toBe(
+      "Compact thresholds: hint 41% (dyn·cost) · force 88% · window 1.0M · reserve 16k · range 35%..60%",
+    );
+    expect(lines[1]).toBe(
+      "  price r $0.20/M w $5.00/M~ out $20.00/M (write pricing approximate) · C* 16% · g 1k/turn (σ 900) · S0 98k",
+    );
+    expect(lines[2]).toBe(
+      "  R $10.00 (uncalibrated prior, ≈ 96 turns) · dynamic on · telemetry 12 → ~/.pi/agent/telemetry/compact-switch.jsonl",
+    );
+  });
+
+  it("degraded ⇒ line 1 ends with dyn off (reason → static line)", () => {
+    const view = { ...usableView, usable: false, degradeReason: "price-unknown", hintPercent: null, basis: null };
+    const text = renderStatus(
+      dynamicDeps(view, { forceAtPercent: 88, forceAtTokens: 0, forceScaling: true, reserveTokens: 16_384 }),
+      1_000_000,
+    );
+    const first = text.split("\n").at(-3);
+    expect(first).toContain("dyn off (price-unknown → static line)");
+    expect(first).toContain("force 88%");
+    expect(first).not.toContain("dyn·");
+  });
+
+  it("view() reads through the holder so /reload retargets the new stack", () => {
+    let current: unknown = { ...usableView };
+    const base = deps([]) as Record<string, unknown>;
+    base.dynamic = { view: () => current };
+    const before = renderStatus(base as never, 1_000_000);
+    expect(before).toContain("dyn·cost");
+    current = { ...usableView, basis: "tier", hintPercent: 72 }; // 模拟 /reload 后新 stack 的 runtime
+    const after = renderStatus(base as never, 1_000_000);
+    expect(after).toContain("hint 72% (dyn·tier)");
+  });
+});

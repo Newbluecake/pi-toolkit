@@ -215,3 +215,90 @@ describe("set_compact_threshold", () => {
     });
   });
 });
+
+// ── compact-hint dynamic（dynamic-threshold-plan.md §10.5 · T-D3-TOOL）────────
+
+describe("dynamic hint line in set_compact_threshold query (P1-11)", () => {
+  const usableView = {
+    mode: "on",
+    usable: true,
+    degradeReason: null,
+    hintPercent: 41,
+    basis: "cost",
+    lowerBoundPercent: 35,
+    capPercent: 60,
+    cStarPercent: 16,
+    g: 1200,
+    sigma: 900,
+    s0: 98_000,
+    rUsd: 10,
+    rEquivalentTurns: 96,
+    priceReadPerM: 0.2,
+    priceWritePerM: 5,
+    priceOutputPerM: 20,
+    writePricingApproximate: true,
+    subscriptionPressure: null,
+    telemetryCount: 12,
+    telemetryPath: "~/.pi/agent/telemetry/compact-switch.jsonl",
+  } as const;
+
+  it("port absent ⇒ query text unchanged (byte-identical to today)", async () => {
+    const current = state();
+    const tool = createSetCompactThresholdTool({ getState: () => current, compactToolEnabled: () => true });
+    const without = await tool.execute("1", {}, undefined, undefined, ctx());
+    const absent = createSetCompactThresholdTool({
+      getState: () => current,
+      compactToolEnabled: () => true,
+      dynamic: { view: () => undefined },
+    });
+    const withUndefinedView = await absent.execute("2", {}, undefined, undefined, ctx());
+    expect(withUndefinedView.content[0]?.text).toBe(without.content[0]?.text);
+  });
+
+  it("on + usable ⇒ query appends the dynamic line; set branch unchanged", async () => {
+    const current = state();
+    const tool = createSetCompactThresholdTool({
+      getState: () => current,
+      compactToolEnabled: () => true,
+      dynamic: { view: () => usableView },
+    });
+    const query = await tool.execute("1", {}, undefined, undefined, ctx());
+    const text = query.content[0]?.text ?? "";
+    expect(text).toContain("Dynamic hint line: 41% (cost; C* 16%, g 1200 tokens/turn, R $10.00 uncalibrated)");
+    expect(text).toContain("your configured 75% stays the upper bound.");
+    // set 分支不变：不追加动态行，行为照旧
+    const set = await tool.execute("2", { percent: 70 }, undefined, undefined, ctx());
+    expect(set.content[0]?.text).not.toContain("Dynamic hint line");
+    expect(current.thresholdPercent).toBe(70);
+    expect(set.details).toMatchObject({ ok: true, action: "set", thresholdPercent: 70 });
+  });
+
+  it("shadow marks computed-but-not-applied; off adds no dynamic line", async () => {
+    const shadowTool = createSetCompactThresholdTool({
+      getState: () => state(),
+      compactToolEnabled: () => true,
+      dynamic: { view: () => ({ ...usableView, mode: "shadow" }) },
+    });
+    const shadow = await shadowTool.execute("1", {}, undefined, undefined, ctx());
+    expect(shadow.content[0]?.text).toContain("[shadow: computed but NOT applied]");
+    const offTool = createSetCompactThresholdTool({
+      getState: () => state(),
+      compactToolEnabled: () => true,
+      dynamic: { view: () => ({ ...usableView, mode: "off" }) },
+    });
+    const off = await offTool.execute("2", {}, undefined, undefined, ctx());
+    expect(off.content[0]?.text).not.toContain("Dynamic hint line");
+  });
+
+  it("degraded view ⇒ dynamic line reports inactive (reason → static line only)", async () => {
+    const tool = createSetCompactThresholdTool({
+      getState: () => state(),
+      compactToolEnabled: () => true,
+      dynamic: {
+        view: () => ({ ...usableView, usable: false, degradeReason: "price-unknown", hintPercent: null, basis: null }),
+      },
+    });
+    const query = await tool.execute("1", {}, undefined, undefined, ctx());
+    expect(query.content[0]?.text).toContain("Dynamic hint line: inactive (price-unknown → static line only).");
+  });
+});

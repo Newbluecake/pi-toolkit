@@ -186,6 +186,35 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   }),
   "worktree.enabled": bool("worktree.enabled", "Isolate subagents in git worktrees"),
   "compact.enabled": bool("compact.enabled", "Allow the model to trigger context compaction"),
+  // compact-hint dynamic（dynamic-threshold-plan.md §10.4）：5 键全部非 live（activate 捕获，改后 /reload）。
+  "compact.dynamicThreshold.mode": choice(
+    "compact.dynamicThreshold.mode",
+    ["off", "shadow", "on"],
+    "Price-aware dynamic hint line (default on; shadow = compute + telemetry only)",
+  ),
+  "compact.dynamicThreshold.minHintPercent": {
+    ...count("compact.dynamicThreshold.minHintPercent", 0, "Never hint before this share of the window"),
+    max: 100,
+  } as SettingSpec,
+  "compact.dynamicThreshold.maxQualityPercent": {
+    ...count(
+      "compact.dynamicThreshold.maxQualityPercent",
+      0,
+      "Quality ceiling (uncalibrated safety cap); never hint later than this",
+    ),
+    max: 100,
+  } as SettingSpec,
+  "compact.dynamicThreshold.rediscoveryUsd": {
+    kind: "number",
+    path: "compact.dynamicThreshold.rediscoveryUsd",
+    min: 0,
+    description: "Assumed rediscovery cost per switch, USD (uncalibrated empirical prior)",
+  },
+  "compact.dynamicThreshold.unknownPriceMode": choice(
+    "compact.dynamicThreshold.unknownPriceMode",
+    ["static", "quality"],
+    "Fallback when the route reports no cache-read price",
+  ),
   "extend.enabled": bool("extend.enabled", "Timeout grace + extend_subagent_timeout tool"),
   "hud.enabled": bool("hud.enabled", "Merged HUD: take over the footer (off restores pi's built-in footer)"),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),

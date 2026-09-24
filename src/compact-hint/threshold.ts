@@ -80,10 +80,15 @@ export function usageTickStep(percent: number, step: number, ceiling: number): n
 /** hint/tick 文案里推荐的工具名：switch_context（模型自写交接）或 compact_context（通用摘要）。 */
 export type CompactToolName = "switch_context" | "compact_context";
 
+/**
+ * 上下文通报文案（§10.1）：可选第 4 参 `marker`（动态阈值的英文短标记，如 `hint 41% · cost`）
+ * 追加在文案尾部（空格分隔）。省略时输出与今天**逐字节相同**（mode !== "on" 时钩子永远省略）。
+ */
 export function buildUsageTickText(
   percent: number,
   hintCeiling: number,
   tool: CompactToolName = "compact_context",
+  marker?: string,
 ): string {
   const hintLine =
     hintCeiling > 0 && hintCeiling <= 100
@@ -91,7 +96,8 @@ export function buildUsageTickText(
         ? `已超过提醒阈值 ${hintCeiling}%；如果你正在收尾一个子任务，请尽快调用 ${tool}。`
         : `达到 ${hintCeiling}% 时会再提醒你考虑 ${tool}；现在无需操作。`
       : "现在无需操作。";
-  return `[pi-subagent 上下文通报] 上下文已使用约 ${Math.round(percent)}%。${hintLine}`;
+  const markerSuffix = marker !== undefined && marker.length > 0 ? ` ${marker}` : "";
+  return `[pi-subagent 上下文通报] 上下文已使用约 ${Math.round(percent)}%。${hintLine}${markerSuffix}`;
 }
 
 export function maxThresholdPercent(contextWindow: number, reserveTokens: number): number {
@@ -165,7 +171,11 @@ export function buildCompactForceText(percent: number, forceAt: number): string 
   );
 }
 
-export function buildCompactHintText(percent: number, effective: number, forceAt = 0): string {
+/**
+ * 通用摘要压缩的 L1 提醒（§10.2）：可选第 4 参 `note`（动态阈值的中文单行说明，仅
+ * basis ∈ {cost, tier, quota} 时非空）追加为末尾新行。省略时与今天逐字节相同。
+ */
+export function buildCompactHintText(percent: number, effective: number, forceAt = 0, note?: string): string {
   const forceLine =
     forceAt > 0 ? `若用量继续涨至 ${forceAt}%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n` : "";
   return (
@@ -174,16 +184,17 @@ export function buildCompactHintText(percent: number, effective: number, forceAt
     "- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n" +
     "  这是只有自主压缩才有的控制权；\n" +
     (forceAt > 0 ? `- ${forceLine}` : forceLine) +
-    "- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。"
+    "- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。" +
+    (note !== undefined && note.length > 0 ? `\n${note}` : "")
   );
 }
 
 /**
  * switch_context 模式的 L1 提示（替代 buildCompactHintText）：重点不是"去压缩"，
  * 而是"交接内容由你来写，写漏即永久丢失" —— 这是自主切换相对通用摘要的唯一优势，
- * 也是模型最容易敷衍的地方。
+ * 也是模型最容易敷衍的地方。可选第 4 参 `note` 同 buildCompactHintText（§10.2）。
  */
-export function buildSwitchHintText(percent: number, effective: number, forceAt = 0): string {
+export function buildSwitchHintText(percent: number, effective: number, forceAt = 0, note?: string): string {
   const forceLine =
     forceAt > 0
       ? `- 若用量继续涨至 ${forceAt}%，系统会先硬性要求你切换；仍不照办就回落到通用摘要压缩，\n  届时保留什么由摘要模型决定，你会失去控制权；\n`
@@ -194,7 +205,8 @@ export function buildSwitchHintText(percent: number, effective: number, forceAt 
     "- 你在参数里写下的 goal / progress / next_steps / decisions / key_files 就是切换后的全部上下文，\n" +
     "  没有摘要模型替你补救——写全才不丢；\n" +
     forceLine +
-    "- 切换不是终止：切换后你会带着自己写的交接内容自动继续当前任务。"
+    "- 切换不是终止：切换后你会带着自己写的交接内容自动继续当前任务。" +
+    (note !== undefined && note.length > 0 ? `\n${note}` : "")
   );
 }
 

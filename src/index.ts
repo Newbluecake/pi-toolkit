@@ -217,6 +217,23 @@ export default function activate(pi: ExtensionAPI): void {
       handoffPending: () => handoffStore.hasFresh(),
     }),
   );
+  // compact-hint 动态阈值（dynamic-threshold-plan.md D3 §5.4）：三个新事件 handler。全部经
+  // holder 读当前会话的 runtime（/reload 后自然指向新 stack），mode=off / 惰性 runtime 下
+  // 全部 no-op（§11.3 回滚保证 1：首行判空）。注册一次 per activate()（I7）。
+  pi.on("tool_call", (event) => {
+    if (!holder.current?.dynamic) return;
+    // 纯辅助诊断：只记「叫过 switch_context」，恒不拦截、不改 event.input（T-D3-TOOLCALL-PASSTHRU）。
+    const toolName = (event as { toolName?: unknown }).toolName;
+    if (toolName === "switch_context") holder.current.dynamic.onToolCall(toolName);
+  });
+  pi.on("session_compact", (event, ctx) => {
+    if (!holder.current?.dynamic) return;
+    holder.current.dynamic.onSessionCompact(event, ctx);
+  });
+  pi.on("model_select", (event) => {
+    if (!holder.current?.dynamic) return;
+    holder.current.dynamic.noteModelSelected((event as { model?: unknown }).model);
+  });
   // 额度感知派单（docs/dev/quota/quota-plan.md §4.2 / §5）：与 compact-hint 同一
   // turn_end 通道、同一 sendMessage 形状；状态在 stack 里（每次 session_start 重建，
   // 经 holder 读当前会话——/reload 存活）。alternatives 由 gate.ts 的
@@ -368,11 +385,17 @@ export default function activate(pi: ExtensionAPI): void {
         createSwitchContextCompactHook({
           store: handoffStore,
           sessionFacts: createSessionFactsProvider(holder, settings),
+          // R2-1：唯一因果信号——交接文本真的被采用时开火（带 seq），供动态遥测建 handoffMarker。
+          onApplied: (info) => holder.current?.dynamic?.noteHandoffApplied(info),
           debug: process.env.PI_SUBAGENT_DEBUG_COMPACT_HINT === "1",
         }),
       );
       // 压缩失败/被取消：交接文本作废，绝不能留给下一次（可能是几十轮后）的压缩。
-      pi.on("session_compact_failed", () => handoffStore.clear());
+      // 动态遥测的两个 marker 同步清（§5.4 清除③；归因不能落在失败的一次上）。
+      pi.on("session_compact_failed", () => {
+        handoffStore.clear();
+        holder.current?.dynamic?.clearMarkers("compact-failed");
+      });
       pi.on("session_shutdown", () => handoffStore.clear());
     }
     // 彻底替换为默认：switchTool 开启时不再暴露 compact_context，
@@ -385,6 +408,7 @@ export default function activate(pi: ExtensionAPI): void {
         getState: () => holder.current?.compactHint,
         compactToolEnabled: () => settings.compact.enabled,
         toolName: settings.compact.switchTool ? "switch_context" : "compact_context",
+        dynamic: { view: () => holder.current?.dynamic?.statusView() },
       }),
     );
   }
@@ -462,6 +486,21 @@ export default function activate(pi: ExtensionAPI): void {
       mention: {
         entries: () => mentionAutocompleteEntries(holder),
       },
+      // compact-hint 动态阈值（§10.3，P1-11）：经 holder 读当前会话（/reload 后自然指向新 stack）。
+      // facts() 只读快照 compactHint 的 force/reserve 配置；窗口由命令时点的 ctx.getContextUsage 给。
+      dynamic: {
+        view: () => holder.current?.dynamic?.statusView(),
+        facts: () => {
+          const state = holder.current?.compactHint;
+          if (!state) return undefined;
+          return {
+            forceAtPercent: state.forceAtPercent,
+            forceAtTokens: state.forceAtTokens,
+            forceScaling: state.forceScaling,
+            reserveTokens: state.reserveTokens,
+          };
+        },
+      },
       settings: {
         // settings.budget is passed by reference into every session stack
         // (stack.ts) and read at spawn time (spawn-service mergeBudget), so
@@ -509,6 +548,7 @@ export default function activate(pi: ExtensionAPI): void {
       holder.current.keepalive?.dispose();
       holder.current.adaptive?.dispose();
       holder.current.quota?.dispose();
+      holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
       holder.current.scheduler.stop();
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
@@ -528,7 +568,7 @@ export default function activate(pi: ExtensionAPI): void {
     await stack.scheduler.start(); // X5
   });
 
-  pi.on("session_shutdown", async (event) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     const stack = holder.current;
     if (!stack) return;
     // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
@@ -543,6 +583,7 @@ export default function activate(pi: ExtensionAPI): void {
     stack.keepalive?.dispose();
     stack.adaptive?.dispose();
     stack.quota?.dispose();
+    stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
     stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
     // Fabric must freeze before run shutdown so late verdicts from the old

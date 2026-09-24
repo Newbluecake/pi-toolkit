@@ -8,6 +8,7 @@ import {
   tokenLineExceedsWindow,
   windowScaledForcePercent,
 } from "../compact-hint/threshold.js";
+import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
 import type { CompactHintState } from "../stack.js";
 
 export const SetCompactThresholdParams = Type.Object({
@@ -39,6 +40,8 @@ export interface SetCompactThresholdToolDeps {
   compactToolEnabled: () => boolean;
   /** 文案里推荐的压缩/切换工具名（注册时即已确定）。默认 compact_context。 */
   toolName?: CompactToolName;
+  /** 动态阈值只读端口（§10.5，P1-11）；缺席则 query 文案不加动态行。 */
+  dynamic?: { view(): DynamicStatusView | undefined };
 }
 
 function result(text: string, reason: string, extra: Record<string, unknown> = {}) {
@@ -104,11 +107,31 @@ export function createSetCompactThresholdTool(
         params.tokens === undefined &&
         params.forceTokens === undefined
       ) {
+        // §10.5：query 分支追加动态阈值行（端口缺席则不加；set 分支不变）。三态文案：
+        // on+usable ⇒ 具体线与依据；shadow ⇒ 计算但不生效；off/退化 ⇒ 静态线独占。
+        const view = deps.dynamic?.view();
+        let dynamicLine = "";
+        if (view !== undefined && view.mode !== "off") {
+          if (view.usable && view.hintPercent !== null) {
+            // §10.5 样例：`Dynamic hint line: 41% (cost; C* 16%, g 1.2k/turn, R $10 uncalibrated) — …`
+            const cStar = view.cStarPercent !== null ? `; C* ${view.cStarPercent}%` : "";
+            const g = view.g !== null ? `, g ${Math.round(view.g)} tokens/turn` : "";
+            dynamicLine =
+              `\nDynamic hint line: ${view.hintPercent}% (${view.basis ?? "—"}${cStar}${g}, ` +
+              `R $${view.rUsd.toFixed(2)} uncalibrated)${
+                view.mode === "shadow" ? " [shadow: computed but NOT applied]" : ""
+              } — your configured ${formatThreshold(state.thresholdPercent, state.thresholdTokens, window)} stays the upper bound.`;
+          } else {
+            dynamicLine = `\nDynamic hint line: inactive (${
+              view.degradeReason ?? "unknown"
+            } → static line only)${view.mode === "shadow" ? " [shadow]" : ""}.`;
+          }
+        }
         return {
           content: [
             {
               type: "text" as const,
-              text: `Compact hint threshold: ${formatThreshold(state.thresholdPercent, state.thresholdTokens, window)} (effective ${effective}%), force: ${formatThreshold(state.forceAtPercent, state.forceAtTokens, window)} (effective ${effectiveForce}%), current usage ${current}${usageNote}.`,
+              text: `Compact hint threshold: ${formatThreshold(state.thresholdPercent, state.thresholdTokens, window)} (effective ${effective}%), force: ${formatThreshold(state.forceAtPercent, state.forceAtTokens, window)} (effective ${effectiveForce}%), current usage ${current}${usageNote}.${dynamicLine}`,
             },
           ],
           details: {

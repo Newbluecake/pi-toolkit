@@ -25,6 +25,8 @@ import { describeJobStatus } from "../tools/bash-job-tool.js";
 import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 import { countActiveRuns } from "../reload/defer.js";
+import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
+import { effectiveThresholdPercentWithTokens, windowScaledForcePercent } from "../compact-hint/threshold.js";
 
 /** Live settings object + persistence port (see config/setting-specs.ts). */
 export type SettingsCommandDeps = SettingsStore;
@@ -53,6 +55,23 @@ export interface StatusCommandDeps {
    * Absent ⇒ the reload subcommand degrades to a hint to use built-in /reload.
    */
   reload?: { arm(activeCount: number): void; disarm(): void; readonly pending: boolean };
+  /**
+   * compact-hint 动态阈值（dynamic-threshold-plan.md §10.3，P1-11）：只读端口。
+   * 缺席（mode=off / 惰性 runtime / 旧宿主）⇒ 输出与今天**逐字节相同**。
+   * `facts()` 补齐渲染第 1 行所需的静态事实（force 锚点/reserve）——方案 §10.3 的
+   * DynamicStatusView 没有这些字段但渲染行需要（方案矛盾处的保守处置，见施工报告）。
+   */
+  dynamic?: {
+    view(): DynamicStatusView | undefined;
+    facts?():
+      | {
+          forceAtPercent: number;
+          forceAtTokens: number;
+          forceScaling: boolean;
+          reserveTokens: number;
+        }
+      | undefined;
+  };
 }
 
 /**
@@ -131,7 +150,8 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
         ctx.ui.notify(renderRunDetail(deps.query, idArg, deps.resolveRun), "info");
         return;
       }
-      ctx.ui.notify(renderStatus(deps), "info");
+      const usageWindow = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage()?.contextWindow : undefined;
+      ctx.ui.notify(renderStatus(deps, usageWindow), "info");
     },
   };
 }
@@ -475,7 +495,7 @@ export function renderBashJobDetail(
   return lines.join("\n");
 }
 
-export function renderStatus(deps: StatusCommandDeps): string {
+export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): string {
   const runs = deps.query.list();
   const active = runs.filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
   const lines: string[] = [];
@@ -517,6 +537,7 @@ export function renderStatus(deps: StatusCommandDeps): string {
   if (deps.notifier.degraded.length) lines.push(`Degraded deliveries: ${deps.notifier.degraded.length}`);
   if (deps.mention) lines.push(...renderMentionableLabels(deps.mention));
   if (deps.bashJobs) lines.push(...renderBashJobsSection(deps.bashJobs, deps.workflow?.now?.() ?? Date.now()));
+  if (deps.dynamic) lines.push(...renderDynamicThresholdSection(deps.dynamic, contextWindow));
   return lines.join("\n");
 }
 
@@ -528,4 +549,75 @@ function renderMentionableLabels(source: { entries(): readonly MentionAutocomple
     lines.push(`  @${entry.label} status=${status} type=${entry.type} run=${entry.runId}`);
   }
   return lines;
+}
+
+// ── compact-hint 动态阈值节（dynamic-threshold-plan.md §10.3，P1-11）─────────────
+
+/** token 量的短英文格式（1.0M / 98k / 16k）；null ⇒ "—"。 */
+function formatTokensShort(tokens: number | null | undefined): string {
+  if (tokens === null || tokens === undefined || !Number.isFinite(tokens) || tokens < 0) return "—";
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
+  return `${Math.round(tokens)}`;
+}
+
+function formatUsdPerM(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value) || value < 0) return "—";
+  return `$${value.toFixed(2)}/M`;
+}
+
+/**
+ * §10.3 渲染（英文，3 行）。view 缺席 / mode="off" ⇒ 整节不渲染（旧输出逐字节不变）。
+ * `contextWindow` 来自命令时点的 `ctx.getContextUsage()`（force 线换算用，缺席则省略该段）。
+ */
+export function renderDynamicThresholdSection(
+  port: NonNullable<StatusCommandDeps["dynamic"]>,
+  contextWindow?: number,
+): string[] {
+  const view = port.view();
+  if (view === undefined || view.mode === "off") return [];
+  const facts = port.facts?.();
+  const window =
+    contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null;
+  const forcePercent =
+    facts !== undefined && window !== null
+      ? effectiveThresholdPercentWithTokens(
+          facts.forceScaling ? windowScaledForcePercent(facts.forceAtPercent, window) : facts.forceAtPercent,
+          facts.forceAtTokens,
+          window,
+          facts.reserveTokens,
+        )
+      : null;
+  const factsParts = [
+    forcePercent !== null ? `force ${forcePercent}%` : null,
+    window !== null ? `window ${formatTokensShort(window)}` : null,
+    facts !== undefined ? `reserve ${formatTokensShort(facts.reserveTokens)}` : null,
+  ].filter(Boolean);
+  if (view.usable) {
+    const range =
+      view.lowerBoundPercent !== null && view.capPercent !== null
+        ? ` · range ${view.lowerBoundPercent}%..${view.capPercent}%`
+        : "";
+    const lines = [
+      `Compact thresholds: hint ${view.hintPercent ?? "—"}% (dyn·${view.basis ?? "—"}) · ${factsParts.join(" · ")}${range}`,
+    ];
+    lines.push(
+      `  price r ${formatUsdPerM(view.priceReadPerM)} w ${formatUsdPerM(view.priceWritePerM)}~ out ${formatUsdPerM(view.priceOutputPerM)} (write pricing approximate) · C* ${
+        view.cStarPercent !== null ? `${view.cStarPercent}%` : "—"
+      } · g ${formatTokensShort(view.g)}/turn (σ ${formatTokensShort(view.sigma)}) · S0 ${formatTokensShort(view.s0)}`,
+    );
+    lines.push(
+      `  R $${view.rUsd.toFixed(2)} (uncalibrated prior${
+        view.rEquivalentTurns !== null ? `, ≈ ${view.rEquivalentTurns} turns` : ""
+      }) · dynamic ${view.mode} · telemetry ${view.telemetryCount} → ${view.telemetryPath ?? "—"}`,
+    );
+    return lines;
+  }
+  // 退化：第 1 行末尾改为 dyn off（reason → static line）；估计量/价格行仍给诊断值。
+  const reason = view.degradeReason ?? "unknown";
+  return [
+    `Compact thresholds: hint static · ${factsParts.join(" · ")} · dyn off (${reason} → static line)`,
+    `  price r ${formatUsdPerM(view.priceReadPerM)} w ${formatUsdPerM(view.priceWritePerM)}~ · g ${formatTokensShort(view.g)}/turn (σ ${formatTokensShort(view.sigma)}) · S0 ${formatTokensShort(view.s0)}`,
+    `  R $${view.rUsd.toFixed(2)} (uncalibrated prior) · dynamic ${view.mode} · telemetry ${view.telemetryCount} → ${view.telemetryPath ?? "—"}`,
+  ];
 }

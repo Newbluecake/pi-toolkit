@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { resolveReserveTokens } from "./compact-hint/pi-settings.js";
+import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "./config/settings.js";
 import {
   COMPACT_HINT_COOLDOWN_MS,
   COMPACT_HINT_CUSTOM_TYPE,
@@ -12,9 +13,14 @@ import {
   buildSwitchHintText,
   buildUsageTickText,
   effectiveThresholdPercentWithTokens,
+  thresholdLineTokens,
   usageTickStep,
   windowScaledForcePercent,
 } from "./compact-hint/threshold.js";
+import { HYSTERESIS_PCT, composeHintLineTokens } from "./compact-hint/dynamic/threshold.js";
+import { hintNote, tickMarker } from "./compact-hint/dynamic/markers.js";
+import { wireDynamicThreshold, type DynamicRuntime } from "./compact-hint/dynamic/wire.js";
+import type { DynamicThresholdOutcome, ThresholdBasis } from "./compact-hint/dynamic/types.js";
 import { homedir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -460,7 +466,9 @@ export interface CompactHintState {
   forceAtTokens: number;
   reserveTokens: number;
   lastHintAt: number;
-  hintedAt: { effectivePercent: number; contextWindow: number } | undefined;
+  /** hint 已发过的闩锁。`hintEpoch` 仅在 mode="on"（动态阈值，§9.2）时携带：高位期编号，
+   *  真实用量跌破 line − 迟滞时由 runtime 自增并清空本字段（线自己动不重置提醒权）。 */
+  hintedAt: { effectivePercent: number; contextWindow: number; hintEpoch?: number } | undefined;
   /** Coarsest step (percent points) between lightweight usage-tick reports;
    *  the grid densifies toward the force ceiling. 0 disables ticks. */
   tickStepPercent: number;
@@ -474,6 +482,9 @@ export interface CompactHintState {
   forceDemandTurns: number;
   /** 本轮高位期内已发出的硬性切换要求次数；用量回落到强制线以下即归零。 */
   demandCount: number;
+  /** 价格感知动态阈值运行时（dynamic-threshold-plan.md D3）；mode=off / print、json 构造
+   *  时缺席或惰性。与 `Stack.dynamic` 引用同一对象（§2.4 所有权在 Stack）。 */
+  dynamic?: DynamicRuntime | undefined;
 }
 
 /** set_model (plan §4.10): single model-registry port shared by spawn admission,
@@ -503,6 +514,9 @@ export interface StackModelPort {
 
 export interface Stack {
   compactHint: CompactHintState;
+  /** 动态阈值运行时（compact-hint dynamic plan D3；mode=off 或 print/json 构造时缺席或惰性）。
+   *  dispose 的接入点在 index.ts 的 session_shutdown / session_start 防御性清理（P1-4）。 */
+  dynamic?: DynamicRuntime;
   /** Shared model-hint/registry port (spawn admission + set_model, plan §4.10). */
   models: StackModelPort;
   spawn: SpawnService;
@@ -571,6 +585,10 @@ export function createCompactHintHook(
   const now = deps.now ?? (() => Date.now());
   let forcing = false;
   let lastForcedAt = 0;
+  // §9.2「真实用量跌破」的方向坐标：上一轮观测到的 percent（unknown-usage 归零）。
+  // 动态线上移越过静止/上潳的用量时不是「真实回落」，不得重置提醒权（设计意图：
+  // 只有真实用量的回落才重置，任何「线自己动了」都不重置）。
+  let lastPercentSeen: number | null = null;
   return (_event, ctx) => {
     if (ctx.mode === "print" || ctx.mode === "json") return;
     const state = holder.current?.compactHint;
@@ -592,14 +610,59 @@ export function createCompactHintHook(
       );
     if (!usage || percent == null) {
       state.hintedAt = undefined;
+      lastPercentSeen = null;
       return;
     }
-    const effective = effectiveThresholdPercentWithTokens(
+    const previousPercent = lastPercentSeen;
+    lastPercentSeen = percent;
+    // ── 动态阈值（dynamic-threshold-plan.md §3.6/§9.2/§10）：每轮 turn_end 重算一次（S1）。
+    // 无 runtime（mode=off / compact 关）/ 惰性 / 内部禁用 ⇒ 合成与闩锁走原表达式
+    //（mode=off 逐字节回滚保证，T-D3-OFF-GOLDEN）；shadow 只计算 + 遥测，不改模型可见字节。
+    const activeRuntime = state.dynamic;
+    let dyn: DynamicThresholdOutcome | undefined;
+    if (activeRuntime !== undefined && activeRuntime.active) {
+      try {
+        dyn = activeRuntime.onTurnEnd({
+          ctx, // 完整事件 ctx：mode（二次判惰性）+ sessionManager（§5.5 观察窗聚合）
+          model: ctx.model,
+          usage: { tokens: usage.tokens ?? null, percent, contextWindow: usage.contextWindow },
+          staticHint: { percent: state.thresholdPercent, tokensK: state.thresholdTokens },
+          force: {
+            atPercent: state.forceAtPercent,
+            atTokensK: state.forceAtTokens,
+            forceScaling: state.forceScaling,
+          },
+          reserveTokens: state.reserveTokens,
+        });
+      } catch {
+        dyn = undefined; // wire 内部已有 try/catch；这里再次兑底：遥测/动态层绝不拖垮主链路
+      }
+    }
+    const runtimeOn =
+      activeRuntime !== undefined && activeRuntime.active && activeRuntime.mode === "on" ? activeRuntime : undefined;
+    const usableDyn = runtimeOn !== undefined && dyn?.usable === true ? dyn : undefined;
+    let effective = effectiveThresholdPercentWithTokens(
       state.thresholdPercent,
       state.thresholdTokens,
       usage.contextWindow,
       state.reserveTokens,
     );
+    // §3.6 合成（D3：min —— 动态线只能提前）。静态线更早 / 退化 / shadow / off ⇒ 原表达式不动。
+    let dynamicLineWon = false;
+    if (usableDyn !== undefined) {
+      const composedTokens = composeHintLineTokens({
+        staticLines: { percent: state.thresholdPercent, tokensK: state.thresholdTokens },
+        window: usage.contextWindow,
+        reserveTokens: state.reserveTokens,
+        mode: "on",
+        dynamic: usableDyn,
+      });
+      const staticTokens = thresholdLineTokens(state.thresholdPercent, state.thresholdTokens, usage.contextWindow);
+      if (composedTokens > 0 && composedTokens < staticTokens) {
+        effective = Math.min(effective, usableDyn.hintPercent);
+        dynamicLineWon = true;
+      }
+    }
     const effectiveForce = effectiveThresholdPercentWithTokens(
       state.forceScaling ? windowScaledForcePercent(state.forceAtPercent, usage.contextWindow) : state.forceAtPercent,
       state.forceAtTokens,
@@ -639,6 +702,8 @@ export function createCompactHintHook(
               },
               { triggerTurn: false },
             );
+            // §5.4：demand 发出 ⇒ 建立 forceMarker（发送失败则不建，不留脏归因）。
+            activeRuntime?.noteForce("demand");
           } catch (error) {
             console.warn(`[pi-subagent] switch-context demand send failed: ${String(error)}`);
           }
@@ -669,6 +734,9 @@ export function createCompactHintHook(
           },
           { triggerTurn: false },
         );
+        // §5.4：force 压缩已发起 ⇒ 建立 forceMarker；成败由 session_compact / onError /
+        // 同步 catch / session_compact_failed 四条路径归宿（R2-4）。
+        activeRuntime?.noteForce("force");
       } catch (error) {
         console.warn(`[pi-subagent] compact-hint force notice send failed: ${String(error)}`);
       }
@@ -682,11 +750,13 @@ export function createCompactHintHook(
           },
           onError: (error) => {
             forcing = false;
+            activeRuntime?.clearForceMarker(); // §5.4 清除②：ctx.compact() 失败立即清
             if (debug) console.warn(`[pi-subagent] compact-hint force failed: ${error.message}`);
           },
         });
       } catch (error) {
         forcing = false;
+        activeRuntime?.clearForceMarker(); // §5.4 清除②：同步抛出同样立即清
         if (debug) console.warn(`[pi-subagent] compact-hint force failed synchronously: ${String(error)}`);
       }
       return;
@@ -706,6 +776,15 @@ export function createCompactHintHook(
     if (tick < state.lastTickStep && percent <= state.lastTickStep - USAGE_TICK_HYSTERESIS_PERCENT) {
       state.lastTickStep = tick;
     }
+    // §10.1：tick 尾部的英文短标记（仅 mode=on 且有 hint 线；省略 ⇒ 文案与今天逐字节相同）。
+    const tickMarkerText =
+      runtimeOn !== undefined && effective > 0
+        ? tickMarker(
+            dynamicLineWon && usableDyn !== undefined ? usableDyn.basis : "static",
+            effective,
+            usableDyn?.nextTierTokens,
+          )
+        : undefined;
     const trySendTick = () => {
       if (tick <= state.lastTickStep) return;
       try {
@@ -716,6 +795,7 @@ export function createCompactHintHook(
               percent,
               effective > 0 ? effective : 0,
               state.switchTool ? "switch_context" : "compact_context",
+              tickMarkerText,
             ),
             display: true,
             details: { percent, tickStep: tick },
@@ -728,27 +808,63 @@ export function createCompactHintHook(
         console.warn(`[pi-subagent] usage-tick send failed: ${String(error)}`);
       }
     };
+    // §9.2 闩锁：mode=on ⇒ epoch 闩锁（线自己动不重置提醒权；只有真实用量跌破
+    // line − 迟滞才重置）；其余模式 ⇒ 与今天逐字节等价的表达式。
     if (effective <= 0 || percent < effective) {
-      state.hintedAt = undefined;
+      if (runtimeOn !== undefined) {
+        // 真实回落（跌破 line − 迟滞 **且用量确实在下降**）才重置提醒权；
+        // 动态线上移越过静止的用量不算（「线自己动了」不重置，§9.2 设计意图）。
+        if (
+          effective > 0 &&
+          percent < effective - HYSTERESIS_PCT &&
+          previousPercent !== null &&
+          percent < previousPercent
+        ) {
+          runtimeOn.noteRealDrop();
+          state.hintedAt = undefined;
+        }
+      } else {
+        state.hintedAt = undefined;
+      }
       trySendTick();
       return;
     }
-    if (state.hintedAt?.effectivePercent === effective && state.hintedAt.contextWindow === usage.contextWindow) {
+    const latched =
+      runtimeOn !== undefined
+        ? state.hintedAt?.hintEpoch !== undefined && state.hintedAt.hintEpoch === runtimeOn.hintEpoch()
+        : state.hintedAt?.effectivePercent === effective && state.hintedAt.contextWindow === usage.contextWindow;
+    // §6.3 跨档前一次性提醒：允许突破 hint 的冷却发一次（每个 B 一张票；P1-9：B 本身仍属低价档）。
+    const tierTicket =
+      runtimeOn !== undefined && usableDyn !== undefined && runtimeOn.consumeTierTicket(usage.tokens ?? null);
+    if (latched && !tierTicket) {
       trySendTick();
       return;
     }
     const timestamp = now();
-    if (state.lastHintAt > 0 && timestamp - state.lastHintAt < COMPACT_HINT_COOLDOWN_MS) {
+    if (!tierTicket && state.lastHintAt > 0 && timestamp - state.lastHintAt < COMPACT_HINT_COOLDOWN_MS) {
       trySendTick();
       return;
+    }
+    // §10.2：动态线的中文单行说明。仅当动态线真正生效（dynamicLineWon）或跨档票
+    // 命中时附加——静态线独占时阈值并非价格模型给出，不能冒充；demand（L2）不加。
+    let note: string | undefined;
+    if (usableDyn !== undefined && (dynamicLineWon || tierTicket)) {
+      const noteBasis: ThresholdBasis = tierTicket ? "tier" : usableDyn.basis;
+      note = hintNote(noteBasis, {
+        hintPercent: effective,
+        usedTokens: usage.tokens ?? null,
+        window: usage.contextWindow,
+        nextTierTokens: usableDyn.nextTierTokens,
+        ...(usableDyn.subscriptionPressure !== undefined ? { usedPct: usableDyn.subscriptionPressure } : {}),
+      });
     }
     try {
       deps.sendMessage(
         {
           customType: COMPACT_HINT_CUSTOM_TYPE,
           content: state.switchTool
-            ? buildSwitchHintText(percent, effective, effectiveForce)
-            : buildCompactHintText(percent, effective, effectiveForce),
+            ? buildSwitchHintText(percent, effective, effectiveForce, note)
+            : buildCompactHintText(percent, effective, effectiveForce, note),
           display: true,
           details: { percent, thresholdPercent: effective },
         },
@@ -758,7 +874,10 @@ export function createCompactHintHook(
       console.warn(`[pi-subagent] compact-hint send failed: ${String(error)}`);
       return;
     }
-    state.hintedAt = { effectivePercent: effective, contextWindow: usage.contextWindow };
+    state.hintedAt =
+      runtimeOn !== undefined
+        ? { effectivePercent: effective, contextWindow: usage.contextWindow, hintEpoch: runtimeOn.hintEpoch() }
+        : { effectivePercent: effective, contextWindow: usage.contextWindow };
     state.lastHintAt = timestamp;
     // The hint already reports the current percent — absorb any pending tick
     // step so we don't double-inject usage info in the same turn.
@@ -1432,6 +1551,48 @@ export function buildSessionStack(
   // refreshIfStale 永不返回被拒 Promise，失败静默降级（R1）。
   quota?.service.refreshIfStale();
 
+  // compact-hint 动态阈值（dynamic-threshold-plan.md D3）：mode=off / compact 关时不构造
+  //（§11.3 回滚保证 1）；print/json 构造 ⇒ wire 内返回惰性 runtime。所有权在 Stack（同时经
+  // compactHint.dynamic 引用同一对象）；dispose 由 index.ts 的 session_shutdown / session_start
+  // 防御性清理负责（P1-4），buildSessionStack 内不做 previous-runtime 交接（无 timer/外部资源）。
+  const dynamicConfig = settings.compact.dynamicThreshold ?? DEFAULT_DYNAMIC_THRESHOLD_SETTINGS;
+  const dynamic =
+    settings.compact.enabled && dynamicConfig.mode !== "off"
+      ? wireDynamicThreshold({
+          ctx: { mode: ctx.mode, sessionManager: ctx.sessionManager },
+          config: dynamicConfig,
+          sessionId: currentSessionId(ctx),
+          telemetryFilePath: join(getAgentDir(), "telemetry", "compact-switch.jsonl"),
+          now: () => systemClock.now(),
+          appendEntry: (type, data) => pi.appendEntry(type, data),
+          readBranch: () => {
+            try {
+              const sm = ctx.sessionManager as { getBranch?: () => readonly unknown[] } | undefined;
+              return sm?.getBranch?.() ?? [];
+            } catch {
+              return [];
+            }
+          },
+          quota: {
+            enabled: settings.quota.enabled,
+            isSubscription: parseSubscriptionProviders(settings.quota.subscriptionProviders),
+            // WindowVerdict.resetAt → SubscriptionWindowLike.resetAtMs 的字段名适配（§8.2）。
+            verdictFor: (provider) => {
+              const verdict = quotaRef.current?.service.verdictFor(provider);
+              if (verdict === undefined) return undefined;
+              return {
+                stale: verdict.stale,
+                windows: verdict.windows.map((w) => ({
+                  usedPct: w.usedPct,
+                  ...(w.resetAt !== undefined ? { resetAtMs: w.resetAt } : {}),
+                })),
+              };
+            },
+          },
+        })
+      : undefined;
+  compactHint.dynamic = dynamic;
+
   // X7b: always-on fleet widget above the editor. The controller self-probes
   // ctx.ui.setWidget and goes inert (no timer, no throw) in non-interactive
   // modes; settings.fleetWidget=false skips it entirely.
@@ -1597,6 +1758,7 @@ export function buildSessionStack(
   };
   return {
     compactHint,
+    ...(dynamic ? { dynamic } : {}),
     models,
     spawn,
     query,

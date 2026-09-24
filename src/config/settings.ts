@@ -113,6 +113,20 @@ export interface BashJobsSettings {
   shellPath?: string;
 }
 
+/** 动态阈值（dynamic-threshold-plan.md §11.1）：价格/缓存感知的 switch_context 提醒线。 */
+export interface DynamicThresholdSettings {
+  /** 默认 "on"（用户拍板 D1；风险由 min 合成 + force 不动 + off 逐字节回归兑住）。shadow = 全量计算 + 遥测 + status，不改任何模型可见字节。 */
+  mode: "off" | "shadow" | "on";
+  /** 地板：默认 35（研究 §7.4）。 */
+  minHintPercent: number;
+  /** 质量上限：默认 60 —— 未校准的安全上限（D8）。 */
+  maxQualityPercent: number;
+  /** 再发现成本 R：默认 $10 —— 经验先验，未跨模型校准（D2/§5.1）。 */
+  rediscoveryUsd: number;
+  /** 价格未知时的退化模式：默认 "static"（最保守 = 不改变现行行为）。 */
+  unknownPriceMode: "static" | "quality";
+}
+
 export interface CompactSettings {
   enabled: boolean;
   hintThresholdPercent: number;
@@ -148,6 +162,8 @@ export interface CompactSettings {
   /** 越过强制线后，先硬性要求模型调用 `switch_context` 的次数；用完仍越线才回落到通用强制压缩。
    *  Default 1；0 = 不给机会，直接强制通用压缩。 */
   forceDemandTurns: number;
+  /** 价格感知动态提醒线（docs/dev/compact-hint/dynamic-threshold-plan.md）。 */
+  dynamicThreshold: DynamicThresholdSettings;
 }
 
 export type CacheTtlMode = "auto" | "on" | "off" | "adaptive";
@@ -429,6 +445,15 @@ export interface FabricSettings {
   rootMinIntervalMs: number;
   rootInboxCap: number;
 }
+/** 动态阈值默认值（§11.2）：mode 默认 on（用户拍板 D1）；maxQualityPercent/rediscoveryUsd 均未校准。 */
+export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
+  mode: "on",
+  minHintPercent: 35,
+  maxQualityPercent: 60,
+  rediscoveryUsd: 10,
+  unknownPriceMode: "static",
+};
+
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
   budget: DEFAULT_BUDGET,
@@ -475,6 +500,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     switchTool: true,
     keepCompactTool: false,
     forceDemandTurns: 1,
+    dynamicThreshold: DEFAULT_DYNAMIC_THRESHOLD_SETTINGS,
   },
   fabric: {
     enabled: false,
@@ -1058,6 +1084,32 @@ export function parseExtendSettings(input: unknown): ExtendSettings {
         : defaults.notify,
   };
 }
+/** 解析 compact.dynamicThreshold（§11.1）：逐字段回退默认、交叉校验 min>max ⇒ 两者回默认、枚举白名单，永不抛。 */
+export function parseDynamicThresholdSettings(input: unknown): DynamicThresholdSettings {
+  const defaults = DEFAULT_DYNAMIC_THRESHOLD_SETTINGS;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const mode = value.mode;
+  const unknownPriceMode = value.unknownPriceMode;
+  const percent = (raw: unknown, fallback: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100 ? Math.floor(raw) : fallback;
+  const min = percent(value.minHintPercent, defaults.minHintPercent);
+  const max = percent(value.maxQualityPercent, defaults.maxQualityPercent);
+  const crossed = min > max; // 交叉校验：min > max ⇒ 两者都回默认（§11.1）
+  const rediscovery = value.rediscoveryUsd;
+  return {
+    mode: mode === "off" || mode === "shadow" || mode === "on" ? mode : defaults.mode,
+    minHintPercent: crossed ? defaults.minHintPercent : min,
+    maxQualityPercent: crossed ? defaults.maxQualityPercent : max,
+    rediscoveryUsd:
+      typeof rediscovery === "number" && Number.isFinite(rediscovery) && rediscovery >= 0
+        ? rediscovery
+        : defaults.rediscoveryUsd,
+    unknownPriceMode:
+      unknownPriceMode === "static" || unknownPriceMode === "quality" ? unknownPriceMode : defaults.unknownPriceMode,
+  };
+}
+
 /** Parse the optional model-triggered context compaction settings block. */
 export function parseCompactSettings(input: unknown): CompactSettings {
   const defaults = DEFAULT_SETTINGS.compact;
@@ -1112,6 +1164,7 @@ export function parseCompactSettings(input: unknown): CompactSettings {
       typeof tick === "number" && Number.isFinite(tick) && (tick === 0 || (tick >= 5 && tick <= 100))
         ? Math.floor(tick)
         : defaults.usageTickStepPercent,
+    dynamicThreshold: parseDynamicThresholdSettings(value.dynamicThreshold),
     ...(typeof reserve === "number" && Number.isFinite(reserve) && reserve > 0
       ? { assumedReserveTokens: Math.floor(reserve) }
       : {}),

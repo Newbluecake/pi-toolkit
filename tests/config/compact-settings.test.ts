@@ -16,6 +16,7 @@ describe("compact settings", () => {
       switchTool: true,
       keepCompactTool: false,
       forceDemandTurns: 1,
+      dynamicThreshold: defaults.dynamicThreshold,
     });
   });
 
@@ -41,6 +42,7 @@ describe("compact settings", () => {
       switchTool: true,
       keepCompactTool: false,
       forceDemandTurns: 1,
+      dynamicThreshold: defaults.dynamicThreshold,
     });
   });
 
@@ -87,6 +89,7 @@ describe("compact settings", () => {
       switchTool: true,
       keepCompactTool: false,
       forceDemandTurns: 1,
+      dynamicThreshold: defaults.dynamicThreshold,
     });
     expect(loadSettings({ compact: "invalid" }).compact).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 60, assumedReserveTokens: 32768 })).toEqual({
@@ -100,6 +103,7 @@ describe("compact settings", () => {
       switchTool: true,
       keepCompactTool: false,
       forceDemandTurns: 1,
+      dynamicThreshold: defaults.dynamicThreshold,
       assumedReserveTokens: 32768,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0 })).toEqual({
@@ -113,6 +117,7 @@ describe("compact settings", () => {
       switchTool: true,
       keepCompactTool: false,
       forceDemandTurns: 1,
+      dynamicThreshold: defaults.dynamicThreshold,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0.5 })).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: 0 })).toMatchObject({ forceAtPercent: 0 });

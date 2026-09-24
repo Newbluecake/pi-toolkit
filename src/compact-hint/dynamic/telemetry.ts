@@ -129,13 +129,16 @@ export interface SwitchTelemetryRecord {
 export type SwitchRProxy = NonNullable<SwitchTelemetryRecord["rProxy"]>;
 
 // ---------------------------------------------------------------------------
-// D1 依赖字段的最小局部快照类型
+// D1 依赖字段的最小局部快照类型（D3 已定案：**保留局部类型，不与 dynamic/types.ts 合并**）
 // ---------------------------------------------------------------------------
 
-// D3 接线时与 dynamic/types.ts 统一（D1 在途，这里只声明遥测需要的最小结构化形状；
-// 全部 nullable 的字段在记录里必须以 null 透传，缺省值由 D1/D3 决定）。
+// 这四个是**可空序列化视图**（D5：缺失一律 null，绝不用 0 冒充），不是 D1 的域类型：
+// `DynamicThresholdOutcome` 是判别联合（P0-1），`PriceModel`/`EstimatorState` 是非空活跃对象；
+// 落盘记录需要的是「事件时点的可空切片」。wire（D3）在每次事件时点用 D1 的域对象组装
+// 这里的快照（见 wire.ts 的 buildSnapshot），字面量联合与 D1 导出（DynamicConfig["mode"]、
+// ThresholdBasis、DegradeReason 的字符串值）保持同步。
 
-/** D3 接线时与 dynamic/types.ts 统一：动态线输出（DynamicThresholdOutcome + 发布态）的最小形状。 */
+/** 动态线输出（DynamicThresholdOutcome + 发布态）的可空遥测切片。 */
 export interface ThresholdSnapshot {
   mode: "off" | "shadow" | "on";
   /** 上一次对外发布的 hintPercent（published）。 */
@@ -149,7 +152,7 @@ export interface ThresholdSnapshot {
   degradeReason: string | null;
 }
 
-/** D3 接线时与 dynamic/types.ts 统一：在线估计量（EstimatorState 读侧）的最小形状。 */
+/** 在线估计量（EstimatorState 读侧导出）的可空遥测切片。 */
 export interface EstimateSnapshot {
   g: number | null;
   sigma: number | null;
@@ -160,7 +163,7 @@ export interface EstimateSnapshot {
   handoffTokens: number | null;
 }
 
-/** D3 接线时与 dynamic/types.ts 统一：价格模型（PriceModel / tier 命中）的最小形状。 */
+/** 价格模型（PriceModel / tier 命中）的可空遥测切片。 */
 export interface PriceSnapshot {
   cacheRead: number | null;
   cacheWrite: number | null;
@@ -170,7 +173,7 @@ export interface PriceSnapshot {
   writePricingApproximate: true;
 }
 
-/** D3 接线时与 dynamic/types.ts 统一：ctx.model 的最小形状。 */
+/** ctx.model 的可空遥测切片。 */
 export interface TelemetryModelSnapshot {
   provider: string | null;
   id: string | null;
