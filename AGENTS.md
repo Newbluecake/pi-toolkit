@@ -115,6 +115,16 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
   frontmatter (default: parent only).
+- `src/consult/` — in-turn expert consultation (`consult` tool). A subagent dispatched with an
+  `experts` whitelist (`Agent({ experts })`, resolved to verified runIds at dispatch) gets the
+  `consult` tool and can synchronously ask an already-finished expert run: the expert's persisted
+  session is streaming-forked (`fork-store.ts`), a short readonly run (`CONSULT_READONLY_TOOLS`,
+  enforced at both pi `sessionSpec.tools` and tool-scope; no injections, cannot spawn) answers,
+  and the fork file is deleted when the runner reaps it (`RunnerDeps.onReaped`). Guards: first
+  request cost / context preflight, turn-boundary turn and cost caps (`watcher.ts`, cap aborts map
+  to `user_stop`). The main session never registers the tool (v1); `consult.enabled=false`
+  leaves the wiring inert. Wired in `src/stack.ts` through a late-bound ref. Design + test
+  anchors: `docs/dev/consult/plan.md`.
 - `src/hud/` — merged pi-hud: full footer takeover (git/worktrees, token & cost stats incl.
   live subagent cost, LLM timing/speed) + status key `pi-hud` + `/pi-hud-refresh` + settings-gated
   periodic `git fetch` (`hud.autoFetchMinutes`, default 5, 0 = off — the ↑/↓ counts compare against
@@ -190,7 +200,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
 - `docs/dev/` — per-feature design docs (auto-background, delivery v2, bash-auto-background,
-  subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), sysprompt-stable (system prompt
+  subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), consult, sysprompt-stable (system prompt
   冻结快照 + 唤醒回放), ...); read the matching one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).
 
