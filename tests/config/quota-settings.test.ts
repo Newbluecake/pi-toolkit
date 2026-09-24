@@ -26,6 +26,7 @@ const QUOTA_TIME_PATHS = [
 const QUOTA_SPEC_KEYS = [
   "quota.enabled",
   "quota.providers",
+  "quota.subscriptionProviders",
   "quota.refreshS",
   "quota.staleAfterS",
   "quota.l1Percent",
@@ -47,6 +48,7 @@ describe("quota settings", () => {
     expect(defaults).toEqual({
       enabled: true,
       providers: "zai-coding-cn,zai,kimi-coding",
+      subscriptionProviders: "",
       refreshMs: 600_000,
       staleAfterMs: 3_600_000,
       l1Percent: 50,

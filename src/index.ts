@@ -52,7 +52,7 @@ import { createCompactTool } from "./tools/compact-tool.js";
 import { createSwitchContextTool } from "./tools/switch-context-tool.js";
 import { PendingHandoffStore } from "./context-switch/store.js";
 import { createQuotaHintHook } from "./quota/index.js";
-import { pickAlternatives } from "./quota/gate.js";
+import { parseSubscriptionProviders, pickAlternatives } from "./quota/gate.js";
 import { createSwitchContextCompactHook } from "./context-switch/hook.js";
 import { createSessionFactsProvider } from "./context-switch/session-facts.js";
 import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-tool.js";
@@ -211,6 +211,7 @@ export default function activate(pi: ExtensionAPI): void {
   // turn_end 通道、同一 sendMessage 形状；状态在 stack 里（每次 session_start 重建，
   // 经 holder 读当前会话——/reload 存活）。alternatives 由 gate.ts 的
   // pickAlternatives 供给（Pack D 偏差 1：hook deps 的可选注入）。
+  const isQuotaSubscription = parseSubscriptionProviders(settings.quota.subscriptionProviders);
   pi.on(
     "turn_end",
     createQuotaHintHook({
@@ -223,6 +224,7 @@ export default function activate(pi: ExtensionAPI): void {
           verdictFor: (p) => holder.current?.quota?.verdictFor(p),
           // 只推荐 /models 里激活的模型（scope ∩ available，未配置 scope 时为 available）。
           available: () => holder.current?.models.recommendable() ?? [],
+          isSubscription: isQuotaSubscription,
         }),
     }),
   );

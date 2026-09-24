@@ -38,6 +38,22 @@ export interface QuotaGateDeps {
   readonly available: () => readonly ModelCandidate[];
   readonly blockAtLevel: LadderLevel; // settings.quota.gateLevel
   readonly now: Millis;
+  /**
+   * settings `quota.subscriptionProviders`：没有额度接口、但实为订阅的 provider
+   * （如 copilot-*）。缺省 ⇒ 只有带窗口数据的受管 provider 算订阅。
+   */
+  readonly isSubscription?: ((provider: string) => boolean) | undefined;
+}
+
+/** `quota.subscriptionProviders`（逗号分隔）→ 判定函数；空串 ⇒ 恒 false。 */
+export function parseSubscriptionProviders(raw: string): (provider: string) => boolean {
+  const set = new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s !== ""),
+  );
+  return (provider) => set.has(provider);
 }
 
 /** undefined = 放行。只读缓存，**零 IO、零 await**。 */
@@ -61,19 +77,29 @@ export function evaluateQuotaGate(model: ModelRef, deps: QuotaGateDeps): QuotaGa
  * `订阅层 asc, level asc, maxUsedPct asc, 注册表顺序 asc`。已 block 的 provider
  * （自身或任何 level >= gateLevel 的 provider）一律排除。
  *
- * 订阅层（2026-09 口径修订）：受管且带窗口数据的 provider 是**订阅额度**——窗口
- * 内不用就作废，所以只要没被排除，一律排在非受管 provider（按量计费/中转，
- * 无额度数据）之前。旧口径把非受管视作 level 0 / pct 0 排在最前，等于一有预警
- * 就把流量从「已付费的订阅」推向「按 token 计费」的模型，方向反了。
+ * 订阅优先（2026-09 口径修订）：订阅额度窗口内不用就作废。分三层——
+ *   tier 0 受管订阅（带窗口数据，额度可见）
+ *   tier 1 声明订阅（`quota.subscriptionProviders`，无额度数据）
+ *   tier 2 其余（按量计费/中转）
+ * **只要还有任何订阅候选（tier 0/1），就只推荐订阅**，宁可少于 limit 个；订阅
+ * 全部耗尽/被排除时才退到 tier 2。旧口径把非受管视作 level 0 / pct 0 排在最前，
+ * 等于一有预警就把流量从「已付费的订阅」推向「按 token 计费」的模型。
  */
 export function pickAlternatives(
   blocked: string,
-  deps: Pick<QuotaGateDeps, "verdictFor" | "available">,
+  deps: Pick<QuotaGateDeps, "verdictFor" | "available" | "isSubscription">,
   limit?: number,
 ): readonly string[] {
   const cap = limit === undefined ? DEFAULT_ALTERNATIVE_LIMIT : Math.max(0, limit);
   if (cap === 0) return [];
   const exclusion = exclusionLevel(deps);
+  const declared = (provider: string): boolean => {
+    try {
+      return deps.isSubscription?.(provider) === true;
+    } catch {
+      return false;
+    }
+  };
   const scored: { key: string; tier: number; level: LadderLevel; pct: number; order: number }[] = [];
   let order = 0;
   for (const candidate of deps.available()) {
@@ -88,7 +114,7 @@ export function pickAlternatives(
       if (verdict.level >= exclusion) continue;
       scored.push({
         key: `${candidate.provider}/${candidate.id}`,
-        tier: verdict.windows.length > 0 ? 0 : 1,
+        tier: verdict.windows.length > 0 ? 0 : declared(candidate.provider) ? 1 : 2,
         level: verdict.level,
         pct: maxUsedPct(verdict),
         order: rank,
@@ -96,11 +122,13 @@ export function pickAlternatives(
       continue;
     }
     // 无 verdict / stale：有窗口数据的 stale 快照仍是订阅（只是数据旧），归订阅层。
-    const tier = verdict !== undefined && verdict.windows.length > 0 ? 0 : 1;
+    const tier = verdict !== undefined && verdict.windows.length > 0 ? 0 : declared(candidate.provider) ? 1 : 2;
     scored.push({ key: `${candidate.provider}/${candidate.id}`, tier, level: 0, pct: 0, order: rank });
   }
-  scored.sort((a, b) => a.tier - b.tier || a.level - b.level || a.pct - b.pct || a.order - b.order);
-  return scored.slice(0, cap).map((s) => s.key);
+  // 有订阅候选 ⇒ 只推荐订阅；否则才退到按量计费。
+  const pool = scored.some((s) => s.tier < 2) ? scored.filter((s) => s.tier < 2) : scored;
+  pool.sort((a, b) => a.tier - b.tier || a.level - b.level || a.pct - b.pct || a.order - b.order);
+  return pool.slice(0, cap).map((s) => s.key);
 }
 
 /** formatModelCandidates 的 annotate 实参：返回 " [5h 92% ⚠]" 之类后缀或 undefined。 */

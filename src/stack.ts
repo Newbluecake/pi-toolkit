@@ -83,7 +83,7 @@ import {
 } from "./service/cache-adaptive.js";
 import { createQuotaStack, type QuotaHintState, type QuotaService, type QuotaStack } from "./quota/index.js";
 import { readQuotaStatusTheme } from "./quota/render.js";
-import { evaluateQuotaGate, quotaAnnotation, toLadderLevel } from "./quota/gate.js";
+import { evaluateQuotaGate, parseSubscriptionProviders, quotaAnnotation, toLadderLevel } from "./quota/gate.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
 import { createMentionNotes, type MentionNotes } from "./mention/notes.js";
@@ -1141,6 +1141,7 @@ export function buildSessionStack(
               // E 包 Minor 8：settings 的 number 经 toLadderLevel 收窄，无裸 as。
               blockAtLevel: toLadderLevel(settings.quota.gateLevel),
               now: systemClock.now(),
+              isSubscription: parseSubscriptionProviders(settings.quota.subscriptionProviders),
             });
           },
         }

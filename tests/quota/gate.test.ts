@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { formatModelCandidates, type ModelCandidate } from "../../src/config/model-hint.js";
 import {
   evaluateQuotaGate,
+  parseSubscriptionProviders,
   pickAlternatives,
   quotaAnnotation,
   toLadderLevel,
@@ -165,13 +166,9 @@ describe("pickAlternatives", () => {
       // cloudrouter-anthropic: unmanaged (no verdict) → pay-per-use tier.
     };
     const deps = gateDeps((p) => verdicts[p]);
-    // Subscriptions with headroom come first (use them up); unmanaged
-    // pay-per-use cloudrouter goes last even though it has no quota pressure.
-    expect(pickAlternatives("zai-coding-cn", deps)).toEqual([
-      "kimi-coding/kimi-k3",
-      "zai/glm-5.3-air",
-      "cloudrouter-anthropic/claude-opus-5",
-    ]);
+    // Subscriptions with headroom exist ⇒ ONLY subscriptions are recommended
+    // (use them up) — pay-per-use cloudrouter is dropped, even with a spare slot.
+    expect(pickAlternatives("zai-coding-cn", deps)).toEqual(["kimi-coding/kimi-k3", "zai/glm-5.3-air"]);
     // Same level (L1) → lower usedPct first (kimi 20% before zai 50%).
     expect(pickAlternatives("zai-coding-cn", deps, 2)).toEqual(["kimi-coding/kimi-k3", "zai/glm-5.3-air"]);
   });
@@ -183,9 +180,9 @@ describe("pickAlternatives", () => {
       "zai-coding-cn": makeVerdict({ provider: "zai-coding-cn", level: 1, windows: [win("5h", 30, 1)] }),
     };
     const deps = gateDeps((p) => verdicts[p]);
-    // kimi (fresh L3) is excluded; stale zai counts as healthy (R5) and
-    // the unmanaged cloudrouter keeps its registry position after it.
-    expect(pickAlternatives("zai-coding-cn", deps)).toEqual(["zai/glm-5.3-air", "cloudrouter-anthropic/claude-opus-5"]);
+    // kimi (fresh L3) is excluded; stale zai counts as healthy (R5) and, being a
+    // subscription, keeps pay-per-use cloudrouter out of the list.
+    expect(pickAlternatives("zai-coding-cn", deps)).toEqual(["zai/glm-5.3-air"]);
   });
 
   it("defaults to the level-3 exclusion line when deps carries no blockAtLevel (hook-side Pick)", () => {
@@ -196,10 +193,7 @@ describe("pickAlternatives", () => {
     const hookDeps = { verdictFor: (p: string) => verdicts[p], available: () => CANDIDATES };
     // No blockAtLevel in the deps → exclusion defaults to 3, so an L2 provider
     // stays recommendable even though an aggressive gateLevel=2 gate would block it.
-    expect(pickAlternatives("zai-coding-cn", hookDeps)).toEqual([
-      "zai/glm-5.3-air",
-      "cloudrouter-anthropic/claude-opus-5",
-    ]);
+    expect(pickAlternatives("zai-coding-cn", hookDeps)).toEqual(["zai/glm-5.3-air"]);
   });
 
   it("respects the exclusion line carried by full QuotaGateDeps (gateLevel 2 excludes L2)", () => {
@@ -208,7 +202,44 @@ describe("pickAlternatives", () => {
       zai: makeVerdict({ provider: "zai", level: 1, windows: [win("5h", 55, 1)] }),
     };
     const full = gateDeps((p) => verdicts[p], 2);
-    expect(pickAlternatives("zai-coding-cn", full)).toEqual(["zai/glm-5.3-air", "cloudrouter-anthropic/claude-opus-5"]);
+    expect(pickAlternatives("zai-coding-cn", full)).toEqual(["zai/glm-5.3-air"]);
+  });
+
+  it("falls back to pay-per-use only when every subscription is exhausted/excluded", () => {
+    const verdicts: Record<string, ProviderVerdict> = {
+      "kimi-coding": makeVerdict({ provider: "kimi-coding", level: 3, windows: [win("week", 100, 3)] }),
+      zai: makeVerdict({ provider: "zai", level: 3, windows: [win("5h", 95, 3)] }),
+    };
+    expect(
+      pickAlternatives(
+        "zai-coding-cn",
+        gateDeps((p) => verdicts[p]),
+      ),
+    ).toEqual(["cloudrouter-anthropic/claude-opus-5"]);
+  });
+
+  it("quota.subscriptionProviders marks quota-less providers as subscriptions (after managed ones)", () => {
+    const candidates: readonly ModelCandidate[] = [
+      { provider: "deepseek", id: "deepseek-flash" },
+      { provider: "copilot-anthropic", id: "claude-opus-5" },
+      { provider: "kimi-coding", id: "kimi-k3" },
+      { provider: "zai", id: "glm-5.3-air" },
+    ];
+    const verdicts: Record<string, ProviderVerdict> = {
+      "kimi-coding": makeVerdict({ provider: "kimi-coding", level: 3, windows: [win("week", 100, 3)] }),
+      zai: makeVerdict({ provider: "zai", level: 1, windows: [win("5h", 60, 1)] }),
+    };
+    const isSubscription = parseSubscriptionProviders(" copilot-anthropic , ,");
+    const deps = { verdictFor: (p: string) => verdicts[p], available: () => candidates, isSubscription };
+    // managed zai (visible headroom) → declared copilot → deepseek dropped.
+    expect(pickAlternatives("zai-coding-cn", deps)).toEqual(["zai/glm-5.3-air", "copilot-anthropic/claude-opus-5"]);
+    // with zai exhausted too, the declared subscription alone still keeps pay-per-use out.
+    const allHot = { ...verdicts, zai: makeVerdict({ provider: "zai", level: 3, windows: [win("5h", 99, 3)] }) };
+    expect(pickAlternatives("zai-coding-cn", { ...deps, verdictFor: (p: string) => allHot[p] })).toEqual([
+      "copilot-anthropic/claude-opus-5",
+    ]);
+    // empty setting ⇒ nothing declared.
+    expect(parseSubscriptionProviders("")("copilot-anthropic")).toBe(false);
   });
 
   it("returns [] for limit 0 and keeps registry order among equal scores", () => {

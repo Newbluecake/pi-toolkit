@@ -418,6 +418,11 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     path: "quota.providers",
     description: "Comma-separated quota providers (zai-coding-cn,zai,kimi-coding); empty = none",
   },
+  "quota.subscriptionProviders": {
+    kind: "string",
+    path: "quota.subscriptionProviders",
+    description: "Comma-separated extra subscription providers without a quota API (e.g. copilot-anthropic)",
+  },
   "quota.refreshS": seconds("quota.refreshMs", { min: 60, max: 86_400, description: "Quota snapshot TTL" }),
   "quota.staleAfterS": seconds("quota.staleAfterMs", {
     min: 60,

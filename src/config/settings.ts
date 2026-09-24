@@ -201,6 +201,11 @@ export interface QuotaSettings {
   enabled: boolean;
   /** 逗号分隔的 provider id 白名单；空串 = 全部关闭。未知 id 静默忽略。 */
   providers: string;
+  /**
+   * 逗号分隔：没有额度接口、但实为订阅的 provider（如 copilot-anthropic）。替代链
+   * 把它们与受管订阅同归「订阅」——有订阅可选时只推荐订阅。空串 = 无。
+   */
+  subscriptionProviders: string;
   /** 快照 TTL：早于此不重新请求。 */
   refreshMs: number;
   /** 超过此龄的快照视为陈旧：只提示、闸门不阻断。 */
@@ -454,6 +459,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   quota: {
     enabled: true,
     providers: "zai-coding-cn,zai,kimi-coding",
+    subscriptionProviders: "",
     refreshMs: 600_000, // 10min（简报的 refreshMinutes: 10）
     staleAfterMs: 3_600_000, // 1h
     l1Percent: 50,
@@ -839,6 +845,7 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
   return {
     enabled: bool(value.enabled, defaults.enabled),
     providers: str(value.providers, defaults.providers),
+    subscriptionProviders: str(value.subscriptionProviders, defaults.subscriptionProviders),
     refreshMs: num(value.refreshMs, defaults.refreshMs, 60_000, 86_400_000),
     staleAfterMs: num(value.staleAfterMs, defaults.staleAfterMs, 60_000, 604_800_000),
     l1Percent: l1,
