@@ -41,6 +41,7 @@ function makeVerdict(input: {
   level: LadderLevel;
   windows?: readonly WindowVerdict[];
   demoted?: boolean;
+  demotedUntil?: number;
   stale?: boolean;
 }): ProviderVerdict {
   return {
@@ -48,6 +49,7 @@ function makeVerdict(input: {
     level: input.level,
     windows: input.windows ?? [],
     demoted: input.demoted ?? false,
+    ...(input.demotedUntil === undefined ? {} : { demotedUntil: input.demotedUntil }),
     fetchedAt: NOW,
     stale: input.stale ?? false,
   };
@@ -318,5 +320,34 @@ describe("formatModelCandidates compat lock (§9 gate case 8)", () => {
     expect(formatModelCandidates(CANDIDATES, 8, annotate)).toBe(
       "Available: zai-coding-cn/glm-5.3, kimi-coding/kimi-k3 [7d 100% ⚠], zai/glm-5.3-air, cloudrouter-anthropic/claude-opus-5",
     );
+  });
+});
+
+// 等级只来自降位地板（读数与降位矛盾，2026-09-24 kimi 现场）：闸门行为与 L2 预警文案一致。
+describe("demotion-floor-only verdicts", () => {
+  const floorOnly = makeVerdict({
+    provider: "kimi-coding",
+    level: 2,
+    demoted: true,
+    demotedUntil: RESET_0211,
+    windows: [win("5h", 0, 0), win("week", 0, 0)],
+  });
+  const model = { provider: "kimi-coding", id: "kimi-k3" };
+  const verdictFor = (p: string): ProviderVerdict | undefined => (p === "kimi-coding" ? floorOnly : undefined);
+
+  it("default gateLevel 3 lets it through (the L2 copy promises no block)", () => {
+    expect(evaluateQuotaGate(model, gateDeps(verdictFor))).toBeUndefined();
+  });
+
+  it("gateLevel 2 blocks it with the demotion explanation, not '配额已用 0%'", () => {
+    const res = evaluateQuotaGate(model, gateDeps(verdictFor, 2));
+    expect(res?.level).toBe(2);
+    expect(res?.message).toContain("quota gate: kimi-coding 仍在降位期（此前额度告急触发降位，预计");
+    expect(res?.message).toContain("最新读数（5h 0% · 7d 0%）与降位矛盾");
+    expect(res?.message).not.toContain("配额已用 0%");
+  });
+
+  it("quotaAnnotation marks the demotion itself instead of a misleading reading", () => {
+    expect(quotaAnnotation({ provider: "kimi-coding", id: "kimi-k3" }, verdictFor)).toBe(" [⤓demoted ⚠]");
   });
 });

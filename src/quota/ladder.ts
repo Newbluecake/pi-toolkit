@@ -38,6 +38,8 @@ export interface ProviderVerdict {
   readonly windows: readonly WindowVerdict[];
   /** 持久化的「已降位」标记仍在有效期内。 */
   readonly demoted: boolean;
+  /** 降位标记的到期时刻（demotion store 的 expiresAt）；未降位 / 未知时 undefined。 */
+  readonly demotedUntil?: Millis | undefined;
   readonly fetchedAt: Millis;
   /** 快照年龄超过 staleAfterMs —— 闸门据此退化为不阻断。 */
   readonly stale: boolean;
@@ -46,7 +48,9 @@ export interface ProviderVerdict {
 
 /**
  * 重新武装的边界抖动幅度（plan D4/D5）：窗口 usedPct 相对上次观测回落至少
- * 这么多才认定为真实窗口重置（clears latches / forecast rings / demotions）。
+ * 这么多才**可能**是窗口重置。service 层还要求重置证据（旧 resetAt 已过 / resetAt
+ * 前移 / 下一次拉取二次确认）才据此清降位与样本环——单凭回落不够，上游故障时
+ * 端点会短暂返回归零读数（2026-09-24 kimi 现场）。
  */
 export const QUOTA_HYSTERESIS_PCT = 15;
 
@@ -117,6 +121,7 @@ export function providerVerdict(
     readonly staleAfterMs: Millis;
     readonly etaOf: (scope: WindowScope) => Millis | undefined;
     readonly demoted: boolean;
+    readonly demotedUntil?: Millis | undefined;
   },
 ): ProviderVerdict {
   const stale = input.now - snapshot.fetchedAt > input.staleAfterMs;
@@ -134,10 +139,20 @@ export function providerVerdict(
     level,
     windows,
     demoted: input.demoted,
+    ...(input.demoted && input.demotedUntil !== undefined ? { demotedUntil: input.demotedUntil } : {}),
     fetchedAt: snapshot.fetchedAt,
     stale,
     ...(snapshot.plan === undefined ? {} : { plan: snapshot.plan }),
   };
+}
+
+/**
+ * 等级只来自降位地板：仍在降位期，但没有任何窗口自身达到 L2。读数与降位矛盾
+ * （上游残缺数据、或服务端提前重置尚未被观测确认）——文案层据此如实说明，
+ * 不能拿用量最低的窗口去讲「已用 0%」。
+ */
+export function isDemotionFloorOnly(v: ProviderVerdict): boolean {
+  return v.demoted && v.level >= 2 && v.windows.every((w) => w.level < 2);
 }
 
 /** usedPct 的线性网格步（step<=0 ⇒ 恒 0，即关闭网格闸）。 */

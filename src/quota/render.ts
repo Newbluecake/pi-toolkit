@@ -13,7 +13,7 @@
 
 import type { WindowScope } from "./types.js";
 import type { Millis } from "../core/types.js";
-import { DEFAULT_THRESHOLDS, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
+import { DEFAULT_THRESHOLDS, isDemotionFloorOnly, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
 
 const MINUTE_MS = 60_000;
 
@@ -65,6 +65,10 @@ function windowText(w: WindowVerdict): string {
 
 function demotedSuffix(v: ProviderVerdict, now: Millis): string {
   if (!v.demoted) return "";
+  // 降位记录自己的到期时刻优先（Kimi 周耗尽时 5h 的 resetAt 更早，拿它当解除时刻是错的）。
+  if (v.demotedUntil !== undefined && Number.isFinite(v.demotedUntil)) {
+    return ` ⤓demoted(→${formatResetAt(v.demotedUntil, now)})`;
+  }
   const resets = v.windows.map((w) => w.resetAt).filter((r): r is Millis => r !== undefined && Number.isFinite(r));
   if (resets.length === 0) return " ⤓demoted";
   return ` ⤓demoted(→${formatResetAt(Math.min(...resets), now)})`;
@@ -118,13 +122,45 @@ function directUseText(provider: string, alternatives: readonly string[]): strin
   return `本轮不要把新任务派给 ${provider}。${alternativesAdvice(alternatives)}`;
 }
 
+/** 已耗尽的窗口没有「还剩多久耗尽」可言——ETA 子句只给未耗尽窗口。 */
+function liveEtaMs(w: WindowVerdict): number | undefined {
+  if (w.reason === "exhausted" || w.usedPct >= 100) return undefined;
+  return w.etaMs !== undefined && Number.isFinite(w.etaMs) && w.etaMs >= 0 ? w.etaMs : undefined;
+}
+
+/** 紧凑读数串（英文 token）：`5h 0% · 7d 0%`。 */
+function readingsText(v: ProviderVerdict): string {
+  return v.windows.map((w) => `${formatScope(w.scope)} ${pctOf(w.usedPct)}%`).join(" · ");
+}
+
+/**
+ * 等级只来自降位地板时的一句话（L2 预警块与 spawn 闸门文案共用）：仍在降位期、何时解除、
+ * 最新读数与降位矛盾、已按降位处理。
+ */
+export function demotionFloorClause(v: ProviderVerdict, now: Millis): string {
+  const until = v.demotedUntil === undefined ? "预计解除时间未知" : `预计 ${formatResetAt(v.demotedUntil, now)} 解除`;
+  const readings = v.windows.length > 0 ? `最新读数（${readingsText(v)}）` : "最新读数";
+  return `仍在降位期（此前额度告急触发降位，${until}），${readings}与降位矛盾，可能是上游返回的残缺数据，已按降位处理`;
+}
+
 const GATE_PROMISE_LINE = "继续派给该 provider 会在 spawn 阶段被快速失败拦下（不会消耗 run）。";
 
 /**
  * L2 提示块（含 ETA / reset）。2026-09 口径修订：订阅额度窗口内不用就作废，L2 不再建议
  * 改派其它模型、不再降位——只告知走势，明确「照常优先用」，切换留给 L3。
  */
-export function buildQuotaWarnText(v: ProviderVerdict, now: Millis, label: string = v.provider): string {
+export function buildQuotaWarnText(
+  v: ProviderVerdict,
+  now: Millis,
+  label: string = v.provider,
+  alternatives: readonly string[] = [],
+): string {
+  if (isDemotionFloorOnly(v)) {
+    // 等级只来自降位地板：挑用量最高的窗口讲「已用 0% … 派单不变」是误导（2026-09-24 kimi
+    // 现场：7d 实际仍耗尽）。如实说明降位状态；不承诺闸门行为（地板 L2 是否被拦取决于
+    // quota.gateLevel，闸门拦下时用同一句 demotionFloorClause 解释）。
+    return `[quota 预警] ${label} ${demotionFloorClause(v, now)}。\n新任务优先考虑其它订阅模型；若仍派给它，可能因额度耗尽失败。${alternativesAdvice(alternatives)}`;
+  }
   const w = triggerWindow(v);
   let head: string;
   if (w === undefined) {
@@ -133,7 +169,7 @@ export function buildQuotaWarnText(v: ProviderVerdict, now: Millis, label: strin
   } else {
     head = `[quota 预警] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
     if (w.reason === "pct") head += `（阈值 ${thresholdText(w.level)}%）`;
-    const etaMs = w.etaMs !== undefined && w.etaMs >= 0 ? w.etaMs : undefined;
+    const etaMs = liveEtaMs(w);
     if (etaMs !== undefined) head += `，按当前速率${formatEta(etaMs)}后耗尽`;
     if (w.resetAt !== undefined) {
       if (etaMs !== undefined && now + etaMs < w.resetAt) {
@@ -160,7 +196,7 @@ export function buildQuotaBlockText(
     head = `[quota 严重] ${label}`;
   } else {
     head = `[quota 严重] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
-    const etaMs = w.etaMs !== undefined && w.etaMs >= 0 ? w.etaMs : undefined;
+    const etaMs = liveEtaMs(w); // 已耗尽窗口不报 ETA（「已用 100%，预计不足 1 分钟内耗尽」自相矛盾）
     if (etaMs !== undefined) head += `，预计 ${etaSpanText(etaMs)}内耗尽`;
     if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
@@ -203,7 +239,7 @@ export function buildQuotaMessage(sections: readonly QuotaSection[], now: Millis
     );
   const grouped = groupSamePool(sections);
   for (const { section: s, label } of grouped) {
-    if (s.verdict.level === 2) parts.push(buildQuotaWarnText(s.verdict, now, label));
+    if (s.verdict.level === 2) parts.push(buildQuotaWarnText(s.verdict, now, label, s.alternatives));
   }
   for (const { section: s, label } of grouped) {
     if (s.verdict.level === 3) parts.push(buildQuotaBlockText(s.verdict, s.alternatives, now, label));

@@ -860,8 +860,13 @@ function providerVerdict(snapshot, { now, thresholds, staleAfterMs, etaOf, demot
 
 过期（双保险，任一命中即清）：
   ① TTL：now >= expiresAt（expiresAt = 触发窗口的 resetAt；未知则 markedAt + 6h）
-  ② 观测重置：新快照中该 provider 的**全部**窗口 usedPct 都 <= 旧值 - QUOTA_HYSTERESIS_PCT(15)
-     ⇒ demotions.clear(provider) 并清空该 provider 的全部 forecast 样本环
+  ② 观测重置（2026-09-26 修订，按窗口判定 + 需重置证据）：某窗口 usedPct <= 旧值 - QUOTA_HYSTERESIS_PCT(15)
+     **且**有重置证据（旧 resetAt 已过，或新 resetAt 前移 ≥ 1 分钟）⇒ demotions.clear(provider)，只清该窗口的
+     forecast 样本环；同一次落地里其它窗口仍在 L3 ⇒ 当场重新降位。
+     有回落但**无**证据 ⇒ 可疑读数：保留旧快照、不推样本、不动降位，warn 一次；下一次拉取给出同一窗口的
+     同样回落才确认为服务端提前重置（中间来过一次正常读数则作废）。
+     （旧规则「全部窗口都回落」的两个缺陷：kimi 5h 恒为 0 无法回落 ⇒ 7d 提前重置后降位永不清除；
+      上游返回残缺归零数据时若各窗口恰好都 ≥15 ⇒ 误清降位、闸门放行。现场：field-2026-09-24 / 2026-09-24 05:49 kimi 归零快照。）
   ③ 文件损坏/不可读 ⇒ 视为空表（静默），标记退化为「本进程内存有效」
 ```
 
@@ -1253,7 +1258,7 @@ moonshot-balance-positive.json
 3. 单个 adapter 抛/超时 → 其余 provider 的快照照常产出（**静默降级隔离**）
 4. `verdicts()` 是同步的且在无快照时返回 `[]`
 5. 刷新后自动 `mark` 降位（level 抬到 2）
-6. 观测到重置（全部窗口跌幅 ≥ 15）→ `clear` 降位 + 清空样本环
+6. 观测到重置（某窗口跌幅 ≥ 15 且有重置证据，或两次一致的回落确认）→ `clear` 降位 + 清空该窗口样本环；无证据的单次回落被拒收
 7. `setStatus` 在刷新后被调用；`dispose()` 后被以 `undefined` 调用一次
 8. `dispose()` 后 `refreshIfStale()` 不再发请求
 9. **无任何 timer 被创建**（`FakeClock.pendingTimers === 0` —— 锁死 D2 的「零定时器」决策）

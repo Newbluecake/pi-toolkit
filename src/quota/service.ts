@@ -10,9 +10,15 @@
  *   turn 都去撞墙（偏差记录：plan 只定义了快照 TTL，此为同节流的自然延伸）。
  * - **零 setInterval/setTimeout**（D2：懒触发为主，不装任何 timer——测试用
  *   `FakeClock.pendingTimers === 0` 锁死）。
- * - 刷新落地后：观测重置（全部窗口跌幅 ≥ QUOTA_HYSTERESIS_PCT）⇒
- *   `demotions.clear` + 清该 provider 全部样本环；否则按 (provider, scope)
- *   追加样本；verdict level ≥ 2 ⇒ `demotions.mark`；最后写 HUD status 行。
+ * - 刷新落地后先做**异常读数防护**（2026-09-24 kimi 现场：上游 502 风暴期间
+ *   `/usages` 短暂返回归零且无 resetAt 的窗口）：逐窗口判回落——跌幅
+ *   ≥ QUOTA_HYSTERESIS_PCT 且有重置证据（旧 resetAt 已过，或 resetAt 前移
+ *   ≥ RESET_ADVANCE_TOLERANCE_MS）⇒ 已验证重置；有回落无证据 ⇒ 可疑：本次**不替换
+ *   快照、不推样本、不动降位**，记一条待确认读数并把下次拉取推迟一个 refreshMs；
+ *   下一次拉取仍给出同一窗口的回落 ⇒ 确认为服务端提前重置，按已验证重置处理。
+ * - 已验证重置（任一窗口）⇒ `demotions.clear` + 重启该窗口样本环（跨重置的斜率
+ *   是垃圾）；其余窗口照常追加样本；随后 verdict level ≥ 3 ⇒ `demotions.mark`
+ *   （仍有别的窗口在 L3 就当场重新降位）；最后写 HUD status 行。
  * - dispose（M3 评审修订，单一所有者、幂等）：`setStatus(undefined)` 恰一次；
  *   在途刷新落地后**拒写 status、拒改状态**；`QuotaStack.dispose()` 只是纯转发。
  */
@@ -31,7 +37,7 @@ import {
   type ProviderAdapter,
   type QuotaProviderId,
   type QuotaSnapshot,
-  type QuotaWindowsSnapshot,
+  type QuotaWindow,
   type WindowScope,
 } from "./types.js";
 
@@ -61,16 +67,33 @@ export interface QuotaServiceDeps {
   readonly warn?: ((message: string) => void) | undefined;
 }
 
-/** §5.3 ② 观测重置：新快照的全部窗口都比旧快照同 scope 跌 ≥ QUOTA_HYSTERESIS_PCT。 */
-function isObservedReset(prev: QuotaSnapshot | undefined, next: QuotaWindowsSnapshot): boolean {
-  if (prev === undefined || prev.kind !== "windows") return false;
-  if (prev.windows.length === 0 || next.windows.length === 0) return false;
-  for (const w of next.windows) {
-    const old = prev.windows.find((p) => p.scope === w.scope);
-    if (old === undefined) return false;
-    if (w.usedPct > old.usedPct - QUOTA_HYSTERESIS_PCT) return false;
+/**
+ * resetAt 前移多少才算「窗口已滚动」的证据：两家适配器给的都是绝对重置时刻，真实重置
+ * 会让它前移一整个窗口（5h / 7d）；1 分钟容差只为吸收两次拉取间的时间戳抖动。
+ */
+export const RESET_ADVANCE_TOLERANCE_MS = 60_000;
+
+/** 可疑读数的待确认记录：哪些窗口回落了但没有重置证据。 */
+interface SuspectRead {
+  readonly fetchedAt: Millis;
+  readonly scopes: ReadonlySet<WindowScope>;
+}
+
+/**
+ * §5.3 ② 观测重置（2026-09 修订：必须有证据）。单窗口回落分类：
+ * - `none`：没有回落 ≥ QUOTA_HYSTERESIS_PCT（或旧快照无此窗口）；
+ * - `reset`：回落且有重置证据——旧 resetAt 已过，或新 resetAt 前移；
+ * - `unverified`：回落但无证据（now < 旧 resetAt 且新 resetAt 缺失/未前移，或双方都无
+ *   resetAt 可比）——交给调用方做两次确认。
+ */
+function classifyDrop(old: QuotaWindow | undefined, next: QuotaWindow, at: Millis): "none" | "reset" | "unverified" {
+  if (old === undefined) return "none";
+  if (next.usedPct > old.usedPct - QUOTA_HYSTERESIS_PCT) return "none";
+  if (old.resetAt !== undefined) {
+    if (at >= old.resetAt) return "reset";
+    if (next.resetAt !== undefined && next.resetAt - old.resetAt >= RESET_ADVANCE_TOLERANCE_MS) return "reset";
   }
-  return true;
+  return "unverified";
 }
 
 export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
@@ -79,6 +102,8 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   const rings = new Map<string, readonly BurnSample[]>();
   const inflight = new Map<QuotaProviderId, Promise<void>>();
   const lastAttempt = new Map<QuotaProviderId, Millis>();
+  /** 被拒的可疑读数（每 provider 至多一条）；下一次拉取据此做二次确认。 */
+  const suspects = new Map<QuotaProviderId, SuspectRead>();
   let disposed = false;
 
   const safeWarn = (message: string): void => {
@@ -121,9 +146,12 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       etaCache.set(scope, eta);
       return eta;
     };
+    let demotedUntil: Millis | undefined = undefined;
     let demoted = false;
     try {
-      demoted = deps.demotions.get(id, now) !== undefined;
+      const record = deps.demotions.get(id, now);
+      demoted = record !== undefined;
+      demotedUntil = record?.expiresAt;
     } catch {
       demoted = false; // demotion store 契约永不抛；此兜底为注入桩而设。
     }
@@ -134,6 +162,7 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
         staleAfterMs: settings.staleAfterMs,
         etaOf,
         demoted,
+        demotedUntil,
       });
     } catch {
       return undefined; // 纯函数层不应抛；万一抛了（注入桩）也不拖垮整批 verdict。
@@ -159,27 +188,58 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     }
   };
 
-  /** 刷新落地：存快照 → 重置检测/样本环 → 降位标记 → HUD。调用方保证 disposed === false。 */
+  /**
+   * 刷新落地：异常读数防护 → 存快照 → 重置检测/样本环 → 降位标记 → HUD。
+   * 调用方保证 disposed === false。
+   */
   const applySnapshot = (snapshot: QuotaSnapshot): void => {
     const id = snapshot.provider;
     const now = clock.now();
     const prev = snapshots.get(id);
-    snapshots.set(id, snapshot);
-    if (snapshot.kind === "windows") {
-      if (isObservedReset(prev, snapshot)) {
-        // §5.3 ②：观测重置 ⇒ 清降位 + 清该 provider 全部样本环（跨重置的斜率是垃圾）。
-        try {
-          deps.demotions.clear(id);
-        } catch {
-          // 契约永不抛，兜注入桩。
-        }
-        for (const w of snapshot.windows) rings.delete(ringKey(id, w.scope));
-      } else {
-        for (const w of snapshot.windows) {
-          const key = ringKey(id, w.scope);
-          rings.set(key, pushSample(rings.get(key) ?? [], { at: snapshot.fetchedAt, usedPct: w.usedPct }));
+    const pending = suspects.get(id);
+    const resetScopes = new Set<WindowScope>();
+    const unverified = new Set<WindowScope>(); // 本次无证据回落的全部窗口（含被二次确认者）
+    let rejected = false;
+    const drops: string[] = [];
+    if (prev !== undefined) {
+      for (const w of snapshot.windows) {
+        const old = prev.windows.find((p) => p.scope === w.scope);
+        const kind = classifyDrop(old, w, snapshot.fetchedAt);
+        if (kind === "reset") {
+          resetScopes.add(w.scope);
+        } else if (kind === "unverified") {
+          unverified.add(w.scope);
+          drops.push(`${w.scope} ${Math.round(old?.usedPct ?? 0)}%→${Math.round(w.usedPct)}%`);
+          // 两次确认：上一条被拒读数也报了这个窗口的回落 ⇒ 认定服务端提前重置。
+          if (pending?.scopes.has(w.scope) === true) resetScopes.add(w.scope);
+          else rejected = true;
         }
       }
+    }
+    if (rejected) {
+      // 可疑读数：不替换快照、不推样本、不清降位——旧快照继续生效（会自然老化为 stale）。
+      suspects.set(id, { fetchedAt: snapshot.fetchedAt, scopes: unverified });
+      safeWarn(
+        `[quota] ${id}: usage dropped without reset evidence (${drops.join(", ")}); ` +
+          "keeping the previous snapshot until the next read confirms it",
+      );
+      return;
+    }
+    suspects.delete(id);
+    snapshots.set(id, snapshot);
+    if (resetScopes.size > 0) {
+      // §5.3 ②：有证据的观测重置 ⇒ 清降位（同一次落地里若别的窗口仍在 L3，下面会当场重新降位）。
+      try {
+        deps.demotions.clear(id);
+      } catch {
+        // 契约永不抛，兜注入桩。
+      }
+    }
+    for (const w of snapshot.windows) {
+      const key = ringKey(id, w.scope);
+      const sample: BurnSample = { at: snapshot.fetchedAt, usedPct: w.usedPct };
+      // 重置窗口的样本环从新样本重启（跨重置的斜率是垃圾）；其余窗口照常追加。
+      rings.set(key, resetScopes.has(w.scope) ? [sample] : pushSample(rings.get(key) ?? [], sample));
     }
     const verdict = verdictOf(id, now);
     if (verdict !== undefined && verdict.level >= 3) {
@@ -208,6 +268,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       const existing = snapshots.get(id);
       if (existing !== undefined) {
         if (now - existing.fetchedAt < settings.refreshMs) continue; // TTL：快照未过期
+        // 刚拒过一条可疑读数：确认读数至少隔一个刷新周期再拉（不在故障风暴里连撞端点）。
+        const suspect = suspects.get(id);
+        if (suspect !== undefined && now - suspect.fetchedAt < settings.refreshMs) continue;
       } else {
         // 无快照（从未成功或上次失败）：按上次尝试时间退避，失败的端点不被每轮 turn 撞击。
         const last = lastAttempt.get(id);

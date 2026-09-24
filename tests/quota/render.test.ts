@@ -314,3 +314,77 @@ describe("renderQuotaStatus (HUD line)", () => {
     expect(readQuotaStatusTheme({ ui: { theme: { fg: "not-a-fn" } } })).toBeUndefined();
   });
 });
+
+// 2026-09-24 kimi 现场：等级只来自降位地板时，旧文案挑用量最高的窗口说「5h 已用 0% …
+// 派单不变」；已耗尽窗口还报「预计不足 1 分钟内耗尽」。
+describe("demotion-floor copy and exhausted windows", () => {
+  const UNTIL = new Date(2026, 0, 18, 9, 6, 0).getTime(); // 1/18 09:06（跨天带日期）
+  const floorOnly = verdict({
+    provider: "kimi-coding",
+    level: 2,
+    demoted: true,
+    demotedUntil: UNTIL,
+    windows: [w("5h", 0, 0, "none"), w("week", 0, 0, "none")],
+  });
+
+  it("L2 block says the provider is still demoted instead of '已用 0% … 派单不变'", () => {
+    const text = buildQuotaWarnText(floorOnly, NOW, "kimi-coding", ["zai-coding-cn/glm-5.3"]);
+    expect(text).toBe(
+      [
+        "[quota 预警] kimi-coding 仍在降位期（此前额度告急触发降位，预计 1/18 09:06 解除），最新读数（5h 0% · 7d 0%）与降位矛盾，可能是上游返回的残缺数据，已按降位处理。",
+        "新任务优先考虑其它订阅模型；若仍派给它，可能因额度耗尽失败。替代候选（订阅优先）：zai-coding-cn/glm-5.3。",
+        "按任务需求选：候选能胜任就优先用（订阅额度不用会作废）；不胜任就按路由表另选合适模型，不必硬凑。",
+      ].join("\n"),
+    );
+    expect(text).not.toContain("派单不变");
+    expect(text).not.toContain("已用 0%");
+  });
+
+  it("says 预计解除时间未知 when the demotion record carries no expiry", () => {
+    const { demotedUntil: _drop, ...rest } = floorOnly;
+    const text = buildQuotaWarnText(rest, NOW);
+    expect(text).toContain("仍在降位期（此前额度告急触发降位，预计解除时间未知）");
+  });
+
+  it("buildQuotaMessage routes the floor-only verdict's alternatives into the L2 block", () => {
+    const text = buildQuotaMessage([{ verdict: floorOnly, alternatives: ["zai-coding-cn/glm-5.3"] }], NOW);
+    expect(text).toContain("仍在降位期");
+    expect(text).toContain("替代候选（订阅优先）：zai-coding-cn/glm-5.3");
+  });
+
+  it("a window genuinely at L2 keeps the ordinary advisory copy even while demoted", () => {
+    const v = verdict({ level: 2, demoted: true, demotedUntil: UNTIL, windows: [w("5h", 78, 2, "pct")] });
+    const text = buildQuotaWarnText(v, NOW);
+    expect(text).toContain("5h 已用 78%");
+    expect(text).not.toContain("仍在降位期");
+  });
+
+  it("⤓demoted(→…) prefers the demotion record's expiry over the earliest window reset", () => {
+    const v = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      demoted: true,
+      demotedUntil: UNTIL,
+      windows: [w("5h", 0, 0, "none", { resetAt: RESET }), w("week", 100, 3, "exhausted", { resetAt: UNTIL })],
+    });
+    expect(renderProviderLine(v, NOW)).toBe("kimi-coding 5h 0% · 7d 100% ⚠ ⤓demoted(→1/18 09:06)");
+  });
+
+  it("L3 block never attaches an ETA to an exhausted window", () => {
+    const v = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [w("5h", 0, 0, "none"), w("week", 100, 3, "exhausted", { resetAt: UNTIL, etaMs: 20_000 })],
+    });
+    const text = buildQuotaBlockText(v, [], NOW);
+    expect(text.split("\n")[0]).toBe("[quota 严重] kimi-coding 7d 已用 100%（窗口 1/18 09:06 重置）。");
+    expect(text).not.toContain("预计");
+  });
+
+  it("L2 block never attaches an ETA to an exhausted window either (defensive)", () => {
+    const v = verdict({ level: 2, windows: [w("week", 100, 2, "exhausted", { etaMs: 20_000 })] });
+    const text = buildQuotaWarnText(v, NOW);
+    expect(text).toContain("7d 已用 100%");
+    expect(text).not.toContain("按当前速率");
+  });
+});

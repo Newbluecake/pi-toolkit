@@ -22,9 +22,9 @@
 
 import type { ModelCandidate, ModelRef } from "../config/model-hint.js";
 import type { Millis } from "../core/types.js";
-import type { ProviderVerdict, WindowVerdict } from "./ladder.js";
+import { isDemotionFloorOnly, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
 import type { LadderLevel } from "./types.js";
-import { alternativesAdvice, formatResetAt, formatScope } from "./render.js";
+import { alternativesAdvice, demotionFloorClause, formatResetAt, formatScope } from "./render.js";
 
 export interface QuotaGateVerdict {
   readonly level: LadderLevel;
@@ -139,6 +139,8 @@ export function quotaAnnotation(
   // 无快照 / 非受管 provider / L0 ⇒ 零标记（输出与今天逐字节相同）。
   const verdict = verdictFor(candidate.provider);
   if (verdict === undefined || verdict.level < 1) return undefined;
+  // 等级只来自降位地板：读数与降位矛盾，标读数（`7d 0% ⚠`）只会误导——标降位本身。
+  if (isDemotionFloorOnly(verdict)) return ` [⤓demoted${levelMark(verdict.level)}]`;
   // 取该 provider 等级最高的那个窗口来标注（Kimi 周 100% 压过 5h 8%）。
   const w = triggerWindow(verdict);
   if (w === undefined) return undefined;
@@ -203,6 +205,9 @@ function levelMark(level: LadderLevel): string {
 }
 
 function windowClause(v: ProviderVerdict, now: Millis): string {
+  // 等级只来自降位地板（只有 quota.gateLevel ≤ 2 才会拦到这里）：与 L2 预警块同一句解释，
+  // 不拿「5h 配额已用 0%」当拦截理由。
+  if (isDemotionFloorOnly(v)) return demotionFloorClause(v, now);
   const w = triggerWindow(v);
   if (w === undefined) {
     return "配额状态未知"; // 防御分支：无窗口数据（适配器层不产出）
@@ -230,7 +235,7 @@ function buildGateMessage(
       ? alternativesAdvice(alternatives)
       : "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。";
   return (
-    `quota gate: ${provider} 的 ${windowClause(verdict, now)}，本次 spawn 已快速失败，未消耗任何 run。\n` +
+    `quota gate: ${provider}${isDemotionFloorOnly(verdict) ? " " : " 的 "}${windowClause(verdict, now)}，本次 spawn 已快速失败，未消耗任何 run。\n` +
     `${altLine}\n` +
     `（在 settings 文件里把 quota.gate 设为 false 可关闭本闸门。）`
   );

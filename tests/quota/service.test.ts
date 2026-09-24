@@ -179,34 +179,41 @@ describe("createQuotaService", () => {
   });
 
   it("observed reset clears the demotion and the sample rings (eta probe)", async () => {
-    // l3EtaMs=0 + 无 resetAt ⇒ forecast 不抬级，etaMs 只作环探针。
+    // l3EtaMs=0 ⇒ forecast 不按 ETA 硬线抬级，etaMs 只作环探针。窗口重置时刻 R 落在第 3、4 次
+    // 拉取之间：第 4 次拉取时旧 resetAt 已过——这是观测重置的「证据」（2026-09 修订：无证据的
+    // 回落会被当作可疑读数拒收，见下方 anomaly-guard 用例）。
     const f = makeFixture({ l3EtaMs: 0 });
-    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 60 }], f.clock.now()));
+    const t0 = f.clock.now();
+    const R = t0 + 1_500_000; // t0+25min
+    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 60, resetAt: R }], f.clock.now()));
     f.service.refreshIfStale();
     await f.service.whenIdle();
     f.clock.advance(600_000); // 10min
-    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 80 }], f.clock.now()));
+    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 80, resetAt: R }], f.clock.now()));
     f.service.refreshIfStale();
     await f.service.whenIdle();
     // 80% ⇒ L2 只提示、不降位（订阅优先用完）；环 [60@t0, 80@t1] ⇒ eta = (100-80)/(20/10min) = 10min。
     expect(f.demotions.get("zai-coding-cn", f.clock.now())).toBeUndefined();
     expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(600_000);
     f.clock.advance(600_000);
-    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 92 }], f.clock.now()));
+    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 92, resetAt: R }], f.clock.now()));
     f.service.refreshIfStale();
     await f.service.whenIdle();
     // 92% ⇒ L3 ⇒ 降位标记；环 [60@t0, 92@t2] ⇒ eta = (100-92)/(32/20min) = 5min。
     expect(f.demotions.get("zai-coding-cn", f.clock.now())?.level).toBe(3);
     expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(300_000);
-    f.clock.advance(600_000);
-    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 5 }], f.clock.now()));
+    f.clock.advance(600_000); // t3 = t0+30min > R
+    f.zai.set(() =>
+      windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 5, resetAt: R + 18_000_000 }], f.clock.now()),
+    );
     f.service.refreshIfStale();
     await f.service.whenIdle();
-    // 全部窗口跌幅 92→5（≥15）⇒ 观测重置：clear 降位 + 清环。
+    // 92→5（≥15）且旧 resetAt 已过 ⇒ 观测重置：clear 降位 + 清环。
     expect(f.demotions.get("zai-coding-cn", f.clock.now())).toBeUndefined();
     const after = f.service.verdictFor("zai-coding-cn");
     expect(after?.level).toBe(0);
     expect(after?.demoted).toBe(false);
+    expect(after?.windows[0]?.usedPct).toBe(5);
     expect(after?.windows[0]?.etaMs).toBeUndefined(); // 环只剩 1 个样本 ⇒ too-few
   });
 
@@ -269,5 +276,204 @@ describe("createQuotaService", () => {
     expect(f.setStatus).not.toHaveBeenCalledWith(expect.stringMatching(/^quota /));
     expect(f.service.verdictFor("zai-coding-cn")).toBeUndefined();
     expect(f.demotions.list(f.clock.now())).toHaveLength(0);
+  });
+});
+
+// 2026-09-24 kimi 现场：上游 502 风暴期间 /usages 短暂返回归零、无 resetAt 的窗口；
+// 旧实现无条件接受 ⇒ 注入「5h 已用 0%，派单不变」、样本环被 0 污染（随后报出「100% 且
+// 不足 1 分钟内耗尽」），若 5h 当时非 0 还会清掉降位。
+describe("createQuotaService anomaly guard (drops need reset evidence)", () => {
+  const HOUR = 3_600_000;
+  const REFRESH = DEFAULT_SETTINGS.quota.refreshMs;
+
+  async function land(f: Fixture, stub: Stub, snapshot: () => QuotaSnapshot): Promise<void> {
+    stub.set(snapshot);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+  }
+
+  /** kimi 现场形状：5h 空闲、7d 耗尽 ⇒ L3 + 降位至 7d 重置时刻。 */
+  async function kimiExhausted(f: Fixture): Promise<{ r5h: number; rWeek: number; t0: number }> {
+    const t0 = f.clock.now();
+    const r5h = t0 + 3 * HOUR;
+    const rWeek = t0 + 90 * HOUR;
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0, resetAt: r5h },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    );
+    return { r5h, rWeek, t0 };
+  }
+
+  const zeroed = (f: Fixture) => (): QuotaSnapshot =>
+    windowsSnapshot(
+      "kimi-coding",
+      [
+        { scope: "5h", usedPct: 0 },
+        { scope: "week", usedPct: 0 },
+      ],
+      f.clock.now(),
+    );
+
+  it("rejects a transient zeroed snapshot: snapshot, demotion and HUD stay put; warns once", async () => {
+    const f = makeFixture();
+    const { rWeek, t0 } = await kimiExhausted(f);
+    expect(f.demotions.get("kimi-coding", f.clock.now())).toMatchObject({ level: 3, expiresAt: rWeek });
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed(f));
+    const v = f.service.verdictFor("kimi-coding");
+    expect(v?.fetchedAt).toBe(t0); // 快照未被替换
+    expect(v?.windows.map((w) => w.usedPct)).toEqual([0, 100]);
+    expect(v?.level).toBe(3);
+    expect(v?.demoted).toBe(true);
+    expect(v?.demotedUntil).toBe(rWeek);
+    expect(f.demotions.get("kimi-coding", f.clock.now())).toMatchObject({ level: 3, expiresAt: rWeek });
+    const warns = f.warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("without reset evidence"));
+    expect(warns).toEqual([expect.stringContaining("kimi-coding")]);
+    expect(warns[0]).toContain("week 100%→0%");
+    // 被拒后不在故障风暴里连撞端点：确认读数至少隔一个 refreshMs。
+    const fetches = f.kimi.fetches();
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.kimi.fetches()).toBe(fetches);
+  });
+
+  it("rejected reads never enter the forecast ring (eta keeps the pre-anomaly slope)", async () => {
+    const f = makeFixture({ l3EtaMs: 0 });
+    const reset = f.clock.now() + 4 * HOUR;
+    const snap = (pct: number, resetAt?: number) => (): QuotaSnapshot =>
+      windowsSnapshot(
+        "zai-coding-cn",
+        [resetAt === undefined ? { scope: "5h", usedPct: pct } : { scope: "5h", usedPct: pct, resetAt }],
+        f.clock.now(),
+      );
+    await land(f, f.zai, snap(40, reset));
+    f.clock.advance(REFRESH);
+    await land(f, f.zai, snap(60, reset));
+    // 环 [40@t0, 60@t1] ⇒ eta = (100-60)/(20/10min) = 20min
+    expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(1_200_000);
+    f.clock.advance(REFRESH);
+    await land(f, f.zai, snap(0)); // 可疑：60→0，无 resetAt
+    expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.usedPct).toBe(60);
+    expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(1_200_000);
+    f.clock.advance(REFRESH);
+    await land(f, f.zai, snap(65, reset));
+    // 环 [40@t0, 60@t1, 65@t3] ⇒ eta = (100-65)/(25/30min) = 42min；若 0 进过环则是 [0, 65] 的陡斜率。
+    expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(2_520_000);
+  });
+
+  it("accepts the drop when the next read (one refresh later) repeats it — server-side early reset", async () => {
+    const f = makeFixture();
+    await kimiExhausted(f);
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed(f));
+    expect(f.service.verdictFor("kimi-coding")?.level).toBe(3); // 第一次：拒收
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed(f));
+    const v = f.service.verdictFor("kimi-coding");
+    expect(v?.fetchedAt).toBe(f.clock.now());
+    expect(v?.windows.map((w) => w.usedPct)).toEqual([0, 0]);
+    expect(v?.level).toBe(0);
+    expect(v?.demoted).toBe(false);
+    expect(f.demotions.get("kimi-coding", f.clock.now())).toBeUndefined();
+  });
+
+  it("a normal read in between discards the pending suspect — a later anomaly is rejected afresh", async () => {
+    const f = makeFixture();
+    const { r5h, rWeek } = await kimiExhausted(f);
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed(f)); // 可疑
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0, resetAt: r5h },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    ); // 正常读数落地
+    const normalAt = f.clock.now();
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed(f)); // 新一轮异常：不能被上上次的可疑读数「确认」
+    expect(f.service.verdictFor("kimi-coding")?.fetchedAt).toBe(normalAt);
+    expect(f.service.verdictFor("kimi-coding")?.level).toBe(3);
+    expect(f.demotions.get("kimi-coding", f.clock.now())?.level).toBe(3);
+  });
+
+  it("old resetAt already passed ⇒ immediate observed reset, demotion cleared", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    f.demotions.mark("zai-coding-cn", 3, t0 + 48 * HOUR, t0); // 持久化的降位（跨进程遗留）
+    await land(f, f.zai, () =>
+      windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 60, resetAt: t0 + 300_000 }], f.clock.now()),
+    );
+    expect(f.service.verdictFor("zai-coding-cn")?.demoted).toBe(true);
+    f.clock.advance(REFRESH); // 越过旧 resetAt
+    await land(f, f.zai, () => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 3 }], f.clock.now()));
+    const v = f.service.verdictFor("zai-coding-cn");
+    expect(v?.windows[0]?.usedPct).toBe(3);
+    expect(v?.demoted).toBe(false);
+    expect(f.demotions.get("zai-coding-cn", f.clock.now())).toBeUndefined();
+  });
+
+  it("resetAt moved forward ⇒ immediate observed reset even while another window stays idle", async () => {
+    // kimi 形状：5h 恒 0（无法回落），7d 提前重置并给出新的重置时刻。旧规则要求「全部窗口
+    // 回落」，此时降位永远清不掉；现在任一窗口有证据的重置即清。
+    const f = makeFixture();
+    const { r5h, rWeek } = await kimiExhausted(f);
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0, resetAt: r5h },
+          { scope: "week", usedPct: 2, resetAt: rWeek + 168 * HOUR },
+        ],
+        f.clock.now(),
+      ),
+    );
+    const v = f.service.verdictFor("kimi-coding");
+    expect(v?.windows.map((w) => w.usedPct)).toEqual([0, 2]);
+    expect(v?.level).toBe(0);
+    expect(f.demotions.get("kimi-coding", f.clock.now())).toBeUndefined();
+    expect(f.warn).not.toHaveBeenCalledWith(expect.stringContaining("without reset evidence"));
+  });
+
+  it("a verified reset of one window re-marks the demotion when another window is still L3", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    const rWeek = t0 + 90 * HOUR;
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 60, resetAt: t0 + 300_000 },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    );
+    f.clock.advance(REFRESH); // 5h 旧 resetAt 已过 ⇒ 5h 的回落有证据
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 1, resetAt: t0 + 5 * HOUR },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    );
+    const v = f.service.verdictFor("kimi-coding");
+    expect(v?.level).toBe(3);
+    expect(v?.demoted).toBe(true);
+    expect(f.demotions.get("kimi-coding", f.clock.now())).toMatchObject({ level: 3, expiresAt: rWeek });
   });
 });
