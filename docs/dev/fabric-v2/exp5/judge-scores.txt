@@ -1,0 +1,19 @@
+judges: ['claude-sonnet-5', 'kimi-k3']
+c0-r1  c0  scores=[4, 3] mean=3.5 violations=[2, 3]  D1:✗/✗ D2:✓/✓ D3:✓/✓ D4:✓/✗ D5:✓/✓ D6:✗/✗ D7:·/·
+c0-r2  c0  scores=[1, 1] mean=1.0 violations=[5, 5]  D1:✗/✗ D2:✗/✗ D3:✗/✗ D4:✗/✗ D5:✓/✓ D6:✗/✗ D7:·/·
+c1-r1  c1  scores=[7, 7] mean=7.0 violations=[0, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+c1-r2  c1  scores=[7, 7] mean=7.0 violations=[0, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+c2-r1  c2  scores=[6, 6] mean=6.0 violations=[1, 1]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✗/✗ D7:✓/✓
+c2-r2  c2  scores=[6, 7] mean=6.5 violations=[1, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✗/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+c3-r1  c3  scores=[7, 7] mean=7.0 violations=[0, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+c3-r2  c3  scores=[7, 7] mean=7.0 violations=[0, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+e1-r1  e1  scores=[7, 7] mean=7.0 violations=[0, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+e1-r3  e1  scores=[7, 7] mean=7.0 violations=[0, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+e1-r4  e1  scores=[7, 7] mean=7.0 violations=[0, 0]  D1:✓/✓ D2:✓/✓ D3:✓/✓ D4:✓/✓ D5:✓/✓ D6:✓/✓ D7:✓/✓
+
+inter-judge agreement: 75/77 = 97%
+c0: mean score 2.25  (runs 3.5, 1.0)  mean violations 3.8
+c1: mean score 7.00  (runs 7.0, 7.0)  mean violations 0.0
+c2: mean score 6.25  (runs 6.0, 6.5)  mean violations 0.8
+c3: mean score 7.00  (runs 7.0, 7.0)  mean violations 0.0
+e1: mean score 7.00  (runs 7.0, 7.0, 7.0)  mean violations 0.0

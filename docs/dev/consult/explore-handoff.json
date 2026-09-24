@@ -1,0 +1,367 @@
+{
+  "conclusion": "按 8 个问题分点（行号均为当前工作区实测）：\n\n【1. resume 全链路】Agent({resume}) 的完整路径：(a) src/tools/agent-tool.ts:288 把 params.resume 变成 SpawnRequest.resumeFrom；(b) src/service/spawn-service.ts spawn() 准入段 371-418：先用 resolveRun(371) 解析 running 提示（仍在跑→400-407 拒绝并提示 steer_subagent），再用 resolveResume(395/409) 拿 sessionFile，411-413 检查 resumeLocks（targetId 与 sessionFile 双键，任一命中即拒绝 \"already has a resume in progress\"），415-416 加双锁，417 把 resumeFrom 重写为 sessionFile 绝对路径；(c) 锁释放只在 start() 的 finally（spawn-service.ts:243-250，释放 resumeLockKeys 里所有键——曾有的 P1 bug 是只删 resumeFrom 导致 targetId 锁永久泄漏）；(d) src/service/resolve-target.ts resolveResumeTarget(150-168)：id→唯一前缀→label 三级解析，sessionFile 只能来自 live/records 终态快照（snapshotWithSessionFile:51-65 要求 TERMINAL + diag.sessionFile）或 tombstone，且 existsSync+statIsFile 校验，注释明确「caller-provided path is never accepted」(147-149)；(e) resumeFrom 经 request-threading.ts:26 THREADED 白名单穿透到 ResolvedSpawnRequest；(f) src/runtime/runner.ts:465-470 在 session_create 相位分派 driver.resume(req.resumeFrom, req)（driver 无 resume 能力则 reject）；(g) src/runtime/session-driver.ts resume(324-331)：SessionManager.open(sessionFile) 打开【同一个文件】再 createAgentSession({sessionManager})——续写原 session 文件的根因即在此：pi 的会话是 append-only 树，prompt() 的新条目全部 append 进专家原 jsonl。锁只防并发 resume 互斥，不提供「不污染」语义。另注：resume 时 withResolvedModel 仍应用 spec.model 覆盖（可换模型，但换模型即破坏缓存前缀）。\n\n【2. run 记录与 tombstone 生命周期 / reload】全部进程内存态：records Map(104)、outcomes(105)、running Set(108)、claimedRunIds(109)、resumeLocks(110)、labels(111)、nesting/childrenOf/parentOf(121-123) 都是 createSpawnService 闭包内变量。写入时机：running 在 start() 起始 add、finish() delete；records 在每次 onSnapshot 与 finish() 终态重建时 set；tombstones 在 finish() 对每个带 sessionFile 的终态快照 register（spawn-service.ts:178），TombstoneStore（src/service/tombstone.ts:19-36）TTL 默认 30 分钟（spawn-service.ts:112），字段仅 runId/generation/sessionFile/createdAt/expiresAt，has/get/list 时惰性 cleanup。持久化：wrapWithRunLog（src/adapters/pi-run-log.ts:24-40）把每个终态 RunSnapshot 整体 appendEntry(\"subagent:run\", snapshot) 写进【主会话】jsonl（runLogHost 的 sessionManager 是宿主 ctx 的）——RunSnapshot 含 runId/generation/status/phase/deadlines/diag{sessionFile、model、label、agentType、taskPrompt、usage、toolCounts…}/outcome/updatedAt/parentRunId，即 F3 重建所需最小字段（runId、label、sessionFile、type=diag.agentType、model=diag.model）全部已在。/reload：index.ts:522-546 session_shutdown 先对所有非终态 run stop(\"shutdown\")；session_start → buildSessionStack（stack.ts:847 起）全新构造：新 spawn service（records/labels/tombstones 全空）、新 MemoryRunStore（空）。ctx.sessionManager.getEntries() 的 prefetchedEntries（stack.ts:850）只被两处消费：fabric 树重建（263-273，读 subagent:run 补边/markRunning/tombstone，且仅 settings.fabric.enabled 时）与 outbox 的 taken runId 集合（880-890，防新 run 撞旧 id）。没有任何代码把 subagent:run 条目回灌 records/labels ⇒ reload 后按 run id/label resume 一律 \"resume target not found\"（与项目记忆一致）。但主会话文件里的 subagent:run 条目在 reload / 主会话 /resume 后仍可经 getEntries() 读到，足以重建 consult 的专家索引；session-nav（src/session-nav/subagent-sessions.ts:68-90）已有扫描 jsonl 提取 subagent:run 标记的先例。\n\n【3. pi SDK 会话 fork 能力】SessionManager 有现成 fork 能力（node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.d.ts + docs/session-format.md:380-430）：① createBranchedSession(leafId)（d.ts ~232；实现 dist/core/session-manager.js:1080-1168）——在【同一 sessionDir】生成全新文件 <timestamp>_<新id>.jsonl，createSessionId() 新 id、header 带 parentSession=原文件路径（原文件完全不动），复制 root→leafId 路径（label 条目剔除重链）；注意它会原地 MUTATE 该 SessionManager 实例（sessionId/sessionFile 指向新文件、leaf=路径末条），且无 assistant 消息时延迟到首次 _persist 才写盘；persist=false 时返回 undefined。② 静态 forkFrom(sourcePath, targetCwd, sessionDir?, options?)（js:1237-1272）——读源文件全部条目，在目标目录建新文件：新 id + parentSession=源路径，writeFileSync flag:\"wx\"（绝不覆盖），逐条 append 非头条目，返回新 SessionManager 实例（不动源）。③ branch()/branchWithSummary() 只移 leaf 指针，后续 append 仍写【原文件】——不适合 consult 的 F2。文件格式（session-format.md:180-206）：首行 header {type:\"session\",version:3,id,cwd,parentSession?}，条目 8 位 hex id + parentId 构成树。「手复制 jsonl 再 open」的隐患：副本 header 携带与原文件相同的会话 id（两文件同 id，open() 信任 header）；无 parentSession 溯源；无 wx 防覆盖；对终态专家无写入竞态但仍属脏路径。createBranchedSession/forkFrom 全部规避（新 id+父链+append-only）。与 pi-toolkit 的接缝先例：PiSessionDriver.resume(324-331) 已演示 SessionManager.open + createAgentSession({sessionManager}) 的注入方式，fork 出的 manager 可同法注入。注意 fork 文件落在专家的 sessionDir（createBranchedSession）——会在 /resume 列表里以普通会话出现（session-nav 按 subagent:run 标记区分主/子会话，fork 文件里没有这些标记，会被当主会话列出），consult 需要清理策略或专用 sessionDir。\n\n【4. 嵌套工具注入与作用域】子会话工具注入全在 src/service/runtime-adapter.ts run() 内（384-471）：customTools 数组 + grantedReserved 数组按序注入——message_agent（fabric 开启时，386-412，带 from=runId、canMessage 白名单）、set_model（无条件，421-429）、嵌套 Agent（spec.type.canSpawn?.length && deps.nestedSpawn 时，430-442：allowedTypes=canSpawn、forceSlotless=true、parentRunId=本 run id）、StructuredOutput（有 schema 时，444-457）；随后 M1 合并（470-471）把 grantedReserved 并进 sessionSpec.tools 允许列表，否则 pi 的注册表过滤会静默丢弃这些保留名工具；toolScope = buildToolScopePolicy({tools: type.tools, granted: grantedReserved})（492-494）。src/runtime/tool-scope.ts：RESERVED_TOOL_NAMES（36-45：Agent/get_subagent_result/steer_subagent/StructuredOutput/message_agent/set_model/extend_subagent_timeout）默认全 deny，granted 的从 deny 排除并加进 allow（81-88）；enforcer 在 bind 后与每个 turn_end 重放（runner.ts bind 回调内调用，仅 turn 边界），以 getActiveTools() 为唯一事实源，新注册的未授权工具会被剥除并 WARN（TS4 只报 bind 后新增者）。主会话注册在 src/index.ts：pre-guard（子会话保留）注册 web_search/todo/memory（89-107）；HOST_KEY 认领（141 一带 if(g[HOST_KEY]) return 使子会话 inert）之后注册 Agent/get_subagent_result/steer/abort/extend/set_model(host form)/switch_context/compact_context/set_compact_threshold/bash/bash_job/SubagentWorkflow + /agent /goal 命令 + before_agent_start 系统提示注入（agent 类型列表 + 可用模型表）。consult 工具的自然落点＝runtime-adapter 的 customTools 注入（同 set_model/message_agent 模式，需要的话加进 RESERVED_TOOL_NAMES + granted）。\n\n【5. 通知抑制与可观测性】前台嵌套 run 完成通知的抑制是 CC2：runtime-adapter.ts childRunIds 集合，run() 入口 343 行 `if (spec.request.parentRunId !== undefined) childRunIds.add(spec.runId)`（判据只看带没带 parentRunId，不看父真假）；enqueue_delivery 解释器 237 行丢弃子 run 投递；settleConfigFailure 312 行同样拦；deadlineNoticeHandler 107 行拦宽限/延长通知。expectAck/claimedRunIds（spawn-service.ts:431 add、508 expectsAck）不是抑制机制：ackWindowMs 默认 0，notifier enqueue→send 同步链先于 ack 执行（fail-open，silent-run 文档 §2.2 论证）；它只影响 shouldDeliverDeadlineNotice（delivery/deadline-notice.ts:98-109：expectsAck && !autoBackgrounded ⇒ 不发 deadline 通知）与 spawnAndWait 的结果认领（onOutcomeAcked→notifier.ack，stack.ts）。已知缺口（silent-run-a1 §2.3/a1-r3 §5.2，当前代码仍存在）：spawn-service.ts:243 start() catch 的 notifyTerminalFailure 不查 parentRunId——runner.run() 抛异常路径上子 run 会漏发顶层通知（正常路径不可达，consult 用 parentRunId 时应顺手修）。fleet widget：fleet-panel.ts toRow 397 行 nested=snapshot.parentRunId!==undefined；fleet-widget.ts treeOrder 把 parentRunId 指向另一 run 的行缩进嵌套（425-429 ↳ 缩进），workflow 子女另有 ⚙ 组头（404-423）——consult 挂提问方真实 runId 即自动成为提问方行下的子节点。成本：每个 run 自己的 diag.usage 是 message_end 累加的生命周期累计（X9）；子 run 成本回传父会话靠工具结果上的 usage（agent-tool.ts execute 返回 usage: toPiToolUsage(outcome.usage)，src/tools/usage.ts——pi 把它记在 toolResult 消息上并计入 footer//session/RPC 总账）；fleet 面板 usageTotal 汇总各 run diag.usage（fleet-panel.ts:427）；HUD 经 subagent:usage 1Hz 广播看实时子 agent 成本。\n\n【6. 预算与零挂死】单 run 覆盖：Agent 工具 timeout_s → budgetOverride:{totalMs: timeout_s*1000}（agent-tool.ts:289）；spawn() 合并 mergeBudget(settings.budget, type.budgetOverride, req.budgetOverride) 后 applyBudgetPolicy（spawn-service.ts:419-431）——显式 totalMs ⇒ maxTotalFactor=1 硬顶（无宽限无延长，deadline.ts:96-102）；另有 CC4 deadlineAt 绝对时刻硬顶（只收紧）。watchdog 子阶段（deadline.ts DEFAULT_BUDGET:11-32 + dueAtFor:45-80 + watchdog.ts timerReason:17-30）：queueWait 10m/queue_timeout、startup 30s、bind 60s、firstEvent 2m、idle 4m、modelTurn 15m（model_turn 双约束：lastEventAt+idleMs 静默 与 phaseEnteredAt+modelTurnMs 硬顶取早）、tool 10m、compaction 5m、total 30m（+totalGrace 90s 宽限、maxExtensions 3、maxTotalFactor 2）、abortGrace 10s、reap 5s；EventWatchdog 1Hz tick 派发 deadline_fired，runner 的 guardUntil 是第二个精确 deadline 生产者（含宽限重臂）。提问方被中止时子 run 级联中止的三条链：(a) 显式 abort→spawn-service.abort 先 cascadeChildren（522-535，沿 childrenOf 递归）；(b) 任何取消原因（超时/用户停/external）→ runner createCancelHandle onCancel → onChildAbort(runId,\"parent_abort\")（runner.ts:390-412）→ stack.ts:1109 接线 spawnRef.current.abort(parentRunId)——父 run 任何死法都带走 childrenOf 里的子 run；(c) 前台嵌套工具：agent-tool execute 把工具调用 signal 传进 spawnAndWait → SpawnRequest.signal → createCancelHandle external listener——提问方 turn 被中止（Esc）即同步取消子 run（detachSignalOnStart 仅 run_in_background 用）。consult 的 F4 语义＝标准嵌套 run 行为，直接复用，不需要 silent-run 的免疫模式。\n\n【7. silent-run 设计的可复用/不适用】可复用：(i) CC2 判据「parentRunId !== undefined 即拦全部三类顶层通知（完成/config-failure/deadline）」——consult 挂提问方【真实】runId 即满足 F6 不产生顶层通知；(ii) 「expectAck 不是抑制机制」的论证与测试锚点；(iii) budgetOverride.totalMs 硬顶配方（fire-and-forget 必须显式给；consult 同理给 2-3 分钟默认硬顶）；(iv) slotless 取舍论证（slotless 无 queue-timeout 保护；consult 前台短时限建议 slotless=true 免排队或占槽排队均可，需方案定）；(v) notifyTerminalFailure 缺口（spawn-service.ts:243 仍未修）——consult 落地时应一并修；(vi) 可见性副作用清单照抄：fleet 嵌套行、subagent:started 事件、backgroundBusy 计数（consult 在跑会按住 feishu 完成卡与 keepalive 判忙——通常正确）。不适用：(i) S3「发起方取消不影响」与 F4 完全相反——consult 绝不能用合成 owner id，必须用真实提问方 runId 挂进 childrenOf 级联半径；(ii) S1 免检绕过不需要（consult 工具由 host 注入或作为提问方 customTools，天然有权威通道）；(iii) detachSignalOnStart 不能用（前台同步要保留 turn signal 链路）；(iv) 静默 run 是 fire-and-forget 异步等 waitOutcome，consult 是工具 execute 内同步等待（spawnAndWait/waitOutcome 内联），语义不同；(v) silent-run 强调「不 await 结果=丢失」，consult 恰好必须 await。\n\n【8. cache-ttl 交互】cache-ttl 扩展（wireCacheTtl，index.ts 在 HOST_KEY 认领之后注册）只在主会话生效：before_provider_request(301)/before_provider_headers(392) 等钩子按 mode 重写 cache_control ttl 或剥离，子会话（子 agent run）的激活被 HOST_KEY 守卫短路，完全不经这些钩子——子 run 的请求由 pi-ai provider 层原生处理：PI_CACHE_RETENTION=long 时 pi-ai 对请求加 1h ephemeral（docs/environment-variables.md:87，pi-ai dist/api/*-messages.js 等多处读取），默认 5m。keepalive/adaptive 服务只盯主会话前缀；子 run 对它们的影响仅是 backgroundBusy()（stack.ts:1222 按 query.list() 非终态计数）判忙继续 ping 主会话。fork 请教的缓存命中前提（机制层）：(a) 请求前缀逐字节一致——fork 复制专家条目即可，但 system prompt/工具清单来自【会话创建配置】：consult 会话若换 agent type/systemPrompt/工具集，从头全 miss；(b) 同一模型（缓存键含模型；换模型=全量重写）；(c) 命名空间与时效：1h 与 5m 是分离命名空间（1h 请求读不到 5m 写入的前缀，「entry fee」首次升级整段重写；实测该路由 1h 实际存活 7-13.6 分钟）；专家子会话的写入按 pi-ai 默认（PI_CACHE_RETENTION 未设时 5m）⇒ 专家结束后 5 分钟内请教可命中共享前缀，超时则按输入全价（专家 12K 字回答的长上下文场景这是一笔大钱，方案应提示「趁热请教」）；(d) 判命中不要用 cacheRead>0（跨会话共享的 system/tools 块 ~11.3k tok 恒命中），要锚上一次前缀 token 数。主会话 cache-ttl 的 on/adaptive 模式对 fork 咨询无直接帮助（不同会话、不同前缀），只有 PI_CACHE_RETENTION=long 这种进程级设置会同时作用于子会话与 fork 会话。",
+  "fileIndex": [
+    {
+      "path": "docs/dev/consult/requirements.md",
+      "role": "需求简报：F1-F7 功能需求、§6 开放问题（本次探索的问题来源）",
+      "readFully": true
+    },
+    {
+      "path": "src/tools/agent-tool.ts",
+      "role": "Agent 工具入口：resume 参数→resumeFrom(288)、timeout_s→budgetOverride(289)、signal 透传 spawnAndWait、嵌套工具工厂（allowedTypes/forceSlotless/parentRunId）、前台 progress 端口、工具结果 usage 回传",
+      "readFully": true
+    },
+    {
+      "path": "src/service/spawn-service.ts",
+      "role": "spawn/spawnAndWait/abort/stopChildrenOf；records/running/claimedRunIds/resumeLocks/labels/nesting/childrenOf(104-123)；resume 准入与双键锁(389-418)、锁释放(243-250)、tombstone.register(178)、budget 合并与 applyBudgetPolicy(419-431)、CC1 cascadeChildren(522-535)",
+      "readFully": true
+    },
+    {
+      "path": "src/service/resolve-target.ts",
+      "role": "resolveRunId(124)/resolveResumeTarget(150)：id→前缀→label、终态+sessionFile 校验、路径不受信(147-149)、候选项列表",
+      "readFully": true
+    },
+    {
+      "path": "src/service/runtime-adapter.ts",
+      "role": "run() 装配 SessionSpec+customTools+grantedReserved(384-471)、CC2 childRunIds(107/237/312/343)、deadlineNoticeHandler(102-110)、toolScope 构建(492-494)、X10 双校验、H2 resolveSessionSpec",
+      "readFully": true
+    },
+    {
+      "path": "src/runtime/session-driver.ts",
+      "role": "PiSessionDriver.create/resume(324-331)、toCreateOptions(systemPromptOverride→DefaultResourceLoader)、withResolvedModel、SessionHandle 能力面（setActiveTools/steer/getModelRef/...）",
+      "readFully": true
+    },
+    {
+      "path": "src/runtime/runner.ts",
+      "role": "RuntimeRunner.run 全生命周期：resume 分派(465-470)、createCancelHandle+onChildAbort 级联(390-412)、detachSignalOnStart(414)、guardUntil 跟随式 deadline(宽限重臂)、slot 获取、toolScope 在 bind/turn_end 重放",
+      "readFully": true
+    },
+    {
+      "path": "src/service/tombstone.ts",
+      "role": "TombstoneStore：register/has/get/list/cleanup，TTL 30min 默认，字段 runId/generation/sessionFile/createdAt/expiresAt",
+      "readFully": true
+    },
+    {
+      "path": "src/adapters/pi-run-log.ts",
+      "role": "wrapWithRunLog：终态快照整体 appendEntry(\"subagent:run\") 进主会话文件 + verifyLanded 读回校验",
+      "readFully": true
+    },
+    {
+      "path": "src/runtime/tool-scope.ts",
+      "role": "RESERVED_TOOL_NAMES、buildToolScopePolicy、createToolScopeEnforcer（bind/turn_end 重放，TS4 只报 newcomer）",
+      "readFully": true
+    },
+    {
+      "path": "src/runtime/watchdog.ts",
+      "role": "EventWatchdog：1Hz tick、timerReason 映射、total/total_grace 直读 deadlines",
+      "readFully": true
+    },
+    {
+      "path": "src/core/deadline.ts",
+      "role": "DEFAULT_BUDGET 全部子阶段、dueAtFor 相位→截止、OVERTIME_PHASES、applyBudgetPolicy、extendability/graceWindow、hardDeadlineAtFor",
+      "readFully": true
+    },
+    {
+      "path": "src/core/types.ts",
+      "role": "SpawnRequest（resumeFrom/deadlineAt/budgetOverride/slotless/parentRunId...）、SessionSpec、RunSnapshot/RunDiagnostics（sessionFile/model/label/agentType/taskPrompt/usage）、RunInput/RunEffect",
+      "readFully": true
+    },
+    {
+      "path": "src/index.ts",
+      "role": "activate()：pre-guard web_search/todo/memory、HOST_KEY 守卫与释放、主会话工具注册、session_start 重建栈、session_shutdown 停所有 run(522-546)、forwardSpawn/forwardQuery holder 模式、wireCacheTtl 位置（post-guard）",
+      "readFully": true
+    },
+    {
+      "path": "src/stack.ts",
+      "role": "buildSessionStack：全部 previous* dispose 交接、prefetchedEntries(850) 只喂 fabric 树(263-273)与 outbox taken(880-890)、spawn/onChildAbort 接线(1109)、sendFormatted(triggerTurn:true)、onOutcomeAcked→ack、keepalive/adaptive 的 backgroundBusy、fleet widget 装配、notifyTerminalFailure 回调",
+      "readFully": true
+    },
+    {
+      "path": "src/service/run-registry.ts",
+      "role": "createLiveRunRegistry：spawn.records 活快照 + store 兜底的合并视图（无持久化重建逻辑）",
+      "readFully": true
+    },
+    {
+      "path": "src/service/request-threading.ts",
+      "role": "THREADED 白名单(26)：resumeFrom/parentRunId/deadlineAt/signal/slotless/detachSignalOnStart 必须显式穿透 + never 穷尽断言",
+      "readFully": false,
+      "lines": "1-40"
+    },
+    {
+      "path": "src/tools/usage.ts",
+      "role": "toPiToolUsage：子 run usage → pi 工具结果 Usage 形状（cost.total 承载）",
+      "readFully": true
+    },
+    {
+      "path": "src/ui/fleet-panel.ts",
+      "role": "toRow/buildFleetViewModel：nested 标记(397)、usageTotal 汇总(427)、活跃/终态行组装",
+      "readFully": false,
+      "lines": "370-440"
+    },
+    {
+      "path": "src/ui/fleet-widget.ts",
+      "role": "渲染树：workflow ⚙ 组(404-423)、treeOrder 嵌套缩进(425-429 ↳)，行预算分配",
+      "readFully": false,
+      "lines": "395-445"
+    },
+    {
+      "path": "src/delivery/deadline-notice.ts",
+      "role": "shouldDeliverDeadlineNotice(98-109)：policy off/always / expectsAck&&!autoBackgrounded 抑制；deliveryOptionsFor（grace 才 triggerTurn）",
+      "readFully": false,
+      "lines": "88-129"
+    },
+    {
+      "path": "src/cache-ttl/cache-ttl.ts",
+      "role": "wireCacheTtl 钩子面（before_provider_request:301 / before_provider_headers:392 等，全部 host 会话 ctx）；mode 标签与 rewrite 动作",
+      "readFully": false,
+      "lines": "1-120 + grep 钩子行号"
+    },
+    {
+      "path": "src/session-nav/subagent-sessions.ts",
+      "role": "先例：扫描会话 jsonl 提取 subagent:run 标记（区分主/子会话）；fork 文件无标记会被当主会话列出",
+      "readFully": false,
+      "lines": "9-90（grep 级）"
+    },
+    {
+      "path": "node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.d.ts",
+      "role": "SessionManager 全 API 面：SessionHeader(parentSession)、NewSessionOptions、branch/branchWithSummary/createBranchedSession/forkFrom/newSession/setSessionFile、ReadonlySessionManager",
+      "readFully": true
+    },
+    {
+      "path": "node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js",
+      "role": "createBranchedSession 实现(1080-1168：新 id/新文件/parentSession header/原地 mutate/延迟写盘) 与 forkFrom 实现(1237-1272：wx 落盘/全量复制/新实例)",
+      "readFully": false,
+      "lines": "1075-1180, 1230-1300"
+    },
+    {
+      "path": "node_modules/@earendil-works/pi-coding-agent/docs/session-format.md",
+      "role": "会话文件格式：header 含 parentSession 的 fork 语义(197-200)、SessionManager API 摘要(380-430)",
+      "readFully": false,
+      "lines": "180-230, 380-430"
+    },
+    {
+      "path": "node_modules/@earendil-works/pi-coding-agent/docs/environment-variables.md",
+      "role": "PI_CACHE_RETENTION=long：pi 原生扩展缓存保留（provider 层，进程级）",
+      "readFully": false,
+      "lines": "87 附近"
+    },
+    {
+      "path": "docs/dev/fabric-v2/silent-run-a1.md",
+      "role": "静默 run 方案：CC2/X3/级联三接缝的代码级论证（行号索引附录 A）、expectAck fail-open 论证、notifyTerminalFailure 缺口、slotless 取舍",
+      "readFully": true
+    },
+    {
+      "path": "docs/dev/fabric-v2/exp-r23/a1-r3.md",
+      "role": "静默 run 实施案 r3：合成 owner id 配方、三触发链核实、可见性副作用、备选与否决记录（§8）",
+      "readFully": true
+    },
+    {
+      "path": "AGENTS.md",
+      "role": "仓库结构、不变量（零挂死/timer unref/无模块级可变状态/HOST_KEY）、cache-ttl 命名空间与 entry fee 要点",
+      "readFully": true
+    },
+    {
+      "path": "~/.pi/agent/memory/-home-bluecake-ai-pi-toolkit/cache-ttl-gotchas.md",
+      "role": "实测事实：1h/5m 分离命名空间、1h 实际存活 7-13.6min、判命中锚前缀 token 数、续 1h 的 5m 尾巴重写",
+      "readFully": true
+    }
+  ],
+  "evidence": [
+    {
+      "claim": "resume 入口：Agent 工具把 params.resume 装进 SpawnRequest.resumeFrom",
+      "file": "src/tools/agent-tool.ts",
+      "lines": "288"
+    },
+    {
+      "claim": "resume 准入：running 检查→steer 提示；resolveResume 拿 sessionFile；resumeLocks 双键（targetId+sessionFile）互斥；resumeFrom 被重写为 sessionFile 路径",
+      "file": "src/service/spawn-service.ts",
+      "lines": "389-418"
+    },
+    {
+      "claim": "resume 锁释放唯一位置：start() 的 finally 删除 resumeLockKeys 全部键（防泄漏）",
+      "file": "src/service/spawn-service.ts",
+      "lines": "243-250"
+    },
+    {
+      "claim": "resolveResumeTarget 只接受 id/前缀/label；sessionFile 只来自终态快照或 tombstone 且必须 existsSync+isFile；caller 路径不受信",
+      "file": "src/service/resolve-target.ts",
+      "lines": "51-65, 147-168"
+    },
+    {
+      "claim": "resume 续写原 session 文件的根因：driver.resume 用 SessionManager.open(同一文件) + createAgentSession({sessionManager})，append-only 写入原 jsonl",
+      "file": "src/runtime/session-driver.ts",
+      "lines": "324-331"
+    },
+    {
+      "claim": "runner 在 session_create 相位分派 driver.resume（无 resume 能力则 reject）",
+      "file": "src/runtime/runner.ts",
+      "lines": "465-470"
+    },
+    {
+      "claim": "resumeFrom/parentRunId/deadlineAt/signal/slotless 经 THREADED 白名单穿透到 ResolvedSpawnRequest（编译期穷尽断言）",
+      "file": "src/service/request-threading.ts",
+      "lines": "26"
+    },
+    {
+      "claim": "records/running/claimedRunIds/resumeLocks/labels/nesting/childrenOf 全是 createSpawnService 闭包内进程内存态",
+      "file": "src/service/spawn-service.ts",
+      "lines": "104-123"
+    },
+    {
+      "claim": "tombstone 在 finish() 对带 sessionFile 的终态快照 register；TTL 默认 30 分钟，字段仅 runId/generation/sessionFile/createdAt/expiresAt",
+      "file": "src/service/spawn-service.ts / src/service/tombstone.ts",
+      "lines": "112, 178 / 19-36"
+    },
+    {
+      "claim": "subagent:run 条目持久化的是完整 RunSnapshot（含 diag.sessionFile/model/label/agentType/taskPrompt/usage/parentRunId 与 outcome），写进主会话文件；F3 重建所需字段全部已在",
+      "file": "src/adapters/pi-run-log.ts + src/core/types.ts",
+      "lines": "24-40 + RunSnapshot/RunDiagnostics 定义"
+    },
+    {
+      "claim": "/reload：session_shutdown 对所有非终态 run stop(\"shutdown\")；随后 buildSessionStack 全新构造（records/labels/tombstones 全空）",
+      "file": "src/index.ts + src/stack.ts",
+      "lines": "522-546 + 847 起"
+    },
+    {
+      "claim": "prefetchedEntries（getEntries 含 subagent:run）只被 fabric 树重建与 outbox taken 集合消费；没有任何 records/labels 回灌 ⇒ reload 后 resume 按 id/label 必失败",
+      "file": "src/stack.ts",
+      "lines": "850, 263-273, 880-890"
+    },
+    {
+      "claim": "SessionManager.createBranchedSession(leafId)：同 sessionDir 新文件+新 id+parentSession header，复制 root→leaf 路径，原地 mutate 实例，原文件不动；无 assistant 时延迟写盘",
+      "file": "node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js",
+      "lines": "1080-1168"
+    },
+    {
+      "claim": "SessionManager.forkFrom(sourcePath,targetCwd)：静态，新文件 flag:wx 新 id parentSession=源路径，复制全部非头条目，返回新实例",
+      "file": "node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js",
+      "lines": "1237-1272"
+    },
+    {
+      "claim": "fork 父子关系记录在 session header 的 parentSession 字段；branch()/branchWithSummary() 只移 leaf、仍写原文件（不满足 F2）",
+      "file": "node_modules/@earendil-works/pi-coding-agent/docs/session-format.md",
+      "lines": "197-200, 380-430"
+    },
+    {
+      "claim": "嵌套工具注入：message_agent/set_model/Agent(canSpawn)/StructuredOutput 经 customTools+grantedReserved 注入，且 granted 名合并进 sessionSpec.tools 防 pi 注册表过滤丢弃",
+      "file": "src/service/runtime-adapter.ts",
+      "lines": "384-471"
+    },
+    {
+      "claim": "tool-scope：RESERVED_TOOL_NAMES 默认 deny，granted 豁免；enforcer 在 bind 与每个 turn_end 用 getActiveTools() 重放（MCP 晚注册防绕过）",
+      "file": "src/runtime/tool-scope.ts",
+      "lines": "36-45, 81-92, 108-135"
+    },
+    {
+      "claim": "CC2 通知抑制判据：run() 入口 parentRunId !== undefined ⇒ childRunIds；拦 enqueue_delivery/settleConfigFailure/deadlineNotice 三条路径",
+      "file": "src/service/runtime-adapter.ts",
+      "lines": "343, 237, 312, 107"
+    },
+    {
+      "claim": "expectAck 不是抑制机制：只影响 shouldDeliverDeadlineNotice（expectsAck&&!autoBackgrounded）与结果认领；ackWindowMs 默认 0 fail-open",
+      "file": "src/delivery/deadline-notice.ts + docs/dev/fabric-v2/silent-run-a1.md",
+      "lines": "98-109 + §1.2"
+    },
+    {
+      "claim": "notifyTerminalFailure 缺口仍在：start() catch 无条件通知，不查 parentRunId（子 run 异常路径会漏发顶层通知）",
+      "file": "src/service/spawn-service.ts",
+      "lines": "243"
+    },
+    {
+      "claim": "fleet widget 嵌套展示：nested=parentRunId!==undefined；treeOrder 按 parentRunId 缩进为子行（↳），workflow 子女归 ⚙ 组",
+      "file": "src/ui/fleet-panel.ts + src/ui/fleet-widget.ts",
+      "lines": "397 + 404-429"
+    },
+    {
+      "claim": "子 run 成本回传父会话：工具结果 usage=toPiToolUsage(outcome.usage)，pi 记在 toolResult 消息计入总账；fleet usageTotal 另汇总各 run diag.usage",
+      "file": "src/tools/agent-tool.ts + src/tools/usage.ts + src/ui/fleet-panel.ts",
+      "lines": "execute 返回处 + 全文 + 427"
+    },
+    {
+      "claim": "预算覆盖：timeout_s→budgetOverride.totalMs；spawn 合并三层后 applyBudgetPolicy 钳 maxTotalFactor=1（显式预算=硬顶，无宽限无延长）",
+      "file": "src/tools/agent-tool.ts + src/service/spawn-service.ts + src/core/deadline.ts",
+      "lines": "289 + 419-431 + 96-110"
+    },
+    {
+      "claim": "watchdog 子阶段预算与 timer→reason 映射（queue/startup/bind/firstEvent/idle/modelTurn/tool/compaction/total/grace）",
+      "file": "src/core/deadline.ts + src/runtime/watchdog.ts",
+      "lines": "11-32, 45-80 + 17-30"
+    },
+    {
+      "claim": "级联中止三条链：abort 先 cascadeChildren；任何取消→onChildAbort→stack 接线 spawn.abort；前台嵌套工具 signal 直连 turn 中止",
+      "file": "src/service/spawn-service.ts + src/runtime/runner.ts + src/stack.ts + src/tools/agent-tool.ts",
+      "lines": "522-535 + 390-412 + 1109 + execute spawnAndWait 调用"
+    },
+    {
+      "claim": "cache-ttl 扩展只挂主会话（wireCacheTtl 在 HOST_KEY 认领后注册），子会话不经过任何 ttl 重写钩子；子 run 请求由 pi-ai 原生处理（PI_CACHE_RETENTION=long→1h，默认 5m）",
+      "file": "src/index.ts + src/cache-ttl/cache-ttl.ts + node_modules/.../docs/environment-variables.md",
+      "lines": "wireCacheTtl 调用位置 + 301/392 + 87"
+    },
+    {
+      "claim": "1h 与 5m 缓存是分离命名空间：1h 请求读不到 5m 写入前缀（entry fee 全额重写）；实测 1h 存活 7-13.6 分钟；判命中须锚前缀 token 数而非 cacheRead>0",
+      "file": "~/.pi/agent/memory/-home-bluecake-ai-pi-toolkit/cache-ttl-gotchas.md",
+      "lines": "全文"
+    },
+    {
+      "claim": "consult 与 silent-run 的语义差异：S3 免疫与 F4 级联相反，须用真实提问方 runId（进 childrenOf 级联半径）；detachSignalOnStart 不可用于前台同步请教",
+      "file": "docs/dev/fabric-v2/exp-r23/a1-r3.md",
+      "lines": "§1.2/§3.1/§4"
+    },
+    {
+      "claim": "fork 文件的 /resume 列表污染：session-nav 靠扫描 subagent:run 标记区分主/子会话；fork 文件无这些标记（subagent:run 写在主会话文件），会被当普通主会话列出",
+      "file": "src/session-nav/subagent-sessions.ts",
+      "lines": "9-16, 68-90"
+    }
+  ],
+  "ruledOut": [
+    {
+      "target": "SessionManager.branch()/branchWithSummary() 作为 consult 的 fork 机制",
+      "why": "只移动 leaf 指针，后续 append 仍写专家原 session 文件（append-only 同文件分叉），不满足 F2 不污染；getEntries 注释明确条目不可修改删除"
+    },
+    {
+      "target": "手复制 jsonl 文件再 SessionManager.open 作为 fork",
+      "why": "副本 header 保留原会话 id（两文件同 id）、无 parentSession 溯源、无 wx 防覆盖；SDK 的 createBranchedSession/forkFrom 已安全覆盖同语义（新 id+父链+append-only），无需手工复制"
+    },
+    {
+      "target": "expectAck/claimedRunIds/ack 窗口作为通知抑制机制",
+      "why": "ackWindowMs/coalesceWindowMs 默认 0，notifier enqueue→send 同一同步链先于 ack 微任务（fail-open）；CC2（parentRunId 判据）才是唯一可靠抑制层——两份 silent-run 文档均以 goal verifier 为活反例论证"
+    },
+    {
+      "target": "/reload 后从 subagent:run 条目重建 spawn records/labels 的既有代码",
+      "why": "排查 stack.ts 全部 prefetchedEntries 消费点：仅 buildFabric 树（且需 fabric.enabled）与 outbox taken runId 集合；records/labels/tombstones 无任何回灌路径（reload 后 resume 失败的根因），F3 需要新写重建逻辑"
+    },
+    {
+      "target": "SpawnRequest.resumeFrom 直接传 session 文件路径（types.ts 注释声称支持）",
+      "why": "spawn() 准入只用 resolveRun（id/前缀/label）解析；resolveResumeTarget 注释与实现均拒绝 caller 路径（resolve-target.ts:147-149）；TombstoneStore.resolve 虽接受 sessionFile 但不在 spawn 路径上——注释过时"
+    },
+    {
+      "target": "给 consult 复用现有 resume 路径满足 F2 并发",
+      "why": "resume 双键锁（targetId+sessionFile）使同一专家同时只能被一个 resume 打开，且续写原文件；F2 要求不污染+可并发，必须走 fork（SDK 能力已在问题 3 证实）"
+    },
+    {
+      "target": "cache-ttl 扩展覆盖子 run / fork 会话",
+      "why": "wireCacheTtl 注册在 HOST_KEY 守卫之后，仅主会话钩子生效；子会话激活被守卫短路。进程级只有 PI_CACHE_RETENTION（pi-ai 层）影响子会话"
+    },
+    {
+      "target": "set_model 工具的 host 形态泄漏进子会话 / message_agent 是主会话工具",
+      "why": "set_model host form 只在 index.ts 注册（HOST_KEY 后）；子会话拿到的是 runtime-adapter 注入的 per-run 形态；message_agent 仅经 customTools 注入给子 run（fabric 开启时），本包不在主会话注册它"
+    },
+    {
+      "target": "watchdog/reaper 存在 per-run 关闭开关（consult 想缩短监督）",
+      "why": "EventWatchdog 无 per-run disable；预算只能经 mergeBudget/budgetOverride 收紧（这正是零挂死不变量），silent-run 文档 §8 也否决了关闭监督的思路"
+    },
+    {
+      "target": "pi SDK 另有 open-as-new / copy / duplicate 类 API",
+      "why": "通读 session-manager.d.ts 全部方法：fork 语义仅 createBranchedSession（实例）、forkFrom（静态）、newSession({parentSession})、setSessionFile 四处，无其它复制类 API"
+    }
+  ],
+  "openQuestions": [
+    "pi-ai 对各 provider 的原生 cache_control 细节（哪些 provider、PI_CACHE_RETENTION=long 在 anthropic 之外的生效面）只从 env 文档与 api 文件名推断，未逐 provider 追实现；consult 方案若要精确预算 fork 首请求成本，需实测专家会话的 cacheRead/cacheWrite。",
+    "createAgentSession 接受「fork 出的 SessionManager」虽与 driver.resume 的 open+注入模式同构（高置信），但本仓库尚无任何代码真正调用过 createBranchedSession/forkFrom——fork 路径的端到端行为（systemPrompt 组装、sessionFile 落点、与 persist 选项交互）需要一次小实验验证。",
+    "createBranchedSession 原地 mutate 打开源文件的 SessionManager 实例：consult 若想并发 fork 同一专家，需确认每次 open 一个新实例（SessionManager.open 每次新实例，读文件为同步全量加载——大专家会话的 fork 延迟未测量）。",
+    "fleet widget 中「consult 挂在嵌套 run（提问方本身是子 run）下」的深层缩进渲染正确性：treeOrder 支持任意深度但未实际渲染验证过二层以上嵌套。",
+    "主会话 /resume（而非 /reload）后 prefetchedEntries 是否完整包含 subagent:run 条目（getEntries 读文件应包含，但没有测试锁定该行为）；F3 若依赖它，需补一条行为锁定测试。",
+    "专家 fork 文件的清理策略对 session-nav /resume 列表的实际观感（fork 文件会以普通会话出现）未做端到端确认；可选缓解（专用 sessionDir / 定期清扫 / fork 后咨询完即删）留给方案定。",
+    "pi 核心是否在 session 文件以外的地方按会话 id 做索引（若有，fork 文件同目录累积是否影响 list 性能）未查——仅确认 SessionManager.list 每次扫描目录读 header。"
+  ]
+}

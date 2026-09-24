@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import json, glob, os, re, io, statistics, sys, time
+# usage: judge-score.py [map.tsv] [prompt-marker]
+MAP = sys.argv[1] if len(sys.argv) > 1 else "/tmp/.fv2_private/judge-map.tsv"
+MARK = sys.argv[2] if len(sys.argv) > 2 else "/tmp/judge/"
 SESS = os.path.expanduser("~/.pi/agent/sessions/--home-bluecake-ai-pi-toolkit--")
-idmap = {l.split("\t")[0]: (l.split("\t")[1], l.split("\t")[2].strip()) for l in io.open("/tmp/.fv2_private/judge-map.tsv", encoding="utf-8") if l.strip()}
+idmap = {l.split("\t")[0]: (l.split("\t")[1], l.split("\t")[2].strip()) for l in io.open(MAP, encoding="utf-8") if l.strip()}
 def load(f):
     out=[]
     for l in io.open(f, encoding="utf-8"):
@@ -16,7 +19,7 @@ for f in sorted(glob.glob(SESS + "/*.jsonl"), key=os.path.getmtime)[-40:]:
     if not users: continue
     c = users[0]["message"]["content"]
     first = c if isinstance(c, str) else "".join(p.get("text", "") for p in c if p.get("type") == "text")
-    if not first.startswith("你是一名严格的评审"): continue
+    if not first.startswith("你是一名严格的评审") or MARK not in first: continue
     texts = [p["text"] for e in es if e.get("type") == "message" and e["message"].get("role") == "assistant" for p in e["message"].get("content", []) if p.get("type") == "text"]
     blocks = re.findall(r"```json\s*(\{.*?\})\s*```", "\n".join(texts), re.S)
     if blocks: judges[model] = json.loads(blocks[-1])
@@ -40,7 +43,7 @@ for doc, (arm, cond) in sorted(idmap.items(), key=lambda x: x[1]):
     rows[arm] = (cond, s, viol, statistics.mean(s) if s else 0, detail)
     print(f"{arm:6} {cond}  scores={s} mean={statistics.mean(s) if s else 0:.1f} violations={viol}  {detail}")
 print(f"\ninter-judge agreement: {agree}/{total} = {agree/total:.0%}" if total else "")
-for c in ["c0", "c1", "c2", "c3"]:
+for c in ["c0", "c1", "c2", "c3", "e1"]:
     ms = [r[3] for r in rows.values() if r[0] == c]
     vs = [statistics.mean(r[2]) for r in rows.values() if r[0] == c]
     if ms: print(f"{c}: mean score {statistics.mean(ms):.2f}  (runs {', '.join(f'{x:.1f}' for x in ms)})  mean violations {statistics.mean(vs):.1f}")

@@ -1,0 +1,6 @@
+e1-r1  tools=34 asks=1 (resume=1) firstAsk@20 leaks=0 costB=0.684 expertTask=0.222 consult=0.119 (expertToolsDuringConsult=0) out=✓
+e1-r2  tools=41 asks=1 (resume=0) firstAsk@19 leaks=0 costB=0.614 expertTask=0.000 consult=0.000 (expertToolsDuringConsult=0) out=✓
+e1-r3  tools=31 asks=1 (resume=1) firstAsk@20 leaks=0 costB=0.479 expertTask=0.171 consult=0.107 (expertToolsDuringConsult=0) out=✓
+e1-r4  tools=25 asks=1 (resume=1) firstAsk@17 leaks=0 costB=0.439 expertTask=0.188 consult=0.081 (expertToolsDuringConsult=0) out=✓
+
+Q&A exported: /tmp/.p5x/qa2.md (4 exchanges)
