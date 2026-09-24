@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { applyBudgetPolicy } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
@@ -249,7 +250,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         error: toErrorInfo(error),
       };
       finish(failed);
-      deps.notifyTerminalFailure?.(failed);
+      // consult plan §6 B-6: only top-level runs notify from this catch — it
+      // captures runner.run() itself throwing, a path that bypasses the
+      // adapter's CC2 suppression, so a nested run would otherwise leak a
+      // top-level notification its parent never asked for (the parent awaits
+      // the outcome through spawnAndWait/waitOutcome). Session_create
+      // failures never reach here (the runner's own catch folds them into
+      // prompt_settled). T-8 locks this.
+      if (req.parentRunId === undefined) deps.notifyTerminalFailure?.(failed);
     } finally {
       // Release every key acquired at spawn time (targetId AND sessionFile) —
       // deleting only req.resumeFrom leaks the targetId lock forever once
@@ -344,7 +352,12 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       if (req.parentRunId) {
         const parent = nesting.get(req.parentRunId);
         if (parent) {
-          if (!parent.canSpawn?.includes(req.type))
+          // consult (plan §4.4, review-1 #1): fork requests (a consulted
+          // expert's copy) skip the canSpawn gate — the asking run's type
+          // generally has no canSpawn for the *expert's* type, and requiring
+          // it would reject every consult. Depth still counts and is still
+          // capped: a consult run is a real nested run for depth purposes.
+          if (!req.forkSessionFrom && !parent.canSpawn?.includes(req.type))
             return {
               error: {
                 kind: "config",
@@ -395,6 +408,35 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         };
       const labelAction: "register" | "repoint" = repoint ? "repoint" : "register";
 
+      // consult (plan §4.4): fork admission branch. Validated here — after
+      // label planning, before the resume branch — and deliberately takes no
+      // locks: a fork copy is private to this one run (concurrent consults of
+      // the same expert each hold their own copy), so resumeLocks has nothing
+      // to mutex. statSync (not existsSync+statSync) keeps the check a single
+      // race-free syscall.
+      if (req.forkSessionFrom) {
+        if (req.resumeFrom)
+          return {
+            error: {
+              kind: "config",
+              message: "forkSessionFrom and resumeFrom are mutually exclusive",
+              retryable: false,
+            },
+          };
+        try {
+          if (!statSync(req.forkSessionFrom).isFile())
+            throw new Error(`fork session file missing: ${req.forkSessionFrom}`);
+        } catch {
+          return {
+            error: {
+              kind: "config",
+              message: `fork session file missing: ${req.forkSessionFrom}`,
+              retryable: false,
+            },
+          };
+        }
+      }
+
       if (req.resumeFrom) {
         // Resolve once for the running hint, then resolve the owned session
         // file. Both calls are synchronous and this whole admission section
@@ -436,7 +478,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       labels.set(effective, target);
       deps.onLabel?.(effective, target, { resumed: labelAction === "repoint" });
       resolvedReq = { ...resolvedReq, label: effective };
-      nesting.set(runId, { depth, ...(config.canSpawn ? { canSpawn: config.canSpawn } : {}) });
+      // consult (plan §4.4, review-2 #6): a fork run's nesting entry carries
+      // NO canSpawn — a consulted expert must not delegate further. Together
+      // with the adapter not injecting the nested Agent tool and pi's
+      // read-only tools allowlist, this is one of three independent guards.
+      nesting.set(runId, {
+        depth,
+        ...(config.canSpawn && !req.forkSessionFrom ? { canSpawn: config.canSpawn } : {}),
+      });
       if (req.expectAck) claimedRunIds.add(runId);
       if (req.parentRunId) {
         parentOf.set(runId, req.parentRunId);

@@ -18,6 +18,7 @@ import type {
   LifecycleEvent,
   Millis,
   RunEffect,
+  RunId,
   RunInput,
   RunOutcome,
   RunSnapshot,
@@ -58,6 +59,18 @@ export interface ResolvedSpawnRequest extends SessionSpec {
    * for the compile-time guard against exactly that.
    */
   deadlineAt?: Millis;
+  /**
+   * consult (plan §4.3/§4.4): threaded verbatim from
+   * `SpawnRequest.forkSessionFrom`. The runner uses it for two things:
+   * ① session_create opens this file through `driver.resume` instead of
+   * creating a fresh session; ② after the run is physically reaped it is
+   * handed back to `RunnerDeps.onReaped(runId, forkSessionFrom)` so the fork
+   * copy can be deleted at the one point in time where nothing can write to
+   * it again. Declared here (rather than only in package B) because
+   * `service/request-threading.ts`'s Gate C requires every THREADED field to
+   * exist under the same name on this interface.
+   */
+  forkSessionFrom?: string;
   /** M-A: display-only spawn metadata (model/label/agent type) folded into diag at enqueue time for the presentation layer (fleet tree / Agent tool card). */
   displayMeta?: RunDisplayMeta;
   /** X11: per-run tool-scope policy + a fresh (per-run) enforcer instance; undefined = no dynamic re-enforcement (legacy behavior). */
@@ -220,6 +233,18 @@ export interface RunnerDeps {
    * children; RuntimeRunner itself has no notion of a run tree.
    */
   onChildAbort?: (runId: string, cause: StopCause) => void;
+  /**
+   * consult (plan §4.4, frozen surface): physical-reclaim-completed hook.
+   * Called once per run after the finally-block's `runReap()` finishes
+   * (beforeReap + reaper dispose included, success or failure), and once
+   * more from each late-arrival path after `disposeLate`. `forkSessionFrom`
+   * is taken straight from `req.forkSessionFrom` (undefined for every
+   * non-consult run) — the deletion fact travels with the request, so no
+   * side registry (the v2 pendingDeletions race) exists. Implementations
+   * must be idempotent, synchronous and non-throwing (a throw is swallowed
+   * and only loses the cleanup).
+   */
+  onReaped?: (runId: RunId, forkSessionFrom?: string) => void;
 }
 export interface Runner {
   run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome>;
@@ -462,15 +487,26 @@ export class RuntimeRunner implements Runner {
       ticket = acq.value.ticket;
       dispatch({ kind: "slot_acquired", at: this.d.clock.now() });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "session_create" });
-      createP = req.resumeFrom
+      // consult (plan §4.4): a fork copy is just "an existing session file" —
+      // open it through the same driver.resume seam as Agent({resume}); the
+      // driver is unchanged (cwd arrives via SpawnRequest.cwd, overriding the
+      // header cwd). forkSessionFrom is admitted mutually exclusive with
+      // resumeFrom upstream, and wins the ?? so the ordering is total anyway.
+      const openFile = req.forkSessionFrom ?? req.resumeFrom;
+      createP = openFile
         ? this.d.driver.resume
-          ? this.d.driver.resume(req.resumeFrom, req)
+          ? this.d.driver.resume(openFile, req)
           : Promise.reject(new Error("session driver does not support resume"))
         : this.d.driver.create(req);
       const createBudget = remainingFor(budget.startupMs, this.d.clock.now(), state.deadlines);
       const created = await this.guard(createP, createBudget.ms, cancel, "create");
       if (!created.ok) {
-        this.d.driver.onLateArrival(createP, (h) => this.d.reaper.disposeLate(req.runId, gen, h));
+        this.d.driver.onLateArrival(createP, (h) => {
+          this.d.reaper.disposeLate(req.runId, gen, h); // sync
+          // 迟到会话的写入（appendThinkingLevelChange 等）已在 createP resolve
+          // 前完成；dispose 后再回调删除（幂等，覆盖 _persist 重生残片）。
+          this.notifyReaped(req);
+        });
         createP = undefined;
         dispatch({
           kind: "startup_failed",
@@ -573,7 +609,11 @@ export class RuntimeRunner implements Runner {
       cancel.detach();
       this.d.watchdog.disarm(req.runId, gen);
       ticket?.release();
-      if (createP) this.d.driver.onLateArrival(createP, (h) => this.d.reaper.disposeLate(req.runId, gen, h));
+      if (createP)
+        this.d.driver.onLateArrival(createP, (h) => {
+          this.d.reaper.disposeLate(req.runId, gen, h);
+          this.notifyReaped(req); // same ordering guarantee as the guard-failure path above
+        });
       const reap: ReapInput = {
         runId: req.runId,
         generation: gen,
@@ -600,13 +640,23 @@ export class RuntimeRunner implements Runner {
         }
         return this.d.reaper.reap(reap);
       };
-      void runReap().catch(() => undefined);
+      void runReap()
+        .catch(() => undefined)
+        .then(() => this.notifyReaped(req));
       const dEntry = this.dispatchers.get(req.runId);
       if (dEntry && dEntry.gen === gen) this.dispatchers.delete(req.runId);
       const cEntry = this.activeCancels.get(req.runId);
       if (cEntry && cEntry.gen === gen) this.activeCancels.delete(req.runId);
       const hEntry = this.activeHandles.get(req.runId);
       if (hEntry && hEntry.gen === gen) this.activeHandles.delete(req.runId);
+    }
+  }
+  /** consult (§4.4): post-reap cleanup seam. Swallows everything — a cleanup callback must never affect the runner. */
+  private notifyReaped(req: ResolvedSpawnRequest) {
+    try {
+      this.d.onReaped?.(req.runId, req.forkSessionFrom);
+    } catch {
+      /* 清理回调不得影响 runner */
     }
   }
   /** Bounded generic await, no cancel signal (H3 beforeReap only needs a timeout, not abort-linkage). */

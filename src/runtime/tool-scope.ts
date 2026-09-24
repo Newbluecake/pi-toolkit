@@ -35,7 +35,26 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // sessions), so deny-by-default strips MCP/late-registered same-name
   // tools from every run.
   "extend_subagent_timeout",
+  // consult (consult plan §6 A-4b): injected into a subagent run only when its
+  // dispatcher attached a resolved expert whitelist (`Agent({experts})`), and
+  // never into a consult run itself. Deny-by-default means an MCP or
+  // late-registered same-name tool cannot hand any other run the ability to
+  // fork+resume somebody else's session.
+  "consult",
 ];
+
+/**
+ * consult (plan §4.6/§5.4, frozen surface): the tool domain a consulted expert
+ * runs with. Single source for BOTH pi's one-shot `tools` allowlist on the
+ * forked session (set after H2 so no extension can widen it) and this
+ * module's per-turn enforcer policy — the two must never drift, which is why
+ * this constant lives here rather than in src/consult/.
+ *
+ * `grep`/`find`/`ls` are NOT active by default in pi (an unset `tools` means
+ * read/bash/edit/write), so they only exist for a consult run because they
+ * are named here.
+ */
+export const CONSULT_READONLY_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
 
 export interface ToolScopePolicy {
   /** Allow-list (agent type `tools` field, plus any explicitly granted reserved names). `undefined` = no allow-list restriction (only `deny` applies). */

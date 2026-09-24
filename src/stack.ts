@@ -80,6 +80,7 @@ import {
   TIMEOUT_NOTICE_TYPE,
 } from "./delivery/deadline-notice.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
+import { consultSessionDir, FORK_TTL_MS, sweepForkDir } from "./consult/fork-store.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
 import {
@@ -818,6 +819,17 @@ export function buildSessionStack(
   previousAdaptive = undefined;
   previousQuota?.dispose();
   previousQuota = undefined;
+
+  // consult (plan §5.1/§6 C-9): fork-copy GC — once per session build, no
+  // timer. Unconditional (runs even with consult.enabled=false so leftovers
+  // from before a disable still age out). Multi-process safety argument and
+  // the two load-bearing premises live with sweepForkDir: ① any live consult
+  // run dies within its 150s totalMs hard cap, so an in-use fork file is
+  // ~576× younger than the 24h TTL; ② the "no valid header ⇒ delete
+  // regardless of mtime" fragment rule cannot hit a file mid-creation because
+  // the fork's very first write is a complete header line (header-first
+  // write order). Never throws; missing dir is a no-op.
+  sweepForkDir(consultSessionDir(), FORK_TTL_MS);
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*

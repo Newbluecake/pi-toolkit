@@ -133,6 +133,43 @@ export interface AgentTypeConfig {
   /** Frontmatter `can_message`: relations this run may address through fabric. */
   canMessage?: CanMessage[];
 }
+/**
+ * consult (docs/dev/consult/plan.md §4.3, frozen surface): one entry of the
+ * expert whitelist a dispatcher attached to an `Agent({ experts: [...] })`
+ * call, **already resolved at dispatch time** (hence trusted downstream).
+ *
+ * `label` is display-only — matching a model-supplied `expert` handle is done
+ * on `runId` (labels are process-local, only ever written, and reset by
+ * `/reload`, so the same label can legitimately point at two different runs
+ * across reload generations; the dispatch-time resolver reports those as
+ * ambiguous instead of guessing).
+ */
+export interface ConsultExpertRef {
+  runId: RunId;
+  /** Display only (fleet rows / tool echo); never a matching key. */
+  label?: string;
+  /** The expert's persisted session file — the fork source. */
+  sessionFile: string;
+  agentType: string;
+  model?: { provider: string; id: string };
+  /** Context usage (0-100) snapshotted at dispatch time; re-checked live at consult time. */
+  contextPercent?: number;
+  /** Context token count snapshotted at dispatch time (first-request cost pre-check); re-checked live. */
+  contextTokens?: number;
+  /** The expert was still running at dispatch time (consult must wait for its terminal state). */
+  pending?: boolean;
+}
+
+/**
+ * consult (plan §6 C-9, frozen surface): result of forking an expert's
+ * persisted session. `forkExpertSession` **never throws** — every failure mode
+ * of pi's `SessionManager.forkFrom` (empty/unparsable source, missing
+ * `type:"session"` header, `flag:"wx"` collision, mkdir/write failure) is
+ * folded into `{ ok: false, reason }` so the consult tool can nack instead of
+ * throwing at a caller that did nothing wrong.
+ */
+export type ForkExpertSessionResult = { ok: true; path: string } | { ok: false; reason: string };
+
 export interface SpawnRequest {
   /** Assigned run identifier, used by lifecycle extensions for resource names. */
   runId?: RunId;
@@ -212,6 +249,27 @@ export interface SpawnRequest {
    *      (see ResolvedSpawnRequest.parentRunId below).
    */
   deadlineAt?: Millis;
+  /**
+   * F7 (consult plan §4.3): expert whitelist already resolved at dispatch
+   * time by the Agent tool. The runtime adapter injects the `consult` tool
+   * into this run when the list is non-empty. Consumed by the adapter, never
+   * threaded verbatim into `ResolvedSpawnRequest`.
+   */
+  consultExperts?: ConsultExpertRef[];
+  /**
+   * consult-only (plan §4.3/§4.4): absolute path of the forked copy of an
+   * expert's session file. Produced exclusively inside the consult tool (by
+   * fork-store, right before the spawn) and mutually exclusive with
+   * `resumeFrom`. Spawn admission only validates existsSync + isFile and
+   * takes the fork branch (skips the canSpawn gate, writes no `canSpawn` into
+   * the nesting entry); the runner opens it through `driver.resume` and hands
+   * the same path back via `onReaped` once the run is physically reaped.
+   *
+   * Its presence is also the sole "this is a consult run" predicate used by
+   * the runtime adapter to force the read-only tool domain
+   * (`CONSULT_READONLY_TOOLS`).
+   */
+  forkSessionFrom?: string;
 }
 /**
  * M-A (presentation): one observed tool call of a run, kept in
@@ -239,6 +297,14 @@ export interface RunDisplayMeta {
   /** X1 (agent tree): set for `isolation:"worktree"` spawns as `{ state: "active" }`;
    *  beforeReap later replaces it with the disposal outcome via setWorktreeDisposition. */
   worktree?: WorktreeDisposition;
+  /**
+   * consult (consult plan §6 C-12): present iff this run is a consult run
+   * (spawned with `forkSessionFrom` by the consult tool). Carries the asking
+   * run's id — a display-only marker that lets the fleet row / status views
+   * badge the run without parsing the `consult-` label prefix (labels are
+   * display-only and user-visible, so prefixes are not a reliable signal).
+   */
+  consultOf?: { askerRunId?: RunId };
 }
 
 /**

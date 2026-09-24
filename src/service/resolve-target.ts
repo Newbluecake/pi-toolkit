@@ -109,7 +109,15 @@ function formatCandidates(candidates: readonly ResumeCandidate[]): string {
 function resumeError(handle: string, candidates: readonly ResumeCandidate[]): string {
   return `resume target not found: ${oneLine(handle)}. Resumable targets: [${formatCandidates(candidates)}]`;
 }
-function matchRunId(handle: string, deps: ResolveTargetDeps): { runId?: RunId; ambiguous: boolean } {
+/**
+ * Two-level id match: exact run id, then unique prefix. Exported for the
+ * consult ExpertIndex (plan §4.5 / §6 C-8b, frozen surface) so the index
+ * resolves ids with *this* implementation instead of a look-alike that can
+ * drift; it feeds a minimal `ResolveTargetDeps` whose `records` are its own
+ * projected snapshots (only `knownIds()` is reached from here — no label /
+ * candidate logic).
+ */
+export function matchRunId(handle: string, deps: ResolveTargetDeps): { runId?: RunId; ambiguous: boolean } {
   const ids = knownIds(deps);
   if (ids.has(handle)) return { runId: handle, ambiguous: false };
   const prefixes = [...ids].filter((runId) => runId.startsWith(handle));

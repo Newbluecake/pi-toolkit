@@ -1,0 +1,304 @@
+import { createHash } from "node:crypto";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  utimesSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  consultSessionDir,
+  FORK_TTL_MS,
+  forkExpertSession,
+  readHeaderCwd,
+  removeForkFile,
+  resolveForkCwd,
+  sweepForkDir,
+} from "../../src/consult/fork-store.js";
+
+/**
+ * consult plan §9 T-6 (package B): the handwritten streaming fork, exercised
+ * against real pi `SessionManager` files in temp dirs. F2's core assertion is
+ * the sha256 of the source never changing; the fork must be a file pi itself
+ * can open (`SessionManager.open`) with the exact header contract forkFrom
+ * produced: new id, parentSession = resolved source, cwd = two-level pick.
+ */
+
+const dirs: string[] = [];
+function tempDir(): string {
+  const d = mkdtempSync(join(tmpdir(), "consult-fork-"));
+  dirs.push(d);
+  return d;
+}
+afterEach(() => {
+  for (const d of dirs.splice(0)) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+});
+
+const sha256 = (file: string): string => createHash("sha256").update(readFileSync(file)).digest("hex");
+
+/** A real expert session: pi-created header + real appended entries, in a private dir.
+ * pi buffers entries until the first assistant message arrives (`_persist`'s
+ * hasAssistant gate), so the fixture appends one — that is what makes the
+ * header + everything before it actually hit the disk. */
+function realExpertSession(label: string): { file: string; cwd: string; entries: number } {
+  const cwd = tempDir();
+  const srcDir = join(cwd, "sessions");
+  const mgr = SessionManager.create(cwd, srcDir);
+  mgr.appendMessage({ role: "user", content: [{ type: "text", text: `expert task ${label}` }] });
+  mgr.appendCustomEntry("subagent:run", { label, done: true });
+  mgr.appendMessage({ role: "assistant", content: [{ type: "text", text: "expert answer" }] });
+  mgr.appendCustomMessageEntry("fabric:message", "hello from expert", false, { seq: 1 });
+  return { file: mgr.getSessionFile()!, cwd, entries: mgr.getEntries().length };
+}
+
+function readHeader(file: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(file, "utf8").split("\n", 1)[0]!) as Record<string, unknown>;
+}
+
+describe("consult fork-store: forkExpertSession (streaming fork, T-6)", () => {
+  it("copies a real expert session byte-for-byte past a rewritten header, leaving the source untouched", () => {
+    const src = realExpertSession("explorer");
+    const before = sha256(src.file);
+    const dir = tempDir();
+
+    const result = forkExpertSession(src.file, "/fallback/cwd", dir);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.path.startsWith(dir)).toBe(true);
+    expect(sha256(src.file)).toBe(before); // F2: source never written
+
+    const header = readHeader(result.path);
+    const sourceHeader = readHeader(src.file);
+    expect(header["type"]).toBe("session");
+    expect(header["parentSession"]).toBe(resolve(src.file));
+    expect(header["id"]).not.toBe(sourceHeader["id"]); // new id
+    expect(typeof header["id"]).toBe("string");
+    expect(header["cwd"]).toBe(resolve(src.cwd)); // header cwd exists → level 1
+
+    // The fork is a file pi itself accepts: same non-header entries, header swapped
+    // (pi's getEntries() deliberately excludes the `session` header line).
+    const forked = SessionManager.open(result.path);
+    expect(forked.getSessionId()).toBe(header["id"]);
+    expect(forked.getEntries().length).toBe(src.entries);
+    expect(forked.getEntries()).toEqual(SessionManager.open(src.file).getEntries());
+  });
+
+  it("falls back to the asking run's cwd when the header cwd no longer exists (two-level, review-2 #12)", () => {
+    // The session FILE must outlive its header cwd (a deleted worktree):
+    // sessions live under <home>/sessions while the cwd was <home>/worktree.
+    const home = tempDir();
+    const worktreeCwd = join(home, "worktree");
+    mkdirSync(worktreeCwd);
+    const mgr = SessionManager.create(worktreeCwd, join(home, "sessions"));
+    mgr.appendMessage({ role: "user", content: [{ type: "text", text: "expert task" }] });
+    mgr.appendMessage({ role: "assistant", content: [{ type: "text", text: "answer" }] });
+    const file = mgr.getSessionFile()!;
+    rmSync(worktreeCwd, { recursive: true, force: true }); // header cwd gone, file alive
+
+    const result = forkExpertSession(file, "/asker/checkout", tempDir());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(readHeader(result.path)["cwd"]).toBe(resolve("/asker/checkout"));
+  });
+
+  it("keeps `wx` semantics: never clobbers an existing target, source and target both untouched", () => {
+    const src = realExpertSession("collide");
+    const dir = tempDir();
+    const fixedId = "0199fixed-fixed-fixed-fixed-fixed"; // valid session id charset
+    // Freeze time: the target name is `<timestamp>_<id>.jsonl`, so without a
+    // frozen clock two same-id forks can land in different milliseconds and
+    // never collide (this exact test was flaky in the full-suite run).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      expect(readdirSync(dir)).toEqual([]); // empty — the first fork creates the target
+      const first = forkExpertSession(src.file, "/c", dir, { newId: () => fixedId });
+      expect(first.ok).toBe(true);
+      const targetPath = first.ok ? first.path : "";
+      const existingBytes = readFileSync(targetPath);
+
+      const second = forkExpertSession(src.file, "/c", dir, { newId: () => fixedId });
+
+      expect(second.ok).toBe(false);
+      if (second.ok) throw new Error("expected failure");
+      expect(second.reason).toContain("already exists");
+      expect(readFileSync(targetPath).equals(existingBytes)).toBe(true); // not clobbered
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("maps the four forkFrom failure classes to { ok:false, reason } without throwing (§15 #2)", () => {
+    const dir = tempDir();
+    // ① empty source
+    const empty = join(dir, "empty.jsonl");
+    writeFileSync(empty, "");
+    expect(forkExpertSession(empty, "/c", dir)).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("empty or invalid"),
+    });
+    // ① missing source
+    expect(forkExpertSession(join(dir, "nope.jsonl"), "/c", dir)).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("empty or invalid"),
+    });
+    // ② no header: first parsed entry is a message
+    const noHeader = join(dir, "no-header.jsonl");
+    writeFileSync(
+      noHeader,
+      `${JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: "t", message: {} })}\n`,
+    );
+    const noHeaderResult = forkExpertSession(noHeader, "/c", dir);
+    expect(noHeaderResult).toMatchObject({ ok: false, reason: expect.stringContaining("no header") });
+    // ② header-scan cap: first line exceeds 8 KB
+    const longLine = join(dir, "long-line.jsonl");
+    writeFileSync(longLine, `${"x".repeat(9 * 1024)}\n{"type":"session","id":"s"}\n`);
+    expect(forkExpertSession(longLine, "/c", dir)).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("header scan limit"),
+    });
+    // ④ write failure: target dir path exists as a plain file → mkdirSync throws
+    const good = realExpertSession("write-fail");
+    const dirAsFile = join(dir, "not-a-dir");
+    writeFileSync(dirAsFile, "x");
+    expect(forkExpertSession(good.file, "/c", join(dirAsFile, "sub")).ok).toBe(false);
+    // sanity: the same source is forkable into a real dir (control group)
+    expect(forkExpertSession(good.file, "/c", tempDir()).ok).toBe(true);
+  });
+
+  it("tolerates blank/garbage lines before the header and drops them from the copy", () => {
+    const dir = tempDir();
+    const header = { type: "session", version: 3, id: "src-id", timestamp: "t", cwd: dir };
+    const message = { type: "message", id: "m1", parentId: null, timestamp: "t", message: {} };
+    const src = join(dir, "leading-junk.jsonl");
+    // SessionManager.create wrote a real file into <cwd>/sessions — build this one by hand.
+    writeFileSync(src, `\nnot json at all\n${JSON.stringify(header)}\n${JSON.stringify(message)}\n`);
+
+    const result = forkExpertSession(src, dir, dir);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    // pi can open the fork: junk dropped, message kept (getEntries excludes
+    // the header line by design).
+    const opened = SessionManager.open(result.path);
+    expect(opened.getSessionId()).not.toBe("src-id");
+    expect(opened.getEntries().map((e) => e.type)).toEqual(["message"]);
+  });
+});
+
+describe("consult fork-store: resolveForkCwd / readHeaderCwd (T-6)", () => {
+  it("resolveForkCwd picks the live header cwd, else the fallback", () => {
+    const live = tempDir();
+    const dead = tempDir();
+    rmSync(dead, { recursive: true, force: true });
+    const mkSource = (cwdValue: string): string => {
+      const file = join(live, `src-${Math.random().toString(36).slice(2)}.jsonl`);
+      writeFileSync(
+        file,
+        `${JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: cwdValue })}\n`,
+      );
+      return file;
+    };
+    expect(resolveForkCwd(mkSource(live), "/fallback")).toBe(resolve(live));
+    expect(resolveForkCwd(mkSource(dead), "/fallback")).toBe(resolve("/fallback"));
+    expect(resolveForkCwd(mkSource(dead), dead)).toBe(resolve(dead)); // fallback itself is used verbatim when alive
+    // unreadable source → fallback (never throws)
+    expect(resolveForkCwd(join(live, "missing.jsonl"), "/fallback")).toBe(resolve("/fallback"));
+  });
+
+  it("readHeaderCwd: bounded read, blank-line tolerance, undefined on garbage/over-limit", () => {
+    const dir = tempDir();
+    const mk = (body: string): string => {
+      const f = join(dir, `h-${Math.random().toString(36).slice(2)}.jsonl`);
+      writeFileSync(f, body);
+      return f;
+    };
+    expect(readHeaderCwd(mk(`${JSON.stringify({ type: "session", id: "s", cwd: "/a/b" })}\n`))).toBe("/a/b");
+    expect(readHeaderCwd(mk(`\n\n${JSON.stringify({ type: "session", id: "s", cwd: "/a/b" })}\n`))).toBe("/a/b");
+    expect(readHeaderCwd(mk("plain text file\nsecond line\n"))).toBeUndefined();
+    expect(readHeaderCwd(mk(`${JSON.stringify({ type: "message", id: "m" })}\n`))).toBeUndefined();
+    expect(readHeaderCwd(mk(`${"y".repeat(9 * 1024)}\n`))).toBeUndefined();
+    expect(readHeaderCwd(join(dir, "absent.jsonl"))).toBeUndefined();
+  });
+});
+
+describe("consult fork-store: sweepForkDir (T-6, §5.1)", () => {
+  it("keeps valid files inside the TTL, drops expired files and headerless fragments regardless of mtime", () => {
+    const dir = tempDir();
+    const valid = join(dir, "valid.jsonl");
+    writeFileSync(valid, `${JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir })}\n`);
+    const expired = join(dir, "expired.jsonl");
+    writeFileSync(expired, `${JSON.stringify({ type: "session", version: 3, id: "s2", timestamp: "t", cwd: dir })}\n`);
+    const freshFragment = join(dir, "fresh-fragment.jsonl"); // _persist reborn after unlink — fresh mtime, no header
+    writeFileSync(freshFragment, `${JSON.stringify({ type: "message", id: "m", parentId: null, timestamp: "t" })}\n`);
+    const oldFragment = join(dir, "old-fragment.jsonl");
+    writeFileSync(oldFragment, "not a session at all\n");
+
+    const now = Date.now();
+    utimesSync(expired, new Date(now - FORK_TTL_MS - 60_000), new Date(now - FORK_TTL_MS - 60_000));
+    utimesSync(oldFragment, new Date(now - 3 * FORK_TTL_MS), new Date(now - 3 * FORK_TTL_MS));
+    // valid + freshFragment keep their (fresh) mtimes.
+
+    const result = sweepForkDir(dir, FORK_TTL_MS, now);
+
+    // oldFragment is both old and headerless — the TTL rule fires first
+    // (classification only matters for observability; deletion is what matters).
+    expect(result).toEqual({ removedExpired: 2, removedFragments: 1, kept: 1, errors: 0 });
+    expect(() => statSync(valid)).not.toThrow();
+    expect(() => statSync(expired)).toThrow();
+    expect(() => statSync(freshFragment)).toThrow(); // fragment rule ignores TTL
+    expect(() => statSync(oldFragment)).toThrow();
+  });
+
+  it("never throws on a missing dir, ignores subdirectories, and is a no-op for an empty dir", () => {
+    expect(sweepForkDir(join(tempDir(), "does-not-exist"), FORK_TTL_MS)).toEqual({
+      removedExpired: 0,
+      removedFragments: 0,
+      kept: 0,
+      errors: 0,
+    });
+    const dir = tempDir();
+    mkdirSync(join(dir, "subdir"));
+    expect(sweepForkDir(dir, FORK_TTL_MS)).toEqual({ removedExpired: 0, removedFragments: 0, kept: 0, errors: 0 });
+    expect(() => statSync(join(dir, "subdir"))).not.toThrow(); // directories untouched
+  });
+});
+
+describe("consult fork-store: removeForkFile / consultSessionDir", () => {
+  it("deletes only inside the consult dir; ENOENT is silent (idempotent)", () => {
+    const dir = tempDir();
+    const inside = join(dir, "fork.jsonl");
+    writeFileSync(inside, "{}\n");
+    const outsideDir = tempDir();
+    const outside = join(outsideDir, "precious.jsonl");
+    writeFileSync(outside, "keep me\n");
+
+    expect(removeForkFile(inside, dir)).toBe(true);
+    expect(() => statSync(inside)).toThrow();
+    expect(removeForkFile(inside, dir)).toBe(false); // ENOENT — silent, idempotent
+    expect(removeForkFile(outside, dir)).toBe(false); // outside the dir — refused
+    expect(readFileSync(outside, "utf8")).toBe("keep me\n");
+    // traversal attempts resolving outside the dir are refused too
+    expect(removeForkFile(join(dir, "..", "precious.jsonl"), dir)).toBe(false);
+    expect(readFileSync(outside, "utf8")).toBe("keep me\n");
+  });
+
+  it("consultSessionDir is pi's agent dir cache (review-1 #15)", () => {
+    expect(consultSessionDir()).toBe(join(getAgentDir(), "cache", "consult-sessions"));
+  });
+});

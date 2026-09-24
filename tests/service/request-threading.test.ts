@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { SpawnRequest } from "../../src/core/types.js";
+import type { ResolvedSpawnRequest } from "../../src/runtime/runner.js";
 import { threadThroughRequestFields } from "../../src/service/request-threading.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +48,25 @@ describe("threadThroughRequestFields", () => {
 
   it("an empty request threads to an empty object (no THREADED field present)", () => {
     expect(threadThroughRequestFields({ type: "worker", prompt: "hi" })).toEqual({});
+  });
+
+  it("consult (plan §4.3): forkSessionFrom is threaded, consultExperts is not", () => {
+    const req: SpawnRequest = {
+      type: "explorer",
+      prompt: "question",
+      parentRunId: "r_ASKER01",
+      forkSessionFrom: "/tmp/consult/fork-1.jsonl",
+      consultExperts: [{ runId: "r_EXPERT01", sessionFile: "/tmp/expert.jsonl", agentType: "explorer" }],
+    };
+    const out = threadThroughRequestFields(req);
+    expect(out).toEqual({ parentRunId: "r_ASKER01", forkSessionFrom: "/tmp/consult/fork-1.jsonl" });
+    // consultExperts is adapter-only (injection decision); it must never reach
+    // the execution layer verbatim.
+    expect(Object.prototype.hasOwnProperty.call(out, "consultExperts")).toBe(false);
+    // Gate C is what makes the threaded field actually land on the runner's
+    // request type — assert the round-trip target accepts it (T-10).
+    const resolved: Pick<ResolvedSpawnRequest, "forkSessionFrom"> = { forkSessionFrom: out.forkSessionFrom };
+    expect(resolved.forkSessionFrom).toBe("/tmp/consult/fork-1.jsonl");
   });
 });
 

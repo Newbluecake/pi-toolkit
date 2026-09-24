@@ -1,7 +1,16 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ErrorInfo, JsonSchema, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
+import type {
+  ErrorInfo,
+  JsonSchema,
+  RunId,
+  RunOutcome,
+  RunSnapshot,
+  SpawnRequest,
+  ConsultExpertRef,
+} from "../core/types.js";
+import type { ResolveExpertsResult } from "../consult/index.js";
 import { normalizeSchemaInput } from "../core/json-schema.js";
 import type { BoundedWaitResult } from "../service/spawn-service.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
@@ -178,6 +187,16 @@ export const AgentToolParams = Type.Object({
         "without a schema-valid submission it is reported as failed, not completed with free text.",
     }),
   ),
+  experts: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Optional whitelist of subagent runs (labels or run_ids) this subagent may consult in-turn via the " +
+        "consult tool — e.g. an upstream agent whose decisions it needs. Entries are resolved at dispatch " +
+        "time: unresolvable or ambiguous entries fail the dispatch (use the run_id to disambiguate); " +
+        "still-running entries are accepted with a warning and become consultable once they finish. " +
+        "The consulted copy is read-only and runs in the consulting agent's checkout.",
+    }),
+  ),
 });
 export type AgentToolParams = Static<typeof AgentToolParams>;
 
@@ -215,6 +234,15 @@ export function createAgentTool(deps: {
    * plain-text card instead.
    */
   markdownTheme?: () => MarkdownTheme | undefined;
+  /**
+   * consult (consult plan §4.2): dispatch-time expert-whitelist resolver.
+   * Wired for BOTH the top-level Agent tool (src/index.ts holder) and the
+   * nested one injected by runtime-adapter — any Agent caller that can pass
+   * `experts` must be able to resolve them; an unresolvable/ambiguous entry
+   * throws here so the dispatcher gets immediate feedback. Absent +
+   * `experts` passed ⇒ execute throws (never silently ignored, review-2 #11③).
+   */
+  resolveExperts?: (refs: readonly string[]) => ResolveExpertsResult;
 }): ToolDefinition<typeof AgentToolParams> {
   const nestedNote = deps.allowedTypes
     ? ` This is a nested delegation tool: subagent_type is restricted to [${deps.allowedTypes.join(", ")}], every spawned run is slotless (does not consume the concurrency pool), and nesting depth is capped by the host (further attempts beyond the cap are rejected, not silently allowed).`
@@ -273,6 +301,22 @@ export function createAgentTool(deps: {
         schema = normalized.schema;
       }
       const modelOverride = parseModel(params.model);
+      // consult §4.2: `experts` must be resolvable in THIS context — an
+      // unresolvable/ambiguous entry is a dispatcher config error and throws
+      // here (fail-fast at dispatch, never silently ignored).
+      if (params.experts?.length && !deps.resolveExperts)
+        throw new Error(
+          "experts is not supported in this context (no consult whitelist resolver is wired); drop the experts parameter",
+        );
+      const experts = params.experts?.length ? deps.resolveExperts!(params.experts) : undefined;
+      // consult §4.3: the resolved refs ride on the spawn request (trusted,
+      // already resolved — the runtime adapter injects the consult tool off
+      // them). Every spawn path below spreads baseRequest, so background /
+      // foreground / auto-background all carry them.
+      const expertEcho = (experts === undefined ? [] : [...experts.lines, ...experts.warnings]).map((line) => ({
+        type: "text" as const,
+        text: line,
+      }));
       const baseRequest = {
         type: params.subagent_type,
         prompt: params.prompt,
@@ -289,6 +333,7 @@ export function createAgentTool(deps: {
         ...(typeof params.timeout_s === "number" ? { budgetOverride: { totalMs: params.timeout_s * 1000 } } : {}),
         ...(params.isolation ? { isolation: params.isolation } : {}),
         ...(schema !== undefined ? { schema } : {}),
+        ...(experts !== undefined && experts.refs.length > 0 ? { consultExperts: experts.refs } : {}),
       };
       if (params.run_in_background) {
         // detachSignalOnStart: background runs are fire-and-forget — the
@@ -309,6 +354,7 @@ export function createAgentTool(deps: {
               text: `Subagent "${effectiveLabel}" started in background (run_id: ${spawned.runId}). You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with get_subagent_result(run_id: "${spawned.runId}") after the notification arrives.`,
             },
             { type: "text" as const, text: labelMarker(effectiveLabel, spawned.runId, "running") },
+            ...expertEcho,
           ],
           details: { runId: spawned.runId, label: effectiveLabel, background: true },
         };
@@ -375,6 +421,7 @@ export function createAgentTool(deps: {
                     text: `Subagent "${effectiveLabel}" is still running after ${formatDuration(autoMs)} and has been moved to the background (run_id: ${spawned.runId}). The run was NOT stopped — it keeps running under its normal time budget, and you will receive a completion notification when it finishes; collect it then with get_subagent_result(run_id: "${spawned.runId}"). Meanwhile you can use steer_subagent to send a follow-up instruction, or abort_subagent to stop it.`,
                   },
                   { type: "text" as const, text: labelMarker(effectiveLabel, spawned.runId, "running") },
+                  ...expertEcho,
                 ],
                 details: { runId: spawned.runId, label: effectiveLabel, background: true, autoBackgrounded: true },
               };
@@ -420,6 +467,7 @@ export function createAgentTool(deps: {
         content: [
           { type: "text" as const, text: resultText },
           { type: "text" as const, text: labelMarker(effectiveLabel, outcome.runId, outcome.status) },
+          ...expertEcho,
         ],
         // pi usage accounting: the child session's spend rides on this tool
         // result so pi's own totals (footer, /session, RPC) include it.

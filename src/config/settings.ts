@@ -190,6 +190,32 @@ export interface CacheTtlSettings {
 }
 
 /**
+ * consult（docs/dev/consult/plan.md §4.6，冻结面）：轮内同步请教。七个字段，
+ * 逐字段容错解析见 parseConsultSettings（never throws）。预检与累计帽是
+ * **两个**值（方案 §15 #4）：共用一个值时 est 可以合法逼近 cap（如 $1.9 / cap $2），
+ * 第一个 turn 结束即越帽 ⇒ maxTurns 退化为 1；$2/$4 保证 est 打满预检线时仍余
+ * ≥ 1 个同量级 turn 的预算（P0-α③ 实测：150k 上下文专家首请求 $1.23）。
+ * 内部常量（故意不进 settings，防旋钮 creep）：FORK_TTL_MS = 24h、
+ * CONSULT_MAX_CONTEXT_PERCENT = 75、CONSULT_MAX_GLOBAL_INFLIGHT = 8。
+ */
+export interface ConsultSettings {
+  /** 总开关。false = 不注入 consult 工具；派发后被关则工具返回 unavailable nack。Default true。 */
+  enabled: boolean;
+  /** 请教 run 的总预算硬顶（budgetOverride.totalMs ⇒ maxTotalFactor=1，无宽限无延长）。Default 150s。 */
+  timeoutMs: number;
+  /** 回答截断上限（同时写进问题 prompt 的指令）。Default 2000。 */
+  maxAnswerChars: number;
+  /** 轮次上限：第 maxTurns+1 个 turn 开始时 abort（turn 边界判定）。Default 3。 */
+  maxTurns: number;
+  /** fork 前的首请求成本预检阈值（USD）；0 = 关闭预检。Default 2。 */
+  maxFirstRequestUsd: number;
+  /** 累计成本帽（USD，turn 边界判定）；0 = 关闭成本帽。Default 4。 */
+  maxCostUsd: number;
+  /** 每提问方 in-flight consult 上限。Default 2。 */
+  maxConcurrent: number;
+}
+
+/**
  * 额度感知派单（docs/dev/quota/quota-plan.md §8.1）：阶梯预警 + spawn 闸门 +
  * HUD 的设置块。逐字段容错解析见 parseQuotaSettings（never throws）。时长
  * 字段（*Ms 内部毫秒、文件存 *S 秒）登记在 TIME_SETTING_MS_PATHS；阈值
@@ -334,6 +360,8 @@ export interface AgentSettings {
   quota: QuotaSettings;
   /** /goal 目标驱动持续运行（goal-plan v4）。 */
   goal: GoalSettings;
+  /** consult：轮内同步请教（consult plan §4.6）。 */
+  consult: ConsultSettings;
   /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `enabled:false` leaves pi's built-in footer untouched. */
   hud: HudSettings;
   /** Merged plugins: web_search tool (Codex/SerpAPI/Bocha/Tavily failover). Default on. */
@@ -495,6 +523,15 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     untilCmdTimeoutMs: 300_000,
     deliveryWatchdogMs: 30_000,
   },
+  consult: {
+    enabled: true,
+    timeoutMs: 150_000,
+    maxAnswerChars: 2_000,
+    maxTurns: 3,
+    maxFirstRequestUsd: 2,
+    maxCostUsd: 4,
+    maxConcurrent: 2,
+  },
   hud: { enabled: true, autoFetchMinutes: 5 },
   webSearch: { enabled: true },
   todo: { enabled: true },
@@ -570,6 +607,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "goal.evalTimeoutMs",
   "goal.untilCmdTimeoutMs",
   "goal.deliveryWatchdogMs",
+  "consult.timeoutMs",
   "cacheTtl.keepaliveIntervalMs",
   "cacheTtl.adaptiveColdCooldownMs",
   "cacheTtl.adaptiveColdMinHorizonMs",
@@ -690,6 +728,7 @@ export function loadSettings(source: unknown): AgentSettings {
     quota: parseQuotaSettings(value.quota),
     extend: parseExtendSettings(value.extend),
     goal: parseGoalSettings(value.goal),
+    consult: parseConsultSettings(value.consult),
     hud: parseHudSettings(value.hud),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
     todo: parseEnabledGroup(value.todo, DEFAULT_SETTINGS.todo),
@@ -699,6 +738,44 @@ export function loadSettings(source: unknown): AgentSettings {
     memory: parseMemorySettings(value.memory),
     reload: parseReloadSettings(value.reload),
   });
+}
+
+/**
+ * consult settings 块解析（plan §4.6）：逐字段容错、never throws（parseGoalSettings
+ * 同款风格）。数字须 finite 且 ≥ 0；计数/时长字段要求整数；美元阈值允许小数
+ * （exactOptionalPropertyTypes：七个字段总是存在，不设可选键）。
+ */
+export function parseConsultSettings(input: unknown): ConsultSettings {
+  const defaults = DEFAULT_SETTINGS.consult;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const num = (raw: unknown, fallback: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+  const int = (raw: unknown, fallback: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && Number.isInteger(raw) && raw >= 0 ? raw : fallback;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    // totalMs 硬顶：0 会让 applyBudgetPolicy 退回默认预算（无硬顶），所以下界是 1ms 而不是 0。
+    timeoutMs: (() => {
+      const parsed = int(value.timeoutMs, defaults.timeoutMs);
+      return parsed > 0 ? parsed : defaults.timeoutMs;
+    })(),
+    maxAnswerChars: (() => {
+      const parsed = int(value.maxAnswerChars, defaults.maxAnswerChars);
+      return parsed > 0 ? parsed : defaults.maxAnswerChars;
+    })(),
+    maxTurns: (() => {
+      const parsed = int(value.maxTurns, defaults.maxTurns);
+      return parsed > 0 ? parsed : defaults.maxTurns;
+    })(),
+    // 两个美元阈值允许 0（= 关闭对应闸门），故走 num 而不是「> 0 才收」。
+    maxFirstRequestUsd: num(value.maxFirstRequestUsd, defaults.maxFirstRequestUsd),
+    maxCostUsd: num(value.maxCostUsd, defaults.maxCostUsd),
+    maxConcurrent: (() => {
+      const parsed = int(value.maxConcurrent, defaults.maxConcurrent);
+      return parsed > 0 ? parsed : defaults.maxConcurrent;
+    })(),
+  };
 }
 
 /**

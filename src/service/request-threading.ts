@@ -23,7 +23,15 @@ import type { ResolvedSpawnRequest } from "../runtime/runner.js";
  */
 
 /** Fields threaded verbatim into `ResolvedSpawnRequest` (same name, same meaning). */
-const THREADED = ["signal", "detachSignalOnStart", "slotless", "resumeFrom", "parentRunId", "deadlineAt"] as const;
+const THREADED = [
+  "signal",
+  "detachSignalOnStart",
+  "slotless",
+  "resumeFrom",
+  "parentRunId",
+  "deadlineAt",
+  "forkSessionFrom",
+] as const;
 
 /**
  * Fields deliberately NOT threaded verbatim, with the reason each is excluded
@@ -42,6 +50,7 @@ const NOT_THREADED = [
   "expectAck", // consumed by spawn-service for the caller-ack hold registry
   "isolation", // consumed by the X1 worktree extension via H2, not threaded
   "schema", // consumed by the adapter to inject the StructuredOutput tool
+  "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)
 ] as const;
 
 type ClassifiedKeys = (typeof THREADED)[number] | (typeof NOT_THREADED)[number];

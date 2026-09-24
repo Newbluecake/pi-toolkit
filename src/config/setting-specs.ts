@@ -408,6 +408,31 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "no new run observed within this window => retry once, then stop the goal",
     description: "Continuation delivery watchdog",
   }),
+  // consult（consult plan §4.6）：轮内同步请教的七个旋钮，全部非 live（在
+  // 派发/请教时从当次栈的 settings 读取 ⇒ 改动需 /reload）。内部常量
+  // （FORK_TTL_MS / CONSULT_MAX_CONTEXT_PERCENT / CONSULT_MAX_GLOBAL_INFLIGHT）
+  // 刻意不在这里，防旋钮蔓延（评审-1 #20）。
+  "consult.enabled": bool("consult.enabled", "Enable in-turn consult of finished expert subagent runs"),
+  "consult.timeoutS": seconds("consult.timeoutMs", {
+    min: 1,
+    hint: "hard total budget of a consult run (no grace, no extension)",
+    description: "Consult run timeout",
+  }),
+  "consult.maxAnswerChars": count("consult.maxAnswerChars", 1, "Max chars of an expert answer before truncation"),
+  "consult.maxTurns": count("consult.maxTurns", 1, "Max turns a consulted expert may take before being cut off"),
+  "consult.maxFirstRequestUsd": {
+    kind: "number",
+    path: "consult.maxFirstRequestUsd",
+    min: 0,
+    description: "Pre-fork first-request cost cap in USD; 0 = no pre-check",
+  },
+  "consult.maxCostUsd": {
+    kind: "number",
+    path: "consult.maxCostUsd",
+    min: 0,
+    description: "Cumulative cost cap per consult in USD (turn boundary); 0 = unlimited",
+  },
+  "consult.maxConcurrent": count("consult.maxConcurrent", 1, "Max in-flight consults per asking run"),
   // Quota-aware dispatch (quota-plan §8.5): all non-live — captured at
   // activate, change ⇒ /reload. baseUrl / userAgent stay JSON-file-only
   // (same treatment as bashJobs.dir / bashJobs.shellPath): they are escape

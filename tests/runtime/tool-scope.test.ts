@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONSULT_READONLY_TOOLS,
   RESERVED_TOOL_NAMES,
   buildToolScopePolicy,
   createToolScopeEnforcer,
@@ -37,6 +38,23 @@ describe("runtime/tool-scope: buildToolScopePolicy", () => {
     expect(buildToolScopePolicy({ granted: ["extend_subagent_timeout"] }).deny.has("extend_subagent_timeout")).toBe(
       false,
     );
+  });
+  it("consult (plan §6 A-4b): consult is reserved and denied by default, granted only per-run", () => {
+    expect(RESERVED_TOOL_NAMES).toContain("consult");
+    expect(buildToolScopePolicy({}).deny.has("consult")).toBe(true);
+    // 派发方给了专家白名单的 run 才被 granted —— 此时不得被剔掉，
+    // 且在声明了 tools 白名单的类型上要能合入 allow（M1 合并）。
+    const granted = buildToolScopePolicy({ tools: ["read"], granted: ["consult"] });
+    expect(granted.deny.has("consult")).toBe(false);
+    expect(granted.allow?.has("consult")).toBe(true);
+  });
+  it("consult read-only domain: CONSULT_READONLY_TOOLS as an allow-list keeps exactly those four", () => {
+    const policy = buildToolScopePolicy({ tools: CONSULT_READONLY_TOOLS });
+    expect([...(policy.allow ?? [])].sort()).toEqual(["find", "grep", "ls", "read"]);
+    const handle = fakeHandle(["read", "grep", "find", "ls", "bash", "write", "Agent", "consult"]);
+    const decision = createToolScopeEnforcer().onBind(handle, policy);
+    expect(decision.applied).toEqual(["find", "grep", "ls", "read"]);
+    expect(handle.getActiveTools().sort()).toEqual(["find", "grep", "ls", "read"]);
   });
   it("undefined tools means no allow-list restriction (legacy behavior preserved)", () => {
     const policy = buildToolScopePolicy({});
