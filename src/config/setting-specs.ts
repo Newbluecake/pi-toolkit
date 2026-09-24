@@ -424,6 +424,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description: "Comma-separated extra subscription providers without a quota API (e.g. copilot-anthropic)",
   },
   "quota.refreshS": seconds("quota.refreshMs", { min: 60, max: 86_400, description: "Quota snapshot TTL" }),
+  "quota.refreshHotS": seconds("quota.refreshHotMs", { min: 1, max: 86_400, description: "Hot quota snapshot TTL" }),
   "quota.staleAfterS": seconds("quota.staleAfterMs", {
     min: 60,
     max: 604_800,

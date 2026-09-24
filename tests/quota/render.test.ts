@@ -5,11 +5,13 @@
 // expected HH:MM strings hold on any timezone.
 
 import { describe, expect, it } from "vitest";
-import type { LadderLevel } from "../../src/quota/types.js";
-import type { ProviderVerdict, WindowVerdict } from "../../src/quota/ladder.js";
+import type { LadderLevel, WindowScope } from "../../src/quota/types.js";
+import type { ProviderVerdict, QuotaRecoveryEvent, WindowVerdict } from "../../src/quota/ladder.js";
 import {
+  alternativesAdvice,
   buildQuotaBlockText,
   buildQuotaMessage,
+  buildQuotaRecoveryText,
   buildQuotaTickText,
   buildQuotaWarnText,
   dedupeVerdicts,
@@ -73,6 +75,19 @@ describe("formatScope / formatResetAt / formatEta", () => {
   });
 });
 
+describe("alternative provider copy", () => {
+  it("uses provider-oriented subscription advice", () => {
+    const text = alternativesAdvice({ providers: ["kimi-coding"], subscription: true });
+    expect(text).toContain("替代候选（订阅优先）：kimi-coding。");
+    expect(text).toContain("在这些 provider 下按任务需求选择合适模型");
+  });
+
+  it("labels tier 2 fallback as pay-per-use rather than subscription-first", () => {
+    const text = alternativesAdvice({ providers: ["cloudrouter-response"], subscription: false });
+    expect(text).toContain("无可用订阅；按量计费 provider：cloudrouter-response。");
+    expect(text).not.toContain("订阅优先");
+  });
+});
 describe("L1 tick block", () => {
   it("renders one segment per provider and ⚠ on degraded windows", () => {
     const zai = verdict({
@@ -151,7 +166,7 @@ describe("L3 block", () => {
       [
         "[quota 严重] zai-coding-cn 5h 已用 93%，预计 18 分钟内耗尽（窗口 02:11 重置）。",
         "本轮不要把新任务派给 zai-coding-cn。替代候选（订阅优先）：kimi-coding/kimi-k3、cloudrouter-anthropic/claude-opus-5。",
-        "按任务需求选：候选能胜任就优先用（订阅额度不用会作废）；不胜任就按路由表另选合适模型，不必硬凑。",
+        "按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
         "继续派给该 provider 会在 spawn 阶段被快速失败拦下（不会消耗 run）。",
       ].join("\n"),
     );
@@ -333,7 +348,7 @@ describe("demotion-floor copy and exhausted windows", () => {
       [
         "[quota 预警] kimi-coding 仍在降位期（此前额度告急触发降位，预计 1/18 09:06 解除），最新读数（5h 0% · 7d 0%）与降位矛盾，可能是上游返回的残缺数据，已按降位处理。",
         "新任务优先考虑其它订阅模型；若仍派给它，可能因额度耗尽失败。替代候选（订阅优先）：zai-coding-cn/glm-5.3。",
-        "按任务需求选：候选能胜任就优先用（订阅额度不用会作废）；不胜任就按路由表另选合适模型，不必硬凑。",
+        "按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
       ].join("\n"),
     );
     expect(text).not.toContain("派单不变");
@@ -386,5 +401,86 @@ describe("demotion-floor copy and exhausted windows", () => {
     const text = buildQuotaWarnText(v, NOW);
     expect(text).toContain("7d 已用 100%");
     expect(text).not.toContain("按当前速率");
+  });
+});
+
+// 额度恢复播报文案（buildQuotaRecoveryText）：英文 token（5h/7d 读数）+ 中文散文；
+// 闸门状态必须与 event.gateBlocked 一致——另一窗口仍耗时绝不写「已放行」。
+describe("recovery block (额度恢复播报)", () => {
+  const R5H = new Date(2026, 0, 15, 6, 11, 0).getTime(); // local 06:11
+  const RWEEK = new Date(2026, 0, 18, 9, 6, 0).getTime(); // local 1/18 09:06
+
+  function recovery(over: Partial<QuotaRecoveryEvent> = {}): QuotaRecoveryEvent {
+    return {
+      provider: "kimi-coding",
+      resetScopes: new Set<WindowScope>(["5h", "week"]),
+      verdict: verdict({
+        provider: "kimi-coding",
+        level: 0,
+        windows: [w("5h", 0, 0, "none"), w("week", 2, 0, "none")],
+      }),
+      gateBlocked: false,
+      at: NOW,
+      ...over,
+    };
+  }
+
+  it("full reset with the gate open: current readings + 放行 + 可恢复派单", () => {
+    expect(buildQuotaRecoveryText(recovery(), NOW)).toBe(
+      "[quota 恢复] kimi-coding 窗口已重置，当前 5h 0% · 7d 2%，spawn 闸门已放行，可恢复派单。",
+    );
+  });
+
+  it("single-window reset with the other still exhausted names both honestly (never 已放行)", () => {
+    const v = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      demoted: true,
+      demotedUntil: RWEEK,
+      windows: [w("5h", 1, 0, "none", { resetAt: R5H }), w("week", 100, 3, "exhausted", { resetAt: RWEEK })],
+    });
+    const text = buildQuotaRecoveryText(
+      recovery({ resetScopes: new Set<WindowScope>(["5h"]), verdict: v, gateBlocked: true }),
+      NOW,
+    );
+    expect(text).toBe(
+      "[quota 恢复] kimi-coding 5h 窗口已重置，当前 5h 1% · 7d 100%，" +
+        "7d 仍耗尽（1/18 09:06 重置），spawn 闸门仍拦截，请继续避开该 provider 的新任务。",
+    );
+    expect(text).not.toContain("已放行");
+  });
+
+  it("a still-warm (L2) unreset window is named with the ⚠ token", () => {
+    const v = verdict({
+      provider: "zai-coding-cn",
+      level: 2,
+      windows: [w("5h", 10, 0, "none"), w("week", 80, 2, "pct", { resetAt: RWEEK })],
+    });
+    const text = buildQuotaRecoveryText(
+      recovery({ provider: "zai-coding-cn", resetScopes: new Set<WindowScope>(["5h"]), verdict: v, gateBlocked: true }),
+      NOW,
+    );
+    expect(text).toContain("5h 窗口已重置，当前 5h 10% · 7d 80%");
+    expect(text).toContain("7d 仍 80% ⚠，spawn 闸门仍拦截");
+    expect(text).not.toContain("已放行");
+  });
+
+  it("all windows reset yet still gated (low gateLevel): honest fallback clause", () => {
+    const v = verdict({ provider: "zai-coding-cn", level: 2, windows: [w("5h", 55, 2, "pct")] });
+    const text = buildQuotaRecoveryText(
+      recovery({ provider: "zai-coding-cn", resetScopes: new Set<WindowScope>(["5h"]), verdict: v, gateBlocked: true }),
+      NOW,
+    );
+    expect(text).toContain("窗口已重置，当前 5h 55%");
+    expect(text).toContain("重置后读数仍触发闸门（等级 L2），spawn 闸门仍拦截");
+    expect(text).not.toContain("已放行");
+  });
+
+  it("window-less verdict (defensive) keeps the reset scopes without readings", () => {
+    const text = buildQuotaRecoveryText(
+      recovery({ verdict: verdict({ provider: "kimi-coding", level: 0, windows: [] }) }),
+      NOW,
+    );
+    expect(text).toBe("[quota 恢复] kimi-coding 5h、7d 窗口已重置，spawn 闸门已放行，可恢复派单。");
   });
 });

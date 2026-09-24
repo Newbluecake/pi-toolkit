@@ -206,8 +206,10 @@ export interface QuotaSettings {
    * 把它们与受管订阅同归「订阅」——有订阅可选时只推荐订阅。空串 = 无。
    */
   subscriptionProviders: string;
-  /** 快照 TTL：早于此不重新请求。 */
+  /** 快照 TTL：早于此不重新请求。冷态 provider 使用该值。 */
   refreshMs: number;
+  /** 热态 provider 的快照 TTL；非法或非正值回落默认值。 */
+  refreshHotMs: number;
   /** 超过此龄的快照视为陈旧：只提示、闸门不阻断。 */
   staleAfterMs: number;
   /** L1 提示阈值（used %）。 */
@@ -461,6 +463,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     providers: "zai-coding-cn,zai,kimi-coding",
     subscriptionProviders: "",
     refreshMs: 600_000, // 10min（简报的 refreshMinutes: 10）
+    refreshHotMs: 120_000, // 2min（L1/近耗尽 provider）
     staleAfterMs: 3_600_000, // 1h
     l1Percent: 50,
     l2Percent: 75,
@@ -571,6 +574,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "cacheTtl.adaptiveColdCooldownMs",
   "cacheTtl.adaptiveColdMinHorizonMs",
   "quota.refreshMs",
+  "quota.refreshHotMs",
   "quota.staleAfterMs",
   "quota.l3EtaMs",
   "quota.minIntervalMs",
@@ -847,6 +851,7 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
     providers: str(value.providers, defaults.providers),
     subscriptionProviders: str(value.subscriptionProviders, defaults.subscriptionProviders),
     refreshMs: num(value.refreshMs, defaults.refreshMs, 60_000, 86_400_000),
+    refreshHotMs: num(value.refreshHotMs, defaults.refreshHotMs, 1, 86_400_000),
     staleAfterMs: num(value.staleAfterMs, defaults.staleAfterMs, 60_000, 604_800_000),
     l1Percent: l1,
     l2Percent: l2,

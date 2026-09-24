@@ -27,8 +27,15 @@ import type { Clock } from "../core/clock.js";
 import type { QuotaSettings } from "../config/settings.js";
 import type { Millis } from "../core/types.js";
 import type { DemotionStore } from "./demotion.js";
+import { toLadderLevel } from "./gate.js";
 import { forecast, pushSample, type BurnSample } from "./forecast.js";
-import { providerVerdict, QUOTA_HYSTERESIS_PCT, type LadderThresholds, type ProviderVerdict } from "./ladder.js";
+import {
+  providerVerdict,
+  QUOTA_HYSTERESIS_PCT,
+  type LadderThresholds,
+  type ProviderVerdict,
+  type QuotaRecoveryEvent,
+} from "./ladder.js";
 import { renderQuotaStatus, type QuotaStatusTheme } from "./render.js";
 import {
   isQuotaProviderId,
@@ -65,6 +72,13 @@ export interface QuotaServiceDeps {
   /** HUD 主题（ctx.ui.theme 的结构子集）；旧 pi / 非 TUI 时 undefined ⇒ 纯文本。 */
   readonly theme?: (() => QuotaStatusTheme | undefined) | undefined;
   readonly warn?: ((message: string) => void) | undefined;
+  /**
+   * 观测重置分支的恢复事件出口（额度恢复播报）：快照被接受且 classifyDrop 认定
+   * 重置（有证据 / 两次确认）时，在全部状态落定（降位当场重建、HUD）之后每 provider
+   * 每次至多调用一次。回调异常被吞（数据面不可被注入面拖垮）。可疑读数拒收路径
+   * 早 return，天然不触发。
+   */
+  readonly onObservedReset?: ((event: QuotaRecoveryEvent) => void) | undefined;
 }
 
 /**
@@ -178,6 +192,16 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     return out;
   };
 
+  // Hot providers are refreshed more often independently; an L1 snapshot or a
+  // forecast that reaches exhaustion within an hour is enough to enter hot mode.
+  const effectiveTtl = (id: QuotaProviderId, now: Millis): Millis => {
+    const verdict = verdictOf(id, now);
+    const hot =
+      verdict?.level !== undefined &&
+      (verdict.level >= 1 || verdict.windows.some((window) => window.etaMs !== undefined && window.etaMs < 3_600_000));
+    return hot ? settings.refreshHotMs : settings.refreshMs;
+  };
+
   /** HUD 行写入（R8：setStatus 可能来自陈旧 ctx，双探测 + try/catch 由注入方负责，这里再兜一层）。 */
   const writeStatus = (now: Millis): void => {
     if (disposed || deps.setStatus === undefined) return;
@@ -258,6 +282,26 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       }
     }
     writeStatus(now);
+    // 额度恢复播报：观测重置（有证据 / 两次确认）且快照被接受 ⇒ 发一条恢复事件。
+    // verdictOf 重算以拿到**终态**——上面 level ≥ 3 的当场重新降位必须反映进事件，
+    // 文案据此如实写「仍拦截」，而不是拿 clear 后的中间态误报「已放行」。
+    if (resetScopes.size > 0 && deps.onObservedReset !== undefined) {
+      const recovered = verdictOf(id, now);
+      if (recovered !== undefined) {
+        try {
+          deps.onObservedReset({
+            provider: id,
+            resetScopes: new Set(resetScopes),
+            verdict: recovered,
+            // 镜像 evaluateQuotaGate 的阻断条件（快照刚落地 ⇒ 非 stale）。
+            gateBlocked: settings.gate && recovered.level >= toLadderLevel(settings.gateLevel),
+            at: now,
+          });
+        } catch (error) {
+          safeWarn(`[quota] ${id} recovery listener failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
   };
 
   const refreshIfStale = (): void => {
@@ -265,16 +309,17 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     for (const adapter of deps.adapters) {
       const id = adapter.id;
       const now = clock.now();
+      const ttl = effectiveTtl(id, now);
       const existing = snapshots.get(id);
       if (existing !== undefined) {
-        if (now - existing.fetchedAt < settings.refreshMs) continue; // TTL：快照未过期
-        // 刚拒过一条可疑读数：确认读数至少隔一个刷新周期再拉（不在故障风暴里连撞端点）。
+        if (now - existing.fetchedAt < ttl) continue; // TTL：按 provider 热/冷状态计算
+        // 刚拒过一条可疑读数：确认读数至少隔一个有效刷新周期再拉。
         const suspect = suspects.get(id);
-        if (suspect !== undefined && now - suspect.fetchedAt < settings.refreshMs) continue;
+        if (suspect !== undefined && now - suspect.fetchedAt < ttl) continue;
       } else {
         // 无快照（从未成功或上次失败）：按上次尝试时间退避，失败的端点不被每轮 turn 撞击。
         const last = lastAttempt.get(id);
-        if (last !== undefined && now - last < settings.refreshMs) continue;
+        if (last !== undefined && now - last < ttl) continue;
       }
       if (inflight.has(id)) continue; // per-provider 在途去重
       lastAttempt.set(id, now);

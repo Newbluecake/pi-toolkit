@@ -147,6 +147,23 @@ export function providerVerdict(
 }
 
 /**
+ * 额度恢复事件（service → hook，额度恢复播报）：`applySnapshot` 认定观测重置
+ * （有重置证据或两次一致回落，service.classifyDrop）且快照被接受时发出。数据面只
+ * 描述事实；是否注入由 hook 层按闩锁（「本会话曾真播报过」）决定——从未告警过的
+ * provider 无「恢复」可言。
+ */
+export interface QuotaRecoveryEvent {
+  readonly provider: QuotaProviderId;
+  /** 本次被认定观测重置的窗口 scope 集合。 */
+  readonly resetScopes: ReadonlySet<WindowScope>;
+  /** 落地后的**终态**判定（含按现有语义当场重建的降位标记）。 */
+  readonly verdict: ProviderVerdict;
+  /** 镜像 evaluateQuotaGate 的阻断判定（gate && !stale && level ≥ gateLevel）——文案据此如实写闸门状态。 */
+  readonly gateBlocked: boolean;
+  readonly at: Millis;
+}
+
+/**
  * 等级只来自降位地板：仍在降位期，但没有任何窗口自身达到 L2。读数与降位矛盾
  * （上游残缺数据、或服务端提前重置尚未被观测确认）——文案层据此如实说明，
  * 不能拿用量最低的窗口去讲「已用 0%」。

@@ -11,8 +11,9 @@ import {
   type QuotaAnnounceLatch,
   type QuotaHintState,
 } from "../../src/quota/hook.js";
-import type { ProviderVerdict, WindowVerdict } from "../../src/quota/ladder.js";
+import type { ProviderVerdict, QuotaRecoveryEvent, WindowVerdict } from "../../src/quota/ladder.js";
 import type { LadderLevel, WindowScope } from "../../src/quota/types.js";
+import type { AlternativeSelection } from "../../src/quota/render.js";
 
 const FETCHED_AT = 1_000;
 const RESET_AT = 50_000;
@@ -48,6 +49,7 @@ function makeState(over: Partial<QuotaHintState> = {}): QuotaHintState {
     display: true,
     latches: new Map<string, QuotaAnnounceLatch>(),
     lastSentAt: 0,
+    recoveries: [],
     ...over,
   };
 }
@@ -61,7 +63,13 @@ interface SentEntry {
   options: { triggerTurn: false };
 }
 
-function harness(options: { state?: Partial<QuotaHintState>; verdicts?: readonly ProviderVerdict[] } = {}) {
+function harness(
+  options: {
+    state?: Partial<QuotaHintState>;
+    verdicts?: readonly ProviderVerdict[];
+    alternatives?: (provider: string) => AlternativeSelection;
+  } = {},
+) {
   const state = makeState(options.state);
   let clock = 1_000;
   let current: readonly ProviderVerdict[] = options.verdicts ?? [];
@@ -79,6 +87,7 @@ function harness(options: { state?: Partial<QuotaHintState>; verdicts?: readonly
     refresh: refreshSpy,
     sendMessage,
     now: () => clock,
+    ...(options.alternatives === undefined ? {} : { alternatives: options.alternatives }),
   });
   return {
     state,
@@ -166,6 +175,15 @@ describe("createQuotaHintHook", () => {
     expect(h.refreshSpy).not.toHaveBeenCalled();
   });
 
+  it("injects provider-only alternatives with tier-aware copy", () => {
+    const h = harness({
+      verdicts: [verdict({ level: 3, windows: [w("5h", 93, 3)] })],
+      alternatives: () => ({ providers: ["cloudrouter-response"], subscription: false }),
+    });
+    h.hook({}, ctx());
+    expect(h.sent[0]?.message.content).toContain("无可用订阅；按量计费 provider：cloudrouter-response");
+    expect(h.sent[0]?.message.content).not.toContain("订阅优先");
+  });
   it("L0: sends nothing, clears the provider latch, still lazy-refreshes", () => {
     const h = harness({ verdicts: [verdict({ level: 0, windows: [w("5h", 5, 0, "none")] })] });
     h.state.latches.set("zai-coding-cn", { level: 1, step: 60, at: 0, usedPct: 62 });
@@ -361,5 +379,129 @@ describe("createQuotaHintHook", () => {
     expect(h.sent).toHaveLength(1); // 仍是上一条，本轮零新增
     expect(h.state.latches.has("zai-coding-cn")).toBe(false);
     expect(h.refreshSpy).toHaveBeenCalled();
+  });
+});
+
+// 额度恢复播报：hook 每 turn_end 排空 state.recoveries，仅在 provider 曾真播报过
+// （闩锁存在）时注入恢复块（含当前读数与闸门状态）；同轮抑制常规块（每次观测重置
+// 至多一条）；绕过 minInterval（与 L3 同理）；send 失败 ⇒ 闩锁回滚 + 事件回队。
+describe("createQuotaHintHook recovery announcements", () => {
+  function recoveryEvent(over: Partial<QuotaRecoveryEvent> = {}): QuotaRecoveryEvent {
+    return {
+      provider: "zai-coding-cn",
+      resetScopes: new Set<WindowScope>(["5h", "week"]),
+      verdict: verdict({ level: 0, windows: [w("5h", 0, 0, "none"), w("week", 2, 0, "none")] }),
+      gateBlocked: false,
+      at: 1_000,
+      ...over,
+    };
+  }
+
+  const l0Reset = () => verdict({ level: 0, windows: [w("5h", 0, 0, "none"), w("week", 2, 0, "none")] });
+
+  it("an eligible recovery (latch exists) sends exactly one message with current readings", () => {
+    const h = harness({ verdicts: [l0Reset()] });
+    h.state.latches.set("zai-coding-cn", { level: 3, step: 100, at: 0, usedPct: 100 }); // 曾真播报过
+    h.state.recoveries.push(recoveryEvent());
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.content).toContain("[quota 恢复] zai-coding-cn 窗口已重置");
+    expect(h.sent[0]?.message.content).toContain("5h 0% · 7d 2%");
+    expect(h.sent[0]?.message.content).toContain("spawn 闸门已放行，可恢复派单");
+    expect(h.sent[0]?.message.customType).toBe(QUOTA_CUSTOM_TYPE);
+    expect(h.sent[0]?.message.details).toMatchObject({
+      recoveries: [{ provider: "zai-coding-cn", scopes: ["5h", "week"], level: 0, gateBlocked: false }],
+    });
+    expect(h.state.recoveries).toHaveLength(0); // consume-once
+    expect(h.state.latches.has("zai-coding-cn")).toBe(false); // L0 删闩锁发生在判定之后
+    h.hook({}, ctx()); // 下一轮同读数：零新增（每次观测重置至多一条）
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("a provider that never announced gets no recovery message; the event is consumed silently", () => {
+    const h = harness({ verdicts: [l0Reset()] });
+    h.state.recoveries.push(recoveryEvent());
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(0);
+    expect(h.state.recoveries).toHaveLength(0);
+    expect(h.state.lastSentAt).toBe(0);
+  });
+
+  it("partial reset with the gate still blocked: honest copy, suppressed L3 block, latch advances", () => {
+    const stillL3 = verdict({
+      level: 3,
+      demoted: true,
+      demotedUntil: RESET_AT,
+      windows: [w("5h", 1, 0, "none"), w("week", 100, 3, "exhausted")],
+    });
+    const h = harness({ verdicts: [stillL3] });
+    h.state.latches.set("zai-coding-cn", { level: 3, step: 100, at: 0, usedPct: 100 });
+    h.state.recoveries.push(
+      recoveryEvent({ resetScopes: new Set<WindowScope>(["5h"]), verdict: stillL3, gateBlocked: true }),
+    );
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("5h 窗口已重置");
+    expect(content).toContain("7d 仍耗尽");
+    expect(content).toContain("spawn 闸门仍拦截");
+    expect(content).not.toContain("已放行"); // demotion 当场重建 ⇒ 绝不误报放行
+    expect(content).not.toContain("[quota 严重]"); // 常规块被抑制：每次观测重置至多一条
+    // 闩锁保留当前状态（level/step 不回退到更旧的播报点；announce=false 时 next 即旧闩锁，
+    // 复读门维持原有节奏——恢复后的 L3 复读是「仍在耗尽」的常规提醒，不是重置的双播）。
+    expect(h.state.latches.get("zai-coding-cn")).toMatchObject({ level: 3, step: 100 });
+    h.clock += 60_000; // 下一轮：无恢复、repeatMs 未到 ⇒ 零新增
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("recovery bypasses the global minInterval floor and carries the normal tick through", () => {
+    // 对照：无恢复事件时，间隔内的 L1 网格前进被地板吞掉。
+    const a = harness({ verdicts: [verdict()] });
+    a.hook({}, ctx()); // t=1_000 首发
+    a.clock += 60_000;
+    a.setVerdicts([verdict({ windows: [w("5h", 71, 1)] })]);
+    a.hook({}, ctx());
+    expect(a.sent).toHaveLength(1);
+    // 实验：同样在间隔内，但挂着一条恢复事件 ⇒ 恢复块 + 常规块合并照发（一轮一条）。
+    const b = harness({ verdicts: [verdict()] });
+    b.hook({}, ctx()); // zai 62% 首发，lastSentAt=1_000
+    b.state.latches.set("kimi-coding", { level: 3, step: 100, at: 0, usedPct: 100 }); // kimi 曾播报
+    const kimiRecovered = verdict({
+      provider: "kimi-coding",
+      level: 0,
+      windows: [w("5h", 0, 0, "none"), w("week", 2, 0, "none")],
+    });
+    b.clock += 60_000; // 仍在 minIntervalMs 内
+    b.setVerdicts([verdict({ windows: [w("5h", 71, 1)] }), kimiRecovered]);
+    b.state.recoveries.push(recoveryEvent({ provider: "kimi-coding", verdict: kimiRecovered }));
+    b.hook({}, ctx());
+    expect(b.sent).toHaveLength(2);
+    const content = b.sent[1]?.message.content ?? "";
+    expect(content).toContain("[quota 恢复] kimi-coding");
+    expect(content).toContain("71%"); // 被恢复块携带过地板的常规 tick
+    expect(content.indexOf("[quota 恢复]")).toBeLessThan(content.indexOf("[quota]")); // 恢复块在前
+    expect(b.state.lastSentAt).toBe(61_000); // 发送后照常推进地板锚点
+  });
+
+  it("a failed send re-queues the recovery event and restores the latch; the retry sends once in total", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = harness({ verdicts: [l0Reset()] });
+    h.state.latches.set("zai-coding-cn", { level: 3, step: 100, at: 0, usedPct: 100 });
+    h.state.recoveries.push(recoveryEvent({ verdict: l0Reset() }));
+    h.failSend(true);
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(0);
+    expect(h.state.recoveries).toHaveLength(1); // 回队
+    expect(h.state.latches.get("zai-coding-cn")).toMatchObject({ at: 0, usedPct: 100 }); // L0 删除随失败回滚
+    h.failSend(false);
+    h.clock += 60_000;
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.content).toContain("[quota 恢复]");
+    expect(h.state.recoveries).toHaveLength(0);
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1); // 重试成功后不再重复
+    warn.mockRestore();
   });
 });

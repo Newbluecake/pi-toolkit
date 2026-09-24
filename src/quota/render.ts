@@ -13,7 +13,13 @@
 
 import type { WindowScope } from "./types.js";
 import type { Millis } from "../core/types.js";
-import { DEFAULT_THRESHOLDS, isDemotionFloorOnly, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
+import {
+  DEFAULT_THRESHOLDS,
+  isDemotionFloorOnly,
+  type ProviderVerdict,
+  type QuotaRecoveryEvent,
+  type WindowVerdict,
+} from "./ladder.js";
 
 const MINUTE_MS = 60_000;
 
@@ -112,13 +118,27 @@ function thresholdText(level: number): number {
  * 要什么能力——所以只给**候选**（订阅优先排序），由派单方结合任务需求取舍：候选
  * 胜任就优先用（订阅额度不用会作废），不胜任就按路由表另选，不硬凑。
  */
-export function alternativesAdvice(alternatives: readonly string[]): string {
-  return alternatives.length > 0
-    ? `替代候选（订阅优先）：${alternatives.join("、")}。\n按任务需求选：候选能胜任就优先用（订阅额度不用会作废）；不胜任就按路由表另选合适模型，不必硬凑。`
-    : "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。";
+export interface AlternativeSelection {
+  readonly providers: readonly string[];
+  /** true when the selected pool is tier 0/1 subscription providers. */
+  readonly subscription: boolean;
 }
 
-function directUseText(provider: string, alternatives: readonly string[]): string {
+export type AlternativeInput = AlternativeSelection | readonly string[];
+
+function normalizeAlternatives(input: AlternativeInput): AlternativeSelection {
+  if (Array.isArray(input)) return { providers: input as readonly string[], subscription: true };
+  return input as AlternativeSelection;
+}
+
+export function alternativesAdvice(input: AlternativeInput): string {
+  const { providers, subscription } = normalizeAlternatives(input);
+  if (providers.length === 0) return "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。";
+  const heading = subscription ? "替代候选（订阅优先）" : "无可用订阅；按量计费 provider";
+  return `${heading}：${providers.join("、")}。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；${subscription ? "订阅额度不用会作废；" : ""}不胜任就按路由表另选合适模型，不必硬凑。`;
+}
+
+function directUseText(provider: string, alternatives: AlternativeInput): string {
   return `本轮不要把新任务派给 ${provider}。${alternativesAdvice(alternatives)}`;
 }
 
@@ -153,7 +173,7 @@ export function buildQuotaWarnText(
   v: ProviderVerdict,
   now: Millis,
   label: string = v.provider,
-  alternatives: readonly string[] = [],
+  alternatives: AlternativeInput = { providers: [], subscription: true },
 ): string {
   if (isDemotionFloorOnly(v)) {
     // 等级只来自降位地板：挑用量最高的窗口讲「已用 0% … 派单不变」是误导（2026-09-24 kimi
@@ -185,7 +205,7 @@ export function buildQuotaWarnText(
 /** L3 强烈块（含本轮禁用 + 替代候选 + 按需取舍说明）。 */
 export function buildQuotaBlockText(
   v: ProviderVerdict,
-  alternatives: readonly string[],
+  alternatives: AlternativeInput,
   now: Millis,
   label: string = v.provider,
 ): string {
@@ -196,14 +216,43 @@ export function buildQuotaBlockText(
     head = `[quota 严重] ${label}`;
   } else {
     head = `[quota 严重] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
-    const etaMs = liveEtaMs(w); // 已耗尽窗口不报 ETA（「已用 100%，预计不足 1 分钟内耗尽」自相矛盾）
+    const etaMs = liveEtaMs(w); // 已耗尽窗口不报 ETA
     if (etaMs !== undefined) head += `，预计 ${etaSpanText(etaMs)}内耗尽`;
     if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
   return `${head}。\n${directUseText(label, alternatives)}\n${GATE_PROMISE_LINE}`;
 }
 
-type QuotaSection = { readonly verdict: ProviderVerdict; readonly alternatives: readonly string[] };
+/**
+ * 恢复播报块（额度恢复播报，一次性）：观测重置落地后由 hook 排空恢复事件时注入。
+ * 与 L2/L3 同为面向模型的散文段（中文），紧凑读数仍是英文 token（`5h 0% · 7d 2%`）。
+ * 闸门状态必须与 event.gateBlocked（镜像 evaluateQuotaGate 的判定，含降位当场重建）
+ * 一致——另一窗口仍耗时绝不写「已放行」。
+ */
+export function buildQuotaRecoveryText(event: QuotaRecoveryEvent, now: Millis): string {
+  const v = event.verdict;
+  const readings = v.windows.length > 0 ? `，当前 ${readingsText(v)}` : "";
+  const allReset = v.windows.length > 0 && v.windows.every((w) => event.resetScopes.has(w.scope));
+  const resetPart = allReset ? "窗口已重置" : `${[...event.resetScopes].map(formatScope).join("、")} 窗口已重置`;
+  const head = `[quota 恢复] ${v.provider} ${resetPart}${readings}`;
+  if (!event.gateBlocked) return `${head}，spawn 闸门已放行，可恢复派单。`;
+  // 闸门仍拦：如实写哪个窗口仍受限（未重置且 ≥ L2 者优先）；全重置但读数仍过
+  // 闸门线（gateLevel 低 / 速率预测抬级）也照实说，绝不写「已放行」。
+  const still = v.windows.filter((w) => !event.resetScopes.has(w.scope) && w.level >= 2);
+  const stillText =
+    still.length > 0
+      ? still
+          .map((w) =>
+            w.reason === "exhausted" || w.usedPct >= 100
+              ? `${formatScope(w.scope)} 仍耗尽${w.resetAt === undefined ? "" : `（${formatResetAt(w.resetAt, now)} 重置）`}`
+              : `${formatScope(w.scope)} 仍 ${pctOf(w.usedPct)}% ⚠`,
+          )
+          .join("，")
+      : `重置后读数仍触发闸门（等级 L${v.level}）`;
+  return `${head}，${stillText}，spawn 闸门仍拦截，请继续避开该 provider 的新任务。`;
+}
+
+type QuotaSection = { readonly verdict: ProviderVerdict; readonly alternatives: AlternativeInput };
 
 /**
  * 同池合并（L2/L3 注入块，与 HUD/tick 的 `dedupeVerdicts` 同一签名）：`zai-coding-cn`
@@ -221,7 +270,11 @@ function groupSamePool(sections: readonly QuotaSection[]): { section: QuotaSecti
   }
   return [...groups.values()].map(({ section, providers }) => {
     const members = new Set(providers);
-    const alternatives = section.alternatives.filter((a) => !members.has(a.split("/")[0] ?? a));
+    const normalized = normalizeAlternatives(section.alternatives);
+    const alternatives = {
+      providers: normalized.providers.filter((a) => !members.has(a.split("/")[0] ?? a)),
+      subscription: normalized.subscription,
+    };
     return { section: { verdict: section.verdict, alternatives }, label: providers.join(" / ") };
   });
 }

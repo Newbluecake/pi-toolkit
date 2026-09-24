@@ -16,6 +16,7 @@ const defaults = DEFAULT_SETTINGS.quota;
 
 const QUOTA_TIME_PATHS = [
   "quota.refreshMs",
+  "quota.refreshHotMs",
   "quota.staleAfterMs",
   "quota.l3EtaMs",
   "quota.minIntervalMs",
@@ -28,6 +29,7 @@ const QUOTA_SPEC_KEYS = [
   "quota.providers",
   "quota.subscriptionProviders",
   "quota.refreshS",
+  "quota.refreshHotS",
   "quota.staleAfterS",
   "quota.l1Percent",
   "quota.l2Percent",
@@ -50,6 +52,7 @@ describe("quota settings", () => {
       providers: "zai-coding-cn,zai,kimi-coding",
       subscriptionProviders: "",
       refreshMs: 600_000,
+      refreshHotMs: 120_000,
       staleAfterMs: 3_600_000,
       l1Percent: 50,
       l2Percent: 75,
@@ -104,6 +107,8 @@ describe("quota settings", () => {
     ).toEqual(defaults);
     // upper bound too: refreshMs above 24h also falls back
     expect(parseQuotaSettings({ refreshMs: 86_400_001 }).refreshMs).toBe(defaults.refreshMs);
+    expect(parseQuotaSettings({ refreshHotMs: 0 }).refreshHotMs).toBe(defaults.refreshHotMs);
+    expect(parseQuotaSettings({ refreshHotMs: "fast" }).refreshHotMs).toBe(defaults.refreshHotMs);
     expect(parseQuotaSettings({ gateLevel: 4 }).gateLevel).toBe(defaults.gateLevel);
   });
 
@@ -135,7 +140,7 @@ describe("quota settings", () => {
     expect(isTimeSettingKey("quota.l1Percent")).toBe(false);
   });
 
-  it("registers all six quota.* duration paths in TIME_SETTING_MS_PATHS", () => {
+  it("registers all quota.* duration paths in TIME_SETTING_MS_PATHS", () => {
     for (const path of QUOTA_TIME_PATHS) {
       expect(TIME_SETTING_MS_PATHS, path).toContain(path);
       expect(isTimeSettingKey(path.replace(/Ms$/, "S")), path).toBe(true);
@@ -157,6 +162,11 @@ describe("quota settings", () => {
     }
     // duration specs carry time:true and point at the internal *Ms path
     expect(SETTING_SPECS["quota.refreshS"]).toMatchObject({ kind: "number", path: "quota.refreshMs", time: true });
+    expect(SETTING_SPECS["quota.refreshHotS"]).toMatchObject({
+      kind: "number",
+      path: "quota.refreshHotMs",
+      time: true,
+    });
     expect(SETTING_SPECS["quota.requestTimeoutS"]).toMatchObject({ kind: "number", path: "quota.requestTimeoutMs" });
     // gateLevel needs a max that count() cannot express
     expect(SETTING_SPECS["quota.gateLevel"]).toMatchObject({
@@ -174,6 +184,7 @@ describe("quota settings", () => {
 
   it("converts the file's *S seconds to internal milliseconds via loadSettings", () => {
     expect(loadSettings({ quota: { refreshS: 300 } }).quota.refreshMs).toBe(300_000);
+    expect(loadSettings({ quota: { refreshHotS: 30 } }).quota.refreshHotMs).toBe(30_000);
     expect(loadSettings({ quota: { repeatS: 0 } }).quota.repeatMs).toBe(0);
     // invalid block wired through loadSettings also falls back to defaults
     expect(loadSettings({ quota: "invalid" }).quota).toEqual(defaults);

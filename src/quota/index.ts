@@ -23,13 +23,14 @@ import { createFetchJson } from "./http.js";
 import {
   createQuotaHintHook,
   QUOTA_CUSTOM_TYPE,
+  QUOTA_RECOVERY_INBOX_CAP,
   type QuotaAnnounceLatch,
   type QuotaHintDeps,
   type QuotaHintState,
 } from "./hook.js";
 import { createQuotaService, type QuotaService, type QuotaServiceDeps } from "./service.js";
 import type { QuotaStatusTheme } from "./render.js";
-import type { ProviderVerdict } from "./ladder.js";
+import type { ProviderVerdict, QuotaRecoveryEvent } from "./ladder.js";
 import { isQuotaProviderId, type LadderLevel, type QuotaProviderId, type QuotaSnapshot } from "./types.js";
 
 export interface QuotaStack {
@@ -77,18 +78,9 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     ...(warn === undefined ? {} : { warn }),
   });
 
-  const service = createQuotaService({
-    settings,
-    clock,
-    adapters,
-    credentials,
-    fetchJson,
-    demotions,
-    ...(input.setStatus === undefined ? {} : { setStatus: input.setStatus }),
-    ...(input.theme === undefined ? {} : { theme: input.theme }),
-    ...(warn === undefined ? {} : { warn }),
-  });
-
+  // 额度恢复播报的接缝（service 经事件、hook 层凭闩锁判断）：hintState 与 service
+  // 同在此构造，收件箱与 latches 同生命周期；「曾播报」语义与 Minor 1/2 回滚都留在
+  // hook 层，service 保持注入无关。上限只防积压（见 QUOTA_RECOVERY_INBOX_CAP）。
   const hintState: QuotaHintState = {
     enabled: true,
     tickStepPercent: settings.tickStepPercent,
@@ -97,7 +89,25 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     display: settings.display,
     latches: new Map<string, QuotaAnnounceLatch>(),
     lastSentAt: 0,
+    recoveries: [],
   };
+  const pushRecovery = (event: QuotaRecoveryEvent): void => {
+    if (hintState.recoveries.length >= QUOTA_RECOVERY_INBOX_CAP) hintState.recoveries.shift();
+    hintState.recoveries.push(event);
+  };
+
+  const service = createQuotaService({
+    settings,
+    clock,
+    adapters,
+    credentials,
+    fetchJson,
+    demotions,
+    onObservedReset: pushRecovery,
+    ...(input.setStatus === undefined ? {} : { setStatus: input.setStatus }),
+    ...(input.theme === undefined ? {} : { theme: input.theme }),
+    ...(warn === undefined ? {} : { warn }),
+  });
 
   // M3：纯转发——一切清理收进 QuotaService.dispose() 单一所有者。
   return {
@@ -115,6 +125,7 @@ export type {
   QuotaHintDeps,
   QuotaHintState,
   QuotaProviderId,
+  QuotaRecoveryEvent,
   QuotaService,
   QuotaServiceDeps,
   QuotaSnapshot,

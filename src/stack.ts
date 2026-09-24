@@ -839,6 +839,22 @@ export function buildSessionStack(
     demandCount: 0,
   };
   const widgetRef: { current?: FleetWidgetController } = {};
+  // quota-plan D2: lifecycle-triggered refreshes stay lazy and reuse the
+  // service's per-provider TTL/in-flight guards (main session only).
+  const quotaRef: { current?: QuotaStack | undefined } = {};
+  const quotaLifecyclePoints: SubagentExtensionPoints = {
+    onLifecycle: (event) => {
+      if (
+        event.status === "running" ||
+        event.status === "completed" ||
+        event.status === "failed" ||
+        event.status === "timed_out" ||
+        event.status === "aborted"
+      ) {
+        quotaRef.current?.service.refreshIfStale();
+      }
+    },
+  };
   const widgetPoints: SubagentExtensionPoints = { onLifecycle: () => widgetRef.current?.refresh() };
   const receiptPoints: SubagentExtensionPoints = {
     onDelivery: (payload, state) =>
@@ -848,7 +864,13 @@ export function buildSessionStack(
   // every lifecycle event so the final terminal frame is always emitted.
   const usageRef: { current?: UsageBroadcaster } = {};
   const usagePoints: SubagentExtensionPoints = { onLifecycle: () => usageRef.current?.poke() };
-  const merged = mergeExtensionPoints([...mergedExtensions, widgetPoints, usagePoints, receiptPoints]);
+  const merged = mergeExtensionPoints([
+    ...mergedExtensions,
+    widgetPoints,
+    usagePoints,
+    receiptPoints,
+    quotaLifecyclePoints,
+  ]);
 
   // G5a degradation: ctx.sessionManager is part of pi's session ctx contract
   // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
@@ -911,7 +933,6 @@ export function buildSessionStack(
   // quota-plan §4.1 / integration-map §7：spawn 闸门（下方 createSpawnService）
   // 需要 quota，而 quota 按计划构造在 keepalive/adaptive 之后——晚绑定 ref
   // 解决「A 需要还没构造出来的 B」（runnerRef/widgetRef 同款）。
-  const quotaRef: { current?: QuotaStack | undefined } = {};
   const mention = createMentionRegistry();
   // X6b: session-scoped, capped FIFO — notes are one-line previews, never read
   // back into context. Pending (steer-path) notes self-clear once the target run

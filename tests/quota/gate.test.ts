@@ -96,7 +96,7 @@ describe("evaluateQuotaGate", () => {
     expect(verdict?.level).toBe(3);
     expect(verdict?.message).toContain("98%");
     expect(verdict?.message).toContain("02:11");
-    expect(verdict?.message).toContain("kimi-coding/kimi-k3");
+    expect(verdict?.message).toContain("kimi-coding");
     expect(verdict?.message).toContain("未消耗任何 run");
     // Blocked provider itself never appears among the alternatives.
     expect(verdict?.alternatives).not.toContain("zai-coding-cn/glm-5.3");
@@ -139,7 +139,7 @@ describe("evaluateQuotaGate", () => {
       now: NOW,
     };
     const verdict = evaluateQuotaGate({ provider: "zai-coding-cn", id: "glm-5.3" }, deps);
-    expect(verdict?.alternatives).toEqual([]);
+    expect(verdict?.alternatives).toEqual({ providers: [], subscription: false });
     expect(verdict?.message).toContain("暂无替代候选，按路由表另选合适模型（可检查 pi /model");
   });
 
@@ -170,9 +170,15 @@ describe("pickAlternatives", () => {
     const deps = gateDeps((p) => verdicts[p]);
     // Subscriptions with headroom exist ⇒ ONLY subscriptions are recommended
     // (use them up) — pay-per-use cloudrouter is dropped, even with a spare slot.
-    expect(pickAlternatives("zai-coding-cn", deps)).toEqual(["kimi-coding/kimi-k3", "zai/glm-5.3-air"]);
+    expect(pickAlternatives("zai-coding-cn", deps)).toEqual({
+      providers: ["kimi-coding", "zai"],
+      subscription: true,
+    });
     // Same level (L1) → lower usedPct first (kimi 20% before zai 50%).
-    expect(pickAlternatives("zai-coding-cn", deps, 2)).toEqual(["kimi-coding/kimi-k3", "zai/glm-5.3-air"]);
+    expect(pickAlternatives("zai-coding-cn", deps, 2)).toEqual({
+      providers: ["kimi-coding", "zai"],
+      subscription: true,
+    });
   });
 
   it("excludes providers at/above the gate line while stale ones stay selectable", () => {
@@ -184,7 +190,7 @@ describe("pickAlternatives", () => {
     const deps = gateDeps((p) => verdicts[p]);
     // kimi (fresh L3) is excluded; stale zai counts as healthy (R5) and, being a
     // subscription, keeps pay-per-use cloudrouter out of the list.
-    expect(pickAlternatives("zai-coding-cn", deps)).toEqual(["zai/glm-5.3-air"]);
+    expect(pickAlternatives("zai-coding-cn", deps)).toEqual({ providers: ["zai"], subscription: true });
   });
 
   it("defaults to the level-3 exclusion line when deps carries no blockAtLevel (hook-side Pick)", () => {
@@ -195,7 +201,7 @@ describe("pickAlternatives", () => {
     const hookDeps = { verdictFor: (p: string) => verdicts[p], available: () => CANDIDATES };
     // No blockAtLevel in the deps → exclusion defaults to 3, so an L2 provider
     // stays recommendable even though an aggressive gateLevel=2 gate would block it.
-    expect(pickAlternatives("zai-coding-cn", hookDeps)).toEqual(["zai/glm-5.3-air"]);
+    expect(pickAlternatives("zai-coding-cn", hookDeps)).toEqual({ providers: ["zai"], subscription: true });
   });
 
   it("respects the exclusion line carried by full QuotaGateDeps (gateLevel 2 excludes L2)", () => {
@@ -204,7 +210,7 @@ describe("pickAlternatives", () => {
       zai: makeVerdict({ provider: "zai", level: 1, windows: [win("5h", 55, 1)] }),
     };
     const full = gateDeps((p) => verdicts[p], 2);
-    expect(pickAlternatives("zai-coding-cn", full)).toEqual(["zai/glm-5.3-air"]);
+    expect(pickAlternatives("zai-coding-cn", full)).toEqual({ providers: ["zai"], subscription: true });
   });
 
   it("falls back to pay-per-use only when every subscription is exhausted/excluded", () => {
@@ -217,7 +223,7 @@ describe("pickAlternatives", () => {
         "zai-coding-cn",
         gateDeps((p) => verdicts[p]),
       ),
-    ).toEqual(["cloudrouter-anthropic/claude-opus-5"]);
+    ).toEqual({ providers: ["cloudrouter-anthropic"], subscription: false });
   });
 
   it("quota.subscriptionProviders marks quota-less providers as subscriptions (after managed ones)", () => {
@@ -234,12 +240,16 @@ describe("pickAlternatives", () => {
     const isSubscription = parseSubscriptionProviders(" copilot-anthropic , ,");
     const deps = { verdictFor: (p: string) => verdicts[p], available: () => candidates, isSubscription };
     // managed zai (visible headroom) → declared copilot → deepseek dropped.
-    expect(pickAlternatives("zai-coding-cn", deps)).toEqual(["zai/glm-5.3-air", "copilot-anthropic/claude-opus-5"]);
+    expect(pickAlternatives("zai-coding-cn", deps)).toEqual({
+      providers: ["zai", "copilot-anthropic"],
+      subscription: true,
+    });
     // with zai exhausted too, the declared subscription alone still keeps pay-per-use out.
     const allHot = { ...verdicts, zai: makeVerdict({ provider: "zai", level: 3, windows: [win("5h", 99, 3)] }) };
-    expect(pickAlternatives("zai-coding-cn", { ...deps, verdictFor: (p: string) => allHot[p] })).toEqual([
-      "copilot-anthropic/claude-opus-5",
-    ]);
+    expect(pickAlternatives("zai-coding-cn", { ...deps, verdictFor: (p: string) => allHot[p] })).toEqual({
+      providers: ["copilot-anthropic"],
+      subscription: true,
+    });
     // empty setting ⇒ nothing declared.
     expect(parseSubscriptionProviders("")("copilot-anthropic")).toBe(false);
   });
@@ -251,17 +261,44 @@ describe("pickAlternatives", () => {
         gateDeps(() => undefined),
         0,
       ),
-    ).toEqual([]);
+    ).toEqual({ providers: [], subscription: false });
     expect(
       pickAlternatives(
         "zai-coding-cn",
         gateDeps(() => undefined),
       ),
-    ).toEqual(["kimi-coding/kimi-k3", "zai/glm-5.3-air", "cloudrouter-anthropic/claude-opus-5"]);
+    ).toEqual({
+      providers: ["kimi-coding", "zai", "cloudrouter-anthropic"],
+      subscription: false,
+    });
   });
-});
+  it("dedupes multiple models from one provider and reports subscription tier", () => {
+    const candidates: readonly ModelCandidate[] = [
+      { provider: "cloudrouter-response", id: "gpt-5.6-sol" },
+      { provider: "cloudrouter-response", id: "gpt-5.6-terra" },
+      { provider: "zai", id: "glm-5.3-air" },
+    ];
+    const result = pickAlternatives("zai-coding-cn", {
+      verdictFor: () => undefined,
+      available: () => candidates,
+    });
+    expect(result).toEqual({ providers: ["cloudrouter-response", "zai"], subscription: false });
+  });
 
-describe("quotaAnnotation", () => {
+  it("does not recommend tier 2 when a subscription candidate remains", () => {
+    const result = pickAlternatives("zai-coding-cn", {
+      verdictFor: (provider) =>
+        provider === "kimi-coding"
+          ? makeVerdict({ provider: "kimi-coding", level: 1, windows: [win("5h", 20, 1)] })
+          : undefined,
+      available: () => [
+        { provider: "kimi-coding", id: "kimi-k3" },
+        { provider: "cloudrouter-response", id: "gpt-5.6-sol" },
+      ],
+    });
+    expect(result).toEqual({ providers: ["kimi-coding"], subscription: true });
+  });
+
   it("7. L0 → no mark, L2/L3 → ⚠ (highest window wins), unknown provider → undefined", () => {
     const verdicts: Record<string, ProviderVerdict> = {
       "zai-coding-cn": makeVerdict({ provider: "zai-coding-cn", level: 2, windows: [win("5h", 78, 2)] }),

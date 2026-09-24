@@ -10,6 +10,7 @@ import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_SETTINGS, type QuotaSettings } from "../../src/config/settings.js";
 import { createDemotionStore, type DemotionStore } from "../../src/quota/demotion.js";
 import { createQuotaService, type QuotaService } from "../../src/quota/service.js";
+import type { QuotaRecoveryEvent } from "../../src/quota/ladder.js";
 import type { ProviderAdapter, QuotaProviderId, QuotaSnapshot, QuotaWindowsSnapshot } from "../../src/quota/types.js";
 
 let dir: string;
@@ -73,15 +74,21 @@ interface Fixture {
   readonly kimi: Stub;
   readonly setStatus: ReturnType<typeof vi.fn>;
   readonly warn: ReturnType<typeof vi.fn>;
+  /** onObservedReset 的默认收集器（额度恢复播报）；自定义回调时恒空。 */
+  readonly events: QuotaRecoveryEvent[];
 }
 
-function makeFixture(settingsOver: Partial<QuotaSettings> = {}): Fixture {
+function makeFixture(
+  settingsOver: Partial<QuotaSettings> = {},
+  onObservedReset?: (event: QuotaRecoveryEvent) => void,
+): Fixture {
   const clock = new FakeClock(1_000);
   const settings: QuotaSettings = { ...DEFAULT_SETTINGS.quota, ...settingsOver };
   const zai = stubAdapter("zai-coding-cn");
   const kimi = stubAdapter("kimi-coding");
   const setStatus = vi.fn();
   const warn = vi.fn();
+  const events: QuotaRecoveryEvent[] = [];
   const demotions = createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn });
   const service = createQuotaService({
     settings,
@@ -92,11 +99,43 @@ function makeFixture(settingsOver: Partial<QuotaSettings> = {}): Fixture {
     demotions,
     setStatus,
     warn,
+    onObservedReset: onObservedReset ?? ((event) => events.push(event)),
   });
-  return { clock, service, demotions, zai, kimi, setStatus, warn };
+  return { clock, service, demotions, zai, kimi, setStatus, warn, events };
 }
 
 describe("createQuotaService", () => {
+  it("uses refreshHotMs for L1 providers while keeping cold providers on refreshMs", async () => {
+    const f = makeFixture({ refreshHotMs: 120_000 });
+    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 50 }], f.clock.now()));
+    f.kimi.set(() => windowsSnapshot("kimi-coding", [{ scope: "5h", usedPct: 10 }], f.clock.now()));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    f.clock.advance(120_001);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.zai.fetches()).toBe(2);
+    expect(f.kimi.fetches()).toBe(1);
+  });
+
+  it("uses refreshHotMs when forecast ETA is below one hour even below the L1 percentage", async () => {
+    const f = makeFixture({ refreshHotMs: 120_000, l1Percent: 95, l2Percent: 96, l3Percent: 97 });
+    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 10 }], f.clock.now()));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    f.clock.advance(DEFAULT_SETTINGS.quota.refreshMs);
+    // 10% → 25% over refreshMs (10 min) ⇒ 1.5%/min, 75% left ⇒ ETA 50 min: inside the
+    // 1h hot window but above the 30-min l3EtaMs escalation, so only the ETA branch
+    // (not a level ≥ 1) can make this provider hot.
+    f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 25 }], f.clock.now()));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    f.clock.advance(120_001);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.zai.fetches()).toBe(3);
+  });
+
   it("refreshIfStale fetches every adapter once, and the TTL window suppresses re-fetches", async () => {
     const f = makeFixture();
     f.zai.set(() => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 10 }], f.clock.now()));
@@ -475,5 +514,189 @@ describe("createQuotaService anomaly guard (drops need reset evidence)", () => {
     expect(v?.level).toBe(3);
     expect(v?.demoted).toBe(true);
     expect(f.demotions.get("kimi-coding", f.clock.now())).toMatchObject({ level: 3, expiresAt: rWeek });
+  });
+});
+
+// 额度恢复播报（applySnapshot 观测重置分支 → onObservedReset）：只在该分支发事件，
+// 事件携带终态判定（含当场重建的降位）与镜像闸门判定；可疑读数拒收路径零事件。
+describe("createQuotaService recovery events (observed reset → onObservedReset)", () => {
+  const HOUR = 3_600_000;
+  const REFRESH = DEFAULT_SETTINGS.quota.refreshMs;
+
+  async function land(f: Fixture, stub: Stub, snapshot: () => QuotaSnapshot): Promise<void> {
+    stub.set(snapshot);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+  }
+
+  it("an evidence-backed reset (old resetAt passed) emits exactly one event with the terminal verdict", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    f.demotions.mark("zai-coding-cn", 3, t0 + 48 * HOUR, t0); // 跨进程遗留的降位
+    await land(f, f.zai, () =>
+      windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 60, resetAt: t0 + 300_000 }], f.clock.now()),
+    );
+    expect(f.events).toHaveLength(0); // 首次落地无回落 ⇒ 无事件
+    f.clock.advance(REFRESH); // 越过旧 resetAt ⇒ 回落带证据
+    await land(f, f.zai, () => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 5 }], f.clock.now()));
+    expect(f.events).toHaveLength(1);
+    const e = f.events[0];
+    if (e === undefined) throw new Error("event missing");
+    expect(e.provider).toBe("zai-coding-cn");
+    expect([...e.resetScopes]).toEqual(["5h"]);
+    expect(e.verdict.level).toBe(0);
+    expect(e.verdict.demoted).toBe(false); // 降位已清且未重建
+    expect(e.gateBlocked).toBe(false);
+    expect(e.at).toBe(f.clock.now());
+  });
+
+  it("a suspect read emits nothing; only the confirming second read emits (two-confirmation reset)", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    const r5h = t0 + 3 * HOUR;
+    const rWeek = t0 + 90 * HOUR;
+    const zeroed = (): QuotaSnapshot =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0 },
+          { scope: "week", usedPct: 0 },
+        ],
+        f.clock.now(),
+      );
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0, resetAt: r5h },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    );
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed); // 第一次归零：拒收 ⇒ 零事件（误报免疫）
+    expect(f.events).toHaveLength(0);
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed); // 第二次同样回落 ⇒ 确认 ⇒ 恰一条
+    expect(f.events).toHaveLength(1);
+    const e = f.events[0];
+    if (e === undefined) throw new Error("event missing");
+    expect(e.provider).toBe("kimi-coding");
+    expect([...e.resetScopes]).toEqual(["week"]); // 5h 恒 0 无回落
+    expect(e.verdict.level).toBe(0);
+    expect(e.gateBlocked).toBe(false);
+  });
+
+  it("a partial reset with the other window still L3 emits the event with the re-marked demotion", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    const rWeek = t0 + 90 * HOUR;
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 60, resetAt: t0 + 300_000 },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    );
+    f.clock.advance(REFRESH); // 5h 旧 resetAt 已过 ⇒ 5h 的回落有证据
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 1, resetAt: t0 + 5 * HOUR },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    );
+    expect(f.events).toHaveLength(1);
+    const e = f.events[0];
+    if (e === undefined) throw new Error("event missing");
+    expect([...e.resetScopes]).toEqual(["5h"]);
+    // 终态：7d 仍 L3 ⇒ 降位当场重建，闸门仍拦——事件不得拿 clear 后的中间态报「已放行」。
+    expect(e.verdict.level).toBe(3);
+    expect(e.verdict.demoted).toBe(true);
+    expect(e.verdict.demotedUntil).toBe(rWeek);
+    expect(e.gateBlocked).toBe(true);
+  });
+
+  it("gateBlocked mirrors the settings: gate=false stays open even at L3; gateLevel=2 trips on a post-reset L2", async () => {
+    const off = makeFixture({ gate: false });
+    const t0 = off.clock.now();
+    await land(off, off.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 60, resetAt: t0 + 300_000 },
+          { scope: "week", usedPct: 100, resetAt: t0 + 90 * HOUR },
+        ],
+        off.clock.now(),
+      ),
+    );
+    off.clock.advance(REFRESH);
+    await land(off, off.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 1, resetAt: t0 + 5 * HOUR },
+          { scope: "week", usedPct: 100, resetAt: t0 + 90 * HOUR },
+        ],
+        off.clock.now(),
+      ),
+    );
+    expect(off.events[0]?.gateBlocked).toBe(false); // 闸门整体关闭 ⇒ 不拦
+
+    const low = makeFixture({ gateLevel: 2 });
+    const s0 = low.clock.now();
+    await land(low, low.zai, () =>
+      windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 95, resetAt: s0 + 300_000 }], low.clock.now()),
+    );
+    low.clock.advance(REFRESH);
+    await land(low, low.zai, () =>
+      windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 80, resetAt: s0 + 5 * HOUR }], low.clock.now()),
+    );
+    expect(low.events).toHaveLength(1);
+    expect(low.events[0]?.verdict.level).toBe(2); // 80% ⇒ L2（90 才是 L3）
+    expect(low.events[0]?.gateBlocked).toBe(true); // gateLevel=2 ⇒ 仍拦
+  });
+
+  it("a normal landing without any drop emits no event", async () => {
+    const f = makeFixture();
+    await land(f, f.zai, () =>
+      windowsSnapshot(
+        "zai-coding-cn",
+        [{ scope: "5h", usedPct: 40, resetAt: f.clock.now() + 4 * HOUR }],
+        f.clock.now(),
+      ),
+    );
+    f.clock.advance(REFRESH);
+    await land(f, f.zai, () =>
+      windowsSnapshot(
+        "zai-coding-cn",
+        [{ scope: "5h", usedPct: 60, resetAt: f.clock.now() + 4 * HOUR }],
+        f.clock.now(),
+      ),
+    );
+    expect(f.events).toHaveLength(0);
+  });
+
+  it("a throwing recovery listener is swallowed: state still lands, warns once", async () => {
+    const f = makeFixture({}, () => {
+      throw new Error("listener boom");
+    });
+    const t0 = f.clock.now();
+    await land(f, f.zai, () =>
+      windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 60, resetAt: t0 + 300_000 }], f.clock.now()),
+    );
+    f.clock.advance(REFRESH);
+    await land(f, f.zai, () => windowsSnapshot("zai-coding-cn", [{ scope: "5h", usedPct: 5 }], f.clock.now()));
+    expect(f.warn).toHaveBeenCalledWith(expect.stringContaining("recovery listener failed"));
+    expect(f.warn).toHaveBeenCalledWith(expect.stringContaining("listener boom"));
+    expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.usedPct).toBe(5); // 快照照常落地
+    expect(f.demotions.get("zai-coding-cn", f.clock.now())).toBeUndefined();
   });
 });

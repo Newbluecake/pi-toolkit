@@ -24,13 +24,19 @@ import type { ModelCandidate, ModelRef } from "../config/model-hint.js";
 import type { Millis } from "../core/types.js";
 import { isDemotionFloorOnly, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
 import type { LadderLevel } from "./types.js";
-import { alternativesAdvice, demotionFloorClause, formatResetAt, formatScope } from "./render.js";
+import {
+  alternativesAdvice,
+  demotionFloorClause,
+  formatResetAt,
+  formatScope,
+  type AlternativeSelection,
+} from "./render.js";
 
 export interface QuotaGateVerdict {
   readonly level: LadderLevel;
   /** 面向模型的快速失败文案（会成为 spawn config error 的 message）。 */
   readonly message: string;
-  readonly alternatives: readonly string[]; // "provider/id"
+  readonly alternatives: AlternativeSelection;
 }
 
 export interface QuotaGateDeps {
@@ -89,9 +95,9 @@ export function pickAlternatives(
   blocked: string,
   deps: Pick<QuotaGateDeps, "verdictFor" | "available" | "isSubscription">,
   limit?: number,
-): readonly string[] {
+): AlternativeSelection {
   const cap = limit === undefined ? DEFAULT_ALTERNATIVE_LIMIT : Math.max(0, limit);
-  if (cap === 0) return [];
+  if (cap === 0) return { providers: [], subscription: false };
   const exclusion = exclusionLevel(deps);
   const declared = (provider: string): boolean => {
     try {
@@ -100,20 +106,22 @@ export function pickAlternatives(
       return false;
     }
   };
-  const scored: { key: string; tier: number; level: LadderLevel; pct: number; order: number }[] = [];
+  const scored: { provider: string; tier: number; level: LadderLevel; pct: number; order: number }[] = [];
+  const seen = new Set<string>();
   let order = 0;
   for (const candidate of deps.available()) {
     // 注册表顺序是最后一层 tie-break，先占号再谈排除。
     const rank = order;
     order += 1;
-    if (candidate.provider === blocked) continue;
+    if (candidate.provider === blocked || seen.has(candidate.provider)) continue;
+    seen.add(candidate.provider);
     const verdict = deps.verdictFor(candidate.provider);
     // Minor 3：无 verdict（非受管 provider）⇒ level 0 / pct 0，可入选；
     // stale 快照同理（闸门对 stale 放行，R5，不构成排除理由）。
     if (verdict !== undefined && !verdict.stale) {
       if (verdict.level >= exclusion) continue;
       scored.push({
-        key: `${candidate.provider}/${candidate.id}`,
+        provider: candidate.provider,
         tier: verdict.windows.length > 0 ? 0 : declared(candidate.provider) ? 1 : 2,
         level: verdict.level,
         pct: maxUsedPct(verdict),
@@ -123,12 +131,15 @@ export function pickAlternatives(
     }
     // 无 verdict / stale：有窗口数据的 stale 快照仍是订阅（只是数据旧），归订阅层。
     const tier = verdict !== undefined && verdict.windows.length > 0 ? 0 : declared(candidate.provider) ? 1 : 2;
-    scored.push({ key: `${candidate.provider}/${candidate.id}`, tier, level: 0, pct: 0, order: rank });
+    scored.push({ provider: candidate.provider, tier, level: 0, pct: 0, order: rank });
   }
   // 有订阅候选 ⇒ 只推荐订阅；否则才退到按量计费。
   const pool = scored.some((s) => s.tier < 2) ? scored.filter((s) => s.tier < 2) : scored;
   pool.sort((a, b) => a.tier - b.tier || a.level - b.level || a.pct - b.pct || a.order - b.order);
-  return pool.slice(0, cap).map((s) => s.key);
+  return {
+    providers: pool.slice(0, cap).map((s) => s.provider),
+    subscription: pool.length > 0 && pool[0]!.tier < 2,
+  };
 }
 
 /** formatModelCandidates 的 annotate 实参：返回 " [5h 92% ⚠]" 之类后缀或 undefined。 */
@@ -227,11 +238,11 @@ function windowClause(v: ProviderVerdict, now: Millis): string {
 function buildGateMessage(
   provider: string,
   verdict: ProviderVerdict,
-  alternatives: readonly string[],
+  alternatives: AlternativeSelection,
   now: Millis,
 ): string {
   const altLine =
-    alternatives.length > 0
+    alternatives.providers.length > 0
       ? alternativesAdvice(alternatives)
       : "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。";
   return (
