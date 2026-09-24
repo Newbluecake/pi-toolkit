@@ -335,6 +335,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         deadlines: state.deadlines,
         diag: state.diag,
         updatedAt: deps.clock.now(),
+        // consult plan §9 T-18 (package E finding): the terminal `settle()`
+        // transition (core/state-machine.ts) has always spread
+        // `state.parentRunId` into its snapshot; this LIVE per-dispatch
+        // projection never did, so every nested run (X3 Agent tool spawns
+        // included, not just consult) showed up in the fleet widget / any
+        // `query.list({ parentRunId })` lookup as non-nested until it
+        // settled. `state.parentRunId` is set once at `createInitialState`
+        // and never changes, so this is a pure gap-fill, not new behavior.
+        ...(state.parentRunId === undefined ? {} : { parentRunId: state.parentRunId }),
       });
     },
     onExtensionError: (hook, runId, error) =>

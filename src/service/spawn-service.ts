@@ -161,6 +161,16 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           generation: outcome.diag.generation,
           status: outcome.status,
           phase: "settled",
+          // consult plan §9 T-18 (package E finding): this fallback
+          // rebuild from `outcome.diag` (RunOutcome carries no parentRunId
+          // of its own) used to silently drop the nesting edge that the
+          // runner's own terminal snapshot (core/state-machine.ts settle())
+          // already carried through `onSnapshot` moments earlier in this
+          // same call — every nested run (X3 included, not just consult)
+          // lost its `nested` fleet marker and `query.list({ parentRunId })`
+          // visibility the instant it settled. `parent` is `parentOf.get
+          // (outcome.runId)`, captured above before the cascade cleanup.
+          ...(parent !== undefined ? { parentRunId: parent } : {}),
           deadlines: {
             enqueuedAt: outcome.diag.enqueuedAt ?? outcome.diag.createdAt,
             deadlineAt: outcome.diag.deadlineAt,
