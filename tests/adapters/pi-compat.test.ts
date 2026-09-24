@@ -6,7 +6,7 @@ describe("pi-compat gate", () => {
     // Regression: gating on sessionManager.getEntries at load time disabled
     // the whole extension on real pi, where sessionManager only exists on
     // the session_start ctx.
-    const caps = detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, "0.84.4");
+    const caps = detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, "0.87.1");
     expect(caps.canReadBackEntries).toBe(false);
     const result = assertCompatible(caps);
     expect(result.ok).toBe(true);

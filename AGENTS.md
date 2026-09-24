@@ -175,7 +175,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   CHANGELOG is generated from them.
 - Tool parameters use `@sinclair/typebox` schemas (the only runtime dependency).
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
-  `>=0.84.0 <0.86.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`.
+  `>=0.87.0 <0.88.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`.
 
 ## pi-extension specifics (easy to get wrong)
 

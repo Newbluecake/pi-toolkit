@@ -61,16 +61,22 @@ export function probeReadBackEntries(host: { sessionManager?: { getEntries?: unk
 }
 
 /**
- * /goal（goal-plan v4 M-f/M-g）依赖的未文档化 pi 行为假设，0.85 升级时回归：
+ * /goal（goal-plan v4 M-f/M-g）依赖的未文档化 pi 行为假设，peer 升级时回归
+ * （最近一次复核：0.87.1）：
  *  1. 用户 Ctrl+C abort 当前 run 时仍照常 emit agent_end 与 agent_settled
  *     （证据：chunk-OMWWHBTG.js abort 分支；若未来 abort 跳过这两个事件，
  *     goal 只是当轮不评估——行为可接受，但自动暂停会失效）。
- *  2. AgentEndEvent 没有 willRetry 字段；「是否有后续 retry/compaction」只能靠
+ *  2. 扩展事件 AgentEndEvent 没有 willRetry 字段（0.87 只给会话级 _emit 的
+ *     agent_end 加了 willRetry，扩展侧仍是 { type, messages }，
+ *     agent-session.js:581 vs :716）；「是否有后续 retry/compaction」只能靠
  *     agent_settled 的语义保证（这也是 goal 钩在 agent_settled 的原因）。
  *  3. AgentSettledEvent 不携带消息载荷；abort 检测只能先在 agent_end 记录
  *     末条 assistant 的 stopReason（"aborted"），再在 settled 时消费。
- *  4. sendUserMessage 返回 void、异步失败经 emitError 走掉，扩展侧 try/catch
- *     抓不到投递失败——goal 因此用投递看门狗（观察新 run 是否起来）而非错误回调。
+ *  4. ExtensionAPI.sendUserMessage 返回 void（0.87 types.d.ts:1055；AgentSession
+ *     自身的同名方法是 async，loader 不回传该 Promise）、异步失败经 emitError
+ *     走掉，扩展侧 try/catch 抓不到投递失败——goal 因此用投递看门狗（观察新 run
+ *     是否起来）而非错误回调。0.87 起 agent_settled 内请求的 run 被推迟到所有
+ *     settled 处理器跑完，看门狗是定时器触发，不受影响。
  */
 const ASSUMED_EVENTS_PRESENT = {
   tool_execution_start: true,
@@ -98,7 +104,7 @@ export function detectPiCapabilities(pi: MinimalPiHost, version = "unknown"): Pi
   };
 }
 
-export const TESTED_PI_RANGE = "0.84.1 - 0.84.4";
+export const TESTED_PI_RANGE = "0.87.0 - 0.87.1";
 
 export type CompatResult = { ok: true; warning?: string } | { ok: false; reason: string };
 
@@ -141,5 +147,5 @@ function isWithinTestedRange(version: string): boolean {
   const parts = version.split(".").map((n) => Number.parseInt(n, 10));
   if (parts.length < 2 || parts.some((n) => Number.isNaN(n))) return false;
   const [major, minor] = parts as [number, number];
-  return major === 0 && minor === 84;
+  return major === 0 && minor === 87;
 }

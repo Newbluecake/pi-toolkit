@@ -5,7 +5,7 @@ import * as codingAgent from "@earendil-works/pi-coding-agent";
 
 const packageRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-// 0.84.4 exposes the loader from its internal extensions index but omits it
+// 0.87.1 (like 0.84.4) exposes the loader from its internal extensions index but omits it
 // from the package root. Prefer a host root export when available; the fallback
 // still imports the real loader implementation from the resolved host package.
 const hostEntry = resolve(packageRoot, "node_modules/@earendil-works/pi-coding-agent/dist/index.js");
