@@ -17,7 +17,12 @@ import type {
   SpawnedJob,
 } from "../../src/bash/process.js";
 import { FakeClock } from "../../src/core/clock.js";
-import { BashToolParams, createBashTool, type BashBackgroundDetails } from "../../src/tools/bash-tool.js";
+import {
+  BashToolParams,
+  createBashTool,
+  formatDescriptionSuffix,
+  type BashBackgroundDetails,
+} from "../../src/tools/bash-tool.js";
 
 /**
  * §10 T1-T9 for the bash override tool.
@@ -247,6 +252,21 @@ describe("bash override tool — T1 built-in golden equivalence", () => {
     expect(tool.description.startsWith(inner.description)).toBe(true);
     expect(tool.promptSnippet).toBe(inner.promptSnippet);
     expect(tool.promptGuidelines).toEqual(inner.promptGuidelines);
+  });
+
+  it("documents the one-shot timer pattern with its guardrails", () => {
+    const suffix = formatDescriptionSuffix(120_000);
+    // Recipe: explicit background sleep whose notification is the wake-up.
+    expect(suffix).toContain("One-shot timer");
+    expect(suffix).toContain("sleep <seconds> && echo");
+    expect(suffix).toMatch(/run_in_background: true — its completion notification wakes you/);
+    // Guardrails: no polling, portable seconds, cancellable, not restart-safe.
+    expect(suffix).toContain("never for polling");
+    expect(suffix).toContain("no `date -d`");
+    expect(suffix).toContain('bash_job(action: "kill"');
+    expect(suffix).toContain("/reload may drop a sleeping timer");
+    // The run_in_background param no longer claims fire-and-forget is its ONLY use.
+    expect(BashToolParams.properties.run_in_background.description).toContain("one-shot timer");
   });
 
   for (const scenario of SCENARIOS) {

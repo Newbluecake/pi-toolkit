@@ -53,7 +53,8 @@ export const BashToolParams = Type.Object({
       description:
         "If true, the command is started in the background immediately and the call returns with a job_id; " +
         "the process keeps running (check on it with the bash_job tool). Use this ONLY for fire-and-forget " +
-        "commands whose result you will never need. For a long command whose result you DO need, omit this " +
+        "commands whose result you will never need, or as a one-shot timer (see the tool description). " +
+        "For a long command whose result you DO need, omit this " +
         "and run it in the foreground — the call returns early on its own once it passes the auto-background " +
         "threshold, so explicitly backgrounding and then blocking on bash_job wait wastes an extra request.",
     }),
@@ -160,7 +161,16 @@ export function formatDescriptionSuffix(autoBackgroundMs: number): string {
     `then block on bash_job wait; that wastes an extra request for nothing. Reserve run_in_background: true ` +
     `for fire-and-forget commands whose result you will never need. Manage a backgrounded job with the ` +
     `bash_job tool (status / wait / kill / list); the log is a plain file, so you can also read it directly ` +
-    `with the read tool or with tail/grep/awk.`
+    `with the read tool or with tail/grep/awk.` +
+    ` One-shot timer: to resume work at a known later time (a quota window reset, a rate-limit backoff, an ` +
+    `external job due at a known time), start \`sleep <seconds> && echo "<what to do on wake-up>"\` with ` +
+    `run_in_background: true — its completion notification wakes you and shows the echoed line, so state the ` +
+    `follow-up action in it (the conversation may have been compacted during a long wait). Compute <seconds> yourself (portable; no ` +
+    `\`date -d\`). Timers are for a single wait with a known deadline, never for polling: every wake-up costs ` +
+    `a full model turn, so do not loop short sleeps, and prefer real completion notifications (subagents, ` +
+    `background jobs) when one exists. If the wait becomes unnecessary, cancel it with ` +
+    `bash_job(action: "kill", job_id: "…"). A pi restart or /reload may drop a sleeping timer, so do not ` +
+    `rely on one across a restart.`
   );
 }
 
