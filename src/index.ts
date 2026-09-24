@@ -221,7 +221,8 @@ export default function activate(pi: ExtensionAPI): void {
       alternatives: (provider) =>
         pickAlternatives(provider, {
           verdictFor: (p) => holder.current?.quota?.verdictFor(p),
-          available: () => holder.current?.models.available() ?? [],
+          // 只推荐 /models 里激活的模型（scope ∩ available，未配置 scope 时为 available）。
+          available: () => holder.current?.models.recommendable() ?? [],
         }),
     }),
   );

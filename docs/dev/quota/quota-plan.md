@@ -1397,3 +1397,4 @@ moonshot-balance-positive.json
   - `pickAlternatives` 排序键前置**订阅层**：带窗口数据的受管 provider（含 stale）排在非受管（按量计费/中转，无额度数据）之前，其后才是 `level asc, maxUsedPct asc, 注册表顺序 asc`。原「非受管视作 L0/pct 0 排最前」（Minor 3）作废。
   - `formatResetAt` 跨天输出 `M/D HH:MM`——7d 窗口只报 `HH:MM` 会被读成「今天」。
 - **同池合并注入（2026-09 用户确认）**：`buildQuotaMessage` 对 L2/L3 块按「等级 + `dedupeVerdicts` 同一池签名」分组，同池的 `zai-coding-cn` 与 `zai` 合并为一段（标签 `zai-coding-cn / zai`），替代链剔除组内成员；L1 tick 沿用 `dedupeVerdicts` 折叠。
+- **替代链只推荐 scope 内模型（2026-09 用户要求）**：`StackModelPort.recommendable()` = 会话 scope（`ctx.scopedModels` live getter，即 `/models` 里激活的模型）∩ `getAvailable()`，保留 scope 顺序；未配置 scope 时退化为 available。turn_end 注入与 spawn 闸门的 `pickAlternatives` 都改读它；模型解析/校验（resolveHint、set_model、未知 hint 报错列表）仍走 available，不受影响。

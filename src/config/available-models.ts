@@ -39,6 +39,32 @@ export function readScopedModels(scoped: readonly ScopedModelLike[] | undefined)
 }
 
 /**
+ * Models the extension may **recommend** (quota alternatives): the session scope
+ * (`--models` / `enabledModels`, i.e. what `/models` shows) when one is configured,
+ * intersected with the usable registry snapshot so a scoped-but-unauthenticated
+ * entry never gets suggested; scope order wins (it is the user's own ranking).
+ * No scope configured ⇒ the full usable snapshot (pi's documented "unscoped"
+ * contract). Pure — the caller supplies both lists.
+ */
+export function recommendableModels(
+  scoped: readonly AvailableModelEntry[],
+  available: readonly AvailableModelEntry[],
+): AvailableModelEntry[] {
+  if (scoped.length === 0) return [...available];
+  const usable = new Map(available.map((m) => [`${m.provider}/${m.id}`, m]));
+  const seen = new Set<string>();
+  const out: AvailableModelEntry[] = [];
+  for (const m of scoped) {
+    const ref = `${m.provider}/${m.id}`;
+    const hit = usable.get(ref);
+    if (hit === undefined || seen.has(ref)) continue;
+    seen.add(ref);
+    out.push(hit);
+  }
+  return out;
+}
+
+/**
  * Copy a registry snapshot into prompt-entry shape. Kept synchronous and
  * fail-open: before_agent_start is a prompt-decoration path, so a registry
  * hiccup must degrade to "no models section" rather than break the turn.

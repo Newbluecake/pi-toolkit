@@ -48,6 +48,7 @@ import { createFabricTree } from "./fabric/tree.js";
 import { formatMessage, type FabricRecord } from "./core/message.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
+import { readScopedModels, recommendableModels } from "./config/available-models.js";
 import { resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
 import type { Runner } from "./service/ports.js";
@@ -464,6 +465,17 @@ export interface StackModelPort {
   resolveHint(hint: string): { provider: string; id: string } | undefined;
   find(provider: string, id: string): unknown | undefined;
   available(): readonly {
+    provider: string;
+    id: string;
+    name?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+  }[];
+  /**
+   * 推荐面（额度替代链）：会话 scope（`/models` 里激活的模型）∩ available；未配置
+   * scope 时退化为 available。只用于「推荐」，解析/校验仍走 available。
+   */
+  recommendable(): readonly {
     provider: string;
     id: string;
     name?: string;
@@ -1039,6 +1051,20 @@ export function buildSessionStack(
   // filters to authenticated/usable entries, so a hint can never land on a
   // model the session couldn't actually run. One port, three consumers:
   // spawn admission, the per-run injected set_model tool, the host tool.
+  const availableEntries = (): {
+    provider: string;
+    id: string;
+    name: string;
+    reasoning: boolean;
+    contextWindow: number;
+  }[] =>
+    ctx.modelRegistry.getAvailable().map((m) => ({
+      provider: m.provider,
+      id: m.id,
+      name: m.name,
+      reasoning: m.reasoning,
+      contextWindow: m.contextWindow,
+    }));
   const models: StackModelPort = {
     resolveHint: (hint) =>
       resolveModelHint(
@@ -1046,14 +1072,18 @@ export function buildSessionStack(
         ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
       ),
     find: (p, id) => ctx.modelRegistry.find(p, id),
-    available: () =>
-      ctx.modelRegistry.getAvailable().map((m) => ({
-        provider: m.provider,
-        id: m.id,
-        name: m.name,
-        reasoning: m.reasoning,
-        contextWindow: m.contextWindow,
-      })),
+    available: availableEntries,
+    recommendable: () => {
+      // scopedModels 是 live getter（用户中途改 /models scope 立即生效）；会话被替换后
+      // assertActive 会抛——推荐面降级为 available，绝不拖垮 turn_end / spawn。
+      let scoped: ReturnType<typeof readScopedModels> = [];
+      try {
+        scoped = readScopedModels(ctx.scopedModels);
+      } catch {
+        scoped = [];
+      }
+      return recommendableModels(scoped, availableEntries());
+    },
   };
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,
@@ -1106,7 +1136,8 @@ export function buildSessionStack(
             if (quota === undefined) return undefined;
             return evaluateQuotaGate(model, {
               verdictFor: (p) => quota.service.verdictFor(p),
-              available: models.available,
+              // 替代链只推荐 /models 里激活的模型（scope ∩ available）。
+              available: models.recommendable,
               // E 包 Minor 8：settings 的 number 经 toLadderLevel 收窄，无裸 as。
               blockAtLevel: toLadderLevel(settings.quota.gateLevel),
               now: systemClock.now(),

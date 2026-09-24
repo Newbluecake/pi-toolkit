@@ -4,6 +4,7 @@ import {
   availableModelsFromRegistry,
   formatAvailableModelsForPrompt,
   readScopedModels,
+  recommendableModels,
   type AvailableModelEntry,
 } from "../../src/config/available-models.js";
 
@@ -152,5 +153,29 @@ describe("availableModelsFromRegistry", () => {
     expect(availableModelsFromRegistry(registry)).toEqual([
       { provider: "anthropic", id: "claude-sonnet", name: "Claude Sonnet", reasoning: true, contextWindow: 200_000 },
     ]);
+  });
+});
+
+describe("recommendableModels (quota alternatives only suggest /models-scoped models)", () => {
+  const ref = (m: AvailableModelEntry) => `${m.provider}/${m.id}`;
+  const available = [
+    model({ provider: "deepseek", id: "deepseek-flash" }),
+    model({ provider: "newapi-aws", id: "claude-opus-5" }),
+    model({ provider: "zai", id: "glm-4.7" }),
+    model({ provider: "zai", id: "glm-5.3" }),
+  ];
+
+  it("restricts to the scope, in scope order, dropping scoped-but-unusable entries", () => {
+    const scoped = [
+      model({ provider: "zai", id: "glm-5.3" }),
+      model({ provider: "kimi-coding", id: "k3" }), // scoped but not in available (no auth)
+      model({ provider: "deepseek", id: "deepseek-flash" }),
+      model({ provider: "zai", id: "glm-5.3" }), // duplicate
+    ];
+    expect(recommendableModels(scoped, available).map(ref)).toEqual(["zai/glm-5.3", "deepseek/deepseek-flash"]);
+  });
+
+  it("falls back to the full available list when no scope is configured", () => {
+    expect(recommendableModels([], available).map(ref)).toEqual(available.map(ref));
   });
 });
