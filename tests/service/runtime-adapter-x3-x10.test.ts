@@ -163,6 +163,35 @@ describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
     );
   });
 
+  // Regression: replace-mode role prompts used to be dropped on every path
+  // (buildPrompt skipped them, SessionSpec had no field) — every replace type
+  // (Explore/architect/reviewer/...) ran with no role prompt at all.
+  it.each([
+    ["replace", "You are the reviewer.", "You are the reviewer."],
+    ["append", "You are the reviewer.", undefined],
+    ["replace", "", undefined],
+  ] as const)(
+    "promptMode=%s with systemPrompt=%j puts %j on SessionSpec.systemPrompt",
+    async (promptMode, systemPrompt, expected) => {
+      const clock = new FakeClock();
+      let captured: SessionSpec | undefined;
+      const type: AgentTypeConfig = { name: "worker", description: "x", systemPrompt, promptMode };
+      const driver: SessionDriver = {
+        create: async (s: SessionSpec) => {
+          captured = s;
+          return handle();
+        },
+        bind: async () => undefined,
+        onLateArrival: () => undefined,
+      };
+      const runner = buildAdapter(clock, { driver });
+      const p = runner.run(spec(type));
+      await drain(clock, 10);
+      await p;
+      expect(captured?.systemPrompt).toBe(expected);
+    },
+  );
+
   it("does not inject the nested Agent tool when the agent type has no canSpawn", async () => {
     const clock = new FakeClock();
     let capturedTools: unknown[] | undefined;

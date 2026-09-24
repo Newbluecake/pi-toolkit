@@ -612,6 +612,15 @@ export interface SessionSpec {
    * way by service/runtime-adapter.ts before H2 extensions run.
    */
   customTools?: unknown[];
+  /**
+   * `prompt_mode: replace` agent types: the type's system prompt, which
+   * replaces pi's base system prompt (preamble / tool list / rules / docs).
+   * pi still appends APPEND_SYSTEM, project context files (AGENTS.md),
+   * skills and cwd — the same semantics as `pi --system-prompt`. Applied by
+   * the driver through `DefaultResourceLoader({ systemPromptOverride })`.
+   * Absent for `append` types (their prompt is prefixed to the task prompt).
+   */
+  systemPrompt?: string;
 }
 
 /** A resource an injected tool holds that reaper can synchronously, idempotently kill (2.2.2). */

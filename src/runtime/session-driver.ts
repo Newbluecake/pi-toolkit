@@ -1,4 +1,5 @@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type {
@@ -252,6 +253,29 @@ class PiSessionHandle implements SessionHandle {
 
 export type ModelResolver = (provider: string, id: string) => unknown | undefined;
 
+/**
+ * Turn a SessionSpec into createAgentSession options. `systemPrompt`
+ * (prompt_mode: replace types) is not a createAgentSession option: pi only
+ * accepts a system prompt override through the resource loader. Build the
+ * same loader createAgentSession would build by default (cwd, agentDir,
+ * shared settingsManager) plus `systemPromptOverride`, so nothing else about
+ * the child session changes (extensions, skills, AGENTS.md, APPEND_SYSTEM).
+ */
+export async function toCreateOptions(spec: SessionSpec, cwd: string): Promise<Record<string, unknown>> {
+  const { systemPrompt, ...rest } = spec;
+  if (!systemPrompt) return rest;
+  const agentDir = rest.agentDir ?? getAgentDir();
+  const settingsManager = SettingsManager.create(cwd, agentDir);
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    systemPromptOverride: () => systemPrompt,
+  });
+  await resourceLoader.reload();
+  return { ...rest, settingsManager, resourceLoader };
+}
+
 export class PiSessionDriver implements SessionDriver {
   constructor(
     private readonly rememberAgents = true,
@@ -287,18 +311,22 @@ export class PiSessionDriver implements SessionDriver {
     const cwd = resolved.cwd ?? process.cwd();
     const persist = resolved.persist ?? this.rememberAgents;
     const sessionManager = persist ? SessionManager.create(cwd) : SessionManager.inMemory(cwd);
-    return createAgentSession({
-      ...resolved,
-      sessionManager,
-      ...(persist ? {} : { persist: false }),
-    } as Parameters<typeof createAgentSession>[0]).then(({ session }) => new PiSessionHandle(session));
+    return toCreateOptions(resolved, cwd)
+      .then((options) =>
+        createAgentSession({
+          ...options,
+          sessionManager,
+          ...(persist ? {} : { persist: false }),
+        } as Parameters<typeof createAgentSession>[0]),
+      )
+      .then(({ session }) => new PiSessionHandle(session));
   }
   resume(sessionFile: string, spec: SessionSpec) {
     const resolved = this.withResolvedModel(spec);
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
-    return createAgentSession({ ...resolved, sessionManager } as Parameters<typeof createAgentSession>[0]).then(
-      ({ session }) => new PiSessionHandle(session),
-    );
+    return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
+      .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
+      .then(({ session }) => new PiSessionHandle(session));
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];

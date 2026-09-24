@@ -181,6 +181,11 @@ function failedConfigOutcome(runId: string, error: ErrorInfo, now: number, label
  * Assembles the prompt actually sent to the model turn from the agent type's
  * systemPrompt + promptMode and the caller's request prompt (architecture
  * §5.12 / agent .md frontmatter semantics: "replace" vs "append").
+ *
+ * "replace" types do NOT get their system prompt here: it travels as
+ * `SessionSpec.systemPrompt` and replaces pi's base system prompt (see the
+ * sessionSpec assembly below). It used to be silently dropped on both paths,
+ * so every replace-mode type ran with no role prompt at all.
  */
 function buildPrompt(spec: RunnerSpec): string {
   const { type, request } = spec;
@@ -369,6 +374,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.type.tools === undefined ? {} : { tools: spec.type.tools }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+          ...(spec.type.promptMode === "replace" && spec.type.systemPrompt
+            ? { systemPrompt: spec.type.systemPrompt }
+            : {}),
         };
         // X3/X10 built-in injected tools, always applied ahead of any H2
         // extension (so an extension's resolveSessionSpec still sees — and can
