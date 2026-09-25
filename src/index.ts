@@ -56,6 +56,7 @@ import { createBashJobTool } from "./tools/bash-job-tool.js";
 import type { BashJobManager } from "./bash/manager.js";
 import { isTerminalJobStatus } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
+import { renderTaskStartedMessage, TASK_STARTED_CUSTOM_TYPE, createTaskCommand } from "./commands/task.js";
 import { createGoalCommand } from "./goal/command.js";
 import { createGoalLoopHook } from "./goal/hook.js";
 import { persistGoalRecord } from "./goal/store.js";
@@ -519,6 +520,20 @@ export default function activate(pi: ExtensionAPI): void {
       },
     }),
   );
+
+  // /task：用户直接派一个后台 general-purpose subagent（src/commands/task.ts）。
+  // 仅主会话（HOST_KEY 守卫之后）；spawn 经 holder 转发到当前会话栈，与
+  // Agent 工具后台路径同一条 SpawnService → notification outbox 链路。
+  pi.registerCommand(
+    "task",
+    createTaskCommand({
+      spawn: (req) => requireStack(holder).spawn.spawn(req),
+      sendMessage: (message, options) => pi.sendMessage(message, options),
+    }),
+  );
+  if (typeof pi.registerMessageRenderer === "function") {
+    pi.registerMessageRenderer(TASK_STARTED_CUSTOM_TYPE, renderTaskStartedMessage);
+  }
 
   // X6: @handle mentions. Registered once; resolves through the current
   // session's stack like the tools above. Conservative by contract: unknown
