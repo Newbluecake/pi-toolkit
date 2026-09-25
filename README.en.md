@@ -202,20 +202,21 @@ User settings: `~/.pi/agent/pi-subagent.json` (the filename keeps its historical
 
 ## Commands
 
-| Command                 | What it does                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `/agent status`         | Diagnostics for all non-terminal runs: phase, last event, idle time, orphans   |
-| `/agent status <runId>` | Full tool timeline of one run                                                  |
-| `/agent costs`          | Per-run cost breakdown, most expensive first                                   |
-| `/agent settings`       | Interactive settings editor                                                    |
-| `/mem`                  | Project memory: `list` / `path` / `import [--force] [slug\|all]`               |
-| `/tasklist`             | Task list panel (`/tasklist clear` to wipe)                                    |
-| `/goal`                 | Objective loop (status / pause / resume / clear)                               |
-| `/watch`                | Watch this session; notify Feishu on every task end                            |
-| `/pi-hud-refresh`       | git fetch and refresh the HUD footer                                           |
-| `/cache-ttl`            | Prompt-cache TTL mode (on/off/auto/save)                                       |
-| `/resume-recent`        | Resume a session from the last 48h (`--all` for everything; bare `resume` too) |
-| `/clear`                | New session (bare `clear` works too)                                           |
+| Command                 | What it does                                                                                                      |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `/agent status`         | Diagnostics for all non-terminal runs: phase, last event, idle time, orphans                                      |
+| `/agent status <runId>` | Full tool timeline of one run                                                                                     |
+| `/agent costs`          | Per-run cost breakdown, most expensive first                                                                      |
+| `/agent settings`       | Interactive settings editor                                                                                       |
+| `/task <description>`   | Start a background general-purpose subagent; the main session gets a start record and the completion notification |
+| `/mem`                  | Project memory: `list` / `path` / `import [--force] [slug\|all]`                                                  |
+| `/tasklist`             | Task list panel (`/tasklist clear` to wipe)                                                                       |
+| `/goal`                 | Objective loop (status / pause / resume / clear)                                                                  |
+| `/watch`                | Watch this session; notify Feishu on every task end                                                               |
+| `/pi-hud-refresh`       | git fetch and refresh the HUD footer                                                                              |
+| `/cache-ttl`            | Prompt-cache TTL mode (on/off/auto/save)                                                                          |
+| `/resume-recent`        | Resume a session from the last 48h (`--all` for everything; bare `resume` too)                                    |
+| `/clear`                | New session (bare `clear` works too)                                                                              |
 
 ## Migrating from standalone plugins
 

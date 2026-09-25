@@ -199,20 +199,21 @@ queue_wait → resolve_config → session_create → extension_bind
 
 ## 命令
 
-| 命令                    | 内容                                                          |
-| ----------------------- | ------------------------------------------------------------- |
-| `/agent status`         | 所有非终态 run 的诊断：相位、最近事件、空闲时长、孤儿 session |
-| `/agent status <runId>` | 单个 run 的完整工具时间线                                     |
-| `/agent costs`          | 按花费降序的逐 run 明细                                       |
-| `/agent settings`       | 交互式设置编辑器                                              |
-| `/mem`                  | 项目记忆：`list` / `path` / `import [--force] [slug\|all]`    |
-| `/tasklist`             | 任务列表面板（`/tasklist clear` 清空）                        |
-| `/goal`                 | 目标驱动循环（status / pause / resume / clear）               |
-| `/watch`                | 标记本会话，每次任务结束都通知飞书                            |
-| `/pi-hud-refresh`       | git fetch 并刷新 HUD footer                                   |
-| `/cache-ttl`            | prompt cache TTL 模式（on/off/auto/save）                     |
-| `/resume-recent`        | 恢复最近 48 小时的会话（`--all` 全量；裸输 `resume` 等效）    |
-| `/clear`                | 开新会话（裸输 `clear` 等效）                                 |
+| 命令                    | 内容                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `/agent status`         | 所有非终态 run 的诊断：相位、最近事件、空闲时长、孤儿 session                  |
+| `/agent status <runId>` | 单个 run 的完整工具时间线                                                      |
+| `/agent costs`          | 按花费降序的逐 run 明细                                                        |
+| `/agent settings`       | 交互式设置编辑器                                                               |
+| `/task <任务描述>`      | 启动一个后台 general-purpose subagent 执行任务；主会话会收到启动记录与完成通知 |
+| `/mem`                  | 项目记忆：`list` / `path` / `import [--force] [slug\|all]`                     |
+| `/tasklist`             | 任务列表面板（`/tasklist clear` 清空）                                         |
+| `/goal`                 | 目标驱动循环（status / pause / resume / clear）                                |
+| `/watch`                | 标记本会话，每次任务结束都通知飞书                                             |
+| `/pi-hud-refresh`       | git fetch 并刷新 HUD footer                                                    |
+| `/cache-ttl`            | prompt cache TTL 模式（on/off/auto/save）                                      |
+| `/resume-recent`        | 恢复最近 48 小时的会话（`--all` 全量；裸输 `resume` 等效）                     |
+| `/clear`                | 开新会话（裸输 `clear` 等效）                                                  |
 
 ## 从独立插件迁移
 
