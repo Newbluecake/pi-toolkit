@@ -31,6 +31,9 @@ metadata:
 3. **fable / gpt-6 只用于复杂任务**（L3），常规任务禁止动用。
 4. **能并行必并行**：判定可并行的任务必须在**同一条消息**中发出多个 `Agent` 调用，或在
    `SubagentWorkflow` 里用 `parallel()`/`pipeline()`；顺序派发不算并行。
+   **同一轮并行超过 6 个 agent 必须用 `SubagentWorkflow`**（全局并发上限默认 6，第 7 个起在全局槽位排队且有排队超时；
+   workflow 自带 FIFO 排队、最多占 4 槽并给普通 Agent 留槽）。workflow 子任务不能指定模型、不能挂 `experts`、
+   `isolation` 不生效——需要这些的任务留在 `Agent`，其余进 workflow（详见 references/subagent-workflow.md）。
    **每轮派单前必须先做并行自检**（流程见「并行调度」节）；选择串行必须能指出具体硬依赖
    （谁消费谁的产物、谁和谁写同一文件），「稳妥起见一个个来」「先看看结果再说」不是合法的
    串行理由——不依赖结果的任务不许等结果。
@@ -280,7 +283,8 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 - 机械性改动开 `high` thinking；只读小查询开 `high`。
 - 让 verifier 重跑全量测试（应主会话后台跑，verifier 只读 diff + 定向命令取证）。
 - 无文件交集却上 `isolation: "worktree"`，白白增加合并成本。
-- ≤3 个子任务还去写 `SubagentWorkflow` 脚本（同消息 3 个 `Agent` 调用更快）。
+- ≤3 个子任务还去写 `SubagentWorkflow` 脚本（同消息 3 个 `Agent` 调用更快）；4–6 个两者皆可，按是否需要分模型/挂专家选。
+- 同一轮并行 >6 个 agent 仍用同消息 `Agent` 硬派（撞全局并发上限，后面的排队且可能排队超时）。
 - 打回重派 / 换模型接手时不挂上一轮 run 为专家，让新 agent 把已排除的路再踩一遍。
 - 把所有上游一股脑挂成 `experts`，或拿 consult 替代交接包（文件坐标、验收标准不写进 prompt）。
 
