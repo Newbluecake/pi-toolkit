@@ -200,6 +200,13 @@ export interface WorkflowGroupInput {
   readonly recentSettled?: readonly WorkflowDoneChild[];
   /** Present while the finished workflow's frozen snapshot lingers — muted header with a ✓/✗ icon. */
   readonly terminal?: { readonly status: string };
+  /**
+   * workflow-agent-queue §5 (stage B): the header's deadline marker, present
+   * only while it carries information beyond `elapsed / budget` — inside the
+   * timeout grace window (`⏳宽限58s`) or once extended (`⏳12m+1`). Running
+   * workflows only.
+   */
+  readonly deadline?: { readonly remainingMs: number; readonly extensions: number; readonly inGrace: boolean };
 }
 
 /** M-C: one run's main tree-row line. M10: segment-colored — label is the eye-catcher
@@ -261,12 +268,18 @@ export function findGlyphCollisions(line: string): string[] {
   return collisions;
 }
 
-/** The run's distance to its effective deadline: `⏳12m` (with `+N` when
- *  extensions were granted), `⏳宽限58s` while inside the grace window. */
+/** Distance to an effective deadline: `⏳12m` (with `+N` when extensions
+ *  were granted), `⏳宽限58s` while inside the grace window. Shared by run
+ *  rows and (stage B) workflow headers so both read the same. */
+export function deadlineMarker(remainingMs: number, extensions: number, inGrace: boolean): string {
+  const t = formatDuration(remainingMs);
+  const ext = extensions > 0 ? `+${extensions}` : "";
+  return inGrace ? `⏳宽限${t}` : `⏳${t}${ext}`;
+}
+
+/** The run's distance to its effective deadline (see `deadlineMarker`). */
 function deadlineField(row: FleetRow): string {
-  const t = formatDuration(row.remainingMs!);
-  const ext = row.extensions > 0 ? `+${row.extensions}` : "";
-  return row.inGrace ? `⏳宽限${t}` : `⏳${t}${ext}`;
+  return deadlineMarker(row.remainingMs!, row.extensions, row.inGrace);
 }
 
 function widgetRowMain(
@@ -521,6 +534,11 @@ export function workflowHeaderLine(wf: WorkflowGroupInput, color: FleetColorize)
   if (queuedTotal > 0) counts.push(`⧗ ${queuedTotal}`);
   if (warnTotal > 0) counts.push(`⚠ ${warnTotal}`);
   const segments = [wf.name, time];
+  // Stage B: grace / extension marker, same format as the run row's deadline
+  // field. Headers never consume the line budget, so it is never dropped.
+  if (wf.deadline !== undefined && wf.terminal === undefined) {
+    segments.push(deadlineMarker(wf.deadline.remainingMs, wf.deadline.extensions, wf.deadline.inGrace));
+  }
   const countsText = counts.join(" ");
   if (countsText !== "") segments.push(countsText);
   if (wf.terminal !== undefined) {
@@ -571,7 +589,19 @@ export function workflowGroupInput(snap: WorkflowActivitySnapshot, now: number, 
         source: child.source,
       })),
     ...(snap.terminal !== undefined ? { terminal: { status: snap.terminal.status } } : {}),
+    ...workflowDeadlineInput(snap, now),
   };
+}
+
+/** Stage B: the header deadline marker input — only inside grace or once extended, never on a frozen snapshot. */
+function workflowDeadlineInput(snap: WorkflowActivitySnapshot, now: number): Pick<WorkflowGroupInput, "deadline"> {
+  if (snap.terminal !== undefined) return {};
+  const extensions = snap.extensions ?? 0;
+  const inGrace = snap.graceUntil !== undefined;
+  if (!inGrace && extensions === 0) return {};
+  const effective = snap.graceUntil ?? snap.deadlineAt;
+  if (effective === undefined) return {};
+  return { deadline: { remainingMs: Math.max(0, effective - now), extensions, inGrace } };
 }
 
 /** M-C: order active rows as a forest — severity-ordered roots, each followed by its children (depth-first). */

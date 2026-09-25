@@ -2038,3 +2038,106 @@ describe("M12: wide-risk glyph collisions (emoji terminals render ⚙⚠↩♻�
     for (const line of lines) expect(findGlyphCollisions(line)).toEqual([]);
   });
 });
+
+describe("workflow-agent-queue §5 (stage B): workflow header deadline marker", () => {
+  const plain = (_t: string, s: string) => s;
+  const base = {
+    workflowId: "wf-1",
+    name: "multi-review",
+    elapsedMs: 3_602_000,
+    budgetMs: 3_600_000,
+    doneTotal: 2,
+    failedTotal: 0,
+    activeTotal: 1,
+  };
+
+  it("inside the grace window: `⏳宽限58s` (same format as the run row), right after the time segment", () => {
+    const line = workflowHeaderLine(
+      { ...base, deadline: { remainingMs: 58_000, extensions: 0, inGrace: true } },
+      plain,
+    );
+    expect(line).toBe("⚙ multi-review · 1h00m / 1h00m · ⏳宽限58s · ✓2 ▸1");
+    expect(findGlyphCollisions(line)).toEqual([]);
+  });
+
+  it("extended: `⏳12m+1`; grace after an extension keeps the grace form", () => {
+    expect(
+      workflowHeaderLine(
+        { ...base, budgetMs: 4_320_000, deadline: { remainingMs: 720_000, extensions: 1, inGrace: false } },
+        plain,
+      ),
+    ).toBe("⚙ multi-review · 1h00m / 1h12m · ⏳12m00s+1 · ✓2 ▸1");
+    expect(
+      workflowHeaderLine({ ...base, deadline: { remainingMs: 5_000, extensions: 2, inGrace: true } }, plain),
+    ).toContain("· ⏳宽限5s ·");
+  });
+
+  it("no marker without grace/extension, and never on a frozen terminal header", () => {
+    expect(workflowHeaderLine(base, plain)).toBe("⚙ multi-review · 1h00m / 1h00m · ✓2 ▸1");
+    expect(
+      workflowHeaderLine(
+        { ...base, terminal: { status: "timed_out" }, deadline: { remainingMs: 1, extensions: 1, inGrace: true } },
+        plain,
+      ),
+    ).not.toContain("⏳");
+  });
+
+  it("workflowGroupInput maps graceUntil / extensions from the activity snapshot (grace wins over the soft deadline)", () => {
+    const snap: import("../../src/workflow/activity.js").WorkflowActivitySnapshot = {
+      workflowId: "wf-1",
+      name: "pipe",
+      startedAt: 0,
+      deadlineAt: 60_000,
+      activeChildren: [],
+      settledChildren: [],
+      settledTotal: 0,
+      completedTotal: 0,
+      replayTotal: 0,
+      queuedChildren: [],
+      rejectedTotal: 0,
+      stageErrorTotal: 0,
+      phases: [],
+    };
+    expect(workflowGroupInput(snap, 30_000, 5_000).deadline).toBeUndefined();
+    expect(workflowGroupInput({ ...snap, graceUntil: 70_000 }, 62_000, 5_000).deadline).toEqual({
+      remainingMs: 8_000,
+      extensions: 0,
+      inGrace: true,
+    });
+    expect(workflowGroupInput({ ...snap, deadlineAt: 90_000, extensions: 1 }, 62_000, 5_000).deadline).toEqual({
+      remainingMs: 28_000,
+      extensions: 1,
+      inGrace: false,
+    });
+    const frozen = { ...snap, graceUntil: 70_000, terminal: { status: "timed_out" as const, endedAt: 70_000 } };
+    expect(workflowGroupInput(frozen, 71_000, 5_000).deadline).toBeUndefined();
+  });
+
+  it("end to end (registry → widget): the grace marker is on the header even when the row budget is exhausted", async () => {
+    const { createWorkflowActivityRegistry } = await import("../../src/workflow/activity.js");
+    const reg = createWorkflowActivityRegistry({ now: () => 62_000 });
+    reg.register("wf-1", "multi-review", 0, 60_000, ["review"]);
+    reg.onEvent("subagent:workflow:deadline", {
+      workflowId: "wf-1",
+      at: 60_000,
+      kind: "grace",
+      deadlineAt: 60_000,
+      graceUntil: 150_000,
+      hardDeadlineAt: 240_000,
+      extensionsUsed: 0,
+      maxExtensions: 3,
+    });
+    const runs = [1, 2, 3].map((i) =>
+      snapshot({ runId: `run-${i}00`, parentRunId: "wf-1", diag: diag({ createdAt: 8_000, label: `child-${i}` }) }),
+    );
+    const lines = buildFleetWidgetLines(buildFleetViewModel(runs, { ...OPTS, now: 62_000 }), {
+      width: 120,
+      frame: 0,
+      maxRows: 1,
+      workflows: reg.listForDisplay().map((w) => workflowGroupInput(w, 62_000, 5_000)),
+    })!;
+    const header = lines.find((line) => line.includes("multi-review"))!;
+    expect(header).toContain("⏳宽限1m28s");
+    for (const line of lines) expect(findGlyphCollisions(line)).toEqual([]);
+  });
+});
