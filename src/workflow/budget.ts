@@ -18,6 +18,11 @@ import type { WorkflowRunBudget } from "./types.js";
  * milestone can wire it without changing this function's contract, but for
  * now every caller passes `phaseDeadlineAt: undefined`, which is exactly
  * BW10's `phaseTotalMs=0 ⇒ phaseRemaining=+∞` case.
+ *
+ * BW10's *workflow* half (`workflowTotalMs=0 ⇒ workflowDeadlineAt` absent) is
+ * forbidden at the configuration layer (workflow-agent-queue plan §0 Major-2):
+ * `workflow.budget.workflowTotalS` must be > 0. The `undefined` handling below
+ * survives only as a defensive branch.
  */
 
 export interface WorkflowBudgetView {
@@ -106,7 +111,11 @@ export function deriveChildBudget(view: WorkflowBudgetView, want: Millis | undef
   } else if (view.phaseDeadlineAt !== undefined) {
     deadlineAt = view.phaseDeadlineAt;
   } else {
-    deadlineAt = undefined; // BW10: workflowTotalMs=0 (and no phase cap) ⇒ genuinely unbounded.
+    // BW10: workflowTotalMs=0 (and no phase cap) ⇒ unbounded. Defensive branch
+    // only — the settings layer forbids workflowTotalMs <= 0 (it never worked
+    // in background mode, see parseWorkflowSettings), and run-budget.ts /
+    // the tool's mergeBudget fall back to the default for it.
+    deadlineAt = undefined;
   }
 
   return { totalMs, queueWaitMs, capped: winner.capped, ...(deadlineAt !== undefined ? { deadlineAt } : {}) };

@@ -63,7 +63,11 @@ function seconds(
 /** Integer-second duration knob whose effective default lives in DEFAULT_WORKFLOW_BUDGET. */
 function workflowSeconds(leaf: keyof WorkflowBudget): SettingSpec {
   return {
-    ...seconds(`workflow.budget.${leaf}`, { description: WORKFLOW_BUDGET_DESCRIPTIONS[leaf] }),
+    // workflowTotalMs must be > 0 (BW10 is unsupported in background mode; 0 falls back to the default).
+    ...seconds(`workflow.budget.${leaf}`, {
+      description: WORKFLOW_BUDGET_DESCRIPTIONS[leaf],
+      ...(leaf === "workflowTotalMs" ? { min: 1 } : {}),
+    }),
     fallback: msToSeconds(DEFAULT_WORKFLOW_BUDGET[leaf]),
   };
 }
@@ -106,7 +110,7 @@ const WORKFLOW_BUDGET_DESCRIPTIONS: Record<keyof WorkflowBudget, string> = {
   hostCallMs: "Host call (agent/tool) timeout",
   gateMs: "User gate wait timeout",
   phaseTotalMs: "Per-phase cap; 0 = unlimited",
-  workflowTotalMs: "Overall workflow cap",
+  workflowTotalMs: "Overall workflow cap (must be > 0; 0 falls back to the default)",
   heartbeatStallMs: "Heartbeat stall diagnostic threshold",
   abortGraceMs: "Abort grace before worker teardown",
   terminateConfirmMs: "Worker terminate confirm timeout",

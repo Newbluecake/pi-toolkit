@@ -32,7 +32,8 @@ export function buildWorkflowRunBudget(settings: AgentSettings): WorkflowRunBudg
     heartbeatMs: 250,
     heartbeatStallMs: merged.heartbeatStallMs,
     terminateConfirmMs: merged.terminateConfirmMs,
-    workflowTotalMs: merged.workflowTotalMs,
+    // BW10 unsupported (settings reject <= 0); defensive for programmatic settings objects.
+    workflowTotalMs: merged.workflowTotalMs > 0 ? merged.workflowTotalMs : DEFAULT_WORKFLOW_BUDGET.workflowTotalMs,
     runawayPolicy: settings.workflow.runawayPolicy,
     hostCallMs: merged.hostCallMs,
     gateMs: merged.gateMs,

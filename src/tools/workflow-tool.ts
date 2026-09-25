@@ -99,9 +99,10 @@ export const WorkflowToolParams = Type.Object({
 });
 export type WorkflowToolParams = Static<typeof WorkflowToolParams>;
 
-function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): WorkflowRunBudget {
-  if (timeoutMs === undefined) return base;
-  return { ...base, workflowTotalMs: Math.max(0, timeoutMs) };
+/** Exported for tests. `timeoutMs <= 0` (or non-finite) falls back to the base budget — BW10 (a 0 = unbounded workflow cap) is unsupported, same rule as the settings layer. */
+export function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): WorkflowRunBudget {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return base;
+  return { ...base, workflowTotalMs: timeoutMs };
 }
 
 export function scriptDisplayName(script: string): string {

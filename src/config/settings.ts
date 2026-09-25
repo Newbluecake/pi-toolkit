@@ -1208,7 +1208,15 @@ function parseWorkflowSettings(input: unknown): WorkflowSettings {
   const cleanedBudget: Partial<WorkflowBudget> = {};
   for (const key of validBudgetKeys) {
     const v = budget[key];
-    if (typeof v === "number" && v >= 0) cleanedBudget[key] = v;
+    if (typeof v !== "number" || !(v >= 0)) continue;
+    // workflow-agent-queue §0/Major-2 (same shape as the subagent D-11 rule):
+    // workflowTotalMs must be > 0. BW10 ("0 = no workflow cap") never worked in
+    // background mode — background.ts bounds its driver race by
+    // workflowTotalMs + slack, so 0 ended every run after ~14s — and a queued
+    // agent() call needs a finite ack.deadlineAt. Drop it here so the default
+    // applies; loadSettingsFromFile WARNs once.
+    if (key === "workflowTotalMs" && v <= 0) continue;
+    cleanedBudget[key] = v;
   }
   return {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
@@ -1281,6 +1289,24 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
       budgetBlock && typeof budgetBlock === "object" ? (budgetBlock as Record<string, unknown>).totalS : undefined;
     if (typeof rawTotalS === "number" && rawTotalS <= 0) {
       console.warn(`[pi-subagent] budget.totalS must be > 0 (got ${rawTotalS}); using the default 1800s`);
+    }
+    // Same rule for the workflow cap (BW10 is unsupported in background mode —
+    // see parseWorkflowSettings): dropped at parse time, WARNed here once.
+    const workflowBlock = (cache.value as Record<string, unknown>).workflow;
+    const workflowBudget =
+      workflowBlock && typeof workflowBlock === "object"
+        ? (workflowBlock as Record<string, unknown>).budget
+        : undefined;
+    const rawWorkflowTotalS =
+      workflowBudget && typeof workflowBudget === "object"
+        ? (workflowBudget as Record<string, unknown>).workflowTotalS
+        : undefined;
+    if (typeof rawWorkflowTotalS === "number" && rawWorkflowTotalS <= 0) {
+      console.warn(
+        `[pi-subagent] workflow.budget.workflowTotalS must be > 0 (got ${rawWorkflowTotalS}); using the default ${
+          DEFAULT_WORKFLOW_BUDGET.workflowTotalMs / 1000
+        }s`,
+      );
     }
     return loadSettings(cache.value);
   } catch (error) {
