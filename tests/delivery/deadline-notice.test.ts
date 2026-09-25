@@ -3,9 +3,13 @@ import {
   TIMEOUT_NOTICE_TYPE,
   deliveryOptionsFor,
   formatDeadlineNotice,
+  formatWorkflowDeadlineNotice,
   overtimeTail,
   shouldDeliverDeadlineNotice,
+  shouldDeliverWorkflowDeadlineNotice,
+  workflowDeliveryOptionsFor,
 } from "../../src/delivery/deadline-notice.js";
+import type { WorkflowDeadlineNotice } from "../../src/workflow/deadline.js";
 import type { DeadlineNotice, RunDiagnostics, RunSnapshot } from "../../src/core/types.js";
 
 const NOW = 1_802_000;
@@ -190,5 +194,76 @@ describe("delivery/deadline-notice: overtimeTail (arch §5.6)", () => {
     expect(overtimeTail(snapshot({ graces: 1, extensions: 0, grantedMs: 0 }).diag)).toBe(
       " (finished in overtime; 0 extensions used)",
     );
+  });
+});
+
+describe("delivery/deadline-notice: workflow notices (workflow-agent-queue §4.5, stage B)", () => {
+  const WF = "wf_0123456789abcdef0123";
+  const grace = (overrides: Partial<WorkflowDeadlineNotice> = {}): WorkflowDeadlineNotice => ({
+    kind: "grace",
+    workflowId: WF,
+    at: 3_600_000,
+    deadlineAt: 3_600_000,
+    graceUntil: 3_690_000,
+    hardDeadlineAt: 7_200_000,
+    extensionsUsed: 0,
+    maxExtensions: 3,
+    totalMs: 3_600_000,
+    suggestedExtendMs: 3_600_000,
+    live: { phaseId: "review", running: 2, queued: 1, settled: 5 },
+    ...overrides,
+  });
+
+  it("grace: the full template — who, grace left, Now, copyable call (full id, seconds), budget, opt-out", () => {
+    const text = formatWorkflowDeadlineNotice(grace(), { now: 3_600_000, name: "multi-review" });
+    expect(text.split("\n")).toEqual([
+      '⏳ Workflow "multi-review" (wf_01234567) hit its 1h00m time budget and is STILL RUNNING.',
+      "Grace: 1m30s left — then it stops as timed_out and its children are aborted.",
+      'Now: phase "review" · 2 running · 1 queued · 5 settled',
+      `Give it more time:  extend_subagent_timeout(run_id: "${WF}", extend_s: 3600)`,
+      "Budget left: 3 of 3 extensions, at most 1h00m more.",
+      "Doing nothing lets it expire — that is a valid choice if its partial result is enough.",
+    ]);
+  });
+
+  it("grace without a name / live picture, after an extension", () => {
+    const text = formatWorkflowDeadlineNotice(
+      grace({ extensionsUsed: 1, live: undefined, deadlineAt: 4_200_000, graceUntil: 4_290_000 }),
+      { now: 4_230_000 },
+    );
+    expect(text).toContain("⏳ Workflow wf_01234567 hit its 1h00m time budget (extended 1 time) and is STILL RUNNING.");
+    expect(text).toContain("Grace: 1m00s left");
+    expect(text).not.toContain("Now:");
+    expect(text).toContain("Budget left: 2 of 3 extensions");
+  });
+
+  it("extended: a one-line receipt with the reason", () => {
+    const text = formatWorkflowDeadlineNotice(
+      {
+        kind: "extended",
+        workflowId: WF,
+        at: 3_600_000,
+        deadlineAt: 4_200_000,
+        hardDeadlineAt: 7_200_000,
+        extensionsUsed: 1,
+        maxExtensions: 3,
+        totalMs: 3_600_000,
+        requestedMs: 600_000,
+        grantedMs: 600_000,
+        reason: "last phase\nis running",
+      },
+      { now: 3_600_000, name: "multi-review" },
+    );
+    expect(text).toBe(
+      '⏳ Workflow "multi-review" (wf_01234567) deadline extended by 10m00s (1 of 3 extensions used, 50m00s headroom left). Reason: last phase is running',
+    );
+  });
+
+  it("delivery: only policy off suppresses (a workflow is always background); grace wakes the model, extended does not", () => {
+    expect(shouldDeliverWorkflowDeadlineNotice({ policy: "off" })).toBe(false);
+    expect(shouldDeliverWorkflowDeadlineNotice({ policy: "background" })).toBe(true);
+    expect(shouldDeliverWorkflowDeadlineNotice({ policy: "always" })).toBe(true);
+    expect(workflowDeliveryOptionsFor(grace())).toEqual({ triggerTurn: true });
+    expect(workflowDeliveryOptionsFor(grace({ kind: "extended" }))).toEqual({ triggerTurn: false });
   });
 });

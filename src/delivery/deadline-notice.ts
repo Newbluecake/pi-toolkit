@@ -1,5 +1,6 @@
 import { formatDuration } from "../core/format.js";
 import type { DeadlineNotice, Millis, RunDiagnostics, RunSnapshot } from "../core/types.js";
+import type { WorkflowDeadlineNotice } from "../workflow/deadline.js";
 
 /**
  * timeout-notify (arch §5): the grace/extended notice channel.
@@ -129,4 +130,73 @@ export function overtimeTail(diag: RunDiagnostics | undefined): string {
   const overtime = diag?.overtime;
   if (overtime === undefined || (overtime.graces <= 0 && overtime.extensions <= 0)) return "";
   return ` (finished in overtime; ${overtime.extensions} extension${overtime.extensions === 1 ? "" : "s"} used)`;
+}
+
+// ── workflow deadline notices (workflow-agent-queue §4.5, stage B) ──────────
+
+const shortWorkflowId = (workflowId: string) => workflowId.slice(0, 11); // "wf_" + 8
+
+function workflowWho(notice: WorkflowDeadlineNotice, name: string | undefined): string {
+  return name ? `"${oneLine(name, 60)}" (${shortWorkflowId(notice.workflowId)})` : shortWorkflowId(notice.workflowId);
+}
+
+/** `phase "review" · 2 running · 1 queued · 5 settled` — the workflow's live picture at notice time. */
+function workflowNowLine(live: NonNullable<WorkflowDeadlineNotice["live"]>): string {
+  const parts: string[] = [];
+  if (live.phaseId !== undefined) parts.push(`phase "${oneLine(live.phaseId, 40)}"`);
+  parts.push(`${live.running} running`, `${live.queued} queued`, `${live.settled} settled`);
+  return parts.join(" · ");
+}
+
+/**
+ * Render a workflow deadline notice (same channel and conventions as
+ * `formatDeadlineNotice`: relative durations only, a directly copyable
+ * extend call, "doing nothing is a valid choice"). The copyable call uses the
+ * full workflow id so it can never hit an ambiguous-prefix error.
+ */
+export function formatWorkflowDeadlineNotice(
+  notice: WorkflowDeadlineNotice,
+  ctx: { now: Millis; name?: string },
+): string {
+  const { now } = ctx;
+  const who = workflowWho(notice, ctx.name);
+  if (notice.kind === "extended") {
+    let line =
+      `⏳ Workflow ${who} deadline extended by ${formatDuration(notice.grantedMs ?? 0)} ` +
+      `(${notice.extensionsUsed} of ${notice.maxExtensions} extensions used, ` +
+      `${formatDuration(Math.max(0, notice.hardDeadlineAt - notice.deadlineAt))} headroom left).`;
+    if (notice.reason) line += ` Reason: ${oneLine(notice.reason, 120)}`;
+    return line;
+  }
+  const graceLeft = formatDuration(Math.max(0, (notice.graceUntil ?? now) - now));
+  const extendS = Math.max(1, Math.round((notice.suggestedExtendMs ?? 60_000) / 1000));
+  const extensionsLeft = notice.maxExtensions - notice.extensionsUsed;
+  const headroom = formatDuration(Math.max(0, notice.hardDeadlineAt - Math.max(now, notice.deadlineAt)));
+  const extended =
+    notice.extensionsUsed > 0
+      ? ` (extended ${notice.extensionsUsed} time${notice.extensionsUsed === 1 ? "" : "s"})`
+      : "";
+  const lines = [
+    `⏳ Workflow ${who} hit its ${formatDuration(notice.totalMs)} time budget${extended} and is STILL RUNNING.`,
+    `Grace: ${graceLeft} left — then it stops as timed_out and its children are aborted.`,
+    ...(notice.live !== undefined ? [`Now: ${workflowNowLine(notice.live)}`] : []),
+    `Give it more time:  extend_subagent_timeout(run_id: "${notice.workflowId}", extend_s: ${extendS})`,
+    `Budget left: ${extensionsLeft} of ${notice.maxExtensions} extensions, at most ${headroom} more.`,
+    `Doing nothing lets it expire — that is a valid choice if its partial result is enough.`,
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * Workflow notices never have a caller synchronously blocked on them (a
+ * workflow is always a background run), so only policy "off" suppresses them —
+ * "background" and "always" both deliver.
+ */
+export function shouldDeliverWorkflowDeadlineNotice(ctx: { policy: DeadlineNotifyPolicy }): boolean {
+  return ctx.policy !== "off";
+}
+
+/** Same rule as `deliveryOptionsFor`: a grace notice wakes the model into a decision turn; an extended receipt is display-only. */
+export function workflowDeliveryOptionsFor(notice: WorkflowDeadlineNotice): { triggerTurn: boolean } {
+  return { triggerTurn: notice.kind === "grace" };
 }

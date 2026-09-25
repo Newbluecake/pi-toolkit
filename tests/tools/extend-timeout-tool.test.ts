@@ -3,6 +3,9 @@ import type { Text } from "@earendil-works/pi-tui";
 import { createExtendTimeoutTool, ExtendTimeoutParams } from "../../src/tools/extend-timeout-tool.js";
 import type { ExtendOutcome, RunSnapshot } from "../../src/core/types.js";
 import type { QueryService } from "../../src/service/query-service.js";
+import type { WorkflowQueryPort } from "../../src/tools/workflow-target.js";
+import type { BackgroundWorkflowView } from "../../src/workflow/background.js";
+import type { WorkflowExtendOutcome } from "../../src/workflow/deadline.js";
 
 const theme = { fg: (_tone: string, text: string) => text, bold: (text: string) => text } as never;
 const ctx = (lastComponent?: unknown) => ({ lastComponent, state: {} }) as never;
@@ -284,5 +287,161 @@ describe("tools/extend-timeout-tool: renderCall (TUI call card)", () => {
     expect(clipped).not.toContain("x".repeat(100));
     const streaming = (tool.renderCall!({}, theme, ctx()) as Text).render(120).join("\n");
     expect(streaming).toContain("Extend Subagent Timeout:");
+  });
+});
+
+// ── workflow-agent-queue §4.5 (stage B): wf_… targets ────────────────────────
+
+const WF = "wf_0123456789abcdef0123";
+
+function workflowView(overrides: Partial<BackgroundWorkflowView> = {}): BackgroundWorkflowView {
+  return {
+    workflowId: WF,
+    name: "review-flow",
+    startedAt: 0,
+    deadlineAt: 70_000, // NOW + 60s
+    hardDeadlineAt: 130_000,
+    status: "running",
+    ...overrides,
+  };
+}
+
+function workflowSetup(outcome: WorkflowExtendOutcome, view: BackgroundWorkflowView | undefined = workflowView()) {
+  const extend = vi.fn(() => outcome);
+  const workflows: WorkflowQueryPort = {
+    resolve: (handle) =>
+      handle.startsWith("wf_") && WF.startsWith(handle) ? { kind: "workflow", workflowId: WF } : { kind: "none" },
+    resolveLabel: (handle) => (handle === "review-flow" ? { kind: "workflow", workflowId: WF } : { kind: "none" }),
+    get: () => view,
+    wait: async () => ({ ok: false, reason: "unknown_workflow" }),
+    stop: async () => ({ ok: false, reason: "unknown_workflow" }),
+    activity: () => undefined,
+    extend,
+  };
+  const query: FakeQuery = { extendTimeout: vi.fn(() => okOutcome()), get: vi.fn(() => undefined) };
+  const tool = createExtendTimeoutTool({
+    query,
+    resolveRun: () => ({ ok: false, error: "no such run", candidates: [] }),
+    workflows,
+    now: () => NOW,
+  });
+  return { tool, extend, query };
+}
+
+function workflowOk(overrides: Partial<WorkflowExtendOutcome & { ok: true }> = {}): WorkflowExtendOutcome {
+  return {
+    ok: true,
+    workflowId: WF,
+    previousDeadlineAt: 70_000,
+    deadlineAt: 670_000, // NOW + 660s
+    requestedMs: 600_000,
+    grantedMs: 600_000,
+    clamped: false,
+    extensionsUsed: 1,
+    extensionsRemaining: 2,
+    hardDeadlineAt: 1_270_000,
+    rescuedFromGrace: false,
+    ...overrides,
+  };
+}
+
+describe("tools/extend-timeout-tool: SubagentWorkflow targets", () => {
+  it("run_id documents workflow ids; the description mentions workflows and their children", () => {
+    const { tool } = workflowSetup(workflowOk());
+    const runId = (ExtendTimeoutParams.properties.run_id as { description: string }).description;
+    expect(runId).toContain("SubagentWorkflow id (wf_…)");
+    expect(tool.description).toContain("background SubagentWorkflow");
+    expect(tool.description).toContain("extend their workflow instead");
+  });
+
+  it("a wf_ id (exact, prefix or script name) goes to workflows.extend, never to the run query", async () => {
+    for (const handle of [WF, "wf_0123", "review-flow"]) {
+      const { tool, extend, query } = workflowSetup(workflowOk());
+      await executeText(tool, { run_id: handle, extend_s: 600, reason: "tests left" });
+      expect(extend).toHaveBeenCalledWith(WF, 600_000, { reason: "tests left" });
+      expect(query.extendTimeout).not.toHaveBeenCalled();
+    }
+  });
+
+  it("success text mirrors the run receipt; a rescue is called out; details carry the raw outcome", async () => {
+    const { tool } = workflowSetup(workflowOk({ rescuedFromGrace: true, clamped: true, requestedMs: 900_000 }));
+    const result = await tool.execute("tc1", { run_id: WF, extend_s: 900 } as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toBe(
+      `Extended workflow ${WF} by 10m00s (requested 15m00s, clamped by its hard ceiling). New deadline in 11m00s. ` +
+        "2 of 3 extensions left; at most 10m00s more available. " +
+        "The workflow was inside its timeout grace window and is now back to normal execution.",
+    );
+    expect(result.details).toMatchObject({ ok: true, workflowId: WF, rescuedFromGrace: true });
+  });
+
+  it("explicit timeout_s workflow → no_headroom with the hard-cap wording", async () => {
+    const { tool } = workflowSetup(
+      { ok: false, reason: "no_headroom" },
+      workflowView({ deadlineAt: 70_000, hardDeadlineAt: 70_000 }),
+    );
+    const message = await executeError(tool, { run_id: WF, extend_s: 60 });
+    expect(message).toBe(
+      `workflow ${WF} ("review-flow") was started with an explicit timeout_s, which is a hard cap; it stops at its ` +
+        `deadline (in 1m00s) and cannot be extended. Read what it produced with get_subagent_result(run_id: "${WF}") ` +
+        "after the notification, or abort_subagent and restart the workflow with a larger timeout_s.",
+    );
+  });
+
+  it("no_headroom after extensions → ceiling wording", async () => {
+    const { tool } = workflowSetup(
+      { ok: false, reason: "no_headroom" },
+      workflowView({ deadlineAt: 130_000, hardDeadlineAt: 130_000, extensions: 2 }),
+    );
+    const message = await executeError(tool, { run_id: WF, extend_s: 60 });
+    expect(message).toContain("is at its hard ceiling (2m10s from start)");
+    expect(message).toContain("stops at its deadline (in 2m00s)");
+  });
+
+  it.each<[WorkflowExtendOutcome & { ok: false }, Partial<BackgroundWorkflowView>, string[]]>([
+    [{ ok: false, reason: "limit_reached" }, { extensions: 3 }, ["already used all 3 deadline extensions", "in 1m00s"]],
+    [{ ok: false, reason: "limit_reached" }, {}, ["already used all deadline extensions"]],
+    [{ ok: false, reason: "stopping" }, { stopRequested: "user_stop" }, ["is already stopping (user_stop)"]],
+    [{ ok: false, reason: "already_terminal" }, { status: "completed" }, ["already finished (completed)"]],
+    [{ ok: false, reason: "already_terminal" }, {}, ["already finished (its terminal decision is made)"]],
+    [{ ok: false, reason: "unsupported", detail: "boom" }, {}, ["this build cannot extend", "(boom)"]],
+    [{ ok: false, reason: "uncapped" }, {}, ["no time cap configured"]],
+    [{ ok: false, reason: "unknown_workflow" }, {}, ["unknown workflow", "/agent status"]],
+  ])("rejection %o → says what to do next", async (outcome, view, fragments) => {
+    const { tool } = workflowSetup(outcome, workflowView(view));
+    const message = await executeError(tool, { run_id: WF, extend_s: 60 });
+    for (const f of fragments) expect(message).toContain(f);
+  });
+
+  it("a port without extend() answers unsupported", async () => {
+    const { query } = setup(okOutcome());
+    const workflows: WorkflowQueryPort = {
+      resolve: () => ({ kind: "workflow", workflowId: WF }),
+      resolveLabel: () => ({ kind: "none" }),
+      get: () => workflowView(),
+      wait: async () => ({ ok: false, reason: "unknown_workflow" }),
+      stop: async () => ({ ok: false, reason: "unknown_workflow" }),
+      activity: () => undefined,
+    };
+    const tool = createExtendTimeoutTool({ query, workflows, now: () => NOW });
+    expect(await executeError(tool, { run_id: WF, extend_s: 60 })).toContain("this build cannot extend");
+  });
+
+  it("a workflow's child run is intercepted: points at the owning workflow, never calls extendTimeout", async () => {
+    const child = { ...snapshot({}), parentRunId: WF } as RunSnapshot;
+    const { query, tool } = setup(okOutcome(), child);
+    const message = await executeError(tool, { run_id: RUN_ID, extend_s: 120 });
+    expect(message).toBe(
+      `run r-abcdef is a child of workflow ${WF}; a workflow's children run under the workflow's own deadline and ` +
+        `cannot be extended one by one. Extend the workflow instead: extend_subagent_timeout(run_id: "${WF}", extend_s: 120).`,
+    );
+    expect(query.extendTimeout).not.toHaveBeenCalled();
+  });
+
+  it("a nested (non-workflow) child run is still extendable", async () => {
+    const nested = { ...snapshot({}), parentRunId: "r-parent0001" } as RunSnapshot;
+    const { query, tool } = setup(okOutcome(), nested);
+    await executeText(tool, { run_id: RUN_ID, extend_s: 60 });
+    expect(query.extendTimeout).toHaveBeenCalled();
   });
 });

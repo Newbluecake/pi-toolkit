@@ -18,13 +18,19 @@ export interface WorkflowQueryPort extends Pick<
   snapshotOf?(runId: string): RunSnapshot | undefined;
   /** A child run's lifetime usage, for spend accounting on the terminal read. */
   usageOf?(runId: string): UsageDelta | undefined;
+  /**
+   * workflow-agent-queue §4.5 (stage B): `extend_subagent_timeout(run_id: "wf_…")`.
+   * Optional so read-only ports (result/abort test doubles) keep compiling;
+   * absent ⇒ the extend tool answers `unsupported`.
+   */
+  extend?: BackgroundWorkflows["extend"];
 }
 
 export type ToolTarget =
   { readonly kind: "run"; readonly runId: string } | { readonly kind: "workflow"; readonly workflowId: string };
 
-/** Every workflow id starts with this prefix; run ids never do (`r_…`). */
-const WORKFLOW_ID_PREFIX = "wf_";
+/** Every workflow id starts with this prefix; run ids never do (`r_…`). A workflow's children carry it as their `parentRunId`. */
+export const WORKFLOW_ID_PREFIX = "wf_";
 
 /**
  * Resolve a model-facing `run_id` argument to a run or a background workflow.
