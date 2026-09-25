@@ -61,7 +61,9 @@ export const WorkflowToolParams = Type.Object({
     description:
       "The workflow script source. Must start with `export const meta = { name, description }` (a plain object " +
       "literal). The sandboxed script body may call agent(prompt, opts?), parallel(thunks), pipeline(items, " +
-      "...stages), phase(title), log(message), and read the top-level `args`/`budget` globals; it may not use " +
+      "...stages), phase(title), log(message), and read the top-level `args`/`budget` globals. Each pipeline stage " +
+      "is called as stage(prevValue, item, index) \u2014 the first stage gets prevValue=undefined, so write it as " +
+      "(_prev, item, i) => ... . The script may not use " +
       "Date.now()/Math.random()/eval (all disabled \u2014 they would silently break replay). Max 512 KiB.",
   }),
   args: Type.Optional(

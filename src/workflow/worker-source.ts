@@ -271,6 +271,14 @@ function reportStageError(source, itemIndex, stageIndex, error) {
   // property instead (cross-realm safe), fall back to String().
   var message =
     error && typeof error.message === "string" ? error.message : String(error);
+  // Most common pipeline() mistake: writing the first stage as (item) => ...
+  // when stages are called as stage(prevValue, item, index) — the first
+  // stage's prevValue is undefined, so touching it throws "... of undefined".
+  if (source === "pipeline" && stageIndex === 0 && /\bundefined\b/.test(message)) {
+    message +=
+      " (hint: stages are called as stage(prevValue, item, index); the first stage gets prevValue=undefined \u2014 " +
+      "write it as (_prev, item, i) => ...)";
+  }
   var msg = {
     kind: "stage_error",
     source: source,

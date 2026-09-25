@@ -230,6 +230,51 @@ describe("M3.4 pipeline(items, ...stages) (\u00a75.2/\u00a75.3: no stage barrier
     expect(stageErrors).toEqual([{ source: "pipeline", itemIndex: 0, stageIndex: 0, message: "stage1 boom" }]);
     await host.terminate("test-done");
   }, 10_000);
+
+  it("a first stage written as (item) => ... gets a signature hint appended to its undefined-access error", async () => {
+    const { spawner } = completingSpawner();
+    const script = scriptWith(`
+      const results = await pipeline(
+        ["a.ts"],
+        (f) => f.replace(".ts", ""),
+        (prev) => prev.missing.deeper,
+      );
+      return results;
+    `);
+    const { host, outcome } = await bootReal(script, spawner);
+    const stageErrors: Array<{ source: string; itemIndex: number; stageIndex?: number; message: string }> = [];
+    host.events.onStageError((e) => stageErrors.push(e));
+    const result = await outcome;
+    expect(result.returned).toEqual([null]);
+    expect(stageErrors).toHaveLength(1);
+    expect(stageErrors[0]?.stageIndex).toBe(0);
+    expect(stageErrors[0]?.message).toMatch(/of undefined/);
+    expect(stageErrors[0]?.message).toContain(
+      "(hint: stages are called as stage(prevValue, item, index); the first stage gets prevValue=undefined \u2014 write it as (_prev, item, i) => ...)",
+    );
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("the signature hint is not appended to later stages or to unrelated stage-0 errors", async () => {
+    const { spawner } = completingSpawner();
+    const script = scriptWith(`
+      const results = await pipeline(
+        ["a", "b"],
+        (prev, item) => { if (item === "a") throw new Error("plain boom"); return undefined; },
+        (prev) => prev.missing,
+      );
+      return results;
+    `);
+    const { host, outcome } = await bootReal(script, spawner);
+    const stageErrors: Array<{ source: string; itemIndex: number; stageIndex?: number; message: string }> = [];
+    host.events.onStageError((e) => stageErrors.push(e));
+    const result = await outcome;
+    expect(result.returned).toEqual([null, null]);
+    expect(stageErrors).toHaveLength(2);
+    for (const e of stageErrors) expect(e.message).not.toContain("hint:");
+    expect(stageErrors.find((e) => e.itemIndex === 1)?.stageIndex).toBe(1);
+    await host.terminate("test-done");
+  }, 10_000);
 });
 
 describe("M3.4 phase(title) (\u00a75.2/\u00a75.3: statement form, environment tag, opts.phase override)", () => {
