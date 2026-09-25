@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { systemClock } from "../../src/core/clock.js";
 import { attachHostCallHandler, type ChildSpawner } from "../../src/workflow/host.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
-import type { WorkerHost } from "../../src/workflow/types.js";
+import type { WorkerHost, WorkflowStageError } from "../../src/workflow/types.js";
 
 /**
  * M3.2 verification Blocker B (fixed here): `HostAckEnvelope`/
@@ -40,8 +40,18 @@ function scriptWith(body: string): string {
 async function bootReal(
   script: string,
   spawner: ChildSpawner,
-): Promise<{ host: WorkerHost; outcome: Promise<{ returned?: unknown; threw?: { message: string } }> }> {
+  budgetOverrides: { maxParallel?: number } = {},
+): Promise<{
+  host: WorkerHost;
+  outcome: Promise<{ returned?: unknown; threw?: { message: string } }>;
+  stageErrors: WorkflowStageError[];
+  workerErrors: unknown[];
+}> {
   const host = createWorkerHost({ clock: systemClock });
+  const stageErrors: WorkflowStageError[] = [];
+  const workerErrors: unknown[] = [];
+  host.events.onStageError((e) => stageErrors.push(e));
+  host.events.onError((e) => workerErrors.push(e));
   attachHostCallHandler({
     clock: systemClock,
     workerHost: host,
@@ -54,7 +64,9 @@ async function bootReal(
       maxChildren: 10,
       maxBatchItems: 10,
       childBudgetPolicy: "inherit_remaining",
+      ...budgetOverrides,
     },
+    workflowDeadlineAt: Date.now() + 30_000,
   });
   const boot = await host.boot({
     scriptSource: script,
@@ -80,7 +92,7 @@ async function bootReal(
       resolve({ threw });
     });
   });
-  return { host, outcome };
+  return { host, outcome, stageErrors, workerErrors };
 }
 
 describe("real-worker agent() host-call round trip (M3.2/M3.3 Blocker B regression coverage)", () => {
@@ -189,4 +201,145 @@ describe("real-worker agent() host-call round trip (M3.2/M3.3 Blocker B regressi
     expect(result.returned).toBe(true);
     await host.terminate("test-done");
   }, 10_000);
+});
+
+/**
+ * workflow-agent-queue §7 (stage A), real worker: queued dispatch end to end.
+ */
+function delayedSpawner(opts: { delayMsOf?(prompt: string): number; errorFor?(prompt: string): string | undefined }) {
+  const promptOf = new Map<string, string>();
+  const spawned: string[] = [];
+  let n = 0;
+  const spawner: ChildSpawner = {
+    spawn: async (req) => {
+      const err = opts.errorFor?.(req.prompt);
+      if (err !== undefined) return { error: { message: err } };
+      spawned.push(req.prompt);
+      const runId = `r${++n}`;
+      promptOf.set(runId, req.prompt);
+      return { runId };
+    },
+    abort: async () => true,
+    waitAll: async ({ runIds }) => ({
+      settled: await Promise.all(
+        runIds.map(async (runId) => {
+          const prompt = promptOf.get(runId) ?? "";
+          const delay = opts.delayMsOf?.(prompt) ?? 0;
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          return { runId, status: "completed" as const, text: `done:${prompt}` };
+        }),
+      ),
+      pending: [],
+    }),
+  };
+  return { spawner, spawned };
+}
+
+describe("real-worker agent() queueing (workflow-agent-queue stage A)", () => {
+  it("field repro: an un-awaited slow agent() + await parallel([4 thunks]) at maxParallel 4 — every slot non-null, no stage_error", async () => {
+    const { spawner, spawned } = delayedSpawner({ delayMsOf: (p) => (p === "slow" ? 300 : 50) });
+    const { host, outcome, stageErrors } = await bootReal(
+      scriptWith(
+        'const slow = agent("slow");\n' +
+          'const r = await parallel([1, 2, 3, 4].map((i) => () => agent("t" + i)));\n' +
+          "const s = await slow;\n" +
+          "return JSON.stringify({ r, s });",
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(JSON.parse(result.returned as string)).toEqual({
+      r: ["done:t1", "done:t2", "done:t3", "done:t4"],
+      s: "done:slow",
+    });
+    expect(spawned).toHaveLength(5);
+    expect(stageErrors).toEqual([]);
+    await host.terminate("test-done");
+  }, 15_000);
+
+  it("a rejected settle (queued call whose dispatch-time spawn fails) makes agent() reject — catchable by the script", async () => {
+    const { spawner } = delayedSpawner({
+      delayMsOf: (p) => (p === "hold" ? 100 : 0),
+      errorFor: (p) => (p === "bad" ? "unknown agent type 'nope'" : undefined),
+    });
+    const { host, outcome, stageErrors } = await bootReal(
+      scriptWith(
+        'const hold = agent("hold");\n' +
+          'let caught = "no-throw";\n' +
+          'try { await agent("bad", { agentType: "nope" }); } catch (e) { caught = "caught:" + e.message; }\n' +
+          'return caught + "|" + (await hold);',
+      ),
+      spawner,
+      { maxParallel: 1 },
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toBe("caught:unknown agent type 'nope'|done:hold");
+    expect(stageErrors).toEqual([]);
+    await host.terminate("test-done");
+  }, 15_000);
+
+  it("review v2 #2: an un-awaited agent() that rejects is reported as stage_error(source:'unhandled') and the worker keeps running", async () => {
+    const { spawner } = delayedSpawner({
+      delayMsOf: (p) => (p === "good" ? 150 : 0),
+      errorFor: (p) => (p === "bad" ? "unknown agent type 'nope'" : undefined),
+    });
+    const { host, outcome, stageErrors, workerErrors } = await bootReal(
+      scriptWith('agent("bad", { agentType: "nope" });\nreturn await agent("good");'),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toBe("done:good");
+    expect(workerErrors).toEqual([]);
+    expect(stageErrors).toEqual([
+      {
+        source: "unhandled",
+        itemIndex: 0,
+        message: expect.stringContaining("unknown agent type 'nope'"),
+      },
+    ]);
+    await host.terminate("test-done");
+  }, 15_000);
+});
+
+describe("worker-source: a buffered settle still carries rejected:true", () => {
+  it("settle(rejected) racing ahead of its own ack is buffered and still makes agent() reject", async () => {
+    const host = createWorkerHost({ clock: systemClock });
+    host.events.onHostCall((env) => {
+      // Deliberately out of order: the settle lands before the ack.
+      host.send({
+        kind: "host_settle",
+        callId: env.id,
+        ok: false,
+        error: { message: "dispatch failed" },
+        rejected: true,
+      });
+      host.send({
+        kind: "host_ack",
+        id: env.id,
+        ok: true,
+        value: { callId: env.id, deadlineAt: Date.now() + 10_000, queued: true },
+      });
+    });
+    const boot = await host.boot({
+      scriptSource: scriptWith(
+        'try { await agent("x"); return "no-throw"; } catch (e) { return "caught:" + e.message; }',
+      ),
+      scriptSliceMs: 2_000,
+      heartbeatMs: 0,
+      workerBootMs: 5_000,
+      terminateConfirmMs: 2_000,
+      hostCallMs: 3_000,
+      gateMs: 3_000,
+    });
+    expect(boot.ok).toBe(true);
+    const returned = await new Promise<unknown>((resolve) => {
+      host.events.onScriptReturned(resolve);
+      host.events.onScriptThrew((e) => resolve({ threw: e }));
+    });
+    expect(returned).toBe("caught:dispatch failed");
+    await host.terminate("test-done");
+  }, 15_000);
 });

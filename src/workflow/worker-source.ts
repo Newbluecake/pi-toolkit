@@ -25,10 +25,15 @@
  *                  | { kind: "script_returned", result: unknown }
  *                  | { kind: "script_threw", message: string, stack?: string }
  *                  | { kind: "host_call", id, op: "agent"|"gate", args } (§3.3/§3.5, M3.2)
- *                  | { kind: "stage_error", source: "parallel"|"pipeline", itemIndex, stageIndex?, message }
+ *                  | { kind: "stage_error", source: "parallel"|"pipeline"|"unhandled", itemIndex, stageIndex?, message }
  *                    (fire-and-forget WARN: a parallel()/pipeline() stage threw and the slot was settled
  *                    to null — the host surfaces these in WorkflowDiagnostics so a caller can tell the
- *                    script's result may be silently incomplete)
+ *                    script's result may be silently incomplete. "unhandled": a promise rejected with no
+ *                    handler — typically a fire-and-forget agent() whose dispatch was rejected — which the
+ *                    scaffold's global unhandledRejection hook reports instead of letting the worker die;
+ *                    itemIndex is then the 0-based sequence number of such rejections)
+ *   host -> worker host_settle may carry rejected:true (a post-ack dispatch failure): agent() then
+ *                    rejects instead of resolving to null (workflow-agent-queue §3.4)
  * Everything the scaffold needs to start (script source, slice timeout,
  * heartbeat period, the heartbeat `SharedArrayBuffer`, the port itself) is
  * passed once via `workerData` at construction — there is no separate "boot"
@@ -47,6 +52,7 @@ export function buildWorkerSource(): string {
 const WORKER_SOURCE = String.raw`
 "use strict";
 const vm = require("node:vm");
+const nodeProcess = require("node:process");
 const { workerData } = require("node:worker_threads");
 
 const commPort = workerData.commPort;
@@ -167,6 +173,13 @@ function agent(prompt, opts) {
     // so a \`budget.spent()\` call made from the very next statement already
     // sees this call's usage.
     if (typeof outcome.outputTokens === "number") spentOutputTokens += outcome.outputTokens;
+    // workflow-agent-queue §3.4: a call acked as queued can still fail to
+    // *dispatch* later (spawn error / spawn timeout / HR2 residual). Those are
+    // admission-class failures, so they reject exactly like an ack failure
+    // would have — never a silent null.
+    if (!outcome.ok && outcome.rejected) {
+      throw new Error((outcome.error && outcome.error.message) || "agent() dispatch was rejected");
+    }
     // §5.2/§5.3: a terminal *failure* of the child (or being withheld/aborted
     // by the host) resolves to 'null' — same, deliberately-unresolvable-from-
     // "skipped", semantics as the upstream plugin. Admission-time failures
@@ -288,6 +301,31 @@ function reportStageError(source, itemIndex, stageIndex, error) {
   if (typeof stageIndex === "number") msg.stageIndex = stageIndex;
   send(msg);
 }
+
+// Review v2 #2 (workflow-agent-queue §0′): a script that fires agent()
+// without awaiting it and never attaches .catch() used to crash the whole
+// worker thread (Node's default unhandled-rejection mode throws) the moment
+// that call was rejected — reported as worker_died, taking every sibling call
+// down with it. Queued dispatch widens that reject surface, so the scaffold
+// installs a global hook: the rejection is reported over the existing
+// stage_error channel (source "unhandled", counted like any other stage
+// error) and the worker keeps running. Cancellation (workflow stopping, a
+// cancelled ack) is not a script defect — swallowed without a report.
+let unhandledSeq = 0;
+nodeProcess.on("unhandledRejection", function (reason) {
+  try {
+    if (reason && reason.cancelled === true) return;
+    var message = reason && typeof reason.message === "string" ? reason.message : String(reason);
+    send({
+      kind: "stage_error",
+      source: "unhandled",
+      itemIndex: unhandledSeq++,
+      message: "unhandled rejection (a call without await/.catch): " + message,
+    });
+  } catch (_err) {
+    // Never let the reporter itself take the worker down.
+  }
+});
 
 function serializeError(e) {
   if (e instanceof Error) return { message: e.message, stack: e.stack };
@@ -507,14 +545,17 @@ commPort.on("message", (msg) => {
     // HR6: reject every worker-side pending call/settle wait immediately —
     // the workflow is stopping, so nothing still "in flight" from this
     // worker's perspective can ever be honored.
+    // Tagged cancelled:true (like a cancelled ack) so the unhandledRejection
+    // hook below never reports a stopping workflow's fire-and-forget calls
+    // as script defects.
     for (const [id, p] of pendingCalls) {
       clearTimeout(p.timer);
-      p.reject(new Error("host call cancelled: " + (msg.reason || "workflow stopping")));
+      p.reject(Object.assign(new Error("host call cancelled: " + (msg.reason || "workflow stopping")), { cancelled: true }));
     }
     pendingCalls.clear();
     for (const [callId, p] of pendingSettles) {
       clearTimeout(p.timer);
-      p.reject(new Error("agent() cancelled: " + (msg.reason || "workflow stopping")));
+      p.reject(Object.assign(new Error("agent() cancelled: " + (msg.reason || "workflow stopping")), { cancelled: true }));
     }
     pendingSettles.clear();
     return;
@@ -536,14 +577,14 @@ commPort.on("message", (msg) => {
       // error), or this settle raced ahead of its own ack — buffer it
       // briefly so a \`waitForSettle()\` that registers moments later still
       // picks it up instead of hanging until HR1's own timeout.
-      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label });
+      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label, rejected: msg.rejected === true });
       const cleanup = setTimeout(() => bufferedSettles.delete(msg.callId), BUFFERED_SETTLE_TTL_MS);
       if (typeof cleanup.unref === "function") cleanup.unref();
       return;
     }
     pendingSettles.delete(msg.callId);
     clearTimeout(pending.timer);
-    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label });
+    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label, rejected: msg.rejected === true });
     return;
   }
 });

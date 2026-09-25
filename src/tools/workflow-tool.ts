@@ -379,7 +379,12 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "<workflow id>), which stops every child run. Do not poll or block waiting for it — continue other work or " +
       "end your turn. Differences from a general multi-agent orchestrator you may have used before: (1) there is " +
       "no pause/step/skip/retry control once started — only stop; (2) nested workflow(...) calls are not " +
-      "supported (inline the referenced logic directly). Use this only when a single Agent call's own multi-step " +
+      "supported (inline the referenced logic directly). agent() calls beyond the workflow's own concurrency " +
+      "limit are queued FIFO instead of failing; a call still queued when the workflow stops or times out " +
+      "resolves to null (as does one that runs out of workflow budget while queued — a call made after the " +
+      "budget is already exhausted rejects instead). A queued call whose dispatch fails (spawn error/timeout) " +
+      "rejects like any admission failure, so fire-and-forget agent() calls (not awaited) should attach their " +
+      "own .catch(). Use this only when a single Agent call's own multi-step " +
       "reasoning is not enough and you specifically need several independently-prompted subagents coordinated by " +
       "real control flow.",
     promptSnippet:

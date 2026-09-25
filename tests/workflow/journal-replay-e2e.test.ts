@@ -415,3 +415,76 @@ describe("RP11: content scope emits a WARN + event (never silent)", () => {
     }
   });
 });
+
+/**
+ * workflow-agent-queue §6/§7 (stage A): occurrence and chain digest are
+ * assigned at *submission* (before queueing), so dispatch order never
+ * affects replay; a withheld queued call is never journaled (RP3).
+ */
+describe("workflow-agent-queue: replay with queued agent() calls (real worker, real journal.jsonl)", () => {
+  it("a run whose calls were queued (maxParallel 1) is fully replayed on the second run, duplicate prompts included (content scope: occurrences 0/1)", async () => {
+    const origWarn = console.warn;
+    console.warn = () => undefined; // content scope WARNs once per run (RP11) — not under test here
+    try {
+      await queuedReplayRun("content", [0, 0, 1, 0]);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
+  it("the same queued run replays fully under the default chain scope (each chain position is its own key)", async () => {
+    await queuedReplayRun("chain", [0, 0, 0, 0]);
+  });
+
+  async function queuedReplayRun(replayScope: "content" | "chain", occurrences: number[]): Promise<void> {
+    const script = scriptWith(
+      'const r = await parallel(["A", "B", "A", "C"].map((p) => () => agent("task " + p)));\nreturn r.join("|");',
+    );
+    const budget = { ...REAL_BUDGET, maxParallel: 1 } as WorkflowRunBudget;
+    let calls = 0;
+    const run1 = makeSpawner({
+      resultOf: (p) => `${p}#${++calls}`,
+      delayMsOf: (p) => (p === "task A" ? 30 : 5),
+    });
+    const outcome1 = await runWithJournal(script, run1.spawner, { budget, replayScope });
+    expect(outcome1.status).toBe("completed");
+    expect(run1.spawnedPrompts).toEqual(["task A", "task B", "task A", "task C"]); // FIFO dispatch
+    expect(outcome1.replay).toEqual({ hits: 0, misses: 4, skipped: 0, corruptLines: 0 });
+    expect(outcome1.children.filter((c) => c.queueWaitMs !== undefined)).toHaveLength(3);
+
+    const run2 = makeSpawner({ resultOf: () => "must-not-run" });
+    const outcome2 = await runWithJournal(script, run2.spawner, { budget, replayScope });
+    expect(outcome2.status).toBe("completed");
+    expect(run2.spawnedPrompts).toEqual([]);
+    expect(outcome2.replay).toEqual({ hits: 4, misses: 0, skipped: 0, corruptLines: 0 });
+    expect(outcome2.result).toBe(outcome1.result); // same occurrence ↔ same value, dispatch order irrelevant
+    expect(outcome2.children.map((c) => c.occurrence)).toEqual(occurrences); // content: "task A" twice → 0 and 1
+  }
+
+  it("RP3: calls withheld while queued (workflow timed out) are never journaled", async () => {
+    const script = scriptWith(
+      'const r = await parallel([() => agent("slow"), () => agent("queued 1"), () => agent("queued 2")]);\nreturn r;',
+    );
+    const run1 = makeSpawner({ delayMsOf: (p) => (p === "slow" ? 1_500 : 0) });
+    const outcome1 = await runWithJournal(script, run1.spawner, {
+      budget: { ...REAL_BUDGET, maxParallel: 1, workflowTotalMs: 400, abortGraceMs: 50 } as WorkflowRunBudget,
+    });
+    expect(outcome1.status).toBe("timed_out");
+    expect(run1.spawnedPrompts).toEqual(["slow"]);
+    expect(
+      outcome1.children
+        .filter((c) => c.status === "withheld")
+        .map((c) => c.queueWaitMs !== undefined)
+        .sort(),
+    ).toEqual([true, true]);
+    const journalText = await readFile(join(journalRootDir, "j1", "journal.jsonl"), "utf8").catch(() => "");
+    expect(journalText.trim()).toBe("");
+
+    const run2 = makeSpawner();
+    const outcome2 = await runWithJournal(script, run2.spawner, {
+      budget: { ...REAL_BUDGET, maxParallel: 1 } as WorkflowRunBudget,
+    });
+    expect(outcome2.replay?.hits).toBe(0);
+    expect(run2.spawnedPrompts).toEqual(["slow", "queued 1", "queued 2"]);
+  }, 15_000);
+});

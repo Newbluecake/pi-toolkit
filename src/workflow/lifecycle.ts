@@ -148,7 +148,11 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
       }
       case "stage_error": {
         const raw = msg as { source?: unknown; itemIndex?: unknown; stageIndex?: unknown; message?: unknown };
-        if ((raw.source !== "parallel" && raw.source !== "pipeline") || typeof raw.itemIndex !== "number") return; // HR7-equivalent: malformed, drop silently.
+        if (
+          (raw.source !== "parallel" && raw.source !== "pipeline" && raw.source !== "unhandled") ||
+          typeof raw.itemIndex !== "number"
+        )
+          return; // HR7-equivalent: malformed, drop silently.
         const error: WorkflowStageError = {
           source: raw.source,
           itemIndex: raw.itemIndex,

@@ -382,10 +382,14 @@ export interface SerializedError {
 /**
  * One parallel()/pipeline() stage failure reported by the worker sandbox
  * (worker -> host `{ kind: "stage_error" }`). `stageIndex` is present only
- * for `pipeline` (parallel thunks are single-stage).
+ * for `pipeline` (parallel thunks are single-stage). `"unhandled"`
+ * (workflow-agent-queue §0′ #2): a promise rejected with no handler — e.g. a
+ * fire-and-forget `agent()` whose dispatch was rejected — caught by the
+ * scaffold's global hook instead of killing the worker; `itemIndex` is then
+ * the 0-based sequence number of such rejections in this run.
  */
 export interface WorkflowStageError {
-  readonly source: "parallel" | "pipeline";
+  readonly source: "parallel" | "pipeline" | "unhandled";
   readonly itemIndex: number;
   readonly stageIndex?: number;
   readonly message: string;

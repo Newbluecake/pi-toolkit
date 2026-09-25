@@ -1,4 +1,4 @@
-import type { Clock } from "../core/clock.js";
+import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
 import type { Millis, RunId, UsageDelta } from "../core/types.js";
 import { deriveChildBudget } from "./budget.js";
@@ -205,6 +205,15 @@ export interface HostCallHandler {
 
 const DEFAULT_AGENT_TYPE = "general-purpose";
 
+/** workflow-agent-queue D2/D5: what `dispatchQueued` needs to spawn a call that was acked as queued. */
+interface QueuedAgentCall {
+  readonly callId: CallId;
+  readonly prompt: string;
+  readonly agentType: string;
+  readonly label?: string;
+  readonly phaseId?: string;
+}
+
 function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
@@ -238,6 +247,26 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   const agentTypeOf = new Map<CallId, string>();
   let terminated = false;
   let currentPhaseId: string | undefined;
+
+  // workflow-agent-queue D2/D3: `agent()` calls acked while every maxParallel
+  // slot was busy wait here, strictly FIFO, until `pump()` admits them. They
+  // hold no slot (`activeCount()` excludes the registry's `queued` phase).
+  // Bounded: at most `maxChildren − active` entries (maxChildren counts
+  // queued calls), and emptied synchronously by stopOwned/onTerminating.
+  const waitQueue: QueuedAgentCall[] = [];
+  const enqueuedAtOf = new Map<CallId, Millis>();
+  /** Set at dispatch: how long a queued call waited for its slot. */
+  const queueWaitOf = new Map<CallId, Millis>();
+  /** D5: the per-dispatch spawn-timeout timer of each in-flight queued dispatch (cleared by whoever settles the call). */
+  const spawnTimers = new Map<CallId, TimerHandle>();
+  let pumping = false;
+
+  function clearSpawnTimerOf(callId: CallId): void {
+    const timer = spawnTimers.get(callId);
+    if (timer === undefined) return;
+    deps.clock.clearTimer(timer);
+    spawnTimers.delete(callId);
+  }
 
   // M3.5 §6.2: per-run chain digest (advances on every submission, hit or
   // miss — 推论 2.2/定理 4') + per-K submission counters (occurrence is
@@ -298,8 +327,15 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       title,
       deps.clock.setTimer(phaseTotalMs, () => {
         phaseTimers.delete(title);
-        for (const active of registry.listActive()) {
-          if (phaseOf.get(active.callId) !== title) continue;
+        const targets = registry.listActive().filter((active) => phaseOf.get(active.callId) === title);
+        // Drop this phase's queued calls from the FIFO *before* settling
+        // anything: each settle below pumps the queue, and it must never
+        // dispatch a call this same timer is about to withhold.
+        const targetIds = new Set(targets.map((t) => t.callId));
+        for (let i = waitQueue.length - 1; i >= 0; i -= 1) {
+          if (targetIds.has(waitQueue[i]!.callId)) waitQueue.splice(i, 1);
+        }
+        for (const active of targets) {
           // workflow-agent-queue D6/D7 (single owner): whoever flips a call to
           // settled records it. `cancel()` returning "withheld" means *this*
           // timer just settled a never-spawned admission — record + settle it
@@ -326,12 +362,37 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     cancelRetryWindowMs: deps.budget.cancelRetryWindowMs ?? 35_000,
   });
 
+  /** D1: slots in use — admission + pre_runner + running; `queued` calls hold none. */
+  function activeCount(): number {
+    const stats = registry.stats;
+    return stats.admission + stats.pre_runner + stats.running;
+  }
+
+  /** D1: every call ever submitted this run, queued and settled included (the maxChildren measure). */
+  function totalSubmitted(): number {
+    const stats = registry.stats;
+    return stats.queued + stats.admission + stats.pre_runner + stats.running + stats.settled;
+  }
+
+  /** How long `callId` waited in the queue: fixed at dispatch, or still running if it never left the queue. `undefined` for a call that was never queued. */
+  function queueWaitMsOf(callId: CallId): Millis | undefined {
+    const fixed = queueWaitOf.get(callId);
+    if (fixed !== undefined) return fixed;
+    const enqueuedAt = enqueuedAtOf.get(callId);
+    return enqueuedAt === undefined ? undefined : deps.clock.now() - enqueuedAt;
+  }
+
   function recordSettled(summary: WorkflowChildSummary): void {
     const label = labelOf.get(summary.callId);
     const agentType = agentTypeOf.get(summary.callId);
+    const queueWaitMs = queueWaitMsOf(summary.callId);
     labelOf.delete(summary.callId);
     agentTypeOf.delete(summary.callId);
-    const enriched = summary.label === undefined && label !== undefined ? { ...summary, label } : summary;
+    enqueuedAtOf.delete(summary.callId);
+    queueWaitOf.delete(summary.callId);
+    const labelled = summary.label === undefined && label !== undefined ? { ...summary, label } : summary;
+    const enriched =
+      queueWaitMs !== undefined && labelled.queueWaitMs === undefined ? { ...labelled, queueWaitMs } : labelled;
     children.push(enriched);
     deps.onChildSettled?.(enriched);
     // M10: "settled" fires here — the single chokepoint every child outcome
@@ -352,6 +413,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       const waiters = drainWaiters.splice(0, drainWaiters.length);
       for (const cb of waiters) cb();
     }
+    // D3: every settle may free a slot — hand it to the head of the queue.
+    pump();
   }
 
   // M3.3 §7.2 WL2: event-driven (not polled) wait for "every still-active
@@ -374,7 +437,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
    * a rejection rather than `null`.
    */
   function settleUnspawned(callId: CallId, opts: { cause: string; message: string; rejected?: boolean }): void {
-    const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
+    clearSpawnTimerOf(callId); // an in-flight queued dispatch: no armed timer outlives its call (a late spawn still orphan-aborts).
+    // D8: an undispatched call's duration runs from enqueue (queueWaitMs is recorded separately).
+    const durationMs = deps.clock.now() - (enqueuedAtOf.get(callId) ?? startedAt.get(callId) ?? deps.clock.now());
     const phaseId = phaseOf.get(callId);
     journalMetaOf.delete(callId); // never journaled (RP3: withheld isn't a success).
     recordSettled({
@@ -563,22 +628,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // itself returning `{ error }`, which this handler already threads
     // through to an ack failure below. No separate check needed here.
 
-    const activeCount = ["admission", "pre_runner", "running"].reduce(
-      (n, phase) => n + registry.stats[phase as "admission" | "pre_runner" | "running"],
-      0,
-    );
-    if (activeCount >= budget.maxParallel) {
-      journalMetaOf.delete(callId);
-      return {
-        kind: "host_ack",
-        id: callId,
-        ok: false,
-        error: { message: `agent(): maxParallel (${budget.maxParallel}) concurrent children already active` },
-      };
-    }
-    const totalEverSubmitted =
-      registry.stats.admission + registry.stats.pre_runner + registry.stats.running + registry.stats.settled;
-    if (totalEverSubmitted >= budget.maxChildren) {
+    // workflow-agent-queue D2 ②: maxChildren counts queued calls too (the
+    // queue can never outgrow `maxChildren − active`).
+    if (totalSubmitted() >= budget.maxChildren) {
       journalMetaOf.delete(callId);
       return {
         kind: "host_ack",
@@ -588,17 +640,10 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       };
     }
 
-    const derived = deriveChildBudget(
-      {
-        now: deps.clock.now(),
-        policy: budget.childBudgetPolicy,
-        ...(deps.workflowDeadlineAt !== undefined ? { workflowDeadlineAt: deps.workflowDeadlineAt } : {}),
-        // M3.2: no phase tracking yet (see budget.ts doc) — `phaseDeadlineAt` deliberately omitted.
-        ...(budget.childBudgetFraction !== undefined ? { fraction: budget.childBudgetFraction } : {}),
-        ...(budget.childTotalMs !== undefined ? { fixedTotalMs: budget.childTotalMs } : {}),
-      },
-      undefined,
-    );
+    // D2 ③: submission-time BW2 stays an ack failure (the call is rejected
+    // outright). A call that runs out of budget while *queued* is withheld
+    // instead (→ null, see dispatchQueued) — the documented BW2 asymmetry.
+    const derived = deriveNow();
     if (derived.capped === "expired") {
       journalMetaOf.delete(callId);
       return {
@@ -609,20 +654,46 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       };
     }
 
-    registry.submit(callId, deps.clock.now());
-    startedAt.set(callId, deps.clock.now());
+    const call: QueuedAgentCall = {
+      callId,
+      prompt: a.prompt,
+      agentType,
+      ...(label !== undefined ? { label } : {}),
+      ...(phaseId !== undefined ? { phaseId } : {}),
+    };
     if (phaseId !== undefined) phaseOf.set(callId, phaseId);
     if (label !== undefined) labelOf.set(callId, label);
     agentTypeOf.set(callId, agentType);
 
-    const spawned = await deps.spawner.spawn({
-      type: agentType,
-      prompt: a.prompt,
-      ...(label !== undefined ? { label } : {}),
-      ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
-      ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
-      budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },
-    });
+    // D2 ④: all maxParallel slots busy — or calls already waiting, so a
+    // newcomer never jumps the FIFO — ack now, dispatch later (option C: the
+    // same ack-first shape as a replay hit). The ack's `deadlineAt` bounds
+    // the worker's `waitForSettle` (BW10 is gone, so it is always finite in
+    // production); the host guarantees a settle before then because WT8's
+    // `finish` → `stopOwned` withholds every still-queued call.
+    if (waitQueue.length > 0 || activeCount() >= budget.maxParallel) {
+      const at = deps.clock.now();
+      registry.submit(callId, at, { queued: true });
+      enqueuedAtOf.set(callId, at);
+      waitQueue.push(call);
+      return {
+        kind: "host_ack",
+        id: callId,
+        ok: true,
+        value: {
+          callId,
+          ...(deps.workflowDeadlineAt !== undefined ? { deadlineAt: deps.workflowDeadlineAt } : {}),
+          queued: true,
+        },
+      };
+    }
+
+    // D2 ⑤: a free slot — the pre-queue immediate path, unchanged (the ack
+    // waits for spawn() itself, bounded by HR2).
+    registry.submit(callId, deps.clock.now());
+    startedAt.set(callId, deps.clock.now());
+
+    const spawned = await deps.spawner.spawn(spawnRequestFor(call, derived));
     if ("error" in spawned) {
       // workflow-agent-queue D7 (single owner): a cancel (phase timeout,
       // stopOwned/terminate, HR2 residual release) may have already settled
@@ -651,10 +722,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       return { kind: "host_ack", id: callId, ok: false, error: spawned.error };
     }
 
-    const bound = registry.bind(callId, spawned.runId);
     const effectiveLabel = spawned.label ?? label;
-    if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
-    if (bound.cancelNow) {
+    const bound = bindSpawned(callId, spawned.runId);
+    if (bound.kind === "orphaned") {
       // M3.3 fix (was previously silently dropped): a cancel arrived while
       // this `agent()`'s `spawner.spawn()` call was still in flight, so
       // `CallRegistry` had already (synchronously, on the A1 admission
@@ -662,13 +732,78 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // spawn — `spawned.runId` is a real, running child. `registry.bind()`
       // itself already kicked off a bounded A2-style retry (`retryOrphanAbort`)
       // against it, so there is nothing further to do here beyond skipping the
-      // `waitAll()`/`recordSettled` path below — the withheld summary for this
+      // `waitAll()`/`recordSettled` path — the withheld summary for this
       // callId was already recorded when the cancel first landed
-      // (`settleWithheld`/`forceSettleActive`), and recording it again here
+      // (`settleUnspawned`/`forceSettleActive`), and recording it again here
       // would duplicate `children[]`.
-      return { kind: "host_ack", id: callId, ok: false, cancelled: true, cause: bound.cause ?? "cancelled" };
+      return { kind: "host_ack", id: callId, ok: false, cancelled: true, cause: bound.cause };
     }
+    if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
+    runBoundChild(callId, spawned.runId, { agentType, phaseId, effectiveLabel });
 
+    return { kind: "host_ack", id: callId, ok: true, value: { callId, deadlineAt: derived.deadlineAt } };
+  }
+
+  /** The one `deriveChildBudget` call site — submission-time BW2 precheck and dispatch time alike. */
+  function deriveNow(): ReturnType<typeof deriveChildBudget> {
+    return deriveChildBudget(
+      {
+        now: deps.clock.now(),
+        policy: budget.childBudgetPolicy,
+        ...(deps.workflowDeadlineAt !== undefined ? { workflowDeadlineAt: deps.workflowDeadlineAt } : {}),
+        // M3.2: no phase tracking yet (see budget.ts doc) — `phaseDeadlineAt` deliberately omitted.
+        ...(budget.childBudgetFraction !== undefined ? { fraction: budget.childBudgetFraction } : {}),
+        ...(budget.childTotalMs !== undefined ? { fixedTotalMs: budget.childTotalMs } : {}),
+      },
+      undefined,
+    );
+  }
+
+  function spawnRequestFor(
+    call: QueuedAgentCall,
+    derived: ReturnType<typeof deriveChildBudget>,
+  ): Parameters<ChildSpawner["spawn"]>[0] {
+    return {
+      type: call.agentType,
+      prompt: call.prompt,
+      ...(call.label !== undefined ? { label: call.label } : {}),
+      ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
+      ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
+      budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },
+    };
+  }
+
+  /**
+   * Binds a freshly spawned `runId` to its call. `"orphaned"` means the call
+   * was already settled by someone else while spawn() was in flight — the
+   * real child is being aborted (registry's `retryOrphanAbort`, or the
+   * defensive `late_spawn` abort for a settled call that carries no cancel
+   * intent) and the caller must not record or settle anything.
+   */
+  function bindSpawned(callId: CallId, runId: RunId): { kind: "bound" } | { kind: "orphaned"; cause: string } {
+    const pre = registry.resolve(callId);
+    if (pre?.phase === "settled" && pre.cancelIntent === undefined) {
+      void deps.spawner.abort(runId, "late_spawn").catch(() => false);
+      return { kind: "orphaned", cause: "late_spawn" };
+    }
+    const bound = registry.bind(callId, runId);
+    if (bound.cancelNow) return { kind: "orphaned", cause: bound.cause ?? "cancelled" };
+    return { kind: "bound" };
+  }
+
+  /**
+   * workflow-agent-queue D4: everything after a successful, non-cancelled
+   * bind — shared by the immediate (pre-ack) path and `dispatchQueued`.
+   * Announces "spawned" and waits for the child's real outcome in the
+   * background (HR3: never awaited by an ack).
+   */
+  function runBoundChild(
+    callId: CallId,
+    runId: RunId,
+    meta: { agentType: string; phaseId: string | undefined; effectiveLabel: string | undefined },
+  ): void {
+    const { agentType, phaseId, effectiveLabel } = meta;
+    const journal = deps.journal;
     // M10: the child is really running and was not cancelled in the
     // admission window — announce it. Emitted *after* the `cancelNow` check
     // so a call whose withheld settle already fired never produces a
@@ -676,38 +811,38 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     deps.onChildEvent?.({
       kind: "spawned",
       callId,
-      runId: spawned.runId,
+      runId,
       ...(effectiveLabel !== undefined ? { label: effectiveLabel } : {}),
       agentType,
       ...(phaseId !== undefined ? { phaseId } : {}),
       at: deps.clock.now(),
     });
 
-    // HR3: fire the settle wait in the background — the ack below returns
-    // immediately, independent of how long the child itself takes.
-    void deps.spawner.waitAll({ runIds: [spawned.runId] }).then(({ settled }) => {
-      const outcome = settled[0];
+    const onOutcome = (outcome: ChildOutcome | undefined): void => {
+      // Single owner (D6): stopOwned()/onTerminating may already have
+      // force-settled (and recorded) this call as aborted; the child's real
+      // outcome arriving afterwards must not produce a second record/settle.
+      if (registry.resolve(callId)?.phase === "settled") return;
       registry.settle(callId, deps.clock.now());
       const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
       if (!outcome) {
         // The spawner never settled this run (e.g. it was already gone by
         // the time waitAll looked it up) — report it honestly rather than hang.
         journalMetaOf.delete(callId); // never journaled (RP3: not a success).
-        const settleMsg: HostSettleEnvelope = {
-          kind: "host_settle",
-          callId,
-          ok: false,
-          error: { message: "child run did not settle" },
-        };
         recordSettled({
           callId,
-          runId: spawned.runId,
+          runId,
           source: "live",
           status: "aborted",
           durationMs,
           ...(phaseId !== undefined ? { phaseId } : {}),
         });
-        deps.workerHost.send(settleMsg);
+        deps.workerHost.send({
+          kind: "host_settle",
+          callId,
+          ok: false,
+          error: { message: "child run did not settle" },
+        } satisfies HostSettleEnvelope);
         return;
       }
       recordSettled({
@@ -726,17 +861,17 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // gives us. `append()` is fire-and-forget (JS1) — never awaited here,
       // so a slow/failing disk cannot delay this settle push to the worker.
       if (journal && outcome.status === "completed") {
-        const meta = journalMetaOf.get(callId);
-        if (meta) {
+        const jm = journalMetaOf.get(callId);
+        if (jm) {
           journal.store.append(
             journal.dir,
             buildEntry({
               scope: journal.scope,
-              key: meta.taskKey,
-              chainDigestBefore: meta.chainDigestBefore,
-              occurrence: meta.occurrence,
-              agentType: meta.agentType,
-              ...(meta.isolation !== undefined ? { isolation: meta.isolation } : {}),
+              key: jm.taskKey,
+              chainDigestBefore: jm.chainDigestBefore,
+              occurrence: jm.occurrence,
+              agentType: jm.agentType,
+              ...(jm.isolation !== undefined ? { isolation: jm.isolation } : {}),
               value: outcome.text ?? null,
               completedAt: deps.clock.now(),
               durationMs,
@@ -758,9 +893,110 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
             }
           : { kind: "host_settle", callId, ok: false, error: outcome.error ?? { message: `child ${outcome.status}` } };
       deps.workerHost.send(settleMsg);
-    });
+    };
+    // HR3: fire the settle wait in the background. A rejecting waitAll() is
+    // treated like "did not settle" — it must never leave the call holding a
+    // maxParallel slot (and the FIFO queue stalled behind it) forever.
+    void deps.spawner.waitAll({ runIds: [runId] }).then(
+      ({ settled }) => onOutcome(settled[0]),
+      () => onOutcome(undefined),
+    );
+  }
 
-    return { kind: "host_ack", id: callId, ok: true, value: { callId, deadlineAt: derived.deadlineAt } };
+  /**
+   * workflow-agent-queue D5: dispatch a call that was acked as queued and
+   * has just been admitted by `pump()`. Only a `host_settle` is left to send.
+   * Every async exit is guarded by the single-owner rule: a continuation acts
+   * only if *it* flips the call (`registry.cancel()` → `"withheld"`, or a
+   * successful bind); otherwise someone else already recorded it.
+   *
+   * Deliberately **no** `withDeadline` around spawn() (review v1 Blocker-1):
+   * the spawn promise keeps its own continuation, so a late runId always
+   * reaches `registry.bind` → `cancelNow` → orphan abort instead of being
+   * dropped by a timed-out race. The timeout is a separate timer.
+   */
+  function dispatchQueued(call: QueuedAgentCall): void {
+    const { callId } = call;
+    const now = deps.clock.now();
+    queueWaitOf.set(callId, now - (enqueuedAtOf.get(callId) ?? now));
+    startedAt.set(callId, now);
+
+    const derived = deriveNow();
+    if (derived.capped === "expired") {
+      // Out of time while queued: withheld → null, not rejected (user decision
+      // 2; from stage B on only seen when the workflow itself is about to time out).
+      if (registry.cancel(callId, "budget_exhausted") === "withheld") {
+        settleUnspawned(callId, { cause: "budget_exhausted", message: "workflow deadline reached while queued" });
+      }
+      return;
+    }
+
+    const spawnTimeoutMs = Math.max(1, Math.min(budget.hostCallMs, remainingWorkflowMs()));
+    const timer = deps.clock.setTimer(spawnTimeoutMs, () => {
+      spawnTimers.delete(callId);
+      if (registry.resolve(callId)?.phase !== "admission") return;
+      if (registry.cancel(callId, "spawn_timeout") === "withheld") {
+        settleUnspawned(callId, {
+          cause: "spawn_timeout",
+          message: `spawn did not complete within ${spawnTimeoutMs}ms`,
+          rejected: true,
+        });
+      }
+    });
+    spawnTimers.set(callId, timer);
+    const clearSpawnTimer = (): void => clearSpawnTimerOf(callId);
+
+    let sp: Promise<ChildSpawnResult | ChildSpawnError>;
+    try {
+      sp = Promise.resolve(deps.spawner.spawn(spawnRequestFor(call, derived)));
+    } catch (e) {
+      sp = Promise.reject(e);
+    }
+    const onSpawned = (r: ChildSpawnResult | ChildSpawnError): void => {
+      clearSpawnTimer();
+      if ("error" in r) {
+        if (registry.cancel(callId, "spawn_error") === "withheld") {
+          settleUnspawned(callId, { cause: "spawn_error", message: r.error.message, rejected: true });
+        }
+        return;
+      }
+      const effectiveLabel = r.label ?? call.label;
+      if (bindSpawned(callId, r.runId).kind === "orphaned") return;
+      if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
+      runBoundChild(callId, r.runId, { agentType: call.agentType, phaseId: call.phaseId, effectiveLabel });
+    };
+    // Review v2 #4: `onSpawnThrew` is the error branch of `onSpawned`.
+    const onSpawnThrew = (e: unknown): void => {
+      clearSpawnTimer();
+      if (registry.resolve(callId)?.phase === "settled") return;
+      if (registry.cancel(callId, "spawn_error") === "withheld") {
+        settleUnspawned(callId, { cause: "spawn_error", message: errMsg(e), rejected: true });
+      }
+    };
+    void sp.then(onSpawned, onSpawnThrew).catch((e: unknown) => {
+      // A throwing observer (onChildEvent/onChildSettled) must not become an
+      // unhandled rejection in the host process.
+      console.warn(`[pi-subagent] workflow agent() dispatch continuation failed: ${errMsg(e)}`);
+    });
+  }
+
+  /**
+   * workflow-agent-queue D3: dispatch queued calls FIFO while slots are free.
+   * Synchronous; re-entrant calls (a dispatch that settles synchronously →
+   * `recordSettled` → `pump`) are folded into the running loop.
+   */
+  function pump(): void {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (!terminated && waitQueue.length > 0 && activeCount() < budget.maxParallel) {
+        const next = waitQueue.shift()!;
+        if (!registry.admit(next.callId)) continue; // withheld while waiting — already recorded.
+        dispatchQueued(next);
+      }
+    } finally {
+      pumping = false;
+    }
   }
 
   async function handleGate(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
@@ -878,6 +1114,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     terminated = true;
     clearAllPhaseTimers(); // WR4-equivalent: no armed timer may survive the workflow's own terminal decision.
     const cancelled = registry.cancelAll(reason);
+    waitQueue.length = 0; // D9: every queued call was just withheld by cancelAll.
     for (const callId of cancelled.withheld) {
       settleUnspawned(callId, { cause: reason, message: `workflow terminating (${reason})` });
     }
@@ -902,7 +1139,11 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       };
     },
     cancelAllChildren(cause) {
-      registry.cancelAll(cause);
+      const cancelled = registry.cancelAll(cause);
+      waitQueue.length = 0;
+      for (const callId of cancelled.withheld) {
+        settleUnspawned(callId, { cause, message: `workflow terminating (${cause})` });
+      }
     },
     async stopOwned(cause, graceMs) {
       if (terminated) return { orphanChildren: [] }; // idempotent (WI6): a prior stopOwned()/terminate() already ran.
@@ -915,6 +1156,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // retry loop +, if the caller supplied one, the core's own owner-stop
       // sweep — OS4).
       const cancelled = registry.cancelAll(cause);
+      waitQueue.length = 0; // D9: every queued call was just withheld by cancelAll.
       for (const callId of cancelled.withheld) {
         settleUnspawned(callId, { cause, message: `workflow terminating (${cause})` });
       }

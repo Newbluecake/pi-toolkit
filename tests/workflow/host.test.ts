@@ -320,10 +320,12 @@ describe("host.ts: BW2 budget exhaustion (§4.4.3)", () => {
 });
 
 describe("host.ts: maxParallel/maxChildren (§5.3)", () => {
-  it("maxParallel rejects a new agent() call while the cap's worth of children are still active", async () => {
+  // workflow-agent-queue (plan §7): maxParallel no longer rejects — a call
+  // beyond the cap is acked as queued and dispatched once a slot frees.
+  it("maxParallel queues (ack {queued:true}) a new agent() call while the cap's worth of children are active, then dispatches it when a slot frees", async () => {
     const h = harness({ maxParallel: 1 });
     await h.boot();
-    let resolveFirst!: (o: { settled: ChildOutcome[]; pending: string[] }) => void;
+    const resolvers: Array<(o: { settled: ChildOutcome[]; pending: string[] }) => void> = [];
     let spawnCount = 0;
     const spawner: ChildSpawner = {
       spawn: async () => {
@@ -331,19 +333,28 @@ describe("host.ts: maxParallel/maxChildren (§5.3)", () => {
         return { runId: `run${spawnCount}` };
       },
       abort: async () => true,
-      waitAll: () => new Promise((resolve) => (resolveFirst = resolve)),
+      waitAll: () => new Promise((resolve) => resolvers.push(resolve)),
     };
-    h.attach(spawner, async () => ({ ok: true, code: 0, stdout: "", stderr: "" }));
+    h.attach(spawner, async () => ({ ok: true, code: 0, stdout: "", stderr: "" }), 60_000);
     h.postHostCall("1", "agent", { prompt: "one", opts: null });
     await flush();
     h.postHostCall("2", "agent", { prompt: "two", opts: null });
     await flush();
-    expect(spawnCount).toBe(1); // the 2nd call was rejected before ever reaching spawn()
-    const ack2 = h.sent.find((m) => (m as { id?: string }).id === "2") as { ok: boolean; error?: { message: string } };
-    expect(ack2.ok).toBe(false);
-    expect(ack2.error?.message).toMatch(/maxParallel/);
-    resolveFirst({ settled: [{ runId: "run1", status: "completed", text: "ok" }], pending: [] });
+    expect(spawnCount).toBe(1); // the 2nd call waits in the queue, spawn() not called yet
+    const ack2 = h.sent.find((m) => (m as { id?: string }).id === "2") as { ok: boolean; value?: unknown };
+    expect(ack2).toEqual({
+      kind: "host_ack",
+      id: "2",
+      ok: true,
+      value: { callId: "2", deadlineAt: 60_000, queued: true },
+    });
+    resolvers[0]!({ settled: [{ runId: "run1", status: "completed", text: "ok" }], pending: [] });
     await flush();
+    expect(spawnCount).toBe(2); // slot freed → the queued call is dispatched
+    resolvers[1]!({ settled: [{ runId: "run2", status: "completed", text: "two done" }], pending: [] });
+    await flush();
+    const settle2 = h.sent.find((m) => (m as { callId?: string }).callId === "2") as { ok: boolean; value: unknown };
+    expect(settle2).toMatchObject({ ok: true, value: "two done" });
   });
 
   it("maxChildren rejects once the workflow-wide cap is hit, even after earlier children have settled", async () => {
@@ -764,5 +775,449 @@ describe("host.ts: single-owner settlement (workflow-agent-queue D6–D8)", () =
     expect(handler.children).toHaveLength(1);
     expect(handler.registry.listActive()).toEqual([]);
     expect(h.clock.pendingTimers).toBe(0);
+  });
+});
+
+/**
+ * workflow-agent-queue §3.3 D1–D5/D9 + §7 (stage A): agent() calls beyond
+ * maxParallel are acked as queued and dispatched FIFO as slots free.
+ */
+describe("host.ts: FIFO queue beyond maxParallel (workflow-agent-queue D1–D5, D9)", () => {
+  function queueHarness(overrides: Partial<WorkflowRunBudget> = {}, workflowDeadlineAt = 1_000_000) {
+    const h = harness({ maxParallel: 1, ...overrides });
+    const c = controllableSpawner();
+    const events: WorkflowChildEvent[] = [];
+    return {
+      ...h,
+      c,
+      events,
+      attachQ(extra: Partial<Parameters<typeof attachHostCallHandler>[0]> = {}) {
+        return attachHostCallHandler({
+          clock: h.clock,
+          workerHost: h.workerHost,
+          spawner: c.spawner,
+          gateRunner: okGate,
+          budget: { ...BASE_BUDGET, maxParallel: 1, ...overrides },
+          workflowDeadlineAt,
+          onChildEvent: (e) => events.push(e),
+          ...extra,
+        });
+      },
+      spawnedPrompts: () => c.spawns.map((s) => s.req.prompt),
+    };
+  }
+
+  it("FIFO: queued calls are acked {queued:true} and dispatched in arrival order; a newcomer never jumps the queue", async () => {
+    const h = queueHarness();
+    await h.boot();
+    const handler = h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    h.postHostCall("3", "agent", { prompt: "p3", opts: null });
+    await flush();
+    for (const id of ["2", "3"]) {
+      expect(sentFor(h.sent, id).acks).toEqual([
+        { kind: "host_ack", id, ok: true, value: { callId: id, deadlineAt: 1_000_000, queued: true } },
+      ]);
+    }
+    expect(handler.registry.stats.queued).toBe(2);
+    expect(h.spawnedPrompts()).toEqual(["p1"]);
+
+    h.clock.advance(250);
+    h.c.finishChild("r1");
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["p1", "p2"]);
+    // p3 is still waiting even though the dispatch of p2 is in flight.
+    h.postHostCall("4", "agent", { prompt: "p4", opts: null });
+    await flush();
+    expect(sentFor(h.sent, "4").acks[0]).toMatchObject({ ok: true, value: { queued: true } });
+    h.c.spawns[1]!.resolve({ runId: "r2" });
+    await flush();
+    h.c.finishChild("r2", "completed", "two");
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["p1", "p2", "p3"]);
+    h.c.spawns[2]!.resolve({ runId: "r3" });
+    await flush();
+    h.c.finishChild("r3");
+    await flush();
+    h.c.spawns[3]!.resolve({ runId: "r4" });
+    await flush();
+    h.c.finishChild("r4");
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["p1", "p2", "p3", "p4"]);
+    expect(handler.children.map((c) => c.callId)).toEqual(["1", "2", "3", "4"]);
+    expect(handler.children[1]).toMatchObject({ status: "completed", queueWaitMs: 250 });
+    expect(handler.children[0]).not.toHaveProperty("queueWaitMs"); // never queued
+    expect(sentFor(h.sent, "2").settles).toEqual([expect.objectContaining({ ok: true, value: "two", runId: "r2" })]);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("the dispatched child gets the same deadline-capped budget as an immediate one (deriveChildBudget at dispatch time)", async () => {
+    const h = queueHarness({}, 10_000);
+    await h.boot();
+    h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.clock.advance(4_000);
+    h.c.finishChild("r1");
+    await flush();
+    expect(h.c.spawns[1]!.req).toMatchObject({
+      prompt: "p2",
+      deadlineAt: 10_000,
+      budgetOverride: { totalMs: 6_000 },
+    });
+  });
+
+  it("D9: stopOwned() withholds every queued call at once — one record each, spawn never called, no timers left", async () => {
+    const h = queueHarness();
+    await h.boot();
+    const handler = h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    h.postHostCall("3", "agent", { prompt: "p3", opts: null });
+    await flush();
+    h.clock.advance(100);
+    const stopping = handler.stopOwned("user_stop", 1_000);
+    await flush();
+    for (const id of ["2", "3"]) {
+      expect(sentFor(h.sent, id).settles).toEqual([
+        { kind: "host_settle", callId: id, ok: false, error: { message: "workflow terminating (user_stop)" } },
+      ]);
+    }
+    expect(
+      handler.children.filter((c) => c.status === "withheld").map((c) => [c.callId, c.durationMs, c.queueWaitMs]),
+    ).toEqual([
+      ["2", 100, 100],
+      ["3", 100, 100],
+    ]);
+    expect(h.spawnedPrompts()).toEqual(["p1"]);
+    h.clock.advance(1_000); // grace expires → the running child is force-settled
+    await stopping;
+    expect(handler.children.map((c) => c.callId).sort()).toEqual(["1", "2", "3"]);
+    expect(handler.registry.listActive()).toEqual([]);
+    expect(h.clock.pendingTimers).toBe(0);
+    // The force-settled child's real outcome arriving later is ignored (single owner).
+    h.c.finishChild("r1");
+    await flush();
+    expect(handler.children).toHaveLength(3);
+    expect(sentFor(h.sent, "1").settles).toHaveLength(1);
+  });
+
+  it("D9: terminate() (onTerminating) withholds queued calls the same way", async () => {
+    const h = queueHarness();
+    await h.boot();
+    const handler = h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    await flush();
+    await h.workerHost.terminate("workflow_timed_out");
+    expect(handler.children.map((c) => [c.callId, c.status])).toEqual([
+      ["2", "withheld"],
+      ["1", "aborted"],
+    ]);
+    expect(h.spawnedPrompts()).toEqual(["p1"]);
+    expect(handler.registry.listActive()).toEqual([]);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("a phase timeout withholds only that phase's queued calls; other phases stay queued and dispatch later", async () => {
+    const h = queueHarness({ phaseTotalMs: 1_000 });
+    await h.boot();
+    const handler = h.attachQ();
+    const port = h.workerData().commPort;
+    port.postMessage({ kind: "phase", title: "a" });
+    await flush();
+    h.postHostCall("1", "agent", { prompt: "a1", opts: { phase: "a" } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    h.postHostCall("2", "agent", { prompt: "a2", opts: { phase: "a" } });
+    h.postHostCall("3", "agent", { prompt: "b1", opts: { phase: "b" } });
+    await flush();
+    h.clock.advance(1_000);
+    await flush();
+    expect(sentFor(h.sent, "2").settles).toEqual([
+      expect.objectContaining({ ok: false, error: { message: "withheld (phase_timeout)" } }),
+    ]);
+    expect(h.c.aborts).toEqual([{ runId: "r1", cause: "phase_timeout" }]); // running child: A2 retry path
+    expect(handler.registry.resolve("3")?.phase).toBe("queued");
+    expect(h.spawnedPrompts()).toEqual(["a1"]);
+    h.c.finishChild("r1", "aborted");
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["a1", "b1"]);
+    expect(handler.children.map((c) => [c.callId, c.status])).toEqual([
+      ["2", "withheld"],
+      ["1", "aborted"],
+    ]);
+  });
+
+  it("a phase timeout never dispatches a same-phase queued call while withholding its siblings", async () => {
+    const h = queueHarness({ phaseTotalMs: 1_000 });
+    await h.boot();
+    const handler = h.attachQ();
+    h.workerData().commPort.postMessage({ kind: "phase", title: "a" });
+    await flush();
+    for (const id of ["1", "2", "3"]) h.postHostCall(id, "agent", { prompt: `a${id}`, opts: { phase: "a" } });
+    await flush();
+    expect(handler.registry.resolve("1")?.phase).toBe("admission"); // spawn in flight
+    h.clock.advance(1_000);
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["a1"]); // settling call 1 freed the slot, but a2/a3 were already withdrawn
+    expect(handler.children.map((c) => c.callId).sort()).toEqual(["1", "2", "3"]);
+    h.c.spawns[0]!.resolve({ runId: "late" });
+    await flush();
+    expect(h.c.aborts).toEqual([{ runId: "late", cause: "phase_timeout" }]);
+    expect(handler.children).toHaveLength(3);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("dispatch-time BW2: a call that runs out of workflow budget while queued is withheld (null), not rejected", async () => {
+    const h = queueHarness({}, 10_000);
+    await h.boot();
+    const handler = h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.clock.advance(10_000);
+    h.c.finishChild("r1");
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["p1"]);
+    expect(sentFor(h.sent, "2").settles).toEqual([
+      { kind: "host_settle", callId: "2", ok: false, error: { message: "workflow deadline reached while queued" } },
+    ]);
+    expect(handler.children.find((c) => c.callId === "2")).toMatchObject({
+      status: "withheld",
+      durationMs: 10_000,
+      queueWaitMs: 10_000,
+    });
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("a dispatch-time spawn error settles rejected:true (worker rejects agent()) with one withheld record", async () => {
+    const h = queueHarness();
+    await h.boot();
+    const handler = h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { agentType: "bogus" } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    h.c.spawns[1]!.resolve({ error: { message: "unknown agent type: bogus" } });
+    await flush();
+    expect(sentFor(h.sent, "2").settles).toEqual([
+      {
+        kind: "host_settle",
+        callId: "2",
+        ok: false,
+        error: { message: "unknown agent type: bogus" },
+        rejected: true,
+      },
+    ]);
+    expect(handler.children.filter((c) => c.callId === "2")).toEqual([expect.objectContaining({ status: "withheld" })]);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("review v2 #4 onSpawnThrew: a rejecting (or synchronously throwing) spawn() at dispatch settles rejected:true", async () => {
+    const h = queueHarness();
+    await h.boot();
+    let calls = 0;
+    const base = h.c.spawner;
+    const spawner: ChildSpawner = {
+      ...base,
+      spawn: (req) => {
+        calls += 1;
+        if (calls === 2) return Promise.reject(new Error("spawn rejected"));
+        if (calls === 3) throw new Error("spawn threw synchronously");
+        return base.spawn(req);
+      },
+    };
+    const handler = h.attachQ({ spawner });
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    h.postHostCall("3", "agent", { prompt: "p3", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    expect(sentFor(h.sent, "2").settles).toEqual([
+      expect.objectContaining({ ok: false, rejected: true, error: { message: "spawn rejected" } }),
+    ]);
+    expect(sentFor(h.sent, "3").settles).toEqual([
+      expect.objectContaining({ ok: false, rejected: true, error: { message: "spawn threw synchronously" } }),
+    ]);
+    expect(handler.children.map((c) => [c.callId, c.status])).toEqual([
+      ["1", "completed"],
+      ["2", "withheld"],
+      ["3", "withheld"],
+    ]);
+    expect(handler.registry.listActive()).toEqual([]);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("review v1 Blocker-1: a dispatch spawn timeout settles rejected, frees the slot, and a late runId is orphan-aborted with no second settle", async () => {
+    const h = queueHarness({ hostCallMs: 1_000 });
+    await h.boot();
+    const handler = h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    h.postHostCall("3", "agent", { prompt: "p3", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["p1", "p2"]);
+    h.clock.advance(1_000);
+    await flush();
+    expect(sentFor(h.sent, "2").settles).toEqual([
+      {
+        kind: "host_settle",
+        callId: "2",
+        ok: false,
+        error: { message: "spawn did not complete within 1000ms" },
+        rejected: true,
+      },
+    ]);
+    expect(h.spawnedPrompts()).toEqual(["p1", "p2", "p3"]); // slot freed → p3 dispatched
+    h.c.spawns[1]!.resolve({ runId: "late-2" });
+    await flush();
+    expect(h.c.aborts).toEqual([{ runId: "late-2", cause: "spawn_timeout" }]);
+    expect(sentFor(h.sent, "2").settles).toHaveLength(1);
+    expect(handler.children.filter((c) => c.callId === "2")).toHaveLength(1);
+    h.c.spawns[2]!.resolve({ runId: "r3" });
+    await flush();
+    h.c.finishChild("r3");
+    await flush();
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  /**
+   * review v1 Major-1: a queued dispatch whose spawn() is in flight is
+   * withheld by a canceller (phase timeout / stopOwned); the spawn then ends
+   * with an error, a success, or never (timeout). Every combination: exactly
+   * one record, at most one settle, no armed timers.
+   */
+  for (const canceller of ["phase_timeout", "stopOwned"] as const) {
+    for (const spawnEnd of ["error", "success", "timeout"] as const) {
+      it(`Major-1 matrix: in-flight dispatch × ${canceller} × spawn ${spawnEnd} → exactly one record`, async () => {
+        const h = queueHarness({ hostCallMs: 5_000, phaseTotalMs: 2_000 });
+        await h.boot();
+        const handler = h.attachQ();
+        h.workerData().commPort.postMessage({ kind: "phase", title: "a" });
+        await flush();
+        h.postHostCall("1", "agent", { prompt: "p1", opts: { phase: "b" } });
+        h.postHostCall("2", "agent", { prompt: "p2", opts: { phase: "a" } });
+        await flush();
+        h.c.spawns[0]!.resolve({ runId: "r1" });
+        await flush();
+        h.c.finishChild("r1");
+        await flush();
+        expect(handler.registry.resolve("2")?.phase).toBe("admission"); // dispatched, spawn in flight
+        let stopping: Promise<unknown> | undefined;
+        if (canceller === "phase_timeout") h.clock.advance(2_000);
+        else stopping = handler.stopOwned("user_stop", 500);
+        await flush();
+        expect(handler.children.filter((c) => c.callId === "2")).toHaveLength(1);
+        if (spawnEnd === "error") h.c.spawns[1]!.resolve({ error: { message: "late error" } });
+        if (spawnEnd === "success") h.c.spawns[1]!.resolve({ runId: "late-2" });
+        if (spawnEnd === "timeout") h.clock.advance(5_000);
+        await flush();
+        await stopping;
+        expect(handler.children.filter((c) => c.callId === "2")).toHaveLength(1);
+        expect(sentFor(h.sent, "2").settles).toHaveLength(1);
+        expect(sentFor(h.sent, "2").settles[0]).not.toHaveProperty("rejected");
+        const cause = canceller === "phase_timeout" ? "phase_timeout" : "user_stop";
+        expect(h.c.aborts).toEqual(spawnEnd === "success" ? [{ runId: "late-2", cause }] : []);
+        expect(h.clock.pendingTimers).toBe(0);
+      });
+    }
+  }
+
+  it("D8 + queue: an HR2-timed-out immediate admission releases its slot, so the queued call behind it dispatches", async () => {
+    const h = queueHarness({ hostCallMs: 1_000 });
+    await h.boot();
+    h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "hangs", opts: null });
+    await flush();
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    await flush();
+    expect(sentFor(h.sent, "2").acks[0]).toMatchObject({ ok: true, value: { queued: true } });
+    expect(h.spawnedPrompts()).toEqual(["hangs"]);
+    h.clock.advance(1_000);
+    await flush();
+    expect(h.spawnedPrompts()).toEqual(["hangs", "p2"]);
+  });
+
+  it("maxChildren counts queued calls", async () => {
+    const h = queueHarness({ maxChildren: 2 });
+    await h.boot();
+    h.attachQ();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    h.postHostCall("3", "agent", { prompt: "p3", opts: null });
+    await flush();
+    expect(sentFor(h.sent, "2").acks[0]).toMatchObject({ ok: true, value: { queued: true } });
+    expect(sentFor(h.sent, "3").acks[0]).toMatchObject({
+      ok: false,
+      error: { message: expect.stringMatching(/maxChildren \(2\)/) },
+    });
+  });
+
+  it("a replay hit at full load settles immediately — it is never queued", async () => {
+    const h = queueHarness();
+    await h.boot();
+    const entry = {
+      v: 1,
+      scope: "content",
+      key: "key",
+      chainDigestBefore: "root",
+      occurrence: 0,
+      agentType: "worker",
+      status: "completed",
+      value: "cached",
+      completedAt: 1,
+      durationMs: 0,
+      digest: "digest",
+    } as JournalEntry;
+    let lookups = 0;
+    const index: ReplayIndex = {
+      scope: "content",
+      lookup: () => (++lookups === 1 ? undefined : entry), // 1st call misses (live), 2nd hits
+      stats: { loadedEntries: 1, corruptLines: 0, scopeMismatch: 0 },
+    };
+    const handler = h.attachQ({
+      spawner: { ...h.c.spawner, configHashOf: () => "hash" },
+      journal: {
+        store: { append: () => undefined } as never,
+        dir: ".",
+        index,
+        scope: "content",
+        noReplay: false,
+        deterministic: { current: true },
+      },
+    });
+    h.postHostCall("1", "agent", { prompt: "live", opts: null });
+    await flush();
+    h.postHostCall("2", "agent", { prompt: "cached", opts: null });
+    await flush();
+    expect(sentFor(h.sent, "2").acks[0]).toMatchObject({ ok: true });
+    expect(sentFor(h.sent, "2").acks[0]!.value).not.toHaveProperty("queued");
+    expect(sentFor(h.sent, "2").settles).toEqual([expect.objectContaining({ ok: true, value: "cached" })]);
+    expect(handler.registry.stats.queued).toBe(0);
+    expect(handler.children).toEqual([expect.objectContaining({ callId: "2", source: "replay" })]);
   });
 });
