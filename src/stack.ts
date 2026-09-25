@@ -1713,6 +1713,7 @@ export function buildSessionStack(
       query,
       clock: systemClock,
       idleBudgetMs: settings.budget.idleMs,
+      maxRows: settings.fleetWidgetMaxRows,
       receiptOf: (runId) => contextReceipt.receiptOf(runId),
       mentionNoteOf: (runId) => mentionNotes.get(runId),
       terminalLingerMs: settings.fleetTerminalLingerMs,

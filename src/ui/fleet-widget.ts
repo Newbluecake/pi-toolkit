@@ -1,5 +1,5 @@
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import type { Millis, RunId, SubagentExtensionPoints } from "../core/types.js";
 import type { ContextReceipt } from "../delivery/context-receipt.js";
 import type { JobRecord, JobStatus } from "../bash/types.js";
@@ -67,9 +67,13 @@ export const FLEET_WIDGET_KEY = "pi-subagent:fleet";
 const WIDGET_MARK: Record<FleetHighlight, string> = { none: " ", warn: "!", crit: "✗" };
 
 /** M-C: default / hard cap on run LINES below the header (a run uses 1–2: main row + activity line).
- *  Default 6 fully covers the common ≤3-busy-agent fleet (3 main + 3 activity lines). */
-export const WIDGET_DEFAULT_ROWS = 6;
-export const WIDGET_MAX_ROWS = 8;
+ *  M-C2: the widget stopped being a plain string-array `setWidget` payload (pi's
+ *  InteractiveMode.MAX_WIDGET_LINES=10 clamp only applies to that overload) and
+ *  became a pi-tui component factory instead — this budget is no longer bounded
+ *  by pi's own widget-line cap, only by settings.fleetWidgetMaxRows (clamped here
+ *  to WIDGET_MAX_ROWS). Default 20 comfortably covers a double-digit busy fleet. */
+export const WIDGET_DEFAULT_ROWS = 20;
+export const WIDGET_MAX_ROWS = 40;
 
 /**
  * Compact cost for the widget: 4 decimals below half a cent (subagent runs
@@ -118,7 +122,7 @@ export interface BashJobViewInput {
 }
 
 export interface FleetWidgetRenderOptions {
-  /** Line budget for run lines below the header (a run with live activity uses 2). Default WIDGET_DEFAULT_ROWS (6); hard cap WIDGET_MAX_ROWS (8). */
+  /** Line budget for run lines below the header (a run with live activity uses 2). Default WIDGET_DEFAULT_ROWS (20); hard cap WIDGET_MAX_ROWS (40). */
   maxRows?: number;
   /** M6: keep just-finished runs visible (dimmed, ✓/✗) for this long. Default 5000ms; 0 disables. */
   terminalLingerMs?: number;
@@ -936,13 +940,57 @@ export function buildFleetWidgetLines(
 
 // ── Controller ──
 
+/** Minimal probed slice of pi's TUI handed to a widget component factory — just enough to request a repaint. */
+export interface WidgetTuiHandle {
+  requestRender?: (force?: boolean) => void;
+}
+
+/**
+ * M-C2: the agent-tree widget's live pi-tui component. Installed exactly
+ * once per "active span" via the component-factory `setWidget` overload
+ * (string-array widgets are capped at pi's InteractiveMode.MAX_WIDGET_LINES
+ * = 10; a component factory is not — see the module doc's rationale for the
+ * whole M-C2 change). `setLines` is called on every subsequent tick instead
+ * of re-registering a new factory, which would tear down and rebuild pi's
+ * widget container (and every sibling widget hanging off it) once a second.
+ *
+ * Packaging difference from the old string-array path: pi wraps each string
+ * of that path in `new Text(line, 1, 0)` (paddingX=1) before handing it to
+ * the container, which is what the old `widgetWidth()` (columns − 2) comment
+ * explained. A component factory gets no such wrapper — pi hands it the RAW
+ * terminal width — so `render()` adds the equivalent 1-column left margin
+ * itself (dropping the now-pointless matching right margin, which only ever
+ * existed to pad Text's background fill) and defensively re-truncates to
+ * `width - 1` using the width IT actually receives, not the width the
+ * controller assumed when it built the lines. The two normally agree
+ * (`widgetWidth()` also reads `process.stdout.columns`); the defensive pass
+ * only bites a resize race between a tick's `renderFrame()` and pi's next
+ * paint, and is ANSI-safe (`truncateToWidth`) either way.
+ */
+class FleetTreeWidget implements Component {
+  private lines: readonly string[] = [];
+
+  setLines(lines: readonly string[]): void {
+    this.lines = lines;
+  }
+
+  render(width: number): string[] {
+    if (width <= 1) return this.lines.map(() => "");
+    const contentWidth = width - 1;
+    return this.lines.map((line) => ` ${truncateToWidth(line, contentWidth)}`);
+  }
+
+  invalidate(): void {}
+}
+
 /** Minimal probed slice of ExtensionUIContext; setWidget is `unknown` because non-interactive modes may drop it. */
 export interface FleetWidgetHost {
   setWidget?: unknown;
 }
+type WidgetFactory = (tui: WidgetTuiHandle, theme: unknown) => Component;
 type SetWidgetFn = (
   key: string,
-  content: string[] | undefined,
+  content: string[] | WidgetFactory | undefined,
   options?: { placement?: "aboveEditor" | "belowEditor" },
 ) => void;
 
@@ -959,7 +1007,7 @@ export interface FleetWidgetDeps {
   idleBudgetMs?: Millis;
   /** settings.fleetDeadlineWarnMs — runs within this of their deadline turn warn. 0/undefined disables. */
   deadlineWarnMs?: Millis;
-  /** Line budget for run lines below the header. Default WIDGET_DEFAULT_ROWS (6); hard cap WIDGET_MAX_ROWS (8). */
+  /** Line budget for run lines below the header. Default WIDGET_DEFAULT_ROWS (20); hard cap WIDGET_MAX_ROWS (40). */
   maxRows?: number;
   /** M9/M11: workflow snapshots (WorkflowActivityRegistry.listForDisplay — running plus frozen terminal linger) for ⚙ pipeline group headers. */
   workflows?: () => readonly WorkflowActivitySnapshot[];
@@ -990,6 +1038,13 @@ export class FleetWidgetController {
   private uiDead = false;
   /** Sticky: refresh() failures are reported once — the 1Hz tick keeps running. */
   private warnedRefreshFailure = false;
+  /** M-C2: the mounted component instance while the widget is visible — set exactly
+   *  once per active span (see push()); cleared whenever the widget is hidden or
+   *  disposed so the next active span installs a fresh factory/component pair. */
+  private treeComponent: FleetTreeWidget | undefined;
+  /** M-C2: bound `tui.requestRender` captured by the component factory on mount; used
+   *  by every subsequent tick instead of calling setWidget again. */
+  private requestRenderFn: (() => void) | undefined;
   /** H1 observer; merge into the session's SubagentExtensionPoints fan-out. */
   readonly lifecycle: SubagentExtensionPoints;
   /** D2: cache is controller-owned because renderFrame must stay synchronous. */
@@ -1172,27 +1227,72 @@ export class FleetWidgetController {
     }
   }
 
+  /**
+   * M-C2: mount-once + update-in-place. The FIRST time a frame has visible
+   * lines, install a component factory via `setWidget` (mirrors the
+   * `src/todo/index.ts` precedent) and capture the host's `requestRender`
+   * off the factory's `tui` argument. Every subsequent tick with lines just
+   * updates that same component's data and calls `requestRender()` — no
+   * repeat `setWidget` call, so pi's widget container (and every sibling
+   * widget sharing it) is never torn down and rebuilt once a second. When
+   * the fleet goes idle, `setWidget(key, undefined)` still runs every tick
+   * exactly as before (unchanged, pre-existing behavior) and the component
+   * reference is cleared so the NEXT active span installs a fresh factory
+   * (pi's own `removeExisting` already disposes the old component when the
+   * key is replaced/cleared).
+   */
   private push(lines: string[] | undefined): void {
     try {
+      if (lines === undefined) {
+        this.treeComponent = undefined;
+        this.requestRenderFn = undefined;
+        this.setWidget!(FLEET_WIDGET_KEY, undefined);
+        return;
+      }
       // M-C fix: setWidget lines are plain strings — a long label + tool trail
       // would wrap and grow the widget by extra lines. Truncate to the live
       // terminal width (ANSI-safe), falling back to a conservative 120 cols.
       //
-      // Flicker fix: pi renders each widget string as `new Text(line, /*paddingX*/ 1, 0)`,
-      // so the wrap threshold is terminal columns − 2 (1 col of padding each
-      // side), NOT columns − 1. Truncating to columns − 1 left every max-width
-      // line exactly 1 col past the threshold: it wrapped onto a dangling
-      // second line, and as live durations/trails changed width each 1Hz tick
-      // the wrap toggled on/off → widget height oscillated → every line below
-      // (editor, footer) reflowed every second — the "agent tree flicker".
+      // Flicker fix (the WIDTH BUDGET below is still the fix; only the
+      // packaging changed under M-C2): the string-array path rendered each
+      // line as `new Text(line, /*paddingX*/ 1, 0)`, a 1-col margin each
+      // side, so the wrap threshold was terminal columns − 2 (NOT columns −
+      // 1 — that left every max-width line exactly 1 col past the threshold,
+      // wrapping onto a dangling second line whose on/off toggling each 1Hz
+      // tick oscillated the widget's height and reflowed everything below
+      // it — the original "agent tree flicker"). FleetTreeWidget.render()
+      // reproduces the same 1-col LEFT margin itself and re-truncates
+      // defensively to its own `width − 1`, so keeping this columns − 2
+      // budget here (feeding lines that already fit with a column to spare)
+      // preserves the fix under the new packaging.
       const width = this.widgetWidth();
       // Main run rows are assembled to width; only live activity continuations
       // retain truncation because their stream/tool content is intentionally unbounded.
-      const truncated = lines?.map((line) => truncateToWidth(line, width));
-      this.setWidget!(FLEET_WIDGET_KEY, truncated, { placement: "aboveEditor" });
+      const truncated = lines.map((line) => truncateToWidth(line, width));
+      if (this.treeComponent) {
+        // Already mounted: update the live component's data and ask the host
+        // to repaint. No setWidget call — that would rebuild pi's widget
+        // container from scratch every second.
+        this.treeComponent.setLines(truncated);
+        this.requestRenderFn?.();
+        return;
+      }
+      const component = new FleetTreeWidget();
+      component.setLines(truncated);
+      this.treeComponent = component;
+      this.setWidget!(
+        FLEET_WIDGET_KEY,
+        (tui) => {
+          this.requestRenderFn = typeof tui?.requestRender === "function" ? () => tui.requestRender!() : undefined;
+          return component;
+        },
+        { placement: "aboveEditor" },
+      );
     } catch {
       // Non-interactive/degenerate host: go inert silently (never throw out of a UI observer).
       this.uiDead = true;
+      this.treeComponent = undefined;
+      this.requestRenderFn = undefined;
       this.stopTimer();
     }
   }
@@ -1218,5 +1318,7 @@ export class FleetWidgetController {
         /* host already gone — nothing to clear */
       }
     }
+    this.treeComponent = undefined;
+    this.requestRenderFn = undefined;
   }
 }

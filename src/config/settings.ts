@@ -404,6 +404,8 @@ export interface AgentSettings {
   fleetAwaitNotificationMs: number;
   /** Fleet 主行剩余时间低于该值时转 warn 色；0 = 关闭该预警层（arch §7.2）。 */
   fleetDeadlineWarnMs: number;
+  /** Line budget for run lines below the fleet widget header (the agent tree is now a pi-tui component factory, not a string-array widget, so it is no longer clamped by pi's InteractiveMode.MAX_WIDGET_LINES=10). Clamped 1–40 (WIDGET_MAX_ROWS); non-integer/out-of-range falls back to the default (20). */
+  fleetWidgetMaxRows: number;
   /** Max chars of a subagent result body returned to callers; 0 = unlimited. */
   resultMaxChars: number;
   /** CC3: workflow engine settings (M3.1+ feature surface). Default disabled. */
@@ -499,6 +501,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   fleetTerminalLingerMs: 5_000,
   fleetAwaitNotificationMs: 600_000,
   fleetDeadlineWarnMs: 60_000,
+  fleetWidgetMaxRows: 20,
   resultMaxChars: 32_000,
   workflow: {
     enabled: false,
@@ -779,6 +782,13 @@ export function loadSettings(source: unknown): AgentSettings {
       value.fleetDeadlineWarnMs >= 0
         ? value.fleetDeadlineWarnMs
         : DEFAULT_SETTINGS.fleetDeadlineWarnMs,
+    fleetWidgetMaxRows:
+      typeof value.fleetWidgetMaxRows === "number" &&
+      Number.isInteger(value.fleetWidgetMaxRows) &&
+      value.fleetWidgetMaxRows >= 1 &&
+      value.fleetWidgetMaxRows <= 40
+        ? value.fleetWidgetMaxRows
+        : DEFAULT_SETTINGS.fleetWidgetMaxRows,
     resultMaxChars:
       typeof value.resultMaxChars === "number" && Number.isFinite(value.resultMaxChars) && value.resultMaxChars >= 0
         ? Math.floor(value.resultMaxChars)

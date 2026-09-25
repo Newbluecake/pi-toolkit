@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import { bashJobsEnabled, buildSessionStack, formatBashJobNotification, readBashJobTail } from "../../src/stack.js";
@@ -337,11 +338,36 @@ describe("S7 notification text", () => {
 });
 
 describe("S8 fleet widget + bash jobs wiring", () => {
+  /**
+   * M-C2: the controller now installs a pi-tui component factory (not a
+   * string-array widget) and pushes UPDATES via `tui.requestRender()`
+   * instead of a repeat `setWidget` call. To keep every existing assertion
+   * here byte-identical (`calls.some((frame) => frame?.some(...))`), this
+   * fake mirrors pi's real widget container closely enough to snapshot the
+   * CURRENT rendered lines into `calls` on every mount AND every
+   * requestRender — i.e. `calls` still holds one entry per logical push,
+   * exactly like the pre-M-C2 string-array `setWidget` calls did.
+   */
   function widgetContext(calls: Array<string[] | undefined>): ExtensionContext {
+    type WidgetFactory = (tui: { requestRender: () => void }, theme: unknown) => Component;
+    let mounted: Component | undefined;
+    const tui = { requestRender: () => calls.push(mounted?.render(200)) };
     return {
       ...ctx,
       ui: {
-        setWidget: (_key: string, content: string[] | undefined) => calls.push(content),
+        setWidget: (_key: string, content: string[] | WidgetFactory | undefined) => {
+          if (content === undefined) {
+            mounted = undefined;
+            calls.push(undefined);
+            return;
+          }
+          if (typeof content === "function") {
+            mounted = content(tui, {});
+            calls.push(mounted.render(200));
+            return;
+          }
+          calls.push(content);
+        },
       },
     } as unknown as ExtensionContext;
   }

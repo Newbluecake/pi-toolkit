@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { FakeClock } from "../../src/core/clock.js";
 import type { LifecycleEvent, RunDiagnostics, RunSnapshot, UsageDelta } from "../../src/core/types.js";
 import type { QueryService } from "../../src/service/query-service.js";
@@ -576,9 +576,10 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
         }),
       });
     const three = [busy("r1-000000", 1_000), busy("r2-000000", 2_000), busy("r3-000000", 3_000)];
-    // default maxRows (6) = 3 main rows + 3 activity lines: the LAST run's
-    // tool trail is no longer starved by an odd leftover line
-    const lines = buildFleetWidgetLines(buildFleetViewModel(three, OPTS))!;
+    // Explicit maxRows 6 (M-C2: the DEFAULT is now 20, no longer clamped by pi's
+    // string-array widget cap) = 3 main rows + 3 activity lines: the LAST run's
+    // tool trail is no longer starved by an odd leftover line.
+    const lines = buildFleetWidgetLines(buildFleetViewModel(three, OPTS), { maxRows: 6 })!;
     expect(lines).toHaveLength(1 + 6);
     expect(lines.filter((l) => l.includes("▸bash"))).toHaveLength(3);
   });
@@ -701,12 +702,12 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(buildFleetWidgetLines(buildFleetViewModel([free], OPTS))![0]).toBe("● 1 active Agents");
   });
 
-  it("truncation: default 6 rows + header, overflow reported on the header as +N more", () => {
+  it("truncation: explicit maxRows below the run count reports overflow via the header's +N more", () => {
     const runs = Array.from({ length: 7 }, (_, i) =>
       snapshot({ runId: `run-${i}00000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }),
     );
     const model = buildFleetViewModel(runs, OPTS);
-    const lines = buildFleetWidgetLines(model)!; // default maxRows = 6
+    const lines = buildFleetWidgetLines(model, { maxRows: 6 })!;
     expect(lines).toHaveLength(7);
     expect(lines[0]).toContain("7 active Agents");
     expect(lines[0]).toContain("+1 more");
@@ -726,13 +727,14 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
   });
 
   it(`maxRows is hard-capped at ${WIDGET_MAX_ROWS}`, () => {
-    const runs = Array.from({ length: 12 }, (_, i) =>
+    const runCount = WIDGET_MAX_ROWS + 3;
+    const runs = Array.from({ length: runCount }, (_, i) =>
       snapshot({ runId: `run-${i}0000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }),
     );
-    const model = buildFleetViewModel(runs, { ...OPTS, maxActiveRows: 12 });
-    const lines = buildFleetWidgetLines(model, { maxRows: 99 })!;
+    const model = buildFleetViewModel(runs, { ...OPTS, maxActiveRows: runCount });
+    const lines = buildFleetWidgetLines(model, { maxRows: WIDGET_MAX_ROWS + 20 })!;
     expect(lines).toHaveLength(1 + WIDGET_MAX_ROWS);
-    expect(lines[0]).toContain(`+${12 - WIDGET_MAX_ROWS} more`);
+    expect(lines[0]).toContain(`+${runCount - WIDGET_MAX_ROWS} more`);
   });
 
   it("pending terminal notifications stay beyond old linger and show the user @ message", () => {
@@ -1068,24 +1070,58 @@ describe("FleetWidgetController (fake ui)", () => {
     return holder;
   }
 
+  /**
+   * M-C2: the controller now installs a pi-tui COMPONENT FACTORY (mirrors
+   * pi's real `setExtensionWidget`: `content(tui, theme)` builds the live
+   * component) instead of a plain string array — tests assert against
+   * `renderedLines()` / `mountCount` / `requestRenderCount` rather than
+   * indexing raw `calls[].content` as a string array.
+   */
+  type WidgetFactory = (tui: { requestRender: () => void }, theme: unknown) => Component;
   interface WidgetCall {
     key: string;
-    content: string[] | undefined;
+    content: string[] | WidgetFactory | undefined;
     options?: { placement?: string };
   }
   function fakeUi() {
     const calls: WidgetCall[] = [];
+    let mounted: Component | undefined;
+    let mountCount = 0;
+    let requestRenderCount = 0;
+    const tui = {
+      requestRender: () => {
+        requestRenderCount++;
+      },
+    };
     return {
       calls,
-      setWidget(key: string, content: string[] | undefined, options?: { placement?: string }) {
+      get mountCount() {
+        return mountCount;
+      },
+      get requestRenderCount() {
+        return requestRenderCount;
+      },
+      setWidget(key: string, content: string[] | WidgetFactory | undefined, options?: { placement?: string }) {
         calls.push({ key, content, options });
+        if (content === undefined) {
+          mounted = undefined;
+        } else if (typeof content === "function") {
+          mountCount++;
+          mounted = content(tui, {});
+        }
+      },
+      /** The widget's current visible lines, however they got there (initial
+       *  mount or a later requestRender-driven update) — mirrors what a user
+       *  would actually see on the next paint. */
+      renderedLines(): string[] | undefined {
+        return mounted?.render(200);
       },
     };
   }
 
   const lifecycleEvent = (runId: string): LifecycleEvent => ({ runId, generation: 1, status: "running", at: NOW });
 
-  it("mounts above the editor on construction when runs are active", () => {
+  it("mounts a component factory above the editor exactly once when runs are active", () => {
     const clock = new FakeClock(NOW);
     const ui = fakeUi();
     const query = fakeQuery([snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) })]);
@@ -1093,7 +1129,9 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(1);
     expect(ui.calls[0]!.key).toBe(FLEET_WIDGET_KEY);
     expect(ui.calls[0]!.options?.placement).toBe("aboveEditor");
-    expect(ui.calls[0]!.content).toEqual(["● 1 active Agents", "  live-000 · 🤔 1s Σ1s"]);
+    expect(typeof ui.calls[0]!.content).toBe("function"); // component factory, not a string[]
+    expect(ui.mountCount).toBe(1);
+    expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s Σ1s"]);
     expect(clock.pendingTimers).toBe(1); // 1s tick armed
   });
 
@@ -1103,20 +1141,23 @@ describe("FleetWidgetController (fake ui)", () => {
     new FleetWidgetController({ ui, query: fakeQuery([]), clock });
     expect(ui.calls).toHaveLength(1);
     expect(ui.calls[0]!.content).toBeUndefined();
+    expect(ui.mountCount).toBe(0);
   });
 
-  it("refreshes on the clock tick with updated elapsed times", () => {
+  it("refreshes on the clock tick via setLines + requestRender — no repeat setWidget call", () => {
     const clock = new FakeClock(NOW);
     const ui = fakeUi();
     const query = fakeQuery([snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) })]);
     new FleetWidgetController({ ui, query, clock });
     clock.advance(61_000);
-    const last = ui.calls[ui.calls.length - 1]!;
-    expect(last.content![1]).toContain("1m02s"); // now=71_000, createdAt=9_000
-    expect(ui.calls.length).toBeGreaterThan(10); // one push per 1s tick
+    expect(ui.renderedLines()?.[1]).toContain("1m02s"); // now=71_000, createdAt=9_000
+    // One push per 1s tick, but ALL of them update the same mounted component.
+    expect(ui.mountCount).toBe(1);
+    expect(ui.calls).toHaveLength(1); // setWidget itself never called again
+    expect(ui.requestRenderCount).toBeGreaterThan(10);
   });
 
-  it("H1 onLifecycle triggers an immediate refresh (start → shown, finish → hidden)", () => {
+  it("H1 onLifecycle triggers an immediate refresh (start → shown, finish → hidden); re-activation remounts a fresh component", () => {
     const clock = new FakeClock(NOW);
     const ui = fakeUi();
     const query = fakeQuery([]);
@@ -1125,11 +1166,17 @@ describe("FleetWidgetController (fake ui)", () => {
 
     query.runs.push(snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
     widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"));
-    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active Agents", "  live-000 · 🤔 1s Σ1s"]);
+    expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s Σ1s"]);
+    expect(ui.mountCount).toBe(1); // first activation after starting idle
 
     query.runs.length = 0;
     widget.lifecycle.onLifecycle!({ ...lifecycleEvent("live-0000"), status: "completed" });
     expect(ui.calls[ui.calls.length - 1]!.content).toBeUndefined();
+
+    // Re-activating after the idle setWidget(undefined) installs a fresh component.
+    query.runs.push(snapshot({ runId: "live-1111", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
+    widget.lifecycle.onLifecycle!(lifecycleEvent("live-1111"));
+    expect(ui.mountCount).toBe(2);
   });
 
   it("dispose stops the tick and clears the widget; double dispose is a no-op", () => {
@@ -1140,6 +1187,7 @@ describe("FleetWidgetController (fake ui)", () => {
     widget.dispose();
     expect(clock.pendingTimers).toBe(0);
     expect(ui.calls[ui.calls.length - 1]).toEqual({ key: FLEET_WIDGET_KEY, content: undefined, options: undefined });
+    expect(ui.renderedLines()).toBeUndefined(); // cleared on dispose
     const callCount = ui.calls.length;
     clock.advance(5_000);
     widget.dispose();
@@ -1213,7 +1261,7 @@ describe("FleetWidgetController (fake ui)", () => {
       clock.advance(1_000);
       const last = ui.calls[ui.calls.length - 1]!;
       expect(last.key).toBe(FLEET_WIDGET_KEY);
-      expect(last.content![0]).toContain("1 active Agents"); // recovered on its own
+      expect(ui.renderedLines()?.[0]).toContain("1 active Agents"); // recovered on its own
       widget.dispose();
     } finally {
       warn.mockRestore();
@@ -1270,6 +1318,51 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(0);
     expect(clock.pendingTimers).toBe(0);
     expect(() => widget.dispose()).not.toThrow();
+  });
+
+  it("component.render(width) never exceeds width, for any width including 1", () => {
+    const clock = new FakeClock(NOW);
+    const ui = fakeUi();
+    const query = fakeQuery([
+      snapshot({
+        runId: "live-0000",
+        diag: diag({
+          createdAt: 9_000,
+          lastEventAt: 9_900,
+          label: "a very very very long agent label that should never overflow",
+          toolHistory: [{ name: "bash", toolCallId: "t", startedAt: 9_900 }],
+        }),
+      }),
+    ]);
+    new FleetWidgetController({ ui, query, clock });
+    const calls = ui.calls;
+    expect(typeof calls[0]!.content).toBe("function");
+    const factory = calls[0]!.content as (tui: { requestRender: () => void }, theme: unknown) => Component;
+    const component = factory({ requestRender: () => {} }, {});
+    for (const width of [1, 2, 5, 20, 79, 80, 200]) {
+      const lines = component.render(width);
+      for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
+
+  it("settings.fleetWidgetMaxRows reaches buildFleetWidgetLines through deps.maxRows, clamped to WIDGET_MAX_ROWS", () => {
+    const clock = new FakeClock(NOW);
+    const ui = fakeUi();
+    const runs = Array.from({ length: WIDGET_MAX_ROWS + 10 }, (_, i) =>
+      snapshot({ runId: `run-${i}0000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }),
+    );
+    // Deliberately out-of-range (mirrors an already-clamped settings value
+    // reaching the controller unchanged) — the controller/builder clamp again.
+    new FleetWidgetController({ ui, query: fakeQuery(runs), clock, maxRows: WIDGET_MAX_ROWS + 999 });
+    const lines = ui.renderedLines()!;
+    // header + WIDGET_MAX_ROWS run rows, never more.
+    expect(lines).toHaveLength(1 + WIDGET_MAX_ROWS);
+
+    const uiSmall = fakeUi();
+    new FleetWidgetController({ ui: uiSmall, query: fakeQuery(runs), clock: new FakeClock(NOW), maxRows: 3 });
+    const smallLines = uiSmall.renderedLines()!;
+    expect(smallLines).toHaveLength(1 + 3);
+    expect(smallLines[0]).toContain("+");
   });
 });
 

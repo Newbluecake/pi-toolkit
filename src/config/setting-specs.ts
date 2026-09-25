@@ -286,6 +286,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "0 disables the deadline warn tier",
     description: "Fleet row turns warn when remaining time drops below this",
   }),
+  fleetWidgetMaxRows: {
+    ...count("fleetWidgetMaxRows", 1, "Line budget for run lines below the agent-tree header (1-40)"),
+    max: 40,
+  } as SettingSpec,
   "reload.defer": bool("reload.defer", "Defer /reload until running subagents settle"),
   "cacheTtl.mode": choice(
     "cacheTtl.mode",

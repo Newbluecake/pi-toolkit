@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Component } from "@earendil-works/pi-tui";
 import { FakeClock } from "../../src/core/clock.js";
 import type { JobRecord } from "../../src/bash/types.js";
 import type { QueryService } from "../../src/service/query-service.js";
@@ -39,8 +40,22 @@ function query(): QueryService & { runs: RunSnapshot[] } {
 }
 
 function ui() {
-  const calls: Array<string[] | undefined> = [];
-  return { calls, setWidget: (_key: string, content: string[] | undefined) => calls.push(content) };
+  type WidgetFactory = (tui: { requestRender: () => void }, theme: unknown) => Component;
+  const calls: Array<string[] | WidgetFactory | undefined> = [];
+  let mounted: Component | undefined;
+  const tui = { requestRender: () => {} };
+  return {
+    calls,
+    setWidget: (_key: string, content: string[] | WidgetFactory | undefined) => {
+      calls.push(content);
+      if (content === undefined) mounted = undefined;
+      else if (typeof content === "function") mounted = content(tui, {});
+    },
+    /** The widget's current visible lines, however they got there (mount or a
+     *  later requestRender-driven update via setLines) — mirrors what the old
+     *  `calls.at(-1)` string-array assertions checked before M-C2. */
+    renderedLines: (): string[] | undefined => mounted?.render(200),
+  };
 }
 
 describe("FleetWidgetController background bash tails", () => {
@@ -69,7 +84,7 @@ describe("FleetWidgetController background bash tails", () => {
     await Promise.resolve();
     await Promise.resolve();
     clock.advance(1000);
-    expect(host.calls.at(-1)?.join("\n")).toContain("» latest");
+    expect(host.renderedLines()?.join("\n")).toContain("» latest");
     resolve({ text: "new\nlatest two", logBytes: 30 });
     await Promise.resolve();
     await Promise.resolve();
@@ -96,7 +111,7 @@ describe("FleetWidgetController background bash tails", () => {
     await flush();
     widget.refresh();
     expect(calls).toBe(1);
-    expect(host.calls.at(-1)?.join("\n")).toContain("» failed");
+    expect(host.renderedLines()?.join("\n")).toContain("» failed");
     clock.advance(1000);
     clock.advance(1000);
     expect(calls).toBe(1);
@@ -125,7 +140,7 @@ describe("FleetWidgetController background bash tails", () => {
     expect(calls).toBe(2);
     jobs.length = 0;
     clock.advance(1000);
-    expect(host.calls.at(-1)).toBeUndefined();
+    expect(host.renderedLines()).toBeUndefined();
     const readsBeforeDispose = calls;
     widget.dispose();
     clock.advance(5000);
