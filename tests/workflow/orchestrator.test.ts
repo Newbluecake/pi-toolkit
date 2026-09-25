@@ -152,6 +152,42 @@ describe("orchestrator.ts (M3.1 skeleton: boot -> script -> settle)", () => {
     expect(outcome.status).toBe("completed"); // not overwritten by the exit event terminate() itself triggers
   });
 
+  it("workflow-agent-queue §5: every stage_error (incl. source 'unhandled') is also emitted on subagent:workflow:stage_error, message capped at 200", async () => {
+    const clock = new FakeClock();
+    const { deps, factory } = makeDeps(clock);
+    const emitted: Array<{ channel: string; payload: Record<string, unknown> }> = [];
+    const orch = createOrchestrator({
+      ...deps,
+      emit: (channel, payload) => emitted.push({ channel, payload: payload as Record<string, unknown> }),
+    });
+    const runPromise = orch.run(req());
+    await new Promise((r) => setTimeout(r, 0));
+    const port = factory.workerData().commPort;
+    port.postMessage({ kind: "stage_error", source: "pipeline", itemIndex: 2, stageIndex: 1, message: "stage boom" });
+    port.postMessage({ kind: "stage_error", source: "unhandled", itemIndex: 0, message: "x".repeat(300) });
+    port.postMessage({ kind: "stage_error", source: "bogus", itemIndex: 0, message: "dropped" });
+    port.postMessage({ kind: "script_returned", result: "ok" });
+    const outcome = await runPromise;
+    expect(outcome.diag.stageErrors?.count).toBe(2);
+    const stageEvents = emitted.filter((e) => e.channel === "subagent:workflow:stage_error").map((e) => e.payload);
+    expect(stageEvents).toEqual([
+      {
+        workflowId: "wf_test",
+        at: expect.any(Number),
+        source: "pipeline",
+        itemIndex: 2,
+        stageIndex: 1,
+        message: "stage boom",
+      },
+      { workflowId: "wf_test", at: expect.any(Number), source: "unhandled", itemIndex: 0, message: expect.any(String) },
+    ]);
+    const capped = stageEvents[1]!.message as string;
+    expect(capped).toHaveLength(200);
+    expect(capped.endsWith("\u2026")).toBe(true);
+    // The diag sample keeps the full message; only the event is capped.
+    expect(outcome.diag.stageErrors?.samples[1]?.message).toHaveLength(300);
+  });
+
   it("stage_error messages from the worker land in diag.stageErrors (count exact, samples capped at 5)", async () => {
     const clock = new FakeClock();
     const { deps, factory } = makeDeps(clock);

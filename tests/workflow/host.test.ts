@@ -556,7 +556,9 @@ describe("host.ts: M10 child lifecycle events (onChildEvent)", () => {
     expect(handler.children[0]).toMatchObject({ callId: "1", label: "dev:a", status: "completed" });
   });
 
-  it("an admission-time spawn failure fires only 'settled' (withheld) — never a spawned-after-failure inversion", async () => {
+  // workflow-agent-queue §5: an admission-time spawn failure now also emits
+  // "rejected" (stage admission) right before its withheld "settled".
+  it("an admission-time spawn failure fires 'rejected' then 'settled' (withheld) — never a spawned-after-failure inversion", async () => {
     const spawner: ChildSpawner = {
       spawn: async () => ({ error: { message: "no slots" } }),
       abort: async () => true,
@@ -569,9 +571,17 @@ describe("host.ts: M10 child lifecycle events (onChildEvent)", () => {
     h.postHostCall("1", "agent", { prompt: "task", opts: { label: "dev:b" } });
     await flush();
 
-    expect(h.events).toHaveLength(1);
-    expect(h.events[0]).toMatchObject({ kind: "settled", callId: "1", label: "dev:b", status: "withheld" });
-    expect(h.events[0]!.kind).not.toBe("spawned");
+    expect(h.events).toHaveLength(2);
+    expect(h.events[0]).toMatchObject({
+      kind: "rejected",
+      callId: "1",
+      label: "dev:b",
+      stage: "admission",
+      reason: "spawn_error",
+      message: "no slots",
+    });
+    expect(h.events[1]).toMatchObject({ kind: "settled", callId: "1", label: "dev:b", status: "withheld" });
+    expect(h.events.some((e) => e.kind === "spawned")).toBe(false);
   });
 
   it("without an onChildEvent listener the handler behaves exactly as before (observational, never load-bearing)", async () => {
@@ -1219,5 +1229,167 @@ describe("host.ts: FIFO queue beyond maxParallel (workflow-agent-queue D1–D5, 
     expect(sentFor(h.sent, "2").settles).toEqual([expect.objectContaining({ ok: true, value: "cached" })]);
     expect(handler.registry.stats.queued).toBe(0);
     expect(handler.children).toEqual([expect.objectContaining({ callId: "2", source: "replay" })]);
+  });
+});
+
+/** workflow-agent-queue D10/§5: queued / rejected events and their ordering. */
+describe("host.ts: queued/rejected child events (workflow-agent-queue D10, §5)", () => {
+  function eventHarness(overrides: Partial<WorkflowRunBudget> = {}, workflowDeadlineAt = 1_000_000) {
+    const h = harness({ maxParallel: 1, ...overrides });
+    const c = controllableSpawner();
+    const events: WorkflowChildEvent[] = [];
+    const attach = () =>
+      attachHostCallHandler({
+        clock: h.clock,
+        workerHost: h.workerHost,
+        spawner: c.spawner,
+        gateRunner: okGate,
+        budget: { ...BASE_BUDGET, maxParallel: 1, ...overrides },
+        workflowDeadlineAt,
+        onChildEvent: (e) => events.push(e),
+      });
+    const kindsOf = (callId: string) => events.filter((e) => e.callId === callId).map((e) => e.kind);
+    return { ...h, c, events, attach, kindsOf };
+  }
+
+  it("a queued call emits queued → spawned → settled (settled carries queueWaitMs); an immediate one never emits queued", async () => {
+    const h = eventHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: { label: "first" } });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { label: "second", agentType: "Explore", phase: "scan" } });
+    await flush();
+    expect(h.events.find((e) => e.kind === "queued")).toEqual({
+      kind: "queued",
+      callId: "2",
+      label: "second",
+      agentType: "Explore",
+      phaseId: "scan",
+      at: 0,
+    });
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.clock.advance(300);
+    h.c.finishChild("r1");
+    await flush();
+    h.c.spawns[1]!.resolve({ runId: "r2" });
+    await flush();
+    h.c.finishChild("r2");
+    await flush();
+    expect(h.kindsOf("1")).toEqual(["spawned", "settled"]);
+    expect(h.kindsOf("2")).toEqual(["queued", "spawned", "settled"]);
+    expect(h.events.find((e) => e.kind === "settled" && e.callId === "2")).toMatchObject({ queueWaitMs: 300 });
+    expect(h.events.find((e) => e.kind === "settled" && e.callId === "1")).not.toHaveProperty("queueWaitMs");
+  });
+
+  it("cancellation-class outcomes (stop, phase timeout, out of budget while queued) emit only settled — never rejected", async () => {
+    const h = eventHarness({ phaseTotalMs: 1_000 }, 5_000);
+    await h.boot();
+    const handler = h.attach();
+    h.workerData().commPort.postMessage({ kind: "phase", title: "a" });
+    await flush();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { phase: "a" } }); // phase timeout while queued
+    h.postHostCall("3", "agent", { prompt: "p3", opts: null }); // out of budget while queued
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.clock.advance(1_000);
+    await flush();
+    h.clock.advance(4_000);
+    h.c.finishChild("r1");
+    await flush();
+    h.postHostCall("4", "agent", { prompt: "p4", opts: null });
+    await flush();
+    await handler.stopOwned("user_stop", 100);
+    expect(h.kindsOf("2")).toEqual(["queued", "settled"]);
+    expect(h.kindsOf("3")).toEqual(["queued", "settled"]);
+    expect(h.events.some((e) => e.kind === "rejected" && e.callId !== "4")).toBe(false);
+  });
+
+  it("dispatch-stage rejections: rejected(stage dispatch) precedes the withheld settled — spawn_error and spawn_timeout", async () => {
+    const h = eventHarness({ hostCallMs: 1_000 });
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { label: "two" } });
+    h.postHostCall("3", "agent", { prompt: "p3", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    h.c.spawns[1]!.resolve({ error: { message: "E".repeat(250) } });
+    await flush();
+    h.clock.advance(1_000); // p3's dispatch spawn times out
+    await flush();
+    expect(h.kindsOf("2")).toEqual(["queued", "rejected", "settled"]);
+    expect(h.kindsOf("3")).toEqual(["queued", "rejected", "settled"]);
+    const r2 = h.events.find((e) => e.kind === "rejected" && e.callId === "2")!;
+    expect(r2).toMatchObject({ stage: "dispatch", reason: "spawn_error", label: "two", agentType: "general-purpose" });
+    expect(r2.message).toHaveLength(200);
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "3")).toMatchObject({
+      stage: "dispatch",
+      reason: "spawn_timeout",
+      message: "spawn did not complete within 1000ms",
+    });
+  });
+
+  it("admission-stage rejections: invalid_args, max_children and budget_exhausted emit rejected only (no children[] record)", async () => {
+    const h = eventHarness({ maxChildren: 1, maxParallel: 4 });
+    await h.boot();
+    const handler = h.attach();
+    h.postHostCall("bad", "agent", { prompt: 42, opts: { label: "L" } });
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { label: "over" } });
+    await flush();
+    expect(h.kindsOf("bad")).toEqual(["rejected"]);
+    expect(h.events.find((e) => e.callId === "bad")).toMatchObject({
+      stage: "admission",
+      reason: "invalid_args",
+      label: "L",
+    });
+    expect(h.kindsOf("2")).toEqual(["rejected"]);
+    expect(h.events.find((e) => e.callId === "2")).toMatchObject({ reason: "max_children", label: "over" });
+    expect(handler.children).toEqual([]);
+
+    const h2 = eventHarness({}, -1); // workflow budget already exhausted
+    await h2.boot();
+    h2.attach();
+    h2.postHostCall("x", "agent", { prompt: "p", opts: { agentType: "Plan" } });
+    await flush();
+    expect(h2.events).toEqual([
+      expect.objectContaining({
+        kind: "rejected",
+        callId: "x",
+        stage: "admission",
+        reason: "budget_exhausted",
+        agentType: "Plan",
+      }),
+    ]);
+  });
+
+  it("immediate-path spawn error and HR2 residual emit rejected(stage admission) → settled", async () => {
+    const h = eventHarness({ hostCallMs: 1_000, maxParallel: 4 });
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ error: { message: "unknown agent type" } });
+    await flush();
+    h.clock.advance(1_000); // p2's spawn never answers → HR2
+    await flush();
+    expect(h.kindsOf("1")).toEqual(["rejected", "settled"]);
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
+      stage: "admission",
+      reason: "spawn_error",
+      message: "unknown agent type",
+    });
+    expect(h.kindsOf("2")).toEqual(["rejected", "settled"]);
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "2")).toMatchObject({
+      stage: "admission",
+      reason: "host_call_timeout",
+    });
   });
 });

@@ -502,3 +502,109 @@ describe("workflow activity registry (M11): terminal linger (list() vs listForDi
     expect(frozen.currentPhaseId).toBeUndefined();
   });
 });
+
+/** workflow-agent-queue §5: queuedChildren / rejectedTotal / stageErrorTotal. */
+describe("workflow activity registry: queue and warning counters (workflow-agent-queue §5)", () => {
+  const child = (kind: string, callId: string, extra: Record<string, unknown> = {}) => ({
+    workflowId: "wf-q",
+    kind,
+    callId,
+    at: 1_000,
+    ...extra,
+  });
+
+  it("queuedChildren is FIFO and drops a call on spawned / settled / rejected", () => {
+    const reg = createWorkflowActivityRegistry();
+    reg.register("wf-q", "q", 0);
+    expect(reg.list()[0]).toMatchObject({ queuedChildren: [], rejectedTotal: 0, stageErrorTotal: 0 });
+    reg.onEvent(
+      "subagent:workflow:child",
+      child("queued", "c1", { label: "one", agentType: "Explore", phaseId: "p", at: 10 }),
+    );
+    reg.onEvent("subagent:workflow:child", child("queued", "c2", { at: 20 }));
+    reg.onEvent("subagent:workflow:child", child("queued", "c3", { at: 30 }));
+    reg.onEvent("subagent:workflow:child", child("queued", "c4", { at: 40 }));
+    expect(reg.list()[0]!.queuedChildren).toEqual([
+      { callId: "c1", label: "one", agentType: "Explore", phaseId: "p", queuedAt: 10 },
+      { callId: "c2", queuedAt: 20 },
+      { callId: "c3", queuedAt: 30 },
+      { callId: "c4", queuedAt: 40 },
+    ]);
+    reg.onEvent("subagent:workflow:child", child("spawned", "c1", { runId: "r1" }));
+    reg.onEvent(
+      "subagent:workflow:child",
+      child("settled", "c3", { status: "withheld", source: "live", durationMs: 5 }),
+    );
+    reg.onEvent(
+      "subagent:workflow:child",
+      child("rejected", "c4", { stage: "dispatch", reason: "spawn_error", message: "x" }),
+    );
+    const snap = reg.list()[0]!;
+    expect(snap.queuedChildren.map((q) => q.callId)).toEqual(["c2"]);
+    expect(snap.activeChildren.map((a) => a.callId)).toEqual(["c1"]);
+    expect(snap.rejectedTotal).toBe(1);
+  });
+
+  it("rejectedTotal counts once per callId; stageErrorTotal counts every stage_error for that workflow only", () => {
+    const reg = createWorkflowActivityRegistry();
+    reg.register("wf-q", "q", 0);
+    reg.register("wf-other", "o", 0);
+    reg.onEvent("subagent:workflow:child", child("rejected", "c1", { stage: "admission", reason: "max_children" }));
+    reg.onEvent("subagent:workflow:child", child("rejected", "c1", { stage: "admission", reason: "max_children" }));
+    reg.onEvent("subagent:workflow:child", child("rejected", "c2", { stage: "dispatch", reason: "spawn_timeout" }));
+    reg.onEvent("subagent:workflow:stage_error", {
+      workflowId: "wf-q",
+      at: 1,
+      source: "parallel",
+      itemIndex: 0,
+      message: "a",
+    });
+    reg.onEvent("subagent:workflow:stage_error", {
+      workflowId: "wf-q",
+      at: 2,
+      source: "unhandled",
+      itemIndex: 0,
+      message: "b",
+    });
+    reg.onEvent("subagent:workflow:stage_error", {
+      workflowId: "wf-other",
+      at: 3,
+      source: "pipeline",
+      itemIndex: 1,
+      message: "c",
+    });
+    reg.onEvent("subagent:workflow:stage_error", { at: 4, source: "pipeline" }); // malformed: ignored
+    const [q, other] = reg.list();
+    expect(q).toMatchObject({ workflowId: "wf-q", rejectedTotal: 2, stageErrorTotal: 2 });
+    expect(other).toMatchObject({ workflowId: "wf-other", rejectedTotal: 0, stageErrorTotal: 1 });
+    // A rejected call without a record neither settles nor counts as settled.
+    expect(q!.settledTotal).toBe(0);
+  });
+
+  it("a late 'queued' for an already-settled call is ignored; the frozen terminal snapshot keeps the counters", () => {
+    const reg = createWorkflowActivityRegistry({ now: () => 5_000 });
+    reg.register("wf-q", "q", 0);
+    reg.onEvent(
+      "subagent:workflow:child",
+      child("settled", "c1", { status: "withheld", source: "live", durationMs: 0 }),
+    );
+    reg.onEvent("subagent:workflow:child", child("queued", "c1"));
+    reg.onEvent("subagent:workflow:stage_error", {
+      workflowId: "wf-q",
+      at: 1,
+      source: "parallel",
+      itemIndex: 0,
+      message: "a",
+    });
+    reg.onEvent("subagent:workflow:child", child("rejected", "c2", { stage: "admission", reason: "invalid_args" }));
+    expect(reg.list()[0]!.queuedChildren).toEqual([]);
+    reg.unregister("wf-q", { status: "completed" });
+    const frozen = reg.listForDisplay()[0]!;
+    expect(frozen).toMatchObject({
+      queuedChildren: [],
+      rejectedTotal: 1,
+      stageErrorTotal: 1,
+      terminal: { status: "completed" },
+    });
+  });
+});

@@ -66,6 +66,24 @@ import type { WorkflowId, WorkflowTerminalStatus } from "./types.js";
  *    fires when the linger expires) and `/agent status` countBusy.
  */
 
+/**
+ * workflow-agent-queue §5 (stage A): the same `subagent:workflow:child` feed
+ * also carries `"queued"` (an `agent()` call acked while every maxParallel
+ * slot was busy — kept in FIFO order in `queuedChildren` until its
+ * "spawned"/"settled"/"rejected") and `"rejected"` (admission/dispatch
+ * failures, counted once per callId in `rejectedTotal`); the separate
+ * `subagent:workflow:stage_error` channel (a parallel()/pipeline() stage or an
+ * unhandled rejection settled to null) is counted in `stageErrorTotal`.
+ * Cancellation-class outcomes never reach either counter.
+ */
+export interface WorkflowQueuedChild {
+  readonly callId: string;
+  readonly label?: string;
+  readonly agentType?: string;
+  readonly phaseId?: string;
+  readonly queuedAt: Millis;
+}
+
 /** M10: one in-flight child of a workflow run, as announced by host.ts's `"spawned"` event. */
 export interface WorkflowChildActivity {
   readonly callId: string;
@@ -133,6 +151,12 @@ export interface WorkflowActivitySnapshot {
   readonly settledTotal: number;
   readonly completedTotal: number;
   readonly replayTotal: number;
+  /** workflow-agent-queue §5: calls waiting for a maxParallel slot, FIFO (oldest first). */
+  readonly queuedChildren: readonly WorkflowQueuedChild[];
+  /** workflow-agent-queue §5: `agent()` calls rejected at admission or dispatch (once per callId). */
+  readonly rejectedTotal: number;
+  /** workflow-agent-queue §5: stage errors reported by the worker (parallel/pipeline/unhandled). */
+  readonly stageErrorTotal: number;
   /** M11: the phase chain — entered visits in entry order, then planned-but-pending names in scan order. */
   readonly phases: readonly WorkflowPhaseActivity[];
   /** M12: visits collapsed off the chain head past `MAX_VISITS` (oldest done ones; current/draining never). */
@@ -213,6 +237,10 @@ interface MutableEntry {
   callVisits: Map<string, number>;
   collapsedVisits: number;
   activeChildren: Map<string, WorkflowChildActivity>;
+  /** Insertion order = queue order (FIFO). */
+  queuedChildren: Map<string, WorkflowQueuedChild>;
+  rejectedCallIds: Set<string>;
+  stageErrorTotal: number;
   settledChildren: WorkflowSettledChild[];
   settledCallIds: Set<string>;
   settledTotal: number;
@@ -222,6 +250,12 @@ interface MutableEntry {
 
 /** M11: a frozen snapshot kept past `unregister` — `terminal` is always present on these. */
 type LingeringSnapshot = WorkflowActivitySnapshot & { readonly terminal: WorkflowTerminalMark };
+
+function asStageErrorEvent(channel: string, payload: unknown): { workflowId: WorkflowId } | undefined {
+  if (channel !== "subagent:workflow:stage_error" || payload === null || typeof payload !== "object") return undefined;
+  const p = payload as Record<string, unknown>;
+  return typeof p.workflowId === "string" ? { workflowId: p.workflowId } : undefined;
+}
 
 function isPhaseEnterEvent(
   channel: string,
@@ -237,7 +271,7 @@ type ChildEventPayload = {
   workflowId: WorkflowId;
   callId: string;
   at: Millis;
-  kind: "spawned" | "settled";
+  kind: "queued" | "spawned" | "settled" | "rejected";
   runId?: string;
   label?: string;
   agentType?: string;
@@ -252,7 +286,7 @@ function asChildEvent(channel: string, payload: unknown): ChildEventPayload | un
   if (channel !== "subagent:workflow:child" || payload === null || typeof payload !== "object") return undefined;
   const p = payload as Record<string, unknown>;
   if (typeof p.workflowId !== "string" || typeof p.callId !== "string") return undefined;
-  if (p.kind !== "spawned" && p.kind !== "settled") return undefined;
+  if (p.kind !== "queued" && p.kind !== "spawned" && p.kind !== "settled" && p.kind !== "rejected") return undefined;
   if (typeof p.at !== "number") return undefined;
   return p as unknown as ChildEventPayload;
 }
@@ -366,6 +400,9 @@ export function createWorkflowActivityRegistry(
       settledTotal: e.settledTotal,
       completedTotal: e.completedTotal,
       replayTotal: e.replayTotal,
+      queuedChildren: [...e.queuedChildren.values()],
+      rejectedTotal: e.rejectedCallIds.size,
+      stageErrorTotal: e.stageErrorTotal,
       phases: phasesOf(e, frozen),
       ...(e.collapsedVisits > 0 ? { collapsedVisits: e.collapsedVisits } : {}),
     };
@@ -397,6 +434,9 @@ export function createWorkflowActivityRegistry(
         callVisits: new Map(),
         collapsedVisits: 0,
         activeChildren: new Map(),
+        queuedChildren: new Map(),
+        rejectedCallIds: new Set(),
+        stageErrorTotal: 0,
         settledChildren: [],
         settledCallIds: new Set(),
         settledTotal: 0,
@@ -411,10 +451,33 @@ export function createWorkflowActivityRegistry(
         if (entry) enterPhase(entry, phase.phaseId);
         return;
       }
+      const stageError = asStageErrorEvent(channel, payload);
+      if (stageError !== undefined) {
+        const entry = entries.get(stageError.workflowId);
+        if (entry) entry.stageErrorTotal += 1;
+        return;
+      }
       const child = asChildEvent(channel, payload);
       if (child === undefined) return;
       const entry = entries.get(child.workflowId);
       if (!entry) return;
+      if (child.kind === "queued") {
+        if (entry.settledCallIds.has(child.callId)) return; // defensive: never resurrect a settled call.
+        entry.queuedChildren.set(child.callId, {
+          callId: child.callId,
+          ...(child.label !== undefined ? { label: child.label } : {}),
+          ...(child.agentType !== undefined ? { agentType: child.agentType } : {}),
+          ...(child.phaseId !== undefined ? { phaseId: child.phaseId } : {}),
+          queuedAt: child.at,
+        });
+        return;
+      }
+      // Any later lifecycle event means the call is no longer waiting for a slot.
+      entry.queuedChildren.delete(child.callId);
+      if (child.kind === "rejected") {
+        entry.rejectedCallIds.add(child.callId);
+        return;
+      }
       if (child.kind === "spawned") {
         entry.activeChildren.set(child.callId, {
           callId: child.callId,

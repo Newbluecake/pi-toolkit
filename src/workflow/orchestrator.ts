@@ -2,6 +2,7 @@ import type { Clock } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
 import {
   attachHostCallHandler,
+  capEventMessage,
   type ChildSpawner,
   type GateRunner,
   type HostCallHandler,
@@ -450,6 +451,16 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
     workerHost.events.onStageError((error) => {
       stageErrorCount += 1;
       if (stageErrorSamples.length < STAGE_ERROR_SAMPLE_CAP) stageErrorSamples.push(error);
+      // workflow-agent-queue §5: live feed for the activity registry's
+      // stageErrorTotal (the fleet widget's ⚠ N) — best-effort, observational.
+      deps.emit?.("subagent:workflow:stage_error", {
+        workflowId: req.workflowId,
+        at: deps.clock.now(),
+        source: error.source,
+        itemIndex: error.itemIndex,
+        ...(error.stageIndex !== undefined ? { stageIndex: error.stageIndex } : {}),
+        message: capEventMessage(error.message),
+      });
     });
 
     // M3.5 RP9: updates `journalConfig.deterministic.current` the instant the

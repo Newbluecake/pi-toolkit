@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import { attachHostCallHandler, type ChildOutcome, type ChildSpawner } from "../../src/workflow/host.js";
+import {
+  attachHostCallHandler,
+  type ChildOutcome,
+  type ChildSpawner,
+  type WorkflowChildEvent,
+} from "../../src/workflow/host.js";
 import type { HostCallEnvelope, WorkerHost } from "../../src/workflow/types.js";
 
 /**
@@ -11,7 +16,9 @@ import type { HostCallEnvelope, WorkerHost } from "../../src/workflow/types.js";
  * or terminate. Invariants:
  *  - at every step: slots in use (admission + pre_runner + running) ≤ maxParallel;
  *  - spawn() is called in submission order (FIFO — nobody jumps the queue);
- *  - each callId: exactly one children[] record, at most one host_settle;
+ *  - each callId: exactly one children[] record, at most one host_settle, and a
+ *    child-event sequence allowed by the §5 contract (queued before spawned,
+ *    rejected right before settled, settled last);
  *  - after stop + late spawns/settles: nothing active or queued, no armed timers.
  */
 
@@ -66,6 +73,7 @@ async function runSeed(seed: number): Promise<void> {
   const waiters = new Map<string, (o: ChildOutcome) => void>();
   const spawnOrder: number[] = [];
   const aborts: string[] = [];
+  const events: WorkflowChildEvent[] = [];
   let runSeq = 0;
   const spawner: ChildSpawner = {
     spawn: (req) =>
@@ -98,6 +106,7 @@ async function runSeed(seed: number): Promise<void> {
       phaseTotalMs: 3_000,
     },
     workflowDeadlineAt: 10_000_000,
+    onChildEvent: (e) => events.push(e),
   });
 
   const activeNow = (): number => {
@@ -167,6 +176,23 @@ async function runSeed(seed: number): Promise<void> {
     if (m.kind === "host_settle") settleCounts.set(String(m.callId), (settleCounts.get(String(m.callId)) ?? 0) + 1);
   }
   for (const [id, n] of settleCounts) expect(n, `seed ${seed}: call ${id} settled ${n}×`).toBe(1);
+
+  // §5 event contract, per callId.
+  const allowed = new Set([
+    "settled", // immediate admission withheld while its spawn was in flight (stop / phase timeout)
+    "spawned,settled",
+    "queued,settled",
+    "queued,spawned,settled",
+    "queued,rejected,settled",
+    "rejected,settled",
+  ]);
+  for (const id of submitted) {
+    const seq = events
+      .filter((e) => e.callId === id)
+      .map((e) => e.kind)
+      .join(",");
+    expect(allowed.has(seq), `seed ${seed}: call ${id} events ${seq}`).toBe(true);
+  }
 
   // FIFO: spawn() calls happen in submission order.
   for (let i = 1; i < spawnOrder.length; i += 1) {

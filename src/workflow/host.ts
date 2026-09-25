@@ -110,7 +110,19 @@ export type GateRunner = (
  * zero-hang invariants may ever come to depend on a listener existing.
  */
 export interface WorkflowChildEvent {
-  readonly kind: "spawned" | "settled";
+  /**
+   * workflow-agent-queue §5 adds two kinds:
+   *  - "queued": the call was acked as queued (all maxParallel slots busy).
+   *    It is followed by either "spawned" → "settled" or a direct "settled",
+   *    never by a "spawned" preceding it.
+   *  - "rejected": an admission failure — an ack failure that is not a
+   *    cancellation (`stage: "admission"`), or a post-ack dispatch failure
+   *    settled with `rejected: true` (`stage: "dispatch"`). When the call has
+   *    a `children[]` record, "rejected" precedes its (withheld) "settled".
+   *    Cancellation-class outcomes (stop, phase timeout, budget running out
+   *    while queued) never emit "rejected".
+   */
+  readonly kind: "queued" | "spawned" | "settled" | "rejected";
   readonly callId: CallId;
   readonly runId?: RunId;
   readonly label?: string;
@@ -120,7 +132,24 @@ export interface WorkflowChildEvent {
   readonly status?: WorkflowChildSummary["status"];
   readonly source?: "live" | "replay";
   readonly durationMs?: Millis;
+  /** "settled" only, previously-queued calls only — mirrors `WorkflowChildSummary.queueWaitMs`. */
+  readonly queueWaitMs?: Millis;
+  /** "rejected" only. */
+  readonly stage?: "admission" | "dispatch";
+  /** "rejected" only. */
+  readonly reason?: WorkflowChildRejectReason;
+  /** "rejected" only — the failure message, capped at 200 chars. */
+  readonly message?: string;
   readonly at: Millis;
+}
+
+/** workflow-agent-queue §5: why an `agent()` call was rejected. */
+export type WorkflowChildRejectReason =
+  "invalid_args" | "max_children" | "budget_exhausted" | "spawn_error" | "spawn_timeout" | "host_call_timeout";
+
+/** §5: event messages are capped at 200 chars. */
+export function capEventMessage(message: string): string {
+  return message.length > 200 ? `${message.slice(0, 199)}\u2026` : message;
 }
 
 /**
@@ -407,6 +436,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       status: enriched.status,
       source: enriched.source,
       durationMs: enriched.durationMs,
+      ...(enriched.queueWaitMs !== undefined ? { queueWaitMs: enriched.queueWaitMs } : {}),
       at: deps.clock.now(),
     });
     if (registry.listActive().length === 0) {
@@ -427,6 +457,46 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   const drainWaiters: Array<() => void> = [];
 
   /**
+   * workflow-agent-queue D10/§5: the single "rejected" emitter. Display
+   * metadata comes from the submission maps when the call got that far, or
+   * from `meta` for an ack failure that returns before them.
+   */
+  function emitRejected(
+    callId: CallId,
+    stage: "admission" | "dispatch",
+    reason: WorkflowChildRejectReason,
+    message: string,
+    meta: { label?: string | undefined; agentType?: string | undefined; phaseId?: string | undefined } = {},
+  ): void {
+    const label = labelOf.get(callId) ?? meta.label;
+    const agentType = agentTypeOf.get(callId) ?? meta.agentType;
+    const phaseId = phaseOf.get(callId) ?? meta.phaseId;
+    deps.onChildEvent?.({
+      kind: "rejected",
+      callId,
+      ...(label !== undefined ? { label } : {}),
+      ...(agentType !== undefined ? { agentType } : {}),
+      ...(phaseId !== undefined ? { phaseId } : {}),
+      stage,
+      reason,
+      message: capEventMessage(message),
+      at: deps.clock.now(),
+    });
+  }
+
+  /** Best-effort display metadata of a raw `agent()` args object (for "rejected" events emitted before `handleAgent` parses it). */
+  function displayMetaOfArgs(args: unknown): { label?: string; agentType?: string; phaseId?: string } {
+    const opts = (args as { opts?: unknown } | null | undefined)?.opts;
+    if (opts === null || typeof opts !== "object") return {};
+    const o = opts as { label?: unknown; agentType?: unknown; phase?: unknown };
+    return {
+      ...(typeof o.label === "string" ? { label: o.label } : {}),
+      ...(typeof o.agentType === "string" ? { agentType: o.agentType } : {}),
+      ...(typeof o.phase === "string" ? { phaseId: o.phase } : {}),
+    };
+  }
+
+  /**
    * A1 (withheld) — workflow-agent-queue D6: the single recorder for a call
    * that never got a bound child. Callers must have *just* flipped the call
    * to settled themselves (`registry.cancel()` returned `"withheld"`) — that
@@ -436,8 +506,17 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
    * `rejected` marks a post-ack admission failure the worker must surface as
    * a rejection rather than `null`.
    */
-  function settleUnspawned(callId: CallId, opts: { cause: string; message: string; rejected?: boolean }): void {
+  function settleUnspawned(
+    callId: CallId,
+    opts: {
+      cause: string;
+      message: string;
+      rejected?: { stage: "admission" | "dispatch"; reason: WorkflowChildRejectReason };
+    },
+  ): void {
     clearSpawnTimerOf(callId); // an in-flight queued dispatch: no armed timer outlives its call (a late spawn still orphan-aborts).
+    // §5 order: "rejected" precedes the withheld "settled".
+    if (opts.rejected !== undefined) emitRejected(callId, opts.rejected.stage, opts.rejected.reason, opts.message);
     // D8: an undispatched call's duration runs from enqueue (queueWaitMs is recorded separately).
     const durationMs = deps.clock.now() - (enqueuedAtOf.get(callId) ?? startedAt.get(callId) ?? deps.clock.now());
     const phaseId = phaseOf.get(callId);
@@ -454,7 +533,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       callId,
       ok: false,
       error: { message: opts.message },
-      ...(opts.rejected === true ? { rejected: true as const } : {}),
+      ...(opts.rejected !== undefined ? { rejected: true as const } : {}),
     } satisfies HostSettleEnvelope);
   }
 
@@ -499,12 +578,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       opts?: { label?: unknown; agentType?: unknown; phase?: unknown } | null;
     };
     if (typeof a.prompt !== "string") {
-      return {
-        kind: "host_ack",
-        id: callId,
-        ok: false,
-        error: { message: "agent(prompt, opts?): prompt must be a string" },
-      };
+      const message = "agent(prompt, opts?): prompt must be a string";
+      emitRejected(callId, "admission", "invalid_args", message, displayMetaOfArgs(args));
+      return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
     const opts = a.opts ?? {};
     const label = typeof opts.label === "string" ? opts.label : undefined;
@@ -632,12 +708,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // queue can never outgrow `maxChildren − active`).
     if (totalSubmitted() >= budget.maxChildren) {
       journalMetaOf.delete(callId);
-      return {
-        kind: "host_ack",
-        id: callId,
-        ok: false,
-        error: { message: `agent(): maxChildren (${budget.maxChildren}) exceeded for this workflow run` },
-      };
+      const message = `agent(): maxChildren (${budget.maxChildren}) exceeded for this workflow run`;
+      emitRejected(callId, "admission", "max_children", message, { label, agentType, phaseId });
+      return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
 
     // D2 ③: submission-time BW2 stays an ack failure (the call is rejected
@@ -646,12 +719,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const derived = deriveNow();
     if (derived.capped === "expired") {
       journalMetaOf.delete(callId);
-      return {
-        kind: "host_ack",
-        id: callId,
-        ok: false,
-        error: { message: "WorkflowBudgetExhausted: no remaining budget to spawn a child (BW2)" },
-      };
+      const message = "WorkflowBudgetExhausted: no remaining budget to spawn a child (BW2)";
+      emitRejected(callId, "admission", "budget_exhausted", message, { label, agentType, phaseId });
+      return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
 
     const call: QueuedAgentCall = {
@@ -676,6 +746,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       registry.submit(callId, at, { queued: true });
       enqueuedAtOf.set(callId, at);
       waitQueue.push(call);
+      deps.onChildEvent?.({
+        kind: "queued",
+        callId,
+        ...(label !== undefined ? { label } : {}),
+        agentType,
+        ...(phaseId !== undefined ? { phaseId } : {}),
+        at,
+      });
       return {
         kind: "host_ack",
         id: callId,
@@ -712,6 +790,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       }
       registry.settle(callId, deps.clock.now());
       journalMetaOf.delete(callId);
+      emitRejected(callId, "admission", "spawn_error", spawned.error.message);
       recordSettled({
         callId,
         source: "live",
@@ -939,7 +1018,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         settleUnspawned(callId, {
           cause: "spawn_timeout",
           message: `spawn did not complete within ${spawnTimeoutMs}ms`,
-          rejected: true,
+          rejected: { stage: "dispatch", reason: "spawn_timeout" },
         });
       }
     });
@@ -956,7 +1035,11 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       clearSpawnTimer();
       if ("error" in r) {
         if (registry.cancel(callId, "spawn_error") === "withheld") {
-          settleUnspawned(callId, { cause: "spawn_error", message: r.error.message, rejected: true });
+          settleUnspawned(callId, {
+            cause: "spawn_error",
+            message: r.error.message,
+            rejected: { stage: "dispatch", reason: "spawn_error" },
+          });
         }
         return;
       }
@@ -970,7 +1053,11 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       clearSpawnTimer();
       if (registry.resolve(callId)?.phase === "settled") return;
       if (registry.cancel(callId, "spawn_error") === "withheld") {
-        settleUnspawned(callId, { cause: "spawn_error", message: errMsg(e), rejected: true });
+        settleUnspawned(callId, {
+          cause: "spawn_error",
+          message: errMsg(e),
+          rejected: { stage: "dispatch", reason: "spawn_error" },
+        });
       }
     };
     void sp.then(onSpawned, onSpawnThrew).catch((e: unknown) => {
@@ -1057,11 +1144,15 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // ms<=0 and only fires `p.catch()` on the real promise, discarding
     // whatever answer it would have produced).
     if (boundMs <= 0) {
+      const message = "WorkflowBudgetExhausted: no remaining workflow budget to service this host call (BW2)";
+      if (envelope.op === "agent") {
+        emitRejected(envelope.id, "admission", "budget_exhausted", message, displayMetaOfArgs(envelope.args));
+      }
       deps.workerHost.send({
         kind: "host_ack",
         id: envelope.id,
         ok: false,
-        error: { message: "WorkflowBudgetExhausted: no remaining workflow budget to service this host call (BW2)" },
+        error: { message },
       } satisfies HostAckEnvelope);
       return;
     }
@@ -1090,8 +1181,10 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // a late spawn then binds against a settled-with-intent call and goes
       // through the orphan-abort path (`registry.bind` → `retryOrphanAbort`).
       if (envelope.op === "agent" && registry.resolve(envelope.id) !== undefined) {
-        if (registry.cancel(envelope.id, "host_call_timeout") === "withheld") {
-          settleUnspawned(envelope.id, { cause: "host_call_timeout", message, rejected: true });
+        // A spawn() that *threw* is a spawn error, not a timeout.
+        const reason: WorkflowChildRejectReason = r.reason === "timeout" ? "host_call_timeout" : "spawn_error";
+        if (registry.cancel(envelope.id, reason) === "withheld") {
+          settleUnspawned(envelope.id, { cause: reason, message, rejected: { stage: "admission", reason } });
         }
       }
     });
