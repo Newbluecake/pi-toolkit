@@ -5,7 +5,7 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, type Component, Text } from "@earendil-works/pi-tui";
-import { orderTasks, type Task } from "./state.js";
+import { activeBlockers, isBlocked, orderTasks, type Task } from "./state.js";
 
 const WIDGET_TASK_LIMIT = 6;
 const PANEL_TASK_LIMIT = 10;
@@ -21,12 +21,12 @@ export class TodoWidget implements Component {
     const tasks = selectWidgetTasks(allTasks);
     const completed = allTasks.filter((task) => task.status === "completed").length;
     const active = allTasks.filter((task) => task.status === "in_progress").length;
-    const blocked = allTasks.filter((task) => task.blockedBy.length > 0 && task.status !== "completed").length;
+    const blocked = allTasks.filter((task) => task.status !== "completed" && isBlocked(task, allTasks)).length;
     const title =
       active > 0 ? `Tasks ${completed}/${allTasks.length} · ${active} active` : `Tasks ${completed}/${allTasks.length}`;
     const lines = [truncateToWidth(` ${this.theme.fg("accent", this.theme.bold(title))}`, width)];
 
-    for (const task of tasks) lines.push(...renderTaskLines(task, this.theme, width));
+    for (const task of tasks) lines.push(...renderTaskLines(task, allTasks, this.theme, width));
 
     const omitted = allTasks.length - tasks.length;
     if (omitted > 0) {
@@ -91,7 +91,7 @@ export class TodoPanel implements Component {
       lines.push(truncateToWidth(` ${this.theme.fg("dim", "No tasks yet.")}`, width));
     } else {
       const visible = tasks.slice(this.offset, this.offset + PANEL_TASK_LIMIT);
-      for (const task of visible) lines.push(...renderTaskLines(task, this.theme, width));
+      for (const task of visible) lines.push(...renderTaskLines(task, tasks, this.theme, width));
       if (this.offset > 0 || this.offset + visible.length < tasks.length) {
         lines.push(
           truncateToWidth(
@@ -115,15 +115,16 @@ export class TodoPanel implements Component {
   }
 }
 
-export function renderTaskLines(task: Task, theme: Theme, width: number): string[] {
+export function renderTaskLines(task: Task, tasks: readonly Task[], theme: Theme, width: number): string[] {
+  const blockers = activeBlockers(task, tasks);
   const icon =
-    task.status === "completed" ? "✓" : task.status === "in_progress" ? "✳" : task.blockedBy.length > 0 ? "⊘" : "○";
+    task.status === "completed" ? "✓" : task.status === "in_progress" ? "✳" : blockers.length > 0 ? "⊘" : "○";
   const label = task.status === "in_progress" ? (task.activeForm ?? task.subject) : task.subject;
   const owner = task.owner ? theme.fg("dim", ` · ${task.owner}`) : "";
   let subject: string;
   if (task.status === "completed") subject = theme.fg("dim", theme.strikethrough(label));
   else if (task.status === "in_progress") subject = theme.fg("warning", theme.bold(label));
-  else if (task.blockedBy.length > 0) subject = theme.fg("muted", label);
+  else if (blockers.length > 0) subject = theme.fg("muted", label);
   else subject = theme.fg("text", label);
 
   const iconText =
@@ -131,18 +132,15 @@ export function renderTaskLines(task: Task, theme: Theme, width: number): string
       ? theme.fg("success", icon)
       : task.status === "in_progress"
         ? theme.fg("warning", icon)
-        : task.blockedBy.length > 0
+        : blockers.length > 0
           ? theme.fg("error", icon)
           : theme.fg("dim", icon);
   const primary = ` ${iconText} ${theme.fg("accent", `#${task.id}`)} ${subject}${owner}`;
   const lines = [truncateToWidth(primary, width)];
 
-  if (task.blockedBy.length > 0 && task.status !== "completed") {
+  if (blockers.length > 0 && task.status !== "completed") {
     lines.push(
-      truncateToWidth(
-        `   ${theme.fg("dim", `↳ blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}`)}`,
-        width,
-      ),
+      truncateToWidth(`   ${theme.fg("dim", `↳ blocked by ${blockers.map((id) => `#${id}`).join(", ")}`)}`, width),
     );
   }
   return lines;
@@ -156,6 +154,6 @@ function selectWidgetTasks(tasks: readonly Task[]): readonly Task[] {
   return tasks.slice(start, start + WIDGET_TASK_LIMIT);
 }
 
-export function renderTaskPreview(task: Task, theme: Theme): Component {
-  return new Text(renderTaskLines(task, theme, 80).join("\n"), 0, 0);
+export function renderTaskPreview(task: Task, theme: Theme, tasks: readonly Task[] = [task]): Component {
+  return new Text(renderTaskLines(task, tasks, theme, 80).join("\n"), 0, 0);
 }

@@ -239,4 +239,69 @@ describe("wireTodo tools", () => {
     const list = await exec(host, "TaskList", {}, ctx);
     expect(list.content[0]?.text).toBe("No tasks.");
   });
+
+  test("TaskUpdate reports Unblocked in the tool text and notifies via ctx.ui when completing a task unblocks another", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await host.handlers.get("session_start")?.({}, ctx);
+    await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+    await exec(host, "TaskCreate", { subject: "B", description: "B", blockedBy: ["1"] }, ctx);
+
+    // Before completion, the list still shows #2 as blocked (regression guard
+    // for the bug this task fixed: display must reflect predecessor status).
+    const before = await exec(host, "TaskList", {}, ctx);
+    expect(before.content[0]?.text).toContain("blocked by #1");
+
+    host.notifications.length = 0;
+    const completed = await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    expect(completed.content[0]?.text).toContain("Unblocked: #2 B");
+    expect(completed.details.unblocked?.map((task: { id: number }) => task.id)).toEqual([2]);
+    expect(host.notifications.some((message) => message.includes("#2") && message.includes("B"))).toBe(true);
+
+    // Fixed: the list no longer shows #2 as blocked once #1 is completed.
+    const after = await exec(host, "TaskList", {}, ctx);
+    expect(after.content[0]?.text).not.toContain("blocked by");
+  });
+
+  test("TaskUpdate does not report Unblocked when other predecessors remain incomplete", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+    await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+    await exec(host, "TaskCreate", { subject: "C", description: "C", blockedBy: ["1", "2"] }, ctx);
+
+    const partial = await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    expect(partial.content[0]?.text).not.toContain("Unblocked");
+
+    const rest = await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+    expect(rest.content[0]?.text).toContain("Unblocked: #3 C");
+  });
+
+  test("TaskDelete reports and notifies Unblocked when deleting an incomplete predecessor frees a task", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await host.handlers.get("session_start")?.({}, ctx);
+    await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+    await exec(host, "TaskCreate", { subject: "B", description: "B", blockedBy: ["1"] }, ctx);
+
+    host.notifications.length = 0;
+    const deleted = await exec(host, "TaskDelete", { taskId: "1" }, ctx);
+    expect(deleted.content[0]?.text).toContain("Unblocked: #2 B");
+    expect(host.notifications.some((message) => message.includes("#2"))).toBe(true);
+  });
+
+  test("no ctx.ui.notify in rpc/headless sessions even when a task is unblocked (must not throw)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const rpcCtx = fakeCtx(host, "rpc");
+    await exec(host, "TaskCreate", { subject: "A", description: "A" }, rpcCtx);
+    await exec(host, "TaskCreate", { subject: "B", description: "B", blockedBy: ["1"] }, rpcCtx);
+
+    const completed = await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, rpcCtx);
+    expect(completed.content[0]?.text).toContain("Unblocked: #2 B");
+    expect(host.notifications).toEqual([]);
+  });
 });

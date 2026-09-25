@@ -24,11 +24,13 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { TodoPanel, TodoWidget } from "./ui.js";
 import {
+  activeBlockers,
   cloneState,
   createTask,
   deleteTask,
   emptyState,
   getTask,
+  newlyUnblockedTasks,
   orderTasks,
   replayState,
   STATE_ENTRY,
@@ -91,6 +93,7 @@ type ToolDetails = {
   task?: Task | undefined;
   changed?: boolean | undefined;
   error?: string | undefined;
+  unblocked?: Task[] | undefined;
 };
 
 export function wireTodo(pi: ExtensionAPI): void {
@@ -159,7 +162,12 @@ export function wireTodo(pi: ExtensionAPI): void {
     handler: (
       params: T,
       ctx: ExtensionContext,
-    ) => { task?: Task | undefined; changed?: boolean | undefined; text?: string | undefined },
+    ) => {
+      task?: Task | undefined;
+      changed?: boolean | undefined;
+      text?: string | undefined;
+      unblocked?: Task[] | undefined;
+    },
     persistState = true,
   ): void => {
     pi.registerTool({
@@ -177,13 +185,11 @@ export function wireTodo(pi: ExtensionAPI): void {
           const result = handler(params as T, ctx);
           if (persistState && result.changed !== false) persist();
           refreshWidget();
+          const baseText = result.text ?? formatToolText(action, state, result.task, result.changed);
+          const text = appendUnblockedNotice(baseText, result.unblocked);
+          notifyUnblocked(ctx, result.unblocked);
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: result.text ?? formatToolText(action, state, result.task, result.changed),
-              },
-            ],
+            content: [{ type: "text" as const, text }],
             details: { action, state: cloneState(state), ...result },
           };
         });
@@ -263,10 +269,11 @@ export function wireTodo(pi: ExtensionAPI): void {
   registerMutation<TaskUpdateInput>(
     "TaskUpdate",
     "TaskUpdate",
-    "Update a task's status, text, owner, metadata or dependencies. Use the task ID returned by TaskCreate or TaskList.",
+    "Update a task's status, text, owner, metadata or dependencies. Use the task ID returned by TaskCreate or TaskList. Completing a task reports any other tasks it unblocks.",
     TaskUpdateSchema,
     "update",
     (params) => {
+      const before = state;
       const result = updateTask(state, params.taskId, {
         subject: params.subject,
         description: params.description,
@@ -281,20 +288,23 @@ export function wireTodo(pi: ExtensionAPI): void {
       } as TaskInput);
       state = result.state;
       refreshWidget();
-      return { task: result.task, changed: result.changed };
+      const unblocked = result.changed ? newlyUnblockedTasks(before, state) : [];
+      return { task: result.task, changed: result.changed, unblocked };
     },
   );
 
   registerMutation<TaskDeleteInput>(
     "TaskDelete",
     "TaskDelete",
-    "Delete a task by ID and remove its dependency edges.",
+    "Delete a task by ID and remove its dependency edges. Reports any other tasks the deletion unblocks.",
     TaskDeleteSchema,
     "delete",
     (params) => {
+      const before = state;
       const result = deleteTask(state, params.taskId);
       state = result.state;
-      return { task: result.task };
+      const unblocked = newlyUnblockedTasks(before, state);
+      return { task: result.task, unblocked };
     },
   );
 
@@ -342,9 +352,27 @@ export function wireTodo(pi: ExtensionAPI): void {
   });
 }
 
-function formatTaskLine(task: Task): string {
-  const icon = task.status === "completed" ? "✓" : task.status === "in_progress" ? "✳" : "○";
-  const suffix = task.blockedBy.length > 0 ? ` [blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}]` : "";
+function appendUnblockedNotice(text: string, unblocked?: Task[]): string {
+  const suffix = formatUnblockedSuffix(unblocked);
+  return suffix ? `${text}\n${suffix}` : text;
+}
+
+function formatUnblockedSuffix(unblocked?: Task[]): string | undefined {
+  if (!unblocked || unblocked.length === 0) return undefined;
+  return `Unblocked: ${unblocked.map((task) => `#${task.id} ${task.subject}`).join(", ")}`;
+}
+
+function notifyUnblocked(ctx: ExtensionContext, unblocked?: Task[]): void {
+  if (!unblocked || unblocked.length === 0) return;
+  if (!ctx.hasUI) return;
+  const list = unblocked.map((task) => `#${task.id} ${task.subject}`).join("\u3001");
+  ctx.ui.notify(`\u53ef\u4ee5\u7ee7\u7eed\u63a8\u8fdb\uff1a${list}`, "info");
+}
+
+function formatTaskLine(task: Task, tasks: readonly Task[]): string {
+  const icon = task.status === "completed" ? "\u2713" : task.status === "in_progress" ? "\u2733" : "\u25cb";
+  const blockers = activeBlockers(task, tasks);
+  const suffix = blockers.length > 0 ? ` [blocked by ${blockers.map((id) => `#${id}`).join(", ")}]` : "";
   const owner = task.owner ? ` (${task.owner})` : "";
   return `${icon} #${task.id} ${task.status} ${task.subject}${owner}${suffix}`;
 }
@@ -352,7 +380,7 @@ function formatTaskLine(task: Task): string {
 function formatTaskList(state: TodoState): string {
   if (state.tasks.length === 0) return "No tasks.";
   return orderTasks(state.tasks)
-    .map((task) => `${formatTaskLine(task)}\n  ${task.description}`)
+    .map((task) => `${formatTaskLine(task, state.tasks)}\n  ${task.description}`)
     .join("\n");
 }
 
@@ -361,7 +389,7 @@ function formatToolText(action: Action, state: TodoState, task?: Task, changed =
     case "create":
       return task ? `Task #${task.id} created: ${task.subject}` : "Task created.";
     case "get":
-      return task ? `${formatTaskLine(task)}\n${task.description}` : "Task found.";
+      return task ? `${formatTaskLine(task, state.tasks)}\n${task.description}` : "Task found.";
     case "update":
       return task
         ? changed

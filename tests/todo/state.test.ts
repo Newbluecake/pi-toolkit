@@ -3,10 +3,13 @@
 
 import { describe, expect, test } from "vitest";
 import {
+  activeBlockers,
   cloneState,
   createTask,
   deleteTask,
   emptyState,
+  isBlocked,
+  newlyUnblockedTasks,
   orderTasks,
   restoreState,
   updateTask,
@@ -148,6 +151,76 @@ describe("claude todo state", () => {
       const c = { ...base, id: 1, blocks: [2], blockedBy: [2] };
       const d = { ...base, id: 2, blocks: [1], blockedBy: [1] };
       expect(restoreState({ tasks: [c, d], nextId: 3 })).toBeUndefined();
+    });
+  });
+
+  describe("blocked-status derived from predecessor completion", () => {
+    test("isBlocked/activeBlockers ignore completed predecessors (repro: pre-fix bug)", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B", blockedBy: ["1"] }, 2).state;
+      const before = updateTask(state, "2", { owner: "me" }, 2).task; // no-op-ish touch, keep pending
+      const taskB = state.tasks[1]!;
+      expect(isBlocked(taskB, state.tasks)).toBe(true);
+      expect(activeBlockers(taskB, state.tasks)).toEqual([1]);
+      expect(before).toBeDefined();
+
+      state = updateTask(state, "1", { status: "completed" }, 3).state;
+      const taskBAfter = state.tasks.find((task) => task.id === 2)!;
+      // The bug: blockedBy still lists #1, but #1 is completed — must not
+      // still count as an active blocker.
+      expect(taskBAfter.blockedBy).toEqual([1]);
+      expect(activeBlockers(taskBAfter, state.tasks)).toEqual([]);
+      expect(isBlocked(taskBAfter, state.tasks)).toBe(false);
+    });
+
+    test("newlyUnblockedTasks reports a task whose last active predecessor just completed", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B", blockedBy: ["1"] }, 2).state;
+      state = createTask(state, { subject: "C", description: "C" }, 3).state;
+
+      const before = state;
+      const after = updateTask(state, "1", { status: "completed" }, 4).state;
+      const unblocked = newlyUnblockedTasks(before, after);
+      expect(unblocked.map((task) => task.id)).toEqual([2]);
+    });
+
+    test("newlyUnblockedTasks requires ALL predecessors completed before reporting", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = createTask(state, { subject: "C", description: "C", blockedBy: ["1", "2"] }, 3).state;
+
+      const before = state;
+      const afterOne = updateTask(state, "1", { status: "completed" }, 4).state;
+      expect(newlyUnblockedTasks(before, afterOne)).toEqual([]);
+
+      const afterBoth = updateTask(afterOne, "2", { status: "completed" }, 5).state;
+      expect(newlyUnblockedTasks(afterOne, afterBoth).map((task) => task.id)).toEqual([3]);
+    });
+
+    test("newlyUnblockedTasks reports a task after deleting its only (incomplete) predecessor", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B", blockedBy: ["1"] }, 2).state;
+
+      const before = state;
+      const after = deleteTask(state, "1").state;
+      const unblocked = newlyUnblockedTasks(before, after);
+      expect(unblocked.map((task) => task.id)).toEqual([2]);
+    });
+
+    test("newlyUnblockedTasks never reports an already-completed task", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B", blockedBy: ["1"] }, 2).state;
+      state = updateTask(state, "2", { status: "completed", removeBlockedBy: ["1"] }, 2).state;
+      // #2 is completed and has no blockers now; completing #1 must not
+      // "unblock" a task that is already done.
+      const before = state;
+      const after = updateTask(state, "1", { status: "completed" }, 5).state;
+      expect(newlyUnblockedTasks(before, after)).toEqual([]);
     });
   });
 });

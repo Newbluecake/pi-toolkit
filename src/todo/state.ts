@@ -357,6 +357,42 @@ function validateDependencyGraph(state: TodoState): void {
   for (const task of state.tasks) visit(task.id);
 }
 
+/**
+ * A task's blockedBy edges that still reference a non-completed task.
+ * Completed predecessors no longer count as blocking (deleted predecessors
+ * are already pruned from blockedBy by deleteTask, so no extra filtering is
+ * needed for that case).
+ */
+export function activeBlockers(task: Task, tasks: readonly Task[]): number[] {
+  if (task.blockedBy.length === 0) return [];
+  const completedIds = new Set(
+    tasks.filter((candidate) => candidate.status === "completed").map((candidate) => candidate.id),
+  );
+  return task.blockedBy.filter((id) => !completedIds.has(id));
+}
+
+export function isBlocked(task: Task, tasks: readonly Task[]): boolean {
+  return activeBlockers(task, tasks).length > 0;
+}
+
+/**
+ * Tasks that were blocked in `before` and are no longer blocked in `after`
+ * (all remaining predecessors completed, or the blocking predecessor was
+ * removed/deleted). Used to report "Unblocked: ..." after a mutation.
+ * Newly-created tasks (absent from `before`) are not reported; completed
+ * tasks are never reported as unblocked.
+ */
+export function newlyUnblockedTasks(before: TodoState, after: TodoState): Task[] {
+  const result: Task[] = [];
+  for (const task of after.tasks) {
+    if (task.status === "completed") continue;
+    const beforeTask = before.tasks.find((candidate) => candidate.id === task.id);
+    if (!beforeTask) continue;
+    if (isBlocked(beforeTask, before.tasks) && !isBlocked(task, after.tasks)) result.push(task);
+  }
+  return result;
+}
+
 function findTask(state: TodoState, id: number): Task {
   const task = state.tasks.find((candidate) => candidate.id === id);
   if (!task) throw new Error(`Task #${id} not found`);
