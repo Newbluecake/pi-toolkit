@@ -271,3 +271,158 @@ describe("CallRegistry (§3.6)", () => {
     expect(result.alreadySettled).toEqual(["done"]);
   });
 });
+
+/**
+ * workflow-agent-queue §3.2/§7: the `queued` phase — acked, waiting for a
+ * maxParallel slot, holding none, cancelled exactly like `admission`.
+ */
+describe("CallRegistry: queued phase (workflow-agent-queue §3.2)", () => {
+  function make() {
+    const clock = new FakeClock();
+    const aborts: Array<{ runId: string; cause: string }> = [];
+    const registry = createCallRegistry({
+      clock,
+      abort: async (runId, cause) => {
+        aborts.push({ runId, cause });
+        return true;
+      },
+      cancelRetryWindowMs: 1_000,
+    });
+    return { clock, aborts, registry };
+  }
+
+  it("submit({queued:true}) lands in 'queued'; admit() moves it to 'admission' exactly once", () => {
+    const { clock, registry } = make();
+    registry.submit("q1", clock.now(), { queued: true });
+    expect(registry.resolve("q1")?.phase).toBe("queued");
+    expect(registry.stats.queued).toBe(1);
+    expect(registry.stats.admission).toBe(0);
+    expect(registry.admit("q1")).toBe(true);
+    expect(registry.resolve("q1")?.phase).toBe("admission");
+    expect(registry.stats.queued).toBe(0);
+    expect(registry.stats.admission).toBe(1);
+    expect(registry.admit("q1")).toBe(false); // not queued any more
+    expect(registry.admit("unknown")).toBe(false);
+  });
+
+  it("cancel() of a queued call withholds it (settled + cancelIntent) and never calls abort(); admit() afterwards is refused", async () => {
+    const { clock, aborts, registry } = make();
+    registry.submit("q1", clock.now(), { queued: true });
+    expect(registry.cancel("q1", "phase_timeout")).toBe("withheld");
+    expect(registry.resolve("q1")).toMatchObject({ phase: "settled", cancelIntent: { cause: "phase_timeout" } });
+    await Promise.resolve();
+    expect(aborts).toEqual([]);
+    expect(registry.admit("q1")).toBe(false);
+    expect(registry.resolve("q1")?.phase).toBe("settled");
+  });
+
+  it("CR4 applies to queued submissions: a cancel before submit withholds the call on arrival", () => {
+    const { clock, registry } = make();
+    expect(registry.cancel("q1", "user_stop")).toBe("unknown");
+    registry.submit("q1", clock.now(), { queued: true });
+    expect(registry.resolve("q1")).toMatchObject({ phase: "settled", cancelIntent: { cause: "user_stop" } });
+    expect(registry.admit("q1")).toBe(false);
+  });
+
+  it("listActive() includes queued calls; cancelAll() classifies them as withheld and closes the registry (CR5)", () => {
+    const { clock, registry } = make();
+    registry.submit("q1", clock.now(), { queued: true });
+    registry.submit("a1", clock.now());
+    registry.submit("r1", clock.now());
+    registry.bind("r1", "run-r1");
+    expect(registry.listActive().map((c) => [c.callId, c.phase])).toEqual([
+      ["q1", "queued"],
+      ["a1", "admission"],
+      ["r1", "running"],
+    ]);
+    const result = registry.cancelAll("shutdown");
+    expect(result.withheld).toEqual(["q1", "a1"]);
+    expect(result.retrying).toEqual(["r1"]);
+    expect(registry.listActive().map((c) => c.callId)).toEqual(["r1"]);
+    registry.submit("q2", clock.now(), { queued: true });
+    expect(registry.resolve("q2")).toBeUndefined();
+  });
+
+  /**
+   * Transition table: every resting phase reachable through the public API ×
+   * {admit, bind, settle, cancel}. `pre_runner` is not a resting phase — bind()
+   * passes through it within one synchronous block — so it has no row.
+   * "withheld" = settled with a cancelIntent (a late bind is an orphan).
+   */
+  type Resting = "queued" | "admission" | "running" | "settled" | "withheld";
+  type Op = "admit" | "bind" | "settle" | "cancel";
+  const setup: Record<Resting, (r: ReturnType<typeof make>) => void> = {
+    queued: ({ clock, registry }) => registry.submit("c", clock.now(), { queued: true }),
+    admission: ({ clock, registry }) => registry.submit("c", clock.now()),
+    running: ({ clock, registry }) => {
+      registry.submit("c", clock.now());
+      registry.bind("c", "run-0");
+    },
+    settled: ({ clock, registry }) => {
+      registry.submit("c", clock.now());
+      registry.bind("c", "run-0");
+      registry.settle("c", clock.now());
+    },
+    withheld: ({ clock, registry }) => {
+      registry.submit("c", clock.now());
+      registry.cancel("c", "stop");
+    },
+  };
+  const expected: Record<Resting, Record<Op, { phase: string; result: unknown; aborts: number }>> = {
+    queued: {
+      admit: { phase: "admission", result: true, aborts: 0 },
+      // Defensive: a queued call never reaches the spawner, but a real runId must never be dropped.
+      bind: { phase: "running", result: { cancelNow: false }, aborts: 0 },
+      settle: { phase: "settled", result: undefined, aborts: 0 },
+      cancel: { phase: "settled", result: "withheld", aborts: 0 },
+    },
+    admission: {
+      admit: { phase: "admission", result: false, aborts: 0 },
+      bind: { phase: "running", result: { cancelNow: false }, aborts: 0 },
+      settle: { phase: "settled", result: undefined, aborts: 0 },
+      cancel: { phase: "settled", result: "withheld", aborts: 0 },
+    },
+    running: {
+      admit: { phase: "running", result: false, aborts: 0 },
+      bind: { phase: "running", result: { cancelNow: false }, aborts: 0 },
+      settle: { phase: "settled", result: undefined, aborts: 0 },
+      cancel: { phase: "running", result: "retrying", aborts: 1 },
+    },
+    settled: {
+      admit: { phase: "settled", result: false, aborts: 0 },
+      bind: { phase: "settled", result: { cancelNow: false }, aborts: 0 },
+      settle: { phase: "settled", result: undefined, aborts: 0 },
+      cancel: { phase: "settled", result: "already_settled", aborts: 0 },
+    },
+    withheld: {
+      admit: { phase: "settled", result: false, aborts: 0 },
+      bind: { phase: "settled", result: { cancelNow: true, cause: "stop" }, aborts: 1 },
+      settle: { phase: "settled", result: undefined, aborts: 0 },
+      cancel: { phase: "settled", result: "already_settled", aborts: 0 },
+    },
+  };
+  for (const from of Object.keys(expected) as Resting[]) {
+    for (const op of Object.keys(expected[from]) as Op[]) {
+      it(`transition table: ${from} × ${op}`, async () => {
+        const r = make();
+        setup[from](r);
+        const abortsBefore = r.aborts.length;
+        const result =
+          op === "admit"
+            ? r.registry.admit("c")
+            : op === "bind"
+              ? r.registry.bind("c", "run-1")
+              : op === "settle"
+                ? r.registry.settle("c", r.clock.now())
+                : r.registry.cancel("c", "x");
+        await Promise.resolve();
+        const want = expected[from][op];
+        expect(r.registry.resolve("c")?.phase).toBe(want.phase);
+        expect(result).toEqual(want.result);
+        expect(r.aborts.length - abortsBefore).toBe(want.aborts);
+        r.registry.settle("c", r.clock.now()); // stop any retry loop
+        expect(r.clock.pendingTimers).toBe(0);
+      });
+    }
+  }
+});

@@ -44,7 +44,16 @@ export type CallId = string;
  * both retry `SpawnService.abort(runId)` identically — so this is a
  * documented simplification, not a silent one.
  */
-export type CallPhase = "admission" | "pre_runner" | "running" | "settled";
+/**
+ * workflow-agent-queue §3.1: `queued` precedes `admission` for an `agent()`
+ * call acked while the workflow's `maxParallel` slots were full (or other
+ * calls were already waiting — FIFO). A queued call holds **no** slot (it is
+ * excluded from host.ts's active count), has never touched the spawner, and
+ * is cancelled exactly like `admission`: `cancel()` withholds it
+ * permanently (`"withheld"`, `cancelIntent` recorded). Only
+ * `CallRegistry.admit()` moves it on to `admission`.
+ */
+export type CallPhase = "queued" | "admission" | "pre_runner" | "running" | "settled";
 
 export interface CallCancelIntent {
   readonly cause: string;
@@ -159,6 +168,13 @@ export interface WorkflowChildSummary {
   readonly textPreview?: string;
   readonly taskKey?: TaskKey;
   readonly occurrence?: number;
+  /**
+   * workflow-agent-queue §3.1/D8: how long the call waited in the FIFO queue
+   * for a `maxParallel` slot — present only for calls that were queued. For a
+   * call that never left the queue (withheld while waiting) `durationMs` is
+   * measured from enqueue and equals this value.
+   */
+  readonly queueWaitMs?: Millis;
 }
 
 /** §2.3.1: the worker's terminated-after state machine, S1 (spawning/ready) through S8 (orphan probe). */

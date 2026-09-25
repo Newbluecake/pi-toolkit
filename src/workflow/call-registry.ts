@@ -31,7 +31,19 @@ export interface CallRegistryDeps {
 }
 
 export interface CallRegistry {
-  submit(callId: CallId, at: Millis): void;
+  /**
+   * Registers a call in `admission` — or, with `opts.queued`, in `queued`
+   * (workflow-agent-queue §3.2: acked but waiting for a `maxParallel` slot).
+   * CR4/CR5 apply identically to both.
+   */
+  submit(callId: CallId, at: Millis, opts?: { queued?: boolean }): void;
+  /**
+   * workflow-agent-queue §3.2: `queued -> admission`, the only transition out
+   * of `queued` besides cancel/settle. Returns `false` (and changes nothing)
+   * for any other phase — notably a queued call that was already withheld
+   * by a cancel before its slot came up, which the host's pump then skips.
+   */
+  admit(callId: CallId): boolean;
   /** A1 -> A2. Returns `cancelNow` when a CancelIntent was already registered against this callId before `bind` ran (CR2/CR4). */
   bind(callId: CallId, runId: RunId): { cancelNow: boolean; cause?: string };
   /** A2/A3/A4 -> A5 (or A1 -> "withheld", modeled as settled with no runId). */
@@ -71,7 +83,7 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
   let closed = false;
 
   function countByPhase(): Record<CallPhase, number> {
-    const out: Record<CallPhase, number> = { admission: 0, pre_runner: 0, running: 0, settled: 0 };
+    const out: Record<CallPhase, number> = { queued: 0, admission: 0, pre_runner: 0, running: 0, settled: 0 };
     for (const c of calls.values()) out[c.phase] += 1;
     return out;
   }
@@ -134,9 +146,9 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
   }
 
   const registry: CallRegistry = {
-    submit(callId, at) {
+    submit(callId, at, opts) {
       if (closed) return; // CR5
-      calls.set(callId, { callId, submittedAt: at, phase: "admission" });
+      calls.set(callId, { callId, submittedAt: at, phase: opts?.queued === true ? "queued" : "admission" });
       const cause = preIntents.get(callId);
       if (cause !== undefined) {
         // CR4: cancel arrived first — the call never gets to spawn.
@@ -146,6 +158,12 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
         state.settledAt = at;
         state.cancelIntent = { cause, at, attempts: 0, lastAttemptAt: at };
       }
+    },
+    admit(callId) {
+      const state = calls.get(callId);
+      if (!state || state.phase !== "queued") return false;
+      state.phase = "admission";
+      return true;
     },
     bind(callId, runId) {
       const state = calls.get(callId);
@@ -176,6 +194,9 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
         }
         return { cancelNow: false };
       }
+      // A `queued` call never reaches the spawner (host.ts admits it first);
+      // binding one anyway is treated like admission — defensive, so a real
+      // runId is never dropped on the floor.
       state.phase = "pre_runner";
       state.runId = runId;
       if (state.cancelIntent) {
@@ -210,8 +231,8 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
         return "unknown";
       }
       if (state.phase === "settled") return "already_settled";
-      if (state.phase === "admission") {
-        // A1: never spawned — withhold it permanently.
+      if (state.phase === "admission" || state.phase === "queued") {
+        // A1 (and workflow-agent-queue §3.2 `queued`): never spawned — withhold it permanently.
         state.phase = "settled";
         state.settledAt = deps.clock.now();
         state.cancelIntent = { cause, at: deps.clock.now(), attempts: 0, lastAttemptAt: deps.clock.now() };
