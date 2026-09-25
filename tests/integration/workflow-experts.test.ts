@@ -5,7 +5,15 @@ import { join } from "node:path";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryRunStore } from "../../src/core/store.js";
-import type { AgentTypeConfig, RunSnapshot, SubagentExtensionPoints } from "../../src/core/types.js";
+import type { AgentTypeConfig, DriverEvent, RunSnapshot, SubagentExtensionPoints } from "../../src/core/types.js";
+import { aggregateChildUsage } from "../../src/tools/workflow-tool.js";
+import type { WorkflowOutcome } from "../../src/workflow/types.js";
+import { attachHostCallHandler, type ChildSpawner, type GateRunner } from "../../src/workflow/host.js";
+import { createWorkflowChildSpawner } from "../../src/workflow/spawner-adapter.js";
+import { createWorkerHost } from "../../src/workflow/lifecycle.js";
+import { fakeSpawnWorkerFactory } from "../workflow/helpers.js";
+import { renderCosts } from "../../src/commands/status.js";
+import { buildUsageEvent } from "../../src/delivery/usage-broadcast.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
@@ -14,26 +22,44 @@ import { createRuntimeRunnerAdapter } from "../../src/service/runtime-adapter.js
 import { createSpawnService, type SpawnService } from "../../src/service/spawn-service.js";
 
 /**
- * workflow-experts (docs/dev/workflow-experts/plan.md \u00a76 D-group, \u00a77): real
+ * workflow-experts (docs/dev/workflow-experts/plan.md §6 D-group, §7): real
  * `SpawnService` + `RuntimeRunner` integration coverage for the pieces this
  * package (`wf-experts`) actually owns end-to-end.
  *
- * **Scope note (mandatory reading before touching this file)**: tests
- * #27/#29/#30/#31 in the plan's \u00a76 test list depend on package B's
- * `spawn-service.ts` `stopping`-set fork-admission guard (\u00a74.7,
- * `fix(spawn): reject consult fork admission while the parent is stopping or
- * gone`) and/or package C's `resolveExperts(refs, { completedOnly })`
- * (`src/consult/index.ts`) \u2014 **neither file is in this package's domain**
- * (\u00a77's `wf-experts` globs). Per the task's file-domain constraint, this
- * suite only implements what is testable against the *current*, unmodified
- * `src/service/spawn-service.ts`: #28 (slotless consult-shaped admission
- * alongside a full workflow slot, unaffected by B) below. #27/#29/#30/#31
- * are left as explicit `it.skip` placeholders with the exact blocking
- * dependency named, per the task's "flag pending items rather than
- * approximate them" instruction \u2014 **re-run this file once B and C land**.
+ * **Scope note**: packages B (`src/service/spawn-service.ts`'s `stopping`-set
+ * fork-admission guard, §4.7) and C (`src/consult/index.ts`'s
+ * `resolveExperts(refs, { completedOnly })`) have both landed on master.
+ * Tests #27/#29/#30/#31 below exercise them purely through their already-
+ * frozen **public APIs** (`SpawnService.spawn/abort/stopChildrenOf`,
+ * `createWorkflowChildSpawner`, `attachHostCallHandler`) — this file still
+ * never imports or edits `src/service/spawn-service.ts` or
+ * `src/consult/index.ts` themselves (§7's `wf-experts` globs are untouched).
+ * None of the four goes through the real `consult` tool / host.ts's §4.4
+ * experts-resolution wiring end-to-end (that is package A's own
+ * `host.test.ts`/`expert-scope.test.ts`/`spawner-adapter.test.ts` domain);
+ * #30/#31 instead hand-construct the exact `DriverEvent` a real consult
+ * toolResult would deliver (`{t:"message_end", usage, absorbedRunIds}`,
+ * pinned by `tests/runtime/nested-run-usage.test.ts`) so the *usage-
+ * absorption accounting itself* (session-driver.ts / state-machine.ts's
+ * X9/X12, plus the workflow / HUD / `/agent costs` dedupe consumers) runs
+ * for real. Scope confirmed with the workflow-experts-plan-v2 review
+ * (consult, 2026-09-26): D#29's "stopOwned finishes within abortGraceMs"
+ * targets `HostCallHandler.stopOwned` specifically (not
+ * `src/workflow/background.ts`, which this file still never touches).
  */
 
-const type: AgentTypeConfig = { name: "worker", description: "worker", systemPrompt: "", promptMode: "append" };
+const type: AgentTypeConfig = {
+  name: "worker",
+  description: "worker",
+  systemPrompt: "",
+  promptMode: "append",
+  // D#27's last scenario (a non-fork nested spawn, unaffected by the D19
+  // `stopping` guard) needs an ordinary nested-delegation whitelist; every
+  // OTHER scenario in this file spawns via `forkSessionFrom`, which bypasses
+  // canSpawn entirely (spawn-service.ts's own D19 fixtures already pin that
+  // down), so adding it here is harmless to every other test.
+  canSpawn: ["worker"],
+};
 
 function fastBudget(totalMs: number) {
   return {
@@ -85,6 +111,13 @@ async function drain(clock: FakeClock, ticks: number, stepMs = 1) {
   }
 }
 
+/** Real setTimeout(0) flush — needed alongside `drain()` when a fake worker
+ *  thread's own port messaging (real MessageChannel microtasks, not
+ *  `FakeClock`-driven) is in the mix (D#29's `attachHostCallHandler`). */
+async function flush(n = 3): Promise<void> {
+  for (let i = 0; i < n; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function buildFullStack(clock: FakeClock, driver: SessionDriver, extensions: SubagentExtensionPoints[] = []) {
   const pool = new SingleSlotPool(clock, 1); // maxParallel-equivalent: exactly one global slot (test #28's setup)
   const store = new MemoryRunStore();
@@ -109,6 +142,11 @@ function buildFullStack(clock: FakeClock, driver: SessionDriver, extensions: Sub
     get: (name: string) => (name === "worker" ? type : undefined),
     list: () => [type],
     reload: async () => ({ types: [type], errors: [] }),
+    // workflow-experts §6 D#29: `createWorkflowChildSpawner`'s `configHashOf`
+    // forwards straight to this registry method (required, not optional, on
+    // `AgentTypeRegistry` — host.ts itself treats a missing/undefined result
+    // as "fail closed on replay", never a crash).
+    configHashOf: (name: string) => (name === "worker" ? "hash-worker" : undefined),
   };
   const svc: SpawnService & { snapshots(): readonly RunSnapshot[] } = createSpawnService({
     types,
@@ -116,16 +154,54 @@ function buildFullStack(clock: FakeClock, driver: SessionDriver, extensions: Sub
     runner,
     now: () => clock.now(),
   });
-  return { pool, store, svc };
+  return { pool, store, svc, types };
 }
 
-describe("workflow-experts \u00a76 D#28: consult spawn admission alongside a full workflow slot", () => {
+/** A driver that hands back a fresh, controllable prompt() per `create()`
+ *  call and records each `bind()`'s `onEvent` callback in call order —
+ *  D#30/D#31 spawn R then C sequentially (draining between each), so
+ *  `sinks[0]`/`resolvers[0]` are R's and `sinks[1]`/`resolvers[1]` are C's. */
+function createOrderedDriver(): {
+  driver: SessionDriver;
+  sinks: Array<(e: DriverEvent) => void>;
+  resolvers: Array<() => void>;
+} {
+  const sinks: Array<(e: DriverEvent) => void> = [];
+  const resolvers: Array<() => void> = [];
+  const makeControllableHandle = (overrides: Partial<SessionHandle> = {}): SessionHandle => {
+    let resolvePrompt!: () => void;
+    const promptP = new Promise<void>((resolve) => {
+      resolvePrompt = resolve;
+    });
+    resolvers.push(resolvePrompt);
+    return handle({ prompt: () => promptP, ...overrides });
+  };
+  const driver: SessionDriver = {
+    create: async () => makeControllableHandle(),
+    // C (the fork-shaped consult child) goes through `resume`, never
+    // `create` (X2 resume path) — same controllable-prompt shape so its own
+    // message_end/resolve can be driven independently of R's.
+    resume: async (file) => makeControllableHandle({ sessionFile: file }),
+    bind: async (_h, cb) => {
+      sinks.push(cb);
+    },
+    onLateArrival: () => undefined,
+  };
+  return { driver, sinks, resolvers };
+}
+
+describe("workflow-experts §6 D#28: consult spawn admission alongside a full workflow slot", () => {
   it("with the single global slot held by the workflow's own child R, a slotless fork-shaped consult spawn is admitted immediately; a second, non-slotless workflow agent() spawn still queues on the slot", async () => {
     const clock = new FakeClock();
     // R's own prompt() never resolves -- it must stay "running" (holding the
     // sole global slot) for the whole test, until explicitly aborted below.
     const driver: SessionDriver = {
       create: async () => handle({ prompt: () => new Promise(() => {}) }),
+      // Every fork-shaped ("consult") spawn in this file goes through
+      // `driver.resume`, never `driver.create` (X2 resume path) — a driver
+      // without it fails every such run with "session driver does not
+      // support resume" the instant it actually starts.
+      resume: async (file) => handle({ sessionFile: file, prompt: () => new Promise(() => {}) }),
       bind: async () => undefined,
       onLateArrival: () => undefined,
     };
@@ -179,31 +255,307 @@ describe("workflow-experts \u00a76 D#28: consult spawn admission alongside a ful
   });
 });
 
-describe("workflow-experts \u00a76 D#27/#29/#30/#31: blocked pending package B/C \u2014 re-run once merged", () => {
-  it.skip("D#27: abort(R) racing a consult fork-spawn admission in the same tick rejects with 'parent run is stopping or gone' (needs spawn-service.ts's `stopping` set, package B \u00a74.7)", () => {
-    // Intentionally not implemented here: this package's file domain
-    // excludes src/service/spawn-service.ts. Once package B lands, port
-    // tests/service/spawn-fork-admission.test.ts's scenarios (or extend
-    // this file) to also exercise a real workflow R + a real consult-shaped
-    // fork spawn racing abort(R) in the same synchronous tick.
-  });
+describe("workflow-experts §6 D#27: fork admission vs. abort race (real SpawnService + RuntimeRunner)", () => {
+  it("a same-tick abort(R) rejects a racing fork-shaped consult spawn; a fork spawned BEFORE abort ends up cascade-aborted alongside R", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => new Promise(() => {}) }),
+      // Every fork-shaped ("consult") spawn in this file goes through
+      // `driver.resume`, never `driver.create` (X2 resume path) — a driver
+      // without it fails every such run with "session driver does not
+      // support resume" the instant it actually starts.
+      resume: async (file) => handle({ sessionFile: file, prompt: () => new Promise(() => {}) }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const { svc } = buildFullStack(clock, driver);
+    const forkDir = mkdtempSync(join(tmpdir(), "wf-experts-fork27-"));
+    const forkFile = (name: string): string => {
+      const f = join(forkDir, name);
+      writeFileSync(f, "");
+      return f;
+    };
 
-  it.skip("D#29: workflow stop/killAt aborts R, which cascades to abort a fork-spawned consult child C; stopOwned finishes within abortGraceMs with no leftover timers (needs package B's stopping guard to be meaningful \u2014 today's cascadeChildren already aborts a plain child, but the interesting race this test targets is B's)", () => {
-    // Cascade-abort of an *already admitted* plain child is already covered
-    // by existing spawn-service tests; the workflow-specific value of #29 is
-    // asserting the *forkSessionFrom* path specifically, which is B's guard.
-  });
+    // --- Phase A: same-tick race. `abort()`'s synchronous prefix
+    // (`stopping.add(runId)`, spawn-service.ts D19/N3) has already run by
+    // the time this statement hands back a pending promise, so the very
+    // next statement's fork spawn races the SAME tick.
+    const r1 = await svc.spawn({ type: "worker", prompt: "R1", budgetOverride: { totalMs: 60_000 } });
+    if ("error" in r1) throw new Error(r1.error.message);
+    await drain(clock, 3);
 
-  it.skip("D#30: normal completion path \u2014 R absorbs C's usage exactly once (absorbedRunIds), workflow aggregation and /agent costs do not double count (needs the real consult tool + resolveExperts wiring end-to-end, package C)", () => {
-    // Package A's own contribution (SpawnRequest.consultExperts forwarding,
-    // ChildSpawner.resolveExperts) is covered by spawner-adapter.test.ts and
-    // host.test.ts; the usage-absorption accounting itself lives in
-    // runtime-adapter.ts/request-threading.ts and is exercised by consult's
-    // own existing test suite, not this package.
-  });
+    const abort1P = svc.abort(r1.runId, "user_stop");
+    const raced = await svc.spawn({
+      type: "worker",
+      prompt: "consult-vs-abort",
+      slotless: true,
+      parentRunId: r1.runId,
+      forkSessionFrom: forkFile("racer.jsonl"),
+      budgetOverride: { totalMs: 10_000 },
+    });
+    expect(raced).toEqual({
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+    });
+    await abort1P;
+    await drain(clock, 5);
 
-  it.skip('D#31: consult in progress when R is aborted \u2014 workflow aggregation under-counts C\'s usage (known D20 gap), but global HUD/"+agents" still counts it (needs the real consult tool end-to-end, package C)', () => {
-    // Same dependency as #30 \u2014 the cost-absorption machinery under test
-    // here is entirely outside src/workflow/**/spawner-adapter.ts.
+    // --- Phase B: a fork spawned BEFORE abort is on R's `childrenOf` set by
+    // the time abort() cascades, so it ends up aborted alongside R.
+    const r2 = await svc.spawn({ type: "worker", prompt: "R2", budgetOverride: { totalMs: 60_000 } });
+    if ("error" in r2) throw new Error(r2.error.message);
+    await drain(clock, 3);
+    const c2 = await svc.spawn({
+      type: "worker",
+      prompt: "consult-before-abort",
+      slotless: true,
+      parentRunId: r2.runId,
+      forkSessionFrom: forkFile("prior.jsonl"),
+      budgetOverride: { totalMs: 10_000 },
+    });
+    if ("error" in c2) throw new Error(c2.error.message);
+    await drain(clock, 3);
+
+    await svc.abort(r2.runId, "user_stop");
+    await drain(clock, 5);
+
+    const r2Snap = svc.snapshots().find((s) => s.runId === r2.runId);
+    const c2Snap = svc.snapshots().find((s) => s.runId === c2.runId);
+    expect(r2Snap?.status).toBe("aborted");
+    expect(c2Snap?.status).toBe("aborted");
+  });
+});
+
+describe("workflow-experts §6 D#29: HostCallHandler.stopOwned cascades R → a fork-spawned consult child C", () => {
+  it("stopOwned settles R and cascade-aborts C within the grace window, with no orphaned children and no leftover timers", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => new Promise(() => {}) }),
+      // Every fork-shaped ("consult") spawn in this file goes through
+      // `driver.resume`, never `driver.create` (X2 resume path) — a driver
+      // without it fails every such run with "session driver does not
+      // support resume" the instant it actually starts.
+      resume: async (file) => handle({ sessionFile: file, prompt: () => new Promise(() => {}) }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const { svc, types } = buildFullStack(clock, driver);
+    const spawner: ChildSpawner = createWorkflowChildSpawner(svc, types);
+    const gateRunner: GateRunner = async () => ({ ok: true, code: 0, stdout: "", stderr: "" });
+
+    const { spawnWorker, workerData } = fakeSpawnWorkerFactory();
+    const workerHost = createWorkerHost({ clock, spawnWorker });
+    await workerHost.boot({
+      scriptSource: 'export const meta = { name: "t", description: "t" };',
+      scriptSliceMs: 1_000,
+      heartbeatMs: 0,
+      workerBootMs: 1_000,
+      terminateConfirmMs: 500,
+    });
+    const sent: unknown[] = [];
+    workerData().commPort.on("message", (m) => sent.push(m));
+
+    let spawnedRunId: string | undefined;
+    const handler = attachHostCallHandler({
+      clock,
+      workerHost,
+      spawner,
+      gateRunner,
+      budget: {},
+      // The workflow's own (never-a-tracked-run) owner id — `stopOwned`
+      // funnels into `spawner.stopChildrenOf(parentRunId, cause)` with this.
+      parentRunId: "wf-1",
+      onChildEvent: (e) => {
+        if (e.kind === "spawned") spawnedRunId = e.runId;
+      },
+    });
+
+    // R: the workflow script's own `agent("R")` call, dispatched through the
+    // real host_call protocol so it genuinely lands as `parentRunId: "wf-1"`.
+    workerData().commPort.postMessage({
+      kind: "host_call",
+      id: "1",
+      op: "agent",
+      args: { prompt: "R", opts: { agentType: "worker" } },
+    });
+    await flush();
+    await drain(clock, 3);
+    if (spawnedRunId === undefined) throw new Error("R never spawned (bad harness assumption)");
+
+    // C: a fork-shaped consult child of R, spawned directly on `svc` (the
+    // real consult tool's own dispatch shape — bypassing host.ts's experts
+    // wiring entirely, per this file's Scope note above).
+    const forkDir = mkdtempSync(join(tmpdir(), "wf-experts-fork29-"));
+    const forkFile = join(forkDir, "fork.jsonl");
+    writeFileSync(forkFile, "");
+    const c = await svc.spawn({
+      type: "worker",
+      prompt: "consult-C",
+      slotless: true,
+      parentRunId: spawnedRunId,
+      forkSessionFrom: forkFile,
+      budgetOverride: { totalMs: 10_000 },
+    });
+    if ("error" in c) throw new Error(c.error.message);
+    await drain(clock, 3);
+
+    const stopP = handler.stopOwned("user_stop", 500);
+    await drain(clock, 10);
+    await flush();
+    const result = await stopP;
+
+    expect(result.orphanChildren).toEqual([]); // R settled for real, well inside the 500ms grace
+    const rSnap = svc.snapshots().find((s) => s.runId === spawnedRunId);
+    const cSnap = svc.snapshots().find((s) => s.runId === c.runId);
+    expect(rSnap?.status).toBe("aborted");
+    expect(cSnap?.status).toBe("aborted"); // cascaded via stopChildrenOf("wf-1") -> abort(R) -> abort(C)
+
+    await workerHost.terminate("test done");
+    await flush();
+    expect(clock.pendingTimers).toBe(0);
+  });
+});
+
+describe("workflow-experts §6 D#30: normal completion — R absorbs C's usage exactly once", () => {
+  it("R's diag.usage/absorbedRunIds fold in C's cost once; workflow aggregation and the /agent-costs + usage-broadcast dedupe consumers do not double count", async () => {
+    const clock = new FakeClock();
+    const { driver, sinks, resolvers } = createOrderedDriver();
+    const { svc } = buildFullStack(clock, driver);
+
+    const r = await svc.spawn({ type: "worker", prompt: "R", budgetOverride: { totalMs: 60_000 } });
+    if ("error" in r) throw new Error(r.error.message);
+    await drain(clock, 3);
+    if (sinks.length < 1) throw new Error("R never bound (bad harness assumption)");
+
+    const forkDir = mkdtempSync(join(tmpdir(), "wf-experts-fork30-"));
+    const forkFile = join(forkDir, "fork.jsonl");
+    writeFileSync(forkFile, "");
+    const c = await svc.spawn({
+      type: "worker",
+      prompt: "consult-C",
+      slotless: true,
+      parentRunId: r.runId,
+      forkSessionFrom: forkFile,
+      budgetOverride: { totalMs: 10_000 },
+    });
+    if ("error" in c) throw new Error(c.error.message);
+    await drain(clock, 3);
+    if (sinks.length < 2) throw new Error("C never bound (bad harness assumption)");
+
+    // C runs its own turn (its own accrued cost) and completes normally.
+    sinks[1]!({ t: "message_end", usage: { input: 500, output: 300, cacheRead: 0, cacheWrite: 0, costUsd: 0.12 } });
+    resolvers[1]!();
+    await drain(clock, 5);
+    const cSnap = svc.snapshots().find((s) => s.runId === c.runId);
+    expect(cSnap?.status).toBe("completed");
+    expect(cSnap?.diag.usage?.costUsd).toBeCloseTo(0.12, 10);
+
+    // The (simulated) real consult tool delivers C's lifetime spend on R's
+    // OWN toolResult message_end — exactly the shape
+    // tests/runtime/nested-run-usage.test.ts pins for a `consultRunId`-
+    // bearing toolResult (X9/X12: the session driver already extracted
+    // `absorbedRunIds` before this reaches the state machine).
+    sinks[0]!({
+      t: "message_end",
+      usage: { input: 50, output: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.12 },
+      absorbedRunIds: [c.runId],
+    });
+    resolvers[0]!();
+    await drain(clock, 5);
+    const rSnap = svc.snapshots().find((s) => s.runId === r.runId);
+    expect(rSnap?.status).toBe("completed");
+    expect(rSnap?.diag.usage?.costUsd).toBeCloseTo(0.12, 10);
+    expect(rSnap?.diag.absorbedRunIds).toContain(c.runId);
+
+    // Workflow-level aggregation: only R is the workflow's own direct child
+    // (host.ts only ever records direct `agent()` calls into
+    // `WorkflowChildSummary[]` — C is a grandchild reached via consult, never
+    // a workflow "child" in that sense).
+    const outcome = {
+      children: [{ callId: "1", runId: r.runId, source: "live", status: "completed", durationMs: 1 }],
+    } as unknown as WorkflowOutcome;
+    const usageOf = (id: string) => svc.snapshots().find((s) => s.runId === id)?.diag.usage;
+    const aggregated = aggregateChildUsage(outcome, usageOf);
+    expect(aggregated?.costUsd).toBeCloseTo(0.12, 10); // counted exactly once, not 0.24
+
+    // Consumer-level dedupe: src/commands/status.ts's own doc says the grand
+    // total "skips any run whose id shows up in another tracked run's
+    // absorbedRunIds" — same rule the HUD footer's `+agents` and the usage
+    // broadcast's `absorbed` flag use.
+    const costsText = renderCosts({ list: () => svc.snapshots() } as never);
+    expect(costsText).toContain("(absorbed)");
+    expect(costsText).toMatch(/Total: \$0\.1200/);
+
+    const usageEvent = buildUsageEvent(svc.snapshots(), clock.now());
+    const cRow = usageEvent.runs.find((row) => row.runId === c.runId);
+    expect(cRow?.absorbed).toBe(true);
+    expect(usageEvent.activeCostUsd).toBe(0); // both runs are terminal by now
+  });
+});
+
+describe("workflow-experts §6 D#31: consult in progress when R is aborted — known D20 undercount", () => {
+  it("workflow aggregation excludes C's already-accrued cost, but the global usage-broadcast/costs consumers still track it independently", async () => {
+    const clock = new FakeClock();
+    const { driver, sinks } = createOrderedDriver();
+    const { svc } = buildFullStack(clock, driver);
+
+    const r = await svc.spawn({ type: "worker", prompt: "R", budgetOverride: { totalMs: 60_000 } });
+    if ("error" in r) throw new Error(r.error.message);
+    await drain(clock, 3);
+    if (sinks.length < 1) throw new Error("R never bound (bad harness assumption)");
+
+    const forkDir = mkdtempSync(join(tmpdir(), "wf-experts-fork31-"));
+    const forkFile = join(forkDir, "fork.jsonl");
+    writeFileSync(forkFile, "");
+    const c = await svc.spawn({
+      type: "worker",
+      prompt: "consult-C",
+      slotless: true,
+      parentRunId: r.runId,
+      forkSessionFrom: forkFile,
+      budgetOverride: { totalMs: 10_000 },
+    });
+    if ("error" in c) throw new Error(c.error.message);
+    await drain(clock, 3);
+    if (sinks.length < 2) throw new Error("C never bound (bad harness assumption)");
+
+    // C is "in progress": it has already burned some of its own tokens (its
+    // own message_end, no absorption — the consult never got far enough to
+    // deliver a toolResult back to R) when R gets aborted.
+    sinks[1]!({ t: "message_end", usage: { input: 200, output: 100, cacheRead: 0, cacheWrite: 0, costUsd: 0.05 } });
+    await drain(clock, 2);
+
+    await svc.abort(r.runId, "user_stop");
+    await drain(clock, 5);
+
+    const rSnap = svc.snapshots().find((s) => s.runId === r.runId);
+    const cSnap = svc.snapshots().find((s) => s.runId === c.runId);
+    expect(rSnap?.status).toBe("aborted");
+    expect(cSnap?.status).toBe("aborted"); // cascaded alongside R
+    expect(rSnap?.diag.usage?.costUsd ?? 0).toBe(0); // R never absorbed anything from C
+    expect(rSnap?.diag.absorbedRunIds ?? []).toEqual([]);
+    expect(cSnap?.diag.usage?.costUsd).toBeCloseTo(0.05, 10); // C's own accrued spend, untouched by the abort
+
+    // D20's known gap: workflow-level aggregation only ever sees R (its one
+    // direct child) — C's cost silently disappears from the workflow total.
+    const outcome = {
+      children: [{ callId: "1", runId: r.runId, source: "live", status: "aborted", durationMs: 1 }],
+    } as unknown as WorkflowOutcome;
+    const usageOf = (id: string) => svc.snapshots().find((s) => s.runId === id)?.diag.usage;
+    const aggregated = aggregateChildUsage(outcome, usageOf);
+    expect(aggregated?.costUsd ?? 0).toBe(0); // C's $0.05 is nowhere in the workflow's own total
+
+    // But the global tracked-run consumers (HUD usage broadcast / `/agent
+    // costs`) still see C as an independent, non-absorbed run — its spend is
+    // not lost, only missing from THIS workflow's own aggregate (D20; fix
+    // this assertion, not delete it, once the v2 compensation lands).
+    const usageEvent = buildUsageEvent(svc.snapshots(), clock.now());
+    const cRow = usageEvent.runs.find((row) => row.runId === c.runId);
+    expect(cRow).toBeDefined();
+    expect(cRow?.absorbed).toBeUndefined();
+    expect(cRow?.costUsd).toBeCloseTo(0.05, 10);
+
+    const costsText = renderCosts({ list: () => svc.snapshots() } as never);
+    expect(costsText).not.toContain("(absorbed)");
+    expect(costsText).toMatch(/Total: \$0\.0500/);
   });
 });

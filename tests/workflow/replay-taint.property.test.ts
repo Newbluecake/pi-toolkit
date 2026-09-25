@@ -6,21 +6,21 @@ import { buildEntry } from "../../src/workflow/journal.js";
 import type { HostCallEnvelope, JournalEntry, WorkflowChildSummary } from "../../src/workflow/types.js";
 
 /**
- * workflow-experts (docs/dev/workflow-experts/plan.md \u00a76 test C#25):
+ * workflow-experts (docs/dev/workflow-experts/plan.md §6 test C#25):
  * seeded property coverage for chain-taint replay safety. Two runs of the
  * *same* submission plan (identical prompts/opts, same order) are driven
  * through fresh `attachHostCallHandler` instances; between the two runs the
- * environment is randomly flipped \u2014 each `agent({ experts })` step's
+ * environment is randomly flipped — each `agent({ experts })` step's
  * resolution independently succeeds or fails in run 1 vs run 2. Run 2's
  * journal `index` is built from whatever run 1 actually appended.
  *
- * Since `TaskSemantics` never includes `experts` (\u00a74.6: taskKeyOf is
+ * Since `TaskSemantics` never includes `experts` (§4.6: taskKeyOf is
  * unchanged), the *chain digest* a plain or experts-declaring step produces
- * is identical between the two runs regardless of resolution outcome \u2014 only
+ * is identical between the two runs regardless of resolution outcome — only
  * *whether it gets journaled* and *whether taint is set* depend on the
  * per-run environment. That is exactly what this test exercises:
  *
- *  - P2/P3 (\u00a75): once a run's OWN chain is tainted (some earlier step's
+ *  - P2/P3 (§5): once a run's OWN chain is tainted (some earlier step's
  *    experts resolved successfully in *that* run), no later step in that
  *    same run may ever be a replay hit, and no later step may ever be
  *    journaled (checked directly against the append log and the live
@@ -140,7 +140,7 @@ function genPlan(next: () => number, n: number): Step[] {
   return Array.from({ length: n }, (_v, i) => ({ prompt: `s${i}`, experts: next() < 0.3 }));
 }
 
-describe("workflow-experts \u00a76 C#25: chain-taint property (seeded, two runs, environment flip)", () => {
+describe("workflow-experts §6 C#25: chain-taint property (seeded, two runs, environment flip)", () => {
   const seeds = Array.from({ length: 24 }, (_v, i) => i * 97 + 1);
 
   let sawSuccess = false;
@@ -218,7 +218,7 @@ describe("workflow-experts \u00a76 C#25: chain-taint property (seeded, two runs,
   });
 });
 
-describe("workflow-experts \u00a76 C#25 (targeted, deterministic): a hand-built taint-then-replay scenario", () => {
+describe("workflow-experts §6 C#25 (targeted, deterministic): a hand-built taint-then-replay scenario", () => {
   it("a plain call before an experts call replays cleanly across runs; the tainted tail never does", async () => {
     const plan: Step[] = [
       { prompt: "a", experts: false },

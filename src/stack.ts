@@ -1838,18 +1838,12 @@ export function buildSessionStack(
   // workflow-experts (docs/dev/workflow-experts/plan.md §4.8): the workflow
   // engine's own dispatch-time expert resolver — always `completedOnly:
   // true` (D8), late-bound through `consultRef` exactly like
-  // `consultResolveExperts` above (package C, `src/consult/index.ts`, is not
-  // touched by this package; its `resolveExperts` signature is frozen to
-  // accept an optional second `{ completedOnly?: boolean }` argument — the
-  // cast below is a temporary shim until that lands, harmless once it does).
+  // `consultResolveExperts` above (package C, `src/consult/index.ts`, already
+  // exposes `resolveExperts(refs, opts?: { completedOnly?: boolean })`).
   const workflowChildSpawner = createWorkflowChildSpawner(spawn, types, {
     resolveExperts: (refs, o) => {
       if (!consultRef.current) throw new Error("consult is not wired yet");
-      type ResolveExpertsWithOpts = (
-        handles: readonly string[],
-        opts?: { completedOnly?: boolean },
-      ) => ReturnType<ConsultWiring["resolveExperts"]>;
-      return (consultRef.current.resolveExperts as ResolveExpertsWithOpts)(refs, o);
+      return consultRef.current.resolveExperts(refs, o);
     },
   });
   const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");

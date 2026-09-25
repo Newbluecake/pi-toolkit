@@ -377,7 +377,7 @@ describe("real-worker agent() model/thinking opts (per-call overrides)", () => {
       spawn: async () => ({
         error: {
           message:
-            'Unknown model "cloudrouter-anthropic/claude-opus-5-5" \u2014 not in pi\'s model registry, so no run ' +
+            'Unknown model "cloudrouter-anthropic/claude-opus-5-5" — not in pi\'s model registry, so no run ' +
             "was started. Did you mean: cr-anthropic/claude-opus-5-5?",
         },
       }),
@@ -394,7 +394,7 @@ describe("real-worker agent() model/thinking opts (per-call overrides)", () => {
     const result = await outcome;
     expect(result.threw).toBeUndefined();
     expect(result.returned).toBe(
-      'caught:Unknown model "cloudrouter-anthropic/claude-opus-5-5" \u2014 not in pi\'s model registry, so no ' +
+      'caught:Unknown model "cloudrouter-anthropic/claude-opus-5-5" — not in pi\'s model registry, so no ' +
         "run was started. Did you mean: cr-anthropic/claude-opus-5-5?",
     );
     await host.terminate("test-done");
