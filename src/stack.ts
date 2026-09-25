@@ -13,11 +13,10 @@ import {
   buildSwitchHintText,
   buildUsageTickText,
   effectiveThresholdPercentWithTokens,
-  thresholdLineTokens,
   usageTickStep,
   windowScaledForcePercent,
 } from "./compact-hint/threshold.js";
-import { HYSTERESIS_PCT, composeHintLineTokens } from "./compact-hint/dynamic/threshold.js";
+import { HYSTERESIS_PCT, resolveEffectiveHint } from "./compact-hint/dynamic/threshold.js";
 import { hintNote, tickMarker } from "./compact-hint/dynamic/markers.js";
 import { wireDynamicThreshold, type DynamicRuntime } from "./compact-hint/dynamic/wire.js";
 import type { DynamicThresholdOutcome, ThresholdBasis } from "./compact-hint/dynamic/types.js";
@@ -641,28 +640,22 @@ export function createCompactHintHook(
     const runtimeOn =
       activeRuntime !== undefined && activeRuntime.active && activeRuntime.mode === "on" ? activeRuntime : undefined;
     const usableDyn = runtimeOn !== undefined && dyn?.usable === true ? dyn : undefined;
-    let effective = effectiveThresholdPercentWithTokens(
-      state.thresholdPercent,
-      state.thresholdTokens,
-      usage.contextWindow,
-      state.reserveTokens,
-    );
     // §3.6 合成（D3：min —— 动态线只能提前）。静态线更早 / 退化 / shadow / off ⇒ 原表达式不动。
-    let dynamicLineWon = false;
-    if (usableDyn !== undefined) {
-      const composedTokens = composeHintLineTokens({
-        staticLines: { percent: state.thresholdPercent, tokensK: state.thresholdTokens },
-        window: usage.contextWindow,
-        reserveTokens: state.reserveTokens,
-        mode: "on",
-        dynamic: usableDyn,
-      });
-      const staticTokens = thresholdLineTokens(state.thresholdPercent, state.thresholdTokens, usage.contextWindow);
-      if (composedTokens > 0 && composedTokens < staticTokens) {
-        effective = Math.min(effective, usableDyn.hintPercent);
-        dynamicLineWon = true;
-      }
-    }
+    // 与 /agent status 共用 resolveEffectiveHint，保证 status 显示的生效线与真实触发点一致。
+    const resolvedHint = resolveEffectiveHint({
+      staticEffectivePercent: effectiveThresholdPercentWithTokens(
+        state.thresholdPercent,
+        state.thresholdTokens,
+        usage.contextWindow,
+        state.reserveTokens,
+      ),
+      staticLines: { percent: state.thresholdPercent, tokensK: state.thresholdTokens },
+      window: usage.contextWindow,
+      reserveTokens: state.reserveTokens,
+      dynamic: usableDyn,
+    });
+    const effective = resolvedHint.percent;
+    const dynamicLineWon = resolvedHint.dynamicWon;
     const effectiveForce = effectiveThresholdPercentWithTokens(
       state.forceScaling ? windowScaledForcePercent(state.forceAtPercent, usage.contextWindow) : state.forceAtPercent,
       state.forceAtTokens,

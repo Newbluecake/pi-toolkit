@@ -494,6 +494,8 @@ export default function activate(pi: ExtensionAPI): void {
           const state = holder.current?.compactHint;
           if (!state) return undefined;
           return {
+            thresholdPercent: state.thresholdPercent,
+            thresholdTokens: state.thresholdTokens,
             forceAtPercent: state.forceAtPercent,
             forceAtTokens: state.forceAtTokens,
             forceScaling: state.forceScaling,

@@ -801,6 +801,66 @@ describe("dynamic threshold status section (P1-11)", () => {
     expect(first).not.toContain("dyn·");
   });
 
+  // P2 (live acceptance 2026-09-25): line 1 used to print the bare dynamic line ("hint 60%")
+  // while the hook actually fired at the static 50% (500k on a 1M window). With the static
+  // facts present it now shows the line that fires, composed via the hook's own function.
+  describe("line 1 shows the hint that actually fires (P2)", () => {
+    const staticFacts = {
+      thresholdPercent: 75,
+      thresholdTokens: 500,
+      forceAtPercent: 88,
+      forceAtTokens: 0,
+      forceScaling: true,
+      reserveTokens: 16_384,
+    };
+    const head = (view: unknown, facts: unknown = staticFacts) =>
+      renderStatus(dynamicDeps(view, facts), 1_000_000)
+        .split("\n")
+        .find((l) => l.startsWith("Compact thresholds:"));
+
+    it("static line earlier (the live case) ⇒ the static percent, dynamic shown as context", () => {
+      const view = { ...usableView, hintPercent: 60, hintTokens: 600_000, basis: "quality-cap" };
+      expect(head(view)).toContain("hint 50% (static; dyn 60% quality-cap)");
+      expect(head(view)).not.toContain("hint 60%");
+    });
+
+    it("dynamic line earlier ⇒ the dynamic percent, static shown as context", () => {
+      const view = { ...usableView, hintPercent: 41, hintTokens: 410_000, basis: "cost" };
+      expect(head(view)).toContain("hint 41% (dyn·cost; static 50%)");
+    });
+
+    it("shadow ⇒ the static line fires; dynamic is labelled shadow", () => {
+      const view = { ...usableView, mode: "shadow", hintPercent: 41, hintTokens: 410_000, basis: "cost" };
+      expect(head(view)).toContain("hint 50% (static; shadow dyn 41% cost)");
+    });
+
+    it("static line disabled (2000k line auto-off on 1M) ⇒ hint off; dynamic never resurrects it", () => {
+      const view = { ...usableView, hintPercent: 41, hintTokens: 410_000, basis: "cost" };
+      expect(head(view, { ...staticFacts, thresholdPercent: 0, thresholdTokens: 2000 })).toContain(
+        "hint off (static off; dyn 41% cost not applied)",
+      );
+    });
+
+    it("degraded ⇒ the static percent instead of the bare word 'static'", () => {
+      const view = {
+        ...usableView,
+        usable: false,
+        degradeReason: "price-unknown",
+        hintPercent: null,
+        hintTokens: null,
+      };
+      expect(head(view)).toContain("hint 50% (static) · force 88%");
+      expect(head(view)).toContain("dyn off (price-unknown → static line)");
+    });
+
+    it("no static facts (older host) ⇒ the previous bare dynamic format is kept", () => {
+      const view = { ...usableView, hintTokens: 410_000 };
+      expect(head(view, { forceAtPercent: 88, forceAtTokens: 0, forceScaling: true, reserveTokens: 16_384 })).toContain(
+        "hint 41% (dyn·cost)",
+      );
+    });
+  });
+
   it("view() reads through the holder so /reload retargets the new stack", () => {
     let current: unknown = { ...usableView };
     const base = deps([]) as Record<string, unknown>;

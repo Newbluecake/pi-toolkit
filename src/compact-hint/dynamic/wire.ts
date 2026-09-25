@@ -85,6 +85,8 @@ export interface DynamicStatusView {
   readonly usable: boolean;
   readonly degradeReason: string | null;
   readonly hintPercent: number | null;
+  /** The dynamic line in tokens (status composes it with the static line exactly like the hook). */
+  readonly hintTokens: number | null;
   readonly basis: string | null;
   readonly lowerBoundPercent: number | null;
   readonly capPercent: number | null;
@@ -710,6 +712,7 @@ export function wireDynamicThreshold(deps: DynamicWiringDeps): DynamicRuntime {
         usable,
         degradeReason: !usable && outcome !== undefined ? outcome.reason : null,
         hintPercent: usable ? outcome.hintPercent : null,
+        hintTokens: usable ? outcome.hintTokens : null,
         basis: usable ? outcome.basis : null,
         lowerBoundPercent: usable ? percentOf(outcome.lowerBound, lastWindow) : null,
         capPercent: usable ? percentOf(outcome.cap, lastWindow) : null,

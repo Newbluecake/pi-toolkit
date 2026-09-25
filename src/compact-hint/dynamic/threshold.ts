@@ -423,7 +423,8 @@ export interface ComposeHintLineArgs {
   window: number;
   reserveTokens: number;
   mode: DynamicConfig["mode"];
-  dynamic: DynamicThresholdOutcome;
+  /** Only `usable` and `hintTokens` are read, so a status view can pass a structural slice. */
+  dynamic: Pick<Extract<DynamicThresholdOutcome, { usable: true }>, "usable" | "hintTokens"> | { usable: false };
 }
 
 /**
@@ -441,4 +442,36 @@ export function composeHintLineTokens(args: ComposeHintLineArgs): number {
   if (mode !== "on") return staticTokens;
   if (!dynamic.usable) return staticTokens;
   return Math.min(staticTokens, dynamic.hintTokens);
+}
+
+export interface EffectiveHintArgs {
+  /** The static line as the hook resolves it today (`effectiveThresholdPercentWithTokens`). */
+  staticEffectivePercent: number;
+  staticLines: StaticHintLines;
+  window: number;
+  reserveTokens: number;
+  /** A usable dynamic line in `on` mode; undefined for off / shadow / degraded. */
+  dynamic: { hintTokens: number; hintPercent: number } | undefined;
+}
+
+/**
+ * The hint percent the hook actually fires at, plus whether the dynamic line won. Shared by
+ * the compact-hint hook and `/agent status` so the status line can never disagree with the
+ * real trigger: the dynamic line only wins when it is strictly earlier in token terms (D3).
+ */
+export function resolveEffectiveHint(args: EffectiveHintArgs): { percent: number; dynamicWon: boolean } {
+  const { staticEffectivePercent, staticLines, window: w, reserveTokens, dynamic } = args;
+  if (dynamic === undefined) return { percent: staticEffectivePercent, dynamicWon: false };
+  const composed = composeHintLineTokens({
+    staticLines,
+    window: w,
+    reserveTokens,
+    mode: "on",
+    dynamic: { usable: true, hintTokens: dynamic.hintTokens },
+  });
+  const staticTokens = thresholdLineTokens(staticLines.percent, staticLines.tokensK, w);
+  if (composed > 0 && composed < staticTokens) {
+    return { percent: Math.min(staticEffectivePercent, dynamic.hintPercent), dynamicWon: true };
+  }
+  return { percent: staticEffectivePercent, dynamicWon: false };
 }

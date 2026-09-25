@@ -27,6 +27,7 @@ import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor
 import { countActiveRuns } from "../reload/defer.js";
 import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
 import { effectiveThresholdPercentWithTokens, windowScaledForcePercent } from "../compact-hint/threshold.js";
+import { resolveEffectiveHint } from "../compact-hint/dynamic/threshold.js";
 
 /** Live settings object + persistence port (see config/setting-specs.ts). */
 export type SettingsCommandDeps = SettingsStore;
@@ -65,6 +66,9 @@ export interface StatusCommandDeps {
     view(): DynamicStatusView | undefined;
     facts?():
       | {
+          /** Static hint lines (percent + absolute-k), so line 1 can show the line that actually fires. */
+          thresholdPercent?: number;
+          thresholdTokens?: number;
           forceAtPercent: number;
           forceAtTokens: number;
           forceScaling: boolean;
@@ -567,6 +571,44 @@ function formatUsdPerM(value: number | null | undefined): string {
 }
 
 /**
+ * Line-1 head: the hint percent that actually fires (static vs dynamic composed exactly like the
+ * hook, via the shared resolveEffectiveHint), with the losing line shown for context. Without the
+ * static facts (older host) it falls back to the bare dynamic line.
+ */
+function renderHintHead(
+  view: DynamicStatusView,
+  staticLines: { percent: number; tokensK: number } | null,
+  staticEffective: number | null,
+  window: number | null,
+  reserveTokens: number | undefined,
+): string {
+  const dynLabel = `dyn ${view.hintPercent ?? "—"}% ${view.basis ?? "—"}`;
+  if (staticLines === null || staticEffective === null || window === null || reserveTokens === undefined) {
+    return `hint ${view.hintPercent ?? "—"}% (dyn·${view.basis ?? "—"})`;
+  }
+  if (view.mode !== "on") {
+    return staticEffective > 0
+      ? `hint ${staticEffective}% (static; shadow ${dynLabel})`
+      : `hint off (static off; shadow ${dynLabel})`;
+  }
+  // D3: a disabled static line stays disabled — the dynamic layer never resurrects a hint.
+  if (staticEffective <= 0) return `hint off (static off; ${dynLabel} not applied)`;
+  const resolved = resolveEffectiveHint({
+    staticEffectivePercent: staticEffective,
+    staticLines,
+    window,
+    reserveTokens,
+    dynamic:
+      view.hintTokens !== null && view.hintPercent !== null
+        ? { hintTokens: view.hintTokens, hintPercent: view.hintPercent }
+        : undefined,
+  });
+  return resolved.dynamicWon
+    ? `hint ${resolved.percent}% (dyn·${view.basis ?? "—"}; static ${staticEffective}%)`
+    : `hint ${resolved.percent}% (static; ${dynLabel})`;
+}
+
+/**
  * §10.3 渲染（英文，3 行）。view 缺席 / mode="off" ⇒ 整节不渲染（旧输出逐字节不变）。
  * `contextWindow` 来自命令时点的 `ctx.getContextUsage()`（force 线换算用，缺席则省略该段）。
  */
@@ -593,13 +635,22 @@ export function renderDynamicThresholdSection(
     window !== null ? `window ${formatTokensShort(window)}` : null,
     facts !== undefined ? `reserve ${formatTokensShort(facts.reserveTokens)}` : null,
   ].filter(Boolean);
+  // The static hint line as the hook resolves it (null when the host did not supply it).
+  const staticLines =
+    facts?.thresholdPercent !== undefined
+      ? { percent: facts.thresholdPercent, tokensK: facts.thresholdTokens ?? 0 }
+      : null;
+  const staticEffective =
+    staticLines !== null && window !== null && facts !== undefined
+      ? effectiveThresholdPercentWithTokens(staticLines.percent, staticLines.tokensK, window, facts.reserveTokens)
+      : null;
   if (view.usable) {
     const range =
       view.lowerBoundPercent !== null && view.capPercent !== null
         ? ` · range ${view.lowerBoundPercent}%..${view.capPercent}%`
         : "";
     const lines = [
-      `Compact thresholds: hint ${view.hintPercent ?? "—"}% (dyn·${view.basis ?? "—"}) · ${factsParts.join(" · ")}${range}`,
+      `Compact thresholds: ${renderHintHead(view, staticLines, staticEffective, window, facts?.reserveTokens)} · ${factsParts.join(" · ")}${range}`,
     ];
     lines.push(
       `  price r ${formatUsdPerM(view.priceReadPerM)} w ${formatUsdPerM(view.priceWritePerM)}~ out ${formatUsdPerM(view.priceOutputPerM)} (write pricing approximate) · C* ${
@@ -615,8 +666,10 @@ export function renderDynamicThresholdSection(
   }
   // 退化：第 1 行末尾改为 dyn off（reason → static line）；估计量/价格行仍给诊断值。
   const reason = view.degradeReason ?? "unknown";
+  const staticHead =
+    staticEffective === null ? "hint static" : staticEffective > 0 ? `hint ${staticEffective}% (static)` : "hint off";
   return [
-    `Compact thresholds: hint static · ${factsParts.join(" · ")} · dyn off (${reason} → static line)`,
+    `Compact thresholds: ${staticHead} · ${factsParts.join(" · ")} · dyn off (${reason} → static line)`,
     `  price r ${formatUsdPerM(view.priceReadPerM)} w ${formatUsdPerM(view.priceWritePerM)}~ · g ${formatTokensShort(view.g)}/turn (σ ${formatTokensShort(view.sigma)}) · S0 ${formatTokensShort(view.s0)}`,
     `  R $${view.rUsd.toFixed(2)} (uncalibrated prior) · dynamic ${view.mode} · telemetry ${view.telemetryCount} → ${view.telemetryPath ?? "—"}`,
   ];
