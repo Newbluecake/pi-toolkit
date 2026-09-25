@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { layoutTopLine, renderExtensionStatusLines, renderTimeLineStatusParts } from "../../src/hud/footer.js";
+import {
+  computeLiveSubagentCost,
+  layoutTopLine,
+  renderExtensionStatusLines,
+  renderTimeLineStatusParts,
+} from "../../src/hud/footer.js";
 
 const theme = {
   fg: (color: string, text: string) => `<${color}>${text}</>`,
@@ -155,5 +160,70 @@ describe("layoutTopLine", () => {
     expect(line.startsWith(parts.left)).toBe(true);
     expect(line.endsWith(parts.model)).toBe(true);
     expect(line.length).toBe(80);
+  });
+});
+
+describe("computeLiveSubagentCost (+agents component)", () => {
+  // 语义：Σ（主会话 assistant + 带 usage 的 toolResult）来自 session entries；
+  // +agents 来自 subagent:usage 广播减去 subAccounted。总数 = Σ + +agents。
+  const entry = (costUsd: number, terminal: boolean, absorbed?: boolean) =>
+    absorbed === undefined ? { costUsd, terminal } : { costUsd, terminal, absorbed: true };
+
+  it("复现：嵌套 run 花费已随父 run 的 toolResult 入账，但广播仍单列它 ⇒ 总额虚增", () => {
+    // 场景：主会话派出 R（$1.0），R 内部 consult 产生 C（$0.2，父 R）。
+    // 主会话 get_subagent_result(R) 的 toolResult usage 已含 C 的 $0.2（X9 链，
+    // 见 tests/runtime/nested-run-usage.test.ts），subAccounted 只记下 R。
+    const subUsage = new Map([
+      ["run_r", entry(1.0, true)],
+      ["run_c", entry(0.2, true)], // consult run：花费已在 R 的 $1.0 里
+    ]);
+    const live = computeLiveSubagentCost(subUsage, new Set(["run_r"]));
+    // 当前实现：C 未被 subAccounted ⇒ +agents 仍计 $0.2。
+    expect(live.costUsd).toBe(0.2);
+    // ⇒ footer 总额 = Σ($1.0，已含 C) + +agents($0.2) = $1.2，实际 $1.0。
+    expect(1.0 + live.costUsd).toBe(1.2);
+    expect(live.anyActive).toBe(false); // 全终态：显示为永久灰色残留
+  });
+
+  it("被吸收（absorbed）的 run 不再计入 +agents：总额回到真实值", () => {
+    const subUsage = new Map([
+      ["run_r", entry(1.0, true)],
+      ["run_c", entry(0.2, true, true)], // 广播标记：花费已在父 run 累计器内
+    ]);
+    const live = computeLiveSubagentCost(subUsage, new Set(["run_r"]));
+    expect(live.costUsd).toBe(0);
+    expect(1.0 + live.costUsd).toBe(1.0); // 实际花费
+    expect(live.anyActive).toBe(false);
+  });
+
+  it("父 run 尚未被主会话取回时，被吸收的子 run 也不重复：+agents 只剩父", () => {
+    // R 运行中（$0.8 已花，其中含已取回的 C $0.2）；广播：R 未吸收标记、C absorbed。
+    const subUsage = new Map([
+      ["run_r", entry(0.8, false)],
+      ["run_c", entry(0.2, true, true)],
+    ]);
+    const live = computeLiveSubagentCost(subUsage, new Set());
+    expect(live.costUsd).toBeCloseTo(0.8, 10);
+    expect(live.anyActive).toBe(true); // R 还在烧钱 ⇒ 黄色
+  });
+
+  it("未被吸收（父 run 从未取结果）的终态嵌套 run 仍计入（真实花费，不留少算）", () => {
+    const subUsage = new Map([
+      ["run_r", entry(0.8, true)],
+      ["run_g", entry(0.3, true)], // 后台嵌套 run，R 终态也没取它的结果
+    ]);
+    const live = computeLiveSubagentCost(subUsage, new Set(["run_r"]));
+    expect(live.costUsd).toBeCloseTo(0.3, 10);
+    expect(live.anyActive).toBe(false);
+  });
+
+  it("运行中的普通子 run 照常计入且标 active", () => {
+    const subUsage = new Map([
+      ["run_x", entry(0.4, false)],
+      ["run_y", entry(0.1, true)],
+    ]);
+    const live = computeLiveSubagentCost(subUsage, new Set());
+    expect(live.costUsd).toBeCloseTo(0.5, 10);
+    expect(live.anyActive).toBe(true);
   });
 });

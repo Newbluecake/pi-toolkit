@@ -13,11 +13,25 @@ import type { Millis, RunSnapshot, RunStatus } from "../core/types.js";
  *  - dedupe against pi's session-accounted usage by runId: a toolResult
  *    message carrying usage also carries details.runId (Agent /
  *    get_subagent_result), so a consumer counts an event run only until its
- *    runId shows up on an usage-bearing toolResult.
+ *    runId shows up on an usage-bearing toolResult;
+ *  - X12: `absorbed: true` marks a run whose lifetime spend already rode
+ *    into ANOTHER tracked run's accumulator on a usage-bearing toolResult
+ *    (nested Agent / get_subagent_result / consult) — summing both would
+ *    double-count. Computed here as the union of every snapshot's
+ *    diag.absorbedRunIds, so consumers never re-derive it.
  */
 export interface SubagentUsageEvent {
   at: Millis;
-  runs: Array<{ runId: string; label?: string; costUsd: number; terminal: boolean }>;
+  runs: Array<{
+    runId: string;
+    label?: string;
+    costUsd: number;
+    terminal: boolean;
+    /** X12: spend already counted inside another tracked run (skip when summing). */
+    absorbed?: true;
+    /** Nesting edge, when the run was spawned by another tracked run. */
+    parentRunId?: string;
+  }>;
   /** Sum over non-terminal runs — the "currently burning" number. */
   activeCostUsd: number;
 }
@@ -26,16 +40,22 @@ const TERMINAL: readonly RunStatus[] = ["completed", "failed", "timed_out", "abo
 
 /** Pure event builder (unit-tested without timers). */
 export function buildUsageEvent(snapshots: readonly RunSnapshot[], at: Millis): SubagentUsageEvent {
+  // X12: a run absorbed by ANY tracked run is flagged once, centrally —
+  // consumers just skip `absorbed` entries instead of re-deriving the set.
+  const absorbedIds = new Set<string>();
+  for (const s of snapshots) for (const id of s.diag.absorbedRunIds ?? []) absorbedIds.add(id);
   const runs = snapshots.map((s) => ({
     runId: s.runId,
     ...(s.diag.label === undefined ? {} : { label: s.diag.label }),
     costUsd: s.diag.usage?.costUsd ?? 0,
     terminal: TERMINAL.includes(s.status),
+    ...(absorbedIds.has(s.runId) ? { absorbed: true as const } : {}),
+    ...(s.parentRunId === undefined ? {} : { parentRunId: s.parentRunId }),
   }));
   return {
     at,
     runs,
-    activeCostUsd: runs.reduce((sum, r) => sum + (r.terminal ? 0 : r.costUsd), 0),
+    activeCostUsd: runs.reduce((sum, r) => sum + (r.terminal || r.absorbed === true ? 0 : r.costUsd), 0),
   };
 }
 

@@ -397,7 +397,20 @@ export interface ContextUsageInfo {
 export type DriverEvent =
   | { t: "turn_start" }
   | { t: "turn_end"; toolResults: number }
-  | { t: "message_end"; usage?: UsageDelta }
+  | {
+      t: "message_end";
+      usage?: UsageDelta;
+      /**
+       * X12: run ids whose lifetime spend rode into THIS run's X9 accumulator
+       * on this usage-bearing toolResult (nested Agent / get_subagent_result /
+       * consult). Extracted by the session driver from the pi message's
+       * `details` (runId / runIds / consultRunId); only present when the
+       * message carries usage (a background-spawn ack references a run whose
+       * spend is NOT yet inside the parent). Cost consumers (usage broadcast,
+       * /agent costs) use it to avoid double-counting the nested run.
+       */
+      absorbedRunIds?: readonly string[];
+    }
   | { t: "context_usage"; usage: ContextUsageInfo }
   | { t: "tool_start"; toolCallId: string; toolName: string; argsPreview?: string }
   | { t: "tool_end"; toolCallId: string; toolName: string; isError: boolean }
@@ -541,6 +554,15 @@ export interface RunDiagnostics {
    * stats by design (architecture §7.2 X9).
    */
   usage?: UsageDelta;
+  /**
+   * X12: bounded, deduped set of run ids whose lifetime spend was absorbed
+   * into `usage` via a usage-bearing toolResult (nested Agent / consult /
+   * get_subagent_result fetches inside THIS run's session). Cost consumers use
+   * it to skip those runs when summing per-run costs (usage broadcast's
+   * `absorbed` flag, /agent costs Total). Monotone — ids are only ever added
+   * (cap: ABSORBED_RUN_IDS_CAP, FIFO).
+   */
+  absorbedRunIds?: string[];
   /** Best-effort live context snapshot; trailing events after terminal only update memory and are not persisted again. */
   contextUsage?: ContextUsageInfo;
   /** M-A: display-only spawn metadata (model/label/type), set once at enqueue. */

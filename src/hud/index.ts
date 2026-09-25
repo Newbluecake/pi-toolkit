@@ -27,7 +27,7 @@
  */
 import { performance } from "node:perf_hooks";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { installFooter, renderConversationStats } from "./footer.js";
+import { installFooter, renderConversationStats, type SubUsageEntry } from "./footer.js";
 import { readRepoState, readWorktrees, type ExecFn, type GitState, type WorktreeInfo } from "./git.js";
 import { defaultPluginInfoDeps, readPluginInfo, type PluginInfo, type PluginInfoDeps } from "./plugin-info.js";
 import { SpeedTracker } from "./speed.js";
@@ -93,11 +93,12 @@ export interface HudSession {
    */
   bgAgents: Map<string, number>;
   /**
-   * pi-subagent 实时费用（subagent:usage 事件，1Hz）：runId → 累计花费/是否终态。
+   * pi-subagent 实时费用（subagent:usage 事件，1Hz）：runId → 累计花费/是否终态/是否已被父 run 吸收。
    * 与 session 已入账部分（携带 usage 的 toolResult，其 details.runId 可识别）
-   * 按 runId 去重：已入账的 run 不再计入实时分量，避免双算。
+   * 按 runId 去重：已入账的 run 不再计入实时分量，避免双算；被吸收
+   * （absorbed）同理 —— 其花费已随父 run 的 toolResult usage 入账。
    */
-  subUsage: Map<string, { costUsd: number; terminal: boolean }>;
+  subUsage: Map<string, SubUsageEntry>;
   timing: TimingState;
   speed: SpeedTracker;
   streamStartedAt: number | undefined;
@@ -296,6 +297,7 @@ export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
       s.subUsage.set(rid, {
         costUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : 0,
         terminal: Boolean((r as { terminal?: unknown }).terminal),
+        ...(Boolean((r as { absorbed?: unknown }).absorbed) ? { absorbed: true } : {}),
       });
     }
     s.footerRequestRender?.();

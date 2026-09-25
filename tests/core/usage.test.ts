@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
-import { createInitialState, reduce } from "../../src/core/state-machine.js";
+import { ABSORBED_RUN_IDS_CAP, createInitialState, reduce } from "../../src/core/state-machine.js";
 import type { RunState, StampedInput, UsageDelta } from "../../src/core/types.js";
 
 /**
@@ -152,5 +152,159 @@ describe("X9 usage accumulation", () => {
     s = apply(s, { kind: "prompt_settled" } as never, 7);
     expect(s.outcome?.usage).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(s.outcome ?? {}, "usage")).toBe(false);
+  });
+});
+
+/**
+ * X12: absorbedRunIds — the bounded, deduped set of nested-run ids whose
+ * lifetime spend rode into THIS run's X9 accumulator on a usage-bearing
+ * toolResult message_end (see tests/runtime/nested-run-usage.test.ts for the
+ * mapEvent half of this contract; these tests drive the reduce()/diag half
+ * directly, mirroring the "X9 usage accumulation" tests above).
+ */
+describe("X12 absorbed run ids", () => {
+  it("folds a message_end's absorbedRunIds into diag.absorbedRunIds", () => {
+    const s = apply(
+      runningState(),
+      {
+        kind: "session_event",
+        event: { t: "message_end", usage: usage(10, 5, 0.42), absorbedRunIds: ["run_c"] },
+      } as never,
+      6,
+    );
+    expect(s.diag.absorbedRunIds).toEqual(["run_c"]);
+  });
+
+  it("dedupes repeated ids and only ever grows across multiple message_ends (monotone)", () => {
+    let s = runningState();
+    s = apply(
+      s,
+      {
+        kind: "session_event",
+        event: { t: "message_end", usage: usage(1, 1, 0.1), absorbedRunIds: ["run_a", "run_b"] },
+      } as never,
+      6,
+    );
+    expect(s.diag.absorbedRunIds).toEqual(["run_a", "run_b"]);
+    // "run_a" repeats (e.g. a get_subagent_result poll re-fetching the same
+    // finished run) — must not duplicate; "run_c" is new — must be appended.
+    s = apply(
+      s,
+      {
+        kind: "session_event",
+        event: { t: "message_end", usage: usage(1, 1, 0.1), absorbedRunIds: ["run_a", "run_c"] },
+      } as never,
+      7,
+    );
+    expect(s.diag.absorbedRunIds).toEqual(["run_a", "run_b", "run_c"]);
+  });
+
+  it("keeps folding a trailing message_end's absorbedRunIds after the run is already terminal", () => {
+    let s = runningState();
+    s = apply(
+      s,
+      {
+        kind: "session_event",
+        event: { t: "message_end", usage: usage(1, 1, 0.1), absorbedRunIds: ["run_a"] },
+      } as never,
+      6,
+    );
+    s = apply(s, { kind: "prompt_settled" } as never, 7);
+    expect(s.status).toBe("completed");
+    // Trailing event during abort/reap teardown after settle (terminalUpdate branch).
+    s = apply(
+      s,
+      {
+        kind: "session_event",
+        event: { t: "message_end", usage: usage(1, 1, 0.1), absorbedRunIds: ["run_b"] },
+      } as never,
+      8,
+    );
+    expect(s.diag.absorbedRunIds).toEqual(["run_a", "run_b"]);
+  });
+
+  it("does not fabricate absorbedRunIds when the event carries none", () => {
+    const s = apply(
+      runningState(),
+      { kind: "session_event", event: { t: "message_end", usage: usage(1, 1, 0.1) } } as never,
+      6,
+    );
+    expect(s.diag.absorbedRunIds).toBeUndefined();
+  });
+
+  it("caps at ABSORBED_RUN_IDS_CAP, dropping the OLDEST id first (FIFO)", () => {
+    let s = runningState();
+    const total = ABSORBED_RUN_IDS_CAP + 10;
+    for (let i = 0; i < total; i++) {
+      s = apply(
+        s,
+        {
+          kind: "session_event",
+          event: { t: "message_end", usage: usage(1, 1, 0.001), absorbedRunIds: [`run_${i}`] },
+        } as never,
+        6 + i,
+      );
+    }
+    expect(s.diag.absorbedRunIds).toHaveLength(ABSORBED_RUN_IDS_CAP);
+    // The oldest 10 ids (run_0..run_9) were evicted; the newest CAP survive.
+    expect(s.diag.absorbedRunIds).not.toContain("run_0");
+    expect(s.diag.absorbedRunIds).not.toContain(`run_${total - ABSORBED_RUN_IDS_CAP - 1}`);
+    expect(s.diag.absorbedRunIds?.[0]).toBe(`run_${total - ABSORBED_RUN_IDS_CAP}`);
+    expect(s.diag.absorbedRunIds?.at(-1)).toBe(`run_${total - 1}`);
+    // Usage kept summing throughout — the cap only bounds the id set, never the money.
+    expect(s.diag.usage?.costUsd).toBeCloseTo(0.001 * total, 6);
+  });
+
+  /**
+   * Property (requested alongside the X12 diag addition): folding
+   * absorbedRunIds (a) never removes a previously-seen id (monotone set) and
+   * (b) never changes status/phase/effects relative to the same event stream
+   * with absorbedRunIds stripped — it is a pure additive diag annotation.
+   * Driven with a seeded PRNG over a mixed sequence of message_end (with/
+   * without absorbedRunIds) and text_delta events, from both a running and
+   * an already-terminal run (covers both reduce() folding sites: the main
+   * session_event branch and terminalUpdate's trailing-event branch).
+   */
+  function random(seed: number): () => number {
+    let value = seed >>> 0;
+    return () => {
+      value = (Math.imul(value ^ (value >>> 15), 1 | value) + 0x6d2b79f5) | 0;
+      return ((value ^ (value >>> 13)) >>> 0) / 4294967296;
+    };
+  }
+
+  it("property: absorbed id set is monotone and status/phase/effects are unaffected, 200 seeded sequences x {running, terminal}", () => {
+    for (const startTerminal of [false, true]) {
+      for (let seed = 1; seed <= 200; seed++) {
+        const next = random(seed + (startTerminal ? 900000 : 0));
+        let base = runningState();
+        if (startTerminal) base = apply(base, { kind: "prompt_settled" } as never, 6);
+        let withIds = base;
+        let without = base;
+        let prevAbsorbed: readonly string[] = base.diag.absorbedRunIds ?? [];
+        for (let step = 0; step < 20; step++) {
+          const at = 100 + step;
+          const hasIds = next() < 0.6;
+          const ids = hasIds ? [`r${Math.floor(next() * 5)}`] : undefined;
+          const eventBase = { t: "message_end" as const, usage: usage(1, 1, 0.01) };
+          const rWith = apply(
+            withIds,
+            { kind: "session_event", event: { ...eventBase, ...(ids ? { absorbedRunIds: ids } : {}) } } as never,
+            at,
+          );
+          const rWithout = apply(without, { kind: "session_event", event: eventBase } as never, at);
+          // (b) additive-only: stripping absorbedRunIds must not change anything else.
+          expect(rWith.status).toBe(rWithout.status);
+          expect(rWith.phase).toBe(rWithout.phase);
+          expect({ ...rWith.diag, absorbedRunIds: undefined }).toEqual({ ...rWithout.diag, absorbedRunIds: undefined });
+          // (a) monotone: every previously-seen id is still present.
+          const nowAbsorbed = rWith.diag.absorbedRunIds ?? [];
+          for (const id of prevAbsorbed) expect(nowAbsorbed).toContain(id);
+          prevAbsorbed = nowAbsorbed;
+          withIds = rWith;
+          without = rWithout;
+        }
+      }
+    }
   });
 });

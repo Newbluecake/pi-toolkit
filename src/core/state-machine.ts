@@ -54,6 +54,35 @@ export const TOOL_HISTORY_CAP = 30;
 export const TASK_PROMPT_CAP = 4096;
 
 /**
+ * X12: bounded cap for RunDiagnostics.absorbedRunIds. A run that delegates a
+ * lot (consult experts, nested Agents, repeated get_subagent_result fetches)
+ * absorbs one id per usage-bearing toolResult; the cap keeps persist_snapshot
+ * bounded. FIFO: the OLDEST id drops first — the residual risk is that a run
+ * absorbing more than this many children loses the earliest absorption
+ * markers (cost consumers then over-count those few runs), which is strictly
+ * better than unbounded growth on every snapshot write.
+ */
+export const ABSORBED_RUN_IDS_CAP = 100;
+
+/**
+ * X12: fold a message_end's absorbedRunIds (run ids whose lifetime spend rode
+ * into THIS run's X9 accumulator on that usage-bearing toolResult) into the
+ * diag's bounded, deduped set. Monotone: ids are only ever added.
+ */
+function absorbRunIds(prev: string[] | undefined, ids: readonly string[] | undefined): string[] | undefined {
+  if (ids === undefined || ids.length === 0) return prev;
+  const seen = new Set(prev ?? []);
+  const next = prev ? [...prev] : [];
+  for (const id of ids) {
+    if (id === "" || seen.has(id)) continue;
+    seen.add(id);
+    next.push(id);
+  }
+  if (next.length === 0) return prev;
+  return next.length > ABSORBED_RUN_IDS_CAP ? next.slice(next.length - ABSORBED_RUN_IDS_CAP) : next;
+}
+
+/**
  * Display-only cap for RunDiagnostics.thinkingText (the agent tree's `»`
  * thinking preview). Thinking streams can run to thousands of tokens; only
  * the freshest tail is signal, so keep the last THINKING_TEXT_CAP chars —
@@ -451,6 +480,11 @@ function terminalUpdate(state: RunState, input: RunInput): { state: RunState; ef
       const nextUsage = accumulateUsage(d.usage, input.event.usage);
       if (nextUsage === undefined) delete d.usage;
       else d.usage = nextUsage;
+      // X12: absorption markers fold on the same trailing events (a toolResult
+      // whose usage is still arriving after settle must still mark its runs).
+      const nextAbsorbed = absorbRunIds(d.absorbedRunIds, input.event.absorbedRunIds);
+      if (nextAbsorbed === undefined) delete d.absorbedRunIds;
+      else d.absorbedRunIds = nextAbsorbed;
       if (state.outcome)
         return {
           state: {
@@ -654,6 +688,9 @@ export function reduce(
   if (input.kind === "session_event") {
     const e = input.event;
     const usage = e.t === "message_end" ? accumulateUsage(state.diag.usage, e.usage) : undefined;
+    // X12: run ids absorbed by this message_end's usage-bearing toolResult —
+    // same threading rationale as usage below.
+    const absorbed = e.t === "message_end" ? absorbRunIds(state.diag.absorbedRunIds, e.absorbedRunIds) : undefined;
     const base: Partial<RunDiagnostics> = {
       lastEventAt: input.at,
       lastEventType: e.t,
@@ -669,6 +706,7 @@ export function reduce(
       // so the accumulator is updated regardless of which phase/branch handles this event
       // (including the abort_grace/reap early-return branch immediately below).
       ...(usage === undefined ? {} : { usage }),
+      ...(absorbed === undefined ? {} : { absorbedRunIds: absorbed }),
       // M-A: tool trail (toolHistory/toolCounts) — same threading rationale as usage.
       ...toolTrailPatch(state.diag, e, input.at),
     };

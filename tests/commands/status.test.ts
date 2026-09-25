@@ -337,6 +337,43 @@ describe("M7 renderCosts", () => {
     const { renderCosts } = await import("../../src/commands/status.js");
     expect(renderCosts({ list: () => [] } as never)).toContain("No subagent runs");
   });
+
+  it("X12: excludes an absorbed nested run from the grand total and marks its row", async () => {
+    const { renderCosts } = await import("../../src/commands/status.js");
+    // Parent R consulted expert C: R's usage already includes C's $0.20 (X9
+    // accumulation from the consult toolResult's message_end), and R's diag
+    // records C's runId as absorbed. Summing both rows would double-count C.
+    const parent = snapshot({
+      runId: "parent-r0",
+      diag: {
+        ...snapshot().diag,
+        label: "parent",
+        settledAt: 10_000,
+        usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.8 },
+        absorbedRunIds: ["child-c0"],
+      },
+    });
+    const child = snapshot({
+      runId: "child-c0",
+      diag: {
+        ...snapshot().diag,
+        label: "consult expert",
+        settledAt: 9_000,
+        usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, costUsd: 0.2 },
+      },
+    });
+    const text = renderCosts({ ...({} as object), list: () => [parent, child] } as never);
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("2 run(s)");
+    // Both rows still shown; the absorbed child is marked.
+    expect(text).toContain("child-c0");
+    expect(text.split("\n").find((l) => l.includes("child-c0"))).toContain("(absorbed)");
+    expect(text.split("\n").find((l) => l.includes("parent-r"))).not.toContain("(absorbed)");
+    // Total counts only the parent's $0.80 (which already includes the child's $0.20), not $1.00.
+    expect(text).toContain("Total: $0.8000");
+    expect(text).not.toContain("Total: $1.0000");
+    expect(text).toContain("excludes 1 absorbed run(s)");
+  });
 });
 
 describe("/agent settings subcommand", () => {

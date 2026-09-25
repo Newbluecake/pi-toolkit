@@ -125,6 +125,26 @@ export function previewToolArgs(args: unknown, max = 80): string | undefined {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+/**
+ * X12: collect the tracked-run ids a toolResult message's `details` carries:
+ * `runId` (nested Agent blocking result / get_subagent_result), `runIds`
+ * (SubagentWorkflow batch results) and `consultRunId` (consult tool result).
+ * Purely structural — no pi types, defensive against host shapes. Returns
+ * undefined when nothing recognizable is present (the common case: assistant
+ * message_ends and usage-less toolResults).
+ */
+export function toolResultRunIds(message: unknown): readonly string[] | undefined {
+  const m = message as { role?: unknown; details?: unknown } | undefined;
+  if (!m || m.role !== "toolResult") return undefined;
+  const det = m.details as { runId?: unknown; runIds?: unknown; consultRunId?: unknown } | undefined;
+  if (!det || typeof det !== "object") return undefined;
+  const ids: string[] = [];
+  if (typeof det.runId === "string" && det.runId !== "") ids.push(det.runId);
+  if (typeof det.consultRunId === "string" && det.consultRunId !== "") ids.push(det.consultRunId);
+  if (Array.isArray(det.runIds)) for (const r of det.runIds) if (typeof r === "string" && r !== "") ids.push(r);
+  return ids.length > 0 ? ids : undefined;
+}
+
 function mapEvent(e: any): DriverEvent | undefined {
   if (!e || typeof e.type !== "string") return undefined;
   const t = e.type;
@@ -133,7 +153,20 @@ function mapEvent(e: any): DriverEvent | undefined {
   if (t === "message_end") {
     // exactOptionalPropertyTypes: omit `usage` entirely when absent.
     const usage = mapUsage(e.message?.usage);
-    return usage ? { t: "message_end", usage } : { t: "message_end" };
+    // X12: pi emits message_end for toolResult messages too (agent-core
+    // tool-placement.js); a *usage-bearing* one carries some nested run's
+    // spend INTO this run's X9 accumulator, and its `details` name the run(s)
+    // (nested Agent / get_subagent_result: runId; workflow batch: runIds;
+    // consult: consultRunId). Extract those ids so cost consumers can skip
+    // the nested runs instead of double-counting them. Gated on usage: a
+    // background-spawn ack (or a "still running" poll) references a run whose
+    // spend is NOT yet inside the parent — absorbing it would under-count.
+    const absorbedRunIds = usage ? toolResultRunIds(e.message) : undefined;
+    return {
+      t: "message_end",
+      ...(usage ? { usage } : {}),
+      ...(absorbedRunIds === undefined ? {} : { absorbedRunIds }),
+    };
   }
   if (t === "tool_execution_start") {
     const argsPreview = previewToolArgs(e.args);

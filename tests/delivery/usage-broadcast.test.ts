@@ -51,6 +51,45 @@ describe("M-E: buildUsageEvent", () => {
     ]);
     expect(event.activeCostUsd).toBeCloseTo(0.1);
   });
+
+  it("X12: flags a run named in another tracked run's absorbedRunIds, and threads parentRunId", () => {
+    // Parent R absorbed consult run C's spend on a toolResult message_end;
+    // the broadcast must mark C so a consumer (HUD/costs) skips it when summing.
+    const event = buildUsageEvent(
+      [
+        snapshot({
+          runId: "r_parent",
+          diag: diag({ usage: usage(0.8), absorbedRunIds: ["r_child"] }),
+        }),
+        snapshot({
+          runId: "r_child",
+          status: "completed",
+          phase: "settled",
+          parentRunId: "r_parent",
+          diag: diag({ usage: usage(0.2) }),
+        }),
+      ],
+      5_000,
+    );
+    expect(event.runs).toEqual([
+      { runId: "r_parent", costUsd: 0.8, terminal: false },
+      { runId: "r_child", costUsd: 0.2, terminal: true, absorbed: true, parentRunId: "r_parent" },
+    ]);
+  });
+
+  it("X12: an absorbed run does not count toward activeCostUsd even while still running", () => {
+    // Defensive: our tools only attach usage (and thus absorption) at a nested
+    // run's terminal outcome, but the broadcaster must not double-bill even if
+    // a host quirk somehow marked a non-terminal run absorbed.
+    const event = buildUsageEvent(
+      [
+        snapshot({ runId: "r_parent", diag: diag({ usage: usage(0.5), absorbedRunIds: ["r_child"] }) }),
+        snapshot({ runId: "r_child", diag: diag({ usage: usage(0.3) }) }), // still running
+      ],
+      5_000,
+    );
+    expect(event.activeCostUsd).toBeCloseTo(0.5, 10);
+  });
 });
 
 describe("M-E: UsageBroadcaster ticker", () => {

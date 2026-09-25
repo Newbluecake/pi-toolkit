@@ -196,6 +196,42 @@ export function renderExtensionStatusLines(
   return lines;
 }
 
+/**
+ * One broadcast entry of the `subagent:usage` map (runId → cost/terminal),
+ * as kept by the HUD session and folded by computeLiveSubagentCost().
+ * `absorbed` marks a run whose lifetime spend already rode into its parent
+ * run's accumulator on a usage-bearing toolResult (nested Agent /
+ * get_subagent_result / consult) — see usage-broadcast.ts.
+ */
+export interface SubUsageEntry {
+  costUsd: number;
+  terminal: boolean;
+  absorbed?: boolean;
+}
+
+/**
+ * Fold the broadcast map into the footer's `+agents` component: the spend of
+ * every run NOT yet accounted on a session toolResult (subAccounted) and not
+ * absorbed into another tracked run's accumulator (X12 — nested Agent /
+ * consult / get_subagent_result spend rides the parent's toolResult usage;
+ * counting both would double-bill). Returns the total and whether any counted
+ * run is still burning money (yellow vs grey).
+ */
+export function computeLiveSubagentCost(
+  subUsage: ReadonlyMap<string, SubUsageEntry>,
+  subAccounted: ReadonlySet<string>,
+): { costUsd: number; anyActive: boolean } {
+  let costUsd = 0;
+  let anyActive = false;
+  for (const [rid, u] of subUsage) {
+    if (subAccounted.has(rid)) continue;
+    if (u.absorbed) continue;
+    costUsd += u.costUsd;
+    if (!u.terminal) anyActive = true;
+  }
+  return { costUsd, anyActive };
+}
+
 function renderLlmTiming(session: HudSession, ctx: ExtensionContext): string {
   const timing = session.timing;
   const activeLlmDurationMs = timing.llmStartedAt === undefined ? undefined : performance.now() - timing.llmStartedAt;
@@ -320,13 +356,9 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
         const totalParts: string[] = [];
         // 实时子代理花费：尚未经 toolResult 入账的 run 的累计成本。
         // 运行中显黄色（还在烧钱），全部终态但未取回时显灰色（残留尾差）。
-        let liveSubCost = 0;
-        let liveSubActive = false;
-        for (const [rid, u] of session.subUsage) {
-          if (subAccounted.has(rid)) continue;
-          liveSubCost += u.costUsd;
-          if (!u.terminal) liveSubActive = true;
-        }
+        const live = computeLiveSubagentCost(session.subUsage, subAccounted);
+        const liveSubCost = live.costUsd;
+        const liveSubActive = live.anyActive;
         if (totalInput) totalParts.push(theme.fg("success", `↑${formatTokens(totalInput)}`));
         if (totalOutput) totalParts.push(theme.fg("accent", `↓${formatTokens(totalOutput)}`));
         if (totalCacheRead) totalParts.push(theme.fg("dim", `R${formatTokens(totalCacheRead)}`));

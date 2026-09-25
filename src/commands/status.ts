@@ -399,11 +399,23 @@ export function renderRunDetail(
  * M7: `/agent costs` — per-run spend breakdown (cost-descending), separating
  * active from finished runs, with a grand total. Answers "钱花哪了" without
  * digging through notifications.
+ *
+ * X12: a run's `diag.usage` already includes the lifetime spend of any
+ * nested run absorbed on one of its usage-bearing toolResults (consult /
+ * nested Agent / get_subagent_result — see src/core/state-machine.ts
+ * absorbRunIds). Listing every run's cost AND summing all of them would
+ * double-count the absorbed child on top of the parent that already carries
+ * its spend, so the grand total skips any run whose id shows up in another
+ * tracked run's `absorbedRunIds` (same rule as the HUD footer's `+agents`
+ * and the usage broadcast's `absorbed` flag) — the per-run row is still
+ * shown (marked `(absorbed)`) so nothing silently disappears from the list.
  */
 export function renderCosts(query: QueryService): string {
   const runs = [...query.list()].sort((a, b) => (b.diag.usage?.costUsd ?? 0) - (a.diag.usage?.costUsd ?? 0));
   if (runs.length === 0) return "No subagent runs recorded this session.";
   const terminalStatuses = ["completed", "failed", "timed_out", "aborted"];
+  const absorbedIds = new Set<string>();
+  for (const s of runs) for (const id of s.diag.absorbedRunIds ?? []) absorbedIds.add(id);
   const lines = [`Subagent costs — ${runs.length} run(s)`];
   for (const s of runs) {
     const d = s.diag;
@@ -419,13 +431,19 @@ export function renderCosts(query: QueryService): string {
       `${d.turns}t`,
       d.settledAt !== undefined ? formatDuration(Math.max(0, d.settledAt - d.createdAt)) : "running",
     ];
-    lines.push(cols.join(" "));
+    let row = cols.join(" ");
+    if (absorbedIds.has(s.runId)) row += " (absorbed)";
+    lines.push(row);
   }
-  const total = sumUsage(runs.map((s) => s.diag.usage));
+  const countedRuns = runs.filter((s) => !absorbedIds.has(s.runId));
+  const total = sumUsage(countedRuns.map((s) => s.diag.usage));
   if (total)
     lines.push(
       `  Total: $${total.costUsd.toFixed(4)} · in:${total.input} out:${total.output} cache_r:${total.cacheRead}`,
     );
+  const absorbedCount = runs.length - countedRuns.length;
+  if (absorbedCount > 0)
+    lines.push(`  (excludes ${absorbedCount} absorbed run(s) already counted in a parent's total above)`);
   return lines.join("\n");
 }
 
