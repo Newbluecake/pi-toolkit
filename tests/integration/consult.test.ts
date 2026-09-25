@@ -34,10 +34,14 @@ import { buildFleetViewModel } from "../../src/ui/fleet-panel.js";
 let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
 const tempDirs: string[] = [];
 
+/** Releases for dispatcher prompts held open by spyOnDriver's default create handle. */
+const parentGates: Array<() => void> = [];
+
 beforeEach(() => {
   homeSandbox = sandboxHome();
 });
 afterEach(() => {
+  for (const release of parentGates.splice(0)) release();
   vi.restoreAllMocks();
   homeSandbox?.restore();
   homeSandbox = undefined;
@@ -193,7 +197,15 @@ function spyOnDriver(
   vi.spyOn(PiSessionDriver.prototype, "create").mockImplementation(async (spec) => {
     const s = spec as SpecLike;
     calls.push({ kind: "create", spec: s });
-    return ((await opts.onCreate?.(s)) ?? fakeHandle()) as never;
+    // Default dispatcher handle keeps its prompt pending until the test ends:
+    // a real consult() runs inside the asking run's own tool call, and fork
+    // admission rejects an asker that is stopping or gone (spawn-fork-guard,
+    // workflow-experts plan §4.7). Released in afterEach.
+    const gated = (): SessionHandle => {
+      const gate = new Promise<void>((resolve) => parentGates.push(resolve));
+      return fakeHandle({ prompt: () => gate });
+    };
+    return ((await opts.onCreate?.(s)) ?? gated()) as never;
   });
   vi.spyOn(PiSessionDriver.prototype, "resume").mockImplementation(async (file, spec) => {
     const s = spec as SpecLike;
