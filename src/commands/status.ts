@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot, UsageDelta } from "../core/types.js";
+import { displayAgentType } from "../core/types.js";
 import {
   SETTING_SPECS,
   currentOf,
@@ -335,7 +336,8 @@ export function renderRunDetail(
   const elapsed = (d.settledAt ?? Date.now()) - d.createdAt;
   const head = [
     `Run ${s.runId.slice(0, 8)}${d.label ? ` (${d.label})` : ""}`,
-    d.agentType ?? undefined,
+    // consult §16.5 (acceptance follow-up): reserved id "main", never the sentinel.
+    displayAgentType(d.agentType) ?? undefined,
     formatModelRef(d.model),
     `${s.status}/${s.phase}`,
     formatDuration(Math.max(0, elapsed)),
@@ -426,7 +428,7 @@ export function renderCosts(query: QueryService): string {
       active ? "▸" : s.status === "completed" ? "✓" : "✗",
       s.runId.slice(0, 8),
       (d.label ?? "·").slice(0, 24).padEnd(24),
-      (d.agentType ?? "·").padEnd(12),
+      (displayAgentType(d.agentType) ?? "·").padEnd(12),
       (formatModelRef(d.model) ?? "·").padEnd(24),
       `${d.turns}t`,
       d.settledAt !== undefined ? formatDuration(Math.max(0, d.settledAt - d.createdAt)) : "running",

@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ErrorInfo, JsonSchema, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
+import { displayAgentType } from "../core/types.js";
 import type { ResolveExpertsResult } from "../consult/index.js";
 import { normalizeSchemaInput } from "../core/json-schema.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
@@ -48,7 +49,9 @@ export interface AgentToolDetails {
 export function buildProgressLines(snap: RunSnapshot, now: number, maxTools = 3): string[] {
   const d = snap.diag;
   const header = `⏳ ${[
-    formatModelRef(d.model) ?? d.agentType ?? snap.status,
+    // consult §16.5 (acceptance follow-up): the model-fallback shows the
+    // reserved id "main", never the internal sentinel type name.
+    formatModelRef(d.model) ?? displayAgentType(d.agentType) ?? snap.status,
     phaseLabel(snap.phase, d, now),
     `turn ${d.turns + 1}`,
     formatDuration(Math.max(0, now - d.createdAt)),
