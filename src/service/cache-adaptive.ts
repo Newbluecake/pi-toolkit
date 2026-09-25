@@ -162,6 +162,13 @@ export interface CacheAdaptiveDeps {
    * `undefined` ⇒ pre-fix behaviour (keepalive off ⇒ adaptive is the only cover).
    */
   keepaliveHorizonMs?: () => Millis | undefined;
+  /**
+   * task #14: compact-hint's switch-imminent predicate, evaluated per decision against live
+   * context usage (stack.ts `isSwitchImminentNow`). `true` ⇒ no NEW 1h prefix (entry fee)
+   * for a prefix the next context switch discards; covered renewals pass. Absent /
+   * throwing ⇒ `false` (behaviour unchanged).
+   */
+  switchImminent?: () => boolean;
   /** I-A7: whether `self` is still the holder's current instance (stack.ts passes `(self) => previousAdaptive === self`). */
   isCurrent: (self: CacheAdaptiveService) => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
@@ -278,6 +285,14 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     }
   }
 
+  private safeSwitchImminent(): boolean {
+    try {
+      return this.deps.switchImminent?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
   private audit(kind: string, extra: Record<string, unknown> = {}): void {
     try {
       this.deps.appendEntry?.(AUDIT_CUSTOM_TYPE, { kind, at: this.clock.now(), ...extra });
@@ -312,6 +327,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     const gapMs = this.state.lastRequestStartedAt !== undefined ? now - this.state.lastRequestStartedAt : undefined;
     const lastProvenCacheReadAt = this.safeProvenCacheReadAt();
     const keepaliveHorizonMs = this.safeKeepaliveHorizonMs();
+    const switchImminent = this.safeSwitchImminent();
     const decision = decideAdaptiveTtl({
       now,
       mode: "adaptive", // the caller (cache-ttl.ts) already gated on the mode setting.
@@ -326,6 +342,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       state: this.state,
       lastProvenCacheReadAt,
       keepaliveHorizonMs,
+      switchImminent,
     });
     const strongSignals = decision.signals.filter((s) => s !== "history-gap").length;
     // Captured BEFORE noteDecision arms this upgrade's own cover (plan.md §16.3):

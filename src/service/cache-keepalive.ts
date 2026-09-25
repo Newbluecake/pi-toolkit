@@ -170,6 +170,12 @@ export interface CacheKeepaliveDeps {
    * after keepalive). Absent / throwing ⇒ false ⇒ pinging is unchanged.
    */
   adaptiveCoversPrefix?: () => boolean;
+  /**
+   * task #14: compact-hint's switch-imminent flag. `true` ⇒ the one-shot 1h upgrade after
+   * budget exhaustion is skipped (it would rewrite at 2x a prefix the next switch discards).
+   * Absent / throwing ⇒ false ⇒ unchanged. Plain pings are never affected.
+   */
+  switchImminent?: () => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
   emit?: (channel: string, payload: unknown) => void;
 }
@@ -568,6 +574,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.window = invalidateReducer(this.window, reason);
   }
 
+  private safeSwitchImminent(): boolean {
+    try {
+      return this.deps.switchImminent?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
   consumeUpgrade(sessionId: string, instance: string, now?: number): boolean {
     if (!this.accept(sessionId, instance)) return false;
     const result = consumeUpgradeReducer(this.window, {
@@ -576,6 +590,9 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       upgradeAfterBudgetEnabled: this.config().upgradeAfterBudget,
       now: now ?? this.clock.now(),
       assumedTtlMs: ASSUMED_TTL_MS,
+      // Lazy: the predicate reads live context usage (a session projection), and it only
+      // matters on the rare request that carries a pending one-shot upgrade.
+      switchImminent: this.window.upgradePending && this.safeSwitchImminent(),
     });
     this.window = result.window;
     return result.consumed;

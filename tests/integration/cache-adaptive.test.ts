@@ -168,6 +168,38 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
     }
   });
 
+  it("task #14: compact-hint's switchImminent reaches the decider through the stack wiring", async () => {
+    const { pi, emit } = fakePi();
+    const settings = settingsWith();
+    const ctx = fakeCtx();
+    const stack = buildSessionStack(pi, ctx, settings, emptyTypes, []);
+    try {
+      const holder: { current?: { adaptive?: typeof stack.adaptive } } = { current: stack };
+      wireCacheTtl(pi, settings, { adaptive: () => holder.current?.adaptive });
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      stack.adaptive?.noteUiPromptStart("session-under-test", stack.adaptive.instanceId);
+
+      // The same armed request that upgrades in the test above is refused while
+      // compact-hint reports the prefix is about to be discarded (a pending handoff
+      // counts regardless of usage; the stack's predicate reads it at request time).
+      let pending = true;
+      stack.compactHint.imminence = { hintPercent: 50, forcePercent: 88, handoffPending: () => pending };
+      const [refused] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(refused)).toBeUndefined();
+      expect(stack.adaptive?.snapshot().lastDecision?.reason).toBe("switch-imminent");
+
+      // Control: clearing the flag lets the still-armed gate upgrade (falsifiable).
+      pending = false;
+      const [armed] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(armed)).toBe("1h");
+    } finally {
+      stack.adaptive?.dispose();
+      stack.keepalive?.dispose();
+      stack.scheduler.stop();
+      stack.rpc.close();
+    }
+  });
+
   it("takes the COLD branch when the ledger fails the M1 model anchor", async () => {
     // A ledger whose entry carries no model id cannot be proven to describe the
     // current model's cache, so it must not be judged warm (that is exactly the

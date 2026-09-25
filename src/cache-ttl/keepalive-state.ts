@@ -780,6 +780,8 @@ export interface ConsumeUpgradeInput {
   upgradeAfterBudgetEnabled: boolean;
   now: Millis;
   assumedTtlMs?: Millis;
+  /** task #14: compact-hint says the prefix is about to be discarded ⇒ never upgrade (stays pending). */
+  switchImminent?: boolean;
 }
 
 export interface ConsumeUpgradeResult {
@@ -800,6 +802,7 @@ export function consumeUpgrade(window: WindowState, input: ConsumeUpgradeInput):
     input.sessionMatches &&
     input.mode === "auto" &&
     input.upgradeAfterBudgetEnabled &&
+    input.switchImminent !== true &&
     window.lastReadStartedAt !== undefined &&
     input.now - window.lastReadStartedAt > assumedTtlMs;
   if (!eligible) return { consumed: false, window };

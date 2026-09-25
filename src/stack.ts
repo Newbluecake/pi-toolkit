@@ -13,6 +13,7 @@ import {
   buildSwitchHintText,
   buildUsageTickText,
   effectiveThresholdPercentWithTokens,
+  isSwitchImminent,
   usageTickStep,
   windowScaledForcePercent,
 } from "./compact-hint/threshold.js";
@@ -481,6 +482,11 @@ export interface CompactHintState {
   forceDemandTurns: number;
   /** 本轮高位期内已发出的硬性切换要求次数；用量回落到强制线以下即归零。 */
   demandCount: number;
+  /** task #14：最近一次 turn_end 算出的生效线 + 交接暂存端口。「快要切换」在**请求时**由
+   *  `isSwitchImminentNow` 用实时用量判定（压缩后 usage 未知 ⇒ false；turn_end 之后涨进余量区
+   *  也能看到），cache-ttl 据此不再为即将丢弃的前缀付 1h 入场费。未算过（print/json、compact
+   *  关）时 undefined ⇒ 恒 false。 */
+  imminence: { hintPercent: number; forcePercent: number; handoffPending: (() => boolean) | undefined } | undefined;
   /** 价格感知动态阈值运行时（dynamic-threshold-plan.md D3）；mode=off / print、json 构造
    *  时缺席或惰性。与 `Stack.dynamic` 引用同一对象（§2.4 所有权在 Stack）。 */
   dynamic?: DynamicRuntime | undefined;
@@ -566,6 +572,29 @@ export interface Stack {
  * forwarding path (customType literal, event shape) — index.ts stays
  * assembly-only (I7) and just registers this once per activate().
  */
+/**
+ * task #14: is the current prefix about to be discarded by a context switch? Evaluated at
+ * request time against LIVE usage and the lines the last turn_end published, so it neither
+ * lags a big tool result that landed after turn_end nor outlives a compaction (pi reports
+ * usage as unknown until the first post-compaction response). A pending handoff counts
+ * regardless of usage. Every failure degrades to `false` (the pre-#14 behaviour).
+ */
+export function isSwitchImminentNow(
+  state: Pick<CompactHintState, "imminence">,
+  ctx: Pick<ExtensionContext, "getContextUsage">,
+): boolean {
+  const imminence = state.imminence;
+  if (imminence === undefined) return false;
+  try {
+    if (imminence.handoffPending?.() === true) return true;
+    const percent = ctx.getContextUsage()?.percent;
+    if (percent == null) return false;
+    return isSwitchImminent(percent, imminence.hintPercent, imminence.forcePercent);
+  } catch {
+    return false;
+  }
+}
+
 export function createCompactHintHook(
   holder: { current?: Stack },
   deps: {
@@ -662,6 +691,8 @@ export function createCompactHintHook(
       usage.contextWindow,
       state.reserveTokens,
     );
+    // task #14: publish the effective lines; cache-ttl judges imminence against live usage per request.
+    state.imminence = { hintPercent: effective, forcePercent: effectiveForce, handoffPending: deps.handoffPending };
     if (effectiveForce > 0 && percent >= effectiveForce) {
       const timestamp = now();
       // switch_context 模式（先礼后兵）：越线先硬性要求模型自己写交接内容，
@@ -974,6 +1005,7 @@ export function buildSessionStack(
     switchTool: settings.compact.enabled && settings.compact.switchTool,
     forceDemandTurns: settings.compact.forceDemandTurns,
     demandCount: 0,
+    imminence: undefined,
   };
   const widgetRef: { current?: FleetWidgetController } = {};
   // quota-plan D2: lifecycle-triggered refreshes stay lazy and reuse the
@@ -1487,6 +1519,8 @@ export function buildSessionStack(
         adaptiveSnapshot: () => previousAdaptive?.snapshot(),
         // F1: stand down while adaptive's settled 1h entry covers the prefix (lazy, same reason).
         adaptiveCoversPrefix: () => previousAdaptive?.coversPrefix() === true,
+        // task #14: skip the one-shot 1h upgrade for a prefix the next switch discards.
+        switchImminent: () => isSwitchImminentNow(compactHint, ctx),
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),
       })
@@ -1510,6 +1544,8 @@ export function buildSessionStack(
         provenCacheReadAt: () => keepalive?.provenCacheReadAt(),
         // F1: no new 1h prefix for gaps the pinger already bridges.
         keepaliveHorizonMs: () => keepalive?.gapHorizonMs(),
+        // task #14: no new 1h prefix (entry fee) for one compact-hint says is about to be discarded.
+        switchImminent: () => isSwitchImminentNow(compactHint, ctx),
         isCurrent: (self) => previousAdaptive === self,
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),

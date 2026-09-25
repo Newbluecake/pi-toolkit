@@ -222,3 +222,29 @@ export function buildSwitchDemandText(percent: number, forceAt: number): string 
     "- 如果本回合结束时仍未切换，系统将改为强制通用摘要压缩，保留什么将不再由你决定。"
   );
 }
+
+/**
+ * How close (in percentage points) usage may get to the earliest active line before a
+ * switch counts as imminent. At 5pp a 1M window leaves ~50k tokens of headroom — a few
+ * turns at typical growth, one turn after a large file read.
+ */
+export const SWITCH_IMMINENT_MARGIN_PERCENT = 5;
+
+/**
+ * Whether the current prefix is about to be discarded by a context switch/compaction:
+ * usage is within `margin` points of the earliest active line (the effective hint line or
+ * the effective force line; a line <= 0 is off). The cache-ttl layer reads this to stop
+ * investing in a prefix it would throw away (a 1h entry fee rewrites the whole prefix at
+ * 2x input price right before switch_context drops it).
+ */
+export function isSwitchImminent(
+  percent: number,
+  effectiveHintPercent: number,
+  effectiveForcePercent: number,
+  margin = SWITCH_IMMINENT_MARGIN_PERCENT,
+): boolean {
+  if (!Number.isFinite(percent)) return false;
+  const lines = [effectiveHintPercent, effectiveForcePercent].filter((line) => Number.isFinite(line) && line > 0);
+  if (lines.length === 0) return false;
+  return percent >= Math.min(...lines) - margin;
+}

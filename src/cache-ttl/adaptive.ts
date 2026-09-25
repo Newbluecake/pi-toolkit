@@ -169,7 +169,11 @@ export type AdaptiveDeclineReason =
   /** F1 (verification-2026-09-25): opening a new 1h prefix would pay an entry fee for gaps the keepalive
    *  pinger already covers more cheaply; only a session that has DEMONSTRATED a gap beyond the ping
    *  horizon earns the fee. */
-  | "keepalive-covers";
+  | "keepalive-covers"
+  /** task #14: compact-hint reports the prefix is about to be discarded by a context switch /
+   *  compaction (usage near the earliest active line, or a handoff pending) — a NEW 1h prefix
+   *  (entry fee) would be paid for a prefix that is thrown away next. Covered renewals pass. */
+  | "switch-imminent";
 
 export type AdaptiveBreakerReason = "warm-write-too-expensive" | "warm-miss" | "write-budget" | "1h-ineffective";
 
@@ -523,6 +527,12 @@ export interface AdaptiveDecideInput {
    * pings are the cheaper cover for anything shorter. Absent ⇒ pre-fix behaviour.
    */
   keepaliveHorizonMs?: number | undefined;
+  /**
+   * task #14: compact-hint's `switchImminent` (stack.ts passes the compact-hint state flag).
+   * `true` ⇒ an upgrade that would open a NEW 1h prefix (entry fee) is refused with
+   * `switch-imminent`; a covered renewal is unaffected. Absent / `false` ⇒ unchanged.
+   */
+  switchImminent?: boolean | undefined;
 }
 
 export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision {
@@ -540,6 +550,7 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     state,
     lastProvenCacheReadAt,
     keepaliveHorizonMs,
+    switchImminent,
   } = input;
   const no = (reason: AdaptiveDeclineReason, signalsSeen: AdaptiveSignalKind[] = []): AdaptiveDecision => ({
     upgrade: false,
@@ -564,6 +575,14 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
   // steady-state path below stays open.
   const covered1h = isPrefix1hCovered(state, now);
   if (!covered1h && feeBudgetExhausted(state, config)) return no("fee-budget");
+  // task #14: never pay a NEW entry fee (whole-prefix 1h rewrite) for a prefix the next
+  // context switch discards. A covered renewal stays open: it rewrites only the tail at
+  // +0.75x, and refusing it would strand the prefix — F1 has keepalive stand down while
+  // the 1h cover holds, so nothing would protect it once that cover lapses. Residual: a
+  // covered request whose OWN payload drifted still settles as a full rewrite (D4
+  // `readCollapsed`); that is only knowable after settlement, and F2 clears the cover as
+  // soon as a drifted settlement is seen, so the next imminent request is gated here.
+  if (!covered1h && switchImminent === true) return no("switch-imminent");
 
   // ── Group B: horizon signals ────────────────────────────────────────────
   const strong: AdaptiveSignalKind[] = [];
