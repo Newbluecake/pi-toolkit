@@ -217,6 +217,31 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ),
   "extend.enabled": bool("extend.enabled", "Timeout grace + extend_subagent_timeout tool"),
   "hud.enabled": bool("hud.enabled", "Merged HUD: take over the footer (off restores pi's built-in footer)"),
+  // web-hub (plan 包 I): five keys, all non-live (captured at activate; change → /reload).
+  "webHub.enabled": bool(
+    "webHub.enabled",
+    "web-hub browser UI via a local hub process (default off ⇒ zero wiring/network/disk)",
+  ),
+  "webHub.autoStart": bool("webHub.autoStart", "web-hub: auto-spawn the hub process when no hub is running"),
+  "webHub.port": {
+    kind: "number",
+    path: "webHub.port",
+    min: 0,
+    max: 65_535,
+    integer: true,
+    description: "web-hub: HTTP port bound to 127.0.0.1 (0 = ephemeral)",
+  },
+  "webHub.idleExitMinutes": {
+    kind: "number",
+    path: "webHub.idleExitMinutes",
+    min: 1,
+    description: "web-hub: hub self-exits after this many minutes with no agents and no browser clients",
+  },
+  "webHub.nodeLoader": {
+    kind: "string",
+    path: "webHub.nodeLoader",
+    description: "web-hub: explicit jiti-cli path override (escape hatch when pi bundles no jiti)",
+  },
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (main session only)"),

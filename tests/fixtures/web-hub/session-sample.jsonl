@@ -1,0 +1,9 @@
+{"type":"session","version":3,"id":"01a0d8b5-bced-7315-984b-e10539c7f7f5","timestamp":"2026-09-25T13:16:24.173Z","cwd":"/tmp/webprobe-scratch"}
+{"type":"model_change","id":"32b5dd7e","parentId":null,"timestamp":"2026-09-25T13:16:24.316Z","provider":"deepseek","modelId":"deepseek-flash"}
+{"type":"thinking_level_change","id":"14b6d8a0","parentId":"32b5dd7e","timestamp":"2026-09-25T13:16:24.316Z","thinkingLevel":"low"}
+{"type":"custom","customType":"subagent:prompt-sections","data":{"v":1,"sections":{"pi_project_memory":{"snapshot":"","sentCount":0,"sentBytes":0}}},"id":"d998d67f","parentId":"14b6d8a0","timestamp":"2026-09-25T13:17:01.001Z"}
+{"type":"custom_message","customType":"probe:custom","content":"hello","display":true,"details":{"src":"probe"},"id":"a7842bcd","parentId":"d998d67f","timestamp":"2026-09-25T13:21:25.409Z"}
+{"type":"message","id":"5ca08511","parentId":"a7842bcd","timestamp":"2026-09-25T13:22:01.100Z","message":{"role":"user","content":"read package.json and summarize in 1 line","timestamp":1790342521100}}
+{"type":"message","id":"ce41e651","parentId":"5ca08511","timestamp":"2026-09-25T13:22:03.472Z","message":{"role":"assistant","content":"package.json describes pi-toolkit, a toolbox extension for pi.","provider":"deepseek","model":"deepseek-flash","stopReason":"end_turn","timestamp":1790342523472,"usage":{"input":120,"output":24,"cost":{"total":0.000321}}}}
+{"type":"message","id":"7f2a9c04","parentId":"ce41e651","timestamp":"2026-09-25T13:22:03.900Z","message":{"role":"toolResult","content":"ok","isError":false,"toolCallId":"call_1","toolName":"read","timestamp":1790342523900}}
+{"type":"compaction","id":"9599fb40","parentId":"7f2a9c04","timestamp":"2026-09-25T13:24:07.179Z","summary":"## Goal\n- Summarize package.json for the user in one line.","firstKeptEntryId":"9599fb40","tokensBefore":84000}

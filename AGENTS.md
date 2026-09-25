@@ -213,6 +213,13 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `/clear`, bare `exit` interception, a pre-submit rewriting editor, and resume-list title
   cleaning (skill envelopes + `[sub:type]` subagent marks driven by our own `subagent:run`
   entries, disk-cached under `<agent>/cache/session-nav/`). Post-guard, TUI-only.
+- `src/web-hub/` — browser UI over a per-machine hub daemon (`webHub.enabled`, default off ⇒ zero wiring,
+  zero network, zero disk; post-guard, child sessions inert). `protocol/` (frame/key/path contracts shared by
+  both sides), `hub/` (singleton daemon: composition root `hub.ts`, process entry `main.ts` run through pi's
+  bundled jiti-cli, HTTP/SSE/auth/static; never imports pi), `agent/` (pi-side client `wireWebHub`: process-
+  level connection on a `Symbol.for` global, reused across /new·/resume·/fork, handed over on /reload),
+  `web/` (no-build static frontend, innerHTML banned). Wired at the end of `src/index.ts` after
+  `wireDeferredReload`. P1 is read-only. Design: `docs/dev/web-hub/{arch,plan}.md`.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
   (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses

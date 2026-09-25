@@ -9,6 +9,10 @@ import {
   DEFAULT_HINT_THRESHOLD_PERCENT,
   DEFAULT_USAGE_TICK_STEP_PERCENT,
 } from "../compact-hint/threshold.js";
+// web-hub (plan 包 I): the settings type is owned by package D; `import type`
+// only, so this pre-guard module never loads the web-hub runtime graph.
+import type { WebHubSettings } from "../web-hub/agent/index.js";
+export type { WebHubSettings };
 // quota (阶梯阈值按窗口区分): WindowScope is a zero-pi-import type from src/quota/types.ts
 // (plan 分层纪律) —— type-only import, no runtime dependency on the quota module graph.
 import type { WindowScope } from "../quota/types.js";
@@ -421,6 +425,8 @@ export interface AgentSettings {
   consult: ConsultSettings;
   /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `enabled:false` leaves pi's built-in footer untouched. */
   hud: HudSettings;
+  /** web-hub browser UI (plan 包 I). Default OFF: when disabled there is zero wiring, zero network, zero disk. */
+  webHub: WebHubSettings;
   /** Merged plugins: web_search tool (Codex/SerpAPI/Bocha/Tavily failover). Default on. */
   webSearch: EnabledGroup;
   /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasklist + aboveEditor widget. Default on. */
@@ -605,6 +611,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     maxConcurrent: 2,
   },
   hud: { enabled: true, autoFetchMinutes: 5 },
+  webHub: { enabled: false, autoStart: true, port: 7878, idleExitMinutes: 10, nodeLoader: "" },
   webSearch: { enabled: true },
   todo: { enabled: true },
   askUser: { enabled: true },
@@ -796,6 +803,7 @@ export function loadSettings(source: unknown): AgentSettings {
     goal: parseGoalSettings(value.goal),
     consult: parseConsultSettings(value.consult),
     hud: parseHudSettings(value.hud),
+    webHub: parseWebHubSettings(value.webHub),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
     todo: parseEnabledGroup(value.todo, DEFAULT_SETTINGS.todo),
     askUser: parseEnabledGroup(value.askUser, DEFAULT_SETTINGS.askUser),
@@ -1105,6 +1113,27 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     indexMax: num(value.indexMax, defaults.indexMax, 1, 100),
     maxFileBytes,
     maxWriteBytes: Math.min(num(value.maxWriteBytes, defaults.maxWriteBytes, 256, 4 * 1024 * 1024), maxFileBytes),
+  };
+}
+
+/**
+ * web-hub settings block (plan 包 I): field-level fallback to defaults, never
+ * throws (parseHudSettings 同款). `port` must be an integer in 0..65535 (0 =
+ * ephemeral); `idleExitMinutes` must be finite and ≥ 1.
+ */
+export function parseWebHubSettings(input: unknown): WebHubSettings {
+  const defaults = DEFAULT_SETTINGS.webHub;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const record = input as Record<string, unknown>;
+  const port = record.port;
+  const idle = record.idleExitMinutes;
+  const nodeLoader = record.nodeLoader;
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
+    autoStart: typeof record.autoStart === "boolean" ? record.autoStart : defaults.autoStart,
+    port: typeof port === "number" && Number.isInteger(port) && port >= 0 && port <= 65_535 ? port : defaults.port,
+    idleExitMinutes: typeof idle === "number" && Number.isFinite(idle) && idle >= 1 ? idle : defaults.idleExitMinutes,
+    nodeLoader: typeof nodeLoader === "string" ? nodeLoader : defaults.nodeLoader,
   };
 }
 

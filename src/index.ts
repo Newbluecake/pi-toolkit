@@ -56,6 +56,8 @@ import { createBashJobTool } from "./tools/bash-job-tool.js";
 import type { BashJobManager } from "./bash/manager.js";
 import { isTerminalJobStatus } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
+import { createWebHubCommand } from "./commands/webhub.js";
+import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
 import { renderTaskStartedMessage, TASK_STARTED_CUSTOM_TYPE, createTaskCommand } from "./commands/task.js";
 import { createGoalCommand } from "./goal/command.js";
 import { createGoalLoopHook } from "./goal/hook.js";
@@ -651,6 +653,21 @@ export default function activate(pi: ExtensionAPI): void {
   // order, and this one's editor install reads getEditorComponent() to wrap
   // whatever session-nav installed (registration order = wrapping order).
   reloadRef.current = wireDeferredReload(pi, { settings, activeRunCount: activeSubagentRunCount });
+
+  // web-hub (plan 包 I): post-guard (child sessions stay inert), default off.
+  // MUST be wired after wireDeferredReload so web-hub's session_start handler
+  // runs after the stack rebuild and its fleet port can read holder.current.
+  // Both the wiring and the command registration sit inside the enabled gate:
+  // disabled ⇒ wireWebHub is never called, /webhub never registered, zero
+  // network and zero disk (asserted by tests/integration/web-hub-disabled).
+  if (settings.webHub.enabled) {
+    const webHubRef: { current?: WebHubControl } = {};
+    webHubRef.current = wireWebHub(pi, {
+      settings: settings.webHub,
+      fleet: () => holder.current?.query.list() ?? [],
+    });
+    pi.registerCommand("webhub", createWebHubCommand({ control: () => webHubRef.current }));
+  }
 }
 
 /** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */
