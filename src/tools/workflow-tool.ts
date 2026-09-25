@@ -61,7 +61,12 @@ export const WorkflowToolParams = Type.Object({
     description:
       "The workflow script source. Must start with `export const meta = { name, description }` (a plain object " +
       "literal). The sandboxed script body may call agent(prompt, opts?), parallel(thunks), pipeline(items, " +
-      "...stages), phase(title), log(message), and read the top-level `args`/`budget` globals. Each pipeline stage " +
+      "...stages), phase(title), log(message), and read the top-level `args`/`budget` globals. agent() opts: label, " +
+      "agentType, phase, fullResult, model (per-call model override — the FULL 'provider/id' exactly as listed in the " +
+      "'Available models' section of the system prompt, same rule as the Agent tool; a bare model id/substring is " +
+      "resolved as a fuzzy hint, and an unknown model or unresolvable hint rejects the agent() call), thinking " +
+      "('off' | 'low' | 'medium' | 'high', per-call thinking-level override; unset = the agent type's frontmatter " +
+      "level). Each pipeline stage " +
       "is called as stage(prevValue, item, index) \u2014 the first stage gets prevValue=undefined, so write it as " +
       "(_prev, item, i) => ... . The script may not use " +
       "Date.now()/Math.random()/eval (all disabled \u2014 they would silently break replay). Max 512 KiB.",
@@ -400,7 +405,9 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "<workflow id>), which stops every child run. Do not poll or block waiting for it — continue other work or " +
       "end your turn. Differences from a general multi-agent orchestrator you may have used before: (1) there is " +
       "no pause/step/skip/retry control once started — only stop; (2) nested workflow(...) calls are not " +
-      "supported (inline the referenced logic directly). agent() calls beyond the workflow's own concurrency " +
+      "supported (inline the referenced logic directly). Each agent() call can also carry its own model (full " +
+      "'provider/id' as listed in the system prompt's Available models section — same rule as the Agent tool's model " +
+      "param) and thinking level, overriding the agent type's frontmatter for that child. agent() calls beyond the workflow's own concurrency " +
       "limit are queued FIFO instead of failing; a call still queued when the workflow stops or times out " +
       "resolves to null (as does one that runs out of workflow budget while queued — a call made after the " +
       "budget is already exhausted rejects instead). A queued call whose dispatch fails (spawn error/timeout) " +

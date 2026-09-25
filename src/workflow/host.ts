@@ -1,6 +1,7 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import type { Millis, RunId, UsageDelta } from "../core/types.js";
+import { THINKING_LEVELS, type Millis, type RunId, type ThinkingLevel, type UsageDelta } from "../core/types.js";
+import { parseStrictModelRef } from "../config/model-hint.js";
 import { deriveChildBudget } from "./budget.js";
 import { createCallRegistry, type CallRegistry } from "./call-registry.js";
 import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf, type JournalStore } from "./journal.js";
@@ -67,6 +68,20 @@ export interface ChildSpawner {
      * signal at all, only the CC4 ceiling.
      */
     budgetOverride?: { totalMs?: Millis; queueWaitMs?: Millis };
+    /**
+     * Per-call model override (agent()'s `opts.model`, Agent-tool `model`
+     * semantics): a strict `provider/id` pair as split by `parseStrictModelRef`
+     * — `modelHintOverride` carries the non-pair form instead, exactly one of
+     * the two is ever set for a given call. Structurally compatible with
+     * `SpawnRequest.modelOverride`, which the real spawner-adapter forwards
+     * verbatim so spawn admission can existence-check it (unknown model ⇒
+     * spawn error ⇒ `agent()` rejects, `Did you mean` suggestion preserved).
+     */
+    modelOverride?: { provider: string; id: string };
+    /** The non-pair `opts.model` form ("sonnet", "kimi-k3") — resolved as a fuzzy hint at spawn admission. */
+    modelHintOverride?: string;
+    /** Per-call thinking-level override (agent()'s `opts.thinking`), same values as the Agent tool's `thinking` param. */
+    thinkingOverride?: ThinkingLevel;
   }): Promise<ChildSpawnResult | ChildSpawnError>;
   abort(runId: RunId, cause?: string): Promise<boolean>;
   waitAll(opts: { runIds: RunId[] }): Promise<{ settled: ChildOutcome[]; pending: RunId[] }>;
@@ -258,6 +273,10 @@ interface QueuedAgentCall {
   readonly agentType: string;
   readonly label?: string;
   readonly phaseId?: string;
+  /** Per-call model/thinking overrides (see `ChildSpawner.spawn`) — resolved once at submission, carried to dispatch. */
+  readonly modelOverride?: { provider: string; id: string };
+  readonly modelHintOverride?: string;
+  readonly thinkingOverride?: ThinkingLevel;
 }
 
 function errMsg(e: unknown): string {
@@ -594,7 +613,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   async function handleAgent(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
     const a = args as {
       prompt?: unknown;
-      opts?: { label?: unknown; agentType?: unknown; phase?: unknown } | null;
+      opts?: { label?: unknown; agentType?: unknown; phase?: unknown; model?: unknown; thinking?: unknown } | null;
     };
     if (typeof a.prompt !== "string") {
       const message = "agent(prompt, opts?): prompt must be a string";
@@ -605,6 +624,38 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const label = typeof opts.label === "string" ? opts.label : undefined;
     const agentType =
       typeof opts.agentType === "string" ? opts.agentType : (deps.defaultAgentType ?? DEFAULT_AGENT_TYPE);
+    // agent() model/thinking overrides (Agent-tool `model`/`thinking`
+    // semantics): defense-in-depth against a malformed envelope — the
+    // trusted worker scaffold already rejects a non-string `model` /
+    // out-of-set `thinking` client-side (worker-source.ts), but host.ts
+    // validates the raw envelope for itself exactly like it re-checks
+    // `prompt` above, so a forged host_call can't smuggle a non-string
+    // through to spawn admission.
+    const rawModel = opts.model;
+    if (rawModel !== undefined && typeof rawModel !== "string") {
+      const message = "agent(prompt, opts?): opts.model must be a string";
+      emitRejected(callId, "admission", "invalid_args", message, displayMetaOfArgs(args));
+      return { kind: "host_ack", id: callId, ok: false, error: { message } };
+    }
+    const rawThinking = opts.thinking;
+    const thinkingOverride: ThinkingLevel | undefined =
+      typeof rawThinking === "string" && THINKING_LEVELS.includes(rawThinking as ThinkingLevel)
+        ? (rawThinking as ThinkingLevel)
+        : undefined;
+    if (rawThinking !== undefined && thinkingOverride === undefined) {
+      const message = "agent(prompt, opts?): opts.thinking must be one of 'off' | 'low' | 'medium' | 'high'";
+      emitRejected(callId, "admission", "invalid_args", message, displayMetaOfArgs(args));
+      return { kind: "host_ack", id: callId, ok: false, error: { message } };
+    }
+    // The Agent tool's own split, reused verbatim (`parseStrictModelRef`, no
+    // reimplementation): a strict `provider/id` pair becomes `modelOverride`
+    // (existence-checked by spawn admission); anything else stays the raw
+    // string as `modelHintOverride` (fuzzy-resolved at spawn admission,
+    // unresolvable ⇒ spawn error ⇒ `agent()` rejects). Exactly one of the
+    // two is ever set.
+    const modelOverride = rawModel !== undefined ? parseStrictModelRef(rawModel) : undefined;
+    const modelHintOverride = rawModel !== undefined && modelOverride === undefined ? rawModel : undefined;
+    // (thinkingOverride is declared above, alongside its validation guard.)
     // M3.4 §5.2: worker-source.ts already resolved \`opts.phase\` against the
     // script's environment \`phase(title)\` (explicit \`opts.phase\` wins) before
     // this call ever left the sandbox — this handler just records whatever it
@@ -646,6 +697,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         agentType,
         agentTypeConfigHash,
         prompt: a.prompt,
+        // Raw strings, not the resolved pair: the taskKey must distinguish
+        // every distinct *declared* model/thinking (same prompt + different
+        // model must never replay the old result). Two spellings of the same
+        // model simply miss — safe; the reverse is not.
+        ...(rawModel !== undefined ? { model: rawModel } : {}),
+        ...(thinkingOverride !== undefined ? { thinking: thinkingOverride } : {}),
         ...(isolation !== undefined ? { isolation } : {}),
         ...(deps.workflowArgs !== undefined ? { workflowArgs: deps.workflowArgs } : {}),
       };
@@ -749,6 +806,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       agentType,
       ...(label !== undefined ? { label } : {}),
       ...(phaseId !== undefined ? { phaseId } : {}),
+      ...(modelOverride !== undefined ? { modelOverride } : {}),
+      ...(modelHintOverride !== undefined ? { modelHintOverride } : {}),
+      ...(thinkingOverride !== undefined ? { thinkingOverride } : {}),
     };
     if (phaseId !== undefined) phaseOf.set(callId, phaseId);
     if (label !== undefined) labelOf.set(callId, label);
@@ -872,6 +932,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       type: call.agentType,
       prompt: call.prompt,
       ...(call.label !== undefined ? { label: call.label } : {}),
+      ...(call.modelOverride !== undefined ? { modelOverride: call.modelOverride } : {}),
+      ...(call.modelHintOverride !== undefined ? { modelHintOverride: call.modelHintOverride } : {}),
+      ...(call.thinkingOverride !== undefined ? { thinkingOverride: call.thinkingOverride } : {}),
       ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
       ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
       budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },

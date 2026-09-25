@@ -1393,3 +1393,185 @@ describe("host.ts: queued/rejected child events (workflow-agent-queue D10, §5)"
     });
   });
 });
+
+describe("host.ts: agent() model/thinking overrides (Agent-tool model/thinking semantics)", () => {
+  function modelHarness(budgetOverrides: Partial<WorkflowRunBudget> = {}) {
+    const h = harness({ maxParallel: 4, ...budgetOverrides });
+    const c = controllableSpawner();
+    const events: WorkflowChildEvent[] = [];
+    return {
+      ...h,
+      c,
+      events,
+      attach(extra: Partial<Parameters<typeof attachHostCallHandler>[0]> = {}) {
+        return attachHostCallHandler({
+          clock: h.clock,
+          workerHost: h.workerHost,
+          spawner: c.spawner,
+          gateRunner: okGate,
+          budget: { ...BASE_BUDGET, maxParallel: 4, ...budgetOverrides },
+          workflowDeadlineAt: 1_000_000,
+          onChildEvent: (e) => events.push(e),
+          ...extra,
+        });
+      },
+      kindsOf(callId: string): string[] {
+        return events.filter((e) => e.callId === callId).map((e) => e.kind);
+      },
+    };
+  }
+
+  it("splits a strict provider/id pair into modelOverride on the spawn request (no hint field)", async () => {
+    const h = modelHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p", opts: { model: "cr-anthropic/claude-sonnet-5" } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    expect(h.c.spawns[0]!.req).toMatchObject({ modelOverride: { provider: "cr-anthropic", id: "claude-sonnet-5" } });
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("modelHintOverride");
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("thinkingOverride");
+    h.c.finishChild("r1");
+    await flush();
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("keeps a non-pair model as modelHintOverride (fuzzy hint resolved at spawn admission)", async () => {
+    const h = modelHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p", opts: { model: "sonnet" } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    expect(h.c.spawns[0]!.req).toMatchObject({ modelHintOverride: "sonnet" });
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("modelOverride");
+    h.c.finishChild("r1");
+    await flush();
+  });
+
+  it("threads opts.thinking as thinkingOverride (composable with model)", async () => {
+    const h = modelHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p", opts: { model: "zai/glm-5.3", thinking: "high" } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    expect(h.c.spawns[0]!.req).toMatchObject({
+      modelOverride: { provider: "zai", id: "glm-5.3" },
+      thinkingOverride: "high",
+    });
+    h.c.finishChild("r1");
+    await flush();
+  });
+
+  it("adds no override fields when the script passed neither (request shape unchanged)", async () => {
+    const h = modelHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("modelOverride");
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("modelHintOverride");
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("thinkingOverride");
+    h.c.finishChild("r1");
+    await flush();
+  });
+
+  it("a queued call carries its model/thinking overrides to the delayed dispatch", async () => {
+    const h = modelHarness({ maxParallel: 1 });
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { model: "cr-kimi/kimi-k3", thinking: "low" } });
+    await flush();
+    expect(sentFor(h.sent, "2").acks[0]).toMatchObject({ ok: true, value: { queued: true } });
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    h.c.spawns[1]!.resolve({ runId: "r2" });
+    await flush();
+    expect(h.c.spawns[1]!.req).toMatchObject({
+      prompt: "p2",
+      modelOverride: { provider: "cr-kimi", id: "kimi-k3" },
+      thinkingOverride: "low",
+    });
+    h.c.finishChild("r2");
+    await flush();
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("rejects a non-string model / out-of-set thinking at admission (invalid_args) before spawn", async () => {
+    const h = modelHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("m", "agent", { prompt: "p", opts: { model: 42 } });
+    h.postHostCall("t", "agent", { prompt: "p", opts: { thinking: "max" } });
+    await flush();
+    expect(h.c.spawns).toHaveLength(0);
+    expect(sentFor(h.sent, "m").acks[0]).toMatchObject({
+      ok: false,
+      error: { message: "agent(prompt, opts?): opts.model must be a string" },
+    });
+    expect(sentFor(h.sent, "t").acks[0]).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("opts.thinking must be one of") },
+    });
+    for (const id of ["m", "t"]) {
+      expect(h.events.find((e) => e.kind === "rejected" && e.callId === id)).toMatchObject({
+        stage: "admission",
+        reason: "invalid_args",
+      });
+    }
+  });
+
+  it("an unknown-model spawn error acks ok:false with the spawn-service message verbatim (suggestions preserved)", async () => {
+    const h = modelHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p", opts: { model: "cloudrouter-anthropic/claude-opus-5-5" } });
+    await flush();
+    const message =
+      'Unknown model "cloudrouter-anthropic/claude-opus-5-5" \u2014 not in pi\'s model registry, so no run was ' +
+      "started. Did you mean: cr-anthropic/claude-opus-5-5?";
+    h.c.spawns[0]!.resolve({ error: { message } });
+    await flush();
+    expect(sentFor(h.sent, "1").acks[0]).toMatchObject({ ok: false, error: { message } });
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
+      stage: "admission",
+      reason: "spawn_error",
+      message: expect.stringContaining("Did you mean"),
+    });
+  });
+
+  it("a queued call whose dispatch fails on the model settles rejected:true (worker-side agent() rejects)", async () => {
+    const h = modelHarness({ maxParallel: 1 });
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { model: "ghost/model-x" } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    h.c.spawns[1]!.resolve({ error: { message: 'Unknown model "ghost/model-x". Did you mean: zai/glm-5.3?' } });
+    await flush();
+    expect(h.kindsOf("2")).toEqual(["queued", "rejected", "settled"]);
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "2")).toMatchObject({
+      stage: "dispatch",
+      reason: "spawn_error",
+    });
+    expect(sentFor(h.sent, "2").settles[0]).toMatchObject({
+      ok: false,
+      rejected: true,
+      error: { message: expect.stringContaining("Did you mean") },
+    });
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+});

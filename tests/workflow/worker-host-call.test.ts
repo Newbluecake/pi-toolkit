@@ -343,3 +343,92 @@ describe("worker-source: a buffered settle still carries rejected:true", () => {
     await host.terminate("test-done");
   }, 15_000);
 });
+
+describe("real-worker agent() model/thinking opts (per-call overrides)", () => {
+  it("forwards opts.model/opts.thinking verbatim: a strict pair reaches spawn as modelOverride (+ thinkingOverride)", async () => {
+    const spawns: Parameters<ChildSpawner["spawn"]>[0][] = [];
+    const spawner: ChildSpawner = {
+      spawn: async (req) => {
+        spawns.push(req);
+        return { runId: "r-model" };
+      },
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "ok" })),
+        pending: [],
+      }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith('await agent("do", { model: "cr-anthropic/claude-sonnet-5", thinking: "high" }); return "done";'),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.returned).toBe("done");
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0]).toMatchObject({
+      modelOverride: { provider: "cr-anthropic", id: "claude-sonnet-5" },
+      thinkingOverride: "high",
+    });
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("an unknown model rejects agent() with the spawn-service message preserved (Did you mean suggestion)", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({
+        error: {
+          message:
+            'Unknown model "cloudrouter-anthropic/claude-opus-5-5" \u2014 not in pi\'s model registry, so no run ' +
+            "was started. Did you mean: cr-anthropic/claude-opus-5-5?",
+        },
+      }),
+      abort: async () => true,
+      waitAll: async () => ({ settled: [], pending: [] }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'try { await agent("do", { model: "cloudrouter-anthropic/claude-opus-5-5" }); return "not-rejected"; }' +
+          ' catch (e) { return "caught:" + e.message; }',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toBe(
+      'caught:Unknown model "cloudrouter-anthropic/claude-opus-5-5" \u2014 not in pi\'s model registry, so no ' +
+        "run was started. Did you mean: cr-anthropic/claude-opus-5-5?",
+    );
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("a non-string model / out-of-set thinking reject client-side with a TypeError — no host round-trip, no spawn", async () => {
+    const spawns: Parameters<ChildSpawner["spawn"]>[0][] = [];
+    const spawner: ChildSpawner = {
+      spawn: async (req) => {
+        spawns.push(req);
+        return { runId: "r" };
+      },
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "ok" })),
+        pending: [],
+      }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        "const r = {};\n" +
+          'try { await agent("x", { model: 42 }); r.m = "no-reject"; } catch (e) { r.m = e.name + ":" + e.message; }\n' +
+          'try { await agent("x", { thinking: "max" }); r.t = "no-reject"; } catch (e) { r.t = e.name + ":" + e.message; }\n' +
+          "return r;",
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toMatchObject({
+      m: "TypeError:agent(prompt, opts?): opts.model must be a string",
+      t: expect.stringContaining("opts.thinking must be one of"),
+    });
+    expect(spawns).toHaveLength(0);
+    await host.terminate("test-done");
+  }, 10_000);
+});

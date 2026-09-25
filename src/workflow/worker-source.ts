@@ -163,6 +163,17 @@ function workflowFn() {
 function agent(prompt, opts) {
   if (typeof prompt !== "string") return Promise.reject(new TypeError("agent(prompt, opts?): prompt must be a string"));
   var o = opts || {};
+  // opts.model / opts.thinking (Agent-tool model/thinking semantics) are
+  // forwarded verbatim to the host below — but only after the same style of
+  // client-side type check as prompt: a non-string model or an out-of-set
+  // thinking level is a script defect and rejects synchronously (catchable),
+  // instead of surfacing as an opaque spawn error one round-trip later.
+  if (o.model !== undefined && typeof o.model !== "string")
+    return Promise.reject(new TypeError("agent(prompt, opts?): opts.model must be a string"));
+  if (o.thinking !== undefined && ["off", "low", "medium", "high"].indexOf(o.thinking) === -1)
+    return Promise.reject(
+      new TypeError("agent(prompt, opts?): opts.thinking must be one of 'off' | 'low' | 'medium' | 'high'"),
+    );
   var fullResult = o.fullResult === true;
   var effectivePhase = typeof o.phase === "string" ? o.phase : currentPhase;
   var mergedOpts = effectivePhase !== undefined ? Object.assign({}, o, { phase: effectivePhase }) : o;

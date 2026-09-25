@@ -56,6 +56,40 @@ describe("taskKeyOf (§6.2 A2': declared-semantics completeness)", () => {
   it("changes when isolation is added", () => {
     expect(taskKeyOf(baseSem)).not.toBe(taskKeyOf({ ...baseSem, isolation: "worktree" }));
   });
+  it("changes when a per-call model override is added (same prompt + different model must never replay the old result)", () => {
+    expect(taskKeyOf(baseSem)).not.toBe(taskKeyOf({ ...baseSem, model: "cr-anthropic/claude-sonnet-5" }));
+    expect(taskKeyOf({ ...baseSem, model: "zai/glm-5.3" })).not.toBe(
+      taskKeyOf({ ...baseSem, model: "cr-anthropic/claude-sonnet-5" }),
+    );
+    // The raw string participates, so a strict pair and its fuzzy hint form
+    // are distinct declared semantics (a miss is always safe; a false hit is not).
+    expect(taskKeyOf({ ...baseSem, model: "sonnet" })).not.toBe(
+      taskKeyOf({ ...baseSem, model: "cr-anthropic/claude-sonnet-5" }),
+    );
+  });
+  it("changes when a per-call thinking override is added or differs", () => {
+    expect(taskKeyOf(baseSem)).not.toBe(taskKeyOf({ ...baseSem, thinking: "high" }));
+    expect(taskKeyOf({ ...baseSem, thinking: "low" })).not.toBe(taskKeyOf({ ...baseSem, thinking: "high" }));
+  });
+  it("is byte-identical to the pre-override formula when model/thinking are absent (existing journals never invalidate)", () => {
+    // The exact canon object taskKeyOf built before model/thinking existed —
+    // recomputed here from the exported primitives so the equality below is
+    // a byte-level proof, not a restatement of the current implementation.
+    const legacyKeyOf = (sem: TaskSemantics): string =>
+      sha256Hex(
+        canonicalize({
+          agentType: sem.agentType,
+          agentTypeConfigHash: sem.agentTypeConfigHash,
+          prompt: sem.prompt,
+          ...(sem.isolation !== undefined ? { isolation: sem.isolation } : {}),
+          ...(sem.workflowArgs !== undefined ? { workflowArgs: sem.workflowArgs } : {}),
+        }),
+      ).slice(0, 32);
+    expect(taskKeyOf(baseSem)).toBe(legacyKeyOf(baseSem));
+    expect(taskKeyOf({ ...baseSem, isolation: "worktree", workflowArgs: { a: 1 } })).toBe(
+      legacyKeyOf({ ...baseSem, isolation: "worktree", workflowArgs: { a: 1 } }),
+    );
+  });
   it("changes when workflowArgs changes", () => {
     expect(taskKeyOf({ ...baseSem, workflowArgs: { n: 1 } })).not.toBe(
       taskKeyOf({ ...baseSem, workflowArgs: { n: 2 } }),

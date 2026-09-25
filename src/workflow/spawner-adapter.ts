@@ -47,6 +47,16 @@ export function createWorkflowChildSpawner(spawn: SpawnService, types: AgentType
         type: req.type,
         prompt: req.prompt,
         ...(req.label !== undefined ? { label: req.label } : {}),
+        // agent()'s `opts.model` / `opts.thinking` (Agent-tool `model`/
+        // `thinking` semantics, split in host.ts's `handleAgent`):
+        // forwarded verbatim so spawn admission existence-checks strict
+        // pairs (`modelExists`, `Did you mean` suggestions) and fuzzy-resolves
+        // hints — an unknown model / unresolvable hint / quota-gate block all
+        // come back as a spawn error, i.e. a dispatch failure that rejects
+        // the script's `agent()` call.
+        ...(req.modelOverride !== undefined ? { modelOverride: req.modelOverride } : {}),
+        ...(req.modelHintOverride !== undefined ? { modelHintOverride: req.modelHintOverride } : {}),
+        ...(req.thinkingOverride !== undefined ? { thinkingOverride: req.thinkingOverride } : {}),
         ...(req.deadlineAt !== undefined ? { deadlineAt: req.deadlineAt } : {}),
         ...(req.parentRunId !== undefined ? { parentRunId: req.parentRunId } : {}),
         // §4.4.3 BW1/BW3: the workflow-derived relative budget, forwarded

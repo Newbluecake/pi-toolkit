@@ -1,4 +1,4 @@
-import type { Millis, RunId } from "../core/types.js";
+import type { Millis, RunId, ThinkingLevel } from "../core/types.js";
 import type { RunawayPolicy } from "../config/settings.js";
 
 /**
@@ -97,9 +97,15 @@ export type ReplayScope = "chain" | "content";
 /**
  * M3.5 §6.2 `TaskSemantics` (design's `journal-key.ts`), *narrowed* to the
  * fields the current `agent()` host-call surface (host.ts's `handleAgent`)
- * actually carries — `model`/`effort`/`tools`/`cwd`/`schema`/`gate` are not
+ * actually carries — `effort`/`tools`/`cwd`/`schema`/`gate` are not
  * threaded through `ChildSpawner.spawn()` yet (M3.2/M3.4 scope), so they are
- * not part of the key. This is a documented simplification in the same
+ * not part of the key. `model`/`thinking` **are**: since agent() grew real
+ * per-call overrides (split into `modelOverride`/`modelHintOverride`/
+ * `thinkingOverride` in `handleAgent`, exactly like the Agent tool), the same
+ * prompt on a different model must never replay the old result — the *raw*
+ * string as spoken by the script participates in the key (two spellings of
+ * the same model simply miss, which is safe; the reverse — one key for two
+ * models — is not). This is a documented simplification in the same
  * spirit as every other M3.x narrowing (see host.ts's own doc comments) —
  * a future milestone that wires those fields into `agent()` must add them
  * here too (`KEY_POLICY`-equivalent completeness is enforced by
@@ -112,6 +118,10 @@ export interface TaskSemantics {
   /** E2 (§6.3): a content hash of the agent type's *resolved configuration*, not just its name — a `.md` definition edit must miss. Falls back to the bare `agentType` name when the configured `ChildSpawner` cannot report one (documented gap, see host.ts's `ChildSpawner.configHashOf`). */
   readonly agentTypeConfigHash: string;
   readonly prompt: string;
+  /** Per-call model override (Agent-tool `model` semantics: strict `provider/id` pair or fuzzy hint) — the raw string the script passed, not the resolved pair. */
+  readonly model?: string;
+  /** Per-call thinking-level override, same values as the Agent tool's `thinking` param. */
+  readonly thinking?: ThinkingLevel;
   /** RP7: `isolation:"worktree"` tasks are never replayed by default. */
   readonly isolation?: "worktree";
   /** §6.2: the workflow run's own top-level `args` — included because a script's prompt-construction logic can depend on `args` even where the resulting prompt text does not visibly change (defense-in-depth beyond "prompt is already textually complete"). */
