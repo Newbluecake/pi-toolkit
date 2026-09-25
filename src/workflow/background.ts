@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Clock, TimerHandle } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import type { WorkflowActivityRegistry } from "./activity.js";
+import { scanPlannedPhases } from "./phase-scan.js";
 import type { Orchestrator, OrchestratorRunRequest } from "./orchestrator.js";
 import type {
   ReplayScope,
@@ -303,7 +304,9 @@ export function createBackgroundWorkflows(deps: BackgroundWorkflowsDeps): Backgr
     entry.outcome = outcome;
     entry.settledAt = clock.now();
     try {
-      deps.activity.unregister(entry.workflowId);
+      // M11: pass the outcome status so the fleet widget's frozen pipeline
+      // snapshot carries the real terminal mark for its linger window.
+      deps.activity.unregister(entry.workflowId, { status: outcome.status });
     } catch {
       // activity is display-only
     }
@@ -383,7 +386,7 @@ export function createBackgroundWorkflows(deps: BackgroundWorkflowsDeps): Backgr
       if (entries.has(workflowId)) throw new Error("unable to allocate a unique workflow id");
       const startedAt = clock.now();
       const deadlineAt = req.budget.workflowTotalMs > 0 ? startedAt + req.budget.workflowTotalMs : undefined;
-      deps.activity.register(workflowId, req.name, startedAt, deadlineAt);
+      deps.activity.register(workflowId, req.name, startedAt, deadlineAt, scanPlannedPhases(req.script));
       let orchestrator: Orchestrator;
       try {
         orchestrator = deps.createOrchestrator(workflowId);

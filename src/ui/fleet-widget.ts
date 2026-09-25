@@ -16,6 +16,7 @@ import {
   type FleetRow,
   type FleetViewModel,
 } from "./fleet-panel.js";
+import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 
 /**
  * X7b fleet widget: the always-on compact counterpart to the `/agent fleet`
@@ -127,7 +128,7 @@ export interface FleetWidgetRenderOptions {
   mentionNoteOf?: (runId: string) => string | undefined;
   /** Hard upper bound for pending notification rows. Default 10 minutes. */
   awaitNotificationMs?: number;
-  /** M9: in-flight workflows — rendered as ⚙ group headers with their children (rows whose parentRunId === workflowId) indented beneath. */
+  /** M9: in-flight workflows — rendered as ⚙ group headers with their children (rows whose parentRunId === workflowId) indented beneath. M11: pipeline view — phase chain + counts + frozen terminal linger. */
   workflows?: readonly WorkflowGroupInput[];
   /** D1/M3: background bash jobs share the main-row budget with runs. */
   bashJobs?: readonly BashJobViewInput[];
@@ -135,14 +136,46 @@ export interface FleetWidgetRenderOptions {
   color?: FleetColorize;
   /** Available visible columns for main-row field assembly. */
   width?: number;
+  /** M11: spinner frame index for the active phase chip (`now / refreshMs` is a natural choice). Default 0 — the builder stays pure. */
+  frame?: number;
 }
 
-/** M9: one in-flight workflow's header data (from WorkflowActivityRegistry, elapsed precomputed by the controller). */
+/** M11: one phase chip of a workflow's pipeline chain (structurally the registry's WorkflowPhaseActivity). */
+export interface WorkflowPhaseChip {
+  readonly id: string;
+  readonly state: "pending" | "active" | "draining" | "done";
+  readonly spawned: number;
+  readonly settled: number;
+  /** Settled children with status !== "completed" — renders the chip as ✗ (crit). */
+  readonly failed: number;
+}
+
+/** M11: a just-settled workflow child still inside the terminal-linger window. */
+export interface WorkflowDoneChild {
+  readonly label: string;
+  readonly ok: boolean;
+  readonly durationMs: Millis;
+}
+
+/** M9/M11: one workflow's header + pipeline data (controller maps the registry snapshot; elapsed is precomputed and frozen at terminal). */
 export interface WorkflowGroupInput {
-  workflowId: string;
-  name: string;
-  phase?: string;
-  elapsedMs: number;
+  readonly workflowId: string;
+  readonly name: string;
+  readonly elapsedMs: number;
+  /** Total budget (deadline − start); rendered as `elapsed / budget` when present. */
+  readonly budgetMs?: number;
+  /** Phase chain chips; empty/absent → no chain line (a workflow with neither planned nor entered phases stays one simple header). */
+  readonly phases?: readonly WorkflowPhaseChip[];
+  /** Children settled completed (workflow-level totals — implicit-phase children count here too). */
+  readonly doneTotal: number;
+  /** Children settled non-completed. */
+  readonly failedTotal: number;
+  /** Children currently in flight. */
+  readonly activeTotal: number;
+  /** Just-settled children still within terminalLingerMs, most recent last. */
+  readonly recentSettled?: readonly WorkflowDoneChild[];
+  /** Present while the finished workflow's frozen snapshot lingers — muted header with a ✓/✗ icon. */
+  readonly terminal?: { readonly status: string };
 }
 
 /** M-C: one run's main tree-row line. M10: segment-colored — label is the eye-catcher
@@ -282,6 +315,144 @@ function widgetTerminalDetail(row: FleetRow, width: number): string {
   return [finalLabel, type, wt, chosen, ...suffix].filter(Boolean).join(" ");
 }
 
+// ── M11: workflow pipeline view (pure builders) ─────────────────────────────
+
+/** Braille spinner frames for the active phase chip; the frame index arrives as a parameter so the builder stays pure. */
+export const PHASE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+const PHASE_CHAIN_SEP = " ━━▶ ";
+
+function phaseChipText(chip: WorkflowPhaseChip, frame: string): string {
+  const name = chip.id.replace(/\s+/g, " ").trim() || "?";
+  const counts = chip.spawned > 0 ? ` ${chip.settled}/${chip.spawned}` : "";
+  if (chip.state === "done") return `${chip.failed > 0 ? "✗" : "✓"} ${name}${counts}`;
+  if (chip.state === "active") return `${frame} ${name}${counts}`;
+  // Left behind by the script but children still running: progress, never ✓.
+  if (chip.state === "draining") return `▸ ${name}${counts}`;
+  return `○ ${name}`;
+}
+
+/**
+ * M11: the phase chain line — `✓ done n/n ━━▶ ⠹ active settled/spawned ━━▶ ○ pending`,
+ * joined by ` ━━▶ `. Coloring: done+clean = success, done-with-failures = ✗ crit
+ * (the only mandatory tone), pending = muted, active = plain (the moving
+ * spinner separates it from the muted tail without another color).
+ * Returns undefined when there is no chain to draw (no planned and no entered
+ * phase — the header then stays as simple as before M11).
+ *
+ * Truncation keeps the ACTIVE chip (the "current stage" is the one thing a
+ * glance must land on) and grows outward while the line fits; whatever falls
+ * off either side collapses to a single `…` chip. Without an active chip
+ * (frozen terminal snapshot / never started) the anchor is the last done
+ * chip, else the head.
+ */
+export function workflowPhaseChainLine(
+  phases: readonly WorkflowPhaseChip[],
+  opts: { width?: number; color?: FleetColorize; frame?: number } = {},
+): string | undefined {
+  if (phases.length === 0) return undefined;
+  const color = opts.color ?? ((_tone, text) => text);
+  const frameIndex = Math.trunc(Math.abs(opts.frame ?? 0)) % PHASE_SPINNER_FRAMES.length;
+  const frame = PHASE_SPINNER_FRAMES[frameIndex] ?? PHASE_SPINNER_FRAMES[0]!;
+  const width = Math.max(4, opts.width ?? 120);
+  const texts = phases.map((chip) => {
+    const text = phaseChipText(chip, frame);
+    if (chip.state === "done") return color(chip.failed > 0 ? "crit" : "success", text);
+    if (chip.state === "pending") return color("muted", text);
+    return text;
+  });
+  const widths = texts.map((text) => visibleWidth(text));
+  const sepWidth = visibleWidth(PHASE_CHAIN_SEP);
+  const activeIdx = phases.findIndex((chip) => chip.state === "active");
+  const anchor = activeIdx >= 0 ? activeIdx : phases.some((chip) => chip.state === "done") ? phases.length - 1 : 0;
+  const windowFits = (lo: number, hi: number): boolean => {
+    let total = 0;
+    for (let i = lo; i <= hi; i++) total += widths[i]!;
+    total += (hi - lo) * sepWidth;
+    if (lo > 0) total += sepWidth + 1; // `…` chip + separator
+    if (hi < phases.length - 1) total += sepWidth + 1;
+    return total <= width;
+  };
+  let lo = anchor;
+  let hi = anchor;
+  if (!windowFits(lo, hi)) return truncateToWidth(texts[anchor]!, width);
+  // Grow toward the pending side first, fall back to the done side; stop when neither fits.
+  for (;;) {
+    let grew = false;
+    if (hi + 1 < phases.length && windowFits(lo, hi + 1)) {
+      hi += 1;
+      grew = true;
+    } else if (lo - 1 >= 0 && windowFits(lo - 1, hi)) {
+      lo -= 1;
+      grew = true;
+    }
+    if (!grew) break;
+  }
+  const parts: string[] = [];
+  if (lo > 0) parts.push("…");
+  for (let i = lo; i <= hi; i++) parts.push(texts[i]!);
+  if (hi < phases.length - 1) parts.push("…");
+  return parts.join(PHASE_CHAIN_SEP);
+}
+
+/** Terminal icon: explicit failure statuses → ✗; unknown ("terminal") judged by the children's failure count. */
+function workflowTerminalIcon(wf: WorkflowGroupInput): "✓" | "✗" {
+  const status = wf.terminal?.status;
+  if (status === "failed" || status === "timed_out" || status === "aborted") return "✗";
+  if (status === "completed") return "✓";
+  return wf.failedTotal > 0 ? "✗" : "✓";
+}
+
+/**
+ * M11: the workflow header — `⚙ name · elapsed / budget · ✓n ✗n ▸n`. The budget
+ * segment only appears when a deadline was declared; ✗ is omitted at zero
+ * and the whole counts segment stays hidden while nothing has happened yet
+ * (✓0 ▸0 is noise). Terminal (frozen) workflows swap ⚙ for ✓/✗ and render the
+ * whole line muted. UI-text rule: compact inline markers, English tokens only.
+ */
+export function workflowHeaderLine(wf: WorkflowGroupInput, color: FleetColorize): string {
+  const icon = wf.terminal === undefined ? "⚙" : workflowTerminalIcon(wf);
+  const elapsed = formatDuration(wf.elapsedMs);
+  const time = wf.budgetMs !== undefined ? `${elapsed} / ${formatDuration(wf.budgetMs)}` : elapsed;
+  const counts: string[] = [];
+  if (wf.doneTotal > 0) counts.push(`✓${wf.doneTotal}`);
+  if (wf.failedTotal > 0) counts.push(`✗${wf.failedTotal}`);
+  if (wf.activeTotal > 0) counts.push(`▸${wf.activeTotal}`);
+  const segments = [wf.name, time];
+  const countsText = counts.join(" ");
+  if (countsText !== "") segments.push(countsText);
+  return color(wf.terminal === undefined ? "header" : "muted", `${icon} ${segments.join(" · ")}`);
+}
+
+/**
+ * M11: registry snapshot → WorkflowGroupInput. Elapsed freezes at
+ * `terminal.endedAt` for lingering workflows (a frozen pipeline must not keep
+ * ticking); the recent-children window reuses the widget's terminalLingerMs so
+ * the ✓/✗ rows fade on the same clock as the freeze itself.
+ */
+export function workflowGroupInput(snap: WorkflowActivitySnapshot, now: number, lingerMs: number): WorkflowGroupInput {
+  return {
+    workflowId: snap.workflowId,
+    name: snap.name,
+    elapsedMs: Math.max(0, (snap.terminal?.endedAt ?? now) - snap.startedAt),
+    ...(snap.deadlineAt !== undefined && snap.deadlineAt > snap.startedAt
+      ? { budgetMs: snap.deadlineAt - snap.startedAt }
+      : {}),
+    phases: [...snap.phases],
+    doneTotal: snap.completedTotal,
+    failedTotal: Math.max(0, snap.settledTotal - snap.completedTotal),
+    activeTotal: snap.activeChildren.length,
+    recentSettled: snap.settledChildren
+      .filter((child) => now - child.settledAt <= lingerMs)
+      .map((child) => ({
+        label: child.label ?? child.callId,
+        ok: child.status === "completed",
+        durationMs: child.durationMs,
+      })),
+    ...(snap.terminal !== undefined ? { terminal: { status: snap.terminal.status } } : {}),
+  };
+}
+
 /** M-C: order active rows as a forest — severity-ordered roots, each followed by its children (depth-first). */
 export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; depth: number }> {
   const present = new Set(rows.map((r) => r.runId));
@@ -419,14 +590,36 @@ export function buildFleetWidgetLines(
     } else general.push(row);
   }
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
-  // Ordered entries: workflow ⚙ group headers interleaved with their claimed
-  // runs, then the general run forest. ⚙ headers don't consume the line budget.
+  // Ordered entries: workflow ⚙ group headers (plus their free phase-chain
+  // line and lingering just-settled child rows) interleaved with their
+  // claimed runs, then the general run forest. ⚙ headers and chain lines
+  // don't consume the line budget; just-settled child rows draw from the
+  // leftover budget so they can never crowd out a run's identity row.
   type Entry =
-    { header: string } | { row: FleetRow; indent: string } | { bash: BashJobViewInput } | { awaiting: FleetRow };
+    | { header: string }
+    | { settled: string }
+    | { row: FleetRow; indent: string }
+    | { bash: BashJobViewInput }
+    | { awaiting: FleetRow };
   const entries: Entry[] = [];
   for (const wf of workflows) {
-    entries.push({ header: color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`) });
+    entries.push({ header: workflowHeaderLine(wf, color) });
+    const chain =
+      wf.phases === undefined
+        ? undefined
+        : workflowPhaseChainLine(wf.phases, {
+            width: Math.max(6, width - 2),
+            color,
+            ...(opts.frame !== undefined ? { frame: opts.frame } : {}),
+          });
+    if (chain !== undefined) entries.push({ header: `  ${chain}` });
     for (const row of grouped.get(wf.workflowId) ?? []) entries.push({ row, indent: "↳ " });
+    for (const child of wf.recentSettled ?? []) {
+      const label = truncateToWidth(child.label, Math.max(8, width - 16));
+      entries.push({
+        settled: color("muted", `    ${child.ok ? "✓" : "✗"} ${label} ${formatDuration(child.durationMs)}`),
+      });
+    }
   }
   for (const { row, depth } of treeOrder(general)) {
     const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
@@ -447,6 +640,10 @@ export function buildFleetWidgetLines(
   let shownRuns = 0;
   const rendered = entries.map((entry) => {
     if ("header" in entry) return { main: entry.header, activity: undefined as string | undefined, show: false };
+    // Just-settled workflow children: no identity row of their own — their
+    // single line lives in the leftover budget (same pool as activity
+    // continuations, display order preserved).
+    if ("settled" in entry) return { main: undefined, activity: entry.settled, show: false };
     if (budget <= 0) return undefined; // identity hidden behind "+N more"
     const rendered =
       "bash" in entry
@@ -493,7 +690,7 @@ export function buildFleetWidgetLines(
   for (let i = 0; i < rendered.length; i++) {
     const r = rendered[i];
     if (!r) continue;
-    lines.push(r.main);
+    if (r.main !== undefined) lines.push(r.main);
     if (r.show && r.activity !== undefined) {
       const entry = entries[i];
       const awaitingNote = entry !== undefined && "awaiting" in entry ? mentionNoteOf(entry.awaiting.runId) : undefined;
@@ -588,8 +785,8 @@ export interface FleetWidgetDeps {
   deadlineWarnMs?: Millis;
   /** Line budget for run lines below the header. Default WIDGET_DEFAULT_ROWS (6); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
-  /** M9: in-flight workflow snapshots (WorkflowActivityRegistry.list) for ⚙ group headers. */
-  workflows?: () => readonly { workflowId: string; name: string; startedAt: number; currentPhaseId?: string }[];
+  /** M9/M11: workflow snapshots (WorkflowActivityRegistry.listForDisplay — running plus frozen terminal linger) for ⚙ pipeline group headers. */
+  workflows?: () => readonly WorkflowActivitySnapshot[];
   /** D1: live in-memory bash job records; fs access remains in the stack adapter. */
   bashJobs?: () => readonly JobRecord[];
   /** D2: stack-bound two-pass tail reader, including the observed file size. */
@@ -718,14 +915,13 @@ export class FleetWidgetController {
       ...(this.deps.receiptOf ? { receiptOf: this.deps.receiptOf } : {}),
       ...(this.deps.mentionNoteOf ? { mentionNoteOf: this.deps.mentionNoteOf } : {}),
       ...(this.deps.color ? { color: this.deps.color } : {}),
+      // M11: the active phase chip spins one frame per tick; the recent-children
+      // window shares the builder's linger so rows fade on the same clock as
+      // the terminal freeze.
+      frame: Math.floor(now / Math.max(120, this.deps.refreshMs ?? 1000)),
       ...(this.deps.workflows
         ? {
-            workflows: this.deps.workflows().map((w) => ({
-              workflowId: w.workflowId,
-              name: w.name,
-              ...(w.currentPhaseId === undefined ? {} : { phase: w.currentPhaseId }),
-              elapsedMs: Math.max(0, now - w.startedAt),
-            })),
+            workflows: this.deps.workflows().map((w) => workflowGroupInput(w, now, this.deps.terminalLingerMs ?? 5000)),
           }
         : {}),
       ...(this.deps.bashJobs ? { bashJobs: bashViews } : {}),

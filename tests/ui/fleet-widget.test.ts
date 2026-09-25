@@ -19,6 +19,10 @@ import {
   bashJobHighlight,
   tailLine,
   treeOrder,
+  workflowGroupInput,
+  workflowHeaderLine,
+  workflowPhaseChainLine,
+  type WorkflowPhaseChip,
   WIDGET_MAX_ROWS,
 } from "../../src/ui/fleet-widget.js";
 
@@ -1253,10 +1257,12 @@ describe("M9: workflow group headers in the tree", () => {
     const loner = snapshot({ runId: "loner-000", diag: diag({ createdAt: 7_000, lastEventAt: 9_900 }) });
     const model = buildFleetViewModel([wfChild1, wfChild2, loner], OPTS);
     const lines = buildFleetWidgetLines(model, {
-      workflows: [{ workflowId: "wf-1", name: "plan-review", phase: "review", elapsedMs: 121_000 }],
+      workflows: [
+        { workflowId: "wf-1", name: "plan-review", elapsedMs: 121_000, doneTotal: 0, failedTotal: 0, activeTotal: 2 },
+      ],
     })!;
     expect(lines[0]).toContain("3 active Agents");
-    expect(lines[1]).toBe("⚙ plan-review · review · 2m01s");
+    expect(lines[1]).toBe("⚙ plan-review · 2m01s · ▸2");
     expect(lines[2]).toContain("↳ 评审A");
     expect(lines[3]).toContain("↳ 评审B");
     expect(lines[4]).toContain("loner-00");
@@ -1266,10 +1272,12 @@ describe("M9: workflow group headers in the tree", () => {
   it("a workflow with no visible children still shows its header; widget visible even with 0 active runs", () => {
     const model = buildFleetViewModel([], OPTS);
     const lines = buildFleetWidgetLines(model, {
-      workflows: [{ workflowId: "wf-2", name: "nightly", elapsedMs: 5_000 }],
+      workflows: [
+        { workflowId: "wf-2", name: "nightly", elapsedMs: 5_000, doneTotal: 0, failedTotal: 0, activeTotal: 0 },
+      ],
     })!;
     expect(lines[0]).toContain("0 active Agents");
-    expect(lines[1]).toBe("⚙ nightly · - · 5s");
+    expect(lines[1]).toBe("⚙ nightly · 5s");
   });
 
   it("without workflows opt, workflow-orphaned children keep the plain ↳ top-level rendering", () => {
@@ -1335,5 +1343,296 @@ describe("worktree isolation marker rendering (X1)", () => {
     })!;
     expect(lines.join("\n")).toContain("⎇ pi-agent-extremely-…");
     expect(lines.join("\n")).not.toContain("pi-agent-extremely-long-run-identifier");
+  });
+});
+
+describe("M11: workflow pipeline view", () => {
+  const chip = (
+    id: string,
+    state: "pending" | "active" | "draining" | "done",
+    spawned = 0,
+    settled = 0,
+    failed = 0,
+  ): WorkflowPhaseChip => ({ id, state, spawned, settled, failed });
+
+  it("renders header with budget + counts and the phase chain under it (✗0 omitted, frame picks the spinner glyph)", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      frame: 2, // ⠹
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "wf-smoke-test",
+          elapsedMs: 42_000,
+          budgetMs: 600_000,
+          doneTotal: 3,
+          failedTotal: 0,
+          activeTotal: 2,
+          phases: [chip("scan", "done", 2, 2), chip("summarize", "active", 3, 1), chip("report", "pending")],
+        },
+      ],
+    })!;
+    expect(lines[1]).toBe("⚙ wf-smoke-test · 42s / 10m00s · ✓3 ▸2");
+    expect(lines[2]).toBe("  ✓ scan 2/2 ━━▶ ⠹ summarize 1/3 ━━▶ ○ report");
+  });
+
+  it("no chain line when there are no phases at all (planned empty, never entered) — header stays simple", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      workflows: [
+        { workflowId: "wf-2", name: "nightly", elapsedMs: 5_000, doneTotal: 0, failedTotal: 0, activeTotal: 0 },
+      ],
+    })!;
+    expect(lines[1]).toBe("⚙ nightly · 5s");
+    expect(lines).toHaveLength(2); // widget header + workflow header only
+  });
+
+  it("a single entered phase still renders a one-chip chain; counts hidden while spawned is 0", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      frame: 0,
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "solo",
+          elapsedMs: 1_000,
+          doneTotal: 0,
+          failedTotal: 0,
+          activeTotal: 1,
+          phases: [chip("scan", "active")],
+        },
+      ],
+    })!;
+    expect(lines[2]).toBe("  ⠋ scan");
+  });
+
+  it("colors: done-clean = success, done-with-failures = crit ✗, pending = muted, active = plain", () => {
+    const seen: string[] = [];
+    const color: FleetColorize = (tone, text) => {
+      seen.push(`${tone}:${text}`);
+      return text;
+    };
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      color,
+      frame: 4,
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "tone",
+          elapsedMs: 1_000,
+          doneTotal: 1,
+          failedTotal: 1,
+          activeTotal: 1,
+          phases: [
+            chip("scan", "done", 2, 2, 2),
+            chip("build", "done", 1, 1),
+            chip("pack", "active", 1),
+            chip("ship", "pending"),
+          ],
+        },
+      ],
+    })!;
+    expect(seen).toContain("crit:✗ scan 2/2");
+    expect(seen).toContain("success:✓ build 1/1");
+    expect(seen).toContain("muted:○ ship");
+    expect(lines[2]).toContain("⠼ pack 0/1"); // active chip: plain (no tone call), glyph from frame 4
+  });
+
+  it("a draining phase (left behind, children still running) renders ▸ n/m, plain — never ✓", () => {
+    const seen: string[] = [];
+    const color: FleetColorize = (tone, text) => {
+      seen.push(`${tone}:${text}`);
+      return text;
+    };
+    const line = workflowPhaseChainLine(
+      [chip("scan", "draining", 2, 1), chip("summarize", "active", 1), chip("report", "pending")],
+      { frame: 0, color },
+    );
+    expect(line).toBe("▸ scan 1/2 ━━▶ ⠋ summarize 0/1 ━━▶ ○ report");
+    expect(seen.some((s) => s.includes("scan"))).toBe(false); // plain: no success tone for an unfinished phase
+  });
+
+  it("chain truncation keeps the active chip and collapses the sides to …", () => {
+    const phases = [
+      chip("alpha", "done", 1, 1),
+      chip("beta", "done", 1, 1),
+      chip("gamma", "active", 2, 1),
+      chip("delta", "pending"),
+      chip("epsilon", "pending"),
+    ];
+    // chips are 7+6+11+7+9 wide, sep 5: full chain = 40 + 4×5 = 60.
+    // width 36 → window [gamma..delta]: 11+7+5 + two … sides (6+6) = 35 fits, beta side (40) does not
+    expect(workflowPhaseChainLine(phases, { width: 36, frame: 0 })).toBe("… ━━▶ ⠋ gamma 1/2 ━━▶ ○ delta ━━▶ …");
+    // width 24 → the active chip alone (with … sides): 11 + 6 + 6 = 23 fits, either neighbor does not
+    expect(workflowPhaseChainLine(phases, { width: 24, frame: 0 })).toBe("… ━━▶ ⠋ gamma 1/2 ━━▶ …");
+    // very narrow: even the anchored window overflows → the anchor chip itself is truncated
+    expect(visibleWidth(workflowPhaseChainLine(phases, { width: 8, frame: 0 })!)).toBeLessThanOrEqual(8);
+    // wide enough → whole chain, no ellipses (full width: 11+10+11+7+9 + 4×5 = 68)
+    expect(workflowPhaseChainLine(phases, { width: 68, frame: 0 })).toBe(
+      "✓ alpha 1/1 ━━▶ ✓ beta 1/1 ━━▶ ⠋ gamma 1/2 ━━▶ ○ delta ━━▶ ○ epsilon",
+    );
+    expect(workflowPhaseChainLine([], { width: 40 })).toBeUndefined();
+  });
+
+  it("recent settled children render as muted rows after the workflow's active rows, within the leftover budget only", () => {
+    const child1 = snapshot({
+      runId: "child-a00",
+      parentRunId: "wf-1",
+      diag: diag({ createdAt: 8_000, lastEventAt: 9_900, label: "wf-sum-journal" }),
+    });
+    const child2 = snapshot({
+      runId: "child-b00",
+      parentRunId: "wf-1",
+      diag: diag({ createdAt: 8_500, lastEventAt: 9_900, label: "wf-sum-log" }),
+    });
+    const model = buildFleetViewModel([child1, child2], OPTS);
+    const base = {
+      workflowId: "wf-1",
+      name: "wf-smoke-test",
+      elapsedMs: 42_000,
+      doneTotal: 3,
+      failedTotal: 1,
+      activeTotal: 2,
+      phases: [chip("scan", "done", 2, 2), chip("summarize", "active", 2, 1)],
+      recentSettled: [
+        { label: "wf-sum-background", ok: true, durationMs: 8_000 },
+        { label: "wf-sum-config", ok: false, durationMs: 3_500 },
+      ],
+    };
+    // both active children's identity rows consume maxRows=2 → settled rows hidden
+    const tight = buildFleetWidgetLines(buildFleetViewModel([child1, child2], OPTS), {
+      maxRows: 2,
+      workflows: [base],
+    })!;
+    expect(tight.filter((l) => l.includes("wf-sum-background"))).toHaveLength(0);
+    // leftover budget present → settled rows appear under the workflow, after its active rows
+    const lines = buildFleetWidgetLines(model, { maxRows: 4, workflows: [base] })!;
+    expect(lines[1]).toBe("⚙ wf-smoke-test · 42s · ✓3 ✗1 ▸2");
+    expect(lines[2]).toBe("  ✓ scan 2/2 ━━▶ ⠋ summarize 1/2");
+    expect(lines[3]).toContain("↳ wf-sum-journal");
+    expect(lines[4]).toContain("↳ wf-sum-log");
+    expect(lines[5]).toBe("    ✓ wf-sum-background 8s");
+    expect(lines[6]).toBe("    ✗ wf-sum-config 3s");
+  });
+
+  it("a lingering terminal workflow renders a muted frozen header with ✓/✗ icon and a frozen pipeline", () => {
+    const seen: string[] = [];
+    const color: FleetColorize = (tone, text) => {
+      seen.push(`${tone}:${text}`);
+      return text;
+    };
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      color,
+      frame: 3,
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "wf-smoke-test",
+          elapsedMs: 65_000, // controller freezes this at terminal.endedAt
+          budgetMs: 600_000,
+          doneTotal: 4,
+          failedTotal: 0,
+          activeTotal: 0,
+          phases: [chip("scan", "done", 2, 2), chip("report", "done", 2, 2)],
+          terminal: { status: "completed" },
+        },
+      ],
+    })!;
+    expect(lines[1]).toBe("✓ wf-smoke-test · 1m05s / 10m00s · ✓4");
+    expect(lines[2]).toBe("  ✓ scan 2/2 ━━▶ ✓ report 2/2");
+    expect(seen).toContain("muted:✓ wf-smoke-test · 1m05s / 10m00s · ✓4");
+    // a failed freeze swaps the icon (and keeps the crit chain chips)
+    const failed = buildFleetWidgetLines(model, {
+      workflows: [
+        {
+          workflowId: "wf-2",
+          name: "broken",
+          elapsedMs: 10_000,
+          doneTotal: 0,
+          failedTotal: 2,
+          activeTotal: 0,
+          phases: [chip("scan", "done", 2, 2, 2)],
+          terminal: { status: "failed" },
+        },
+      ],
+    })!;
+    expect(failed[1]).toBe("✗ broken · 10s · ✗2");
+    expect(failed[2]).toBe("  ✗ scan 2/2");
+    // unknown terminal status: judged by the children
+    const unknown = buildFleetWidgetLines(model, {
+      workflows: [
+        {
+          workflowId: "wf-3",
+          name: "mystery",
+          elapsedMs: 1_000,
+          doneTotal: 0,
+          failedTotal: 0,
+          activeTotal: 0,
+          phases: [chip("scan", "done", 1, 1)],
+          terminal: { status: "terminal" },
+        },
+      ],
+    })!;
+    expect(unknown[1]).toBe("✓ mystery · 1s");
+  });
+
+  it("workflowGroupInput: elapsed freezes at endedAt; recentSettled filters by the linger window", () => {
+    const snap: import("../../src/workflow/activity.js").WorkflowActivitySnapshot = {
+      workflowId: "wf-1",
+      name: "pipe",
+      startedAt: 1_000,
+      deadlineAt: 301_000,
+      currentPhaseId: "scan",
+      activeChildren: [{ callId: "c1", enteredAt: 2_000 }],
+      settledChildren: [
+        { callId: "c0", status: "completed", source: "live", durationMs: 500, settledAt: 16_000 },
+        { callId: "c1x", label: "old", status: "completed", source: "live", durationMs: 500, settledAt: 2_000 },
+      ],
+      settledTotal: 5,
+      completedTotal: 4,
+      replayTotal: 0,
+      phases: [{ id: "scan", state: "active", spawned: 1, settled: 0, failed: 0 }],
+    };
+    const live = workflowGroupInput(snap, 20_000, 5_000);
+    expect(live.elapsedMs).toBe(19_000);
+    expect(live.budgetMs).toBe(300_000);
+    expect(live.doneTotal).toBe(4);
+    expect(live.failedTotal).toBe(1);
+    expect(live.activeTotal).toBe(1);
+    expect(live.recentSettled).toEqual([{ label: "c0", ok: true, durationMs: 500 }]); // the 18s-old one is out
+    expect(live.terminal).toBeUndefined();
+    const frozen = workflowGroupInput({ ...snap, terminal: { status: "completed", endedAt: 15_000 } }, 20_000, 5_000);
+    expect(frozen.elapsedMs).toBe(14_000); // stopped ticking at the freeze
+    expect(frozen.terminal).toEqual({ status: "completed" });
+    expect(frozen.recentSettled).toEqual([{ label: "c0", ok: true, durationMs: 500 }]); // 4s old, still inside
+  });
+
+  it("widget stays visible (not undefined) while a workflow lingers terminal", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "x",
+          elapsedMs: 1_000,
+          doneTotal: 1,
+          failedTotal: 0,
+          activeTotal: 0,
+          terminal: { status: "completed" },
+        },
+      ],
+    });
+    expect(lines).toBeDefined();
+    expect(lines![0]).toContain("0 active Agents");
+  });
+
+  it("workflowHeaderLine hides the counts segment while nothing has happened (✓0 ▸0 is noise)", () => {
+    const line = workflowHeaderLine(
+      { workflowId: "wf-1", name: "fresh", elapsedMs: 200, doneTotal: 0, failedTotal: 0, activeTotal: 0 },
+      (_t, s) => s,
+    );
+    expect(line).toBe("⚙ fresh · 200ms");
   });
 });

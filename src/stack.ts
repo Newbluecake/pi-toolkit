@@ -1553,7 +1553,14 @@ export function buildSessionStack(
         ctx,
         sessionId: currentSessionId(ctx),
         settings: settings.cacheTtl,
-        signals: () => computeAdaptiveSignals(query.list(), bashJobs?.backgroundJobCount() ?? 0, systemClock.now()),
+        // Background workflows count as subagent work (running-only `list()`, never the display linger).
+        signals: () =>
+          computeAdaptiveSignals(
+            query.list(),
+            bashJobs?.backgroundJobCount() ?? 0,
+            systemClock.now(),
+            workflowActivity.list(),
+          ),
         // D1: the predictor's warm/cold split must see the pinger's evidence —
         // `keepalive` is constructed just above, so this is a direct read (the
         // reverse direction needs the lazy `previousAdaptive` closure instead).
@@ -1686,8 +1693,11 @@ export function buildSessionStack(
         : {}),
       // M9: ⚙ workflow group headers in the agent tree — children (parentRunId
       // === workflowId) are indented under their workflow instead of floating
-      // as orphan ↳ rows.
-      workflows: () => workflowActivity.list(),
+      // as orphan ↳ rows. M11: the display feed additionally carries frozen
+      // terminal snapshots for the pipeline view's linger window — `list()`
+      // itself must stay running-only (it is the background-busy counter for
+      // keepalive / deferred reload / status).
+      workflows: () => workflowActivity.listForDisplay(),
       ...(bashJobs
         ? {
             bashJobs: () => bashJobs.list(),
