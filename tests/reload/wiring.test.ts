@@ -89,16 +89,29 @@ describe("wireDeferredReload", () => {
     expect(sent).toHaveLength(1);
   });
 
-  it("drops both bus subscriptions on session_shutdown (the bus survives /reload)", () => {
+  it("recounts when a background workflow settles (no run event marks a workflow's end)", () => {
+    const { pi, sent, emitBus } = fakePi();
+    let active = 1; // the workflow itself, between child runs
+    const ctl = wireDeferredReload(pi, { settings: DEFAULT_SETTINGS, activeRunCount: () => active });
+    ctl.arm(1);
+    emitBus("subagent:workflow:settled"); // still counted as busy → no fire
+    expect(sent).toEqual([]);
+    active = 0;
+    emitBus("subagent:workflow:settled");
+    expect(sent).toHaveLength(1);
+  });
+
+  it("drops all bus subscriptions on session_shutdown (the bus survives /reload)", () => {
     const { pi, unsubs, emitPi, emitBus, sent } = fakePi();
     const ctl = wireDeferredReload(pi, { settings: DEFAULT_SETTINGS, activeRunCount: () => 0 });
 
     emitPi("session_shutdown");
-    expect(unsubs).toHaveLength(2);
+    expect(unsubs).toHaveLength(3);
     for (const unsub of unsubs) expect(unsub).toHaveBeenCalledTimes(1);
 
     ctl.arm(0);
     emitBus("subagent:completed"); // handlers are gone — nothing fires
+    emitBus("subagent:workflow:settled");
     expect(sent).toEqual([]);
   });
 

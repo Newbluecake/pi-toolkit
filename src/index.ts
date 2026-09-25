@@ -71,9 +71,8 @@ import wireFeishuNotify from "./feishu-notify/index.js";
 import { wireSessionNav } from "./session-nav/index.js";
 import { wireDeferredReload, type DeferredReloadDeps } from "./reload/index.js";
 import type { DeferredReloadController } from "./reload/defer.js";
-import type { Orchestrator } from "./workflow/orchestrator.js";
-import type { WorkflowActivityRegistry } from "./workflow/activity.js";
-import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
+import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
+import type { WorkflowQueryPort } from "./tools/workflow-target.js";
 
 /**
  * M2 Wave 1 (architecture §7.1): the single merge point for the four
@@ -159,9 +158,10 @@ export default function activate(pi: ExtensionAPI): void {
   const holder: { current?: Stack } = {};
   const releaseBackgroundStatus = publishBackgroundStatus(() => {
     const stack = holder.current;
+    // Background workflows count as running subagent work (between child runs they have no live run).
     const runningSubagents = stack
       ? stack.query.list().filter((snapshot) => ["queued", "starting", "running", "stopping"].includes(snapshot.status))
-          .length
+          .length + stack.workflow.activity.list().length
       : 0;
     return {
       runningSubagents,
@@ -325,6 +325,7 @@ export default function activate(pi: ExtensionAPI): void {
       notifier: forwardNotifier(holder),
       resultMaxChars: () => settings.resultMaxChars,
       markdownTheme: resolveMarkdownTheme,
+      workflows: forwardWorkflowQuery(holder),
     }),
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
@@ -351,7 +352,13 @@ export default function activate(pi: ExtensionAPI): void {
       resolveRun: forwardResolveRun(holder),
     }),
   );
-  pi.registerTool(createAbortTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  pi.registerTool(
+    createAbortTool({
+      query: forwardQuery(holder),
+      resolveRun: forwardResolveRun(holder),
+      workflows: forwardWorkflowQuery(holder),
+    }),
+  );
   // timeout-notify：extend.enabled=false 时工具不注册（spawn 侧同步钳 maxExtensions=0，D-16）。
   if (settings.extend.enabled) {
     pi.registerTool(
@@ -457,9 +464,10 @@ export default function activate(pi: ExtensionAPI): void {
   // session-nav's so the editor wrapper layers on top of SessionNavEditor —
   // but /agent needs it now, so the command gets a facade over this ref.
   const reloadRef: { current?: DeferredReloadController } = {};
+  // Background workflows count too (a workflow between child runs has no live run but is still busy).
   const activeSubagentRunCount: DeferredReloadDeps["activeRunCount"] = () =>
-    holder.current?.query.list().filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status))
-      .length ?? 0;
+    (holder.current?.query.list().filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status))
+      .length ?? 0) + (holder.current?.workflow.activity.list().length ?? 0);
   pi.registerCommand(
     "agent",
     createStatusCommand({
@@ -467,7 +475,10 @@ export default function activate(pi: ExtensionAPI): void {
       resolveRun: forwardResolveRun(holder),
       orphans: forwardOrphans(holder),
       notifier: forwardNotifier(holder),
-      workflow: { activity: { list: () => forwardWorkflow(holder).activity.list() }, now: () => systemClock.now() },
+      workflow: {
+        activity: { list: () => holder.current?.workflow.activity.list() ?? [] },
+        now: () => systemClock.now(),
+      },
       bashJobs: { list: () => holder.current?.bashJobs?.list() ?? [] },
       mention: {
         entries: () => mentionAutocompleteEntries(holder),
@@ -540,6 +551,7 @@ export default function activate(pi: ExtensionAPI): void {
       holder.current.scheduler.stop();
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
+      holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
     }
     await types.reload();
     const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)], _event.reason);
@@ -552,6 +564,8 @@ export default function activate(pi: ExtensionAPI): void {
       );
     }
     stack.notifier.reconcile();
+    // Background workflows (plan §3.2): notices the previous stack persisted while shutting down.
+    stack.workflow.redeliverPendingNotices();
     stack.fabric?.pump(); // RC5: synchronous, never blocks startup
     await stack.scheduler.start(); // X5
   });
@@ -578,11 +592,20 @@ export default function activate(pi: ExtensionAPI): void {
     // stack cannot write into the shared outbox; the next stack owns pending records.
     stack.fabric?.dispose();
     const drainMs = Math.min(settings.budget.abortGraceMs * 3, 15_000);
+    // Background workflows (docs/dev/workflow-background/plan.md §4): request a stop on every
+    // running workflow first (so no script spawns another child), then stop runs; both drains
+    // share one bound. seal() finalizes any workflow still settling with its degraded snapshot
+    // — its notice is persisted into THIS session while it is still current.
+    stack.workflow.runs.shutdown();
     const pending = stack.query
       .list()
       .filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
     await Promise.all(pending.map((s) => stack.query.stop(s.runId, "shutdown")));
-    await stack.query.waitAll({ runIds: pending.map((s) => s.runId), waitMs: drainMs });
+    await Promise.all([
+      stack.query.waitAll({ runIds: pending.map((s) => s.runId), waitMs: drainMs }),
+      stack.workflow.runs.drain(drainMs),
+    ]);
+    stack.workflow.runs.seal();
     // bash auto-background §3.7: reload/new/resume/fork always keep the
     // processes (the next stack adopts them); only a real `quit` consults
     // shutdownPolicy, and even `kill` is bounded best-effort — a background
@@ -693,26 +716,26 @@ function forwardQuery(holder: { current?: Stack }): QueryService {
     extendTimeout: (runId, extendMs, opts) => requireStack(holder).query.extendTimeout(runId, extendMs, opts),
   };
 }
-function forwardWorkflow(holder: { current?: Stack }): {
-  defaultBudget: WorkflowRunBudget;
-  activity: WorkflowActivityRegistry;
-  createOrchestrator(workflowId: WorkflowId): Orchestrator;
-  usageOf(runId: string): UsageDelta | undefined;
-  snapshotOf(runId: string): RunSnapshot | undefined;
-} {
+function forwardWorkflow(holder: { current?: Stack }): WorkflowToolDeps {
   return {
     get defaultBudget() {
       return requireStack(holder).workflow.defaultBudget;
     },
-    get activity() {
-      return requireStack(holder).workflow.activity;
-    },
-    createOrchestrator: (workflowId) => requireStack(holder).workflow.createOrchestrator(workflowId),
-    // M8: child spend lookup for the workflow tool's aggregate usage.
-    usageOf: (runId) => holder.current?.query.get(runId)?.diag.usage,
-    // M10: live child snapshots for the workflow tool card's per-child rows
-    // (same QueryService the Agent tool's M-B progress port reads).
+    runs: { start: (req) => requireStack(holder).workflow.runs.start(req) },
+  };
+}
+/** Background workflow management for get_subagent_result / abort_subagent (plan §2.3). Lenient when no
+ *  session exists yet: nothing resolves as a workflow, so the run path produces its usual error. */
+function forwardWorkflowQuery(holder: { current?: Stack }): WorkflowQueryPort {
+  return {
+    resolve: (handle) => holder.current?.workflow.runs.resolve(handle) ?? { kind: "none" },
+    resolveLabel: (handle) => holder.current?.workflow.runs.resolveLabel(handle) ?? { kind: "none" },
+    get: (workflowId) => holder.current?.workflow.runs.get(workflowId),
+    wait: (workflowId, opts) => requireStack(holder).workflow.runs.wait(workflowId, opts),
+    stop: (workflowId, cause, opts) => requireStack(holder).workflow.runs.stop(workflowId, cause, opts),
+    activity: (workflowId) => holder.current?.workflow.activity.list().find((w) => w.workflowId === workflowId),
     snapshotOf: (runId) => holder.current?.query.get(runId),
+    usageOf: (runId) => holder.current?.query.get(runId)?.diag.usage,
   };
 }
 /** bash auto-background: the current session's job manager (absent before the

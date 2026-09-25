@@ -2,31 +2,30 @@ import { describe, expect, it } from "vitest";
 import { systemClock } from "../../src/core/clock.js";
 import type { ChildOutcome, ChildSpawner } from "../../src/workflow/host.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
-import { createOrchestrator, type Orchestrator } from "../../src/workflow/orchestrator.js";
+import { createOrchestrator } from "../../src/workflow/orchestrator.js";
 import { createWorkflowActivityRegistry, type WorkflowActivitySnapshot } from "../../src/workflow/activity.js";
+import { createBackgroundWorkflows, type BackgroundWorkflows } from "../../src/workflow/background.js";
 import type { WorkflowOutcome, WorkflowRunBudget } from "../../src/workflow/types.js";
 import type { RunSnapshot } from "../../src/core/types.js";
 import {
   buildWorkflowProgressLines,
   createDisabledWorkflowToolStub,
   createWorkflowTool,
+  formatWorkflowNotification,
   formatWorkflowSummary,
-  type WorkflowToolDeps,
+  renderOutcomeText,
 } from "../../src/tools/workflow-tool.js";
 
 /**
- * M3.6 (workflow design §11 M3.6): end-to-end tool coverage.
+ * SubagentWorkflow tool — background-only (docs/dev/workflow-background/plan.md).
  *
- *  - "two agents, real worker" proves the tool is not a half-finished shim:
+ *  - The tool validates, starts the run in the background registry and
+ *    returns the workflow id at once; the workflow settles later.
+ *  - "two agents, real worker" proves the engine path is intact end-to-end:
  *    a real `node:worker_threads` worker runs a real script that calls
- *    `agent()` twice and combines the results, through the real
- *    orchestrator/host-call-handler/journal-less path, exactly as a model
- *    invoking `SubagentWorkflow` would exercise it.
- *  - "enabled=false" proves the settings gate index.ts wires actually works
- *    (the stub tool, not the real one, is what a disabled instance exposes).
- *  - WT13/WT17 coverage proves the tool's own timeout/fallback sequence
- *    (§4.3.2) never hangs and never disguises a degraded snapshot as a
- *    confirmed terminal outcome.
+ *    `agent()` twice, through the real orchestrator, started by the tool.
+ *  - The bounded run → stop → settle → fallback sequence (formerly WT13/WT17
+ *    in this tool) now lives in the registry: tests/workflow/background.test.ts.
  */
 
 const REAL_BUDGET: WorkflowRunBudget = {
@@ -45,10 +44,16 @@ const REAL_BUDGET: WorkflowRunBudget = {
   maxBatchItems: 50,
 };
 
-function makeSpawner(): { spawner: ChildSpawner; spawnedPrompts: string[] } {
+function makeSpawner(opts: { hold?: boolean } = {}): {
+  spawner: ChildSpawner;
+  spawnedPrompts: string[];
+  release: () => void;
+} {
   const spawnedPrompts: string[] = [];
   let n = 0;
   const promptByRunId = new Map<string, string>();
+  let releaseHeld!: () => void;
+  const held = new Promise<void>((resolve) => (releaseHeld = resolve));
   const spawner: ChildSpawner = {
     spawn: async (req) => {
       spawnedPrompts.push(req.prompt);
@@ -58,6 +63,7 @@ function makeSpawner(): { spawner: ChildSpawner; spawnedPrompts: string[] } {
     },
     abort: async () => true,
     waitAll: async ({ runIds }) => {
+      if (opts.hold) await held;
       const settled: ChildOutcome[] = runIds.map((runId) => {
         const prompt = promptByRunId.get(runId) ?? "";
         return { runId, status: "completed" as const, text: `done:${prompt}` };
@@ -66,13 +72,14 @@ function makeSpawner(): { spawner: ChildSpawner; spawnedPrompts: string[] } {
     },
     configHashOf: (type) => `cfg:${type}`,
   };
-  return { spawner, spawnedPrompts };
+  return { spawner, spawnedPrompts, release: () => releaseHeld() };
 }
 
-function realDeps(spawner: ChildSpawner, budget: WorkflowRunBudget = REAL_BUDGET): WorkflowToolDeps {
-  return {
-    defaultBudget: budget,
-    activity: createWorkflowActivityRegistry(),
+function realRuns(spawner: ChildSpawner): BackgroundWorkflows {
+  const activity = createWorkflowActivityRegistry();
+  return createBackgroundWorkflows({
+    clock: systemClock,
+    activity,
     createOrchestrator: (workflowId) =>
       createOrchestrator({
         clock: systemClock,
@@ -80,43 +87,69 @@ function realDeps(spawner: ChildSpawner, budget: WorkflowRunBudget = REAL_BUDGET
         spawner,
         gateRunner: async () => ({ ok: true, code: 0, stdout: "", stderr: "" }),
         parentRunId: workflowId,
+        emit: (channel, payload) => activity.onEvent(channel, payload),
       }),
-  };
+  });
 }
 
-describe("SubagentWorkflow tool (M3.6): real worker end-to-end", () => {
-  it("a two-agent script (sequential) runs through a real worker and returns a combined result", async () => {
-    const { spawner, spawnedPrompts } = makeSpawner();
-    const tool = createWorkflowTool(realDeps(spawner));
-    const script =
-      'export const meta = { name: "two-agent", description: "t" };\n' +
-      'const a = await agent("first task");\n' +
-      'const b = await agent("second task");\n' +
-      'return a + "|" + b;';
-    const result = await tool.execute("call-1", { script }, undefined);
-    expect(spawnedPrompts).toEqual(["first task", "second task"]);
-    const details = result.details as { status: string; children: unknown[] };
-    expect(details.status).toBe("completed");
-    expect(details.children).toHaveLength(2);
-    expect(result.content[0]).toMatchObject({ type: "text" });
-    expect((result.content[0] as { text: string }).text).toContain("done:first task|done:second task");
-  }, 15_000);
+function toolWith(runs: BackgroundWorkflows, budget: WorkflowRunBudget = REAL_BUDGET) {
+  return createWorkflowTool({ defaultBudget: budget, runs });
+}
 
-  it("a two-agent script run in parallel() also completes end-to-end", async () => {
-    const { spawner, spawnedPrompts } = makeSpawner();
-    const tool = createWorkflowTool(realDeps(spawner));
-    const script =
-      'export const meta = { name: "parallel-two", description: "t" };\n' +
-      'const [a, b] = await parallel([() => agent("p1"), () => agent("p2")]);\n' +
-      'return [a, b].join(",");';
-    const result = await tool.execute("call-2", { script }, undefined);
-    expect(spawnedPrompts.sort()).toEqual(["p1", "p2"]);
-    expect((result.details as { status: string }).status).toBe("completed");
-  }, 15_000);
+async function settle(runs: BackgroundWorkflows, workflowId: string): Promise<WorkflowOutcome> {
+  const waited = await runs.wait(workflowId, { waitMs: 15_000 });
+  if (!waited.ok) throw new Error(`workflow did not settle: ${waited.reason}`);
+  return waited.view.outcome;
+}
 
-  it("already-aborted signal returns immediately and never boots a worker", async () => {
+const text = (r: { content: { type: string; text?: string }[] }) =>
+  r.content.map((c) => (c.type === "text" ? (c.text ?? "") : "")).join("\n");
+
+describe("SubagentWorkflow tool: background-only", () => {
+  it("returns immediately with a workflow id + label marker while the workflow is still running", async () => {
+    const { spawner, release } = makeSpawner({ hold: true });
+    const runs = realRuns(spawner);
+    const tool = toolWith(runs);
+    const script = 'export const meta = { name: "held-flow", description: "t" };\nreturn await agent("task");';
+    const result = await tool.execute("call-bg", { script }, undefined);
+    const details = result.details as { workflowId: string; label: string; status: string; background: boolean };
+    expect(details).toMatchObject({ label: "held-flow", status: "running", background: true });
+    expect(details.workflowId).toMatch(/^wf_[0-9a-f]{20}$/);
+    // The call did not wait for the terminal state: the registry still has it running.
+    expect(runs.get(details.workflowId)?.status).toBe("running");
+    const body = text(result);
+    expect(body).toContain(`workflow_id: ${details.workflowId}`);
+    expect(body).toContain(`get_subagent_result(run_id: "${details.workflowId}")`);
+    expect(body).toContain(`abort_subagent(run_id: "${details.workflowId}")`);
+    expect(body).toMatch(/do not block or poll/);
+    expect(body).toContain(`[workflow label: "held-flow" · workflow_id: ${details.workflowId} · status: running]`);
+    release();
+    const outcome = await settle(runs, details.workflowId);
+    expect(outcome.status).toBe("completed");
+    expect(outcome.result).toBe("done:task");
+  }, 20_000);
+
+  it("the workflow is detached from the tool call's signal once started (Esc on the turn does not stop it)", async () => {
+    const { spawner, release } = makeSpawner({ hold: true });
+    const runs = realRuns(spawner);
+    const tool = toolWith(runs);
+    const controller = new AbortController();
+    const result = await tool.execute(
+      "call-detached",
+      { script: 'export const meta = { name: "d", description: "t" };\nreturn await agent("x");' },
+      controller.signal,
+    );
+    const id = (result.details as { workflowId: string }).workflowId;
+    controller.abort(); // after start
+    release();
+    const outcome = await settle(runs, id);
+    expect(outcome.status).toBe("completed"); // not "aborted"
+  }, 20_000);
+
+  it("an already-aborted signal is still rejected before anything starts", async () => {
     const { spawner, spawnedPrompts } = makeSpawner();
-    const tool = createWorkflowTool(realDeps(spawner));
+    const runs = realRuns(spawner);
+    const tool = toolWith(runs);
     const controller = new AbortController();
     controller.abort();
     const result = await tool.execute(
@@ -124,20 +157,89 @@ describe("SubagentWorkflow tool (M3.6): real worker end-to-end", () => {
       { script: 'export const meta = { name: "t", description: "t" };\nreturn 1;' },
       controller.signal,
     );
-    expect(spawnedPrompts).toEqual([]);
     expect(result.details).toEqual({ status: "aborted" });
+    expect(runs.list()).toEqual([]);
+    expect(spawnedPrompts).toEqual([]);
   });
 
-  it("a script error (after an await) surfaces as a thrown tool error with the workflow's diagnostic text", async () => {
-    const { spawner } = makeSpawner();
-    const tool = createWorkflowTool(realDeps(spawner));
+  it("an empty or oversized script is rejected synchronously and nothing is registered", async () => {
+    const runs = realRuns(makeSpawner().spawner);
+    const tool = toolWith(runs);
+    await expect(tool.execute("c", { script: "   " }, undefined)).rejects.toThrow(/must not be empty/);
+    await expect(tool.execute("c", { script: "x".repeat(600 * 1024) }, undefined)).rejects.toThrow(/byte limit/);
+    expect(runs.list()).toEqual([]);
+  });
+
+  it("timeout_s overrides the workflow budget", async () => {
+    const started: WorkflowRunBudget[] = [];
+    const tool = createWorkflowTool({
+      defaultBudget: REAL_BUDGET,
+      runs: {
+        start: (req) => {
+          started.push(req.budget);
+          return { workflowId: "wf_fixed", name: req.name, startedAt: 0, status: "running" };
+        },
+      },
+    });
+    await tool.execute(
+      "c",
+      { script: 'export const meta={name:"t",description:"t"};\nreturn 1;', timeout_s: 7 },
+      undefined,
+    );
+    expect(started[0]!.workflowTotalMs).toBe(7_000);
+  });
+
+  it("describes the background model and no longer claims to block", () => {
+    const tool = toolWith(realRuns(makeSpawner().spawner));
+    expect(tool.description).toContain("always runs in the background");
+    expect(tool.description).toContain("get_subagent_result");
+    expect(tool.description).toContain("abort_subagent");
+    expect(tool.description).not.toMatch(/BLOCKS|blocks until/);
+    expect(tool.promptSnippet).toMatch(/background/);
+  });
+});
+
+describe("SubagentWorkflow (background): real worker end-to-end", () => {
+  it("a two-agent script (sequential) runs through a real worker and settles with the combined result", async () => {
+    const { spawner, spawnedPrompts } = makeSpawner();
+    const runs = realRuns(spawner);
+    const script =
+      'export const meta = { name: "two-agent", description: "t" };\n' +
+      'const a = await agent("first task");\n' +
+      'const b = await agent("second task");\n' +
+      'return a + "|" + b;';
+    const r = await toolWith(runs).execute("call-1", { script }, undefined);
+    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+    expect(spawnedPrompts).toEqual(["first task", "second task"]);
+    expect(outcome.status).toBe("completed");
+    expect(outcome.children).toHaveLength(2);
+    expect(renderOutcomeText(outcome)).toContain("done:first task|done:second task");
+  }, 15_000);
+
+  it("a two-agent script run in parallel() also completes end-to-end", async () => {
+    const { spawner, spawnedPrompts } = makeSpawner();
+    const runs = realRuns(spawner);
+    const script =
+      'export const meta = { name: "parallel-two", description: "t" };\n' +
+      'const [a, b] = await parallel([() => agent("p1"), () => agent("p2")]);\n' +
+      'return [a, b].join(",");';
+    const r = await toolWith(runs).execute("call-2", { script }, undefined);
+    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+    expect(spawnedPrompts.sort()).toEqual(["p1", "p2"]);
+    expect(outcome.status).toBe("completed");
+  }, 15_000);
+
+  it("a script error (after an await) settles as failed with the workflow's diagnostic text", async () => {
+    const runs = realRuns(makeSpawner().spawner);
     const script = 'export const meta = { name: "t", description: "t" };\nawait agent("x");\nthrow new Error("boom");';
-    await expect(tool.execute("call-4", { script }, undefined)).rejects.toThrow(/boom/);
+    const r = await toolWith(runs).execute("call-4", { script }, undefined);
+    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+    expect(outcome.status).toBe("failed");
+    expect(renderOutcomeText(outcome)).toMatch(/boom/);
   }, 10_000);
 
   it("a pipeline stage that throws settles items to null AND surfaces a stage-error WARNING (the null is never silent)", async () => {
-    const { spawner } = makeSpawner();
-    const tool = createWorkflowTool(realDeps(spawner));
+    const runs = realRuns(makeSpawner().spawner);
     // First-stage signature bug, the exact incident shape: (item) reads the
     // *prev* arg (undefined on stage 0), so every item throws a TypeError.
     const script =
@@ -148,20 +250,18 @@ describe("SubagentWorkflow tool (M3.6): real worker end-to-end", () => {
       "  async (prev) => prev + '!',\n" +
       ");\n" +
       "return JSON.stringify(graded);";
-    const result = await tool.execute("call-5", { script }, undefined);
-    const text = (result.content[0] as { text: string }).text;
-    // §5.2 null-settling semantics unchanged…
-    expect(text).toContain("[null,null]");
-    expect((result.details as { status: string }).status).toBe("completed");
-    // …but the failure is now visible to the caller, with source/item/stage.
-    expect(text).toMatch(/WARNING: 2 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
-    expect(text).toMatch(/pipeline\[item 0 stage 0\]:/);
-    expect(text).toMatch(/Cannot read propert/);
+    const r = await toolWith(runs).execute("call-5", { script }, undefined);
+    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+    const body = renderOutcomeText(outcome);
+    expect(body).toContain("[null,null]");
+    expect(outcome.status).toBe("completed");
+    expect(body).toMatch(/WARNING: 2 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
+    expect(body).toMatch(/pipeline\[item 0 stage 0\]:/);
+    expect(body).toMatch(/Cannot read propert/);
   }, 15_000);
 
   it("a parallel thunk that throws resolves its slot to null AND surfaces a stage-error WARNING", async () => {
-    const { spawner } = makeSpawner();
-    const tool = createWorkflowTool(realDeps(spawner));
+    const runs = realRuns(makeSpawner().spawner);
     const script =
       'export const meta = { name: "par-null", description: "t" };\n' +
       "const r = await parallel([\n" +
@@ -169,11 +269,12 @@ describe("SubagentWorkflow tool (M3.6): real worker end-to-end", () => {
       "  async () => 'ok',\n" +
       "]);\n" +
       "return JSON.stringify(r);";
-    const result = await tool.execute("call-6", { script }, undefined);
-    const text = (result.content[0] as { text: string }).text;
-    expect(text).toContain('[null,"ok"]');
-    expect(text).toMatch(/WARNING: 1 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
-    expect(text).toMatch(/parallel\[item 0\]: thunk boom/);
+    const r = await toolWith(runs).execute("call-6", { script }, undefined);
+    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+    const body = renderOutcomeText(outcome);
+    expect(body).toContain('[null,"ok"]');
+    expect(body).toMatch(/WARNING: 1 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
+    expect(body).toMatch(/parallel\[item 0\]: thunk boom/);
   }, 15_000);
 });
 
@@ -187,7 +288,6 @@ describe("SubagentWorkflow disabled stub (settings.workflow.enabled === false)",
   });
 });
 
-/** A hand-built `Orchestrator` double so WT13/WT17's own timeout/grace-window sequencing can be driven deterministically without waiting on the full `workflowTotalMs`+`abortGraceMs`+`terminateConfirmMs` real chain (that combination is already covered end-to-end by wc02-runaway-gate.test.ts/abort.test.ts at the orchestrator layer). */
 function fakeOutcome(overrides: Partial<WorkflowOutcome> = {}): WorkflowOutcome {
   return {
     workflowId: "wf_fake",
@@ -199,103 +299,6 @@ function fakeOutcome(overrides: Partial<WorkflowOutcome> = {}): WorkflowOutcome 
     ...overrides,
   };
 }
-
-describe("SubagentWorkflow tool: WT13/WT17 timeout+fallback sequence (§4.3.2)", () => {
-  it("run() settling within toolCallMs is returned as-is (fast path, no stop()/settled() detour)", async () => {
-    let stopCalled = false;
-    const orch: Orchestrator = {
-      run: async () => fakeOutcome({ result: "fast" }),
-      stop: async () => {
-        stopCalled = true;
-        return { ok: true };
-      },
-      outcomeAt1: () => undefined,
-      settled: async () => fakeOutcome(),
-    };
-    const tool = createWorkflowTool({
-      defaultBudget: { ...REAL_BUDGET, workflowTotalMs: 200, terminateConfirmMs: 50 },
-      activity: createWorkflowActivityRegistry(),
-      createOrchestrator: () => orch,
-    });
-    const result = await tool.execute(
-      "c",
-      { script: 'export const meta={name:"t",description:"t"};\nreturn 1;' },
-      undefined,
-    );
-    expect(stopCalled).toBe(false);
-    expect((result.details as { status: string }).status).toBe("completed");
-  });
-
-  it("run() hanging past toolCallMs fires an un-awaited stop() and returns settled()'s real terminal outcome (TL2/TL6)", async () => {
-    let stopCalledAt = 0;
-    const start = Date.now();
-    const orch: Orchestrator = {
-      run: () => new Promise(() => {}), // never resolves — forces the timeout branch
-      stop: async () => {
-        stopCalledAt = Date.now() - start;
-        return { ok: true };
-      },
-      outcomeAt1: () =>
-        fakeOutcome({ status: "timed_out", pendingReconcile: true, result: "outcomeAt1-fallback-should-not-be-used" }),
-      // Resolves shortly after stop() is called, well inside settlementGraceMs.
-      settled: () => new Promise((resolve) => setTimeout(() => resolve(fakeOutcome({ status: "timed_out" })), 30)),
-    };
-    const tool = createWorkflowTool({
-      // workflowTotalMs=50 -> the tool races run() against (toolCallMs-3000), which is
-      // tiny here, so the timeout branch fires almost immediately.
-      defaultBudget: { ...REAL_BUDGET, workflowTotalMs: 50, terminateConfirmMs: 10, abortGraceMs: 10, reconcileMs: 10 },
-      activity: createWorkflowActivityRegistry(),
-      createOrchestrator: () => orch,
-    });
-    let message = "";
-    try {
-      await tool.execute("c", { script: 'export const meta={name:"t",description:"t"};\nreturn 1;' }, undefined);
-      throw new Error("expected tool.execute to throw for a non-completed outcome");
-    } catch (e) {
-      message = e instanceof Error ? e.message : String(e);
-    }
-    expect(stopCalledAt).toBeGreaterThan(0); // stop() was actually invoked, not skipped
-    expect(message).toContain("did not complete successfully: timed_out"); // the *real* settled() outcome
-    expect(message).not.toContain("outcomeAt1-fallback-should-not-be-used"); // never fell back to ① when ② was available
-  }, 10_000);
-
-  it("run() AND settled() both failing to return within budget falls back to outcomeAt1(), explicitly marked degraded (never disguised as a confirmed terminal state)", async () => {
-    const orch: Orchestrator = {
-      run: () => new Promise(() => {}),
-      stop: async () => ({ ok: true }),
-      outcomeAt1: () => fakeOutcome({ status: "timed_out", pendingReconcile: true, result: "partial" }),
-      settled: () => new Promise(() => {}), // also never resolves
-    };
-    const tool = createWorkflowTool({
-      defaultBudget: { ...REAL_BUDGET, workflowTotalMs: 50, terminateConfirmMs: 10, abortGraceMs: 10, reconcileMs: 10 },
-      activity: createWorkflowActivityRegistry(),
-      createOrchestrator: () => orch,
-    });
-    // The tool must still return (GW1b) — bounded by toolCallMs (~3.3s here from the settlementGraceMs constant), not hang forever.
-    const start = Date.now();
-    await expect(
-      tool.execute("c", { script: 'export const meta={name:"t",description:"t"};\nreturn 1;' }, undefined),
-    ).rejects.toThrow(/timed_out/);
-    expect(Date.now() - start).toBeLessThan(5_000);
-  }, 10_000);
-
-  it("outcomeAt1() itself also gone (EI5 double-failure): the tool still returns a bare, honestly-degraded skeleton instead of hanging", async () => {
-    const orch: Orchestrator = {
-      run: () => new Promise(() => {}),
-      stop: async () => ({ ok: true }),
-      outcomeAt1: () => undefined,
-      settled: () => new Promise(() => {}),
-    };
-    const tool = createWorkflowTool({
-      defaultBudget: { ...REAL_BUDGET, workflowTotalMs: 50, terminateConfirmMs: 10, abortGraceMs: 10, reconcileMs: 10 },
-      activity: createWorkflowActivityRegistry(),
-      createOrchestrator: () => orch,
-    });
-    await expect(
-      tool.execute("c", { script: 'export const meta={name:"t",description:"t"};\nreturn 1;' }, undefined),
-    ).rejects.toThrow(/timed_out/);
-  }, 10_000);
-});
 
 describe("M10: buildWorkflowProgressLines", () => {
   const base: WorkflowActivitySnapshot = {
@@ -407,96 +410,7 @@ describe("M10: formatWorkflowSummary", () => {
   });
 });
 
-describe("M10: live tool-card progress (onUpdate)", () => {
-  it("streams a header partial immediately and a per-child row once the child spawns", async () => {
-    const activity = createWorkflowActivityRegistry();
-    let release!: (o: { settled: ChildOutcome[]; pending: string[] }) => void;
-    const spawner: ChildSpawner = {
-      spawn: async () => ({ runId: "r1" }),
-      abort: async () => true,
-      waitAll: () => new Promise((resolve) => (release = resolve)),
-      configHashOf: (type) => `cfg:${type}`,
-    };
-    const tool = createWorkflowTool({
-      defaultBudget: REAL_BUDGET,
-      activity,
-      createOrchestrator: (workflowId) =>
-        createOrchestrator({
-          clock: systemClock,
-          createWorkerHost: () => createWorkerHost({ clock: systemClock }),
-          spawner,
-          gateRunner: async () => ({ ok: true, code: 0, stdout: "", stderr: "" }),
-          parentRunId: workflowId,
-          // Mirrors stack.ts's wiring: the orchestrator's event stream feeds the activity registry.
-          emit: (channel, payload) => activity.onEvent(channel, payload),
-        }),
-      snapshotOf: () => undefined, // no session snapshots in this harness → fallback rows
-    });
-    const partials: string[] = [];
-    const pending = tool.execute(
-      "call-live",
-      {
-        script:
-          'export const meta = { name: "live-card", description: "t" };\n' +
-          'return await agent("task one", { label: "dev:a" });',
-      },
-      undefined,
-      ((u: { content?: { type: string; text?: string }[] }) => {
-        partials.push(
-          (u.content ?? [])
-            .map((c) => (c.type === "text" ? (c.text ?? "") : ""))
-            .filter(Boolean)
-            .join("\n"),
-        );
-      }) as never,
-    );
-    try {
-      // The 1 Hz progress timer drives per-child rows; poll the collected
-      // partials rather than sleeping a fixed interval.
-      const deadline = Date.now() + 8_000;
-      while (Date.now() < deadline && !partials.some((t) => t.includes("dev:a"))) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      expect(partials.some((t) => t.includes("⏳ live-card"))).toBe(true);
-      expect(partials.some((t) => t.includes("▸ dev:a"))).toBe(true);
-      expect(partials.some((t) => t.includes("▸ 1 running"))).toBe(true);
-    } finally {
-      release({ settled: [{ runId: "r1", status: "completed", text: "done" }], pending: [] });
-    }
-    const result = await pending;
-    const details = result.details as { status: string; summary?: string };
-    expect(details.status).toBe("completed");
-    expect(details.summary).toContain("completed");
-    expect(details.summary).toContain("1 children");
-  }, 20_000);
-
-  it("works unchanged when no onUpdate is provided (no progress plumbing engaged)", async () => {
-    const { spawner } = makeSpawner();
-    const tool = createWorkflowTool(realDeps(spawner));
-    const result = await tool.execute(
-      "call-noprogress",
-      { script: 'export const meta = { name: "t", description: "t" };\nreturn 42;' },
-      undefined,
-    );
-    expect((result.details as { status: string }).status).toBe("completed");
-  }, 15_000);
-});
-
-describe("SubagentWorkflow tool: outcome text does not duplicate child output already in result", () => {
-  function toolFor(outcome: WorkflowOutcome) {
-    const orch: Orchestrator = {
-      run: async () => outcome,
-      stop: async () => ({ ok: true }),
-      outcomeAt1: () => undefined,
-      settled: async () => outcome,
-    };
-    return createWorkflowTool({
-      defaultBudget: { ...REAL_BUDGET, workflowTotalMs: 1_000, terminateConfirmMs: 50 },
-      activity: createWorkflowActivityRegistry(),
-      createOrchestrator: () => orch,
-    });
-  }
-  const script = 'export const meta={name:"t",description:"t"};\nreturn 1;';
+describe("renderOutcomeText: does not duplicate child output already in result", () => {
   const child = (
     label: string,
     status: WorkflowOutcome["children"][number]["status"],
@@ -510,40 +424,71 @@ describe("SubagentWorkflow tool: outcome text does not duplicate child output al
     ...(textPreview !== undefined ? { textPreview } : {}),
   });
 
-  it("with a result: completed children show status only; failed children keep their preview", async () => {
-    const tool = toolFor(
+  it("with a result: completed children show status only; failed children keep their preview", () => {
+    const body = renderOutcomeText(
       fakeOutcome({
         result: { a: "ALPHA-OUTPUT" },
         children: [child("a", "completed", "ALPHA-OUTPUT"), child("b", "failed", "BETA-ERROR-DETAIL")],
       }),
     );
-    const text = ((await tool.execute("c", { script }, undefined)).content[0] as { text: string }).text;
-    expect(text.match(/ALPHA-OUTPUT/g)).toHaveLength(1); // only inside result:
-    expect(text).toContain("  - [completed] a\n");
-    expect(text).toContain("  - [failed] b: BETA-ERROR-DETAIL");
-    expect(text).toContain("children (2, completed outputs omitted");
+    expect(body.match(/ALPHA-OUTPUT/g)).toHaveLength(1); // only inside result:
+    expect(body).toContain("  - [completed] a\n");
+    expect(body).toContain("  - [failed] b: BETA-ERROR-DETAIL");
+    expect(body).toContain("children (2, completed outputs omitted");
   });
 
-  it("a structured result is pretty-printed on its own lines; a primitive stays inline", async () => {
+  it("a structured result is pretty-printed on its own lines; a primitive stays inline", () => {
     const obj = { a: "x", n: [1, 2] };
-    const text = (
-      (await toolFor(fakeOutcome({ result: obj })).execute("c", { script }, undefined)).content[0] as {
-        text: string;
-      }
-    ).text;
-    expect(text).toContain(`result:\n${JSON.stringify(obj, null, 2)}`);
-    const inline = (
-      (await toolFor(fakeOutcome({ result: 42 })).execute("c", { script }, undefined)).content[0] as {
-        text: string;
-      }
-    ).text;
-    expect(inline).toContain("result: 42");
+    expect(renderOutcomeText(fakeOutcome({ result: obj }))).toContain(`result:\n${JSON.stringify(obj, null, 2)}`);
+    expect(renderOutcomeText(fakeOutcome({ result: 42 }))).toContain("result: 42");
   });
 
-  it("without a result: completed children keep their preview (it is the only place the output shows up)", async () => {
-    const tool = toolFor(fakeOutcome({ children: [child("a", "completed", "ALPHA-OUTPUT")] }));
-    const text = ((await tool.execute("c", { script }, undefined)).content[0] as { text: string }).text;
-    expect(text).toContain("  - [completed] a: ALPHA-OUTPUT");
-    expect(text).toContain("children (1):");
+  it("without a result: completed children keep their preview (it is the only place the output shows up)", () => {
+    const body = renderOutcomeText(fakeOutcome({ children: [child("a", "completed", "ALPHA-OUTPUT")] }));
+    expect(body).toContain("  - [completed] a: ALPHA-OUTPUT");
+    expect(body).toContain("children (1):");
+  });
+});
+
+describe("formatWorkflowNotification", () => {
+  const settled = (outcome: WorkflowOutcome) => ({ workflowId: "wf_abc", name: "review-flow", outcome });
+
+  it("carries id, name, status, stats with spend, the outcome text, and how to re-read it", () => {
+    const body = formatWorkflowNotification(
+      settled(
+        fakeOutcome({
+          workflowId: "wf_abc",
+          result: "ALL GOOD",
+          durationMs: 65_000,
+          children: [{ callId: "c1", runId: "r_1", source: "live", status: "completed", durationMs: 5 }],
+        }),
+      ),
+      { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.25 },
+      0,
+    );
+    expect(body.split("\n")[0]).toBe(
+      'Workflow "review-flow" (wf_abc) completed — completed · 1m05s · 1 children (✓1) · $0.25',
+    );
+    expect(body).toContain("result: ALL GOOD");
+    expect(body).toContain('get_subagent_result(run_id: "wf_abc")');
+  });
+
+  it("caps the outcome text by resultMaxChars (control: 0 = no cap)", () => {
+    const long = "x".repeat(5_000);
+    const capped = formatWorkflowNotification(settled(fakeOutcome({ result: long })), undefined, 500);
+    expect(capped).toMatch(/middle \d+ of \d+ chars omitted/);
+    expect(capped.length).toBeLessThan(1_500);
+    const uncapped = formatWorkflowNotification(settled(fakeOutcome({ result: long })), undefined, 0);
+    expect(uncapped).toContain(long);
+  });
+
+  it("states a non-completed status and its cause in the header", () => {
+    const body = formatWorkflowNotification(
+      settled(fakeOutcome({ status: "aborted", stopCause: "user_stop" })),
+      undefined,
+      0,
+    );
+    expect(body.split("\n")[0]).toMatch(/^Workflow "review-flow" \(wf_abc\) aborted — aborted/);
+    expect(body).toContain("aborted (user_stop)");
   });
 });

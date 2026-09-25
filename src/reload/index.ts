@@ -5,8 +5,9 @@
  * Wiring:
  * - session_start (TUI only, settings.reload.defer): wrap the current editor
  *   so an exact `/reload` submission becomes `/agent reload`.
- * - subagent:completed / subagent:failed on the pi.events bus: recount active
- *   runs and let the controller fire once the fleet is empty. The bus
+ * - subagent:completed / subagent:failed / subagent:workflow:settled on the
+ *   pi.events bus: recount active runs + background workflows and let the
+ *   controller fire once the fleet is empty. The bus
  *   survives /reload, so both subscriptions are collected and dropped on
  *   session_shutdown (same pattern as src/hud/).
  * - fire: `pi.sendUserMessage("/agent reload fire", { deliverAs: "followUp",
@@ -25,10 +26,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentSettings } from "../config/settings.js";
 import { DeferredReloadController } from "./defer.js";
 import { createReloadEditorFactory } from "./editor.js";
+import { WORKFLOW_SETTLED_EVENT } from "../workflow/background.js";
 
 export interface DeferredReloadDeps {
   settings: AgentSettings;
-  /** Fresh count of non-terminal subagent runs, read at event time. */
+  /** Fresh count of non-terminal subagent runs plus running background workflows, read at event time. */
   activeRunCount: () => number;
 }
 
@@ -51,6 +53,9 @@ export function wireDeferredReload(pi: ExtensionAPI, deps: DeferredReloadDeps): 
   const busUnsubscribers: Array<() => void> = [
     pi.events.on("subagent:completed", onSettle),
     pi.events.on("subagent:failed", onSettle),
+    // Background workflows settle without a run event of their own (the last child may have
+    // settled long before the script returned) — recount on their terminal entry too.
+    pi.events.on(WORKFLOW_SETTLED_EVENT, onSettle),
   ];
 
   pi.on("session_start", (_event, ctx) => {

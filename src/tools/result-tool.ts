@@ -17,6 +17,17 @@ import {
 import { toPiToolUsage } from "./usage.js";
 import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
 import { truncateResultText } from "./result-text.js";
+import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
+import {
+  buildWorkflowProgressLines,
+  formatWorkflowResultText,
+  formatWorkflowSummary,
+  liveChildRunIds,
+  sumUsage,
+} from "./workflow-tool.js";
+import type { BackgroundWorkflowView } from "../workflow/background.js";
+import type { WorkflowOutcome } from "../workflow/types.js";
+import type { UsageDelta } from "../core/types.js";
 
 /**
  * "get_subagent_result" — drop-in replacement for @tintinweb/pi-subagents'
@@ -36,12 +47,13 @@ import { truncateResultText } from "./result-text.js";
 export const ResultToolParams = Type.Object({
   run_id: Type.String({
     description:
-      "The run id returned by the Agent tool; also accepts a unique run_id prefix or the Agent call's label (its description).",
+      "The run id returned by the Agent tool; also accepts a unique run_id prefix or the Agent call's label (its description). " +
+      "A SubagentWorkflow id (wf_…, or a unique prefix / the workflow's script name) reads that background workflow instead.",
   }),
   wait: Type.Optional(
     Type.Boolean({
       description:
-        "If true, block until the run reaches a terminal state (bounded by wait_ms). Default false — and keep it " +
+        "If true, block until the run (or workflow) reaches a terminal state (bounded by wait_ms). Default false — and keep it " +
         "false in almost all cases: a blocking wait occupies the agent loop for its whole duration, so the user " +
         "cannot type a new message or command until it returns. Rely on the run's completion notification and " +
         "call this tool without wait once it arrives; use wait only as a fallback when an expected notification " +
@@ -64,6 +76,11 @@ export const DEFAULT_WAIT_MS = 300_000;
 /** Partial-update / final-result details consumed by renderResult (mirrors AgentToolDetails in agent-tool.ts). */
 export interface ResultToolDetails {
   runId?: string;
+  /** Set when the target was a background SubagentWorkflow. */
+  workflowId?: string;
+  /** Workflow reads: the live child runs whose spend this result accounts for (HUD dedupe). */
+  runIds?: string[];
+  costUsd?: number;
   label?: string;
   status?: string;
   durationMs?: number;
@@ -90,6 +107,8 @@ export function createResultTool(deps: {
    * plain-text card instead.
    */
   markdownTheme?: () => MarkdownTheme | undefined;
+  /** Background SubagentWorkflow reads (absent: workflow ids are not accepted). */
+  workflows?: WorkflowQueryPort;
 }): ToolDefinition<typeof ResultToolParams> {
   const pollGuard = createPollGuard(deps.pollGuard);
   const waitStreak = createTimeoutStreak(deps.timeoutStreak);
@@ -113,11 +132,127 @@ export function createResultTool(deps: {
       // Defensive boundary for future notifier implementations.
     }
   };
+  /**
+   * Workflow spend accounting, same "first terminal read attaches it" rule as
+   * runs, with ONE dedupe set shared with the run path: each live child run is
+   * reported at most once, whether it is read individually (get_subagent_result
+   * on the child run_id) or through its workflow. After /reload the child runs
+   * are gone from the query service; the aggregate captured at settle time
+   * (view.usage) is used then — only when none of its children was reported.
+   */
+  const workflowUsageOnce = (view: BackgroundWorkflowView, outcome: WorkflowOutcome) => {
+    const runIds = liveChildRunIds(outcome);
+    if (usageReported.has(view.workflowId)) return { runIds, total: undefined as UsageDelta | undefined };
+    usageReported.add(view.workflowId);
+    const unreported = runIds.filter((id) => !usageReported.has(id));
+    const live = deps.workflows?.usageOf ? unreported.map((id) => deps.workflows!.usageOf!(id)) : [];
+    const resolvedAny = live.some((u) => u !== undefined);
+    let total = sumUsage(live);
+    if (!resolvedAny && unreported.length === runIds.length && view.usage) total = sumUsage([view.usage]);
+    for (const id of runIds) usageReported.add(id);
+    return { runIds, total };
+  };
+  const workflowTerminal = (view: BackgroundWorkflowView, outcome: WorkflowOutcome, maxChars: number) => {
+    const { runIds, total } = workflowUsageOnce(view, outcome);
+    // Display cost: the whole workflow's spend, whether or not this read is the one that accounts it.
+    const displayUsage =
+      total ??
+      (deps.workflows?.usageOf ? sumUsage(runIds.map((id) => deps.workflows!.usageOf!(id))) : undefined) ??
+      view.usage;
+    const rendered = formatWorkflowResultText(outcome, displayUsage, maxChars);
+    return {
+      text: rendered.text,
+      ...(total ? { usage: toPiToolUsage(total) } : {}),
+      details: {
+        workflowId: view.workflowId,
+        label: view.name,
+        status: outcome.status,
+        durationMs: outcome.durationMs,
+        summary: formatWorkflowSummary(outcome, displayUsage),
+        runIds,
+        ...(displayUsage ? { costUsd: displayUsage.costUsd } : {}),
+        ...(rendered.truncated ? { truncated: true as const, totalChars: rendered.totalChars } : {}),
+      } satisfies ResultToolDetails,
+    };
+  };
+  const workflowProgress = (workflowId: string, now: number): string[] => {
+    const activity = deps.workflows?.activity(workflowId);
+    return activity ? buildWorkflowProgressLines(activity, now, deps.workflows?.snapshotOf) : [];
+  };
+  async function executeWorkflow(
+    workflowId: string,
+    params: ResultToolParams,
+    signal: AbortSignal | undefined,
+    onUpdate: ((u: { content: { type: "text"; text: string }[]; details: ResultToolDetails }) => void) | undefined,
+  ) {
+    const workflows = deps.workflows!;
+    const maxChars = deps.resultMaxChars?.() ?? 0;
+    if (!params.wait) {
+      const pollWarning = pollGuard.record(workflowId);
+      const withWarning = (text: string) => (pollWarning ? `${pollWarning}\n\n${text}` : text);
+      const view = workflows.get(workflowId);
+      if (!view) throw new Error(`unknown workflow id: ${params.run_id}`);
+      if (view.status === "running" || !view.outcome) {
+        const text = [
+          `Workflow ${workflowId} ("${view.name}") is still running.`,
+          ...workflowProgress(workflowId, Date.now()),
+        ].join("\n");
+        return {
+          content: [{ type: "text" as const, text: withWarning(text) }],
+          details: { workflowId, label: view.name, status: "running" } satisfies ResultToolDetails,
+        };
+      }
+      waitStreak.reset(workflowId);
+      const terminal = workflowTerminal(view, view.outcome, maxChars);
+      return {
+        content: [{ type: "text" as const, text: withWarning(terminal.text) }],
+        ...(terminal.usage ? { usage: terminal.usage } : {}),
+        details: terminal.details,
+      };
+    }
+    const startedAt = Date.now();
+    const waitMs = params.wait_ms ?? DEFAULT_WAIT_MS;
+    const push = () => {
+      if (!onUpdate) return;
+      const now = Date.now();
+      const lines = [
+        `⏳ waiting for ${workflowId} · ${formatDuration(now - startedAt)} / ${formatDuration(waitMs)}`,
+        ...workflowProgress(workflowId, now),
+      ];
+      onUpdate({ content: [{ type: "text", text: lines.join("\n") }], details: { workflowId, progress: lines } });
+    };
+    const timer = onUpdate ? setInterval(push, 1000) : undefined;
+    (timer as { unref?: () => void } | undefined)?.unref?.();
+    push();
+    let waited;
+    try {
+      waited = await workflows.wait(workflowId, { waitMs, ...(signal ? { signal } : {}) });
+    } finally {
+      if (timer) clearInterval(timer);
+    }
+    if (!waited.ok) {
+      if (waited.reason === "wait_timeout") {
+        throw new Error(waitTimeoutMessage(workflowId, waitMs, waitStreak.timeout(workflowId, waitMs), "workflow"));
+      }
+      throw new Error(
+        waited.reason === "unknown_workflow" ? `unknown workflow id: ${params.run_id}` : "wait was aborted",
+      );
+    }
+    waitStreak.reset(workflowId);
+    const terminal = workflowTerminal(waited.view, waited.view.outcome, maxChars);
+    return {
+      content: [{ type: "text" as const, text: terminal.text }],
+      ...(terminal.usage ? { usage: terminal.usage } : {}),
+      details: terminal.details,
+    };
+  }
   return {
     name: "get_subagent_result",
     label: "Get Subagent Result",
     description:
-      "Check on, or collect the result of, a subagent run started with the Agent tool. " +
+      "Check on, or collect the result of, a subagent run started with the Agent tool — or a background " +
+      "SubagentWorkflow, by its workflow id (wf_…): progress while it runs, the full outcome plus its children's " +
+      "spend once it is terminal. " +
       "Agent runs push a completion notification on terminal state, so the normal flow is: continue other " +
       "work (or end your turn), then call this tool without wait once the notification arrives. Set wait: true " +
       "to block until the run finishes (up to wait_ms) — while it blocks, the user cannot send new input, so " +
@@ -129,7 +264,8 @@ export function createResultTool(deps: {
       "same run returns a warning; await the completion notification instead. " +
       "A wait that times out tells you how to proceed; repeated timeouts on the same run escalate that " +
       "guidance (raise wait_ms, or stop blocking and await the notification).",
-    promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
+    promptSnippet:
+      "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's or workflow's status/result",
     parameters: ResultToolParams,
     /**
      * Without a renderCall the TUI shows a bare "get_subagent_result ⠦" while
@@ -220,9 +356,11 @@ export function createResultTool(deps: {
     // §2.7: the pi harness may invoke execute() with signal === undefined; the
     // wait path below tolerates that (QueryService.wait's opts.signal is optional).
     async execute(_toolCallId, params, signal, onUpdate) {
-      const resolved = deps.resolveRun?.(params.run_id);
-      if (resolved && !resolved.ok) throw new Error(resolved.error);
-      const runId = resolved?.ok ? resolved.runId : params.run_id;
+      const target = resolveToolTarget(params.run_id, deps.resolveRun, deps.workflows);
+      if (target.kind === "workflow") {
+        return executeWorkflow(target.workflowId, params, signal, onUpdate as never);
+      }
+      const runId = target.runId;
       if (!params.wait) {
         // The frequency guard covers only this non-blocking read path; the
         // wait path below is guarded by the consecutive-timeout streak.
@@ -334,14 +472,19 @@ export function createResultTool(deps: {
  * two ways out; consecutive timeouts on the same run escalate with the
  * streak count and the cumulative time already wasted blocking.
  */
-function waitTimeoutMessage(runId: string, waitMs: number, streak: TimeoutStreakResult): string {
-  const base = `wait timed out after ${formatDuration(waitMs)}; run ${runId} is still going.`;
+function waitTimeoutMessage(
+  runId: string,
+  waitMs: number,
+  streak: TimeoutStreakResult,
+  noun: "run" | "workflow" = "run",
+): string {
+  const base = `wait timed out after ${formatDuration(waitMs)}; ${noun} ${runId} is still going.`;
   const directions =
     "Either retry with a larger wait_ms if blocking is genuinely necessary, or — preferred — end your " +
-    "turn (or do other work) and let the run's completion notification arrive.";
+    `turn (or do other work) and let the ${noun}'s completion notification arrive.`;
   if (!streak.escalate) return `${base} ${directions}`;
   return (
-    `${base} That is ${streak.streak} consecutive timeouts on this run ` +
+    `${base} That is ${streak.streak} consecutive timeouts on this ${noun} ` +
     `(~${formatDuration(streak.totalWaitedMs)} spent blocked) — re-waiting does not make it finish faster. ` +
     directions
   );

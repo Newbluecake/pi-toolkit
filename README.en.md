@@ -27,9 +27,9 @@ Or download the zip (prebuilt) from [GitHub Releases](https://github.com/Newblue
 ## The subagent system
 
 - **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (strict `provider/id` or a fuzzy hint like `sonnet` / `kimi-k3`), `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_s` (an explicit timeout is a hard cap — no grace, no extension), and `schema` (structured, schema-validated output). The main-session `Agent` **always runs in the background**: it returns a run_id immediately and pushes a completion notification on terminal state (there is no foreground/blocking mode and no `run_in_background` parameter). The nested `Agent` injected into a subagent keeps its blocking default plus opt-in `run_in_background` (a child runs in print mode — its run ends with its turn, so it cannot wait for a notification).
-- **`get_subagent_result`** — collect a result after its completion notification arrives; non-blocking by default, `wait: true` + `wait_ms` for bounded blocking (a fallback).
+- **`get_subagent_result`** — collect a result after its completion notification arrives; non-blocking by default, `wait: true` + `wait_ms` for bounded blocking (a fallback). Also accepts a `SubagentWorkflow` id (`wf_…`).
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
-- **`abort_subagent`** — stop a running subagent; idempotent on terminal runs.
+- **`abort_subagent`** — stop a running subagent; idempotent on terminal runs. Given a workflow id (`wf_…`) it stops the whole background workflow and every child run.
 - **`extend_subagent_timeout`** — extend a running run's total deadline (capped in count and by a hard ceiling). Default-budget runs enter a grace window at expiry with a notification to the main session; only an unattended grace elapse terminates the run.
 - **`set_model`** — switch models mid-run (takes effect on the next LLM call, without interrupting the current turn): defaults to your own session, or targets a running subagent by run id / unique prefix / label; optional `thinking` level; the switch is written to the transcript and survives resume.
 - **Agent types** — discovered from `.md` definitions in `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/` and injected into the system prompt; frontmatter `model:` accepts strict ids or fuzzy hints.
@@ -39,6 +39,8 @@ Or download the zip (prebuilt) from [GitHub Releases](https://github.com/Newblue
 ### SubagentWorkflow
 
 Sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget, runaway detection, and a replayable journal. Off by default (`workflow.enabled`).
+
+Workflows **always run in the background**: the call returns a workflow id (`wf_…`) immediately, and a completion notification (name, status, result summary capped by `resultMaxChars`, spend) is pushed to the main session on terminal state. Use `get_subagent_result(run_id: "wf_…")` for progress or the full outcome (the id, a unique prefix or the script's `meta.name` all work) and `abort_subagent` to stop it. Every workflow is still bounded by its total budget plus a grace window and always reaches a terminal state; on session shutdown / `/reload` a running workflow is stopped and its notice is persisted into the session and re-delivered once the next time that session loads. Design: [docs/dev/workflow-background/plan.md](docs/dev/workflow-background/plan.md).
 
 ### Agent tree
 

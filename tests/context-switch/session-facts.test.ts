@@ -61,6 +61,26 @@ describe("context-switch/session-facts", () => {
     expect(facts.bashJobs).toEqual(["job-1111 — npm test"]);
   });
 
+  it("lists running background workflows alongside runs (terminal ones are left out)", () => {
+    const facts = collectSessionFacts(
+      stack({
+        query: { list: () => [] },
+        mention: { labels: () => [], resolve: () => undefined },
+        workflow: {
+          runs: {
+            list: () => [
+              { workflowId: "wf_live", name: "review-flow", status: "running" },
+              { workflowId: "wf_done", name: "old-flow", status: "completed" },
+            ],
+          },
+        },
+      }),
+      {},
+      settings,
+    );
+    expect(facts.runs).toEqual(['workflow "review-flow" (wf_live) — running']);
+  });
+
   it("omits empty lists rather than emitting empty appendix sections", () => {
     const facts = collectSessionFacts(
       stack({

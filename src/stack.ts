@@ -130,6 +130,8 @@ import { createWorkerHost } from "./workflow/lifecycle.js";
 import { createOrchestrator, type Orchestrator } from "./workflow/orchestrator.js";
 import { buildWorkflowRunBudget } from "./workflow/run-budget.js";
 import { createWorkflowChildSpawner } from "./workflow/spawner-adapter.js";
+import { createBackgroundWorkflows, type BackgroundWorkflows } from "./workflow/background.js";
+import { createWorkflowNoticeSink, redeliverPendingWorkflowNotices } from "./adapters/workflow-notice.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 
 /** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack.
@@ -158,6 +160,10 @@ let previousAdaptive: CacheAdaptiveService | undefined;
  *  交接。`/reload` 走 session_shutdown dispose Stack.quota（M3：QuotaService.dispose
  *  是唯一清理所有者且幂等），与 previousFleetWidget 同一套双路径纪律。 */
 let previousQuota: QuotaStack | undefined;
+/** Background workflows (docs/dev/workflow-background/plan.md §4): the primary teardown is
+ *  index.ts's session_shutdown (shutdown → drain → seal); this top-of-build handoff is the
+ *  defensive path for a session_start without a paired shutdown — stop everything, report nothing. */
+let previousWorkflowRuns: BackgroundWorkflows | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -451,6 +457,13 @@ export interface WorkflowSupport {
    * that anchor (the same X3 pattern nested `Agent` delegation already uses).
    */
   createOrchestrator(workflowId: WorkflowId): Orchestrator;
+  /**
+   * Background SubagentWorkflow registry (docs/dev/workflow-background/plan.md):
+   * running orchestrators + retained terminal outcomes, per session stack.
+   */
+  readonly runs: BackgroundWorkflows;
+  /** Re-deliver notices a previous stack persisted during shutdown (called once from index.ts's session_start). */
+  redeliverPendingNotices(): number;
 }
 
 export interface CompactHintState {
@@ -975,6 +988,8 @@ export function buildSessionStack(
   previousAdaptive = undefined;
   previousQuota?.dispose();
   previousQuota = undefined;
+  previousWorkflowRuns?.abandon();
+  previousWorkflowRuns = undefined;
 
   // consult (plan §5.1/§6 C-9): fork-copy GC — once per session build, no
   // timer. Unconditional (runs even with consult.enabled=false so leftovers
@@ -1511,7 +1526,9 @@ export function buildSessionStack(
         settings: settings.cacheTtl,
         backgroundBusy: () =>
           query.list().some((s) => ["queued", "starting", "running", "stopping"].includes(s.status)) ||
-          (bashJobs?.backgroundJobCount() ?? 0) > 0,
+          (bashJobs?.backgroundJobCount() ?? 0) > 0 ||
+          // A background workflow between child runs is still background work.
+          workflowActivity.list().length > 0,
         isCurrent: (self) => previousKeepalive === self,
         // Lazily read: `adaptive` is constructed below, so this closure must
         // resolve at publish time, not at construction time.
@@ -1757,36 +1774,59 @@ export function buildSessionStack(
   // (M9: created above the fleet widget, which lists in-flight workflows.)
   const workflowChildSpawner = createWorkflowChildSpawner(spawn, types);
   const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");
+  const createWorkflowOrchestrator = (workflowId: WorkflowId): Orchestrator =>
+    createOrchestrator({
+      clock: systemClock,
+      createWorkerHost: () => createWorkerHost({ clock: systemClock }),
+      spawner: workflowChildSpawner,
+      gateRunner: async (cmd, opts) => {
+        const result = await pi.exec("bash", ["-c", cmd], {
+          timeout: opts.timeoutMs,
+          ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        });
+        return {
+          ok: result.code === 0 && !result.killed,
+          code: result.code,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        };
+      },
+      parentRunId: workflowId,
+      journalRootDir: workflowJournalRootDir,
+      emit: (channel, payload) => {
+        pi.events.emit(channel, payload);
+        workflowActivity.onEvent(channel, payload);
+      },
+    });
+  const workflowRuns = createBackgroundWorkflows({
+    clock: systemClock,
+    activity: workflowActivity,
+    createOrchestrator: createWorkflowOrchestrator,
+    onSettled: createWorkflowNoticeSink({
+      sendMessage: (message, options) => pi.sendMessage(message, options),
+      appendEntry: (customType, data) => pi.appendEntry(customType, data),
+      emit: (channel, payload) => pi.events.emit(channel, payload),
+      usageOf: (runId) => query.get(runId)?.diag.usage,
+      resultMaxChars: () => settings.resultMaxChars,
+      now: () => systemClock.now(),
+    }),
+  });
+  previousWorkflowRuns = workflowRuns;
   const workflow: WorkflowSupport = {
     enabled: settings.workflow.enabled,
     defaultBudget: buildWorkflowRunBudget(settings),
     activity: workflowActivity,
     journalRootDir: workflowJournalRootDir,
-    createOrchestrator(workflowId) {
-      return createOrchestrator({
-        clock: systemClock,
-        createWorkerHost: () => createWorkerHost({ clock: systemClock }),
-        spawner: workflowChildSpawner,
-        gateRunner: async (cmd, opts) => {
-          const result = await pi.exec("bash", ["-c", cmd], {
-            timeout: opts.timeoutMs,
-            ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
-          });
-          return {
-            ok: result.code === 0 && !result.killed,
-            code: result.code,
-            stdout: result.stdout,
-            stderr: result.stderr,
-          };
-        },
-        parentRunId: workflowId,
-        journalRootDir: workflowJournalRootDir,
-        emit: (channel, payload) => {
-          pi.events.emit(channel, payload);
-          workflowActivity.onEvent(channel, payload);
-        },
-      });
-    },
+    createOrchestrator: createWorkflowOrchestrator,
+    runs: workflowRuns,
+    redeliverPendingNotices: () =>
+      redeliverPendingWorkflowNotices({
+        branch: () => (ctx.sessionManager as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [],
+        runs: workflowRuns,
+        sendMessage: (message, options) => pi.sendMessage(message, options),
+        appendEntry: (customType, data) => pi.appendEntry(customType, data),
+        now: () => systemClock.now(),
+      }),
   };
   return {
     compactHint,

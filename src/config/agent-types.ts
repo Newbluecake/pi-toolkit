@@ -225,6 +225,7 @@ export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): st
     "Tool protocol: the Agent tool always runs in the background — every call returns immediately with a run_id, and a completion notification is pushed to you when the run reaches a terminal state; after that notification arrives, collect the result with get_subagent_result(run_id). While it runs you can steer it with steer_subagent or stop it with abort_subagent. Do not poll or block waiting for it — continue other work or end your turn. Independent tasks can be dispatched in parallel with several Agent calls in the same message.",
     "steer_subagent works only on a run that is still running; abort_subagent stops a running run; the Agent tool's resume parameter works only on a terminal run with an existing persisted session (terminal includes completed, failed, timed_out and aborted).",
     "Anywhere a run_id is accepted (get_subagent_result, steer_subagent, abort_subagent, resume), the Agent call's label (its description) works too.",
+    "SubagentWorkflow (when enabled) also always runs in the background: it returns a workflow id (wf_…) immediately and pushes a completion notification when the workflow reaches a terminal state; get_subagent_result and abort_subagent accept that workflow id in place of a run_id.",
   ].join("\n");
 }
 

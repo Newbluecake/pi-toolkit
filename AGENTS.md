@@ -9,7 +9,9 @@ Guidance for AI coding agents working in this repository.
 replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
 `abort_subagent` tools (the main-session `Agent` is background-only — every call returns a run_id and completion is
 notified; only the nested `Agent` injected into a child keeps the blocking default, see
-`docs/dev/agent-background-only/plan.md`), the `SubagentWorkflow` orchestration tool, the `/agent` command, a live
+`docs/dev/agent-background-only/plan.md`), the `SubagentWorkflow` orchestration tool (also background-only: returns a
+`wf_…` id, notifies on terminal state, managed through `get_subagent_result` / `abort_subagent` — see
+`docs/dev/workflow-background/plan.md`), the `/agent` command, a live
 fleet widget (agent tree), a notification delivery subsystem, and a cron scheduler. Beyond that
 core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus
 a `bash_job` manager tool, provides `switch_context` / `compact_context` / `set_compact_threshold`
@@ -215,13 +217,19 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `docs/dev/goal/goal-plan.md` (v4 评审修订为最终施工口径).
 - `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed,
   with caller-ack suppression and a coalescer for hold-window merges.
-- `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, runaway detection.
+- `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, runaway detection, and the per-stack
+  background registry (`background.ts`: start → bounded run/stop/settle with degraded fallback so every workflow
+  reaches a terminal entry, `stop`/`wait`/`resolve`, bounded terminal retention, `shutdown`/`drain`/`seal` on
+  session_shutdown and `abandon` on a defensive rebuild). Completion notices are pi-facing
+  (`src/adapters/workflow-notice.ts`: `sendMessage` + `triggerTurn` while live; persisted `subagent:workflow-notice`
+  entry during shutdown, re-delivered once by the next stack on that session file). Design:
+  `docs/dev/workflow-background/plan.md`.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —
   tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor,
   `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
-- `docs/dev/` — per-feature design docs (agent-background-only (supersedes auto-background), delivery v2, bash-auto-background,
+- `docs/dev/` — per-feature design docs (agent-background-only (supersedes auto-background), workflow-background, delivery v2, bash-auto-background,
   subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), consult, sysprompt-stable (system prompt
   冻结快照 + 唤醒回放), ...); read the matching one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).

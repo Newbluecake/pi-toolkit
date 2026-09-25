@@ -151,7 +151,8 @@ export interface Orchestrator {
   settled(workflowId: WorkflowId): Promise<WorkflowOutcome>;
 }
 
-function validateScriptSize(script: string): { ok: true } | { ok: false; message: string } {
+/** Exported so the `SubagentWorkflow` tool can reject an oversized/empty script synchronously, before it starts a background run. */
+export function validateScriptSize(script: string): { ok: true } | { ok: false; message: string } {
   const bytes = Buffer.byteLength(script, "utf8");
   if (bytes > MAX_SCRIPT_BYTES) {
     return { ok: false, message: `script exceeds the ${MAX_SCRIPT_BYTES} byte limit (§5.1): got ${bytes} bytes` };

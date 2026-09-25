@@ -27,9 +27,9 @@ pi update --extension git:github.com/Newbluecake/pi-toolkit
 ## Subagent 系统
 
 - **`Agent` 工具** — 发起有边界的 subagent run：`description`、`prompt`、`subagent_type`，可选 `model` 覆盖（严格 `provider/id` 或模糊 hint 如 `sonnet`、`kimi-k3`）、`resume`（续跑已结束的会话）、`isolation: "worktree"`（每个 run 一个 git worktree）、`timeout_s`（显式超时为硬顶，不宽限不延长）、`schema`（结构化输出，经 schema 校验）。主会话的 `Agent` **一律后台运行**：立即返回 run_id，终态时推送完成通知（不再有前台阻塞模式与 `run_in_background` 参数）；子 agent 里注入的嵌套 `Agent` 保持默认阻塞、可选 `run_in_background`（子会话是 print 模式，本轮结束即 run 结束，等不到通知）。
-- **`get_subagent_result`** — 完成通知到达后取结果；默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞（兜底用）。
+- **`get_subagent_result`** — 完成通知到达后取结果；默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞（兜底用）。也接受 `SubagentWorkflow` 的工作流 ID（`wf_…`）。
 - **`steer_subagent`** — 向运行中的子 agent 发送追加指令。
-- **`abort_subagent`** — 停止运行中的子 agent；对终态 run 幂等。
+- **`abort_subagent`** — 停止运行中的子 agent；对终态 run 幂等。传工作流 ID（`wf_…`）则停止整个后台工作流及其全部子 run。
 - **`extend_subagent_timeout`** — 延长运行中 run 的总超时（次数与硬天花板双上限）。默认预算的 run 到点时先进续跑宽限并通知主会话，宽限内可延长，宽限耗尽未处理才终止。
 - **`set_model`** — 运行中切换模型（下一次 LLM 调用生效，不打断当前 turn）：缺省切自己，也可按 run_id / 前缀 / label 切运行中的子 agent；可选 `thinking` 档位；切换写入 transcript，resume 后沿用。
 - **Agent 类型** — 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义并注入系统提示词；frontmatter `model:` 支持严格 id 或模糊 hint。
@@ -39,6 +39,8 @@ pi update --extension git:github.com/Newbluecake/pi-toolkit
 ### SubagentWorkflow
 
 沙箱化 JS 编排（`agent()` / `parallel()` / `pipeline()` / `phase()`），带独立 wall-clock 预算、runaway 检测和可回放 journal。默认关闭（`workflow.enabled`）。
+
+工作流**一律后台运行**：调用立即返回工作流 ID（`wf_…`），到达终态时向主会话推送一条完成通知（名称、状态、结果摘要（受 `resultMaxChars` 截断）、花费）。用 `get_subagent_result(run_id: "wf_…")` 查看进度或取完整结果（ID、唯一前缀或脚本 `meta.name` 均可），用 `abort_subagent` 停止。每个工作流仍受「总预算 + 宽限」约束，必达终态；会话关闭 / `/reload` 时运行中的工作流会被停止，其通知持久化到会话里、在下一次加载该会话时补发一次。设计见 [docs/dev/workflow-background/plan.md](docs/dev/workflow-background/plan.md)。
 
 ### Agent tree
 

@@ -62,6 +62,11 @@ export function collectSessionFacts(
       const handle = label ? `${label} (${snapshot.runId.slice(0, 8)})` : snapshot.runId.slice(0, 8);
       return `${handle} — ${snapshot.status}/${snapshot.phase}`;
     });
+  // Background SubagentWorkflows survive the switch too (docs/dev/workflow-background/plan.md).
+  const workflows = safe(() => stack?.workflow.runs.list()) ?? [];
+  for (const wf of workflows) {
+    if (wf.status === "running") runs.push(`workflow "${wf.name}" (${wf.workflowId}) — running`);
+  }
   if (runs.length > 0) facts.runs = runs;
 
   const jobs = safe(() => stack?.bashJobs?.list()) ?? [];

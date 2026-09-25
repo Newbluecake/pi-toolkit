@@ -109,6 +109,15 @@ describe("system prompt: background-only Agent tool protocol", () => {
     expect(protocol).toContain("several Agent calls in the same message");
   });
 
+  it("states that SubagentWorkflow is background too and managed by its workflow id", () => {
+    const line = prompt.split("\n").find((l) => l.startsWith("SubagentWorkflow"));
+    expect(line).toBeDefined();
+    expect(line).toContain("always runs in the background");
+    expect(line).toContain("wf_");
+    expect(line).toContain("get_subagent_result");
+    expect(line).toContain("abort_subagent");
+  });
+
   it("no longer mentions a foreground mode, auto-background, or run_in_background", () => {
     expect(prompt).not.toMatch(/foreground|auto-background|run_in_background|blocks until/i);
   });

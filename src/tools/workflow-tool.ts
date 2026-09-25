@@ -1,71 +1,60 @@
-import { randomUUID } from "node:crypto";
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { systemClock } from "../core/clock.js";
-import { withDeadline } from "../core/deadline.js";
-import type { Orchestrator, OrchestratorRunRequest } from "../workflow/orchestrator.js";
-import type { WorkflowActivityRegistry, WorkflowActivitySnapshot } from "../workflow/activity.js";
-import type { WorkflowId, WorkflowOutcome, WorkflowRunBudget } from "../workflow/types.js";
+import { validateScriptSize } from "../workflow/orchestrator.js";
+import { assertHeartbeatBudgetInvariant } from "../workflow/runaway.js";
+import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
+import type { BackgroundWorkflowUsage, BackgroundWorkflowView, BackgroundWorkflows } from "../workflow/background.js";
+import type { WorkflowOutcome, WorkflowRunBudget } from "../workflow/types.js";
 import type { RunSnapshot, UsageDelta } from "../core/types.js";
 import { buildProgressLines } from "./agent-tool.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
-import { toPiToolUsage } from "./usage.js";
+import { truncateResultText } from "./result-text.js";
 
 /**
- * M3.6 (workflow design \u00a75.1/\u00a74.3/\u00a74.3.2): the `SubagentWorkflow` tool \u2014
- * the model-facing entry point into the engine `src/workflow/**` has built
- * up through M3.1\u2013M3.5 (isolation shell, host calls, abort propagation,
- * script API, journal/replay). This file is the *only* place `toolCallMs`/
- * `settlementGraceMs` (WT13/WT17) are enforced \u2014 `Orchestrator.run()` itself
- * has no notion of a tool-call deadline, it only knows its own
- * `budget.workflowTotalMs`.
+ * The `SubagentWorkflow` tool — the model-facing entry point into the engine
+ * in `src/workflow/**`.
+ *
+ * Background-only (docs/dev/workflow-background/plan.md): `execute` validates
+ * the parameters and budget, starts the run in the session's background
+ * workflow registry (`src/workflow/background.ts`, which owns the bounded
+ * run → stop → settle → degraded-fallback sequence formerly enforced here)
+ * and returns the `workflowId` immediately. Completion is pushed to the main
+ * session as a notification; `get_subagent_result` / `abort_subagent` accept
+ * the workflow id. The run is detached from this call's AbortSignal (an
+ * already-aborted signal still rejects before anything starts).
  *
  * Narrow port (mirrors `agent-tool.ts`'s `NestedSpawnPort`): this file has
- * zero imports from `src/stack.ts` / `src/service/**`, only from
- * `src/workflow/**`'s own public types \u2014 `index.ts` is the only place that
- * has to know both this tool's shape and `Stack`'s.
+ * zero imports from `src/stack.ts` / `src/service/**` — `index.ts` is the
+ * only place that knows both this tool's shape and `Stack`'s.
+ *
+ * Main-session only: the tool is registered post-HOST_KEY-guard in
+ * `src/index.ts` and is never injected into child sessions, so there is no
+ * print-mode (blocking) flavour to keep.
  */
 export interface WorkflowToolDeps {
   readonly defaultBudget: WorkflowRunBudget;
-  readonly activity: WorkflowActivityRegistry;
-  createOrchestrator(workflowId: WorkflowId): Orchestrator;
-  /** M8: resolve a live child run's lifetime usage so the workflow tool result can carry the aggregate spend (pi usage accounting). */
-  usageOf?(runId: string): UsageDelta | undefined;
-  /**
-   * M10: live per-run snapshots (the same `QueryService.get` the Agent
-   * tool's M-B progress port reads) — powers the tool card's per-child live
-   * rows while `run()` is still blocking. Optional: without it the card
-   * degrades to workflow-level progress (name/phase/elapsed + child labels
-   * from the activity registry), never to a blank card.
-   */
-  snapshotOf?(runId: string): RunSnapshot | undefined;
+  readonly runs: Pick<BackgroundWorkflows, "start">;
 }
 
-/** M10: partial-update / final-result details consumed by renderResult (mirrors agent-tool.ts's `AgentToolDetails`). */
+/** Tool-result details consumed by renderResult (mirrors agent-tool.ts's `AgentToolDetails`). */
 export interface WorkflowToolDetails {
   workflowId?: string;
+  /** Script `meta.name` — the workflow's display label. */
+  label?: string;
   status?: string;
+  background?: true;
   durationMs?: number;
-  /** Partial (isPartial) updates: preformatted live progress lines. */
+  /** Legacy (pre-background) sessions: partial live progress lines. Kept so old history still renders. */
   progress?: string[];
-  /** Final result: one-line stats summary (status · duration · children tally · cost). */
+  /** Final-result stats line (legacy blocking results + get_subagent_result reads). */
   summary?: string;
   costUsd?: number;
   children?: WorkflowOutcome["children"];
   runIds?: string[];
   replay?: WorkflowOutcome["replay"];
 }
-
-/**
- * \u00a74.3.2 WT17: how long the tool waits for `settled()` (\u2461) after it has
- * already given up on `run()` itself settling within `toolCallMs -
- * settlementGraceMs` and fired an (un-awaited, TL6) `stop()`. Design default.
- */
-const SETTLEMENT_GRACE_MS = 3_000;
-/** \u00a74.1 WT8's own tick granularity \u2014 folded into the `toolCallMs` upper-bound演算 (\u00a74.3.1) alongside the abort/terminate/reconcile windows the budget itself may leave unset. */
-const TICK_MS = 250;
 
 export const WorkflowToolParams = Type.Object({
   script: Type.String({
@@ -108,24 +97,12 @@ export const WorkflowToolParams = Type.Object({
 });
 export type WorkflowToolParams = Static<typeof WorkflowToolParams>;
 
-function computeToolCallMs(budget: WorkflowRunBudget): number {
-  // \u00a74.3.1: toolCallMs := workflowTotalMs + tickMs + abortGraceMs + terminateConfirmMs + reconcileMs + settlementGraceMs
-  return (
-    budget.workflowTotalMs +
-    TICK_MS +
-    (budget.abortGraceMs ?? 10_000) +
-    budget.terminateConfirmMs +
-    (budget.reconcileMs ?? 1_000) +
-    SETTLEMENT_GRACE_MS
-  );
-}
-
 function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): WorkflowRunBudget {
   if (timeoutMs === undefined) return base;
   return { ...base, workflowTotalMs: Math.max(0, timeoutMs) };
 }
 
-function scriptDisplayName(script: string): string {
+export function scriptDisplayName(script: string): string {
   const m = /export\s+const\s+meta\s*=\s*\{[^}]*name\s*:\s*["'`]([^"'`]+)["'`]/.exec(script);
   return m?.[1] ?? "(unnamed workflow)";
 }
@@ -142,7 +119,8 @@ function settledMark(status: string, source: "live" | "replay"): string {
 }
 
 /**
- * M10: live progress lines for the blocking workflow tool card — the
+ * M10: live progress lines for a running workflow (get_subagent_result's
+ * running read and its wait stream; formerly the blocking tool card) — the
  * workflow-level counterpart of agent-tool.ts's `buildProgressLines`.
  * Line 1 is a status header (name · phase · elapsed · budget left); line 2
  * is a settled/running tally; then one live row per active child (the
@@ -254,7 +232,7 @@ function renderChildren(children: WorkflowOutcome["children"], omitCompletedPrev
   return lines.join("\n");
 }
 
-function renderOutcomeText(outcome: WorkflowOutcome): string {
+export function renderOutcomeText(outcome: WorkflowOutcome): string {
   const parts: string[] = [];
   if (outcome.diag.degraded === "settlement_timeout") {
     parts.push(
@@ -299,70 +277,89 @@ function renderOutcomeText(outcome: WorkflowOutcome): string {
   return parts.join("\n");
 }
 
-/**
- * \u00a74.3.2's exact WT13/WT17 sequence, reproduced here (not delegated to
- * `Orchestrator` \u2014 it has no notion of a tool-call deadline):
- *   1. race `run()` against `toolCallMs - settlementGraceMs`
- *   2. on timeout: fire-and-forget (TL6: never `await`) an idempotent `stop()`
- *   3. race `settled()` against `settlementGraceMs`
- *   4. on *that* timeout: fall back to `outcomeAt1()` (or a bare skeleton if
- *      even that is gone), explicitly marked `degraded:"settlement_timeout"`
- *      \u2014 never rendered as if it were a confirmed terminal outcome (\u00a74.3.1.1).
- */
-async function runWithBoundedToolCall(
-  orchestrator: Orchestrator,
-  req: OrchestratorRunRequest,
-  toolCallMs: number,
-): Promise<WorkflowOutcome> {
-  const first = await withDeadline(
-    orchestrator.run(req),
-    Math.max(0, toolCallMs - SETTLEMENT_GRACE_MS),
-    systemClock,
-    "workflow_tool_run",
-  );
-  if (first.ok) return first.value;
-  void orchestrator.stop(req.workflowId, "timeout"); // TL6: not awaited \u2014 settled() below carries the wait.
-  const second = await withDeadline(
-    orchestrator.settled(req.workflowId),
-    SETTLEMENT_GRACE_MS,
-    systemClock,
-    "workflow_tool_settle",
-  );
-  if (second.ok) return second.value;
-  const skeleton = orchestrator.outcomeAt1(req.workflowId);
-  if (skeleton) return { ...skeleton, diag: { ...skeleton.diag, degraded: "settlement_timeout" } };
-  // EI5 also failed to leave a snapshot behind \u2014 the tool still returns
-  // (GW1b's promise never hangs), just with the barest honest skeleton.
-  return {
-    workflowId: req.workflowId,
-    status: "timed_out",
-    pendingReconcile: true,
-    timeoutReason: "workflow_total",
-    durationMs: toolCallMs,
-    children: [],
-    diag: {
-      createdAt: systemClock.now(),
-      heartbeat: { seq: 0, observedAt: systemClock.now(), stalledMs: 0 },
-      logLines: 0,
-      degraded: "settlement_timeout",
-    },
-  };
+/** Sum of the live children's lifetime spend (replay hits and withheld calls carry no runId and cost nothing). */
+export function liveChildRunIds(outcome: WorkflowOutcome): string[] {
+  return outcome.children.filter((c) => c.source === "live" && c.runId !== undefined).map((c) => c.runId!);
+}
+
+export function sumUsage(
+  usages: readonly (UsageDelta | BackgroundWorkflowUsage | undefined)[],
+): UsageDelta | undefined {
+  return usages.reduce<UsageDelta | undefined>((acc, u) => {
+    if (!u) return acc;
+    return acc
+      ? {
+          input: acc.input + u.input,
+          output: acc.output + u.output,
+          cacheRead: acc.cacheRead + u.cacheRead,
+          cacheWrite: acc.cacheWrite + u.cacheWrite,
+          costUsd: acc.costUsd + u.costUsd,
+        }
+      : { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, costUsd: u.costUsd };
+  }, undefined);
+}
+
+/** Aggregate child spend of a settled workflow, looked up per live child run. */
+export function aggregateChildUsage(
+  outcome: WorkflowOutcome,
+  usageOf: ((runId: string) => UsageDelta | undefined) | undefined,
+): UsageDelta | undefined {
+  if (!usageOf) return undefined;
+  return sumUsage(liveChildRunIds(outcome).map((id) => usageOf(id)));
+}
+
+function workflowLabelMarker(name: string, workflowId: string, status: string): string {
+  return `[workflow label: "${name}" · workflow_id: ${workflowId} · status: ${status}]`;
 }
 
 /**
- * "SubagentWorkflow" \u2014 M3.6's model-facing entry point.
+ * Terminal read text (get_subagent_result): the outcome rendering capped by
+ * resultMaxChars, plus a duration/children/cost trailer — the workflow
+ * counterpart of the run result trailer.
+ */
+export function formatWorkflowResultText(outcome: WorkflowOutcome, usage: UsageDelta | undefined, maxChars: number) {
+  const body = truncateResultText(renderOutcomeText(outcome), maxChars);
+  const trailer = [
+    `duration: ${formatDuration(outcome.durationMs)}`,
+    `children: ${outcome.children.length}`,
+    usage
+      ? `usage: in:${usage.input} out:${usage.output} cache_r:${usage.cacheRead} cache_w:${usage.cacheWrite} cost:$${usage.costUsd.toFixed(4)}`
+      : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return { text: `${body.text}\n\n(${trailer})`, truncated: body.truncated, totalChars: body.totalChars };
+}
+
+/**
+ * Completion notification body pushed to the main session when a background
+ * workflow settles: header (name · id · stats incl. spend), the outcome text
+ * capped by resultMaxChars, and how to re-read it.
+ */
+export function formatWorkflowNotification(
+  settled: Pick<BackgroundWorkflowView, "workflowId" | "name"> & { outcome: WorkflowOutcome },
+  usage: UsageDelta | undefined,
+  maxChars: number,
+): string {
+  const { outcome } = settled;
+  const header = `Workflow "${settled.name}" (${settled.workflowId}) ${outcome.status} — ${formatWorkflowSummary(outcome, usage)}`;
+  const body = truncateResultText(renderOutcomeText(outcome), maxChars).text;
+  const hint =
+    `Re-read the full outcome with get_subagent_result(run_id: "${settled.workflowId}")` +
+    (outcome.children.length > 0 ? " (it also reports the children's spend to the session totals)." : ".");
+  return `${header}\n\n${body}\n\n${hint}`;
+}
+
+/**
+ * "SubagentWorkflow" — model-facing entry point.
  *
- * Honest capability declaration (\u00a75.3 compat matrix, \u00a71.2 non-goals):
- *  - NW3: no pause/step/skip/retry from the calling model. The only control
- *    surface once a run has started is the tool call's own cancellation
- *    (Esc/`signal`), which stops the *whole* run.
+ * Honest capability declaration (§5.3 compat matrix, §1.2 non-goals):
+ *  - Always background: the call returns a workflow id at once; a completion
+ *    notification follows; get_subagent_result / abort_subagent manage it.
+ *  - NW3: no pause/step/skip/retry — the only control once started is stop
+ *    (abort_subagent), which stops the whole run.
  *  - NW5: `workflow(nameOrRef)` (nested workflow calls) is not implemented;
  *    a script that calls it gets a clear rejection, not a silent no-op.
- *  - \u00a75.5: unlike the upstream plugin (which returns a task id immediately
- *    and runs in the background), this call BLOCKS until the workflow
- *    reaches a terminal state (bounded by its own timeout_s plus a fixed
- *    grace window) \u2014 a long workflow occupies this tool call for its
- *    whole duration.
  */
 export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeof WorkflowToolParams> {
   return {
@@ -372,20 +369,22 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "Run a multi-agent orchestration script: a sandboxed JS program that calls agent(prompt, opts?) (and " +
       "parallel()/pipeline()/phase()/log()) to coordinate several bounded subagent runs, with its own absolute " +
       "wall-clock budget, deadline-capped children, and (optionally) cross-run result caching via a journal. " +
-      "Every run reaches a terminal state (completed/failed/timed_out/aborted) \u2014 it never hangs. " +
-      "Differences from a general multi-agent orchestrator you may have used before: (1) this call BLOCKS until " +
-      "the workflow finishes (no background task-id + notification model); (2) there is no pause/step/skip/retry " +
-      "control once started \u2014 only stop; (3) nested workflow(...) calls are not supported (inline the referenced " +
-      "logic directly). Use this only when a single Agent call's own multi-step reasoning is not enough and you " +
-      "specifically need several independently-prompted subagents coordinated by real control flow.",
+      "The workflow always runs in the background: the call returns immediately with a workflow id (wf_…), and " +
+      "a completion notification is pushed to you when the workflow reaches a terminal state " +
+      "(completed/failed/timed_out/aborted — it never hangs). After that notification arrives, collect the full " +
+      "outcome with get_subagent_result(run_id: <workflow id>); stop it early with abort_subagent(run_id: " +
+      "<workflow id>), which stops every child run. Do not poll or block waiting for it — continue other work or " +
+      "end your turn. Differences from a general multi-agent orchestrator you may have used before: (1) there is " +
+      "no pause/step/skip/retry control once started — only stop; (2) nested workflow(...) calls are not " +
+      "supported (inline the referenced logic directly). Use this only when a single Agent call's own multi-step " +
+      "reasoning is not enough and you specifically need several independently-prompted subagents coordinated by " +
+      "real control flow.",
     promptSnippet:
-      "SubagentWorkflow(script, args?, journal?, noReplay?, replayScope?, timeout_s?) - run a multi-agent orchestration script",
+      "SubagentWorkflow(script, args?, journal?, noReplay?, replayScope?, timeout_s?) - run a multi-agent orchestration script in the background (returns a workflow id; completion is notified)",
     parameters: WorkflowToolParams,
     /**
-     * M10: without a renderCall the TUI falls back to the bare tool name for
-     * what is typically the longest-blocking call in the toolbox. Show the
-     * workflow's declared name + the knobs that matter (journal / timeout),
-     * like the Agent card shows its description.
+     * Show the workflow's declared name + the knobs that matter (journal /
+     * timeout), like the Agent card shows its description.
      */
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
@@ -402,114 +401,55 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       text.setText(meta ? `${title}\n${theme.fg("muted", meta)}` : title);
       return text;
     },
-    async execute(_toolCallId, params, signal, onUpdate) {
-      // \u00a75.1 rule 1: check signal?.aborted before anything else \u2014 never boot a worker for an already-cancelled call.
+    async execute(_toolCallId, params, signal) {
+      // §5.1 rule 1: check signal?.aborted before anything else — never boot a worker for an already-cancelled call.
+      // After this check the run is detached from `signal` (Esc on this turn does not stop the workflow).
       if (signal?.aborted) {
         return {
           content: [{ type: "text" as const, text: "workflow run aborted before starting (signal already aborted)." }],
           details: { status: "aborted" as const },
         };
       }
-      const workflowId: WorkflowId = `wf_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+      const size = validateScriptSize(params.script);
+      if (!size.ok) throw new Error(`SubagentWorkflow: ${size.message}`);
       const budget = mergeBudget(
         deps.defaultBudget,
         params.timeout_s === undefined ? undefined : params.timeout_s * 1000,
       );
-      const toolCallMs = computeToolCallMs(budget);
-      const startedAt = systemClock.now();
-      deps.activity.register(
-        workflowId,
-        scriptDisplayName(params.script),
-        startedAt,
-        startedAt + budget.workflowTotalMs,
-      );
-      const orchestrator = deps.createOrchestrator(workflowId);
-      // M10: live tool-card progress while `run()` blocks — the same 1 Hz
-      // read-only onUpdate side channel the Agent tool's M-B path uses
-      // (read: activity registry + per-child run snapshots; it never touches
-      // engine state, and the timer is unref'd so it cannot wedge `pi -p`).
-      let progressTimer: ReturnType<typeof setInterval> | undefined;
-      if (onUpdate) {
-        const push = () => {
-          const snap = deps.activity.list().find((w) => w.workflowId === workflowId);
-          if (!snap) return;
-          const lines = buildWorkflowProgressLines(snap, systemClock.now(), deps.snapshotOf);
-          onUpdate({
-            content: [{ type: "text" as const, text: lines.join("\n") }],
-            details: { workflowId, progress: lines } satisfies WorkflowToolDetails,
-          });
-        };
-        progressTimer = setInterval(push, 1000);
-        (progressTimer as { unref?: () => void }).unref?.();
-        push();
+      if (budget.heartbeatMs > 0) {
+        assertHeartbeatBudgetInvariant(budget.scriptSliceMs, budget.heartbeatStallMs, budget.heartbeatMs);
       }
-      try {
-        const req: OrchestratorRunRequest = {
-          workflowId,
-          script: params.script,
-          budget,
-          ...(params.args !== undefined ? { args: params.args } : {}),
-          ...(params.journal !== undefined ? { journal: params.journal } : {}),
-          ...(params.noReplay !== undefined ? { noReplay: params.noReplay } : {}),
-          ...(params.replayScope !== undefined ? { replayScope: params.replayScope } : {}),
-          ...(signal ? { signal } : {}),
-        };
-        const outcome = await runWithBoundedToolCall(orchestrator, req, toolCallMs);
-        if (outcome.status !== "completed") {
-          const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.stopCause ?? outcome.status;
-          throw new Error(
-            `workflow "${workflowId}" did not complete successfully: ${reason}\n${renderOutcomeText(outcome)}`,
-          );
-        }
-        // M8: aggregate the LIVE children's spend onto this tool result (pi
-        // usage accounting — same mechanism as the Agent tool). Replay hits
-        // cost nothing and carry no fresh runId; withheld/running children
-        // without a runId contribute nothing. runIds ride along in details so
-        // an external HUD (pi-hud) can dedupe its event-reported live costs.
-        const liveRunIds = outcome.children
-          .filter((c) => c.source === "live" && c.runId !== undefined)
-          .map((c) => c.runId!);
-        const childUsages = deps.usageOf ? liveRunIds.map((id) => deps.usageOf!(id)).filter(Boolean) : [];
-        const totalUsage = (childUsages as UsageDelta[]).reduce<UsageDelta | undefined>(
-          (acc, u) =>
-            acc
-              ? {
-                  input: acc.input + u.input,
-                  output: acc.output + u.output,
-                  cacheRead: acc.cacheRead + u.cacheRead,
-                  cacheWrite: acc.cacheWrite + u.cacheWrite,
-                  costUsd: acc.costUsd + u.costUsd,
-                }
-              : u,
-          undefined,
-        );
-        return {
-          content: [{ type: "text" as const, text: renderOutcomeText(outcome) }],
-          ...(totalUsage ? { usage: toPiToolUsage(totalUsage) } : {}),
-          details: {
-            workflowId: outcome.workflowId,
-            status: outcome.status,
-            durationMs: outcome.durationMs,
-            // M10: presentation stats (renderResult summary line + history replay).
-            summary: formatWorkflowSummary(outcome, totalUsage),
-            ...(totalUsage ? { costUsd: totalUsage.costUsd } : {}),
-            children: outcome.children,
-            runIds: liveRunIds,
-            ...(outcome.replay ? { replay: outcome.replay } : {}),
-          } satisfies WorkflowToolDetails,
-        };
-      } finally {
-        if (progressTimer !== undefined) clearInterval(progressTimer);
-        deps.activity.unregister(workflowId);
-      }
+      const name = scriptDisplayName(params.script);
+      const started = deps.runs.start({
+        script: params.script,
+        name,
+        budget,
+        ...(params.args !== undefined ? { args: params.args } : {}),
+        ...(params.journal !== undefined ? { journal: params.journal } : {}),
+        ...(params.noReplay !== undefined ? { noReplay: params.noReplay } : {}),
+        ...(params.replayScope !== undefined ? { replayScope: params.replayScope } : {}),
+      });
+      const id = started.workflowId;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `Workflow "${name}" started in background (workflow_id: ${id}, budget: ${formatDuration(budget.workflowTotalMs)}). ` +
+              "You will receive a completion notification when it reaches a terminal state — do not block or poll " +
+              `for it now; collect the full outcome with get_subagent_result(run_id: "${id}") after the notification ` +
+              `arrives, or stop it early with abort_subagent(run_id: "${id}").`,
+          },
+          { type: "text" as const, text: workflowLabelMarker(name, id, "running") },
+        ],
+        details: { workflowId: id, label: name, status: "running", background: true } satisfies WorkflowToolDetails,
+      };
     },
     /**
-     * M10: renders both partial (streaming) updates and the final result —
-     * same contract as the Agent tool's renderResult:
-     *  - partial: the live progress lines (⏳ header + tally + per-child
-     *    rows), tone-mapped per mark (✗ error / ▸ accent / ✓·↩·⊘ muted);
-     *  - final: a muted stats summary line, then the outcome text (collapsed
-     *    to a handful of lines unless the entry is expanded).
+     * Background start results render as their (short) text; results from
+     * sessions recorded before the background switch still carry a stats
+     * `summary` and, for partial updates, live `progress` lines — both keep
+     * rendering so old history stays readable.
      */
     renderResult(result, options, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
@@ -534,6 +474,8 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       }
       const parts: string[] = [];
       if (details.summary) parts.push(theme.fg("muted", `\u2713 ${details.summary}`));
+      else if (details.background && details.workflowId)
+        parts.push(theme.fg("muted", `\u25b8 ${details.workflowId} · running in background`));
       if (body) {
         const lines = body.split("\n");
         const cap = 6;
