@@ -64,6 +64,20 @@ export interface JobStore {
    * when the job is gone).
    */
   update(jobId: JobId, mutate: (record: JobRecord) => JobRecord | undefined): Promise<JobRecord | undefined>;
+  /**
+   * bash-timeout-grace plan §2.5: serialized read-modify-write that also
+   * covers the "record does not exist yet" case — `mutate` receives
+   * `undefined` when there is no file on disk, and returning `undefined`
+   * from `mutate` (in either case) skips the write. Deadline back-writes
+   * (R5/R10), the crash-handoff log relocation (`BashJobManager.relocateLog`)
+   * and R12's `failed`/`killed` finalizations all go through this so a CAS
+   * ("current.deadline.seq >= next.deadline.seq => don't write") can be
+   * expressed by the caller without a separate existence check.
+   */
+  upsert(
+    jobId: JobId,
+    mutate: (record: JobRecord | undefined) => JobRecord | undefined,
+  ): Promise<JobRecord | undefined>;
   /** Persist the `bash_job output` cursor (§4.3). Monotonic: never moves backwards. */
   setReadCursor(jobId: JobId, cursor: number): Promise<JobRecord | undefined>;
   /** Delete the record and its log file. Idempotent. */
@@ -82,6 +96,126 @@ const LOG_SUFFIX = ".log";
 const TMP_SUFFIX = ".tmp";
 
 /**
+ * bash-timeout-grace plan §2.5 "共享写链": every `JobStore` instance writing to
+ * the same directory — across `/reload`, `/new`, `/resume` within one process
+ * — must serialize through exactly one chain, or a newer manager's deadline
+ * back-write (R10's seq CAS) could be interleaved with an older manager's
+ * still-draining writes and either side could silently lose an update. The
+ * chain lives on `globalThis` (the same `Symbol.for` pattern as the
+ * worktree-origin and child-bash registries) so it survives the extension's
+ * in-process re-activation on `/reload` — there is deliberately no `reset()`.
+ *
+ * No module-scope mutable state: everything mutable lives inside the
+ * `JobStoreChainRegistry` object reachable only through the global slot.
+ */
+const JOB_STORE_CHAIN_REGISTRY_KEY = Symbol.for("pi-subagent:bash-job-store-chains");
+
+interface JobStoreChain {
+  /** Tail of the serialization chain; each `enqueue` call chains onto this. */
+  queue: Promise<unknown>;
+  /** Operations enqueued *and* still in flight against this chain. */
+  pending: number;
+  /** Recency marker for idle-only LRU eviction (§2.5 "淘汰"). */
+  lastUsedAt: Millis;
+  /** Enqueue time of the oldest currently-pending operation; `undefined` when idle. */
+  oldestEnqueuedAt: Millis | undefined;
+  /** Latch: the combined backlog WARN (pending/age) fires at most once per chain. */
+  warnedBacklog: boolean;
+}
+
+interface JobStoreChainRegistry {
+  readonly chains: Map<string, JobStoreChain>;
+  /** Latch: the over-capacity WARN fires at most once per process lifetime. */
+  warnedOverCapacity: boolean;
+}
+
+/** §2.5 "淘汰": chain map capacity before idle (pending === 0) chains are LRU-evicted. */
+export const JOB_STORE_CHAIN_CAP = 64;
+/** §2.5 "遥测": a chain WARNs once it has this many operations in flight. */
+export const JOB_STORE_CHAIN_PENDING_WARN = 256;
+/** §2.5 "遥测": a chain WARNs once its oldest in-flight operation has waited this long. */
+export const JOB_STORE_CHAIN_OLDEST_WARN_MS: Millis = 60_000;
+
+function getChainRegistry(): JobStoreChainRegistry {
+  const g = globalThis as Record<symbol, JobStoreChainRegistry | undefined>;
+  const existing = g[JOB_STORE_CHAIN_REGISTRY_KEY];
+  if (existing) return existing;
+  const created: JobStoreChainRegistry = { chains: new Map(), warnedOverCapacity: false };
+  g[JOB_STORE_CHAIN_REGISTRY_KEY] = created;
+  return created;
+}
+
+/**
+ * Get-or-create the chain for `dir` (resolved to an absolute path so two
+ * different string spellings of the same directory still share one chain).
+ * Creating a *new* chain is the only moment eviction runs — an already-live
+ * chain is simply returned (and its recency bumped), so a chain that is busy
+ * at the instant another dir needs room is never the one removed out from
+ * under an in-flight write (§2.5 "淘汰只淘汰 pending === 0 的链").
+ */
+function chainFor(dir: string, now: Millis, warn: (message: string) => void): JobStoreChain {
+  const registry = getChainRegistry();
+  const key = resolve(dir);
+  const existing = registry.chains.get(key);
+  if (existing) {
+    existing.lastUsedAt = now;
+    return existing;
+  }
+  const created: JobStoreChain = {
+    queue: Promise.resolve(),
+    pending: 0,
+    lastUsedAt: now,
+    oldestEnqueuedAt: undefined,
+    warnedBacklog: false,
+  };
+  registry.chains.set(key, created);
+  if (registry.chains.size > JOB_STORE_CHAIN_CAP) {
+    const idle = [...registry.chains.entries()]
+      .filter(([k, chain]) => chain.pending === 0 && k !== key)
+      .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+    for (const [k] of idle) {
+      if (registry.chains.size <= JOB_STORE_CHAIN_CAP) break;
+      registry.chains.delete(k);
+    }
+    if (registry.chains.size > JOB_STORE_CHAIN_CAP && !registry.warnedOverCapacity) {
+      registry.warnedOverCapacity = true;
+      const busy = [...registry.chains.values()].filter((chain) => chain.pending > 0).length;
+      warn(`bash job store chains over capacity (${busy} busy)`);
+    }
+  }
+  return created;
+}
+
+/**
+ * Aggregate snapshot across every directory's chain (§2.5 "遥测"), for
+ * `/agent status` (a later package) to surface as `chains N (busy k, oldest
+ * 12s)`. `now` is injectable so tests (and any FakeClock-driven caller) get a
+ * deterministic `oldestPendingMs`; real callers can omit it.
+ */
+export interface ChainStats {
+  readonly dirs: number;
+  readonly busy: number;
+  readonly maxPending: number;
+  readonly oldestPendingMs: number | undefined;
+}
+
+export function chainStats(now: Millis = Date.now()): ChainStats {
+  const registry = getChainRegistry();
+  let busy = 0;
+  let maxPending = 0;
+  let oldestPendingMs: number | undefined;
+  for (const chain of registry.chains.values()) {
+    if (chain.pending > 0) busy++;
+    if (chain.pending > maxPending) maxPending = chain.pending;
+    if (chain.oldestEnqueuedAt !== undefined) {
+      const age = now - chain.oldestEnqueuedAt;
+      if (oldestPendingMs === undefined || age > oldestPendingMs) oldestPendingMs = age;
+    }
+  }
+  return { dirs: registry.chains.size, busy, maxPending, oldestPendingMs };
+}
+
+/**
  * `.tmp` files are the debris of an interrupted `writeAtomic`: intrinsically
  * momentary, so they get a short fixed TTL instead of `retentionMs` (a day of
  * half-written records helps nobody). Not configurable on purpose — see
@@ -98,20 +232,37 @@ export function createJobStore(options: JobStoreOptions): JobStore {
   const logPath = (jobId: JobId) => join(dir, `${jobId}${LOG_SUFFIX}`);
 
   /**
-   * Single serialization chain. It orders atomic writes (as in
-   * `schedule/store.ts`) *and* makes `update`'s read-modify-write indivisible
-   * against concurrent saves from the same process.
+   * Every write/read-modify-write for this store's `dir` goes through the
+   * shared per-directory chain (§2.5) instead of a private queue: it both
+   * orders atomic writes (as before) *and* now also orders them against any
+   * other `JobStore` instance — in this process, past or present — pointed at
+   * the same directory (the /reload handoff window, §2.5).
    */
-  let queue: Promise<unknown> = Promise.resolve();
   let tmpSeq = 0;
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const next = queue.then(fn, fn);
+    const now = clock.now();
+    const chain = chainFor(dir, now, warn);
+    if (chain.pending === 0) chain.oldestEnqueuedAt = now;
+    chain.pending++;
+    if (!chain.warnedBacklog) {
+      const oldestMs = chain.oldestEnqueuedAt !== undefined ? now - chain.oldestEnqueuedAt : 0;
+      if (chain.pending > JOB_STORE_CHAIN_PENDING_WARN || oldestMs > JOB_STORE_CHAIN_OLDEST_WARN_MS) {
+        chain.warnedBacklog = true;
+        warn(`bash job store chain ${dir} backlog: ${chain.pending} pending, oldest ${Math.round(oldestMs / 1000)}s`);
+      }
+    }
+    const result = chain.queue.then(fn, fn);
     // Keep the chain alive regardless of individual failures.
-    queue = next.then(
+    chain.queue = result.then(
       () => undefined,
       () => undefined,
     );
-    return next;
+    const settle = (): void => {
+      chain.pending = Math.max(0, chain.pending - 1);
+      if (chain.pending === 0) chain.oldestEnqueuedAt = undefined;
+    };
+    result.then(settle, settle);
+    return result;
   }
 
   async function writeAtomic(record: JobRecord): Promise<void> {
@@ -173,6 +324,19 @@ export function createJobStore(options: JobStoreOptions): JobStore {
     return enqueue(async () => {
       const current = await readRecord(jobId);
       if (!current) return undefined;
+      const next = mutate(current);
+      if (!next) return current;
+      await writeAtomic(next);
+      return next;
+    });
+  }
+
+  function upsert(
+    jobId: JobId,
+    mutate: (record: JobRecord | undefined) => JobRecord | undefined,
+  ): Promise<JobRecord | undefined> {
+    return enqueue(async () => {
+      const current = await readRecord(jobId);
       const next = mutate(current);
       if (!next) return current;
       await writeAtomic(next);
@@ -314,6 +478,7 @@ export function createJobStore(options: JobStoreOptions): JobStore {
     logPath,
     loadAll,
     update,
+    upsert,
     remove,
 
     save(record) {

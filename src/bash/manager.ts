@@ -2,6 +2,14 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { mkdir, open, stat } from "node:fs/promises";
 import type { Clock, TimerHandle } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
+import {
+  applyJobExtension,
+  createJobDeadline,
+  DEFAULT_JOB_DEADLINE_POLICY,
+  jobGraceWindow,
+  resumeDeadline,
+  type JobExtensionReason,
+} from "./deadline.js";
 import { newJobId } from "./ids.js";
 import type { JobStore } from "./job-store.js";
 import type { JobExit, KillOutcome, ProcessPort, SpawnedJob } from "./process.js";
@@ -13,6 +21,8 @@ import {
   previewCommand,
   transitionJob,
   truncateFinalText,
+  type JobDeadline,
+  type JobDeadlinePolicy,
   type JobId,
   type JobRecord,
   type JobStatus,
@@ -68,6 +78,15 @@ export const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
  * wake an idle session and wedge `pi -p`.
  */
 export const DEFAULT_SWEEP_INTERVAL_MS = 600_000;
+/**
+ * bash-timeout-grace plan §2.4 R12 (v5, user-widened): the job's own staged
+ * on-disk persistence budget before `reserve()` gives up and fails the job
+ * without ever spawning a process. Not a tool-call wait bound — that is
+ * `§3.6`'s separate `R`/abort race, layered on top of this.
+ */
+export const STAGE_PERSIST_TIMEOUT_MS: Millis = 30_000;
+/** §2.2/R7: `extend()`'s own bound on waiting for the matching disk write. */
+export const EXTEND_PERSIST_TIMEOUT_MS: Millis = 2_000;
 /** Candidate list cap in resolution errors (matches `resolve-target.ts`). */
 const MAX_CANDIDATES = 10;
 
@@ -104,6 +123,32 @@ export interface BashJobManagerOptions {
   /** Post-exit drain cap used by the process port and log marker. */
   drainTimeoutMs?: Millis;
   warn?: (message: string) => void;
+  /**
+   * bash-timeout-grace plan §2.1: the frozen deadline policy stamped onto
+   * every job created with a `timeoutMs` (§2.3/2.4). Defaults to
+   * `DEFAULT_JOB_DEADLINE_POLICY` (U4: 60s grace / 3 extensions / 3x factor).
+   */
+  deadlinePolicy?: JobDeadlinePolicy;
+  /**
+   * §3 (child session bash jobs): stamps every job this manager creates with
+   * `owner: "subagent"` (§3.9's crash-recovery branch keys off this field).
+   * Omitted for the main session's manager.
+   */
+  owner?: "subagent";
+  /**
+   * §3.6 S1: synchronous admission gate consulted by `reserve()` before a new
+   * job is created. Returning `false` (a sealed child run, §3.3) rejects the
+   * call with "run is ending; no new bash jobs" and spawns nothing. Omitted
+   * (main session) means "always admit".
+   */
+  admit?: () => boolean;
+  /**
+   * §2.3 table: fired synchronously whenever a running job's deadline enters
+   * its grace window (deduplicated per grace episode via `graceNotified`,
+   * R6) or a successful `extend()` moves `dueAt` forward. The caller (a later
+   * package) owns actually notifying anyone; the manager only decides *when*.
+   */
+  onDeadline?: (record: JobRecord, kind: "grace" | "extended") => void;
 }
 
 export interface CreateJobInit {
@@ -112,6 +157,12 @@ export interface CreateJobInit {
   env?: NodeJS.ProcessEnv;
   /** Live output relay for the foreground phase (pi's `BashOperations.exec`). */
   onData?: (chunk: string) => void;
+  /**
+   * bash-timeout-grace plan §2.1/U3: the model-supplied `timeout` (ms),
+   * already resolved by the caller's `resolveTimeoutMs`. Omitted (or `<= 0`)
+   * means "no job-level deadline" — the only representation of "no timeout".
+   */
+  timeoutMs?: Millis;
 }
 
 export interface CreatedJob {
@@ -180,6 +231,17 @@ export interface RecoverSummary {
   readonly pruned: readonly JobId[];
   /** Non-record files dropped by the sweep (bad records, orphan logs, tmp debris). */
   readonly prunedFiles: readonly string[];
+  /**
+   * bash-timeout-grace plan §3.9: `owner: "subagent"` `running` jobs whose
+   * identity was verified and were actively killed (not merely adopted).
+   */
+  readonly subagentKilled: readonly JobId[];
+  /**
+   * §2.5 step 4: `true` when the scan stopped early because `signal` fired
+   * (or the manager was disposed) before every record was adjudicated —
+   * `recover()` never hangs on it, it just does less work.
+   */
+  readonly partial: boolean;
 }
 
 export interface LocalJobHandoff {
@@ -188,11 +250,57 @@ export interface LocalJobHandoff {
   readonly handle: LocalHandle;
 }
 
+/**
+ * bash-timeout-grace plan §3.6: the synchronous half of a job's creation.
+ * `started` never rejects (§3.6/R12) — every failure or cancellation path
+ * settles the in-memory record to a terminal status first and resolves
+ * `{ ok: false, error }`, so `waitExit`/`bash_job status`/the settle-hold
+ * summary/exit facts can all observe the outcome without an unhandled
+ * rejection anywhere in the process.
+ */
+export interface ReservedJob {
+  readonly jobId: JobId;
+  readonly logPath: string;
+  readonly started: Promise<StartedResult>;
+}
+
+export type StartedResult =
+  { readonly ok: true; readonly job: CreatedJob } | { readonly ok: false; readonly error: Error };
+
+/** `extend()`'s own reasons on top of `deadline.ts`'s eligibility reasons. */
+export type ManagerExtendReason = JobExtensionReason | "not_found";
+
+export type ExtendJobOutcome =
+  | { readonly ok: true; readonly record: JobRecord; readonly persistPending: boolean }
+  | { readonly ok: false; readonly reason: ManagerExtendReason };
+
 export interface BashJobManager {
   readonly dir: string;
   readonly maxBackgroundJobs: number;
-  recover(): Promise<RecoverSummary>;
+  /**
+   * §2.5/§3.9: `signal` (when given) is checked before every I/O call and
+   * after every `await` (the linearization point is `signal.aborted` going
+   * true) — aborting never leaves a mutated record, never rearms a timer,
+   * never sends a notification; it simply makes `recover()` return sooner
+   * with `partial: true`. Disposing the manager has the same effect on any
+   * `recover()` call already in flight against it.
+   */
+  recover(signal?: AbortSignal): Promise<RecoverSummary>;
   create(init: CreateJobInit): Promise<CreatedJob>;
+  /**
+   * bash-timeout-grace plan §3.6: the non-blocking spawn entry point.
+   * Synchronous (E33) — admits (§3.6 S1), allocates the `jobId`/`logPath`,
+   * and returns immediately; the whole save → spawn → running sequence (R12)
+   * runs behind `started`, which never rejects. Throws synchronously only
+   * when the manager is disposed or `admit()` refuses (no job is created).
+   */
+  reserve(init: CreateJobInit): ReservedJob;
+  /**
+   * bash-timeout-grace plan §3.6/R12: cancel a job still inside `reserve()`'s
+   * own flow (or kill it outright if it already reached `running`).
+   * Synchronous, idempotent, and total — a stale/unknown `jobId` is a no-op.
+   */
+  cancelReserve(jobId: JobId): void;
   /** In-memory snapshot (sync, for `/agent status` and the tool layer). */
   get(jobId: JobId): JobRecord | undefined;
   /** Disk-authoritative read (falls back to memory when the file is gone). */
@@ -202,6 +310,21 @@ export interface BashJobManager {
   resolve(handle: string): JobId;
   /** Mark the job as handed to the model; enables its completion notice (§5). */
   markBackgrounded(jobId: JobId): Promise<JobRecord | undefined>;
+  /**
+   * bash-timeout-grace plan §3.6: synchronous twin of `markBackgrounded` for
+   * the auto-background return path (R = D − 3s) — the tool call must return
+   * with zero further `await`s, so the persistence is fired-and-forgotten
+   * through the store's chain (R5) instead of awaited.
+   */
+  markBackgroundedSync(jobId: JobId): void;
+  /**
+   * §2.5 step 3 (crash-handoff log relocation): update the in-memory
+   * `logPath` synchronously and queue the matching on-disk `upsert` on the
+   * job's directory chain. Resolves once that write settles (or is skipped
+   * because the job is gone) so the caller can safely `unlink` the old JSON
+   * afterwards.
+   */
+  relocateLog(jobId: JobId, newLogPath: string): Promise<void>;
   /** Persist the inner tool's final text (allowed before or after settlement). */
   setFinalText(jobId: JobId, text: string): Promise<JobRecord | undefined>;
   /**
@@ -211,6 +334,14 @@ export interface BashJobManager {
   noteTermination(jobId: JobId, reason: "killed" | "timed_out"): void;
   readOutput(jobId: JobId, options?: ReadOutputOptions): Promise<JobOutputRead>;
   kill(jobId: JobId, options?: { graceMs?: Millis }): Promise<KillJobResult>;
+  /**
+   * bash-timeout-grace plan §2.2/§2.6 (`bash_job(action:"extend")`): apply an
+   * extension synchronously against the in-memory record (R1) and wait at
+   * most 2s for the matching disk write (R7) before returning —
+   * `persistPending: true` means the extension is in effect (waiters/timers
+   * already reflect it) but the write is still queued.
+   */
+  extend(jobId: JobId, extendMs: Millis, reason?: string): Promise<ExtendJobOutcome>;
   /**
    * Bounded wait for a terminal state; resolves with the latest record. An
    * abort signal settles the wait early (with the current record), so Esc /
@@ -222,14 +353,24 @@ export interface BashJobManager {
     timeoutMs: Millis,
     opts?: { signal?: AbortSignal | undefined },
   ): Promise<JobRecord | undefined>;
+  /**
+   * §3.5 support: resolves once every given job id is terminal (or the
+   * shared timeout/abort fires first, per-job, mirroring `waitExit`).
+   */
+  waitAllExit(jobIds: readonly JobId[], timeoutMs: Millis, opts?: { signal?: AbortSignal | undefined }): Promise<void>;
   /** §3.8 — this host's `running` **and** backgrounded jobs. */
   backgroundJobCount(): number;
   hasBackgroundCapacity(): boolean;
   /** Export backgrounded local jobs for the next in-process stack. */
   exportLocalJobs(): LocalJobHandoff[];
   hasOpenLocalHandle(jobId: JobId): boolean;
-  /** Adopt local handles exported by the previous stack. */
-  adoptLocalJobs(handoffs: LocalJobHandoff[]): void;
+  /**
+   * Adopt local handles exported by the previous stack (§2.5 step 2).
+   * `opts.sessionId`, when given and different from a handed-off record's
+   * own `sessionId`, retags it (this manager's session now owns the job).
+   * Deadline timers are rearmed purely from the in-memory record — no I/O.
+   */
+  adoptLocalJobs(handoffs: LocalJobHandoff[], opts?: { sessionId?: string }): void;
   /** Wait until all queued store writes have settled. */
   drain(): Promise<void>;
   /** Clears timers only. Never kills a process, never notifies afterwards. */
@@ -282,6 +423,16 @@ interface Entry {
   /** Present only for jobs this manager spawned itself (not adopted ones). */
   local?: LocalHandle;
   waiters: Set<Waiter>;
+  /**
+   * bash-timeout-grace plan §2.4 R12: `reserve()`'s own sub-state while the
+   * job has not reached `running` yet. `undefined` once spawn is settled
+   * (running/failed/killed) — not itself part of the persisted record.
+   */
+  stage?: "persisting" | "spawning" | undefined;
+  /** §2.4 R12: only-increases cancellation flag set by `cancelReserve` / sealing. */
+  cancelled?: boolean | undefined;
+  /** §2.3 due/grace timer for this job's `deadline`, if any (R2). */
+  deadlineTimer?: TimerHandle | undefined;
 }
 
 export function createBashJobManager(options: BashJobManagerOptions): BashJobManager {
@@ -304,6 +455,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     options.discardGraceMs !== undefined && Number.isFinite(options.discardGraceMs) && options.discardGraceMs >= 0
       ? Math.trunc(options.discardGraceMs)
       : DEFAULT_DISCARD_GRACE_MS;
+  const deadlinePolicy = options.deadlinePolicy ?? DEFAULT_JOB_DEADLINE_POLICY;
   const myToken = {};
 
   const entries = new Map<JobId, Entry>();
@@ -340,6 +492,12 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
    * Adopt a freshly persisted record into the table. A local job's live byte
    * counters win over the (deliberately throttled) on-disk ones, so status and
    * list views never regress while the process is still writing.
+   *
+   * R9 (read-not-regress): the incoming `deadline` never overwrites a
+   * higher-`seq` in-memory one — a synchronous `extend()`/grace-entry can
+   * complete before its own back-write lands on disk, and a *different*
+   * write's disk read (recovery, a stale `manager.load()`) must not resurrect
+   * the older value in memory.
    */
   function putRecord(record: JobRecord): JobRecord {
     const entry = ensureEntry(record);
@@ -354,9 +512,15 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
               outputTruncated: record.outputTruncated || handle.truncated,
             }
           : record;
-    entry.record = merged;
-    if (isTerminalJobStatus(merged.status)) settleWaiters(entry);
-    return merged;
+    const priorDeadline = entry.record.deadline;
+    const incomingDeadline = merged.deadline;
+    const withDeadline =
+      priorDeadline !== undefined && (incomingDeadline === undefined || priorDeadline.seq >= incomingDeadline.seq)
+        ? { ...merged, deadline: priorDeadline }
+        : merged;
+    entry.record = withDeadline;
+    if (isTerminalJobStatus(withDeadline.status)) settleWaiters(entry);
+    return withDeadline;
   }
 
   function settleWaiters(entry: Entry): void {
@@ -394,6 +558,197 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   ): Promise<JobRecord | undefined> {
     const stored = await store.update(jobId, mutate);
     return stored ? putRecord(stored) : undefined;
+  }
+
+  // ── job-level deadline (bash-timeout-grace plan §2.3/§2.4) ───────────────
+
+  /**
+   * R5/R10: queue the deadline back-write on the store's chain without
+   * awaiting it — memory (already updated by the caller) is authoritative,
+   * disk is best-effort and CAS'd by `seq` so an in-flight write can never
+   * undo a newer one (R10). A missing on-disk record (job never persisted,
+   * or already pruned) is a no-op, not an error.
+   */
+  function persistDeadline(jobId: JobId, next: JobDeadline): void {
+    void store
+      .upsert(jobId, (current) => {
+        if (!current) return undefined;
+        if (current.deadline !== undefined && current.deadline.seq >= next.seq) return undefined;
+        return { ...current, deadline: next };
+      })
+      .catch((error) => warn(`bash job ${jobId} deadline persistence error (ignored): ${String(error)}`));
+  }
+
+  /**
+   * R2: the *only* deadline timer callback. Every arm captures nothing but
+   * the `jobId` — staleness is judged fresh, every time, straight off the
+   * live record, so a lost race (extend landed first, exit landed first)
+   * simply produces a different (still correct) decision instead of a
+   * stale one firing anyway.
+   */
+  function rearm(jobId: JobId): void {
+    const entry = entries.get(jobId);
+    if (!entry || disposed) return;
+    if (entry.deadlineTimer !== undefined) {
+      clock.clearTimer(entry.deadlineTimer);
+      entry.deadlineTimer = undefined;
+    }
+    const record = entry.record;
+    if (isTerminalJobStatus(record.status) || record.deadline === undefined) return;
+    const now = clock.now();
+    const decision = resumeDeadline(record, now);
+    if (decision.kind === "none") return;
+    if (decision.kind === "expire") {
+      void killForDeadline(jobId, "timed_out");
+      return;
+    }
+    if (decision.kind === "grace") {
+      enterGrace(jobId, decision.graceUntil);
+      return;
+    }
+    entry.deadlineTimer = clock.setTimer(Math.max(0, decision.at - now), () => {
+      const live = entries.get(jobId);
+      if (live) live.deadlineTimer = undefined;
+      rearm(jobId);
+    });
+  }
+
+  /**
+   * §2.3/R6: enter (or re-confirm) the grace window — memory first (sync),
+   * disk after (fire-and-forget), notification deduplicated per episode via
+   * `graceNotified < graces`, then rearm at `graceUntil`.
+   */
+  function enterGrace(jobId: JobId, graceUntil: Millis): void {
+    const entry = entries.get(jobId);
+    if (!entry || disposed) return;
+    const record = entry.record;
+    const d = record.deadline;
+    if (!d || isTerminalJobStatus(record.status)) return;
+    const nextGraces = d.graces + 1;
+    const notify = d.graceNotified < nextGraces;
+    const next: JobDeadline = {
+      ...d,
+      graceUntil,
+      graces: nextGraces,
+      graceNotified: notify ? d.graceNotified + 1 : d.graceNotified,
+      seq: d.seq + 1,
+    };
+    entry.record = { ...record, deadline: next };
+    persistDeadline(jobId, next);
+    if (notify) {
+      try {
+        options.onDeadline?.(entry.record, "grace");
+      } catch (error) {
+        warn(`bash job ${jobId} onDeadline(grace) threw (ignored): ${String(error)}`);
+      }
+    }
+    rearm(jobId);
+  }
+
+  /**
+   * §2.3 table: due (no/expired grace) → kill. Mirrors `bash-tool.ts`'s
+   * existing `killTree` composition (`kill()` synchronously pins
+   * `local.termination` before its first `await`, so relabelling it right
+   * after the call — still in the same microtask — always wins) rather than
+   * duplicating the identity-checked kill ladder.
+   */
+  async function killForDeadline(jobId: JobId, reason: "timed_out"): Promise<void> {
+    const entry = entries.get(jobId);
+    if (!entry || isTerminalJobStatus(entry.record.status)) return;
+    if (entry.local) {
+      void kill(jobId, {}).catch((error) => warn(`bash job ${jobId} deadline kill failed: ${String(error)}`));
+      noteTerminationInternal(jobId, reason);
+      return;
+    }
+    // Defensive fallback: a deadline timer should only ever be armed for a job
+    // this manager itself spawned (and therefore still holds a local handle
+    // for) — see `rearm`'s only callers. Kept total rather than assuming.
+    const record = entry.record;
+    const ownership = processPort.checkPidOwnership(record);
+    if (ownership === "unsafe") {
+      await applyTransition(jobId, "orphaned", { at: clock.now(), exitCode: null });
+      return;
+    }
+    if (ownership === "dead") {
+      await applyTransition(jobId, "exited_unknown", { at: clock.now(), exitCode: null });
+      return;
+    }
+    const pid = record.pid;
+    if (pid !== undefined) {
+      const outcome = await processPort
+        .killJobTree(pid, record.procStartTime !== undefined ? { expectedProcStartTime: record.procStartTime } : {})
+        .catch(() => "refused" as const);
+      if (outcome === "refused") {
+        await applyTransition(jobId, "orphaned", { at: clock.now(), exitCode: null });
+        return;
+      }
+    }
+    await applyTransition(jobId, reason, { at: clock.now(), exitCode: null });
+  }
+
+  /** Shared by the public `noteTermination` and the internal deadline path. */
+  function noteTerminationInternal(jobId: JobId, reason: "killed" | "timed_out"): void {
+    const local = entries.get(jobId)?.local;
+    if (local) local.termination = reason;
+  }
+
+  /**
+   * §2.4 R12: race a promise against the clock (not real timers, so
+   * FakeClock-driven tests are deterministic). Distinguishes "resolved",
+   * "rejected" and "timed out" — `runReserveFlow` needs all three.
+   */
+  function raceOutcome<T>(
+    promise: Promise<T>,
+    ms: Millis,
+  ): Promise<{ kind: "ok"; value: T } | { kind: "error"; error: unknown } | { kind: "timeout" }> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = clock.setTimer(ms, () => {
+        if (settled) return;
+        settled = true;
+        resolve({ kind: "timeout" });
+      });
+      promise.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clock.clearTimer(timer);
+          resolve({ kind: "ok", value });
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          clock.clearTimer(timer);
+          resolve({ kind: "error", error });
+        },
+      );
+    });
+  }
+
+  /** R7: like `raceOutcome`, but collapsed to "did it settle before the deadline". */
+  function raceSettled(promise: Promise<unknown>, ms: Millis): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = clock.setTimer(ms, () => {
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      });
+      promise.then(
+        () => {
+          if (settled) return;
+          settled = true;
+          clock.clearTimer(timer);
+          resolve(true);
+        },
+        () => {
+          if (settled) return;
+          settled = true;
+          clock.clearTimer(timer);
+          resolve(true);
+        },
+      );
+    });
   }
 
   // ── notification poll (single channel, §5 / I-b) ─────────────────────────
@@ -691,21 +1046,248 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     return entry.record;
   }
 
+  // ── reserve / create (§3.6, R12) ──────────────────────────────────────────
+
+  /** §2.4 R12: the persisting-stage cancellation/failure landing — no disk await. */
+  function killReserveNoProcess(jobId: JobId, entry: Entry, reasonText: string): StartedResult {
+    entry.stage = undefined;
+    const at = clock.now();
+    if (!isTerminalJobStatus(entry.record.status)) {
+      const local = transitionJob(entry.record, "killed", { at, exitCode: null });
+      if (local.ok) {
+        entry.record = putRecord(local.record);
+        settleWaiters(entry);
+      }
+      void store
+        .update(jobId, (current) => {
+          const result = transitionJob(current, "killed", { at, exitCode: null });
+          return result.ok ? result.record : undefined;
+        })
+        .catch((error) => warn(`bash job ${jobId} killed-state persistence error (ignored): ${String(error)}`));
+    }
+    return { ok: false, error: new Error(reasonText) };
+  }
+
+  /** §2.4 R12: the save-timeout/save-error landing — no disk await either. */
+  function failReserveSync(jobId: JobId, entry: Entry, message: string): StartedResult {
+    entry.stage = undefined;
+    const at = clock.now();
+    if (!isTerminalJobStatus(entry.record.status)) {
+      const local = transitionJob(entry.record, "failed", { at, exitCode: null, finalText: message });
+      if (local.ok) {
+        entry.record = putRecord(local.record);
+        settleWaiters(entry);
+      }
+      void store
+        .update(jobId, (current) => {
+          const result = transitionJob(current, "failed", { at, exitCode: null, finalText: message });
+          return result.ok ? result.record : undefined;
+        })
+        .catch((error) => warn(`bash job ${jobId} failed-state persistence error (ignored): ${String(error)}`));
+    }
+    return { ok: false, error: new Error(message) };
+  }
+
+  /**
+   * §2.4 R12 / §3.6: the async body behind `reserve()`. Never rejects — every
+   * exit path resolves a `StartedResult` (the outer `.catch` in `reserve()`
+   * is a pure defensive backstop, this function is written to not need it).
+   */
+  async function runReserveFlow(jobId: JobId, entry: Entry, init: CreateJobInit): Promise<StartedResult> {
+    const saveOutcome = await raceOutcome(store.save(entry.record), STAGE_PERSIST_TIMEOUT_MS);
+    if (isTerminalJobStatus(entry.record.status)) {
+      // `cancelReserve` already finalized this while the save was racing.
+      return { ok: false, error: new Error(`bash job ${jobId} was cancelled before it started`) };
+    }
+    if (saveOutcome.kind === "timeout") {
+      return failReserveSync(
+        jobId,
+        entry,
+        "bash job store did not persist the staged record within 30s; command not started",
+      );
+    }
+    if (saveOutcome.kind === "error") {
+      const message = saveOutcome.error instanceof Error ? saveOutcome.error.message : String(saveOutcome.error);
+      return failReserveSync(jobId, entry, message);
+    }
+    await mkdir(store.dir, { recursive: true, mode: 0o700 }).catch(() => undefined);
+    if (entry.cancelled || (options.admit && !options.admit())) {
+      return killReserveNoProcess(jobId, entry, `bash job ${jobId} was cancelled before it started`);
+    }
+
+    entry.stage = "spawning";
+    let spawned: SpawnedJob;
+    try {
+      spawned = await processPort.spawnJob(init.command, init.cwd, init.env);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      entry.stage = undefined;
+      // Same fire-and-forget persistence discipline as the other failure exits
+      // (R1): the process never existed, so there is nothing time-sensitive
+      // left to protect by awaiting the write.
+      const at = clock.now();
+      if (!isTerminalJobStatus(entry.record.status)) {
+        const local = transitionJob(entry.record, "failed", { at, exitCode: null, finalText: message });
+        if (local.ok) {
+          entry.record = putRecord(local.record);
+          settleWaiters(entry);
+        }
+        void applyTransition(jobId, "failed", { at, exitCode: null, finalText: message }).catch((e) =>
+          warn(`bash job ${jobId} failed-state persistence error (ignored): ${String(e)}`),
+        );
+      }
+      return { ok: false, error: error instanceof Error ? error : new Error(message) };
+    }
+
+    // R12: the pid is claimed into the entry *before* any cancellation
+    // decision, in the same synchronous section — there is no window where a
+    // returned pid belongs to nobody.
+    const logPath = store.logPath(jobId);
+    const handle: LocalHandle = {
+      spawned,
+      stream: createWriteStream(logPath, { flags: "a", mode: 0o600 }),
+      flush: Promise.resolve(),
+      written: 0,
+      truncated: false,
+      closed: false,
+      adopted: false,
+      atLineStart: true,
+      footerWritten: false,
+      owner: myToken,
+      pendingTerminal: undefined,
+    };
+    entry.local = handle;
+    entry.stage = undefined;
+    const cancelledAfterSpawn = Boolean(entry.cancelled);
+    handle.stream.on("error", (error) => {
+      warn(`bash job ${jobId} log write failed: ${String(error)}`);
+    });
+    const onChunk = (chunk: Buffer | string): void => teeChunk(entry, handle, chunk, init.onData);
+    spawned.stdout.on("data", onChunk);
+    spawned.stderr.on("data", onChunk);
+
+    if (cancelledAfterSpawn) {
+      handle.termination = "killed";
+      // Fire-and-forget (R12: "不 await"); the rejection is absorbed here so a
+      // transport hiccup on the kill signal never becomes an unhandled
+      // rejection — the exit event still settles the job's terminal state.
+      void processPort
+        .killJobTree(spawned.pid, { graceMs: 0 })
+        .catch((error) => warn(`bash job ${jobId} cancel-kill failed: ${String(error)}`));
+      void finalizeLocal(jobId, entry, handle).catch((error) => {
+        warn(`bash job ${jobId} finalization failed: ${String(error)}`);
+        return entry.record;
+      });
+      ensurePolling();
+      return { ok: false, error: new Error(`bash job ${jobId} was cancelled before it could be handed off`) };
+    }
+
+    const at = clock.now();
+    const localRunning = transitionJob(entry.record, "running", {
+      at,
+      pid: spawned.pid,
+      pgid: spawned.pgid,
+      ...(spawned.procStartTime !== undefined ? { procStartTime: spawned.procStartTime } : {}),
+    });
+    if (localRunning.ok) entry.record = putRecord(localRunning.record);
+    // Fire-and-forget (R1): the tool call must not wait on this disk write —
+    // it is enqueued on the store's chain and callers reading through the
+    // same store observe it in order regardless.
+    void applyTransition(jobId, "running", {
+      at,
+      pid: spawned.pid,
+      pgid: spawned.pgid,
+      ...(spawned.procStartTime !== undefined ? { procStartTime: spawned.procStartTime } : {}),
+    }).catch((error) => warn(`bash job ${jobId} running-state persistence error (ignored): ${String(error)}`));
+
+    if (init.timeoutMs !== undefined && init.timeoutMs > 0) {
+      const deadline = createJobDeadline(init.timeoutMs, deadlinePolicy, entry.record.spawnedAt ?? at);
+      entry.record = { ...entry.record, deadline };
+      persistDeadline(jobId, deadline);
+      rearm(jobId);
+    }
+
+    const record = entry.record;
+    const exit = finalizeLocal(jobId, entry, handle).catch((error) => {
+      warn(`bash job ${jobId} finalization failed: ${String(error)}`);
+      return entry.record;
+    });
+    ensurePolling();
+    // Fire-and-forget (throttled): keeps a days-long session from accreting
+    // job files, without adding a timer or delaying the spawn path.
+    void maybeSweep();
+
+    return { ok: true, job: { jobId, record, pid: spawned.pid, pgid: spawned.pgid, logPath, exit } };
+  }
+
+  function reserve(init: CreateJobInit): ReservedJob {
+    if (disposed) throw new Error("stale bash job manager");
+    if (options.admit && !options.admit()) throw new Error("run is ending; no new bash jobs");
+    const jobId = newJobId((candidate) => entries.has(candidate));
+    localJobs.add(jobId);
+    const logPath = store.logPath(jobId);
+    const staged = createJobRecord({
+      jobId,
+      command: init.command,
+      cwd: init.cwd,
+      sessionId: options.sessionId,
+      hostPid,
+      logPath,
+      createdAt: clock.now(),
+    });
+    const stagedWithOwner = options.owner !== undefined ? { ...staged, owner: options.owner } : staged;
+    const entry = ensureEntry(stagedWithOwner);
+    entry.cancelled = false;
+    entry.stage = "persisting";
+
+    const started = runReserveFlow(jobId, entry, init).catch((error): StartedResult => {
+      // Defensive-only: `runReserveFlow` is written to never reject; absorb
+      // anyway so `started` truly never rejects (§3.6's one hard guarantee).
+      warn(`bash job ${jobId} reserve flow threw unexpectedly (absorbed): ${String(error)}`);
+      return { ok: false, error: error instanceof Error ? error : new Error(String(error)) };
+    });
+    return { jobId, logPath, started };
+  }
+
+  function cancelReserve(jobId: JobId): void {
+    const entry = entries.get(jobId);
+    if (!entry) return;
+    entry.cancelled = true;
+    if (entry.stage === "persisting") {
+      killReserveNoProcess(jobId, entry, `bash job ${jobId} was cancelled before it started`);
+      return;
+    }
+    if (entry.stage === "spawning") return; // resolved synchronously once spawnJob settles (R12)
+    if (!isTerminalJobStatus(entry.record.status)) {
+      void kill(jobId, {}).catch((error) => warn(`bash job ${jobId} cancelReserve kill failed: ${String(error)}`));
+    }
+  }
+
+  /**
+   * Deliberately independent of `reserve()`/`runReserveFlow` (not a thin
+   * wrapper) — today's `bash-tool.ts` (P4, not yet migrated) calls `create()`
+   * directly and its existing golden/timing tests (`tests/tools/bash-tool.
+   * test.ts`) assert on the exact number of microtask ticks between spawn
+   * and an early abort. `reserve()`'s save-race (R12) inherently adds a tick
+   * versus a bare `await store.save(...)`; keeping `create()`'s body
+   * byte-for-byte the pre-P3 implementation avoids leaking that shift into
+   * a package this one must not touch. P4 is expected to migrate the tool
+   * layer onto `reserve()` directly (per plan §3.6) and retire this path.
+   */
   async function create(init: CreateJobInit): Promise<CreatedJob> {
     const jobId = newJobId((candidate) => entries.has(candidate));
     localJobs.add(jobId);
     const logPath = store.logPath(jobId);
-    const staged = putRecord(
-      createJobRecord({
-        jobId,
-        command: init.command,
-        cwd: init.cwd,
-        sessionId: options.sessionId,
-        hostPid,
-        logPath,
-        createdAt: clock.now(),
-      }),
-    );
+    const baseRecord = createJobRecord({
+      jobId,
+      command: init.command,
+      cwd: init.cwd,
+      sessionId: options.sessionId,
+      hostPid,
+      logPath,
+      createdAt: clock.now(),
+    });
+    const staged = putRecord(options.owner !== undefined ? { ...baseRecord, owner: options.owner } : baseRecord);
     // Persist before spawning: a crash between the two leaves a `staged`
     // record that `recover()` can honestly report as lost.
     await store.save(staged);
@@ -749,7 +1331,14 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       pgid: spawned.pgid,
       ...(spawned.procStartTime !== undefined ? { procStartTime: spawned.procStartTime } : {}),
     });
-    const record = running ?? entry.record;
+    let record = running ?? entry.record;
+    if (init.timeoutMs !== undefined && init.timeoutMs > 0) {
+      const deadline = createJobDeadline(init.timeoutMs, deadlinePolicy, record.spawnedAt ?? clock.now());
+      entry.record = { ...entry.record, deadline };
+      record = entry.record;
+      persistDeadline(jobId, deadline);
+      rearm(jobId);
+    }
 
     const exit = finalizeLocal(jobId, entry, handle).catch((error) => {
       warn(`bash job ${jobId} finalization failed: ${String(error)}`);
@@ -762,6 +1351,106 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     void maybeSweep();
 
     return { jobId, record, pid: spawned.pid, pgid: spawned.pgid, logPath, exit };
+  }
+
+  async function extend(jobId: JobId, extendMs: Millis, reason?: string): Promise<ExtendJobOutcome> {
+    if (disposed) throw new Error("stale bash job manager");
+    const entry = entries.get(jobId);
+    if (!entry) return { ok: false, reason: "not_found" };
+    const now = clock.now();
+    const result = applyJobExtension(entry.record, extendMs, now, reason);
+    if (!result.ok) return { ok: false, reason: result.reason };
+    entry.record = putRecord(result.record);
+    rearm(jobId);
+    try {
+      options.onDeadline?.(entry.record, "extended");
+    } catch (error) {
+      warn(`bash job ${jobId} onDeadline(extended) threw (ignored): ${String(error)}`);
+    }
+    const nextDeadline = entry.record.deadline;
+    const persistPromise =
+      nextDeadline === undefined
+        ? Promise.resolve()
+        : store.upsert(jobId, (current) => {
+            if (!current) return undefined;
+            if (current.deadline !== undefined && current.deadline.seq >= nextDeadline.seq) return undefined;
+            return { ...current, deadline: nextDeadline };
+          });
+    const persisted = await raceSettled(persistPromise, EXTEND_PERSIST_TIMEOUT_MS);
+    return { ok: true, record: entry.record, persistPending: !persisted };
+  }
+
+  function markBackgroundedSync(jobId: JobId): void {
+    const entry = entries.get(jobId);
+    if (!entry || entry.record.backgroundedAt !== undefined) return;
+    const at = clock.now();
+    entry.record = { ...entry.record, backgroundedAt: at };
+    void store
+      .update(jobId, (current) =>
+        current.backgroundedAt === undefined ? { ...current, backgroundedAt: at } : undefined,
+      )
+      .catch((error) => warn(`bash job ${jobId} backgroundedAt persistence error (ignored): ${String(error)}`));
+    ensurePolling();
+  }
+
+  async function relocateLog(jobId: JobId, newLogPath: string): Promise<void> {
+    const entry = entries.get(jobId);
+    if (entry) entry.record = { ...entry.record, logPath: newLogPath };
+    // §2.5 step 3: the crash-handoff job may not have a JSON record on disk
+    // at this (possibly brand-new) directory yet — `store.upsert` only writes
+    // when `mutate` returns non-undefined, and a plain `current ?? undefined`
+    // check would silently drop the write forever. Seed it from the
+    // already-adopted in-memory record (`adoptLocalJobs` runs first, §2.5
+    // step 2) so the first relocation also materializes the record, not just
+    // repoints an existing one.
+    const seed = entry?.record;
+    await store.upsert(jobId, (current) => {
+      if (current) return { ...current, logPath: newLogPath };
+      if (seed) return { ...seed, logPath: newLogPath };
+      return undefined;
+    });
+  }
+
+  async function waitAllExit(
+    jobIds: readonly JobId[],
+    timeoutMs: Millis,
+    opts?: { signal?: AbortSignal | undefined },
+  ): Promise<void> {
+    await Promise.all(jobIds.map((jobId) => waitExit(jobId, timeoutMs, opts)));
+  }
+
+  function waitExit(
+    jobId: JobId,
+    timeoutMs: Millis,
+    opts?: { signal?: AbortSignal | undefined },
+  ): Promise<JobRecord | undefined> {
+    const entry = entries.get(jobId);
+    if (!entry) return Promise.resolve(undefined);
+    if (isTerminalJobStatus(entry.record.status)) return Promise.resolve(entry.record);
+    if (opts?.signal?.aborted) return Promise.resolve(entry.record);
+    return new Promise<JobRecord | undefined>((resolve) => {
+      const onAbort = () => {
+        entry.waiters.delete(waiter);
+        clock.clearTimer(waiter.timer);
+        settle(entry.record);
+      };
+      // Every settlement path goes through settle(), which also drops the
+      // abort listener so it cannot accumulate on the tool-call signal.
+      const settle = (record: JobRecord | undefined) => {
+        opts?.signal?.removeEventListener("abort", onAbort);
+        resolve(record);
+      };
+      const waiter: Waiter = {
+        resolve: settle,
+        timer: clock.setTimer(Math.max(0, timeoutMs), () => {
+          entry.waiters.delete(waiter);
+          // Z1: a wait never fails — the caller gets the current record.
+          settle(entry.record);
+        }),
+      };
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+      entry.waiters.add(waiter);
+    });
   }
 
   // ── resolution (§4.3, format aligned with service/resolve-target.ts) ──────
@@ -935,18 +1624,44 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
 
   // ── recover (§3.6) ───────────────────────────────────────────────────────
 
-  async function recover(): Promise<RecoverSummary> {
+  async function recover(signal?: AbortSignal): Promise<RecoverSummary> {
+    const aborted = (): boolean => disposed || (signal?.aborted ?? false);
+    const emptySummary = (): RecoverSummary => ({
+      adopted: [],
+      exitedUnknown: [],
+      orphaned: [],
+      lostStaged: [],
+      foreign: [],
+      pendingNotices: [],
+      pruned: [],
+      prunedFiles: [],
+      subagentKilled: [],
+      partial: true,
+    });
+    if (aborted()) return emptySummary();
     const pruned = await store.pruneExpired(sweepArgs());
     lastSweepAt = clock.now();
+    if (aborted()) return { ...emptySummary(), pruned: pruned.jobs, prunedFiles: pruned.files };
     const records = await store.loadAll();
     const adopted: JobId[] = [];
     const exitedUnknown: JobId[] = [];
     const orphaned: JobId[] = [];
     const lostStaged: JobId[] = [];
     const foreign: JobId[] = [];
+    // §3.9: crash-recovered jobs owned by a subagent's own bash tool are
+    // actively (identity-checked) killed rather than merely adopted — there
+    // is no subagent left alive to manage them.
+    const subagentKilled: JobId[] = [];
+    let subagentTotal = 0;
+    let subagentOrphanedCount = 0;
+    let partial = false;
 
     for (const record of records) {
-      // Our own in-flight/settled job: `create()` owns it end to end.
+      if (aborted()) {
+        partial = true;
+        break;
+      }
+      // Our own in-flight/settled job: `create()`/`reserve()` owns it end to end.
       if (localJobs.has(record.jobId)) continue;
       if (isTerminalJobStatus(record.status)) {
         putRecord(record);
@@ -955,18 +1670,46 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       putRecord(record);
       if (record.status === "staged") {
         // The spawn outcome died with the previous process; there is no pid to
-        // probe, so `failed` is the only honest label.
+        // probe, so `failed` is the only honest label (§3.9 row 1: same for
+        // both owner kinds).
         const stored = await applyTransition(record.jobId, "failed", {
           at: clock.now(),
           exitCode: null,
           finalText: "pi exited before this bash job's spawn was confirmed; the process state is unknown.",
         });
+        if (aborted()) {
+          partial = true;
+          break;
+        }
         if (stored) lostStaged.push(record.jobId);
         continue;
       }
-      // Another *live* pi process still owns this job: hands off entirely.
+      // Another *live* pi process still owns this job: hands off entirely
+      // (regardless of owner — a safety floor, not a §3.9 concern).
       if (record.hostPid > 0 && record.hostPid !== hostPid && processPort.probePid(record.hostPid)) {
         foreign.push(record.jobId);
+        continue;
+      }
+      if (record.owner === "subagent") {
+        // §3.9: `kill()`'s no-local-handle branch already does the identity
+        // check (unsafe/dead/alive) and produces exactly the four outcomes
+        // this table wants — alive+signalled → killed, alive+refused →
+        // orphaned, dead → exited_unknown, unsafe → orphaned.
+        subagentTotal++;
+        const result = await kill(record.jobId, {}).catch((error) => {
+          warn(`bash job ${record.jobId} crash-recovery kill failed: ${String(error)}`);
+          return undefined;
+        });
+        if (aborted()) {
+          partial = true;
+          break;
+        }
+        const finalStatus = result?.record.status ?? entries.get(record.jobId)?.record.status;
+        if (finalStatus === "killed") subagentKilled.push(record.jobId);
+        else if (finalStatus === "orphaned") {
+          orphaned.push(record.jobId);
+          subagentOrphanedCount++;
+        } else if (finalStatus === "exited_unknown") exitedUnknown.push(record.jobId);
         continue;
       }
       const ownership = processPort.checkPidOwnership(record);
@@ -976,17 +1719,35 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         await applyPatch(record.jobId, (current) =>
           current.backgroundedAt === undefined ? { ...current, backgroundedAt: clock.now() } : undefined,
         );
+        if (aborted()) {
+          partial = true;
+          break;
+        }
         adopted.push(record.jobId);
         continue;
       }
       if (ownership === "dead") {
         const stored = await applyTransition(record.jobId, "exited_unknown", { at: clock.now(), exitCode: null });
+        if (aborted()) {
+          partial = true;
+          break;
+        }
         if (stored) exitedUnknown.push(record.jobId);
         continue;
       }
       // "unsafe" — mark and display only; never kill, never announce (§3.6).
       const stored = await applyTransition(record.jobId, "orphaned", { at: clock.now(), exitCode: null });
+      if (aborted()) {
+        partial = true;
+        break;
+      }
       if (stored) orphaned.push(record.jobId);
+    }
+
+    if (subagentTotal > 0) {
+      warn(
+        `${subagentTotal} subagent bash jobs from a crashed pi were reaped (${subagentKilled.length} killed, ${subagentOrphanedCount} orphaned — not signalled, pid unverifiable)`,
+      );
     }
 
     const pendingNotices = [...entries.values()]
@@ -1003,6 +1764,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       pendingNotices,
       pruned: pruned.jobs,
       prunedFiles: pruned.files,
+      subagentKilled,
+      partial,
     };
   }
 
@@ -1011,6 +1774,14 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     for (const [jobId, entry] of entries) {
       if (!entry.local || entry.local.closed || entry.record.backgroundedAt === undefined) continue;
       entry.local.owner = {};
+      // The next stack's `adoptLocalJobs` rearms a fresh deadline timer
+      // (§2.5 step 2) off the handed-off record; a timer left running here
+      // would otherwise dangle forever (the entry is about to be deleted, so
+      // `dispose()`'s own sweep can no longer reach it to clear it).
+      if (entry.deadlineTimer !== undefined) {
+        clock.clearTimer(entry.deadlineTimer);
+        entry.deadlineTimer = undefined;
+      }
       handoffs.push({ jobId, record: entry.record, handle: entry.local });
       entries.delete(jobId);
       localJobs.delete(jobId);
@@ -1022,9 +1793,13 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const local = entries.get(jobId)?.local;
     return local !== undefined && !local.closed;
   }
-  function adoptLocalJobs(handoffs: LocalJobHandoff[]): void {
+  function adoptLocalJobs(handoffs: LocalJobHandoff[], opts?: { sessionId?: string }): void {
     for (const handoff of handoffs) {
-      const entry = ensureEntry(handoff.record);
+      const record =
+        opts?.sessionId !== undefined && opts.sessionId !== handoff.record.sessionId
+          ? { ...handoff.record, sessionId: opts.sessionId }
+          : handoff.record;
+      const entry = ensureEntry(record);
       entry.local = handoff.handle;
       handoff.handle.owner = myToken;
       handoff.handle.adopted = true;
@@ -1032,6 +1807,9 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       void finalizeLocal(handoff.jobId, entry, handoff.handle).catch((error) => {
         warn(`bash job ${handoff.jobId} finalization failed after handoff: ${String(error)}`);
       });
+      // §2.5 step 2: rearm purely off the handed-off in-memory record — no I/O,
+      // so timer recovery never depends on a disk read completing.
+      if (entry.record.deadline !== undefined) rearm(handoff.jobId);
     }
     ensurePolling();
   }
@@ -1053,9 +1831,15 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     maxBackgroundJobs,
     recover,
     create,
+    reserve,
+    cancelReserve,
     resolve,
     readOutput,
     kill,
+    extend,
+    waitAllExit,
+    markBackgroundedSync,
+    relocateLog,
 
     get(jobId) {
       return entries.get(jobId)?.record;
@@ -1091,35 +1875,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       if (local) local.termination = reason;
     },
 
-    waitExit(jobId, timeoutMs, opts) {
-      const entry = entries.get(jobId);
-      if (!entry) return Promise.resolve(undefined);
-      if (isTerminalJobStatus(entry.record.status)) return Promise.resolve(entry.record);
-      if (opts?.signal?.aborted) return Promise.resolve(entry.record);
-      return new Promise<JobRecord | undefined>((resolve) => {
-        const onAbort = () => {
-          entry.waiters.delete(waiter);
-          clock.clearTimer(waiter.timer);
-          settle(entry.record);
-        };
-        // Every settlement path goes through settle(), which also drops the
-        // abort listener so it cannot accumulate on the tool-call signal.
-        const settle = (record: JobRecord | undefined) => {
-          opts?.signal?.removeEventListener("abort", onAbort);
-          resolve(record);
-        };
-        const waiter: Waiter = {
-          resolve: settle,
-          timer: clock.setTimer(Math.max(0, timeoutMs), () => {
-            entry.waiters.delete(waiter);
-            // Z1: a wait never fails — the caller gets the current record.
-            settle(entry.record);
-          }),
-        };
-        opts?.signal?.addEventListener("abort", onAbort, { once: true });
-        entry.waiters.add(waiter);
-      });
-    },
+    waitExit,
 
     backgroundJobCount,
 
@@ -1146,6 +1902,14 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       if (pollTimer !== undefined) {
         clock.clearTimer(pollTimer);
         pollTimer = undefined;
+      }
+      // R8: no stray deadline timer keeps firing (into a no-op, since
+      // `rearm`/`killForDeadline` both bail on `disposed`) after dispose.
+      for (const entry of entries.values()) {
+        if (entry.deadlineTimer !== undefined) {
+          clock.clearTimer(entry.deadlineTimer);
+          entry.deadlineTimer = undefined;
+        }
       }
       // Waiters must not outlive the manager; hand them the last known record.
       for (const entry of entries.values()) {

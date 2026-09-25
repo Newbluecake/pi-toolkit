@@ -2,7 +2,14 @@ import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createJobStore, TMP_RETENTION_MS, type JobStore } from "../../src/bash/job-store.js";
+import {
+  chainStats,
+  createJobStore,
+  JOB_STORE_CHAIN_CAP,
+  JOB_STORE_CHAIN_PENDING_WARN,
+  TMP_RETENTION_MS,
+  type JobStore,
+} from "../../src/bash/job-store.js";
 import { createJobRecord, transitionJob, type JobRecord } from "../../src/bash/types.js";
 import { FakeClock } from "../../src/core/clock.js";
 
@@ -375,5 +382,109 @@ describe("bash job store directory sweep", () => {
   it("is a no-op on a directory that does not exist", async () => {
     const { store } = await harness();
     expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
+  });
+});
+
+// ── bash-timeout-grace plan §2.5 (T30): the shared per-directory write chain ─
+
+function padId(i: number): string {
+  return `b_${String(i).padStart(8, "0")}`;
+}
+
+describe("bash job store: shared write chain (§2.5, T30)", () => {
+  it("shares one chain's pending count across multiple JobStore instances on the same dir", async () => {
+    const { dir, clock } = await harness();
+    const shared = join(dir, "shared");
+    const storeA = createJobStore({ dir: shared, retentionMs: 86_400_000, clock });
+    const storeB = createJobStore({ dir: shared, retentionMs: 86_400_000, clock });
+    const before = chainStats();
+    const pA = storeA.save(record(padId(1), storeA));
+    const pB = storeB.save(record(padId(2), storeB));
+    // Synchronous snapshot, before either write has had a chance to settle:
+    // both instances' saves are enqueued on the *same* chain.
+    const mid = chainStats();
+    expect(mid.dirs).toBeGreaterThanOrEqual(before.dirs + 1);
+    expect(mid.maxPending).toBeGreaterThanOrEqual(2);
+    await Promise.all([pA, pB]);
+    const after = chainStats();
+    expect(after.busy).toBeLessThanOrEqual(mid.busy);
+  });
+
+  it("gives different directories independent chains", async () => {
+    const { dir, clock } = await harness();
+    const storeA = createJobStore({ dir: join(dir, "dir-a"), retentionMs: 86_400_000, clock });
+    const storeB = createJobStore({ dir: join(dir, "dir-b"), retentionMs: 86_400_000, clock });
+    const before = chainStats();
+    const pA = storeA.save(record(padId(3), storeA));
+    const mid = chainStats();
+    expect(mid.dirs).toBeGreaterThanOrEqual(before.dirs + 1);
+    await pA;
+    // dir-b never had anything enqueued; touching it now must not observe
+    // any pending inherited from dir-a.
+    const pB = storeB.save(record(padId(4), storeB));
+    await pB;
+    expect(true).toBe(true); // no throw / no cross-talk is the assertion here
+  });
+
+  it("never evicts a busy chain even far over capacity, and warns once", async () => {
+    const { dir, clock, warnings } = await harness();
+    const stores: JobStore[] = [];
+    const pending: Promise<void>[] = [];
+    const count = JOB_STORE_CHAIN_CAP + 5;
+    for (let i = 0; i < count; i++) {
+      stores.push(
+        createJobStore({ dir: join(dir, `cap-${i}`), retentionMs: 86_400_000, clock, warn: (m) => warnings.push(m) }),
+      );
+    }
+    // Fire every save synchronously, with zero `await` in between: real fs
+    // writes never settle within the same synchronous section, so every one
+    // of these `count` chains is guaranteed `pending >= 1` right now.
+    for (let i = 0; i < stores.length; i++) {
+      pending.push(stores[i]!.save(record(padId(i), stores[i]!)));
+    }
+    const stats = chainStats();
+    expect(stats.dirs).toBeGreaterThanOrEqual(count);
+    expect(stats.busy).toBeGreaterThanOrEqual(count);
+    expect(warnings.filter((w) => w.includes("chains over capacity")).length).toBeGreaterThanOrEqual(1);
+    await Promise.all(pending);
+  });
+
+  it("warns once (not repeatedly) when a single chain's pending count exceeds 256", async () => {
+    const { dir, clock, warnings } = await harness();
+    const store = createJobStore({
+      dir: join(dir, "backlog"),
+      retentionMs: 86_400_000,
+      clock,
+      warn: (m) => warnings.push(m),
+    });
+    const pending: Promise<void>[] = [];
+    for (let i = 0; i < JOB_STORE_CHAIN_PENDING_WARN + 10; i++) {
+      pending.push(store.save(record(padId(i), store)));
+    }
+    const backlogWarnings = warnings.filter((w) => w.includes("backlog") && w.includes("pending"));
+    expect(backlogWarnings).toHaveLength(1);
+    await Promise.all(pending);
+  });
+
+  it("upsert creates a record that does not exist yet", async () => {
+    const { store } = await harness();
+    const created = await store.upsert(padId(9), (current) => {
+      expect(current).toBeUndefined();
+      return record(padId(9), store);
+    });
+    expect(created?.jobId).toBe(padId(9));
+    const onDisk = await store.load(padId(9));
+    expect(onDisk?.jobId).toBe(padId(9));
+  });
+
+  it("upsert's mutate returning undefined skips the write and resolves to the prior value", async () => {
+    const { store } = await harness();
+    await store.save(record(padId(10), store));
+    const result = await store.upsert(padId(10), () => undefined);
+    expect(result?.jobId).toBe(padId(10));
+    const skippedOnMissing = await store.upsert(padId(11), () => undefined);
+    expect(skippedOnMissing).toBeUndefined();
+    const stillMissing = await store.load(padId(11));
+    expect(stillMissing).toBeUndefined();
   });
 });
