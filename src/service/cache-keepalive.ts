@@ -113,16 +113,18 @@ export interface KeepalivePort {
   provenCacheReadAt(): Millis | undefined;
   /**
    * F1 (adaptive verification-2026-09-25): the longest gap this pinger can bridge
-   * for the current session (`keepaliveGapHorizonMs`), or `undefined` when it
-   * cannot ping at all — disabled, session-disabled breaker, headless run mode,
-   * non-anthropic / denied route, or a
-   * measured prefix (`prefixTokens`, 0 when unproven) below `keepaliveMinPrefixTokens`
-   * — gates #8 would stop every ping of the window that follows (review R1). The
-   * per-window ping budget and a single unproven ping are deliberately NOT checked:
-   * both reset when the next real request opens a new window, which is exactly the
-   * window this horizon describes; repeated failures trip the session breaker.
-   * Consumed by the adaptive predictor, which refuses to pay a 1h entry fee for
-   * gaps this horizon already covers. Identity-free like `provenCacheReadAt`.
+   * after a request whose measured prefix is `prefixTokens` (0 when unproven), or
+   * `undefined` when it cannot ping that window at all — disabled, session-disabled
+   * breaker, headless run mode, non-anthropic / denied route, or a prefix below
+   * `keepaliveMinPrefixTokens` (gate #8, review R1).
+   *
+   * Contract (review rounds 2–3): this is the pinger's capability for the window the
+   * NEXT real request opens. Whether that request itself can be replayed — it must be
+   * streaming (gate #7.5) — is only known to the caller holding the outgoing payload,
+   * so the adaptive caller checks it (R7) and must not ask for a non-streaming one.
+   * The per-window ping budget and a single unproven ping are deliberately NOT
+   * checked: both reset with that new window; repeated failures trip the session
+   * breaker (⇒ `undefined`). Identity-free like `provenCacheReadAt`.
    */
   gapHorizonMs(prefixTokens: number): Millis | undefined;
   setEnabled(on: boolean): void;

@@ -407,7 +407,12 @@ describe("R2 — survival evidence is recorded from covered long-gap hits", () =
       lastGapMs: 52 * MIN,
       max1hSurvivalMs: 20 * MIN,
     });
-    const next = onLedgerObserved(s, ledger({ cacheRead: 118_000, cacheWrite: 4_000 }), NOW, CONFIG);
+    const next = onLedgerObserved(
+      s,
+      ledger({ providerId: "anthropic", cacheRead: 118_000, cacheWrite: 4_000 }),
+      NOW,
+      CONFIG,
+    );
     expect(next.indirect1hConfirms).toBe(1);
     expect(next.max1hSurvivalMs).toBe(52 * MIN);
   });
@@ -615,8 +620,9 @@ describe("R8 — the lineage key hashes full content", () => {
     expect(payloadLineageKey(p)).toBe(payloadLineageKey(JSON.parse(JSON.stringify(p))));
     const cyclic: Record<string, unknown> = { name: "x" };
     cyclic.self = cyclic;
-    expect(() => payloadLineageKey({ system: "s", tools: [cyclic] })).not.toThrow();
-    expect(payloadLineageKey(null)).toBe("");
+    // unserializable content has no reliable identity ⇒ unknown (lineage unchecked), never a lossy stand-in
+    expect(payloadLineageKey({ system: "s", tools: [cyclic] })).toBeUndefined();
+    expect(payloadLineageKey(null)).toBeUndefined();
   });
 });
 
@@ -650,5 +656,54 @@ describe("R9 — survival evidence is bound to the route", () => {
       "cloudrouter-anthropic",
     );
     expect(next.max1hSurvivalMs).toBe(55 * MIN);
+  });
+});
+
+describe("R9 round 3 — an UNKNOWN route is never evidence", () => {
+  it("ledgerRouteKey is undefined without a provider or a model", () => {
+    expect(ledgerRouteKey(ledger({ modelId: "opus" }))).toBeUndefined();
+    expect(ledgerRouteKey(ledger({ providerId: "", modelId: "opus" }))).toBeUndefined();
+    expect(ledgerRouteKey(ledger({ providerId: "a", modelId: "" }))).toBeUndefined();
+  });
+
+  it("review scenario: two providers serving model 'opus' without provider fields never share evidence", () => {
+    // provider A's 1h entry is read after 52 min — but the ledger does not say which provider served it
+    const afterA = onLedgerObserved(
+      state({
+        lastPrefixTokens: 120_000,
+        lastReconciledEntrySeq: 9,
+        oneHourCoverUntil: NOW + 5 * MIN,
+        confirmed1hWrites: 1,
+        lastGapMs: 52 * MIN,
+      }),
+      ledger({ modelId: "opus", cacheRead: 118_000, cacheWrite: 4_000 }),
+      NOW,
+      CONFIG,
+    );
+    expect(afterA.indirect1hConfirms).toBe(1); // the hit still counts as a 1h confirmation…
+    expect(afterA.max1hSurvivalMs).toBe(0); // …but not as survival evidence
+    expect(afterA.survivalRouteKey).toBeUndefined();
+    // provider B, fresh cover, same unknown route shape ⇒ keepalive must NOT stand down
+    const onB = { ...afterA, oneHourCoverUntil: NOW + 58 * MIN, confirmed1hWrites: 2, tokensSinceLast1hWrite: 0 };
+    expect(adaptiveCoversPrefix(onB, CONFIG, NOW, HORIZON)).toBe(false);
+  });
+
+  it("a hit on an unknown route also DROPS earlier known-route evidence (it may be another provider now)", () => {
+    const next = onLedgerObserved(
+      state({
+        lastPrefixTokens: 120_000,
+        lastReconciledEntrySeq: 9,
+        oneHourCoverUntil: NOW + 5 * MIN,
+        confirmed1hWrites: 1,
+        lastGapMs: 30 * MIN,
+        max1hSurvivalMs: 55 * MIN,
+        survivalRouteKey: "anthropic|opus",
+      }),
+      ledger({ modelId: "opus", cacheRead: 118_000, cacheWrite: 4_000 }),
+      NOW,
+      CONFIG,
+    );
+    expect(next.max1hSurvivalMs).toBe(0);
+    expect(next.lastRouteKey).toBeUndefined();
   });
 });

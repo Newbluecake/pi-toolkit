@@ -280,6 +280,7 @@ function run(steps: readonly Step[], opts: RunOpts) {
       entrySeq: entries, // the assistant entry lands at index `entries`
       entriesLength: entries + 1,
       modelId: MODEL,
+      providerId: "cloudrouter-anthropic", // R9: survival evidence needs a known route
     };
     entries += 1;
     if (opts.mode === "adaptive") {

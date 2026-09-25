@@ -109,7 +109,7 @@ export interface AdaptiveDecideRequest {
   /** The one ledger read of this request (also reused for the keepalive capture prefix). */
   ledger: LedgerUsage;
   /** Review R4: `payloadLineageKey` of the outgoing payload. Absent ⇒ lineage unchecked. */
-  lineageKey?: string;
+  lineageKey?: string | undefined;
   /** Review round 2 (R7): `payload.stream === true` of the OUTGOING request. Keepalive can only replay a
    *  streaming request (gate #7.5), so a non-streaming one leaves the gap after it uncovered. Absent ⇒ assumed streaming. */
   streaming?: boolean;

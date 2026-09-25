@@ -567,8 +567,12 @@ function analyzePayload(payload: unknown): PayloadAnalysis {
  * from a miss across lineages (field: wake turns ran without the memory/agent
  * sections, 01a0d2f9 / 01a0d2e4). Same digests `CaptureFingerprint` uses (G7).
  */
-export function payloadLineageKey(payload: unknown): string {
-  if (!isObjectRecord(payload)) return "";
+export function payloadLineageKey(payload: unknown): string | undefined {
+  if (!isObjectRecord(payload)) return undefined;
+  // Byte-level (not canonical) serialization on purpose (review round 3): the
+  // upstream cache matches BYTE prefixes, so two tool lists that differ only in
+  // key order are already different cache lineages — canonicalizing would hide a
+  // real lineage split. pi serializes its own tool list deterministically.
   // Review round 2 (R8): hash the FULL content. The fingerprint digests above
   // (length + first/last 64 chars, tool names only) are fine for G7's drift
   // alarm but collide on exactly the edits that split lineages in the field — a
@@ -576,30 +580,36 @@ export function payloadLineageKey(payload: unknown): string {
   // timestamps) or a tool schema/description change under the same name.
   const systemText = extractText(payload.system);
   const tools = Array.isArray(payload.tools) ? payload.tools : [];
-  let toolsJson = "";
+  let toolsJson: string;
+  let thinkingJson: string;
   try {
     toolsJson = JSON.stringify(tools) ?? "";
+    thinkingJson = payload.thinking !== undefined ? (JSON.stringify(payload.thinking) ?? "") : "";
   } catch {
-    toolsJson = `${tools.length}`; // cyclic/unserializable tools: degrade to the count
+    // Unserializable (cyclic) content has no reliable identity — report "unknown"
+    // (lineage unchecked) rather than a lossy stand-in that could collide.
+    return undefined;
   }
-  const thinking = payload.thinking;
-  let thinkingJson = "";
-  try {
-    thinkingJson = thinking !== undefined ? (JSON.stringify(thinking) ?? "") : "";
-  } catch {
-    thinkingJson = "?";
-  }
-  return `${systemText.length}:${fnv1a32(systemText)}|${tools.length}:${fnv1a32(toolsJson)}|${fnv1a32(thinkingJson)}`;
+  return `${systemText.length}:${hash53(systemText)}|${tools.length}:${hash53(toolsJson)}|${hash53(thinkingJson)}`;
 }
 
-/** 32-bit FNV-1a over UTF-16 code units — a fast, dependency-free content hash (not cryptographic). */
-function fnv1a32(text: string): string {
-  let h = 0x811c9dc5;
+/**
+ * 53-bit content hash (cyrb53) over UTF-16 code units — fast and dependency-free.
+ * Not cryptographic: an accidental collision needs ~10⁸ distinct lineages in one
+ * session (review round 3 asked for more than 32 bits), and a collision's worst
+ * case stays bounded by the cover window, probes and budgets.
+ */
+function hash53(text: string, seed = 0): string {
+  let h1 = 0xdeadbeef ^ seed;
+  let h2 = 0x41c6ce57 ^ seed;
   for (let i = 0; i < text.length; i += 1) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
   }
-  return h.toString(16).padStart(8, "0");
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }
 
 export function inspectPayload(payload: unknown): PayloadShape {

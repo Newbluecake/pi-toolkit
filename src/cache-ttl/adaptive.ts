@@ -464,9 +464,15 @@ function restoredSurvival(
   return { max1hSurvivalMs: ms, survivalRouteKey: route };
 }
 
-/** R9: the upstream route a ledger entry was served by ("" parts when unreported). */
-export function ledgerRouteKey(ledger: LedgerUsage): string {
-  return `${ledger.providerId ?? ""}|${ledger.modelId}`;
+/**
+ * R9: the upstream route a ledger entry was served by, or `undefined` when the
+ * entry does not identify it (no `provider` / no `model`). Review round 3: an
+ * unknown route must never compare equal to another unknown route — two
+ * providers serving the same model id would otherwise share survival evidence.
+ */
+export function ledgerRouteKey(ledger: LedgerUsage): string | undefined {
+  if (ledger.providerId === undefined || ledger.providerId === "" || ledger.modelId === "") return undefined;
+  return `${ledger.providerId}|${ledger.modelId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1060,10 +1066,15 @@ export function onLedgerObserved(
       next = {
         ...next,
         indirect1hConfirms: next.indirect1hConfirms + 1,
-        // R9: evidence from another route is discarded, never merged.
-        max1hSurvivalMs:
-          next.survivalRouteKey === route ? Math.max(next.max1hSurvivalMs, next.lastGapMs) : next.lastGapMs,
-        survivalRouteKey: route,
+        // R9: evidence from another route is discarded, never merged; evidence on an
+        // UNKNOWN route is not evidence at all (it could stand keepalive down anywhere).
+        ...(route === undefined
+          ? { max1hSurvivalMs: 0, survivalRouteKey: undefined }
+          : {
+              max1hSurvivalMs:
+                next.survivalRouteKey === route ? Math.max(next.max1hSurvivalMs, next.lastGapMs) : next.lastGapMs,
+              survivalRouteKey: route,
+            }),
       };
     } else {
       next = { ...next, ineffective1h: next.ineffective1h + 1 };
