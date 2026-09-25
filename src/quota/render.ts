@@ -138,8 +138,13 @@ export function alternativesAdvice(input: AlternativeInput): string {
   return `${heading}：${providers.join("、")}。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；${subscription ? "订阅额度不用会作废；" : ""}不胜任就按路由表另选合适模型，不必硬凑。`;
 }
 
+/**
+ * 禁用句 + 闸门承诺 + 替代候选。闸门承诺必须内嵌在点名的禁用句里：
+ * 放在替代候选之后写「该 provider」时，最近的先行词是候选（如 zai），读起来像
+ * 候选会被拦（2026-09 现场反馈）。
+ */
 function directUseText(provider: string, alternatives: AlternativeInput): string {
-  return `本轮不要把新任务派给 ${provider}。${alternativesAdvice(alternatives)}`;
+  return `本轮不要把新任务派给 ${provider}（${GATE_PROMISE}）。\n${alternativesAdvice(alternatives)}`;
 }
 
 /** 已耗尽的窗口没有「还剩多久耗尽」可言——ETA 子句只给未耗尽窗口。 */
@@ -163,7 +168,7 @@ export function demotionFloorClause(v: ProviderVerdict, now: Millis): string {
   return `仍在降位期（此前额度告急触发降位，${until}），${readings}与降位矛盾，可能是上游返回的残缺数据，已按降位处理`;
 }
 
-const GATE_PROMISE_LINE = "继续派给该 provider 会在 spawn 阶段被快速失败拦下（不会消耗 run）。";
+const GATE_PROMISE = "继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run";
 
 /**
  * L2 提示块（含 ETA / reset）。2026-09 口径修订：订阅额度窗口内不用就作废，L2 不再建议
@@ -220,7 +225,7 @@ export function buildQuotaBlockText(
     if (etaMs !== undefined) head += `，预计 ${etaSpanText(etaMs)}内耗尽`;
     if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
-  return `${head}。\n${directUseText(label, alternatives)}\n${GATE_PROMISE_LINE}`;
+  return `${head}。\n${directUseText(label, alternatives)}`;
 }
 
 /**
@@ -249,7 +254,7 @@ export function buildQuotaRecoveryText(event: QuotaRecoveryEvent, now: Millis): 
           )
           .join("，")
       : `重置后读数仍触发闸门（等级 L${v.level}）`;
-  return `${head}，${stillText}，spawn 闸门仍拦截，请继续避开该 provider 的新任务。`;
+  return `${head}，${stillText}，spawn 闸门仍拦截，请继续避开 ${v.provider} 的新任务。`;
 }
 
 type QuotaSection = { readonly verdict: ProviderVerdict; readonly alternatives: AlternativeInput };
@@ -297,7 +302,7 @@ export function buildQuotaMessage(sections: readonly QuotaSection[], now: Millis
   for (const { section: s, label } of grouped) {
     if (s.verdict.level === 3) parts.push(buildQuotaBlockText(s.verdict, s.alternatives, now, label));
   }
-  return parts.join("\n\n");
+  return parts.join("\n");
 }
 
 function shortName(provider: string): string {

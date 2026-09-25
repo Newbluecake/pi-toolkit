@@ -230,7 +230,7 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
       deps.sendMessage(
         {
           customType: QUOTA_CUSTOM_TYPE,
-          content: parts.join("\n\n"),
+          content: parts.join("\n"),
           display: state.display,
           details: {
             level: maxLevel,

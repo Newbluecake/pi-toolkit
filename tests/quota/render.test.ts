@@ -165,9 +165,9 @@ describe("L3 block", () => {
     expect(buildQuotaBlockText(v, alternatives, NOW)).toBe(
       [
         "[quota 严重] zai-coding-cn 5h 已用 93%，预计 18 分钟内耗尽（窗口 02:11 重置）。",
-        "本轮不要把新任务派给 zai-coding-cn。替代候选（订阅优先）：kimi-coding/kimi-k3、cloudrouter-anthropic/claude-opus-5。",
+        "本轮不要把新任务派给 zai-coding-cn（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。",
+        "替代候选（订阅优先）：kimi-coding/kimi-k3、cloudrouter-anthropic/claude-opus-5。",
         "按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
-        "继续派给该 provider 会在 spawn 阶段被快速失败拦下（不会消耗 run）。",
       ].join("\n"),
     );
   });
@@ -177,10 +177,15 @@ describe("L3 block", () => {
     const text = buildQuotaBlockText(v, [], NOW);
     expect(text).toContain("[quota 严重] zai-coding-cn 7d 已用 100%。");
     expect(text).toContain(
-      "本轮不要把新任务派给 zai-coding-cn。暂无替代候选，按路由表另选合适模型（可检查 pi /model）。",
+      "本轮不要把新任务派给 zai-coding-cn（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。\n暂无替代候选，按路由表另选合适模型（可检查 pi /model）。",
     );
   });
 });
+
+/** 注入消息按 `[quota` 段首切分（段间单换行，段内也有换行，不能按空行切）。 */
+function blocks(text: string): string[] {
+  return text.split(/\n(?=\[quota)/);
+}
 
 describe("buildQuotaMessage", () => {
   it("assembles one merged message: L1 tick first, then L2/L3 blocks", () => {
@@ -195,7 +200,9 @@ describe("buildQuotaMessage", () => {
       ],
       NOW,
     );
-    const parts = text.split("\n\n");
+    // 段间单换行（不留空行）：按 `[quota` 段首切分。
+    expect(text).not.toContain("\n\n");
+    const parts = blocks(text);
     expect(parts).toHaveLength(3);
     expect(parts[0]).toBe("[quota] kimi-coding 5h 55%");
     expect(parts[1]).toContain("[quota 预警]");
@@ -213,7 +220,7 @@ describe("buildQuotaMessage", () => {
       ],
       NOW,
     );
-    expect(warn.split("\n\n")).toHaveLength(1);
+    expect(blocks(warn)).toHaveLength(1);
     expect(warn).toContain("[quota 预警] zai-coding-cn / zai 7d 已用 28%");
 
     // L3：合并后替代链剔除同池成员（同池的另一个名字不是替代）。
@@ -231,8 +238,10 @@ describe("buildQuotaMessage", () => {
       ],
       NOW,
     );
-    expect(block.split("\n\n")).toHaveLength(1);
-    expect(block).toContain("本轮不要把新任务派给 zai-coding-cn / zai。替代候选（订阅优先）：deepseek/x。");
+    expect(blocks(block)).toHaveLength(1);
+    expect(block).toContain(
+      "本轮不要把新任务派给 zai-coding-cn / zai（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。\n替代候选（订阅优先）：deepseek/x。",
+    );
   });
 
   it("keeps different pools (or same data at different levels) as separate blocks", () => {
@@ -245,7 +254,7 @@ describe("buildQuotaMessage", () => {
       ],
       NOW,
     );
-    expect(text.split("\n\n")).toHaveLength(2);
+    expect(blocks(text)).toHaveLength(2);
     expect(text).toContain("[quota 预警] zai-coding-cn 5h");
     expect(text).toContain("[quota 预警] zai 5h");
   });
@@ -445,7 +454,7 @@ describe("recovery block (额度恢复播报)", () => {
     );
     expect(text).toBe(
       "[quota 恢复] kimi-coding 5h 窗口已重置，当前 5h 1% · 7d 100%，" +
-        "7d 仍耗尽（1/18 09:06 重置），spawn 闸门仍拦截，请继续避开该 provider 的新任务。",
+        "7d 仍耗尽（1/18 09:06 重置），spawn 闸门仍拦截，请继续避开 kimi-coding 的新任务。",
     );
     expect(text).not.toContain("已放行");
   });
