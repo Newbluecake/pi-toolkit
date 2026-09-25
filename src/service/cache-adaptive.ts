@@ -36,6 +36,7 @@ import {
   createInitialAdaptiveState,
   decideAdaptiveTtl,
   endArmedEpisode,
+  routeKeyOf,
   invalidateAdaptive as invalidateReducer,
   isPrefix1hCovered,
   noteDecision,
@@ -362,12 +363,25 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       request.lineageKey !== undefined &&
       this.state.coverLineageKey !== undefined &&
       request.lineageKey !== this.state.coverLineageKey;
+    // F-D / F-C: did the keepalive pinger prove a read during this gap (it was armed), and
+    // how long ago was the cache last demonstrably touched? `decide` runs before this
+    // request re-captures the keepalive window, so `provenCacheReadAt` still describes
+    // the gap that just ended.
+    const lastStart = this.state.lastRequestStartedAt;
+    const gapArmed =
+      lastStart !== undefined && lastProvenCacheReadAt !== undefined && lastProvenCacheReadAt > lastStart;
+    const sinceTouchMs = gapArmed ? now - lastProvenCacheReadAt : gapMs;
     this.state = noteDecision(this.state, decision, {
       now,
       gapMs,
       entriesLength: request.ledger.entriesLength,
       strongSignals,
       lineageKey: request.lineageKey,
+      gapArmed,
+      sinceTouchMs,
+      // review #4: the route THIS request goes to (ledgerRouteKey format), so a cover armed
+      // right after a model switch never borrows the previous route's learned 1h lifetime.
+      routeKey: routeKeyOf(model?.provider, model?.id),
     });
     this.audit("decision", {
       upgrade: decision.upgrade,
@@ -384,6 +398,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
         maxSubagentHorizonMs: signals.maxSubagentHorizonMs,
       },
       gapBeforeMs: gapMs,
+      gapArmed,
       // D1 audit trail: how stale the last REAL request was vs. how stale the
       // last PROVEN read was. In the incident these were 809s and 69s.
       provenReadAgeMs: lastProvenCacheReadAt === undefined ? undefined : now - lastProvenCacheReadAt,
@@ -434,6 +449,9 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       driftCoverClears: this.state.driftCoverClears,
       max1hSurvivalMs: this.state.max1hSurvivalMs,
       survivalRouteKey: this.state.survivalRouteKey,
+      learned1hLifeMs: this.state.learned1hLifeMs,
+      learnedLifeRouteKey: this.state.learnedLifeRouteKey,
+      coverCollapses: this.state.coverCollapses,
       breaker: this.state.breaker?.reason,
     });
     if (this.state.breaker !== undefined && before.breaker === undefined) {

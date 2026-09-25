@@ -88,6 +88,22 @@ export const ADAPTIVE_GAP_RING_SIZE = 20;
 /** §4.3: an upgrade claims 1h of coverage from its decision time. */
 export const ADAPTIVE_COVER_MS: Millis = 3_600_000;
 /**
+ * F-A (verification-2026-09-26): once this session has LEARNED an upper bound on
+ * the route's 1h lifetime (a covered renewal whose read collapsed), a new cover
+ * lasts this fraction of it instead of the optimistic ADAPTIVE_COVER_MS. The bound
+ * is `settle time − last 1h write`, which can only over-estimate the lifetime
+ * (a later refresh would have made the entry die even later), so 0.8 keeps a margin
+ * without ever making a wrong bound tighter than the evidence.
+ */
+export const ADAPTIVE_COVER_SAFETY = 0.8;
+/**
+ * F-A floor (review #5): a collapse no more than one 5m TTL after the 1h write point
+ * cannot be a 1h lifetime — the 5m chain written with it would still be alive — so it
+ * is drift, never a lesson. This also keeps one misattributed collapse from locking a
+ * near-zero cover into the session (and, via read-back, across /reload).
+ */
+export const ADAPTIVE_LIFE_MIN_BOUND_MS: Millis = ASSUMED_TTL_MS;
+/**
  * D3: what counts as "the 1h entry survived" when a long-gap request lands
  * inside the cover window, and as "this settlement was a real increment"
  * when a pending upgrade settles.
@@ -238,6 +254,9 @@ export interface AdaptivePending {
    *  counter when the upgrade demonstrably did not land (`cacheWrite1h === 0`).
    *  Absent ⇒ 0 (records created before this field existed). */
   tail5mTokens?: number;
+  /** F-A: lineage / route of the upgrading request — the identity a landed 1h write point carries. */
+  lineageKey?: string;
+  routeKey?: string;
 }
 
 export interface AdaptiveReconcileRecord {
@@ -258,6 +277,29 @@ export interface AdaptiveState {
   lastGapMs: number | undefined;
   /** Ring of the last ADAPTIVE_GAP_RING_SIZE inter-request gaps (S4). */
   gaps: readonly number[];
+  /**
+   * F-D (verification-2026-09-26): the subset of `gaps` during which the keepalive pinger
+   * PROVED a read — the gaps background work kept armed. F1's "keepalive covers every gap
+   * seen" is judged on this ring only: a human idle (lunch) is never pinged and never earns
+   * an entry fee either, so it says nothing about the waits adaptive would pay for, and
+   * used to disable F1 for the rest of the session. Prefix-bound transient (not restored).
+   */
+  armedGaps: readonly number[];
+  /** F-C: the gap before the latest request was bridged by keepalive (a proven read ≤ one 5m TTL
+   *  before it) — a hit after it is the 5m chain's, not evidence about the 1h entry. */
+  lastGapPingBridged: boolean;
+  /** F-A: decision time of the last upgrade whose 1h write was CONFIRMED by the cache_creation split
+   *  (the 1h write point), plus the lineage and route it was written for. Prefix-bound: cleared on invalidate. */
+  last1hWriteAt: Millis | undefined;
+  last1hWriteLineageKey: string | undefined;
+  last1hWriteRouteKey: string | undefined;
+  /** F-A: learned upper bound on the route's 1h lifetime (a covered renewal found the entry gone).
+   *  Route-bound like `max1hSurvivalMs`; restored on /reload. */
+  learned1hLifeMs: number | undefined;
+  /** F-A: route `learned1hLifeMs` was measured on (R9 semantics). */
+  learnedLifeRouteKey: string | undefined;
+  /** F-A: covered renewals whose read collapsed (the cover claimed a 1h entry that was gone). */
+  coverCollapses: number;
   breaker: { reason: AdaptiveBreakerReason; at: Millis } | undefined;
   /** I-A6: measured cacheWrite total attributed to upgrades (m1: includes pre-booked dropped pendings). */
   upgradeWriteTokens: number;
@@ -326,6 +368,14 @@ export function createInitialAdaptiveState(): AdaptiveState {
     lastRequestStartedAt: undefined,
     lastGapMs: undefined,
     gaps: [],
+    armedGaps: [],
+    lastGapPingBridged: false,
+    last1hWriteAt: undefined,
+    last1hWriteLineageKey: undefined,
+    last1hWriteRouteKey: undefined,
+    learned1hLifeMs: undefined,
+    learnedLifeRouteKey: undefined,
+    coverCollapses: 0,
     breaker: undefined,
     upgradeWriteTokens: 0,
     upgradeWriteUsd: 0,
@@ -428,7 +478,9 @@ export function readBackAdaptiveSessionState(branch: readonly unknown[]): Adapti
           feeWriteTokens: asFiniteNumber(data.feeWriteTokens) ?? base.feeWriteTokens,
           feeWriteUsd: asFiniteNumber(data.feeWriteUsd) ?? base.feeWriteUsd,
           driftCoverClears: asFiniteNumber(data.driftCoverClears) ?? base.driftCoverClears,
+          coverCollapses: asFiniteNumber(data.coverCollapses) ?? base.coverCollapses,
           ...restoredSurvival(base, data),
+          ...restoredLearnedLife(base, data),
           breaker:
             base.breaker ??
             (reason !== undefined && at !== undefined
@@ -465,14 +517,61 @@ function restoredSurvival(
 }
 
 /**
+ * F-A: the learned 1h-lifetime bound is restored WITH its route, like survival
+ * evidence (R9) — but it is an UPPER bound, so the same route keeps the SMALLER
+ * value. A different route replaces it; entries without a route restore nothing.
+ */
+function restoredLearnedLife(
+  base: AdaptiveState,
+  data: Record<string, unknown>,
+): Pick<AdaptiveState, "learned1hLifeMs" | "learnedLifeRouteKey"> {
+  const ms = asFiniteNumber(data.learned1hLifeMs);
+  const route =
+    typeof data.learnedLifeRouteKey === "string" && data.learnedLifeRouteKey !== ""
+      ? data.learnedLifeRouteKey
+      : undefined;
+  // Range check (review #5): only values the live path could have learned are restored —
+  // a bound at or below one 5m TTL is never learned (see ADAPTIVE_LIFE_MIN_BOUND_MS).
+  if (ms === undefined || !(ms > ADAPTIVE_LIFE_MIN_BOUND_MS) || ms > ADAPTIVE_COVER_MS || route === undefined) {
+    return { learned1hLifeMs: base.learned1hLifeMs, learnedLifeRouteKey: base.learnedLifeRouteKey };
+  }
+  if (route === base.learnedLifeRouteKey && base.learned1hLifeMs !== undefined)
+    return { learned1hLifeMs: Math.min(base.learned1hLifeMs, ms), learnedLifeRouteKey: route };
+  return { learned1hLifeMs: ms, learnedLifeRouteKey: route };
+}
+
+/**
+ * F-A: how long a cover armed now may claim. The optimistic ADAPTIVE_COVER_MS
+ * until this session has learned the route's 1h entry dies sooner; then
+ * ADAPTIVE_COVER_SAFETY × that bound. Only a bound measured on `routeKey` applies —
+ * the route of the request arming the cover (review #4: a model switch must not carry
+ * route A's bound onto route B's first cover). An unknown route (`undefined`, required
+ * on purpose so it cannot silently default) gets the optimistic 1h (R9).
+ */
+export function adaptiveCoverLengthMs(state: AdaptiveState, routeKey: string | undefined): Millis {
+  if (
+    state.learned1hLifeMs === undefined ||
+    state.learnedLifeRouteKey === undefined ||
+    state.learnedLifeRouteKey !== routeKey
+  )
+    return ADAPTIVE_COVER_MS;
+  return Math.min(ADAPTIVE_COVER_MS, Math.max(0, ADAPTIVE_COVER_SAFETY * state.learned1hLifeMs));
+}
+
+/**
  * R9: the upstream route a ledger entry was served by, or `undefined` when the
  * entry does not identify it (no `provider` / no `model`). Review round 3: an
  * unknown route must never compare equal to another unknown route — two
  * providers serving the same model id would otherwise share survival evidence.
  */
 export function ledgerRouteKey(ledger: LedgerUsage): string | undefined {
-  if (ledger.providerId === undefined || ledger.providerId === "" || ledger.modelId === "") return undefined;
-  return `${ledger.providerId}|${ledger.modelId}`;
+  return routeKeyOf(ledger.providerId, ledger.modelId);
+}
+
+/** The single `provider|model` route-key constructor (ledger side and request side must never drift apart). */
+export function routeKeyOf(provider: string | undefined, model: string | undefined): string | undefined {
+  if (provider === undefined || provider === "" || model === undefined || model === "") return undefined;
+  return `${provider}|${model}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -697,8 +796,10 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     (signals.subagentRuns > 0 &&
       (signals.maxSubagentHorizonMs === undefined || signals.maxSubagentHorizonMs >= config.coldMinHorizonMs));
   // F1: keepalive can bridge every gap this session has shown so far ⇒ a new
-  // 1h prefix would only duplicate what the pings already buy.
-  const keepaliveCovers = keepaliveHorizonMs !== undefined && !state.gaps.some((gap) => gap > keepaliveHorizonMs);
+  // 1h prefix would only duplicate what the pings already buy. F-D: "shown" means
+  // an ARMED gap (the pinger was working during it) — an unpinged human idle says
+  // nothing about the background waits an entry fee would be paid for.
+  const keepaliveCovers = keepaliveHorizonMs !== undefined && !state.armedGaps.some((gap) => gap > keepaliveHorizonMs);
 
   if (warm) {
     // Warm: marginal cost 0.75 × Δ (baseline: same request unrewritten). Wide
@@ -785,6 +886,13 @@ export interface NoteDecisionInput {
   strongSignals: number;
   /** R4: lineage key of this request's payload (same value handed to `decideAdaptiveTtl`). */
   lineageKey?: string | undefined;
+  /** F-D: the keepalive pinger proved a read during this gap (the service derives it from
+   *  `provenCacheReadAt() > lastRequestStartedAt`). Absent ⇒ false. */
+  gapArmed?: boolean | undefined;
+  /** F-C: time since the last PROVEN cache touch (real request or proven ping). Absent ⇒ `gapMs`. */
+  sinceTouchMs?: number | undefined;
+  /** F-A / review #4: `provider|model` of THIS request (`routeKeyOf`). Absent ⇒ route unknown ⇒ the optimistic 1h cover. */
+  routeKey?: string | undefined;
 }
 
 /** Called for every adaptive-mode request, upgrade or not: gap ring, warm-window clock, episode latch, pending probe record. */
@@ -794,9 +902,16 @@ export function noteDecision(
   input: NoteDecisionInput,
 ): AdaptiveState {
   const gaps = input.gapMs === undefined ? state.gaps : [...state.gaps, input.gapMs].slice(-ADAPTIVE_GAP_RING_SIZE);
+  const gapArmed = input.gapMs !== undefined && input.gapArmed === true;
+  const armedGaps =
+    gapArmed && input.gapMs !== undefined
+      ? [...state.armedGaps, input.gapMs].slice(-ADAPTIVE_GAP_RING_SIZE)
+      : state.armedGaps;
   let next: AdaptiveState = {
     ...state,
     gaps,
+    armedGaps,
+    lastGapPingBridged: gapArmed && input.sinceTouchMs !== undefined && input.sinceTouchMs <= ASSUMED_TTL_MS,
     lastGapMs: input.gapMs,
     lastRequestStartedAt: input.now,
     lastDecision: decision,
@@ -819,8 +934,11 @@ export function noteDecision(
       // belongs to THIS upgrade and must not make it look like its own successor.
       covered1h: isPrefix1hCovered(state, input.now, input.lineageKey),
       tail5mTokens: state.tokensSinceLast1hWrite,
+      ...(input.lineageKey !== undefined ? { lineageKey: input.lineageKey } : {}),
+      ...(input.routeKey !== undefined ? { routeKey: input.routeKey } : {}),
     },
-    oneHourCoverUntil: input.now + ADAPTIVE_COVER_MS,
+    // Review round 2: an unknown request route never borrows the last settled route's bound (R9).
+    oneHourCoverUntil: input.now + adaptiveCoverLengthMs(state, input.routeKey),
     coverLineageKey: input.lineageKey,
     lastUpgradeAt: input.now,
     tokensSinceLast1hWrite: 0,
@@ -947,7 +1065,7 @@ export function onLedgerObserved(
     next.lastLineageKey !== undefined &&
     next.lastLineageKey !== next.coverLineageKey;
   const prefixShrunk = prevPrefixTokens > 0 && ledger.cacheRead + ledger.cacheWrite < prevPrefixTokens;
-  const insideWarmWindow = next.lastGapMs === undefined || next.lastGapMs <= ASSUMED_TTL_MS;
+  const insideWarmWindow = next.lastGapMs === undefined || next.lastGapMs <= ASSUMED_TTL_MS || next.lastGapPingBridged;
   const drift =
     !settlesPending && describesLatest && !otherLineage && readCollapsed && (prefixShrunk || insideWarmWindow);
 
@@ -1019,6 +1137,63 @@ export function onLedgerObserved(
               (ledger.cacheWriteUsd === undefined ? 0 : entryFeeFraction(pending) * ledger.cacheWriteUsd),
           }),
     };
+    // F-A (verification-2026-09-26): a COVERED renewal whose read collapsed on the
+    // same, non-shrunk prefix means the 1h entry the cover vouched for was already
+    // gone. Keepalive keeps the 5m chain alive across bridged waits, and a 5m read
+    // of that longer chain never refreshes the 1h entry — so on a route whose 1h
+    // entry dies before ADAPTIVE_COVER_MS the optimistic cover kept green-lighting
+    // "renewals" that each rewrote the whole prefix at 1h (the fee budget was the
+    // only stop, and no breaker ever tripped). Learn the upper bound
+    // `settle − last 1h write` on this route and cap covers by it from now on,
+    // including the one this upgrade just armed.
+    //
+    // Evidence discipline (review #1/#2/#4): the write point must be a CONFIRMED 1h
+    // write (split-reported `cacheWrite1h > 0`, never "unreported ⇒ assume landed"),
+    // this renewal must itself have landed as 1h, and both must be KNOWN to be the
+    // same lineage and route — a collapse that could be payload drift or a route
+    // switch is not a lifetime. A bound within one 5m TTL is drift by construction.
+    const settleRoute = ledgerRouteKey(ledger);
+    const confirmed1h = ledger.cacheWrite1h !== undefined && ledger.cacheWrite1h > 0;
+    const bound = next.last1hWriteAt !== undefined ? pending.at - next.last1hWriteAt : undefined;
+    if (
+      pending.covered1h &&
+      // Review round 2: exact correlation — the assistant entry of THIS request (the normal
+      // case lands exactly at `minEntrySeq`), on the route the request was decided for.
+      ledger.entrySeq === pending.minEntrySeq &&
+      pending.routeKey !== undefined &&
+      pending.routeKey === settleRoute &&
+      readCollapsed &&
+      !prefixShrunk &&
+      confirmed1h &&
+      settleRoute !== undefined &&
+      next.last1hWriteRouteKey === settleRoute &&
+      pending.lineageKey !== undefined &&
+      next.last1hWriteLineageKey === pending.lineageKey &&
+      bound !== undefined &&
+      bound > ADAPTIVE_LIFE_MIN_BOUND_MS
+    ) {
+      const prevBound = next.learnedLifeRouteKey === settleRoute ? next.learned1hLifeMs : undefined;
+      next = {
+        ...next,
+        coverCollapses: next.coverCollapses + 1,
+        learned1hLifeMs: prevBound === undefined ? bound : Math.min(prevBound, bound),
+        learnedLifeRouteKey: settleRoute,
+      };
+      if (next.oneHourCoverUntil !== undefined) {
+        next = {
+          ...next,
+          oneHourCoverUntil: Math.min(next.oneHourCoverUntil, pending.at + adaptiveCoverLengthMs(next, settleRoute)),
+        };
+      }
+    }
+    if (confirmed1h) {
+      next = {
+        ...next,
+        last1hWriteAt: pending.at,
+        last1hWriteLineageKey: pending.lineageKey,
+        last1hWriteRouteKey: settleRoute,
+      };
+    }
     // The warm probes test §0.4 corollary 1 — "a warm 1h upgrade bills only the
     // increment" — which is a claim about 1h→1h. On a transition the full-prefix
     // rewrite IS the expected shape (field evidence, plan.md §16.3), so judging it
@@ -1053,7 +1228,11 @@ export function onLedgerObserved(
     next.oneHourCoverUntil !== undefined &&
     now < next.oneHourCoverUntil &&
     next.lastGapMs !== undefined &&
-    next.lastGapMs > ASSUMED_TTL_MS
+    next.lastGapMs > ASSUMED_TTL_MS &&
+    // F-C: keepalive kept the 5m chain alive across this gap ⇒ a hit is the 5m
+    // chain's and a miss is not the 1h entry's fault — neither is a verdict, and
+    // a hit must not become survival evidence.
+    !next.lastGapPingBridged
   ) {
     // D3: `cacheRead > 0` was far too weak a success criterion — a request that
     // read only the tiny cross-session-shared system/tools block (4.5% of the
@@ -1101,6 +1280,10 @@ export function invalidateAdaptive(
     ...state,
     lastInvalidateSeq: Math.max(state.lastInvalidateSeq, entriesLength - 1),
     oneHourCoverUntil: undefined,
+    // F-A: the 1h write point belongs to the old prefix — a later collapse against it is drift.
+    last1hWriteAt: undefined,
+    last1hWriteLineageKey: undefined,
+    last1hWriteRouteKey: undefined,
   };
   const pending = next.pending;
   if (pending !== undefined) {
@@ -1158,6 +1341,10 @@ export interface AdaptiveSnapshot {
   driftCoverClears: number;
   /** R2: longest demonstrated 1h survival (gap before a covered hit) this session. */
   max1hSurvivalMs: number;
+  /** F-A: learned upper bound on the route's 1h lifetime (undefined until a covered renewal collapses). */
+  learned1hLifeMs: number | undefined;
+  /** F-A: covered renewals that found their 1h entry gone. */
+  coverCollapses: number;
   droppedPending: number;
   breaker: { reason: AdaptiveBreakerReason; at: Millis } | undefined;
   lastReconcile: AdaptiveReconcileRecord | undefined;
@@ -1196,6 +1383,8 @@ export function buildAdaptiveSnapshot(state: AdaptiveState, config: AdaptiveConf
     ineffective1h: state.ineffective1h,
     driftCoverClears: state.driftCoverClears,
     max1hSurvivalMs: state.max1hSurvivalMs,
+    learned1hLifeMs: state.learned1hLifeMs,
+    coverCollapses: state.coverCollapses,
     droppedPending: state.droppedPending,
     breaker: state.breaker,
     lastReconcile: state.lastReconcile,

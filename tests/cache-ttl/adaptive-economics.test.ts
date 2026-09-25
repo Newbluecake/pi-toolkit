@@ -90,10 +90,14 @@ interface Usage {
 
 class Upstream {
   entries: CacheEntry[] = [];
-  constructor(readonly oneHourLife: OneHourLife) {}
+  /** `readMult` = cache-read price × base (official 0.1; cloudrouter opus-5-5 bills 0.05 — F7). */
+  constructor(
+    readonly oneHourLife: OneHourLife,
+    readonly readMult = 0.1,
+  ) {}
 
   clone(): Upstream {
-    const u = new Upstream(this.oneHourLife);
+    const u = new Upstream(this.oneHourLife, this.readMult);
     u.entries = this.entries.map((e) => ({ ...e }));
     return u;
   }
@@ -113,7 +117,7 @@ class Upstream {
     const lifeMs = honored1h ? (this.oneHourLife as number) : 5 * MIN;
     if (write > 0) this.entries.push({ lineage, prefix, ns: honored1h ? "1h" : "5m", lifeMs, expiresAt: now + lifeMs });
     const cacheWriteUsd = ((write - write1h) * 1.25 + write1h * 2.0) * R;
-    return { read, write, write1h, cacheWriteUsd, costUsd: read * 0.1 * R + cacheWriteUsd };
+    return { read, write, write1h, cacheWriteUsd, costUsd: read * this.readMult * R + cacheWriteUsd };
   }
 }
 
@@ -143,15 +147,18 @@ interface RunResult {
   longGapMisses: number;
   pings: number;
   pingUsd: number;
+  coverCollapses: number;
   state: AdaptiveState;
   reasons: Record<string, number>;
 }
 
 interface RunOpts {
-  mode: "adaptive" | "auto";
+  /** `on` = every request ttl:"1h" (cacheTtl.mode=on); keepalive then never pings (gate #7). */
+  mode: "adaptive" | "auto" | "on";
   life: OneHourLife;
   startPrefix: number;
   keepalive?: boolean;
+  readMult?: number;
 }
 
 const PING_INTERVAL_MS = 240_000;
@@ -159,7 +166,7 @@ const PING_MAX = 11;
 const KEEPALIVE_HORIZON_MS = keepaliveGapHorizonMs({ intervalMs: PING_INTERVAL_MS, maxPings: PING_MAX });
 
 function run(steps: readonly Step[], opts: RunOpts) {
-  const up = new Upstream(opts.life);
+  const up = new Upstream(opts.life, opts.readMult);
   let state = createInitialAdaptiveState();
   let now = 1_800_000_000_000;
   let prefix = opts.startPrefix;
@@ -177,6 +184,12 @@ function run(steps: readonly Step[], opts: RunOpts) {
     modelId: "",
   };
   let lastPrefix = 0;
+  // Keepalive gate #8 realism: a window's capture carries the ledger of the request BEFORE the
+  // captured one, so the gap after a session's first request is never pinged ("prefix-unproven").
+  // `ledgerPrefix` is the latest settled assistant usage — it survives compaction, like the real
+  // `readLatestAssistantUsage` does; `capturePrefix` is what the pinger sees for the current window.
+  let ledgerPrefix = 0;
+  let capturePrefix = 0;
   let lastTtl: "5m" | "1h" = "5m";
   let lastProvenAt: number | undefined;
   const res: RunResult = {
@@ -188,6 +201,7 @@ function run(steps: readonly Step[], opts: RunOpts) {
     longGapMisses: 0,
     pings: 0,
     pingUsd: 0,
+    coverCollapses: 0,
     state,
     reasons: {},
   };
@@ -197,7 +211,7 @@ function run(steps: readonly Step[], opts: RunOpts) {
     now += step.gapMs;
     const yieldToAdaptive =
       opts.mode === "adaptive" && adaptiveCoversPrefix(state, CONFIG, prevAt, KEEPALIVE_HORIZON_MS);
-    if (opts.keepalive && step.pingArmed && lastTtl === "5m" && lastPrefix >= 20_000 && !yieldToAdaptive) {
+    if (opts.keepalive && step.pingArmed && lastTtl === "5m" && capturePrefix >= 20_000 && !yieldToAdaptive) {
       for (let i = 1; i <= PING_MAX && prevAt + i * PING_INTERVAL_MS < now; i++) {
         const at = prevAt + i * PING_INTERVAL_MS;
         const ping = up.send(at, lineage, lastPrefix, "5m");
@@ -205,7 +219,11 @@ function run(steps: readonly Step[], opts: RunOpts) {
         res.pingUsd += ping.costUsd;
         res.costUsd += ping.costUsd;
         if (ping.write === 0) lastProvenAt = at;
-        else break; // an unproven ping ends the window (cache was already gone)
+        else {
+          // an unproven ping ends the window and clears its capture ⇒ provenCacheReadAt() = undefined
+          lastProvenAt = undefined;
+          break;
+        }
       }
     }
     if (step.compactTo !== undefined) {
@@ -214,6 +232,7 @@ function run(steps: readonly Step[], opts: RunOpts) {
       lastPrefix = 0;
       entries += 1; // compaction entry
       state = invalidateAdaptive(state, "compact", entries);
+      lastProvenAt = undefined; // the keepalive window is invalidated on the same event (capture cleared)
     }
     prefix += step.delta;
     entries += 1; // user / toolResult entry
@@ -226,9 +245,14 @@ function run(steps: readonly Step[], opts: RunOpts) {
       ...step.signals,
     };
 
-    let ttl: "5m" | "1h" = "5m";
+    let ttl: "5m" | "1h" = opts.mode === "on" ? "1h" : "5m";
     if (opts.mode === "adaptive") {
       const gapMs = state.lastRequestStartedAt !== undefined ? now - state.lastRequestStartedAt : undefined;
+      // Same derivation as CacheAdaptiveService.decide (F-D / F-C).
+      const lastStart = state.lastRequestStartedAt;
+      const provenAt = lastProvenAt;
+      const gapArmed = lastStart !== undefined && provenAt !== undefined && provenAt > lastStart;
+      const sinceTouchMs = gapArmed && provenAt !== undefined ? now - provenAt : gapMs;
       const decision = decideAdaptiveTtl({
         now,
         mode: "adaptive",
@@ -242,8 +266,9 @@ function run(steps: readonly Step[], opts: RunOpts) {
         config: CONFIG,
         state,
         lastProvenCacheReadAt: lastProvenAt,
+        lineageKey: `L${lineage}`,
         // R1: the pinger only covers the next gap when the measured prefix clears its min-prefix gate.
-        keepaliveHorizonMs: opts.keepalive && lastPrefix >= 20_000 ? KEEPALIVE_HORIZON_MS : undefined,
+        keepaliveHorizonMs: opts.keepalive && ledgerPrefix >= 20_000 ? KEEPALIVE_HORIZON_MS : undefined,
       });
       const key = decision.upgrade ? `UP:${decision.class}` : `no:${decision.reason}`;
       res.reasons[key] = (res.reasons[key] ?? 0) + 1;
@@ -252,6 +277,10 @@ function run(steps: readonly Step[], opts: RunOpts) {
         gapMs,
         entriesLength: entries,
         strongSignals: decision.signals.filter((s) => s !== "history-gap").length,
+        lineageKey: `L${lineage}`,
+        routeKey: `cloudrouter-anthropic|${MODEL}`,
+        gapArmed,
+        sinceTouchMs,
       });
       if (decision.upgrade) {
         ttl = "1h";
@@ -270,6 +299,8 @@ function run(steps: readonly Step[], opts: RunOpts) {
       else res.longGapMisses += 1;
     }
     lastPrefix = usage.read + usage.write;
+    capturePrefix = ledgerPrefix;
+    ledgerPrefix = lastPrefix;
     ledger = {
       source: "usage",
       cacheRead: usage.read,
@@ -290,6 +321,7 @@ function run(steps: readonly Step[], opts: RunOpts) {
     }
   }
   res.state = state;
+  res.coverCollapses = state.coverCollapses;
   res.bookedUsd = state.upgradeWriteUsd + state.feeWriteUsd;
   return res;
 }
@@ -505,4 +537,196 @@ describe("adaptive economics — G5: value on top of keepalive (the production d
     expect(r.autoKa.longGapMisses).toBe(0);
     expect(r.adaptiveKa.costUsd).toBeLessThanOrEqual(r.autoKa.costUsd + 1e-9);
   });
+});
+
+// ─── strategy matrix: every mode × workload × 1h survival × price profile ─────
+//
+// Answers "how much does the production default save versus always-5m and
+// always-1h?" across workloads, instead of per-goal pins. Rows are workloads,
+// columns the five strategies a user can actually configure. Printed with
+// ADAPTIVE_ECON_REPORT=1; the assertions only pin the bounded-loss invariant
+// (adaptive on top of keepalive never costs more than its budgets over
+// keepalive alone) so the table can evolve without brittle numbers.
+
+/** Human think-time between turns, no background work: no strong signal, keepalive unarmed. */
+function humanGaps(turns: number, gapsMin: readonly number[]): Step[] {
+  const steps: Step[] = [];
+  for (let t = 0; t < turns; t++) steps.push(...turn(4, t === 0 ? 0 : gapsMin[t % gapsMin.length]! * MIN, 3_000));
+  return steps;
+}
+
+/** A long background bash job (build/test) the user waits on, `cycles` times. */
+function bashWaits(cycles: number, wait: number): Step[] {
+  const steps: Step[] = [];
+  for (let c = 0; c < cycles; c++) {
+    steps.push(...turn(2, c === 0 ? 0 : 60_000, 3_000, { backgroundBashJobs: 1 }));
+    const wake = turn(3, wait, 4_000);
+    wake[0]!.pingArmed = true;
+    steps.push(...wake);
+  }
+  return steps;
+}
+
+function denseTurns(turns: number, signals?: Partial<AdaptiveSignals>): Step[] {
+  const steps: Step[] = [];
+  for (let t = 0; t < turns; t++) steps.push(...turn(5, t === 0 ? 0 : 90_000, 3_000, signals));
+  return steps;
+}
+
+function compactChurn(): Step[] {
+  const steps: Step[] = [];
+  for (let c = 0; c < 15; c++) {
+    steps.push({ gapMs: 60_000, delta: 0, compactTo: 150_000, signals: { backgroundBashJobs: 1 } });
+    steps.push(...turn(4, 20_000, 3_000, { backgroundBashJobs: 1 }));
+  }
+  return steps;
+}
+
+/** A plausible working session stitched from the pieces above. */
+function mixedDay(): Step[] {
+  const a = denseTurns(5);
+  const b = dispatchCycles(2, 20 * MIN);
+  b[0]!.gapMs = 60_000;
+  const c = humanGaps(4, [3, 8, 15, 6]);
+  c[0]!.gapMs = 4 * MIN;
+  const d = dispatchCycles(2, 50 * MIN);
+  d[0]!.gapMs = 60_000;
+  const e: Step[] = [{ gapMs: 60_000, delta: 0, compactTo: 60_000 }, ...denseTurns(3, SUBAGENT_30M)];
+  const f = dispatchCycles(1, 30 * MIN);
+  f[0]!.gapMs = 60_000;
+  return [...a, ...b, ...c, ...d, ...e, ...f];
+}
+
+/** A session opens with a plain user turn — no background work can exist before the first request. */
+function opened(build: () => Step[]): () => Step[] {
+  return () => {
+    const steps = build();
+    return [{ gapMs: 0, delta: 0 }, ...steps.map((st, i) => (i === 0 ? { ...st, gapMs: 30_000 } : st))];
+  };
+}
+
+const MATRIX_WORKLOADS: ReadonlyArray<readonly [string, () => Step[]]> = [
+  ["dense, no signals", () => denseTurns(10)],
+  ["dense + live subagent", () => denseTurns(12, SUBAGENT_30M)],
+  ["human gaps 3-15m", () => humanGaps(8, [3, 8, 15, 6])],
+  ["dispatch×4 wait 8m", () => dispatchCycles(4, 8 * MIN)],
+  ["dispatch×4 wait 20m", () => dispatchCycles(4, 20 * MIN)],
+  ["dispatch×4 wait 40m", () => dispatchCycles(4, 40 * MIN)],
+  ["dispatch×4 wait 58m", () => dispatchCycles(4, 58 * MIN)],
+  ["bash build×3 wait 25m", () => bashWaits(3, 25 * MIN)],
+  ["compact churn + bash", compactChurn],
+  ["mixed day", mixedDay],
+  ["long break, bash×4 25m", longBreakThenBash],
+  ["dispatch 58m, bash×4 25m", longWaitThenBash],
+];
+
+/** An ARMED >horizon wait (legit entry fee under F1/F-D), then ping-bridged 25-min builds (F-A's remaining path). */
+function longWaitThenBash(): Step[] {
+  const back = bashWaits(4, 25 * MIN);
+  back[0]!.gapMs = 60_000;
+  return [...dispatchCycles(1, 58 * MIN), ...back];
+}
+
+/** A >horizon idle (lunch) teaches the gap ring, then ping-bridged 25-min builds follow (F-A's legit-cover path). */
+function longBreakThenBash(): Step[] {
+  const steps = [...denseTurns(3)];
+  const back = bashWaits(4, 25 * MIN);
+  back[0]!.gapMs = 55 * MIN;
+  return [...steps, ...back];
+}
+
+const STRATEGIES = [
+  ["5m", { mode: "auto" }],
+  ["5m+ka", { mode: "auto", keepalive: true }],
+  ["1h", { mode: "on" }],
+  ["adaptive", { mode: "adaptive" }],
+  ["adaptive+ka", { mode: "adaptive", keepalive: true }],
+] as const satisfies ReadonlyArray<readonly [string, Pick<RunOpts, "mode" | "keepalive">]>;
+
+function runMatrix(life: OneHourLife, readMult: number) {
+  const rows = MATRIX_WORKLOADS.map(([name, build]) => {
+    const steps = opened(build)();
+    const cells = STRATEGIES.map(([label, s]) => {
+      const r = run(steps, { ...s, life, startPrefix: 100_000, readMult });
+      return { label, r };
+    });
+    return { name, cells, maxPrefix: Math.max(...cells.map((c) => c.r.state.lastPrefixTokens ?? 0), 200_000) };
+  });
+  if (process.env.ADAPTIVE_ECON_REPORT === "1") {
+    const pct = (x: number, base: number) => `${x <= base ? "-" : "+"}${Math.abs((1 - x / base) * 100).toFixed(0)}%`;
+    const lines = [
+      `[matrix] 1h life=${life === "ignored" ? "ignored" : `${(life as number) / MIN}m`}  read=${readMult}×  (cost; % vs 5m)`,
+      `  ${"workload".padEnd(24)}${STRATEGIES.map(([l]) => l.padStart(17)).join("")}   best`,
+    ];
+    const totals = STRATEGIES.map(() => 0);
+    for (const row of rows) {
+      const base = row.cells[0]!.r.costUsd;
+      const best = row.cells.reduce((a, b) => (b.r.costUsd < a.r.costUsd - 1e-9 ? b : a));
+      row.cells.forEach((c, i) => (totals[i]! += c.r.costUsd));
+      lines.push(
+        `  ${row.name.padEnd(24)}${row.cells
+          .map((c, i) => `$${c.r.costUsd.toFixed(2)}${i === 0 ? "" : ` ${pct(c.r.costUsd, base)}`}`.padStart(17))
+          .join("")}   ${best.label}`,
+      );
+    }
+    lines.push(
+      `  ${"Σ (equal weight)".padEnd(24)}${totals
+        .map((t, i) => `$${t.toFixed(2)}${i === 0 ? "" : ` ${pct(t, totals[0]!)}`}`.padStart(17))
+        .join("")}`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(lines.join("\n"));
+  }
+  return rows;
+}
+
+describe("adaptive economics — strategy matrix (5m / 5m+ka / 1h / adaptive / adaptive+ka)", () => {
+  const LIVES: readonly OneHourLife[] = [60 * MIN, 25 * MIN, 10 * MIN];
+  for (const readMult of [0.1, 0.05]) {
+    for (const life of LIVES) {
+      it(`bounded loss vs keepalive alone — 1h life ${(life as number) / MIN}m, read ${readMult}×`, () => {
+        for (const row of runMatrix(life, readMult)) {
+          const autoKa = row.cells[1]!.r.costUsd;
+          const adaptiveKa = row.cells[4]!.r.costUsd;
+          const overshoot = row.maxPrefix * 2.0 * R;
+          expect(adaptiveKa - autoKa, row.name).toBeLessThanOrEqual(
+            CONFIG.feeBudgetUsd + CONFIG.writeBudgetUsd + 2 * overshoot,
+          );
+        }
+      });
+    }
+  }
+});
+
+// ─── regressions from the 2026-09-26 strategy matrix (F-A / F-C / F-D) ─────────
+
+describe("adaptive economics — 2026-09-26 fixes hold across the matrix", () => {
+  const cell = (life: OneHourLife, readMult: number, workload: string, label: string) => {
+    const [, build] = MATRIX_WORKLOADS.find(([n]) => n === workload)!;
+    const [, s] = STRATEGIES.find(([l]) => l === label)!;
+    return run(opened(build)(), { ...s, life, startPrefix: 100_000, readMult });
+  };
+
+  for (const readMult of [0.1, 0.05]) {
+    for (const life of [60 * MIN, 25 * MIN]) {
+      const tag = `1h ${life / MIN}m, read ${readMult}×`;
+      it(`F-D: an unpinged human idle no longer disables F1 — adaptive+ka = keepalive alone (${tag})`, () => {
+        const ka = cell(life, readMult, "long break, bash×4 25m", "5m+ka");
+        const aka = cell(life, readMult, "long break, bash×4 25m", "adaptive+ka");
+        expect(aka.upgrades).toBe(0); // was: entry fee + renewals on top of the pings
+        expect(aka.costUsd).toBeCloseTo(ka.costUsd, 10);
+      });
+    }
+    it(`F-A: after a legit fee, a dead 1h entry is found once, not per renewal (1h 25m, read ${readMult}×)`, () => {
+      const aka = cell(25 * MIN, readMult, "dispatch 58m, bash×4 25m", "adaptive+ka");
+      expect(aka.state.coverCollapses).toBe(1); // was 3 (every renewal rewrote the whole prefix)
+      expect(aka.state.learned1hLifeMs).toBeDefined();
+      expect(aka.state.learned1hLifeMs!).toBeLessThan(60 * MIN);
+    });
+    it(`F-A control: when the 1h entry really lives 60 min nothing is learned (read ${readMult}×)`, () => {
+      const aka = cell(60 * MIN, readMult, "dispatch 58m, bash×4 25m", "adaptive+ka");
+      expect(aka.state.coverCollapses).toBe(0);
+      expect(aka.state.learned1hLifeMs).toBeUndefined();
+    });
+  }
 });

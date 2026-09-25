@@ -126,7 +126,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   **保活与自适应按空档择一**（plan §19，验证 `verification-2026-09-25.md`）：保活能桥接的空档
   （`keepaliveGapHorizonMs`，默认 49min）内 adaptive 不开新前缀（`keepalive-covers`），被确认的 1h
   覆盖期间保活不 ping（tick 门 `adaptive-1h`）；前缀漂移（缩短 / warm 窗口内整前缀失效）只清 cover、
-  不判 `1h-ineffective`；入场费只认强信号时域。经济学仿真：`tests/cache-ttl/adaptive-economics.test.ts`。
+  不判 `1h-ineffective`；入场费只认强信号时域。**§20（2026-09-26）**：F1 的「见过超出保活时域的空档」只认
+  武装空档（`armedGaps`，保活证明过读中的那些——人为午休不算）；已覆盖续期读崩塌 ⇒ 学到路由 1h 寿命上界
+  `learned1hLifeMs`，cover 封顶为其 0.8 倍；被 ping 撑住的空档不做 1h 判决。经济学仿真（含 5 策略 × 12 负载的
+  策略矩阵）：`tests/cache-ttl/adaptive-economics.test.ts`。
   Design: `docs/dev/cache-ttl-adaptive/plan.md`.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via

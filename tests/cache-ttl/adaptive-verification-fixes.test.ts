@@ -142,11 +142,11 @@ describe("F1 — adaptive does not buy what keepalive already covers", () => {
     expect(d).toMatchObject({ upgrade: true, class: "warm" });
   });
 
-  it("a session that has SHOWN a gap beyond the horizon earns the entry fee", () => {
+  it("a session that has SHOWN an armed gap beyond the horizon earns the entry fee", () => {
     const d = decide({
       signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * MIN }),
       keepaliveHorizonMs: HORIZON,
-      state: state({ lastRequestStartedAt: NOW - 20_000, gaps: [20 * MIN, 55 * MIN] }),
+      state: state({ lastRequestStartedAt: NOW - 20_000, gaps: [20 * MIN, 55 * MIN], armedGaps: [20 * MIN, 55 * MIN] }),
     });
     expect(d).toMatchObject({ upgrade: true, class: "warm" });
   });

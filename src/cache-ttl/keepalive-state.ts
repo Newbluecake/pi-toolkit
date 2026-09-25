@@ -1174,8 +1174,12 @@ export function renderAdaptiveReportLines(snapshot: AdaptiveSnapshot): string[] 
     snapshot.coverRemainingMs !== undefined
       ? `cover ends in ${Math.ceil(snapshot.coverRemainingMs / 60_000)}m`
       : "no cover";
+  const learned =
+    snapshot.learned1hLifeMs !== undefined
+      ? ` · learned life ≤${Math.floor(snapshot.learned1hLifeMs / 60_000)}m (collapses ${snapshot.coverCollapses})`
+      : "";
   lines.push(
-    `adaptive 1h: confirmed ${snapshot.confirmed1hWrites} · unconfirmed ${snapshot.unconfirmed1hWrites} · indirect ${snapshot.indirect1hConfirms} · ineffective ${snapshot.ineffective1h} · ${cover}`,
+    `adaptive 1h: confirmed ${snapshot.confirmed1hWrites} · unconfirmed ${snapshot.unconfirmed1hWrites} · indirect ${snapshot.indirect1hConfirms} · ineffective ${snapshot.ineffective1h} · ${cover}${learned}`,
   );
   if (snapshot.lastReconcile !== undefined) {
     const r = snapshot.lastReconcile;

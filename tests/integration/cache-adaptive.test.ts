@@ -357,7 +357,7 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
     }
   });
 
-  it("F1: with keepalive on, no new 1h prefix until a gap beyond the ping horizon; keepalive keeps pinging until 1h survival is proven", async () => {
+  it("F1/F-D: with keepalive on, no new 1h prefix until an ARMED gap beyond the ping horizon; keepalive keeps pinging until 1h survival is proven", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(1_800_000_000_000);
     const { pi, emit } = fakePi();
@@ -390,9 +390,21 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
       expect(ttlOf(covered)).toBeUndefined();
       expect(stack.adaptive?.snapshot().lastDecision?.reason).toBe("keepalive-covers");
 
-      // A 50-min gap: longer than any ping window can bridge. The request that
-      // ENDS it is still refused (the ring learns the gap at this decision)...
+      // F-D control: a 50-min gap the pinger never worked through (no proven read —
+      // a human idle) is not evidence about background waits: still refused.
       vi.setSystemTime(Date.now() + 50 * 60_000);
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      vi.setSystemTime(Date.now() + 20_000);
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(stack.adaptive?.snapshot().lastDecision?.reason).toBe("keepalive-covers");
+
+      // A 50-min ARMED gap: the pinger proved reads through it (stubbed here — no real
+      // timers) but no ping window can bridge it. The request that ENDS it is still
+      // refused (the armed ring learns the gap at this decision)...
+      const gapStart = Date.now();
+      const keepalive = stack.keepalive as { provenCacheReadAt: () => number | undefined };
+      keepalive.provenCacheReadAt = () => gapStart + 44 * 60_000; // last proven ping of the window
+      vi.setSystemTime(gapStart + 50 * 60_000);
       const [afterGap] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
       expect(ttlOf(afterGap)).toBeUndefined();
       // ...and the next one opens the prefix: the session has earned the fee.
