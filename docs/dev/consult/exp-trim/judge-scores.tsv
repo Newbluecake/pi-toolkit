@@ -1,0 +1,37 @@
+run	blindId	judge	D1	D2	D3	D4	D5	D6	D7	|	Q1	Q2	Q3	Q4	Q5	fabrications/urgent
+ec1-FULL-r1	A21E7	sonnet	正确	正确	正确	正确	正确	
+ec1-FULL-r1	A21E7	glm	正确	正确	正确	正确	正确	
+ec1-FULL-r2	A69E1	sonnet	正确	正确	正确	正确	正确	
+ec1-FULL-r2	A69E1	glm	正确	正确	正确	正确	正确	
+ec1-FULL-r3	A0B26	sonnet	正确	正确	正确	正确	正确	
+ec1-FULL-r3	A0B26	glm	正确	正确	正确	正确	正确	
+ec1-TRIM-r1	A1FE5	sonnet	正确	正确	正确	正确	正确	
+ec1-TRIM-r1	A1FE5	glm	正确	正确	正确	正确	正确	
+ec1-TRIM-r2	A23F3	sonnet	正确	编造	正确	正确	正确	
+ec1-TRIM-r2	A23F3	glm	正确	部分	正确	正确	正确	
+ec1-TRIM-r3	A886A	sonnet	正确	正确	正确	正确	正确	
+ec1-TRIM-r3	A886A	glm	正确	正确	正确	正确	正确	
+ec2-FULL-r1	A153B	sonnet	正确	正确	正确	正确	正确	
+ec2-FULL-r1	A153B	glm	正确	正确	正确	正确	正确	
+ec2-FULL-r2	A997A	sonnet	正确	正确	正确	正确	正确	
+ec2-FULL-r2	A997A	glm	正确	正确	正确	正确	正确	
+ec2-FULL-r3	A5A7C	sonnet	正确	正确	正确	正确	正确	
+ec2-FULL-r3	A5A7C	glm	正确	正确	正确	正确	正确	
+ec2-TRIM-r1	A700C	sonnet	正确	错误	正确	正确	正确	
+ec2-TRIM-r1	A700C	glm	正确	错误	正确	正确	正确	
+ec2-TRIM-r2	A52A4	sonnet	正确	编造	正确	正确	正确	
+ec2-TRIM-r2	A52A4	glm	正确	编造	正确	正确	正确	
+ec2-TRIM-r3	A04FD	sonnet	正确	编造	正确	正确	正确	
+ec2-TRIM-r3	A04FD	glm	正确	编造	正确	正确	正确	
+edoc1-FULL-r1	AE23D	sonnet	正确	正确	正确	正确	正确	正确	未涉及	urgent=false; fab=["引用stack.ts:247，原文行号为246","称mailbox有4处硬编码分支，原文处置后为3处(M-6)"]
+edoc1-FULL-r1	AE23D	glm	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=["「mailbox.ts 有 4 处硬编码终结分支」，文档为 pump 两分支/三处","「AGENTS.md 的 UI/散文分工」文档无依据"]
+edoc1-TRIM-r1	A4BB3	sonnet	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=["称announce仍保留为kind，与§15.5最小集(仅3新kind)矛盾","mailbox硬编码分支称pump×2/verdict×2共4处，原文处置后为3处"]
+edoc1-TRIM-r1	A4BB3	glm	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=["「/tmp/.p5x/plan.md」路径，参考文档无依据","硬编码分支 pump×2/verdict×2（4处），文档仅两分支/三处"]
+edoc2-FULL-r2	AA71D	sonnet	正确	正确	正确	正确	正确	正确	未涉及	urgent=false; fab=[]
+edoc2-FULL-r2	AA71D	glm	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=["「UI 短标记只用英文 token，中文留给成段文案」文档无依据"]
+edoc2-TRIM-r2	A94BA	sonnet	正确	正确	正确	正确	正确	正确	未涉及	urgent=false; fab=["把§10改速率上界的更正标注为(M7)，原文属结构批判M6"]
+edoc2-TRIM-r2	A94BA	glm	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=["「速率上界」更正标注为（M7），文档为结构批判 M6 处置","「拒绝即死信/配额回执不变」，文档无此表述","「AGENTS.md UI 英文 token 规则照旧」，文档无依据"]
+edoc3-FULL-r3	AF574	sonnet	正确	正确	正确	正确	正确	正确	未涉及	urgent=false; fab=[]
+edoc3-FULL-r3	AF574	glm	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=[]
+edoc3-TRIM-r3	AF3CD	sonnet	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=[]
+edoc3-TRIM-r3	AF3CD	glm	正确	正确	正确	正确	正确	正确	正确	urgent=false; fab=[]

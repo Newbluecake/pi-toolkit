@@ -1,0 +1,79 @@
+{
+  "judge": "cr-anthropic/claude-sonnet-5",
+  "batch": "edoc",
+  "costUsd": 0.627528,
+  "wallMs": 329924,
+  "parsed": {
+    "A4BB3": {
+      "D1": ["正确", "can_message彻底删除(D-2)…只留方向性协议规则"],
+      "D2": ["正确", "只有direct可W1(turn)/W2(复活)，广播恒不唤醒"],
+      "D3": ["正确", "广播=1条`to:\"board\"`记录，恒O(1)绝不N路push"],
+      "D4": ["正确", "三级塌缩为push/board两级，按接收方状态裁定"],
+      "D5": ["正确", "仅当前主session（D-3）"],
+      "D6": ["正确", "超限降级不拒收（D-6）"],
+      "D7": ["正确", "nack一等公民（D-7）"],
+      "urgentAsCurrent": [false, "urgent/roster/hop等已砍"],
+      "fabrications": [
+        "称announce仍保留为kind，与§15.5最小集(仅3新kind)矛盾",
+        "mailbox硬编码分支称pump×2/verdict×2共4处，原文处置后为3处"
+      ]
+    },
+    "A94BA": {
+      "D1": ["正确", "can_message彻底删除…其余任意关系全开(R3)"],
+      "D2": ["正确", "只有direct可唤醒…广播恒不唤醒"],
+      "D3": ["正确", "广播=1条to:'board'看板记录，恒O(1)"],
+      "D4": ["正确", "两级push/board，按接收方状态裁定"],
+      "D5": ["正确", "仅当前主session…新会话归零"],
+      "D6": ["正确", "inboxCap溢出降board"],
+      "D7": ["未涉及", "nack仅列为kind，未称其为一等公民"],
+      "urgentAsCurrent": [false, "全文未提及urgent字段"],
+      "fabrications": ["把§10改速率上界的更正标注为(M7)，原文属结构批判M6"]
+    },
+    "AA71D": {
+      "D1": ["正确", "D-2彻底删can_message…跨树/任意深度/同级全通"],
+      "D2": ["正确", "仅direct可产生W1/W2，广播恒不唤醒"],
+      "D3": ["正确", "广播＝单条to:'board'记录，无人被禁言"],
+      "D4": ["正确", "D-1′(取代D-1，urgent取消)…按接收方状态"],
+      "D5": ["正确", "仅当前主session(D-3，不跨会话)"],
+      "D6": ["正确", "满则降级不拒收(D-6，R3字面满足)"],
+      "D7": ["未涉及", "nack多次出现但未称一等公民"],
+      "urgentAsCurrent": [false, "urgent取消"],
+      "fabrications": []
+    },
+    "AE23D": {
+      "D1": ["正确", "彻底删can_message(D-2)…其余kind任意关系全开"],
+      "D2": ["正确", "仅direct点对点可产生W1/W2，广播恒不唤醒"],
+      "D3": ["正确", "广播=1条to:'board'记录(D-5，恒O(1))"],
+      "D4": ["正确", "三级塌缩为两级；urgent取消，闸门G1关闭"],
+      "D5": ["正确", "D-3仅当前主session…不跨会话"],
+      "D6": ["正确", "满⇒降级不拒收(D-6)"],
+      "D7": ["未涉及", "nack多次提及但未称一等公民"],
+      "urgentAsCurrent": [false, "urgent取消，闸门G1关闭"],
+      "fabrications": ["引用stack.ts:247，原文行号为246", "称mailbox有4处硬编码分支，原文处置后为3处(M-6)"]
+    },
+    "AF3CD": {
+      "D1": ["正确", "D-2彻底删can_message…其余kind任意关系全开(R3)"],
+      "D2": ["正确", "仅direct点对点可W1/W2…广播恒不唤醒"],
+      "D3": ["正确", "广播=单条to:'board'记录(D-5，恒O(1))"],
+      "D4": ["正确", "塌缩为两级push/board…urgent取消"],
+      "D5": ["正确", "仅当前主session(D-3)…不跨会话"],
+      "D6": ["正确", "inboxCap满则降级board，永不拒收(D-6)"],
+      "D7": ["正确", "nack是一等公民(D-7，让提问方尽快转自查)"],
+      "urgentAsCurrent": [false, "notify/pull无区别、urgent取消"],
+      "fabrications": []
+    },
+    "AF574": {
+      "D1": ["正确", "彻底删除can_message…任意关系…全放行"],
+      "D2": ["正确", "只有点对点direct可产生W1/W2…广播恒不唤醒"],
+      "D3": ["正确", "广播=单条to:'board'记录恒O(1)(D-5)"],
+      "D4": ["正确", "三级discipline塌缩为两级…urgent字段取消"],
+      "D5": ["正确", "仅当前主session(D-3，不跨会话)"],
+      "D6": ["正确", "溢出降级不拒收"],
+      "D7": ["未涉及", "nack多次提及但未称一等公民"],
+      "urgentAsCurrent": [false, "urgent字段取消，G1关闭"],
+      "fabrications": []
+    }
+  },
+  "raw": "```json\n{\n  \"A4BB3\": {\n    \"D1\": [\"正确\", \"can_message彻底删除(D-2)…只留方向性协议规则\"],\n    \"D2\": [\"正确\", \"只有direct可W1(turn)/W2(复活)，广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=1条`to:\\\"board\\\"`记录，恒O(1)绝不N路push\"],\n    \"D4\": [\"正确\", \"三级塌缩为push/board两级，按接收方状态裁定\"],\n    \"D5\": [\"正确\", \"仅当前主session（D-3）\"],\n    \"D6\": [\"正确\", \"超限降级不拒收（D-6）\"],\n    \"D7\": [\"正确\", \"nack一等公民（D-7）\"],\n    \"urgentAsCurrent\": [false, \"urgent/roster/hop等已砍\"],\n    \"fabrications\": [\n      \"称announce仍保留为kind，与§15.5最小集(仅3新kind)矛盾\",\n      \"mailbox硬编码分支称pump×2/verdict×2共4处，原文处置后为3处\"\n    ]\n  },\n  \"A94BA\": {\n    \"D1\": [\"正确\", \"can_message彻底删除…其余任意关系全开(R3)\"],\n    \"D2\": [\"正确\", \"只有direct可唤醒…广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=1条to:'board'看板记录，恒O(1)\"],\n    \"D4\": [\"正确\", \"两级push/board，按接收方状态裁定\"],\n    \"D5\": [\"正确\", \"仅当前主session…新会话归零\"],\n    \"D6\": [\"正确\", \"inboxCap溢出降board\"],\n    \"D7\": [\"未涉及\", \"nack仅列为kind，未称其为一等公民\"],\n    \"urgentAsCurrent\": [false, \"全文未提及urgent字段\"],\n    \"fabrications\": [\n      \"把§10改速率上界的更正标注为(M7)，原文属结构批判M6\"\n    ]\n  },\n  \"AA71D\": {\n    \"D1\": [\"正确\", \"D-2彻底删can_message…跨树/任意深度/同级全通\"],\n    \"D2\": [\"正确\", \"仅direct可产生W1/W2，广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播＝单条to:'board'记录，无人被禁言\"],\n    \"D4\": [\"正确\", \"D-1′(取代D-1，urgent取消)…按接收方状态\"],\n    \"D5\": [\"正确\", \"仅当前主session(D-3，不跨会话)\"],\n    \"D6\": [\"正确\", \"满则降级不拒收(D-6，R3字面满足)\"],\n    \"D7\": [\"未涉及\", \"nack多次出现但未称一等公民\"],\n    \"urgentAsCurrent\": [false, \"urgent取消\"],\n    \"fabrications\": []\n  },\n  \"AE23D\": {\n    \"D1\": [\"正确\", \"彻底删can_message(D-2)…其余kind任意关系全开\"],\n    \"D2\": [\"正确\", \"仅direct点对点可产生W1/W2，广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=1条to:'board'记录(D-5，恒O(1))\"],\n    \"D4\": [\"正确\", \"三级塌缩为两级；urgent取消，闸门G1关闭\"],\n    \"D5\": [\"正确\", \"D-3仅当前主session…不跨会话\"],\n    \"D6\": [\"正确\", \"满⇒降级不拒收(D-6)\"],\n    \"D7\": [\"未涉及\", \"nack多次提及但未称一等公民\"],\n    \"urgentAsCurrent\": [false, \"urgent取消，闸门G1关闭\"],\n    \"fabrications\": [\n      \"引用stack.ts:247，原文行号为246\",\n      \"称mailbox有4处硬编码分支，原文处置后为3处(M-6)\"\n    ]\n  },\n  \"AF3CD\": {\n    \"D1\": [\"正确\", \"D-2彻底删can_message…其余kind任意关系全开(R3)\"],\n    \"D2\": [\"正确\", \"仅direct点对点可W1/W2…广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=单条to:'board'记录(D-5，恒O(1))\"],\n    \"D4\": [\"正确\", \"塌缩为两级push/board…urgent取消\"],\n    \"D5\": [\"正确\", \"仅当前主session(D-3)…不跨会话\"],\n    \"D6\": [\"正确\", \"inboxCap满则降级board，永不拒收(D-6)\"],\n    \"D7\": [\"正确\", \"nack是一等公民(D-7，让提问方尽快转自查)\"],\n    \"urgentAsCurrent\": [false, \"notify/pull无区别、urgent取消\"],\n    \"fabrications\": []\n  },\n  \"AF574\": {\n    \"D1\": [\"正确\", \"彻底删除can_message…任意关系…全放行\"],\n    \"D2\": [\"正确\", \"只有点对点direct可产生W1/W2…广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=单条to:'board'记录恒O(1)(D-5)\"],\n    \"D4\": [\"正确\", \"三级discipline塌缩为两级…urgent字段取消\"],\n    \"D5\": [\"正确\", \"仅当前主session(D-3，不跨会话)\"],\n    \"D6\": [\"正确\", \"溢出降级不拒收\"],\n    \"D7\": [\"未涉及\", \"nack多次提及但未称一等公民\"],\n    \"urgentAsCurrent\": [false, \"urgent字段取消，G1关闭\"],\n    \"fabrications\": []\n  }\n}\n```",
+  "stopReason": "stop"
+}

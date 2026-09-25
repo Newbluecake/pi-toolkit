@@ -1,0 +1,41 @@
+{
+  "id": "ec1-FULL-r1",
+  "expert": "ec1",
+  "arm": "FULL",
+  "rep": 1,
+  "nonce": "6741333d",
+  "model": "cr-anthropic/claude-sonnet-5",
+  "thinkingLevel": "medium",
+  "cwd": "/tmp/exp6-snap-apistrike-70dbf25",
+  "elidedToolResults": 0,
+  "firstRequest": {
+    "input": 2,
+    "cacheWrite": 96167,
+    "cacheRead": 0,
+    "total": 96169,
+    "costUsd": 0.37453725,
+    "opusEq": 0.62422875
+  },
+  "perTurn": [
+    {
+      "input": 2,
+      "output": 927,
+      "cacheRead": 0,
+      "cacheWrite": 96167,
+      "costUsd": 0.37453725,
+      "atMs": 22035
+    }
+  ],
+  "turns": 1,
+  "toolCalls": [],
+  "wallMs": 22036,
+  "costUsd": 0.37453725,
+  "opusEq": 0.62422875,
+  "overProdTime": false,
+  "overProdTurns": false,
+  "stopReason": "stop",
+  "leakCalls": [],
+  "answerChars": 1363,
+  "wouldTruncate": false,
+  "answer": "1. Placement 取值：`PlacementValue`、`PlacementName`、`PlacementHeader`、`PlacementBody`、`PlacementPath`（定义于 `internal/mutator/engine.go`）。\n\n2. 追踪 header 名为 `X-ApiStrike-Trace`，值由 `internal/runner/runner.go` 中的 `newTraceID()` 函数生成：随机读取 8 字节（`crypto/rand`），编码为 16 位十六进制字符串；若 `rand.Read` 失败则回退为 `\"00000000\" + time.Now().Format(\"150405\")`。该 header 在 `dispatch()` 中通过 `req.Header.Set(\"X-ApiStrike-Trace\", traceID)` 设置。\n\n3. 按 `docs/design.md`：\n   - L2 Sink 上报端点：`POST /api/v1/sinks/report`\n   - L3 OOB 的 DNS 监听端口：`:8053`（HTTP 回调监听 `:8888`；文档注明用户需自行把 53 转发到 8053 高端口）\n\n4. P0-1：`DictionaryMutator.Mutate` 中的 payload 游标 `cursors`（`internal/mutator/dictionary.go:91`，`cursors := make([]int, len(slots))`）是函数局部变量，每次调用都从 0 重新开始 round-robin 消费语料。而 runner 主循环会把同一个 seed 反复重新入队并重新调用 `Mutate`（见 `runner.go` 里 `r.cfg.Scheduler.Init(append(currentQueue(...), s))` 的 re-queue 逻辑），导致每轮 `Mutate` 都从游标 0 出发，命中一模一样的前 N 条 payload（受 `cfg.MaxPerSeed` 默认 50 和参数 slot 数量分摊），corpus 剩余条目永远不会被使用，同一批 payload 被无限重复发送。定位：`internal/mutator/dictionary.go:91`（游标声明）+ 同文件 `Mutate` 方法整体（约 51-140 行）。\n\n5. **没有被用到。** 依据：`cmd/apistrike/main.go:224` 生产环境组装 Mutator 时只调用了 `mutator.NewDictionaryMutator(corpus, userCorpus, mutator.DictionaryConfig{})`，全仓库对 `mutator.NewSchemaMutator()` 的调用仅存在于其自身定义处（`internal/mutator/schema.go`）及测试文件中，没有任何生产代码路径（`main.go`、`internal/manager/manager.go`）引用它或把它组合进实际跑的 Mutator 链路。"
+}

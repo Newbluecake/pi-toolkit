@@ -1,0 +1,41 @@
+{
+  "id": "ec2-FULL-r2",
+  "expert": "ec2",
+  "arm": "FULL",
+  "rep": 2,
+  "nonce": "8fc4f548",
+  "model": "cr-anthropic/claude-sonnet-5",
+  "thinkingLevel": "medium",
+  "cwd": "/tmp/exp6-snap-apistrike-55e1bfe",
+  "elidedToolResults": 0,
+  "firstRequest": {
+    "input": 2,
+    "cacheWrite": 59654,
+    "cacheRead": 1314,
+    "total": 60970,
+    "costUsd": 0.2377077,
+    "opusEq": 0.3961795
+  },
+  "perTurn": [
+    {
+      "input": 2,
+      "output": 907,
+      "cacheRead": 1314,
+      "cacheWrite": 59654,
+      "costUsd": 0.2377077,
+      "atMs": 13426
+    }
+  ],
+  "turns": 1,
+  "toolCalls": [],
+  "wallMs": 13427,
+  "costUsd": 0.2377077,
+  "opusEq": 0.3961795,
+  "overProdTime": false,
+  "overProdTurns": false,
+  "stopReason": "stop",
+  "leakCalls": [],
+  "answerChars": 1370,
+  "wouldTruncate": false,
+  "answer": "1. P1-1：finding 落库静默丢弃——`SaveFindings` 批内一条失败即 return err 中断整批，runner 侧 `_ =` 吞掉错误。证据定位：`runner/runner.go:623`、`manager/manager.go:449-461`（审计报告原始行号；本次验收核实的是修复后代码，位置略有偏移，修复后落在 `manager.go` 的 `findingsAdapter.SaveFindings` 和 `runner.go` 的 `dispatch`）。\n\n2. `internal/runner` 包本轮 `-run 'Baseline'` 共 7 个测试全部 PASS：TestRunnerBaselineWiresStatusDiffTiming、TestRunnerBaselineDisabledProducesNoBaselineFindings、TestRunnerBaselineEndpointKeyIncludesMethod、TestRunnerFeedsBaselineBeforeMutations、TestRunnerBaselineDisabledWithNegativeSamples、TestRunnerBaselineOncePerEndpoint、TestRunnerSkipsBaselineWhenEngineLacksFeeder。该包耗时 2.550s（`ok github.com/bluecake/apistrike/internal/runner 2.550s`）。\n\n3. 签名：`FeedBaseline(req *finding.HTTPRequest, status, bodyLength int, durationMs int64)`。单次基线 HTTP 请求失败时（`http.NewRequestWithContext` 出错、`HTTPClient.Do` 出错、或读 body 出错），`ensureBaseline` 记 `WARN` 日志后 `return nil`——即中止该 endpoint 本轮基线阶段但不视为致命错误，不影响后续变异循环；只有 `ctx.Err() != nil`（上下文取消）才会返回非 nil error 向上传播。\n\n4. 总体验收结论：**通过**。无 Blocker、无 Major。Minor 两条：① `ensureBaseline` 对 path 参数化 endpoint 的 baseline key 不匹配是已知且已在注释中如实记录的局限，建议后续跟踪；② baseline 请求经限速器但不计入 `MaxRequests`/`sent` 预算，是有意设计，但高 endpoint 数场景下会有额外真实流量开销，建议观察生产影响。\n\n5. 真实 runner 集成测试（`TestRunnerBaselineWiresStatusDiffTiming`）实测输出：`findings by detector: map[diff:17 status:17 timing:1]`，即 diff 17 个、status 17 个、timing 1 个，三者均非零，满足验收要求。"
+}

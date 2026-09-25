@@ -1,0 +1,86 @@
+{
+  "judge": "zai/glm-5.3",
+  "batch": "edoc",
+  "costUsd": 0.2112736,
+  "wallMs": 396341,
+  "parsed": {
+    "A4BB3": {
+      "D1": ["正确", "can_message 彻底删除（D-2），authorize() 只留方向性协议规则，其余任意两 agent 直达"],
+      "D2": ["正确", "只有 direct 可 W1（turn）/W2（复活），广播恒不唤醒"],
+      "D3": ["正确", "广播 = 1 条 to:\"board\" 记录（D-5），恒 O(1) 绝不 N 路 push"],
+      "D4": ["正确", "三级塌缩为 push/board 两级，按接收方状态裁定"],
+      "D5": ["正确", "仅当前主 session（D-3），session_start 从 prefetched 重建"],
+      "D6": ["正确", "超限降级不拒收（D-6）"],
+      "D7": ["正确", "nack 一等公民（D-7）"],
+      "urgentAsCurrent": [false, "多处推翻正文，urgent/roster/hop 等已砍"],
+      "fabrications": [
+        "「/tmp/.p5x/plan.md」路径，参考文档无依据",
+        "硬编码分支 pump×2/verdict×2（4处），文档仅两分支/三处"
+      ]
+    },
+    "A94BA": {
+      "D1": ["正确", "can_message 彻底删除，authorize() 只留方向性协议规则"],
+      "D2": ["正确", "只有 `audience.kind===\"direct\"` 可唤醒，广播恒不唤醒"],
+      "D3": ["正确", "广播=1 条 `to:\"board\"` 看板记录（D-5），绝不 N 路 push"],
+      "D4": ["正确", "两级 push/board，按接收方状态裁定"],
+      "D5": ["正确", "看板（D-3）：仅当前主 session…新会话归零"],
+      "D6": ["正确", "inboxCap 溢出降 board"],
+      "D7": ["正确", "新增 query/answer/nack"],
+      "urgentAsCurrent": [false, "D-1 三级 discipline、urgent、roster、mutation 等已被推翻或裁剪"],
+      "fabrications": [
+        "「速率上界」更正标注为（M7），文档为结构批判 M6 处置",
+        "「拒绝即死信/配额回执不变」，文档无此表述",
+        "「AGENTS.md UI 英文 token 规则照旧」，文档无依据"
+      ]
+    },
+    "AA71D": {
+      "D1": ["正确", "D-2 彻底删 can_message；authorize() 只留方向性协议规则"],
+      "D2": ["正确", "I-W＝仅 direct 消息可产生 W1/W2，广播恒不唤醒"],
+      "D3": ["正确", "广播恒落看板（to:\"board\"，1 条记录恒 O(1)）"],
+      "D4": ["正确", "D-1′（取代 D-1，`urgent` 取消）——运行中子 agent→push"],
+      "D5": ["正确", "仅当前主 session（D-3，不跨会话）"],
+      "D6": ["正确", "满则降级不拒收（D-6，R3 字面满足）"],
+      "D7": ["正确", "新增 query/answer/nack（最小集仅此 3 个新 kind）"],
+      "urgentAsCurrent": [false, "D-1′（取代 D-1，`urgent` 取消）"],
+      "fabrications": ["「UI 短标记只用英文 token，中文留给成段文案」文档无依据"]
+    },
+    "AE23D": {
+      "D1": ["正确", "彻底删 `can_message`（D-2）…其余 kind 任意关系全开"],
+      "D2": ["正确", "仅 direct 点对点可产生 W1（steer）/W2（revive），广播恒不唤醒"],
+      "D3": ["正确", "广播=1 条 `to:\"board\"` 记录（D-5，恒 O(1)）"],
+      "D4": ["正确", "按接收方状态——运行中子 agent→push；`urgent` 取消"],
+      "D5": ["正确", "D-3 仅当前主 session…不跨会话"],
+      "D6": ["正确", "满⇒降级不拒收（D-6）"],
+      "D7": ["正确", "最终最小集只新增 query/answer/nack"],
+      "urgentAsCurrent": [false, "三级塌缩为两级；`urgent` 取消；闸门 G1 关闭"],
+      "fabrications": [
+        "「mailbox.ts 有 4 处硬编码终结分支」，文档为 pump 两分支/三处",
+        "「AGENTS.md 的 UI/散文分工」文档无依据"
+      ]
+    },
+    "AF3CD": {
+      "D1": ["正确", "D-2 彻底删 `can_message`；authorize() 只留方向性协议规则"],
+      "D2": ["正确", "仅 direct 点对点可 W1(steer)/W2(revive)；广播恒不唤醒"],
+      "D3": ["正确", "广播=单条 `to:\"board\"` 记录（D-5，恒 O(1)），谁都能发"],
+      "D4": ["正确", "discipline 按接收方状态定，且塌缩为两级 push/board"],
+      "D5": ["正确", "仅当前主 session（D-3…读回重建，不跨会话）"],
+      "D6": ["正确", "inboxCap 满则降级 board，永不拒收（D-6）"],
+      "D7": ["正确", "nack 是一等公民（D-7，让提问方尽快转自查）"],
+      "urgentAsCurrent": [false, "notify/pull 无区别、`urgent` 取消"],
+      "fabrications": []
+    },
+    "AF574": {
+      "D1": ["正确", "彻底删除 can_message，authorize() 只留方向性协议规则"],
+      "D2": ["正确", "只有点对点 direct 可产生 W1/W2，广播恒不唤醒"],
+      "D3": ["正确", "广播=单条 `to:\"board\"` 记录恒 O(1)（D-5）"],
+      "D4": ["正确", "按接收方状态裁定——运行中子 agent→push；urgent 字段取消"],
+      "D5": ["正确", "作用域仅当前主 session（D-3，不跨会话）"],
+      "D6": ["正确", "inboxCap 满⇒降级 board，绝不拒收（D-6）"],
+      "D7": ["正确", "v1 五种全保留 + 新增 query/answer/nack"],
+      "urgentAsCurrent": [false, "notify≡pull；urgent 字段取消，G1 关闭"],
+      "fabrications": []
+    }
+  },
+  "raw": "```json\n{\n  \"A4BB3\": {\n    \"D1\": [\"正确\", \"can_message 彻底删除（D-2），authorize() 只留方向性协议规则，其余任意两 agent 直达\"],\n    \"D2\": [\"正确\", \"只有 direct 可 W1（turn）/W2（复活），广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播 = 1 条 to:\\\"board\\\" 记录（D-5），恒 O(1) 绝不 N 路 push\"],\n    \"D4\": [\"正确\", \"三级塌缩为 push/board 两级，按接收方状态裁定\"],\n    \"D5\": [\"正确\", \"仅当前主 session（D-3），session_start 从 prefetched 重建\"],\n    \"D6\": [\"正确\", \"超限降级不拒收（D-6）\"],\n    \"D7\": [\"正确\", \"nack 一等公民（D-7）\"],\n    \"urgentAsCurrent\": [false, \"多处推翻正文，urgent/roster/hop 等已砍\"],\n    \"fabrications\": [\n      \"「/tmp/.p5x/plan.md」路径，参考文档无依据\",\n      \"硬编码分支 pump×2/verdict×2（4处），文档仅两分支/三处\"\n    ]\n  },\n  \"A94BA\": {\n    \"D1\": [\"正确\", \"can_message 彻底删除，authorize() 只留方向性协议规则\"],\n    \"D2\": [\"正确\", \"只有 `audience.kind===\\\"direct\\\"` 可唤醒，广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=1 条 `to:\\\"board\\\"` 看板记录（D-5），绝不 N 路 push\"],\n    \"D4\": [\"正确\", \"两级 push/board，按接收方状态裁定\"],\n    \"D5\": [\"正确\", \"看板（D-3）：仅当前主 session…新会话归零\"],\n    \"D6\": [\"正确\", \"inboxCap 溢出降 board\"],\n    \"D7\": [\"正确\", \"新增 query/answer/nack\"],\n    \"urgentAsCurrent\": [false, \"D-1 三级 discipline、urgent、roster、mutation 等已被推翻或裁剪\"],\n    \"fabrications\": [\n      \"「速率上界」更正标注为（M7），文档为结构批判 M6 处置\",\n      \"「拒绝即死信/配额回执不变」，文档无此表述\",\n      \"「AGENTS.md UI 英文 token 规则照旧」，文档无依据\"\n    ]\n  },\n  \"AA71D\": {\n    \"D1\": [\"正确\", \"D-2 彻底删 can_message；authorize() 只留方向性协议规则\"],\n    \"D2\": [\"正确\", \"I-W＝仅 direct 消息可产生 W1/W2，广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播恒落看板（to:\\\"board\\\"，1 条记录恒 O(1)）\"],\n    \"D4\": [\"正确\", \"D-1′（取代 D-1，`urgent` 取消）——运行中子 agent→push\"],\n    \"D5\": [\"正确\", \"仅当前主 session（D-3，不跨会话）\"],\n    \"D6\": [\"正确\", \"满则降级不拒收（D-6，R3 字面满足）\"],\n    \"D7\": [\"正确\", \"新增 query/answer/nack（最小集仅此 3 个新 kind）\"],\n    \"urgentAsCurrent\": [false, \"D-1′（取代 D-1，`urgent` 取消）\"],\n    \"fabrications\": [\n      \"「UI 短标记只用英文 token，中文留给成段文案」文档无依据\"\n    ]\n  },\n  \"AE23D\": {\n    \"D1\": [\"正确\", \"彻底删 `can_message`（D-2）…其余 kind 任意关系全开\"],\n    \"D2\": [\"正确\", \"仅 direct 点对点可产生 W1（steer）/W2（revive），广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=1 条 `to:\\\"board\\\"` 记录（D-5，恒 O(1)）\"],\n    \"D4\": [\"正确\", \"按接收方状态——运行中子 agent→push；`urgent` 取消\"],\n    \"D5\": [\"正确\", \"D-3 仅当前主 session…不跨会话\"],\n    \"D6\": [\"正确\", \"满⇒降级不拒收（D-6）\"],\n    \"D7\": [\"正确\", \"最终最小集只新增 query/answer/nack\"],\n    \"urgentAsCurrent\": [false, \"三级塌缩为两级；`urgent` 取消；闸门 G1 关闭\"],\n    \"fabrications\": [\n      \"「mailbox.ts 有 4 处硬编码终结分支」，文档为 pump 两分支/三处\",\n      \"「AGENTS.md 的 UI/散文分工」文档无依据\"\n    ]\n  },\n  \"AF3CD\": {\n    \"D1\": [\"正确\", \"D-2 彻底删 `can_message`；authorize() 只留方向性协议规则\"],\n    \"D2\": [\"正确\", \"仅 direct 点对点可 W1(steer)/W2(revive)；广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=单条 `to:\\\"board\\\"` 记录（D-5，恒 O(1)），谁都能发\"],\n    \"D4\": [\"正确\", \"discipline 按接收方状态定，且塌缩为两级 push/board\"],\n    \"D5\": [\"正确\", \"仅当前主 session（D-3…读回重建，不跨会话）\"],\n    \"D6\": [\"正确\", \"inboxCap 满则降级 board，永不拒收（D-6）\"],\n    \"D7\": [\"正确\", \"nack 是一等公民（D-7，让提问方尽快转自查）\"],\n    \"urgentAsCurrent\": [false, \"notify/pull 无区别、`urgent` 取消\"],\n    \"fabrications\": []\n  },\n  \"AF574\": {\n    \"D1\": [\"正确\", \"彻底删除 can_message，authorize() 只留方向性协议规则\"],\n    \"D2\": [\"正确\", \"只有点对点 direct 可产生 W1/W2，广播恒不唤醒\"],\n    \"D3\": [\"正确\", \"广播=单条 `to:\\\"board\\\"` 记录恒 O(1)（D-5）\"],\n    \"D4\": [\"正确\", \"按接收方状态裁定——运行中子 agent→push；urgent 字段取消\"],\n    \"D5\": [\"正确\", \"作用域仅当前主 session（D-3，不跨会话）\"],\n    \"D6\": [\"正确\", \"inboxCap 满⇒降级 board，绝不拒收（D-6）\"],\n    \"D7\": [\"正确\", \"v1 五种全保留 + 新增 query/answer/nack\"],\n    \"urgentAsCurrent\": [false, \"notify≡pull；urgent 字段取消，G1 关闭\"],\n    \"fabrications\": []\n  }\n}\n```",
+  "stopReason": "stop"
+}

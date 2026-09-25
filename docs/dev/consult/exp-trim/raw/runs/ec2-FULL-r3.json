@@ -1,0 +1,41 @@
+{
+  "id": "ec2-FULL-r3",
+  "expert": "ec2",
+  "arm": "FULL",
+  "rep": 3,
+  "nonce": "86207741",
+  "model": "cr-anthropic/claude-sonnet-5",
+  "thinkingLevel": "medium",
+  "cwd": "/tmp/exp6-snap-apistrike-55e1bfe",
+  "elidedToolResults": 0,
+  "firstRequest": {
+    "input": 2,
+    "cacheWrite": 59651,
+    "cacheRead": 1314,
+    "total": 60967,
+    "costUsd": 0.23678145,
+    "opusEq": 0.39463575
+  },
+  "perTurn": [
+    {
+      "input": 2,
+      "output": 846,
+      "cacheRead": 1314,
+      "cacheWrite": 59651,
+      "costUsd": 0.23678145,
+      "atMs": 17608
+    }
+  ],
+  "turns": 1,
+  "toolCalls": [],
+  "wallMs": 17609,
+  "costUsd": 0.23678145,
+  "opusEq": 0.39463575,
+  "overProdTime": false,
+  "overProdTurns": false,
+  "stopReason": "stop",
+  "leakCalls": [],
+  "answerChars": 1274,
+  "wouldTruncate": false,
+  "answer": "1. P1-1：finding 落库静默丢弃——`SaveFindings` 批内单条失败即 `return err` 中断整批，runner 侧用 `_ =` 吞掉错误，导致 SQLite busy/locked 时整批 finding 无声消失、无日志无计数。证据定位：`runner/runner.go:623`、`manager/manager.go:449-461`（审计报告原文标注）。\n\n2. `internal/runner` 包本次跑 `Baseline` 相关测试共 **7 个全部 PASS**：TestRunnerBaselineWiresStatusDiffTiming、TestRunnerBaselineDisabledProducesNoBaselineFindings、TestRunnerBaselineEndpointKeyIncludesMethod、TestRunnerFeedsBaselineBeforeMutations、TestRunnerBaselineDisabledWithNegativeSamples、TestRunnerBaselineOncePerEndpoint、TestRunnerSkipsBaselineWhenEngineLacksFeeder。包总耗时 **2.550s**（`ok github.com/bluecake/apistrike/internal/runner 2.550s`）。\n\n3. 签名：`FeedBaseline(req *finding.HTTPRequest, status, bodyLength int, durationMs int64)`。单次基线 HTTP 失败时（构造请求失败 / `HTTPClient.Do` 失败 / 读 body 失败）：`ensureBaseline` 记 `WARN` 日志（含方法/URL/错误），然后 `return nil`——直接结束整个 endpoint 的基线阶段（不重试、不当作致命错误、不阻塞后续变异循环）。只有 `ctx.Err() != nil` 或 `RateLimiter.Wait` 报错时才向上返回非 nil error。\n\n4. 总体结论：**通过 ✅**。无 Blocker、无 Major。Minor 两条：(a) `ensureBaseline` 对 path 参数化 endpoint 的 baseline key 不匹配是已知且如实记录的局限，建议后续 backlog 跟踪；(b) baseline 请求过限速器但不计入 `MaxRequests`/`sent` 预算，属有意设计但需关注高并发下的额外真实流量开销。\n\n5. 真实 runner 集成测试（`TestRunnerBaselineWiresStatusDiffTiming`）实测输出：`findings by detector: map[diff:17 status:17 timing:1]`。"
+}

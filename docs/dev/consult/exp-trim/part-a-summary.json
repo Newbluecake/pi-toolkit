@@ -1,0 +1,157 @@
+{
+  "n": 59,
+  "types": [
+    "?",
+    "Explore",
+    "Plan",
+    "architect",
+    "architect-ask",
+    "architect-consult",
+    "frontend-dev",
+    "general",
+    "general-purpose",
+    "reviewer",
+    "upstream-analyst",
+    "verifier"
+  ],
+  "ctx": {
+    "min": 31523,
+    "median": 77067,
+    "max": 247709
+  },
+  "toolResultShareMedian": 0.4904969075984079,
+  "calibMdAPEMedian": 0.12523244109655382,
+  "T1": {
+    "medianPct": 0.38076017187303773,
+    "p90Pct": 0.5747470639097099,
+    "p10Pct": 0.1907230880794098,
+    "medianPctMsgs": 0.48446756166237515,
+    "medianUsd": 0.18526859913888905,
+    "p90Usd": 0.4403086676438217,
+    "meanUsd": 0.2553209522112598
+  },
+  "T2": {
+    "medianPct": 0.4429251967685352,
+    "p90Pct": 0.6663357812210977,
+    "p10Pct": 0.2532060396629337,
+    "medianPctMsgs": 0.6009598621736366,
+    "medianUsd": 0.22278773075532468,
+    "p90Usd": 0.49927691139077734,
+    "meanUsd": 0.29205505690480704
+  },
+  "T3": {
+    "medianPct": 0.5042655503955439,
+    "p90Pct": 0.6744399920037718,
+    "p10Pct": 0.28948764236914526,
+    "medianPctMsgs": 0.6672185275164385,
+    "medianUsd": 0.25145669992411296,
+    "p90Usd": 0.600728945447091,
+    "meanUsd": 0.3226784326664004
+  },
+  "byType": {
+    "?": {
+      "n": 5,
+      "ctxMedian": 92397,
+      "T1medianPct": 0.4926311240075798,
+      "T2medianPct": 0.6188802836642655,
+      "T3medianPct": 0.5240554342258049
+    },
+    "Explore": {
+      "n": 5,
+      "ctxMedian": 93574,
+      "T1medianPct": 0.5426783793391429,
+      "T2medianPct": 0.5868145530950758,
+      "T3medianPct": 0.6155268185936524
+    },
+    "Plan": {
+      "n": 5,
+      "ctxMedian": 77067,
+      "T1medianPct": 0.4168323360442759,
+      "T2medianPct": 0.47062328772254347,
+      "T3medianPct": 0.5457066126150939
+    },
+    "architect": {
+      "n": 5,
+      "ctxMedian": 74327,
+      "T1medianPct": 0.22863409217791172,
+      "T2medianPct": 0.3063666574798419,
+      "T3medianPct": 0.4098759356436594
+    },
+    "architect-ask": {
+      "n": 5,
+      "ctxMedian": 109341,
+      "T1medianPct": 0.4417481663649993,
+      "T2medianPct": 0.5139081952558692,
+      "T3medianPct": 0.6219941265714529
+    },
+    "architect-consult": {
+      "n": 4,
+      "ctxMedian": 97977,
+      "T1medianPct": 0.40005207125983044,
+      "T2medianPct": 0.46374006796995454,
+      "T3medianPct": 0.6181977456269965
+    },
+    "frontend-dev": {
+      "n": 5,
+      "ctxMedian": 60231,
+      "T1medianPct": 0.23655343534229448,
+      "T2medianPct": 0.4143686831503446,
+      "T3medianPct": 0.5042655503955439
+    },
+    "general": {
+      "n": 5,
+      "ctxMedian": 70360,
+      "T1medianPct": 0.26983658866881693,
+      "T2medianPct": 0.2866965725937296,
+      "T3medianPct": 0.30405605467503216
+    },
+    "general-purpose": {
+      "n": 5,
+      "ctxMedian": 94153,
+      "T1medianPct": 0.19240857538563502,
+      "T2medianPct": 0.34419683625077147,
+      "T3medianPct": 0.397934689887644
+    },
+    "reviewer": {
+      "n": 5,
+      "ctxMedian": 66351,
+      "T1medianPct": 0.38972412210380275,
+      "T2medianPct": 0.5226981689916337,
+      "T3medianPct": 0.5605039559009433
+    },
+    "upstream-analyst": {
+      "n": 5,
+      "ctxMedian": 55169,
+      "T1medianPct": 0.419920491402842,
+      "T2medianPct": 0.4520050965394151,
+      "T3medianPct": 0.4851913934347581
+    },
+    "verifier": {
+      "n": 5,
+      "ctxMedian": 69913,
+      "T1medianPct": 0.3553874703488289,
+      "T2medianPct": 0.4396456438691238,
+      "T3medianPct": 0.3730139176792199
+    }
+  },
+  "byCtxBin": {
+    "30-60k": {
+      "n": 22,
+      "T1medianPct": 0.3240372289505762,
+      "T1medianUsd": 0.09601004550346018
+    },
+    "60-120k": {
+      "n": 25,
+      "T1medianPct": 0.38116401606397654,
+      "T1medianUsd": 0.21728069911858972
+    },
+    "120-300k": {
+      "n": 12,
+      "T1medianPct": 0.43633825037602003,
+      "T1medianUsd": 0.48410775398111505
+    }
+  },
+  "candidatesConsidered": 2249,
+  "eligible": 1717,
+  "skippedCalibration": []
+}

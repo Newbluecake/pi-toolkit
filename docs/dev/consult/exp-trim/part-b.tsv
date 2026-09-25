@@ -1,0 +1,19 @@
+run	blindId	model	elided	firstReqTok	firstIn	firstCW	firstCR	firstUsd	firstOpusB	turns	tools	wallS	totalUsd	totalOpusEq	totalOpusB	>150s	>3turns	chars	sonnet	glm	mean	fabS	fabG	urgentS	urgentG	agree	tools_detail
+ec1-FULL-r1	A21E7	cr-anthropic/claude-sonnet-5	0	96169	2	96167	0	0.3745	0.6242	1	0	22.0	0.3745	0.6242	0.6242			1363	5	5	5	0	0			5/5	
+ec1-FULL-r2	A69E1	cr-anthropic/claude-sonnet-5	0	96170	2	94854	1314	0.3686	0.6144	1	0	19.6	0.3686	0.6144	0.6144			1189	5	5	5	0	0			5/5	
+ec1-FULL-r3	A0B26	cr-anthropic/claude-sonnet-5	0	96170	2	94854	1314	0.3695	0.6159	1	0	13.8	0.3695	0.6159	0.6159			1319	5	5	5	0	0			5/5	
+ec1-TRIM-r1	A1FE5	cr-anthropic/claude-sonnet-5	16	46690	2	46688	0	0.1820	0.3034	5	6	36.6	0.2855	0.4758	0.4758		Y	1394	5	5	5	0	0			5/5	grep:mutator,grep:runner,grep:design.md,read:runner.go@540,grep:runner,read:runner.go@30
+ec1-TRIM-r2	A23F3	cr-anthropic/claude-sonnet-5	16	46690	2	45374	1314	0.1804	0.3006	2	5	21.3	0.2273	0.3789	0.3789			1301	4	4.5	4.25	1	0			4/5	grep:mutator,grep:runner.go,grep:design.md,grep:dictionary.go,grep:main.go
+ec1-TRIM-r3	A886A	cr-anthropic/claude-sonnet-5	16	46690	2	45374	1314	0.1775	0.2958	2	4	23.2	0.2350	0.3916	0.3916			1637	5	5	5	0	0			5/5	grep:mutator,grep:runner.go,grep:design.md,grep:exp6-snap-apistrike-70dbf25
+ec2-FULL-r1	A153B	cr-anthropic/claude-sonnet-5	0	60970	2	59654	1314	0.2358	0.3930	1	0	12.1	0.2358	0.3930	0.3930			1203	5	5	5	0	0			5/5	
+ec2-FULL-r2	A997A	cr-anthropic/claude-sonnet-5	0	60970	2	59654	1314	0.2377	0.3962	1	0	13.4	0.2377	0.3962	0.3962			1370	5	5	5	0	0			5/5	
+ec2-FULL-r3	A5A7C	cr-anthropic/claude-sonnet-5	0	60967	2	59651	1314	0.2368	0.3946	1	0	17.6	0.2368	0.3946	0.3946			1274	5	5	5	0	0			5/5	
+ec2-TRIM-r1	A700C	cr-anthropic/claude-sonnet-5	13	36337	2	35021	1314	0.1387	0.2311	4	6	45.1	0.2581	0.4301	0.4301		Y	1746	4	4	4	0	0			5/5	read:scan-effectiveness-audit.md@1,grep:scan-effectiveness-audit.md,grep:detect,read:runner.go@679,grep:runner.go,grep:runner_baseline_integration_test.go
+ec2-TRIM-r2	A52A4	cr-anthropic/claude-sonnet-5	13	36337	2	35021	1314	0.1376	0.2293	2	3	20.1	0.1975	0.3292	0.3292			1252	4	4	4	1	1			5/5	grep:scan-effectiveness-audit.md,grep:runner.go,grep:detect
+ec2-TRIM-r3	A04FD	cr-anthropic/claude-sonnet-5	13	36337	2	35021	1314	0.1380	0.2300	3	4	27.1	0.2135	0.3558	0.3558			1441	4	4	4	1	1			5/5	grep:scan-effectiveness-audit.md,grep:engine.go,grep:runner.go,grep:runner
+edoc1-FULL-r1	AE23D	zai/glm-5.3	0	58241	57409	0	832	0.0973	0.4544	1	0	76.9	0.0973	0.3826	0.4544			2454	6	7	6.5	2	2			6/7	
+edoc1-TRIM-r1	A4BB3	zai/glm-5.3	10	31698	30930	0	768	0.0450	0.2021	4	6	63.0	0.1146	0.3976	0.4575		Y	2455	7	7	7	2	2			7/7	grep:plan.md,grep:plan.md,read:plan.md@628,read:plan.md@42,read:plan.md@110,read:plan.md@434
+edoc2-FULL-r2	AA71D	zai/glm-5.3	0	54186	53354	0	832	0.0877	0.4068	1	0	70.4	0.0877	0.3401	0.4068			2191	6	7	6.5	0	1			6/7	
+edoc2-TRIM-r2	A94BA	zai/glm-5.3	5	30930	30098	0	832	0.0493	0.2282	4	3	114.8	0.1059	0.3750	0.4265		Y	2575	6	7	6.5	1	3			6/7	grep:plan.md,grep:plan.md,read:plan.md@644
+edoc3-FULL-r3	AF574	zai/glm-5.3	0	54510	53678	0	832	0.0913	0.4264	1	0	78.6	0.0913	0.3593	0.4264			2568	6	7	6.5	0	0			6/7	
+edoc3-TRIM-r3	AF3CD	zai/glm-5.3	10	27871	27039	0	832	0.0398	0.1790	7	6	92.9	0.1386	0.4467	0.5043		Y	2615	7	7	7	0	0			7/7	grep:plan.md,read:plan.md@21,read:plan.md@161,read:plan.md@306,read:plan.md@476,read:plan.md@648

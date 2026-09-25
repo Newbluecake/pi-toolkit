@@ -1,0 +1,41 @@
+{
+  "id": "ec1-FULL-r2",
+  "expert": "ec1",
+  "arm": "FULL",
+  "rep": 2,
+  "nonce": "ceb86d34",
+  "model": "cr-anthropic/claude-sonnet-5",
+  "thinkingLevel": "medium",
+  "cwd": "/tmp/exp6-snap-apistrike-70dbf25",
+  "elidedToolResults": 0,
+  "firstRequest": {
+    "input": 2,
+    "cacheWrite": 94854,
+    "cacheRead": 1314,
+    "total": 96170,
+    "costUsd": 0.3686427,
+    "opusEq": 0.6144045
+  },
+  "perTurn": [
+    {
+      "input": 2,
+      "output": 836,
+      "cacheRead": 1314,
+      "cacheWrite": 94854,
+      "costUsd": 0.3686427,
+      "atMs": 19551
+    }
+  ],
+  "turns": 1,
+  "toolCalls": [],
+  "wallMs": 19552,
+  "costUsd": 0.3686427,
+  "opusEq": 0.6144045,
+  "overProdTime": false,
+  "overProdTurns": false,
+  "stopReason": "stop",
+  "leakCalls": [],
+  "answerChars": 1189,
+  "wouldTruncate": false,
+  "answer": "1. `Placement` 取值：`PlacementValue`、`PlacementName`、`PlacementHeader`、`PlacementBody`、`PlacementPath`（定义于 `internal/mutator/engine.go`）。注意 `PlacementHeader`/`PlacementName` 从未被实际赋值使用，是死枚举。\n\n2. 追踪 header 是 `X-ApiStrike-Trace`，值由 `internal/runner/runner.go` 中的 `newTraceID()` 生成：读取 8 字节 crypto/rand 随机数，hex 编码为 16 位十六进制字符串；`rand.Read` 失败时回退为 `\"00000000\" + time.Now().Format(\"150405\")`。\n\n3. L2 上报端点：`POST /api/v1/sinks/report`（design.md \"上报协议\"一节）。L3 OOB DNS 监听端口：`:8053`（design.md 写明 `DNS Listener (:8053)`，且注明高端口，需用户自行把 53 转发到 8053）。\n\n4. P0-1：Dictionary 变异的 payload 游标每次调用都重置为 0。位置：`internal/mutator/dictionary.go:91`（`cursors := make([]int, len(slots))`）。问题是 `DictionaryMutator.Mutate` 为纯函数，`cursors` 是局部变量，而 runner 主循环会把同一个 seed 反复重新入队直到预算耗尽，每次重新调用 `Mutate` 都从游标 0 开始按 round-robin 消耗 `cap=MaxPerSeed`（默认 50）个 payload，导致每个参数永远只发送 corpus 前 ~5 条 payload 并无限重复，corpus 剩余条目（各类别 16~39 条）从未被使用。这正是\"请求发了很多但漏洞检出率低\"的核心原因。\n\n5. 没有被用到。依据：`cmd/apistrike/main.go:224` 只调用了 `mutator.NewDictionaryMutator(corpus, userCorpus, mutator.DictionaryConfig{})` 并把它作为唯一 `Mutator` 传入 `manager.NewManager(...)`；全仓库搜索 `NewSchemaMutator` 除定义处外无任何调用点，说明 `SchemaMutator`（类型边界值变异）虽然实现完整且有测试，但从未被组装进生产的 Manager/Runner 依赖链路。"
+}

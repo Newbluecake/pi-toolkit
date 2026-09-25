@@ -1,0 +1,41 @@
+{
+  "id": "edoc1-FULL-r1",
+  "expert": "edoc1",
+  "arm": "FULL",
+  "rep": 1,
+  "nonce": "396092d7",
+  "model": "zai/glm-5.3",
+  "thinkingLevel": "high",
+  "cwd": "/tmp/exp5-repo",
+  "elidedToolResults": 0,
+  "firstRequest": {
+    "input": 57409,
+    "cacheWrite": 0,
+    "cacheRead": 832,
+    "total": 58241,
+    "costUsd": 0.09733972,
+    "opusEq": 0.382636
+  },
+  "perTurn": [
+    {
+      "input": 57409,
+      "output": 3807,
+      "cacheRead": 832,
+      "cacheWrite": 0,
+      "costUsd": 0.09733972,
+      "atMs": 76865
+    }
+  ],
+  "turns": 1,
+  "toolCalls": [],
+  "wallMs": 76866,
+  "costUsd": 0.09733972,
+  "opusEq": 0.382636,
+  "overProdTime": false,
+  "overProdTurns": false,
+  "stopReason": "stop",
+  "leakCalls": [],
+  "answerChars": 2454,
+  "wouldTruncate": true,
+  "answer": "结论：v2 最终口径 =「删除 `can_message`，寻址全放开＋纪律两级（push/board）按接收方状态裁定＋广播恒 1 条看板记录且恒不唤醒＋超限只降级永不拒收」。注意：plan 正文 §0–§14 已被打回「不得据此实施」，一切以 §15 评审处置为准；且需求方已拍板**先跑 baseline-experiment 量化收益、再投工程**。\n\n1. **权限**：彻底删 `can_message`（D-2）。`authorize()` 只留方向性协议规则（result 仅 child 上行、directive 仅 parent 下行、dead_letter 仅 system），其余 kind 任意关系全开；树关系退化为溯源标注，mention 退化为 `@label` 寻址语法糖。广播=1 条 `to:\"board\"` 记录（D-5，恒 O(1)），无权限闸（R3）；roster selector（type/subtree/running）已被 §15.5 裁掉。\n2. **kind**：保留 v1 五个；最终最小集只新增 query/answer/nack（announce 未列入 §15.5 最小集，是否保留需实施前确认）。answer 强制 `evidence`，`replyTo` 复用 MessageKey 作关联。\n3. **纪律**：§15.1 推翻「push=打断一轮」成本模型后由 D-1′ 取代：**按接收方状态**——运行中子 agent→push（steer 并入当前 turn 的下一次 LLM 调用，无额外轮）；root→push 但受 `wakeRoot`+配额；终态→board 或 revive。三级塌缩为两级；`urgent` 取消；闸门 G1 关闭。\n4. **唤醒**：不变量 I-W——仅 direct 点对点可产生 W1（steer）/W2（revive），广播恒不唤醒；W2 另需 `kind===\"query\"`（reviveOnDirectQuery）。revive=`spawn({resumeFrom, slotless, deadlineAt 夹紧})`，`autoReviveMaxPerSession:10`；B2/M8：需专属 owner 锚点+跳过 canSpawn+抑制 notifier，`resumeLocks` 拒绝须由 `reviving` map 转投新 run，label 不得 repoint。root 空闲也可被 push 起轮（wakeRoot:false 则 root 入站全降级 display+board）。\n5. **看板**：D-3 仅当前主 session；`appendEntry` customType `\"subagent:board\"`（复用 pi-outbox-store 模式），session_start 从 prefetched 重建，不跨会话；boardCap 500 / topic 50。B1：启动注入改宿主侧 buildPrompt 拼 prompt（before_agent_start 在子会话不触发）。\n6. **配额**：发送侧 per-kind 配额废弃（legacy 键仅解析为存储上限）；改接收侧 `inboxCap:8`（root 12），满⇒降级不拒收（D-6）；per-link throttle 保留、只推迟；M6：answer/nack 需保留配额或协议 kind 不计入 inboxUsed；§15.4 承认实际只剩**速率上界**非总量上界。\n7. **R2**：`message_agent` 同步返回、任何发送不失败（超限一律降级）；revive fire-and-forget；广播就 1 条记录、无部分失败概念。残余：回复延迟无上界（root 前台最长 600s）；M2：请教 root 仅 `run_in_background` 调度下有效。\n8. **兼容**：旧 frontmatter `can_message` 只 WARN；v1 记录 /reload 迁移须做 M-3（audience undefined 守卫、死信显式 discipline:\"push\"）+M-7（openQueries 从 engine hydrate）；`fabric.enabled` 默认 false 唯一开关；MVP 切 M1(删闸)→M2(纪律)→M3(看板)→M4(问答)→M5(广播)→M6(revive)，但须按 §15.5 裁剪重排；主会话也须注册 message_agent+read_board。\n9. **不做**：阻塞式 consult（slot 死锁/resumeLocks 互等）；跨会话看板（由 memory 承载）；urgent、hop/maxHops（死代码）、mutation+L3 失效预警、scope.symbols、boardSenderSharePct、answered supersede、隐式兴趣域（新 agent 恒空）；不造相关性分类器；§15.6 已推翻「M3 能消大半重复调研」的主张。\n10. **硬约束**：状态机转移表在 `stack.ts:247` 字面量+7 处测试 fixture 逐字复制，M3 建议先写 board 成功再 `put({...state:\"delivered\"})` 直写绕开 lockstep；`mailbox.ts` 有 4 处硬编码 `finding||directive` 的终结分支会静默吞新 kind（M-6）；不可信输入两洞已认账无解法（删闸后可唤醒全工具 root；看板注入=持久化 prompt 注入）；与 quota 并行改动有冻结面要求、§1 行号锚点须改符号锚点；文档语言中英按 AGENTS.md 的 UI/散文分工。"
+}

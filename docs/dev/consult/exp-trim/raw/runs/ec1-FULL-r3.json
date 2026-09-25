@@ -1,0 +1,41 @@
+{
+  "id": "ec1-FULL-r3",
+  "expert": "ec1",
+  "arm": "FULL",
+  "rep": 3,
+  "nonce": "0a923f08",
+  "model": "cr-anthropic/claude-sonnet-5",
+  "thinkingLevel": "medium",
+  "cwd": "/tmp/exp6-snap-apistrike-70dbf25",
+  "elidedToolResults": 0,
+  "firstRequest": {
+    "input": 2,
+    "cacheWrite": 94854,
+    "cacheRead": 1314,
+    "total": 96170,
+    "costUsd": 0.36951269999999997,
+    "opusEq": 0.6158545
+  },
+  "perTurn": [
+    {
+      "input": 2,
+      "output": 894,
+      "cacheRead": 1314,
+      "cacheWrite": 94854,
+      "costUsd": 0.36951269999999997,
+      "atMs": 13760
+    }
+  ],
+  "turns": 1,
+  "toolCalls": [],
+  "wallMs": 13762,
+  "costUsd": 0.36951269999999997,
+  "opusEq": 0.6158545,
+  "overProdTime": false,
+  "overProdTurns": false,
+  "stopReason": "stop",
+  "leakCalls": [],
+  "answerChars": 1319,
+  "wouldTruncate": false,
+  "answer": "1. `Placement`：`PlacementValue`、`PlacementName`、`PlacementHeader`、`PlacementBody`、`PlacementPath`（`internal/mutator/engine.go`）。注意 `PlacementHeader` 是死枚举，实际代码从未赋值它。\n\n2. Header 名为 `X-ApiStrike-Trace`。值由 `runner.go` 中的 `newTraceID()` 生成：读 8 字节随机数 `crypto/rand.Read`，成功则 `hex.EncodeToString` 得到 16 位十六进制字符串；失败则 fallback 为 `\"00000000\" + time.Now().Format(\"150405\")`。生成后在 `dispatch()` 里通过 `req.Header.Set(\"X-ApiStrike-Trace\", traceID)` 写入请求。\n\n3. \n- L2 上报端点：`POST /api/v1/sinks/report`（design.md §3 L2 上报协议部分明确写出）。\n- L3 OOB DNS 监听端口：`:8053`（design.md 原文：\"DNS Listener (:8053) ← 接收 DNS 查询（高端口，用户自行转发 53→8053）\"）。\n\n4. P0-1：Dictionary 变异的 payload 游标每次调用都从 0 重置，导致同一 seed 被 runner 反复重新入队 fuzz 时，永远只发送 corpus 前几条 payload，其余全部从未被使用。\n- 定位：`internal/mutator/dictionary.go:91`（`cursors := make([]int, len(slots))`，局部变量，非跨调用持久状态）；根因触发点是 `internal/runner/runner.go` 主循环里把同一 seed 重新排回调度队列（`r.cfg.Scheduler.Init(append(currentQueue(r.cfg.Scheduler), s))`）后又重新调用 `r.cfg.Mutator.Mutate(...)`。\n\n5. 没有被用到。依据：`internal/mutator/schema.go` 里 `SchemaMutator`/`NewSchemaMutator` 定义完整且有单测，但全仓库搜索 `NewSchemaMutator(` 除定义处外无任何调用；生产入口 `cmd/apistrike/main.go:224` 只组装了 `mut := mutator.NewDictionaryMutator(corpus, userCorpus, mutator.DictionaryConfig{})` 并把它作为唯一 `Mutator` 传给 `manager.NewManager(...)`，没有任何 Composite/多 Mutator 组装逻辑把 `SchemaMutator` 接进去。"
+}

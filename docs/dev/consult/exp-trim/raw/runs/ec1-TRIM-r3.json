@@ -1,0 +1,96 @@
+{
+  "id": "ec1-TRIM-r3",
+  "expert": "ec1",
+  "arm": "TRIM",
+  "rep": 3,
+  "nonce": "650c3fa5",
+  "model": "cr-anthropic/claude-sonnet-5",
+  "thinkingLevel": "medium",
+  "cwd": "/tmp/exp6-snap-apistrike-70dbf25",
+  "elidedToolResults": 16,
+  "placeholders": [
+    "[elided by consult fork: 402 lines / ~5910 tokens of read /tmp/exp6-snap-apistrike-70dbf25/docs/design.md (offset=1 limit=400) output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 78 lines / ~1090 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/seed/seed.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 445 lines / ~6220 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/seed/openapi.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 213 lines / ~2827 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/mutator/schema.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 93 lines / ~1742 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/mutator/engine.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 312 lines / ~4575 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/mutator/dictionary.go (offset=1 limit=400) output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 178 lines / ~2423 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/seed/har.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 123 lines / ~2000 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/seed/paramtype.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 555 lines / ~6632 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/seed/infer.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 655 lines / ~10782 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/runner/runner.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 82 lines / ~1197 tokens of bash cd /tmp/exp6-snap-apistrike-70dbf25 && sed -n '180,260p' cmd/apistrike/main.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 176 lines / ~2832 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/mutator/feedback.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 70 lines / ~1117 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/coverage/report.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 99 lines / ~1521 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/task/model.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 103 lines / ~1370 tokens of read /tmp/exp6-snap-apistrike-70dbf25/internal/mutator/corpus.go output — re-read with the read tool if you need the exact content]",
+    "[elided by consult fork: 51 lines / ~1037 tokens of bash cd /tmp/exp6-snap-apistrike-70dbf25 && sed -n '1,50p' internal/mutator/user_corpus.go output — re-read with the read tool if you need the exact content]"
+  ],
+  "firstRequest": {
+    "input": 2,
+    "cacheWrite": 45374,
+    "cacheRead": 1314,
+    "total": 46690,
+    "costUsd": 0.17745270000000002,
+    "opusEq": 0.2957545
+  },
+  "perTurn": [
+    {
+      "input": 2,
+      "output": 460,
+      "cacheRead": 1314,
+      "cacheWrite": 45374,
+      "costUsd": 0.17745270000000002,
+      "atMs": 7702
+    },
+    {
+      "input": 2,
+      "output": 1119,
+      "cacheRead": 46688,
+      "cacheWrite": 7126,
+      "costUsd": 0.0575199,
+      "atMs": 23223
+    }
+  ],
+  "turns": 2,
+  "toolCalls": [
+    {
+      "name": "grep",
+      "args": {
+        "pattern": "Placement",
+        "path": "/tmp/exp6-snap-apistrike-70dbf25/internal/mutator"
+      }
+    },
+    {
+      "name": "grep",
+      "args": {
+        "pattern": "X-Apistrike|X-ApiStrike|trace|Trace",
+        "path": "/tmp/exp6-snap-apistrike-70dbf25/internal/runner/runner.go"
+      }
+    },
+    {
+      "name": "grep",
+      "args": {
+        "pattern": "/api/|sink|endpoint|DNS|port|53",
+        "path": "/tmp/exp6-snap-apistrike-70dbf25/docs/design.md"
+      }
+    },
+    {
+      "name": "grep",
+      "args": {
+        "pattern": "NewSchemaMutator|NewDictionaryMutator",
+        "path": "/tmp/exp6-snap-apistrike-70dbf25"
+      }
+    }
+  ],
+  "wallMs": 23224,
+  "costUsd": 0.23497260000000003,
+  "opusEq": 0.391621,
+  "overProdTime": false,
+  "overProdTurns": false,
+  "stopReason": "stop",
+  "leakCalls": [],
+  "answerChars": 1637,
+  "wouldTruncate": false,
+  "answer": "**结论**：Placement 有 5 个取值；追踪 header 是 `X-ApiStrike-Trace`；L2 上报端点是 `POST /api/v1/sinks/report`，L3 DNS 监听 `:8053`；P0-1 是 dictionary.go 变异游标每次调用归零导致重复空转；SchemaMutator 只在测试文件被 `NewSchemaMutator()` 调用，生产代码 `cmd/apistrike/main.go` 中未出现，未接入生产链路。\n\n1. **Placement 取值**（`internal/mutator/engine.go:48-52`）：`PlacementValue`(\"value\")、`PlacementName`(\"name\")、`PlacementHeader`(\"header\")、`PlacementBody`(\"body\")、`PlacementPath`(\"path\")。注意 `PlacementHeader` 虽定义但代码里从未被赋值使用（无 header 变异路径）。\n\n2. **追踪 header**：`X-ApiStrike-Trace`（`internal/runner/runner.go:551` `req.Header.Set(\"X-ApiStrike-Trace\", traceID)`）。值由 `newTraceID()` 生成（`runner.go:30-34`），是一个 16 字节的十六进制随机字符串，独立于 marker 体系，用于 L3 OOB 关联及 L2 sink 请求登记（`RegisterRequest(traceID, marker, req)`）。\n\n3. **design.md 依据**：L2 Sink 命中上报端点是 `POST /api/v1/sinks/report`（design.md:45, 141, 304, 790, 821）；L3 OOB 的 DNS 监听端口是 `:8053`（design.md:360 `DNS Listener (:8053)`，docker-compose 里也是 `\"8053:8053\"`，design.md:1069-1072）。\n\n4. **P0-1**：`internal/mutator/dictionary.go:91` 的 `cursors := make([]int, len(slots))` 是每次 `Mutate()` 调用时新建的局部变量，没有跨调用持久化。由于 runner 会把同一 seed 反复重新入队/重新调用 `Mutate`（直到 `MaxRequests`/`MaxDuration` 耗尽），每次调用的 cursor 都从 0 重新开始，导致每个参数在 `MaxPerSeed`（默认 50）限额下的 round-robin 分配总是命中 corpus 里**同样靠前的几条 payload**，corpus 里靠后的条目永远不会被消费到——表现为\"发了很多重复请求，但字典没被真正跑遍\"。\n\n5. **SchemaMutator 未接入生产**：唯一构造调用点是 `NewSchemaMutator()`（`internal/mutator/schema.go:24`），全仓库检索该函数调用只出现在测试文件（`internal/mutator/schema_test.go` 多处）。生产入口 `cmd/apistrike/main.go:224` 只组装了 `mutator.NewDictionaryMutator(...)` 并把它作为唯一 Mutator 传给 runner/manager，没有任何 Composite/组合逻辑把 SchemaMutator 接进去，因此类型边界变异（整数溢出、字符串越界、enum 越权等）在真实运行时不会触发。"
+}
