@@ -114,6 +114,24 @@ describe("computeAdaptiveSignals", () => {
     expect(computeAdaptiveSignals([], 0, NOW).backgroundBashJobs).toBe(0);
   });
 
+  it("counts a running background workflow with its own deadline as the horizon", () => {
+    const signals = computeAdaptiveSignals([], 0, NOW, [{ deadlineAt: (NOW + 3_000_000) as Millis }]);
+    expect(signals).toEqual({ subagentRuns: 1, maxSubagentHorizonMs: 3_000_000, backgroundBashJobs: 0 });
+  });
+
+  it("takes the max horizon across child runs and workflows; a deadline-less workflow is busy but horizon-neutral", () => {
+    const signals = computeAdaptiveSignals([run("running", (NOW + 240_000) as Millis)], 0, NOW, [
+      { deadlineAt: (NOW + 1_800_000) as Millis },
+      {},
+    ]);
+    expect(signals.subagentRuns).toBe(3);
+    expect(signals.maxSubagentHorizonMs).toBe(1_800_000);
+  });
+
+  it("defaults to no workflows (pre-existing three-argument callers unchanged)", () => {
+    expect(computeAdaptiveSignals([], 0, NOW).subagentRuns).toBe(0);
+  });
+
   it("returns all-zero signals for an empty fleet", () => {
     expect(computeAdaptiveSignals([], 0, NOW)).toEqual({
       subagentRuns: 0,

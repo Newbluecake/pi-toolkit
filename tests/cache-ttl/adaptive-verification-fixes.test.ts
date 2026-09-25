@@ -36,6 +36,8 @@ import {
   type CaptureFingerprint,
 } from "../../src/cache-ttl/keepalive-state.js";
 import type { LedgerUsage } from "../../src/cache-ttl/usage-ledger.js";
+import { computeAdaptiveSignals } from "../../src/service/cache-adaptive.js";
+import type { Millis } from "../../src/core/types.js";
 
 const NOW = 1_790_000_000_000;
 const MIN = 60_000;
@@ -705,5 +707,35 @@ describe("R9 round 3 — an UNKNOWN route is never evidence", () => {
     );
     expect(next.max1hSurvivalMs).toBe(0);
     expect(next.lastRouteKey).toBeUndefined();
+  });
+});
+
+// ─── main session × background workflow ────────────────────────────────────
+
+describe("background workflow is a strong signal (main session waiting on SubagentWorkflow)", () => {
+  // The request right after a SubagentWorkflow call sets the TTL for the whole
+  // wait, and at that moment the worker often has no live child run yet (boot,
+  // gate(), gap between children). Only the workflow itself is observable.
+  const workflowOnly = (deadlineInMs: number) =>
+    signals(computeAdaptiveSignals([], 0, NOW as Millis, [{ deadlineAt: (NOW + deadlineInMs) as Millis }]));
+
+  it("control: no child run and no workflow ⇒ nothing observable ⇒ no-signal", () => {
+    const d = decide({ signals: signals(computeAdaptiveSignals([], 0, NOW as Millis)), keepaliveHorizonMs: undefined });
+    expect(d).toMatchObject({ upgrade: false, reason: "no-signal" });
+  });
+
+  it("a workflow with no live child yet earns the upgrade on its own horizon (keepalive off)", () => {
+    const d = decide({ signals: workflowOnly(55 * MIN), keepaliveHorizonMs: undefined });
+    expect(d).toMatchObject({ upgrade: true, class: "warm" });
+  });
+
+  it("a workflow about to hit its deadline is not a long horizon", () => {
+    const d = decide({ signals: workflowOnly(2 * MIN), keepaliveHorizonMs: undefined });
+    expect(d).toMatchObject({ upgrade: false, reason: "fee-horizon-too-short" });
+  });
+
+  it("F1 still arbitrates: keepalive covering every seen gap ⇒ keepalive-covers, no entry fee", () => {
+    const d = decide({ signals: workflowOnly(55 * MIN), keepaliveHorizonMs: HORIZON });
+    expect(d).toMatchObject({ upgrade: false, reason: "keepalive-covers" });
   });
 });

@@ -79,6 +79,16 @@ export interface AdaptiveExternalSignals {
  * status list, so a future `RunStatus` member cannot silently be counted as
  * live. A run with no deadline at all contributes to the count but not to the
  * horizon — it is busy, but tells us nothing about *how long*.
+ *
+ * Background workflows (`workflows`, the RUNNING-only `WorkflowActivityRegistry.list()`)
+ * count as subagent work too, with the workflow's own absolute deadline as the
+ * horizon. Without this, the main session's request right after a
+ * `SubagentWorkflow` call — the one that sets the TTL for the whole wait — often
+ * saw zero live runs (worker still booting, a `gate()` running, or a gap between
+ * children) and was refused with `fee-horizon-too-short`; keepalive's
+ * `backgroundBusy` already counted workflows, adaptive did not. A workflow and
+ * its live children may both be counted: decisions only test `> 0` and the max
+ * horizon, so the double count is cosmetic (audit numbers only).
  */
 export function computeAdaptiveSignals(
   runs: readonly {
@@ -87,19 +97,23 @@ export function computeAdaptiveSignals(
   }[],
   backgroundBashJobs: number,
   now: Millis,
+  workflows: readonly { readonly deadlineAt?: Millis | undefined }[] = [],
 ): AdaptiveExternalSignals {
   let subagentRuns = 0;
   let maxSubagentHorizonMs: number | undefined;
-  for (const run of runs) {
-    if (isTerminalStatus(run.status)) continue;
+  const consider = (at: Millis | undefined): void => {
     subagentRuns += 1;
-    // The hard deadline is the one the reaper actually enforces, so it bounds
-    // the run's real horizon; fall back to the soft deadline when unset.
-    const at = run.deadlines.hardDeadlineAt ?? run.deadlines.deadlineAt;
-    if (at === undefined) continue;
+    if (at === undefined) return;
     const remaining = at - now;
     if (maxSubagentHorizonMs === undefined || remaining > maxSubagentHorizonMs) maxSubagentHorizonMs = remaining;
+  };
+  for (const run of runs) {
+    if (isTerminalStatus(run.status)) continue;
+    // The hard deadline is the one the reaper actually enforces, so it bounds
+    // the run's real horizon; fall back to the soft deadline when unset.
+    consider(run.deadlines.hardDeadlineAt ?? run.deadlines.deadlineAt);
   }
+  for (const workflow of workflows) consider(workflow.deadlineAt);
   return { subagentRuns, maxSubagentHorizonMs, backgroundBashJobs };
 }
 
