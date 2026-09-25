@@ -25,16 +25,18 @@
 - 批量派 dev 前必须先过[冲突预检](./parallel-safety.md#二冲突预检多写包并行前必做四步)：
   把 `args.tasks` 的文件域分配表跑一遍 `conflict-check.mjs`，交集任务重切或标 `worktree: true`，
   分配表四件事写进每个任务的 prompt。
+- `SubagentWorkflow` 派发**不支持 `experts`**（workflow 子 run 拿不到 consult 工具）：按 SKILL.md「挂专家」矩阵
+  必须挂专家的包（L3 写包、打回重派、换模型接手）不进 workflow，改用 `Agent` 同消息并行派。
 - `SubagentWorkflow` 一律**后台运行**：调用立即返回 `wf_…` 工作流 ID，终态时推送完成通知；
   通知到达后用 `get_subagent_result(run_id: "wf_…")` 取完整结果，需要中途叫停用 `abort_subagent`。
   不要轮询或 `wait` 干等——主会话在工作流运行期间照常接收用户输入、可以做别的事。
 
 ## 模型映射与回退
 
-Explore=`cr-anthropic/claude-sonnet-5`，Plan=`kimi-coding/k3-256k`，
-reviewer=`kimi-coding/k3-256k`（与制定模型撞车时改 `cr-anthropic/claude-opus-5`），
-dev=`kimi-coding/k3-256k`，verifier=`kimi-coding/k3-256k`（与 dev 撞车时改 sonnet）；
-GPT 系（gpt-sol / gpt-terra / gpt-6）只作最后兜底。
+Explore=`zai-coding-cn/glm-5.3`（→ `zai/glm-5.3` → sonnet），Plan=`kimi-coding/k3-256k`，
+reviewer=`cr-anthropic/claude-opus-5-5`（方案用 opus 档时改 `kimi-coding/k3-256k`），
+dev=`kimi-coding/k3-256k`，verifier=`zai-coding-cn/glm-5.3`（dev 用 glm 时改 `cr-anthropic/claude-sonnet-5`）；
+GPT 系（gpt-sol / gpt-terra / gpt-6）只作最后兜底。以 SKILL.md「各阶段模型分工」表为准。
 
 `agent()` 返回 `null` 不区分「用户跳过」与「模型失败」；严格按序回退由主会话根据失败通知重派，
 workflow 内不做无脑 fallback。
@@ -54,7 +56,7 @@ const results = await pipeline(
     agent(t.prompt, {
       label: `dev:${t.id}`,
       phase: "Implement",
-      agentType: t.agentType || "general-purpose",
+      agentType: t.agentType || "general",
       model: t.devModel || "kimi-coding/k3-256k",
       effort: "medium",
       gate: t.gate,
@@ -66,7 +68,7 @@ const results = await pipeline(
       label: `verify:${t.id}`,
       phase: "Verify",
       agentType: "verifier",
-      model: t.verifyModel || "kimi-coding/k3-256k",
+      model: t.verifyModel || "zai-coding-cn/glm-5.3",
       effort: "medium",
     }).then((verify) => ({ task: t.id, dev, verify })),
 );

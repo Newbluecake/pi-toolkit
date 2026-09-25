@@ -1,6 +1,6 @@
 ---
 name: dev-flow
-description: 日常开发任务的标准工作流与模型调度规范（按复杂度打分定车道：L0 直改/L1 快车道/L2 标准/L3 复杂，各车道闸门与流程不同；需求澄清→代码探索→架构设计→方案制定→方案评审→前端开发→开发→验收，每阶段用性价比最合适的模型，能并行的任务同消息并行派发以压缩总时长）。当开始一个开发任务（新功能、bug 修复、重构）、需要决定"用哪个模型做探索/架构设计/方案/评审/前端开发/开发/验收"或哪些任务可以并行、如何加快开发速度，或用户提到开发流程、模型分工、模型路由、并行派发、代码探索、架构设计、方案制定、方案评审、前端开发、任务验收时使用。需求模糊时先走 dev-clarify 澄清再进入本流程。
+description: 日常开发任务的标准工作流与模型调度规范（按复杂度打分定车道：L0 直改/L1 快车道/L2 标准/L3 复杂，各车道闸门与流程不同；需求澄清→代码探索→架构设计→方案制定→方案评审→前端开发→开发→验收，每阶段用性价比最合适的模型，能并行的任务同消息并行派发以压缩总时长）。当开始一个开发任务（新功能、bug 修复、重构）、需要决定"用哪个模型做探索/架构设计/方案/评审/前端开发/开发/验收"或哪些任务可以并行、下游要不要挂 consult 专家、如何加快开发速度，或用户提到开发流程、模型分工、模型路由、并行派发、代码探索、架构设计、方案制定、方案评审、前端开发、任务验收、consult/专家时使用。需求模糊时先走 dev-clarify 澄清再进入本流程。
 metadata:
   scope: user-level
   orchestrator: pi Agent tool（SubagentWorkflow 仅作可选批量执行器）
@@ -34,7 +34,8 @@ metadata:
    **每轮派单前必须先做并行自检**（流程见「并行调度」节）；选择串行必须能指出具体硬依赖
    （谁消费谁的产物、谁和谁写同一文件），「稳妥起见一个个来」「先看看结果再说」不是合法的
    串行理由——不依赖结果的任务不许等结果。
-5. **评审独立性**：评审模型 ≠ 方案制定模型；验收模型 ≠ 开发模型。
+5. **评审独立性**：评审模型 ≠ 方案制定模型；验收模型 ≠ 开发模型（走回退链时跳过与被评对象同系的模型）；
+   评审/验收不得靠 consult 被评对象的作者来判定对错（见「挂专家」节）。
 6. **先澄清后规划**：需求模糊必须先走 `dev-clarify`（HARD GATE），禁止拿模糊需求派 Plan。
 7. **workflow 不越权**：`SubagentWorkflow` 只用于已确认方案后的批量执行或阶段内 fan-out，
    用户闸门必须留在主会话。
@@ -75,6 +76,17 @@ kimi-k3 → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [as
 
 派单前参考系统注入的 [quota] 行：订阅额度窗口内不用就作废，**优先用完订阅**——L1/L2（预警）只是提示，派单照常；只有 L3（≥90% 或即将耗尽）才跳过该 provider。[quota] 给出的替代只是**候选**（按订阅优先排序），额度层不知道任务需求：先判断候选是否胜任本阶段任务（对照本表的阶段→模型路由），胜任就优先用订阅；不胜任就按本表另选合适模型，不为用额度而硬凑。额度行不存在时按本表默认顺序。
 
+## 第 0 步：需求澄清（dev-clarify）
+
+需求模糊（一句话想法、目标/边界/验收标准不清）时先跑 `/skill:dev-clarify <需求>`。
+
+- **主会话内运行，不派 subagent**：靠 `ask_user` 多轮交互，模型用主会话当前模型。
+  也可独立运行 `node ~/.agents/skills/dev-clarify/scripts/clarify.mjs "<需求>"`。
+- **提速**：进入交互前先后台派一个 Explore 摸现状，澄清完成时探索结论已就绪。
+- **产出分流**：`simple` → L0/L1 直接开发；`standard/complex` → 产出
+  `docs/dev/{feature}/{feature}-requirements.md`，回本流程定车道，派 Plan 时把该路径写进 prompt。
+- **两道独立闸门**：dev-clarify 的「澄清未确认禁止实施」与本流程的「方案未确认禁止开发」都不能跳。
+
 ## 第一步：定车道（先打分，再谈流程）
 
 ### 复杂度速评（10 秒打分卡）
@@ -113,22 +125,22 @@ kimi-k3 → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [as
   prompt 声明的文件域；发现隐藏的跨模块/契约影响。
 - **降级（只允许降流程，不允许降闸门）**：方案确认后实际改动面缩水到 L1 范围，可跳过评审环节，
   但「一票升级」命中的任务任何情况下不得降级。
-- 升级时已有产物（探索结论、微方案）直接带入新车道复用，不推倒重来。
+- 升级时已有产物（探索结论、微方案）直接带入新车道复用，不推倒重来；升级后的 Plan 挂原 dev run 为专家。
 
 ## 各阶段模型分工
 
-| 阶段                   | 首选     | 次选                                          | 说明                                                                                                   |
-| ---------------------- | -------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **核心调度**（主会话） | kimi-k3  | opus-5.5 → opus-5                             | 任务拆解、派单、汇总；启动时 `--model kimi-coding/k3-256k` 或 Ctrl+P                                   |
-| **代码探索**           | glm-5.3  | sonnet → gpt-terra（兜底）                    | `subagent_type=Explore`，只读定位代码/梳理调用链                                                       |
-| **架构设计**           | opus-5.5 | opus-5 → gpt-6（兜底）；简单 → kimi-k3        | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                  |
-| **方案制定**           | kimi-k3  | opus-5.5 → opus-5 → gpt-sol                   | `subagent_type=Plan`                                                                                   |
-| **前端开发**           | kimi-k3  | opus-5.5 → opus-5                             | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose |
-| **复杂任务方案**       | opus-5.5 | opus-5 → gpt-6（兜底）                        | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                              |
-| **疑难攻坚**           | opus-5.5 | gpt-6（兜底）                                 | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                         |
-| **方案评审**           | kimi-k3  | opus-5.5 → opus-5 → glm-5.3 → gpt-sol（兜底） | `subagent_type=reviewer`，制定用 k3 系时评审改 opus-5.5；L3 用 opus-5.5                                |
-| **开发实施**           | kimi-k3  | glm-5.3 → sonnet → gpt-sol（兜底）            | `subagent_type=general-purpose`                                                                        |
-| **任务验收**           | kimi-k3  | glm-5.3 → sonnet → gpt-sol（兜底）            | `subagent_type=verifier`，开发用 k3 系时验收改 glm-5.3；开发用 glm-5.3 时验收改 sonnet                 |
+| 阶段                   | 首选     | 次选                                         | 说明                                                                                                   |
+| ---------------------- | -------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **核心调度**（主会话） | kimi-k3  | opus-5.5 → opus-5                            | 任务拆解、派单、汇总；启动时 `--model kimi-coding/k3-256k` 或 Ctrl+P                                   |
+| **代码探索**           | glm-5.3  | sonnet → gpt-terra（兜底）                   | `subagent_type=Explore`，只读定位代码/梳理调用链；glm 专家被 consult 也最便宜                          |
+| **架构设计**           | opus-5.5 | opus-5 → gpt-6（兜底）；简单 → kimi-k3       | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                  |
+| **方案制定**           | kimi-k3  | opus-5.5 → opus-5 → gpt-sol                  | `subagent_type=Plan`                                                                                   |
+| **前端开发**           | kimi-k3  | opus-5.5 → opus-5                            | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose |
+| **复杂任务方案**       | opus-5.5 | opus-5 → gpt-6（兜底）                       | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                              |
+| **疑难攻坚**           | opus-5.5 | gpt-6（兜底）                                | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                         |
+| **方案评审**           | opus-5.5 | opus-5 → kimi-k3 → glm-5.3 → gpt-sol（兜底） | `subagent_type=reviewer`；方案用 k3 系（L1/L2 默认）→ opus-5.5；方案用 opus 档（L3）→ kimi-k3 起步     |
+| **开发实施**           | kimi-k3  | glm-5.3 → sonnet → gpt-sol（兜底）           | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                            |
+| **任务验收**           | glm-5.3  | sonnet → kimi-k3 → gpt-sol（兜底）           | `subagent_type=verifier`；开发用 k3 系（默认）→ glm-5.3；开发用 glm-5.3 → sonnet                       |
 
 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier /
 general / Explore），自带角色 prompt 与工具约束；调用时传 `subagent_type` 并按本表传 `model`。
@@ -155,7 +167,7 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 ### L1 快车道（1-2 轮 subagent）
 
 ```
-1. （改动点不明时）主会话 grep/read 定位，或派一个 Explore(sonnet, thinking=low)
+1. （改动点不明时）主会话 grep/read 定位，或派一个 Explore(glm-5.3, thinking=low)
 2. 派 dev（kimi-k3），prompt 要求：动手前先输出 3 行微方案
    （改哪几个文件 / 怎么改 / 跑什么命令验证），然后一气改完
 3. 自验前移写死：dev 必须跑指定验证命令并贴真实输出
@@ -170,12 +182,13 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 ```
 0. 需求模糊 → 主会话内跑 /skill:dev-clarify（同时后台预热 Explore）
 1. 主会话定车道 + TaskCreate 建 todo
-2‖3. 同一条消息派：Explore(sonnet) ‖ Plan(kimi-k3)
+2‖3. 同一条消息派：Explore(glm-5.3) ‖ Plan(kimi-k3)
      —— 改动点未知、方案强依赖探索结论时才退化为先 Explore 后 Plan
-4‖5. 方案到手：立刻贴给用户确认，同时后台派 reviewer(kimi-k3/opus-5.5)
+4‖5. 方案到手：立刻贴给用户确认，同时后台派 reviewer(opus-5.5，可挂 Plan 为专家)
      —— 用户读方案的时间 = 评审时间；两者都通过才开工（HARD GATE）
-6. 并行开发：按文件域拆包，同消息派多个 dev / frontend-dev（先过冲突预检）
-7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier 只读 diff
+6. 并行开发：按文件域拆包，同消息派多个 dev / frontend-dev（先过冲突预检）；
+   按「挂专家」矩阵决定是否 `experts: [Plan]`
+7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier(glm-5.3) 只读 diff
 9. 主会话汇总验收结论，报告用户
 ```
 
@@ -187,28 +200,74 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
    —— 可与 Explore 同消息并行
 3. Plan 升级 opus-5.5（不可用时 opus-5），prompt 给出 arch.md 与 Explore 产物路径
    —— 方案被 reviewer 判 Blocker 且 opus-5.5 二次仍不过，才 ask_user 批准后升 fable
-4‖5. 评审（opus-5.5 / gpt-sol，须与方案模型不同）∥ 用户确认（HARD GATE）
-6. 冲突预检 → 按文件域拆 ≥2 个写包同消息派 dev；跨包共享文件进冻结面
+4‖5. 评审（kimi-k3 → gpt-sol，须与方案模型 opus 档不同）∥ 用户确认（HARD GATE）
+6. 冲突预检 → 按文件域拆 ≥2 个写包同消息派 dev；跨包共享文件进冻结面；
+   每个写包挂 `experts: [architect, Plan]`（L3 方案取舍多，默认必挂）
 7. 每包 dev 返回即派对应 verifier 验收（不等全部完成），主会话后台跑全量测试
-8. 全部验收通过后主会话汇总；任一包被打回只重派该包，不回退整体
+8. 全部验收通过后主会话汇总；任一包被打回只重派该包（挂上一轮 dev + 打回它的 verifier），不回退整体
 ```
 
 ## 免等手法（照抄）
 
-| 手法            | 做法                                                                                   | 省下     |
-| --------------- | -------------------------------------------------------------------------------------- | -------- |
-| 澄清期预热探索  | 进 `dev-clarify` 交互前先后台派 Explore；澄清结束时现状摘要已就绪                      | 一轮探索 |
-| Explore ∥ Plan  | 目标明确时同消息派，把已知文件清单/线索直接写进 Plan 的 prompt                         | 一轮     |
-| 评审 ∥ 用户确认 | 方案一到手立刻呈现给用户 + 同时后台派 reviewer                                         | 一轮评审 |
-| 前端 ∥ 后端     | 文件域不交叉时 frontend-dev 与 general-purpose 同消息派                                | 一轮     |
-| 验收 ∥ 测试     | 主会话 `bash_job` 后台跑全量测试，verifier 同时只读 diff + 跑定向命令                  | 一轮     |
-| 自验前移        | dev prompt 写死「改完必须跑 X 命令并贴真实输出」                                       | 一次返工 |
-| 产物落盘        | Explore/Plan 结果写 `docs/dev/<feature>/`，下游 prompt 给路径而非复述                  | 大量读码 |
-| 下游挂专家      | 派开发/评审/验收时传 `experts: [探索/方案 agent 的 label]`，决策与否决理由按需 consult | 整段复述 |
-| 长尾截断        | 给 `Agent` 传 `timeout_ms`（dev 约 15min）；超时不续等，拆小重派或换模型               | 尾部空等 |
+| 手法            | 做法                                                                              | 省下     |
+| --------------- | --------------------------------------------------------------------------------- | -------- |
+| 澄清期预热探索  | 进 `dev-clarify` 交互前先后台派 Explore；澄清结束时现状摘要已就绪                 | 一轮探索 |
+| Explore ∥ Plan  | 目标明确时同消息派，把已知文件清单/线索直接写进 Plan 的 prompt                    | 一轮     |
+| 评审 ∥ 用户确认 | 方案一到手立刻呈现给用户 + 同时后台派 reviewer                                    | 一轮评审 |
+| 前端 ∥ 后端     | 文件域不交叉时 frontend-dev 与 general 同消息派                                   | 一轮     |
+| 验收 ∥ 测试     | 主会话 `bash_job` 后台跑全量测试，verifier 同时只读 diff + 跑定向命令             | 一轮     |
+| 自验前移        | dev prompt 写死「改完必须跑 X 命令并贴真实输出」                                  | 一次返工 |
+| 产物落盘        | Explore/Plan 结果写 `docs/dev/<feature>/`，下游 prompt 给路径而非复述             | 大量读码 |
+| 下游挂专家      | 按「挂专家」矩阵传 `experts`，决策/否决理由/失败原因由下游按需 consult            | 整段复述 |
+| 长尾截断        | 给 `Agent` 传 `timeout_s`（dev 约 900）；这是硬上限不可延长，超时拆小重派或换模型 | 尾部空等 |
 
 **评审 ∥ 确认的补充规则**：用户先点头、reviewer 后报出 Blocker 时，必须停下重新确认，
 不得以「用户已同意」为由带病开工。
+
+## 挂专家（consult）：何时必须传 `experts`
+
+**判据**：下游要的知识 ① 只存在于某个已派 subagent 的会话里、② 读代码读不到、③ 交接包写不全——
+三条同时成立就挂。能写进 prompt / 落盘文档的先写（推永远比拉稳：推 7.0/7，拉 6.5/7，
+都不给时下游被现有代码带偏只有 2.0/7）。读不到的典型是：**拍板过的决策、否决过的方案及理由、
+用户偏好、上一轮失败原因与已排除的假设**。
+
+### 场景矩阵
+
+| 场景                                                  | 下游               | 挂谁（`experts`）                            | 要求     | 理由                                         |
+| ----------------------------------------------------- | ------------------ | -------------------------------------------- | -------- | -------------------------------------------- |
+| 打回重派（reviewer Blocker / verifier 打回）          | 重派的 Plan / dev  | 上一轮 Plan/dev + 打回它的 reviewer/verifier | **必须** | 试过的路、打回判据不在代码里；不挂就重蹈覆辙 |
+| 疑难升级 / 回退链换模型接手半成品                     | 接手的 agent       | 前面失败或超时的 run（终态即可挂）           | **必须** | 已排除的假设最贵，重新排查一遍整轮白跑       |
+| 车道升级 L1 → L2                                      | Plan               | L1 的 dev run                                | **必须** | 升级原因（冻结面、取舍点）只在它的会话里     |
+| L3 开发写包                                           | dev / frontend-dev | architect + Plan                             | **必须** | 取舍点多，交接包必然写不全                   |
+| L2 开发写包：方案经评审修订、用户改过、或 ≥2 个取舍点 | dev / frontend-dev | Plan                                         | **必须** | 最终口径与作废口径并存，下游易按旧口径做     |
+| L2 开发写包：方案直白、一次通过                       | dev / frontend-dev | Plan                                         | 可选     | 交接包够用时挂着也几乎不花钱，不问不收费     |
+| 方案评审                                              | reviewer           | Plan（L3 另加 architect）                    | 推荐     | 只问「为什么这样定 / 否决了什么」，减少误报  |
+| 任务验收                                              | verifier           | Plan（L3 另加 architect）                    | 推荐     | 只问验收判据的意图                           |
+
+### 禁挂 / 不必挂
+
+- **被验收对象的作者**：verifier 不挂它验收的 dev（dev 会替自己辩护）。reviewer / verifier 挂 Plan 时只许问
+  意图与否决理由，不得问「这样对不对」——独立性（铁律 5）优先，结论必须自己取证。
+- **正在并行运行的兄弟写包**：互相请教会把接口分歧藏进对话；共享接口进冻结面，由主会话统一推送。
+- **L0 / L1**：微方案自足；L1 前置 Explore 的结论直接写进 dev prompt。
+- **只产出文件坐标/调用链的 Explore**：代码可读，推 fileIndex 就够（它 ruledOut 了大量排查路径时例外）。
+- **知识在主会话或用户对话里**（dev-clarify 结论、用户口头偏好）：主会话不是 run，挂不了——
+  必须写进 requirements 文档或 prompt。
+- **`SubagentWorkflow` 子任务**：workflow 派发不支持 `experts`；需要 consult 的包改用 `Agent` 派。
+
+### 挂载纪律
+
+1. **先推后拉**：文件坐标、关键结论、验收标准照样写进 prompt；`experts` 只补残差，不替代交接包。
+2. **只挂 1-2 个最相关的**：每次请教都要重放专家整段上下文（glm 专家单次 < $0.05；Claude 专家首轮写缓存，
+   19k ≈ sonnet $0.07，长会话按比例涨；默认帽 3 轮 / $4）。挂多了下游也不知道该问谁。
+3. **prompt 里写一句「哪类问题该 consult」**（上面列的几类读不到的知识），代码能查的让它自己 grep；
+   专家的 label / 类型 / 任务摘要由 consult 工具自动列出，不必复述。
+4. **上游起好可辨识的 label**（`Agent` 的 description，如 `plan:auth-refresh`）；重名歧义时改传 run_id。
+5. 上游还在运行也能挂（带警告，结束后才可问），但下游开工依赖其结论时仍要等 barrier。
+6. **不挂就别暗示**：没给 `experts` 时，prompt 里不要写「方案另有未展开的决策」之类的话，
+   下游会去翻会话记录等不该碰的地方。
+
+证据与机制细节见 `agent-handoff` skill「可选：让下游能向掌握知识的 agent 请教」。
 
 ## 提速反模式（禁止）
 
@@ -222,6 +281,8 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 - 让 verifier 重跑全量测试（应主会话后台跑，verifier 只读 diff + 定向命令取证）。
 - 无文件交集却上 `isolation: "worktree"`，白白增加合并成本。
 - ≤3 个子任务还去写 `SubagentWorkflow` 脚本（同消息 3 个 `Agent` 调用更快）。
+- 打回重派 / 换模型接手时不挂上一轮 run 为专家，让新 agent 把已排除的路再踩一遍。
+- 把所有上游一股脑挂成 `experts`，或拿 consult 替代交接包（文件坐标、验收标准不写进 prompt）。
 
 ## 并行调度（要点）
 
@@ -275,11 +336,7 @@ node ~/.agents/skills/dev-flow/scripts/conflict-check.mjs spec.json --cwd <仓�
   项目规范（发版铁律、测试命令等），不要只写「基于你的发现做 X」。
 - **trust but verify**：subagent 报「完成」不代表真完成；自报的用例数/失败数经常失真，
   验收必须自己跑命令取证。
-- **下游挂专家（consult）**：机制与约束见 `Agent` 工具的 `experts` 参数说明，这里只管策略。在流程里的位置：
-  探索/方案 agent 结束后，派开发、评审、验收时把它们挂成 `experts`；先推后拉——代码位置、关键结论
-  仍写进交接包，consult 只补交接包写不全的拍板决策/否决理由/用户偏好。成本：glm 专家单次 < $0.05；
-  Claude 专家首轮要写缓存整段专家上下文（19k ≈ sonnet $0.07，长会话按比例涨）。证据与细节见
-  `agent-handoff` skill「可选：让下游能向掌握知识的 agent 请教」。
+- **下游挂专家（consult）**：何时必挂/挂谁/何时禁挂见「挂专家」节；机制与约束见 `Agent` 工具的 `experts` 参数说明。
 - **省略 model**：不需要指定时直接省略，让 subagent 继承默认配置，不要猜。
 
 ## thinking 级别
@@ -296,17 +353,6 @@ node ~/.agents/skills/dev-flow/scripts/conflict-check.mjs spec.json --cwd <仓�
 模型档位限制：`claude-opus-5-5` 与 `claude-opus-5` 同为自适应思考，支持到 `xhigh` / `max`；
 `gpt-6-astra` 不支持 `off`（API 拒绝 `reasoning.effort: "none"`，400），
 最低 `low`；支持 `low` / `medium` / `high` / `xhigh` / `max`。
-
-## 第 0 步：需求澄清（dev-clarify）
-
-需求模糊（一句话想法、目标/边界/验收标准不清）时先跑 `/skill:dev-clarify <需求>`。
-
-- **主会话内运行，不派 subagent**：靠 `ask_user` 多轮交互，模型用主会话当前模型。
-  也可独立运行 `node ~/.agents/skills/dev-clarify/scripts/clarify.mjs "<需求>"`。
-- **提速**：进入交互前先后台派一个 Explore 摸现状，澄清完成时探索结论已就绪。
-- **产出分流**：`simple` → L0/L1 直接开发；`standard/complex` → 产出
-  `docs/dev/{feature}/{feature}-requirements.md`，回本流程定车道，派 Plan 时把该路径写进 prompt。
-- **两道独立闸门**：dev-clarify 的「澄清未确认禁止实施」与本流程的「方案未确认禁止开发」都不能跳。
 
 ## 参考与协作
 
