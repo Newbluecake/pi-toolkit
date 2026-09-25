@@ -194,7 +194,10 @@ export const AgentToolParams = Type.Object({
         "consult tool — e.g. an upstream agent whose decisions it needs. Entries are resolved at dispatch " +
         "time: unresolvable or ambiguous entries fail the dispatch (use the run_id to disambiguate); " +
         "still-running entries are accepted with a warning and become consultable once they finish. " +
-        "The consulted copy is read-only and runs in the consulting agent's checkout.",
+        "The consulted copy is read-only and runs in the consulting agent's checkout. " +
+        "Use it when the subagent needs what an upstream agent holds but cannot be read from code " +
+        "(decisions, rejected alternatives, user preferences); say in the task prompt what each expert knows, " +
+        "and still put file locations and key conclusions in the prompt itself.",
     }),
   ),
 });
