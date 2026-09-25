@@ -227,11 +227,19 @@ export function formatWorkflowSummary(outcome: WorkflowOutcome, totalUsage?: Usa
 const MAX_CHILD_PREVIEW = 2_048;
 const MAX_TOTAL_PREVIEW = 32_768;
 
-function renderChildren(children: WorkflowOutcome["children"]): string {
+/**
+ * `omitCompletedPreviews`: when the script returned a `result`, a completed
+ * child's text already reached the caller through it (or was deliberately
+ * condensed away by the script) — repeating up to 32 KiB of previews would
+ * just duplicate `result`. Non-completed children keep their preview: their
+ * `agent()` call resolved to `null`, so that text never made it into `result`.
+ */
+function renderChildren(children: WorkflowOutcome["children"], omitCompletedPreviews = false): string {
   let budget = MAX_TOTAL_PREVIEW;
   const lines: string[] = [];
   for (const c of children) {
-    const preview = c.textPreview ? c.textPreview.slice(0, MAX_CHILD_PREVIEW) : "";
+    const showPreview = !(omitCompletedPreviews && c.status === "completed");
+    const preview = showPreview && c.textPreview ? c.textPreview.slice(0, MAX_CHILD_PREVIEW) : "";
     let line = `  - [${c.status}${c.source === "replay" ? "/replay" : ""}] ${c.label ?? c.callId}${preview ? `: ${preview}` : ""}`;
     if (line.length > budget) {
       line = `${line.slice(0, Math.max(0, budget))}\u2026(truncated, see get_subagent_result for the full run)`;
@@ -270,11 +278,18 @@ function renderOutcomeText(outcome: WorkflowOutcome): string {
     );
   }
   if (outcome.result !== undefined) {
-    parts.push(`result: ${typeof outcome.result === "string" ? outcome.result : JSON.stringify(outcome.result)}`);
+    // Strings verbatim; structured values pretty-printed (2-space) on their own lines so nested
+    // objects stay readable. A primitive/empty value stays inline (`result: 42`).
+    const r = outcome.result;
+    const rendered = typeof r === "string" ? r : (JSON.stringify(r, null, 2) ?? String(r));
+    parts.push(rendered.includes("\n") ? `result:\n${rendered}` : `result: ${rendered}`);
   }
   if (outcome.error) parts.push(`error: ${outcome.error.message}`);
-  if (outcome.children.length)
-    parts.push(`children (${outcome.children.length}):\n${renderChildren(outcome.children)}`);
+  if (outcome.children.length) {
+    const hasResult = outcome.result !== undefined;
+    const note = hasResult ? ", completed outputs omitted \u2014 see result or get_subagent_result" : "";
+    parts.push(`children (${outcome.children.length}${note}):\n${renderChildren(outcome.children, hasResult)}`);
+  }
   if (outcome.orphanChildren?.length) parts.push(`orphaned children: ${outcome.orphanChildren.length} (see diag)`);
   if (outcome.replay) {
     parts.push(

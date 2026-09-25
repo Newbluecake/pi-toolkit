@@ -481,3 +481,69 @@ describe("M10: live tool-card progress (onUpdate)", () => {
     expect((result.details as { status: string }).status).toBe("completed");
   }, 15_000);
 });
+
+describe("SubagentWorkflow tool: outcome text does not duplicate child output already in result", () => {
+  function toolFor(outcome: WorkflowOutcome) {
+    const orch: Orchestrator = {
+      run: async () => outcome,
+      stop: async () => ({ ok: true }),
+      outcomeAt1: () => undefined,
+      settled: async () => outcome,
+    };
+    return createWorkflowTool({
+      defaultBudget: { ...REAL_BUDGET, workflowTotalMs: 1_000, terminateConfirmMs: 50 },
+      activity: createWorkflowActivityRegistry(),
+      createOrchestrator: () => orch,
+    });
+  }
+  const script = 'export const meta={name:"t",description:"t"};\nreturn 1;';
+  const child = (
+    label: string,
+    status: WorkflowOutcome["children"][number]["status"],
+    textPreview?: string,
+  ): WorkflowOutcome["children"][number] => ({
+    callId: `c-${label}`,
+    label,
+    source: "live",
+    status,
+    durationMs: 10,
+    ...(textPreview !== undefined ? { textPreview } : {}),
+  });
+
+  it("with a result: completed children show status only; failed children keep their preview", async () => {
+    const tool = toolFor(
+      fakeOutcome({
+        result: { a: "ALPHA-OUTPUT" },
+        children: [child("a", "completed", "ALPHA-OUTPUT"), child("b", "failed", "BETA-ERROR-DETAIL")],
+      }),
+    );
+    const text = ((await tool.execute("c", { script }, undefined)).content[0] as { text: string }).text;
+    expect(text.match(/ALPHA-OUTPUT/g)).toHaveLength(1); // only inside result:
+    expect(text).toContain("  - [completed] a\n");
+    expect(text).toContain("  - [failed] b: BETA-ERROR-DETAIL");
+    expect(text).toContain("children (2, completed outputs omitted");
+  });
+
+  it("a structured result is pretty-printed on its own lines; a primitive stays inline", async () => {
+    const obj = { a: "x", n: [1, 2] };
+    const text = (
+      (await toolFor(fakeOutcome({ result: obj })).execute("c", { script }, undefined)).content[0] as {
+        text: string;
+      }
+    ).text;
+    expect(text).toContain(`result:\n${JSON.stringify(obj, null, 2)}`);
+    const inline = (
+      (await toolFor(fakeOutcome({ result: 42 })).execute("c", { script }, undefined)).content[0] as {
+        text: string;
+      }
+    ).text;
+    expect(inline).toContain("result: 42");
+  });
+
+  it("without a result: completed children keep their preview (it is the only place the output shows up)", async () => {
+    const tool = toolFor(fakeOutcome({ children: [child("a", "completed", "ALPHA-OUTPUT")] }));
+    const text = ((await tool.execute("c", { script }, undefined)).content[0] as { text: string }).text;
+    expect(text).toContain("  - [completed] a: ALPHA-OUTPUT");
+    expect(text).toContain("children (1):");
+  });
+});
