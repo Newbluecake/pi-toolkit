@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { createSpawnService } from "../../src/service/spawn-service.js";
 import { CONSULT_MAIN_AGENT_TYPE } from "../../src/core/types.js";
 import type { AgentTypeConfig, RunOutcome, StopCause } from "../../src/core/types.js";
@@ -60,6 +60,10 @@ function controllableRunner() {
     abortCalls,
     settle: (runId: string) => {
       pending.get(runId)?.(outcome(runId));
+      pending.delete(runId);
+    },
+    settleAs: (runId: string, status: RunOutcome["status"]) => {
+      pending.get(runId)?.({ ...outcome(runId), status });
       pending.delete(runId);
     },
   };
@@ -501,7 +505,7 @@ describe("SpawnService: fork admission vs. abort/stopping race (D19, test 27, N3
   });
 
   it("fork spawned BEFORE abort: C is on the cascade list and ends up aborted alongside R", async () => {
-    const { runner, abortCalls } = controllableRunner();
+    const { runner, abortCalls, settleAs } = controllableRunner();
     const svc = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
     const r = await svc.spawn({ type: "asker", prompt: "r" });
     if ("error" in r) throw new Error(r.error.message);
@@ -513,8 +517,13 @@ describe("SpawnService: fork admission vs. abort/stopping race (D19, test 27, N3
     });
     if ("error" in c) throw new Error(c.error.message);
 
-    await svc.abort(r.runId);
-    expect(abortCalls.map((call) => call.runId).sort()).toEqual([c.runId, r.runId].sort());
+    const abortP = svc.abort(r.runId);
+    await vi.waitFor(() => expect(abortCalls.map((call) => call.runId).sort()).toEqual([c.runId, r.runId].sort()));
+    // The fake runner reports what a real one does once its abort lands.
+    settleAs(c.runId, "aborted");
+    settleAs(r.runId, "aborted");
+    await abortP;
+    expect(await svc.waitOutcome(c.runId, 1_000)).toMatchObject({ kind: "settled", outcome: { status: "aborted" } });
   });
 
   it("non-fork nested spawn admission is untouched by stopping (D19 only tightens fork requests)", async () => {
