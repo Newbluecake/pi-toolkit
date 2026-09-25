@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
+  closeSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
-  statSync,
-  writeFileSync,
+  readSync,
   rmSync,
   mkdirSync,
+  statSync,
+  truncateSync,
   utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -23,6 +28,7 @@ import {
   removeForkFile,
   resolveForkCwd,
   sweepForkDir,
+  type SourceStatSignature,
 } from "../../src/consult/fork-store.js";
 
 /**
@@ -438,5 +444,218 @@ describe("consult fork-store: forkMainSessionSnapshot (§16 rule 5)", () => {
     const result = forkMainSessionSnapshot(join(dir, "does-not-exist.jsonl"), dir, targetDir);
     expect(result.ok).toBe(false);
     expect(readdirSync(targetDir)).toHaveLength(0);
+  });
+});
+
+/** A handcrafted main-session source: valid header + `count` valid JSON lines (tail line terminated). */
+function mainSessionSource(dir: string, name: string, count: number): { file: string; original: string } {
+  const file = join(dir, name);
+  const lines = [JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir })];
+  for (let i = 0; i < count; i++) lines.push(JSON.stringify({ type: "message", id: `m${i}`, pad: "x".repeat(48) }));
+  const original = `${lines.join("\n")}\n`;
+  writeFileSync(file, original);
+  return { file, original };
+}
+
+/**
+ * ~12 KB source: over an injected 4 KB parse cap AND over the 8 KB tail
+ * window, so the oversized path's window genuinely starts mid-line.
+ */
+function oversizedSource(dir: string, name: string): string {
+  const lines = [JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir })];
+  for (let i = 0; i < 300; i++) lines.push(JSON.stringify({ type: "message", id: `m${i}`, pad: "x".repeat(32) }));
+  const file = join(dir, name);
+  writeFileSync(file, `${lines.join("\n")}\n`);
+  return file;
+}
+
+/** Bounded-reader spy mirroring the production default (fd + readSync), recording every request. */
+function spyWindow(): {
+  read: (path: string, start: number, length: number) => Buffer;
+  calls: Array<{ start: number; length: number }>;
+} {
+  const calls: Array<{ start: number; length: number }> = [];
+  return {
+    read(path, start, length) {
+      calls.push({ start, length });
+      const fd = openSync(path, "r");
+      try {
+        const buf = Buffer.alloc(length);
+        let filled = 0;
+        while (filled < buf.length) {
+          const n = readSync(fd, buf, filled, buf.length - filled, start + filled);
+          if (n === 0) break;
+          filled += n;
+        }
+        return filled === buf.length ? buf : buf.subarray(0, filled);
+      } finally {
+        closeSync(fd);
+      }
+    },
+    calls,
+  };
+}
+
+describe("consult fork-store: main-session snapshot stat-drift detection (§16 rule 5 follow-up)", () => {
+  it("a source truncated while the copy runs is retried once, then nacked, leaving no fork file", () => {
+    const dir = tempDir();
+    const targetDir = tempDir();
+    const { file } = mainSessionSource(dir, "truncated.jsonl", 60);
+    // Every fire halves the source: attempt 1's post-stat sees the shrink
+    // (size comparison — no mtime granularity involved), attempt 2 shrinks it
+    // again, so the drift persists deterministically across both attempts.
+    const shrink = () => truncateSync(file, Math.max(1, Math.floor(statSync(file).size / 2)));
+    const result = forkMainSessionSnapshot(file, dir, targetDir, { onAfterCopy: shrink });
+    expect(result).toEqual({ ok: false, reason: expect.stringContaining("inconsistent after retry") });
+    if (!result.ok) expect(result.reason).toContain("source rewritten mid-fork");
+    expect(readdirSync(targetDir)).toHaveLength(0);
+  });
+
+  it("a pure append while the copy runs passes — the snapshot is cut at copy time, whole lines only", () => {
+    const dir = tempDir();
+    const targetDir = tempDir();
+    const { file, original } = mainSessionSource(dir, "appending.jsonl", 30);
+    const appended = JSON.stringify({ type: "message", id: "appended-after-copy" });
+    const result = forkMainSessionSnapshot(file, dir, targetDir, {
+      onAfterCopy: () => appendFileSync(file, `${appended}\n`),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // The copy is bounded by the scan-time size, so the post-copy append is
+      // simply not part of the snapshot — no torn line, nothing to retry.
+      const tail = original.slice(original.indexOf("\n") + 1);
+      const fork = readFileSync(result.path, "utf8");
+      expect(fork.endsWith(tail)).toBe(true);
+      expect(fork).not.toContain("appended-after-copy");
+      expect(checkForkConsistency(result.path)).toEqual({ ok: true });
+    }
+  });
+
+  it("a same-length in-place rewrite (mtime advanced, size unchanged) is inconsistent on every attempt", () => {
+    const dir = tempDir();
+    const targetDir = tempDir();
+    const { file } = mainSessionSource(dir, "same-size.jsonl", 30);
+    const real = statSync(file);
+    let clock = 0;
+    // mtime granularity is filesystem-dependent, so the seam supplies the
+    // signature directly: every observation a tick apart, size never moving.
+    const statSource = vi.fn((): SourceStatSignature => ({
+      size: real.size,
+      mtimeMs: real.mtimeMs + ++clock,
+      ino: Number(real.ino),
+    }));
+    const result = forkMainSessionSnapshot(file, dir, targetDir, { statSource });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("inconsistent after retry");
+      expect(result.reason).toContain("non-appending write");
+    }
+    expect(readdirSync(targetDir)).toHaveLength(0);
+    // pre+post per attempt — the seam really brackets the copy on both tries.
+    expect(statSource).toHaveBeenCalledTimes(4);
+  });
+
+  it("a transient inode replacement is retried, then succeeds once the source settles", () => {
+    const dir = tempDir();
+    const targetDir = tempDir();
+    const { file } = mainSessionSource(dir, "replaced.jsonl", 20);
+    let n = 0;
+    const result = forkMainSessionSnapshot(file, dir, targetDir, {
+      statSource: () => {
+        n += 1;
+        const st = statSync(file);
+        return { size: st.size, mtimeMs: st.mtimeMs, ino: n === 1 ? 111 : 222 };
+      },
+    });
+    // Attempt 1: pre (inode 111) vs post (inode 222) → replaced → retry;
+    // attempt 2: stable inode → no drift → the parse check passes.
+    expect(result.ok).toBe(true);
+  });
+
+  it("the stat-drift check still runs for an oversized source, whose parse stays window-bounded", () => {
+    const dir = tempDir();
+    const okDir = tempDir();
+    const badDir = tempDir();
+    const file = oversizedSource(dir, "big-main.jsonl");
+
+    const reads = spyWindow();
+    const ok = forkMainSessionSnapshot(file, dir, okDir, { consistencyMaxBytes: 4096, readWindow: reads.read });
+    expect(ok.ok).toBe(true);
+    expect(reads.calls.length).toBeGreaterThanOrEqual(2); // header window + tail window
+    expect(reads.calls.every((c) => c.length <= 8192)).toBe(true);
+    expect(reads.calls.every((c) => c.length < statSync(file).size)).toBe(true); // never the whole file
+
+    const real = statSync(file);
+    let clock = 0;
+    const bad = forkMainSessionSnapshot(file, dir, badDir, {
+      consistencyMaxBytes: 4096,
+      statSource: () => ({ size: real.size, mtimeMs: real.mtimeMs + ++clock, ino: Number(real.ino) }),
+    });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.reason).toContain("non-appending write");
+    expect(readdirSync(badDir)).toHaveLength(0);
+  });
+});
+
+describe("consult fork-store: checkForkConsistency oversized regime (§16 rule 5 follow-up)", () => {
+  it("validates header + tail window without reading the file whole (default reader)", () => {
+    const dir = tempDir();
+    const file = oversizedSource(dir, "big-ok.jsonl");
+    expect(checkForkConsistency(file, { maxBytes: 4096 })).toEqual({ ok: true });
+  });
+
+  it("requests only bounded windows: header scan + one tail window, never the whole file", () => {
+    const dir = tempDir();
+    const file = oversizedSource(dir, "big-spied.jsonl");
+    const size = statSync(file).size;
+    const reads = spyWindow();
+    expect(checkForkConsistency(file, { maxBytes: 4096, readWindow: reads.read })).toEqual({ ok: true });
+    expect(reads.calls.length).toBe(2);
+    expect(reads.calls[0]).toEqual({ start: 0, length: Math.min(size, 8192) });
+    expect(reads.calls[1]).toEqual({ start: size - Math.min(size, 8192), length: Math.min(size, 8192) });
+  });
+
+  it("still rejects an oversized fork whose header line is not valid JSON, or not a session header", () => {
+    const dir = tempDir();
+    const lines: string[] = [];
+    for (let i = 0; i < 300; i++) lines.push(JSON.stringify({ type: "message", id: `m${i}`, pad: "x".repeat(32) }));
+    const badJson = join(dir, "big-bad-json.jsonl");
+    writeFileSync(badJson, `not json at all\n${lines.join("\n")}\n`);
+    const check = checkForkConsistency(badJson, { maxBytes: 4096 });
+    expect(check.ok).toBe(false);
+    if (!check.ok) expect(check.reason).toContain("header line is not valid JSON");
+
+    const notHeader = join(dir, "big-not-header.jsonl");
+    writeFileSync(notHeader, `${JSON.stringify({ type: "message", id: "m0" })}\n${lines.join("\n")}\n`);
+    const check2 = checkForkConsistency(notHeader, { maxBytes: 4096 });
+    expect(check2.ok).toBe(false);
+    if (!check2.ok) expect(check2.reason).toContain("first line is not a session header");
+  });
+
+  it("rejects a corrupt non-final line inside the tail window (mid-fork splice signature)", () => {
+    const dir = tempDir();
+    const lines = [JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir })];
+    for (let i = 0; i < 300; i++) lines.push(JSON.stringify({ type: "message", id: `m${i}`, pad: "x".repeat(32) }));
+    lines.push('{"type":"message", this splice line is not valid json'); // inside the 8 KB tail window, NOT final
+    lines.push(JSON.stringify({ type: "message", id: "tail-1" }));
+    lines.push(JSON.stringify({ type: "message", id: "tail-2" }));
+    const file = join(dir, "big-splice.jsonl");
+    writeFileSync(file, `${lines.join("\n")}\n`);
+    const check = checkForkConsistency(file, { maxBytes: 4096 });
+    expect(check.ok).toBe(false);
+    if (!check.ok) {
+      expect(check.reason).toContain("tail window");
+      expect(check.reason).toContain("mid-fork");
+    }
+  });
+
+  it("tolerates a genuinely torn final line in an oversized fork", () => {
+    const dir = tempDir();
+    const lines = [JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir })];
+    for (let i = 0; i < 300; i++) lines.push(JSON.stringify({ type: "message", id: `m${i}`, pad: "x".repeat(32) }));
+    lines.push('{"type":"message","id":"torn", "unterminat'); // no trailing newline — mid-append capture
+    const file = join(dir, "big-torn.jsonl");
+    writeFileSync(file, lines.join("\n"));
+    expect(checkForkConsistency(file, { maxBytes: 4096 })).toEqual({ ok: true });
   });
 });

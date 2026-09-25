@@ -907,7 +907,14 @@ export interface ConsultSettings {
    `/compact`）。`forkExpertSession` 的字节区间拷贝在这种情况下可能拷出"横跨两代内容"的半成品——`pi` 的
    加载器只对**最后一行**的半截宽容，中间行解析失败说明真的错了。`checkForkConsistency`
    （`src/consult/fork-store.ts`）复制后重读整个 fork 文件：header 必须解析且是合法 session header；
-   除最后一行外任何一行解析失败 ⇒ 判定不一致。`forkMainSessionSnapshot` 包一层：不一致就删掉这次的 fork
+   除最后一行外任何一行解析失败 ⇒ 判定不一致。**验收补强（2026-09，Minor 修复）**：逐行解析抓不住
+   "每行各自合法但前后两代拼接"或"截断中的自洽前缀"，所以 `forkMainSessionSnapshot` 另在复制**前后**
+   各取一次源文件 stat（size + mtimeMs，可得时含 ino）：size 变小、或 mtime 变了且非纯追加（size 未增长，
+   含原地同长重写与 inode 替换）⇒ 同样判不一致，走同一条删 fork → 立即重试 → nack 路径；纯追加（size 增
+   大）视为正常——快照截止到拷贝时刻，末行可半截的既有规则不变。>32MB 的大文件不再"直接信任"：跳过逐
+   行解析，但仍做 stat 漂移检测与 header（首行 8KB 窗口）+ 尾部 8KB 窗口的非末行解析校验，且不把整个文
+   件读进内存（测试可注入更小阈值与受限读窗口断言）。
+   `forkMainSessionSnapshot` 包一层：不一致就删掉这次的 fork
    文件、**立即重试一次**（不 sleep——本模块全同步 fs，AGENTS.md 的零挂死不变量不允许为重试引入一个真的
    等待；由并发写者的时序自然错开来兜底），仍失败 ⇒ `{ok:false, reason:"fork_failed: inconsistent after
 retry (...)"}`，consult 工具按现有"fork 失败"分支 nack `unavailable`，**不抛**，且此时还没有发生任何
@@ -1015,6 +1022,9 @@ ConsultExpertRef[]` 这个到处传递的类型变成一个更复杂的判别联
 - `tests/consult/fork-store.test.ts`：`checkForkConsistency` 的六种输入形状（正常/仅末行不完整/中间行损坏
   /header 非法 JSON/header 非 session 类型/空文件）；`forkMainSessionSnapshot` 的三种结局（一次成功、
   可复现的不一致重试一次后放弃且不留残留文件、`forkExpertSession` 本身硬失败时不重试直接透传）。
+  验收补强（2026-09）另加：复制期间源被截断变小 ⇒ 重试后 nack 无残留；纯追加 ⇒ 通过且快照不含追加字
+  节；mtime 变但 size 不变（注入 stat）⇒ 不一致；inode 替换 ⇒ 重试后成功；大文件（注入小阈值 + 受限
+  读窗口 spy）仍做 stat 漂移与 header/尾窗校验、且从不整文件读入。
 - `tests/tools/agent-tool-experts.test.ts`：`resolveExperts` 返回 `kind:"main"` 的 ref 时，agent-tool.ts
   原样转发（零特判）且回显文案含"the host main session"。
 - `tests/integration/consult-wiring.test.ts`：经真实 `buildSessionStack` 的 `ctx.sessionManager
@@ -1030,6 +1040,7 @@ ConsultExpertRef[]` 这个到处传递的类型变成一个更复杂的判别联
 agentType` 的展示层映射，不影响本节任何既有断言）。
 - fork 一致性重试**不做真实的时间退避**（同步、立即重试）——已在 16.1 第 5 条写明理由（零挂死不变量 +
   本模块全同步 fs 的既有约束），这是有意选择，不是遗漏。
-- `checkForkConsistency` 对 >32MB 的 fork 文件直接信任拷贝、不重新解析（性能兜底，与 `forkExpertSession`
-  本身"整链耗时"顾虑同源）——没有为这一分支单独写测试（会需要构造一个 32MB+ 的临时文件，拖慢测试套件），
-  作为已知的、代价可控的测试盲区记录在此。
+- ~~`checkForkConsistency` 对 >32MB 的 fork 文件直接信任拷贝、不重新解析~~ —— 已修复（2026-09 验收 Minor）：
+  大文件跳过逐行解析，但**仍执行** stat 漂移检测与 header（首行 8KB 窗口）+ 尾部 8KB 窗口的非末行解析
+  校验，且不再把整个文件读进内存（旧实现先 `readFileSync` 整个文件再判"太大"）。测试用注入的小阈值 +
+  受限读窗口 spy 锁定（不再需要真写 32MB 文件），原"测试盲区"记录作废。

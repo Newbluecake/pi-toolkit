@@ -205,9 +205,18 @@ export function readHeaderCwd(file: string): string | undefined {
   return typeof scanned.scan.header.cwd === "string" ? scanned.scan.header.cwd : undefined;
 }
 
-/** Test seam for the wx-collision test: deterministic target id. */
+/** Test seams on the fork path (same convention everywhere: production wiring sets none of them). */
 export interface ForkExpertSessionOptions {
+  /** Deterministic target id (wx-collision tests). */
   newId?: () => string;
+  /**
+   * Fires between the completed streaming copy and the return — exactly the
+   * window in which a concurrent pi `_rewriteFile` would land on the MAIN
+   * session's file. Test code mutates the SOURCE here to make the rewrite
+   * race deterministic; `forkMainSessionSnapshot`'s post-copy stat then sees
+   * the drift. Production never sets it.
+   */
+  onAfterCopy?: (source: string, target: string) => void;
 }
 
 /**
@@ -257,6 +266,8 @@ export function forkExpertSession(
     writeFileSync(target, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
     try {
       copyTail(sourcePath, contentStart, fileSize, target);
+      // Test seam (§16 rule 5 follow-up): see ForkExpertSessionOptions.onAfterCopy.
+      opts.onAfterCopy?.(sourcePath, target);
     } catch (e) {
       // Half-written fork: unlike forkFrom, the path IS known here — remove it
       // immediately. If even that fails the file still has a valid header and
@@ -285,7 +296,28 @@ export function forkExpertSession(
  */
 const CONSISTENCY_CHECK_MAX_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Tail window the oversized path inspects (bytes). Beyond the per-line cap we
+ * skip the full parse but still look at the last few KB: a two-generation
+ * splice whose seam lands inside this window still fails, and anything
+ * earlier is the stat-drift detector's job (forkMainSessionSnapshot), not
+ * the parser's.
+ */
+const CONSISTENCY_TAIL_WINDOW_BYTES = 8 * 1024;
+
 type ForkConsistencyCheck = { ok: true } | { ok: false; reason: string };
+
+/** Test seams for `checkForkConsistency` (never set by production wiring). */
+export interface ForkConsistencyOptions {
+  /** Overrides `CONSISTENCY_CHECK_MAX_BYTES` so tests exercise the oversized path without writing 32 MB. */
+  maxBytes?: number;
+  /**
+   * Bounded reader the oversized path uses for its header/tail windows
+   * (default: fd + readSync). Injected in tests to assert the file is never
+   * read whole.
+   */
+  readWindow?: (path: string, start: number, length: number) => Buffer;
+}
 
 /**
  * consult (plan §16 rule 5): a plain expert's session is terminal, so the
@@ -304,18 +336,38 @@ type ForkConsistencyCheck = { ok: true } | { ok: false; reason: string };
  */
 /**
  * Exported as a test seam (same convention as `ForkExpertSessionOptions`) so
- * the detection logic — "every line but the last must parse" — can be
- * pinned directly against hand-crafted fork files, without needing to
- * engineer a genuine concurrent rewrite race in a unit test.
+ * the detection logic can be pinned directly against hand-crafted fork files,
+ * without needing to engineer a genuine concurrent rewrite race in a unit
+ * test.
+ *
+ * Two regimes, split by the fork copy's size (acceptance follow-up to §16
+ * rule 5 — the old "trust anything over 32 MB" branch read the whole file
+ * into a string first and then skipped every check):
+ *  - small (≤ `maxBytes`): re-read the whole copy; header must parse as a
+ *    session header, every line but the last must parse as JSON;
+ *  - oversized (> `maxBytes`): never read the file whole — validate the first
+ *    line (8 KB window, same shape rules) and the last 8 KB tail window
+ *    (every COMPLETE line there must parse; the window's leading fragment —
+ *    cut mid-line by the window edge — and the trailing final line — possibly
+ *    torn by a concurrent append — are both exempt). The stat-drift detector
+ *    in `forkMainSessionSnapshot` still runs for oversized copies and is the
+ *    primary rewrite guard there.
  */
-export function checkForkConsistency(path: string): ForkConsistencyCheck {
+export function checkForkConsistency(path: string, opts: ForkConsistencyOptions = {}): ForkConsistencyCheck {
+  const maxBytes = opts.maxBytes ?? CONSISTENCY_CHECK_MAX_BYTES;
+  let size: number;
+  try {
+    size = statSync(path).size;
+  } catch (e) {
+    return { ok: false, reason: `could not re-read the fork copy: ${toReason(e)}` };
+  }
+  if (size > maxBytes) return checkOversizedFork(path, size, opts);
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (e) {
     return { ok: false, reason: `could not re-read the fork copy: ${toReason(e)}` };
   }
-  if (text.length > CONSISTENCY_CHECK_MAX_BYTES) return { ok: true }; // too large to cheaply re-verify; trust the copy
   const lines = text.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop(); // trailing newline
   if (lines.length === 0) return { ok: false, reason: "fork copy is empty" };
@@ -342,6 +394,124 @@ export function checkForkConsistency(path: string): ForkConsistencyCheck {
   return { ok: true };
 }
 
+/** Default bounded reader for the oversized path's windows (fd + readSync, EOF-short). */
+function readWindowDefault(path: string, start: number, length: number): Buffer {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(length);
+    let filled = 0;
+    while (filled < buf.length) {
+      const n = readSync(fd, buf, filled, buf.length - filled, start + filled);
+      if (n === 0) break;
+      filled += n;
+    }
+    return filled === buf.length ? buf : buf.subarray(0, filled);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Oversized regime of `checkForkConsistency` — header line + tail window only, never the whole file. */
+function checkOversizedFork(path: string, size: number, opts: ForkConsistencyOptions): ForkConsistencyCheck {
+  const read = opts.readWindow ?? readWindowDefault;
+  let head: Buffer;
+  try {
+    head = read(path, 0, Math.min(size, HEADER_SCAN_LIMIT_BYTES));
+  } catch (e) {
+    return { ok: false, reason: `could not re-read the fork copy: ${toReason(e)}` };
+  }
+  const nl = head.indexOf(10); // "\n"
+  const firstLine = (nl === -1 ? head : head.subarray(0, nl)).toString("utf8");
+  let header: unknown;
+  try {
+    header = JSON.parse(firstLine);
+  } catch {
+    return { ok: false, reason: "fork copy's header line is not valid JSON" };
+  }
+  if (!isSessionHeader(header)) return { ok: false, reason: "fork copy's first line is not a session header" };
+
+  const tailLen = Math.min(size, CONSISTENCY_TAIL_WINDOW_BYTES);
+  const tailStart = size - tailLen;
+  let tail: Buffer;
+  try {
+    tail = read(path, tailStart, tailLen);
+  } catch (e) {
+    return { ok: false, reason: `could not re-read the fork copy: ${toReason(e)}` };
+  }
+  // The window may start mid-line: everything before its first newline is a
+  // fragment of a line the small path would have parsed whole — skip it.
+  let from: number;
+  if (tailStart === 0) {
+    from = 0; // window covers the file head — its first line IS the header line
+  } else {
+    const firstNl = tail.indexOf(10);
+    if (firstNl === -1) return { ok: true }; // no complete line inside the window
+    from = firstNl + 1;
+  }
+  for (;;) {
+    const lineEnd = tail.indexOf(10, from);
+    if (lineEnd === -1) break; // trailing final line — possibly torn by a concurrent append; exempt
+    const line = tail.subarray(from, lineEnd);
+    from = lineEnd + 1;
+    if (line.toString("utf8").trim().length === 0) continue;
+    try {
+      JSON.parse(line.toString("utf8"));
+    } catch {
+      return {
+        ok: false,
+        reason: `fork copy tail window has a non-final line that is not valid JSON (source rewritten mid-fork)`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * The source's stat signature `forkMainSessionSnapshot` compares across the
+ * copy (acceptance follow-up to §16 rule 5). A line-level re-parse alone
+ * cannot catch every mid-copy rewrite: pi's `_rewriteFile` truncates in place
+ * (`openSync(path, "w")`) and rewrites whole lines, so a copy taken while a
+ * rewrite is in flight can be "every line individually valid JSON" yet still
+ * splice two generations (or capture a self-consistent truncated prefix) —
+ * both pass the parser. Two stats around the copy catch what the parser
+ * cannot: a rewrite always leaves size/mtimeMs/ino evidence behind.
+ */
+export interface SourceStatSignature {
+  size: number;
+  mtimeMs: number;
+  /** POSIX only (0/absent elsewhere): a different inode means the path was replaced — never a pure append. */
+  ino?: number;
+}
+
+/** Test seams for `forkMainSessionSnapshot` (never set by production wiring). */
+export interface ForkMainSessionOptions extends ForkExpertSessionOptions {
+  /** Replaces `statSync` of the source so drift fixtures are deterministic (mtime granularity is not). */
+  statSource?: (path: string) => SourceStatSignature;
+  /** Forwarded to `checkForkConsistency` as its size cap (oversized-path tests). */
+  consistencyMaxBytes?: number;
+  /** Forwarded to `checkForkConsistency` as its bounded reader (oversized-path tests). */
+  readWindow?: (path: string, start: number, length: number) => Buffer;
+}
+
+function statSourceSignature(path: string): SourceStatSignature {
+  const st = statSync(path);
+  return { size: st.size, mtimeMs: st.mtimeMs, ...(st.ino > 0 ? { ino: st.ino } : {}) };
+}
+
+/**
+ * Pure drift verdict: `undefined` means "untouched, or pure append" (the
+ * snapshot is cut at copy time; growth past the copied prefix is simply not
+ * part of it), any string is a single-line inconsistency reason.
+ */
+function sourceDriftReason(pre: SourceStatSignature, post: SourceStatSignature): string | undefined {
+  if (pre.ino !== undefined && post.ino !== undefined && pre.ino !== post.ino)
+    return `source rewritten mid-fork: file replaced (inode ${pre.ino} → ${post.ino})`;
+  if (post.size < pre.size) return `source rewritten mid-fork: size shrank (${pre.size} → ${post.size} bytes)`;
+  if (post.mtimeMs !== pre.mtimeMs && post.size <= pre.size)
+    return `source rewritten mid-fork: non-appending write (mtime changed, size ${pre.size} unchanged)`;
+  return undefined;
+}
+
 /**
  * consult (plan §16 rule 5): `forkExpertSession` + a post-copy consistency
  * check, with ONE immediate retry — no sleep. Everything in this module is
@@ -351,21 +521,48 @@ export function checkForkConsistency(path: string): ForkConsistencyCheck {
  * whatever mid-rewrite window caused the first failure. Used only for the
  * host main session — a plain expert fork never needs this (its source is
  * terminal) and keeps using `forkExpertSession` directly.
+ *
+ * The check is layered (acceptance follow-up): (1) a stat of the source
+ * before and after the copy — shrink, non-appending mtime change, or an
+ * inode swap is a rewrite no matter what the bytes look like; (2) the
+ * line-level re-parse of `checkForkConsistency` (see there for the two
+ * size regimes). Both funnel into the same delete → retry → nack path, and
+ * neither sleeps or arms a timer.
  */
 export function forkMainSessionSnapshot(
   sourceFile: string,
   fallbackCwd: string,
   dir: string = consultSessionDir(),
-  opts: ForkExpertSessionOptions = {},
+  opts: ForkMainSessionOptions = {},
 ): ForkExpertSessionResult {
+  const sourcePath = resolvePath(sourceFile);
+  const stat = (path: string): SourceStatSignature | undefined => {
+    try {
+      return opts.statSource ? opts.statSource(path) : statSourceSignature(path);
+    } catch {
+      return undefined; // unreadable source: the scan inside forkExpertSession reports it properly
+    }
+  };
   let lastReason = "fork_failed";
   for (let attempt = 0; attempt < 2; attempt++) {
-    const result = forkExpertSession(sourceFile, fallbackCwd, dir, opts);
+    const pre = stat(sourcePath);
+    const result = forkExpertSession(sourcePath, fallbackCwd, dir, opts);
     if (!result.ok) return result; // a hard failure is not a consistency issue — surface it as-is
-    const check = checkForkConsistency(result.path);
-    if (check.ok) return result;
+    let inconsistent: string | undefined;
+    if (pre !== undefined) {
+      const post = stat(sourcePath);
+      if (post !== undefined) inconsistent = sourceDriftReason(pre, post);
+    }
+    if (inconsistent === undefined) {
+      const check = checkForkConsistency(result.path, {
+        ...(opts.consistencyMaxBytes !== undefined ? { maxBytes: opts.consistencyMaxBytes } : {}),
+        ...(opts.readWindow !== undefined ? { readWindow: opts.readWindow } : {}),
+      });
+      if (check.ok) return result;
+      inconsistent = check.reason;
+    }
     removeForkFile(result.path, dir);
-    lastReason = check.reason;
+    lastReason = inconsistent;
   }
   return { ok: false, reason: `fork_failed: inconsistent after retry (${lastReason})` };
 }
