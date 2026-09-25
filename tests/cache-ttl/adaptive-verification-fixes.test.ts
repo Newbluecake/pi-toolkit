@@ -16,6 +16,7 @@ import {
   adaptiveCoversPrefix,
   createInitialAdaptiveState,
   decideAdaptiveTtl,
+  ledgerRouteKey,
   noteDecision,
   onLedgerObserved,
   type AdaptiveConfig,
@@ -180,6 +181,8 @@ describe("F1 — adaptive does not buy what keepalive already covers", () => {
       confirmed1hWrites: 1,
       tokensSinceLast1hWrite: 3_000,
       max1hSurvivalMs: 52 * MIN, // a covered request already read the 1h entry after a 52-min gap
+      survivalRouteKey: "anthropic|m",
+      lastRouteKey: "anthropic|m",
       coverLineageKey: "A",
       lastLineageKey: "A",
     });
@@ -198,6 +201,9 @@ describe("F1 — adaptive does not buy what keepalive already covers", () => {
       ["remaining cover shorter than the horizon", { oneHourCoverUntil: NOW + 30 * MIN }],
       // R4: the last request (the one keepalive would replay) is of another lineage.
       ["last request of another lineage", { lastLineageKey: "B" }],
+      // R9: survival is a property of the upstream route — evidence never transfers.
+      ["evidence measured on another route", { lastRouteKey: "copilot|m" }],
+      ["evidence without a route", { survivalRouteKey: undefined }],
     ])("false when %s", (_name, o) => {
       expect(adaptiveCoversPrefix({ ...covered, ...o }, CONFIG, NOW, HORIZON)).toBe(false);
     });
@@ -513,5 +519,136 @@ describe("R4 — lineage keys", () => {
     expect(payloadLineageKey({ ...base, system: [{ type: "text", text: "sys + memory" }] })).not.toBe(k);
     expect(payloadLineageKey({ ...base, tools: [{ name: "read" }, { name: "bash" }] })).not.toBe(k);
     expect(payloadLineageKey({ ...base, thinking: { type: "enabled", budget_tokens: 1024 } })).not.toBe(k);
+  });
+});
+
+// ─── review round 2: R2 flow, R3 bounds, R8 collisions, R9 routes ──────────
+
+describe("R2 flow — evidence alone does not stand keepalive down; the next covered refresh does", () => {
+  it("upgrade → confirmed settle → 52-min covered hit (evidence) → refresh → stand-down", () => {
+    const H = HORIZON;
+    const sig = signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * MIN });
+    const led = (o: Partial<LedgerUsage>) => ledger({ providerId: "anthropic", ...o });
+    let t = NOW;
+    let s = state({ lastRequestStartedAt: t - 20_000, lastReconciledEntrySeq: 9, lastPrefixTokens: 100_000 });
+
+    // 1) open the prefix (no keepalive horizon here: the fee is allowed)
+    let d = decide({ now: t, state: s, signals: sig, ledger: led({ entrySeq: 9 }), lineageKey: "A" });
+    expect(d.upgrade).toBe(true);
+    s = noteDecision(s, d, { now: t, gapMs: 20_000, entriesLength: 10, strongSignals: 1, lineageKey: "A" });
+    s = onLedgerObserved(s, led({ entrySeq: 10, cacheRead: 0, cacheWrite: 104_000, cacheWrite1h: 104_000 }), t, CONFIG);
+    expect(s.confirmed1hWrites).toBe(1);
+    expect(adaptiveCoversPrefix(s, CONFIG, t, H)).toBe(false); // no evidence yet
+
+    // 2) a 52-min gap; the request (5m, no signal) reads the 1h entry ⇒ evidence
+    t += 52 * MIN;
+    d = decide({ now: t, state: s, signals: signals(), ledger: led({ entrySeq: 10 }), lineageKey: "A" });
+    s = noteDecision(s, d, { now: t, gapMs: 52 * MIN, entriesLength: 11, strongSignals: 0, lineageKey: "A" });
+    s = onLedgerObserved(s, led({ entrySeq: 11, cacheRead: 104_000, cacheWrite: 17_000, cacheWrite1h: 0 }), t, CONFIG);
+    expect(s.max1hSurvivalMs).toBe(52 * MIN);
+    expect(s.survivalRouteKey).toBe("anthropic|m");
+    // …but the optimistic cover armed 52 min ago has only 8 min left < 49-min horizon (intentionally conservative).
+    expect(adaptiveCoversPrefix(s, CONFIG, t, H)).toBe(false);
+
+    // 3) a covered refresh re-arms the cover (tail 17k ≥ 16k refresh threshold) ⇒ now keepalive may stand down
+    t += 20_000;
+    d = decide({
+      now: t,
+      state: s,
+      signals: sig,
+      ledger: led({ entrySeq: 11, cacheRead: 104_000, cacheWrite: 3_000 }),
+      lineageKey: "A",
+    });
+    expect(d).toMatchObject({ upgrade: true, class: "warm" });
+    s = noteDecision(s, d, { now: t, gapMs: 20_000, entriesLength: 12, strongSignals: 1, lineageKey: "A" });
+    s = onLedgerObserved(
+      s,
+      led({ entrySeq: 12, cacheRead: 104_000, cacheWrite: 20_000, cacheWrite1h: 20_000 }),
+      t,
+      CONFIG,
+    );
+    expect(adaptiveCoversPrefix(s, CONFIG, t, H)).toBe(true);
+  });
+});
+
+describe("R3 bounds — describesLatest", () => {
+  const judged = (lastDecisionEntriesLength: number, entrySeq: number) =>
+    onLedgerObserved(
+      state({
+        lastPrefixTokens: 200_000,
+        lastReconciledEntrySeq: 9,
+        oneHourCoverUntil: NOW + 50 * MIN,
+        confirmed1hWrites: 1,
+        lastGapMs: 20 * MIN,
+        lastDecisionEntriesLength,
+      }),
+      ledger({ entrySeq, cacheRead: 11_000, cacheWrite: 195_000 }),
+      NOW,
+      CONFIG,
+    ).breaker?.reason;
+  it("equality is the normal case — the new assistant entry lands exactly at entriesLength ⇒ judged", () => {
+    expect(judged(12, 12)).toBe("1h-ineffective");
+  });
+  it("initial -1 (no decision recorded yet) ⇒ judged as before", () => {
+    expect(judged(-1, 12)).toBe("1h-ineffective");
+  });
+  it("one below ⇒ an earlier request ⇒ not judged", () => {
+    expect(judged(13, 12)).toBeUndefined();
+  });
+});
+
+describe("R8 — the lineage key hashes full content", () => {
+  const sys = (middle: string) => [{ type: "text", text: `${"H".repeat(80)}${middle}${"T".repeat(80)}` }];
+  it("a same-length edit in the MIDDLE of the system prompt changes the key", () => {
+    const a = { system: sys("updated: 2026-09-25T04:00"), messages: [] };
+    const b = { system: sys("updated: 2026-09-25T05:00"), messages: [] };
+    expect(JSON.stringify(a).length).toBe(JSON.stringify(b).length);
+    expect(payloadLineageKey(a)).not.toBe(payloadLineageKey(b));
+  });
+  it("a tool schema / description change under the same name changes the key", () => {
+    const t1 = { system: "s", tools: [{ name: "read", input_schema: { type: "object", properties: { path: {} } } }] };
+    const t2 = { system: "s", tools: [{ name: "read", input_schema: { type: "object", properties: { file: {} } } }] };
+    expect(payloadLineageKey(t1)).not.toBe(payloadLineageKey(t2));
+  });
+  it("is stable for identical content and never throws on odd input", () => {
+    const p = { system: "s", tools: [{ name: "a" }], thinking: { type: "enabled" } };
+    expect(payloadLineageKey(p)).toBe(payloadLineageKey(JSON.parse(JSON.stringify(p))));
+    const cyclic: Record<string, unknown> = { name: "x" };
+    cyclic.self = cyclic;
+    expect(() => payloadLineageKey({ system: "s", tools: [cyclic] })).not.toThrow();
+    expect(payloadLineageKey(null)).toBe("");
+  });
+});
+
+describe("R9 — survival evidence is bound to the route", () => {
+  const hitAfter52 = (s: AdaptiveState, providerId: string) =>
+    onLedgerObserved(s, ledger({ providerId, cacheRead: 118_000, cacheWrite: 4_000 }), NOW, CONFIG);
+  const base = state({
+    lastPrefixTokens: 120_000,
+    lastReconciledEntrySeq: 9,
+    oneHourCoverUntil: NOW + 5 * MIN,
+    confirmed1hWrites: 1,
+    lastGapMs: 30 * MIN,
+  });
+  it("records the route with the evidence and tracks the last settled route", () => {
+    const next = hitAfter52(base, "cloudrouter-anthropic");
+    expect(next.survivalRouteKey).toBe("cloudrouter-anthropic|m");
+    expect(next.lastRouteKey).toBe("cloudrouter-anthropic|m");
+    expect(ledgerRouteKey(ledger({ providerId: "x", modelId: "y" }))).toBe("x|y");
+  });
+  it("evidence from another route is REPLACED, not merged (a longer old value cannot leak)", () => {
+    const next = hitAfter52(
+      { ...base, max1hSurvivalMs: 55 * MIN, survivalRouteKey: "other|m" },
+      "cloudrouter-anthropic",
+    );
+    expect(next.max1hSurvivalMs).toBe(30 * MIN);
+    expect(next.survivalRouteKey).toBe("cloudrouter-anthropic|m");
+  });
+  it("same route keeps the maximum", () => {
+    const next = hitAfter52(
+      { ...base, max1hSurvivalMs: 55 * MIN, survivalRouteKey: "cloudrouter-anthropic|m" },
+      "cloudrouter-anthropic",
+    );
+    expect(next.max1hSurvivalMs).toBe(55 * MIN);
   });
 });

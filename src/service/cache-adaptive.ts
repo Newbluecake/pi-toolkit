@@ -110,6 +110,9 @@ export interface AdaptiveDecideRequest {
   ledger: LedgerUsage;
   /** Review R4: `payloadLineageKey` of the outgoing payload. Absent ⇒ lineage unchecked. */
   lineageKey?: string;
+  /** Review round 2 (R7): `payload.stream === true` of the OUTGOING request. Keepalive can only replay a
+   *  streaming request (gate #7.5), so a non-streaming one leaves the gap after it uncovered. Absent ⇒ assumed streaming. */
+  streaming?: boolean;
 }
 
 /** plan.md §9.2: the surface `src/cache-ttl/cache-ttl.ts` talks to. */
@@ -330,7 +333,9 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     const lastProvenCacheReadAt = this.safeProvenCacheReadAt();
     // R1: the pinger covers the gap after THIS request only if its prefix clears the
     // keepalive min-prefix gate; an unproven ledger counts as 0 (gate #8 refuses it too).
-    const keepaliveHorizonMs = this.safeKeepaliveHorizonMs(prefixFromLedger(request.ledger).tokens);
+    // R7: …and only if THIS request is streaming — its capture is what the pinger would replay.
+    const keepaliveHorizonMs =
+      request.streaming === false ? undefined : this.safeKeepaliveHorizonMs(prefixFromLedger(request.ledger).tokens);
     const switchImminent = this.safeSwitchImminent();
     const decision = decideAdaptiveTtl({
       now,
@@ -428,6 +433,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       feeWriteUsd: this.state.feeWriteUsd,
       driftCoverClears: this.state.driftCoverClears,
       max1hSurvivalMs: this.state.max1hSurvivalMs,
+      survivalRouteKey: this.state.survivalRouteKey,
       breaker: this.state.breaker?.reason,
     });
     if (this.state.breaker !== undefined && before.breaker === undefined) {

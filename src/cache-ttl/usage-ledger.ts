@@ -38,6 +38,9 @@ export interface LedgerUsage {
   entriesLength: number;
   /** M1 anchor: `entry.message.model` ("" when unreadable); compared against `ctx.model.id`. */
   modelId: string;
+  /** Review round 2 (R9): `entry.message.provider` — with `modelId` it identifies the ROUTE whose 1h
+   *  lifetime the adaptive survival evidence describes. Optional (older entries / test fixtures). */
+  providerId?: string;
 }
 
 const UNKNOWN_LEDGER: LedgerUsage = {
@@ -54,7 +57,7 @@ const UNKNOWN_LEDGER: LedgerUsage = {
 
 interface LedgerEntryLike {
   type?: string;
-  message?: { role?: string; model?: string; usage?: Record<string, unknown> };
+  message?: { role?: string; model?: string; provider?: string; usage?: Record<string, unknown> };
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -90,6 +93,7 @@ export function readLatestAssistantUsage(ctx: LedgerCtxLike | undefined): Ledger
           entrySeq: i,
           entriesLength: entries.length,
           modelId: typeof entry.message.model === "string" ? entry.message.model : "",
+          ...(typeof entry.message.provider === "string" ? { providerId: entry.message.provider } : {}),
         };
       }
     }

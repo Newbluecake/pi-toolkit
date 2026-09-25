@@ -115,7 +115,7 @@ export interface KeepalivePort {
    * F1 (adaptive verification-2026-09-25): the longest gap this pinger can bridge
    * for the current session (`keepaliveGapHorizonMs`), or `undefined` when it
    * cannot ping at all — disabled, session-disabled breaker, headless run mode,
-   * non-anthropic / denied route, a captured payload that is not streamable, or a
+   * non-anthropic / denied route, or a
    * measured prefix (`prefixTokens`, 0 when unproven) below `keepaliveMinPrefixTokens`
    * — gates #8 would stop every ping of the window that follows (review R1). The
    * per-window ping budget and a single unproven ping are deliberately NOT checked:
@@ -642,8 +642,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       return undefined;
     }
     if (model?.api !== ANTHROPIC_MESSAGES_API || PING_DENY_PROVIDERS.has(model.provider)) return undefined;
-    const capture = this.window.capture;
-    if (capture !== undefined && capture.payload.stream !== true) return undefined;
+    // Streamability is judged on the CURRENT request by the caller (review R7): the
+    // previous window's capture says nothing about the window the next request opens.
     return keepaliveGapHorizonMs(config);
   }
 

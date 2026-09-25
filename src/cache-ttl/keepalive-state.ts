@@ -568,8 +568,38 @@ function analyzePayload(payload: unknown): PayloadAnalysis {
  * sections, 01a0d2f9 / 01a0d2e4). Same digests `CaptureFingerprint` uses (G7).
  */
 export function payloadLineageKey(payload: unknown): string {
-  const a = analyzePayload(payload);
-  return `${a.systemDigest}|${a.toolsDigest}|${a.thinkingDigest}`;
+  if (!isObjectRecord(payload)) return "";
+  // Review round 2 (R8): hash the FULL content. The fingerprint digests above
+  // (length + first/last 64 chars, tool names only) are fine for G7's drift
+  // alarm but collide on exactly the edits that split lineages in the field — a
+  // same-length change in the middle of the system prompt (memory frontmatter
+  // timestamps) or a tool schema/description change under the same name.
+  const systemText = extractText(payload.system);
+  const tools = Array.isArray(payload.tools) ? payload.tools : [];
+  let toolsJson = "";
+  try {
+    toolsJson = JSON.stringify(tools) ?? "";
+  } catch {
+    toolsJson = `${tools.length}`; // cyclic/unserializable tools: degrade to the count
+  }
+  const thinking = payload.thinking;
+  let thinkingJson = "";
+  try {
+    thinkingJson = thinking !== undefined ? (JSON.stringify(thinking) ?? "") : "";
+  } catch {
+    thinkingJson = "?";
+  }
+  return `${systemText.length}:${fnv1a32(systemText)}|${tools.length}:${fnv1a32(toolsJson)}|${fnv1a32(thinkingJson)}`;
+}
+
+/** 32-bit FNV-1a over UTF-16 code units — a fast, dependency-free content hash (not cryptographic). */
+function fnv1a32(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
 }
 
 export function inspectPayload(payload: unknown): PayloadShape {

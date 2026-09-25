@@ -423,4 +423,34 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
       stack.rpc.close();
     }
   });
+
+  it("R7: with keepalive on, a NON-streaming request is not 'covered by keepalive' (the pinger cannot replay it)", async () => {
+    const { pi, emit } = fakePi();
+    const settings = settingsWith({ keepalive: true });
+    const ctx = fakeCtx();
+    const stack = buildSessionStack(pi, ctx, settings, emptyTypes, []);
+    try {
+      const holder: { current?: { adaptive?: typeof stack.adaptive } } = { current: stack };
+      wireCacheTtl(pi, settings, { adaptive: () => holder.current?.adaptive });
+      stack.adaptive?.noteUiPromptStart("session-under-test", stack.adaptive.instanceId);
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx); // lastRequestStartedAt
+      // control: streaming ⇒ keepalive can cover ⇒ refused
+      const [streaming] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(streaming)).toBeUndefined();
+      expect(stack.adaptive?.snapshot().lastDecision?.reason).toBe("keepalive-covers");
+      // non-streaming ⇒ gate #7.5 would stop every ping of the next window ⇒ adaptive is the only cover
+      const [nonStreaming] = await emit(
+        "before_provider_request",
+        { payload: { ...ephemeralPayload(), stream: false } },
+        ctx,
+      );
+      expect(stack.adaptive?.snapshot().lastDecision?.reason).not.toBe("keepalive-covers");
+      expect(ttlOf(nonStreaming)).toBe("1h");
+    } finally {
+      stack.adaptive?.dispose();
+      stack.keepalive?.dispose();
+      stack.scheduler.stop();
+      stack.rpc.close();
+    }
+  });
 });

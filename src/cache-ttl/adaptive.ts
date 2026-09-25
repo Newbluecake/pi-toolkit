@@ -310,6 +310,11 @@ export interface AdaptiveState {
    *  The keepalive pinger only stands down once this covers its whole horizon (evidence, not the
    *  optimistic 1h cover). Session evidence, restored on /reload. */
   max1hSurvivalMs: number;
+  /** R9 (review round 2): route (`provider|model` of the settling ledger) the survival evidence was
+   *  measured on — 1h lifetime is a property of the upstream route, so evidence never transfers. */
+  survivalRouteKey: string | undefined;
+  /** R9: route of the most recently settled ledger entry (what the next ping would replay against). */
+  lastRouteKey: string | undefined;
   droppedPending: number;
   lastDecision: AdaptiveDecision | undefined;
   lastReconcile: AdaptiveReconcileRecord | undefined;
@@ -347,6 +352,8 @@ export function createInitialAdaptiveState(): AdaptiveState {
     coverLineageKey: undefined,
     lastDecisionEntriesLength: -1,
     max1hSurvivalMs: 0,
+    survivalRouteKey: undefined,
+    lastRouteKey: undefined,
     droppedPending: 0,
     lastDecision: undefined,
     lastReconcile: undefined,
@@ -421,7 +428,7 @@ export function readBackAdaptiveSessionState(branch: readonly unknown[]): Adapti
           feeWriteTokens: asFiniteNumber(data.feeWriteTokens) ?? base.feeWriteTokens,
           feeWriteUsd: asFiniteNumber(data.feeWriteUsd) ?? base.feeWriteUsd,
           driftCoverClears: asFiniteNumber(data.driftCoverClears) ?? base.driftCoverClears,
-          max1hSurvivalMs: Math.max(base.max1hSurvivalMs, asFiniteNumber(data.max1hSurvivalMs) ?? 0),
+          ...restoredSurvival(base, data),
           breaker:
             base.breaker ??
             (reason !== undefined && at !== undefined
@@ -434,6 +441,32 @@ export function readBackAdaptiveSessionState(branch: readonly unknown[]): Adapti
   } catch {
     return undefined;
   }
+}
+
+/**
+ * R9: survival evidence is restored WITH its route. Same route ⇒ keep the larger
+ * value (evidence only grows); a different route ⇒ the newer entry replaces it
+ * (evidence never transfers across routes). Entries without a route key (pre-R9)
+ * restore nothing — unbound evidence is exactly what R9 forbids.
+ */
+function restoredSurvival(
+  base: AdaptiveState,
+  data: Record<string, unknown>,
+): Pick<AdaptiveState, "max1hSurvivalMs" | "survivalRouteKey"> {
+  const ms = asFiniteNumber(data.max1hSurvivalMs);
+  const route =
+    typeof data.survivalRouteKey === "string" && data.survivalRouteKey !== "" ? data.survivalRouteKey : undefined;
+  if (ms === undefined || ms <= 0 || route === undefined) {
+    return { max1hSurvivalMs: base.max1hSurvivalMs, survivalRouteKey: base.survivalRouteKey };
+  }
+  if (route === base.survivalRouteKey)
+    return { max1hSurvivalMs: Math.max(base.max1hSurvivalMs, ms), survivalRouteKey: route };
+  return { max1hSurvivalMs: ms, survivalRouteKey: route };
+}
+
+/** R9: the upstream route a ledger entry was served by ("" parts when unreported). */
+export function ledgerRouteKey(ledger: LedgerUsage): string {
+  return `${ledger.providerId ?? ""}|${ledger.modelId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +558,9 @@ export function adaptiveCoversPrefix(
     isPrefix1hCovered(state, now, state.lastLineageKey) &&
     state.tokensSinceLast1hWrite <= config.refreshAfterTokens &&
     state.max1hSurvivalMs >= horizonMs &&
+    // R9: evidence only counts on the route it was measured on.
+    state.survivalRouteKey !== undefined &&
+    state.survivalRouteKey === state.lastRouteKey &&
     state.oneHourCoverUntil !== undefined &&
     state.oneHourCoverUntil - now >= horizonMs
   );
@@ -912,6 +948,7 @@ export function onLedgerObserved(
   next = {
     ...next,
     lastReconciledEntrySeq: ledger.entrySeq,
+    lastRouteKey: ledgerRouteKey(ledger),
     tokensSinceLast1hWrite: next.tokensSinceLast1hWrite + ledger.cacheWrite,
     lastPrefixTokens: ledger.cacheRead + ledger.cacheWrite,
     lastReconcile: {
@@ -1019,10 +1056,14 @@ export function onLedgerObserved(
     // measured prefix instead; see ADAPTIVE_COVER_HIT_FRACTION.
     const hit = prevPrefixTokens > 0 ? !readCollapsed : ledger.cacheRead > 0;
     if (hit) {
+      const route = ledgerRouteKey(ledger);
       next = {
         ...next,
         indirect1hConfirms: next.indirect1hConfirms + 1,
-        max1hSurvivalMs: Math.max(next.max1hSurvivalMs, next.lastGapMs),
+        // R9: evidence from another route is discarded, never merged.
+        max1hSurvivalMs:
+          next.survivalRouteKey === route ? Math.max(next.max1hSurvivalMs, next.lastGapMs) : next.lastGapMs,
+        survivalRouteKey: route,
       };
     } else {
       next = { ...next, ineffective1h: next.ineffective1h + 1 };

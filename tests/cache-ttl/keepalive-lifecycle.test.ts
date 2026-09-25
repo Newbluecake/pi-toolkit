@@ -643,7 +643,7 @@ describe("cache-keepalive service — F1 arbitration with adaptive", () => {
     expect(service.gapHorizonMs(20_000)).toBe(2_940_000);
   });
 
-  it("gapHorizonMs is undefined when disabled, with a zero ping budget, on a non-streaming capture, after the session breaker, or once disposed", async () => {
+  it("gapHorizonMs is undefined when disabled, with a zero ping budget, after the session breaker, or once disposed", async () => {
     const off = harness().service;
     off.setEnabled(false);
     expect(off.gapHorizonMs(30_000)).toBeUndefined();
@@ -658,9 +658,11 @@ describe("cache-keepalive service — F1 arbitration with adaptive", () => {
     });
     expect(zero.gapHorizonMs(30_000)).toBeUndefined();
 
+    // (streamability is judged on the CURRENT request by the adaptive caller — review R7 — so a
+    // non-streaming PREVIOUS capture no longer makes the horizon undefined here)
     const ns = harness().service;
     ns.noteRequest(capture({ payload: { messages: [], stream: false } }, ns.instanceId));
-    expect(ns.gapHorizonMs(30_000)).toBeUndefined();
+    expect(ns.gapHorizonMs(30_000)).toBe(2_940_000);
 
     const fetchImpl = vi.fn(async () =>
       fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200 })]),

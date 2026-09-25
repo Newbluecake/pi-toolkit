@@ -22,14 +22,27 @@ const decisionEntry = (budget: Record<string, unknown>) => entry({ kind: "decisi
 const reconcileEntry = (fields: Record<string, unknown>) => entry({ kind: "reconcile", at: 5_000, ...fields });
 
 describe("readBackAdaptiveSessionState", () => {
-  it("review R5: restores drift telemetry and the 1h survival evidence (evidence never shrinks)", () => {
+  it("review R5/R9: restores drift telemetry and route-bound 1h survival evidence", () => {
     const state = readBackAdaptiveSessionState([
-      reconcileEntry({ driftCoverClears: 1, max1hSurvivalMs: 3_120_000 }),
-      reconcileEntry({ driftCoverClears: 2, max1hSurvivalMs: 600_000 }),
+      reconcileEntry({ driftCoverClears: 1, max1hSurvivalMs: 3_120_000, survivalRouteKey: "anthropic|opus" }),
+      reconcileEntry({ driftCoverClears: 2, max1hSurvivalMs: 600_000, survivalRouteKey: "anthropic|opus" }),
       reconcileEntry({ upgradeWriteTokens: 5 }), // pre-R5 entry without the fields
     ]);
     expect(state?.driftCoverClears).toBe(2);
-    expect(state?.max1hSurvivalMs).toBe(3_120_000);
+    expect(state?.max1hSurvivalMs).toBe(3_120_000); // same route: evidence never shrinks
+    expect(state?.survivalRouteKey).toBe("anthropic|opus");
+
+    // a later entry on ANOTHER route replaces the evidence (never transfers)
+    const switched = readBackAdaptiveSessionState([
+      reconcileEntry({ max1hSurvivalMs: 3_120_000, survivalRouteKey: "anthropic|opus" }),
+      reconcileEntry({ max1hSurvivalMs: 600_000, survivalRouteKey: "copilot|opus" }),
+    ]);
+    expect(switched?.max1hSurvivalMs).toBe(600_000);
+    expect(switched?.survivalRouteKey).toBe("copilot|opus");
+
+    // unbound (pre-R9) evidence restores nothing
+    const unbound = readBackAdaptiveSessionState([reconcileEntry({ max1hSurvivalMs: 3_120_000 })]);
+    expect(unbound?.max1hSurvivalMs).toBe(0);
     // prefix-bound lineage/cover transients are still never restored
     expect(state?.coverLineageKey).toBeUndefined();
     expect(state?.oneHourCoverUntil).toBeUndefined();
