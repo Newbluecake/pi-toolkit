@@ -299,7 +299,16 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       deps.clock.setTimer(phaseTotalMs, () => {
         phaseTimers.delete(title);
         for (const active of registry.listActive()) {
-          if (phaseOf.get(active.callId) === title) registry.cancel(active.callId, "phase_timeout");
+          if (phaseOf.get(active.callId) !== title) continue;
+          // workflow-agent-queue D6/D7 (single owner): whoever flips a call to
+          // settled records it. `cancel()` returning "withheld" means *this*
+          // timer just settled a never-spawned admission — record + settle it
+          // here (it used to be silently dropped from `children[]`). Active
+          // (bound) calls return "retrying": their real settle still arrives
+          // through the child's own waitAll() path.
+          if (registry.cancel(active.callId, "phase_timeout") === "withheld") {
+            settleUnspawned(active.callId, { cause: "phase_timeout", message: "withheld (phase_timeout)" });
+          }
         }
         deps.onPhaseChange?.({ phaseId: title, kind: "timeout", at: deps.clock.now() });
       }),
@@ -354,8 +363,17 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   // `clock.advance(graceMs)` is enough to force the timeout branch).
   const drainWaiters: Array<() => void> = [];
 
-  /** A1 (withheld): `cancel()` already synchronously settled these — they never spawned, so there is no runId to report. */
-  function settleWithheld(callId: CallId, cause: string): void {
+  /**
+   * A1 (withheld) — workflow-agent-queue D6: the single recorder for a call
+   * that never got a bound child. Callers must have *just* flipped the call
+   * to settled themselves (`registry.cancel()` returned `"withheld"`) — that
+   * is the single-owner rule that guarantees exactly one `children[]` entry
+   * and at most one `host_settle` per callId. `message` is the real reason
+   * (never a generic "terminating" for a phase timeout / spawn failure);
+   * `rejected` marks a post-ack admission failure the worker must surface as
+   * a rejection rather than `null`.
+   */
+  function settleUnspawned(callId: CallId, opts: { cause: string; message: string; rejected?: boolean }): void {
     const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
     const phaseId = phaseOf.get(callId);
     journalMetaOf.delete(callId); // never journaled (RP3: withheld isn't a success).
@@ -370,7 +388,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       kind: "host_settle",
       callId,
       ok: false,
-      error: { message: `workflow terminating (${cause})` },
+      error: { message: opts.message },
+      ...(opts.rejected === true ? { rejected: true as const } : {}),
     } satisfies HostSettleEnvelope);
   }
 
@@ -605,6 +624,21 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },
     });
     if ("error" in spawned) {
+      // workflow-agent-queue D7 (single owner): a cancel (phase timeout,
+      // stopOwned/terminate, HR2 residual release) may have already settled
+      // *and recorded* this call while spawn() was in flight — recording it
+      // again here used to produce a second `children[]` entry. Answer with
+      // the same cancelled ack the success path's `bind().cancelNow` gives.
+      const current = registry.resolve(callId);
+      if (current?.phase === "settled") {
+        return {
+          kind: "host_ack",
+          id: callId,
+          ok: false,
+          cancelled: true,
+          cause: current.cancelIntent?.cause ?? "cancelled",
+        };
+      }
       registry.settle(callId, deps.clock.now());
       journalMetaOf.delete(callId);
       recordSettled({
@@ -801,13 +835,28 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       if (terminated) return; // avoid a duplicate ack racing the terminate()-driven one below.
       if (r.ok) {
         deps.workerHost.send(r.value);
-      } else {
-        deps.workerHost.send({
-          kind: "host_ack",
-          id: envelope.id,
-          ok: false,
-          error: { message: `host call '${envelope.op}' did not complete within ${boundMs}ms (HR2)` },
-        } satisfies HostAckEnvelope);
+        return;
+      }
+      const message =
+        r.reason === "timeout"
+          ? `host call '${envelope.op}' did not complete within ${boundMs}ms (HR2)`
+          : r.error.message;
+      deps.workerHost.send({
+        kind: "host_ack",
+        id: envelope.id,
+        ok: false,
+        error: { message },
+      } satisfies HostAckEnvelope);
+      // workflow-agent-queue D8: the ack above answers the worker, but the
+      // admission itself used to stay in `admission` until spawn() finally
+      // returned (or forever, if it threw) — occupying a maxParallel slot the
+      // whole time. Release it now: withhold + record it here (single owner);
+      // a late spawn then binds against a settled-with-intent call and goes
+      // through the orphan-abort path (`registry.bind` → `retryOrphanAbort`).
+      if (envelope.op === "agent" && registry.resolve(envelope.id) !== undefined) {
+        if (registry.cancel(envelope.id, "host_call_timeout") === "withheld") {
+          settleUnspawned(envelope.id, { cause: "host_call_timeout", message, rejected: true });
+        }
       }
     });
   });
@@ -829,7 +878,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     terminated = true;
     clearAllPhaseTimers(); // WR4-equivalent: no armed timer may survive the workflow's own terminal decision.
     const cancelled = registry.cancelAll(reason);
-    for (const callId of cancelled.withheld) settleWithheld(callId, reason);
+    for (const callId of cancelled.withheld) {
+      settleUnspawned(callId, { cause: reason, message: `workflow terminating (${reason})` });
+    }
     for (const callId of cancelled.retrying) forceSettleActive(callId, reason);
   });
 
@@ -864,7 +915,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // retry loop +, if the caller supplied one, the core's own owner-stop
       // sweep — OS4).
       const cancelled = registry.cancelAll(cause);
-      for (const callId of cancelled.withheld) settleWithheld(callId, cause);
+      for (const callId of cancelled.withheld) {
+        settleUnspawned(callId, { cause, message: `workflow terminating (${cause})` });
+      }
       if (deps.spawner.stopChildrenOf && deps.parentRunId !== undefined) {
         try {
           await deps.spawner.stopChildrenOf(deps.parentRunId, cause);

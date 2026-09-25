@@ -580,3 +580,189 @@ describe("host.ts: M10 child lifecycle events (onChildEvent)", () => {
     expect(handler.children[0]!.status).toBe("completed");
   });
 });
+
+/**
+ * workflow-agent-queue D6–D8 (plan §3.3, review v1 Major-1 / #4): "whoever
+ * flips a call to settled records it" — every exit path is guarded so each
+ * callId gets exactly one `children[]` entry and at most one `host_settle`.
+ */
+function controllableSpawner() {
+  const spawns: Array<{
+    req: Parameters<ChildSpawner["spawn"]>[0];
+    resolve(r: { runId: string; label?: string } | { error: { message: string } }): void;
+    reject(e: unknown): void;
+  }> = [];
+  const aborts: Array<{ runId: string; cause?: string }> = [];
+  const waiters = new Map<string, (o: ChildOutcome) => void>();
+  const spawner: ChildSpawner = {
+    spawn: (req) => new Promise((resolve, reject) => spawns.push({ req, resolve, reject })),
+    abort: async (runId, cause) => {
+      aborts.push({ runId, ...(cause !== undefined ? { cause } : {}) });
+      return true;
+    },
+    waitAll: ({ runIds }) =>
+      new Promise((resolve) => {
+        const runId = runIds[0]!;
+        waiters.set(runId, (o) => resolve({ settled: [o], pending: [] }));
+      }),
+  };
+  return {
+    spawner,
+    spawns,
+    aborts,
+    finishChild(runId: string, status: ChildOutcome["status"] = "completed", text = "ok") {
+      const w = waiters.get(runId);
+      if (!w) throw new Error(`no waitAll registered for ${runId}`);
+      waiters.delete(runId);
+      w({ runId, status, text });
+    },
+    running(): string[] {
+      return [...waiters.keys()];
+    },
+  };
+}
+
+function sentFor(sent: unknown[], id: string) {
+  return {
+    acks: sent.filter(
+      (m) => (m as { kind?: string; id?: string }).kind === "host_ack" && (m as { id?: string }).id === id,
+    ) as Array<Record<string, unknown>>,
+    settles: sent.filter(
+      (m) =>
+        (m as { kind?: string; callId?: string }).kind === "host_settle" && (m as { callId?: string }).callId === id,
+    ) as Array<Record<string, unknown>>,
+  };
+}
+
+const okGate: GateRunner = async () => ({ ok: true, code: 0, stdout: "", stderr: "" });
+
+describe("host.ts: single-owner settlement (workflow-agent-queue D6–D8)", () => {
+  it("D7: a phase timeout withholds an in-flight admission exactly once; a late successful spawn is orphan-aborted and the ack is cancelled", async () => {
+    const h = harness({ phaseTotalMs: 1_000 });
+    await h.boot();
+    const c = controllableSpawner();
+    const handler = h.attach(c.spawner, okGate);
+    h.workerData().commPort.postMessage({ kind: "phase", title: "p1" });
+    await flush();
+    h.postHostCall("1", "agent", { prompt: "slow spawn", opts: { phase: "p1" } });
+    await flush();
+    expect(c.spawns).toHaveLength(1);
+    expect(handler.registry.resolve("1")?.phase).toBe("admission");
+
+    h.clock.advance(1_000);
+    await flush();
+    // Previously: registry flipped to settled but nothing recorded / sent.
+    expect(handler.children).toHaveLength(1);
+    expect(handler.children[0]).toMatchObject({ callId: "1", status: "withheld", phaseId: "p1" });
+    expect(sentFor(h.sent, "1").settles).toHaveLength(1);
+    expect(sentFor(h.sent, "1").settles[0]).toMatchObject({
+      ok: false,
+      error: { message: "withheld (phase_timeout)" },
+    });
+    expect(sentFor(h.sent, "1").settles[0]).not.toHaveProperty("rejected");
+
+    c.spawns[0]!.resolve({ runId: "late-run" });
+    await flush();
+    expect(c.aborts).toEqual([{ runId: "late-run", cause: "phase_timeout" }]);
+    expect(sentFor(h.sent, "1").acks).toEqual([
+      { kind: "host_ack", id: "1", ok: false, cancelled: true, cause: "phase_timeout" },
+    ]);
+    expect(handler.children).toHaveLength(1);
+    expect(sentFor(h.sent, "1").settles).toHaveLength(1);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("D7: a phase timeout followed by a late spawn *error* answers a cancelled ack and never records a second entry", async () => {
+    const h = harness({ phaseTotalMs: 1_000 });
+    await h.boot();
+    const c = controllableSpawner();
+    const handler = h.attach(c.spawner, okGate);
+    h.workerData().commPort.postMessage({ kind: "phase", title: "p1" });
+    await flush();
+    h.postHostCall("1", "agent", { prompt: "x", opts: { phase: "p1" } });
+    await flush();
+    h.clock.advance(1_000);
+    await flush();
+    c.spawns[0]!.resolve({ error: { message: "unknown agent type" } });
+    await flush();
+    expect(handler.children).toHaveLength(1);
+    expect(handler.children[0]!.status).toBe("withheld");
+    expect(sentFor(h.sent, "1").acks).toEqual([
+      { kind: "host_ack", id: "1", ok: false, cancelled: true, cause: "phase_timeout" },
+    ]);
+    expect(sentFor(h.sent, "1").settles).toHaveLength(1);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("D7: stopOwned() while spawn() is in flight, then spawn returns an error — exactly one children[] entry (was two)", async () => {
+    const h = harness();
+    await h.boot();
+    const c = controllableSpawner();
+    const handler = h.attach(c.spawner, okGate);
+    h.postHostCall("1", "agent", { prompt: "x", opts: null });
+    await flush();
+    const stopping = handler.stopOwned("user_stop", 1_000);
+    await flush();
+    expect(handler.children).toHaveLength(1);
+    c.spawns[0]!.resolve({ error: { message: "spawn failed late" } });
+    await flush();
+    await stopping;
+    expect(handler.children).toHaveLength(1);
+    expect(handler.children[0]).toMatchObject({ callId: "1", status: "withheld" });
+    expect(sentFor(h.sent, "1").settles).toHaveLength(1);
+    expect(sentFor(h.sent, "1").settles[0]).toMatchObject({ error: { message: "workflow terminating (user_stop)" } });
+  });
+
+  it("D8: an HR2-timed-out admission is released at once (rejected settle, slot freed); the late spawn is orphan-aborted without a second record", async () => {
+    const h = harness({ hostCallMs: 1_000, maxParallel: 1 });
+    await h.boot();
+    const c = controllableSpawner();
+    const handler = h.attach(c.spawner, okGate);
+    h.postHostCall("1", "agent", { prompt: "hangs", opts: null });
+    await flush();
+    h.clock.advance(1_000);
+    await flush();
+    expect(sentFor(h.sent, "1").acks[0]).toMatchObject({ ok: false, error: { message: expect.stringMatching(/HR2/) } });
+    expect(handler.registry.resolve("1")?.phase).toBe("settled");
+    expect(handler.children).toEqual([expect.objectContaining({ callId: "1", status: "withheld" })]);
+    expect(sentFor(h.sent, "1").settles).toEqual([
+      expect.objectContaining({ ok: false, rejected: true, error: { message: expect.stringMatching(/HR2/) } }),
+    ]);
+
+    // The residual no longer occupies the single maxParallel slot.
+    h.postHostCall("2", "agent", { prompt: "next", opts: null });
+    await flush();
+    expect(c.spawns).toHaveLength(2);
+    c.spawns[1]!.resolve({ runId: "r2" });
+    await flush();
+    expect(sentFor(h.sent, "2").acks[0]).toMatchObject({ ok: true });
+
+    c.spawns[0]!.resolve({ runId: "late-1" });
+    await flush();
+    expect(c.aborts).toEqual([{ runId: "late-1", cause: "host_call_timeout" }]);
+    expect(handler.children.filter((s) => s.callId === "1")).toHaveLength(1);
+    expect(sentFor(h.sent, "1").acks).toHaveLength(1);
+    c.finishChild("r2");
+    await flush();
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("D8: a spawn() that throws acks the real error (not a fake HR2 timeout) and releases the admission", async () => {
+    const h = harness({ maxParallel: 1 });
+    await h.boot();
+    const c = controllableSpawner();
+    const handler = h.attach(c.spawner, okGate);
+    h.postHostCall("1", "agent", { prompt: "x", opts: null });
+    await flush();
+    c.spawns[0]!.reject(new Error("spawner exploded"));
+    await flush();
+    expect(sentFor(h.sent, "1").acks[0]).toMatchObject({
+      ok: false,
+      error: { message: expect.stringMatching(/spawner exploded/) },
+    });
+    expect(handler.registry.resolve("1")?.phase).toBe("settled");
+    expect(handler.children).toHaveLength(1);
+    expect(handler.registry.listActive()).toEqual([]);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+});

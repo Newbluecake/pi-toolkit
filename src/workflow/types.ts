@@ -480,6 +480,15 @@ export type HostSettleEnvelope =
       readonly callId: string;
       readonly ok: false;
       readonly error: { readonly message: string };
+      /**
+       * workflow-agent-queue §3.1/§3.4: the call was *rejected* after its ack
+       * (a post-ack dispatch/admission failure — spawn error, spawn timeout,
+       * an HR2 residual admission), as opposed to a child that ran and failed
+       * or a call that was withheld/cancelled. The worker's `agent()` rejects
+       * (throws) on this instead of resolving to `null`, preserving the
+       * pre-queue "admission failures reject" contract (§5.3).
+       */
+      readonly rejected?: true;
     };
 
 /**
