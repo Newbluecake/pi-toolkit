@@ -17,21 +17,24 @@
 | 同一轮并行数 | 用什么                                                                              |
 | ------------ | ----------------------------------------------------------------------------------- |
 | ≤3           | 同消息多个 `Agent`（更快、更好控，不必写脚本）                                      |
-| 4–6          | 两者皆可：需要分模型 / 挂专家 / worktree 隔离用 `Agent`，同质批量用 workflow        |
+| 4–6          | 两者皆可：要挂专家 / worktree 隔离用 `Agent`，同质批量用 workflow（分模型两边都行） |
 | **>6**       | **必须 workflow**（全局 `concurrencyLimit` 默认 6，同消息硬派会在全局槽位排队超时） |
 
 workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`）时 FIFO 排队（widget 显示 `⧗ N`），
 不会失败；派发失败会 reject，fire-and-forget 调用要自己 `.catch()`。
 
-超过 6 个的任务里若有必须分模型 / 挂专家 / 隔离的，把它们拆出来用 `Agent` 派（≤6），其余同质任务进 workflow。
+超过 6 个的任务里若有必须挂专家 / 隔离的，把它们拆出来用 `Agent` 派（≤6），其余同质任务进 workflow；
+分模型不必拆——`agent()` 可以按调用指定 `model`。
 
 ## 禁用与限制
 
 - 禁止承载 `dev-clarify`、方案确认等用户交互闸门；workflow 启动后跑到结束，不能中途等用户。
 - 禁止顺序 `await agent()` 冒充并行；并行必须 `parallel()` / `pipeline()`。
-- **`agent(prompt, opts)` 只认 `label` / `agentType` / `phase` / `fullResult`**：`model`、`effort`/thinking 传了也被忽略，
-  `isolation: "worktree"` 只写进 journal、**不真正隔离**。子 run 的模型 = agent 类型 frontmatter 的 `model:`，没有则走 pi 默认模型。
-  ⇒ 评审/验收独立性靠「类型 frontmatter 的模型与 dev 类型不同」保证；做不到就别把评审/验收放进 workflow。
+- **`agent(prompt, opts)` 认 `label` / `agentType` / `phase` / `fullResult` / `model` / `thinking`**：`model` 用完整
+  `provider/id`（同 `Agent` 的 `model` 参数；裸 id/子串作模糊 hint 解析，未知模型 / hint 解析失败 / 额度闸门拦截
+  会直接 reject，错误信息含 `Did you mean` 建议），`thinking` 取 `off|low|medium|high`；`effort` 仍被忽略，
+  `isolation: "worktree"` 只写进 journal、**不真正隔离**。
+  ⇒ 评审/验收独立性直接在 verify 一级用 `model:` 指定与 dev 不同的模型（见下方模板），或继续写进类型 frontmatter。
 - 方案强依赖探索结论时先 Explore 后 Plan；只有 Plan 输入自足时才可 Explore + Plan 并行。
 - 有文件交叉的 dev 任务**不能进 workflow**（隔离不生效）：重切文件域，或改用 `Agent({ isolation: "worktree" })`。
 - 批量派 dev 前必须先过[冲突预检](./parallel-safety.md#二冲突预检多写包并行前必做四步)：
@@ -45,8 +48,8 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 
 ## 模型映射与回退
 
-下表是**用 `Agent` 派发时**的角色→模型映射。workflow 内指定不了模型，只有把模型写进对应 agent 类型的
-frontmatter（`model:`）才会生效——当前 `~/.pi/agent/agents/*.md` 都没写 `model:`，workflow 子 run 一律走 pi 默认模型。
+下表的角色→模型映射**同样适用于 workflow**：`agent()` 的 `opts.model` / `opts.thinking` 与 `Agent` 的同名参数同规则
+（完整 `provider/id` 优先；同 prompt 换模型不会命中 journal 旧结果），也可以继续写进 agent 类型 frontmatter 的 `model:`。
 
 Explore=`zai-coding-cn/glm-5.3`（→ `zai/glm-5.3` → sonnet），Plan=`kimi-coding/k3-256k`，
 reviewer=`cr-anthropic/claude-opus-5-5`（方案用 opus 档时改 `kimi-coding/k3-256k`），
@@ -77,14 +80,16 @@ const results = await pipeline(
     agent(t.prompt, {
       label: `dev:${t.id}`,
       phase: "Implement",
-      agentType: t.agentType || "general", // 模型由该类型 frontmatter 决定
+      agentType: t.agentType || "general",
+      model: "zai/glm-5.3", // 按调用指定模型，与 Agent 的 model 参数同规则
     }),
   (dev, t) =>
     dev &&
     agent(`验收 ${t.id}：\n${dev}`, {
       label: `verify:${t.id}`,
       phase: "Verify",
-      agentType: "verifier", // 与 dev 类型的 frontmatter 模型不同，才满足验收独立性
+      agentType: "verifier",
+      model: "cr-anthropic/claude-sonnet-5", // 与 dev 一级不同模型，才满足验收独立性
     }).then((verify) => ({ task: t.id, dev, verify })),
 );
 return { results: results.filter(Boolean) };

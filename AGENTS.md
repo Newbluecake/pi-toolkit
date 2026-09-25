@@ -236,7 +236,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   entry during shutdown, re-delivered once by the next stack on that session file). `agent()` calls beyond `maxParallel`
   FIFO-queue instead of failing (host acks first, then queues; non-time-exhausted dispatch failures reject the script's
   `agent()`; out-of-time while queued ⇒ withheld `null`; a worker-wide `unhandledRejection` is reported as `stage_error`
-  `source:"unhandled"`, never `worker_died`); workflows share the subagent timeout grace + extension machinery
+  `source:"unhandled"`, never `worker_died`); `agent()`'s `opts.model`/`opts.thinking` are real per-call overrides
+  (Agent-tool `model`/`thinking` semantics — strict `provider/id` vs fuzzy-hint split via `parseStrictModelRef`, unknown
+  model ⇒ dispatch-failure reject with suggestions; both fields join the journal taskKey so a model swap never replays
+  the old result); workflows share the subagent timeout grace + extension machinery
   (`deadline.ts`: pure deadline controller, `killAt()` bounds host calls/BW2/gate; `extend_subagent_timeout` accepts `wf_…`
   ids — full/prefix/script name — and refuses a workflow's children, which are pinned to the workflow `hardAt`; explicit
   `timeout_s` is a hard cap). Design: `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`.
