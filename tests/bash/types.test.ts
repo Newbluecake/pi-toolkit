@@ -343,3 +343,102 @@ describe("parseJobRecord", () => {
     expect(Object.keys(result.record)).not.toContain("procStartTime");
   });
 });
+
+/**
+ * T7 (bash-timeout-grace plan §2.1 compat): a `deadline` and `owner` are both
+ * optional, absent-not-undefined fields. "non-legal `deadline` (non-finite,
+ * `dueAt > hardAt`, out-of-range policy) => drop the field, degrade to
+ * no-timeout" — the record itself must still parse fine.
+ */
+describe("parseJobRecord — deadline/owner (bash-timeout-grace §2.1)", () => {
+  const deadlineWire = {
+    timeoutMs: 100_000,
+    policy: { graceMs: 60_000, maxExtensions: 3, maxTimeoutFactor: 3 },
+    dueAt: 101_000,
+    hardAt: 301_000,
+    graceUntil: 120_000,
+    graces: 1,
+    graceNotified: 1,
+    extensions: 2,
+    grantedMs: 40_000,
+    lastReason: "long build",
+    seq: 3,
+  };
+
+  const wire = {
+    v: 1,
+    jobId: "b_3F7K2M9P",
+    command: "npm test",
+    cwd: "/repo",
+    sessionId: "s1",
+    hostPid: 12345,
+    status: "running",
+    createdAt: 1_000,
+    exitCode: null,
+    logPath: "/tmp/b_3F7K2M9P.log",
+    logBytes: 0,
+    outputTruncated: false,
+    readCursor: 0,
+    deadline: deadlineWire,
+    owner: "subagent",
+  };
+
+  it("round-trips a record with a full deadline and owner", () => {
+    const result = parseJobRecord(structuredClone(wire));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.record).toEqual(wire);
+  });
+
+  it("round-trips a record with no deadline and no owner (the common case)", () => {
+    const { deadline: _d, owner: _o, ...bare } = wire;
+    const result = parseJobRecord(structuredClone(bare));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.record).toEqual(bare);
+    expect(Object.keys(result.record)).not.toContain("deadline");
+    expect(Object.keys(result.record)).not.toContain("owner");
+  });
+
+  it("round-trips a deadline with no graceUntil/lastReason (mid-run, never graced)", () => {
+    const { graceUntil: _g, lastReason: _l, ...bareDeadline } = deadlineWire;
+    const result = parseJobRecord({ ...structuredClone(wire), deadline: bareDeadline });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.record.deadline).toEqual(bareDeadline);
+  });
+
+  it("drops an unrecognized owner value instead of throwing", () => {
+    for (const bogusOwner of ["host", "", 1, null, {}]) {
+      const result = parseJobRecord({ ...structuredClone(wire), owner: bogusOwner });
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(Object.keys(result.record)).not.toContain("owner");
+    }
+  });
+
+  it("drops a non-legal deadline (degrades to no-timeout) without rejecting the whole record", () => {
+    const illegal: ReadonlyArray<unknown> = [
+      null,
+      "nope",
+      [],
+      { ...deadlineWire, dueAt: Number.NaN }, // non-finite
+      { ...deadlineWire, dueAt: deadlineWire.hardAt + 1 }, // dueAt > hardAt
+      { ...deadlineWire, graceUntil: deadlineWire.hardAt + 1 }, // graceUntil > hardAt
+      { ...deadlineWire, policy: { ...deadlineWire.policy, maxTimeoutFactor: 0.5 } }, // out-of-range policy
+      { ...deadlineWire, policy: { ...deadlineWire.policy, maxExtensions: -1 } },
+      { ...deadlineWire, extensions: deadlineWire.policy.maxExtensions + 1 }, // policy 越界
+      { ...deadlineWire, graceNotified: deadlineWire.graces + 1 }, // invariant violation
+      { ...deadlineWire, timeoutMs: 0 }, // "no timeout" is absence, not timeoutMs:0
+      { ...deadlineWire, timeoutMs: -1 },
+      { ...deadlineWire, policy: undefined },
+      { ...deadlineWire, seq: -1 },
+    ];
+    for (const bogus of illegal) {
+      const result = parseJobRecord({ ...structuredClone(wire), deadline: bogus });
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(Object.keys(result.record)).not.toContain("deadline");
+    }
+  });
+});

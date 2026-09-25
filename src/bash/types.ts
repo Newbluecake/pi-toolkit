@@ -74,6 +74,51 @@ export const FINAL_TEXT_MAX_BYTES = 16 * 1024;
 export const COMMAND_PREVIEW_MAX = 200;
 
 /**
+ * Job-level deadline policy (bash-timeout-grace plan §2.1), frozen onto the
+ * job at creation — a later config change only affects new jobs, never a job
+ * already carrying a `deadline`.
+ */
+export interface JobDeadlinePolicy {
+  /** Grace window after `dueAt` before a backgrounded job is killed. `<= 0` disables grace (D-6). */
+  readonly graceMs: Millis;
+  /** Extensions allowed over the job's lifetime. `0` disables `extend` entirely (D-6: also disables grace). */
+  readonly maxExtensions: number;
+  /** `hardAt = spawnedAt + ceil(timeoutMs * maxTimeoutFactor)`. `1` = no headroom (uncapped-equivalent to none). */
+  readonly maxTimeoutFactor: number;
+}
+
+/**
+ * §2.1 job-level deadline (mirrors `src/core/types.ts`'s `RunDeadlines` /
+ * `DeadlineBudget` shape). Absent on a `JobRecord` entirely when the caller
+ * did not pass a `timeout` (U3/U5) — there is no "deadline with no timeout"
+ * state. All of `deadline.ts`'s pure functions operate on this shape.
+ */
+export interface JobDeadline {
+  /** The model-supplied `timeout` (ms), as resolved by the existing `resolveTimeoutMs`. */
+  readonly timeoutMs: Millis;
+  /** Frozen at job creation; see `JobDeadlinePolicy`. */
+  readonly policy: JobDeadlinePolicy;
+  /** `spawnedAt + timeoutMs`, moved forward by `applyJobExtension`. */
+  readonly dueAt: Millis;
+  /** `spawnedAt + ceil(timeoutMs * policy.maxTimeoutFactor)`. Never moves (mirrors `hardDeadlineAt`, E32). */
+  readonly hardAt: Millis;
+  /** Set while the job is in its post-`dueAt` grace window; cleared by `applyJobExtension`. */
+  readonly graceUntil?: Millis;
+  /** Count of grace windows entered over the job's lifetime (monotonic). */
+  readonly graces: number;
+  /** Count of grace-entry notifications actually sent (`<= graces`; R6 reload dedup). */
+  readonly graceNotified: number;
+  /** Count of successful `extend` calls (`<= policy.maxExtensions`). */
+  readonly extensions: number;
+  /** Total ms actually granted across all extensions (audit; may be less than the sum of requested `extendMs`). */
+  readonly grantedMs: number;
+  /** Caller-supplied reason for the most recent extension, if any (`bash_job extend`'s `reason?`). */
+  readonly lastReason?: string;
+  /** Bumped on every deadline mutation; used for read-not-regress (R9) and write-not-regress (R10) CAS. */
+  readonly seq: number;
+}
+
+/**
  * §3.5 persisted job record — one JSON file per job. Optional fields are
  * genuinely absent (not `undefined`) on disk: `exactOptionalPropertyTypes` is
  * on, so builders below use conditional spreads rather than `x: undefined`.
@@ -117,6 +162,14 @@ export interface JobRecord {
    * consumer (or a future action) may want a resumable cursor again.
    */
   readonly readCursor: number;
+  /**
+   * Job-level deadline (bash-timeout-grace plan §2.1). Absent when the caller
+   * did not pass a `timeout` — "no deadline" is the only representation of
+   * "no timeout", there is no separate no-op deadline value.
+   */
+  readonly deadline?: JobDeadline;
+  /** Set for jobs created by a subagent's own `bash` tool call (plan §3). */
+  readonly owner?: "subagent";
 }
 
 /**
@@ -318,6 +371,8 @@ export function parseJobRecord(value: unknown): JobRecordParse {
   const notifiedAt = finiteNumber(raw.notifiedAt);
   const procStartTime = nonEmptyString(raw.procStartTime);
   const finalText = typeof raw.finalText === "string" ? raw.finalText : undefined;
+  const deadline = parseJobDeadline(raw.deadline);
+  const owner = raw.owner === "subagent" ? "subagent" : undefined;
 
   return {
     ok: true,
@@ -343,6 +398,80 @@ export function parseJobRecord(value: unknown): JobRecordParse {
       ...(endedAt !== undefined ? { endedAt } : {}),
       ...(finalText !== undefined ? { finalText } : {}),
       ...(notifiedAt !== undefined ? { notifiedAt } : {}),
+      ...(deadline !== undefined ? { deadline } : {}),
+      ...(owner !== undefined ? { owner } : {}),
     },
+  };
+}
+
+/**
+ * Schema-validate an untrusted `deadline` sub-object (§2.1 compat: "non-legal
+ * `deadline` (non-finite, `dueAt > hardAt`, out-of-range policy) => drop the
+ * field, degrade to no-timeout"). Never throws; a dropped field is silent at
+ * this layer — the caller (manager, out of P1 scope) can detect the drop by
+ * comparing `raw.deadline !== undefined` against the parsed record and warn
+ * once if it wants to.
+ */
+function parseJobDeadline(raw: unknown): JobDeadline | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const policyRaw = r.policy;
+  if (typeof policyRaw !== "object" || policyRaw === null || Array.isArray(policyRaw)) return undefined;
+  const p = policyRaw as Record<string, unknown>;
+
+  const timeoutMs = finiteNumber(r.timeoutMs);
+  const dueAt = finiteNumber(r.dueAt);
+  const hardAt = finiteNumber(r.hardAt);
+  const extensions = finiteNumber(r.extensions);
+  const grantedMs = finiteNumber(r.grantedMs);
+  const seq = finiteNumber(r.seq);
+  const graces = finiteNumber(r.graces);
+  const graceNotified = finiteNumber(r.graceNotified);
+  const graceUntil = finiteNumber(r.graceUntil);
+  const lastReason = nonEmptyString(r.lastReason);
+  const graceMs = finiteNumber(p.graceMs);
+  const maxExtensions = finiteNumber(p.maxExtensions);
+  const maxTimeoutFactor = finiteNumber(p.maxTimeoutFactor);
+
+  if (
+    timeoutMs === undefined ||
+    !(timeoutMs > 0) ||
+    dueAt === undefined ||
+    hardAt === undefined ||
+    extensions === undefined ||
+    extensions < 0 ||
+    grantedMs === undefined ||
+    grantedMs < 0 ||
+    seq === undefined ||
+    seq < 0 ||
+    graces === undefined ||
+    graces < 0 ||
+    graceNotified === undefined ||
+    graceNotified < 0 ||
+    graceMs === undefined ||
+    maxExtensions === undefined ||
+    maxExtensions < 0 ||
+    maxTimeoutFactor === undefined ||
+    !(maxTimeoutFactor >= 1)
+  ) {
+    return undefined;
+  }
+  if (dueAt > hardAt) return undefined; // named illegal condition (§2.1 compat)
+  if (graceUntil !== undefined && (!(graceUntil <= hardAt) || !(graceUntil > 0))) return undefined; // T6 invariant
+  if (extensions > maxExtensions) return undefined; // policy 越界
+  if (graceNotified > graces) return undefined; // invariant violation
+
+  return {
+    timeoutMs,
+    policy: { graceMs, maxExtensions, maxTimeoutFactor },
+    dueAt,
+    hardAt,
+    graces,
+    graceNotified,
+    extensions,
+    grantedMs,
+    seq,
+    ...(graceUntil !== undefined ? { graceUntil } : {}),
+    ...(lastReason !== undefined ? { lastReason } : {}),
   };
 }
