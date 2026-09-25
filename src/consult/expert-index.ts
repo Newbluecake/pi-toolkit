@@ -20,6 +20,8 @@ export interface ExpertRecord {
   status: "completed" | "failed" | "timed_out" | "aborted";
   contextPercent?: number;
   contextTokens?: number;
+  /** The run's original task prompt, summarized (`summarizeExpertTask`); display only. */
+  task?: string;
   updatedAt: Millis;
 }
 
@@ -40,6 +42,22 @@ export interface ExpertIndex {
   findByLabel(label: string): readonly ExpertRecord[];
   /** All records (diagnostics / candidate listing). */
   list(): readonly ExpertRecord[];
+}
+
+/** Max characters of an expert's task summary shown to the asker (display only). */
+export const EXPERT_TASK_SUMMARY_CHARS = 160;
+
+/**
+ * One-line summary of an expert's original task prompt for the asker's consult tool
+ * description: whitespace collapsed, truncated to `max` code points with an ellipsis.
+ * Undefined for missing/blank input.
+ */
+export function summarizeExpertTask(taskPrompt: unknown, max = EXPERT_TASK_SUMMARY_CHARS): string | undefined {
+  if (typeof taskPrompt !== "string") return undefined;
+  const flat = taskPrompt.replace(/\s+/g, " ").trim();
+  if (flat.length === 0) return undefined;
+  const chars = [...flat];
+  return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("")}…`;
 }
 
 /**
@@ -132,6 +150,7 @@ export function createExpertIndex(opts: { consultDir: string }): ExpertIndex {
         // forgeable, truncated at 36 codepoints), see plan §13 #11.
         if (isUnderDir(opts.consultDir, sessionFile)) continue;
         const ctx = diag ? contextNumbers(diag) : {};
+        const task = summarizeExpertTask(diag?.taskPrompt);
         next.set(snap.runId, {
           runId: snap.runId,
           ...(diag?.label !== undefined ? { label: diag.label } : {}),
@@ -141,6 +160,7 @@ export function createExpertIndex(opts: { consultDir: string }): ExpertIndex {
           ...(diag?.model !== undefined ? { model: diag.model } : {}),
           ...(ctx.percent !== undefined ? { contextPercent: ctx.percent } : {}),
           ...(ctx.tokens !== undefined ? { contextTokens: ctx.tokens } : {}),
+          ...(task !== undefined ? { task } : {}),
           updatedAt: typeof snap.updatedAt === "number" ? snap.updatedAt : 0,
         });
       }

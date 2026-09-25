@@ -196,8 +196,9 @@ export const AgentToolParams = Type.Object({
         "still-running entries are accepted with a warning and become consultable once they finish. " +
         "The consulted copy is read-only and runs in the consulting agent's checkout. " +
         "Use it when the subagent needs what an upstream agent holds but cannot be read from code " +
-        "(decisions, rejected alternatives, user preferences); say in the task prompt what each expert knows, " +
-        "and still put file locations and key conclusions in the prompt itself.",
+        "(decisions, rejected alternatives, user preferences). The subagent's consult tool already lists each " +
+        "expert's label, type, state and original task; add to the task prompt only what that summary does not " +
+        "convey, and still put file locations and key conclusions in the prompt itself.",
     }),
   ),
 });

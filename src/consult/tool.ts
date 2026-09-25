@@ -307,6 +307,23 @@ function expertName(ref: ConsultExpertRef): string {
   return ref.label !== undefined && ref.label !== "" ? ref.label : ref.runId;
 }
 
+/**
+ * The asker's roster: who it may consult and what each expert covered (its original task,
+ * summarized at dispatch). Rendered into this run's own consult tool description, so the
+ * dispatcher does not have to restate expert names in the task prompt.
+ */
+export function renderExpertRoster(whitelist: readonly ConsultExpertRef[], maxConcurrent: number): string {
+  const rows = whitelist.map((ref) => {
+    const who = ref.label !== undefined && ref.label !== "" ? `${ref.label} (${ref.runId})` : ref.runId;
+    const model = ref.model !== undefined ? ` · ${ref.model.provider}/${ref.model.id}` : "";
+    const state = ref.pending ? "still running when you were dispatched; consult nacks until it finishes" : "finished";
+    const task = ref.task !== undefined ? ` — task: ${JSON.stringify(ref.task)}` : "";
+    return `- ${who} — ${ref.agentType || "agent"}${model} · ${state}${task}`;
+  });
+  const limit = Number.isFinite(maxConcurrent) && maxConcurrent > 0 ? ` (up to ${maxConcurrent} at once)` : "";
+  return `Experts you can consult${limit}:\n${rows.join("\n")}`;
+}
+
 /** Estimate the first-request cost: full prefix rewrite at write price (§4.1, B-form always misses cache). */
 export function estimateFirstRequestUsd(tokens: number, price: { input: number; cacheWrite: number }): number {
   return (tokens * Math.max(price.input, price.cacheWrite)) / 1e6;
@@ -323,7 +340,8 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
       "plus your question, runs in the asking agent's checkout (not its original worktree) with only " +
       "read/grep/find/ls, and is bounded to a few turns and a short wall-clock budget. There is no fallback to a " +
       "fresh agent — if the expert is unavailable (still running, session gone, context too full, cost too high) " +
-      "you get a clear negative answer; investigate yourself instead of retrying.",
+      "you get a clear negative answer; investigate yourself instead of retrying." +
+      `\n\n${renderExpertRoster(deps.whitelist, deps.settings().maxConcurrent)}`,
     promptSnippet: "consult(expert, question) - ask a whitelisted finished expert run and get its answer in-turn",
     parameters: ConsultToolParams,
     async execute(_toolCallId, params, signal) {

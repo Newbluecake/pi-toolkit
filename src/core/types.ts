@@ -158,6 +158,12 @@ export interface ConsultExpertRef {
   contextTokens?: number;
   /** The expert was still running at dispatch time (consult must wait for its terminal state). */
   pending?: boolean;
+  /**
+   * Display only: the expert's original task prompt, whitespace-collapsed and truncated
+   * (`summarizeExpertTask`), rendered into the asker's consult tool description so the asker
+   * knows what each expert covered without the dispatcher restating it.
+   */
+  task?: string;
 }
 
 /**

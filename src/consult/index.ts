@@ -5,7 +5,7 @@ import type { ConsultSettings } from "../config/settings.js";
 import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
 import { matchRunId, type ResolveTargetDeps } from "../service/resolve-target.js";
-import { createExpertIndex, isUnderDir, type ExpertIndex } from "./expert-index.js";
+import { createExpertIndex, isUnderDir, summarizeExpertTask, type ExpertIndex } from "./expert-index.js";
 import {
   CONSULT_MAX_GLOBAL_INFLIGHT,
   createConsultSpawnPort,
@@ -190,6 +190,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
     const percent = ctx !== undefined ? ctx.percent : record?.contextPercent;
     const tokens = ctx?.tokens ?? record?.contextTokens;
     const label = liveSnap?.diag.label ?? record?.label;
+    const task = summarizeExpertTask(liveSnap?.diag.taskPrompt) ?? record?.task;
     return {
       ref: {
         runId,
@@ -204,6 +205,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
         ...(percent != null ? { contextPercent: percent } : {}),
         ...(tokens !== undefined ? { contextTokens: tokens } : {}),
         ...(pending ? { pending: true } : {}),
+        ...(task !== undefined ? { task } : {}),
       },
       ...(pending ? { warning: `⚠ expert "${handle}" is still running; consult will nack until it finishes.` } : {}),
     };

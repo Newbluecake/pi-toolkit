@@ -51,6 +51,7 @@ function snapshot(opts: {
   agentType?: string;
   model?: { provider: string; id: string };
   contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+  taskPrompt?: string;
 }): RunSnapshot {
   return {
     runId: opts.runId,
@@ -74,6 +75,7 @@ function snapshot(opts: {
       ...(opts.label !== undefined ? { label: opts.label } : {}),
       ...(opts.agentType !== undefined ? { agentType: opts.agentType } : {}),
       ...(opts.model !== undefined ? { model: opts.model } : {}),
+      ...(opts.taskPrompt !== undefined ? { taskPrompt: opts.taskPrompt } : {}),
       ...(opts.contextUsage !== undefined ? { contextUsage: opts.contextUsage } : {}),
     },
     updatedAt: 1000,
@@ -555,5 +557,63 @@ describe("wireConsult × real fork-store (package B composition)", () => {
     expect(existsSync(spawnReq.forkSessionFrom!)).toBe(false);
     rmSync(expertCwd, { recursive: true, force: true });
     rmSync(forkDir, { recursive: true, force: true });
+  });
+});
+
+// Roster (2026-09-25): the asker's consult tool lists who it may consult and what each expert
+// covered, so the dispatcher no longer has to restate expert names in the task prompt.
+describe("wireConsult: expert task summary reaches the asker's consult tool description", () => {
+  const longTask =
+    "Read src/quota/service.ts\n\n  and figure out when refreshHotMs applies, how it differs from refreshMs, " +
+    "and how subagent lifecycle events trigger a refresh. Answer in at most five lines, citing file:line for each claim.";
+
+  it("index path: the task is summarized from the persisted run's taskPrompt", () => {
+    const w = wiring({
+      entries: [
+        {
+          type: "custom",
+          customType: "subagent:run",
+          data: snapshot({
+            runId: "r_TASKIDX01",
+            label: "quota-expert",
+            agentType: "Explore",
+            sessionFile: oldExpertFile,
+            model: { provider: "zai", id: "glm-5.3" },
+            taskPrompt: longTask,
+          }),
+        },
+      ],
+    });
+    const [ref] = w.resolveExperts(["quota-expert"]).refs;
+    expect(ref?.task).toBeDefined();
+    expect(ref!.task).not.toMatch(/\s{2,}|\n/);
+    expect([...ref!.task!].length).toBeLessThanOrEqual(160);
+    expect(ref!.task!.startsWith("Read src/quota/service.ts and figure out")).toBe(true);
+    expect(ref!.task!.endsWith("…")).toBe(true);
+  });
+
+  it("live path: a running expert's taskPrompt wins, and the tool description lists the roster", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_TASKLIVE1",
+          status: "running",
+          label: "planner",
+          agentType: "Plan",
+          sessionFile: newExpertFile,
+          model: { provider: "acme", id: "big" },
+          taskPrompt: "Draft the migration plan for the settings file",
+        }),
+      ],
+    });
+    const result = w.resolveExperts(["planner"]);
+    expect(result.refs[0]).toMatchObject({ pending: true, task: "Draft the migration plan for the settings file" });
+    const tool = w.depsFactory("r_ASKER0001" as RunId, "/work", result.refs);
+    expect(tool).toBeDefined();
+    const description = String(tool!.description);
+    expect(description).toContain("Experts you can consult (up to 2 at once):");
+    expect(description).toContain(
+      '- planner (r_TASKLIVE1) — Plan · acme/big · still running when you were dispatched; consult nacks until it finishes — task: "Draft the migration plan for the settings file"',
+    );
   });
 });
