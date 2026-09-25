@@ -112,14 +112,21 @@ export function buildTaskStartedDetails(runId: RunId, label: string, description
  * of the default custom-message box (English tokens only — compact marker).
  * Registration is guarded by a `typeof pi.registerMessageRenderer` probe in
  * src/index.ts; without it the default renderer shows the full content.
+ *
+ * pi hands a custom renderer's component straight to the chat container with
+ * no surrounding Box, so the line must carry its own horizontal padding —
+ * `options.outputPad` (the user's outputPad setting, default 1), the same
+ * indent pi uses for user/assistant messages. Padding 0 left the line flush
+ * against column 0, out of line with everything around it.
  */
-export const renderTaskStartedMessage: MessageRenderer<TaskStartedDetails> = (message, _options, theme) => {
+export const renderTaskStartedMessage: MessageRenderer<TaskStartedDetails> = (message, options, theme) => {
   const details = message.details;
   if (!details || typeof details !== "object") return undefined;
   const { runId, label } = details as Partial<TaskStartedDetails>;
   if (runId === undefined || label === undefined) return undefined;
   const short = runId.length > 8 ? runId.slice(0, 8) : runId;
-  return new Text(theme.fg("muted", `/task started · ${label} (#${short}) · background`), 0, 0);
+  const padX = typeof options?.outputPad === "number" && options.outputPad >= 0 ? options.outputPad : 1;
+  return new Text(theme.fg("muted", `/task started · ${label} (#${short}) · background`), padX, 0);
 };
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {

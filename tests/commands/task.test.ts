@@ -9,6 +9,7 @@ import {
   buildTaskStartedDetails,
   createTaskCommand,
   deriveTaskLabel,
+  renderTaskStartedMessage,
   truncateTaskDescription,
   type TaskCommandDeps,
 } from "../../src/commands/task.js";
@@ -175,5 +176,32 @@ describe("/task content and details builders", () => {
     const details = buildTaskStartedDetails("r_abc12345", "lbl", "z".repeat(TASK_DESCRIPTION_PREVIEW_CHARS + 5));
     expect(details.truncated).toBe(true);
     expect(details.task.startsWith("z".repeat(TASK_DESCRIPTION_PREVIEW_CHARS))).toBe(true);
+  });
+});
+
+describe("renderTaskStartedMessage", () => {
+  const theme = { fg: (_color: string, text: string) => text } as unknown as Parameters<
+    typeof renderTaskStartedMessage
+  >[2];
+  const message = {
+    role: "custom",
+    customType: TASK_STARTED_CUSTOM_TYPE,
+    content: "",
+    display: true,
+    details: buildTaskStartedDetails("r_abc12345xyz", "my-task", "do it"),
+    timestamp: 0,
+  } as unknown as Parameters<typeof renderTaskStartedMessage>[0];
+
+  it("indents the line by pi's outputPad like other chat messages", () => {
+    const lines = renderTaskStartedMessage(message, { expanded: false, outputPad: 1 }, theme)!.render(80);
+    expect(lines[0]).toMatch(/^ \/task started · my-task \(#r_abc123\) · background/);
+    const wide = renderTaskStartedMessage(message, { expanded: false, outputPad: 3 }, theme)!.render(80);
+    expect(wide[0]).toMatch(/^ {3}\/task started/);
+  });
+
+  it("falls back to a 1-column indent when outputPad is missing", () => {
+    const opts = { expanded: false } as unknown as Parameters<typeof renderTaskStartedMessage>[1];
+    const lines = renderTaskStartedMessage(message, opts, theme)!.render(80);
+    expect(lines[0]).toMatch(/^ \/task started/);
   });
 });
