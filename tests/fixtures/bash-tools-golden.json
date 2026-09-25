@@ -1,0 +1,68 @@
+{
+  "bash": {
+    "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. If a command runs longer than ~4m50s, the call returns early on its own with a job_id — the process is NOT killed, it keeps running with its output captured to a log file, and you are notified when it finishes. So for a long-running command whose result you need, just run it in the foreground and let this threshold move it to the background — do NOT set run_in_background: true and then block on bash_job wait; that wastes an extra request for nothing. Reserve run_in_background: true for fire-and-forget commands whose result you will never need. Manage a backgrounded job with the bash_job tool (status / wait / kill / list); the log is a plain file, so you can also read it directly with the read tool or with tail/grep/awk. One-shot timer: to resume work at a known later time (a quota window reset, a rate-limit backoff, an external job due at a known time), start `sleep <seconds> && echo \"<what to do on wake-up>\"` with run_in_background: true — its completion notification wakes you and shows the echoed line, so state the follow-up action in it (the conversation may have been compacted during a long wait). Compute <seconds> yourself (portable; no `date -d`). Timers are for a single wait with a known deadline, never for polling: every wake-up costs a full model turn, so do not loop short sleeps, and prefer real completion notifications (subagents, background jobs) when one exists. If the wait becomes unnecessary, cancel it with bash_job(action: \"kill\", job_id: \"…\"). A pi restart or /reload may drop a sleeping timer, so do not rely on one across a restart.",
+    "label": "bash",
+    "name": "bash",
+    "parameters": {
+      "properties": {
+        "command": {
+          "description": "Shell command to execute",
+          "type": "string"
+        },
+        "run_in_background": {
+          "description": "If true, the command is started in the background immediately and the call returns with a job_id; the process keeps running (check on it with the bash_job tool). Use this ONLY for fire-and-forget commands whose result you will never need, or as a one-shot timer (see the tool description). For a long command whose result you DO need, omit this and run it in the foreground — the call returns early on its own once it passes the auto-background threshold, so explicitly backgrounding and then blocking on bash_job wait wastes an extra request.",
+          "type": "boolean"
+        },
+        "timeout": {
+          "description": "Timeout in seconds (optional, no default timeout)",
+          "type": "number"
+        }
+      },
+      "required": ["command"],
+      "type": "object"
+    },
+    "promptGuidelines": ["You can inspect PI_* environment variables for current model and session details."],
+    "promptSnippet": "Execute bash commands (ls, grep, find, etc.)"
+  },
+  "bash_job": {
+    "description": "Manage bash commands that were moved to the background (a bash call that runs past the threshold returns a job_id instead of blocking; the process keeps running with its output captured to a log file). Actions: status (state summary plus the tail of the log), wait (block up to wait_ms, returns the current status on timeout; a completion notification arrives on its own when the job finishes, and while wait blocks the user cannot send new input, so prefer status or continuing other work unless there is nothing else to do; repeated timing-out waits escalate the guidance toward raising wait_ms or awaiting the notification), kill (terminate the process tree; safe to repeat), list (this session's jobs). The log is a plain file: for the full or a targeted view, read its path directly with the read tool or with tail/grep/awk instead of calling this tool (grep a large log rather than reading it whole). list and status only expose jobs started by this session. Nothing here consumes the job, so status is safe to poll — but rapid repeated polling of the same job returns a warning; await the completion notification instead.",
+    "label": "Bash Job",
+    "name": "bash_job",
+    "parameters": {
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "const": "status",
+              "type": "string"
+            },
+            {
+              "const": "wait",
+              "type": "string"
+            },
+            {
+              "const": "kill",
+              "type": "string"
+            },
+            {
+              "const": "list",
+              "type": "string"
+            }
+          ],
+          "description": "status: state summary plus the tail of the job's log; wait: block (bounded) until the job exits — a completion notification is pushed automatically when the job finishes, and while wait blocks the user cannot send new input, so prefer status (or simply continuing other work) unless there is nothing else to do; repeated timing-out waits escalate guidance (raise wait_ms, or await the notification); kill: terminate the process tree; list: all known jobs."
+        },
+        "job_id": {
+          "description": "Job id returned by a bash call that was moved to the background; a unique prefix is accepted. Required for every action except list.",
+          "type": "string"
+        },
+        "wait_ms": {
+          "description": "wait only: max milliseconds to block (default 30000, capped at 120000). Returns the current status on timeout instead of failing.",
+          "type": "number"
+        }
+      },
+      "required": ["action"],
+      "type": "object"
+    },
+    "promptSnippet": "bash_job(action: \"status\"|\"wait\"|\"kill\"|\"list\", job_id?, wait_ms?) - inspect, wait for, or stop a backgrounded bash command (job_id comes from the bash call that was moved to the background; a unique prefix works); its log is a plain file you can also read/tail/grep directly"
+  }
+}
