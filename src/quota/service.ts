@@ -317,7 +317,11 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
         // 窗口已过重置 ⇒ 读数已知过期（判定层已把该窗口视同过期，见 ladder 规则 0）：
         // 绕过 TTL 立即重拉，闸门/注入不再建立在重置前的旧数据上，直到新读数落地。
         // 在途去重照常兜住并发触发；可疑读数的退避不绕过（确认节奏不变）。零 timer。
-        const resetElapsed = existing.windows.some((w) => w.resetAt !== undefined && w.resetAt <= now);
+        // 只认「快照拉取于重置之前」：上游若在重置后仍回报过去的 resetAt（数据滞后），
+        // 新快照 fetchedAt ≥ resetAt ⇒ 不再绕过，回到常规 TTL（否则每个触发点都会打一次端点）。
+        const resetElapsed = existing.windows.some(
+          (w) => w.resetAt !== undefined && w.resetAt <= now && existing.fetchedAt < w.resetAt,
+        );
         if (!resetElapsed && now - existing.fetchedAt < ttl) continue; // TTL：按 provider 热/冷状态计算
         // 刚拒过一条可疑读数：确认读数至少隔一个有效刷新周期再拉。
         const suspect = suspects.get(id);

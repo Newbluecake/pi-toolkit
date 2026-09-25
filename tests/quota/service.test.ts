@@ -755,6 +755,27 @@ describe("elapsed-reset TTL bypass", () => {
     expect(f.events).toHaveLength(1);
   });
 
+  it("does not keep bypassing the TTL when upstream still reports a past resetAt after the reset", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    await land(f, f.kimi, () =>
+      windowsSnapshot("kimi-coding", [{ scope: "week", usedPct: 100, resetAt: t0 + MINUTE }], f.clock.now()),
+    );
+    f.clock.advance(90_000); // 过 resetAt，TTL 内 ⇒ 绕过一次
+    await land(f, f.kimi, () =>
+      // 上游滞后：重置后仍回报旧的（已过去的）resetAt
+      windowsSnapshot("kimi-coding", [{ scope: "week", usedPct: 3, resetAt: t0 + MINUTE }], f.clock.now()),
+    );
+    expect(f.kimi.fetches()).toBe(2);
+    // 新快照拉取于 resetAt 之后 ⇒ 不再绕过：TTL 内的触发全部空转
+    for (let i = 0; i < 3; i++) {
+      f.clock.advance(10_000);
+      f.service.refreshIfStale();
+      await f.service.whenIdle();
+    }
+    expect(f.kimi.fetches()).toBe(2);
+  });
+
   it("keeps suppressing within the TTL while the reset is still in the future (legacy behavior)", async () => {
     const f = makeFixture();
     const t0 = f.clock.now();
