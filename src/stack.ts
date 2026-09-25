@@ -1518,7 +1518,7 @@ export function buildSessionStack(
         // resolve at publish time, not at construction time.
         adaptiveSnapshot: () => previousAdaptive?.snapshot(),
         // F1: stand down while adaptive's settled 1h entry covers the prefix (lazy, same reason).
-        adaptiveCoversPrefix: () => previousAdaptive?.coversPrefix() === true,
+        adaptiveCoversPrefix: (horizonMs) => previousAdaptive?.coversPrefix(horizonMs) === true,
         // task #14: skip the one-shot 1h upgrade for a prefix the next switch discards.
         switchImminent: () => isSwitchImminentNow(compactHint, ctx),
         appendEntry: (type, data) => pi.appendEntry(type, data),
@@ -1543,7 +1543,7 @@ export function buildSessionStack(
         // reverse direction needs the lazy `previousAdaptive` closure instead).
         provenCacheReadAt: () => keepalive?.provenCacheReadAt(),
         // F1: no new 1h prefix for gaps the pinger already bridges.
-        keepaliveHorizonMs: () => keepalive?.gapHorizonMs(),
+        keepaliveHorizonMs: (prefixTokens) => keepalive?.gapHorizonMs(prefixTokens),
         // task #14: no new 1h prefix (entry fee) for one compact-hint says is about to be discarded.
         switchImminent: () => isSwitchImminentNow(compactHint, ctx),
         isCurrent: (self) => previousAdaptive === self,

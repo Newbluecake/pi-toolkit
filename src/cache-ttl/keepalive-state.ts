@@ -558,6 +558,20 @@ function analyzePayload(payload: unknown): PayloadAnalysis {
   };
 }
 
+/**
+ * R4 (adaptive review 2026-09-25): a cheap identity of the prefix LINEAGE — the
+ * parts of the payload that, when they change, make every cached entry of the
+ * previous lineage unreadable (system text digest, tool list, thinking config).
+ * Two requests with different keys cannot share a cache prefix, so the adaptive
+ * predictor must neither treat one's 1h cover as the other's nor judge the route
+ * from a miss across lineages (field: wake turns ran without the memory/agent
+ * sections, 01a0d2f9 / 01a0d2e4). Same digests `CaptureFingerprint` uses (G7).
+ */
+export function payloadLineageKey(payload: unknown): string {
+  const a = analyzePayload(payload);
+  return `${a.systemDigest}|${a.toolsDigest}|${a.thinkingDigest}`;
+}
+
 export function inspectPayload(payload: unknown): PayloadShape {
   const a = analyzePayload(payload);
   return {

@@ -357,7 +357,7 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
     }
   });
 
-  it("F1: with keepalive on, no new 1h prefix until a gap beyond the ping horizon; then keepalive stands down", async () => {
+  it("F1: with keepalive on, no new 1h prefix until a gap beyond the ping horizon; keepalive keeps pinging until 1h survival is proven", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(1_800_000_000_000);
     const { pi, emit } = fakePi();
@@ -380,7 +380,8 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
       wireCacheTtl(pi, settings, { adaptive: () => holder.current?.adaptive });
       const sid = "session-under-test";
       // 11 pings × 240 s + one 300 s TTL = 49 min.
-      expect(stack.keepalive?.gapHorizonMs()).toBe(2_940_000);
+      expect(stack.keepalive?.gapHorizonMs(304_000)).toBe(2_940_000);
+      expect(stack.keepalive?.gapHorizonMs(10_000)).toBeUndefined(); // R1: below keepaliveMinPrefixTokens
 
       stack.adaptive?.noteUiPromptStart(sid, stack.adaptive.instanceId);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
@@ -398,7 +399,7 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
       vi.setSystemTime(Date.now() + 20_000);
       const [opened] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
       expect(ttlOf(opened)).toBe("1h");
-      expect(stack.adaptive?.coversPrefix()).toBe(false); // unsettled
+      expect(stack.adaptive?.coversPrefix(2_940_000)).toBe(false); // unsettled
 
       entries.push({
         type: "message",
@@ -409,8 +410,11 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
         },
       });
       await emit("turn_end", {}, ctx);
-      // Settled + confirmed 1h + no tail ⇒ the keepalive dep sees a covered prefix.
-      expect(stack.adaptive?.coversPrefix()).toBe(true);
+      // Settled + confirmed 1h + no tail — but R2 (review): keepalive only stands down once
+      // the session has PROVEN the 1h entry outlives its 49-min horizon. No covered long-gap
+      // hit yet ⇒ keep pinging; a 60-min horizon-free query would still say no for the same reason.
+      expect(stack.adaptive?.snapshot().confirmed1hWrites).toBe(1);
+      expect(stack.adaptive?.coversPrefix(2_940_000)).toBe(false);
     } finally {
       vi.useRealTimers();
       stack.adaptive?.dispose();

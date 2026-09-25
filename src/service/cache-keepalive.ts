@@ -115,11 +115,16 @@ export interface KeepalivePort {
    * F1 (adaptive verification-2026-09-25): the longest gap this pinger can bridge
    * for the current session (`keepaliveGapHorizonMs`), or `undefined` when it
    * cannot ping at all — disabled, session-disabled breaker, headless run mode,
-   * non-anthropic / denied route, or a captured payload that is not streamable.
+   * non-anthropic / denied route, a captured payload that is not streamable, or a
+   * measured prefix (`prefixTokens`, 0 when unproven) below `keepaliveMinPrefixTokens`
+   * — gates #8 would stop every ping of the window that follows (review R1). The
+   * per-window ping budget and a single unproven ping are deliberately NOT checked:
+   * both reset when the next real request opens a new window, which is exactly the
+   * window this horizon describes; repeated failures trip the session breaker.
    * Consumed by the adaptive predictor, which refuses to pay a 1h entry fee for
    * gaps this horizon already covers. Identity-free like `provenCacheReadAt`.
    */
-  gapHorizonMs(): Millis | undefined;
+  gapHorizonMs(prefixTokens: number): Millis | undefined;
   setEnabled(on: boolean): void;
   /**
    * plan.md merge note (UI cleanup): `cache-ttl.ts` owns the mode/dirty
@@ -169,7 +174,7 @@ export interface CacheKeepaliveDeps {
    * prefix (`CacheAdaptiveService.coversPrefix`). Lazily read (adaptive is built
    * after keepalive). Absent / throwing ⇒ false ⇒ pinging is unchanged.
    */
-  adaptiveCoversPrefix?: () => boolean;
+  adaptiveCoversPrefix?: (horizonMs: Millis) => boolean;
   /**
    * task #14: compact-hint's switch-imminent flag. `true` ⇒ the one-shot 1h upgrade after
    * budget exhaustion is skipped (it would rewrite at 2x a prefix the next switch discards).
@@ -277,7 +282,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   /** F1: never let the adaptive port break a tick — absent/throwing ⇒ not covered. */
   private safeAdaptiveCovers(): boolean {
     try {
-      return this.deps.adaptiveCoversPrefix?.() === true;
+      return this.deps.adaptiveCoversPrefix?.(keepaliveGapHorizonMs(this.config())) === true;
     } catch {
       return false;
     }
@@ -623,10 +628,11 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     return this.window.lastProvenPingStartedAt;
   }
 
-  gapHorizonMs(): Millis | undefined {
+  gapHorizonMs(prefixTokens: number): Millis | undefined {
     if (this.disposed) return undefined;
     const config = this.config();
     if (!config.enabled || config.maxPings <= 0) return undefined;
+    if (!(prefixTokens >= config.minPrefixTokens)) return undefined;
     if (this.session.disabled !== undefined) return undefined;
     if (!keepaliveModeAllowsPing(this.safeMode())) return undefined;
     let model: KeepaliveModelInfo | undefined;

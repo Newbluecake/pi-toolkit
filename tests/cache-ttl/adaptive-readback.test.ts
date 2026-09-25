@@ -22,6 +22,19 @@ const decisionEntry = (budget: Record<string, unknown>) => entry({ kind: "decisi
 const reconcileEntry = (fields: Record<string, unknown>) => entry({ kind: "reconcile", at: 5_000, ...fields });
 
 describe("readBackAdaptiveSessionState", () => {
+  it("review R5: restores drift telemetry and the 1h survival evidence (evidence never shrinks)", () => {
+    const state = readBackAdaptiveSessionState([
+      reconcileEntry({ driftCoverClears: 1, max1hSurvivalMs: 3_120_000 }),
+      reconcileEntry({ driftCoverClears: 2, max1hSurvivalMs: 600_000 }),
+      reconcileEntry({ upgradeWriteTokens: 5 }), // pre-R5 entry without the fields
+    ]);
+    expect(state?.driftCoverClears).toBe(2);
+    expect(state?.max1hSurvivalMs).toBe(3_120_000);
+    // prefix-bound lineage/cover transients are still never restored
+    expect(state?.coverLineageKey).toBeUndefined();
+    expect(state?.oneHourCoverUntil).toBeUndefined();
+  });
+
   it("restores a tripped breaker with its first trip time", () => {
     const state = readBackAdaptiveSessionState([
       reconcileEntry({ upgradeWriteTokens: 10, feeWriteTokens: 0, feeWriteUsd: 0 }),

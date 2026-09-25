@@ -294,9 +294,22 @@ export interface AdaptiveState {
   ineffective1h: number;
   /** D3 anchor: `cacheRead + cacheWrite` of the previous settled ledger entry (0 before the first). */
   lastPrefixTokens: number;
-  /** F2: settlements that revealed prefix drift (shrunk prefix, or a whole-prefix miss inside the warm
-   *  window) and therefore dropped the 1h cover instead of judging the route. Observability only. */
+  /** F2: settlements that revealed prefix drift (a collapsed read on a shrunk prefix, or inside the
+   *  warm window) and therefore dropped the 1h cover instead of judging the route. Session telemetry,
+   *  restored on /reload. */
   driftCoverClears: number;
+  /** R4: `payloadLineageKey` of the most recent request (undefined until a caller supplies one). */
+  lastLineageKey: string | undefined;
+  /** R4: lineage key of the request that armed the current 1h cover — a request of another lineage
+   *  cannot read that entry, so it is neither "covered" nor evidence about the route. */
+  coverLineageKey: string | undefined;
+  /** R3: `entriesLength` at the latest decision. A ledger entry below it belongs to an EARLIER request,
+   *  so the request-level facts (`lastGapMs`, `lastLineageKey`) do not describe it. */
+  lastDecisionEntriesLength: number;
+  /** R2: longest gap after which a covered request demonstrably READ the 1h entry in this session.
+   *  The keepalive pinger only stands down once this covers its whole horizon (evidence, not the
+   *  optimistic 1h cover). Session evidence, restored on /reload. */
+  max1hSurvivalMs: number;
   droppedPending: number;
   lastDecision: AdaptiveDecision | undefined;
   lastReconcile: AdaptiveReconcileRecord | undefined;
@@ -330,6 +343,10 @@ export function createInitialAdaptiveState(): AdaptiveState {
     ineffective1h: 0,
     lastPrefixTokens: 0,
     driftCoverClears: 0,
+    lastLineageKey: undefined,
+    coverLineageKey: undefined,
+    lastDecisionEntriesLength: -1,
+    max1hSurvivalMs: 0,
     droppedPending: 0,
     lastDecision: undefined,
     lastReconcile: undefined,
@@ -403,6 +420,8 @@ export function readBackAdaptiveSessionState(branch: readonly unknown[]): Adapti
           upgradeWriteUsd: asFiniteNumber(data.upgradeWriteUsd) ?? base.upgradeWriteUsd,
           feeWriteTokens: asFiniteNumber(data.feeWriteTokens) ?? base.feeWriteTokens,
           feeWriteUsd: asFiniteNumber(data.feeWriteUsd) ?? base.feeWriteUsd,
+          driftCoverClears: asFiniteNumber(data.driftCoverClears) ?? base.driftCoverClears,
+          max1hSurvivalMs: Math.max(base.max1hSurvivalMs, asFiniteNumber(data.max1hSurvivalMs) ?? 0),
           breaker:
             base.breaker ??
             (reason !== undefined && at !== undefined
@@ -461,17 +480,27 @@ function feeBudgetExhausted(state: AdaptiveState, config: AdaptiveConfig): boole
  * transition. Erring toward "uncovered" only ever costs probe coverage, never
  * money — the budgets bound both paths.
  */
-export function isPrefix1hCovered(state: AdaptiveState, now: Millis): boolean {
+export function isPrefix1hCovered(state: AdaptiveState, now: Millis, lineageKey?: string): boolean {
   return (
     state.oneHourCoverUntil !== undefined &&
     now < state.oneHourCoverUntil &&
-    state.confirmed1hWrites + state.unconfirmed1hWrites > 0
+    state.confirmed1hWrites + state.unconfirmed1hWrites > 0 &&
+    // R4: another lineage cannot read the 1h entry this cover was bought for.
+    (lineageKey === undefined || state.coverLineageKey === undefined || lineageKey === state.coverLineageKey)
   );
 }
 
 /**
  * F1 (verification-2026-09-25, keepalive side): may the keepalive pinger stand
  * down for the current window because a 1h entry already backs this prefix?
+ *
+ * R2 (review 2026-09-25): standing down is TERMINAL for the window — once the 5m
+ * chain lapses, a later ping would be a write, so keepalive cannot resume. It is
+ * therefore only allowed on EVIDENCE that the 1h entry outlives every gap the
+ * pinger could have bridged: this session has seen a covered request read the
+ * 1h entry after a gap ≥ `horizonMs` (`max1hSurvivalMs`), and the remaining
+ * cover spans the horizon. The measured route kept 1h entries alive for ~23 min
+ * and lost them past ~27 min — without such proof, pinging is the safe cover.
  *
  * Pings replay the last (5m) request and keep the 5m chain alive; when a
  * settled, CONFIRMED (`cacheWrite1h > 0`) 1h write covers the prefix and the
@@ -483,13 +512,21 @@ export function isPrefix1hCovered(state: AdaptiveState, now: Millis): boolean {
  * entry dies early anyway, the next long-gap request trips `1h-ineffective`,
  * this predicate turns false, and pinging resumes — one bounded miss.
  */
-export function adaptiveCoversPrefix(state: AdaptiveState, config: AdaptiveConfig, now: Millis): boolean {
+export function adaptiveCoversPrefix(
+  state: AdaptiveState,
+  config: AdaptiveConfig,
+  now: Millis,
+  horizonMs: Millis,
+): boolean {
   return (
     state.breaker === undefined &&
     state.pending === undefined &&
     state.confirmed1hWrites > 0 &&
-    isPrefix1hCovered(state, now) &&
-    state.tokensSinceLast1hWrite <= config.refreshAfterTokens
+    isPrefix1hCovered(state, now, state.lastLineageKey) &&
+    state.tokensSinceLast1hWrite <= config.refreshAfterTokens &&
+    state.max1hSurvivalMs >= horizonMs &&
+    state.oneHourCoverUntil !== undefined &&
+    state.oneHourCoverUntil - now >= horizonMs
   );
 }
 
@@ -533,6 +570,8 @@ export interface AdaptiveDecideInput {
    * `switch-imminent`; a covered renewal is unaffected. Absent / `false` ⇒ unchanged.
    */
   switchImminent?: boolean | undefined;
+  /** R4: `payloadLineageKey` of the outgoing payload. Absent ⇒ lineage is not checked (pre-fix behaviour). */
+  lineageKey?: string | undefined;
 }
 
 export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision {
@@ -551,6 +590,7 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     lastProvenCacheReadAt,
     keepaliveHorizonMs,
     switchImminent,
+    lineageKey,
   } = input;
   const no = (reason: AdaptiveDeclineReason, signalsSeen: AdaptiveSignalKind[] = []): AdaptiveDecision => ({
     upgrade: false,
@@ -573,7 +613,7 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
   // G-H (entry fee): an upgrade whose prefix is not already 1h-backed rewrites the
   // whole prefix on real routes. Refuse a NEW fee once its budget is gone; the
   // steady-state path below stays open.
-  const covered1h = isPrefix1hCovered(state, now);
+  const covered1h = isPrefix1hCovered(state, now, lineageKey);
   if (!covered1h && feeBudgetExhausted(state, config)) return no("fee-budget");
   // task #14: never pay a NEW entry fee (whole-prefix 1h rewrite) for a prefix the next
   // context switch discards. A covered renewal stays open: it rewrites only the tail at
@@ -701,6 +741,8 @@ export interface NoteDecisionInput {
   entriesLength: number;
   /** Strong signals present at decision time (drives `armedEpisode`). */
   strongSignals: number;
+  /** R4: lineage key of this request's payload (same value handed to `decideAdaptiveTtl`). */
+  lineageKey?: string | undefined;
 }
 
 /** Called for every adaptive-mode request, upgrade or not: gap ring, warm-window clock, episode latch, pending probe record. */
@@ -716,6 +758,8 @@ export function noteDecision(
     lastGapMs: input.gapMs,
     lastRequestStartedAt: input.now,
     lastDecision: decision,
+    lastDecisionEntriesLength: input.entriesLength,
+    ...(input.lineageKey !== undefined ? { lastLineageKey: input.lineageKey } : {}),
   };
   if (input.strongSignals > 0 && !next.armedEpisode) next = { ...next, armedEpisode: true };
   if (!decision.upgrade || decision.class === undefined) return next;
@@ -731,10 +775,11 @@ export function noteDecision(
       predictedDeltaTokens: decision.predictedDeltaTokens,
       // Read from `state` (pre-arm) on purpose: the cover armed just below
       // belongs to THIS upgrade and must not make it look like its own successor.
-      covered1h: isPrefix1hCovered(state, input.now),
+      covered1h: isPrefix1hCovered(state, input.now, input.lineageKey),
       tail5mTokens: state.tokensSinceLast1hWrite,
     },
     oneHourCoverUntil: input.now + ADAPTIVE_COVER_MS,
+    coverLineageKey: input.lineageKey,
     lastUpgradeAt: input.now,
     tokensSinceLast1hWrite: 0,
     warmUpgrades: next.warmUpgrades + (decision.class === "warm" ? 1 : 0),
@@ -845,10 +890,24 @@ export function onLedgerObserved(
   // cover is dropped and the route is NOT judged on this observation. An upgrade
   // settling here is exempt: its own collapse is the entry-fee shape (D4) and it
   // just wrote a fresh 1h entry for the new prefix.
+  //
+  // Review revisions: R3 — only a ledger entry of the LATEST decision's request is
+  // described by `lastGapMs` / `lastLineageKey`; an older one is accounted but not
+  // judged. R4 — when the lineage keys say this request is of ANOTHER lineage than
+  // the cover, the miss is explained (it could never read that entry): no verdict,
+  // and the cover is kept for its own lineage, which may well come back. A shrunk
+  // prefix alone is not drift either (history can legitimately get shorter while
+  // still reading the cached prefix); it has to come with a collapsed read.
   const settlesPending = next.pending !== undefined && ledger.entrySeq >= next.pending.minEntrySeq;
+  const describesLatest = ledger.entrySeq >= next.lastDecisionEntriesLength;
+  const otherLineage =
+    next.coverLineageKey !== undefined &&
+    next.lastLineageKey !== undefined &&
+    next.lastLineageKey !== next.coverLineageKey;
   const prefixShrunk = prevPrefixTokens > 0 && ledger.cacheRead + ledger.cacheWrite < prevPrefixTokens;
   const insideWarmWindow = next.lastGapMs === undefined || next.lastGapMs <= ASSUMED_TTL_MS;
-  const drift = !settlesPending && (prefixShrunk || (readCollapsed && insideWarmWindow));
+  const drift =
+    !settlesPending && describesLatest && !otherLineage && readCollapsed && (prefixShrunk || insideWarmWindow);
 
   next = {
     ...next,
@@ -945,6 +1004,8 @@ export function onLedgerObserved(
   // §4.3/§5.2: a cold request inside the 1h cover window proves (hit) or
   // disproves (miss ⇒ trip) that the upstream honored ttl:"1h".
   if (
+    describesLatest &&
+    !otherLineage &&
     !drift &&
     next.oneHourCoverUntil !== undefined &&
     now < next.oneHourCoverUntil &&
@@ -958,7 +1019,11 @@ export function onLedgerObserved(
     // measured prefix instead; see ADAPTIVE_COVER_HIT_FRACTION.
     const hit = prevPrefixTokens > 0 ? !readCollapsed : ledger.cacheRead > 0;
     if (hit) {
-      next = { ...next, indirect1hConfirms: next.indirect1hConfirms + 1 };
+      next = {
+        ...next,
+        indirect1hConfirms: next.indirect1hConfirms + 1,
+        max1hSurvivalMs: Math.max(next.max1hSurvivalMs, next.lastGapMs),
+      };
     } else {
       next = { ...next, ineffective1h: next.ineffective1h + 1 };
       next = tripBreaker(next, "1h-ineffective", now);
@@ -1039,6 +1104,8 @@ export interface AdaptiveSnapshot {
   ineffective1h: number;
   /** F2: 1h covers dropped because a settlement revealed prefix drift. */
   driftCoverClears: number;
+  /** R2: longest demonstrated 1h survival (gap before a covered hit) this session. */
+  max1hSurvivalMs: number;
   droppedPending: number;
   breaker: { reason: AdaptiveBreakerReason; at: Millis } | undefined;
   lastReconcile: AdaptiveReconcileRecord | undefined;
@@ -1076,6 +1143,7 @@ export function buildAdaptiveSnapshot(state: AdaptiveState, config: AdaptiveConf
     indirect1hConfirms: state.indirect1hConfirms,
     ineffective1h: state.ineffective1h,
     driftCoverClears: state.driftCoverClears,
+    max1hSurvivalMs: state.max1hSurvivalMs,
     droppedPending: state.droppedPending,
     breaker: state.breaker,
     lastReconcile: state.lastReconcile,

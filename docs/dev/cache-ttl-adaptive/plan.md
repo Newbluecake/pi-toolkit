@@ -1527,3 +1527,19 @@ pred Δ=1,183  尾巴=5,098  → 实际 1h 写 7,109
 
 未决：唤醒轮与用户轮的 system prompt 分叉（谱系分裂的主因）已由 91a2878 wake replay 修复，现场样本几乎全部早于它；
 F1–F5 与 wake replay 同时生效后需要重采现场数据，届时再评估 S4 的剩余价值与 `ADAPTIVE_COVER_MS`。
+
+### 19.1 独立评审修订（gpt-5.6-sol 评审打回，同日）
+
+评审结论 REJECT（0 Blocker / 4 Major / 2 Minor）：F1 的可用性判断与 F2 的谱系判断仍可能**比修复前更差**。裁决与修订：
+
+| #   | 评审意见                                                                                                                  | 裁决     | 修订                                                                                                                                                                                                                                                                                                                      |
+| --- | ------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | `gapHorizonMs()` 是静态能力值：前缀 < `keepaliveMinPrefixTokens` 时保活不 ping，adaptive 却拒升                           | 部分采纳 | `gapHorizonMs(prefixTokens)`：本次请求实测前缀（未证实 = 0）低于门槛 ⇒ `undefined`。窗口 ping 预算与单次 unproven 不查：二者都随下一次真实请求开启的新窗口重置——而 horizon 描述的正是那个窗口；连续失败走会话熔断（已 ⇒ `undefined`）                                                                                     |
+| R2  | `adaptive-1h` 是 terminal，却以乐观的 1h cover 为依据；1h 若 ~27min 就死，27–44min 的空档由「ping 可覆盖」变成整前缀 miss | 采纳     | 让位必须有**证据**：`adaptiveCoversPrefix(…, horizonMs)` 追加 `max1hSurvivalMs ≥ horizon`（本会话已观测到被覆盖请求在 ≥ 保活时域的空档后读中 1h 条目，由 1h 判决的 hit 分支记录，跨 /reload 恢复）且剩余 cover ≥ horizon。无证据时照常 ping。代价：60min 空档场景 adaptive+ka 从 $5.18 回到 $5.87（仍远低于仅保活 $8.45） |
+| R3  | pending/ledger 只按 `entrySeq ≥ minEntrySeq` 关联，F2 又读全局 `lastGapMs`                                                | 部分采纳 | 会话内请求串行、reconcile 先于下一次决策，错配是既有的理论风险（非本次引入）。低成本加固：`lastDecisionEntriesLength`，账本不属于最新一次决策的请求时照常记账，但**不做漂移/1h 判决**                                                                                                                                     |
+| R4  | F2 只是启发式：合法缩短会误清 cover；前缀变长的谱系切换仍会误熔断                                                         | 采纳     | **谱系键** `payloadLineageKey`（system 文本摘要 + 工具列表 + thinking 配置，与保活指纹同源）：`isPrefix1hCovered` 要求当前请求与 cover 同谱系；异谱系请求的 miss 不判决、也不清对方谱系的 cover（交替谱系会回来）；启发式漂移改为「读塌缩 且（前缀缩短 或 warm 窗口内）」——只缩短不算                                     |
+| R5  | `driftCoverClears` 不随 /reload 恢复                                                                                      | 采纳     | read-back 恢复 `driftCoverClears` 与 `max1hSurvivalMs`（取历史最大值）；谱系/cover 等前缀相关瞬态仍不恢复                                                                                                                                                                                                                 |
+| R6  | 测试注入静态 horizon，缺服务/动态场景                                                                                     | 采纳     | 新增：服务侧 `gapHorizonMs` 前缀门槛、dep 收到的 horizon、R2 证据/剩余 cover、R3、R4 各分支、`payloadLineageKey`、read-back；仿真里 horizon 只在前缀 ≥ 20k 时传入。R1–R4 共 7 个变异全部被用例击杀                                                                                                                        |
+
+真机冒烟（隔离 worktree + 临时 agent 目录，claude-sonnet-5）：后台 bash job 运行时决策为 `keepalive-covers`、
+`keepaliveHorizonMs=2940000`，全程无 1h 写入，job 结束后的唤醒轮（76s 空档）命中缓存。

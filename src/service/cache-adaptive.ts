@@ -47,7 +47,7 @@ import {
   type AdaptiveState,
 } from "../cache-ttl/adaptive.js";
 import type { InvalidateReason, PayloadShape } from "../cache-ttl/keepalive-state.js";
-import { readLatestAssistantUsage, type LedgerUsage } from "../cache-ttl/usage-ledger.js";
+import { prefixFromLedger, readLatestAssistantUsage, type LedgerUsage } from "../cache-ttl/usage-ledger.js";
 import type { CacheTtlSettings } from "../config/settings.js";
 import { isTerminalStatus } from "../core/status.js";
 import type { Millis, RunStatus } from "../core/types.js";
@@ -108,6 +108,8 @@ export interface AdaptiveDecideRequest {
   shape: PayloadShape;
   /** The one ledger read of this request (also reused for the keepalive capture prefix). */
   ledger: LedgerUsage;
+  /** Review R4: `payloadLineageKey` of the outgoing payload. Absent ⇒ lineage unchecked. */
+  lineageKey?: string;
 }
 
 /** plan.md §9.2: the surface `src/cache-ttl/cache-ttl.ts` talks to. */
@@ -136,7 +138,7 @@ export interface CacheAdaptiveService extends AdaptivePort {
    * stands down for the window. Identity-free (the stack holds the current
    * instance); `false` once disposed.
    */
-  coversPrefix(): boolean;
+  coversPrefix(horizonMs: Millis): boolean;
 }
 
 export interface CacheAdaptiveDeps {
@@ -161,7 +163,7 @@ export interface CacheAdaptiveDeps {
    * opened after the session has shown a gap beyond it. Absent / throwing /
    * `undefined` ⇒ pre-fix behaviour (keepalive off ⇒ adaptive is the only cover).
    */
-  keepaliveHorizonMs?: () => Millis | undefined;
+  keepaliveHorizonMs?: (prefixTokens: number) => Millis | undefined;
   /**
    * task #14: compact-hint's switch-imminent predicate, evaluated per decision against live
    * context usage (stack.ts `isSwitchImminentNow`). `true` ⇒ no NEW 1h prefix (entry fee)
@@ -277,9 +279,9 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
   }
 
   /** F1: same degradation policy — a throwing keepalive port reads as "keepalive cannot cover". */
-  private safeKeepaliveHorizonMs(): Millis | undefined {
+  private safeKeepaliveHorizonMs(prefixTokens: number): Millis | undefined {
     try {
-      return this.deps.keepaliveHorizonMs?.();
+      return this.deps.keepaliveHorizonMs?.(prefixTokens);
     } catch {
       return undefined;
     }
@@ -326,7 +328,9 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     const signals = this.safeSignals();
     const gapMs = this.state.lastRequestStartedAt !== undefined ? now - this.state.lastRequestStartedAt : undefined;
     const lastProvenCacheReadAt = this.safeProvenCacheReadAt();
-    const keepaliveHorizonMs = this.safeKeepaliveHorizonMs();
+    // R1: the pinger covers the gap after THIS request only if its prefix clears the
+    // keepalive min-prefix gate; an unproven ledger counts as 0 (gate #8 refuses it too).
+    const keepaliveHorizonMs = this.safeKeepaliveHorizonMs(prefixFromLedger(request.ledger).tokens);
     const switchImminent = this.safeSwitchImminent();
     const decision = decideAdaptiveTtl({
       now,
@@ -343,21 +347,28 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       lastProvenCacheReadAt,
       keepaliveHorizonMs,
       switchImminent,
+      lineageKey: request.lineageKey,
     });
     const strongSignals = decision.signals.filter((s) => s !== "history-gap").length;
     // Captured BEFORE noteDecision arms this upgrade's own cover (plan.md §16.3):
     // false ⇒ the upgrade pays the entry fee and is exempt from the warm probes.
-    const covered1h = isPrefix1hCovered(this.state, now);
+    const covered1h = isPrefix1hCovered(this.state, now, request.lineageKey);
+    const otherLineage =
+      request.lineageKey !== undefined &&
+      this.state.coverLineageKey !== undefined &&
+      request.lineageKey !== this.state.coverLineageKey;
     this.state = noteDecision(this.state, decision, {
       now,
       gapMs,
       entriesLength: request.ledger.entriesLength,
       strongSignals,
+      lineageKey: request.lineageKey,
     });
     this.audit("decision", {
       upgrade: decision.upgrade,
       class: decision.class,
       covered1h,
+      otherLineage,
       reason: decision.reason,
       signals: decision.signals,
       signalCounts: {
@@ -416,6 +427,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       feeWriteTokens: this.state.feeWriteTokens,
       feeWriteUsd: this.state.feeWriteUsd,
       driftCoverClears: this.state.driftCoverClears,
+      max1hSurvivalMs: this.state.max1hSurvivalMs,
       breaker: this.state.breaker?.reason,
     });
     if (this.state.breaker !== undefined && before.breaker === undefined) {
@@ -465,9 +477,9 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     this.state = endArmedEpisode(this.state);
   }
 
-  coversPrefix(): boolean {
+  coversPrefix(horizonMs: Millis): boolean {
     if (this.disposed) return false;
-    return adaptiveCoversPrefix(this.state, this.config(), this.clock.now());
+    return adaptiveCoversPrefix(this.state, this.config(), this.clock.now(), horizonMs);
   }
 
   // -- lifecycle --------------------------------------------------------------

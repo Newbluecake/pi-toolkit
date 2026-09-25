@@ -8,6 +8,7 @@ import {
 import {
   buildFingerprint,
   inspectPayload,
+  payloadLineageKey,
   renderAdaptiveReportLines,
   renderCacheStatus,
   readCacheStatusTheme,
@@ -324,6 +325,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     const decision: AdaptiveDecision | undefined = adaptiveSvc?.decide(sessionId, adaptiveSvc.instanceId, {
       shape: inspectPayload(event.payload), // read-only walk of the pre-rewrite payload
       ledger,
+      lineageKey: payloadLineageKey(event.payload), // review R4: prefix lineage identity
     });
 
     // §6.3/I-K5: the service is mode-agnostic (it doesn't know about on/off/auto) —

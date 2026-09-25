@@ -16,6 +16,7 @@ import {
   adaptiveCoversPrefix,
   createInitialAdaptiveState,
   decideAdaptiveTtl,
+  noteDecision,
   onLedgerObserved,
   type AdaptiveConfig,
   type AdaptiveDecideInput,
@@ -29,6 +30,7 @@ import {
   createInitialWindowState,
   evaluateTick,
   keepaliveGapHorizonMs,
+  payloadLineageKey,
   type CapturedRequest,
   type CaptureFingerprint,
 } from "../../src/cache-ttl/keepalive-state.js";
@@ -172,14 +174,17 @@ describe("F1 — adaptive does not buy what keepalive already covers", () => {
     expect(d).toMatchObject({ upgrade: true, class: "warm" });
   });
 
-  describe("adaptiveCoversPrefix (keepalive stands down)", () => {
+  describe("adaptiveCoversPrefix (keepalive stands down — only on evidence, review R2)", () => {
     const covered = state({
-      oneHourCoverUntil: NOW + 30 * MIN,
+      oneHourCoverUntil: NOW + 55 * MIN,
       confirmed1hWrites: 1,
       tokensSinceLast1hWrite: 3_000,
+      max1hSurvivalMs: 52 * MIN, // a covered request already read the 1h entry after a 52-min gap
+      coverLineageKey: "A",
+      lastLineageKey: "A",
     });
-    it("true for a settled, confirmed 1h entry with a small tail", () => {
-      expect(adaptiveCoversPrefix(covered, CONFIG, NOW)).toBe(true);
+    it("true for a settled, confirmed 1h entry with a small tail, proven to outlive the horizon", () => {
+      expect(adaptiveCoversPrefix(covered, CONFIG, NOW, HORIZON)).toBe(true);
     });
     it.each([
       ["breaker tripped", { breaker: { reason: "write-budget" as const, at: NOW } }],
@@ -187,8 +192,14 @@ describe("F1 — adaptive does not buy what keepalive already covers", () => {
       ["1h never confirmed by the split", { confirmed1hWrites: 0, unconfirmed1hWrites: 1 }],
       ["cover window expired", { oneHourCoverUntil: NOW - 1 }],
       ["5m tail too large", { tokensSinceLast1hWrite: 16_001 }],
+      // R2: the optimistic 1h cover is not evidence — the measured route lost 1h entries past ~27 min.
+      ["no survival evidence yet", { max1hSurvivalMs: 0 }],
+      ["survival proven only below the horizon (23 min)", { max1hSurvivalMs: 23 * MIN }],
+      ["remaining cover shorter than the horizon", { oneHourCoverUntil: NOW + 30 * MIN }],
+      // R4: the last request (the one keepalive would replay) is of another lineage.
+      ["last request of another lineage", { lastLineageKey: "B" }],
     ])("false when %s", (_name, o) => {
-      expect(adaptiveCoversPrefix({ ...covered, ...o }, CONFIG, NOW)).toBe(false);
+      expect(adaptiveCoversPrefix({ ...covered, ...o }, CONFIG, NOW, HORIZON)).toBe(false);
     });
   });
 
@@ -375,5 +386,132 @@ describe("F5 — a collapsed covered settlement is booked as a fee and not probe
       CONFIG,
     );
     expect(next.breaker?.reason).toBe("warm-write-too-expensive");
+  });
+});
+
+// ─── review revisions R2–R4 ─────────────────────────────────────────────────
+
+describe("R2 — survival evidence is recorded from covered long-gap hits", () => {
+  it("a covered request that reads the 1h entry after a 52-min gap raises max1hSurvivalMs", () => {
+    const s = state({
+      lastPrefixTokens: 120_000,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 5 * MIN,
+      confirmed1hWrites: 1,
+      lastGapMs: 52 * MIN,
+      max1hSurvivalMs: 20 * MIN,
+    });
+    const next = onLedgerObserved(s, ledger({ cacheRead: 118_000, cacheWrite: 4_000 }), NOW, CONFIG);
+    expect(next.indirect1hConfirms).toBe(1);
+    expect(next.max1hSurvivalMs).toBe(52 * MIN);
+  });
+});
+
+describe("R3 — a ledger entry of an EARLIER request is accounted but not judged", () => {
+  it("no drift clear and no 1h verdict when the ledger predates the latest decision", () => {
+    const s = state({
+      lastPrefixTokens: 200_000,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 50 * MIN,
+      confirmed1hWrites: 1,
+      lastGapMs: 20 * MIN, // describes the LATEST request (entriesLength 14), not entry #10
+      lastDecisionEntriesLength: 14,
+    });
+    const next = onLedgerObserved(s, ledger({ entrySeq: 10, cacheRead: 11_000, cacheWrite: 195_000 }), NOW, CONFIG);
+    expect(next.breaker).toBeUndefined();
+    expect(next.oneHourCoverUntil).toBe(NOW + 50 * MIN);
+    expect(next.tokensSinceLast1hWrite).toBe(195_000); // still accounted
+  });
+});
+
+describe("R4 — lineage keys", () => {
+  const coveredA = {
+    lastPrefixTokens: 221_838,
+    lastReconciledEntrySeq: 9,
+    oneHourCoverUntil: NOW + 50 * MIN,
+    confirmed1hWrites: 2,
+    coverLineageKey: "A",
+  };
+
+  it("a long-gap miss of ANOTHER lineage is not a route verdict, and A's cover is kept", () => {
+    // 01a0d2e4 shape: a grown prefix, so the shrink heuristic alone could not save it.
+    const next = onLedgerObserved(
+      state({ ...coveredA, lastLineageKey: "B", lastGapMs: 6.9 * MIN }),
+      ledger({ cacheRead: 43_088, cacheWrite: 179_986, cacheWrite1h: 0 }),
+      NOW,
+      CONFIG,
+    );
+    expect(next.breaker).toBeUndefined();
+    expect(next.ineffective1h).toBe(0);
+    expect(next.oneHourCoverUntil).toBe(NOW + 50 * MIN);
+    expect(next.driftCoverClears).toBe(0);
+  });
+
+  it("control: the SAME lineage collapsing after a long gap still trips 1h-ineffective", () => {
+    const next = onLedgerObserved(
+      state({ ...coveredA, lastLineageKey: "A", lastGapMs: 13.5 * MIN }),
+      ledger({ cacheRead: 11_356, cacheWrite: 215_000, cacheWrite1h: 0 }),
+      NOW,
+      CONFIG,
+    );
+    expect(next.breaker?.reason).toBe("1h-ineffective");
+  });
+
+  it("a shrunk prefix that still READ the cache is not drift (e.g. history got shorter)", () => {
+    const next = onLedgerObserved(
+      state({ ...coveredA, lastLineageKey: "A", lastGapMs: 40_000 }),
+      ledger({ cacheRead: 200_000, cacheWrite: 5_000 }),
+      NOW,
+      CONFIG,
+    );
+    expect(next.oneHourCoverUntil).toBe(NOW + 50 * MIN);
+    expect(next.driftCoverClears).toBe(0);
+  });
+
+  it("decide: a request of another lineage is not covered ⇒ entry-fee path, not a covered refresh", () => {
+    const covered = state({
+      lastRequestStartedAt: NOW - 20_000,
+      oneHourCoverUntil: NOW + 30 * MIN,
+      confirmed1hWrites: 1,
+      lastUpgradeAt: NOW - 10 * MIN,
+      tokensSinceLast1hWrite: 18_000,
+      gaps: [400_000],
+      coverLineageKey: "A",
+    });
+    // S4-only: allowed as a covered refresh on lineage A, refused as a fee on lineage B.
+    expect(decide({ state: covered, lineageKey: "A" })).toMatchObject({ upgrade: true, class: "warm" });
+    expect(decide({ state: covered, lineageKey: "B" })).toMatchObject({
+      upgrade: false,
+      reason: "fee-horizon-too-short",
+    });
+    // No key supplied ⇒ lineage unchecked (pre-R4 behaviour).
+    expect(decide({ state: covered })).toMatchObject({ upgrade: true, class: "warm" });
+  });
+
+  it("noteDecision records the lineage of the request and of the cover it arms", () => {
+    const d = decide({ signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * MIN }), lineageKey: "A" });
+    const next = noteDecision(state({ lastRequestStartedAt: NOW - 20_000 }), d, {
+      now: NOW,
+      gapMs: 20_000,
+      entriesLength: 12,
+      strongSignals: 1,
+      lineageKey: "A",
+    });
+    expect(next.lastLineageKey).toBe("A");
+    expect(next.coverLineageKey).toBe("A");
+    expect(next.lastDecisionEntriesLength).toBe(12);
+  });
+
+  it("payloadLineageKey changes with the system text, tools or thinking config — not with messages", () => {
+    const base = {
+      system: [{ type: "text", text: "sys" }],
+      tools: [{ name: "read" }],
+      messages: [{ role: "user", content: "a" }],
+    };
+    const k = payloadLineageKey(base);
+    expect(payloadLineageKey({ ...base, messages: [...base.messages, { role: "user", content: "b" }] })).toBe(k);
+    expect(payloadLineageKey({ ...base, system: [{ type: "text", text: "sys + memory" }] })).not.toBe(k);
+    expect(payloadLineageKey({ ...base, tools: [{ name: "read" }, { name: "bash" }] })).not.toBe(k);
+    expect(payloadLineageKey({ ...base, thinking: { type: "enabled", budget_tokens: 1024 } })).not.toBe(k);
   });
 });
