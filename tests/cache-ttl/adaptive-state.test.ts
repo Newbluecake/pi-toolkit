@@ -160,8 +160,22 @@ const TRUTH_TABLE: TruthRow[] = [
   },
   { name: "#8 nothing at all", ledger: { cacheWrite: 3_000 }, expect: { upgrade: false, reason: "no-signal" } },
   {
-    name: "#9 nothing, but the session has seen a long gap (S4 weak)",
+    // F3 (verification-2026-09-25): S4 alone no longer pays an entry fee — field
+    // session 01a0d24f paid $2.06 on a 101 s-gap request that no long gap followed.
+    name: "#9 nothing, but the session has seen a long gap (S4 weak) — uncovered: no fee on S4 alone",
     state: { gaps: [400_000] },
+    ledger: { cacheWrite: 3_000 },
+    expect: { upgrade: false, reason: "fee-horizon-too-short", signals: ["history-gap"] },
+  },
+  {
+    name: "#9b S4 still refreshes an already 1h-covered prefix",
+    state: {
+      gaps: [400_000],
+      oneHourCoverUntil: NOW + 30 * 60_000,
+      confirmed1hWrites: 1,
+      lastUpgradeAt: NOW - 10 * 60_000,
+      tokensSinceLast1hWrite: 18_000,
+    },
     ledger: { cacheWrite: 3_000 },
     expect: { upgrade: true, class: "warm", signals: ["history-gap"] },
   },
@@ -900,6 +914,9 @@ describe("gap ring and the S4 weak signal", () => {
           lastRequestStartedAt: NOW - 60_000,
           lastUpgradeAt: NOW - 30_000,
           tokensSinceLast1hWrite: 4_000,
+          // covered: since F3 an uncovered S4-only request stops at fee-horizon-too-short
+          oneHourCoverUntil: NOW + 30 * 60_000,
+          confirmed1hWrites: 1,
         }),
       }),
     );

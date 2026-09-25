@@ -88,11 +88,23 @@ const emptyTypes = {
   reload: async () => ({ types: [], errors: [] }),
 } as unknown as AgentTypeRegistry;
 
+/**
+ * Keepalive is OFF by default here: with it on, F1 (verification-2026-09-25)
+ * refuses every new 1h prefix until the session has shown a gap beyond the ping
+ * horizon, which would hide the adaptive-only machinery these tests pin. The
+ * keepalive-on arbitration has its own test at the end of the file.
+ */
 function settingsWith(overrides: Partial<AgentSettings["cacheTtl"]> = {}): AgentSettings {
   return {
     ...DEFAULT_SETTINGS,
     fleetWidget: false,
-    cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, mode: "adaptive", adaptiveEnabled: true, ...overrides },
+    cacheTtl: {
+      ...DEFAULT_SETTINGS.cacheTtl,
+      mode: "adaptive",
+      adaptiveEnabled: true,
+      keepalive: false,
+      ...overrides,
+    },
   };
 }
 
@@ -243,11 +255,22 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
       await emit("turn_end", {}, ctx);
       const [second] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
       expect(ttlOf(second)).toBe("1h");
-      settle({ cacheRead: 0, cacheWrite: 90_000, cacheWrite1h: 90_000, input: 5, output: 5, cost: { total: 0 } });
+      //    F5 (verification-2026-09-25): a COLLAPSED read here would be prefix
+      //    drift, booked as another entry fee and not judged — the violation that
+      //    must still trip is a covered 1h→1h settlement that READ the prefix yet
+      //    wrote far beyond max(3 × (tail + Δ), floor) = 96k.
+      settle({
+        cacheRead: 100_000,
+        cacheWrite: 120_000,
+        cacheWrite1h: 120_000,
+        input: 5,
+        output: 5,
+        cost: { total: 0 },
+      });
       await emit("turn_end", {}, ctx);
 
       snap = stack.adaptive?.snapshot();
-      expect(snap?.breaker?.reason).toBe("warm-miss");
+      expect(snap?.breaker?.reason).toBe("warm-write-too-expensive");
 
       // 3) `/reload` (field-2026-09-24 §3.1): session_start rebuilds the whole
       //    stack. The breaker and the spent fee budget are session-permanent, so
@@ -260,7 +283,7 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
       const reloaded = buildSessionStack(pi, ctx, settings, emptyTypes, []);
       try {
         const after = reloaded.adaptive?.snapshot();
-        expect(after?.breaker?.reason).toBe("warm-miss");
+        expect(after?.breaker?.reason).toBe("warm-write-too-expensive");
         expect(after?.feeWriteTokens).toBe(snap?.feeWriteTokens); // identical to the pre-reload counters
         expect(after?.upgradeWriteTokens).toBe(snap?.upgradeWriteTokens);
         holder.current = reloaded;
@@ -296,6 +319,69 @@ describe("cache adaptive — real buildSessionStack + wireCacheTtl", () => {
       const [result] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
       expect(ttlOf(result)).toBeUndefined();
     } finally {
+      stack.keepalive?.dispose();
+      stack.scheduler.stop();
+      stack.rpc.close();
+    }
+  });
+
+  it("F1: with keepalive on, no new 1h prefix until a gap beyond the ping horizon; then keepalive stands down", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_800_000_000_000);
+    const { pi, emit } = fakePi();
+    const settings = settingsWith({ keepalive: true });
+    const entries: unknown[] = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          model: "claude-x",
+          usage: { cacheRead: 300_000, cacheWrite: 4_000, input: 5, output: 5, cost: { total: 0 } },
+        },
+      },
+    ];
+    const ctx = fakeCtx();
+    (ctx as unknown as { sessionManager: { getEntries: () => unknown[] } }).sessionManager.getEntries = () => entries;
+    const stack = buildSessionStack(pi, ctx, settings, emptyTypes, []);
+    try {
+      const holder: { current?: { adaptive?: typeof stack.adaptive } } = { current: stack };
+      wireCacheTtl(pi, settings, { adaptive: () => holder.current?.adaptive });
+      const sid = "session-under-test";
+      // 11 pings × 240 s + one 300 s TTL = 49 min.
+      expect(stack.keepalive?.gapHorizonMs()).toBe(2_940_000);
+
+      stack.adaptive?.noteUiPromptStart(sid, stack.adaptive.instanceId);
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      vi.setSystemTime(Date.now() + 20_000);
+      const [covered] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(covered)).toBeUndefined();
+      expect(stack.adaptive?.snapshot().lastDecision?.reason).toBe("keepalive-covers");
+
+      // A 50-min gap: longer than any ping window can bridge. The request that
+      // ENDS it is still refused (the ring learns the gap at this decision)...
+      vi.setSystemTime(Date.now() + 50 * 60_000);
+      const [afterGap] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(afterGap)).toBeUndefined();
+      // ...and the next one opens the prefix: the session has earned the fee.
+      vi.setSystemTime(Date.now() + 20_000);
+      const [opened] = await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      expect(ttlOf(opened)).toBe("1h");
+      expect(stack.adaptive?.coversPrefix()).toBe(false); // unsettled
+
+      entries.push({
+        type: "message",
+        message: {
+          role: "assistant",
+          model: "claude-x",
+          usage: { cacheRead: 0, cacheWrite: 304_000, cacheWrite1h: 304_000, input: 5, output: 5, cost: { total: 0 } },
+        },
+      });
+      await emit("turn_end", {}, ctx);
+      // Settled + confirmed 1h + no tail ⇒ the keepalive dep sees a covered prefix.
+      expect(stack.adaptive?.coversPrefix()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      stack.adaptive?.dispose();
       stack.keepalive?.dispose();
       stack.scheduler.stop();
       stack.rpc.close();

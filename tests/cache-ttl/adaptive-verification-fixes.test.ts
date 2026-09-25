@@ -1,0 +1,379 @@
+/**
+ * Regression tests for the fixes that came out of the 2026-09-25 adaptive
+ * verification (docs/dev/cache-ttl-adaptive/verification-2026-09-25.md, plan.md §19).
+ * Field numbers are the real ones, so a regression names its incident.
+ *
+ *   F1 keepalive ↔ adaptive arbitration (no double payment)
+ *   F2 lineage/drift-aware 1h judgement (no false `1h-ineffective`)
+ *   F3 an entry fee needs a strong, quantified horizon (S4 alone is not enough)
+ *   F4 cold upgrades are booked at the 5m→1h premium (0.375), not 0.95
+ *   F5 a collapsed covered settlement is not judged by the warm probes
+ */
+import { describe, expect, it } from "vitest";
+import {
+  ENTRY_FEE_MARGINAL_WRITE_FRACTION,
+  MARGINAL_WRITE_FRACTION,
+  adaptiveCoversPrefix,
+  createInitialAdaptiveState,
+  decideAdaptiveTtl,
+  onLedgerObserved,
+  type AdaptiveConfig,
+  type AdaptiveDecideInput,
+  type AdaptivePending,
+  type AdaptiveSignals,
+  type AdaptiveState,
+} from "../../src/cache-ttl/adaptive.js";
+import {
+  ASSUMED_TTL_MS,
+  createInitialSessionTotals,
+  createInitialWindowState,
+  evaluateTick,
+  keepaliveGapHorizonMs,
+  type CapturedRequest,
+  type CaptureFingerprint,
+} from "../../src/cache-ttl/keepalive-state.js";
+import type { LedgerUsage } from "../../src/cache-ttl/usage-ledger.js";
+
+const NOW = 1_790_000_000_000;
+const MIN = 60_000;
+const HORIZON = keepaliveGapHorizonMs({ intervalMs: 240_000, maxPings: 11 });
+
+const CONFIG: AdaptiveConfig = {
+  writeBudgetTokens: 200_000,
+  writeBudgetUsd: 1,
+  feeBudgetTokens: 600_000,
+  feeBudgetUsd: 3,
+  maxDeltaTokens: 32_000,
+  refreshAfterTokens: 16_000,
+  coldUpgrades: 1,
+  coldCooldownMs: 1_200_000,
+  coldMinHorizonMs: 600_000,
+  historyGapSignal: true,
+  probeWriteFactor: 3,
+  probeWriteFloorTokens: 64_000,
+  probeWriteFloorFraction: 0.5,
+  probeWriteFloorMinTokens: 4_000,
+};
+
+function signals(o: Partial<AdaptiveSignals> = {}): AdaptiveSignals {
+  return {
+    subagentRuns: 0,
+    maxSubagentHorizonMs: undefined,
+    backgroundBashJobs: 0,
+    uiPrompts: 0,
+    activeTools: 0,
+    ...o,
+  };
+}
+
+function ledger(o: Partial<LedgerUsage> = {}): LedgerUsage {
+  return {
+    source: "usage",
+    cacheRead: 100_000,
+    cacheWrite: 3_000,
+    cacheWrite1h: undefined,
+    costTotalUsd: undefined,
+    cacheWriteUsd: undefined,
+    entrySeq: 10,
+    entriesLength: 11,
+    modelId: "m",
+    ...o,
+  };
+}
+
+function state(o: Partial<AdaptiveState> = {}): AdaptiveState {
+  return { ...createInitialAdaptiveState(), ...o };
+}
+
+function decide(o: Partial<AdaptiveDecideInput> = {}) {
+  return decideAdaptiveTtl({
+    now: NOW,
+    mode: "adaptive",
+    api: "anthropic-messages",
+    provider: "cloudrouter-anthropic",
+    modelId: "m",
+    supportsLongCacheRetention: true,
+    shape: { ephemeralBreakpoints: 2, ttl1h: false, hasThinking: false, maxTokens: 32_000 },
+    signals: signals(),
+    ledger: ledger(),
+    config: CONFIG,
+    state: state({ lastRequestStartedAt: NOW - 20_000 }),
+    lastProvenCacheReadAt: undefined,
+    ...o,
+  });
+}
+
+function pending(o: Partial<AdaptivePending> = {}): AdaptivePending {
+  return {
+    requestSeq: 1,
+    minEntrySeq: 11,
+    at: NOW,
+    class: "warm",
+    predictedDeltaTokens: 5_000,
+    covered1h: false,
+    ...o,
+  };
+}
+
+// ─── F1 ─────────────────────────────────────────────────────────────────────
+
+describe("F1 — adaptive does not buy what keepalive already covers", () => {
+  it("horizon = 11 pings × 4 min + one 5-min TTL", () => {
+    expect(HORIZON).toBe(49 * MIN);
+    expect(keepaliveGapHorizonMs({ intervalMs: 240_000, maxPings: 0 })).toBe(ASSUMED_TTL_MS);
+  });
+
+  it("warm uncovered upgrade is refused while every seen gap fits the ping horizon", () => {
+    const d = decide({
+      signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * MIN }),
+      keepaliveHorizonMs: HORIZON,
+    });
+    expect(d).toMatchObject({ upgrade: false, reason: "keepalive-covers" });
+  });
+
+  it("control: the same request upgrades without keepalive (horizon undefined ⇒ pre-fix behaviour)", () => {
+    const d = decide({
+      signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * MIN }),
+      keepaliveHorizonMs: undefined,
+    });
+    expect(d).toMatchObject({ upgrade: true, class: "warm" });
+  });
+
+  it("a session that has SHOWN a gap beyond the horizon earns the entry fee", () => {
+    const d = decide({
+      signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * MIN }),
+      keepaliveHorizonMs: HORIZON,
+      state: state({ lastRequestStartedAt: NOW - 20_000, gaps: [20 * MIN, 55 * MIN] }),
+    });
+    expect(d).toMatchObject({ upgrade: true, class: "warm" });
+  });
+
+  it("cold opening is refused the same way", () => {
+    const d = decide({
+      signals: signals({ backgroundBashJobs: 1 }),
+      keepaliveHorizonMs: HORIZON,
+      state: state({ lastRequestStartedAt: NOW - 20 * MIN, gaps: [20 * MIN] }),
+    });
+    expect(d).toMatchObject({ upgrade: false, reason: "keepalive-covers" });
+  });
+
+  it("a covered refresh is unaffected (the fee is already paid)", () => {
+    const d = decide({
+      signals: signals({ subagentRuns: 1, maxSubagentHorizonMs: 30 * MIN }),
+      keepaliveHorizonMs: HORIZON,
+      state: state({
+        lastRequestStartedAt: NOW - 20_000,
+        oneHourCoverUntil: NOW + 30 * MIN,
+        confirmed1hWrites: 1,
+        lastUpgradeAt: NOW - 10 * MIN,
+        tokensSinceLast1hWrite: 18_000,
+      }),
+    });
+    expect(d).toMatchObject({ upgrade: true, class: "warm" });
+  });
+
+  describe("adaptiveCoversPrefix (keepalive stands down)", () => {
+    const covered = state({
+      oneHourCoverUntil: NOW + 30 * MIN,
+      confirmed1hWrites: 1,
+      tokensSinceLast1hWrite: 3_000,
+    });
+    it("true for a settled, confirmed 1h entry with a small tail", () => {
+      expect(adaptiveCoversPrefix(covered, CONFIG, NOW)).toBe(true);
+    });
+    it.each([
+      ["breaker tripped", { breaker: { reason: "write-budget" as const, at: NOW } }],
+      ["upgrade still unsettled", { pending: pending() }],
+      ["1h never confirmed by the split", { confirmed1hWrites: 0, unconfirmed1hWrites: 1 }],
+      ["cover window expired", { oneHourCoverUntil: NOW - 1 }],
+      ["5m tail too large", { tokensSinceLast1hWrite: 16_001 }],
+    ])("false when %s", (_name, o) => {
+      expect(adaptiveCoversPrefix({ ...covered, ...o }, CONFIG, NOW)).toBe(false);
+    });
+  });
+
+  describe("evaluateTick gate #11.5", () => {
+    const fp: CaptureFingerprint = {
+      sessionId: "s1",
+      provider: "anthropic",
+      api: "anthropic-messages",
+      modelId: "claude",
+      ctxModelId: "claude",
+      baseUrl: "https://api.anthropic.com",
+      authHeaderKeys: "x-api-key",
+      breakpointPath: "system.0",
+      thinkingDigest: "",
+      systemDigest: "10:abc:abc",
+      toolsDigest: "0:",
+      messageCount: 3,
+    };
+    const capture: CapturedRequest = {
+      sessionId: "s1",
+      instance: "i",
+      payload: { messages: [], stream: true },
+      headers: {},
+      fingerprint: fp,
+      shape: { ephemeralBreakpoints: 1, ttl1h: false, hasThinking: false, maxTokens: 4096 },
+      prefix: { tokens: 100_000, source: "usage" },
+      capturedAt: 0,
+    };
+    const tick = (adaptiveCovered: boolean | undefined) =>
+      evaluateTick({
+        now: 240_000,
+        mode: "tui",
+        armed: true,
+        config: { enabled: true, intervalMs: 240_000, maxPings: 11, minPrefixTokens: 20_000, upgradeAfterBudget: true },
+        session: createInitialSessionTotals(),
+        window: {
+          ...createInitialWindowState(),
+          capture,
+          windowStartAt: 0,
+          lastReadStartedAt: 0,
+          aliveUntil: ASSUMED_TTL_MS,
+          nextPingAt: 240_000,
+        },
+        currentFingerprint: fp,
+        ...(adaptiveCovered === undefined ? {} : { adaptiveCovered }),
+      }).decision;
+    it("skips terminally while adaptive covers the prefix", () => {
+      expect(tick(true)).toEqual({ kind: "skip", reason: "adaptive-1h", terminal: true });
+    });
+    it("pings as before when not covered / not reported", () => {
+      expect(tick(false)).toEqual({ kind: "ping" });
+      expect(tick(undefined)).toEqual({ kind: "ping" });
+    });
+  });
+});
+
+// ─── F2 ─────────────────────────────────────────────────────────────────────
+
+describe("F2 — prefix drift drops the cover instead of tripping 1h-ineffective", () => {
+  it("01a0d2f9 10:49: a SHRUNK prefix after a 9.8-min gap is another lineage, not a dead 1h entry", () => {
+    // 1h point 87,393 (10:39:23); the wake-turn lineage sent 83,691 and shared 9,149.
+    const s = state({
+      lastPrefixTokens: 87_393,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 50 * MIN,
+      confirmed1hWrites: 1,
+      lastGapMs: 9.8 * MIN,
+    });
+    const next = onLedgerObserved(s, ledger({ cacheRead: 9_149, cacheWrite: 74_542, cacheWrite1h: 0 }), NOW, CONFIG);
+    expect(next.breaker).toBeUndefined();
+    expect(next.ineffective1h).toBe(0);
+    expect(next.oneHourCoverUntil).toBeUndefined();
+    expect(next.driftCoverClears).toBe(1);
+  });
+
+  it("01a0d2e4 10:48:34: a whole-prefix miss 56 s after the last request clears the cover; the later long-gap miss is not judged", () => {
+    const s = state({
+      lastPrefixTokens: 205_943,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 50 * MIN,
+      confirmed1hWrites: 2,
+      lastGapMs: 56_000,
+    });
+    const drifted = onLedgerObserved(
+      s,
+      ledger({ cacheRead: 11_846, cacheWrite: 207_109, cacheWrite1h: 0 }),
+      NOW,
+      CONFIG,
+    );
+    expect(drifted.oneHourCoverUntil).toBeUndefined();
+    expect(drifted.breaker).toBeUndefined();
+    // 10:55:57, 6.9-min gap, read 43,088 of 221,838.
+    const later = onLedgerObserved(
+      { ...drifted, lastPrefixTokens: 221_838, lastGapMs: 6.9 * MIN },
+      ledger({ entrySeq: 20, cacheRead: 43_088, cacheWrite: 179_986, cacheWrite1h: 0 }),
+      NOW + 7 * MIN,
+      CONFIG,
+    );
+    expect(later.breaker).toBeUndefined();
+  });
+
+  it("control: a GROWN prefix that collapses after a long gap inside the cover still trips (route ignores 1h)", () => {
+    const s = state({
+      lastPrefixTokens: 252_052,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 50 * MIN,
+      confirmed1hWrites: 1,
+      lastGapMs: 13.5 * MIN,
+    });
+    const next = onLedgerObserved(s, ledger({ cacheRead: 11_356, cacheWrite: 243_000, cacheWrite1h: 0 }), NOW, CONFIG);
+    expect(next.breaker?.reason).toBe("1h-ineffective");
+    expect(next.driftCoverClears).toBe(0);
+  });
+
+  it("an upgrade settling as a collapse is the entry-fee shape, not drift (cover kept)", () => {
+    const s = state({
+      lastPrefixTokens: 86_103,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 60 * MIN,
+      lastGapMs: 20_000,
+      pending: pending({ minEntrySeq: 10 }),
+    });
+    const next = onLedgerObserved(s, ledger({ cacheRead: 0, cacheWrite: 87_391, cacheWrite1h: 87_391 }), NOW, CONFIG);
+    expect(next.oneHourCoverUntil).toBe(NOW + 60 * MIN);
+    expect(next.driftCoverClears).toBe(0);
+    expect(next.feeUpgrades).toBe(1);
+  });
+});
+
+// ─── F4 ─────────────────────────────────────────────────────────────────────
+
+describe("F4 — entry-fee USD fraction follows the counterfactual", () => {
+  const settle = (cls: "warm" | "cold") =>
+    onLedgerObserved(
+      state({ lastReconciledEntrySeq: 9, pending: pending({ class: cls, minEntrySeq: 10 }) }),
+      ledger({ cacheRead: 0, cacheWrite: 100_000, cacheWrite1h: 100_000, cacheWriteUsd: 1.0 }),
+      NOW,
+      CONFIG,
+    );
+  it("cold (prefix presumed dead): only the 5m→1h premium, 0.375", () => {
+    expect(settle("cold").feeWriteUsd).toBeCloseTo(MARGINAL_WRITE_FRACTION * 1.0, 10);
+  });
+  it("warm transition (5m would have hit): 0.95", () => {
+    expect(settle("warm").feeWriteUsd).toBeCloseTo(ENTRY_FEE_MARGINAL_WRITE_FRACTION * 1.0, 10);
+  });
+});
+
+// ─── F5 ─────────────────────────────────────────────────────────────────────
+
+describe("F5 — a collapsed covered settlement is booked as a fee and not probed", () => {
+  it("01a0d188 04:04:55: read 44,386 of 133,651 under cover ⇒ fee, no warm-write-too-expensive", () => {
+    const s = state({
+      lastPrefixTokens: 133_651,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 40 * MIN,
+      confirmed1hWrites: 1,
+      lastGapMs: 30_000,
+      pending: pending({ covered1h: true, predictedDeltaTokens: 6_000, minEntrySeq: 10 }),
+    });
+    const next = onLedgerObserved(
+      s,
+      ledger({ cacheRead: 44_386, cacheWrite: 95_000, cacheWrite1h: 95_000 }),
+      NOW,
+      CONFIG,
+    );
+    expect(next.breaker).toBeUndefined();
+    expect(next.feeUpgrades).toBe(1);
+    expect(next.upgradeWriteTokens).toBe(0);
+  });
+
+  it("control: a covered settlement that READ the prefix and still over-wrote trips", () => {
+    const s = state({
+      lastPrefixTokens: 133_651,
+      lastReconciledEntrySeq: 9,
+      oneHourCoverUntil: NOW + 40 * MIN,
+      confirmed1hWrites: 1,
+      lastGapMs: 30_000,
+      pending: pending({ covered1h: true, predictedDeltaTokens: 6_000, minEntrySeq: 10 }),
+    });
+    const next = onLedgerObserved(
+      s,
+      ledger({ cacheRead: 133_651, cacheWrite: 95_000, cacheWrite1h: 95_000 }),
+      NOW,
+      CONFIG,
+    );
+    expect(next.breaker?.reason).toBe("warm-write-too-expensive");
+  });
+});

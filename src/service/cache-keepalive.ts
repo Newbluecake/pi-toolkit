@@ -18,7 +18,9 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
 import {
+  ANTHROPIC_MESSAGES_API,
   ASSUMED_TTL_MS,
+  PING_DENY_PROVIDERS,
   TICK_INTERVAL_MS,
   TTL_SAFETY_MARGIN_MS,
   cacheReadCostUsd,
@@ -28,6 +30,8 @@ import {
   createInitialWindowState,
   evaluateTick,
   invalidate as invalidateReducer,
+  keepaliveGapHorizonMs,
+  keepaliveModeAllowsPing,
   onPingStarted,
   onProvenHit,
   onRealRequest,
@@ -107,6 +111,15 @@ export interface KeepalivePort {
    * holds the current instance.
    */
   provenCacheReadAt(): Millis | undefined;
+  /**
+   * F1 (adaptive verification-2026-09-25): the longest gap this pinger can bridge
+   * for the current session (`keepaliveGapHorizonMs`), or `undefined` when it
+   * cannot ping at all — disabled, session-disabled breaker, headless run mode,
+   * non-anthropic / denied route, or a captured payload that is not streamable.
+   * Consumed by the adaptive predictor, which refuses to pay a 1h entry fee for
+   * gaps this horizon already covers. Identity-free like `provenCacheReadAt`.
+   */
+  gapHorizonMs(): Millis | undefined;
   setEnabled(on: boolean): void;
   /**
    * plan.md merge note (UI cleanup): `cache-ttl.ts` owns the mode/dirty
@@ -151,6 +164,12 @@ export interface CacheKeepaliveDeps {
    * every ping/window change would blank them until the next request.
    */
   adaptiveSnapshot?: () => AdaptiveSnapshot | undefined;
+  /**
+   * F1: whether the adaptive predictor's settled 1h entry covers the current
+   * prefix (`CacheAdaptiveService.coversPrefix`). Lazily read (adaptive is built
+   * after keepalive). Absent / throwing ⇒ false ⇒ pinging is unchanged.
+   */
+  adaptiveCoversPrefix?: () => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
   emit?: (channel: string, payload: unknown) => void;
 }
@@ -249,6 +268,15 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     }
   }
 
+  /** F1: never let the adaptive port break a tick — absent/throwing ⇒ not covered. */
+  private safeAdaptiveCovers(): boolean {
+    try {
+      return this.deps.adaptiveCoversPrefix?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
   private armed(): boolean {
     try {
       return this.deps.backgroundBusy() || this.activeTools > 0 || this.uiPrompts > 0;
@@ -341,6 +369,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       session: this.session,
       window: this.window,
       currentFingerprint: capture ? this.currentFingerprintFor(capture) : EMPTY_FINGERPRINT,
+      adaptiveCovered: this.safeAdaptiveCovers(),
     });
     this.window = result.window;
     switch (result.decision.kind) {
@@ -575,6 +604,24 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     // longer evidence about the CURRENT prefix, so report nothing.
     if (this.window.capture === undefined) return undefined;
     return this.window.lastProvenPingStartedAt;
+  }
+
+  gapHorizonMs(): Millis | undefined {
+    if (this.disposed) return undefined;
+    const config = this.config();
+    if (!config.enabled || config.maxPings <= 0) return undefined;
+    if (this.session.disabled !== undefined) return undefined;
+    if (!keepaliveModeAllowsPing(this.safeMode())) return undefined;
+    let model: KeepaliveModelInfo | undefined;
+    try {
+      model = this.deps.ctx.model as unknown as KeepaliveModelInfo | undefined;
+    } catch {
+      return undefined;
+    }
+    if (model?.api !== ANTHROPIC_MESSAGES_API || PING_DENY_PROVIDERS.has(model.provider)) return undefined;
+    const capture = this.window.capture;
+    if (capture !== undefined && capture.payload.stream !== true) return undefined;
+    return keepaliveGapHorizonMs(config);
   }
 
   setEnabled(on: boolean): void {

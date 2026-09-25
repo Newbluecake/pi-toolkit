@@ -31,6 +31,7 @@ import {
   ADAPTIVE_PROBE_WRITE_FLOOR_FRACTION,
   ADAPTIVE_PROBE_WRITE_FLOOR_MIN_TOKENS,
   ADAPTIVE_PROBE_WRITE_FLOOR_TOKENS,
+  adaptiveCoversPrefix,
   buildAdaptiveSnapshot,
   createInitialAdaptiveState,
   decideAdaptiveTtl,
@@ -129,6 +130,13 @@ export interface CacheAdaptiveService extends AdaptivePort {
   noteUiPromptEnd(sessionId: string, instance: string): void;
   /** `agent_settled`: force counters back to 0 and close the armed episode. */
   noteAgentSettled(sessionId: string, instance: string): void;
+  /**
+   * F1 (verification-2026-09-25): a settled, confirmed 1h entry covers the current
+   * prefix with a small 5m tail (`adaptiveCoversPrefix`) — the keepalive pinger
+   * stands down for the window. Identity-free (the stack holds the current
+   * instance); `false` once disposed.
+   */
+  coversPrefix(): boolean;
 }
 
 export interface CacheAdaptiveDeps {
@@ -147,6 +155,13 @@ export interface CacheAdaptiveDeps {
    * bit-for-bit unchanged.
    */
   provenCacheReadAt?: () => Millis | undefined;
+  /**
+   * F1: the keepalive service's `gapHorizonMs()` (stack.ts passes
+   * `() => keepalive?.gapHorizonMs()`). While defined, a NEW 1h prefix is only
+   * opened after the session has shown a gap beyond it. Absent / throwing /
+   * `undefined` ⇒ pre-fix behaviour (keepalive off ⇒ adaptive is the only cover).
+   */
+  keepaliveHorizonMs?: () => Millis | undefined;
   /** I-A7: whether `self` is still the holder's current instance (stack.ts passes `(self) => previousAdaptive === self`). */
   isCurrent: (self: CacheAdaptiveService) => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
@@ -254,6 +269,15 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     }
   }
 
+  /** F1: same degradation policy — a throwing keepalive port reads as "keepalive cannot cover". */
+  private safeKeepaliveHorizonMs(): Millis | undefined {
+    try {
+      return this.deps.keepaliveHorizonMs?.();
+    } catch {
+      return undefined;
+    }
+  }
+
   private audit(kind: string, extra: Record<string, unknown> = {}): void {
     try {
       this.deps.appendEntry?.(AUDIT_CUSTOM_TYPE, { kind, at: this.clock.now(), ...extra });
@@ -287,6 +311,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     const signals = this.safeSignals();
     const gapMs = this.state.lastRequestStartedAt !== undefined ? now - this.state.lastRequestStartedAt : undefined;
     const lastProvenCacheReadAt = this.safeProvenCacheReadAt();
+    const keepaliveHorizonMs = this.safeKeepaliveHorizonMs();
     const decision = decideAdaptiveTtl({
       now,
       mode: "adaptive", // the caller (cache-ttl.ts) already gated on the mode setting.
@@ -300,6 +325,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       config: this.config(),
       state: this.state,
       lastProvenCacheReadAt,
+      keepaliveHorizonMs,
     });
     const strongSignals = decision.signals.filter((s) => s !== "history-gap").length;
     // Captured BEFORE noteDecision arms this upgrade's own cover (plan.md §16.3):
@@ -328,6 +354,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       // D1 audit trail: how stale the last REAL request was vs. how stale the
       // last PROVEN read was. In the incident these were 809s and 69s.
       provenReadAgeMs: lastProvenCacheReadAt === undefined ? undefined : now - lastProvenCacheReadAt,
+      keepaliveHorizonMs,
       predictedDeltaTokens: decision.predictedDeltaTokens,
       budget: {
         upgradeWriteTokens: this.state.upgradeWriteTokens,
@@ -371,6 +398,7 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
       upgradeWriteUsd: this.state.upgradeWriteUsd,
       feeWriteTokens: this.state.feeWriteTokens,
       feeWriteUsd: this.state.feeWriteUsd,
+      driftCoverClears: this.state.driftCoverClears,
       breaker: this.state.breaker?.reason,
     });
     if (this.state.breaker !== undefined && before.breaker === undefined) {
@@ -418,6 +446,11 @@ class CacheAdaptiveServiceImpl implements CacheAdaptiveService {
     this.activeTools = 0;
     this.uiPrompts = 0;
     this.state = endArmedEpisode(this.state);
+  }
+
+  coversPrefix(): boolean {
+    if (this.disposed) return false;
+    return adaptiveCoversPrefix(this.state, this.config(), this.clock.now());
   }
 
   // -- lifecycle --------------------------------------------------------------

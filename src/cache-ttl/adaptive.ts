@@ -165,7 +165,11 @@ export type AdaptiveDeclineReason =
   | "cold-budget"
   | "cold-cooldown"
   /** D1: the cold branch's premise ("the prefix is dead anyway") is false — keepalive has proven it alive. */
-  | "cold-cache-alive";
+  | "cold-cache-alive"
+  /** F1 (verification-2026-09-25): opening a new 1h prefix would pay an entry fee for gaps the keepalive
+   *  pinger already covers more cheaply; only a session that has DEMONSTRATED a gap beyond the ping
+   *  horizon earns the fee. */
+  | "keepalive-covers";
 
 export type AdaptiveBreakerReason = "warm-write-too-expensive" | "warm-miss" | "write-budget" | "1h-ineffective";
 
@@ -286,6 +290,9 @@ export interface AdaptiveState {
   ineffective1h: number;
   /** D3 anchor: `cacheRead + cacheWrite` of the previous settled ledger entry (0 before the first). */
   lastPrefixTokens: number;
+  /** F2: settlements that revealed prefix drift (shrunk prefix, or a whole-prefix miss inside the warm
+   *  window) and therefore dropped the 1h cover instead of judging the route. Observability only. */
+  driftCoverClears: number;
   droppedPending: number;
   lastDecision: AdaptiveDecision | undefined;
   lastReconcile: AdaptiveReconcileRecord | undefined;
@@ -318,6 +325,7 @@ export function createInitialAdaptiveState(): AdaptiveState {
     indirect1hConfirms: 0,
     ineffective1h: 0,
     lastPrefixTokens: 0,
+    driftCoverClears: 0,
     droppedPending: 0,
     lastDecision: undefined,
     lastReconcile: undefined,
@@ -457,6 +465,30 @@ export function isPrefix1hCovered(state: AdaptiveState, now: Millis): boolean {
   );
 }
 
+/**
+ * F1 (verification-2026-09-25, keepalive side): may the keepalive pinger stand
+ * down for the current window because a 1h entry already backs this prefix?
+ *
+ * Pings replay the last (5m) request and keep the 5m chain alive; when a
+ * settled, CONFIRMED (`cacheWrite1h > 0`) 1h write covers the prefix and the
+ * 5m tail written since is small, the request after the gap reads the 1h entry
+ * and rewrites only that tail at 5m — every ping in between is paid twice
+ * (simulation: adaptive+keepalive cost 32% more than keepalive alone). Stricter
+ * than `isPrefix1hCovered` on purpose: no breaker, no unsettled upgrade, at
+ * least one split-reported 1h write, tail ≤ `refreshAfterTokens`. If the 1h
+ * entry dies early anyway, the next long-gap request trips `1h-ineffective`,
+ * this predicate turns false, and pinging resumes — one bounded miss.
+ */
+export function adaptiveCoversPrefix(state: AdaptiveState, config: AdaptiveConfig, now: Millis): boolean {
+  return (
+    state.breaker === undefined &&
+    state.pending === undefined &&
+    state.confirmed1hWrites > 0 &&
+    isPrefix1hCovered(state, now) &&
+    state.tokensSinceLast1hWrite <= config.refreshAfterTokens
+  );
+}
+
 export interface AdaptiveDecideInput {
   now: Millis;
   /** G-A defense: anything but "adaptive" never upgrades. */
@@ -482,6 +514,15 @@ export interface AdaptiveDecideInput {
    * than "a real request went out", which is only an assumption.
    */
   lastProvenCacheReadAt: Millis | undefined;
+  /**
+   * F1 (verification-2026-09-25): the longest gap the keepalive pinger can bridge
+   * for this session (`maxPings × interval + TTL`), or `undefined` when keepalive
+   * is off / session-disabled / unable to ping this route. While defined, opening
+   * a NEW 1h prefix (entry fee, warm-uncovered or cold) is refused with
+   * `keepalive-covers` unless the gap ring already holds a gap longer than it —
+   * pings are the cheaper cover for anything shorter. Absent ⇒ pre-fix behaviour.
+   */
+  keepaliveHorizonMs?: number | undefined;
 }
 
 export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision {
@@ -498,6 +539,7 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     config,
     state,
     lastProvenCacheReadAt,
+    keepaliveHorizonMs,
   } = input;
   const no = (reason: AdaptiveDeclineReason, signalsSeen: AdaptiveSignalKind[] = []): AdaptiveDecision => ({
     upgrade: false,
@@ -553,6 +595,9 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     signals.uiPrompts > 0 ||
     (signals.subagentRuns > 0 &&
       (signals.maxSubagentHorizonMs === undefined || signals.maxSubagentHorizonMs >= config.coldMinHorizonMs));
+  // F1: keepalive can bridge every gap this session has shown so far ⇒ a new
+  // 1h prefix would only duplicate what the pings already buy.
+  const keepaliveCovers = keepaliveHorizonMs !== undefined && !state.gaps.some((gap) => gap > keepaliveHorizonMs);
 
   if (warm) {
     // Warm: marginal cost 0.75 × Δ (baseline: same request unrewritten). Wide
@@ -569,9 +614,12 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
     if (predicted1hWrite > config.maxDeltaTokens) return no("delta-too-large", seen);
     // ...unless this warm request is also the prefix's FIRST 1h write, in which
     // case it is economically a cold upgrade (full-prefix rewrite) and has to
-    // earn the fee: either a quantified live horizon, or S4's demonstrated
-    // long-gap habit — which is itself the payback condition.
-    if (!covered1h && !horizonOk && weak.length === 0) return no("fee-horizon-too-short", seen);
+    // earn the fee with a quantified LIVE horizon. F3 (verification-2026-09-25):
+    // S4 alone used to qualify too, and paid a $2.06 fee on a 101 s-gap request
+    // that no long gap ever followed (session 01a0d24f); 5 of 9 field fees never
+    // amortized. S4 keeps its role for refreshing an already-covered prefix.
+    if (!covered1h && !horizonOk) return no("fee-horizon-too-short", seen);
+    if (!covered1h && keepaliveCovers) return no("keepalive-covers", seen);
     const episodeJustArmed = strong.length > 0 && !state.armedEpisode; // signal just opened: always upgrade
     // The throttle only guards REPEAT purchases after an upgrade; before the
     // session's first upgrade there is nothing to refresh (otherwise a
@@ -607,6 +655,7 @@ export function decideAdaptiveTtl(input: AdaptiveDecideInput): AdaptiveDecision 
   if (cacheProvenAlive) return no("cold-cache-alive", seen);
   if (strong.length === 0) return no("cold-signal-too-weak", seen);
   if (!horizonOk) return no("cold-signal-too-weak", seen);
+  if (!covered1h && keepaliveCovers) return no("keepalive-covers", seen);
   if (state.coldUpgradesUsed >= config.coldUpgrades) return no("cold-budget", seen);
   if (state.lastColdUpgradeAt !== undefined && now - state.lastColdUpgradeAt < config.coldCooldownMs)
     return no("cold-cooldown", seen);
@@ -677,6 +726,19 @@ export function noteDecision(
 
 function tripBreaker(state: AdaptiveState, reason: AdaptiveBreakerReason, at: Millis): AdaptiveState {
   return state.breaker !== undefined ? state : { ...state, breaker: { reason, at } };
+}
+
+/**
+ * F4 (verification-2026-09-25): marginal fraction of `cost.cacheWrite` for an
+ * ENTRY-FEE settlement. A WARM transition's counterfactual is "the 5m request
+ * would have hit" ⇒ (2.0 − 0.1)/2.0 = 0.95. A COLD upgrade was decided precisely
+ * because the prefix is presumed dead (session start, stale ledger, >TTL gap),
+ * so the 5m counterfactual rewrites it too ⇒ only the 5m→1h premium is marginal,
+ * 0.375. Booking cold at 0.95 over-reported by ~2.5× (simulation: $1.87 booked
+ * vs $1.35 true) and exhausted the fee budget early.
+ */
+function entryFeeFraction(pending: AdaptivePending): number {
+  return pending.class === "cold" ? MARGINAL_WRITE_FRACTION : ENTRY_FEE_MARGINAL_WRITE_FRACTION;
 }
 
 /**
@@ -754,6 +816,20 @@ export function onLedgerObserved(
   // that depend on it — they fall back to the pre-fix `cacheRead > 0` test.
   const prevPrefixTokens = next.lastPrefixTokens;
   const readCollapsed = prevPrefixTokens > 0 && ledger.cacheRead < ADAPTIVE_COVER_HIT_FRACTION * prevPrefixTokens;
+  // F2 (verification-2026-09-25): prefix drift the invalidate events never saw.
+  // Two field shapes, both on sessions with alternating prompt lineages:
+  //   - the prefix SHRANK (01a0d2f9 10:49: 83,691 < 87,393 — a wake-turn lineage
+  //     that shared only 9,149 tokens; the 1h entry was read intact 23 min later);
+  //   - a whole-prefix miss INSIDE the warm window, with no gap to blame
+  //     (01a0d2e4 10:48:34: 56 s gap, read 11,846 / write 207,109).
+  // Either way the 1h cover no longer maps onto the prefix being sent, so the
+  // cover is dropped and the route is NOT judged on this observation. An upgrade
+  // settling here is exempt: its own collapse is the entry-fee shape (D4) and it
+  // just wrote a fresh 1h entry for the new prefix.
+  const settlesPending = next.pending !== undefined && ledger.entrySeq >= next.pending.minEntrySeq;
+  const prefixShrunk = prevPrefixTokens > 0 && ledger.cacheRead + ledger.cacheWrite < prevPrefixTokens;
+  const insideWarmWindow = next.lastGapMs === undefined || next.lastGapMs <= ASSUMED_TTL_MS;
+  const drift = !settlesPending && (prefixShrunk || (readCollapsed && insideWarmWindow));
 
   next = {
     ...next,
@@ -769,6 +845,9 @@ export function onLedgerObserved(
       cacheWriteUsd: ledger.cacheWriteUsd,
     },
   };
+  if (drift && next.oneHourCoverUntil !== undefined) {
+    next = { ...next, oneHourCoverUntil: undefined, driftCoverClears: next.driftCoverClears + 1 };
+  }
 
   const pending = next.pending;
   if (pending !== undefined && ledger.entrySeq >= pending.minEntrySeq) {
@@ -816,14 +895,18 @@ export function onLedgerObserved(
             feeWriteTokens: next.feeWriteTokens + ledger.cacheWrite,
             feeWriteUsd:
               next.feeWriteUsd +
-              (ledger.cacheWriteUsd === undefined ? 0 : ENTRY_FEE_MARGINAL_WRITE_FRACTION * ledger.cacheWriteUsd),
+              (ledger.cacheWriteUsd === undefined ? 0 : entryFeeFraction(pending) * ledger.cacheWriteUsd),
           }),
     };
     // The warm probes test §0.4 corollary 1 — "a warm 1h upgrade bills only the
     // increment" — which is a claim about 1h→1h. On a transition the full-prefix
     // rewrite IS the expected shape (field evidence, plan.md §16.3), so judging it
     // here produced a guaranteed false trip on the first upgrade of every session.
-    if (pending.class === "warm" && pending.covered1h) {
+    // F5: the same holds for a covered upgrade whose read COLLAPSED — D4 above has
+    // already booked it as an entry fee (the prefix drifted under the cover), so
+    // judging it as a 1h→1h increment contradicted our own bookkeeping (field:
+    // 01a0d188 04:04:55 was booked as a fee AND tripped warm-write-too-expensive).
+    if (pending.class === "warm" && pending.covered1h && !readCollapsed) {
       if (ledger.cacheRead === 0) {
         // Covered by a settled 1h entry, still a total miss: the prefix drifted
         // under us (or the cover is a lie) ⇒ the warm judgement is unreliable here.
@@ -843,6 +926,7 @@ export function onLedgerObserved(
   // §4.3/§5.2: a cold request inside the 1h cover window proves (hit) or
   // disproves (miss ⇒ trip) that the upstream honored ttl:"1h".
   if (
+    !drift &&
     next.oneHourCoverUntil !== undefined &&
     now < next.oneHourCoverUntil &&
     next.lastGapMs !== undefined &&
@@ -934,6 +1018,8 @@ export interface AdaptiveSnapshot {
   unconfirmed1hWrites: number;
   indirect1hConfirms: number;
   ineffective1h: number;
+  /** F2: 1h covers dropped because a settlement revealed prefix drift. */
+  driftCoverClears: number;
   droppedPending: number;
   breaker: { reason: AdaptiveBreakerReason; at: Millis } | undefined;
   lastReconcile: AdaptiveReconcileRecord | undefined;
@@ -970,6 +1056,7 @@ export function buildAdaptiveSnapshot(state: AdaptiveState, config: AdaptiveConf
     unconfirmed1hWrites: state.unconfirmed1hWrites,
     indirect1hConfirms: state.indirect1hConfirms,
     ineffective1h: state.ineffective1h,
+    driftCoverClears: state.driftCoverClears,
     droppedPending: state.droppedPending,
     breaker: state.breaker,
     lastReconcile: state.lastReconcile,

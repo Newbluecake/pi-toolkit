@@ -1485,6 +1485,8 @@ export function buildSessionStack(
         // Lazily read: `adaptive` is constructed below, so this closure must
         // resolve at publish time, not at construction time.
         adaptiveSnapshot: () => previousAdaptive?.snapshot(),
+        // F1: stand down while adaptive's settled 1h entry covers the prefix (lazy, same reason).
+        adaptiveCoversPrefix: () => previousAdaptive?.coversPrefix() === true,
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),
       })
@@ -1506,6 +1508,8 @@ export function buildSessionStack(
         // `keepalive` is constructed just above, so this is a direct read (the
         // reverse direction needs the lazy `previousAdaptive` closure instead).
         provenCacheReadAt: () => keepalive?.provenCacheReadAt(),
+        // F1: no new 1h prefix for gaps the pinger already bridges.
+        keepaliveHorizonMs: () => keepalive?.gapHorizonMs(),
         isCurrent: (self) => previousAdaptive === self,
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),

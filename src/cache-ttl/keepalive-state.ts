@@ -44,6 +44,11 @@ export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 /** G2: only these run modes can plausibly resume a long-idle session. */
 const RUN_MODES_ALLOWING_PING: ReadonlySet<string> = new Set(["tui", "rpc"]);
 
+/** Gate #4 as a predicate, for callers outside `evaluateTick` (F1 horizon report). */
+export function keepaliveModeAllowsPing(mode: string): boolean {
+  return RUN_MODES_ALLOWING_PING.has(mode);
+}
+
 // ---------------------------------------------------------------------------
 // ping-client.ts type re-export (collapsed onto the real types in step 4 —
 // see the type-ownership note above).
@@ -268,6 +273,16 @@ export interface KeepaliveConfig {
   upgradeAfterBudget: boolean;
 }
 
+/**
+ * F1 (adaptive verification-2026-09-25): the longest real-request gap a keepalive
+ * window can bridge — the last ping lands at `maxPings × intervalMs` and keeps the
+ * entry alive for one more TTL. The adaptive predictor refuses to open a NEW 1h
+ * prefix while every gap the session has shown fits inside this horizon.
+ */
+export function keepaliveGapHorizonMs(config: Pick<KeepaliveConfig, "intervalMs" | "maxPings">): Millis {
+  return Math.max(0, config.maxPings) * config.intervalMs + ASSUMED_TTL_MS;
+}
+
 // ---------------------------------------------------------------------------
 // evaluateTick (plan.md §5.2 — 15 short-circuit checks + the ping outcome)
 // ---------------------------------------------------------------------------
@@ -286,6 +301,8 @@ export type TickSkipReason =
   | "request-in-flight"
   | "ping-in-flight"
   | "not-armed"
+  /** F1 (adaptive verification-2026-09-25): a settled, confirmed 1h entry already backs this prefix — pinging the 5m chain would pay for the same gap twice. */
+  | "adaptive-1h"
   | "cache-expired"
   | "budget-exhausted"
   | "not-due";
@@ -328,6 +345,12 @@ export interface EvaluateTickInput {
   window: WindowState;
   /** Freshly-derived fingerprint of "what would go out right now"; compared against `window.capture.fingerprint`. */
   currentFingerprint: CaptureFingerprint;
+  /**
+   * F1: the adaptive predictor reports that a settled, confirmed 1h entry covers
+   * the current prefix with only a small 5m tail (`adaptiveCoversPrefix`). Absent
+   * ⇒ false (keepalive-only sessions are unchanged).
+   */
+  adaptiveCovered?: boolean;
 }
 
 export interface TickResult {
@@ -337,7 +360,7 @@ export interface TickResult {
 }
 
 export function evaluateTick(input: EvaluateTickInput): TickResult {
-  const { config, session, window, armed, mode, now, currentFingerprint } = input;
+  const { config, session, window, armed, mode, now, currentFingerprint, adaptiveCovered } = input;
 
   const skip = (reason: TickSkipReason, terminal: boolean): TickResult => ({
     decision: { kind: "skip", reason, terminal },
@@ -380,6 +403,10 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   if (window.requestInFlight) return skip("request-in-flight", false);
   // #11
   if (window.pingInFlight) return skip("ping-in-flight", false);
+  // #11.5 — F1: the request after the gap will read the 1h entry and rewrite only
+  // the small 5m tail; every ping would duplicate that cover. Terminal: the cover
+  // only changes at the next real request, which opens a new window anyway.
+  if (adaptiveCovered === true) return skip("adaptive-1h", true);
   // #12 — G8
   if (!armed) return skip("not-armed", false);
   // #13 — most important: the cache is presumed dead, pinging now would be a full write.
