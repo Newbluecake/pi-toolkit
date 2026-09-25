@@ -93,6 +93,35 @@ export function renderPluginInfo(
   return `${theme.fg("dim", "toolkit ")}${[identPart, timePart].filter(Boolean).join(" ")}`;
 }
 
+/**
+ * 首行布局（纯函数，可单测）：左 cwd │ git [• 会话名] [│ toolkit …]，右对齐模型。
+ * 宽度不够时的降级顺序：先去掉 provider 前缀 → 再去掉插件信息 → 最后左侧截断优先、
+ * 模型名截断到剩余宽度（与旧 stats 行右侧模型的截断语义一致）。
+ */
+export function layoutTopLine(
+  parts: { left: string; plugin?: string; model: string; modelWithProvider?: string },
+  width: number,
+  theme: { fg(color: string, text: string): string },
+): string {
+  const sep = theme.fg("dim", " │ ");
+  const leftWithPlugin = parts.plugin ? `${parts.left}${sep}${parts.plugin}` : parts.left;
+  const candidates: Array<[string, string]> = [];
+  if (parts.modelWithProvider) candidates.push([leftWithPlugin, parts.modelWithProvider]);
+  candidates.push([leftWithPlugin, parts.model]);
+  if (parts.plugin) candidates.push([parts.left, parts.model]);
+  for (const [left, right] of candidates) {
+    const lw = visibleWidth(left);
+    const rw = visibleWidth(right);
+    if (lw + 2 + rw <= width) return left + " ".repeat(width - lw - rw) + theme.fg("dim", right);
+  }
+  const left = truncateToWidth(parts.left, width, theme.fg("dim", "..."));
+  const lw = visibleWidth(left);
+  const available = width - lw - 2;
+  const right = available > 0 ? truncateToWidth(parts.model, available, "") : "";
+  if (!right) return left;
+  return left + " ".repeat(Math.max(0, width - lw - visibleWidth(right))) + theme.fg("dim", right);
+}
+
 export function renderToolStats(session: HudSession, ctx: ExtensionContext): string {
   const theme = ctx.ui.theme;
   const sorted = [...session.toolCounts.entries()].sort((a, b) => b[1] - a[1]);
@@ -329,45 +358,31 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
         }
         const sessionName = ctx.sessionManager.getSessionName();
         if (sessionName) pwdLine += `${theme.fg("dim", " • ")}${theme.fg("muted", sessionName)}`;
-        // 插件自身版本放在 pwd 行末：静态信息，与 cwd/git 同属"环境"关注面；
-        // 该行按宽度截断，窄终端下它最先被截掉（优先级低于 cwd/git/会话名）。
         const pluginInfo = renderPluginInfo(session.pluginInfo, theme);
-        if (pluginInfo) pwdLine += `${theme.fg("dim", " │ ")}${pluginInfo}`;
-
-        let statsLeft = statsParts.join(theme.fg("dim", " │ "));
-        let statsLeftWidth = visibleWidth(statsLeft);
-        if (statsLeftWidth > width) {
-          statsLeft = truncateToWidth(statsLeft, width, "...");
-          statsLeftWidth = visibleWidth(statsLeft);
-        }
 
         const modelName = ctx.model?.id || "no-model";
-        let rightSide = modelName;
+        let modelText = modelName;
         if (ctx.model?.reasoning) {
-          rightSide = thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+          modelText = thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
         }
-        if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
-          const withProvider = `(${ctx.model.provider}) ${rightSide}`;
-          if (statsLeftWidth + 2 + visibleWidth(withProvider) <= width) rightSide = withProvider;
-        }
+        const modelWithProvider =
+          footerData.getAvailableProviderCount() > 1 && ctx.model ? `(${ctx.model.provider}) ${modelText}` : undefined;
 
-        const rightWidth = visibleWidth(rightSide);
-        let statsLine: string;
-        if (statsLeftWidth + 2 + rightWidth <= width) {
-          statsLine = statsLeft + " ".repeat(width - statsLeftWidth - rightWidth) + theme.fg("dim", rightSide);
-        } else {
-          const availableForRight = width - statsLeftWidth - 2;
-          const truncatedRight = availableForRight > 0 ? truncateToWidth(rightSide, availableForRight, "") : "";
-          statsLine =
-            statsLeft +
-            " ".repeat(Math.max(0, width - statsLeftWidth - visibleWidth(truncatedRight))) +
-            theme.fg("dim", truncatedRight);
-        }
+        const statsLine = truncateToWidth(statsParts.join(theme.fg("dim", " │ ")), width, "...");
 
         const extensionStatuses = footerData.getExtensionStatuses();
         const statusEntries = Array.from(extensionStatuses.entries());
         const lines = [
-          truncateToWidth(pwdLine, width, theme.fg("dim", "...")),
+          layoutTopLine(
+            {
+              left: pwdLine,
+              ...(pluginInfo ? { plugin: pluginInfo } : {}),
+              model: modelText,
+              ...(modelWithProvider ? { modelWithProvider } : {}),
+            },
+            width,
+            theme,
+          ),
           ...renderWorktreeLines(session, ctx, width),
           statsLine,
         ];

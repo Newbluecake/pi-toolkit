@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { renderExtensionStatusLines, renderTimeLineStatusParts } from "../../src/hud/footer.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { layoutTopLine, renderExtensionStatusLines, renderTimeLineStatusParts } from "../../src/hud/footer.js";
 
 const theme = {
   fg: (color: string, text: string) => `<${color}>${text}</>`,
@@ -109,5 +110,50 @@ describe("renderTimeLineStatusParts", () => {
 
   it("对文本做净化（换行/重复空白折叠）", () => {
     expect(renderTimeLineStatusParts([["pi-hud", "input 1\n  · rounds 2"]], theme)).toEqual(["input 1 · rounds 2"]);
+  });
+});
+
+describe("layoutTopLine", () => {
+  const plain = { fg: (_c: string, t: string) => t };
+  const parts = {
+    left: "~/repo │ git master@abc1234",
+    plugin: "toolkit v0.2.1@abc1234",
+    model: "claude-opus-5-5 • high",
+    modelWithProvider: "(cloudrouter-anthropic) claude-opus-5-5 • high",
+  };
+  const full = `${parts.left} │ ${parts.plugin}`;
+
+  it("宽度充足：左侧含插件信息，右对齐带 provider 的模型", () => {
+    const line = layoutTopLine(parts, 120, plain);
+    expect(line.length).toBe(120);
+    expect(line.startsWith(full)).toBe(true);
+    expect(line.endsWith(parts.modelWithProvider)).toBe(true);
+  });
+
+  it("稍窄：先去掉 provider 前缀", () => {
+    const width = full.length + 2 + parts.model.length;
+    const line = layoutTopLine(parts, width, plain);
+    expect(line).toBe(`${full}  ${parts.model}`);
+  });
+
+  it("再窄：去掉插件信息，保住模型", () => {
+    const width = parts.left.length + 2 + parts.model.length + 1;
+    const line = layoutTopLine(parts, width, plain);
+    expect(line).toBe(`${parts.left}   ${parts.model}`);
+  });
+
+  it("极窄：左侧优先，模型截断到剩余宽度", () => {
+    const width = parts.left.length + 8;
+    const line = layoutTopLine(parts, width, plain);
+    expect(line.startsWith(parts.left)).toBe(true);
+    expect(visibleWidth(line)).toBe(width);
+    expect(line).not.toContain("toolkit");
+  });
+
+  it("无插件信息 / 单 provider", () => {
+    const line = layoutTopLine({ left: parts.left, model: parts.model }, 80, plain);
+    expect(line.startsWith(parts.left)).toBe(true);
+    expect(line.endsWith(parts.model)).toBe(true);
+    expect(line.length).toBe(80);
   });
 });
