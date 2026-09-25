@@ -81,9 +81,12 @@ import { formatDigest, formatSingle } from "./delivery/format.js";
 import {
   deliveryOptionsFor,
   formatDeadlineNotice,
+  formatWorkflowDeadlineNotice,
   overtimeTail,
   shouldDeliverDeadlineNotice,
+  shouldDeliverWorkflowDeadlineNotice,
   TIMEOUT_NOTICE_TYPE,
+  workflowDeliveryOptionsFor,
 } from "./delivery/deadline-notice.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
 import {
@@ -133,6 +136,7 @@ import { createWorkflowChildSpawner } from "./workflow/spawner-adapter.js";
 import { createBackgroundWorkflows, type BackgroundWorkflows } from "./workflow/background.js";
 import { createWorkflowNoticeSink, redeliverPendingWorkflowNotices } from "./adapters/workflow-notice.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
+import type { WorkflowDeadlineNotice } from "./workflow/deadline.js";
 
 /** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack.
  *  This module-level handoff only covers SAME-module session swaps (new/fork/resume):
@@ -1784,6 +1788,29 @@ export function buildSessionStack(
   // (M9: created above the fleet widget, which lists in-flight workflows.)
   const workflowChildSpawner = createWorkflowChildSpawner(spawn, types);
   const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");
+  /**
+   * workflow-agent-queue §4.5 (stage B): a background workflow's grace /
+   * extended notice — the same `subagent:timeout` channel as run notices
+   * (never the outbox, D-4), `settings.extend.notify` off ⇒ dropped (the grace
+   * window itself still applies), grace wakes the model, extended is
+   * display-only. The display name comes from the background registry.
+   */
+  const sendWorkflowDeadlineNotice = (notice: WorkflowDeadlineNotice): void => {
+    if (!shouldDeliverWorkflowDeadlineNotice({ policy: settings.extend.notify })) return;
+    const name = workflowRuns.get(notice.workflowId)?.name;
+    pi.sendMessage(
+      {
+        customType: TIMEOUT_NOTICE_TYPE,
+        content: formatWorkflowDeadlineNotice(notice, {
+          now: systemClock.now(),
+          ...(name === undefined ? {} : { name }),
+        }),
+        display: true,
+        details: notice,
+      },
+      workflowDeliveryOptionsFor(notice),
+    );
+  };
   const createWorkflowOrchestrator = (workflowId: WorkflowId): Orchestrator =>
     createOrchestrator({
       clock: systemClock,
@@ -1803,6 +1830,7 @@ export function buildSessionStack(
       },
       parentRunId: workflowId,
       journalRootDir: workflowJournalRootDir,
+      onDeadlineNotice: sendWorkflowDeadlineNotice,
       emit: (channel, payload) => {
         pi.events.emit(channel, payload);
         workflowActivity.onEvent(channel, payload);

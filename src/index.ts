@@ -366,6 +366,7 @@ export default function activate(pi: ExtensionAPI): void {
       createExtendTimeoutTool({
         query: forwardQuery(holder),
         resolveRun: forwardResolveRun(holder),
+        workflows: forwardWorkflowQuery(holder),
         now: () => systemClock.now(),
       }),
     );
@@ -748,6 +749,7 @@ function forwardWorkflowQuery(holder: { current?: Stack }): WorkflowQueryPort {
     get: (workflowId) => holder.current?.workflow.runs.get(workflowId),
     wait: (workflowId, opts) => requireStack(holder).workflow.runs.wait(workflowId, opts),
     stop: (workflowId, cause, opts) => requireStack(holder).workflow.runs.stop(workflowId, cause, opts),
+    extend: (workflowId, extendMs, opts) => requireStack(holder).workflow.runs.extend(workflowId, extendMs, opts),
     activity: (workflowId) => holder.current?.workflow.activity.list().find((w) => w.workflowId === workflowId),
     snapshotOf: (runId) => holder.current?.query.get(runId),
     usageOf: (runId) => holder.current?.query.get(runId)?.diag.usage,
