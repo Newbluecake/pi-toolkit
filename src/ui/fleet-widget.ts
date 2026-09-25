@@ -165,6 +165,14 @@ export interface WorkflowDoneChild {
   readonly source: "live" | "replay";
 }
 
+/** workflow-agent-queue §5: one FIFO-queued `agent()` call waiting for a maxParallel slot, as rendered under its workflow's active rows. */
+export interface WorkflowQueuedChildView {
+  /** `label ?? agentType ?? callId` — the call's best display name. */
+  readonly label: string;
+  /** `now − queuedAt`, frozen at the snapshot's terminal time once the workflow ends. */
+  readonly waitedMs: Millis;
+}
+
 /** M9/M11: one workflow's header + pipeline data (controller maps the registry snapshot; elapsed is precomputed and frozen at terminal). */
 export interface WorkflowGroupInput {
   readonly workflowId: string;
@@ -182,6 +190,12 @@ export interface WorkflowGroupInput {
   readonly failedTotal: number;
   /** Children currently in flight. */
   readonly activeTotal: number;
+  /** workflow-agent-queue §5: calls acked while every maxParallel slot was busy, FIFO (oldest first) — header `⧗ N` + dim waiting rows. */
+  readonly queued?: readonly WorkflowQueuedChildView[];
+  /** workflow-agent-queue §5: `agent()` calls rejected at admission or dispatch (once per callId) — feeds `⚠ N`. */
+  readonly rejectedTotal?: number;
+  /** workflow-agent-queue §5: parallel/pipeline stage errors + unhandled rejections — feeds `⚠ N`. */
+  readonly stageErrorTotal?: number;
   /** Just-settled children still within terminalLingerMs, most recent last. */
   readonly recentSettled?: readonly WorkflowDoneChild[];
   /** Present while the finished workflow's frozen snapshot lingers — muted header with a ✓/✗ icon. */
@@ -468,22 +482,44 @@ function terminalReasonText(status: string): string | undefined {
 }
 
 /**
- * M11: the workflow header — `⚙ name · elapsed / budget · ✓n ✗n ▸n`. The budget
+ * workflow-agent-queue §5: a queued call's waiting row — `⧗ label waiting
+ * for slot · 15s` — muted (dim), 4-space indent matching the recent-settled
+ * rows it precedes. English tokens only (UI-text rule); ⧗ has no
+ * emoji-presentation variant (visible width 1 everywhere) and still keeps a
+ * space before the label for column consistency with the header's `⧗ N`.
+ */
+function workflowQueuedLine(child: WorkflowQueuedChildView, width: number, color: FleetColorize): string {
+  const prefix = "    ⧗ ";
+  const suffix = ` waiting for slot · ${formatDuration(child.waitedMs)}`;
+  const label = truncateToWidth(child.label, Math.max(8, width - visibleWidth(prefix) - visibleWidth(suffix)));
+  return color("muted", `${prefix}${label}${suffix}`);
+}
+
+/**
+ * M11: the workflow header — `⚙ name · elapsed / budget · ✓n ✗n ▸n ⧗ N ⚠ N`. The budget
  * segment only appears when a deadline was declared; ✗ is omitted at zero
  * and the whole counts segment stays hidden while nothing has happened yet
- * (✓0 ▸0 is noise). Terminal (frozen) workflows swap ⚙ for ✓/✗, render the
- * whole line muted, and (M12) name their cause — ` · timed out` / ` · aborted`
- * / ` · failed`; `completed` and unknown statuses add nothing. UI-text rule:
- * compact inline markers, English tokens only.
+ * (✓0 ▸0 is noise). workflow-agent-queue §5 appends `⧗ N` (calls waiting for
+ * a maxParallel slot) and `⚠ N` (rejectedTotal + stageErrorTotal) — the
+ * space between glyph and digit is MANDATORY: ⚠ has an emoji-presentation
+ * variant (WIDE_RISK_GLYPHS) that renders two-wide in many terminals, ⧗ gets
+ * the same space for visual consistency. Terminal (frozen) workflows swap ⚙
+ * for ✓/✗, render the whole line muted, and (M12) name their cause — ` ·
+ * timed out` / ` · aborted` / ` · failed`; `completed` and unknown statuses add
+ * nothing. UI-text rule: compact inline markers, English tokens only.
  */
 export function workflowHeaderLine(wf: WorkflowGroupInput, color: FleetColorize): string {
   const icon = wf.terminal === undefined ? "⚙" : workflowTerminalIcon(wf);
   const elapsed = formatDuration(wf.elapsedMs);
   const time = wf.budgetMs !== undefined ? `${elapsed} / ${formatDuration(wf.budgetMs)}` : elapsed;
+  const warnTotal = (wf.rejectedTotal ?? 0) + (wf.stageErrorTotal ?? 0);
+  const queuedTotal = wf.queued?.length ?? 0;
   const counts: string[] = [];
   if (wf.doneTotal > 0) counts.push(`✓${wf.doneTotal}`);
   if (wf.failedTotal > 0) counts.push(`✗${wf.failedTotal}`);
   if (wf.activeTotal > 0) counts.push(`▸${wf.activeTotal}`);
+  if (queuedTotal > 0) counts.push(`⧗ ${queuedTotal}`);
+  if (warnTotal > 0) counts.push(`⚠ ${warnTotal}`);
   const segments = [wf.name, time];
   const countsText = counts.join(" ");
   if (countsText !== "") segments.push(countsText);
@@ -499,12 +535,17 @@ export function workflowHeaderLine(wf: WorkflowGroupInput, color: FleetColorize)
  * `terminal.endedAt` for lingering workflows (a frozen pipeline must not keep
  * ticking); the recent-children window reuses the widget's terminalLingerMs so
  * the ✓/✗ rows fade on the same clock as the freeze itself.
+ * workflow-agent-queue §5: queued children map with `label ?? agentType ??
+ * callId` and their wait time measured against the same frozen clock (the
+ * engine settles every queued call before unregistering, so a frozen snapshot
+ * carries an empty queue — the frozen clock is defensive only).
  */
 export function workflowGroupInput(snap: WorkflowActivitySnapshot, now: number, lingerMs: number): WorkflowGroupInput {
+  const asOf = snap.terminal?.endedAt ?? now;
   return {
     workflowId: snap.workflowId,
     name: snap.name,
-    elapsedMs: Math.max(0, (snap.terminal?.endedAt ?? now) - snap.startedAt),
+    elapsedMs: Math.max(0, asOf - snap.startedAt),
     ...(snap.deadlineAt !== undefined && snap.deadlineAt > snap.startedAt
       ? { budgetMs: snap.deadlineAt - snap.startedAt }
       : {}),
@@ -515,6 +556,12 @@ export function workflowGroupInput(snap: WorkflowActivitySnapshot, now: number, 
     doneTotal: snap.completedTotal,
     failedTotal: Math.max(0, snap.settledTotal - snap.completedTotal),
     activeTotal: snap.activeChildren.length,
+    queued: snap.queuedChildren.map((child) => ({
+      label: child.label ?? child.agentType ?? child.callId,
+      waitedMs: Math.max(0, asOf - child.queuedAt),
+    })),
+    rejectedTotal: snap.rejectedTotal,
+    stageErrorTotal: snap.stageErrorTotal,
     recentSettled: snap.settledChildren
       .filter((child) => now - child.settledAt <= lingerMs)
       .map((child) => ({
@@ -665,13 +712,16 @@ export function buildFleetWidgetLines(
   }
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
   // Ordered entries: workflow ⚙ group headers (plus their free phase-chain
-  // line and lingering just-settled child rows) interleaved with their
-  // claimed runs, then the general run forest. ⚙ headers and chain lines
-  // don't consume the line budget; just-settled child rows draw from the
-  // leftover budget so they can never crowd out a run's identity row.
+  // line, dim queued waiting rows and lingering just-settled child rows)
+  // interleaved with their claimed runs, then the general run forest. ⚙
+  // headers and chain lines don't consume the line budget; queued rows draw
+  // from the identity budget (they hold a slot in the script's future), while
+  // just-settled child rows draw from the leftover budget so they can never
+  // crowd out a run's identity row.
   type Entry =
     | { header: string }
     | { settled: string }
+    | { queued: string }
     | { row: FleetRow; indent: string }
     | { bash: BashJobViewInput }
     | { awaiting: FleetRow };
@@ -689,6 +739,7 @@ export function buildFleetWidgetLines(
           });
     if (chain !== undefined) entries.push({ header: `  ${chain}` });
     for (const row of grouped.get(wf.workflowId) ?? []) entries.push({ row, indent: "↳ " });
+    for (const child of wf.queued ?? []) entries.push({ queued: workflowQueuedLine(child, width, color) });
     for (const child of wf.recentSettled ?? []) {
       const label = truncateToWidth(child.label, Math.max(8, width - 16));
       entries.push({
@@ -722,6 +773,15 @@ export function buildFleetWidgetLines(
     // single line lives in the leftover budget (same pool as activity
     // continuations, display order preserved).
     if ("settled" in entry) return { main: undefined, activity: entry.settled, show: false };
+    // workflow-agent-queue §5: queued calls are in-flight identities (they
+    // hold a slot in the script's future) — main-row budget, same pool as run
+    // identities; overflow joins the "+N more" count below.
+    if ("queued" in entry) {
+      if (budget <= 0) return undefined; // queued identity hidden behind "+N more"
+      budget -= 1;
+      shownRuns += 1;
+      return { main: entry.queued, activity: undefined as string | undefined, show: false };
+    }
     if (budget <= 0) return undefined; // identity hidden behind "+N more"
     const rendered =
       "bash" in entry
@@ -800,10 +860,13 @@ export function buildFleetWidgetLines(
     }
   }
   // M4: only active identities contribute to hidden; workflow headers and
-  // terminal linger rows are transient and intentionally excluded. Awaiting
-  // mains live in the same shownRuns pool, so they join the identity total
-  // rather than being adjusted for separately (which would double-count them).
-  const hidden = model.activeCount + activeBash.length + awaitingTerminal.length - shownRuns;
+  // terminal linger rows are transient and intentionally excluded. Workflow
+  // children count through model.activeCount; queued calls (§5) are
+  // identities without a run row, so they join both totals explicitly.
+  // Awaiting mains live in the same shownRuns pool, so they join the identity
+  // total rather than being adjusted for separately (which would double-count them).
+  const queuedTotal = workflows.reduce((sum, wf) => sum + (wf.queued?.length ?? 0), 0);
+  const hidden = model.activeCount + activeBash.length + awaitingTerminal.length + queuedTotal - shownRuns;
   const header =
     `${color(worst, "●")} ${model.activeCount} active Agents` +
     (activeBash.length > 0 ? ` · ${activeBash.length} bash` : "") +

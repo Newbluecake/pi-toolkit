@@ -310,6 +310,10 @@ describe("M10: buildWorkflowProgressLines", () => {
     settledTotal: 0,
     completedTotal: 0,
     replayTotal: 0,
+    queuedChildren: [],
+    rejectedTotal: 0,
+    stageErrorTotal: 0,
+    phases: [],
   };
 
   it("renders the header with name, phase, elapsed and remaining budget", () => {

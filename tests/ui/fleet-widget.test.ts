@@ -1686,6 +1686,9 @@ describe("M11: workflow pipeline view", () => {
       settledTotal: 5,
       completedTotal: 4,
       replayTotal: 0,
+      queuedChildren: [],
+      rejectedTotal: 0,
+      stageErrorTotal: 0,
       phases: [{ id: "scan", state: "active", spawned: 1, settled: 0, failed: 0, replayed: 0 }],
     };
     const live = workflowGroupInput(snap, 20_000, 5_000);
@@ -1712,6 +1715,9 @@ describe("M11: workflow pipeline view", () => {
       settledTotal: 0,
       completedTotal: 0,
       replayTotal: 0,
+      queuedChildren: [],
+      rejectedTotal: 0,
+      stageErrorTotal: 0,
       phases: [],
     };
     expect(workflowGroupInput(base, 10_000, 5_000).collapsedVisits).toBeUndefined();
@@ -1743,6 +1749,206 @@ describe("M11: workflow pipeline view", () => {
       (_t, s) => s,
     );
     expect(line).toBe("⚙ fresh · 200ms");
+  });
+});
+
+describe("workflow-agent-queue §5: queued + error marks in the pipeline view", () => {
+  const plain = (_t: string, s: string) => s;
+  const wfChild = (runId: string, label: string) =>
+    snapshot({
+      runId,
+      parentRunId: "wf-1",
+      diag: diag({ createdAt: 8_000, lastEventAt: 9_900, label }),
+    });
+
+  it("header appends `⧗ N` and `⚠ N` after the counts, each with a mandatory space (⚠ is wide-risk)", () => {
+    expect(
+      workflowHeaderLine(
+        {
+          workflowId: "wf-1",
+          name: "multi-review",
+          elapsedMs: 18_000,
+          budgetMs: 600_000,
+          doneTotal: 2,
+          failedTotal: 0,
+          activeTotal: 4,
+          queued: [{ label: "review-race", waitedMs: 15_000 }],
+          rejectedTotal: 1,
+          stageErrorTotal: 1,
+        },
+        plain,
+      ),
+    ).toBe("⚙ multi-review · 18s / 10m00s · ✓2 ▸4 ⧗ 1 ⚠ 2");
+  });
+
+  it("`⧗ N` shows only with queued calls; `⚠ N` only when rejectedTotal + stageErrorTotal > 0", () => {
+    const base = {
+      workflowId: "wf-1",
+      name: "multi-review",
+      elapsedMs: 18_000,
+      budgetMs: 600_000,
+      doneTotal: 2,
+      failedTotal: 0,
+      activeTotal: 4,
+    };
+    // neither mark: exactly the pre-§5 header
+    expect(workflowHeaderLine(base, plain)).toBe("⚙ multi-review · 18s / 10m00s · ✓2 ▸4");
+    // queued only
+    expect(
+      workflowHeaderLine(
+        {
+          ...base,
+          queued: [
+            { label: "a", waitedMs: 1 },
+            { label: "b", waitedMs: 2 },
+          ],
+        },
+        plain,
+      ),
+    ).toBe("⚙ multi-review · 18s / 10m00s · ✓2 ▸4 ⧗ 2");
+    // rejected only / stage errors only / both pool into one ⚠ count
+    expect(workflowHeaderLine({ ...base, rejectedTotal: 3 }, plain)).toBe("⚙ multi-review · 18s / 10m00s · ✓2 ▸4 ⚠ 3");
+    expect(workflowHeaderLine({ ...base, stageErrorTotal: 2 }, plain)).toBe(
+      "⚙ multi-review · 18s / 10m00s · ✓2 ▸4 ⚠ 2",
+    );
+    expect(workflowHeaderLine({ ...base, rejectedTotal: 1, stageErrorTotal: 2 }, plain)).toBe(
+      "⚙ multi-review · 18s / 10m00s · ✓2 ▸4 ⚠ 3",
+    );
+    // a queued-only workflow still surfaces its counts segment (⧗ alone is signal, not noise)
+    expect(
+      workflowHeaderLine(
+        {
+          workflowId: "wf-1",
+          name: "fresh-queue",
+          elapsedMs: 200,
+          doneTotal: 0,
+          failedTotal: 0,
+          activeTotal: 0,
+          queued: [
+            { label: "a", waitedMs: 1 },
+            { label: "b", waitedMs: 2 },
+          ],
+        },
+        plain,
+      ),
+    ).toBe("⚙ fresh-queue · 200ms · ⧗ 2");
+  });
+
+  it("queued rows render dim after the workflow's active rows and before recent-settled rows", () => {
+    const model = buildFleetViewModel([wfChild("child-a00", "active-a"), wfChild("child-b00", "active-b")], OPTS);
+    const seen: string[] = [];
+    const color = (tone: string, text: string) => {
+      seen.push(`${tone}:${text}`);
+      return text;
+    };
+    const lines = buildFleetWidgetLines(model, {
+      color,
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "multi-review",
+          elapsedMs: 18_000,
+          budgetMs: 600_000,
+          doneTotal: 1,
+          failedTotal: 0,
+          activeTotal: 2,
+          queued: [
+            { label: "queued-a", waitedMs: 15_000 },
+            { label: "queued-b", waitedMs: 14_000 },
+          ],
+          recentSettled: [{ label: "done-a", ok: true, durationMs: 8_000, source: "live" }],
+        },
+      ],
+    })!;
+    expect(lines[1]).toBe("⚙ multi-review · 18s / 10m00s · ✓1 ▸2 ⧗ 2");
+    expect(lines[2]).toContain("↳ active-a");
+    expect(lines[3]).toContain("↳ active-b");
+    expect(lines[4]).toBe("    ⧗ queued-a waiting for slot · 15s");
+    expect(lines[5]).toBe("    ⧗ queued-b waiting for slot · 14s");
+    expect(lines[6]).toBe("    ✓ done-a 8s");
+    // the whole queued row is dim (muted tone), like the settled rows above it
+    expect(seen).toContain("muted:    ⧗ queued-a waiting for slot · 15s");
+  });
+
+  it("queued rows share the run-identity line budget; overflow joins the `+N more` count", () => {
+    const model = buildFleetViewModel([wfChild("child-a00", "active-a"), wfChild("child-b00", "active-b")], OPTS);
+    const wf = {
+      workflowId: "wf-1",
+      name: "multi-review",
+      elapsedMs: 18_000,
+      doneTotal: 0,
+      failedTotal: 0,
+      activeTotal: 2,
+      queued: [
+        { label: "queued-a", waitedMs: 15_000 },
+        { label: "queued-b", waitedMs: 14_000 },
+      ],
+    };
+    // identity budget exhausted by the two run rows → both queued rows hidden, counted as +2 more
+    const tight = buildFleetWidgetLines(model, { maxRows: 2, workflows: [wf] })!;
+    expect(tight[0]).toBe("● 2 active Agents · +2 more");
+    expect(tight.some((l) => l.includes("waiting for slot"))).toBe(false);
+    // one line of identity budget left → first queued row shows, second joins +1 more
+    const one = buildFleetWidgetLines(model, { maxRows: 3, workflows: [wf] })!;
+    expect(one.filter((l) => l.includes("waiting for slot"))).toHaveLength(1);
+    expect(one[0]).toBe("● 2 active Agents · +1 more");
+    expect(one.find((l) => l.includes("waiting for slot"))).toBe("    ⧗ queued-a waiting for slot · 15s");
+  });
+
+  it("workflowGroupInput maps queuedChildren (label ?? agentType ?? callId, waitedMs = now − queuedAt) and the error totals", () => {
+    const snap: import("../../src/workflow/activity.js").WorkflowActivitySnapshot = {
+      workflowId: "wf-1",
+      name: "multi-review",
+      startedAt: 0,
+      deadlineAt: 600_000,
+      activeChildren: [],
+      settledChildren: [],
+      settledTotal: 0,
+      completedTotal: 0,
+      replayTotal: 0,
+      queuedChildren: [
+        { callId: "c1", label: "review-race", queuedAt: 3_000 },
+        { callId: "c2", agentType: "Explore", queuedAt: 4_000 },
+        { callId: "c3", queuedAt: 4_500 },
+      ],
+      rejectedTotal: 1,
+      stageErrorTotal: 2,
+      phases: [],
+    };
+    const input = workflowGroupInput(snap, 18_000, 5_000);
+    expect(input.queued).toEqual([
+      { label: "review-race", waitedMs: 15_000 },
+      { label: "Explore", waitedMs: 14_000 },
+      { label: "c3", waitedMs: 13_500 },
+    ]);
+    expect(input.rejectedTotal).toBe(1);
+    expect(input.stageErrorTotal).toBe(2);
+    // frozen snapshot: the wait clock freezes at endedAt (the engine settles every
+    // queued call before unregistering — this pins the defensive behavior)
+    const frozen = workflowGroupInput({ ...snap, terminal: { status: "completed", endedAt: 20_000 } }, 30_000, 5_000);
+    expect(frozen.queued![0]).toEqual({ label: "review-race", waitedMs: 17_000 });
+  });
+
+  it("headers and queued rows render collision-free (⧗ has no emoji variant; ⚠ is followed by a space)", () => {
+    const model = buildFleetViewModel([wfChild("child-a00", "active-a")], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "multi-review",
+          elapsedMs: 18_000,
+          budgetMs: 600_000,
+          doneTotal: 2,
+          failedTotal: 0,
+          activeTotal: 1,
+          queued: [{ label: "queued-a", waitedMs: 15_000 }],
+          rejectedTotal: 1,
+          stageErrorTotal: 1,
+        },
+      ],
+    })!;
+    expect(lines[1]).toBe("⚙ multi-review · 18s / 10m00s · ✓2 ▸1 ⧗ 1 ⚠ 2");
+    for (const line of lines) expect(findGlyphCollisions(line)).toEqual([]);
   });
 });
 
