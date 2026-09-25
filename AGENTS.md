@@ -56,6 +56,12 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   re-export of `./src/index.js` (jiti maps the `.js` suffix to the `.ts` file). Keep it thin.
 - `index.js` — companion entry for plain Node consumers, re-exporting `./dist/index.js`
   (package.json `main`/`exports`). Not used by pi.
+- `skills/` — agent skills shipped with the package (`pi.skills` in package.json; also in npm
+  `files`): `dev-flow` (dev workflow lanes, model routing, parallel dispatch) and `agent-handoff`
+  (structured handoffs and consult usage, backed by `docs/dev/fabric-v2` experiments). They are the
+  source of truth — do not keep a second copy under `~/.agents/skills/` (pi keeps the first skill of a
+  name and warns on collisions). Tool mechanics belong in tool/parameter descriptions; skills carry
+  strategy, evidence and costs.
 - `src/index.ts` — **assembly only** (invariant I7): register tools/commands/hooks once per
   `activate()`, own the HOST_KEY host-claim guard, rebuild the session stack on every
   `session_start`. No logic lives here.
