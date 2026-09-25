@@ -123,6 +123,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   全价重写。`1h-ineffective` 探针同理只认「读占上一次前缀的比例」，不认 `cacheRead > 0`。
   同理，已覆盖前缀的续 1h 也要重写升级后累积的 5m 尾巴（`tokensSinceLast1hWrite`）：warm
   预测/`delta-too-large` 按「尾巴 + Δ」判，尾巴部分美元边际按 0.95 计（plan §18）。
+  **保活与自适应按空档择一**（plan §19，验证 `verification-2026-09-25.md`）：保活能桥接的空档
+  （`keepaliveGapHorizonMs`，默认 49min）内 adaptive 不开新前缀（`keepalive-covers`），被确认的 1h
+  覆盖期间保活不 ping（tick 门 `adaptive-1h`）；前缀漂移（缩短 / warm 窗口内整前缀失效）只清 cover、
+  不判 `1h-ineffective`；入场费只认强信号时域。经济学仿真：`tests/cache-ttl/adaptive-economics.test.ts`。
   Design: `docs/dev/cache-ttl-adaptive/plan.md`.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
