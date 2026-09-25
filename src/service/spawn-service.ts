@@ -5,7 +5,7 @@ import { newRunId, isRunId } from "../core/ids.js";
 import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
 import { toErrorInfo } from "../core/errors.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
-import { formatModelCandidates, type ModelCandidate } from "../config/model-hint.js";
+import { formatModelCandidates, formatUnknownModelError, type ModelCandidate } from "../config/model-hint.js";
 import type { QuotaGateVerdict } from "../quota/gate.js";
 import type {
   DeadlineBudget,
@@ -90,6 +90,16 @@ export interface SpawnServiceDeps {
   resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
   /** Optional live candidate list for self-correcting unknown-hint errors. */
   availableModels?: () => readonly ModelCandidate[];
+  /**
+   * Strict `provider/id` existence check against pi's model registry — the
+   * exact lookup the session driver's create() would otherwise fail on
+   * (`ModelRegistry.find`), wired in stack.ts. `true` = known, `false` =
+   * definitely unknown ⇒ admission rejects with suggestions (no run is
+   * created), `undefined` = registry unavailable ⇒ admission does not block
+   * (fail-open: the driver's own lookup stays the backstop). Not injected ⇒
+   * no dispatch-time check at all (pre-existing behavior).
+   */
+  modelExists?: (model: { provider: string; id: string }) => boolean | undefined;
   /**
    * 额度闸门（quota-plan §6）：**同步**、只读缓存、返回 undefined 放行。
    * 未注入时行为与今天完全一致（全特性可一键回退，plan R11）。
@@ -298,11 +308,11 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         return { error: { kind: "config", message: `unknown agent type: ${req.type}. ${hint}`, retryable: false } };
       }
       // Model-hint admission check (fuzzy frontmatter `model:` / Agent tool
-      // `model` param). Strict provider/id pairs pass through untouched and
-      // are validated later by the session driver's registry lookup; only
-      // hints need resolving here, and an unresolvable hint is rejected
-      // BEFORE any mutable state write (same admission discipline as the
-      // resume/CC4 checks) instead of settling as a failed run — and never
+      // `model` param). Strict provider/id pairs are existence-checked right
+      // below (modelExists); only hints need resolving here, and an
+      // unresolvable hint is rejected BEFORE any mutable state write (same
+      // admission discipline as the resume/CC4 checks) instead of settling as
+      // a failed run — and never
       // silently downgraded to the parent/default model.
       let admittedModel = req.modelOverride ?? config.model;
       if (!admittedModel) {
@@ -323,6 +333,24 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           }
           admittedModel = resolved;
         }
+      }
+      // Strict provider/id admission check (a renamed provider such as
+      // `cloudrouter-anthropic/…` → `cr-anthropic/…`): fail fast with
+      // suggestions instead of creating a run that can only die at session
+      // create. Same zero-side-effect admission zone as the hint check above;
+      // an unavailable registry (undefined) never blocks.
+      if (admittedModel && deps.modelExists?.(admittedModel) === false) {
+        const fromType = req.modelOverride === undefined && config.model !== undefined;
+        return {
+          error: {
+            kind: "config",
+            message: formatUnknownModelError(admittedModel, deps.availableModels?.() ?? [], {
+              ...(fromType ? { source: `agent type "${config.name}" frontmatter model` } : {}),
+              ...(deps.quotaAnnotate ? { annotate: deps.quotaAnnotate } : {}),
+            }),
+            retryable: false,
+          },
+        };
       }
       // 额度闸门（quota-plan §6）：admittedModel 定型之后、任何可变状态写入
       // （resumeLocks/labels/nesting/…）之前——与 CC4/unknown-type/model-hint

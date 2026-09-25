@@ -89,3 +89,86 @@ export function resolveModelHint(hint: string, candidates: readonly ModelCandida
     pick((c) => (c.name ?? "").toLowerCase().includes(q))
   );
 }
+
+/** Classic Levenshtein distance (two-row DP); inputs are short model refs. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur.push(Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + cost));
+    }
+    prev = cur;
+  }
+  return prev[b.length]!;
+}
+
+/**
+ * "Did you mean" candidates for a strict `provider/id` that is not in pi's
+ * model registry (typically a renamed provider: `cloudrouter-anthropic/x` →
+ * `cr-anthropic/x`). Ranking, first tier wins ties, candidate order breaks
+ * the rest:
+ *
+ * -1. the same pair differing only in case (pi's lookup is exact);
+ *  0. same id under another provider (case-insensitive) — the rename case;
+ *  1. same provider, similar id;
+ *  2. any provider, similar id or similar full ref.
+ *
+ * Tiers 1–2 only keep candidates within an edit-distance threshold
+ * (≈ a third of the longer string, at least 2), so an unrelated model is
+ * never offered as a "correction". Pure; at most `limit` distinct refs.
+ */
+export function suggestModelRefs(ref: ModelRef, candidates: readonly ModelCandidate[], limit = 3): ModelCandidate[] {
+  const p = ref.provider.toLowerCase();
+  const i = ref.id.toLowerCase();
+  const full = `${p}/${i}`;
+  const close = (a: string, b: string, d: number) => d <= Math.max(2, Math.floor(Math.max(a.length, b.length) / 3));
+  const scored: Array<{ c: ModelCandidate; tier: number; d: number; order: number }> = [];
+  const seen = new Set<string>();
+  candidates.forEach((c, order) => {
+    const key = `${c.provider}/${c.id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const cp = c.provider.toLowerCase();
+    const ci = c.id.toLowerCase();
+    // Case-only mismatch: pi's registry lookup is exact, so this is the best fix.
+    if (cp === p && ci === i) return void scored.push({ c, tier: -1, d: 0, order });
+    if (ci === i) return void scored.push({ c, tier: 0, d: editDistance(p, cp), order });
+    const dId = editDistance(i, ci);
+    if (cp === p) {
+      if (close(i, ci, dId)) scored.push({ c, tier: 1, d: dId, order });
+      return;
+    }
+    const cfull = `${cp}/${ci}`;
+    const dFull = editDistance(full, cfull);
+    if (close(i, ci, dId) || close(full, cfull, dFull)) scored.push({ c, tier: 2, d: Math.min(dId, dFull), order });
+  });
+  scored.sort((a, b) => a.tier - b.tier || a.d - b.d || a.order - b.order);
+  return scored.slice(0, Math.max(0, limit)).map((s) => s.c);
+}
+
+/**
+ * Self-correcting admission error for a strict `provider/id` pi's registry
+ * does not know. `source` names where the pair came from when it is not the
+ * caller's own `model` param (an agent type's frontmatter default).
+ */
+export function formatUnknownModelError(
+  ref: ModelRef,
+  candidates: readonly ModelCandidate[],
+  opts: { source?: string; annotate?: (candidate: ModelCandidate) => string | undefined } = {},
+): string {
+  const head =
+    `Unknown model "${ref.provider}/${ref.id}"${opts.source ? ` (${opts.source})` : ""} — ` +
+    `not in pi's model registry, so no run was started.`;
+  const suggestions = suggestModelRefs(ref, candidates);
+  if (suggestions.length > 0)
+    return `${head} Did you mean: ${suggestions
+      .map((c) => `${c.provider}/${c.id}${opts.annotate?.(c) ?? ""}`)
+      .join(", ")}?`;
+  const list = formatModelCandidates(candidates, 8, opts.annotate);
+  return `${head} Pass the FULL provider/id of an available model (pi /model lists them).${list ? ` ${list}` : ""}`;
+}

@@ -60,7 +60,12 @@ import { createFabricTree } from "./fabric/tree.js";
 import { formatMessage, type FabricRecord } from "./core/message.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
-import { readScopedModels, recommendableModels } from "./config/available-models.js";
+import {
+  readScopedModels,
+  recommendableModels,
+  registryModelExists,
+  type ModelLookupLike,
+} from "./config/available-models.js";
 import { resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
 import type { Runner } from "./service/ports.js";
@@ -1361,6 +1366,19 @@ export function buildSessionStack(
     // feeds self-correcting unknown-hint errors.
     resolveModelHint: models.resolveHint,
     availableModels: models.available,
+    // Strict provider/id admission: the same exact lookup PiSessionDriver's
+    // create() would fail on, done before a run exists. Fail-open — a missing
+    // / throwing / still-empty registry reports "unavailable" (undefined) and
+    // never blocks a spawn.
+    modelExists: (m: { provider: string; id: string }) => {
+      let registry: ModelLookupLike | undefined;
+      try {
+        registry = ctx.modelRegistry as ModelLookupLike | undefined; // live getter; may throw on a replaced session
+      } catch {
+        registry = undefined;
+      }
+      return registryModelExists(registry, m);
+    },
     // quota-plan §4.1/§6：额度闸门注入（同步、只读缓存、零 IO、零 await——
     // QuotaGateDeps 的类型就杜绝了 spawn 路径发请求）。enabled=false ⇒
     // quotaRef.current 为空 ⇒ 恒放行（R11）；gate=false ⇒ 整个不注入。

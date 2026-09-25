@@ -145,3 +145,36 @@ export function resolvePromptModels(
   if (scopedEntries.length > 0) return scopedEntries;
   return [...(stackAvailable ?? availableModelsFromRegistry(registry))];
 }
+
+/** Structural slice of pi's ModelRegistry the strict-model admission check needs. */
+export interface ModelLookupLike {
+  find?: (provider: string, id: string) => unknown;
+  getAll?: () => readonly unknown[];
+  getAvailable?: () => readonly unknown[];
+}
+
+/**
+ * Strict `provider/id` existence check for spawn admission — the same exact
+ * `find` PiSessionDriver's create() resolves through, done before a run
+ * exists. Tri-state and fail-open: `true` known, `false` definitely unknown,
+ * `undefined` when the registry is missing, throws, or knows no models at all
+ * (not loaded / a stub) — admission must never block on an unusable registry.
+ */
+export function registryModelExists(
+  registry: ModelLookupLike | undefined,
+  ref: { provider: string; id: string },
+): boolean | undefined {
+  try {
+    if (!registry || typeof registry.find !== "function") return undefined;
+    if (registry.find(ref.provider, ref.id) !== undefined) return true;
+    const known =
+      typeof registry.getAll === "function"
+        ? registry.getAll()
+        : typeof registry.getAvailable === "function"
+          ? registry.getAvailable()
+          : [];
+    return Array.isArray(known) && known.length > 0 ? false : undefined;
+  } catch {
+    return undefined;
+  }
+}
