@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createBashJobTool,
   DEFAULT_WAIT_MS,
@@ -641,5 +641,538 @@ describe("bash_job — wait timeout streak (repeated timing-out waits escalate g
     const text = (await wait(tool)).content[0]!.text;
     expect(text).toContain("Still running after waiting 5s");
     expect(text).not.toContain("consecutive wait timeouts"); // back to first-timeout wording
+  });
+});
+
+// ── T16 (bash-timeout-grace §2.6/§3.6): extend, schema trimming, D budgets ─
+
+import type { ExtendJobOutcome } from "../../src/tools/bash-tool.js";
+import type { JobDeadline, JobDeadlinePolicy } from "../../src/bash/types.js";
+import type { HostRunView } from "../../src/bash/child-registry.js";
+import { BashJobToolExtendParams } from "../../src/tools/bash-job-tool.js";
+
+const POLICY: JobDeadlinePolicy = { graceMs: 60_000, maxExtensions: 3, maxTimeoutFactor: 3 };
+
+function makeDeadline(over: Partial<JobDeadline> = {}): JobDeadline {
+  return {
+    timeoutMs: 600_000,
+    policy: POLICY,
+    dueAt: NOW + 60_000,
+    hardAt: NOW + 1_800_000,
+    graces: 0,
+    graceNotified: 0,
+    extensions: 0,
+    grantedMs: 0,
+    seq: 0,
+    ...over,
+  };
+}
+
+/** Deadline-aware fake: adds the frozen §3.6 surface to the base fake. */
+function fakeDeadlineManager(): FakeManager & {
+  extendCalls: { jobId: string; extendMs: number; reason?: string }[];
+  extendOutcome: ExtendJobOutcome | undefined;
+  setExtendOutcome(outcome: ExtendJobOutcome): void;
+  persistNever: boolean;
+} {
+  const base = fakeManager();
+  const extendCalls: { jobId: string; extendMs: number; reason?: string }[] = [];
+  const holder: {
+    extendOutcome: ExtendJobOutcome | undefined;
+    persistNever: boolean;
+  } = { extendOutcome: undefined, persistNever: false };
+  return Object.assign(base, {
+    extendCalls,
+    ...holder,
+    setExtendOutcome(outcome: ExtendJobOutcome) {
+      holder.extendOutcome = outcome;
+    },
+    reserve() {
+      throw new Error("unused in bash_job tests");
+    },
+    cancelReserve() {},
+    markBackgroundedSync() {},
+    extend(jobId: string, extendMs: number, reason?: string) {
+      extendCalls.push({ jobId, extendMs, ...(reason !== undefined ? { reason } : {}) });
+      if (holder.extendOutcome !== undefined) return holder.extendOutcome;
+      throw new Error("test must setExtendOutcome first");
+    },
+  });
+}
+
+describe("bash_job — T16 extend (§2.6)", () => {
+  it("extends a graced job and reports the new deadline and budget", async () => {
+    const manager = fakeDeadlineManager();
+    const before = makeRecord({
+      jobId: "b_EXTE0001",
+      backgroundedAt: NOW - 30_000,
+      deadline: makeDeadline({ graceUntil: NOW + 58_000 }),
+    });
+    manager.put(before);
+    const extended: JobRecord = {
+      ...before,
+      deadline: makeDeadline({
+        graceUntil: undefined,
+        dueAt: NOW + 660_000,
+        extensions: 1,
+        grantedMs: 600_000,
+        seq: 1,
+        ...({ lastReason: "test needs more time" } as Partial<JobDeadline>),
+      }),
+    };
+    manager.setExtendOutcome({ ok: true, record: extended, persisted: Promise.resolve() });
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
+    const response = await tool.execute(
+      "tc",
+      { action: "extend", job_id: "b_EXTE0001", extend_s: 600, reason: "test needs more time" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(manager.extendCalls).toEqual([{ jobId: "b_EXTE0001", extendMs: 600_000, reason: "test needs more time" }]);
+    const out = response.content[0]!.text;
+    expect(out).toContain("extended by 10m00s");
+    expect(out).toContain("2 of 3 extensions left");
+    expect(out).not.toContain("persist pending");
+    expect(response.details).toMatchObject({
+      extended: true,
+      extendMs: 600_000,
+      grantedMs: 600_000,
+      extensionsLeft: 2,
+    });
+    expect((response.details as Record<string, unknown>).persistPending).toBeUndefined();
+  });
+
+  it("notes persist pending when the write-behind record does not confirm within 2s (R7)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const manager = fakeDeadlineManager();
+      const before = makeRecord({ jobId: "b_EXTE0002", backgroundedAt: NOW - 30_000, deadline: makeDeadline() });
+      manager.put(before);
+      manager.setExtendOutcome({
+        ok: true,
+        record: {
+          ...before,
+          deadline: makeDeadline({ dueAt: NOW + 660_000, extensions: 1, grantedMs: 600_000, seq: 1 }),
+        },
+        persisted: new Promise(() => {}), // store chain hangs
+      });
+      const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
+      const pending = tool.execute(
+        "tc",
+        { action: "extend", job_id: "b_EXTE0002", extend_s: 600 },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      await vi.advanceTimersByTimeAsync(1_999);
+      const early = await Promise.race([pending.then(() => "done"), Promise.resolve("pending")]);
+      expect(early).toBe("pending"); // R7: never blocks longer than 2s
+      await vi.advanceTimersByTimeAsync(1);
+      const response = await pending;
+      expect(response.content[0]!.text).toContain("persist pending");
+      expect(response.details).toMatchObject({ persistPending: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["already_terminal", /has already finished — there is no timeout left to extend/],
+    ["no_timeout", /started without an explicit timeout, so it has no deadline to extend/],
+    ["foreground", /still in the foreground — its timeout cannot be extended/],
+    ["limit_reached", /already used its full extension budget \(3 of 3 extensions\)/],
+    ["no_headroom", /has reached its hard lifetime ceiling \(3x its original timeout\)/],
+    ["zero_gain", /would add no time/],
+  ])("rejects with a self-correctable message for %s", async (reason, expected) => {
+    const manager = fakeDeadlineManager();
+    const before = makeRecord({
+      jobId: "b_EXTE0003",
+      backgroundedAt: NOW - 30_000,
+      deadline: makeDeadline({
+        extensions: reason === "limit_reached" ? 3 : 0,
+        dueAt: reason === "no_headroom" ? NOW : NOW + 60_000,
+      }),
+    });
+    if (reason === "already_terminal") before.status = "completed";
+    manager.put(before);
+    manager.setExtendOutcome({
+      ok: false,
+      reason: reason as ExtendJobOutcome extends { ok: false; reason: infer R } ? R : never,
+    });
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
+    await expect(
+      tool.execute("tc", { action: "extend", job_id: "b_EXTE0003", extend_s: 60 }, undefined, undefined, {} as never),
+    ).rejects.toThrow(expected);
+  });
+
+  it("validates extend_s and reason before touching the manager", async () => {
+    const manager = fakeDeadlineManager();
+    manager.put(makeRecord({ jobId: "b_EXTE0004", backgroundedAt: NOW, deadline: makeDeadline() }));
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
+    await expect(
+      tool.execute("tc", { action: "extend", job_id: "b_EXTE0004" }, undefined, undefined, {} as never),
+    ).rejects.toThrow(/requires extend_s: a positive number of seconds/);
+    for (const bad of [0, -5, Number.NaN, Infinity]) {
+      await expect(
+        tool.execute(
+          "tc",
+          { action: "extend", job_id: "b_EXTE0004", extend_s: bad },
+          undefined,
+          undefined,
+          {} as never,
+        ),
+      ).rejects.toThrow(/requires extend_s: a positive number of seconds/);
+    }
+    await expect(
+      tool.execute(
+        "tc",
+        { action: "extend", job_id: "b_EXTE0004", extend_s: 10, reason: "r".repeat(201) },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/reason is too long \(201 chars; max 200\)/);
+    expect(manager.extendCalls).toEqual([]);
+  });
+});
+
+describe("bash_job — T16 schema trimming per switch (§5.2)", () => {
+  const actionsOf = (schema: unknown): string[] =>
+    (schema as { properties: { action: { anyOf: Array<{ const: string }> } } }).properties.action.anyOf
+      .map((entry) => entry.const)
+      .sort();
+  const keysOf = (schema: unknown): string[] => Object.keys((schema as { properties: object }).properties).sort();
+
+  it("feature off (no deadline dep): exactly the golden surface", () => {
+    const tool = createBashJobTool({ manager: () => undefined });
+    expect(actionsOf(tool.parameters)).toEqual(["kill", "list", "status", "wait"]);
+    expect(keysOf(tool.parameters)).toEqual(["action", "job_id", "wait_ms"]);
+  });
+
+  it("maxExtensions=0 or factor=1 (D-6): still exactly the golden surface", () => {
+    for (const surface of [
+      { graceMs: 60_000, maxExtensions: 0, maxTimeoutFactor: 3 },
+      { graceMs: 60_000, maxExtensions: 3, maxTimeoutFactor: 1 },
+    ]) {
+      const tool = createBashJobTool({ manager: () => undefined, deadline: () => surface });
+      expect(actionsOf(tool.parameters)).toEqual(["kill", "list", "status", "wait"]);
+      expect(keysOf(tool.parameters)).toEqual(["action", "job_id", "wait_ms"]);
+    }
+  });
+
+  it("feature on: adds exactly extend / extend_s / reason (T18's default-config claim)", () => {
+    const off = createBashJobTool({ manager: () => undefined });
+    const on = createBashJobTool({ manager: () => undefined, deadline: () => POLICY });
+    expect(actionsOf(on.parameters)).toEqual(["extend", "kill", "list", "status", "wait"]);
+    expect(keysOf(on.parameters)).toEqual(["action", "extend_s", "job_id", "reason", "wait_ms"]);
+    // Everything the two surfaces share is byte-identical (same description
+    // strings), so the only additions are the extend bits themselves.
+    const onProps = (on.parameters as typeof BashJobToolExtendParams).properties;
+    const offProps = (off.parameters as unknown as typeof BashJobToolExtendParams).properties;
+    expect(onProps.job_id).toEqual(offProps.job_id);
+    expect(onProps.wait_ms).toEqual(offProps.wait_ms);
+    expect(onProps.action.description).toBe(offProps.action.description);
+  });
+
+  it("default-config surface differs from the golden fixture only by extend/extend_s/reason", async () => {
+    const { readFileSync, existsSync } = await import("node:fs");
+    const fixturePath = resolveRepoPath("tests/fixtures/bash-tools-golden.json");
+    expect(existsSync(fixturePath)).toBe(true);
+    const golden = JSON.parse(readFileSync(fixturePath, "utf8")) as Record<string, { parameters: unknown }>;
+    // Rebuild the default-config surface the same canonical way the golden
+    // test does (deep key sort), then prove the diff is confined.
+    const sortKeysDeep = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(sortKeysDeep);
+      if (value !== null && typeof value === "object") {
+        const source = value as Record<string, unknown>;
+        const sorted: Record<string, unknown> = {};
+        for (const key of Object.keys(source).sort()) sorted[key] = sortKeysDeep(source[key]);
+        return sorted;
+      }
+      return value;
+    };
+    const extract = (schema: unknown): unknown =>
+      sortKeysDeep(JSON.parse(JSON.stringify(schema, (_, v) => (typeof v === "symbol" ? undefined : v))));
+    const onTool = createBashJobTool({ manager: () => undefined, deadline: () => POLICY });
+    const goldenParams = extract(golden.bash_job!.parameters);
+    const onParams = extract(onTool.parameters);
+    // Strip the three additions from the ON side and byte-compare the rest.
+    const stripped = JSON.parse(JSON.stringify(onParams)) as {
+      properties: Record<string, unknown> & { action: { anyOf: unknown[]; description: string } };
+    };
+    delete stripped.properties.extend_s;
+    delete stripped.properties.reason;
+    const extendLiteral = JSON.stringify(sortKeysDeep({ const: "extend", type: "string" }));
+    stripped.properties.action.anyOf = stripped.properties.action.anyOf.filter(
+      (entry) => JSON.stringify(sortKeysDeep(entry)) !== extendLiteral,
+    );
+    expect(JSON.stringify(stripped)).toBe(JSON.stringify(goldenParams));
+    // The non-parameter surface fields are untouched too.
+    const offTool = createBashJobTool({ manager: () => undefined });
+    expect(onTool.description).toBe(offTool.description);
+    expect(onTool.promptSnippet).toBe(offTool.promptSnippet);
+    expect(onTool.label).toBe(offTool.label);
+  });
+});
+
+function resolveRepoPath(relative: string): string {
+  // tests run with cwd = package root.
+  return `${process.cwd()}/${relative}`;
+}
+
+describe("bash_job — T16 grace line in status/wait (§2.6)", () => {
+  const graced = makeRecord({
+    jobId: "b_GRAC0001",
+    backgroundedAt: NOW - 30_000,
+    deadline: makeDeadline({ graceUntil: NOW + 58_000 }),
+  });
+
+  it("status shows the extend-or-expire line while in grace", async () => {
+    const manager = fakeManager();
+    manager.put(graced, "working\n");
+    const out = (await run(manager, { action: "status", job_id: "b_GRAC0001" })).content[0]!.text;
+    expect(out).toContain("⏳ timeout reached — killed in 58s unless extended:");
+    expect(out).toContain('bash_job(action: "extend", job_id: "b_GRAC0001", extend_s: 600)');
+  });
+
+  it("wait leads with the grace line instead of the generic timeout guidance", async () => {
+    const manager = fakeManager({ waitResolvesImmediately: true });
+    manager.put(graced);
+    const out = (await run(manager, { action: "wait", job_id: "b_GRAC0001", wait_ms: 1_000 })).content[0]!.text;
+    expect(out).toContain("⏳ timeout reached — killed in 58s unless extended:");
+    expect(out).toContain("Doing nothing lets the job be killed as timed_out");
+    expect(out).not.toContain("Still running after waiting");
+  });
+
+  it("no grace line without a deadline, outside grace, or once terminal", async () => {
+    const manager = fakeManager();
+    manager.put(makeRecord({ jobId: "b_GRAC0002", backgroundedAt: NOW }));
+    manager.put(
+      makeRecord({ jobId: "b_GRAC0003", backgroundedAt: NOW, deadline: makeDeadline({ dueAt: NOW + 60_000 }) }),
+    );
+    manager.put(
+      makeRecord({
+        jobId: "b_GRAC0004",
+        status: "completed",
+        exitCode: 0,
+        endedAt: NOW,
+        deadline: makeDeadline({ graceUntil: NOW + 58_000 }),
+      }),
+    );
+    for (const jobId of ["b_GRAC0002", "b_GRAC0003", "b_GRAC0004"]) {
+      const out = (await run(manager, { action: "status", job_id: jobId })).content[0]!.text;
+      expect(out).not.toContain("timeout reached");
+    }
+  });
+});
+
+describe("bash_job — T16 child-session D budgets (§3.6)", () => {
+  function childView(dueAt: number | undefined): () => HostRunView {
+    return () => ({
+      runId: "run-1",
+      watchdogDueAt: () => dueAt,
+      hardDeadlineAt: () => undefined,
+      maxExtensions: () => 3,
+      stopping: () => false,
+      noteToolReturn: () => {},
+    });
+  }
+
+  it("a single wait is truncated to D − now − MARGIN_RETURN", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const manager = fakeManager();
+      manager.put(makeRecord({ jobId: "b_WAIT0001", pid: 5 }));
+      let at = NOW; // call start
+      const due = at + 43_000; // D − 3s leaves 40s
+      const tool = createBashJobTool({
+        manager: () => manager,
+        host: childView(due),
+        now: () => at,
+      });
+      const pending = tool.execute(
+        "tc",
+        { action: "wait", job_id: "b_WAIT0001", wait_ms: 60_000 },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      await waitForCall(manager, "waitExit:b_WAIT0001:40000");
+      manager.settleWait("b_WAIT0001");
+      const response = await pending;
+      expect(manager.calls).toContain("waitExit:b_WAIT0001:40000");
+      expect(response.content[0]!.text).toContain("Still running after waiting 40s");
+      expect(response.details).toMatchObject({ waitedMs: 40_000, finished: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("consecutive waits: the second call's budget is what remains until D − 3s", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const manager = fakeManager({ waitResolvesImmediately: true });
+      manager.put(makeRecord({ jobId: "b_WAIT0002", pid: 5 }));
+      const tool = createBashJobTool({
+        manager: () => manager,
+        host: childView(NOW + 23_000), // 20s of budget left at NOW
+        now: () => NOW,
+      });
+      await tool.execute(
+        "tc",
+        { action: "wait", job_id: "b_WAIT0002", wait_ms: 120_000 },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      expect(manager.calls).toContain("waitExit:b_WAIT0002:20000");
+      // Time has passed: only 5s remain until D − 3s.
+      const later = createBashJobTool({
+        manager: () => manager,
+        host: childView(NOW + 8_000),
+        now: () => NOW,
+      });
+      await later.execute(
+        "tc",
+        { action: "wait", job_id: "b_WAIT0002", wait_ms: 30_000 },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      expect(manager.calls).toContain("waitExit:b_WAIT0002:5000");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("parallel waits all return by D − 3s", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const manager = fakeManager();
+      manager.put(makeRecord({ jobId: "b_WAIT0003", pid: 5 }));
+      manager.put(makeRecord({ jobId: "b_WAIT0004", pid: 6 }));
+      const tool = createBashJobTool({
+        manager: () => manager,
+        host: childView(NOW + 43_000),
+        now: () => NOW,
+      });
+      const first = tool.execute(
+        "tc",
+        { action: "wait", job_id: "b_WAIT0003", wait_ms: 60_000 },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      const second = tool.execute(
+        "tc2",
+        { action: "wait", job_id: "b_WAIT0004", wait_ms: 60_000 },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      await waitForCall(manager, "waitExit:b_WAIT0003:40000");
+      manager.settleWait("b_WAIT0003");
+      manager.settleWait("b_WAIT0004");
+      const [a, b] = await Promise.all([first, second]);
+      expect(a.details).toMatchObject({ waitedMs: 40_000 });
+      expect(b.details).toMatchObject({ waitedMs: 40_000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a hanging disk read still returns on time, with memory state and a budget note", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const manager = fakeManager();
+      const hanging: JobRecord = makeRecord({ jobId: "b_HANG0001", pid: 9, logBytes: 4 });
+      manager.put(hanging, "data\n");
+      manager.load = async () => new Promise(() => {}); // store hang
+      manager.readOutput = async () => new Promise(() => {}); // log read hang
+      let at = NOW;
+      const tool = createBashJobTool({
+        manager: () => manager,
+        host: childView(NOW + 13_000), // 10s budget
+        now: () => at,
+      });
+      const pending = tool.execute("tc", { action: "status", job_id: "b_HANG0001" }, undefined, undefined, {} as never);
+      // Load race (10s) then tail race (whatever remains) both time out.
+      await vi.advanceTimersByTimeAsync(10_000);
+      at += 10_000;
+      await vi.advanceTimersByTimeAsync(10_000);
+      at += 10_000;
+      const response = await pending;
+      const out = response.content[0]!.text;
+      expect(out).toContain("running"); // the memory record answered
+      expect(out).toContain("log tail unavailable (time budget)");
+      expect(response.details).toMatchObject({ degraded: true, tailBudgetExhausted: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("wait with a hanging trailing read falls back to memory and still finishes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const manager = fakeManager();
+      manager.put(makeRecord({ jobId: "b_HANG0002", pid: 10 }));
+      // waitExit resolves `undefined` (memory entry unknown to it) so the
+      // trailing load runs — and hangs, like a wedged store chain.
+      manager.waitExit = (jobId: JobId, timeoutMs: number) => {
+        manager.calls.push(`waitExit:${jobId}:${timeoutMs}`);
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(undefined), Math.max(0, timeoutMs));
+          (timer as unknown as { unref?: () => void }).unref?.();
+        });
+      };
+      const originalLoad = manager.load.bind(manager);
+      let loads = 0;
+      manager.load = async (jobId: JobId) => {
+        loads += 1;
+        if (loads >= 2) await new Promise(() => {}); // only the trailing load hangs
+        return originalLoad(jobId);
+      };
+      const tool = createBashJobTool({
+        manager: () => manager,
+        host: childView(NOW + 43_000), // 40s budget
+        now: () => NOW,
+      });
+      const pending = tool.execute(
+        "tc",
+        { action: "wait", job_id: "b_HANG0002", wait_ms: 5_000 },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      await waitForCall(manager, "waitExit:b_HANG0002:5000");
+      await vi.advanceTimersByTimeAsync(5_000); // the wait itself elapses
+      await vi.advanceTimersByTimeAsync(40_000); // the trailing load's budget runs out
+      const response = await pending;
+      expect(response.content[0]!.text).toContain("running"); // memory fallback
+      expect(response.details).toMatchObject({ finished: false, waitedMs: 5_000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("D undefined (no truncation): today's wait semantics", async () => {
+    const manager = fakeManager();
+    manager.put(makeRecord({ jobId: "b_WAIT0005", pid: 5 }));
+    const tool = createBashJobTool({
+      manager: () => manager,
+      host: childView(undefined),
+      now: () => NOW,
+    });
+    const pending = tool.execute(
+      "tc",
+      { action: "wait", job_id: "b_WAIT0005", wait_ms: 60_000 },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    await waitForCall(manager, "waitExit:b_WAIT0005:60000");
+    manager.settleWait("b_WAIT0005");
+    expect((await pending).details).toMatchObject({ waitedMs: 60_000 });
   });
 });

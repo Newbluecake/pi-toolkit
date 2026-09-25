@@ -5,8 +5,13 @@ import { createSteerTool } from "../../src/tools/steer-tool.js";
 import { createAbortTool } from "../../src/tools/abort-tool.js";
 import { createWorkflowTool } from "../../src/tools/workflow-tool.js";
 import { createStructuredOutputTool } from "../../src/tools/structured-output-tool.js";
-import { createBashTool } from "../../src/tools/bash-tool.js";
-import { createBashJobTool } from "../../src/tools/bash-job-tool.js";
+import {
+  createBashTool,
+  formatAutoBackgroundTextStarting,
+  formatDeadlineSuffix,
+  formatExplicitBackgroundTextStarting,
+} from "../../src/tools/bash-tool.js";
+import { createBashJobTool, formatGraceLine } from "../../src/tools/bash-job-tool.js";
 import { createSetModelTool } from "../../src/tools/set-model-tool.js";
 import { createExtendTimeoutTool } from "../../src/tools/extend-timeout-tool.js";
 
@@ -145,5 +150,90 @@ describe("model-facing tool strings", () => {
       }
       expect(bashJob().description).toMatch(/grep a large log/);
     });
+  });
+});
+
+/**
+ * bash-timeout-grace T17: every NEW model-facing string the P4 tools add —
+ * the deadline suffix on `bash`, the extend schema bits, the grace line, the
+ * `pid starting` hand-back texts, and the extend refusals — follows the same
+ * rules as the rest: English tokens only (no CJK leaking into compact
+ * markers/lines), no internal vocabulary, no plan-section references.
+ */
+describe("bash deadline strings (bash-timeout-grace T17)", () => {
+  const POLICY = { graceMs: 60_000, maxExtensions: 3, maxTimeoutFactor: 3 };
+
+  const newStrings = (): string[] => {
+    const bash = createBashTool({
+      manager: () => undefined,
+      autoBackgroundMs: () => 120_000,
+      deadline: () => POLICY,
+    });
+    const bashOff = createBashTool({ manager: () => undefined, autoBackgroundMs: () => 120_000 });
+    const jobOn = createBashJobTool({ manager: () => undefined, deadline: () => POLICY });
+    return [
+      bash.description,
+      formatDeadlineSuffix(POLICY),
+      formatDeadlineSuffix({ graceMs: 0, maxExtensions: 3, maxTimeoutFactor: 3 }),
+      formatAutoBackgroundTextStarting("b_TEST0001", 5_000, "/tmp/x.log"),
+      formatExplicitBackgroundTextStarting("b_TEST0001", "/tmp/x.log"),
+      formatGraceLine(
+        { ...({} as never), status: "running", jobId: "b_TEST0001", deadline: { graceUntil: 58_000 } } as never,
+        0,
+      )!,
+      JSON.stringify(jobOn.parameters),
+      // The deadline suffix must not change the off-baseline surface at all.
+      bashOff.description,
+    ];
+  };
+
+  it("keeps the new deadline/grace/starting strings free of internal vocabulary", () => {
+    for (const value of newStrings()) {
+      expect(value).not.toMatch(/[§]|architecture/);
+      expect(value).not.toMatch(/exited_unknown|orphaned|BashJobManager|readCursor|bashJobs\.|reserve\(|R12|D-6/);
+      expect(value).not.toMatch(/pi-subagent|plan\.md|child-registry/);
+    }
+  });
+
+  it("uses English tokens only — no CJK in any model-facing line", () => {
+    for (const value of newStrings()) expect(value).not.toMatch(/[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]/);
+  });
+
+  it("the bash deadline suffix spells the extend contract, or disappears when disabled", () => {
+    const on = formatDeadlineSuffix(POLICY);
+    expect(on).toContain('bash_job(action: "extend"');
+    expect(on).toContain("grace");
+    expect(on).toContain("3 extensions");
+    expect(on).toContain("3x the original timeout");
+    // graceMs=0: extend-only phrasing, no grace promise.
+    const extendOnly = formatDeadlineSuffix({ graceMs: 0, maxExtensions: 3, maxTimeoutFactor: 3 });
+    expect(extendOnly).toContain("killed at once (no grace window)");
+    // D-6: disabled entirely when there is no extension headroom.
+    expect(formatDeadlineSuffix({ graceMs: 60_000, maxExtensions: 0, maxTimeoutFactor: 3 })).toBe("");
+    expect(formatDeadlineSuffix({ graceMs: 60_000, maxExtensions: 3, maxTimeoutFactor: 1 })).toBe("");
+    expect(formatDeadlineSuffix(undefined)).toBe("");
+  });
+
+  it("the grace line is a single compact line with the exact extend recipe", () => {
+    const record = {
+      status: "running",
+      jobId: "b_GRACE001",
+      deadline: { graceUntil: 1_058_000 },
+    } as never;
+    const line = formatGraceLine(record, 1_000_000)!;
+    expect(line).toBe(
+      "⏳ timeout reached — killed in 58s unless extended: " +
+        'bash_job(action: "extend", job_id: "b_GRACE001", extend_s: 600)',
+    );
+  });
+
+  it("extend params carry actionable descriptions without internal jargon", () => {
+    const on = createBashJobTool({ manager: () => undefined, deadline: () => POLICY });
+    const descriptions = collectDescriptions(on.parameters).join(" ");
+    expect(descriptions).toContain("push the job's timeout deadline back");
+    expect(descriptions).toContain("hard lifetime ceiling");
+    expect(descriptions).toContain("max 200 chars");
+    expect(descriptions).not.toContain("applyJobExtension");
+    expect(descriptions).not.toContain("hardAt");
   });
 });

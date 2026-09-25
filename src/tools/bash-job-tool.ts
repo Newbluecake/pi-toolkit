@@ -1,10 +1,12 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { formatSize, truncateTail, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { HostRunView } from "../bash/child-registry.js";
 import type { Millis } from "../core/types.js";
 import type { BashJobManager, JobOutputRead } from "../bash/manager.js";
-import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
+import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobId, type JobRecord } from "../bash/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
+import { asDeadlineAware, MARGIN_RETURN_MS, type BashDeadlineSurface, type ExtendJobOutcome } from "./bash-tool.js";
 import {
   createPollGuard,
   createTimeoutStreak,
@@ -51,37 +53,87 @@ export const MAX_WAIT_MS = 120_000;
 export const STATUS_TAIL_BYTES = 2048;
 /** Lines of log tail `status` shows out of those bytes. */
 export const STATUS_TAIL_LINES = 20;
+/** §2.6/R7: how long `extend` waits for its write-behind persistence. */
+export const EXTEND_PERSIST_WAIT_MS = 2_000;
+/** §2.6: `reason` cap for `extend`. */
+export const EXTEND_REASON_MAX_CHARS = 200;
+/** §2.6: the `extend_s` shown in the grace line as a concrete suggestion. */
+const GRACE_LINE_EXTEND_S = 600;
+
+const ACTION_DESCRIPTION =
+  "status: state summary plus the tail of the job's log; " +
+  "wait: block (bounded) until the job exits — a completion notification is pushed automatically when the " +
+  "job finishes, and while wait blocks the user cannot send new input, so prefer status (or simply " +
+  "continuing other work) unless there is nothing else to do; repeated timing-out waits escalate " +
+  "guidance (raise wait_ms, or await the notification); " +
+  "kill: terminate the process tree; list: all known jobs.";
+
+const JOB_ID_DESCRIPTION =
+  "Job id returned by a bash call that was moved to the background; a unique prefix is accepted. " +
+  "Required for every action except list.";
+
+const WAIT_MS_DESCRIPTION =
+  "wait only: max milliseconds to block (default 30000, capped at 120000). " +
+  "Returns the current status on timeout instead of failing.";
 
 export const BashJobToolParams = Type.Object({
   action: Type.Union([Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")], {
-    description:
-      "status: state summary plus the tail of the job's log; " +
-      "wait: block (bounded) until the job exits — a completion notification is pushed automatically when the " +
-      "job finishes, and while wait blocks the user cannot send new input, so prefer status (or simply " +
-      "continuing other work) unless there is nothing else to do; repeated timing-out waits escalate " +
-      "guidance (raise wait_ms, or await the notification); " +
-      "kill: terminate the process tree; list: all known jobs.",
+    description: ACTION_DESCRIPTION,
   }),
-  job_id: Type.Optional(
-    Type.String({
-      description:
-        "Job id returned by a bash call that was moved to the background; a unique prefix is accepted. " +
-        "Required for every action except list.",
-    }),
+  job_id: Type.Optional(Type.String({ description: JOB_ID_DESCRIPTION })),
+  wait_ms: Type.Optional(Type.Number({ description: WAIT_MS_DESCRIPTION })),
+});
+export type BashJobToolParams = Static<typeof BashJobToolParams>;
+
+/**
+ * §2.6/§5.2: the schema variant registered while the deadline/extend feature
+ * is enabled — identical to `BashJobToolParams` except that the action union
+ * gains `extend` plus the `extend_s` / `reason` parameters (T18: nothing else
+ * differs). The disabled variant stays byte-identical to the golden fixture.
+ */
+export const BashJobToolExtendParams = Type.Object({
+  action: Type.Union(
+    [Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list"), Type.Literal("extend")],
+    {
+      description: ACTION_DESCRIPTION,
+    },
   ),
-  wait_ms: Type.Optional(
+  job_id: Type.Optional(Type.String({ description: JOB_ID_DESCRIPTION })),
+  wait_ms: Type.Optional(Type.Number({ description: WAIT_MS_DESCRIPTION })),
+  extend_s: Type.Optional(
     Type.Number({
       description:
-        "wait only: max milliseconds to block (default 30000, capped at 120000). " +
-        "Returns the current status on timeout instead of failing.",
+        "extend only: seconds to push the job's timeout deadline back by (capped by the job's hard " +
+        "lifetime ceiling). Only a backgrounded job started with an explicit timeout can be extended; " +
+        "if its timeout has already fired, extend during the grace window before the job is killed.",
+    }),
+  ),
+  reason: Type.Optional(
+    Type.String({
+      description: `extend only: short reason (max ${EXTEND_REASON_MAX_CHARS} chars) recorded with the extension for later audit.`,
     }),
   ),
 });
-export type BashJobToolParams = Static<typeof BashJobToolParams>;
+export type BashJobToolExtendParams = Static<typeof BashJobToolExtendParams>;
 
 export interface BashJobToolDeps {
   /** Late-bound so the tool can be registered once and survive session rebuilds. */
   manager: () => BashJobManager | undefined;
+  /**
+   * bash-timeout-grace §3.6 child-session mode: the host run view providing
+   * `watchdogDueAt()`. Provided ⇒ this is a child session: `wait` durations and
+   * every disk read are bounded by `D − MARGIN_RETURN_MS` so the call always
+   * returns before the tool-phase deadline. Absent ⇒ main session: unbounded
+   * (today's semantics).
+   */
+  host?: () => HostRunView | undefined;
+  /**
+   * §2.6/§5.2 deadline switch: present and enabled (`maxExtensions > 0`,
+   * `maxTimeoutFactor > 1`) ⇒ the schema carries `extend` / `extend_s` /
+   * `reason`. Absent or disabled ⇒ the surface is byte-identical to today's
+   * (golden fixture).
+   */
+  deadline?: () => BashDeadlineSurface | undefined;
   /** Injectable clock for deterministic durations in tests. */
   now?: () => Millis;
   /**
@@ -234,6 +286,8 @@ async function readStatusTail(manager: BashJobManager, record: JobRecord): Promi
 
 function formatStatus(record: JobRecord, read: JobOutputRead | undefined, at: Millis): string {
   const lines: string[] = [formatJobSummary(record, at)];
+  const grace = formatGraceLine(record, at);
+  if (grace !== undefined) lines.push(grace);
   const raw = read ? lastLines(read.content, STATUS_TAIL_LINES) : "";
   if (raw.length > 0) {
     // truncateTail is pi's own context guard: even 20 lines can be huge.
@@ -247,10 +301,105 @@ function formatStatus(record: JobRecord, read: JobOutputRead | undefined, at: Mi
   return lines.join("\n");
 }
 
+/** §2.6/§3.6 — the deadline budget shared by `status`/`wait` in child mode. */
+interface ReturnBudget {
+  /** Absolute ms timestamp the call must have returned by (D − MARGIN_RETURN). */
+  readonly dueAt: Millis;
+  remaining(at: Millis): number;
+}
+
+function makeBudget(dueAt: Millis): ReturnBudget {
+  return { dueAt, remaining: (at: Millis) => Math.max(0, dueAt - at) };
+}
+
+function unrefTimer(timer: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> {
+  // A ref'd timer wedges `pi -p` (AGENTS.md).
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return timer;
+}
+
+/** §3.6: race a disk read against the remaining budget; `false` = budget out. */
+async function raceBudget<T>(read: Promise<T>, budgetMs: number): Promise<{ ok: true; value: T } | { ok: false }> {
+  if (budgetMs <= 0) return { ok: false };
+  return new Promise((resolve) => {
+    const timer = unrefTimer(setTimeout(() => resolve({ ok: false }), budgetMs));
+    read.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve({ ok: true, value });
+      },
+      () => {
+        clearTimeout(timer);
+        resolve({ ok: false });
+      },
+    );
+  });
+}
+
+interface BoundedRecord {
+  readonly record: JobRecord;
+  /** True when the disk read lost the deadline race (memory state used). */
+  readonly degraded: boolean;
+}
+
+async function loadRecord(manager: BashJobManager, jobId: string): Promise<JobRecord> {
+  const record = (await manager.load(jobId)) ?? manager.get(jobId);
+  if (!record) throw new Error(`bash job not found: ${jobId}`);
+  return record;
+}
+
+/**
+ * `loadRecord` under a child-session budget (§3.6): the disk read races the
+ * budget; on loss (or a store hang) the in-memory entry is the answer. A job
+ * known to neither is the same "not found" as today.
+ */
+async function loadRecordBounded(
+  manager: BashJobManager,
+  jobId: JobId,
+  budget: ReturnBudget | undefined,
+  now: () => Millis,
+): Promise<BoundedRecord> {
+  if (budget === undefined) return { record: await loadRecord(manager, jobId), degraded: false };
+  const raced = await raceBudget(manager.load(jobId), budget.remaining(now()));
+  if (raced.ok) {
+    const record = raced.value ?? manager.get(jobId);
+    if (!record) throw new Error(`bash job not found: ${jobId}`);
+    return { record, degraded: false };
+  }
+  const memory = manager.get(jobId);
+  if (!memory) throw new Error(`bash job not found: ${jobId}`);
+  return { record: memory, degraded: true };
+}
+
+/** §2.6: the in-grace reminder line for `status` / `wait`. */
+export function formatGraceLine(record: JobRecord, at: Millis): string | undefined {
+  const deadline = record.deadline;
+  if (deadline === undefined || deadline.graceUntil === undefined) return undefined;
+  if (record.status !== "running") return undefined;
+  const leftMs = deadline.graceUntil - at;
+  if (leftMs <= 0) return undefined;
+  return (
+    `⏳ timeout reached — killed in ${Math.ceil(leftMs / 1000)}s unless extended: ` +
+    `bash_job(action: "extend", job_id: "${record.jobId}", extend_s: ${GRACE_LINE_EXTEND_S})`
+  );
+}
+
 // ── tool ───────────────────────────────────────────────────────────────────
 
-export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof BashJobToolParams> {
+export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof BashJobToolExtendParams> {
   const now = deps.now ?? (() => Date.now());
+  // §5.2: schema trimming — extend is only in the surface while the deadline
+  // feature is enabled (maxExtensions > 0 and real headroom, D-6).
+  const extendEnabled =
+    deps.deadline !== undefined &&
+    (() => {
+      try {
+        const surface = deps.deadline?.();
+        return surface !== undefined && surface.maxExtensions > 0 && surface.maxTimeoutFactor > 1;
+      } catch {
+        return false;
+      }
+    })();
   const waitStreak = createTimeoutStreak(deps.timeoutStreak);
   const statusPollGuard = createPollGuard({
     windowMs: deps.pollGuard?.windowMs,
@@ -273,7 +422,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
     return manager;
   }
 
-  function requireJobId(params: BashJobToolParams): string {
+  function requireJobId(params: BashJobToolExtendParams): string {
     const handle = params.job_id?.trim();
     if (!handle) throw new Error(`bash_job(action: "${params.action}") requires job_id`);
     return handle;
@@ -305,7 +454,11 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       'bash_job(action: "status"|"wait"|"kill"|"list", job_id?, wait_ms?) - inspect, wait for, or stop a ' +
       "backgrounded bash command (job_id comes from the bash call that was moved to the background; a unique prefix " +
       "works); its log is a plain file you can also read/tail/grep directly",
-    parameters: BashJobToolParams,
+    // §5.2: the extend-enabled variant only while the feature is on; the
+    // disabled surface is byte-identical to the golden fixture.
+    parameters: extendEnabled
+      ? BashJobToolExtendParams
+      : (BashJobToolParams as unknown as typeof BashJobToolExtendParams),
     renderCall(args, theme, context) {
       const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const action = args?.action ?? "…";
@@ -316,6 +469,21 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
 
     async execute(_toolCallId, params, signal) {
       const manager = requireManager();
+
+      // §3.6 child-session mode: every bounded action and every disk read must
+      // be done by D − MARGIN_RETURN. No host view (or a view that answers
+      // `undefined`) ⇒ unbounded, today's semantics.
+      let budget: ReturnBudget | undefined;
+      if (deps.host !== undefined) {
+        let due: Millis | undefined;
+        try {
+          const value = deps.host()?.watchdogDueAt();
+          due = typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+        } catch {
+          due = undefined;
+        }
+        if (due !== undefined) budget = makeBudget(due - MARGIN_RETURN_MS);
+      }
 
       if (params.action === "list") {
         const records = manager.list();
@@ -334,38 +502,68 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
 
       if (params.action === "status") {
         const pollWarning = statusPollGuard.record(jobId);
-        const record = await loadRecord(manager, jobId);
+        const loaded = await loadRecordBounded(manager, jobId, budget, now);
+        const record = loaded.record;
         const at = now();
         // The tail read is side-effect free (advanceCursor: false), so status
-        // stays a safe poll: it never hides output from a later read.
-        const read = await readStatusTail(manager, record);
-        const statusText = formatStatus(record, read, at);
+        // stays a safe poll: it never hides output from a later read. In child
+        // mode it also races the return budget (§3.6): a store/log read that
+        // cannot finish in time degrades to the memory state, and the tail
+        // says so instead of hanging the call.
+        let read: JobOutputRead | undefined;
+        let tailBudgetExhausted = false;
+        if (budget === undefined) {
+          read = await readStatusTail(manager, record);
+        } else {
+          const raced = await raceBudget(readStatusTail(manager, record), budget.remaining(at));
+          if (raced.ok) read = raced.value;
+          else tailBudgetExhausted = true;
+        }
+        const statusText =
+          tailBudgetExhausted && read === undefined
+            ? `${formatStatus(record, undefined, at)}\nlog tail unavailable (time budget)`
+            : formatStatus(record, read, at);
         return {
           ...text(pollWarning ? `${pollWarning}\n\n${statusText}` : statusText),
           details: {
             ...jobDetails(record, at),
             tailBytes: read ? read.nextOffset - read.startOffset : 0,
             tailFromOffset: read?.startOffset ?? 0,
+            ...(loaded.degraded ? { degraded: true } : {}),
+            ...(tailBudgetExhausted && read === undefined ? { tailBudgetExhausted: true } : {}),
           },
         };
       }
 
       if (params.action === "wait") {
         const requested = Number.isFinite(params.wait_ms ?? NaN) ? Math.trunc(params.wait_ms as number) : undefined;
-        const waitMs = Math.min(MAX_WAIT_MS, Math.max(0, requested ?? DEFAULT_WAIT_MS));
-        const before = await loadRecord(manager, jobId);
+        // §3.6: min(wait_ms ?? 30s, 120s, D − now − MARGIN_RETURN) — a child
+        // session's wait never outlives the tool-phase deadline.
+        const capped = Math.min(MAX_WAIT_MS, Math.max(0, requested ?? DEFAULT_WAIT_MS));
+        const budgetLeft = budget?.remaining(now()) ?? Number.POSITIVE_INFINITY;
+        const waitMs = Math.min(capped, Math.max(0, budgetLeft));
+        const before = (await loadRecordBounded(manager, jobId, budget, now)).record;
         // The abort signal matters here: without it the wait outlasts Esc and
         // session teardown (/exit) until wait_ms fires, wedging the turn.
-        const record = isTerminalJobStatus(before.status)
+        const waited = isTerminalJobStatus(before.status)
           ? before
-          : ((await manager.waitExit(jobId, waitMs, { signal })) ?? (await loadRecord(manager, jobId)));
+          : ((await manager.waitExit(jobId, waitMs, { signal })) ??
+            (await loadRecordBounded(manager, jobId, budget, now)).record);
+        const record = waited;
         if (signal?.aborted) throw new Error("wait was aborted");
         const at = now();
+        const grace = formatGraceLine(record, at);
         const finished = isTerminalJobStatus(record.status);
         let suffix: string;
         if (finished) {
           waitStreak.reset(jobId);
           suffix = `\n${finalStatusLine(record)}\n${formatLogFileHint(record.logPath)}`;
+        } else if (grace !== undefined) {
+          // §2.6: an in-grace wait result leads with the extend-or-expire line.
+          waitStreak.reset(jobId);
+          suffix =
+            `\n${grace} Doing nothing lets the job be killed as timed_out when the grace window ends — ` +
+            `that is a valid choice if you no longer need the result.`;
         } else {
           // A timing-out wait is not an error, but the streak escalates the
           // guidance when the model keeps re-waiting on the same job: raise
@@ -384,6 +582,97 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         return {
           ...text(`${formatJobSummary(record, at)}${suffix}`),
           details: { ...jobDetails(record, at), waitedMs: waitMs, finished },
+        };
+      }
+
+      if (params.action === "extend") {
+        // §2.6: `extend` exists only on the enabled surface, and only a
+        // deadline-aware manager can adjudicate it.
+        const deadlineManager = asDeadlineAware(manager);
+        if (!deadlineManager || typeof deadlineManager.extend !== "function") {
+          throw new Error(
+            `bash_job(action: "extend") is not available in this session ` +
+              "(the bash job deadline feature is disabled)",
+          );
+        }
+        const extendSeconds = params.extend_s;
+        if (extendSeconds === undefined || !Number.isFinite(extendSeconds) || extendSeconds <= 0) {
+          throw new Error('bash_job(action: "extend") requires extend_s: a positive number of seconds');
+        }
+        const reason = params.reason?.trim();
+        if (reason !== undefined && reason.length > EXTEND_REASON_MAX_CHARS) {
+          throw new Error(
+            `bash_job(action: "extend") reason is too long (${reason.length} chars; ` +
+              `max ${EXTEND_REASON_MAX_CHARS})`,
+          );
+        }
+        const at = now();
+        const before = manager.get(jobId);
+        let outcome: ExtendJobOutcome;
+        try {
+          outcome = deadlineManager.extend(jobId, Math.round(extendSeconds * 1000), reason || undefined);
+        } catch (error) {
+          // R8: a disposed manager throws `stale bash job manager` — surface it.
+          throw error instanceof Error ? error : new Error(String(error));
+        }
+        if (!outcome.ok) throw new Error(extendRefusal(jobId, outcome.reason, before));
+        const record = outcome.record;
+        const deadline = record.deadline;
+        if (deadline === undefined) {
+          // Unreachable for a real manager (ok implies an extended deadline).
+          throw new Error(`bash job ${jobId} was extended but carries no deadline`);
+        }
+        // R7: the adjudication above is already in effect in memory; wait for
+        // the write-behind persistence at most EXTEND_PERSIST_WAIT_MS, then
+        // note `persist pending` instead of blocking the model.
+        let persistPending = false;
+        await new Promise<void>((resolve) => {
+          const timer = unrefTimer(
+            setTimeout(() => {
+              persistPending = true;
+              resolve();
+            }, EXTEND_PERSIST_WAIT_MS),
+          );
+          void Promise.resolve(outcome.persisted).then(
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+          );
+        });
+        const previousDueAt = before?.deadline?.dueAt;
+        const grantedMs =
+          previousDueAt !== undefined ? Math.max(0, deadline.dueAt - previousDueAt) : deadline.grantedMs;
+        const extensionsLeft = Math.max(0, deadline.policy.maxExtensions - deadline.extensions);
+        const lines = [
+          `Bash job ${jobId} ($ ${previewCommand(record.command, 60)}) extended by ${formatDuration(grantedMs)} — ` +
+            `its timeout now fires in ${formatDuration(Math.max(0, deadline.dueAt - at))} ` +
+            `(${extensionsLeft} of ${deadline.policy.maxExtensions} extensions left, ` +
+            `hard lifetime ceiling in ${formatDuration(Math.max(0, deadline.hardAt - deadline.dueAt))}).`,
+        ];
+        if (persistPending) {
+          lines.push(
+            "[persist pending: the extension is already in effect; the job record on disk has not confirmed it " +
+              `within ${formatDuration(EXTEND_PERSIST_WAIT_MS)}]`,
+          );
+        }
+        lines.push(formatLogFileHint(record.logPath));
+        return {
+          ...text(lines.join("\n")),
+          details: {
+            ...jobDetails(record, at),
+            extended: true,
+            extendMs: Math.round(extendSeconds * 1000),
+            grantedMs,
+            extensionsLeft,
+            dueAt: deadline.dueAt,
+            hardAt: deadline.hardAt,
+            ...(persistPending ? { persistPending: true } : {}),
+          },
         };
       }
 
@@ -421,7 +710,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         details: { ...jobDetails(result.record, at), alreadyTerminal: false, killed: true, outcome: result.outcome },
       };
     },
-  } satisfies ToolDefinition<typeof BashJobToolParams>;
+  } satisfies ToolDefinition<typeof BashJobToolExtendParams>;
 }
 
 function orphanRefusal(jobId: string): string {
@@ -429,4 +718,39 @@ function orphanRefusal(jobId: string): string {
     `bash job ${jobId} was left behind by an earlier pi process and cannot be safely killed ` +
     "(its process identity could not be verified, so killing it might hit an unrelated process)"
   );
+}
+
+/** §2.6: every `extend` refusal, phrased so the model can self-correct. */
+function extendRefusal(jobId: string, reason: string, before: JobRecord | undefined): string {
+  const deadline = before?.deadline;
+  switch (reason) {
+    case "already_terminal":
+      return `bash job ${jobId} has already finished — there is no timeout left to extend`;
+    case "no_timeout":
+      return `bash job ${jobId} was started without an explicit timeout, so it has no deadline to extend`;
+    case "foreground":
+      return (
+        `bash job ${jobId} is still in the foreground — its timeout cannot be extended; wait for the call to ` +
+        "finish or to be moved to the background first"
+      );
+    case "limit_reached":
+      return (
+        `bash job ${jobId} already used its full extension budget ` +
+        `(${deadline?.extensions ?? "all"} of ${deadline?.policy.maxExtensions ?? "its"} extensions) — ` +
+        "the next timeout fires for good"
+      );
+    case "no_headroom":
+      return (
+        `bash job ${jobId} has reached its hard lifetime ceiling ` +
+        `(${deadline ? `${deadline.policy.maxTimeoutFactor}x its original timeout` : "timeout x factor"}) — ` +
+        "it cannot be extended any further"
+      );
+    case "zero_gain":
+      return (
+        `bash job ${jobId} could not be extended: the requested amount would add no time ` +
+        "(it is already capped by the job's hard lifetime ceiling)"
+      );
+    default:
+      return `bash job ${jobId} could not be extended: ${reason}`;
+  }
 }

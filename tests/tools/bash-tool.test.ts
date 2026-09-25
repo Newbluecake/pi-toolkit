@@ -2,11 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createBashJobManager, type BashJobManager } from "../../src/bash/manager.js";
+import { createBashJobManager, type BashJobManager, type CreatedJob } from "../../src/bash/manager.js";
 import { createJobStore } from "../../src/bash/job-store.js";
+import type { HostRunView } from "../../src/bash/child-registry.js";
+import type { JobRecord } from "../../src/bash/types.js";
 import type {
   JobExit,
   KillJobTreeOptions,
@@ -534,5 +536,545 @@ describe("bash override tool — auto-background", () => {
     const zero = await zeroTool.execute("call-2", { command: "echo zero" }, undefined, undefined, harness.ctx);
     expect(zero.content[0]).toEqual({ type: "text", text: "zero\n" });
     expect(harness.port.spawns).toHaveLength(0);
+  });
+});
+
+// ── T15 (bash-timeout-grace §3.6): two-layer race, R, latch ────────────────
+
+/**
+ * Minimal deadline-aware manager stand-in implementing the plan-frozen P3
+ * surface (`reserve` / `cancelReserve` / `markBackgroundedSync` / `extend`,
+ * §3.6/§2.3) over fully controllable `started` / `exit` promises. The inner
+ * tool layer only ever calls those four plus `setFinalText` / capacity reads.
+ */
+interface FakeReservation {
+  readonly jobId: string;
+  readonly logPath: string;
+  readonly record: JobRecord;
+  readonly init: { command: string; cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number };
+  resolveStarted: (
+    outcome:
+      | {
+          ok: true;
+          job: CreatedJob;
+        }
+      | { ok: false; error: Error },
+  ) => void;
+  readonly started: Promise<{ ok: true; job: CreatedJob } | { ok: false; error: Error }>;
+  readonly exit: Promise<JobRecord>;
+  resolveExit: (record: JobRecord) => void;
+  cancelled: boolean;
+  backgroundedSync: number;
+}
+
+function fakeRecord(jobId: string, over: Partial<JobRecord> = {}): JobRecord {
+  return {
+    v: 1,
+    jobId,
+    command: "run-it",
+    cwd: "/repo",
+    sessionId: "session-1",
+    hostPid: 4242,
+    pid: 7001,
+    status: "running",
+    createdAt: NOW_MS,
+    spawnedAt: NOW_MS,
+    exitCode: null,
+    logPath: `/tmp/${jobId}.log`,
+    logBytes: 0,
+    outputTruncated: false,
+    readCursor: 0,
+    ...over,
+  };
+}
+
+const NOW_MS = 1_000_000;
+
+class FakeDeadlineHarness {
+  readonly reservations: FakeReservation[] = [];
+  readonly cancelled: string[] = [];
+  readonly finalTexts: { jobId: string; text: string }[] = [];
+  readonly returns: { toolCallId: string; at: number }[] = [];
+  readonly warnings: string[] = [];
+  capacity = true;
+  private n = 0;
+  readonly manager: BashJobManager;
+
+  constructor() {
+    const harness = this;
+    this.manager = {
+      dir: "/tmp/bash-jobs",
+      maxBackgroundJobs: 8,
+      async recover() {
+        throw new Error("unused");
+      },
+      async create() {
+        throw new Error("deadline-aware fake: create() must not be called");
+      },
+      get: (jobId) => harness.reservations.find((r) => r.jobId === jobId)?.record ?? undefined,
+      async load(jobId) {
+        return harness.reservations.find((r) => r.jobId === jobId)?.record ?? undefined;
+      },
+      list: () => [...harness.reservations.values()].map((r) => r.record),
+      resolve(handle) {
+        const trimmed = handle.trim();
+        const exact = harness.reservations.find((r) => r.jobId === trimmed);
+        if (exact) return exact.jobId;
+        const matches = harness.reservations.filter((r) => r.jobId.startsWith(trimmed));
+        if (matches.length === 1) return matches[0]!.jobId;
+        throw new Error(`bash job not found: ${trimmed}`);
+      },
+      async markBackgrounded(jobId) {
+        const r = harness.reservations.find((x) => x.jobId === jobId);
+        return r?.record;
+      },
+      async setFinalText(jobId, finalText) {
+        harness.finalTexts.push({ jobId, text: finalText });
+        return undefined;
+      },
+      noteTermination() {},
+      async readOutput() {
+        throw new Error("unused");
+      },
+      async kill(jobId) {
+        harness.cancelled.push(jobId);
+        throw new Error("unused");
+      },
+      async waitExit() {
+        return undefined;
+      },
+      backgroundJobCount() {
+        return 0;
+      },
+      hasBackgroundCapacity() {
+        return harness.capacity;
+      },
+      exportLocalJobs() {
+        return [];
+      },
+      hasOpenLocalHandle() {
+        return false;
+      },
+      adoptLocalJobs() {},
+      async drain() {},
+      dispose() {},
+      // ── the frozen §3.6 surface ──────────────────────────────────────────
+      reserve(init: { command: string; cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number }): {
+        jobId: string;
+        logPath: string;
+        started: Promise<unknown>;
+      } {
+        const jobId = `b_FAKEn${++harness.n}`.replace("n", "");
+        let resolveStarted: FakeReservation["resolveStarted"] = () => {};
+        const started = new Promise<{ ok: true; job: CreatedJob } | { ok: false; error: Error }>((resolve) => {
+          resolveStarted = resolve;
+        });
+        let resolveExit: (record: JobRecord) => void = () => {};
+        const exit = new Promise<JobRecord>((resolve) => {
+          resolveExit = resolve;
+        });
+        const record = fakeRecord(jobId);
+        const reservation: FakeReservation = {
+          jobId,
+          logPath: record.logPath,
+          init,
+          resolveStarted,
+          started,
+          exit,
+          resolveExit,
+          cancelled: false,
+          backgroundedSync: 0,
+          get record() {
+            return record;
+          },
+        } as FakeReservation;
+        harness.reservations.push(reservation);
+        return { jobId, logPath: record.logPath, started };
+      },
+      cancelReserve(jobId: string): void {
+        const r = harness.reservations.find((x) => x.jobId === jobId);
+        if (r) r.cancelled = true;
+        harness.cancelled.push(jobId);
+      },
+      markBackgroundedSync(jobId: string): void {
+        const r = harness.reservations.find((x) => x.jobId === jobId);
+        if (r) r.backgroundedSync += 1;
+      },
+      extend() {
+        return { ok: false, reason: "no_timeout" as const };
+      },
+    } as unknown as BashJobManager;
+  }
+
+  lastReservation(): FakeReservation {
+    const r = this.reservations[this.reservations.length - 1];
+    if (!r) throw new Error("no reservation");
+    return r;
+  }
+
+  /** Resolve `started` with a running job at the given fake-time offset. */
+  startJob(offsetMs: number, pid = 7001): void {
+    const r = this.lastReservation();
+    setTimeout(() => {
+      const job: CreatedJob = {
+        jobId: r.jobId,
+        record: fakeRecord(r.jobId, { pid }),
+        pid,
+        pgid: pid,
+        logPath: r.logPath,
+        exit: r.exit,
+      };
+      r.resolveStarted({ ok: true, job });
+    }, offsetMs);
+  }
+
+  exitJob(offsetMs: number, over: Partial<JobRecord> = {}): void {
+    const r = this.lastReservation();
+    setTimeout(() => r.resolveExit(fakeRecord(r.jobId, { status: "completed", exitCode: 0, ...over })), offsetMs);
+  }
+}
+
+interface ChildToolOptions {
+  thresholdMs?: number;
+  /** `undefined` = the view answers "no D" (§3.6 "D 未定义"). */
+  dueAt?: () => number | undefined;
+  toolBudgetMs?: () => number | undefined;
+}
+
+function childTool(harness: FakeDeadlineHarness, options: ChildToolOptions = {}): ReturnType<typeof createBashTool> {
+  const view: HostRunView = {
+    runId: "run-1",
+    watchdogDueAt: () => options.dueAt?.(),
+    hardDeadlineAt: () => undefined,
+    maxExtensions: () => 3,
+    stopping: () => false,
+    noteToolReturn: (toolCallId, at) => harness.returns.push({ toolCallId, at }),
+  };
+  return createBashTool({
+    manager: () => harness.manager,
+    autoBackgroundMs: () => options.thresholdMs ?? 120_000,
+    host: () => view,
+    ...(options.toolBudgetMs !== undefined ? { toolBudgetMs: options.toolBudgetMs } : {}),
+    now: () => FAKE_NOW,
+    warn: (message) => harness.warnings.push(message),
+  });
+}
+
+function mainTool(harness: FakeDeadlineHarness, thresholdMs = 10 * 60_000): ReturnType<typeof createBashTool> {
+  return createBashTool({
+    manager: () => harness.manager,
+    autoBackgroundMs: () => thresholdMs,
+    warn: (message) => harness.warnings.push(message),
+  });
+}
+
+/**
+ * Deterministic T15 clock: the tool's `now` is pinned, so R = min(threshold,
+ * D − 3s) lands on exact fake-timer boundaries instead of real Date.now() ms
+ * jitter (two real Date.now() calls can straddle a ms tick and shift R by 1).
+ */
+const FAKE_NOW = 1_729_000_000_000;
+const D8S = () => FAKE_NOW + 8_000;
+const D20S = () => FAKE_NOW + 20_000;
+
+describe("bash override tool — T15 two-layer race (§3.6)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  });
+
+  it("R ample: the threshold still governs when D is far away", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: () => FAKE_NOW + 300_000 });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    await vi.advanceTimersByTimeAsync(119_999);
+    const pending = await Promise.race([run.then(() => "done"), Promise.resolve("pending")]);
+    expect(pending).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await run;
+    expect((result.details as BashBackgroundDetails).background).toBe(true);
+    expect((result.details as BashBackgroundDetails).pid).toBe(7001);
+  });
+
+  it("toolMs ≤ MARGIN_RETURN (D−3s ≤ now): returns synchronously with `pid starting`", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: () => FAKE_NOW + 3_000 });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    // No timer advance at all — the latch fired during the call itself.
+    const result = await run;
+    const details = result.details as BashBackgroundDetails;
+    const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    expect(details.background).toBe(true);
+    expect(details.pid).toBeUndefined();
+    expect(body).toContain("pid starting");
+    expect(body).toContain(details.jobId);
+    expect(harness.lastReservation().backgroundedSync).toBe(1);
+    expect(harness.cancelled).toEqual([]);
+    expect(harness.returns).toHaveLength(1);
+    expect(harness.returns[0]!.toolCallId).toBe("call-1");
+  });
+
+  it("D undefined (watchdogDueAt → undefined): no truncation, threshold governs", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: () => undefined });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const pending = await Promise.race([run.then(() => "done"), Promise.resolve("pending")]);
+    expect(pending).toBe("pending");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect((await run).details).toMatchObject({ background: true });
+  });
+
+  it("no host view attached: static D = start + toolBudget, warned once", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = createBashTool({
+      manager: () => harness.manager,
+      autoBackgroundMs: () => 120_000,
+      host: () => undefined,
+      toolBudgetMs: () => 8_000,
+      now: () => FAKE_NOW,
+      warn: (message) => harness.warnings.push(message),
+    });
+    const first = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    await vi.advanceTimersByTimeAsync(4_999);
+    const pending = await Promise.race([first.then(() => "done"), Promise.resolve("pending")]);
+    expect(pending).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await first;
+    expect(harness.warnings.filter((line) => line.includes("no host view attached"))).toHaveLength(1);
+    // A second call does not warn again (once per tool instance).
+    const second = tool.execute("call-2", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await second;
+    expect(harness.warnings.filter((line) => line.includes("no host view attached"))).toHaveLength(1);
+  });
+
+  it("R spans the whole call ①: `started` never settles → background at D−3s with `starting`", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D8S });
+    const run = tool.execute("call-1", { command: "npm test", timeout: 30 }, undefined, undefined, makeCtx("/repo"));
+    // The reservation (and its timeoutMs) is visible immediately (E33).
+    expect(harness.reservations).toHaveLength(1);
+    expect(harness.lastReservation().init.timeoutMs).toBe(30_000);
+    await vi.advanceTimersByTimeAsync(4_999);
+    const pending = await Promise.race([run.then(() => "done"), Promise.resolve("pending")]);
+    expect(pending).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await run;
+    const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    expect(body).toContain("pid starting");
+    expect((result.details as BashBackgroundDetails).pid).toBeUndefined();
+    // Nobody cancelled: the reservation keeps waiting for its staged persist.
+    expect(harness.cancelled).toEqual([]);
+    expect(harness.lastReservation().backgroundedSync).toBe(1);
+    expect(harness.returns).toHaveLength(1);
+  });
+
+  it("R spans the whole call ②: started resolved, command still running → background at D−3s with the pid", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D8S });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    harness.exitJob(60_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await run;
+    expect((result.details as BashBackgroundDetails).pid).toBe(7001);
+    expect(harness.lastReservation().backgroundedSync).toBe(1);
+    // The command finishing later lands in finalText via adoptInnerPromise (§2.3).
+    await vi.advanceTimersByTimeAsync(55_000);
+    await waitFor(() => harness.finalTexts.length === 1, "the adopted final text");
+    expect(harness.finalTexts[0]!.jobId).toBe(harness.lastReservation().jobId);
+    // pi's own foreground text for a clean exit with no output — adopted (§2.3).
+    expect(harness.finalTexts[0]!.text).toBe("(no output)");
+  });
+
+  it("toolMs = 20s: R = D − 3s = 17s", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D20S });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    await vi.advanceTimersByTimeAsync(16_999);
+    const pending = await Promise.race([run.then(() => "done"), Promise.resolve("pending")]);
+    expect(pending).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await run).details).toMatchObject({ background: true });
+  });
+
+  it("job.exit first: the foreground result is pi's own, not a background hand-back", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: D8S });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1);
+    harness.exitJob(500);
+    await vi.advanceTimersByTimeAsync(600);
+    const result = await run;
+    expect(result.content).toEqual([{ type: "text", text: "(no output)" }]);
+    expect((result.details as BashBackgroundDetails | undefined)?.background).toBeUndefined();
+    expect(harness.lastReservation().backgroundedSync).toBe(0);
+    expect(harness.returns).toEqual([]);
+  });
+
+  it("same tick (exit just before R): exactly one branch runs — foreground wins", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D8S });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1);
+    harness.exitJob(4_999); // 1ms before the R timer
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await run;
+    expect(result.content).toEqual([{ type: "text", text: "(no output)" }]);
+    expect(harness.lastReservation().backgroundedSync).toBe(0);
+    expect(harness.returns).toEqual([]);
+    expect(harness.finalTexts).toEqual([]); // foreground: nothing adopted
+  });
+
+  it("same tick (exit scheduled exactly at R): exactly one branch runs — the latch picks background", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D8S });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1);
+    harness.exitJob(5_000); // the same tick as the R timer
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await run;
+    const details = result.details as BashBackgroundDetails;
+    // Exactly one winner: background text, exactly one markBackgroundedSync.
+    expect(details.background).toBe(true);
+    expect(harness.lastReservation().backgroundedSync).toBe(1);
+    // The foreground delivery never ran on top of it.
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0]!.type).toBe("text");
+    expect(result.content[0]!.text).toContain("moved to the background");
+  });
+
+  it("main session, store hang: foreground throws started's error at its 30s bound", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = mainTool(harness, 10 * 60_000);
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    const reservation = harness.lastReservation();
+    const expectation = expect(run).rejects.toThrow("bash job store did not persist the staged record within 30s");
+    setTimeout(
+      () =>
+        reservation.resolveStarted({
+          ok: false,
+          error: new Error("bash job store did not persist the staged record within 30s"),
+        }),
+      30_000,
+    );
+    await vi.advanceTimersByTimeAsync(29_999);
+    const pending = await Promise.race([
+      run.then(
+        () => "done",
+        () => "failed",
+      ),
+      Promise.resolve("pending"),
+    ]);
+    expect(pending).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(run).rejects.toThrow("bash job store did not persist the staged record within 30s");
+    expect(harness.lastReservation().backgroundedSync).toBe(0);
+  });
+
+  it("main session, Esc at 2s: aborts at once, cancelReserve called, nothing spawned", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = mainTool(harness, 10 * 60_000);
+    const controller = new AbortController();
+    const run = tool.execute("call-1", { command: "npm test" }, controller.signal, undefined, makeCtx("/repo"));
+    const jobId = harness.lastReservation().jobId;
+    await vi.advanceTimersByTimeAsync(2_000);
+    controller.abort();
+    await expect(run).rejects.toThrow("Command aborted");
+    expect(harness.cancelled).toEqual([jobId]);
+  });
+
+  it("parallel batch: a second bash in the same tool phase returns by the same D−3s", async () => {
+    const harness = new FakeDeadlineHarness();
+    const due = FAKE_NOW + 8_000;
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: () => due });
+    const first = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    const second = tool.execute("call-2", { command: "npm run build" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect((await first).details).toMatchObject({ background: true });
+    expect((await second).details).toMatchObject({ background: true });
+    expect(harness.reservations).toHaveLength(2);
+  });
+
+  it("child session with full background slots still converts (C2 over-quota)", async () => {
+    const harness = new FakeDeadlineHarness();
+    harness.capacity = false;
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: () => FAKE_NOW + 300_000 });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    harness.startJob(1_000);
+    await vi.advanceTimersByTimeAsync(120_000);
+    const result = await run;
+    expect((result.details as BashBackgroundDetails).background).toBe(true);
+    expect(harness.warnings.some((line) => line.includes("stayed in the foreground"))).toBe(false);
+  });
+
+  it("run_in_background in a child session: the latch fires right after reserve, before the pid", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { dueAt: () => FAKE_NOW + 300_000 });
+    const run = tool.execute(
+      "call-1",
+      { command: "npm test", run_in_background: true },
+      undefined,
+      undefined,
+      makeCtx("/repo"),
+    );
+    const result = await run;
+    const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    expect((result.details as BashBackgroundDetails).background).toBe(true);
+    expect((result.details as BashBackgroundDetails).autoBackgrounded).toBeUndefined();
+    expect(body).toContain("started in the background");
+    expect(body).toContain("pid starting");
+  });
+
+  it("run_in_background against a full table is still rejected before spawn (both modes)", async () => {
+    const harness = new FakeDeadlineHarness();
+    harness.capacity = false;
+    const tool = childTool(harness, { dueAt: () => FAKE_NOW + 300_000 });
+    await expect(
+      tool.execute("call-1", { command: "npm test", run_in_background: true }, undefined, undefined, makeCtx("/repo")),
+    ).rejects.toThrow(/all 8 background job slots are in use/);
+    expect(harness.reservations).toHaveLength(0);
+  });
+
+  it("foreground started.ok=false in child mode: throws the original error (no background rescue)", async () => {
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: () => FAKE_NOW + 300_000 });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    const reservation = harness.lastReservation();
+    // Attach the handler before the rejection fires (the fake-timer flush
+    // would otherwise briefly leave the rejected promise unobserved).
+    const expectation = expect(run).rejects.toThrow("spawn refused: no such shell");
+    setTimeout(
+      () => reservation.resolveStarted({ ok: false, error: new Error("spawn refused: no such shell") }),
+      1_000,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expectation;
+    expect(harness.lastReservation().backgroundedSync).toBe(0);
+  });
+
+  it("B-LOOP budget: the R timer fires exactly at D − MARGIN_RETURN, leaving the margin for the return path", async () => {
+    // toolMs = 8s ⇒ R = 5s: a 1s event-loop block + a 1s tool_result hook
+    // after the return still lands tool_end at 7s < D = 8s. (The 4s-block
+    // boundary-warning path is host-side lag telemetry, P5/T32; this test
+    // pins the tool-side budget that makes the arithmetic possible.)
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D8S });
+    const run = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));
+    await vi.advanceTimersByTimeAsync(4_999);
+    const pending = await Promise.race([run.then(() => "done"), Promise.resolve("pending")]);
+    expect(pending).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await run;
+    // The host needs the exact R instant to compute tool_end − R (B-LOOP).
+    expect(harness.returns).toHaveLength(1);
+    expect(harness.returns[0]).toEqual({ toolCallId: "call-1", at: FAKE_NOW });
   });
 });

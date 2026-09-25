@@ -6,8 +6,11 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { BashJobManager, CreatedJob } from "../bash/manager.js";
-import type { JobId } from "../bash/types.js";
+import type { Millis } from "../core/types.js";
+import type { HostRunView } from "../bash/child-registry.js";
+import type { JobExtensionReason } from "../bash/deadline.js";
+import type { BashJobManager, CreatedJob, CreateJobInit } from "../bash/manager.js";
+import type { JobDeadlinePolicy, JobId, JobRecord } from "../bash/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 
 /**
@@ -33,8 +36,24 @@ import { formatDuration } from "../ui/fleet-panel.js";
  *    so its eventual settlement lands in `finalText` instead of becoming an
  *    unhandled rejection (§2.3).
  *
+ * bash-timeout-grace §3.6 (P4): the race is now a **two-layer race with a
+ * single synchronous latch**. The outer layer (`execute` below) races the
+ * inner exec's whole promise (`settled` — it only settles when the command
+ * ends) against the R timer and the caller's abort; R therefore spans the
+ * entire call no matter which await the inner layer is parked on. The inner
+ * layer (`execViaManager`) never learns about R: it reserves the job
+ * synchronously (`manager.reserve`, E33), awaits `started` (never rejects,
+ * R12-bounded), then awaits `job.exit`. Whichever of `settled` / R / abort
+ * runs first sets the latch (`backgrounded` / `foregroundDone`) in its
+ * synchronous callback prologue, so "R and `started`/`exit` arrive in the same
+ * tick" has exactly one winner. The background branch never awaits
+ * `markBackgrounded` — a deadline-aware manager gets the synchronous
+ * `markBackgroundedSync` and the caller is handed `job_id`/`logPath` right
+ * away (`pid starting` until the spawn completes).
+ *
  * Layering: no session/stack state is captured — the manager and the threshold
- * arrive as getters so `src/index.ts` can forward the current stack's instance
+ * arrive as getters so `src/index.ts` (main session) / `src/bash/child.ts`
+ * (child session, later package) can forward the current stack's instance
  * (the extension re-activates in-process on `/reload`).
  */
 
@@ -68,17 +87,123 @@ export interface BashBackgroundDetails {
   background: true;
   /** Set only when the threshold (not `run_in_background`) triggered it. */
   autoBackgrounded?: true;
-  pid: number;
+  /**
+   * Absent while the call was handed back before the spawn completed (§3.6
+   * child-session R return: the text says `pid starting` instead).
+   */
+  pid?: number;
   logPath: string;
 }
 
 export type BashOverrideDetails = BashToolDetails | BashBackgroundDetails | undefined;
+
+// ── frozen P3 manager surface (bash-timeout-grace §3.6 / §2.3) ─────────────
+
+/**
+ * §3.6 `manager.reserve()`'s result: the synchronous control plane for one
+ * bash call. `jobId`/`logPath` are known the instant `reserve()` returns, so
+ * the outer race can hand the call back without waiting for the spawn, the
+ * staged-record persist, or anything else.
+ */
+export interface ReservedBashJob {
+  readonly jobId: JobId;
+  readonly logPath: string;
+  /**
+   * R12: settles `{ok:false}` on every failure path (persist timeout, spawn
+   * rejection, cancellation/seal) — **never rejects** — and by construction
+   * within the 30s staged-persist budget. The tool's foreground path throws
+   * `error` verbatim; the background path simply keeps running it.
+   */
+  readonly started: Promise<StartedOutcome>;
+}
+
+export type StartedOutcome = { ok: true; job: CreatedJob } | { ok: false; error: Error };
+
+/**
+ * §2.3/§2.6 `manager.extend()`'s result: the synchronous in-memory
+ * adjudication plus the write-behind persistence handle the tool waits on for
+ * at most 2s (R7) before noting `persist pending`.
+ */
+export type ExtendJobOutcome =
+  { ok: true; record: JobRecord; persisted: Promise<unknown> } | { ok: false; reason: JobExtensionReason };
+
+/**
+ * The deadline-aware `BashJobManager` surface P4's tools program against
+ * (implemented by P3 in `src/bash/manager.ts`; frozen by the plan's §3.6/§2.3
+ * tables). Until P3 lands, `asDeadlineAware()` reports the real manager as
+ * *not* deadline-aware and both tools take their byte-identical legacy paths.
+ */
+export interface DeadlineAwareBashJobManager extends BashJobManager {
+  /** Sync. Throws on admission refusal (sealed run: `run is ending; no new bash jobs`). */
+  reserve(init: CreateJobInit & { timeoutMs?: Millis }): ReservedBashJob;
+  /** Sync; total over `staged(persisting)` / `staged(spawning)` / `running`. */
+  cancelReserve(jobId: JobId): void;
+  /** Sync memory write; persistence is write-behind through the store chain (R5/R10). */
+  markBackgroundedSync(jobId: JobId): void;
+  /**
+   * Sync adjudication (applyJobExtension) → re-armed timer → `onDeadline(extended)`.
+   * Throws `stale bash job manager` once the manager is disposed (R8).
+   */
+  extend(jobId: JobId, extendMs: Millis, reason?: string): ExtendJobOutcome;
+}
+
+/** Runtime capability check: does this manager implement the §3.6 surface? */
+export function asDeadlineAware(manager: BashJobManager): DeadlineAwareBashJobManager | undefined {
+  const candidate = manager as Partial<DeadlineAwareBashJobManager>;
+  return typeof candidate.reserve === "function" &&
+    typeof candidate.cancelReserve === "function" &&
+    typeof candidate.markBackgroundedSync === "function"
+    ? (candidate as DeadlineAwareBashJobManager)
+    : undefined;
+}
+
+// ── deadline surface settings (§5.2 switch) ────────────────────────────────
+
+/**
+ * The `bashJobs` deadline knobs the tool *surfaces* need (§2.6/§5.2). Absent
+ * (`deps.deadline` undefined) or disabled (`maxExtensions <= 0`, or
+ * `maxTimeoutFactor <= 1` = no headroom, D-6) ⇒ every surface is byte-identical
+ * to today's, which is what the golden fixture pins.
+ */
+export type BashDeadlineSurface = JobDeadlinePolicy;
+
+/**
+ * §3.6 `MARGIN_RETURN`: the child-session return budget subtracted from the
+ * host watchdog's due date. ≥ 2 watchdog ticks + 1s adjudication lag (E30);
+ * 1s of it is the tick-judgment reserve, the rest is the B-LOOP boundary for
+ * event-loop lag plus pi's post-tool hook chain (E26).
+ */
+export const MARGIN_RETURN_MS = 3_000;
 
 export interface BashToolDeps {
   /** Current session's job manager; `undefined` ⇒ pure pass-through to pi. */
   manager: () => BashJobManager | undefined;
   /** Auto-background threshold in ms; `0`/negative ⇒ pure pass-through. */
   autoBackgroundMs: () => number;
+  /**
+   * §3.6 child-session mode: the host run view providing `watchdogDueAt()`.
+   * Provided (even when it resolves to `undefined`) ⇒ this is a child session:
+   * R = min(now + autoBackgroundMs, D − MARGIN_RETURN_MS), background slots may
+   * be exceeded on auto-background (C2), and the R return does not wait for a
+   * pid (`pid starting`). Absent ⇒ main session: today's semantics exactly.
+   */
+  host?: () => HostRunView | undefined;
+  /**
+   * §3.6 static fallback when no host view is attached to this child session
+   * yet: the watchdog's tool-phase budget (settings `budget.toolS`, ms). Used
+   * as `D = callStart + toolBudgetMs`; a warn is emitted once per tool
+   * instance. Only consulted in child mode (`host` provided) and only when the
+   * view itself is absent (a view that answers `undefined` means "no D ⇒ no
+   * truncation").
+   */
+  toolBudgetMs?: () => number | undefined;
+  /**
+   * §2.6/§5.2 deadline switch for the description suffix. Absent or disabled ⇒
+   * the description is byte-identical to today's (golden fixture).
+   */
+  deadline?: () => BashDeadlineSurface | undefined;
+  /** Injectable clock (R/elapsed math); defaults to `Date.now`. */
+  now?: () => Millis;
   /** Diagnostics sink (defaults to `console.warn`, like the rest of the plugin). */
   warn?: (message: string) => void;
 }
@@ -122,6 +247,21 @@ export function formatAutoBackgroundText(jobId: JobId, elapsedMs: number, logPat
   );
 }
 
+/**
+ * §3.6 — the R return fired before the spawn completed: no pid exists yet, so
+ * the text says `pid starting` and the model is told how to watch it settle.
+ */
+export function formatAutoBackgroundTextStarting(jobId: JobId, elapsedMs: number, logPath: string): string {
+  return (
+    `Bash command is still running after ${formatDuration(elapsedMs)} and has been moved to the background ` +
+    `(job_id: ${jobId}, pid starting). The process was NOT killed — it is starting up and keeps running with ` +
+    `output captured to a log (${logPath}), and you will receive a completion notification when it finishes. ` +
+    `Do not block or poll for it now. Later: bash_job(action: "status", job_id: "${jobId}") for a summary plus ` +
+    `the log tail, or read that log path directly — it is a plain file, so the read tool and tail/grep/awk all ` +
+    `work (grep a large log rather than reading it whole). Stop it with bash_job(action: "kill", job_id: "${jobId}").`
+  );
+}
+
 /** §2.2 — the explicit `run_in_background: true` variant (no "still running after" prefix). */
 export function formatExplicitBackgroundText(jobId: JobId, pid: number, logPath: string): string {
   return (
@@ -130,6 +270,18 @@ export function formatExplicitBackgroundText(jobId: JobId, pid: number, logPath:
     `Do not block or poll for it now. Later: bash_job(action: "status", job_id: "${jobId}") for a summary plus the ` +
     `log tail, or read that log path directly — it is a plain file, so the read tool and tail/grep/awk all work ` +
     `(grep a large log rather than reading it whole). Stop it with bash_job(action: "kill", job_id: "${jobId}").`
+  );
+}
+
+/** §3.6 — the explicit `run_in_background: true` variant when the pid is not assigned yet. */
+export function formatExplicitBackgroundTextStarting(jobId: JobId, logPath: string): string {
+  return (
+    `Bash command started in the background (job_id: ${jobId}, pid starting). The process was NOT killed — ` +
+    `it is starting up, with output captured to a log (${logPath}), and you will receive a completion ` +
+    `notification when it finishes. Do not block or poll for it now. Later: bash_job(action: "status", ` +
+    `job_id: "${jobId}") for a summary plus the log tail, or read that log path directly — it is a plain file, ` +
+    `so the read tool and tail/grep/awk all work (grep a large log rather than reading it whole). Stop it with ` +
+    `bash_job(action: "kill", job_id: "${jobId}").`
   );
 }
 
@@ -174,6 +326,33 @@ export function formatDescriptionSuffix(autoBackgroundMs: number): string {
   );
 }
 
+/**
+ * §2.6/§5.2 — the deadline sentence appended to the bash description when the
+ * extend/grace feature is enabled. `""` when disabled
+ * (`maxExtensions <= 0` or `maxTimeoutFactor <= 1`), so the off-baseline
+ * description stays byte-identical to the golden fixture.
+ */
+export function formatDeadlineSuffix(surface: BashDeadlineSurface | undefined): string {
+  if (surface === undefined) return "";
+  if (surface.maxExtensions <= 0 || surface.maxTimeoutFactor <= 1) return "";
+  const budget = `at most ${surface.maxExtensions} extension${
+    surface.maxExtensions === 1 ? "" : "s"
+  }, total lifetime capped at ${surface.maxTimeoutFactor}x the original timeout`;
+  if (surface.graceMs > 0) {
+    return (
+      ` A backgrounded job whose explicit timeout has fired is not killed immediately: it first gets a ` +
+      `${formatDuration(surface.graceMs)} grace window (you are notified) — give it more time with ` +
+      `bash_job(action: "extend", job_id: "…", extend_s: 600) (${budget}), or do nothing and it is killed as ` +
+      `timed_out when the grace ends.`
+    );
+  }
+  return (
+    ` A backgrounded job whose explicit timeout has fired is killed at once (no grace window), but you can ` +
+    `push the deadline back before it fires with bash_job(action: "extend", job_id: "…", extend_s: 600) ` +
+    `(${budget}).`
+  );
+}
+
 interface InnerParams {
   command: string;
   timeout?: number;
@@ -181,12 +360,14 @@ interface InnerParams {
 
 /**
  * Per-call bookkeeping shared between the injected `exec` and the outer race.
- * `job` is only known once the spawn has succeeded — the background branches
- * both wait for it, so a `job_id` is never invented for a process that does
- * not exist (§2.2).
+ * With a deadline-aware manager, `reservation` is set the moment `reserve()`
+ * returns (synchronously, E33) so the outer race can hand the call back before
+ * any pid exists; `job` (the pid-bearing `CreatedJob`) follows once `started`
+ * settles `{ok:true}`.
  */
 interface CallState {
   job?: CreatedJob;
+  reservation?: ReservedBashJob;
   jobReady: Promise<CreatedJob | undefined>;
   resolveJobReady: (job: CreatedJob | undefined) => void;
 }
@@ -201,15 +382,20 @@ function createCallState(): CallState {
 
 export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashToolParams, BashOverrideDetails> {
   const warn = deps.warn ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
+  const now = deps.now ?? (() => Date.now());
   // §2.1: renderers do not depend on `operations`, so one stateless definition
   // (never executed) supplies the whole static surface and both renderers.
   const surface = createBashToolDefinition(process.cwd());
   const thresholdForDescription = safeThreshold(deps, warn);
+  const deadlineSurface = safeDeadlineSurface(deps, warn);
+  // §3.6: the static no-host-view fallback warns once per tool instance.
+  let warnedStaticDeadline = false;
 
   return {
     name: "bash",
     label: surface.label,
-    description: surface.description + formatDescriptionSuffix(thresholdForDescription),
+    description:
+      surface.description + formatDescriptionSuffix(thresholdForDescription) + formatDeadlineSuffix(deadlineSurface),
     ...(surface.promptSnippet !== undefined ? { promptSnippet: surface.promptSnippet } : {}),
     ...(surface.promptGuidelines !== undefined ? { promptGuidelines: [...surface.promptGuidelines] } : {}),
     parameters: BashToolParams,
@@ -231,18 +417,53 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
 
       // §3.8: an explicit background request over the cap is a config error the
       // model can correct — and it is raised *before* anything spawns, so no
-      // process is left dangling behind the rejection.
+      // process is left dangling behind the rejection. (§3.6: this is the only
+      // spawn path still bound by the cap — child-session auto-backgrounding
+      // may exceed it, C2.)
       if (params.run_in_background === true && !manager.hasBackgroundCapacity()) {
         throw capacityError(manager.maxBackgroundJobs);
       }
 
+      const childMode = deps.host !== undefined;
+      const view = childMode ? safeHostView(deps, warn) : undefined;
+
+      // ── §3.6 R computation ────────────────────────────────────────────────
+      // D = hostView.watchdogDueAt() (same source as the watchdog, E2). No
+      // view attached but a tool budget known ⇒ static D = start + toolBudget
+      // (warn once). A view that answers `undefined`, or neither present ⇒ no
+      // D ⇒ no truncation (today's semantics).
+      const startedAt = now();
+      let deadlineAt: number | undefined;
+      if (childMode) {
+        if (view !== undefined) deadlineAt = readWatchdogDue(view, warn);
+        else {
+          const budget = safeToolBudget(deps, warn);
+          if (budget > 0) {
+            deadlineAt = startedAt + budget;
+            if (!warnedStaticDeadline) {
+              warnedStaticDeadline = true;
+              warn(
+                `bash auto-background: no host view attached; using the static tool budget ` +
+                  `(${budget}ms) as the return deadline for this call`,
+              );
+            }
+          }
+        }
+      }
+      const rWaitMs =
+        deadlineAt === undefined
+          ? thresholdMs
+          : Math.min(thresholdMs, Math.max(0, deadlineAt - MARGIN_RETURN_MS - startedAt));
+
       const state = createCallState();
-      const startedAt = Date.now();
       let forwardAbort = true;
       let forwardUpdates = true;
       let listenerAttached = false;
       const relay = new AbortController();
       const onAbort = (): void => {
+        // §2.4: once the call has been handed back (latch taken) a caller
+        // abort must not reach the process; before that it is forwarded and
+        // the inner path kills/cancels exactly like the built-in tool.
         if (forwardAbort) relay.abort();
       };
       // Entering already aborted keeps the built-in semantics exactly: the
@@ -270,6 +491,14 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
           }
         : undefined;
 
+      // Deferred outer result: the latch callbacks below resolve/reject it.
+      let resolveOuter!: (result: OuterResult) => void;
+      let rejectOuter!: (error: unknown) => void;
+      const outer = new Promise<OuterResult>((resolve, reject) => {
+        resolveOuter = resolve;
+        rejectOuter = reject;
+      });
+
       let innerPromise: Promise<Awaited<ReturnType<typeof runInner>>>;
       try {
         innerPromise = runInner(inner, toolCallId, innerParams, relay.signal, gatedUpdate, ctx);
@@ -285,68 +514,182 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
         (error: unknown) => ({ ok: false as const, error }),
       );
 
-      // The background trigger: the pid for an explicit request, the threshold
-      // timer otherwise. Both resolve to "we may hand this call back now".
-      let thresholdTimer: ReturnType<typeof setTimeout> | undefined;
-      const trigger =
-        params.run_in_background === true
-          ? state.jobReady.then(() => undefined)
-          : new Promise<void>((resolve) => {
-              thresholdTimer = unrefTimer(setTimeout(resolve, thresholdMs));
-            });
-
-      try {
-        const raced = await Promise.race([settled, trigger.then(() => "trigger" as const)]);
-        if (raced !== "trigger") {
-          // Short-command path: pi's own resolve/reject, verbatim (§2.3 T1).
-          stopForwarding();
-          if (raced.ok) return raced.result;
-          throw raced.error;
+      // ── §3.6 single atomic adjudication (the latch) ───────────────────────
+      // Both flags are only ever assigned inside synchronous callback
+      // prologues (settled.then / R timer / abort→relay paths all funnel into
+      // one of these), so a same-tick arrival has exactly one winner.
+      let backgrounded = false;
+      let foregroundDone = false;
+      let capacityNote = false;
+      let rTimer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = (): void => {
+        stopForwarding();
+        if (rTimer !== undefined) {
+          clearTimeout(rTimer);
+          rTimer = undefined;
         }
+      };
 
-        const job = state.job ?? (await Promise.race([state.jobReady, settled.then(() => undefined)]));
-        if (!job) {
-          // The spawn has not (or will never) produce a pid — there is no job
-          // to hand over, so keep waiting for the inner result.
-          stopForwarding();
-          return await finishForeground(settled);
-        }
-        if (!manager.hasBackgroundCapacity()) {
-          // §3.8: refuse to background, keep the foreground wait, tell the model why.
+      const deliverForeground = (outcome: Settled): void => {
+        if (backgrounded || foregroundDone) return;
+        foregroundDone = true;
+        cleanup();
+        if (outcome.ok) {
+          resolveOuter(capacityNote ? appendCapacityNote(outcome.result, manager.maxBackgroundJobs) : outcome.result);
+        } else rejectOuter(outcome.error);
+      };
+      settled.then(deliverForeground);
+
+      const deliverSettledOutcome = (outcome: Settled): void => {
+        if (outcome.ok) {
+          resolveOuter(capacityNote ? appendCapacityNote(outcome.result, manager.maxBackgroundJobs) : outcome.result);
+        } else rejectOuter(outcome.error);
+      };
+
+      const takeBackground = (): void => {
+        if (backgrounded || foregroundDone) return;
+        // §3.8: a main-session threshold hit against a full table stays in the
+        // foreground (with the capacity note). Child sessions convert anyway
+        // (§3.6 C2: only run_in_background spawns are bound by the cap).
+        if (!childMode && !manager.hasBackgroundCapacity()) {
           warn(
-            `bash job ${job.jobId} stayed in the foreground: all ${manager.maxBackgroundJobs} background slots are in use`,
+            `bash job ${state.reservation?.jobId ?? state.job?.jobId ?? "(pending)"} stayed in the foreground: ` +
+              `all ${manager.maxBackgroundJobs} background slots are in use`,
           );
-          const result = await finishForeground(settled);
-          return appendCapacityNote(result, manager.maxBackgroundJobs);
+          capacityNote = true;
+          return; // the trigger is spent; settled will deliver the foreground outcome
+        }
+        // The latch is taken NOW, at trigger time — a command settling while
+        // we still wait for its pid must not steal the call back into the
+        // foreground (today's race resolved the same way).
+        backgrounded = true;
+        cleanup();
+        forwardUpdates = false;
+        // §3.6 boundary telemetry: a child session reports the instant control
+        // returns at R (the host correlates it against this toolCallId's
+        // tool_end to measure return lag). Only the child-mode R return is a
+        // deadline race — foreground and main-session returns are not.
+        if (childMode && view !== undefined) {
+          try {
+            view.noteToolReturn(toolCallId, now());
+          } catch {
+            /* telemetry must never break the return path */
+          }
         }
 
-        // ── hand the call back; the process lives on (§1 Z2) ────────────────
-        forwardUpdates = false;
-        stopForwarding();
-        await manager.markBackgrounded(job.jobId);
-        adoptInnerPromise(manager, job.jobId, settled, warn);
+        const deadlineManager = asDeadlineAware(manager);
         const autoBackgrounded = params.run_in_background !== true;
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: autoBackgrounded
-                ? formatAutoBackgroundText(job.jobId, Date.now() - startedAt, job.logPath)
-                : formatExplicitBackgroundText(job.jobId, job.pid, job.logPath),
-            },
-          ],
-          details: {
-            jobId: job.jobId,
-            background: true,
-            ...(autoBackgrounded ? { autoBackgrounded: true as const } : {}),
-            pid: job.pid,
-            logPath: job.logPath,
-          } satisfies BashBackgroundDetails,
+        const elapsedMs = now() - startedAt;
+
+        // §3.6/P4 acceptance: the background branch never awaits markBackgrounded
+        // for a deadline-aware manager — the sync memory write is enough to hand
+        // the call back, persistence is write-behind. The legacy manager (P3
+        // not merged) keeps today's awaited patch so the record is marked by
+        // the time the caller observes the return.
+        const handOff = (jobId: JobId): Promise<void> => {
+          if (deadlineManager) {
+            deadlineManager.markBackgroundedSync(jobId);
+            return Promise.resolve();
+          }
+          return manager.markBackgrounded(jobId).then(
+            () => undefined,
+            () => undefined,
+          );
         };
-      } finally {
-        stopForwarding();
-        if (thresholdTimer !== undefined) clearTimeout(thresholdTimer);
+
+        const finishWithJob = (known: CreatedJob, handoff: Promise<void>): void => {
+          void handoff.then(() =>
+            resolveOuter({
+              content: [
+                {
+                  type: "text" as const,
+                  text: autoBackgrounded
+                    ? formatAutoBackgroundText(known.jobId, elapsedMs, known.logPath)
+                    : formatExplicitBackgroundText(known.jobId, known.pid, known.logPath),
+                },
+              ],
+              details: {
+                jobId: known.jobId,
+                background: true,
+                ...(autoBackgrounded ? { autoBackgrounded: true as const } : {}),
+                pid: known.pid,
+                logPath: known.logPath,
+              } satisfies BashBackgroundDetails,
+            }),
+          );
+        };
+
+        if (state.job !== undefined) {
+          // The pid is already known: hand the call back right here.
+          const job = state.job;
+          adoptInnerPromise(manager, job.jobId, settled, warn);
+          finishWithJob(job, handOff(job.jobId));
+          return;
+        }
+        if (childMode && state.reservation !== undefined) {
+          // §3.6: the spawn has not produced a pid yet — return now, the job
+          // finishes starting up in the background (`pid starting`).
+          const reservation = state.reservation;
+          adoptInnerPromise(manager, reservation.jobId, settled, warn);
+          void handOff(reservation.jobId).then(() =>
+            resolveOuter({
+              content: [
+                {
+                  type: "text" as const,
+                  text: autoBackgrounded
+                    ? formatAutoBackgroundTextStarting(reservation.jobId, elapsedMs, reservation.logPath)
+                    : formatExplicitBackgroundTextStarting(reservation.jobId, reservation.logPath),
+                },
+              ],
+              details: {
+                jobId: reservation.jobId,
+                background: true,
+                ...(autoBackgrounded ? { autoBackgrounded: true as const } : {}),
+                logPath: reservation.logPath,
+              } satisfies BashBackgroundDetails,
+            }),
+          );
+          return;
+        }
+
+        // Main session (or a reservation that never happened — the inner call
+        // is already settling): today's semantics — wait for the pid (bounded
+        // by started's R12 budget) or for the inner result if the spawn never
+        // completes.
+        void (async () => {
+          try {
+            const awaited = await Promise.race([state.jobReady, settled.then(() => undefined)]);
+            if (awaited !== undefined) {
+              adoptInnerPromise(manager, awaited.jobId, settled, warn);
+              finishWithJob(awaited, handOff(awaited.jobId));
+            } else deliverSettledOutcome(await settled);
+          } catch (error) {
+            rejectOuter(error);
+          }
+        })();
+      };
+
+      // Arm the background triggers.
+      if (params.run_in_background === true) {
+        if (childMode) {
+          // §3.6 ③: reserve has already returned (E33 — pi's execute reaches
+          // ops.exec with no prior await), so the latch fires right here.
+          takeBackground();
+        } else {
+          // §2.2: today's semantics — wait for the pid before handing back.
+          void state.jobReady.then(() => takeBackground());
+        }
+      } else if (rWaitMs <= 0) {
+        // §3.6 "R ≤ now" (e.g. toolMs ≤ MARGIN_RETURN): return at once,
+        // without waiting for a pid.
+        takeBackground();
+      } else {
+        // The R timer. At trigger time there is nothing to re-read: the only
+        // decision left is "hand the call back now", which is what happens.
+        rTimer = unrefTimer(setTimeout(takeBackground, rWaitMs));
       }
+
+      return outer;
     },
 
     renderCall(args, theme, context) {
@@ -365,6 +708,9 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
 
 type InnerDefinition = ReturnType<typeof createBashToolDefinition>;
 type InnerResult = Awaited<ReturnType<InnerDefinition["execute"]>>;
+/** The background hand-back result (§2.2/§3.6) — pi's renderer shows it as plain text. */
+type BackgroundResult = { content: { type: "text"; text: string }[]; details: BashBackgroundDetails };
+type OuterResult = InnerResult | BackgroundResult;
 
 function runInner(
   definition: InnerDefinition,
@@ -378,12 +724,6 @@ function runInner(
 }
 
 type Settled = { ok: true; result: InnerResult } | { ok: false; error: unknown };
-
-async function finishForeground(settled: Promise<Settled>): Promise<InnerResult> {
-  const outcome = await settled;
-  if (outcome.ok) return outcome.result;
-  throw outcome.error;
-}
 
 /** §3.8 foreground fallback: annotate the successful result, never the rejection. */
 function appendCapacityNote(result: InnerResult, maxBackgroundJobs: number): InnerResult {
@@ -439,6 +779,13 @@ function errorText(error: unknown): string {
  * spawning, abort kills the tree and throws `"aborted"`, an expired `timeout`
  * kills the tree and throws `timeout:<s>`, otherwise the exit code is
  * returned (`null` when signalled).
+ *
+ * §3.6 (deadline-aware manager): the local timeout timer is gone — the
+ * `timeoutMs` travels to the manager inside `reserve()` and the deadline
+ * (foreground kill / grace / extend) is adjudicated there; this layer only
+ * translates a `timed_out` exit record back into pi's `timeout:<s>` error so
+ * the foreground text stays byte-identical. Abort at either await ⇒ sync
+ * `cancelReserve` + `aborted`.
  */
 async function execViaManager(
   manager: BashJobManager,
@@ -458,6 +805,94 @@ async function execViaManager(
     throw new Error("aborted");
   }
 
+  const deadlineManager = asDeadlineAware(manager);
+  if (deadlineManager) return execViaReserve(deadlineManager, state, command, cwd, options, timeoutMs);
+  return execViaCreate(manager, state, command, cwd, options, timeoutMs);
+}
+
+/** §3.6 inner layer over `reserve()` / `started` / `job.exit`. */
+async function execViaReserve(
+  manager: DeadlineAwareBashJobManager,
+  state: CallState,
+  command: string,
+  cwd: string,
+  options: {
+    onData: (data: Buffer) => void;
+    signal?: AbortSignal;
+    timeout?: number;
+    env?: NodeJS.ProcessEnv;
+  },
+  timeoutMs: number | undefined,
+): Promise<{ exitCode: number | null }> {
+  let reservation: ReservedBashJob;
+  try {
+    reservation = manager.reserve({
+      command,
+      cwd,
+      ...(options.env !== undefined ? { env: options.env } : {}),
+      onData: (chunk) => options.onData(Buffer.from(chunk, "utf8")),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    });
+  } catch (error) {
+    state.resolveJobReady(undefined);
+    throw error;
+  }
+  state.reservation = reservation;
+  // jobReady (the pid-bearing job) follows started; `{ok:false}` resolves it
+  // undefined so the outer layer falls back to the inner result.
+  void reservation.started.then(
+    (outcome) => {
+      if (outcome.ok) {
+        state.job = outcome.job;
+        state.resolveJobReady(outcome.job);
+      } else state.resolveJobReady(undefined);
+    },
+    () => state.resolveJobReady(undefined), // defensive: started never rejects (R12)
+  );
+
+  // Abort ⇒ synchronously cancel (all three staged/running substates, §3.6)
+  // and surface pi's own `aborted` error without waiting for the exit.
+  let onAbortReserve: (() => void) | undefined = undefined;
+  const abortSignal = new Promise<never>((_resolve, reject) => {
+    onAbortReserve = () => reject(new Error("aborted"));
+  });
+  // The rejection must never become an unhandledRejection when nobody is
+  // racing it anymore.
+  void abortSignal.catch(() => undefined);
+  const handleAbort = (): void => {
+    manager.cancelReserve(reservation.jobId);
+    onAbortReserve?.();
+  };
+  try {
+    if (options.signal) {
+      if (options.signal.aborted) handleAbort();
+      else options.signal.addEventListener("abort", handleAbort, { once: true });
+    }
+    const started = await Promise.race([reservation.started, abortSignal]);
+    if (!started.ok) throw started.error;
+    const record = await Promise.race([started.job.exit, abortSignal]);
+    if (options.signal?.aborted) throw new Error("aborted");
+    if (record.status === "timed_out") throw new Error(`timeout:${options.timeout}`);
+    return { exitCode: record.exitCode };
+  } finally {
+    if (options.signal) options.signal.removeEventListener("abort", handleAbort);
+  }
+}
+
+/** Today's path over `manager.create()` — unchanged, used until P3 lands. */
+async function execViaCreate(
+  manager: BashJobManager,
+  state: CallState,
+  command: string,
+  cwd: string,
+  options: {
+    onData: (data: Buffer) => void;
+    signal?: AbortSignal;
+    timeout?: number;
+    env?: NodeJS.ProcessEnv;
+  },
+  timeoutMs: number | undefined,
+): Promise<{ exitCode: number | null }> {
   let job: CreatedJob;
   try {
     job = await manager.create({
@@ -513,5 +948,46 @@ function safeThreshold(deps: BashToolDeps, warn: (message: string) => void): num
   } catch (error) {
     warn(`bash auto-background threshold unavailable (feature disabled for this call): ${String(error)}`);
     return 0;
+  }
+}
+
+function safeDeadlineSurface(deps: BashToolDeps, warn: (message: string) => void): BashDeadlineSurface | undefined {
+  if (deps.deadline === undefined) return undefined;
+  try {
+    return deps.deadline();
+  } catch (error) {
+    warn(`bash deadline settings unavailable (surface suffix omitted): ${String(error)}`);
+    return undefined;
+  }
+}
+
+function safeToolBudget(deps: BashToolDeps, warn: (message: string) => void): number {
+  if (deps.toolBudgetMs === undefined) return 0;
+  try {
+    const value = deps.toolBudgetMs();
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+  } catch (error) {
+    warn(`bash tool budget unavailable (no static return deadline): ${String(error)}`);
+    return 0;
+  }
+}
+
+function readWatchdogDue(view: HostRunView, warn: (message: string) => void): number | undefined {
+  try {
+    const value = view.watchdogDueAt();
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+    return value;
+  } catch (error) {
+    warn(`bash host watchdog view unavailable (no return deadline truncation): ${String(error)}`);
+    return undefined;
+  }
+}
+
+function safeHostView(deps: BashToolDeps, warn: (message: string) => void): HostRunView | undefined {
+  try {
+    return deps.host?.();
+  } catch (error) {
+    warn(`bash host view unavailable (treating as unattached): ${String(error)}`);
+    return undefined;
   }
 }
