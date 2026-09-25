@@ -1,21 +1,46 @@
 /**
- * hub composition root (plan §包 B). Wires singleton → registry → history →
- * agent server → injected HTTP frontend (never imports http.ts: package C is
- * passed in as a `FrontendFactory`), then writes hub.json atomically once the
- * socket and HTTP both listen. `close()` is idempotent and bounded.
+ * hub composition root (plan §1.4.2 / §1.3.3 / §3.1 — frozen interface, S1-W1
+ * 接口包). Wires singleton → registry → history → agent server → injected
+ * HTTP frontend (never imports http.ts: package C is passed in as a
+ * `FrontendFactory`), then writes hub.json atomically once the socket and
+ * HTTP both listen. `close()` is idempotent and bounded.
+ *
+ * Startup cancellation chain (§3.1): a single `AbortController` (`startup`)
+ * covers steps ①–⑦; `HUB_START_DEADLINE_MS` aborts it. Every step is wrapped
+ * in `withSignal` so `startHub` itself always settles within the deadline
+ * regardless of how slow an individual step (or an injected test double) is;
+ * each step is independently responsible for noticing the abort once its own
+ * work eventually completes and cleaning up after itself (`acquireSingleton`'s
+ * `SingletonDeps.signal`, `HttpFrontend.listen`'s `opts.signal`). On any
+ * failure — including the deadline — already-created resources are released
+ * in reverse order via `cleanup`, then `rootScope.dispose()` runs before the
+ * error is (re-)thrown.
  *
  * The listening socket server stays ref'd (the hub is meant to live until the
  * idle monitor fires); every timer here is unref'd.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { ensurePrivateDir, resolveHubPaths, type HubPaths } from "../protocol/paths.js";
+import { readFileSync } from "node:fs";
+import type { LanStatus } from "../protocol/lan.js";
+import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
 import { PROTO } from "../protocol/version.js";
 import { createAgentServer } from "./agent-server.js";
 import { createHistoryService } from "./history.js";
+import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
+import { withDeadline, withSignal, createScope, type Scope } from "./lifecycle.js";
 import { createHubLog } from "./log.js";
-import type { FrontendFactory, HttpFrontend, HubConfig, HubInfo, HubLog } from "./ports.js";
+import { defaultLanAssembly } from "./lan-assembly.js";
+import type {
+  FrontendFactory,
+  HttpFrontend,
+  HubConfig,
+  HubInfo,
+  HubLog,
+  LanAssembly,
+  LanFrontendDeps,
+} from "./ports.js";
+import type { FsDeps } from "../protocol/paths.js";
 import { createRegistry } from "./registry.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 
@@ -23,54 +48,103 @@ export interface RunningHub {
   paths: HubPaths;
   httpPort: number;
   info: HubInfo;
+  identity: SocketIdentity;
+  lan?: import("./ports.js").LanFacade;
+  lanStatus(): LanStatus | undefined;
   close(reason: string): Promise<void>;
   readonly closed: Promise<string>;
 }
 
 export const REGISTRY_TICK_MS = 5_000;
+/** Overall startup cancellation budget (§3.1); a single `AbortController` covers steps ①–⑦. */
+export const HUB_START_DEADLINE_MS = 20_000;
+/** Overall shutdown budget (§3.1); individual steps still use the smaller `STEP_DEADLINE_MS`. */
+export const HUB_CLOSE_DEADLINE_MS = 10_000;
+/** Per-step bound for cleanup/close steps; kept separate from the crash-only hard exit in `installProcessHandlers`. */
 const STEP_DEADLINE_MS = 3_000;
+
+export interface StartHubDeps {
+  now?: () => number;
+  uid?: number;
+  xdgRuntimeDir?: string;
+  fs?: Partial<FsDeps> | undefined;
+  /** Default: `defaultLanAssembly` (throws `E_NOT_IMPLEMENTED:LD` — W1 stub). */
+  lanAssembly?: LanAssembly;
+  /** Set by `main.ts` when `parseHubLanConfig` rejects `config.lan`; mutually exclusive with `config.lan`. */
+  lanConfigError?: { detail: string };
+}
 
 export async function startHub(
   config: HubConfig,
   frontend: FrontendFactory,
-  deps?: { now?: () => number; uid?: number; xdgRuntimeDir?: string },
+  deps: StartHubDeps = {},
 ): Promise<RunningHub | { exists: true }> {
-  const now = deps?.now ?? Date.now;
+  if (config.lan !== undefined && deps.lanConfigError !== undefined) {
+    throw new Error("web-hub: startHub received both config.lan and deps.lanConfigError");
+  }
+  const now = deps.now ?? Date.now;
+  const startup = new AbortController(); // ① startup scope: the sole cancellation source
+  const startTimer = setTimeout(() => startup.abort(new Error("web-hub: start timeout")), HUB_START_DEADLINE_MS);
+  startTimer.unref();
   const paths = resolveHubPaths({
     home: config.home,
-    uid: deps?.uid ?? process.getuid?.() ?? 0,
-    xdgRuntimeDir: deps?.xdgRuntimeDir ?? process.env["XDG_RUNTIME_DIR"],
+    uid: deps.uid ?? process.getuid?.() ?? 0,
+    xdgRuntimeDir: deps.xdgRuntimeDir ?? process.env["XDG_RUNTIME_DIR"],
   });
-  ensurePrivateDir(paths.stateDir);
   const log = createHubLog(paths.logFile);
+  const rootScope: Scope = createScope({ log, now }); // ③ hub-lifetime scope
+  const cleanup: Array<() => Promise<void>> = []; // executed in reverse on failure, each bounded
 
-  const single = await acquireSingleton(paths, { now });
-  if (single.kind === "exists") {
-    log.info("hub already running", single.hubPid === undefined ? {} : { hubPid: single.hubPid });
-    log.close();
-    return { exists: true };
-  }
-  if (single.kind === "failed") {
-    log.error("singleton acquisition failed", { error: single.error });
-    log.close();
-    throw new Error(`web-hub: ${single.error}`);
-  }
-
-  const registry = createRegistry({ now, log, hubVersion: config.pluginVersion });
-  const history = createHistoryService({ registry, log });
-  let httpPort = 0;
-  const agentServer = createAgentServer(single.server, { registry, config, log, now, httpPort: () => httpPort });
-  const info: HubInfo = {
-    version: config.pluginVersion,
-    buildId: config.buildId,
-    pid: process.pid,
-    startedAt: now(),
-    proto: PROTO,
-  };
-
-  let fe: HttpFrontend | undefined;
   try {
-    fe = frontend({
+    await withSignal(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, deps.fs), startup.signal); // ②
+
+    const single = await withSignal(
+      acquireSingleton(paths, { now, fs: deps.fs, signal: startup.signal }), // ④
+      startup.signal,
+    );
+    if (single.kind === "exists") {
+      clearTimeout(startTimer);
+      log.info("hub already running", single.hubPid === undefined ? {} : { hubPid: single.hubPid });
+      log.close();
+      await rootScope.dispose();
+      return { exists: true };
+    }
+    if (single.kind === "failed") throw new Error(`web-hub: ${single.error}`);
+    const owner = single; // narrow once here; closures defined below (e.g. `close`) don't retain flow narrowing
+    cleanup.push(() => owner.release());
+
+    const registry = createRegistry({ now, log, hubVersion: config.pluginVersion });
+    const history = createHistoryService({ registry, log });
+    cleanup.push(async () => history.dispose());
+    let httpPort = 0;
+    const agentServer = createAgentServer(owner.server, { registry, config, log, now, httpPort: () => httpPort });
+    cleanup.push(() => agentServer.close());
+
+    const info: HubInfo = {
+      version: config.pluginVersion,
+      buildId: config.buildId,
+      pid: process.pid,
+      startedAt: now(),
+      proto: PROTO,
+    };
+    const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
+
+    let lanDeps: LanFrontendDeps | undefined;
+    if (config.lan !== undefined) {
+      lanDeps = await withSignal(
+        (deps.lanAssembly ?? defaultLanAssembly).build({
+          cfg: config.lan,
+          paths,
+          log,
+          now,
+          scope: rootScope.child(),
+          onStatus: (s) => hubJson.patchLan(s),
+        }), // ⑤
+        startup.signal,
+      );
+    }
+
+    const fe = frontend({
       config,
       paths,
       registry,
@@ -79,90 +153,116 @@ export async function startHub(
       log,
       info: () => info,
       now,
+      ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
-    httpPort = (await fe.listen()).port;
-  } catch (err) {
-    log.error("http frontend failed to start", { error: String(err) });
-    if (fe !== undefined) await bounded(fe.close());
-    history.dispose();
-    await bounded(agentServer.close());
-    await single.release();
-    log.close();
-    throw err instanceof Error ? err : new Error(String(err));
-  }
-  const frontendRef = fe;
+    cleanup.push(() => fe.close());
 
-  const nonce = randomBytes(12).toString("base64url");
-  try {
-    writeHubJson(paths.hubJson, {
+    httpPort = (await withSignal(fe.listen({ signal: startup.signal }), startup.signal)).port; // ⑥
+
+    const initialLan: LanStatus | undefined =
+      deps.lanConfigError !== undefined
+        ? { state: "off", reason: "bad-config", detail: deps.lanConfigError.detail }
+        : fe.lan !== undefined
+          ? { state: "starting" }
+          : undefined;
+    hubJson.write({
       pid: process.pid,
-      nonce,
+      nonce: randomBytes(12).toString("base64url"),
       version: config.pluginVersion,
       buildId: config.buildId,
       proto: PROTO,
       socket: paths.socketPath,
       port: httpPort,
       startedAt: info.startedAt,
-    });
-  } catch (err) {
-    log.error("hub.json write failed", { error: String(err) });
-  }
-  log.info("hub started", { pid: process.pid, port: httpPort, socket: paths.socketPath, version: info.version });
+      ...identityFields(),
+      ...(initialLan === undefined ? {} : { lan: initialLan }),
+    }); // ⑦
 
-  let resolveClosed!: (reason: string) => void;
-  const closed = new Promise<string>((resolve) => {
-    resolveClosed = resolve;
-  });
-  let closing: Promise<void> | undefined;
-
-  const tick = setInterval(() => {
-    try {
-      registry.tick(now());
-    } catch (err) {
-      log.error("registry tick threw", { error: String(err) });
+    clearTimeout(startTimer); // startup complete; further cancellation is close()'s job
+    if (fe.lan !== undefined) {
+      void fe.lan.start().then(
+        (s) => hubJson.patchLan(s),
+        (err: unknown) => hubJson.patchLan({ state: "off", reason: "timeout", detail: String(err) }),
+      );
     }
-  }, REGISTRY_TICK_MS);
-  tick.unref();
 
-  const stopFence = startFence(paths.socketPath, single.inode, () => {
-    log.warn("socket fence lost: another hub owns the socket path");
-    void close("fence");
-  });
+    log.info("hub started", { pid: process.pid, port: httpPort, socket: paths.socketPath, version: info.version });
 
-  const idle = createIdleMonitor({
-    counts: () => ({
-      agents: Math.max(agentServer.connectionCount(), registry.list().length),
-      sse: frontendRef.clientCount(),
-      headless: 0,
-    }),
-    idleMs: Math.max(1, config.idleExitMinutes) * 60_000,
-    now,
-    onIdle: () => {
-      log.info("idle timeout reached");
-      void close("idle");
-    },
-  });
+    let resolveClosed!: (reason: string) => void;
+    const closed = new Promise<string>((resolve) => {
+      resolveClosed = resolve;
+    });
+    let closing: Promise<void> | undefined;
 
-  function close(reason: string): Promise<void> {
-    if (closing !== undefined) return closing;
-    closing = (async () => {
-      log.info("hub closing", { reason });
-      idle.stop();
-      stopFence();
-      clearInterval(tick);
-      history.dispose();
-      await bounded(frontendRef.close());
-      await bounded(agentServer.close());
-      await bounded(single.kind === "owner" ? single.release() : Promise.resolve());
-      removeHubJsonIfOurs(paths.hubJson);
-      log.info("hub closed", { reason });
-      log.close();
-      resolveClosed(reason);
-    })();
-    return closing;
+    const tick = setInterval(() => {
+      try {
+        registry.tick(now());
+      } catch (err) {
+        log.error("registry tick threw", { error: String(err) });
+      }
+    }, REGISTRY_TICK_MS);
+    tick.unref();
+
+    const stopFence = startFence(paths.socketPath, owner.identity, (why) => {
+      log.warn("socket fence lost: another hub owns the socket path", { why });
+      void close("fence");
+    });
+
+    const idle = createIdleMonitor({
+      counts: () => ({
+        agents: Math.max(agentServer.connectionCount(), registry.list().length),
+        sse: fe.clientCount(),
+        headless: 0,
+      }),
+      idleMs: Math.max(1, config.idleExitMinutes) * 60_000,
+      now,
+      onIdle: () => {
+        log.info("idle timeout reached");
+        void close("idle");
+      },
+    });
+
+    function close(reason: string): Promise<void> {
+      if (closing !== undefined) return closing;
+      const inner = (async (): Promise<void> => {
+        log.info("hub closing", { reason });
+        stopFence();
+        idle.stop();
+        clearInterval(tick);
+        await bounded(fe.close());
+        history.dispose();
+        await bounded(agentServer.close());
+        await bounded(rootScope.dispose());
+        await bounded(owner.release());
+        hubJson.removeIfOurs();
+        log.info("hub closed", { reason });
+        log.close();
+        resolveClosed(reason);
+      })();
+      closing = withDeadline(inner, HUB_CLOSE_DEADLINE_MS).catch((err: unknown) => {
+        log.error("web-hub: hub close exceeded deadline", { error: String(err) });
+        process.exit(1);
+      });
+      return closing;
+    }
+
+    return {
+      paths,
+      httpPort,
+      info,
+      identity: owner.identity,
+      ...(fe.lan === undefined ? {} : { lan: fe.lan }),
+      lanStatus: () => hubJson.current()?.lan,
+      close,
+      closed,
+    };
+  } catch (err) {
+    clearTimeout(startTimer);
+    for (const step of cleanup.reverse()) await bounded(step()); // ⑧ reverse-order release of created resources
+    await bounded(rootScope.dispose());
+    log.close();
+    throw err instanceof Error ? err : new Error(String(err));
   }
-
-  return { paths, httpPort, info, close, closed };
 }
 
 /**
@@ -177,6 +277,8 @@ export function installProcessHandlers(hub: RunningHub, log: HubLog): () => void
   };
   const onCrash = (err: unknown): void => {
     log.error("uncaught exception", { error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
+    // Crash-only hard exit stays at 3s (not unified with HUB_CLOSE_DEADLINE_MS, plan v8 §15.7 #6):
+    // process state is untrusted after an uncaughtException, so a fast respawn beats a full cleanup.
     const force = setTimeout(() => process.exit(1), STEP_DEADLINE_MS);
     force.unref();
     void hub.close("crash").finally(() => process.exit(1));
@@ -200,19 +302,24 @@ export function installProcessHandlers(hub: RunningHub, log: HubLog): () => void
 // helpers
 // ---------------------------------------------------------------------------
 
-function writeHubJson(file: string, content: object): void {
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(content, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, file);
-}
-
-function removeHubJsonIfOurs(file: string): void {
+/** Linux: field 22 (1-indexed) of `/proc/self/stat`; other platforms return `{}` (no identity fields). */
+function identityFields(): Pick<HubRecord, "procStartTicks" | "argv"> {
+  if (process.platform !== "linux") return {};
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown };
-    if (parsed.pid === process.pid) unlinkSync(file);
+    const stat = readFileSync("/proc/self/stat", "utf8");
+    const afterComm = stat
+      .slice(stat.lastIndexOf(")") + 1)
+      .trim()
+      .split(/\s+/);
+    // Fields after `pid (comm)`: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5) flags(6)
+    // minflt(7) cminflt(8) majflt(9) cmajflt(10) utime(11) stime(12) cutime(13) cstime(14)
+    // priority(15) nice(16) num_threads(17) itrealvalue(18) starttime(19) — field 22 overall.
+    const raw = afterComm[19];
+    const procStartTicks = raw === undefined ? NaN : Number(raw);
+    if (!Number.isFinite(procStartTicks)) return {};
+    return { procStartTicks, argv: process.argv.slice() };
   } catch {
-    // missing / foreign / corrupt: leave it
+    return {};
   }
 }
 

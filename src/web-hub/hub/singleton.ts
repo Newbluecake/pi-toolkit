@@ -1,5 +1,6 @@
 /**
- * hub single-instance guard (plan §包 B, arch §3.3 三步).
+ * hub single-instance guard (plan §1.3.2 / §1.3.3 — frozen interface, S1-W1
+ * 接口包).
  *
  * ⓪ Linux only — instance guard: `listen("\0pi-webhub-<uid>-<hash(stateDir)>")`,
  *    an abstract-namespace unix socket held for the hub's whole lifetime. The
@@ -17,43 +18,59 @@
  *    (connect success = alive — no `hello` is sent, so the live hub never
  *    registers a dirty record); only ECONNREFUSED/ENOENT count as dead (EAGAIN
  *    = backlog full = a wedged but live hub) ⇒ unlink + listen once more.
+ *    Once bound, `identity` (dev/ino of the socket + its containing dir) is
+ *    captured via a minimal `lstat`-only helper — W1 does *not* call the
+ *    exported `verifyBoundSocket` (that stub enforces symlink/owner checks,
+ *    LP's job; see `protocol/paths.ts`).
  * ③ The lock is released as soon as the socket is bound: from then on the
  *    bound socket itself is the mutual-exclusion token (later starters hit
  *    EADDRINUSE and their probe succeeds). hub.json is written by `hub.ts`.
  *
- * Fence: `startFence` compares `stat(sock).ino` with the inode recorded at
- * listen time; a mismatch or a vanished path ⇒ `onLost()`.
+ * Cancellation (`SingletonDeps.signal`, §3.1's `startup` scope): every
+ * internal await is raced against the signal via `withSignal` (a genuinely
+ * hung fs call — as injected by `startup-cancel.test.ts` — must still let
+ * `acquireSingleton` return promptly once the deadline fires); a late bind
+ * that only notices the abort *after* it already owns the socket closes the
+ * server (which unlinks the still-ours path via libuv) before returning
+ * `{kind:"failed", reason:"aborted"}`.
+ *
+ * Fence: `startFence` compares a fresh `lstat` against the identity recorded
+ * at bind time; `fenceLossOf` classifies the mismatch/error into a `FenceLoss`
+ * (§1.3.2) — `"io"` (timeout or an unclassified error) only fires `onLost`
+ * after `ioStrikes` consecutive occurrences, everything else fires once,
+ * immediately.
  */
 import { createHash } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeSync,
-} from "node:fs";
-import { stat } from "node:fs/promises";
+import { closeSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { chmod, lstat } from "node:fs/promises";
 import net from "node:net";
 import { dirname } from "node:path";
-import { ensurePrivateDir, type HubPaths } from "../protocol/paths.js";
+import {
+  PrivateDirError,
+  ensurePrivateDir,
+  type FsDeps,
+  type HubPaths,
+  type PrivateDirReason,
+  type SocketIdentity,
+} from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
+import { withDeadline, withSignal } from "./lifecycle.js";
 
 export { pidAlive } from "../protocol/pid.js";
 
 export type SingletonResult =
-  | { kind: "owner"; server: import("node:net").Server; inode: number; release(): Promise<void> } // release: close + unlink sock（inode 仍是自己时）
+  | { kind: "owner"; server: import("node:net").Server; identity: SocketIdentity; release(): Promise<void> }
   | { kind: "exists"; hubPid?: number }
-  | { kind: "failed"; error: string };
+  | { kind: "failed"; error: string; reason?: PrivateDirReason | "socket-verify" | "listen" | "lock" | "aborted" };
 
 export const DEFAULT_PROBE_MS = 500;
 export const DEFAULT_LOCK_STALE_MS = 10_000;
 export const DEFAULT_FENCE_MS = 30_000;
 /** First fence check comes early: a path removed right after startup must not leave the hub unreachable for 30s. */
 export const DEFAULT_FENCE_FIRST_MS = 2_000;
+/** Single fence check's own upper bound (§3.1); 3 consecutive timeouts before `onLost("io")` fires. */
+export const DEFAULT_FENCE_CHECK_DEADLINE_MS = 5_000;
+export const DEFAULT_FENCE_IO_STRIKES = 3;
 const RELEASE_DEADLINE_MS = 2_000;
 
 export interface SingletonDeps {
@@ -65,18 +82,33 @@ export interface SingletonDeps {
    * Linux, `undefined` elsewhere). `null` disables the guard (tests of the ①–③ fallback).
    */
   guardName?: string | null;
+  /** fs.promises overrides for the post-bind `identity` lstat/chmod (testing only). */
+  fs?: Partial<FsDeps> | undefined;
+  /** `startHub`'s `startup` scope (§3.1); a late bind self-cleans once it notices abort. */
+  signal?: AbortSignal | undefined;
+}
+
+function raced<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  return signal === undefined ? p : withSignal(p, signal);
+}
+
+function aborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 export async function acquireSingleton(paths: HubPaths, deps?: SingletonDeps): Promise<SingletonResult> {
   const probeMs = deps?.probeMs ?? DEFAULT_PROBE_MS;
   const lockStaleMs = deps?.lockStaleMs ?? DEFAULT_LOCK_STALE_MS;
   const now = deps?.now ?? Date.now;
+  const signal = deps?.signal;
 
   try {
-    ensurePrivateDir(paths.stateDir);
-    const sockDir = dirname(paths.socketPath);
-    if (sockDir !== paths.stateDir) ensurePrivateDir(sockDir);
+    await raced(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, deps?.fs), signal);
+    if (paths.socketDir !== paths.stateDir) {
+      await raced(ensurePrivateDir(paths.socketDir, paths.policies.socketDir, deps?.fs), signal);
+    }
   } catch (err) {
+    if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
     return { kind: "failed", error: `state dir: ${errMsg(err)}` };
   }
 
@@ -91,7 +123,7 @@ export async function acquireSingleton(paths: HubPaths, deps?: SingletonDeps): P
   }
   let handedOver = false;
   try {
-    const r = await acquireFileSingleton(paths, probeMs, lockStaleMs, now, guard);
+    const r = await acquireFileSingleton(paths, probeMs, lockStaleMs, now, guard, deps?.fs, signal);
     handedOver = r.kind === "owner";
     return r;
   } finally {
@@ -105,6 +137,8 @@ async function acquireFileSingleton(
   lockStaleMs: number,
   now: () => number,
   guard: net.Server | undefined,
+  fsDeps: Partial<FsDeps> | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<SingletonResult> {
   // ① start lock
   let lock = tryLock(paths.startLock, now());
@@ -121,6 +155,7 @@ async function acquireFileSingleton(
   if (typeof lock === "object") return { kind: "failed", error: `start lock: ${lock.error}` };
 
   try {
+    if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
     // ② bind
     let bound = await listenOn(paths.socketPath);
     if (bound.kind === "inuse") {
@@ -131,28 +166,38 @@ async function acquireFileSingleton(
     }
     if (bound.kind === "error") return { kind: "failed", error: `listen: ${bound.error}` };
     const server = bound.server;
-    let inode: number;
+    const chmodFn = fsDeps?.chmod ?? chmod;
+    const lstatFn = fsDeps?.lstat ?? lstat;
+    let identity: SocketIdentity;
     try {
-      chmodSync(paths.socketPath, 0o600);
-      inode = statSync(paths.socketPath).ino;
+      await raced(chmodFn(paths.socketPath, 0o600), signal);
+      const socketSt = await raced(lstatFn(paths.socketPath), signal);
+      const dirSt = await raced(lstatFn(paths.socketDir), signal);
+      identity = { socket: { dev: socketSt.dev, ino: socketSt.ino }, dir: { dev: dirSt.dev, ino: dirSt.ino } };
     } catch (err) {
       await closeServer(server);
-      return { kind: "failed", error: `socket stat: ${errMsg(err)}` };
+      if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
+      return { kind: "failed", error: `socket stat: ${errMsg(err)}`, reason: "socket-verify" };
+    }
+    if (aborted(signal)) {
+      await closeServer(server); // libuv unlinks the path — it is still bound to us alone
+      return { kind: "failed", error: "start aborted", reason: "aborted" };
     }
     let released = false;
     return {
       kind: "owner",
       server,
-      inode,
+      identity,
       release: async () => {
         if (released) return;
         released = true;
         // libuv unlinks the bound path itself when the server closes (uv__pipe_close). If the
-        // path now belongs to someone else (fence lost), park the foreign entry for the
-        // duration of the close so it survives, then put it back.
+        // path now belongs to someone else (fence lost) or was replaced by a symlink, park the
+        // foreign entry for the duration of the close so it survives, then put it back.
         let ours = false;
         try {
-          ours = statSync(paths.socketPath).ino === inode;
+          const st = await lstatFn(paths.socketPath);
+          ours = !st.isSymbolicLink() && st.dev === identity.socket.dev && st.ino === identity.socket.ino;
         } catch {
           ours = false;
         }
@@ -185,37 +230,126 @@ async function acquireFileSingleton(
   }
 }
 
+// ---------------------------------------------------------------------------
+// fence
+// ---------------------------------------------------------------------------
+
+export type FenceLoss =
+  | "socket-missing" // lstat ENOENT
+  | "socket-replaced" // socket.{dev,ino} 与 identity 不同
+  | "socket-symlink" // lstat 是 symlink
+  | "socket-not-socket" // lstat 存在但不是 socket
+  | "dir-replaced" // 目录 {dev,ino} 与 identity.dir 不同
+  | "owner-mismatch" // socket 或目录 uid 不是当前 uid
+  | "io"; // 校验超时（5s）或非 PrivateDirError 的 I/O 错误；连续 3 次才触发 onLost("io")
+
+/**
+ * Map a fence-check outcome to a `FenceLoss`. `err` is the error from the
+ * check (`undefined` when the check succeeded but produced a `seen` identity
+ * that differs from `identity`); `seen` is the freshly observed identity.
+ */
+export function fenceLossOf(err: unknown, identity: SocketIdentity, seen: SocketIdentity | undefined): FenceLoss {
+  if (err !== undefined && err !== null) {
+    if (err instanceof PrivateDirError) {
+      switch (err.reason) {
+        case "not-directory":
+          return "socket-not-socket";
+        case "symlink":
+          return "socket-symlink";
+        case "owner-mismatch":
+          return "owner-mismatch";
+        default:
+          return "io"; // "mode" | "parent-not-sticky" | "io"
+      }
+    }
+    if (errCode(err) === "ENOENT") return "socket-missing";
+    return "io"; // E_DEADLINE / EIO / EACCES / anything else non-PrivateDirError
+  }
+  if (seen !== undefined) {
+    if (seen.socket.dev !== identity.socket.dev || seen.socket.ino !== identity.socket.ino) return "socket-replaced";
+    if (seen.dir.dev !== identity.dir.dev || seen.dir.ino !== identity.dir.ino) return "dir-replaced";
+  }
+  return "io";
+}
+
 export function startFence(
   socketPath: string,
-  inode: number,
-  onLost: () => void,
+  identity: SocketIdentity,
+  onLost: (why: FenceLoss) => void,
   intervalMs: number = DEFAULT_FENCE_MS,
   firstMs: number = Math.min(DEFAULT_FENCE_FIRST_MS, intervalMs),
+  deps?: Partial<FsDeps> & { checkDeadlineMs?: number; ioStrikes?: number },
 ): () => void {
+  const lstatFn = deps?.lstat ?? lstat;
+  const checkDeadlineMs = deps?.checkDeadlineMs ?? DEFAULT_FENCE_CHECK_DEADLINE_MS;
+  const ioStrikes = deps?.ioStrikes ?? DEFAULT_FENCE_IO_STRIKES;
+  const dir = dirname(socketPath);
   let stopped = false;
   let inFlight = false;
-  const check = (): void => {
+  let ioStrikeCount = 0;
+
+  function lost(why: FenceLoss): void {
+    stop();
+    onLost(why);
+  }
+
+  function noteIoStrike(): void {
+    ioStrikeCount++;
+    if (ioStrikeCount >= ioStrikes) {
+      ioStrikeCount = 0;
+      lost("io");
+    }
+  }
+
+  async function checkAsync(): Promise<void> {
     if (stopped || inFlight) return;
     inFlight = true;
-    stat(socketPath).then(
-      (st) => {
-        inFlight = false;
-        if (!stopped && st.ino !== inode) lost();
-      },
-      () => {
-        inFlight = false;
-        if (!stopped) lost();
-      },
-    );
+    try {
+      const st = await withDeadline(lstatFn(socketPath), checkDeadlineMs);
+      if (stopped) return;
+      if (st.isSymbolicLink()) {
+        ioStrikeCount = 0;
+        lost("socket-symlink");
+        return;
+      }
+      if (!st.isSocket()) {
+        ioStrikeCount = 0;
+        lost("socket-not-socket");
+        return;
+      }
+      if (st.dev !== identity.socket.dev || st.ino !== identity.socket.ino) {
+        ioStrikeCount = 0;
+        lost("socket-replaced");
+        return;
+      }
+      const dst = await withDeadline(lstatFn(dir), checkDeadlineMs);
+      if (stopped) return;
+      if (dst.dev !== identity.dir.dev || dst.ino !== identity.dir.ino) {
+        ioStrikeCount = 0;
+        lost("dir-replaced");
+        return;
+      }
+      ioStrikeCount = 0;
+    } catch (err) {
+      if (stopped) return;
+      if (errCode(err) === "ENOENT") {
+        ioStrikeCount = 0;
+        lost("socket-missing");
+        return;
+      }
+      noteIoStrike();
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  const check = (): void => {
+    void checkAsync();
   };
   const first = setTimeout(check, firstMs);
   first.unref();
   const timer = setInterval(check, intervalMs);
   timer.unref();
-  function lost(): void {
-    stop();
-    onLost();
-  }
   function stop(): void {
     stopped = true;
     clearTimeout(first);

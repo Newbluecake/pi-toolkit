@@ -27,10 +27,22 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { API_ERRORS, type AgentCard, type HistoryPayload } from "../protocol/http-contract.js";
+import { canonicalHostKey, canonicalOrigin } from "../protocol/lan.js";
 import type { FleetRowWire } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
-import type { AgentView, FrontendDeps, FrontendFactory, HttpFrontend, HubEvent } from "./ports.js";
+import type {
+  AgentView,
+  FrontendDeps,
+  FrontendFactory,
+  HostSnapshot,
+  HttpFrontend,
+  HubEvent,
+  HubLog,
+  LanTransport,
+  ListenerKind,
+  RequestContext,
+} from "./ports.js";
 import { createSseHub, type SseClient, type SseEventName } from "./sse.js";
 import { serveStatic, webRoot } from "./static.js";
 
@@ -44,6 +56,11 @@ const HISTORY_GUARD_MS = TIMING.snapshotMs + 1_000;
 const CLOSE_DEADLINE_MS = 2_000;
 const MAX_PENDING_FRAMES = 4_096;
 const BIND_HOST = "127.0.0.1"; // not configurable by design (arch §9)
+
+function toAbortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : "web-hub: aborted");
+}
 
 type ApiError = (typeof API_ERRORS)[number];
 
@@ -228,6 +245,59 @@ function toCard(v: AgentView): AgentCard {
   if (v.session !== undefined) card.session = v.session;
   if (v.status !== undefined) card.status = v.status;
   return card;
+}
+
+// ---------------------------------------------------------------------------
+// §1.4.4 buildContext / createLanTransport
+// ---------------------------------------------------------------------------
+
+/** `::ffff:1.2.3.4` → `1.2.3.4` (IPv4-mapped IPv6, as node's `net`/`http` report dual-stack peers). */
+function normalizePeerIp(ip: string | undefined): string {
+  if (ip === undefined) return "";
+  return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+}
+
+/**
+ * Build the per-request `RequestContext` (plan §2.5 step 1). The loopback
+ * branch centralizes what P1's `allowedHost`/`csrfOk` already read off `req`
+ * (`req.headers.host`, `req.socket.remoteAddress`) into one place — it does
+ * *not* replace those functions' own P1 decision logic (kept byte-identical
+ * in `handle()`), so it never rejects for `kind: "loopback"`. The `"lan"`
+ * branch (host-snapshot lookup, proxy resolution, 400/421 rejection) is LC's
+ * job (W2, S1-W2 `LC:http`) — W1 stub.
+ */
+export function buildContext(
+  req: IncomingMessage,
+  kind: ListenerKind,
+  lan?: { snapshot: HostSnapshot; trust: ReadonlySet<string> },
+): RequestContext | { reject: 400 | 421; code: "E_BAD_REQUEST" | "E_HOST"; detail: string } {
+  if (kind === "lan") {
+    void lan;
+    throw new Error("E_NOT_IMPLEMENTED:LC");
+  }
+  const peerIp = normalizePeerIp(req.socket.remoteAddress);
+  const hostHeader = req.headers.host;
+  const hostKey = canonicalHostKey(hostHeader, "http") ?? (hostHeader ?? "").toLowerCase();
+  return {
+    kind: "loopback",
+    peerIp,
+    viaTrustedProxy: false,
+    clientIp: peerIp,
+    scheme: "http",
+    hostKey,
+    externalOrigin: canonicalOrigin("http", hostKey),
+  };
+}
+
+/** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` port isn't frozen elsewhere in W1, so it stays unexported/loose here until LC (W2) fills this in. */
+export interface LanTransportCtx {
+  handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext): Promise<void>;
+  log: HubLog;
+  connGuard: unknown;
+}
+
+export function createLanTransport(_ctx: LanTransportCtx): LanTransport {
+  throw new Error("E_NOT_IMPLEMENTED:LC");
 }
 
 export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
@@ -525,21 +595,37 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     });
   }
 
-  async function listen(): Promise<{ port: number }> {
+  async function listen(opts?: { signal?: AbortSignal }): Promise<{ port: number }> {
     if (server !== undefined) return { port };
     if (closed) throw new Error("web-hub http frontend already closed");
+    const signal = opts?.signal;
+    if (signal?.aborted === true) throw toAbortError(signal);
     auth.token(); // create / repair the token file up front
     const srv = createServer(onRequest);
     srv.headersTimeout = 10_000;
     srv.requestTimeout = 15_000;
     srv.on("connection", (socket) => socket.unref());
     srv.on("clientError", (_err, socket) => socket.destroy());
+    let abortedLate = false;
+    const onAbort = (): void => {
+      abortedLate = true;
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      port = await tryListen(srv, config.port);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE" || config.port === 0) throw err;
-      log.warn("web-hub http: port in use, falling back to a random port", { port: config.port });
-      port = await tryListen(srv, 0);
+      try {
+        port = await tryListen(srv, config.port);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE" || config.port === 0) throw err;
+        log.warn("web-hub http: port in use, falling back to a random port", { port: config.port });
+        port = await tryListen(srv, 0);
+      }
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+    if (abortedLate) {
+      // The caller (startHub) already gave up while `listen` was in flight — self-clean.
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+      throw toAbortError(signal!);
     }
     srv.on("error", (err) => log.error("web-hub http: server error", { error: String(err) }));
     srv.unref();

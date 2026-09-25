@@ -23,6 +23,7 @@ export const SSE_EVENTS = Object.freeze([
   "gap",
   "resync",
   "append",
+  "auth",
   "ping",
 ]);
 
@@ -37,6 +38,8 @@ export const API_ERRORS = Object.freeze([
   "E_DEADLINE",
   "E_AGENT_GONE",
   "E_NOT_IMPLEMENTED",
+  "E_BUSY",
+  "E_DB",
 ]);
 
 /** Endpoints the P1 (read-only) frontend talks to. */

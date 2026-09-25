@@ -18,11 +18,14 @@
  * the hub: `RunningHub.close()` closes its own log, but the process handlers
  * must still be able to write during/after teardown.
  */
-import { ensurePrivateDir, resolveHubPaths } from "../protocol/paths.js";
-import { installProcessHandlers, startHub } from "./hub.js";
+import { resolveHubPaths } from "../protocol/paths.js";
+import { installProcessHandlers, startHub, type StartHubDeps } from "./hub.js";
 import { createHttpFrontend } from "./http.js";
+import { parseHubLanConfig } from "./lan-config.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
+
+export { parseHubLanConfig } from "./lan-config.js";
 
 function fail(message: string, code: number): never {
   try {
@@ -45,6 +48,19 @@ async function main(): Promise<void> {
   if (config.v !== 1 || typeof config.home !== "string" || config.home === "") {
     fail("PI_WEBHUB_CONFIG is not a v1 HubConfig", 2);
   }
+  process.umask(0o077); // before any file-system operation (§1.3.1)
+
+  const startDeps: StartHubDeps = {};
+  if (config.lan !== undefined) {
+    const parsed = parseHubLanConfig(config.lan);
+    if (parsed.ok) {
+      config = { ...config, lan: parsed.lan };
+    } else {
+      const { lan: _drop, ...rest } = config;
+      config = rest;
+      startDeps.lanConfigError = { detail: parsed.detail };
+    }
+  }
 
   const paths = resolveHubPaths({
     home: config.home,
@@ -54,17 +70,12 @@ async function main(): Promise<void> {
         ? process.env.XDG_RUNTIME_DIR
         : undefined,
   });
-  try {
-    ensurePrivateDir(paths.stateDir);
-  } catch (err) {
-    fail(`state dir not private: ${err instanceof Error ? err.message : String(err)}`, 1);
-  }
   const log = createHubLog(paths.logFile);
   log.info("hub process starting", { port: config.port, idleExitMinutes: config.idleExitMinutes });
 
   let hub: Awaited<ReturnType<typeof startHub>>;
   try {
-    hub = await startHub(config, createHttpFrontend);
+    hub = await startHub(config, createHttpFrontend, startDeps);
   } catch (err) {
     log.error("hub startup failed", { error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
     log.close();
