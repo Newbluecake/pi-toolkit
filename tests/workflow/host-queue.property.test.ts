@@ -20,6 +20,12 @@ import type { HostCallEnvelope, WorkerHost } from "../../src/workflow/types.js";
  *    child-event sequence allowed by the §5 contract (queued before spawned,
  *    rejected right before settled, settled last);
  *  - after stop + late spawns/settles: nothing active or queued, no armed timers.
+ *
+ * Branch coverage guard (P1 acceptance, Minor): the seeds must, in total,
+ * actually drive the failure branches — dispatch spawn timeouts, spawn
+ * errors, orphan aborts of late-bound children and HR2 host-call timeouts —
+ * so a generator regression that only produces happy paths fails loudly
+ * instead of silently weakening every invariant above.
  */
 
 function random(seed: number): () => number {
@@ -63,7 +69,16 @@ interface PendingSpawn {
   reject(e: unknown): void;
 }
 
-async function runSeed(seed: number): Promise<void> {
+/** How often a seed hit each failure branch (summed across seeds by the test). */
+interface BranchHits {
+  spawnTimeout: number;
+  spawnError: number;
+  /** spawner.abort() on a real runId whose call was already withheld while spawn() was in flight, before the final stop. */
+  orphanAbort: number;
+  hostCallTimeout: number;
+}
+
+async function runSeed(seed: number): Promise<BranchHits> {
   const next = random(seed);
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(next() * xs.length)]!;
   const clock = new FakeClock();
@@ -75,6 +90,9 @@ async function runSeed(seed: number): Promise<void> {
   const aborts: string[] = [];
   const events: WorkflowChildEvent[] = [];
   let runSeq = 0;
+  let stopped = false;
+  const abortedDuringRun: string[] = [];
+  const callOfRun = new Map<string, string>();
   const spawner: ChildSpawner = {
     spawn: (req) =>
       new Promise((resolve, reject) => {
@@ -84,6 +102,7 @@ async function runSeed(seed: number): Promise<void> {
       }),
     abort: async (runId) => {
       aborts.push(runId);
+      if (!stopped) abortedDuringRun.push(runId);
       return true;
     },
     waitAll: ({ runIds }) =>
@@ -126,8 +145,11 @@ async function runSeed(seed: number): Promise<void> {
       const idx = Math.floor(next() * pendingSpawns.length);
       const [s] = pendingSpawns.splice(idx, 1);
       const kind = next();
-      if (kind < 0.7) s!.resolve({ runId: `run-${++runSeq}` });
-      else if (kind < 0.9) s!.resolve({ error: { message: "spawn error" } });
+      if (kind < 0.7) {
+        const runId = `run-${++runSeq}`;
+        callOfRun.set(runId, String(s!.callIndex));
+        s!.resolve({ runId });
+      } else if (kind < 0.9) s!.resolve({ error: { message: "spawn error" } });
       else s!.reject(new Error("spawn threw"));
     } else if (r < 0.8 && waiters.size > 0) {
       const runId = pick([...waiters.keys()]);
@@ -144,6 +166,7 @@ async function runSeed(seed: number): Promise<void> {
   }
 
   // Final stop: stopOwned (with a grace window) or a hard terminate().
+  stopped = true;
   if (next() < 0.5) {
     const stopping = handler.stopOwned("user_stop", 500);
     await flush();
@@ -200,12 +223,28 @@ async function runSeed(seed: number): Promise<void> {
   }
 
   expect(clock.pendingTimers, `seed ${seed}: armed timers left`).toBe(0);
+
+  const rejectedWith = (reason: string) => events.filter((e) => e.kind === "rejected" && e.reason === reason).length;
+  const statusOf = new Map(handler.children.map((c) => [c.callId, c.status]));
+  return {
+    spawnTimeout: rejectedWith("spawn_timeout"),
+    spawnError: rejectedWith("spawn_error"),
+    orphanAbort: abortedDuringRun.filter((runId) => statusOf.get(callOfRun.get(runId) ?? "") === "withheld").length,
+    hostCallTimeout: rejectedWith("host_call_timeout"),
+  };
 }
 
 describe("host.ts FIFO queue: seeded properties (workflow-agent-queue §7)", () => {
   it("keeps the slot cap, FIFO dispatch, single-record/single-settle and clean-stop invariants across seeded interleavings", async () => {
+    const total: BranchHits = { spawnTimeout: 0, spawnError: 0, orphanAbort: 0, hostCallTimeout: 0 };
     for (const seed of [1, 7, 42, 99, 1234, 4096, 31337, 0xc0ffee, 0xbeef, 2026]) {
-      await runSeed(seed);
+      const hits = await runSeed(seed);
+      for (const key of Object.keys(total) as (keyof BranchHits)[]) total[key] += hits[key];
     }
+    // The generator must keep exercising every failure branch (not just the happy path).
+    expect(total.spawnTimeout, "spawn_timeout branch never hit").toBeGreaterThan(0);
+    expect(total.spawnError, "spawn_error branch never hit").toBeGreaterThan(0);
+    expect(total.orphanAbort, "orphan-abort branch never hit").toBeGreaterThan(0);
+    expect(total.hostCallTimeout, "host_call_timeout branch never hit").toBeGreaterThan(0);
   }, 30_000);
 });
