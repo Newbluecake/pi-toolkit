@@ -30,7 +30,7 @@ pi update --extension git:github.com/Newbluecake/pi-toolkit
 - **`get_subagent_result`** — 完成通知到达后取结果；默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞（兜底用）。也接受 `SubagentWorkflow` 的工作流 ID（`wf_…`）。
 - **`steer_subagent`** — 向运行中的子 agent 发送追加指令。
 - **`abort_subagent`** — 停止运行中的子 agent；对终态 run 幂等。传工作流 ID（`wf_…`）则停止整个后台工作流及其全部子 run。
-- **`extend_subagent_timeout`** — 延长运行中 run 的总超时（次数与硬天花板双上限）。默认预算的 run 到点时先进续跑宽限并通知主会话，宽限内可延长，宽限耗尽未处理才终止。
+- **`extend_subagent_timeout`** — 延长运行中 run 的总超时（次数与硬天花板双上限）。默认预算的 run 到点时先进续跑宽限并通知主会话，宽限内可延长，宽限耗尽未处理才终止。也接受工作流 ID（`wf_…`、唯一前缀或脚本 `meta.name`）：延长整个后台工作流；工作流的子 run 钉在所属工作流的硬顶上，不能单独延长（工具会提示改延长所属工作流）。
 - **`set_model`** — 运行中切换模型（下一次 LLM 调用生效，不打断当前 turn）：缺省切自己，也可按 run_id / 前缀 / label 切运行中的子 agent；可选 `thinking` 档位；切换写入 transcript，resume 后沿用。
 - **Agent 类型** — 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义并注入系统提示词；frontmatter `model:` 支持严格 id 或模糊 hint。
 - **`@mention` 引导** — 编辑器输入 `@<label> <消息>`，可引导运行中的子 agent，或复活已结束的。
@@ -40,7 +40,7 @@ pi update --extension git:github.com/Newbluecake/pi-toolkit
 
 沙箱化 JS 编排（`agent()` / `parallel()` / `pipeline()` / `phase()`），带独立 wall-clock 预算、runaway 检测和可回放 journal。默认关闭（`workflow.enabled`）。
 
-工作流**一律后台运行**：调用立即返回工作流 ID（`wf_…`），到达终态时向主会话推送一条完成通知（名称、状态、结果摘要（受 `resultMaxChars` 截断）、花费）。用 `get_subagent_result(run_id: "wf_…")` 查看进度或取完整结果（ID、唯一前缀或脚本 `meta.name` 均可），用 `abort_subagent` 停止。每个工作流仍受「总预算 + 宽限」约束，必达终态；会话关闭 / `/reload` 时运行中的工作流会被停止，其通知持久化到会话里、在下一次加载该会话时补发一次。设计见 [docs/dev/workflow-background/plan.md](docs/dev/workflow-background/plan.md)。
+工作流**一律后台运行**：调用立即返回工作流 ID（`wf_…`），到达终态时向主会话推送一条完成通知（名称、状态、结果摘要（受 `resultMaxChars` 截断）、花费）。用 `get_subagent_result(run_id: "wf_…")` 查看进度或取完整结果（ID、唯一前缀或脚本 `meta.name` 均可），用 `abort_subagent` 停止。超出并发上限的 `agent()` 调用按 FIFO 排队而不是失败（工作流停止或时间耗尽时排队中的调用解析为 `null`，派发失败则 reject）。每个工作流仍受「总预算 + 宽限」约束（默认预算到点先宽限并通知，可用 `extend_subagent_timeout` 延长；显式 `timeout_s` 为硬顶），必达终态；会话关闭 / `/reload` 时运行中的工作流会被停止，其通知持久化到会话里、在下一次加载该会话时补发一次。设计见 [docs/dev/workflow-background/plan.md](docs/dev/workflow-background/plan.md)、[docs/dev/workflow-agent-queue/plan.md](docs/dev/workflow-agent-queue/plan.md)。
 
 ### Agent tree
 

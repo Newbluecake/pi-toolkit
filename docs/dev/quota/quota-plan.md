@@ -1405,3 +1405,11 @@ moonshot-balance-positive.json
 - **替代链只推荐 scope 内模型（2026-09 用户要求）**：`StackModelPort.recommendable()` = 会话 scope（`ctx.scopedModels` live getter，即 `/models` 里激活的模型）∩ `getAvailable()`，保留 scope 顺序；未配置 scope 时退化为 available。turn_end 注入与 spawn 闸门的 `pickAlternatives` 都改读它；模型解析/校验（resolveHint、set_model、未知 hint 报错列表）仍走 available，不受影响。
 - **有订阅就只推荐订阅（2026-09 用户要求）**：`pickAlternatives` 分三层——tier 0 受管订阅（带窗口数据）、tier 1 声明订阅（新增 settings `quota.subscriptionProviders`，逗号分隔，默认空，用于 copilot-\* 这类无额度接口的订阅）、tier 2 其余（按量计费/中转）。只要存在 tier 0/1 候选就只返回订阅（宁可少于 3 个），全部订阅耗尽/被排除时才退到 tier 2。
 - **替代只给候选、按需取舍（2026-09 用户要求）**：额度层不知道任务需求，L3 块与 spawn 闸门文案从「直接使用：X → Y」改为「替代候选（订阅优先）：X、Y。按任务需求选：候选能胜任就优先用；不胜任就按路由表另选合适模型，不必硬凑」（共用 `render.ts#alternativesAdvice`）；「禁止」措辞缓和为「本轮不要」。
+
+## 14. 实施后修复（reset-elapsed，2026-09-25）
+
+合入 master 后的三个修复，实施以代码（`d7606a5`、`72e965b`、`0c701c7`）为准：
+
+- **reset-elapsed 规则（`d7606a5`）**：`ladder.ts` `windowLevel` 新增规则 0——窗口 `resetAt ≤ now` ⇒ 该窗口等级归 0，新 reason `"reset-elapsed"`。只放宽、不收紧：forecast 不得把已过期窗口重新抬级，`providerVerdict` 的窗口 max 与降位地板不变，`resetAt` 未知/未到的窗口走原路径（与快照级 `stale` 正交）。闸门、turn_end 注入、HUD 与 `service.gateBlocked` 全部读同一 verdict，重置已过但快照未刷新时不再拦截 spawn / 复读 L3。HUD 与 tick 行对过期窗口追加紧凑英文标记 `·reset`（如 `7d 100%·reset`）。
+- **TTL 绕过只认「拉取于重置之前」（`72e965b`）**：`service.refreshIfStale` 在任一窗口 `resetAt ≤ now` 时绕过刷新 TTL 立即重拉（触发点：turn_end / spawn 生命周期 / session_start；在途去重照常、可疑读数退避不绕过、仍零 timer）——收紧为附带条件 `existing.fetchedAt < w.resetAt`：上游若在重置后仍回报过去的 resetAt（数据滞后），新快照不再绕过，避免每个触发点都打一次端点。
+- **`repeatS` 只在 L3 复读（`0c701c7`）**：`shouldAnnounce` 闸 3 的复读仅对 level ≥ 3；L2 是纯提示、从不复读（QuotaSettings 注释与 `quota.repeatS` 编辑器描述同步修正）。另：reset-elapsed 窗口把等级归零得到的 L0 不是真实读数（快照尚未刷新），hook 不删公告闩锁——观测重置恢复事件仍恰好一次。

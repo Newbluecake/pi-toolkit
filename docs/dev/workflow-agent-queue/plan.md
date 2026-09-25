@@ -1,6 +1,7 @@
 # SubagentWorkflow `agent()` 排队 · 方案 v2
 
-> 状态：方案 v2（待评审 v2 + 用户确认）。制定：claude-opus-5-5（Plan，只读调研）。替换 v1。
+> 状态：**已实施**（2026-09-25 合入 master）。阶段 A（排队 + 修复 + 事件 + UI）：`87b3396..db440e0` + `efbeb82`；阶段 B（宽限与延长）：`8a06b0b..cc09dc2`；工具描述与本批文档随 docs 提交。
+> 制定：claude-opus-5-5（Plan，只读调研）。替换 v1；v3 修订见 §0′；实施记录与已知限制见 §0″。
 > 依据：v1 + 用户决定、`review.md`（评审 v1）、`docs/dev/timeout-notify/{plan,arch}.md` 及其已落地实现。
 
 ## 0. v2 相对 v1 的变更与评审处置
@@ -57,6 +58,24 @@ UI 渲染拆为 A-UI / B-UI，等 fleet-widget 的另一任务合入后再做。
   宽限标记在 P2 合入后补。
 - **P4 文档**：工具描述、workflow-background/plan.md、AGENTS.md、README。
 - 整体验收（verifier + 全量门禁 + 真机 workflow）后一起合入 master。
+
+## 0″. 实施记录（2026-09-25 合入 master）
+
+阶段 A：`87b3396`（单所有者结算）→ `282e84d`（BW10 配置层取消，`workflow.budget.workflowTotalS` 必须 > 0）→ `828062a`（CallRegistry `queued` 阶段）→ `6f7b7e0`（FIFO 排队）→ `db440e0`（queued/rejected/stage_error 事件）+ UI `efbeb82`（`⧗ N` / `⚠ N` 与排队行）；阶段 B：`8a06b0b`（纯 deadline controller）→ `d060fba`（宽限 + 子任务钉 `hardAt`）→ `293acd5`（`extend_subagent_timeout` 接受 wf id）→ `8019b68`（通知接线）→ `e5465c5`（UI 宽限/延长标记）→ `969ae0a`（属性测试补强）→ `cc09dc2`（进度头宽限倒计时）。§7 测试计划全部落地：`tests/workflow/{host,call-registry,activity,worker-host-call,journal-replay-e2e,deadline,host-queue.property}.test.ts`、`tests/tools/{workflow-tool,extend-timeout-tool}.test.ts`、`tests/integration/workflow-grace-wiring.test.ts`。与 §0′/§3/§4 的偏离（以代码为准）：
+
+- **端口可选化**：`Orchestrator.extend` / `Orchestrator.deadline`（orchestrator.ts）与 `WorkflowQueryPort.extend`（端口本体在 `src/tools/workflow-target.ts`——§4.5 只写了「加 extend」）落地为**可选方法**：缺省 ⇒ 调用方拿到 `unsupported`，结构化测试替身不必补实现（生产 orchestrator / `index.ts` 转发恒有实现）。`OrchestratorDeps.onDeadlineNotice` 同为可选。
+- **background view 增加 `hardDeadlineAt`**：§4.3 只列了 `graceUntil?` / `extensions?`；实现补了静态硬顶字段（`background.ts` view 与 activity snapshot 各一份），extend 工具的硬顶文案与 widget 头部标记都读它。
+- **进度头宽限倒计时（计划外，`cc09dc2`）**：`get_subagent_result` 运行中读数的进度头（`workflow-tool.ts` `buildWorkflowProgressLines`）在宽限期改为倒计时宽限（`grace 1m28s left`），延长过的工作流显示 `58s left (+N)`——§4.5 未列，验收时补的模型可见性。
+- **通知里用完整 wf id**：§4.5 的可抄命令示例是 8 位短 id；实现里 who-行用 `wf_`+8 短 id、**可抄的 `extend_subagent_timeout(run_id: …)` 命令用完整 workflow id**（`deadline-notice.ts`，杜绝前缀歧义命中失败）。grace 通知 `triggerTurn:true`、extended 回执 `triggerTurn:false`，与计划一致。
+- **头部截止标记只在宽限期或有延长时出现**：§5 写「阶段 B 头部截止沿用 run 行」；实现（`fleet-widget.ts`）只在 `graceUntil` 存在或 `extensions > 0` 时渲染，终态冻结快照不渲染（常显的剩余时间只挤头部而无信息增量）。宽限标记按用户决定统一英文 token：`⏳grace 58s`（run 行与 workflow 头共用 `deadlineMarker`），延长标记 `⏳9m48s+1` 不变。
+- **lifecycle.ts 的 `stage_error` 白名单扩为 `parallel | pipeline | unhandled`**：持久化侧对事件字段做白名单校验，`"unhandled"` 是 §5 事件表之外新增的 `source`（与 worker 兜底配套）。
+- **HR6 取消类 reject 带 `cancelled:true` 且兜底跳过**：worker 端收到 cancel 时，所有 pending 的 host call / settle 等待以带 `cancelled:true` 的 Error reject；全局 `unhandledRejection` 兜底对 `cancelled === true` 的 rejection 静默跳过——停止中的 workflow 的 fire-and-forget 调用不算脚本缺陷、不进 `⚠ N`。
+
+已知限制：
+
+- **`gate()` 不随延长**：`host.ts` `handleGate` 在调用时刻一次性算好 `timeoutMs = min(gateMs, remainingWorkflowMs())` 交给 gateRunner；workflow 被延长不会拉长在跑的 gate——跨越延长时刻的 gate 仍按旧截止失败（顶层脚本因此失败；`parallel()`/`pipeline()` 内计为 stage_error）。最小修法：gateRunner 改为轮询 `killAt()` 的动态截止。
+- **gate 与 WT8 同刻到期结局不定**：`gate()` 自身超时与 workflow 截止落在同一时刻时谁先生效是竞态——结局可能是 gate 失败在前（script_error / 脚本失败），也可能是 `timed_out` 在前；不做确定性保证。
+- **`/reload` 场景缺专门回归测试**：宽限/延长与「shutdown 停止 → 通知持久化 → 下一 stack 补发」的组合没有专门回归（现有覆盖：`tests/reload/wiring.test.ts` 只测重新计数，`workflow-background-wiring` 只测通知补发，deadline 路径只有单元/属性测试）。
 
 ## 1. 现状摘要（文件:行号）
 
@@ -173,7 +192,7 @@ UI 渲染拆为 A-UI / B-UI，等 fleet-widget 的另一任务合入后再做。
 
 - 顺序：派发被拒 = `rejected` → `settled`(withheld)；cancelled 类（stop、phase 超时）只发 `settled`，**不**计入 `⚠`；queued 之后要么 spawned → settled，要么直接 settled，绝不先 spawned 后 queued。
 - activity snapshot 新增：`queuedChildren: readonly {callId, label?, agentType?, phaseId?, queuedAt}[]`（FIFO，spawned / settled 时移除）；`rejectedTotal`、`stageErrorTotal`；阶段 B：`graceUntil?`、`hardDeadlineAt?`、`extensions?`，`deadlineAt` 就地更新。
-- 渲染规格（A-UI / B-UI 实施于 fleet-widget）：头部 `⧗ N`（有排队时）、`⚠ N`（`rejectedTotal + stageErrorTotal > 0`）；排队行 `⧗ <label ?? agentType ?? callId> waiting for slot · <formatDuration(now − queuedAt)>`，dim，排在 active 行之后、计入行预算、溢出并入 `+N more`；阶段 B 头部截止沿用 run 行 `⏳12m` / `⏳12m+1` / `⏳宽限58s`，宽限期内永不丢弃；所有符号后跟空格并通过 `WIDE_RISK_GLYPHS` / `findGlyphCollisions`；紧凑标记只用英文 token。
+- 渲染规格（A-UI / B-UI 实施于 fleet-widget）：头部 `⧗ N`（有排队时）、`⚠ N`（`rejectedTotal + stageErrorTotal > 0`）；排队行 `⧗ <label ?? agentType ?? callId> waiting for slot · <formatDuration(now − queuedAt)>`，dim，排在 active 行之后、计入行预算、溢出并入 `+N more`；阶段 B 头部截止沿用 run 行 `⏳12m` / `⏳12m+1` / `⏳grace 58s`，宽限期内永不丢弃；所有符号后跟空格并通过 `WIDE_RISK_GLYPHS` / `findGlyphCollisions`；紧凑标记只用英文 token。
 
 ## 6. 不变式论证
 

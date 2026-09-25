@@ -199,6 +199,6 @@ details }, { triggerTurn: true })`。内容：`Workflow "<name>" (wf_…) <statu
 ## 11. 残余风险
 
 - 通知在会话存活期间不持久化：崩溃 / kill 会丢（run outbox 可跨崩溃对账，工作流没有等价物）。
-- 没有并发工作流数上限：模型可以一次启动多个后台工作流；子 run 仍受 SlotPool 与每个工作流的 `maxParallel` 约束。
+- 没有并发工作流数上限：模型可以一次启动多个后台工作流；子 run 仍受 SlotPool 与每个工作流的 `maxParallel` 约束（超额的 `agent()` 调用是 FIFO 排队，不是拒绝——见 [workflow-agent-queue/plan.md](workflow-agent-queue/plan.md)）。
 - HUD 的「回合计时挂起」只看 run 事件：工作流在两个子 run 之间时 HUD 视为空闲。
 - 通知正文包含受 `resultMaxChars` 截断的完整 outcome 文本；随后 `get_subagent_result` 会再给一次，存在一次重复。

@@ -409,7 +409,8 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "deadline gets a short grace window and you receive a notice — extend it with extend_subagent_timeout(run_id: " +
       "<workflow id>, extend_s) (a limited number of extensions, capped by a hard ceiling) or let it stop as " +
       "timed_out; its children are aborted with it. A workflow started with an explicit timeout_s is a hard cap " +
-      "(no grace, no extension). Use this only when a single Agent call's own multi-step " +
+      "(no grace, no extension). One exception: a script gate() shell call keeps the deadline it was given when it " +
+      "started, so extending the workflow does not lengthen a gate already in flight. Use this only when a single Agent call's own multi-step " +
       "reasoning is not enough and you specifically need several independently-prompted subagents coordinated by " +
       "real control flow.",
     promptSnippet:

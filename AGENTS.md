@@ -205,7 +205,9 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   cleaning (skill envelopes + `[sub:type]` subagent marks driven by our own `subagent:run`
   entries, disk-cached under `<agent>/cache/session-nav/`). Post-guard, TUI-only.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
-- `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate (design: `docs/dev/quota/`).
+- `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
+  (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses
+  the refresh TTL only while the snapshot predates the reset; `quota.repeatS` re-sends at L3 only.
 - `src/schedule/` — cron parser, scheduler, persisted schedule store.
 - `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): an editor wrapper rewrites exact
   `/reload` submissions to `/agent reload`, which parks the reload while subagents/workflows are active and
@@ -222,14 +224,20 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   reaches a terminal entry, `stop`/`wait`/`resolve`, bounded terminal retention, `shutdown`/`drain`/`seal` on
   session_shutdown and `abandon` on a defensive rebuild). Completion notices are pi-facing
   (`src/adapters/workflow-notice.ts`: `sendMessage` + `triggerTurn` while live; persisted `subagent:workflow-notice`
-  entry during shutdown, re-delivered once by the next stack on that session file). Design:
-  `docs/dev/workflow-background/plan.md`.
+  entry during shutdown, re-delivered once by the next stack on that session file). `agent()` calls beyond `maxParallel`
+  FIFO-queue instead of failing (host acks first, then queues; non-time-exhausted dispatch failures reject the script's
+  `agent()`; out-of-time while queued ⇒ withheld `null`; a worker-wide `unhandledRejection` is reported as `stage_error`
+  `source:"unhandled"`, never `worker_died`); workflows share the subagent timeout grace + extension machinery
+  (`deadline.ts`: pure deadline controller, `killAt()` bounds host calls/BW2/gate; `extend_subagent_timeout` accepts `wf_…`
+  ids — full/prefix/script name — and refuses a workflow's children, which are pinned to the workflow `hardAt`; explicit
+  `timeout_s` is a hard cap). Design: `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —
   tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor,
   `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
-- `docs/dev/` — per-feature design docs (agent-background-only (supersedes auto-background), workflow-background, delivery v2, bash-auto-background,
+- `docs/dev/` — per-feature design docs (agent-background-only (supersedes auto-background), workflow-background,
+  workflow-agent-queue (agent() 排队 + workflow 宽限/延长), delivery v2, bash-auto-background,
   subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), consult, sysprompt-stable (system prompt
   冻结快照 + 唤醒回放), ...); read the matching one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).
