@@ -329,6 +329,10 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
         }
         const sessionName = ctx.sessionManager.getSessionName();
         if (sessionName) pwdLine += `${theme.fg("dim", " • ")}${theme.fg("muted", sessionName)}`;
+        // 插件自身版本放在 pwd 行末：静态信息，与 cwd/git 同属"环境"关注面；
+        // 该行按宽度截断，窄终端下它最先被截掉（优先级低于 cwd/git/会话名）。
+        const pluginInfo = renderPluginInfo(session.pluginInfo, theme);
+        if (pluginInfo) pwdLine += `${theme.fg("dim", " │ ")}${pluginInfo}`;
 
         let statsLeft = statsParts.join(theme.fg("dim", " │ "));
         let statsLeftWidth = visibleWidth(statsLeft);
@@ -372,7 +376,6 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
           renderLlmTiming(session, ctx),
           renderBgAgents(session, ctx),
           ...renderTimeLineStatusParts(statusEntries, theme),
-          renderPluginInfo(session.pluginInfo, theme),
         ].filter((part): part is string => Boolean(part));
         if (timeParts.length > 0) {
           // Wrap rather than truncate: the line now also carries the watch
