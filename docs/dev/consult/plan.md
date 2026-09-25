@@ -1034,10 +1034,14 @@ ConsultExpertRef[]` 这个到处传递的类型变成一个更复杂的判别联
 
 ### 16.5 已知遗留 / 偏离
 
-- fleet 面板尚未渲染 `consultOf`/嵌套 consult 行本身（v3.1 §11-1 已记录为"未实测"的既有缺口）——main 请教
-  run 的 `displayMeta.agentType` 会显示内部哨兵串 `consult:main-snapshot` 而不是 `"main"`；等 fleet 真正
-  开始渲染这条信息时一并修（一行 `agentType === CONSULT_MAIN_AGENT_TYPE ? CONSULT_MAIN_EXPERT_ID :
-agentType` 的展示层映射，不影响本节任何既有断言）。
+- fleet 面板尚未渲染 `consultOf`/嵌套 consult 行本身（v3.1 §11-1 已记录为"未实测"的既有缺口，仍未修）。
+  ~~main 请教 run 的 `displayMeta.agentType` 会显示内部哨兵串 `consult:main-snapshot` 而不是 `"main"`~~
+  —— 已修复（2026-09 验收 Minor）：`src/core/types.ts` 新增展示层映射 `displayAgentType(type)`
+  （`CONSULT_MAIN_AGENT_TYPE → CONSULT_MAIN_EXPERT_ID`，其余类型原样返回），在
+  `src/service/runtime-adapter.ts`（写入 `displayMeta.agentType` 时）与 `src/ui/fleet-panel.ts`（`toRow`
+  渲染 `type` 字段时，同时覆盖旧快照里已经落盘的原始哨兵串）两处套用。spawn/admission 侧仍比较
+  `spec.type.name` 的原始值（fork 绕行判断不受影响）——只在展示边界折叠。fleet widget/panel 各有一条测试
+  锁定：main 请教 run 显示 `main`，普通 consult run（真实 expert type）保持原类型名不变。
 - fork 一致性重试**不做真实的时间退避**（同步、立即重试）——已在 16.1 第 5 条写明理由（零挂死不变量 +
   本模块全同步 fs 的既有约束），这是有意选择，不是遗漏。
 - ~~`checkForkConsistency` 对 >32MB 的 fork 文件直接信任拷贝、不重新解析~~ —— 已修复（2026-09 验收 Minor）：

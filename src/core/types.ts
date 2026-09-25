@@ -203,6 +203,23 @@ export const CONSULT_MAIN_EXPERT_ID = "main";
 export const CONSULT_MAIN_AGENT_TYPE = "consult:main-snapshot";
 
 /**
+ * consult (plan §16.5, acceptance follow-up): the presentation-layer name for
+ * a spawned run's agent type. A main-session consult run carries the sentinel
+ * `CONSULT_MAIN_AGENT_TYPE` in its spec — spawn admission and the fork bypass
+ * compare that RAW value and must keep seeing it — but renderers (fleet
+ * widget/panel rows, `/agent` tables, progress lines) fold it back to the
+ * reserved expert id `CONSULT_MAIN_EXPERT_ID` ("main") so the internal type
+ * name never reaches a user-facing surface. Identity for every other type
+ * name; `undefined` passes through untouched. Safe to apply repeatedly
+ * ("main" is not the sentinel).
+ */
+export function displayAgentType(type: string): string;
+export function displayAgentType(type: string | undefined): string | undefined;
+export function displayAgentType(type: string | undefined): string | undefined {
+  return type === CONSULT_MAIN_AGENT_TYPE ? CONSULT_MAIN_EXPERT_ID : type;
+}
+
+/**
  * consult (plan §6 C-9, frozen surface): result of forking an expert's
  * persisted session. `forkExpertSession` **never throws** — every failure mode
  * of pi's `SessionManager.forkFrom` (empty/unparsable source, missing

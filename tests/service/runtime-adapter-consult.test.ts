@@ -230,6 +230,28 @@ describe("runtime-adapter: consult run read-only domain (T-12)", () => {
     await p;
     expect(captured.spec!.displayMeta!.consultOf).toEqual({ askerRunId: "r_ASKER" });
   });
+
+  it("folds the main-session sentinel type to `main` in displayMeta (§16.5), raw type for everyone else", async () => {
+    const clock = new FakeClock();
+    const captured: { spec?: { displayMeta?: { agentType?: unknown } } } = {};
+    const driver = captureDriver(captured as { spec?: SessionSpec });
+    const runner = buildAdapter(clock, { driver });
+    // The spawn-side spec carries the RAW sentinel (admission compares it);
+    // only the display-only metadata is folded.
+    const mainType: AgentTypeConfig = { ...expertType(), name: "consult:main-snapshot" };
+    const p = runner.run(spec(mainType, consultRequest));
+    await drain(clock, 12);
+    await p;
+    expect(captured.spec!.displayMeta!.agentType).toBe("main");
+
+    const captured2: { spec?: { displayMeta?: { agentType?: unknown } } } = {};
+    const driver2 = captureDriver(captured2 as { spec?: SessionSpec });
+    const runner2 = buildAdapter(clock, { driver: driver2 });
+    const p2 = runner2.run(spec(expertType(), consultRequest));
+    await drain(clock, 12);
+    await p2;
+    expect(captured2.spec!.displayMeta!.agentType).toBe("explorer");
+  });
 });
 
 // Small wrapper so the replace-mode case above can drain too.

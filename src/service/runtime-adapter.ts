@@ -18,6 +18,7 @@ import type {
   WorktreeDisposal,
   Millis,
 } from "../core/types.js";
+import { displayAgentType } from "../core/types.js";
 import { deliveryKey } from "../core/delivery-key.js";
 import type { Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
@@ -646,7 +647,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           displayMeta: {
             ...(spec.model === undefined ? {} : { model: spec.model }),
             ...(spec.request.label === undefined ? {} : { label: spec.request.label }),
-            agentType: spec.type.name,
+            // consult §16.5 (acceptance follow-up): display-only — the main-session
+            // sentinel type is folded to "main" here so every diag-driven renderer
+            // shows the reserved id; spawn/admission keep comparing the raw
+            // spec.type.name (and consult runs can never re-enter admission: the
+            // expert index excludes them structurally by session-file location).
+            agentType: displayAgentType(spec.type.name),
             taskPrompt: spec.request.prompt.slice(0, TASK_PROMPT_CAP),
             // X1 (agent tree): `⎇ wt` on the row while the run is in flight;
             // keyed off the request's declared intent. H2 failure paths

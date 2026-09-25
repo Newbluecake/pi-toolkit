@@ -295,6 +295,18 @@ describe("view-model: buildFleetViewModel", () => {
     expect(row.idleMs).toBe(100);
   });
 
+  it("toRow folds the consult main sentinel to the reserved id `main` (consult §16.5), plain types untouched", () => {
+    const mainRun = snapshot({ runId: "mainc000-snap-0000", diag: diag({ agentType: "consult:main-snapshot" }) });
+    const plainRun = snapshot({ runId: "plain000-snap-0000", diag: diag({ agentType: "explorer" }) });
+    const model = buildFleetViewModel([mainRun, plainRun], opts);
+    const byRun = new Map(model.rows.map((r) => [r.runId, r.type]));
+    expect(byRun.get(mainRun.runId)).toBe("main");
+    expect(byRun.get(plainRun.runId)).toBe("explorer");
+    // The render boundary also maps a typeOf-fed value (legacy snapshots / injected resolvers).
+    const viaTypeOf = buildFleetViewModel([mainRun], { ...opts, typeOf: () => "consult:main-snapshot" });
+    expect(viaTypeOf.rows[0]!.type).toBe("main");
+  });
+
   it("toRow carries remainingMs / inGrace / extensions (graceUntil wins; terminal rows freeze)", () => {
     const plain = snapshot({
       runId: "plain-000",

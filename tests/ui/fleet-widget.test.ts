@@ -147,6 +147,25 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[1]).toBe("  重构用户模块 architect copilot-completion/kimi-k3 🤔 1s Σ1s");
   });
 
+  it("consult §16.5: a main-session consult run's row shows `main`, never the sentinel type", () => {
+    const mainRun = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        agentType: "consult:main-snapshot",
+      }),
+    });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([mainRun], OPTS))!;
+    expect(lines[1]).toContain(" main ");
+    expect(lines[1]).not.toContain("consult:main-snapshot");
+    // A plain consult run (real expert type) keeps its type verbatim.
+    const expertRun = snapshot({
+      diag: diag({ createdAt: 9_000, lastEventAt: 9_900, agentType: "explorer" }),
+    });
+    const expertLines = buildFleetWidgetLines(buildFleetViewModel([expertRun], OPTS))!;
+    expect(expertLines[1]).toContain(" explorer ");
+  });
+
   it("model uses full name, basename, then omission as width tightens", () => {
     const run = snapshot({
       diag: diag({

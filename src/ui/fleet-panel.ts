@@ -9,6 +9,7 @@ import type {
   UsageDelta,
   WorktreeDisposition,
 } from "../core/types.js";
+import { displayAgentType } from "../core/types.js";
 import { formatDuration } from "../core/format.js";
 
 // Re-exported for the ~10 existing consumers (tools/, commands/, ui/, stack,
@@ -390,7 +391,10 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
   return {
     runId: snapshot.runId,
     shortRunId: snapshot.runId.slice(0, 8),
-    type: opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType,
+    // consult §16.5 (acceptance follow-up): fold the main-session sentinel back
+    // to "main" at the render boundary — also covers snapshots persisted by
+    // older builds whose diag still carries the raw sentinel.
+    type: displayAgentType(opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType),
     label: snapshot.diag.label,
     model: formatModelRef(snapshot.diag.model),
     // Terminal rows freeze the trail (no live duration): a run killed mid-tool
