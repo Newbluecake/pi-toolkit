@@ -572,3 +572,96 @@ describe("cache-keepalive service — m1 fetch-reject late path (validation repo
     expect(final.window.aliveUntil).toBe(aliveUntilAfterReal); // not moved by the stale result
   });
 });
+
+// F1 (adaptive verification-2026-09-25): the service side of the keepalive ↔
+// adaptive arbitration — the tick consults the injected `adaptiveCoversPrefix`
+// dep, and `gapHorizonMs()` reports `undefined` whenever this pinger cannot ping.
+describe("cache-keepalive service — F1 arbitration with adaptive", () => {
+  it("stands down (terminal adaptive-1h skip, zero pings) while adaptive covers the prefix", async () => {
+    const fetchImpl = vi.fn(provenHitFetch());
+    const { service, clock } = harness({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      adaptiveCoversPrefix: () => true,
+    });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000);
+    await flush();
+    expect(service.report().lastSkip).toBe("adaptive-1h");
+    expect(service.report().window.pings).toBe(0);
+    expect(clock.pendingTimers).toBe(0); // terminal: the loop stopped
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("pings as before when the dep reports false, is absent, or throws", async () => {
+    for (const dep of [
+      () => false,
+      undefined,
+      () => {
+        throw new Error("boom");
+      },
+    ]) {
+      const { service, clock } = harness(dep === undefined ? {} : { adaptiveCoversPrefix: dep });
+      service.noteRequest(capture({}, service.instanceId));
+      service.noteRequestSettled("s1", service.instanceId);
+      clock.advance(245_000);
+      await flush();
+      expect(service.report().window.pings).toBe(1);
+      service.dispose();
+    }
+  });
+
+  it("gapHorizonMs = maxPings × interval + TTL on a pingable session", () => {
+    const { service } = harness();
+    expect(service.gapHorizonMs()).toBe(11 * 240_000 + 300_000);
+  });
+
+  it.each([
+    ["headless print mode", {}, { mode: "print" }],
+    [
+      "denied provider (per-request billing)",
+      {},
+      { model: { provider: "github-copilot", api: "anthropic-messages", id: "c", baseUrl: "" } },
+    ],
+    ["non-anthropic api", {}, { model: { provider: "openai", api: "openai-responses", id: "g", baseUrl: "" } }],
+    ["model unreadable", {}, { model: undefined }],
+  ])("gapHorizonMs is undefined for %s", (_name, deps, ctxOverrides) => {
+    const { service } = harness(deps, ctxOverrides);
+    expect(service.gapHorizonMs()).toBeUndefined();
+  });
+
+  it("gapHorizonMs is undefined when disabled, with a zero ping budget, on a non-streaming capture, after the session breaker, or once disposed", async () => {
+    const off = harness().service;
+    off.setEnabled(false);
+    expect(off.gapHorizonMs()).toBeUndefined();
+
+    const zero = createCacheKeepaliveService({
+      clock: new FakeClock(0),
+      ctx: fakeCtx() as never,
+      sessionId: "s1",
+      settings: { ...SETTINGS, keepaliveMaxPings: 0 },
+      backgroundBusy: () => true,
+      isCurrent: () => true,
+    });
+    expect(zero.gapHorizonMs()).toBeUndefined();
+
+    const ns = harness().service;
+    ns.noteRequest(capture({ payload: { messages: [], stream: false } }, ns.instanceId));
+    expect(ns.gapHorizonMs()).toBeUndefined();
+
+    const fetchImpl = vi.fn(async () =>
+      fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200 })]),
+    ) as unknown as typeof fetch;
+    const broken = harness({ fetchImpl });
+    broken.service.noteRequest(capture({}, broken.service.instanceId));
+    broken.service.noteRequestSettled("s1", broken.service.instanceId);
+    broken.clock.advance(240_000);
+    await flush();
+    expect(broken.service.report().session.disabled).toBeDefined();
+    expect(broken.service.gapHorizonMs()).toBeUndefined();
+
+    const gone = harness().service;
+    gone.dispose();
+    expect(gone.gapHorizonMs()).toBeUndefined();
+  });
+});
