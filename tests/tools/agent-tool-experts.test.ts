@@ -131,4 +131,30 @@ describe("Agent tool experts parameter", () => {
     await tool.execute("c", params(), undefined, undefined, undefined as never);
     expect(calls[0]!.consultExperts).toBeUndefined();
   });
+
+  it('the reserved "main" ref (kind:"main") flows through untouched — agent-tool.ts needs no §16-specific code', async () => {
+    // agent-tool.ts is deliberately unaware of §16: whatever resolveExperts
+    // (wireConsult) hands back for "main" is threaded through exactly like
+    // any other resolved ref — this is the whole point of putting all of
+    // §16's logic in src/consult/index.ts instead of here.
+    const mainRef: ConsultExpertRef = {
+      runId: "main",
+      label: "main",
+      sessionFile: "/tmp/host-main.jsonl",
+      agentType: "consult:main-snapshot",
+      kind: "main",
+    };
+    const resolved: ResolveExpertsResult = {
+      refs: [mainRef],
+      lines: ['expert "main" → the host main session'],
+      warnings: [],
+    };
+    const calls: SpawnRequest[] = [];
+    const tool = createAgentTool({ spawn: port(calls), resolveExperts: () => resolved });
+    const result = (await tool.execute("c", params(["main"]), undefined, undefined, undefined as never)) as {
+      content: Array<{ text: string }>;
+    };
+    expect(calls[0]!.consultExperts).toEqual([mainRef]);
+    expect(result.content.map((c) => c.text).join("\n")).toContain("the host main session");
+  });
 });

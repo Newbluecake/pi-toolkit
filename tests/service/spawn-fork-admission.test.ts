@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { createSpawnService } from "../../src/service/spawn-service.js";
+import { CONSULT_MAIN_AGENT_TYPE } from "../../src/core/types.js";
 import type { AgentTypeConfig, RunOutcome, StopCause } from "../../src/core/types.js";
 import type { Runner, SlotPool } from "../../src/service/ports.js";
 
@@ -262,6 +263,61 @@ describe("SpawnService: consult fork admission (T-7)", () => {
     if ("error" in top) throw new Error(top.error.message);
     const child = await svc.spawn({ type: "worker", prompt: "b", parentRunId: top.runId });
     expect("error" in child).toBe(false);
+  });
+});
+
+/**
+ * consult (plan §16 "consult the main session"): the "no type" admission
+ * branch for `CONSULT_MAIN_AGENT_TYPE`. No agent type of that name is ever
+ * registered here — the point is that admission still succeeds when
+ * `forkSessionFrom` is set, and still fails exactly like any other unknown
+ * type when it is not.
+ */
+describe('SpawnService: consult("main") no-type fork admission (§16)', () => {
+  it("admits a fork request naming CONSULT_MAIN_AGENT_TYPE even though it is registered nowhere", async () => {
+    const { runner } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([askerType]), pool, runner, now: () => 0 });
+    const asker = await svc.spawn({ type: "asker", prompt: "a" });
+    if ("error" in asker) throw new Error(asker.error.message);
+
+    const consult = await svc.spawn({
+      type: CONSULT_MAIN_AGENT_TYPE,
+      prompt: "question for main",
+      parentRunId: asker.runId,
+      forkSessionFrom: forkFile(),
+    });
+    expect("error" in consult).toBe(false);
+    if ("error" in consult) throw new Error(consult.error.message);
+    expect(consult.label).toBeTruthy();
+  });
+
+  it("still rejects CONSULT_MAIN_AGENT_TYPE without forkSessionFrom as an unknown type", async () => {
+    const { runner } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([askerType]), pool, runner, now: () => 0 });
+    const asker = await svc.spawn({ type: "asker", prompt: "a" });
+    if ("error" in asker) throw new Error(asker.error.message);
+
+    const rejected = await svc.spawn({ type: CONSULT_MAIN_AGENT_TYPE, prompt: "q", parentRunId: asker.runId });
+    expect("error" in rejected).toBe(true);
+    if (!("error" in rejected)) throw new Error("expected an error");
+    expect(rejected.error.message).toContain(`unknown agent type: ${CONSULT_MAIN_AGENT_TYPE}`);
+  });
+
+  it("a real registered type literally named CONSULT_MAIN_AGENT_TYPE is untouched by the bypass", async () => {
+    // §16: the bypass is keyed off the sentinel string AND forkSessionFrom
+    // together — a real type sharing that exact name (contrived, but the
+    // collision the design deliberately avoids) still resolves through the
+    // registry for a PLAIN dispatch (no forkSessionFrom).
+    const shadow: AgentTypeConfig = {
+      name: CONSULT_MAIN_AGENT_TYPE,
+      description: "a real type that happens to share the sentinel name",
+      systemPrompt: "real prompt",
+      promptMode: "append",
+    };
+    const { runner } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([shadow]), pool, runner, now: () => 0 });
+    const plain = await svc.spawn({ type: CONSULT_MAIN_AGENT_TYPE, prompt: "q" });
+    expect("error" in plain).toBe(false);
   });
 });
 

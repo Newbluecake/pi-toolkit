@@ -14,9 +14,11 @@ import { join, resolve } from "node:path";
 import { SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  checkForkConsistency,
   consultSessionDir,
   FORK_TTL_MS,
   forkExpertSession,
+  forkMainSessionSnapshot,
   readHeaderCwd,
   removeForkFile,
   resolveForkCwd,
@@ -300,5 +302,141 @@ describe("consult fork-store: removeForkFile / consultSessionDir", () => {
 
   it("consultSessionDir is pi's agent dir cache (review-1 #15)", () => {
     expect(consultSessionDir()).toBe(join(getAgentDir(), "cache", "consult-sessions"));
+  });
+});
+
+/**
+ * consult (plan §16 rule 5): the host main session is live — unlike a
+ * terminal expert, its file can be concurrently appended to or wholesale
+ * rewritten (`_rewriteFile`, e.g. across `/compact`) at the exact moment a
+ * background subagent calls `consult("main", …)`. `checkForkConsistency`
+ * is the detection primitive; `forkMainSessionSnapshot` wraps it with one
+ * retry. Genuinely racing a concurrent rewrite deterministically in a unit
+ * test is impractical, so these tests exercise the SAME code path with a
+ * hand-crafted source whose corruption is reproducible on every attempt —
+ * `checkForkConsistency` cannot tell "a rewrite landed mid-copy" apart from
+ * "the source's Nth line was already malformed", which is exactly the
+ * point: it only needs to notice *some* line other than the last failed to
+ * parse.
+ */
+describe("consult fork-store: checkForkConsistency (§16 rule 5)", () => {
+  it("accepts a well-formed multi-line fork file", () => {
+    const dir = tempDir();
+    const file = join(dir, "good.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir }),
+        JSON.stringify({ type: "message", id: "m1" }),
+        JSON.stringify({ type: "message", id: "m2" }),
+        "",
+      ].join("\n"),
+    );
+    expect(checkForkConsistency(file)).toEqual({ ok: true });
+  });
+
+  it("tolerates a genuinely incomplete FINAL line (ordinary mid-append capture)", () => {
+    const dir = tempDir();
+    const file = join(dir, "trailing-partial.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir }),
+        JSON.stringify({ type: "message", id: "m1" }),
+        '{"type":"message","id":"m2", "unterminat', // no trailing newline — genuinely incomplete
+      ].join("\n"),
+    );
+    expect(checkForkConsistency(file)).toEqual({ ok: true });
+  });
+
+  it("rejects a MIDDLE line that fails to parse (mid-file corruption signature)", () => {
+    const dir = tempDir();
+    const file = join(dir, "mid-corrupt.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir }),
+        '{"type":"message", this is not valid json at all', // corrupted, NOT the last line
+        JSON.stringify({ type: "message", id: "m2" }),
+        "",
+      ].join("\n"),
+    );
+    const check = checkForkConsistency(file);
+    expect(check.ok).toBe(false);
+    if (!check.ok) expect(check.reason).toContain("mid-fork");
+  });
+
+  it("rejects a header line that is not valid JSON, or not a session header", () => {
+    const dir = tempDir();
+    const badJson = join(dir, "bad-header.jsonl");
+    writeFileSync(badJson, "not json at all\n");
+    expect(checkForkConsistency(badJson).ok).toBe(false);
+
+    const notHeader = join(dir, "not-a-header.jsonl");
+    writeFileSync(notHeader, `${JSON.stringify({ type: "message", id: "m1" })}\n`);
+    expect(checkForkConsistency(notHeader).ok).toBe(false);
+  });
+
+  it("rejects an empty file", () => {
+    const dir = tempDir();
+    const empty = join(dir, "empty.jsonl");
+    writeFileSync(empty, "");
+    expect(checkForkConsistency(empty).ok).toBe(false);
+  });
+});
+
+describe("consult fork-store: forkMainSessionSnapshot (§16 rule 5)", () => {
+  it("a consistent source forks successfully in a single attempt, same contract as forkExpertSession", () => {
+    const dir = tempDir();
+    const targetDir = tempDir();
+    const source = join(dir, "main.jsonl");
+    writeFileSync(
+      source,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir }),
+        JSON.stringify({ type: "message", id: "m1" }),
+        "",
+      ].join("\n"),
+    );
+    const result = forkMainSessionSnapshot(source, dir, targetDir);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(checkForkConsistency(result.path)).toEqual({ ok: true });
+      expect(readFileSync(result.path, "utf8")).toContain('"parentSession"');
+    }
+  });
+
+  it("retries once on a reproducibly-inconsistent source, then gives up and leaves no fork file behind", () => {
+    const dir = tempDir();
+    const targetDir = tempDir();
+    const source = join(dir, "corrupt-main.jsonl");
+    // A source whose SECOND (non-last) line is malformed: forkExpertSession's
+    // verbatim byte copy reproduces it faithfully on EVERY attempt, so the
+    // post-copy consistency check fails deterministically both times —
+    // exercising the exact "detect, delete, retry once, still bad, give up"
+    // path a genuine concurrent-rewrite race would also hit.
+    writeFileSync(
+      source,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: dir }),
+        '{"type":"message", not valid json',
+        JSON.stringify({ type: "message", id: "m2" }),
+        "",
+      ].join("\n"),
+    );
+    let n = 0;
+    const result = forkMainSessionSnapshot(source, dir, targetDir, { newId: () => `attempt-${++n}` });
+    expect(result).toEqual({ ok: false, reason: expect.stringContaining("inconsistent after retry") });
+    if (!result.ok) expect(result.reason).toContain("mid-fork");
+    // Both attempted copies were cleaned up — no residue in the target dir.
+    expect(readdirSync(targetDir)).toHaveLength(0);
+  });
+
+  it("a hard forkExpertSession failure (e.g. unreadable source) surfaces immediately, no retry", () => {
+    const dir = tempDir();
+    const targetDir = tempDir();
+    const result = forkMainSessionSnapshot(join(dir, "does-not-exist.jsonl"), dir, targetDir);
+    expect(result.ok).toBe(false);
+    expect(readdirSync(targetDir)).toHaveLength(0);
   });
 });

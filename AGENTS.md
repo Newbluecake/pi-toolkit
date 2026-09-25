@@ -149,9 +149,15 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   enforced at both pi `sessionSpec.tools` and tool-scope; no injections, cannot spawn) answers,
   and the fork file is deleted when the runner reaps it (`RunnerDeps.onReaped`). Guards: first
   request cost / context preflight, turn-boundary turn and cost caps (`watcher.ts`, cap aborts map
-  to `user_stop`). The main session never registers the tool (v1); `consult.enabled=false`
-  leaves the wiring inert. Wired in `src/stack.ts` through a late-bound ref. Design + test
-  anchors: `docs/dev/consult/plan.md`.
+  to `user_stop`). The main session never registers the tool itself, but a reserved expert id
+  `"main"` (`Agent({ experts: ["main"] })`, priority over any same-named label/run) lets a
+  dispatched child consult the HOST main session the same way — live facts (session file / model /
+  context usage) come from `main-facts.ts` read fresh off the `ExtensionContext` on every call
+  (never a dispatch-time snapshot), and the fork gets an extra post-copy consistency check +
+  one retry (`forkMainSessionSnapshot`) because that file, unlike a finished expert's, can be
+  concurrently appended to or rewritten. `consult.enabled=false` leaves the wiring inert (both
+  forms). Wired in `src/stack.ts` through a late-bound ref. Design + test anchors:
+  `docs/dev/consult/plan.md`.
 - `src/hud/` — merged pi-hud: full footer takeover (git/worktrees, token & cost stats incl.
   live subagent cost, LLM timing/speed, own `toolkit v<ver>@<commit>[*] <commit time>` at the end of the cwd/git line with the model right-aligned on it — read once per activate by `plugin-info.ts`, git fields only when the package root is itself the git toplevel) + status key `pi-hud` + `/pi-hud-refresh` + settings-gated
   periodic `git fetch` (`hud.autoFetchMinutes`, default 5, 0 = off — the ↑/↓ counts compare against

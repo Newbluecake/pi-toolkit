@@ -7,7 +7,9 @@ import { toErrorInfo } from "../core/errors.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import { formatModelCandidates, formatUnknownModelError, type ModelCandidate } from "../config/model-hint.js";
 import type { QuotaGateVerdict } from "../quota/gate.js";
+import { CONSULT_MAIN_AGENT_TYPE } from "../core/types.js";
 import type {
+  AgentTypeConfig,
   DeadlineBudget,
   ErrorInfo,
   RunId,
@@ -25,6 +27,26 @@ import {
   type ResolveResumeResult,
   type ResolveRunResult,
 } from "./resolve-target.js";
+
+/**
+ * consult (plan §16): the "no type" admission branch for `consult("main",
+ * …)` — a static, in-memory `AgentTypeConfig` used ONLY when a request names
+ * `CONSULT_MAIN_AGENT_TYPE` AND carries `forkSessionFrom`. Deliberately NOT
+ * registered anywhere (no `AgentTypeRegistry` involvement at all): it never
+ * appears in `list()`/the system-prompt agent-types section, and a plain
+ * dispatch of this type name (no `forkSessionFrom`) is rejected exactly like
+ * any other unknown type, since `deps.types.get()` is only ever bypassed
+ * below when both conditions hold. Every field the runtime adapter forces
+ * for a consult run anyway (tools, prompt) is irrelevant here; this only
+ * needs to exist so admission has *some* config to build the run's
+ * RunnerSpec from.
+ */
+const MAIN_SNAPSHOT_TYPE_CONFIG: AgentTypeConfig = {
+  name: CONSULT_MAIN_AGENT_TYPE,
+  description: 'Internal: a read-only fork of the host main session (consult("main", …) only).',
+  systemPrompt: "",
+  promptMode: "append",
+};
 
 export interface SpawnLabelTarget {
   readonly runId: RunId;
@@ -298,7 +320,15 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // effects: no runId, no index writes, no H2, no worktree, no slot.
       if (req.deadlineAt !== undefined && req.deadlineAt <= now())
         return { error: { kind: "config", message: "deadlineAt already expired", retryable: false } };
-      const config = deps.types.get(req.type);
+      // consult (plan §16): the "no type" bypass for `consult("main", …)` —
+      // never touches `deps.types` at all when it fires, so it has zero
+      // effect on the registry, `list()`, or a real type of the same name
+      // dispatched WITHOUT a forkSessionFrom (that still falls through to
+      // the normal lookup below and is rejected as unknown, same as today).
+      const config =
+        req.type === CONSULT_MAIN_AGENT_TYPE && req.forkSessionFrom !== undefined
+          ? MAIN_SNAPSHOT_TYPE_CONFIG
+          : deps.types.get(req.type);
       if (!config) {
         // Self-correcting error: list the valid names so a model that missed
         // (or predates) the system-prompt type section recovers in one turn

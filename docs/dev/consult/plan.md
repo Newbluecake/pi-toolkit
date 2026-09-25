@@ -868,3 +868,168 @@ export interface ConsultSettings {
 | 10  | 建议   | **采纳（两小条全收）**            | §13 #3 行、§4.1 watcher 判据                                                                                            | ① §13（review-1）#3 的理由列开头补「**（v2 原文；结论已被 §12 最终确认与 §14 #8 取代——现行口径是方案 B）**」，只扫表的人不会再误读成「现在按 A 施工」。② 判新 turn 的理由改为「`lastTurnStartAt` 是粘滞字段，即便将来引入快照节流/合并也不会漏判」，并注明评审核实的事实：`onStateChange` 在每次 `dispatch` 后无条件触发、每个 `session_event` 一条快照，**快照并不合并**，两种判据当前等价——选择无害但理由原先不成立。                                                                                                                                                                                                                                                                                                                        |
 
 **冻结前 checklist（包 A 合并门）**：① `StopCause` 未被修改（`git diff src/core/types.ts` 不含 `StopCause` 行）；② `ConsultSettings` 为七字段且 `maxFirstRequestUsd`/`maxCostUsd` 默认 2/4；③ `matchRunId` 已导出；④ `forkExpertSession` 签名为结果对象；⑤ `CONSULT_READONLY_TOOLS` 与 `onReaped(runId, forkSessionFrom?)` 与 v3 一致。
+
+## §16 修订：请教主会话（保留 id `main`）
+
+> 用户已拍板（见任务对话，非本文档评审轮次产物）：子 agent 能用 `consult` 请教**主会话**，与请教其它专家
+> **完全相同的方案**（fork 专家持久化会话 → 只读请教 run 作答，B 形态），只是主会话用一个**保留的专家 id：
+> `main`**。本节记录施工口径、与 v3.1 既有设计的差异点，以及为什么每一处差异都选了「代价最小」的实现。
+
+### 16.1 规则（已定，逐条落实）
+
+1. **授权 = 白名单**：只有派发时 `Agent({ experts: ["main", ...] })` 显式列出 `main` 的子 agent 才获得对主
+   会话的 consult。不新增设置开关（`consult.enabled=false` 仍整体关闭两种形态）。嵌套子 agent 派发时列
+   `main` 同样可用——`resolveExperts` 是 `wireConsult` 闭包里唯一一份实现，顶层与嵌套 Agent 工具共用同一
+   个函数引用（`src/service/runtime-adapter.ts` 的 `consultResolveExperts` 与 `src/index.ts` 的顶层
+   `resolveExperts` 都转发到它），因此“main 永远指向宿主主会话”这一点不需要在 agent-tool.ts 里做任何区分。
+2. **保留名**：`CONSULT_MAIN_EXPERT_ID = "main"` 在 `resolveExperts` 的每个 handle 循环体最前面被检查——
+   命中就直接构造 main 的 ref 并 `continue`，**从不落入**下面 id/label 并集的解析逻辑，因此即便某个真实
+   run 用 label `"main"` 结束，也不会被误当成宿主主会话（反之亦然：写进白名单的 `"main"` 永远指向主会话，
+   不会被同名 run 抢先）。见 `tests/consult/wire.test.ts` 的 “main” takes priority over a live run 用例。
+3. **快照时机**：`consult("main", …)` 每次调用时才读 `mainSessionFacts()`（`src/consult/main-facts.ts`），
+   而不是 `Agent({experts})` 派发时缓存的值——工具执行路径里 `sessionFile`/`model`/`tokens`/`percent` 全部
+   来自这次调用现读的结果，`ref` 上缓存的（派发时）字段只在 `resolveExperts` 阶段短暂存在，consult 工具
+   对 `kind:"main"` 的 ref 完全不读它们（见 16.3）。主会话 `--no-session`（`ctx.sessionManager.getSessionFile()`
+   返回 `undefined`）⇒ 派发时 `resolveExperts(["main"])` 直接 throw 配置错，文案含 `--no-session`，与其它
+   解析失败同类（不是 consult 调用时才发现，是**派发时**就能拒绝，节省一次来回）。
+4. **守卫**：沿用全部现有守卫（`maxFirstRequestUsd` 首请求预检、上下文 ≥75% 预检、只读工具域、maxTurns /
+   maxCostUsd、并发上限、`consult.timeoutMs` 硬顶）。差异仅两点，且都在 `src/consult/tool.ts` 的
+   `execute()` 里用 `const isMain = ref.kind === "main"` 一次性分岔，不是散落各处的字符串比较：
+   - **跳过「专家仍在运行」nack**：`isMain` 为真时完全不执行 `deps.query.get(ref.runId)` 与按 sessionFile
+     扫描 live 运行中 run 的两段逻辑（主会话恒在运行，这两段本来就该永远判"否"——显式跳过比"让它自然
+     判否"更诚实，也防着将来谁往 query registry 里塞进一条 `runId:"main"` 的记录）。
+   - **首请求预检不得因数据缺失而跳过**：`tokens`/`model` 二者之一缺失（`mainSessionFacts()` 没拿到
+     `ctx.model` 或 `ctx.getContextUsage()`）⇒ 直接 nack `unavailable`（文案："cannot estimate the
+     first-request cost right now"），**不**像真专家那样静默跳过预检退回给 turn-boundary 帽兜底——因为
+     宿主会话理应总是有模型/用量，缺失是异常信号，不是"这次没有这项数据而已"。上下文百分比预检本身仍是
+     "缺失即跳过"（与真专家一致），只有**成本预检**的缺失口径更严格。
+5. **fork 一致性**：主会话 jsonl 在 consult 调用瞬间可能正被追加，也可能被 `_rewriteFile` 整体重写（如
+   `/compact`）。`forkExpertSession` 的字节区间拷贝在这种情况下可能拷出"横跨两代内容"的半成品——`pi` 的
+   加载器只对**最后一行**的半截宽容，中间行解析失败说明真的错了。`checkForkConsistency`
+   （`src/consult/fork-store.ts`）复制后重读整个 fork 文件：header 必须解析且是合法 session header；
+   除最后一行外任何一行解析失败 ⇒ 判定不一致。`forkMainSessionSnapshot` 包一层：不一致就删掉这次的 fork
+   文件、**立即重试一次**（不 sleep——本模块全同步 fs，AGENTS.md 的零挂死不变量不允许为重试引入一个真的
+   等待；由并发写者的时序自然错开来兜底），仍失败 ⇒ `{ok:false, reason:"fork_failed: inconsistent after
+retry (...)"}`，consult 工具按现有"fork 失败"分支 nack `unavailable`，**不抛**，且此时还没有发生任何
+   `spawn`。真专家的会话是终态文件，不会有这个问题，继续用未加检查的 `forkExpertSession`——两条路径都在
+   `ConsultForkStore.forkMainSession?`（可选方法）与 `forkExpertSession`（必选方法）上分开，consult 工具
+   在 `isMain` 时优先用前者、缺失时优雅退回后者（`tests/consult/consult-tool.test.ts` 两个用例分别锁定）。
+   `/tree` 切换分支只改内存 leaf、不改会话文件本身，fork 以磁盘文件为准——这里也接受，理由与真专家一致
+   （§5.1 已有的声明同样适用：fork 永远是"文件当前内容"的快照，不是"某个内存分支"的快照）。
+6. **类型**：请教主会话的 consult run 需要一个 `agentType` 才能过 `spawn-service.ts` 的准入（构造
+   `RunnerSpec` 要有 `config: AgentTypeConfig`）。两个候选方案：
+   - **内置伪类型**：往 `AgentTypeRegistry` 里注册一个真实存在的类型（如 `main-snapshot`），靠
+     `list()`/系统提示的"可派发类型"清单过滤把它排除在外。
+   - **"无类型"分支**（**已选**）：`spawn-service.ts` 的 `spawn()` 在查 `deps.types.get(req.type)`
+     **之前**先判一次 `req.type === CONSULT_MAIN_AGENT_TYPE && req.forkSessionFrom !== undefined`——命中
+     就直接用一个模块级、`AgentTypeRegistry` 完全不知情的静态 `AgentTypeConfig`
+     （`MAIN_SNAPSHOT_TYPE_CONFIG`）；不命中（没有 `forkSessionFrom`，即有人想直接拿这个哨兵名字去派发一
+     个"新鲜"会话）就照常查注册表，几乎总是查不到，跟其它未知类型名一模一样地报错。
+   - **理由（选"无类型"而非"内置类型"）**：往注册表里塞一个类型意味着必须再教会 `list()`/
+     `formatAgentTypesForPrompt()`/`configHashOf()` 这三个消费者"这个类型是隐藏的"——每加一个消费者就多
+     一处要记得同步排除的地方，而且 `AgentTypeRegistry` 是**跨会话共享**的抽象（每次 `session_start` 都
+     `types.reload()`），往里注入东西天然有更大的作用域。"无类型"分支完全不碰 `AgentTypeRegistry`：
+     `deps.types.get()`/`deps.types.list()` 的实现、返回值、调用者可见行为**全部零改动**——`spawn-service.ts`
+     里唯一新增的是三行（一个模块级常量 + 一个三元表达式），且只在 `forkSessionFrom` 同时成立时才生效，
+     真实爆炸半径就是"main-snapshot 请教 run 的准入"这一条路径。**收尾的碰撞风险**：为什么
+     `CONSULT_MAIN_AGENT_TYPE`（`"consult:main-snapshot"`）不干脆直接用 `"main"`——如果一个用户真的在
+     `.pi/agents/main.md` 里定义了名叫 `main` 的类型，并把某次这个类型的 run 当成**普通专家**（不是保留
+     id，是 label/run_id 匹配到的真实专家）加进白名单，之后被正常请教时 `port.spawn({type: ref.agentType
+/* = "main" */, forkSessionFrom, ...})` 会命中同一个分支，拿到的是我们的合成配置而不是用户在
+     `main.md` 里写的真配置（对 consult run 而言唯一有实际影响的字段是 `thinkingLevel`，因为 tools/prompt
+     早被 `isConsultRun` 分支强制覆盖）。用两个不同的哨兵值（`CONSULT_MAIN_EXPERT_ID="main"` 给
+     `resolveExperts` 的 handle 匹配、`CONSULT_MAIN_AGENT_TYPE="consult:main-snapshot"` 给
+     `ref.agentType`/spawn 准入）把这个极窄的碰撞面直接消掉，成本是一个字符串常量，值得付。
+     `tests/service/spawn-fork-admission.test.ts` 里専门有一条用例断言"一个真的叫
+     `consult:main-snapshot` 的注册类型在**不带** `forkSessionFrom` 的普通派发下完全走正常路径"，把这条
+     不变量锁死。
+7. **prompt**：`buildConsultPrompt`（`src/consult/prompt.ts`）新增可选 `isMain?: boolean`，为真时在只读
+   工具声明之后多插两句：只回答与问题相关的决策/偏好/上下文，不要复述凭据或无关对话；上下文里没有就直接
+   说没有、不要猜测（提醒它自己可能已经被 `compact_context`/`switch_context` 折叠过）。其余部分（结论先行
+   /字数上限/只读工具清单/Budget note）与专家路径完全共享同一份模板。
+8. **可观测**：
+   - consult 工具结果 `details.expertRunId`/`expertLabel` 都是 `"main"`（`buildMainRef` 把 `runId`/`label`
+     都设成 `CONSULT_MAIN_EXPERT_ID`），调度方/模型在工具输出里直接看到 `"main"`，不会看到内部哨兵类型名。
+   - `renderExpertRoster`/`describeWhitelist`（`src/consult/tool.ts`）加了一条通用护栏——`label === runId`
+     时不再重复拼 `"main (main)"`，只显示一次；顺带把 `kind:"main"` 的一行渲染成"the host main session"
+     而不是 `ref.agentType || "agent"`（否则会在自己的工具描述里印出 `consult:main-snapshot` 这种实现
+     细节）。
+   - fleet 嵌套行：`RunDisplayMeta.agentType` 目前就是 `spec.type.name`，对 main 请教 run 而言就是
+     `CONSULT_MAIN_AGENT_TYPE`——**本次未改** `runtime-adapter.ts` 去做展示层覆盖（评估过"一行把
+     `agentType` 映射回 `main`"的方案，但 `consultOf` 这条展示通路本身在 fleet 面板里还没有被渲染消费者
+     读取，见 `rg -n "consultOf" src` 只命中类型定义——为一个尚未被任何 UI 读取的字段加特判，价值现在是
+     负的；等 fleet 真的开始渲染嵌套 consult 行时再一并处理，已记入"遗留"）。ExpertIndex 不受影响：main
+     从不落盘为 `subagent:run` 条目（它根本不是一个被 spawn 的 run），`rebuildFromEntries` 天然不会收到它。
+9. **`ConsultExpertRef` 扩展**：加了一个可选字段 `kind?: "run" | "main"`（默认省略 = `"run"`，即所有
+   v3.1 已有的 ref 语义零改动）。`freeze-surface.test.ts` 原有的 "carries the dispatch-time snapshot
+   fields" 用例继续用不带 `kind` 的 ref 断言，证明这确实是纯加法。
+
+### 16.2 未采纳的备选（及理由）
+
+- **给 `ConsultExpertRef` 单独开一个 `MainExpertRef` 联合类型**：会让 `whitelist: readonly
+ConsultExpertRef[]` 这个到处传递的类型变成一个更复杂的判别联合，`matchExpertRef`/`renderExpertRoster`
+  等函数要多写类型收窄。一个可选 `kind` 字段能达到同样的运行时区分效果，且对现有代码零侵入。
+- **主会话也注册 `consult` 工具（能反过来问自己的子 agent）**：任务描述明确排除（"主会话不注册 consult
+  工具"沿用 OQ2 结论），未实现。
+- **`consult.expertTools`/`consult.mainReadonly` 之类的新旋钮**：任务要求"不新增设置开关"，两种形态共用
+  同一套 `ConsultSettings`（`maxTurns`/`maxCostUsd`/`timeoutMs`/…）。
+
+### 16.3 与 v3.1 既有设计的接缝（供后续维护者核对）
+
+- `src/core/types.ts`：`ConsultExpertRef.kind?`、`CONSULT_MAIN_EXPERT_ID`、`CONSULT_MAIN_AGENT_TYPE`。
+  **`StopCause` 依旧未动**——16.1 的两点差异都在 consult 工具内部的分支判断，从不触碰状态机。
+- `src/service/spawn-service.ts`：`spawn()` 里 `deps.types.get(req.type)` 前面插一个三元表达式，见 16.1
+  第 6 条。**`canSpawn` 分支、nesting 写入、resumeLocks 互斥全部沿用现有 fork 分支**——main 请教 run 只是
+  "又一个 `forkSessionFrom` 请求"，深度计算、并发/预算硬顶、无 `canSpawn` 传递这些既有不变量原样生效。
+- `src/consult/main-facts.ts`（新增，pi-free）：`MainSessionFacts`/`MainSessionFactsProvider` 类型。
+- `src/consult/fork-store.ts`：新增 `checkForkConsistency`（导出为测试缝）、`forkMainSessionSnapshot`。
+  `forkExpertSession` 本体**零改动**。
+- `src/consult/tool.ts`：`ConsultForkStore.forkMainSession?`（可选方法）、`ConsultDeps.mainSessionFacts?`；
+  `execute()` 内 `isMain` 分支（16.1 第 4/5 条）；`renderExpertRoster`/`describeWhitelist` 的展示护栏。
+- `src/consult/prompt.ts`：`buildConsultPrompt` 新增 `isMain?` 可选参数。
+- `src/consult/index.ts`：`WireConsultDeps.mainSessionFacts?`；`resolveExperts` 循环体最前面的保留字判断
+  - `buildMainRef()`；`depsFactory` 把 `mainFacts` 转发进 `createConsultTool`。
+- `src/stack.ts`：`mainSessionFactsFrom(ctx)`——直接读 `ctx.sessionManager.getSessionFile()` /
+  `ctx.model` / `ctx.getContextUsage()`；这个 `ctx` 就是 `session_start` 传进 `buildSessionStack` 的那个,
+  长期存活、可在会话生命周期内任意时刻调用（`src/hud/footer.ts` 的 `installFooter` 早就是这样用的——它把
+  同一个 `ctx` 存进闭包，每次 footer 重绘都调 `ctx.sessionManager.getEntries()`/`ctx.model` 拿到当时刻的
+  真实值，本仓库里这是"`ctx` 在会话内保持活对象"的既有证据，不是本次新引入的假设）。`consultForkStore`
+  新增 `forkMainSession` 转发到 `forkMainSessionSnapshot`。
+- `src/tools/agent-tool.ts`：`experts` 参数描述追加一句关于保留 id `main` 的说明；**参数 schema 本身
+  不变**（仍是 `string[]`），`execute()` 逻辑不变——"main"只是白名单数组里合法的一个字符串，agent-tool.ts
+  从头到尾不知道它有特殊含义（这正是 16.1 第 1 条"整个特性只活在 `resolveExperts` 里"想要的效果，见
+  `tests/tools/agent-tool-experts.test.ts` 新增用例的断言标题）。
+
+### 16.4 测试清单（新增，未在 v3.1 §9 出现）
+
+- `tests/service/spawn-fork-admission.test.ts`：`main` 无类型分支准入通过 / 不带 `forkSessionFrom` 时按
+  未知类型拒绝 / 真实同名注册类型的普通派发不受影响。
+- `tests/consult/wire.test.ts`：`resolveExperts(["main"])` 走通（携带 model/context）/ 无会话文件（含
+  provider 未注入的安全默认）报配置错 / 会话文件已从磁盘消失报配置错 / 与同名 label 冲突时 main 优先 /
+  `consult.enabled=false` 时 main 同样被拦。
+- `tests/consult/consult-tool.test.ts`：跳过 still_running（即便人为构造一个同 runId/sessionFile 的活跃
+  run）/ 缺 tokens 或缺 model 均硬 nack（不静默跳过）/ 真专家路径的"缺失即跳过"行为不受影响（回归锚点）/
+  ≥75% 上下文预检对 main 同样生效、且用的是实时值而非陈旧快照 / 优先走 `forkMainSession`、store 未提供时
+  优雅退回 `forkExpertSession` / `modelOverride` 用的是实时模型而非派发时缓存值 / prompt 含 main 专属两句
+  / 未被列入白名单的子 agent 请求 `main` 仍走"不在白名单"的通用 throw（不是绕过白名单的全局后门）。
+- `tests/consult/fork-store.test.ts`：`checkForkConsistency` 的六种输入形状（正常/仅末行不完整/中间行损坏
+  /header 非法 JSON/header 非 session 类型/空文件）；`forkMainSessionSnapshot` 的三种结局（一次成功、
+  可复现的不一致重试一次后放弃且不留残留文件、`forkExpertSession` 本身硬失败时不重试直接透传）。
+- `tests/tools/agent-tool-experts.test.ts`：`resolveExperts` 返回 `kind:"main"` 的 ref 时，agent-tool.ts
+  原样转发（零特判）且回显文案含"the host main session"。
+- `tests/integration/consult-wiring.test.ts`：经真实 `buildSessionStack` 的 `ctx.sessionManager
+.getSessionFile()`/`ctx.model`/`ctx.getContextUsage()` 端到端解析出 main 的 ref；一次真实的
+  `consult("main", …)` 调用让假驱动的第二次 `resume` 调用带着一个**不同于**主会话文件路径的
+  `forkSessionFrom`（fork 副本，不是原文件）。
+
+### 16.5 已知遗留 / 偏离
+
+- fleet 面板尚未渲染 `consultOf`/嵌套 consult 行本身（v3.1 §11-1 已记录为"未实测"的既有缺口）——main 请教
+  run 的 `displayMeta.agentType` 会显示内部哨兵串 `consult:main-snapshot` 而不是 `"main"`；等 fleet 真正
+  开始渲染这条信息时一并修（一行 `agentType === CONSULT_MAIN_AGENT_TYPE ? CONSULT_MAIN_EXPERT_ID :
+agentType` 的展示层映射，不影响本节任何既有断言）。
+- fork 一致性重试**不做真实的时间退避**（同步、立即重试）——已在 16.1 第 5 条写明理由（零挂死不变量 +
+  本模块全同步 fs 的既有约束），这是有意选择，不是遗漏。
+- `checkForkConsistency` 对 >32MB 的 fork 文件直接信任拷贝、不重新解析（性能兜底，与 `forkExpertSession`
+  本身"整链耗时"顾虑同源）——没有为这一分支单独写测试（会需要构造一个 32MB+ 的临时文件，拖慢测试套件），
+  作为已知的、代价可控的测试盲区记录在此。

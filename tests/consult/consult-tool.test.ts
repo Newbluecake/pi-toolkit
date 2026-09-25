@@ -21,6 +21,8 @@ import {
   type ConsultSpawnPort,
 } from "../../src/consult/tool.js";
 import { CONSULT_READONLY_TOOLS } from "../../src/runtime/tool-scope.js";
+import { CONSULT_MAIN_AGENT_TYPE, CONSULT_MAIN_EXPERT_ID } from "../../src/core/types.js";
+import type { MainSessionFacts } from "../../src/consult/main-facts.js";
 
 /**
  * T-2/T-3/T-4/T-5 (consult plan §9): the consult tool's gate/nack surface,
@@ -58,6 +60,23 @@ function ref(overrides: Partial<ConsultExpertRef> = {}): ConsultExpertRef {
   // sessionFile is resolved here (not in baseRef) because the tmp file only
   // exists after beforeAll — a module-level constant would capture undefined.
   return { ...baseRef, sessionFile: expertSessionFile, ...overrides };
+}
+
+/**
+ * consult (plan §16 "consult the main session"): the reserved-id ref
+ * `wireConsult.resolveExperts(["main"])` produces (see tests/consult/wire.test.ts
+ * for the resolution side) — a whitelist entry a subagent's OWN consult
+ * tool receives after `Agent({ experts: ["main"] })`.
+ */
+function mainRef(overrides: Partial<ConsultExpertRef> = {}): ConsultExpertRef {
+  return {
+    runId: CONSULT_MAIN_EXPERT_ID,
+    label: CONSULT_MAIN_EXPERT_ID,
+    sessionFile: expertSessionFile,
+    agentType: CONSULT_MAIN_AGENT_TYPE,
+    kind: "main",
+    ...overrides,
+  };
 }
 
 // ── fakes ──────────────────────────────────────────────────────────────────
@@ -134,8 +153,9 @@ class FakePort implements ConsultSpawnPort {
   }
 }
 
-function makeForkStore(opts: { fail?: boolean; cwd?: string } = {}) {
+function makeForkStore(opts: { fail?: boolean; cwd?: string; withMainSession?: boolean } = {}) {
   const calls: Array<{ source: string; fallbackCwd: string }> = [];
+  const mainCalls: Array<{ source: string; fallbackCwd: string }> = [];
   const removed: string[] = [];
   const store: ConsultForkStore = {
     forkExpertSession: (sourceFile, fallbackCwd) => {
@@ -146,8 +166,18 @@ function makeForkStore(opts: { fail?: boolean; cwd?: string } = {}) {
       removed.push(path);
     },
     resolveForkCwd: (_source, fallbackCwd) => opts.cwd ?? fallbackCwd,
+    ...(opts.withMainSession
+      ? {
+          forkMainSession: (sourceFile, fallbackCwd) => {
+            mainCalls.push({ source: sourceFile, fallbackCwd });
+            return opts.fail
+              ? { ok: false, reason: "source file has no session header" }
+              : { ok: true, path: FORK_PATH };
+          },
+        }
+      : {}),
   };
-  return { store, calls, removed };
+  return { store, calls, mainCalls, removed };
 }
 
 function completedOutcome(text: string): RunOutcome {
@@ -199,6 +229,7 @@ function harness(
     settings?: Partial<ConsultSettings>;
     fork?: ReturnType<typeof makeForkStore>;
     port?: FakePort;
+    mainSessionFacts?: () => MainSessionFacts;
   } = {},
 ): Harness {
   const port = opts.port ?? new FakePort();
@@ -224,6 +255,7 @@ function harness(
       },
     },
     settings: () => settings,
+    ...(opts.mainSessionFacts !== undefined ? { mainSessionFacts: opts.mainSessionFacts } : {}),
   });
   return { tool, port, fork, priceOf, inflightCount: () => inFlight.count, settings };
 }
@@ -614,6 +646,153 @@ describe("consult tool: failure surface (T-4)", () => {
     d2.settle();
     const result = (await p2) as ToolResult;
     expect(result.details.turnBudgetHint).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ── §16: consulting the reserved "main" expert ───────────────────────────
+
+describe('consult tool: consulting the reserved "main" expert (§16)', () => {
+  it("skips the still_running nack entirely, even if a live run happens to share its runId/sessionFile", async () => {
+    const h = harness({
+      ref: mainRef(),
+      // A live, non-terminal run that (contrived) shares BOTH main's runId
+      // and its sessionFile — structurally impossible in production, but
+      // proves the still_running re-check is skipped for kind:"main"
+      // rather than merely "never matching in practice".
+      query: fakeQuery([liveSnapshot({ runId: "main", status: "running", sessionFile: expertSessionFile })]),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "host-model" },
+        contextTokens: 1_000,
+        contextPercent: 10,
+      }),
+    });
+    const result = (await exec(h, "main")) as ToolResult;
+    expect(result.details.outcome).toBe("completed");
+    expect(h.port.spawnCalls).toHaveLength(1);
+  });
+
+  it("nacks unavailable when the host session has no persisted file right now (--no-session)", async () => {
+    const h = harness({ ref: mainRef(), mainSessionFacts: () => ({}) });
+    const result = (await exec(h, "main")) as ToolResult;
+    expect(result.details.outcome).toBe("unavailable");
+    expect(result.content[0]!.text).toContain("--no-session");
+    expect(h.port.spawnCalls).toHaveLength(0);
+  });
+
+  it("nacks unavailable (never throws) when the first-request cost cannot be estimated (missing tokens)", async () => {
+    const h = harness({
+      ref: mainRef(),
+      mainSessionFacts: () => ({ sessionFile: expertSessionFile, model: { provider: "acme", id: "host-model" } }),
+    });
+    const result = (await exec(h, "main")) as ToolResult;
+    expect(result.details.outcome).toBe("unavailable");
+    expect(result.content[0]!.text).toContain("cannot estimate the first-request cost");
+    expect(h.fork.calls).toHaveLength(0);
+    expect(h.port.spawnCalls).toHaveLength(0);
+  });
+
+  it("nacks unavailable when the model is missing (tokens present)", async () => {
+    const h = harness({
+      ref: mainRef(),
+      mainSessionFacts: () => ({ sessionFile: expertSessionFile, contextTokens: 50_000 }),
+    });
+    const result = (await exec(h, "main")) as ToolResult;
+    expect(result.details.outcome).toBe("unavailable");
+    expect(result.content[0]!.text).toContain("cannot estimate the first-request cost");
+  });
+
+  it("the real expert path is UNCHANGED by §16: missing tokens still just skip the pre-check (not a hard nack)", async () => {
+    const h = harness({ ref: ref({ contextTokens: undefined, model: undefined }) });
+    const result = (await exec(h)) as ToolResult;
+    expect(result.details.outcome).toBe("completed"); // no nack — turn-boundary cap is the guard, as before §16
+  });
+
+  it("context_too_large still fires for main, sourced from LIVE mainSessionFacts (not a stale dispatch snapshot)", async () => {
+    const h = harness({
+      ref: mainRef(),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "host-model" },
+        contextTokens: 190_000,
+        contextPercent: 95,
+      }),
+    });
+    const result = (await exec(h, "main")) as ToolResult;
+    expect(result.details.outcome).toBe("context_too_large");
+    expect(h.fork.calls).toHaveLength(0);
+  });
+
+  it("forks via forkMainSession (the consistency-checked path) when the store provides it", async () => {
+    const h = harness({
+      ref: mainRef(),
+      fork: makeForkStore({ withMainSession: true }),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "host-model" },
+        contextTokens: 1_000,
+        contextPercent: 5,
+      }),
+    });
+    const result = (await exec(h, "main")) as ToolResult;
+    expect(result.details.outcome).toBe("completed");
+    expect(h.fork.calls).toHaveLength(0); // NOT the plain expert path
+    expect(h.fork.mainCalls).toHaveLength(1);
+    expect(h.fork.mainCalls[0]!.source).toBe(expertSessionFile);
+  });
+
+  it("falls back to forkExpertSession when the store does not implement forkMainSession", async () => {
+    const h = harness({
+      ref: mainRef(),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "host-model" },
+        contextTokens: 1_000,
+        contextPercent: 5,
+      }),
+    });
+    const result = (await exec(h, "main")) as ToolResult;
+    expect(result.details.outcome).toBe("completed");
+    expect(h.fork.calls).toHaveLength(1);
+  });
+
+  it("passes the host's live model as modelOverride, not a stale ref value", async () => {
+    const h = harness({
+      ref: mainRef({ model: { provider: "stale", id: "dispatch-time-model" } }),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "live-model" },
+        contextTokens: 1_000,
+        contextPercent: 5,
+      }),
+    });
+    await exec(h, "main");
+    expect(h.port.spawnCalls[0]!.modelOverride).toEqual({ provider: "acme", id: "live-model" });
+  });
+
+  it("the prompt carries the main-specific clauses (§16 rule 7)", async () => {
+    const h = harness({
+      ref: mainRef(),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "host-model" },
+        contextTokens: 1_000,
+        contextPercent: 5,
+      }),
+    });
+    await exec(h, "main", "what did we decide about X?");
+    const prompt = h.port.spawnCalls[0]!.prompt;
+    expect(prompt).toContain("You are the host main session");
+    expect(prompt).toContain("say so plainly instead of guessing");
+    expect(prompt).toContain("what did we decide about X?");
+  });
+
+  it("an unlisted subagent cannot reach main through its own consult tool (whitelist, not a global bypass)", async () => {
+    // A run whose OWN whitelist does not contain "main" gets the ordinary
+    // "not in this run's expert whitelist" throw — the reserved id changes
+    // WHAT "main" resolves to, never WHO may ask for it.
+    const h = harness({ ref: ref() }); // whitelist = [explorer], no main entry
+    await expect(exec(h, "main")).rejects.toThrow(/not in this run's expert whitelist/);
   });
 });
 

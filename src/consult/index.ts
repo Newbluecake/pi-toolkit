@@ -1,6 +1,12 @@
 import { existsSync, statSync } from "node:fs";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ConsultExpertRef, RunId, RunSnapshot } from "../core/types.js";
+import {
+  CONSULT_MAIN_AGENT_TYPE,
+  CONSULT_MAIN_EXPERT_ID,
+  type ConsultExpertRef,
+  type RunId,
+  type RunSnapshot,
+} from "../core/types.js";
 import type { ConsultSettings } from "../config/settings.js";
 import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
@@ -12,6 +18,7 @@ import {
   createConsultTool,
   type ConsultForkStore,
 } from "./tool.js";
+import type { MainSessionFactsProvider } from "./main-facts.js";
 
 /**
  * consult assembly (docs/dev/consult/plan.md §6 C-11): everything mutable
@@ -64,6 +71,15 @@ export interface WireConsultDeps {
   consultDir: string;
   /** Main-session prefetched entries for the initial ExpertIndex rebuild. */
   prefetchedEntries?: readonly unknown[];
+  /**
+   * consult (plan §16 "consult the main session"): live facts about the
+   * HOST main session, read fresh on every `experts:["main"]` dispatch-time
+   * resolution AND on every actual `consult("main", …)` call (never cached
+   * — rule 3/4). Absent ⇒ "main" always fails to resolve with "no persisted
+   * session" (safe default; production wiring is stack.ts over the
+   * session's own `ExtensionContext`, mirroring the HUD footer precedent).
+   */
+  mainSessionFacts?: MainSessionFactsProvider;
 }
 
 const TERMINAL = new Set(["completed", "failed", "timed_out", "aborted"]);
@@ -80,6 +96,36 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
   const { settings, query, forkStore, consultDir } = deps;
   const expertIndex = createExpertIndex({ consultDir });
   if (deps.prefetchedEntries) expertIndex.rebuildFromEntries(deps.prefetchedEntries);
+  // consult (plan §16): read fresh on every call, never cached here — see
+  // main-facts.ts for why a stale reading would be wrong.
+  const mainFacts: MainSessionFactsProvider = deps.mainSessionFacts ?? (() => ({}));
+  /** §16 rules 2/4: resolve the reserved "main" handle from LIVE host facts, never a cached snapshot. */
+  function buildMainRef(): { ref?: ConsultExpertRef; failure?: string } {
+    const facts = mainFacts();
+    const sessionFile = facts.sessionFile;
+    if (sessionFile === undefined || sessionFile.length === 0) {
+      return {
+        failure:
+          "the host main session has no persisted session file (it was started with --no-session) — " +
+          "resume-free consult needs a session file",
+      };
+    }
+    if (!fileExists(sessionFile)) {
+      return { failure: `the host main session's file no longer exists on disk (${sessionFile})` };
+    }
+    return {
+      ref: {
+        runId: CONSULT_MAIN_EXPERT_ID,
+        label: CONSULT_MAIN_EXPERT_ID,
+        sessionFile,
+        agentType: CONSULT_MAIN_AGENT_TYPE,
+        kind: "main",
+        ...(facts.model !== undefined ? { model: facts.model } : {}),
+        ...(facts.contextPercent != null ? { contextPercent: facts.contextPercent } : {}),
+        ...(facts.contextTokens != null ? { contextTokens: facts.contextTokens } : {}),
+      },
+    };
+  }
 
   // ── Concurrency gate (§4.1 ②): per-asker cap (settings) + global cap
   // (constant 8). Plain closure counters, rebuilt with the stack.
@@ -222,6 +268,19 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
     const failures: string[] = [];
     for (const handle of refs) {
       const trimmed = handle.trim();
+      // §16 rule 2: the reserved "main" handle is checked FIRST, taking
+      // priority over any real run/label that happens to share the name —
+      // it never falls through to the id/label union logic below.
+      if (trimmed === CONSULT_MAIN_EXPERT_ID) {
+        const built = buildMainRef();
+        if (built.failure !== undefined) {
+          failures.push(`expert "${CONSULT_MAIN_EXPERT_ID}": ${built.failure}`);
+          continue;
+        }
+        resolved.push(built.ref!);
+        lines.push(`expert "${CONSULT_MAIN_EXPERT_ID}" → the host main session`);
+        continue;
+      }
       // 1) id path: live and index both do exact → unique-prefix (matchRunId
       //    semantics on both sides); union of runIds >1 → ambiguous.
       const liveMatch = matchRunId(trimmed, liveIds);
@@ -307,6 +366,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
         priceOf: deps.priceOf,
         inflight,
         settings,
+        mainSessionFacts: mainFacts,
       });
     },
     sweep() {
@@ -337,3 +397,4 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
 export type { ConsultForkStore, ConsultSpawnPort } from "./tool.js";
 export { buildConsultPrompt } from "./prompt.js";
 export type { ForkExpertSessionResult } from "../core/types.js";
+export type { MainSessionFacts, MainSessionFactsProvider } from "./main-facts.js";

@@ -17,6 +17,7 @@ import { toPiToolUsage } from "../tools/usage.js";
 import { truncateResultText } from "../tools/result-text.js";
 import { buildConsultPrompt } from "./prompt.js";
 import { createCapWatcher, type ConsultCapReason } from "./watcher.js";
+import type { MainSessionFacts, MainSessionFactsProvider } from "./main-facts.js";
 
 /**
  * "consult" — in-turn synchronous ask of a finished expert run
@@ -83,6 +84,15 @@ export interface ConsultSpawnPort {
 export interface ConsultForkStore {
   /** Synchronous expert-session fork; NEVER throws (§15 #2 — failures fold into `{ok:false,reason}`). */
   forkExpertSession(sourceFile: string, fallbackCwd: string): ForkExpertSessionResult;
+  /**
+   * consult (plan §16 rule 5): consistency-checked variant used ONLY for
+   * the host main session — unlike a terminal expert's file, main's can be
+   * concurrently appended to (or wholesale rewritten by pi's own
+   * `_rewriteFile`) at the exact moment `consult("main", …)` runs.
+   * Optional: falls back to `forkExpertSession` when a fork store does not
+   * provide it (e.g. package C unit tests with a plain stub).
+   */
+  forkMainSession?(sourceFile: string, fallbackCwd: string): ForkExpertSessionResult;
   /** Delete a fork file; must be consult-dir-scoped and ENOENT-silent (idempotent). */
   removeForkFile(path: string): void;
   /**
@@ -198,6 +208,14 @@ export interface ConsultDeps {
   ) => { input: number; cacheWrite: number } | undefined;
   inflight: ConsultInflight;
   settings: () => ConsultSettings;
+  /**
+   * consult (plan §16): live host-session facts, read fresh on every
+   * `consult("main", …)` call (never the dispatch-time ref snapshot — rule
+   * 3/4). Absent + a "main" ref in the whitelist ⇒ every consult of it nacks
+   * with "no persisted session" (safe default; wireConsult always injects
+   * the real provider in production).
+   */
+  mainSessionFacts?: MainSessionFactsProvider;
 }
 
 /** `details.outcome` vocabulary of the consult tool result (§4.1 error table). */
@@ -261,7 +279,11 @@ export function consultRunLabel(): string {
 
 function describeWhitelist(whitelist: readonly ConsultExpertRef[]): string {
   return whitelist
-    .map((ref) => (ref.label !== undefined && ref.label !== "" ? `${ref.label} (${ref.runId})` : ref.runId))
+    .map((ref) =>
+      ref.label !== undefined && ref.label !== "" && ref.label !== ref.runId
+        ? `${ref.label} (${ref.runId})`
+        : ref.runId,
+    )
     .join(", ");
 }
 
@@ -314,11 +336,20 @@ function expertName(ref: ConsultExpertRef): string {
  */
 export function renderExpertRoster(whitelist: readonly ConsultExpertRef[], maxConcurrent: number): string {
   const rows = whitelist.map((ref) => {
-    const who = ref.label !== undefined && ref.label !== "" ? `${ref.label} (${ref.runId})` : ref.runId;
+    const who =
+      ref.label !== undefined && ref.label !== "" && ref.label !== ref.runId
+        ? `${ref.label} (${ref.runId})`
+        : ref.runId;
     const model = ref.model !== undefined ? ` · ${ref.model.provider}/${ref.model.id}` : "";
-    const state = ref.pending ? "still running when you were dispatched; consult nacks until it finishes" : "finished";
+    const isMain = ref.kind === "main";
+    const kind = isMain ? "the host main session" : ref.agentType || "agent";
+    const state = isMain
+      ? "live — the orchestrating session, not a finished run"
+      : ref.pending
+        ? "still running when you were dispatched; consult nacks until it finishes"
+        : "finished";
     const task = ref.task !== undefined ? ` — task: ${JSON.stringify(ref.task)}` : "";
-    return `- ${who} — ${ref.agentType || "agent"}${model} · ${state}${task}`;
+    return `- ${who} — ${kind}${model} · ${state}${task}`;
   });
   const limit = Number.isFinite(maxConcurrent) && maxConcurrent > 0 ? ` (up to ${maxConcurrent} at once)` : "";
   return `Experts you can consult${limit}:\n${rows.join("\n")}`;
@@ -350,6 +381,7 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
       const question = params.question.trim();
       if (question.length === 0) throw new Error("consult: question must not be empty.");
       const ref = matchExpertRef(params.expert, deps.whitelist);
+      const isMain = ref.kind === "main";
       if (!s.enabled) {
         return {
           content: [{ type: "text" as const, text: `consult is disabled (consult.enabled=false).` }],
@@ -381,25 +413,13 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         // run holding the same sessionFile (covers `Agent({resume})`
         // continuing the expert under a new runId — resumeLocks is
         // spawn-service-private, the sessionFile scan is the observable half).
-        const live = deps.query.get(ref.runId);
-        if (live !== undefined && !isTerminal(live.status)) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Expert "${expertName(ref)}" is still running; use steer_subagent-style follow-up via your dispatcher instead.`,
-              },
-            ],
-            details: {
-              expertRunId: ref.runId,
-              ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
-              outcome: "still_running",
-            } satisfies ConsultToolDetails,
-          };
-        }
-        for (const snap of deps.query.list()) {
-          if (isTerminal(snap.status)) continue;
-          if (snap.diag.sessionFile !== undefined && snap.diag.sessionFile === ref.sessionFile) {
+        // §16 rule 1: the host main session is never tracked as a "run" — it
+        // is live by construction, so this whole re-check is skipped for it
+        // (there is nothing to nack as still_running).
+        let live: RunSnapshot | undefined;
+        if (!isMain) {
+          live = deps.query.get(ref.runId);
+          if (live !== undefined && !isTerminal(live.status)) {
             return {
               content: [
                 {
@@ -414,13 +434,55 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
               } satisfies ConsultToolDetails,
             };
           }
+          for (const snap of deps.query.list()) {
+            if (isTerminal(snap.status)) continue;
+            if (snap.diag.sessionFile !== undefined && snap.diag.sessionFile === ref.sessionFile) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `Expert "${expertName(ref)}" is still running; use steer_subagent-style follow-up via your dispatcher instead.`,
+                  },
+                ],
+                details: {
+                  expertRunId: ref.runId,
+                  ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
+                  outcome: "still_running",
+                } satisfies ConsultToolDetails,
+              };
+            }
+          }
         }
-        if (!fileExists(ref.sessionFile)) {
+        // §16 rule 3: fork the CURRENT persisted file, not a dispatch-time
+        // snapshot. For a real expert `ref.sessionFile` already IS the
+        // (static, terminal) file; for main it is read fresh right here, so a
+        // subagent calling consult("main", …) long after dispatch still gets
+        // the host's live file/model/context, never a stale one.
+        const mainFacts: MainSessionFacts | undefined = isMain ? (deps.mainSessionFacts?.() ?? {}) : undefined;
+        const sessionFile = isMain ? mainFacts!.sessionFile : ref.sessionFile;
+        if (sessionFile === undefined || sessionFile.length === 0) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Expert "${expertName(ref)}" could not be consulted: its session file is missing (${ref.sessionFile}). Fall back to your own investigation.`,
+                text:
+                  'Expert "main" could not be consulted: the host main session has no persisted session ' +
+                  "(it was started with --no-session). Fall back to your own investigation.",
+              },
+            ],
+            details: {
+              expertRunId: ref.runId,
+              ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
+              outcome: "unavailable",
+            } satisfies ConsultToolDetails,
+          };
+        }
+        if (!fileExists(sessionFile)) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Expert "${expertName(ref)}" could not be consulted: its session file is missing (${sessionFile}). Fall back to your own investigation.`,
               },
             ],
             details: {
@@ -431,12 +493,18 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           };
         }
         // ④ Pre-checks, before the fork — a rejection here creates no file.
-        //    Context: the freshest live value when the expert still has a
-        //    record, else the dispatch-time snapshot. A live snapshot that
-        //    reports percent = null means "unknown" → skip the check entirely
-        //    (review-2 #15③) rather than falling back to a stale ref value.
-        const liveContext = live?.diag.contextUsage;
-        const effectivePercent = liveContext !== undefined ? liveContext.percent : ref.contextPercent;
+        //    Context: for a real expert, the freshest live value when it
+        //    still has a record, else the dispatch-time snapshot (a live
+        //    snapshot reporting percent = null means "unknown" → skip,
+        //    review-2 #15③, rather than resurrecting a stale ref value). For
+        //    main (§16 rule 4) it is whatever `mainSessionFacts()` just
+        //    reported — there is no dispatch-time fallback to resurrect.
+        const liveContext = isMain ? undefined : live?.diag.contextUsage;
+        const effectivePercent = isMain
+          ? mainFacts!.contextPercent
+          : liveContext !== undefined
+            ? liveContext.percent
+            : ref.contextPercent;
         if (effectivePercent != null && effectivePercent >= CONSULT_MAX_CONTEXT_PERCENT) {
           return {
             content: [
@@ -458,19 +526,41 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         //    First-request cost (§4.1, review-3 #4/#7): the fork path rewrites
         //    the whole prefix at write price, so estimate
         //    tokens × max(input, cacheWrite) and gate on maxFirstRequestUsd.
-        //    Missing tokens or unknown price → skip (turn-boundary cap still
-        //    guards); the estimate/hint ride along in details either way.
-        const tokens =
-          liveContext === undefined
+        //    Missing tokens or unknown price → skip for a real expert (the
+        //    turn-boundary cap still guards); for main (§16 rule 4) missing
+        //    data is instead a hard nack — the host session is always live,
+        //    so a missing model/token reading means the estimate cannot be
+        //    trusted at all, not merely "unavailable this time".
+        const tokens = isMain
+          ? mainFacts!.contextTokens
+          : liveContext === undefined
             ? ref.contextTokens
             : liveContext.tokens === null
               ? ref.contextTokens
               : liveContext.tokens;
+        const model = isMain ? mainFacts!.model : ref.model;
+        if (isMain && (tokens === undefined || tokens === null || model === undefined)) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  'Expert "main" could not be consulted: cannot estimate the first-request cost right now ' +
+                  "(the host session's current model or context size is unavailable). Fall back to your own investigation.",
+              },
+            ],
+            details: {
+              expertRunId: ref.runId,
+              ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
+              outcome: "unavailable",
+            } satisfies ConsultToolDetails,
+          };
+        }
         let costEstimateUsd: number | undefined;
         let turnBudgetHint: number | undefined;
         let budgetNote = false;
-        if (tokens !== undefined && tokens !== null && ref.model !== undefined) {
-          const price = deps.priceOf(ref.model, tokens);
+        if (tokens !== undefined && tokens !== null && model !== undefined) {
+          const price = deps.priceOf(model, tokens);
           if (price !== undefined) {
             const est = estimateFirstRequestUsd(tokens, price);
             costEstimateUsd = est;
@@ -500,8 +590,14 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
             }
           }
         }
-        // ⑤ Fork (never throws — §15 #2). Rejection here still spawned nothing.
-        const fork = deps.forkStore.forkExpertSession(ref.sessionFile, deps.selfCwd);
+        // ⑤ Fork (never throws — §15 #2). Rejection here still spawned
+        // nothing. Main gets the consistency-checked variant when the store
+        // provides one (§16 rule 5 — the host file can be concurrently
+        // appended to/rewritten, unlike a terminal expert's).
+        const fork =
+          isMain && deps.forkStore.forkMainSession
+            ? deps.forkStore.forkMainSession(sessionFile, deps.selfCwd)
+            : deps.forkStore.forkExpertSession(sessionFile, deps.selfCwd);
         if (!fork.ok) {
           return {
             content: [
@@ -521,7 +617,7 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         // expert's header cwd when it still exists (preserved worktrees),
         // else the asker's cwd (§5.1 two-level; the consulted copy always
         // runs in a live checkout of the asking side).
-        const cwd = deps.forkStore.resolveForkCwd?.(ref.sessionFile, deps.selfCwd) ?? deps.selfCwd;
+        const cwd = deps.forkStore.resolveForkCwd?.(sessionFile, deps.selfCwd) ?? deps.selfCwd;
         let started: { runId: RunId; label?: string } | { error: ErrorInfo };
         try {
           started = await deps.port.spawn({
@@ -530,9 +626,10 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
               question,
               maxAnswerChars: s.maxAnswerChars,
               budgetNote,
+              isMain,
             }),
             label: consultRunLabel(),
-            ...(ref.model !== undefined ? { modelOverride: ref.model } : {}),
+            ...(model !== undefined ? { modelOverride: model } : {}),
             cwd,
             forkSessionFrom: fork.path,
             parentRunId: deps.selfRunId,

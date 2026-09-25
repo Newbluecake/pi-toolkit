@@ -21,6 +21,14 @@ export function buildConsultPrompt(opts: {
    * burning the turn on tool calls.
    */
   budgetNote: boolean;
+  /**
+   * consult (plan §16 rule 7): true when consulting the reserved "main"
+   * expert — appends two extra clauses tailored to the host main session
+   * (which may have been compacted/handed off, and whose transcript may
+   * contain credentials or unrelated conversation the asker has no business
+   * seeing repeated back).
+   */
+  isMain?: boolean;
 }): string {
   const lines = [
     "[consult] You are being consulted by a downstream agent that cannot see your session.",
@@ -29,10 +37,16 @@ export function buildConsultPrompt(opts: {
     `In this consult you ONLY have read-only tools: ${CONSULT_READONLY_TOOLS.join(", ")}. Do not attempt any other tool`,
     "(bash/edit/write/Agent/... from your history are unavailable). Prefer not to call tools unless the",
     "answer strictly requires a fresh environment fact.",
-    "",
-    "Question:",
-    opts.question,
   ];
+  if (opts.isMain) {
+    lines.push(
+      "You are the host main session, consulted by one of your own subagents. Answer only the decisions,",
+      "preferences and context relevant to its question — do not restate credentials or unrelated parts of",
+      "the conversation. If your history does not contain the answer (it may have been compacted or handed",
+      "off before this point), say so plainly instead of guessing.",
+    );
+  }
+  lines.push("", "Question:", opts.question);
   if (opts.budgetNote) {
     // §4.1: appended at the tail of the question prompt.
     lines.push("Budget note: you have roughly one turn — answer directly from your context, do not call tools.");

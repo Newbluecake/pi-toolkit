@@ -9,6 +9,7 @@ import type { QueryService } from "../../src/service/query-service.js";
 import type { SpawnService } from "../../src/service/spawn-service.js";
 import { wireConsult } from "../../src/consult/index.js";
 import { createConsultSpawnPort, type ConsultForkStore } from "../../src/consult/tool.js";
+import type { MainSessionFacts } from "../../src/consult/main-facts.js";
 import {
   FORK_TTL_MS,
   forkExpertSession,
@@ -155,6 +156,7 @@ function wiring(opts: {
   settings?: Partial<ConsultSettings>;
   forkStore?: ConsultForkStore;
   spawnService?: Pick<SpawnService, "spawn" | "waitOutcome" | "abort">;
+  mainSessionFacts?: () => MainSessionFacts;
 }) {
   return wireConsult({
     settings: () => ({ ...DEFAULT_SETTINGS.consult, ...opts.settings }),
@@ -164,6 +166,7 @@ function wiring(opts: {
     forkStore: opts.forkStore ?? forkStoreStub(),
     consultDir: CONSULT_DIR,
     ...(opts.entries !== undefined ? { prefetchedEntries: opts.entries } : {}),
+    ...(opts.mainSessionFacts !== undefined ? { mainSessionFacts: opts.mainSessionFacts } : {}),
   });
 }
 
@@ -285,6 +288,61 @@ describe("wireConsult.resolveExperts: live ∪ index, cross-source ambiguity (T-
       live: [snapshot({ runId: "r_OTHERAAA1", label: "solo", agentType: "scout", sessionFile: newExpertFile })],
     });
     expect(w.resolveExperts(["r_OTHERAAA"]).refs[0]!.runId).toBe("r_OTHERAAA1");
+  });
+});
+
+describe('wireConsult.resolveExperts: the reserved "main" expert id (§16)', () => {
+  it('resolves "main" from live mainSessionFacts, carrying kind/model/context through', () => {
+    const w = wiring({
+      mainSessionFacts: () => ({
+        sessionFile: oldExpertFile,
+        model: { provider: "acme", id: "host-model" },
+        contextTokens: 12_345,
+        contextPercent: 40,
+      }),
+    });
+    const result = w.resolveExperts(["main"]);
+    expect(result.refs).toHaveLength(1);
+    const ref = result.refs[0]!;
+    expect(ref.kind).toBe("main");
+    expect(ref.runId).toBe("main");
+    expect(ref.label).toBe("main");
+    expect(ref.sessionFile).toBe(oldExpertFile);
+    expect(ref.model).toEqual({ provider: "acme", id: "host-model" });
+    expect(ref.contextTokens).toBe(12_345);
+    expect(ref.contextPercent).toBe(40);
+    expect(result.lines[0]).toBe('expert "main" → the host main session');
+  });
+
+  it("fails resolution when the host session has no persisted file (--no-session)", () => {
+    const w = wiring({ mainSessionFacts: () => ({}) });
+    expect(() => w.resolveExperts(["main"])).toThrow(/no persisted session file.*--no-session/s);
+  });
+
+  it("fails resolution when mainSessionFacts is not wired at all (safe default)", () => {
+    const w = wiring({});
+    expect(() => w.resolveExperts(["main"])).toThrow(/no persisted session file/);
+  });
+
+  it("fails resolution when the reported session file no longer exists on disk", () => {
+    const w = wiring({ mainSessionFacts: () => ({ sessionFile: join(tmp, "does-not-exist.jsonl") }) });
+    expect(() => w.resolveExperts(["main"])).toThrow(/no longer exists on disk/);
+  });
+
+  it('"main" takes priority over a live run that happens to share the label (§16 rule 2)', () => {
+    const w = wiring({
+      live: [snapshot({ runId: "r_IMPOSTOR1", label: "main", agentType: "scout", sessionFile: newExpertFile })],
+      mainSessionFacts: () => ({ sessionFile: oldExpertFile }),
+    });
+    const result = w.resolveExperts(["main"]);
+    expect(result.refs).toHaveLength(1);
+    expect(result.refs[0]!.kind).toBe("main");
+    expect(result.refs[0]!.sessionFile).toBe(oldExpertFile); // NOT the impostor run's file
+  });
+
+  it('consult.enabled=false still blocks "main" resolution like any other handle', () => {
+    const w = wiring({ settings: { enabled: false }, mainSessionFacts: () => ({ sessionFile: oldExpertFile }) });
+    expect(() => w.resolveExperts(["main"])).toThrow("consult is disabled");
   });
 });
 

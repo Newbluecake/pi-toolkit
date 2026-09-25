@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
   statSync,
@@ -275,6 +276,98 @@ export function forkExpertSession(
       return { ok: false, reason: `fork target already exists: ${target}` };
     return { ok: false, reason: toReason(e) };
   }
+}
+
+/**
+ * consult (plan §16 rule 5): cap on the post-fork consistency re-read —
+ * beyond this size we trust the copy rather than re-parse a whole session
+ * file on every `consult("main", …)` call.
+ */
+const CONSISTENCY_CHECK_MAX_BYTES = 32 * 1024 * 1024;
+
+type ForkConsistencyCheck = { ok: true } | { ok: false; reason: string };
+
+/**
+ * consult (plan §16 rule 5): a plain expert's session is terminal, so the
+ * raw byte-range copy `forkExpertSession` performs above is always
+ * internally consistent — nothing appends to (or rewrites) the source after
+ * the expert settles. The HOST MAIN session is the opposite: pi may be
+ * appending to it, or wholesale rewriting it (`_rewriteFile`, e.g. across a
+ * `/compact`), at the exact moment a background subagent calls
+ * `consult("main", …)`. This re-parses the freshly-written fork copy and
+ * rejects it when any line OTHER than the last fails to parse as JSON — a
+ * mid-file parse failure can only mean the copied byte range straddled two
+ * different generations of the source file (a rewrite landed mid-copy); a
+ * genuinely incomplete FINAL line is the ordinary "we caught it mid-append"
+ * case pi's own loader already tolerates and is not treated as
+ * inconsistency here either.
+ */
+/**
+ * Exported as a test seam (same convention as `ForkExpertSessionOptions`) so
+ * the detection logic — "every line but the last must parse" — can be
+ * pinned directly against hand-crafted fork files, without needing to
+ * engineer a genuine concurrent rewrite race in a unit test.
+ */
+export function checkForkConsistency(path: string): ForkConsistencyCheck {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    return { ok: false, reason: `could not re-read the fork copy: ${toReason(e)}` };
+  }
+  if (text.length > CONSISTENCY_CHECK_MAX_BYTES) return { ok: true }; // too large to cheaply re-verify; trust the copy
+  const lines = text.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop(); // trailing newline
+  if (lines.length === 0) return { ok: false, reason: "fork copy is empty" };
+  let header: unknown;
+  try {
+    header = JSON.parse(lines[0]!);
+  } catch {
+    return { ok: false, reason: "fork copy's header line is not valid JSON" };
+  }
+  if (!isSessionHeader(header)) return { ok: false, reason: "fork copy's first line is not a session header" };
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim().length === 0) continue;
+    try {
+      JSON.parse(line);
+    } catch {
+      // Only the LAST line may legitimately be incomplete (a real
+      // concurrent partial write); any earlier failure is mid-file
+      // corruption from a rewrite that landed during the copy.
+      if (i !== lines.length - 1)
+        return { ok: false, reason: `fork copy line ${i + 1} is not valid JSON (source rewritten mid-fork)` };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * consult (plan §16 rule 5): `forkExpertSession` + a post-copy consistency
+ * check, with ONE immediate retry — no sleep. Everything in this module is
+ * synchronous fs and this repo never blocks the event loop for a timer
+ * (AGENTS.md zero-hang invariant); by the time the retry's own
+ * read+scan+copy runs, a concurrent writer has almost certainly moved past
+ * whatever mid-rewrite window caused the first failure. Used only for the
+ * host main session — a plain expert fork never needs this (its source is
+ * terminal) and keeps using `forkExpertSession` directly.
+ */
+export function forkMainSessionSnapshot(
+  sourceFile: string,
+  fallbackCwd: string,
+  dir: string = consultSessionDir(),
+  opts: ForkExpertSessionOptions = {},
+): ForkExpertSessionResult {
+  let lastReason = "fork_failed";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = forkExpertSession(sourceFile, fallbackCwd, dir, opts);
+    if (!result.ok) return result; // a hard failure is not a consistency issue — surface it as-is
+    const check = checkForkConsistency(result.path);
+    if (check.ok) return result;
+    removeForkFile(result.path, dir);
+    lastReason = check.reason;
+  }
+  return { ok: false, reason: `fork_failed: inconsistent after retry (${lastReason})` };
 }
 
 /**

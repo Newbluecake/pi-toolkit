@@ -152,6 +152,18 @@ export interface ConsultExpertRef {
   sessionFile: string;
   agentType: string;
   model?: { provider: string; id: string };
+  /**
+   * consult (plan §16 "consult the main session"): "run" (the default when
+   * absent — every pre-§16 ref) is a real finished subagent; "main" is the
+   * reserved main-session ref built from `CONSULT_MAIN_EXPERT_ID`. For a
+   * "main" ref, `runId`/`label` are both the literal string "main" (there is
+   * no generated run id) and the consult tool skips the still-running
+   * re-check (the host session is always live) and treats a missing live
+   * model/context reading as a hard nack rather than silently skipping the
+   * cost pre-check (§16 rule 4). Additive field — every existing ref
+   * (`kind` absent) keeps its exact pre-§16 behavior.
+   */
+  kind?: "run" | "main";
   /** Context usage (0-100) snapshotted at dispatch time; re-checked live at consult time. */
   contextPercent?: number;
   /** Context token count snapshotted at dispatch time (first-request cost pre-check); re-checked live. */
@@ -165,6 +177,30 @@ export interface ConsultExpertRef {
    */
   task?: string;
 }
+
+/**
+ * consult (plan §16 "consult the main session via the reserved expert id
+ * 'main'"): reserved expert handle that ALWAYS names the host main session,
+ * never a spawned run — it takes priority over any label a real run happens
+ * to share (rule 2). A dispatcher must still list it explicitly in
+ * `Agent({ experts: ["main", ...] })` to authorize the child it dispatches;
+ * nothing else about the whitelist/authorization model changes (§4.2).
+ */
+export const CONSULT_MAIN_EXPERT_ID = "main";
+
+/**
+ * consult (plan §16): the sentinel `AgentTypeName` the fork-admission "no
+ * type" branch in `spawn-service.ts` recognizes. `deps.types.get()` is
+ * bypassed entirely (in favor of an in-memory `AgentTypeConfig`) only when
+ * this exact name is paired with a `forkSessionFrom` request — without one,
+ * dispatching this name fails exactly like any other unknown type, and the
+ * bypass never touches (or shadows) a real registered type of the same
+ * name. Deliberately distinct from `CONSULT_MAIN_EXPERT_ID`: a real expert
+ * whose ORIGINAL agent type happens to be named "main" must still resolve
+ * through the real registry when it is (normally) consulted — only refs
+ * built for the reserved main-session handle ever carry this agentType.
+ */
+export const CONSULT_MAIN_AGENT_TYPE = "consult:main-snapshot";
 
 /**
  * consult (plan §6 C-9, frozen surface): result of forking an expert's

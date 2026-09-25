@@ -57,7 +57,14 @@ function fastBudget() {
 
 type Entry = { type: string; customType?: string; data?: unknown };
 
-function harness(entries: Entry[] = []) {
+function harness(
+  entries: Entry[] = [],
+  ctxOverrides: {
+    sessionFile?: string;
+    model?: { provider: string; id: string };
+    contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+  } = {},
+) {
   const appended: Entry[] = [];
   const pi = {
     appendEntry(customType: string, data?: unknown) {
@@ -74,11 +81,17 @@ function harness(entries: Entry[] = []) {
     setThinkingLevel: () => undefined,
   } as unknown as ExtensionAPI;
   const ctx = {
-    sessionManager: { getEntries: () => entries, getSessionId: () => "consult-wiring" },
+    sessionManager: {
+      getEntries: () => entries,
+      getSessionId: () => "consult-wiring",
+      ...(ctxOverrides.sessionFile !== undefined ? { getSessionFile: () => ctxOverrides.sessionFile } : {}),
+    },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
     ui: {},
     hasUI: false,
     cwd: process.cwd(),
+    ...(ctxOverrides.model !== undefined ? { model: ctxOverrides.model } : {}),
+    ...(ctxOverrides.contextUsage !== undefined ? { getContextUsage: () => ctxOverrides.contextUsage } : {}),
   } as unknown as ExtensionContext;
   return { pi, ctx, appended };
 }
@@ -318,5 +331,94 @@ describe("consult wiring: RuntimeAdapterDeps captured from the real buildSession
     expect(() => stack.consult.resolveExperts(["nope"])).toThrow();
     vi.doUnmock("../../src/service/runtime-adapter.js");
     vi.resetModules();
+  });
+});
+
+/**
+ * consult (plan §16 "consult the main session"): end-to-end through the REAL
+ * `buildSessionStack` — `ctx.sessionManager.getSessionFile`/`ctx.model`/
+ * `ctx.getContextUsage` feed `stack.consult.resolveExperts(["main"])`, and a
+ * dispatched child's injected consult tool actually forks THAT file (not the
+ * expert path) when asked for "main".
+ */
+describe('consult wiring: the reserved "main" expert, end to end (§16)', () => {
+  it('resolveExperts(["main"]) reads the live ctx accessors, not a frozen snapshot', async () => {
+    const mainDir = mkdtempSync(join(tmpdir(), "consult-main-wiring-"));
+    const mainSessionFile = join(mainDir, "main-session.jsonl");
+    writeFileSync(
+      mainSessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "host", timestamp: "t", cwd: mainDir })}\n`,
+    );
+    const h = harness([], {
+      sessionFile: mainSessionFile,
+      model: { provider: "acme", id: "host-model" },
+      contextUsage: { tokens: 4_321, contextWindow: 200_000, percent: 2 },
+    });
+    const stack = buildSessionStack(
+      h.pi,
+      h.ctx,
+      settings({ consult: { ...DEFAULT_SETTINGS.consult, enabled: true } }),
+      types,
+      [],
+    );
+    const result = stack.consult.resolveExperts(["main"]);
+    expect(result.refs).toHaveLength(1);
+    const ref = result.refs[0]!;
+    expect(ref.kind).toBe("main");
+    expect(ref.sessionFile).toBe(mainSessionFile);
+    expect(ref.model).toEqual({ provider: "acme", id: "host-model" });
+    expect(ref.contextTokens).toBe(4_321);
+  });
+
+  it('a dispatched child\'s consult("main", …) forks the LIVE main session file, not the expert path', async () => {
+    const { calls } = spyOnDriver();
+    const mainDir = mkdtempSync(join(tmpdir(), "consult-main-wiring-"));
+    const mainSessionFile = join(mainDir, "main-session.jsonl");
+    writeFileSync(
+      mainSessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "host", timestamp: "t", cwd: mainDir })}\n`,
+    );
+    const h = harness([], {
+      sessionFile: mainSessionFile,
+      model: { provider: "acme", id: "host-model" },
+      contextUsage: { tokens: 4_321, contextWindow: 200_000, percent: 2 },
+    });
+    const stack = buildSessionStack(
+      h.pi,
+      h.ctx,
+      settings({ consult: { ...DEFAULT_SETTINGS.consult, enabled: true, timeoutMs: 300 } }),
+      types,
+      [],
+    );
+    const mainRef = stack.consult.resolveExperts(["main"]).refs[0]!;
+    const spawned = await stack.spawn.spawn({
+      type: "dispatcher",
+      prompt: "consult main",
+      consultExperts: [mainRef],
+    });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+    await drain();
+    expect(calls).toHaveLength(1); // the dispatched child itself (create)
+    const consultTool = (calls[0]!.spec.customTools ?? []).find((t) => (t as { name?: string }).name === "consult") as {
+      execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details: unknown }>;
+    };
+    expect(consultTool).toBeDefined();
+
+    const result = await consultTool.execute(
+      "call-1",
+      { expert: "main", question: "what did we decide?" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    await drain();
+    expect(calls).toHaveLength(2); // + the consult run's own resume
+    const consultCall = calls[1]!;
+    expect(consultCall.kind).toBe("resume");
+    const forkPath = (consultCall.spec as unknown as { forkSessionFrom?: string }).forkSessionFrom;
+    // Never resumes the LIVE main file directly — always a private fork copy.
+    expect(forkPath).toBeDefined();
+    expect(forkPath).not.toBe(mainSessionFile);
+    expect((result.details as { expertRunId?: string }).expertRunId).toBe("main");
   });
 });

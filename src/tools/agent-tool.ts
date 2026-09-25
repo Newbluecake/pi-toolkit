@@ -175,14 +175,17 @@ const trailingFields = {
     Type.Array(Type.String(), {
       description:
         "Optional whitelist of subagent runs (labels or run_ids) this subagent may consult in-turn via the " +
-        "consult tool — e.g. an upstream agent whose decisions it needs. Entries are resolved at dispatch " +
+        'consult tool — e.g. an upstream agent whose decisions it needs. The reserved id "main" always names ' +
+        "the HOST main session (this one, or the one that ultimately dispatched this chain), never a real run, " +
+        "and takes priority over any run/label that happens to share the name — include it to let the " +
+        "subagent ask the main session directly. Entries are resolved at dispatch " +
         "time: unresolvable or ambiguous entries fail the dispatch (use the run_id to disambiguate); " +
         "still-running entries are accepted with a warning and become consultable once they finish. " +
         "The consulted copy is read-only and runs in the consulting agent's checkout. " +
-        "Use it when the subagent needs what an upstream agent holds but cannot be read from code " +
-        "(decisions, rejected alternatives, user preferences). The subagent's consult tool already lists each " +
-        "expert's label, type, state and original task; add to the task prompt only what that summary does not " +
-        "convey, and still put file locations and key conclusions in the prompt itself.",
+        "Use it when the subagent needs what an upstream agent (or the main session) holds but cannot be read " +
+        "from code (decisions, rejected alternatives, user preferences). The subagent's consult tool already " +
+        "lists each expert's label, type, state and original task; add to the task prompt only what that " +
+        "summary does not convey, and still put file locations and key conclusions in the prompt itself.",
     }),
   ),
 };

@@ -97,6 +97,7 @@ import { parseDeliveryKey } from "./core/delivery-key.js";
 import {
   consultSessionDir,
   forkExpertSession,
+  forkMainSessionSnapshot,
   FORK_TTL_MS,
   removeForkFile,
   resolveForkCwd,
@@ -104,6 +105,7 @@ import {
 } from "./consult/fork-store.js";
 import { wireConsult, type ConsultWiring } from "./consult/index.js";
 import type { ConsultForkStore } from "./consult/tool.js";
+import type { MainSessionFacts } from "./consult/main-facts.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
 import {
@@ -385,6 +387,32 @@ function currentSessionId(ctx: ExtensionContext): string {
     return (ctx.sessionManager as { getSessionId?: () => string } | undefined)?.getSessionId?.() ?? "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * consult (plan §16 "consult the main session"): live snapshot of the host
+ * session's own persisted-session path / current model / current context
+ * usage, read fresh on every call. Safe to call at any point in the
+ * session's lifetime from the `ctx` captured once at `session_start` — the
+ * same accessors `src/hud/footer.ts`'s `installFooter` already reads on
+ * every later render from that very reference is the existing proof in this
+ * codebase that this `ctx` stays live for the whole session rather than
+ * freezing at capture time. Never throws (every failure degrades to `{}`,
+ * mirroring every other `MainSessionFacts` producer).
+ */
+function mainSessionFactsFrom(ctx: ExtensionContext): MainSessionFacts {
+  try {
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    const model = ctx.model;
+    const usage = ctx.getContextUsage?.();
+    return {
+      ...(sessionFile !== undefined ? { sessionFile } : {}),
+      ...(model !== undefined ? { model: { provider: model.provider, id: model.id } } : {}),
+      ...(usage !== undefined ? { contextTokens: usage.tokens, contextPercent: usage.percent } : {}),
+    };
+  } catch {
+    return {};
   }
 }
 
@@ -1511,6 +1539,7 @@ export function buildSessionStack(
   };
   const consultForkStore: ConsultForkStore = {
     forkExpertSession,
+    forkMainSession: (sourceFile, fallbackCwd) => forkMainSessionSnapshot(sourceFile, fallbackCwd),
     removeForkFile,
     resolveForkCwd,
     sweepForkDir: () => sweepForkDir(consultSessionDir(), FORK_TTL_MS),
@@ -1523,6 +1552,7 @@ export function buildSessionStack(
     forkStore: consultForkStore,
     consultDir: consultSessionDir(),
     prefetchedEntries,
+    mainSessionFacts: () => mainSessionFactsFrom(ctx),
   });
   consultRef.current = consult;
   // M9: created early — the fleet widget below lists in-flight workflows.
