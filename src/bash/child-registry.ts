@@ -78,7 +78,16 @@ export interface ChildBashRegistry {
   attachHost(sessionId: string, view: HostRunView): void;
   hostView(sessionId: string): HostRunView | undefined;
   isSealed(sessionId: string): boolean;
-  /** Resolves once this sessionId is sealed (immediately if already sealed). Never rejects. */
+  /** Resolves once this sessionId is sealed (immediately if already sealed). Never rejects.
+   *
+   * Bounded degradation (review follow-up): the waiter map is FIFO-capped at
+   * `REGISTRY_CAP` sessionIds like every other bookkeeping map here — a
+   * sessionId that never seals (or seals only after its tombstone was itself
+   * evicted, see `sealAndKill`) must not pin waiters for the life of the
+   * process. When the oldest key is evicted, its waiters are RESOLVED early:
+   * a `whenSealed` promise never stays pending forever (zero-hang). Consumers
+   * must treat resolution as a wake-up to re-check, never as proof that the
+   * session actually sealed (the §3.5 settle-hold race does exactly that). */
   whenSealed(sessionId: string): Promise<void>;
   /**
    * Synchronous, idempotent per sessionId: the FIRST call seals the session
@@ -102,15 +111,18 @@ export const KILL_ALL_BACKSTOP_MARGIN_MS = 3_000;
 
 const EMPTY_REPORT: KillAllReport = { killed: [], alreadyDone: [], orphaned: [], pending: [] };
 
-/** Insertion-ordered Map used as a FIFO-capped cache: evicts the oldest entry once `cap` is exceeded. */
-function fifoSet<V>(map: Map<string, V>, key: string, value: V, cap: number): void {
+/** Insertion-ordered Map used as a FIFO-capped cache: evicts the oldest entry(ies) once `cap` is exceeded. Returns the evicted `[key, value]` pairs (empty when nothing was evicted) so callers can land bounded degradation safely (e.g. resolving evicted seal waiters instead of leaving them pending). */
+function fifoSet<V>(map: Map<string, V>, key: string, value: V, cap: number): Array<[string, V]> {
+  const evicted: Array<[string, V]> = [];
   if (map.has(key)) map.delete(key); // re-insert to refresh recency order
   map.set(key, value);
   while (map.size > cap) {
     const oldest = map.keys().next();
     if (oldest.done) break;
+    evicted.push([oldest.value, map.get(oldest.value)!]);
     map.delete(oldest.value);
   }
+  return evicted;
 }
 
 class ChildBashRegistryImpl implements ChildBashRegistry {
@@ -137,6 +149,14 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
       }
       return { generation, unregister: () => undefined };
     }
+    // Bounded degradation (review follow-up): a very-late register whose
+    // sealed tombstone was already FIFO-evicted (see sealAndKill) falls
+    // through to here and IS retained. Safe, deliberately: sessionIds are
+    // never reused, so this entry can never alias a different live session;
+    // the only new observable is a possible SECOND sealAndKill for this id,
+    // whose killAll the entry contractually memoizes (§3.3 S3/S4) — the
+    // entry's own memoization, not registry bookkeeping, is what guarantees
+    // at-most-one actual kill. unregister() keeps working unchanged.
     fifoSet(this.entries, entry.sessionId, { entry: full, generation }, REGISTRY_CAP);
     return {
       generation,
@@ -161,7 +181,21 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
     return new Promise((resolve) => {
       const waiters = this.sealWaiters.get(sessionId) ?? [];
       waiters.push(resolve);
-      this.sealWaiters.set(sessionId, waiters);
+      // Same FIFO cap as every other map (review follow-up): without it an
+      // unknown sessionId's waiters accumulate forever. Eviction RESOLVES the
+      // evicted waiters synchronously — no timer is involved anywhere in this
+      // path (the module's only timer is boundedKillAll's unref'd backstop),
+      // and a resolved-early waiter is the wake-only degradation documented
+      // on ChildBashRegistry.whenSealed.
+      for (const [, evictedWaiters] of fifoSet(this.sealWaiters, sessionId, waiters, REGISTRY_CAP)) {
+        for (const w of evictedWaiters) {
+          try {
+            w();
+          } catch {
+            /* a waiter must never break registration */
+          }
+        }
+      }
     });
   }
 
@@ -172,6 +206,9 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
     // is never reused, so evicting the oldest one only means a very old,
     // long-finished run's isSealed()/whenSealed() would (harmlessly) answer
     // as if it were never sealed; nothing still running can observe that.
+    // The one second-order effect: an EXTREMELY late register() for that same
+    // session (later than 512 other seals) is then retained as if fresh —
+    // see register()'s retain-path comment for why that is still safe.
     if (this.sealed.size > REGISTRY_CAP) {
       const oldest = this.sealed.values().next();
       if (!oldest.done) this.sealed.delete(oldest.value);

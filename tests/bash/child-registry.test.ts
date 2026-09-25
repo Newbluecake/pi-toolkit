@@ -317,4 +317,76 @@ describe("child-registry: FIFO capacity bound (T2, no blanket clear)", () => {
     const stillThere = `${prefix}${REGISTRY_CAP}`;
     expect(registry.sealAndKill(stillThere, 0)).toBeDefined();
   }, 20_000);
+
+  it(`FIFO-caps whenSealed waiters at ${REGISTRY_CAP} sessionIds and RESOLVES the evicted oldest's waiters (never left pending, no timer involved)`, async () => {
+    const registry = getChildBashRegistry();
+    const prefix = `waiters-${randomUUID()}-`;
+    let oldestWoke = false;
+    const oldestP = registry
+      .whenSealed(`${prefix}0`)
+      .then(() => {
+        oldestWoke = true;
+      })
+      .then(() => "woke"); // resolved ⇒ the chain settles, so awaiting cannot hang
+    for (let i = 1; i <= REGISTRY_CAP; i++) void registry.whenSealed(`${prefix}${i}`); // 513 keys total ⇒ key 0 evicted while inserting key 512
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(oldestWoke).toBe(true); // resolved early — the sealed-waiter degradation, synchronously, without any timer
+    await oldestP; // already settled; awaiting pins that the chain can never hang
+    // The newest waiter is NOT resolved by the cap: it stays pending until its session actually seals.
+    const newest = `${prefix}${REGISTRY_CAP}`;
+    let newestWoke = false;
+    const newestP = registry.whenSealed(newest).then(() => {
+      newestWoke = true;
+    });
+    await Promise.resolve();
+    expect(newestWoke).toBe(false);
+    registry.sealAndKill(newest, 0);
+    await newestP;
+    expect(newestWoke).toBe(true);
+  }, 20_000);
+
+  it("re-touching an existing whenSealed key refreshes recency instead of evicting its own waiters", async () => {
+    const registry = getChildBashRegistry();
+    const sid = randomUUID();
+    const other = randomUUID();
+    let woke = false;
+    const p = registry.whenSealed(sid).then(() => {
+      woke = true;
+    });
+    void registry.whenSealed(other);
+    void registry.whenSealed(sid); // re-insert: recency refresh, no eviction of `sid`
+    await Promise.resolve();
+    expect(woke).toBe(false); // still pending — not spuriously resolved by its own re-registration
+    registry.sealAndKill(sid, 0);
+    await p;
+    expect(woke).toBe(true);
+  });
+
+  it("bounded degradation: a very-late register after its sealed tombstone was FIFO-evicted is retained and may be sealed a second time — safe because the entry's killAll is contractually memoized (§3.3 S3/S4)", async () => {
+    const registry = getChildBashRegistry();
+    const sid = `evicted-tombstone-${randomUUID()}`;
+    registry.register(fakeEntry(sid).entry);
+    await registry.sealAndKill(sid, 0)!.done; // first seal consumes the original entry
+    // Push the tombstone out of the 512-cap sealed set.
+    for (let i = 0; i <= REGISTRY_CAP; i++) registry.sealAndKill(`${sid}-pad-${i}`, 0);
+    expect(registry.isSealed(sid)).toBe(false); // the documented sealed-set degradation
+    // A register arriving AFTER the eviction falls into the retain path (register's comment)…
+    let killCalls = 0;
+    let memo: Promise<KillAllReport> | undefined;
+    const late = fakeEntry(sid, {
+      killAll: () => {
+        killCalls++;
+        memo ??= Promise.resolve(EMPTY_REPORT); // memoized per §3.3 S3 — the contract that makes the second seal kill-free
+        return memo;
+      },
+    });
+    registry.register(late.entry);
+    // …so a later sealAndKill for the same id runs a SECOND seal of that sessionId.
+    const second = registry.sealAndKill(sid, 0);
+    expect(second).toBeDefined();
+    await second!.done;
+    expect(late.sealedCalls).toBe(1); // the late entry was sealed (its first and only)
+    expect(killCalls).toBe(1); // but the memoized killAll still killed at most once across both seals
+    // And the entry still unregisters normally (no zombie in `entries`).
+  });
 });

@@ -220,7 +220,7 @@ export interface RunnerDeps {
    */
   beforeReap?: (outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }) => Promise<void> | void;
   /** Diagnostics-only sink for extension hook failures/timeouts (H3); never affects run outcome or settle timing beyond reapMs bound. */
-  onExtensionError?: (hook: "beforeReap", runId: string, error: string) => void;
+  onExtensionError?: (hook: "beforeReap" | "onLateArrival", runId: string, error: string) => void;
   /** Fired after every accepted dispatch with the fresh state — the live
    *  read-model feed for in-flight runs (persist_snapshot is terminal-only). */
   onStateChange?: (runId: string, state: RunState) => void;
@@ -723,11 +723,23 @@ export class RuntimeRunner implements Runner {
       cancel.detach();
       this.d.watchdog.disarm(req.runId, gen);
       ticket?.release();
-      if (createP)
-        this.d.driver.onLateArrival(createP, (h) => {
-          this.d.reaper.disposeLate(req.runId, gen, h);
-          this.notifyReaped(req, h.sessionId); // same ordering guarantee as the guard-failure path above
-        });
+      if (createP) {
+        // Review follow-up (P0b): this fallback is reached when the
+        // guard-failure branch's own onLateArrival call threw (that is the
+        // seam that leaves createP set into the catch path). A throwing
+        // driver hook here must not propagate — an exception escaping the
+        // finally would skip runReap()/notifyReaped() and the map cleanup
+        // below and reject run() itself — so it is swallowed and reported
+        // exactly like a throwing onReaped/beforeReap.
+        try {
+          this.d.driver.onLateArrival(createP, (h) => {
+            this.d.reaper.disposeLate(req.runId, gen, h);
+            this.notifyReaped(req, h.sessionId); // same ordering guarantee as the guard-failure path above
+          });
+        } catch (e) {
+          this.d.onExtensionError?.("onLateArrival", req.runId, e instanceof Error ? e.message : String(e));
+        }
+      }
       const reap: ReapInput = {
         runId: req.runId,
         generation: gen,

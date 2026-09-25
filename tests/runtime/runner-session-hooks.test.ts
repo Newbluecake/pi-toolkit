@@ -491,3 +491,147 @@ describe("onReaped carries the observed sessionId at all three call sites (bash-
     expect(h.reaped).toEqual([{ runId: "r-reap-abort", forkSessionFrom: undefined, sessionId: "s-reap-abort" }]);
   });
 });
+
+/** Records disposeLate calls on top of the real reaper (noLateArrival-path assertions need to see it). */
+class RecordingReaper extends EscalatingReaper {
+  readonly lateDisposals: string[] = [];
+  override disposeLate(runId: string, generation: number, h: SessionHandle): void {
+    this.lateDisposals.push(`${runId}:${generation}:${h.sessionId}`);
+    super.disposeLate(runId, generation, h);
+  }
+}
+
+describe("run() finally late-arrival fallback (the `if (createP)` branch; bash-timeout-grace plan §3.2 review follow-up)", () => {
+  // Reaching that branch requires an exception between `createP = …` and its
+  // two clearing points; the only injectable seam is the guard-failure
+  // branch's own `driver.onLateArrival` call throwing (then the catch path
+  // runs with createP still set). No handle is ever bound on this path, so
+  // sealing is observable as: the terminal prompt_settled dispatch happens
+  // BEFORE the finally's late-arrival registration (whose first line is
+  // sealBeforeTerminal — a no-op here only because no handle was ever bound,
+  // which is exactly why sealSession must stay untouched), and the late
+  // session's defensive seal travels through onReaped(sessionId) — §3.2's
+  // table row for the late-arrival paths.
+  const lateHarness = (
+    order: string[],
+    create: () => Promise<SessionHandle>,
+    onLateArrival: SessionDriver["onLateArrival"],
+  ) => {
+    const clock = new FakeClock();
+    const reaper = new RecordingReaper(clock);
+    const sealCalls: string[] = [];
+    const reaped: ReapedEntry[] = [];
+    const store = { put() {}, get: () => undefined, list: () => [], appendOutbox() {} };
+    const d: RunnerDeps = {
+      clock,
+      driver: { create, bind: async () => undefined, onLateArrival },
+      pool: new SingleSlotPool(clock, 2),
+      store,
+      watchdog: { arm() {}, disarm() {}, tick() {} },
+      reaper,
+      effects: new BasicEffectInterpreter(),
+      emit() {},
+      deliver() {},
+      onStateChange: (_runId, state) => {
+        if (isTerminalStatus(state.status)) order.push("terminal-dispatch");
+      },
+      sealSession: (runId, sessionId) => {
+        sealCalls.push(`${runId}:${sessionId}`);
+        return makeFacts("late");
+      },
+      onReaped: (runId, forkSessionFrom, sessionId) => {
+        order.push(`onReaped(${sessionId ?? "undefined"})`);
+        reaped.push({ runId, forkSessionFrom, sessionId });
+      },
+    };
+    return { clock, runner: new RuntimeRunner(d), reaper, sealCalls, reaped };
+  };
+
+  it("a throwing first onLateArrival (guard-failure branch) leaves createP set: the finally still seals first, registers the late handler, reaps, and settles without any unhandled rejection", async () => {
+    let lateResolve: (h: SessionHandle) => void = () => undefined;
+    const createP = new Promise<SessionHandle>((r) => {
+      lateResolve = r;
+    });
+    const order: string[] = [];
+    let calls = 0;
+    const h = lateHarness(
+      order,
+      () => createP,
+      (p, cb) => {
+        calls++;
+        if (calls === 1) {
+          order.push("late-throw");
+          throw new Error("first onLateArrival exploded"); // makes the !created.ok branch throw ⇒ catch ⇒ finally with createP still set
+        }
+        order.push("late-register");
+        p.then(cb, () => undefined);
+      },
+    );
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const p = h.runner.run({ ...request, runId: "r-finally-late" }, budget);
+      await pump();
+      h.clock.advance(budget.startupMs + 1); // create guard times out ⇒ guard-failure branch ⇒ throwing onLateArrival ⇒ catch
+      const outcome = await p;
+      await pump(); // let the fire-and-forget runReap() → notifyReaped(undefined) chain settle
+      expect(outcome.status).toBe("failed");
+      expect(outcome.error?.message).toBe("first onLateArrival exploded");
+      // Sealing order: the terminal dispatch strictly precedes the finally's
+      // late-arrival registration; sealSession stays untouched (no handle was
+      // ever bound on this path — the no-handle test above pins that). The
+      // possible extra "terminal-dispatch" entries after "late-register" are
+      // the reaper's own absorbed `cancel.cancel("reap")` re-observing the
+      // already-terminal state through onStateChange — not a second
+      // transition (the reducer no-ops a stop_requested on a terminal run).
+      expect(order.slice(0, 3)).toEqual(["late-throw", "terminal-dispatch", "late-register"]);
+      expect(order.at(-1)).toBe("onReaped(undefined)");
+      expect(order.indexOf("terminal-dispatch")).toBeLessThan(order.indexOf("late-register"));
+      expect(h.sealCalls).toEqual([]);
+      // Normal reap happened despite the throw (sessionId undefined — no handle).
+      expect(h.reaped).toEqual([{ runId: "r-finally-late", forkSessionFrom: undefined, sessionId: undefined }]);
+      // The late session still gets its defensive seal path: disposeLate +
+      // onReaped with the late handle's sessionId.
+      lateResolve(handle({ sessionId: "s-finally-late" }));
+      await pump(5);
+      expect(h.reaper.lateDisposals).toEqual(["r-finally-late:1:s-finally-late"]);
+      expect(h.reaped).toHaveLength(2);
+      expect(h.reaped[1]).toEqual({ runId: "r-finally-late", forkSessionFrom: undefined, sessionId: "s-finally-late" });
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("a driver whose onLateArrival ALWAYS throws cannot break out of the finally: run() still resolves, the reap pipeline and map cleanup still run", async () => {
+    const order: string[] = [];
+    const h = lateHarness(
+      order,
+      () => new Promise<SessionHandle>(() => undefined),
+      () => {
+        order.push("late-throw");
+        throw new Error("onLateArrival always explodes");
+      },
+    );
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const p = h.runner.run({ ...request, runId: "r-finally-throw" }, budget);
+      await pump();
+      h.clock.advance(budget.startupMs + 1);
+      const outcome = await p; // without the try/catch fix this rejects with the driver hook's error instead
+      expect(outcome.status).toBe("failed");
+      expect(outcome.error?.message).toBe("onLateArrival always explodes");
+      await pump();
+      expect(h.reaped).toEqual([{ runId: "r-finally-throw", forkSessionFrom: undefined, sessionId: undefined }]);
+      // Map cleanup still ran ⇒ the terminal snapshot stays readable (the
+      // generation/cancel/handle entries were deleted, not leaked forever).
+      expect(h.runner.getRunState("r-finally-throw")?.outcome).toBe(outcome);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});
