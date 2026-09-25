@@ -1413,3 +1413,14 @@ moonshot-balance-positive.json
 - **reset-elapsed 规则（`d7606a5`）**：`ladder.ts` `windowLevel` 新增规则 0——窗口 `resetAt ≤ now` ⇒ 该窗口等级归 0，新 reason `"reset-elapsed"`。只放宽、不收紧：forecast 不得把已过期窗口重新抬级，`providerVerdict` 的窗口 max 与降位地板不变，`resetAt` 未知/未到的窗口走原路径（与快照级 `stale` 正交）。闸门、turn_end 注入、HUD 与 `service.gateBlocked` 全部读同一 verdict，重置已过但快照未刷新时不再拦截 spawn / 复读 L3。HUD 与 tick 行对过期窗口追加紧凑英文标记 `·reset`（如 `7d 100%·reset`）。
 - **TTL 绕过只认「拉取于重置之前」（`72e965b`）**：`service.refreshIfStale` 在任一窗口 `resetAt ≤ now` 时绕过刷新 TTL 立即重拉（触发点：turn_end / spawn 生命周期 / session_start；在途去重照常、可疑读数退避不绕过、仍零 timer）——收紧为附带条件 `existing.fetchedAt < w.resetAt`：上游若在重置后仍回报过去的 resetAt（数据滞后），新快照不再绕过，避免每个触发点都打一次端点。
 - **`repeatS` 只在 L3 复读（`0c701c7`）**：`shouldAnnounce` 闸 3 的复读仅对 level ≥ 3；L2 是纯提示、从不复读（QuotaSettings 注释与 `quota.repeatS` 编辑器描述同步修正）。另：reset-elapsed 窗口把等级归零得到的 L0 不是真实读数（快照尚未刷新），hook 不删公告闩锁——观测重置恢复事件仍恰好一次。
+
+## 15. 实施后增强（HUD 恢复倒计时，2026-09-25）
+
+合入 master 后的用户确认效果：HUD 状态行里**用完**的 provider 段末尾追加恢复倒计时 ` resets <时长>`（紧凑英文 token，段与倒计时之间一个空格）：
+
+- **触发条件**：该 provider 存在用完窗口（`usedPct ≥ 100`，即 ladder reason `"exhausted"`；`reset-elapsed` 的窗口不算——那只是读数过期）。未用完（含 L3 ≥90%）不显示。
+- **恢复时刻**：全部用完窗口 `resetAt` 的**最大值**（5h 与 7d 都用完要等 7d 重置才真正可用）；任一用完窗口的 `resetAt` 未知 ⇒ 不显示（不猜）。
+- **时长档位**（`render.ts#formatCountdown`，floor 到分钟）：≥1d `2d11h`（小时为 0 ⇒ `2d`）；≥1h `3h12m`（分钟为 0 ⇒ `3h`）；≥1m `45m`；<1m `<1m`。例：`quota zai 23%/85% · kimi 100%/100% resets 2d11h`。
+- **主题**：倒计时 `dim`（百分比仍按 levelColor）。同池去重与 `·stale Nm` 行尾标记行为不变。
+- **刷新时机**：倒计时按 `writeStatus` 落地时的 now 现算（快照每次落地都会重写 HUD 行）。用完的 provider 恒为 hot（level ≥ 3）⇒ `refreshHotMs`（默认 2min）节流，turn_end / 子代理生命周期 / session_start 任一触发点都会驱动重拉；会话完全空闲时整行（含百分比）冻结——与现状一致，零 timer 不变量保持。HUD 自身的 5s footer 重绘只复读已存的 status 字符串，不重算；若未来要空闲时也走秒，需把 status 槽改成渲染回调（改 `src/hud/footer.ts` 聚合面），本期不做。
+- **月度窗口调查结论（2026-09-25 实测，两家凭据均在）**：zai `GET /api/monitor/usage/quota/limit` 的 `data.limits` 只含 `unit:3`（5h）与 `unit:6`（week）两条，无其它 unit；kimi `GET /coding/v1/usages` 的 `usages` 只含 `limit_5h` / `limit_7d`（`booster_wallet` 是按量充值钱包，非窗口额度）。两家均无月度窗口 ⇒ 不新增 `"month"` scope。

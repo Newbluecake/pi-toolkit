@@ -60,6 +60,25 @@ export function formatEta(etaMs: Millis | undefined): string {
   return `约 ${etaSpanText(etaMs)}`;
 }
 
+/**
+ * 紧凑倒计时时长（英文 token，AGENTS.md UI split）：≥1d ⇒ `2d11h`（小时为 0 ⇒
+ * `2d`）；≥1h ⇒ `3h12m`（分钟为 0 ⇒ `3h`）；≥1m ⇒ `45m`；<1m ⇒ `<1m`。
+ * 向下取整到分钟——倒计时读数随刷新递减，向上取整会在整分边界跳变两格。
+ */
+export function formatCountdown(ms: Millis): string {
+  if (!Number.isFinite(ms) || ms < MINUTE_MS) return "<1m";
+  const totalMinutes = Math.floor(ms / MINUTE_MS);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    const remMinutes = totalMinutes % 60;
+    return remMinutes > 0 ? `${totalHours}h${remMinutes}m` : `${totalHours}h`;
+  }
+  const days = Math.floor(totalHours / 24);
+  const remHours = totalHours % 24;
+  return remHours > 0 ? `${days}d${remHours}h` : `${days}d`;
+}
+
 function pctOf(pct: number): number {
   return Math.round(Math.min(100, Math.max(0, pct)));
 }
@@ -314,10 +333,29 @@ function shortName(provider: string): string {
   return provider.split("-")[0] ?? provider;
 }
 
-function hudSegment(v: ProviderVerdict): string {
+/**
+ * 恢复倒计时（HUD 专属，2026-09 用户确认效果）：provider 有**用完**窗口
+ * （`usedPct ≥ 100` 且非 `reset-elapsed`——后者只是读数过期，等下一次拉取）
+ * 时，倒计时到「真正恢复可用」＝全部用完窗口 `resetAt` 的**最大值**（5h 与 7d
+ * 都用完要等 7d 重置）。任一用完窗口的 `resetAt` 未知 ⇒ 不显示（不猜）；
+ * resetAt 已过属防御分支（ladder 规则 0 已把它判成 reset-elapsed）。
+ */
+function recoveryCountdownText(v: ProviderVerdict, now: Millis): string | undefined {
+  let max: Millis | undefined = undefined;
+  for (const w of v.windows) {
+    if (w.reason === "reset-elapsed" || w.usedPct < 100) continue;
+    if (w.resetAt === undefined || !Number.isFinite(w.resetAt)) return undefined;
+    if (max === undefined || w.resetAt > max) max = w.resetAt;
+  }
+  if (max === undefined || max <= now) return undefined;
+  return formatCountdown(max - now);
+}
+
+function hudSegment(v: ProviderVerdict, now: Millis): string {
   if (v.windows.length === 0) return shortName(v.provider); // 防御分支（适配器层不产出）
   const cells = v.windows.map((w) => `${pctOf(w.usedPct)}%${resetSuffix(w)}`);
-  return `${shortName(v.provider)} ${cells.join("/")}`;
+  const countdown = recoveryCountdownText(v, now);
+  return `${shortName(v.provider)} ${cells.join("/")}${countdown === undefined ? "" : ` resets ${countdown}`}`;
 }
 
 /** The subset of pi's Theme this module needs (mirror of cache-ttl's CacheStatusTheme); structural so tests need no pi UI. */
@@ -360,16 +398,18 @@ function levelColor(level: number): string {
   return level >= 3 ? "error" : level === 2 ? "warning" : "text";
 }
 
-/** HUD 约定：dim 标签 + 彩色值（`input 32` 同款，见 keepalive-state.ts 的注释）。 */
-function hudSegmentThemed(v: ProviderVerdict, theme: QuotaStatusTheme): string {
+/** HUD 约定：dim 标签 + 彩色值（`input 32` 同款，见 keepalive-state.ts 的注释）；倒计时 dim（数值仍按 levelColor）。 */
+function hudSegmentThemed(v: ProviderVerdict, now: Millis, theme: QuotaStatusTheme): string {
   if (v.windows.length === 0) return theme.fg("dim", shortName(v.provider)); // 防御分支
   const name = theme.fg("dim", shortName(v.provider));
   const value = v.windows.map((w) => `${pctOf(w.usedPct)}%${resetSuffix(w)}`).join("/");
-  return `${name} ${theme.fg(levelColor(v.level), value)}`;
+  const countdown = recoveryCountdownText(v, now);
+  return `${name} ${theme.fg(levelColor(v.level), value)}${countdown === undefined ? "" : ` ${theme.fg("dim", `resets ${countdown}`)}`}`;
 }
 
 /**
- * HUD 一行（含陈旧标记）：`quota zai 62%/21% · kimi 8%/100%`。
+ * HUD 一行（含陈旧标记）：`quota zai 62%/21% · kimi 8%/100% resets 2d11h`（用完
+ * 的 provider 段末尾带恢复倒计时，见 `recoveryCountdownText`）。
  * 全部 provider 无快照（verdicts 为空）⇒ undefined（不占位）；
  * 任一快照年龄超过 refreshMs ⇒ 行尾追加 ` ·stale 12m`（取最老者）。
  */
@@ -384,7 +424,7 @@ export function renderQuotaStatus(
   let maxAge = 0;
   for (const v of rows) maxAge = Math.max(maxAge, now - v.fetchedAt);
   const joiner = theme === undefined ? " · " : theme.fg("dim", " · ");
-  const segments = rows.map((v) => (theme === undefined ? hudSegment(v) : hudSegmentThemed(v, theme)));
+  const segments = rows.map((v) => (theme === undefined ? hudSegment(v, now) : hudSegmentThemed(v, now, theme)));
   let line = `${theme === undefined ? "quota" : theme.fg("dim", "quota")} ${segments.join(joiner)}`;
   if (maxAge > refreshMs) {
     const stale = ` ·stale ${Math.floor(maxAge / MINUTE_MS)}m`;

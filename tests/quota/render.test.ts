@@ -15,6 +15,7 @@ import {
   buildQuotaTickText,
   buildQuotaWarnText,
   dedupeVerdicts,
+  formatCountdown,
   formatEta,
   formatResetAt,
   formatScope,
@@ -72,6 +73,21 @@ describe("formatScope / formatResetAt / formatEta", () => {
     expect(formatEta(3_600_000)).toBe("约 1 小时");
     expect(formatEta(10_000)).toBe("约 不足 1 分钟");
     expect(formatEta(undefined)).toBe("未知");
+  });
+
+  it("formatCountdown hits each duration tier boundary (English tokens, floor to minute)", () => {
+    expect(formatCountdown(59_000)).toBe("<1m");
+    expect(formatCountdown(60_000)).toBe("1m");
+    expect(formatCountdown(59 * 60_000)).toBe("59m");
+    expect(formatCountdown(60 * 60_000 - 1_000)).toBe("59m"); // 59m59s
+    expect(formatCountdown(60 * 60_000)).toBe("1h");
+    expect(formatCountdown(3 * 60_000 * 60)).toBe("3h");
+    expect(formatCountdown((3 * 60 + 12) * 60_000)).toBe("3h12m");
+    expect(formatCountdown((23 * 60 + 59) * 60_000)).toBe("23h59m");
+    expect(formatCountdown(24 * 60_000 * 60)).toBe("1d");
+    expect(formatCountdown(2 * 24 * 3_600_000)).toBe("2d"); // 2d0h
+    expect(formatCountdown((2 * 24 + 11) * 3_600_000)).toBe("2d11h");
+    expect(formatCountdown(Number.NaN)).toBe("<1m"); // 防御：非有限值
   });
 });
 
@@ -364,6 +380,113 @@ describe("renderQuotaStatus (HUD line)", () => {
     expect(readQuotaStatusTheme({ ui: {} })).toBeUndefined();
     expect(readQuotaStatusTheme(undefined)).toBeUndefined();
     expect(readQuotaStatusTheme({ ui: { theme: { fg: "not-a-fn" } } })).toBeUndefined();
+  });
+});
+
+// 恢复倒计时（2026-09 用户确认效果）：用完窗口的 provider 段末尾追加
+// ` resets <时长>`（英文 token），倒计时到全部用完窗口 resetAt 的最大值。
+describe("HUD recovery countdown (resets …)", () => {
+  const H = 3_600_000;
+  const D = 24 * H;
+  const TWO_D_11H = 2 * D + 11 * H;
+
+  /** week 用完（resetAt 可控）、5h 未用的 kimi verdict。 */
+  function exhaustedKimi(resetAt: number | undefined, now = NOW): ProviderVerdict {
+    return verdict({
+      provider: "kimi-coding",
+      level: 3,
+      fetchedAt: now,
+      windows: [w("5h", 8, 0, "none"), w("week", 100, 3, "exhausted", ...(resetAt === undefined ? [] : [{ resetAt }]))],
+    });
+  }
+
+  it("appends ` resets <duration>` to the exhausted provider segment only", () => {
+    const zai = verdict({ windows: [w("5h", 62, 1, "pct"), w("week", 21, 0, "none")] });
+    const kimi = exhaustedKimi(NOW + TWO_D_11H);
+    expect(renderQuotaStatus([zai, kimi], NOW, 600_000)).toBe("quota zai 62%/21% · kimi 8%/100% resets 2d11h");
+  });
+
+  it("takes the LATEST resetAt when both windows are exhausted (wait for 7d)", () => {
+    const both = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [
+        w("5h", 100, 3, "exhausted", { resetAt: NOW + 3 * H }),
+        w("week", 100, 3, "exhausted", { resetAt: NOW + TWO_D_11H }),
+      ],
+    });
+    expect(renderQuotaStatus([both], NOW, 600_000)).toBe("quota kimi 100%/100% resets 2d11h");
+    // 窗口顺序不影响取最大值
+    const flipped = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [
+        w("week", 100, 3, "exhausted", { resetAt: NOW + TWO_D_11H }),
+        w("5h", 100, 3, "exhausted", { resetAt: NOW + 3 * H }),
+      ],
+    });
+    expect(renderQuotaStatus([flipped], NOW, 600_000)).toBe("quota kimi 100%/100% resets 2d11h");
+  });
+
+  it("hides the countdown when any exhausted window has no resetAt (never guess)", () => {
+    // 唯一用完窗口无 resetAt
+    expect(renderQuotaStatus([exhaustedKimi(undefined)], NOW, 600_000)).toBe("quota kimi 8%/100%");
+    // 5h 用完（有 resetAt）+ week 用完（无）⇒ 恢复时刻未知，同样不显示
+    const partial = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [w("5h", 100, 3, "exhausted", { resetAt: NOW + 3 * H }), w("week", 100, 3, "exhausted")],
+    });
+    expect(renderQuotaStatus([partial], NOW, 600_000)).toBe("quota kimi 100%/100%");
+  });
+
+  it("never shows a countdown for merely-high usage (L3 95% not exhausted)", () => {
+    const hot = verdict({
+      level: 3,
+      windows: [w("5h", 95, 3, "pct", { resetAt: NOW + TWO_D_11H })],
+    });
+    expect(renderQuotaStatus([hot], NOW, 600_000)).toBe("quota zai 95%");
+  });
+
+  it("reset-elapsed windows never count as exhausted (·reset keeps its place)", () => {
+    const elapsed = verdict({
+      provider: "kimi-coding",
+      level: 0,
+      windows: [w("5h", 8, 0, "none"), w("week", 100, 0, "reset-elapsed", { resetAt: NOW - 60_000 })],
+    });
+    expect(renderQuotaStatus([elapsed], NOW, 600_000)).toBe("quota kimi 8%/100%·reset");
+  });
+
+  it("defensively hides the countdown when an exhausted window's resetAt is already past", () => {
+    // ladder 规则 0 已把这类窗口判成 reset-elapsed，这里锁住渲染层的防御分支
+    const past = exhaustedKimi(NOW - 1_000);
+    expect(renderQuotaStatus([past], NOW, 600_000)).toBe("quota kimi 8%/100%");
+  });
+
+  it("themes the countdown dim while percentages keep levelColor", () => {
+    const theme = { fg: (color: string, text: string) => `<${color}>${text}</>` };
+    expect(renderQuotaStatus([exhaustedKimi(NOW + TWO_D_11H)], NOW, 600_000, theme)).toBe(
+      "<dim>quota</> <dim>kimi</> <error>8%/100%</> <dim>resets 2d11h</>",
+    );
+  });
+
+  it("coexists with the ·stale marker (stale stays at line end)", () => {
+    const later = NOW + 12 * 60_000;
+    const kimi = exhaustedKimi(later + TWO_D_11H, NOW); // fetchedAt=NOW ⇒ age 12m；倒计时按 later 现算
+    expect(renderQuotaStatus([kimi], later, 600_000)).toBe("quota kimi 8%/100% resets 2d11h ·stale 12m");
+  });
+
+  it("coexists with same-pool dedupe (one segment, one countdown)", () => {
+    const cn = verdict({
+      level: 3,
+      windows: [w("5h", 12, 0, "none"), w("week", 100, 3, "exhausted", { resetAt: NOW + TWO_D_11H })],
+    });
+    const intl = verdict({
+      provider: "zai",
+      level: 3,
+      windows: [w("5h", 12, 0, "none"), w("week", 100, 3, "exhausted", { resetAt: NOW + TWO_D_11H })],
+    });
+    expect(renderQuotaStatus([cn, intl], NOW, 600_000)).toBe("quota zai 12%/100% resets 2d11h");
   });
 });
 
