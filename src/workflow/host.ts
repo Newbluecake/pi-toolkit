@@ -653,8 +653,11 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // string as `modelHintOverride` (fuzzy-resolved at spawn admission,
     // unresolvable ⇒ spawn error ⇒ `agent()` rejects). Exactly one of the
     // two is ever set.
-    const modelOverride = rawModel !== undefined ? parseStrictModelRef(rawModel) : undefined;
-    const modelHintOverride = rawModel !== undefined && modelOverride === undefined ? rawModel : undefined;
+    // Same rule as the Agent tool (agent-tool.ts: `params.model` truthiness): an
+    // empty string means "no override", never an empty fuzzy hint.
+    const model = typeof rawModel === "string" && rawModel !== "" ? rawModel : undefined;
+    const modelOverride = model !== undefined ? parseStrictModelRef(model) : undefined;
+    const modelHintOverride = model !== undefined && modelOverride === undefined ? model : undefined;
     // (thinkingOverride is declared above, alongside its validation guard.)
     // M3.4 §5.2: worker-source.ts already resolved \`opts.phase\` against the
     // script's environment \`phase(title)\` (explicit \`opts.phase\` wins) before
@@ -701,7 +704,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         // every distinct *declared* model/thinking (same prompt + different
         // model must never replay the old result). Two spellings of the same
         // model simply miss — safe; the reverse is not.
-        ...(rawModel !== undefined ? { model: rawModel } : {}),
+        ...(model !== undefined ? { model } : {}),
         ...(thinkingOverride !== undefined ? { thinking: thinkingOverride } : {}),
         ...(isolation !== undefined ? { isolation } : {}),
         ...(deps.workflowArgs !== undefined ? { workflowArgs: deps.workflowArgs } : {}),

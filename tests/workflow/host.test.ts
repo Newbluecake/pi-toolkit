@@ -1437,6 +1437,20 @@ describe("host.ts: agent() model/thinking overrides (Agent-tool model/thinking s
     expect(h.clock.pendingTimers).toBe(0);
   });
 
+  it('treats model: "" as no override (same rule as the Agent tool)', async () => {
+    const h = modelHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p", opts: { model: "" } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("modelOverride");
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("modelHintOverride");
+    h.c.finishChild("r1");
+    await flush();
+  });
+
   it("keeps a non-pair model as modelHintOverride (fuzzy hint resolved at spawn admission)", async () => {
     const h = modelHarness();
     await h.boot();
