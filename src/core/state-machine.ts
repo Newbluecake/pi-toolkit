@@ -379,6 +379,11 @@ function finish(
         ...((d.error?.message ?? d.timeoutReason) === undefined
           ? {}
           : { failReason: d.error?.message ?? d.timeoutReason }),
+        // bash-timeout-grace plan §3.7/§3.8 (P0b, frozen): mirrors d.exitFacts
+        // (already folded into outcome.diag/snapshot.diag above via `diag: d`)
+        // so a delivered notice can render the same exit-time bash job facts
+        // without re-reading the snapshot (P15b: all four copies same value).
+        ...(d.exitFacts === undefined ? {} : { exitFacts: d.exitFacts }),
         diag: {
           phase: "settled",
           status,
@@ -539,6 +544,23 @@ export function reduce(
       : { state: { ...state, diag: { ...state.diag, model: input.event.model } }, effects: [] };
   if (stamped.generation !== state.generation)
     return { state: { ...state, diag: { ...state.diag, staleInputs: state.diag.staleInputs + 1 } }, effects: [] };
+  // bash-timeout-grace plan §3.8 (P0b, frozen position): exit_facts is a
+  // metadata-only session_event carrying the runner's synchronous seal-time
+  // child bash job snapshot (RunnerDeps.sealSession, dispatched by
+  // sealBeforeTerminal). Unlike context_usage/model_changed above it is NOT
+  // exempt from the generation check — a stale-generation exit_facts input
+  // only bumps staleInputs like any other input, via the branch immediately
+  // above. Placed here — after the generation check, before effect_failed and
+  // before the terminal() dispatch to terminalUpdate — so a terminal run gets
+  // an EXPLICIT no-op (the exact same state reference, no effects, bypassing
+  // terminalUpdate entirely: P15b "终态之后再插入 ⇒ 状态对象引用相等") while a
+  // non-terminal run gets a pure diagnostics patch touching nothing else
+  // (P15a). Repeated insertion on the same non-terminal state takes the
+  // latter value (plain field overwrite).
+  if (input.kind === "session_event" && input.event.t === "exit_facts")
+    return terminal(state.status)
+      ? { state, effects: [] }
+      : { state: { ...state, diag: { ...state.diag, exitFacts: input.event.facts } }, effects: [] };
   // effect_failed is a recovery protocol, including after settlement. It must
   // run before the terminal read-only update so terminal effects can recover.
   if (input.kind === "effect_failed") return handleEffectFailed(state, input);

@@ -19,6 +19,7 @@ import type {
   LifecycleEvent,
   Millis,
   RunEffect,
+  RunExitFacts,
   RunId,
   RunInput,
   RunOutcome,
@@ -235,17 +236,42 @@ export interface RunnerDeps {
    */
   onChildAbort?: (runId: string, cause: StopCause) => void;
   /**
-   * consult (plan §4.4, frozen surface): physical-reclaim-completed hook.
-   * Called once per run after the finally-block's `runReap()` finishes
-   * (beforeReap + reaper dispose included, success or failure), and once
-   * more from each late-arrival path after `disposeLate`. `forkSessionFrom`
-   * is taken straight from `req.forkSessionFrom` (undefined for every
-   * non-consult run) — the deletion fact travels with the request, so no
-   * side registry (the v2 pendingDeletions race) exists. Implementations
-   * must be idempotent, synchronous and non-throwing (a throw is swallowed
-   * and only loses the cleanup).
+   * bash-timeout-grace plan §3.2 (P0b, frozen): synchronous, idempotent,
+   * never-throwing seal callback. Invoked by the runner's internal
+   * `sealBeforeTerminal(runId, gen)` exactly once per (runId, generation)
+   * that has a bound session, immediately before the FIRST input guaranteed
+   * to move that run into a terminal RunStatus (§3.2's table: bind failure,
+   * the normal/catch prompt_settled dispatches, the abort_grace/extension_bind
+   * fireDeadline() branch, and the run() finally fallback — invariant I-SEAL).
+   * Returns the child bash job snapshot to fold into
+   * `diag.exitFacts` (dispatched as `session_event{t:"exit_facts"}`), or
+   * `undefined` when there is nothing to report — no child registry entry for
+   * this sessionId, the feature disabled, or this stack never wired it at
+   * all. A thrown error is treated exactly like an absent callback: swallowed
+   * by the runner, never surfaced into the dispatch path (RunExitFacts is
+   * best-effort presentation data, not a state-machine invariant — AGENTS.md
+   * zero-hang: this must never block or reject).
    */
-  onReaped?: (runId: RunId, forkSessionFrom?: string) => void;
+  sealSession?: (runId: RunId, sessionId: string) => RunExitFacts | undefined;
+  /**
+   * consult (plan §4.4, frozen surface) + bash-timeout-grace plan §3.2:
+   * physical-reclaim-completed hook. Called once per run after the
+   * finally-block's `runReap()` finishes (beforeReap + reaper dispose
+   * included, success or failure), and once more from each late-arrival path
+   * after `disposeLate`. `forkSessionFrom` is taken straight from
+   * `req.forkSessionFrom` (undefined for every non-consult run) — the
+   * deletion fact travels with the request, so no side registry (the v2
+   * pendingDeletions race) exists. `sessionId` (added by the
+   * bash-timeout-grace plan, §3.2) is the child session id observed at the
+   * call site — `handle?.sessionId` on the normal reap path, `h.sessionId` on
+   * both late-arrival paths — so a host-side listener can defensively seal a
+   * session `sealBeforeTerminal` never reached (e.g. a late-arrival session
+   * created outside the normal handle lifecycle); additive parameter,
+   * existing wiring that ignores the third argument is unaffected.
+   * Implementations must be idempotent, synchronous and non-throwing (a
+   * throw is swallowed and only loses the cleanup).
+   */
+  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string) => void;
 }
 export interface Runner {
   run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome>;
@@ -286,6 +312,8 @@ export class RuntimeRunner implements Runner {
   >();
   private readonly activeCancels = new Map<string, { gen: number; cancel: CancelHandle }>();
   private readonly activeHandles = new Map<string, { gen: number; handle: SessionHandle }>();
+  /** bash-timeout-grace plan §3.2: runId -> generation already sealed, guarding sealBeforeTerminal's idempotency (I-SEAL). */
+  private readonly sealedGenerations = new Map<string, number>();
   constructor(private readonly d: RunnerDeps) {}
   /** Public dispatch entry so external drivers (watchdog ticks, effect-failure feedback) can feed inputs into a specific, still-running (runId, generation) without touching another concurrent run (fixes the single-field-clobber hazard when limit > 1). */
   dispatchExternal(runId: string, generation: number, input: RunInput): void {
@@ -415,6 +443,34 @@ export class RuntimeRunner implements Runner {
     return { ok: true, model: effective, ...(level === undefined ? {} : { thinking: level }) };
   }
   /**
+   * bash-timeout-grace plan §3.2 (P0b, frozen): synchronous, idempotent
+   * pre-terminal seal (invariant I-SEAL). No-ops when there is no bound
+   * session for this (runId, generation) — nothing to seal — or when this
+   * generation has already been sealed once. `sealSession` itself must never
+   * throw into the dispatch path; a thrown error is treated exactly like an
+   * absent callback (RunExitFacts is best-effort diagnostics, never a
+   * lifecycle concern).
+   */
+  private sealBeforeTerminal(runId: string, gen: number): void {
+    if (this.sealedGenerations.get(runId) === gen) return;
+    const handleEntry = this.activeHandles.get(runId);
+    if (!handleEntry || handleEntry.gen !== gen) return;
+    this.sealedGenerations.set(runId, gen);
+    let facts: RunExitFacts | undefined;
+    try {
+      facts = this.d.sealSession?.(runId, handleEntry.handle.sessionId);
+    } catch {
+      /* best-effort diagnostics — never break the dispatch path */
+      facts = undefined;
+    }
+    if (facts === undefined) return;
+    this.dispatchExternal(runId, gen, {
+      kind: "session_event",
+      at: this.d.clock.now(),
+      event: { t: "exit_facts", facts },
+    });
+  }
+  /**
    * M4: EventWatchdog 的超时入口。两步缺一不可：
    * 1. 先把 deadline_fired 折进状态机 —— 进入 abort_grace 并记录具体 timeoutReason；
    * 2. 再取消本 run 的 CancelHandle —— run() 正阻塞在 guard(handle.prompt(...)) 上，
@@ -427,6 +483,20 @@ export class RuntimeRunner implements Runner {
   fireDeadline(runId: string, generation: number, input: Extract<RunInput, { kind: "deadline_fired" }>): void {
     const state = this.states.get(runId);
     if (!state || state.generation !== generation || isTerminalStatus(state.status)) return;
+    // bash-timeout-grace plan §3.2 (P0b, frozen): in these two phases a
+    // deadline_fired is UNCONDITIONALLY terminal in the reducer (abort_grace's
+    // second timeout; extension_bind's watchdog-driven timeout) — see
+    // state-machine.ts's deadline_fired branch. Every other phase either stays
+    // non-terminal (enters abort_grace) or is covered by one of the other four
+    // sealBeforeTerminal call sites, so gating on these exact two phases keeps
+    // sealAndKill from ever firing early against a run that is merely entering
+    // its abort grace window.
+    if (
+      (state.phase === "abort_grace" || state.phase === "extension_bind") &&
+      this.activeHandles.get(runId)?.gen === generation
+    ) {
+      this.sealBeforeTerminal(runId, generation);
+    }
     this.dispatchExternal(runId, generation, input);
     // timeout-notify (arch §3.5, review-critical): re-read the state AFTER the
     // dispatch. If the run just entered a timeout grace window it is still
@@ -530,7 +600,7 @@ export class RuntimeRunner implements Runner {
           this.d.reaper.disposeLate(req.runId, gen, h); // sync
           // 迟到会话的写入（appendThinkingLevelChange 等）已在 createP resolve
           // 前完成；dispose 后再回调删除（幂等，覆盖 _persist 重生残片）。
-          this.notifyReaped(req);
+          this.notifyReaped(req, h.sessionId);
         });
         createP = undefined;
         dispatch({
@@ -577,6 +647,7 @@ export class RuntimeRunner implements Runner {
         "bind",
       );
       if (!bound.ok) {
+        this.sealBeforeTerminal(req.runId, gen);
         dispatch({
           kind: "startup_failed",
           at: this.d.clock.now(),
@@ -635,6 +706,7 @@ export class RuntimeRunner implements Runner {
         }
         return error("cancelled", "aborted");
       })();
+      this.sealBeforeTerminal(req.runId, gen);
       dispatch({
         kind: "prompt_settled",
         at: this.d.clock.now(),
@@ -643,16 +715,18 @@ export class RuntimeRunner implements Runner {
       });
       return state.outcome!;
     } catch (e) {
+      this.sealBeforeTerminal(req.runId, gen);
       dispatch({ kind: "prompt_settled", at: this.d.clock.now(), error: error(e) });
       return state.outcome!;
     } finally {
+      this.sealBeforeTerminal(req.runId, gen);
       cancel.detach();
       this.d.watchdog.disarm(req.runId, gen);
       ticket?.release();
       if (createP)
         this.d.driver.onLateArrival(createP, (h) => {
           this.d.reaper.disposeLate(req.runId, gen, h);
-          this.notifyReaped(req); // same ordering guarantee as the guard-failure path above
+          this.notifyReaped(req, h.sessionId); // same ordering guarantee as the guard-failure path above
         });
       const reap: ReapInput = {
         runId: req.runId,
@@ -682,19 +756,21 @@ export class RuntimeRunner implements Runner {
       };
       void runReap()
         .catch(() => undefined)
-        .then(() => this.notifyReaped(req));
+        .then(() => this.notifyReaped(req, handle?.sessionId));
       const dEntry = this.dispatchers.get(req.runId);
       if (dEntry && dEntry.gen === gen) this.dispatchers.delete(req.runId);
       const cEntry = this.activeCancels.get(req.runId);
       if (cEntry && cEntry.gen === gen) this.activeCancels.delete(req.runId);
       const hEntry = this.activeHandles.get(req.runId);
       if (hEntry && hEntry.gen === gen) this.activeHandles.delete(req.runId);
+      const sealedGen = this.sealedGenerations.get(req.runId);
+      if (sealedGen === gen) this.sealedGenerations.delete(req.runId);
     }
   }
   /** consult (§4.4): post-reap cleanup seam. Swallows everything — a cleanup callback must never affect the runner. */
-  private notifyReaped(req: ResolvedSpawnRequest) {
+  private notifyReaped(req: ResolvedSpawnRequest, sessionId?: string) {
     try {
-      this.d.onReaped?.(req.runId, req.forkSessionFrom);
+      this.d.onReaped?.(req.runId, req.forkSessionFrom, sessionId);
     } catch {
       /* 清理回调不得影响 runner */
     }

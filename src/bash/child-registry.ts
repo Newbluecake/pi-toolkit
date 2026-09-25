@@ -1,0 +1,278 @@
+import type { RunExitFacts } from "../core/types.js";
+
+/**
+ * bash-timeout-grace plan §3.1 (P0b, frozen surface): the process-level
+ * registry a child (subagent) session's bash job manager registers itself
+ * into, and the runner's `sealBeforeTerminal` (src/runtime/runner.ts) reads
+ * through the host side (`src/stack.ts`, a later package) to fold a run's
+ * exit-time bash job facts into `diag.exitFacts` and to kill any jobs still
+ * running when the run ends.
+ *
+ * **No pi imports** (I1-style layering, mirrors `src/core/`) — this module
+ * only coordinates plain objects supplied by the caller (`ChildBashEntry`,
+ * `HostRunView`); the actual bash process/job-store machinery lives entirely
+ * in `src/bash/manager.ts` + `src/bash/child.ts` (later packages).
+ *
+ * **No module-scope mutable state** (AGENTS.md: the extension re-activates on
+ * `/reload` in the same process without busting Node's module cache). The
+ * registry singleton lives behind `CHILD_BASH_REGISTRY_KEY` on `globalThis`
+ * (the same `Symbol.for` pattern as the worktree-origin registry and the
+ * shared job-store write chains) so every session (main + every child) that
+ * imports this module in the same process shares exactly one instance,
+ * survives `/reload`, and is trivially inert when the feature is off (nobody
+ * ever registers an entry). `getChildBashRegistry()` builds it lazily and
+ * caches it on that global slot; there is deliberately no `reset()` — a
+ * `/reload` must NOT drop bookkeeping for sessions that are still alive
+ * across the reload (their entries would otherwise silently vanish from the
+ * registry while their manager/process is still running).
+ */
+export const CHILD_BASH_REGISTRY_KEY = Symbol.for("pi-subagent:child-bash-jobs");
+
+/** Aggregate result of killing every non-terminal job of a sealed session (§3.3 S3). */
+export interface KillAllReport {
+  killed: string[];
+  alreadyDone: string[];
+  orphaned: string[];
+  pending: string[];
+}
+
+/**
+ * One child session's bash job manager, as registered into the registry.
+ * Implemented by `src/bash/child.ts` (a later package) — this module only
+ * calls these three methods, never reaches into bash manager internals.
+ */
+export interface ChildBashEntry {
+  readonly sessionId: string;
+  readonly generation: number;
+  /** Synchronous, read-only snapshot of this session's bash jobs (running + not-yet-seen-by-the-agent finished ones). Must never throw (a throw is treated as "no facts"). */
+  exitFacts(): RunExitFacts;
+  /** Kill every non-terminal job of this session. Idempotent/memoized and internally bounded — the entry's own responsibility per §3.3 S3; the registry additionally applies a defensive backstop (see sealAndKill). Must never reject. */
+  killAll(graceMs: number): Promise<KillAllReport>;
+  /** Synchronous: stop admitting new jobs (`manager.reserve()`'s `admit()` check, §3.6 S1) and wake up any settle-hold wait (§3.5). Must never throw. */
+  onSealed(): void;
+}
+
+/**
+ * Read-only view of the parent (host) run driving a child session, attached
+ * by the host side (`src/stack.ts`) once the child's `sessionId` is first
+ * observed on `RunnerDeps.onStateChange`. Consumed by the (later) settle-hold
+ * hook and the auto-background return-time budget (§3.5/§3.6) — this module
+ * only stores and hands it back, it never calls through it itself.
+ */
+export interface HostRunView {
+  readonly runId: string;
+  /** Same source as the watchdog's own sub-phase due date (E2), combined with effectiveDeadlineAt — whichever is sooner. */
+  watchdogDueAt(): number | undefined;
+  /** state.deadlines.hardDeadlineAt (E32) — frozen at enqueue, the §3.5 round-budget's H. */
+  hardDeadlineAt(): number | undefined;
+  /** settings.budget.maxExtensions (E32) — the §3.5 round-budget's E. */
+  maxExtensions(): number;
+  stopping(): boolean;
+  /** §3.6 boundary telemetry: the child bash tool reports the instant it returned control (R) for a given tool call; the host correlates it against that toolCallId's later tool_end to measure return lag. */
+  noteToolReturn(toolCallId: string, at: number): void;
+}
+
+export interface ChildBashRegistry {
+  /** Registers (or re-registers) this session's bash job manager. Generation is monotonic per sessionId (starts at 1, survives re-registration). Registering into an already-sealed sessionId immediately calls the new entry's `onSealed()` (defensive: the session is ending regardless of registration order) and does not retain the entry for a future `sealAndKill`. */
+  register(entry: Omit<ChildBashEntry, "generation">): { generation: number; unregister(): void };
+  attachHost(sessionId: string, view: HostRunView): void;
+  hostView(sessionId: string): HostRunView | undefined;
+  isSealed(sessionId: string): boolean;
+  /** Resolves once this sessionId is sealed (immediately if already sealed). Never rejects. */
+  whenSealed(sessionId: string): Promise<void>;
+  /**
+   * Synchronous, idempotent per sessionId: the FIRST call seals the session
+   * (irreversible), synchronously reads `exitFacts()` + calls `onSealed()` on
+   * the registered entry (if any) and starts `killAll` (NOT awaited — the
+   * returned `done` promise is for the caller to observe, never to block
+   * on). Every subsequent call for the same sessionId returns `undefined`.
+   * A sessionId with no registered entry still becomes sealed on first call
+   * (so a late `register()` for it is treated as already-sealed) but the
+   * call itself returns `undefined` (nothing to report or kill).
+   */
+  sealAndKill(sessionId: string, graceMs: number): { facts: RunExitFacts; done: Promise<KillAllReport> } | undefined;
+  /** Best-effort fan-out of sealAndKill to every currently-registered (not yet sealed) entry, bounded by graceMs (session_shutdown, S6). Never rejects. */
+  sealAll(graceMs: number): Promise<void>;
+}
+
+/** Bounds every FIFO-capped bookkeeping map below (unbounded growth over a long-lived process is the failure mode being capped, not a functional requirement — see the module doc). */
+export const REGISTRY_CAP = 512;
+/** §3.3 S3's own bound is per-job; this is the registry's defensive backstop on the aggregate `killAll` call so a misbehaving entry can never hang sealAndKill's caller forever (AGENTS.md zero-hang). */
+export const KILL_ALL_BACKSTOP_MARGIN_MS = 3_000;
+
+const EMPTY_REPORT: KillAllReport = { killed: [], alreadyDone: [], orphaned: [], pending: [] };
+
+/** Insertion-ordered Map used as a FIFO-capped cache: evicts the oldest entry once `cap` is exceeded. */
+function fifoSet<V>(map: Map<string, V>, key: string, value: V, cap: number): void {
+  if (map.has(key)) map.delete(key); // re-insert to refresh recency order
+  map.set(key, value);
+  while (map.size > cap) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
+}
+
+class ChildBashRegistryImpl implements ChildBashRegistry {
+  private readonly entries = new Map<string, { entry: ChildBashEntry; generation: number }>();
+  private readonly generations = new Map<string, number>();
+  private readonly hosts = new Map<string, HostRunView>();
+  private readonly sealed = new Set<string>();
+  private readonly sealResults = new Map<string, { facts: RunExitFacts; done: Promise<KillAllReport> }>();
+  private readonly sealWaiters = new Map<string, Array<() => void>>();
+
+  register(entry: Omit<ChildBashEntry, "generation">): { generation: number; unregister(): void } {
+    const generation = (this.generations.get(entry.sessionId) ?? 0) + 1;
+    fifoSet(this.generations, entry.sessionId, generation, REGISTRY_CAP);
+    const full: ChildBashEntry = { ...entry, generation };
+    if (this.sealed.has(entry.sessionId)) {
+      // Already sealed (a race: the run ended before/while this session's
+      // manager finished starting up) — this entry is never retained for a
+      // future sealAndKill (there will not be one), but it must still stop
+      // admitting new jobs immediately.
+      try {
+        full.onSealed();
+      } catch {
+        /* onSealed must never break registration */
+      }
+      return { generation, unregister: () => undefined };
+    }
+    fifoSet(this.entries, entry.sessionId, { entry: full, generation }, REGISTRY_CAP);
+    return {
+      generation,
+      unregister: () => {
+        const current = this.entries.get(entry.sessionId);
+        if (current && current.generation === generation) this.entries.delete(entry.sessionId);
+      },
+    };
+  }
+
+  attachHost(sessionId: string, view: HostRunView): void {
+    fifoSet(this.hosts, sessionId, view, REGISTRY_CAP);
+  }
+  hostView(sessionId: string): HostRunView | undefined {
+    return this.hosts.get(sessionId);
+  }
+  isSealed(sessionId: string): boolean {
+    return this.sealed.has(sessionId);
+  }
+  whenSealed(sessionId: string): Promise<void> {
+    if (this.sealed.has(sessionId)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiters = this.sealWaiters.get(sessionId) ?? [];
+      waiters.push(resolve);
+      this.sealWaiters.set(sessionId, waiters);
+    });
+  }
+
+  sealAndKill(sessionId: string, graceMs: number): { facts: RunExitFacts; done: Promise<KillAllReport> } | undefined {
+    if (this.sealed.has(sessionId)) return undefined;
+    this.sealed.add(sessionId);
+    // Cap the sealed-set the same way as the live bookkeeping — a sessionId
+    // is never reused, so evicting the oldest one only means a very old,
+    // long-finished run's isSealed()/whenSealed() would (harmlessly) answer
+    // as if it were never sealed; nothing still running can observe that.
+    if (this.sealed.size > REGISTRY_CAP) {
+      const oldest = this.sealed.values().next();
+      if (!oldest.done) this.sealed.delete(oldest.value);
+    }
+    const waiters = this.sealWaiters.get(sessionId);
+    this.sealWaiters.delete(sessionId);
+    for (const w of waiters ?? []) {
+      try {
+        w();
+      } catch {
+        /* a waiter must never break sealing */
+      }
+    }
+    const registered = this.entries.get(sessionId);
+    this.entries.delete(sessionId);
+    if (!registered) return undefined;
+    const { entry } = registered;
+    try {
+      entry.onSealed();
+    } catch {
+      /* onSealed must never break sealAndKill */
+    }
+    let facts: RunExitFacts;
+    try {
+      facts = entry.exitFacts();
+    } catch {
+      facts = { bashJobs: [] };
+    }
+    const done = this.boundedKillAll(entry, facts, graceMs);
+    const result = { facts, done };
+    fifoSet(this.sealResults, sessionId, result, REGISTRY_CAP);
+    void done.finally(() => {
+      // "条目在 done 后删除" (§3.1): once the kill settles there is nothing
+      // left to report through this bookkeeping slot.
+      const current = this.sealResults.get(sessionId);
+      if (current === result) this.sealResults.delete(sessionId);
+    });
+    return result;
+  }
+
+  async sealAll(graceMs: number): Promise<void> {
+    const sessionIds = [...this.entries.keys()];
+    await Promise.all(
+      sessionIds.map(async (id) => {
+        const result = this.sealAndKill(id, graceMs);
+        if (result) await result.done.catch(() => undefined);
+      }),
+    );
+  }
+
+  /**
+   * Defensive backstop on top of the entry's own (already-bounded, per §3.3
+   * S3) killAll: if it still has not settled within `graceMs +
+   * KILL_ALL_BACKSTOP_MARGIN_MS`, this resolves anyway using the pre-seal
+   * `facts` snapshot to classify every job that was non-terminal at seal
+   * time ("terminating") as `pending`, everything else as `alreadyDone`.
+   * `entry.killAll` keeps running in the background; its own eventual
+   * settlement is not observed by anyone once this backstop has already
+   * resolved (matches the rest of this codebase's "best-effort, never hang
+   * the caller" posture for anything crossing a process boundary).
+   */
+  private boundedKillAll(entry: ChildBashEntry, facts: RunExitFacts, graceMs: number): Promise<KillAllReport> {
+    const bound = Math.max(0, graceMs) + KILL_ALL_BACKSTOP_MARGIN_MS;
+    return new Promise<KillAllReport>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const pending: string[] = [];
+        const alreadyDone: string[] = [];
+        for (const job of facts.bashJobs) (job.state === "terminating" ? pending : alreadyDone).push(job.jobId);
+        resolve({ ...EMPTY_REPORT, alreadyDone, pending });
+      }, bound);
+      timer.unref?.();
+      entry
+        .killAll(graceMs)
+        .then(
+          (report) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(report);
+          },
+          () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(EMPTY_REPORT);
+          },
+        )
+        .catch(() => undefined);
+    });
+  }
+}
+
+/** Lazily builds (or reuses, across `/reload`) the single process-wide registry instance. */
+export function getChildBashRegistry(): ChildBashRegistry {
+  const g = globalThis as Record<symbol, ChildBashRegistry | undefined>;
+  const existing = g[CHILD_BASH_REGISTRY_KEY];
+  if (existing) return existing;
+  const created = new ChildBashRegistryImpl();
+  g[CHILD_BASH_REGISTRY_KEY] = created;
+  return created;
+}

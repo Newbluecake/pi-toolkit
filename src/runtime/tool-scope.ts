@@ -41,6 +41,12 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // late-registered same-name tool cannot hand any other run the ability to
   // fork+resume somebody else's session.
   "consult",
+  // bash_job (bash-timeout-grace plan §3.10): registered per-session only when
+  // bashJobs.childSessions is on AND the child session already carries a real
+  // `bash` tool grant (bashJobGrant below) — deny-by-default keeps an
+  // MCP/late-registered same-name tool from handing a run job-management
+  // powers (extend/kill/wait/status/list) it was never granted.
+  "bash_job",
 ];
 
 /**
@@ -96,6 +102,41 @@ export function buildToolScopePolicy(opts: {
   const grantedSet = new Set(opts.granted ?? []);
   const deny = new Set(RESERVED_TOOL_NAMES.filter((n) => !grantedSet.has(n)));
   return opts.tools ? { allow: new Set([...opts.tools, ...grantedSet]), deny } : { deny };
+}
+
+/**
+ * bash-timeout-grace plan §3.10 (P0b, frozen): pure decision — should this
+ * child session's `bash_job` reserved name be added to `grantedReserved` (the
+ * same E24 pattern set_model/Agent/StructuredOutput/consult already use,
+ * merged by the caller into `sessionSpec.tools` and this policy's `allow`)?
+ *
+ *   bashJobGrant({ typeTools, childBashJobs, consult })
+ *     = childBashJobs && !consult && (typeTools === undefined || typeTools.includes("bash"))
+ *
+ * `typeTools` mirrors `buildToolScopePolicy`'s own `opts.tools` semantics:
+ * `undefined` = the agent type declares no allow-list restriction (every
+ * built-in tool, including `bash`, is available) — granted. An explicit list
+ * gates on it actually containing `bash` (a type that never has `bash` has
+ * nothing for `bash_job` to manage). `childBashJobs` is the session-level
+ * `bashJobs.childSessions` setting gate (false ⇒ the whole feature is off for
+ * this session, never granted, never registered). `consult` is true for a
+ * consult run (forkSessionFrom-based, CONSULT_READONLY_TOOLS domain) — never
+ * granted regardless of type/tools, matching the plan's "两层都不含" rule (the
+ * read-only domain's `tools` list also never contains "bash"/"bash_job", so
+ * this check is defense-in-depth, not the only gate). Wiring the actual
+ * `bash_job` tool registration + settings read is `src/bash/child.ts` (a
+ * later package), not this pure function.
+ */
+export interface BashJobGrantInput {
+  /** Agent type's declared `tools` allow-list; `undefined` = no restriction (buildToolScopePolicy's own `opts.tools` semantics). */
+  typeTools?: readonly string[];
+  /** `bashJobs.childSessions` setting gate — false disables the feature outright for this session. */
+  childBashJobs: boolean;
+  /** True for a consult run (read-only tool domain) — never granted regardless of type/tools. */
+  consult: boolean;
+}
+export function bashJobGrant(input: BashJobGrantInput): boolean {
+  return input.childBashJobs && !input.consult && (input.typeTools === undefined || input.typeTools.includes("bash"));
 }
 
 export function createToolScopeEnforcer(

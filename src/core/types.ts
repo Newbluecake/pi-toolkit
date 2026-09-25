@@ -423,7 +423,54 @@ export type DriverEvent =
   | { t: "text_delta"; delta: string }
   | { t: "thinking_delta"; delta: string }
   /** set_model: the live session's model was switched mid-run (display-only diag patch; see state-machine.ts reduce's early-return branch). */
-  | { t: "model_changed"; model: { provider: string; id: string } };
+  | { t: "model_changed"; model: { provider: string; id: string } }
+  /**
+   * bash-timeout-grace plan §3.1/§3.8 (P0b, frozen): the runner's synchronous,
+   * end-of-run snapshot of this run's child bash jobs (RunnerDeps.sealSession,
+   * dispatched by `sealBeforeTerminal` immediately before the first input that
+   * moves the run terminal). Metadata-only, same family as `model_changed` —
+   * see state-machine.ts reduce()'s dedicated branch for the exact placement
+   * (after the generation check, before effect_failed/terminal(), §3.8) and
+   * why it is NOT exempt from the generation check the way model_changed is. */
+  | { t: "exit_facts"; facts: RunExitFacts };
+
+/**
+ * bash-timeout-grace plan §3.1 (P0b, frozen): one child-session bash job as
+ * observed at seal time, either still running ("terminating" — a SIGTERM was
+ * just sent) or already in one of its terminal job states. Pure data (no pi
+ * imports, I1); `logPath` is the job's own log file so a parent can point the
+ * user at partial output. At most RunExitFacts.bashJobs.length entries are
+ * ever built for one run (state-machine.ts does no truncation itself — the
+ * cap is enforced by the producer, src/bash/child-registry.ts).
+ */
+export interface RunExitJob {
+  jobId: string;
+  commandPreview: string;
+  state: "terminating" | "completed" | "failed" | "timed_out" | "killed";
+  exitCode: number | null;
+  logPath: string;
+  durationMs: Millis;
+  /** Whether the child session ever observed this job finish (bash_job wait/status) before the run ended. */
+  seen: boolean;
+}
+
+/**
+ * bash-timeout-grace plan §3.1 (P0b, frozen): the synchronous, read-only
+ * exit-time snapshot `ChildBashRegistry.sealAndKill`/`exitFacts()` return,
+ * folded into `RunDiagnostics.exitFacts` via the `exit_facts` session_event
+ * and carried from there into `RunOutcome.diag`, the terminal `RunSnapshot`
+ * and `DeliveryPayload.exitFacts` (§3.7/§3.8) — never rebuilt from anything
+ * but this one value once it lands on a run's diag. `bashJobsMore` counts
+ * additional non-terminal/unseen jobs beyond the (at most 5) entries in
+ * `bashJobs` (see RunExitJob). `hold` (§3.5, written by the child-session
+ * settle-hold hook, not by sealSession itself) records the settle-hold
+ * round budget outcome for this run, when the hold feature is engaged.
+ */
+export interface RunExitFacts {
+  bashJobs: RunExitJob[];
+  bashJobsMore?: number;
+  hold?: { rounds: number; cap: number; exhausted: boolean };
+}
 /**
  * set_model switch result union (docs/dev/set-model/set-model-plan.md §4.1).
  * The runner returns a reason union instead of throwing (unlike steer) so
@@ -626,6 +673,14 @@ export interface RunDiagnostics {
   thinkingText?: string;
   /** Persisted pi session used by X2 resume. */
   sessionFile?: string;
+  /**
+   * bash-timeout-grace plan §3.1/§3.7/§3.8 (P0b, frozen): the runner's
+   * end-of-run child bash job snapshot, written exactly once per run by the
+   * `exit_facts` session_event branch in reduce() (metadata-only patch, same
+   * family as `model` above). Absent when the run had no child registry entry
+   * or the feature never fired (e.g. the run never bound a session).
+   */
+  exitFacts?: RunExitFacts;
 }
 export interface DiagSummary {
   phase: RunPhase;
@@ -658,6 +713,8 @@ export interface DeliveryPayload {
   structuredPreview?: string;
   failReason?: string;
   label?: string;
+  /** bash-timeout-grace plan §3.7/§3.8 (P0b, frozen): mirrors RunDiagnostics.exitFacts at the moment `finish()` built this payload; same value as outcome.diag.exitFacts / persist_snapshot.snapshot.outcome.diag.exitFacts (P15b). */
+  exitFacts?: RunExitFacts;
 }
 export interface RunSnapshot {
   runId: RunId;

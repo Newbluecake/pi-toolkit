@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET, remainingFor, withDeadline } from "../../src/core/deadline.js";
 import { FakeClock } from "../../src/core/clock.js";
+import { isTerminalStatus } from "../../src/core/status.js";
 import {
   createInitialState,
   INPUT_KINDS,
@@ -11,6 +12,7 @@ import {
 import type {
   DeadlineBudget,
   RunEffect,
+  RunExitFacts,
   RunInput,
   RunPhase,
   RunState,
@@ -2466,5 +2468,367 @@ describe("timeout grace", () => {
     expect(final.state.phase).toBe("abort_grace");
     expect(final.effects.some((e) => e.effect.kind === "notify_deadline")).toBe(false);
     expect(notices).toEqual(["grace", "extended", "grace", "extended", "grace", "extended"]);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * exit_facts (bash-timeout-grace plan §3.8, P0b frozen): a metadata-only
+ * session_event, same family as model_changed (§2.4/E23), but placed AFTER
+ * the generation check and explicitly short-circuited before terminalUpdate
+ * (see reduce()'s dedicated branch). Hand-written coverage per §7 T4:
+ *   - every RunPhase accepts it as a pure diag patch when non-terminal;
+ *   - a terminal fixture (settled, and the artificial "reap" fixture — both
+ *     have a terminal RunStatus per fixture()'s own construction, see N6-1)
+ *     gets an EXPLICIT reference-equal no-op;
+ *   - a stale-generation input only bumps staleInputs (never writes exitFacts);
+ *   - repeated insertion on a non-terminal state takes the latter value;
+ *   - it flows into outcome.diag / persist_snapshot.snapshot.outcome.diag /
+ *     enqueue_delivery.payload at the first terminal input thereafter.
+ * ------------------------------------------------------------------------- */
+describe("exit_facts (bash-timeout-grace plan \u00a73.8): metadata session_event", () => {
+  const facts: RunExitFacts = {
+    bashJobs: [
+      {
+        jobId: "j_1",
+        commandPreview: "sleep 5",
+        state: "terminating",
+        exitCode: null,
+        logPath: "/tmp/j_1.log",
+        durationMs: 500,
+        seen: false,
+      },
+    ],
+  };
+  const facts2: RunExitFacts = {
+    bashJobs: [
+      {
+        jobId: "j_2",
+        commandPreview: "true",
+        state: "completed",
+        exitCode: 0,
+        logPath: "/tmp/j_2.log",
+        durationMs: 10,
+        seen: true,
+      },
+    ],
+    bashJobsMore: 2,
+    hold: { rounds: 3, cap: 40, exhausted: false },
+  };
+  function exitFactsInput(at: number, f: RunExitFacts = facts): RunInput {
+    return { kind: "session_event", at, event: { t: "exit_facts", facts: f } };
+  }
+
+  for (const phase of RUN_PHASES) {
+    const before = fixture(phase);
+    const label = isTerminalStatus(before.status) ? "terminal \u21d2 explicit no-op" : "non-terminal \u21d2 diag patch";
+    it(`phase ${phase} (${label})`, () => {
+      const result = reduce(
+        before,
+        { generation: before.generation, input: exitFactsInput(before.diag.phaseEnteredAt + 1) },
+        budget,
+      );
+      expect(result.effects).toEqual([]);
+      if (isTerminalStatus(before.status)) {
+        // P15b "终态之后再插入 ⇒ 状态对象引用相等": bypasses terminalUpdate entirely.
+        expect(result.state).toBe(before);
+        return;
+      }
+      expect(result.state.diag.exitFacts).toEqual(facts);
+      // Nothing else changed (P15a): compare with exitFacts stripped from both sides.
+      const { exitFacts: _wf, ...restDiagWith } = result.state.diag;
+      const { exitFacts: _base, ...restDiagBase } = before.diag;
+      expect(restDiagWith).toEqual(restDiagBase);
+      expect(result.state.phase).toBe(before.phase);
+      expect(result.state.status).toBe(before.status);
+      expect(result.state.armedTimers).toEqual(before.armedTimers);
+      expect(result.state.deadlines).toEqual(before.deadlines);
+      expect(result.state.slotHeld).toBe(before.slotHeld);
+    });
+  }
+
+  it("a stale-generation exit_facts only increments staleInputs, never writes exitFacts", () => {
+    const before = fixture("model_turn");
+    const result = reduce(
+      before,
+      { generation: before.generation - 1, input: exitFactsInput(before.diag.phaseEnteredAt + 1) },
+      budget,
+    );
+    expect(result.effects).toEqual([]);
+    expect(result.state.diag.staleInputs).toBe(before.diag.staleInputs + 1);
+    expect(result.state.diag.exitFacts).toBeUndefined();
+  });
+
+  it("repeated insertion on a non-terminal state takes the latter value", () => {
+    let s = fixture("model_turn");
+    s = apply(s, exitFactsInput(0)).state;
+    expect(s.diag.exitFacts).toEqual(facts);
+    s = apply(s, exitFactsInput(1, facts2)).state;
+    expect(s.diag.exitFacts).toEqual(facts2);
+  });
+
+  it("flows into outcome.diag / persist_snapshot / enqueue_delivery.payload at the first terminal input", () => {
+    let s = fixture("model_turn");
+    s = apply(s, exitFactsInput(0)).state;
+    const result = reduce(
+      s,
+      { generation: s.generation, input: { kind: "prompt_settled", at: s.diag.phaseEnteredAt + 1, text: "done" } },
+      budget,
+    );
+    expect(result.state.status).toBe("completed");
+    expect(result.state.diag.exitFacts).toEqual(facts);
+    expect(result.state.outcome?.diag.exitFacts).toEqual(facts);
+    const snapshotEffect = result.effects.find((e) => e.effect.kind === "persist_snapshot");
+    const deliveryEffect = result.effects.find((e) => e.effect.kind === "enqueue_delivery");
+    expect(
+      snapshotEffect?.effect.kind === "persist_snapshot"
+        ? snapshotEffect.effect.snapshot.outcome?.diag.exitFacts
+        : undefined,
+    ).toEqual(facts);
+    expect(
+      deliveryEffect?.effect.kind === "enqueue_delivery" ? deliveryEffect.effect.payload.exitFacts : undefined,
+    ).toEqual(facts);
+  });
+
+  it("terminal no-op: exit_facts inserted AFTER settle never overwrites the sealed outcome", () => {
+    let s = fixture("model_turn");
+    s = apply(s, { kind: "prompt_settled", text: "done" }).state;
+    expect(s.status).toBe("completed");
+    const sealedDiag = s.diag;
+    const sealedOutcome = s.outcome;
+    const result = reduce(s, { generation: s.generation, input: exitFactsInput(s.diag.phaseEnteredAt + 1) }, budget);
+    expect(result.effects).toEqual([]);
+    expect(result.state).toBe(s);
+    expect(result.state.diag).toBe(sealedDiag);
+    expect(result.state.outcome).toBe(sealedOutcome);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * P15a/P15b (bash-timeout-grace plan §3.8, P0b frozen): property invariants
+ * over random input sequences, complementing the hand-written suite above
+ * with a much wider (diag-content-diverse) state space. Named P15a/P15b per
+ * the plan's own labels; unrelated to the pre-existing "P15 failed settles
+ * carry their cause" suite above (different property, different describe
+ * block — both labels coexist in this file, as P1-P14/P8/"seeded property
+ * invariants" already do with their own independent numbering).
+ * ------------------------------------------------------------------------- */
+describe("P15a/P15b: exit_facts session_event isolation (bash-timeout-grace plan \u00a73.8)", () => {
+  function rng(seed: number): () => number {
+    let value = seed >>> 0;
+    return () => {
+      value = (Math.imul(value ^ (value >>> 15), 1 | value) + 0x6d2b79f5) | 0;
+      return ((value ^ (value >>> 13)) >>> 0) / 4294967296;
+    };
+  }
+  /** A lighter-weight version of the P1-P14 generator above (self-contained —
+   * kept local rather than hoisting the shared one out of its describe block,
+   * to avoid touching that unrelated suite). Covers enough RunInput variety
+   * (phase transitions, stop_requested, deadline_fired, deadline_extended,
+   * effect_failed, escalation_done, session_event bursts) to reach a wide mix
+   * of non-terminal AND terminal states across the 25-step walk. */
+  function randomInput(state: RunState, next: () => number): RunInput {
+    const at = Math.floor(next() * 1000) + 1;
+    const causes = ["parent_abort", "user_stop", "shutdown", "parent_gone"] as const;
+    if (state.phase === "queue_wait" && next() < 0.3) return { kind: "slot_acquired", at };
+    if (state.armedTimers.length && next() < 0.2) {
+      const timer = state.armedTimers[Math.floor(next() * state.armedTimers.length)];
+      return {
+        kind: "deadline_fired",
+        at,
+        timer,
+        reason: timer === "queue" ? "queue_timeout" : timer === "total" || timer === "total_grace" ? "total" : "idle",
+      };
+    }
+    if (next() < 0.15) return { kind: "stop_requested", at, cause: causes[Math.floor(next() * causes.length)] };
+    if (next() < 0.15)
+      return { kind: "deadline_extended", at, extendMs: 1_000 + Math.floor(next() * 100_000), source: "tool" };
+    if (next() < 0.15) {
+      const kinds = ["turn_start", "turn_end", "tool_start", "tool_end", "message_end", "text_delta"] as const;
+      const k = kinds[Math.floor(next() * kinds.length)]!;
+      const event =
+        k === "turn_end"
+          ? ({ t: k, toolResults: 0 } as const)
+          : k === "tool_start"
+            ? ({ t: k, toolCallId: "a", toolName: "bash" } as const)
+            : k === "tool_end"
+              ? ({ t: k, toolCallId: "a", toolName: "bash", isError: false } as const)
+              : k === "text_delta"
+                ? ({ t: k, delta: "x" } as const)
+                : ({ t: k } as const);
+      return { kind: "session_event", at, event };
+    }
+    if (next() < 0.1)
+      return {
+        kind: "effect_failed",
+        at,
+        effect: "dispose",
+        error: { kind: "internal", message: "e", retryable: next() < 0.5 },
+      };
+    if (next() < 0.15) return { kind: "prompt_settled", at };
+    return { kind: "phase_entered", at, phase: state.phase };
+  }
+  function sampleFacts(n: number): RunExitFacts {
+    return {
+      bashJobs: [
+        {
+          jobId: `j_${n}`,
+          commandPreview: `cmd ${n}`,
+          state: (["terminating", "completed", "failed", "timed_out", "killed"] as const)[n % 5],
+          exitCode: n % 5 === 1 ? 0 : null,
+          logPath: `/tmp/j_${n}.log`,
+          durationMs: n,
+          seen: n % 2 === 0,
+        },
+      ],
+      bashJobsMore: n % 3 === 0 ? n % 7 : undefined,
+    };
+  }
+  function start(): RunState {
+    return reduce(createInitialState("r", 1, 0), { generation: 1, input: { kind: "enqueued", at: 0, budget } }, budget)
+      .state;
+  }
+
+  it("P15a: on any non-terminal prefix state, exit_facts changes only diag.exitFacts", () => {
+    let nonTerminalSamples = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = rng(seed * 7 + 1);
+      let state = start();
+      for (let step = 0; step < 20; step++) {
+        if (!isTerminalStatus(state.status)) {
+          nonTerminalSamples++;
+          const at = state.diag.phaseEnteredAt + 1;
+          const facts = sampleFacts(seed * 100 + step);
+          const withFacts = reduce(
+            state,
+            { generation: state.generation, input: { kind: "session_event", at, event: { t: "exit_facts", facts } } },
+            budget,
+          );
+          expect(withFacts.effects).toEqual([]);
+          expect(withFacts.state.diag.exitFacts).toEqual(facts);
+          const { exitFacts: _wf, ...restWith } = withFacts.state.diag;
+          const { exitFacts: _base, ...restBase } = state.diag;
+          expect(restWith).toEqual(restBase);
+          // Explicitly called out by the plan (§3.8) as fields that must stay identical.
+          expect(withFacts.state.diag.lastEventAt).toBe(state.diag.lastEventAt);
+          expect(withFacts.state.diag.lastEventType).toBe(state.diag.lastEventType);
+          expect(withFacts.state.diag.lastTurnStartAt).toBe(state.diag.lastTurnStartAt);
+          expect(withFacts.state.diag.turns).toBe(state.diag.turns);
+          expect(withFacts.state.diag.usage).toEqual(state.diag.usage);
+          expect(withFacts.state.diag.toolHistory).toEqual(state.diag.toolHistory);
+          expect(withFacts.state.diag.contextUsage).toEqual(state.diag.contextUsage);
+          expect(withFacts.state.diag.model).toEqual(state.diag.model);
+          expect(withFacts.state.phase).toBe(state.phase);
+          expect(withFacts.state.status).toBe(state.status);
+          expect(withFacts.state.armedTimers).toEqual(state.armedTimers);
+          expect(withFacts.state.deadlines).toEqual(state.deadlines);
+        }
+        const event = randomInput(state, next);
+        state = reduce(state, { generation: state.generation, input: event }, budget).state;
+      }
+    }
+    // Non-vacuous: the walk must actually visit plenty of non-terminal states.
+    expect(nonTerminalSamples).toBeGreaterThan(1000);
+  });
+
+  it("P15b: exit_facts inserted right before the first terminal input surfaces in exactly four same-valued places; post-terminal insertion is a pure no-op", () => {
+    let firstTerminalTransitions = 0;
+    let snapshotChecks = 0;
+    let deliveryChecks = 0;
+    let postTerminalChecks = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = rng(seed * 13 + 3);
+      let state = start();
+      for (let step = 0; step < 20; step++) {
+        if (isTerminalStatus(state.status)) {
+          postTerminalChecks++;
+          const facts = sampleFacts(seed * 1000 + step);
+          const at = state.diag.phaseEnteredAt + 1;
+          const r = reduce(
+            state,
+            { generation: state.generation, input: { kind: "session_event", at, event: { t: "exit_facts", facts } } },
+            budget,
+          );
+          expect(r.state).toBe(state);
+          expect(r.effects).toEqual([]);
+          continue;
+        }
+        const event = randomInput(state, next);
+        const resultA = reduce(state, { generation: state.generation, input: event }, budget);
+        if (isTerminalStatus(resultA.state.status)) {
+          firstTerminalTransitions++;
+          const facts = sampleFacts(seed * 1000 + step);
+          const preAt = "at" in event ? event.at : state.diag.phaseEnteredAt + 1;
+          const withFacts = reduce(
+            state,
+            {
+              generation: state.generation,
+              input: { kind: "session_event", at: preAt, event: { t: "exit_facts", facts } },
+            },
+            budget,
+          ).state;
+          const resultB = reduce(withFacts, { generation: withFacts.generation, input: event }, budget);
+          // diag
+          expect(resultA.state.diag.exitFacts).toBeUndefined();
+          expect(resultB.state.diag.exitFacts).toEqual(facts);
+          const { exitFacts: _da, ...restDiagA } = resultA.state.diag;
+          const { exitFacts: _db, ...restDiagB } = resultB.state.diag;
+          expect(restDiagB).toEqual(restDiagA);
+          expect(resultB.state.phase).toBe(resultA.state.phase);
+          expect(resultB.state.status).toBe(resultA.state.status);
+          expect(resultB.state.armedTimers).toEqual(resultA.state.armedTimers);
+          expect(resultB.state.deadlines).toEqual(resultA.state.deadlines);
+          // outcome.diag
+          const outcomeA = resultA.state.outcome;
+          const outcomeB = resultB.state.outcome;
+          if (outcomeA && outcomeB) {
+            expect(outcomeA.diag.exitFacts).toBeUndefined();
+            expect(outcomeB.diag.exitFacts).toEqual(facts);
+            const { diag: diagA, ...restOutcomeA } = outcomeA;
+            const { diag: diagB, ...restOutcomeB } = outcomeB;
+            expect(restOutcomeB).toEqual(restOutcomeA);
+            const { exitFacts: _oa, ...restOutcomeDiagA } = diagA;
+            const { exitFacts: _ob, ...restOutcomeDiagB } = diagB;
+            expect(restOutcomeDiagB).toEqual(restOutcomeDiagA);
+          }
+          // persist_snapshot
+          const snapA = resultA.effects.find((e) => e.effect.kind === "persist_snapshot");
+          const snapB = resultB.effects.find((e) => e.effect.kind === "persist_snapshot");
+          if (snapA?.effect.kind === "persist_snapshot" && snapB?.effect.kind === "persist_snapshot") {
+            snapshotChecks++;
+            const outA = snapA.effect.snapshot.outcome;
+            const outB = snapB.effect.snapshot.outcome;
+            expect(outA?.diag.exitFacts).toBeUndefined();
+            expect(outB?.diag.exitFacts).toEqual(facts);
+            if (outA && outB) {
+              const { diag: sdA, ...srA } = outA;
+              const { diag: sdB, ...srB } = outB;
+              expect(srB).toEqual(srA);
+              const { exitFacts: _sa, ...srdA } = sdA;
+              const { exitFacts: _sb, ...srdB } = sdB;
+              expect(srdB).toEqual(srdA);
+            }
+          }
+          // enqueue_delivery.payload
+          const delA = resultA.effects.find((e) => e.effect.kind === "enqueue_delivery");
+          const delB = resultB.effects.find((e) => e.effect.kind === "enqueue_delivery");
+          if (delA?.effect.kind === "enqueue_delivery" && delB?.effect.kind === "enqueue_delivery") {
+            deliveryChecks++;
+            expect(delA.effect.payload.exitFacts).toBeUndefined();
+            expect(delB.effect.payload.exitFacts).toEqual(facts);
+            const { exitFacts: _pa, ...prA } = delA.effect.payload;
+            const { exitFacts: _pb, ...prB } = delB.effect.payload;
+            expect(prB).toEqual(prA);
+          }
+          state = resultA.state;
+          continue;
+        }
+        state = resultA.state;
+      }
+    }
+    // Non-vacuous: every branch above must have actually been exercised.
+    expect(firstTerminalTransitions).toBeGreaterThan(100);
+    expect(snapshotChecks).toBeGreaterThan(50);
+    expect(deliveryChecks).toBeGreaterThan(50);
+    expect(postTerminalChecks).toBeGreaterThan(0);
   });
 });

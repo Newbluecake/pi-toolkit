@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONSULT_READONLY_TOOLS,
   RESERVED_TOOL_NAMES,
+  bashJobGrant,
   buildToolScopePolicy,
   createToolScopeEnforcer,
   type ScopeSessionHandle,
@@ -184,5 +185,47 @@ describe("runtime/tool-scope: H27 setActiveTools failure containment", () => {
     const enforcer = createToolScopeEnforcer({ onBlocked: (n) => blocked.push([...n]), onError: () => {} });
     enforcer.onTurnBoundary(handle, policy);
     expect(blocked).toEqual([["mcp_evil_tool"]]);
+  });
+});
+
+/**
+ * bash-timeout-grace plan §3.10 (P0b, frozen): bashJobGrant's six documented
+ * cases (§7 T3) — pure decision, no settings/session wiring involved.
+ */
+describe("runtime/tool-scope: bashJobGrant (bash-timeout-grace plan §3.10)", () => {
+  it("bash_job is reserved and denied by default, like the other host-managed tools", () => {
+    expect(RESERVED_TOOL_NAMES).toContain("bash_job");
+    expect(buildToolScopePolicy({}).deny.has("bash_job")).toBe(true);
+    expect(buildToolScopePolicy({ granted: ["bash_job"] }).deny.has("bash_job")).toBe(false);
+  });
+  it("tools undeclared (no allow-list restriction) => granted", () => {
+    expect(bashJobGrant({ childBashJobs: true, consult: false })).toBe(true);
+  });
+  it("tools includes bash (Plan/Explore/reviewer/verifier/architect-style types) => granted", () => {
+    expect(bashJobGrant({ typeTools: ["read", "bash", "edit"], childBashJobs: true, consult: false })).toBe(true);
+  });
+  it("tools declared without bash (a bash_job-only type) => not granted", () => {
+    expect(bashJobGrant({ typeTools: ["bash_job"], childBashJobs: true, consult: false })).toBe(false);
+    expect(bashJobGrant({ typeTools: ["read", "edit"], childBashJobs: true, consult: false })).toBe(false);
+  });
+  it("a consult (read-only) run is never granted, even with bash in tools", () => {
+    expect(bashJobGrant({ typeTools: ["bash"], childBashJobs: true, consult: true })).toBe(false);
+    expect(bashJobGrant({ childBashJobs: true, consult: true })).toBe(false);
+  });
+  it("bashJobs.childSessions=false disables the grant regardless of tools/consult", () => {
+    expect(bashJobGrant({ childBashJobs: false, consult: false })).toBe(false);
+    expect(bashJobGrant({ typeTools: ["bash"], childBashJobs: false, consult: false })).toBe(false);
+  });
+  it("an MCP tool of the same name is stripped by the reserved-name deny unless explicitly granted", () => {
+    // bashJobGrant only decides whether to ADD "bash_job" to grantedReserved;
+    // the actual stripping is buildToolScopePolicy's existing deny-by-default
+    // (already covered above) — this closes the loop end to end.
+    const granted = bashJobGrant({ childBashJobs: true, consult: false });
+    expect(granted).toBe(true);
+    const policy = buildToolScopePolicy({ granted: granted ? ["bash_job"] : [] });
+    expect(policy.deny.has("bash_job")).toBe(false);
+    const notGranted = bashJobGrant({ childBashJobs: false, consult: false });
+    const policyOff = buildToolScopePolicy({ granted: notGranted ? ["bash_job"] : [] });
+    expect(policyOff.deny.has("bash_job")).toBe(true);
   });
 });
