@@ -146,6 +146,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const outcomes = new Map<RunId, RunOutcome>();
   const waits = new Map<RunId, Set<(outcome: RunOutcome) => void>>();
   const running = new Set<RunId>();
+  // D19 (workflow-experts §4.7): idempotent set of runIds currently being
+  // torn down. Populated synchronously by abort() BEFORE its first `await`
+  // (cascadeChildren) so a consult fork admission racing the same tick sees
+  // it; cleared in finish() (also idempotent — Set.delete on an absent key
+  // is a no-op). This is deliberately separate from `running`: a run stays
+  // in `running` until finish() actually settles it, but must be rejected
+  // for new fork admission the instant abort() is called.
+  const stopping = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
   const resumeLocks = new Set<string>();
   const labels = deps.labelIndex ?? new Map<string, SpawnLabelTarget>();
@@ -174,6 +182,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const finish = (outcome: RunOutcome) => {
     outcomes.set(outcome.runId, outcome);
     running.delete(outcome.runId);
+    stopping.delete(outcome.runId);
     claimedRunIds.delete(outcome.runId);
     nesting.delete(outcome.runId);
     const parent = parentOf.get(outcome.runId);
@@ -469,6 +478,21 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // to mutex. statSync (not existsSync+statSync) keeps the check a single
       // race-free syscall.
       if (req.forkSessionFrom) {
+        // D19 (workflow-experts §4.7, N3): a fork (consult) request must be
+        // rejected while its parent is stopping or already gone — not just
+        // absent from `running` but also present in `stopping` (abort() has
+        // been called but the run hasn't settled yet). This runs before any
+        // mutable state write, same admission discipline as the rest of
+        // spawn(). The tool-call `signal` remains a second line of defense.
+        if (!req.parentRunId || !running.has(req.parentRunId) || stopping.has(req.parentRunId)) {
+          return {
+            error: {
+              kind: "config",
+              message: "parent run is stopping or gone",
+              retryable: false,
+            },
+          };
+        }
         if (req.resumeFrom)
           return {
             error: {
@@ -635,6 +659,13 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     },
     async abort(runId, cause = "user_stop") {
       if (!running.has(runId)) return false;
+      // D19 (workflow-experts §4.7, N3): synchronous, before the first
+      // `await` below (cascadeChildren) — a fork admission racing this same
+      // tick must see `runId` as stopping. `stopping` is an idempotent set
+      // (repeated abort() calls on the same runId, or the production path
+      // stopChildrenOf → abort, just re-add the same member); cleared once
+      // in finish(), also idempotent.
+      stopping.add(runId);
       // X3: cascade to nested children before/alongside aborting this run
       // itself. Recurses through `service.abort` so grandchildren are
       // reached too; idempotent against the double-hop that also arrives via

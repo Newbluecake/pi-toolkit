@@ -350,24 +350,32 @@ describe("SpawnService: notifyTerminalFailure nested-run gap (T-8, §6 B-6)", ()
   });
 
   it("suppresses the notification for a NESTED run (parentRunId set) — no top-level leak past CC2", async () => {
-    const { runner } = controllableRunner();
-    const svc0 = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
-    const asker = await svc0.spawn({ type: "asker", prompt: "a" }); // stays running
-    if ("error" in asker) throw new Error(asker.error.message);
-
-    const { runner: boom } = throwingRunner();
+    // D19 (workflow-experts §4.7): fork admission now requires the parent to
+    // be `running.has` in THIS SAME service, so a single runner is used here
+    // (asker's own run() hangs forever to "stay running"; the nested expert
+    // run's run() rejects) instead of the previous two-instance setup, whose
+    // cross-instance parentRunId was never actually tracked as running.
     const notified: RunOutcome[] = [];
+    const runner: Runner = {
+      run: (spec) =>
+        spec.request.type === "asker"
+          ? new Promise<RunOutcome>(() => {}) // never settles — asker "stays running"
+          : Promise.reject(new Error("runner exploded")),
+    };
     const svc = createSpawnService({
       types: typesRegistry([expertType, askerType]),
       pool,
-      runner: boom,
+      runner,
       now: () => 0,
       notifyTerminalFailure: (o) => notified.push(o),
     });
+    const asker = await svc.spawn({ type: "asker", prompt: "a" });
+    if ("error" in asker) throw new Error(asker.error.message);
+
     const nested = await svc.spawn({
       type: "expert",
       prompt: "b",
-      parentRunId: asker.runId, // any tracked parent id would do; reuse a live one
+      parentRunId: asker.runId, // genuinely running in this same service
       forkSessionFrom: forkFile(),
     });
     if ("error" in nested) throw new Error(nested.error.message);
@@ -378,5 +386,149 @@ describe("SpawnService: notifyTerminalFailure nested-run gap (T-8, §6 B-6)", ()
     // top-level notification is suppressed (the parent gets the outcome
     // through spawnAndWait/waitOutcome, not through the notifier).
     expect(notified).toEqual([]);
+  });
+});
+
+/**
+ * workflow-experts plan §3 D19 / §4.7 / test 27 / N3 (review-3 addendum):
+ * the `stopping` set must be marked SYNCHRONOUSLY inside abort() — strictly
+ * before its first `await` (`cascadeChildren`) — so a consult fork admission
+ * racing the exact same tick sees it. `stopping` is an idempotent set:
+ * direct abort(R), the production cascade path
+ * stopChildrenOf(workflowId) -> abort(R), and repeated abort() calls on the
+ * same runId must all agree. finish() clears the mark, also idempotently.
+ * Every case here drives the REAL createSpawnService end to end (no mocked
+ * admission layer) per the anchor review-1 #1 already established above.
+ */
+describe("SpawnService: fork admission vs. abort/stopping race (D19, test 27, N3)", () => {
+  it("direct abort(R): a same-tick fork admission for R is rejected with the frozen error text", async () => {
+    const { runner, abortCalls } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
+    const r = await svc.spawn({ type: "asker", prompt: "r" });
+    if ("error" in r) throw new Error(r.error.message);
+
+    // Not awaited yet: everything up to abort()'s first `await` — including
+    // the `stopping.add(runId)` line — has already run synchronously by the
+    // time this statement completes and hands back a pending promise.
+    const abortP = svc.abort(r.runId);
+
+    const raced = await svc.spawn({
+      type: "expert",
+      prompt: "consult",
+      parentRunId: r.runId,
+      forkSessionFrom: forkFile(),
+    });
+    expect(raced).toEqual({
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+    });
+
+    await abortP;
+    expect(abortCalls.map((c) => c.runId)).toEqual([r.runId]);
+  });
+
+  it("production path stopChildrenOf(workflowId) -> abort(R): same-tick fork admission for R is rejected", async () => {
+    const { runner } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
+    // R is nested under an untracked "workflow" id (exactly how a workflow's
+    // background registry owns its children — parentId is never itself a
+    // spawned run; see stopChildrenOf's own CC1 comment above).
+    const r = await svc.spawn({ type: "asker", prompt: "r", parentRunId: "workflow-1" });
+    if ("error" in r) throw new Error(r.error.message);
+
+    // Same reasoning as the direct-abort case: stopChildrenOf awaits
+    // cascadeChildren, which synchronously fans out into abort(r.runId)
+    // before hitting ITS OWN first await — so `stopping.add(r.runId)` is
+    // already done by the time this statement hands back a pending promise.
+    const stopP = svc.stopChildrenOf("workflow-1");
+
+    const raced = await svc.spawn({
+      type: "expert",
+      prompt: "consult",
+      parentRunId: r.runId,
+      forkSessionFrom: forkFile(),
+    });
+    expect(raced).toEqual({
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+    });
+
+    await stopP;
+  });
+
+  it("repeated abort(R) is idempotent: second call re-adds the same stopping member, no crash, fork stays rejected", async () => {
+    const { runner, abortCalls } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
+    const r = await svc.spawn({ type: "asker", prompt: "r" });
+    if ("error" in r) throw new Error(r.error.message);
+
+    await svc.abort(r.runId);
+    await svc.abort(r.runId); // R never settles in this fake runner: running.has(r) is still true
+    expect(abortCalls.filter((c) => c.runId === r.runId)).toHaveLength(2);
+
+    const raced = await svc.spawn({
+      type: "expert",
+      prompt: "consult",
+      parentRunId: r.runId,
+      forkSessionFrom: forkFile(),
+    });
+    expect(raced).toEqual({
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+    });
+  });
+
+  it("R finishes normally (no abort): fork admission after finish() is rejected as gone, and a THIRD abort() is a true no-op", async () => {
+    const { runner, settle } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
+    const r = await svc.spawn({ type: "asker", prompt: "r" });
+    if ("error" in r) throw new Error(r.error.message);
+
+    settle(r.runId); // finish() runs: running.delete + stopping.delete (idempotent — r was never in `stopping`)
+    const waited = await svc.waitOutcome(r.runId);
+    if (waited.kind !== "settled") throw new Error("expected R to settle");
+
+    const afterFinish = await svc.spawn({
+      type: "expert",
+      prompt: "consult",
+      parentRunId: r.runId,
+      forkSessionFrom: forkFile(),
+    });
+    expect(afterFinish).toEqual({
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+    });
+
+    // abort() on an already-finished run is a true no-op (never reaches the
+    // `stopping.add` line at all — the `running.has` guard short-circuits).
+    expect(await svc.abort(r.runId)).toBe(false);
+  });
+
+  it("fork spawned BEFORE abort: C is on the cascade list and ends up aborted alongside R", async () => {
+    const { runner, abortCalls } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
+    const r = await svc.spawn({ type: "asker", prompt: "r" });
+    if ("error" in r) throw new Error(r.error.message);
+    const c = await svc.spawn({
+      type: "expert",
+      prompt: "consult",
+      parentRunId: r.runId,
+      forkSessionFrom: forkFile(),
+    });
+    if ("error" in c) throw new Error(c.error.message);
+
+    await svc.abort(r.runId);
+    expect(abortCalls.map((call) => call.runId).sort()).toEqual([c.runId, r.runId].sort());
+  });
+
+  it("non-fork nested spawn admission is untouched by stopping (D19 only tightens fork requests)", async () => {
+    const { runner } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([expertType, workerType]), pool, runner, now: () => 0 });
+    const top = await svc.spawn({ type: "expert", prompt: "a" }); // expert can spawn worker
+    if ("error" in top) throw new Error(top.error.message);
+
+    const abortP = svc.abort(top.runId); // marks `stopping` synchronously, same as above
+    const nested = await svc.spawn({ type: "worker", prompt: "b", parentRunId: top.runId });
+    // No forkSessionFrom on this request ⇒ the D19 gate never runs for it;
+    // ordinary canSpawn/depth admission is unaffected by `stopping`.
+    expect("error" in nested).toBe(false);
+
+    await abortP;
   });
 });
