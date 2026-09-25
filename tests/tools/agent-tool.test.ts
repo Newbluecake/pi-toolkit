@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { createAgentTool, type NestedSpawnPort } from "../../src/tools/agent-tool.js";
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import {
+  AgentToolParams,
+  NestedAgentToolParams,
+  createAgentTool,
+  type NestedSpawnPort,
+} from "../../src/tools/agent-tool.js";
 import { CappedBody } from "../../src/ui/capped-body.js";
 import type { RunDiagnostics, RunOutcome, SpawnRequest } from "../../src/core/types.js";
 
@@ -33,19 +39,122 @@ function outcome(
   };
 }
 
-function fakePort(): NestedSpawnPort & { seen?: SpawnRequest } {
-  const port: NestedSpawnPort & { seen?: SpawnRequest } = {
+function fakePort(): NestedSpawnPort & { seen?: SpawnRequest; calls: string[] } {
+  const port: NestedSpawnPort & { seen?: SpawnRequest; calls: string[] } = {
+    calls: [],
     async spawn(req) {
+      port.calls.push("spawn");
       port.seen = req;
       return { runId: "child-1" };
     },
     async spawnAndWait(req) {
+      port.calls.push("spawnAndWait");
       port.seen = req;
       return outcome("child-1");
     },
   };
   return port;
 }
+
+/** The nested delegation flavour (blocking by default) — what runtime-adapter injects into a child. */
+function nestedTool(port: NestedSpawnPort, extra: { resultMaxChars?: () => number } = {}) {
+  return createAgentTool({ spawn: port, parentRunId: "parent-1", allowedTypes: ["worker", "general"], ...extra });
+}
+
+describe("tools/agent-tool: top-level Agent is background-only", () => {
+  it("the top-level schema has no run_in_background field; the nested schema keeps it", () => {
+    expect(Object.keys(AgentToolParams.properties)).not.toContain("run_in_background");
+    expect(Object.keys(NestedAgentToolParams.properties)).toContain("run_in_background");
+    expect(createAgentTool({ spawn: fakePort() }).parameters).toBe(AgentToolParams);
+    expect(nestedTool(fakePort()).parameters).toBe(NestedAgentToolParams);
+    // Everything else is shared verbatim between the two surfaces.
+    const { run_in_background: _dropped, ...nestedRest } = NestedAgentToolParams.properties;
+    expect(Object.keys(AgentToolParams.properties)).toEqual(Object.keys(nestedRest));
+  });
+
+  it("a plain call returns a run_id immediately through spawn(), never spawnAndWait()", async () => {
+    const port = fakePort();
+    const result = await createAgentTool({ spawn: port }).execute(
+      "tc",
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.calls).toEqual(["spawn"]);
+    expect(port.seen?.detachSignalOnStart).toBe(true);
+    expect(port.seen?.expectAck).toBeUndefined();
+    expect(result.details).toEqual({ runId: "child-1", label: "d", background: true });
+    const text = result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+    expect(text).toContain("started in background (run_id: child-1)");
+    expect(text).toContain('get_subagent_result(run_id: "child-1")');
+    expect(text).toContain('[subagent label: "d" · run_id: child-1 · status: running]');
+  });
+
+  it("still runs in the background when a legacy run_in_background: false is passed", async () => {
+    const port = fakePort();
+    const legacyArgs = { description: "d", prompt: "p", subagent_type: "worker", run_in_background: false };
+    const result = await createAgentTool({ spawn: port }).execute(
+      "tc",
+      legacyArgs as AgentToolParams,
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.calls).toEqual(["spawn"]);
+    expect(port.seen?.detachSignalOnStart).toBe(true);
+    expect((result.details as { background?: boolean }).background).toBe(true);
+  });
+
+  it("pi's argument validation accepts (and does not reject) a legacy run_in_background field", () => {
+    const tool = createAgentTool({ spawn: fakePort() });
+    const args = { description: "d", prompt: "p", subagent_type: "worker", run_in_background: false };
+    const validated = validateToolArguments(tool as never, {
+      type: "toolCall",
+      id: "tc",
+      name: "Agent",
+      arguments: args,
+    });
+    expect(validated).toMatchObject({ description: "d", subagent_type: "worker" });
+    // …while a genuinely malformed call is still rejected (the check is real).
+    expect(() =>
+      validateToolArguments(tool as never, { type: "toolCall", id: "tc", name: "Agent", arguments: { prompt: "p" } }),
+    ).toThrow(/Validation failed/);
+  });
+
+  it("describes the background-only protocol and drops the foreground/auto-background wording", () => {
+    const tool = createAgentTool({ spawn: fakePort() });
+    expect(tool.description).toContain("always runs in the background");
+    expect(tool.description).toContain("get_subagent_result");
+    expect(tool.description).toContain("steer_subagent");
+    expect(tool.description).toContain("abort_subagent");
+    expect(tool.description).toContain("same message");
+    expect(tool.description).not.toMatch(/run_in_background|foreground|auto-background/i);
+    expect(tool.promptSnippet).not.toContain("run_in_background");
+    expect(tool.promptSnippet).toContain("background");
+    const nested = nestedTool(fakePort());
+    expect(nested.description).toContain("run_in_background: true");
+    expect(nested.description).toContain("blocks until the subagent finishes");
+    expect(nested.description).not.toMatch(/auto-background/i);
+    expect(nested.promptSnippet).toContain("run_in_background?");
+  });
+
+  it("the nested tool keeps its blocking default: spawnAndWait, full-turn signal linkage, direct result", async () => {
+    const port = fakePort();
+    const result = await nestedTool(port).execute(
+      "tc",
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.calls).toEqual(["spawnAndWait"]);
+    expect(port.seen?.detachSignalOnStart).toBeUndefined();
+    expect(port.seen?.parentRunId).toBe("parent-1");
+    expect(result.content[0]).toEqual({ type: "text", text: "done" });
+    expect((result.details as { status?: string }).status).toBe("completed");
+  });
+});
 
 describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotless)", () => {
   it("rejects a subagent_type outside allowedTypes before ever calling spawn (tool-level defense in depth)", async () => {
@@ -95,9 +204,9 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
     expect(port.seen?.slotless).toBeUndefined();
   });
 
-  it("run_in_background spawns carry detachSignalOnStart (host-turn abort must not cancel them); foreground spawnAndWait keeps full-turn linkage", async () => {
+  it("nested run_in_background spawns carry detachSignalOnStart (host-turn abort must not cancel them); nested blocking spawnAndWait keeps full-turn linkage", async () => {
     const bgPort = fakePort();
-    await createAgentTool({ spawn: bgPort }).execute(
+    await nestedTool(bgPort).execute(
       "tc-bg",
       { description: "d", prompt: "p", subagent_type: "worker", run_in_background: true },
       undefined,
@@ -107,7 +216,7 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
     expect(bgPort.seen?.detachSignalOnStart).toBe(true);
 
     const fgPort = fakePort();
-    await createAgentTool({ spawn: fgPort }).execute(
+    await nestedTool(fgPort).execute(
       "tc-fg",
       { description: "d", prompt: "p", subagent_type: "worker" },
       undefined,
@@ -169,14 +278,14 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
   });
 });
 
-describe("tools/agent-tool: foreground failure diagnostics", () => {
+describe("tools/agent-tool: nested blocking failure diagnostics", () => {
   const failed = (text?: string, sessionFile?: string) =>
     outcome("failed-42", { status: "failed", text, error: { message: "boom" } }, { sessionFile });
 
   it("includes runId, a non-committal resume hint, and a capped output tail", async () => {
     const port = fakePort();
     port.spawnAndWait = async () => failed("x".repeat(1000), "/missing/session.json");
-    const tool = createAgentTool({ spawn: port });
+    const tool = nestedTool(port);
     await expect(
       tool.execute(
         "tc1",
@@ -207,7 +316,7 @@ describe("tools/agent-tool: foreground failure diagnostics", () => {
   it("does not check session-file existence before using the non-committal hint", async () => {
     const port = fakePort();
     port.spawnAndWait = async () => failed(undefined, "/definitely/not/on/disk");
-    const tool = createAgentTool({ spawn: port });
+    const tool = nestedTool(port);
     await expect(
       tool.execute(
         "tc1",
@@ -222,7 +331,7 @@ describe("tools/agent-tool: foreground failure diagnostics", () => {
   it("explains when no session was created and omits blank output tails", async () => {
     const port = fakePort();
     port.spawnAndWait = async () => failed("   ");
-    const tool = createAgentTool({ spawn: port });
+    const tool = nestedTool(port);
     await expect(
       tool.execute(
         "tc1",
@@ -265,7 +374,7 @@ describe("tools/agent-tool: label result contract", () => {
   it("adds an effective-label marker as a separate final content block", async () => {
     const port = fakePort();
     port.spawnAndWait = async () => outcome("run-1", {}, { label: "derived-1" });
-    const result = (await createAgentTool({ spawn: port }).execute(
+    const result = (await nestedTool(port).execute(
       "tc",
       {
         description: "requested",
@@ -284,7 +393,7 @@ describe("tools/agent-tool: label result contract", () => {
   it("keeps structured JSON in content[0] and puts the marker in content[1]", async () => {
     const port = fakePort();
     port.spawnAndWait = async () => outcome("run-2", { structuredResult: { ok: true } }, { label: "structured" });
-    const result = (await createAgentTool({ spawn: port }).execute(
+    const result = (await nestedTool(port).execute(
       "tc",
       {
         description: "requested",
@@ -310,7 +419,6 @@ describe("tools/agent-tool: label result contract", () => {
         description: "requested",
         prompt: "p",
         subagent_type: "worker",
-        run_in_background: true,
       },
       undefined,
       undefined,
@@ -327,7 +435,7 @@ describe("tools/agent-tool: label result contract", () => {
       expect(req.resumeFrom).toBe("old");
       return outcome("run-resumed", {}, { label: "repointed" });
     };
-    const result = (await createAgentTool({ spawn: port }).execute(
+    const result = (await nestedTool(port).execute(
       "tc",
       {
         description: "requested",
@@ -360,8 +468,8 @@ describe("tools/agent-tool: renderCall (TUI call card)", () => {
     expect(out).toContain("type: general-purpose");
   });
 
-  it("marks background / resume / isolation runs and reuses the last component", () => {
-    const tool = createAgentTool({ spawn: fakePort() });
+  it("marks nested background / resume / isolation runs and reuses the last component", () => {
+    const tool = nestedTool(fakePort());
     const first = tool.renderCall!(
       {
         description: "d",
@@ -385,6 +493,18 @@ describe("tools/agent-tool: renderCall (TUI call card)", () => {
     );
     expect(second).toBe(first); // same Text instance, mutated in place (bash-tool convention)
     expect((second as Text).render(120).join("\n")).toContain("Agent: d2");
+  });
+
+  it("never renders a background marker on the top-level card (always background), even for a legacy field", () => {
+    const tool = createAgentTool({ spawn: fakePort() });
+    const comp = tool.renderCall!(
+      { description: "d", prompt: "p", subagent_type: "worker", run_in_background: true } as AgentToolParams,
+      theme as never,
+      ctx() as never,
+    ) as Text;
+    const out = comp.render(120).join("\n");
+    expect(out).toContain("type: worker");
+    expect(out).not.toContain("background");
   });
 
   it("tolerates partial streaming args (no description yet)", () => {
@@ -518,17 +638,22 @@ describe("tools/agent-tool: renderResult (markdown body)", () => {
     }
   });
 
-  it("keeps the streaming partial path on the reused Text component", () => {
-    const tool = createAgentTool({ spawn: fakePort(), markdownTheme: () => fakeMdTheme });
-    const partial = {
-      content: [{ type: "text", text: "⏳ working" }],
-      details: { runId: "r1", progress: ["⏳ header", "✓ done", "✗ oops"] },
+  it("renders the top-level background start result as the plain body on the reused Text component", () => {
+    const tool = createAgentTool({ spawn: fakePort() });
+    const result = {
+      content: [
+        { type: "text", text: 'Subagent "d" started in background (run_id: r1).' },
+        { type: "text", text: '[subagent label: "d" · run_id: r1 · status: running]' },
+      ],
+      details: { runId: "r1", label: "d", background: true },
     } as never;
-    const options = { isPartial: true } as never;
-    const first = tool.renderResult!(partial, options, theme as never, ctx() as never);
+    const options = { isPartial: false, expanded: false } as never;
+    const first = tool.renderResult!(result, options, theme as never, ctx() as never);
     expect(first).toBeInstanceOf(Text);
-    const second = tool.renderResult!(partial, options, theme as never, ctx(first) as never);
+    const rendered = componentText(first);
+    expect(rendered).toContain("started in background (run_id: r1)");
+    expect(rendered).not.toContain("✓ "); // no stats summary line for a background start
+    const second = tool.renderResult!(result, options, theme as never, ctx(first) as never);
     expect(second).toBe(first); // lastComponent reuse preserved
-    expect(componentText(second)).toContain("✗ oops");
   });
 });

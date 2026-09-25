@@ -111,7 +111,8 @@ describe("SettingsEditorModel navigation", () => {
     expect(byKey.get("budget.idleS")?.def).toBe("240");
     expect(byKey.has("budget.idleMs")).toBe(false);
     expect(byKey.get("budget.startupRetries")?.value).toBe("2");
-    expect(byKey.get("foregroundAutoBackgroundS")?.value).toBe("600");
+    expect(byKey.has("foregroundAutoBackgroundS")).toBe(false); // removed with the foreground Agent mode
+    expect(byKey.get("deliveryBackoffS")?.value).toBe("1");
     expect(byKey.get("worktree.gitTimeoutS")?.value).toBe("30");
     expect(byKey.get("bashJobs.retentionS")?.value).toBe("86400");
     // workflow.budget.* is unset in DEFAULT_SETTINGS but shows its effective default

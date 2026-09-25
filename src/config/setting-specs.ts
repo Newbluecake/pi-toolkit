@@ -167,10 +167,6 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   deliveryAttempts: count("deliveryAttempts", 1, "Notification delivery attempts"),
   deliveryBackoffS: seconds("deliveryBackoffMs", { description: "Backoff between delivery attempts" }),
   reconcileTtlS: seconds("reconcileTtlMs", { description: "Retention of delivered records for reconcile" }),
-  foregroundAutoBackgroundS: seconds("foregroundAutoBackgroundMs", {
-    hint: "0 disables foreground auto-background",
-    description: "Auto-background foreground Agent calls after this",
-  }),
   maxReconcileRounds: count("maxReconcileRounds", 0, "Max reconcile rounds per flush"),
   maxReconcileBatch: count("maxReconcileBatch", 1, "Max deliveries reconciled per round"),
   coalesceWindowS: seconds("coalesceWindowMs", {
@@ -255,7 +251,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "extend.notify": choice(
     "extend.notify",
     ["background", "always", "off"],
-    "Grace notice delivery: background = skip foreground-blocking runs; always = debug only",
+    "Grace notice delivery: background = skip runs a caller blocks on; always = debug only",
   ),
   fleetDeadlineWarnS: seconds("fleetDeadlineWarnMs", {
     hint: "0 disables the deadline warn tier",

@@ -222,9 +222,10 @@ export interface SpawnRequest {
    * createCancelHandle is unaffected); once the run starts, the runner
    * detaches the external listener so an abort of the caller's turn (Esc /
    * compact_context / compact-hint forced compaction) no longer cancels
-   * this run. Only for fire-and-forget background spawns — foreground
-   * spawnAndWait keeps full-turn linkage on purpose (Esc killing a
-   * foreground run is a feature). Cancellation paths that go through
+   * this run. Only for fire-and-forget background spawns — blocking
+   * spawnAndWait callers (nested Agent, workflow, /goal verifier) keep
+   * full-turn linkage on purpose (Esc killing a run the turn is blocked
+   * on is a feature). Cancellation paths that go through
    * activeCancels (abort_subagent, watchdog timeout, ...) are unaffected
    * because detach only removes the external listener.
    */
@@ -280,7 +281,7 @@ export interface SpawnRequest {
 /**
  * M-A (presentation): one observed tool call of a run, kept in
  * RunDiagnostics.toolHistory (bounded ring, TOOL_HISTORY_CAP) so both the
- * foreground Agent tool card and the fleet/agent-tree widget can render a
+ * progress tool cards (get_subagent_result wait, workflow) and the fleet/agent-tree widget can render a
  * live execution trail without re-reading the child session file.
  */
 export interface ToolCallRecord {
@@ -456,8 +457,6 @@ export interface RunOutcome {
 }
 export interface RunDiagnostics {
   createdAt: Millis;
-  /** Display-only timestamp when a foreground call was moved to background. */
-  autoBackgroundedAt?: Millis;
   enqueuedAt?: Millis;
   startedAt?: Millis;
   promptDispatchedAt?: Millis;

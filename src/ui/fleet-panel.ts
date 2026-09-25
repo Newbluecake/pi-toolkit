@@ -78,8 +78,6 @@ export interface FleetRow {
   maxEscalation: EscalationLevel | undefined;
   usage: UsageDelta | undefined;
   contextUsage: ContextUsageInfo | undefined;
-  /** Run was moved from foreground to background by the timeout threshold. */
-  autoBackgrounded?: boolean;
   /** Prompt preview for a terminal run awaiting notification context entry. */
   taskPreview?: string;
   /** X3 nested run (spawned with parentRunId). */
@@ -151,7 +149,7 @@ export function thinkingFrame(now: Millis): string {
 
 /**
  * M11: human-friendly phase label for the presentation surfaces (tree rows,
- * foreground card). Diagnostic surfaces (/agent status) keep the raw
+ * progress cards). Diagnostic surfaces (/agent status) keep the raw
  * RunPhase. retry shows its attempt counter when known.
  *
  * `now` is optional for backward compatibility: when given, the thinking
@@ -418,7 +416,6 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     maxEscalation: esc.max,
     usage: snapshot.diag.usage,
     contextUsage: snapshot.diag.contextUsage,
-    autoBackgrounded: snapshot.diag.autoBackgroundedAt !== undefined,
     ...(snapshot.diag.taskPrompt?.replace(/\s+/g, " ").trim()
       ? { taskPreview: snapshot.diag.taskPrompt.replace(/\s+/g, " ").trim() }
       : {}),

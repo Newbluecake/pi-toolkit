@@ -9,7 +9,7 @@ A toolbox extension for [pi](https://github.com/earendil-works/pi): the flagship
 1. **Zero-hang guarantee** — every subagent run is a pure state machine with per-phase deadlines: a 1Hz watchdog fires them, an escalation ladder (cancel → steer → abort → dispose) physically reclaims resources, and anything that still refuses to die is registered as an orphan, never forgotten. **Every run reaches a terminal state** — the failure modes a naive "spawn + await" wrapper cannot see (model API stalling mid-turn, tool calls that never return, sessions that refuse to exit) all have a defined death and a defined cleanup here.
 2. **Fully observable** — while runs are active, a live **agent tree** sits above your editor: phase, in-flight tool calls, model streaming tails, real-time cost. `/agent status` gives a per-run tool timeline.
 3. **Results always delivered** — completion notifications flow through a persistent, acknowledgeable pipeline (staged → delivered → consumed): a notification that can't enter context is retried with a 10-minute hard backstop, never silently dropped.
-4. **Foreground/background freedom** — a foreground `Agent` call auto-backgrounds after 10 minutes (the run keeps going); bash commands do the same (default threshold 290s, deliberately under the 5-minute prompt-cache TTL). Dispatch and walk away — completion notifications drive the next step.
+4. **Dispatch and walk away** — main-session `Agent` calls always run in the background and return a run_id immediately; completion notifications drive the next step (dispatch several in one message to run them in parallel). bash commands auto-background past a threshold (default 290s, deliberately under the 5-minute prompt-cache TTL).
 5. **A toolbox, not a monolith** — every module beyond the subagent core has its own switch (`hud.enabled`, `memory.enabled`, `webSearch.enabled`, …). Install one package, take what you need.
 
 ## Install
@@ -26,10 +26,10 @@ Or download the zip (prebuilt) from [GitHub Releases](https://github.com/Newblue
 
 ## The subagent system
 
-- **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (strict `provider/id` or a fuzzy hint like `sonnet` / `kimi-k3`), `run_in_background`, `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_s` (an explicit timeout is a hard cap — no grace, no extension), and `schema` (structured, schema-validated output).
-- **`get_subagent_result`** — non-blocking poll by default; `wait: true` + `wait_ms` for bounded blocking.
+- **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (strict `provider/id` or a fuzzy hint like `sonnet` / `kimi-k3`), `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_s` (an explicit timeout is a hard cap — no grace, no extension), and `schema` (structured, schema-validated output). The main-session `Agent` **always runs in the background**: it returns a run_id immediately and pushes a completion notification on terminal state (there is no foreground/blocking mode and no `run_in_background` parameter). The nested `Agent` injected into a subagent keeps its blocking default plus opt-in `run_in_background` (a child runs in print mode — its run ends with its turn, so it cannot wait for a notification).
+- **`get_subagent_result`** — collect a result after its completion notification arrives; non-blocking by default, `wait: true` + `wait_ms` for bounded blocking (a fallback).
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
-- **`abort_subagent`** — stop a running subagent (including auto-backgrounded ones); idempotent on terminal runs.
+- **`abort_subagent`** — stop a running subagent; idempotent on terminal runs.
 - **`extend_subagent_timeout`** — extend a running run's total deadline (capped in count and by a hard ceiling). Default-budget runs enter a grace window at expiry with a notification to the main session; only an unattended grace elapse terminates the run.
 - **`set_model`** — switch models mid-run (takes effect on the next LLM call, without interrupting the current turn): defaults to your own session, or targets a running subagent by run id / unique prefix / label; optional `thinking` level; the switch is written to the transcript and survives resume.
 - **Agent types** — discovered from `.md` definitions in `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/` and injected into the system prompt; frontmatter `model:` accepts strict ids or fuzzy hints.
@@ -174,7 +174,6 @@ User settings: `~/.pi/agent/pi-subagent.json` (the filename keeps its historical
   "concurrencyLimit": 6,
   "fleetWidget": true, // the agent tree above the editor
   "maxNestedDepth": 2, // depth cap for subagents spawning subagents
-  "foregroundAutoBackgroundS": 600, // foreground Agent auto-background; 0 = off
   "resultMaxChars": 8000, // result text cap; 0 = unlimited, live
   "worktree": { "enabled": false },
   "memory": { "enabled": true }, // project memory (injection + memory tool + /mem)

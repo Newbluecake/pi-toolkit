@@ -86,10 +86,12 @@ export function formatDeadlineNotice(notice: DeadlineNotice, ctx: { now: Millis;
  *
  *  - policy "off": deliver nothing (the grace window itself still applies).
  *  - policy "always": deliver everything (debug only, D-17 — rule 2 ignored).
- *  - policy "background" (default): skip runs whose foreground Agent call is
- *    still blocking the host (expectsAck && !autoBackgrounded) — the host
- *    model could not act on the notice anyway, so it would be pure noise.
- *    Once the run auto-backgrounds, notices resume.
+ *  - policy "background" (default): skip runs a caller is synchronously
+ *    blocked on (expectsAck — spawnAndWait from a nested Agent call, a
+ *    workflow step, the /goal verifier, consult) — the waiting model could
+ *    not act on the notice anyway, so it would be pure noise. The top-level
+ *    Agent tool always spawns in the background, so its runs are never
+ *    skipped.
  *
  * Note the responsibility boundary: whether an "extended" receipt wakes the
  * model is NOT decided here but in deliveryOptionsFor (triggerTurn: false);
@@ -100,12 +102,11 @@ export function shouldDeliverDeadlineNotice(
   ctx: {
     policy: DeadlineNotifyPolicy;
     expectsAck(runId: string): boolean;
-    autoBackgrounded(runId: string): boolean;
   },
 ): boolean {
   if (ctx.policy === "off") return false;
   if (ctx.policy === "always") return true;
-  return !(ctx.expectsAck(notice.runId) && !ctx.autoBackgrounded(notice.runId));
+  return !ctx.expectsAck(notice.runId);
 }
 
 /**

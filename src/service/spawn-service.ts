@@ -37,7 +37,6 @@ export interface SpawnService {
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
   waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
   expectsAck(runId: RunId): boolean;
-  markAutoBackgrounded(runId: RunId): void;
   /**
    * X1 (agent tree): post-settlement worktree display state. beforeReap runs
    * AFTER finish() built the terminal snapshot, so the disposal outcome can
@@ -114,7 +113,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const records = new Map<RunId, RunSnapshot>();
   const outcomes = new Map<RunId, RunOutcome>();
   const waits = new Map<RunId, Set<(outcome: RunOutcome) => void>>();
-  const autoBackgroundedAt = new Map<RunId, number>();
   const running = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
   const resumeLocks = new Set<string>();
@@ -179,16 +177,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             ...(outcome.diag.hardDeadlineAt !== undefined ? { hardDeadlineAt: outcome.diag.hardDeadlineAt } : {}),
             ...(outcome.diag.overtime?.grace !== undefined ? { graceUntil: outcome.diag.overtime.grace.until } : {}),
           },
-          diag: {
-            ...outcome.diag,
-            ...(outcome.diag.autoBackgroundedAt !== undefined
-              ? { autoBackgroundedAt: outcome.diag.autoBackgroundedAt }
-              : records.get(outcome.runId)?.diag.autoBackgroundedAt !== undefined
-                ? { autoBackgroundedAt: records.get(outcome.runId)!.diag.autoBackgroundedAt }
-                : autoBackgroundedAt.has(outcome.runId)
-                  ? { autoBackgroundedAt: autoBackgroundedAt.get(outcome.runId) }
-                  : {}),
-          },
+          diag: { ...outcome.diag },
           outcome,
           updatedAt: now(),
         } satisfies RunSnapshot)
@@ -200,7 +189,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     }
     for (const resolve of waits.get(outcome.runId) ?? []) resolve(outcome);
     waits.delete(outcome.runId);
-    autoBackgroundedAt.delete(outcome.runId);
   };
   const start = async (
     req: SpawnRequest,
@@ -230,8 +218,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const outcome = await deps.runner.run(spec, {
         ...(deps.onLifecycle ? { onLifecycle: deps.onLifecycle } : {}),
         onSnapshot: (s) => {
-          const markedAt = autoBackgroundedAt.get(runId);
-          if (markedAt !== undefined) s.diag.autoBackgroundedAt = markedAt;
           records.set(runId, s);
           deps.onSnapshot?.(s);
         },
@@ -575,16 +561,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     },
     expectsAck(runId) {
       return claimedRunIds.has(runId);
-    },
-    markAutoBackgrounded(runId) {
-      if (!running.has(runId)) return;
-      const markedAt = now();
-      autoBackgroundedAt.set(runId, markedAt);
-      const live = records.get(runId);
-      if (live) {
-        live.diag.autoBackgroundedAt = markedAt;
-        deps.onSnapshot?.(live);
-      }
     },
     // X1: no running.has guard — by the time beforeReap reports, the run is
     // already terminal and finish() has replaced the live record with the

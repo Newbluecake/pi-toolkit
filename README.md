@@ -9,7 +9,7 @@
 1. **零卡死保证** — 每个 subagent run 都是一条带分相 deadline 的纯状态机：1Hz 看门狗触发超时，升级阶梯（cancel → steer → abort → dispose）物理回收资源，杀不掉的登记为 orphan 绝不遗忘。**每个 run 必然到达终态**——模型 API 中途停滞、工具调用永不返回、session 拒绝退出，这些"spawn + await"封装看不见的失败方式在这里都有明确的死法和善后。
 2. **全程可观测** — run 活跃期间，编辑器上方常驻实时 **agent tree**：相位、在途工具、模型流式尾部、实时费用，一目了然；`/agent status` 给出逐 run 的完整工具时间线。
 3. **结果必达** — 完成通知走持久化、可确认的投递管线（staged → delivered → consumed）：主会话不收就一直挂着，发不出去有 10 分钟硬兜底，绝不静默丢失。
-4. **前后台自由** — 前台 Agent 调用超过 10 分钟自动转后台（run 不停）；bash 命令同理（阈值默认 290 秒，刻意低于 5 分钟 prompt 缓存 TTL）。派完即走，完成通知驱动下一步。
+4. **派完即走** — 主会话的 `Agent` 调用一律后台运行，立即返回 run_id，完成通知驱动下一步（可在同一条消息里并行派发多个）；bash 命令超过阈值自动转后台（默认 290 秒，刻意低于 5 分钟 prompt 缓存 TTL）。
 5. **工具箱，不是单体** — 除 subagent 核心外每个模块都可独立开关（`hud.enabled`、`memory.enabled`、`webSearch.enabled`……），装一个包，按需取用。
 
 ## 安装
@@ -26,10 +26,10 @@ pi update --extension git:github.com/Newbluecake/pi-toolkit
 
 ## Subagent 系统
 
-- **`Agent` 工具** — 发起有边界的 subagent run：`description`、`prompt`、`subagent_type`，可选 `model` 覆盖（严格 `provider/id` 或模糊 hint 如 `sonnet`、`kimi-k3`）、`run_in_background`、`resume`（续跑已结束的会话）、`isolation: "worktree"`（每个 run 一个 git worktree）、`timeout_s`（显式超时为硬顶，不宽限不延长）、`schema`（结构化输出，经 schema 校验）。
-- **`get_subagent_result`** — 默认非阻塞轮询；`wait: true` + `wait_ms` 为有界阻塞。
+- **`Agent` 工具** — 发起有边界的 subagent run：`description`、`prompt`、`subagent_type`，可选 `model` 覆盖（严格 `provider/id` 或模糊 hint 如 `sonnet`、`kimi-k3`）、`resume`（续跑已结束的会话）、`isolation: "worktree"`（每个 run 一个 git worktree）、`timeout_s`（显式超时为硬顶，不宽限不延长）、`schema`（结构化输出，经 schema 校验）。主会话的 `Agent` **一律后台运行**：立即返回 run_id，终态时推送完成通知（不再有前台阻塞模式与 `run_in_background` 参数）；子 agent 里注入的嵌套 `Agent` 保持默认阻塞、可选 `run_in_background`（子会话是 print 模式，本轮结束即 run 结束，等不到通知）。
+- **`get_subagent_result`** — 完成通知到达后取结果；默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞（兜底用）。
 - **`steer_subagent`** — 向运行中的子 agent 发送追加指令。
-- **`abort_subagent`** — 停止运行中的子 agent（含自动转后台的 run）；对终态 run 幂等。
+- **`abort_subagent`** — 停止运行中的子 agent；对终态 run 幂等。
 - **`extend_subagent_timeout`** — 延长运行中 run 的总超时（次数与硬天花板双上限）。默认预算的 run 到点时先进续跑宽限并通知主会话，宽限内可延长，宽限耗尽未处理才终止。
 - **`set_model`** — 运行中切换模型（下一次 LLM 调用生效，不打断当前 turn）：缺省切自己，也可按 run_id / 前缀 / label 切运行中的子 agent；可选 `thinking` 档位；切换写入 transcript，resume 后沿用。
 - **Agent 类型** — 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义并注入系统提示词；frontmatter `model:` 支持严格 id 或模糊 hint。
@@ -171,7 +171,6 @@ queue_wait → resolve_config → session_create → extension_bind
   "concurrencyLimit": 6,
   "fleetWidget": true, // 编辑器上方的 agent tree
   "maxNestedDepth": 2, // 子 agent 再 spawn 子 agent 的深度上限
-  "foregroundAutoBackgroundS": 600, // 前台 Agent 调用自动转后台；0 关闭
   "resultMaxChars": 8000, // 结果文本上限；0 不限，live 生效
   "worktree": { "enabled": false },
   "memory": { "enabled": true }, // 项目记忆（注入 + memory 工具 + /mem）

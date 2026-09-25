@@ -75,7 +75,7 @@ function makeHub(host: FakePi, opts: Partial<PromptSectionHubOpts> = {}): Prompt
 }
 
 function registerCoreSections(hub: PromptSectionHub): void {
-  hub.register("pi_subagent_types", agentTypesSection({ types: { list: () => TYPES }, foregroundAutoBackgroundMs: 0 }));
+  hub.register("pi_subagent_types", agentTypesSection({ types: { list: () => TYPES } }));
   hub.register("pi_subagent_models", availableModelsSection({ stackAvailable: () => MODELS }));
 }
 
@@ -125,7 +125,7 @@ describe("memory section registered in the hub (M3)", () => {
     const memoryBlock = memorySection(fx.memDeps).provider({ ctx: fakeCtx(fx.cwd), promptText: "BASE" } as any);
     let oracle = "BASE";
     if (typeof memoryBlock === "string" && memoryBlock !== "") oracle += "\n\n" + memoryBlock;
-    oracle = appendAgentTypesToSystemPrompt(oracle, TYPES, { foregroundAutoBackgroundMs: 0 });
+    oracle = appendAgentTypesToSystemPrompt(oracle, TYPES);
     oracle = appendAvailableModelsToSystemPrompt(oracle, MODELS);
 
     expect(result.systemPrompt).toBe(oracle);

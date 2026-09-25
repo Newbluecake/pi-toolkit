@@ -307,17 +307,9 @@ export default function activate(pi: ExtensionAPI): void {
   };
   pi.registerTool(
     createAgentTool({
+      // Top-level Agent always runs in the background (docs/dev/agent-background-only):
+      // only spawn() is reached; the outcome arrives through the notification outbox.
       spawn: forwardSpawn(holder),
-      // M-B: live foreground progress — snapshot reads from the query service,
-      // terminal wait through the spawn service's own waiter (no unknown-run
-      // race for a just-spawned id, unlike QueryService.wait).
-      autoBackgroundMs: () => settings.foregroundAutoBackgroundMs,
-      resultMaxChars: () => settings.resultMaxChars,
-      progress: {
-        getSnapshot: (runId) => holder.current?.query.get(runId),
-        waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
-        markAutoBackgrounded: (runId) => requireStack(holder).spawn.markAutoBackgrounded(runId),
-      },
       markdownTheme: resolveMarkdownTheme,
       // consult (plan §6 D-16): dispatch-time `experts` resolution for the
       // top-level Agent tool — the main session itself never gets the
@@ -429,13 +421,7 @@ export default function activate(pi: ExtensionAPI): void {
   // replay capture. Its registration order is the existing types -> models
   // order; the memory section (registered pre-guard by wireMemory, M3) has
   // already contributed the first section.
-  promptHub.register(
-    "pi_subagent_types",
-    agentTypesSection({
-      types,
-      foregroundAutoBackgroundMs: settings.foregroundAutoBackgroundMs,
-    }),
-  );
+  promptHub.register("pi_subagent_types", agentTypesSection({ types }));
   promptHub.register(
     "pi_subagent_models",
     availableModelsSection({
@@ -681,7 +667,6 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     waitAll: (opts) => requireStack(holder).spawn.waitAll(opts),
     waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
     expectsAck: (runId) => requireStack(holder).spawn.expectsAck(runId),
-    markAutoBackgrounded: (runId) => requireStack(holder).spawn.markAutoBackgrounded(runId),
     // CC1: forwarded for parity with the rest of SpawnService; no caller yet
     // (the workflow orchestrator that will use this lands in M3.1+).
     stopChildrenOf: (parentId, cause) => requireStack(holder).spawn.stopChildrenOf(parentId, cause),

@@ -45,7 +45,7 @@ function params(experts?: string[]) {
   };
 }
 
-function port(calls: SpawnRequest[], options: { background?: boolean } = {}): NestedSpawnPort {
+function port(calls: SpawnRequest[]): NestedSpawnPort {
   return {
     spawn: async (req) => {
       calls.push(req);
@@ -98,20 +98,31 @@ describe("Agent tool experts parameter", () => {
     expect(text).toContain("still running; consult will nack");
   });
 
-  it("carries consultExperts through the background reconstruction path too", async () => {
-    const calls: SpawnRequest[] = [];
+  it("carries consultExperts through the top-level background path and the nested blocking path", async () => {
     const resolved: ResolveExpertsResult = { refs: [ref], lines: ["mapping"], warnings: [] };
-    const tool = createAgentTool({ spawn: port(calls), resolveExperts: () => resolved });
-    await tool.execute(
+    const topCalls: SpawnRequest[] = [];
+    await createAgentTool({ spawn: port(topCalls), resolveExperts: () => resolved }).execute(
       "c",
-      { ...params(["explorer"]), run_in_background: true },
+      params(["explorer"]),
       undefined,
       undefined,
       undefined as never,
     );
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.consultExperts).toEqual([ref]);
-    expect(calls[0]!.detachSignalOnStart).toBe(true);
+    expect(topCalls).toHaveLength(1);
+    expect(topCalls[0]!.consultExperts).toEqual([ref]);
+    expect(topCalls[0]!.detachSignalOnStart).toBe(true);
+
+    const nestedCalls: SpawnRequest[] = [];
+    const nested = await createAgentTool({
+      spawn: port(nestedCalls),
+      parentRunId: "parent-1",
+      allowedTypes: ["worker"],
+      resolveExperts: () => resolved,
+    }).execute("c", params(["explorer"]), undefined, undefined, undefined as never);
+    expect(nestedCalls).toHaveLength(1);
+    expect(nestedCalls[0]!.consultExperts).toEqual([ref]);
+    expect(nestedCalls[0]!.detachSignalOnStart).toBeUndefined();
+    expect(nested.content.map((c) => (c.type === "text" ? c.text : "")).join("\n")).toContain("mapping");
   });
 
   it("experts remains optional and does not affect ordinary Agent calls", async () => {

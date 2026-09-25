@@ -30,7 +30,7 @@ export function createAbortTool(deps: {
     name: "abort_subagent",
     label: "Abort Subagent",
     description:
-      "Stop a still-running subagent started with the Agent tool (including one that was auto-backgrounded). Terminal runs are reported as already-finished instead of erroring, so repeated calls are safe.",
+      "Stop a still-running subagent started with the Agent tool. Terminal runs are reported as already-finished instead of erroring, so repeated calls are safe.",
     promptSnippet: "abort_subagent(run_id, reason?) - stop a running subagent",
     parameters: AbortToolParams,
     renderCall(args, theme, context) {

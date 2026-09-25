@@ -262,7 +262,8 @@ describe("formatAgentTypesForPrompt (system-prompt injection)", () => {
 
   it("appends the tool-usage protocol lines", () => {
     const out = formatAgentTypesForPrompt([type("worker", "Does work.")]);
-    expect(out).toContain("run_in_background");
+    expect(out).toContain("always runs in the background");
+    expect(out).not.toContain("run_in_background");
     expect(out).toContain("get_subagent_result");
     expect(out).toContain("steer_subagent");
     expect(out).toContain("terminal run");

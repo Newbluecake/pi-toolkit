@@ -117,8 +117,8 @@ export function createResultTool(deps: {
     name: "get_subagent_result",
     label: "Get Subagent Result",
     description:
-      "Check on, or collect the result of, a subagent run started with the Agent tool (run_in_background: true). " +
-      "Background runs push a completion notification on terminal state, so the normal flow is: continue other " +
+      "Check on, or collect the result of, a subagent run started with the Agent tool. " +
+      "Agent runs push a completion notification on terminal state, so the normal flow is: continue other " +
       "work (or end your turn), then call this tool without wait once the notification arrives. Set wait: true " +
       "to block until the run finishes (up to wait_ms) — while it blocks, the user cannot send new input, so " +
       "avoid it whenever anything else could proceed (ending your turn counts); it is a fallback for when an " +
@@ -263,8 +263,8 @@ export function createResultTool(deps: {
           },
         };
       }
-      // Live visibility while the (bounded) wait blocks: same 1 Hz partial-
-      // update side channel as the Agent tool's foreground path — header with
+      // Live visibility while the (bounded) wait blocks: a 1 Hz partial-
+      // update side channel (buildProgressLines, shared with workflow) — header with
       // elapsed/budget plus the awaited run's own progress snapshot. Purely a
       // read-only display concern; the wait semantics are unchanged.
       const startedAt = Date.now();

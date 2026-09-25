@@ -237,12 +237,15 @@ describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
         throw new Error("unused");
       },
     };
-    let injectedTool: { execute: (...args: unknown[]) => Promise<unknown> } | undefined;
+    type InjectedTool = {
+      name: string;
+      parameters: { properties: Record<string, unknown> };
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+    let injectedTool: InjectedTool | undefined;
     const drv2: SessionDriver = {
       create: async (s: SessionSpec) => {
-        injectedTool = (
-          s.customTools as Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }>
-        ).find((t) => t.name === "Agent");
+        injectedTool = (s.customTools as InjectedTool[]).find((t) => t.name === "Agent");
         return handle();
       },
       bind: async () => undefined,
@@ -254,6 +257,9 @@ describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
     await drain(clock, 10);
     await p;
     expect(injectedTool).toBeDefined();
+    // The nested flavour keeps run_in_background (a print-mode child cannot
+    // await notifications; the top-level tool is background-only instead).
+    expect(Object.keys(injectedTool!.parameters.properties)).toContain("run_in_background");
     await injectedTool!.execute(
       "tc",
       { description: "d", prompt: "p", subagent_type: "worker", run_in_background: true },

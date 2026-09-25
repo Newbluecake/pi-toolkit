@@ -1,5 +1,10 @@
 # auto-background + abort_subagent — 实施方案（v3，复审修订版）
 
+> **已被取代（2026-09-26）**：主会话 Agent 工具只保留后台模式，见
+> [docs/dev/agent-background-only/plan.md](../agent-background-only/plan.md)。本文的前台
+> auto-background 机制（`foregroundAutoBackgroundMs`、`markAutoBackgrounded`、1Hz 前台进度流）
+> 已删除；`abort_subagent` 仍保留。以下内容仅作历史记录。
+
 > 只读调查 + 本文档，不含实现。目标：借鉴 Claude Code，前台 Agent 调用超过阈值后自动
 > 降级为后台（主会话拿回控制权）；补齐模型侧后台控制面 `abort_subagent`。
 > v3 相对 v2 的 7 条实施级修订见 §9。行号均已对照当前代码复核。

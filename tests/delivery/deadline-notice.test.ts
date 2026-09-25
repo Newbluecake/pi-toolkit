@@ -134,21 +134,16 @@ describe("delivery/deadline-notice: formatDeadlineNotice — extended (arch §5.
 });
 
 describe("delivery/deadline-notice: shouldDeliverDeadlineNotice (arch §5.5 truth table)", () => {
-  const ack = { expectsAck: () => true, autoBackgrounded: () => false };
-  const ackBg = { expectsAck: () => true, autoBackgrounded: () => true };
-  const noAck = { expectsAck: () => false, autoBackgrounded: () => false };
+  const ack = { expectsAck: () => true };
+  const noAck = { expectsAck: () => false };
 
   it('policy "off" delivers nothing (grace still applies — only the notice is silenced)', () => {
     expect(shouldDeliverDeadlineNotice(graceNotice(), { policy: "off", ...noAck })).toBe(false);
     expect(shouldDeliverDeadlineNotice(extendedNotice(), { policy: "off", ...noAck })).toBe(false);
   });
 
-  it('policy "background" skips a run whose foreground caller-ack still blocks the host', () => {
+  it('policy "background" skips a run a caller is synchronously blocked on (spawnAndWait caller-ack)', () => {
     expect(shouldDeliverDeadlineNotice(graceNotice(), { policy: "background", ...ack })).toBe(false);
-  });
-
-  it('policy "background" delivers once the run auto-backgrounded (host unblocked)', () => {
-    expect(shouldDeliverDeadlineNotice(graceNotice(), { policy: "background", ...ackBg })).toBe(true);
   });
 
   it('policy "background" delivers runs nobody is synchronously waiting on', () => {

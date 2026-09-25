@@ -136,7 +136,7 @@ describe("merged plugins wiring (plugin-merge)", () => {
 
   it("B1: child activation performs zero file writes (legacy settings file stays byte-identical)", () => {
     // A legacy ms key that loadSettingsFromFile would migrate + rewrite.
-    writeSettings({ foregroundAutoBackgroundMs: 1000 });
+    writeSettings({ deliveryBackoffMs: 1000 });
     const before = readFileSync(settingsPath, "utf8");
     (globalThis as Record<symbol, unknown>)[HOST_KEY] = { activatedAt: Date.now() };
     const { pi, tools } = fakePi();
@@ -147,13 +147,13 @@ describe("merged plugins wiring (plugin-merge)", () => {
   });
 
   it("B1 contrast: host activation migrates the legacy key in place (atomically, no tmp residue)", () => {
-    writeSettings({ foregroundAutoBackgroundMs: 1000 });
+    writeSettings({ deliveryBackoffMs: 1000 });
     const { pi, tools } = fakePi();
     activate(pi);
     expect(tools.has("Agent")).toBe(true);
     const migrated = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
-    expect(migrated.foregroundAutoBackgroundMs).toBeUndefined();
-    expect(migrated.foregroundAutoBackgroundS).toBe(1);
+    expect(migrated.deliveryBackoffMs).toBeUndefined();
+    expect(migrated.deliveryBackoffS).toBe(1);
     expect(existsSync(`${settingsPath}.${process.pid}.tmp`)).toBe(false);
   });
 });

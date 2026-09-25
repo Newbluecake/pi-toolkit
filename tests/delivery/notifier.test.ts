@@ -71,7 +71,6 @@ describe("Notifier", () => {
       shouldDeliverDeadlineNotice(notice, {
         policy: "always",
         expectsAck: () => true,
-        autoBackgrounded: () => false,
       }),
     ).toBe(true);
     const content = formatDeadlineNotice(notice, { now: 1_000 });

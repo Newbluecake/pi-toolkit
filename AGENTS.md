@@ -7,7 +7,9 @@ Guidance for AI coding agents working in this repository.
 `pi-toolkit` (formerly `pi-subagent`) — a toolbox extension for [pi](https://github.com/earendil-works/pi)
 (the `@earendil-works/pi-coding-agent` CLI) whose flagship is an anti-hang subagent system: a drop-in
 replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
-`abort_subagent` tools, the `SubagentWorkflow` orchestration tool, the `/agent` command, a live
+`abort_subagent` tools (the main-session `Agent` is background-only — every call returns a run_id and completion is
+notified; only the nested `Agent` injected into a child keeps the blocking default, see
+`docs/dev/agent-background-only/plan.md`), the `SubagentWorkflow` orchestration tool, the `/agent` command, a live
 fleet widget (agent tree), a notification delivery subsystem, and a cron scheduler. Beyond that
 core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus
 a `bash_job` manager tool, provides `switch_context` / `compact_context` / `set_compact_threshold`
@@ -219,7 +221,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor,
   `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
-- `docs/dev/` — per-feature design docs (auto-background, delivery v2, bash-auto-background,
+- `docs/dev/` — per-feature design docs (agent-background-only (supersedes auto-background), delivery v2, bash-auto-background,
   subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), consult, sysprompt-stable (system prompt
   冻结快照 + 唤醒回放), ...); read the matching one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).

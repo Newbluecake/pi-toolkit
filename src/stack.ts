@@ -1174,7 +1174,6 @@ export function buildSessionStack(
       !shouldDeliverDeadlineNotice(notice, {
         policy: settings.extend.notify,
         expectsAck: (id) => spawnRef.current?.expectsAck(id) === true,
-        autoBackgrounded: (id) => query.get(id)?.diag.autoBackgroundedAt !== undefined,
       })
     )
       return;

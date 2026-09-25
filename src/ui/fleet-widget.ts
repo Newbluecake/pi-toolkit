@@ -203,7 +203,6 @@ function widgetRowMain(
     { name: "context", value: row.contextUsage ? formatContextUsage(row.contextUsage) : "" },
     ...(row.usage ? [{ name: "cost", value: formatWidgetCost(row.usage.costUsd) }] : []),
     { name: "total", value: `Σ${formatDuration(row.elapsedMs)}` },
-    ...(row.autoBackgrounded ? [{ name: "background", value: "⇣后台" }] : []),
   ];
   const shown = new Map(fields.map((field) => [field.name, field.value]));
   const compose = (labelText: string): string =>
@@ -224,7 +223,6 @@ function widgetRowMain(
     if (!fits()) drop("context");
     if (!fits()) drop("wt");
     if (!fits()) drop("cost");
-    if (!fits()) drop("background");
     if (!fits()) drop("total");
     // deadline is the LAST droppable field ("how long is left" beats "how long
     // it has run" at narrow widths), and while in grace it is NEVER dropped —

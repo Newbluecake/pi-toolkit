@@ -175,25 +175,21 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
         model: { provider: "droid-completion", id: "long-model-name" },
         contextUsage: { tokens: 32_000, contextWindow: 262_144, percent: 12.3 },
         usage: usage(1.05),
-        autoBackgroundedAt: 9_000,
       }),
     });
     const model = buildFleetViewModel([run], OPTS);
     const at = (width: number) => buildFleetWidgetLines(model, { width })![1]!;
     expect(at(120)).toContain("任务标签 architect droid-completion/long-model-name");
-    expect(at(120)).toContain("⇣后台");
     expect(at(70)).not.toContain("architect");
     expect(at(70)).toContain("long-model-name");
     expect(at(50)).not.toContain("long-model-name");
     expect(at(50)).toContain("12.3%/262k");
     expect(at(35)).not.toContain("12.3%/262k");
     expect(at(35)).toContain("$1.05");
-    // Last drop tier: ⇣后台 goes before Σ (buildFleetWidgetLines clamps
-    // width to >= 20, at which label+phase+Σ still fit, so the Σ-drop tier
-    // is unreachable through this entry point).
-    expect(at(26)).toContain("⇣后台");
+    // Last reachable tier: buildFleetWidgetLines clamps width to >= 20, at
+    // which label+phase+Σ still fit, so the Σ-drop tier is unreachable
+    // through this entry point.
     expect(at(26)).toContain("Σ1s");
-    expect(at(24)).not.toContain("⇣后台");
     expect(at(24)).toContain("Σ1s");
     // The label is never truncated while droppable fields remain.
     expect(at(20)).toContain("任务标签");
@@ -259,11 +255,6 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(compactPhaseLabel("等待中")).toBe("等待中");
   });
 
-  it("shows the auto-background indicator on the main row", () => {
-    const run = snapshot({ diag: diag({ autoBackgroundedAt: 9_000, lastEventAt: 9_900 }) });
-    expect(buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]).toContain("⇣后台");
-  });
-
   describe("deadline field (timeout grace & extension)", () => {
     const liveDiag = (overrides: Partial<RunDiagnostics> = {}): RunDiagnostics =>
       diag({ createdAt: 9_000, phaseEnteredAt: 9_000, lastEventAt: 9_900, ...overrides });
@@ -312,7 +303,6 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
           model: { provider: "droid-completion", id: "long-model-name" },
           contextUsage: { tokens: 32_000, contextWindow: 262_144, percent: 12.3 },
           usage: usage(1.05),
-          autoBackgroundedAt: 9_000,
         }),
       });
       const model = buildFleetViewModel([run], OPTS);
@@ -342,7 +332,6 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
           model: { provider: "droid-completion", id: "long-model-name" },
           contextUsage: { tokens: 32_000, contextWindow: 262_144, percent: 12.3 },
           usage: usage(1.05),
-          autoBackgroundedAt: 9_000,
         }),
       });
       const model = buildFleetViewModel([run], OPTS);

@@ -67,7 +67,7 @@ describe("settings file time-unit migration", () => {
   it("reads the new second-valued keys and converts them to internal milliseconds", () => {
     write({
       budget: { idleS: 600, totalS: 1800, startupRetries: 4 },
-      foregroundAutoBackgroundS: 120,
+      deliveryBackoffS: 120,
       worktree: { enabled: true, gitTimeoutS: 45 },
       workflow: { enabled: true, replayTtlS: 60, budget: { gateS: 30 } },
       bashJobs: { autoBackgroundS: 30, retentionS: 3_600, maxLogBytes: 1_024 },
@@ -76,7 +76,7 @@ describe("settings file time-unit migration", () => {
     expect(s.budget.idleMs).toBe(600_000);
     expect(s.budget.totalMs).toBe(1_800_000);
     expect(s.budget.startupRetries).toBe(4);
-    expect(s.foregroundAutoBackgroundMs).toBe(120_000);
+    expect(s.deliveryBackoffMs).toBe(120_000);
     expect(s.worktree).toEqual({ enabled: true, gitTimeoutMs: 45_000 });
     expect(s.workflow.replayTtlMs).toBe(60_000);
     expect(s.workflow.budget.gateMs).toBe(30_000);
@@ -86,7 +86,7 @@ describe("settings file time-unit migration", () => {
     // nothing to migrate ⇒ file untouched, no WARN
     expect(readBack()).toEqual({
       budget: { idleS: 600, totalS: 1800, startupRetries: 4 },
-      foregroundAutoBackgroundS: 120,
+      deliveryBackoffS: 120,
       worktree: { enabled: true, gitTimeoutS: 45 },
       workflow: { enabled: true, replayTtlS: 60, budget: { gateS: 30 } },
       bashJobs: { autoBackgroundS: 30, retentionS: 3_600, maxLogBytes: 1_024 },
@@ -189,9 +189,9 @@ describe("settings file time-unit migration", () => {
 
   it("keeps `/agent settings set` round-trippable: persisted second keys reload identically", () => {
     // this is what persistSettingOverride writes for `settings set budget.idleS 600`
-    write({ [secondsKeyOf("foregroundAutoBackgroundMs")]: 90, budget: { [secondsKeyOf("idleMs")]: 600 } });
+    write({ [secondsKeyOf("deliveryBackoffMs")]: 90, budget: { [secondsKeyOf("idleMs")]: 600 } });
     const s = loadSettingsFromFile(path);
-    expect(s.foregroundAutoBackgroundMs).toBe(90_000);
+    expect(s.deliveryBackoffMs).toBe(90_000);
     expect(s.budget.idleMs).toBe(600_000);
     expect(warn).not.toHaveBeenCalled();
   });

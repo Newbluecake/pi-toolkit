@@ -13,15 +13,9 @@ import type { SectionProviderInput, SectionRegistration } from "./hub.js";
 export const AGENT_TYPES_TITLE = "## Available subagent types (pi-subagent)";
 export const AVAILABLE_MODELS_TITLE = "## Available models (pi-subagent)";
 
-export function agentTypesSection(deps: {
-  types: { list(): readonly AgentTypeConfig[] };
-  foregroundAutoBackgroundMs: number;
-}): SectionRegistration {
+export function agentTypesSection(deps: { types: { list(): readonly AgentTypeConfig[] } }): SectionRegistration {
   return {
-    provider: () =>
-      formatAgentTypesForPrompt(deps.types.list(), {
-        foregroundAutoBackgroundMs: deps.foregroundAutoBackgroundMs,
-      }),
+    provider: () => formatAgentTypesForPrompt(deps.types.list()),
     title: AGENT_TYPES_TITLE,
     pointerHint: "The Agent tool rejects an unknown subagent_type with the current list of valid types.",
   };
