@@ -400,7 +400,7 @@ export interface AgentSettings {
   hud: HudSettings;
   /** Merged plugins: web_search tool (Codex/SerpAPI/Bocha/Tavily failover). Default on. */
   webSearch: EnabledGroup;
-  /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasks + aboveEditor widget. Default on. */
+  /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasklist + aboveEditor widget. Default on. */
   todo: EnabledGroup;
   /** ask_user interactive question tool (main session only — child subagent sessions never see it). Default on. */
   askUser: EnabledGroup;

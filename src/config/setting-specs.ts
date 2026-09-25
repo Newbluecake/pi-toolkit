@@ -214,7 +214,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "extend.enabled": bool("extend.enabled", "Timeout grace + extend_subagent_timeout tool"),
   "hud.enabled": bool("hud.enabled", "Merged HUD: take over the footer (off restores pi's built-in footer)"),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
-  "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasks widget)"),
+  "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (main session only)"),
   "feishuNotify.enabled": bool("feishuNotify.enabled", "Feishu notification cards (main session only)"),
   "sessionNav.enabled": bool(

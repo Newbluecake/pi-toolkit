@@ -92,7 +92,7 @@ Claude Code 风格的 cwd-keyed 被动记忆：每个会话自动把当前项目
 
 - **HUD footer** — 安装即接管 pi 底部 footer（`hud.enabled: false` 一键还原）。显示 pwd/git 分支与工作树、token/费用统计（含 subagent 实时费用）、上下文用量、模型与 thinking 档位、LLM 计时与生成速率。
 - **`web_search` 工具** — Codex / SerpAPI / Bocha / Tavily 四供应商自动 failover（网络错误/超时/429/5xx 指数退避后切换），主会话与子会话均可用；凭证见「配置」。
-- **任务工具** — `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` + 编辑器上方的任务 widget + `/tasks` 面板，状态持久化在会话文件里（fork/resume 无损恢复）。
+- **任务工具** — `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` + 编辑器上方的任务 widget + `/tasklist` 面板，状态持久化在会话文件里（fork/resume 无损恢复）。
 - **`ask_user` 工具** — 交互式澄清：结构化多选问题（≤4 题批量），TUI/RPC 均支持；多问题缺 header 时自动从问题文本派生标签页标题（超长截断、派生撞车自动加后缀，显式重复 header 仍拒绝；单问题只做 trim/截断，不会凭空补 header）；仅主会话可用（子 agent 会话是 print 模式，注册了也只能返回 headless 错误，因此不对子会话注册）。
 - **飞书通知** — `@notify` 关键词、`/watch`、`/feishu-test` 与结果/汇总/心跳/等待输入卡片（被动触发，无 AI 主动调用面）。完成类通知默认等后台 subagent 与后台 bash 全部空闲才发（`requireBackgroundIdle`，忙时抑制不补发）。
 - **会话导航** — `/resume` 默认只扫最近 48 小时（Tab / `--all` 全量），skill 会话标题清洗、subagent 会话标注 `[sub:类型]`；`/clear` 开新会话；裸 `exit` 直接退出。
@@ -178,7 +178,7 @@ queue_wait → resolve_config → session_create → extension_bind
   "memory": { "enabled": true }, // 项目记忆（注入 + memory 工具 + /mem）
   "hud": { "enabled": true }, // HUD footer；false 还原 pi 内置 footer
   "webSearch": { "enabled": true }, // web_search 工具
-  "todo": { "enabled": true }, // Task* 任务工具 + /tasks
+  "todo": { "enabled": true }, // Task* 任务工具 + /tasklist
   "askUser": { "enabled": true }, // ask_user 交互提问
   "feishuNotify": { "enabled": true }, // 飞书通知卡片（仅主会话）
   "sessionNav": { "enabled": true }, // 会话导航增强
@@ -206,7 +206,7 @@ queue_wait → resolve_config → session_create → extension_bind
 | `/agent costs`          | 按花费降序的逐 run 明细                                       |
 | `/agent settings`       | 交互式设置编辑器                                              |
 | `/mem`                  | 项目记忆：`list` / `path` / `import [--force] [slug\|all]`    |
-| `/tasks`                | 任务列表面板（`/tasks clear` 清空）                           |
+| `/tasklist`             | 任务列表面板（`/tasklist clear` 清空）                        |
 | `/goal`                 | 目标驱动循环（status / pause / resume / clear）               |
 | `/watch`                | 标记本会话，每次任务结束都通知飞书                            |
 | `/pi-hud-refresh`       | git fetch 并刷新 HUD footer                                   |
@@ -222,7 +222,7 @@ queue_wait → resolve_config → session_create → extension_bind
 - `@bluecake/pi-ask-user` → `pi uninstall`；飞书配置 `~/.pi/agent/feishu-notify.json` 原样保留。
 - pi-hud / web-search / pi-claude-todo / session-nav 等散装扩展 → 删除 `~/.pi/agent/extensions/` 下的对应文件/目录。
 
-**残留识别**：pi 对重名命令会加后缀——看到 `/mem:1` `/mem:2`、`/tasks:1` `/tasks:2` 而**裸命令消失**，即说明旧插件仍在加载；同名工具则是 first-wins 静默遮蔽（看工具 description 是否含新能力即可判定生效方）。
+**残留识别**：pi 对重名命令会加后缀——看到 `/mem:1` `/mem:2`、`/tasklist:1` `/tasklist:2` 而**裸命令消失**，即说明旧插件仍在加载；同名工具则是 first-wins 静默遮蔽（看工具 description 是否含新能力即可判定生效方）。
 
 ## 开发
 

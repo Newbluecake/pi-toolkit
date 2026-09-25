@@ -96,7 +96,7 @@ Claude-Code-style cwd-keyed passive memory: every session auto-injects the curre
 
 - **HUD footer** — takes over pi's footer on install (`hud.enabled: false` to restore). Shows pwd/git branch & worktrees, token & cost stats (including live subagent spend), context usage, model & thinking level, LLM timing and generation speed.
 - **`web_search` tool** — Codex / SerpAPI / Bocha / Tavily with automatic failover (retryable errors get exponential backoff, then the next provider), available in main and child sessions; credentials under "Configuration".
-- **Task tools** — `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` + an above-editor task widget + the `/tasks` panel, with state persisted in the session file (fork/resume safe).
+- **Task tools** — `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` + an above-editor task widget + the `/tasklist` panel, with state persisted in the session file (fork/resume safe).
 - **`ask_user` tool** — interactive clarification: structured multiple-choice questions (up to 4 batched), TUI and RPC, works in child sessions.
 - **Feishu notifications** — `@notify` keyword, `/watch`, `/feishu-test`, plus result/summary/heartbeat/waiting-for-input cards (passive triggers only). Completion cards wait for background subagents and background bash to drain first (`requireBackgroundIdle`; suppressed, not deferred, while busy).
 - **Session navigation** — `/resume` scans only the last 48 hours by default (Tab / `--all` for everything), skill-session title cleaning, subagent sessions tagged `[sub:type]`; `/clear` starts a new session; bare `exit` quits.
@@ -181,7 +181,7 @@ User settings: `~/.pi/agent/pi-subagent.json` (the filename keeps its historical
   "memory": { "enabled": true }, // project memory (injection + memory tool + /mem)
   "hud": { "enabled": true }, // HUD footer; false restores pi's built-in footer
   "webSearch": { "enabled": true }, // web_search tool
-  "todo": { "enabled": true }, // Task* tools + /tasks
+  "todo": { "enabled": true }, // Task* tools + /tasklist
   "askUser": { "enabled": true }, // ask_user interactive questions
   "feishuNotify": { "enabled": true }, // Feishu cards (main session only)
   "sessionNav": { "enabled": true }, // session navigation enhancements
@@ -209,7 +209,7 @@ User settings: `~/.pi/agent/pi-subagent.json` (the filename keeps its historical
 | `/agent costs`          | Per-run cost breakdown, most expensive first                                   |
 | `/agent settings`       | Interactive settings editor                                                    |
 | `/mem`                  | Project memory: `list` / `path` / `import [--force] [slug\|all]`               |
-| `/tasks`                | Task list panel (`/tasks clear` to wipe)                                       |
+| `/tasklist`             | Task list panel (`/tasklist clear` to wipe)                                    |
 | `/goal`                 | Objective loop (status / pause / resume / clear)                               |
 | `/watch`                | Watch this session; notify Feishu on every task end                            |
 | `/pi-hud-refresh`       | git fetch and refresh the HUD footer                                           |
@@ -225,7 +225,7 @@ These standalone plugins have been merged into this package one by one. Migratio
 - `@bluecake/pi-ask-user` → `pi uninstall` it; the Feishu config `~/.pi/agent/feishu-notify.json` is preserved.
 - Loose extensions like pi-hud / web-search / pi-claude-todo / session-nav → delete the corresponding files/dirs under `~/.pi/agent/extensions/`.
 
-**Leftover detection**: pi suffixes duplicate command names — seeing `/mem:1` `/mem:2` or `/tasks:1` `/tasks:2` while the **bare command disappears** means an old plugin is still loaded; duplicate tools are first-wins silent shadowing (check the tool description for the new capabilities to tell which one won).
+**Leftover detection**: pi suffixes duplicate command names — seeing `/mem:1` `/mem:2` or `/tasklist:1` `/tasklist:2` while the **bare command disappears** means an old plugin is still loaded; duplicate tools are first-wins silent shadowing (check the tool description for the new capabilities to tell which one won).
 
 ## Development
 

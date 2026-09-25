@@ -80,11 +80,11 @@ async function exec(host: Host, name: string, params: unknown, ctx: ExtensionCon
 }
 
 describe("wireTodo tools", () => {
-  test("registers the five Task* tools, /tasks, and the session hooks", () => {
+  test("registers the five Task* tools, /tasklist, and the session hooks", () => {
     const host = fakePi();
     wireTodo(host.pi);
     expect([...host.tools.keys()].sort()).toEqual(["TaskCreate", "TaskDelete", "TaskGet", "TaskList", "TaskUpdate"]);
-    expect(host.commands.has("tasks")).toBe(true);
+    expect(host.commands.has("tasklist")).toBe(true);
     for (const event of ["session_start", "session_tree", "session_compact", "session_shutdown"]) {
       expect(host.handlers.has(event)).toBe(true);
     }
@@ -223,14 +223,14 @@ describe("wireTodo tools", () => {
     expect(host.widgetCalls.some((call) => call.key === "claude-code-todo" && call.content !== undefined)).toBe(true);
   });
 
-  test("/tasks clear empties the list and persists", async () => {
+  test("/tasklist clear empties the list and persists", async () => {
     const host = fakePi();
     wireTodo(host.pi);
     const ctx = fakeCtx(host);
     await exec(host, "TaskCreate", { subject: "A", description: "do A" }, ctx);
     expect(host.appended).toHaveLength(1);
 
-    const command = host.commands.get("tasks");
+    const command = host.commands.get("tasklist");
     await command?.handler("clear", ctx);
     expect(host.appended).toHaveLength(2);
     expect((host.appended.at(-1)?.data as TodoState).tasks).toHaveLength(0);

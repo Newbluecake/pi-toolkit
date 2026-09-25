@@ -158,7 +158,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/web-search/` — merged web_search tool: Codex/SerpAPI/Bocha/Tavily failover with retry
   policy; credentials from env or `~/.config/pi/web-search.env`; registered pre-guard.
 - `src/todo/` — merged pi-claude-todo: TaskCreate/List/Get/Update/Delete + aboveEditor widget
-  (key `claude-code-todo`, coexists with the fleet widget) + `/tasks`. Persists via the
+  (key `claude-code-todo`, coexists with the fleet widget) + `/tasklist`. Persists via the
   `claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only.
 - `src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`.
   Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`,

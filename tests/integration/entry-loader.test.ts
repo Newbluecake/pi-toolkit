@@ -38,7 +38,7 @@ describe("pi-toolkit extension entry", () => {
     expect(tools).toContain("web_search");
     expect(tools).toContain("TaskCreate");
     const commands = loaded.extensions.flatMap((extension: any) => [...extension.commands.keys()]);
-    for (const name of ["agent", "tasks", "pi-hud-refresh", "watch", "feishu-test", "resume-recent", "clear"]) {
+    for (const name of ["agent", "tasklist", "pi-hud-refresh", "watch", "feishu-test", "resume-recent", "clear"]) {
       expect(commands, `command /${name}`).toContain(name);
     }
   }, 30_000);

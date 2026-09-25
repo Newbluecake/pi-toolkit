@@ -1,7 +1,7 @@
 // Ported from pi-claude-todo (MIT, author is this repository's user) — src/index.ts.
 //
 // Entry contract (merge-plan D6): `wireTodo(pi)` registers the five Task*
-// tools, the `/tasks` command, and the session restore hooks. It does NOT
+// tools, the `/tasklist` command, and the session restore hooks. It does NOT
 // read settings — the `todo.enabled` gate lives at the call site
 // (src/index.ts, assembly package D).
 //
@@ -17,7 +17,7 @@
 // String constants kept verbatim from the standalone plugin (merge-plan D3)
 // so existing session data keeps loading: STATE_ENTRY "claude-code-todo-state"
 // (state.ts), LEGACY_STATUS_KEY "claude-code-todo-status", widget key
-// "claude-code-todo", command `/tasks`.
+// "claude-code-todo", command `/tasklist`.
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -298,8 +298,8 @@ export function wireTodo(pi: ExtensionAPI): void {
     },
   );
 
-  pi.registerCommand("tasks", {
-    description: "Show the Claude Code-style task list, or clear it with /tasks clear",
+  pi.registerCommand("tasklist", {
+    description: "Show the Claude Code-style task list, or clear it with /tasklist clear",
     handler: async (args, ctx) => {
       // TUI gate (revision N5): same rule as restore() — a rpc/child session
       // must never become the widget owner.

@@ -8,7 +8,7 @@ import activate from "../../src/index.js";
 /**
  * plugin-merge wiring (merge-plan D2/D6 + review B1/S6):
  *  1. child sessions (HOST_KEY pre-claimed) still get the merged web_search /
- *     TaskCreate..TaskDelete tools + /tasks — they register BEFORE the guard
+ *     TaskCreate..TaskDelete tools + /tasklist — they register BEFORE the guard
  *     (ask_user does NOT: it is post-guard, so it stays host-session only);
  *  2. the host session additionally gets Agent, /agent and the HUD surface;
  *  3. hud/webSearch/todo gates (settings file) each suppress their surface;
@@ -81,7 +81,7 @@ describe("merged plugins wiring (plugin-merge)", () => {
     const { pi, tools, commands } = fakePi();
     activate(pi);
     for (const name of MERGED_TOOLS) expect(tools.has(name), `tool ${name}`).toBe(true);
-    expect(commands.has("tasks")).toBe(true);
+    expect(commands.has("tasklist")).toBe(true);
     // ask_user is post-guard (host-session only): a subagent must not see a tool
     // that can only ever return the headless error in print mode.
     expect(tools.has("ask_user")).toBe(false);
@@ -101,7 +101,7 @@ describe("merged plugins wiring (plugin-merge)", () => {
     for (const name of MERGED_TOOLS) expect(tools.has(name), `tool ${name}`).toBe(true);
     expect(tools.has("ask_user")).toBe(true);
     expect(tools.has("Agent")).toBe(true);
-    expect(commands.has("tasks")).toBe(true);
+    expect(commands.has("tasklist")).toBe(true);
     expect(commands.has("agent")).toBe(true);
     expect(commands.has("pi-hud-refresh")).toBe(true);
     expect(commands.has("watch")).toBe(true);
@@ -123,7 +123,7 @@ describe("merged plugins wiring (plugin-merge)", () => {
     activate(pi);
     for (const name of MERGED_TOOLS) expect(tools.has(name), `tool ${name}`).toBe(false);
     expect(tools.has("ask_user")).toBe(false);
-    expect(commands.has("tasks")).toBe(false);
+    expect(commands.has("tasklist")).toBe(false);
     expect(commands.has("pi-hud-refresh")).toBe(false);
     expect(commands.has("watch")).toBe(false);
     expect(commands.has("feishu-test")).toBe(false);

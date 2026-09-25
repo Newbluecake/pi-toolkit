@@ -31,7 +31,9 @@ export class TodoWidget implements Component {
     const omitted = allTasks.length - tasks.length;
     if (omitted > 0) {
       const suffix = blocked > 0 ? ` · ${blocked} blocked` : "";
-      lines.push(truncateToWidth(` ${this.theme.fg("dim", `… ${omitted} more${suffix} · /tasks to view all`)}`, width));
+      lines.push(
+        truncateToWidth(` ${this.theme.fg("dim", `… ${omitted} more${suffix} · /tasklist to view all`)}`, width),
+      );
     }
     return lines;
   }
