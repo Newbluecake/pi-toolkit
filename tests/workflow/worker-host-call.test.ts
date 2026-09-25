@@ -432,3 +432,139 @@ describe("real-worker agent() model/thinking opts (per-call overrides)", () => {
     await host.terminate("test-done");
   }, 10_000);
 });
+
+/**
+ * workflow-experts (docs/dev/workflow-experts/plan.md §4.5, N1, §6 test
+ * A#10): the worker-side JS mirror of agent-opts.ts's structural snapshot,
+ * exercised through a REAL sandbox realm — only here can a genuine getter/
+ * Proxy/function object literal be constructed the way a script actually
+ * would. N1's core claim (never `postMessage` an unclonable value, so a
+ * defect is reported *immediately* rather than after HR1's timeout) is
+ * pinned by the elapsed-time assertions below: `hostCallMs` is 3s in this
+ * harness, so anything that resolves in well under a second could not have
+ * gone through the pre-fix DataCloneError-swallowed-by-`send()` path.
+ */
+describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () => {
+  it("a function value on a known key fails immediately (well under HR1's timeout), never waits for a settle", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "unused" }),
+      abort: async () => true,
+      waitAll: async () => ({ settled: [], pending: [] }),
+    };
+    const started = Date.now();
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'try { await agent("x", { label: function () {} }); return "no-reject"; }' +
+          ' catch (e) { return "caught:" + e.message; }',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    const elapsedMs = Date.now() - started;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toContain("caught:");
+    expect(result.returned).toContain("plain object");
+    expect(elapsedMs).toBeLessThan(1_500); // HR1/hostCallMs here is 3_000ms
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("a getter on a known key is rejected without ever being invoked (its side effect never fires)", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "unused" }),
+      abort: async () => true,
+      waitAll: async () => ({ settled: [], pending: [] }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        "const opts = {};\n" +
+          'Object.defineProperty(opts, "model", { enumerable: true, configurable: true, get: function () { throw new Error("getter ran"); } });\n' +
+          'try { await agent("x", opts); return "no-reject"; } catch (e) { return "caught:" + e.message; }',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toContain("caught:");
+    expect(result.returned).not.toContain("getter ran");
+    expect(result.returned).toContain("accessors are not allowed");
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("a real Proxy as the whole opts object is rejected without its traps ever firing", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "unused" }),
+      abort: async () => true,
+      waitAll: async () => ({ settled: [], pending: [] }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'const opts = new Proxy({}, { ownKeys: function () { throw new Error("trap fired"); } });\n' +
+          'try { await agent("x", opts); return "no-reject"; } catch (e) { return "caught:" + e.message; }',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toContain("caught:");
+    expect(result.returned).not.toContain("trap fired");
+    expect(result.returned).toContain("Proxy");
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("a function element inside experts[] is bad_array, immediately, never spawns", async () => {
+    const spawns: unknown[] = [];
+    const spawner: ChildSpawner = {
+      spawn: async (req) => {
+        spawns.push(req);
+        return { runId: "r" };
+      },
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "ok" })),
+        pending: [],
+      }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'try { await agent("x", { experts: [function () {}] }); return "no-reject"; }' +
+          ' catch (e) { return "caught:" + e.message; }',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toContain("caught:");
+    expect(result.returned).toContain("experts");
+    expect(spawns).toHaveLength(0);
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("an unknown key (effort) round-trips fine on the wire but is still rejected — host generates the message", async () => {
+    const spawns: unknown[] = [];
+    const spawner: ChildSpawner = {
+      spawn: async (req) => {
+        spawns.push(req);
+        return { runId: "r" };
+      },
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "ok" })),
+        pending: [],
+      }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'try { await agent("x", { effort: "low" }); return "no-reject"; }' +
+          ' catch (e) { return "caught:" + e.message; }',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toContain("caught:");
+    expect(result.returned).toContain('"effort"');
+    expect(result.returned).toContain("thinking");
+    expect(spawns).toHaveLength(0);
+    await host.terminate("test-done");
+  }, 10_000);
+});

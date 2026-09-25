@@ -1,8 +1,9 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import { THINKING_LEVELS, type Millis, type RunId, type ThinkingLevel, type UsageDelta } from "../core/types.js";
+import type { Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { deriveChildBudget } from "./budget.js";
+import { snapshotAgentOpts, validateAgentOpts, type OptsDefect } from "./agent-opts.js";
 import { createCallRegistry, type CallRegistry } from "./call-registry.js";
 import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf, type JournalStore } from "./journal.js";
 import { decideReplay, type ReplayIndex } from "./replay.js";
@@ -613,40 +614,31 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   async function handleAgent(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
     const a = args as {
       prompt?: unknown;
-      opts?: { label?: unknown; agentType?: unknown; phase?: unknown; model?: unknown; thinking?: unknown } | null;
+      opts?: unknown;
+      /** workflow-experts §4.5: the worker's own structural report on the *original* (pre-snapshot) opts object — absent for a raw envelope posted with no report at all (host.test.ts's direct-envelope harness, or a forged/legacy call). */
+      optsReport?: { unknownKeys?: readonly string[]; defect?: OptsDefect };
     };
     if (typeof a.prompt !== "string") {
       const message = "agent(prompt, opts?): prompt must be a string";
       emitRejected(callId, "admission", "invalid_args", message, displayMetaOfArgs(args));
       return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
-    const opts = a.opts ?? {};
-    const label = typeof opts.label === "string" ? opts.label : undefined;
-    const agentType =
-      typeof opts.agentType === "string" ? opts.agentType : (deps.defaultAgentType ?? DEFAULT_AGENT_TYPE);
-    // agent() model/thinking overrides (Agent-tool `model`/`thinking`
-    // semantics): defense-in-depth against a malformed envelope — the
-    // trusted worker scaffold already rejects a non-string `model` /
-    // out-of-set `thinking` client-side (worker-source.ts), but host.ts
-    // validates the raw envelope for itself exactly like it re-checks
-    // `prompt` above, so a forged host_call can't smuggle a non-string
-    // through to spawn admission.
-    const rawModel = opts.model;
-    if (rawModel !== undefined && typeof rawModel !== "string") {
-      const message = "agent(prompt, opts?): opts.model must be a string";
-      emitRejected(callId, "admission", "invalid_args", message, displayMetaOfArgs(args));
-      return { kind: "host_ack", id: callId, ok: false, error: { message } };
+    // workflow-experts §4.1/§4.4 (D1-D7): strict structural validation of
+    // `opts`. The host takes its own independent snapshot of whatever
+    // actually arrived on the wire (defense-in-depth — a forged/legacy
+    // envelope with no `optsReport` at all must still be caught) and merges
+    // it with the worker's own report of the *original* sandboxed object
+    // (which the worker never forwards verbatim — N1). Either side's defect
+    // wins; `unknownKeys` is the union; the error message is generated once,
+    // here.
+    const validated = validateAgentOpts(snapshotAgentOpts(a.opts), a.optsReport);
+    if (!validated.ok) {
+      emitRejected(callId, "admission", "invalid_args", validated.message, displayMetaOfArgs(args));
+      return { kind: "host_ack", id: callId, ok: false, error: { message: validated.message } };
     }
-    const rawThinking = opts.thinking;
-    const thinkingOverride: ThinkingLevel | undefined =
-      typeof rawThinking === "string" && THINKING_LEVELS.includes(rawThinking as ThinkingLevel)
-        ? (rawThinking as ThinkingLevel)
-        : undefined;
-    if (rawThinking !== undefined && thinkingOverride === undefined) {
-      const message = "agent(prompt, opts?): opts.thinking must be one of 'off' | 'low' | 'medium' | 'high'";
-      emitRejected(callId, "admission", "invalid_args", message, displayMetaOfArgs(args));
-      return { kind: "host_ack", id: callId, ok: false, error: { message } };
-    }
+    const validOpts = validated.opts;
+    const label = validOpts.label;
+    const agentType = validOpts.agentType ?? deps.defaultAgentType ?? DEFAULT_AGENT_TYPE;
     // The Agent tool's own split, reused verbatim (`parseStrictModelRef`, no
     // reimplementation): a strict `provider/id` pair becomes `modelOverride`
     // (existence-checked by spawn admission); anything else stays the raw
@@ -655,24 +647,23 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // two is ever set.
     // Same rule as the Agent tool (agent-tool.ts: `params.model` truthiness): an
     // empty string means "no override", never an empty fuzzy hint.
-    const model = typeof rawModel === "string" && rawModel !== "" ? rawModel : undefined;
+    const model = validOpts.model !== undefined && validOpts.model !== "" ? validOpts.model : undefined;
     const modelOverride = model !== undefined ? parseStrictModelRef(model) : undefined;
     const modelHintOverride = model !== undefined && modelOverride === undefined ? model : undefined;
-    // (thinkingOverride is declared above, alongside its validation guard.)
+    const thinkingOverride = validOpts.thinking;
     // M3.4 §5.2: worker-source.ts already resolved \`opts.phase\` against the
     // script's environment \`phase(title)\` (explicit \`opts.phase\` wins) before
     // this call ever left the sandbox — this handler just records whatever it
     // receives, it never itself falls back to a "current phase" notion (that
     // state lives in \`currentPhaseId\`/\`handlePhase\` above, worker-side only).
-    const phaseId = typeof opts.phase === "string" ? opts.phase : undefined;
+    const phaseId = validOpts.phase;
     // M3.5 RP7 (§6.4): opt-in per-call `isolation:"worktree"` marker — not
     // yet threaded into `ChildSpawner.spawn()` (host.ts doesn't call
     // `SpawnService` directly, WI2), so it has no *live* effect on where the
     // child actually runs today. It exists here purely so the journal
     // records it and RP7 can veto replaying it once a future milestone wires
     // real worktree isolation through `ChildSpawner`.
-    const isolation: "worktree" | undefined =
-      (opts as { isolation?: unknown }).isolation === "worktree" ? "worktree" : undefined;
+    const isolation = validOpts.isolation;
 
     // M3.5 §6.2/§6.4: the replay short-circuit. Computed unconditionally
     // whenever a journal is configured, before any admission-limit checks

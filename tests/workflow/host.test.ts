@@ -1589,3 +1589,58 @@ describe("host.ts: agent() model/thinking overrides (Agent-tool model/thinking s
     expect(h.clock.pendingTimers).toBe(0);
   });
 });
+
+/**
+ * workflow-experts (docs/dev/workflow-experts/plan.md §4.1/§4.4, §6 A): strict
+ * opts validation driven through the real host_call envelope path (no worker
+ * involved — the worker's own JS mirror gets real-`vm` coverage in
+ * worker-host-call.test.ts).
+ */
+describe("host.ts: strict agent() opts validation (workflow-experts §4.1/§4.4)", () => {
+  it("an unknown key on a raw envelope (no optsReport at all — host's own independent re-snapshot) is rejected with the allowed-key list", async () => {
+    const h = harness();
+    await h.boot();
+    h.attach(noopSpawner(), okGate);
+    h.postHostCall("1", "agent", { prompt: "p", opts: { effort: "low" } });
+    await flush();
+    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack.ok).toBe(false);
+    expect(ack.error?.message).toContain('"effort"');
+    expect(ack.error?.message).toContain("allowed:");
+  });
+
+  it("opts: false is rejected as not a plain object (D4 — no longer silently treated as {})", async () => {
+    const h = harness();
+    await h.boot();
+    h.attach(noopSpawner(), okGate);
+    h.postHostCall("1", "agent", { prompt: "p", opts: false });
+    await flush();
+    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack.ok).toBe(false);
+    expect(ack.error?.message).toContain("plain object");
+  });
+
+  it("the worker's own optsReport.defect is honored even when the transited opts object looks fine to the host", async () => {
+    const h = harness();
+    await h.boot();
+    h.attach(noopSpawner(), okGate);
+    h.postHostCall("1", "agent", {
+      prompt: "p",
+      opts: {},
+      optsReport: { defect: { code: "accessor", key: "label" } },
+    });
+    await flush();
+    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack.ok).toBe(false);
+    expect(ack.error?.message).toContain("label");
+  });
+
+  it("an invalid_args rejection never creates a children[] record (admission-stage, same as max_children/BW2)", async () => {
+    const h = harness();
+    await h.boot();
+    const handler = h.attach(noopSpawner(), okGate);
+    h.postHostCall("1", "agent", { prompt: "p", opts: { effort: "low" } });
+    await flush();
+    expect(handler.children).toEqual([]);
+  });
+});

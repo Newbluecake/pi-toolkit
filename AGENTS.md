@@ -253,7 +253,12 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   the old result); workflows share the subagent timeout grace + extension machinery
   (`deadline.ts`: pure deadline controller, `killAt()` bounds host calls/BW2/gate; `extend_subagent_timeout` accepts `wf_…`
   ids — full/prefix/script name — and refuses a workflow's children, which are pinned to the workflow `hardAt`; explicit
-  `timeout_s` is a hard cap). Design: `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`.
+  `timeout_s` is a hard cap). `agent(prompt, opts?)` opts are strictly validated (`agent-opts.ts`: only
+  `label`/`agentType`/`phase`/`fullResult`/`model`/`thinking`/`isolation`/`experts` — any other key, a non-plain-object
+  `opts`, an accessor/Proxy/function-valued known key, or a malformed `experts` array reject with the full allowed-key
+  list and a mistaken-key hint; the worker (`worker-source.ts`) takes its own structural snapshot first and never
+  `postMessage`s an unclonable value — host.ts re-snapshots independently and either side's defect wins). Design:
+  `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md`.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —
   tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor,

@@ -41,12 +41,20 @@
  * out of scope, WK4).
  */
 
+import { AGENT_OPTS_KEYS } from "./agent-opts.js";
+
 /**
  * Returns the worker-thread scaffold source, as CommonJS text suitable for
  * `new Worker(source, { eval: true, workerData, transferList })`.
+ *
+ * workflow-experts (docs/dev/workflow-experts/plan.md §4.5): the placeholder
+ * text below is substituted with `AGENT_OPTS_KEYS`'s JSON form so the worker
+ * and host share one literal list of allowed keys — plain text substitution
+ * (not a template literal `${...}`) so the giant `String.raw\`...\`` body
+ * below stays exactly as `String.raw`-escaping-free as it always was.
  */
 export function buildWorkerSource(): string {
-  return WORKER_SOURCE;
+  return WORKER_SOURCE.replace("__AGENT_OPTS_KEYS_JSON__", JSON.stringify(AGENT_OPTS_KEYS));
 }
 
 const WORKER_SOURCE = String.raw`
@@ -54,6 +62,7 @@ const WORKER_SOURCE = String.raw`
 const vm = require("node:vm");
 const nodeProcess = require("node:process");
 const { workerData } = require("node:worker_threads");
+const { types: utilTypes } = require("node:util");
 
 const commPort = workerData.commPort;
 const heartbeatSab = workerData.heartbeatSab || null;
@@ -160,24 +169,179 @@ function workflowFn() {
   );
 }
 
+// workflow-experts (docs/dev/workflow-experts/plan.md §4.1/§4.5, N1): a JS
+// mirror of agent-opts.ts's structural classification — kept line-for-line
+// equivalent (parity is pinned by tests/workflow/agent-opts.test.ts's shared
+// case table run against both). This runs in the *trusted scaffold* realm
+// (outside vm) against the *sandbox script's* raw opts object, so Object
+// .prototype/Array.prototype identity checks must accept both this
+// realm's own prototypes and the sandbox context's (captured once, right
+// after vm.createContext — see sandboxObjectProto/sandboxArrayProto
+// below). Never invokes a getter (Reflect.getOwnPropertyDescriptor only) and
+// never touches a Proxy's traps (util.types.isProxy first, unconditionally).
+const AGENT_OPTS_KEYS = __AGENT_OPTS_KEYS_JSON__;
+let sandboxObjectProto = null;
+let sandboxArrayProto = null;
+
+function isProxyValue(v) {
+  return typeof v === "object" && v !== null && utilTypes.isProxy(v);
+}
+
+function unsafeValueKind(v) {
+  if (isProxyValue(v)) return "proxy";
+  var t = typeof v;
+  if (t === "function" || t === "symbol") return "unclonable";
+  return undefined;
+}
+
+function describeOptsKind(raw) {
+  if (raw === null) return "null";
+  if (Array.isArray(raw)) return "array";
+  if (typeof raw === "function") return "function";
+  return typeof raw;
+}
+
+function snapshotExpertsValue(value) {
+  if (unsafeValueKind(value) !== undefined) return { defect: { code: "bad_array", key: "experts" } };
+  if (!Array.isArray(value)) return { value: value };
+  var proto;
+  try {
+    proto = Object.getPrototypeOf(value);
+  } catch (e) {
+    return { defect: { code: "bad_array", key: "experts" } };
+  }
+  if (proto === null || (proto !== Array.prototype && proto !== sandboxArrayProto)) {
+    return { defect: { code: "bad_array", key: "experts" } };
+  }
+  var keys;
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch (e) {
+    return { defect: { code: "bad_array", key: "experts" } };
+  }
+  var len = value.length;
+  if (typeof len !== "number" || len < 0 || Math.floor(len) !== len) {
+    return { defect: { code: "bad_array", key: "experts" } };
+  }
+  var expected = { length: true };
+  for (var i = 0; i < len; i++) expected[String(i)] = true;
+  if (keys.length !== len + 1) return { defect: { code: "bad_array", key: "experts" } }; // hole or extra prop
+  for (var j = 0; j < keys.length; j++) {
+    var k = keys[j];
+    if (typeof k !== "string" || !Object.prototype.hasOwnProperty.call(expected, k)) {
+      return { defect: { code: "bad_array", key: "experts" } };
+    }
+  }
+  var items = [];
+  for (var m = 0; m < len; m++) {
+    var d;
+    try {
+      d = Reflect.getOwnPropertyDescriptor(value, String(m));
+    } catch (e) {
+      return { defect: { code: "bad_array", key: "experts" } };
+    }
+    if (!d || d.get || d.set) return { defect: { code: "bad_array", key: "experts" } };
+    if (unsafeValueKind(d.value) !== undefined) return { defect: { code: "bad_array", key: "experts" } };
+    items.push(d.value);
+  }
+  return { value: items };
+}
+
+function snapshotOpts(raw) {
+  if (raw === undefined || raw === null) return { values: {}, unknownKeys: [] };
+  if (isProxyValue(raw)) return { values: {}, unknownKeys: [], defect: { code: "proxy" } };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return { values: {}, unknownKeys: [], defect: { code: "not_plain_object", detail: describeOptsKind(raw) } };
+  }
+  var proto;
+  try {
+    proto = Object.getPrototypeOf(raw);
+  } catch (e) {
+    return { values: {}, unknownKeys: [], defect: { code: "threw" } };
+  }
+  if (proto !== null && proto !== Object.prototype && proto !== sandboxObjectProto) {
+    return { values: {}, unknownKeys: [], defect: { code: "not_plain_object", detail: "unexpected prototype" } };
+  }
+  var keys;
+  try {
+    keys = Reflect.ownKeys(raw);
+  } catch (e) {
+    return { values: {}, unknownKeys: [], defect: { code: "threw" } };
+  }
+  var values = {};
+  var unknownKeys = [];
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var displayKey = typeof key === "symbol" ? "Symbol(" + (key.description || "") + ")" : key;
+    var known = typeof key === "string" && AGENT_OPTS_KEYS.indexOf(key) !== -1;
+    var desc;
+    try {
+      desc = Reflect.getOwnPropertyDescriptor(raw, key);
+    } catch (e) {
+      return { values: {}, unknownKeys: [], defect: { code: "threw", key: displayKey } };
+    }
+    if (!desc) continue;
+    if (desc.get || desc.set) {
+      if (known) return { values: {}, unknownKeys: [], defect: { code: "accessor", key: displayKey } };
+      unknownKeys.push(displayKey);
+      continue;
+    }
+    if (!known) {
+      unknownKeys.push(displayKey);
+      continue;
+    }
+    var value = desc.value;
+    if (value === undefined) continue;
+    if (key === "experts") {
+      var arr = snapshotExpertsValue(value);
+      if (arr.defect) return { values: {}, unknownKeys: [], defect: arr.defect };
+      values.experts = arr.value;
+      continue;
+    }
+    var unsafe = unsafeValueKind(value);
+    if (unsafe) {
+      return {
+        values: {},
+        unknownKeys: [],
+        defect: { code: unsafe === "proxy" ? "proxy" : "not_plain_object", key: key },
+      };
+    }
+    values[key] = value;
+  }
+  return { values: values, unknownKeys: unknownKeys };
+}
+
 function agent(prompt, opts) {
   if (typeof prompt !== "string") return Promise.reject(new TypeError("agent(prompt, opts?): prompt must be a string"));
-  var o = opts || {};
-  // opts.model / opts.thinking (Agent-tool model/thinking semantics) are
-  // forwarded verbatim to the host below — but only after the same style of
-  // client-side type check as prompt: a non-string model or an out-of-set
-  // thinking level is a script defect and rejects synchronously (catchable),
-  // instead of surfacing as an opaque spawn error one round-trip later.
-  if (o.model !== undefined && typeof o.model !== "string")
+  // N1 (review, must hold): the original opts object is NEVER forwarded.
+  // snapshotOpts only reads it through Reflect.ownKeys /
+  // Reflect.getOwnPropertyDescriptor (no getter ever runs) and, on success,
+  // yields values containing only already-safe primitives/strings/arrays
+  // of such — a function/symbol/Proxy anywhere reachable (including inside
+  // experts) instead produces a defect and values stays {}. Only
+  // values (plus the computed phase) is ever handed to callHost, so a
+  // postMessage DataCloneError from an unclonable opts value is now
+  // structurally impossible — the defect is reported instead, immediately,
+  // synchronously, without ever waiting on HR1.
+  var snap = snapshotOpts(opts);
+  var v = snap.values;
+  // Client-side fast-fail wording kept byte-identical to before this change
+  // (existing tests pin it) — skipped when a structural defect already means
+  // v carries nothing to check.
+  if (!snap.defect && v.model !== undefined && typeof v.model !== "string")
     return Promise.reject(new TypeError("agent(prompt, opts?): opts.model must be a string"));
-  if (o.thinking !== undefined && ["off", "low", "medium", "high"].indexOf(o.thinking) === -1)
+  if (!snap.defect && v.thinking !== undefined && ["off", "low", "medium", "high"].indexOf(v.thinking) === -1)
     return Promise.reject(
       new TypeError("agent(prompt, opts?): opts.thinking must be one of 'off' | 'low' | 'medium' | 'high'"),
     );
-  var fullResult = o.fullResult === true;
-  var effectivePhase = typeof o.phase === "string" ? o.phase : currentPhase;
-  var mergedOpts = effectivePhase !== undefined ? Object.assign({}, o, { phase: effectivePhase }) : o;
-  return callHost("agent", { prompt: prompt, opts: mergedOpts }, hostCallMs).then(function (ack) {
+  var fullResult = v.fullResult === true;
+  var effectivePhase = typeof v.phase === "string" ? v.phase : currentPhase;
+  var sentOpts = {};
+  for (var sk in v) if (Object.prototype.hasOwnProperty.call(v, sk)) sentOpts[sk] = v[sk];
+  if (effectivePhase !== undefined) sentOpts.phase = effectivePhase;
+  var optsReport = { unknownKeys: snap.unknownKeys };
+  if (snap.defect) optsReport.defect = snap.defect;
+  return callHost("agent", { prompt: prompt, opts: sentOpts, optsReport: optsReport }, hostCallMs).then(function (ack) {
     return waitForSettle(ack.callId, ack.deadlineAt);
   }).then(function (outcome) {
     // M3.6 (§5.2 budget.spent()): accumulate before resolving to the script,
@@ -516,6 +680,18 @@ function run() {
   let ctx;
   try {
     ctx = vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });
+  } catch (err) {
+    send({ kind: "script_threw", message: serializeError(err).message, stack: serializeError(err).stack });
+    return;
+  }
+  // workflow-experts §4.5 (D2): the sandbox realm has its own Object
+  // .prototype/Array.prototype, distinct from the scaffold's — captured
+  // once here so snapshotOpts/snapshotExpertsValue (which run in the
+  // *scaffold* realm against the *script's* opts object) can recognize a
+  // plain object/array literal the script wrote as such.
+  try {
+    sandboxObjectProto = vm.runInContext("Object.prototype", ctx);
+    sandboxArrayProto = vm.runInContext("Array.prototype", ctx);
   } catch (err) {
     send({ kind: "script_threw", message: serializeError(err).message, stack: serializeError(err).stack });
     return;
