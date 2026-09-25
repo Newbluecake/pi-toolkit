@@ -386,6 +386,52 @@ describe("wireConsult.resolveExperts: opt-in completedOnly (workflow-experts §4
     const result = w.resolveExperts(["main"], { completedOnly: true });
     expect(result.refs[0]).toMatchObject({ runId: "main" });
   });
+
+  it("completedOnly:true rejects a timed_out run", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_TIMEOUT01",
+          status: "timed_out",
+          label: "slowpoke",
+          agentType: "worker",
+          sessionFile: newExpertFile,
+        }),
+      ],
+    });
+    expect(() => w.resolveExperts(["slowpoke"], { completedOnly: true })).toThrow(
+      /its run ended as timed_out \(workflow experts must be completed runs\)/,
+    );
+  });
+
+  it("completedOnly:true rejects a completed run that has no persisted session", () => {
+    const w = wiring({
+      live: [snapshot({ runId: "r_NOSESS001", status: "completed", label: "nosess", agentType: "worker" })],
+    });
+    // By run_id: the id path reaches the per-run check (a label lookup already filters out
+    // session-less runs and fails earlier with "no finished run with a persisted session").
+    expect(() => w.resolveExperts(["r_NOSESS001"], { completedOnly: true })).toThrow(/has no persisted session/);
+    expect(() => w.resolveExperts(["nosess"], { completedOnly: true })).toThrow(
+      /no finished run with a persisted session/,
+    );
+  });
+
+  it("completedOnly:true rejects a completed run whose session file was deleted", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_DELETED01",
+          status: "completed",
+          label: "deleted",
+          agentType: "worker",
+          sessionFile: join(tmp, "deleted-after-completion.jsonl"),
+        }),
+      ],
+    });
+    expect(() => w.resolveExperts(["deleted"], { completedOnly: true })).toThrow(
+      /its session file no longer exists on disk/,
+    );
+  });
 });
 
 describe('wireConsult.resolveExperts: the reserved "main" expert id (§16)', () => {
