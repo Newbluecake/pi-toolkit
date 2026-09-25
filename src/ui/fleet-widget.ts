@@ -142,12 +142,18 @@ export interface FleetWidgetRenderOptions {
 
 /** M11: one phase chip of a workflow's pipeline chain (structurally the registry's WorkflowPhaseActivity). */
 export interface WorkflowPhaseChip {
+  /** Visit display id — the bare phase name (`draft`) or a re-entry (`draft#2`). */
   readonly id: string;
+  /** The original phase name — present only on repeat visits (`id !== name`). */
+  readonly name?: string;
   readonly state: "pending" | "active" | "draining" | "done";
   readonly spawned: number;
+  /** Live settles — replay hits are tallied in `replayed`, so `settled/spawned` stays a live-only fraction. */
   readonly settled: number;
   /** Settled children with status !== "completed" — renders the chip as ✗ (crit). */
   readonly failed: number;
+  /** Journal-replay hits settled into this visit — renders the `↩ N` suffix. */
+  readonly replayed: number;
 }
 
 /** M11: a just-settled workflow child still inside the terminal-linger window. */
@@ -155,6 +161,8 @@ export interface WorkflowDoneChild {
   readonly label: string;
   readonly ok: boolean;
   readonly durationMs: Millis;
+  /** Replay hits (`↩ label replay`) have no duration and never render ✓/✗ — they were free. */
+  readonly source: "live" | "replay";
 }
 
 /** M9/M11: one workflow's header + pipeline data (controller maps the registry snapshot; elapsed is precomputed and frozen at terminal). */
@@ -166,6 +174,8 @@ export interface WorkflowGroupInput {
   readonly budgetMs?: number;
   /** Phase chain chips; empty/absent → no chain line (a workflow with neither planned nor entered phases stays one simple header). */
   readonly phases?: readonly WorkflowPhaseChip[];
+  /** M12: visits collapsed off the chain head past the registry's visit cap — the chain renders `…+N` in front. */
+  readonly collapsedVisits?: number;
   /** Children settled completed (workflow-level totals — implicit-phase children count here too). */
   readonly doneTotal: number;
   /** Children settled non-completed. */
@@ -197,11 +207,44 @@ export function compactPhaseLabel(label: string): string {
     // Keep a visible separator before the attempt counter. The recycle mark
     // is rendered as an emoji in some terminals (two columns), so `♻1/3`
     // can visually collide even though its string width looks correct.
-    const rest = label.slice(emoji.length).replace(/^重试/, "");
+    // phaseLabel now writes `♻ 重试…`; the space-bearing form must be
+    // stripped too (legacy space-less inputs keep working).
+    const rest = label.slice(emoji.length).replace(/^ ?重试/, "");
     return rest ? `${emoji} ${rest}` : emoji;
   }
   if (!/^(?:🧠|💭|🤔|💡|⏸|⚡|🔧|🗜|⏹)/u.test(label)) return label;
   return emoji;
+}
+
+// ── Wide-risk glyphs (defense against emoji-terminal column overlap) ───────
+
+/**
+ * BMP symbols with an emoji-presentation variant: pi-tui's `visibleWidth`
+ * counts them as 1 column, but many terminals render them 2 wide — the
+ * character glued right after them gets covered. (⚡⏳🔧🧠💭🤔💡 are
+ * counted as 2 by visibleWidth already; ✓✗▸○⧗→⎇ have no emoji variant.)
+ * UI copy must follow each of these with a space or end the line — enforced
+ * by `findGlyphCollisions` in tests.
+ */
+export const WIDE_RISK_GLYPHS = ["⚙", "⚠", "↩", "♻", "⏸", "⏹", "🗜"] as const;
+
+/**
+ * Offending fragments of a (plain, uncolored) line: every wide-risk glyph —
+ * optionally followed by U+FE0F — must be followed by a space or the end of
+ * the line. Returns e.g. `["⚠2"]` for `"⚠2 active"`; empty = safe to render.
+ */
+export function findGlyphCollisions(line: string): string[] {
+  const collisions: string[] = [];
+  const codePoints = [...line];
+  const risky = new Set<string>(WIDE_RISK_GLYPHS);
+  for (let i = 0; i < codePoints.length; i += 1) {
+    const cp = codePoints[i]!;
+    if (!risky.has(cp)) continue;
+    const vs16 = codePoints[i + 1] === "\uFE0F";
+    const next = codePoints[i + (vs16 ? 2 : 1)];
+    if (next !== undefined && next !== " ") collisions.push(`${cp}${vs16 ? "\uFE0F" : ""}${next}`);
+  }
+  return collisions;
 }
 
 /** The run's distance to its effective deadline: `⏳12m` (with `+N` when
@@ -320,23 +363,29 @@ function widgetTerminalDetail(row: FleetRow, width: number): string {
 /** Braille spinner frames for the active phase chip; the frame index arrives as a parameter so the builder stays pure. */
 export const PHASE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 
-const PHASE_CHAIN_SEP = " ━━▶ ";
+/** Compact arrow separator (visible width 3) — the old ` ━━▶ ` (5) ate too much of narrow chains. */
+const PHASE_CHAIN_SEP = " → ";
 
 function phaseChipText(chip: WorkflowPhaseChip, frame: string): string {
   const name = chip.id.replace(/\s+/g, " ").trim() || "?";
+  // The fraction is live-only (`settled` counts live settles; replay hits carry
+  // no spawn) and replay hits ride along as `↩ N` — the space is mandatory:
+  // ↩ is a wide-risk glyph whose digits would overlap it in emoji terminals.
   const counts = chip.spawned > 0 ? ` ${chip.settled}/${chip.spawned}` : "";
-  if (chip.state === "done") return `${chip.failed > 0 ? "✗" : "✓"} ${name}${counts}`;
-  if (chip.state === "active") return `${frame} ${name}${counts}`;
+  const replay = chip.replayed > 0 ? ` ↩ ${chip.replayed}` : "";
+  if (chip.state === "done") return `${chip.failed > 0 ? "✗" : "✓"} ${name}${counts}${replay}`;
+  if (chip.state === "active") return `${frame} ${name}${counts}${replay}`;
   // Left behind by the script but children still running: progress, never ✓.
-  if (chip.state === "draining") return `▸ ${name}${counts}`;
+  if (chip.state === "draining") return `▸ ${name}${counts}${replay}`;
   return `○ ${name}`;
 }
 
 /**
- * M11: the phase chain line — `✓ done n/n ━━▶ ⠹ active settled/spawned ━━▶ ○ pending`,
- * joined by ` ━━▶ `. Coloring: done+clean = success, done-with-failures = ✗ crit
- * (the only mandatory tone), pending = muted, active = plain (the moving
- * spinner separates it from the muted tail without another color).
+ * M11: the phase chain line — `✓ done n/n → ⠹ active settled/spawned → ○ pending`,
+ * joined by ` → ` (M12: the short arrow). Coloring: done+clean = success,
+ * done-with-failures = ✗ crit (the only mandatory tone), pending = muted,
+ * active = plain (the moving spinner separates it from the muted tail
+ * without another color).
  * Returns undefined when there is no chain to draw (no planned and no entered
  * phase — the header then stays as simple as before M11).
  *
@@ -344,17 +393,20 @@ function phaseChipText(chip: WorkflowPhaseChip, frame: string): string {
  * glance must land on) and grows outward while the line fits; whatever falls
  * off either side collapses to a single `…` chip. Without an active chip
  * (frozen terminal snapshot / never started) the anchor is the last done
- * chip, else the head.
+ * chip, else the head. `collapsedVisits` (registry visit-cap drops) renders
+ * as `…+N` in front — once set, the head marker absorbs the truncated-left
+ * chips into its count (both mean "more visits before the window").
  */
 export function workflowPhaseChainLine(
   phases: readonly WorkflowPhaseChip[],
-  opts: { width?: number; color?: FleetColorize; frame?: number } = {},
+  opts: { width?: number; color?: FleetColorize; frame?: number; collapsedVisits?: number } = {},
 ): string | undefined {
   if (phases.length === 0) return undefined;
   const color = opts.color ?? ((_tone, text) => text);
   const frameIndex = Math.trunc(Math.abs(opts.frame ?? 0)) % PHASE_SPINNER_FRAMES.length;
   const frame = PHASE_SPINNER_FRAMES[frameIndex] ?? PHASE_SPINNER_FRAMES[0]!;
   const width = Math.max(4, opts.width ?? 120);
+  const collapsed = Math.max(0, Math.trunc(opts.collapsedVisits ?? 0));
   const texts = phases.map((chip) => {
     const text = phaseChipText(chip, frame);
     if (chip.state === "done") return color(chip.failed > 0 ? "crit" : "success", text);
@@ -365,12 +417,15 @@ export function workflowPhaseChainLine(
   const sepWidth = visibleWidth(PHASE_CHAIN_SEP);
   const activeIdx = phases.findIndex((chip) => chip.state === "active");
   const anchor = activeIdx >= 0 ? activeIdx : phases.some((chip) => chip.state === "done") ? phases.length - 1 : 0;
+  const headMarker = (lo: number): string | undefined =>
+    collapsed > 0 ? `…+${collapsed + lo}` : lo > 0 ? "…" : undefined;
   const windowFits = (lo: number, hi: number): boolean => {
     let total = 0;
     for (let i = lo; i <= hi; i++) total += widths[i]!;
     total += (hi - lo) * sepWidth;
-    if (lo > 0) total += sepWidth + 1; // `…` chip + separator
-    if (hi < phases.length - 1) total += sepWidth + 1;
+    const head = headMarker(lo);
+    if (head !== undefined) total += sepWidth + visibleWidth(head);
+    if (hi < phases.length - 1) total += sepWidth + 1; // `…` chip + separator
     return total <= width;
   };
   let lo = anchor;
@@ -389,7 +444,8 @@ export function workflowPhaseChainLine(
     if (!grew) break;
   }
   const parts: string[] = [];
-  if (lo > 0) parts.push("…");
+  const head = headMarker(lo);
+  if (head !== undefined) parts.push(head);
   for (let i = lo; i <= hi; i++) parts.push(texts[i]!);
   if (hi < phases.length - 1) parts.push("…");
   return parts.join(PHASE_CHAIN_SEP);
@@ -403,12 +459,22 @@ function workflowTerminalIcon(wf: WorkflowGroupInput): "✓" | "✗" {
   return wf.failedTotal > 0 ? "✗" : "✓";
 }
 
+/** M12: the terminal cause as a plain English token appended to the frozen header (` · timed out`). */
+function terminalReasonText(status: string): string | undefined {
+  if (status === "timed_out") return "timed out";
+  if (status === "aborted") return "aborted";
+  if (status === "failed") return "failed";
+  return undefined; // "completed" and unknown statuses add nothing
+}
+
 /**
  * M11: the workflow header — `⚙ name · elapsed / budget · ✓n ✗n ▸n`. The budget
  * segment only appears when a deadline was declared; ✗ is omitted at zero
  * and the whole counts segment stays hidden while nothing has happened yet
- * (✓0 ▸0 is noise). Terminal (frozen) workflows swap ⚙ for ✓/✗ and render the
- * whole line muted. UI-text rule: compact inline markers, English tokens only.
+ * (✓0 ▸0 is noise). Terminal (frozen) workflows swap ⚙ for ✓/✗, render the
+ * whole line muted, and (M12) name their cause — ` · timed out` / ` · aborted`
+ * / ` · failed`; `completed` and unknown statuses add nothing. UI-text rule:
+ * compact inline markers, English tokens only.
  */
 export function workflowHeaderLine(wf: WorkflowGroupInput, color: FleetColorize): string {
   const icon = wf.terminal === undefined ? "⚙" : workflowTerminalIcon(wf);
@@ -421,6 +487,10 @@ export function workflowHeaderLine(wf: WorkflowGroupInput, color: FleetColorize)
   const segments = [wf.name, time];
   const countsText = counts.join(" ");
   if (countsText !== "") segments.push(countsText);
+  if (wf.terminal !== undefined) {
+    const reason = terminalReasonText(wf.terminal.status);
+    if (reason !== undefined) segments.push(reason);
+  }
   return color(wf.terminal === undefined ? "header" : "muted", `${icon} ${segments.join(" · ")}`);
 }
 
@@ -439,6 +509,9 @@ export function workflowGroupInput(snap: WorkflowActivitySnapshot, now: number, 
       ? { budgetMs: snap.deadlineAt - snap.startedAt }
       : {}),
     phases: [...snap.phases],
+    ...(snap.collapsedVisits !== undefined && snap.collapsedVisits > 0
+      ? { collapsedVisits: snap.collapsedVisits }
+      : {}),
     doneTotal: snap.completedTotal,
     failedTotal: Math.max(0, snap.settledTotal - snap.completedTotal),
     activeTotal: snap.activeChildren.length,
@@ -448,6 +521,7 @@ export function workflowGroupInput(snap: WorkflowActivitySnapshot, now: number, 
         label: child.label ?? child.callId,
         ok: child.status === "completed",
         durationMs: child.durationMs,
+        source: child.source,
       })),
     ...(snap.terminal !== undefined ? { terminal: { status: snap.terminal.status } } : {}),
   };
@@ -611,13 +685,17 @@ export function buildFleetWidgetLines(
             width: Math.max(6, width - 2),
             color,
             ...(opts.frame !== undefined ? { frame: opts.frame } : {}),
+            ...(wf.collapsedVisits !== undefined ? { collapsedVisits: wf.collapsedVisits } : {}),
           });
     if (chain !== undefined) entries.push({ header: `  ${chain}` });
     for (const row of grouped.get(wf.workflowId) ?? []) entries.push({ row, indent: "↳ " });
     for (const child of wf.recentSettled ?? []) {
       const label = truncateToWidth(child.label, Math.max(8, width - 16));
       entries.push({
-        settled: color("muted", `    ${child.ok ? "✓" : "✗"} ${label} ${formatDuration(child.durationMs)}`),
+        settled:
+          child.source === "replay"
+            ? color("muted", `    ↩ ${label} replay`) // journal hit: no ✓/✗, no fake duration
+            : color("muted", `    ${child.ok ? "✓" : "✗"} ${label} ${formatDuration(child.durationMs)}`),
       });
     }
   }

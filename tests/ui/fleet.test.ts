@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { RunDiagnostics, RunSnapshot, UsageDelta } from "../../src/core/types.js";
+import type { RunDiagnostics, RunPhase, RunSnapshot, UsageDelta } from "../../src/core/types.js";
 import {
   buildFleetViewModel,
   escalationSummary,
@@ -13,6 +13,7 @@ import {
   thinkingFrame,
   worktreeMarker,
 } from "../../src/ui/fleet-panel.js";
+import { findGlyphCollisions } from "../../src/ui/fleet-widget.js";
 
 function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
   return {
@@ -180,6 +181,35 @@ describe("view-model: animated thinking label (emoji frame cycle)", () => {
   it("buildFleetViewModel rows carry the animated label for the view's now", () => {
     const model = buildFleetViewModel([snapshot()], { now: 13_000 });
     expect(model.rows[0]!.phaseLabel).toBe("💭思考"); // 13 % 4 = 1
+  });
+
+  it("M12: every phaseLabel return value is wide-risk-collision-free (⏸ ♻ 🗜 ⏹ carry a space; ⚡🔧🧠💭🤔💡 are true width 2)", () => {
+    const phases: RunPhase[] = [
+      "queue_wait",
+      "resolve_config",
+      "session_create",
+      "extension_bind",
+      "prompt_dispatch",
+      "model_turn",
+      "tool_exec",
+      "retry_backoff",
+      "compaction",
+      "abort_grace",
+      "reap",
+      "settled",
+    ];
+    const retry = { attempt: 2, maxAttempts: 3, delayMs: 100, startedAt: 0 } as const;
+    for (const phase of phases) {
+      for (const label of [phaseLabel(phase), phaseLabel(phase, undefined, 13_000), phaseLabel(phase, { retry })]) {
+        expect(findGlyphCollisions(label), `${phase}: ${label}`).toEqual([]);
+      }
+    }
+    // the spaced forms are the expected output for the risk glyphs
+    expect(phaseLabel("queue_wait")).toBe("⏸ 排队");
+    expect(phaseLabel("compaction")).toBe("🗜 压缩");
+    expect(phaseLabel("abort_grace")).toBe("⏹ 停止中");
+    expect(phaseLabel("retry_backoff", { retry })).toBe("♻ 重试2/3");
+    expect(phaseLabel("retry_backoff")).toBe("♻ 重试");
   });
 });
 

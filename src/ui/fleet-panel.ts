@@ -55,7 +55,7 @@ export interface FleetRow {
   streamLine: string | undefined;
   /** M-C: parent link for tree grouping in the widget (undefined = top-level). */
   parentRunId: RunId | undefined;
-  /** M11: human-friendly phase label (🧠思考 / 🔧工具 / ♻重试2/3 …) for presentation surfaces.
+  /** M11: human-friendly phase label (🧠思考 / 🔧工具 / ♻ 重试2/3 …) for presentation surfaces.
    *  The thinking label is ANIMATED when built with a `now` (see phaseLabel): the icon cycles
    *  through width-stable emoji frames (🧠思考 → 💭思考 → 🤔思考 → 💡思考 → …), one frame per
    *  second of wall time, so the 1Hz widget/panel tick reads as a live indicator. */
@@ -160,7 +160,7 @@ export function thinkingFrame(now: Millis): string {
 export function phaseLabel(phase: RunPhase, diag?: Pick<RunDiagnostics, "retry">, now?: Millis): string {
   switch (phase) {
     case "queue_wait":
-      return "⏸排队";
+      return "⏸ 排队";
     case "resolve_config":
     case "session_create":
     case "extension_bind":
@@ -171,12 +171,15 @@ export function phaseLabel(phase: RunPhase, diag?: Pick<RunDiagnostics, "retry">
     case "tool_exec":
       return "🔧工具";
     case "retry_backoff":
-      return diag?.retry ? `♻重试${diag.retry.attempt}/${diag.retry.maxAttempts}` : "♻重试";
+      // ⏸⏹🗜♻ are wide-risk glyphs (visibleWidth 1, emoji terminals render 2):
+      // the trailing space keeps the CJK suffix off the glyph's second column.
+      // ⚡🔧 and the thinking frames are width-2 already and stay compact.
+      return diag?.retry ? `♻ 重试${diag.retry.attempt}/${diag.retry.maxAttempts}` : "♻ 重试";
     case "compaction":
-      return "🗜压缩";
+      return "🗜 压缩";
     case "abort_grace":
     case "reap":
-      return "⏹停止中";
+      return "⏹ 停止中";
     case "settled":
       return "已结束";
   }

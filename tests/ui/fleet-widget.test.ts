@@ -14,6 +14,7 @@ import {
   compactPhaseLabel,
   FLEET_WIDGET_KEY,
   FleetWidgetController,
+  findGlyphCollisions,
   formatWidgetCost,
   formatLogSize,
   bashJobHighlight,
@@ -255,6 +256,14 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(compactPhaseLabel("♻重试1/5")).toBe("♻ 1/5");
     expect(compactPhaseLabel("♻重试")).toBe("♻");
     expect(compactPhaseLabel("🤔思考")).toBe("🤔");
+    // M12: phaseLabel now writes a space after the wide-risk glyphs — the
+    // spaced forms must compact identically (legacy space-less still works).
+    expect(compactPhaseLabel("⏸ 排队")).toBe("⏸");
+    expect(compactPhaseLabel("⏹ 停止中")).toBe("⏹");
+    expect(compactPhaseLabel("🗜 压缩")).toBe("🗜");
+    expect(compactPhaseLabel("♻ 重试2/3")).toBe("♻ 2/3");
+    expect(compactPhaseLabel("♻️ 重试2/3")).toBe("♻️ 2/3");
+    expect(compactPhaseLabel("♻ 重试")).toBe("♻");
     // Non-emoji phase labels pass through untouched.
     expect(compactPhaseLabel("等待中")).toBe("等待中");
   });
@@ -1346,14 +1355,17 @@ describe("worktree isolation marker rendering (X1)", () => {
   });
 });
 
+const wfChip = (
+  id: string,
+  state: "pending" | "active" | "draining" | "done",
+  spawned = 0,
+  settled = 0,
+  failed = 0,
+  replayed = 0,
+): WorkflowPhaseChip => ({ id, state, spawned, settled, failed, replayed });
+
 describe("M11: workflow pipeline view", () => {
-  const chip = (
-    id: string,
-    state: "pending" | "active" | "draining" | "done",
-    spawned = 0,
-    settled = 0,
-    failed = 0,
-  ): WorkflowPhaseChip => ({ id, state, spawned, settled, failed });
+  const chip = wfChip;
 
   it("renders header with budget + counts and the phase chain under it (✗0 omitted, frame picks the spinner glyph)", () => {
     const model = buildFleetViewModel([], OPTS);
@@ -1373,7 +1385,7 @@ describe("M11: workflow pipeline view", () => {
       ],
     })!;
     expect(lines[1]).toBe("⚙ wf-smoke-test · 42s / 10m00s · ✓3 ▸2");
-    expect(lines[2]).toBe("  ✓ scan 2/2 ━━▶ ⠹ summarize 1/3 ━━▶ ○ report");
+    expect(lines[2]).toBe("  ✓ scan 2/2 → ⠹ summarize 1/3 → ○ report");
   });
 
   it("no chain line when there are no phases at all (planned empty, never entered) — header stays simple", () => {
@@ -1449,11 +1461,11 @@ describe("M11: workflow pipeline view", () => {
       [chip("scan", "draining", 2, 1), chip("summarize", "active", 1), chip("report", "pending")],
       { frame: 0, color },
     );
-    expect(line).toBe("▸ scan 1/2 ━━▶ ⠋ summarize 0/1 ━━▶ ○ report");
+    expect(line).toBe("▸ scan 1/2 → ⠋ summarize 0/1 → ○ report");
     expect(seen.some((s) => s.includes("scan"))).toBe(false); // plain: no success tone for an unfinished phase
   });
 
-  it("chain truncation keeps the active chip and collapses the sides to …", () => {
+  it("chain truncation keeps the active chip and collapses the sides to … (short arrow: sep width 3)", () => {
     const phases = [
       chip("alpha", "done", 1, 1),
       chip("beta", "done", 1, 1),
@@ -1461,18 +1473,45 @@ describe("M11: workflow pipeline view", () => {
       chip("delta", "pending"),
       chip("epsilon", "pending"),
     ];
-    // chips are 7+6+11+7+9 wide, sep 5: full chain = 40 + 4×5 = 60.
-    // width 36 → window [gamma..delta]: 11+7+5 + two … sides (6+6) = 35 fits, beta side (40) does not
-    expect(workflowPhaseChainLine(phases, { width: 36, frame: 0 })).toBe("… ━━▶ ⠋ gamma 1/2 ━━▶ ○ delta ━━▶ …");
-    // width 24 → the active chip alone (with … sides): 11 + 6 + 6 = 23 fits, either neighbor does not
-    expect(workflowPhaseChainLine(phases, { width: 24, frame: 0 })).toBe("… ━━▶ ⠋ gamma 1/2 ━━▶ …");
+    // chips are 11+10+11+7+9 wide, sep 3: full chain = 48 + 4×3 = 60.
+    // width 30 → window [gamma..delta]: 11+7+3 = 21 + two … sides (4+4) = 29 fits, beta side (28+6+4+4=42) does not
+    expect(workflowPhaseChainLine(phases, { width: 30, frame: 0 })).toBe("… → ⠋ gamma 1/2 → ○ delta → …");
+    // width 37 → single-sided: [gamma..epsilon] = 27+6+4 = 37 fits, [beta..epsilon] = 37+9+4 = 50 does not
+    expect(workflowPhaseChainLine(phases, { width: 37, frame: 0 })).toBe("… → ⠋ gamma 1/2 → ○ delta → ○ epsilon");
     // very narrow: even the anchored window overflows → the anchor chip itself is truncated
     expect(visibleWidth(workflowPhaseChainLine(phases, { width: 8, frame: 0 })!)).toBeLessThanOrEqual(8);
-    // wide enough → whole chain, no ellipses (full width: 11+10+11+7+9 + 4×5 = 68)
-    expect(workflowPhaseChainLine(phases, { width: 68, frame: 0 })).toBe(
-      "✓ alpha 1/1 ━━▶ ✓ beta 1/1 ━━▶ ⠋ gamma 1/2 ━━▶ ○ delta ━━▶ ○ epsilon",
+    // wide enough → whole chain, no ellipses (full width: 48 + 4×3 = 60)
+    expect(workflowPhaseChainLine(phases, { width: 60, frame: 0 })).toBe(
+      "✓ alpha 1/1 → ✓ beta 1/1 → ⠋ gamma 1/2 → ○ delta → ○ epsilon",
     );
     expect(workflowPhaseChainLine([], { width: 40 })).toBeUndefined();
+  });
+
+  it("replay-only chips render `✓ name ↩ N` — no fraction, since replay hits carry no spawn", () => {
+    const line = workflowPhaseChainLine([chip("gather", "done", 0, 0, 0, 3), chip("analyze", "active", 1, 0, 0, 0)], {
+      frame: 2,
+    });
+    expect(line).toBe("✓ gather ↩ 3 → ⠹ analyze 0/1");
+  });
+
+  it("mixed chips keep the live-only fraction and append the replay tally: `✓ x 2/2 ↩ 1`", () => {
+    // settled counts live settles only — the fraction stays `live settled/live spawned`
+    const line = workflowPhaseChainLine([chip("x", "done", 2, 2, 0, 1)], { frame: 0 });
+    expect(line).toBe("✓ x 2/2 ↩ 1");
+    const draining = workflowPhaseChainLine([chip("y", "draining", 2, 1, 0, 1)], { frame: 0 });
+    expect(draining).toBe("▸ y 1/2 ↩ 1");
+  });
+
+  it("collapsedVisits renders `…+N` at the chain head and absorbs left-truncated chips into the count", () => {
+    const phases = [chip("a", "done", 1, 1), chip("b", "done", 1, 1), chip("c", "active", 1)];
+    // whole chain fits → the marker names just the dropped visits
+    expect(workflowPhaseChainLine(phases, { width: 120, frame: 0, collapsedVisits: 2 })).toBe(
+      "…+2 → ✓ a 1/1 → ✓ b 1/1 → ⠋ c 0/1",
+    );
+    // narrow window hides a+b on the left → they join the dropped count (…+4), never a second ellipsis
+    expect(workflowPhaseChainLine(phases, { width: 22, frame: 0, collapsedVisits: 2 })).toBe("…+4 → ⠋ c 0/1");
+    // no collapsed visits, no truncation → no marker at all
+    expect(workflowPhaseChainLine(phases, { width: 120, frame: 0 })).toBe("✓ a 1/1 → ✓ b 1/1 → ⠋ c 0/1");
   });
 
   it("recent settled children render as muted rows after the workflow's active rows, within the leftover budget only", () => {
@@ -1496,8 +1535,8 @@ describe("M11: workflow pipeline view", () => {
       activeTotal: 2,
       phases: [chip("scan", "done", 2, 2), chip("summarize", "active", 2, 1)],
       recentSettled: [
-        { label: "wf-sum-background", ok: true, durationMs: 8_000 },
-        { label: "wf-sum-config", ok: false, durationMs: 3_500 },
+        { label: "wf-sum-background", ok: true, durationMs: 8_000, source: "live" as const },
+        { label: "wf-sum-config", ok: false, durationMs: 3_500, source: "live" as const },
       ],
     };
     // both active children's identity rows consume maxRows=2 → settled rows hidden
@@ -1509,11 +1548,39 @@ describe("M11: workflow pipeline view", () => {
     // leftover budget present → settled rows appear under the workflow, after its active rows
     const lines = buildFleetWidgetLines(model, { maxRows: 4, workflows: [base] })!;
     expect(lines[1]).toBe("⚙ wf-smoke-test · 42s · ✓3 ✗1 ▸2");
-    expect(lines[2]).toBe("  ✓ scan 2/2 ━━▶ ⠋ summarize 1/2");
+    expect(lines[2]).toBe("  ✓ scan 2/2 → ⠋ summarize 1/2");
     expect(lines[3]).toContain("↳ wf-sum-journal");
     expect(lines[4]).toContain("↳ wf-sum-log");
     expect(lines[5]).toBe("    ✓ wf-sum-background 8s");
     expect(lines[6]).toBe("    ✗ wf-sum-config 3s");
+  });
+
+  it("replay-settled children render `↩ label replay` (muted, no ✓/✗, no fake duration)", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      frame: 2,
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "nightly-audit",
+          elapsedMs: 4_000,
+          doneTotal: 2,
+          failedTotal: 1,
+          activeTotal: 1,
+          phases: [chip("gather", "done", 0, 0, 0, 3), chip("analyze", "active", 1, 0, 0, 0)],
+          recentSettled: [
+            { label: "fetch-logs", ok: true, durationMs: 0, source: "replay" },
+            { label: "fetch-metrics", ok: true, durationMs: 0, source: "replay" },
+            { label: "live-child", ok: false, durationMs: 1_500, source: "live" },
+          ],
+        },
+      ],
+    })!;
+    expect(lines[1]).toBe("⚙ nightly-audit · 4s · ✓2 ✗1 ▸1");
+    expect(lines[2]).toBe("  ✓ gather ↩ 3 → ⠹ analyze 0/1");
+    expect(lines[3]).toBe("    ↩ fetch-logs replay");
+    expect(lines[4]).toBe("    ↩ fetch-metrics replay");
+    expect(lines[5]).toBe("    ✗ live-child 1s");
   });
 
   it("a lingering terminal workflow renders a muted frozen header with ✓/✗ icon and a frozen pipeline", () => {
@@ -1541,9 +1608,9 @@ describe("M11: workflow pipeline view", () => {
       ],
     })!;
     expect(lines[1]).toBe("✓ wf-smoke-test · 1m05s / 10m00s · ✓4");
-    expect(lines[2]).toBe("  ✓ scan 2/2 ━━▶ ✓ report 2/2");
+    expect(lines[2]).toBe("  ✓ scan 2/2 → ✓ report 2/2");
     expect(seen).toContain("muted:✓ wf-smoke-test · 1m05s / 10m00s · ✓4");
-    // a failed freeze swaps the icon (and keeps the crit chain chips)
+    // a failed freeze swaps the icon (and keeps the crit chain chips) and names its cause
     const failed = buildFleetWidgetLines(model, {
       workflows: [
         {
@@ -1558,7 +1625,7 @@ describe("M11: workflow pipeline view", () => {
         },
       ],
     })!;
-    expect(failed[1]).toBe("✗ broken · 10s · ✗2");
+    expect(failed[1]).toBe("✗ broken · 10s · ✗2 · failed");
     expect(failed[2]).toBe("  ✗ scan 2/2");
     // unknown terminal status: judged by the children
     const unknown = buildFleetWidgetLines(model, {
@@ -1578,6 +1645,32 @@ describe("M11: workflow pipeline view", () => {
     expect(unknown[1]).toBe("✓ mystery · 1s");
   });
 
+  it("frozen headers name the terminal cause: timed out / aborted; completed and unknown add nothing", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const header = (terminal: { status: string }) =>
+      buildFleetWidgetLines(model, {
+        workflows: [
+          {
+            workflowId: "wf-1",
+            name: "long-crawl",
+            elapsedMs: 30_000,
+            budgetMs: 30_000,
+            doneTotal: 0,
+            failedTotal: 1,
+            activeTotal: 0,
+            phases: [chip("crawl", "done", 1, 1, 1), chip("digest", "pending")],
+            terminal,
+          },
+        ],
+      })!;
+    expect(header({ status: "timed_out" })[1]).toBe("✗ long-crawl · 30s / 30s · ✗1 · timed out");
+    expect(header({ status: "aborted" })[1]).toBe("✗ long-crawl · 30s / 30s · ✗1 · aborted");
+    expect(header({ status: "failed" })[1]).toBe("✗ long-crawl · 30s / 30s · ✗1 · failed");
+    // completed adds no cause; its failed-children count still shows
+    expect(header({ status: "completed" })[1]).toBe("✓ long-crawl · 30s / 30s · ✗1");
+    expect(header({ status: "terminal" })[1]).toBe("✗ long-crawl · 30s / 30s · ✗1"); // unknown judged by children
+  });
+
   it("workflowGroupInput: elapsed freezes at endedAt; recentSettled filters by the linger window", () => {
     const snap: import("../../src/workflow/activity.js").WorkflowActivitySnapshot = {
       workflowId: "wf-1",
@@ -1593,7 +1686,7 @@ describe("M11: workflow pipeline view", () => {
       settledTotal: 5,
       completedTotal: 4,
       replayTotal: 0,
-      phases: [{ id: "scan", state: "active", spawned: 1, settled: 0, failed: 0 }],
+      phases: [{ id: "scan", state: "active", spawned: 1, settled: 0, failed: 0, replayed: 0 }],
     };
     const live = workflowGroupInput(snap, 20_000, 5_000);
     expect(live.elapsedMs).toBe(19_000);
@@ -1601,12 +1694,28 @@ describe("M11: workflow pipeline view", () => {
     expect(live.doneTotal).toBe(4);
     expect(live.failedTotal).toBe(1);
     expect(live.activeTotal).toBe(1);
-    expect(live.recentSettled).toEqual([{ label: "c0", ok: true, durationMs: 500 }]); // the 18s-old one is out
+    expect(live.recentSettled).toEqual([{ label: "c0", ok: true, durationMs: 500, source: "live" }]); // the 18s-old one is out
     expect(live.terminal).toBeUndefined();
     const frozen = workflowGroupInput({ ...snap, terminal: { status: "completed", endedAt: 15_000 } }, 20_000, 5_000);
     expect(frozen.elapsedMs).toBe(14_000); // stopped ticking at the freeze
     expect(frozen.terminal).toEqual({ status: "completed" });
-    expect(frozen.recentSettled).toEqual([{ label: "c0", ok: true, durationMs: 500 }]); // 4s old, still inside
+    expect(frozen.recentSettled).toEqual([{ label: "c0", ok: true, durationMs: 500, source: "live" }]); // 4s old, still inside
+  });
+
+  it("workflowGroupInput passes collapsedVisits through only when visits were dropped", () => {
+    const base: import("../../src/workflow/activity.js").WorkflowActivitySnapshot = {
+      workflowId: "wf-1",
+      name: "pipe",
+      startedAt: 1_000,
+      activeChildren: [],
+      settledChildren: [],
+      settledTotal: 0,
+      completedTotal: 0,
+      replayTotal: 0,
+      phases: [],
+    };
+    expect(workflowGroupInput(base, 10_000, 5_000).collapsedVisits).toBeUndefined();
+    expect(workflowGroupInput({ ...base, collapsedVisits: 2 }, 10_000, 5_000).collapsedVisits).toBe(2);
   });
 
   it("widget stays visible (not undefined) while a workflow lingers terminal", () => {
@@ -1634,5 +1743,92 @@ describe("M11: workflow pipeline view", () => {
       (_t, s) => s,
     );
     expect(line).toBe("⚙ fresh · 200ms");
+  });
+});
+
+describe("M12: wide-risk glyph collisions (emoji terminals render ⚙⚠↩♻⏸⏹🗜 two-wide)", () => {
+  const chip = wfChip;
+  it("findGlyphCollisions flags a risk glyph glued to a non-space (VS16-aware); space or EOL is safe", () => {
+    expect(findGlyphCollisions("⚠2 active")).toEqual(["⚠2"]);
+    expect(findGlyphCollisions("✓ gather ↩3")).toEqual(["↩3"]);
+    expect(findGlyphCollisions("⏸排队")).toEqual(["⏸排"]);
+    expect(findGlyphCollisions("⏸\uFE0F排队")).toEqual(["⏸\uFE0F排"]);
+    // safe forms: trailing space, end of line, non-risk glyphs
+    expect(findGlyphCollisions("✓ gather ↩ 3")).toEqual([]);
+    expect(findGlyphCollisions("⚙ name · 5s")).toEqual([]);
+    expect(findGlyphCollisions(" ↩")).toEqual([]);
+    expect(findGlyphCollisions("✓1 ✗2 ▸3 ⧗4 →5 ⎇6")).toEqual([]);
+  });
+
+  it("workflow surfaces (header / chain / recent-settled / frozen header) render collision-free", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const live = buildFleetWidgetLines(model, {
+      width: 100,
+      frame: 2,
+      workflows: [
+        {
+          workflowId: "wf-1",
+          name: "draft-check-loop",
+          elapsedMs: 25_000,
+          budgetMs: 600_000,
+          doneTotal: 3,
+          failedTotal: 0,
+          activeTotal: 1,
+          collapsedVisits: 2,
+          phases: [
+            chip("draft", "done", 1, 1),
+            chip("check", "done", 1, 1),
+            chip("draft#2", "done", 1, 1),
+            chip("gather", "done", 0, 0, 0, 3),
+            chip("check#2", "active", 1, 0, 0, 1),
+            chip("accept", "pending"),
+          ],
+          recentSettled: [
+            { label: "fetch-logs", ok: true, durationMs: 0, source: "replay" },
+            { label: "loop-draft-2", ok: false, durationMs: 7_000, source: "live" },
+          ],
+        },
+        {
+          workflowId: "wf-2",
+          name: "long-crawl",
+          elapsedMs: 30_000,
+          budgetMs: 30_000,
+          doneTotal: 0,
+          failedTotal: 1,
+          activeTotal: 0,
+          phases: [chip("crawl", "done", 1, 1, 1), chip("digest", "pending")],
+          terminal: { status: "timed_out" },
+        },
+      ],
+    })!;
+    expect(live.some((line) => line.includes("↩ fetch-logs replay"))).toBe(true);
+    expect(live.some((line) => line.includes("· timed out"))).toBe(true);
+    for (const line of live) expect(findGlyphCollisions(line)).toEqual([]);
+  });
+
+  it("run rows in queue_wait / retry_backoff / compaction / abort_grace render collision-free", () => {
+    const phases = ["queue_wait", "retry_backoff", "compaction", "abort_grace", "reap"] as const;
+    const runs = phases.map((phase, i) =>
+      snapshot({
+        runId: `run-${i}00`,
+        phase,
+        diag: diag({
+          createdAt: 9_000,
+          phaseEnteredAt: 9_000,
+          lastEventAt: 9_900,
+          phase,
+          label: `task-${phase}`,
+          ...(phase === "retry_backoff"
+            ? { retry: { attempt: 2, maxAttempts: 3, delayMs: 100, startedAt: 9_000 } }
+            : {}),
+        }),
+      }),
+    );
+    const lines = buildFleetWidgetLines(buildFleetViewModel(runs, OPTS), { width: 120, frame: 0 })!;
+    // sanity: each phase label actually made it onto a row (compacted or not)
+    for (const marker of ["⏸", "♻", "🗜", "⏹"]) {
+      expect(lines.some((line) => line.includes(marker))).toBe(true);
+    }
+    for (const line of lines) expect(findGlyphCollisions(line)).toEqual([]);
   });
 });

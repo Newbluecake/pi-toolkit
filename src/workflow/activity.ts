@@ -34,14 +34,28 @@ import type { WorkflowId, WorkflowTerminalStatus } from "./types.js";
  *  - `register` takes an optional `plannedPhases` list (statically scanned
  *    from the script source by `phase-scan.ts`); those phases show up as
  *    `pending` chips before the script ever calls `phase()`.
- *  - Every phase the runtime actually observes (a `phase` enter event, a
- *    spawned/settled child carrying that phaseId) is tracked in entry order
- *    with spawned/settled/failed counts. The snapshot's `phases` chain is
- *    entered-phases-in-entry-order followed by planned-but-never-entered
- *    ones in scan order; a runtime phase unknown to the scan simply appends
- *    to the entered segment (chain tail among entered phases). Children
+ *  - The chain's unit is a VISIT (one entry into a phase name), not the
+ *    name: loops that re-enter `phase("draft")` append `draft#2`, `draft#3` …
+ *    at the chain tail instead of jumping back to the first slot, so a loop
+ *    always reads as moving forward. A consecutive `phase(X)` (X already the
+ *    current visit) opens nothing; a name never entered before opens a visit
+ *    with the bare name — if it is a planned phase, that planned slot is the
+ *    one it occupies (moved out of the pending tail, as before). Every phase
+ *    the runtime actually observes (a `phase` enter event, a spawned/settled
+ *    child carrying that phaseId) opens visits the same way; a runtime phase
+ *    unknown to the scan simply appends to the entered segment. Children
  *    without any phaseId fall into an implicit bucket that never appears on
  *    the chain but still counts in the workflow-level totals.
+ *  - Count attribution is per visit: a spawned child counts against its
+ *    phase's LATEST visit at spawn time (recorded by callId), and a settle
+ *    resolves through that recorded visit — never re-resolved by name, so a
+ *    late settle from a previous loop round can never leak into the fresh
+ *    visit. A settle with no spawned row but a phaseId (journal replay hits,
+ *    withheld calls) counts against that name's latest visit and is tallied
+ *    separately as `replayed` (replay hits carry no spawn and no duration).
+ *    Past `MAX_VISITS` (32) entered visits the oldest DONE visit is dropped
+ *    (the current visit and any draining one never are); `collapsedVisits`
+ *    counts the drops so the widget can render `…+N` at the chain head.
  *  - `unregister(id, { status })` freezes the final snapshot and keeps it in
  *    a separate lingering map for `terminalLingerMs`, exposed ONLY through
  *    `listForDisplay()` — never through `list()`. This split is load-bearing:
@@ -74,19 +88,29 @@ export interface WorkflowSettledChild {
 }
 
 /**
- * M11: one phase chip of the pipeline chain. `state`: current phase = active;
- * an earlier-entered phase that still has unsettled children = draining (the
- * script moved on, its stragglers did not — never shown as ✓); an
- * earlier-entered phase whose children all settled = done; never-entered =
- * pending. Frozen (terminal) snapshots have neither active nor draining.
+ * M11 (M12 visit semantics): one chip of the pipeline chain — a VISIT of a
+ * phase, not the phase name: `draft` first visit, `draft#2` re-entry (the
+ * original name is kept in `name`). `state`: the current visit = active; an
+ * earlier visit that still has unsettled live children = draining (the script
+ * moved on, its stragglers did not — never shown as ✓); an earlier visit
+ * whose live children all settled = done; planned-but-never-entered = pending
+ * (name-less, `id` is the bare phase name). Frozen (terminal) snapshots have
+ * neither active nor draining.
  */
 export interface WorkflowPhaseActivity {
+  /** Display id: the bare phase name for the first visit, `name#n` from the second entry on. */
   readonly id: string;
+  /** The original phase name — present only on repeat visits (`id !== name`). */
+  readonly name?: string;
   readonly state: "pending" | "active" | "draining" | "done";
+  /** Live children spawned into this visit. */
   readonly spawned: number;
+  /** Live children settled into this visit — replay hits are tallied in `replayed`, not here. */
   readonly settled: number;
-  /** Settled children with `status !== "completed"`. */
+  /** Settled children (any source) with `status !== "completed"`. */
   readonly failed: number;
+  /** Journal-replay hits settled into this visit (`source === "replay"` — no spawn, no duration). */
+  readonly replayed: number;
 }
 
 /** M11: stamped onto the frozen snapshot when the background registry settles the workflow. `"terminal"` = caller had no terminal status to pass. */
@@ -109,8 +133,10 @@ export interface WorkflowActivitySnapshot {
   readonly settledTotal: number;
   readonly completedTotal: number;
   readonly replayTotal: number;
-  /** M11: the phase chain — entered phases in entry order, then planned-but-pending in scan order. */
+  /** M11: the phase chain — entered visits in entry order, then planned-but-pending names in scan order. */
   readonly phases: readonly WorkflowPhaseActivity[];
+  /** M12: visits collapsed off the chain head past `MAX_VISITS` (oldest done ones; current/draining never). */
+  readonly collapsedVisits?: number;
   /** M11: present only on a lingering frozen snapshot (see `listForDisplay`). */
   readonly terminal?: WorkflowTerminalMark;
 }
@@ -156,28 +182,42 @@ const MAX_SETTLED_KEPT = 8;
 /** M11: default terminal linger (matches the fleet widget's run-linger default). */
 const DEFAULT_TERMINAL_LINGER_MS: Millis = 5_000;
 
+/** M12: hard cap on ENTERED visits kept on the chain; the oldest done ones collapse past it. */
+const MAX_VISITS = 32;
+
+/** M12: one visit of a phase name (the chain unit — re-entries are new tail visits, not jumps back). */
+interface VisitEntry {
+  /** The original phase name as spoken by `phase()`/child events. */
+  readonly name: string;
+  /** Display id: `name` for the first visit, `name#n` from the second entry on. */
+  readonly id: string;
+  spawned: number;
+  settled: number;
+  failed: number;
+  replayed: number;
+  enteredAt: Millis;
+}
+
 interface MutableEntry {
   name: string;
   startedAt: Millis;
   deadlineAt?: Millis;
   currentPhaseId?: string;
   plannedPhases: string[];
-  enteredOrder: string[];
-  enteredSet: Set<string>;
-  phaseStats: Map<string, PhaseStats>;
+  visits: VisitEntry[];
+  /** Index into `visits`; -1 until the first `phase` enter event. Only `enterPhase` moves it, always forward. */
+  currentVisitIdx: number;
+  /** Phase name → how many visits of that name were opened (drives `#n` ids and planned-slot occupation). */
+  nameEntries: Map<string, number>;
+  /** callId → the visit a spawned child counts against (settles resolve through it, never by name). */
+  callVisits: Map<string, number>;
+  collapsedVisits: number;
   activeChildren: Map<string, WorkflowChildActivity>;
   settledChildren: WorkflowSettledChild[];
   settledCallIds: Set<string>;
   settledTotal: number;
   completedTotal: number;
   replayTotal: number;
-}
-
-interface PhaseStats {
-  spawned: number;
-  settled: number;
-  failed: number;
-  enteredAt: Millis;
 }
 
 /** M11: a frozen snapshot kept past `unregister` — `terminal` is always present on these. */
@@ -225,47 +265,93 @@ export function createWorkflowActivityRegistry(
   const entries = new Map<WorkflowId, MutableEntry>();
   const lingering = new Map<WorkflowId, LingeringSnapshot>();
 
-  function statsFor(entry: MutableEntry, phaseId: string): PhaseStats {
-    const existing = entry.phaseStats.get(phaseId);
-    if (existing !== undefined) return existing;
-    const created: PhaseStats = { spawned: 0, settled: 0, failed: 0, enteredAt: now() };
-    entry.phaseStats.set(phaseId, created);
-    return created;
+  /**
+   * M12: open a NEW visit for `name` (appended at the chain tail) without
+   * touching the current-visit pointer. Ids are `name` (first visit) /
+   * `name#n` (re-entry, n from 2). Callers responsible for "same name as the
+   * current visit reuses it" must go through `enterPhase` instead.
+   */
+  function openVisit(entry: MutableEntry, name: string): number {
+    collapseDoneVisits(entry);
+    const ordinal = (entry.nameEntries.get(name) ?? 0) + 1;
+    entry.nameEntries.set(name, ordinal);
+    entry.visits.push({
+      name,
+      id: ordinal === 1 ? name : `${name}#${ordinal}`,
+      spawned: 0,
+      settled: 0,
+      failed: 0,
+      replayed: 0,
+      enteredAt: now(),
+    });
+    return entry.visits.length - 1;
   }
 
-  /** First observation wins the chain slot; later re-entries keep the original position. */
-  function markEntered(entry: MutableEntry, phaseId: string): void {
-    if (entry.enteredSet.has(phaseId)) return;
-    entry.enteredSet.add(phaseId);
-    entry.enteredOrder.push(phaseId);
+  /** `phase(X)` semantics: X already the current visit → reuse it (no new visit); else open one and make it current. */
+  function enterPhase(entry: MutableEntry, name: string): void {
+    if (entry.currentVisitIdx >= 0 && entry.visits[entry.currentVisitIdx]!.name === name) return;
+    entry.currentVisitIdx = openVisit(entry, name);
+    entry.currentPhaseId = name;
   }
 
-  /** Entered phases in entry order, then planned-but-never-entered in scan order. Frozen (terminal) snapshots show no active chip. */
-  function phasesOf(entry: MutableEntry, frozen: boolean): WorkflowPhaseActivity[] {
-    const ordered = [...entry.enteredOrder];
-    for (const planned of entry.plannedPhases) {
-      if (!entry.enteredSet.has(planned)) ordered.push(planned);
+  /** Latest visit of `name`; opens one (not current — only a `phase` enter event moves the pointer) when never entered. */
+  function latestVisitIdxOf(entry: MutableEntry, name: string): number {
+    for (let i = entry.visits.length - 1; i >= 0; i -= 1) {
+      if (entry.visits[i]!.name === name) return i;
     }
-    return ordered.map((id) => {
-      const stats = entry.phaseStats.get(id);
-      const entered = entry.enteredSet.has(id);
-      const unsettled = (stats?.spawned ?? 0) > (stats?.settled ?? 0);
+    return openVisit(entry, name);
+  }
+
+  /**
+   * M12: keep entered visits bounded — before appending a visit that would
+   * exceed `MAX_VISITS`, drop the OLDEST done visit (the current visit and
+   * any draining one are never dropped). An all-draining pathological chain
+   * may exceed the cap; the next settle or entry trims it again.
+   */
+  function collapseDoneVisits(entry: MutableEntry): void {
+    while (entry.visits.length + 1 > MAX_VISITS) {
+      const dropIdx = entry.visits.findIndex(
+        (visit, i) => i !== entry.currentVisitIdx && visit.spawned <= visit.settled,
+      );
+      if (dropIdx < 0) return;
+      entry.visits.splice(dropIdx, 1);
+      entry.collapsedVisits += 1;
+      if (dropIdx < entry.currentVisitIdx) entry.currentVisitIdx -= 1;
+      // callVisits reindex: a done visit holds no pending call (unsettled
+      // children keep it draining), so `=== dropIdx` entries are defensive
+      // deletions; everything above shifts down one.
+      for (const [callId, idx] of entry.callVisits) {
+        if (idx === dropIdx) entry.callVisits.delete(callId);
+        else if (idx > dropIdx) entry.callVisits.set(callId, idx - 1);
+      }
+    }
+  }
+
+  /** Entered visits in entry order, then planned-but-never-entered names in scan order. Frozen (terminal) snapshots show no active/draining chip. */
+  function phasesOf(entry: MutableEntry, frozen: boolean): WorkflowPhaseActivity[] {
+    const chips: WorkflowPhaseActivity[] = entry.visits.map((visit, idx) => {
       const state: WorkflowPhaseActivity["state"] =
-        !frozen && id === entry.currentPhaseId
+        !frozen && idx === entry.currentVisitIdx
           ? "active"
-          : !entered
-            ? "pending"
-            : !frozen && unsettled
-              ? "draining"
-              : "done";
+          : !frozen && visit.spawned > visit.settled
+            ? "draining"
+            : "done";
       return {
-        id,
+        id: visit.id,
+        ...(visit.id !== visit.name ? { name: visit.name } : {}),
         state,
-        spawned: stats?.spawned ?? 0,
-        settled: stats?.settled ?? 0,
-        failed: stats?.failed ?? 0,
+        spawned: visit.spawned,
+        settled: visit.settled,
+        failed: visit.failed,
+        replayed: visit.replayed,
       };
     });
+    for (const planned of entry.plannedPhases) {
+      if ((entry.nameEntries.get(planned) ?? 0) === 0) {
+        chips.push({ id: planned, state: "pending", spawned: 0, settled: 0, failed: 0, replayed: 0 });
+      }
+    }
+    return chips;
   }
 
   function snapshotOf(workflowId: WorkflowId, e: MutableEntry, frozen: boolean): WorkflowActivitySnapshot {
@@ -281,6 +367,7 @@ export function createWorkflowActivityRegistry(
       completedTotal: e.completedTotal,
       replayTotal: e.replayTotal,
       phases: phasesOf(e, frozen),
+      ...(e.collapsedVisits > 0 ? { collapsedVisits: e.collapsedVisits } : {}),
     };
   }
 
@@ -304,9 +391,11 @@ export function createWorkflowActivityRegistry(
         startedAt,
         ...(deadlineAt !== undefined ? { deadlineAt } : {}),
         plannedPhases: plannedPhases === undefined ? [] : [...plannedPhases],
-        enteredOrder: [],
-        enteredSet: new Set(),
-        phaseStats: new Map(),
+        visits: [],
+        currentVisitIdx: -1,
+        nameEntries: new Map(),
+        callVisits: new Map(),
+        collapsedVisits: 0,
         activeChildren: new Map(),
         settledChildren: [],
         settledCallIds: new Set(),
@@ -319,10 +408,7 @@ export function createWorkflowActivityRegistry(
       const phase = isPhaseEnterEvent(channel, payload) ? payload : undefined;
       if (phase !== undefined) {
         const entry = entries.get(phase.workflowId);
-        if (entry) {
-          entry.currentPhaseId = phase.phaseId;
-          markEntered(entry, phase.phaseId);
-        }
+        if (entry) enterPhase(entry, phase.phaseId);
         return;
       }
       const child = asChildEvent(channel, payload);
@@ -339,26 +425,32 @@ export function createWorkflowActivityRegistry(
           enteredAt: child.at,
         });
         if (child.phaseId !== undefined) {
-          markEntered(entry, child.phaseId);
-          statsFor(entry, child.phaseId).spawned += 1;
+          const idx = latestVisitIdxOf(entry, child.phaseId);
+          entry.callVisits.set(child.callId, idx);
+          entry.visits[idx]!.spawned += 1;
         }
         return;
       }
-      // kind === "settled" — the phase comes from the event itself, else from
-      // the spawned row we are about to remove (callId lookup).
-      const active = entry.activeChildren.get(child.callId);
-      const phaseId = child.phaseId ?? active?.phaseId;
+      // kind === "settled" — the visit comes from the spawn row we are about
+      // to remove (callId lookup, never re-resolved by name so a late settle
+      // from an earlier loop round cannot leak into the fresh visit);
+      // without a spawn row (replay hits, withheld calls) the event's own
+      // phaseId attributes to that name's LATEST visit.
+      const recordedVisit = entry.callVisits.get(child.callId);
       entry.activeChildren.delete(child.callId);
+      entry.callVisits.delete(child.callId);
       if (entry.settledCallIds.has(child.callId)) return; // defensive: count each call exactly once.
       entry.settledCallIds.add(child.callId);
       entry.settledTotal += 1;
       if (child.status === "completed") entry.completedTotal += 1;
       if (child.source === "replay") entry.replayTotal += 1;
-      if (phaseId !== undefined) {
-        markEntered(entry, phaseId);
-        const stats = statsFor(entry, phaseId);
-        stats.settled += 1;
-        if (child.status !== "completed") stats.failed += 1;
+      const visitIdx =
+        recordedVisit ?? (child.phaseId !== undefined ? latestVisitIdxOf(entry, child.phaseId) : undefined);
+      if (visitIdx !== undefined) {
+        const visit = entry.visits[visitIdx]!;
+        if (child.source === "replay") visit.replayed += 1;
+        else visit.settled += 1;
+        if (child.status !== "completed") visit.failed += 1;
       }
       entry.settledChildren.push({
         callId: child.callId,

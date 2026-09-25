@@ -217,13 +217,23 @@ describe("workflow activity registry (M11): per-phase pipeline stats", () => {
     expect(snap.completedTotal).toBe(0);
   });
 
-  it("a settled event carrying phaseId (replay hit, no spawned row) counts toward that phase", () => {
+  it("a settled event carrying phaseId (replay hit, no spawned row) tallies into that phase's visit as `replayed`", () => {
     const reg = pipeline();
     reg.onEvent(
       "subagent:workflow:child",
       settled("c1", { runId: undefined, source: "replay", phaseId: "scan", durationMs: 0 }),
     );
-    expect(reg.list()[0]!.phases[0]).toMatchObject({ id: "scan", state: "done", spawned: 0, settled: 1, failed: 0 });
+    // `settled` counts live settles only — replay hits live in `replayed` so
+    // the chip fraction (`settled/spawned`) stays live-only and replay
+    // cannot mask an unsettled live child in the draining check.
+    expect(reg.list()[0]!.phases[0]).toMatchObject({
+      id: "scan",
+      state: "done",
+      spawned: 0,
+      settled: 0,
+      failed: 0,
+      replayed: 1,
+    });
   });
 
   it("a phase the script left while children still run is draining (never done/✓) until they all settle", () => {
@@ -251,16 +261,157 @@ describe("workflow activity registry (M11): per-phase pipeline stats", () => {
     expect(frozen.phases.map((p) => p.state)).toEqual(["done", "done"]);
   });
 
-  it("re-entering an earlier phase keeps its first chain slot (documented positional semantics)", () => {
+  it("M12: re-entering an earlier phase appends a new visit at the chain tail (A→B→A ⇒ [A, B, A#2])", () => {
     const reg = pipeline();
     reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" });
     reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "summarize", kind: "enter" });
     reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" });
-    expect(reg.list()[0]!.phases.map((p) => [p.id, p.state])).toEqual([
-      ["scan", "active"],
+    const phases = reg.list()[0]!.phases;
+    expect(phases.map((p) => [p.id, p.state])).toEqual([
+      ["scan", "done"],
       ["summarize", "done"],
+      ["scan#2", "active"],
       ["report", "pending"],
     ]);
+    // the repeat visit keeps the original name; the first visit does not carry one
+    expect(phases[2]).toMatchObject({ id: "scan#2", name: "scan" });
+    expect(phases[0]!.name).toBeUndefined();
+    expect(reg.list()[0]!.currentPhaseId).toBe("scan");
+  });
+
+  it("M12: a frozen snapshot keeps the visit chain but shows no active/draining", () => {
+    let time = 10_000;
+    const reg = createWorkflowActivityRegistry({ now: () => time, terminalLingerMs: 5_000 });
+    reg.register(WF, "loop", 1_000, 61_000, ["draft", "check", "accept"]);
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "draft", kind: "enter" });
+    reg.onEvent("subagent:workflow:child", spawned("d1", { phaseId: "draft" }));
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "check", kind: "enter" });
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "draft", kind: "enter" }); // draft#2
+    reg.unregister(WF, { status: "timed_out" });
+    time += 1_000;
+    const frozen = reg.listForDisplay()[0]!;
+    // d1 never settled — live it would be draining; frozen freezes it done (no straggler spinner on a corpse)
+    expect(frozen.phases.map((p) => [p.id, p.state])).toEqual([
+      ["draft", "done"],
+      ["check", "done"],
+      ["draft#2", "done"],
+      ["accept", "pending"],
+    ]);
+    expect(frozen.terminal).toMatchObject({ status: "timed_out" });
+    expect(reg.list()).toHaveLength(0); // running-only contract intact
+  });
+
+  it("M12: three loop rounds produce draft / draft#2 / draft#3 visits with their own counts", () => {
+    const reg = createWorkflowActivityRegistry();
+    reg.register(WF, "loop", 1_000, 61_000, ["draft", "check"]);
+    for (const round of [1, 2, 3]) {
+      reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "draft", kind: "enter" });
+      reg.onEvent("subagent:workflow:child", spawned(`d${round}`, { phaseId: "draft" }));
+      reg.onEvent("subagent:workflow:child", settled(`d${round}`));
+      reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "check", kind: "enter" });
+      reg.onEvent("subagent:workflow:child", spawned(`c${round}`, { phaseId: "check" }));
+      reg.onEvent("subagent:workflow:child", settled(`c${round}`));
+    }
+    const byId = Object.fromEntries(reg.list()[0]!.phases.map((p) => [p.id, p]));
+    expect(Object.keys(byId)).toEqual(["draft", "check", "draft#2", "check#2", "draft#3", "check#3"]);
+    expect(byId["draft"]).toMatchObject({ spawned: 1, settled: 1, state: "done" });
+    expect(byId["check#3"]).toMatchObject({ spawned: 1, settled: 1, state: "active" });
+    expect(byId["draft#3"]).toMatchObject({ spawned: 1, settled: 1, state: "done" });
+  });
+
+  it("M12: a late settle from an earlier round resolves through the spawn-recorded visit, never the fresh one", () => {
+    const reg = pipeline();
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" });
+    reg.onEvent("subagent:workflow:child", spawned("c1", { phaseId: "scan" }));
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "summarize", kind: "enter" });
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" }); // scan#2
+    // straggler settles AFTER the re-entry — even when the event re-carries the
+    // bare phase name, the callId lookup wins.
+    reg.onEvent("subagent:workflow:child", settled("c1", { phaseId: "scan", status: "failed" }));
+    const phases = reg.list()[0]!.phases;
+    expect(phases[0]).toMatchObject({ id: "scan", spawned: 1, settled: 1, failed: 1, state: "done" });
+    expect(phases[2]).toMatchObject({ id: "scan#2", spawned: 0, settled: 0, failed: 0, state: "active" });
+  });
+
+  it("M12: a late settle keeps the earlier visit draining until it lands, then done", () => {
+    const reg = pipeline();
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" });
+    reg.onEvent("subagent:workflow:child", spawned("c1", { phaseId: "scan" }));
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "summarize", kind: "enter" });
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" }); // scan#2
+    expect(reg.list()[0]!.phases[0]).toMatchObject({ id: "scan", state: "draining" });
+    reg.onEvent("subagent:workflow:child", settled("c1"));
+    expect(reg.list()[0]!.phases[0]).toMatchObject({ id: "scan", state: "done", settled: 1 });
+  });
+
+  it("M12: replay settles attribute to the name's LATEST visit and count as `replayed`", () => {
+    const reg = createWorkflowActivityRegistry();
+    reg.register(WF, "pipe", 1_000, 61_000, ["gather"]);
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "gather", kind: "enter" });
+    reg.onEvent("subagent:workflow:child", settled("c1", { phaseId: "gather" })); // round 1, live
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "analyze", kind: "enter" });
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "gather", kind: "enter" }); // gather#2
+    reg.onEvent(
+      "subagent:workflow:child",
+      settled("c2", { runId: undefined, source: "replay", phaseId: "gather", durationMs: 0 }),
+    );
+    const phases = reg.list()[0]!.phases;
+    expect(phases[0]).toMatchObject({ id: "gather", settled: 1, replayed: 0, state: "done" });
+    expect(phases[2]).toMatchObject({ id: "gather#2", settled: 0, replayed: 1, state: "active" });
+    expect(reg.list()[0]!.replayTotal).toBe(1);
+  });
+
+  it("M12: a consecutive phase(X) (X already current) opens no new visit", () => {
+    const reg = pipeline();
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" });
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "scan", kind: "enter" });
+    reg.onEvent("subagent:workflow:child", spawned("c1", { phaseId: "scan" }));
+    const phases = reg.list()[0]!.phases;
+    expect(phases.map((p) => p.id)).toEqual(["scan", "summarize", "report"]);
+    expect(phases[0]).toMatchObject({ state: "active", spawned: 1 });
+  });
+
+  it("M12: a spawned child with a never-entered planned phaseId opens its visit and occupies the planned slot", () => {
+    const reg = pipeline();
+    reg.onEvent("subagent:workflow:child", spawned("c1", { phaseId: "report" }));
+    const phases = reg.list()[0]!.phases;
+    expect(phases.map((p) => [p.id, p.state])).toEqual([
+      ["report", "draining"], // entered (visit opened by the spawn), child still running, no phase event → not active
+      ["scan", "pending"],
+      ["summarize", "pending"],
+    ]);
+  });
+
+  it("M12: past 32 entered visits the oldest done visit collapses; draining/current never drop", () => {
+    const reg = createWorkflowActivityRegistry();
+    reg.register(WF, "long", 1_000);
+    for (let i = 1; i <= 32; i += 1) {
+      reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: `p${i}`, kind: "enter" });
+    }
+    const atCap = reg.list()[0]!;
+    expect(atCap.phases).toHaveLength(32);
+    expect(atCap.collapsedVisits).toBeUndefined();
+    // p1 keeps an unsettled child (draining) — it must survive the collapse
+    reg.onEvent("subagent:workflow:child", spawned("straggler", { phaseId: "p1" }));
+    reg.onEvent("subagent:workflow:phase", { workflowId: WF, phaseId: "p33", kind: "enter" });
+    const collapsed = reg.list()[0]!;
+    expect(collapsed.collapsedVisits).toBe(1);
+    expect(collapsed.phases).toHaveLength(32);
+    // p1 survived (draining), p2 (oldest done) dropped, current p33 kept
+    expect(collapsed.phases.map((p) => p.id)).toEqual([
+      "p1",
+      ...Array.from({ length: 30 }, (_, k) => `p${k + 3}`), // p3..p32
+      "p33",
+    ]);
+    expect(collapsed.phases[0]).toMatchObject({ id: "p1", state: "draining" });
+    expect(collapsed.phases.some((p) => p.id === "p2")).toBe(false);
+    expect(collapsed.phases[31]).toMatchObject({ id: "p33", state: "active" });
+    // after the collapse re-indexed every visit, the straggler's late settle still lands on p1
+    reg.onEvent("subagent:workflow:child", settled("straggler"));
+    const after = reg.list()[0]!;
+    expect(after.phases[0]).toMatchObject({ id: "p1", state: "done", spawned: 1, settled: 1 });
+    expect(after.phases.slice(1).every((p) => p.spawned === 0 && p.settled === 0)).toBe(true);
+    expect(after.phases[31]).toMatchObject({ id: "p33", state: "active" });
   });
 
   it("WorkflowSettledChild carries settledAt (the event's `at`)", () => {
