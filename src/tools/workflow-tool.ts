@@ -154,7 +154,14 @@ export function buildWorkflowProgressLines(
     `\u23f3 ${activity.name}`,
     activity.currentPhaseId !== undefined ? `phase: ${activity.currentPhaseId}` : undefined,
     formatDuration(Math.max(0, now - activity.startedAt)),
-    activity.deadlineAt !== undefined ? `${formatDuration(Math.max(0, activity.deadlineAt - now))} left` : undefined,
+    // Stage B: inside the timeout grace window the soft deadline is already past — count down the grace instead.
+    activity.graceUntil !== undefined
+      ? `grace ${formatDuration(Math.max(0, activity.graceUntil - now))} left`
+      : activity.deadlineAt !== undefined
+        ? `${formatDuration(Math.max(0, activity.deadlineAt - now))} left${
+            (activity.extensions ?? 0) > 0 ? ` (+${activity.extensions})` : ""
+          }`
+        : undefined,
   ]
     .filter(Boolean)
     .join(" · ");

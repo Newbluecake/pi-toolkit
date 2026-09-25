@@ -322,6 +322,13 @@ describe("M10: buildWorkflowProgressLines", () => {
     expect(lines).toHaveLength(1); // no tally/children yet
   });
 
+  it("stage B: inside the grace window the header counts down the grace; an extended run shows (+N)", () => {
+    const grace = buildWorkflowProgressLines({ ...base, deadlineAt: 60_000, graceUntil: 150_000 }, 62_000);
+    expect(grace[0]).toBe("⏳ demo-flow · 1m02s · grace 1m28s left");
+    const extended = buildWorkflowProgressLines({ ...base, deadlineAt: 120_000, extensions: 1 }, 62_000);
+    expect(extended[0]).toBe("⏳ demo-flow · 1m02s · 58s left (+1)");
+  });
+
   it("renders the settled/running tally and the recent-settled trail with per-status marks", () => {
     const lines = buildWorkflowProgressLines(
       {
