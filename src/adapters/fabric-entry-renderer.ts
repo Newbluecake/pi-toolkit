@@ -8,8 +8,19 @@ export const FABRIC_ENTRY_CUSTOM_TYPE = "subagent:fabric";
  * Left padding shared by the header and the payload, so a fabric entry reads as
  * one uniformly indented block (the header used to sit flush left while the body
  * was indented, which broke the visual grouping).
+ *
+ * Matches pi's own assistant-message padding (`outputPad`, default 1): a fabric
+ * reply (e.g. the answer to a user @mention) must line up with regular assistant
+ * text, not sit one column deeper. pi 0.87's EntryRenderOptions does not carry
+ * `outputPad` (only MessageRenderOptions does), so honor it when a host passes
+ * it and fall back to pi's default otherwise.
  */
-const FABRIC_BODY_INDENT = 2;
+const FABRIC_BODY_INDENT = 1;
+
+function bodyIndent(options: unknown): number {
+  const pad = (options as { outputPad?: unknown } | undefined)?.outputPad;
+  return typeof pad === "number" && Number.isInteger(pad) && pad >= 0 ? pad : FABRIC_BODY_INDENT;
+}
 
 /**
  * TUI renderer for fabric custom entries. The fabric outbox store is
@@ -62,15 +73,16 @@ function markdownThemeFrom(theme: Theme): MarkdownTheme {
 }
 
 export function createFabricEntryRenderer(resolveSender?: FabricSenderResolver): EntryRenderer {
-  return (entry, _options, theme) => {
+  return (entry, options, theme) => {
     const data = entry.data as Partial<FabricRecord> | undefined;
     if (data?.state !== "delivered") return undefined;
     const text = data.payload?.text ?? "";
     const sender = formatSender(data.from, resolveSender);
-    const header = new Text(theme.fg("muted", `[fabric ${data.kind ?? "message"}${sender}]`), FABRIC_BODY_INDENT, 0);
+    const indent = bodyIndent(options);
+    const header = new Text(theme.fg("muted", `[fabric ${data.kind ?? "message"}${sender}]`), indent, 0);
     if (text.trim() === "") return header;
-    // Header on its own line + the payload as a markdown block, both at
-    // FABRIC_BODY_INDENT: fabric payloads are model-written prose (progress
+    // Header on its own line + the payload as a markdown block, both at the
+    // same indent: fabric payloads are model-written prose (progress
     // reports, findings) that routinely span lines and carry lists/code.
     // Prefixing them inline into one plain Text left wrapped lines hugging
     // column 0 and swallowed all markup; leaving the header flush left while
@@ -78,7 +90,7 @@ export function createFabricEntryRenderer(resolveSender?: FabricSenderResolver):
     const container = new Container();
     container.addChild(header);
     container.addChild(
-      new Markdown(text, FABRIC_BODY_INDENT, 0, markdownThemeFrom(theme), {
+      new Markdown(text, indent, 0, markdownThemeFrom(theme), {
         color: (plain) => theme.fg("muted", plain),
       }),
     );

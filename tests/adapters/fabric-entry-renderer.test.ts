@@ -50,16 +50,16 @@ describe("renderFabricEntry", () => {
     );
     expect(component).toBeInstanceOf(Container);
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("  [fabric finding r_ABCDEFGH]");
-    expect(lines[1]).toBe("  hello <bold>fabric</bold>");
+    expect(lines[0]).toBe(" [fabric finding r_ABCDEFGH]");
+    expect(lines[1]).toBe(" hello <bold>fabric</bold>");
   });
 
   it("prefers the mention label over the runId when a resolver is provided", () => {
     const render = createFabricEntryRenderer((runId) => (runId === "r_ABCDEFGH" ? "watcher" : undefined));
     const component = render(entry(record({ state: "delivered", deliveredAt: 2 })), { expanded: false }, theme);
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("  [fabric finding @watcher]");
-    expect(lines[1]).toBe("  hello fabric");
+    expect(lines[0]).toBe(" [fabric finding @watcher]");
+    expect(lines[1]).toBe(" hello fabric");
   });
 
   it("renders nothing for every non-delivered state (append-per-transition would duplicate the message)", () => {
@@ -88,10 +88,10 @@ describe("renderFabricEntry", () => {
       theme,
     );
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("  [fabric finding @watcher]");
-    expect(lines[1]).toBe("  line1");
-    expect(lines[2]).toBe("  - <bold>line2</bold>");
-    expect(lines[3]).toBe("      - line3");
+    expect(lines[0]).toBe(" [fabric finding @watcher]");
+    expect(lines[1]).toBe(" line1");
+    expect(lines[2]).toBe(" - <bold>line2</bold>");
+    expect(lines[3]).toBe("     - line3");
   });
 
   it("indents a header-only entry (blank payload) to the body's left margin", () => {
@@ -102,7 +102,7 @@ describe("renderFabricEntry", () => {
     );
     expect(component).not.toBeInstanceOf(Container);
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("  [fabric finding r_ABCDEFGH]");
+    expect(lines[0]).toBe(" [fabric finding r_ABCDEFGH]");
     expect(lines[1]).toBeUndefined();
   });
 
@@ -113,7 +113,17 @@ describe("renderFabricEntry", () => {
       theme,
     );
     const lines = component!.render(200).map((line) => line.trimEnd());
-    expect(lines[0]).toBe("  [fabric message]");
-    expect(lines[1]).toBe("  x");
+    expect(lines[0]).toBe(" [fabric message]");
+    expect(lines[1]).toBe(" x");
+  });
+
+  it("lines up with pi's assistant text: default outputPad is 1, a host-supplied outputPad wins", () => {
+    const delivered = entry(record({ state: "delivered", deliveredAt: 2 }));
+    const def = renderFabricEntry(delivered, { expanded: false }, theme)!.render(200);
+    expect(def[0]).toMatch(/^ \[fabric/);
+    expect(def[1]!.trimEnd()).toBe(" hello fabric");
+    const zero = renderFabricEntry(delivered, { expanded: false, outputPad: 0 } as never, theme)!.render(200);
+    expect(zero[0]!.trimEnd()).toBe("[fabric finding r_ABCDEFGH]");
+    expect(zero[1]!.trimEnd()).toBe("hello fabric");
   });
 });
