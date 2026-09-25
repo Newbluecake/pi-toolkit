@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { lstat } from "node:fs/promises";
 import net from "node:net";
+import { join } from "node:path";
 import { resolveHubPaths, type HubPaths } from "../../../src/web-hub/protocol/paths.js";
 import {
   acquireSingleton,
@@ -151,6 +162,17 @@ describe("acquireSingleton", () => {
     owners.length = 0;
     expect(existsSync(p.socketPath)).toBe(true);
     expect(readFileSync(p.socketPath, "utf8")).toBe("someone else"); // park/restore was lossless
+
+    const c = track(await acquireSingleton(p, { probeMs: 50 }));
+    if (c.kind !== "owner") throw new Error("expected owner");
+    unlinkSync(p.socketPath);
+    const target = join(tmp.make("wh-s-target-"), "real-file");
+    writeFileSync(target, "real target");
+    symlinkSync(target, p.socketPath); // path replaced by a symlink
+    await c.release();
+    owners.length = 0;
+    expect(lstatSync(p.socketPath).isSymbolicLink()).toBe(true); // the symlink itself is left alone
+    expect(readFileSync(target, "utf8")).toBe("real target"); // and its target is never touched/unlinked
   });
 });
 
@@ -160,7 +182,16 @@ describe("startFence", () => {
     const o = track(await acquireSingleton(p, { probeMs: 50 }));
     if (o.kind !== "owner") throw new Error("expected owner");
     let lost = 0;
-    const stop = startFence(p.socketPath, o.inode, () => lost++, 20);
+    let why: string | undefined;
+    const stop = startFence(
+      p.socketPath,
+      o.identity,
+      (w) => {
+        lost++;
+        why = w;
+      },
+      20,
+    );
     await new Promise((r) => setTimeout(r, 80));
     expect(lost).toBe(0);
     unlinkSync(p.socketPath);
@@ -168,6 +199,7 @@ describe("startFence", () => {
     await waitFor(() => lost > 0, 2000);
     await new Promise((r) => setTimeout(r, 80));
     expect(lost).toBe(1);
+    expect(why).toBe("socket-not-socket"); // regular file, not a socket at all
     stop();
   });
 
@@ -176,7 +208,7 @@ describe("startFence", () => {
     const o = track(await acquireSingleton(p, { probeMs: 50 }));
     if (o.kind !== "owner") throw new Error("expected owner");
     let lost = 0;
-    const stop = startFence(p.socketPath, o.inode, () => lost++, 20);
+    const stop = startFence(p.socketPath, o.identity, () => lost++, 20);
     stop();
     unlinkSync(p.socketPath);
     await new Promise((r) => setTimeout(r, 80));
@@ -301,10 +333,75 @@ describe("startFence first check", () => {
     const o = track(await acquireSingleton(p, { probeMs: 50 }));
     if (o.kind !== "owner") throw new Error("expected owner");
     let lost = 0;
+    let why: string | undefined;
     unlinkSync(p.socketPath);
-    const stop = startFence(p.socketPath, o.inode, () => lost++, 60_000, 30);
+    const stop = startFence(
+      p.socketPath,
+      o.identity,
+      (w) => {
+        lost++;
+        why = w;
+      },
+      60_000,
+      30,
+    );
     await waitFor(() => lost > 0, 1_000);
     expect(lost).toBe(1);
+    expect(why).toBe("socket-missing");
+    stop();
+  });
+});
+
+// Contract test ⑩ (§11): io-strike accumulation — a genuinely transient/slow check does not
+// immediately declare the socket lost; only `ioStrikes` (default 3) *consecutive* timeouts do.
+describe("startFence io strikes", () => {
+  it("3 consecutive check timeouts trigger onLost('io')", async () => {
+    const p = paths();
+    const o = track(await acquireSingleton(p, { probeMs: 50 }));
+    if (o.kind !== "owner") throw new Error("expected owner");
+    let lost = 0;
+    let why: string | undefined;
+    const hangingLstat = () => new Promise<never>(() => {});
+    const stop = startFence(
+      p.socketPath,
+      o.identity,
+      (w) => {
+        lost++;
+        why = w;
+      },
+      30,
+      10,
+      { lstat: hangingLstat as unknown as typeof lstat, checkDeadlineMs: 20, ioStrikes: 3 },
+    );
+    await waitFor(() => lost > 0, 3_000);
+    expect(lost).toBe(1);
+    expect(why).toBe("io");
+    stop();
+  });
+
+  it("2 check timeouts followed by a success do not trigger onLost (the strike counter resets)", async () => {
+    const p = paths();
+    const o = track(await acquireSingleton(p, { probeMs: 50 }));
+    if (o.kind !== "owner") throw new Error("expected owner");
+    let lost = 0;
+    let calls = 0;
+    const flakyLstat: typeof lstat = ((path: Parameters<typeof lstat>[0]) => {
+      calls++;
+      return calls <= 2 ? new Promise<never>(() => {}) : lstat(path);
+    }) as typeof lstat;
+    const stop = startFence(
+      p.socketPath,
+      o.identity,
+      () => {
+        lost++;
+      },
+      30,
+      10,
+      { lstat: flakyLstat, checkDeadlineMs: 20, ioStrikes: 3 },
+    );
+    await waitFor(() => calls >= 4, 3_000); // 2 hung socket-checks + 1 successful socket-check + its dir-check
+    await new Promise((r) => setTimeout(r, 150));
+    expect(lost).toBe(0);
     stop();
   });
 });

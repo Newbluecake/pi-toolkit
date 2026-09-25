@@ -12,6 +12,7 @@ import { decodeAgentFrame, type AgentFrame, type HubFrame } from "../../../src/w
 import { encodeFrame, NdjsonDecoder } from "../../../src/web-hub/protocol/ndjson.js";
 import type { HubPaths } from "../../../src/web-hub/protocol/paths.js";
 import type { WebHubSettings } from "../../../src/web-hub/agent/index.js";
+import { testHubPaths } from "../helpers/paths.js";
 
 export const CONN_KEY = Symbol.for("pi-subagent:web-hub");
 export const AGENT_ID_KEY = Symbol.for("pi-subagent:web-hub:agent-id");
@@ -22,14 +23,7 @@ export function tmpDir(prefix = "wh-d-"): { dir: string; cleanup: () => void } {
 }
 
 export function pathsIn(dir: string): HubPaths {
-  return {
-    stateDir: dir,
-    socketPath: join(dir, "hub.sock"),
-    hubJson: join(dir, "hub.json"),
-    tokenFile: join(dir, "token"),
-    logFile: join(dir, "hub.log"),
-    startLock: join(dir, "start.lock"),
-  };
+  return testHubPaths(dir);
 }
 
 export const SETTINGS: WebHubSettings = {

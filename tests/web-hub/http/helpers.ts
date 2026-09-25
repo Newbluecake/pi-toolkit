@@ -7,6 +7,7 @@ import type { AgentCard, HistoryPayload } from "../../../src/web-hub/protocol/ht
 import type { HubPaths } from "../../../src/web-hub/protocol/paths.js";
 import { PROTO } from "../../../src/web-hub/protocol/version.js";
 import type { AgentView, FrontendDeps, HistoryService, HubEvent, HubLog } from "../../../src/web-hub/hub/ports.js";
+import { testHubPaths } from "../helpers/paths.js";
 
 export function makeTmp(prefix = "pwh-http-"): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -81,14 +82,7 @@ export function fakeDeps(dir: string, opts: { port?: number } = {}): FakeDeps {
     onLeafChanged: () => {},
   };
   const stateDir = join(dir, "state");
-  const paths: HubPaths = {
-    stateDir,
-    socketPath: join(stateDir, "hub.sock"),
-    hubJson: join(stateDir, "hub.json"),
-    tokenFile: join(stateDir, "token"),
-    logFile: join(stateDir, "hub.log"),
-    startLock: join(stateDir, "start.lock"),
-  };
+  const paths: HubPaths = testHubPaths(stateDir);
   return {
     config: { v: 1, home: dir, port: opts.port ?? 0, idleExitMinutes: 10, pluginVersion: "0.0.0-test", buildId: "b1" },
     paths,
