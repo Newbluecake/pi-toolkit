@@ -93,16 +93,30 @@ export const WorkflowToolParams = Type.Object({
   timeout_s: Type.Optional(
     Type.Integer({
       minimum: 1,
-      description: "Total wall-clock budget for the whole workflow run, in seconds (overrides the default).",
+      description:
+        "Total wall-clock budget for the whole workflow run, in seconds (overrides the default). An explicit " +
+        "timeout_s is a hard cap: no timeout grace window and no extension. Omit it to get the default budget, " +
+        "which can be extended.",
     }),
   ),
 });
 export type WorkflowToolParams = Static<typeof WorkflowToolParams>;
 
-/** Exported for tests. `timeoutMs <= 0` (or non-finite) falls back to the base budget — BW10 (a 0 = unbounded workflow cap) is unsupported, same rule as the settings layer. */
+/**
+ * Exported for tests. `timeoutMs <= 0` (or non-finite) falls back to the base budget — BW10 (a 0 = unbounded workflow
+ * cap) is unsupported, same rule as the settings layer. An explicit `timeout_s` is a **hard cap** (workflow-agent-queue
+ * §4.1, D-10 for workflows): `maxTotalFactor = 1` ⇒ hard ceiling = soft deadline ⇒ no grace window, no extension.
+ */
 export function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): WorkflowRunBudget {
   if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return base;
-  return { ...base, workflowTotalMs: timeoutMs };
+  return { ...base, workflowTotalMs: timeoutMs, maxTotalFactor: 1 };
+}
+
+/** `" (extendable up to 2h)"` for a default-budget run that can be extended past its budget; empty for a hard cap. */
+function extendableSuffix(budget: WorkflowRunBudget): string {
+  const factor = budget.maxTotalFactor ?? 1;
+  if (!(factor > 1) || !((budget.maxExtensions ?? 0) > 0)) return "";
+  return ` (extendable up to ${formatDuration(Math.ceil(budget.workflowTotalMs * factor))})`;
 }
 
 export function scriptDisplayName(script: string): string {
@@ -384,7 +398,11 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "resolves to null (as does one that runs out of workflow budget while queued — a call made after the " +
       "budget is already exhausted rejects instead). A queued call whose dispatch fails (spawn error/timeout) " +
       "rejects like any admission failure, so fire-and-forget agent() calls (not awaited) should attach their " +
-      "own .catch(). Use this only when a single Agent call's own multi-step " +
+      "own .catch(). Timeouts work like a subagent's: with the default budget, a workflow that reaches its " +
+      "deadline gets a short grace window and you receive a notice — extend it with extend_subagent_timeout(run_id: " +
+      "<workflow id>, extend_s) (a limited number of extensions, capped by a hard ceiling) or let it stop as " +
+      "timed_out; its children are aborted with it. A workflow started with an explicit timeout_s is a hard cap " +
+      "(no grace, no extension). Use this only when a single Agent call's own multi-step " +
       "reasoning is not enough and you specifically need several independently-prompted subagents coordinated by " +
       "real control flow.",
     promptSnippet:
@@ -443,7 +461,7 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
           {
             type: "text" as const,
             text:
-              `Workflow "${name}" started in background (workflow_id: ${id}, budget: ${formatDuration(budget.workflowTotalMs)}). ` +
+              `Workflow "${name}" started in background (workflow_id: ${id}, budget: ${formatDuration(budget.workflowTotalMs)}${extendableSuffix(budget)}). ` +
               "You will receive a completion notification when it reaches a terminal state — do not block or poll " +
               `for it now; collect the full outcome with get_subagent_result(run_id: "${id}") after the notification ` +
               `arrives, or stop it early with abort_subagent(run_id: "${id}").`,

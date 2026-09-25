@@ -3,6 +3,7 @@ import { FakeClock, systemClock } from "../../src/core/clock.js";
 import { createWorkflowActivityRegistry } from "../../src/workflow/activity.js";
 import {
   createBackgroundWorkflows,
+  runBoundMs,
   type BackgroundSettlePhase,
   type BackgroundWorkflowView,
   type BackgroundWorkflowsDeps,
@@ -396,5 +397,111 @@ describe("background workflows: session shutdown", () => {
     });
     expect(runs.get("wf_seed")?.name).toBe("old");
     expect(runs.activeCount()).toBe(0);
+  });
+});
+
+describe("background workflows: deadline extension (workflow-agent-queue §4.3, stage B)", () => {
+  function extendable() {
+    const c = controllable({ settleOnStop: true });
+    const calls: Array<{ id: string; ms: number; reason?: string }> = [];
+    let state = {
+      startedAt: 0,
+      softAt: 60_000,
+      hardAt: 120_000,
+      extensions: 0,
+      grantedMs: 0,
+      graces: 1,
+      closed: false,
+      stopping: false,
+      graceUntil: 70_000,
+    } as ReturnType<NonNullable<Orchestrator["deadline"]>> & object;
+    const orch: Orchestrator = {
+      ...c.orch,
+      extend: (id, ms, opts) => {
+        calls.push({ id, ms, ...(opts?.reason !== undefined ? { reason: opts.reason } : {}) });
+        const { graceUntil: _g, ...rest } = state;
+        state = { ...rest, softAt: 90_000, extensions: 1, grantedMs: 30_000 };
+        return {
+          ok: true,
+          workflowId: id,
+          previousDeadlineAt: 60_000,
+          deadlineAt: 90_000,
+          requestedMs: ms,
+          grantedMs: 30_000,
+          clamped: false,
+          extensionsUsed: 1,
+          extensionsRemaining: 1,
+          hardDeadlineAt: 120_000,
+          rescuedFromGrace: true,
+        };
+      },
+      deadline: () => state,
+    };
+    return { c, orch, calls };
+  }
+
+  it("unknown → unknown_workflow; running → forwarded to the orchestrator; view reads the live deadline", async () => {
+    const e = extendable();
+    const { runs } = registry(() => e.orch);
+    expect(runs.extend("wf_nope", 1_000)).toEqual({ ok: false, reason: "unknown_workflow" });
+    const v = start(runs);
+    const before = runs.get(v.workflowId)!;
+    expect(before).toMatchObject({ deadlineAt: 60_000, graceUntil: 70_000, hardDeadlineAt: 120_000 });
+    expect(before.extensions).toBeUndefined();
+    const r = runs.extend(v.workflowId, 30_000, { reason: "why" });
+    expect(r).toMatchObject({ ok: true, deadlineAt: 90_000, rescuedFromGrace: true });
+    expect(e.calls).toEqual([{ id: v.workflowId, ms: 30_000, reason: "why" }]);
+    const after = runs.get(v.workflowId)!;
+    expect(after).toMatchObject({ deadlineAt: 90_000, hardDeadlineAt: 120_000, extensions: 1 });
+    expect(after.graceUntil).toBeUndefined();
+    e.c.release(
+      outcome({
+        diag: { ...outcome().diag, deadlineAt: 90_000, overtime: { graces: 1, extensions: 1, grantedMs: 30_000 } },
+      }),
+    );
+    await runs.wait(v.workflowId, { waitMs: 1_000 });
+    // Terminal: the outcome's (extended) deadline is frozen on the entry; extend refused.
+    expect(runs.get(v.workflowId)).toMatchObject({ status: "completed", deadlineAt: 90_000, extensions: 1 });
+    expect(runs.extend(v.workflowId, 1_000)).toEqual({ ok: false, reason: "already_terminal" });
+    expect(e.calls).toHaveLength(1);
+  });
+
+  it("a requested stop → stopping (the orchestrator is not asked)", async () => {
+    const e = extendable();
+    const { runs } = registry(() => e.orch);
+    const v = start(runs);
+    const stopping = runs.stop(v.workflowId, "user_stop");
+    expect(runs.extend(v.workflowId, 1_000)).toEqual({ ok: false, reason: "stopping" });
+    await stopping;
+    expect(e.calls).toEqual([]);
+  });
+
+  it("an orchestrator without extend() → unsupported; a throwing one degrades to unsupported", async () => {
+    const plain = controllable({ settleOnStop: true });
+    const { runs } = registry(() => plain.orch);
+    const v = start(runs);
+    expect(runs.extend(v.workflowId, 1_000)).toEqual({ ok: false, reason: "unsupported" });
+    await runs.stop(v.workflowId, "user_stop");
+
+    const throwing = controllable({ settleOnStop: true });
+    const { runs: runs2 } = registry(() => ({
+      ...throwing.orch,
+      extend: () => {
+        throw new Error("boom");
+      },
+    }));
+    const v2 = start(runs2);
+    expect(runs2.extend(v2.workflowId, 1_000)).toEqual({ ok: false, reason: "unsupported", detail: "boom" });
+    await runs2.stop(v2.workflowId, "user_stop");
+  });
+
+  it("runBoundMs is measured from the static hard ceiling ceil(total × max(1, factor))", () => {
+    const base = runBoundMs(LONG_BUDGET);
+    expect(runBoundMs({ ...LONG_BUDGET, maxTotalFactor: 1 })).toBe(base);
+    expect(runBoundMs({ ...LONG_BUDGET, maxTotalFactor: 0.5 })).toBe(base);
+    expect(runBoundMs({ ...LONG_BUDGET, maxTotalFactor: 2 })).toBe(base + 60_000);
+    expect(runBoundMs({ ...LONG_BUDGET, workflowTotalMs: 1_001, maxTotalFactor: 1.5 })).toBe(
+      base - 60_000 + Math.ceil(1_001 * 1.5),
+    );
   });
 });

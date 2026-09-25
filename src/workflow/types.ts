@@ -250,6 +250,13 @@ export interface WorkflowDiagnostics {
   readonly degraded?: "settlement_apply_failed" | "settlement_timeout";
   /** M3.4 §9.1/§9.2: the phase the script's most recent `phase(title)` call declared, if any — diagnostic only (`/agent status`-equivalent), not authoritative for `WorkflowChildSummary.phaseId` (each call records its own phase at submission time). */
   readonly currentPhaseId?: PhaseId;
+  /**
+   * workflow-agent-queue §4.3 (stage B): present once the workflow entered a
+   * timeout grace window or was extended at least once (`deadlineAt` above is
+   * then the *current*, extended soft deadline). Mirrors the subagent run's
+   * `RunDiagnostics.overtime` counters.
+   */
+  readonly overtime?: { readonly graces: number; readonly extensions: number; readonly grantedMs: Millis };
 }
 
 /**
@@ -335,6 +342,18 @@ export interface WorkflowRunBudget {
    * unaffected and keeps running (this is *not* a global `close_gate`).
    */
   readonly phaseTotalMs?: Millis;
+  /**
+   * workflow-agent-queue §4.1 (stage B): the workflow's timeout grace window
+   * and extension budget — the subagent `settings.budget.{totalGraceMs,
+   * maxExtensions, maxTotalFactor}` reused as-is (run-budget.ts; no
+   * workflow-specific keys). All optional: absent ⇒ no grace, no extension,
+   * `hardAt === softAt` (the pre-stage-B hard WT8 deadline). An explicit
+   * `timeout_s` forces `maxTotalFactor = 1` (hard cap, D-10); `extend.enabled
+   * = false` forces `maxExtensions = 0` (D-16).
+   */
+  readonly totalGraceMs?: Millis;
+  readonly maxExtensions?: number;
+  readonly maxTotalFactor?: number;
 }
 
 /** §3.5: what `WorkerHost.boot()` needs to start the worker thread and its sandboxed script. */

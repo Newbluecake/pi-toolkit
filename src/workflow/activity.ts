@@ -76,6 +76,13 @@ import type { WorkflowId, WorkflowTerminalStatus } from "./types.js";
  * unhandled rejection settled to null) is counted in `stageErrorTotal`.
  * Cancellation-class outcomes never reach either counter.
  */
+/*
+ * workflow-agent-queue §5 (stage B): `subagent:workflow:deadline` (kind
+ * "grace" | "extended") moves the row's `deadlineAt` in place and carries
+ * `graceUntil` (set on "grace", cleared on "extended" — a rescue),
+ * `hardDeadlineAt` and `extensions` (granted so far) for the fleet widget's
+ * `⏳宽限58s` / `⏳12m+1` header marker.
+ */
 export interface WorkflowQueuedChild {
   readonly callId: string;
   readonly label?: string;
@@ -141,7 +148,14 @@ export interface WorkflowActivitySnapshot {
   readonly workflowId: WorkflowId;
   readonly name: string;
   readonly startedAt: Millis;
+  /** Current soft deadline — moved in place by `subagent:workflow:deadline` events (stage B). */
   readonly deadlineAt?: Millis;
+  /** Stage B: end of the current timeout grace window (present only inside one). */
+  readonly graceUntil?: Millis;
+  /** Stage B: the static hard ceiling, known from the first deadline event on. */
+  readonly hardDeadlineAt?: Millis;
+  /** Stage B: extensions granted so far (present once ≥ 1). */
+  readonly extensions?: number;
   readonly currentPhaseId?: string;
   /** M10: children announced as spawned and not yet settled, in announcement order. */
   readonly activeChildren: readonly WorkflowChildActivity[];
@@ -226,6 +240,9 @@ interface MutableEntry {
   name: string;
   startedAt: Millis;
   deadlineAt?: Millis;
+  graceUntil?: Millis;
+  hardDeadlineAt?: Millis;
+  extensions: number;
   currentPhaseId?: string;
   plannedPhases: string[];
   visits: VisitEntry[];
@@ -255,6 +272,35 @@ function asStageErrorEvent(channel: string, payload: unknown): { workflowId: Wor
   if (channel !== "subagent:workflow:stage_error" || payload === null || typeof payload !== "object") return undefined;
   const p = payload as Record<string, unknown>;
   return typeof p.workflowId === "string" ? { workflowId: p.workflowId } : undefined;
+}
+
+/** Stage B: the `subagent:workflow:deadline` payload (orchestrator announceDeadline). Malformed → ignored. */
+function asDeadlineEvent(
+  channel: string,
+  payload: unknown,
+):
+  | {
+      workflowId: WorkflowId;
+      kind: "grace" | "extended";
+      deadlineAt: Millis;
+      graceUntil?: Millis;
+      hardDeadlineAt: Millis;
+      extensionsUsed: number;
+    }
+  | undefined {
+  if (channel !== "subagent:workflow:deadline" || payload === null || typeof payload !== "object") return undefined;
+  const p = payload as Record<string, unknown>;
+  if (typeof p.workflowId !== "string" || (p.kind !== "grace" && p.kind !== "extended")) return undefined;
+  if (typeof p.deadlineAt !== "number" || typeof p.hardDeadlineAt !== "number") return undefined;
+  if (typeof p.extensionsUsed !== "number") return undefined;
+  return {
+    workflowId: p.workflowId,
+    kind: p.kind,
+    deadlineAt: p.deadlineAt,
+    ...(typeof p.graceUntil === "number" ? { graceUntil: p.graceUntil } : {}),
+    hardDeadlineAt: p.hardDeadlineAt,
+    extensionsUsed: p.extensionsUsed,
+  };
 }
 
 function isPhaseEnterEvent(
@@ -394,6 +440,10 @@ export function createWorkflowActivityRegistry(
       name: e.name,
       startedAt: e.startedAt,
       ...(e.deadlineAt !== undefined ? { deadlineAt: e.deadlineAt } : {}),
+      // A frozen (terminal) snapshot is past any grace window.
+      ...(e.graceUntil !== undefined && !frozen ? { graceUntil: e.graceUntil } : {}),
+      ...(e.hardDeadlineAt !== undefined ? { hardDeadlineAt: e.hardDeadlineAt } : {}),
+      ...(e.extensions > 0 ? { extensions: e.extensions } : {}),
       ...(e.currentPhaseId !== undefined ? { currentPhaseId: e.currentPhaseId } : {}),
       activeChildren: [...e.activeChildren.values()],
       settledChildren: [...e.settledChildren],
@@ -427,6 +477,7 @@ export function createWorkflowActivityRegistry(
         name,
         startedAt,
         ...(deadlineAt !== undefined ? { deadlineAt } : {}),
+        extensions: 0,
         plannedPhases: plannedPhases === undefined ? [] : [...plannedPhases],
         visits: [],
         currentVisitIdx: -1,
@@ -449,6 +500,17 @@ export function createWorkflowActivityRegistry(
       if (phase !== undefined) {
         const entry = entries.get(phase.workflowId);
         if (entry) enterPhase(entry, phase.phaseId);
+        return;
+      }
+      const moved = asDeadlineEvent(channel, payload);
+      if (moved !== undefined) {
+        const entry = entries.get(moved.workflowId);
+        if (!entry) return;
+        entry.deadlineAt = moved.deadlineAt;
+        entry.hardDeadlineAt = moved.hardDeadlineAt;
+        entry.extensions = Math.max(entry.extensions, moved.extensionsUsed);
+        if (moved.kind === "grace" && moved.graceUntil !== undefined) entry.graceUntil = moved.graceUntil;
+        else delete entry.graceUntil; // "extended" = back to normal execution
         return;
       }
       const stageError = asStageErrorEvent(channel, payload);

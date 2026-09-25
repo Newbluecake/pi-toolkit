@@ -46,5 +46,10 @@ export function buildWorkflowRunBudget(settings: AgentSettings): WorkflowRunBudg
     replayTtlMs: settings.workflow.replayTtlMs,
     journalFlushMs: 2_000,
     ...(merged.phaseTotalMs > 0 ? { phaseTotalMs: merged.phaseTotalMs } : {}),
+    // workflow-agent-queue §4.1 (stage B): the subagent grace/extension knobs,
+    // reused verbatim; extend.enabled=false closes grace and extension alike (D-16).
+    totalGraceMs: settings.budget.totalGraceMs,
+    maxExtensions: settings.extend.enabled ? settings.budget.maxExtensions : 0,
+    maxTotalFactor: settings.budget.maxTotalFactor,
   };
 }

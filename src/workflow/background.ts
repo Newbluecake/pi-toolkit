@@ -3,6 +3,7 @@ import type { Clock, TimerHandle } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import type { WorkflowActivityRegistry } from "./activity.js";
 import { scanPlannedPhases } from "./phase-scan.js";
+import type { WorkflowExtendOutcome } from "./deadline.js";
 import type { Orchestrator, OrchestratorRunRequest } from "./orchestrator.js";
 import type {
   ReplayScope,
@@ -60,7 +61,14 @@ export interface BackgroundWorkflowView {
   /** Script `meta.name` (display label). */
   readonly name: string;
   readonly startedAt: Millis;
+  /** Current soft deadline (moves forward with each extension; read live from the orchestrator while running). */
   readonly deadlineAt?: Millis;
+  /** workflow-agent-queue §4.3 (stage B): end of the current timeout grace window (running workflows inside it only). */
+  readonly graceUntil?: Millis;
+  /** Static hard ceiling (`deadlineAt === hardDeadlineAt` with no extensions ⇒ an explicit `timeout_s` hard cap). */
+  readonly hardDeadlineAt?: Millis;
+  /** Extensions granted so far (present once ≥ 1). */
+  readonly extensions?: number;
   readonly status: BackgroundWorkflowStatus;
   readonly outcome?: WorkflowOutcome;
   readonly settledAt?: Millis;
@@ -143,6 +151,13 @@ export interface BackgroundWorkflows {
     cause: WorkflowStopCause,
     opts?: { waitMs?: Millis },
   ): Promise<BackgroundWorkflowStopResult>;
+  /**
+   * workflow-agent-queue §4.3 (stage B): synchronous deadline extension
+   * (`extend_subagent_timeout(run_id: "wf_…")`). Unknown id → `unknown_workflow`;
+   * a terminal entry → `already_terminal`; a stop already requested →
+   * `stopping`; otherwise the orchestrator's deadline controller decides.
+   */
+  extend(workflowId: WorkflowId, extendMs: Millis, opts?: { reason?: string }): WorkflowExtendOutcome;
   /** Insert an already-terminal entry (read back from a persisted notice after /reload); its retention starts now. No-op when the id exists. */
   seedTerminal(view: BackgroundWorkflowView & { readonly outcome: WorkflowOutcome }): void;
   /** Request `stop("shutdown")` on every running workflow; later settles report phase "shutdown". Idempotent. */
@@ -156,10 +171,18 @@ export interface BackgroundWorkflows {
   readonly shuttingDown: boolean;
 }
 
-/** The blocking tool's §4.3.1 `toolCallMs` minus the settle grace — how long `run()` itself may take. */
+/**
+ * The blocking tool's §4.3.1 `toolCallMs` minus the settle grace — how long
+ * `run()` itself may take. Stage B (workflow-agent-queue §4.3): measured from
+ * the static hard ceiling `ceil(workflowTotalMs × max(1, maxTotalFactor))` —
+ * grace windows and extensions never move WT8 past it, so the driver race
+ * stays statically bounded.
+ */
 export function runBoundMs(budget: WorkflowRunBudget): Millis {
+  const factor =
+    budget.maxTotalFactor !== undefined && Number.isFinite(budget.maxTotalFactor) ? budget.maxTotalFactor : 1;
   return (
-    budget.workflowTotalMs +
+    Math.ceil(budget.workflowTotalMs * Math.max(1, factor)) +
     TICK_MS +
     (budget.abortGraceMs ?? 10_000) +
     budget.terminateConfirmMs +
@@ -188,7 +211,10 @@ interface Entry {
   readonly workflowId: WorkflowId;
   readonly name: string;
   readonly startedAt: Millis;
-  readonly deadlineAt?: Millis;
+  /** Initial soft deadline; replaced by the outcome's (possibly extended) one at finalize. */
+  deadlineAt?: Millis;
+  /** Frozen at finalize from the outcome's diag (live values come from the orchestrator). */
+  extensions?: number;
   readonly budget?: WorkflowRunBudget;
   readonly orchestrator?: Orchestrator;
   status: BackgroundWorkflowStatus;
@@ -203,11 +229,25 @@ interface Entry {
 }
 
 function view(entry: Entry): BackgroundWorkflowView {
+  // Stage B: a running workflow's deadline moves (grace / extensions) — read it live.
+  let live: ReturnType<NonNullable<Orchestrator["deadline"]>>;
+  if (entry.status === "running") {
+    try {
+      live = entry.orchestrator?.deadline?.(entry.workflowId);
+    } catch {
+      live = undefined;
+    }
+  }
+  const deadlineAt = live?.softAt ?? entry.deadlineAt;
+  const extensions = live?.extensions ?? entry.extensions;
   return {
     workflowId: entry.workflowId,
     name: entry.name,
     startedAt: entry.startedAt,
-    ...(entry.deadlineAt !== undefined ? { deadlineAt: entry.deadlineAt } : {}),
+    ...(deadlineAt !== undefined ? { deadlineAt } : {}),
+    ...(live?.graceUntil !== undefined ? { graceUntil: live.graceUntil } : {}),
+    ...(live !== undefined ? { hardDeadlineAt: live.hardAt } : {}),
+    ...(extensions !== undefined && extensions > 0 ? { extensions } : {}),
     status: entry.status,
     ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
     ...(entry.settledAt !== undefined ? { settledAt: entry.settledAt } : {}),
@@ -303,6 +343,8 @@ export function createBackgroundWorkflows(deps: BackgroundWorkflowsDeps): Backgr
     entry.status = outcome.status;
     entry.outcome = outcome;
     entry.settledAt = clock.now();
+    if (outcome.diag.deadlineAt !== undefined) entry.deadlineAt = outcome.diag.deadlineAt;
+    if (outcome.diag.overtime !== undefined) entry.extensions = outcome.diag.overtime.extensions;
     try {
       // M11: pass the outcome status so the fleet widget's frozen pipeline
       // snapshot carries the real terminal mark for its linger window.
@@ -500,6 +542,23 @@ export function createBackgroundWorkflows(deps: BackgroundWorkflowsDeps): Backgr
       return r.kind === "value"
         ? { ok: true, settled: true, view: view(entry) }
         : { ok: true, settled: false, view: view(entry) };
+    },
+    extend(workflowId, extendMs, opts) {
+      const entry = entries.get(workflowId);
+      if (!entry) return { ok: false, reason: "unknown_workflow" };
+      if (entry.status !== "running") return { ok: false, reason: "already_terminal" };
+      if (entry.stopRequested !== undefined) return { ok: false, reason: "stopping" };
+      const extend = entry.orchestrator?.extend;
+      if (!extend) return { ok: false, reason: "unsupported" };
+      try {
+        return extend.call(entry.orchestrator, workflowId, extendMs, opts);
+      } catch (error) {
+        return {
+          ok: false,
+          reason: "unsupported",
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
     },
     seedTerminal(seed) {
       if (entries.has(seed.workflowId)) return;

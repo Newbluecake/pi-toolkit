@@ -195,8 +195,25 @@ export interface HostCallHandlerDeps {
     | "cancelRetryWindowMs"
     | "phaseTotalMs"
   >;
-  /** WR2-equivalent: the workflow's own absolute deadline, computed once at enqueue and never recomputed here. */
+  /**
+   * The workflow's static absolute **hard ceiling** (`W.hardAt`, fixed at
+   * enqueue — workflow-agent-queue §0′ #1). Children are pinned to it: every
+   * dispatched child gets `deadlineAt = W.hardAt` (CC4) and `budgetOverride.
+   * totalMs = W.hardAt − now` (explicit ⇒ a hard-capped child, D-10), and
+   * every `agent()` ack carries it as `deadlineAt` (the worker's settle-wait
+   * bound). Children still never outlive the workflow: it ends at `killAt()`
+   * and `stopOwned` structurally stops them. Without grace/extension
+   * configured this equals the soft deadline.
+   */
   readonly workflowDeadlineAt?: Millis;
+  /**
+   * workflow-agent-queue §4.3 (stage B): the *mutable* instant the workflow
+   * is going to stop at (grace window / extensions included — the deadline
+   * controller's `killAt`). Bounds every host call (HR2), `gate()`, the BW2
+   * budget checks and the queued-dispatch spawn timeout, so a workflow inside
+   * its grace window keeps dispatching. Defaults to `workflowDeadlineAt`.
+   */
+  killAt?(): Millis;
   readonly defaultAgentType?: string;
   readonly parentRunId?: string;
   /** M3.5 §6.2: the workflow run's own top-level `args` — folded into every task's `TaskSemantics.workflowArgs`. */
@@ -567,9 +584,11 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     } satisfies HostSettleEnvelope);
   }
 
+  /** Time left until the workflow stops (`killAt`, grace/extensions included); +∞ for the defensive uncapped case. */
   function remainingWorkflowMs(): Millis {
-    if (deps.workflowDeadlineAt === undefined) return Number.POSITIVE_INFINITY;
-    return Math.max(0, deps.workflowDeadlineAt - deps.clock.now());
+    const killAt = deps.killAt?.() ?? deps.workflowDeadlineAt;
+    if (killAt === undefined) return Number.POSITIVE_INFINITY;
+    return Math.max(0, killAt - deps.clock.now());
   }
 
   async function handleAgent(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
@@ -823,8 +842,15 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     return { kind: "host_ack", id: callId, ok: true, value: { callId, deadlineAt: derived.deadlineAt } };
   }
 
-  /** The one `deriveChildBudget` call site — submission-time BW2 precheck and dispatch time alike. */
+  /**
+   * The one `deriveChildBudget` call site — submission-time BW2 precheck and
+   * dispatch time alike. The child budget is derived against the static hard
+   * ceiling (`workflowDeadlineAt` = `W.hardAt`, §0′ #1: totalMs = hardAt − now,
+   * deadlineAt = hardAt), while BW2 "expired" is judged against `killAt` —
+   * the instant the workflow itself actually stops.
+   */
   function deriveNow(): ReturnType<typeof deriveChildBudget> {
+    if (remainingWorkflowMs() <= 0) return { totalMs: 0, queueWaitMs: 0, capped: "expired" };
     return deriveChildBudget(
       {
         now: deps.clock.now(),

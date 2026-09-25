@@ -608,3 +608,41 @@ describe("workflow activity registry: queue and warning counters (workflow-agent
     });
   });
 });
+
+describe("workflow activity registry: subagent:workflow:deadline (workflow-agent-queue §5, stage B)", () => {
+  const deadline = (kind: "grace" | "extended", extra: Record<string, unknown> = {}) => ({
+    workflowId: WF,
+    at: 62_000,
+    kind,
+    deadlineAt: 61_000,
+    hardDeadlineAt: 121_000,
+    extensionsUsed: 0,
+    maxExtensions: 3,
+    ...extra,
+  });
+
+  it("grace sets graceUntil + hardDeadlineAt; extended moves deadlineAt in place, clears graceUntil, counts extensions", () => {
+    const reg = registered();
+    expect(reg.list()[0]).toMatchObject({ deadlineAt: 61_000 });
+    expect(reg.list()[0]!.graceUntil).toBeUndefined();
+    reg.onEvent("subagent:workflow:deadline", deadline("grace", { graceUntil: 71_000 }));
+    expect(reg.list()[0]).toMatchObject({ deadlineAt: 61_000, graceUntil: 71_000, hardDeadlineAt: 121_000 });
+    expect(reg.list()[0]!.extensions).toBeUndefined();
+    reg.onEvent("subagent:workflow:deadline", deadline("extended", { deadlineAt: 90_000, extensionsUsed: 1 }));
+    const after = reg.list()[0]!;
+    expect(after).toMatchObject({ deadlineAt: 90_000, hardDeadlineAt: 121_000, extensions: 1 });
+    expect(after.graceUntil).toBeUndefined();
+  });
+
+  it("malformed or unknown-workflow deadline events are ignored; the frozen snapshot never shows a grace window", () => {
+    const reg = registered();
+    reg.onEvent("subagent:workflow:deadline", { workflowId: WF, kind: "grace" });
+    reg.onEvent("subagent:workflow:deadline", deadline("grace", { workflowId: "wf_other", graceUntil: 1 }));
+    expect(reg.list()[0]!.hardDeadlineAt).toBeUndefined();
+    reg.onEvent("subagent:workflow:deadline", deadline("grace", { graceUntil: 71_000, extensionsUsed: 2 }));
+    reg.unregister(WF, { status: "timed_out" });
+    const frozen = reg.listForDisplay()[0]!;
+    expect(frozen.graceUntil).toBeUndefined();
+    expect(frozen).toMatchObject({ extensions: 2, terminal: { status: "timed_out" } });
+  });
+});

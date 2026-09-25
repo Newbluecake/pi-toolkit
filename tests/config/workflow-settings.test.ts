@@ -60,6 +60,22 @@ describe("workflow.budget.workflowTotalS must be > 0", () => {
     expect(mergeBudget(base, Number.NaN)).toBe(base);
     expect(mergeBudget(base, 7_000).workflowTotalMs).toBe(7_000);
   });
+
+  it("stage B: an explicit timeout_s is a hard cap (maxTotalFactor forced to 1); the default budget keeps the subagent grace knobs", () => {
+    const base = buildWorkflowRunBudget(DEFAULT_SETTINGS);
+    expect(base).toMatchObject({
+      totalGraceMs: DEFAULT_SETTINGS.budget.totalGraceMs,
+      maxExtensions: DEFAULT_SETTINGS.budget.maxExtensions,
+      maxTotalFactor: DEFAULT_SETTINGS.budget.maxTotalFactor,
+    });
+    expect(base.maxTotalFactor).toBeGreaterThan(1);
+    const explicit = mergeBudget(base, 7_000);
+    expect(explicit.maxTotalFactor).toBe(1);
+    expect(explicit.maxExtensions).toBe(base.maxExtensions);
+    // extend.enabled=false closes grace and extension alike (D-16).
+    const off = buildWorkflowRunBudget({ ...DEFAULT_SETTINGS, extend: { ...DEFAULT_SETTINGS.extend, enabled: false } });
+    expect(off.maxExtensions).toBe(0);
+  });
 });
 
 describe("loadSettingsFromFile: workflow.budget.workflowTotalS WARN", () => {

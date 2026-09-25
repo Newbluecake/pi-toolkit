@@ -496,3 +496,41 @@ describe("formatWorkflowNotification", () => {
     expect(body).toContain("aborted (user_stop)");
   });
 });
+
+describe("SubagentWorkflow tool: grace & extension (workflow-agent-queue §4.1, stage B)", () => {
+  function recordingRuns() {
+    const started: WorkflowRunBudget[] = [];
+    const runs = {
+      start: (req: { budget: WorkflowRunBudget; name: string }) => {
+        started.push(req.budget);
+        return { workflowId: "wf_0123456789abcdef0123", name: req.name, startedAt: 0, status: "running" as const };
+      },
+    };
+    return { runs, started };
+  }
+  const script = 'export const meta = { name: "g", description: "t" };\nreturn 1;';
+  const EXTENDABLE: WorkflowRunBudget = { ...REAL_BUDGET, totalGraceMs: 90_000, maxExtensions: 3, maxTotalFactor: 2 };
+
+  it("default budget: started text names the hard ceiling it can be extended to; the budget keeps its factor", async () => {
+    const { runs, started } = recordingRuns();
+    const tool = createWorkflowTool({ defaultBudget: EXTENDABLE, runs });
+    const body = text(await tool.execute("c", { script }, undefined));
+    expect(body).toContain("budget: 20s (extendable up to 40s)");
+    expect(started[0]!.maxTotalFactor).toBe(2);
+  });
+
+  it("explicit timeout_s: hard cap (factor 1), no extendable suffix", async () => {
+    const { runs, started } = recordingRuns();
+    const tool = createWorkflowTool({ defaultBudget: EXTENDABLE, runs });
+    const body = text(await tool.execute("c", { script, timeout_s: 30 }, undefined));
+    expect(body).toContain("budget: 30s)");
+    expect(body).not.toContain("extendable");
+    expect(started[0]).toMatchObject({ workflowTotalMs: 30_000, maxTotalFactor: 1 });
+  });
+
+  it("the description tells the model about the grace notice, extend_subagent_timeout and the timeout_s hard cap", () => {
+    const tool = createWorkflowTool({ defaultBudget: EXTENDABLE, runs: recordingRuns().runs });
+    expect(tool.description).toContain("extend_subagent_timeout(run_id: <workflow id>, extend_s)");
+    expect(tool.description).toMatch(/explicit timeout_s is a hard cap/);
+  });
+});

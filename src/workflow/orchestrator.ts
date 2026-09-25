@@ -8,6 +8,13 @@ import {
   type HostCallHandler,
   type JournalRunConfig,
 } from "./host.js";
+import {
+  createWorkflowDeadlineController,
+  type WorkflowDeadlineController,
+  type WorkflowDeadlineNotice,
+  type WorkflowDeadlineState,
+  type WorkflowExtendOutcome,
+} from "./deadline.js";
 import { createJournalStore } from "./journal.js";
 import { buildReplayIndex } from "./replay.js";
 import { assertHeartbeatBudgetInvariant, startRunawayWatchdog } from "./runaway.js";
@@ -119,6 +126,14 @@ export interface OrchestratorDeps {
    * disables the feature entirely, see `OrchestratorRunRequest.journal`.
    */
   journalRootDir?: string;
+  /**
+   * workflow-agent-queue §4.3/§4.5 (stage B): fired when a run enters its
+   * timeout grace window (`kind: "grace"`) or is extended (`"extended"`) —
+   * alongside the `subagent:workflow:deadline` event. The assembler (stack.ts)
+   * renders + delivers it on the `subagent:timeout` channel. Best-effort: a
+   * throwing sink is swallowed, never affects the run.
+   */
+  onDeadlineNotice?(notice: WorkflowDeadlineNotice): void;
 }
 
 export interface Orchestrator {
@@ -150,6 +165,19 @@ export interface Orchestrator {
    * `workflowId` was never `run()` (never rejects once a run has started).
    */
   settled(workflowId: WorkflowId): Promise<WorkflowOutcome>;
+  /**
+   * workflow-agent-queue §4.3 (stage B): synchronously push a running
+   * workflow's soft deadline forward (`extend_subagent_timeout(run_id:
+   * "wf_…")`). Only the run's deadline controller decides (review v2 #5):
+   * once `finish()` has made the terminal decision — which closes the
+   * controller synchronously — every call fails with `already_terminal`,
+   * independent of the background entry's state. Re-arms WT8 and emits the
+   * `"extended"` notice on success. Optional so structural test doubles keep
+   * compiling; the production orchestrator always implements it.
+   */
+  extend?(workflowId: WorkflowId, extendMs: number, opts?: { reason?: string }): WorkflowExtendOutcome;
+  /** Live deadline state of a running workflow (`undefined` once reaped or for an uncapped run). */
+  deadline?(workflowId: WorkflowId): WorkflowDeadlineState | undefined;
 }
 
 /** Exported so the `SubagentWorkflow` tool can reject an oversized/empty script synchronously, before it starts a background run. */
@@ -247,6 +275,8 @@ interface RunEntry {
   outcomeAt1(): WorkflowOutcome | undefined;
   readonly settled: Promise<WorkflowOutcome>;
   requestStop(cause: WorkflowStopCause): void;
+  extend(extendMs: number, opts?: { reason?: string }): WorkflowExtendOutcome;
+  readonly deadline: WorkflowDeadlineController | undefined;
 }
 
 /**
@@ -306,12 +336,101 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
     let triggerAbort: ((cause: WorkflowStopCause) => void) | undefined;
     let pendingExternalStop: WorkflowStopCause | undefined;
 
+    // workflow-agent-queue §4.2/§4.3 (stage B): the single source of truth for
+    // WT8 — soft deadline, grace window, extensions, hard ceiling. Created at
+    // `enqueued` time (createdAt) so an extension that lands while the worker
+    // is still booting is honored when WT8 is first armed. Closed
+    // synchronously by `finish()` / `settleImmediately` (review v2 #5).
+    const deadline: WorkflowDeadlineController | undefined =
+      req.budget.workflowTotalMs > 0
+        ? createWorkflowDeadlineController(req.workflowId, createdAt, {
+            totalMs: req.budget.workflowTotalMs,
+            totalGraceMs: req.budget.totalGraceMs ?? 0,
+            maxExtensions: req.budget.maxExtensions ?? 0,
+            maxTotalFactor: req.budget.maxTotalFactor ?? 1,
+          })
+        : undefined;
+    /** Set while WT8 is live (inside the resolution executor); cleared by `cleanup()`. */
+    let rearmDeadline: (() => void) | undefined;
+
+    /** Emit the `subagent:workflow:deadline` event + the notice sink. Observational — never throws. */
+    const announceDeadline = (
+      kind: WorkflowDeadlineNotice["kind"],
+      extra: Pick<WorkflowDeadlineNotice, "requestedMs" | "grantedMs" | "reason"> = {},
+    ): void => {
+      if (!deadline) return;
+      const at = deps.clock.now();
+      const s = deadline.state();
+      const stats = hostHandlerRef?.registry.stats;
+      const phaseId = hostHandlerRef?.currentPhaseId;
+      const notice: WorkflowDeadlineNotice = {
+        kind,
+        workflowId: req.workflowId,
+        at,
+        deadlineAt: s.softAt,
+        ...(s.graceUntil !== undefined ? { graceUntil: s.graceUntil } : {}),
+        hardDeadlineAt: s.hardAt,
+        extensionsUsed: s.extensions,
+        maxExtensions: deadline.policy.maxExtensions,
+        totalMs: deadline.policy.totalMs,
+        ...(kind === "grace"
+          ? { suggestedExtendMs: Math.min(deadline.policy.totalMs, s.hardAt - Math.max(at, s.softAt)) }
+          : {}),
+        ...extra,
+        ...(stats !== undefined
+          ? {
+              live: {
+                ...(phaseId !== undefined ? { phaseId } : {}),
+                running: stats.admission + stats.pre_runner + stats.running,
+                queued: stats.queued,
+                settled: hostHandlerRef?.children.length ?? 0,
+              },
+            }
+          : {}),
+      };
+      try {
+        deps.emit?.("subagent:workflow:deadline", {
+          workflowId: req.workflowId,
+          at,
+          kind,
+          deadlineAt: s.softAt,
+          ...(s.graceUntil !== undefined ? { graceUntil: s.graceUntil } : {}),
+          hardDeadlineAt: s.hardAt,
+          extensionsUsed: s.extensions,
+          maxExtensions: deadline.policy.maxExtensions,
+        });
+      } catch {
+        // observational
+      }
+      try {
+        deps.onDeadlineNotice?.(notice);
+      } catch (error) {
+        console.warn(
+          `[pi-subagent] workflow ${req.workflowId} deadline notice sink threw (ignored): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+
     runs.set(req.workflowId, {
       outcomeAt1: () => outcomeAt1Snapshot,
       settled: settledPromise,
       requestStop: (cause) => {
+        deadline?.markStopping(); // an extension racing the stop is refused with `stopping`.
         if (triggerAbort) triggerAbort(cause);
         else pendingExternalStop = cause; // WI6: stop() raced boot — honored the instant the executor is ready.
+      },
+      deadline,
+      extend: (extendMs, opts) => {
+        if (!deadline) return { ok: false, reason: "uncapped" };
+        const out = deadline.extend(deps.clock.now(), extendMs);
+        if (!out.ok) return out;
+        rearmDeadline?.();
+        announceDeadline("extended", {
+          requestedMs: out.requestedMs,
+          grantedMs: out.grantedMs,
+          ...(opts?.reason !== undefined ? { reason: opts.reason } : {}),
+        });
+        return out;
       },
     });
 
@@ -327,11 +446,15 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       orphanChildren: readonly OrphanChildSummary[],
     ): WorkflowOutcome => {
       const settledAt = deps.clock.now();
+      const dl = deadline?.state();
       const diag: WorkflowDiagnostics = {
         createdAt,
         startedAt: createdAt,
         settledAt,
-        ...(req.budget.workflowTotalMs > 0 ? { deadlineAt: createdAt + req.budget.workflowTotalMs } : {}),
+        ...(dl !== undefined ? { deadlineAt: dl.softAt } : {}),
+        ...(dl !== undefined && (dl.graces > 0 || dl.extensions > 0)
+          ? { overtime: { graces: dl.graces, extensions: dl.extensions, grantedMs: dl.grantedMs } }
+          : {}),
         heartbeat,
         logLines,
         ...(stageErrorCount > 0 ? { stageErrors: { count: stageErrorCount, samples: stageErrorSamples } } : {}),
@@ -377,6 +500,7 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
 
     /** Pre-boot fast paths never had a worker/children to reconcile — settle immediately at ①=②. */
     const settleImmediately = (status: WorkflowTerminalStatus, extra: ReturnType<typeof extraFor>): WorkflowOutcome => {
+      deadline?.close();
       const outcome = buildOutcome(status, false, extra, []);
       outcomeAt1Snapshot = outcome;
       deps.emit?.(`subagent:workflow:${status}`, outcome);
@@ -413,7 +537,6 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       return settleImmediately("failed", { stopCause: "script_error", error: { message: loadCheck.value.message } });
     }
 
-    const deadlineAt = req.budget.workflowTotalMs > 0 ? createdAt + req.budget.workflowTotalMs : undefined;
     const workerHost = deps.createWorkerHost();
 
     // M3.5 §6.5/§6.6: load (once, before boot) whatever journal history exists
@@ -499,7 +622,11 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       spawner,
       gateRunner,
       budget: req.budget,
-      ...(deadlineAt !== undefined ? { workflowDeadlineAt: deadlineAt } : {}),
+      // §0′ #1: children are pinned to the static hard ceiling; everything
+      // that bounds *this* workflow's own activity reads the mutable killAt.
+      ...(deadline !== undefined
+        ? { workflowDeadlineAt: deadline.state().hardAt, killAt: () => deadline.killAt(deps.clock.now()) }
+        : {}),
       ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
       ...(req.args !== undefined ? { workflowArgs: req.args } : {}),
       ...(journalConfig !== undefined ? { journal: journalConfig } : {}),
@@ -554,13 +681,17 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       let onAbort: (() => void) | undefined;
 
       const cleanup = (): void => {
+        deadline?.close(); // review v2 #5: synchronously, so an extend racing the teardown is refused.
+        rearmDeadline = undefined;
         if (deadlineTimer !== undefined) deps.clock.clearTimer(deadlineTimer);
+        deadlineTimer = undefined;
         watchdog?.stop();
         if (onAbort) req.signal?.removeEventListener("abort", onAbort);
       };
       const finish = (r: InternalResolution): void => {
         if (done) return; // WR1/WI6: terminal decision is made at most once.
         done = true;
+        deadline?.close(); // review v2 #5: the terminal decision closes the deadline controller synchronously.
         cleanup();
         resolve(r);
       };
@@ -584,12 +715,31 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       });
       workerHost.events.onError((error) => finish({ kind: "failed", stopCause: "worker_died", error }));
 
-      if (deadlineAt !== undefined) {
-        // WT8: the sole hard-guarantee trigger (§4.1) — armed once at
-        // `enqueued` time (`createdAt` above), never rearmed (WR2).
-        deadlineTimer = deps.clock.setTimer(Math.max(0, deadlineAt - deps.clock.now()), () =>
-          finish({ kind: "timed_out", timeoutReason: "workflow_total" }),
-        );
+      if (deadline !== undefined) {
+        // WT8: the sole hard-guarantee trigger (§4.1). Stage B (workflow-agent-
+        // queue §4.3): driven by the deadline controller — armed at
+        // `nextTimerAt()` (soft deadline, or the grace window's end) and
+        // re-armed only when a grace window opens or an extension moves the
+        // soft deadline. WR2, restated: the fire time only ever moves forward,
+        // never past the static `hardAt`, and WT8 is armed at most
+        // 1 + 2 × maxExtensions times (each grace needs an unused extension).
+        const armDeadline = (): void => {
+          if (done) return;
+          if (deadlineTimer !== undefined) deps.clock.clearTimer(deadlineTimer);
+          deadlineTimer = deps.clock.setTimer(Math.max(0, deadline.nextTimerAt() - deps.clock.now()), () => {
+            deadlineTimer = undefined;
+            if (done) return;
+            const verdict = deadline.onTimer(deps.clock.now());
+            if (verdict.kind === "expire") {
+              finish({ kind: "timed_out", timeoutReason: "workflow_total" });
+              return;
+            }
+            armDeadline();
+            if (verdict.kind === "grace") announceDeadline("grace");
+          });
+        };
+        rearmDeadline = armDeadline;
+        armDeadline();
       }
 
       watchdog = startRunawayWatchdog({
@@ -757,6 +907,14 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       const entry = runs.get(workflowId);
       if (!entry) return Promise.reject(new Error(`workflow: no run found for workflowId '${workflowId}'`));
       return entry.settled;
+    },
+    extend(workflowId, extendMs, opts) {
+      const entry = runs.get(workflowId);
+      if (!entry) return { ok: false, reason: "unknown_workflow" };
+      return entry.extend(extendMs, opts);
+    },
+    deadline(workflowId) {
+      return runs.get(workflowId)?.deadline?.state();
     },
   };
 }
