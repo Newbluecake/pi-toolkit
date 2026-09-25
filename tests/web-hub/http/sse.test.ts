@@ -197,3 +197,74 @@ describe("SseHub", () => {
     expect(ev.id).toBe(1_700_000_000_001);
   });
 });
+
+// S1 (§4.2, §11 W1 契约测试 ⑩): attach(auth) / revoke(pred, reason) / list().
+describe("SseHub auth / revoke / list (plan §4.2)", () => {
+  function authOf(userId: number): NonNullable<SseClient["auth"]> {
+    return { sidHash: `sid-${userId}`, userId, epoch: 1, boundOrigin: "http://192.168.1.5:7879", verifiedAt: 0 };
+  }
+
+  async function setupAuthed(): Promise<{ hub: SseHub; port: number; attached: SseClient[] }> {
+    const h = createSseHub({ now: () => 0 });
+    hub = h;
+    const attached: SseClient[] = [];
+    server = createServer((req, res) => {
+      const userId = attached.length + 1;
+      attached.push(h.attach(req, res, undefined, authOf(userId)));
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+    return { hub: h, port: (server.address() as { port: number }).port, attached };
+  }
+
+  it("attach(..., auth) stores it on the returned client and in list()", async () => {
+    const { port, attached } = await setupAuthed();
+    const c = await connect(port);
+    expect(attached[0]!.auth).toEqual(authOf(1));
+    expect(hub!.list()).toHaveLength(1);
+    expect(hub!.list()[0]!.auth).toEqual(authOf(1));
+    c.close();
+  });
+
+  it("a plain attach() (no auth arg) leaves `auth` unset", async () => {
+    const { port } = await setup();
+    const c = await connect(port);
+    expect(hub!.list()[0]!.auth).toBeUndefined();
+    c.close();
+  });
+
+  it("revoke(pred, reason) stops publish/send, emits event:auth, then ends the stream — only for matching clients", async () => {
+    const { hub: h, port } = await setupAuthed();
+    const a = await connect(port); // user 1
+    const b = await connect(port); // user 2
+    const n = h.revoke((c) => c.auth?.userId === 1, "revoked");
+    expect(n).toBe(1);
+    const authEv = await a.waitFor((e) => e.event === "auth");
+    expect(authEv.data).toEqual({ reason: "revoked" });
+    await a.waitEnd();
+    await vi.waitFor(() => expect(h.count()).toBe(1)); // only b remains attached
+    h.publish("status", {}); // broadcast after revoke
+    await settle();
+    expect(b.events.some((e) => e.event === "status")).toBe(true);
+    expect(a.events.filter((e) => e.event === "status")).toHaveLength(0); // revoked client received nothing further
+    b.close();
+  });
+
+  it("revoke() is idempotent per client (a second matching call counts/ends nothing more)", async () => {
+    const { hub: h, port } = await setupAuthed();
+    const a = await connect(port);
+    const first = h.revoke((c) => c.auth?.userId === 1, "revoked");
+    const second = h.revoke((c) => c.auth?.userId === 1, "revoked");
+    expect(first).toBe(1);
+    expect(second).toBe(0);
+    await a.waitEnd();
+  });
+
+  it("list() only returns currently attached (non-closed) clients", async () => {
+    const { hub: h, port } = await setupAuthed();
+    const a = await connect(port);
+    expect(h.list()).toHaveLength(1);
+    a.close();
+    await vi.waitFor(() => expect(h.count()).toBe(0));
+    expect(h.list()).toHaveLength(0);
+  });
+});

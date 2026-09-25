@@ -1,0 +1,163 @@
+/**
+ * Contract test ⑪ (plan §11 表格) + `parseHubLanConfig` unit tests (§1.4.3,
+ * §9.1). `parseHubLanConfig` lives in `hub/lan-config.ts` and is re-exported
+ * from `hub/main.ts`; tests import the former directly — `hub/main.ts` runs
+ * `void main()` at module scope (spawned-process entry point) and must never
+ * be `import`ed from a test process (it would call `process.exit`).
+ */
+import { afterEach, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { parseHubLanConfig } from "../../../src/web-hub/hub/lan-config.js";
+import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
+import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
+import { resolveHubPaths } from "../../../src/web-hub/protocol/paths.js";
+import { config, tmpDirs } from "./helpers.js";
+
+const tmp = tmpDirs();
+const hubs: RunningHub[] = [];
+
+afterEach(async () => {
+  for (const h of hubs.splice(0)) await h.close("test");
+  tmp.cleanup();
+});
+
+function fakeFrontend(): FrontendFactory & { deps: FrontendDeps[] } {
+  const f = ((deps: FrontendDeps): HttpFrontend => {
+    f.deps.push(deps);
+    return { listen: async () => ({ port: 40077 }), close: async () => {}, clientCount: () => 0 };
+  }) as FrontendFactory & { deps: FrontendDeps[] };
+  f.deps = [];
+  return f;
+}
+
+describe("parseHubLanConfig (plan §1.4.3, §9.1)", () => {
+  const valid = { port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
+
+  it("accepts a minimal valid config", () => {
+    expect(parseHubLanConfig(valid)).toEqual({ ok: true, lan: valid });
+  });
+
+  it("lower-cases / canonicalizes extraHosts entries", () => {
+    const r = parseHubLanConfig({ ...valid, extraHosts: ["MyHost.Local"] });
+    expect(r).toEqual({ ok: true, lan: { ...valid, extraHosts: ["myhost.local"] } });
+  });
+
+  it("rejects a non-object", () => {
+    expect(parseHubLanConfig(null).ok).toBe(false);
+    expect(parseHubLanConfig("x").ok).toBe(false);
+    expect(parseHubLanConfig([]).ok).toBe(false);
+  });
+
+  it("rejects an out-of-range port", () => {
+    expect(parseHubLanConfig({ ...valid, port: 0 }).ok).toBe(false);
+    expect(parseHubLanConfig({ ...valid, port: 70000 }).ok).toBe(false);
+    expect(parseHubLanConfig({ ...valid, port: 1.5 }).ok).toBe(false);
+  });
+
+  it("rejects a numeric/denylisted extraHosts entry", () => {
+    const numeric = parseHubLanConfig({ ...valid, extraHosts: ["202507220006"] });
+    expect(numeric.ok).toBe(false);
+    if (!numeric.ok) expect(numeric.detail).toContain("numeric");
+    const denylisted = parseHubLanConfig({ ...valid, extraHosts: ["dev"] });
+    expect(denylisted.ok).toBe(false);
+    if (!denylisted.ok) expect(denylisted.detail).toContain("denylisted");
+  });
+
+  it("rejects a non-IPv4 trustProxyFrom entry", () => {
+    const r = parseHubLanConfig({
+      ...valid,
+      trustProxyFrom: ["not-an-ip"],
+      externalOrigins: ["https://hub.example.com"],
+    });
+    expect(r.ok).toBe(false);
+  });
+
+  it("rejects a non-https externalOrigins entry", () => {
+    const r = parseHubLanConfig({
+      ...valid,
+      trustProxyFrom: ["127.0.0.1"],
+      externalOrigins: ["http://hub.example.com"],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toContain("origin-not-https");
+  });
+
+  it("accepts a matched trustProxyFrom / externalOrigins pair", () => {
+    const r = parseHubLanConfig({
+      ...valid,
+      trustProxyFrom: ["127.0.0.1"],
+      externalOrigins: ["https://hub.example.com"],
+    });
+    expect(r).toEqual({
+      ok: true,
+      lan: { ...valid, trustProxyFrom: ["127.0.0.1"], externalOrigins: ["https://hub.example.com"] },
+    });
+  });
+
+  it("rejects trustProxyFrom set without externalOrigins (proxy-config-mismatch)", () => {
+    const r = parseHubLanConfig({ ...valid, trustProxyFrom: ["127.0.0.1"] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toContain("proxy-config-mismatch");
+  });
+
+  it("rejects externalOrigins set without trustProxyFrom (proxy-config-mismatch)", () => {
+    const r = parseHubLanConfig({ ...valid, externalOrigins: ["https://hub.example.com"] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toContain("proxy-config-mismatch");
+  });
+
+  it("rejects a non-array extraHosts/trustProxyFrom/externalOrigins", () => {
+    expect(parseHubLanConfig({ ...valid, extraHosts: "x" }).ok).toBe(false);
+    expect(parseHubLanConfig({ ...valid, trustProxyFrom: "x" }).ok).toBe(false);
+    expect(parseHubLanConfig({ ...valid, externalOrigins: "x" }).ok).toBe(false);
+  });
+});
+
+describe("startHub: lanConfigError / lanAssembly stub (plan §1.4.2, §1.4.3, contract ⑪)", () => {
+  it("deps.lanConfigError ⇒ hub.json.lan is off/bad-config and RunningHub.lan is undefined", async () => {
+    const home = tmp.make("wh-lanconfig-");
+    const fe = fakeFrontend();
+    const hub = await startHub(config({ home }), fe, {
+      uid: process.getuid?.() ?? 0,
+      lanConfigError: { detail: "port[0]=99999999: out of range" },
+    });
+    if ("exists" in hub) throw new Error("unexpected exists");
+    hubs.push(hub);
+    expect(hub.lan).toBeUndefined();
+    expect(hub.lanStatus()).toEqual({ state: "off", reason: "bad-config", detail: "port[0]=99999999: out of range" });
+    expect(fe.deps[0]!.lan).toBeUndefined();
+  });
+
+  it("config.lan and deps.lanConfigError together is a caller contract violation (rejects, not silently ignored)", async () => {
+    const home = tmp.make("wh-lanconfig-bad-");
+    await expect(
+      startHub(
+        { ...config({ home }), lan: { port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
+        fakeFrontend(),
+        { uid: process.getuid?.() ?? 0, lanConfigError: { detail: "x" } },
+      ),
+    ).rejects.toThrow(/lanConfigError/);
+    // nothing was bound
+    const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
+    expect(existsSync(paths.socketPath)).toBe(false);
+  });
+
+  it("a valid config.lan with the default (stub) lanAssembly ⇒ startHub rejects E_NOT_IMPLEMENTED:LD and cleans up", async () => {
+    const home = tmp.make("wh-lanconfig-ld-");
+    const uid = process.getuid?.() ?? 0;
+    await expect(
+      startHub(
+        { ...config({ home }), lan: { port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
+        fakeFrontend(),
+        { uid },
+      ),
+    ).rejects.toThrow("E_NOT_IMPLEMENTED:LD");
+    const paths = resolveHubPaths({ home, uid });
+    expect(existsSync(paths.socketPath)).toBe(false); // singleton released on failure
+    expect(existsSync(paths.hubJson)).toBe(false); // hub.json is never written before the LD step
+    // restartable afterwards (proves the failed attempt didn't leak the socket/lock)
+    const hub = await startHub(config({ home }), fakeFrontend(), { uid });
+    if ("exists" in hub) throw new Error("unexpected exists");
+    hubs.push(hub);
+  });
+});

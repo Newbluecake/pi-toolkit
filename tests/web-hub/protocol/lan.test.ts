@@ -1,0 +1,157 @@
+import { describe, expect, it } from "vitest";
+import {
+  SINGLE_LABEL_DENYLIST,
+  canonicalHostKey,
+  canonicalOrigin,
+  classifyHostToken,
+  parseOrigin,
+} from "../../../src/web-hub/protocol/lan.js";
+
+describe("classifyHostToken: classification priority (plan §2.1)", () => {
+  it("localhost ⇒ localhost (not denylisted)", () => {
+    expect(classifyHostToken("localhost")).toEqual({ ok: true, kind: "localhost", host: "localhost" });
+  });
+
+  it("LOCALHOST ⇒ localhost after lower-casing", () => {
+    expect(classifyHostToken("LOCALHOST")).toEqual({ ok: true, kind: "localhost", host: "localhost" });
+  });
+
+  it("localhost.local ⇒ dot-local", () => {
+    expect(classifyHostToken("localhost.local")).toEqual({ ok: true, kind: "dot-local", host: "localhost.local" });
+  });
+
+  it("a.localhost ⇒ fqdn", () => {
+    expect(classifyHostToken("a.localhost")).toEqual({ ok: true, kind: "fqdn", host: "a.localhost" });
+  });
+
+  it("127.0.0.1 ⇒ ipv4 (not numeric)", () => {
+    expect(classifyHostToken("127.0.0.1")).toEqual({ ok: true, kind: "ipv4", host: "127.0.0.1" });
+  });
+
+  it("123 ⇒ numeric (not single-label)", () => {
+    expect(classifyHostToken("123")).toEqual({ ok: false, reason: "numeric" });
+  });
+
+  it("123.local ⇒ dot-local", () => {
+    expect(classifyHostToken("123.local")).toEqual({ ok: true, kind: "dot-local", host: "123.local" });
+  });
+
+  it("dev ⇒ denylisted", () => {
+    expect(classifyHostToken("dev")).toEqual({ ok: false, reason: "denylisted" });
+  });
+
+  it("x.dev ⇒ fqdn", () => {
+    expect(classifyHostToken("x.dev")).toEqual({ ok: true, kind: "fqdn", host: "x.dev" });
+  });
+
+  it("a_b ⇒ syntax (checked before denylisted)", () => {
+    expect(classifyHostToken("a_b")).toEqual({ ok: false, reason: "syntax" });
+  });
+
+  it("::1 ⇒ ipv6", () => {
+    expect(classifyHostToken("::1")).toEqual({ ok: false, reason: "ipv6" });
+  });
+
+  it("a nonexistent numeric hostname is not omitted from SINGLE_LABEL_DENYLIST semantics: denylist excludes localhost", () => {
+    expect((SINGLE_LABEL_DENYLIST as readonly string[]).includes("localhost")).toBe(false);
+  });
+
+  it("full denylist set is rejected as denylisted", () => {
+    for (const h of SINGLE_LABEL_DENYLIST) expect(classifyHostToken(h)).toEqual({ ok: false, reason: "denylisted" });
+  });
+
+  it("a label over 63 bytes ⇒ too-long", () => {
+    const label = "a".repeat(64);
+    expect(classifyHostToken(`${label}.com`)).toEqual({ ok: false, reason: "too-long" });
+  });
+
+  it("a total host over 253 bytes ⇒ too-long", () => {
+    const host = `${Array.from({ length: 60 }, () => "abcd").join(".")}.com`;
+    expect(host.length).toBeGreaterThan(253);
+    expect(classifyHostToken(host)).toEqual({ ok: false, reason: "too-long" });
+  });
+
+  it("three-label .local (not exactly one preceding label) ⇒ fqdn, not dot-local", () => {
+    expect(classifyHostToken("a.b.local")).toEqual({ ok: true, kind: "fqdn", host: "a.b.local" });
+  });
+
+  it("a bare unlisted single label ⇒ single-label", () => {
+    expect(classifyHostToken("myhost")).toEqual({ ok: true, kind: "single-label", host: "myhost" });
+  });
+
+  it("mixed-case FQDN is lower-cased", () => {
+    expect(classifyHostToken("MyHost.Example.Net")).toEqual({ ok: true, kind: "fqdn", host: "myhost.example.net" });
+  });
+});
+
+describe("canonicalHostKey / canonicalOrigin / parseOrigin (plan §2.2)", () => {
+  it("Host: hub.example.com + https ⇒ hub.example.com:443 / https://hub.example.com", () => {
+    const key = canonicalHostKey("hub.example.com", "https");
+    expect(key).toBe("hub.example.com:443");
+    expect(canonicalOrigin("https", key!)).toBe("https://hub.example.com");
+  });
+
+  it("Host: 192.168.31.25:7879 ⇒ unchanged", () => {
+    const key = canonicalHostKey("192.168.31.25:7879", "http");
+    expect(key).toBe("192.168.31.25:7879");
+    expect(canonicalOrigin("http", key!)).toBe("http://192.168.31.25:7879");
+  });
+
+  it("Host: MyHost.Local:7879 ⇒ lower-cased", () => {
+    expect(canonicalHostKey("MyHost.Local:7879", "http")).toBe("myhost.local:7879");
+  });
+
+  it("Host: host:080 ⇒ rejected (leading zero port)", () => {
+    expect(canonicalHostKey("host:080", "http")).toBeUndefined();
+  });
+
+  it("Host: host:0 ⇒ rejected (out of range)", () => {
+    expect(canonicalHostKey("host:0", "http")).toBeUndefined();
+  });
+
+  it("bracketed IPv6 literal ⇒ rejected", () => {
+    expect(canonicalHostKey("[::1]:7879", "http")).toBeUndefined();
+  });
+
+  it("Origin: https://hub.example.com:443 and https://hub.example.com normalize equal", () => {
+    const a = parseOrigin("https://hub.example.com:443");
+    const b = parseOrigin("https://hub.example.com");
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(canonicalOrigin(a!.scheme, a!.hostKey)).toBe(canonicalOrigin(b!.scheme, b!.hostKey));
+  });
+
+  it("Origin: https://hub.example.com/ (trailing slash, pathname '/') ⇒ accepted", () => {
+    expect(parseOrigin("https://hub.example.com/")).toEqual({ scheme: "https", hostKey: "hub.example.com:443" });
+  });
+
+  it("Origin with a non-root path ⇒ rejected", () => {
+    expect(parseOrigin("https://hub.example.com/x")).toBeUndefined();
+  });
+
+  it("Origin with search or hash ⇒ rejected", () => {
+    expect(parseOrigin("https://hub.example.com/?a=1")).toBeUndefined();
+    expect(parseOrigin("https://hub.example.com/#a")).toBeUndefined();
+  });
+
+  it("Origin with embedded userinfo ⇒ rejected", () => {
+    expect(parseOrigin("https://user:pw@hub.example.com")).toBeUndefined();
+  });
+
+  it("Origin: null ⇒ rejected", () => {
+    expect(parseOrigin("null")).toBeUndefined();
+  });
+
+  it("Origin with a non-http(s) scheme ⇒ rejected", () => {
+    expect(parseOrigin("ftp://hub.example.com")).toBeUndefined();
+  });
+
+  it("a numeric / denylisted host is still canonicalizable (canonicalization ≠ allow-list)", () => {
+    expect(canonicalHostKey("202507220006", "http")).toBe("202507220006:80");
+    expect(canonicalHostKey("dev", "http")).toBe("dev:80");
+  });
+
+  it("a syntactically invalid host is not canonicalizable", () => {
+    expect(canonicalHostKey("a_b", "http")).toBeUndefined();
+  });
+});
