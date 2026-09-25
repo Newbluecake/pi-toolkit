@@ -44,17 +44,17 @@ metadata:
 
 ## 模型 ID 速查表
 
-| 别名      | 精确 ID（按优先级）                                                                        |
-| --------- | ------------------------------------------------------------------------------------------ |
-| kimi-k3   | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cloudrouter-kimi/kimi-k3`                      |
-| glm-5.3   | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                    |
-| opus-5.5  | `cloudrouter-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜） |
-| opus-5    | `cloudrouter-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                      |
-| sonnet    | `cloudrouter-anthropic/claude-sonnet-5` → `copilot-anthropic/claude-sonnet-4.6`            |
-| fable     | `cloudrouter-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）      |
-| gpt-sol   | `cloudrouter-response/gpt-5.6-sol` → `zhipu-pool/gpt-5.6-sol`                              |
-| gpt-terra | `cloudrouter-response/gpt-5.6-terra`                                                       |
-| gpt-6     | `cloudrouter-response/gpt-6-astra`                                                         |
+| 别名      | 精确 ID（按优先级）                                                               |
+| --------- | --------------------------------------------------------------------------------- |
+| kimi-k3   | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                      |
+| glm-5.3   | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                           |
+| opus-5.5  | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜） |
+| opus-5    | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                      |
+| sonnet    | `cr-anthropic/claude-sonnet-5` → `copilot-anthropic/claude-sonnet-4.6`            |
+| fable     | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）      |
+| gpt-sol   | `cr-response/gpt-5.6-sol` → `zhipu-pool/gpt-5.6-sol`                              |
+| gpt-terra | `cr-response/gpt-5.6-terra`                                                       |
+| gpt-6     | `cr-response/gpt-6-astra`                                                         |
 
 ### 疑难升级阶梯（fable 闸门）
 
@@ -266,7 +266,7 @@ node ~/.agents/skills/dev-flow/scripts/conflict-check.mjs spec.json --cwd <仓�
 ## Agent 调用要点
 
 - **k3 调用顺序**：一律先 `kimi-coding/k3-256k`，失败按
-  `kimi-coding/k3` → `cloudrouter-kimi/kimi-k3` 回退。
+  `kimi-coding/k3` → `cr-kimi/kimi-k3` 回退。
 - **后台 + 通知驱动**：主会话的 `Agent` 一律后台运行（立即返回 run_id，无需也无法选前台）。派发后主会话做不冲突的准备工作
   （整理验收清单、写 todo），没活干就直接结束本轮并说明在等哪些 subagent；收到完成通知再
   `get_subagent_result` 收结果。多个并行任务**按通知到达顺序逐个收取**，先完成先处理。

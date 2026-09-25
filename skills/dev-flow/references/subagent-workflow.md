@@ -31,8 +31,8 @@
 
 ## 模型映射与回退
 
-Explore=`cloudrouter-anthropic/claude-sonnet-5`，Plan=`kimi-coding/k3-256k`，
-reviewer=`kimi-coding/k3-256k`（与制定模型撞车时改 `cloudrouter-anthropic/claude-opus-5`），
+Explore=`cr-anthropic/claude-sonnet-5`，Plan=`kimi-coding/k3-256k`，
+reviewer=`kimi-coding/k3-256k`（与制定模型撞车时改 `cr-anthropic/claude-opus-5`），
 dev=`kimi-coding/k3-256k`，verifier=`kimi-coding/k3-256k`（与 dev 撞车时改 sonnet）；
 GPT 系（gpt-sol / gpt-terra / gpt-6）只作最后兜底。
 
