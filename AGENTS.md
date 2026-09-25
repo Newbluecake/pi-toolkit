@@ -143,7 +143,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   leaves the wiring inert. Wired in `src/stack.ts` through a late-bound ref. Design + test
   anchors: `docs/dev/consult/plan.md`.
 - `src/hud/` — merged pi-hud: full footer takeover (git/worktrees, token & cost stats incl.
-  live subagent cost, LLM timing/speed) + status key `pi-hud` + `/pi-hud-refresh` + settings-gated
+  live subagent cost, LLM timing/speed, own `toolkit v<ver>@<commit>[*] <commit time>` on the time line — read once per activate by `plugin-info.ts`, git fields only when the package root is itself the git toplevel) + status key `pi-hud` + `/pi-hud-refresh` + settings-gated
   periodic `git fetch` (`hud.autoFetchMinutes`, default 5, 0 = off — the ↑/↓ counts compare against
   the local remote-tracking ref, so without fetch they never see remote commits pushed elsewhere). State lives
   in a per-session `HudSession` (single `live` flag, all timers unref'd, all `pi.events`

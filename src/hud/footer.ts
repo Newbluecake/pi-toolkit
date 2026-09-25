@@ -17,6 +17,7 @@ import {
 } from "./format.js";
 import type { GitState, WorktreeInfo } from "./git.js";
 import type { HudSession } from "./index.js";
+import type { PluginInfo } from "./plugin-info.js";
 
 const MAX_VISIBLE_WORKTREES = 10;
 
@@ -72,6 +73,24 @@ function renderSessionStart(session: HudSession, ctx: ExtensionContext): string 
   if (sessionStartedAt === undefined) return undefined;
   const theme = ctx.ui.theme;
   return `${theme.fg("dim", "start ")}${theme.fg("muted", formatStartTime(sessionStartedAt))}`;
+}
+
+/**
+ * 插件自身信息段：`toolkit v0.2.1@b5edde5* 2026-09-25 14:16`（`*` = 工作树有未提交改动）。
+ * 缺哪段省哪段；全缺返回 undefined（整段不占位）。纯函数，可单测。
+ */
+export function renderPluginInfo(
+  info: PluginInfo | undefined,
+  theme: { fg(color: string, text: string): string },
+): string | undefined {
+  if (!info) return undefined;
+  let ident = info.version ? `v${info.version}` : "";
+  if (info.commit) ident += `@${info.commit}${info.dirty ? "*" : ""}`;
+  const time = info.commitTime === undefined ? "" : formatStartTime(info.commitTime);
+  if (!ident && !time) return undefined;
+  const identPart = ident ? theme.fg("muted", ident) : "";
+  const timePart = time ? theme.fg("dim", time) : "";
+  return `${theme.fg("dim", "toolkit ")}${[identPart, timePart].filter(Boolean).join(" ")}`;
 }
 
 export function renderToolStats(session: HudSession, ctx: ExtensionContext): string {
@@ -353,6 +372,7 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
           renderLlmTiming(session, ctx),
           renderBgAgents(session, ctx),
           ...renderTimeLineStatusParts(statusEntries, theme),
+          renderPluginInfo(session.pluginInfo, theme),
         ].filter((part): part is string => Boolean(part));
         if (timeParts.length > 0) {
           // Wrap rather than truncate: the line now also carries the watch

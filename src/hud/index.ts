@@ -29,6 +29,7 @@ import { performance } from "node:perf_hooks";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installFooter, renderConversationStats } from "./footer.js";
 import { readRepoState, readWorktrees, type ExecFn, type GitState, type WorktreeInfo } from "./git.js";
+import { defaultPluginInfoDeps, readPluginInfo, type PluginInfo, type PluginInfoDeps } from "./plugin-info.js";
 import { SpeedTracker } from "./speed.js";
 import {
   SESSION_START_ENTRY_TYPE,
@@ -52,6 +53,11 @@ export interface HudOptions {
    * 提交；0 = 关闭（只保留手动 /pi-hud-refresh）。
    */
   autoFetchMinutes?: number;
+  /**
+   * 插件自身版本/commit 的读取依赖（测试注入）；`null` = 不读取。
+   * 省略时用 import.meta.url 推出的包根 + package.json + git。
+   */
+  pluginInfoDeps?: PluginInfoDeps | null;
 }
 
 export interface HudSession {
@@ -69,6 +75,8 @@ export interface HudSession {
   refreshing: boolean;
   gitState: GitState | undefined;
   worktrees: WorktreeInfo[] | undefined;
+  /** 本插件的版本 / commit / 提交时间（每次 activate 读一次，异步就绪后重绘）。 */
+  pluginInfo: PluginInfo | undefined;
   /** 上次自动 fetch 的 Date.now() 时间戳；0 = 尚未 fetch（首个 refresh 即补一次）。 */
   lastAutoFetchAt: number;
   userInputs: number;
@@ -106,6 +114,7 @@ function createHudSession(ctx: ExtensionContext): HudSession {
     refreshing: false,
     gitState: undefined,
     worktrees: undefined,
+    pluginInfo: undefined,
     lastAutoFetchAt: 0,
     userInputs: 0,
     llmRequests: 0,
@@ -127,6 +136,26 @@ export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
   let session: HudSession | undefined;
   // S4：pi.events 退订收集。事件总线跨 /reload 存活，不收集就每次 reload 泄漏一套。
   const busUnsubscribers: Array<() => void> = [];
+  // 插件信息每次 activate（含 /reload）只读一次：git pull + /reload 后自然刷新。
+  let pluginInfo: PluginInfo | undefined;
+  let pluginInfoPromise: Promise<void> | undefined;
+  function loadPluginInfo(): void {
+    if (pluginInfoPromise) return;
+    const deps = options.pluginInfoDeps === undefined ? defaultPluginInfoDeps() : options.pluginInfoDeps;
+    if (!deps) {
+      pluginInfoPromise = Promise.resolve();
+      return;
+    }
+    pluginInfoPromise = readPluginInfo(deps)
+      .then((info) => {
+        pluginInfo = info;
+        const s = session;
+        if (!s?.active || !s.live) return;
+        s.pluginInfo = info;
+        s.footerRequestRender?.();
+      })
+      .catch(() => {});
+  }
 
   const exec: ExecFn = (command, args, options) => pi.exec(command, args, options);
   const appendEntry = (customType: string, data?: unknown) => pi.appendEntry(customType, data);
@@ -302,6 +331,8 @@ export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
     if (!s.live) return;
     s.active = true;
     subscribeBusEvents();
+    s.pluginInfo = pluginInfo;
+    loadPluginInfo();
 
     restoreTiming(s.timing, ctx.sessionManager.getBranch());
     s.speed.reset();
