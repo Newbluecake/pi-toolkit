@@ -429,6 +429,9 @@ describe("parseJobRecord — deadline/owner (bash-timeout-grace §2.1)", () => {
       { ...deadlineWire, policy: { ...deadlineWire.policy, maxExtensions: -1 } },
       { ...deadlineWire, extensions: deadlineWire.policy.maxExtensions + 1 }, // policy 越界
       { ...deadlineWire, graceNotified: deadlineWire.graces + 1 }, // invariant violation
+      { ...deadlineWire, policy: { ...deadlineWire.policy, maxExtensions: 0.5 } }, // non-integer cap
+      { ...deadlineWire, extensions: 1.5 }, // non-integer counter
+      { ...deadlineWire, graces: 0.5 }, // non-integer counter
       { ...deadlineWire, timeoutMs: 0 }, // "no timeout" is absence, not timeoutMs:0
       { ...deadlineWire, timeoutMs: -1 },
       { ...deadlineWire, policy: undefined },

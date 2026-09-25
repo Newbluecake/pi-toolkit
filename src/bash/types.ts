@@ -456,6 +456,8 @@ function parseJobDeadline(raw: unknown): JobDeadline | undefined {
   ) {
     return undefined;
   }
+  // Counters and the extension cap are integers (§5.1: non-integer ⇒ illegal ⇒ no-timeout fallback).
+  if (![extensions, graces, graceNotified, seq, maxExtensions].every(Number.isInteger)) return undefined;
   if (dueAt > hardAt) return undefined; // named illegal condition (§2.1 compat)
   if (graceUntil !== undefined && (!(graceUntil <= hardAt) || !(graceUntil > 0))) return undefined; // T6 invariant
   if (extensions > maxExtensions) return undefined; // policy 越界
