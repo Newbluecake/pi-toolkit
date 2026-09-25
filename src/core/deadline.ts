@@ -1,5 +1,6 @@
 import type { Clock } from "./clock.js";
 import { toErrorInfo } from "./errors.js";
+import { formatDuration } from "./format.js";
 import { isTerminalStatus } from "./status.js";
 import type { DeadlineBudget, ErrorInfo, Millis, RunDeadlines, RunDiagnostics, RunPhase, RunState } from "./types.js";
 export const DEFAULT_BUDGET: DeadlineBudget = {
@@ -158,6 +159,39 @@ export function graceWindow(state: RunState, budget: DeadlineBudget, at: Millis)
   const until = Math.min(at + budget.totalGraceMs, h);
   return until > at ? until : undefined;
 }
+/**
+ * Human-readable cause of a watchdog kill, for the terminal error message.
+ * Without it every timer produced the same "deadline exceeded" text, so a
+ * sub-phase kill (a bash command stuck for budget.toolS, a silent model turn)
+ * looked exactly like a total-budget timeout — and a total-budget timeout
+ * that got no grace window looked like a broken grace notice. The timeout
+ * grace + extend_subagent_timeout path only ever covers the total budget
+ * (timeout-notify arch §3.4: sub-phase timers are never softened).
+ *
+ * `killedAt` is when the watchdog fired (abort_grace entry). Durations are
+ * observed ones, never the configured budget — the watchdog reads the
+ * session-wide budget, which the caller may not have at hand.
+ */
+export function describeTimeout(diag: RunDiagnostics, killedAt: Millis): string {
+  const reason = diag.timeoutReason;
+  if (reason === "total") {
+    if (diag.overtime !== undefined) return "total budget exceeded after grace";
+    const capped =
+      diag.hardDeadlineAt !== undefined && diag.deadlineAt !== undefined && diag.hardDeadlineAt <= diag.deadlineAt;
+    return capped ? "total budget exceeded (hard cap: no grace window)" : "total budget exceeded";
+  }
+  if (reason === "idle") {
+    const tool = diag.currentTool;
+    if (tool !== undefined)
+      return `tool "${tool.name}" still running after ${formatDuration(killedAt - tool.startedAt)} (budget.toolS)`;
+    const silent = killedAt - (diag.lastEventAt ?? diag.phaseEnteredAt);
+    return `no model progress for ${formatDuration(silent)} (budget.idleS / budget.modelTurnS)`;
+  }
+  if (reason === "compaction") return "compaction exceeded budget.compactionS";
+  if (reason === "no_first_event") return "no first model event (budget.firstEventS)";
+  return "deadline exceeded";
+}
+
 export type DeadlineResult<T> =
   { ok: true; value: T } | { ok: false; reason: "timeout" } | { ok: false; reason: "error"; error: ErrorInfo };
 

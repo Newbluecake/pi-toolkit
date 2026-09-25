@@ -696,6 +696,7 @@ describe("timeout grace & extendDeadline (runner)", () => {
     const outcome = await settle(runPromise, clock, 20); // now = 50
     expect(outcome.status).toBe("timed_out");
     expect(outcome.timeoutReason).toBe("total");
+    expect(outcome.error?.message).toBe("total budget exceeded after grace; prompt cancelled");
   });
 
   it("race both ways: watchdog-first and guard-first converge to the same terminal state", async () => {
@@ -729,5 +730,69 @@ describe("timeout grace & extendDeadline (runner)", () => {
     // short-circuits on terminal state) — idempotency of the losing racer.
     wd.tick(60);
     expect(runner.getRunState("r-race")?.outcome?.status).toBe("timed_out");
+  });
+});
+
+/**
+ * Incident 2026-09-25 (claude2api r_0NTTV27H): a child's `go test` hung for
+ * budget.toolS and the watchdog killed the whole run with the same
+ * "deadline exceeded" text a total-budget timeout produces — so it read as a
+ * broken grace notice. The terminal message must name the timer that fired.
+ */
+describe("timeout cause in the terminal error message", () => {
+  it("a tool-watchdog kill names the stuck tool and budget.toolS, not the total budget", async () => {
+    const clock = new FakeClock();
+    const b = { ...budget, totalMs: 10_000, toolMs: 50, idleMs: 0 };
+    let emit: ((event: DriverEvent) => void) | undefined;
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async (_h, onEvent) => {
+        emit = onEvent;
+      },
+      onLateArrival() {},
+    };
+    const runner = new RuntimeRunner(deps(clock, driver));
+    const runPromise = runner.run({ ...request, runId: "r-tool" }, b);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    emit?.({ t: "turn_start" });
+    emit?.({ t: "tool_start", toolCallId: "c1", toolName: "bash" });
+    expect(runner.getRunState("r-tool")?.phase).toBe("tool_exec");
+    const wd = new EventWatchdog({
+      clock,
+      budget: b,
+      getState: (id, gen) => runner.getRunState(id, gen),
+      dispatch: (id, gen, input) =>
+        runner.fireDeadline(id, gen, input as Extract<RunInput, { kind: "deadline_fired" }>),
+      tickMs: 10,
+    });
+    wd.arm("r-tool", 1);
+    clock.advance(60);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    const outcome = await settle(runPromise, clock, 20);
+    expect(outcome.status).toBe("timed_out");
+    // The hung prompt never unwinds, so the abort_grace timer settles the run:
+    // its expiry must keep the killing timer's reason (not rewrite it to "total").
+    expect(outcome.timeoutReason).toBe("idle");
+    expect(outcome.error?.message).toBe(
+      'tool "bash" still running after 50ms (budget.toolS); run did not stop within abort grace',
+    );
+    expect(outcome.error?.message).not.toContain("total");
+  });
+
+  it("a total-budget kill without a grace window says so", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    };
+    // maxTotalFactor 1 ⇒ hardDeadlineAt == deadlineAt (explicit timeout_s, D-10).
+    const runPromise = new RuntimeRunner(deps(clock, driver)).run(
+      { ...request, runId: "r-hard" },
+      { ...budget, maxTotalFactor: 1 },
+    );
+    const outcome = await settle(runPromise, clock, 31);
+    expect(outcome.timeoutReason).toBe("total");
+    expect(outcome.error?.message).toBe("total budget exceeded (hard cap: no grace window); prompt cancelled");
   });
 });

@@ -1,4 +1,11 @@
-import { DEFAULT_BUDGET, dueAtFor, extendability, graceWindow, hardDeadlineAtFor } from "./deadline.js";
+import {
+  DEFAULT_BUDGET,
+  describeTimeout,
+  dueAtFor,
+  extendability,
+  graceWindow,
+  hardDeadlineAtFor,
+} from "./deadline.js";
 import { deliveryKey } from "./delivery-key.js";
 import { isTerminalStatus } from "./status.js";
 import type {
@@ -874,10 +881,18 @@ export function reduce(
     if (state.phase === "abort_grace") {
       const status =
         state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout" ? "timed_out" : "aborted";
-      return finish(removed, status, input.at, budget, { timeoutReason: input.reason }, [
-        { kind: "request_abort" },
-        { kind: "dispose" },
-      ]);
+      // The abort_grace timer's own reason is always "total" (watchdog
+      // timerReason); it must not overwrite the timer that actually killed the
+      // run (e.g. a stuck tool → "idle"), or a sub-phase kill that did not
+      // unwind within abortGraceMs gets reported as a total-budget timeout.
+      const patch: Partial<RunDiagnostics> = { timeoutReason: state.diag.timeoutReason ?? input.reason };
+      if (status === "timed_out" && state.diag.error === undefined)
+        patch.error = {
+          kind: "timeout",
+          message: `${describeTimeout({ ...state.diag, ...patch }, state.diag.phaseEnteredAt)}; run did not stop within abort grace`,
+          retryable: false,
+        };
+      return finish(removed, status, input.at, budget, patch, [{ kind: "request_abort" }, { kind: "dispose" }]);
     }
     // timeout-notify (arch §3.5(b)): soft deadline reached in an overtime-eligible
     // phase with a grace window available ⇒ enter grace, the run keeps going

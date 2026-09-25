@@ -1,4 +1,5 @@
 import {
+  describeTimeout,
   effectiveDeadlineAt,
   extendability,
   remainingFor,
@@ -626,8 +627,12 @@ export class RuntimeRunner implements Runner {
           return startError(prompted.error);
         // M4: guard 因 cancel 解除时，若状态机已因 watchdog 超时进入 abort_grace
         // （timeoutReason/stopCause 已记录），结果必须是 timed_out 而非 aborted。
-        if (state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout")
-          return error("deadline exceeded; prompt cancelled", "timeout");
+        if (state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout") {
+          // Name the timer that actually fired (tool / idle / total …) — a
+          // sub-phase kill must not read like a total-budget timeout.
+          const killedAt = state.phase === "abort_grace" ? state.diag.phaseEnteredAt : this.d.clock.now();
+          return error(`${describeTimeout(state.diag, killedAt)}; prompt cancelled`, "timeout");
+        }
         return error("cancelled", "aborted");
       })();
       dispatch({

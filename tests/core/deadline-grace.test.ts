@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyBudgetPolicy,
   DEFAULT_BUDGET,
+  describeTimeout,
   effectiveDeadlineAt,
   extendability,
   graceWindow,
@@ -9,7 +10,7 @@ import {
   OVERTIME_PHASES,
 } from "../../src/core/deadline.js";
 import { isTerminalStatus, TERMINAL_STATUSES } from "../../src/core/status.js";
-import type { DeadlineBudget, RunState } from "../../src/core/types.js";
+import type { DeadlineBudget, RunDiagnostics, RunState } from "../../src/core/types.js";
 
 const budget: DeadlineBudget = { ...DEFAULT_BUDGET };
 
@@ -184,5 +185,42 @@ describe("core/deadline: graceWindow", () => {
   });
   it("undefined outside overtime phases (D-14)", () => {
     expect(graceWindow(state({ phase: "queue_wait" }), budget, 100_000)).toBeUndefined();
+  });
+});
+
+describe("describeTimeout", () => {
+  const diag = (patch: Partial<RunDiagnostics>): RunDiagnostics =>
+    ({
+      ...state({}).diag,
+      phaseEnteredAt: 0,
+      deadlineAt: 100_000,
+      hardDeadlineAt: 200_000,
+      ...patch,
+    }) as RunDiagnostics;
+  it("tool watchdog: names the stuck tool and how long it ran", () => {
+    const d = diag({ timeoutReason: "idle", currentTool: { name: "bash", toolCallId: "c", startedAt: 1_000 } });
+    expect(describeTimeout(d, 601_000)).toBe('tool "bash" still running after 10m00s (budget.toolS)');
+  });
+  it("idle without a tool: silence measured from the last event", () => {
+    expect(describeTimeout(diag({ timeoutReason: "idle", lastEventAt: 5_000 }), 605_000)).toBe(
+      "no model progress for 10m00s (budget.idleS / budget.modelTurnS)",
+    );
+  });
+  it("total: distinguishes plain, hard-capped (no grace) and after-grace", () => {
+    expect(describeTimeout(diag({ timeoutReason: "total" }), 100_000)).toBe("total budget exceeded");
+    expect(describeTimeout(diag({ timeoutReason: "total", hardDeadlineAt: 100_000 }), 100_000)).toBe(
+      "total budget exceeded (hard cap: no grace window)",
+    );
+    const overtime = { graces: 1, extensions: 0, grantedMs: 0 };
+    expect(describeTimeout(diag({ timeoutReason: "total", overtime }), 190_000)).toBe(
+      "total budget exceeded after grace",
+    );
+  });
+  it("other reasons and the unknown fallback", () => {
+    expect(describeTimeout(diag({ timeoutReason: "compaction" }), 1)).toBe("compaction exceeded budget.compactionS");
+    expect(describeTimeout(diag({ timeoutReason: "no_first_event" }), 1)).toBe(
+      "no first model event (budget.firstEventS)",
+    );
+    expect(describeTimeout(diag({}), 1)).toBe("deadline exceeded");
   });
 });
