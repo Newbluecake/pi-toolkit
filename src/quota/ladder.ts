@@ -56,6 +56,26 @@ export const QUOTA_HYSTERESIS_PCT = 15;
 
 export const DEFAULT_THRESHOLDS: LadderThresholds = { l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000 };
 
+/**
+ * 按窗口区分的仓库默认阈值（quota-plan「阶梯阈值按窗口区分」）：5h 窗口保留旧的
+ * 50/75/90（快速反应——一次会话烧穿的可能性高）；week（HUD 显示 7d）窗口拉高到
+ * 50/95/98——7 天窗口天然摊薄，旧的 75/90 在多 agent 场景下太容易被日常波动
+ * 触发误报。l3EtaMs（速率预测硬线）两窗口相同、不随窗口区分。`DEFAULT_THRESHOLDS`
+ * 等价于 `DEFAULT_THRESHOLDS_BY_WINDOW["5h"]`，保留供只关心单窗口的调用方
+ * （现有 windowLevel 直调测试）沿用。
+ */
+export const DEFAULT_THRESHOLDS_BY_WINDOW: Readonly<Record<WindowScope, LadderThresholds>> = {
+  "5h": { l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000 },
+  week: { l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000 },
+};
+
+/** `providerVerdict` 的 thresholds 入参：单一阈值（沿用旧调用方）或按 scope 解析的函数。 */
+export type LadderThresholdsInput = LadderThresholds | ((scope: WindowScope) => LadderThresholds);
+
+function resolveThresholds(input: LadderThresholdsInput, scope: WindowScope): LadderThresholds {
+  return typeof input === "function" ? input(scope) : input;
+}
+
 function clampPct(pct: number): number {
   if (!Number.isFinite(pct)) return 0;
   return Math.min(100, Math.max(0, pct));
@@ -134,7 +154,8 @@ export function providerVerdict(
   snapshot: QuotaSnapshot,
   input: {
     readonly now: Millis;
-    readonly thresholds: LadderThresholds;
+    /** 单一阈值（两窗口共用，沿用旧调用方）或按 scope 解析的函数（service.ts 实际传的形态，支持按窗口区分阈值）。 */
+    readonly thresholds: LadderThresholdsInput;
     readonly staleAfterMs: Millis;
     readonly etaOf: (scope: WindowScope) => Millis | undefined;
     readonly demoted: boolean;
@@ -144,7 +165,11 @@ export function providerVerdict(
   const stale = input.now - snapshot.fetchedAt > input.staleAfterMs;
 
   const windows = snapshot.windows.map((w) =>
-    windowLevel(w, { now: input.now, etaMs: input.etaOf(w.scope), thresholds: input.thresholds }),
+    windowLevel(w, {
+      now: input.now,
+      etaMs: input.etaOf(w.scope),
+      thresholds: resolveThresholds(input.thresholds, w.scope),
+    }),
   );
   // ★ Kimi 陷阱的唯一正解：provider 级 = 全部窗口取**最高**严重级，周窗口
   //   used_ratio:1 (L3) 必须压过 5h 的 remaining:100 (L0)。reset-elapsed 的窗口

@@ -216,7 +216,11 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
   (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses
-  the refresh TTL only while the snapshot predates the reset; `quota.repeatS` re-sends at L3 only.
+  the refresh TTL only while the snapshot predates the reset; `quota.repeatS` re-sends at L3 only. Ladder thresholds are per-window
+  (repo defaults: 5h 50/75/90, week/7d 50/95/98 — `ladder.ts`'s `DEFAULT_THRESHOLDS_BY_WINDOW`; `l3EtaMs` stays global). `quota.windows.{5h,week}.{l1,l2,l3}Percent`
+  override a single window; the legacy flat `quota.l1Percent/l2Percent/l3Percent` still work and, when set, override BOTH windows
+  (back-compat) — window-level fields win over the flat override, which wins over the per-window default. Each window's l1<=l2<=l3
+  is clamped independently.
 - `src/schedule/` — cron parser, scheduler, persisted schedule store.
 - `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): an editor wrapper rewrites exact
   `/reload` submissions to `/agent reload`, which parks the reload while subagents/workflows are active and

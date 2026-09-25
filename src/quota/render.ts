@@ -14,7 +14,7 @@
 import type { WindowScope } from "./types.js";
 import type { Millis } from "../core/types.js";
 import {
-  DEFAULT_THRESHOLDS,
+  DEFAULT_THRESHOLDS_BY_WINDOW,
   isDemotionFloorOnly,
   type ProviderVerdict,
   type QuotaRecoveryEvent,
@@ -129,12 +129,13 @@ function triggerWindow(v: ProviderVerdict): WindowVerdict | undefined {
 }
 
 /**
- * 阈值文案取 DEFAULT_THRESHOLDS（plan §5.5 模板按默认 50/75/90 书写；
- * ProviderVerdict 不携带运行时阈值——见偏差记录，仅在 reason==="pct" 时展示，
- * forecast 抬级时让速率子句自己解释原因）。
+ * 阈值文案取该窗口的仓库默认（quota-plan「阶梯阈值按窗口区分」：5h 50/75/90、
+ * week 50/95/98）；ProviderVerdict 不携带运行时阈值——见偏差记录，仅在
+ * reason==="pct" 时展示，forecast 抬级时让速率子句自己解释原因）。
  */
-function thresholdText(level: number): number {
-  return level >= 3 ? DEFAULT_THRESHOLDS.l3 : level === 2 ? DEFAULT_THRESHOLDS.l2 : DEFAULT_THRESHOLDS.l1;
+function thresholdText(level: number, scope: WindowScope): number {
+  const t = DEFAULT_THRESHOLDS_BY_WINDOW[scope];
+  return level >= 3 ? t.l3 : level === 2 ? t.l2 : t.l1;
 }
 
 /**
@@ -217,7 +218,7 @@ export function buildQuotaWarnText(
     head = `[quota 预警] ${label}`;
   } else {
     head = `[quota 预警] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
-    if (w.reason === "pct") head += `（阈值 ${thresholdText(w.level)}%）`;
+    if (w.reason === "pct") head += `（阈值 ${thresholdText(w.level, w.scope)}%）`;
     const etaMs = liveEtaMs(w);
     if (etaMs !== undefined) head += `，按当前速率${formatEta(etaMs)}后耗尽`;
     if (w.resetAt !== undefined) {
@@ -228,7 +229,8 @@ export function buildQuotaWarnText(
       }
     }
   }
-  return `${head}。\n订阅额度照常优先使用，派单不变；到 L3（≥${DEFAULT_THRESHOLDS.l3}% 或即将耗尽）才会切换。`;
+  const l3 = w === undefined ? DEFAULT_THRESHOLDS_BY_WINDOW["5h"].l3 : DEFAULT_THRESHOLDS_BY_WINDOW[w.scope].l3;
+  return `${head}。\n订阅额度照常优先使用，派单不变；到 L3（≥${l3}% 或即将耗尽）才会切换。`;
 }
 
 /** L3 强烈块（含本轮禁用 + 替代候选 + 按需取舍说明）。 */

@@ -130,11 +130,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     }
   };
 
-  const thresholds: LadderThresholds = {
-    l1: settings.l1Percent,
-    l2: settings.l2Percent,
-    l3: settings.l3Percent,
-    l3EtaMs: settings.l3EtaMs,
+  const thresholds = (scope: WindowScope): LadderThresholds => {
+    const w = settings.windows[scope];
+    return { l1: w.l1Percent, l2: w.l2Percent, l3: w.l3Percent, l3EtaMs: settings.l3EtaMs };
   };
 
   const ringKey = (provider: string, scope: WindowScope): string => `${provider}|${scope}`;

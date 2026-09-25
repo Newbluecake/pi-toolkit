@@ -9,6 +9,9 @@ import {
   DEFAULT_HINT_THRESHOLD_PERCENT,
   DEFAULT_USAGE_TICK_STEP_PERCENT,
 } from "../compact-hint/threshold.js";
+// quota (阶梯阈值按窗口区分): WindowScope is a zero-pi-import type from src/quota/types.ts
+// (plan 分层纪律) —— type-only import, no runtime dependency on the quota module graph.
+import type { WindowScope } from "../quota/types.js";
 
 /**
  * CC3 (workflow design §3.2/§8.2): forward-declared budget shape for the
@@ -235,6 +238,17 @@ export interface ConsultSettings {
 }
 
 /**
+ * 按窗口区分后的一组阶梯阈值（quota-plan「阶梯阈值按窗口区分」）：已在
+ * parseQuotaSettings 里钳制完毕 l1<=l2<=l3，消费方（service.ts、render.ts）
+ * 直接取用、无需再校验。
+ */
+export interface QuotaWindowThresholds {
+  readonly l1Percent: number;
+  readonly l2Percent: number;
+  readonly l3Percent: number;
+}
+
+/**
  * 额度感知派单（docs/dev/quota/quota-plan.md §8.1）：阶梯预警 + spawn 闸门 +
  * HUD 的设置块。逐字段容错解析见 parseQuotaSettings（never throws）。时长
  * 字段（*Ms 内部毫秒、文件存 *S 秒）登记在 TIME_SETTING_MS_PATHS；阈值
@@ -257,14 +271,23 @@ export interface QuotaSettings {
   refreshHotMs: number;
   /** 超过此龄的快照视为陈旧：只提示、闸门不阻断。 */
   staleAfterMs: number;
-  /** L1 提示阈值（used %）。 */
+  /** L1 提示阈值（used %）。当 `quota.windows[scope]` 未覆盖某窗口时，两窗口共用本字段（向后兼容）。 */
   l1Percent: number;
-  /** L2 建议阈值（used %）。 */
+  /** L2 建议阈值（used %）。同上兼容语义。 */
   l2Percent: number;
-  /** L3 强烈阈值（used %）。 */
+  /** L3 强烈阈值（used %）。同上兼容语义。 */
   l3Percent: number;
-  /** ETA 低于此值直接判 L3。 */
+  /** ETA 低于此值直接判 L3。两窗口相同、不随窗口区分。 */
   l3EtaMs: number;
+  /**
+   * 按窗口区分的最终解析阈值（quota-plan「阶梯阈值按窗口区分」）：5h 与 week
+   * 各自的 l1<=l2<=l3 已在 parseQuotaSettings 钳制完毕——service.ts / render.ts
+   * 直接按 `windows[scope]` 取值，不必再理解上面三个全局字段的兼容规则。
+   * 优先级（parseQuotaSettings 落地）：`quota.windows.<scope>.*` > 显式设置的
+   * 全局 `l1Percent/l2Percent/l3Percent`（对两窗口同时生效）> 按窗口仓库默认
+   * （ladder.ts 的 DEFAULT_THRESHOLDS_BY_WINDOW）。
+   */
+  windows: Readonly<Record<WindowScope, QuotaWindowThresholds>>;
   /** L1 tick 的 usedPct 网格步；0 = 关闭网格闸（只剩等级闩锁）。 */
   tickStepPercent: number;
   /** 两条 quota 消息之间的全局最小间隔（L3 不受限）。 */
@@ -542,6 +565,10 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     l2Percent: 75,
     l3Percent: 90,
     l3EtaMs: 1_800_000, // 30min（简报的 ETA < 30min）
+    windows: {
+      "5h": { l1Percent: 50, l2Percent: 75, l3Percent: 90 },
+      week: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
+    },
     tickStepPercent: 10,
     minIntervalMs: 300_000, // 5min
     repeatMs: 1_800_000, // 30min
@@ -948,7 +975,8 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
  */
 export function parseQuotaSettings(input: unknown): QuotaSettings {
   const defaults = DEFAULT_SETTINGS.quota;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    return { ...defaults, windows: { ...defaults.windows } };
   const value = input as Record<string, unknown>;
   const bool = (raw: unknown, fallback: boolean): boolean => (typeof raw === "boolean" ? raw : fallback);
   const num = (raw: unknown, fallback: number, min: number, max: number): number =>
@@ -963,6 +991,12 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
   const l1 = num(value.l1Percent, defaults.l1Percent, 1, 100);
   const l2 = Math.max(l1, num(value.l2Percent, defaults.l2Percent, 1, 100));
   const l3 = Math.max(l2, num(value.l3Percent, defaults.l3Percent, 1, 100));
+  const isValidPercent = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v) && v >= 1 && v <= 100;
+  const windows = parseQuotaWindowThresholds(value.windows, defaults.windows, {
+    l1: isValidPercent(value.l1Percent) ? l1 : undefined,
+    l2: isValidPercent(value.l2Percent) ? l2 : undefined,
+    l3: isValidPercent(value.l3Percent) ? l3 : undefined,
+  });
   return {
     enabled: bool(value.enabled, defaults.enabled),
     providers: str(value.providers, defaults.providers),
@@ -974,6 +1008,7 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
     l2Percent: l2,
     l3Percent: l3,
     l3EtaMs: num(value.l3EtaMs, defaults.l3EtaMs, 0, 86_400_000),
+    windows,
     tickStepPercent: num(value.tickStepPercent, defaults.tickStepPercent, 0, 50),
     minIntervalMs: num(value.minIntervalMs, defaults.minIntervalMs, 0, 86_400_000),
     repeatMs: num(value.repeatMs, defaults.repeatMs, 0, 86_400_000),
@@ -986,6 +1021,42 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
     zaiOverseasBaseUrl: url(value.zaiOverseasBaseUrl, defaults.zaiOverseasBaseUrl),
     kimiBaseUrl: url(value.kimiBaseUrl, defaults.kimiBaseUrl),
     userAgent: str(value.userAgent, defaults.userAgent),
+  };
+}
+
+/**
+ * 单个窗口的阈值解析（quota-plan「阶梯阈值按窗口区分」）：优先级 窗口级字段 >
+ * 显式设置的全局旧字段（`globalOverride`，未设置则为 undefined）> 按窗口仓库
+ * 默认。窗口内部再次钳制 l1<=l2<=l3（与旧的全局钳制同款，配置写反顶上去而非
+ * 静默失效）。
+ */
+function parseWindowThresholds(
+  raw: unknown,
+  scopeDefaults: QuotaWindowThresholds,
+  globalOverride: { readonly l1: number | undefined; readonly l2: number | undefined; readonly l3: number | undefined },
+): QuotaWindowThresholds {
+  const record = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : undefined;
+  const num = (value: unknown, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= 100 ? Math.floor(value) : fallback;
+  const base1 = globalOverride.l1 ?? scopeDefaults.l1Percent;
+  const base2 = globalOverride.l2 ?? scopeDefaults.l2Percent;
+  const base3 = globalOverride.l3 ?? scopeDefaults.l3Percent;
+  const l1 = num(record?.l1Percent, base1);
+  const l2 = Math.max(l1, num(record?.l2Percent, base2));
+  const l3 = Math.max(l2, num(record?.l3Percent, base3));
+  return { l1Percent: l1, l2Percent: l2, l3Percent: l3 };
+}
+
+/** `quota.windows` 块解析：非对象/缺失 → 对两个窗口都应用 globalOverride 后的默认。 */
+function parseQuotaWindowThresholds(
+  raw: unknown,
+  defaults: Readonly<Record<WindowScope, QuotaWindowThresholds>>,
+  globalOverride: { readonly l1: number | undefined; readonly l2: number | undefined; readonly l3: number | undefined },
+): Readonly<Record<WindowScope, QuotaWindowThresholds>> {
+  const record = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : undefined;
+  return {
+    "5h": parseWindowThresholds(record?.["5h"], defaults["5h"], globalOverride),
+    week: parseWindowThresholds(record?.week, defaults.week, globalOverride),
   };
 }
 

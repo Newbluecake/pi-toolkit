@@ -196,6 +196,13 @@ describe("L2 warn block", () => {
     expect(text).not.toContain("降一位");
     expect(text).toContain("订阅额度照常优先使用");
   });
+
+  it("uses the week window's own threshold (95%), not the 5h default (75%) — quota-plan 「阶梯阈值按窗口区分」", () => {
+    const v = verdict({ level: 2, windows: [w("week", 95, 2, "pct")] });
+    const text = buildQuotaWarnText(v, NOW);
+    expect(text).toContain("7d 已用 95%（阈值 95%）");
+    expect(text).toContain("到 L3（\u226598% 或即将耗尽）");
+  });
 });
 
 describe("L3 block", () => {

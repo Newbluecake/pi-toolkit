@@ -2,7 +2,13 @@
 // aggregation (Kimi week trap), demotion floor, gridStep, stale.
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_THRESHOLDS, gridStep, providerVerdict, windowLevel } from "../../src/quota/ladder.js";
+import {
+  DEFAULT_THRESHOLDS,
+  DEFAULT_THRESHOLDS_BY_WINDOW,
+  gridStep,
+  providerVerdict,
+  windowLevel,
+} from "../../src/quota/ladder.js";
 import type { QuotaWindowsSnapshot } from "../../src/quota/types.js";
 
 const NOW = 1_000_000;
@@ -254,5 +260,77 @@ describe("gridStep", () => {
     expect(gridStep(62, 0)).toBe(0);
     expect(gridStep(62, -5)).toBe(0);
     expect(gridStep(Number.NaN, 10)).toBe(0);
+  });
+});
+
+// 阶梯阈值按窗口区分：providerVerdict 的 thresholds 支持按 scope 解析的函数
+// （service.ts 实际传入的形态），5h 与 week 的默认阈值应各自独立生效。
+describe("providerVerdict per-window thresholds", () => {
+  const byWindow = (scope: "5h" | "week") => DEFAULT_THRESHOLDS_BY_WINDOW[scope];
+
+  it("week 94% stays L1, 95% raises to L2, 98% raises to L3 (week defaults 50/95/98)", () => {
+    const cases: readonly [number, 0 | 1 | 2 | 3][] = [
+      [94, 1],
+      [95, 2],
+      [98, 3],
+    ];
+    for (const [pct, level] of cases) {
+      const snap = windowsSnapshot("kimi-coding", [{ scope: "week", usedPct: pct }]);
+      const v = providerVerdict(snap, {
+        now: NOW,
+        thresholds: byWindow,
+        staleAfterMs: STALE_AFTER_MS,
+        etaOf: () => undefined,
+        demoted: false,
+      });
+      expect(v.level, `pct=${pct}`).toBe(level);
+    }
+  });
+
+  it("5h 75% raises to L2, 90% raises to L3 (5h defaults 50/75/90, unchanged)", () => {
+    const cases: readonly [number, 0 | 1 | 2 | 3][] = [
+      [75, 2],
+      [90, 3],
+    ];
+    for (const [pct, level] of cases) {
+      const snap = windowsSnapshot("kimi-coding", [{ scope: "5h", usedPct: pct }]);
+      const v = providerVerdict(snap, {
+        now: NOW,
+        thresholds: byWindow,
+        staleAfterMs: STALE_AFTER_MS,
+        etaOf: () => undefined,
+        demoted: false,
+      });
+      expect(v.level, `pct=${pct}`).toBe(level);
+    }
+  });
+
+  it("judges the two windows independently in the same snapshot: 5h 75% (L2) vs week 75% (still L1)", () => {
+    const snap = windowsSnapshot("kimi-coding", [
+      { scope: "5h", usedPct: 75 },
+      { scope: "week", usedPct: 75 },
+    ]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: byWindow,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: false,
+    });
+    expect(v.windows.find((w) => w.scope === "5h")).toMatchObject({ level: 2 });
+    expect(v.windows.find((w) => w.scope === "week")).toMatchObject({ level: 1 });
+    expect(v.level).toBe(2); // max across windows
+  });
+
+  it("also accepts a single flat LadderThresholds (back-compat call shape used elsewhere)", () => {
+    const snap = windowsSnapshot("kimi-coding", [win(80)]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: false,
+    });
+    expect(v.level).toBe(2);
   });
 });

@@ -1424,3 +1424,34 @@ moonshot-balance-positive.json
 - **主题**：倒计时 `dim`（百分比仍按 levelColor）。同池去重与 `·stale Nm` 行尾标记行为不变。
 - **刷新时机**：倒计时按 `writeStatus` 落地时的 now 现算（快照每次落地都会重写 HUD 行）。用完的 provider 恒为 hot（level ≥ 3）⇒ `refreshHotMs`（默认 2min）节流，turn_end / 子代理生命周期 / session_start 任一触发点都会驱动重拉；会话完全空闲时整行（含百分比）冻结——与现状一致，零 timer 不变量保持。HUD 自身的 5s footer 重绘只复读已存的 status 字符串，不重算；若未来要空闲时也走秒，需把 status 槽改成渲染回调（改 `src/hud/footer.ts` 聚合面），本期不做。
 - **月度窗口调查结论（2026-09-25 实测，两家凭据均在）**：zai `GET /api/monitor/usage/quota/limit` 的 `data.limits` 只含 `unit:3`（5h）与 `unit:6`（week）两条，无其它 unit；kimi `GET /coding/v1/usages` 的 `usages` 只含 `limit_5h` / `limit_7d`（`booster_wallet` 是按量充值钱包，非窗口额度）。两家均无月度窗口 ⇒ 不新增 `"month"` scope。
+
+## 16. 阶梯阈值按窗口区分（2026-09-27 用户拍板）
+
+仓库默认阈值从「两窗口共用一份」改为按窗口区分：5h 保留 50/75/90（快速反应），
+week（HUD `7d`）拉高到 50/95/98（7 天窗口天然摊薄，旧的 75/90 在多 agent 场景
+下太容易被日常波动触发误报）；`l3EtaMs`（速率预测硬线）两窗口相同、不随窗口
+区分。
+
+- **代码落点**：`ladder.ts` 新增 `DEFAULT_THRESHOLDS_BY_WINDOW`（`DEFAULT_THRESHOLDS`
+  保留，等价于 `[...]["5h"]`，供只关心单窗口的调用方沿用）；`providerVerdict` 的
+  `thresholds` 入参放宽为 `LadderThresholds | ((scope) => LadderThresholds)`，
+  `service.ts` 传一个按 `settings.windows[scope]` 取值的解析函数。`render.ts`
+  的 `thresholdText` 按触发窗口的 `scope` 查对应默认值，L2 文案的「阈值 NN%」与
+  「到 L3（≥NN%）」尾句都随窗口变化（7d 预警写「阈值 95%」）。
+- **settings 形状**：`QuotaSettings` 新增 `windows: Readonly<Record<WindowScope,
+{ l1Percent; l2Percent; l3Percent }>>`（`QuotaWindowThresholds`），文件层支持
+  `quota.windows.{"5h","week"}.{l1,l2,l3}Percent` 六个独立覆盖点，通过既有的
+  `getPath`/`setPath` 点分路径机制（与 `workflow.budget.*` 同款）无需额外 UI 改造。
+  优先级：窗口级字段 > 显式设置的旧全局 `quota.l1Percent/l2Percent/l3Percent`
+  （**若用户显式配置了合法范围内的全局值，视为对两个窗口的覆盖**，向后兼容）>
+  按窗口仓库默认。「显式设置」按原始输入是否为 `[1,100]` 内的有限数判定——落在
+  校验失败区间而回落默认的旧字段（如 `l2Percent: 101`）不算显式覆盖，不会污染
+  另一窗口的默认值。每个窗口内部独立钳制 `l1 <= l2 <= l3`。
+- **SETTING_SPECS**：新增六个 `quota.windows.<scope>.<lN>Percent` 词条（`count()`
+  同款，非 live，`/agent settings` 文本命令与 TUI 编辑器都按 dotted path 查表，
+  不需要专门的嵌套对象录入 UI）。
+- **测试**：`tests/quota/ladder.test.ts`（providerVerdict 按窗口独立判定：week
+  94/95/98 → L1/L2/L3，5h 75/90 → L2/L3，同快照两窗口互不干扰，向后兼容单一
+  `LadderThresholds` 调用形态）、`tests/config/quota-settings.test.ts`（默认值、
+  窗口覆盖、全局旧字段的双窗口覆盖与失效判定、窗口内钳制、SETTING_SPECS 六词条）、
+  `tests/quota/render.test.ts`（7d 阈值文案按 95% 展示）。

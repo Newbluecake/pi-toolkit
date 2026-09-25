@@ -485,9 +485,56 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "older snapshots warn but never block a spawn",
     description: "Snapshot age after which the gate stops blocking",
   }),
-  "quota.l1Percent": count("quota.l1Percent", 1, "L1 hint threshold (used %)"),
-  "quota.l2Percent": count("quota.l2Percent", 1, "L2 advise threshold (used %)"),
-  "quota.l3Percent": count("quota.l3Percent", 1, "L3 strong threshold (used %)"),
+  "quota.l1Percent": count(
+    "quota.l1Percent",
+    1,
+    "L1 hint threshold (used %); applies to both windows unless overridden below",
+  ),
+  "quota.l2Percent": count(
+    "quota.l2Percent",
+    1,
+    "L2 advise threshold (used %); applies to both windows unless overridden below",
+  ),
+  "quota.l3Percent": count(
+    "quota.l3Percent",
+    1,
+    "L3 strong threshold (used %); applies to both windows unless overridden below",
+  ),
+  // Per-window overrides (quota-plan 「阶梯阈值按窗口区分」): repository defaults already differ
+  // per window (5h 50/75/90, week 50/95/98); these six knobs let a user override one
+  // scope without touching the other. Nested dotted paths already work through
+  // getPath/setPath (same mechanism as `workflow.budget.*`) — the flat editor and
+  // text `set` both index by the full string key, so no special UI plumbing is needed.
+  "quota.windows.5h.l1Percent": count(
+    "quota.windows.5h.l1Percent",
+    1,
+    "5h window L1 threshold override (used %); falls back to quota.l1Percent, then the 5h default (50)",
+  ),
+  "quota.windows.5h.l2Percent": count(
+    "quota.windows.5h.l2Percent",
+    1,
+    "5h window L2 threshold override (used %); falls back to quota.l2Percent, then the 5h default (75)",
+  ),
+  "quota.windows.5h.l3Percent": count(
+    "quota.windows.5h.l3Percent",
+    1,
+    "5h window L3 threshold override (used %); falls back to quota.l3Percent, then the 5h default (90)",
+  ),
+  "quota.windows.week.l1Percent": count(
+    "quota.windows.week.l1Percent",
+    1,
+    "week (7d) window L1 threshold override (used %); falls back to quota.l1Percent, then the week default (50)",
+  ),
+  "quota.windows.week.l2Percent": count(
+    "quota.windows.week.l2Percent",
+    1,
+    "week (7d) window L2 threshold override (used %); falls back to quota.l2Percent, then the week default (95)",
+  ),
+  "quota.windows.week.l3Percent": count(
+    "quota.windows.week.l3Percent",
+    1,
+    "week (7d) window L3 threshold override (used %); falls back to quota.l3Percent, then the week default (98)",
+  ),
   "quota.l3EtaS": seconds("quota.l3EtaMs", { max: 86_400, description: "Predicted exhaustion horizon that forces L3" }),
   "quota.tickStepPercent": count("quota.tickStepPercent", 0, "Used-% grid between L1 ticks; 0 = level latch only"),
   "quota.minIntervalS": seconds("quota.minIntervalMs", {

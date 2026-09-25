@@ -58,6 +58,10 @@ describe("quota settings", () => {
       l2Percent: 75,
       l3Percent: 90,
       l3EtaMs: 1_800_000,
+      windows: {
+        "5h": { l1Percent: 50, l2Percent: 75, l3Percent: 90 },
+        week: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
+      },
       tickStepPercent: 10,
       minIntervalMs: 300_000,
       repeatMs: 1_800_000,
@@ -188,5 +192,94 @@ describe("quota settings", () => {
     expect(loadSettings({ quota: { repeatS: 0 } }).quota.repeatMs).toBe(0);
     // invalid block wired through loadSettings also falls back to defaults
     expect(loadSettings({ quota: "invalid" }).quota).toEqual(defaults);
+  });
+});
+
+// 阶梯阈值按窗口区分（用户拍板）：5h 默认 50/75/90、week 默认 50/95/98，支持
+// `quota.windows.<scope>.*` 窗口级覆盖，且与旧的全局 l1Percent/l2Percent/l3Percent
+// 保持向后兼容（全局字段 = 对两个窗口的覆盖）。优先级：窗口级 > 全局 > 按窗口默认。
+describe("quota settings: per-window threshold overrides", () => {
+  it("pins the per-window defaults: 5h 50/75/90, week 50/95/98", () => {
+    expect(defaults.windows).toEqual({
+      "5h": { l1Percent: 50, l2Percent: 75, l3Percent: 90 },
+      week: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
+    });
+  });
+
+  it("overrides only the targeted window when quota.windows is set", () => {
+    const parsed = parseQuotaSettings({ windows: { week: { l2Percent: 92, l3Percent: 96 } } });
+    expect(parsed.windows["5h"]).toEqual(defaults.windows["5h"]); // untouched
+    expect(parsed.windows.week).toEqual({ l1Percent: 50, l2Percent: 92, l3Percent: 96 });
+  });
+
+  it("clamps monotonically inside each window independently (l1<=l2<=l3)", () => {
+    const parsed = parseQuotaSettings({
+      windows: {
+        "5h": { l1Percent: 80, l2Percent: 50, l3Percent: 60 },
+        week: { l1Percent: 10, l2Percent: 99, l3Percent: 20 },
+      },
+    });
+    expect(parsed.windows["5h"]).toEqual({ l1Percent: 80, l2Percent: 80, l3Percent: 80 });
+    expect(parsed.windows.week).toEqual({ l1Percent: 10, l2Percent: 99, l3Percent: 99 });
+  });
+
+  it("back-compat: an explicit legacy global l1/l2/l3Percent overrides BOTH windows", () => {
+    const parsed = parseQuotaSettings({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
+    expect(parsed.windows["5h"]).toEqual({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
+    expect(parsed.windows.week).toEqual({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
+  });
+
+  it("window-level field wins over the legacy global override", () => {
+    const parsed = parseQuotaSettings({
+      l1Percent: 40,
+      l2Percent: 60,
+      l3Percent: 80,
+      windows: { week: { l2Percent: 97 } },
+    });
+    // 5h has no window-level override ⇒ falls back to the global override
+    expect(parsed.windows["5h"]).toEqual({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
+    // week's l2Percent is window-level ⇒ wins over the global override; l1/l3 still
+    // fall back to the (clamped) global override
+    expect(parsed.windows.week).toEqual({ l1Percent: 40, l2Percent: 97, l3Percent: 97 });
+  });
+
+  it("an out-of-range legacy global field does NOT count as an explicit override (falls through to per-window default)", () => {
+    // l2Percent: 101 is invalid input ⇒ parseQuotaSettings falls back the top-level
+    // field to its own default (75), but that fallback must NOT be treated as a
+    // user-authored override of the week window's 95 default.
+    const parsed = parseQuotaSettings({ l2Percent: 101 });
+    expect(parsed.windows.week.l2Percent).toBe(95);
+    expect(parsed.windows["5h"].l2Percent).toBe(75);
+  });
+
+  it("ignores a non-object quota.windows block", () => {
+    for (const bad of [null, "nope", 1, [], [1, 2]]) {
+      expect(parseQuotaSettings({ windows: bad }).windows).toEqual(defaults.windows);
+    }
+  });
+
+  it("round-trips through loadSettings (file shape, no *S conversion needed — percents are not durations)", () => {
+    const loaded = loadSettings({ quota: { windows: { "5h": { l3Percent: 92 } } } });
+    expect(loaded.quota.windows["5h"]).toEqual({ l1Percent: 50, l2Percent: 75, l3Percent: 92 });
+    expect(loaded.quota.windows.week).toEqual(defaults.windows.week);
+  });
+
+  it("exposes the six per-window override keys in SETTING_SPECS, all non-live", () => {
+    const keys = [
+      "quota.windows.5h.l1Percent",
+      "quota.windows.5h.l2Percent",
+      "quota.windows.5h.l3Percent",
+      "quota.windows.week.l1Percent",
+      "quota.windows.week.l2Percent",
+      "quota.windows.week.l3Percent",
+    ] as const;
+    for (const key of keys) {
+      expect(isKnownSettingKey(key), key).toBe(true);
+      const spec = SETTING_SPECS[key]!;
+      expect(spec.live, key).toBeUndefined();
+      expect(spec.path, key).toBe(key);
+      expect(defaultOf(spec), key).not.toBeUndefined();
+      expect(currentOf(DEFAULT_SETTINGS, spec), key).not.toBe("(unset)");
+    }
   });
 });
