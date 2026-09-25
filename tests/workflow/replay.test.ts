@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf } from "../../src/workflow/journal.js";
 import { buildReplayIndex, decideReplay } from "../../src/workflow/replay.js";
 import type { JournalEntry, TaskSemantics } from "../../src/workflow/types.js";
@@ -419,5 +419,119 @@ describe("M3.6 Blocker fix (§6.3 E2): configHashAvailable fail-closed", () => {
       now: 2000,
     });
     expect(decision).toEqual({ kind: "skip", reason: "truncated" });
+  });
+});
+
+describe("workflow-experts §4.6/§5: experts/chain_tainted skip — lookup never runs, noReplay still wins first", () => {
+  it("experts:true skips even when a matching entry exists, and never touches the index (lookup spy)", () => {
+    const entries = makeChainRun(["a"]);
+    const index = buildReplayIndex(entries, 0, "chain");
+    const lookupSpy = vi.spyOn(index, "lookup");
+    const decision = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      experts: true,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "experts" });
+    expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  it("tainted:true skips even when a matching entry exists, and never touches the index (lookup spy)", () => {
+    const entries = makeChainRun(["a"]);
+    const index = buildReplayIndex(entries, 0, "chain");
+    const lookupSpy = vi.spyOn(index, "lookup");
+    const decision = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      tainted: true,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "chain_tainted" });
+    expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  it("ordering: noReplay > non_deterministic > experts > chain_tainted > config_hash_unavailable > lookup", () => {
+    const index = buildReplayIndex([], 0, "chain");
+    const base = {
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      now: 2000,
+    };
+    expect(
+      decideReplay({
+        ...base,
+        noReplay: true,
+        deterministic: false,
+        experts: true,
+        tainted: true,
+        configHashAvailable: false,
+      }),
+    ).toEqual({ kind: "skip", reason: "no_replay" });
+    expect(
+      decideReplay({
+        ...base,
+        noReplay: false,
+        deterministic: false,
+        experts: true,
+        tainted: true,
+        configHashAvailable: false,
+      }),
+    ).toEqual({ kind: "skip", reason: "non_deterministic" });
+    expect(
+      decideReplay({
+        ...base,
+        noReplay: false,
+        deterministic: true,
+        experts: true,
+        tainted: true,
+        configHashAvailable: false,
+      }),
+    ).toEqual({ kind: "skip", reason: "experts" });
+    expect(
+      decideReplay({
+        ...base,
+        noReplay: false,
+        deterministic: true,
+        experts: false,
+        tainted: true,
+        configHashAvailable: false,
+      }),
+    ).toEqual({ kind: "skip", reason: "chain_tainted" });
+    expect(
+      decideReplay({
+        ...base,
+        noReplay: false,
+        deterministic: true,
+        experts: false,
+        tainted: false,
+        configHashAvailable: false,
+      }),
+    ).toEqual({ kind: "skip", reason: "config_hash_unavailable" });
+  });
+
+  it("experts/tainted both absent (undefined) behaves exactly like before (unaffected calls keep hitting)", () => {
+    const entries = makeChainRun(["a"]);
+    const index = buildReplayIndex(entries, 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+    });
+    expect(decision.kind).toBe("hit");
   });
 });

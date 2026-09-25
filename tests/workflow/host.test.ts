@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import type { JournalEntry, ReplayIndex } from "../../src/workflow/types.js";
+import type { ReplayIndex } from "../../src/workflow/types.js";
+import type { JournalEntry } from "../../src/workflow/types.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
 import {
   attachHostCallHandler,
@@ -10,6 +11,7 @@ import {
   type WorkflowChildEvent,
 } from "../../src/workflow/host.js";
 import type { WorkflowRunBudget } from "../../src/workflow/types.js";
+import { buildReplayIndex } from "../../src/workflow/replay.js";
 import { fakeSpawnWorkerFactory } from "./helpers.js";
 
 /**
@@ -1591,10 +1593,10 @@ describe("host.ts: agent() model/thinking overrides (Agent-tool model/thinking s
 });
 
 /**
- * workflow-experts (docs/dev/workflow-experts/plan.md §4.1/§4.4, §6 A): strict
- * opts validation driven through the real host_call envelope path (no worker
- * involved — the worker's own JS mirror gets real-`vm` coverage in
- * worker-host-call.test.ts).
+ * workflow-experts (docs/dev/workflow-experts/plan.md §4.1/§4.4, §6 A/B):
+ * strict opts validation and the experts admission gate, driven through the
+ * real host_call envelope path (no worker involved — the worker's own JS
+ * mirror gets real-`vm` coverage in worker-host-call.test.ts).
  */
 describe("host.ts: strict agent() opts validation (workflow-experts §4.1/§4.4)", () => {
   it("an unknown key on a raw envelope (no optsReport at all — host's own independent re-snapshot) is rejected with the allowed-key list", async () => {
@@ -1642,5 +1644,196 @@ describe("host.ts: strict agent() opts validation (workflow-experts §4.1/§4.4)
     h.postHostCall("1", "agent", { prompt: "p", opts: { effort: "low" } });
     await flush();
     expect(handler.children).toEqual([]);
+  });
+});
+
+describe("host.ts: agent({ experts }) admission (workflow-experts §4.4, D9/D11)", () => {
+  function expertsHarness(budgetOverrides: Partial<WorkflowRunBudget> = {}) {
+    const h = harness({ maxParallel: 4, ...budgetOverrides });
+    const c = controllableSpawner();
+    const events: WorkflowChildEvent[] = [];
+    return {
+      ...h,
+      c,
+      events,
+      attach(extra: Partial<Parameters<typeof attachHostCallHandler>[0]> = {}) {
+        return attachHostCallHandler({
+          clock: h.clock,
+          workerHost: h.workerHost,
+          spawner: c.spawner,
+          gateRunner: okGate,
+          budget: { ...BASE_BUDGET, maxParallel: 4, ...budgetOverrides },
+          workflowDeadlineAt: 1_000_000,
+          onChildEvent: (e) => events.push(e),
+          ...extra,
+        });
+      },
+      kindsOf(callId: string): string[] {
+        return events.filter((e) => e.callId === callId).map((e) => e.kind);
+      },
+    };
+  }
+
+  it("rejects with 'not supported in this context' when no resolveExperts is wired at all (D17)", async () => {
+    const h = expertsHarness();
+    await h.boot();
+    h.attach();
+    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["dev"] } });
+    await flush();
+    expect(h.c.spawns).toHaveLength(0);
+    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack.ok).toBe(false);
+    expect(ack.error?.message).toContain("not supported in this context");
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
+      stage: "admission",
+      reason: "experts_unresolved",
+    });
+  });
+
+  it("a successful resolution forwards consultExperts on the spawn request and records experts on the settled summary", async () => {
+    const h = expertsHarness();
+    await h.boot();
+    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
+    const resolveExperts = vi.fn(() => ({ refs }));
+    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
+    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["outside"] } });
+    await flush();
+    expect(resolveExperts).toHaveBeenCalledWith(["outside"]);
+    expect(h.c.spawns[0]!.req).toMatchObject({ consultExperts: refs });
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    expect(handler.children[0]).toMatchObject({ experts: ["r-expert"] });
+  });
+
+  it("a resolver failure rejects the call with experts_unresolved, never calls spawn, and records no children[] entry", async () => {
+    const h = expertsHarness();
+    await h.boot();
+    const resolveExperts = vi.fn(() => ({ error: { message: "expert not found" } }));
+    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
+    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["ghost"] } });
+    await flush();
+    expect(h.c.spawns).toHaveLength(0);
+    expect(handler.children).toEqual([]);
+    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack.ok).toBe(false);
+    expect(ack.error?.message).toBe("expert not found");
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
+      stage: "admission",
+      reason: "experts_unresolved",
+    });
+  });
+
+  it("a call with experts:[] (validated to undefined) never touches resolveExperts at all", async () => {
+    const h = expertsHarness();
+    await h.boot();
+    const resolveExperts = vi.fn(() => ({ refs: [] }));
+    h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
+    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: [] } });
+    await flush();
+    expect(resolveExperts).not.toHaveBeenCalled();
+    expect(h.c.spawns[0]!.req).not.toHaveProperty("consultExperts");
+  });
+});
+
+describe("host.ts: chain-taint replay safety (workflow-experts D12-D15, §5)", () => {
+  function taintHarness(budgetOverrides: Partial<WorkflowRunBudget> = {}) {
+    const h = harness({ maxParallel: 4, ...budgetOverrides });
+    const c = controllableSpawner();
+    const appendSpy = vi.fn();
+    const index = buildReplayIndex([], 0, "chain");
+    return {
+      ...h,
+      c,
+      appendSpy,
+      attach(extra: Partial<Parameters<typeof attachHostCallHandler>[0]> = {}) {
+        return attachHostCallHandler({
+          clock: h.clock,
+          workerHost: h.workerHost,
+          spawner: { ...c.spawner, configHashOf: () => "hash" },
+          gateRunner: okGate,
+          budget: { ...BASE_BUDGET, maxParallel: 4, ...budgetOverrides },
+          workflowDeadlineAt: 1_000_000,
+          journal: {
+            store: { append: appendSpy } as never,
+            dir: ".",
+            index,
+            scope: "chain",
+            noReplay: false,
+            deterministic: { current: true },
+          },
+          ...extra,
+        });
+      },
+    };
+  }
+
+  it("an experts call itself is never journaled, even though it completes successfully", async () => {
+    const h = taintHarness();
+    await h.boot();
+    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
+    const resolveExperts = vi.fn(() => ({ refs }));
+    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
+    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["outside"] } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    expect(h.appendSpy).not.toHaveBeenCalled();
+    expect(handler.replayStats).toMatchObject({ tainted: true });
+  });
+
+  it("a call submitted after a successful experts resolution is chain_tainted and never journaled, even though it declares no experts of its own", async () => {
+    const h = taintHarness();
+    await h.boot();
+    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
+    const resolveExperts = vi.fn(() => ({ refs }));
+    h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
+    h.postHostCall("1", "agent", { prompt: "expert-call", opts: { experts: ["outside"] } });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    h.postHostCall("2", "agent", { prompt: "plain-call", opts: null });
+    await flush();
+    h.c.spawns[1]!.resolve({ runId: "r2" });
+    await flush();
+    h.c.finishChild("r2");
+    await flush();
+    expect(h.appendSpy).not.toHaveBeenCalled();
+  });
+
+  it("a call BEFORE any taint is journaled normally (baseline, taint is not global-by-default)", async () => {
+    const h = taintHarness();
+    await h.boot();
+    const handler = h.attach();
+    h.postHostCall("1", "agent", { prompt: "plain-call", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+    expect(h.appendSpy).toHaveBeenCalledTimes(1);
+    expect(handler.replayStats).not.toHaveProperty("tainted");
+  });
+
+  it("a REJECTED experts call (resolver failure) never taints the chain — the next plain call still journals", async () => {
+    const h = taintHarness();
+    await h.boot();
+    const resolveExperts = vi.fn(() => ({ error: { message: "nope" } }));
+    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
+    h.postHostCall("1", "agent", { prompt: "expert-call", opts: { experts: ["ghost"] } });
+    await flush();
+    h.postHostCall("2", "agent", { prompt: "plain-call", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r2" });
+    await flush();
+    h.c.finishChild("r2");
+    await flush();
+    expect(h.appendSpy).toHaveBeenCalledTimes(1);
+    expect(handler.replayStats).not.toHaveProperty("tainted");
   });
 });

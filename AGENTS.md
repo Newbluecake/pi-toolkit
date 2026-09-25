@@ -257,7 +257,14 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `label`/`agentType`/`phase`/`fullResult`/`model`/`thinking`/`isolation`/`experts` — any other key, a non-plain-object
   `opts`, an accessor/Proxy/function-valued known key, or a malformed `experts` array reject with the full allowed-key
   list and a mistaken-key hint; the worker (`worker-source.ts`) takes its own structural snapshot first and never
-  `postMessage`s an unclonable value — host.ts re-snapshots independently and either side's defect wins). Design:
+  `postMessage`s an unclonable value — host.ts re-snapshots independently and either side's defect wins) and
+  `agent({ experts })` lets a workflow child consult in-turn (`expert-scope.ts`: resolution order is `"main"` → this
+  workflow's own same-labeled call (by declared or effective label, rejecting on any unsettled/ambiguous/non-completed
+  candidate) → the consult wiring's `resolveExperts(refs, { completedOnly: true })`, D8 — stricter than the top-level
+  Agent tool, which stays completedOnly-agnostic); any call that declares `experts`, and every call submitted after one
+  whose experts resolved successfully, never reads or writes the journal (`replay.ts`'s `"experts"`/`"chain_tainted"`
+  skip reasons, checked before `config_hash_unavailable`/lookup) — `TaskSemantics`/`taskKeyOf` are unchanged (experts
+  never join the key). Design:
   `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md`.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —

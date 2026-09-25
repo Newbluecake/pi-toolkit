@@ -198,19 +198,23 @@ describe("SubagentWorkflow tool: background-only", () => {
     expect(tool.promptSnippet).toMatch(/background/);
   });
 
-  it("documents agent()'s per-call model/thinking opts (Agent-tool model semantics)", () => {
+  it("documents agent()'s per-call model/thinking opts (Agent-tool model semantics) and the strict opts / experts contract", () => {
     const tool = toolWith(realRuns(makeSpawner().spawner));
     expect(tool.description).toContain("model");
     expect(tool.description).toContain("thinking");
     // The script-param description carries the opts list a script author reads.
     const params = tool.parameters as unknown as { properties: { script: { description: string } } };
     const desc = params.properties.script.description;
-    expect(desc).toContain("agent() opts");
+    expect(desc).toContain("strictly validated");
     expect(desc).toContain("model");
     expect(desc).toContain("provider/id");
     expect(desc).toContain("fuzzy hint");
     expect(desc).toContain("thinking");
     expect(desc).toContain("'off' | 'low' | 'medium' | 'high'");
+    expect(desc).toContain("isolation");
+    expect(desc).toContain("experts");
+    expect(desc).toContain("completed");
+    expect(desc).toContain("noReplay");
   });
 });
 

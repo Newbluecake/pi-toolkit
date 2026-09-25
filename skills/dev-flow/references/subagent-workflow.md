@@ -30,18 +30,27 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 
 - 禁止承载 `dev-clarify`、方案确认等用户交互闸门；workflow 启动后跑到结束，不能中途等用户。
 - 禁止顺序 `await agent()` 冒充并行；并行必须 `parallel()` / `pipeline()`。
-- **`agent(prompt, opts)` 认 `label` / `agentType` / `phase` / `fullResult` / `model` / `thinking`**：`model` 用完整
+- **`agent(prompt, opts)` 严格校验，只认 `label` / `agentType` / `phase` / `fullResult` / `model` / `thinking` /
+  `isolation` / `experts` 这八个键**：任何其它键（含拼写变体，如 `effort`/`subagent_type`/`schema`/`resume`/
+  `timeout_ms`/`run_in_background`）、未知键值为 `undefined`、`opts` 本身不是普通对象（`false`/`0`/`""`/数组/
+  函数/Proxy/类实例）、已知键类型不对，一律 reject（报错列出允许键全集 + 常见误写的替代建议）。`model` 用完整
   `provider/id`（同 `Agent` 的 `model` 参数；裸 id/子串作模糊 hint 解析，未知模型 / hint 解析失败 / 额度闸门拦截
-  会直接 reject，错误信息含 `Did you mean` 建议），`thinking` 取 `off|low|medium|high`；`effort` 仍被忽略，
+  会直接 reject，错误信息含 `Did you mean` 建议），`thinking` 取 `off|low|medium|high`；
   `isolation: "worktree"` 只写进 journal、**不真正隔离**。
   ⇒ 评审/验收独立性直接在 verify 一级用 `model:` 指定与 dev 不同的模型（见下方模板），或继续写进类型 frontmatter。
+- **`agent(prompt, { experts })` 现在可以挂专家**，但规则比顶层 `Agent` 更严：`experts` 只接受**已 completed**
+  且有持久化 session 的调用（failed/timed_out/aborted/仍在运行/回放命中的调用都会被拒），可以是 `label`/`run_id`，
+  也可以是保留字 `"main"`（指宿主主会话）。解析顺序：`"main"` 优先 → **本 workflow 内自己提交过的同名调用**
+  （按声明或去重后的实际 label 匹配；本地有候选就绝不会解析到外面同名的旧 run）→ 交给主会话侧的 consult 解析器
+  按 label/run_id 查找。挂了 experts 的那次调用、以及它成功解析之后**这个 run 里提交的所有后续调用**，都不会走
+  journal 回放（即使配置了 journal）——重跑一个开了 journal 的脚本时，如果上游专家调用命中了回放，它下游那些
+  依赖专家结论的调用会被拒（提示改 `noReplay: true` 整体重跑，或换用外部 run_id）。先 `await` 专家调用、
+  确认它已经结束，再把它的 label 传给下一次 `agent({ experts: [...] })`。
 - 方案强依赖探索结论时先 Explore 后 Plan；只有 Plan 输入自足时才可 Explore + Plan 并行。
 - 有文件交叉的 dev 任务**不能进 workflow**（隔离不生效）：重切文件域，或改用 `Agent({ isolation: "worktree" })`。
 - 批量派 dev 前必须先过[冲突预检](./parallel-safety.md#二冲突预检多写包并行前必做四步)：
   把 `args.tasks` 的文件域分配表跑一遍 `conflict-check.mjs`，交集任务重切或移出 workflow 用 `Agent` 隔离派，
   分配表四件事写进每个任务的 prompt。
-- `SubagentWorkflow` 派发**不支持 `experts`**（workflow 子 run 拿不到 consult 工具）：按 SKILL.md「挂专家」矩阵
-  必须挂专家的包（L3 写包、打回重派、换模型接手）不进 workflow，改用 `Agent` 同消息并行派。
 - `SubagentWorkflow` 一律**后台运行**：调用立即返回 `wf_…` 工作流 ID，终态时推送完成通知；
   通知到达后用 `get_subagent_result(run_id: "wf_…")` 取完整结果，需要中途叫停用 `abort_subagent`。
   不要轮询或 `wait` 干等——主会话在工作流运行期间照常接收用户输入、可以做别的事。
@@ -90,6 +99,10 @@ const results = await pipeline(
       phase: "Verify",
       agentType: "verifier",
       model: "cr-anthropic/claude-sonnet-5", // 与 dev 一级不同模型，才满足验收独立性
+      // 验收可以挂上同一 pipeline 里已经 completed 的 dev 调用作为专家（按它声明的 label 匹配到本 workflow
+      // 自己那次调用，不会漏解到外面同名的旧 run）——前提是 dev 那次调用必须先 completed（pipeline 本身已保证），
+      // 且挂了 experts 之后本次及后续提交不走 journal 回放。
+      experts: [`dev:${t.id}`],
     }).then((verify) => ({ task: t.id, dev, verify })),
 );
 return { results: results.filter(Boolean) };

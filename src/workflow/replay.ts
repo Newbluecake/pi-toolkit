@@ -79,7 +79,16 @@ export type ReplayDecision =
   | {
       readonly kind: "skip";
       readonly reason:
-        "no_replay" | "non_deterministic" | "isolation_worktree" | "expired" | "config_hash_unavailable" | "truncated";
+        | "no_replay"
+        | "non_deterministic"
+        | "isolation_worktree"
+        | "expired"
+        | "config_hash_unavailable"
+        | "truncated"
+        /** workflow-experts D12: this call itself passed `opts.experts` — never replayed, never journaled. */
+        | "experts"
+        /** workflow-experts D13-D15: submitted after some earlier call's experts resolved successfully this run — the whole rest of the chain is live. */
+        | "chain_tainted";
     };
 
 export interface DecideReplayInput {
@@ -106,6 +115,10 @@ export interface DecideReplayInput {
    * concept to begin with).
    */
   readonly configHashAvailable?: boolean;
+  /** workflow-experts D12: `true` for a call that itself carries `opts.experts` (regardless of whether resolution ends up succeeding — host.ts only sets this when experts resolved, see its own call site doc). */
+  readonly experts?: boolean;
+  /** workflow-experts D13-D15: `true` once this run's chain has been tainted by an earlier successfully-resolved experts call. */
+  readonly tainted?: boolean;
 }
 
 export const DEFAULT_REPLAY_TTL_MS: Millis = 7 * 24 * 60 * 60 * 1000;
@@ -118,6 +131,11 @@ export const DEFAULT_REPLAY_TTL_MS: Millis = 7 * 24 * 60 * 60 * 1000;
 export function decideReplay(input: DecideReplayInput): ReplayDecision {
   if (input.noReplay) return { kind: "skip", reason: "no_replay" };
   if (!input.deterministic) return { kind: "skip", reason: "non_deterministic" };
+  // workflow-experts §4.6/§5: an experts call and everything chain-tainted
+  // after it are unconditionally skip — checked *before* the index is ever
+  // touched (§5's contract table: lookup must never run for either case).
+  if (input.experts === true) return { kind: "skip", reason: "experts" };
+  if (input.tainted === true) return { kind: "skip", reason: "chain_tainted" };
   // M3.6 Blocker fix (§6.3 E2): fail-closed when this call has no reliable
   // `agentTypeConfigHash` — never even look at the index. This is checked
   // *before* `index.lookup` on purpose: a name-only fallback key could

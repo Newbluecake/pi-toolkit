@@ -61,12 +61,25 @@ export const WorkflowToolParams = Type.Object({
     description:
       "The workflow script source. Must start with `export const meta = { name, description }` (a plain object " +
       "literal). The sandboxed script body may call agent(prompt, opts?), parallel(thunks), pipeline(items, " +
-      "...stages), phase(title), log(message), and read the top-level `args`/`budget` globals. agent() opts: label, " +
-      "agentType, phase, fullResult, model (per-call model override — the FULL 'provider/id' exactly as listed in the " +
+      "...stages), phase(title), log(message), and read the top-level `args`/`budget` globals. agent()'s opts is " +
+      "strictly validated: only label, agentType, phase, fullResult, model, thinking, isolation, experts are " +
+      "allowed — any other key (or a wrong-typed value on an allowed one, or opts itself not being a plain object) " +
+      "rejects the call with the full allowed-key list and a 'did you mean' hint for common mistakes (e.g. effort " +
+      "-> thinking, subagent_type -> agentType, schema/resume/timeout_ms are not supported here at all). model is a " +
+      "per-call model override — the FULL 'provider/id' exactly as listed in the " +
       "'Available models' section of the system prompt, same rule as the Agent tool; a bare model id/substring is " +
       "resolved as a fuzzy hint, and an unknown model or unresolvable hint rejects the agent() call), thinking " +
       "('off' | 'low' | 'medium' | 'high', per-call thinking-level override; unset = the agent type's frontmatter " +
-      "level). Each pipeline stage " +
+      "level). experts is a whitelist of subagent handles (labels/run_ids from THIS workflow run, or the reserved " +
+      "'main' for the host main session) this specific agent() call may consult in-turn via the consult tool — " +
+      "unlike the top-level Agent tool's experts, a workflow expert must already be a **completed** run with a " +
+      "persisted session (failed/timed_out/aborted/still-running entries are rejected); resolving a within-this-" +
+      "workflow label always prefers THIS run's own matching call (by declared or effective label) over any " +
+      "outside run sharing the name, and rejects outright if that local call hasn't settled yet or never completed " +
+      "successfully. Any agent() call that carries experts, and every call submitted after one whose experts " +
+      "resolved successfully, is never replayed (journal-wise) even when a journal is configured — a re-run whose " +
+      "upstream expert call would have replayed instead rejects the downstream expert call; pass noReplay: true to " +
+      "force the whole run live. Each pipeline stage " +
       "is called as stage(prevValue, item, index) \u2014 the first stage gets prevValue=undefined, so write it as " +
       "(_prev, item, i) => ... . The script may not use " +
       "Date.now()/Math.random()/eval (all disabled \u2014 they would silently break replay). Max 512 KiB.",

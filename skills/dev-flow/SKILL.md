@@ -32,9 +32,11 @@ metadata:
 4. **能并行必并行**：判定可并行的任务必须在**同一条消息**中发出多个 `Agent` 调用，或在
    `SubagentWorkflow` 里用 `parallel()`/`pipeline()`；顺序派发不算并行。
    **同一轮并行超过 6 个 agent 必须用 `SubagentWorkflow`**（全局并发上限默认 6，第 7 个起在全局槽位排队且有排队超时；
-   workflow 自带 FIFO 排队、最多占 4 槽并给普通 Agent 留槽）。workflow 子任务不能挂 `experts`、
-   `isolation` 不生效（`model`/`thinking` 可按调用指定，同 `Agent` 参数规则）——需要专家/worktree 隔离的任务
-   留在 `Agent`，其余进 workflow（详见 references/subagent-workflow.md）。
+   workflow 自带 FIFO 排队、最多占 4 槽并给普通 Agent 留槽）。workflow 子任务 `agent(prompt, opts)` 严格校验（未知键拒，
+   列允许键全集），**现在可以挂 `experts`**（只接受本 workflow 内已 completed 的同名调用或外部 completed run/`"main"`，
+   挂了之后本次及后续提交不走 journal 回放，详见 references/subagent-workflow.md），`isolation` 仍不生效
+   （`model`/`thinking` 可按调用指定，同 `Agent` 参数规则）——需要 worktree 隔离的任务仍留在 `Agent`，
+   其余进 workflow（详见 references/subagent-workflow.md）。
    **每轮派单前必须先做并行自检**（流程见「并行调度」节）；选择串行必须能指出具体硬依赖
    （谁消费谁的产物、谁和谁写同一文件），「稳妥起见一个个来」「先看看结果再说」不是合法的
    串行理由——不依赖结果的任务不许等结果。
@@ -257,7 +259,8 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 - **只产出文件坐标/调用链的 Explore**：代码可读，推 fileIndex 就够（它 ruledOut 了大量排查路径时例外）。
 - **知识在主会话或用户对话里**（dev-clarify 结论、用户口头偏好）：主会话不是 run，挂不了——
   必须写进 requirements 文档或 prompt。
-- **`SubagentWorkflow` 子任务**：workflow 派发不支持 `experts`；需要 consult 的包改用 `Agent` 派。
+- **`SubagentWorkflow` 子任务**：现在可以挂 `experts`，但只接受 completed 且有持久化 session 的调用
+  （本 workflow 内同名先查本地，未 completed/仍在运行/回放命中都会拒）；详见 references/subagent-workflow.md。
 
 ### 挂载纪律
 

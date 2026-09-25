@@ -15,7 +15,7 @@
 约束（来自 AGENTS.md 与需求 §5）：零挂死不变量（分层 deadline + watchdog + reaper + 可确认投递）、timer 全 unref、
 无模块级可变状态（`/reload` 同进程重激活）、HOST_KEY 守卫、TS strict 全套、typebox 参数、pi peer `>=0.84.0 <0.86.0`。
 
-**v1 非目标**（评审 #14 决议）：`SubagentWorkflow` 派发路径不支持 `experts`（`workflow/spawner-adapter.ts:46-60` 逐字段组装，穿透留待后续）；主会话不注册 consult 工具。
+**v1 非目标**（评审 #14 决议）：`SubagentWorkflow` 派发路径不支持 `experts`（`workflow/spawner-adapter.ts:46-60` 逐字段组装，穿透留待后续）；主会话不注册 consult 工具。**已被 `docs/dev/workflow-experts/plan.md` 解除**（v2，2026-09）：workflow 子 run 现在可以挂 `experts`，但规则比顶层更严——只接受 completed 且有持久化 session 的调用（`resolveExperts` 新增 opt-in `completedOnly` 选项），带 experts 的调用及其后续提交的调用不参与 journal 回放。
 
 ### F1–F7 回应总表
 
@@ -341,7 +341,7 @@ experts: Type.Optional(Type.Array(Type.String(), {
 - 通过项 → `baseRequest.consultExperts = resolvedRefs`；**工具结果逐项回显** `expert "X" → run_id <id> (<agentType>)`（评审-2 #9），调度方可当场核对问的是谁。
 
 **注入点**：顶层 Agent 工具（`src/index.ts:282`）经 holder 转发 `resolveExperts: (refs) => requireStack(holder).consult.resolveExperts(refs)`；嵌套 Agent 工具（`runtime-adapter.ts:474`）经 adapter deps `consultResolveExperts` 注入（与既有 `Agent({resume})` 同级信任，§5.2）。consult 工具本身不注册进主会话（§5.2）。
-**工作流派发 v1 不支持**（非目标，§1）：`spawner-adapter.ts` 逐字段组装不带 `consultExperts`，也不经 agent-tool——workflow 子 run 永远拿不到 consult 工具，文档显式声明。
+**工作流派发 v1 不支持**（非目标，§1）：`spawner-adapter.ts` 逐字段组装不带 `consultExperts`，也不经 agent-tool——workflow 子 run 永远拿不到 consult 工具，文档显式声明。**已被 `docs/dev/workflow-experts/plan.md` 解除**：`spawner-adapter.ts` 现在按显式字段转发已解析的 `consultExperts`（脚本本身传不了 ref 对象，只能传字符串 handle），workflow 只接受 completed 专家。
 
 ### 4.3 SpawnRequest / 穿透（冻结面，包 A）
 

@@ -567,4 +567,27 @@ describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () =>
     expect(spawns).toHaveLength(0);
     await host.terminate("test-done");
   }, 10_000);
+
+  it("a well-formed experts array round-trips through the real worker and reaches the ChildSpawner", async () => {
+    const spawns: Parameters<ChildSpawner["spawn"]>[0][] = [];
+    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
+    const spawner: ChildSpawner = {
+      spawn: async (req) => {
+        spawns.push(req);
+        return { runId: "r1" };
+      },
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "ok" })),
+        pending: [],
+      }),
+      resolveExperts: (handles) => ({ refs: handles.map(() => refs[0]!) }),
+    };
+    const { host, outcome } = await bootReal(scriptWith('return await agent("x", { experts: ["dev"] });'), spawner);
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toBe("ok");
+    expect(spawns[0]).toMatchObject({ consultExperts: refs });
+    await host.terminate("test-done");
+  }, 10_000);
 });

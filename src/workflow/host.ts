@@ -1,9 +1,10 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import type { Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
+import type { ConsultExpertRef, Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { deriveChildBudget } from "./budget.js";
 import { snapshotAgentOpts, validateAgentOpts, type OptsDefect } from "./agent-opts.js";
+import { createWorkflowExpertScope, resolveWorkflowExperts, type WorkflowExpertResolver } from "./expert-scope.js";
 import { createCallRegistry, type CallRegistry } from "./call-registry.js";
 import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf, type JournalStore } from "./journal.js";
 import { decideReplay, type ReplayIndex } from "./replay.js";
@@ -83,6 +84,15 @@ export interface ChildSpawner {
     modelHintOverride?: string;
     /** Per-call thinking-level override (agent()'s `opts.thinking`), same values as the Agent tool's `thinking` param. */
     thinkingOverride?: ThinkingLevel;
+    /**
+     * workflow-experts (docs/dev/workflow-experts/plan.md §4.2/§4.8): the
+     * resolved (trusted) expert whitelist for this child — structurally the
+     * same field `SpawnRequest.consultExperts` already carries for the
+     * top-level/nested Agent tool. Host.ts only ever populates this from a
+     * successful `resolveWorkflowExperts` call; the script itself can never
+     * construct a `ConsultExpertRef` (it only ever passes handle strings).
+     */
+    consultExperts?: readonly ConsultExpertRef[];
   }): Promise<ChildSpawnResult | ChildSpawnError>;
   abort(runId: RunId, cause?: string): Promise<boolean>;
   waitAll(opts: { runIds: RunId[] }): Promise<{ settled: ChildOutcome[]; pending: RunId[] }>;
@@ -107,6 +117,17 @@ export interface ChildSpawner {
    * changed agent-type definition.
    */
   configHashOf?(type: string): string | undefined;
+  /**
+   * workflow-experts §4.2/§4.8/D17: dispatch-time expert resolution for this
+   * workflow run — the production wiring (`spawner-adapter.ts`, `stack.ts`)
+   * forwards to `consult`'s `resolveExperts` (package C) with `{
+   * completedOnly: true }` (D8) fixed. Never throws (contract, not just
+   * convention — `resolveWorkflowExperts` also wraps a throw defensively).
+   * Absent — e.g. a `ChildSpawner` test double, or `consult.enabled=false` at
+   * the real wiring — fails closed: `agent({ experts })` rejects with "not
+   * supported in this context" (D17), it never silently drops `experts`.
+   */
+  resolveExperts?: WorkflowExpertResolver;
 }
 
 export type GateRunner = (
@@ -159,9 +180,15 @@ export interface WorkflowChildEvent {
   readonly at: Millis;
 }
 
-/** workflow-agent-queue §5: why an `agent()` call was rejected. */
+/** workflow-agent-queue §5 (workflow-experts adds "experts_unresolved"): why an `agent()` call was rejected. */
 export type WorkflowChildRejectReason =
-  "invalid_args" | "max_children" | "budget_exhausted" | "spawn_error" | "spawn_timeout" | "host_call_timeout";
+  | "invalid_args"
+  | "max_children"
+  | "budget_exhausted"
+  | "spawn_error"
+  | "spawn_timeout"
+  | "host_call_timeout"
+  | "experts_unresolved";
 
 /** §5: event messages are capped at 200 chars. */
 export function capEventMessage(message: string): string {
@@ -278,6 +305,9 @@ interface QueuedAgentCall {
   readonly modelOverride?: { provider: string; id: string };
   readonly modelHintOverride?: string;
   readonly thinkingOverride?: ThinkingLevel;
+  /** workflow-experts §4.4: the resolved refs (bound to `spawnRequestFor`'s `consultExperts`) and the ids they resolved to (diagnostics, `WorkflowChildSummary.experts`). Set only when `opts.experts` was present and resolution succeeded — a call never reaches this struct otherwise (§4.4's admission gate rejects it first). */
+  readonly consultExperts?: readonly ConsultExpertRef[];
+  readonly expertIds?: readonly string[];
 }
 
 function errMsg(e: unknown): string {
@@ -311,6 +341,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   // existed in the type since M3.x but was never populated until now.
   const labelOf = new Map<CallId, string>();
   const agentTypeOf = new Map<CallId, string>();
+  /** workflow-experts D22: set alongside `call.expertIds` at submission time, consumed once by `recordSettled` to fold `experts` into the recorded `WorkflowChildSummary`. */
+  const expertIdsOf = new Map<CallId, readonly string[]>();
   let terminated = false;
   let currentPhaseId: string | undefined;
 
@@ -347,6 +379,15 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     { taskKey: TaskKey; chainDigestBefore: string; occurrence: number; agentType: string; isolation?: "worktree" }
   >();
   const replayStats = { hits: 0, misses: 0, skipped: 0 };
+  // workflow-experts D13-D15: one scope per run (closure-local, not module
+  // scope). `replayTainted` starts false and is set (never cleared) the
+  // instant some call's experts resolve successfully (§4.4) — every call
+  // *submitted* afterwards reads `tainted:true` at its own journal-block
+  // decideReplay (the call that itself set it still reads the pre-taint
+  // value, D13's "解析成功" row uses `experts:true`, not `tainted:true`, for
+  // itself).
+  const expertScope = createWorkflowExpertScope();
+  let replayTainted = false;
   /**
    * M3.4 fix (found while adding real WT7 coverage): a *single* "current
    * phase timer" is wrong — clearing the previous phase's timer the instant
@@ -452,15 +493,24 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const label = labelOf.get(summary.callId);
     const agentType = agentTypeOf.get(summary.callId);
     const queueWaitMs = queueWaitMsOf(summary.callId);
+    const experts = expertIdsOf.get(summary.callId);
     labelOf.delete(summary.callId);
     agentTypeOf.delete(summary.callId);
     enqueuedAtOf.delete(summary.callId);
     queueWaitOf.delete(summary.callId);
+    expertIdsOf.delete(summary.callId);
     const labelled = summary.label === undefined && label !== undefined ? { ...summary, label } : summary;
-    const enriched =
+    const withQueueWait =
       queueWaitMs !== undefined && labelled.queueWaitMs === undefined ? { ...labelled, queueWaitMs } : labelled;
+    const enriched =
+      experts !== undefined && withQueueWait.experts === undefined ? { ...withQueueWait, experts } : withQueueWait;
     children.push(enriched);
     deps.onChildSettled?.(enriched);
+    // workflow-experts §4.4: the single chokepoint every settlement (live,
+    // replay hit, withheld, force-settled) passes through — the workflow
+    // expert scope needs to see every one of them (D10's "still running" /
+    // "completed" / "failed" classification depends on it).
+    expertScope.noteSettled(enriched);
     // M10: "settled" fires here — the single chokepoint every child outcome
     // (live settle, replay hit, withheld, force-settled abort) passes through.
     deps.onChildEvent?.({
@@ -665,6 +715,13 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // real worktree isolation through `ChildSpawner`.
     const isolation = validOpts.isolation;
 
+    // workflow-experts §4.4/D9-D11: recorded right away, before the journal/
+    // maxChildren/BW2 gates below — a later call's `mapLocal` needs to see
+    // every earlier submission's declared label regardless of how far this
+    // one itself gets.
+    expertScope.noteSubmitted(callId, label);
+    const declaresExperts = validOpts.experts !== undefined;
+
     // M3.5 §6.2/§6.4: the replay short-circuit. Computed unconditionally
     // whenever a journal is configured, before any admission-limit checks
     // below — occurrence/chain-digest must advance on *every* submission,
@@ -717,6 +774,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         deterministic: journal.deterministic.current,
         now: deps.clock.now(),
         configHashAvailable,
+        // workflow-experts §4.4/§5: `experts` is "this call itself declared
+        // opts.experts" (regardless of whether resolution below ends up
+        // succeeding — the contract table's "解析成功" row still reads
+        // `skip:experts` for itself); `tainted` is the run-wide flag set by
+        // some *earlier* call's successful resolution (D13). Both bypass
+        // `index.lookup` entirely.
+        experts: declaresExperts,
+        tainted: replayTainted,
         ...(journal.replayTtlMs !== undefined ? { replayTtlMs: journal.replayTtlMs } : {}),
       });
 
@@ -759,13 +824,19 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       }
       if (decision.kind === "miss") replayStats.misses += 1;
       else replayStats.skipped += 1;
-      journalMetaOf.set(callId, {
-        taskKey,
-        chainDigestBefore,
-        occurrence,
-        agentType,
-        ...(isolation !== undefined ? { isolation } : {}),
-      });
+      // workflow-experts D12/D13/P3: an experts call (this one) or anything
+      // submitted after the chain was tainted is NEVER journaled, regardless
+      // of how its live settle turns out — skip the bookkeeping that would
+      // otherwise let `runBoundChild`'s completion handler write an entry.
+      if (!declaresExperts && !replayTainted) {
+        journalMetaOf.set(callId, {
+          taskKey,
+          chainDigestBefore,
+          occurrence,
+          agentType,
+          ...(isolation !== undefined ? { isolation } : {}),
+        });
+      }
     }
 
     // §5.3 D-W… "narrowed": M3.2 does not have the agent-type registry
@@ -794,6 +865,30 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
 
+    // workflow-experts §4.2/§4.4 stage ④ (§5's ordering: after journal/
+    // maxChildren/BW2, before queueing/dispatch): resolve the whitelist.
+    // `mapLocal`'s own rejects and the resolver's failures are both reported
+    // the same way — `experts_unresolved`, an ordinary ack failure the
+    // script can `.catch()` (D11: fast, synchronous, bounded — a handful of
+    // `statSync`s at most, never a new wait).
+    let consultExperts: readonly ConsultExpertRef[] | undefined;
+    let expertIds: readonly string[] | undefined;
+    if (declaresExperts) {
+      const resolved = resolveWorkflowExperts(validOpts.experts!, expertScope, deps.spawner.resolveExperts);
+      if (!resolved.ok) {
+        emitRejected(callId, "admission", "experts_unresolved", resolved.message, { label, agentType, phaseId });
+        return { kind: "host_ack", id: callId, ok: false, error: { message: resolved.message } };
+      }
+      consultExperts = resolved.refs;
+      expertIds = resolved.ids;
+      expertIdsOf.set(callId, expertIds);
+      // D13: taint takes effect for every call *submitted after this point* —
+      // this call's own journal-block decision already ran (above) reading
+      // the pre-taint value, exactly matching the contract table's "带
+      // experts，解析成功" row (`experts:true`, not `tainted:true`, for itself).
+      replayTainted = true;
+    }
+
     const call: QueuedAgentCall = {
       callId,
       prompt: a.prompt,
@@ -803,6 +898,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(modelOverride !== undefined ? { modelOverride } : {}),
       ...(modelHintOverride !== undefined ? { modelHintOverride } : {}),
       ...(thinkingOverride !== undefined ? { thinkingOverride } : {}),
+      ...(consultExperts !== undefined ? { consultExperts } : {}),
+      ...(expertIds !== undefined ? { expertIds } : {}),
     };
     if (phaseId !== undefined) phaseOf.set(callId, phaseId);
     if (label !== undefined) labelOf.set(callId, label);
@@ -891,6 +988,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       return { kind: "host_ack", id: callId, ok: false, cancelled: true, cause: bound.cause };
     }
     if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
+    expertScope.noteBound(callId, spawned.runId, effectiveLabel);
     runBoundChild(callId, spawned.runId, { agentType, phaseId, effectiveLabel });
 
     return { kind: "host_ack", id: callId, ok: true, value: { callId, deadlineAt: derived.deadlineAt } };
@@ -929,6 +1027,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(call.modelOverride !== undefined ? { modelOverride: call.modelOverride } : {}),
       ...(call.modelHintOverride !== undefined ? { modelHintOverride: call.modelHintOverride } : {}),
       ...(call.thinkingOverride !== undefined ? { thinkingOverride: call.thinkingOverride } : {}),
+      ...(call.consultExperts !== undefined ? { consultExperts: call.consultExperts } : {}),
       ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
       ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
       budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },
@@ -1129,6 +1228,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       const effectiveLabel = r.label ?? call.label;
       if (bindSpawned(callId, r.runId).kind === "orphaned") return;
       if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
+      expertScope.noteBound(callId, r.runId, effectiveLabel);
       runBoundChild(callId, r.runId, { agentType: call.agentType, phaseId: call.phaseId, effectiveLabel });
     };
     // Review v2 #4: `onSpawnThrew` is the error branch of `onSpawned`.
@@ -1312,6 +1412,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         misses: replayStats.misses,
         skipped: replayStats.skipped,
         corruptLines: deps.journal.index.stats.corruptLines,
+        ...(replayTainted ? { tainted: true as const } : {}),
       };
     },
     cancelAllChildren(cause) {

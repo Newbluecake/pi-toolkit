@@ -40,13 +40,42 @@ function toCoreStopCause(cause?: string): StopCause | undefined {
   }
 }
 
-export function createWorkflowChildSpawner(spawn: SpawnService, types: AgentTypeRegistry): ChildSpawner {
+export interface WorkflowChildSpawnerOptions {
+  /**
+   * workflow-experts §4.8: the workflow-facing seam onto `consult`'s
+   * `resolveExperts(refs, opts?)` (package C's frozen-face signature).
+   * `stack.ts` wires this to a late-bound ref over the real consult wiring.
+   * `createWorkflowChildSpawner` itself always calls it with `{
+   * completedOnly: true }` (D8) and wraps any throw into `{ error }` before
+   * handing a plain 1-arg `WorkflowExpertResolver` down to `host.ts`
+   * (`ChildSpawner.resolveExperts`) — host.ts/`resolveWorkflowExperts` never
+   * know about `completedOnly` at all, that policy choice lives entirely at
+   * this seam.
+   */
+  resolveExperts?: (
+    refs: readonly string[],
+    opts: { completedOnly: true },
+  ) => { refs: readonly import("../core/types.js").ConsultExpertRef[] } | { error: { message: string } };
+}
+
+export function createWorkflowChildSpawner(
+  spawn: SpawnService,
+  types: AgentTypeRegistry,
+  opts?: WorkflowChildSpawnerOptions,
+): ChildSpawner {
   return {
     async spawn(req): Promise<ChildSpawnResult | ChildSpawnError> {
       const result = await spawn.spawn({
         type: req.type,
         prompt: req.prompt,
         ...(req.label !== undefined ? { label: req.label } : {}),
+        // workflow-experts §4.8: forwarded verbatim — already-resolved,
+        // trusted refs (host.ts only ever populates this from a successful
+        // `resolveWorkflowExperts`, never from anything the script itself
+        // could construct).
+        ...(req.consultExperts !== undefined && req.consultExperts.length > 0
+          ? { consultExperts: [...req.consultExperts] }
+          : {}),
         // agent()'s `opts.model` / `opts.thinking` (Agent-tool `model`/
         // `thinking` semantics, split in host.ts's `handleAgent`):
         // forwarded verbatim so spawn admission existence-checks strict
@@ -96,5 +125,16 @@ export function createWorkflowChildSpawner(spawn: SpawnService, types: AgentType
     configHashOf(type) {
       return types.configHashOf(type);
     },
+    ...(opts?.resolveExperts
+      ? {
+          resolveExperts(handles) {
+            try {
+              return opts.resolveExperts!(handles, { completedOnly: true });
+            } catch (e) {
+              return { error: { message: e instanceof Error ? e.message : String(e) } };
+            }
+          },
+        }
+      : {}),
   };
 }

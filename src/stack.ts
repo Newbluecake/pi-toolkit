@@ -1835,7 +1835,23 @@ export function buildSessionStack(
   // actually call `createOrchestrator()` (settings.workflow.enabled default
   // `false` — the engine stays entirely inert until then).
   // (M9: created above the fleet widget, which lists in-flight workflows.)
-  const workflowChildSpawner = createWorkflowChildSpawner(spawn, types);
+  // workflow-experts (docs/dev/workflow-experts/plan.md §4.8): the workflow
+  // engine's own dispatch-time expert resolver — always `completedOnly:
+  // true` (D8), late-bound through `consultRef` exactly like
+  // `consultResolveExperts` above (package C, `src/consult/index.ts`, is not
+  // touched by this package; its `resolveExperts` signature is frozen to
+  // accept an optional second `{ completedOnly?: boolean }` argument — the
+  // cast below is a temporary shim until that lands, harmless once it does).
+  const workflowChildSpawner = createWorkflowChildSpawner(spawn, types, {
+    resolveExperts: (refs, o) => {
+      if (!consultRef.current) throw new Error("consult is not wired yet");
+      type ResolveExpertsWithOpts = (
+        handles: readonly string[],
+        opts?: { completedOnly?: boolean },
+      ) => ReturnType<ConsultWiring["resolveExperts"]>;
+      return (consultRef.current.resolveExperts as ResolveExpertsWithOpts)(refs, o);
+    },
+  });
   const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");
   /**
    * workflow-agent-queue §4.5 (stage B): a background workflow's grace /
