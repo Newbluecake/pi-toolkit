@@ -235,11 +235,12 @@ describe("RuntimeRunner consult fork: session_create dispatch (§4.4)", () => {
     );
     const outcome = await h.runner.run({ runId: "r-fork-fail", prompt: "q", forkSessionFrom: forkFile }, budget);
     await drain();
-    // guard() reports a rejected create as reason "cancelled" which the runner
-    // labels kind "timeout" ⇒ startup_failed settles timed_out (existing
-    // semantics, unchanged by consult) — the cleanup seam is what we assert.
-    expect(outcome.status).toBe("timed_out");
-    expect(outcome.timeoutReason).toBe("session_create");
+    // A rejected create is a real failure with a real cause (not a timeout):
+    // startup_failed settles failed and carries the driver's message. The
+    // cleanup seam below is unchanged by that classification.
+    expect(outcome.status).toBe("failed");
+    expect(outcome.timeoutReason).toBeUndefined();
+    expect(outcome.error?.message).toBe("session file unreadable");
     expect(h.reaped).toEqual([{ runId: "r-fork-fail", forkSessionFrom: forkFile }]);
     expect(existsSync(forkFile)).toBe(false);
     // A rejected create promise never reaches onLateArrival's callback —
@@ -359,6 +360,7 @@ describe("RuntimeRunner consult fork: reap-vs-outcome ordering (T-21 property, n
     expect(h.reaped).toEqual([{ runId: "r-order-b", forkSessionFrom: forkFile }]);
     expect(existsSync(forkFile)).toBe(false); // already deleted — the result is not lost for it
     const outcome = await runPromise; // late observer still gets the settled outcome immediately
-    expect(outcome.status).toBe("timed_out"); // failed resume ⇒ timeoutReason session_create
+    expect(outcome.status).toBe("failed"); // rejected resume ⇒ failed with the driver's cause
+    expect(outcome.error?.message).toBe("instant failure — reap is near-zero work");
   });
 });

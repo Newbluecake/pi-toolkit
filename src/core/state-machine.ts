@@ -645,7 +645,11 @@ export function reduce(
         { timeoutReason: input.phase === "extension_bind" ? "extension_bind" : "session_create" },
         [{ kind: "dispose" }],
       );
-    return finish(state, "failed", input.at, budget, { lastEventType: input.error.kind });
+    // session_create / extension_bind failing with a real cause (driver
+    // rejection: unknown model, createAgentSession throwing, …): carry the
+    // error like resolve_config does, so the outbox failReason and
+    // get_subagent_result show *why* instead of an empty failed.
+    return finish(state, "failed", input.at, budget, { lastEventType: input.error.kind, error: input.error });
   }
   if (input.kind === "session_event") {
     const e = input.event;

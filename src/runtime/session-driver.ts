@@ -190,7 +190,9 @@ class PiSessionHandle implements SessionHandle {
     this.sessionFile = session.sessionFile;
   }
   prompt(text: string) {
-    return this.session.prompt(text);
+    return this.session.prompt(text).catch((e: unknown) => {
+      throw explainPromptRejection(this.session, e);
+    });
   }
   steer(text: string) {
     return this.session.steer(text);
@@ -248,6 +250,38 @@ class PiSessionHandle implements SessionHandle {
   }
   setThinkingLevel(level: string) {
     this.session.setThinkingLevel(level as never);
+  }
+}
+
+/**
+ * prompt() rejected (pi throws before the turn, e.g. `No API key found for
+ * <provider>.`). The spawn path resolves the requested model against the HOST
+ * process's registry, but createAgentSession builds a fresh model runtime from
+ * models.json for every child session (sdk: `options.modelRuntime ??
+ * ModelRuntime.create(...)`). When models.json changed after pi started (a
+ * provider rename), the host still resolves the old name while the child does
+ * not know it — name that divergence instead of leaving only pi's auth hint.
+ * Rejection-path only: never alters a successful prompt.
+ */
+export function explainPromptRejection(session: unknown, e: unknown): Error {
+  const err = e instanceof Error ? e : new Error(String(e));
+  try {
+    const s = session as {
+      model?: { provider?: unknown; id?: unknown };
+      modelRuntime?: { getModel?: (provider: string, id: string) => unknown };
+    };
+    const provider = s.model?.provider;
+    const id = s.model?.id;
+    const getModel = s.modelRuntime?.getModel;
+    if (typeof provider !== "string" || typeof id !== "string" || typeof getModel !== "function") return err;
+    if (getModel.call(s.modelRuntime, provider, id) !== undefined) return err;
+    return new Error(
+      `model "${provider}/${id}" is not in the child session's model registry (pi rebuilds it from models.json ` +
+        `for each new session; this pi process's registry is stale — models.json changed since pi started? ` +
+        `Use a provider/id from the current models.json; restart pi to refresh the host registry): ${err.message}`,
+    );
+  } catch {
+    return err;
   }
 }
 

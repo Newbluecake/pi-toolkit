@@ -254,6 +254,28 @@ const error = (e: unknown, kind: ErrorInfo["kind"] = "internal"): ErrorInfo => (
   message: e instanceof Error ? e.message : String(e),
   retryable: false,
 });
+/** Cap for a start-phase exception message carried into diag.error / the outbox failReason. */
+export const START_ERROR_MESSAGE_CAP = 1000;
+/**
+ * A session_create / extension_bind / prompt() *rejection* (as opposed to a
+ * cancel or a deadline) is a real failure with a real cause — e.g. pi's
+ * `No API key found for <provider>.` when the child session's fresh model
+ * runtime does not know the requested provider. Keep the message (capped) so
+ * the completion notice and get_subagent_result show it instead of the
+ * generic "cancelled" the guards used to report for every rejection.
+ */
+function startError(e: unknown): ErrorInfo {
+  const raw = (e instanceof Error ? e.message : String(e)).trim() || "session start failed (empty error message)";
+  const message = raw.length > START_ERROR_MESSAGE_CAP ? `${raw.slice(0, START_ERROR_MESSAGE_CAP - 1)}…` : raw;
+  return { kind: "internal", message, retryable: false };
+}
+/** Guard verdict: settled value, deadline, cancel signal, or the awaited promise's own rejection. */
+type GuardResult<T> = { ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" } | GuardRejected;
+interface GuardRejected {
+  ok: false;
+  reason: "error";
+  error: unknown;
+}
 export class RuntimeRunner implements Runner {
   private readonly states = new Map<string, RunState>();
   private generation = new Map<string, number>();
@@ -479,7 +501,9 @@ export class RuntimeRunner implements Runner {
         dispatch({
           kind: "slot_denied",
           at: this.d.clock.now(),
-          reason: acq.reason === "cancelled" ? "aborted" : "queue_timeout",
+          // pool.acquire never rejects (it resolves {ok:false,"aborted"}); a
+          // rejection here is a pool bug and keeps the historical aborted mapping.
+          reason: acq.reason === "timeout" ? "queue_timeout" : "aborted",
         });
         return state.outcome!;
       }
@@ -512,7 +536,11 @@ export class RuntimeRunner implements Runner {
           kind: "startup_failed",
           at: this.d.clock.now(),
           phase: "session_create",
-          error: error(created.reason, "timeout"),
+          // A driver rejection (unknown model, createAgentSession throwing) is
+          // failed(cause), not timed_out("cancelled"): only the startup budget
+          // expiring is a timeout. A cancel/stop has already moved the run to
+          // abort_grace, where startup_failed is absorbed either way.
+          error: created.reason === "error" ? startError(created.error) : error(created.reason, "timeout"),
         });
         return state.outcome!;
       }
@@ -552,7 +580,7 @@ export class RuntimeRunner implements Runner {
           kind: "startup_failed",
           at: this.d.clock.now(),
           phase: "extension_bind",
-          error: error(bound.reason, "timeout"),
+          error: bound.reason === "error" ? startError(bound.error) : error(bound.reason, "timeout"),
         });
         return state.outcome!;
       }
@@ -586,19 +614,26 @@ export class RuntimeRunner implements Runner {
       // "error" surfaces only on the message). Without this, a provider
       // crash looks like "completed with empty text".
       const turnError = prompted.ok ? handle.getTurnError?.() : undefined;
+      const promptError = ((): ErrorInfo | undefined => {
+        if (prompted.ok) return turnError === undefined ? undefined : error(turnError, "model");
+        if (prompted.reason === "timeout") return error("timeout", "timeout");
+        // prompt() itself rejected (pi threw before/while running the turn —
+        // e.g. "No API key found for <provider>.") on a run nobody asked to
+        // stop: failed with the real cause. A rejection racing a stop/deadline
+        // (stopCause/timeoutReason already recorded) takes the cancel mapping
+        // below, so abort/timeout semantics are unchanged.
+        if (prompted.reason === "error" && state.diag.stopCause === undefined && state.diag.timeoutReason === undefined)
+          return startError(prompted.error);
+        // M4: guard 因 cancel 解除时，若状态机已因 watchdog 超时进入 abort_grace
+        // （timeoutReason/stopCause 已记录），结果必须是 timed_out 而非 aborted。
+        if (state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout")
+          return error("deadline exceeded; prompt cancelled", "timeout");
+        return error("cancelled", "aborted");
+      })();
       dispatch({
         kind: "prompt_settled",
         at: this.d.clock.now(),
-        ...(prompted.ok
-          ? turnError === undefined
-            ? {}
-            : { error: error(turnError, "model") }
-          : // M4: guard 因 cancel 解除时，若状态机已因 watchdog 超时进入 abort_grace
-            // （timeoutReason/stopCause 已记录），结果必须是 timed_out 而非 aborted。
-            prompted.reason === "cancelled" &&
-              (state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout")
-            ? { error: error("deadline exceeded; prompt cancelled", "timeout") }
-            : { error: error(prompted.reason, prompted.reason === "cancelled" ? "aborted" : "timeout") }),
+        ...(promptError === undefined ? {} : { error: promptError }),
         ...(finalText === undefined ? {} : { text: finalText }),
       });
       return state.outcome!;
@@ -720,11 +755,11 @@ export class RuntimeRunner implements Runner {
     cancel: CancelHandle,
     label: string,
     onExpired?: () => void,
-  ): Promise<{ ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" }> {
+  ): Promise<GuardResult<T>> {
     let timer: ReturnType<Clock["setTimer"]> | undefined;
     return new Promise((resolve) => {
       let done = false;
-      const finish = (r: { ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" }) => {
+      const finish = (r: GuardResult<T>) => {
         if (done) return;
         done = true;
         if (timer) {
@@ -765,20 +800,15 @@ export class RuntimeRunner implements Runner {
       cancel.signal.addEventListener("abort", onAbort, { once: true });
       p.then(
         (value) => finish({ ok: true, value }),
-        () => finish({ ok: false, reason: "cancelled" }),
+        (rejection: unknown) => finish({ ok: false, reason: "error", error: rejection }),
       ).catch(() => undefined);
     });
   }
-  private async guard<T>(
-    p: Promise<T>,
-    ms: number,
-    cancel: CancelHandle,
-    label: string,
-  ): Promise<{ ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" }> {
+  private async guard<T>(p: Promise<T>, ms: number, cancel: CancelHandle, label: string): Promise<GuardResult<T>> {
     let timer: ReturnType<Clock["setTimer"]> | undefined;
     return new Promise((resolve) => {
       let done = false;
-      const finish = (r: { ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" }) => {
+      const finish = (r: GuardResult<T>) => {
         if (done) return;
         done = true;
         if (timer) this.d.clock.clearTimer(timer);
@@ -791,7 +821,7 @@ export class RuntimeRunner implements Runner {
       cancel.signal.addEventListener("abort", onAbort, { once: true });
       p.then(
         (value) => finish({ ok: true, value }),
-        () => finish({ ok: false, reason: "cancelled" }),
+        (rejection: unknown) => finish({ ok: false, reason: "error", error: rejection }),
       ).catch(() => undefined);
     });
   }

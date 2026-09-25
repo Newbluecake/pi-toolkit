@@ -404,6 +404,25 @@ describe("major recovery and deadline contracts", () => {
   });
 
   it.each(["session_create", "extension_bind"] as const)(
+    "%s startup_failed with a non-timeout cause settles failed and carries the error into diag + delivery",
+    (phase) => {
+      let state = apply(enqueued(), { kind: "slot_acquired" }).state;
+      state = apply(state, { kind: "phase_entered", phase }).state;
+      const error = {
+        kind: "internal",
+        message: "No API key found for cloudrouter-anthropic.",
+        retryable: false,
+      } as const;
+      const result = apply(state, { kind: "startup_failed", phase, error });
+      expect(result.state.status).toBe("failed");
+      expect(result.state.diag.error).toEqual(error);
+      expect(result.state.outcome?.error).toEqual(error);
+      const delivery = result.effects.find((e) => e.effect.kind === "enqueue_delivery")?.effect;
+      expect(delivery?.kind === "enqueue_delivery" && delivery.payload.failReason).toBe(error.message);
+    },
+  );
+
+  it.each(["session_create", "extension_bind"] as const)(
     "%s startup_failed with a timeout error settles timed_out and disposes, skipping abort_grace",
     (phase) => {
       let state = apply(enqueued(), { kind: "slot_acquired" }).state;
@@ -1485,6 +1504,58 @@ describe("P1-P14 property invariants", () => {
       }
       if (property === 10 && terminalStatuses.includes(state.status)) expect(deliveries.size).toBe(1);
     }
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * P15: an error-carrying settle never loses its cause. For random starting
+ * phases, error kinds and settle inputs (startup_failed / prompt_settled with
+ * an error), whenever the run lands in `failed`, diag.error, outcome.error and
+ * the delivery failReason all carry the input's message — the invariant whose
+ * violation made a session_create failure show up as a reason-less `failed`
+ * (and a rejected prompt as `aborted: cancelled`).
+ * ------------------------------------------------------------------------- */
+describe("P15 failed settles carry their cause", () => {
+  function rng(seed: number): () => number {
+    let v = seed >>> 0;
+    return () => {
+      v = (Math.imul(v ^ (v >>> 15), 1 | v) + 0x6d2b79f5) | 0;
+      return ((v ^ (v >>> 13)) >>> 0) / 4294967296;
+    };
+  }
+  const phases = ["resolve_config", "session_create", "extension_bind", "prompt_dispatch", "model_turn"] as const;
+  const errorKinds = ["config", "auth", "startup_transient", "model", "internal", "timeout", "aborted"] as const;
+  it("1000 random error settles", () => {
+    let failedSeen = 0;
+    const hits = new Set<string>();
+    // One stream for all cases: per-seed streams of this generator start out
+    // correlated for consecutive seeds and would collapse the phase choice.
+    const next = rng(150_015);
+    for (let seed = 1; seed <= 1000; seed++) {
+      const phase = phases[Math.floor(next() * phases.length)]!;
+      const kind = errorKinds[Math.floor(next() * errorKinds.length)]!;
+      const error = { kind, message: `cause-${seed}`, retryable: next() < 0.3 };
+      let state = apply(enqueued(), { kind: "slot_acquired" }).state;
+      if (phase !== "resolve_config") state = apply(state, { kind: "phase_entered", phase }).state;
+      const useStartup =
+        (phase === "resolve_config" || phase === "session_create" || phase === "extension_bind") && next() < 0.6;
+      const settle: RunInput = useStartup
+        ? { kind: "startup_failed", at: 2, phase, error }
+        : { kind: "prompt_settled", at: 2, error };
+      const result = reduce(state, { generation: state.generation, input: settle }, budget);
+      if (result.state.status !== "failed") continue;
+      failedSeen++;
+      hits.add(`${settle.kind}@${phase}`);
+      expect(result.state.diag.error?.message).toBe(error.message);
+      expect(result.state.outcome?.error?.message).toBe(error.message);
+      const delivery = result.effects.find((e) => e.effect.kind === "enqueue_delivery")?.effect;
+      expect(delivery?.kind === "enqueue_delivery" && delivery.payload.failReason).toBe(error.message);
+    }
+    // Non-vacuous: the generator must actually reach every failed branch.
+    expect(failedSeen).toBeGreaterThan(200);
+    for (const p of ["resolve_config", "session_create", "extension_bind"])
+      expect(hits).toContain(`startup_failed@${p}`);
+    for (const p of phases) expect(hits).toContain(`prompt_settled@${p}`);
   });
 });
 
