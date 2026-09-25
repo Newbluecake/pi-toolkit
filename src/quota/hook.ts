@@ -152,6 +152,11 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
     const latchesBefore = new Map<string, QuotaAnnounceLatch | undefined>();
     for (const v of verdicts) {
       if (v.level === 0) {
+        // reset-elapsed 窗口把等级归零的 L0 不是真实读数（快照还没刷新）：不删闩锁。
+        // 此处删掉会把即将到来的恢复事件（service 观测重置后推入 recoveries）的门槛
+        // （「本会话曾真播报过」）抹掉，恢复播报被静默吞掉（漏报）；真实读数落地后
+        // 由恢复路径或下一轮的 L0 分支正常清闸。
+        if (v.windows.some((w) => w.reason === "reset-elapsed")) continue;
         // 恢复 provider 的 L0 删闩锁要登记回滚：send 失败时恢复事件会回队重试，
         // 而重试的门槛（「曾播报」）就是这个闩锁——它不能随一次失败的发送消失。
         if (recoveredProviders.has(v.provider)) {

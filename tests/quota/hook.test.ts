@@ -382,6 +382,76 @@ describe("createQuotaHintHook", () => {
   });
 });
 
+// 重置时刻已过的窗口（ladder 规则 0 reset-elapsed）：不再对它发 L3 预警；且由它
+// 归零约 L0 不删闩锁——否则恢复事件（service 观测重置后推入 recoveries）的门槛
+// （「曾真播报过」）会被提前抹掉，恢复播报漏发。
+describe("reset-elapsed windows (no L3 injection, latch kept for the recovery event)", () => {
+  const elapsedKimi = () =>
+    verdict({
+      provider: "kimi-coding",
+      level: 0,
+      windows: [w("5h", 8, 0, "none"), w("week", 100, 0, "reset-elapsed")],
+    });
+
+  it("injects nothing for a window whose reset has elapsed (even past repeatMs) and keeps the latch", () => {
+    const h = harness({ verdicts: [elapsedKimi()] });
+    h.state.latches.set("kimi-coding", { level: 3, step: 100, at: 0, usedPct: 100 }); // 曾真播报过 L3
+    h.clock = 10_000_000; // 远超 repeatMs：旧实现会在这里复读 L3
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(0); // 不再对已重置窗口发 L3 预警
+    expect(h.state.latches.has("kimi-coding")).toBe(true); // 闩锁保留（等恢复事件）
+    expect(h.refreshSpy).toHaveBeenCalled(); // 懒刷新照常触发（service 侧绕过 TTL）
+    // 对照：真实读数的 L0（无 reset-elapsed 窗口）仍删闩锁（旧行为不变）。
+    h.setVerdicts([
+      verdict({ provider: "kimi-coding", level: 0, windows: [w("5h", 8, 0, "none"), w("week", 2, 0, "none")] }),
+    ]);
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(0);
+    expect(h.state.latches.has("kimi-coding")).toBe(false);
+  });
+
+  it("the kept latch lets the recovery event land exactly once (no missed announcement)", () => {
+    const h = harness({ verdicts: [elapsedKimi()] });
+    h.state.latches.set("kimi-coding", { level: 3, step: 100, at: 0, usedPct: 100 });
+    h.hook({}, ctx()); // 窗口已过重置：静默 + 保留闩锁 + 触发刷新
+    expect(h.sent).toHaveLength(0);
+    // 刷新落地：service 推入恢复事件；本轮 verdict 已是真实读数 L0。
+    const fresh = verdict({
+      provider: "kimi-coding",
+      level: 0,
+      windows: [w("5h", 0, 0, "none"), w("week", 2, 0, "none")],
+    });
+    h.setVerdicts([fresh]);
+    h.state.recoveries.push({
+      provider: "kimi-coding",
+      resetScopes: new Set<WindowScope>(["week"]),
+      verdict: fresh,
+      gateBlocked: false,
+      at: 1_000,
+    });
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.content).toContain("[quota 恢复] kimi-coding 7d 窗口已重置");
+    expect(h.sent[0]?.message.content).toContain("可恢复派单");
+    expect(h.state.latches.has("kimi-coding")).toBe(false); // 恢复路径正常清闸
+    h.hook({}, ctx()); // 同读数下一轮：零新增（不重复）
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("a live L3 window still announces while another window's reset has elapsed (max of live windows)", () => {
+    const live = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [w("5h", 100, 3, "exhausted"), w("week", 100, 0, "reset-elapsed")],
+    });
+    const h = harness({ verdicts: [live] });
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.content).toContain("[quota 严重]");
+    expect(h.sent[0]?.message.content).toContain("5h 已用 100%");
+  });
+});
+
 // 额度恢复播报：hook 每 turn_end 排空 state.recoveries，仅在 provider 曾真播报过
 // （闩锁存在）时注入恢复块（含当前读数与闸门状态）；同轮抑制常规块（每次观测重置
 // 至多一条）；绕过 minInterval（与 L3 同理）；send 失败 ⇒ 闩锁回滚 + 事件回队。

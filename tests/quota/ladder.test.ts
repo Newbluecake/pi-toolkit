@@ -74,6 +74,50 @@ describe("windowLevel", () => {
   });
 });
 
+// 规则 0（reset-elapsed）：重置时刻已过的窗口旧读数视同过期——等级 0、不贡献
+// provider 最高级（修：「快照未 stale 但窗口已重置」期间的误 L3 闸门/注入）。
+describe("windowLevel reset-elapsed", () => {
+  it("treats a window whose resetAt has passed as level 0 / reset-elapsed, even at 100% or with a short ETA", () => {
+    for (const usedPct of [100, 92, 62]) {
+      expect(windowLevel(win(usedPct, NOW - 1), { now: NOW, thresholds: DEFAULT_THRESHOLDS })).toMatchObject({
+        level: 0,
+        reason: "reset-elapsed",
+        usedPct,
+      });
+    }
+    // 速率预测不得把已过期窗口重新抬级（跨重置的斜率是垃圾）。
+    const forecast = windowLevel(win(100, NOW - 1), {
+      now: NOW,
+      etaMs: 60_000,
+      thresholds: DEFAULT_THRESHOLDS,
+    });
+    expect(forecast).toMatchObject({ level: 0, reason: "reset-elapsed" });
+    expect(forecast.etaMs).toBeUndefined();
+  });
+
+  it("counts the resetAt === now boundary as elapsed, and keeps resetAt === now+1 on the legacy path", () => {
+    expect(windowLevel(win(100, NOW), { now: NOW, thresholds: DEFAULT_THRESHOLDS })).toMatchObject({
+      level: 0,
+      reason: "reset-elapsed",
+    });
+    expect(windowLevel(win(100, NOW + 1), { now: NOW, thresholds: DEFAULT_THRESHOLDS })).toMatchObject({
+      level: 3,
+      reason: "exhausted",
+    });
+  });
+
+  it("leaves resetAt-unknown windows byte-identical to the legacy behavior", () => {
+    expect(windowLevel(win(100), { now: NOW, thresholds: DEFAULT_THRESHOLDS })).toMatchObject({
+      level: 3,
+      reason: "exhausted",
+    });
+    expect(windowLevel(win(62), { now: NOW, etaMs: 20 * 60_000, thresholds: DEFAULT_THRESHOLDS })).toMatchObject({
+      level: 3,
+      reason: "forecast-eta",
+    });
+  });
+});
+
 describe("providerVerdict", () => {
   it("takes the max window level: week 100% beats idle 5h #kimi-week-trap", () => {
     const snap = windowsSnapshot("kimi-coding", [
@@ -146,6 +190,55 @@ describe("providerVerdict", () => {
       demoted: false,
     });
     expect(v.plan).toBe("max");
+  });
+
+  it("reset-elapsed windows contribute nothing: elapsed week 100% + idle 5h → level 0", () => {
+    const snap = windowsSnapshot("kimi-coding", [
+      { scope: "5h", usedPct: 8, resetAt: NOW + 3 * HOUR },
+      { scope: "week", usedPct: 100, resetAt: NOW - 1 },
+    ]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: false,
+    });
+    expect(v.level).toBe(0);
+    expect(v.windows[1]).toMatchObject({ scope: "week", level: 0, reason: "reset-elapsed", usedPct: 100 });
+  });
+
+  it("still takes the max of live windows: elapsed week + live exhausted 5h → level 3", () => {
+    const snap = windowsSnapshot("kimi-coding", [
+      { scope: "5h", usedPct: 100, resetAt: NOW + 3 * HOUR },
+      { scope: "week", usedPct: 100, resetAt: NOW - 1 },
+    ]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: false,
+    });
+    expect(v.level).toBe(3);
+    expect(v.windows[0]).toMatchObject({ scope: "5h", level: 3, reason: "exhausted" });
+  });
+
+  it("demotion floor is unaffected: every window elapsed + demoted → still pinned at level 2", () => {
+    const snap = windowsSnapshot("kimi-coding", [
+      { scope: "5h", usedPct: 100, resetAt: NOW - 1 },
+      { scope: "week", usedPct: 100, resetAt: NOW - 2 },
+    ]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: DEFAULT_THRESHOLDS,
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => undefined,
+      demoted: true,
+      demotedUntil: NOW + 6 * HOUR,
+    });
+    expect(v.level).toBe(2);
+    expect(v.windows.every((w) => w.reason === "reset-elapsed")).toBe(true);
   });
 });
 

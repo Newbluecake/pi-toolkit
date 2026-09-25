@@ -19,7 +19,7 @@ export interface LadderThresholds {
   readonly l3EtaMs: Millis;
 }
 
-export type LadderReason = "none" | "pct" | "forecast-before-reset" | "forecast-eta" | "exhausted";
+export type LadderReason = "none" | "pct" | "forecast-before-reset" | "forecast-eta" | "exhausted" | "reset-elapsed";
 
 export interface WindowVerdict {
   readonly scope: WindowScope;
@@ -61,7 +61,13 @@ function clampPct(pct: number): number {
   return Math.min(100, Math.max(0, pct));
 }
 
-/** 单窗口判定（plan §5.2）。etaMs 由调用方（service）从 forecast 注入，本函数保持纯。 */
+/** 单窗口判定（plan §5.2）。etaMs 由调用方（service）从 forecast 注入，本函数保持纯。
+ *
+ * 规则 0（reset-elapsed）：`resetAt` 已过的窗口旧读数对「现在」不再成立（窗口滚动后
+ * 额度理论上已回满），视同过期数据——等级 0、不参与闸门/注入/取最高，速率预测也不得
+ * 把它重新抬级（跨重置的斜率本来就是垃圾）。只放宽：`resetAt` 未知或未到的窗口走
+ * 原路径。与快照级 `stale`（按年龄）正交：本规则按窗口精确到 resetAt，stale 兜底
+ * 没有 resetAt 的数据。 */
 export function windowLevel(
   window: QuotaWindow,
   input: { readonly now: Millis; readonly etaMs?: Millis | undefined; readonly thresholds: LadderThresholds },
@@ -69,6 +75,17 @@ export function windowLevel(
   const pct = clampPct(window.usedPct);
   const { now, thresholds } = input;
   const etaMs = input.etaMs !== undefined && Number.isFinite(input.etaMs) ? input.etaMs : undefined;
+
+  // 0) 重置时刻已过（含 resetAt === now 的边界）。
+  if (window.resetAt !== undefined && window.resetAt <= now) {
+    return {
+      scope: window.scope,
+      usedPct: pct,
+      level: 0,
+      reason: "reset-elapsed",
+      resetAt: window.resetAt,
+    };
+  }
 
   // 1) 硬耗尽
   if (pct >= 100) {
@@ -130,7 +147,8 @@ export function providerVerdict(
     windowLevel(w, { now: input.now, etaMs: input.etaOf(w.scope), thresholds: input.thresholds }),
   );
   // ★ Kimi 陷阱的唯一正解：provider 级 = 全部窗口取**最高**严重级，周窗口
-  //   used_ratio:1 (L3) 必须压过 5h 的 remaining:100 (L0)。
+  //   used_ratio:1 (L3) 必须压过 5h 的 remaining:100 (L0)。reset-elapsed 的窗口
+  //   等级为 0，天然不贡献最高级；降位地板照常在取最高之后叠加（不受本规则影响）。
   let level: LadderLevel = 0;
   for (const w of windows) if (w.level > level) level = w.level;
   if (input.demoted && level < 2) level = 2;

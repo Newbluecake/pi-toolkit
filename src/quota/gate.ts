@@ -68,6 +68,8 @@ export function evaluateQuotaGate(model: ModelRef, deps: QuotaGateDeps): QuotaGa
   const verdict = deps.verdictFor(model.provider);
   if (verdict === undefined) return undefined;
   // R5：陈旧快照绝不阻断——闸门退化为今天的行为，真实 429 走原有回退链。
+  // 重置时刻已过的窗口在 ladder（windowLevel 规则 0 reset-elapsed）就已等级归零，
+  // 不会走入这里的 level——闸门只读判定，不重复实现窗口级过期。
   if (verdict.stale) return undefined;
   if (verdict.level < deps.blockAtLevel) return undefined;
   const alternatives = pickAlternatives(model.provider, deps, DEFAULT_ALTERNATIVE_LIMIT);

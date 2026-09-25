@@ -700,3 +700,139 @@ describe("createQuotaService recovery events (observed reset → onObservedReset
     expect(f.demotions.get("zai-coding-cn", f.clock.now())).toBeUndefined();
   });
 });
+
+// 窗口已过重置 ⇒ 绕过 TTL 立即重拉（ladder 规则 0 的数据面配套）：判定层已把该
+// 窗口视同过期，数据面也要尽快追上；否则闸门虽放行，HUD/注入仍建立在重置前的
+// 旧数据上直到 TTL 自然到期。在途去重照常兜住并发触发；可疑读数退避不绕过。
+describe("elapsed-reset TTL bypass", () => {
+  const MINUTE = 60_000;
+  const HOUR = 3_600_000;
+
+  async function land(f: Fixture, stub: Stub, snapshot: () => QuotaSnapshot): Promise<void> {
+    stub.set(snapshot);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+  }
+
+  it("refreshes within the TTL once a window's resetAt has passed, and the observed reset lands exactly once", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 8, resetAt: t0 + 3 * HOUR },
+          { scope: "week", usedPct: 100, resetAt: t0 + MINUTE },
+        ],
+        f.clock.now(),
+      ),
+    );
+    expect(f.service.verdictFor("kimi-coding")?.level).toBe(3); // 周窗口仍有效 ⇒ L3（热态）
+    expect(f.demotions.get("kimi-coding", f.clock.now())?.level).toBe(3);
+    // 90s：已过周窗口 resetAt（60s），但仍远在热态 TTL（refreshHotMs=120s）内。
+    f.clock.advance(90_000);
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 1, resetAt: t0 + 3 * HOUR },
+          { scope: "week", usedPct: 2, resetAt: t0 + 168 * HOUR },
+        ],
+        f.clock.now(),
+      ),
+    );
+    expect(f.kimi.fetches()).toBe(2); // TTL 被绕过：重置已过就立即重拉
+    const v = f.service.verdictFor("kimi-coding");
+    expect(v?.level).toBe(0); // 真实读数落地：不再 L3
+    expect(v?.windows[1]?.usedPct).toBe(2);
+    expect(f.demotions.get("kimi-coding", f.clock.now())).toBeUndefined(); // 观测重置清降位
+    expect(f.events).toHaveLength(1); // 恢复事件恰一条（旧 resetAt 已过 ⇒ 有证据）
+    expect(f.events[0]?.gateBlocked).toBe(false);
+    // 新快照的 resetAt 都在未来 ⇒ TTL 恢复生效：不再重拉，也不再产事件（不重复）。
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.kimi.fetches()).toBe(2);
+    expect(f.events).toHaveLength(1);
+  });
+
+  it("keeps suppressing within the TTL while the reset is still in the future (legacy behavior)", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    await land(f, f.kimi, () =>
+      windowsSnapshot("kimi-coding", [{ scope: "week", usedPct: 100, resetAt: t0 + 3 * HOUR }], f.clock.now()),
+    );
+    expect(f.kimi.fetches()).toBe(1);
+    // L3 ⇒ 热态：TTL 是 refreshHotMs（120s）。TTL 内且 resetAt 未到 ⇒ 空转（与旧版一致）。
+    f.clock.advance(DEFAULT_SETTINGS.quota.refreshHotMs - 1);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.kimi.fetches()).toBe(1);
+    expect(f.service.verdictFor("kimi-coding")?.level).toBe(3);
+  });
+
+  it("dedupes concurrent bypass refreshes per provider (three triggers, one round-trip)", async () => {
+    const f = makeFixture();
+    const t0 = f.clock.now();
+    await land(f, f.zai, () =>
+      windowsSnapshot("zai-coding-cn", [{ scope: "week", usedPct: 100, resetAt: t0 + 30_000 }], f.clock.now()),
+    );
+    expect(f.zai.fetches()).toBe(1);
+    // 60s：已过 resetAt（30s），仍在热态 TTL（120s）内 ⇒ 只有绕过才会发请求。
+    f.clock.advance(60_000);
+    let release!: (snapshot: QuotaSnapshot) => void;
+    f.zai.set(
+      () =>
+        new Promise<QuotaSnapshot>((resolve) => {
+          release = (snapshot) => resolve(snapshot);
+        }),
+    );
+    f.service.refreshIfStale();
+    f.service.refreshIfStale();
+    f.service.refreshIfStale(); // 在途 ⇒ 直接空转
+    expect(f.zai.fetches()).toBe(2); // 只有第一次真正发出请求
+    release(windowsSnapshot("zai-coding-cn", [{ scope: "week", usedPct: 3, resetAt: t0 + 168 * HOUR }], f.clock.now()));
+    await f.service.whenIdle();
+    expect(f.zai.fetches()).toBe(2);
+    expect(f.service.verdictFor("zai-coding-cn")?.level).toBe(0);
+  });
+
+  it("does not bypass the suspect-read backoff even when the reset has elapsed", async () => {
+    // 可疑读数的退避（自拒收起一个有效刷新周期）不被「窗口已过重置」绕过：
+    // 上游故障时的归零读数仍需节奏确认。退避期满后的重拉二次确认 ⇒ 观测重置恰一条。
+    const f = makeFixture({ refreshMs: 60_000, refreshHotMs: 60_000 });
+    const t0 = f.clock.now();
+    const rWeek = t0 + 72_000; // 72s 后重置
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0, resetAt: t0 + 3 * HOUR },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        f.clock.now(),
+      ),
+    );
+    const zeroed = (): QuotaSnapshot =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0, resetAt: t0 + 3 * HOUR },
+          { scope: "week", usedPct: 0 },
+        ],
+        f.clock.now(),
+      );
+    f.clock.advance(60_000); // TTL 到期：拉到无证据回落（resetAt 还没到）⇒ 拒收 + 记可疑
+    await land(f, f.kimi, zeroed);
+    expect(f.warn).toHaveBeenCalledWith(expect.stringContaining("without reset evidence"));
+    expect(f.service.verdictFor("kimi-coding")?.windows[1]?.usedPct).toBe(100); // 旧快照继续生效
+    f.clock.advance(30_000); // t0+90s：周窗口已过重置（72s），但可疑退避（60s）未满
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.kimi.fetches()).toBe(2); // 退避压住绕过：不拉
+    f.clock.advance(35_000); // t0+125s：退避期满 ⇒ 拉到同一回落 ⇒ 二次确认 + 旧 resetAt 已过
+    await land(f, f.kimi, zeroed);
+    expect(f.events).toHaveLength(1); // 恰一条恢复事件（不因绕过重复）
+    expect([...(f.events[0]?.resetScopes ?? [])]).toEqual(["week"]);
+    expect(f.service.verdictFor("kimi-coding")?.windows[1]?.usedPct).toBe(0);
+  });
+});

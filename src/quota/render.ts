@@ -64,9 +64,14 @@ function pctOf(pct: number): number {
   return Math.round(Math.min(100, Math.max(0, pct)));
 }
 
+/** 重置时刻已过（读数过期，等下一次拉取刷新）的紧凑英文标记（AGENTS.md UI split）。 */
+function resetSuffix(w: WindowVerdict): string {
+  return w.reason === "reset-elapsed" ? "·reset" : "";
+}
+
 function windowText(w: WindowVerdict): string {
   const mark = w.level >= 2 ? " ⚠" : "";
-  return `${formatScope(w.scope)} ${pctOf(w.usedPct)}%${mark}`;
+  return `${formatScope(w.scope)} ${pctOf(w.usedPct)}%${resetSuffix(w)}${mark}`;
 }
 
 function demotedSuffix(v: ProviderVerdict, now: Millis): string {
@@ -311,7 +316,7 @@ function shortName(provider: string): string {
 
 function hudSegment(v: ProviderVerdict): string {
   if (v.windows.length === 0) return shortName(v.provider); // 防御分支（适配器层不产出）
-  const cells = v.windows.map((w) => `${pctOf(w.usedPct)}%`);
+  const cells = v.windows.map((w) => `${pctOf(w.usedPct)}%${resetSuffix(w)}`);
   return `${shortName(v.provider)} ${cells.join("/")}`;
 }
 
@@ -359,7 +364,7 @@ function levelColor(level: number): string {
 function hudSegmentThemed(v: ProviderVerdict, theme: QuotaStatusTheme): string {
   if (v.windows.length === 0) return theme.fg("dim", shortName(v.provider)); // 防御分支
   const name = theme.fg("dim", shortName(v.provider));
-  const value = v.windows.map((w) => `${pctOf(w.usedPct)}%`).join("/");
+  const value = v.windows.map((w) => `${pctOf(w.usedPct)}%${resetSuffix(w)}`).join("/");
   return `${name} ${theme.fg(levelColor(v.level), value)}`;
 }
 

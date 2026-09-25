@@ -117,6 +117,34 @@ describe("L1 tick block", () => {
     const v = verdict({ level: 1, demoted: true, windows: [w("5h", 41, 1, "pct")] });
     expect(renderProviderLine(v, NOW)).toBe("zai-coding-cn 5h 41% ⤓demoted");
   });
+
+  it("marks a window whose reset has elapsed with the compact English ·reset token (no ⚠)", () => {
+    const kimi = verdict({
+      provider: "kimi-coding",
+      level: 0,
+      windows: [w("5h", 8, 0, "none"), w("week", 100, 0, "reset-elapsed")],
+    });
+    expect(renderProviderLine(kimi, NOW)).toBe("kimi-coding 5h 8% · 7d 100%·reset");
+    expect(buildQuotaTickText([kimi], NOW)).toBe("[quota] kimi-coding 5h 8% · 7d 100%·reset");
+    // 与仍在有效的 L2 窗口共存：·reset 只落在已过重置的窗口上，⚠ 照常给有效窗口。
+    const mixed = verdict({
+      provider: "kimi-coding",
+      level: 2,
+      windows: [w("5h", 80, 2, "pct"), w("week", 100, 0, "reset-elapsed")],
+    });
+    expect(renderProviderLine(mixed, NOW)).toBe("kimi-coding 5h 80% ⚠ · 7d 100%·reset");
+  });
+
+  it("HUD line carries ·reset per elapsed window, plain and themed", () => {
+    const kimi = verdict({
+      provider: "kimi-coding",
+      level: 0,
+      windows: [w("5h", 8, 0, "none"), w("week", 100, 0, "reset-elapsed")],
+    });
+    expect(renderQuotaStatus([kimi], NOW, 600_000)).toBe("quota kimi 8%/100%·reset");
+    const theme = { fg: (_color: string, text: string) => `<${text}>` };
+    expect(renderQuotaStatus([kimi], NOW, 600_000, theme)).toBe("<quota> <kimi> <8%/100%·reset>");
+  });
 });
 
 describe("L2 warn block", () => {

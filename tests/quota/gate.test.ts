@@ -13,7 +13,12 @@ import {
   toLadderLevel,
   type QuotaGateDeps,
 } from "../../src/quota/gate.js";
-import type { ProviderVerdict, WindowVerdict } from "../../src/quota/ladder.js";
+import {
+  DEFAULT_THRESHOLDS,
+  providerVerdict,
+  type ProviderVerdict,
+  type WindowVerdict,
+} from "../../src/quota/ladder.js";
 import type { LadderLevel, QuotaProviderId, WindowScope } from "../../src/quota/types.js";
 
 const NOW = 1_000_000;
@@ -386,5 +391,93 @@ describe("demotion-floor-only verdicts", () => {
 
   it("quotaAnnotation marks the demotion itself instead of a misleading reading", () => {
     expect(quotaAnnotation({ provider: "kimi-coding", id: "kimi-k3" }, verdictFor)).toBe(" [⤓demoted ⚠]");
+  });
+});
+
+// 重置时刻已过的窗口不再阻断（ladder 规则 0）：verdict 用 providerVerdict 现算
+// （与 service 同源），锁住「闸门只读判定层」的口径一致性。
+describe("windows whose reset has elapsed (relaxation)", () => {
+  const HOUR = 3_600_000;
+
+  function serviceVerdict(
+    windows: readonly { scope: WindowScope; usedPct: number; resetAt?: number }[],
+  ): ProviderVerdict {
+    return providerVerdict(
+      {
+        provider: "kimi-coding",
+        kind: "windows",
+        windows: windows.map((w) => ({
+          scope: w.scope,
+          usedPct: w.usedPct,
+          ...(w.resetAt === undefined ? {} : { resetAt: w.resetAt }),
+        })),
+        fetchedAt: NOW - 40 * 60_000, // 快照 40min：不 stale（staleAfterMs 默认 1h）
+      },
+      {
+        now: NOW,
+        thresholds: DEFAULT_THRESHOLDS,
+        staleAfterMs: HOUR,
+        etaOf: () => undefined,
+        demoted: false,
+      },
+    );
+  }
+
+  it("does not fast-fail when the only blocking window's resetAt has already passed", () => {
+    // 任务现场形状：08:30 拉到 kimi 周 100%（resetAt 09:06），09:10 派 kimi——快照
+    // 40min 未 stale，但周窗口已过重置 ⇒ 不再阻断。
+    const verdict = serviceVerdict([
+      { scope: "5h", usedPct: 8, resetAt: NOW + 3 * HOUR },
+      { scope: "week", usedPct: 100, resetAt: NOW - 4 * 60_000 },
+    ]);
+    expect(verdict.level).toBe(0); // 判定层已归零
+    expect(
+      evaluateQuotaGate(
+        { provider: "kimi-coding", id: "kimi-k3" },
+        gateDeps(() => verdict),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("still blocks when another live window keeps the provider at the gate line (max of live windows)", () => {
+    const verdict = serviceVerdict([
+      { scope: "5h", usedPct: 98, resetAt: NOW + 3 * HOUR },
+      { scope: "week", usedPct: 100, resetAt: NOW - 4 * 60_000 },
+    ]);
+    expect(verdict.level).toBe(3);
+    const res = evaluateQuotaGate(
+      { provider: "kimi-coding", id: "kimi-k3" },
+      gateDeps(() => verdict),
+    );
+    expect(res?.level).toBe(3);
+    expect(res?.message).toContain("5h"); // 拦截理由是仍在有效的 5h 窗口
+  });
+
+  it("resetAt unknown keeps the legacy behavior: a fresh 100% window still blocks", () => {
+    const verdict = serviceVerdict([{ scope: "week", usedPct: 100 }]);
+    expect(
+      evaluateQuotaGate(
+        { provider: "kimi-coding", id: "kimi-k3" },
+        gateDeps(() => verdict),
+      ),
+    ).toBeDefined();
+  });
+
+  it("an elapsed-reset provider becomes a recommendable alternative again (level 0)", () => {
+    const verdicts: Record<string, ProviderVerdict> = {
+      "kimi-coding": serviceVerdict([
+        { scope: "5h", usedPct: 8, resetAt: NOW + 3 * HOUR },
+        { scope: "week", usedPct: 100, resetAt: NOW - 4 * 60_000 },
+      ]),
+      zai: makeVerdict({ provider: "zai", level: 1, windows: [win("5h", 60, 1)] }),
+    };
+    // 已过重置的 kimi 不再被排除线拦下，且 level 0 在排序键里压过 L1 的 zai
+    //（pct 只在同层内决胜——旧读数 100 不会把 level 0 打到后面）。
+    expect(
+      pickAlternatives(
+        "zai-coding-cn",
+        gateDeps((p) => verdicts[p]),
+      ),
+    ).toEqual({ providers: ["kimi-coding", "zai"], subscription: true });
   });
 });
