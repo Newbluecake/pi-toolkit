@@ -291,6 +291,103 @@ describe("wireConsult.resolveExperts: live ∪ index, cross-source ambiguity (T-
   });
 });
 
+// workflow-experts plan §3 D8 / §4.3, test #20: `opts.completedOnly` is opt-in
+// and top-level (no opts) resolution must stay byte-identical (failed/aborted
+// still accepted, pending still rejected the same way).
+describe("wireConsult.resolveExperts: opt-in completedOnly (workflow-experts §4.3, test #20)", () => {
+  it("without opts, a failed run is still accepted (top-level behavior unchanged)", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_FAILED001",
+          status: "failed",
+          label: "flopped",
+          agentType: "worker",
+          sessionFile: newExpertFile,
+        }),
+      ],
+    });
+    const result = w.resolveExperts(["flopped"]);
+    expect(result.refs[0]).toMatchObject({ runId: "r_FAILED001" });
+  });
+
+  it("completedOnly:true rejects a failed run, naming the actual status", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_FAILED001",
+          status: "failed",
+          label: "flopped",
+          agentType: "worker",
+          sessionFile: newExpertFile,
+        }),
+      ],
+    });
+    expect(() => w.resolveExperts(["flopped"], { completedOnly: true })).toThrow(
+      /its run ended as failed \(workflow experts must be completed runs\)/,
+    );
+  });
+
+  it("completedOnly:true rejects an aborted run", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_ABORTED01",
+          status: "aborted",
+          label: "stopped",
+          agentType: "worker",
+          sessionFile: newExpertFile,
+        }),
+      ],
+    });
+    expect(() => w.resolveExperts(["stopped"], { completedOnly: true })).toThrow(
+      /its run ended as aborted \(workflow experts must be completed runs\)/,
+    );
+  });
+
+  it("completedOnly:true rejects a still-running expert (distinct from the top-level pending warning)", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_RUNLIVE2",
+          status: "running",
+          label: "busybee2",
+          agentType: "worker",
+          sessionFile: newExpertFile,
+        }),
+      ],
+    });
+    expect(() => w.resolveExperts(["busybee2"], { completedOnly: true })).toThrow(
+      /is still running \(await it first\)/,
+    );
+  });
+
+  it("completedOnly:true accepts a genuinely completed run just like the default path", () => {
+    const w = wiring({
+      live: [
+        snapshot({
+          runId: "r_DONEOK01",
+          status: "completed",
+          label: "finisher",
+          agentType: "worker",
+          sessionFile: newExpertFile,
+        }),
+      ],
+    });
+    const result = w.resolveExperts(["finisher"], { completedOnly: true });
+    expect(result.refs[0]).toMatchObject({ runId: "r_DONEOK01" });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('"main" resolution is unaffected by completedOnly (it is not a run)', () => {
+    const w = wiring({
+      mainSessionFacts: () => ({ sessionFile: oldExpertFile }),
+    });
+    const result = w.resolveExperts(["main"], { completedOnly: true });
+    expect(result.refs[0]).toMatchObject({ runId: "main" });
+  });
+});
+
 describe('wireConsult.resolveExperts: the reserved "main" expert id (§16)', () => {
   it('resolves "main" from live mainSessionFacts, carrying kind/model/context through', () => {
     const w = wiring({

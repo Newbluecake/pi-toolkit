@@ -39,8 +39,14 @@ export interface ResolveExpertsResult {
 
 export interface ConsultWiring {
   expertIndex: ExpertIndex;
-  /** Agent-tool `experts` admission resolver — throws a config error on any failure (§4.2). */
-  resolveExperts(refs: readonly string[]): ResolveExpertsResult;
+  /**
+   * Agent-tool `experts` admission resolver — throws a config error on any
+   * failure (§4.2). `opts.completedOnly` (workflow-experts plan §3 D8 /
+   * §4.3, opt-in) restricts acceptance to `completed` runs with a
+   * persisted session file; omitted/false keeps top-level `Agent` behavior
+   * byte-identical (failed/aborted/timed_out runs still accepted).
+   */
+  resolveExperts(refs: readonly string[], opts?: { completedOnly?: boolean }): ResolveExpertsResult;
   /** Per-run consult-tool factory for the runtime adapter; undefined when disabled/whitelist empty. */
   depsFactory(selfRunId: RunId, selfCwd: string, whitelist: readonly ConsultExpertRef[]): ToolDefinition | undefined;
   /** Fork-dir TTL sweep (stack calls it synchronously at build; no timer is ever created). */
@@ -212,6 +218,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
     handle: string,
     runId: RunId,
     liveSnap: RunSnapshot | undefined,
+    opts?: { completedOnly?: boolean },
   ): { ref?: ConsultExpertRef; warning?: string; failure?: string } {
     const record = expertIndex.list().find((r) => r.runId === runId);
     const sessionFile = liveSnap?.diag.sessionFile ?? record?.sessionFile;
@@ -228,6 +235,22 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
     const agentType = liveSnap?.diag.agentType ?? record?.agentType ?? "";
     if (agentType.length === 0) return { failure: "its run record carries no agent type" };
     const pending = liveSnap !== undefined && !TERMINAL.has(liveSnap.status);
+    if (opts?.completedOnly === true) {
+      // workflow-experts plan §3 D8 / §4.3: workflow-local resolution only
+      // ever accepts `completed` runs with a persisted session — failed/
+      // timed_out/aborted and still-running are all rejected, with the
+      // reason spelled out (D8's rationale: a failed/aborted upstream's
+      // session is often a half-finished conclusion, and an un-awaited
+      // running run is most likely a script bug). Top-level `Agent` never
+      // passes this option, so its behavior stays byte-identical.
+      if (pending) return { failure: "is still running (await it first)" };
+      const status = liveSnap?.status ?? record?.status;
+      if (status !== "completed") {
+        return {
+          failure: `its run ended as ${status ?? "unknown"} (workflow experts must be completed runs)`,
+        };
+      }
+    }
     const ctx = liveSnap?.diag.contextUsage;
     // A live `percent: null` is an explicit "unknown" measurement: do not
     // resurrect a stale dispatch-time percentage and accidentally nack a
@@ -257,7 +280,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
     };
   }
 
-  function resolveExperts(refs: readonly string[]): ResolveExpertsResult {
+  function resolveExperts(refs: readonly string[], opts?: { completedOnly?: boolean }): ResolveExpertsResult {
     if (!settings().enabled)
       throw new Error('consult is disabled (consult.enabled=false); remove "experts" or enable it');
     const live = liveCandidates();
@@ -303,6 +326,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
           trimmed,
           runId,
           live.find((s) => s.runId === runId),
+          opts,
         );
       } else {
         // 2) label path (id missed): live labels ∪ index labels, dedup by
@@ -319,6 +343,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
             trimmed,
             runId,
             live.find((s) => s.runId === runId),
+            opts,
           );
         }
       }
