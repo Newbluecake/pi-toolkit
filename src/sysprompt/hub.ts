@@ -63,7 +63,12 @@ export interface PromptSectionHub {
   _captured(): string | undefined;
 }
 
-type RenderUpdate = { section: SectionName; title: string; pointerHint?: string } & SectionUpdate;
+type RenderUpdate = {
+  section: SectionName;
+  title: string;
+  pointerHint?: string;
+  absentFromHead?: boolean;
+} & SectionUpdate;
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
   return typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
@@ -193,6 +198,8 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
             section: name,
             title: titleOf(registration, input),
             ...(registration.pointerHint === undefined ? {} : { pointerHint: registration.pointerHint }),
+            // The frozen head never carried this section (empty snapshot) ⇒ the update adds it.
+            ...(resolved.state.snapshot === "" ? { absentFromHead: true } : {}),
             ...resolved.update,
           });
         }

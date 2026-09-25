@@ -168,6 +168,29 @@ describe("memory section registered in the hub (M3)", () => {
     expect(second!.message.customType).toBe("subagent:prompt-section-update");
     expect(second!.message.content).toContain("fresh note");
     expect(second!.message.content).toContain(memoryTitle(toSlug(fx.cwd)));
+    // P3 (live acceptance 2026-09-25): the frozen head had no memory section, so the update
+    // must say it ADDS one — not that it replaces a section the prompt never contained.
+    expect(second!.message.content).toContain("ADDS a section to your system prompt");
+    expect(second!.message.content).not.toContain("REPLACES");
+  });
+
+  test("stable mode: a memory section present at freeze time is REPLACED by later updates", () => {
+    const fx = fixture();
+    writeFileSync(join(fx.memoryDir, "notes.md"), "first note");
+    const host = fakePi();
+    const hub = makeHub(host, { mode: () => "stable" });
+    hub.register("pi_project_memory", memorySection(fx.memDeps));
+    registerCoreSections(hub);
+
+    const first = beforeAgentStart(host, "BASE", fx.cwd);
+    expect(first?.systemPrompt).toContain("first note");
+
+    writeFileSync(join(fx.memoryDir, "notes.md"), "second note");
+    fx.cache.delete(fx.cwd);
+    const second = beforeAgentStart(host, "BASE", fx.cwd);
+    expect(second?.systemPrompt).toBe(first?.systemPrompt);
+    expect(second!.message.content).toContain("REPLACES the section of your system prompt");
+    expect(second!.message.content).not.toContain("ADDS a section");
   });
 
   test("child session: injectInChildSessions=false makes the section inert", () => {
