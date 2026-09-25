@@ -203,7 +203,7 @@ export interface WorkflowGroupInput {
   /**
    * workflow-agent-queue §5 (stage B): the header's deadline marker, present
    * only while it carries information beyond `elapsed / budget` — inside the
-   * timeout grace window (`⏳宽限58s`) or once extended (`⏳12m+1`). Running
+   * timeout grace window (`⏳grace 58s`) or once extended (`⏳12m+1`). Running
    * workflows only.
    */
   readonly deadline?: { readonly remainingMs: number; readonly extensions: number; readonly inGrace: boolean };
@@ -269,12 +269,12 @@ export function findGlyphCollisions(line: string): string[] {
 }
 
 /** Distance to an effective deadline: `⏳12m` (with `+N` when extensions
- *  were granted), `⏳宽限58s` while inside the grace window. Shared by run
+ *  were granted), `⏳grace 58s` while inside the grace window. Shared by run
  *  rows and (stage B) workflow headers so both read the same. */
 export function deadlineMarker(remainingMs: number, extensions: number, inGrace: boolean): string {
   const t = formatDuration(remainingMs);
   const ext = extensions > 0 ? `+${extensions}` : "";
-  return inGrace ? `⏳宽限${t}` : `⏳${t}${ext}`;
+  return inGrace ? `⏳grace ${t}` : `⏳${t}${ext}`;
 }
 
 /** The run's distance to its effective deadline (see `deadlineMarker`). */
@@ -331,6 +331,11 @@ function widgetRowMain(
     // it has run" at narrow widths), and while in grace it is NEVER dropped —
     // that is a sub-90s must-see signal; truncate the label instead.
     if (!fits() && !row.inGrace) drop("deadline");
+    // Still too wide even with a 1-column label while in grace: fall back to the
+    // bare `⏳58s` countdown (the row is already crit-toned, so "grace" stays legible).
+    if (row.inGrace && visibleWidth(compose("")) + 1 > width) {
+      shown.set("deadline", `⏳${formatDuration(row.remainingMs!)}`);
+    }
   }
   // compose("") already contains the label↔fields separator (its leading
   // empty element contributes exactly one space), so no extra column reserve.

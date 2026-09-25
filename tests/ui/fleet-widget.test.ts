@@ -292,13 +292,13 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       expect(line).toContain("⏳1m05s+2");
     });
 
-    it("renders ⏳宽限<remaining> while inside the grace window", () => {
+    it("renders ⏳grace <remaining> while inside the grace window", () => {
       const run = snapshot({
         deadlines: { enqueuedAt: 0, deadlineAt: 5_000, queueDeadlineAt: undefined, graceUntil: NOW + 58_000 },
         diag: liveDiag(),
       });
       const line = buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]!;
-      expect(line).toContain("⏳宽限58s");
+      expect(line).toContain("⏳grace 58s");
     });
 
     it("no deadline (and terminal rows) render no deadline field", () => {
@@ -349,11 +349,14 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       });
       const model = buildFleetViewModel([run], OPTS);
       const at = (width: number) => buildFleetWidgetLines(model, { width })![1]!;
-      for (const w of [120, 80, 60, 40, 30, 20]) {
+      for (const w of [120, 80, 60, 40, 30]) {
         const line = at(w);
-        expect(line).toContain("⏳宽限58s");
+        expect(line).toContain("⏳grace 58s");
         expect(visibleWidth(line)).toBeLessThanOrEqual(w);
       }
+      // Too narrow for the full marker: the bare countdown survives, never dropped.
+      expect(at(20)).toContain("⏳58s");
+      expect(visibleWidth(at(20))).toBeLessThanOrEqual(20);
       // At the narrowest width the label gave way, not the grace countdown.
       expect(at(20)).not.toContain("这是一个非常非常长的任务标签名");
     });
@@ -2051,12 +2054,12 @@ describe("workflow-agent-queue §5 (stage B): workflow header deadline marker", 
     activeTotal: 1,
   };
 
-  it("inside the grace window: `⏳宽限58s` (same format as the run row), right after the time segment", () => {
+  it("inside the grace window: `⏳grace 58s` (same format as the run row), right after the time segment", () => {
     const line = workflowHeaderLine(
       { ...base, deadline: { remainingMs: 58_000, extensions: 0, inGrace: true } },
       plain,
     );
-    expect(line).toBe("⚙ multi-review · 1h00m / 1h00m · ⏳宽限58s · ✓2 ▸1");
+    expect(line).toBe("⚙ multi-review · 1h00m / 1h00m · ⏳grace 58s · ✓2 ▸1");
     expect(findGlyphCollisions(line)).toEqual([]);
   });
 
@@ -2069,7 +2072,7 @@ describe("workflow-agent-queue §5 (stage B): workflow header deadline marker", 
     ).toBe("⚙ multi-review · 1h00m / 1h12m · ⏳12m00s+1 · ✓2 ▸1");
     expect(
       workflowHeaderLine({ ...base, deadline: { remainingMs: 5_000, extensions: 2, inGrace: true } }, plain),
-    ).toContain("· ⏳宽限5s ·");
+    ).toContain("· ⏳grace 5s ·");
   });
 
   it("no marker without grace/extension, and never on a frozen terminal header", () => {
@@ -2137,7 +2140,7 @@ describe("workflow-agent-queue §5 (stage B): workflow header deadline marker", 
       workflows: reg.listForDisplay().map((w) => workflowGroupInput(w, 62_000, 5_000)),
     })!;
     const header = lines.find((line) => line.includes("multi-review"))!;
-    expect(header).toContain("⏳宽限1m28s");
+    expect(header).toContain("⏳grace 1m28s");
     for (const line of lines) expect(findGlyphCollisions(line)).toEqual([]);
   });
 });

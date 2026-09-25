@@ -81,7 +81,7 @@ import type { WorkflowId, WorkflowTerminalStatus } from "./types.js";
  * "grace" | "extended") moves the row's `deadlineAt` in place and carries
  * `graceUntil` (set on "grace", cleared on "extended" — a rescue),
  * `hardDeadlineAt` and `extensions` (granted so far) for the fleet widget's
- * `⏳宽限58s` / `⏳12m+1` header marker.
+ * `⏳grace 58s` / `⏳12m+1` header marker.
  */
 export interface WorkflowQueuedChild {
   readonly callId: string;
