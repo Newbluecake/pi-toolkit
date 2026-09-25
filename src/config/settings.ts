@@ -269,7 +269,7 @@ export interface QuotaSettings {
   tickStepPercent: number;
   /** 两条 quota 消息之间的全局最小间隔（L3 不受限）。 */
   minIntervalMs: number;
-  /** L2+ 的复读周期。 */
+  /** L3 的复读周期；L2 纯提示不复读。 */
   repeatMs: number;
   /** 注入消息是否在 transcript 可见。 */
   display: boolean;

@@ -495,7 +495,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "L3 bypasses this floor",
     description: "Global minimum interval between quota messages",
   }),
-  "quota.repeatS": seconds("quota.repeatMs", { max: 86_400, description: "L2+ re-announce period" }),
+  "quota.repeatS": seconds("quota.repeatMs", { max: 86_400, description: "L3 re-announce period; L2 announces once" }),
   "quota.display": bool("quota.display", "Show the injected quota line in the transcript"),
   "quota.gate": bool("quota.gate", "Fail spawns fast when the target provider's quota is exhausted"),
   "quota.gateLevel": {
