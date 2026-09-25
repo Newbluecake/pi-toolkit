@@ -272,9 +272,27 @@ function randomBase36(length: number): string {
   return s.slice(0, length);
 }
 
-/** `consult-<rand4>` (review-1 #11): random base so high-frequency consults never exhaust the label suffix space. */
-export function consultRunLabel(): string {
-  return `consult-${randomBase36(4)}`;
+/** Longest expert slug kept in a consult run label (fleet rows stay one line). */
+const CONSULT_LABEL_EXPERT_MAX = 32;
+
+/** Label-safe form of an expert name: `[A-Za-z0-9._-]` only, runs of anything else → one `-`, capped. */
+function consultLabelSlug(name: string): string {
+  return name
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, CONSULT_LABEL_EXPERT_MAX)
+    .replace(/-+$/, "");
+}
+
+/**
+ * `consult-<expert>-<rand4>` — the expert slug says who is being asked; the
+ * random base36 suffix (review-1 #11) keeps high-frequency consults from ever
+ * exhausting the label space. An empty slug falls back to `consult-<rand4>`.
+ */
+export function consultRunLabel(expert?: string): string {
+  const slug = expert !== undefined ? consultLabelSlug(expert) : "";
+  return slug !== "" ? `consult-${slug}-${randomBase36(4)}` : `consult-${randomBase36(4)}`;
 }
 
 function describeWhitelist(whitelist: readonly ConsultExpertRef[]): string {
@@ -628,7 +646,7 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
               budgetNote,
               isMain,
             }),
-            label: consultRunLabel(),
+            label: consultRunLabel(expertName(ref)),
             ...(model !== undefined ? { modelOverride: model } : {}),
             cwd,
             forkSessionFrom: fork.path,

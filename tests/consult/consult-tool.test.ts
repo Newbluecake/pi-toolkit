@@ -16,6 +16,7 @@ import type { QueryService } from "../../src/service/query-service.js";
 import {
   CONSULT_MAX_CONTEXT_PERCENT,
   ConsultToolParams,
+  consultRunLabel,
   createConsultTool,
   type ConsultForkStore,
   type ConsultSpawnPort,
@@ -488,7 +489,7 @@ describe("consult tool: success surface (T-3)", () => {
     expect(req.signal).toBe(controller.signal); // same signal, not detached
     expect(req.type).toBe("explorer");
     expect(req.modelOverride).toEqual({ provider: "acme", id: "bigmodel" });
-    expect(req.label).toMatch(/^consult-[a-z0-9]{4}$/);
+    expect(req.label).toMatch(/^consult-explorer-[a-z0-9]{4}$/);
     expect(req.prompt).toContain(`ONLY have read-only tools: ${CONSULT_READONLY_TOOLS.join(", ")}`);
     expect(req.prompt).toContain("why?");
     expect(h.port.waitOutcomeCalls).toEqual(["r_CONSULT1"]);
@@ -851,3 +852,24 @@ function createDeferredSnapshots(h: Harness) {
 async function flushMicrotasks() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
+
+describe("consultRunLabel", () => {
+  it("names the expert and keeps a random base36 suffix", () => {
+    expect(consultRunLabel("re-review-bash-v3")).toMatch(/^consult-re-review-bash-v3-[a-z0-9]{4}$/);
+    expect(consultRunLabel("main")).toMatch(/^consult-main-[a-z0-9]{4}$/);
+  });
+
+  it("slugs unsafe characters and caps long names at 32 chars", () => {
+    expect(consultRunLabel("bash-timeout-grace-plan-v4-(fable)")).toMatch(
+      /^consult-bash-timeout-grace-plan-v4-fable-[a-z0-9]{4}$/,
+    );
+    expect(consultRunLabel("web hub / LAN plan")).toMatch(/^consult-web-hub-LAN-plan-[a-z0-9]{4}$/);
+    const slug = consultRunLabel("x".repeat(80)).slice("consult-".length, -5);
+    expect(slug).toBe("x".repeat(32));
+  });
+
+  it("falls back to consult-<rand4> when there is no usable name", () => {
+    expect(consultRunLabel()).toMatch(/^consult-[a-z0-9]{4}$/);
+    expect(consultRunLabel("()")).toMatch(/^consult-[a-z0-9]{4}$/);
+  });
+});
