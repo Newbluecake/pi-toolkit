@@ -2,3 +2,4 @@ node_modules/
 dist/
 coverage/
 package-lock.json
+tests/fixtures/bash-tools-golden.json

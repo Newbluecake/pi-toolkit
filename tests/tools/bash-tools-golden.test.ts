@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import prettier from "prettier";
 import { describe, expect, it } from "vitest";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
@@ -26,22 +25,11 @@ import { BashJobToolParams, createBashJobTool } from "../../src/tools/bash-job-t
  * object output — so the fixture simply omits the key rather than writing
  * `null`/an empty value.
  *
- * One finishing step beyond the plan's literal wording: the
- * `JSON.stringify(v, null, 2)` output is re-wrapped through Prettier's own
- * `json` parser before being written or compared. AGENTS.md's `format:check`
- * gate applies to every tracked file including fixtures (unlike
- * `tests/fixtures/compact-hint-golden.json`, which happens to contain no
- * short scalar arrays and so passes Prettier's default output unmodified,
- * this fixture's `required`/`promptGuidelines` arrays would otherwise get
- * silently rewritten — array-collapsed onto one line — by the repo's
- * pre-commit hook (`prettier --write`), permanently drifting the checked-in
- * file away from what `JSON.stringify(v, null, 2)` produces and breaking the
- * byte-for-byte comparison on every future run for a reason that has nothing
- * to do with the tool surface itself. Content and key order are unaffected —
- * Prettier's JSON printer never reorders object keys or changes string
- * content, it only rewraps whitespace — so this is formatting-only and does
- * not weaken the "byte-for-byte" guarantee over the meaningful content.
- * See "待确认取舍" in the P0a delivery report.
+ * Canonical bytes are exactly `JSON.stringify(sortKeysDeep(v), null, 2) + "\n"`
+ * (plan §5.3). The fixture is listed in `.prettierignore` so neither
+ * `format:check` nor the pre-commit `prettier --write` hook can rewrap it
+ * (Prettier would collapse short arrays such as `required` onto one line and
+ * drift the checked-in bytes away from the canonical definition).
  *
  * Generation command (plan §5.3, **only** on unmodified master, **only**
  * once, for P0a):
@@ -110,9 +98,8 @@ function sortKeysDeep(value: unknown): unknown {
   return value;
 }
 
-async function canonicalize(value: unknown): Promise<string> {
-  const raw = JSON.stringify(sortKeysDeep(value), null, 2);
-  return prettier.format(raw, { parser: "json", printWidth: 120, tabWidth: 2 });
+function canonicalize(value: unknown): string {
+  return `${JSON.stringify(sortKeysDeep(value), null, 2)}\n`;
 }
 
 /** Builds the two tool surfaces this package covers (§6.2 P0a: bash, bash_job only). */
@@ -127,7 +114,7 @@ function buildGolden(): Record<string, ToolSurface> {
 
 describe("bash tool surfaces — golden fixture (T0)", () => {
   it("matches tests/fixtures/bash-tools-golden.json byte-for-byte", async () => {
-    const serialized = await canonicalize(buildGolden());
+    const serialized = canonicalize(buildGolden());
 
     if (process.env.UPDATE_BASH_GOLDEN) {
       if (existsSync(FIXTURE_PATH)) {

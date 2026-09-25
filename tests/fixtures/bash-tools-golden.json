@@ -18,10 +18,14 @@
           "type": "number"
         }
       },
-      "required": ["command"],
+      "required": [
+        "command"
+      ],
       "type": "object"
     },
-    "promptGuidelines": ["You can inspect PI_* environment variables for current model and session details."],
+    "promptGuidelines": [
+      "You can inspect PI_* environment variables for current model and session details."
+    ],
     "promptSnippet": "Execute bash commands (ls, grep, find, etc.)"
   },
   "bash_job": {
@@ -60,7 +64,9 @@
           "type": "number"
         }
       },
-      "required": ["action"],
+      "required": [
+        "action"
+      ],
       "type": "object"
     },
     "promptSnippet": "bash_job(action: \"status\"|\"wait\"|\"kill\"|\"list\", job_id?, wait_ms?) - inspect, wait for, or stop a backgrounded bash command (job_id comes from the bash call that was moved to the background; a unique prefix works); its log is a plain file you can also read/tail/grep directly"
