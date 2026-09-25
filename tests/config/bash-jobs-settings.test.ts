@@ -4,7 +4,7 @@ import { DEFAULT_SETTINGS, loadSettings, parseBashJobsSettings } from "../../src
 const defaults = DEFAULT_SETTINGS.bashJobs;
 
 describe("bashJobs settings block (§6)", () => {
-  it("pins the documented defaults (R2/R4/R5)", () => {
+  it("pins the documented defaults (R2/R4/R5, bash-timeout-grace §5.1)", () => {
     expect(defaults).toEqual({
       autoBackgroundMs: 290_000,
       maxLogBytes: 10_485_760,
@@ -12,6 +12,12 @@ describe("bashJobs settings block (§6)", () => {
       retentionMs: 24 * 60 * 60 * 1_000,
       drainTimeoutMs: 30_000,
       shutdownPolicy: "keep",
+      childSessions: true,
+      childSettleHold: true,
+      childSettleHoldMaxRounds: 0,
+      timeoutGraceMs: 60_000,
+      maxExtensions: 3,
+      maxTimeoutFactor: 3,
     });
     // optional fields are absent, not `undefined` (exactOptionalPropertyTypes)
     expect("dir" in defaults).toBe(false);
@@ -52,6 +58,12 @@ describe("bashJobs settings block (§6)", () => {
       retentionMs: 0,
       drainTimeoutMs: defaults.drainTimeoutMs,
       shutdownPolicy: "keep",
+      childSessions: defaults.childSessions,
+      childSettleHold: defaults.childSettleHold,
+      childSettleHoldMaxRounds: defaults.childSettleHoldMaxRounds,
+      timeoutGraceMs: defaults.timeoutGraceMs,
+      maxExtensions: defaults.maxExtensions,
+      maxTimeoutFactor: defaults.maxTimeoutFactor,
     });
   });
 
@@ -113,6 +125,12 @@ describe("bashJobs settings block (§6)", () => {
       retentionMs: 1,
       drainTimeoutMs: defaults.drainTimeoutMs,
       shutdownPolicy: "keep",
+      childSessions: defaults.childSessions,
+      childSettleHold: defaults.childSettleHold,
+      childSettleHoldMaxRounds: defaults.childSettleHoldMaxRounds,
+      timeoutGraceMs: defaults.timeoutGraceMs,
+      maxExtensions: defaults.maxExtensions,
+      maxTimeoutFactor: defaults.maxTimeoutFactor,
     });
   });
 
@@ -158,5 +176,94 @@ describe("bashJobs settings block (§6)", () => {
     });
     // illegal seconds fall back field-by-field
     expect(loadSettings({ bashJobs: { autoBackgroundS: "30", retentionS: -1 } }).bashJobs).toEqual(defaults);
+  });
+
+  describe("bash-timeout-grace §5.1 new keys (U1/U2/U4/C3)", () => {
+    it("childSessions/childSettleHold default true and fall back to true for non-boolean input", () => {
+      expect(parseBashJobsSettings({}).childSessions).toBe(true);
+      expect(parseBashJobsSettings({}).childSettleHold).toBe(true);
+      expect(parseBashJobsSettings({ childSessions: false }).childSessions).toBe(false);
+      expect(parseBashJobsSettings({ childSettleHold: false }).childSettleHold).toBe(false);
+      for (const value of ["false", 0, 1, null, undefined, {}, []]) {
+        expect(parseBashJobsSettings({ childSessions: value }).childSessions, `childSessions=${String(value)}`).toBe(
+          true,
+        );
+        expect(
+          parseBashJobsSettings({ childSettleHold: value }).childSettleHold,
+          `childSettleHold=${String(value)}`,
+        ).toBe(true);
+      }
+    });
+
+    it("childSettleHoldMaxRounds: 0 = auto (default), positive integers pass through, non-integer/negative fall back to 0", () => {
+      expect(parseBashJobsSettings({}).childSettleHoldMaxRounds).toBe(0);
+      expect(parseBashJobsSettings({ childSettleHoldMaxRounds: 0 }).childSettleHoldMaxRounds).toBe(0);
+      expect(parseBashJobsSettings({ childSettleHoldMaxRounds: 40 }).childSettleHoldMaxRounds).toBe(40);
+      for (const value of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "40", null, undefined, true, {}, []]) {
+        expect(
+          parseBashJobsSettings({ childSettleHoldMaxRounds: value }).childSettleHoldMaxRounds,
+          `childSettleHoldMaxRounds=${String(value)}`,
+        ).toBe(0);
+      }
+    });
+
+    it("timeoutGraceMs: default 60_000, 0 disables grace, missing/negative/NaN fall back to default", () => {
+      expect(parseBashJobsSettings({}).timeoutGraceMs).toBe(60_000);
+      expect(parseBashJobsSettings({ timeoutGraceMs: 0 }).timeoutGraceMs).toBe(0);
+      expect(parseBashJobsSettings({ timeoutGraceMs: 5_000 }).timeoutGraceMs).toBe(5_000);
+      for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, "60000", null, undefined, true, {}, []]) {
+        expect(parseBashJobsSettings({ timeoutGraceMs: value }).timeoutGraceMs, `timeoutGraceMs=${String(value)}`).toBe(
+          60_000,
+        );
+      }
+      // seconds ↔ ms boundary: file key is `timeoutGraceS`
+      expect(loadSettings({ bashJobs: { timeoutGraceS: 30 } }).bashJobs.timeoutGraceMs).toBe(30_000);
+      expect(loadSettings({ bashJobs: { timeoutGraceS: 0 } }).bashJobs.timeoutGraceMs).toBe(0);
+      expect(loadSettings({ bashJobs: { timeoutGraceS: -1 } }).bashJobs.timeoutGraceMs).toBe(60_000);
+    });
+
+    it("maxExtensions: default 3, 0 disables extend, non-integer/negative fall back to default", () => {
+      expect(parseBashJobsSettings({}).maxExtensions).toBe(3);
+      expect(parseBashJobsSettings({ maxExtensions: 0 }).maxExtensions).toBe(0);
+      expect(parseBashJobsSettings({ maxExtensions: 5 }).maxExtensions).toBe(5);
+      for (const value of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "3", null, undefined, true, {}, []]) {
+        expect(parseBashJobsSettings({ maxExtensions: value }).maxExtensions, `maxExtensions=${String(value)}`).toBe(3);
+      }
+    });
+
+    it("maxTimeoutFactor: default 3, non-integer >= 1 is legal, not-finite/< 1 fall back to default (1 = zero headroom)", () => {
+      expect(parseBashJobsSettings({}).maxTimeoutFactor).toBe(3);
+      expect(parseBashJobsSettings({ maxTimeoutFactor: 1 }).maxTimeoutFactor).toBe(1);
+      expect(parseBashJobsSettings({ maxTimeoutFactor: 2.5 }).maxTimeoutFactor).toBe(2.5);
+      for (const value of [0, 0.999, -1, Number.NaN, Number.POSITIVE_INFINITY, "3", null, undefined, true, {}, []]) {
+        expect(
+          parseBashJobsSettings({ maxTimeoutFactor: value }).maxTimeoutFactor,
+          `maxTimeoutFactor=${String(value)}`,
+        ).toBe(3);
+      }
+    });
+
+    it("is wired into loadSettings end to end", () => {
+      expect(
+        loadSettings({
+          bashJobs: {
+            childSessions: false,
+            childSettleHold: false,
+            childSettleHoldMaxRounds: 10,
+            timeoutGraceS: 0,
+            maxExtensions: 0,
+            maxTimeoutFactor: 1,
+          },
+        }).bashJobs,
+      ).toEqual({
+        ...defaults,
+        childSessions: false,
+        childSettleHold: false,
+        childSettleHoldMaxRounds: 10,
+        timeoutGraceMs: 0,
+        maxExtensions: 0,
+        maxTimeoutFactor: 1,
+      });
+    });
   });
 });

@@ -118,6 +118,18 @@ export interface BashJobsSettings {
   dir?: string;
   /** Shell used to run job commands; defaults to the $SHELL whitelist → bash (§3.3) when unset. */
   shellPath?: string;
+  /** bash-timeout-grace §5.1 (U1): subagent/child sessions get the bash override + `bash_job` tool registered. Default true; `false` = child sessions stay on today's behavior (no auto-background, no bash_job, no settle hold). */
+  childSessions: boolean;
+  /** bash-timeout-grace §5.1 (U2): a settling child run with non-terminal background jobs is kept alive and reminded instead of finishing immediately. Default true; `false` = no settle hold (child.ts's `agent_before_settle` handler is never registered). */
+  childSettleHold: boolean;
+  /** bash-timeout-grace §3.5/§5.1 (C3): hard cap on settle-hold continuation rounds for one run. `0` (default) = auto, derived per run as `2 × R_wait` from the run's own hard deadline/extension budget (§3.5) — there is no "unlimited" value, set a large number instead. Non-integer/negative → 0 (auto). */
+  childSettleHoldMaxRounds: number;
+  /** bash-timeout-grace §5.1 (U4): grace window after a job-level `timeout` fires before an already-backgrounded job is killed, so `bash_job(action:"extend")` has a chance to run. Default 60_000 (60s); missing/negative/NaN → default; `0` = grace off (still-foreground jobs are always killed immediately regardless of this setting, §2.3). */
+  timeoutGraceMs: number;
+  /** bash-timeout-grace §5.1 (U4): max number of `bash_job(action:"extend")` calls accepted per job. Default 3; non-integer/negative → 3; `0` = extend disabled, which (D-6) also disables grace for that job. */
+  maxExtensions: number;
+  /** bash-timeout-grace §5.1 (U4): hard lifetime ceiling as a multiple of the job's original `timeout` (`hardAt = spawnedAt + ceil(timeoutMs × maxTimeoutFactor)`). Default 3; not finite or `< 1` → 3; `1` = zero headroom ⇒ no extend, no grace. */
+  maxTimeoutFactor: number;
 }
 
 /** 动态阈值（dynamic-threshold-plan.md §11.1）：价格/缓存感知的 switch_context 提醒线。 */
@@ -517,6 +529,12 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     retentionMs: 24 * 60 * 60 * 1_000,
     drainTimeoutMs: 30_000,
     shutdownPolicy: "keep",
+    childSessions: true,
+    childSettleHold: true,
+    childSettleHoldMaxRounds: 0,
+    timeoutGraceMs: 60_000,
+    maxExtensions: 3,
+    maxTimeoutFactor: 3,
   },
   compact: {
     enabled: true,
@@ -683,6 +701,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "bashJobs.autoBackgroundMs",
   "bashJobs.drainTimeoutMs",
   "bashJobs.retentionMs",
+  "bashJobs.timeoutGraceMs",
   "fabric.minIntervalMs",
   "fabric.progressTtlMs",
   "fabric.rootMinIntervalMs",
@@ -1287,6 +1306,11 @@ export function parseBashJobsSettings(input: unknown): BashJobsSettings {
   const str = (raw: unknown): string | undefined => (typeof raw === "string" && raw.length > 0 ? raw : undefined);
   const dir = str(value.dir);
   const shellPath = str(value.shellPath);
+  // bash-timeout-grace §5.1: non-negative integer count, falling back field-by-field like every
+  // other bashJobs numeric knob (childSettleHoldMaxRounds / maxExtensions share this shape; `0` is
+  // a legal value for both — auto / extend-disabled — so it is never special-cased away from `defaults`).
+  const intCount = (raw: unknown, fallback: number): number =>
+    typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : fallback;
   return {
     autoBackgroundMs: num(value.autoBackgroundMs, defaults.autoBackgroundMs),
     maxLogBytes: num(value.maxLogBytes, defaults.maxLogBytes),
@@ -1305,6 +1329,21 @@ export function parseBashJobsSettings(input: unknown): BashJobsSettings {
         : defaults.shutdownPolicy,
     ...(dir === undefined ? {} : { dir }),
     ...(shellPath === undefined ? {} : { shellPath }),
+    // bash-timeout-grace §5.1 (U1/U2): non-boolean falls back to the default (true for both).
+    childSessions: typeof value.childSessions === "boolean" ? value.childSessions : defaults.childSessions,
+    childSettleHold: typeof value.childSettleHold === "boolean" ? value.childSettleHold : defaults.childSettleHold,
+    // §5.1 (C3): no "unlimited" value — non-integer/negative falls back to 0 (auto), not silently clamped.
+    childSettleHoldMaxRounds: intCount(value.childSettleHoldMaxRounds, defaults.childSettleHoldMaxRounds),
+    // §5.1 (U4): timeoutGraceMs allows 0 (grace off), matching the `num` helper's own 0-is-legal rule.
+    timeoutGraceMs: num(value.timeoutGraceMs, defaults.timeoutGraceMs),
+    maxExtensions: intCount(value.maxExtensions, defaults.maxExtensions),
+    // §5.1 (U4): factor is a multiplier, not a duration — allowed to be fractional, floor is 1 (not 0).
+    maxTimeoutFactor:
+      typeof value.maxTimeoutFactor === "number" &&
+      Number.isFinite(value.maxTimeoutFactor) &&
+      value.maxTimeoutFactor >= 1
+        ? value.maxTimeoutFactor
+        : defaults.maxTimeoutFactor,
   };
 }
 

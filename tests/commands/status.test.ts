@@ -530,6 +530,12 @@ describe("/agent settings subcommand", () => {
       "bashJobs.maxBackgroundJobs",
       "bashJobs.retentionS",
       "bashJobs.shutdownPolicy",
+      "bashJobs.childSessions",
+      "bashJobs.childSettleHold",
+      "bashJobs.childSettleHoldMaxRounds",
+      "bashJobs.timeoutGraceS",
+      "bashJobs.maxExtensions",
+      "bashJobs.maxTimeoutFactor",
     ]) {
       expect(listing).toContain(key);
     }
@@ -565,6 +571,46 @@ describe("/agent settings subcommand", () => {
     expect(run(d, "settings set bashJobs.dir /tmp/x")).toContain("Unknown settings key");
     expect(persisted).toEqual([]);
     expect(current.bashJobs).toEqual(DEFAULT_SETTINGS.bashJobs);
+  });
+
+  it("S1 (bash-timeout-grace §5.1, P2): exposes and persists the new child/grace/extend knobs", () => {
+    const { d, persisted, current } = settingsDeps();
+
+    expect(run(d, "settings set bashJobs.childSessions false")).toContain("takes effect after /reload");
+    expect(current.bashJobs.childSessions).toBe(false);
+    expect(run(d, "settings set bashJobs.childSettleHold false")).toContain("Persisted to");
+    expect(current.bashJobs.childSettleHold).toBe(false);
+
+    // childSettleHoldMaxRounds: 0 = auto, no "unlimited" value
+    expect(run(d, "settings set bashJobs.childSettleHoldMaxRounds 40")).toContain("Persisted to");
+    expect(current.bashJobs.childSettleHoldMaxRounds).toBe(40);
+    expect(run(d, "settings set bashJobs.childSettleHoldMaxRounds -1")).toContain("Invalid value");
+    expect(run(d, "settings set bashJobs.childSettleHoldMaxRounds 1.5")).toContain("expected an integer >= 0");
+    run(d, "settings reset bashJobs.childSettleHoldMaxRounds");
+    expect(current.bashJobs.childSettleHoldMaxRounds).toBe(0);
+
+    // timeoutGraceS: seconds ↔ ms boundary, 0 = grace off
+    expect(run(d, "settings set bashJobs.timeoutGraceS 0")).toContain("Persisted to");
+    expect(current.bashJobs.timeoutGraceMs).toBe(0);
+    expect(run(d, "settings set bashJobs.timeoutGraceS 30")).toContain("Persisted to");
+    expect(current.bashJobs.timeoutGraceMs).toBe(30_000);
+    expect(run(d, "settings set bashJobs.timeoutGraceS -1")).toContain("Invalid value");
+
+    // maxExtensions: 0 = extend disabled
+    expect(run(d, "settings set bashJobs.maxExtensions 0")).toContain("Persisted to");
+    expect(current.bashJobs.maxExtensions).toBe(0);
+    expect(run(d, "settings set bashJobs.maxExtensions -1")).toContain("Invalid value");
+    expect(run(d, "settings set bashJobs.maxExtensions 1.5")).toContain("expected an integer >= 0");
+
+    // maxTimeoutFactor: >= 1, non-integer legal, 1 = zero headroom
+    expect(run(d, "settings set bashJobs.maxTimeoutFactor 1")).toContain("Persisted to");
+    expect(current.bashJobs.maxTimeoutFactor).toBe(1);
+    expect(run(d, "settings set bashJobs.maxTimeoutFactor 2.5")).toContain("Persisted to");
+    expect(current.bashJobs.maxTimeoutFactor).toBe(2.5);
+    expect(run(d, "settings set bashJobs.maxTimeoutFactor 0.5")).toContain("Invalid value");
+
+    expect(persisted).toContainEqual(["bashJobs.childSessions", false]);
+    expect(persisted).toContainEqual(["bashJobs.maxTimeoutFactor", 2.5]);
   });
 
   it("tab completion offers second-valued keys with their second defaults", () => {
