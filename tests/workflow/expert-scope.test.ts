@@ -43,6 +43,26 @@ describe("createWorkflowExpertScope.mapLocal: D9/D10 local resolution", () => {
     expect(scope.mapLocal("dev")).toEqual({ kind: "pass", handle: "dev" });
   });
 
+  it("P1 regression (host.ts §5): a callId that never reached one of the three real `registry.submit` sites (i.e. `noteSubmitted` was never called for it — an admission-stage rejection: max_children/budget_exhausted/experts_unresolved/invalid_args) leaves NO trace — a later call reusing its label is unaffected, never reported as 'still running'", () => {
+    const scope = createWorkflowExpertScope();
+    // Contrast with the OLD (buggy) host.ts, which called `noteSubmitted`
+    // unconditionally before the journal/maxChildren/BW2/experts gates —
+    // any of those bailing out early left the callId registered forever as
+    // an unsettled candidate (see the now-failing assertion in the comment
+    // below). The fixed host.ts simply never calls `noteSubmitted` for a
+    // callId that gets rejected before reaching `registry.submit`, so this
+    // scope never even learns the callId existed.
+    // scope.noteSubmitted("rejected-1", "dev"); // <- what the bug used to do
+    expect(scope.mapLocal("dev")).toEqual({ kind: "pass", handle: "dev" }); // never "still running"
+
+    // A later, real call CAN legitimately reuse the same label and resolve
+    // normally — the phantom entry never blocked it.
+    scope.noteSubmitted("c2", "dev");
+    scope.noteBound("c2", "r2", "dev");
+    scope.noteSettled(summary({ callId: "c2", runId: "r2" }));
+    expect(scope.mapLocal("dev")).toEqual({ kind: "local", runId: "r2" });
+  });
+
   it("resolves to the runId of a completed local call matched by its DECLARED label", () => {
     const scope = createWorkflowExpertScope();
     scope.noteSubmitted("c1", "dev");

@@ -1735,6 +1735,125 @@ describe("host.ts: agent({ experts }) admission (workflow-experts §4.4, D9/D11)
     expect(resolveExperts).not.toHaveBeenCalled();
     expect(h.c.spawns[0]!.req).not.toHaveProperty("consultExperts");
   });
+
+  /**
+   * P1 (verification finding, docs/dev/workflow-experts/plan.md §5/D10):
+   * host.ts used to call `expertScope.noteSubmitted()` unconditionally, at
+   * the very top of `handleAgent`, BEFORE the journal/maxChildren/BW2/
+   * experts admission gates below it could reject the call — an
+   * admission-rejected labeled call was left registered as a permanently
+   * unsettled local candidate, so any LATER call in the same workflow run
+   * that referenced its label as an expert incorrectly got "is still
+   * running" forever, regardless of the real (settled, or never-submitted)
+   * state. The fix moves `noteSubmitted` to the three REAL `registry.submit`
+   * call sites (replay hit / FIFO queue / immediate dispatch) so a call
+   * rejected before any of them leaves no trace at all.
+   */
+  it("P1 regression: budget_exhausted (BW2, the outer host-call gate) never registers a phantom local candidate — once the deadline is extended, a later reference to its label falls through to the resolver instead of 'still running'", async () => {
+    const h = expertsHarness();
+    await h.boot();
+    // Already expired: the OUTER host-call gate (host.ts's `onHostCall`,
+    // ahead of `handleAgent`) rejects every envelope as budget_exhausted
+    // before `handleAgent` — and therefore `noteSubmitted` — ever runs.
+    let killAtValue = 0;
+    const resolveExperts = vi.fn(() => ({ error: { message: "no external match" } }));
+    const handler = h.attach({ killAt: () => killAtValue, spawner: { ...h.c.spawner, resolveExperts } });
+
+    h.postHostCall("1", "agent", { prompt: "p1", opts: { label: "dev" } });
+    await flush();
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
+      stage: "admission",
+      reason: "budget_exhausted",
+      label: "dev",
+    });
+    expect(handler.children).toEqual([]);
+
+    // A grace/extension raising `killAt()` (workflow-agent-queue's
+    // `extend_subagent_timeout` does exactly this in production) — BW2 no
+    // longer trips for later calls.
+    killAtValue = h.clock.now() + 60_000;
+
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { experts: ["dev"] } });
+    await flush();
+    // Before the fix: "dev" (call "1") was phantom-registered and
+    // permanently unsettled -> reject 'is still running'. After the fix:
+    // "1" left no trace -> mapLocal passes "dev" straight through to the
+    // (mocked) resolver.
+    expect(resolveExperts).toHaveBeenCalledWith(["dev"]);
+    const ack2 = sentFor(h.sent, "2").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack2.ok).toBe(false);
+    expect(ack2.error?.message).toBe("no external match"); // NOT "... is still running ..."
+  });
+
+  it("P1 regression: experts_unresolved on a labeled call never registers a phantom local candidate — a later reference to its label falls through to the resolver instead of 'still running' (test #23 semantics: caught, then continue)", async () => {
+    const h = expertsHarness();
+    await h.boot();
+    const ref = { runId: "r-ext", sessionFile: "/tmp/r-ext.jsonl", agentType: "gp" };
+    const resolveExperts = vi.fn((handles: readonly string[]) =>
+      handles.includes("ghost") ? { error: { message: "expert not found" } } : { refs: [ref] },
+    );
+    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
+
+    // Call "1" (label "dev") itself asks for a bogus external expert and
+    // gets rejected — before the P1 fix this still registered "dev" as an
+    // unsettled local candidate.
+    h.postHostCall("1", "agent", { prompt: "p1", opts: { label: "dev", experts: ["ghost"] } });
+    await flush();
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
+      stage: "admission",
+      reason: "experts_unresolved",
+    });
+    expect(handler.children).toEqual([]);
+
+    // Call "2" references "dev" as an expert (the script caught "1"'s
+    // rejection and moved on — test #23's semantics). Before the fix: reject
+    // 'is still running'. After the fix: falls through to the resolver.
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { experts: ["dev"] } });
+    await flush();
+    expect(resolveExperts).toHaveBeenLastCalledWith(["dev"]);
+    expect(h.c.spawns[0]!.req).toMatchObject({ consultExperts: [ref] });
+  });
+
+  it("P1 regression: max_children never registers a phantom local candidate either — a literal 'later call resolves dev correctly' round trip is unreachable for THIS gate specifically (see comment); the direct, reachable contract test lives in expert-scope.test.ts", async () => {
+    const h = expertsHarness({ maxChildren: 1 });
+    await h.boot();
+    const handler = h.attach();
+
+    // Call "1" uses the workflow's only maxChildren=1 slot; settle it so
+    // `handler.children` has a real baseline to compare against below.
+    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
+    await flush();
+    h.c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    h.c.finishChild("r1");
+    await flush();
+
+    // Call "2" (label "dev") is rejected outright by max_children — before
+    // the P1 fix this still registered "dev" as an unsettled local
+    // candidate in expertScope, forever.
+    h.postHostCall("2", "agent", { prompt: "p2", opts: { label: "dev" } });
+    await flush();
+    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "2")).toMatchObject({
+      reason: "max_children",
+      label: "dev",
+    });
+    expect(handler.children).toHaveLength(1); // only call "1" ever settles/records
+
+    // NOTE: unlike budget_exhausted (the outer gate's `killAt` is dynamic —
+    // a grace/extension can raise it) and experts_unresolved (doesn't touch
+    // any cap at all), maxChildren's own counter (`totalSubmitted()`, D1)
+    // only ever grows and has no reset/extend mechanism within a single
+    // workflow run: once it trips for call "2", EVERY subsequent call
+    // (including one that references "dev" as an expert) is ALSO rejected
+    // by max_children before ever reaching expert resolution — so it can
+    // never observe "still running" either. This asserts exactly that: the
+    // rejection reason stays "max_children", the resolver is never reached.
+    h.postHostCall("3", "agent", { prompt: "p3", opts: { experts: ["dev"] } });
+    await flush();
+    const ack3 = sentFor(h.sent, "3").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack3.ok).toBe(false);
+    expect(ack3.error?.message).toContain("maxChildren");
+  });
 });
 
 describe("host.ts: chain-taint replay safety (workflow-experts D12-D15, §5)", () => {

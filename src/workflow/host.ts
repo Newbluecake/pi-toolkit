@@ -715,11 +715,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // real worktree isolation through `ChildSpawner`.
     const isolation = validOpts.isolation;
 
-    // workflow-experts §4.4/D9-D11: recorded right away, before the journal/
-    // maxChildren/BW2 gates below — a later call's `mapLocal` needs to see
-    // every earlier submission's declared label regardless of how far this
-    // one itself gets.
-    expertScope.noteSubmitted(callId, label);
+    // workflow-experts §4.4/D9-D11/P1 fix: recorded at each of the three
+    // REAL `registry.submit` sites below (replay hit / FIFO queue /
+    // immediate dispatch) — never here. A call rejected before any of those
+    // (invalid_args, max_children, budget_exhausted, experts_unresolved)
+    // never occupies a `CallInfo` slot, so a later call reusing the same
+    // label never sees a phantom "still running" candidate (§5's table: a
+    // rejection must leave zero trace in `expertScope`, matching D10/#23's
+    // "caught experts_unresolved, then continue" semantics).
     const declaresExperts = validOpts.experts !== undefined;
 
     // M3.5 §6.2/§6.4: the replay short-circuit. Computed unconditionally
@@ -787,6 +790,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
 
       if (decision.kind === "hit") {
         replayStats.hits += 1;
+        expertScope.noteSubmitted(callId, label);
         registry.submit(callId, deps.clock.now());
         startedAt.set(callId, deps.clock.now());
         if (phaseId !== undefined) phaseOf.set(callId, phaseId);
@@ -913,6 +917,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // `finish` → `stopOwned` withholds every still-queued call.
     if (waitQueue.length > 0 || activeCount() >= budget.maxParallel) {
       const at = deps.clock.now();
+      expertScope.noteSubmitted(callId, label);
       registry.submit(callId, at, { queued: true });
       enqueuedAtOf.set(callId, at);
       waitQueue.push(call);
@@ -938,6 +943,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
 
     // D2 ⑤: a free slot — the pre-queue immediate path, unchanged (the ack
     // waits for spawn() itself, bounded by HR2).
+    expertScope.noteSubmitted(callId, label);
     registry.submit(callId, deps.clock.now());
     startedAt.set(callId, deps.clock.now());
 
