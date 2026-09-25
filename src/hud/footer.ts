@@ -160,6 +160,15 @@ function renderBgAgents(session: HudSession, ctx: ExtensionContext): string | un
  */
 const TIME_LINE_STATUS_KEYS = ["feishu-notify", "pi-hud"] as const;
 
+/**
+ * Status keys kept off the shared status line. `pi-subagent:web-hub` mirrors
+ * WEB_HUB_STATUS_KEY in src/web-hub/agent/index.ts (a literal here so the HUD
+ * never loads the web-hub module graph); it gets its own line, or shares the
+ * quota line when both fit. `quota` always comes last.
+ */
+const WEB_HUB_STATUS_KEY = "pi-subagent:web-hub";
+const OWN_LINE_STATUS_KEYS = [WEB_HUB_STATUS_KEY, "quota"] as const;
+
 export function renderTimeLineStatusParts(
   entries: readonly [string, string][],
   theme: { fg(color: string, text: string): string },
@@ -179,20 +188,35 @@ export function renderTimeLineStatusParts(
 export function renderExtensionStatusLines(
   entries: readonly [string, string][],
   theme: { fg(color: string, text: string): string },
+  /** Footer width. When given and web-hub fits after the quota text, the two share the quota line. */
+  width?: number,
 ): string[] {
   const timeLineKeys: readonly string[] = TIME_LINE_STATUS_KEYS;
+  const ownLineKeys: readonly string[] = OWN_LINE_STATUS_KEYS;
   const others = entries
-    .filter(([key]) => key !== "quota" && !timeLineKeys.includes(key))
+    .filter(([key]) => !ownLineKeys.includes(key) && !timeLineKeys.includes(key))
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([, text]) => sanitizeStatusText(text) || undefined)
     .filter((part): part is string => part !== undefined);
   const lines: string[] = [];
   if (others.length > 0) lines.push(others.join(" "));
-  const quotaText = entries.find(([key]) => key === "quota")?.[1];
-  if (quotaText !== undefined) {
-    const sanitized = sanitizeStatusText(quotaText);
-    if (sanitized) lines.push(sanitized);
+  const own = (key: string): string | undefined => {
+    const text = entries.find(([k]) => k === key)?.[1];
+    return text === undefined ? undefined : sanitizeStatusText(text) || undefined;
+  };
+  const web = own(WEB_HUB_STATUS_KEY);
+  const quota = own("quota");
+  // web-hub is short (`web ●`): ride on the quota line when both fit in one
+  // row; otherwise (or without a width) each keeps a line of its own.
+  const sep = theme.fg("dim", " │ ");
+  if (web !== undefined && quota !== undefined && width !== undefined) {
+    if (visibleWidth(quota) + visibleWidth(sep) + visibleWidth(web) <= width) {
+      lines.push(quota + sep + web);
+      return lines;
+    }
   }
+  if (web !== undefined) lines.push(web);
+  if (quota !== undefined) lines.push(quota);
   return lines;
 }
 
@@ -430,7 +454,7 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
           lines.push(...wrapTextWithAnsi(timeParts.join(theme.fg("dim", " │ ")), width));
         }
         // 扩展状态行（status 行 + quota 独占行），随后 tools 统计独占一行。
-        for (const statusLine of renderExtensionStatusLines(statusEntries, theme)) {
+        for (const statusLine of renderExtensionStatusLines(statusEntries, theme, width)) {
           lines.push(...wrapTextWithAnsi(statusLine, width));
         }
         // tools 统计独占一行：它的宽度随工具种类增长，挤在 status 行里会把

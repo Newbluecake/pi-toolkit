@@ -23,6 +23,31 @@ describe("renderExtensionStatusLines", () => {
     expect(lines).toEqual(["5h", "kimi 62%"]);
   });
 
+  it("web-hub 状态独占一行（无宽度或无 quota 时），位于共享行之后、quota 之前", () => {
+    const lines = renderExtensionStatusLines(
+      [
+        ["quota", "kimi 62%"],
+        ["pi-subagent:web-hub", "web ●"],
+        ["cache-ttl", "cache adaptive · 5m"],
+      ],
+      theme,
+    );
+    expect(lines).toEqual(["cache adaptive · 5m", "web ●", "kimi 62%"]);
+    expect(renderExtensionStatusLines([["pi-subagent:web-hub", "web ●"]], theme, 80)).toEqual(["web ●"]);
+  });
+
+  it("放得下时 web-hub 并入 quota 行末尾，放不下则各占一行", () => {
+    const entries: [string, string][] = [
+      ["quota", "kimi 62%"],
+      ["pi-subagent:web-hub", "web ●"],
+      ["cache-ttl", "5m"],
+    ];
+    const plain = { fg: (_color: string, text: string) => text };
+    // "kimi 62%" (8) + " │ " (3) + "web ●" (5) = 16
+    expect(renderExtensionStatusLines(entries, plain, 16)).toEqual(["5m", "kimi 62% │ web ●"]);
+    expect(renderExtensionStatusLines(entries, plain, 15)).toEqual(["5m", "web ●", "kimi 62%"]);
+  });
+
   it("其余条目按 key 排序后合并为一行", () => {
     const lines = renderExtensionStatusLines(
       [
