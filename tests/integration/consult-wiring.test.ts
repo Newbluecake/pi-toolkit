@@ -391,6 +391,16 @@ describe('consult wiring: the reserved "main" expert, end to end (§16)', () => 
       [],
     );
     const mainRef = stack.consult.resolveExperts(["main"]).refs[0]!;
+    // Keep the dispatched parent run genuinely live while it consults: a real
+    // consult() call happens inside the parent's own tool call, and fork
+    // admission rejects a parent that is stopping or gone (spawn-fork-guard,
+    // workflow-experts plan §4.7). The default fake handle settles at once.
+    let releaseParent!: () => void;
+    const parentGate = new Promise<void>((resolve) => (releaseParent = resolve));
+    vi.mocked(PiSessionDriver.prototype.create).mockImplementationOnce(async (spec) => {
+      calls.push({ kind: "create", spec: spec as { customTools?: unknown[] } });
+      return { ...fakeHandle(), prompt: () => parentGate } as never;
+    });
     const spawned = await stack.spawn.spawn({
       type: "dispatcher",
       prompt: "consult main",
@@ -420,5 +430,7 @@ describe('consult wiring: the reserved "main" expert, end to end (§16)', () => 
     expect(forkPath).toBeDefined();
     expect(forkPath).not.toBe(mainSessionFile);
     expect((result.details as { expertRunId?: string }).expertRunId).toBe("main");
+    releaseParent();
+    await drain();
   });
 });
