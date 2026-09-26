@@ -78,6 +78,18 @@ describe("workflow.budget.workflowTotalS must be > 0", () => {
   });
 });
 
+describe("buildWorkflowRunBudget: worktreeSettleMaxMs (workflow-worktree plan D5)", () => {
+  it("derives from the effective settings.budget.reapMs + 1_000", () => {
+    const s = { ...DEFAULT_SETTINGS, budget: { ...DEFAULT_SETTINGS.budget, reapMs: 5_000 } };
+    expect(buildWorkflowRunBudget(s).worktreeSettleMaxMs).toBe(6_000);
+  });
+
+  it("tracks a non-default reapMs (an agent-type-agnostic host fallback, independent of any per-type override)", () => {
+    const s = { ...DEFAULT_SETTINGS, budget: { ...DEFAULT_SETTINGS.budget, reapMs: 30_000 } };
+    expect(buildWorkflowRunBudget(s).worktreeSettleMaxMs).toBe(31_000);
+  });
+});
+
 describe("loadSettingsFromFile: workflow.budget.workflowTotalS WARN", () => {
   let dir: string;
   let path: string;

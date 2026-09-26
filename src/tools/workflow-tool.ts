@@ -5,7 +5,7 @@ import { validateScriptSize } from "../workflow/orchestrator.js";
 import { assertHeartbeatBudgetInvariant } from "../workflow/runaway.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import type { BackgroundWorkflowUsage, BackgroundWorkflowView, BackgroundWorkflows } from "../workflow/background.js";
-import type { WorkflowOutcome, WorkflowRunBudget } from "../workflow/types.js";
+import type { WorkflowChildSummary, WorkflowOutcome, WorkflowRunBudget } from "../workflow/types.js";
 import type { RunSnapshot, UsageDelta } from "../core/types.js";
 import { buildProgressLines } from "./agent-tool.js";
 import { formatDuration } from "../ui/fleet-panel.js";
@@ -70,7 +70,14 @@ export const WorkflowToolParams = Type.Object({
       "'Available models' section of the system prompt, same rule as the Agent tool; a bare model id/substring is " +
       "resolved as a fuzzy hint, and an unknown model or unresolvable hint rejects the agent() call), thinking " +
       "('off' | 'low' | 'medium' | 'high', per-call thinking-level override; unset = the agent type's frontmatter " +
-      "level). experts is a whitelist of subagent handles (labels/run_ids from THIS workflow run, or the reserved " +
+      "level). isolation: 'worktree' runs that specific agent() call in its own isolated git worktree created from " +
+      "the current HEAD (uncommitted main-checkout changes are NOT visible, and isolated calls cannot see each " +
+      "other's changes either); on completion its changes are committed to a new pi-agent-<runId> branch in the " +
+      "main repo (merge or cherry-pick it yourself — the workflow never merges automatically) or the worktree is " +
+      "PRESERVED on disk instead if committing fails (the outcome names its path). Fails the call outright (no " +
+      "fallback) when worktree.enabled is off. An isolated call's result is never journaled or replayed, and every " +
+      "call submitted afterward in this same run is skipped from replay too, even when a journal is configured. " +
+      "experts is a whitelist of subagent handles (labels/run_ids from THIS workflow run, or the reserved " +
       "'main' for the host main session) this specific agent() call may consult in-turn via the consult tool — " +
       "unlike the top-level Agent tool's experts, a workflow expert must already be a **completed** run with a " +
       "persisted session (failed/timed_out/aborted/still-running entries are rejected); resolving a within-this-" +
@@ -274,6 +281,87 @@ function renderChildren(children: WorkflowOutcome["children"], omitCompletedPrev
   return lines.join("\n");
 }
 
+/**
+ * workflow-worktree plan D5 (§4 render): the worktree-isolation block
+ * `formatWorkflowResultText`/`formatWorkflowNotification` splice in
+ * *outside* the head/tail-truncated body, so a caller can always see every
+ * child's branch/kept-path/pending state even when `renderOutcomeText`'s
+ * own body got cut. Self-bounded independently of that truncation: at most
+ * `WORKTREE_BLOCK_MAX_LINES` rows, each capped at
+ * `WORKTREE_BLOCK_LINE_MAX_CHARS` chars, the whole block capped at
+ * `WORKTREE_BLOCK_MAX_BYTES` — anything beyond that collapses into a single
+ * "…N more" line pointing at `git branch --list 'pi-agent-*'`. `clean`/
+ * `none` children are never listed (nothing interesting to report).
+ * Returns `undefined` when no child has a worktree entry at all (the common
+ * case — no `isolation:"worktree"` calls this run), so callers can skip
+ * splicing in an empty section.
+ */
+const WORKTREE_BLOCK_MAX_LINES = 64;
+const WORKTREE_BLOCK_LINE_MAX_CHARS = 300;
+const WORKTREE_BLOCK_MAX_BYTES = 8 * 1024;
+
+function describeWorktreeState(info: NonNullable<WorkflowChildSummary["worktree"]>): string {
+  switch (info.state) {
+    case "committed":
+      return info.branch ?? "committed";
+    case "kept":
+      return info.path ? `kept ${info.path}` : "kept";
+    case "pending":
+      return "pending";
+    case "clean":
+      return "clean";
+    case "none":
+      return "none";
+  }
+}
+
+function worktreeLineFor(c: WorkflowChildSummary): string | undefined {
+  const info = c.worktree;
+  if (info === undefined || info.state === "clean" || info.state === "none") return undefined;
+  const name = c.label ?? c.callId;
+  const expectedBranch = `pi-agent-${c.runId ?? c.callId}`;
+  const desc =
+    info.state === "pending" && c.worktreeFinal !== undefined
+      ? `pending\u2192${describeWorktreeState(c.worktreeFinal)}`
+      : describeWorktreeState(info);
+  const line = `${name} \u2192 ${desc} (expected branch ${expectedBranch})`;
+  return line.length > WORKTREE_BLOCK_LINE_MAX_CHARS
+    ? `${line.slice(0, WORKTREE_BLOCK_LINE_MAX_CHARS - 1)}\u2026`
+    : line;
+}
+
+export function renderWorktreeBlock(outcome: WorkflowOutcome): string | undefined {
+  const candidates: string[] = [];
+  for (const c of outcome.children) {
+    const line = worktreeLineFor(c);
+    if (line !== undefined) candidates.push(line);
+  }
+  if (candidates.length === 0) return undefined;
+  let more = Math.max(0, candidates.length - WORKTREE_BLOCK_MAX_LINES);
+  const capped = candidates.slice(0, WORKTREE_BLOCK_MAX_LINES);
+  const kept: string[] = [];
+  // The 8 KiB cap covers the WHOLE block: header + lines + the worst-case
+  // `…N more` tail (N ≤ candidates.length), reserved up front.
+  const header = "worktrees:\n";
+  const tailReserve = Buffer.byteLength(worktreeTail(candidates.length), "utf8");
+  const budget = WORKTREE_BLOCK_MAX_BYTES - Buffer.byteLength(header, "utf8") - tailReserve;
+  let bytes = 0;
+  for (const line of capped) {
+    const lineBytes = Buffer.byteLength(line, "utf8") + (kept.length > 0 ? 1 : 0);
+    if (bytes + lineBytes > budget) {
+      more += capped.length - kept.length;
+      break;
+    }
+    bytes += lineBytes;
+    kept.push(line);
+  }
+  return `${header}${kept.join("\n")}${more > 0 ? worktreeTail(more) : ""}`;
+}
+
+function worktreeTail(more: number): string {
+  return `\n\u2026${more} more; git branch --list 'pi-agent-*'`;
+}
+
 export function renderOutcomeText(outcome: WorkflowOutcome): string {
   const parts: string[] = [];
   if (outcome.diag.degraded === "settlement_timeout") {
@@ -361,6 +449,11 @@ function workflowLabelMarker(name: string, workflowId: string, status: string): 
  */
 export function formatWorkflowResultText(outcome: WorkflowOutcome, usage: UsageDelta | undefined, maxChars: number) {
   const body = truncateResultText(renderOutcomeText(outcome), maxChars);
+  // workflow-worktree plan D5 (§4 render): spliced in *outside* the
+  // truncated body — the branch/kept/pending block always survives head/tail
+  // truncation, and is capped independently of it.
+  const worktreeBlock = renderWorktreeBlock(outcome);
+  const worktreeSection = worktreeBlock !== undefined ? `\n\n${worktreeBlock}` : "";
   const trailer = [
     `duration: ${formatDuration(outcome.durationMs)}`,
     `children: ${outcome.children.length}`,
@@ -370,7 +463,11 @@ export function formatWorkflowResultText(outcome: WorkflowOutcome, usage: UsageD
   ]
     .filter(Boolean)
     .join(" · ");
-  return { text: `${body.text}\n\n(${trailer})`, truncated: body.truncated, totalChars: body.totalChars };
+  return {
+    text: `${body.text}${worktreeSection}\n\n(${trailer})`,
+    truncated: body.truncated,
+    totalChars: body.totalChars,
+  };
 }
 
 /**
@@ -386,10 +483,13 @@ export function formatWorkflowNotification(
   const { outcome } = settled;
   const header = `Workflow "${settled.name}" (${settled.workflowId}) ${outcome.status} — ${formatWorkflowSummary(outcome, usage)}`;
   const body = truncateResultText(renderOutcomeText(outcome), maxChars).text;
+  // workflow-worktree plan D5: same placement rule as formatWorkflowResultText — outside the truncated body, before the hint.
+  const worktreeBlock = renderWorktreeBlock(outcome);
+  const worktreeSection = worktreeBlock !== undefined ? `\n\n${worktreeBlock}` : "";
   const hint =
     `Re-read the full outcome with get_subagent_result(run_id: "${settled.workflowId}")` +
     (outcome.children.length > 0 ? " (it also reports the children's spend to the session totals)." : ".");
-  return `${header}\n\n${body}\n\n${hint}`;
+  return `${header}\n\n${body}${worktreeSection}\n\n${hint}`;
 }
 
 /**

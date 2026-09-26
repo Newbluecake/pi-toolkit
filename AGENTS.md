@@ -264,8 +264,25 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   Agent tool, which stays completedOnly-agnostic); any call that declares `experts`, and every call submitted after one
   whose experts resolved successfully, never reads or writes the journal (`replay.ts`'s `"experts"`/`"chain_tainted"`
   skip reasons, checked before `config_hash_unavailable`/lookup) — `TaskSemantics`/`taskKeyOf` are unchanged (experts
-  never join the key). Design:
-  `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md`.
+  never join the key). `agent(prompt, { isolation: "worktree" })` (workflow-worktree plan, packages P1/P2) now
+  really isolates that one call in its own git worktree (built from the current HEAD by the same H2/H3 extension
+  the top-level `Agent` tool uses) instead of only marking the journal entry: `ChildSpawner.worktreeAvailable()`
+  (stack.ts wires it to `worktree.enabled`, no fallback) gates admission (`isolation_unavailable` reject, never
+  journaled, never taints); an accepted isolation call taints the rest of the run's replay chain exactly like
+  `experts` does, and is itself never journaled/replayed (`replay.ts`'s `isolation` input, checked before
+  `configHashAvailable`/lookup). The host waits up to `min(remainingWorkflowMs(), worktreeSettleMaxMs)` for H3's
+  disposition before settling (`worktree:{state}` on the settle envelope and in `fullResult`'s extra `worktree`
+  key — the only new key, and only for an isolated call); a give-up settles `pending` (frozen, the worker never
+  hears about it again) while an unbounded "late" listener keeps waiting in the background and folds a real
+  disposition into `WorkflowChildSummary.worktreeFinal` (never mutating the frozen `worktree` field) — visible on
+  a `children` read taken after it arrives. A workflow stop/timeout force-settles a still-bound isolated call as
+  `aborted` + `worktree:pending` while H3 keeps committing in the background (D7 — same "no orphan" contract as a
+  top-level `Agent`). `SubagentWorkflow`'s outcome text/notification carry a self-bounded `worktrees:` block
+  (64 lines / 8 KiB, `git branch --list 'pi-agent-*'` pointer beyond that) spliced in _outside_ the head/tail-
+  truncated body, so branches survive truncation. The workflow never merges branches itself — that is the
+  dispatching session's job, same as for a top-level isolated `Agent` run. Design:
+  `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md`,
+  `docs/dev/workflow-worktree/plan.md`.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —
   tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor,

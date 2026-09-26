@@ -34,9 +34,11 @@ metadata:
    **同一轮并行超过 6 个 agent 必须用 `SubagentWorkflow`**（全局并发上限默认 6，第 7 个起在全局槽位排队且有排队超时；
    workflow 自带 FIFO 排队、最多占 4 槽并给普通 Agent 留槽）。workflow 子任务 `agent(prompt, opts)` 严格校验（未知键拒，
    列允许键全集），**现在可以挂 `experts`**（只接受本 workflow 内已 completed 的同名调用或外部 completed run/`"main"`，
-   挂了之后本次及后续提交不走 journal 回放，详见 references/subagent-workflow.md），`isolation` 仍不生效
-   （`model`/`thinking` 可按调用指定，同 `Agent` 参数规则）——需要 worktree 隔离的任务仍留在 `Agent`，
-   其余进 workflow（详见 references/subagent-workflow.md）。
+   挂了之后本次及后续提交不走 journal 回放，详见 references/subagent-workflow.md），`isolation: "worktree"`
+   现在真正生效（真建隔离 git worktree，worktree.enabled=false 时直接 reject 无兜底；分支 `pi-agent-<runId>`
+   由调度方自己合并，workflow 从不自动合并；隔离节点之间互不可见彼此改动）
+   （`model`/`thinking` 可按调用指定，同 `Agent` 参数规则）——挂专家或需要跨调用共享未提交改动的任务仍留在 `Agent`，
+   其余（含需要 worktree 隔离但文件域不交叉的任务）都可进 workflow（详见 references/subagent-workflow.md）。
    **每轮派单前必须先做并行自检**（流程见「并行调度」节）；选择串行必须能指出具体硬依赖
    （谁消费谁的产物、谁和谁写同一文件），「稳妥起见一个个来」「先看看结果再说」不是合法的
    串行理由——不依赖结果的任务不许等结果。

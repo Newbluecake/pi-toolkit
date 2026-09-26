@@ -1,6 +1,7 @@
 import type { StopCause } from "../core/types.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import type { ChildOutcome, ChildSpawnError, ChildSpawnResult, ChildSpawner } from "./host.js";
+import type { ChildWorktreeInfo } from "./types.js";
 import type { SpawnService } from "../service/spawn-service.js";
 
 /**
@@ -56,6 +57,16 @@ export interface WorkflowChildSpawnerOptions {
     refs: readonly string[],
     opts: { completedOnly: true },
   ) => { refs: readonly import("../core/types.js").ConsultExpertRef[] } | { error: { message: string } };
+  /**
+   * workflow-worktree plan D2: the live availability gate for
+   * `isolation:"worktree"` — `stack.ts` wires this to `() =>
+   * settings.worktree.enabled`, read fresh on every call (a `/reload` that
+   * flips the setting takes effect immediately, same convention as
+   * `resolveExperts` being a late-bound ref rather than a snapshot). Absent
+   * — e.g. a test that never configures it — `handleAgent`'s D2 gate fails
+   * closed (`worktreeAvailable?.() !== true` reads `undefined`).
+   */
+  worktreeAvailable?: () => boolean;
 }
 
 export function createWorkflowChildSpawner(
@@ -76,6 +87,11 @@ export function createWorkflowChildSpawner(
         ...(req.consultExperts !== undefined && req.consultExperts.length > 0
           ? { consultExperts: [...req.consultExperts] }
           : {}),
+        // workflow-worktree plan D1: forwarded verbatim to `SpawnRequest.
+        // isolation` — the real worktree-isolation machinery lives entirely
+        // in H2 (src/extensions/worktree.ts) and the service layer; this
+        // adapter's only job is to not drop the field.
+        ...(req.isolation !== undefined ? { isolation: req.isolation } : {}),
         // agent()'s `opts.model` / `opts.thinking` (Agent-tool `model`/
         // `thinking` semantics, split in host.ts's `handleAgent`):
         // forwarded verbatim so spawn admission existence-checks strict
@@ -124,6 +140,32 @@ export function createWorkflowChildSpawner(
     },
     configHashOf(type) {
       return types.configHashOf(type);
+    },
+    ...(opts?.worktreeAvailable ? { worktreeAvailable: opts.worktreeAvailable } : {}),
+    /**
+     * workflow-worktree plan D5: maps `SpawnService.waitWorktreeDisposition`'s
+     * `settled|none|timeout|disposed` result onto `ChildWorktreeInfo`
+     * — `timeout` and `disposed` both collapse to `"pending"` (host.ts never
+     * needs to tell a settle-wait give-up apart from a stack-rebuild
+     * dispose). Absent `SpawnService.waitWorktreeDisposition` (an older/test
+     * double) degrades to `{ state: "none" }` rather than throwing.
+     */
+    async awaitWorktree(runId, waitOpts): Promise<ChildWorktreeInfo> {
+      if (!spawn.waitWorktreeDisposition) return { state: "none" };
+      const result = await spawn.waitWorktreeDisposition(runId, waitOpts);
+      switch (result.kind) {
+        case "settled":
+          return {
+            state: result.disposition.state,
+            ...(result.disposition.branch !== undefined ? { branch: result.disposition.branch } : {}),
+            ...(result.disposition.path !== undefined ? { path: result.disposition.path } : {}),
+          };
+        case "none":
+          return { state: "none" };
+        case "timeout":
+        case "disposed":
+          return { state: "pending" };
+      }
     },
     ...(opts?.resolveExperts
       ? {

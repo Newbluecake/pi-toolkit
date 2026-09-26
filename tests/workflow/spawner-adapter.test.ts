@@ -161,3 +161,71 @@ describe("createWorkflowChildSpawner: workflow-experts (§4.8)", () => {
     expect(adapter.resolveExperts!(["dev"])).toEqual({ refs });
   });
 });
+
+describe("createWorkflowChildSpawner: workflow-worktree (D1/D2/D5)", () => {
+  it('forwards isolation:"worktree" verbatim to SpawnService.spawn, and omits the key entirely when absent', async () => {
+    const { service, requests } = fakeSpawnService();
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    await adapter.spawn({ type: "general", prompt: "p", isolation: "worktree" });
+    await adapter.spawn({ type: "general", prompt: "p2" });
+    expect(requests[0]).toMatchObject({ isolation: "worktree" });
+    expect(requests[1]).not.toHaveProperty("isolation");
+  });
+
+  it("worktreeAvailable is absent from the adapter when no option was supplied", () => {
+    const { service } = fakeSpawnService();
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    expect(adapter.worktreeAvailable).toBeUndefined();
+  });
+
+  it("worktreeAvailable reads the injected getter's LIVE value on every call (not a dispatch-time snapshot)", () => {
+    const { service } = fakeSpawnService();
+    let flag = false;
+    const adapter = createWorkflowChildSpawner(service, fakeTypes(), { worktreeAvailable: () => flag });
+    expect(adapter.worktreeAvailable!()).toBe(false);
+    flag = true;
+    expect(adapter.worktreeAvailable!()).toBe(true);
+  });
+
+  it("awaitWorktree maps a 'settled' SpawnService result onto ChildWorktreeInfo, branch/path included only when present", async () => {
+    const { service } = fakeSpawnService();
+    (
+      service as unknown as { waitWorktreeDisposition: SpawnService["waitWorktreeDisposition"] }
+    ).waitWorktreeDisposition = async (_runId, _opts) => ({
+      kind: "settled",
+      disposition: { state: "committed", branch: "pi-agent-r1" },
+    });
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    await expect(adapter.awaitWorktree!("r1", { horizon: "settle" })).resolves.toEqual({
+      state: "committed",
+      branch: "pi-agent-r1",
+    });
+  });
+
+  it("awaitWorktree maps 'timeout' and 'disposed' both onto state:'pending' — host.ts never needs to tell them apart", async () => {
+    const { service } = fakeSpawnService();
+    const results: Array<{ kind: "timeout" } | { kind: "disposed" }> = [{ kind: "timeout" }, { kind: "disposed" }];
+    (
+      service as unknown as { waitWorktreeDisposition: SpawnService["waitWorktreeDisposition"] }
+    ).waitWorktreeDisposition = async () => results.shift()!;
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    await expect(adapter.awaitWorktree!("r1", { horizon: "settle" })).resolves.toEqual({ state: "pending" });
+    await expect(adapter.awaitWorktree!("r1", { horizon: "late" })).resolves.toEqual({ state: "pending" });
+  });
+
+  it("awaitWorktree maps 'none' onto state:'none'", async () => {
+    const { service } = fakeSpawnService();
+    (
+      service as unknown as { waitWorktreeDisposition: SpawnService["waitWorktreeDisposition"] }
+    ).waitWorktreeDisposition = async () => ({ kind: "none" });
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    await expect(adapter.awaitWorktree!("r1", { horizon: "settle" })).resolves.toEqual({ state: "none" });
+  });
+
+  it("awaitWorktree degrades to state:'none' when the underlying SpawnService has no waitWorktreeDisposition at all", async () => {
+    const { service } = fakeSpawnService();
+    delete (service as { waitWorktreeDisposition?: unknown }).waitWorktreeDisposition;
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    await expect(adapter.awaitWorktree!("r1", { horizon: "settle" })).resolves.toEqual({ state: "none" });
+  });
+});

@@ -1899,6 +1899,10 @@ export function buildSessionStack(
       if (!consultRef.current) throw new Error("consult is not wired yet");
       return consultRef.current.resolveExperts(refs, o);
     },
+    // workflow-worktree plan D2: read fresh on every call (not snapshotted
+    // at stack-build time) so a `/reload` that flips `worktree.enabled`
+    // takes effect for the next agent({isolation}) call immediately.
+    worktreeAvailable: () => settings.worktree.enabled,
   });
   const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");
   /**

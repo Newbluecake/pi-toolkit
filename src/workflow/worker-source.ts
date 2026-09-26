@@ -19,7 +19,10 @@
  * channel — §2.3.1 S5 / WC09):
  *   host -> worker : { kind: "cancel", reason: string }
  *                  | { kind: "host_ack", id, ok, value } | { ..., ok:false, error } | { ..., ok:false, cancelled:true, cause } (§3.3/§3.5, M3.2)
- *                  | { kind: "host_settle", callId, ok, value } | { ..., ok:false, error } (HR3, M3.2)
+ *                  | { kind: "host_settle", callId, ok, value, worktree? } | { ..., ok:false, error } (HR3, M3.2;
+ *                    workflow-worktree plan D5 adds the optional `worktree` key on the ok:true branch only, for an
+ *                    isolated call — copied verbatim through both settle buffer points, surfaced to the script only
+ *                    via `fullResult`'s `worktree` key)
  *   worker -> host : { kind: "meta_error", message: string }
  *                  | { kind: "log", line: string }
  *                  | { kind: "script_returned", result: unknown }
@@ -361,7 +364,15 @@ function agent(prompt, opts) {
     // (unknown type, budget exhausted, HR1/HR2 timeout) reject instead — see
     // the rejection path above and §5.3's "narrowed" agentType row.
     if (!outcome.ok) return null;
-    if (fullResult) return { text: outcome.value == null ? null : outcome.value, runId: outcome.runId || null, label: outcome.label || null };
+    if (fullResult) {
+      // workflow-worktree plan D5: \`worktree\` only ever appears on the
+      // returned object when this call's settle actually carried one (an
+      // isolated call) — an unisolated call's fullResult shape stays
+      // byte-identical (Object.keys === ["text", "runId", "label"]).
+      var fr = { text: outcome.value == null ? null : outcome.value, runId: outcome.runId || null, label: outcome.label || null };
+      if (outcome.worktree !== undefined) fr.worktree = outcome.worktree;
+      return fr;
+    }
     return outcome.value;
   });
 }
@@ -764,14 +775,14 @@ commPort.on("message", (msg) => {
       // error), or this settle raced ahead of its own ack — buffer it
       // briefly so a \`waitForSettle()\` that registers moments later still
       // picks it up instead of hanging until HR1's own timeout.
-      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label, rejected: msg.rejected === true });
+      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label, rejected: msg.rejected === true, worktree: msg.worktree });
       const cleanup = setTimeout(() => bufferedSettles.delete(msg.callId), BUFFERED_SETTLE_TTL_MS);
       if (typeof cleanup.unref === "function") cleanup.unref();
       return;
     }
     pendingSettles.delete(msg.callId);
     clearTimeout(pending.timer);
-    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label, rejected: msg.rejected === true });
+    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label, rejected: msg.rejected === true, worktree: msg.worktree });
     return;
   }
 });

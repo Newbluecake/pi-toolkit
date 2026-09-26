@@ -202,7 +202,39 @@ export interface WorkflowChildSummary {
    * order. Absent for a call that never passed `opts.experts`.
    */
   readonly experts?: readonly string[];
+  /**
+   * workflow-worktree plan D5: the worktree disposition the *worker*
+   * actually observed at its own settle time (frozen — recorded once,
+   * never mutated afterwards). Present only for a call that requested
+   * `isolation:"worktree"` and was actually bound to a run (never for a
+   * `withheld`/rejected call — `settleUnspawned` never sets it).
+   */
+  readonly worktree?: ChildWorktreeInfo;
+  /**
+   * workflow-worktree plan D5 step 4: a disposition that arrived through
+   * the unbounded "late" listener *after* the worker's own settle (or after
+   * a force-settle during stop/terminate) — the real terminal outcome,
+   * folded in only by `HostCallHandler.children`'s getter at read time
+   * (never mutates `worktree` above, which stays frozen at whatever the
+   * worker actually saw). Present only when a late report actually arrived
+   * before this particular read.
+   */
+  readonly worktreeFinal?: ChildWorktreeInfo;
 }
+
+/**
+ * workflow-worktree plan D5 (§4 frozen face): the per-call worktree summary
+ * `HostCallHandler` renders into `WorkflowChildSummary`/`HostSettleEnvelope`
+ * — mirrors `WorktreeDisposition`/`WorktreeDisposal` (core/types.ts) but adds
+ * "pending" (the settle-wait gave up before H3 reported back — D5's frozen,
+ * never-revised-to-the-worker value) and "none" (not isolated, or H2 never
+ * got far enough to report a `diag.worktree` at all).
+ */
+export type ChildWorktreeInfo = {
+  readonly state: "committed" | "clean" | "kept" | "pending" | "none";
+  readonly branch?: string;
+  readonly path?: string;
+};
 
 /** §2.3.1: the worker's terminated-after state machine, S1 (spawning/ready) through S8 (orphan probe). */
 export type WorkerLifecycle = "spawning" | "ready" | "closing" | "detached" | "terminated" | "orphaned";
@@ -381,6 +413,18 @@ export interface WorkflowRunBudget {
   readonly totalGraceMs?: Millis;
   readonly maxExtensions?: number;
   readonly maxTotalFactor?: number;
+  /**
+   * workflow-worktree plan D5: the host's own fallback upper bound for the
+   * settle-horizon worktree wait (`min(remainingWorkflowMs(), this)`),
+   * derived by `buildWorkflowRunBudget` from the *effective* `settings.
+   * budget.reapMs + 1_000` — independent of any agent-type-specific
+   * `reapMs` override (which can only make the real wait longer than this
+   * floor assumes, never shorter: a slow agent type's H3 simply lands in
+   * the "late" listener instead of the "settle" one). Optional — absent
+   * (an older/test budget object) falls back to a fixed default, same
+   * convention as every other optional field here.
+   */
+  readonly worktreeSettleMaxMs?: Millis;
 }
 
 /** §3.5: what `WorkerHost.boot()` needs to start the worker thread and its sandboxed script. */
@@ -540,6 +584,16 @@ export type HostSettleEnvelope =
       readonly label?: string;
       /** M3.6 (workflow design §5.2 `budget.spent()`): this call's live child's output-token usage, so the sandbox's cumulative counter can advance. Absent (not `0`) for a replay hit — a cached result costs nothing, and `budget.spent()`'s doc explicitly promises it "never fabricates a number" for anything it cannot actually account for. */
       readonly outputTokens?: number;
+      /**
+       * workflow-worktree plan D5: present only when this call requested
+       * `isolation:"worktree"` — the settle-time worktree disposition the
+       * worker hands back through `fullResult`'s `worktree` key. Never set
+       * on the `ok:false` branch below (a failed/aborted child's worktree
+       * state still lands in `WorkflowChildSummary.worktree` for the
+       * outcome text, but the wire contract to the worker script is
+       * intentionally narrower — see worker-source.ts's `fullResult`).
+       */
+      readonly worktree?: ChildWorktreeInfo;
     }
   | {
       readonly kind: "host_settle";

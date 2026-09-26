@@ -36,7 +36,14 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
   函数/Proxy/类实例）、已知键类型不对，一律 reject（报错列出允许键全集 + 常见误写的替代建议）。`model` 用完整
   `provider/id`（同 `Agent` 的 `model` 参数；裸 id/子串作模糊 hint 解析，未知模型 / hint 解析失败 / 额度闸门拦截
   会直接 reject，错误信息含 `Did you mean` 建议），`thinking` 取 `off|low|medium|high`；
-  `isolation: "worktree"` 只写进 journal、**不真正隔离**。
+  `isolation: "worktree"`（workflow-worktree plan P2，已上线）**真正生效**：该次 `agent()` 调用在从当前 HEAD
+  新建的独立 git worktree 里跑（未提交的主工作区改动对它不可见，隔离的调用之间也互不可见）；跑完把改动提交到
+  新分支 `pi-agent-<runId>`（分支名与 workflow 内部的 callId/label 无关，二者的对应关系只在 outcome 文本里给出），
+  **调度方自己负责 merge / cherry-pick**——workflow 从不自动合并；提交失败则 worktree 原样保留在磁盘上（outcome
+  里给出路径）。`worktree.enabled=false` 时直接 reject（reason `isolation_unavailable`，无退化路径）。带隔离的
+  调用以及它之后提交的所有调用都不进 journal 回放（即使配置了 journal），语义与挂 `experts` 的调用一致；
+  `fullResult: true` 时返回对象只在这次调用真的隔离过才会多出 `worktree` 键（`{state, branch?, path?}`），outcome
+  文本另有独立的 `worktrees:` 分栏列出每个调用的分支/kept 路径/pending 状态，不会被正文的头尾截断吞掉。
   ⇒ 评审/验收独立性直接在 verify 一级用 `model:` 指定与 dev 不同的模型（见下方模板），或继续写进类型 frontmatter。
 - **`agent(prompt, { experts })` 现在可以挂专家**，但规则比顶层 `Agent` 更严：`experts` 只接受**已 completed**
   且有持久化 session 的调用（failed/timed_out/aborted/仍在运行/回放命中的调用都会被拒），可以是 `label`/`run_id`，
@@ -47,7 +54,11 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
   依赖专家结论的调用会被拒（提示改 `noReplay: true` 整体重跑，或换用外部 run_id）。先 `await` 专家调用、
   确认它已经结束，再把它的 label 传给下一次 `agent({ experts: [...] })`。
 - 方案强依赖探索结论时先 Explore 后 Plan；只有 Plan 输入自足时才可 Explore + Plan 并行。
-- 有文件交叉的 dev 任务**不能进 workflow**（隔离不生效）：重切文件域，或改用 `Agent({ isolation: "worktree" })`。
+- 有文件交叉的 dev 任务可以进 workflow 了：给冲突的那几个 `agent()` 调用分别挂 `opts.isolation: "worktree"`
+  （需要 `worktree.enabled=true`，否则整包直接 reject，无退化路径），各自在独立 worktree 里跑互不干扰；跑完的分支
+  由调度方（主会话）自己合并——workflow 不做合并。仍然不挂隔离的调用留在共享工作区，和以前一样必须按冲突预检
+  分配文件域。跨调用共享的未跟踪依赖（如 `node_modules`）走 `worktree.linkPaths` 只读共享，不要在隔离调用里跑
+  安装/更新类命令（会污染共享目录，这条不受隔离保护）。
 - 批量派 dev 前必须先过[冲突预检](./parallel-safety.md#二冲突预检多写包并行前必做四步)：
   把 `args.tasks` 的文件域分配表跑一遍 `conflict-check.mjs`，交集任务重切或移出 workflow 用 `Agent` 隔离派，
   分配表四件事写进每个任务的 prompt。

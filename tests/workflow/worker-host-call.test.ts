@@ -204,6 +204,88 @@ describe("real-worker agent() host-call round trip (M3.2/M3.3 Blocker B regressi
 });
 
 /**
+ * workflow-worktree plan §6 P2 tests 19-20: `fullResult`'s `worktree` key
+ * end-to-end through the real worker — present (and only present) for an
+ * isolated call's SUCCESSFUL settle, absent for every other shape, and the
+ * failure/abort path still resolves to plain `null` (never throws, never
+ * hangs) exactly like the pre-D5 baseline.
+ */
+describe("real-worker agent({isolation}) worktree field (workflow-worktree plan D5, §6 tests 19-20)", () => {
+  it("fullResult carries worktree only for an isolated call, and Object.keys stays exactly [text,runId,label] otherwise", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "r-wt", label: "wt-label" }),
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "wt text" })),
+        pending: [],
+      }),
+      worktreeAvailable: () => true,
+      awaitWorktree: async () => ({ state: "committed", branch: "pi-agent-r-wt" }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'const iso = await agent("x", { isolation: "worktree", fullResult: true }); ' +
+          'const plain = await agent("y", { fullResult: true }); ' +
+          "return JSON.stringify({ isoKeys: Object.keys(iso).sort(), iso: iso, plainKeys: Object.keys(plain).sort() });",
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    const parsed = JSON.parse(result.returned as string);
+    expect(parsed.isoKeys).toEqual(["label", "runId", "text", "worktree"]);
+    expect(parsed.iso.worktree).toEqual({ state: "committed", branch: "pi-agent-r-wt" });
+    expect(parsed.plainKeys).toEqual(["label", "runId", "text"]); // unisolated: byte-identical to the pre-D5 shape
+  }, 10_000);
+
+  it("a failed isolated child still resolves agent() to plain null (§5.2/§5.3 semantics), fullResult included", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "r-wt-fail" }),
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "failed" as const, error: { message: "boom" } })),
+        pending: [],
+      }),
+      worktreeAvailable: () => true,
+      awaitWorktree: async () => ({ state: "kept", path: "/tmp/wt/r-wt-fail" }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'const a = await agent("x", { isolation: "worktree" }); ' +
+          'const b = await agent("y", { isolation: "worktree", fullResult: true }); ' +
+          "return JSON.stringify({ a, b });",
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(JSON.parse(result.returned as string)).toEqual({ a: null, b: null });
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it('isolation:"worktree" rejected by the D2 availability gate is a catchable rejection, not a null/hang', async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "unused" }),
+      abort: async () => true,
+      waitAll: async () => ({ settled: [], pending: [] }),
+      worktreeAvailable: () => false,
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'try { await agent("x", { isolation: "worktree" }); return "no-throw"; } ' +
+          'catch (e) { return "caught:" + e.message; }',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.threw).toBeUndefined();
+    expect(result.returned).toMatch(/^caught:/);
+    expect(result.returned).toContain("worktree.enabled");
+    await host.terminate("test-done");
+  }, 10_000);
+});
+
+/**
  * workflow-agent-queue §7 (stage A), real worker: queued dispatch end to end.
  */
 function delayedSpawner(opts: { delayMsOf?(prompt: string): number; errorFor?(prompt: string): string | undefined }) {

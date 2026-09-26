@@ -12,8 +12,10 @@ import {
   createDisabledWorkflowToolStub,
   createWorkflowTool,
   formatWorkflowNotification,
+  formatWorkflowResultText,
   formatWorkflowSummary,
   renderOutcomeText,
+  renderWorktreeBlock,
 } from "../../src/tools/workflow-tool.js";
 
 /**
@@ -477,6 +479,149 @@ describe("renderOutcomeText: does not duplicate child output already in result",
     const body = renderOutcomeText(fakeOutcome({ children: [child("a", "completed", "ALPHA-OUTPUT")] }));
     expect(body).toContain("  - [completed] a: ALPHA-OUTPUT");
     expect(body).toContain("children (1):");
+  });
+});
+
+describe("renderWorktreeBlock (workflow-worktree plan D5 §4 render, §6 test 23)", () => {
+  const withWorktree = (
+    label: string,
+    worktree: WorkflowOutcome["children"][number]["worktree"],
+    extra: Partial<WorkflowOutcome["children"][number]> = {},
+  ): WorkflowOutcome["children"][number] => ({
+    callId: `c-${label}`,
+    runId: `r-${label}`,
+    label,
+    source: "live",
+    status: "completed",
+    durationMs: 10,
+    worktree,
+    ...extra,
+  });
+
+  it("returns undefined when no child carries a worktree entry at all", () => {
+    expect(renderWorktreeBlock(fakeOutcome({ children: [withWorktree("a", undefined)] }))).toBeUndefined();
+    expect(renderWorktreeBlock(fakeOutcome({ children: [] }))).toBeUndefined();
+  });
+
+  it("clean and none are never listed", () => {
+    expect(
+      renderWorktreeBlock(
+        fakeOutcome({ children: [withWorktree("a", { state: "clean" }), withWorktree("b", { state: "none" })] }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("renders committed with branch, kept with path, and pending→final when worktreeFinal has arrived", () => {
+    const block = renderWorktreeBlock(
+      fakeOutcome({
+        children: [
+          withWorktree("a", { state: "committed", branch: "pi-agent-r-a" }),
+          withWorktree("b", { state: "kept", path: "/tmp/wt/r-b" }),
+          withWorktree("c", { state: "pending" }, { worktreeFinal: { state: "committed", branch: "pi-agent-r-c" } }),
+          withWorktree("d", { state: "pending" }),
+        ],
+      }),
+    );
+    expect(block).toBeDefined();
+    expect(block).toContain("worktrees:");
+    expect(block).toContain("a → pi-agent-r-a (expected branch pi-agent-r-a)");
+    expect(block).toContain("b → kept /tmp/wt/r-b (expected branch pi-agent-r-b)");
+    expect(block).toContain("c → pending→pi-agent-r-c (expected branch pi-agent-r-c)");
+    expect(block).toContain("d → pending (expected branch pi-agent-r-d)");
+  });
+
+  it("caps at 64 lines / 8 KiB total, folding the rest into an '…N more' line pointing at git branch --list", () => {
+    const children = Array.from({ length: 100 }, (_, i) =>
+      withWorktree(`n${i}`, { state: "committed", branch: `pi-agent-r-n${i}` }),
+    );
+    const block = renderWorktreeBlock(fakeOutcome({ children }))!;
+    const lines = block.split("\n");
+    expect(lines[0]).toBe("worktrees:");
+    const bodyLines = lines.slice(1, -1);
+    expect(bodyLines.length).toBeLessThanOrEqual(64);
+    expect(lines.at(-1)).toMatch(/^…\d+ more; git branch --list 'pi-agent-\*'$/);
+    expect(Buffer.byteLength(block, "utf8")).toBeLessThanOrEqual(8 * 1024); // header + tail included
+  });
+
+  it("the 8 KiB cap includes the header and the '…N more' tail even with long lines", () => {
+    const children = Array.from({ length: 60 }, (_, i) =>
+      withWorktree(`n${i}`, { state: "kept", path: `/tmp/${"x".repeat(250)}/${i}` }),
+    );
+    const block = renderWorktreeBlock(fakeOutcome({ children }))!;
+    expect(block.split("\n").at(-1)).toMatch(/^…\d+ more; git branch --list 'pi-agent-\*'$/);
+    expect(Buffer.byteLength(block, "utf8")).toBeLessThanOrEqual(8 * 1024);
+  });
+
+  it("a single overlong line is truncated to WORKTREE_BLOCK_LINE_MAX_CHARS", () => {
+    const block = renderWorktreeBlock(
+      fakeOutcome({ children: [withWorktree("a", { state: "kept", path: "/" + "x".repeat(500) })] }),
+    )!;
+    const line = block.split("\n")[1]!;
+    expect(line.length).toBeLessThanOrEqual(300);
+    expect(line.endsWith("…")).toBe(true);
+  });
+});
+
+describe("formatWorkflowResultText/formatWorkflowNotification: the worktree block survives head/tail truncation", () => {
+  it("formatWorkflowResultText places the worktree block OUTSIDE the truncated body, before the trailer", () => {
+    const long = "x".repeat(5_000);
+    const outcome = fakeOutcome({
+      result: long,
+      children: [
+        {
+          callId: "c1",
+          runId: "r1",
+          label: "a",
+          source: "live",
+          status: "completed",
+          durationMs: 1,
+          worktree: { state: "kept", path: "/tmp/wt/r1" },
+        },
+      ],
+    });
+    const { text } = formatWorkflowResultText(outcome, undefined, 500);
+    expect(text).toMatch(/middle \d+ of \d+ chars omitted/); // body really was truncated
+    expect(text).toContain("worktrees:\na → kept /tmp/wt/r1 (expected branch pi-agent-r1)");
+    // trailer comes after the worktree block, worktree block comes after the (truncated) body.
+    const bodyEnd = text.indexOf("chars omitted");
+    const wtIdx = text.indexOf("worktrees:");
+    const trailerIdx = text.indexOf("(duration:");
+    expect(bodyEnd).toBeGreaterThan(-1);
+    expect(wtIdx).toBeGreaterThan(bodyEnd);
+    expect(trailerIdx).toBeGreaterThan(wtIdx);
+  });
+
+  it("formatWorkflowNotification places the worktree block OUTSIDE the truncated body, before the hint", () => {
+    const long = "x".repeat(5_000);
+    const outcome = fakeOutcome({
+      result: long,
+      children: [
+        {
+          callId: "c1",
+          runId: "r1",
+          label: "a",
+          source: "live",
+          status: "completed",
+          durationMs: 1,
+          worktree: { state: "committed", branch: "pi-agent-r1" },
+        },
+      ],
+    });
+    const body = formatWorkflowNotification({ workflowId: "wf_abc", name: "review-flow", outcome }, undefined, 500);
+    expect(body).toContain("worktrees:\na → pi-agent-r1 (expected branch pi-agent-r1)");
+    const wtIdx = body.indexOf("worktrees:");
+    const hintIdx = body.indexOf("Re-read the full outcome");
+    expect(wtIdx).toBeGreaterThan(-1);
+    expect(hintIdx).toBeGreaterThan(wtIdx);
+  });
+
+  it("no worktree section is added when no child has a worktree entry (byte-identical to pre-D5)", () => {
+    const outcome = fakeOutcome({
+      result: "hi",
+      children: [{ callId: "c1", source: "live", status: "completed", durationMs: 1 }],
+    });
+    const { text } = formatWorkflowResultText(outcome, undefined, 0);
+    expect(text).not.toContain("worktrees:");
   });
 });
 

@@ -51,5 +51,11 @@ export function buildWorkflowRunBudget(settings: AgentSettings): WorkflowRunBudg
     totalGraceMs: settings.budget.totalGraceMs,
     maxExtensions: settings.extend.enabled ? settings.budget.maxExtensions : 0,
     maxTotalFactor: settings.budget.maxTotalFactor,
+    // workflow-worktree plan D5: the host's own settle-horizon fallback
+    // upper bound, derived from the *effective* settings.budget.reapMs —
+    // an agent-type-specific reapMs override can only make the real wait
+    // longer than this floor assumes (a slow H3 then lands in the "late"
+    // listener instead), never shorter.
+    worktreeSettleMaxMs: settings.budget.reapMs + 1_000,
   };
 }

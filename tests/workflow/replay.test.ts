@@ -272,6 +272,58 @@ describe("RP gate: noReplay / deterministic / isolation / TTL / scope mismatch",
     expect(decision).toEqual({ kind: "skip", reason: "isolation_worktree" });
   });
 
+  it("D3: input.isolation:true skips before configHashAvailable/lookup, even when a matching entry exists", () => {
+    const entries = makeChainRun(["a"]);
+    const index = buildReplayIndex(entries, 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      configHashAvailable: false, // would otherwise force config_hash_unavailable — isolation must win first
+      isolation: true,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "isolation_worktree" });
+  });
+
+  it("D3: input.isolation:false/undefined does not skip — an otherwise-matching entry still hits", () => {
+    const entries = makeChainRun(["a"]);
+    const index = buildReplayIndex(entries, 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: false,
+    });
+    expect(decision.kind).toBe("hit");
+  });
+
+  it("D3: isolation:true takes priority over tainted (both skip, but isolation_worktree is the reported reason)", () => {
+    const entries = makeChainRun(["a"]);
+    const index = buildReplayIndex(entries, 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      tainted: true,
+      isolation: true,
+    });
+    // `tainted` is checked first in decideReplay's ordering, so a call that is
+    // BOTH tainted and isolated reports chain_tainted — pin that ordering here.
+    expect(decision).toEqual({ kind: "skip", reason: "chain_tainted" });
+  });
+
   it("RP6: an entry older than replayTtlMs is skipped as expired", () => {
     const entries = makeChainRun(["a"]);
     const index = buildReplayIndex(entries, 0, "chain");

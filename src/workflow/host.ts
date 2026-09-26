@@ -10,6 +10,7 @@ import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf, type JournalStore }
 import { decideReplay, type ReplayIndex } from "./replay.js";
 import type {
   CallId,
+  ChildWorktreeInfo,
   HostAckEnvelope,
   HostCallEnvelope,
   HostSettleEnvelope,
@@ -93,6 +94,14 @@ export interface ChildSpawner {
      * construct a `ConsultExpertRef` (it only ever passes handle strings).
      */
     consultExperts?: readonly ConsultExpertRef[];
+    /**
+     * workflow-worktree plan D1: opt-in per-call worktree isolation
+     * (`agent(prompt, { isolation: "worktree" })`) — forwarded verbatim to
+     * `SpawnRequest.isolation`, which the real spawner-adapter already
+     * threads through to `SpawnService.spawn`. Absent for an ordinary call
+     * (never sent as `undefined`).
+     */
+    isolation?: "worktree";
   }): Promise<ChildSpawnResult | ChildSpawnError>;
   abort(runId: RunId, cause?: string): Promise<boolean>;
   waitAll(opts: { runIds: RunId[] }): Promise<{ settled: ChildOutcome[]; pending: RunId[] }>;
@@ -128,6 +137,31 @@ export interface ChildSpawner {
    * supported in this context" (D17), it never silently drops `experts`.
    */
   resolveExperts?: WorkflowExpertResolver;
+  /**
+   * workflow-worktree plan D2: the live availability gate for
+   * `isolation:"worktree"` (decision 1 — no fallback to the shared
+   * checkout). `stack.ts` wires this to `() => settings.worktree.enabled`,
+   * read fresh on every call so a `/reload` that flips the setting takes
+   * effect immediately. Absent, or returning anything other than `true` —
+   * e.g. a `ChildSpawner` test double that never implements it — fails
+   * closed: `handleAgent`'s D2 gate rejects any `isolation:"worktree"` call
+   * with `isolation_unavailable` rather than silently spawning it
+   * unisolated.
+   */
+  worktreeAvailable?(): boolean;
+  /**
+   * workflow-worktree plan D5: bounded (via `capMs`) or unbounded wait for
+   * this run's worktree disposition, resolved through the production
+   * adapter's own mapping of `SpawnService.waitWorktreeDisposition`'s
+   * `settled|none|timeout|disposed` result onto `ChildWorktreeInfo`'s
+   * `committed|clean|kept|pending|none` states (`timeout`/`disposed` both
+   * become `"pending"` — host.ts never needs to tell them apart). Never
+   * rejects, never hangs beyond the `capMs`/port-owned upper bound. Absent —
+   * a `ChildSpawner` test double, or a real adapter whose underlying
+   * `SpawnService` doesn't implement `waitWorktreeDisposition` — is treated
+   * by `handleAgent` exactly like an immediate `{ state: "none" }`.
+   */
+  awaitWorktree?(runId: RunId, opts: { horizon: "settle" | "late"; capMs?: Millis }): Promise<ChildWorktreeInfo>;
 }
 
 export type GateRunner = (
@@ -188,7 +222,9 @@ export type WorkflowChildRejectReason =
   | "spawn_error"
   | "spawn_timeout"
   | "host_call_timeout"
-  | "experts_unresolved";
+  | "experts_unresolved"
+  /** workflow-worktree plan D2: `isolation:"worktree"` requested while `ChildSpawner.worktreeAvailable?.()` is not `true` — no fallback to the shared checkout (decision 1). */
+  | "isolation_unavailable";
 
 /** §5: event messages are capped at 200 chars. */
 export function capEventMessage(message: string): string {
@@ -237,6 +273,7 @@ export interface HostCallHandlerDeps {
     | "childTotalMs"
     | "cancelRetryWindowMs"
     | "phaseTotalMs"
+    | "worktreeSettleMaxMs"
   >;
   /**
    * The workflow's static absolute **hard ceiling** (`W.hardAt`, fixed at
@@ -308,11 +345,41 @@ interface QueuedAgentCall {
   /** workflow-experts §4.4: the resolved refs (bound to `spawnRequestFor`'s `consultExperts`) and the ids they resolved to (diagnostics, `WorkflowChildSummary.experts`). Set only when `opts.experts` was present and resolution succeeded — a call never reaches this struct otherwise (§4.4's admission gate rejects it first). */
   readonly consultExperts?: readonly ConsultExpertRef[];
   readonly expertIds?: readonly string[];
+  /** workflow-worktree plan D1/D2: set only when `opts.isolation` was present AND the D2 availability gate passed — a rejected isolation request never reaches this struct (mirrors `consultExperts`'s admission-gated-first pattern). */
+  readonly isolation?: "worktree";
 }
 
 function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/** workflow-worktree plan D5: fallback when `WorkflowRunBudget.worktreeSettleMaxMs` is absent (an older/test budget object) — matches `DEFAULT_BUDGET.reapMs` (5s, core/deadline.ts) + 1s. */
+const DEFAULT_WORKTREE_SETTLE_MAX_MS: Millis = 6_000;
+
+/**
+ * workflow-worktree plan D5: never rejects, never hangs beyond whatever
+ * bound `spawner.awaitWorktree` itself promises — an absent method (an
+ * older/fake `ChildSpawner`, or a real adapter over a `SpawnService` with no
+ * `waitWorktreeDisposition`) degrades to `{ state: "none" }` instead of
+ * throwing, and a throwing implementation (contract violation) is caught
+ * defensively as `pending` rather than becoming an unhandled rejection.
+ */
+async function awaitWorktreeSafe(
+  spawner: ChildSpawner,
+  runId: RunId,
+  opts: { horizon: "settle" | "late"; capMs?: Millis },
+): Promise<ChildWorktreeInfo> {
+  if (!spawner.awaitWorktree) return { state: "none" };
+  try {
+    return await spawner.awaitWorktree(runId, opts);
+  } catch {
+    // A rejecting port (contract violation) says nothing about the run —
+    // H3 may still be committing. Map it to `pending` (plan §2 D5 / §6 #15),
+    // never `none`, so the script and the outcome never claim "no worktree"
+    // for a run that may yet land on a pi-agent branch.
+    return { state: "pending" };
+  }
 }
 
 /**
@@ -329,6 +396,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     maxChildren: deps.budget.maxChildren ?? 500,
     maxBatchItems: deps.budget.maxBatchItems ?? 1024,
     childBudgetPolicy: deps.budget.childBudgetPolicy ?? "inherit_remaining",
+    worktreeSettleMaxMs: deps.budget.worktreeSettleMaxMs ?? DEFAULT_WORKTREE_SETTLE_MAX_MS,
     ...(deps.budget.childBudgetFraction !== undefined ? { childBudgetFraction: deps.budget.childBudgetFraction } : {}),
     ...(deps.budget.childTotalMs !== undefined ? { childTotalMs: deps.budget.childTotalMs } : {}),
   };
@@ -343,6 +411,10 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   const agentTypeOf = new Map<CallId, string>();
   /** workflow-experts D22: set alongside `call.expertIds` at submission time, consumed once by `recordSettled` to fold `experts` into the recorded `WorkflowChildSummary`. */
   const expertIdsOf = new Map<CallId, readonly string[]>();
+  /** workflow-worktree plan D5/D2: set once (in `runBoundChild`) for a call that requested `isolation:"worktree"` and was actually bound to a run — read by `forceSettleActive` (which has no other way to know) and deleted by `recordSettled` alongside the other per-callId maps. */
+  const isolationOf = new Map<CallId, true>();
+  /** workflow-worktree plan D5 step 3/4: a disposition the "late" listener (no cap, no host timer) delivered after this call's own settle — folded into `worktreeFinal` by the `children` getter at read time, never mutating the frozen `worktree` field. */
+  const lateWorktreeOf = new Map<CallId, ChildWorktreeInfo>();
   let terminated = false;
   let currentPhaseId: string | undefined;
 
@@ -373,10 +445,10 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   // no-ops (never read) when `deps.journal` is absent.
   let chainDigest = CHAIN_SEED;
   const occCounters = new Map<string, number>();
-  /** callId -> the journal bookkeeping needed to write an entry once this call's live settle arrives (RP3: only successful calls are ever journaled). */
+  /** callId -> the journal bookkeeping needed to write an entry once this call's live settle arrives (RP3: only successful calls are ever journaled; workflow-worktree plan D3: an isolated call never has an entry here at all, so `agentType` is the only per-call metadata left to carry — `isolation` used to ride along here before D3 made isolation categorically un-journaled). */
   const journalMetaOf = new Map<
     CallId,
-    { taskKey: TaskKey; chainDigestBefore: string; occurrence: number; agentType: string; isolation?: "worktree" }
+    { taskKey: TaskKey; chainDigestBefore: string; occurrence: number; agentType: string }
   >();
   const replayStats = { hits: 0, misses: 0, skipped: 0 };
   // workflow-experts D13-D15: one scope per run (closure-local, not module
@@ -499,6 +571,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     enqueuedAtOf.delete(summary.callId);
     queueWaitOf.delete(summary.callId);
     expertIdsOf.delete(summary.callId);
+    isolationOf.delete(summary.callId);
     const labelled = summary.label === undefined && label !== undefined ? { ...summary, label } : summary;
     const withQueueWait =
       queueWaitMs !== undefined && labelled.queueWaitMs === undefined ? { ...labelled, queueWaitMs } : labelled;
@@ -636,6 +709,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
     const phaseId = phaseOf.get(callId);
     journalMetaOf.delete(callId); // never journaled (RP3: forced-abort isn't a success).
+    // workflow-worktree plan D5 step 5/D7: an isolated, already-bound call
+    // that the workflow force-settled (stop/terminate) before its own
+    // settle-wait finished still has a real worktree in flight — H3 keeps
+    // running in the background regardless (D7). Read `isolationOf` before
+    // `recordSettled` deletes it; the pending marker and the late listener
+    // are the only trace this force-settle leaves behind for it.
+    const isolated = isolationOf.has(callId);
+    if (isolated && state?.runId !== undefined) startLateWorktreeListener(callId, state.runId);
     recordSettled({
       callId,
       ...(state?.runId !== undefined ? { runId: state.runId } : {}),
@@ -643,6 +724,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       status: "aborted",
       durationMs,
       ...(phaseId !== undefined ? { phaseId } : {}),
+      ...(isolated && state?.runId !== undefined ? { worktree: { state: "pending" } as const } : {}),
     });
     // Best-effort: the port may already be closing (S5), but a send racing
     // that close is harmless (WorkerHost.send is a no-throw best-effort primitive).
@@ -659,6 +741,23 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const killAt = deps.killAt?.() ?? deps.workflowDeadlineAt;
     if (killAt === undefined) return Number.POSITIVE_INFINITY;
     return Math.max(0, killAt - deps.clock.now());
+  }
+
+  /**
+   * workflow-worktree plan D5 step 3: the unbounded "late" listener — no
+   * cap, no host timer, because nothing here ever awaits it; its own upper
+   * bound is owned entirely by the port (`5 × reapMs_eff + 1s`, or
+   * immediate `disposed` once a stack rebuild/shutdown tears the port
+   * down). Only a *real* disposition (`committed`/`clean`/`kept`) is ever
+   * recorded — `pending`/`none` mean nothing new arrived (or the port was
+   * disposed mid-flight) and are silently discarded, matching D5's "晚到
+   * 监听收到 disposed 时直接丢弃".
+   */
+  function startLateWorktreeListener(callId: CallId, runId: RunId): void {
+    void awaitWorktreeSafe(deps.spawner, runId, { horizon: "late" }).then((info) => {
+      if (info.state === "pending" || info.state === "none") return;
+      lateWorktreeOf.set(callId, info);
+    });
   }
 
   async function handleAgent(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
@@ -707,12 +806,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // receives, it never itself falls back to a "current phase" notion (that
     // state lives in \`currentPhaseId\`/\`handlePhase\` above, worker-side only).
     const phaseId = validOpts.phase;
-    // M3.5 RP7 (§6.4): opt-in per-call `isolation:"worktree"` marker — not
-    // yet threaded into `ChildSpawner.spawn()` (host.ts doesn't call
-    // `SpawnService` directly, WI2), so it has no *live* effect on where the
-    // child actually runs today. It exists here purely so the journal
-    // records it and RP7 can veto replaying it once a future milestone wires
-    // real worktree isolation through `ChildSpawner`.
+    // workflow-worktree plan D1 (§2 evidence table, previously M3.5 RP7):
+    // opt-in per-call `isolation:"worktree"` — now threaded into
+    // `ChildSpawner.spawn()`'s request (real worktree isolation, gated by
+    // D2's `worktreeAvailable()` below), and still into the journal's
+    // taskKey so the pre-lookup D3/RP7 gate (and the post-lookup RP7 check
+    // for older, already-written entries) can veto replaying it.
     const isolation = validOpts.isolation;
 
     // workflow-experts §4.4/D9-D11/P1 fix: recorded at each of the three
@@ -785,6 +884,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         // `index.lookup` entirely.
         experts: declaresExperts,
         tainted: replayTainted,
+        // workflow-worktree plan D3: an isolated call is unconditionally
+        // skip, same shape as `experts`/`tainted` above.
+        isolation: isolation !== undefined,
         ...(journal.replayTtlMs !== undefined ? { replayTtlMs: journal.replayTtlMs } : {}),
       });
 
@@ -832,13 +934,17 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // submitted after the chain was tainted is NEVER journaled, regardless
       // of how its live settle turns out — skip the bookkeeping that would
       // otherwise let `runBoundChild`'s completion handler write an entry.
-      if (!declaresExperts && !replayTainted) {
+      // workflow-worktree plan D3: an isolated call is never journaled,
+      // regardless of `declaresExperts`/`replayTainted` — its own live
+      // settle never reaches the journal-write site below (D2's isolation
+      // taint is set separately, after this journal block, not via this
+      // map).
+      if (!declaresExperts && !replayTainted && isolation === undefined) {
         journalMetaOf.set(callId, {
           taskKey,
           chainDigestBefore,
           occurrence,
           agentType,
-          ...(isolation !== undefined ? { isolation } : {}),
         });
       }
     }
@@ -867,6 +973,28 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       const message = "WorkflowBudgetExhausted: no remaining budget to spawn a child (BW2)";
       emitRejected(callId, "admission", "budget_exhausted", message, { label, agentType, phaseId });
       return { kind: "host_ack", id: callId, ok: false, error: { message } };
+    }
+
+    // workflow-worktree plan D2 (same admission stage as the experts
+    // resolution right below): the live availability gate for
+    // `isolation:"worktree"` — decision 1, no fallback to the shared
+    // checkout. Checked before this call ever touches the registry,
+    // `expertScope`, or `replayTainted` — a rejected isolation call leaves
+    // no trace anywhere, exactly like the maxChildren/BW2 rejections above
+    // (`journalMetaOf` was never set for it to begin with, D3).
+    if (isolation !== undefined && deps.spawner.worktreeAvailable?.() !== true) {
+      const message =
+        'agent(): isolation:"worktree" requires worktree.enabled=true — there is no fallback to the shared checkout';
+      emitRejected(callId, "admission", "isolation_unavailable", message, { label, agentType, phaseId });
+      return { kind: "host_ack", id: callId, ok: false, error: { message } };
+    }
+    if (isolation !== undefined) {
+      // D3: an accepted isolation call taints the rest of the chain exactly
+      // like a successful experts resolution below — this call's own
+      // journal-block decision already ran above reading the pre-taint
+      // value (`isolation:true` already forced it to `skip`, independent of
+      // `tainted`).
+      replayTainted = true;
     }
 
     // workflow-experts §4.2/§4.4 stage ④ (§5's ordering: after journal/
@@ -904,6 +1032,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(thinkingOverride !== undefined ? { thinkingOverride } : {}),
       ...(consultExperts !== undefined ? { consultExperts } : {}),
       ...(expertIds !== undefined ? { expertIds } : {}),
+      ...(isolation !== undefined ? { isolation } : {}),
     };
     if (phaseId !== undefined) phaseOf.set(callId, phaseId);
     if (label !== undefined) labelOf.set(callId, label);
@@ -995,7 +1124,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     }
     if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
     expertScope.noteBound(callId, spawned.runId, effectiveLabel);
-    runBoundChild(callId, spawned.runId, { agentType, phaseId, effectiveLabel });
+    runBoundChild(callId, spawned.runId, {
+      agentType,
+      phaseId,
+      effectiveLabel,
+      ...(call.isolation !== undefined ? { isolation: call.isolation } : {}),
+    });
 
     return { kind: "host_ack", id: callId, ok: true, value: { callId, deadlineAt: derived.deadlineAt } };
   }
@@ -1034,6 +1168,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(call.modelHintOverride !== undefined ? { modelHintOverride: call.modelHintOverride } : {}),
       ...(call.thinkingOverride !== undefined ? { thinkingOverride: call.thinkingOverride } : {}),
       ...(call.consultExperts !== undefined ? { consultExperts: call.consultExperts } : {}),
+      ...(call.isolation !== undefined ? { isolation: call.isolation } : {}),
       ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
       ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
       budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },
@@ -1067,9 +1202,16 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   function runBoundChild(
     callId: CallId,
     runId: RunId,
-    meta: { agentType: string; phaseId: string | undefined; effectiveLabel: string | undefined },
+    meta: {
+      agentType: string;
+      phaseId: string | undefined;
+      effectiveLabel: string | undefined;
+      /** workflow-worktree plan D5: forwarded from `call.isolation` by both dispatch paths — `undefined` for an ordinary call. */
+      isolation?: "worktree";
+    },
   ): void {
-    const { agentType, phaseId, effectiveLabel } = meta;
+    const { agentType, phaseId, effectiveLabel, isolation } = meta;
+    if (isolation !== undefined) isolationOf.set(callId, true);
     const journal = deps.journal;
     // M10: the child is really running and was not cancelled in the
     // admission window — announce it. Emitted *after* the `cancelNow` check
@@ -1085,7 +1227,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       at: deps.clock.now(),
     });
 
-    const onOutcome = (outcome: ChildOutcome | undefined): void => {
+    const onOutcome = (outcome: ChildOutcome | undefined, wt: ChildWorktreeInfo | undefined): void => {
       // Single owner (D6): stopOwned()/onTerminating may already have
       // force-settled (and recorded) this call as aborted; the child's real
       // outcome arriving afterwards must not produce a second record/settle.
@@ -1103,6 +1245,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
           status: "aborted",
           durationMs,
           ...(phaseId !== undefined ? { phaseId } : {}),
+          ...(wt !== undefined ? { worktree: wt } : {}),
         });
         deps.workerHost.send({
           kind: "host_settle",
@@ -1120,6 +1263,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         durationMs,
         ...(outcome.text !== undefined ? { textPreview: outcome.text.slice(0, 2048) } : {}),
         ...(phaseId !== undefined ? { phaseId } : {}),
+        ...(wt !== undefined ? { worktree: wt } : {}),
       });
       // M3.5 RP3 (§6.4): only a *successful* live settle is ever journaled —
       // failed/aborted/timed-out children never get an entry, matching the
@@ -1138,7 +1282,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
               chainDigestBefore: jm.chainDigestBefore,
               occurrence: jm.occurrence,
               agentType: jm.agentType,
-              ...(jm.isolation !== undefined ? { isolation: jm.isolation } : {}),
               value: outcome.text ?? null,
               completedAt: deps.clock.now(),
               durationMs,
@@ -1157,17 +1300,60 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
               ...(outcome.usage?.output !== undefined ? { outputTokens: outcome.usage.output } : {}),
               runId: outcome.runId,
               ...(effectiveLabel !== undefined ? { label: effectiveLabel } : {}),
+              // workflow-worktree plan D5: only ever attached to the ok:true
+              // branch — a failed/aborted isolated child's worktree state
+              // still lands in the recorded summary above, but the wire
+              // contract to the worker (fullResult's `worktree` key) never
+              // carries it for a failure.
+              ...(wt !== undefined ? { worktree: wt } : {}),
             }
           : { kind: "host_settle", callId, ok: false, error: outcome.error ?? { message: `child ${outcome.status}` } };
       deps.workerHost.send(settleMsg);
     };
+
+    /**
+     * workflow-worktree plan D5 (host flow, steps 1-3): for an isolated
+     * call, bound the wait for H3's settle-horizon disposition by
+     * `min(remainingWorkflowMs(), worktreeSettleMaxMs)` — the call keeps its
+     * `maxParallel` slot the whole time (D8) — then start the unbounded
+     * "late" listener and hand both outcome+disposition to `onOutcome`
+     * together. An unisolated call skips all of this (`wt` stays
+     * `undefined`, byte-identical to the pre-D5 settle path).
+     */
+    async function afterOutcome(outcome: ChildOutcome | undefined): Promise<void> {
+      if (registry.resolve(callId)?.phase === "settled") return; // already force-settled (stopOwned/onTerminating already started its own late listener, D5 step 5).
+      if (isolation === undefined) {
+        onOutcome(outcome, undefined);
+        return;
+      }
+      const capMs = Math.max(1, Math.min(remainingWorkflowMs(), budget.worktreeSettleMaxMs));
+      const result = await withDeadline(
+        awaitWorktreeSafe(deps.spawner, runId, { horizon: "settle", capMs }),
+        capMs,
+        deps.clock,
+        "worktree_settle",
+      );
+      if (registry.resolve(callId)?.phase === "settled") return; // raced with a stop while the settle-wait was in flight.
+      const wt: ChildWorktreeInfo = result.ok ? result.value : { state: "pending" };
+      startLateWorktreeListener(callId, runId);
+      onOutcome(outcome, wt);
+    }
+
     // HR3: fire the settle wait in the background. A rejecting waitAll() is
     // treated like "did not settle" — it must never leave the call holding a
     // maxParallel slot (and the FIFO queue stalled behind it) forever.
-    void deps.spawner.waitAll({ runIds: [runId] }).then(
-      ({ settled }) => onOutcome(settled[0]),
-      () => onOutcome(undefined),
-    );
+    void deps.spawner
+      .waitAll({ runIds: [runId] })
+      .then(
+        ({ settled }) => afterOutcome(settled[0]),
+        () => afterOutcome(undefined),
+      )
+      .catch((e: unknown) => {
+        // A throwing observer (onChildEvent/onChildSettled) must not become an
+        // unhandled rejection in the host process (same defensive net as
+        // dispatchQueued's own continuation below).
+        console.warn(`[pi-subagent] workflow agent() worktree-wait continuation failed: ${errMsg(e)}`);
+      });
   }
 
   /**
@@ -1235,7 +1421,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       if (bindSpawned(callId, r.runId).kind === "orphaned") return;
       if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
       expertScope.noteBound(callId, r.runId, effectiveLabel);
-      runBoundChild(callId, r.runId, { agentType: call.agentType, phaseId: call.phaseId, effectiveLabel });
+      runBoundChild(callId, r.runId, {
+        agentType: call.agentType,
+        phaseId: call.phaseId,
+        effectiveLabel,
+        ...(call.isolation !== undefined ? { isolation: call.isolation } : {}),
+      });
     };
     // Review v2 #4: `onSpawnThrew` is the error branch of `onSpawned`.
     const onSpawnThrew = (e: unknown): void => {
@@ -1406,7 +1597,16 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   return {
     registry,
     get children() {
-      return children;
+      // workflow-worktree plan D5 step 4: fold in any "late" disposition
+      // that has arrived since this call's own settle — the frozen
+      // `worktree` field the worker actually saw is never mutated; only a
+      // fresh object with `worktreeFinal` attached is returned, and only
+      // for the callIds `lateWorktreeOf` actually has something for.
+      if (lateWorktreeOf.size === 0) return children;
+      return children.map((c) => {
+        const final = lateWorktreeOf.get(c.callId);
+        return final === undefined ? c : { ...c, worktreeFinal: final };
+      });
     },
     get currentPhaseId() {
       return currentPhaseId;

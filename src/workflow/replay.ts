@@ -119,6 +119,16 @@ export interface DecideReplayInput {
   readonly experts?: boolean;
   /** workflow-experts D13-D15: `true` once this run's chain has been tainted by an earlier successfully-resolved experts call. */
   readonly tainted?: boolean;
+  /**
+   * workflow-worktree plan D3 (option A): `true` for a call that itself
+   * declared `opts.isolation:"worktree"` — unconditionally `skip` (never a
+   * hit, never even reaching `configHashAvailable`/`index.lookup`),
+   * regardless of whether the run was actually admitted (host.ts never
+   * writes `journalMetaOf` for an isolated call either, so nothing of its
+   * own is ever journaled to begin with — this only matters for a
+   * *replayed* run re-submitting the same isolated call).
+   */
+  readonly isolation?: boolean;
 }
 
 export const DEFAULT_REPLAY_TTL_MS: Millis = 7 * 24 * 60 * 60 * 1000;
@@ -136,6 +146,13 @@ export function decideReplay(input: DecideReplayInput): ReplayDecision {
   // touched (§5's contract table: lookup must never run for either case).
   if (input.experts === true) return { kind: "skip", reason: "experts" };
   if (input.tainted === true) return { kind: "skip", reason: "chain_tainted" };
+  // workflow-worktree plan D3: an isolated call is unconditionally skip,
+  // checked before the index is ever touched — same shape as the `experts`/
+  // `tainted` checks above, and distinct from the post-lookup RP7 check
+  // below (which only fires for an *already-written* entry that happens to
+  // carry `isolation:"worktree"`, kept for entries journaled before this
+  // input field existed).
+  if (input.isolation === true) return { kind: "skip", reason: "isolation_worktree" };
   // M3.6 Blocker fix (§6.3 E2): fail-closed when this call has no reliable
   // `agentTypeConfigHash` — never even look at the index. This is checked
   // *before* `index.lookup` on purpose: a name-only fallback key could
