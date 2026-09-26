@@ -12,6 +12,7 @@ import { createAgentTypeRegistry } from "./config/agent-types.js";
 import {
   defaultSettingsPath,
   loadSettingsFromFile,
+  loadWebHubLanSettingsWarnings,
   persistSettingOverride,
   readSettingsNoMigrate,
   type AgentSettings,
@@ -666,7 +667,15 @@ export default function activate(pi: ExtensionAPI): void {
       settings: settings.webHub,
       fleet: () => holder.current?.query.list() ?? [],
     });
-    pi.registerCommand("webhub", createWebHubCommand({ control: () => webHubRef.current }));
+    // §9.1/§2.4 diagnostic snapshot (invalid `extraHosts` tokens / `trustProxyFrom`↔`externalOrigins`
+    // mismatch) — same non-live, activate-time capture as `settings` itself; without this the
+    // production `/webhub status` never surfaced these settings-level warnings even though
+    // `createWebHubCommand` has supported the `lanSettingsWarnings` seam since it was written.
+    const lanSettingsWarnings = loadWebHubLanSettingsWarnings();
+    pi.registerCommand(
+      "webhub",
+      createWebHubCommand({ control: () => webHubRef.current, lanSettingsWarnings: () => lanSettingsWarnings }),
+    );
   }
 }
 

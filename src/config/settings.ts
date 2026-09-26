@@ -12,6 +12,7 @@ import {
 // web-hub (plan 包 I): the settings type is owned by package D; `import type`
 // only, so this pre-guard module never loads the web-hub runtime graph.
 import type { WebHubLanSettings, WebHubSettings } from "../web-hub/agent/index.js";
+import type { WebHubLanSettingsWarnings } from "../commands/webhub.js";
 export type { WebHubSettings, WebHubLanSettings };
 // web-hub LAN (S1-W3 LI, lan-plan.md §9.1): host-token / origin classification is W1-frozen and
 // shared by every layer that needs to agree on what counts as a valid host — settings validation
@@ -1180,15 +1181,19 @@ export function parseMemorySettings(input: unknown): MemorySettings {
  * by `parseWebHubLanValidation` (exported for status-line consumers, e.g. `/webhub status`) so the
  * accepted/rejected classification of every host token never drifts between the two call sites.
  */
+function resolveWebHubPort(record: Record<string, unknown>): number {
+  const defaults = DEFAULT_SETTINGS.webHub;
+  const port = record.port;
+  return typeof port === "number" && Number.isInteger(port) && port >= 0 && port <= 65_535 ? port : defaults.port;
+}
+
 export function parseWebHubSettings(input: unknown): WebHubSettings {
   const defaults = DEFAULT_SETTINGS.webHub;
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults, lan: { ...defaults.lan! } };
   const record = input as Record<string, unknown>;
-  const port = record.port;
   const idle = record.idleExitMinutes;
   const nodeLoader = record.nodeLoader;
-  const resolvedPort =
-    typeof port === "number" && Number.isInteger(port) && port >= 0 && port <= 65_535 ? port : defaults.port;
+  const resolvedPort = resolveWebHubPort(record);
   return {
     enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
     autoStart: typeof record.autoStart === "boolean" ? record.autoStart : defaults.autoStart,
@@ -1618,6 +1623,32 @@ export function readSettingsNoMigrate(path: string = defaultSettingsPath()): Age
     return loadSettings(parsed);
   } catch {
     return loadSettings(undefined);
+  }
+}
+
+/**
+ * `webHub.lan` settings-level validation warnings (plan §9.1/§2.4), read directly off the
+ * settings file the same way `readSettingsNoMigrate` does — read-only, never migrates/writes,
+ * defaults (empty warnings) on any failure. `webHub.*` is a non-live, activate-time snapshot
+ * (same as `AgentSettings.webHub` itself), so callers capture this once and reuse it; there is no
+ * separate "raw settings" object kept around after `loadSettingsFromFile` returns, hence the
+ * second (cheap, best-effort) file read rather than threading the raw JSON through `AgentSettings`
+ * (which would widen a type several unrelated call sites depend on for no other reason than this
+ * one diagnostic snapshot).
+ */
+export function loadWebHubLanSettingsWarnings(path: string = defaultSettingsPath()): WebHubLanSettingsWarnings {
+  const empty: WebHubLanSettingsWarnings = { invalidExtraHosts: [], proxyMismatch: false };
+  try {
+    if (!existsSync(path)) return empty;
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return empty;
+    const webHubRaw = (parsed as Record<string, unknown>).webHub;
+    if (webHubRaw === null || typeof webHubRaw !== "object" || Array.isArray(webHubRaw)) return empty;
+    const record = webHubRaw as Record<string, unknown>;
+    const { invalidExtraHosts, proxyMismatch } = parseWebHubLanValidation(record.lan, resolveWebHubPort(record));
+    return { invalidExtraHosts, proxyMismatch };
+  } catch {
+    return empty;
   }
 }
 

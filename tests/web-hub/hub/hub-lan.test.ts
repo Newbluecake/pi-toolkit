@@ -13,7 +13,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type { LanAssembly, LanFrontendDeps } from "../../../src/web-hub/hub/ports.js";
-import { defaultLanAssembly } from "../../../src/web-hub/hub/lan-assembly.js";
+import { defaultLanAssembly, LanAssemblyOffError } from "../../../src/web-hub/hub/lan-assembly.js";
 import type {
   FrontendDeps,
   FrontendFactory,
@@ -136,6 +136,63 @@ describe("startHub + defaultLanAssembly (plan \u00a71.4, \u00a78) \u2014 config.
     c.send({ t: "lan_req", rid: "r1", op: "info" });
     const lanRes = await c.waitFrame((f) => f["t"] === "lan_res");
     expect(lanRes).toEqual({ t: "lan_res", rid: "r1", ok: false, code: "E_NO_LAN", message: "LAN is not configured" });
+  });
+});
+
+// LD review-fix suggestion (lan-plan.md's own defaultLanAssembly doc comment, plan section 1.4.2):
+// only LanAssemblyOffError -- the class defaultLanAssembly.build() throws for a *recognized*
+// section-4.1 db-open failure -- may degrade startHub to a loopback-only hub. Anything else a
+// LanAssembly.build() throws (a real bug, a stub's E_NOT_IMPLEMENTED:*, ...) must still abort
+// startHub outright, exactly like a P1 failure with no LAN configured at all would.
+describe("startHub + LanAssembly.build() failures (plan section 1.4.2 / LD review-fix suggestion)", () => {
+  it("LanAssemblyOffError degrades to loopback-only: fe.lan undefined, hub.json.lan = off/<reason>, hub still starts", async () => {
+    const home = tmp.make("wh-lan-offerror-");
+    const fe = fakeFrontendWithLan();
+    const uid = process.getuid?.() ?? 0;
+    const offAssembly: LanAssembly = {
+      async build() {
+        throw new LanAssemblyOffError("db-too-large", "hub.db exceeds 64 MiB");
+      },
+    };
+    const hub = await startHub(
+      { ...config({ home }), lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
+      fe,
+      { uid, lanAssembly: offAssembly },
+    );
+    if ("exists" in hub) throw new Error("unexpected exists");
+    hubs.push(hub);
+
+    expect(hub.lan).toBeUndefined();
+    expect(fe.deps[0]!.lan).toBeUndefined();
+    expect(hub.lanStatus()).toEqual({ state: "off", reason: "db-too-large", detail: "hub.db exceeds 64 MiB" });
+
+    const paths = resolveHubPaths({ home, uid });
+    const json = JSON.parse(readFileSync(paths.hubJson, "utf8")) as Record<string, unknown>;
+    expect(json["lan"]).toEqual({ state: "off", reason: "db-too-large", detail: "hub.db exceeds 64 MiB" });
+  });
+
+  it("a non-LanAssemblyOffError build failure aborts startHub entirely (rejects, no RunningHub, hub.json never written)", async () => {
+    const home = tmp.make("wh-lan-abort-");
+    const fe = fakeFrontendWithLan();
+    const uid = process.getuid?.() ?? 0;
+    const buggyAssembly: LanAssembly = {
+      async build() {
+        throw new Error("boom: not a recognized off-reason");
+      },
+    };
+    await expect(
+      startHub({ ...config({ home }), lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } }, fe, {
+        uid,
+        lanAssembly: buggyAssembly,
+      }),
+    ).rejects.toThrow(/boom: not a recognized off-reason/);
+
+    // Nothing was left running: fe.close/fe.listen never even got called (build() failed before
+    // the frontend was constructed), and hub.json was never written for this attempt.
+    expect(fe.deps).toHaveLength(0);
+    expect(fe.closed).toBe(0);
+    const paths = resolveHubPaths({ home, uid });
+    expect(existsSync(paths.hubJson)).toBe(false);
   });
 });
 

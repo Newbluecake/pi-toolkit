@@ -1,10 +1,14 @@
 // web-hub plan §包 I: webHub.* settings block — parser tolerance + spec surface.
 // Style follows memory-settings.test.ts.
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_SETTINGS,
   loadSettings,
+  loadWebHubLanSettingsWarnings,
   parseWebHubLanValidation,
   parseWebHubSettings,
 } from "../../src/config/settings.js";
@@ -202,6 +206,55 @@ describe("web-hub settings", () => {
       expect(v.proxyMismatch).toBe(true); // trustProxyFrom set, externalOrigins empty
 
       expect(parseWebHubLanValidation({}, 7878)).toEqual({ invalidExtraHosts: [], proxyMismatch: false });
+    });
+
+    describe("loadWebHubLanSettingsWarnings (LI wiring: src/index.ts → createWebHubCommand)", () => {
+      let dir: string;
+      let path: string;
+
+      beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), "pi-subagent-webhub-lan-warn-"));
+        path = join(dir, "pi-subagent.json");
+      });
+
+      it("reads the same invalidExtraHosts/proxyMismatch off disk that parseWebHubLanValidation would compute", () => {
+        writeFileSync(
+          path,
+          JSON.stringify({
+            webHub: { port: 7878, lan: { extraHosts: "dev, 202507220006", trustProxyFrom: "127.0.0.1" } },
+          }),
+          "utf8",
+        );
+        expect(loadWebHubLanSettingsWarnings(path)).toEqual({
+          invalidExtraHosts: [
+            { token: "dev", reason: "denylisted" },
+            { token: "202507220006", reason: "numeric" },
+          ],
+          proxyMismatch: true,
+        });
+      });
+
+      it("defaults to empty warnings for a missing file, malformed JSON, or a missing/malformed webHub block", () => {
+        const empty = { invalidExtraHosts: [], proxyMismatch: false };
+        expect(loadWebHubLanSettingsWarnings(path)).toEqual(empty); // file doesn't exist
+        writeFileSync(path, "not json", "utf8");
+        expect(loadWebHubLanSettingsWarnings(path)).toEqual(empty);
+        writeFileSync(path, JSON.stringify({ webHub: "nope" }), "utf8");
+        expect(loadWebHubLanSettingsWarnings(path)).toEqual(empty);
+        writeFileSync(path, JSON.stringify({ concurrencyLimit: 3 }), "utf8");
+        expect(loadWebHubLanSettingsWarnings(path)).toEqual(empty);
+      });
+
+      it("resolves webHub.port the same way parseWebHubSettings does, so a lan.port collision with a custom webHub.port still falls back correctly", () => {
+        writeFileSync(
+          path,
+          JSON.stringify({ webHub: { port: 9000, lan: { port: 9000, trustProxyFrom: "127.0.0.1" } } }),
+          "utf8",
+        );
+        // lan.port === webHub.port ⇒ parseWebHubLanBlock falls back lan.port to its own default
+        // internally; only trustProxyFrom-without-externalOrigins should surface as a warning here.
+        expect(loadWebHubLanSettingsWarnings(path)).toEqual({ invalidExtraHosts: [], proxyMismatch: true });
+      });
     });
 
     it("loadSettings round-trips webHub.lan through the top-level parser", () => {
