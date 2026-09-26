@@ -30,7 +30,17 @@
 import { Buffer } from "node:buffer";
 import { randomBytes, randomUUID } from "node:crypto";
 import { connect as netConnectDefault, type Socket } from "node:net";
-import type { AgentFrame, AgentId, AgentKind, HubFrame, SessionInfo } from "../protocol/messages.js";
+import type {
+  AgentFrame,
+  AgentId,
+  AgentKind,
+  HubCtlAckFrame,
+  HubCtlFrame,
+  HubFrame,
+  LanReqFrame,
+  LanResFrame,
+  SessionInfo,
+} from "../protocol/messages.js";
 import { decodeHubFrame, LIMITS, TIMING } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import type { HubPaths } from "../protocol/paths.js";
@@ -46,6 +56,8 @@ const CONN_KEY = Symbol.for("pi-subagent:web-hub");
 
 /** Retry delay after `hello_reject{E_PROTO}` (arch §4.3: retry in 10 min). */
 const PROTO_RETRY_MS = 10 * 60_000;
+/** S1 admin request/response timeout (plan §8.1: "请求超时 3s"). */
+const ADMIN_REQUEST_TIMEOUT_MS = 3_000;
 /** After a graceful `end()`, force-destroy a socket whose peer never reads. */
 const END_DESTROY_MS = 1_000;
 const BACKOFF_JITTER = 0.2;
@@ -53,6 +65,11 @@ const SPAWN_FAST_MIN_MS = 250;
 const SPAWN_FAST_MAX_MS = 4_000;
 
 type GlobalBag = Record<symbol, unknown>;
+
+/** rid generator for admin requests (`connection.request()` callers). */
+export function newAdminRid(): string {
+  return randomUUID();
+}
 
 /** Read (or create on first use) the process-level agent identity. */
 export function processAgentId(): AgentId {
@@ -87,6 +104,18 @@ export interface HubConnection {
   readonly seq: number;
   status(): WebHubStatusView;
   close(reason: string): void;
+  /**
+   * S1 admin control-plane request (plan §8.1): `lan_req` / `hub_ctl`, matched
+   * to its `lan_res` / `hub_ctl_ack` by `rid`. Rejects immediately, without
+   * sending anything, when the link isn't `live` or the hub's `hello_ack.caps`
+   * doesn't include `requiredCap` ("旧 hub 会忽略未知帧 ⇒ agent 先检查 caps，
+   * 没有对应能力就直接判定不支持，不发请求"). Timeout `ADMIN_REQUEST_TIMEOUT_MS`
+   * (unref'd); every pending request rejects when the link tears down (§11 LE
+   * row: "连接关闭时全部 reject").
+   */
+  request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
+  /** Capabilities from the current live link's `hello_ack.caps` (empty until live, or if the hub omitted it). */
+  readonly caps: readonly string[];
 }
 
 export type SlotKind = "session" | "status" | "fleet" | "prompts";
@@ -191,6 +220,11 @@ class Connection implements HubConnection {
   private gapFrom: number | undefined;
   private firstEvSeqOnLink: number | undefined;
   private binding: BindingPort | undefined;
+  private helloCaps: readonly string[] = [];
+  private readonly pending = new Map<
+    string,
+    { resolve: (f: LanResFrame | HubCtlAckFrame) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+  >();
 
   private connectTimer: NodeJS.Timeout | undefined;
   private helloTimer: NodeJS.Timeout | undefined;
@@ -288,6 +322,26 @@ class Connection implements HubConnection {
     }
   }
 
+  get caps(): readonly string[] {
+    return this.helloCaps;
+  }
+
+  request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame> {
+    return new Promise((resolve, reject) => {
+      if (this.link !== "live" || !this.helloCaps.includes(requiredCap)) {
+        reject(new Error(`E_NO_CAP: ${requiredCap}`));
+        return;
+      }
+      const rid = frame.rid;
+      const timer = unrefTimer(ADMIN_REQUEST_TIMEOUT_MS, () => {
+        this.pending.delete(rid);
+        reject(new Error("E_TIMEOUT: admin request timed out"));
+      });
+      this.pending.set(rid, { resolve, reject, timer });
+      this.writeRaw(frame);
+    });
+  }
+
   status(): WebHubStatusView {
     const view: WebHubStatusView = { state: this.viewState(), attached: this.binding !== undefined };
     if (this.agentKey !== undefined) view.agentKey = this.agentKey;
@@ -305,6 +359,7 @@ class Connection implements HubConnection {
     this.socket = undefined;
     for (const k of TIMER_KEYS) this.clearTimer(k);
     this.slots.clear();
+    this.rejectPending(`E_CLOSED: ${reason}`);
     if (sock !== undefined) {
       try {
         if (wasLive) {
@@ -414,6 +469,7 @@ class Connection implements HubConnection {
         this.agentKey = frame.agentKey;
         this.hubVersion = frame.hubVersion;
         this.httpPort = frame.http.port;
+        this.helloCaps = frame.caps ?? [];
         this.lastError = undefined;
         this.protoRejected = false;
         this.attempt = 0;
@@ -449,6 +505,16 @@ class Connection implements HubConnection {
         return;
       case "pong":
         return;
+      case "lan_res":
+      case "hub_ctl_ack": {
+        const p = this.pending.get(frame.rid);
+        if (p !== undefined) {
+          this.pending.delete(frame.rid);
+          clearTimeout(p.timer);
+          p.resolve(frame);
+        }
+        return;
+      }
       case "snapshot_req":
         if (this.link === "live") this.callBinding((b) => b.onSnapshotReq(frame.rid));
         return;
@@ -520,15 +586,28 @@ class Connection implements HubConnection {
   private teardownSocket(): void {
     const sock = this.socket;
     this.socket = undefined;
+    this.helloCaps = [];
     for (const k of LINK_TIMER_KEYS) this.clearTimer(k);
     if (this.firstEvSeqOnLink !== undefined) this.markGap(this.firstEvSeqOnLink);
     this.firstEvSeqOnLink = undefined;
+    this.rejectPending("E_CONN_LOST: link torn down");
     if (sock !== undefined) {
       try {
         sock.destroy();
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  /** Reject every outstanding `request()` (connection close/teardown, plan §11 LE row). */
+  private rejectPending(message: string): void {
+    if (this.pending.size === 0) return;
+    const entries = [...this.pending.values()];
+    this.pending.clear();
+    for (const p of entries) {
+      clearTimeout(p.timer);
+      p.reject(new Error(message));
     }
   }
 
