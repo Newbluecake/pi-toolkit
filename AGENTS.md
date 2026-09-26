@@ -225,7 +225,11 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   bundled jiti-cli, HTTP/SSE/auth/static; never imports pi), `agent/` (pi-side client `wireWebHub`: process-
   level connection on a `Symbol.for` global, reused across /new·/resume·/fork, handed over on /reload),
   `web/` (no-build static frontend, innerHTML banned). Wired at the end of `src/index.ts` after
-  `wireDeferredReload`. P1 is read-only. Design: `docs/dev/web-hub/{arch,plan}.md`.
+  `wireDeferredReload`. P1 is read-only. Design: `docs/dev/web-hub/{arch,plan}.md`. LAN access (S1,
+  `webHub.lan.enabled`, default off): username/password auth over plain HTTP on `0.0.0.0:<webHub.lan.port>`,
+  host allow-list + optional trusted-reverse-proxy origin (`webHub.lan.{trustProxyFrom,externalOrigins}`) for
+  HTTPS termination, SQLite-backed sessions in a SIGKILL-able child process, and `/webhub passwd|unlock|restart`
+  — design: `docs/dev/web-hub/lan-plan.md`.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
   (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses

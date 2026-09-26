@@ -30,6 +30,7 @@ export const SSE_EVENTS = [
   "gap",
   "resync",
   "append", // spike K7④：hub 从会话文件尾部补出的、事件流未覆盖的条目 {agentKey, entries: WireEntry[]}
+  "auth", // S1: 会话撤销/到期（用户密码登录，限 LAN listener）{reason:"revoked"|"expired"}
   "ping",
 ] as const;
 
@@ -43,7 +44,16 @@ export const API_ERRORS = [
   "E_DEADLINE",
   "E_AGENT_GONE",
   "E_NOT_IMPLEMENTED",
+  "E_BUSY", // S1: IPC 准入拒绝（在途 64 / 排队 128 满）
+  "E_DB", // S1: SQLite 子进程不可用 / 超时
+  "E_LOCKED", // S1 (LC review fix, lan-plan.md §15.9 #4, additive exception): LAN 登录 §6.2 每 IP
+  // 退避锁定 — 之前登录 429 一律 E_RATE，令前端 §10 的倒计时/不自动重试分支永远不可达。
 ] as const;
+
+/** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */
+export interface SseAuthPayload {
+  reason: "revoked" | "expired";
+}
 
 export interface AgentCard {
   agentKey: string;

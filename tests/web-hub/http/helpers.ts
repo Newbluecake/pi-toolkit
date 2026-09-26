@@ -7,6 +7,7 @@ import type { AgentCard, HistoryPayload } from "../../../src/web-hub/protocol/ht
 import type { HubPaths } from "../../../src/web-hub/protocol/paths.js";
 import { PROTO } from "../../../src/web-hub/protocol/version.js";
 import type { AgentView, FrontendDeps, HistoryService, HubEvent, HubLog } from "../../../src/web-hub/hub/ports.js";
+import { testHubPaths } from "../helpers/paths.js";
 
 export function makeTmp(prefix = "pwh-http-"): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -81,14 +82,7 @@ export function fakeDeps(dir: string, opts: { port?: number } = {}): FakeDeps {
     onLeafChanged: () => {},
   };
   const stateDir = join(dir, "state");
-  const paths: HubPaths = {
-    stateDir,
-    socketPath: join(stateDir, "hub.sock"),
-    hubJson: join(stateDir, "hub.json"),
-    tokenFile: join(stateDir, "token"),
-    logFile: join(stateDir, "hub.log"),
-    startLock: join(stateDir, "start.lock"),
-  };
+  const paths: HubPaths = testHubPaths(stateDir);
   return {
     config: { v: 1, home: dir, port: opts.port ?? 0, idleExitMinutes: 10, pluginVersion: "0.0.0-test", buildId: "b1" },
     paths,
@@ -206,13 +200,27 @@ export function parseSseBlock(block: string): SseEvent | undefined {
 
 export function openSse(
   port: number,
-  opts: { cookie?: string; lastEventId?: number | string; path?: string; host?: string } = {},
+  opts: {
+    cookie?: string;
+    lastEventId?: number | string;
+    path?: string;
+    host?: string;
+    /** TCP dial target, defaults to `127.0.0.1` — see `lan-helpers.ts`'s `lanRequest.destHost` for
+     * why this must be separate from the (possibly spoofed) `Host` header. */
+    destHost?: string;
+  } = {},
 ): Promise<SseConn> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = { Host: opts.host ?? `127.0.0.1:${port}`, Accept: "text/event-stream" };
     if (opts.cookie !== undefined) headers.Cookie = opts.cookie;
     if (opts.lastEventId !== undefined) headers["Last-Event-ID"] = String(opts.lastEventId);
-    const req = httpRequest({ host: "127.0.0.1", port, path: opts.path ?? "/api/events", headers, agent: false });
+    const req = httpRequest({
+      host: opts.destHost ?? "127.0.0.1",
+      port,
+      path: opts.path ?? "/api/events",
+      headers,
+      agent: false,
+    });
     req.on("error", reject);
     req.on("response", (res) => {
       const events: SseEvent[] = [];

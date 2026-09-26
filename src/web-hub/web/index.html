@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-auth-mode="__AUTH_MODE__">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -9,13 +9,33 @@
     <script type="module" src="/assets/app.js"></script>
   </head>
   <body>
+    <p id="auth-mode-error" class="auth-mode-error" role="alert" hidden>
+      Cannot determine sign-in mode (stale page?). Reload.
+    </p>
+    <div id="login-screen" hidden>
+      <p id="plaintext-notice" class="plaintext-notice" hidden>
+        This page is served over plain HTTP: your password and session travel unencrypted on this network.
+      </p>
+      <form id="login" hidden>
+        <label for="login-username">Username</label>
+        <input id="login-username" name="username" autocomplete="username" required />
+        <label for="login-password">Password</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+        <button id="login-submit" type="submit">Sign in</button>
+        <p id="login-error" role="alert"></p>
+      </form>
+    </div>
     <div id="app">
       <header id="topbar">
         <span class="brand">pi web-hub</span>
         <span id="conn" class="conn" data-state="connecting">connecting</span>
         <span id="hub" class="hub"></span>
         <span class="mode">read-only</span>
+        <button id="signout" class="signout" type="button" hidden>Sign out</button>
       </header>
+      <p id="initial-password-banner" class="initial-password-banner" hidden>
+        Please change the initial password soon (run "/webhub passwd" on the host).
+      </p>
       <div id="layout">
         <aside id="agents" aria-label="agents"></aside>
         <main id="main">

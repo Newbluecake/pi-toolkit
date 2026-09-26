@@ -321,6 +321,12 @@ UI 上下文由 runner 持有（`runner.setUIContext` 非导出面），唯一�
 
 浏览器端 token 存 `localStorage`（hub 重启后 sid 失效可静默重登）——取舍：XSS 下本就全失守，CSP 为主防线。
 
+> **S1 LAN 更新（2026-09，S1-W3 LI）**：§1 的非目标「远程（非 loopback）访问」已被 S1 取代——`webHub.lan.enabled`
+> （默认关）额外绑定 `0.0.0.0:<webHub.lan.port>`，走用户名/密码鉴权（不是本表的 token），host 白名单 +
+> 可选受信任反向代理（`trustProxyFrom`/`externalOrigins`，代理终止 HTTPS）+ 每 IP/全局限流 + SQLite 会话。
+> 上表仍是 P1（loopback + token）的威胁模型，两套鉴权面完全隔离（不同 cookie、不同会话存储）；LAN 的完整
+> 威胁模型、决策与测试矩阵见 `docs/dev/web-hub/lan-plan.md` §1–§12（尤其 §1.1 的信任边界表）。
+
 ## 10. 关键决策
 
 | #    | 决策                                                                                                | 备选                                          | 理由                                                                                                                                     |

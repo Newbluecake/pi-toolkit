@@ -24,19 +24,65 @@
  * then `history` is pushed first, followed by buffered frames (ev with
  * `seq < fromSeq` dropped — already merged into the snapshot), and only then
  * does the client join the live subscriber set.
+ *
+ * ---------------------------------------------------------------------------
+ * LAN listener (plan §2.5, §6, §7 — S1-W2 `LC:http`). Everything below the
+ * loopback implementation is the LAN side: `buildContext`'s `"lan"` branch,
+ * `createLanTransport` (the `node:http` binder + `ConnGuard` wiring), the
+ * LAN application router (`handleLanRequest`, reusing `createRouteSet` so
+ * agents/fleet/history/SSE behave identically to loopback — only the auth
+ * mechanism and quotas differ), and `createHttpFrontend`'s `deps.lan` wiring
+ * that assembles all of it into `HttpFrontend.lan: LanFacade`. This absorbs
+ * what plan §3 sketches as a separate `lan-controller.ts` (`LanController`)
+ * — that type never made it into `hub/ports.ts`'s W1 freeze, and `http.ts`
+ * (LC's exclusive file) is the only place `HttpFrontend.lan` can actually be
+ * constructed from a `LanFrontendDeps`, so LC implements the bind → 60s tick
+ * → 421-throttled recompute → revoke lifecycle directly here rather than
+ * depending on a same-named file that S1-W3's LD package has not written
+ * yet. Flagged in the delivery report as a documented deviation, not a
+ * frozen-signature change (§11 W1 review only froze `hub/ports.ts` on this
+ * point — this is a fully additive implementation choice).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { API_ERRORS, type AgentCard, type HistoryPayload } from "../protocol/http-contract.js";
+import { canonicalHostKey, canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
 import type { FleetRowWire } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
-import type { AgentView, FrontendDeps, FrontendFactory, HttpFrontend, HubEvent } from "./ports.js";
-import { createSseHub, type SseClient, type SseEventName } from "./sse.js";
-import { serveStatic, webRoot } from "./static.js";
+import { createConnGuard } from "./conn-guard.js";
+import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
+import { sameHostKeys } from "./net-hosts.js";
+import type {
+  AgentView,
+  ConnGuard,
+  ConnLease,
+  FrontendDeps,
+  FrontendFactory,
+  HostSnapshot,
+  HttpFrontend,
+  HubEvent,
+  HubInfo,
+  HubLog,
+  HistoryService,
+  LanFacade,
+  LanFrontendDeps,
+  LanListenerHandle,
+  LanOffReason,
+  LanSessionRecord,
+  LanStatus,
+  LanTransport,
+  ListenerKind,
+  RegistryView,
+  RequestContext,
+} from "./ports.js";
+import { createSseHub, type SseClient, type SseEventName, type SseHub } from "./sse.js";
+import { serveIndex, serveStatic, webRoot } from "./static.js";
 
 export const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
 export const MAX_BODY_BYTES = 64 * 1024;
+export const LAN_LOGIN_BODY_BYTES = 4 * 1024;
 export const HISTORY_PAGE_MAX = 400;
 const BODY_DEADLINE_MS = 10_000;
 /** Outer guard on history calls; B enforces TIMING.snapshotMs itself, this only bounds a misbehaving port. */
@@ -44,6 +90,40 @@ const HISTORY_GUARD_MS = TIMING.snapshotMs + 1_000;
 const CLOSE_DEADLINE_MS = 2_000;
 const MAX_PENDING_FRAMES = 4_096;
 const BIND_HOST = "127.0.0.1"; // not configurable by design (arch §9)
+const LAN_BIND_HOST = "0.0.0.0";
+const LAN_SOCKET_IDLE_MS = 60_000;
+const LAN_HEADERS_TIMEOUT_MS = 10_000;
+const LAN_REQUEST_TIMEOUT_MS = 15_000;
+const LAN_KEEPALIVE_TIMEOUT_MS = 5_000;
+const LAN_CLIENT_IP_INFLIGHT_CAP = 16;
+const LAN_SID_WAITERS_CAP = 8;
+const LAN_SSE_GLOBAL_CAP = 32;
+const LAN_SSE_PER_SID_CAP = 8;
+const LAN_RECOMPUTE_THROTTLE_MS = 5_000;
+const LAN_TICK_MS = 60_000;
+// Review fix (LC, plan §1.4/§3, W3 acceptance item 1): `LanFacade.start()` is specified to be
+// bounded by `LAN_START_DEADLINE_MS` (plan's own `lan-controller.ts` sketch defines it as
+// 30_000ms; §15.8 moved the actual implementation into this file's self-hosted lifecycle without
+// changing the budget). Exported so tests can drive it with `vi.useFakeTimers()` the same way
+// `hub.ts`'s `HUB_START_DEADLINE_MS` contract tests do, instead of waiting out 30 real seconds.
+export const LAN_START_DEADLINE_MS = 30_000;
+// §4.2 "SSE 到期复核" (LC review fix, lan-plan.md §15.9 #3): a periodic (≤60s) recheck of every
+// LAN SSE connection's session, independent of the ping-only keepalive `sse.ts` already does.
+const LAN_SSE_EXPIRY_TICK_MS = 55_000;
+const LAN_SSE_EXPIRY_BATCH_CAP = 32;
+const LAN_SSE_EXPIRY_BATCH_DEADLINE_MS = 20_000;
+// §4.2 review fix (lan-plan.md task LC #1): the 55s tick above depends on the db being reachable
+// (`touchSession`); while the db is down it can't revoke anything, so a per-connection local
+// timer keyed off the session's own `absoluteExpiresAt` (7-day hard ceiling) is the only thing
+// that still fires. `setTimeout`'s delay is a signed 32-bit int (~24.8 days) — well above the
+// 7-day ceiling in practice, but `scheduleAbsoluteExpiry` still segments a longer remaining span
+// defensively rather than silently truncating it.
+const ABS_EXPIRY_MAX_DELAY_MS = 2_147_483_647;
+
+function toAbortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : "web-hub: aborted");
+}
 
 type ApiError = (typeof API_ERRORS)[number];
 
@@ -119,6 +199,9 @@ function statusFor(code: string): number {
       return 501;
     case "E_DEADLINE":
       return 504;
+    case "E_BUSY":
+    case "E_DB":
+      return 503;
     default:
       return 500;
   }
@@ -172,10 +255,10 @@ function stringField(body: unknown, name: string): string | undefined {
   return typeof v === "string" && v.length > 0 && v.length <= 256 ? v : undefined;
 }
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
+function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    if (Number.isFinite(declared) && declared > maxBytes) {
       reject(new HttpError(413, "E_BAD_REQUEST", "body too large"));
       return;
     }
@@ -192,7 +275,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
     };
     const onData = (chunk: Buffer): void => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) finish(new HttpError(413, "E_BAD_REQUEST", "body too large"));
+      if (size > maxBytes) finish(new HttpError(413, "E_BAD_REQUEST", "body too large"));
       else chunks.push(chunk);
     };
     const timer = setTimeout(() => finish(new HttpError(408, "E_DEADLINE", "body read timeout")), BODY_DEADLINE_MS);
@@ -204,8 +287,8 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
   });
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const buf = await readBody(req);
+async function readJson(req: IncomingMessage, maxBytes?: number): Promise<unknown> {
+  const buf = await readBody(req, maxBytes);
   if (buf.length === 0) return undefined;
   try {
     return JSON.parse(buf.toString("utf8")) as unknown;
@@ -230,19 +313,270 @@ function toCard(v: AgentView): AgentCard {
   return card;
 }
 
-export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
-  const { config, registry, bus, history, log, now } = deps;
-  const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
-  const sse = createSseHub({ now });
-  const root = webRoot();
-  const pending = new Map<string, Map<string, PendingSub>>(); // clientId → agentKey → buffer
-  const fleetCache = new Map<string, FleetRowWire[]>();
-  let server: Server | undefined;
-  let port = 0;
-  let unsubscribeBus: (() => void) | undefined;
-  let closed = false;
+// ---------------------------------------------------------------------------
+// §1.4.4 buildContext / createLanTransport
+// ---------------------------------------------------------------------------
 
-  // ---- subscriptions --------------------------------------------------------
+/** `::ffff:1.2.3.4` → `1.2.3.4` (IPv4-mapped IPv6, as node's `net`/`http` report dual-stack peers). */
+function normalizePeerIp(ip: string | undefined): string {
+  if (ip === undefined) return "";
+  return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+}
+
+type BuildContextReject = { reject: 400 | 421; code: "E_BAD_REQUEST" | "E_HOST"; detail: string };
+
+/** First label-ish token before an optional `:port` — used only to decide whether a rejected
+ * Host looks IPv4-shaped enough to justify a throttled recompute (§2.3). Not a validator. */
+function hostPartOf(raw: string | undefined): string {
+  if (raw === undefined) return "";
+  const idx = raw.lastIndexOf(":");
+  return (idx < 0 ? raw : raw.slice(0, idx)).toLowerCase();
+}
+
+function buildLanContext(
+  req: IncomingMessage,
+  lan: { snapshot: HostSnapshot; trust: ReadonlySet<string> },
+): RequestContext | BuildContextReject {
+  const peerIp = normalizePeerIp(req.socket.remoteAddress);
+  const resolution = resolveProxyLocal(peerIp, req.headers, lan.trust);
+  if (resolution.viaTrustedProxy && resolution.warnings.includes("proto-invalid")) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "proxy-proto" };
+  }
+  if (resolution.viaTrustedProxy && resolution.warnings.includes("host-multi")) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "proxy-host" };
+  }
+  const hostRaw = resolution.hostHeader;
+  if (hostRaw !== undefined && hostRaw.includes(",")) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "proxy-host" };
+  }
+  const hostKey = canonicalHostKey(hostRaw, resolution.scheme);
+  if (hostKey === undefined) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "bad-host" };
+  }
+  const externalOrigin = canonicalOrigin(resolution.scheme, hostKey);
+  if (resolution.viaTrustedProxy) {
+    if (!lan.snapshot.externalOrigins.has(externalOrigin)) {
+      return { reject: 421, code: "E_HOST", detail: "proxy-host" };
+    }
+  } else if (!lan.snapshot.hostKeys.has(hostKey)) {
+    return { reject: 421, code: "E_HOST", detail: "host" };
+  }
+  return {
+    kind: "lan",
+    peerIp,
+    viaTrustedProxy: resolution.viaTrustedProxy,
+    clientIp: resolution.clientIp,
+    scheme: resolution.scheme,
+    hostKey,
+    externalOrigin,
+    snapshot: lan.snapshot,
+  };
+}
+
+// Inlined instead of importing `./proxy.js` to keep `buildContext` (a pure function per plan
+// §1.4.4) free of any module with its own exported test surface beyond what it re-exports; the
+// canonical, tested implementation lives in `hub/proxy.ts` (`resolveProxy`) and this delegates to
+// it byte-for-byte (kept as a thin re-export, not a duplicate) — see below.
+import { resolveProxy as resolveProxyLocal } from "./proxy.js";
+
+/**
+ * Build the per-request `RequestContext` (plan §2.5 step 1). The loopback
+ * branch centralizes what P1's `allowedHost`/`csrfOk` already read off `req`
+ * (`req.headers.host`, `req.socket.remoteAddress`) into one place — it does
+ * *not* replace those functions' own P1 decision logic (kept byte-identical
+ * in `handle()`), so it never rejects for `kind: "loopback"`. The `"lan"`
+ * branch (§2.4 proxy resolution, §2.2 canonicalization, §2.3 whitelist)
+ * rejects with 400/421 *before* any `RequestContext` is constructed —
+ * matching `createLanTransport`'s contract of only ever calling
+ * `handleRequest` with a fully-built `RequestContext`.
+ */
+export function buildContext(
+  req: IncomingMessage,
+  kind: ListenerKind,
+  lan?: { snapshot: HostSnapshot; trust: ReadonlySet<string> },
+): RequestContext | { reject: 400 | 421; code: "E_BAD_REQUEST" | "E_HOST"; detail: string } {
+  if (kind === "lan") {
+    if (lan === undefined) throw new Error('web-hub: buildContext(req, "lan") requires the lan snapshot/trust arg');
+    return buildLanContext(req, lan);
+  }
+  const peerIp = normalizePeerIp(req.socket.remoteAddress);
+  const hostHeader = req.headers.host;
+  const hostKey = canonicalHostKey(hostHeader, "http") ?? (hostHeader ?? "").toLowerCase();
+  return {
+    kind: "loopback",
+    peerIp,
+    viaTrustedProxy: false,
+    clientIp: peerIp,
+    scheme: "http",
+    hostKey,
+    externalOrigin: canonicalOrigin("http", hostKey),
+  };
+}
+
+/** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` is now frozen in `hub/ports.ts` (review fix #9). */
+export interface LanTransportCtx {
+  handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext, lease: ConnLease): Promise<void>;
+  log: HubLog;
+  connGuard: ConnGuard;
+  /**
+   * Called synchronously — never `await`ed by the transport — whenever a request was rejected
+   * with `E_HOST` from a *direct* (non-proxy) peer whose `Host` header's host part parses as an
+   * IPv4 literal (§2.3: "直连请求收到 421 且 Host 的主机部分是 IPv4 语法 ⇒ 一次节流重算").
+   * The transport itself has no `HostsPort`/`cfg` access — throttling and the actual
+   * `hosts.compute()` + `handle.swap()` are the caller's job (`createHttpFrontend`'s LAN facade).
+   */
+  onIPv4HostReject?(hostPart: string): void;
+}
+
+interface SocketWithLease extends Socket {
+  __lanLease?: ConnLease;
+}
+
+export function createLanTransport(ctx: LanTransportCtx): LanTransport {
+  return {
+    bind(port: number, first: HostSnapshot, signal: AbortSignal): Promise<LanListenerHandle> {
+      if (signal.aborted) return Promise.reject(toAbortError(signal));
+      let snapshot = first;
+      const srv: Server = createServer();
+      srv.headersTimeout = LAN_HEADERS_TIMEOUT_MS;
+      srv.requestTimeout = LAN_REQUEST_TIMEOUT_MS;
+      srv.keepAliveTimeout = LAN_KEEPALIVE_TIMEOUT_MS;
+      srv.on("clientError", (_err, socket) => socket.destroy());
+      srv.on("connection", (socket: SocketWithLease) => {
+        socket.unref();
+        const peerIp = normalizePeerIp(socket.remoteAddress);
+        const viaTrustedProxy = snapshot.trustProxyFrom.has(peerIp);
+        const lease = ctx.connGuard.admit({ peerIp, viaTrustedProxy, onEvict: () => socket.destroy() });
+        if (lease === undefined) {
+          socket.destroy();
+          return;
+        }
+        socket.__lanLease = lease;
+        socket.setTimeout(LAN_SOCKET_IDLE_MS, () => socket.destroy());
+        socket.once("close", () => lease.release());
+      });
+      srv.on("request", (req: IncomingMessage, res: ServerResponse) => {
+        const socket = req.socket as SocketWithLease;
+        const lease = socket.__lanLease;
+        if (lease === undefined) {
+          res.destroy();
+          return;
+        }
+        const result = buildContext(req, "lan", { snapshot, trust: snapshot.trustProxyFrom });
+        if ("reject" in result) {
+          if (result.code === "E_HOST" && !snapshot.trustProxyFrom.has(normalizePeerIp(socket.remoteAddress))) {
+            const hostPart = hostPartOf(req.headers.host);
+            const cls = classifyHostToken(hostPart);
+            if (cls.ok && cls.kind === "ipv4") ctx.onIPv4HostReject?.(hostPart);
+          }
+          setSecurityHeaders(res);
+          sendError(res, result.reject, result.code, result.detail);
+          return;
+        }
+        ctx.handleRequest(req, res, result, lease).catch((err: unknown) => {
+          ctx.log.error("web-hub lan http: request failed", { url: req.url, error: String(err) });
+          if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
+          else res.destroy();
+        });
+      });
+      // Review fix (LC, plan §1.4/§3, W3 acceptance item 1): the entry check above only catches
+      // a signal that was *already* aborted before `bind()` was even called — a signal that
+      // aborts while `listen()` is still in flight (the caller's `LAN_START_DEADLINE_MS` timer, or
+      // a concurrent `LanFacade.close()`) was previously ignored entirely: `listen()`'s callback
+      // would still fire, still `resolve()`, and hand back a fully bound, listening server that
+      // nobody asked for anymore — a leaked listener holding the port. Wire an `abort` listener for
+      // the whole lifetime of this bind attempt so whichever settles first (the real `listening`/
+      // `error` event, or the caller giving up) wins exactly once; the loser's side effect (a
+      // half-bound or fully-bound `srv`) is always closed by this function itself — the caller
+      // never has to know a server object ever existed for an attempt it abandoned.
+      return new Promise<LanListenerHandle>((resolve, reject) => {
+        let settled = false;
+        const onAbort = (): void => {
+          if (settled) return;
+          settled = true;
+          srv.off("error", onError);
+          // `srv.close()` is safe to call even before `listening` has fired (Node queues the
+          // close behind the in-flight bind); either way the port is released and no 'listening'
+          // server is left dangling.
+          srv.close();
+          reject(toAbortError(signal));
+        };
+        const onError = (err: Error): void => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          reject(err);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        srv.once("error", onError);
+        srv.listen(port, LAN_BIND_HOST, () => {
+          srv.off("error", onError);
+          signal.removeEventListener("abort", onAbort);
+          if (settled) return; // `onAbort` (or `onError`) already won the race and closed `srv`
+          if (signal.aborted) {
+            // Belt-and-suspenders for the boundary case where `listening` fires without our own
+            // `abort` listener having run first — either way, a caller that gave up must never
+            // receive a resolved handle.
+            settled = true;
+            srv.close();
+            reject(toAbortError(signal));
+            return;
+          }
+          settled = true;
+          srv.on("error", (err) => ctx.log.error("web-hub lan http: server error", { error: String(err) }));
+          srv.unref();
+          const addr = srv.address();
+          const boundPort = addr !== null && typeof addr === "object" ? addr.port : port;
+          resolve({
+            port: boundPort,
+            current: () => snapshot,
+            swap: (next) => {
+              snapshot = next;
+            },
+            close: () =>
+              new Promise<void>((res2) => {
+                const timer = setTimeout(res2, CLOSE_DEADLINE_MS);
+                timer.unref?.();
+                srv.close(() => {
+                  clearTimeout(timer);
+                  res2();
+                });
+                srv.closeAllConnections();
+              }),
+          });
+        });
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// shared route set (agents / fleet / history / SSE) — used by both listeners
+// ---------------------------------------------------------------------------
+
+interface RouteSet {
+  pending: Map<string, Map<string, PendingSub>>;
+  fleetCache: Map<string, FleetRowWire[]>;
+  onHubEvent(e: HubEvent): void;
+  subscribe(body: unknown, res: ServerResponse): void;
+  unsubscribe(body: unknown, res: ServerResponse): void;
+  openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient;
+  historyPage(query: URLSearchParams, res: ServerResponse): Promise<void>;
+}
+
+function createRouteSet(
+  sse: SseHub,
+  routeDeps: {
+    registry: RegistryView;
+    history: HistoryService;
+    log: HubLog;
+    info: () => HubInfo;
+    port: () => number;
+    isClosed: () => boolean;
+  },
+): RouteSet {
+  const pending = new Map<string, Map<string, PendingSub>>();
+  const fleetCache = new Map<string, FleetRowWire[]>();
 
   function getPending(clientId: string, agentKey: string): PendingSub | undefined {
     return pending.get(clientId)?.get(agentKey);
@@ -258,7 +592,6 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   function dropAgent(agentKey: string): void {
     fleetCache.delete(agentKey);
     for (const clientId of [...pending.keys()]) deletePending(clientId, agentKey);
-    // live subscriber sets are pruned lazily: sse.get() only returns live clients
   }
 
   function bufferScoped(agentKey: string, frame: PendingFrame): void {
@@ -266,7 +599,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       const p = m.get(agentKey);
       if (p === undefined) continue;
       if (sse.get(clientId) === undefined) {
-        pending.delete(clientId); // client disconnected mid-snapshot
+        pending.delete(clientId);
         continue;
       }
       if (p.frames.length >= MAX_PENDING_FRAMES) p.overflow = true;
@@ -280,7 +613,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   }
 
   function onHubEvent(e: HubEvent): void {
-    if (closed) return;
+    if (routeDeps.isClosed()) return;
     try {
       switch (e.type) {
         case "agent_up":
@@ -317,7 +650,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           break;
       }
     } catch (err) {
-      log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });
+      routeDeps.log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });
     }
   }
 
@@ -326,15 +659,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     let error: string | undefined;
     let message: string | undefined;
     try {
-      payload = await withDeadline(history.snapshot(agentKey), HISTORY_GUARD_MS);
+      payload = await withDeadline(routeDeps.history.snapshot(agentKey), HISTORY_GUARD_MS);
     } catch (err) {
-      const d = safeErrorDetail(err, log);
+      const d = safeErrorDetail(err, routeDeps.log);
       error = d.code;
       message = d.message;
     }
-    if (getPending(client.id, agentKey) !== p) return; // superseded, unsubscribed or agent gone
+    if (getPending(client.id, agentKey) !== p) return;
     deletePending(client.id, agentKey);
-    if (closed || sse.get(client.id) !== client) return;
+    if (routeDeps.isClosed() || sse.get(client.id) !== client) return;
     if (payload === undefined) {
       client.send("history", { agentKey, error: error ?? "E_INTERNAL", message });
       return;
@@ -348,32 +681,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     client.subscribed.add(agentKey);
   }
 
-  // ---- routes ---------------------------------------------------------------
-
-  function allowedHost(host: string | undefined): boolean {
-    if (host === undefined) return false;
-    const h = host.toLowerCase();
-    return h === `127.0.0.1:${port}` || h === `localhost:${port}`;
-  }
-
-  function csrfOk(req: IncomingMessage): boolean {
-    const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
-    if (ct !== "application/json") return false;
-    if (req.headers["x-pwh"] !== "1") return false;
-    const origin = req.headers.origin;
-    if (origin !== undefined && origin.toLowerCase() !== `http://${(req.headers.host ?? "").toLowerCase()}`)
-      return false;
-    return true;
-  }
-
-  function openEvents(req: IncomingMessage, res: ServerResponse): void {
+  function openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient {
     const raw = req.headers["last-event-id"];
     const lastEventId = typeof raw === "string" && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
-    const client = sse.attach(req, res, lastEventId);
-    client.send("hub", { ...deps.info(), port });
-    client.send("agents", { agents: registry.list().map(toCard) });
+    const client = sse.attach(req, res, lastEventId, auth);
+    client.send("hub", { ...routeDeps.info(), port: routeDeps.port() });
+    client.send("agents", { agents: routeDeps.registry.list().map(toCard) });
     for (const [agentKey, runs] of fleetCache) client.send("fleet", { agentKey, runs });
     res.once("close", () => pending.delete(client.id));
+    return client;
   }
 
   function subscribe(body: unknown, res: ServerResponse): void {
@@ -382,8 +698,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     if (clientId === undefined || agentKey === undefined) throw new HttpError(400, "E_BAD_REQUEST");
     const client = sse.get(clientId);
     if (client === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown clientId");
-    if (registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
-    client.subscribed.delete(agentKey); // re-subscribe = fresh snapshot (gap/resync recovery)
+    if (routeDeps.registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
+    client.subscribed.delete(agentKey);
     const p: PendingSub = { frames: [], overflow: false };
     let m = pending.get(clientId);
     if (m === undefined) pending.set(clientId, (m = new Map()));
@@ -411,13 +727,708 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (!/^\d{1,9}$/.test(limitRaw)) throw new HttpError(400, "E_BAD_REQUEST", "bad limit");
       limit = Math.min(HISTORY_PAGE_MAX, Math.max(1, Number(limitRaw)));
     }
-    if (registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
+    if (routeDeps.registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
     try {
-      sendJson(res, 200, await withDeadline(history.page(agentKey, before, limit), HISTORY_GUARD_MS));
+      sendJson(res, 200, await withDeadline(routeDeps.history.page(agentKey, before, limit), HISTORY_GUARD_MS));
     } catch (err) {
-      const d = safeErrorDetail(err, log);
+      const d = safeErrorDetail(err, routeDeps.log);
       throw new HttpError(statusFor(d.code), d.code, d.message);
     }
+  }
+
+  return { pending, fleetCache, onHubEvent, subscribe, unsubscribe, openEvents, historyPage };
+}
+
+// ---------------------------------------------------------------------------
+// LAN application router (plan §2.5, §6.4, §7)
+// ---------------------------------------------------------------------------
+
+export interface LanRuntime {
+  lan: LanFrontendDeps;
+  routes: RouteSet;
+  lanSse: SseHub;
+  root: string;
+  now: () => number;
+  version: () => string;
+  log: HubLog;
+  clientInflight: Map<string, number>;
+  sidInflight: Map<string, { promise: Promise<LanSessionRecord | undefined>; waiters: number }>;
+  /** §4.2 review fix (LC #1): per-`SseClient.id` local absolute-expiry timers, keyed so a
+   * connection's own close/revoke can clear it and `LanFacade.close()` can sweep the rest. */
+  absoluteExpiryTimers: Map<string, ReturnType<typeof setTimeout>>;
+  /** §5.1/§9.2 review fix (LC #2): marks a corrupt KDF param row so the next status rebuild
+   * folds `db-invalid:kdf` into `LanStatus.warnings` — set by the login path's
+   * `onCorruptKdfParams`, read by `buildLanStatus` via the closure in `createHttpFrontend`. */
+  markKdfInvalid: () => void;
+}
+
+function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
+  let entry = rt.sidInflight.get(sidHash);
+  if (entry === undefined) {
+    const promise = rt.lan.store.touchSession(sidHash, rt.now()).finally(() => {
+      rt.sidInflight.delete(sidHash);
+    });
+    entry = { promise, waiters: 1 };
+    rt.sidInflight.set(sidHash, entry);
+    return promise;
+  }
+  if (entry.waiters >= LAN_SID_WAITERS_CAP) return "busy";
+  entry.waiters++;
+  return entry.promise;
+}
+
+function releaseClientInflight(rt: LanRuntime, ip: string): void {
+  const c = (rt.clientInflight.get(ip) ?? 1) - 1;
+  if (c <= 0) rt.clientInflight.delete(ip);
+  else rt.clientInflight.set(ip, c);
+}
+
+/** `lan-store.ts`'s concrete `LanStore` exposes an unfrozen `touchSessionReserved` for exactly
+ * this tick (its own doc comment says so), but `LanFrontendDeps.store` is typed as the frozen
+ * `LanStorePort` (§1.4.1/§4, W1) which has no such method — widening it is a signature change
+ * out of this package's review-fix authorization (only `ConnLease` got one, lan-plan.md §15.9
+ * #1). Duck-type it instead: use the reserved channel when the concrete store happens to expose
+ * it, otherwise fall back to the plain (frozen) `touchSession` — either way the validation logic
+ * below is identical. */
+function touchForExpiryRecheck(
+  store: LanFrontendDeps["store"],
+  sidHash: string,
+  now: number,
+): Promise<LanSessionRecord | undefined> {
+  const reserved = (store as { touchSessionReserved?: LanFrontendDeps["store"]["touchSession"] }).touchSessionReserved;
+  return typeof reserved === "function" ? reserved.call(store, sidHash, now) : store.touchSession(sidHash, now);
+}
+
+/** §4.2 "SSE 到期复核" (LC review fix, lan-plan.md §15.9 #3): a 55s tick, independent of `sse.ts`'s
+ * ping-only keepalive, that re-validates every authenticated LAN SSE connection's session —
+ * revoked (`deleteSession`)/rotated (`setPassword`'s epoch bump)/expired sessions must not leave
+ * an SSE stream open past this cadence even if nothing else ever touches them again. Per §4.2:
+ * processes at most `LAN_SSE_EXPIRY_BATCH_CAP` (32) clients per tick, serially, deferring any
+ * remainder to the next tick (backlog only grows if `LAN_SSE_EXPIRY_TICK_MS` is somehow shorter
+ * than 32 sequential IPC round-trips, which never happens in practice); a store rejection (`E_DB`
+ * / timeout) *keeps* the connection open and only logs — "can't verify" is never treated as
+ * "revoke". */
+/** Exported for a focused unit test on the §4.2 review-fix behaviors (LC #3's `verifiedAt`
+ * update; the batch/deadline/db-rejection paths are already covered end-to-end through
+ * `tests/web-hub/http/lan-sse-expiry.test.ts`'s real HTTP harness) — not part of any frozen
+ * (`ports.ts`) surface. */
+export async function recheckLanSseExpiry(rt: LanRuntime): Promise<void> {
+  const clients = rt.lanSse
+    .list()
+    .filter((c): c is SseClient & { auth: NonNullable<SseClient["auth"]> } => c.auth !== undefined);
+  if (clients.length === 0) return;
+  const batch = clients.slice(0, LAN_SSE_EXPIRY_BATCH_CAP);
+  if (clients.length > batch.length) {
+    rt.log.warn("web-hub lan http: sse expiry recheck backlog, deferring remainder to next tick", {
+      pending: clients.length - batch.length,
+    });
+  }
+  const deadline = rt.now() + LAN_SSE_EXPIRY_BATCH_DEADLINE_MS;
+  for (const client of batch) {
+    if (rt.now() > deadline) {
+      rt.log.warn("web-hub lan http: sse expiry recheck batch deadline exceeded, deferring remainder", {});
+      break;
+    }
+    const auth = client.auth;
+    let rec: LanSessionRecord | undefined;
+    try {
+      rec = await touchForExpiryRecheck(rt.lan.store, auth.sidHash, rt.now());
+    } catch (err) {
+      rt.log.error("web-hub lan http: sse expiry recheck touchSession failed, keeping connection", {
+        error: String(err),
+      });
+      continue;
+    }
+    const expired =
+      rec === undefined ||
+      rec.epoch !== auth.epoch ||
+      rec.boundOrigin !== auth.boundOrigin ||
+      rt.now() >= Math.min(rec.expiresAt, rec.absoluteExpiresAt);
+    if (expired) rt.lanSse.revoke((c) => c === client, "expired");
+    // §4.2 review fix (LC #3): a successful recheck (not expired) is itself proof of liveness —
+    // record it on the client's own `auth` so `list()`/observability reflects the last time this
+    // connection's session was actually re-validated, not just when it was opened.
+    else auth.verifiedAt = rt.now();
+  }
+}
+
+/** §4.2 review fix (LC #1): schedules (and, on fire, reschedules across `ABS_EXPIRY_MAX_DELAY_MS`
+ * segments) a client-local `unref`'d timer at the session's `absoluteExpiresAt` (7-day hard
+ * ceiling) so an LAN SSE connection is force-closed at that instant even while the db is
+ * unavailable and `recheckLanSseExpiry`'s 55s tick can't reach it (that tick depends on
+ * `touchSession`, i.e. the db). Idempotent to call again for the same client — overwrites
+ * whatever timer was tracked under `client.id`. */
+function scheduleAbsoluteExpiry(rt: LanRuntime, client: SseClient, absoluteExpiresAt: number): void {
+  const arm = (): void => {
+    const remaining = absoluteExpiresAt - rt.now();
+    if (remaining <= 0) {
+      rt.absoluteExpiryTimers.delete(client.id);
+      if (client.revoked !== true) rt.lanSse.revoke((c) => c === client, "expired");
+      return;
+    }
+    const t = setTimeout(arm, Math.min(remaining, ABS_EXPIRY_MAX_DELAY_MS));
+    t.unref();
+    rt.absoluteExpiryTimers.set(client.id, t);
+  };
+  arm();
+}
+
+/** Clears (if any) the absolute-expiry timer for `clientId` — called on the connection's own
+ * `close` (natural disconnect, logout/passwd revoke, tick-recheck revoke) and swept in bulk by
+ * `LanFacade.close()`. Safe to call when there is nothing to clear. */
+function clearAbsoluteExpiry(rt: LanRuntime, clientId: string): void {
+  const t = rt.absoluteExpiryTimers.get(clientId);
+  if (t === undefined) return;
+  clearTimeout(t);
+  rt.absoluteExpiryTimers.delete(clientId);
+}
+
+interface LanSessionResult {
+  userId: number;
+  epoch: number;
+  sidHash: string;
+  /** §4.2 review fix (LC #1): threaded through so `/api/events` can arm `scheduleAbsoluteExpiry`. */
+  absoluteExpiresAt: number;
+}
+
+/** §2.5 step 5's "需要会话" gate: per-clientIP inflight quota → (for `/api/events`) SSE
+ * global/per-sid limits, checked *before* any IPC → `touchSession` (deduped per `sidHash`, ≤8
+ * riders) → expiry + origin-binding re-check. Sends the terminal error response itself and
+ * returns `undefined` on any failure; on success the caller still owns `res` (and, for SSE,
+ * `res`'s lifetime governs when the inflight slot is released). */
+async function requireLanSession(
+  rt: LanRuntime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RequestContext,
+  isSseRoute: boolean,
+  lease: ConnLease,
+): Promise<LanSessionResult | undefined> {
+  const ip = ctx.clientIp;
+  const current = rt.clientInflight.get(ip) ?? 0;
+  if (current >= LAN_CLIENT_IP_INFLIGHT_CAP) {
+    sendError(res, 429, "E_RATE");
+    return undefined;
+  }
+  rt.clientInflight.set(ip, current + 1);
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    releaseClientInflight(rt, ip);
+  };
+  res.once("close", release);
+  res.once("finish", release);
+
+  const sid = readLanCookie(req.headers.cookie);
+  if (sid === undefined) {
+    release();
+    sendError(res, 401, "E_AUTH");
+    return undefined;
+  }
+  const sidHash = hashSid(sid);
+
+  if (isSseRoute) {
+    const perSid = rt.lanSse.list().filter((c) => c.auth?.sidHash === sidHash).length;
+    if (rt.lanSse.count() >= LAN_SSE_GLOBAL_CAP || perSid >= LAN_SSE_PER_SID_CAP) {
+      release();
+      sendError(res, 429, "E_RATE");
+      return undefined;
+    }
+  }
+
+  const touched = sharedTouchSession(rt, sidHash);
+  let rec: LanSessionRecord | undefined;
+  if (touched === "busy") {
+    release();
+    sendError(res, 429, "E_RATE");
+    return undefined;
+  }
+  try {
+    rec = await touched;
+  } catch (err) {
+    release();
+    rt.log.error("web-hub lan http: touchSession failed", { error: String(err) });
+    sendError(res, 503, "E_DB");
+    return undefined;
+  }
+  if (rec === undefined) {
+    release();
+    sendError(res, 401, "E_AUTH");
+    return undefined;
+  }
+  const expired = rt.now() >= Math.min(rec.expiresAt, rec.absoluteExpiresAt);
+  if (expired || rec.boundOrigin !== ctx.externalOrigin) {
+    release();
+    sendError(res, 401, "E_AUTH");
+    return undefined;
+  }
+  lease.enterAuthed();
+  return { userId: rec.userId, epoch: rec.epoch, sidHash, absoluteExpiresAt: rec.absoluteExpiresAt };
+}
+
+function csrfOkLan(req: IncomingMessage, ctx: RequestContext): boolean {
+  const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+  if (ct !== "application/json") return false;
+  if (req.headers["x-pwh"] !== "1") return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return false;
+  const parsed = parseOrigin(origin);
+  if (parsed === undefined) return false;
+  return canonicalOrigin(parsed.scheme, parsed.hostKey) === ctx.externalOrigin;
+}
+
+async function handleLanRequestInner(
+  rt: LanRuntime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RequestContext,
+  lease: ConnLease,
+): Promise<void> {
+  setSecurityHeaders(res);
+  const url = req.url ?? "/";
+  const qi = url.indexOf("?");
+  const path = qi < 0 ? url : url.slice(0, qi);
+  const query = new URLSearchParams(qi < 0 ? "" : url.slice(qi + 1));
+  const method = (req.method ?? "GET").toUpperCase();
+
+  if (method === "OPTIONS") throw new HttpError(404, "E_NOT_FOUND");
+
+  if (path === "/healthz") {
+    if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
+    sendJson(
+      res,
+      200,
+      { ok: true, version: rt.version(), authMode: "password", plaintext: ctx.scheme === "http" },
+      { "Cache-Control": "no-store" },
+    );
+    return;
+  }
+
+  if (path !== "/api" && !path.startsWith("/api/")) {
+    if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
+    if (!(await serveStatic(rt.root, path, res, { authMode: "password" }))) throw new HttpError(404, "E_NOT_FOUND");
+    return;
+  }
+
+  res.setHeader("Cache-Control", "no-store");
+
+  if (method === "POST") {
+    if (!csrfOkLan(req, ctx)) throw new HttpError(403, "E_CSRF");
+    if (path === "/api/login") {
+      const body = await readJson(req, LAN_LOGIN_BODY_BYTES);
+      let outcome: LanLoginOutcome;
+      try {
+        outcome = await runLanLogin(
+          ctx,
+          body,
+          {
+            store: rt.lan.store,
+            kdf: rt.lan.kdf,
+            limiter: rt.lan.limiter,
+            admission: rt.lan.admission,
+            onCorruptKdfParams: (username, reason) => {
+              rt.log.error("web-hub lan http: corrupt kdf params (db-invalid:kdf)", { username, reason });
+              rt.markKdfInvalid();
+            },
+          },
+          rt.now(),
+          { onAdmitted: () => lease.enterLoginPending() },
+        );
+      } catch (err) {
+        // §6.3's class table (review fix, lan-plan.md §15.9 #1): every login-pending request must
+        // end by promoting to `authed` or falling back to the evictable `unauth` category — a
+        // store/KDF exception (e.g. a db timeout) is a terminal path too, not just 200/401/429.
+        lease.leaveLoginPending();
+        throw err;
+      }
+      if (outcome.status === 200) {
+        lease.enterAuthed();
+        sendJson(
+          res,
+          200,
+          // plan §10's wire field is `initialPassword` (review fix, lan-plan.md §15.9 #5) — this
+          // handler previously sent `initialPasswordInUse`, which the frontend never reads.
+          { ok: true, initialPassword: outcome.initialPasswordInUse },
+          { "Set-Cookie": formatLanCookie(outcome.cookie, { secure: ctx.scheme === "https" }) },
+        );
+      } else if (outcome.status === 429) {
+        lease.leaveLoginPending();
+        sendJson(
+          res,
+          429,
+          {
+            // review fix (lan-plan.md §15.9 #4): only the KDF fair-scheduling admission queue (safe
+            // to auto-retry) and the saturation sub-case (§6.2's own literal wire shape) get
+            // `E_RATE`; an ordinary per-IP backoff lockout gets the new `E_LOCKED` so the frontend's
+            // countdown-without-auto-retry branch (§10) is actually reachable.
+            error: outcome.kind === "admission" || outcome.saturated === true ? "E_RATE" : "E_LOCKED",
+            ...(outcome.saturated === true ? { saturated: true } : {}),
+          },
+          { "Retry-After": String(Math.ceil(outcome.retryAfterMs / 1000)) },
+        );
+      } else {
+        lease.leaveLoginPending();
+        sendError(res, 401, "E_AUTH");
+      }
+      return;
+    }
+    if (path === "/api/logout") {
+      const sid = readLanCookie(req.headers.cookie);
+      if (sid !== undefined) {
+        const sidHash = hashSid(sid);
+        try {
+          await rt.lan.store.deleteSession(sidHash);
+          rt.lanSse.revoke((c) => c.auth?.sidHash === sidHash, "revoked");
+        } catch (err) {
+          rt.log.error("web-hub lan http: logout deleteSession failed", { error: String(err) });
+        }
+      }
+      sendJson(
+        res,
+        200,
+        { ok: true },
+        { "Set-Cookie": formatLanCookie("", { secure: ctx.scheme === "https", clear: true }) },
+      );
+      return;
+    }
+    const session = await requireLanSession(rt, req, res, ctx, false, lease);
+    if (session === undefined) return;
+    const body = await readJson(req);
+    if (path === "/api/subscribe") return rt.routes.subscribe(body, res);
+    if (path === "/api/unsubscribe") return rt.routes.unsubscribe(body, res);
+    throw new HttpError(404, "E_NOT_FOUND");
+  }
+
+  if (method === "GET") {
+    if (path === "/api/session") {
+      const session = await requireLanSession(rt, req, res, ctx, false, lease);
+      if (session === undefined) return;
+      const summary = await rt.lan.store.getUserSummary(session.userId);
+      sendJson(res, 200, {
+        username: summary?.username ?? "",
+        initialPasswordInUse: summary?.initialPasswordInUse ?? false,
+      });
+      return;
+    }
+    if (path === "/api/events") {
+      const session = await requireLanSession(rt, req, res, ctx, true, lease);
+      if (session === undefined) return;
+      const client = rt.routes.openEvents(req, res, {
+        sidHash: session.sidHash,
+        userId: session.userId,
+        epoch: session.epoch,
+        boundOrigin: ctx.externalOrigin,
+        verifiedAt: rt.now(),
+      });
+      // §4.2 review fix (LC #1): a db-independent hard ceiling — cleared on the connection's own
+      // `close` (natural disconnect, logout/passwd revoke, or the 55s tick's own "expired" revoke).
+      scheduleAbsoluteExpiry(rt, client, session.absoluteExpiresAt);
+      res.once("close", () => clearAbsoluteExpiry(rt, client.id));
+      return;
+    }
+    if (path === "/api/history") {
+      const session = await requireLanSession(rt, req, res, ctx, false, lease);
+      if (session === undefined) return;
+      await rt.routes.historyPage(query, res);
+      return;
+    }
+  }
+
+  throw new HttpError(404, "E_NOT_FOUND");
+}
+
+function handleLanRequest(
+  rt: LanRuntime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RequestContext,
+  lease: ConnLease,
+): Promise<void> {
+  return handleLanRequestInner(rt, req, res, ctx, lease).catch((err: unknown) => {
+    if (err instanceof HttpError) {
+      if (err.status === 413 || err.status === 408) {
+        res.setHeader("Connection", "close");
+        res.once("finish", () => req.destroy());
+      }
+      sendError(res, err.status, err.code, err.message === err.code ? undefined : err.message);
+      return;
+    }
+    rt.log.error("web-hub lan http: request failed", { url: req.url, error: String(err) });
+    if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
+    else res.destroy();
+  });
+}
+
+function buildLanStatus(
+  cfg: LanFrontendDeps["cfg"],
+  snapshot: HostSnapshot,
+  boundPort: number,
+  extraWarnings: readonly string[] = [],
+): LanStatus {
+  const hosts = [...snapshot.hostKeys]
+    .map((k) => k.slice(0, k.lastIndexOf(":")))
+    .sort((a, b) => {
+      const aIsIp =
+        classifyHostToken(a).ok &&
+        classifyHostToken(a).ok === true &&
+        (classifyHostToken(a) as { kind: string }).kind === "ipv4";
+      const bIsIp =
+        classifyHostToken(b).ok &&
+        classifyHostToken(b).ok === true &&
+        (classifyHostToken(b) as { kind: string }).kind === "ipv4";
+      if (aIsIp !== bIsIp) return aIsIp ? -1 : 1;
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+  const proxy =
+    cfg.trustProxyFrom.length > 0
+      ? { trustedFrom: [...cfg.trustProxyFrom], externalOrigins: [...cfg.externalOrigins] }
+      : undefined;
+  return {
+    state: "on",
+    port: boundPort,
+    hosts,
+    omitted: [...snapshot.omitted],
+    ...(proxy === undefined ? {} : { proxy }),
+    warnings: ["plaintext", ...extraWarnings],
+  };
+}
+
+export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
+  const { config, registry, bus, history, log, now } = deps;
+  const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
+  const sse = createSseHub({ now });
+  const root = webRoot();
+  let server: Server | undefined;
+  let port = 0;
+  let unsubscribeBus: (() => void) | undefined;
+  let closed = false;
+
+  const routes = createRouteSet(sse, {
+    registry,
+    history,
+    log,
+    info: deps.info,
+    port: () => port,
+    isClosed: () => closed,
+  });
+
+  // ---- LAN facade (§2.5/§6/§7) ------------------------------------------
+
+  let lanFacade: LanFacade | undefined;
+  let lanSseRef: SseHub | undefined;
+  if (deps.lan !== undefined) {
+    const lan = deps.lan;
+    const lanSse = createSseHub({ now });
+    lanSseRef = lanSse;
+    const lanRoutes = createRouteSet(lanSse, {
+      registry,
+      history,
+      log,
+      info: deps.info,
+      port: () => lan.cfg.port,
+      isClosed: () => lanClosed,
+    });
+    let lanClosed = false;
+    const unsubscribeLanBus = bus.subscribe(lanRoutes.onHubEvent);
+    // §5.1/§9.2 review fix (LC #2): sticky once set (a corrupt KDF row doesn't self-heal without
+    // an operator fixing the db), folded into `LanStatus.warnings` by every subsequent rebuild.
+    let kdfInvalidWarning = false;
+    const rt: LanRuntime = {
+      lan,
+      routes: lanRoutes,
+      lanSse,
+      root,
+      now,
+      version: () => deps.info().version,
+      log,
+      clientInflight: new Map(),
+      sidInflight: new Map(),
+      absoluteExpiryTimers: new Map(),
+      markKdfInvalid: () => {
+        if (kdfInvalidWarning) return;
+        kdfInvalidWarning = true;
+        if (handle === undefined) return;
+        status = buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings());
+        lan.onStatus(status);
+      },
+    };
+    const connGuard = createConnGuard();
+    let handle: LanListenerHandle | undefined;
+    let gen = 0;
+    let status: LanStatus = { state: "starting" };
+    let lastRecomputeAt = 0;
+    // Review fix (LC, plan §1.4/§3, W3 acceptance item 1): `start()`/`close()` race guard.
+    // `startGen` is bumped by both a fresh `start()` call and by `close()` — whichever `start()`
+    // captured the *current* value as `mine` right before its own `await` is the only one allowed
+    // to publish a result; any attempt that finds `mine !== startGen` (a newer `start()` ran) or
+    // `lanClosed` (a `close()` ran) after resuming from that `await` must self-clean instead of
+    // mutating `handle`/`status` (§1.4 "迟到结果自我清理"). `inFlightStartAborts` lets `close()`
+    // proactively abort a `start()` that is still awaiting `transport.bind()` so the half/fully
+    // bound listener (and the port it holds) is released immediately rather than only once that
+    // bind attempt eventually settles on its own.
+    let startGen = 0;
+    const inFlightStartAborts = new Set<AbortController>();
+
+    function extraWarnings(): string[] {
+      return kdfInvalidWarning ? ["db-invalid:kdf"] : [];
+    }
+
+    function recompute(force: boolean): void {
+      if (handle === undefined || lanClosed) return;
+      const t = now();
+      if (!force && t - lastRecomputeAt < LAN_RECOMPUTE_THROTTLE_MS) return;
+      lastRecomputeAt = t;
+      const next = lan.hosts.compute(lan.cfg);
+      const cur = handle.current();
+      if (sameHostKeys(cur, next)) return;
+      gen++;
+      const swapped: HostSnapshot = { ...next, gen };
+      handle.swap(swapped);
+      status = buildLanStatus(lan.cfg, swapped, handle.port, extraWarnings());
+      lan.onStatus(status);
+    }
+
+    const transport = createLanTransport({
+      log,
+      connGuard,
+      onIPv4HostReject: () => recompute(false),
+      handleRequest: (req, res, ctx, lease) => handleLanRequest(rt, req, res, ctx, lease),
+    });
+
+    lanFacade = {
+      async start(): Promise<LanStatus> {
+        // §1.4/§3 "close 之后的 start 为 no-op": once closed, this facade never opens a listener again
+        // (the only recovery path is a whole-new hub process via `/webhub restart`).
+        if (lanClosed) return status;
+        const mine = ++startGen;
+        const startAbort = new AbortController();
+        inFlightStartAborts.add(startAbort);
+        let timedOut = false;
+        const deadlineTimer = setTimeout(() => {
+          timedOut = true;
+          startAbort.abort(new Error(`web-hub: LAN start exceeded ${LAN_START_DEADLINE_MS}ms`));
+        }, LAN_START_DEADLINE_MS);
+        deadlineTimer.unref?.();
+        try {
+          const first = lan.hosts.compute(lan.cfg);
+          gen = 1;
+          let bound: LanListenerHandle;
+          try {
+            bound = await transport.bind(lan.cfg.port, { ...first, gen }, startAbort.signal);
+          } catch (err) {
+            if (mine !== startGen || lanClosed) return status; // a newer start()/close() already won
+            const reason: LanOffReason = timedOut ? "timeout" : "listen-failed";
+            status = reason === "timeout" ? { state: "off", reason } : { state: "off", reason, detail: String(err) };
+            return status;
+          }
+          if (mine !== startGen || lanClosed) {
+            // A newer start() (tests only — production calls this once) or a concurrent close() ran
+            // while we were awaiting `bind()`: the port we just bound is now unwanted — release it
+            // ourselves (§1.4 "已 bind 的 handle 被关闭、端口可重新 bind") and leave `handle`/`status`
+            // untouched so we can never resurrect a facade that `close()` already tore down.
+            void bound.close();
+            return status;
+          }
+          handle = bound;
+          status = buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings());
+          lan.scope.timer(() => recompute(true), LAN_TICK_MS, true);
+          lan.scope.timer(
+            () => {
+              if (lanClosed) return;
+              void recheckLanSseExpiry(rt).catch((err: unknown) => {
+                rt.log.error("web-hub lan http: sse expiry recheck tick failed", { error: String(err) });
+              });
+            },
+            LAN_SSE_EXPIRY_TICK_MS,
+            true,
+          );
+          return status;
+        } finally {
+          clearTimeout(deadlineTimer);
+          inFlightStartAborts.delete(startAbort);
+        }
+      },
+      status(): LanStatus {
+        return status;
+      },
+      async close(): Promise<void> {
+        lanClosed = true;
+        startGen++; // invalidate any start() awaiting bind() right now, or about to be called
+        // §1.4 "close 与 start 并发": don't just wait for an in-flight start()'s bind() to settle on
+        // its own — abort it now so the half/fully bound listener (and the port) is released
+        // immediately; `bind()`'s own abort handling (see `createLanTransport`) does the actual
+        // `srv.close()`.
+        for (const c of inFlightStartAborts) c.abort(new Error("web-hub: LAN closed"));
+        inFlightStartAborts.clear();
+        unsubscribeLanBus();
+        lanSse.closeAll();
+        rt.sidInflight.clear();
+        rt.clientInflight.clear();
+        // §4.2 review fix (LC #1): sweep any absolute-expiry timers not already cleared by their
+        // connection's own `close` event (the `closeAll()` above ends every response, but that
+        // event fires asynchronously — don't leave unref'd timers dangling past this `close()`).
+        for (const t of rt.absoluteExpiryTimers.values()) clearTimeout(t);
+        rt.absoluteExpiryTimers.clear();
+        await handle?.close();
+      },
+      revoke(target: { sidHash: string } | { userId: number }): number {
+        const pred: (c: SseClient) => boolean =
+          "sidHash" in target ? (c) => c.auth?.sidHash === target.sidHash : (c) => c.auth?.userId === target.userId;
+        return lanSse.revoke(pred, "revoked");
+      },
+    };
+
+    // §4.1 fail-closed (LD review-fix P1): the resident query subprocess giving up permanently
+    // (db-client.ts's `onUnavailable`, after its own 1s→5s→30s backoff exhausts 4 restarts in a
+    // rolling 10-minute window) must actually tear the LAN listener down, not just relabel the
+    // status — recovery is `/webhub restart` (a fresh process/assembly), never an in-place rebind
+    // (`db-client.ts` never respawns again once `unavailable` is set, so there is nothing to
+    // rebind *to* short of a full restart). `LanFrontendDeps.store` is frozen to the plain
+    // `LanStorePort` (§1.4.1, W1), which has no `onUnavailable` — duck-type the concrete `LanStore`
+    // instance instead (same pattern as `touchForExpiryRecheck`'s `touchSessionReserved`, §15.9
+    // #3: widening the frozen interface is out of this package's authorization, so probe for the
+    // method at runtime rather than changing the type). `defaultLanAssembly` (LD, lan-assembly.ts)
+    // also subscribes to this same event to fold the reason into `hub.json.lan` even when no
+    // `HttpFrontend.lan` exists to close (e.g. a fake facade in a unit test); that call is
+    // idempotent with this one (`onStatus` is just the latest write) and this subscription is the
+    // only one with the actual listener handle, so it is authoritative for `LanFacade.status()`
+    // (read by `admin.ts`'s `lan_req info`/`/webhub status`) and for really closing the port.
+    const storeWithUnavailable = lan.store as {
+      onUnavailable?: (cb: (reason: "db-unavailable") => void) => () => void;
+    };
+    if (typeof storeWithUnavailable.onUnavailable === "function") {
+      storeWithUnavailable.onUnavailable(() => {
+        if (lanClosed) return;
+        status = { state: "off", reason: "db-unavailable" };
+        lan.onStatus(status);
+        void lanFacade?.close().catch((err: unknown) => {
+          log.error("web-hub lan http: failed to close LAN listener after db-unavailable", { error: String(err) });
+        });
+      });
+    }
+  }
+
+  // ---- loopback subscriptions -------------------------------------------
+
+  function allowedHost(host: string | undefined): boolean {
+    if (host === undefined) return false;
+    const h = host.toLowerCase();
+    return h === `127.0.0.1:${port}` || h === `localhost:${port}`;
+  }
+
+  function csrfOk(req: IncomingMessage): boolean {
+    const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+    if (ct !== "application/json") return false;
+    if (req.headers["x-pwh"] !== "1") return false;
+    const origin = req.headers.origin;
+    if (origin !== undefined && origin.toLowerCase() !== `http://${(req.headers.host ?? "").toLowerCase()}`)
+      return false;
+    return true;
+  }
+
+  function openEvents(req: IncomingMessage, res: ServerResponse): void {
+    routes.openEvents(req, res);
   }
 
   async function handleApi(
@@ -459,8 +1470,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         return;
       }
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
-      if (path === "/api/subscribe") return subscribe(body, res);
-      if (path === "/api/unsubscribe") return unsubscribe(body, res);
+      if (path === "/api/subscribe") return routes.subscribe(body, res);
+      if (path === "/api/unsubscribe") return routes.unsubscribe(body, res);
       if (
         path === "/api/cmd" ||
         path === "/api/dialog" ||
@@ -473,7 +1484,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     if (method === "GET") {
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
       if (path === "/api/events") return openEvents(req, res);
-      if (path === "/api/history") return historyPage(query, res);
+      if (path === "/api/history") return routes.historyPage(query, res);
     }
     throw new HttpError(404, "E_NOT_FOUND");
   }
@@ -492,7 +1503,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       sendJson(res, 200, { ok: true, version: deps.info().version }, { "Cache-Control": "no-store" });
       return;
     }
-    if (!(await serveStatic(root, path, res))) throw new HttpError(404, "E_NOT_FOUND");
+    if (!(await serveStatic(root, path, res, { authMode: "token" }))) throw new HttpError(404, "E_NOT_FOUND");
   }
 
   function onRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -525,26 +1536,42 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     });
   }
 
-  async function listen(): Promise<{ port: number }> {
+  async function listen(opts?: { signal?: AbortSignal }): Promise<{ port: number }> {
     if (server !== undefined) return { port };
     if (closed) throw new Error("web-hub http frontend already closed");
+    const signal = opts?.signal;
+    if (signal?.aborted === true) throw toAbortError(signal);
     auth.token(); // create / repair the token file up front
     const srv = createServer(onRequest);
     srv.headersTimeout = 10_000;
     srv.requestTimeout = 15_000;
     srv.on("connection", (socket) => socket.unref());
     srv.on("clientError", (_err, socket) => socket.destroy());
+    let abortedLate = false;
+    const onAbort = (): void => {
+      abortedLate = true;
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      port = await tryListen(srv, config.port);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE" || config.port === 0) throw err;
-      log.warn("web-hub http: port in use, falling back to a random port", { port: config.port });
-      port = await tryListen(srv, 0);
+      try {
+        port = await tryListen(srv, config.port);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE" || config.port === 0) throw err;
+        log.warn("web-hub http: port in use, falling back to a random port", { port: config.port });
+        port = await tryListen(srv, 0);
+      }
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+    if (abortedLate) {
+      // The caller (startHub) already gave up while `listen` was in flight — self-clean.
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+      throw toAbortError(signal!);
     }
     srv.on("error", (err) => log.error("web-hub http: server error", { error: String(err) }));
     srv.unref();
     server = srv;
-    unsubscribeBus = bus.subscribe(onHubEvent);
+    unsubscribeBus = bus.subscribe(routes.onHubEvent);
     log.info("web-hub http listening", { host: BIND_HOST, port });
     return { port };
   }
@@ -552,9 +1579,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
+    await lanFacade?.close();
     unsubscribeBus?.();
     unsubscribeBus = undefined;
-    pending.clear();
+    routes.pending.clear();
     sse.closeAll();
     const srv = server;
     if (srv === undefined) return;
@@ -569,5 +1597,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     });
   }
 
-  return { listen, close, clientCount: () => sse.count() };
+  return {
+    listen,
+    close,
+    clientCount: () => sse.count() + (lanSseRef === undefined ? 0 : lanSseRef.count()),
+    ...(lanFacade === undefined ? {} : { lan: lanFacade }),
+  };
 };

@@ -7,9 +7,10 @@
  * literal plus total serialized size (≤ MAX_FRAME_BYTES). Unknown frame types —
  * including RESERVED_FRAME_TYPES — decode to `undefined` and are ignored.
  */
-import { Type, type TObject } from "@sinclair/typebox";
+import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { MAX_FRAME_BYTES } from "./ndjson.js";
+import type { LanStatus } from "./lan.js";
 
 // ---------------------------------------------------------------------------
 // data types
@@ -154,7 +155,40 @@ export type AgentFrame =
   | { t: "branch_reply"; rid: string; entries: WireEntry[]; truncated: boolean }
   | { t: "gap"; fromSeq: number }
   | { t: "ping"; ts: number }
-  | { t: "pong"; ts: number };
+  | { t: "pong"; ts: number }
+  | LanReqFrame
+  | HubCtlFrame;
+
+// ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
+
+export type LanReqFrame =
+  | { t: "lan_req"; rid: string; op: "info" }
+  | { t: "lan_req"; rid: string; op: "passwd"; username: string; password: string }
+  | { t: "lan_req"; rid: string; op: "unlock" };
+
+export interface HubCtlFrame {
+  t: "hub_ctl";
+  rid: string;
+  op: "shutdown";
+  reason: "restart";
+}
+
+export interface HubCtlAckFrame {
+  t: "hub_ctl_ack";
+  rid: string;
+}
+
+/** `lan_res{ok:true}.info` (§8.1); `lan` 字段是 `hub.json.lan` 同样的 `LanStatus`（定义在 `protocol/lan.ts`，避免与 `hub/ports.ts` 循环引用）。 */
+export interface LanInfoPayload {
+  username: string;
+  initialPassword?: string;
+  initialLogin?: { ip: string; at: number };
+  lan: LanStatus;
+}
+
+export type LanResFrame =
+  | { t: "lan_res"; rid: string; ok: true; info?: LanInfoPayload }
+  | { t: "lan_res"; rid: string; ok: false; code: string; message: string };
 
 // hub→agent
 export type HubFrame =
@@ -167,12 +201,15 @@ export type HubFrame =
       pingMs: number;
       leaseMs: number;
       http: { port: number };
+      caps?: string[]; // S1: "ctl.v1"（始终带）/ "lan.v1"（收到 config.lan 时带），只在装配了 admin 端口时输出
     }
   | { t: "hello_reject"; code: "E_PROTO" | "E_BAD_HELLO" | "E_TICKET"; message: string; retryAfterMs: number }
   | { t: "snapshot_req"; rid: string }
   | { t: "branch_req"; rid: string; maxBytes: number }
   | { t: "ping"; ts: number }
-  | { t: "pong"; ts: number };
+  | { t: "pong"; ts: number }
+  | LanResFrame
+  | HubCtlAckFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -361,6 +398,7 @@ const HelloAckSchema = Type.Object({
   pingMs: Type.Number(),
   leaseMs: Type.Number(),
   http: Type.Object({ port: Type.Integer() }),
+  caps: Type.Optional(Type.Array(Type.String())),
 });
 
 const HelloRejectSchema = Type.Object({
@@ -378,7 +416,86 @@ const BranchReqSchema = Type.Object({
   maxBytes: Type.Number(),
 });
 
-const agentFrameSchemas: Readonly<Record<string, TObject>> = {
+// --- S1 LAN control-plane frames (§8.1): each op / ok variant is its own strict
+// (additionalProperties:false) schema, matching the discriminated-union TS types above
+// exactly — "passwd" requires username+password and rejects them on "info"/"unlock";
+// "ok:true" and "ok:false" are mutually exclusive (the latter requires code+message,
+// the former forbids them) (review fix #4). ---
+
+const LanReqInfoSchema = Type.Object(
+  { t: Type.Literal("lan_req"), rid: Type.String(), op: Type.Literal("info") },
+  { additionalProperties: false },
+);
+const LanReqPasswdSchema = Type.Object(
+  {
+    t: Type.Literal("lan_req"),
+    rid: Type.String(),
+    op: Type.Literal("passwd"),
+    username: Type.String(),
+    password: Type.String(),
+  },
+  { additionalProperties: false },
+);
+const LanReqUnlockSchema = Type.Object(
+  { t: Type.Literal("lan_req"), rid: Type.String(), op: Type.Literal("unlock") },
+  { additionalProperties: false },
+);
+const LanReqSchema = Type.Union([LanReqInfoSchema, LanReqPasswdSchema, LanReqUnlockSchema]);
+
+const HubCtlSchema = Type.Object(
+  {
+    t: Type.Literal("hub_ctl"),
+    rid: Type.String(),
+    op: Type.Literal("shutdown"),
+    reason: Type.Literal("restart"),
+  },
+  { additionalProperties: false },
+);
+
+const HubCtlAckSchema = Type.Object(
+  {
+    t: Type.Literal("hub_ctl_ack"),
+    rid: Type.String(),
+  },
+  { additionalProperties: false },
+);
+
+// `info.lan` is validated loosely (`Type.Unknown()`): `LanStatus` is a discriminated union
+// pinned by the exported TS type and by `tests/web-hub/contract/types.test-d.ts`, not
+// duplicated here — the same posture as `WireMessageSchema`/`WireEventSchema` for same-
+// user-trusted payloads. Every other field is strict (additionalProperties:false).
+const LanInfoPayloadSchema = Type.Object(
+  {
+    username: Type.String(),
+    initialPassword: Type.Optional(Type.String()),
+    initialLogin: Type.Optional(Type.Object({ ip: Type.String(), at: Type.Number() }, { additionalProperties: false })),
+    lan: Type.Unknown(),
+  },
+  { additionalProperties: false },
+);
+
+const LanResOkSchema = Type.Object(
+  {
+    t: Type.Literal("lan_res"),
+    rid: Type.String(),
+    ok: Type.Literal(true),
+    info: Type.Optional(LanInfoPayloadSchema),
+  },
+  { additionalProperties: false },
+);
+const LanResErrSchema = Type.Object(
+  {
+    t: Type.Literal("lan_res"),
+    rid: Type.String(),
+    ok: Type.Literal(false),
+    code: Type.String(),
+    message: Type.String(),
+  },
+  { additionalProperties: false },
+);
+const LanResSchema = Type.Union([LanResOkSchema, LanResErrSchema]);
+
+const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   hello: HelloSchema,
   bye: ByeSchema,
   session: SessionFrameSchema,
@@ -391,15 +508,19 @@ const agentFrameSchemas: Readonly<Record<string, TObject>> = {
   gap: GapSchema,
   ping: PingSchema,
   pong: PongSchema,
+  lan_req: LanReqSchema,
+  hub_ctl: HubCtlSchema,
 };
 
-const hubFrameSchemas: Readonly<Record<string, TObject>> = {
+const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   hello_ack: HelloAckSchema,
   hello_reject: HelloRejectSchema,
   snapshot_req: SnapshotReqSchema,
   branch_req: BranchReqSchema,
   ping: PingSchema,
   pong: PongSchema,
+  lan_res: LanResSchema,
+  hub_ctl_ack: HubCtlAckSchema,
 };
 
 // ---------------------------------------------------------------------------
@@ -416,7 +537,7 @@ export function decodeHubFrame(raw: unknown): HubFrame | undefined {
   return decodeWith(hubFrameSchemas, raw) as HubFrame | undefined;
 }
 
-function decodeWith(schemas: Readonly<Record<string, TObject>>, raw: unknown): object | undefined {
+function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): object | undefined {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   if (!withinFrameBudget(raw)) return undefined;
   const t = (raw as Record<string, unknown>)["t"];

@@ -20,6 +20,18 @@ import { renderBanner } from "./render/banner.js";
 import { renderFleet } from "./render/fleet.js";
 import { renderTranscript } from "./render/transcript.js";
 import { el } from "./render/dom.js";
+import { createPasswordClient } from "./password-client.js";
+import {
+  clearPasswordField,
+  hideLoginForm,
+  queryLoginUi,
+  readLoginForm,
+  setLoginBusy,
+  setLoginError,
+  showAuthModeError,
+  showInitialPasswordBanner,
+  showLoginForm,
+} from "./render/login.js";
 
 export const TOKEN_KEY = "pwh_token";
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -307,6 +319,32 @@ const PAGE_TRIGGER_PX = 48;
  * @param {Document} doc
  */
 export function mountApp(win, doc) {
+  return wireFleetUi(win, doc, (hooks) =>
+    createClient({
+      fetch: (url, init) => win.fetch(url, init),
+      EventSource: win.EventSource,
+      storage: win.localStorage,
+      location: win.location,
+      history: win.history,
+      setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+      clearTimeout: (t) => win.clearTimeout(t),
+      now: () => Date.now(),
+      ...hooks,
+    }),
+  );
+}
+
+/**
+ * Shared read-only fleet UI (agent list / session head / fleet panel /
+ * transcript) driven by an SSE-backed client. Used by both `mountApp` (token
+ * mode, `createClient`) and `mountPasswordApp` (password mode,
+ * `createPasswordClient` in `password-client.js`) — both transports expose
+ * the same `{ onMessage, onConn }` hook shape and `{ start, close }` shape.
+ * @param {any} win
+ * @param {Document} doc
+ * @param {(hooks: { onMessage: (msg: any) => void, onConn: (state: string) => void }) => { start(): Promise<void>, close(): void }} makeClient
+ */
+function wireFleetUi(win, doc, makeClient) {
   const $ = (/** @type {string} */ id) => /** @type {HTMLElement} */ (doc.getElementById(id));
   const ui = {
     conn: $("conn"),
@@ -330,15 +368,7 @@ export function mountApp(win, doc) {
   const lastSubAt = new Map();
   let subTimer = /** @type {any} */ (null);
 
-  const client = createClient({
-    fetch: (url, init) => win.fetch(url, init),
-    EventSource: win.EventSource,
-    storage: win.localStorage,
-    location: win.location,
-    history: win.history,
-    setTimeout: (fn, ms) => win.setTimeout(fn, ms),
-    clearTimeout: (t) => win.clearTimeout(t),
-    now: () => Date.now(),
+  const client = makeClient({
     onMessage: dispatch,
     onConn: (c) => dispatch({ event: "conn", data: { state: c } }),
   });
@@ -487,6 +517,176 @@ export function mountApp(win, doc) {
   return { client, getState: () => state };
 }
 
+// ---------------------------------------------------------------------------
+// auth-mode gate (plan §10, package LF)
+// ---------------------------------------------------------------------------
+
+/**
+ * `data-auth-mode` three-state gate: `mountApp` above is untouched (still the
+ * exact token-mode function every existing test calls directly) — this is
+ * the new entrypoint the bottom-of-file bootstrap actually uses, and it is
+ * the one place with "no fallback to token" (plan §10 row 1): only the
+ * literal string `"token"` reaches `mountApp`.
+ * @param {any} win
+ * @param {Document} doc
+ */
+export function mountAuthApp(win, doc) {
+  const mode = doc.documentElement?.dataset?.authMode;
+  if (mode === "token") return mountApp(win, doc);
+  if (mode === "password") return mountPasswordApp(win, doc);
+  return mountErrorApp(doc);
+}
+
+/** §10 row 1: missing/invalid `data-auth-mode` — no `#t=`, no localStorage, no `/api/login`, no SSE. @param {Document} doc */
+function mountErrorApp(doc) {
+  const $ = (/** @type {string} */ id) => doc.getElementById(id);
+  showAuthModeError(queryLoginUi($));
+  return { client: null, getState: () => null };
+}
+
+/**
+ * Password-mode mount: the login screen gates the shared fleet UI
+ * (`wireFleetUi`, reused byte-for-byte from `mountApp`) behind
+ * `createPasswordClient`. `render/login.js` owns every DOM mutation for the
+ * login screen (hidden/disabled/textContent/value only — no innerHTML).
+ * @param {any} win
+ * @param {Document} doc
+ */
+function mountPasswordApp(win, doc) {
+  const $ = (/** @type {string} */ id) => doc.getElementById(id);
+  const loginUi = queryLoginUi($);
+  const plaintext = win.location?.protocol === "http:";
+  // Fail-closed by default: the form is the first thing shown, before the
+  // transport even starts (no FOUC of the read-only shell while unauthed).
+  showLoginForm(loginUi, plaintext);
+
+  /** @param {string} state */
+  function onConnVisibility(state) {
+    if (state === "open") hideLoginForm(loginUi);
+    else if (state === "auth") showLoginForm(loginUi, plaintext);
+  }
+
+  /** @type {any} */
+  let countdownTimer = null;
+  function stopCountdown() {
+    if (countdownTimer !== null) {
+      win.clearTimeout(countdownTimer);
+      countdownTimer = null;
+    }
+  }
+  /** @param {number} seconds @param {(n: number) => string} textFor */
+  function runCountdown(seconds, textFor) {
+    stopCountdown();
+    let remaining = seconds;
+    setLoginError(loginUi, textFor(remaining));
+    const tick = () => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        countdownTimer = null;
+        setLoginError(loginUi, "");
+        setLoginBusy(loginUi, false);
+        return;
+      }
+      setLoginError(loginUi, textFor(remaining));
+      countdownTimer = win.setTimeout(tick, 1_000);
+    };
+    countdownTimer = win.setTimeout(tick, 1_000);
+  }
+
+  const fleet = wireFleetUi(win, doc, (hooks) =>
+    createPasswordClient({
+      fetch: (url, init) => win.fetch(url, init),
+      EventSource: win.EventSource,
+      location: win.location,
+      history: win.history,
+      setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+      clearTimeout: (t) => win.clearTimeout(t),
+      now: () => Date.now(),
+      onMessage: hooks.onMessage,
+      onConn: (c) => {
+        onConnVisibility(c);
+        hooks.onConn(c);
+      },
+      onAuthEvent: (reason) => {
+        setLoginError(
+          loginUi,
+          reason === "revoked"
+            ? "Signed out on another tab or by the host."
+            : "Session expired — please sign in again.",
+        );
+      },
+      onUnauthenticated: () => {
+        /* onConnVisibility already reacted to the matching onConn("auth") */
+      },
+      onSessionInfo: (info) => showInitialPasswordBanner(loginUi, info.initialPasswordInUse),
+      onLoginRetry: (kind) => {
+        setLoginError(loginUi, kind === "rate" ? "Too many requests, retrying…" : "Hub is busy, retrying…");
+      },
+    }),
+  );
+
+  if (loginUi.form) {
+    loginUi.form.addEventListener("submit", (/** @type {any} */ ev) => {
+      ev.preventDefault?.();
+      stopCountdown();
+      const { username, password } = readLoginForm(loginUi);
+      setLoginError(loginUi, "");
+      setLoginBusy(loginUi, true);
+      void fleet.client.login(username, password).then((/** @type {any} */ res) => {
+        if (res.ok) {
+          clearPasswordField(loginUi);
+          setLoginError(loginUi, "");
+          setLoginBusy(loginUi, false);
+          if (res.initialPassword) showInitialPasswordBanner(loginUi, true);
+          return;
+        }
+        switch (res.kind) {
+          case "throttled":
+            runCountdown(res.retryAfterS, (n) => `Too many attempts. Try again in ${n}s.`);
+            return; // stays busy until the countdown re-enables the form
+          case "invalid":
+            setLoginBusy(loginUi, false);
+            setLoginError(loginUi, "Invalid username or password.");
+            return;
+          case "saturated":
+            setLoginBusy(loginUi, false);
+            setLoginError(
+              loginUi,
+              'Sign-in from new addresses is temporarily blocked. Ask the host to run "/webhub unlock".',
+            );
+            return;
+          case "not-allowed":
+            setLoginBusy(loginUi, false);
+            setLoginError(
+              loginUi,
+              'This address is not on the hub\'s allow-list. Use one of the addresses shown by "/webhub open".',
+            );
+            return;
+          case "busy-exhausted":
+            setLoginBusy(loginUi, false);
+            setLoginError(loginUi, "Hub database unavailable — retry");
+            return;
+          case "network":
+            setLoginBusy(loginUi, false);
+            setLoginError(loginUi, "Cannot reach hub.");
+            return;
+          default:
+            setLoginBusy(loginUi, false);
+            setLoginError(loginUi, "Sign-in failed.");
+        }
+      });
+    });
+  }
+
+  if (loginUi.signout) {
+    loginUi.signout.addEventListener("click", () => {
+      void fleet.client.logout();
+    });
+  }
+
+  return fleet;
+}
+
 if (typeof window !== "undefined" && typeof document !== "undefined" && document.getElementById("app")) {
-  mountApp(window, document);
+  mountAuthApp(window, document);
 }

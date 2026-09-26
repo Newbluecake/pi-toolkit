@@ -23,21 +23,41 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot } from "../../core/types.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
-import type { HubConfig } from "../hub/ports.js";
-import { FORWARDED_EVENTS, type AgentKind, type SessionInfo } from "../protocol/messages.js";
+import type { HubConfig, HubLanConfig } from "../hub/ports.js";
+import {
+  FORWARDED_EVENTS,
+  type AgentKind,
+  type LanInfoPayload,
+  type LanReqFrame,
+  type SessionInfo,
+} from "../protocol/messages.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
+import type { LanStatus } from "../protocol/lan.js";
 import {
   acquireConnection,
   currentConnection,
   MODULE_INSTANCE,
+  newAdminRid,
   type BindingPort,
   type HubConnection,
 } from "./connection.js";
 import { createEventTap } from "./event-tap.js";
+import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { resolveJitiCli, spawnHub, type LauncherPlan } from "./launcher.js";
+import { MaskedInputComponent, runPasswdPrompt, type PasswdOutcome } from "./passwd-prompt.js";
+import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
+import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
+
+export interface WebHubLanSettings {
+  enabled: boolean;
+  port: number;
+  extraHosts: string[];
+  trustProxyFrom: string[];
+  externalOrigins: string[];
+} // I 在 settings.ts 预定义五个 webHub.lan.* 键（§9.1），校验后按这个形状传进来；LE 只消费，不做自己的校验
 
 export interface WebHubSettings {
   enabled: boolean;
@@ -45,6 +65,8 @@ export interface WebHubSettings {
   port: number;
   idleExitMinutes: number;
   nodeLoader: string;
+  /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
+  lan?: WebHubLanSettings;
 } // I 在 settings.ts `import type` 并 re-export（D 不改 settings.ts）
 
 export interface WebHubDeps {
@@ -71,10 +93,28 @@ export interface WebHubStatusView {
   attached: boolean;
 }
 
+export type LanAdminResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: "unavailable" } // not live, or hub didn't advertise lan.v1
+  | { ok: false; reason: "rejected"; code: string; message: string };
+
 export interface WebHubControl {
   status(): WebHubStatusView;
   /** http://127.0.0.1:<port>/#t=<token>; port from hello_ack (live) or hub.json (pid alive); else a hint. */
   url(): { url: string } | { hint: string };
+  /** S1 LAN admin surface (plan §8.1/§8.2/§9.3; wired by LI's `/webhub passwd|unlock|restart`). */
+  lan: {
+    /** LAN status lines for `/webhub status` (plan §9.3), read straight from `hub.json` on disk
+     * — works even when the admin socket isn't live. */
+    statusLines(): string[];
+    /** Raw `lan_req{op:"info"}` result; callers decide how to render `initialPassword` (never here —
+     * see `lan-status.ts`'s `formatInitialPasswordLines`, keyed on UI mode). */
+    info(): Promise<LanAdminResult<LanInfoPayload | undefined>>;
+    unlock(): Promise<LanAdminResult<void>>;
+    /** Runs the full interactive TUI flow (username → masked password twice → `lan_req passwd`). */
+    changePasswordInteractive(): Promise<PasswdOutcome>;
+    restart(): Promise<RestartOutcome>;
+  };
 }
 
 export const WEB_HUB_STATUS_KEY = "pi-subagent:web-hub";
@@ -239,10 +279,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     return launcher;
   };
 
-  const connectWith = (info: { pluginVersion: string; buildId: string }): void => {
-    const x = ctx;
-    if (!attached || x === undefined) return;
-    const plan = resolveLauncher();
+  const buildHubConfig = (info: { pluginVersion: string; buildId: string }): HubConfig => {
     const config: HubConfig = {
       v: 1,
       home,
@@ -252,6 +289,23 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       buildId: info.buildId,
     };
     if (argv1 !== undefined) config.launcher = [process.execPath, argv1];
+    if (settings.lan?.enabled === true) {
+      const lan: HubLanConfig = {
+        port: settings.lan.port,
+        extraHosts: settings.lan.extraHosts,
+        trustProxyFrom: settings.lan.trustProxyFrom,
+        externalOrigins: settings.lan.externalOrigins,
+      };
+      config.lan = lan;
+    }
+    return config;
+  };
+
+  const connectWith = (info: { pluginVersion: string; buildId: string }): void => {
+    const x = ctx;
+    if (!attached || x === undefined) return;
+    const plan = resolveLauncher();
+    const config = buildHubConfig(info);
     const c = acquireConnection({
       buildId: info.buildId,
       pluginVersion: info.pluginVersion,
@@ -339,9 +393,144 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
   }
 
+  interface HubJsonSnapshot {
+    pid?: number;
+    procStartTicks?: number;
+    argv?: string[];
+    lan?: LanStatus;
+  }
+
+  const readHubJsonRecord = (): HubJsonSnapshot | undefined => {
+    try {
+      const parsed = JSON.parse(readFileSync(paths.hubJson, "utf8")) as Record<string, unknown>;
+      const rec: HubJsonSnapshot = {};
+      if (typeof parsed.pid === "number") rec.pid = parsed.pid;
+      if (typeof parsed.procStartTicks === "number") rec.procStartTicks = parsed.procStartTicks;
+      if (Array.isArray(parsed.argv) && parsed.argv.every((a) => typeof a === "string")) {
+        rec.argv = parsed.argv as string[];
+      }
+      if (parsed.lan !== undefined) rec.lan = parsed.lan as LanStatus;
+      return rec;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** §9.3 LAN status lines, straight off `hub.json` — no admin RPC needed. */
+  const lanStatusLines = (): string[] => {
+    const rec = readHubJsonRecord();
+    const lanPaths: LanStatusPaths = { dbFile: paths.dbFile, lanPortSetting: settings.lan?.port ?? 0 };
+    return formatLanStatusLines(rec?.lan, {
+      settingsEnabled: settings.lan?.enabled === true,
+      ...(rec?.pid !== undefined ? { hubPid: rec.pid } : {}),
+      paths: lanPaths,
+    });
+  };
+
+  const sendLanReq = async (op: "info" | "unlock"): Promise<LanAdminResult<LanInfoPayload | undefined>> => {
+    const c = conn;
+    if (c === undefined) return { ok: false, reason: "unavailable" };
+    const frame: LanReqFrame =
+      op === "info"
+        ? { t: "lan_req", rid: newAdminRid(), op: "info" }
+        : { t: "lan_req", rid: newAdminRid(), op: "unlock" };
+    try {
+      const res = await c.request(frame, "lan.v1");
+      if (res.t !== "lan_res") return { ok: false, reason: "unavailable" };
+      if (!res.ok) return { ok: false, reason: "rejected", code: res.code, message: res.message };
+      return { ok: true, value: res.info };
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  };
+
+  const lanInfo = (): Promise<LanAdminResult<LanInfoPayload | undefined>> => sendLanReq("info");
+
+  const lanUnlock = async (): Promise<LanAdminResult<void>> => {
+    const res = await sendLanReq("unlock");
+    if (!res.ok) return res;
+    return { ok: true, value: undefined };
+  };
+
+  const changePasswordInteractive = async (): Promise<PasswdOutcome> => {
+    const x = ctx;
+    const c = conn;
+    if (x === undefined || x.mode !== "tui" || !x.hasUI || c === undefined) return { ok: false, reason: "no-cap" };
+    return runPasswdPrompt({
+      hasCap: (cap) => c.caps.includes(cap),
+      promptUsername: async () => {
+        try {
+          return await x.ui.input("用户名");
+        } catch {
+          return undefined;
+        }
+      },
+      promptPassword: async (title) => {
+        try {
+          return await x.ui.custom<string | undefined>(
+            (tui, _theme, _keybindings, done) => new MaskedInputComponent(title, tui, done),
+          );
+        } catch {
+          return undefined;
+        }
+      },
+      request: async (frame, cap) => {
+        const res = await c.request(frame, cap);
+        if (res.t !== "lan_res") throw new Error("E_UNEXPECTED_FRAME: expected lan_res");
+        return res;
+      },
+    });
+  };
+
+  /** Fire-and-forget: reuses the auto-start launcher path, rebuilding `HubConfig` with fresh build info. */
+  const respawnSoon = (): void => {
+    const plan = resolveLauncher();
+    if ("error" in plan) return;
+    void getBuildInfo().then((info) => {
+      spawnHub(plan, hubMainPath, buildHubConfig(info), deps.spawnImpl);
+    });
+  };
+
+  const restart = (): Promise<RestartOutcome> =>
+    restartHub({
+      isLiveWithCap: (cap) => conn?.status().state === "live" && (conn?.caps.includes(cap) ?? false),
+      request: async (frame, cap) => {
+        const c = conn;
+        if (c === undefined) throw new Error("E_NOT_CONNECTED");
+        return c.request(frame, cap);
+      },
+      readHubRecord: () => {
+        const rec = readHubJsonRecord();
+        if (rec?.pid === undefined) return undefined;
+        const out: { pid: number; procStartTicks?: number; argv?: string[] } = { pid: rec.pid };
+        if (rec.procStartTicks !== undefined) out.procStartTicks = rec.procStartTicks;
+        if (rec.argv !== undefined) out.argv = rec.argv;
+        return out;
+      },
+      pidAlive: (pid) => ctlLivenessProbe(pid),
+      verifyIdentity: (expected) => verifyProcIdentity(expected),
+      readStartTicksNow: (pid) => readStartTicksNow(pid),
+      kill: (pid, signal) => {
+        try {
+          process.kill(pid, signal);
+        } catch {
+          /* already gone — nothing to signal */
+        }
+      },
+      spawn: respawnSoon,
+      now,
+    });
+
   return {
     status: () => conn?.status() ?? { state: "off", attached: false },
     url: () => hubUrl(paths, conn),
+    lan: {
+      statusLines: lanStatusLines,
+      info: lanInfo,
+      unlock: lanUnlock,
+      changePasswordInteractive,
+      restart,
+    },
   };
 }
 

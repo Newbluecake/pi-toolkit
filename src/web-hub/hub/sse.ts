@@ -19,7 +19,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { SSE_EVENTS } from "../protocol/http-contract.js";
+import type { SSE_EVENTS, SseAuthPayload } from "../protocol/http-contract.js";
 
 export type SseEventName = (typeof SSE_EVENTS)[number];
 
@@ -28,14 +28,27 @@ export interface SseClient {
   subscribed: Set<string>;
   send(event: SseEventName, data: unknown): boolean;
   close(): void;
+  /** Set when the LAN listener attaches an authenticated client (§4.2); loopback clients never set it. */
+  auth?: { sidHash: string; userId: number; epoch: number; boundOrigin: string; verifiedAt: number };
+  /** Set once `revoke()` has matched this client; `publish`/`send` become no-ops for it. */
+  revoked?: boolean;
 }
 
 export interface SseHub {
-  attach(req: IncomingMessage, res: ServerResponse, lastEventId: number | undefined): SseClient;
+  attach(
+    req: IncomingMessage,
+    res: ServerResponse,
+    lastEventId: number | undefined,
+    auth?: SseClient["auth"],
+  ): SseClient;
   publish(event: SseEventName, data: unknown, agentKey?: string): void; // agentKey 存在时仅推给订阅者；全局 ring（≤8192 条 且 ≤16 MiB 序列化字节，任一超限丢最旧）按 id 补发
   get(clientId: string): SseClient | undefined;
   count(): number;
   closeAll(): void;
+  /** Synchronously mark matching clients revoked (stops `publish`/`send`), emit `event: auth`, then end the stream. Returns the count. */
+  revoke(pred: (c: SseClient) => boolean, reason: "revoked" | "expired"): number;
+  /** Snapshot of currently attached clients, for the 55s expiry-recheck tick (§4.2; LD/LS, W2). */
+  list(): readonly SseClient[];
 }
 
 export const SSE_DEFAULTS = {
@@ -104,7 +117,7 @@ export function createSseHub(opts: {
   }
 
   function write(state: ClientState, frame: string): boolean {
-    if (state.closed) return false;
+    if (state.closed || state.client.revoked === true) return false;
     try {
       state.res.write(frame);
     } catch {
@@ -172,7 +185,12 @@ export function createSseHub(opts: {
     return frames;
   }
 
-  function attach(req: IncomingMessage, res: ServerResponse, lastEventId: number | undefined): SseClient {
+  function attach(
+    req: IncomingMessage,
+    res: ServerResponse,
+    lastEventId: number | undefined,
+    auth?: SseClient["auth"],
+  ): SseClient {
     const id = newClientId();
     const subscribed = new Set<string>();
     const client: SseClient = {
@@ -180,6 +198,7 @@ export function createSseHub(opts: {
       subscribed,
       send: (event, data) => write(state, formatSseFrame(event, data)),
       close: () => drop(state, false),
+      ...(auth === undefined ? {} : { auth }),
     };
     const state: ClientState = { client, res, closed: false };
     clients.set(id, state);
@@ -219,11 +238,31 @@ export function createSseHub(opts: {
     }
   }
 
+  function revoke(pred: (c: SseClient) => boolean, reason: "revoked" | "expired"): number {
+    const payload: SseAuthPayload = { reason };
+    const frame = formatSseFrame("auth", payload);
+    let n = 0;
+    for (const state of [...clients.values()]) {
+      if (state.closed || state.client.revoked === true || !pred(state.client)) continue;
+      state.client.revoked = true; // stop publish/send before anything else observes this client
+      n++;
+      try {
+        state.res.write(frame);
+      } catch {
+        // best effort — falling through to drop() below regardless
+      }
+      drop(state, false);
+    }
+    return n;
+  }
+
   return {
     attach,
     publish,
     get: (clientId) => clients.get(clientId)?.client,
     count: () => clients.size,
+    revoke,
+    list: () => [...clients.values()].filter((s) => !s.closed).map((s) => s.client),
     closeAll: () => {
       for (const state of [...clients.values()]) drop(state, false);
       stopPing();

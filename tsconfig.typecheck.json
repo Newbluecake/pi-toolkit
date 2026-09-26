@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*", "index.ts", "ask-user.ts", "feishu-notify.ts", "tests/web-hub/contract/types.test-d.ts"]
+}
