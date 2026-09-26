@@ -43,9 +43,10 @@ import { formatDuration } from "../ui/fleet-panel.js";
  * layer (`execViaManager`) never learns about R: it reserves the job
  * synchronously (`manager.reserve`, E33), awaits `started` (never rejects,
  * R12-bounded), then awaits `job.exit`. Whichever of `settled` / R / abort
- * runs first sets the latch (`backgrounded` / `foregroundDone`) in its
- * synchronous callback prologue, so "R and `started`/`exit` arrive in the same
- * tick" has exactly one winner. The background branch never awaits
+ * runs first claims the single synchronous `decision` latch
+ * (`"foreground"` / `"background"` / `"abort"`) in its callback prologue
+ * (“用户确认（v6）” P4: one latch, three callbacks), so "R and
+ * `started`/`exit`/`abort` arrive in the same tick" has exactly one winner. The background branch never awaits
  * `markBackgrounded` — the manager's synchronous `markBackgroundedSync`
  * (write-behind persistence, R5/R10) hands the caller `job_id`/`logPath`
  * right away (`pid starting` until the spawn completes).
@@ -394,25 +395,32 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
           : Math.min(thresholdMs, Math.max(0, deadlineAt - MARGIN_RETURN_MS - startedAt));
 
       const state = createCallState();
-      let forwardAbort = true;
       let forwardUpdates = true;
       let listenerAttached = false;
       const relay = new AbortController();
+      // §3.6 / “用户确认（v6）” P4: the caller-abort callback is a first-class
+      // latch participant (below) — it claims the decision synchronously, so
+      // an abort racing the R timer in the same tick can never hand a job the
+      // caller just cancelled back as "backgrounded". Before the latch exists
+      // (this setup section) an entry-aborted signal keeps the built-in
+      // semantics exactly: the relay is pre-aborted, so `exec` throws
+      // "aborted" before spawning.
       const onAbort = (): void => {
-        // §2.4: once the call has been handed back (latch taken) a caller
-        // abort must not reach the process; before that it is forwarded and
-        // the inner path kills/cancels exactly like the built-in tool.
-        if (forwardAbort) relay.abort();
+        if (decision !== undefined) return;
+        decision = "abort";
+        cleanup();
+        // §2.4: the claim above means the background branch can no longer
+        // fire, so forwarding is unconditional here — and once the call HAS
+        // been handed back the listener is already detached, keeping a
+        // post-background abort away from the process.
+        relay.abort();
       };
-      // Entering already aborted keeps the built-in semantics exactly: the
-      // relay is pre-aborted, so `exec` throws "aborted" before spawning.
       if (signal?.aborted) relay.abort();
       else if (signal) {
         signal.addEventListener("abort", onAbort, { once: true });
         listenerAttached = true;
       }
       const stopForwarding = (): void => {
-        forwardAbort = false;
         if (listenerAttached) {
           signal?.removeEventListener("abort", onAbort);
           listenerAttached = false;
@@ -453,11 +461,17 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
       );
 
       // ── §3.6 single atomic adjudication (the latch) ───────────────────────
-      // Both flags are only ever assigned inside synchronous callback
-      // prologues (settled.then / R timer / abort→relay paths all funnel into
-      // one of these), so a same-tick arrival has exactly one winner.
-      let backgrounded = false;
-      let foregroundDone = false;
+      // ONE synchronous decision variable shared by all three racing
+      // callbacks — `settled.then`, the R timer (via `takeBackground`) and the
+      // caller-abort listener (`onAbort` above). Each claims it in its own
+      // synchronous prologue, so any same-tick arrival pair (settled vs R,
+      // abort vs R, abort vs settled) has exactly one winner. The "abort"
+      // claim does not deliver by itself: the inner exec is still
+      // killing/draining (§3.6) and its settled outcome — carrying any output
+      // that arrived between the abort and the drain — is delivered by the
+      // settled callback below, which treats "abort" as its own.
+      type Decision = "foreground" | "background" | "abort";
+      let decision: Decision | undefined;
       let capacityNote = false;
       let rTimer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = (): void => {
@@ -469,8 +483,12 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
       };
 
       const deliverForeground = (outcome: Settled): void => {
-        if (backgrounded || foregroundDone) return;
-        foregroundDone = true;
+        // The background branch already won this call; a late inner settlement
+        // goes to `finalText` via `adoptInnerPromise` instead. An "abort"
+        // claim still delivers — the foreground outcome IS the abort's
+        // completion (the inner's killed-and-drained rejection).
+        if (decision === "background") return;
+        decision ??= "foreground";
         cleanup();
         if (outcome.ok) {
           resolveOuter(capacityNote ? appendCapacityNote(outcome.result, manager.maxBackgroundJobs) : outcome.result);
@@ -485,7 +503,7 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
       };
 
       const takeBackground = (): void => {
-        if (backgrounded || foregroundDone) return;
+        if (decision !== undefined) return;
         // §3.8: a main-session threshold hit against a full table stays in the
         // foreground (with the capacity note). Child sessions convert anyway
         // (§3.6 C2: only run_in_background spawns are bound by the cap).
@@ -498,9 +516,10 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
           return; // the trigger is spent; settled will deliver the foreground outcome
         }
         // The latch is taken NOW, at trigger time — a command settling while
-        // we still wait for its pid must not steal the call back into the
-        // foreground (today's race resolved the same way).
-        backgrounded = true;
+        // we still wait for its pid, or a caller abort arriving in the same
+        // tick, must not steal the call back into the foreground or cancel a
+        // job the caller was just handed.
+        decision = "background";
         cleanup();
         forwardUpdates = false;
         // §3.6 boundary telemetry: a child session reports the instant control
@@ -712,12 +731,11 @@ function errorText(error: unknown): string {
  * manager inside `reserve()` and the deadline (foreground kill / grace /
  * extend) is adjudicated there; this layer only translates a `timed_out` exit
  * record back into pi's `timeout:<s>` error so the foreground text stays
- * byte-identical. Abort while `started` is pending ⇒ sync `cancelReserve` +
- * `aborted` (nothing spawned yet); abort after ⇒ `cancelReserve` (a kill for
- * a running job) and the exit is still awaited before `aborted` is thrown —
- * pi's own `waitForChildProcess`-then-check semantics, so the drain flushes
- * the process's last output through `onData` before the caller sees the
- * rejection.
+ * byte-identical. Abort while `started` is pending ⇒ cancel the reservation
+ * and surface `aborted` (nothing spawned, nothing to drain); abort after ⇒
+ * cancel/kill the job (the kill signal deferred one macrotask so same-tick
+ * pipe deliveries are still tee'd) and the exit is awaited before `aborted`
+ * is thrown — pi's own `waitForChildProcess`-then-check semantics.
  */
 async function execViaManager(
   manager: BashJobManager,
@@ -780,10 +798,9 @@ async function execViaReserve(
     () => state.resolveJobReady(undefined), // defensive: started never rejects (R12)
   );
 
-  // Abort ⇒ synchronously cancel (all three staged/running substates, §3.6).
-  // The `abortSignal` rejection only guards the `await started` race (nothing
-  // has spawned yet, so there is no exit worth waiting for); once the job is
-  // running, an abort cancels/kills it and the exit below is still awaited.
+  // Abort ⇒ cancel (all three staged/running substates, §3.6). The
+  // `abortSignal` rejection only guards the `await started` race (nothing
+  // has spawned yet, so there is no exit worth waiting for).
   let onAbortReserve: (() => void) | undefined = undefined;
   const abortSignal = new Promise<never>((_resolve, reject) => {
     onAbortReserve = () => reject(new Error("aborted"));
@@ -792,7 +809,22 @@ async function execViaReserve(
   // racing it anymore.
   void abortSignal.catch(() => undefined);
   const handleAbort = (): void => {
-    manager.cancelReserve(reservation.jobId);
+    // Staged (no pid yet): cancel synchronously — the spawn must never
+    // happen. Running (`state.job` is set, i.e. `started` resolved `{ok}`):
+    // the kill signal is deferred one macrotask so output already queued in
+    // this tick (pipe deliveries scheduled alongside the abort — what a real
+    // process flushes into the kernel pipe buffer as it dies) is still
+    // tee'd before the stream ends; the exit below is awaited afterwards, so
+    // the drain folds that output into the aborted error's text, exactly
+    // like the built-in tool's `killProcessTree` + `waitForChildProcess`.
+    // A ref'd setImmediate cannot wedge the loop (it fires within one tick).
+    if (state.job === undefined) {
+      manager.cancelReserve(reservation.jobId);
+    } else {
+      setImmediate(() => {
+        manager.cancelReserve(reservation.jobId);
+      });
+    }
     onAbortReserve?.();
   };
   try {

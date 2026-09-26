@@ -6,6 +6,7 @@ import {
   chainStats,
   createJobStore,
   JOB_STORE_CHAIN_CAP,
+  JOB_STORE_CHAIN_OLDEST_WARN_MS,
   JOB_STORE_CHAIN_PENDING_WARN,
   TMP_RETENTION_MS,
   type JobStore,
@@ -464,6 +465,32 @@ describe("bash job store: shared write chain (§2.5, T30)", () => {
     const backlogWarnings = warnings.filter((w) => w.includes("backlog") && w.includes("pending"));
     expect(backlogWarnings).toHaveLength(1);
     await Promise.all(pending);
+  });
+
+  it("warns once when the oldest pending op ages past 60s (chainStats surfaces the age)", async () => {
+    const { dir, clock, warnings } = await harness();
+    const store = createJobStore({
+      dir: join(dir, "oldest"),
+      retentionMs: 86_400_000,
+      clock,
+      warn: (m) => warnings.push(m),
+    });
+    // No fs stub needed: the first save is enqueued and still in flight (no
+    // `await` since), so the chain is busy while its oldest op ages purely by
+    // clock arithmetic — jump the FakeClock past the 60s backlog threshold.
+    const first = store.save(record(padId(70), store));
+    clock.advance(JOB_STORE_CHAIN_OLDEST_WARN_MS + 1_000);
+    const stats = chainStats(clock.now());
+    expect(stats.oldestPendingMs).toBeGreaterThanOrEqual(JOB_STORE_CHAIN_OLDEST_WARN_MS + 1_000);
+    // The next enqueue re-checks the backlog and trips the age branch.
+    const second = store.save(record(padId(71), store));
+    const ageWarnings = warnings.filter((w) => w.includes("backlog") && w.includes("oldest 61s"));
+    expect(ageWarnings).toHaveLength(1);
+    expect(ageWarnings[0]).toContain(`bash job store chain ${join(dir, "oldest")} backlog`);
+    // Latched: later enqueues on the same still-aging chain do not re-warn.
+    const third = store.save(record(padId(72), store));
+    expect(warnings.filter((w) => w.includes("backlog"))).toHaveLength(1);
+    await Promise.all([first, second, third]);
   });
 
   it("upsert creates a record that does not exist yet", async () => {

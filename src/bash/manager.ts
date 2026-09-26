@@ -533,11 +533,20 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
 
   // ── persistence helpers ──────────────────────────────────────────────────
 
+  /**
+   * `guard` (recover's abort checkpoint, §2.5 step 4): checked before the
+   * store write is even queued (no new I/O after the linearization point)
+   * and again before the result is folded into memory — a write that was
+   * already in flight when the guard tripped is allowed to settle on disk,
+   * but its result is discarded here: no `putRecord`, no waiter settlement.
+   */
   async function applyTransition(
     jobId: JobId,
     to: JobStatus,
     patch: JobTransitionPatch,
+    guard?: () => boolean,
   ): Promise<JobRecord | undefined> {
+    if (guard?.()) return undefined;
     const stored = await store.update(jobId, (current) => {
       const result = transitionJob(current, to, patch);
       if (!result.ok) {
@@ -549,15 +558,21 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       return result.record;
     });
     if (!stored) return undefined;
+    if (guard?.()) return undefined;
     return putRecord(stored);
   }
 
+  /** `guard` as in `applyTransition` above (§2.5 step 4). */
   async function applyPatch(
     jobId: JobId,
     mutate: (record: JobRecord) => JobRecord | undefined,
+    guard?: () => boolean,
   ): Promise<JobRecord | undefined> {
+    if (guard?.()) return undefined;
     const stored = await store.update(jobId, mutate);
-    return stored ? putRecord(stored) : undefined;
+    if (!stored) return undefined;
+    if (guard?.()) return undefined;
+    return putRecord(stored);
   }
 
   // ── job-level deadline (bash-timeout-grace plan §2.3/§2.4) ───────────────
@@ -1535,7 +1550,11 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
 
   // ── kill (§3.3 ladder, idempotent, identity-guarded) ─────────────────────
 
-  async function kill(jobId: JobId, killOptions: { graceMs?: Millis } = {}): Promise<KillJobResult> {
+  async function kill(
+    jobId: JobId,
+    killOptions: { graceMs?: Millis } = {},
+    guard?: () => boolean,
+  ): Promise<KillJobResult> {
     const entry = entries.get(jobId);
     const record = entry?.record ?? (await store.load(jobId));
     if (!record) throw new Error(`bash job not found: ${jobId}`);
@@ -1572,7 +1591,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const pid = record.pid;
     if (pid === undefined) {
       // `staged`: no process to signal yet. Label it honestly and stop.
-      const stored = await applyTransition(jobId, "killed", { at: clock.now(), exitCode: null });
+      const stored = await applyTransition(jobId, "killed", { at: clock.now(), exitCode: null }, guard);
       return { jobId, outcome: "already-dead", alreadyTerminal: false, record: stored ?? record };
     }
 
@@ -1581,10 +1600,10 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     if (!local) {
       // Adopted job: prove ownership before signalling anything (I-c).
       const ownership = processPort.checkPidOwnership(record);
-      if (ownership === "unsafe") return refuseAsOrphan(jobId, record);
+      if (ownership === "unsafe") return refuseAsOrphan(jobId, record, guard);
       if (ownership === "dead") {
-        const stored = await applyTransition(jobId, "exited_unknown", { at: clock.now(), exitCode: null });
-        ensurePolling();
+        const stored = await applyTransition(jobId, "exited_unknown", { at: clock.now(), exitCode: null }, guard);
+        if (!guard?.()) ensurePolling();
         return { jobId, outcome: "already-dead", alreadyTerminal: false, record: stored ?? record };
       }
     }
@@ -1596,7 +1615,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     });
     if (outcome === "refused") {
       if (local) delete local.termination;
-      return refuseAsOrphan(jobId, record);
+      return refuseAsOrphan(jobId, record, guard);
     }
     if (local) {
       // The `exit` event is authoritative for a job we own: it carries the
@@ -1604,13 +1623,13 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       ensurePolling();
       return { jobId, outcome, alreadyTerminal: false, record: entry?.record ?? record };
     }
-    const stored = await applyTransition(jobId, "killed", { at: clock.now(), exitCode: null });
-    ensurePolling();
+    const stored = await applyTransition(jobId, "killed", { at: clock.now(), exitCode: null }, guard);
+    if (!guard?.()) ensurePolling();
     return { jobId, outcome, alreadyTerminal: false, record: stored ?? record };
   }
 
-  async function refuseAsOrphan(jobId: JobId, record: JobRecord): Promise<KillJobResult> {
-    const stored = await applyTransition(jobId, "orphaned", { at: clock.now(), exitCode: null });
+  async function refuseAsOrphan(jobId: JobId, record: JobRecord, guard?: () => boolean): Promise<KillJobResult> {
+    const stored = await applyTransition(jobId, "orphaned", { at: clock.now(), exitCode: null }, guard);
     return {
       jobId,
       outcome: "refused",
@@ -1672,11 +1691,16 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         // The spawn outcome died with the previous process; there is no pid to
         // probe, so `failed` is the only honest label (§3.9 row 1: same for
         // both owner kinds).
-        const stored = await applyTransition(record.jobId, "failed", {
-          at: clock.now(),
-          exitCode: null,
-          finalText: "pi exited before this bash job's spawn was confirmed; the process state is unknown.",
-        });
+        const stored = await applyTransition(
+          record.jobId,
+          "failed",
+          {
+            at: clock.now(),
+            exitCode: null,
+            finalText: "pi exited before this bash job's spawn was confirmed; the process state is unknown.",
+          },
+          aborted,
+        );
         if (aborted()) {
           partial = true;
           break;
@@ -1696,7 +1720,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         // this table wants — alive+signalled → killed, alive+refused →
         // orphaned, dead → exited_unknown, unsafe → orphaned.
         subagentTotal++;
-        const result = await kill(record.jobId, {}).catch((error) => {
+        const result = await kill(record.jobId, {}, aborted).catch((error) => {
           warn(`bash job ${record.jobId} crash-recovery kill failed: ${String(error)}`);
           return undefined;
         });
@@ -1716,8 +1740,10 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       if (ownership === "alive") {
         // An adopted job is ownerless by definition — nobody is waiting on its
         // tool call anymore, so it becomes notification-eligible (§5).
-        await applyPatch(record.jobId, (current) =>
-          current.backgroundedAt === undefined ? { ...current, backgroundedAt: clock.now() } : undefined,
+        await applyPatch(
+          record.jobId,
+          (current) => (current.backgroundedAt === undefined ? { ...current, backgroundedAt: clock.now() } : undefined),
+          aborted,
         );
         if (aborted()) {
           partial = true;
@@ -1727,7 +1753,12 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         continue;
       }
       if (ownership === "dead") {
-        const stored = await applyTransition(record.jobId, "exited_unknown", { at: clock.now(), exitCode: null });
+        const stored = await applyTransition(
+          record.jobId,
+          "exited_unknown",
+          { at: clock.now(), exitCode: null },
+          aborted,
+        );
         if (aborted()) {
           partial = true;
           break;
@@ -1736,7 +1767,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         continue;
       }
       // "unsafe" — mark and display only; never kill, never announce (§3.6).
-      const stored = await applyTransition(record.jobId, "orphaned", { at: clock.now(), exitCode: null });
+      const stored = await applyTransition(record.jobId, "orphaned", { at: clock.now(), exitCode: null }, aborted);
       if (aborted()) {
         partial = true;
         break;
@@ -1754,7 +1785,9 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       .map((entry) => entry.record)
       .filter((record) => shouldNotifyJob(record))
       .map((record) => record.jobId);
-    ensurePolling();
+    // §2.5 step 4: a cancelled scan rearms nothing — the poller (and any
+    // notice it would deliver) belongs to a later, uncancelled pass.
+    if (!partial) ensurePolling();
     return {
       adopted,
       exitedUnknown,

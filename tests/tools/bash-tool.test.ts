@@ -325,14 +325,14 @@ describe("bash override tool — T1 built-in golden equivalence", () => {
       const overrideAbort = new AbortController();
       const overrideRun = capture(() => tool.execute("call-2", params, overrideAbort.signal, undefined, harness.ctx));
       if (scenario.kind === "abort") {
-        // The fake process emits its chunks one setImmediate after the spawn
-        // resolves (FakePort.script). Since P3, an abort cancels/kills the
-        // job synchronously (plan §3.6 — no spawn survives an abort, and a
-        // running job is killed at once), so the abort must land *after* the
-        // scripted output has been produced and relayed, which is the scenario
-        // this equivalence asserts ("output, then the user hits Esc").
+        // Since P3, an abort that lands before the spawn cancels the job (no
+        // process, no output — plan §3.6), which the fake-ops builtin model
+        // cannot express (it emits chunks before waiting). So the scenario
+        // waits for the spawn and then aborts immediately: the scripted
+        // output is still in flight in that same tick, and the tool must
+        // deliver it in the aborted error (the kill signal is deferred one
+        // macrotask — §3.6, "abort 后、exit/drain 前到达的输出仍进入结果").
         await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
-        await waitFor(() => (harness.manager.list()[0]?.logBytes ?? 0) > 0, "the scripted output to be teed");
         overrideAbort.abort();
       }
       if (scenario.kind === "timeout") {
@@ -429,10 +429,6 @@ describe("bash override tool — auto-background", () => {
     const tool = toolFor(harness, HUGE_THRESHOLD_MS);
     const run = tool.execute("call-1", { command: "sleep 900" }, controller.signal, undefined, harness.ctx);
     await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
-    // §3.6: the abort kills the job synchronously now, so let the scripted
-    // `partial` output land first — the assertion is about output that exists
-    // *before* the abort, exactly like the built-in tool's real processes.
-    await waitFor(() => (harness.manager.list()[0]?.logBytes ?? 0) > 0, "the scripted output to be teed");
     controller.abort();
 
     // Byte-identical to the built-in: accumulated output, blank line, status.
@@ -440,6 +436,23 @@ describe("bash override tool — auto-background", () => {
     expect(harness.port.killCalls).toHaveLength(1);
     const job = harness.manager.list()[0]!;
     expect(job.status).toBe("killed");
+  });
+
+  it("T4b: output arriving after the abort but before the drain still enters the result (§3.6)", async () => {
+    const harness = await makeHarness();
+    const controller = new AbortController();
+    const tool = toolFor(harness, HUGE_THRESHOLD_MS);
+    const run = tool.execute("call-1", { command: "sleep 900" }, controller.signal, undefined, harness.ctx);
+    await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
+    harness.port.last().write("partial\n");
+    controller.abort();
+    // Written strictly AFTER the abort and before the (one-macrotask-deferred)
+    // kill + drain: exactly the bytes the baseline protected — a real process
+    // flushing its pipe buffer while dying.
+    harness.port.last().write("after abort\n");
+    await expect(run).rejects.toThrow(/^partial\n+after abort\n+Command aborted$/);
+    expect(harness.port.killCalls).toHaveLength(1);
+    expect(harness.manager.list()[0]?.status).toBe("killed");
   });
 
   it("T5: an already-aborted signal throws before anything spawns", async () => {
@@ -984,6 +997,88 @@ describe("bash override tool — T15 two-layer race (§3.6)", () => {
     expect(result.content[0]!.text).toContain("moved to the background");
   });
 
+  // ── abort joins the latch (“用户确认（v6）” P4): same-tick orderings ─────
+
+  it("same tick (abort just before R): the abort wins the latch — no background hand-back, the job is cancelled", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D8S });
+    const controller = new AbortController();
+    // Registered BEFORE execute arms the R timer, so with the same 5s expiry
+    // the abort dispatch runs first in that tick (Node fires same-expiry
+    // timers in registration order).
+    setTimeout(() => controller.abort(), 5_000);
+    const run = tool.execute("call-1", { command: "npm test" }, controller.signal, undefined, makeCtx("/repo"));
+    harness.startJob(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The fake manager has no process to kill — resolve the exit the way the
+    // real (deferred) cancelReserve kill would.
+    const reservation = harness.lastReservation();
+    reservation.resolveExit(fakeRecord(reservation.jobId, { status: "killed", exitCode: null }));
+    await expect(run).rejects.toThrow("Command aborted");
+    // The latch never took the background branch: no hand-back, no return
+    // telemetry, and the deferred cancelReserve landed.
+    expect(harness.lastReservation().backgroundedSync).toBe(0);
+    expect(harness.returns).toEqual([]);
+    expect(harness.cancelled).toContain(reservation.jobId);
+  });
+
+  it("same tick (R before abort): background wins — the abort never reaches the process", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 290_000, dueAt: D8S });
+    const controller = new AbortController();
+    const run = tool.execute("call-1", { command: "npm test" }, controller.signal, undefined, makeCtx("/repo"));
+    harness.startJob(1);
+    // Registered AFTER execute armed the R timer → R fires first.
+    setTimeout(() => controller.abort(), 5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await run;
+    expect((result.details as BashBackgroundDetails).background).toBe(true);
+    expect(harness.lastReservation().backgroundedSync).toBe(1);
+    // §2.4: the already-handed-back call keeps its process.
+    expect(harness.cancelled).toEqual([]);
+  });
+
+  it("abort before job.exit: the exit is still awaited, then `aborted` wins over a natural result", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: () => FAKE_NOW + 300_000 });
+    const controller = new AbortController();
+    const run = tool.execute("call-1", { command: "npm test" }, controller.signal, undefined, makeCtx("/repo"));
+    harness.startJob(1);
+    const expectation = expect(run).rejects.toThrow("Command aborted");
+    setTimeout(() => controller.abort(), 3_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The abort has won the latch; the job's exit arrives afterwards (the
+    // fake has no process — resolve the exit the way the deferred
+    // cancelReserve kill would). pi's own semantics: the exit is awaited,
+    // and only then is `aborted` thrown.
+    const reservation = harness.lastReservation();
+    reservation.resolveExit(fakeRecord(reservation.jobId, { status: "killed", exitCode: null }));
+    await expectation;
+    expect(harness.lastReservation().backgroundedSync).toBe(0);
+    await settle();
+    expect(harness.cancelled).toContain(reservation.jobId);
+  });
+
+  it("same tick (job.exit before abort): the natural foreground result stands, the abort is a no-op", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = new FakeDeadlineHarness();
+    const tool = childTool(harness, { thresholdMs: 120_000, dueAt: () => FAKE_NOW + 300_000 });
+    const controller = new AbortController();
+    const run = tool.execute("call-1", { command: "npm test" }, controller.signal, undefined, makeCtx("/repo"));
+    harness.startJob(1);
+    harness.exitJob(3_000); // registered first → its microtask chain completes first
+    setTimeout(() => controller.abort(), 3_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await run;
+    expect(result.content).toEqual([{ type: "text", text: "(no output)" }]);
+    expect((result.details as BashBackgroundDetails | undefined)?.background).toBeUndefined();
+    expect(harness.lastReservation().backgroundedSync).toBe(0);
+    expect(harness.cancelled).toEqual([]);
+  });
+
   it("main session, store hang: foreground throws started's error at its 30s bound", async () => {
     const harness = new FakeDeadlineHarness();
     const tool = mainTool(harness, 10 * 60_000);
@@ -1008,7 +1103,7 @@ describe("bash override tool — T15 two-layer race (§3.6)", () => {
     ]);
     expect(pending).toBe("pending");
     await vi.advanceTimersByTimeAsync(1);
-    await expect(run).rejects.toThrow("bash job store did not persist the staged record within 30s");
+    await expectation;
     expect(harness.lastReservation().backgroundedSync).toBe(0);
   });
 

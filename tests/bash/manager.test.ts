@@ -595,6 +595,53 @@ describe("bash job manager: kill (§3.3)", () => {
     expect(h.port.killCalls).toEqual([]);
   });
 
+  it("T10/T13: a killJobTree rejection is absorbed and the terminal state lands exactly once", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const h = await harness();
+      const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+      await h.manager.markBackgrounded(job.jobId);
+      // The signal was genuinely sent, but the transport reports a rejection
+      // instead of an outcome — exactly the R12 "rejection absorbed" case.
+      let killCalls = 0;
+      h.port.killJobTree = async () => {
+        killCalls += 1;
+        throw new Error("kill transport hiccup");
+      };
+
+      // The tool's abort path (cancelReserve → kill) absorbs the rejection
+      // internally — nothing throws, nothing becomes unhandled.
+      h.manager.cancelReserve(job.jobId);
+      expect(killCalls).toBe(1);
+      // The absorption itself is a fire-and-forget `.catch` — one microtask later.
+      await waitFor(
+        () => h.warnings.some((w) => w.includes("cancelReserve kill failed")),
+        "the kill rejection to be absorbed with a warning",
+      );
+      // The process still dies from the delivered signal: the exit event —
+      // not the rejected kill — is the one authority, and the terminal
+      // transition lands exactly once.
+      h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+      await waitFor(() => h.manager.get(job.jobId)?.status === "killed", "the job to settle killed");
+      const record = h.manager.get(job.jobId)!;
+      expect(record.status).toBe("killed");
+      expect(record.endedAt).toBe(1_000);
+      await settle();
+      expect(unhandled).toEqual([]);
+
+      // A kill on the now-terminal job neither signals again nor throws.
+      const again = await h.manager.kill(job.jobId);
+      expect(again.alreadyTerminal).toBe(true);
+      expect(killCalls).toBe(1);
+      await settle();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("refuses to kill an adopted job with unverifiable ownership and marks it orphaned", async () => {
     const h = await harness();
     await seed(h.store, "b_NSAFE001", { status: "running", pid: 9001, spawnedAt: 600, hostPid: HOST_PID });
@@ -992,6 +1039,80 @@ describe("bash job manager: recover (§3.6)", () => {
     expect(second.exitedUnknown).toEqual([]);
     expect(second.pendingNotices).toEqual(["b_DEAD0002"]);
     expect(h.manager.get("b_DEAD0002")?.endedAt).toBe(1_000);
+  });
+
+  // ── §2.5 step 4 linearization: an abort landing inside the transition /
+  // patch phase (not just the prune phase) must not fold results, mutate
+  // memory, rearm timers, or start any further store write. ─────────────────
+
+  it("an abort mid-transition discards the in-flight write: no fold, no further writes, no timers", async () => {
+    const h = await harness();
+    await seed(h.store, "b_P0A00001", { status: "running", pid: 9301, spawnedAt: 600, backgroundedAt: 650 });
+    await seed(h.store, "b_P0B00002", { status: "running", pid: 9302, spawnedAt: 600, backgroundedAt: 650 });
+    await seed(h.store, "b_P0C00003", { status: "running", pid: 9303, spawnedAt: 600, backgroundedAt: 650 });
+    h.port.ownership.set(9301, "dead");
+    h.port.ownership.set(9302, "dead");
+    h.port.ownership.set(9303, "dead");
+
+    const controller = new AbortController();
+    const realUpdate = h.store.update.bind(h.store);
+    let writes = 0;
+    h.store.update = (jobId: string, mutate: (record: JobRecord) => JobRecord | undefined) => {
+      writes += 1;
+      // The linearization point: abort fires while write #2 is between the
+      // pre-call checkpoint and the actual fs round-trip (in flight).
+      if (writes === 2) controller.abort();
+      return realUpdate(jobId, mutate);
+    };
+
+    const summary = await h.manager.recover(controller.signal);
+    expect(summary.partial).toBe(true);
+    // Write #1 completed before the abort: folded and reported.
+    expect(summary.exitedUnknown).toEqual(["b_P0A00001"]);
+    expect(h.manager.get("b_P0A00001")?.status).toBe("exited_unknown");
+    // Write #2 was in flight: allowed to settle on disk, but NOT folded —
+    // the memory entry keeps its pre-abort state.
+    expect((await h.store.load("b_P0B00002"))?.status).toBe("exited_unknown");
+    expect(h.manager.get("b_P0B00002")?.status).toBe("running");
+    // Record #3 was never reached: no memory entry, nothing queued for it.
+    expect(h.manager.get("b_P0C00003")).toBeUndefined();
+    // No further store writes after the abort point, and nothing rearmed.
+    const afterAbort = writes;
+    await settle();
+    expect(writes).toBe(afterAbort);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("an abort mid-patch (adoption) discards the backgroundedAt fold the same way", async () => {
+    const h = await harness();
+    await seed(h.store, "b_P0D00004", { status: "running", pid: 9304, spawnedAt: 600 });
+    await seed(h.store, "b_P0E00005", { status: "running", pid: 9305, spawnedAt: 600 });
+    h.port.ownership.set(9304, "alive");
+    h.port.ownership.set(9305, "alive");
+
+    const controller = new AbortController();
+    const realUpdate = h.store.update.bind(h.store);
+    let writes = 0;
+    h.store.update = (jobId: string, mutate: (record: JobRecord) => JobRecord | undefined) => {
+      writes += 1;
+      if (writes === 1) controller.abort(); // abort during the very first adoption patch
+      return realUpdate(jobId, mutate);
+    };
+
+    const summary = await h.manager.recover(controller.signal);
+    expect(summary.partial).toBe(true);
+    expect(summary.adopted).toEqual([]);
+    // The patch settled on disk but the fold was discarded: no backgroundedAt
+    // in memory, so the job is not notification-eligible from this scan.
+    expect((await h.store.load("b_P0D00004"))?.backgroundedAt).toBe(1_000);
+    expect(h.manager.get("b_P0D00004")?.backgroundedAt).toBeUndefined();
+    expect(h.manager.get("b_P0D00004")?.status).toBe("running");
+    expect(h.manager.get("b_P0E00005")).toBeUndefined();
+    const afterAbort = writes;
+    await settle();
+    expect(writes).toBe(afterAbort);
+    expect(h.clock.pendingTimers).toBe(0);
+    expect(h.notified).toEqual([]);
   });
 });
 
