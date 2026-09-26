@@ -42,6 +42,9 @@ export interface LanHarness {
   fe: HttpFrontend;
   status: LanStatus;
   port: number;
+  /** The configured LAN port (fixed at harness construction, before any `start()`/`close()` —
+   * useful with `autoStart: false` when `status`/`port` haven't settled yet). */
+  cfg: HubLanConfig;
   store: FakeLanStore;
   limiter: LoginLimiter;
   clock: FakeClock;
@@ -65,6 +68,11 @@ export async function startLan(
   opts: {
     cfg?: Partial<HubLanConfig>;
     clock?: FakeClock;
+    /** Review fix (LC, plan §1.4/§3, W3 acceptance item 1): set `false` to get the harness back
+     * *before* `fe.lan.start()` is called, so a test can control the timing of `start()`/`close()`
+     * itself (e.g. to exercise the deadline or a close()∥start() race). `status`/`port` on the
+     * returned harness are then just the pre-start placeholders (`{state:"starting"}` / `0`).  */
+    autoStart?: boolean;
   } = {},
 ): Promise<LanHarness> {
   const clock = opts.clock ?? fakeClock();
@@ -127,14 +135,20 @@ export async function startLan(
   });
 
   if (fe.lan === undefined) throw new Error("test bug: fe.lan not constructed");
-  const status = await fe.lan.start();
-  lastStatus = status;
-  const port = status.state === "on" ? status.port : 0;
+  const autoStart = opts.autoStart ?? true;
+  let status: LanStatus = lastStatus;
+  let port = 0;
+  if (autoStart) {
+    status = await fe.lan.start();
+    lastStatus = status;
+    port = status.state === "on" ? status.port : 0;
+  }
 
   return {
     fe,
     status,
     port,
+    cfg,
     store,
     limiter,
     clock,

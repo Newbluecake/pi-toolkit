@@ -237,9 +237,21 @@ export async function startHub(
 
     clearTimeout(startTimer); // startup complete; further cancellation is close()'s job
     if (fe.lan !== undefined) {
+      // Review fix (LC, plan §1.4/§3, W3 acceptance item 1/3): `LanFacade.start()` is bounded by
+      // its own `LAN_START_DEADLINE_MS` and always *resolves* with a correctly classified
+      // `LanStatus` (`off/timeout`, `off/listen-failed`, ...) instead of rejecting for any
+      // recognized outcome — mislabeling every rejection here as `timeout` used to hide real
+      // causes (e.g. a port conflict) behind the wrong reason. A rejection reaching this handler
+      // therefore means something escaped that classification (a genuine bug in `start()` itself),
+      // so log it loudly rather than writing a second, silently-wrong guess into `hub.json`.
       void fe.lan.start().then(
         (s) => hubJson.patchLan(s),
-        (err: unknown) => hubJson.patchLan({ state: "off", reason: "timeout", detail: String(err) }),
+        (err: unknown) => {
+          log.error("web-hub: LAN start() rejected unexpectedly (not a classified LanStatus)", {
+            error: String(err),
+          });
+          hubJson.patchLan({ state: "off", reason: "listen-failed", detail: String(err) });
+        },
       );
     }
 

@@ -68,6 +68,7 @@ import type {
   LanFacade,
   LanFrontendDeps,
   LanListenerHandle,
+  LanOffReason,
   LanSessionRecord,
   LanStatus,
   LanTransport,
@@ -100,6 +101,12 @@ const LAN_SSE_GLOBAL_CAP = 32;
 const LAN_SSE_PER_SID_CAP = 8;
 const LAN_RECOMPUTE_THROTTLE_MS = 5_000;
 const LAN_TICK_MS = 60_000;
+// Review fix (LC, plan §1.4/§3, W3 acceptance item 1): `LanFacade.start()` is specified to be
+// bounded by `LAN_START_DEADLINE_MS` (plan's own `lan-controller.ts` sketch defines it as
+// 30_000ms; §15.8 moved the actual implementation into this file's self-hosted lifecycle without
+// changing the budget). Exported so tests can drive it with `vi.useFakeTimers()` the same way
+// `hub.ts`'s `HUB_START_DEADLINE_MS` contract tests do, instead of waiting out 30 real seconds.
+export const LAN_START_DEADLINE_MS = 30_000;
 // §4.2 "SSE 到期复核" (LC review fix, lan-plan.md §15.9 #3): a periodic (≤60s) recheck of every
 // LAN SSE connection's session, independent of the ping-only keepalive `sse.ts` already does.
 const LAN_SSE_EXPIRY_TICK_MS = 55_000;
@@ -472,11 +479,50 @@ export function createLanTransport(ctx: LanTransportCtx): LanTransport {
           else res.destroy();
         });
       });
+      // Review fix (LC, plan §1.4/§3, W3 acceptance item 1): the entry check above only catches
+      // a signal that was *already* aborted before `bind()` was even called — a signal that
+      // aborts while `listen()` is still in flight (the caller's `LAN_START_DEADLINE_MS` timer, or
+      // a concurrent `LanFacade.close()`) was previously ignored entirely: `listen()`'s callback
+      // would still fire, still `resolve()`, and hand back a fully bound, listening server that
+      // nobody asked for anymore — a leaked listener holding the port. Wire an `abort` listener for
+      // the whole lifetime of this bind attempt so whichever settles first (the real `listening`/
+      // `error` event, or the caller giving up) wins exactly once; the loser's side effect (a
+      // half-bound or fully-bound `srv`) is always closed by this function itself — the caller
+      // never has to know a server object ever existed for an attempt it abandoned.
       return new Promise<LanListenerHandle>((resolve, reject) => {
-        const onError = (err: Error): void => reject(err);
+        let settled = false;
+        const onAbort = (): void => {
+          if (settled) return;
+          settled = true;
+          srv.off("error", onError);
+          // `srv.close()` is safe to call even before `listening` has fired (Node queues the
+          // close behind the in-flight bind); either way the port is released and no 'listening'
+          // server is left dangling.
+          srv.close();
+          reject(toAbortError(signal));
+        };
+        const onError = (err: Error): void => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          reject(err);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
         srv.once("error", onError);
         srv.listen(port, LAN_BIND_HOST, () => {
           srv.off("error", onError);
+          signal.removeEventListener("abort", onAbort);
+          if (settled) return; // `onAbort` (or `onError`) already won the race and closed `srv`
+          if (signal.aborted) {
+            // Belt-and-suspenders for the boundary case where `listening` fires without our own
+            // `abort` listener having run first — either way, a caller that gave up must never
+            // receive a resolved handle.
+            settled = true;
+            srv.close();
+            reject(toAbortError(signal));
+            return;
+          }
+          settled = true;
           srv.on("error", (err) => ctx.log.error("web-hub lan http: server error", { error: String(err) }));
           srv.unref();
           const addr = srv.address();
@@ -1212,6 +1258,17 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     let gen = 0;
     let status: LanStatus = { state: "starting" };
     let lastRecomputeAt = 0;
+    // Review fix (LC, plan §1.4/§3, W3 acceptance item 1): `start()`/`close()` race guard.
+    // `startGen` is bumped by both a fresh `start()` call and by `close()` — whichever `start()`
+    // captured the *current* value as `mine` right before its own `await` is the only one allowed
+    // to publish a result; any attempt that finds `mine !== startGen` (a newer `start()` ran) or
+    // `lanClosed` (a `close()` ran) after resuming from that `await` must self-clean instead of
+    // mutating `handle`/`status` (§1.4 "迟到结果自我清理"). `inFlightStartAborts` lets `close()`
+    // proactively abort a `start()` that is still awaiting `transport.bind()` so the half/fully
+    // bound listener (and the port it holds) is released immediately rather than only once that
+    // bind attempt eventually settles on its own.
+    let startGen = 0;
+    const inFlightStartAborts = new Set<AbortController>();
 
     function extraWarnings(): string[] {
       return kdfInvalidWarning ? ["db-invalid:kdf"] : [];
@@ -1241,28 +1298,69 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
 
     lanFacade = {
       async start(): Promise<LanStatus> {
-        const first = lan.hosts.compute(lan.cfg);
-        gen = 1;
-        handle = await transport.bind(lan.cfg.port, { ...first, gen }, lan.scope.signal);
-        status = buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings());
-        lan.scope.timer(() => recompute(true), LAN_TICK_MS, true);
-        lan.scope.timer(
-          () => {
-            if (lanClosed) return;
-            void recheckLanSseExpiry(rt).catch((err: unknown) => {
-              rt.log.error("web-hub lan http: sse expiry recheck tick failed", { error: String(err) });
-            });
-          },
-          LAN_SSE_EXPIRY_TICK_MS,
-          true,
-        );
-        return status;
+        // §1.4/§3 "close 之后的 start 为 no-op": once closed, this facade never opens a listener again
+        // (the only recovery path is a whole-new hub process via `/webhub restart`).
+        if (lanClosed) return status;
+        const mine = ++startGen;
+        const startAbort = new AbortController();
+        inFlightStartAborts.add(startAbort);
+        let timedOut = false;
+        const deadlineTimer = setTimeout(() => {
+          timedOut = true;
+          startAbort.abort(new Error(`web-hub: LAN start exceeded ${LAN_START_DEADLINE_MS}ms`));
+        }, LAN_START_DEADLINE_MS);
+        deadlineTimer.unref?.();
+        try {
+          const first = lan.hosts.compute(lan.cfg);
+          gen = 1;
+          let bound: LanListenerHandle;
+          try {
+            bound = await transport.bind(lan.cfg.port, { ...first, gen }, startAbort.signal);
+          } catch (err) {
+            if (mine !== startGen || lanClosed) return status; // a newer start()/close() already won
+            const reason: LanOffReason = timedOut ? "timeout" : "listen-failed";
+            status = reason === "timeout" ? { state: "off", reason } : { state: "off", reason, detail: String(err) };
+            return status;
+          }
+          if (mine !== startGen || lanClosed) {
+            // A newer start() (tests only — production calls this once) or a concurrent close() ran
+            // while we were awaiting `bind()`: the port we just bound is now unwanted — release it
+            // ourselves (§1.4 "已 bind 的 handle 被关闭、端口可重新 bind") and leave `handle`/`status`
+            // untouched so we can never resurrect a facade that `close()` already tore down.
+            void bound.close();
+            return status;
+          }
+          handle = bound;
+          status = buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings());
+          lan.scope.timer(() => recompute(true), LAN_TICK_MS, true);
+          lan.scope.timer(
+            () => {
+              if (lanClosed) return;
+              void recheckLanSseExpiry(rt).catch((err: unknown) => {
+                rt.log.error("web-hub lan http: sse expiry recheck tick failed", { error: String(err) });
+              });
+            },
+            LAN_SSE_EXPIRY_TICK_MS,
+            true,
+          );
+          return status;
+        } finally {
+          clearTimeout(deadlineTimer);
+          inFlightStartAborts.delete(startAbort);
+        }
       },
       status(): LanStatus {
         return status;
       },
       async close(): Promise<void> {
         lanClosed = true;
+        startGen++; // invalidate any start() awaiting bind() right now, or about to be called
+        // §1.4 "close 与 start 并发": don't just wait for an in-flight start()'s bind() to settle on
+        // its own — abort it now so the half/fully bound listener (and the port) is released
+        // immediately; `bind()`'s own abort handling (see `createLanTransport`) does the actual
+        // `srv.close()`.
+        for (const c of inFlightStartAborts) c.abort(new Error("web-hub: LAN closed"));
+        inFlightStartAborts.clear();
         unsubscribeLanBus();
         lanSse.closeAll();
         rt.sidInflight.clear();
