@@ -10,6 +10,8 @@ import { EventWatchdog } from "../../src/runtime/watchdog.js";
 import { createRuntimeRunnerAdapter, type RuntimeAdapterDeps } from "../../src/service/runtime-adapter.js";
 import type { RunnerSpec } from "../../src/service/ports.js";
 import { formatExitFacts } from "../../src/tools/result-text.js";
+import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE, type PiOutboxHost } from "../../src/adapters/pi-outbox-store.js";
+import { createNotifier, type PersistedDelivery } from "../../src/delivery/notifier.js";
 
 /**
  * bash-timeout-grace plan §3.2/§3.7/§3.8 (P5, T25-T27): the value chain from
@@ -95,22 +97,32 @@ function makeFacts(tag: string): RunExitFacts {
     ],
   };
 }
-function captureNotifier() {
-  const enqueued: DeliveryPayload[] = [];
-  return {
-    captured: {
-      enqueue: (payload: DeliveryPayload) => enqueued.push(payload),
-      finalize: () => "missing" as const,
-      settleBatch: () => undefined,
-      peek: () => undefined,
-      consume: () => false,
-      reconcile: () => ({ redelivered: [], suppressed: [], abandoned: [] }),
-      verifyPersisted: () => ({ missing: [] }),
-      stats: { staged: 0, pending: 0, batched: 0, delivered: 0, consumed: 0, dropped: 0, abandoned: 0 },
-      degraded: [],
+
+/**
+ * T26/T27 (P5b item 4): the REAL persistence path (`createPiOutboxStore` +
+ * `createNotifier`, byte-identical wiring to `src/stack.ts`'s own
+ * `outbox`/`notifier` construction) backed by a plain array standing in for
+ * `pi.sessionManager.getEntries()` — `appendEntry` pushes into it
+ * synchronously, exactly like the real `pi.appendEntry`. A "restart" is
+ * modeled the same way `buildSessionStack` itself models `/reload`: a
+ * SECOND `createPiOutboxStore` fed the SAME array as `prefetched`. No
+ * `buildSessionStack` call is involved (nothing here touches `~/.pi/agent`
+ * or any real filesystem/session-manager state), so `sandboxHome()` does
+ * not apply — this is the "equivalent real persistence path" the P5b task
+ * calls for as an alternative to a full stack rebuild.
+ */
+function realOutboxHost(
+  entries: { type: string; customType?: string; data?: unknown }[],
+  prefetched?: readonly { type: string; customType?: string; data?: unknown }[],
+): { host: PiOutboxHost; outbox: ReturnType<typeof createPiOutboxStore<PersistedDelivery>> } {
+  const host: PiOutboxHost = {
+    appendEntry: (customType, data) => {
+      entries.push({ type: "custom", customType, data });
     },
-    enqueued,
+    sessionManager: { getEntries: () => entries },
   };
+  const outbox = createPiOutboxStore<PersistedDelivery>(host, OUTBOX_CUSTOM_TYPE, prefetched);
+  return { host, outbox };
 }
 
 describe("exit facts value chain (T25-T27)", () => {
@@ -155,37 +167,111 @@ describe("exit facts value chain (T25-T27)", () => {
     expect(formatExitFacts(outcome.diag.exitFacts)).toBeUndefined();
   });
 
-  it("T26: enqueue_delivery's payload carries the same exitFacts value — synchronous, no rebuild window", async () => {
+  it("T26: enqueue_delivery's payload lands in a REAL outbox (createPiOutboxStore) synchronously — no crash window between finish() and persistence", async () => {
     const clock = new FakeClock();
     const facts = makeFacts("t26");
-    const capture = captureNotifier();
+    const entries: { type: string; customType?: string; data?: unknown }[] = [];
+    const { outbox } = realOutboxHost(entries);
+    const sent: DeliveryPayload[] = [];
+    const notifier = createNotifier({
+      store: outbox,
+      clock,
+      maxAttempts: 3,
+      backoffMs: 1_000,
+      reconcileTtlMs: 24 * 60 * 60 * 1_000,
+      maxReconcileRounds: 3,
+      maxBatch: 10,
+      cancelBuffered: () => undefined,
+      sender: (payload) => {
+        sent.push(payload);
+      },
+    });
     const driver: SessionDriver = {
       create: async () => handle(),
       bind: async () => undefined,
       onLateArrival: () => undefined,
     };
-    const runner = buildAdapter(clock, {
-      driver,
-      notifier: capture.captured,
-      sealSession: () => facts,
-    });
+    const runner = buildAdapter(clock, { driver, notifier, sealSession: () => facts });
     const outcome = await runner.run(spec(plainType()));
-    expect(capture.enqueued).toHaveLength(1);
-    expect(capture.enqueued[0]!.exitFacts).toEqual(facts);
-    expect(capture.enqueued[0]!.exitFacts).toEqual(outcome.diag.exitFacts);
+
+    // The crash-window claim (§3.7): `sealSession → exit_facts → finish() →
+    // enqueue_delivery → notifier.enqueue → outbox.put → pi.appendEntry` all
+    // happen inside ONE synchronous call stack (no `await` in between) — so by
+    // the time `run()` has already resolved, the REAL entry log (`entries`,
+    // standing in for `pi.sessionManager.getEntries()`) must already contain
+    // the persisted record. This is the actual `createPiOutboxStore.put()`
+    // code path, not a manual JSON round-trip.
+    const persisted = entries.find(
+      (e) => e.customType === OUTBOX_CUSTOM_TYPE && (e.data as PersistedDelivery | undefined)?.runId === "r1",
+    );
+    expect(persisted).toBeDefined();
+    const persistedPayload = persisted!.data as PersistedDelivery;
+    expect(persistedPayload.exitFacts).toEqual(facts);
+    expect(persistedPayload.exitFacts).toEqual(outcome.diag.exitFacts);
+    // The notifier's own immediate delivery attempt also carries it (model-facing send).
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.exitFacts).toEqual(facts);
   });
 
-  it("T27: the same DeliveryPayload shape round-trips through JSON (outbox persistence survives a restart)", () => {
+  it("T27: a fresh createPiOutboxStore fed the SAME entry log after a simulated restart recovers exitFacts and redelivers", async () => {
+    const clock = new FakeClock();
     const facts = makeFacts("t27");
-    const payload: DeliveryPayload = {
-      runId: "r1",
-      generation: 1,
-      status: "completed",
-      exitFacts: facts,
-    } as unknown as DeliveryPayload;
-    const roundTripped = JSON.parse(JSON.stringify(payload)) as DeliveryPayload;
-    expect(roundTripped.exitFacts).toEqual(facts);
-    expect(formatExitFacts(roundTripped.exitFacts)).toBe(formatExitFacts(facts));
+    const entries: { type: string; customType?: string; data?: unknown }[] = [];
+    const { outbox: outboxBeforeCrash } = realOutboxHost(entries);
+    const notifierBeforeCrash = createNotifier({
+      store: outboxBeforeCrash,
+      clock,
+      maxAttempts: 3,
+      backoffMs: 1_000,
+      reconcileTtlMs: 24 * 60 * 60 * 1_000,
+      maxReconcileRounds: 3,
+      maxBatch: 10,
+      cancelBuffered: () => undefined,
+      // The crash happens BEFORE delivery is confirmed (the realistic window
+      // §3.7 cares about — a record already "delivered" needs no redelivery
+      // at all, so that case would prove nothing here): the first send throws,
+      // leaving the persisted record in state "pending" (`settleFailed`,
+      // attempts=1 < maxAttempts=3), exactly as if the process died before
+      // the notification actually reached anyone.
+      sender: () => {
+        throw new Error("simulated crash before delivery confirmed");
+      },
+    });
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, { driver, notifier: notifierBeforeCrash, sealSession: () => facts });
+    await runner.run(spec(plainType()));
+    expect(entries.length).toBeGreaterThan(0); // sanity: something really was persisted before "crashing"
+
+    // Simulate a restart: a brand-new process re-imports the SAME persisted
+    // entry log as `prefetchedEntries` (`src/stack.ts`'s own `/reload`/resume
+    // wiring, byte-identical call shape: `createPiOutboxStore(host,
+    // OUTBOX_CUSTOM_TYPE, prefetchedEntries)`) — no shared in-memory state
+    // with the pre-crash notifier/outbox beyond the plain entry array.
+    const sentAfterRestart: DeliveryPayload[] = [];
+    const { outbox: outboxAfterRestart } = realOutboxHost([], entries);
+    const notifierAfterRestart = createNotifier({
+      store: outboxAfterRestart,
+      clock,
+      maxAttempts: 3,
+      backoffMs: 1_000,
+      reconcileTtlMs: 24 * 60 * 60 * 1_000,
+      maxReconcileRounds: 3,
+      maxBatch: 10,
+      cancelBuffered: () => undefined,
+      sender: (payload) => {
+        sentAfterRestart.push(payload);
+      },
+    });
+
+    const report = notifierAfterRestart.reconcile();
+    expect(report.redelivered).toEqual(["r1:1"]);
+    expect(sentAfterRestart).toHaveLength(1);
+    expect(sentAfterRestart[0]!.exitFacts).toEqual(facts);
+    expect(formatExitFacts(sentAfterRestart[0]!.exitFacts)).toBe(formatExitFacts(facts));
   });
 
   it("onReaped forwards sessionId as a defensive fan-out point (E18 late-arrival call sites)", async () => {

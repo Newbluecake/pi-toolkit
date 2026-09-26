@@ -52,9 +52,9 @@ export interface WireChildBashJobsOptions {
 }
 
 /** §3.5: fixed constants (not settings — see plan §9's risk table on low idleMs). */
-const W_HOLD_MS: Millis = 120_000;
-const MARGIN_HOLD_MS: Millis = 15_000;
-const HOLD_MIN_MS: Millis = 5_000;
+export const W_HOLD_MS: Millis = 120_000;
+export const MARGIN_HOLD_MS: Millis = 15_000;
+export const HOLD_MIN_MS: Millis = 5_000;
 
 /** A resolve-only gate: `fire()` wakes every current waiter and re-arms for the next episode. */
 function createGate(): { wait(): Promise<void>; fire(): void } {
@@ -94,7 +94,12 @@ function mapExitState(status: JobRecord["status"]): RunExitJob["state"] {
 }
 
 /** §3.1 `ChildBashEntry.exitFacts()`: sync, read-only, capped at 5 entries. */
-function buildExitFacts(manager: BashJobManager, seen: ReadonlySet<JobId>, clock: Clock): RunExitFacts {
+function buildExitFacts(
+  manager: BashJobManager,
+  seen: ReadonlySet<JobId>,
+  clock: Clock,
+  holdSnapshot: () => { rounds: number; cap: number } | undefined,
+): RunExitFacts {
   const relevant = manager
     .list()
     .filter((record) => !isTerminalJobStatus(record.status) || !seen.has(record.jobId))
@@ -110,11 +115,16 @@ function buildExitFacts(manager: BashJobManager, seen: ReadonlySet<JobId>, clock
     durationMs: Math.max(0, (record.endedAt ?? now) - (record.spawnedAt ?? record.createdAt)),
     seen: seen.has(record.jobId),
   }));
-  return { bashJobs, ...(relevant.length > 5 ? { bashJobsMore: relevant.length - 5 } : {}) };
+  const hold = holdSnapshot();
+  return {
+    bashJobs,
+    ...(relevant.length > 5 ? { bashJobsMore: relevant.length - 5 } : {}),
+    ...(hold !== undefined ? { hold: { rounds: hold.rounds, cap: hold.cap, exhausted: hold.rounds >= hold.cap } } : {}),
+  };
 }
 
 /** §3.3 S3: kill every non-terminal job of this manager, bounded by the caller's own memoization. */
-async function killAllNonTerminal(manager: BashJobManager, graceMs: number): Promise<KillAllReport> {
+export async function killAllNonTerminal(manager: BashJobManager, graceMs: number): Promise<KillAllReport> {
   const targets = manager.list().filter((record) => !isTerminalJobStatus(record.status));
   const killed: JobId[] = [];
   const alreadyDone: JobId[] = [];
@@ -165,7 +175,7 @@ function formatGraceNotice(record: JobRecord, now: Millis): string {
 }
 
 /** §3.5: `R_wait = ceil(H / W_HOLD) + 2 + E + G0`; `cap = childSettleHoldMaxRounds || 2 * R_wait`. */
-function computeHoldCap(
+export function computeHoldCap(
   configuredMax: number,
   hardDeadlineAt: number | undefined,
   t0: Millis,
@@ -291,7 +301,10 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
     manager = m;
     registry.register({
       sessionId,
-      exitFacts: () => buildExitFacts(m, seen, clock),
+      exitFacts: () =>
+        buildExitFacts(m, seen, clock, () =>
+          frozenT0 !== undefined ? { rounds: holdRounds, cap: frozenCap ?? 1 } : undefined,
+        ),
       killAll: (graceMs) => killAllNonTerminal(m, graceMs),
       onSealed: () => {
         graceGate.fire();

@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { formatSize, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { resolveReserveTokens } from "./compact-hint/pi-settings.js";
 import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "./config/settings.js";
 import {
@@ -304,6 +304,65 @@ export function formatBashJobNotification(record: JobRecord, tail?: string, now:
   ].join("\n");
 }
 
+/**
+ * bash-timeout-grace plan §4 (P5b): the main-session job-deadline notice
+ * channel — distinct customType from the completion notice
+ * (`BASH_JOB_NOTIFICATION_TYPE`) so a downstream hook/model can tell the two
+ * apart. "grace" wakes the model into a decision turn (mirrors
+ * `deliveryOptionsFor` for the run-level timeout-notify channel);
+ * "extended" is a TUI-only receipt (the tool call already told the model the
+ * same numbers in its own return text — §2.6/`bash-job-tool.ts`).
+ */
+export const BASH_JOB_DEADLINE_NOTIFICATION_TYPE = "bash-job:timeout";
+
+/** §4/§2.6: the `extend_s` suggestion shown in the grace notice — same value as `bash-job-tool.ts`'s own grace line. */
+const BASH_JOB_GRACE_SUGGESTED_EXTEND_S = 600;
+
+/**
+ * §4 main-session grace notice (seven-line template, mirrors
+ * `delivery/deadline-notice.ts`'s run-level `formatDeadlineNotice`): wakes
+ * the model with the job's own command/log context and a copyable `extend`
+ * call. `record.deadline` is always defined when this is called (only
+ * `onDeadline(record, "grace")` calls it) — the `undefined` branch is a
+ * defensive fallback that should be unreachable.
+ */
+export function formatBashJobGraceNotice(record: JobRecord, now: number = Date.now()): string {
+  const deadline = record.deadline;
+  if (deadline === undefined) {
+    return `⏳ Bash job ${record.jobId} hit its timeout and is STILL RUNNING.`;
+  }
+  const graceLeft = formatDuration(Math.max(0, (deadline.graceUntil ?? now) - now));
+  const extensionsLeft = Math.max(0, deadline.policy.maxExtensions - deadline.extensions);
+  const headroom = formatDuration(Math.max(0, deadline.hardAt - Math.max(now, deadline.dueAt)));
+  return [
+    `⏳ Bash job ${record.jobId} hit its ${formatDuration(deadline.timeoutMs)} timeout and is STILL RUNNING.`,
+    `Grace: ${graceLeft} left — then it is killed as timed_out (partial log stays at ${record.logPath}).`,
+    `Command: ${previewCommand(record.command, 60)} · running ${formatDuration(bashJobElapsedMs(record, now))} · log ${formatSize(record.logBytes)}`,
+    `Give it more time:  bash_job(action: "extend", job_id: "${record.jobId}", extend_s: ${BASH_JOB_GRACE_SUGGESTED_EXTEND_S})`,
+    `Budget left: ${extensionsLeft} of ${deadline.policy.maxExtensions} extensions, at most ${headroom} more.`,
+    `Doing nothing lets it expire — that is a valid choice if you no longer need it.`,
+  ].join("\n");
+}
+
+/**
+ * §4 main-session "already extended" receipt — TUI-only (`triggerTurn:
+ * false`): the tool's own return text (`bash-job-tool.ts`) already told the
+ * calling model the same numbers, so this is display-only for the human
+ * watching the session.
+ */
+export function formatBashJobExtendedNotice(record: JobRecord, now: number = Date.now()): string {
+  const deadline = record.deadline;
+  if (deadline === undefined) {
+    return `⏳ Bash job ${record.jobId} timeout extended.`;
+  }
+  const extensionsLeft = Math.max(0, deadline.policy.maxExtensions - deadline.extensions);
+  const headroom = formatDuration(Math.max(0, deadline.hardAt - Math.max(now, deadline.dueAt)));
+  return (
+    `⏳ Bash job ${record.jobId} timeout extended — now fires in ${formatDuration(Math.max(0, deadline.dueAt - now))} ` +
+    `(${extensionsLeft} of ${deadline.policy.maxExtensions} extensions left, ${headroom} hard-limit headroom left).`
+  );
+}
+
 function tailOffset(size: number): number {
   return Math.max(0, size - BASH_JOB_TAIL_BYTES);
 }
@@ -532,6 +591,39 @@ function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: 
     maxLogBytes: config.maxLogBytes,
     maxBackgroundJobs: config.maxBackgroundJobs,
     drainTimeoutMs: config.drainTimeoutMs,
+    // bash-timeout-grace plan §2/§4 (P5b): the main session gets the same
+    // job-level deadline machinery as a child session (§3.4's
+    // `createBashJobManager` call in `src/bash/child.ts`) — without this,
+    // `deadlinePolicy` defaults to `DEFAULT_JOB_DEADLINE_POLICY` regardless
+    // of what the user configured (`bashJobs.timeoutGraceMs`/`maxExtensions`/
+    // `maxTimeoutFactor`), and `onDeadline` being unset means grace/extended
+    // events never reach the model or the TUI.
+    deadlinePolicy: {
+      graceMs: config.timeoutGraceMs,
+      maxExtensions: config.maxExtensions,
+      maxTimeoutFactor: config.maxTimeoutFactor,
+    },
+    onDeadline: (record, kind) => {
+      try {
+        pi.sendMessage(
+          {
+            customType: BASH_JOB_DEADLINE_NOTIFICATION_TYPE,
+            content:
+              kind === "grace"
+                ? formatBashJobGraceNotice(record, systemClock.now())
+                : formatBashJobExtendedNotice(record, systemClock.now()),
+            display: true,
+            details: { kind: "bash-job-deadline", jobId: record.jobId, status: record.status, deadlineKind: kind },
+          },
+          // §4: a grace notice wakes the model into a decision turn; an
+          // "extended" receipt is TUI-only (the tool's own return text
+          // already told the model the same numbers).
+          { triggerTurn: kind === "grace" },
+        );
+      } catch {
+        /* best effort, mirrors notify() above */
+      }
+    },
     notify: async (record) => {
       const tail = managerRef.current ? await readBashJobTail(managerRef.current, record) : undefined;
       pi.sendMessage(

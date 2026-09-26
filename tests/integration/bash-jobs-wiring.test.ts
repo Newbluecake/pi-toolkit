@@ -7,7 +7,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Component } from "@earendil-works/pi-tui";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
-import { bashJobsEnabled, buildSessionStack, formatBashJobNotification, readBashJobTail } from "../../src/stack.js";
+import {
+  bashJobsEnabled,
+  buildSessionStack,
+  formatBashJobExtendedNotice,
+  formatBashJobGraceNotice,
+  formatBashJobNotification,
+  readBashJobTail,
+} from "../../src/stack.js";
 import { probePid, readProcStartTime } from "../../src/bash/process.js";
 import { sanitizeSessionDirName } from "../../src/bash/session-dirs.js";
 import { createJobRecord, type JobRecord } from "../../src/bash/types.js";
@@ -334,6 +341,304 @@ describe("S7 notification text", () => {
     expect(formatBashJobNotification({ ...base, outputTruncated: true }, "tail", 0)).toContain(
       "the job's log hit its size cap",
     );
+  });
+});
+
+/**
+ * P5b (bash-timeout-grace §2/§4): the main session's `bashJobs.timeoutGraceMs` /
+ * `maxExtensions` / `maxTimeoutFactor` settings must actually reach
+ * `src/stack.ts`'s `buildBashJobManager` (`deadlinePolicy`) and its
+ * `onDeadline` callback (grace/extended notice on the `bash-job:timeout`
+ * customType) — the P5 review's Major finding. Every test below picks
+ * non-default policy values (default is 60_000ms/3/3, same as
+ * `DEFAULT_JOB_DEADLINE_POLICY`) precisely so a passing assertion cannot be
+ * explained by the manager silently falling back to its own default.
+ */
+describe("S9 main-session job deadline wiring (P5b)", () => {
+  function killGroup(pid: number | undefined): void {
+    if (pid === undefined) return;
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+
+  it.runIf(posix)(
+    "kills a still-foreground job immediately at its configured timeout — no grace, no notice (U5)",
+    async () => {
+      const dir = join(tmpRoot, "deadline-foreground");
+      const host = fakePi();
+      const stack = buildSessionStack(
+        host.pi,
+        ctx,
+        settingsWith(dir, { timeoutGraceMs: 5_000, maxExtensions: 2, maxTimeoutFactor: 10 }),
+        types,
+        [],
+      );
+      const job = await stack.bashJobs!.create({ command: "sleep 30", cwd: process.cwd(), timeoutMs: 200 });
+      try {
+        await vi.waitFor(() => expect(stack.bashJobs!.get(job.jobId)?.status).toBe("timed_out"), {
+          timeout: 3_000,
+          interval: 20,
+        });
+        expect(stack.bashJobs!.get(job.jobId)?.deadline?.graceUntil).toBeUndefined();
+        expect(host.sent.some((m) => m.message.customType === "bash-job:timeout")).toBe(false);
+      } finally {
+        killGroup(job.pid);
+        stack.bashJobs?.dispose();
+      }
+    },
+  );
+
+  it.runIf(posix)(
+    "backgrounded job hits its timeout, enters grace and sends exactly one bash-job:timeout grace notice honoring the configured graceMs/maxExtensions (not the manager's own default)",
+    async () => {
+      const dir = join(tmpRoot, "deadline-grace");
+      const host = fakePi();
+      const stack = buildSessionStack(
+        host.pi,
+        ctx,
+        settingsWith(dir, { timeoutGraceMs: 400, maxExtensions: 2, maxTimeoutFactor: 10 }),
+        types,
+        [],
+      );
+      const job = await stack.bashJobs!.create({ command: "sleep 30", cwd: process.cwd(), timeoutMs: 200 });
+      try {
+        await stack.bashJobs!.markBackgrounded(job.jobId);
+        await vi.waitFor(() => expect(stack.bashJobs!.get(job.jobId)?.deadline?.graceUntil).toBeTypeOf("number"), {
+          timeout: 3_000,
+          interval: 20,
+        });
+        // Give any (incorrect) duplicate notification a chance to land before asserting the count.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const graceNotices = host.sent.filter((m) => m.message.customType === "bash-job:timeout");
+        expect(graceNotices).toHaveLength(1);
+        expect(graceNotices[0]!.options?.triggerTurn).toBe(true);
+        expect(graceNotices[0]!.message.display).toBe(true);
+        const content = graceNotices[0]!.message.content as string;
+        expect(content).toContain(`Bash job ${job.jobId}`);
+        expect(content).toContain("STILL RUNNING");
+        expect(content).toContain("Grace:");
+        expect(content).toContain(`bash_job(action: "extend", job_id: "${job.jobId}"`);
+        // graceMs=400 (not the manager's own 60_000ms default) and maxExtensions=2 (not 3).
+        expect(content).toContain("Budget left: 2 of 2 extensions");
+        expect(stack.bashJobs!.get(job.jobId)?.status).toBe("running"); // still in grace, not killed yet
+        const record = stack.bashJobs!.get(job.jobId);
+        expect(record?.deadline?.policy).toEqual({ graceMs: 400, maxExtensions: 2, maxTimeoutFactor: 10 });
+      } finally {
+        await stack.bashJobs!.kill(job.jobId, { graceMs: 0 }).catch(() => undefined);
+        killGroup(job.pid);
+        stack.bashJobs?.dispose();
+      }
+    },
+  );
+
+  it.runIf(posix)(
+    "extend() during the grace window works end-to-end and sends exactly one TUI-only extended receipt",
+    async () => {
+      const dir = join(tmpRoot, "deadline-extend");
+      const host = fakePi();
+      const stack = buildSessionStack(
+        host.pi,
+        ctx,
+        settingsWith(dir, { timeoutGraceMs: 400, maxExtensions: 2, maxTimeoutFactor: 10 }),
+        types,
+        [],
+      );
+      const job = await stack.bashJobs!.create({ command: "sleep 30", cwd: process.cwd(), timeoutMs: 200 });
+      try {
+        await stack.bashJobs!.markBackgrounded(job.jobId);
+        await vi.waitFor(() => expect(stack.bashJobs!.get(job.jobId)?.deadline?.graceUntil).toBeTypeOf("number"), {
+          timeout: 3_000,
+          interval: 20,
+        });
+        const before = stack.bashJobs!.get(job.jobId)!;
+        const outcome = await stack.bashJobs!.extend(job.jobId, 5_000, "still needed");
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          expect(outcome.record.deadline?.graceUntil).toBeUndefined(); // extend clears the grace window
+          expect(outcome.record.deadline!.dueAt).toBeGreaterThan(before.deadline!.dueAt);
+          expect(outcome.record.deadline!.extensions).toBe(1);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const extendedNotices = host.sent.filter(
+          (m) =>
+            m.message.customType === "bash-job:timeout" &&
+            (m.message.details as { deadlineKind?: string })?.deadlineKind === "extended",
+        );
+        expect(extendedNotices).toHaveLength(1);
+        expect(extendedNotices[0]!.options?.triggerTurn).toBe(false); // TUI-only receipt (§4)
+        expect(extendedNotices[0]!.message.content as string).toContain(`Bash job ${job.jobId} timeout extended`);
+        // Still exactly one grace notice from before the extend (extend does not re-trigger it).
+        expect(
+          host.sent.filter(
+            (m) =>
+              m.message.customType === "bash-job:timeout" &&
+              (m.message.details as { deadlineKind?: string })?.deadlineKind === "grace",
+          ),
+        ).toHaveLength(1);
+        expect(stack.bashJobs!.get(job.jobId)?.status).toBe("running");
+      } finally {
+        killGroup(job.pid);
+        await stack.bashJobs!.drain().catch(() => undefined);
+        stack.bashJobs?.dispose();
+      }
+    },
+  );
+
+  it.runIf(posix)("kills the job as timed_out once the (configured) grace window expires with no extend", async () => {
+    const dir = join(tmpRoot, "deadline-grace-expiry");
+    const host = fakePi();
+    const stack = buildSessionStack(
+      host.pi,
+      ctx,
+      settingsWith(dir, { timeoutGraceMs: 200, maxExtensions: 2, maxTimeoutFactor: 10 }),
+      types,
+      [],
+    );
+    const job = await stack.bashJobs!.create({ command: "sleep 30", cwd: process.cwd(), timeoutMs: 150 });
+    try {
+      await stack.bashJobs!.markBackgrounded(job.jobId);
+      await vi.waitFor(() => expect(stack.bashJobs!.get(job.jobId)?.status).toBe("timed_out"), {
+        timeout: 3_000,
+        interval: 20,
+      });
+      expect(stack.bashJobs!.get(job.jobId)?.deadline?.graces).toBe(1);
+      expect(stack.bashJobs!.get(job.jobId)?.deadline?.graceNotified).toBe(1);
+      expect(host.sent.filter((m) => m.message.customType === "bash-job:timeout")).toHaveLength(1); // only the grace notice, no second one for the kill
+    } finally {
+      await stack.bashJobs!.drain().catch(() => undefined);
+      killGroup(job.pid);
+      stack.bashJobs?.dispose();
+    }
+  });
+
+  it.runIf(posix)(
+    "maxExtensions=1 is enforced end-to-end: the second extend is refused, only one extended receipt is ever sent",
+    async () => {
+      const dir = join(tmpRoot, "deadline-max-extensions");
+      const host = fakePi();
+      const stack = buildSessionStack(
+        host.pi,
+        ctx,
+        settingsWith(dir, { timeoutGraceMs: 5_000, maxExtensions: 1, maxTimeoutFactor: 20 }),
+        types,
+        [],
+      );
+      const job = await stack.bashJobs!.create({ command: "sleep 30", cwd: process.cwd(), timeoutMs: 200 });
+      try {
+        await stack.bashJobs!.markBackgrounded(job.jobId);
+        await vi.waitFor(() => expect(stack.bashJobs!.get(job.jobId)?.deadline?.graceUntil).toBeTypeOf("number"), {
+          timeout: 3_000,
+          interval: 20,
+        });
+        const first = await stack.bashJobs!.extend(job.jobId, 2_000);
+        expect(first.ok).toBe(true);
+        const second = await stack.bashJobs!.extend(job.jobId, 2_000);
+        expect(second).toEqual({ ok: false, reason: "limit_reached" });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(
+          host.sent.filter(
+            (m) =>
+              m.message.customType === "bash-job:timeout" &&
+              (m.message.details as { deadlineKind?: string })?.deadlineKind === "extended",
+          ),
+        ).toHaveLength(1);
+      } finally {
+        killGroup(job.pid);
+        await stack.bashJobs!.drain().catch(() => undefined);
+        stack.bashJobs?.dispose();
+      }
+    },
+  );
+
+  it.runIf(posix)(
+    "maxTimeoutFactor=1 leaves zero headroom (D-6): grace is disabled entirely, the job is killed outright at dueAt with no notice",
+    async () => {
+      const dir = join(tmpRoot, "deadline-max-factor");
+      const host = fakePi();
+      const stack = buildSessionStack(
+        host.pi,
+        ctx,
+        settingsWith(dir, { timeoutGraceMs: 5_000, maxExtensions: 3, maxTimeoutFactor: 1 }),
+        types,
+        [],
+      );
+      const job = await stack.bashJobs!.create({ command: "sleep 30", cwd: process.cwd(), timeoutMs: 200 });
+      try {
+        await stack.bashJobs!.markBackgrounded(job.jobId);
+        await vi.waitFor(() => expect(stack.bashJobs!.get(job.jobId)?.status).toBe("timed_out"), {
+          timeout: 3_000,
+          interval: 20,
+        });
+        expect(stack.bashJobs!.get(job.jobId)?.deadline?.graceUntil).toBeUndefined();
+        expect(stack.bashJobs!.get(job.jobId)?.deadline?.graces).toBe(0);
+        expect(host.sent.some((m) => m.message.customType === "bash-job:timeout")).toBe(false);
+      } finally {
+        await stack.bashJobs!.drain().catch(() => undefined);
+        killGroup(job.pid);
+        stack.bashJobs?.dispose();
+      }
+    },
+  );
+
+  describe("formatBashJobGraceNotice / formatBashJobExtendedNotice (unit)", () => {
+    const withDeadline: JobRecord = {
+      v: 1,
+      jobId: "b_FMT00001",
+      command: "go test ./... -timeout 20m",
+      cwd: "/repo",
+      sessionId: "s",
+      hostPid: 1,
+      status: "running",
+      createdAt: 0,
+      spawnedAt: 0,
+      backgroundedAt: 0,
+      exitCode: null,
+      logPath: "/tmp/b_FMT00001.log",
+      logBytes: 1_200_000,
+      outputTruncated: false,
+      readCursor: 0,
+      deadline: {
+        timeoutMs: 600_000,
+        policy: { graceMs: 60_000, maxExtensions: 3, maxTimeoutFactor: 3 },
+        dueAt: 600_000,
+        hardAt: 1_800_000,
+        graceUntil: 660_000,
+        graces: 1,
+        graceNotified: 1,
+        extensions: 0,
+        grantedMs: 0,
+        seq: 1,
+      },
+    };
+
+    it("renders the seven-line grace template with the job's own numbers", () => {
+      const text = formatBashJobGraceNotice(withDeadline, 600_000);
+      expect(text).toContain("hit its 10m00s timeout and is STILL RUNNING.");
+      expect(text).toContain("Grace: 1m00s left");
+      expect(text).toContain("Command: go test ./... -timeout 20m · running 10m00s · log");
+      expect(text).toContain('Give it more time:  bash_job(action: "extend", job_id: "b_FMT00001", extend_s: 600)');
+      expect(text).toContain("Budget left: 3 of 3 extensions, at most 20m00s more.");
+      expect(text).toContain("Doing nothing lets it expire");
+    });
+
+    it("renders the extended receipt with remaining budget and headroom", () => {
+      const extended: JobRecord = {
+        ...withDeadline,
+        deadline: {
+          ...withDeadline.deadline!,
+          dueAt: 700_000,
+          graceUntil: undefined,
+          extensions: 1,
+          grantedMs: 100_000,
+        },
+      };
+      const text = formatBashJobExtendedNotice(extended, 600_000);
+      expect(text).toContain("Bash job b_FMT00001 timeout extended");
+      expect(text).toContain("2 of 3 extensions left");
+    });
   });
 });
 

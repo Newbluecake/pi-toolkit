@@ -457,9 +457,29 @@ export default function activate(pi: ExtensionAPI): void {
       createBashTool({
         manager: forwardBashJobs(holder),
         autoBackgroundMs: () => settings.bashJobs.autoBackgroundMs,
+        // P5b: without this the main session's `timeoutGraceMs`/`maxExtensions`/
+        // `maxTimeoutFactor` settings never reach the tool surface (the
+        // description suffix stays off even when the manager's own
+        // deadlinePolicy — src/stack.ts's `buildBashJobManager` — is enabled).
+        deadline: () => ({
+          graceMs: settings.bashJobs.timeoutGraceMs,
+          maxExtensions: settings.bashJobs.maxExtensions,
+          maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
+        }),
       }),
     );
-    pi.registerTool(createBashJobTool({ manager: forwardBashJobs(holder) }));
+    pi.registerTool(
+      createBashJobTool({
+        manager: forwardBashJobs(holder),
+        // P5b: same as above — without this `bash_job`'s schema never gains
+        // the `extend` action for the main session, no matter the settings.
+        deadline: () => ({
+          graceMs: settings.bashJobs.timeoutGraceMs,
+          maxExtensions: settings.bashJobs.maxExtensions,
+          maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
+        }),
+      }),
+    );
   }
   // Inject the registered agent types and available models through the hub.
   // The hub owns the stable/live/legacy mode, persistence, updates, and wake

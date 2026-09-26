@@ -6,8 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import { bashJobsEnabled, checkBashToolReturnLag, scheduleBashJobRecovery } from "../../src/stack.js";
-import { wireChildBashJobs } from "../../src/bash/child.js";
+import { computeHoldCap, HOLD_MIN_MS, MARGIN_HOLD_MS, W_HOLD_MS, wireChildBashJobs } from "../../src/bash/child.js";
 import { getChildBashRegistry, type HostRunView } from "../../src/bash/child-registry.js";
+import { FakeClock } from "../../src/core/clock.js";
+import { formatExitFacts } from "../../src/tools/result-text.js";
+import type { JobRecord } from "../../src/bash/types.js";
 
 /**
  * bash-timeout-grace plan §3.4-3.7 (P5): the child (subagent) session half of
@@ -381,6 +384,312 @@ describe("§3.5 round-budget cap (Q1, representative T21 case)", () => {
 
     // Cleanup: kill the still-running long job so the test process exits cleanly.
     await getChildBashRegistry().sealAndKill(sessionId, 200).done;
+  }, 20_000);
+});
+
+/**
+ * bash-timeout-grace plan §7 T21 (a)-(f) (P5b): fixed FakeClock timelines for
+ * the round-budget cap (§3.5). (d)/(e) are pure `computeHoldCap` arithmetic
+ * (no hook/registry involved — the G0 formula is a pure function of the job
+ * records at t0). (a)/(b)/(c)/(f) drive the real `agent_before_settle` hook
+ * end-to-end with a `FakeClock` injected into `wireChildBashJobs`: real,
+ * short-lived processes stand in for jobs (the manager's own deadline/wait
+ * timers all run off the SAME injected clock, so a job's own real wall-clock
+ * lifetime never needs to match the simulated timeline — only "is it still
+ * alive" matters, and a `sleep 30` real process outlives any of these
+ * sub-second tests). The pattern `const p = emit(...); clock.advance(ms);
+ * await p;` relies on the same guarantee `tests/bash/manager.test.ts` uses
+ * for `extend()`'s persist-timeout race: the hook (and `waitExit`'s Promise
+ * executor) runs synchronously up to its own first `await`, so the fake
+ * timer is armed before `clock.advance()` is called.
+ */
+describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap", () => {
+  function settleEvent() {
+    return { outcome: "completed", context: { canContinue: true }, entries: [] };
+  }
+
+  /**
+   * Give the event loop a short REAL tick so a just-created job's own async
+   * save→spawn→running sequence (real fs/child_process I/O, independent of
+   * the injected `FakeClock`) actually completes before a large
+   * `clock.advance()` forces the manager's 30s staging-persist race (§2.4
+   * R12) to its timeout branch purely because no real microtask turn ever
+   * ran. Real wall-clock cost is tiny (default 50ms) and irrelevant to the
+   * *simulated* timeline these tests otherwise control precisely.
+   */
+  async function settleReal(ms = 50): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /** Minimal JobRecord carrying only what `computeHoldCap`'s G0 sum reads. */
+  function jobWithRemaining(jobId: string, maxExtensions: number, extensions: number): JobRecord {
+    return {
+      v: 1,
+      jobId,
+      command: "sleep 30",
+      cwd: "/repo",
+      sessionId: "s",
+      hostPid: 1,
+      status: "running",
+      createdAt: 0,
+      spawnedAt: 0,
+      backgroundedAt: 0,
+      exitCode: null,
+      logPath: "/tmp/x.log",
+      logBytes: 0,
+      outputTruncated: false,
+      readCursor: 0,
+      deadline: {
+        timeoutMs: 100_000,
+        policy: { graceMs: 60_000, maxExtensions, maxTimeoutFactor: 5 },
+        dueAt: 100_000,
+        hardAt: 500_000,
+        graces: 0,
+        graceNotified: 0,
+        extensions,
+        grantedMs: 0,
+        seq: extensions,
+      },
+    };
+  }
+
+  describe("(d)/(e) computeHoldCap arithmetic (pure, no clock/hook)", () => {
+    it("(d) multiple timeout jobs, same window: G0 = 3+3+3+1+0 = 10 (a fully-spent job contributes 0, D-6)", () => {
+      const t0 = 10_000;
+      const jobs = [
+        jobWithRemaining("A", 3, 0), // remaining 3
+        jobWithRemaining("B", 3, 0), // remaining 3
+        jobWithRemaining("C", 3, 0), // remaining 3
+        jobWithRemaining("D", 3, 2), // remaining 1
+        jobWithRemaining("E", 3, 3), // remaining 0 (exhausted ⇒ contributes 0, D-6)
+      ];
+      // H = 0 (no hard deadline), maxExtensions (run-level E) = 0 ⇒ rWaitBase = 2.
+      const cap = computeHoldCap(0, undefined, t0, 0, jobs);
+      const g0 = 3 + 3 + 3 + 1 + 0;
+      expect(g0).toBe(10);
+      expect(cap).toBe(2 * (2 + g0)); // 24
+    });
+
+    it("(e) multiple timeout jobs, staggered: each still contributes its own remaining independent of the others", () => {
+      const t0 = 0;
+      const jobs = [jobWithRemaining("A", 2, 0), jobWithRemaining("B", 2, 1), jobWithRemaining("C", 2, 2)];
+      const cap = computeHoldCap(0, undefined, t0, 1, jobs);
+      // remaining: A=2, B=1, C=0 ⇒ G0=3; rWaitBase = ceil(0/120000)+2+1=3 ⇒ cap=2*(3+3)=12.
+      expect(cap).toBe(12);
+    });
+
+    it("a configured (non-zero) childSettleHoldMaxRounds always wins over the derived formula", () => {
+      expect(computeHoldCap(7, undefined, 0, 99, [jobWithRemaining("A", 3, 0)])).toBe(7);
+    });
+  });
+
+  it("(a) 对抗模型: rounds are capped at the derived formula's value; hold.exhausted flips true and the exit facts render the budget line", async () => {
+    const { pi, tools, emit } = fakePi();
+    const sessionId = randomUUID();
+    const dir = tmpDir();
+    const clock = new FakeClock(0);
+    wireChildBashJobs(pi, { settings: settingsWith({}, dir), clock });
+    const ctx = fakeCtx(sessionId, dir);
+    const bash = tools.get("bash")!;
+    // No deadline (no `timeout`) ⇒ never contributes to G0; outlives the test in real wall time.
+    await bash.execute("call-long", { command: "sleep 30", run_in_background: true }, undefined, undefined, ctx);
+    await settleReal(); // let the real spawn actually reach `running` before the fake clock jumps ahead.
+    // H=0 (no hard deadline), run-level maxExtensions=0, G0=0 ⇒ rWaitBase=2, cap=2*(2+0)=4.
+    attachHost(sessionId, {
+      watchdogDueAt: () => clock.now() + 600_000,
+      hardDeadlineAt: () => undefined,
+      maxExtensions: () => 0,
+    });
+    const expectedCap = computeHoldCap(0, undefined, 0, 0, []);
+    expect(expectedCap).toBe(4);
+
+    for (let round = 1; round <= expectedCap; round++) {
+      const p = emit("agent_before_settle", settleEvent(), ctx);
+      clock.advance(W_HOLD_MS); // hold = min(120s, 600s-now-15s) stays 120s every round (watchdogDueAt tracks now+600s).
+      const [result] = (await p) as [{ continue: boolean } | undefined];
+      expect(result?.continue).toBe(true);
+    }
+    // cap reached ⇒ this call releases the run instead of holding again — no clock advance needed,
+    // the handler returns before ever reaching the wait/race.
+    const [released] = (await emit("agent_before_settle", settleEvent(), ctx)) as [undefined];
+    expect(released).toBeUndefined();
+
+    const sealed = getChildBashRegistry().sealAndKill(sessionId, 200);
+    expect(sealed?.facts.hold).toEqual({ rounds: expectedCap, cap: expectedCap, exhausted: true });
+    expect(formatExitFacts(sealed?.facts)).toContain(
+      `Settle hold budget exhausted (${expectedCap}/${expectedCap} reminders)`,
+    );
+    await sealed?.done;
+  }, 20_000);
+
+  it("(b) 被动单长job: short jobs finishing mid-hold are folded into the next scheduled wake, never causing an extra round", async () => {
+    const { pi, tools, emit } = fakePi();
+    const sessionId = randomUUID();
+    const dir = tmpDir();
+    const clock = new FakeClock(0);
+    wireChildBashJobs(pi, { settings: settingsWith({}, dir), clock });
+    const ctx = fakeCtx(sessionId, dir);
+    const bash = tools.get("bash")!;
+    await bash.execute("call-long", { command: "sleep 30", run_in_background: true }, undefined, undefined, ctx);
+    const bashJob = tools.get("bash_job")!;
+    const shortIds: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const r = (await bash.execute(
+        `call-short-${i}`,
+        { command: "sleep 0.05", run_in_background: true },
+        undefined,
+        undefined,
+        ctx,
+      )) as { details?: { jobId?: string } };
+      if (r.details?.jobId) shortIds.push(r.details.jobId);
+    }
+    attachHost(sessionId, {
+      watchdogDueAt: () => clock.now() + 600_000,
+      hardDeadlineAt: () => undefined,
+      maxExtensions: () => 0,
+    });
+    // Start the hold round BEFORE the short jobs finish for real, so both are
+    // still part of `nonTerminal`/`ids` at hook-entry time.
+    const p = emit("agent_before_settle", settleEvent(), ctx);
+    // Let the short jobs actually finish for real (independent of the fake clock).
+    await waitUntil(async () => {
+      for (const id of shortIds) {
+        const status = (await bashJob.execute("poll", { action: "status", job_id: id }, undefined, undefined, ctx)) as {
+          details?: { terminal?: boolean };
+        };
+        if (status.details?.terminal !== true) return false;
+      }
+      return true;
+    });
+    clock.advance(W_HOLD_MS); // the long job never finishes ⇒ the round settles via the wait timeout, not "all done".
+    const [result] = (await p) as [{ entries: { content?: string }[]; continue: boolean } | undefined];
+    expect(result?.continue).toBe(true);
+    const text = result?.entries.at(-1)?.content ?? "";
+    // One round only — the short jobs' completion is folded into THIS round's summary, not an extra wake.
+    expect(text).toMatch(/reminder 1\//);
+    expect(text).toMatch(/Finished since last reminder/);
+
+    await getChildBashRegistry().sealAndKill(sessionId, 200).done;
+  }, 20_000);
+
+  it("(c) 被动30分钟预算: rounds stay ≤ R_wait and every wake respects `now ≤ watchdogDueAt - MARGIN_HOLD` (Q2/Q3)", async () => {
+    const { pi, tools, emit } = fakePi();
+    const sessionId = randomUUID();
+    const dir = tmpDir();
+    const clock = new FakeClock(0);
+    wireChildBashJobs(pi, { settings: settingsWith({}, dir), clock });
+    const ctx = fakeCtx(sessionId, dir);
+    const bash = tools.get("bash")!;
+    await bash.execute("call-long", { command: "sleep 30", run_in_background: true }, undefined, undefined, ctx);
+    await settleReal();
+    const ABS_D = 1_800_000; // absolute (not now-relative) 30-minute watchdog deadline — matches the plan's own example.
+    const E = 3;
+    attachHost(sessionId, { watchdogDueAt: () => ABS_D, hardDeadlineAt: () => ABS_D, maxExtensions: () => E });
+    const rWait = Math.ceil(ABS_D / W_HOLD_MS) + 2 + E; // 15 + 2 + 3 = 20
+    expect(rWait).toBe(20);
+
+    let rounds = 0;
+    for (let i = 0; i < rWait + 5; i++) {
+      const holdGuess = Math.min(W_HOLD_MS, ABS_D - clock.now() - MARGIN_HOLD_MS);
+      if (holdGuess < HOLD_MIN_MS) {
+        const [released] = (await emit("agent_before_settle", settleEvent(), ctx)) as [undefined];
+        expect(released).toBeUndefined();
+        break;
+      }
+      const p = emit("agent_before_settle", settleEvent(), ctx);
+      clock.advance(holdGuess);
+      const [result] = (await p) as [{ continue: boolean } | undefined];
+      expect(result?.continue).toBe(true);
+      rounds++;
+      expect(clock.now()).toBeLessThanOrEqual(ABS_D - MARGIN_HOLD_MS); // Q2
+    }
+    expect(rounds).toBeLessThanOrEqual(rWait); // Q3: a truly passive model never touches `cap` (= 2*rWait)
+
+    await getChildBashRegistry().sealAndKill(sessionId, 200).done;
+  }, 20_000);
+
+  it("(f) G0 冻结: a timeout job created mid-hold never changes the cap frozen at the first hold entry", async () => {
+    const { pi, tools, emit } = fakePi();
+    const sessionId = randomUUID();
+    const dir = tmpDir();
+    const clock = new FakeClock(0);
+    const maxExtensions = 3;
+    wireChildBashJobs(pi, {
+      settings: settingsWith({ timeoutGraceMs: 60_000, maxExtensions, maxTimeoutFactor: 5 }, dir),
+      clock,
+    });
+    const ctx = fakeCtx(sessionId, dir);
+    const bash = tools.get("bash")!;
+    const bashJob = tools.get("bash_job")!;
+    // A/B: 999s (simulated) timeout — far outside every clock.advance() below, so neither ever fires for real.
+    const a = (await bash.execute(
+      "call-a",
+      { command: "sleep 30", timeout: 999, run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    )) as { details?: { jobId?: string } };
+    await bash.execute(
+      "call-b",
+      { command: "sleep 30", timeout: 999, run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+    await settleReal(); // both jobs must have reached `running` (deadline attached) before extending A.
+    // Consume one of A's extensions BEFORE the first hold entry ⇒ A's remaining = maxExtensions-1, B's = maxExtensions.
+    const extendResult = (await bashJob.execute(
+      "extend-a",
+      { action: "extend", job_id: a.details!.jobId, extend_s: 10 },
+      undefined,
+      undefined,
+      ctx,
+    )) as { details?: { extended?: boolean } };
+    expect(extendResult.details?.extended).toBe(true);
+    const g0AtT0 = maxExtensions - 1 + maxExtensions; // A=2, B=3 ⇒ 5
+    const expectedFrozenCap = computeHoldCap(0, undefined, 0, 0, [
+      jobWithRemaining("a", maxExtensions, 1),
+      jobWithRemaining("b", maxExtensions, 0),
+    ]);
+    expect(expectedFrozenCap).toBe(2 * (2 + g0AtT0)); // 14
+    // Sanity: had a third full-budget job been present AT t0, the cap would have been different (20) —
+    // proving this test can actually detect a freeze failure, not just a formula that never moves.
+    const capIfCIncludedAtT0 = computeHoldCap(0, undefined, 0, 0, [
+      jobWithRemaining("a", maxExtensions, 1),
+      jobWithRemaining("b", maxExtensions, 0),
+      jobWithRemaining("c", maxExtensions, 0),
+    ]);
+    expect(capIfCIncludedAtT0).not.toBe(expectedFrozenCap);
+
+    attachHost(sessionId, {
+      watchdogDueAt: () => clock.now() + 600_000,
+      hardDeadlineAt: () => undefined,
+      maxExtensions: () => 0,
+    });
+    // Round 1: freezes t0/cap over {a, b} only.
+    const p1 = emit("agent_before_settle", settleEvent(), ctx);
+    clock.advance(W_HOLD_MS);
+    const [r1] = (await p1) as [{ continue: boolean } | undefined];
+    expect(r1?.continue).toBe(true);
+
+    // A NEW timeout job created AFTER the freeze — must not affect the already-frozen cap.
+    await bash.execute(
+      "call-c",
+      { command: "sleep 30", timeout: 999, run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+    await settleReal();
+
+    const p2 = emit("agent_before_settle", settleEvent(), ctx);
+    clock.advance(W_HOLD_MS);
+    const [r2] = (await p2) as [{ continue: boolean } | undefined];
+    expect(r2?.continue).toBe(true);
+
+    const sealed = getChildBashRegistry().sealAndKill(sessionId, 200);
+    expect(sealed?.facts.hold?.cap).toBe(expectedFrozenCap); // frozen at 14, NOT 20
+    await sealed?.done;
   }, 20_000);
 });
 
