@@ -806,3 +806,7 @@ P5 开工闸门：① P0b 已合入且签名未变；② 隔离 worktree（`git 
   - **P4**：§3.6 两层 race 的 latch 与 `settled` / R timer / abort 三个回调为单一实现单元，background 分支不 `await markBackgrounded`；T15 覆盖 started 先到、job.exit 先到、R 先到、同 tick 四种顺序。
   - **P3**：`killJobTree` 的 rejection 被吸收；spawn resolve、自然 exit、abort/seal 同 tick 及 kill 失败时终态只一次（T10/T13）；恢复成功后先清 10s recovery timer，再单独武装 30s cleanup timer（T31 断言）。
   - chainStats 仅在 `chainFor()` 时检查告警可接受，另由 `/agent status` 查询。
+
+## 实施偏差记录
+
+- 2026-09-26：「用户确认（v6）」中 P3 的「恢复成功后先清 10s recovery timer、再单独武装 30s cleanup timer」由 `src/stack.ts` 的恢复 IIFE 承担，属于 **P5** 文件域；P3 只提供 `recover(signal)` / `reconcileRootDir(signal)` 等可取消 API。该条改列入 **P5 验收**（T31 三种顺序）。
