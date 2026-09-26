@@ -132,7 +132,10 @@ function verifyBoundaryProbe(
   try {
     const projection = ctx.sessionManager.buildSessionProjection();
     const projected = projection.entries.find((entry) => entry.sourceEntry.id === found.id);
-    if (projected && projected.messages.length > 0) return { ok: false, reason: "l2-projection" };
+    // Plan §3.1 L2(ii): the probe's projection entry must EXIST (pi's projection is
+    // provenance-preserving, so a missing one means the projection shape changed underneath us)
+    // AND contribute zero messages. Either violation ⇒ l2-projection.
+    if (!projected || projected.messages.length > 0) return { ok: false, reason: "l2-projection" };
   } catch {
     return { ok: false, reason: "l2-projection" };
   }

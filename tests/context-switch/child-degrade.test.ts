@@ -234,6 +234,73 @@ describe("T-D2: L2 zero-impact commit probe never lands on the branch", () => {
   });
 });
 
+describe("T-D2b: L2(ii) — probe lands on the branch but the projection shape is wrong", () => {
+  function driveProbe(projectionOverride: (sm: SessionManager, probeId: string) => unknown) {
+    const capability = getChildSwitchCapability();
+    capability.noteL0({ ok: true });
+    capability.noteL1({ ok: true });
+    const { pi, handlers } = fakePi();
+    wireChildContextSwitch(pi as never, DEFAULT_SETTINGS);
+    const sm = makeSession();
+    const toolCallId = "bash-1";
+    const messageEntryId = appendAssistantWithToolCall(sm, toolCallId);
+    const toolResultEntryId = appendToolResult(sm, toolCallId);
+    const baseCtx = makeCtx(sm);
+    const turn = {
+      outcome: "completed",
+      context: { canContinue: true },
+      entries: [],
+      messageEntryId,
+      toolResultEntryIds: [toolResultEntryId],
+      toolResults: [
+        {
+          role: "toolResult",
+          toolCallId,
+          toolName: "bash",
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          timestamp: Date.now(),
+        },
+      ],
+    };
+    const returned = handlers.get("turn_end")![0]!(turn, baseCtx) as {
+      entries: { type: string; customType?: string; data?: unknown }[];
+    };
+    const probe = returned.entries.find((e) => e.type === "custom" && e.customType === "subagent:boundary-probe")!;
+    // Replay the probe onto the REAL branch, as pi's boundary commit would.
+    const probeId = sm.appendCustomEntry(probe.customType!, probe.data);
+    const ctx = {
+      ...baseCtx,
+      sessionManager: { ...baseCtx.sessionManager, buildSessionProjection: () => projectionOverride(sm, probeId) },
+    };
+    handlers.get("context")![0]!({ messages: [] }, ctx);
+    return getChildSwitchCapability().get();
+  }
+
+  it("projection entry for the probe is MISSING ⇒ disabled:l2-projection (never ready)", () => {
+    const status = driveProbe((sm, probeId) => {
+      const real = sm.buildSessionProjection();
+      return { ...real, entries: real.entries.filter((e) => e.sourceEntry.id !== probeId) };
+    });
+    expect(status.state).toBe("disabled");
+    if (status.state === "disabled") expect(status.reason).toBe("l2-projection");
+  });
+
+  it("projection entry for the probe carries messages ⇒ disabled:l2-projection", () => {
+    const status = driveProbe((sm, probeId) => {
+      const real = sm.buildSessionProjection();
+      return {
+        ...real,
+        entries: real.entries.map((e) =>
+          e.sourceEntry.id === probeId ? { ...e, messages: [{ role: "user", content: "leak", timestamp: 1 }] } : e,
+        ),
+      };
+    });
+    expect(status.state).toBe("disabled");
+    if (status.state === "disabled") expect(status.reason).toBe("l2-projection");
+  });
+});
+
 describe("T-D3: L3(c) — committed, but the next context event still shows dropped content", () => {
   /** Drives a real switch through the wiring, then MANUALLY replays the handler's returned draft
    *  onto the real `sm` (mirroring what pi's own `_commitBoundaryDrafts` would do) so
