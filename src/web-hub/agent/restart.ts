@@ -17,6 +17,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { HubCtlAckFrame, HubCtlFrame, LanResFrame } from "../protocol/messages.js";
+import { pidAlive as pidAliveProbe } from "../protocol/pid.js";
 import type { ExpectedIdentity, IdentityVerdict } from "./proc-identity.js";
 
 const ACK_DEADLINE_MS = 2_000;
@@ -36,7 +37,12 @@ export interface RestartDeps {
   request: (frame: HubCtlFrame, cap: string) => Promise<HubCtlAckFrame | LanResFrame>;
   /** Current `hub.json` record, or `undefined` if it doesn't exist / can't be read. */
   readHubRecord: () => HubIdentityRecord | undefined;
-  /** `pidAlive` (protocol/pid.ts) — zombie-aware liveness probe. */
+  /**
+   * Liveness probe used ONLY by the ctl happy path's post-ack exit wait.
+   * Plan §8.2: the ctl path never reads `/proc` — production wires
+   * `ctlLivenessProbe` (kill(pid, 0) only), never the zombie-aware
+   * `/proc`-reading `pidAlive`.
+   */
   pidAlive: (pid: number) => boolean;
   verifyIdentity: (expected: ExpectedIdentity) => Promise<IdentityVerdict>;
   /** Race-window re-check right before signalling (plan §8.2: "发信号前重新读一次 starttime 比对"). */
@@ -118,6 +124,19 @@ async function fallback(deps: RestartDeps): Promise<RestartOutcome> {
   }
   deps.kill(record.pid, "SIGTERM");
   return { kind: "signalled" };
+}
+
+/**
+ * `kill(pid, 0)`-only liveness (plan §8.2: the ctl path reads no `/proc`).
+ * `/proc` reads stay confined to the no-ack identity fallback.
+ */
+export function ctlLivenessProbe(pid: number, kill?: (pid: number, signal: 0) => void): boolean {
+  return pidAliveProbe(pid, {
+    ...(kill ? { kill } : {}),
+    readProcStat: () => {
+      throw new Error("ctl path reads no /proc");
+    },
+  });
 }
 
 export async function restartHub(deps: RestartDeps): Promise<RestartOutcome> {

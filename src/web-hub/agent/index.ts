@@ -47,7 +47,7 @@ import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { resolveJitiCli, spawnHub, type LauncherPlan } from "./launcher.js";
 import { MaskedInputComponent, runPasswdPrompt, type PasswdOutcome } from "./passwd-prompt.js";
 import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
-import { restartHub, type RestartOutcome } from "./restart.js";
+import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
 
@@ -507,7 +507,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         if (rec.argv !== undefined) out.argv = rec.argv;
         return out;
       },
-      pidAlive,
+      pidAlive: (pid) => ctlLivenessProbe(pid),
       verifyIdentity: (expected) => verifyProcIdentity(expected),
       readStartTicksNow: (pid) => readStartTicksNow(pid),
       kill: (pid, signal) => {

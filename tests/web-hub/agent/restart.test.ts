@@ -205,3 +205,28 @@ describe("restartHub (plan §8.2; LE)", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 });
+
+describe("ctlLivenessProbe (plan §8.2: the ctl path reads no /proc)", () => {
+  it("probes with kill(pid, 0) only and never reads /proc", async () => {
+    const pid = await import("../../../src/web-hub/protocol/pid.js");
+    const { ctlLivenessProbe } = await import("../../../src/web-hub/agent/restart.js");
+    const kills: number[] = [];
+    // alive: kill(pid, 0) succeeds; a /proc read (if any) would throw from the probe's own stub — result must be true without it.
+    expect(ctlLivenessProbe(4242, (p) => void kills.push(p))).toBe(true);
+    // dead: ESRCH
+    const esrch = Object.assign(new Error("no such process"), { code: "ESRCH" });
+    expect(
+      ctlLivenessProbe(4242, () => {
+        throw esrch;
+      }),
+    ).toBe(false);
+    expect(kills).toEqual([4242]);
+    void pid;
+  });
+
+  it("the production wiring never passes a /proc-reading probe to restartHub", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync(new URL("../../../src/web-hub/agent/index.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/pidAlive: \(pid\) => ctlLivenessProbe\(pid\)/);
+  });
+});
