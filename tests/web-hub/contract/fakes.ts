@@ -31,12 +31,22 @@ export interface FakeLanStore extends LanStorePort {
   /** Test-only seed hook (not part of `LanStorePort`) — the port itself has no "set an initial
    * password" op (that is the hub's own bootstrap concern, outside W1's frozen surface). */
   seedUser(user: LanUserRecord): void;
+  /**
+   * Mirrors the concrete `LanStore`'s `onUnavailable`/`unavailable` (plan §4.2's db-client.ts,
+   * not part of the frozen `LanStorePort`) so `hub/http.ts`'s duck-typed fail-closed subscription
+   * (LC review-fix P1, §4.1) can be exercised against this fake without a real SQLite backend —
+   * `simulateUnavailable()` is the test-only trigger a real db-client.ts would reach only after
+   * its own 1s→5s→30s backoff exhausts 4 restarts in a rolling 10-minute window.
+   */
+  onUnavailable(cb: (reason: "db-unavailable") => void): () => void;
+  simulateUnavailable(): void;
 }
 
 export function fakeLanStore(): FakeLanStore {
   const users = new Map<string, LanUserRecord>();
   const sessions = new Map<string, LanSessionRecord>();
   let nextUserId = 1;
+  const unavailableListeners = new Set<(reason: "db-unavailable") => void>();
 
   function userById(userId: number): LanUserRecord | undefined {
     for (const u of users.values()) if (u.id === userId) return u;
@@ -49,6 +59,13 @@ export function fakeLanStore(): FakeLanStore {
     seedUser: (user) => {
       users.set(user.username, user);
       nextUserId = Math.max(nextUserId, user.id + 1);
+    },
+    onUnavailable: (cb) => {
+      unavailableListeners.add(cb);
+      return () => unavailableListeners.delete(cb);
+    },
+    simulateUnavailable: () => {
+      for (const cb of unavailableListeners) cb("db-unavailable");
     },
 
     async getUser(username) {

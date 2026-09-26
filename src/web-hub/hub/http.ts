@@ -1218,7 +1218,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     }
 
     function recompute(force: boolean): void {
-      if (handle === undefined) return;
+      if (handle === undefined || lanClosed) return;
       const t = now();
       if (!force && t - lastRecomputeAt < LAN_RECOMPUTE_THROTTLE_MS) return;
       lastRecomputeAt = t;
@@ -1248,6 +1248,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         lan.scope.timer(() => recompute(true), LAN_TICK_MS, true);
         lan.scope.timer(
           () => {
+            if (lanClosed) return;
             void recheckLanSseExpiry(rt).catch((err: unknown) => {
               rt.log.error("web-hub lan http: sse expiry recheck tick failed", { error: String(err) });
             });
@@ -1279,6 +1280,35 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         return lanSse.revoke(pred, "revoked");
       },
     };
+
+    // §4.1 fail-closed (LD review-fix P1): the resident query subprocess giving up permanently
+    // (db-client.ts's `onUnavailable`, after its own 1s→5s→30s backoff exhausts 4 restarts in a
+    // rolling 10-minute window) must actually tear the LAN listener down, not just relabel the
+    // status — recovery is `/webhub restart` (a fresh process/assembly), never an in-place rebind
+    // (`db-client.ts` never respawns again once `unavailable` is set, so there is nothing to
+    // rebind *to* short of a full restart). `LanFrontendDeps.store` is frozen to the plain
+    // `LanStorePort` (§1.4.1, W1), which has no `onUnavailable` — duck-type the concrete `LanStore`
+    // instance instead (same pattern as `touchForExpiryRecheck`'s `touchSessionReserved`, §15.9
+    // #3: widening the frozen interface is out of this package's authorization, so probe for the
+    // method at runtime rather than changing the type). `defaultLanAssembly` (LD, lan-assembly.ts)
+    // also subscribes to this same event to fold the reason into `hub.json.lan` even when no
+    // `HttpFrontend.lan` exists to close (e.g. a fake facade in a unit test); that call is
+    // idempotent with this one (`onStatus` is just the latest write) and this subscription is the
+    // only one with the actual listener handle, so it is authoritative for `LanFacade.status()`
+    // (read by `admin.ts`'s `lan_req info`/`/webhub status`) and for really closing the port.
+    const storeWithUnavailable = lan.store as {
+      onUnavailable?: (cb: (reason: "db-unavailable") => void) => () => void;
+    };
+    if (typeof storeWithUnavailable.onUnavailable === "function") {
+      storeWithUnavailable.onUnavailable(() => {
+        if (lanClosed) return;
+        status = { state: "off", reason: "db-unavailable" };
+        lan.onStatus(status);
+        void lanFacade?.close().catch((err: unknown) => {
+          log.error("web-hub lan http: failed to close LAN listener after db-unavailable", { error: String(err) });
+        });
+      });
+    }
   }
 
   // ---- loopback subscriptions -------------------------------------------

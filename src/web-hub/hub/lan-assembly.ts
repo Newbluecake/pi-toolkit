@@ -54,11 +54,13 @@ export const defaultLanAssembly: LanAssembly = {
       throw new LanAssemblyOffError(result.reason, result.detail);
     }
     const { store } = result;
-    // §4.1's "查询子进程反复失败" runtime degradation (Q20/§4.2): informational only at this
-    // layer — `LanFrontendDeps.store` is frozen to the plain `LanStorePort` (no `close`/
-    // `onUnavailable`), so only `build()` itself ever sees the concrete `LanStore` needed to
-    // subscribe here. Actually tearing the LAN listener down at runtime is `HttpFrontend.lan.
-    // close()` (LC's own file, http.ts) — out of this package's file domain; documented residual.
+    // §4.1's "查询子进程反复失败" runtime degradation (Q20/§4.2): report the reason here so
+    // `hub.json.lan` reflects it even before `HttpFrontend.lan` exists (e.g. a fake facade in a
+    // unit test, or a race where `build()` hasn't returned yet) — `hub/http.ts`'s own duck-typed
+    // subscription on this same `store.onUnavailable` (LC review-fix P1, §4.1 fail-closed) is what
+    // actually closes the LAN listener and keeps `LanFacade.status()` in sync; both listeners are
+    // idempotent with each other (`onStatus` is just the latest write, and `db-client.ts` never
+    // respawns once `unavailable` is set, so there is nothing left to race against).
     store.onUnavailable(() => {
       onStatus({ state: "off", reason: "db-unavailable" });
     });
