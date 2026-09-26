@@ -77,7 +77,7 @@ describe("createLanTransport (plan §2.3) — stub (LC, W2)", () => {
       createLanTransport({
         handleRequest: async () => {},
         log: { info() {}, warn() {}, error() {} },
-        connGuard: undefined,
+        connGuard: { admit: () => undefined },
       }),
     ).toThrow("E_NOT_IMPLEMENTED:LC");
   });

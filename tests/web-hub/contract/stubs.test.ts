@@ -38,9 +38,9 @@ describe("W1 stubs throw E_NOT_IMPLEMENTED:<pkg> (contract ①)", () => {
   });
 
   it("http.ts: createLanTransport(...) ⇒ LC", () => {
-    expect(() => createLanTransport({ handleRequest: async () => {}, log: noopLog, connGuard: undefined })).toThrow(
-      "E_NOT_IMPLEMENTED:LC",
-    );
+    expect(() =>
+      createLanTransport({ handleRequest: async () => {}, log: noopLog, connGuard: { admit: () => undefined } }),
+    ).toThrow("E_NOT_IMPLEMENTED:LC");
   });
 
   it("protocol/paths.ts: ensurePrivateDir(dir, XDG_SOCKET_DIR_POLICY) ⇒ LP", async () => {

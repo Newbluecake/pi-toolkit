@@ -33,6 +33,34 @@ describe("lan_req / hub_ctl (agent→hub) round-trip and rejection (plan §8.1)"
   it("hub_ctl with a non-restart reason is rejected", () => {
     expect(decodeAgentFrame({ t: "hub_ctl", rid: "r6", op: "shutdown", reason: "bogus" })).toBeUndefined();
   });
+
+  // 审查修复 #4: lan_req 改为按变体拆分的严格判别联合。
+  it("lan_req passwd missing username is rejected", () => {
+    expect(decodeAgentFrame({ t: "lan_req", rid: "r7", op: "passwd", password: "s3cret-s3cret" })).toBeUndefined();
+  });
+
+  it("lan_req passwd missing password is rejected", () => {
+    expect(decodeAgentFrame({ t: "lan_req", rid: "r8", op: "passwd", username: "alice" })).toBeUndefined();
+  });
+
+  it("lan_req info/unlock carrying username/password is rejected (not just ignored)", () => {
+    expect(decodeAgentFrame({ t: "lan_req", rid: "r9", op: "info", username: "alice" })).toBeUndefined();
+    expect(
+      decodeAgentFrame({ t: "lan_req", rid: "r10", op: "unlock", username: "alice", password: "x" }),
+    ).toBeUndefined();
+  });
+
+  it("lan_req with an extra unknown field on any variant is rejected", () => {
+    expect(decodeAgentFrame({ t: "lan_req", rid: "r11", op: "info", extra: 1 })).toBeUndefined();
+    expect(
+      decodeAgentFrame({ t: "lan_req", rid: "r12", op: "passwd", username: "a", password: "b", extra: 1 }),
+    ).toBeUndefined();
+    expect(decodeAgentFrame({ t: "lan_req", rid: "r13", op: "unlock", extra: 1 })).toBeUndefined();
+  });
+
+  it("hub_ctl with an extra unknown field is rejected", () => {
+    expect(decodeAgentFrame({ t: "hub_ctl", rid: "r14", op: "shutdown", reason: "restart", extra: 1 })).toBeUndefined();
+  });
 });
 
 describe("lan_res / hub_ctl_ack (hub→agent) round-trip and rejection", () => {
@@ -65,6 +93,36 @@ describe("lan_res / hub_ctl_ack (hub→agent) round-trip and rejection", () => {
     expect(decodeHubFrame({ t: "lan_res", rid: "r4" })).toBeUndefined();
   });
 
+  // 审查修复 #4: ok:true 与 ok:false{code,message} 互斥。
+  it("lan_res ok:true carrying code/message (the ok:false shape) is rejected", () => {
+    expect(decodeHubFrame({ t: "lan_res", rid: "r5a", ok: true, code: "E_AUTH", message: "x" })).toBeUndefined();
+  });
+
+  it("lan_res ok:false missing code is rejected", () => {
+    expect(decodeHubFrame({ t: "lan_res", rid: "r5b", ok: false, message: "x" })).toBeUndefined();
+  });
+
+  it("lan_res ok:false missing message is rejected", () => {
+    expect(decodeHubFrame({ t: "lan_res", rid: "r5c", ok: false, code: "E_AUTH" })).toBeUndefined();
+  });
+
+  it("lan_res ok:false carrying info (the ok:true shape) is rejected", () => {
+    expect(
+      decodeHubFrame({ t: "lan_res", rid: "r5d", ok: false, code: "E_AUTH", message: "x", info: { username: "a" } }),
+    ).toBeUndefined();
+  });
+
+  it("lan_res with an extra unknown field on either variant is rejected", () => {
+    expect(decodeHubFrame({ t: "lan_res", rid: "r5e", ok: true, extra: 1 })).toBeUndefined();
+    expect(
+      decodeHubFrame({ t: "lan_res", rid: "r5f", ok: false, code: "E_AUTH", message: "x", extra: 1 }),
+    ).toBeUndefined();
+  });
+
+  it("lan_res info with an extra unknown field is rejected", () => {
+    expect(decodeHubFrame({ t: "lan_res", rid: "r5g", ok: true, info: { username: "a", extra: 1 } })).toBeUndefined();
+  });
+
   it("hub_ctl_ack round-trips", () => {
     const frame = { t: "hub_ctl_ack", rid: "r5" };
     expect(decodeHubFrame(frame)).toEqual(frame);
@@ -72,6 +130,10 @@ describe("lan_res / hub_ctl_ack (hub→agent) round-trip and rejection", () => {
 
   it("hub_ctl_ack missing rid is rejected", () => {
     expect(decodeHubFrame({ t: "hub_ctl_ack" })).toBeUndefined();
+  });
+
+  it("hub_ctl_ack with an extra unknown field is rejected", () => {
+    expect(decodeHubFrame({ t: "hub_ctl_ack", rid: "r6", extra: 1 })).toBeUndefined();
   });
 });
 

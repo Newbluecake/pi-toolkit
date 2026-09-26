@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
-import { parseHubLanConfig } from "../../../src/web-hub/hub/lan-config.js";
+import { checkLanPortConflict, parseHubLanConfig } from "../../../src/web-hub/hub/lan-config.js";
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { resolveHubPaths } from "../../../src/web-hub/protocol/paths.js";
@@ -110,6 +110,49 @@ describe("parseHubLanConfig (plan §1.4.3, §9.1)", () => {
     expect(parseHubLanConfig({ ...valid, extraHosts: "x" }).ok).toBe(false);
     expect(parseHubLanConfig({ ...valid, trustProxyFrom: "x" }).ok).toBe(false);
     expect(parseHubLanConfig({ ...valid, externalOrigins: "x" }).ok).toBe(false);
+  });
+
+  // 回审需求 #3: externalOrigins 的 host 部分再评 classifyHostToken，拒绝 numeric/denylisted/ipv6（§2.4）。
+  // 注：数字单标签 host 在到达 classifyHostToken 之前就已被 WHATWG URL 解析器拦下（单标签全数字
+  // 会先尝试解析为 IPv4 32 位整数，超过 uint32 范围——202507220006 就是——整个 URL 直接无法构造，
+  // parseOrigin 返回 undefined，origin-syntax）；这与真实浏览器行为一致（Chromium 同样拒签），效果上
+  // 仍符合“数字 host 被拒”的要求，只是报错标签不同。classifyHostToken 的 numeric 分支在这个
+  // 验证函数里因此不可达，但对 Host 头验证（不经过 new URL()，直接比较字符串）仍有意义。
+  it("rejects a numeric-host externalOrigins entry (via origin-syntax, matching real-browser URL parsing)", () => {
+    const r = parseHubLanConfig({
+      ...valid,
+      trustProxyFrom: ["127.0.0.1"],
+      externalOrigins: ["https://202507220006"],
+    });
+    expect(r.ok).toBe(false);
+  });
+
+  it("rejects a denylisted-host externalOrigins entry", () => {
+    const r = parseHubLanConfig({ ...valid, trustProxyFrom: ["127.0.0.1"], externalOrigins: ["https://dev"] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toContain("denylisted");
+  });
+
+  it("still accepts fqdn / single-label / ipv4 / dot-local / localhost externalOrigins hosts", () => {
+    for (const host of ["hub.example.com", "myhost", "192.168.1.5", "myhost.local", "localhost"]) {
+      const r = parseHubLanConfig({ ...valid, trustProxyFrom: ["127.0.0.1"], externalOrigins: [`https://${host}`] });
+      expect(r.ok, host).toBe(true);
+    }
+  });
+});
+
+// 回审需求 #2: main.ts 在 parseHubLanConfig 成功后另外校验 lan.port !== config.port（§9.1）。
+describe("checkLanPortConflict (plan §9.1)", () => {
+  const lan = { port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
+
+  it("accepts a lan.port that differs from the loopback port", () => {
+    expect(checkLanPortConflict(lan, 8787)).toEqual({ ok: true });
+  });
+
+  it("rejects a lan.port equal to the loopback port", () => {
+    const r = checkLanPortConflict(lan, 7879);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toContain("must not equal webHub.port");
   });
 });
 

@@ -66,6 +66,55 @@ describe("createHubJsonWriter (plan §1.4.2)", () => {
     }
   });
 
+  it("patchLan() before the first write() is queued and merged into (overriding) that write()'s own lan", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      const w = createHubJsonWriter(file, memLog());
+      w.patchLan({ state: "on", port: 7879, hosts: ["192.168.1.5"], omitted: [], warnings: [] }); // 审查修复 #8
+      w.write(baseRecord({ lan: { state: "starting" } })); // write()'s own lan is superseded by the queued patch
+      const onDisk = JSON.parse(readFileSync(file, "utf8")) as HubRecord;
+      expect(onDisk.lan).toEqual({ state: "on", port: 7879, hosts: ["192.168.1.5"], omitted: [], warnings: [] });
+      expect(w.current()?.lan).toEqual(onDisk.lan);
+      // the queue is one-shot: a second write() without an intervening patchLan() keeps its own lan
+      w.write(baseRecord({ lan: { state: "off", reason: "timeout" } }));
+      expect(w.current()?.lan).toEqual({ state: "off", reason: "timeout" });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("after removeIfOurs() the writer is sealed: later write()/patchLan() are no-ops", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      const w = createHubJsonWriter(file, memLog());
+      w.write(baseRecord());
+      w.removeIfOurs();
+      expect(existsSync(file)).toBe(false);
+      w.write(baseRecord({ port: 9999 })); // must not resurrect the file
+      expect(existsSync(file)).toBe(false);
+      expect(w.current()?.port).toBe(baseRecord().port); // unchanged — the write() above was a no-op
+      w.patchLan({ state: "on", port: 7879, hosts: [], omitted: [], warnings: [] }); // also a no-op
+      expect(existsSync(file)).toBe(false);
+      expect(w.current()?.lan).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a patchLan() queued before the first write(), then sealed via removeIfOurs() before that write() ever happens, never resurfaces", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      const w = createHubJsonWriter(file, memLog());
+      w.patchLan({ state: "starting" }); // queued (no base record yet)
+      w.removeIfOurs(); // e.g. startHub failed before ever calling write() — seal immediately
+      w.write(baseRecord({ lan: { state: "on", port: 1, hosts: [], omitted: [], warnings: [] } }));
+      expect(existsSync(file)).toBe(false); // sealed: write() is a no-op
+      expect(w.current()).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
   it("multiple patchLan() calls each re-write the merged record", () => {
     const { file, cleanup } = tmpFile();
     try {
@@ -113,6 +162,19 @@ describe("createHubJsonWriter (plan §1.4.2)", () => {
       const w = createHubJsonWriter(file, memLog());
       w.removeIfOurs();
       expect(existsSync(file)).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("removeIfOurs() seals the writer even when the file wasn't ours to delete", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      writeFileSync(file, JSON.stringify({ pid: process.pid + 1 }));
+      const w = createHubJsonWriter(file, memLog());
+      w.removeIfOurs();
+      w.write(baseRecord()); // must not overwrite the foreign file — sealed regardless of outcome
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ pid: process.pid + 1 });
     } finally {
       cleanup();
     }

@@ -9,6 +9,8 @@
  */
 import { scryptSync } from "node:crypto";
 import type {
+  ConnGuard,
+  ConnLease,
   HostSnapshot,
   HostsPort,
   HubLanConfig,
@@ -169,6 +171,82 @@ export function fakeHosts(overrides: Partial<HostSnapshot> = {}): HostsPort {
         omitted,
         computedAt: Date.now(),
         ...overrides,
+      };
+    },
+  };
+}
+
+/**
+ * Minimal but real §6.3 pool/eviction fake: two pools (direct / “proxy”, keyed
+ * by `viaTrustedProxy`), an unauth-only eviction cap per pool, and a
+ * monotonic `seq` tie-breaker (oldest `unauth` lease evicted first). Every
+ * lease tracks its own category, so `enterLoginPending()`/`enterAuthed()`
+ * make it ineligible for eviction and `release()` always decrements the
+ * right pool regardless of how many other leases share the same `peerIp`.
+ * LC's real `conn-guard.ts` (W2) adds the finer per-IP/per-proxy-address caps
+ * and the two-level §6.3 selection rule; this fake only needs to satisfy the
+ * frozen `ConnGuard` contract for other packages' tests.
+ */
+export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?: number } = {}): ConnGuard {
+  const capDirect = opts.unauthCapDirect ?? 64;
+  const capProxy = opts.unauthCapProxy ?? 48;
+  let nextSeq = 0;
+
+  interface Entry {
+    seq: number;
+    category: "unauth" | "login-pending" | "authed";
+  }
+  const direct = new Map<number, Entry>();
+  const proxy = new Map<number, Entry>();
+
+  function poolFor(viaTrustedProxy: boolean): Map<number, Entry> {
+    return viaTrustedProxy ? proxy : direct;
+  }
+
+  function unauthCount(pool: Map<number, Entry>): number {
+    let n = 0;
+    for (const e of pool.values()) if (e.category === "unauth") n++;
+    return n;
+  }
+
+  function evictOldestUnauth(pool: Map<number, Entry>): boolean {
+    let victimKey: number | undefined;
+    let victim: Entry | undefined;
+    for (const [key, e] of pool) {
+      if (e.category !== "unauth") continue;
+      if (victim === undefined || e.seq < victim.seq) {
+        victimKey = key;
+        victim = e;
+      }
+    }
+    if (victimKey === undefined) return false;
+    pool.delete(victimKey);
+    return true;
+  }
+
+  return {
+    admit({ peerIp, viaTrustedProxy }): ConnLease | undefined {
+      const pool = poolFor(viaTrustedProxy);
+      const cap = viaTrustedProxy ? capProxy : capDirect;
+      if (unauthCount(pool) >= cap && !evictOldestUnauth(pool)) return undefined;
+      const mySeq = nextSeq++;
+      const entry: Entry = { seq: mySeq, category: "unauth" };
+      pool.set(mySeq, entry);
+      let released = false;
+      return {
+        peerIp,
+        viaTrustedProxy,
+        enterLoginPending: () => {
+          if (pool.get(mySeq) === entry) entry.category = "login-pending";
+        },
+        enterAuthed: () => {
+          if (pool.get(mySeq) === entry) entry.category = "authed";
+        },
+        release: () => {
+          if (released) return;
+          released = true;
+          pool.delete(mySeq);
+        },
       };
     },
   };

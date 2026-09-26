@@ -405,3 +405,38 @@ describe("startFence io strikes", () => {
     stop();
   });
 });
+
+// 审查修复 #7: 单次 check 的 socket-lstat 与 dir-lstat 共享一个 checkDeadlineMs 总预算，不是各自一份。
+describe("startFence single-check shared deadline budget", () => {
+  it("a slow socket-lstat leaves the dir-lstat only the remaining budget, not a fresh one", async () => {
+    const p = paths();
+    const o = track(await acquireSingleton(p, { probeMs: 50 }));
+    if (o.kind !== "owner") throw new Error("expected owner");
+    let calls = 0;
+    const slowLstat: typeof lstat = (async (path: Parameters<typeof lstat>[0]) => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 30));
+      return lstat(path);
+    }) as typeof lstat;
+    let lost = 0;
+    let why: string | undefined;
+    const stop = startFence(
+      p.socketPath,
+      o.identity,
+      (w) => {
+        lost++;
+        why = w;
+      },
+      100_000, // the interval never fires again inside this test's window
+      5, // firstMs
+      { lstat: slowLstat, checkDeadlineMs: 50, ioStrikes: 1 },
+    );
+    // Total budget is 50ms; each lstat call takes ~30ms. If the two calls each got a *fresh*
+    // 50ms budget (the pre-fix bug), both would succeed (30 < 50) and this would never fire.
+    // Shared: the dir-lstat only gets ~20ms remaining, which its own 30ms delay exceeds ⇒ "io".
+    await waitFor(() => lost > 0, 2_000);
+    expect(why).toBe("io");
+    expect(calls).toBe(2); // both the socket- and dir-lstat were attempted before the budget ran out
+    stop();
+  });
+});
