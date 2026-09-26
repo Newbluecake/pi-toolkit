@@ -22,6 +22,7 @@ import { displayAgentType } from "../core/types.js";
 import { deliveryKey } from "../core/delivery-key.js";
 import type { Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
+import { writeLateWorktreeDisposition } from "../adapters/worktree-disposition-sink.js";
 import { TASK_PROMPT_CAP } from "../core/state-machine.js";
 import {
   BasicEffectInterpreter,
@@ -154,7 +155,7 @@ function withStartupTimeout<T>(
   p: Promise<T>,
   ms: number,
   clock: Clock,
-): Promise<{ ok: true; value: T } | { ok: false; error: ErrorInfo }> {
+): Promise<{ ok: true; value: T } | { ok: false; error: ErrorInfo; timedOut: boolean }> {
   return new Promise((resolve) => {
     let done = false;
     const timer = clock.setTimer(Math.max(0, ms), () => {
@@ -163,6 +164,7 @@ function withStartupTimeout<T>(
       resolve({
         ok: false,
         error: { kind: "config", message: `resolveSessionSpec timed out after ${ms}ms`, retryable: false },
+        timedOut: true,
       });
     });
     p.then(
@@ -179,6 +181,7 @@ function withStartupTimeout<T>(
         resolve({
           ok: false,
           error: { kind: "config", message: err instanceof Error ? err.message : String(err), retryable: false },
+          timedOut: false,
         });
       },
     );
@@ -227,6 +230,18 @@ function buildPrompt(spec: RunnerSpec): string {
 }
 
 /**
+ * workflow-worktree plan D9 ("只读提示的 prompt 路径", v2.1 condition 4): folds an H2
+ * extension's `SessionSpec.promptNotes` into the actual model-facing prompt.
+ * `notes` undefined or empty ⇒ returns the SAME string reference byte-
+ * identical (no-op fast path, so `linkPaths: []` never allocates a new
+ * string and callers can `===`-compare it against `buildPrompt(spec)`).
+ */
+export function appendPromptNotes(prompt: string, notes?: readonly string[]): string {
+  if (!notes || notes.length === 0) return prompt;
+  return `${prompt}\n\n${notes.join("\n\n")}`;
+}
+
+/**
  * The real cross-layer seam: bridges the L2 execution engine (RuntimeRunner,
  * hang-proof but call-shaped as `run(req, budget)`) to the L3 service
  * contract (ports.Runner, call-shaped as `run(spec, callbacks)`), and wires
@@ -242,6 +257,13 @@ function buildPrompt(spec: RunnerSpec): string {
  */
 export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   const merged = mergeExtensionPoints(deps.extensions ?? []);
+  // D13 (v2.1 condition 2): flipped once by `dispose()` (stack.ts rebuild /
+  // session_shutdown). After that, the H3 write-back below stops touching
+  // `deps.store`/`deps.worktreeDiag` — both belong to a stack that's about to
+  // be replaced — and instead routes to the CURRENT session's durable sink
+  // (adapters/worktree-disposition-sink.ts), which the next stack registers
+  // independently.
+  let disposed = false;
   const perRun = new Map<string, RunnerCallbacks>();
   // CC2: runs spawned with a parentRunId (i.e. workflow/nested children, X3)
   // must not enqueue a top-level completion notification (workflow design
@@ -308,6 +330,21 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           beforeReap: (outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }) => {
             const hook = merged.beforeReap!;
             const setWorktreeDisposition = (disposition: WorktreeDisposal): void => {
+              // D13: after dispose(), this stack's store/live-sink belong to
+              // a replaced stack — route the report to whichever session
+              // CURRENTLY owns the durable sink instead (never back into the
+              // about-to-be-discarded registry, which could resurrect this
+              // run into the WRONG session's read-back).
+              if (disposed) {
+                writeLateWorktreeDisposition({
+                  runId: outcome.runId,
+                  state: disposition.state,
+                  ...(disposition.branch === undefined ? {} : { branch: disposition.branch }),
+                  ...(disposition.path === undefined ? {} : { path: disposition.path }),
+                  at: deps.clock.now(),
+                });
+                return;
+              }
               deps.worktreeDiag?.current?.(outcome.runId, disposition);
               try {
                 const snapshot = deps.store.get(outcome.runId);
@@ -432,6 +469,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       // pre-runner sync throws) never reaches the runner's own finally, so
       // the adapter's finally below is the only onReaped call site for them.
       let runnerEntered = false;
+      // D12 (v2.1 condition 1): mirrors the onReaped bookkeeping above for
+      // `abandonSessionSpec` — fired (fire-and-forget) in this same finally
+      // whenever H2 ran on this runId but the runner never got entered
+      // afterwards (startup timeout, the hook itself throwing, a LATER
+      // extension in the merged chain throwing, or a synchronous throw
+      // between H2 succeeding and `runnerEntered = true`).
+      let h2Invoked = false;
+      let abandonReason: "startup_timeout" | "h2_failed" | "pre_runner_exit" | undefined;
+      const h2Controller = new AbortController();
       try {
         // CC4/CP2: re-check the absolute deadline cap as the first thing
         // inside this run's own execution, before any sessionSpec/customTools
@@ -581,15 +627,25 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // H2: resolveSessionSpec runs before any slot/session resource is
         // acquired and is bounded by startupMs; a throw or timeout fails the
         // run outright ("failed(config)", not a silent fallback to the
-        // unmodified spec).
+        // unmodified spec). D12 (v2.1 condition 1): the hook gets `ctx.signal`,
+        // aborted the instant this wrapper gives up on it (timeout or a
+        // rejection) — an extension that created a resource (the worktree) is
+        // expected to notice it and unwind; `abandonSessionSpec` below is the
+        // fire-and-forget backstop for whatever the hook itself couldn't
+        // finish before returning.
         if (merged.resolveSessionSpec) {
           const hook = merged.resolveSessionSpec;
+          h2Invoked = true;
           const resolved = await withStartupTimeout(
-            Promise.resolve().then(() => hook(sessionSpec, spec.request)),
+            Promise.resolve().then(() => hook(sessionSpec, spec.request, { signal: h2Controller.signal })),
             spec.budget.startupMs,
             deps.clock,
           );
-          if (!resolved.ok) return settleConfigFailure(spec.runId, resolved.error, spec.request.label);
+          if (!resolved.ok) {
+            h2Controller.abort();
+            abandonReason = resolved.timedOut ? "startup_timeout" : "h2_failed";
+            return settleConfigFailure(spec.runId, resolved.error, spec.request.label);
+          }
           sessionSpec = resolved.value;
         }
         // consult §5.4 B-2: FORCE the read-only tool domain AFTER H2, so no
@@ -630,14 +686,21 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               ),
           }),
         };
+        // D9 ("只读提示的 prompt 路径", v2.1 condition 4): `promptNotes` is NOT a
+        // driver-facing SessionSpec field — pulled out here so it never rides
+        // along in `...sessionFields` into the create/resume request, and
+        // folded into the actual prompt via `appendPromptNotes` below instead
+        // (the `prompt` field on SessionSpec itself is always overridden by
+        // the request's own prompt on the next line regardless).
+        const { promptNotes, ...sessionFields } = sessionSpec;
         const req: ResolvedSpawnRequest = {
           runId: spec.runId,
-          ...sessionSpec,
+          ...sessionFields,
           // consult §5.4 B-4: a consult run's prompt is the consult question
           // verbatim — buildPrompt's agent-type prefix (the whole task
           // instruction of the expert's type) is already in the fork's
           // history; replace-mode systemPrompt above survives untouched.
-          prompt: isConsultRun ? spec.request.prompt : buildPrompt(spec),
+          prompt: isConsultRun ? spec.request.prompt : appendPromptNotes(buildPrompt(spec), promptNotes),
           ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
           toolScope,
           // M-A: display-only metadata for the presentation layer (diag.model/
@@ -687,6 +750,20 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         } else settled = outcome;
         return outcome;
       } finally {
+        // D12 (v2.1 condition 1): fire-and-forget — the run's own outcome
+        // (failed(config), already returned above) must never wait on this.
+        // Bounded by the extension's own compensation logic (at most a few
+        // git commands, each under gitTimeoutMs); nothing here awaits it.
+        if (h2Invoked && !runnerEntered) {
+          const reason = abandonReason ?? "pre_runner_exit";
+          void Promise.resolve()
+            .then(() => merged.abandonSessionSpec?.(spec.runId, { reason }))
+            .catch((err) =>
+              console.warn(
+                `[pi-subagent] abandonSessionSpec failed for run ${spec.runId} (ignored): ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+        }
         // consult §4.4 early-exit path: the runner was never entered, so its
         // own finally/onReaped will not run — delete the fork copy here while
         // nothing can write to it (no session was ever opened against it).
@@ -757,6 +834,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     },
     fireDeadline(runId, generation, input) {
       runtime.fireDeadline(runId, generation, input);
+    },
+    // D13 (v2.1 condition 2): idempotent. Flips the redirect above; stack.ts
+    // calls this at the top of a rebuild (handing off from the PREVIOUS
+    // stack's adapter) and again on session_shutdown.
+    dispose() {
+      disposed = true;
     },
   };
 }

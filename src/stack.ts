@@ -131,6 +131,7 @@ import { createQueryService, type QueryService } from "./service/query-service.j
 import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
+import { registerDispositionSink, releaseDispositionSink } from "./adapters/worktree-disposition-sink.js";
 import { FleetWidgetController } from "./ui/fleet-widget.js";
 import type { GoalSession, GoalSessionStartReason } from "./goal/state.js";
 import { readBackGoalRecord } from "./goal/store.js";
@@ -175,6 +176,16 @@ let previousQuota: QuotaStack | undefined;
  *  index.ts's session_shutdown (shutdown → drain → seal); this top-of-build handoff is the
  *  defensive path for a session_start without a paired shutdown — stop everything, report nothing. */
 let previousWorkflowRuns: BackgroundWorkflows | undefined;
+/**
+ * workflow-worktree plan D13 (v2.1 condition 2): the previous stack's
+ * spawn-service + runtime-adapter pair, disposed at the top of the next
+ * build (same-module rebuild handoff, same dual-path discipline as
+ * previousFleetWidget/previousQuota — the OTHER path is index.ts's
+ * session_shutdown calling `Stack.worktreeLate.dispose()` directly, which
+ * covers the `/reload` case where this module-level variable is reset to
+ * undefined by the fresh re-import).
+ */
+let previousWorktreeLate: { dispose(): void } | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -611,6 +622,15 @@ export interface Stack {
    *  wiring itself degrades to no-op resolveExperts/depsFactory, matching the existing
    *  unconditional sweep). index.ts's top-level Agent tool forwards `resolveExperts` off this. */
   consult: ConsultWiring;
+  /**
+   * workflow-worktree plan D13 (v2.1 condition 2, frozen interface §4): tears down THIS
+   * stack's spawn-service worktree waiters/timers and the runtime-adapter's live write-back
+   * (redirecting any still-in-flight H3 report to the durable sink instead), and releases
+   * this stack's disposition-sink registration. Idempotent. Called at the top of the NEXT
+   * `buildSessionStack` (same-module rebuild handoff) AND by index.ts's session_shutdown
+   * (covers `/reload`, which resets the module-level handoff variable).
+   */
+  worktreeLate?: { dispose(): void };
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -1027,6 +1047,8 @@ export function buildSessionStack(
   previousQuota = undefined;
   previousWorkflowRuns?.abandon();
   previousWorkflowRuns = undefined;
+  previousWorktreeLate?.dispose();
+  previousWorktreeLate = undefined;
 
   // consult (plan §5.1/§6 C-9): fork-copy GC — once per session build, no
   // timer. Unconditional (runs even with consult.enabled=false so leftovers
@@ -1505,6 +1527,32 @@ export function buildSessionStack(
   });
   spawnRef.current = spawn;
   worktreeDiag.current = (runId, disposition) => spawn.markWorktreeDisposition?.(runId, disposition);
+  // workflow-worktree plan D13 (v2.1 condition 2): register THIS stack's
+  // durable sink for late worktree dispositions — registerDispositionSink
+  // unconditionally overwrites whoever was registered before (the same
+  // Symbol.for holder every stack shares, so a same-module rebuild or a
+  // fresh `/reload` module both "just work" without needing to release
+  // first). `worktreeLate.dispose()` is the single teardown entry point:
+  // stops this stack's spawn-service waiters/timers, flips the
+  // runtime-adapter's write-back to redirect-only, and releases the sink
+  // registration so a write with nothing left to receive it warns instead
+  // of reaching a torn-down closure.
+  const worktreeSinkToken = {};
+  registerDispositionSink(worktreeSinkToken, (entry) => {
+    try {
+      pi.appendEntry("subagent:worktree-disposition", entry);
+    } catch {
+      /* best effort — see worktree-disposition-sink.ts's own doc comment */
+    }
+  });
+  const worktreeLate: { dispose(): void } = {
+    dispose(): void {
+      spawn.dispose?.();
+      runner.dispose?.();
+      releaseDispositionSink(worktreeSinkToken);
+    },
+  };
+  previousWorktreeLate = worktreeLate;
   // Static fallback for the dynamic per-run wait default (only reached when a
   // snapshot has no deadlineAt yet): the configured run budget + abort grace +
   // settlement headroom, so it tracks `/agent settings` budget changes.
@@ -1941,6 +1989,7 @@ export function buildSessionStack(
     workflow,
     goal,
     consult,
+    worktreeLate,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
     ...(keepalive ? { keepalive } : {}),

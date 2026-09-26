@@ -72,6 +72,17 @@ export interface Runner {
    * 时调用方按 `{ ok: false, reason: "unsupported" }` 处理。
    */
   extendDeadline?(runId: RunId, extendMs: number, opts: { source: ExtendSource; reason?: string }): ExtendOutcome;
+  /**
+   * workflow-worktree plan D13 (v2.1 condition 2): idempotent. Called once by
+   * stack.ts's rebuild hand-off (before the previous stack's pieces are
+   * discarded) and again on session_shutdown. After this, any H3
+   * (beforeReap) write-back that still arrives for a run this adapter
+   * created must redirect to the current session's durable sink instead of
+   * this (about to be replaced) adapter's own store/live-record sink — see
+   * `runtime-adapter.ts`'s `setWorktreeDisposition`. Optional so existing
+   * Runner fakes/tests stay valid.
+   */
+  dispose?(): void;
 }
 export interface RunRegistry {
   get(runId: RunId): RunSnapshot | undefined;

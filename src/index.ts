@@ -624,6 +624,14 @@ export default function activate(pi: ExtensionAPI): void {
       stack.workflow.runs.drain(drainMs),
     ]);
     stack.workflow.runs.seal();
+    // workflow-worktree plan D13 (v2.1 condition 2): tear down THIS stack's
+    // spawn-service worktree waiters/timers, flip the runtime-adapter's
+    // write-back to redirect-only, and release its disposition-sink
+    // registration. Placed after seal() (same ordering rationale as the
+    // fabric-before-workflow-shutdown note above): any run this stack is
+    // still settling must get its chance to write through the normal path
+    // first; only truly late reports after this point are redirected.
+    stack.worktreeLate?.dispose();
     // bash auto-background §3.7: reload/new/resume/fork always keep the
     // processes (the next stack adopts them); only a real `quit` consults
     // shutdownPolicy, and even `kill` is bounded best-effort — a background

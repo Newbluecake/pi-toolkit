@@ -3,6 +3,8 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget, Millis } from "../core/types.js";
+import { dedupeLinkPaths } from "../extensions/worktree-link-paths.js";
+import type { WorktreeSettings } from "../extensions/worktree-settings.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import {
   DEFAULT_FORCE_THRESHOLD_PERCENT,
@@ -405,7 +407,7 @@ export interface AgentSettings {
   coalesceMaxBatch: number;
   ackWindowMs: number;
   rememberAgents: boolean;
-  worktree: { enabled: boolean; gitTimeoutMs: number };
+  worktree: WorktreeSettings;
   /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Exceeding this is rejected at spawn time as a config error, never silently truncated. */
   maxNestedDepth: number;
   /** X7b: always-on agent-tree widget pinned above the editor while subagent runs are active. Default true. */
@@ -507,7 +509,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   coalesceMaxBatch: 8,
   ackWindowMs: 0,
   rememberAgents: true,
-  worktree: { enabled: false, gitTimeoutMs: 30_000 },
+  worktree: { enabled: false, gitTimeoutMs: 30_000, linkPaths: [] },
   maxNestedDepth: 3,
   fleetWidget: true,
   fleetTerminalLingerMs: 5_000,
@@ -820,6 +822,11 @@ export function loadSettings(source: unknown): AgentSettings {
               typeof (value.worktree as Record<string, unknown>).gitTimeoutMs === "number"
                 ? ((value.worktree as Record<string, unknown>).gitTimeoutMs as number)
                 : DEFAULT_SETTINGS.worktree.gitTimeoutMs,
+            linkPaths: dedupeLinkPaths((value.worktree as Record<string, unknown>).linkPaths, (raw, reason) =>
+              console.warn(
+                `[pi-subagent] worktree.linkPaths: dropping invalid entry ${JSON.stringify(raw)}: ${reason}`,
+              ),
+            ),
           }
         : { ...DEFAULT_SETTINGS.worktree },
     workflow: parseWorkflowSettings(value.workflow),

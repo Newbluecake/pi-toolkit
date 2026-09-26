@@ -151,7 +151,10 @@ const leadingFields = {
         "On completion all changes are committed to a new pi-agent-<runId> branch in the main repo and the worktree is deleted; " +
         "if those changes cannot be committed the worktree is PRESERVED on disk instead (a warning names its path) so uncommitted work is never lost. " +
         "Merge or cherry-pick that branch to keep the results. " +
-        "Fails with a config error (no fallback) if worktree.enabled is off or the cwd is not a git repository.",
+        "Fails with a config error (no fallback) if worktree.enabled is off or the cwd is not a git repository. " +
+        "If worktree.linkPaths is configured (e.g. node_modules), those paths are symlinked into the worktree as shared, READ-ONLY " +
+        "dependencies — do not run install/update/prune commands (npm/pnpm/yarn install|ci|add|update, pip install, …) and do not " +
+        "write, delete or modify anything under them; they are never committed.",
     }),
   ),
   timeout_s: Type.Optional(

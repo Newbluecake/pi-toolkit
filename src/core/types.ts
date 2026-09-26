@@ -377,10 +377,12 @@ export interface WorktreeDisposition {
   state: "active" | "committed" | "kept" | "clean";
   /** Branch the worktree changes were committed to (state "committed"), e.g. `pi-agent-<runId>`. */
   branch?: string;
+  /** workflow-worktree plan D5-core: filled in by the extension when state is "kept" so callers can point the user at the on-disk directory. */
+  path?: string;
 }
 
-/** X1: the post-reap subset an extension may report back (no "active"). */
-export type WorktreeDisposal = { state: "committed" | "kept" | "clean"; branch?: string };
+/** X1: the post-reap subset an extension may report back (no "active"). workflow-worktree plan D5-core adds `path?` (kept dispositions only). */
+export type WorktreeDisposal = { state: "committed" | "kept" | "clean"; branch?: string; path?: string };
 
 export interface UsageDelta {
   input: number;
@@ -821,6 +823,16 @@ export interface SessionSpec {
   excludeTools?: string[];
   noTools?: "all" | "builtin";
   prompt?: string;
+  /**
+   * workflow-worktree plan D9 (only-read linkPaths note): extra prose an H2
+   * extension wants appended to the actual model-facing prompt. NOT a
+   * SessionSpec field the driver ever sees — runtime-adapter.ts strips it
+   * out before building the driver request and folds it into the prompt via
+   * `appendPromptNotes(buildPrompt(spec), promptNotes)` instead (the plain
+   * `prompt` field on this interface is otherwise always overridden by the
+   * request's own `prompt`, see runtime-adapter.ts's `buildPrompt`).
+   */
+  promptNotes?: readonly string[];
   /** Whether a fresh session must be persisted for later resume. */
   persist?: boolean;
   /** Existing session file to open for X2 resume. */
@@ -874,7 +886,34 @@ export interface OrphanRecord {
  */
 export interface SubagentExtensionPoints {
   onLifecycle?(e: LifecycleEvent): void;
-  resolveSessionSpec?(spec: SessionSpec, req: SpawnRequest): Promise<SessionSpec> | SessionSpec;
+  /**
+   * workflow-worktree plan D12 (v2.1 condition 1): `ctx.signal` is aborted by
+   * the adapter when its startupMs-scale wrapper (withStartupTimeout) gives
+   * up on this hook — the hook is expected to check it around/after its own
+   * long-running steps (git commands) and unwind. Old extensions that don't
+   * declare the third parameter never see it and keep running to completion
+   * exactly as before (their leak, if any, is caught by `abandonSessionSpec`
+   * below instead).
+   */
+  resolveSessionSpec?(
+    spec: SessionSpec,
+    req: SpawnRequest,
+    ctx?: { signal: AbortSignal },
+  ): Promise<SessionSpec> | SessionSpec;
+  /**
+   * workflow-worktree plan D12: fired (fire-and-forget by the adapter, never
+   * awaited) when `resolveSessionSpec` ran on this runId but the runner was
+   * never entered afterwards — startup timeout, the hook itself throwing, a
+   * later extension in the chain throwing, or a synchronous throw between H2
+   * succeeding and the runner starting. Extensions that created a resource in
+   * `resolveSessionSpec` (the worktree) use this to compensate (best-effort,
+   * bounded, never awaited by the caller). Extensions without state to clean
+   * up simply omit this method.
+   */
+  abandonSessionSpec?(
+    runId: RunId,
+    ctx: { reason: "startup_timeout" | "h2_failed" | "pre_runner_exit" },
+  ): Promise<void> | void;
   beforeReap?(
     outcome: RunOutcome,
     ctx: {

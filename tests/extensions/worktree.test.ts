@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunOutcome, SpawnRequest } from "../../src/core/types.js";
 import { forgetWorktreeOrigin, resolveWorktreeOrigin } from "../../src/core/worktree-origin.js";
 import { createWorktreeExtension, type ExecResult, type WorktreeExec } from "../../src/extensions/worktree.js";
+import { trackedWorktrees } from "../../src/extensions/worktree-orphans.js";
 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 const outcome = (runId: string): RunOutcome => ({
@@ -243,7 +246,8 @@ describe("worktree disposition reporting (X1 agent-tree marker)", () => {
       ctx: {
         cwd: "/tmp/test-worktrees/r-x",
         deadlineMs: 1000,
-        setWorktreeDisposition: (d: { state: "committed" | "kept" | "clean"; branch?: string }) => calls.push(d),
+        setWorktreeDisposition: (d: { state: "committed" | "kept" | "clean"; branch?: string; path?: string }) =>
+          calls.push(d),
       },
     };
   };
@@ -288,7 +292,7 @@ describe("worktree disposition reporting (X1 agent-tree marker)", () => {
     await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-report-kept"));
     const { calls, ctx } = reported();
     await ext.beforeReap?.(outcome("r-report-kept"), ctx);
-    expect(calls).toEqual([{ state: "kept" }]);
+    expect(calls).toEqual([{ state: "kept", path: "/tmp/test-worktrees/r-report-kept" }]);
   });
 
   it("still reports committed when only the final remove fails — the work is safe on the branch", async () => {
@@ -317,5 +321,194 @@ describe("worktree disposition reporting (X1 agent-tree marker)", () => {
     expect(calls).toEqual([]);
     // legacy ctx (no callback at all) must not throw
     await expect(ext.beforeReap?.(outcome("r-unknown"), { cwd: "/repo", deadlineMs: 1000 })).resolves.toBeUndefined();
+  });
+});
+
+describe("owner marker & token (§3, v2.1 condition 3)", () => {
+  const markerPath = (root: string, runId: string) => join(root, ".owners", `${runId}.json`);
+
+  it("writes the marker as 'creating' before `worktree add` runs, then rewrites it to 'active' after success", async () => {
+    const root = "/tmp/test-worktrees-marker-1";
+    const observed: string[] = [];
+    const fake = fakeGit();
+    const wrapped: WorktreeExec = async (cmd, args, opts) => {
+      if (args[0] === "worktree" && args[1] === "add") {
+        observed.push(JSON.parse(readFileSync(markerPath(root, "r-marker"), "utf8")).state);
+      }
+      return fake.exec(cmd, args, opts);
+    };
+    const ext = createWorktreeExtension({ exec: wrapped, settings: { enabled: true }, worktreeRoot: root });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-marker"));
+    expect(observed).toEqual(["creating"]);
+    const after = JSON.parse(readFileSync(markerPath(root, "r-marker"), "utf8"));
+    expect(after.state).toBe("active");
+    expect(after.owner).toMatchObject({ pid: process.pid });
+    expect(typeof after.owner.instanceId).toBe("string");
+  });
+
+  it("two extension instances carry different owner instanceIds", async () => {
+    const root = "/tmp/test-worktrees-marker-2";
+    const fake1 = fakeGit();
+    const fake2 = fakeGit();
+    const ext1 = createWorktreeExtension({ exec: fake1.exec, settings: { enabled: true }, worktreeRoot: root });
+    const ext2 = createWorktreeExtension({ exec: fake2.exec, settings: { enabled: true }, worktreeRoot: root });
+    await ext1.resolveSessionSpec?.({ cwd: "/repo" }, request("r-inst-1"));
+    await ext2.resolveSessionSpec?.({ cwd: "/repo" }, request("r-inst-2"));
+    const id1 = JSON.parse(readFileSync(markerPath(root, "r-inst-1"), "utf8")).owner.instanceId;
+    const id2 = JSON.parse(readFileSync(markerPath(root, "r-inst-2"), "utf8")).owner.instanceId;
+    expect(id1).not.toBe(id2);
+  });
+
+  it("adds the path to the process-wide tracked set while creating/active, removes it once beforeReap finishes", async () => {
+    const root = "/tmp/test-worktrees-marker-3";
+    const fake = fakeGit();
+    const ext = createWorktreeExtension({ exec: fake.exec, settings: { enabled: true }, worktreeRoot: root });
+    const path = `${root}/r-tracked`;
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-tracked"));
+    expect(trackedWorktrees().has(path)).toBe(true);
+    await ext.beforeReap?.(outcome("r-tracked"), { cwd: path, deadlineMs: 1000 });
+    expect(trackedWorktrees().has(path)).toBe(false);
+  });
+
+  it("removes the marker file after beforeReap even when the worktree ends up 'kept'", async () => {
+    const root = "/tmp/test-worktrees-marker-4";
+    const fake = fakeGit({ dirty: true, commitCode: 1 });
+    const ext = createWorktreeExtension({ exec: fake.exec, settings: { enabled: true }, worktreeRoot: root });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-kept-marker"));
+    await ext.beforeReap?.(outcome("r-kept-marker"), { cwd: `${root}/r-kept-marker`, deadlineMs: 1000 });
+    expect(existsSync(markerPath(root, "r-kept-marker"))).toBe(false);
+  });
+});
+
+describe("D12: H2 cancellation & abandon compensation (v2.1 condition 1)", () => {
+  const root = "/tmp/test-worktrees-d12";
+  const markerPath = (runId: string) => join(root, ".owners", `${runId}.json`);
+
+  beforeEach(() => {
+    rmSync(root, { recursive: true, force: true }); // no stale marker/state from a prior (possibly-failed) run
+  });
+
+  /** Real git leaves a real directory behind after `worktree add` and removes
+   *  it on `worktree remove` — compensate()'s existsSync-gated branching only
+   *  means anything if the fake mirrors that side effect. */
+  function fakeFsGit(opts: { removeCode?: number; addCode?: number } = {}) {
+    const calls: string[][] = [];
+    const exec: WorktreeExec = async (_cmd, args) => {
+      calls.push([...args]);
+      if (args[0] === "rev-parse") return ok("/repo\n");
+      if (args[0] === "worktree" && args[1] === "add") {
+        if (opts.addCode) return { code: opts.addCode, stdout: "", stderr: "cannot create" };
+        mkdirSync(args[3]!, { recursive: true });
+        return ok();
+      }
+      if (args[0] === "worktree" && args[1] === "remove") {
+        if (opts.removeCode) return { code: opts.removeCode, stdout: "", stderr: "cannot remove" };
+        rmSync(args[3]!, { recursive: true, force: true });
+        return ok();
+      }
+      return ok();
+    };
+    return { exec, calls };
+  }
+
+  it("compensates (worktree remove) when `abandonSessionSpec` fires while `worktree add` is still creating", async () => {
+    let releaseAdd!: () => void;
+    const addGate = new Promise<void>((resolve) => (releaseAdd = resolve));
+    const inner = fakeFsGit();
+    const exec: WorktreeExec = async (cmd, args, opts) => {
+      if (args[0] === "worktree" && args[1] === "add") await addGate;
+      return inner.exec(cmd, args, opts);
+    };
+    const ext = createWorktreeExtension({ exec, settings: { enabled: true }, worktreeRoot: root });
+    const pending = ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-d12-creating"));
+    // wait deterministically for H2 to reach `worktree add` (marker written "creating")
+    // rather than a fixed setImmediate tick, which races the real mkdir() calls above it.
+    const start = Date.now();
+    while (Date.now() - start < 2000) {
+      if (existsSync(markerPath("r-d12-creating"))) break;
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    await ext.abandonSessionSpec?.("r-d12-creating", { reason: "startup_timeout" });
+    // marker still exists (H2 will compensate itself once add returns)
+    expect(existsSync(markerPath("r-d12-creating"))).toBe(true);
+    releaseAdd();
+    await expect(pending).rejects.toThrow(/aborted/);
+    expect(inner.calls.some((c) => c[0] === "worktree" && c[1] === "remove")).toBe(true);
+    expect(existsSync(markerPath("r-d12-creating"))).toBe(false);
+    expect(existsSync(`${root}/r-d12-creating`)).toBe(false);
+    expect(trackedWorktrees().has(`${root}/r-d12-creating`)).toBe(false);
+  });
+
+  it("compensates an already-active worktree when abandonSessionSpec fires after H2 succeeded (h2_failed / pre_runner_exit)", async () => {
+    const fake = fakeFsGit();
+    const ext = createWorktreeExtension({ exec: fake.exec, settings: { enabled: true }, worktreeRoot: root });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-d12-active"));
+    expect(existsSync(markerPath("r-d12-active"))).toBe(true);
+    await ext.abandonSessionSpec?.("r-d12-active", { reason: "h2_failed" });
+    expect(fake.calls.some((c) => c[0] === "worktree" && c[1] === "remove")).toBe(true);
+    expect(existsSync(markerPath("r-d12-active"))).toBe(false);
+    expect(existsSync(`${root}/r-d12-active`)).toBe(false);
+    expect(resolveWorktreeOrigin(`${root}/r-d12-active`)).toBeUndefined();
+  });
+
+  it("abandonSessionSpec is a no-op for an unknown runId", async () => {
+    const ext = createWorktreeExtension({
+      exec: vi.fn(async () => ok()),
+      settings: { enabled: true },
+      worktreeRoot: root,
+    });
+    await expect(ext.abandonSessionSpec?.("no-such-run", { reason: "pre_runner_exit" })).resolves.toBeUndefined();
+  });
+
+  it("marks the worktree 'abandoned' (preserved) when the compensating remove fails, and warns via onDiagnostic", async () => {
+    const fake = fakeFsGit({ removeCode: 1 });
+    const diagnostics: Array<{ message: string }> = [];
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: root,
+      onDiagnostic: (e) => diagnostics.push(e),
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-d12-abandoned"));
+    await ext.abandonSessionSpec?.("r-d12-abandoned", { reason: "h2_failed" });
+    const marker = JSON.parse(readFileSync(markerPath("r-d12-abandoned"), "utf8"));
+    expect(marker.state).toBe("abandoned");
+    expect(existsSync(`${root}/r-d12-abandoned`)).toBe(true); // preserved, not deleted
+    expect(diagnostics.some((d) => d.message.includes("abandoned at"))).toBe(true);
+  });
+
+  it("compensation is idempotent: concurrent abandon calls share one compensation run (one `worktree remove`)", async () => {
+    const fake = fakeFsGit();
+    const ext = createWorktreeExtension({ exec: fake.exec, settings: { enabled: true }, worktreeRoot: root });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-d12-idempotent"));
+    await Promise.all([
+      ext.abandonSessionSpec?.("r-d12-idempotent", { reason: "h2_failed" }),
+      ext.abandonSessionSpec?.("r-d12-idempotent", { reason: "pre_runner_exit" }),
+    ]);
+    expect(fake.calls.filter((c) => c[0] === "worktree" && c[1] === "remove")).toHaveLength(1);
+  });
+
+  it("`worktree add` itself failing compensates and still throws the original error", async () => {
+    const fake = fakeFsGit({ addCode: 1 });
+    const ext = createWorktreeExtension({ exec: fake.exec, settings: { enabled: true }, worktreeRoot: root });
+    await expect(ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-d12-add-fail"))).rejects.toThrow(
+      /cannot create/,
+    );
+    // add never actually created the directory in this fake — compensate finds it already gone
+    expect(existsSync(markerPath("r-d12-add-fail"))).toBe(false);
+    expect(trackedWorktrees().has(`${root}/r-d12-add-fail`)).toBe(false);
+  });
+
+  it("forwards ctx.signal to the `worktree add` exec call", async () => {
+    const controller = new AbortController();
+    let sawSignal: AbortSignal | undefined;
+    const exec: WorktreeExec = async (_cmd, args, opts) => {
+      if (args[0] === "worktree" && args[1] === "add") sawSignal = opts.signal;
+      if (args[0] === "rev-parse") return ok("/repo\n");
+      return ok();
+    };
+    const ext = createWorktreeExtension({ exec, settings: { enabled: true }, worktreeRoot: root });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-d12-signal"), { signal: controller.signal });
+    expect(sawSignal).toBe(controller.signal);
   });
 });

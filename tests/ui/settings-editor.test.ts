@@ -525,7 +525,11 @@ describe("editor → settings file round trip", () => {
     // and reloading yields the milliseconds the runtime expects
     const reloaded = loadSettingsFromFile(path);
     expect(reloaded.budget.idleMs).toBe(600_000);
-    expect(reloaded.worktree).toEqual({ enabled: true, gitTimeoutMs: DEFAULT_SETTINGS.worktree.gitTimeoutMs });
+    expect(reloaded.worktree).toEqual({
+      enabled: true,
+      gitTimeoutMs: DEFAULT_SETTINGS.worktree.gitTimeoutMs,
+      linkPaths: [],
+    });
     expect(reloaded.bashJobs.retentionMs).toBe(3_600_000);
     // the live object edited in place matches the reloaded file
     expect(current.budget.idleMs).toBe(reloaded.budget.idleMs);

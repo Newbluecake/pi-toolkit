@@ -20,9 +20,18 @@ function warn(hook: string, err: unknown): void {
  *   swallowed — H2 is a bounded pre-hook whose failure must fail the run
  *   (`failed(config)`), not silently continue. The caller applies the
  *   startupMs-scale timeout (architecture: "调用方施加 startupMs 超时").
+ *   workflow-worktree plan D12: the optional `ctx` is threaded through
+ *   unchanged to every extension (old extensions that don't declare a third
+ *   parameter simply ignore it); `ctx.signal.aborted` is checked BEFORE
+ *   calling each extension (not just the first) so a signal fired while an
+ *   earlier extension was running stops the chain before the next one ever
+ *   starts.
  * - H3 beforeReap: run sequentially; each extension's failure/timeout is
  *   caught and logged but never blocks the remaining extensions or the
  *   caller's physical reclaim — H3 must stay bounded and diagnostic-only.
+ * - abandonSessionSpec (D12): fan-out to every extension that declares it,
+ *   same fire-and-forget/catch-and-warn discipline as onLifecycle/onDelivery
+ *   — one extension's compensation failing must never block another's.
  */
 export function mergeExtensionPoints(points: readonly SubagentExtensionPoints[]): SubagentExtensionPoints {
   const active = points.filter((p): p is SubagentExtensionPoints => Boolean(p));
@@ -42,13 +51,27 @@ export function mergeExtensionPoints(points: readonly SubagentExtensionPoints[])
   }
 
   if (active.some((p) => p.resolveSessionSpec)) {
-    merged.resolveSessionSpec = async (spec, req) => {
+    merged.resolveSessionSpec = async (spec, req, ctx) => {
       let current = spec;
       for (const p of active) {
         if (!p.resolveSessionSpec) continue;
-        current = await p.resolveSessionSpec(current, req);
+        if (ctx?.signal.aborted) throw new Error("resolveSessionSpec aborted");
+        current = await p.resolveSessionSpec(current, req, ctx);
       }
       return current;
+    };
+  }
+
+  if (active.some((p) => p.abandonSessionSpec)) {
+    merged.abandonSessionSpec = async (runId, ctx) => {
+      for (const p of active) {
+        if (!p.abandonSessionSpec) continue;
+        try {
+          await p.abandonSessionSpec(runId, ctx);
+        } catch (err) {
+          warn("abandonSessionSpec", err);
+        }
+      }
     };
   }
 

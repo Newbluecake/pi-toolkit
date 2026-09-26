@@ -54,6 +54,14 @@ export interface SpawnLabelTarget {
   readonly parent: RunId | "root";
 }
 export type BoundedWaitResult = { kind: "settled"; outcome: RunOutcome } | { kind: "pending" };
+/**
+ * workflow-worktree plan D5/D13: the four possible outcomes of waiting for a
+ * worktree disposition. `disposed` only appears after `SpawnService.dispose()`
+ * has run (a stack rebuild/shutdown) — every still-pending waiter is settled
+ * with it immediately, and every subsequent call returns it synchronously.
+ */
+export type WorktreeWaitResult =
+  { kind: "settled"; disposition: WorktreeDisposal } | { kind: "none" } | { kind: "timeout" } | { kind: "disposed" };
 export interface SpawnService {
   spawn(req: SpawnRequest): Promise<{ runId: RunId; label?: string } | { error: ErrorInfo }>;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
@@ -67,6 +75,31 @@ export interface SpawnService {
    * would never converge). Optional so test fakes of SpawnService stay valid.
    */
   markWorktreeDisposition?(runId: RunId, disposition: WorktreeDisposal): void;
+  /**
+   * workflow-worktree plan D5: bounded wait for a worktree disposition
+   * report from H3 (beforeReap), keyed off the run's ACTUAL effective
+   * `budget.reapMs` (D5a) rather than a constant. `horizon` picks the upper
+   * bound: "settle" = reapMs+1s (covers the runner's own withTimeout(reapMs)
+   * window), "late" = 5×reapMs+1s (covers H3 continuing to run in the
+   * background after the runner gave up on it — up to 5 git commands, each
+   * bounded by reapMs). `capMs` additionally clamps the wait from above (the
+   * caller's own remaining budget). Never rejects.
+   */
+  waitWorktreeDisposition?(
+    runId: RunId,
+    opts: { horizon: "settle" | "late"; capMs?: number },
+  ): Promise<WorktreeWaitResult>;
+  /**
+   * workflow-worktree plan D13: idempotent. Settles every outstanding
+   * worktree waiter with `{ kind: "disposed" }`, clears their timers, and
+   * clears the D5a reapMs table. After this call `waitWorktreeDisposition`
+   * always resolves `{ kind: "disposed" }` synchronously and
+   * `markWorktreeDisposition` becomes a no-op — late H3 reports must be
+   * redirected to the current session's durable sink instead (Runner.dispose,
+   * see runtime-adapter.ts), never back into this (about to be replaced)
+   * live registry or its store.
+   */
+  dispose?(): void;
   abort(runId: RunId, cause?: StopCause): Promise<boolean>;
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
   /** Resolve a label without exposing the mutable internal index. */
@@ -156,6 +189,37 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const stopping = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
   const resumeLocks = new Set<string>();
+  // D5a (workflow-worktree plan): per-run effective reapMs for worktree waits,
+  // tombstoned (expiresAt) rather than FIFO-capped so a slow, still-live run
+  // never loses its own entry because unrelated runs churned through the map.
+  // Capacity-bounded (4096) only against NEW writes; existing entries are
+  // never evicted to make room.
+  const worktreeWait = new Map<RunId, { reapMs: number; expiresAt?: number }>();
+  const WORKTREE_WAIT_CAPACITY = 4096;
+  interface WorktreeWaiter {
+    resolve(result: WorktreeWaitResult): void;
+    timer?: ReturnType<typeof setTimeout>;
+  }
+  const worktreeWaiters = new Map<RunId, Set<WorktreeWaiter>>();
+  let worktreeDisposed = false;
+  const worktreeSettleMs = (reapMs: number) => reapMs + 1_000;
+  const worktreeLateMs = (reapMs: number) => 5 * reapMs + 1_000;
+  const pruneWorktreeWait = () => {
+    const n = now();
+    for (const [id, entry] of worktreeWait) {
+      if (entry.expiresAt !== undefined && entry.expiresAt <= n) worktreeWait.delete(id);
+    }
+  };
+  const effectiveReapMs = (runId: RunId): number => worktreeWait.get(runId)?.reapMs ?? mergeBudget(deps.budget).reapMs;
+  const settleWorktreeWaiter = (runId: RunId, waiter: WorktreeWaiter, result: WorktreeWaitResult): void => {
+    if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+    const set = worktreeWaiters.get(runId);
+    if (set) {
+      set.delete(waiter);
+      if (set.size === 0) worktreeWaiters.delete(runId);
+    }
+    waiter.resolve(result);
+  };
   const labels = deps.labelIndex ?? new Map<string, SpawnLabelTarget>();
   const tombstones = deps.tombstones ?? new TombstoneStore(30 * 60 * 1000, now);
   // X3: nested-delegation bookkeeping. `nesting` holds, for every currently
@@ -228,6 +292,17 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       tombstones.register(snapshot);
       deps.onSnapshot?.(snapshot);
     }
+    // D5a: finish() runs BEFORE H3 (beforeReap) completes (waitAll returns
+    // early, see spawn-service.ts:231/:695-716) — outcome.diag.worktree at
+    // this point only tells us whether isolation was ever attempted
+    // ("active", set at request-build time), never the final disposition.
+    pruneWorktreeWait();
+    if (outcome.diag?.worktree) {
+      const reapMs = effectiveReapMs(outcome.runId);
+      worktreeWait.set(outcome.runId, { reapMs, expiresAt: now() + worktreeLateMs(reapMs) });
+    } else {
+      worktreeWait.delete(outcome.runId);
+    }
     for (const resolve of waits.get(outcome.runId) ?? []) resolve(outcome);
     waits.delete(outcome.runId);
   };
@@ -244,6 +319,13 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     model?: { provider: string; id: string },
   ) => {
     running.add(runId);
+    // D5a: capture the run's ACTUAL effective reapMs (this mergeBudget result,
+    // not a constant) the moment it's known, so a later wait can use it even
+    // if agent-type-level budgetOverride raised/lowered it. Capacity-bounded
+    // only against new writes — an already-running run is never evicted.
+    if (req.isolation === "worktree" && worktreeWait.size < WORKTREE_WAIT_CAPACITY) {
+      worktreeWait.set(runId, { reapMs: budget.reapMs });
+    }
     try {
       const spec: RunnerSpec = {
         runId,
@@ -650,12 +732,66 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     // re-reads QueryService, so no re-emit is needed (and re-firing
     // onSnapshot for a settled run would ping fabric/usage for nothing).
     markWorktreeDisposition(runId, disposition) {
+      if (worktreeDisposed) return; // D13: dispose() makes this a no-op — late reports go through the durable sink instead
       const live = records.get(runId);
-      if (!live) return;
-      live.diag.worktree = {
-        state: disposition.state,
-        ...(disposition.branch === undefined ? {} : { branch: disposition.branch }),
-      };
+      if (live) {
+        live.diag.worktree = {
+          state: disposition.state,
+          ...(disposition.branch === undefined ? {} : { branch: disposition.branch }),
+          ...(disposition.path === undefined ? {} : { path: disposition.path }),
+        };
+      }
+      pruneWorktreeWait();
+      worktreeWait.delete(runId); // D5a: mark ⇒ delete
+      const waiters = worktreeWaiters.get(runId);
+      if (waiters) {
+        for (const waiter of [...waiters]) settleWorktreeWaiter(runId, waiter, { kind: "settled", disposition });
+      }
+    },
+    async waitWorktreeDisposition(runId, opts) {
+      pruneWorktreeWait();
+      if (worktreeDisposed) return { kind: "disposed" };
+      const live = records.get(runId);
+      const wt = live?.diag.worktree;
+      if (!wt) {
+        worktreeWait.delete(runId); // D5a: none ⇒ delete
+        return { kind: "none" };
+      }
+      if (wt.state !== "active") {
+        return {
+          kind: "settled",
+          disposition: {
+            state: wt.state,
+            ...(wt.branch === undefined ? {} : { branch: wt.branch }),
+            ...(wt.path === undefined ? {} : { path: wt.path }),
+          },
+        };
+      }
+      const reapMs = effectiveReapMs(runId);
+      const horizonMs = opts.horizon === "settle" ? worktreeSettleMs(reapMs) : worktreeLateMs(reapMs);
+      const waitMs = Math.max(0, opts.capMs !== undefined ? Math.min(opts.capMs, horizonMs) : horizonMs);
+      return new Promise<WorktreeWaitResult>((resolve) => {
+        const waiter: WorktreeWaiter = { resolve };
+        const set = worktreeWaiters.get(runId) ?? new Set<WorktreeWaiter>();
+        set.add(waiter);
+        worktreeWaiters.set(runId, set);
+        waiter.timer = setTimeout(() => {
+          // D5a: a "late" horizon timing out means nobody is ever going to ask
+          // again — drop the reapMs entry; a "settle" timeout keeps it, since a
+          // "late" waiter may still be registered afterward.
+          if (opts.horizon === "late") worktreeWait.delete(runId);
+          settleWorktreeWaiter(runId, waiter, { kind: "timeout" });
+        }, waitMs);
+        (waiter.timer as unknown as { unref?: () => void }).unref?.();
+      });
+    },
+    dispose() {
+      if (worktreeDisposed) return;
+      worktreeDisposed = true;
+      for (const [runId, set] of [...worktreeWaiters]) {
+        for (const waiter of [...set]) settleWorktreeWaiter(runId, waiter, { kind: "disposed" });
+      }
+      worktreeWait.clear();
     },
     async abort(runId, cause = "user_stop") {
       if (!running.has(runId)) return false;

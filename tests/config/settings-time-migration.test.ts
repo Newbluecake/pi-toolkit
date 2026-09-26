@@ -77,7 +77,7 @@ describe("settings file time-unit migration", () => {
     expect(s.budget.totalMs).toBe(1_800_000);
     expect(s.budget.startupRetries).toBe(4);
     expect(s.deliveryBackoffMs).toBe(120_000);
-    expect(s.worktree).toEqual({ enabled: true, gitTimeoutMs: 45_000 });
+    expect(s.worktree).toEqual({ enabled: true, gitTimeoutMs: 45_000, linkPaths: [] });
     expect(s.workflow.replayTtlMs).toBe(60_000);
     expect(s.workflow.budget.gateMs).toBe(30_000);
     expect(s.bashJobs.autoBackgroundMs).toBe(30_000);
