@@ -65,6 +65,18 @@ interface WorktreeRecord {
   links: string[];
   /** D12: idempotency guard — abandon and H2's own failure path share exactly one compensation run. */
   compensatePromise?: Promise<void>;
+  /**
+   * Data-loss fix: the commit the worktree was created FROM (captured in the
+   * main repo before `worktree add` runs, or — fallback — rev-parsed inside
+   * the fresh worktree right after `add` succeeds if the pre-add capture
+   * failed). H3 compares this against the worktree's HEAD at reap time: if
+   * they differ, the sub agent committed on its own and a plain "clean
+   * working tree ⇒ just delete it" would silently drop that commit into
+   * dangling-object limbo. Absent (old/recovered record, or both capture
+   * attempts failed) is treated as "cannot prove HEAD is unchanged" — never
+   * as "unchanged".
+   */
+  baseHead?: string;
 }
 
 const READONLY_LINK_NOTE = (paths: readonly string[]): string =>
@@ -260,6 +272,14 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
       const branch = `pi-agent-${safeRunId(runId)}`;
       await mkdir(root, { recursive: true });
       await mkdir(ownersDir, { recursive: true });
+      // Data-loss fix (see WorktreeRecord.baseHead): capture the base commit in
+      // the main repo BEFORE `worktree add` runs so H3 can tell apart "nothing
+      // happened" from "the sub agent committed on its own". Best-effort — an
+      // unborn HEAD (brand-new repo, no commits yet) or a transient failure
+      // here just leaves baseHead unset; H3 then falls back to its
+      // never-assume-unchanged path rather than failing worktree creation.
+      const baseHeadResult = await git(["rev-parse", "HEAD"], repo, settings.gitTimeoutMs, ctx?.signal);
+      let baseHead = baseHeadResult.code === 0 ? baseHeadResult.stdout.trim() || undefined : undefined;
       const record: WorktreeRecord = {
         path,
         repo,
@@ -268,13 +288,17 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
         state: "creating",
         abandonRequested: false,
         links: [],
+        ...(baseHead ? { baseHead } : {}),
       };
       records.set(runId, record);
       tracked.set(path, self.instanceId);
       writeMarker(record, "creating"); // §3 condition 3: predates `worktree add`
       let add: ExecResult;
+      const addArgs = baseHead
+        ? ["worktree", "add", "--detach", path, baseHead]
+        : ["worktree", "add", "--detach", path];
       try {
-        add = await git(["worktree", "add", "--detach", path], repo, settings.gitTimeoutMs, ctx?.signal);
+        add = await git(addArgs, repo, settings.gitTimeoutMs, ctx?.signal);
       } catch (error) {
         await compensate(record);
         throw error;
@@ -289,6 +313,24 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
         await compensate(record);
         throw commandError("git worktree add", add);
       }
+      if (!baseHead) {
+        // Fallback: the pre-add capture failed but `add` still succeeded (e.g.
+        // it created the worktree off an unborn HEAD in some other way, or the
+        // failure above was transient). Best-effort only: any failure here
+        // just leaves baseHead unset, and H3 stays on its conservative path.
+        try {
+          const fallback = await git(["rev-parse", "HEAD"], path, settings.gitTimeoutMs, ctx?.signal);
+          if (fallback.code === 0 && fallback.stdout.trim()) {
+            baseHead = fallback.stdout.trim();
+            record.baseHead = baseHead;
+          }
+        } catch {
+          /* best-effort */
+        }
+      }
+      // D12: the cancellation re-check sits AFTER the last await of the
+      // creating phase (worktree add + the fallback rev-parse) — an abandon
+      // that arrived while either was in flight only set abandonRequested.
       if (ctx?.signal?.aborted || record.abandonRequested) {
         await compensate(record);
         throw new Error("resolveSessionSpec aborted");
@@ -356,11 +398,35 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
         : ["status", "--porcelain"];
       const addArgs = excludePathspecs.length ? ["add", "-A", "--", ".", ...excludePathspecs] : ["add", "-A"];
       try {
+        // Data-loss fix: a clean working tree does NOT mean "nothing happened"
+        // — the sub agent may have run `git commit` itself (detached HEAD or a
+        // branch it switched to on its own), which also leaves `git status`
+        // clean. Compare the worktree's current HEAD against the commit it was
+        // created from; only an exact match may take the old clean-remove
+        // shortcut. `record.baseHead` missing (old/recovered record, or H2's
+        // own capture failed) is treated the same as "HEAD moved" — never as
+        // "unchanged" — so an unsafe delete is never the default.
+        const headResult = await git(["rev-parse", "HEAD"], record.path, ctx.deadlineMs);
+        if (headResult.code !== 0) throw commandError("git rev-parse HEAD", headResult);
+        const currentHead = headResult.stdout.trim();
+        const headAdvanced = record.baseHead === undefined || currentHead !== record.baseHead;
+
         const status = await git(statusArgs, record.path, ctx.deadlineMs);
         if (status.code !== 0) throw commandError("git status --porcelain", status);
         if (isClean(status)) {
-          safeToRemove = true;
-          report({ state: "clean" });
+          if (headAdvanced) {
+            // The sub agent already committed its own work and left nothing
+            // uncommitted. Point pi-agent-<runId> at that commit WITHOUT
+            // touching whatever ref the worktree's HEAD currently resolves to
+            // (it may be a named branch the sub agent switched to itself).
+            const branch = await git(["branch", record.branch, "HEAD"], record.path, ctx.deadlineMs);
+            if (branch.code !== 0) throw commandError("git branch", branch);
+            safeToRemove = true;
+            report({ state: "committed", branch: record.branch });
+          } else {
+            safeToRemove = true;
+            report({ state: "clean" });
+          }
         } else {
           const checkout = await git(["switch", "-c", record.branch], record.path, ctx.deadlineMs);
           if (checkout.code !== 0) throw commandError("git switch -c", checkout);

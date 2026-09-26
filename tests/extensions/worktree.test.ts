@@ -30,13 +30,40 @@ function fakeGit(
     statusCode?: number;
     switchCode?: number;
     commitCode?: number;
+    /** `git branch <name> HEAD` failure code (the headAdvanced+clean path). */
+    branchCode?: number;
+    /** sha `git rev-parse HEAD` reports in the main repo (H2, cwd "/repo") — the base commit recorded on the record. Default "base-sha". */
+    baseHead?: string;
+    /** sha `git rev-parse HEAD` reports inside the worktree (H3) — defaults to `baseHead` (HEAD unchanged). Set different from `baseHead` to simulate the sub agent committing on its own. */
+    worktreeHead?: string;
+    /** H2's pre-add `rev-parse HEAD` in the repo fails (unborn HEAD / transient failure — record.baseHead stays unset). */
+    headRevParseFails?: boolean;
+    /** H2's OWN post-add fallback `rev-parse HEAD` inside the fresh worktree (only runs when `headRevParseFails` is set) also fails — baseHead stays permanently unset even though H3's later rev-parse succeeds normally. */
+    fallbackRevParseFails?: boolean;
+    /** H3's `rev-parse HEAD` inside the worktree fails — the "cannot determine, treat as unsafe" path. */
+    worktreeRevParseFails?: boolean;
   } = {},
 ) {
   const calls: Array<{ args: string[]; cwd?: string }> = [];
   const branches = new Set<string>();
+  const baseHead = opts.baseHead ?? "base-sha";
+  const worktreeHead = opts.worktreeHead ?? baseHead;
+  let worktreeHeadCallCount = 0;
   const exec: WorktreeExec = async (_cmd, args, commandOpts) => {
     calls.push({ args: [...args], cwd: commandOpts.cwd });
-    if (args[0] === "rev-parse") return ok("/repo\n");
+    if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return ok("/repo\n");
+    if (args[0] === "rev-parse" && args[1] === "HEAD") {
+      if (commandOpts.cwd === "/repo") {
+        return opts.headRevParseFails ? { code: 1, stdout: "", stderr: "no head" } : ok(`${baseHead}\n`);
+      }
+      worktreeHeadCallCount += 1;
+      // The very first worktree-cwd call only exists when the repo capture
+      // above failed — it is H2's OWN post-add fallback, not H3's later call.
+      if (worktreeHeadCallCount === 1 && opts.headRevParseFails && opts.fallbackRevParseFails) {
+        return { code: 1, stdout: "", stderr: "no head" };
+      }
+      return opts.worktreeRevParseFails ? { code: 1, stdout: "", stderr: "no head" } : ok(`${worktreeHead}\n`);
+    }
     if (args[0] === "worktree" && args[1] === "add")
       return opts.addCode ? { code: opts.addCode, stdout: "", stderr: "cannot create" } : ok();
     if (args[0] === "status")
@@ -46,6 +73,11 @@ function fakeGit(
     if (args[0] === "switch") {
       if (opts.switchCode) return { code: opts.switchCode, stdout: "", stderr: "branch exists" };
       branches.add(args[2]);
+      return ok();
+    }
+    if (args[0] === "branch") {
+      if (opts.branchCode) return { code: opts.branchCode, stdout: "", stderr: "branch exists" };
+      branches.add(args[1]);
       return ok();
     }
     if (args[0] === "commit")
@@ -72,6 +104,7 @@ describe("worktree extension", () => {
       "add",
       "--detach",
       "/tmp/test-worktrees/r-create",
+      "base-sha",
     ]);
 
     const untouched = await ext.resolveSessionSpec?.({ cwd: "/repo" }, { type: "worker", prompt: "work" });
@@ -110,7 +143,9 @@ describe("worktree extension", () => {
     expect(fake.branches.has("pi-agent-r-dirty")).toBe(true);
     expect(fake.calls.map((c) => c.args)).toEqual([
       ["rev-parse", "--show-toplevel"],
-      ["worktree", "add", "--detach", "/tmp/test-worktrees/r-dirty"],
+      ["rev-parse", "HEAD"],
+      ["worktree", "add", "--detach", "/tmp/test-worktrees/r-dirty", "base-sha"],
+      ["rev-parse", "HEAD"],
       ["status", "--porcelain"],
       ["switch", "-c", "pi-agent-r-dirty"],
       ["add", "-A"],
@@ -187,6 +222,140 @@ describe("worktree extension", () => {
     await ext.beforeReap?.(outcome("r-status-fail"), { cwd: "/tmp/test-worktrees/r-status-fail", deadlineMs: 1000 });
     expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(false);
     expect(diagnostics[0]?.message).toContain("worktree preserved at /tmp/test-worktrees/r-status-fail");
+  });
+});
+
+describe("data-loss fix: HEAD moved without a dirty working tree (sub agent committed on its own)", () => {
+  it("HEAD advanced + clean working tree \u21d2 builds pi-agent-<runId> at HEAD and reports committed (not clean)", async () => {
+    const fake = fakeGit({ worktreeHead: "child-sha" }); // sub agent ran `git commit` itself, then left a clean tree
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-head-advanced-clean"));
+    const calls: Array<{ state: string; branch?: string }> = [];
+    await ext.beforeReap?.(outcome("r-head-advanced-clean"), {
+      cwd: "/tmp/test-worktrees/r-head-advanced-clean",
+      deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
+    });
+    // built via `git branch <name> HEAD`, never `git switch -c` (that would
+    // disturb whatever ref the sub agent's HEAD currently resolves to)
+    expect(fake.calls.some((c) => c.args[0] === "switch")).toBe(false);
+    expect(fake.calls).toContainEqual(
+      expect.objectContaining({ args: ["branch", "pi-agent-r-head-advanced-clean", "HEAD"] }),
+    );
+    expect(fake.branches.has("pi-agent-r-head-advanced-clean")).toBe(true);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-head-advanced-clean" }]);
+    expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(true);
+  });
+
+  it("HEAD advanced + dirty working tree \u21d2 unchanged existing switch-c/add/commit path (branch naturally includes the sub agent's own commit)", async () => {
+    const fake = fakeGit({ dirty: true, worktreeHead: "child-sha" });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-head-advanced-dirty"));
+    await ext.beforeReap?.(outcome("r-head-advanced-dirty"), {
+      cwd: "/tmp/test-worktrees/r-head-advanced-dirty",
+      deadlineMs: 1000,
+    });
+    expect(fake.calls.map((c) => c.args)).toEqual([
+      ["rev-parse", "--show-toplevel"],
+      ["rev-parse", "HEAD"],
+      ["worktree", "add", "--detach", "/tmp/test-worktrees/r-head-advanced-dirty", "base-sha"],
+      ["rev-parse", "HEAD"],
+      ["status", "--porcelain"],
+      ["switch", "-c", "pi-agent-r-head-advanced-dirty"],
+      ["add", "-A"],
+      ["commit", "-m", "pi-agent r-head-advanced-dirty"],
+      ["worktree", "remove", "--force", "/tmp/test-worktrees/r-head-advanced-dirty"],
+    ]);
+  });
+
+  it("HEAD unchanged + clean working tree \u21d2 still the plain clean-remove path (unaffected)", async () => {
+    const fake = fakeGit(); // worktreeHead defaults to baseHead — nothing happened
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-head-unchanged-clean"));
+    const calls: Array<{ state: string; branch?: string }> = [];
+    await ext.beforeReap?.(outcome("r-head-unchanged-clean"), {
+      cwd: "/tmp/test-worktrees/r-head-unchanged-clean",
+      deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
+    });
+    expect(fake.branches.size).toBe(0);
+    expect(calls).toEqual([{ state: "clean" }]);
+  });
+
+  it("HEAD advanced + clean but `git branch` fails (e.g. branch already exists) ⇒ kept, never removed", async () => {
+    const fake = fakeGit({ worktreeHead: "agent-commit", branchCode: 128 });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-branch-fail"));
+    const calls: Array<{ state: string; path?: string }> = [];
+    await ext.beforeReap?.(outcome("r-branch-fail"), {
+      cwd: "/tmp/test-worktrees/r-branch-fail",
+      deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
+    });
+    expect(fake.calls.some((c) => c.args[0] === "branch")).toBe(true);
+    expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(false);
+    expect(calls).toEqual([{ state: "kept", path: "/tmp/test-worktrees/r-branch-fail" }]);
+  });
+
+  it("H3's own `rev-parse HEAD` failing \u21d2 treated as unsafe: kept, never removed (cannot prove anything)", async () => {
+    const fake = fakeGit({ worktreeRevParseFails: true });
+    const diagnostics: Array<{ message: string }> = [];
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-revparse-fail"));
+    const calls: Array<{ state: string; path?: string }> = [];
+    await ext.beforeReap?.(outcome("r-revparse-fail"), {
+      cwd: "/tmp/test-worktrees/r-revparse-fail",
+      deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
+    });
+    expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(false);
+    expect(calls).toEqual([{ state: "kept", path: "/tmp/test-worktrees/r-revparse-fail" }]);
+    expect(diagnostics[0]?.message).toContain("worktree preserved at /tmp/test-worktrees/r-revparse-fail");
+  });
+
+  it("a record with no recorded baseHead (old/recovered record) never takes the clean-remove shortcut, even if the tree is clean and HEAD never moved", async () => {
+    // Both of H2's own capture attempts fail (pre-add rev-parse in the repo,
+    // then its post-add fallback rev-parse inside the fresh worktree) —
+    // record.baseHead stays permanently unset even though H3's later
+    // rev-parse (a transient failure can resolve itself) succeeds normally.
+    const fake = fakeGit({ headRevParseFails: true, fallbackRevParseFails: true });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-no-base"));
+    const calls: Array<{ state: string; branch?: string }> = [];
+    await ext.beforeReap?.(outcome("r-no-base"), {
+      cwd: "/tmp/test-worktrees/r-no-base",
+      deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
+    });
+    // conservative: baseHead unknown ⇒ always treated as "cannot prove
+    // unchanged" ⇒ branch built rather than silently removed
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-no-base" }]);
+    expect(fake.branches.has("pi-agent-r-no-base")).toBe(true);
   });
 });
 
@@ -437,6 +606,35 @@ describe("D12: H2 cancellation & abandon compensation (v2.1 condition 1)", () =>
     expect(existsSync(markerPath("r-d12-creating"))).toBe(false);
     expect(existsSync(`${root}/r-d12-creating`)).toBe(false);
     expect(trackedWorktrees().has(`${root}/r-d12-creating`)).toBe(false);
+  });
+
+  it("compensates when abandonSessionSpec lands during the post-add fallback rev-parse (last await of the creating phase)", async () => {
+    let releaseFallback!: () => void;
+    const fallbackGate = new Promise<void>((resolve) => (releaseFallback = resolve));
+    let fallbackStarted = false;
+    const inner = fakeFsGit();
+    const exec: WorktreeExec = async (cmd, args, opts) => {
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        // pre-add capture in the repo fails ⇒ H2 takes the fallback inside the worktree
+        if (opts.cwd === "/repo") return { code: 1, stdout: "", stderr: "no head" };
+        fallbackStarted = true;
+        await fallbackGate;
+        return ok("fallback-sha\n");
+      }
+      return inner.exec(cmd, args, opts);
+    };
+    const ext = createWorktreeExtension({ exec, settings: { enabled: true }, worktreeRoot: root });
+    const pending = ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-d12-fallback"));
+    const start = Date.now();
+    while (Date.now() - start < 2000 && !fallbackStarted) await new Promise((r) => setTimeout(r, 2));
+    expect(fallbackStarted).toBe(true);
+    await ext.abandonSessionSpec?.("r-d12-fallback", { reason: "startup_timeout" });
+    releaseFallback();
+    await expect(pending).rejects.toThrow(/aborted/);
+    expect(inner.calls.some((c) => c[0] === "worktree" && c[1] === "remove")).toBe(true);
+    expect(existsSync(markerPath("r-d12-fallback"))).toBe(false);
+    expect(existsSync(`${root}/r-d12-fallback`)).toBe(false);
+    expect(trackedWorktrees().has(`${root}/r-d12-fallback`)).toBe(false);
   });
 
   it("compensates an already-active worktree when abandonSessionSpec fires after H2 succeeded (h2_failed / pre_runner_exit)", async () => {

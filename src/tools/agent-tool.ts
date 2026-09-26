@@ -148,7 +148,7 @@ const leadingFields = {
       description:
         "Run in an isolated git worktree created from the current HEAD (uncommitted changes in the main checkout are NOT visible). " +
         "Use for risky edits or when running parallel agents on the same repo. " +
-        "On completion all changes are committed to a new pi-agent-<runId> branch in the main repo and the worktree is deleted; " +
+        "On completion all changes are committed to a new pi-agent-<runId> branch in the main repo and the worktree is deleted (any commits the sub agent made itself are preserved on that branch too); " +
         "if those changes cannot be committed the worktree is PRESERVED on disk instead (a warning names its path) so uncommitted work is never lost. " +
         "Merge or cherry-pick that branch to keep the results. " +
         "Fails with a config error (no fallback) if worktree.enabled is off or the cwd is not a git repository. " +

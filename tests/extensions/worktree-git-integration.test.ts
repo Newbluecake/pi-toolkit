@@ -81,6 +81,38 @@ describe("X1 worktree against real git", () => {
     expect(list.stdout).not.toContain(".wt2");
   });
 
+  it("data-loss fix: a sub agent that commits its own work (clean tree, detached HEAD moved) still lands on a pi-agent branch instead of a dangling commit", async () => {
+    const repo = await makeRepo();
+    const wtRoot = join(repo, ".wt4");
+    const ext = createWorktreeExtension({ exec: realExec, settings: { enabled: true }, worktreeRoot: wtRoot });
+    const rewritten = await ext.resolveSessionSpec!(spec(repo), req("r-selfcommit"));
+
+    // the sub agent runs its own `git add` + `git commit` (exactly what a real
+    // Agent tool call can do inside its worktree), leaving the working tree
+    // clean afterwards. Before this fix, H3 only looked at `git status` — a
+    // clean tree here force-removed the worktree WITHOUT ever building the
+    // pi-agent branch, turning the sub agent's commit into a dangling object
+    // recoverable only via `git fsck --unreachable`.
+    await writeFile(join(rewritten.cwd!, "agent-work.txt"), "done by the sub agent");
+    await realExec("git", ["add", "-A"], { cwd: rewritten.cwd! });
+    await realExec("git", ["commit", "-qm", "sub agent work"], { cwd: rewritten.cwd! });
+    const selfCommit = (await realExec("git", ["rev-parse", "HEAD"], { cwd: rewritten.cwd! })).stdout.trim();
+    const status = await realExec("git", ["status", "--porcelain"], { cwd: rewritten.cwd! });
+    expect(status.stdout.trim()).toBe(""); // confirms the reproduction: clean tree, HEAD advanced
+
+    await ext.beforeReap!(outcome("r-selfcommit"), { cwd: rewritten.cwd!, deadlineMs: 10_000 });
+
+    // pi-agent-<runId> exists in the MAIN repo and points at exactly the sub
+    // agent's own commit.
+    const branchHead = await realExec("git", ["rev-parse", "pi-agent-r-selfcommit"], { cwd: repo });
+    expect(branchHead.stdout.trim()).toBe(selfCommit);
+    const files = await realExec("git", ["show", "--name-only", "--format=", "pi-agent-r-selfcommit"], { cwd: repo });
+    expect(files.stdout).toContain("agent-work.txt");
+    // worktree was still safely removed (the commit lives on the branch now)
+    const list = await realExec("git", ["worktree", "list", "--porcelain"], { cwd: repo });
+    expect(list.stdout).not.toContain(".wt4");
+  });
+
   it("preserves the worktree (and its uncommitted files) when the commit is rejected by a hook", async () => {
     const repo = await makeRepo();
     // a pre-commit hook that always fails forces the commit chain to break
