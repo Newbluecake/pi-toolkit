@@ -68,6 +68,24 @@ interface KeepaliveModelInfo {
   compat?: { supportsLongCacheRetention?: boolean } | undefined;
 }
 
+/**
+ * Ping retry policy (user requirement, 2026-09-26 — see docs/dev/cache-ttl-keepalive/plan.md's
+ * appended "ping 重试" section). Only outcomes where the server provably did NOT process the
+ * request (no cache billing possible) are retried: `network` (no response headers at all) and
+ * these HTTP statuses (rate-limited / transient upstream — never a 4xx that means "this request
+ * is wrong", and never `accepted-then-lost`, which got a 200 and may already have been billed).
+ * Two retries max (three attempts total), backed off 2s then 5s.
+ */
+const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+const PING_RETRY_DELAYS_MS: readonly Millis[] = [2_000, 5_000];
+const PING_MAX_ATTEMPTS = 1 + PING_RETRY_DELAYS_MS.length;
+
+function isRetryablePingOutcome(outcome: PingOutcome): boolean {
+  if (outcome.kind === "network") return true;
+  if (outcome.kind === "http") return RETRYABLE_HTTP_STATUSES.has(outcome.status);
+  return false;
+}
+
 const EMPTY_FINGERPRINT: CaptureFingerprint = {
   sessionId: "",
   provider: "",
@@ -210,6 +228,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private enabledOverride: boolean | undefined;
   private timer: TimerHandle | undefined;
   private abortController: AbortController | undefined;
+  /** Ping-retry backoff wait (user requirement 2026-09-26) — cleared/resolved by `dispose()` so a pending retry never wedges past teardown. */
+  private pendingRetry: { timer: TimerHandle; resolve: () => void } | undefined;
   private lockedAuthHeaderKeys: string | undefined;
   private activeTools = 0;
   private uiPrompts = 0;
@@ -360,6 +380,31 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     }
   }
 
+  /**
+   * Ping-retry backoff wait (user requirement 2026-09-26). Uses the injected
+   * `Clock` (unref'd `systemClock.setTimer` in production, `FakeClock` in tests)
+   * so retries never keep the process alive and are deterministically testable.
+   * `dispose()` resolves any pending wait immediately so `runPing` unwinds
+   * through its own `sameEpoch`/disposed checks instead of leaking a timer.
+   */
+  private sleep(ms: Millis): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = this.clock.setTimer(ms, () => {
+        this.pendingRetry = undefined;
+        resolve();
+      });
+      this.pendingRetry = { timer, resolve };
+    });
+  }
+
+  private cancelPendingRetry(): void {
+    if (this.pendingRetry === undefined) return;
+    const { timer, resolve } = this.pendingRetry;
+    this.pendingRetry = undefined;
+    this.clock.clearTimer(timer);
+    resolve();
+  }
+
   // -- timer (UsageBroadcaster self-arming/self-stopping pattern) ---------
 
   private arm(): void {
@@ -460,8 +505,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       return;
     }
 
-    const controller = new AbortController();
-    this.abortController = controller;
     const body = preparePingPayload(capture.payload);
     const authHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(auth.headers ?? {})) {
@@ -492,18 +535,59 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       model: model.id,
       baseUrl,
     };
-    let outcome: PingOutcome;
-    try {
-      outcome = await sendKeepalivePing(request, {
-        ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
-        signal: controller.signal,
-      });
-    } finally {
-      if (this.abortController === controller) this.abortController = undefined;
-    }
 
-    // I-K8: await return point #2 — the one that matters most (§7.5 "abort 与迟到返回").
-    if (!this.sameEpoch(pingEpoch)) return;
+    // Ping retry (user requirement 2026-09-26, docs/dev/cache-ttl-keepalive/plan.md
+    // "ping 重试" section): only outcomes that PROVE the server never processed the
+    // request (no cache billing possible) are retried — `network` and a fixed set of
+    // transient HTTP statuses (`isRetryablePingOutcome`). `accepted-then-lost` and
+    // every other unproven kind are final on the first attempt: the server may already
+    // have billed a write. Up to `PING_MAX_ATTEMPTS - 1` retries, backed off by
+    // `PING_RETRY_DELAYS_MS`; every await return point re-checks `sameEpoch` (I-K8 —
+    // covers epoch bump from a real request / invalidate / dispose in one guard) and
+    // silently abandons (no proven/unproven counting at all) on mismatch. The whole
+    // sequence is also bounded by the window's remaining TTL margin: a retry that
+    // would land past `aliveUntil - TTL_SAFETY_MARGIN_MS` is skipped and the LAST
+    // outcome is used as final instead.
+    let outcome: PingOutcome | undefined;
+    let attempts = 0;
+    for (;;) {
+      attempts += 1;
+      const controller = new AbortController();
+      this.abortController = controller;
+      try {
+        outcome = await sendKeepalivePing(request, {
+          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+          signal: controller.signal,
+        });
+      } finally {
+        if (this.abortController === controller) this.abortController = undefined;
+      }
+
+      this.audit("ping-attempt", { attempt: attempts, outcomeKind: outcome.kind });
+
+      // I-K8: await return point — the one that matters most (§7.5 "abort 与迟到返回").
+      if (!this.sameEpoch(pingEpoch)) return;
+
+      if (outcome.kind === "proven-hit" || !isRetryablePingOutcome(outcome) || attempts >= PING_MAX_ATTEMPTS) {
+        break;
+      }
+
+      const delayMs = PING_RETRY_DELAYS_MS[attempts - 1]!;
+      const nowBeforeBackoff = this.clock.now();
+      const remainingMs =
+        this.window.aliveUntil !== undefined
+          ? this.window.aliveUntil - TTL_SAFETY_MARGIN_MS - nowBeforeBackoff
+          : undefined;
+      if (remainingMs !== undefined && remainingMs < delayMs) {
+        // Not enough TTL headroom left for another attempt (req #2) — stop retrying
+        // and fall through with this outcome as final; still onUnproven-counted below.
+        break;
+      }
+
+      await this.sleep(delayMs);
+      // I-K8: await return point after the backoff wait.
+      if (!this.sameEpoch(pingEpoch)) return;
+    }
 
     if (outcome.kind === "proven-hit") {
       const applied = onProvenHit(this.window, this.session, pingEpoch, outcome, this.config().intervalMs);
@@ -516,12 +600,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           outcomeKind: outcome.kind,
           cacheReadInputTokens: outcome.cacheReadTokens,
           cacheCreationInputTokens: 0,
+          attempts,
         };
         this.audit("proven-hit", {
           ...diagnostics,
           cacheReadTokens: outcome.cacheReadTokens,
           cacheReadInputTokens: outcome.cacheReadTokens,
           cacheCreationInputTokens: 0,
+          attempts,
         });
       }
     } else {
@@ -536,6 +622,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           outcomeKind: outcome.kind,
           cacheReadInputTokens: 0,
           cacheCreationInputTokens,
+          attempts,
         };
         this.audit("unproven", {
           ...diagnostics,
@@ -543,6 +630,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           disabled: applied.session.disabled !== undefined,
           cacheReadInputTokens: 0,
           cacheCreationInputTokens,
+          attempts,
         });
       }
     }
@@ -702,6 +790,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // best-effort.
     }
     this.abortController = undefined;
+    this.cancelPendingRetry();
     safeSetStatus(this.deps.ctx, undefined);
   }
 }

@@ -1192,3 +1192,56 @@ vitest，`tests/` 镜像 `src/`；沿用“各模块手搓极简 stub、不共�
 | R8 `readLatestAssistantCacheTokens` 扫 entries | 轻微 CPU                                               | 从后向前、命中即停；与 HUD 每秒一次全量遍历（`footer.ts:143`）相比可忽略；read-back 不可用即不 ping                                                                                   |
 | **R2b 抢占后迟到 ping 回写（B5）**             | 误判缓存存活 ⇒ 下次 ping 撞死条目 ⇒ 全量写；并掩盖熔断 | `windowEpoch` 绑定 + 每个 await 返回点与 reducer 前 `sameEpoch()`；失配一律不计数、不回写（I-K8、§7.5）。残余：被抢占那次 ping 若真造成写入，该证据不进 breaker（取舍已在 §7.5 写明） |
 | **R9 漏发 `session_shutdown` 且此后无 build**  | 在途 fetch/reader/socket 不被显式释放                  | **上游已裁决为过度防御，不加任何机制/hook**：该场景意味着进程正在退出或永久空闲，unref 的定时器不阻塞退出、在途 socket 随进程消亡。作为**可接受残余风险**登记在此，不再新增释放路径   |
+
+---
+
+## 16. ping 重试（2026-09-26，用户要求）
+
+单次 keepalive ping（`src/service/cache-keepalive.ts` 的 `runPing`）遇到「服务器确定没处理」的
+失败时，现在会重试，而不是立即计入 §7.5 的会话级熔断。
+
+**判据（`isRetryablePingOutcome`，只看 `ping-client.ts` 已有的 `PingOutcome.kind`，不改分类逻辑）**：
+
+- 可重试：`network`（未收到任何响应头 —— 连接层失败，服务器不可能已经处理/计费）；
+  `http` 且状态码 ∈ `{429, 500, 502, 503, 504, 529}`（限流 / 网关或上游临时故障，同样没有
+  被处理的证据，不可能产生缓存计费）。
+- 不可重试（首次即终局）：`accepted-then-lost`（拿到了 200，可能已经被计费，重试等于二次
+  计费风险）、`proven-write`（已确认写入）、`no-usage`、`malformed`、任何不在上面集合里的
+  `http` 状态（含全部其它 4xx —— 请求本身有问题，重试不会变好）。
+
+**重试参数**：最多 2 次重试（共 3 次尝试），退避 2s、5s，用 `CacheKeepaliveDeps.clock`
+（生产是已 `unref()` 的 `systemClock`，测试注入 `FakeClock`）实现，不用裸 `setTimeout`。
+`CacheKeepaliveServiceImpl.sleep()`/`cancelPendingRetry()` 维护这个等待：`dispose()` 会立即
+`clearTimer` 并 resolve 掉任何挂起的重试等待，让 `runPing` 沿它自己的 `sameEpoch`/disposed
+检查路径收尾，不留下悬空定时器。
+
+**安全性（复用既有的 I-K8 `sameEpoch` 闸门，没有新增守卫）**：每次 HTTP 尝试返回之后、每次
+backoff 等待醒来之后，都先 `sameEpoch(pingEpoch)` 才能继续 —— 这一个闸门就同时挡住了真实
+请求抢占（`onRealRequest` 会 `windowEpoch += 1`）、显式 `invalidate()`、以及 `dispose()`
+（`sameEpoch` 内部先查 `this.disposed`）。任一不满足 ⇒ 直接 `return`，**不调用 `onUnproven`**
+（不计入熔断），和 §7.5 原有的「迟到结果」处理完全一致。
+
+**TTL 预算**：每次决定要不要发起下一次重试之前，都用 `this.clock.now()` 重新算一次剩余
+`window.aliveUntil - TTL_SAFETY_MARGIN_MS - now`；如果这个剩余小于下一次退避的等待时长，就
+放弃重试（**不是**放弃计数 —— 直接拿当前这次的结果走最终的 `onProvenHit`/`onUnproven` 路径，
+和「重试次数用尽」是同一条出口）。这保证整个重试序列不会把 ping 拖到缓存本来就该过期之后。
+
+**计数口径**：只有跑完整个重试序列（成功、遇到不可重试结果、重试次数用尽、或 TTL 预算不够）
+之后的**最后一次**结果才会调用 `onProvenHit`/`onUnproven`；`onUnproven` 的 `kind` 就是这最后
+一次尝试的 `PingOutcome.kind`。中途任何被 `sameEpoch` 挡掉的尝试完全不留痕迹（不计数，也不
+影响 `window`/`session`）。每一次实际发出的 HTTP 尝试都单独 `this.audit("ping-attempt", {
+attempt, outcomeKind })`；最终落地的 `KeepalivePingDiagnostics`（`lastPingDiagnostics`）新增
+了一个可选的 `attempts` 字段（跑了几次 HTTP 尝试才定案），`renderKeepaliveReportLines` 在这
+个字段存在时把它拼进 `last ping:` 那一行。
+
+**没有改的东西**：`ping-client.ts` 的 `PingOutcome` 分类、`sendKeepalivePing` 本身完全未动；
+`keepalive-state.ts` 的熔断阈值（`UNPROVEN_STREAK_LIMIT`/`UNPROVEN_TOTAL_LIMIT`）、`onUnproven`/
+`onProvenHit`/`invalidate` 这几个纯 reducer 的签名和语义也完全未动 —— 重试只是在
+`cache-keepalive.ts` 调用它们**之前**多包了一层「先自己重试几次、拿到最终结果再调 reducer」
+的循环，reducer 层看到的永远只是「一次 ping 的最终结果」。`window.pings`/预算记账也不受影响：
+一次带重试的 ping 序列仍然只消耗 `onPingStarted` 记的那一个预算单位（重试是同一次 ping 的
+延续，不是新的 ping）。
+
+测试：`tests/cache-ttl/keepalive-ping-retry.test.ts`（`FakeClock` 驱动：`network`→`proven-hit`
+两次尝试成功；三次 `network` 只计一次 unproven；`503→200`；`429→200`；`accepted-then-lost`
+和普通 4xx 不重试；抢占/`dispose()`/TTL 不足时不重试、不计数；`dispose()` 后无残留定时器）。

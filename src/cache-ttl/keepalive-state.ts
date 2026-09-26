@@ -947,6 +947,13 @@ export interface KeepalivePingDiagnostics {
   headerKeyDiff: string[];
   model: string;
   baseUrl: string;
+  /**
+   * Ping retry (user requirement 2026-09-26): how many HTTP attempts this ping made
+   * before settling on `outcomeKind` (1 when no retry was needed). Optional so
+   * existing literals (pre-retry callers/tests) stay valid without every one
+   * naming a value.
+   */
+  attempts?: number | undefined;
 }
 
 function formatTokenCount(n: number): string {
@@ -1304,8 +1311,9 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
   if (report.lastPingDiagnostics !== undefined) {
     const d = report.lastPingDiagnostics;
     const headerDiff = d.headerKeyDiff.length > 0 ? ` (filled: ${d.headerKeyDiff.join(",")})` : "";
+    const attemptsSuffix = d.attempts !== undefined ? ` · attempts=${d.attempts}` : "";
     lines.push(
-      `last ping: ${d.outcomeKind} @ ${d.at} · +${d.elapsedSinceCaptureMs}ms since capture · prefix ${d.prefixTokens}tok (${d.prefixSource}) · cache_read=${d.cacheReadInputTokens ?? "n/a"} cache_creation=${d.cacheCreationInputTokens ?? "n/a"} · headers: ${d.headerSource}${headerDiff} · model=${d.model} · baseUrl=${d.baseUrl}`,
+      `last ping: ${d.outcomeKind} @ ${d.at} · +${d.elapsedSinceCaptureMs}ms since capture · prefix ${d.prefixTokens}tok (${d.prefixSource}) · cache_read=${d.cacheReadInputTokens ?? "n/a"} cache_creation=${d.cacheCreationInputTokens ?? "n/a"} · headers: ${d.headerSource}${headerDiff} · model=${d.model} · baseUrl=${d.baseUrl}${attemptsSuffix}`,
     );
   }
   lines.push(
