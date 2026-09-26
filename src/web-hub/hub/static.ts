@@ -76,12 +76,54 @@ async function tryServe(root: string, rel: string, res: ServerResponse): Promise
   return true;
 }
 
-export async function serveStatic(root: string, urlPath: string, res: ServerResponse): Promise<boolean> {
+export async function serveStatic(
+  root: string,
+  urlPath: string,
+  res: ServerResponse,
+  opts?: { authMode?: "token" | "password" },
+): Promise<boolean> {
   const rel = safeRelativePath(urlPath);
   if (rel === undefined) return false;
+  if (rel === "index.html" && opts?.authMode !== undefined) return serveIndex(root, res, opts.authMode);
   if (rel.startsWith("assets/")) {
     const stripped = rel.slice("assets/".length);
     if (stripped.length > 0 && (await tryServe(root, stripped, res))) return true;
   }
   return tryServe(root, rel, res);
+}
+
+const AUTH_MODE_PLACEHOLDER = 'data-auth-mode="__AUTH_MODE__"';
+
+/**
+ * `serveStatic`'s `index.html` special case (plan §1.4.5): reads the file through the same
+ * containment-checked path as `tryServe`, then substitutes the single `data-auth-mode`
+ * placeholder for the literal auth mode. A template without the placeholder (e.g. this test
+ * suite's bare fixture) is served unchanged — the substitution is a no-op, not an error.
+ */
+export async function serveIndex(root: string, res: ServerResponse, authMode: "token" | "password"): Promise<boolean> {
+  const absRoot = resolve(root);
+  const target = resolve(absRoot, "index.html");
+  if (!within(absRoot, target)) return false;
+  let text: string;
+  try {
+    const [realRoot, realTarget] = await Promise.all([realpath(absRoot), realpath(target)]);
+    if (!within(realRoot, realTarget)) return false;
+    const st = await stat(realTarget);
+    if (!st.isFile() || st.size > MAX_STATIC_BYTES) return false;
+    text = await readFile(realTarget, "utf8");
+  } catch {
+    return false;
+  }
+  if (res.headersSent || res.destroyed) return true;
+  const body = text.includes(AUTH_MODE_PLACEHOLDER)
+    ? text.replace(AUTH_MODE_PLACEHOLDER, `data-auth-mode="${authMode}"`)
+    : text;
+  const data = Buffer.from(body, "utf8");
+  res.writeHead(200, {
+    "Content-Type": CONTENT_TYPES[".html"]!,
+    "Content-Length": data.length,
+    "Cache-Control": "no-cache",
+  });
+  res.end(data);
+  return true;
 }

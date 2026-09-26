@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createServer, request as httpRequest, type Server } from "node:http";
-import { buildContext, createLanTransport } from "../../../src/web-hub/hub/http.js";
+import { buildContext } from "../../../src/web-hub/hub/http.js";
 
 async function withServer(
   handler: Parameters<typeof createServer>[0],
@@ -64,21 +64,5 @@ describe('buildContext(req, "loopback") (plan §1.4.4)', () => {
       await close();
     }
     expect(captured).toMatchObject({ hostKey: `localhost:${port}`, externalOrigin: `http://localhost:${port}` });
-  });
-
-  it('kind:"lan" is a stub (LC, W2)', () => {
-    expect(() => buildContext({ headers: {}, socket: {} } as never, "lan")).toThrow("E_NOT_IMPLEMENTED:LC");
-  });
-});
-
-describe("createLanTransport (plan §2.3) — stub (LC, W2)", () => {
-  it("throws E_NOT_IMPLEMENTED:LC when constructed", () => {
-    expect(() =>
-      createLanTransport({
-        handleRequest: async () => {},
-        log: { info() {}, warn() {}, error() {} },
-        connGuard: { admit: () => undefined },
-      }),
-    ).toThrow("E_NOT_IMPLEMENTED:LC");
   });
 });
