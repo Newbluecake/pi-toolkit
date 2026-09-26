@@ -122,12 +122,23 @@ export interface HostsPort {
  * `enterLoginPending()`/`enterAuthed()` move this lease out of the
  * eligible-for-eviction `unauth` category (§6.3's class table) and are also
  * idempotent (a repeated call is a no-op).
+ *
+ * `leaveLoginPending()` (LC review fix, lan-plan.md §15.8 实施偏差记录) is the
+ * missing inverse: §6.3's class table has every *login-pending* request end
+ * (success, failure, 429, or an exception/timeout from the store or KDF)
+ * either promote to `authed` (`enterAuthed()`) or fall back to the
+ * evictable `unauth` category — there was previously no way to express the
+ * latter, so a socket that took a KDF admission slot and then failed to log
+ * in stayed `login-pending` (never evictable) for the rest of its
+ * connection lifetime. A no-op when the lease is already `authed`,
+ * `released`, or already `unauth` (idempotent, like the other two).
  */
 export interface ConnLease {
   readonly peerIp: string;
   readonly viaTrustedProxy: boolean;
   enterLoginPending(): void;
   enterAuthed(): void;
+  leaveLoginPending(): void;
   release(): void;
 }
 

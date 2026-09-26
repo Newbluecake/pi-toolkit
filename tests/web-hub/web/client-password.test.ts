@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createPasswordClient, LOGIN_TIMEOUT_MS, BUSY_RETRY_MAX } from "../../../src/web-hub/web/password-client.js";
+import {
+  createPasswordClient,
+  LOGIN_TIMEOUT_MS,
+  BUSY_RETRY_MAX,
+  CLOSE_PROBE_MAX,
+  CLOSE_PROBE_BACKOFF_MS,
+  BACKOFF_MIN_MS,
+} from "../../../src/web-hub/web/password-client.js";
 import { SILENCE_MS } from "../../../src/web-hub/web/contract.js";
 
 /**
@@ -201,14 +208,53 @@ describe("createPasswordClient: SSE lifecycle", () => {
     e.client.close();
   });
 
-  it("CLOSED (401 or 503 — indistinguishable) ⇒ onConn(auth) + onUnauthenticated, no auth-event reason claimed", async () => {
-    const e = env();
+  it("CLOSED + session probe 401 (genuinely signed out) ⇒ onConn(auth) + onUnauthenticated, no auth-event reason claimed", async () => {
+    const e = env({ fetch: async () => resp(401, { error: "E_AUTH" }) });
     await e.client.start();
+    await flush();
     FakeES.all[0]!.fail(true);
     await flush();
     expect(e.conns.at(-1)).toBe("auth");
     expect(e.unauthed).toEqual([1]);
     expect(e.authEvents).toEqual([]); // never fabricates a revoked/expired reason for a bare close
+    e.client.close();
+  });
+
+  it("CLOSED + session probe 200 (still signed in, e.g. hub restarted the SSE layer) ⇒ keeps the page, never shows the login form, reopens on the normal backoff", async () => {
+    const e = env({ fetch: async () => resp(200, { username: "alice", initialPasswordInUse: false }) });
+    await e.client.start();
+    await flush();
+    FakeES.all[0]!.fail(true);
+    await flush();
+    expect(e.unauthed).toEqual([]); // review fix (lan-plan.md §15.9 #8): 503-shaped CLOSED must not be treated as logout
+    expect(e.conns.at(-1)).not.toBe("auth");
+    expect(FakeES.all).toHaveLength(1); // not reopened yet — waiting on the normal reopen backoff
+    await e.c.advance(2_000);
+    expect(FakeES.all).toHaveLength(2); // reopened once the session was confirmed still valid
+    e.client.close();
+  });
+
+  it("CLOSED + session probe 503/network error ⇒ keeps current state (no login form, no auth signal) and re-probes up to CLOSE_PROBE_MAX times before falling back to a stream reopen", async () => {
+    const e = env({
+      fetch: async (url: string) => (url === "/api/session" ? resp(503, { error: "E_DB" }) : resp(200)),
+    });
+    await e.client.start();
+    await flush();
+    const sessionCallsBefore = e.calls.filter((c) => c.url === "/api/session").length;
+    FakeES.all[0]!.fail(true);
+    await flush();
+    for (let i = 0; i < CLOSE_PROBE_MAX - 1; i++) {
+      await e.c.advance(CLOSE_PROBE_BACKOFF_MS);
+    }
+    const sessionCallsAfter = e.calls.filter((c) => c.url === "/api/session").length;
+    // exactly CLOSE_PROBE_MAX probe attempts happened, never unbounded, and the page was never
+    // treated as signed out or shown any auth-mode change while probing.
+    expect(sessionCallsAfter - sessionCallsBefore).toBe(CLOSE_PROBE_MAX);
+    expect(e.unauthed).toEqual([]);
+    expect(e.conns.at(-1)).not.toBe("auth");
+    expect(FakeES.all).toHaveLength(1); // still no reopen yet — falls back to the ordinary reopen schedule next
+    await e.c.advance(BACKOFF_MIN_MS);
+    expect(FakeES.all).toHaveLength(2); // bounded: gives up re-probing and falls back to reopening the stream
     e.client.close();
   });
 

@@ -87,6 +87,10 @@ describe("types.test-d.ts (plan §11 typecheck contract)", () => {
     expectTypeOf<ConnLease["release"]>().parameters.toEqualTypeOf<[]>(); // no peerIp/category argument
     expectTypeOf<ConnLease>().toHaveProperty("enterLoginPending");
     expectTypeOf<ConnLease>().toHaveProperty("enterAuthed");
+    // LC review fix (lan-plan.md §15.8): the missing inverse of enterLoginPending() — every
+    // login-pending request must end by promoting to authed *or* falling back to evictable unauth.
+    expectTypeOf<ConnLease>().toHaveProperty("leaveLoginPending");
+    expectTypeOf<ConnLease["leaveLoginPending"]>().parameters.toEqualTypeOf<[]>();
   });
 
   // Review fix #9: request-level ports that may queue/run long enough to matter accept an

@@ -164,6 +164,9 @@ export function createConnGuard(
         enterAuthed: () => {
           if (records.get(seq) === rec) rec.category = "authed";
         },
+        leaveLoginPending: () => {
+          if (records.get(seq) === rec && rec.category === "login-pending") rec.category = "unauth";
+        },
         release: () => {
           if (released) return;
           released = true;

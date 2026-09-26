@@ -1,10 +1,28 @@
 /**
- * KDF port implementation (plan §5.1; `hub/kdf.ts`, S1-W2 LS 包): a thin async
- * wrapper over `node:crypto`'s scrypt for the single "run one KDF op" primitive
- * `KdfPort.run` — no concurrency pool here. §5.1's "并发 2、内存预算 64 MiB、
- * 排队由 §6.2 负责" describes `hub/kdf-admission.ts`'s `KdfAdmissionPort` (LC's
- * package, W2, admits/queues *before* ever calling `run`); this module is the
- * thing that eventually gets called once a caller already holds that slot.
+ * KDF port implementation (plan §5.1; `hub/kdf.ts`, S1-W2 LS 包 / LC review-fix
+ * 包 B, lan-plan.md §15.9 #2): an async wrapper over `node:crypto`'s scrypt
+ * for `KdfPort.run`, now *with* §5.1's "并发 2，内存预算 64 MiB" pool — the pool
+ * lives here (not in `hub/kdf-admission.ts`) so it applies to *every* caller
+ * of `KdfPort.run`, regardless of how (or whether) that caller went through
+ * §6.2's fair-scheduling admission queue first. `run()` acquires one of
+ * `KDF_POOL_MAX_CONCURRENT` (2) semaphore slots — queueing internally when
+ * both are taken — before ever calling `node:crypto`'s `scrypt`, and always
+ * releases the slot in a `finally` (a thrown/aborted run still frees it).
+ * Memory: every *validated* stored record's `maxmem` is ≤ 32 MiB
+ * (`validateKdfParams`'s own `128·n·r ≤ 32 MiB` bound below), so concurrency
+ * 2 alone keeps two stored-record KDF runs within the 64 MiB budget;
+ * `defaultKdfParams()`'s *new-write* shape (≈ 33 MiB, used only by the rare
+ * admin `setPassword` path, never by the LAN login/attack surface) means two
+ * concurrent password changes can reach ≈ 66 MiB — accepted (lan-plan.md
+ * §15.9 #2), not enforced by a separate byte-accounting admission layered on
+ * top of the concurrency limit.
+ *
+ * `hub/kdf-admission.ts`'s `KdfAdmissionPort.acquire()` remains §6.2's own
+ * concern (rate/fairness *admission* into a login attempt, before this pool
+ * is ever touched) and its `release()` is correctly a no-op — it already
+ * hands the waiter its result at grant time, before the caller has even
+ * called `kdf.run()`; there is nothing left for it to release once this
+ * module's own semaphore is what actually gates concurrent scrypt calls.
  *
  * Also exports `validateKdfParams` (§5.1 "读取校验" — every field read back
  * from storage must be re-validated before it's fed to `scrypt`, since a
@@ -93,41 +111,118 @@ export function validateKdfParams(
 }
 
 // ---------------------------------------------------------------------------
+// §5.1 "池" — concurrency=2 semaphore (LC review-fix, lan-plan.md §15.9 #2)
+// ---------------------------------------------------------------------------
+
+export const KDF_POOL_MAX_CONCURRENT = 2;
+
+interface Waiter {
+  resolve(release: () => void): void;
+  reject(err: Error): void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+/** A tiny counting semaphore: `acquire()` resolves with a `release()` callback once a slot is
+ * free (queueing internally otherwise); `release()` is idempotent. Exported so it can be unit
+ * tested in isolation (deterministic, no real `scrypt` calls) — `createKdf()` below is the only
+ * production caller. */
+export function createKdfSemaphore(maxConcurrent: number): { acquire(signal?: AbortSignal): Promise<() => void> } {
+  let active = 0;
+  const waiters: Waiter[] = [];
+
+  function handOff(): void {
+    const next = waiters.shift();
+    if (next === undefined) {
+      active--;
+      return;
+    }
+    if (next.signal !== undefined && next.onAbort !== undefined) {
+      next.signal.removeEventListener("abort", next.onAbort);
+    }
+    // Slot count is unchanged: it moves directly from the releasing holder to `next`.
+    next.resolve(makeRelease());
+  }
+
+  function makeRelease(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      handOff();
+    };
+  }
+
+  function acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted === true) return Promise.reject(toAbortError(signal));
+    if (active < maxConcurrent) {
+      active++;
+      return Promise.resolve(makeRelease());
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: Waiter = { resolve, reject };
+      if (signal !== undefined) {
+        waiter.signal = signal;
+        waiter.onAbort = () => {
+          const i = waiters.indexOf(waiter);
+          if (i >= 0) waiters.splice(i, 1);
+          reject(toAbortError(signal));
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      waiters.push(waiter);
+    });
+  }
+
+  return { acquire };
+}
+
+function runScryptOnce(password: string, params: KdfParams, opts: PortOptions | undefined): Promise<Uint8Array> {
+  return new Promise<Uint8Array>((resolve, reject) => {
+    if (opts?.signal?.aborted === true) {
+      reject(toAbortError(opts.signal));
+      return;
+    }
+    let settled = false;
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      reject(toAbortError(opts?.signal));
+    };
+    opts?.signal?.addEventListener("abort", onAbort, { once: true });
+    scryptAsync(
+      password,
+      Buffer.from(params.salt),
+      params.keyLen,
+      { N: params.n, r: params.r, p: params.p, maxmem: maxmemFor(params.n, params.r) },
+      (err, derivedKey) => {
+        opts?.signal?.removeEventListener("abort", onAbort);
+        if (settled) return;
+        settled = true;
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(new Uint8Array(derivedKey.buffer, derivedKey.byteOffset, derivedKey.byteLength));
+      },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
 // §5.1 KdfPort
 // ---------------------------------------------------------------------------
 
-export function createKdf(): KdfPort {
+export function createKdf(opts: { maxConcurrent?: number } = {}): KdfPort {
+  const pool = createKdfSemaphore(opts.maxConcurrent ?? KDF_POOL_MAX_CONCURRENT);
   return {
-    run(password: string, params: KdfParams, opts?: PortOptions): Promise<Uint8Array> {
-      return new Promise<Uint8Array>((resolve, reject) => {
-        if (opts?.signal?.aborted === true) {
-          reject(toAbortError(opts.signal));
-          return;
-        }
-        let settled = false;
-        const onAbort = (): void => {
-          if (settled) return;
-          settled = true;
-          reject(toAbortError(opts?.signal));
-        };
-        opts?.signal?.addEventListener("abort", onAbort, { once: true });
-        scryptAsync(
-          password,
-          Buffer.from(params.salt),
-          params.keyLen,
-          { N: params.n, r: params.r, p: params.p, maxmem: maxmemFor(params.n, params.r) },
-          (err, derivedKey) => {
-            opts?.signal?.removeEventListener("abort", onAbort);
-            if (settled) return;
-            settled = true;
-            if (err) {
-              reject(err);
-              return;
-            }
-            resolve(new Uint8Array(derivedKey.buffer, derivedKey.byteOffset, derivedKey.byteLength));
-          },
-        );
-      });
+    async run(password: string, params: KdfParams, callOpts?: PortOptions): Promise<Uint8Array> {
+      const release = await pool.acquire(callOpts?.signal);
+      try {
+        return await runScryptOnce(password, params, callOpts);
+      } finally {
+        release();
+      }
     },
   };
 }

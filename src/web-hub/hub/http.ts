@@ -51,7 +51,7 @@ import type { FleetRowWire } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
 import { createConnGuard } from "./conn-guard.js";
-import { formatLanCookie, hashSid, readLanCookie, runLanLogin } from "./lan-auth.js";
+import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import type {
   AgentView,
@@ -100,6 +100,11 @@ const LAN_SSE_GLOBAL_CAP = 32;
 const LAN_SSE_PER_SID_CAP = 8;
 const LAN_RECOMPUTE_THROTTLE_MS = 5_000;
 const LAN_TICK_MS = 60_000;
+// §4.2 "SSE 到期复核" (LC review fix, lan-plan.md §15.9 #3): a periodic (≤60s) recheck of every
+// LAN SSE connection's session, independent of the ping-only keepalive `sse.ts` already does.
+const LAN_SSE_EXPIRY_TICK_MS = 55_000;
+const LAN_SSE_EXPIRY_BATCH_CAP = 32;
+const LAN_SSE_EXPIRY_BATCH_DEADLINE_MS = 20_000;
 
 function toAbortError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
@@ -322,6 +327,9 @@ function buildLanContext(
   const resolution = resolveProxyLocal(peerIp, req.headers, lan.trust);
   if (resolution.viaTrustedProxy && resolution.warnings.includes("proto-invalid")) {
     return { reject: 400, code: "E_BAD_REQUEST", detail: "proxy-proto" };
+  }
+  if (resolution.viaTrustedProxy && resolution.warnings.includes("host-multi")) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "proxy-host" };
   }
   const hostRaw = resolution.hostHeader;
   if (hostRaw !== undefined && hostRaw.includes(",")) {
@@ -715,6 +723,67 @@ function releaseClientInflight(rt: LanRuntime, ip: string): void {
   else rt.clientInflight.set(ip, c);
 }
 
+/** `lan-store.ts`'s concrete `LanStore` exposes an unfrozen `touchSessionReserved` for exactly
+ * this tick (its own doc comment says so), but `LanFrontendDeps.store` is typed as the frozen
+ * `LanStorePort` (§1.4.1/§4, W1) which has no such method — widening it is a signature change
+ * out of this package's review-fix authorization (only `ConnLease` got one, lan-plan.md §15.9
+ * #1). Duck-type it instead: use the reserved channel when the concrete store happens to expose
+ * it, otherwise fall back to the plain (frozen) `touchSession` — either way the validation logic
+ * below is identical. */
+function touchForExpiryRecheck(
+  store: LanFrontendDeps["store"],
+  sidHash: string,
+  now: number,
+): Promise<LanSessionRecord | undefined> {
+  const reserved = (store as { touchSessionReserved?: LanFrontendDeps["store"]["touchSession"] }).touchSessionReserved;
+  return typeof reserved === "function" ? reserved.call(store, sidHash, now) : store.touchSession(sidHash, now);
+}
+
+/** §4.2 "SSE 到期复核" (LC review fix, lan-plan.md §15.9 #3): a 55s tick, independent of `sse.ts`'s
+ * ping-only keepalive, that re-validates every authenticated LAN SSE connection's session —
+ * revoked (`deleteSession`)/rotated (`setPassword`'s epoch bump)/expired sessions must not leave
+ * an SSE stream open past this cadence even if nothing else ever touches them again. Per §4.2:
+ * processes at most `LAN_SSE_EXPIRY_BATCH_CAP` (32) clients per tick, serially, deferring any
+ * remainder to the next tick (backlog only grows if `LAN_SSE_EXPIRY_TICK_MS` is somehow shorter
+ * than 32 sequential IPC round-trips, which never happens in practice); a store rejection (`E_DB`
+ * / timeout) *keeps* the connection open and only logs — "can't verify" is never treated as
+ * "revoke". */
+async function recheckLanSseExpiry(rt: LanRuntime): Promise<void> {
+  const clients = rt.lanSse
+    .list()
+    .filter((c): c is SseClient & { auth: NonNullable<SseClient["auth"]> } => c.auth !== undefined);
+  if (clients.length === 0) return;
+  const batch = clients.slice(0, LAN_SSE_EXPIRY_BATCH_CAP);
+  if (clients.length > batch.length) {
+    rt.log.warn("web-hub lan http: sse expiry recheck backlog, deferring remainder to next tick", {
+      pending: clients.length - batch.length,
+    });
+  }
+  const deadline = rt.now() + LAN_SSE_EXPIRY_BATCH_DEADLINE_MS;
+  for (const client of batch) {
+    if (rt.now() > deadline) {
+      rt.log.warn("web-hub lan http: sse expiry recheck batch deadline exceeded, deferring remainder", {});
+      break;
+    }
+    const auth = client.auth;
+    let rec: LanSessionRecord | undefined;
+    try {
+      rec = await touchForExpiryRecheck(rt.lan.store, auth.sidHash, rt.now());
+    } catch (err) {
+      rt.log.error("web-hub lan http: sse expiry recheck touchSession failed, keeping connection", {
+        error: String(err),
+      });
+      continue;
+    }
+    const expired =
+      rec === undefined ||
+      rec.epoch !== auth.epoch ||
+      rec.boundOrigin !== auth.boundOrigin ||
+      rt.now() >= Math.min(rec.expiresAt, rec.absoluteExpiresAt);
+    if (expired) rt.lanSse.revoke((c) => c === client, "expired");
+  }
+}
+
 interface LanSessionResult {
   userId: number;
   epoch: number;
@@ -847,29 +916,56 @@ async function handleLanRequestInner(
     if (!csrfOkLan(req, ctx)) throw new HttpError(403, "E_CSRF");
     if (path === "/api/login") {
       const body = await readJson(req, LAN_LOGIN_BODY_BYTES);
-      const outcome = await runLanLogin(
-        ctx,
-        body,
-        { store: rt.lan.store, kdf: rt.lan.kdf, limiter: rt.lan.limiter, admission: rt.lan.admission },
-        rt.now(),
-        { onAdmitted: () => lease.enterLoginPending() },
-      );
+      let outcome: LanLoginOutcome;
+      try {
+        outcome = await runLanLogin(
+          ctx,
+          body,
+          {
+            store: rt.lan.store,
+            kdf: rt.lan.kdf,
+            limiter: rt.lan.limiter,
+            admission: rt.lan.admission,
+            onCorruptKdfParams: (username, reason) =>
+              rt.log.error("web-hub lan http: corrupt kdf params (db-invalid:kdf)", { username, reason }),
+          },
+          rt.now(),
+          { onAdmitted: () => lease.enterLoginPending() },
+        );
+      } catch (err) {
+        // §6.3's class table (review fix, lan-plan.md §15.9 #1): every login-pending request must
+        // end by promoting to `authed` or falling back to the evictable `unauth` category — a
+        // store/KDF exception (e.g. a db timeout) is a terminal path too, not just 200/401/429.
+        lease.leaveLoginPending();
+        throw err;
+      }
       if (outcome.status === 200) {
         lease.enterAuthed();
         sendJson(
           res,
           200,
-          { ok: true, initialPasswordInUse: outcome.initialPasswordInUse },
+          // plan §10's wire field is `initialPassword` (review fix, lan-plan.md §15.9 #5) — this
+          // handler previously sent `initialPasswordInUse`, which the frontend never reads.
+          { ok: true, initialPassword: outcome.initialPasswordInUse },
           { "Set-Cookie": formatLanCookie(outcome.cookie, { secure: ctx.scheme === "https" }) },
         );
       } else if (outcome.status === 429) {
+        lease.leaveLoginPending();
         sendJson(
           res,
           429,
-          { error: "E_RATE", ...(outcome.saturated === true ? { saturated: true } : {}) },
+          {
+            // review fix (lan-plan.md §15.9 #4): only the KDF fair-scheduling admission queue (safe
+            // to auto-retry) and the saturation sub-case (§6.2's own literal wire shape) get
+            // `E_RATE`; an ordinary per-IP backoff lockout gets the new `E_LOCKED` so the frontend's
+            // countdown-without-auto-retry branch (§10) is actually reachable.
+            error: outcome.kind === "admission" || outcome.saturated === true ? "E_RATE" : "E_LOCKED",
+            ...(outcome.saturated === true ? { saturated: true } : {}),
+          },
           { "Retry-After": String(Math.ceil(outcome.retryAfterMs / 1000)) },
         );
       } else {
+        lease.leaveLoginPending();
         sendError(res, 401, "E_AUTH");
       }
       return;
@@ -1069,6 +1165,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         handle = await transport.bind(lan.cfg.port, { ...first, gen }, lan.scope.signal);
         status = buildLanStatus(lan.cfg, handle.current(), handle.port);
         lan.scope.timer(() => recompute(true), LAN_TICK_MS, true);
+        lan.scope.timer(
+          () => {
+            void recheckLanSseExpiry(rt).catch((err: unknown) => {
+              rt.log.error("web-hub lan http: sse expiry recheck tick failed", { error: String(err) });
+            });
+          },
+          LAN_SSE_EXPIRY_TICK_MS,
+          true,
+        );
         return status;
       },
       status(): LanStatus {
