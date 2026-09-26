@@ -226,3 +226,15 @@ describe("wireWebHub — url()", () => {
     expect(control.url()).toEqual({ hint: expect.any(String) });
   });
 });
+
+describe("statusLineText colours (live marker green)", () => {
+  it("plain without a theme; label dim + state colour with one", async () => {
+    const { statusLineText } = await import("../../../src/web-hub/agent/index.js");
+    const theme = { fg: (c: string, t: string) => `<${c}>${t}</>` };
+    expect(statusLineText({ state: "live" } as never)).toBe("web ●");
+    expect(statusLineText({ state: "live" } as never, theme)).toBe("<dim>web</> <success>●</>");
+    expect(statusLineText({ state: "connecting" } as never, theme)).toBe("<dim>web</> <dim>○</>");
+    expect(statusLineText({ state: "backoff" } as never, theme)).toBe("<dim>web</> <error>✗</>");
+    expect(statusLineText({ state: "off" } as never, theme)).toBeUndefined();
+  });
+});

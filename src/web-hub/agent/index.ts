@@ -208,7 +208,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       c.send(buildBranchReply(rid, x, maxBytes));
     },
     onStateChange: (v) => {
-      if (attached) setStatusLine(statusLineText(v));
+      if (attached) setStatusLine(statusLineText(v, readStatusTheme(ctx)));
     },
   };
 
@@ -271,7 +271,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     c.attach(binding, sessionInfo(x, sessionReason));
     publishStatus();
     onTick();
-    setStatusLine(statusLineText(c.status()));
+    setStatusLine(statusLineText(c.status(), readStatusTheme(x)));
   };
 
   const startTick = (): void => {
@@ -404,21 +404,37 @@ function branchCost(ctx: ExtensionContext): number {
   return total;
 }
 
-export function statusLineText(v: WebHubStatusView): string | undefined {
+/** The subset of pi's Theme the status line needs; structural so tests need no pi UI. */
+export interface WebHubStatusTheme {
+  fg(color: string, text: string): string;
+}
+
+/**
+ * HUD status token. Plain text without a theme; with one, the label is dim and
+ * the marker carries the state colour (live ● green, connecting ○ dim, ✗ red).
+ */
+export function statusLineText(v: WebHubStatusView, theme?: WebHubStatusTheme): string | undefined {
+  const paint = (color: string, marker: string): string =>
+    theme === undefined ? `web ${marker}` : `${theme.fg("dim", "web")} ${theme.fg(color, marker)}`;
   switch (v.state) {
     case "live":
-      return "web ●";
+      return paint("success", "●");
     case "connecting":
-      return "web ○";
+      return paint("dim", "○");
     case "loader":
-      return "web ✗loader";
+      return paint("error", "✗loader");
     case "proto":
-      return "web ✗proto";
+      return paint("error", "✗proto");
     case "backoff":
-      return "web ✗";
+      return paint("error", "✗");
     case "off":
       return undefined;
   }
+}
+
+function readStatusTheme(c: unknown): WebHubStatusTheme | undefined {
+  const theme = (c as { ui?: { theme?: unknown } } | undefined)?.ui?.theme;
+  return typeof (theme as WebHubStatusTheme | undefined)?.fg === "function" ? (theme as WebHubStatusTheme) : undefined;
 }
 
 function hubUrl(paths: HubPaths, conn: HubConnection | undefined): { url: string } | { hint: string } {
