@@ -33,6 +33,16 @@ export interface ReplayIndex {
   readonly scope: ReplayScope;
   /** `chainDigestBefore` is the *live* run's current chain digest (before this submission) — only consulted when `scope==="chain"`. */
   lookup(taskKey: TaskKey, chainDigestBefore: string, occurrence: number): JournalEntry | undefined;
+  /**
+   * replay-verify plan D4.2: the deduplicated (post §6.5 "take latest
+   * completedAt" collapse) `isolation:"worktree"` entries that could still
+   * ever be replayed — `state:"committed"`, not truncated, within
+   * `opts.replayTtlMs` of `opts.now` (same TTL rule `decideReplay` itself
+   * applies at lookup time). Consulted once, before boot, by
+   * `orchestrator.ts#buildJournalConfig` to decide which branches to probe​​
+   * — never touched again once the run starts.
+   */
+  isolatedCandidates(opts: { readonly now: Millis; readonly replayTtlMs?: Millis }): readonly JournalEntry[];
   readonly stats: ReplayIndexStats;
 }
 
@@ -69,6 +79,18 @@ export function buildReplayIndex(
       const lookupKey = scope === "content" ? taskKey : nextChainDigest(chainDigestBefore, taskKey);
       return map.get(`${lookupKey}:${occurrence}`);
     },
+    isolatedCandidates(opts) {
+      const ttl = opts.replayTtlMs ?? DEFAULT_REPLAY_TTL_MS;
+      const out: JournalEntry[] = [];
+      for (const entry of map.values()) {
+        if (entry.isolation !== "worktree") continue;
+        if (entry.worktree?.state !== "committed") continue;
+        if (entry.truncated === true) continue;
+        if (ttl > 0 && opts.now - entry.completedAt > ttl) continue;
+        out.push(entry);
+      }
+      return out;
+    },
     stats: { loadedEntries: entries.length, corruptLines, scopeMismatch },
   };
 }
@@ -88,7 +110,9 @@ export type ReplayDecision =
         /** workflow-experts D12: this call itself passed `opts.experts` — never replayed, never journaled. */
         | "experts"
         /** workflow-experts D13-D15: submitted after some earlier call's experts resolved successfully this run — the whole rest of the chain is live. */
-        | "chain_tainted";
+        | "chain_tainted"
+        /** replay-verify plan D5: a `committed` isolated entry whose recorded branch did not verify (missing, or tip mismatch) against the load-time snapshot probe — never a `clean` entry (D3.1: clean isn't checked at all). */
+        | "worktree_unverified";
     };
 
 export interface DecideReplayInput {
@@ -129,6 +153,21 @@ export interface DecideReplayInput {
    * *replayed* run re-submitting the same isolated call).
    */
   readonly isolation?: boolean;
+  /**
+   * replay-verify plan D5/D9: `"verify"` when `workflow.isolationReplay` is
+   * on for this run (absent/anything else means `off`, the legacy RP7
+   * behavior below). Gates two things: whether an isolation call itself may
+   * proceed past the pre-lookup isolation check at all, and whether a
+   * looked-up `committed` entry still needs `isolationVerified` to pass.
+   */
+  readonly isolationReplay?: "verify";
+  /**
+   * replay-verify plan D6.2: `true` when `entry`'s digest is in this run's
+   * load-time-snapshot verified set (`journal.isolationReplay.verified`).
+   * Only ever consulted for a `committed` isolated entry — `clean` entries
+   * are never checked (D3.1) and skip straight to `hit`.
+   */
+  readonly isolationVerified?: (entry: JournalEntry) => boolean;
 }
 
 export const DEFAULT_REPLAY_TTL_MS: Millis = 7 * 24 * 60 * 60 * 1000;
@@ -152,7 +191,13 @@ export function decideReplay(input: DecideReplayInput): ReplayDecision {
   // below (which only fires for an *already-written* entry that happens to
   // carry `isolation:"worktree"`, kept for entries journaled before this
   // input field existed).
-  if (input.isolation === true) return { kind: "skip", reason: "isolation_worktree" };
+  // replay-verify plan D5: in `verify` mode this call itself is allowed past
+  // this pre-lookup gate — it may still hit a `committed`/`clean` entry
+  // that verified at load time (checked below, after `index.lookup`). In
+  // `off` mode (the only mode before this plan) the gate is unchanged.
+  if (input.isolation === true && input.isolationReplay !== "verify") {
+    return { kind: "skip", reason: "isolation_worktree" };
+  }
   // M3.6 Blocker fix (§6.3 E2): fail-closed when this call has no reliable
   // `agentTypeConfigHash` — never even look at the index. This is checked
   // *before* `index.lookup` on purpose: a name-only fallback key could
@@ -160,14 +205,33 @@ export function decideReplay(input: DecideReplayInput): ReplayDecision {
   if (input.configHashAvailable === false) return { kind: "skip", reason: "config_hash_unavailable" };
   const entry = input.index.lookup(input.taskKey, input.chainDigestBefore, input.occurrence);
   if (!entry) return { kind: "miss" };
-  // RP7: isolation:"worktree" entries are never replayed, regardless of TTL.
-  if (entry.isolation === "worktree") return { kind: "skip", reason: "isolation_worktree" };
+  if (entry.isolation === "worktree") {
+    // RP7 (legacy shape): an entry journaled before this plan (or written
+    // under `off`) never carries `worktree` — unconditionally skip, exactly
+    // like the pre-plan behavior.
+    if (entry.worktree === undefined) return { kind: "skip", reason: "isolation_worktree" };
+    // Defensive symmetry with the pre-lookup gate above: `off` mode never
+    // reaches here in practice (a call with `isolation:true` already
+    // returned above, and a non-isolated call's taskKey can never match an
+    // isolated entry's key — `isolation` participates in `taskKeyOf`), but a
+    // hand-crafted `DecideReplayInput` (or a future caller shape) must still
+    // fail closed rather than silently trust `entry.worktree`.
+    if (input.isolationReplay !== "verify") return { kind: "skip", reason: "isolation_worktree" };
+  }
   // JS6: a value that had to be truncated on write is never a complete
   // answer — replaying it would silently hand the script a mutilated
   // result instead of routing it back to live.
   if (entry.truncated === true) return { kind: "skip", reason: "truncated" };
   const ttl = input.replayTtlMs ?? DEFAULT_REPLAY_TTL_MS;
   if (ttl > 0 && input.now - entry.completedAt > ttl) return { kind: "skip", reason: "expired" };
+  // replay-verify plan D3.1/D5: a `committed` entry additionally needs its
+  // own branch to have verified against the load-time snapshot (user
+  // confirmation 2: exact sha match only); `clean` needs no such check —
+  // it never touched anything a ref could point at, same non-checking
+  // semantics as an ordinary (non-isolated) call's replay.
+  if (entry.worktree?.state === "committed" && !(input.isolationVerified?.(entry) ?? false)) {
+    return { kind: "skip", reason: "worktree_unverified" };
+  }
   // RP3/RP4/RP8 are already enforced upstream (journal.ts only ever produces
   // `status:"completed"`, digest-verified, `v:1` entries into the index) —
   // reaching here means every remaining precondition holds.

@@ -157,6 +157,7 @@ import { createWorkerHost } from "./workflow/lifecycle.js";
 import { createOrchestrator, type Orchestrator } from "./workflow/orchestrator.js";
 import { buildWorkflowRunBudget } from "./workflow/run-budget.js";
 import { createWorkflowChildSpawner } from "./workflow/spawner-adapter.js";
+import { parseForEachRef } from "./workflow/isolation-verify.js";
 import { createBackgroundWorkflows, type BackgroundWorkflows } from "./workflow/background.js";
 import { createWorkflowNoticeSink, redeliverPendingWorkflowNotices } from "./adapters/workflow-notice.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
@@ -2377,6 +2378,33 @@ export function buildSessionStack(
     // at stack-build time) so a `/reload` that flips `worktree.enabled`
     // takes effect for the next agent({isolation}) call immediately.
     worktreeAvailable: () => settings.worktree.enabled,
+    // replay-verify plan D9: same freshness convention — a `/reload` that
+    // flips `workflow.isolationReplay` only takes effect for the NEXT run's
+    // own `buildJournalConfig` (pinned once per run), not a run already live.
+    isolationReplayMode: () => settings.workflow.isolationReplay,
+    // D4.1: the cwd H2 falls back to when a request carries no explicit
+    // `cwd` (`worktree.ts`'s `resolve(spec.cwd ?? request.cwd ?? process.cwd())`)
+    // — pinned once per run by `buildJournalConfig`, read here fresh each time.
+    isolationCwd: () => process.cwd(),
+    // D4.2/D4.4: a single bounded `git for-each-ref` over already
+    // regex-validated `pi-agent-*` branch names — the AbortSignal comes from
+    // `runBoundedProbe`'s own timer (workflow/isolation-verify.ts), so this
+    // adapter only needs to forward it into `pi.exec`'s own cancellation.
+    probeAgentBranches: async (branches, opts) => {
+      try {
+        const result = await pi.exec(
+          "git",
+          ["for-each-ref", "--format=%(refname) %(objectname)", ...branches.map((b) => `refs/heads/${b}`)],
+          { cwd: opts.cwd, timeout: opts.timeoutMs, signal: opts.signal },
+        );
+        if (result.code !== 0 || result.killed) {
+          return { ok: false, error: result.stderr.trim() || `git for-each-ref exited ${result.code}` };
+        }
+        return { ok: true, tips: parseForEachRef(result.stdout, new Set(branches.map((b) => `refs/heads/${b}`))) };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
   });
   const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");
   /**
@@ -2421,6 +2449,9 @@ export function buildSessionStack(
       },
       parentRunId: workflowId,
       journalRootDir: workflowJournalRootDir,
+      // replay-verify plan D4.3: `min(worktree.gitTimeoutMs, 5_000)`, kept
+      // decoupled from orchestrator.ts (WI2 — it only sees a plain number).
+      isolationVerifyTimeoutMs: Math.min(settings.worktree.gitTimeoutMs, 5_000),
       onDeadlineNotice: sendWorkflowDeadlineNotice,
       emit: (channel, payload) => {
         pi.events.emit(channel, payload);

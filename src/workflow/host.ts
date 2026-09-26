@@ -6,14 +6,16 @@ import { deriveChildBudget } from "./budget.js";
 import { snapshotAgentOpts, validateAgentOpts, type OptsDefect } from "./agent-opts.js";
 import { createWorkflowExpertScope, resolveWorkflowExperts, type WorkflowExpertResolver } from "./expert-scope.js";
 import { createCallRegistry, type CallRegistry } from "./call-registry.js";
-import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf, type JournalStore } from "./journal.js";
+import { buildEntry, CHAIN_SEED, nextChainDigest, sha256Hex, taskKeyOf, type JournalStore } from "./journal.js";
 import { decideReplay, type ReplayIndex } from "./replay.js";
+import { recheckBranches, type ProbeAgentBranchesFn } from "./isolation-verify.js";
 import type {
   CallId,
   ChildWorktreeInfo,
   HostAckEnvelope,
   HostCallEnvelope,
   HostSettleEnvelope,
+  JournalEntry,
   OrphanChildSummary,
   ReplayScope,
   TaskKey,
@@ -102,6 +104,14 @@ export interface ChildSpawner {
      * (never sent as `undefined`).
      */
     isolation?: "worktree";
+    /**
+     * replay-verify plan D4.1: pinned once per run (`isolationCwd`) and
+     * threaded verbatim into the H2 worktree extension's own resolution
+     * point — set only for an isolated call while `verify` mode is on;
+     * absent for every other call and for `off` mode (byte-identical spawn
+     * request, D9's off-mode guarantee).
+     */
+    cwd?: string;
   }): Promise<ChildSpawnResult | ChildSpawnError>;
   abort(runId: RunId, cause?: string): Promise<boolean>;
   waitAll(opts: { runIds: RunId[] }): Promise<{ settled: ChildOutcome[]; pending: RunId[] }>;
@@ -162,6 +172,33 @@ export interface ChildSpawner {
    * by `handleAgent` exactly like an immediate `{ state: "none" }`.
    */
   awaitWorktree?(runId: RunId, opts: { horizon: "settle" | "late"; capMs?: Millis }): Promise<ChildWorktreeInfo>;
+  /**
+   * replay-verify plan D4/D9: `stack.ts` wires this to
+   * `() => settings.workflow.isolationReplay`, read fresh every call (a
+   * `/reload` that flips it takes effect for the next run's
+   * `buildJournalConfig`, not this one — the mode is pinned once at load
+   * time, matching `isolationCwd`'s own per-run pinning). Absent — an
+   * older/test `ChildSpawner` — defaults to `"off"` (fail-closed: no probe,
+   * legacy RP7 behavior).
+   */
+  isolationReplayMode?(): "verify" | "off";
+  /**
+   * replay-verify plan D4.1: the cwd H2 would fall back to for THIS run
+   * (`() => process.cwd()` in production) — read exactly once, at
+   * `buildJournalConfig` time, and threaded through as the pinned
+   * `isolationReplay.cwd` for the whole run's probe/spawn-cwd/recheck.
+   * Absent falls back to `process.cwd()` directly.
+   */
+  isolationCwd?(): string;
+  /**
+   * replay-verify plan D4.2/D4.4: a single bounded `git for-each-ref` over
+   * `branches` (already regex-validated `pi-agent-<safe>` names) —
+   * `stack.ts` wires this to `pi.exec("git", ["for-each-ref", ...])`. Absent
+   * — an older/test `ChildSpawner` — disables both the load-time probe and
+   * the terminal recheck (fail-closed to live/unverified, never to a wrong
+   * hit).
+   */
+  probeAgentBranches?: ProbeAgentBranchesFn;
 }
 
 export type GateRunner = (
@@ -254,6 +291,24 @@ export interface JournalRunConfig {
    * and host.ts share one mutable cell without an extra indirection layer.
    */
   readonly deterministic: { current: boolean };
+  /**
+   * replay-verify plan D4/D9: present only when `workflow.isolationReplay`
+   * resolved to `"verify"` for this run (built once by
+   * `orchestrator.ts#buildJournalConfig`, before boot). Its absence is what
+   * `decideReplay`/`handleAgent` treat as `off` — there is no separate
+   * `mode:"off"` variant of this shape.
+   */
+  readonly isolationReplay?: {
+    readonly mode: "verify";
+    /** D4.1: the cwd pinned for this run's spawn requests/probe/recheck. */
+    readonly cwd: string;
+    /** D4.2: entry digests that verified against the load-time snapshot probe. */
+    readonly verified: ReadonlySet<string>;
+    /** D6.2: this run's unique fold seed — `sha256Hex(nonce:key:occurrence)` is `isoId`, so two runs never coincidentally mint the same one. */
+    readonly nonce: string;
+    /** D4.2: the load-time probe's own counters, fixed once before boot. */
+    readonly stats: { probed: number; verified: number; unverified: number; probeError?: string };
+  };
 }
 
 export interface HostCallHandlerDeps {
@@ -327,6 +382,18 @@ export interface HostCallHandler {
   stopOwned(cause: string, graceMs: Millis): Promise<{ orphanChildren: readonly OrphanChildSummary[] }>;
   /** M3.5 JS4: a single bounded best-effort flush of this run's `journal` (no-op if none configured). Intended to be called once, ahead of the workflow's terminal decision (orchestrator.ts). */
   flushJournal(deadlineMs: Millis): Promise<{ written: number; pending: number } | undefined>;
+  /**
+   * replay-verify plan D4.4: the terminal, diagnostic-only recheck — for
+   * every `source:"replay"` child whose journaled disposition was
+   * `committed`, re-probes its branch and annotates `WorkflowChildSummary.
+   * replayStale` ("gone"/"moved") on a mismatch. Never throws, never
+   * changes any settle a script already received; a no-op when no journal
+   * was configured, `isolationReplay` was never armed, there is no
+   * `probeAgentBranches` port, or there were zero committed replay hits
+   * this run (zero git calls in every one of those cases). Intended to run
+   * *concurrently* with `flushJournal` (orchestrator.ts), never gating it.
+   */
+  recheckReplayedIsolation(deadlineMs: Millis): Promise<void>;
 }
 
 const DEFAULT_AGENT_TYPE = "general-purpose";
@@ -356,6 +423,35 @@ function errMsg(e: unknown): string {
 
 /** workflow-worktree plan D5: fallback when `WorkflowRunBudget.worktreeSettleMaxMs` is absent (an older/test budget object) — matches `DEFAULT_BUDGET.reapMs` (5s, core/deadline.ts) + 1s. */
 const DEFAULT_WORKTREE_SETTLE_MAX_MS: Millis = 6_000;
+
+/** replay-verify plan D2: same shape guard journal.ts's `parseEntry` enforces at read time — checked again here at write time so a malformed branch/commit (a `ChildSpawner` contract violation, or a future H3 change this plan didn't anticipate) degrades to "not written" instead of writing a line that would corrupt on the very next load. */
+const WRITE_BRANCH_RE = /^pi-agent-[A-Za-z0-9._-]{1,200}$/;
+const WRITE_COMMIT_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+
+/**
+ * replay-verify plan D3: maps this call's settle-time `ChildWorktreeInfo`
+ * (`wt`) onto the `JournalEntry.worktree` shape a journal write is allowed
+ * to carry, stamped with the live `isoId` this run folded for it (D6.2).
+ * Returns `undefined` — never written — for every disposition the design
+ * table (D3) marks "不写": `kept`, `pending`, `none`, or a `committed`
+ * missing its sha (H3 succeeded but the trailing `rev-parse HEAD` failed,
+ * D1.2) or carrying a shape that fails the same regex `parseEntry` would
+ * reject on load (defense-in-depth against a future H3/adapter defect).
+ */
+function replayableWorktree(wt: ChildWorktreeInfo | undefined, isoId: string): JournalEntry["worktree"] | undefined {
+  if (!wt) return undefined;
+  if (wt.state === "clean") return { state: "clean", isoId };
+  if (
+    wt.state === "committed" &&
+    wt.branch !== undefined &&
+    wt.commit !== undefined &&
+    WRITE_BRANCH_RE.test(wt.branch) &&
+    WRITE_COMMIT_RE.test(wt.commit)
+  ) {
+    return { state: "committed", branch: wt.branch, commit: wt.commit, isoId };
+  }
+  return undefined; // kept / pending / none / committed-without-a-usable-sha
+}
 
 /**
  * workflow-worktree plan D5: never rejects, never hangs beyond whatever
@@ -445,12 +541,41 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   // no-ops (never read) when `deps.journal` is absent.
   let chainDigest = CHAIN_SEED;
   const occCounters = new Map<string, number>();
-  /** callId -> the journal bookkeeping needed to write an entry once this call's live settle arrives (RP3: only successful calls are ever journaled; workflow-worktree plan D3: an isolated call never has an entry here at all, so `agentType` is the only per-call metadata left to carry — `isolation` used to ride along here before D3 made isolation categorically un-journaled). */
+  /**
+   * callId -> the journal bookkeeping needed to write an entry once this
+   * call's live settle arrives (RP3: only successful calls are ever
+   * journaled). replay-verify plan D2/D6: `isolation`/`isoId` are set only
+   * for a call that itself declared `isolation:"worktree"` while `verify`
+   * mode is on (D3/D9: `off` mode keeps the pre-plan behavior of never
+   * setting this map at all for an isolated call) — `isoId` is this live
+   * run's own fold identity for that call (D6.2's `isoIdLive`), carried
+   * here so the eventual write (`runBoundChild`'s `onOutcome`) can stamp it
+   * onto the entry regardless of the settle-time disposition.
+   */
   const journalMetaOf = new Map<
     CallId,
-    { taskKey: TaskKey; chainDigestBefore: string; occurrence: number; agentType: string }
+    {
+      taskKey: TaskKey;
+      chainDigestBefore: string;
+      occurrence: number;
+      agentType: string;
+      isolation?: "worktree";
+      isoId?: string;
+    }
   >();
   const replayStats = { hits: 0, misses: 0, skipped: 0 };
+  /**
+   * replay-verify plan D6.5/D4.4: run-scoped isolation counters that only
+   * ever grow — `freshFolds` (F2 actually applied, i.e. an accepted
+   * isolated `verify`-mode chain-scope call) and `stale` (the terminal
+   * recheck found a previously-trusted replay hit's branch gone/moved).
+   * Combined with `deps.journal.isolationReplay.stats`'s load-time probe
+   * counts by the `replayStats` getter below. Both stay 0 (never surfaced
+   * as a key at all, since `isolation` is only added when `deps.journal.
+   * isolationReplay` is configured) when this run never used `verify` mode.
+   */
+  let freshFolds = 0;
+  let staleReplayCount = 0;
   // workflow-experts D13-D15: one scope per run (closure-local, not module
   // scope). `replayTainted` starts false and is set (never cleared) the
   // instant some call's experts resolve successfully (§4.4) — every call
@@ -831,6 +956,18 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // regardless of outcome), and a replay hit never touches the live
     // resource limits below (it doesn't hold a `SlotPool`/parallel slot).
     const journal = deps.journal;
+    // replay-verify plan D6.2: `verify`/`foldable` are computed unconditionally
+    // (even without a journal — both then stay `false`) so the taint-vs-fold
+    // choice below (§ "D2 ④" area) and the F2 fold application right before
+    // dispatch share one flag each with the journal block, matching the
+    // pseudocode's variable lifetime (declared once per call, read at up to
+    // three points that are NOT nested inside `if (journal)`).
+    const verify = journal?.isolationReplay?.mode === "verify";
+    const foldable = isolation !== undefined && verify && journal?.scope === "chain";
+    // D6.2 F2: set inside the journal block below (iff `foldable`), applied
+    // exactly once, right before `QueuedAgentCall` is constructed — never
+    // read/written anywhere between (I2: no `await` on that path).
+    let pendingFold: string | undefined;
     if (journal) {
       // M3.6 Blocker fix (§6.3 E2 / replay.ts's `configHashAvailable`): a
       // missing `ChildSpawner.configHashOf` (or one that returns `undefined`
@@ -861,10 +998,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       };
       const taskKey = taskKeyOf(sem);
       const chainDigestBefore = chainDigest;
+      // replay-verify plan D6.3 I1: `kForOccurrence` (the lookup key) is
+      // always computed from the *unfolded* `chainDigestBefore` — folding
+      // (F1/F2) only ever changes what a LATER call sees, never this call's
+      // own occurrence/lookup key.
       const kForOccurrence = journal.scope === "content" ? taskKey : nextChainDigest(chainDigestBefore, taskKey);
       const occurrence = occCounters.get(kForOccurrence) ?? 0;
       occCounters.set(kForOccurrence, occurrence + 1);
-      // §6.2 step 5: the chain always advances, hit or miss.
+      // §6.2 step 5: the chain always advances, hit or miss (still unfolded here).
       chainDigest = nextChainDigest(chainDigestBefore, taskKey);
 
       const decision = decideReplay({
@@ -884,14 +1025,40 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         // `index.lookup` entirely.
         experts: declaresExperts,
         tainted: replayTainted,
-        // workflow-worktree plan D3: an isolated call is unconditionally
-        // skip, same shape as `experts`/`tainted` above.
+        // workflow-worktree plan D3 / replay-verify plan D5: an isolated call
+        // is unconditionally skip UNLESS `verify` mode is on, in which case
+        // it may still hit a verified `committed`/unchecked `clean` entry.
         isolation: isolation !== undefined,
         ...(journal.replayTtlMs !== undefined ? { replayTtlMs: journal.replayTtlMs } : {}),
+        ...(verify
+          ? {
+              isolationReplay: "verify" as const,
+              isolationVerified: (e: JournalEntry) => journal.isolationReplay!.verified.has(e.digest),
+            }
+          : {}),
       });
 
-      if (decision.kind === "hit") {
+      // replay-verify plan D7: `worktreeAvailable()` off at the exact moment
+      // of an otherwise-valid isolated hit blocks it (never folds, never
+      // journal-writes-as-hit) and falls through to the ordinary D2 gate
+      // below, which will reject the call with `isolation_unavailable`.
+      const isoHitBlocked =
+        decision.kind === "hit" && isolation !== undefined && deps.spawner.worktreeAvailable?.() !== true;
+      if (decision.kind === "hit" && !isoHitBlocked) {
         replayStats.hits += 1;
+        // D6.2 F1: fold the entry's OWN `isoId` (not a freshly-minted one) —
+        // this is what makes a downstream hit reproduce exactly the fold the
+        // upstream LIVE run applied (I7), and it is the only place `chainDigest`
+        // is folded via an entry that was actually read from the journal.
+        if (foldable && decision.entry.worktree !== undefined) {
+          chainDigest = nextChainDigest(chainDigest, `iso:${decision.entry.worktree.isoId}`);
+        }
+        const wt: ChildWorktreeInfo | undefined =
+          decision.entry.worktree === undefined
+            ? undefined
+            : decision.entry.worktree.state === "committed"
+              ? { state: "committed", branch: decision.entry.worktree.branch, commit: decision.entry.worktree.commit }
+              : { state: "clean" };
         expertScope.noteSubmitted(callId, label);
         registry.submit(callId, deps.clock.now());
         startedAt.set(callId, deps.clock.now());
@@ -908,6 +1075,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
           occurrence,
           ...(decision.entry.value !== null ? { textPreview: decision.entry.value.slice(0, 2048) } : {}),
           ...(phaseId !== undefined ? { phaseId } : {}),
+          ...(wt !== undefined ? { worktree: wt } : {}),
         });
         // Same two-stage ack/settle shape as the live path (HR3) — the ack
         // returned below is what the caller posts; the settle push happens
@@ -920,6 +1088,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
           callId,
           ok: true,
           value: decision.entry.value,
+          ...(wt !== undefined ? { worktree: wt } : {}),
         } satisfies HostSettleEnvelope);
         return {
           kind: "host_ack",
@@ -929,24 +1098,35 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         };
       }
       if (decision.kind === "miss") replayStats.misses += 1;
-      else replayStats.skipped += 1;
+      else replayStats.skipped += 1; // covers a genuine skip decision AND an isoHitBlocked hit
       // workflow-experts D12/D13/P3: an experts call (this one) or anything
       // submitted after the chain was tainted is NEVER journaled, regardless
       // of how its live settle turns out — skip the bookkeeping that would
       // otherwise let `runBoundChild`'s completion handler write an entry.
-      // workflow-worktree plan D3: an isolated call is never journaled,
-      // regardless of `declaresExperts`/`replayTainted` — its own live
-      // settle never reaches the journal-write site below (D2's isolation
-      // taint is set separately, after this journal block, not via this
-      // map).
-      if (!declaresExperts && !replayTainted && isolation === undefined) {
+      // replay-verify plan D3/D9: an isolated call under `off` mode is never
+      // journaled either (the pre-plan behavior, `isolation === undefined ||
+      // verify` below is false for it); under `verify` mode it IS eligible
+      // (independent of scope — content scope keeps writing too, D6.4's "弱
+      // 模式"), unless `declaresExperts`/`replayTainted` already vetoes it
+      // (same rule as any other call).
+      const isoIdLive =
+        isolation !== undefined && verify
+          ? sha256Hex(`${journal.isolationReplay!.nonce}:${kForOccurrence}:${occurrence}`).slice(0, 32)
+          : undefined;
+      if (!declaresExperts && !replayTainted && (isolation === undefined || verify)) {
         journalMetaOf.set(callId, {
           taskKey,
           chainDigestBefore,
           occurrence,
           agentType,
+          ...(isoIdLive !== undefined ? { isolation: "worktree" as const, isoId: isoIdLive } : {}),
         });
       }
+      // D6.3 I3/I4: `pendingFold` is set purely from `foldable`/`isoIdLive` —
+      // NOT gated by `declaresExperts`/`replayTainted` (D8: an accepted
+      // isolated call still folds even after the chain was independently
+      // tainted by an earlier experts call; I3: at most one fold per call).
+      pendingFold = foldable ? isoIdLive : undefined;
     }
 
     // §5.3 D-W… "narrowed": M3.2 does not have the agent-type registry
@@ -980,20 +1160,25 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // `isolation:"worktree"` — decision 1, no fallback to the shared
     // checkout. Checked before this call ever touches the registry,
     // `expertScope`, or `replayTainted` — a rejected isolation call leaves
-    // no trace anywhere, exactly like the maxChildren/BW2 rejections above
-    // (`journalMetaOf` was never set for it to begin with, D3).
+    // no trace anywhere (`journalMetaOf` — replay-verify plan D6.2: possibly
+    // just set above, for a `verify`-mode isolated call — is explicitly
+    // deleted here so a rejected call never lingers as if it were pending a
+    // live write).
     if (isolation !== undefined && deps.spawner.worktreeAvailable?.() !== true) {
+      journalMetaOf.delete(callId);
       const message =
         'agent(): isolation:"worktree" requires worktree.enabled=true — there is no fallback to the shared checkout';
       emitRejected(callId, "admission", "isolation_unavailable", message, { label, agentType, phaseId });
       return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
-    if (isolation !== undefined) {
+    if (isolation !== undefined && !foldable) {
       // D3: an accepted isolation call taints the rest of the chain exactly
       // like a successful experts resolution below — this call's own
       // journal-block decision already ran above reading the pre-taint
       // value (`isolation:true` already forced it to `skip`, independent of
-      // `tainted`).
+      // `tainted`). replay-verify plan D6: when `foldable` (verify mode,
+      // chain scope) the taint is replaced by the F2 fold below instead —
+      // D9/off mode and content scope keep this unconditional taint.
       replayTainted = true;
     }
 
@@ -1019,6 +1204,19 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // the pre-taint value, exactly matching the contract table's "带
       // experts，解析成功" row (`experts:true`, not `tainted:true`, for itself).
       replayTainted = true;
+    }
+
+    // replay-verify plan D6.2/D6.3 F2: the ONLY point `chainDigest` is
+    // folded for a live (not-replayed) accepted isolated call — every
+    // rejection above already `return`ed before reaching here (I4), and
+    // every async failure after this point (spawn error, queued-and-
+    // withheld, etc.) leaves the fold in place (I5/I6: fail-safe, since a
+    // fold with nothing ever journaled under it can only ever miss, never
+    // wrongly hit). Still inside the same synchronous段 the journal block
+    // started in (I2: no `await` between them).
+    if (pendingFold !== undefined) {
+      freshFolds += 1;
+      chainDigest = nextChainDigest(chainDigest, `iso:${pendingFold}`);
     }
 
     const call: QueuedAgentCall = {
@@ -1160,6 +1358,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     call: QueuedAgentCall,
     derived: ReturnType<typeof deriveChildBudget>,
   ): Parameters<ChildSpawner["spawn"]>[0] {
+    // replay-verify plan D4.1: the pinned cwd is only ever attached to an
+    // isolated call's own spawn request, and only under `verify` mode — off
+    // mode and every non-isolated call get the byte-identical (no `cwd`)
+    // request (D9's off-mode guarantee).
+    const isolationCwd =
+      call.isolation !== undefined && deps.journal?.isolationReplay !== undefined
+        ? deps.journal.isolationReplay.cwd
+        : undefined;
     return {
       type: call.agentType,
       prompt: call.prompt,
@@ -1169,6 +1375,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(call.thinkingOverride !== undefined ? { thinkingOverride: call.thinkingOverride } : {}),
       ...(call.consultExperts !== undefined ? { consultExperts: call.consultExperts } : {}),
       ...(call.isolation !== undefined ? { isolation: call.isolation } : {}),
+      ...(isolationCwd !== undefined ? { cwd: isolationCwd } : {}),
       ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
       ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
       budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },
@@ -1274,19 +1481,29 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       if (journal && outcome.status === "completed") {
         const jm = journalMetaOf.get(callId);
         if (jm) {
-          journal.store.append(
-            journal.dir,
-            buildEntry({
-              scope: journal.scope,
-              key: jm.taskKey,
-              chainDigestBefore: jm.chainDigestBefore,
-              occurrence: jm.occurrence,
-              agentType: jm.agentType,
-              value: outcome.text ?? null,
-              completedAt: deps.clock.now(),
-              durationMs,
-            }),
-          );
+          // replay-verify plan D3: an isolated call only ever writes when its
+          // settle-time disposition (`wt`) maps onto a replayable shape
+          // (`replayableWorktree`) — `kept`/`pending`/`none`/a `committed`
+          // without a usable sha are all silently "not written" (D3's table),
+          // never a corrupt/partial entry.
+          const worktree = jm.isolation === "worktree" ? replayableWorktree(wt, jm.isoId!) : undefined;
+          if (jm.isolation === undefined || worktree !== undefined) {
+            journal.store.append(
+              journal.dir,
+              buildEntry({
+                scope: journal.scope,
+                key: jm.taskKey,
+                chainDigestBefore: jm.chainDigestBefore,
+                occurrence: jm.occurrence,
+                agentType: jm.agentType,
+                ...(jm.isolation !== undefined ? { isolation: jm.isolation } : {}),
+                ...(worktree !== undefined ? { worktree } : {}),
+                value: outcome.text ?? null,
+                completedAt: deps.clock.now(),
+                durationMs,
+              }),
+            );
+          }
         }
       }
       journalMetaOf.delete(callId);
@@ -1613,12 +1830,25 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     },
     get replayStats(): WorkflowReplayStats | undefined {
       if (!deps.journal) return undefined;
+      const iso = deps.journal.isolationReplay;
       return {
         hits: replayStats.hits,
         misses: replayStats.misses,
         skipped: replayStats.skipped,
         corruptLines: deps.journal.index.stats.corruptLines,
         ...(replayTainted ? { tainted: true as const } : {}),
+        ...(iso !== undefined
+          ? {
+              isolation: {
+                probed: iso.stats.probed,
+                verified: iso.stats.verified,
+                unverified: iso.stats.unverified,
+                freshFolds,
+                stale: staleReplayCount,
+                ...(iso.stats.probeError !== undefined ? { probeError: iso.stats.probeError } : {}),
+              },
+            }
+          : {}),
       };
     },
     cancelAllChildren(cause) {
@@ -1690,6 +1920,37 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     async flushJournal(deadlineMs) {
       if (!deps.journal) return undefined;
       return deps.journal.store.flush(deps.journal.dir, deadlineMs);
+    },
+    async recheckReplayedIsolation(deadlineMs) {
+      const iso = deps.journal?.isolationReplay;
+      if (!iso || !deps.spawner.probeAgentBranches) return;
+      const targets: Array<{ callId: CallId; branch: string; commit: string }> = [];
+      for (const c of children) {
+        if (c.source === "replay" && c.worktree?.state === "committed" && c.worktree.branch !== undefined) {
+          targets.push({ callId: c.callId, branch: c.worktree.branch, commit: c.worktree.commit! });
+        }
+      }
+      if (targets.length === 0) return;
+      try {
+        const stale = await recheckBranches(targets, deps.spawner.probeAgentBranches, {
+          cwd: iso.cwd,
+          timeoutMs: Math.max(1, Math.min(2_000, deadlineMs)),
+          clock: deps.clock,
+        });
+        if (stale.size === 0) return;
+        for (let i = 0; i < children.length; i += 1) {
+          const c = children[i]!;
+          if (c.source !== "replay" || c.worktree?.state !== "committed" || c.worktree.branch === undefined) continue;
+          const s = stale.get(c.worktree.branch);
+          if (s === undefined) continue;
+          staleReplayCount += 1;
+          children[i] = { ...c, replayStale: s };
+        }
+      } catch {
+        // D4.4: a defect surfacing here (a throwing `probeAgentBranches`
+        // contract violation) must never fail the workflow's terminal
+        // decision — the whole point of this recheck is diagnostic-only.
+      }
     },
   };
 }

@@ -357,6 +357,296 @@ describe("RP gate: noReplay / deterministic / isolation / TTL / scope mismatch",
   });
 });
 
+describe("replay-verify plan D5/D4.2: verify-mode isolation decisions (§6 test 8)", () => {
+  function isoEntry(
+    worktree: JournalEntry["worktree"],
+    overrides: Partial<Parameters<typeof buildEntry>[0]> = {},
+  ): {
+    entry: JournalEntry;
+    taskKey: ReturnType<typeof taskKeyOf>;
+  } {
+    const isoSem: TaskSemantics = { ...sem("iso-a"), isolation: "worktree" };
+    const taskKey = taskKeyOf(isoSem);
+    const entry = buildEntry({
+      scope: "chain",
+      key: taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree,
+      value: "iso-result",
+      completedAt: 1000,
+      durationMs: 10,
+      ...overrides,
+    });
+    return { entry, taskKey };
+  }
+  const committedWt = {
+    state: "committed" as const,
+    branch: "pi-agent-r1",
+    commit: "a".repeat(40),
+    isoId: "b".repeat(32),
+  };
+  const cleanWt = { state: "clean" as const, isoId: "c".repeat(32) };
+
+  it("a verified committed entry hits under verify mode", () => {
+    const { entry, taskKey } = isoEntry(committedWt);
+    const index = buildReplayIndex([entry], 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: true,
+      isolationReplay: "verify",
+      isolationVerified: (e) => e.digest === entry.digest,
+    });
+    expect(decision).toEqual({ kind: "hit", entry });
+  });
+
+  it("an unverified committed entry (isolationVerified returns false) skips as worktree_unverified", () => {
+    const { entry, taskKey } = isoEntry(committedWt);
+    const index = buildReplayIndex([entry], 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: true,
+      isolationReplay: "verify",
+      isolationVerified: () => false,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "worktree_unverified" });
+  });
+
+  it("a missing isolationVerified port defaults to unverified (fail-closed)", () => {
+    const { entry, taskKey } = isoEntry(committedWt);
+    const index = buildReplayIndex([entry], 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: true,
+      isolationReplay: "verify",
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "worktree_unverified" });
+  });
+
+  it("D3.1: a clean entry hits under verify mode WITHOUT ever consulting isolationVerified", () => {
+    const { entry, taskKey } = isoEntry(cleanWt);
+    const index = buildReplayIndex([entry], 0, "chain");
+    const isolationVerified = vi.fn(() => false);
+    const decision = decideReplay({
+      index,
+      taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: true,
+      isolationReplay: "verify",
+      isolationVerified,
+    });
+    expect(decision).toEqual({ kind: "hit", entry });
+    expect(isolationVerified).not.toHaveBeenCalled();
+  });
+
+  it("off mode (isolationReplay absent) still unconditionally skips an isolated call, even with a verified entry present", () => {
+    const { entry, taskKey } = isoEntry(committedWt);
+    const index = buildReplayIndex([entry], 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: true,
+      isolationVerified: () => true, // must be ignored entirely under off mode
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "isolation_worktree" });
+  });
+
+  it('a legacy entry (isolation:"worktree" but no worktree field) skips isolation_worktree even under verify mode', () => {
+    const { taskKey } = isoEntry(committedWt);
+    const legacy = buildEntry({
+      scope: "chain",
+      key: taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      value: "legacy",
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    const index = buildReplayIndex([legacy], 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: true,
+      isolationReplay: "verify",
+      isolationVerified: () => true,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "isolation_worktree" });
+  });
+
+  it("a truncated committed entry skips as truncated, never reaching the verification check", () => {
+    const isoSem: TaskSemantics = { ...sem("iso-huge"), isolation: "worktree" };
+    const taskKey = taskKeyOf(isoSem);
+    const entry = buildEntry({
+      scope: "chain",
+      key: taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree: committedWt,
+      value: "x".repeat(70 * 1024),
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    expect(entry.truncated).toBe(true);
+    const index = buildReplayIndex([entry], 0, "chain");
+    const isolationVerified = vi.fn(() => true);
+    const decision = decideReplay({
+      index,
+      taskKey,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      isolation: true,
+      isolationReplay: "verify",
+      isolationVerified,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "truncated" });
+    expect(isolationVerified).not.toHaveBeenCalled();
+  });
+});
+
+describe("replay-verify plan D4.2: ReplayIndex.isolatedCandidates", () => {
+  it("returns only committed, non-truncated isolated entries within TTL", () => {
+    const isoSem: TaskSemantics = { ...sem("iso-a"), isolation: "worktree" };
+    const committed = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(isoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree: { state: "committed", branch: "pi-agent-r1", commit: "a".repeat(40), isoId: "b".repeat(32) },
+      value: "v",
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    const cleanIsoSem: TaskSemantics = { ...sem("iso-b"), isolation: "worktree" };
+    const clean = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(cleanIsoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree: { state: "clean", isoId: "c".repeat(32) },
+      value: "v",
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    const plain = makeChainRun(["plain"])[0]!;
+    const index = buildReplayIndex([committed, clean, plain], 0, "chain");
+    const candidates = index.isolatedCandidates({ now: 2000 });
+    expect(candidates).toEqual([committed]); // clean is excluded (nothing to verify); plain has no isolation at all
+  });
+
+  it("excludes a committed candidate past replayTtlMs", () => {
+    const isoSem: TaskSemantics = { ...sem("iso-old"), isolation: "worktree" };
+    const committed = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(isoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree: { state: "committed", branch: "pi-agent-r1", commit: "a".repeat(40), isoId: "b".repeat(32) },
+      value: "v",
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    const index = buildReplayIndex([committed], 0, "chain");
+    expect(index.isolatedCandidates({ now: 2_000, replayTtlMs: 500 })).toEqual([]);
+    expect(index.isolatedCandidates({ now: 1_400, replayTtlMs: 500 })).toEqual([committed]);
+  });
+
+  it("excludes a truncated committed candidate", () => {
+    const isoSem: TaskSemantics = { ...sem("iso-huge2"), isolation: "worktree" };
+    const truncated = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(isoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree: { state: "committed", branch: "pi-agent-r1", commit: "a".repeat(40), isoId: "b".repeat(32) },
+      value: "x".repeat(70 * 1024),
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    expect(truncated.truncated).toBe(true);
+    const index = buildReplayIndex([truncated], 0, "chain");
+    expect(index.isolatedCandidates({ now: 2000 })).toEqual([]);
+  });
+
+  it("honors dedup (takes the latest completedAt per key/occurrence, same as lookup)", () => {
+    const isoSem: TaskSemantics = { ...sem("iso-dup"), isolation: "worktree" };
+    const older = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(isoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree: { state: "committed", branch: "pi-agent-old", commit: "a".repeat(40), isoId: "b".repeat(32) },
+      value: "v1",
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    const newer = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(isoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      isolation: "worktree",
+      worktree: { state: "committed", branch: "pi-agent-new", commit: "d".repeat(40), isoId: "e".repeat(32) },
+      value: "v2",
+      completedAt: 2000,
+      durationMs: 10,
+    });
+    const index = buildReplayIndex([older, newer], 0, "chain");
+    expect(index.isolatedCandidates({ now: 3000 })).toEqual([newer]);
+  });
+});
+
 describe("同 (K, occurrence) 多条 → 取 completedAt 最大者 (§6.5)", () => {
   it("buildReplayIndex keeps the entry with the latest completedAt for a duplicate key", () => {
     const key = taskKeyOf(sem("dup"));

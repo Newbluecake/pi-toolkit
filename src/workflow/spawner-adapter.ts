@@ -67,6 +67,12 @@ export interface WorkflowChildSpawnerOptions {
    * closed (`worktreeAvailable?.() !== true` reads `undefined`).
    */
   worktreeAvailable?: () => boolean;
+  /** replay-verify plan D9: `stack.ts` wires this to `() => settings.workflow.isolationReplay`, read fresh every call. */
+  isolationReplayMode?: () => "verify" | "off";
+  /** replay-verify plan D4.1: `stack.ts` wires this to `() => process.cwd()` — the H2 cwd fallback for THIS process. */
+  isolationCwd?: () => string;
+  /** replay-verify plan D4.2/D4.4: `stack.ts` wires this to a bounded `pi.exec("git", ["for-each-ref", ...])`. */
+  probeAgentBranches?: import("./host.js").ChildSpawner["probeAgentBranches"];
 }
 
 export function createWorkflowChildSpawner(
@@ -92,6 +98,10 @@ export function createWorkflowChildSpawner(
         // in H2 (src/extensions/worktree.ts) and the service layer; this
         // adapter's only job is to not drop the field.
         ...(req.isolation !== undefined ? { isolation: req.isolation } : {}),
+        // replay-verify plan D4.1: forwarded verbatim — only ever set by
+        // host.ts for an isolated call under `verify` mode; every other
+        // call's request has no `cwd` key at all (D9's off-mode guarantee).
+        ...(req.cwd !== undefined ? { cwd: req.cwd } : {}),
         // agent()'s `opts.model` / `opts.thinking` (Agent-tool `model`/
         // `thinking` semantics, split in host.ts's `handleAgent`):
         // forwarded verbatim so spawn admission existence-checks strict
@@ -142,6 +152,9 @@ export function createWorkflowChildSpawner(
       return types.configHashOf(type);
     },
     ...(opts?.worktreeAvailable ? { worktreeAvailable: opts.worktreeAvailable } : {}),
+    ...(opts?.isolationReplayMode ? { isolationReplayMode: opts.isolationReplayMode } : {}),
+    ...(opts?.isolationCwd ? { isolationCwd: opts.isolationCwd } : {}),
+    ...(opts?.probeAgentBranches ? { probeAgentBranches: opts.probeAgentBranches } : {}),
     /**
      * workflow-worktree plan D5: maps `SpawnService.waitWorktreeDisposition`'s
      * `settled|none|timeout|disposed` result onto `ChildWorktreeInfo`

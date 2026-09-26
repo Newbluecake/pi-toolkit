@@ -290,7 +290,21 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   top-level `Agent`). `SubagentWorkflow`'s outcome text/notification carry a self-bounded `worktrees:` block
   (64 lines / 8 KiB, `git branch --list 'pi-agent-*'` pointer beyond that) spliced in _outside_ the head/tail-
   truncated body, so branches survive truncation. The workflow never merges branches itself — that is the
-  dispatching session's job, same as for a top-level isolated `Agent` run. Design:
+  dispatching session's job, same as for a top-level isolated `Agent` run. **replay-verify (P2, todo #13,
+  `workflow.isolationReplay`, default `"verify"`)** narrows the P1 "never journaled/replayed" rule above: a
+  `committed` (with sha) or `clean` isolated call's outcome is now journaled, and on a later run with the same
+  journal it replays IF AND ONLY IF its `pi-agent-<runId>` branch, checked once at load time via a single
+  bounded `git for-each-ref` (`src/workflow/isolation-verify.ts`, pinned cwd, `AbortSignal` + `withDeadline`
+  triple-bounded, zero git calls when there is nothing to verify), still points EXACTLY at the recorded commit
+  (`clean` entries are never checked — same non-checking semantics journal replay already has for every
+  ordinary call). In `chain` scope an accepted isolated call no longer taints the rest of the run; instead its
+  live-run identity (`isoId`) folds into the chain digest (`host.ts`'s F1/F2), so a verified hit reproduces the
+  exact fold the upstream live run applied and the whole downstream chain can hit too — `content` scope and
+  `isolationReplay:"off"` keep the old unconditional taint. A terminal, diagnostic-only recheck (running
+  concurrently with the journal flush, never gating it) annotates a replayed child's summary with
+  `replayStale:"gone"|"moved"` if its branch was moved/deleted between the load-time snapshot and settle —
+  it never revises the settle the script already received. Design: `docs/dev/workflow-worktree/replay-verify-plan.md`.
+  Design:
   `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md`,
   `docs/dev/workflow-worktree/plan.md`.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).

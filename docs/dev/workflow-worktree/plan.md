@@ -9,6 +9,7 @@
 2. **实现 `worktree.linkPaths`**：默认 `[]`，本机配置 `["node_modules"]`，同时作用于顶层 Agent。link path 是**只读共享依赖**，不加锁（§2 D9，已接受的风险）。
 3. **consult cwd 本期必做（P3）**：worktree 隔离的提问方（顶层 Agent 或 workflow 子 run）发起的 consult，其 fork 和 spawn 都在提问方**自己的 worktree** 里进行。
 4. 回放选 A：带 isolation 的调用，以及它之后提交的调用，都不读也不写 journal。「校验分支后回放」另记 todo。
+   已由 `docs/dev/workflow-worktree/replay-verify-plan.md`（todo #13）取代：`workflow.isolationReplay="off"`（非默认）时仍为本方案 A；默认 `"verify"` 时按新方案的加载时快照校验回放。
 5. 子 run 失败时 agent() 仍然返回 `null`，分支只在 outcome 文本里列出。
 6. 自动提交**不加** `--no-verify`，用户 hook 照常执行。
 7. 等待 disposition 的上限从**实际生效**的 reapMs 推导。`pending` 一旦出现在脚本返回值里就不会再变；晚到的 disposition 只进入 workflow 终态 outcome 和 run log，不会回填给 worker（§2 D5）。

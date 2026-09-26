@@ -40,8 +40,12 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
   新建的独立 git worktree 里跑（未提交的主工作区改动对它不可见，隔离的调用之间也互不可见）；跑完把改动提交到
   新分支 `pi-agent-<runId>`（分支名与 workflow 内部的 callId/label 无关，二者的对应关系只在 outcome 文本里给出），
   **调度方自己负责 merge / cherry-pick**——workflow 从不自动合并；提交失败则 worktree 原样保留在磁盘上（outcome
-  里给出路径）。`worktree.enabled=false` 时直接 reject（reason `isolation_unavailable`，无退化路径）。带隔离的
-  调用以及它之后提交的所有调用都不进 journal 回放（即使配置了 journal），语义与挂 `experts` 的调用一致；
+  里给出路径）。`worktree.enabled=false` 时直接 reject（reason `isolation_unavailable`，无退化路径）。**replay-verify
+  (P2, todo #13)**：默认 `workflow.isolationReplay="verify"` 时，一次 `committed`(带 sha) 或 `clean` 的隔离调用会
+  写进 journal；下次带同一 journal 重跑时，只有它的 `pi-agent-<runId>` 分支在本次启动时刻精确指向记录的 commit
+  才会命中回放（删除/rebase/强推/已合并删除都视为 live 重跑）；chain scope 下命中会把它的身份折进链摘要，让
+  依赖它的下游也能一起命中（不再像旧版一样无条件染色）；content scope 与 `isolationReplay="off"` 仍保留旧的
+  「带隔离的调用以及它之后提交的所有调用都不进 journal 回放」规则：
   `fullResult: true` 时返回对象只在这次调用真的隔离过才会多出 `worktree` 键（`{state, branch?, path?}`），outcome
   文本另有独立的 `worktrees:` 分栏列出每个调用的分支/kept 路径/pending 状态，不会被正文的头尾截断吞掉。
   ⇒ 评审/验收独立性直接在 verify 一级用 `model:` 指定与 dev 不同的模型（见下方模板），或继续写进类型 frontmatter。

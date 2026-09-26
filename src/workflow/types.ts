@@ -148,6 +148,19 @@ export interface JournalEntry {
   /** RP3: only successful calls are ever journaled. */
   readonly status: "completed";
   readonly isolation?: "worktree";
+  /**
+   * replay-verify plan D2 (option C): present only on `isolation:"worktree"`
+   * entries whose settle-time disposition was replayable — `committed` (with
+   * both a `branch` and a `commit` sha) or `clean`. `isoId` is the per-run
+   * folded identity (D6) a downstream chain-scope hit uses to reproduce the
+   * exact live fold that wrote this entry (I7). `parseEntry` shape-validates
+   * every field with a regex (branch `pi-agent-<safe>`, commit 40/64 hex,
+   * isoId 32 hex) and rejects unknown keys or a `state` outside this union —
+   * any violation demotes the whole line to corrupt (fail-closed).
+   */
+  readonly worktree?:
+    | { readonly state: "committed"; readonly branch: string; readonly commit: string; readonly isoId: string }
+    | { readonly state: "clean"; readonly isoId: string };
   /** The value the sandboxed script's `agent()` call resolved to on this run (`outcome.text ?? null`, mirroring host.ts's live settle path). */
   readonly value: string | null;
   /** JS6 (§6.6): `true` when `value` had to be truncated to `JOURNAL_VALUE_MAX_BYTES` at write time — `replay.ts#decideReplay` always `skip`s such an entry (a mutilated result must never be handed back out as a hit). Absent (not `false`) on untruncated entries, matching every other optional `JournalEntry` field's "undefined means no" convention. */
@@ -175,6 +188,26 @@ export interface WorkflowReplayStats {
    * `WorkflowReplayStats`-adjacent "undefined means no" convention.
    */
   readonly tainted?: true;
+  /**
+   * replay-verify plan D4/D9: present only when `workflow.isolationReplay`
+   * was `"verify"` for this run (absent — not zeros — in `off` mode, so a
+   * caller can tell "verification wasn't in play" from "it ran and found
+   * nothing to verify", matching every other optional stat here). `probed`/
+   * `verified`/`unverified` are the load-time snapshot probe's counts
+   * (D4.2); `freshFolds` is how many `isoId`s this run itself folded live
+   * (D6.5); `stale` is how many replayed-hit branches the terminal
+   * diagnostic (D4.4) found gone/moved after the fact; `probeError` is set
+   * only when the probe itself failed/timed out (fail-closed to live, never
+   * to a wrong hit).
+   */
+  readonly isolation?: {
+    readonly probed: number;
+    readonly verified: number;
+    readonly unverified: number;
+    readonly freshFolds: number;
+    readonly stale: number;
+    readonly probeError?: string;
+  };
 }
 
 export interface WorkflowChildSummary {
@@ -220,6 +253,14 @@ export interface WorkflowChildSummary {
    * before this particular read.
    */
   readonly worktreeFinal?: ChildWorktreeInfo;
+  /**
+   * replay-verify plan D4.4: set only by the terminal parallel-with-flush
+   * recheck, only for a `source:"replay"` child whose entry was `committed`
+   * — the branch this run's snapshot-time verification trusted was found
+   * gone or moved when re-probed just before settling. Diagnostic only: the
+   * settle envelope the script already received is never revised.
+   */
+  readonly replayStale?: "gone" | "moved";
 }
 
 /**

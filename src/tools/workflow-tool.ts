@@ -75,7 +75,12 @@ export const WorkflowToolParams = Type.Object({
       "other's changes either); on completion its changes are committed to a new pi-agent-<runId> branch in the " +
       "main repo (merge or cherry-pick it yourself — the workflow never merges automatically) or the worktree is " +
       "PRESERVED on disk instead if committing fails (the outcome names its path). Fails the call outright (no " +
-      "fallback) when worktree.enabled is off. An isolated call's result is never journaled or replayed, and every " +
+      "fallback) when worktree.enabled is off. With workflow.isolationReplay=verify (the default), a subsequent " +
+      "run with the same journal can reuse a prior isolated call's result IF its pi-agent-<runId> branch still " +
+      "exists and points exactly at the commit that was recorded (anything else — merged-and-deleted, rebased, " +
+      "force-pushed, appended-to — reruns it live); a re-run whose isolated call was skipped/live also re-runs " +
+      "every downstream call that depended on it. With isolationReplay=off, an isolated call's result is never " +
+      "journaled or replayed, and every " +
       "call submitted afterward in this same run is skipped from replay too, even when a journal is configured. " +
       "experts is a whitelist of subagent handles (labels/run_ids from THIS workflow run, or the reserved " +
       "'main' for the host main session) this specific agent() call may consult in-turn via the consult tool — " +
@@ -319,6 +324,19 @@ function worktreeLineFor(c: WorkflowChildSummary): string | undefined {
   const info = c.worktree;
   if (info === undefined || info.state === "clean" || info.state === "none") return undefined;
   const name = c.label ?? c.callId;
+  if (c.source === "replay") {
+    // replay-verify plan D7/D11: a replayed hit has no `runId`, so the
+    // "expected branch" convention below is meaningless for it — render the
+    // recorded branch + a short sha instead, plus a stale annotation from
+    // the terminal recheck (D4.4) when one landed.
+    if (info.state !== "committed") return undefined; // clean replay hits are filtered above; nothing else is ever journaled
+    const sha7 = info.commit !== undefined ? info.commit.slice(0, 7) : "?";
+    const staleSuffix = c.replayStale !== undefined ? `, branch ${c.replayStale}` : "";
+    const line = `${name} \u2192 ${info.branch ?? "?"} (replayed @${sha7}${staleSuffix})`;
+    return line.length > WORKTREE_BLOCK_LINE_MAX_CHARS
+      ? `${line.slice(0, WORKTREE_BLOCK_LINE_MAX_CHARS - 1)}\u2026`
+      : line;
+  }
   const expectedBranch = `pi-agent-${c.runId ?? c.callId}`;
   const desc =
     info.state === "pending" && c.worktreeFinal !== undefined
@@ -400,8 +418,13 @@ export function renderOutcomeText(outcome: WorkflowOutcome): string {
   }
   if (outcome.orphanChildren?.length) parts.push(`orphaned children: ${outcome.orphanChildren.length} (see diag)`);
   if (outcome.replay) {
+    const iso = outcome.replay.isolation;
+    const isoSuffix =
+      iso !== undefined
+        ? `, ${iso.verified} wt-verified, ${iso.unverified} wt-unverified${iso.stale > 0 ? `, ${iso.stale} wt-stale` : ""}`
+        : "";
     parts.push(
-      `replay: ${outcome.replay.hits} hit, ${outcome.replay.misses} miss, ${outcome.replay.skipped} skipped, ${outcome.replay.corruptLines} corrupt`,
+      `replay: ${outcome.replay.hits} hit, ${outcome.replay.misses} miss, ${outcome.replay.skipped} skipped, ${outcome.replay.corruptLines} corrupt${isoSuffix}`,
     );
   }
   return parts.join("\n");

@@ -482,6 +482,44 @@ describe("renderOutcomeText: does not duplicate child output already in result",
   });
 });
 
+describe("renderOutcomeText: replay stats line (replay-verify plan D11/§6 test 19)", () => {
+  it("off mode / no isolation activity: the replay line has no wt-* suffix at all", () => {
+    const body = renderOutcomeText(fakeOutcome({ replay: { hits: 2, misses: 1, skipped: 0, corruptLines: 0 } }));
+    expect(body).toContain("replay: 2 hit, 1 miss, 0 skipped, 0 corrupt");
+    expect(body).not.toContain("wt-");
+  });
+
+  it("verify mode appends `, N wt-verified, N wt-unverified`", () => {
+    const body = renderOutcomeText(
+      fakeOutcome({
+        replay: {
+          hits: 1,
+          misses: 0,
+          skipped: 0,
+          corruptLines: 0,
+          isolation: { probed: 3, verified: 2, unverified: 1, freshFolds: 1, stale: 0 },
+        },
+      }),
+    );
+    expect(body).toContain("replay: 1 hit, 0 miss, 0 skipped, 0 corrupt, 2 wt-verified, 1 wt-unverified");
+  });
+
+  it("a nonzero stale count appends `, N wt-stale`", () => {
+    const body = renderOutcomeText(
+      fakeOutcome({
+        replay: {
+          hits: 1,
+          misses: 0,
+          skipped: 0,
+          corruptLines: 0,
+          isolation: { probed: 1, verified: 1, unverified: 0, freshFolds: 0, stale: 1 },
+        },
+      }),
+    );
+    expect(body).toContain("1 wt-verified, 0 wt-unverified, 1 wt-stale");
+  });
+});
+
 describe("renderWorktreeBlock (workflow-worktree plan D5 §4 render, §6 test 23)", () => {
   const withWorktree = (
     label: string,
@@ -559,6 +597,59 @@ describe("renderWorktreeBlock (workflow-worktree plan D5 §4 render, §6 test 23
     const line = block.split("\n")[1]!;
     expect(line.length).toBeLessThanOrEqual(300);
     expect(line.endsWith("…")).toBe(true);
+  });
+
+  it("replay-verify plan D7/D11: a replayed committed hit renders `label → branch (replayed @sha7)`, never the expected-branch suffix", () => {
+    const block = renderWorktreeBlock(
+      fakeOutcome({
+        children: [
+          withWorktree(
+            "a",
+            { state: "committed", branch: "pi-agent-r-old", commit: "abc1234def5678900000000000000000000abcd" },
+            { source: "replay", runId: undefined },
+          ),
+        ],
+      }),
+    );
+    expect(block).toContain("a → pi-agent-r-old (replayed @abc1234)");
+    expect(block).not.toContain("expected branch");
+  });
+
+  it("D4.4: a stale terminal recheck appends ', branch gone'/', branch moved' to the replay row", () => {
+    const gone = renderWorktreeBlock(
+      fakeOutcome({
+        children: [
+          withWorktree(
+            "a",
+            { state: "committed", branch: "pi-agent-r-old", commit: "abc1234def5678900000000000000000000abcd" },
+            { source: "replay", runId: undefined, replayStale: "gone" },
+          ),
+        ],
+      }),
+    );
+    expect(gone).toContain("(replayed @abc1234, branch gone)");
+    const moved = renderWorktreeBlock(
+      fakeOutcome({
+        children: [
+          withWorktree(
+            "a",
+            { state: "committed", branch: "pi-agent-r-old", commit: "abc1234def5678900000000000000000000abcd" },
+            { source: "replay", runId: undefined, replayStale: "moved" },
+          ),
+        ],
+      }),
+    );
+    expect(moved).toContain("(replayed @abc1234, branch moved)");
+  });
+
+  it("a replayed `clean` entry is never listed (same rule as a live clean call)", () => {
+    expect(
+      renderWorktreeBlock(
+        fakeOutcome({
+          children: [withWorktree("a", { state: "clean" }, { source: "replay", runId: undefined })],
+        }),
+      ),
+    ).toBeUndefined();
   });
 });
 

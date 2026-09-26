@@ -1,5 +1,7 @@
 import type { Clock } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
+import type { Millis } from "../core/types.js";
+import { randomUUID } from "node:crypto";
 import {
   attachHostCallHandler,
   capEventMessage,
@@ -17,6 +19,7 @@ import {
 } from "./deadline.js";
 import { createJournalStore } from "./journal.js";
 import { buildReplayIndex } from "./replay.js";
+import { verifyIsolatedEntries } from "./isolation-verify.js";
 import { assertHeartbeatBudgetInvariant, startRunawayWatchdog } from "./runaway.js";
 import type {
   OrphanChildSummary,
@@ -127,6 +130,13 @@ export interface OrchestratorDeps {
    */
   journalRootDir?: string;
   /**
+   * replay-verify plan D4.2/D4.3: the `min(gitTimeoutMs, 5_000)`-style cap
+   * for the load-time isolation-verify probe (stack.ts derives it from
+   * `settings.worktree.gitTimeoutMs`, keeping this module decoupled from
+   * `src/extensions/worktree-settings.ts`, WI2). Optional, default 5_000ms.
+   */
+  isolationVerifyTimeoutMs?: Millis;
+  /**
    * workflow-agent-queue §4.3/§4.5 (stage B): fired when a run enters its
    * timeout grace window (`kind: "grace"`) or is extended (`"extended"`) —
    * alongside the `subagent:workflow:deadline` event. The assembler (stack.ts)
@@ -211,15 +221,52 @@ async function buildJournalConfig(deps: OrchestratorDeps, req: OrchestratorRunRe
   const { entries, corruptLines } = await store.load(dir);
   const scope: ReplayScope = req.replayScope ?? "chain";
   const index = buildReplayIndex(entries, corruptLines, scope);
-  return {
+  const noReplay = req.noReplay ?? false;
+  const base: JournalRunConfig = {
     store,
     dir,
     index,
     scope,
-    noReplay: req.noReplay ?? false,
+    noReplay,
     ...(req.budget.replayTtlMs !== undefined ? { replayTtlMs: req.budget.replayTtlMs } : {}),
     ...(req.budget.journalFlushMs !== undefined ? { journalFlushMs: req.budget.journalFlushMs } : {}),
     deterministic: { current: true },
+  };
+  // replay-verify plan D4/D9: `off` (the default absent-spawner/absent-method
+  // fail-closed value) leaves `base` untouched — byte-identical to pre-plan
+  // behavior (D9's off-mode guarantee: zero probes, no `isolationReplay` key).
+  const mode = deps.spawner?.isolationReplayMode?.() ?? "off";
+  if (mode !== "verify") return base;
+  const cwd = deps.spawner?.isolationCwd?.() ?? process.cwd();
+  // D4.2: zero git calls when there is nothing to gain from probing —
+  // `noReplay` (replay is forced off anyway) or `worktreeAvailable() !==
+  // true` (isolated calls cannot even run this session). Candidate
+  // emptiness is handled inside `verifyIsolatedEntries` itself.
+  const shouldProbe = !noReplay && deps.spawner?.worktreeAvailable?.() === true;
+  const candidates = index.isolatedCandidates({
+    now: deps.clock.now(),
+    ...(base.replayTtlMs !== undefined ? { replayTtlMs: base.replayTtlMs } : {}),
+  });
+  const timeoutMs = Math.min(deps.isolationVerifyTimeoutMs ?? 5_000, 5_000);
+  const verifyResult = await verifyIsolatedEntries(
+    candidates,
+    shouldProbe ? deps.spawner?.probeAgentBranches : undefined,
+    { cwd, timeoutMs, clock: deps.clock },
+  );
+  return {
+    ...base,
+    isolationReplay: {
+      mode: "verify",
+      cwd,
+      verified: verifyResult.verified,
+      nonce: randomUUID(),
+      stats: {
+        probed: verifyResult.stats.probed,
+        verified: verifyResult.stats.verified,
+        unverified: verifyResult.stats.unverified,
+        ...(verifyResult.probeError !== undefined ? { probeError: verifyResult.probeError } : {}),
+      },
+    },
   };
 }
 
@@ -808,11 +855,18 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
     // `flushJournal` itself never throws (journal.ts's `flush()` degrades to
     // reporting `pending`, never rejects), and a flush timeout never delays
     // the workflow's own terminal decision past `journalFlushMs`.
+    // replay-verify plan D4.4: `recheckReplayedIsolation` runs CONCURRENTLY
+    // with the flush (never sequenced after it) so it adds no terminal
+    // latency of its own — capped independently at 2s inside host.ts.
     try {
-      await hostHandler.flushJournal(req.budget.journalFlushMs ?? 2_000);
+      await Promise.all([
+        hostHandler.flushJournal(req.budget.journalFlushMs ?? 2_000),
+        hostHandler.recheckReplayedIsolation(req.budget.journalFlushMs ?? 2_000),
+      ]);
     } catch {
-      // JS3: a flush failure only costs this run's own newly-written entries
-      // a chance to be replayed later — it never fails the workflow itself.
+      // JS3 / D4.4: a flush failure only costs this run's own newly-written
+      // entries a chance to be replayed later, and a recheck failure only
+      // costs a diagnostic annotation — neither ever fails the workflow itself.
     }
 
     // WL3 (terminate_worker): §2.3.1 S1–S8, unchanged. `stopOwned` above

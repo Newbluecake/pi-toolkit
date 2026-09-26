@@ -173,6 +173,187 @@ describe("sha256Hex", () => {
   });
 });
 
+describe("replay-verify plan D2: JournalEntry.worktree round-trip and shape validation (§6 test 7)", () => {
+  const isoSem: TaskSemantics = { ...baseSem, isolation: "worktree" };
+  const committedWt = {
+    state: "committed" as const,
+    branch: "pi-agent-r1",
+    commit: "a".repeat(40),
+    isoId: "b".repeat(32),
+  };
+  const cleanWt = { state: "clean" as const, isoId: "c".repeat(32) };
+
+  function makeIsoEntry(worktree: JournalEntry["worktree"]): JournalEntry {
+    return buildEntry({
+      scope: "chain",
+      key: taskKeyOf(isoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: isoSem.agentType,
+      isolation: "worktree",
+      worktree,
+      value: "iso-result",
+      completedAt: 1000,
+      durationMs: 10,
+    });
+  }
+
+  it("a committed entry round-trips with a stable digest", () => {
+    const entry = makeIsoEntry(committedWt);
+    expect(entry.worktree).toEqual(committedWt);
+    const parsed = parseEntry(JSON.stringify(entry));
+    expect(parsed).toEqual(entry);
+  });
+
+  it("a clean entry round-trips (no branch/commit)", () => {
+    const entry = makeIsoEntry(cleanWt);
+    const parsed = parseEntry(JSON.stringify(entry));
+    expect(parsed).toEqual(entry);
+    expect(parsed?.worktree).toEqual(cleanWt);
+  });
+
+  it("tampering any worktree field (branch/commit/isoId/state) invalidates the digest ⇒ corrupt", () => {
+    const entry = makeIsoEntry(committedWt);
+    const line = JSON.stringify(entry);
+    for (const bad of [
+      { ...committedWt, branch: "not-a-pi-agent-branch" },
+      { ...committedWt, commit: "not-hex" },
+      { ...committedWt, isoId: "too-short" },
+      { ...committedWt, state: "bogus" },
+    ]) {
+      const tampered = { ...JSON.parse(line), worktree: bad };
+      expect(parseEntry(JSON.stringify(tampered))).toBeUndefined();
+    }
+  });
+
+  it("an illegal branch name (regex mismatch) is corrupt even with a digest recomputed over it", () => {
+    // Build a "legit" entry with an illegal branch by bypassing buildEntry's
+    // trust of its own input (buildEntry does not itself validate shape —
+    // only parseEntry does, so this simulates a foreign/future producer).
+    const illegal = { ...committedWt, branch: "feature/not-pi-agent" };
+    const fields = {
+      v: 1 as const,
+      scope: "chain" as const,
+      key: taskKeyOf(isoSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: isoSem.agentType,
+      status: "completed" as const,
+      isolation: "worktree" as const,
+      worktree: illegal,
+      value: "x",
+      completedAt: 1,
+      durationMs: 1,
+    };
+    const digest = entryDigest(fields);
+    expect(parseEntry(JSON.stringify({ ...fields, digest }))).toBeUndefined();
+  });
+
+  it("a bad commit sha (not 40/64 hex) is corrupt", () => {
+    const entry = makeIsoEntry({ ...committedWt, commit: "short" });
+    // makeIsoEntry itself doesn't validate — but the digest DOES cover the
+    // bad commit, so parseEntry must reject it on shape, not on digest.
+    expect(parseEntry(JSON.stringify(entry))).toBeUndefined();
+  });
+
+  it('a `worktree` key without `isolation:"worktree"` is corrupt (D2)', () => {
+    const entry = makeIsoEntry(committedWt);
+    const { isolation, ...rest } = entry as JournalEntry & { isolation?: unknown };
+    void isolation;
+    const withoutIsolation = { ...rest };
+    // digest was computed WITH isolation present, so this is already corrupt
+    // by digest mismatch too — assert the corrupt outcome either way.
+    expect(parseEntry(JSON.stringify(withoutIsolation))).toBeUndefined();
+  });
+
+  it("an extra/unknown key inside worktree is corrupt", () => {
+    const entry = makeIsoEntry(committedWt);
+    const withExtra = { ...JSON.parse(JSON.stringify(entry)), worktree: { ...committedWt, extra: "nope" } };
+    expect(parseEntry(JSON.stringify(withExtra))).toBeUndefined();
+  });
+
+  it("a non-isolated entry's shape/digest is unaffected by this feature (byte-identical)", () => {
+    const plain = makeEntry();
+    expect(plain.worktree).toBeUndefined();
+    const parsed = parseEntry(JSON.stringify(plain));
+    expect(parsed).toEqual(plain);
+  });
+
+  it("an OLDER parser (pre-D2, no `worktree`-awareness at all) loads a REAL on-disk journal.jsonl written by the CURRENT store: only the worktree-bearing line is corrupt, the plain sibling line reads back byte-identical", async () => {
+    // A faithful reconstruction of `parseEntry` exactly as it existed BEFORE
+    // D2 added the `worktree` field — same whitelist/digest logic, minus
+    // every worktree-related line (no `parseJournalWorktree`, `EntryDigestInput`
+    // never gets a `worktree` key, and it doesn't even special-case the raw
+    // `worktree` key's presence). This is what a not-yet-upgraded sibling
+    // process (or a rollback) would actually run.
+    function oldParseEntry(line: string): JournalEntry | undefined {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(line);
+      } catch {
+        return undefined;
+      }
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+      const r = raw as Record<string, unknown>;
+      if (r.v !== 1) return undefined;
+      if (r.scope !== "chain" && r.scope !== "content") return undefined;
+      if (typeof r.key !== "string" || typeof r.chainDigestBefore !== "string") return undefined;
+      if (typeof r.occurrence !== "number" || !Number.isFinite(r.occurrence)) return undefined;
+      if (typeof r.agentType !== "string") return undefined;
+      if (r.status !== "completed") return undefined;
+      if (r.isolation !== undefined && r.isolation !== "worktree") return undefined;
+      if (r.value !== null && typeof r.value !== "string") return undefined;
+      if (r.truncated !== undefined && r.truncated !== true) return undefined;
+      if (typeof r.completedAt !== "number" || typeof r.durationMs !== "number") return undefined;
+      if (typeof r.digest !== "string") return undefined;
+      const fields = {
+        v: 1 as const,
+        scope: r.scope,
+        key: r.key,
+        chainDigestBefore: r.chainDigestBefore,
+        occurrence: r.occurrence,
+        agentType: r.agentType,
+        status: "completed" as const,
+        ...(r.isolation !== undefined ? { isolation: r.isolation } : {}),
+        // — NO `worktree` key here: the old parser has never heard of it —
+        value: r.value,
+        completedAt: r.completedAt,
+        durationMs: r.durationMs,
+        ...(r.truncated === true ? { truncated: true as const } : {}),
+      };
+      if (entryDigest(fields as Parameters<typeof entryDigest>[0]) !== r.digest) return undefined;
+      return { ...fields, digest: r.digest } as unknown as JournalEntry;
+    }
+
+    const dir = await mkdtemp(join(tmpdir(), "wf-journal-old-parser-"));
+    try {
+      const clock = new FakeClock();
+      const store = createJournalStore({ clock });
+      const plain = makeEntry(); // no `worktree` field at all — unaffected by D2
+      const iso = makeIsoEntry(committedWt); // digest computed WITH `worktree` — the old parser can never reproduce it
+      store.append(dir, plain);
+      store.append(dir, iso);
+      await store.flush(dir, 5_000);
+      const text = await readFile(join(dir, "journal.jsonl"), "utf8");
+      const lines = text.trim().split("\n");
+      expect(lines).toHaveLength(2);
+
+      const results = lines.map((line) => oldParseEntry(line));
+      const corruptCount = results.filter((r) => r === undefined).length;
+      expect(corruptCount).toBe(1); // ONLY the worktree-bearing line
+      expect(results[0]).toEqual(plain); // sibling line reads back fine, byte-identical
+      expect(results[1]).toBeUndefined(); // the worktree line is corrupt under the old parser
+
+      // Sanity check: the CURRENT parser (which knows about `worktree`) reads BOTH lines fine —
+      // proving the corruption above is specifically an old-parser compatibility gap, not a real defect.
+      expect(parseEntry(lines[0]!)).toEqual(plain);
+      expect(parseEntry(lines[1]!)).toEqual(iso);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("JournalStore (§6.6 JS1/JS2/JS3): async append, batched flush, corrupt-line tolerance", () => {
   let dir: string;
   let clock: FakeClock;

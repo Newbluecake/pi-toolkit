@@ -127,6 +127,7 @@ describe("CC3: workflow settings", () => {
       replayTtlMs: 7 * 24 * 60 * 60 * 1_000,
       replayScope: "chain",
       runawayPolicy: "diagnose_only",
+      isolationReplay: "verify",
     });
   });
 
@@ -152,6 +153,7 @@ describe("CC3: workflow settings", () => {
       replayTtlMs: 0,
       replayScope: "content",
       runawayPolicy: "terminate_on_stall",
+      isolationReplay: "verify",
     });
   });
 

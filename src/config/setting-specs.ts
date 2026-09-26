@@ -470,6 +470,11 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["diagnose_only", "terminate_on_stall"],
     "Action when the workflow heartbeat stalls",
   ),
+  "workflow.isolationReplay": choice(
+    "workflow.isolationReplay",
+    ["verify", "off"],
+    'Verify a replayed isolation:"worktree" agent() call\'s branch still points at the recorded commit before reusing it; off restores pre-plan (always-live) behavior',
+  ),
   "workflow.journalDir": { kind: "string", path: "workflow.journalDir", description: "Workflow journal directory" },
   ...WORKFLOW_BUDGET_SPECS,
   // bash auto-background (§6): v1 exposes the numeric knobs plus the shutdown

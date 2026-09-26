@@ -488,3 +488,82 @@ describe("workflow-agent-queue: replay with queued agent() calls (real worker, r
     expect(run2.spawnedPrompts).toEqual(["slow", "queued 1", "queued 2"]);
   }, 15_000);
 });
+
+/**
+ * replay-verify plan §6 P2 test 17: real orchestrator + real worker + real
+ * journal.jsonl on disk, for an `agent(prompt, {isolation:"worktree"})`
+ * call under `workflow.isolationReplay: "verify"` — three runs: live write,
+ * verified hit, and a corrupt-line check against a real on-disk entry.
+ */
+function makeIsolatedSpawner(opts: { verified: boolean; branch?: string; commit?: string }): {
+  spawner: ChildSpawner;
+  spawnedPrompts: string[];
+} {
+  const spawnedPrompts: string[] = [];
+  let n = 0;
+  const branch = opts.branch ?? "pi-agent-r1";
+  const commit = opts.commit ?? "a".repeat(40);
+  const spawner: ChildSpawner = {
+    spawn: async (req) => {
+      spawnedPrompts.push(req.prompt);
+      return { runId: `r${++n}` };
+    },
+    abort: async () => true,
+    waitAll: async ({ runIds }) => ({
+      settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: `done:${runId}` })),
+      pending: [],
+    }),
+    configHashOf: (type) => `cfg:${type}`,
+    worktreeAvailable: () => true,
+    isolationReplayMode: () => "verify",
+    isolationCwd: () => "/fake/repo",
+    awaitWorktree: async () => ({ state: "committed", branch, commit }),
+    probeAgentBranches: async (branches) => ({
+      ok: true,
+      tips: new Map(opts.verified ? branches.map((b) => [`refs/heads/${b}`, commit]) : []),
+    }),
+  };
+  return { spawner, spawnedPrompts };
+}
+
+describe("replay-verify plan §6 P2 test 17: isolated agent() through the real orchestrator/journal", () => {
+  it("run 1 writes (live); run 2 (verified) hits with zero spawns; a hand-corrupted line degrades run 3 to live", async () => {
+    const script = scriptWith(
+      'const a = await agent("iso task", { isolation: "worktree" }); const b = await agent("plain task"); return a + "|" + b;',
+    );
+    const run1 = makeIsolatedSpawner({ verified: false }); // nothing to verify yet — first run
+    const outcome1 = await runWithJournal(script, run1.spawner);
+    expect(outcome1.status).toBe("completed");
+    expect(run1.spawnedPrompts).toEqual(["iso task", "plain task"]);
+    expect(outcome1.replay?.hits).toBe(0);
+
+    const journalPath = join(journalRootDir, "j1", "journal.jsonl");
+    const linesAfterRun1 = (await readFile(journalPath, "utf8")).trim().split("\n");
+    expect(linesAfterRun1).toHaveLength(2); // isolated (committed) + plain both wrote
+
+    const run2 = makeIsolatedSpawner({ verified: true });
+    const outcome2 = await runWithJournal(script, run2.spawner);
+    expect(outcome2.status).toBe("completed");
+    expect(run2.spawnedPrompts).toEqual([]); // fully replayed — isolated hit + downstream hit
+    expect(outcome2.replay?.hits).toBe(2);
+    expect(outcome2.result).toBe(outcome1.result);
+
+    // Hand-corrupt the isolated entry's `value` without touching its digest — a foreign/old-parser
+    // shaped tamper — and confirm run 3 degrades that ONE line to corrupt while the other still hits.
+    const lines = (await readFile(journalPath, "utf8")).trim().split("\n");
+    const tampered = lines.map((line) => {
+      const obj = JSON.parse(line) as { isolation?: string; value?: string };
+      if (obj.isolation === "worktree") obj.value = "tampered-without-digest-update";
+      return JSON.stringify(obj);
+    });
+    await writeFile(journalPath, tampered.join("\n") + "\n", "utf8");
+
+    const run3 = makeIsolatedSpawner({ verified: true });
+    const outcome3 = await runWithJournal(script, run3.spawner);
+    expect(outcome3.replay?.corruptLines).toBe(1);
+    // The isolated call itself must go live again (its entry is now corrupt);
+    // its downstream sibling, whose OWN entry is untouched, still depends on
+    // the isolated call's fresh (this-run) fold, so it also misses/re-writes.
+    expect(run3.spawnedPrompts).toEqual(["iso task", "plain task"]);
+  }, 20_000);
+});

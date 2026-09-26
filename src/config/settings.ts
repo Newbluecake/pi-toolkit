@@ -101,6 +101,18 @@ export interface WorkflowSettings {
   replayTtlMs: number;
   replayScope: "chain" | "content";
   runawayPolicy: RunawayPolicy;
+  /**
+   * replay-verify plan D9 (用户确认 1): whether a replayed `isolation:
+   * "worktree"` call's journaled branch is checked against a load-time
+   * snapshot before being reused. `"verify"` (default): only a `committed`
+   * entry whose `pi-agent-<runId>` branch still exists and points EXACTLY at
+   * the recorded commit at run start may be replayed; `clean` entries are
+   * never checked (D3.1: same non-checking semantics as an ordinary call).
+   * `"off"` restores the pre-plan behavior byte-for-byte (an isolated call
+   * is unconditionally live, never journaled) — see the plan's D9 for the
+   * exact scope of that guarantee.
+   */
+  isolationReplay: "verify" | "off";
 }
 
 /**
@@ -605,6 +617,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     replayTtlMs: 7 * 24 * 60 * 60 * 1_000,
     replayScope: "chain",
     runawayPolicy: "diagnose_only",
+    isolationReplay: "verify",
   },
   bashJobs: {
     autoBackgroundMs: 290_000,
@@ -1660,6 +1673,10 @@ function parseWorkflowSettings(input: unknown): WorkflowSettings {
       value.runawayPolicy === "diagnose_only" || value.runawayPolicy === "terminate_on_stall"
         ? value.runawayPolicy
         : defaults.runawayPolicy,
+    isolationReplay:
+      value.isolationReplay === "verify" || value.isolationReplay === "off"
+        ? value.isolationReplay
+        : defaults.isolationReplay,
   };
 }
 
@@ -1736,6 +1753,20 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
         `[pi-subagent] workflow.budget.workflowTotalS must be > 0 (got ${rawWorkflowTotalS}); using the default ${
           DEFAULT_WORKFLOW_BUDGET.workflowTotalMs / 1000
         }s`,
+      );
+    }
+    // replay-verify-plan D9: an illegal workflow.isolationReplay falls back to the
+    // default ('verify') at parse time (parseWorkflowSettings), same as every other
+    // choice/number field — but D9 requires an explicit WARN ("回落并 WARN"), unlike
+    // the silent field-by-field fallback the rest of loadSettings uses. WARN here once,
+    // mirroring the workflowTotalS pattern above.
+    const rawIsolationReplay =
+      workflowBlock && typeof workflowBlock === "object"
+        ? (workflowBlock as Record<string, unknown>).isolationReplay
+        : undefined;
+    if (rawIsolationReplay !== undefined && rawIsolationReplay !== "verify" && rawIsolationReplay !== "off") {
+      console.warn(
+        `[pi-subagent] invalid workflow.isolationReplay ${JSON.stringify(rawIsolationReplay)} (expected "verify" or "off"); using the default "${DEFAULT_SETTINGS.workflow.isolationReplay}"`,
       );
     }
     return loadSettings(cache.value);

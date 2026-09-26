@@ -129,3 +129,90 @@ describe("loadSettingsFromFile: workflow.budget.workflowTotalS WARN", () => {
     }
   });
 });
+
+describe("replay-verify plan D9: workflow.isolationReplay setting", () => {
+  it("defaults to 'verify'", () => {
+    expect(DEFAULT_SETTINGS.workflow.isolationReplay).toBe("verify");
+    expect(loadSettings(undefined).workflow.isolationReplay).toBe("verify");
+  });
+
+  it("accepts 'off'", () => {
+    expect(loadSettings({ workflow: { isolationReplay: "off" } }).workflow.isolationReplay).toBe("off");
+  });
+
+  it("falls back to the default on an illegal value, without throwing", () => {
+    expect(loadSettings({ workflow: { isolationReplay: "bogus" } }).workflow.isolationReplay).toBe("verify");
+    expect(loadSettings({ workflow: { isolationReplay: 1 } }).workflow.isolationReplay).toBe("verify");
+  });
+
+  it("the setting spec exists with the two legal choices", () => {
+    expect(SETTING_SPECS["workflow.isolationReplay"]).toMatchObject({
+      kind: "enum",
+      path: "workflow.isolationReplay",
+      values: ["verify", "off"],
+    });
+  });
+});
+
+describe("loadSettingsFromFile: workflow.isolationReplay WARN (D9 \u56de\u843d\u5e76 WARN)", () => {
+  let dir: string;
+  let path: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "pi-subagent-workflow-isoreplay-"));
+    path = join(dir, "settings.json");
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("warns exactly once and falls back to the default on an illegal string value", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const content = JSON.stringify({ workflow: { isolationReplay: "bogus" } }, null, 2);
+      writeFileSync(path, content, "utf8");
+      const s = loadSettingsFromFile(path);
+      expect(s.workflow.isolationReplay).toBe("verify");
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain('invalid workflow.isolationReplay "bogus"');
+      expect(warn.mock.calls[0]?.[0]).toContain('using the default "verify"');
+      // WARN-only, no file rewrite (same contract as the workflowTotalS WARN above).
+      expect(readFileSync(path, "utf8")).toBe(content);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns for a non-string illegal value too", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      writeFileSync(path, JSON.stringify({ workflow: { isolationReplay: 1 } }), "utf8");
+      const s = loadSettingsFromFile(path);
+      expect(s.workflow.isolationReplay).toBe("verify");
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not warn for a legal value ('off')", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      writeFileSync(path, JSON.stringify({ workflow: { isolationReplay: "off" } }), "utf8");
+      expect(loadSettingsFromFile(path).workflow.isolationReplay).toBe("off");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not warn when the key is absent", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      writeFileSync(path, JSON.stringify({ workflow: { enabled: true } }), "utf8");
+      expect(loadSettingsFromFile(path).workflow.isolationReplay).toBe("verify");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

@@ -100,6 +100,8 @@ export interface BuildEntryInput {
   readonly occurrence: number;
   readonly agentType: string;
   readonly isolation?: "worktree";
+  /** replay-verify plan D2: only meaningful (and only ever passed) alongside `isolation:"worktree"`. */
+  readonly worktree?: JournalEntry["worktree"];
   readonly value: string | null;
   readonly completedAt: Millis;
   readonly durationMs: Millis;
@@ -119,6 +121,7 @@ export function buildEntry(input: BuildEntryInput): JournalEntry {
     agentType: input.agentType,
     status: "completed",
     ...(input.isolation !== undefined ? { isolation: input.isolation } : {}),
+    ...(input.worktree !== undefined ? { worktree: input.worktree } : {}),
     value,
     completedAt: input.completedAt,
     durationMs: input.durationMs,
@@ -129,6 +132,47 @@ export function buildEntry(input: BuildEntryInput): JournalEntry {
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** replay-verify plan D2: `pi-agent-<safe runId>` (worktree.ts's `safeRunId`), capped generously — a corrupt/foreign branch name must never round-trip. */
+const REPLAY_BRANCH_RE = /^pi-agent-[A-Za-z0-9._-]{1,200}$/;
+/** 40 (sha1) or 64 (sha256) lowercase hex chars — a real `git rev-parse HEAD` output, never anything else. */
+const REPLAY_COMMIT_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+/** replay-verify plan D6: the folded live-run identity, `sha256Hex(...).slice(0, 32)` — 32 lowercase hex chars. */
+const REPLAY_ISO_ID_RE = /^[0-9a-f]{32}$/;
+
+/**
+ * replay-verify plan D2: shape-validates a raw `worktree` value against the
+ * `isolation` field it rode in on. Returns `undefined` for "absent" (valid,
+ * common case) and also for "present but malformed" — the caller
+ * (`parseEntry`) cannot tell those two apart from this return value alone,
+ * so it re-checks `raw.worktree !== undefined` itself before trusting an
+ * `undefined` result as "this entry legitimately has none".
+ */
+function parseJournalWorktree(rawIsolation: unknown, rawWorktree: unknown): JournalEntry["worktree"] | undefined {
+  if (rawWorktree === undefined) return undefined;
+  // A `worktree` field only ever rides alongside isolation:"worktree" — any
+  // other pairing (including a bare `isolation` absence) is a foreign/
+  // hand-edited shape and must corrupt, not silently drop the field.
+  if (rawIsolation !== "worktree") return undefined;
+  if (!isPlainRecord(rawWorktree)) return undefined;
+  const isoId = rawWorktree.isoId;
+  if (typeof isoId !== "string" || !REPLAY_ISO_ID_RE.test(isoId)) return undefined;
+  if (rawWorktree.state === "committed") {
+    const branch = rawWorktree.branch;
+    const commit = rawWorktree.commit;
+    if (typeof branch !== "string" || !REPLAY_BRANCH_RE.test(branch)) return undefined;
+    if (typeof commit !== "string" || !REPLAY_COMMIT_RE.test(commit)) return undefined;
+    const allowed = new Set(["state", "branch", "commit", "isoId"]);
+    if (Object.keys(rawWorktree).some((k) => !allowed.has(k))) return undefined;
+    return { state: "committed", branch, commit, isoId };
+  }
+  if (rawWorktree.state === "clean") {
+    const allowed = new Set(["state", "isoId"]);
+    if (Object.keys(rawWorktree).some((k) => !allowed.has(k))) return undefined;
+    return { state: "clean", isoId };
+  }
+  return undefined; // unknown state — fail-closed to corrupt.
 }
 
 /** Runtime shape guard (a hand-edited/foreign-tool-produced line can be arbitrary JSON) + RP4 digest re-verification, combined — either failure demotes the line to "corrupt" (never partially trusted). */
@@ -147,6 +191,11 @@ export function parseEntry(line: string): JournalEntry | undefined {
   if (typeof raw.agentType !== "string") return undefined;
   if (raw.status !== "completed") return undefined;
   if (raw.isolation !== undefined && raw.isolation !== "worktree") return undefined;
+  // replay-verify plan D2: a `worktree` key present but malformed (or paired
+  // with a non-"worktree" isolation) must corrupt the whole line — never
+  // silently drop the field and parse the rest as if it were a plain entry.
+  const worktree = parseJournalWorktree(raw.isolation, raw.worktree);
+  if (raw.worktree !== undefined && worktree === undefined) return undefined;
   if (raw.value !== null && typeof raw.value !== "string") return undefined;
   if (raw.truncated !== undefined && raw.truncated !== true) return undefined;
   if (typeof raw.completedAt !== "number" || typeof raw.durationMs !== "number") return undefined;
@@ -161,6 +210,7 @@ export function parseEntry(line: string): JournalEntry | undefined {
     agentType: raw.agentType,
     status: "completed",
     ...(raw.isolation !== undefined ? { isolation: raw.isolation } : {}),
+    ...(worktree !== undefined ? { worktree } : {}),
     value: raw.value,
     completedAt: raw.completedAt,
     durationMs: raw.durationMs,
