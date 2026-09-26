@@ -38,6 +38,8 @@ import {
 import { createProcessPort } from "./bash/process.js";
 import { previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
+import { getChildBashRegistry, type HostRunView } from "./bash/child-registry.js";
+import { dueAtFor, effectiveDeadlineAt } from "./core/deadline.js";
 import { formatDuration } from "./ui/fleet-panel.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type {
@@ -163,6 +165,14 @@ let previousAckHold: Coalescer | undefined;
  * adopt the still-running jobs and own the single notification channel.
  */
 let previousBashJobs: BashJobManager | undefined;
+/**
+ * bash-timeout-grace plan §2.5 step 4/6 (P5): the previous stack's bash-job
+ * recovery/cleanup dual-timer handle (see `scheduleBashJobRecovery` below),
+ * disposed at the top of the next build — same dual-path discipline as
+ * `previousBashJobs`/`previousFleetWidget` (the OTHER path is index.ts's
+ * `session_shutdown` calling `Stack.bashJobRecovery.dispose()` directly).
+ */
+let previousBashJobRecovery: { dispose(): void } | undefined;
 let previousFabricMailbox: ReturnType<typeof createFabricMailbox> | undefined;
 /** cache-ttl keepalive (plan.md §2.2): same rebuild-dispose pattern as the usage broadcaster. */
 let previousKeepalive: CacheKeepaliveService | undefined;
@@ -192,6 +202,44 @@ export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
 /** Output tail attached to a completion notice (§5). */
 export const BASH_JOB_TAIL_BYTES = 1024;
 export const BASH_JOB_TAIL_LINES = 10;
+/** bash-timeout-grace plan §3.2/§3.3 (P5): SIGTERM→SIGKILL grace for a sealed
+ *  child session's still-running jobs — same value as `DEFAULT_KILL_GRACE_MS`
+ *  (src/bash/process.ts), kept as an independent local constant so this
+ *  meaning ("how long a just-ended run's jobs get to exit cleanly") does not
+ *  drift with the manager's own per-call default. */
+export const BASH_JOB_SEAL_GRACE_MS = 2_000;
+/** bash-timeout-grace plan §3.6 (P5): half of `MARGIN_RETURN_MS` (bash-tool.ts) — a return that lands past this many ms after `noteToolReturn` warrants a one-time boundary-lag warning. */
+export const BASH_JOB_TOOL_LAG_WARN_MS = 1_500;
+
+/**
+ * bash-timeout-grace plan §3.6 (P5, T32): pure correlation step — for every
+ * `ToolCallRecord` in `toolHistory` that has both ended (`endedAt` set) and a
+ * pending `noteToolReturn(toolCallId, at)` entry, computes the return lag
+ * (`endedAt - at`), removes the entry from `pending` (matched once, never
+ * re-checked), and warns exactly once per `toolCallId` when the lag exceeds
+ * `BASH_JOB_TOOL_LAG_WARN_MS`. Mutates `pending`/`warned` in place (both are
+ * the caller's own bounded bookkeeping maps/sets) and never throws.
+ */
+export function checkBashToolReturnLag(
+  pending: Map<string, number>,
+  warned: Set<string>,
+  toolHistory: readonly { toolCallId: string; endedAt?: number }[] | undefined,
+  warn: (message: string) => void,
+): void {
+  if (pending.size === 0 || !toolHistory) return;
+  for (const call of toolHistory) {
+    const at = pending.get(call.toolCallId);
+    if (at === undefined || call.endedAt === undefined) continue;
+    pending.delete(call.toolCallId);
+    const lag = call.endedAt - at;
+    if (lag > BASH_JOB_TOOL_LAG_WARN_MS && !warned.has(call.toolCallId)) {
+      warned.add(call.toolCallId);
+      warn(
+        `bash auto-background return lag ${(lag / 1000).toFixed(1)}s (boundary ${(BASH_JOB_TOOL_LAG_WARN_MS * 2) / 1000}s)`,
+      );
+    }
+  }
+}
 
 /**
  * §2.5/§2.6 (R6): the whole bash-job subsystem is off on win32 (no process
@@ -393,7 +441,7 @@ function buildFabric(
   return { engine, tree, router, mailbox };
 }
 
-function currentSessionId(ctx: ExtensionContext): string {
+export function currentSessionId(ctx: ExtensionContext): string {
   try {
     return (ctx.sessionManager as { getSessionId?: () => string } | undefined)?.getSessionId?.() ?? "";
   } catch {
@@ -485,6 +533,85 @@ function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: 
   });
   managerRef.current = manager;
   return manager;
+}
+
+/** bash-timeout-grace plan §2.5 step 4/6 (P5): unref'd, default 10s. */
+export const BASH_JOB_RECOVERY_DEADLINE_MS = 10_000;
+/** bash-timeout-grace plan §2.5 step 6 (P5): unref'd, default 30s. */
+export const BASH_JOB_RECONCILE_DEADLINE_MS = 30_000;
+
+/**
+ * bash-timeout-grace plan §2.5 step 4/6 (P5, “实施偏差记录” 2026-09-26): orchestrates
+ * the two independent, unref'd `AbortController`-bounded phases of a stack
+ * rebuild's bash-job recovery.
+ *
+ * `runRecovery` (crash-handoff adopt / migrate / `recover()`) is bounded by
+ * `recoveryDeadlineMs` (default `BASH_JOB_RECOVERY_DEADLINE_MS`). Only once it
+ * SETTLES (resolves or rejects) WITHOUT having been aborted (by its own timer
+ * OR by `dispose()`) does `runCleanup` (directory reconciliation) get armed,
+ * with its OWN fresh `AbortController` ("用户确认（v6）" P3 note: an already-
+ * aborted controller cannot be rearmed — both controllers are created
+ * up-front here instead, so `dispose()` can always abort both, even the one
+ * whose phase has not started yet).
+ *
+ * `dispose()` aborts whichever phase(s) are still outstanding; idempotent,
+ * safe to call more than once or after both phases have already settled.
+ * Three orderings (T31): (a) recovery settles before its deadline ⇒ cleanup
+ * is armed and runs its own bounded phase; (b) recovery's OWN timer fires
+ * first ⇒ cleanup is never armed, `runCleanup` is never called, one warn;
+ * (c) `dispose()` during recovery ⇒ both signals end up aborted, cleanup is
+ * never armed; (d) `dispose()` during cleanup ⇒ only the cleanup signal is
+ * (newly) aborted, its in-flight call sees it at its next checkpoint.
+ */
+export function scheduleBashJobRecovery(opts: {
+  runRecovery: (signal: AbortSignal) => Promise<void>;
+  runCleanup: (signal: AbortSignal) => Promise<void>;
+  recoveryDeadlineMs?: number;
+  reconcileDeadlineMs?: number;
+  warn?: (message: string) => void;
+}): { dispose(): void } {
+  const warn = opts.warn ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
+  const recovery = new AbortController();
+  const cleanup = new AbortController();
+  let disposed = false;
+
+  const recoveryTimer = setTimeout(() => recovery.abort(), opts.recoveryDeadlineMs ?? BASH_JOB_RECOVERY_DEADLINE_MS);
+  recoveryTimer.unref?.();
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+
+  void opts
+    .runRecovery(recovery.signal)
+    .catch((error: unknown) => {
+      warn(`bash job recovery failed (jobs stay unadopted): ${String(error)}`);
+    })
+    .finally(() => {
+      clearTimeout(recoveryTimer);
+      if (disposed) return; // dispose() already aborted `cleanup` above; nothing left to arm.
+      if (recovery.signal.aborted) {
+        warn("bash job recovery cancelled (timeout|superseded); skipping this session's directory reconciliation");
+        return;
+      }
+      cleanupTimer = setTimeout(() => cleanup.abort(), opts.reconcileDeadlineMs ?? BASH_JOB_RECONCILE_DEADLINE_MS);
+      cleanupTimer.unref?.();
+      void opts
+        .runCleanup(cleanup.signal)
+        .catch((error: unknown) => {
+          warn(`bash job directory reconciliation failed: ${String(error)}`);
+        })
+        .finally(() => {
+          if (cleanupTimer !== undefined) clearTimeout(cleanupTimer);
+        });
+    });
+
+  return {
+    dispose(): void {
+      disposed = true;
+      clearTimeout(recoveryTimer);
+      recovery.abort();
+      if (cleanupTimer !== undefined) clearTimeout(cleanupTimer);
+      cleanup.abort();
+    },
+  };
 }
 
 export interface WorkflowSupport {
@@ -607,6 +734,14 @@ export interface Stack {
   fleetWidget?: FleetWidgetController;
   /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
   bashJobs?: BashJobManager;
+  /**
+   * bash-timeout-grace plan §2.5 step 4/6 (P5): this stack's recovery/cleanup
+   * dual-timer handle (absent iff `bashJobs` itself is absent). `dispose()`
+   * aborts whichever phase is still outstanding — called at the top of the
+   * NEXT `buildSessionStack` (module-level handoff, above) AND by index.ts's
+   * `session_shutdown` (covers the fresh-module `/reload` case).
+   */
+  bashJobRecovery?: { dispose(): void };
   fabric?: { dispose(): void; pump(): void };
   /** 提示词缓存保活调度器（plan.md §2）；settings.cacheTtl.keepalive=false 时缺席。 */
   keepalive?: CacheKeepaliveService;
@@ -1037,6 +1172,10 @@ export function buildSessionStack(
   const prevBashJobs = previousBashJobs;
   prevBashJobs?.dispose();
   previousBashJobs = undefined;
+  // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever of the
+  // previous stack's recovery/cleanup phases is still outstanding.
+  previousBashJobRecovery?.dispose();
+  previousBashJobRecovery = undefined;
   previousFabricMailbox?.dispose();
   previousFabricMailbox = undefined;
   previousKeepalive?.dispose();
@@ -1365,6 +1504,40 @@ export function buildSessionStack(
   // which are only constructed after this runner, so the adapter deps below
   // are indirections through this ref, filled in once wireConsult runs.
   const consultRef: { current?: ConsultWiring } = {};
+  // bash-timeout-grace plan §3.1-3.3 (P5): the process-global registry the
+  // child (subagent) session's own bash job manager registers into
+  // (src/bash/child.ts). `query` is referenced by closures below that only
+  // ever run later (async, once a real run exists) — by then it holds the
+  // value assigned further down in this same function (same forward-
+  // reference pattern as spawnRef/consultRef above).
+  const childBashRegistry = getChildBashRegistry();
+  const pendingToolReturns = new Map<string, number>();
+  const warnedToolLag = new Set<string>();
+  const hostViewFor = (runId: RunId): HostRunView => ({
+    runId,
+    watchdogDueAt: () => {
+      const snapshot = query.get(runId);
+      if (!snapshot) return undefined;
+      const dueAt = dueAtFor(snapshot.phase, snapshot.diag, settings.budget);
+      const effAt = effectiveDeadlineAt(snapshot.deadlines);
+      if (dueAt === undefined) return effAt;
+      if (effAt === undefined) return dueAt;
+      return Math.min(dueAt, effAt);
+    },
+    hardDeadlineAt: () => query.get(runId)?.deadlines.hardDeadlineAt,
+    maxExtensions: () => settings.budget.maxExtensions,
+    stopping: () => query.get(runId)?.status === "stopping",
+    noteToolReturn: (toolCallId, at) => {
+      // §3.6 boundary telemetry — bounded the same way as every other
+      // bookkeeping map in this codebase (a stuck/never-returning tool call
+      // must not pin this map forever).
+      if (pendingToolReturns.size >= 256) {
+        const oldest = pendingToolReturns.keys().next();
+        if (!oldest.done) pendingToolReturns.delete(oldest.value);
+      }
+      pendingToolReturns.set(toolCallId, at);
+    },
+  });
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,
     driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
@@ -1399,7 +1572,25 @@ export function buildSessionStack(
       if (!consultRef.current) throw new Error("consult is not wired yet");
       return consultRef.current.resolveExperts(refs);
     },
-    onReaped: (runId, forkSessionFrom) => consultRef.current?.onReaped(runId, forkSessionFrom),
+    onReaped: (runId, forkSessionFrom, sessionId) => {
+      consultRef.current?.onReaped(runId, forkSessionFrom);
+      // bash-timeout-grace plan §3.2 (P5): defensive fan-out — `sealAndKill`
+      // is idempotent, so this is a no-op for the (normal) case where
+      // `sealBeforeTerminal` already sealed the session; it only matters for
+      // the two late-arrival paths (E18), which never had a chance to run
+      // through the runner's own `sealBeforeTerminal` first.
+      if (sessionId !== undefined) childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS);
+    },
+    sealSession: (runId, sessionId) => childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS)?.facts,
+    onSessionSeen: (runId, sessionId) => {
+      childBashRegistry.attachHost(sessionId, hostViewFor(runId));
+      // §3.6 boundary telemetry: correlate any pending noteToolReturn calls
+      // against this run's tool history once it is observable.
+      checkBashToolReturnLag(pendingToolReturns, warnedToolLag, query.get(runId)?.diag.toolHistory, (message) =>
+        console.warn(`[pi-subagent] ${message}`),
+      );
+    },
+    childBashJobsEnabled: settings.bashJobs.childSessions,
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const spawn = createSpawnService({
@@ -1841,6 +2032,7 @@ export function buildSessionStack(
   const rpc = createRPCServer({ events: pi.events, spawn, query });
   // §3.6: prepare the session directory before recover so migrated/orphaned
   // records enter the normal adjudication and notification path.
+  let bashJobRecovery: { dispose(): void } | undefined;
   if (bashJobs) {
     const rootDir = settings.bashJobs.dir ?? join(getAgentDir(), "bash-jobs");
     const selfDirName = sanitizeSessionDirName(currentSessionId(ctx));
@@ -1858,29 +2050,40 @@ export function buildSessionStack(
       skipDirNames: [selfDirName],
       warn: (message: string) => console.warn(`[pi-subagent] ${message}`),
     } as const;
-    void (async () => {
-      await migrateFlatRecords(dirOptions, selfDirName);
-      await migrateFlatRecords(dirOptions, undefined, [selfDirName]);
-      if (prevBashJobs) await handoffInProcess(prevBashJobs, bashJobs, dirOptions);
-      await adoptOrphans(dirOptions, prevBashJobs ? [basename(prevBashJobs.dir)] : []);
-      await bashJobs.recover();
-      if (prevBashJobs && prevBashJobs.dir !== bashJobs.dir) {
-        await prevBashJobs.drain();
-        await sweepHandoffRemnants(
-          prevBashJobs.dir,
-          new Set(bashJobs.list().map((record) => record.jobId)),
-          dirOptions,
-        );
-      }
-    })()
-      .catch((error: unknown) => {
-        console.warn(`[pi-subagent] bash job recovery failed (jobs stay unadopted): ${String(error)}`);
-      })
-      .finally(() => widgetRef.current?.refresh());
-    void reconcileRootDir(dirOptions).catch((error: unknown) => {
-      console.warn(`[pi-subagent] bash job directory reconciliation failed: ${String(error)}`);
+    bashJobRecovery = scheduleBashJobRecovery({
+      runRecovery: async (signal) => {
+        // bash-timeout-grace plan §2.5 steps 1/2 (P5): the crash-handoff
+        // sync prefix (`previous.exportLocalJobs()` → `current.adoptLocalJobs()`,
+        // both purely in-memory, no I/O — `handoffInProcess`'s own doc comment)
+        // runs FIRST, before any of the awaited I/O below — so even if
+        // `migrateFlatRecords`/`adoptOrphans`/`recover()` hang forever on a
+        // slow/broken filesystem, a job handed off from the previous stack
+        // already has its deadline timer rearmed on `bashJobs` by the time
+        // this function's first `await` suspends (T12).
+        try {
+          if (prevBashJobs) await handoffInProcess(prevBashJobs, bashJobs, dirOptions, signal);
+          await migrateFlatRecords(dirOptions, selfDirName, undefined, signal);
+          await migrateFlatRecords(dirOptions, undefined, [selfDirName], signal);
+          await adoptOrphans(dirOptions, prevBashJobs ? [basename(prevBashJobs.dir)] : [], signal);
+          await bashJobs.recover(signal);
+          if (prevBashJobs && prevBashJobs.dir !== bashJobs.dir) {
+            await prevBashJobs.drain();
+            await sweepHandoffRemnants(
+              prevBashJobs.dir,
+              new Set(bashJobs.list().map((record) => record.jobId)),
+              dirOptions,
+              signal,
+            );
+          }
+        } finally {
+          widgetRef.current?.refresh();
+        }
+      },
+      runCleanup: (signal) => reconcileRootDir(dirOptions, signal),
+      warn: (message) => console.warn(`[pi-subagent] ${message}`),
     });
   }
+  previousBashJobRecovery = bashJobRecovery;
 
   // M3.6 (CC3, §11 M3.6): the workflow engine's session-lifetime pieces —
   // built unconditionally (cheap: a spawner adapter closure + a budget
@@ -2002,6 +2205,7 @@ export function buildSessionStack(
     worktreeLate,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
+    ...(bashJobRecovery ? { bashJobRecovery } : {}),
     ...(keepalive ? { keepalive } : {}),
     ...(adaptive ? { adaptive } : {}),
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),

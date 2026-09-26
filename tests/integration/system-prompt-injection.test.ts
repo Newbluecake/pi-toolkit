@@ -237,6 +237,11 @@ describe("wiring: available agent types are injected into the system prompt", ()
     // session_compact / model_select / session_tree / turn_start /
     // agent_settled) — but never the strictly host-only hooks/tools that
     // register past the HOST_KEY guard (e.g. /goal's agent_end).
+    // bash-timeout-grace plan §3.4/§3.5 (P5): `agent_before_settle` joins this
+    // set too — `wireChildBashJobs` registers it pre-guard (default settings:
+    // `bashJobs.childSessions`/`childSettleHold` both true) for the settle-
+    // hold hook, which is inert (returns undefined) until a bash call is
+    // ever made in that child session.
     expect(child.handlers.has("agent_end")).toBe(false);
     const childHook = child.handlers.get("before_agent_start")?.[0];
     expect(childHook!({ systemPrompt: "BASE" }, {})).toBeUndefined(); // present but inert (no sections registered)
@@ -251,6 +256,7 @@ describe("wiring: available agent types are injected into the system prompt", ()
         "model_select",
         "turn_start",
         "agent_settled",
+        "agent_before_settle",
       ]).toContain(event);
     }
 

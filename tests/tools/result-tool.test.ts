@@ -264,6 +264,41 @@ describe("X9 get_subagent_result usage output", () => {
   });
 });
 
+describe("bash-timeout-grace plan \u00a73.7/T25 (P5): formatOutcome renders diag.exitFacts", () => {
+  it("appends the exit-facts trailer for a completed run with still-running bash jobs", async () => {
+    const snap = completedSnapshot();
+    snap.outcome!.diag.exitFacts = {
+      bashJobs: [
+        {
+          jobId: "j_1",
+          commandPreview: "sleep 30",
+          state: "terminating",
+          exitCode: null,
+          logPath: "/tmp/j_1.log",
+          durationMs: 5_000,
+          seen: false,
+        },
+      ],
+    };
+    const query = queryForSnapshot(snap);
+    const tool = createResultTool({ query });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("Background bash jobs at exit");
+    expect(text).toContain("j_1");
+    expect(text).toContain("terminating");
+  });
+
+  it("omits the trailer entirely when there are no exit facts (byte-identical to today otherwise)", async () => {
+    const snap = completedSnapshot();
+    const query = queryForSnapshot(snap);
+    const tool = createResultTool({ query });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).not.toContain("Background bash jobs");
+  });
+});
+
 describe("structured result + progress", () => {
   const queryFor = (snapshot: RunSnapshot): QueryService => ({
     get: () => snapshot,

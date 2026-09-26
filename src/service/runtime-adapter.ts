@@ -9,6 +9,7 @@ import type {
   LifecycleEvent,
   RunDiagnostics,
   RunEffect,
+  RunExitFacts,
   RunId,
   RunOutcome,
   RunSnapshot,
@@ -33,7 +34,12 @@ import {
 import type { Reaper } from "../runtime/reaper.js";
 import type { SessionDriver } from "../runtime/session-driver.js";
 import type { SlotPool } from "../runtime/slot-pool.js";
-import { buildToolScopePolicy, CONSULT_READONLY_TOOLS, createToolScopeEnforcer } from "../runtime/tool-scope.js";
+import {
+  buildToolScopePolicy,
+  bashJobGrant,
+  CONSULT_READONLY_TOOLS,
+  createToolScopeEnforcer,
+} from "../runtime/tool-scope.js";
 import type { Watchdog } from "../runtime/watchdog.js";
 import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
@@ -129,7 +135,33 @@ export interface RuntimeAdapterDeps {
    * those never reach the runner's own finally, so the fork copy would leak
    * to the 24h sweep without this second call site. Must be idempotent.
    */
-  onReaped?: (runId: RunId, forkSessionFrom?: string) => void;
+  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string) => void;
+  /**
+   * bash-timeout-grace plan §3.2 (P5 wiring of the P0b-frozen `RunnerDeps`
+   * field): forwarded verbatim to `RunnerDeps.sealSession` — `sealBeforeTerminal`
+   * calls this synchronously, exactly once per (runId, generation), before the
+   * FIRST terminal reducer input, so the returned `RunExitFacts` (if any) can
+   * be folded into `diag.exitFacts` before the run settles (I-SEAL).
+   */
+  sealSession?: (runId: RunId, sessionId: string) => RunExitFacts | undefined;
+  /**
+   * bash-timeout-grace plan §3.4 (P5): called every time `onStateChange` sees
+   * a defined `state.sessionId` for a run (not just the first time — the
+   * callee, `src/stack.ts`'s `attachHost`, is itself idempotent/cheap). Lets
+   * the host attach a `HostRunView` (watchdog due date / hard deadline /
+   * maxExtensions / stopping / tool-return-lag telemetry) into the process-
+   * global `ChildBashRegistry` for the child session's own bash tools to read.
+   */
+  onSessionSeen?: (runId: RunId, sessionId: string) => void;
+  /**
+   * bash-timeout-grace plan §3.10: the `bashJobs.childSessions` setting gate,
+   * captured once per stack build (never changes mid-session) — feeds
+   * `bashJobGrant` below so a spawned child's agent type deciding it declares
+   * `tools` (or none) determines whether `bash_job` is added to
+   * `grantedReserved` (and, when the type restricts `tools`, merged into
+   * `sessionSpec.tools`) for that particular run.
+   */
+  childBashJobsEnabled?: boolean;
 }
 
 /**
@@ -372,6 +404,17 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         }
       : {}), // H3
     onStateChange: (runId, state) => {
+      // bash-timeout-grace plan §3.4 (P5): fires on every state change, not
+      // gated behind `perRun`'s onSnapshot callback — the child bash job
+      // registry must see `state.sessionId` as soon as it exists regardless
+      // of whether this particular run wired a live snapshot observer.
+      if (state.sessionId !== undefined) {
+        try {
+          deps.onSessionSeen?.(runId, state.sessionId);
+        } catch (error) {
+          console.warn(`[pi-subagent] onSessionSeen failed for run ${runId} (ignored): ${error}`);
+        }
+      }
       const cb = perRun.get(runId)?.onSnapshot;
       if (!cb) return;
       cb({
@@ -401,6 +444,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     // `onReaped(runId, forkSessionFrom?)`); spreading it here is a no-op
     // until B lands (the runner simply ignores the extra property).
     ...(deps.onReaped ? { onReaped: deps.onReaped } : {}),
+    // bash-timeout-grace plan §3.2 (P0b-frozen field, P5 wiring): forwarded
+    // verbatim — `sealBeforeTerminal` is the runner's own call site.
+    ...(deps.sealSession ? { sealSession: deps.sealSession } : {}),
   };
   runtime = new RuntimeRunner(runnerDeps);
   /**
@@ -629,6 +675,23 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             }),
           );
           grantedReserved.push("StructuredOutput");
+        }
+        // bash-timeout-grace plan §3.10 (P5): no customTools injection — `bash`/
+        // `bash_job` are registered by the CHILD session's own pre-guard
+        // `activate()` (src/bash/child.ts, src/index.ts), not injected here.
+        // This only decides whether OUR OWN enforcer (RESERVED_TOOL_NAMES
+        // denies `bash_job` by default) grants it for this particular run,
+        // and merges it into pi's own `sessionSpec.tools` allowlist below
+        // when the agent type declares one (same M1 rescue as every other
+        // grantedReserved push).
+        if (
+          bashJobGrant({
+            ...(spec.type.tools !== undefined ? { typeTools: spec.type.tools } : {}),
+            childBashJobs: deps.childBashJobsEnabled ?? false,
+            consult: isConsultRun,
+          })
+        ) {
+          grantedReserved.push("bash_job");
         }
         if (customTools.length)
           sessionSpec = { ...sessionSpec, customTools: [...(sessionSpec.customTools ?? []), ...customTools] };

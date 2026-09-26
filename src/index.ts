@@ -21,6 +21,7 @@ import { mergeExtensionPoints } from "./extensions/registry.js";
 import {
   buildSessionStack,
   bashJobsEnabled,
+  BASH_JOB_SEAL_GRACE_MS,
   createCompactHintHook,
   createNotificationReceiptHook,
   type Stack,
@@ -66,6 +67,8 @@ import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/work
 import { registerWebSearchTool } from "./web-search/index.js";
 import { wireTodo } from "./todo/index.js";
 import { wireMemory } from "./memory/index.js";
+import { wireChildBashJobs } from "./bash/child.js";
+import { getChildBashRegistry } from "./bash/child-registry.js";
 import { createPromptSectionHub } from "./sysprompt/hub.js";
 import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sections.js";
 import { wireHud } from "./hud/index.js";
@@ -135,6 +138,17 @@ export default function activate(pi: ExtensionAPI): void {
   // hook — the hub folds memory -> agent types -> models in one handler.
   if (preGuardSettings.memory.enabled)
     wireMemory(pi, { settings: preGuardSettings.memory, isChildSession, sections: promptHub });
+
+  // bash-timeout-grace plan §3.4 (P5): the child (subagent) session half of
+  // the auto-background feature — pre-guard, same rationale as memory/todo/
+  // web_search above (activate() itself DOES re-run for every child session,
+  // see src/bash/child.ts's own doc comment on `ensureManager` for exactly
+  // which mechanism does and does not fire for a spawned child). Gated by
+  // the SAME feature switch as the main session (`bashJobsEnabled`, §2.5/R6:
+  // win32/threshold-0 off) AND `bashJobs.childSessions` (§5.1, U1 default on).
+  if (isChildSession && bashJobsEnabled(preGuardSettings) && preGuardSettings.bashJobs.childSessions) {
+    wireChildBashJobs(pi, { settings: preGuardSettings });
+  }
 
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
   // re-activates this extension inside every child. Without a guard, the
@@ -606,6 +620,11 @@ export default function activate(pi: ExtensionAPI): void {
     stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
     stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
+    // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever recovery/
+    // cleanup phase this stack still has outstanding — covers the fresh-
+    // module `/reload` case (buildSessionStack's own module-level handoff
+    // only sees a same-module rebuild).
+    stack.bashJobRecovery?.dispose();
     // Fabric must freeze before run shutdown so late verdicts from the old
     // stack cannot write into the shared outbox; the next stack owns pending records.
     stack.fabric?.dispose();
@@ -638,6 +657,17 @@ export default function activate(pi: ExtensionAPI): void {
     // job that refuses to die must never delay pi's exit.
     if (stack.bashJobs && event.reason === "quit" && settings.bashJobs.shutdownPolicy === "kill") {
       await killBashJobsBounded(stack.bashJobs, settings.budget.abortGraceMs);
+    }
+    // bash-timeout-grace plan §3.3 S6: same "only a real quit" gate as the
+    // main session's own jobs above — a child subagent that is STILL
+    // RUNNING when the main session merely `/reload`s must keep its
+    // background jobs (they are not this stack's to kill); only when the
+    // whole process is exiting does every still-registered child session's
+    // bash jobs get a bounded best-effort kill.
+    if (event.reason === "quit") {
+      await getChildBashRegistry()
+        .sealAll(BASH_JOB_SEAL_GRACE_MS)
+        .catch(() => undefined);
     }
   });
 

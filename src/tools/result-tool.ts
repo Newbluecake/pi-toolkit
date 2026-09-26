@@ -16,7 +16,8 @@ import {
 } from "./poll-guard.js";
 import { toPiToolUsage } from "./usage.js";
 import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
-import { truncateResultText } from "./result-text.js";
+import { formatExitFacts, truncateResultText } from "./result-text.js";
+import type { RunExitFacts } from "../core/types.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
 import {
   buildWorkflowProgressLines,
@@ -499,7 +500,7 @@ function formatOutcome(
     timeoutReason?: string;
     durationMs: number;
     usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
-    diag?: { sessionFile?: string };
+    diag?: { sessionFile?: string; exitFacts?: RunExitFacts };
   },
   maxChars = 0,
 ): string {
@@ -510,6 +511,12 @@ function formatOutcome(
   const trailer = outcome.usage
     ? `\n\n(duration: ${formatDuration(outcome.durationMs)} · usage: in:${outcome.usage.input} out:${outcome.usage.output} cache_r:${outcome.usage.cacheRead} cache_w:${outcome.usage.cacheWrite} cost:$${outcome.usage.costUsd.toFixed(4)})`
     : `\n\n(duration: ${formatDuration(outcome.durationMs)})`;
+  // bash-timeout-grace plan §3.7/T25 (P5): `diag.exitFacts` is threaded here
+  // via the `exit_facts` session_event (§3.8, P0b) → `RunOutcome.diag`
+  // (state-machine `finish()`) → this outcome — the same value the parent's
+  // completion notice renders from `DeliveryPayload.exitFacts` (§3.7 table).
+  const exitFactsText = formatExitFacts(outcome.diag?.exitFacts);
+  const exitSuffix = exitFactsText !== undefined ? `\n\n${exitFactsText}` : "";
   if (outcome.status === "completed") {
     const body =
       outcome.structuredResult !== undefined
@@ -519,10 +526,10 @@ function formatOutcome(
             maxChars,
             outcome.diag?.sessionFile,
           ).text;
-    return body + trailer;
+    return body + trailer + exitSuffix;
   }
   const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
-  return `Subagent run ${outcome.status}: ${reason}${trailer}`;
+  return `Subagent run ${outcome.status}: ${reason}${trailer}${exitSuffix}`;
 }
 
 function truncationDetails(outcome: RunOutcome, maxChars: number): { truncated?: true; totalChars?: number } {
