@@ -813,6 +813,88 @@ describe("S7 /agent status bash jobs section", () => {
   });
 });
 
+// ── workflow-worktree plan §3 (P4 wt-orphans) ──
+
+describe("P4 /agent status worktree orphans section (#25)", () => {
+  function orphanDeps(result: {
+    root: string;
+    count: number;
+    capped: boolean;
+    entries: { path: string; repo?: string; reason: string; notAWorktree?: boolean }[];
+  }) {
+    return { ...deps([]), workflow: undefined, worktreeOrphans: () => result } as never;
+  }
+
+  it("(a) shows nothing when there are no leftovers (and when the port is absent)", () => {
+    expect(
+      renderStatus(orphanDeps({ root: "/tmp/pi-subagent-worktrees", count: 0, capped: false, entries: [] })),
+    ).not.toContain("worktrees:");
+    expect(renderStatus(deps([]) as never)).not.toContain("worktrees:");
+  });
+
+  it("(b) shows the count, root and up to 5 paths when there are leftovers", () => {
+    const entries = Array.from({ length: 7 }, (_, i) => ({
+      path: `/tmp/pi-subagent-worktrees/wt-${i}`,
+      reason: "owner-dead" as const,
+    }));
+    const text = renderStatus(orphanDeps({ root: "/tmp/pi-subagent-worktrees", count: 7, capped: false, entries }));
+    expect(text).toContain("worktrees: 7 orphaned (/tmp/pi-subagent-worktrees)");
+    expect(text).toContain("/tmp/pi-subagent-worktrees/wt-0 (owner-dead)");
+    expect(text).toContain("/tmp/pi-subagent-worktrees/wt-4 (owner-dead)");
+    expect(text).not.toContain("wt-5");
+    expect(text).not.toContain("wt-6");
+  });
+
+  it("rescans on every call — does not cache the first result", () => {
+    let calls = 0;
+    const port = () => {
+      calls += 1;
+      return { root: "/tmp/root", count: 0, capped: false, entries: [] };
+    };
+    const d = { ...deps([]), workflow: undefined, worktreeOrphans: port } as never;
+    renderStatus(d);
+    renderStatus(d);
+    expect(calls).toBe(2);
+  });
+
+  it("shows the capped count with a trailing '+' ", () => {
+    const text = renderStatus(
+      orphanDeps({
+        root: "/tmp/pi-subagent-worktrees",
+        count: 500,
+        capped: true,
+        entries: [{ path: "/tmp/pi-subagent-worktrees/wt-0", reason: "no-owner" }],
+      }),
+    );
+    expect(text).toContain("worktrees: 500+ orphaned");
+  });
+
+  it("annotates not-a-worktree entries", () => {
+    const text = renderStatus(
+      orphanDeps({
+        root: "/tmp/pi-subagent-worktrees",
+        count: 1,
+        capped: false,
+        entries: [{ path: "/tmp/pi-subagent-worktrees/wt-x", reason: "no-owner", notAWorktree: true }],
+      }),
+    );
+    expect(text).toContain("/tmp/pi-subagent-worktrees/wt-x (no-owner, not-a-worktree)");
+  });
+
+  it("never lets a failing scan port break the rest of the diagnostics", () => {
+    const broken = {
+      ...deps([]),
+      workflow: undefined,
+      worktreeOrphans: () => {
+        throw new Error("no active session yet");
+      },
+    };
+    const text = renderStatus(broken as never);
+    expect(text).toContain("Subagent runs:");
+    expect(text).not.toContain("worktrees:");
+  });
+});
+
 // ── compact-hint dynamic（dynamic-threshold-plan.md §10.3 · T-D3-STATUS-VIEW）──
 
 describe("dynamic threshold status section (P1-11)", () => {

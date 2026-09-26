@@ -20,6 +20,7 @@ import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
+import type { WorktreeOrphanScanResult } from "../extensions/worktree-orphans.js";
 import { formatDuration, formatModelRef } from "../ui/fleet-panel.js";
 import { isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
 import { describeJobStatus } from "../tools/bash-job-tool.js";
@@ -49,6 +50,13 @@ export interface StatusCommandDeps {
   bashJobs?: { list(): readonly JobRecord[] };
   /** `/agent status` and editor mention discovery share the live root-child view. */
   mention?: { entries(): readonly MentionAutocompleteEntry[] };
+  /**
+   * workflow-worktree plan §3 (P4 wt-orphans): live, read-only orphan scan port. Called
+   * fresh on every `/agent status` (never cached from session_start's startup scan).
+   * Absent only in tests/minimal hosts — the section then simply does not render, same
+   * degrade pattern as `bashJobs`/`mention`.
+   */
+  worktreeOrphans?: () => WorktreeOrphanScanResult;
   /** `/agent settings` (+ `/agent budget` alias) — absent only in tests/minimal hosts. */
   settings?: SettingsCommandDeps;
   /**
@@ -519,6 +527,30 @@ export function renderBashJobDetail(
   return lines.join("\n");
 }
 
+/**
+ * workflow-worktree plan §3 (P4 wt-orphans): the `worktrees: N orphaned` section of
+ * `/agent status` — rescanned fresh on every call (bounded, synchronous, read-only; no
+ * caching from the session_start startup scan). Absent entirely when there are no
+ * leftovers (matches §3 acceptance (a): "没有残留 ⇒ 既不提示，status 也不显示这一行"). A capped
+ * scan (more directories than the cap) shows the count with a trailing `+` per §3's
+ * "超过 cap 时，计数显示为 500+".
+ */
+export function renderWorktreeOrphansSection(port: () => WorktreeOrphanScanResult): string[] {
+  let result: WorktreeOrphanScanResult;
+  try {
+    result = port();
+  } catch {
+    return [];
+  }
+  if (result.count === 0) return [];
+  const countLabel = result.capped ? `${result.count}+` : `${result.count}`;
+  const lines = [`worktrees: ${countLabel} orphaned (${result.root})`];
+  for (const entry of result.entries.slice(0, 5)) {
+    lines.push(`  ${entry.path} (${entry.reason}${entry.notAWorktree ? ", not-a-worktree" : ""})`);
+  }
+  return lines;
+}
+
 export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): string {
   const runs = deps.query.list();
   const active = runs.filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
@@ -561,6 +593,7 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.notifier.degraded.length) lines.push(`Degraded deliveries: ${deps.notifier.degraded.length}`);
   if (deps.mention) lines.push(...renderMentionableLabels(deps.mention));
   if (deps.bashJobs) lines.push(...renderBashJobsSection(deps.bashJobs, deps.workflow?.now?.() ?? Date.now()));
+  if (deps.worktreeOrphans) lines.push(...renderWorktreeOrphansSection(deps.worktreeOrphans));
   if (deps.dynamic) lines.push(...renderDynamicThresholdSection(deps.dynamic, contextWindow));
   return lines.join("\n");
 }

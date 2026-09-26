@@ -134,6 +134,17 @@ import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 import { registerDispositionSink, releaseDispositionSink } from "./adapters/worktree-disposition-sink.js";
+import {
+  isPidAlive,
+  procStartOf,
+  processStartedAt,
+  runOrphanStartupScan,
+  scanWorktreeOrphans,
+  scanWorktreeOrphansAsync,
+  trackedWorktrees,
+  worktreeRoot,
+  type WorktreeOrphanScanResult,
+} from "./extensions/worktree-orphans.js";
 import { FleetWidgetController } from "./ui/fleet-widget.js";
 import type { GoalSession, GoalSessionStartReason } from "./goal/state.js";
 import { readBackGoalRecord } from "./goal/store.js";
@@ -196,6 +207,15 @@ let previousWorkflowRuns: BackgroundWorkflows | undefined;
  * undefined by the fresh re-import).
  */
 let previousWorktreeLate: { dispose(): void } | undefined;
+/**
+ * workflow-worktree plan §3 (P4 fix, 2026 review): the previous stack's fire-and-forget
+ * startup orphan scan "live" flag, disposed at the top of the next build — same dual-path
+ * discipline as `previousWorktreeLate` (the OTHER path is index.ts's session_shutdown
+ * calling `Stack.worktreeOrphansStartup.dispose()` directly). Flipping `live` to false
+ * before the next build's own scan starts means a scan that is still resolving when the
+ * stack gets rebuilt/torn down can NEVER fire a stale notify after the fact.
+ */
+let previousWorktreeOrphansStartup: { dispose(): void } | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -766,6 +786,25 @@ export interface Stack {
    * (covers `/reload`, which resets the module-level handoff variable).
    */
   worktreeLate?: { dispose(): void };
+  /**
+   * workflow-worktree plan §3 (P4 wt-orphans): live, read-only rescan (no caching) of the
+   * worktree root for directories a dead/gone owner left behind — the data source for
+   * `/agent status`'s `worktrees: N orphaned` line and for the once-per-process startup
+   * notify fired inside `buildSessionStack`. Present unconditionally: scanning does NOT
+   * depend on `worktree.enabled` (a leftover from before the feature was turned off is
+   * still on disk and still needs cleaning — confirmed with the plan author). Bounded,
+   * synchronous fs only, no exec, no writes/unlinks (non-goal: automatic GC, §0 decision 8).
+   */
+  worktreeOrphans(): WorktreeOrphanScanResult;
+  /**
+   * workflow-worktree plan §3 (P4 fix, 2026 review): dispose handle for the once-per-
+   * process, fire-and-forget startup orphan scan started by THIS build. Flips the scan's
+   * `live` flag off so a result that settles after this stack is rebuilt/torn down can never
+   * fire a stale notify. Dual-path teardown — the top of the NEXT `buildSessionStack` disposes
+   * the previous build's handle (same-module rebuild), and index.ts's `session_shutdown`
+   * disposes it directly (covers `/reload`, which resets the module-level handoff variable).
+   */
+  worktreeOrphansStartup?: { dispose(): void };
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -1188,6 +1227,8 @@ export function buildSessionStack(
   previousWorkflowRuns = undefined;
   previousWorktreeLate?.dispose();
   previousWorktreeLate = undefined;
+  previousWorktreeOrphansStartup?.dispose();
+  previousWorktreeOrphansStartup = undefined;
 
   // consult (plan §5.1/§6 C-9): fork-copy GC — once per session build, no
   // timer. Unconditional (runs even with consult.enabled=false so leftovers
@@ -1744,6 +1785,66 @@ export function buildSessionStack(
     },
   };
   previousWorktreeLate = worktreeLate;
+  // workflow-worktree plan §3 (P4 wt-orphans): read-only startup discovery of worktree
+  // directories a dead/gone owner left behind (§0 decision 8 — no automatic GC, ever).
+  // `worktreeOrphans()` below re-scans live on every call (bounded, synchronous fs, no
+  // exec, no writes) so `/agent status` always sees the current picture; it does NOT gate
+  // on `settings.worktree.enabled` (confirmed with the plan author — a leftover from
+  // before the feature was disabled is still on disk and still needs cleaning).
+  const worktreeOrphansSelf = { pid: process.pid, procStartedAt: processStartedAt() };
+  const worktreeOrphans = (): WorktreeOrphanScanResult =>
+    scanWorktreeOrphans({
+      root: worktreeRoot(),
+      isPidAlive,
+      procStartOf,
+      tracked: trackedWorktrees(),
+      self: worktreeOrphansSelf,
+      now: () => systemClock.now(),
+    });
+  // workflow-worktree plan §3 (P4 fix, 2026 review acceptance turn-back): the startup
+  // discovery scan used to run scanWorktreeOrphans() SYNCHRONOUSLY right here, inside
+  // session_start's own critical path — a slow/NFS-backed root (disk contention,
+  // permissions) would block session_start itself. It is now fire-and-forget (`void
+  // runOrphanStartupScan(...)`, never awaited from this function), reads with
+  // fs/promises-based `scanWorktreeOrphansAsync`, and is bounded by its own 5s unref'd
+  // timeout so a hung/slow filesystem can never hang the process it was meant to protect
+  // either — past the timeout the scan is simply abandoned (no notify, diagnostic only).
+  // `worktreeOrphansLiveState.live` flips to false at the top of the NEXT
+  // `buildSessionStack` (`previousWorktreeOrphansStartup?.dispose()`, same-module rebuild)
+  // or via `Stack.worktreeOrphansStartup` in index.ts's `session_shutdown` (covers
+  // `/reload`) — either path guarantees a scan that settles after this stack was
+  // rebuilt/torn down can never fire a stale notify. The once-per-PROCESS notify flag
+  // (`Symbol.for`, same exemption class as HOST_KEY) is set only once `ctx.hasUI` was true
+  // AND the notify call itself did not throw, so a headless/print-mode session_start never
+  // burns the one chance a later TUI session would have had.
+  const worktreeOrphansLiveState = { live: true };
+  const worktreeOrphansStartup: { dispose(): void } = {
+    dispose(): void {
+      worktreeOrphansLiveState.live = false;
+    },
+  };
+  previousWorktreeOrphansStartup = worktreeOrphansStartup;
+  const WORKTREE_ORPHANS_NOTIFIED_KEY = Symbol.for("pi-subagent:worktree-orphans-notified");
+  void runOrphanStartupScan({
+    hasUI: ctx.hasUI,
+    scan: (signal) =>
+      scanWorktreeOrphansAsync({
+        root: worktreeRoot(),
+        isPidAlive,
+        procStartOf,
+        tracked: trackedWorktrees(),
+        self: worktreeOrphansSelf,
+        now: () => systemClock.now(),
+        signal,
+      }),
+    isLive: () => worktreeOrphansLiveState.live,
+    alreadyNotified: () => Boolean((globalThis as Record<symbol, unknown>)[WORKTREE_ORPHANS_NOTIFIED_KEY]),
+    markNotified: () => {
+      (globalThis as Record<symbol, unknown>)[WORKTREE_ORPHANS_NOTIFIED_KEY] = true;
+    },
+    notify: (message) => ctx.ui.notify(message, "warning"),
+    onDiagnostic: (message) => console.warn(`[pi-subagent] ${message}`),
+  });
   // Static fallback for the dynamic per-run wait default (only reached when a
   // snapshot has no deadlineAt yet): the configured run budget + abort grace +
   // settlement headroom, so it tracks `/agent settings` budget changes.
@@ -2203,6 +2304,8 @@ export function buildSessionStack(
     goal,
     consult,
     worktreeLate,
+    worktreeOrphans,
+    worktreeOrphansStartup,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
     ...(bashJobRecovery ? { bashJobRecovery } : {}),

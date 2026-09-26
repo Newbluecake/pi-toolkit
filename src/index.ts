@@ -29,6 +29,7 @@ import {
 import { installMentionInput } from "./mention/mention.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
+import { worktreeRoot } from "./extensions/worktree-orphans.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
 import { SingleSlotPool } from "./runtime/slot-pool.js";
@@ -501,6 +502,11 @@ export default function activate(pi: ExtensionAPI): void {
       mention: {
         entries: () => mentionAutocompleteEntries(holder),
       },
+      // workflow-worktree plan §3 (P4 wt-orphans): always rescans the current stack's live
+      // registry; before the first session_start (no stack yet) degrades to an empty scan
+      // at the same default root the worktree extension itself uses.
+      worktreeOrphans: () =>
+        holder.current?.worktreeOrphans() ?? { root: worktreeRoot(), count: 0, capped: false, entries: [] },
       // compact-hint 动态阈值（§10.3，P1-11）：经 holder 读当前会话（/reload 后自然指向新 stack）。
       // facts() 只读快照 compactHint 的 force/reserve 配置；窗口由命令时点的 ctx.getContextUsage 给。
       dynamic: {
@@ -651,6 +657,11 @@ export default function activate(pi: ExtensionAPI): void {
     // still settling must get its chance to write through the normal path
     // first; only truly late reports after this point are redirected.
     stack.worktreeLate?.dispose();
+    // workflow-worktree plan §3 (P4 fix, 2026 review): stop this stack's fire-and-forget
+    // startup orphan scan from ever firing a notify after shutdown — same rationale as
+    // worktreeLate.dispose() just above (a scan still resolving when the session ends must
+    // never surface a stale prompt into a torn-down UI).
+    stack.worktreeOrphansStartup?.dispose();
     // bash auto-background §3.7: reload/new/resume/fork always keep the
     // processes (the next stack adopts them); only a real `quit` consults
     // shutdownPolicy, and even `kill` is bounded best-effort — a background
