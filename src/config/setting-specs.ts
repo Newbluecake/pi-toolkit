@@ -26,6 +26,13 @@ export interface SettingSpecBase {
   path: string;
   /** The stored/displayed value is integer seconds while `path` holds milliseconds. */
   time?: true;
+  /**
+   * `kind: "string"` only: the stored/displayed value is a comma-joined string while `path` holds
+   * a `string[]` (webHub.lan.{extraHosts,trustProxyFrom,externalOrigins}, plan §9.1 — on-disk they
+   * are comma-separated, the live `AgentSettings` shape LE's frozen `WebHubLanSettings` demands is
+   * an array). Mirrors the `time` transform's split between the stored and live domains.
+   */
+  csv?: true;
   /** Read at spawn time (`budget.*`) ⇒ applies to new runs immediately; everything else needs `/reload`. */
   live?: true;
   /** Effective default when `DEFAULT_SETTINGS` leaves the path unset (`workflow.budget.*`). */
@@ -79,6 +86,10 @@ function bool(path: string, description?: string): SettingSpec {
 }
 function choice(path: string, values: readonly string[], description?: string): SettingSpec {
   return { kind: "enum", path, values, ...(description === undefined ? {} : { description }) };
+}
+/** Comma-joined-string ⇄ `string[]` knob (plan §9.1: webHub.lan.{extraHosts,trustProxyFrom,externalOrigins}). */
+function csvString(path: string, description?: string): SettingSpec {
+  return { kind: "string", path, csv: true, ...(description === undefined ? {} : { description }) };
 }
 
 /** One-line per-leaf descriptions for the run deadline budget. */
@@ -242,6 +253,36 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     path: "webHub.nodeLoader",
     description: "web-hub: explicit jiti-cli path override (escape hatch when pi bundles no jiti)",
   },
+  // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
+  // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
+  // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`
+  // transform) but validated into `string[]` by `parseWebHubLanBlock` at load/reload time — the
+  // editor itself does not re-run §2.1/§2.4 classification (that only happens on reload, same as
+  // webHub.port's own "must differ from webHub.port" check).
+  "webHub.lan.enabled": bool(
+    "webHub.lan.enabled",
+    "web-hub LAN access: bind 0.0.0.0:<webHub.lan.port> with username/password auth (default off)",
+  ),
+  "webHub.lan.port": {
+    kind: "number",
+    path: "webHub.lan.port",
+    min: 1,
+    max: 65_535,
+    integer: true,
+    description: "web-hub LAN: HTTP port bound to 0.0.0.0 (must differ from webHub.port)",
+  },
+  "webHub.lan.extraHosts": csvString(
+    "webHub.lan.extraHosts",
+    "web-hub LAN: extra host names / IPv4 literals to allow-list, comma-separated",
+  ),
+  "webHub.lan.trustProxyFrom": csvString(
+    "webHub.lan.trustProxyFrom",
+    "web-hub LAN: trusted reverse-proxy IPv4 literals (only these may set X-Forwarded-*), comma-separated",
+  ),
+  "webHub.lan.externalOrigins": csvString(
+    "webHub.lan.externalOrigins",
+    "web-hub LAN: allowed external https origins reachable via a trusted proxy, comma-separated",
+  ),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (main session only)"),
@@ -661,6 +702,7 @@ export function isKnownSettingKey(key: string, budgetOnly = false): boolean {
 export function defaultOf(spec: SettingSpec): unknown {
   const internal = getPath(DEFAULT_SETTINGS, spec.path);
   if (internal === undefined) return spec.fallback;
+  if (spec.csv && Array.isArray(internal)) return internal.join(",");
   return spec.time && typeof internal === "number" ? msToSeconds(internal) : internal;
 }
 
@@ -668,6 +710,7 @@ export function defaultOf(spec: SettingSpec): unknown {
 export function currentOf(current: AgentSettings, spec: SettingSpec): unknown {
   const internal = getPath(current, spec.path);
   if (internal === undefined) return defaultOf(spec);
+  if (spec.csv && Array.isArray(internal)) return internal.join(",");
   return spec.time && typeof internal === "number" ? msToSeconds(internal) : internal;
 }
 
@@ -721,8 +764,17 @@ export function parseSettingValue(spec: SettingSpec, raw: string): ParsedSetting
       return spec.values.includes(raw)
         ? { ok: true, stored: raw, live: raw }
         : { ok: false, error: `expected one of: ${spec.values.join(", ")}` };
-    case "string":
+    case "string": {
+      if (spec.csv) {
+        const items = raw
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s !== "");
+        const joined = items.join(",");
+        return { ok: true, stored: joined, live: items };
+      }
       return raw ? { ok: true, stored: raw, live: raw } : { ok: false, error: "expected a non-empty string" };
+    }
   }
 }
 

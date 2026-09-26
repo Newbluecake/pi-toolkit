@@ -19,6 +19,13 @@ function control(over: Partial<WebHubControl> = {}): WebHubControl {
   return {
     status: () => ({ state: "live", attached: true, agentKey: "a1234-abcdef", hubVersion: "1.2.3", httpPort: 7878 }),
     url: () => ({ url: "http://127.0.0.1:7878/#t=secret-token" }),
+    lan: {
+      statusLines: () => [],
+      info: async () => ({ ok: false, reason: "unavailable" }),
+      unlock: async () => ({ ok: false, reason: "unavailable" }),
+      changePasswordInteractive: async () => ({ ok: false, reason: "no-cap" }),
+      restart: async () => ({ kind: "manual", message: "not wired in this fake" }),
+    },
     ...over,
   };
 }
@@ -100,8 +107,8 @@ describe("/webhub command", () => {
   });
 
   it("unknown subcommand ⇒ usage warning", async () => {
-    const notes = await run("restart", { control: control() });
+    const notes = await run("bogus", { control: control() });
     expect(notes[0]!.level).toBe("warning");
-    expect(notes[0]!.message).toContain("/webhub [status|open]");
+    expect(notes[0]!.message).toContain("/webhub [status|open|passwd|unlock|restart]");
   });
 });
