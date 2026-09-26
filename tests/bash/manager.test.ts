@@ -1839,6 +1839,59 @@ describe("bash job manager: seal / reserve (T13)", () => {
     expect(next.get(job.jobId)?.status).toBe("killed");
   });
 
+  it("an in-flight kill carried across a reload handoff is reused: kill() on the new manager sends no second signal", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    // Started but not yet settled: the fake `killJobTree` has no internal
+    // `await`, so the signal is already sent (killCalls === 1) by the time
+    // this line returns, but `kill()`'s own `await processPort.killJobTree`
+    // still needs a microtask tick to resume — exactly the in-flight window
+    // a reload handoff can land in.
+    const firstAttempt = h.manager.kill(job.jobId);
+    expect(h.port.killCalls).toHaveLength(1);
+    const handoffs = h.manager.exportLocalJobs();
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]?.killInFlight).toBeDefined();
+    const next = h.rebuild();
+    next.adoptLocalJobs(handoffs);
+    // A kill() on the NEW manager reuses the carried-over in-flight attempt
+    // — no second signal, same eventual outcome (an `async function`'s
+    // `return` always re-wraps the value in a fresh promise, so this is
+    // reference-transparent, not reference-identical).
+    const secondAttempt = next.kill(job.jobId);
+    expect(h.port.killCalls).toHaveLength(1); // still exactly one signal
+    h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+    const [firstResult, secondResult] = await Promise.all([firstAttempt, secondAttempt]);
+    expect(h.port.killCalls).toHaveLength(1);
+    expect(firstResult).toEqual(secondResult);
+    await waitFor(() => next.get(job.jobId)?.status === "killed", "the handed-off job to settle killed");
+  });
+
+  it("an in-flight kill carried across a reload handoff clears once it settles, letting a later kill() on the new manager retry", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    const firstAttempt = h.manager.kill(job.jobId);
+    const handoffs = h.manager.exportLocalJobs();
+    const next = h.rebuild();
+    next.adoptLocalJobs(handoffs);
+    expect(h.port.killCalls).toHaveLength(1);
+    // Let the carried-over attempt settle (the fake `killJobTree` resolves
+    // "terminated" for a local job without waiting for the actual exit
+    // event) — the new entry's own `.finally()` cleanup, attached during
+    // `adoptLocalJobs`, clears its `killInFlight` once this happens.
+    await firstAttempt;
+    await settle();
+    // A later, non-concurrent kill() call on the new manager is therefore a
+    // fresh retry, not a replay of the carried-over attempt.
+    const retry = await next.kill(job.jobId);
+    expect(retry.outcome).toBe("terminated");
+    expect(h.port.killCalls).toHaveLength(2);
+    h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+    await waitFor(() => next.get(job.jobId)?.status === "killed", "the handed-off job to settle killed");
+  });
+
   it("cancelReserve signals synchronously; a same-tick explicit kill() (a seal/killAll fan-out hitting the same job) sends exactly one signal", async () => {
     const h = await harness();
     const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });

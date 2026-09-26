@@ -248,6 +248,15 @@ export interface LocalJobHandoff {
   readonly jobId: JobId;
   readonly record: JobRecord;
   readonly handle: LocalHandle;
+  /**
+   * §2.4/§3.6 (P3+P4 verifier round 6): the exporting manager's in-flight
+   * `killNonTerminal` attempt for this job, if any, carried across the
+   * reload handoff so the adopting manager reuses the *same* promise
+   * instead of sending a second signal for a kill that is already under
+   * way. Optional and additive — backward compatible with any P0b-frozen
+   * caller that does not know about it.
+   */
+  readonly killInFlight?: Promise<KillJobResult> | undefined;
 }
 
 /**
@@ -1887,7 +1896,12 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         clock.clearTimer(entry.deadlineTimer);
         entry.deadlineTimer = undefined;
       }
-      handoffs.push({ jobId, record: entry.record, handle: entry.local });
+      handoffs.push({
+        jobId,
+        record: entry.record,
+        handle: entry.local,
+        ...(entry.killInFlight !== undefined ? { killInFlight: entry.killInFlight } : {}),
+      });
       entries.delete(jobId);
       localJobs.delete(jobId);
     }
@@ -1909,6 +1923,23 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       handoff.handle.owner = myToken;
       handoff.handle.adopted = true;
       localJobs.add(handoff.jobId);
+      // §2.4/§3.6 (P3+P4 verifier round 6): carry the exporting manager's
+      // in-flight kill across the handoff — a kill() call on the new
+      // manager for this job must reuse the same promise, not send a second
+      // signal for a kill already under way. The identity check in the
+      // cleanup guards against clearing a *newer* lock: if this entry's own
+      // `kill()` starts (and latches) a fresh attempt before the carried-over
+      // one settles, `entry.killInFlight` no longer points at `carried` by
+      // the time it settles, so the newer lock is left alone.
+      const carried = handoff.killInFlight;
+      if (carried !== undefined) {
+        entry.killInFlight = carried;
+        void carried
+          .finally(() => {
+            if (entry.killInFlight === carried) entry.killInFlight = undefined;
+          })
+          .catch(() => undefined);
+      }
       void finalizeLocal(handoff.jobId, entry, handoff.handle).catch((error) => {
         warn(`bash job ${handoff.jobId} finalization failed after handoff: ${String(error)}`);
       });
