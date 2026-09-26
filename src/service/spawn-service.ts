@@ -298,8 +298,12 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     // ("active", set at request-build time), never the final disposition.
     pruneWorktreeWait();
     if (outcome.diag?.worktree) {
-      const reapMs = effectiveReapMs(outcome.runId);
-      worktreeWait.set(outcome.runId, { reapMs, expiresAt: now() + worktreeLateMs(reapMs) });
+      // Only refresh an entry start() admitted — never create one here, so the
+      // D5a capacity bound holds (a run past capacity keeps no entry and every
+      // later wait falls back to settings.budget.reapMs).
+      const entry = worktreeWait.get(outcome.runId);
+      if (entry)
+        worktreeWait.set(outcome.runId, { reapMs: entry.reapMs, expiresAt: now() + worktreeLateMs(entry.reapMs) });
     } else {
       worktreeWait.delete(outcome.runId);
     }

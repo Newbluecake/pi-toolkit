@@ -126,7 +126,8 @@ describe("runtime-adapter: promptNotes -> prompt (workflow-worktree plan D9, v2.
     // the driver never sees a `promptNotes` key at all
     expect(Object.keys(createArgs as object)).not.toContain("promptNotes");
     expect((createArgs as { prompt?: string }).prompt).toBe("hi\n\nWorktree isolation note: READ-ONLY.");
-    void promptedWith;
+    // plan §6 test #5: the bytes the model actually receives
+    expect(promptedWith).toBe("hi\n\nWorktree isolation note: READ-ONLY.");
   });
 
   it("appends the note for prompt_mode:append types (systemPrompt prefix preserved, note appended last)", async () => {

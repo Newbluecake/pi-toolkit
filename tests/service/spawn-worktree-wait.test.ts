@@ -329,12 +329,21 @@ describe("SpawnService: D5a reapMs table lifecycle", () => {
         // eslint-disable-next-line no-await-in-loop
         fillerIds.push(await spawnIsolated(service, `filler-${i}`));
       }
-      const runId = await spawnIsolated(service, "main");
+      // The over-capacity run carries its OWN reapMs (3000ms) via budgetOverride; if finish()
+      // wrongly created a table entry for it, the settle horizon would be 3000+1000ms. The capacity
+      // bound means it never gets an entry, so the wait must fall back to settings.budget.reapMs
+      // (7000ms) ⇒ settle horizon times out at 8000ms.
+      const started = await service.spawn({
+        type: "worker",
+        prompt: "x",
+        isolation: "worktree",
+        label: "main",
+        budgetOverride: { reapMs: 3_000 },
+      });
+      if ("error" in started) throw new Error(started.error.message);
+      const runId = started.runId;
       resolve(runId, activeOutcome(runId));
       await vi.waitFor(() => expect(service.snapshots().find((s) => s.runId === runId)).toBeDefined());
-      // this run's own reapMs (7000ms) never made it into the table (capacity already full at spawn
-      // time) — the wait must fall back to settings.budget.reapMs, which is the SAME value here, so
-      // assert indirectly: settle horizon times out at reapMs+1s = 8000ms, not earlier/later.
       const waiting = service.waitWorktreeDisposition!(runId, { horizon: "settle" });
       await vi.advanceTimersByTimeAsync(7_999);
       let done = false;
