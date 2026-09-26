@@ -139,17 +139,42 @@ export interface ConnGuard {
    * `socket.destroy()` the *new* connection without a response.
    *
    * `args.onEvict` is registered against the returned lease and is invoked
-   * *at most once* — synchronously, from within a *later* `admit()` call,
-   * never from this call — if §6.3's eviction rules pick *this* connection
-   * to make room for that later admission. The caller must
-   * `socket.destroy()` its *own* connection when `onEvict` fires; this is
-   * how eviction is expressed without `ConnGuard` needing to hold a
-   * `net.Socket` reference itself (§6.3: "淡汰 = socket.destroy()（无 HTTP
-   * 响应。。。选择、计数、destroy、接纳都在同一个同步的 connection 处理块中完成"，
-   * so `onEvict` firing and this `admit()` call returning happen in the same
-   * synchronous turn). `onEvict` firing does *not* itself call `release()`
-   * — the evicted connection's own `socket.destroy()`/`'close'` handling is
-   * still responsible for that, same as any other connection closing.
+   * *at most once* if §6.3's eviction rules pick *this* connection to make
+   * room for a *later* admission. The caller must `socket.destroy()` its
+   * *own* connection when `onEvict` fires; this is how eviction is
+   * expressed without `ConnGuard` needing to hold a `net.Socket` reference
+   * itself (§6.3: "淡汰 = socket.destroy()（无 HTTP 响应。。。选择、计数、
+   * destroy、接纳都在同一个同步的 connection 处理块中完成"). `onEvict` firing
+   * does *not* itself call `release()` — the evicted connection's own
+   * `socket.destroy()`/`'close'` handling is still responsible for that,
+   * same as any other connection closing.
+   *
+   * Frozen `onEvict` semantics (review fix round 3 #3 — pin these so LC, W2,
+   * doesn't have to guess, and so the fake below and any real implementation
+   * agree):
+   *
+   *   1. **Synchronous, in-turn**: `onEvict` is called synchronously from
+   *      *inside* the *evicting* `admit()` call (never deferred to a later
+   *      turn, never called from the call that originally registered it) —
+   *      matching §6.3's "选择、计数、destroy、接纳都在同一个同步的
+   *      connection 处理块中完成". The caller can `socket.destroy()`
+   *      unconditionally inside it without worrying about ordering.
+   *   2. **Non-reentrant**: `onEvict` must never call `admit()` itself
+   *      (directly or indirectly, while still inside the evicting `admit()`
+   *      call). An implementation must reject such a reentrant call —
+   *      either by throwing a descriptive `Error` or by treating it as a
+   *      capacity rejection (`undefined`) — *without* changing any pool's
+   *      state (no lease is allocated, no other entry is evicted, the
+   *      original eviction+admission that triggered it still completes
+   *      normally once `onEvict` returns/throws).
+   *   3. **Exception-safe**: if `onEvict` throws, the guard must catch and
+   *      swallow that exception (a real implementation logs it) — it must
+   *      never propagate out of `admit()`, never leave the pool in an
+   *      inconsistent state (the evicted lease is still removed either
+   *      way), and never prevent the *new* connection that triggered the
+   *      eviction from getting its own lease-or-rejection per §6.3's normal
+   *      rules.
+   *
    * LC (W2) wires this to `net.Server`'s `connection`/`close` events; W1's
    * port stays decoupled from `net.Socket` on purpose (easier to fake in
    * tests).

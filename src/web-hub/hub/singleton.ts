@@ -57,6 +57,15 @@
  * `RELEASE_DEADLINE_MS` too (`withDeadline`), matching `closeServer`'s
  * existing bound — a wedged disk during release must not hang it.
  *
+ * Review fix #2 (v3): `releaseLock` itself was still unbounded — a wedged
+ * `readFile`/`unlink` there would hang the `finally` block forever, which
+ * means the late-abort self-release recheck above (v2's fix) could never
+ * run either, silently reintroducing the same zero-hang violation one layer
+ * up. Both of `releaseLock`'s fs calls are now individually bounded by
+ * `RELEASE_DEADLINE_MS` (still never raced against `signal` — a timeout is
+ * just treated the same as any other read/unlink failure: leave the lock
+ * file for the next starter's own stale-lock check).
+ *
  * Fence: `startFence` compares a fresh `lstat` against the identity recorded
  * at bind time; `fenceLossOf` classifies the mismatch/error into a `FenceLoss`
  * (§1.3.2) — `"io"` (timeout or an unclassified error) only fires `onLost`
@@ -97,6 +106,16 @@ export const DEFAULT_FENCE_FIRST_MS = 2_000;
 export const DEFAULT_FENCE_CHECK_DEADLINE_MS = 5_000;
 export const DEFAULT_FENCE_IO_STRIKES = 3;
 const RELEASE_DEADLINE_MS = 2_000;
+/**
+ * `releaseLock`'s own fs ops get a more generous deadline than `RELEASE_DEADLINE_MS` (used by
+ * `closeServer`'s net-level fallback and `release()`'s socket-specific lstat/rename): those
+ * lock-file reads/unlinks can legitimately contend with real disk I/O (observed under a fully
+ * loaded test suite — not a hang, just slow) in a way a `net.Server.close()` callback normally
+ * doesn't. Still bounded (never truly unbounded), just less trigger-happy about giving up on
+ * genuinely-in-flight (not wedged) work and leaving a fresh, live-pid lock file behind for no
+ * reason — which the next starter would then correctly (and safely) refuse to steal.
+ */
+const LOCK_RELEASE_DEADLINE_MS = 5_000;
 
 /** fs.promises overrides for `acquireSingleton`'s lock/probe/release/guard file ops (testing only). */
 type SingletonFsDeps = Partial<FsDeps> &
@@ -602,16 +621,25 @@ async function lockIsStale(
   return false; // empty (being written) or live holder
 }
 
-/** Never raced against `signal` — see the file-header note on review fix #2. */
+/**
+ * Never raced against `signal` (releasing a lock we hold must run to completion even after
+ * abort) but each fs op is bounded by its own `LOCK_RELEASE_DEADLINE_MS` deadline (`withDeadline`,
+ * review fix round 3 #2) — without this, a wedged `readFile` here would hang forever and the
+ * caller's `finally` (in `acquireFileSingleton`) would never complete, meaning the late-abort
+ * self-release recheck that runs *after* it (review fix #2, round 2) could never run either,
+ * reintroducing the zero-hang violation that fix was meant to close. A timeout is treated the
+ * same as any other read/unlink failure: leave the lock file alone (the next starter's own
+ * stale-lock check will reclaim it).
+ */
 async function releaseLock(file: string, fsDeps: SingletonFsDeps | undefined): Promise<void> {
   const readFileFn = fsDeps?.readFile ?? readFile;
   const unlinkFn = fsDeps?.unlink ?? unlink;
   try {
-    const content = await readFileFn(file, "utf8");
+    const content = await withDeadline(readFileFn(file, "utf8"), LOCK_RELEASE_DEADLINE_MS);
     const pid = Number.parseInt(content.trim().split(/\s+/)[0] ?? "", 10);
-    if (pid === process.pid) await unlinkFn(file);
+    if (pid === process.pid) await withDeadline(unlinkFn(file), LOCK_RELEASE_DEADLINE_MS);
   } catch {
-    // gone already
+    // gone already, or timed out — leave it for the next starter's stale-lock check
   }
 }
 

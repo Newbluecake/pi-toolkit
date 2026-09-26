@@ -83,14 +83,26 @@ export function classifyHostToken(token: string): HostTokenResult {
   // ⑤ localhost (before the denylist / numeric checks — never denylisted, v6 #6).
   if (host === "localhost") return { ok: true, kind: "localhost", host };
   // ⑥ numeric last label (WHATWG URL parses it as a numeric IPv4-like host; Chromium rejects it
-  //    before the request ever reaches the server — lan-spike-results.md §5). Decimal ("123"),
-  //    and hex ("0x7f") all count — WHATWG's IPv4 parser accepts both forms for a lone/last part
-  //    (confirmed empirically: `new URL("https://0x7f").host` → "0.0.0.127"); octal ("017") is
-  //    already covered by the decimal check below since it is composed entirely of digit
-  //    characters. This check must run on the *raw* token (see `parseOrigin`'s header comment
-  //    for why feeding it a WHATWG-already-rewritten host would defeat the whole point).
+  //    before the request ever reaches the server — lan-spike-results.md §5). Cross-checked
+  //    against WHATWG's "IPv4 number parser" (URL spec) per-part rules, in the priority WHATWG
+  //    itself applies:
+  //      1. "0x"/"0X" prefix → hex, R=16. Critically the spec then re-checks "if input
+  //         (post-prefix) is empty, return (0, true)" — a BARE "0x"/"0X" with *zero* hex digits
+  //         after it is still a valid number (value 0; confirmed empirically:
+  //         `new URL("https://0x").host` → "0.0.0.0") — so the hex tail is `[0-9a-f]*`, not `+`.
+  //      2. Otherwise a leading "0" → octal, R=8 (numerically only 0-7 digits are valid, but any
+  //         all-decimal-digit string like "089" is already caught by rule 3 below as a
+  //         conservative superset — over-rejecting a string WHATWG wouldn't actually rewrite is
+  //         the safe direction here, not a security gap).
+  //      3. Otherwise decimal, R=10 ("123", and octal-looking "017" since it's all digit chars).
+  //    A *trailing dot* on any of these ("1.", "0x7f.", "0.") does turn WHATWG's "ends in a
+  //    number" check on too, but `String.split(".")` already produces a trailing empty label for
+  //    those, which rule ④ (label syntax) above already rejects as `syntax` — no separate
+  //    handling needed here (verified: "1."/"0."/"0x." all classify `syntax`, never fall through
+  //    to this rule at all). This check must run on the *raw* token (see `parseOrigin`'s header
+  //    comment for why feeding it a WHATWG-already-rewritten host would defeat the whole point).
   const lastLabel = labels[labels.length - 1]!;
-  if (/^[0-9]+$/.test(lastLabel) || /^0x[0-9a-f]+$/i.test(lastLabel)) return { ok: false, reason: "numeric" };
+  if (/^[0-9]+$/.test(lastLabel) || /^0x[0-9a-f]*$/i.test(lastLabel)) return { ok: false, reason: "numeric" };
   // ⑦ single-label denylist.
   if (labels.length === 1 && (SINGLE_LABEL_DENYLIST as readonly string[]).includes(host)) {
     return { ok: false, reason: "denylisted" };

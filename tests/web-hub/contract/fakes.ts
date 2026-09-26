@@ -212,6 +212,9 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
   const capDirect = opts.unauthCapDirect ?? 64;
   const capProxy = opts.unauthCapProxy ?? 48;
   let nextSeq = 0;
+  // 审查修复三轮 #3: 重入护卫——只在一个顶层 admit() 的同步执行期间为 true（包含它同步触发的
+  // evictOldestUnauth → onEvict 链路）；任何在这期间对 admit() 的再进入都拒。
+  let admitting = false;
 
   interface Entry {
     seq: number;
@@ -231,7 +234,12 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
     return n;
   }
 
-  /** 审查修复 #4: 淡汰时先调用被淡汰连接自己登记的 onEvict（一次），再从池中移除该条目。 */
+  /**
+   * 审查修复 #4（二轮）/ #3（三轮）: 淡汰时先从池中移除该条目（无论 onEvict 结果如何，条目都得移除），
+   * 再调用它自己登记的 onEvict（一次）。onEvict 抛错或在内部重入调用 admit() 而抛错（本函数自己的
+   * 重入护卫会抛）都在这里吹掉，不会继续传播到 admit()、不会重新池入池、也不会阻止同次
+   * admit() 给新连接发 lease 或拒。
+   */
   function evictOldestUnauth(pool: Map<number, Entry>): boolean {
     let victimKey: number | undefined;
     let victim: Entry | undefined;
@@ -244,34 +252,56 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
     }
     if (victimKey === undefined || victim === undefined) return false;
     pool.delete(victimKey);
-    victim.onEvict();
+    try {
+      victim.onEvict();
+    } catch {
+      // Swallowed (a real implementation logs this) — must never propagate out of admit(),
+      // must never affect pool state (the victim is already removed above either way), and
+      // must never prevent the new connection that triggered this eviction from getting its
+      // own lease-or-rejection per §6.3's normal rules.
+    }
     return true;
   }
 
   return {
-    admit({ peerIp, viaTrustedProxy, onEvict }): ConnLease | undefined {
-      const pool = poolFor(viaTrustedProxy);
-      const cap = viaTrustedProxy ? capProxy : capDirect;
-      if (unauthCount(pool) >= cap && !evictOldestUnauth(pool)) return undefined;
-      const mySeq = nextSeq++;
-      const entry: Entry = { seq: mySeq, category: "unauth", onEvict };
-      pool.set(mySeq, entry);
-      let released = false;
-      return {
-        peerIp,
-        viaTrustedProxy,
-        enterLoginPending: () => {
-          if (pool.get(mySeq) === entry) entry.category = "login-pending";
-        },
-        enterAuthed: () => {
-          if (pool.get(mySeq) === entry) entry.category = "authed";
-        },
-        release: () => {
-          if (released) return;
-          released = true;
-          pool.delete(mySeq);
-        },
-      };
+    admit(args): ConnLease | undefined {
+      if (admitting) {
+        // Non-reentrant (review fix round 3 #3): onEvict must never call admit() itself, directly
+        // or indirectly, while still inside the evicting admit() call. Throwing here (rather than
+        // silently succeeding) is itself what "rejected" means for this port — the caller's own
+        // onEvict is expected to let this propagate, which the evicting admit()'s own
+        // evictOldestUnauth try/catch above swallows, leaving pool state untouched by the
+        // reentrant attempt.
+        throw new Error("fakeConnGuard: admit() called reentrantly from within onEvict()");
+      }
+      admitting = true;
+      try {
+        const { peerIp, viaTrustedProxy, onEvict } = args;
+        const pool = poolFor(viaTrustedProxy);
+        const cap = viaTrustedProxy ? capProxy : capDirect;
+        if (unauthCount(pool) >= cap && !evictOldestUnauth(pool)) return undefined;
+        const mySeq = nextSeq++;
+        const entry: Entry = { seq: mySeq, category: "unauth", onEvict };
+        pool.set(mySeq, entry);
+        let released = false;
+        return {
+          peerIp,
+          viaTrustedProxy,
+          enterLoginPending: () => {
+            if (pool.get(mySeq) === entry) entry.category = "login-pending";
+          },
+          enterAuthed: () => {
+            if (pool.get(mySeq) === entry) entry.category = "authed";
+          },
+          release: () => {
+            if (released) return;
+            released = true;
+            pool.delete(mySeq);
+          },
+        };
+      } finally {
+        admitting = false;
+      }
     },
   };
 }
