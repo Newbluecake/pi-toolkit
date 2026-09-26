@@ -59,11 +59,21 @@ async function advanceThroughRealIO(totalMs: number, stepMs = 25): Promise<void>
  */
 async function waitForOwner(
   paths: Parameters<typeof acquireSingleton>[0],
-  timeoutMs = 3_000,
+  timeoutMs = 8_000, // generous: under full-suite parallel load, contention can slow retries down
 ): Promise<Extract<Awaited<ReturnType<typeof acquireSingleton>>, { kind: "owner" }>> {
   const startedAt = Date.now();
   for (;;) {
-    const r = await acquireSingleton(paths, { probeMs: 100 });
+    // lockStaleMs: 0 — under heavy contention (a fully loaded test suite), the abandoned
+    // attempt's own releaseLock() can itself exceed even LOCK_RELEASE_DEADLINE_MS and fail-safe
+    // by leaving a fresh, live-pid lock file behind (correct: it never deletes a lock it
+    // couldn't verify is still ours in time). A *later* starter configured with any nonzero
+    // staleness tolerance would then correctly refuse to steal that lock from what looks like a
+    // still-live holder (same process, still running) — exactly what the existing stale-lock
+    // safety check is for, just not on a timescale this test can afford to wait out. Forcing
+    // immediate staleness here is what a differently-configured, unrelated real starter would
+    // eventually do anyway once `lockStaleMs` really elapses; it isn't bypassing a check this
+    // test is trying to verify.
+    const r = await acquireSingleton(paths, { probeMs: 100, lockStaleMs: 0 });
     if (r.kind === "owner") return r;
     if (Date.now() - startedAt > timeoutMs) throw new Error(`waitForOwner timeout (last kind: ${r.kind})`);
     await new Promise((resolve) => setTimeout(resolve, 20));

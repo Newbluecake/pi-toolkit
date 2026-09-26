@@ -43,6 +43,25 @@ describe("classifyHostToken: classification priority (plan §2.1)", () => {
     expect(classifyHostToken("0X7F")).toEqual({ ok: false, reason: "numeric" }); // case-insensitive
   });
 
+  // 审查修复三轮 #1: WHATWG 的 IPv4 number parser 对空 hex 尾（“0x”本身）仍返回成功（值 0），
+  // 而非失败——`new URL("https://0x").host === "0.0.0.0"`。之前的 `/^0x[0-9a-f]+$/` 要求至少一位
+  // hex 数字，让裸 "0x"/"0X" 被当作合法 single-label 放行。
+  it('bare "0x"/"0X" (empty hex tail, WHATWG parses it as 0) ⇒ numeric', () => {
+    expect(classifyHostToken("0x")).toEqual({ ok: false, reason: "numeric" });
+    expect(classifyHostToken("0X")).toEqual({ ok: false, reason: "numeric" });
+  });
+
+  // 尾随一个点的数字段（"1."/"0x."）也会被 WHATWG 重写（`new URL("https://1.").host ===
+  // "0.0.0.1"`），但 `"1.".split(".")` 已产生一个尾随的空 label，被 ④ 规则（label 语法）先一步
+  // 拒为 syntax，根本不会走到 ⑥ 的 numeric 分支——无需额外处理，但仍要验证它们最终被拒。
+  it('a trailing dot on a numeric-looking label ("1.", "0.", "0x.") is rejected (as syntax, via the empty split label)', () => {
+    for (const h of ["1.", "0.", "0x.", "0x7f."]) {
+      const r = classifyHostToken(h);
+      expect(r.ok, h).toBe(false);
+      if (!r.ok) expect(r.reason, h).toBe("syntax");
+    }
+  });
+
   it("1.2 (two-part, WHATWG A.B → A.0.0.B) ⇒ numeric (last label is all-digit)", () => {
     expect(classifyHostToken("1.2")).toEqual({ ok: false, reason: "numeric" });
   });
@@ -174,6 +193,17 @@ describe("canonicalHostKey / canonicalOrigin / parseOrigin (plan §2.2)", () => 
     expect(parseOrigin("https://0x7f")).toEqual({ scheme: "https", hostKey: "0x7f:443" });
     expect(parseOrigin("https://1.2")).toEqual({ scheme: "https", hostKey: "1.2:443" });
     // none of these are "0.0.0.123" / "0.0.0.1" / "0.0.0.127" / "1.0.0.2" (the WHATWG-rewritten forms)
+  });
+
+  // 审查修复三轮 #1: 裸 "0x"/"0X" 也要被保留为原始值（才能被 classifyHostToken 判 numeric）。
+  it('parseOrigin preserves a bare "0x"/"0X" authority too (not WHATWG-rewritten to "0.0.0.0")', () => {
+    expect(parseOrigin("https://0x")).toEqual({ scheme: "https", hostKey: "0x:443" });
+    expect(parseOrigin("https://0X")).toEqual({ scheme: "https", hostKey: "0x:443" }); // lower-cased
+  });
+
+  it('parseOrigin rejects a trailing-dot numeric authority ("1.", "0x.") outright (empty split label ⇒ syntax)', () => {
+    expect(parseOrigin("https://1.")).toBeUndefined();
+    expect(parseOrigin("https://0x.")).toBeUndefined();
   });
 
   it("a syntactically invalid host is not canonicalizable", () => {

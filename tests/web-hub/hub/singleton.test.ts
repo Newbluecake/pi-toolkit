@@ -475,6 +475,45 @@ describe("late abort after the owner value is already constructed (review fix #2
     if (again.kind === "owner") await again.release();
   });
 
+  // 审查修复三轮 #2: releaseLock() 自己无 deadline —— signal 已 abort 但 readFile 永不 resolve 时，
+  // 进不到 owner 后的 signal 重查与自释放，违反零 hang。
+  it("an abort combined with a hung releaseLock() readFile still self-releases within releaseLock's own deadline (not hanging forever)", async () => {
+    const p = paths();
+    const controller = new AbortController();
+    let releaseLockStarted = false;
+    const hungReadFile = (async (file: Parameters<typeof readFile>[0], enc: Parameters<typeof readFile>[1]) => {
+      if (file === p.startLock) {
+        releaseLockStarted = true;
+        controller.abort(); // fires *during* the unraced releaseLock() call, after bind+identity succeeded
+        return new Promise<never>(() => {}); // never resolves — only releaseLock's own deadline can end this
+      }
+      return readFile(file, enc as Parameters<typeof readFile>[1]);
+    }) as typeof readFile;
+
+    const started = Date.now();
+    const r = await acquireSingleton(p, {
+      probeMs: 50,
+      signal: controller.signal,
+      fs: { readFile: hungReadFile },
+    });
+    expect(releaseLockStarted).toBe(true);
+    // bounded by releaseLock's own LOCK_RELEASE_DEADLINE_MS (5s), not hung forever waiting for readFile.
+    expect(Date.now() - started).toBeLessThan(6_000);
+    expect(r.kind).toBe("failed");
+    if (r.kind === "failed") expect(r.reason).toBe("aborted");
+
+    // the socket/guard are freed regardless (closeServer uses real fs, unaffected by the mock);
+    // the lock *file* legitimately may still be on disk — releaseLock could not read it within
+    // its own deadline, so it fails safe and leaves it (never deletes a lock it couldn't verify
+    // is ours) rather than risking deleting a live starter's lock. That leftover is exactly what
+    // the pre-existing stale-lock mechanism (`lockStaleMs`) is for: a later starter configured to
+    // treat it as stale (as any real elapsed time eventually would) can still reclaim it.
+    expect(existsSync(p.socketPath)).toBe(false);
+    const again = track(await acquireSingleton(p, { probeMs: 200, lockStaleMs: 0 }));
+    expect(again.kind).toBe("owner");
+    if (again.kind === "owner") await again.release();
+  });
+
   it("release()'s own lstat/rename calls are bounded (a wedged disk during release does not hang it)", async () => {
     const p = paths();
     let callCount = 0;

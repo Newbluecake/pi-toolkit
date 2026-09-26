@@ -120,10 +120,18 @@ describe("parseHubLanConfig (plan §1.4.3, §9.1)", () => {
   // 正则直接抽取原始 authority，classifyHostToken 现在能真正看到调用方写的原始数字串，
   // numeric 分支对此验证函数可达且必要。
   it("rejects numeric-host externalOrigins entries (decimal, hex, and short/two-part WHATWG-IPv4-rewritable forms)", () => {
-    for (const h of ["123", "1", "0x7f", "1.2", "202507220006"]) {
+    for (const h of ["123", "1", "0x7f", "1.2", "202507220006", "0x", "0X"]) {
       const r = parseHubLanConfig({ ...valid, trustProxyFrom: ["127.0.0.1"], externalOrigins: [`https://${h}`] });
       expect(r.ok, h).toBe(false);
       if (!r.ok) expect(r.detail, h).toContain("numeric");
+    }
+  });
+
+  // 审查修复三轮 #1: 尾随一个点的数字段在 parseOrigin 层就被拒（origin-syntax，非 numeric），但仍需验证最终被拒。
+  it("rejects a trailing-dot numeric externalOrigins entry", () => {
+    for (const h of ["1.", "0.", "0x."]) {
+      const r = parseHubLanConfig({ ...valid, trustProxyFrom: ["127.0.0.1"], externalOrigins: [`https://${h}`] });
+      expect(r.ok, h).toBe(false);
     }
   });
 

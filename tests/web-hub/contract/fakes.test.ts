@@ -76,6 +76,75 @@ describe("fakeConnGuard (plan §6.3)", () => {
     a.release(); // idempotent
     expect(evicted).toEqual([]);
   });
+
+  // 审查修复三轮 #3: onEvict 抛错被吹掉且记录（fake 不记日志，但至少不会传播/影响池状态），
+  // 不影响同次 admit() 自己的结果（新连接仍正常拿到 lease）。
+  it("a throwing onEvict is swallowed: admit() does not throw, the victim is still evicted, the new connection still gets a lease", () => {
+    const g = fakeConnGuard({ unauthCapDirect: 1 });
+    const a = g.admit({
+      peerIp: "1.1.1.1",
+      viaTrustedProxy: false,
+      onEvict: () => {
+        throw new Error("boom");
+      },
+    })!;
+    expect(a).toBeDefined();
+    let b: ReturnType<typeof g.admit>;
+    expect(() => {
+      b = g.admit({ peerIp: "2.2.2.2", viaTrustedProxy: false, onEvict: () => {} });
+    }).not.toThrow();
+    expect(b).toBeDefined();
+    // pool is still at its 1-slot cap (a evicted, b admitted) — a third admission must evict b.
+    const evicted: string[] = [];
+    const c = g.admit({ peerIp: "3.3.3.3", viaTrustedProxy: false, onEvict: () => evicted.push("c") });
+    expect(c).toBeDefined();
+    const d = g.admit({ peerIp: "4.4.4.4", viaTrustedProxy: false, onEvict: () => evicted.push("d") });
+    expect(d).toBeDefined(); // evicts c (b was never given an onEvict that records anything)
+    expect(evicted).toEqual(["c"]);
+  });
+
+  // 审查修复三轮 #3: onEvict 内部重入调用 admit() 必须被拒/抛错，且不改变池状态（重入过后容量不超限）。
+  it("onEvict calling admit() reentrantly is rejected and does not corrupt pool state (capacity stays within its cap)", () => {
+    const g = fakeConnGuard({ unauthCapDirect: 1 });
+    let reentrantThrew: unknown;
+    let reentrantResult: ReturnType<typeof g.admit> | "never-called" = "never-called";
+    const a = g.admit({
+      peerIp: "1.1.1.1",
+      viaTrustedProxy: false,
+      onEvict: () => {
+        try {
+          // reentrant: called from *inside* the evicting admit() below, while `admitting` is true.
+          reentrantResult = g.admit({ peerIp: "9.9.9.9", viaTrustedProxy: false, onEvict: () => {} });
+        } catch (err) {
+          reentrantThrew = err;
+        }
+      },
+    })!;
+    expect(a).toBeDefined();
+    // this admit() evicts `a`, which reentrantly (and unsuccessfully) tries to admit 9.9.9.9.
+    const b = g.admit({ peerIp: "2.2.2.2", viaTrustedProxy: false, onEvict: () => {} });
+    expect(b).toBeDefined();
+    expect(reentrantThrew).toBeInstanceOf(Error);
+    expect(reentrantResult).toBe("never-called"); // the try/catch inside onEvict caught it before assigning
+    // pool must still be exactly at its 1-slot cap: a fresh admission evicts exactly one (b), not
+    // zero (which would mean the reentrant attempt somehow got counted) and not more than one.
+    const evicted: string[] = [];
+    b!.enterAuthed(); // move b out of the way so we can see whether the *reentrant* attempt leaked a slot
+    const c = g.admit({ peerIp: "3.3.3.3", viaTrustedProxy: false, onEvict: () => evicted.push("c") });
+    expect(c).toBeDefined(); // room for exactly one more unauth entry — not zero, not two
+    const d = g.admit({ peerIp: "4.4.4.4", viaTrustedProxy: false, onEvict: () => evicted.push("d") });
+    expect(d).toBeDefined();
+    expect(evicted).toEqual(["c"]); // c was evicted to make room for d — exactly the 1-slot cap, no leak
+  });
+
+  it("a normal (non-reentrant) admit() after a completed eviction is unaffected by the guard flag", () => {
+    const g = fakeConnGuard({ unauthCapDirect: 2 });
+    const a = g.admit({ peerIp: "1.1.1.1", viaTrustedProxy: false, onEvict: () => {} });
+    const b = g.admit({ peerIp: "2.2.2.2", viaTrustedProxy: false, onEvict: () => {} });
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(() => g.admit({ peerIp: "3.3.3.3", viaTrustedProxy: false, onEvict: () => {} })).not.toThrow();
+  });
 });
 
 // 审查修复 #5（v2）: fakeLanStore.createSession 返回原始 sid（设 cookie 用），只存 sha256(sid)；
