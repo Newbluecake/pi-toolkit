@@ -42,9 +42,11 @@ export const API_ERRORS = Object.freeze([
   "E_DB",
 ]);
 
-/** Endpoints the P1 (read-only) frontend talks to. */
+/** Endpoints the P1 (read-only) frontend talks to; `logout`/`session` are LAN-only (S1, package LF). */
 export const API = Object.freeze({
   login: "/api/login",
+  logout: "/api/logout",
+  session: "/api/session",
   events: "/api/events",
   subscribe: "/api/subscribe",
   unsubscribe: "/api/unsubscribe",
