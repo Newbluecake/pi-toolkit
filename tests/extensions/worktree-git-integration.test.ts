@@ -57,7 +57,12 @@ describe("X1 worktree against real git", () => {
 
     // simulate the subagent making a change inside the worktree
     await writeFile(join(rewritten.cwd!, "made-by-agent.txt"), "hello");
-    await ext.beforeReap!(outcome("r-git"), { cwd: rewritten.cwd!, deadlineMs: 10_000 });
+    const dispositions: Array<{ state: string; branch?: string; commit?: string; path?: string }> = [];
+    await ext.beforeReap!(outcome("r-git"), {
+      cwd: rewritten.cwd!,
+      deadlineMs: 10_000,
+      setWorktreeDisposition: (d) => dispositions.push(d),
+    });
 
     // branch with the change exists in the main repo
     const branches = await realExec("git", ["branch", "--list", "pi-agent-r-git"], { cwd: repo });
@@ -67,6 +72,9 @@ describe("X1 worktree against real git", () => {
     // worktree is gone
     const list = await realExec("git", ["worktree", "list", "--porcelain"], { cwd: repo });
     expect(list.stdout).not.toContain(".wt");
+    // replay-verify plan D1: the reported commit sha equals the real branch tip
+    const branchSha = (await realExec("git", ["rev-parse", "pi-agent-r-git"], { cwd: repo })).stdout.trim();
+    expect(dispositions).toEqual([{ state: "committed", branch: "pi-agent-r-git", commit: branchSha }]);
   });
 
   it("removes the worktree without creating a branch when nothing changed", async () => {
@@ -100,12 +108,20 @@ describe("X1 worktree against real git", () => {
     const status = await realExec("git", ["status", "--porcelain"], { cwd: rewritten.cwd! });
     expect(status.stdout.trim()).toBe(""); // confirms the reproduction: clean tree, HEAD advanced
 
-    await ext.beforeReap!(outcome("r-selfcommit"), { cwd: rewritten.cwd!, deadlineMs: 10_000 });
+    const dispositions: Array<{ state: string; branch?: string; commit?: string }> = [];
+    await ext.beforeReap!(outcome("r-selfcommit"), {
+      cwd: rewritten.cwd!,
+      deadlineMs: 10_000,
+      setWorktreeDisposition: (d) => dispositions.push(d),
+    });
 
     // pi-agent-<runId> exists in the MAIN repo and points at exactly the sub
     // agent's own commit.
     const branchHead = await realExec("git", ["rev-parse", "pi-agent-r-selfcommit"], { cwd: repo });
     expect(branchHead.stdout.trim()).toBe(selfCommit);
+    // replay-verify plan D1: the clean+headAdvanced path also reports a sha —
+    // it must equal the sub agent's own commit (H2 never touched anything).
+    expect(dispositions).toEqual([{ state: "committed", branch: "pi-agent-r-selfcommit", commit: selfCommit }]);
     const files = await realExec("git", ["show", "--name-only", "--format=", "pi-agent-r-selfcommit"], { cwd: repo });
     expect(files.stdout).toContain("agent-work.txt");
     // worktree was still safely removed (the commit lives on the branch now)

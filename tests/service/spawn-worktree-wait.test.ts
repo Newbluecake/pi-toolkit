@@ -115,6 +115,37 @@ describe("SpawnService: waitWorktreeDisposition (workflow-worktree plan D5/D5a)"
     });
   });
 
+  it("replay-verify plan D1: mark() and the already-terminal 'settled' path both preserve a reported commit sha", async () => {
+    const { runner, resolve } = makeControllableRunner();
+    const service = createSpawnService(makeDeps(runner));
+    const runId = await spawnIsolated(service);
+    resolve(runId, activeOutcome(runId));
+    await vi.waitFor(() => expect(service.snapshots().find((s) => s.runId === runId)).toBeDefined());
+    const waiting = service.waitWorktreeDisposition!(runId, { horizon: "settle" });
+    service.markWorktreeDisposition!(runId, { state: "committed", branch: "pi-agent-x", commit: "a".repeat(40) });
+    await expect(waiting).resolves.toEqual({
+      kind: "settled",
+      disposition: { state: "committed", branch: "pi-agent-x", commit: "a".repeat(40) },
+    });
+    // already-terminal (post-mark) waitWorktreeDisposition also carries it through
+    await expect(service.waitWorktreeDisposition!(runId, { horizon: "settle" })).resolves.toEqual({
+      kind: "settled",
+      disposition: { state: "committed", branch: "pi-agent-x", commit: "a".repeat(40) },
+    });
+  });
+
+  it("replay-verify plan D1: a committed disposition without a commit sha (H3's trailing rev-parse failed) is transferred without the key", async () => {
+    const { runner, resolve } = makeControllableRunner();
+    const service = createSpawnService(makeDeps(runner));
+    const runId = await spawnIsolated(service);
+    resolve(runId, activeOutcome(runId));
+    await vi.waitFor(() => expect(service.snapshots().find((s) => s.runId === runId)).toBeDefined());
+    service.markWorktreeDisposition!(runId, { state: "committed", branch: "pi-agent-x" });
+    const result = await service.waitWorktreeDisposition!(runId, { horizon: "settle" });
+    expect(result).toEqual({ kind: "settled", disposition: { state: "committed", branch: "pi-agent-x" } });
+    if (result.kind === "settled") expect(Object.keys(result.disposition)).toEqual(["state", "branch"]);
+  });
+
   it("'timeout': no mark() ever arrives within the horizon", async () => {
     vi.useFakeTimers();
     try {

@@ -391,10 +391,17 @@ export interface WorktreeDisposition {
   branch?: string;
   /** workflow-worktree plan D5-core: filled in by the extension when state is "kept" so callers can point the user at the on-disk directory. */
   path?: string;
+  /** replay-verify plan D1: only present for state "committed", and only when H3's post-commit `rev-parse HEAD` succeeded. Absent ≠ not committed — the commit itself is still safe, just unreported. */
+  commit?: string;
 }
 
-/** X1: the post-reap subset an extension may report back (no "active"). workflow-worktree plan D5-core adds `path?` (kept dispositions only). */
-export type WorktreeDisposal = { state: "committed" | "kept" | "clean"; branch?: string; path?: string };
+/** X1: the post-reap subset an extension may report back (no "active"). workflow-worktree plan D5-core adds `path?` (kept dispositions only); replay-verify plan D1 adds `commit?` (committed dispositions only). */
+export type WorktreeDisposal = {
+  state: "committed" | "kept" | "clean";
+  branch?: string;
+  path?: string;
+  commit?: string;
+};
 
 export interface UsageDelta {
   input: number;

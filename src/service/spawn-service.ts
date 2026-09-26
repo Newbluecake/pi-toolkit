@@ -894,6 +894,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           state: disposition.state,
           ...(disposition.branch === undefined ? {} : { branch: disposition.branch }),
           ...(disposition.path === undefined ? {} : { path: disposition.path }),
+          ...(disposition.commit === undefined ? {} : { commit: disposition.commit }),
         };
       }
       pruneWorktreeWait();
@@ -919,6 +920,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             state: wt.state,
             ...(wt.branch === undefined ? {} : { branch: wt.branch }),
             ...(wt.path === undefined ? {} : { path: wt.path }),
+            ...(wt.commit === undefined ? {} : { commit: wt.commit }),
           },
         };
       }

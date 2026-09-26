@@ -234,6 +234,8 @@ export type ChildWorktreeInfo = {
   readonly state: "committed" | "clean" | "kept" | "pending" | "none";
   readonly branch?: string;
   readonly path?: string;
+  /** replay-verify plan D1: only present for state "committed", and only when H3 reported a sha (see WorktreeDisposal.commit). */
+  readonly commit?: string;
 };
 
 /** §2.3.1: the worker's terminated-after state machine, S1 (spawning/ready) through S8 (orphan probe). */

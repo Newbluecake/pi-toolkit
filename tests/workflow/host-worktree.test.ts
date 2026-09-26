@@ -314,6 +314,25 @@ describe("host.ts: D5 settle-wait for an isolated call", () => {
     expect(settle?.worktree).toEqual({ state: "committed", branch: "pi-agent-r1" });
   });
 
+  it("replay-verify plan D1.3 Object.keys regression: a reported commit sha rides through the settle envelope's `worktree` field untouched", async () => {
+    const h = harness();
+    await h.boot();
+    const c = controllableWorktreeSpawner();
+    h.attach(c.spawner, okGate);
+    h.postHostCall("1", "agent", { prompt: "p", opts: { isolation: "worktree", fullResult: true } });
+    await flush();
+    c.spawns[0]!.resolve({ runId: "r1" });
+    await flush();
+    c.finishChild("r1", "completed", "child text");
+    await flush();
+    c.resolveAwait("r1", "settle", { state: "committed", branch: "pi-agent-r1", commit: "a".repeat(40) });
+    await flush();
+    const settle = settleFor(h.sent, "1");
+    expect(settle?.ok).toBe(true);
+    expect(settle?.worktree).toEqual({ state: "committed", branch: "pi-agent-r1", commit: "a".repeat(40) });
+    expect(Object.keys(settle?.worktree as object).sort()).toEqual(["branch", "commit", "state"]);
+  });
+
   it("a disposition already resolved by the time the host asks resolves the settle without waiting", async () => {
     const h = harness();
     await h.boot();

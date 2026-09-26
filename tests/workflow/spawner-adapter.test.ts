@@ -202,6 +202,20 @@ describe("createWorkflowChildSpawner: workflow-worktree (D1/D2/D5)", () => {
     });
   });
 
+  it("replay-verify plan D1: awaitWorktree maps a reported commit sha onto ChildWorktreeInfo.commit, absent when H3 didn't report one", async () => {
+    const { service } = fakeSpawnService();
+    (
+      service as unknown as { waitWorktreeDisposition: SpawnService["waitWorktreeDisposition"] }
+    ).waitWorktreeDisposition = async (_runId, _opts) => ({
+      kind: "settled",
+      disposition: { state: "committed", branch: "pi-agent-r1", commit: "a".repeat(40) },
+    });
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    const result = await adapter.awaitWorktree!("r1", { horizon: "settle" });
+    expect(result).toEqual({ state: "committed", branch: "pi-agent-r1", commit: "a".repeat(40) });
+    expect(Object.keys(result)).toEqual(["state", "branch", "commit"]);
+  });
+
   it("awaitWorktree maps 'timeout' and 'disposed' both onto state:'pending' — host.ts never needs to tell them apart", async () => {
     const { service } = fakeSpawnService();
     const results: Array<{ kind: "timeout" } | { kind: "disposed" }> = [{ kind: "timeout" }, { kind: "disposed" }];

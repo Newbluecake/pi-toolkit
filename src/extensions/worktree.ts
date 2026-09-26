@@ -398,22 +398,32 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
         : ["status", "--porcelain"];
       const addArgs = excludePathspecs.length ? ["add", "-A", "--", ".", ...excludePathspecs] : ["add", "-A"];
       try {
-        // Data-loss fix: a clean working tree does NOT mean "nothing happened"
-        // — the sub agent may have run `git commit` itself (detached HEAD or a
-        // branch it switched to on its own), which also leaves `git status`
-        // clean. Compare the worktree's current HEAD against the commit it was
-        // created from; only an exact match may take the old clean-remove
-        // shortcut. `record.baseHead` missing (old/recovered record, or H2's
-        // own capture failed) is treated the same as "HEAD moved" — never as
-        // "unchanged" — so an unsafe delete is never the default.
-        const headResult = await git(["rev-parse", "HEAD"], record.path, ctx.deadlineMs);
-        if (headResult.code !== 0) throw commandError("git rev-parse HEAD", headResult);
-        const currentHead = headResult.stdout.trim();
-        const headAdvanced = record.baseHead === undefined || currentHead !== record.baseHead;
-
+        // workflow-worktree replay-verify plan D1: `status` now runs FIRST on
+        // every path (report-before-5-commands: clean caps at 3, dirty at 5 —
+        // the `late = 5*reapMs+1s` timing derivation in spawn-service.ts stays
+        // valid). The clean path still needs a HEAD comparison to tell apart
+        // "nothing happened" from "the sub agent committed on its own"
+        // (data-loss fix, see WorktreeRecord.baseHead below); the dirty path
+        // only needs a HEAD read AFTER its own commit, purely to report a
+        // sha — a failure there does NOT roll the disposition back to "kept"
+        // (the commit already succeeded and is safe; see the isolated
+        // try/catch below).
         const status = await git(statusArgs, record.path, ctx.deadlineMs);
         if (status.code !== 0) throw commandError("git status --porcelain", status);
         if (isClean(status)) {
+          // Data-loss fix: a clean working tree does NOT mean "nothing
+          // happened" — the sub agent may have run `git commit` itself
+          // (detached HEAD or a branch it switched to on its own), which
+          // also leaves `git status` clean. Compare the worktree's current
+          // HEAD against the commit it was created from; only an exact
+          // match may take the old clean-remove shortcut. `record.baseHead`
+          // missing (old/recovered record, or H2's own capture failed) is
+          // treated the same as "HEAD moved" — never as "unchanged" — so an
+          // unsafe delete is never the default.
+          const headResult = await git(["rev-parse", "HEAD"], record.path, ctx.deadlineMs);
+          if (headResult.code !== 0) throw commandError("git rev-parse HEAD", headResult);
+          const currentHead = headResult.stdout.trim();
+          const headAdvanced = record.baseHead === undefined || currentHead !== record.baseHead;
           if (headAdvanced) {
             // The sub agent already committed its own work and left nothing
             // uncommitted. Point pi-agent-<runId> at that commit WITHOUT
@@ -422,7 +432,7 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
             const branch = await git(["branch", record.branch, "HEAD"], record.path, ctx.deadlineMs);
             if (branch.code !== 0) throw commandError("git branch", branch);
             safeToRemove = true;
-            report({ state: "committed", branch: record.branch });
+            report({ state: "committed", branch: record.branch, commit: currentHead });
           } else {
             safeToRemove = true;
             report({ state: "clean" });
@@ -435,7 +445,22 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
           const commit = await git(["commit", "-m", `pi-agent ${outcome.runId}`], record.path, ctx.deadlineMs);
           if (commit.code !== 0) throw commandError("git commit", commit);
           safeToRemove = true;
-          report({ state: "committed", branch: record.branch });
+          // D1.2: a failure here does NOT downgrade to "kept" — the commit
+          // already succeeded and the branch is safe; we just have no sha to
+          // report (and the entry can never be journaled per D3, handled in
+          // P2). Isolated try/catch so it never reaches the outer catch.
+          let commitSha: string | undefined;
+          try {
+            const headResult = await git(["rev-parse", "HEAD"], record.path, ctx.deadlineMs);
+            if (headResult.code === 0) commitSha = headResult.stdout.trim() || undefined;
+          } catch {
+            /* best-effort — reported as committed without a sha */
+          }
+          report({
+            state: "committed",
+            branch: record.branch,
+            ...(commitSha !== undefined ? { commit: commitSha } : {}),
+          });
         }
       } catch (error) {
         report({ state: "kept", path: record.path });

@@ -238,6 +238,69 @@ describe("real-worker agent({isolation}) worktree field (workflow-worktree plan 
     expect(parsed.plainKeys).toEqual(["label", "runId", "text"]); // unisolated: byte-identical to the pre-D5 shape
   }, 10_000);
 
+  it("replay-verify plan D1.3 Object.keys regression: `worktree.commit` is present only for a committed disposition WITH a reported sha, and never changes the non-isolated shape", async () => {
+    const cases: Array<{
+      label: string;
+      disposition: {
+        state: "committed" | "clean" | "kept" | "pending" | "none";
+        branch?: string;
+        path?: string;
+        commit?: string;
+      };
+      expectTopKeys: readonly string[];
+      expectWtKeys: readonly string[];
+    }> = [
+      {
+        label: "committed-with-sha",
+        disposition: { state: "committed", branch: "pi-agent-r-wt", commit: "a".repeat(40) },
+        expectTopKeys: ["label", "runId", "text", "worktree"],
+        expectWtKeys: ["branch", "commit", "state"],
+      },
+      {
+        label: "committed-without-sha",
+        disposition: { state: "committed", branch: "pi-agent-r-wt" },
+        expectTopKeys: ["label", "runId", "text", "worktree"],
+        expectWtKeys: ["branch", "state"],
+      },
+      {
+        label: "kept",
+        disposition: { state: "kept", path: "/tmp/wt" },
+        expectTopKeys: ["label", "runId", "text", "worktree"],
+        expectWtKeys: ["path", "state"],
+      },
+      {
+        label: "clean",
+        disposition: { state: "clean" },
+        expectTopKeys: ["label", "runId", "text", "worktree"],
+        expectWtKeys: ["state"],
+      },
+    ];
+    for (const { label, disposition, expectTopKeys, expectWtKeys } of cases) {
+      const spawner: ChildSpawner = {
+        spawn: async () => ({ runId: `r-${label}`, label: `${label}-label` }),
+        abort: async () => true,
+        waitAll: async ({ runIds }) => ({
+          settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "wt text" })),
+          pending: [],
+        }),
+        worktreeAvailable: () => true,
+        awaitWorktree: async () => disposition,
+      };
+      const { outcome } = await bootReal(
+        scriptWith(
+          'const iso = await agent("x", { isolation: "worktree", fullResult: true }); ' +
+            "return JSON.stringify({ topKeys: Object.keys(iso).sort(), wtKeys: Object.keys(iso.worktree).sort() });",
+        ),
+        spawner,
+      );
+      const result = await outcome;
+      expect(result.threw).toBeUndefined();
+      const parsed = JSON.parse(result.returned as string);
+      expect(parsed.topKeys, `${label}: top-level keys`).toEqual([...expectTopKeys].sort());
+      expect(parsed.wtKeys, `${label}: worktree keys`).toEqual([...expectWtKeys].sort());
+    }
+  }, 10_000);
+
   it("a failed isolated child still resolves agent() to plain null (§5.2/§5.3 semantics), fullResult included", async () => {
     const spawner: ChildSpawner = {
       spawn: async () => ({ runId: "r-wt-fail" }),

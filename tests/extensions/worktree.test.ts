@@ -138,20 +138,48 @@ describe("worktree extension", () => {
       settings: { enabled: true },
       worktreeRoot: "/tmp/test-worktrees",
     });
+    const calls: Array<{ state: string; branch?: string; commit?: string }> = [];
     await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-dirty"));
-    await ext.beforeReap?.(outcome("r-dirty"), { cwd: "/tmp/test-worktrees/r-dirty", deadlineMs: 1000 });
+    await ext.beforeReap?.(outcome("r-dirty"), {
+      cwd: "/tmp/test-worktrees/r-dirty",
+      deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
+    });
     expect(fake.branches.has("pi-agent-r-dirty")).toBe(true);
+    // replay-verify plan D1: `status` now runs first on every path, and the
+    // dirty path's own rev-parse HEAD (to obtain the commit sha) runs LAST,
+    // after commit — report-before-5-commands stays true.
     expect(fake.calls.map((c) => c.args)).toEqual([
       ["rev-parse", "--show-toplevel"],
       ["rev-parse", "HEAD"],
       ["worktree", "add", "--detach", "/tmp/test-worktrees/r-dirty", "base-sha"],
-      ["rev-parse", "HEAD"],
       ["status", "--porcelain"],
       ["switch", "-c", "pi-agent-r-dirty"],
       ["add", "-A"],
       ["commit", "-m", "pi-agent r-dirty"],
+      ["rev-parse", "HEAD"],
       ["worktree", "remove", "--force", "/tmp/test-worktrees/r-dirty"],
     ]);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-dirty", commit: "base-sha" }]);
+  });
+
+  it("replay-verify plan D1: a dirty commit whose trailing rev-parse HEAD fails still reports 'committed' (no downgrade to 'kept') and the worktree is still removed, just without a sha", async () => {
+    const fake = fakeGit({ dirty: true, worktreeRevParseFails: true });
+    const ext = createWorktreeExtension({
+      exec: fake.exec,
+      settings: { enabled: true },
+      worktreeRoot: "/tmp/test-worktrees",
+    });
+    const calls: Array<{ state: string; branch?: string; commit?: string }> = [];
+    await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-dirty-no-sha"));
+    await ext.beforeReap?.(outcome("r-dirty-no-sha"), {
+      cwd: "/tmp/test-worktrees/r-dirty-no-sha",
+      deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
+    });
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-dirty-no-sha" }]);
+    expect(calls[0] && "commit" in calls[0]).toBe(false);
+    expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(true);
   });
 
   it("removes a clean worktree without creating a branch", async () => {
@@ -234,7 +262,7 @@ describe("data-loss fix: HEAD moved without a dirty working tree (sub agent comm
       worktreeRoot: "/tmp/test-worktrees",
     });
     await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-head-advanced-clean"));
-    const calls: Array<{ state: string; branch?: string }> = [];
+    const calls: Array<{ state: string; branch?: string; commit?: string }> = [];
     await ext.beforeReap?.(outcome("r-head-advanced-clean"), {
       cwd: "/tmp/test-worktrees/r-head-advanced-clean",
       deadlineMs: 1000,
@@ -247,7 +275,7 @@ describe("data-loss fix: HEAD moved without a dirty working tree (sub agent comm
       expect.objectContaining({ args: ["branch", "pi-agent-r-head-advanced-clean", "HEAD"] }),
     );
     expect(fake.branches.has("pi-agent-r-head-advanced-clean")).toBe(true);
-    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-head-advanced-clean" }]);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-head-advanced-clean", commit: "child-sha" }]);
     expect(fake.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(true);
   });
 
@@ -258,22 +286,28 @@ describe("data-loss fix: HEAD moved without a dirty working tree (sub agent comm
       settings: { enabled: true },
       worktreeRoot: "/tmp/test-worktrees",
     });
+    const calls: Array<{ state: string; branch?: string; commit?: string }> = [];
     await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-head-advanced-dirty"));
     await ext.beforeReap?.(outcome("r-head-advanced-dirty"), {
       cwd: "/tmp/test-worktrees/r-head-advanced-dirty",
       deadlineMs: 1000,
+      setWorktreeDisposition: (d) => calls.push(d),
     });
+    // replay-verify plan D1: `status` runs first; the dirty path no longer
+    // reads HEAD up front (headAdvanced is irrelevant to it) \u2014 its own
+    // rev-parse HEAD now runs LAST, after commit, purely to obtain a sha.
     expect(fake.calls.map((c) => c.args)).toEqual([
       ["rev-parse", "--show-toplevel"],
       ["rev-parse", "HEAD"],
       ["worktree", "add", "--detach", "/tmp/test-worktrees/r-head-advanced-dirty", "base-sha"],
-      ["rev-parse", "HEAD"],
       ["status", "--porcelain"],
       ["switch", "-c", "pi-agent-r-head-advanced-dirty"],
       ["add", "-A"],
       ["commit", "-m", "pi-agent r-head-advanced-dirty"],
+      ["rev-parse", "HEAD"],
       ["worktree", "remove", "--force", "/tmp/test-worktrees/r-head-advanced-dirty"],
     ]);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-head-advanced-dirty", commit: "child-sha" }]);
   });
 
   it("HEAD unchanged + clean working tree \u21d2 still the plain clean-remove path (unaffected)", async () => {
@@ -354,7 +388,7 @@ describe("data-loss fix: HEAD moved without a dirty working tree (sub agent comm
     });
     // conservative: baseHead unknown ⇒ always treated as "cannot prove
     // unchanged" ⇒ branch built rather than silently removed
-    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-no-base" }]);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-no-base", commit: "base-sha" }]);
     expect(fake.branches.has("pi-agent-r-no-base")).toBe(true);
   });
 });
@@ -431,7 +465,7 @@ describe("worktree disposition reporting (X1 agent-tree marker)", () => {
     await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-report-dirty"));
     const { calls, ctx } = reported();
     await ext.beforeReap?.(outcome("r-report-dirty"), ctx);
-    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-report-dirty" }]);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-report-dirty", commit: "base-sha" }]);
   });
 
   it("reports clean for an untouched worktree", async () => {
@@ -474,7 +508,7 @@ describe("worktree disposition reporting (X1 agent-tree marker)", () => {
     await ext.resolveSessionSpec?.({ cwd: "/repo" }, request("r-remove-fail"));
     const { calls, ctx } = reported();
     await ext.beforeReap?.(outcome("r-remove-fail"), ctx);
-    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-remove-fail" }]);
+    expect(calls).toEqual([{ state: "committed", branch: "pi-agent-r-remove-fail", commit: "base-sha" }]);
   });
 
   it("reports nothing for a run without a worktree record and tolerates a legacy ctx", async () => {

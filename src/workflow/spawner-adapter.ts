@@ -159,6 +159,7 @@ export function createWorkflowChildSpawner(
             state: result.disposition.state,
             ...(result.disposition.branch !== undefined ? { branch: result.disposition.branch } : {}),
             ...(result.disposition.path !== undefined ? { path: result.disposition.path } : {}),
+            ...(result.disposition.commit !== undefined ? { commit: result.disposition.commit } : {}),
           };
         case "none":
           return { state: "none" };
