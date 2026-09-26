@@ -33,6 +33,12 @@ export const BUSY_RETRY_MAX = 5;
 export const BUSY_RETRY_DEFAULT_MS = 2_000;
 export const RATE_RETRY_DEFAULT_MS = 1_000;
 export const THROTTLE_RETRY_DEFAULT_MS = 30_000;
+// plan §10 review fix (lan-plan.md §15.9 #8): an SSE stream going CLOSED is ambiguous between
+// “not signed in” (401) and “hub momentarily busy / network hiccup” (503, or the fetch itself
+// failing) — both fail the EventSource connection with no browser retry, indistinguishable from
+// `error` alone. `GET /api/session` disambiguates before deciding what to show.
+export const CLOSE_PROBE_MAX = 5;
+export const CLOSE_PROBE_BACKOFF_MS = 2_000;
 const ES_CLOSED = 2;
 
 /**
@@ -265,6 +271,52 @@ export function createPasswordClient(deps) {
     }, delay);
   }
 
+  /**
+   * plan §10 review fix (lan-plan.md §15.9 #8): an SSE stream that goes CLOSED is ambiguous
+   * between “not signed in” (401) and “hub momentarily busy / network hiccup” (503, or the probe
+   * request itself failing) — both fail the browser's EventSource with no retry, indistinguishable
+   * from `error` alone. Probe `GET /api/session` first: 200 ⇒ the session is still good (keep the
+   * current page, just re-open the stream on the normal backoff schedule); 401 ⇒ genuinely signed
+   * out (show the form); 503 / network error ⇒ keep the current page state as-is (no login form,
+   * no `onConn("auth")`) and re-probe after a fixed backoff, bounded by `CLOSE_PROBE_MAX` attempts
+   * before falling back to the ordinary stream-reopen loop (which will re-enter this same probe if
+   * the stream goes CLOSED again — so the overall retry never truly stops, it just stops busy-
+   * looping the probe itself).
+   * @param {any} source
+   */
+  async function probeSessionAfterClose(source) {
+    for (let attempt = 1; ; attempt++) {
+      if (closed || es !== source) return; // superseded by a newer stream, logout, or close()
+      /** @type {"ok" | "unauthenticated" | "busy" | "network"} */
+      let outcome;
+      try {
+        const r = await request(API.session, { method: "GET" }, REQUEST_TIMEOUT_MS);
+        outcome = r.status === 401 ? "unauthenticated" : r.ok ? "ok" : "busy";
+      } catch {
+        outcome = "network";
+      }
+      if (closed || es !== source) return;
+      if (outcome === "ok") {
+        deps.onConn("reconnecting");
+        scheduleReopen();
+        return;
+      }
+      if (outcome === "unauthenticated") {
+        es = null;
+        deps.onConn("auth");
+        deps.onUnauthenticated();
+        scheduleReopen(); // picks a freshly-authenticated cookie back up (e.g. signed in from another tab)
+        return;
+      }
+      // "busy" (503) or "network": keep the current page state, re-probe after a bounded backoff.
+      if (attempt >= CLOSE_PROBE_MAX) {
+        scheduleReopen();
+        return;
+      }
+      await sleep(CLOSE_PROBE_BACKOFF_MS);
+    }
+  }
+
   function openStream() {
     if (closed) return;
     if (es) {
@@ -321,12 +373,10 @@ export function createPasswordClient(deps) {
         deps.onConn("reconnecting"); // browser auto-reconnects (genuine network hiccup, never a plain HTTP error — verified against Chromium)
         return;
       }
-      // CLOSED: 401 and 503 are indistinguishable here (both fail the connection, no browser retry)
-      // ⇒ treat uniformly as "not signed in" and show the form; §10 "401 或 CLOSED ⇒ 表单".
-      es = null;
-      deps.onConn("auth");
-      deps.onUnauthenticated();
-      scheduleReopen(); // picks a freshly-authenticated cookie back up (e.g. signed in from another tab)
+      // CLOSED: 401 and 503 are indistinguishable here (both fail the connection, no browser
+      // retry) — probe §10 review fix (lan-plan.md §15.9 #8) disambiguates instead of treating
+      // every CLOSED as "not signed in".
+      void probeSessionAfterClose(source);
     });
     armWatchdog();
   }

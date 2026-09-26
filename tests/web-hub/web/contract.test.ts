@@ -18,6 +18,14 @@ describe("web/contract.js mirrors protocol/http-contract.ts", () => {
     expect(Object.isFrozen(web.API_ERRORS)).toBe(true);
   });
 
+  // LC review fix (lan-plan.md §15.9 #6, additive exception): `API.session`/`API.logout` are
+  // LAN-only endpoints that have no counterpart in `protocol/http-contract.ts` (no `API` export
+  // there to mirror against), so nothing above catches a typo/rename in either literal.
+  it("API.session and API.logout point at the S1 LAN-only endpoints", () => {
+    expect(web.API.session).toBe("/api/session");
+    expect(web.API.logout).toBe("/api/logout");
+  });
+
   it("reduce accepts every SSE event name without throwing (minimal / garbage payloads)", () => {
     for (const name of proto.SSE_EVENTS) {
       for (const data of [undefined, null, {}, [], "x", { agentKey: "nope" }]) {

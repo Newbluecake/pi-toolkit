@@ -168,4 +168,59 @@ describe("createConnGuard (plan §6.3)", () => {
     const b = admit(g, "1.1.1.1", false, () => evicted.push("b"));
     expect(b).toBeDefined(); // 2nd conn on the same IP is still within its own 32-total / 8-unauth cap
   });
+
+  // LC review fix (lan-plan.md §15.9 #1): §6.3's class table has every login-pending request end
+  // by promoting to `authed` *or* falling back to the evictable `unauth` category —
+  // `leaveLoginPending()` is that missing inverse of `enterLoginPending()`.
+  describe("leaveLoginPending() (review fix, lan-plan.md §15.9 #1)", () => {
+    it("a login-pending lease that calls leaveLoginPending() becomes evictable (unauth) again", () => {
+      const g = createConnGuard({ directUnauthPoolCap: 2 });
+      const evicted: string[] = [];
+      const a = admit(g, "10.0.0.1", false, () => evicted.push("a"))!;
+      a.enterLoginPending();
+      const b = admit(g, "10.0.0.2", false, () => evicted.push("b"))!;
+      expect(evicted).toEqual([]); // pool at cap (2), but nothing evictable was needed yet
+      a.leaveLoginPending();
+      // pool is now full again (a + b); a 3rd connection must evict *a* (the only unauth one),
+      // never b — proving `a` genuinely returned to the evictable unauth category.
+      const c = admit(g, "10.0.0.3", false, () => evicted.push("c"));
+      expect(c).toBeDefined();
+      expect(evicted).toEqual(["a"]);
+      void b;
+    });
+
+    it("leaveLoginPending() is a no-op once the lease has already been promoted to authed", () => {
+      const g = createConnGuard({ directUnauthPoolCap: 1 });
+      const evicted: string[] = [];
+      const a = admit(g, "10.0.0.1", false, () => evicted.push("a"))!;
+      a.enterLoginPending();
+      a.enterAuthed();
+      a.leaveLoginPending(); // must NOT demote an authed lease back to evictable unauth
+      const b = admit(g, "10.0.0.2", false, () => evicted.push("b"));
+      expect(b).toBeDefined();
+      expect(evicted).toEqual([]); // authed leases are never evictable, regardless of history
+    });
+
+    it("leaveLoginPending() is a no-op on a lease that was never in login-pending (still plain unauth)", () => {
+      const g = createConnGuard({ directUnauthPoolCap: 1 });
+      const evicted: string[] = [];
+      const a = admit(g, "10.0.0.1", false, () => evicted.push("a"))!;
+      a.leaveLoginPending(); // no-op: was already unauth
+      const b = admit(g, "10.0.0.2", false, () => evicted.push("b"));
+      expect(b).toBeDefined();
+      expect(evicted).toEqual(["a"]); // still evictable, exactly as if leaveLoginPending() were never called
+    });
+
+    it("leaveLoginPending() is a no-op after release() (the lease's slot is already gone)", () => {
+      const g = createConnGuard({ directUnauthPoolCap: 1 });
+      const evicted: string[] = [];
+      const a = admit(g, "10.0.0.1", false, () => evicted.push("a"))!;
+      a.enterLoginPending();
+      a.release();
+      expect(() => a.leaveLoginPending()).not.toThrow(); // must not resurrect a released lease
+      const b = admit(g, "10.0.0.2", false, () => evicted.push("b"));
+      expect(b).toBeDefined();
+      expect(evicted).toEqual([]); // a's slot was already freed by release(), nothing left to evict
+    });
+  });
 });

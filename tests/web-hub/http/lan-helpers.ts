@@ -195,6 +195,85 @@ export function lanRequest(
 
 export const LAN_JSON_HEADERS = { "Content-Type": "application/json", "X-PWH": "1" } as const;
 
+export interface SseEvent {
+  event: string;
+  data: unknown;
+}
+
+function parseFrames(chunk: string): SseEvent[] {
+  const out: SseEvent[] = [];
+  for (const block of chunk.split("\n\n")) {
+    if (block.trim().length === 0) continue;
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event: ")) event = line.slice(7);
+      else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+    }
+    if (dataLines.length > 0) out.push({ event, data: JSON.parse(dataLines.join("\n")) });
+  }
+  return out;
+}
+
+/** Opens a real SSE connection (raw `node:http`, no `EventSource` polyfill needed for tests). */
+export async function openSse(
+  port: number,
+  cookie: string,
+): Promise<{ events: SseEvent[]; waitFor(event: string, ms?: number): Promise<SseEvent>; close(): void }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      host: "127.0.0.1",
+      port,
+      path: "/api/events",
+      headers: { Host: `127.0.0.1:${port}`, Cookie: cookie, Accept: "text/event-stream" },
+    });
+    req.on("error", reject);
+    req.end();
+    req.on("response", (res) => {
+      const events: SseEvent[] = [];
+      const waiters: Array<() => void> = [];
+      let buf = "";
+      res.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const p of parts) events.push(...parseFrames(p + "\n\n"));
+        for (const w of [...waiters]) w();
+      });
+      resolve({
+        events,
+        close: () => req.destroy(),
+        waitFor(eventName, ms = 3_000) {
+          return new Promise((res2, rej2) => {
+            const check = (): boolean => {
+              const hit = events.find((e) => e.event === eventName);
+              if (hit !== undefined) {
+                cleanup();
+                res2(hit);
+                return true;
+              }
+              return false;
+            };
+            const timer = setTimeout(() => {
+              cleanup();
+              rej2(new Error(`waitFor(${eventName}) timeout; got ${events.map((e) => e.event).join(",")}`));
+            }, ms);
+            const cleanup = (): void => {
+              clearTimeout(timer);
+              const i = waiters.indexOf(onEv);
+              if (i >= 0) waiters.splice(i, 1);
+            };
+            const onEv = (): void => {
+              check();
+            };
+            if (!check()) waiters.push(onEv);
+          });
+        },
+      });
+    });
+  });
+}
+
 export function lanPostJson(
   port: number,
   path: string,
@@ -216,13 +295,25 @@ export function lanPostJson(
 /** Seed a LAN user (bypassing the (LI/LD-owned) admin passwd flow, which is not part of LC's scope). */
 export function seedLanUser(
   store: FakeLanStore,
-  opts: { id?: number; username: string; password: string; initial?: boolean },
+  opts: {
+    id?: number;
+    username: string;
+    password: string;
+    initial?: boolean;
+    /** §5.1 "读取校验" review-fix tests (LC #2): seed a corrupt KDF params row (e.g. `n` not a
+     * power of 2) without ever feeding it to real scrypt — mirrors `tests/web-hub/hub/lan-auth.
+     * test.ts`'s local `seedUser` override. */
+    kdfOverride?: Partial<{ n: number; r: number; p: number }>;
+  },
 ): void {
   const salt = Buffer.alloc(16, 7);
-  const n = 16384;
-  const r = 8;
-  const p = 1;
-  const hash = scryptSync(opts.password, salt, 32, { N: n, r, p, maxmem: 128 * n * r + 1024 * 1024 });
+  const n = opts.kdfOverride?.n ?? 16384;
+  const r = opts.kdfOverride?.r ?? 8;
+  const p = opts.kdfOverride?.p ?? 1;
+  const validParams = Number.isSafeInteger(n) && n > 0 && (n & (n - 1)) === 0 && 128 * n * r <= 32 * 1024 * 1024;
+  const hash = validParams
+    ? scryptSync(opts.password, salt, 32, { N: n, r, p, maxmem: 128 * n * r + 1024 * 1024 })
+    : Buffer.alloc(32, 1); // corrupt params never actually get fed to scrypt for real
   store.seedUser({
     id: opts.id ?? 1,
     username: opts.username,

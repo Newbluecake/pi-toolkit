@@ -2,87 +2,8 @@
  * SSE open + revoke (plan §4.2 "SSE 撤销" http-layer parts, LC row: "sse.revoke
  * 与 auth 事件（§4.2 SSE 撤销中属于 http 层的部分，用假 store）").
  */
-import { request as httpRequest } from "node:http";
 import { describe, expect, it } from "vitest";
-import { lanPostJson, seedLanUser, startLan } from "./lan-helpers.js";
-
-interface SseEvent {
-  event: string;
-  data: unknown;
-}
-
-function parseFrames(chunk: string): SseEvent[] {
-  const out: SseEvent[] = [];
-  for (const block of chunk.split("\n\n")) {
-    if (block.trim().length === 0) continue;
-    let event = "message";
-    const dataLines: string[] = [];
-    for (const line of block.split("\n")) {
-      if (line.startsWith("event: ")) event = line.slice(7);
-      else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
-    }
-    if (dataLines.length > 0) out.push({ event, data: JSON.parse(dataLines.join("\n")) });
-  }
-  return out;
-}
-
-async function openSse(
-  port: number,
-  cookie: string,
-): Promise<{ events: SseEvent[]; waitFor(event: string, ms?: number): Promise<SseEvent>; close(): void }> {
-  return new Promise((resolve, reject) => {
-    const req = httpRequest({
-      host: "127.0.0.1",
-      port,
-      path: "/api/events",
-      headers: { Host: `127.0.0.1:${port}`, Cookie: cookie, Accept: "text/event-stream" },
-    });
-    req.on("error", reject);
-    req.end();
-    req.on("response", (res) => {
-      const events: SseEvent[] = [];
-      const waiters: Array<() => void> = [];
-      let buf = "";
-      res.on("data", (chunk: Buffer) => {
-        buf += chunk.toString("utf8");
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const p of parts) events.push(...parseFrames(p + "\n\n"));
-        for (const w of [...waiters]) w();
-      });
-      resolve({
-        events,
-        close: () => req.destroy(),
-        waitFor(eventName, ms = 3_000) {
-          return new Promise((res2, rej2) => {
-            const check = (): boolean => {
-              const hit = events.find((e) => e.event === eventName);
-              if (hit !== undefined) {
-                cleanup();
-                res2(hit);
-                return true;
-              }
-              return false;
-            };
-            const timer = setTimeout(() => {
-              cleanup();
-              rej2(new Error(`waitFor(${eventName}) timeout; got ${events.map((e) => e.event).join(",")}`));
-            }, ms);
-            const cleanup = (): void => {
-              clearTimeout(timer);
-              const i = waiters.indexOf(onEv);
-              if (i >= 0) waiters.splice(i, 1);
-            };
-            const onEv = (): void => {
-              check();
-            };
-            if (!check()) waiters.push(onEv);
-          });
-        },
-      });
-    });
-  });
-}
+import { lanPostJson, openSse, seedLanUser, startLan } from "./lan-helpers.js";
 
 describe("LAN SSE open + revoke (plan §4.2)", () => {
   it("logout synchronously revokes the session's open SSE: event:auth{revoked} then stream ends", async () => {

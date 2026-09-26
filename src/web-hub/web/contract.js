@@ -40,6 +40,7 @@ export const API_ERRORS = Object.freeze([
   "E_NOT_IMPLEMENTED",
   "E_BUSY",
   "E_DB",
+  "E_LOCKED",
 ]);
 
 /** Endpoints the P1 (read-only) frontend talks to; `logout`/`session` are LAN-only (S1, package LF). */

@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createKdf,
+  createKdfSemaphore,
   DEFAULT_KDF_KEY_LEN,
   DEFAULT_KDF_N,
   DEFAULT_KDF_P,
@@ -39,6 +40,138 @@ describe('defaultKdfParams (plan §5.1 "参数")', () => {
   it("maxmemFor matches 128*N*r + 1MiB", () => {
     expect(maxmemFor(32768, 8)).toBe(128 * 32768 * 8 + 1024 * 1024);
   });
+});
+
+describe('createKdfSemaphore (plan §5.1 "并发 2"; LC review fix, lan-plan.md §15.9 #2)', () => {
+  it("admits up to maxConcurrent immediately, queues the rest", async () => {
+    const sem = createKdfSemaphore(2);
+    const order: string[] = [];
+    let aResolved = false;
+    let bResolved = false;
+    let cResolved = false;
+    void sem.acquire().then(() => {
+      aResolved = true;
+      order.push("a");
+    });
+    void sem.acquire().then(() => {
+      bResolved = true;
+      order.push("b");
+    });
+    const c = sem.acquire().then((release) => {
+      cResolved = true;
+      order.push("c");
+      return release;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(aResolved).toBe(true);
+    expect(bResolved).toBe(true);
+    expect(cResolved).toBe(false); // 3rd caller queued — both slots already taken
+    void c;
+  });
+
+  it("releasing a slot hands it directly to the oldest queued waiter (FIFO)", async () => {
+    const sem = createKdfSemaphore(1);
+    const order: string[] = [];
+    const releaseA = await sem.acquire();
+    const bPromise = sem.acquire().then((r) => {
+      order.push("b");
+      return r;
+    });
+    const cPromise = sem.acquire().then((r) => {
+      order.push("c");
+      return r;
+    });
+    await Promise.resolve();
+    expect(order).toEqual([]); // both still queued behind a
+    releaseA();
+    const releaseB = await bPromise;
+    expect(order).toEqual(["b"]); // b, not c, gets the freed slot
+    releaseB();
+    await cPromise;
+    expect(order).toEqual(["b", "c"]);
+  });
+
+  it("release() is idempotent — calling it twice only frees the slot once", async () => {
+    const sem = createKdfSemaphore(1);
+    const releaseA = await sem.acquire();
+    releaseA();
+    releaseA(); // must not double-free / hand the same slot to two different waiters
+    const releaseB = await sem.acquire();
+    let cResolved = false;
+    void sem.acquire().then(() => {
+      cResolved = true;
+    });
+    await Promise.resolve();
+    expect(cResolved).toBe(false); // only one slot total — b holds it, c is still queued
+    releaseB();
+  });
+
+  it("an already-aborted signal rejects immediately without consuming a slot", async () => {
+    const sem = createKdfSemaphore(1);
+    const ac = new AbortController();
+    ac.abort(new Error("nope"));
+    await expect(sem.acquire(ac.signal)).rejects.toThrow("nope");
+    // the single slot is still free — a fresh acquire() resolves immediately.
+    let resolved = false;
+    void sem.acquire().then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it("aborting while queued (waiting for a slot) rejects and removes the waiter without ever taking the slot", async () => {
+    const sem = createKdfSemaphore(1);
+    const releaseA = await sem.acquire();
+    const ac = new AbortController();
+    const bPromise = sem.acquire(ac.signal);
+    ac.abort(new Error("stop waiting"));
+    await expect(bPromise).rejects.toThrow("stop waiting");
+    // releasing a now hands the slot to a *new* caller (c), proving b was fully removed from the
+    // queue rather than left as a dangling entry that would otherwise have been granted next.
+    let cGotIt = false;
+    void sem.acquire().then(() => {
+      cGotIt = true;
+    });
+    releaseA();
+    await Promise.resolve();
+    expect(cGotIt).toBe(true);
+  });
+});
+
+describe("createKdf({ maxConcurrent }) actually bounds concurrent scrypt calls (plan §5.1; LC review fix, lan-plan.md §15.9 #2)", () => {
+  it("a 3rd concurrent run() only starts once one of the first two finishes, even though nothing else serializes them", async () => {
+    const kdf = createKdf({ maxConcurrent: 2 });
+    const params = { n: 32768, r: 8, p: 1, keyLen: 32, salt: new Uint8Array(16) };
+    const started: number[] = [];
+    const finished: number[] = [];
+    const track = (i: number) => {
+      started.push(i);
+      return kdf.run(`pw-${i}`, params).finally(() => finished.push(i));
+    };
+    const all = [0, 1, 2].map(track);
+    // give the first two real scrypt calls (≈100ms each per lan-plan.md's own measurement) a
+    // moment to actually be running before asserting the 3rd hasn't started yet.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toEqual([0, 1, 2]); // all three *called* run() already (JS-side, synchronous)
+    expect(finished.length).toBeLessThan(1); // but none of the real ~100ms scrypt calls have finished yet
+    await Promise.all(all);
+    expect(finished).toHaveLength(3);
+    // the 3rd one couldn't have finished before *both* of the first two slots were free at least
+    // once — i.e. it necessarily finished no earlier than whichever of 0/1 finished first.
+    const thirdIndex = finished.indexOf(2);
+    expect(thirdIndex).toBeGreaterThanOrEqual(1);
+  }, 10_000);
+
+  it("a run() that throws (bad scrypt params) still releases its slot for the next queued caller", async () => {
+    const kdf = createKdf({ maxConcurrent: 1 });
+    const badParams = { n: 32768, r: 8, p: 1, keyLen: 32, salt: new Uint8Array(16) };
+    await expect(kdf.run("x", { ...badParams, keyLen: -1 })).rejects.toThrow();
+    // if the slot weren't released in a `finally`, this would hang forever instead of resolving.
+    const ok = await kdf.run("y", badParams);
+    expect(ok.byteLength).toBe(32);
+  }, 10_000);
 });
 
 describe("createKdf().run (plan §5.1)", () => {

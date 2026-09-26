@@ -293,6 +293,9 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
           enterAuthed: () => {
             if (pool.get(mySeq) === entry) entry.category = "authed";
           },
+          leaveLoginPending: () => {
+            if (pool.get(mySeq) === entry && entry.category === "login-pending") entry.category = "unauth";
+          },
           release: () => {
             if (released) return;
             released = true;

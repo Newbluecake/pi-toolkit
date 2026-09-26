@@ -89,4 +89,31 @@ describe("resolveProxy (plan §2.4)", () => {
     );
     expect(r.hostHeader).toBe("a, b");
   });
+
+  // LC review fix (lan-plan.md §15.9 #4, P2): a *repeated* `X-Forwarded-Host` header, delivered
+  // to this pure function as the array form `IncomingHttpHeaders` allows, must be flagged
+  // multi-value — silently taking the last entry (the pre-fix behavior) let a 2nd, possibly
+  // spoofed, header win without ever tripping the existing comma-list check above.
+  it("X-Forwarded-Host delivered as an array (repeated header) is flagged host-multi, not silently collapsed to the last value", () => {
+    const r = resolveProxy(
+      "192.168.31.10",
+      {
+        "x-forwarded-for": "1.2.3.4",
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": ["legit.example.com", "evil.example.com"],
+      },
+      TRUST,
+    );
+    expect(r.warnings).toContain("host-multi");
+  });
+
+  it("X-Forwarded-Host delivered as a single-element array is NOT flagged multi (still just one value)", () => {
+    const r = resolveProxy(
+      "192.168.31.10",
+      { "x-forwarded-for": "1.2.3.4", "x-forwarded-proto": "https", "x-forwarded-host": ["hub.example.com"] },
+      TRUST,
+    );
+    expect(r.warnings).not.toContain("host-multi");
+    expect(r.hostHeader).toBe("hub.example.com");
+  });
 });

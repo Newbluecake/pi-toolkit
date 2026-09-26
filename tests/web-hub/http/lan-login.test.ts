@@ -117,13 +117,15 @@ describe("LAN login pipeline (plan §6.1, §6.4)", () => {
     }
   });
 
-  it("initial-password login: response flags initialPasswordInUse and the store records the first use", async () => {
+  it("initial-password login: response flags initialPassword and the store records the first use", async () => {
     const h = await startLan();
     try {
       seedLanUser(h.store, { username: "alice", password: "initial-secret-1", initial: true });
       const r = await lanPostJson(h.port, "/api/login", { username: "alice", password: "initial-secret-1" });
       expect(r.status).toBe(200);
-      expect(JSON.parse(r.body)).toMatchObject({ initialPasswordInUse: true });
+      // review fix (lan-plan.md §15.9 #6): plan §10's wire field is `initialPassword`, not
+      // `initialPasswordInUse` (that name is reserved for `GET /api/session`'s own response).
+      expect(JSON.parse(r.body)).toMatchObject({ initialPassword: true });
     } finally {
       await h.cleanup();
     }

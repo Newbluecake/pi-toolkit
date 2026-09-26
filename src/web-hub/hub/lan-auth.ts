@@ -11,8 +11,10 @@
  * Cookie: `pwh_lan` — distinct name and store from loopback's `pwh_sid`
  * (`hub/auth.ts`), so the two auth domains never collide (§6.4).
  */
-import { createHash, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { readCookie } from "./auth.js";
+import { validateKdfParams } from "./kdf.js";
+import { hashSid } from "./sid-hash.js";
 import type {
   KdfAdmissionPort,
   KdfParams,
@@ -25,12 +27,10 @@ import type {
 
 export const LAN_SESSION_COOKIE = "pwh_lan";
 
-/** `sha256(sid)`, base64url — must match `LanStorePort`'s own internal hashing convention
- * (`tests/web-hub/contract/fakes.ts`'s `fakeLanStore` uses the identical scheme; the real S1
- * store (LS) is expected to follow §6.4's "库中只存 sha256(sid)" the same way). */
-export function hashSid(sid: string): string {
-  return createHash("sha256").update(sid).digest("base64url");
-}
+/** `sha256(sid)`, base64url (§6.4 "库中只存 sha256(sid)"); re-exported from the shared
+ * `hub/sid-hash.ts` helper (LC review fix, lan-plan.md §15.9 item 5) so existing importers of
+ * `hashSid` from this module keep working unchanged. */
+export { hashSid };
 
 export function formatLanCookie(value: string, opts: { secure: boolean; clear?: boolean }): string {
   const base = `${LAN_SESSION_COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/`;
@@ -53,12 +53,28 @@ export interface LanLoginDeps {
   kdf: KdfPort;
   limiter: LoginLimiterPort & { isFresh?(clientIp: string): boolean };
   admission: KdfAdmissionPort;
+  /** LC review fix (lan-plan.md §15.9 #2): called (never awaited, never thrown) when a stored
+   * user's KDF params fail §5.1's "读取校验" — the caller (`http.ts`) logs it tagged
+   * `db-invalid:kdf` (never the plaintext password/hash). The login itself always still fails
+   * closed with a plain 401 `E_AUTH` (§6.1 "不区分失败原因"); a dummy KDF run keeps the timing
+   * profile identical to the unknown-user / wrong-password branches. */
+  onCorruptKdfParams?: (username: string, reason: string) => void;
 }
 
 export type LanLoginOutcome =
   | { status: 200; cookie: string; initialPasswordInUse: boolean }
   | { status: 401 }
-  | { status: 429; retryAfterMs: number; saturated?: boolean };
+  | {
+      status: 429;
+      retryAfterMs: number;
+      saturated?: boolean;
+      /** LC review fix (lan-plan.md §15.9 #4): which gate produced this 429, so `http.ts` can pick
+       * an `error` tag the frontend actually differentiates on (§10) — `"backoff"` (§6.2 per-IP
+       * lockout, incl. its `saturated` sub-case) is a punitive lock the client must NOT auto-retry
+       * without a user-visible countdown; `"admission"` (§6.2 KDF fair-scheduling queue full /
+       * 20s wait timeout) is a transient capacity signal that is safe to auto-retry. */
+      kind: "backoff" | "admission";
+    };
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0;
@@ -79,6 +95,7 @@ export async function runLanLogin(
     return {
       status: 429,
       retryAfterMs: admitResult.retryAfterMs,
+      kind: "backoff",
       ...(admitResult.saturated === true ? { saturated: true as const } : {}),
     };
   }
@@ -92,17 +109,30 @@ export async function runLanLogin(
   const fresh = deps.limiter.isFresh?.(ctx.clientIp) ?? true;
 
   const admission = await deps.admission.acquire(ctx.clientIp, fresh, opts);
-  if (!admission.ok) return { status: 429, retryAfterMs: admission.retryAfterMs };
+  if (!admission.ok) return { status: 429, retryAfterMs: admission.retryAfterMs, kind: "admission" };
   opts?.onAdmitted?.();
   try {
     const user = username === undefined ? undefined : await deps.store.getUser(username, opts);
-    const params: KdfParams =
-      user === undefined
-        ? DUMMY_PARAMS
-        : { n: user.n, r: user.r, p: user.p, keyLen: user.hash.length, salt: user.salt };
+    // §5.1 "读取校验" (LC review fix, lan-plan.md §15.9 #2): a stored record's KDF params must be
+    // re-validated before they're ever fed to `scrypt` — a corrupted row (n/r/p out of range) could
+    // otherwise turn a login attempt into a memory/time DoS. A dummy KDF run (same shape as the
+    // "no such user" branch) keeps this indistinguishable in timing; the login still just 401s
+    // (§6.1 "不区分失败原因") and the corruption is surfaced only via `onCorruptKdfParams` for logging.
+    let corruptKdf = false;
+    let params: KdfParams = DUMMY_PARAMS;
+    if (user !== undefined) {
+      const validity = validateKdfParams(user);
+      if (validity.ok) {
+        params = { n: user.n, r: user.r, p: user.p, keyLen: user.hash.length, salt: user.salt };
+      } else {
+        corruptKdf = true;
+        deps.onCorruptKdfParams?.(user.username, validity.reason);
+      }
+    }
     const derived = await deps.kdf.run(password, params, opts);
-    const matches = user !== undefined && derived.length === user.hash.length && timingSafeEqual(derived, user.hash);
-    if (user === undefined || !matches) {
+    const matches =
+      user !== undefined && !corruptKdf && derived.length === user.hash.length && timingSafeEqual(derived, user.hash);
+    if (user === undefined || corruptKdf || !matches) {
       deps.limiter.fail(ctx.clientIp);
       return { status: 401 };
     }

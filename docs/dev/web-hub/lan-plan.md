@@ -1406,6 +1406,17 @@ W1 只有一个包，不需要预检；W2 五包（含 LP）与 W3 两包的 spe
 - LC 架构偏差接受：LAN 生命周期（bind → 60s tick → 421 重算 → revoke）由 `hub/http.ts` 自持；W3-LD 不再另写 `lan-controller.ts`，只做 startHub 接线 / admin / hub.json。
 - LE 定下的 `WebHubSettings.lan` / `WebHubControl.lan` 接口由 W3-LI 直接采用。
 
+### 15.9 W2 验收打回（LC http / LF web / KDF 并发，修复包 B，2026-09-27）
+
+LC 验收（真机 + 代码评审）打回 5 项、LF 打回 4 项，均在修复包 B 中处置，均为**在冻结签名之内**的填实/纠正，除下面两条主会话显式授权的偏差：
+
+1. **`ConnLease` 新增 `leaveLoginPending()`**（唯一被授权的签名改动）：`enterLoginPending()`/`enterAuthed()` 只覆盖了 §6.3 类表「成功」分支，登录终结的 401/429/异常/超时分支此前无法把 socket 放回可淘汰的 `unauth`——新增方法是那三个分支缺失的逆操作，`hub/ports.ts`/`hub/conn-guard.ts`/`tests/web-hub/contract/fakes.ts`/`types.test-d.ts` 同步落地。
+2. **KDF 并发 2 的落点选在 `kdf.ts`（选项 A，非装配层）**：`createKdf()` 内部持有一个 `createKdfSemaphore(2)`，`run()` 排队等待槽位再执行 scrypt，`finally` 释放；`kdf-admission.ts` 的 `acquire().release` 保持空实现——它仲裁的是 §6.2 的公平调度令牌桶（服务时即弹出等待队列，没有需要释放的状态），并发/内存预算是 `kdf.ts` 自己的资源池，两者正交，`release()` 为空是设计使然而非缺陷（原 docstring 已这样写，只是 `kdf.ts` 一侧此前没有落地）。内存预算：`validateKdfParams` 已保证任何从库读出的记录 `128·n·r ≤ 32 MiB`，并发 2 × 32 MiB = 64 MiB 与 §5.1 一致；`defaultKdfParams()`（仅 `setPassword` 改密这一条极少触发的管理路径用到）算出 ≈33 MiB，两个并发改密操作合计 ≈66 MiB，超出 64 MiB 名义预算 ~3%——已接受，不在 LAN 攻击面上（改密不是未鉴权端点，不受洪泛影响）。
+3. **SSE 到期复核**（`hub/http.ts`，55s tick）只调用冻结的 `LanStorePort.touchSession`，不是 `lan-store.ts` 内部注释里提到的 `touchSessionReserved`——那需要给 `LanFrontendDeps.store` 加字段（W1 冻结签名改动，本包无权限）。改为运行期鸭子类型探测：若具体 store 实例上恰好存在 `touchSessionReserved` 方法就用它（不占交互槽位的可选优化），否则退回 `touchSession`；两者对调用方是同一保证（成功/失败/expired 的判定逻辑不变）。
+4. **登录 429 discriminator**：`API_ERRORS` 新增 `"E_LOCKED"`（`protocol/http-contract.ts` + `web/contract.js` 镜像同步）——加性扩展，不改变任何既有取值的含义：`limiter.admit()` 的普通每 IP 退避锁定 ⇒ `E_LOCKED`（前端走倒计时、不自动重试分支）；`saturated:true` 时仍按 §6.2 原文吐 `error:"E_RATE"`（字面量不变）；`admission.acquire()` 的 KDF 公平调度队列满/等待超时 ⇒ `E_RATE`（前端自动重试分支，此前所有登录 429 一律 `E_RATE`，导致倒计时分支永远不可达）。
+5. **初始密码字段名**：登录成功响应统一为方案 §10 原文的 `initialPassword:true`（此前 `hub/http.ts` 误发 `initialPasswordInUse`，与前端 `password-client.js` 读取的字段名不一致）；`GET /api/session` 保持 `initialPasswordInUse`（§7/§5.2 原文，未受影响）。
+6. **`web/contract.js` 的 `API.session`/`API.logout`（additive exception）**：这两个端点路径在 `protocol/http-contract.ts` 侧没有对应导出（那侧只有 SSE_EVENTS/API_ERRORS 等线上帧式契约，从未有 `API` 路径表），因此无法用现有的镜像比对测试覆盖；补一条直接断言 `API.session === "/api/session"`/`API.logout === "/api/logout"` 的组件/契约测试，防回归。
+
 ---
 
 ## 16. 待用户确认

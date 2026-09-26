@@ -18,7 +18,7 @@ export interface ProxyResolution {
    * yet validated for cardinality/syntax; the caller re-parses it (§2.4's own multi-value /
    * syntax rules produce 400, which this pure function has no channel to signal on its own). */
   hostHeader: string | undefined;
-  warnings: ("xff-missing" | "xff-all-trusted" | "xff-malformed" | "proto-invalid")[];
+  warnings: ("xff-missing" | "xff-all-trusted" | "xff-malformed" | "proto-invalid" | "host-multi")[];
 }
 
 function lastHeaderValue(v: string | string[] | undefined): string | undefined {
@@ -71,9 +71,17 @@ export function resolveProxy(
   if (!xfpOk) warnings.push("proto-invalid");
 
   // X-Forwarded-Host: trusted ⇒ use it (raw, incl. any comma so the caller can reject multi-value);
-  // missing ⇒ fall back to Host (§2.4 "XFH 缺失 ⇒ 用 Host 做同样的判定").
-  const xfhRaw = lastHeaderValue(headers["x-forwarded-host"]);
-  const hostHeader = xfhRaw ?? headers.host;
+  // missing ⇒ fall back to Host (§2.4 "XFH 缺失 ⇒ 用 Host 做同样的判定"). Review fix (lan-plan.md
+  // §15.9 #4 P2 item): a *repeated* header (the array form `IncomingHttpHeaders` allows, even
+  // though node:http's default header-joining turns real duplicate wire headers into a single
+  // comma-joined string — caught below via `.includes(",")` — some callers/transports can still
+  // hand this function a literal `string[]`) must be flagged as multi-value too; silently taking
+  // the last entry (the old behavior) would let a spoofed *second* `X-Forwarded-Host` win over a
+  // legitimate first one without ever tripping the comma-list check.
+  const xfhRaw = headers["x-forwarded-host"];
+  const xfhMulti = Array.isArray(xfhRaw) && xfhRaw.length > 1;
+  if (xfhMulti) warnings.push("host-multi");
+  const hostHeader = lastHeaderValue(xfhRaw) ?? headers.host;
 
   return { viaTrustedProxy: true, clientIp, scheme: xfpOk ? "https" : "http", hostHeader, warnings };
 }

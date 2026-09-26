@@ -35,13 +35,14 @@
  * report for review.
  */
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import type { LanOffReason } from "../protocol/lan.js";
 import { checkDbFiles, CHECKPOINT_PASSIVE_INTERVAL_MS, MAINT_DEADLINE_MS } from "./db.js";
 import { buildMaintScript } from "./db-child.js";
 import { createDbClient, type DbClient, type DbClientDeps } from "./db-client.js";
 import type { HubLog, LanSessionRecord, LanStorePort, LanUserRecord, LanUserSummary, PortOptions } from "./ports.js";
+import { hashSid as sharedHashSid } from "./sid-hash.js";
 
 const execFileP = promisify(execFile);
 
@@ -338,7 +339,7 @@ function unbase64(s: string): Uint8Array {
 }
 
 function sha256Base64Url(sid: string): string {
-  return createHash("sha256").update(sid).digest("base64url");
+  return sharedHashSid(sid); // LC review fix, lan-plan.md §15.9 item 5: delegates to the shared helper
 }
 
 export type { DbClient };
