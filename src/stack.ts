@@ -803,6 +803,10 @@ export interface CompactHintState {
   /** 价格感知动态阈值运行时（dynamic-threshold-plan.md D3）；mode=off / print、json 构造
    *  时缺席或惰性。与 `Stack.dynamic` 引用同一对象（§2.4 所有权在 Stack）。 */
   dynamic?: DynamicRuntime | undefined;
+  /** child-context-switch plan §2.2/§4：本 run 切换次数已达 `compact.childMaxSwitches` 上限。
+   *  只在子会话 headless 构造时设定（P3）；为 true 时只保留 tick，不再发 hint/demand（不能
+   *  让模型去做做不了的事）。主会话不设置 ⇒ 行为逐字节不变。 */
+  switchesExhausted?: () => boolean;
 }
 
 /** set_model (plan §4.10): single model-registry port shared by spawn admission,
@@ -968,6 +972,10 @@ export function createCompactHintHook(
     sendUserMessage?: (text: string) => void;
     /** switch_context 已暂存交接文本、压缩尚未完成 —— 此时既不再催，也不抢先强制压缩。 */
     handoffPending?: () => boolean;
+    /** child-context-switch plan §2.2：子会话无头版——跳过 print/json 早退，绝不 ctx.compact()。 */
+    headless?: boolean;
+    /** 替代 holder.current?.compactHint：子会话不需要伪造一整个 Stack（plan §2.2）。 */
+    getState?: () => CompactHintState | undefined;
   },
 ): (event: unknown, ctx: ExtensionContext) => void {
   const now = deps.now ?? (() => Date.now());
@@ -978,8 +986,8 @@ export function createCompactHintHook(
   // 只有真实用量的回落才重置，任何「线自己动了」都不重置）。
   let lastPercentSeen: number | null = null;
   return (_event, ctx) => {
-    if (ctx.mode === "print" || ctx.mode === "json") return;
-    const state = holder.current?.compactHint;
+    if (!deps.headless && (ctx.mode === "print" || ctx.mode === "json")) return;
+    const state = deps.getState ? deps.getState() : holder.current?.compactHint;
     if (
       !state ||
       (state.thresholdPercent <= 0 &&
@@ -1053,7 +1061,10 @@ export function createCompactHintHook(
     );
     // task #14: publish the effective lines; cache-ttl judges imminence against live usage per request.
     state.imminence = { hintPercent: effective, forcePercent: effectiveForce, handoffPending: deps.handoffPending };
-    if (effectiveForce > 0 && percent >= effectiveForce) {
+    // child-context-switch plan §2.2：切换次数已用尽 ⇒ 不再进入 force 分支（不发 hint/demand），
+    // 落到下面的 tick-only 早退（不能让模型去做做不了的事；兜底交给 pi 自己的自动压缩）。
+    const switchesExhausted = state.switchesExhausted?.() === true;
+    if (!switchesExhausted && effectiveForce > 0 && percent >= effectiveForce) {
       const timestamp = now();
       // switch_context 模式（先礼后兵）：越线先硬性要求模型自己写交接内容，
       // 只有它不照办（下一次 turn_end 仍越线）才回落到通用强制压缩——安全网不能拆。
@@ -1091,6 +1102,12 @@ export function createCompactHintHook(
           } catch (error) {
             console.warn(`[pi-subagent] switch-context demand send failed: ${String(error)}`);
           }
+          return;
+        }
+        if (deps.headless) {
+          // 子会话没有扩展侧强制压缩通道（ctx.compact() 会 abort 结束 run）：demand 用尽后交给
+          // pi 自身的自动压缩兜底（用户确认 3 选 A），绝不在这里调用 ctx.compact()。
+          if (debug) console.warn("[pi-subagent] compact-hint headless: demand exhausted, no forced compaction");
           return;
         }
       }
@@ -1210,6 +1227,12 @@ export function createCompactHintHook(
       } else {
         state.hintedAt = undefined;
       }
+      trySendTick();
+      return;
+    }
+    if (switchesExhausted) {
+      // 上面的 force 分支已被旁路；这里拦下普通 hint（percent 仍在 [effective, effectiveForce) 区间时），
+      // 只留 tick，同样不再提议模型去做做不了的事。
       trySendTick();
       return;
     }

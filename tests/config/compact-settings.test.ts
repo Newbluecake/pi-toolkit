@@ -17,6 +17,8 @@ describe("compact settings", () => {
       keepCompactTool: false,
       forceDemandTurns: 1,
       dynamicThreshold: defaults.dynamicThreshold,
+      childSessions: true,
+      childMaxSwitches: 5,
     });
   });
 
@@ -43,6 +45,8 @@ describe("compact settings", () => {
       keepCompactTool: false,
       forceDemandTurns: 1,
       dynamicThreshold: defaults.dynamicThreshold,
+      childSessions: true,
+      childMaxSwitches: 5,
     });
   });
 
@@ -90,6 +94,8 @@ describe("compact settings", () => {
       keepCompactTool: false,
       forceDemandTurns: 1,
       dynamicThreshold: defaults.dynamicThreshold,
+      childSessions: true,
+      childMaxSwitches: 5,
     });
     expect(loadSettings({ compact: "invalid" }).compact).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 60, assumedReserveTokens: 32768 })).toEqual({
@@ -104,6 +110,8 @@ describe("compact settings", () => {
       keepCompactTool: false,
       forceDemandTurns: 1,
       dynamicThreshold: defaults.dynamicThreshold,
+      childSessions: true,
+      childMaxSwitches: 5,
       assumedReserveTokens: 32768,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0 })).toEqual({
@@ -118,6 +126,8 @@ describe("compact settings", () => {
       keepCompactTool: false,
       forceDemandTurns: 1,
       dynamicThreshold: defaults.dynamicThreshold,
+      childSessions: true,
+      childMaxSwitches: 5,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0.5 })).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: 0 })).toMatchObject({ forceAtPercent: 0 });
@@ -170,6 +180,21 @@ describe("compact settings", () => {
     expect(parseCompactSettings({ forceDemandTurns: 2.9 }).forceDemandTurns).toBe(2);
     for (const invalid of [-1, 6, Number.NaN, "2", null, Infinity]) {
       expect(parseCompactSettings({ forceDemandTurns: invalid }).forceDemandTurns).toBe(1);
+    }
+  });
+
+  it("parses the child-context-switch block: childSessions / childMaxSwitches (plan §4)", () => {
+    expect(parseCompactSettings({}).childSessions).toBe(true);
+    expect(parseCompactSettings({}).childMaxSwitches).toBe(5);
+    expect(parseCompactSettings({ childSessions: false }).childSessions).toBe(false);
+    for (const invalid of [undefined, null, 0, "false", [], {}]) {
+      expect(parseCompactSettings({ childSessions: invalid }).childSessions).toBe(true);
+    }
+    expect(parseCompactSettings({ childMaxSwitches: 1 }).childMaxSwitches).toBe(1);
+    expect(parseCompactSettings({ childMaxSwitches: 20 }).childMaxSwitches).toBe(20);
+    expect(parseCompactSettings({ childMaxSwitches: 12.9 }).childMaxSwitches).toBe(12);
+    for (const invalid of [0, 21, -1, Number.NaN, "5", null, Infinity]) {
+      expect(parseCompactSettings({ childMaxSwitches: invalid }).childMaxSwitches).toBe(5);
     }
   });
 });

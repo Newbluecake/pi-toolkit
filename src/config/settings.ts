@@ -185,6 +185,18 @@ export interface CompactSettings {
   forceDemandTurns: number;
   /** 价格感知动态提醒线（docs/dev/compact-hint/dynamic-threshold-plan.md）。 */
   dynamicThreshold: DynamicThresholdSettings;
+  /**
+   * child-context-switch plan §4（用户确认 1）：子会话是否注册 switch_context 工具 +
+   * turn_end/context/session_compact handler（另受 `compact.enabled && compact.switchTool` 与
+   * §3.1 能力检测约束）。Default true。
+   */
+  childSessions: boolean;
+  /**
+   * child-context-switch plan §2.1/§4（评审 6）：每 run 切换上限，按分支上带
+   * `details.source === "pi-toolkit:switch_context"` 的 fromHook compaction 条数计（resume 续写
+   * 同一会话文件时计数延续）。Default 5；钳到 [1, 20]。
+   */
+  childMaxSwitches: number;
 }
 
 export type CacheTtlMode = "auto" | "on" | "off" | "adaptive";
@@ -600,6 +612,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     keepCompactTool: false,
     forceDemandTurns: 1,
     dynamicThreshold: DEFAULT_DYNAMIC_THRESHOLD_SETTINGS,
+    childSessions: true,
+    childMaxSwitches: 5,
   },
   fabric: {
     enabled: false,
@@ -1399,6 +1413,14 @@ export function parseCompactSettings(input: unknown): CompactSettings {
         ? Math.floor(tick)
         : defaults.usageTickStepPercent,
     dynamicThreshold: parseDynamicThresholdSettings(value.dynamicThreshold),
+    childSessions: typeof value.childSessions === "boolean" ? value.childSessions : defaults.childSessions,
+    childMaxSwitches:
+      typeof value.childMaxSwitches === "number" &&
+      Number.isFinite(value.childMaxSwitches) &&
+      value.childMaxSwitches >= 1 &&
+      value.childMaxSwitches <= 20
+        ? Math.floor(value.childMaxSwitches)
+        : defaults.childMaxSwitches,
     ...(typeof reserve === "number" && Number.isFinite(reserve) && reserve > 0
       ? { assumedReserveTokens: Math.floor(reserve) }
       : {}),

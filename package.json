@@ -78,6 +78,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:conformance": "vitest run tests/conformance",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

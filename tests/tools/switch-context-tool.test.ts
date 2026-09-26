@@ -4,7 +4,8 @@ import {
   SWITCH_RESUME_TEXT,
   createSwitchContextTool,
 } from "../../src/tools/switch-context-tool.js";
-import { PendingHandoffStore } from "../../src/context-switch/store.js";
+import type { CapabilityStatus } from "../../src/context-switch/capability.js";
+import { ChildSwitchStore, PendingHandoffStore } from "../../src/context-switch/store.js";
 import type { TodoTrackerSnapshot } from "../../src/todo/nudge.js";
 
 type CompactCallbacks = { onComplete: () => void; onError: (error: Error) => void };
@@ -217,5 +218,162 @@ describe("tools/switch-context-tool: todo-nudge handoff advisory", () => {
     const result = await h.execute();
     expect(result.details).toEqual({ ok: false, reason: "non_interactive_mode" });
     expect(result.content[0]?.text).not.toContain("未完成任务");
+  });
+});
+
+function compactionEntry(seq: number) {
+  return {
+    type: "compaction",
+    id: `c${seq}`,
+    fromHook: true,
+    details: { source: "pi-toolkit:switch_context", seq },
+  };
+}
+
+function boundaryHarness(
+  options: {
+    now?: () => number;
+    cooldownMs?: number;
+    childMaxSwitches?: number;
+    capability?: CapabilityStatus;
+    branch?: unknown[];
+    sessionFile?: string | undefined;
+    noSessionFile?: boolean;
+    mode?: "print" | "json" | "interactive";
+  } = {},
+) {
+  const childStore = new ChildSwitchStore();
+  const sessionFile = options.noSessionFile ? undefined : (options.sessionFile ?? "/tmp/child-session.jsonl");
+  const branch = options.branch ?? [];
+  const notify = vi.fn();
+  const compact = vi.fn();
+  const sendUserMessage = vi.fn();
+  const ctx = {
+    mode: options.mode ?? "print",
+    compact,
+    getContextUsage: () => ({ tokens: 10_000 }),
+    ui: { notify },
+    sessionManager: { getSessionFile: () => sessionFile, getBranch: () => branch },
+  };
+  const tool = createSwitchContextTool({
+    store: new PendingHandoffStore(),
+    sendUserMessage,
+    mode: "boundary",
+    childStore,
+    getCapabilityStatus: () => options.capability ?? { state: "ready" },
+    ...(options.childMaxSwitches === undefined ? {} : { childMaxSwitches: options.childMaxSwitches }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.cooldownMs === undefined ? {} : { cooldownMs: options.cooldownMs }),
+  });
+  const execute = (args: Record<string, unknown> = params(), toolCallId = "call-1") =>
+    tool.execute!(toolCallId, args as never, undefined as never, undefined as never, ctx as never);
+  return { childStore, compact, execute, notify, sendUserMessage, tool };
+}
+
+describe("tools/switch-context-tool boundary mode (child-context-switch plan §2.1)", () => {
+  it("does not reject print/json — boundary mode is for non-interactive child sessions", async () => {
+    for (const mode of ["print", "json"] as const) {
+      const h = boundaryHarness({ mode });
+      const result = await h.execute();
+      expect(result.details).toMatchObject({ ok: true });
+    }
+  });
+
+  it("never calls ctx.compact or sendUserMessage, and never terminates the turn", async () => {
+    const h = boundaryHarness();
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: true });
+    expect(result.terminate).toBeUndefined();
+    expect(h.compact).not.toHaveBeenCalled();
+    expect(h.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("stages by toolCallId into the child store instead of the TTL store", async () => {
+    const h = boundaryHarness();
+    await h.execute(params(), "call-42");
+    const staged = h.childStore.peek();
+    expect(staged?.toolCallId).toBe("call-42");
+    expect(staged?.core).toContain("## 当前目标");
+    expect(staged?.keepRecent).toBe(true);
+    expect(typeof staged?.nonce).toBe("string");
+  });
+
+  it("rejects an under-specified handoff without staging anything", async () => {
+    const h = boundaryHarness();
+    const result = await h.execute({ goal: "改点东西", progress: "改了", next_steps: "继续" });
+    expect(result.details).toMatchObject({ ok: false, reason: "invalid_handoff" });
+    expect(h.childStore.hasPending()).toBe(false);
+  });
+
+  it("cooldown: refuses a second switch within the window", async () => {
+    let now = 1_000;
+    const h = boundaryHarness({ now: () => now, cooldownMs: 60_000 });
+    await h.execute(params(), "call-1");
+    now += 1_000;
+    const second = await h.execute(params(), "call-2");
+    expect(second.details).toMatchObject({ ok: false, reason: "cooldown" });
+  });
+
+  it("in-flight: refuses a second switch while one is still staged (not yet consumed by turn_end)", async () => {
+    const h = boundaryHarness({ cooldownMs: 0 });
+    await h.execute(params(), "call-1");
+    const second = await h.execute(params(), "call-2");
+    expect(second.details).toMatchObject({ ok: false, reason: "in_flight" });
+    // once consumed (as the turn_end handler would do), a new switch is allowed again.
+    h.childStore.take(["call-1"]);
+    const third = await h.execute(params(), "call-3");
+    expect(third.details).toMatchObject({ ok: true });
+  });
+
+  it("childMaxSwitches: rejects once the branch already has that many switch_context compactions", async () => {
+    const branch = [compactionEntry(1), compactionEntry(2)];
+    const h = boundaryHarness({ childMaxSwitches: 2, branch });
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: false, reason: "limit_reached" });
+    expect(h.childStore.hasPending()).toBe(false);
+  });
+
+  it("childMaxSwitches: counts continue across resume (pre-existing branch entries)", async () => {
+    const branch = [compactionEntry(1), compactionEntry(2), compactionEntry(3), compactionEntry(4)];
+    const h = boundaryHarness({ childMaxSwitches: 5, branch });
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: true });
+  });
+
+  it("capability disabled -> unavailable, never stages", async () => {
+    const h = boundaryHarness({ capability: { state: "disabled", reason: "l0-missing" } });
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: false, reason: "capability_disabled" });
+    expect(result.content[0]?.text).toContain("l0-missing");
+    expect(h.childStore.hasPending()).toBe(false);
+  });
+
+  it("capability not yet observed/ready -> not_ready, never stages", async () => {
+    for (const state of ["unknown", "static-ok", "observed"] as const) {
+      const h = boundaryHarness({ capability: { state } });
+      const result = await h.execute();
+      expect(result.details).toMatchObject({ ok: false, reason: "not_ready" });
+      expect(h.childStore.hasPending()).toBe(false);
+    }
+  });
+
+  it("capability verifying (another switch mid self-check) -> retry shortly, never stages", async () => {
+    const h = boundaryHarness({ capability: { state: "verifying" } });
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: false, reason: "verifying" });
+    expect(h.childStore.hasPending()).toBe(false);
+  });
+
+  it("capability verified -> allowed, same as ready", async () => {
+    const h = boundaryHarness({ capability: { state: "verified" } });
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: true });
+  });
+
+  it("no session file (unpersistable session) -> unavailable, never stages", async () => {
+    const h = boundaryHarness({ noSessionFile: true });
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: false, reason: "no_session_file" });
+    expect(h.childStore.hasPending()).toBe(false);
   });
 });

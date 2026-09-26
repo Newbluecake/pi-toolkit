@@ -222,6 +222,15 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["static", "quality"],
     "Fallback when the route reports no cache-read price",
   ),
+  // child-context-switch plan §4: child-session switch_context wiring + per-run switch cap.
+  "compact.childSessions": bool(
+    "compact.childSessions",
+    "Register switch_context (boundary mode) + compact-hint in child/subagent sessions",
+  ),
+  "compact.childMaxSwitches": {
+    ...count("compact.childMaxSwitches", 1, "Max switch_context calls per subagent run (counted from the branch)"),
+    max: 20,
+  } as SettingSpec,
   "extend.enabled": bool("extend.enabled", "Timeout grace + extend_subagent_timeout tool"),
   "hud.enabled": bool("hud.enabled", "Merged HUD: take over the footer (off restores pi's built-in footer)"),
   // web-hub (plan 包 I): five keys, all non-live (captured at activate; change → /reload).

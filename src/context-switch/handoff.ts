@@ -140,6 +140,58 @@ export function fileListsFromFileOps(fileOps: unknown): { modifiedFiles: string[
   return { modifiedFiles: [...modified], readFiles: read };
 }
 
+/** child-context-switch §2.1: pi 的 `extractFileOpsFromMessage` 不在顶层导出中（只有
+ *  `FileOperations` 类型被导出，函数本身没有），子会话 boundary 模式没有 `CompactionPreparation`
+ *  可用，只能自己扫 branch。启发式扫描：只识别 assistant 消息中名叫
+ *  read/write/edit/multi_edit 的 tool call，从其 `arguments.path`（或 `file_path`/`filePath`）取
+ *  路径。未知工具名不记入任何清单（宁可漏，不可造假）。 */
+export const CHILD_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(["write", "edit", "multi_edit", "multiedit"]);
+export const CHILD_READ_TOOL_NAMES: ReadonlySet<string> = new Set(["read"]);
+
+interface BranchMessageLike {
+  type?: unknown;
+  message?: { role?: unknown; content?: readonly unknown[] };
+}
+
+function toolCallPathArg(args: unknown): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const obj = args as Record<string, unknown>;
+  const candidate = obj.path ?? obj.file_path ?? obj.filePath;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
+/**
+ * 从已持久化的分支条目中扫【fromIndex, toIndex】（闭区间，包含两端）里的 assistant 工具调用，
+ * 提取读/改文件清单。与 `fileListsFromFileOps` 同形状返回值，供 `boundary.ts` 拼 appendix 时直接复用。
+ */
+export function fileListsFromBranch(
+  branch: readonly BranchMessageLike[],
+  fromIndex: number,
+  toIndex: number,
+): { modifiedFiles: string[]; readFiles: string[] } {
+  const written = new Set<string>();
+  const read = new Set<string>();
+  const start = Math.max(0, fromIndex);
+  const end = Math.min(branch.length - 1, toIndex);
+  for (let i = start; i <= end; i++) {
+    const entry = branch[i];
+    if (!entry || entry.type !== "message") continue;
+    const message = entry.message;
+    if (!message || message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      const call = block as { type?: unknown; name?: unknown; arguments?: unknown };
+      if (call?.type !== "toolCall" || typeof call.name !== "string") continue;
+      const path = toolCallPathArg(call.arguments);
+      if (!path) continue;
+      const name = call.name.toLowerCase();
+      if (CHILD_WRITE_TOOL_NAMES.has(name)) written.add(path);
+      else if (CHILD_READ_TOOL_NAMES.has(name)) read.add(path);
+    }
+  }
+  const readOnly = [...read].filter((path) => !written.has(path));
+  return { modifiedFiles: [...written], readFiles: readOnly };
+}
+
 export function renderAppendix(appendix: HandoffAppendix): string {
   const lines: string[] = [];
   if (appendix.sessionFile) {

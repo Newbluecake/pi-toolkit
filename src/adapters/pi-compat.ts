@@ -13,6 +13,13 @@
  * `eventsPresent` is therefore a documented, conservative assumption, not a
  * verified fact; it is kept as its own field precisely so a future C-class
  * test suite has a single place to plug real verification into.
+ *
+ * Boundary capability (docs/dev/child-context-switch/plan.md §3.1): child-session
+ * switch_context gating is NOT a fifth I14 exception — `probeBoundaryStatic` / `checkTurnEndShape`
+ * below are pure structural probes (L0/L1 of a runtime capability state machine that continues
+ * with a zero-impact commit probe and a first-use self-check, all in src/context-switch/), never a
+ * version comparison. Upgrading pi when its next minor changes boundary-draft semantics needs
+ * `npm run test:conformance`, not a change to this file's version-branching.
  */
 export interface PiCapabilities {
   version: string;
@@ -105,6 +112,85 @@ export function detectPiCapabilities(pi: MinimalPiHost, version = "unknown"): Pi
 }
 
 export const TESTED_PI_RANGE = "0.87.0 - 0.87.1";
+
+/**
+ * Child-context-switch boundary capability (docs/dev/child-context-switch/plan.md §3.1):
+ * structural detection + first-use self-proof + safe degrade, NOT a version gate — the user
+ * explicitly rejected a precise-version I14 exception for this feature (v2→v3 processing, plan
+ * "v3" note). `probeBoundaryStatic` / `checkTurnEndShape` below are the L0/L1 layers of that state
+ * machine; they read only `typeof`/`in`-shaped structure off the live module namespace or event,
+ * never `caps.version`. Callers pass in the namespace import
+ * (`import * as pi from "@earendil-works/pi-coding-agent"`) so this file never performs the import
+ * itself, keeping it testable with a fake module object.
+ */
+export interface BoundaryStaticProbeInput {
+  ExtensionRunner?: { prototype?: { emitBoundary?: unknown } };
+  SessionManager?: { inMemory?: unknown };
+  convertToLlm?: unknown;
+  findCutPoint?: unknown;
+  estimateTokens?: unknown;
+  parseSessionEntries?: unknown;
+  sessionEntryToContextMessages?: unknown;
+}
+
+export type BoundaryProbeResult = { ok: true } | { ok: false; reason: string; missing: readonly string[] };
+
+/** L0 (§3.1): every export the boundary path needs must be a function. No version read. */
+export function probeBoundaryStatic(mod: BoundaryStaticProbeInput | undefined): BoundaryProbeResult {
+  const missing: string[] = [];
+  if (typeof mod?.ExtensionRunner?.prototype?.emitBoundary !== "function") missing.push("ExtensionRunner.emitBoundary");
+  if (typeof mod?.SessionManager?.inMemory !== "function") missing.push("SessionManager.inMemory");
+  if (typeof mod?.convertToLlm !== "function") missing.push("convertToLlm");
+  if (typeof mod?.findCutPoint !== "function") missing.push("findCutPoint");
+  if (typeof mod?.estimateTokens !== "function") missing.push("estimateTokens");
+  if (typeof mod?.parseSessionEntries !== "function") missing.push("parseSessionEntries");
+  if (typeof mod?.sessionEntryToContextMessages !== "function") missing.push("sessionEntryToContextMessages");
+  return missing.length > 0 ? { ok: false, reason: `l0-${missing.join(",")}`, missing } : { ok: true };
+}
+
+/** Structural shape the L1 check needs off a real `TurnEndEvent` + its session ctx. */
+export interface TurnEndShapeInput {
+  entries?: unknown;
+  messageEntryId?: unknown;
+  toolResultEntryIds?: unknown;
+  context?: { canContinue?: unknown };
+  outcome?: unknown;
+}
+
+export interface TurnEndShapeSessionManager {
+  getBranch?: (fromId?: string) => readonly { id?: unknown }[];
+  getHeader?: () => unknown;
+}
+
+const VALID_OUTCOMES = new Set(["completed", "aborted", "error"]);
+
+/**
+ * L1 (§3.1): does THIS turn_end event have the 0.87-shaped boundary fields (0.86's TurnEndEvent
+ * only has type/turnIndex/message/toolResults, plan §1.6)? Runs once per turn_end — a runtime that
+ * degrades mid-process (should never happen, pi doesn't hot-swap) would be caught here too.
+ */
+export function checkTurnEndShape(
+  event: TurnEndShapeInput | undefined,
+  sessionManager: TurnEndShapeSessionManager | undefined,
+): { ok: true } | { ok: false; reason: "l1-event-shape" } {
+  const fail = { ok: false as const, reason: "l1-event-shape" as const };
+  if (!event) return fail;
+  if (!Array.isArray(event.entries)) return fail;
+  if (typeof event.messageEntryId !== "string" || event.messageEntryId.length === 0) return fail;
+  if (!Array.isArray(event.toolResultEntryIds)) return fail;
+  if (typeof event.context?.canContinue !== "boolean") return fail;
+  if (typeof event.outcome !== "string" || !VALID_OUTCOMES.has(event.outcome)) return fail;
+  if (typeof sessionManager?.getHeader !== "function") return fail;
+  if (typeof sessionManager?.getBranch !== "function") return fail;
+  let branch: readonly { id?: unknown }[];
+  try {
+    branch = sessionManager.getBranch();
+  } catch {
+    return fail;
+  }
+  if (!Array.isArray(branch) || !branch.some((entry) => entry?.id === event.messageEntryId)) return fail;
+  return { ok: true };
+}
 
 export type CompatResult = { ok: true; warning?: string } | { ok: false; reason: string };
 

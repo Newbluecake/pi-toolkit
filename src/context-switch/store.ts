@@ -80,3 +80,113 @@ export class PendingHandoffStore {
     return this.peek() !== undefined;
   }
 }
+
+/**
+ * child-context-switch plan §2.1: boundary 模式（子会话）的暂存槎——不是 TTL 新鲜期，而是
+ * **结构化**新鲜度：只有暂存时记下的 `toolCallId` 出现在当前 turn_end 事件的 `toolResults`
+ * 里才算命中；命中即消费，不命中（无论是过期还是从未匹配）也一并清空——同一起长工具跑
+ * 700s 不会被 TTL 误判过期（旧 store 的 2 分钟窗口在这里不适用），但跨过一个 turn_end 仍未被
+ * 采用就永久作废，绝不会被下一次切换尝试捡起来冒充「这次」的交接。
+ */
+export interface ChildStagedSwitch {
+  /** 单调递增序号，写入压缩条目的 details，供 §2.3.1 的诊断与 childMaxSwitches 计数使用。 */
+  seq: number;
+  /** 每次暂存的随机指纹；L2/L3 自证探针与本次切换的对应关系全靠它，不靠时钟。 */
+  nonce: string;
+  toolCallId: string;
+  core: string;
+  keepRecent: boolean;
+  createdAt: number;
+}
+
+export interface ChildSwitchStoreOptions {
+  now?: () => number;
+  nonce?: () => string;
+}
+
+let fallbackNonceCounter = 0;
+
+export class ChildSwitchStore {
+  private readonly now: () => number;
+  private readonly makeNonce: () => string;
+  private pending: ChildStagedSwitch | undefined;
+  private seqCounter = 0;
+
+  constructor(options: ChildSwitchStoreOptions = {}) {
+    this.now = options.now ?? (() => Date.now());
+    this.makeNonce =
+      options.nonce ??
+      (() => {
+        fallbackNonceCounter += 1;
+        return `${Date.now().toString(36)}-${fallbackNonceCounter.toString(36)}`;
+      });
+  }
+
+  /** 暂存一次 boundary 切换请求（覆盖任何未消费的旧暂存——同一时刻只应有一个在途请求）。 */
+  stageForTool(input: { toolCallId: string; core: string; keepRecent: boolean }): { seq: number; nonce: string } {
+    this.seqCounter += 1;
+    const nonce = this.makeNonce();
+    this.pending = {
+      seq: this.seqCounter,
+      nonce,
+      toolCallId: input.toolCallId,
+      core: input.core,
+      keepRecent: input.keepRecent,
+      createdAt: this.now(),
+    };
+    return { seq: this.pending.seq, nonce };
+  }
+
+  /** 只读窥视：不消费，不清空。 */
+  peek(): ChildStagedSwitch | undefined {
+    return this.pending;
+  }
+
+  /**
+   * 结构化新鲜度核对：暂存的 `toolCallId` 在本次 turn 的集合里 ⇒ 消费并返回；否则（包括没有
+   * 暂存的情况）清空并返回 undefined——陈旧的暂存绝不会被下一个 turn_end 捡起来。
+   */
+  take(toolCallIdsInTurn: readonly string[]): ChildStagedSwitch | undefined {
+    const staged = this.pending;
+    this.pending = undefined;
+    if (!staged) return undefined;
+    return toolCallIdsInTurn.includes(staged.toolCallId) ? staged : undefined;
+  }
+
+  /** 无条件清空（outcome !== "completed" 分支）。 */
+  clear(): void {
+    this.pending = undefined;
+  }
+
+  hasPending(): boolean {
+    return this.pending !== undefined;
+  }
+}
+
+/** 标识子会话 boundary 切换提交过的 compaction 条目的 details.source（plan §2.1）。 */
+export const CHILD_SWITCH_SOURCE = "pi-toolkit:switch_context";
+
+/** 最小字段探测：不强要求具体 pi 类型，只看我们自己写下的 details 形状。 */
+interface BranchEntryLike {
+  type?: unknown;
+  fromHook?: unknown;
+  details?: unknown;
+}
+
+/**
+ * 每 run 切换上限（plan §2.1/§4，`compact.childMaxSwitches`）的计数器：当前分支上带
+ * `details.source === CHILD_SWITCH_SOURCE` 的 `fromHook` compaction 条数。每次调用从
+ * `ctx.sessionManager.getBranch()` 现算，所以 resume 续写同一个会话文件时计数延续，不因
+ * 新 activate() 清零。
+ */
+export function countChildSwitches(branch: readonly BranchEntryLike[]): number {
+  let count = 0;
+  for (const entry of branch) {
+    if (entry?.type !== "compaction" || entry.fromHook !== true) continue;
+    const details = entry.details;
+    if (details && typeof details === "object" && (details as Record<string, unknown>).source === CHILD_SWITCH_SOURCE) {
+      count += 1;
+    }
+  }
+  return count;
+}
