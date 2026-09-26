@@ -399,3 +399,159 @@ describe("runtime-adapter: early-exit onReaped (§4.4)", () => {
 
 /** Unused-import guard for the shared snapshot helper shape. */
 export type { RunSnapshot, RunDiagnostics };
+
+/**
+ * D10 (docs/dev/workflow-worktree/plan.md §2): the consult cwd cell/getter
+ * contract. `deps.consult`'s 2nd argument is a GETTER, called synchronously
+ * before H2 (the factory call itself), but only ever invoked by the tool's
+ * own `execute()` — which the fake driver here stands in for by capturing
+ * the getter and calling it directly at chosen points in the run's
+ * lifecycle, instead of building a whole fake tool call.
+ */
+describe("runtime-adapter: consult cwd cell (D10)", () => {
+  function captureConsultGetter(): {
+    factory: RuntimeAdapterDeps["consult"];
+    getterAt: { pre?: () => { cwd: string; isolated: boolean } };
+  } {
+    const getterAt: { pre?: () => { cwd: string; isolated: boolean } } = {};
+    const factory: RuntimeAdapterDeps["consult"] = (_selfRunId, selfCwd) => {
+      // Captured at factory-call time (before H2) — the SAME function
+      // reference is called again later, after the run settles, to observe
+      // whatever value H2 wrote.
+      getterAt.pre = selfCwd;
+      return { name: "consult" } as unknown as ToolDefinition;
+    };
+    return { factory, getterAt };
+  }
+
+  it("before H2 runs, the getter reads the pre-H2 cwd with isolated:false", async () => {
+    const clock = new FakeClock();
+    const driver = captureDriver({});
+    const { factory, getterAt } = captureConsultGetter();
+    // An H2 hook that never resolves within this synchronous prefix — the
+    // getter is read immediately after `runner.run()`'s synchronous portion
+    // returns control, i.e. strictly before the hook's own promise settles.
+    let releaseH2: (() => void) | undefined;
+    const runner = buildAdapter(clock, {
+      driver,
+      consult: factory,
+      extensions: [
+        {
+          resolveSessionSpec: (s) =>
+            new Promise((resolve) => {
+              releaseH2 = () => resolve({ ...s, cwd: "/repo/.pi-worktrees/wt-r1" });
+            }),
+        },
+      ],
+    });
+    const p = runner.run({
+      runId: "r1",
+      type: expertType(),
+      cwd: "/repo",
+      request: {
+        type: "explorer",
+        prompt: "q",
+        consultExperts: [{ runId: "r_E", sessionFile: "/s/e.jsonl", agentType: "explorer" }],
+        isolation: "worktree",
+      },
+      budget: fastBudget(),
+    });
+    // Flush the microtasks the adapter needs to reach the H2 hook call
+    // itself (it is invoked from inside a `.then()`, not synchronously) —
+    // `releaseH2` is not yet assigned right after `runner.run()` returns.
+    // The hook's own promise is still unresolved at this point, so the cwd
+    // cell has not been written yet either.
+    for (let i = 0; i < 5 && releaseH2 === undefined; i++) await Promise.resolve();
+    expect(getterAt.pre).toBeDefined();
+    expect(getterAt.pre!()).toEqual({ cwd: "/repo", isolated: false });
+    releaseH2!();
+    await drain(clock, 12);
+    await p;
+    // The SAME getter reference now reads the post-H2 value.
+    expect(getterAt.pre!()).toEqual({ cwd: "/repo/.pi-worktrees/wt-r1", isolated: true });
+  });
+
+  it("H2 succeeds but isolation wasn't requested ⇒ isolated stays false even if cwd changed", async () => {
+    const clock = new FakeClock();
+    const driver = captureDriver({});
+    const { factory, getterAt } = captureConsultGetter();
+    const runner = buildAdapter(clock, {
+      driver,
+      consult: factory,
+      extensions: [{ resolveSessionSpec: (s) => ({ ...s, cwd: "/somewhere/else" }) }],
+    });
+    const p = runner.run({
+      runId: "r1",
+      type: expertType(),
+      cwd: "/repo",
+      request: {
+        type: "explorer",
+        prompt: "q",
+        consultExperts: [{ runId: "r_E", sessionFile: "/s/e.jsonl", agentType: "explorer" }],
+        // no isolation requested
+      },
+      budget: fastBudget(),
+    });
+    await drain(clock, 12);
+    await p;
+    expect(getterAt.pre!()).toEqual({ cwd: "/somewhere/else", isolated: false });
+  });
+
+  it("unisolated run (no H2 cwd change at all) ⇒ the cell never moves off the pre-H2 value", async () => {
+    const clock = new FakeClock();
+    const driver = captureDriver({});
+    const { factory, getterAt } = captureConsultGetter();
+    const runner = buildAdapter(clock, { driver, consult: factory });
+    const p = runner.run({
+      runId: "r1",
+      type: expertType(),
+      cwd: "/repo",
+      request: {
+        type: "explorer",
+        prompt: "q",
+        consultExperts: [{ runId: "r_E", sessionFile: "/s/e.jsonl", agentType: "explorer" }],
+      },
+      budget: fastBudget(),
+    });
+    await drain(clock, 12);
+    await p;
+    expect(getterAt.pre!()).toEqual({ cwd: "/repo", isolated: false });
+  });
+
+  it("H2 failing ⇒ the consult tool never executes (the run fails before any session/tool call exists)", async () => {
+    const clock = new FakeClock();
+    const create = vi.fn(async () => handle());
+    const driver: SessionDriver = { create, bind: async () => undefined, onLateArrival: () => undefined };
+    const { factory, getterAt } = captureConsultGetter();
+    const runner = buildAdapter(clock, {
+      driver,
+      consult: factory,
+      extensions: [
+        {
+          resolveSessionSpec: async () => {
+            throw new Error("worktree unavailable");
+          },
+        },
+      ],
+    });
+    const outcome = await runner.run({
+      runId: "r1",
+      type: expertType(),
+      cwd: "/repo",
+      request: {
+        type: "explorer",
+        prompt: "q",
+        consultExperts: [{ runId: "r_E", sessionFile: "/s/e.jsonl", agentType: "explorer" }],
+        isolation: "worktree",
+      },
+      budget: fastBudget(),
+    });
+    expect(outcome.status).toBe("failed");
+    // The tool factory WAS called (it always is, before H2), but the session
+    // that would ever call `execute()` on the returned tool never existed.
+    expect(getterAt.pre).toBeDefined();
+    expect(create).not.toHaveBeenCalled();
+    // The cell never advanced past its pre-H2 value since H2 never succeeded.
+    expect(getterAt.pre!()).toEqual({ cwd: "/repo", isolated: false });
+  });
+});

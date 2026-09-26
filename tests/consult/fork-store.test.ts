@@ -209,6 +209,62 @@ describe("consult fork-store: forkExpertSession (streaming fork, T-6)", () => {
   });
 });
 
+/**
+ * D10 (docs/dev/workflow-worktree/plan.md §2): `opts.forceCwd` — the
+ * isolated-asker path. Test #9 in the plan's §6 test list.
+ */
+describe("consult fork-store: forkExpertSession opts.forceCwd (D10)", () => {
+  it("forceCwd:true writes fallbackCwd as the fork header's cwd, even though the source header's cwd exists", () => {
+    const src = realExpertSession("explorer");
+    const dir = tempDir();
+
+    const result = forkExpertSession(src.file, "/asker/worktree", dir, { forceCwd: true });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    const header = readHeader(result.path);
+    // The source header DOES have a live cwd (src.cwd) — forceCwd bypasses it entirely.
+    expect(header["cwd"]).toBe(resolve("/asker/worktree"));
+    expect(header["cwd"]).not.toBe(resolve(src.cwd));
+  });
+
+  it("without forceCwd (undefined, or omitted entirely) the two-level rule is unchanged", () => {
+    const src = realExpertSession("explorer2");
+    const dir = tempDir();
+
+    const explicit = forkExpertSession(src.file, "/asker/worktree", dir, { forceCwd: undefined });
+    expect(explicit.ok).toBe(true);
+    if (!explicit.ok) throw new Error(explicit.reason);
+    expect(readHeader(explicit.path)["cwd"]).toBe(resolve(src.cwd)); // header cwd wins (level 1)
+
+    const omitted = forkExpertSession(src.file, "/asker/worktree", dir);
+    expect(omitted.ok).toBe(true);
+    if (!omitted.ok) throw new Error(omitted.reason);
+    expect(readHeader(omitted.path)["cwd"]).toBe(resolve(src.cwd));
+  });
+
+  it("forceCwd:false behaves exactly like omitting the option (falsy, not just undefined)", () => {
+    const src = realExpertSession("explorer3");
+    const dir = tempDir();
+
+    const result = forkExpertSession(src.file, "/asker/worktree", dir, { forceCwd: false });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(readHeader(result.path)["cwd"]).toBe(resolve(src.cwd));
+  });
+
+  it("forceCwd propagates through forkMainSessionSnapshot's retry wrapper (opts is forwarded verbatim)", () => {
+    const src = realExpertSession("main-like");
+    const dir = tempDir();
+
+    const result = forkMainSessionSnapshot(src.file, "/asker/worktree", dir, { forceCwd: true });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(readHeader(result.path)["cwd"]).toBe(resolve("/asker/worktree"));
+  });
+});
+
 describe("consult fork-store: resolveForkCwd / readHeaderCwd (T-6)", () => {
   it("resolveForkCwd picks the live header cwd, else the fallback", () => {
     const live = tempDir();

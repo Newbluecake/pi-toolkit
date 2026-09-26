@@ -105,12 +105,21 @@ export interface RuntimeAdapterDeps {
     };
   };
   /**
-   * consult (consult plan §6 C-12): per-run consult-tool factory. Injected
-   * into a (non-consult) child run iff its dispatcher attached a resolved
-   * expert whitelist (`SpawnRequest.consultExperts`). Returns undefined when
-   * consult is disabled or the whitelist is empty — no tool, no grant.
+   * consult (consult plan §6 C-12; cwd getter — workflow-worktree plan §2
+   * D10): per-run consult-tool factory. Injected into a (non-consult) child
+   * run iff its dispatcher attached a resolved expert whitelist
+   * (`SpawnRequest.consultExperts`). Returns undefined when consult is
+   * disabled or the whitelist is empty — no tool, no grant. `selfCwd` is a
+   * getter (structural type, this module never imports consult's own
+   * `ConsultAskerCwd`) because the run's cwd cell is written once, AFTER H2
+   * resolves — the factory is called before H2, but its returned tool's
+   * `execute()` only ever runs later, once the session exists.
    */
-  consult?: (selfRunId: RunId, selfCwd: string, whitelist: readonly ConsultExpertRef[]) => ToolDefinition | undefined;
+  consult?: (
+    selfRunId: RunId,
+    selfCwd: () => { cwd: string; isolated: boolean },
+    whitelist: readonly ConsultExpertRef[],
+  ) => ToolDefinition | undefined;
   /** consult: dispatch-time `experts` resolver handed to the nested Agent tool (same trust level as `resume`, plan §5.2). */
   consultResolveExperts?: (refs: readonly string[]) => ResolveExpertsResult;
   /**
@@ -499,6 +508,16 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // the agent type's configured thinkingLevel; neither set => leave the
         // session to pi's global defaultThinkingLevel.
         const thinkingLevel = spec.request.thinkingOverride ?? spec.type.thinkingLevel;
+        // D10 consult cwd (workflow-worktree plan §2 D10): a cell read by the
+        // consult tool's getter. The consult factory below is called BEFORE
+        // H2 runs, but the tool it returns only ever executes later (once the
+        // session exists, which is always after H2) — so writing this cell
+        // once, right after H2 succeeds, is enough for every `execute()` call
+        // to observe the post-H2 value. H2 failing, or never running at all
+        // (no resolveSessionSpec hook, or isolation not requested), leaves it
+        // at this pre-H2 value with `isolated:false`.
+        const preH2Cwd = spec.cwd ?? process.cwd();
+        let askerCwd: { cwd: string; isolated: boolean } = { cwd: preH2Cwd, isolated: false };
         let sessionSpec: SessionSpec = {
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
           ...(spec.model === undefined ? {} : { model: spec.model }),
@@ -591,7 +610,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // tool — and never a consult run itself (explicit !isConsultRun,
         // review-2 #13).
         if (!isConsultRun && spec.request.consultExperts?.length && deps.consult) {
-          const consultTool = deps.consult(spec.runId, spec.cwd ?? process.cwd(), spec.request.consultExperts);
+          const consultTool = deps.consult(spec.runId, () => askerCwd, spec.request.consultExperts);
           if (consultTool !== undefined) {
             customTools.push(consultTool);
             grantedReserved.push("consult");
@@ -647,6 +666,16 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             return settleConfigFailure(spec.runId, resolved.error, spec.request.label);
           }
           sessionSpec = resolved.value;
+          // D10: write the cwd cell exactly once, now that H2 has finished
+          // successfully. `isolated` requires all three: isolation was
+          // actually requested, H2 gave sessionSpec a cwd, and that cwd
+          // differs from the pre-H2 value (a no-op H2 that echoes the same
+          // cwd back is not isolation).
+          askerCwd = {
+            cwd: sessionSpec.cwd ?? preH2Cwd,
+            isolated:
+              spec.request.isolation === "worktree" && sessionSpec.cwd !== undefined && sessionSpec.cwd !== preH2Cwd,
+          };
         }
         // consult §5.4 B-2: FORCE the read-only tool domain AFTER H2, so no
         // extension (worktree or future) can ever widen a consult run's

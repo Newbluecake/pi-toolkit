@@ -155,22 +155,26 @@ class FakePort implements ConsultSpawnPort {
 }
 
 function makeForkStore(opts: { fail?: boolean; cwd?: string; withMainSession?: boolean } = {}) {
-  const calls: Array<{ source: string; fallbackCwd: string }> = [];
-  const mainCalls: Array<{ source: string; fallbackCwd: string }> = [];
+  const calls: Array<{ source: string; fallbackCwd: string; forceCwd?: boolean }> = [];
+  const mainCalls: Array<{ source: string; fallbackCwd: string; forceCwd?: boolean }> = [];
   const removed: string[] = [];
+  let resolveForkCwdCalls = 0;
   const store: ConsultForkStore = {
-    forkExpertSession: (sourceFile, fallbackCwd) => {
-      calls.push({ source: sourceFile, fallbackCwd });
+    forkExpertSession: (sourceFile, fallbackCwd, forkOpts) => {
+      calls.push({ source: sourceFile, fallbackCwd, ...(forkOpts?.forceCwd ? { forceCwd: true } : {}) });
       return opts.fail ? { ok: false, reason: "source file has no session header" } : { ok: true, path: FORK_PATH };
     },
     removeForkFile: (path) => {
       removed.push(path);
     },
-    resolveForkCwd: (_source, fallbackCwd) => opts.cwd ?? fallbackCwd,
+    resolveForkCwd: (_source, fallbackCwd) => {
+      resolveForkCwdCalls += 1;
+      return opts.cwd ?? fallbackCwd;
+    },
     ...(opts.withMainSession
       ? {
-          forkMainSession: (sourceFile, fallbackCwd) => {
-            mainCalls.push({ source: sourceFile, fallbackCwd });
+          forkMainSession: (sourceFile, fallbackCwd, forkOpts) => {
+            mainCalls.push({ source: sourceFile, fallbackCwd, ...(forkOpts?.forceCwd ? { forceCwd: true } : {}) });
             return opts.fail
               ? { ok: false, reason: "source file has no session header" }
               : { ok: true, path: FORK_PATH };
@@ -178,7 +182,7 @@ function makeForkStore(opts: { fail?: boolean; cwd?: string; withMainSession?: b
         }
       : {}),
   };
-  return { store, calls, mainCalls, removed };
+  return { store, calls, mainCalls, removed, resolveForkCwdCalls: () => resolveForkCwdCalls };
 }
 
 function completedOutcome(text: string): RunOutcome {
@@ -221,6 +225,7 @@ interface Harness {
   priceOf: ReturnType<typeof vi.fn>;
   inflightCount: () => number;
   settings: ConsultSettings;
+  selfCwdCallCount: () => number;
 }
 
 function harness(
@@ -231,6 +236,9 @@ function harness(
     fork?: ReturnType<typeof makeForkStore>;
     port?: FakePort;
     mainSessionFacts?: () => MainSessionFacts;
+    /** D10 (workflow-worktree plan §2): drives the asker cwd cell's `isolated` flag. */
+    isolated?: boolean;
+    selfCwd?: string;
   } = {},
 ): Harness {
   const port = opts.port ?? new FakePort();
@@ -238,9 +246,13 @@ function harness(
   const settings: ConsultSettings = { ...DEFAULT_SETTINGS.consult, ...opts.settings };
   const priceOf = vi.fn(() => ({ input: 3, cacheWrite: 5 }) as { input: number; cacheWrite: number } | undefined);
   const inFlight = { count: 0 };
+  const selfCwdCalls = { count: 0 };
   const tool = createConsultTool({
     selfRunId: SELF_RUN_ID,
-    selfCwd: SELF_CWD,
+    selfCwd: () => {
+      selfCwdCalls.count += 1;
+      return { cwd: opts.selfCwd ?? SELF_CWD, isolated: opts.isolated ?? false };
+    },
     whitelist: [opts.ref ?? ref()],
     port,
     query: opts.query ?? fakeQuery(),
@@ -258,7 +270,15 @@ function harness(
     settings: () => settings,
     ...(opts.mainSessionFacts !== undefined ? { mainSessionFacts: opts.mainSessionFacts } : {}),
   });
-  return { tool, port, fork, priceOf, inflightCount: () => inFlight.count, settings };
+  return {
+    tool,
+    port,
+    fork,
+    priceOf,
+    inflightCount: () => inFlight.count,
+    settings,
+    selfCwdCallCount: () => selfCwdCalls.count,
+  };
 }
 
 const exec = (h: Harness, expert = "explorer", question = "What did you decide about X?", signal?: AbortSignal) =>
@@ -319,7 +339,7 @@ describe("consult tool: nack surface (T-2)", () => {
     const fork = makeForkStore();
     const tool = createConsultTool({
       selfRunId: SELF_RUN_ID,
-      selfCwd: SELF_CWD,
+      selfCwd: () => ({ cwd: SELF_CWD, isolated: false }),
       whitelist: [ref()],
       port,
       query: fakeQuery(),
@@ -516,6 +536,63 @@ describe("consult tool: success surface (T-3)", () => {
     const result = (await exec(h)) as ToolResult;
     expect(result.details.turnBudgetHint).toBe(1);
     expect(h.port.spawnCalls[0]!.prompt).toContain("Budget note: you have roughly one turn");
+  });
+});
+
+// D10 (docs/dev/workflow-worktree/plan.md §2): isolated-asker cwd (test #10)
+
+describe("consult tool: isolated asker cwd (D10, test #10)", () => {
+  it("isolated:true ⇒ fork gets forceCwd, spawn cwd is the asker's worktree, resolveForkCwd is never called", async () => {
+    const WORKTREE = "/repo/.pi-worktrees/wt-r1";
+    const fork = makeForkStore({ cwd: "/would-be-two-level-cwd" }); // if consulted, this proves the two-level path was skipped
+    const h = harness({ fork, isolated: true, selfCwd: WORKTREE });
+    const result = (await exec(h)) as ToolResult;
+    expect(result.details.outcome).toBe("completed");
+    expect(h.fork.calls).toEqual([{ source: expertSessionFile, fallbackCwd: WORKTREE, forceCwd: true }]);
+    expect(h.fork.resolveForkCwdCalls()).toBe(0); // never consulted for an isolated asker
+    const req = h.port.spawnCalls[0]!;
+    expect(req.cwd).toBe(WORKTREE); // NOT the two-level result
+  });
+
+  it("isolated:false ⇒ call parameters are byte-identical to the pre-D10 baseline (fallback/resolveForkCwd path)", async () => {
+    const fork = makeForkStore({ cwd: "/expert/worktree" });
+    const h = harness({ fork, isolated: false });
+    await exec(h);
+    // No forceCwd key at all — matches the exact shape asserted pre-D10.
+    expect(h.fork.calls).toEqual([{ source: expertSessionFile, fallbackCwd: SELF_CWD }]);
+    expect(h.fork.resolveForkCwdCalls()).toBe(1); // two-level rule still consulted
+    const req = h.port.spawnCalls[0]!;
+    expect(req.cwd).toBe("/expert/worktree"); // resolveForkCwd's result, unchanged
+  });
+
+  it("the getter is read exactly once per execute() call", async () => {
+    const h = harness({ isolated: true, selfCwd: "/wt/r1" });
+    await exec(h);
+    expect(h.selfCwdCallCount()).toBe(1);
+  });
+
+  it('the reserved "main" expert follows the same isolated-asker rule', async () => {
+    const WORKTREE = "/repo/.pi-worktrees/wt-asker";
+    const fork = makeForkStore({ cwd: "/would-be-two-level-cwd", withMainSession: true });
+    const h = harness({
+      fork,
+      isolated: true,
+      selfCwd: WORKTREE,
+      ref: mainRef(),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "bigmodel" },
+        contextTokens: 1000,
+        contextPercent: 10,
+      }),
+    });
+    const result = (await exec(h, CONSULT_MAIN_EXPERT_ID)) as ToolResult;
+    expect(result.details.outcome).toBe("completed");
+    expect(h.fork.mainCalls).toEqual([{ source: expertSessionFile, fallbackCwd: WORKTREE, forceCwd: true }]);
+    expect(h.fork.calls).toHaveLength(0); // the plain expert path was not used
+    expect(h.fork.resolveForkCwdCalls()).toBe(0);
+    const req = h.port.spawnCalls[0]!;
+    expect(req.cwd).toBe(WORKTREE);
   });
 });
 

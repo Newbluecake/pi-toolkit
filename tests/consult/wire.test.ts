@@ -492,13 +492,17 @@ describe('wireConsult.resolveExperts: the reserved "main" expert id (§16)', () 
 describe("wireConsult.depsFactory + concurrency caps", () => {
   it("returns undefined when disabled or the whitelist is empty; a tool otherwise", () => {
     const enabled = wiring({});
-    expect(enabled.depsFactory("r_A", "/tmp", [])).toBeUndefined();
+    expect(enabled.depsFactory("r_A", () => ({ cwd: "/tmp", isolated: false }), [])).toBeUndefined();
     expect(
-      enabled.depsFactory("r_A", "/tmp", [{ runId: "r_E", sessionFile: "/s.jsonl", agentType: "t" }]),
+      enabled.depsFactory("r_A", () => ({ cwd: "/tmp", isolated: false }), [
+        { runId: "r_E", sessionFile: "/s.jsonl", agentType: "t" },
+      ]),
     ).toBeDefined();
     const disabled = wiring({ settings: { enabled: false } });
     expect(
-      disabled.depsFactory("r_A", "/tmp", [{ runId: "r_E", sessionFile: "/s.jsonl", agentType: "t" }]),
+      disabled.depsFactory("r_A", () => ({ cwd: "/tmp", isolated: false }), [
+        { runId: "r_E", sessionFile: "/s.jsonl", agentType: "t" },
+      ]),
     ).toBeUndefined();
   });
 
@@ -547,7 +551,10 @@ describe("wireConsult.depsFactory + concurrency caps", () => {
       forkStore: forkStoreStub(),
       consultDir: CONSULT_DIR,
     });
-    const mk = () => w.depsFactory("r_A", "/tmp", [{ runId: "r_E", sessionFile: newExpertFile, agentType: "t" }])!;
+    const mk = () =>
+      w.depsFactory("r_A", () => ({ cwd: "/tmp", isolated: false }), [
+        { runId: "r_E", sessionFile: newExpertFile, agentType: "t" },
+      ])!;
     const execTool = (q: string) =>
       mk().execute("c", { expert: "r_E", question: q }, undefined, undefined, undefined as never);
     const first = execTool("q1");
@@ -686,7 +693,9 @@ describe("wireConsult.dispatchSnapshot: snapshot fan-out to registered watchers"
       forkStore: forkStoreStub(),
       consultDir: CONSULT_DIR,
     });
-    const tool = w.depsFactory("r_ASK", "/tmp", [{ runId: "r_E", sessionFile: newExpertFile, agentType: "t" }])!;
+    const tool = w.depsFactory("r_ASK", () => ({ cwd: "/tmp", isolated: false }), [
+      { runId: "r_E", sessionFile: newExpertFile, agentType: "t" },
+    ])!;
     const pending = tool.execute("c", { expert: "r_E", question: "q" }, undefined, undefined, undefined as never);
     for (let i = 0; i < 10 && releaseWait === undefined; i++) await Promise.resolve();
     // In-flight: snapshots for unrelated runs and for the consult run itself
@@ -730,7 +739,7 @@ describe("wireConsult × real fork-store (package B composition)", () => {
       forkStore: realForkStore,
       consultDir: forkDir,
     });
-    const tool = w.depsFactory("r_ASKER", "/tmp/asker", [
+    const tool = w.depsFactory("r_ASKER", () => ({ cwd: "/tmp/asker", isolated: false }), [
       { runId: "r_EXPERT9", sessionFile: expertFile, agentType: "explorer" },
     ])!;
     const result = (await tool.execute(
@@ -809,7 +818,7 @@ describe("wireConsult: expert task summary reaches the asker's consult tool desc
     });
     const result = w.resolveExperts(["planner"]);
     expect(result.refs[0]).toMatchObject({ pending: true, task: "Draft the migration plan for the settings file" });
-    const tool = w.depsFactory("r_ASKER0001" as RunId, "/work", result.refs);
+    const tool = w.depsFactory("r_ASKER0001" as RunId, () => ({ cwd: "/work", isolated: false }), result.refs);
     expect(tool).toBeDefined();
     const description = String(tool!.description);
     expect(description).toContain("Experts you can consult (up to 2 at once):");

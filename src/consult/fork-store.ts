@@ -217,6 +217,15 @@ export interface ForkExpertSessionOptions {
    * the drift. Production never sets it.
    */
   onAfterCopy?: (source: string, target: string) => void;
+  /**
+   * D10 (workflow-worktree plan §2, production field — not a test seam):
+   * the isolated-asker path. When true, the fork's target cwd is forced to
+   * the resolved `fallbackCwd` (the asker's own worktree) instead of the
+   * usual two-level resolution against the source header's cwd — an
+   * isolated asker's consult always runs inside its own worktree, never
+   * the expert's original (or since-deleted) checkout.
+   */
+  forceCwd?: boolean;
 }
 
 /**
@@ -246,7 +255,11 @@ export function forkExpertSession(
     const scanned = scanSessionHead(sourcePath);
     if (!scanned.ok) return { ok: false, reason: scanned.reason };
     const { header, contentStart, fileSize } = scanned.scan;
-    const targetCwd = pickForkCwd(header.cwd, fallbackCwd);
+    // D10 (workflow-worktree plan §2): an isolated asker forces the fork
+    // header's cwd to `fallbackCwd`, skipping the source header's cwd
+    // entirely — the unisolated two-level rule (`pickForkCwd`) is otherwise
+    // unchanged.
+    const targetCwd = opts.forceCwd ? resolvePath(fallbackCwd) : pickForkCwd(header.cwd, fallbackCwd);
     mkdirSync(dir, { recursive: true });
     const newSessionId = opts.newId ? opts.newId() : randomUUID();
     const timestamp = new Date().toISOString();

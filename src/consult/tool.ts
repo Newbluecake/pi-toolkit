@@ -82,17 +82,24 @@ export interface ConsultSpawnPort {
  * keeping it an interface lets package C compile and test standalone.
  */
 export interface ConsultForkStore {
-  /** Synchronous expert-session fork; NEVER throws (§15 #2 — failures fold into `{ok:false,reason}`). */
-  forkExpertSession(sourceFile: string, fallbackCwd: string): ForkExpertSessionResult;
+  /**
+   * Synchronous expert-session fork; NEVER throws (§15 #2 — failures fold
+   * into `{ok:false,reason}`). `opts.forceCwd` (workflow-worktree plan §2
+   * D10): the isolated-asker path — the fork's file-header cwd is forced to
+   * `fallbackCwd` (the asker's own worktree) instead of the usual two-level
+   * resolution against the expert's original header cwd.
+   */
+  forkExpertSession(sourceFile: string, fallbackCwd: string, opts?: { forceCwd?: boolean }): ForkExpertSessionResult;
   /**
    * consult (plan §16 rule 5): consistency-checked variant used ONLY for
    * the host main session — unlike a terminal expert's file, main's can be
    * concurrently appended to (or wholesale rewritten by pi's own
    * `_rewriteFile`) at the exact moment `consult("main", …)` runs.
    * Optional: falls back to `forkExpertSession` when a fork store does not
-   * provide it (e.g. package C unit tests with a plain stub).
+   * provide it (e.g. package C unit tests with a plain stub). `opts.forceCwd`
+   * mirrors `forkExpertSession`'s (workflow-worktree plan §2 D10).
    */
-  forkMainSession?(sourceFile: string, fallbackCwd: string): ForkExpertSessionResult;
+  forkMainSession?(sourceFile: string, fallbackCwd: string, opts?: { forceCwd?: boolean }): ForkExpertSessionResult;
   /** Delete a fork file; must be consult-dir-scoped and ENOENT-silent (idempotent). */
   removeForkFile(path: string): void;
   /**
@@ -186,11 +193,30 @@ export const CONSULT_MAX_CONTEXT_PERCENT = 75;
 /** Global in-flight cap across all askers (slotless runs bypass the slot pool; review-2 #15②). */
 export const CONSULT_MAX_GLOBAL_INFLIGHT = 8;
 
+/**
+ * The asking run's cwd cell (workflow-worktree plan §2 D10). `isolated` is
+ * true only when the asker is a worktree-isolated run whose worktree has
+ * actually been created (H2 succeeded and gave it a different cwd) — an
+ * unisolated asker, or one whose H2 never ran/failed, always reads
+ * `isolated:false`.
+ */
+export interface ConsultAskerCwd {
+  readonly cwd: string;
+  readonly isolated: boolean;
+}
+
 export interface ConsultDeps {
   /** The asking run's id — parentRunId of the consult run and the concurrency key. */
   selfRunId: RunId;
-  /** The asker's cwd (fork cwd fallback + the checkout the consult runs in). */
-  selfCwd: string;
+  /**
+   * Getter for the asker's cwd cell (workflow-worktree plan §2 D10). A
+   * getter, not a plain string, because the runtime adapter writes this
+   * cell once AFTER H2 resolves — by the time this tool's `execute()` ever
+   * runs the session already exists, which is always after H2, so every
+   * call observes the settled value. Read EXACTLY ONCE per `execute()` call
+   * (into a local snapshot) — never re-invoked mid-call.
+   */
+  selfCwd: () => ConsultAskerCwd;
   /** Dispatch-time resolved expert whitelist (SpawnRequest.consultExperts — trusted). */
   whitelist: readonly ConsultExpertRef[];
   port: ConsultSpawnPort;
@@ -386,7 +412,8 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
       "Ask a finished expert subagent run a question and get the answer inside this tool call. `expert` must be " +
       "an entry of this run's expert whitelist (its dispatching agent attached and validated the list at dispatch " +
       "time). The expert's persisted session is forked read-only for the question: it sees its own full history " +
-      "plus your question, runs in the asking agent's checkout (not its original worktree) with only " +
+      "plus your question, runs in the asking agent's own worktree when the asker is worktree-isolated; " +
+      "otherwise in the expert's original checkout if it still exists, else the asker's checkout — with only " +
       "read/grep/find/ls, and is bounded to a few turns and a short wall-clock budget. There is no fallback to a " +
       "fresh agent — if the expert is unavailable (still running, session gone, context too full, cost too high) " +
       "you get a clear negative answer; investigate yourself instead of retrying." +
@@ -395,6 +422,11 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
     parameters: ConsultToolParams,
     async execute(_toolCallId, params, signal) {
       const s = deps.settings();
+      // D10 (workflow-worktree plan §2): read the asker's cwd cell EXACTLY
+      // ONCE per call — the getter contract requires this (the cell can be
+      // mutated by late H2 activity in theory, but every call must see one
+      // consistent snapshot for its whole duration).
+      const asker = deps.selfCwd();
       // ① Caller-mistake validation FIRST (throw, never nack — §4.1 error table row 1).
       const question = params.question.trim();
       if (question.length === 0) throw new Error("consult: question must not be empty.");
@@ -611,11 +643,15 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         // ⑤ Fork (never throws — §15 #2). Rejection here still spawned
         // nothing. Main gets the consistency-checked variant when the store
         // provides one (§16 rule 5 — the host file can be concurrently
-        // appended to/rewritten, unlike a terminal expert's).
+        // appended to/rewritten, unlike a terminal expert's). D10
+        // (workflow-worktree plan §2): an isolated asker forces the fork's
+        // header cwd to its own worktree (`forceCwd:true`) instead of the
+        // usual two-level resolution against the expert's original cwd.
+        const forkOpts = asker.isolated ? { forceCwd: true as const } : undefined;
         const fork =
           isMain && deps.forkStore.forkMainSession
-            ? deps.forkStore.forkMainSession(sessionFile, deps.selfCwd)
-            : deps.forkStore.forkExpertSession(sessionFile, deps.selfCwd);
+            ? deps.forkStore.forkMainSession(sessionFile, asker.cwd, forkOpts)
+            : deps.forkStore.forkExpertSession(sessionFile, asker.cwd, forkOpts);
         if (!fork.ok) {
           return {
             content: [
@@ -631,11 +667,12 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
             } satisfies ConsultToolDetails,
           };
         }
-        // ⑥ Spawn the consult run through the narrow port. Fork cwd: the
-        // expert's header cwd when it still exists (preserved worktrees),
-        // else the asker's cwd (§5.1 two-level; the consulted copy always
-        // runs in a live checkout of the asking side).
-        const cwd = deps.forkStore.resolveForkCwd?.(sessionFile, deps.selfCwd) ?? deps.selfCwd;
+        // ⑥ Spawn the consult run through the narrow port. D10: an isolated
+        // asker's consult always runs in the asker's own worktree — no call
+        // to `resolveForkCwd` at all. An unisolated asker keeps the §5.1
+        // two-level rule unchanged: the expert's header cwd when it still
+        // exists (preserved worktrees), else the asker's cwd.
+        const cwd = asker.isolated ? asker.cwd : (deps.forkStore.resolveForkCwd?.(sessionFile, asker.cwd) ?? asker.cwd);
         let started: { runId: RunId; label?: string } | { error: ErrorInfo };
         try {
           started = await deps.port.spawn({

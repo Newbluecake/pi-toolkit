@@ -1586,8 +1586,14 @@ export function buildSessionStack(
     return { input: tier.input, cacheWrite: tier.cacheWrite };
   };
   const consultForkStore: ConsultForkStore = {
-    forkExpertSession,
-    forkMainSession: (sourceFile, fallbackCwd) => forkMainSessionSnapshot(sourceFile, fallbackCwd),
+    // D10 (workflow-worktree plan §2): wrapped, not passed directly — the
+    // raw functions' 3rd positional parameter is `dir` (defaulted to
+    // `consultSessionDir()`), not `opts`, so the interface's `opts` must be
+    // forwarded as the 4th argument with `dir` left at its default.
+    forkExpertSession: (sourceFile, fallbackCwd, opts) =>
+      forkExpertSession(sourceFile, fallbackCwd, undefined, opts?.forceCwd ? { forceCwd: true } : {}),
+    forkMainSession: (sourceFile, fallbackCwd, opts) =>
+      forkMainSessionSnapshot(sourceFile, fallbackCwd, undefined, opts?.forceCwd ? { forceCwd: true } : {}),
     removeForkFile,
     resolveForkCwd,
     sweepForkDir: () => sweepForkDir(consultSessionDir(), FORK_TTL_MS),

@@ -16,6 +16,7 @@ import {
   CONSULT_MAX_GLOBAL_INFLIGHT,
   createConsultSpawnPort,
   createConsultTool,
+  type ConsultAskerCwd,
   type ConsultForkStore,
 } from "./tool.js";
 import type { MainSessionFactsProvider } from "./main-facts.js";
@@ -48,7 +49,11 @@ export interface ConsultWiring {
    */
   resolveExperts(refs: readonly string[], opts?: { completedOnly?: boolean }): ResolveExpertsResult;
   /** Per-run consult-tool factory for the runtime adapter; undefined when disabled/whitelist empty. */
-  depsFactory(selfRunId: RunId, selfCwd: string, whitelist: readonly ConsultExpertRef[]): ToolDefinition | undefined;
+  depsFactory(
+    selfRunId: RunId,
+    selfCwd: () => ConsultAskerCwd,
+    whitelist: readonly ConsultExpertRef[],
+  ): ToolDefinition | undefined;
   /** Fork-dir TTL sweep (stack calls it synchronously at build; no timer is ever created). */
   sweep(): void;
   /** Runner/adapter physical-reap callback — deletes the fork copy, consult-dir scoped, idempotent (§4.4). */
@@ -419,7 +424,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
   };
 }
 
-export type { ConsultForkStore, ConsultSpawnPort } from "./tool.js";
+export type { ConsultAskerCwd, ConsultForkStore, ConsultSpawnPort } from "./tool.js";
 export { buildConsultPrompt } from "./prompt.js";
 export type { ForkExpertSessionResult } from "../core/types.js";
 export type { MainSessionFacts, MainSessionFactsProvider } from "./main-facts.js";
