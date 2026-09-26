@@ -109,8 +109,18 @@ class FakePort implements ProcessPort {
 
   async killJobTree(pid: number, options?: KillJobTreeOptions): Promise<KillOutcome> {
     this.killCalls.push({ pid, ...(options !== undefined ? { options } : {}) });
-    // A real kill ends the process; the tee/exit path must run identically.
-    this.procs.find((proc) => proc.pid === pid)?.exit({ exitCode: null, signal: "SIGTERM" });
+    // A real kill only sends a signal — the process's death (and the kernel
+    // closing its pipes) is never synchronous with it; any output the
+    // process already queued into the pipe buffer as it dies is still
+    // delivered to our tee in the meantime. Ending the fake process
+    // synchronously here (as this used to) collapsed that gap to zero and
+    // made a same-tick abort lose output a real kill would not: root-caused
+    // in docs/dev/bash-timeout-grace (P3+P4 verifier round 3). Deferring the
+    // synthetic exit by one macrotask restores the gap without touching the
+    // manager/tool's own (synchronous, §3.6) cancel path.
+    setImmediate(() => {
+      this.procs.find((proc) => proc.pid === pid)?.exit({ exitCode: null, signal: "SIGTERM" });
+    });
     return "terminated";
   }
 
@@ -446,9 +456,11 @@ describe("bash override tool — auto-background", () => {
     await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
     harness.port.last().write("partial\n");
     controller.abort();
-    // Written strictly AFTER the abort and before the (one-macrotask-deferred)
-    // kill + drain: exactly the bytes the baseline protected — a real process
-    // flushing its pipe buffer while dying.
+    // Written strictly AFTER the abort (which sends the kill signal
+    // synchronously, §3.6) but before the process's pipes actually close:
+    // exactly the bytes the baseline protected — a real process flushing its
+    // pipe buffer while it dies, still delivered through the tee before the
+    // exit settles.
     harness.port.last().write("after abort\n");
     await expect(run).rejects.toThrow(/^partial\n+after abort\n+Command aborted$/);
     expect(harness.port.killCalls).toHaveLength(1);
@@ -1011,13 +1023,13 @@ describe("bash override tool — T15 two-layer race (§3.6)", () => {
     const run = tool.execute("call-1", { command: "npm test" }, controller.signal, undefined, makeCtx("/repo"));
     harness.startJob(1);
     await vi.advanceTimersByTimeAsync(10_000);
-    // The fake manager has no process to kill — resolve the exit the way the
-    // real (deferred) cancelReserve kill would.
+    // The fake manager has no process to kill — resolve the exit the way
+    // the manager's own kill() would once its signal lands.
     const reservation = harness.lastReservation();
     reservation.resolveExit(fakeRecord(reservation.jobId, { status: "killed", exitCode: null }));
     await expect(run).rejects.toThrow("Command aborted");
     // The latch never took the background branch: no hand-back, no return
-    // telemetry, and the deferred cancelReserve landed.
+    // telemetry, and the synchronous cancelReserve landed at once.
     expect(harness.lastReservation().backgroundedSync).toBe(0);
     expect(harness.returns).toEqual([]);
     expect(harness.cancelled).toContain(reservation.jobId);
@@ -1051,9 +1063,9 @@ describe("bash override tool — T15 two-layer race (§3.6)", () => {
     setTimeout(() => controller.abort(), 3_000);
     await vi.advanceTimersByTimeAsync(10_000);
     // The abort has won the latch; the job's exit arrives afterwards (the
-    // fake has no process — resolve the exit the way the deferred
-    // cancelReserve kill would). pi's own semantics: the exit is awaited,
-    // and only then is `aborted` thrown.
+    // fake has no process — resolve the exit the way the manager's own
+    // kill() would once its signal lands). pi's own semantics: the exit is
+    // awaited, and only then is `aborted` thrown.
     const reservation = harness.lastReservation();
     reservation.resolveExit(fakeRecord(reservation.jobId, { status: "killed", exitCode: null }));
     await expectation;

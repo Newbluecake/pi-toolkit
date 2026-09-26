@@ -1608,6 +1608,20 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       }
     }
 
+    // §2.5 step 4: the identity check above is done (a sync read), but
+    // `killJobTree` is a real signal-send — recover()'s abort checkpoint must
+    // be re-read immediately before it, not just before/after the identity
+    // check, so a scan cancelled in this exact window never signals a
+    // process it only meant to *look at*.
+    if (guard?.()) {
+      return {
+        jobId,
+        outcome: "refused",
+        alreadyTerminal: false,
+        reason: "bash job recovery cancelled before signalling",
+        record,
+      };
+    }
     if (local) local.termination = "killed";
     const outcome = await processPort.killJobTree(pid, {
       ...(grace !== undefined ? { graceMs: grace } : {}),

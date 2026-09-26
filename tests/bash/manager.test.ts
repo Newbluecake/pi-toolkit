@@ -1114,6 +1114,38 @@ describe("bash job manager: recover (§3.6)", () => {
     expect(h.clock.pendingTimers).toBe(0);
     expect(h.notified).toEqual([]);
   });
+
+  it("an abort landing between the identity check and the signal never kills the process (§2.5 step 4, subagent recovery)", async () => {
+    // §3.9: `record.owner === "subagent"` routes through `kill(jobId, {}, aborted)`
+    // inside recover(); for an adopted job (no local handle) that branch does
+    // a synchronous `checkPidOwnership` immediately followed by
+    // `processPort.killJobTree` — with zero `await` in between in today's
+    // code, so nothing can flip `aborted()` in that exact window through a
+    // *real* AbortSignal. The guard right before `killJobTree` is still the
+    // correct defensive checkpoint (§2.5 step 4's "every I/O/signal-send
+    // gated immediately before it" rule), and this test proves it by forcing
+    // the interleaving directly in the identity check itself — exactly the
+    // shape a future refactor (or another guarded caller) could reintroduce.
+    const h = await harness();
+    await seed(h.store, "b_P0F00006", { status: "running", pid: 9306, spawnedAt: 600, owner: "subagent" });
+    const controller = new AbortController();
+    const original = h.port.checkPidOwnership.bind(h.port);
+    h.port.checkPidOwnership = (identity) => {
+      const ownership = identity.pid === 9306 ? "alive" : original(identity);
+      if (identity.pid === 9306) controller.abort(); // lands right after the identity check
+      return ownership;
+    };
+
+    const summary = await h.manager.recover(controller.signal);
+    expect(summary.partial).toBe(true);
+    expect(summary.subagentKilled).toEqual([]);
+    // No signal was ever sent — the guard caught it before `killJobTree`.
+    expect(h.port.killCalls).toEqual([]);
+    expect(h.manager.get("b_P0F00006")?.status).toBe("running");
+    await settle();
+    expect(h.port.killCalls).toEqual([]);
+    expect(h.manager.get("b_P0F00006")?.status).toBe("running");
+  });
 });
 
 describe("bash job manager: listing and lookups", () => {
@@ -1763,6 +1795,65 @@ describe("bash job manager: seal / reserve (T13)", () => {
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.error.message).toMatch(/ENOENT/);
     expect(guard.count()).toBe(0);
+  });
+
+  // ── §3.6 P4 follow-up: cancelReserve's abort-time kill is synchronous ───────
+  // (the plan's own wording), so a same-tick dispose()/reload-handoff/seal
+  // can never race it into a no-op (leak) or observe it as "not yet sent".
+
+  it("cancelReserve signals synchronously; a same-tick dispose() neither re-signals nor drops the eventual exit (no leak)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    h.manager.cancelReserve(job.jobId);
+    // The signal is already in flight, synchronously, by the time
+    // cancelReserve() returns — dispose() (R8: clears timers/waiters only,
+    // never signals a process, §3.7) cannot race it into a no-op.
+    expect(h.port.killCalls).toHaveLength(1);
+    h.manager.dispose();
+    managers.splice(managers.indexOf(h.manager), 1); // avoid double-dispose in afterEach
+    expect(h.port.killCalls).toHaveLength(1); // dispose() itself never signals
+    // The process still dies from that one signal; the exit event is
+    // processed normally even after dispose() — nothing is leaked.
+    h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+    const record = await job.exit;
+    expect(record.status).toBe("killed");
+  });
+
+  it("cancelReserve signals synchronously; a same-tick reload handoff still settles the job exactly once in the next manager (no leak)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    h.manager.cancelReserve(job.jobId);
+    expect(h.port.killCalls).toHaveLength(1);
+    // Same tick: the reload handoff runs immediately after — the signal was
+    // already sent before `exportLocalJobs()` even starts, so it cannot see
+    // (and delete) the entry before the signal goes out.
+    const handoffs = h.manager.exportLocalJobs();
+    expect(handoffs).toHaveLength(1);
+    const next = h.rebuild();
+    next.adoptLocalJobs(handoffs);
+    expect(h.port.killCalls).toHaveLength(1); // still exactly one signal
+    h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+    await waitFor(() => next.get(job.jobId)?.status === "killed", "the handed-off job to settle killed");
+    expect(next.get(job.jobId)?.status).toBe("killed");
+  });
+
+  it("cancelReserve signals synchronously; a same-tick explicit kill() (a seal/killAll fan-out hitting the same job) still settles it exactly once", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    h.manager.cancelReserve(job.jobId);
+    // A concurrent "seal" kill (e.g. a session-shutdown killAll fan-out)
+    // targeting the same job in the same tick — SIGTERM is idempotent
+    // (§3.3/process.ts), so a second signal is harmless; what matters is
+    // that the job still settles to exactly one terminal state, with no
+    // throw and no leak.
+    await h.manager.kill(job.jobId).catch(() => undefined);
+    h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+    const record = await job.exit;
+    expect(record.status).toBe("killed");
+    expect(h.manager.get(job.jobId)?.status).toBe("killed");
   });
 });
 

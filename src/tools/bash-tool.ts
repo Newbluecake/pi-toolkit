@@ -733,9 +733,14 @@ function errorText(error: unknown): string {
  * record back into pi's `timeout:<s>` error so the foreground text stays
  * byte-identical. Abort while `started` is pending ⇒ cancel the reservation
  * and surface `aborted` (nothing spawned, nothing to drain); abort after ⇒
- * cancel/kill the job (the kill signal deferred one macrotask so same-tick
- * pipe deliveries are still tee'd) and the exit is awaited before `aborted`
- * is thrown — pi's own `waitForChildProcess`-then-check semantics.
+ * `cancelReserve` kills the job **synchronously** (no deferral — a deferred
+ * signal would race `dispose()`, a reload's `exportLocalJobs()`, and
+ * `sealAndKill`'s own kill), and the exit is still awaited before `aborted`
+ * is thrown — pi's own `waitForChildProcess`-then-check semantics. A real
+ * kill signal does not itself close the process's pipes (the kernel does,
+ * once the process actually dies), so output already in flight when the
+ * signal is sent is still delivered through the tee before the exit
+ * settles — no extra deferral is needed for that to work.
  */
 async function execViaManager(
   manager: BashJobManager,
@@ -809,22 +814,16 @@ async function execViaReserve(
   // racing it anymore.
   void abortSignal.catch(() => undefined);
   const handleAbort = (): void => {
-    // Staged (no pid yet): cancel synchronously — the spawn must never
-    // happen. Running (`state.job` is set, i.e. `started` resolved `{ok}`):
-    // the kill signal is deferred one macrotask so output already queued in
-    // this tick (pipe deliveries scheduled alongside the abort — what a real
-    // process flushes into the kernel pipe buffer as it dies) is still
-    // tee'd before the stream ends; the exit below is awaited afterwards, so
-    // the drain folds that output into the aborted error's text, exactly
-    // like the built-in tool's `killProcessTree` + `waitForChildProcess`.
-    // A ref'd setImmediate cannot wedge the loop (it fires within one tick).
-    if (state.job === undefined) {
-      manager.cancelReserve(reservation.jobId);
-    } else {
-      setImmediate(() => {
-        manager.cancelReserve(reservation.jobId);
-      });
-    }
+    // §3.6: cancel/kill synchronously on abort (all three staged/running
+    // substates) — `dispose()` only clears timers (manager.ts, R8) and a
+    // reload's `exportLocalJobs()` deletes the entry outright, so a deferred
+    // cancel could become a no-op with the process leaked, or fire a second,
+    // redundant signal after `sealAndKill`'s own kill. The output this used
+    // to protect via a deferred kill is instead protected in the fake test
+    // port (same-tick pipe deliveries are teed before the fake's synthetic
+    // exit lands, mirroring how a real kill signal does not itself close the
+    // pipe — the process closes it once it actually dies).
+    manager.cancelReserve(reservation.jobId);
     onAbortReserve?.();
   };
   try {
