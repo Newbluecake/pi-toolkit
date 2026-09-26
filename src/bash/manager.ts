@@ -433,6 +433,18 @@ interface Entry {
   cancelled?: boolean | undefined;
   /** §2.3 due/grace timer for this job's `deadline`, if any (R2). */
   deadlineTimer?: TimerHandle | undefined;
+  /**
+   * §2.4/§3.6 (P3+P4 verifier round 5): the in-flight `killNonTerminal`
+   * attempt for this job, if any. Concurrent kill triggers (an abort's
+   * `cancelReserve` racing a seal/killAll fan-out, or two independent
+   * `kill()` calls) must send at most one signal per termination attempt —
+   * every caller reuses this same promise instead of calling
+   * `processPort.killJobTree` again. Cleared once the attempt settles
+   * (success *or* failure), so a later, non-concurrent `kill()` call (this
+   * attempt is fully done and the job still needs killing) is free to start
+   * a fresh one rather than being coalesced into a stale result forever.
+   */
+  killInFlight?: Promise<KillJobResult> | undefined;
 }
 
 export function createBashJobManager(options: BashJobManagerOptions): BashJobManager {
@@ -1595,6 +1607,52 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       return { jobId, outcome: "already-dead", alreadyTerminal: false, record: stored ?? record };
     }
 
+    // §2.4/§3.6 (P3+P4 verifier round 5): an in-flight kill for this
+    // (non-terminal) job is reused rather than triggering a second signal —
+    // concurrent triggers (an abort's `cancelReserve` racing a seal/killAll
+    // fan-out, or two independent `kill()` calls) must send at most one
+    // signal per termination attempt. `killNonTerminal`'s own synchronous
+    // prefix (through the identity check and the actual signal-send) runs
+    // to completion — or to its first genuine `await` — before this function
+    // ever yields, so the latch below is set before any concurrent caller
+    // gets a chance to run; §2.4/§3.6.
+    if (entry?.killInFlight) return entry.killInFlight;
+    const attempt = killNonTerminal(jobId, entry, record, pid, killOptions, guard);
+    if (entry) {
+      entry.killInFlight = attempt;
+      // `.finally()` derives a *new* promise that mirrors `attempt`'s eventual
+      // rejection — its own rejection must be swallowed here (the caller's
+      // own handling of `attempt`/`kill()`'s return value, e.g.
+      // `cancelReserve`'s `.catch`, is unaffected; this is purely cleanup
+      // bookkeeping, not a consumer of the result).
+      void attempt
+        .finally(() => {
+          if (entry.killInFlight === attempt) entry.killInFlight = undefined;
+        })
+        .catch(() => undefined);
+    }
+    return attempt;
+  }
+
+  /**
+   * The non-terminal half of `kill()` (identity check → signal → outcome),
+   * factored out so `kill()` can latch it as a single in-flight attempt
+   * (§2.4/§3.6). A rejection here (e.g. `processPort.killJobTree` throwing)
+   * propagates through the shared `entry.killInFlight` promise to every
+   * concurrent caller and clears the latch once settled — a *later*,
+   * non-concurrent `kill()` call is free to start a fresh attempt (SIGTERM
+   * is idempotent; refusing to ever retry a failed kill would leave a job
+   * unkillable after one transport hiccup, which cancelReserve's own
+   * absorbed-rejection handling already treats as recoverable).
+   */
+  async function killNonTerminal(
+    jobId: JobId,
+    entry: Entry | undefined,
+    record: JobRecord,
+    pid: number,
+    killOptions: { graceMs?: Millis },
+    guard?: () => boolean,
+  ): Promise<KillJobResult> {
     const grace = killOptions.graceMs ?? killGraceMs;
     const local = entry?.local;
     if (!local) {

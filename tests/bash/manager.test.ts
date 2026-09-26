@@ -1839,21 +1839,58 @@ describe("bash job manager: seal / reserve (T13)", () => {
     expect(next.get(job.jobId)?.status).toBe("killed");
   });
 
-  it("cancelReserve signals synchronously; a same-tick explicit kill() (a seal/killAll fan-out hitting the same job) still settles it exactly once", async () => {
+  it("cancelReserve signals synchronously; a same-tick explicit kill() (a seal/killAll fan-out hitting the same job) sends exactly one signal", async () => {
     const h = await harness();
     const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
     await h.manager.markBackgrounded(job.jobId);
     h.manager.cancelReserve(job.jobId);
+    expect(h.port.killCalls).toHaveLength(1);
     // A concurrent "seal" kill (e.g. a session-shutdown killAll fan-out)
-    // targeting the same job in the same tick — SIGTERM is idempotent
-    // (§3.3/process.ts), so a second signal is harmless; what matters is
-    // that the job still settles to exactly one terminal state, with no
-    // throw and no leak.
-    await h.manager.kill(job.jobId).catch(() => undefined);
+    // targeting the same job, in the same tick, reuses the in-flight
+    // attempt (§2.4/§3.6) instead of sending a second signal.
+    const sealResult = await h.manager.kill(job.jobId);
+    expect(h.port.killCalls).toHaveLength(1);
+    expect(sealResult.outcome).toBe("terminated");
+    expect(sealResult.alreadyTerminal).toBe(false);
     h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
     const record = await job.exit;
     expect(record.status).toBe("killed");
     expect(h.manager.get(job.jobId)?.status).toBe("killed");
+  });
+
+  it("two concurrent kill() calls on the same non-terminal job send exactly one signal and share the same outcome", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+    // Fire both calls with zero `await` in between: real fs/process work never
+    // settles synchronously, so the second call is guaranteed to observe the
+    // first attempt's in-flight latch (§2.4/§3.6), not a fresh one.
+    const first = h.manager.kill(job.jobId);
+    const second = h.manager.kill(job.jobId);
+    expect(h.port.killCalls).toHaveLength(1);
+    h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(h.port.killCalls).toHaveLength(1);
+    expect(firstResult).toEqual(secondResult);
+    expect(firstResult.outcome).toBe("terminated");
+    const record = await job.exit;
+    expect(record.status).toBe("killed");
+  });
+
+  it("a kill() call issued after a prior attempt has settled is free to retry (not permanently coalesced)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 600", cwd: "/repo" });
+    const first = await h.manager.kill(job.jobId);
+    expect(first.outcome).toBe("terminated");
+    expect(h.port.killCalls).toHaveLength(1);
+    // The first attempt has fully settled (latch cleared, §2.4/§3.6) but the
+    // process has not actually died yet (no `exit()` fired) — a later,
+    // non-concurrent kill() call is a genuinely new attempt, not a replay.
+    const second = await h.manager.kill(job.jobId);
+    expect(second.outcome).toBe("terminated");
+    expect(h.port.killCalls).toHaveLength(2);
+    h.port.last().exit({ exitCode: null, signal: "SIGTERM" });
+    const record = await job.exit;
+    expect(record.status).toBe("killed");
   });
 });
 
