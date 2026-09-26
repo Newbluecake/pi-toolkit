@@ -8,8 +8,11 @@
  * the 64 KiB single-line cap and framing rules match the agent↔hub channel),
  * a 2s per-request deadline that SIGKILLs the child and fails every in-flight
  * request with `E_DB` on expiry, and exit-driven restart with 1s→5s→30s
- * backoff — the 4th failure inside a rolling 10-minute window gives up and
- * reports `db-unavailable` instead of respawning again (fail-closed).
+ * backoff (a crash rejects every in-flight *and* still-queued request
+ * immediately with `E_DB` — nothing rides out to the next child, so a
+ * restart is fail-closed rather than a delayed success) — the 4th failure
+ * inside a rolling 10-minute window gives up and reports `db-unavailable`
+ * instead of respawning again (fail-closed).
  *
  * This module never imports `node:sqlite` — it only ever talks to the
  * subprocess whose script text `db-child.ts` builds.
@@ -148,13 +151,24 @@ export function createDbClient(deps: DbClientDeps): DbClient {
 
   function onChildDown(): void {
     child = undefined;
-    // §4.2: subprocess exit ⇒ reject every in-flight (dispatched) request with E_DB.
-    // Queued (never dispatched) calls are left alone — they'll be redispatched
-    // once the respawned child is ready, or time out on their own deadline.
+    // §4.2: subprocess exit ⇒ reject every in-flight AND queued request immediately.
+    // A queued-but-never-dispatched call must not be left to ride out on the next
+    // (respawned) child: that would let a request submitted before the crash silently
+    // execute against a fresh process minutes later, once backoff finishes — exactly the
+    // "hang / execute across a restart" the plan forbids ("重启期间 LAN 请求一律 503，
+    // 从不挂起"). Restart is fail-closed: every caller gets E_DB now, and any later admit
+    // starts a clean queue against whichever child eventually comes up.
+    const err = new DbClientError("E_DB", "web-hub db: query subprocess exited");
     for (const [, pc] of dispatched) {
-      settleReject(pc, new DbClientError("E_DB", "web-hub db: query subprocess exited"));
+      settleReject(pc, err);
     }
     dispatched.clear();
+    for (const pc of interactiveQueue.splice(0)) {
+      settleReject(pc, err);
+    }
+    for (const pc of reservedQueue.splice(0)) {
+      settleReject(pc, err);
+    }
     interactiveInFlight = 0;
     reservedInFlight = 0;
 

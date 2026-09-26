@@ -92,14 +92,22 @@ export async function startHub(
     xdgRuntimeDir: deps.xdgRuntimeDir ?? process.env["XDG_RUNTIME_DIR"],
   });
   const log = createHubLog(paths.logFile);
+  // Review fix (LP, §1.3.1): default `FsDeps.onWarn` to the real hub log so the
+  // TMP-fallback socket-dir repair's "chmod 0700 + warn" is actually observable in
+  // production, not just in tests that inject their own sink. A caller-supplied
+  // `deps.fs.onWarn` (tests) still wins — spread order keeps this the default only.
+  const fsWithWarn: Partial<FsDeps> = {
+    onWarn: (dir, detail) => log.warn("web-hub: private dir repaired", { dir, detail }),
+    ...deps.fs,
+  };
   const rootScope: Scope = createScope({ log, now }); // ③ hub-lifetime scope
   const cleanup: Array<() => Promise<void>> = []; // executed in reverse on failure, each bounded
 
   try {
-    await withSignal(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, deps.fs), startup.signal); // ②
+    await withSignal(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, fsWithWarn), startup.signal); // ②
 
     const single = await withSignal(
-      acquireSingleton(paths, { now, fs: deps.fs, signal: startup.signal }), // ④
+      acquireSingleton(paths, { now, fs: fsWithWarn, signal: startup.signal }), // ④
       startup.signal,
     );
     if (single.kind === "exists") {

@@ -15,6 +15,9 @@ import {
   maintBusyTimeoutMs,
   QUERY_PRAGMAS,
   SCHEMA_SQL_V1,
+  SCHEMA_V1_COLUMNS,
+  SCHEMA_V1_FOREIGN_KEYS,
+  SCHEMA_V1_INDEX_COLUMNS,
   SCHEMA_V1_OBJECTS,
   WAL_MAX_BYTES,
 } from "../../../src/web-hub/hub/db.js";
@@ -54,6 +57,47 @@ describe("db.ts constants (plan §4.1)", () => {
         .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'")
         .all() as Array<{ name: string }>;
       expect(new Set(rows.map((r) => r.name))).toEqual(new Set(SCHEMA_V1_OBJECTS));
+      // Review fix (§4.1): SCHEMA_V1_COLUMNS/SCHEMA_V1_INDEX_COLUMNS/SCHEMA_V1_FOREIGN_KEYS are the
+      // maintenance script's per-column/constraint diff source — cross-check them against what
+      // SCHEMA_SQL_V1 actually creates so the two never drift apart silently.
+      for (const [table, cols] of Object.entries(SCHEMA_V1_COLUMNS)) {
+        const info = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+          name: string;
+          type: string;
+          notnull: number;
+          pk: number;
+        }>;
+        const byName = new Map(info.map((c) => [c.name, c]));
+        for (const spec of cols) {
+          const actual = byName.get(spec.name);
+          expect(actual, `${table}.${spec.name} missing from live schema`).toBeDefined();
+          expect(actual!.type.toUpperCase()).toBe(spec.type);
+          expect(Boolean(actual!.notnull)).toBe(spec.notnull);
+          expect(Boolean(actual!.pk)).toBe(spec.pk);
+        }
+        expect(info.map((c) => c.name).sort()).toEqual(cols.map((c) => c.name).sort());
+      }
+      for (const [indexName, col] of Object.entries(SCHEMA_V1_INDEX_COLUMNS)) {
+        const indexInfo = db.prepare(`PRAGMA index_info(${indexName})`).all() as Array<{ name: string }>;
+        expect(indexInfo).toHaveLength(1);
+        expect(indexInfo[0]!.name).toBe(col);
+      }
+      for (const [table, fks] of Object.entries(SCHEMA_V1_FOREIGN_KEYS)) {
+        const actual = db.prepare(`PRAGMA foreign_key_list(${table})`).all() as Array<{
+          from: string;
+          table: string;
+          to: string;
+          on_delete: string;
+        }>;
+        for (const spec of fks) {
+          expect(
+            actual.some(
+              (fk) =>
+                fk.from === spec.from && fk.table === spec.table && fk.to === spec.to && fk.on_delete === spec.onDelete,
+            ),
+          ).toBe(true);
+        }
+      }
       expect(() =>
         db
           .prepare(

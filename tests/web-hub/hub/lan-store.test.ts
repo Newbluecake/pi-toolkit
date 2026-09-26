@@ -64,7 +64,8 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
       now,
     });
     expect(typeof sid).toBe("string");
-    expect(sid.length).toBeGreaterThan(20);
+    // Review fix (§6.4): sid is 32 raw bytes, base64url-encoded (unpadded) — 43 chars.
+    expect(sid.length).toBe(43);
 
     const raw =
       readFileSync(dir.dbFile, "latin1") +
@@ -248,6 +249,98 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
     await expect(store.getUser("admin", { signal: ac.signal })).rejects.toBeInstanceOf(Error);
   });
 });
+
+skipIfNoSqlite(
+  "lan-store.ts touchSession dedup (plan \u00a74.2 \u540c sid \u53bb\u91cd\u4e0e\u914d\u989d, review fix)",
+  () => {
+    it("9 concurrent touchSession calls for the same sidHash fold into exactly 1 IPC; the 9th rider gets E_RATE", async () => {
+      const { spawn: realSpawn } = await import("node:child_process");
+      const { createHash } = await import("node:crypto");
+      let touchOps = 0;
+      const dir = tmp();
+      const res = await createLanStore({
+        dbFile: dir.dbFile,
+        log: memLog(),
+        test: true,
+        dbClient: {
+          spawnFn: ((...args: Parameters<typeof realSpawn>) => {
+            const child = realSpawn(...args);
+            const originalWrite = child.stdin.write.bind(child.stdin);
+            child.stdin.write = ((chunk: unknown, ...rest: unknown[]) => {
+              try {
+                const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : "";
+                for (const line of text.split("\\n")) {
+                  if (line.length === 0) continue;
+                  const parsed = JSON.parse(line) as { op?: string };
+                  if (parsed.op === "touchSession") touchOps++;
+                }
+              } catch {
+                // ignore framing noise — only used to count real touchSession frames
+              }
+              return (originalWrite as (...a: unknown[]) => boolean)(chunk, ...rest);
+            }) as typeof child.stdin.write;
+            return child;
+          }) as typeof realSpawn,
+        },
+      });
+      if (!res.ok) throw new Error(`createLanStore failed: ${res.reason}`);
+      const store2 = res.store;
+      try {
+        const now = 9_000_000;
+        const { sid } = await store2.createSession({
+          userId: 1,
+          epoch: 1,
+          boundOrigin: "http://x",
+          createdIp: "1.2.3.4",
+          now,
+        });
+        const sidHash = createHash("sha256").update(sid).digest("base64url");
+        touchOps = 0; // reset past createSession's own (unrelated) op before counting touchSession frames
+        // 8 total riders (1 original admit + 7 dedup waiters, db-client.ts's DEFAULT_DEDUP_MAX_WAITERS)
+        // all succeed sharing one IPC; the 9th distinct rider on the same key is rejected E_RATE.
+        const eight = Array.from({ length: 8 }, () => store2.touchSession(sidHash, now + 1));
+        const ninth = store2.touchSession(sidHash, now + 1).catch((e: unknown) => e);
+        const results = await Promise.all([...eight, ninth]);
+        for (let i = 0; i < 8; i++) {
+          expect((results[i] as { userId: number } | undefined)?.userId).toBe(1);
+        }
+        expect(results[8]).toBeInstanceOf(Error);
+        expect((results[8] as { code?: string }).code).toBe("E_RATE");
+        expect(touchOps).toBe(1); // all 9 riders folded into a single physical IPC round trip
+      } finally {
+        await store2.close();
+        dir.cleanup();
+      }
+    });
+
+    it("touchSessionReserved shares the same dedup key as touchSession for the same sidHash", async () => {
+      const { createHash } = await import("node:crypto");
+      const dir = tmp();
+      const res = await createLanStore({ dbFile: dir.dbFile, log: memLog(), test: true });
+      if (!res.ok) throw new Error(`createLanStore failed: ${res.reason}`);
+      const dedupStore = res.store;
+      try {
+        const now = 9_500_000;
+        const { sid } = await dedupStore.createSession({
+          userId: 1,
+          epoch: 1,
+          boundOrigin: "http://x",
+          createdIp: "1.2.3.4",
+          now,
+        });
+        const sidHash = createHash("sha256").update(sid).digest("base64url");
+        const [a, b] = await Promise.all([
+          dedupStore.touchSession(sidHash, now + 1),
+          dedupStore.touchSessionReserved(sidHash, now + 1),
+        ]);
+        expect(a).toEqual(b);
+      } finally {
+        await dedupStore.close();
+        dir.cleanup();
+      }
+    });
+  },
+);
 
 describe("createLanStore (plan §4.1 前置条件)", () => {
   it("db-too-large: fails closed before ever spawning a subprocess", async () => {

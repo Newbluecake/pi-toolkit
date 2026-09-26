@@ -57,6 +57,78 @@ CREATE INDEX sessions_expiry ON sessions(expires_at);
  * 结构不符 ⇒ db-invalid"). */
 export const SCHEMA_V1_OBJECTS = ["meta", "users", "sessions", "sessions_expiry"] as const;
 
+/**
+ * Review fix (W2 LS, §4.1/§4.3 "损坏"): the structural check above only ever
+ * looked at `sqlite_master` *names* — a `users`/`sessions` table rebuilt with
+ * the right name but a dropped column, a widened NOT NULL, or a different
+ * primary key still passed. This is the per-column shape `db-child.ts`'s
+ * `open-check-migrate` diffs against `PRAGMA table_info(<table>)` (name +
+ * `notnull` + `pk`, mirroring `SCHEMA_SQL_V1` verbatim) once `user_version`
+ * is already 1. Column *order* is not compared (table_info is positional but
+ * SQLite has no supported way to reorder columns short of a full rebuild,
+ * which would already trip the name/notnull/pk diff on at least one column).
+ */
+export interface SchemaColumnSpec {
+  readonly name: string;
+  readonly type: string;
+  readonly notnull: boolean;
+  readonly pk: boolean;
+}
+
+export const SCHEMA_V1_COLUMNS: Readonly<Record<string, readonly SchemaColumnSpec[]>> = {
+  meta: [
+    { name: "key", type: "TEXT", notnull: true, pk: true },
+    { name: "value", type: "TEXT", notnull: true, pk: false },
+  ],
+  users: [
+    { name: "id", type: "INTEGER", notnull: false, pk: true },
+    { name: "username", type: "TEXT", notnull: true, pk: false },
+    { name: "kdf", type: "TEXT", notnull: true, pk: false },
+    { name: "n", type: "INTEGER", notnull: true, pk: false },
+    { name: "r", type: "INTEGER", notnull: true, pk: false },
+    { name: "p", type: "INTEGER", notnull: true, pk: false },
+    { name: "salt", type: "BLOB", notnull: true, pk: false },
+    { name: "hash", type: "BLOB", notnull: true, pk: false },
+    { name: "epoch", type: "INTEGER", notnull: true, pk: false },
+    { name: "initial_password", type: "TEXT", notnull: false, pk: false },
+    { name: "initial_created_at", type: "INTEGER", notnull: false, pk: false },
+    { name: "initial_login_at", type: "INTEGER", notnull: false, pk: false },
+    { name: "initial_login_ip", type: "TEXT", notnull: false, pk: false },
+    { name: "created_at", type: "INTEGER", notnull: true, pk: false },
+    { name: "updated_at", type: "INTEGER", notnull: true, pk: false },
+  ],
+  sessions: [
+    { name: "sid_hash", type: "BLOB", notnull: true, pk: true },
+    { name: "user_id", type: "INTEGER", notnull: true, pk: false },
+    { name: "epoch", type: "INTEGER", notnull: true, pk: false },
+    { name: "bound_origin", type: "TEXT", notnull: true, pk: false },
+    { name: "created_at", type: "INTEGER", notnull: true, pk: false },
+    { name: "last_seen_at", type: "INTEGER", notnull: true, pk: false },
+    { name: "expires_at", type: "INTEGER", notnull: true, pk: false },
+    { name: "absolute_expires_at", type: "INTEGER", notnull: true, pk: false },
+    { name: "created_ip", type: "TEXT", notnull: true, pk: false },
+  ],
+};
+
+/** Index name → the single column it must be built on (`PRAGMA index_info`). Catches an index
+ * rebuilt on the wrong column while keeping its original name (which alone would still satisfy
+ * `SCHEMA_V1_OBJECTS`'s name-only check). */
+export const SCHEMA_V1_INDEX_COLUMNS: Readonly<Record<string, string>> = {
+  sessions_expiry: "expires_at",
+};
+
+/** `sessions.user_id → users.id`, the only foreign key in the v1 schema (`PRAGMA
+ * foreign_key_list`). Catches a `sessions` rebuild that silently dropped the FK constraint
+ * while keeping every column name/notnull/pk intact. */
+export const SCHEMA_V1_FOREIGN_KEYS: Readonly<
+  Record<
+    string,
+    readonly { readonly from: string; readonly table: string; readonly to: string; readonly onDelete: string }[]
+  >
+> = {
+  sessions: [{ from: "user_id", table: "users", to: "id", onDelete: "CASCADE" }],
+};
+
 // ---------------------------------------------------------------------------
 // §4.1 PRAGMA policy
 // ---------------------------------------------------------------------------

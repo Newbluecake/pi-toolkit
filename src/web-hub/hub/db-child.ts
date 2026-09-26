@@ -13,7 +13,16 @@
  * be read at runtime by the child itself, so a production hub never carries the
  * dead code path at all ("只在 PI_WEBHUB_DB_TEST=1 时编译进脚本").
  */
-import { CHECKPOINT_PASSIVE_INTERVAL_MS, QUERY_PRAGMAS, SCHEMA_SQL_V1, SCHEMA_V1_OBJECTS, USER_VERSION } from "./db.js";
+import {
+  CHECKPOINT_PASSIVE_INTERVAL_MS,
+  QUERY_PRAGMAS,
+  SCHEMA_SQL_V1,
+  SCHEMA_V1_COLUMNS,
+  SCHEMA_V1_FOREIGN_KEYS,
+  SCHEMA_V1_INDEX_COLUMNS,
+  SCHEMA_V1_OBJECTS,
+  USER_VERSION,
+} from "./db.js";
 
 export function dbTestModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env["PI_WEBHUB_DB_TEST"] === "1";
@@ -283,6 +292,53 @@ function run() {
           if (!objects.has(name)) {
             reply({ ok: false, code: 'db-invalid', detail: 'missing schema object: ' + name });
             return;
+          }
+        }
+        // Review fix (§4.1/§4.3 "损坏"): name-only checks above pass for a table/index rebuilt
+        // under the right name but with a dropped column, widened NOT NULL, wrong primary key,
+        // an index on the wrong column, or a missing foreign key. Diff the actual structure too.
+        const expectedColumns = ${JSON.stringify(SCHEMA_V1_COLUMNS)};
+        for (const table of Object.keys(expectedColumns)) {
+          const cols = expectedColumns[table];
+          const info = db.prepare('PRAGMA table_info(' + table + ')').all();
+          const byName = new Map(info.map((c) => [c.name, c]));
+          for (const spec of cols) {
+            const actual = byName.get(spec.name);
+            if (!actual) {
+              reply({ ok: false, code: 'db-invalid', detail: 'missing column: ' + table + '.' + spec.name });
+              return;
+            }
+            if (
+              String(actual.type).toUpperCase() !== spec.type ||
+              Boolean(actual.notnull) !== spec.notnull ||
+              Boolean(actual.pk) !== spec.pk
+            ) {
+              reply({ ok: false, code: 'db-invalid', detail: 'column constraint mismatch: ' + table + '.' + spec.name });
+              return;
+            }
+          }
+        }
+        const expectedIndexColumns = ${JSON.stringify(SCHEMA_V1_INDEX_COLUMNS)};
+        for (const indexName of Object.keys(expectedIndexColumns)) {
+          const col = expectedIndexColumns[indexName];
+          const indexInfo = db.prepare('PRAGMA index_info(' + indexName + ')').all();
+          if (indexInfo.length !== 1 || indexInfo[0].name !== col) {
+            reply({ ok: false, code: 'db-invalid', detail: 'index column mismatch: ' + indexName });
+            return;
+          }
+        }
+        const expectedForeignKeys = ${JSON.stringify(SCHEMA_V1_FOREIGN_KEYS)};
+        for (const table of Object.keys(expectedForeignKeys)) {
+          const fks = expectedForeignKeys[table];
+          const actualFks = db.prepare('PRAGMA foreign_key_list(' + table + ')').all();
+          for (const spec of fks) {
+            const match = actualFks.find(
+              (fk) => fk.from === spec.from && fk.table === spec.table && fk.to === spec.to && fk.on_delete === spec.onDelete,
+            );
+            if (!match) {
+              reply({ ok: false, code: 'db-invalid', detail: 'foreign key mismatch: ' + table + '.' + spec.from });
+              return;
+            }
           }
         }
       } else {
