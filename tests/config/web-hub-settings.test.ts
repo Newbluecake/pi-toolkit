@@ -161,6 +161,19 @@ describe("web-hub settings", () => {
       expect(parsed.lan.extraHosts).toEqual(["hub.example.com", "192.168.1.5"]);
     });
 
+    it("list-valued LAN settings also accept JSON string arrays (hand-written settings.json form)", () => {
+      const parsed = parseWebHubSettings({
+        lan: {
+          extraHosts: ["HUB.example.com", " 192.168.1.5 ", "dev", 42, "a.local, b.local"],
+          trustProxyFrom: ["127.0.0.1"],
+          externalOrigins: ["https://hub.example.com"],
+        },
+      });
+      expect(parsed.lan.extraHosts).toEqual(["hub.example.com", "192.168.1.5", "a.local", "b.local"]);
+      expect(parsed.lan.trustProxyFrom).toEqual(["127.0.0.1"]);
+      expect(parsed.lan.externalOrigins).toEqual(["https://hub.example.com"]);
+    });
+
     it("trustProxyFrom keeps only IPv4 literals (paired with externalOrigins so no mismatch trips)", () => {
       const parsed = parseWebHubSettings({
         lan: {

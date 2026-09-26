@@ -1204,12 +1204,18 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
   };
 }
 
+/**
+ * List-valued LAN settings accept either a comma-separated string (the form the settings editor writes) or a JSON
+ * array of strings (the natural hand-written form in settings.json). Non-string array items are dropped.
+ */
 function splitLanCsv(raw: unknown): string[] {
-  if (typeof raw !== "string") return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s !== "");
+  const parts =
+    typeof raw === "string"
+      ? raw.split(",")
+      : Array.isArray(raw)
+        ? raw.flatMap((item) => (typeof item === "string" ? item.split(",") : []))
+        : [];
+  return parts.map((s) => s.trim()).filter((s) => s !== "");
 }
 
 /** §9.1 `webHub.lan.extraHosts`: 逐项 `classifyHostToken`；合法项进入白名单，非法项进入 `invalidExtraHosts`（不进白名单，不报错）。 */
