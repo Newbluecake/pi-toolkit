@@ -330,6 +330,18 @@ export interface SpawnRequest {
    * (`CONSULT_READONLY_TOOLS`).
    */
   forkSessionFrom?: string;
+  /**
+   * L1 (agent-tool pool-full plan §1/§2): admission-time policy when this
+   * (non-slotless) request would exceed the concurrency pool. `"reject"` —
+   * fail admission immediately (no run, no worktree, no record) with a
+   * self-explanatory config error; `"queue"` — the pre-L1 behavior (proceed
+   * to the real SlotPool queue, bounded by `budget.queueWaitMs`). Undefined
+   * (every caller except the top-level/nested Agent tool: workflow children,
+   * consult forks, /task, resume) is also "queue" — this field only ever
+   * narrows admission, never widens it. Ignored entirely for `slotless`
+   * requests, which never occupy a conceptual slot in the first place.
+   */
+  poolFullPolicy?: "reject" | "queue";
 }
 /**
  * M-A (presentation): one observed tool call of a run, kept in

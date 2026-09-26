@@ -11,7 +11,15 @@ import {
   persistSettingOverride,
   type AgentSettings,
 } from "../../src/config/settings.js";
-import { SETTING_SPECS, currentOf, defaultOf, parseSettingValue, settingKeys } from "../../src/config/setting-specs.js";
+import {
+  SETTING_SPECS,
+  currentOf,
+  defaultOf,
+  parseSettingValue,
+  resetSetting,
+  settingKeys,
+  writeSetting,
+} from "../../src/config/setting-specs.js";
 import {
   SettingsEditorModel,
   createSettingsEditorComponent,
@@ -563,5 +571,56 @@ describe("setting-specs table", () => {
     const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AgentSettings;
     current.budget.idleMs = 90_000;
     expect(currentOf(current, spec)).toBe(90);
+  });
+
+  it("L1: concurrencyLimit and agent.queueWhenFull are marked live (apply without /reload)", () => {
+    expect(SETTING_SPECS.concurrencyLimit?.live).toBe(true);
+    expect(SETTING_SPECS["agent.queueWhenFull"]?.live).toBe(true);
+    expect(SETTING_SPECS["agent.queueWhenFull"]?.kind).toBe("boolean");
+  });
+});
+
+describe("L1: SettingsStore.onWrite (agent-tool pool-full plan \u00a74)", () => {
+  it("writeSetting fires onWrite with the storage key and the live (ms-domain) value", () => {
+    const s = store();
+    const seen: Array<[string, unknown]> = [];
+    const withHook = { ...s, onWrite: (key: string, value: unknown) => seen.push([key, value]) };
+    const parsed = parseSettingValue(SETTING_SPECS.concurrencyLimit!, "9");
+    if (!parsed.ok) throw new Error("unreachable");
+    writeSetting(withHook, "concurrencyLimit", parsed);
+    expect(seen).toEqual([["concurrencyLimit", 9]]);
+    expect(withHook.current.concurrencyLimit).toBe(9);
+  });
+
+  it("resetSetting fires onWrite with the default live value", () => {
+    const s = store();
+    s.current.concurrencyLimit = 12;
+    const seen: Array<[string, unknown]> = [];
+    const withHook = { ...s, onWrite: (key: string, value: unknown) => seen.push([key, value]) };
+    resetSetting(withHook, "concurrencyLimit");
+    expect(seen).toEqual([["concurrencyLimit", DEFAULT_SETTINGS.concurrencyLimit]]);
+  });
+
+  it("a throwing onWrite never blocks the in-memory write or persistence", () => {
+    const s = store();
+    const withHook = {
+      ...s,
+      onWrite: () => {
+        throw new Error("boom");
+      },
+    };
+    const parsed = parseSettingValue(SETTING_SPECS.concurrencyLimit!, "3");
+    if (!parsed.ok) throw new Error("unreachable");
+    expect(() => writeSetting(withHook, "concurrencyLimit", parsed)).not.toThrow();
+    expect(withHook.current.concurrencyLimit).toBe(3);
+    expect(s.persisted).toEqual([["concurrencyLimit", 3]]);
+  });
+
+  it("a store without onWrite (existing callers/tests) is unaffected", () => {
+    const s = store();
+    const parsed = parseSettingValue(SETTING_SPECS.concurrencyLimit!, "4");
+    if (!parsed.ok) throw new Error("unreachable");
+    expect(() => writeSetting(s, "concurrencyLimit", parsed)).not.toThrow();
+    expect(s.current.concurrencyLimit).toBe(4);
   });
 });

@@ -379,6 +379,18 @@ export interface ReloadSettings {
 }
 
 /**
+ * L1 (agent-tool pool-full plan §2): top-level/nested Agent tool dispatch
+ * policy when the concurrency pool is already full. Default is `false`
+ * (reject immediately, no queueing); `true` restores the pre-L1 queue-wait
+ * behavior (subject to `budget.queueWaitS`'s own timeout). Workflow children
+ * (src/workflow/) and every other spawn path (consult, /task, resume) never
+ * read this setting — they always queue, unaffected by this toggle.
+ */
+export interface AgentDispatchSettings {
+  queueWhenFull: boolean;
+}
+
+/**
  * system prompt 稳定化（docs/dev/sysprompt-stable/plan.md v3.1 §3.2/§3.5）。S1 阶段
  * 只有 `wakeReplay` 一个键（U5）：通知唤醒轮（`triggerTurn: true` 的 sendMessage）
  * 不经过 `before_agent_start`，开头与用户轮不同 ⇒ 整前缀缓存来回失效；开启时把
@@ -397,6 +409,8 @@ export interface SystemPromptSettings {
 
 export interface AgentSettings {
   concurrencyLimit: number;
+  /** L1 (agent-tool pool-full plan §2): Agent tool pool-full dispatch policy. */
+  agent: AgentDispatchSettings;
   budget: DeadlineBudget;
   deliveryAttempts: number;
   deliveryBackoffMs: number;
@@ -522,6 +536,7 @@ export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
 
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
+  agent: { queueWhenFull: false },
   budget: DEFAULT_BUDGET,
   deliveryAttempts: 3,
   deliveryBackoffMs: 1_000,
@@ -677,6 +692,13 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   reload: { defer: true },
   systemPrompt: { wakeReplay: true, mode: "stable", adoptForeignForcedPrompt: false },
 };
+/** Parse the optional `agent` settings block (L1). Field-by-field fallback to defaults, never throws. */
+export function parseAgentDispatchSettings(input: unknown): AgentDispatchSettings {
+  const defaults = DEFAULT_SETTINGS.agent;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const queueWhenFull = (input as Record<string, unknown>).queueWhenFull;
+  return { queueWhenFull: typeof queueWhenFull === "boolean" ? queueWhenFull : defaults.queueWhenFull };
+}
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
   // 这一个键（其余键保留），回退下一层；DEFAULT_BUDGET.totalMs = 1_800_000 是
@@ -771,6 +793,7 @@ export function loadSettings(source: unknown): AgentSettings {
       typeof value.concurrencyLimit === "number" && value.concurrencyLimit >= 0
         ? value.concurrencyLimit
         : DEFAULT_SETTINGS.concurrencyLimit,
+    agent: parseAgentDispatchSettings(value.agent),
     budget: mergeBudget(budget),
     deliveryAttempts:
       typeof value.deliveryAttempts === "number"

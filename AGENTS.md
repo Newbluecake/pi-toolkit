@@ -81,6 +81,12 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   Spawn admission rejects a `provider/id` unknown to the **host** model registry (typos; suggestions via `suggestModelRefs`).
   It cannot catch a host registry gone stale after `models.json` changed on disk: child sessions rebuild `ModelRuntime`
   from disk, so that case fails at session start as `failed` with `explainPromptRejection`'s cause (never `cancelled`).
+  Pool-full admission (L1, `agent.queueWhenFull` default false): a non-slotless top-level/nested Agent-tool dispatch is
+  rejected immediately (no run/label/worktree ever created) once `SpawnService`'s own admission-time reservation
+  (`slotfulLabel`, never `SlotPool.stats.inUse` — that only updates deep inside the runtime adapter, after H2/worktree
+  creation) reaches `concurrencyLimit`; every successful `spawn()` call also returns `slots` (limit/inUse/free, same
+  slotless-exclusion rule as the real pool) for the Agent tool to surface. Workflow children/consult/resume/`/task`
+  never set `poolFullPolicy` and keep the legacy queue-and-`queueWaitMs`-timeout behavior.
 - `src/ask-user/` — merged interactive `ask_user` tool and TUI/RPC question components; emits `ask-user:activity` while an active TUI component receives input. `normalize.ts` repairs presentation-layer input instead of failing the call: explicit headers are always trimmed/width-capped (a blank one is dropped so the RPC answer key falls back to the question text), and missing headers are derived + de-duplicated in multi-question calls **only** (a single question never gets one invented, so its answer key stays the question text). Headers the model duplicated verbatim are still rejected — they collide as RPC answer keys.
 - `src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated — suppressed (never deferred) while subagents/background bash are still running, since a stopped main session with busy background is not task end.
 - `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →

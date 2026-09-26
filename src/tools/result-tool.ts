@@ -529,6 +529,20 @@ function formatOutcome(
     return body + trailer + exitSuffix;
   }
   const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
+  // L1 (agent-tool pool-full plan §3): a queue_timeout outcome carries no
+  // outcome.error (only diag/timeoutReason) — render the same
+  // self-explanatory text the notification's failReason uses (core's
+  // describeTimeout), instead of the bare enum value "queue_timeout", so a
+  // read of the terminal result explains itself without cross-referencing
+  // the state machine.
+  if (outcome.timeoutReason === "queue_timeout" && outcome.error === undefined) {
+    return (
+      `Subagent run failed: queue timeout — the concurrency pool was full; waited ${formatDuration(outcome.durationMs)} without getting a slot. ` +
+      "Wait for a run to finish and dispatch again, or raise concurrencyLimit (/agent settings)." +
+      trailer +
+      exitSuffix
+    );
+  }
   return `Subagent run ${outcome.status}: ${reason}${trailer}${exitSuffix}`;
 }
 

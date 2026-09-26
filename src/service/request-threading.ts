@@ -51,6 +51,7 @@ const NOT_THREADED = [
   "isolation", // consumed by the X1 worktree extension via H2, not threaded
   "schema", // consumed by the adapter to inject the StructuredOutput tool
   "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)
+  "poolFullPolicy", // consumed entirely by spawn() admission (L1) — decided and resolved before start()/RunnerSpec ever exist
 ] as const;
 
 type ClassifiedKeys = (typeof THREADED)[number] | (typeof NOT_THREADED)[number];

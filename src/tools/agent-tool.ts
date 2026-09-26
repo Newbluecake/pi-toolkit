@@ -5,6 +5,7 @@ import type { ErrorInfo, JsonSchema, RunId, RunOutcome, RunSnapshot, SpawnReques
 import { displayAgentType } from "../core/types.js";
 import type { ResolveExpertsResult } from "../consult/index.js";
 import { normalizeSchemaInput } from "../core/json-schema.js";
+import { formatSlots, type SlotsInfo } from "../core/format.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
@@ -19,8 +20,31 @@ import { truncateResultText } from "./result-text.js";
  * cannot call abort()/waitAll() on unrelated runs).
  */
 export interface NestedSpawnPort {
-  spawn(req: SpawnRequest): Promise<{ runId: RunId; label?: string } | { error: ErrorInfo }>;
+  spawn(req: SpawnRequest): Promise<
+    | {
+        runId: RunId;
+        label?: string;
+        /** L1 (agent-tool pool-full plan §2): mirrors SpawnService.spawn's `queued` field — see there. */
+        queued?: { position: number; runningCount: number; limit: number; queueWaitMs: number };
+        /** §5 (user follow-up): mirrors SpawnService.spawn's `slots` field. Optional here (unlike the real SpawnService, which always provides it) so existing test doubles that predate §5 keep compiling; a real dispatch always has it. */
+        slots?: SlotsInfo;
+      }
+    | { error: ErrorInfo }
+  >;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
+  /**
+   * P1 fix (todo #16 review): mirrors SpawnService.spawnAndWaitWithSlots —
+   * lets the nested (blocking) Agent tool render dispatch-time pool
+   * occupancy the same way the background path does. Optional so existing
+   * test doubles that predate this fix (and only implement spawn/
+   * spawnAndWait) keep compiling; spawnAndCollect falls back to plain
+   * spawnAndWait (with no slots line) when it's absent.
+   */
+  spawnAndWaitWithSlots?(req: SpawnRequest): Promise<{
+    outcome: RunOutcome;
+    slots: SlotsInfo;
+    queued?: { position: number; runningCount: number; limit: number; queueWaitMs: number };
+  }>;
 }
 
 /** Final-result details consumed by renderResult (and history replay). */
@@ -37,6 +61,8 @@ export interface AgentToolDetails {
   model?: string;
   toolCounts?: Record<string, number>;
   costUsd?: number;
+  /** §5 (user follow-up, agent-tool pool-full plan) / P1 fix (todo #16 review): concurrency pool occupancy at the moment of THIS dispatch — background spawns (spawnInBackground) AND the nested blocking path (spawnAndCollect) both populate it now. */
+  slots?: SlotsInfo;
 }
 
 /**
@@ -240,6 +266,15 @@ interface AgentToolCommonDeps {
    * `experts` passed ⇒ execute throws (never silently ignored, review-2 #11③).
    */
   resolveExperts?: (refs: readonly string[]) => ResolveExpertsResult;
+  /**
+   * L1 (agent-tool pool-full plan §2): pool-full dispatch policy —
+   * `settings.agent.queueWhenFull`, read fresh on every call (a `/reload` or
+   * live `/agent settings` edit takes effect immediately, same convention as
+   * `worktreeAvailable`/`resolveExperts`). Absent or returning false (the
+   * default) — reject immediately when the concurrency pool is full;
+   * `true` — restore the pre-L1 queue-and-wait behavior.
+   */
+  queueWhenFull?: () => boolean;
 }
 
 /**
@@ -279,7 +314,8 @@ const DESCRIPTION_HEAD =
   "(completed/failed/timed_out/aborted). ";
 const DESCRIPTION_TAIL =
   "Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
-  "Set schema to require a structured (schema-validated) result instead of free text. The effective label is reported in the tool result and should be used for @mentions.";
+  "Set schema to require a structured (schema-validated) result instead of free text. The effective label is reported in the tool result and should be used for @mentions. " +
+  "If the concurrency pool (concurrencyLimit) is already full, dispatch fails immediately with a config error listing the currently running labels — it does not queue by default (agent.queueWhenFull restores queueing).";
 
 const TOP_LEVEL_DESCRIPTION =
   DESCRIPTION_HEAD +
@@ -303,7 +339,7 @@ function nestedDescription(allowedTypes: readonly string[]): string {
     "it returns. Use steer_subagent to send a follow-up instruction to a still-running one. abort_subagent stops " +
     "a running subagent. " +
     DESCRIPTION_TAIL +
-    ` This is a nested delegation tool: subagent_type is restricted to [${allowedTypes.join(", ")}], every spawned run is slotless (does not consume the concurrency pool), and nesting depth is capped by the host (further attempts beyond the cap are rejected, not silently allowed).`
+    ` This is a nested delegation tool: subagent_type is restricted to [${allowedTypes.join(", ")}], every spawned run is slotless (does not consume the concurrency pool), and nesting depth is capped by the host (further attempts beyond the cap are rejected, not silently allowed). The result's trailing \`slots: …\` line reports the WHOLE pool's occupancy at the moment of this dispatch (same pool the top-level Agent tool draws from) — it is informational only, since this run itself never held a slot and its dispatch never blocks on pool capacity.`
   );
 }
 
@@ -365,6 +401,13 @@ function prepareSpawn(
     ...(params.isolation ? { isolation: params.isolation } : {}),
     ...(schema !== undefined ? { schema } : {}),
     ...(experts !== undefined && experts.refs.length > 0 ? { consultExperts: experts.refs } : {}),
+    // L1 (agent-tool pool-full plan §1/§2): both the top-level and nested
+    // Agent tool set this — it is a no-op for nested calls in practice
+    // (`forceSlotless` above always makes them slotless, and
+    // `poolFullPolicy` only matters for non-slotless requests), but wiring
+    // it uniformly keeps the "same rule for nested" invariant true even if a
+    // future nested caller is ever admitted without forceSlotless.
+    poolFullPolicy: deps.queueWhenFull?.() ? "queue" : "reject",
   };
   return { baseRequest, expertEcho };
 }
@@ -390,16 +433,34 @@ async function spawnInBackground(
   });
   if ("error" in spawned) throw new Error(spawned.error.message);
   const effectiveLabel = spawned.label ?? params.description;
+  // L1 (agent-tool pool-full plan §2): agent.queueWhenFull=true restores
+  // queueing instead of the default immediate reject — make that visible in
+  // the spawn-success message itself, since the run is NOT actually running
+  // yet (it queues behind `runningCount` others, bounded by the same
+  // budget.queueWaitS the real SlotPool enforces).
+  const queuedNote = spawned.queued
+    ? ` Queued: ${spawned.queued.runningCount}/${spawned.queued.limit} running, position ${spawned.queued.position}, max wait ${formatDuration(spawned.queued.queueWaitMs)}.`
+    : "";
   return {
     content: [
       {
         type: "text" as const,
-        text: `Subagent "${effectiveLabel}" started in background (run_id: ${spawned.runId}). You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with get_subagent_result(run_id: "${spawned.runId}") after the notification arrives.`,
+        text: `Subagent "${effectiveLabel}" started in background (run_id: ${spawned.runId}).${queuedNote} You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with get_subagent_result(run_id: "${spawned.runId}") after the notification arrives.`,
       },
       { type: "text" as const, text: labelMarker(effectiveLabel, spawned.runId, "running") },
+      // §5 (user follow-up, agent-tool pool-full plan): compact concurrency-
+      // pool readout on EVERY successful dispatch (AGENTS.md inline-marker
+      // convention — English tokens only). Real SpawnService always supplies
+      // `slots`; the field is optional on the port only for test doubles.
+      ...(spawned.slots ? [{ type: "text" as const, text: formatSlots(spawned.slots) }] : []),
       ...prepared.expertEcho,
     ],
-    details: { runId: spawned.runId, label: effectiveLabel, background: true } satisfies AgentToolDetails,
+    details: {
+      runId: spawned.runId,
+      label: effectiveLabel,
+      background: true,
+      ...(spawned.slots ? { slots: spawned.slots } : {}),
+    } satisfies AgentToolDetails,
   };
 }
 
@@ -410,10 +471,16 @@ async function spawnAndCollect(
   prepared: ReturnType<typeof prepareSpawn>,
   signal: AbortSignal | undefined,
 ) {
-  const outcome: RunOutcome = await deps.spawn.spawnAndWait({
-    ...prepared.baseRequest,
-    ...(signal ? { signal } : {}),
-  });
+  const req = { ...prepared.baseRequest, ...(signal ? { signal } : {}) };
+  // P1 fix (todo #16 review): the blocking path used to have no way to show
+  // dispatch-time pool occupancy at all — RunOutcome (spawnAndWait's return
+  // type) carries no such field, and it shouldn't (slots are a property of
+  // the dispatch moment, not of the finished run). spawnAndWaitWithSlots is
+  // the same wait, plus the slots/queued snapshot spawn() already computed;
+  // fall back to plain spawnAndWait (no slots line) for older test doubles.
+  const { outcome, slots } = deps.spawn.spawnAndWaitWithSlots
+    ? await deps.spawn.spawnAndWaitWithSlots(req)
+    : { outcome: await deps.spawn.spawnAndWait(req), slots: undefined as SlotsInfo | undefined };
   if (outcome.status !== "completed") {
     const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
     const tail = outcome.text?.trim();
@@ -428,6 +495,7 @@ async function spawnAndCollect(
       parts.push("The run failed before a session was created; there is nothing to resume.");
     }
     if (excerpt) parts.push(`Partial output (tail): ${excerpt}`);
+    if (slots) parts.push(formatSlots(slots));
     throw new Error(parts.join(" "));
   }
   const effectiveLabel = outcome.diag.label ?? params.description;
@@ -443,6 +511,10 @@ async function spawnAndCollect(
     content: [
       { type: "text" as const, text: resultText },
       { type: "text" as const, text: labelMarker(effectiveLabel, outcome.runId, outcome.status) },
+      // §5 parity with the background path (agent-tool pool-full plan): the
+      // nested run itself is slotless, so this reports the WHOLE pool's
+      // occupancy at dispatch time — see nestedDescription's caveat.
+      ...(slots ? [{ type: "text" as const, text: formatSlots(slots) }] : []),
       ...prepared.expertEcho,
     ],
     // pi usage accounting: the child session's spend rides on this tool
@@ -460,6 +532,7 @@ async function spawnAndCollect(
       ...(outcome.diag.toolCounts ? { toolCounts: outcome.diag.toolCounts } : {}),
       ...(outcome.usage ? { costUsd: outcome.usage.costUsd } : {}),
       ...(outcome.structuredResult !== undefined ? { structuredResult: outcome.structuredResult } : {}),
+      ...(slots ? { slots } : {}),
     } satisfies AgentToolDetails,
   };
 }

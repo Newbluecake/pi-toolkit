@@ -386,7 +386,14 @@ function finish(
         ...(d.label === undefined ? {} : { label: d.label }),
         ...((d.error?.message ?? d.timeoutReason) === undefined
           ? {}
-          : { failReason: d.error?.message ?? d.timeoutReason }),
+          : {
+              // L1 (agent-tool pool-full plan §3): queue_timeout gets a
+              // self-explanatory failReason (concurrency pool full + wait +
+              // suggestion) instead of the bare enum value — every other
+              // reason is untouched (byte-identical to before).
+              failReason:
+                d.error?.message ?? (d.timeoutReason === "queue_timeout" ? describeTimeout(d, at) : d.timeoutReason),
+            }),
         // bash-timeout-grace plan §3.7/§3.8 (P0b, frozen): mirrors d.exitFacts
         // (already folded into outcome.diag/snapshot.diag above via `diag: d`)
         // so a delivered notice can render the same exit-time bash job facts

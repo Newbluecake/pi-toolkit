@@ -1693,6 +1693,10 @@ export function buildSessionStack(
       pi.events.emit(event.status === "completed" ? "subagent:completed" : "subagent:failed", event),
     nestedSpawn: () => spawnRef.current,
     resultMaxChars: () => settings.resultMaxChars,
+    // L1 (agent-tool pool-full plan §2): forwarded to the nested Agent tool's
+    // `queueWhenFull` dep, read fresh so a live /agent settings edit applies
+    // immediately (same convention as resultMaxChars above).
+    queueWhenFull: () => settings.agent.queueWhenFull,
     onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
     worktreeDiag,
     resolveModelHint: models.resolveHint,

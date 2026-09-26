@@ -87,6 +87,14 @@ export interface RuntimeAdapterDeps {
   nestedSpawn?: () => NestedSpawnPort | undefined;
   /** Live cap for nested Agent blocking result text. */
   resultMaxChars?: () => number;
+  /**
+   * L1 (agent-tool pool-full plan §2): pool-full dispatch policy for the
+   * nested Agent tool — forwarded verbatim to `createAgentTool`'s
+   * `queueWhenFull` dep (see agent-tool.ts). Practically a no-op today
+   * (nested calls are always `forceSlotless`), wired only to keep "same rule
+   * for nested" true if that ever changes.
+   */
+  queueWhenFull?: () => boolean;
   /** X3: forwarded to RunnerDeps.onChildAbort (see runtime/runner.ts) — called whenever this run's cancellation is triggered, so the caller can cascade-abort its children. */
   onChildAbort?: (runId: RunId, cause: StopCause) => void;
   /** set_model: fuzzy model-hint resolver (same instance spawn admission uses — stack.ts Stack.models). */
@@ -641,6 +649,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 allowedTypes: spec.type.canSpawn,
                 forceSlotless: true,
                 ...(deps.resultMaxChars ? { resultMaxChars: deps.resultMaxChars } : {}),
+                ...(deps.queueWhenFull ? { queueWhenFull: deps.queueWhenFull } : {}),
                 // consult §4.2: nested dispatchers resolve `experts` with the
                 // same dispatch-time resolver as the top-level Agent tool
                 // (same trust level as `resume`, plan §5.2); agent-tool

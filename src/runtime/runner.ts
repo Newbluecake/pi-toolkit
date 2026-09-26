@@ -604,6 +604,31 @@ export class RuntimeRunner implements Runner {
         });
         return state.outcome!;
       }
+      // L1 (agent-tool pool-full plan §3, real-timer bug): the wrapped
+      // pool.acquire() promise can resolve with its OWN {ok:false, reason}
+      // value instead of guard() itself timing out/cancelling — real timers
+      // process the pool's queueWaitMs macrotask (and the promise-resolution
+      // microtask that follows it) strictly before guard()'s own, later-armed
+      // setTimer(ms) macrotask even gets a turn, so guard sees "the promise
+      // resolved" (acq.ok===true) carrying the pool's failure as its value.
+      // FakeClock-driven tests never observe this (advance() drains same-tick
+      // timers synchronously in registration order, so guard's own timer
+      // "wins" there instead — see tests/integration/timeout-grace-wiring.test.ts
+      // V19 vs tests/runtime/queue-timeout-race.test.ts). Previously this fell
+      // through to the `throw new Error("slot acquisition returned no ticket")`
+      // below, which the outer catch turned into an illegal prompt_settled
+      // dispatch (state.phase was still "queue_wait", so state.outcome stayed
+      // undefined) and start()'s own catch re-synthesized a durationMs:0
+      // failure whose error.message was the raw "Cannot read properties of
+      // undefined (reading 'runId')" crash from spawn-service's finish().
+      if (!acq.value.ok) {
+        dispatch({
+          kind: "slot_denied",
+          at: this.d.clock.now(),
+          reason: acq.value.reason === "queue_timeout" ? "queue_timeout" : "aborted",
+        });
+        return state.outcome!;
+      }
       if (!("ticket" in acq.value)) throw new Error("slot acquisition returned no ticket");
       ticket = acq.value.ticket;
       dispatch({ kind: "slot_acquired", at: this.d.clock.now() });

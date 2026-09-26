@@ -152,7 +152,14 @@ const WORKFLOW_BUDGET_SPECS: Record<string, SettingSpec> = Object.fromEntries(
 
 export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...BUDGET_SPECS,
-  concurrencyLimit: count("concurrencyLimit", 0, "Max concurrent subagent runs"),
+  concurrencyLimit: { ...count("concurrencyLimit", 0, "Max concurrent subagent runs"), live: true },
+  "agent.queueWhenFull": {
+    ...bool(
+      "agent.queueWhenFull",
+      "Pool-full Agent dispatch policy: false (default) rejects immediately; true restores queue-and-wait (budget.queueWaitS)",
+    ),
+    live: true,
+  },
   maxNestedDepth: count("maxNestedDepth", 0, "Max nested delegation depth"),
   rememberAgents: bool("rememberAgents", "Remember the agent registry across sessions"),
   fleetWidget: bool("fleetWidget", "Pin the live agent tree above the editor"),
@@ -667,6 +674,18 @@ export interface SettingsStore {
   persist: (dottedKey: string, value: unknown) => string | undefined;
   /** Settings file path, shown in messages. */
   path: string;
+  /**
+   * L1 (agent-tool pool-full plan §4): fired after `writeSetting`/`resetSetting`
+   * mutate `current` in place, with the storage key and the new *live*
+   * (millisecond-domain for durations) value — the seam a caller uses to push
+   * a change into a running component that caches the value at construction
+   * (e.g. `concurrencyLimit` → `SlotPool.setLimit`, since the pool captures
+   * the limit once in its constructor and `settings.concurrencyLimit` being
+   * mutated in place does not by itself reach it). Absent ⇒ no such component
+   * is wired (test doubles, budgetOnly editor instances); best-effort only,
+   * never throws back into the write path.
+   */
+  onWrite?: (key: string, liveValue: unknown) => void;
 }
 
 /** Listing order, optionally scoped to the `/agent budget` alias. */
@@ -767,6 +786,12 @@ export function writeSetting(
   const spec = SETTING_SPECS[key]!;
   const previous = formatSettingValue(currentOf(store.current, spec));
   setPath(store.current as unknown as Record<string, unknown>, spec.path, parsed.live);
+  try {
+    store.onWrite?.(key, parsed.live);
+  } catch {
+    // Best effort only (mirrors persist's own error containment below) — the
+    // in-memory settings change is kept regardless of a downstream wiring bug.
+  }
   const persistError = store.persist(key, parsed.stored);
   return {
     key,
@@ -781,7 +806,13 @@ export function writeSetting(
 export function resetSetting(store: SettingsStore, key: string): SettingWriteResult {
   const spec = SETTING_SPECS[key]!;
   const previous = formatSettingValue(currentOf(store.current, spec));
-  setPath(store.current as unknown as Record<string, unknown>, spec.path, getPath(DEFAULT_SETTINGS, spec.path));
+  const liveDefault = getPath(DEFAULT_SETTINGS, spec.path);
+  setPath(store.current as unknown as Record<string, unknown>, spec.path, liveDefault);
+  try {
+    store.onWrite?.(key, liveDefault);
+  } catch {
+    // Best effort only — see writeSetting's identical guard.
+  }
   const persistError = store.persist(key, undefined);
   return {
     key,

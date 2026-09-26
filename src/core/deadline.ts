@@ -189,6 +189,18 @@ export function describeTimeout(diag: RunDiagnostics, killedAt: Millis): string 
   }
   if (reason === "compaction") return "compaction exceeded budget.compactionS";
   if (reason === "no_first_event") return "no first model event (budget.firstEventS)";
+  // L1 (agent-tool pool-full plan §3): a run that never left queue_wait —
+  // waited is measured from enqueuedAt (queueWaitMs is armed at "enqueued",
+  // before any slot/session resource exists), not phaseEnteredAt, since both
+  // are set at the same moment for this phase anyway and enqueuedAt is the
+  // semantically correct anchor.
+  if (reason === "queue_timeout") {
+    const waited = Math.max(0, killedAt - (diag.enqueuedAt ?? diag.createdAt));
+    return (
+      `queue timeout: concurrency pool was full — waited ${formatDuration(waited)} without a slot. ` +
+      "Wait for a run to finish and dispatch again, or raise concurrencyLimit (/agent settings)."
+    );
+  }
   return "deadline exceeded";
 }
 

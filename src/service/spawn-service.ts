@@ -4,6 +4,7 @@ import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
 import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
 import { toErrorInfo } from "../core/errors.js";
+import { formatSlots, slotsInfo, type SlotsInfo } from "../core/format.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import { formatModelCandidates, formatUnknownModelError, type ModelCandidate } from "../config/model-hint.js";
 import type { QuotaGateVerdict } from "../quota/gate.js";
@@ -63,8 +64,31 @@ export type BoundedWaitResult = { kind: "settled"; outcome: RunOutcome } | { kin
 export type WorktreeWaitResult =
   { kind: "settled"; disposition: WorktreeDisposal } | { kind: "none" } | { kind: "timeout" } | { kind: "disposed" };
 export interface SpawnService {
-  spawn(req: SpawnRequest): Promise<{ runId: RunId; label?: string } | { error: ErrorInfo }>;
+  spawn(req: SpawnRequest): Promise<
+    | {
+        runId: RunId;
+        label?: string;
+        /** §5 (user follow-up, agent-tool pool-full plan): current pool occupancy on EVERY successful dispatch, slotless calls included — same inclusion rule as SlotPool itself (consult forks / nested Agent excluded, workflow children included). */
+        slots: SlotsInfo;
+        /** L1 (agent-tool pool-full plan §2): present only when this (non-slotless) request was admitted while the conceptual pool was already at capacity — i.e. it queues behind `runningCount` others, `limit`-wide, at 1-indexed `position`, bounded by `queueWaitMs` (the same budget the real SlotPool enforces). */
+        queued?: { position: number; runningCount: number; limit: number; queueWaitMs: number };
+      }
+    | { error: ErrorInfo }
+  >;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
+  /**
+   * P1 fix (todo #16 review): same dispatch/wait semantics as spawnAndWait,
+   * but also returns the dispatch-time `slots`/`queued` snapshot so a
+   * blocking caller (the nested Agent tool) can render pool occupancy
+   * without RunOutcome carrying a field that only makes sense at dispatch
+   * time. Optional so pre-existing SpawnService test doubles keep
+   * compiling; a real caller falls back to plain spawnAndWait when absent.
+   */
+  spawnAndWaitWithSlots?(req: SpawnRequest): Promise<{
+    outcome: RunOutcome;
+    slots: SlotsInfo;
+    queued?: { position: number; runningCount: number; limit: number; queueWaitMs: number };
+  }>;
   waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
   expectsAck(runId: RunId): boolean;
   /**
@@ -118,6 +142,14 @@ export interface SpawnService {
    * cascade implementation, never a second one (OS1).
    */
   stopChildrenOf(parentId: RunId, cause?: StopCause): Promise<{ stopped: RunId[]; pending: RunId[] }>;
+  /**
+   * L1 (agent-tool pool-full plan §4): live concurrencyLimit update —
+   * `/agent settings` writing `concurrencyLimit` calls this (via
+   * `SettingsStore.onWrite`) so the change takes effect immediately instead
+   * of requiring `/reload`. Forwards to `SlotPool.setLimit` (optional on the
+   * port; a pool that doesn't implement it is a no-op here, never a throw).
+   */
+  setConcurrencyLimit(n: number): void;
 }
 export interface SpawnServiceDeps {
   types: AgentTypeRegistry;
@@ -189,6 +221,18 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const stopping = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
   const resumeLocks = new Set<string>();
+  // L1 (agent-tool pool-full plan §1): every currently ADMITTED (from the
+  // instant spawn() decides to proceed, until finish()) non-slotless run,
+  // keyed to its effective label. This is deliberately NOT `deps.pool.stats`
+  // (which only reflects runs that have actually reached the real
+  // SlotPool.acquire() call — deep inside the runtime adapter, AFTER H2/
+  // worktree creation): admission decisions must be atomic against
+  // concurrent same-tick spawn() calls, and the real pool only updates
+  // asynchronously, well after this function has already returned. Every
+  // non-slotless request — reject-policy or queue-policy alike — is
+  // tracked here so a reject-policy admission check sees queue-policy
+  // occupants too (workflow children, consult forks, resume, /task).
+  const slotfulLabel = new Map<RunId, string>();
   // D5a (workflow-worktree plan): per-run effective reapMs for worktree waits,
   // tombstoned (expiresAt) rather than FIFO-capped so a slow, still-live run
   // never loses its own entry because unrelated runs churned through the map.
@@ -249,6 +293,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     stopping.delete(outcome.runId);
     claimedRunIds.delete(outcome.runId);
     nesting.delete(outcome.runId);
+    slotfulLabel.delete(outcome.runId); // L1: release the conceptual slot regardless of admission policy
     const parent = parentOf.get(outcome.runId);
     if (parent !== undefined) {
       parentOf.delete(outcome.runId);
@@ -415,6 +460,32 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // effects: no runId, no index writes, no H2, no worktree, no slot.
       if (req.deadlineAt !== undefined && req.deadlineAt <= now())
         return { error: { kind: "config", message: "deadlineAt already expired", retryable: false } };
+      // L1 (agent-tool pool-full plan §1): reject-policy admission check —
+      // zero side effects, runs before type/model/quota/nesting checks and
+      // strictly before ANY mutable write, so a rejected call never creates a
+      // run, a label, a nesting entry, or (much later, inside the runtime
+      // adapter's H2 hook) a worktree. `slotfulLabel` — not `deps.pool.stats`
+      // — is the atomicity anchor: multiple spawn() calls dispatched in the
+      // same tick run their synchronous bodies back-to-back with no
+      // interleaving (no `await` precedes this check), so each sees every
+      // prior call's reservation even though the real SlotPool only commits
+      // a slot much later (deep inside the runtime adapter, after H2).
+      if (req.slotless !== true && req.poolFullPolicy === "reject") {
+        const limit = deps.pool.stats?.limit ?? 0;
+        if (limit > 0 && slotfulLabel.size >= limit) {
+          const runningLabels = [...slotfulLabel.values()].slice(0, 10);
+          return {
+            error: {
+              kind: "config",
+              message:
+                `agent pool is full: ${formatSlots(slotsInfo(limit, slotfulLabel.size))}` +
+                (runningLabels.length ? ` (${runningLabels.join(", ")})` : "") +
+                ". Wait for one to finish and dispatch again, or raise concurrencyLimit (/agent settings).",
+              retryable: true,
+            },
+          };
+        }
+      }
       // consult (plan §16): the "no type" bypass for `consult("main", …)` —
       // never touches `deps.types` at all when it fires, so it has zero
       // effect on the registry, `list()`, or a real type of the same name
@@ -642,6 +713,47 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       labels.set(effective, target);
       deps.onLabel?.(effective, target, { resumed: labelAction === "repoint" });
       resolvedReq = { ...resolvedReq, label: effective };
+      // L1 (agent-tool pool-full plan §1/§2): reservation + queued-position
+      // bookkeeping for every non-slotless request, computed BEFORE this run
+      // is added to `slotfulLabel` (so `.size` below counts only runs AHEAD
+      // of it). Reject-policy calls that reached this point already know the
+      // pool wasn't full (the early check above rejected it otherwise);
+      // queue-policy calls (the default for everyone except the top-level/
+      // nested Agent tool — workflow children, consult forks, /task, resume)
+      // can still be "queued" in this conceptual sense, which is exactly what
+      // §2's "already queued: N/N running, position k" message is built from.
+      let queued: { position: number; runningCount: number; limit: number; queueWaitMs: number } | undefined;
+      const limit = deps.pool.stats?.limit ?? 0;
+      if (req.slotless !== true) {
+        if (limit > 0 && slotfulLabel.size >= limit) {
+          queued = {
+            position: slotfulLabel.size - limit + 1,
+            runningCount: slotfulLabel.size,
+            limit,
+            queueWaitMs: budget.queueWaitMs,
+          };
+        }
+        slotfulLabel.set(runId, effective);
+      }
+      // §5 (user follow-up): every SUCCESSFUL dispatch — slotless (nested
+      // Agent, consult) included — reports the pool's current occupancy, so
+      // the caller sees ambient concurrency even for a call that itself never
+      // consumes a slot. Computed AFTER the reservation above, so a
+      // non-slotless call's own slot is reflected in its own `inUse`.
+      //
+      // P1 fix (todo #16 review): `slotfulLabel.size` is the ATOMIC ADMISSION
+      // count — every non-slotless request that won admission, whether or
+      // not it has actually acquired a real SlotPool slot yet (queue-policy
+      // requests admitted past the limit sit in `slotfulLabel` too, so a
+      // same-tick burst can't over-admit). That is the right count for the
+      // pool-full/queue DECISION above, but it is the wrong count to DISPLAY
+      // as `inUse`: with queueWhenFull=true a still-queued request was
+      // showing up as "in use" even though it holds no real slot, producing
+      // impossible readouts like `slots: 2/1 in use, 0 free`. `slotsInfo`
+      // now caps the displayed `inUse` at `limit` and reports the overflow
+      // separately as `queued`, so the two numbers together always add up to
+      // the true admitted count while `inUse` never exceeds `limit`.
+      const slots: SlotsInfo = slotsInfo(limit, slotfulLabel.size, Math.max(0, slotfulLabel.size - limit));
       // consult (plan §4.4, review-2 #6): a fork run's nesting entry carries
       // NO canSpawn — a consulted expert must not delegate further. Together
       // with the adapter not injecting the nested Agent tool and pi's
@@ -662,7 +774,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         deps.onSpawnEdge?.("root", runId);
       }
       void start(resolvedReq, runId, config, budget, lockKeys, depth, admittedModel);
-      return { runId, label: effective };
+      return { runId, label: effective, slots, ...(queued ? { queued } : {}) };
     },
     async spawnAndWait(req) {
       const started = await service.spawn({ ...req, expectAck: true });
@@ -682,6 +794,36 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         // Best effort only; consumption must not alter the returned outcome.
       }
       return result;
+    },
+    // P1 fix (todo #16 review, agent-tool.ts nested blocking path): identical
+    // to spawnAndWait, but ALSO hands back the dispatch-time `slots` snapshot
+    // (and `queued`, if the call itself queued) that `spawn()` already
+    // computed — deliberately not folded into RunOutcome (a core type that
+    // outlives this one call site; slots are a dispatch-moment reading, not
+    // a property of the finished run) and deliberately not re-derived after
+    // the wait (the pool's occupancy at completion time is a different,
+    // less useful number — the caller wants to know what the pool looked
+    // like WHEN it dispatched). spawnAndWait itself is left untouched since
+    // it is a stable, widely-used port (goal/hook.ts, index.ts forwarding,
+    // etc.) whose return type (`Promise<RunOutcome>`) must not change.
+    async spawnAndWaitWithSlots(req) {
+      const started = await service.spawn({ ...req, expectAck: true });
+      if ("error" in started) throw new Error(started.error.message);
+      const result = await new Promise<RunOutcome>((resolve) => {
+        const done = outcomes.get(started.runId);
+        if (done) resolve(done);
+        else {
+          const set = waits.get(started.runId) ?? new Set();
+          set.add(resolve);
+          waits.set(started.runId, set);
+        }
+      });
+      try {
+        deps.onOutcomeAcked?.(result);
+      } catch {
+        // Best effort only; consumption must not alter the returned outcome.
+      }
+      return { outcome: result, slots: started.slots, ...(started.queued ? { queued: started.queued } : {}) };
     },
     async waitOutcome(runId, waitMs) {
       const ack = (outcome: RunOutcome) => {
@@ -855,6 +997,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     getLabel: (label) => labels.get(label),
     resolveRun,
     resolveResume,
+    setConcurrencyLimit(n) {
+      deps.pool.setLimit?.(n);
+    },
     snapshots: () => [...records.values()],
   };
   return service;

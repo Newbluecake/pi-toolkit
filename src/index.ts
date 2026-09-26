@@ -348,6 +348,10 @@ export default function activate(pi: ExtensionAPI): void {
       // consult tool (§4.2/§5.2), but it CAN authorize a whitelist for a
       // dispatched child (agent-tool.ts throws on failure to resolve).
       resolveExperts: (refs) => requireStack(holder).consult.resolveExperts(refs),
+      // L1 (agent-tool pool-full plan §2): read fresh on every call so a
+      // live `/agent settings` edit (or /reload) takes effect immediately,
+      // same convention as worktreeAvailable/resolveExperts above.
+      queueWhenFull: () => settings.agent.queueWhenFull,
     }),
   );
   pi.registerTool(
@@ -572,6 +576,17 @@ export default function activate(pi: ExtensionAPI): void {
         current: settings,
         persist: (key, value) => persistSettingOverride(key, value),
         path: defaultSettingsPath(),
+        // L1 (agent-tool pool-full plan §4): concurrencyLimit is the one
+        // exception — the SlotPool captures it once in its constructor
+        // (stack.ts), so mutating settings.concurrencyLimit in place does not
+        // by itself reach an already-built pool. Forward the write to the
+        // CURRENT session's real SpawnService (never the forwardSpawn shim,
+        // which just re-reads holder itself) so /agent settings takes effect
+        // immediately instead of requiring /reload. Absent stack (no active
+        // session yet) is a silent no-op — there is nothing live to update.
+        onWrite: (key, value) => {
+          if (key === "concurrencyLimit" && typeof value === "number") holder.current?.spawn.setConcurrencyLimit(value);
+        },
       },
       reload: {
         arm: (n) => reloadRef.current?.arm(n),
@@ -816,6 +831,7 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     stopChildrenOf: (parentId, cause) => requireStack(holder).spawn.stopChildrenOf(parentId, cause),
     resolveRun: (handle) => requireStack(holder).spawn.resolveRun(handle),
     resolveResume: (handle) => requireStack(holder).spawn.resolveResume(handle),
+    setConcurrencyLimit: (n) => requireStack(holder).spawn.setConcurrencyLimit(n),
   };
 }
 function forwardResolveRun(holder: { current?: Stack }) {
