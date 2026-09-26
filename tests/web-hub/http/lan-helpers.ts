@@ -295,13 +295,25 @@ export function lanPostJson(
 /** Seed a LAN user (bypassing the (LI/LD-owned) admin passwd flow, which is not part of LC's scope). */
 export function seedLanUser(
   store: FakeLanStore,
-  opts: { id?: number; username: string; password: string; initial?: boolean },
+  opts: {
+    id?: number;
+    username: string;
+    password: string;
+    initial?: boolean;
+    /** §5.1 "读取校验" review-fix tests (LC #2): seed a corrupt KDF params row (e.g. `n` not a
+     * power of 2) without ever feeding it to real scrypt — mirrors `tests/web-hub/hub/lan-auth.
+     * test.ts`'s local `seedUser` override. */
+    kdfOverride?: Partial<{ n: number; r: number; p: number }>;
+  },
 ): void {
   const salt = Buffer.alloc(16, 7);
-  const n = 16384;
-  const r = 8;
-  const p = 1;
-  const hash = scryptSync(opts.password, salt, 32, { N: n, r, p, maxmem: 128 * n * r + 1024 * 1024 });
+  const n = opts.kdfOverride?.n ?? 16384;
+  const r = opts.kdfOverride?.r ?? 8;
+  const p = opts.kdfOverride?.p ?? 1;
+  const validParams = Number.isSafeInteger(n) && n > 0 && (n & (n - 1)) === 0 && 128 * n * r <= 32 * 1024 * 1024;
+  const hash = validParams
+    ? scryptSync(opts.password, salt, 32, { N: n, r, p, maxmem: 128 * n * r + 1024 * 1024 })
+    : Buffer.alloc(32, 1); // corrupt params never actually get fed to scrypt for real
   store.seedUser({
     id: opts.id ?? 1,
     username: opts.username,

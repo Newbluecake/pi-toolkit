@@ -82,6 +82,7 @@ function warningLine(w: string, counts: LanLimiterCounts | undefined): string | 
   if (w === "initial-password-residue") return "警告：旧初始密码在磁盘上可能仍有残留，详见 hub.log。";
   if (w === "db-restarting") return "数据库子进程正在重启。";
   if (w === "proxy-xff-warnings") return "警告：最近收到过不受信任的转发头，详见 hub.log。";
+  if (w === "db-invalid:kdf") return "警告：检测到损坏的密码 KDF 参数，相关账号登录将失败，详见 hub.log。";
   if (w.startsWith("hostname-omitted:") || w.startsWith("invalid-extra-host:")) return undefined; // rendered from omitted/invalidExtraHosts directly
   return undefined; // unknown/forward-compat warning token: silently ignore, never throw
 }

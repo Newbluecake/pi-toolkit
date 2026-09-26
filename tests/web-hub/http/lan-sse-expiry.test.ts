@@ -109,3 +109,75 @@ describe("LAN SSE 55s expiry recheck tick (plan §4.2; LC review fix, lan-plan.m
     }
   });
 });
+
+describe('LAN SSE absolute-expiry local timer (plan §4.2 "另有本地硬计时"; LC review fix, task #1)', () => {
+  it("DB unavailable for the connection's whole remaining lifetime still force-closes it at its own absoluteExpiresAt", async () => {
+    vi.useFakeTimers();
+    const h = await startLan();
+    try {
+      seedLanUser(h.store, { username: "alice", password: "correct-horse-battery" });
+      const login = await lanPostJson(h.port, "/api/login", { username: "alice", password: "correct-horse-battery" });
+      const cookie = (login.headers["set-cookie"]?.[0] ?? "").split(";")[0]!;
+      const sidHash = sidHashFromCookie(cookie);
+
+      // Shrink this session's absolute ceiling so the test doesn't need to fast-forward through
+      // 7 real days' worth of 55s/60s ticks — the local timer only cares about the delta between
+      // `absoluteExpiresAt` and `now` at the instant the SSE connection opens.
+      (h.store.sessionsBySidHash as Map<string, { absoluteExpiresAt: number }>).get(sidHash)!.absoluteExpiresAt =
+        h.clock.now() + 5_000;
+
+      const sse = await openSse(h.port, cookie);
+      await sse.waitFor("hello");
+
+      // The db goes down *after* the connection opened (so the open itself still saw the 7d/
+      // shrunk ceiling) and stays down for the rest of the test — the 55s recheck tick can never
+      // revoke it; only the local absolute-expiry timer can.
+      h.store.touchSession = async () => {
+        throw new Error("boom: db unavailable");
+      };
+
+      h.clock.advance(6_000);
+      await vi.advanceTimersByTimeAsync(6_000);
+
+      const authFrame = await sse.waitFor("auth");
+      expect(authFrame.data).toEqual({ reason: "expired" });
+      sse.close();
+    } finally {
+      await h.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it("closing an SSE connection normally clears its absolute-expiry timer (no leaked unref timer)", async () => {
+    const h = await startLan();
+    try {
+      seedLanUser(h.store, { username: "alice", password: "correct-horse-battery" });
+      const login = await lanPostJson(h.port, "/api/login", { username: "alice", password: "correct-horse-battery" });
+      const cookie = (login.headers["set-cookie"]?.[0] ?? "").split(";")[0]!;
+
+      const setSpy = vi.spyOn(global, "setTimeout");
+      const sse = await openSse(h.port, cookie);
+      await sse.waitFor("hello");
+
+      const sevenDaysMs = 7 * 24 * 3_600_000;
+      const absExpiryCallIndex = setSpy.mock.calls.findIndex((args) => {
+        const delay = args[1];
+        return typeof delay === "number" && Math.abs(delay - sevenDaysMs) < 1_000;
+      });
+      expect(absExpiryCallIndex).toBeGreaterThanOrEqual(0);
+      const timerHandle = setSpy.mock.results[absExpiryCallIndex]!.value;
+
+      const clearSpy = vi.spyOn(global, "clearTimeout");
+      sse.close();
+      // Let the real socket 'close' event (driven by the actual OS/libuv event loop, independent
+      // of any fake timers) propagate to the server side.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(clearSpy.mock.calls.some((call) => call[0] === timerHandle)).toBe(true);
+
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
