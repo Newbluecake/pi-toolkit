@@ -193,22 +193,11 @@ describe("startHub: lanConfigError / lanAssembly stub (plan §1.4.2, §1.4.3, co
     expect(existsSync(paths.socketPath)).toBe(false);
   });
 
-  it("a valid config.lan with the default (stub) lanAssembly ⇒ startHub rejects E_NOT_IMPLEMENTED:LD and cleans up", async () => {
-    const home = tmp.make("wh-lanconfig-ld-");
-    const uid = process.getuid?.() ?? 0;
-    await expect(
-      startHub(
-        { ...config({ home }), lan: { port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
-        fakeFrontend(),
-        { uid },
-      ),
-    ).rejects.toThrow("E_NOT_IMPLEMENTED:LD");
-    const paths = resolveHubPaths({ home, uid });
-    expect(existsSync(paths.socketPath)).toBe(false); // singleton released on failure
-    expect(existsSync(paths.hubJson)).toBe(false); // hub.json is never written before the LD step
-    // restartable afterwards (proves the failed attempt didn't leak the socket/lock)
-    const hub = await startHub(config({ home }), fakeFrontend(), { uid });
-    if ("exists" in hub) throw new Error("unexpected exists");
-    hubs.push(hub);
-  });
+  // S1-W3 LD filled in `defaultLanAssembly.build` (real store/kdf/limiter/admission/hosts
+  // wiring — see hub-lan.test.ts) — the case that used to assert "a valid config.lan with
+  // the default (stub) lanAssembly ⇒ startHub rejects E_NOT_IMPLEMENTED:LD" no longer
+  // holds. Same convention this file's sibling `contract/stubs.test.ts` already used for
+  // LP's/LC's own stubs (deleted once filled in, not left to bit-rot into a false
+  // assertion). An *unrecognized* `lanAssembly.build()` rejection (e.g. an injected stub)
+  // still fails `startHub` the same way — covered by `hub-lan.test.ts`'s equivalent case.
 });

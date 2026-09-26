@@ -21,16 +21,17 @@
  */
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import type { LanStatus } from "../protocol/lan.js";
+import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
 import { PROTO } from "../protocol/version.js";
+import { createAdminHandler } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { createHistoryService } from "./history.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
 import { withDeadline, withSignal, createScope, type Scope } from "./lifecycle.js";
 import { createHubLog } from "./log.js";
-import { defaultLanAssembly } from "./lan-assembly.js";
+import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
 import type {
   FrontendFactory,
   HttpFrontend,
@@ -125,7 +126,32 @@ export async function startHub(
     const history = createHistoryService({ registry, log });
     cleanup.push(async () => history.dispose());
     let httpPort = 0;
-    const agentServer = createAgentServer(owner.server, { registry, config, log, now, httpPort: () => httpPort });
+    // Admin control plane (plan §8, S1-W3 LD): constructed once, ahead of `lanDeps`/`fe`/`close`
+    // (all still `undefined`/not-yet-declared at this point) — every getter below is a closure
+    // over this function's own `let`/`const` bindings, read lazily whenever an actual `lan_req`/
+    // `hub_ctl` frame arrives (always well after every one of them has settled; `close` is a
+    // hoisted function declaration in this same scope, so referencing it here before its textual
+    // definition is safe). This is what lets `hello_ack.caps` include `"ctl.v1"` unconditionally
+    // and `"lan.v1"` once `config.lan` is set, regardless of whether LAN assembly ever succeeds.
+    const admin = createAdminHandler({
+      log,
+      hasLan: () => config.lan !== undefined,
+      store: () => lanDeps?.store,
+      kdf: () => lanDeps?.kdf,
+      limiter: () => lanDeps?.limiter,
+      lan: () => fe.lan,
+      lanStatus: () => hubJson.current()?.lan,
+      shutdown: (reason) => void close(reason),
+      now,
+    });
+    const agentServer = createAgentServer(owner.server, {
+      registry,
+      config,
+      log,
+      now,
+      httpPort: () => httpPort,
+      admin,
+    });
     cleanup.push(() => agentServer.close());
 
     const info: HubInfo = {
@@ -138,18 +164,35 @@ export async function startHub(
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
 
     let lanDeps: LanFrontendDeps | undefined;
+    // §4.1's recognized db-open failures degrade to loopback-only (never fail the whole hub) —
+    // `LanAssemblyOffError` is `defaultLanAssembly`'s (LD's own file) way of saying exactly that;
+    // any other rejection (a real bug, an injected test double's `E_NOT_IMPLEMENTED:LD`, …) still
+    // propagates to this function's own outer `catch` below and fails `startHub` as before.
+    let lanAssemblyOff: { reason: LanOffReason; detail?: string } | undefined;
     if (config.lan !== undefined) {
-      lanDeps = await withSignal(
-        (deps.lanAssembly ?? defaultLanAssembly).build({
-          cfg: config.lan,
-          paths,
-          log,
-          now,
-          scope: rootScope.child(),
-          onStatus: (s) => hubJson.patchLan(s),
-        }), // ⑤
-        startup.signal,
-      );
+      try {
+        lanDeps = await withSignal(
+          (deps.lanAssembly ?? defaultLanAssembly).build({
+            cfg: config.lan,
+            paths,
+            log,
+            now,
+            scope: rootScope.child(),
+            onStatus: (s) => hubJson.patchLan(s),
+          }), // ⑤
+          startup.signal,
+        );
+      } catch (err) {
+        if (err instanceof LanAssemblyOffError) {
+          log.warn("web-hub: LAN assembly reported an off status, starting loopback-only", {
+            reason: err.reason,
+            detail: err.detail,
+          });
+          lanAssemblyOff = { reason: err.reason, ...(err.detail === undefined ? {} : { detail: err.detail }) };
+        } else {
+          throw err;
+        }
+      }
     }
 
     const fe = frontend({
@@ -170,9 +213,15 @@ export async function startHub(
     const initialLan: LanStatus | undefined =
       deps.lanConfigError !== undefined
         ? { state: "off", reason: "bad-config", detail: deps.lanConfigError.detail }
-        : fe.lan !== undefined
-          ? { state: "starting" }
-          : undefined;
+        : lanAssemblyOff !== undefined
+          ? {
+              state: "off",
+              reason: lanAssemblyOff.reason,
+              ...(lanAssemblyOff.detail === undefined ? {} : { detail: lanAssemblyOff.detail }),
+            }
+          : fe.lan !== undefined
+            ? { state: "starting" }
+            : undefined;
     hubJson.write({
       pid: process.pid,
       nonce: randomBytes(12).toString("base64url"),
