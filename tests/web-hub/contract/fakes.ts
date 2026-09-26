@@ -7,7 +7,7 @@
  * they exist purely so W2's LS/LC/LD packages can write tests against the
  * frozen port shapes before their real implementations land.
  */
-import { scryptSync } from "node:crypto";
+import { createHash, randomBytes, scryptSync } from "node:crypto";
 import type {
   ConnGuard,
   ConnLease,
@@ -19,6 +19,7 @@ import type {
   LanSessionRecord,
   LanStorePort,
   LanUserRecord,
+  LanUserSummary,
   LoginLimiterPort,
 } from "../../../src/web-hub/hub/ports.js";
 import { canonicalHostKey } from "../../../src/web-hub/protocol/lan.js";
@@ -27,20 +28,37 @@ export interface FakeLanStore extends LanStorePort {
   /** Test-only introspection (not part of `LanStorePort`). */
   readonly usersByUsername: ReadonlyMap<string, LanUserRecord>;
   readonly sessionsBySidHash: ReadonlyMap<string, LanSessionRecord>;
+  /** Test-only seed hook (not part of `LanStorePort`) — the port itself has no "set an initial
+   * password" op (that is the hub's own bootstrap concern, outside W1's frozen surface). */
+  seedUser(user: LanUserRecord): void;
 }
 
 export function fakeLanStore(): FakeLanStore {
   const users = new Map<string, LanUserRecord>();
   const sessions = new Map<string, LanSessionRecord>();
   let nextUserId = 1;
-  let nextSid = 1;
+
+  function userById(userId: number): LanUserRecord | undefined {
+    for (const u of users.values()) if (u.id === userId) return u;
+    return undefined;
+  }
 
   return {
     usersByUsername: users,
     sessionsBySidHash: sessions,
+    seedUser: (user) => {
+      users.set(user.username, user);
+      nextUserId = Math.max(nextUserId, user.id + 1);
+    },
 
     async getUser(username) {
       return users.get(username);
+    },
+
+    async getUserSummary(userId): Promise<LanUserSummary | undefined> {
+      const u = userById(userId);
+      if (u === undefined) return undefined;
+      return { username: u.username, initialPasswordInUse: u.initialPassword !== undefined };
     },
 
     async initialInfo() {
@@ -60,7 +78,10 @@ export function fakeLanStore(): FakeLanStore {
     },
 
     async createSession(input) {
-      const sidHash = `fake-sid-${nextSid++}`;
+      // §6.4: only the hash is ever persisted; the *raw* id is generated here and returned once
+      // (for the caller to set as the `pwh_lan` cookie) — the store itself never sees it again.
+      const sid = randomBytes(24).toString("base64url");
+      const sidHash = createHash("sha256").update(sid).digest("base64url");
       sessions.set(sidHash, {
         userId: input.userId,
         epoch: input.epoch,
@@ -68,7 +89,7 @@ export function fakeLanStore(): FakeLanStore {
         expiresAt: input.now + 12 * 3_600_000,
         absoluteExpiresAt: input.now + 7 * 24 * 3_600_000,
       });
-      return { sidHash };
+      return { sid };
     },
 
     async touchSession(sidHash) {
@@ -195,6 +216,7 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
   interface Entry {
     seq: number;
     category: "unauth" | "login-pending" | "authed";
+    onEvict: () => void;
   }
   const direct = new Map<number, Entry>();
   const proxy = new Map<number, Entry>();
@@ -209,6 +231,7 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
     return n;
   }
 
+  /** 审查修复 #4: 淡汰时先调用被淡汰连接自己登记的 onEvict（一次），再从池中移除该条目。 */
   function evictOldestUnauth(pool: Map<number, Entry>): boolean {
     let victimKey: number | undefined;
     let victim: Entry | undefined;
@@ -219,18 +242,19 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
         victim = e;
       }
     }
-    if (victimKey === undefined) return false;
+    if (victimKey === undefined || victim === undefined) return false;
     pool.delete(victimKey);
+    victim.onEvict();
     return true;
   }
 
   return {
-    admit({ peerIp, viaTrustedProxy }): ConnLease | undefined {
+    admit({ peerIp, viaTrustedProxy, onEvict }): ConnLease | undefined {
       const pool = poolFor(viaTrustedProxy);
       const cap = viaTrustedProxy ? capProxy : capDirect;
       if (unauthCount(pool) >= cap && !evictOldestUnauth(pool)) return undefined;
       const mySeq = nextSeq++;
-      const entry: Entry = { seq: mySeq, category: "unauth" };
+      const entry: Entry = { seq: mySeq, category: "unauth", onEvict };
       pool.set(mySeq, entry);
       let released = false;
       return {

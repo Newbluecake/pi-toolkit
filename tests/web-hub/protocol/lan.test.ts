@@ -32,6 +32,21 @@ describe("classifyHostToken: classification priority (plan §2.1)", () => {
     expect(classifyHostToken("123")).toEqual({ ok: false, reason: "numeric" });
   });
 
+  // 审查修复 v2 #1: WHATWG 会把短数字/十六进制/两段式重写成真 IPv4，classifyHostToken 必须在
+  // 重写发生前就把这些形式判为 numeric（谁来调用它——parseOrigin 现在不再用 new URL() 取 host——见下面）。
+  it("1 ⇒ numeric", () => {
+    expect(classifyHostToken("1")).toEqual({ ok: false, reason: "numeric" });
+  });
+
+  it("0x7f (hex) ⇒ numeric", () => {
+    expect(classifyHostToken("0x7f")).toEqual({ ok: false, reason: "numeric" });
+    expect(classifyHostToken("0X7F")).toEqual({ ok: false, reason: "numeric" }); // case-insensitive
+  });
+
+  it("1.2 (two-part, WHATWG A.B → A.0.0.B) ⇒ numeric (last label is all-digit)", () => {
+    expect(classifyHostToken("1.2")).toEqual({ ok: false, reason: "numeric" });
+  });
+
   it("123.local ⇒ dot-local", () => {
     expect(classifyHostToken("123.local")).toEqual({ ok: true, kind: "dot-local", host: "123.local" });
   });
@@ -149,6 +164,16 @@ describe("canonicalHostKey / canonicalOrigin / parseOrigin (plan §2.2)", () => 
   it("a numeric / denylisted host is still canonicalizable (canonicalization ≠ allow-list)", () => {
     expect(canonicalHostKey("202507220006", "http")).toBe("202507220006:80");
     expect(canonicalHostKey("dev", "http")).toBe("dev:80");
+  });
+
+  // 审查修复 v2 #1: parseOrigin 不再用 new URL().host 取值——否则 https://123 会被 WHATWG 改写成
+  // 0.0.0.123 并被当作合法 IPv4 放行。hostKey 必须是调用方字面写的原始值。
+  it("parseOrigin preserves the raw authority (does not let WHATWG rewrite a numeric host into a real IPv4)", () => {
+    expect(parseOrigin("https://123")).toEqual({ scheme: "https", hostKey: "123:443" });
+    expect(parseOrigin("https://1")).toEqual({ scheme: "https", hostKey: "1:443" });
+    expect(parseOrigin("https://0x7f")).toEqual({ scheme: "https", hostKey: "0x7f:443" });
+    expect(parseOrigin("https://1.2")).toEqual({ scheme: "https", hostKey: "1.2:443" });
+    // none of these are "0.0.0.123" / "0.0.0.1" / "0.0.0.127" / "1.0.0.2" (the WHATWG-rewritten forms)
   });
 
   it("a syntactically invalid host is not canonicalizable", () => {

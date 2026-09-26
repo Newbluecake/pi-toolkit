@@ -112,19 +112,19 @@ describe("parseHubLanConfig (plan §1.4.3, §9.1)", () => {
     expect(parseHubLanConfig({ ...valid, externalOrigins: "x" }).ok).toBe(false);
   });
 
-  // 回审需求 #3: externalOrigins 的 host 部分再评 classifyHostToken，拒绝 numeric/denylisted/ipv6（§2.4）。
-  // 注：数字单标签 host 在到达 classifyHostToken 之前就已被 WHATWG URL 解析器拦下（单标签全数字
-  // 会先尝试解析为 IPv4 32 位整数，超过 uint32 范围——202507220006 就是——整个 URL 直接无法构造，
-  // parseOrigin 返回 undefined，origin-syntax）；这与真实浏览器行为一致（Chromium 同样拒签），效果上
-  // 仍符合“数字 host 被拒”的要求，只是报错标签不同。classifyHostToken 的 numeric 分支在这个
-  // 验证函数里因此不可达，但对 Host 头验证（不经过 new URL()，直接比较字符串）仍有意义。
-  it("rejects a numeric-host externalOrigins entry (via origin-syntax, matching real-browser URL parsing)", () => {
-    const r = parseHubLanConfig({
-      ...valid,
-      trustProxyFrom: ["127.0.0.1"],
-      externalOrigins: ["https://202507220006"],
-    });
-    expect(r.ok).toBe(false);
+  // 回审需求 #3（v2）: externalOrigins 的 host 部分再评 classifyHostToken，拒绝 numeric/denylisted/ipv6（§2.4）。
+  // v1 修复曾误判 numeric 分支在这个验证函数里不可达（因为 `parseOrigin` 当时用 `new URL().host`
+  // 取 host，而 WHATWG 会把裸数字单标签改写成真 IPv4（`new URL("https://123").host``
+  // === "0.0.0.123"`）——这正是 v2 复审打回的 #1：该改写不仅让 numeric 分支不可达，还会让
+  // `https://123` 被当作合法 IPv4 放行。修复后 `parseOrigin` 不再用 `new URL()` 取 host，而是用
+  // 正则直接抽取原始 authority，classifyHostToken 现在能真正看到调用方写的原始数字串，
+  // numeric 分支对此验证函数可达且必要。
+  it("rejects numeric-host externalOrigins entries (decimal, hex, and short/two-part WHATWG-IPv4-rewritable forms)", () => {
+    for (const h of ["123", "1", "0x7f", "1.2", "202507220006"]) {
+      const r = parseHubLanConfig({ ...valid, trustProxyFrom: ["127.0.0.1"], externalOrigins: [`https://${h}`] });
+      expect(r.ok, h).toBe(false);
+      if (!r.ok) expect(r.detail, h).toContain("numeric");
+    }
   });
 
   it("rejects a denylisted-host externalOrigins entry", () => {

@@ -10,7 +10,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { lstat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import net from "node:net";
 import { join } from "node:path";
 import { resolveHubPaths, type HubPaths } from "../../../src/web-hub/protocol/paths.js";
@@ -248,7 +248,7 @@ describe.runIf(process.platform === "linux")("instance guard (Linux abstract soc
     expect(legacy.kind).toBe("owner");
     expect((await acquireSingleton(p, { probeMs: 100 })).kind).toBe("exists"); // guard free → path probe
     // …and the guard was closed again: a guard-only starter can take it.
-    const name = instanceGuardName(p)!;
+    const name = (await instanceGuardName(p))!;
     const probe = net.createServer();
     await new Promise<void>((resolve, reject) => {
       probe.once("error", reject);
@@ -261,7 +261,8 @@ describe.runIf(process.platform === "linux")("instance guard (Linux abstract soc
     const p = paths();
     track(await acquireSingleton(p, { probeMs: 50 })).kind === "owner" && (await owners.pop()!.release());
     const squat = net.createServer((s) => s.end("1\n")); // pid 1: alive, but not our uid (unless root)
-    await new Promise<void>((resolve) => squat.listen(instanceGuardName(p)!, () => resolve()));
+    const squatName = (await instanceGuardName(p))!;
+    await new Promise<void>((resolve) => squat.listen(squatName, () => resolve()));
     try {
       const r = track(await acquireSingleton(p, { probeMs: 200 }));
       expect(r.kind).toBe(process.getuid?.() === 0 ? "exists" : "owner");
@@ -273,7 +274,8 @@ describe.runIf(process.platform === "linux")("instance guard (Linux abstract soc
   it("a silent guard holder (stopped hub) is never stolen from", async () => {
     const p = paths();
     const silent = net.createServer(() => undefined); // accepts, never answers
-    await new Promise<void>((resolve) => silent.listen(instanceGuardName(p)!, () => resolve()));
+    const silentName = (await instanceGuardName(p))!;
+    await new Promise<void>((resolve) => silent.listen(silentName, () => resolve()));
     try {
       const started = Date.now();
       expect((await acquireSingleton(p, { probeMs: 100 })).kind).toBe("exists");
@@ -284,11 +286,11 @@ describe.runIf(process.platform === "linux")("instance guard (Linux abstract soc
     }
   });
 
-  it("instanceGuardName: abstract on linux, none elsewhere", () => {
+  it("instanceGuardName: abstract on linux, none elsewhere", async () => {
     const p = paths();
-    expect(instanceGuardName(p, { platform: "linux", uid: 7 })).toMatch(/^\0pi-webhub-7-[0-9a-f]{24}$/);
-    expect(instanceGuardName(p, { platform: "darwin" })).toBeUndefined();
-    expect(instanceGuardName(paths())).not.toBe(instanceGuardName(p)); // per state dir
+    await expect(instanceGuardName(p, { platform: "linux", uid: 7 })).resolves.toMatch(/^\0pi-webhub-7-[0-9a-f]{24}$/);
+    await expect(instanceGuardName(p, { platform: "darwin" })).resolves.toBeUndefined();
+    expect(await instanceGuardName(paths())).not.toBe(await instanceGuardName(p)); // per state dir
   });
 });
 
@@ -438,5 +440,57 @@ describe("startFence single-check shared deadline budget", () => {
     expect(why).toBe("io");
     expect(calls).toBe(2); // both the socket- and dir-lstat were attempted before the budget ran out
     stop();
+  });
+});
+
+// 审查修复二轮 #2: acquireFileSingleton 在构造 owner 后、未经签 signal 的 releaseLock 期间 abort ——
+// 外层 withSignal 可能已超时返回，而 handedOver 尚未置 true，迟到 owner 会遗留 socket/guard。
+describe("late abort after the owner value is already constructed (review fix #2, v2)", () => {
+  it("an abort that fires during the unraced releaseLock() self-releases the socket/guard instead of leaking a late owner", async () => {
+    const p = paths();
+    const controller = new AbortController();
+    let releaseLockStarted = false;
+    const abortingReadFile = (async (file: Parameters<typeof readFile>[0], enc: Parameters<typeof readFile>[1]) => {
+      if (file === p.startLock) {
+        releaseLockStarted = true;
+        controller.abort(); // fires *during* the unraced releaseLock() call, after bind+identity succeeded
+      }
+      return readFile(file, enc as Parameters<typeof readFile>[1]);
+    }) as typeof readFile;
+
+    const r = await acquireSingleton(p, {
+      probeMs: 50,
+      signal: controller.signal,
+      fs: { readFile: abortingReadFile },
+    });
+    expect(releaseLockStarted).toBe(true);
+    expect(r.kind).toBe("failed");
+    if (r.kind === "failed") expect(r.reason).toBe("aborted");
+
+    // nothing left bound: socket, lock and (on Linux) the instance guard must all be free.
+    expect(existsSync(p.socketPath)).toBe(false);
+    expect(existsSync(p.startLock)).toBe(false);
+    const again = track(await acquireSingleton(p, { probeMs: 200 }));
+    expect(again.kind).toBe("owner");
+    if (again.kind === "owner") await again.release();
+  });
+
+  it("release()'s own lstat/rename calls are bounded (a wedged disk during release does not hang it)", async () => {
+    const p = paths();
+    let callCount = 0;
+    // The first 2 lstat calls are the real identity computation during acquire (socket + dir);
+    // only later calls (i.e. release()'s own "is this still ours" check) hang.
+    const flakyLstat = (async (path: Parameters<typeof lstat>[0]) => {
+      callCount++;
+      if (callCount <= 2) return lstat(path);
+      return new Promise<never>(() => {});
+    }) as typeof lstat;
+    const o = track(await acquireSingleton(p, { probeMs: 50, fs: { lstat: flakyLstat } }));
+    if (o.kind !== "owner") throw new Error("expected owner");
+    owners.length = 0; // released directly below, not via afterEach
+    const started = Date.now();
+    await o.release();
+    expect(Date.now() - started).toBeLessThan(2_500); // bounded by RELEASE_DEADLINE_MS (2s), not hung forever
+    expect(callCount).toBeGreaterThan(2); // release() really did call the (hanging) lstat
   });
 });
