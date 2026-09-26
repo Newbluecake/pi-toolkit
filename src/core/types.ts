@@ -501,6 +501,22 @@ export type DriverEvent =
    */
   | { t: "switch_capability"; reason: string }
   /**
+   * child-context-switch plan P3 acceptance follow-up (§2.3.1 V1-V6 / "uncommitted"
+   * visibility gap): additive best-effort diagnostic for a switch_context call that did
+   * NOT commit — either a structural rejection from `buildChildSwitchDrafts` (V1-V6:
+   * "unpersisted" | "order" | "concurrent-compaction" | "boundary-conflict" | "cut-point" |
+   * "preview-invalid" | "cannot-continue"), the tool-result-not-ok/no-session-file
+   * "unpersisted" case, or a `verified`-state self-check recheck failure that does NOT (by
+   * itself) disable the capability (a single post-verified "uncommitted" — that case
+   * previously had ZERO diagnostic visibility, unlike the disabling paths which already
+   * surface through `switch_capability`/`switch_selfcheck_failed`). Same best-effort family
+   * as `context_usage` above: diag-only, no effect, accepted in every state. Never affects
+   * this run's outcome and never touches the switch-count semantics owned by
+   * `compact.childMaxSwitches` (that count is derived from the branch itself, not from this
+   * diagnostic).
+   */
+  | { t: "context_switch_rejected"; reason: string }
+  /**
    * bash-timeout-grace plan §3.1/§3.8 (P0b, frozen): the runner's synchronous,
    * end-of-run snapshot of this run's child bash jobs (RunnerDeps.sealSession,
    * dispatched by `sealBeforeTerminal` immediately before the first input that
@@ -564,20 +580,26 @@ export interface ContextSwitchDroppedRange {
 }
 /**
  * child-context-switch plan P0 (§2.3.1): best-effort diagnostics folded into
- * `RunDiagnostics.contextSwitches` by the three new DriverEvent kinds
- * (`context_switch` / `switch_selfcheck_failed` / `switch_capability`),
- * surfaced through `get_subagent_result` and the completion notice.
- * `count`/`last` are written by successful switches; `selfcheck` is the
- * (run-fatal) self-check-failed latch also read by the runner's settlement
- * priority (§2.3.1 point 3); `capability` is a non-fatal capability-state
- * notice owned by a later package's capability state machine (§3.1) — this
- * package only carries the diagnostic plumbing for it.
+ * `RunDiagnostics.contextSwitches` by the DriverEvent kinds
+ * (`context_switch` / `switch_selfcheck_failed` / `switch_capability` /
+ * `context_switch_rejected`), surfaced through `get_subagent_result` and the
+ * completion notice. `count`/`last` are written by successful switches;
+ * `selfcheck` is the (run-fatal) self-check-failed latch also read by the
+ * runner's settlement priority (§2.3.1 point 3); `capability` is a non-fatal
+ * capability-state notice owned by a later package's capability state
+ * machine (§3.1) — this package only carries the diagnostic plumbing for it.
+ * `rejected` (P3 acceptance follow-up, additive) is a bounded FIFO ring of
+ * V1-V6 structural rejections and non-disabling "uncommitted" self-check
+ * recheck failures — the reasons a model saw in its own turn's failure
+ * notice, now also readable by the calling session via get_subagent_result
+ * without changing the switch-count or capability semantics.
  */
 export interface ContextSwitchDiag {
   count: number;
   last?: { seq: number; keepRecent: boolean; at: Millis; dropped: ContextSwitchDroppedRange };
   selfcheck?: { reason: string; at: Millis };
   capability?: { reason: string; at: Millis };
+  rejected?: { reason: string; at: Millis }[];
 }
 /**
  * child-context-switch plan P0 (§2.3.1): one observed failure of pi's own

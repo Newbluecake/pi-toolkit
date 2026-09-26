@@ -85,6 +85,12 @@ export interface StatusCommandDeps {
         }
       | undefined;
   };
+  /**
+   * child-context-switch plan.md §3.1 ("要点"): read-only capability-state port for the
+   * `child switch: verified | ready | disabled(<reason>)` line. Absent — tests/minimal hosts
+   * — skips the line entirely (same degrade pattern as `dynamic`/`bashJobs` above).
+   */
+  childSwitch?: () => { state: string; reason?: string };
 }
 
 /**
@@ -595,7 +601,14 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.bashJobs) lines.push(...renderBashJobsSection(deps.bashJobs, deps.workflow?.now?.() ?? Date.now()));
   if (deps.worktreeOrphans) lines.push(...renderWorktreeOrphansSection(deps.worktreeOrphans));
   if (deps.dynamic) lines.push(...renderDynamicThresholdSection(deps.dynamic, contextWindow));
+  if (deps.childSwitch) lines.push(renderChildSwitchLine(deps.childSwitch()));
   return lines.join("\n");
+}
+
+/** child-context-switch plan.md §3.1: "child switch: verified | ready | disabled(<reason>)". */
+function renderChildSwitchLine(status: { state: string; reason?: string }): string {
+  const label = status.state === "disabled" && status.reason ? `disabled(${status.reason})` : status.state;
+  return `child switch: ${label}`;
 }
 
 function renderMentionableLabels(source: { entries(): readonly MentionAutocompleteEntry[] }): string[] {

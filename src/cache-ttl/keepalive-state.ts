@@ -350,6 +350,12 @@ export type InvalidateReason =
   | "system-prompt-drift"
   | "resources-changed"
   | "session-changed"
+  /** child-context-switch plan.md §2.4 ("边界切换不发 session_compact，但会改写前缀，所以 ...
+   *  也→ invalidate"): a committed boundary-draft switch_context rewrites the child session's
+   *  context exactly like a compaction does; the child cache-ttl wiring (`src/cache-ttl/child.ts`)
+   *  invalidates on it the same way it does on `session-compact` above. Main-session behavior is
+   *  unaffected — nothing on the main-session path ever passes this reason. */
+  | "context-switch"
   | `fingerprint-drift:${string}`;
 
 export interface TickSkip {

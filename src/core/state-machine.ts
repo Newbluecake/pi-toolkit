@@ -65,6 +65,13 @@ export const TOOL_HISTORY_CAP = 30;
  */
 export const COMPACTION_FAILURES_CAP = 3;
 
+/**
+ * child-context-switch plan P3 acceptance follow-up (§2.3.1 V1-V6 visibility gap):
+ * bounded FIFO ring cap for RunDiagnostics.contextSwitches.rejected ("上限如 5" per the
+ * acceptance directive).
+ */
+export const CONTEXT_SWITCH_REJECTED_CAP = 5;
+
 /** Maximum persisted dispatch prompt used by agent-tree previews and /agent status. */
 export const TASK_PROMPT_CAP = 4096;
 
@@ -585,6 +592,19 @@ export function reduce(
       count: prev?.count ?? 0,
       capability: { reason: e.reason, at: input.at },
     };
+    return { state: { ...state, diag: { ...state.diag, contextSwitches: next } }, effects: [] };
+  }
+  // child-context-switch plan P3 acceptance follow-up (§2.3.1 V1-V6 visibility gap):
+  // same best-effort family as context_switch/switch_capability above — a bounded FIFO
+  // ring of rejection reasons (V1-V6 structural rejections, "unpersisted", and a single
+  // (non-disabling) post-verified self-check recheck failure), additive to the existing
+  // count/last/selfcheck/capability fields.
+  if (input.kind === "session_event" && input.event.t === "context_switch_rejected") {
+    const e = input.event;
+    const prev = state.diag.contextSwitches;
+    const prevList = prev?.rejected ?? [];
+    const nextList = [...prevList, { reason: e.reason, at: input.at }].slice(-CONTEXT_SWITCH_REJECTED_CAP);
+    const next: ContextSwitchDiag = { ...prev, count: prev?.count ?? 0, rejected: nextList };
     return { state: { ...state, diag: { ...state.diag, contextSwitches: next } }, effects: [] };
   }
   // set_model: a mid-run model switch is a display-only diagnostics patch —

@@ -112,11 +112,14 @@ describe("context-switch wiring", () => {
     expect(legacy.handlers.get("session_before_compact")).toBeUndefined();
   });
 
-  it("child session (HOST_KEY claimed) never sees the switch tool or the hook", () => {
+  it("child session (HOST_KEY claimed) gets the boundary-mode switch_context tool but never compact_context/the main-session hook (child-context-switch plan.md)", () => {
     (globalThis as Record<symbol, unknown>)[HOST_KEY] = { activatedAt: Date.now() };
     const { pi, tools, handlers } = fakePi();
     activate(pi);
-    expect(tools.has("switch_context")).toBe(false);
+    // child-context-switch plan.md §2/§4 (P3): switch_context IS registered in child sessions
+    // now — boundary mode, gated by compact.childSessions (default true) and the process-wide
+    // capability state machine, wired by src/context-switch/child.ts (pre-guard).
+    expect(tools.has("switch_context")).toBe(true);
     expect(tools.has("compact_context")).toBe(false);
     expect(handlers.get("session_before_compact")).toBeUndefined();
   });

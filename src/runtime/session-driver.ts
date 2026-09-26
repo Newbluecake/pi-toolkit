@@ -28,6 +28,8 @@ export const CHILD_SWITCH_CONTEXT_SOURCE = "pi-toolkit:switch_context";
 export const CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE = "subagent:switch-selfcheck";
 /** child-context-switch plan §3.1 (point 4): customType of the entry the capability state machine (owned by a later package) appends on a disablement/other non-fatal capability notice. */
 export const CHILD_SWITCH_CAPABILITY_CUSTOM_TYPE = "subagent:switch-capability";
+/** child-context-switch plan P3 acceptance follow-up (§2.3.1 V1-V6 visibility gap): customType of the entry the child-session extension appends (owned by a later package) whenever a switch_context call is structurally rejected (V1-V6, "unpersisted") or fails a non-disabling post-verified self-check recheck ("uncommitted") — additive diagnostic, never affects this run's outcome. */
+export const CHILD_SWITCH_REJECTED_CUSTOM_TYPE = "subagent:switch-rejected";
 /** child-context-switch plan §2.4 ("成本计入子 run"): customType of the child keepalive service's audit entries (owned by a later package). Only entries with a positive `costUsd` fold into this run's usage accumulator. */
 export const CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE = "subagent:cache-keepalive";
 export interface DisposeReport {
@@ -217,6 +219,9 @@ function mapEntryAppended(entry: unknown): DriverEvent | undefined {
   if (r["customType"] === CHILD_SWITCH_CAPABILITY_CUSTOM_TYPE) {
     return { t: "switch_capability", reason: str(data?.["reason"]) || "unknown" };
   }
+  if (r["customType"] === CHILD_SWITCH_REJECTED_CUSTOM_TYPE) {
+    return { t: "context_switch_rejected", reason: str(data?.["reason"]) || "unknown" };
+  }
   if (r["customType"] === CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE) {
     const costUsd = data?.["costUsd"];
     if (typeof costUsd !== "number" || !Number.isFinite(costUsd) || costUsd <= 0) return undefined;
@@ -362,14 +367,59 @@ class PiSessionHandle implements SessionHandle {
   }
   /** pi resolves prompt() even when the final turn died (stopReason
    *  "error", e.g. provider crash) — without this check a dead turn looks
-   *  like an empty success. Surface it so the run becomes failed(model). */
+   *  like an empty success. Surface it so the run becomes failed(model).
+   *
+   *  child-context-switch plan P3 acceptance follow-up (T-F1/T-F2/T-F3): pi's own
+   *  `_omitRecoveryAttempt` (agent-session.js, `_checkCompaction`'s overflow branch) splices the
+   *  erroring assistant message OUT of the LIVE `session.messages` — via a `context_edit`
+   *  targeting it with `replacement: null` — on the run's FIRST-ever context-overflow occurrence,
+   *  unconditionally, regardless of whether the recovery compaction it triggers then succeeds or
+   *  fails. When that recovery does NOT end in a retried request (prepareCompaction empty, the
+   *  summarization call itself throws, or the model is unset), NOTHING ever replaces the omitted
+   *  message, so the live-messages scan below finds no error at all and the run would otherwise
+   *  look like an empty success (a leftover in-progress `toolUse` message earlier in the live
+   *  array would be found first and treated as a NON-error — the omitted error itself is simply
+   *  gone). The persisted BRANCH (unlike the live projection) still carries both the original
+   *  message and the very `context_edit` that omitted it — read-only, never mutated here — so
+   *  this fallback (checked FIRST, see its own doc comment for why that ordering is safe) recovers
+   *  exactly that one failure mode without touching any other behavior. */
   getTurnError(): string | undefined {
+    const omitted = this.getOmittedOverflowTurnError();
+    if (omitted !== undefined) return omitted;
     for (let i = this.session.messages.length - 1; i >= 0; i--) {
       const m = this.session.messages[i] as { role?: string; stopReason?: string; errorMessage?: string };
       if (m?.role === "assistant")
         return m.stopReason === "error" ? (m.errorMessage ?? "unknown model error") : undefined;
     }
     return undefined;
+  }
+  /** See `getTurnError()`'s doc comment: the fallback for a first-and-only, never-retried
+   *  overflow whose erroring message `_omitRecoveryAttempt` spliced out of `session.messages`.
+   *  Checked FIRST (not as a last resort) because the persisted branch's LAST entry being exactly
+   *  this `context_edit` is unambiguous proof that nothing else happened afterwards — a
+   *  successful compact-and-retry (T-F1's working case) always appends a compaction entry and a
+   *  fresh message AFTER it, so the branch tail would no longer match this narrow shape and this
+   *  helper correctly returns `undefined`, deferring to the live-messages scan below. Synchronous,
+   *  read-only branch scan — same style as `getSwitchTail()` above. */
+  private getOmittedOverflowTurnError(): string | undefined {
+    let branch: readonly Record<string, unknown>[];
+    try {
+      branch = this.session.sessionManager.getBranch() as unknown as readonly Record<string, unknown>[];
+    } catch {
+      return undefined;
+    }
+    if (!Array.isArray(branch) || branch.length === 0) return undefined;
+    const last = branch[branch.length - 1];
+    if (last?.["type"] !== "context_edit" || last["replacement"] !== null) return undefined;
+    const targetId = last["targetId"];
+    if (typeof targetId !== "string") return undefined;
+    const target = branch.find((entry) => entry["id"] === targetId);
+    const message = target?.["message"] as { role?: unknown; stopReason?: unknown; errorMessage?: unknown } | undefined;
+    if (target?.["type"] !== "message" || message?.role !== "assistant" || message.stopReason !== "error")
+      return undefined;
+    return typeof message.errorMessage === "string" && message.errorMessage.length > 0
+      ? message.errorMessage
+      : "unknown model error";
   }
   getUsage() {
     return undefined;

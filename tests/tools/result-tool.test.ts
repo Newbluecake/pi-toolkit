@@ -299,6 +299,49 @@ describe("bash-timeout-grace plan \u00a73.7/T25 (P5): formatOutcome renders diag
   });
 });
 
+describe("child-context-switch plan.md §2.3.1 (P3): formatOutcome renders diag.contextSwitches/compactionFailures", () => {
+  it("appends the context-switches summary for a completed run that switched once", async () => {
+    const snap = completedSnapshot();
+    snap.outcome!.diag.contextSwitches = {
+      count: 1,
+      last: {
+        seq: 1,
+        keepRecent: false,
+        at: 1000,
+        dropped: { fromEntryId: "m1", toEntryId: "m9", entries: 9, tokensBefore: 50_000, tokensAfterEstimate: 2_000 },
+      },
+    };
+    const query = queryForSnapshot(snap);
+    const tool = createResultTool({ query });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("context switches: 1");
+    expect(text).toContain("dropped ~48000 tokens");
+  });
+
+  it("appends the auto-compaction-failed note when a failed run's error doesn't already mention it", async () => {
+    const snap = completedSnapshot();
+    snap.outcome!.status = "failed";
+    snap.outcome!.error = { kind: "model", message: "provider crashed", retryable: false };
+    snap.outcome!.diag.compactionFailures = [{ reason: "overflow", message: "pi's own summarizer errored", at: 1000 }];
+    const query = queryForSnapshot(snap);
+    const tool = createResultTool({ query });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("auto-compaction failed: pi's own summarizer errored");
+  });
+
+  it("omits both trailers when the run never touched switch_context or pi's auto-compaction", async () => {
+    const snap = completedSnapshot();
+    const query = queryForSnapshot(snap);
+    const tool = createResultTool({ query });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).not.toContain("context switches:");
+    expect(text).not.toContain("auto-compaction failed");
+  });
+});
+
 describe("structured result + progress", () => {
   const queryFor = (snapshot: RunSnapshot): QueryService => ({
     get: () => snapshot,

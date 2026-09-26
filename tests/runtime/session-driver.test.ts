@@ -3,6 +3,7 @@ import {
   CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE,
   CHILD_SWITCH_CAPABILITY_CUSTOM_TYPE,
   CHILD_SWITCH_CONTEXT_SOURCE,
+  CHILD_SWITCH_REJECTED_CUSTOM_TYPE,
   CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE,
   mapContextUsage,
   mapEvent,
@@ -315,6 +316,27 @@ describe("session-driver mapEvent: entry_appended (T-K5, boundary-draft switch/s
       },
     });
     expect(ev).toEqual({ t: "switch_capability", reason: "l1-event-shape" });
+  });
+
+  it("maps a rejected custom entry to context_switch_rejected (P3 acceptance follow-up)", () => {
+    const ev = mapEvent({
+      type: "entry_appended",
+      entry: {
+        type: "custom",
+        id: "e1",
+        customType: CHILD_SWITCH_REJECTED_CUSTOM_TYPE,
+        data: { reason: "unpersisted" },
+      },
+    });
+    expect(ev).toEqual({ t: "context_switch_rejected", reason: "unpersisted" });
+  });
+
+  it("defaults a rejected entry's missing reason to 'unknown'", () => {
+    const ev = mapEvent({
+      type: "entry_appended",
+      entry: { type: "custom", id: "e1", customType: CHILD_SWITCH_REJECTED_CUSTOM_TYPE, data: {} },
+    });
+    expect(ev).toEqual({ t: "context_switch_rejected", reason: "unknown" });
   });
 
   it("maps a cache-keepalive audit entry with costUsd>0 to a message_end usage delta", () => {

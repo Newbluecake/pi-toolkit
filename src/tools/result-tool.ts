@@ -16,8 +16,14 @@ import {
 } from "./poll-guard.js";
 import { toPiToolUsage } from "./usage.js";
 import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
-import { formatExitFacts, truncateResultText } from "./result-text.js";
+import {
+  formatExitFacts,
+  formatContextSwitches,
+  formatCompactionFailureNote,
+  truncateResultText,
+} from "./result-text.js";
 import type { RunExitFacts } from "../core/types.js";
+import type { ContextSwitchDiag, CompactionFailureRecord } from "../core/types.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
 import {
   buildWorkflowProgressLines,
@@ -500,7 +506,12 @@ function formatOutcome(
     timeoutReason?: string;
     durationMs: number;
     usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
-    diag?: { sessionFile?: string; exitFacts?: RunExitFacts };
+    diag?: {
+      sessionFile?: string;
+      exitFacts?: RunExitFacts;
+      contextSwitches?: ContextSwitchDiag;
+      compactionFailures?: CompactionFailureRecord[];
+    };
   },
   maxChars = 0,
 ): string {
@@ -516,7 +527,14 @@ function formatOutcome(
   // (state-machine `finish()`) → this outcome — the same value the parent's
   // completion notice renders from `DeliveryPayload.exitFacts` (§3.7 table).
   const exitFactsText = formatExitFacts(outcome.diag?.exitFacts);
-  const exitSuffix = exitFactsText !== undefined ? `\n\n${exitFactsText}` : "";
+  // child-context-switch plan.md §2.3.1 (P3): same threading pattern as exitFacts above, for the
+  // child-session switch_context boundary-draft diagnostics P0 already wired into `diag`.
+  const contextSwitchesText = formatContextSwitches(outcome.diag?.contextSwitches);
+  const compactionFailureText = formatCompactionFailureNote(outcome.diag?.compactionFailures, outcome.error?.message);
+  const exitSuffix = [exitFactsText, contextSwitchesText, compactionFailureText]
+    .filter((line): line is string => line !== undefined)
+    .map((line) => `\n\n${line}`)
+    .join("");
   if (outcome.status === "completed") {
     const body =
       outcome.structuredResult !== undefined

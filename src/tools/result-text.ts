@@ -108,8 +108,15 @@ export function formatExitFacts(facts: RunExitFacts | undefined): string | undef
  */
 export function formatContextSwitches(contextSwitches: ContextSwitchDiag | undefined): string | undefined {
   if (!contextSwitches) return undefined;
-  const { count, last, selfcheck, capability } = contextSwitches;
-  if (count <= 0 && last === undefined && selfcheck === undefined && capability === undefined) return undefined;
+  const { count, last, selfcheck, capability, rejected } = contextSwitches;
+  if (
+    count <= 0 &&
+    last === undefined &&
+    selfcheck === undefined &&
+    capability === undefined &&
+    (rejected === undefined || rejected.length === 0)
+  )
+    return undefined;
   const parts: string[] = [`context switches: ${count}`];
   if (last) {
     const droppedTokens = Math.max(0, last.dropped.tokensBefore - last.dropped.tokensAfterEstimate);
@@ -119,6 +126,10 @@ export function formatContextSwitches(contextSwitches: ContextSwitchDiag | undef
   }
   if (capability) parts.push(`\u2014 capability disabled: ${capability.reason}`);
   if (selfcheck) parts.push(`\u2014 self-check failed: ${selfcheck.reason}`);
+  if (rejected && rejected.length > 0) {
+    const lastRejected = rejected[rejected.length - 1]!;
+    parts.push(`\u2014 rejected: ${rejected.length} (last: ${lastRejected.reason})`);
+  }
   return parts.join(" ");
 }
 

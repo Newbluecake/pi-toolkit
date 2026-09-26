@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readPiCompactionReserveTokens, resolveReserveTokens } from "../../src/compact-hint/pi-settings.js";
+import {
+  readPiCompactionReserveTokens,
+  resolveReserveTokens,
+  resolveKeepRecentTokens,
+} from "../../src/compact-hint/pi-settings.js";
 
 function isolated() {
   const root = mkdtempSync(join(tmpdir(), "compact-settings-"));
@@ -86,6 +90,24 @@ describe("pi compaction settings", () => {
         writeSettings(project, { compaction: { reserveTokens: value } });
         expect(readPiCompactionReserveTokens(project)).toBeUndefined();
       }
+    } finally {
+      env.restore();
+    }
+  });
+});
+
+describe("child-context-switch plan.md §2.1: resolveKeepRecentTokens (same project→global layer read, different field)", () => {
+  it("prefers the explicit override, then the project layer, then the global layer, then the caller's default", () => {
+    const env = isolated();
+    const project = join(env.root, "project");
+    mkdirSync(project);
+    try {
+      expect(resolveKeepRecentTokens(undefined, 20_000, project)).toBe(20_000);
+      writeFileSync(join(env.agent, "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 40_000 } }));
+      expect(resolveKeepRecentTokens(undefined, 20_000, project)).toBe(40_000);
+      writeSettings(project, { compaction: { keepRecentTokens: 8_000 } });
+      expect(resolveKeepRecentTokens(undefined, 20_000, project)).toBe(8_000);
+      expect(resolveKeepRecentTokens(99_000, 20_000, project)).toBe(99_000);
     } finally {
       env.restore();
     }

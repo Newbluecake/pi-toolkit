@@ -39,6 +39,8 @@ import { createProcessPort } from "./bash/process.js";
 import { previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
 import { getChildBashRegistry, declareHostBashViewCapability, type HostRunView } from "./bash/child-registry.js";
+import { resolveChildSwitchContextGrant } from "./context-switch/capability.js";
+import { getChildKeepaliveDisposeRegistry } from "./cache-ttl/child-registry.js";
 import { dueAtFor, effectiveDeadlineAt } from "./core/deadline.js";
 import { formatDuration } from "./ui/fleet-panel.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
@@ -1771,7 +1773,13 @@ export function buildSessionStack(
       // `sealBeforeTerminal` already sealed the session; it only matters for
       // the two late-arrival paths (E18), which never had a chance to run
       // through the runner's own `sealBeforeTerminal` first.
-      if (sessionId !== undefined) childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS);
+      if (sessionId !== undefined) {
+        childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS);
+        // child-context-switch plan.md §2.4 终态 ③ (P3): same defensive fan-out — the child's own
+        // agent_settled path (src/cache-ttl/child.ts) already disposes its keepalive service in
+        // the normal case; this only matters when that path was somehow never taken.
+        getChildKeepaliveDisposeRegistry().disposeSession(sessionId);
+      }
     },
     sealSession: (runId, sessionId) => childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS)?.facts,
     onSessionSeen: (runId, sessionId) => {
@@ -1783,6 +1791,10 @@ export function buildSessionStack(
       );
     },
     childBashJobsEnabled: settings.bashJobs.childSessions,
+    // child-context-switch plan.md §4/§7 (P3): live read — recomputed on every spawn admission so
+    // a process-wide capability disablement (src/context-switch/capability.ts) mid-session stops
+    // future grants immediately, without needing a new stack build.
+    childSwitchContextGrant: () => resolveChildSwitchContextGrant(settings),
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const spawn = createSpawnService({

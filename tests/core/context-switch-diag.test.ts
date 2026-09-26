@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
-import { COMPACTION_FAILURES_CAP, createInitialState, reduce } from "../../src/core/state-machine.js";
+import {
+  COMPACTION_FAILURES_CAP,
+  CONTEXT_SWITCH_REJECTED_CAP,
+  createInitialState,
+  reduce,
+} from "../../src/core/state-machine.js";
 import { isTerminalStatus } from "../../src/core/status.js";
 import type { RunState, StampedInput } from "../../src/core/types.js";
 
@@ -56,6 +61,7 @@ describe("child-context-switch plan P0 (T-A/T-F4): best-effort diagnostic sessio
     { t: "compaction_failed" as const, reason: "threshold", message: "summarization failed" },
     { t: "switch_selfcheck_failed" as const, reason: "run-ended-after-switch" },
     { t: "switch_capability" as const, reason: "l1-event-shape" },
+    { t: "context_switch_rejected" as const, reason: "unpersisted" },
   ];
 
   for (const event of events) {
@@ -105,7 +111,7 @@ describe("child-context-switch plan P0 (T-A/T-F4): best-effort diagnostic sessio
     });
   }
 
-  it("terminal isolation is identical for all four: settling first, then delivering the event, leaves status/phase/effects untouched", () => {
+  it("terminal isolation is identical for all five: settling first, then delivering the event, leaves status/phase/effects untouched", () => {
     for (const event of events) {
       let s = runningState();
       s = apply(s, { kind: "prompt_settled", text: "done" } as never, 9);
@@ -176,6 +182,48 @@ describe("child-context-switch plan P0 (T-A): diag.contextSwitches / diag.compac
       10,
     );
     expect(s.diag.contextSwitches).toEqual({ count: 0, capability: { reason: "l0-missing-export", at: 10 } });
+  });
+
+  it("context_switch_rejected (P3 acceptance follow-up) appends to contextSwitches.rejected without touching count/last/selfcheck/capability", () => {
+    let s = runningState();
+    s = apply(
+      s,
+      { kind: "session_event", event: { t: "context_switch", seq: 1, keepRecent: true, dropped } } as never,
+      10,
+    );
+    s = apply(s, { kind: "session_event", event: { t: "context_switch_rejected", reason: "order" } } as never, 11);
+    expect(s.diag.contextSwitches?.count).toBe(1);
+    expect(s.diag.contextSwitches?.last).toBeDefined();
+    expect(s.diag.contextSwitches?.rejected).toEqual([{ reason: "order", at: 11 }]);
+  });
+
+  it("context_switch_rejected on its own (no prior successful switch) still writes count:0 + rejected", () => {
+    let s = runningState();
+    s = apply(
+      s,
+      { kind: "session_event", event: { t: "context_switch_rejected", reason: "unpersisted" } } as never,
+      10,
+    );
+    expect(s.diag.contextSwitches).toEqual({ count: 0, rejected: [{ reason: "unpersisted", at: 10 }] });
+  });
+
+  it("context_switch_rejected appends to a bounded FIFO ring capped at CONTEXT_SWITCH_REJECTED_CAP (5)", () => {
+    let s = runningState();
+    for (let i = 1; i <= CONTEXT_SWITCH_REJECTED_CAP + 2; i++) {
+      s = apply(
+        s,
+        { kind: "session_event", event: { t: "context_switch_rejected", reason: `reason${i}` } } as never,
+        10 + i,
+      );
+    }
+    expect(s.diag.contextSwitches?.rejected).toHaveLength(CONTEXT_SWITCH_REJECTED_CAP);
+    expect(s.diag.contextSwitches?.rejected?.map((r) => r.reason)).toEqual([
+      "reason3",
+      "reason4",
+      "reason5",
+      "reason6",
+      "reason7",
+    ]);
   });
 
   it("compaction_failed appends to a bounded FIFO ring capped at COMPACTION_FAILURES_CAP (3)", () => {

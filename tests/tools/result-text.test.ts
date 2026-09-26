@@ -215,6 +215,21 @@ describe("formatContextSwitches (child-context-switch plan P0 §2.3.1)", () => {
     const diag: ContextSwitchDiag = { count: 1, capability: { reason: "l1-event-shape", at: 5 } };
     expect(formatContextSwitches(diag)).toBe("context switches: 1 \u2014 capability disabled: l1-event-shape");
   });
+
+  it("P3 acceptance follow-up: appends a rejected note (count + last reason) when present", () => {
+    const diag: ContextSwitchDiag = {
+      count: 1,
+      rejected: [
+        { reason: "order", at: 1 },
+        { reason: "unpersisted", at: 2 },
+      ],
+    };
+    expect(formatContextSwitches(diag)).toBe("context switches: 1 \u2014 rejected: 2 (last: unpersisted)");
+  });
+
+  it("returns undefined when only an EMPTY rejected array is present (treated as nothing to report)", () => {
+    expect(formatContextSwitches({ count: 0, rejected: [] })).toBeUndefined();
+  });
 });
 
 /**

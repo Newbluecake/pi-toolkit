@@ -92,6 +92,13 @@ export interface ChildSwitchCapability {
   noteL3(result: ProbeResult): CapabilityStatus;
   /** `verified` 之后每次切换的轻量复核：单次失败只计数，连续 2 次才禁用。 */
   noteRecheck(result: ProbeResult): CapabilityStatus;
+  /**
+   * v3.1 条件 2/3（plan §2.3.1 失败模式表「切换后 run 没有进入下一次请求就结束」）：
+   * 无条件禁用，绕开 `noteL3`/`noteRecheck` 按当前状态（verifying 才禁用 / 连续 2 次才禁用）
+   * 的常规判定——这个失败模式足够严重（run 语义已经变了），不管是不是第一次切换、也不管之前
+   * 连续成功了多少次，都必须立即停用。已 disabled 时是 no-op（沿用 `disable()` 的幂等约定）。
+   */
+  noteFatal(reason: string): CapabilityStatus;
   /** 首次进入 disabled 时触发一次；此后任何调用（包括后来才注册的监听器）都不会补发。 */
   onDisabled(listener: (reason: string) => void): () => void;
 }
@@ -143,6 +150,9 @@ function build(record: CapabilityRecord): ChildSwitchCapability {
       if (record.consecutiveUncommitted >= 2) return disable(record, "repeat-uncommitted");
       return record.status;
     },
+    noteFatal(reason) {
+      return disable(record, reason);
+    },
     onDisabled(listener) {
       record.listeners.add(listener);
       return () => record.listeners.delete(listener);
@@ -163,4 +173,23 @@ export function getChildSwitchCapability(): ChildSwitchCapability {
 export function resetChildSwitchCapabilityForTests(): void {
   const g = globalThis as Record<symbol, CapabilityRecord | undefined>;
   g[CAPABILITY_KEY] = freshRecord();
+}
+
+/**
+ * child-context-switch plan.md §4/§7 (P3, T-Z1 acceptance closure): the single predicate
+ * `src/stack.ts`'s `childSwitchContextGrant` evaluates on every spawn admission (live read, so a
+ * process-wide capability disablement mid-session stops future grants immediately without a new
+ * stack build). Extracted here (not left as an inline lambda in `stack.ts`) so it is unit-testable
+ * without constructing a full session stack — `stack.ts` imports and calls this directly, byte-
+ * identical to the inline version it replaces.
+ */
+export function resolveChildSwitchContextGrant(settings: {
+  compact: { enabled: boolean; switchTool: boolean; childSessions: boolean };
+}): boolean {
+  return (
+    settings.compact.enabled &&
+    settings.compact.switchTool &&
+    settings.compact.childSessions &&
+    getChildSwitchCapability().get().state !== "disabled"
+  );
 }

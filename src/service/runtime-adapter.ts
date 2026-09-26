@@ -170,6 +170,15 @@ export interface RuntimeAdapterDeps {
    * `sessionSpec.tools`) for that particular run.
    */
   childBashJobsEnabled?: boolean;
+  /**
+   * child-context-switch plan.md §4/§7 (P3): whether `switch_context` should be granted to a
+   * (non-consult) child run right now — a LIVE getter (not a captured boolean like
+   * `childBashJobsEnabled` above) because the capability state machine
+   * (`src/context-switch/capability.ts`) can transition to `disabled` mid-process; a run
+   * admitted after that must never be granted the tool. Absent ⇒ never granted (byte-identical
+   * to the feature not existing).
+   */
+  childSwitchContextGrant?: () => boolean;
 }
 
 /**
@@ -701,6 +710,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           })
         ) {
           grantedReserved.push("bash_job");
+        }
+        // child-context-switch plan.md §4 (user confirm 2): switch_context is granted to every
+        // non-consult child run, gated only by the wiring layer's live capability read (never
+        // granted once the process-wide state machine has disabled the feature).
+        if (!isConsultRun && (deps.childSwitchContextGrant?.() ?? false)) {
+          grantedReserved.push("switch_context");
         }
         if (customTools.length)
           sessionSpec = { ...sessionSpec, customTools: [...(sessionSpec.customTools ?? []), ...customTools] };

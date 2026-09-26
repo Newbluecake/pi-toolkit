@@ -195,9 +195,10 @@ describe("wiring: available agent types are injected into the system prompt", ()
     expect(hook, "the hub's before_agent_start registers even in a child session (D6)").toBeTypeOf("function");
     expect(hook!({ systemPrompt: "BASE" }, {})).toBeUndefined();
 
-    // The strictly host-only surface (registered only past the guard, e.g.
-    // /goal's agent_end hook) never duplicates into a child session.
-    expect(child.handlers.has("agent_end")).toBe(false);
+    // The strictly host-only surface (e.g. /goal's own command + tools) never duplicates into a
+    // child session; `agent_end` itself is NOT that marker anymore — child-context-switch plan.md
+    // §2/§7 (P3) registers it pre-guard too (self-check + child keepalive settle).
+    expect(child.handlers.has("agent_end"), "child-context-switch (P3) also registers agent_end pre-guard").toBe(true);
   });
 
   it("re-activates after /reload (the host claim is released on session_shutdown)", async () => {
@@ -218,10 +219,11 @@ describe("wiring: available agent types are injected into the system prompt", ()
     expect(reloaded.handlers.has("agent_end"), "post-reload instance owns the host-only surface").toBe(true);
 
     // ...and the fresh instance owns the claim: a child session spawned after
-    // the reload still gets only the hub's (inert) hook, never the host-only surface.
+    // the reload still gets only the hub's (inert) hook plus the child-context-switch
+    // pre-guard surface (P3) — never a duplicate of the strictly host-only /goal wiring.
     const child = fakePi();
     activate(child.pi as never);
-    expect(child.handlers.has("agent_end")).toBe(false);
+    expect(child.handlers.has("agent_end")).toBe(true);
     const childHook = child.handlers.get("before_agent_start")?.[0];
     expect(childHook!({ systemPrompt: "BASE" }, {})).toBeUndefined();
   });
@@ -236,13 +238,17 @@ describe("wiring: available agent types are injected into the system prompt", ()
     // set (before_agent_start / context_with_system / session_start /
     // session_compact / model_select / session_tree / turn_start /
     // agent_settled) — but never the strictly host-only hooks/tools that
-    // register past the HOST_KEY guard (e.g. /goal's agent_end).
+    // register past the HOST_KEY guard (e.g. /goal's own command).
     // bash-timeout-grace plan §3.4/§3.5 (P5): `agent_before_settle` joins this
     // set too — `wireChildBashJobs` registers it pre-guard (default settings:
     // `bashJobs.childSessions`/`childSettleHold` both true) for the settle-
     // hold hook, which is inert (returns undefined) until a bash call is
     // ever made in that child session.
-    expect(child.handlers.has("agent_end")).toBe(false);
+    // child-context-switch plan.md §2/§7 (P3): `agent_end`/`turn_end`/`context`/
+    // `before_provider_request`/`before_provider_headers`/`tool_execution_start`/
+    // `tool_execution_end`/`message_end`/`thinking_level_select`/`session_compact_failed`
+    // join this pre-guard set too (switch_context boundary drafts + child keepalive).
+    expect(child.handlers.has("agent_end")).toBe(true);
     const childHook = child.handlers.get("before_agent_start")?.[0];
     expect(childHook!({ systemPrompt: "BASE" }, {})).toBeUndefined(); // present but inert (no sections registered)
     for (const event of child.handlers.keys()) {
@@ -250,19 +256,30 @@ describe("wiring: available agent types are injected into the system prompt", ()
         "session_start",
         "session_tree",
         "session_compact",
+        "session_compact_failed",
         "session_shutdown",
         "before_agent_start",
         "context_with_system",
         "model_select",
+        "thinking_level_select",
         "turn_start",
+        "turn_end",
+        "context",
+        "agent_end",
         "agent_settled",
         "agent_before_settle",
+        "before_provider_request",
+        "before_provider_headers",
+        "tool_execution_start",
+        "tool_execution_end",
+        "message_end",
       ]).toContain(event);
     }
 
-    // Host still owns the claim, so a later activation stays inert.
+    // Host still owns the claim, so a later activation stays inert w.r.t. the strictly
+    // host-only surface, but still gets the same pre-guard child-context-switch set.
     const another = fakePi();
     activate(another.pi as never);
-    expect(another.handlers.has("agent_end")).toBe(false);
+    expect(another.handlers.has("agent_end")).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
@@ -53,6 +54,7 @@ import { PendingHandoffStore } from "./context-switch/store.js";
 import { createQuotaHintHook } from "./quota/index.js";
 import { parseSubscriptionProviders, pickAlternatives } from "./quota/gate.js";
 import { createSwitchContextCompactHook } from "./context-switch/hook.js";
+import { getChildSwitchCapability } from "./context-switch/capability.js";
 import { createSessionFactsProvider } from "./context-switch/session-facts.js";
 import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-tool.js";
 import { createBashTool } from "./tools/bash-tool.js";
@@ -71,6 +73,7 @@ import { registerWebSearchTool } from "./web-search/index.js";
 import { wireTodo } from "./todo/index.js";
 import { wireMemory } from "./memory/index.js";
 import { wireChildBashJobs } from "./bash/child.js";
+import { wireChildSession } from "./child/wire.js";
 import { getChildBashRegistry } from "./bash/child-registry.js";
 import { createPromptSectionHub } from "./sysprompt/hub.js";
 import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sections.js";
@@ -167,6 +170,14 @@ export default function activate(pi: ExtensionAPI): void {
     wireChildBashJobs(pi, { settings: preGuardSettings });
   }
 
+  // child-context-switch plan §2/§7 (P3): the child (subagent) session half of switch_context
+  // boundary drafts + cache-ttl keepalive — pre-guard, same rationale as bash P5 above (this
+  // extension re-activates for every child session; the feature must not depend on
+  // session_start, which child sessions never receive, plan §0 fact 3). Both sub-features gate
+  // themselves on their own settings internally (compact.childSessions / cacheTtl.childKeepalive);
+  // calling this unconditionally keeps the gating logic in one place (src/child/wire.ts).
+  if (isChildSession) wireChildSession(pi, preGuardSettings);
+
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
   // re-activates this extension inside every child. Without a guard, the
   // child instance registers its own Agent/SubagentWorkflow tools backed by
@@ -205,6 +216,30 @@ export default function activate(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
     releaseBackgroundStatus();
     if (g[HOST_KEY] === claim) delete g[HOST_KEY];
+  });
+
+  // child-context-switch plan.md §3.1 ("要点"): main-session, once-per-activate() alert on the
+  // capability state machine's FIRST-ever transition into `disabled` (process-wide, so it can
+  // fire from any child session's turn_end/context handler). Registered exactly once here
+  // (never inside session_start, which can re-run across /reload) — `notifyCapabilityCtx.current`
+  // always points at the latest live session_start ctx, so the toast still uses fresh UI state.
+  // No ctx yet (disablement happened before the very first session_start, or a headless main
+  // process) — falls back to `console.warn`, same convention as every other startup warning.
+  const notifyCapabilityCtx: { current?: ExtensionContext } = {};
+  getChildSwitchCapability().onDisabled((reason) => {
+    const message =
+      `\u5b50\u4f1a\u8bdd switch_context \u5df2\u5728\u672c\u8fdb\u7a0b\u505c\u7528\uff1a${reason}` +
+      `\uff08pi \u8fd0\u884c\u65f6\u80fd\u529b\u68c0\u6d4b\u672a\u901a\u8fc7\uff09\uff0c\u5b50\u4f1a\u8bdd\u56de\u9000\u4e3a\u4ec5 pi \u81ea\u52a8\u538b\u7f29\u3002`;
+    try {
+      const ctx = notifyCapabilityCtx.current;
+      if (ctx?.hasUI && typeof ctx.ui?.notify === "function") {
+        ctx.ui.notify(message, "warning");
+        return;
+      }
+    } catch {
+      // fall through to console.warn below.
+    }
+    console.warn(`[pi-subagent] ${message}`);
   });
 
   // Merged ask_user (plugin-merge): HOST-SESSION ONLY. A child subagent session
@@ -555,6 +590,10 @@ export default function activate(pi: ExtensionAPI): void {
       mention: {
         entries: () => mentionAutocompleteEntries(holder),
       },
+      // child-context-switch plan.md §3.1 (P3): read-only capability-state port for the
+      // "child switch: verified | ready | disabled(<reason>)" line — process-wide, works even
+      // before the first session_start (no stack needed).
+      childSwitch: () => getChildSwitchCapability().get(),
       // workflow-worktree plan §3 (P4 wt-orphans): always rescans the current stack's live
       // registry; before the first session_start (no stack yet) degrades to an empty scan
       // at the same default root the worktree extension itself uses.
@@ -641,6 +680,7 @@ export default function activate(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    notifyCapabilityCtx.current = ctx;
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
     // Defensive: if pi ever fires session_start without a paired shutdown,
     // stop the previous stack's timer/RPC surfaces so they cannot double-fire.

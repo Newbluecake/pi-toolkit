@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getChildSwitchCapability,
   resetChildSwitchCapabilityForTests,
+  resolveChildSwitchContextGrant,
   type ChildSwitchCapability,
 } from "../../src/context-switch/capability.js";
 
@@ -145,5 +146,75 @@ describe("child-switch capability state machine (plan §3.1)", () => {
     expect(second.get()).toEqual({ state: "observed" });
     second.noteL2({ ok: true });
     expect(first.get()).toEqual({ state: "ready" });
+  });
+
+  describe("noteFatal (v3.1 conditions 2/3: 'run ended right after switch' is unconditional disable)", () => {
+    it("disables immediately from `verifying`, bypassing the single-verifying-failure rule's normal path", () => {
+      const cap = fresh();
+      cap.noteL0({ ok: true });
+      cap.noteL1({ ok: true });
+      cap.noteL2({ ok: true });
+      cap.tryBeginVerification();
+      expect(cap.get()).toEqual({ state: "verifying" });
+      expect(cap.noteFatal("run-ended")).toEqual({ state: "disabled", reason: "run-ended" });
+    });
+
+    it("disables immediately from `verified` too — unlike noteRecheck, a single call is enough", () => {
+      const cap = fresh();
+      cap.noteL0({ ok: true });
+      cap.noteL1({ ok: true });
+      cap.noteL2({ ok: true });
+      cap.tryBeginVerification();
+      cap.noteL3({ ok: true });
+      expect(cap.get()).toEqual({ state: "verified" });
+      expect(cap.noteFatal("run-ended")).toEqual({ state: "disabled", reason: "run-ended" });
+    });
+
+    it("is idempotent once already disabled (does not overwrite the original reason)", () => {
+      const cap = fresh();
+      cap.noteL0({ ok: false, reason: "missing-x" });
+      expect(cap.noteFatal("run-ended")).toEqual({ state: "disabled", reason: "l0-missing-x" });
+    });
+  });
+
+  describe("resolveChildSwitchContextGrant (plan §4/§7, T-Z1 acceptance closure): the exact predicate src/stack.ts's `childSwitchContextGrant` evaluates on every spawn admission", () => {
+    function settingsWith(overrides: Partial<{ enabled: boolean; switchTool: boolean; childSessions: boolean }> = {}) {
+      return { compact: { enabled: true, switchTool: true, childSessions: true, ...overrides } };
+    }
+
+    it("true when compact.enabled/switchTool/childSessions are all on and capability is not disabled", () => {
+      fresh(); // unknown — never disabled by default.
+      expect(resolveChildSwitchContextGrant(settingsWith())).toBe(true);
+    });
+
+    it("false when compact.enabled is off, even with a healthy capability", () => {
+      fresh();
+      expect(resolveChildSwitchContextGrant(settingsWith({ enabled: false }))).toBe(false);
+    });
+
+    it("false when compact.switchTool is off", () => {
+      fresh();
+      expect(resolveChildSwitchContextGrant(settingsWith({ switchTool: false }))).toBe(false);
+    });
+
+    it("false when compact.childSessions is off (T-Z1's own 两个开关 case)", () => {
+      fresh();
+      expect(resolveChildSwitchContextGrant(settingsWith({ childSessions: false }))).toBe(false);
+    });
+
+    it("false once the process-wide capability is disabled, even with every setting on", () => {
+      const cap = fresh();
+      cap.noteL0({ ok: false, reason: "l1-event-shape" });
+      expect(cap.get().state).toBe("disabled");
+      expect(resolveChildSwitchContextGrant(settingsWith())).toBe(false);
+    });
+
+    it("live read: flips from true to false the instant the capability becomes disabled, with no new evaluation object needed", () => {
+      const cap = fresh();
+      const settings = settingsWith();
+      expect(resolveChildSwitchContextGrant(settings)).toBe(true);
+      cap.noteL0({ ok: false, reason: "l0-x" });
+      expect(resolveChildSwitchContextGrant(settings)).toBe(false);
+    });
   });
 });

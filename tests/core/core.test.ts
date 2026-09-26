@@ -1638,6 +1638,9 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
           "compaction_failed",
           "switch_selfcheck_failed",
           "switch_capability",
+          // child-context-switch plan P3 acceptance follow-up (§2.3.1 V1-V6
+          // visibility gap): same exemption family, additive.
+          "context_switch_rejected",
         ] as const);
         switch (eventKind) {
           case "turn_start":
@@ -1669,6 +1672,8 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
             return { kind, at, event: { t: "switch_selfcheck_failed", reason: "run-ended-after-switch" } };
           case "switch_capability":
             return { kind, at, event: { t: "switch_capability", reason: "l1-event-shape" } };
+          case "context_switch_rejected":
+            return { kind, at, event: { t: "context_switch_rejected", reason: "unpersisted" } };
           case "context_usage":
             return {
               kind,

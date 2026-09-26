@@ -110,6 +110,25 @@ describe("X9 status usage rendering", () => {
   });
 });
 
+describe("child-context-switch plan.md §3.1: /agent status childSwitch line", () => {
+  it("renders the capability state when the port is wired", () => {
+    const d = deps([snapshot()]) as Record<string, unknown>;
+    d.childSwitch = () => ({ state: "verified" });
+    expect(renderStatus(d as never)).toContain("child switch: verified");
+  });
+
+  it("renders the reason when disabled", () => {
+    const d = deps([snapshot()]) as Record<string, unknown>;
+    d.childSwitch = () => ({ state: "disabled", reason: "l1-event-shape" });
+    expect(renderStatus(d as never)).toContain("child switch: disabled(l1-event-shape)");
+  });
+
+  it("omits the line entirely when the port is absent", () => {
+    const text = renderStatus(deps([snapshot()]) as never);
+    expect(text).not.toContain("child switch:");
+  });
+});
+
 describe("M3.6 /agent status workflow section", () => {
   it("shows nothing extra when no workflow dep is supplied (default, workflow.enabled=false)", () => {
     const text = renderStatus(deps([snapshot()]) as never);

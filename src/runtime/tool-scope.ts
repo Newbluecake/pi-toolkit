@@ -52,6 +52,13 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // grantedReserved, so deny-by-default strips an MCP/late-registered
   // same-name tool from every child session.
   "list_subagents",
+  // switch_context (child-context-switch plan.md §4, known & accepted difference): registered
+  // ONLY in child sessions (src/context-switch/child.ts, boundary mode) and granted per-run by
+  // runtime-adapter.ts's `childSwitchContextGrant` (every non-consult run, when the feature and
+  // the capability state machine both allow it). Unconditional reservation means a same-named
+  // MCP/late-registered tool is stripped even when the FEATURE itself is off — accepted, same
+  // precedent as bash_job/set_model/consult (T-S11).
+  "switch_context",
 ];
 
 /**
