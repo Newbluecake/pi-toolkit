@@ -310,6 +310,82 @@ describe("buildQuotaMessage", () => {
     expect(text).toContain("[quota 预警] zai 5h");
   });
 
+  it("merges several L3 providers: one reading line each, ban + alternatives said once", () => {
+    const pool = [w("week", 98, 3, "pct", { resetAt: RESET, etaMs: 37 * 60_000 })];
+    const kimiWin = [w("week", 100, 3, "exhausted", { resetAt: RESET })];
+    const alts = { providers: ["cr-response", "cr-anthropic", "zhipu-pool"], subscription: false };
+    const text = buildQuotaMessage(
+      [
+        { verdict: verdict({ provider: "zai-coding-cn", level: 3, windows: pool }), alternatives: alts },
+        { verdict: verdict({ provider: "zai", level: 3, windows: pool }), alternatives: alts },
+        { verdict: verdict({ provider: "kimi-coding", level: 3, windows: kimiWin }), alternatives: alts },
+      ],
+      NOW,
+    );
+    const lines = text.split("\n");
+    expect(lines).toHaveLength(5);
+    expect(lines[0]).toMatch(/^\[quota 严重\] zai-coding-cn \/ zai 7d 已用 98%，预计 37 分钟内耗尽（窗口 .+ 重置）。$/);
+    expect(lines[1]).toMatch(/^\[quota 严重\] kimi-coding 7d 已用 100%（窗口 .+ 重置）。$/);
+    expect(lines[2]).toBe(
+      "本轮不要把新任务派给 zai-coding-cn / zai、kimi-coding（继续派给它们会在 spawn 阶段被快速失败拦下，不会消耗 run）。",
+    );
+    expect(lines[3]).toBe("无可用订阅；按量计费 provider：cr-response、cr-anthropic、zhipu-pool。");
+    expect(text.match(/本轮不要/g)).toHaveLength(1);
+    expect(text.match(/^按任务需求选：/gm)).toHaveLength(1);
+  });
+
+  it("merged L3 alternatives are the intersection minus every banned provider", () => {
+    const hot = [w("5h", 93, 3, "pct", { resetAt: RESET })];
+    const text = buildQuotaMessage(
+      [
+        {
+          verdict: verdict({ provider: "zai", level: 3, windows: hot }),
+          alternatives: ["kimi-coding/k3", "deepseek/x", "a/y"],
+        },
+        {
+          verdict: verdict({ provider: "kimi-coding", level: 3, windows: [w("5h", 95, 3, "pct")] }),
+          alternatives: ["zai/glm", "deepseek/x"],
+        },
+      ],
+      NOW,
+    );
+    expect(text).toContain("替代候选（订阅优先）：deepseek/x。");
+    expect(text).not.toContain("kimi-coding/k3");
+    expect(text.match(/本轮不要/g)).toHaveLength(1);
+  });
+
+  it("falls back to separate L3 blocks when the alternatives cannot be merged losslessly", () => {
+    const hot = [w("5h", 93, 3, "pct", { resetAt: RESET })];
+    // 订阅口径不一致
+    const mixed = buildQuotaMessage(
+      [
+        {
+          verdict: verdict({ provider: "zai", level: 3, windows: hot }),
+          alternatives: { providers: ["a"], subscription: true },
+        },
+        {
+          verdict: verdict({ provider: "kimi-coding", level: 3, windows: [w("5h", 95, 3, "pct")] }),
+          alternatives: { providers: ["a"], subscription: false },
+        },
+      ],
+      NOW,
+    );
+    expect(mixed.match(/本轮不要/g)).toHaveLength(2);
+    // 交集为空而各自原本有候选
+    const disjoint = buildQuotaMessage(
+      [
+        { verdict: verdict({ provider: "zai", level: 3, windows: hot }), alternatives: ["b/x"] },
+        {
+          verdict: verdict({ provider: "kimi-coding", level: 3, windows: [w("5h", 95, 3, "pct")] }),
+          alternatives: ["c/y"],
+        },
+      ],
+      NOW,
+    );
+    expect(disjoint.match(/本轮不要/g)).toHaveLength(2);
+    expect(disjoint).toContain("派给它会");
+  });
+
   it("returns empty string for no sections", () => {
     expect(buildQuotaMessage([], NOW)).toBe("");
   });

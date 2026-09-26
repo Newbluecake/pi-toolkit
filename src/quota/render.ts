@@ -168,8 +168,9 @@ export function alternativesAdvice(input: AlternativeInput): string {
  * 放在替代候选之后写「该 provider」时，最近的先行词是候选（如 zai），读起来像
  * 候选会被拦（2026-09 现场反馈）。
  */
-function directUseText(provider: string, alternatives: AlternativeInput): string {
-  return `本轮不要把新任务派给 ${provider}（${GATE_PROMISE}）。\n${alternativesAdvice(alternatives)}`;
+function directUseText(provider: string, alternatives: AlternativeInput, plural = false): string {
+  const promise = plural ? GATE_PROMISE.replace("派给它", "派给它们") : GATE_PROMISE;
+  return `本轮不要把新任务派给 ${provider}（${promise}）。\n${alternativesAdvice(alternatives)}`;
 }
 
 /** 已耗尽的窗口没有「还剩多久耗尽」可言——ETA 子句只给未耗尽窗口。 */
@@ -240,6 +241,11 @@ export function buildQuotaBlockText(
   now: Millis,
   label: string = v.provider,
 ): string {
+  return `${quotaBlockHead(v, now, label)}。\n${directUseText(label, alternatives)}`;
+}
+
+/** L3 块的首行（读数 + ETA + 重置时刻），不含句号与后续建议。 */
+function quotaBlockHead(v: ProviderVerdict, now: Millis, label: string): string {
   const w = triggerWindow(v);
   let head: string;
   if (w === undefined) {
@@ -251,7 +257,31 @@ export function buildQuotaBlockText(
     if (etaMs !== undefined) head += `，预计 ${etaSpanText(etaMs)}内耗尽`;
     if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
-  return `${head}。\n${directUseText(label, alternatives)}`;
+  return head;
+}
+
+/**
+ * 多个 provider 同时 L3（2026-09-26 用户反馈「提示词内容有点重复」）：每个 provider
+ * 只保留一行读数，禁用句与替代候选合并成一段。替代候选取各段的**交集**并剔除全部被禁用
+ * 的 provider（对每个被禁者都成立的替代才写）；各段订阅口径不一致、或交集为空而原本有
+ * 候选时无法无损合并 ⇒ 返回 undefined，由调用方回落到逐段输出。
+ */
+function buildMergedBlockText(
+  entries: readonly { section: QuotaSection; label: string; members: readonly string[] }[],
+  now: Millis,
+): string | undefined {
+  const normalized = entries.map((e) => normalizeAlternatives(e.section.alternatives));
+  const subscription = normalized[0]?.subscription ?? true;
+  if (normalized.some((n) => n.subscription !== subscription)) return undefined;
+  const blocked = new Set(entries.flatMap((e) => e.members));
+  const first = normalized[0]?.providers ?? [];
+  const providers = first.filter(
+    (p) => !blocked.has(p.split("/")[0] ?? p) && normalized.every((n) => n.providers.includes(p)),
+  );
+  if (providers.length === 0 && normalized.some((n) => n.providers.length > 0)) return undefined;
+  const heads = entries.map((e) => `${quotaBlockHead(e.section.verdict, now, e.label)}。`);
+  const labels = entries.map((e) => e.label).join("、");
+  return `${heads.join("\n")}\n${directUseText(labels, { providers, subscription }, true)}`;
 }
 
 /**
@@ -291,7 +321,9 @@ type QuotaSection = { readonly verdict: ProviderVerdict; readonly alternatives: 
  * 等级也纳入分组键——同池但等级不同（闩锁/陈旧度差异）宁可分开说。替代链剔除组内
  * 全部成员（同池的另一个名字不是替代）。
  */
-function groupSamePool(sections: readonly QuotaSection[]): { section: QuotaSection; label: string }[] {
+function groupSamePool(
+  sections: readonly QuotaSection[],
+): { section: QuotaSection; label: string; members: readonly string[] }[] {
   const groups = new Map<string, { section: QuotaSection; providers: string[] }>();
   for (const s of sections) {
     const key = `${s.verdict.level}#${poolSignature(s.verdict)}`;
@@ -306,7 +338,7 @@ function groupSamePool(sections: readonly QuotaSection[]): { section: QuotaSecti
       providers: normalized.providers.filter((a) => !members.has(a.split("/")[0] ?? a)),
       subscription: normalized.subscription,
     };
-    return { section: { verdict: section.verdict, alternatives }, label: providers.join(" / ") };
+    return { section: { verdict: section.verdict, alternatives }, label: providers.join(" / "), members: providers };
   });
 }
 
@@ -325,9 +357,10 @@ export function buildQuotaMessage(sections: readonly QuotaSection[], now: Millis
   for (const { section: s, label } of grouped) {
     if (s.verdict.level === 2) parts.push(buildQuotaWarnText(s.verdict, now, label, s.alternatives));
   }
-  for (const { section: s, label } of grouped) {
-    if (s.verdict.level === 3) parts.push(buildQuotaBlockText(s.verdict, s.alternatives, now, label));
-  }
+  const l3 = grouped.filter((g) => g.section.verdict.level === 3);
+  const merged = l3.length > 1 ? buildMergedBlockText(l3, now) : undefined;
+  if (merged !== undefined) parts.push(merged);
+  else for (const { section: s, label } of l3) parts.push(buildQuotaBlockText(s.verdict, s.alternatives, now, label));
   return parts.join("\n");
 }
 
