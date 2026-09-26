@@ -435,6 +435,39 @@ describe("HUD recovery countdown (resets …)", () => {
     expect(renderQuotaStatus([flipped], NOW, 600_000)).toBe("quota kimi 100%/100% resets 2d11h");
   });
 
+  it("shows the countdown once a window is above 95% (not only when exhausted)", () => {
+    const near = verdict({
+      provider: "zai-coding-cn",
+      level: 3,
+      windows: [w("5h", 12, 0, "none"), w("week", 96, 3, "pct", { resetAt: NOW + TWO_D_11H })],
+    });
+    expect(renderQuotaStatus([near], NOW, 600_000)).toBe("quota zai 12%/96% resets 2d11h");
+    // 正好 95% 不算「超过」
+    const at95 = verdict({
+      provider: "zai-coding-cn",
+      level: 2,
+      windows: [w("5h", 12, 0, "none"), w("week", 95, 2, "pct", { resetAt: NOW + TWO_D_11H })],
+    });
+    expect(renderQuotaStatus([at95], NOW, 600_000)).toBe("quota zai 12%/95%");
+    // 5h 97% 在前、7d 100% 在后 ⇒ 取较晚的重置
+    const both = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [
+        w("5h", 97, 3, "pct", { resetAt: NOW + 3 * H }),
+        w("week", 100, 3, "exhausted", { resetAt: NOW + TWO_D_11H }),
+      ],
+    });
+    expect(renderQuotaStatus([both], NOW, 600_000)).toBe("quota kimi 97%/100% resets 2d11h");
+    // 只有 5h 过线 ⇒ 5h 的重置
+    const only5h = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [w("5h", 97, 3, "pct", { resetAt: NOW + 3 * H }), w("week", 40, 0, "none")],
+    });
+    expect(renderQuotaStatus([only5h], NOW, 600_000)).toBe("quota kimi 97%/40% resets 3h");
+  });
+
   it("hides the countdown when any exhausted window has no resetAt (never guess)", () => {
     // 唯一用完窗口无 resetAt
     expect(renderQuotaStatus([exhaustedKimi(undefined)], NOW, 600_000)).toBe("quota kimi 8%/100%");

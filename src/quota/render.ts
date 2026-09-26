@@ -336,16 +336,22 @@ function shortName(provider: string): string {
 }
 
 /**
- * 恢复倒计时（HUD 专属，2026-09 用户确认效果）：provider 有**用完**窗口
- * （`usedPct ≥ 100` 且非 `reset-elapsed`——后者只是读数过期，等下一次拉取）
- * 时，倒计时到「真正恢复可用」＝全部用完窗口 `resetAt` 的**最大值**（5h 与 7d
- * 都用完要等 7d 重置）。任一用完窗口的 `resetAt` 未知 ⇒ 不显示（不猜）；
- * resetAt 已过属防御分支（ladder 规则 0 已把它判成 reset-elapsed）。
+ * HUD 显示重置倒计时的用量门槛（2026-09-26 用户要求：超过 95% 都要展示 reset time，
+ * 此前只在 100% 用完时显示）。
+ */
+export const HUD_RESET_COUNTDOWN_PCT = 95;
+
+/**
+ * 恢复倒计时（HUD 专属，2026-09 用户确认效果）：provider 有**临近耗尽或已用完**的窗口
+ * （显示的整数百分比 `> HUD_RESET_COUNTDOWN_PCT`——与段内数字口径一致——且非 `reset-elapsed`——后者只是读数过期，等下一次拉取）
+ * 时，倒计时到这些窗口 `resetAt` 的**最大值**（5h 与 7d 都过线要等 7d 重置）。
+ * 任一过线窗口的 `resetAt` 未知 ⇒ 不显示（不猜）；resetAt 已过属防御分支
+ * （ladder 规则 0 已把它判成 reset-elapsed）。
  */
 function recoveryCountdownText(v: ProviderVerdict, now: Millis): string | undefined {
   let max: Millis | undefined = undefined;
   for (const w of v.windows) {
-    if (w.reason === "reset-elapsed" || w.usedPct < 100) continue;
+    if (w.reason === "reset-elapsed" || !(pctOf(w.usedPct) > HUD_RESET_COUNTDOWN_PCT)) continue;
     if (w.resetAt === undefined || !Number.isFinite(w.resetAt)) return undefined;
     if (max === undefined || w.resetAt > max) max = w.resetAt;
   }
@@ -410,8 +416,8 @@ function hudSegmentThemed(v: ProviderVerdict, now: Millis, theme: QuotaStatusThe
 }
 
 /**
- * HUD 一行（含陈旧标记）：`quota zai 62%/21% · kimi 8%/100% resets 2d11h`（用完
- * 的 provider 段末尾带恢复倒计时，见 `recoveryCountdownText`）。
+ * HUD 一行（含陈旧标记）：`quota zai 62%/21% · kimi 8%/100% resets 2d11h`（有窗口
+ * 超过 95% 的 provider 段末尾带重置倒计时，见 `recoveryCountdownText`）。
  * 全部 provider 无快照（verdicts 为空）⇒ undefined（不占位）；
  * 任一快照年龄超过 refreshMs ⇒ 行尾追加 ` ·stale 12m`（取最老者）。
  */
