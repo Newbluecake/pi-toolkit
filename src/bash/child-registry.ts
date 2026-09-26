@@ -28,6 +28,22 @@ import type { RunExitFacts } from "../core/types.js";
  */
 export const CHILD_BASH_REGISTRY_KEY = Symbol.for("pi-subagent:child-bash-jobs");
 
+/**
+ * host-view host-capability diagnostics (child-bash no-host-view diag plan,
+ * L1 todo #20): the process-global name a HOST stack (`src/stack.ts`)
+ * declares once its `attachHost` wiring is live (i.e. it is running code new
+ * enough to ever call `registry.attachHost(...)`). A child session that
+ * cannot find its host view checks this flag first: if the host never
+ * declared it, the host is simply old, un-reloaded code with no wiring at
+ * all — expected, not a bug, nothing worth recording. Only when the flag IS
+ * declared but the view is still missing is that a genuine timing/wiring
+ * problem worth a diagnostic. Versioned (not just a boolean) so a future
+ * capability-shape change can be told apart from this one without a second
+ * name.
+ */
+export const HOST_VIEW_CAPABILITY = "host-view";
+export const HOST_VIEW_CAPABILITY_VERSION = 1;
+
 /** Aggregate result of killing every non-terminal job of a sealed session (§3.3 S3). */
 export interface KillAllReport {
   killed: string[];
@@ -77,6 +93,22 @@ export interface ChildBashRegistry {
   register(entry: Omit<ChildBashEntry, "generation">): { generation: number; unregister(): void };
   attachHost(sessionId: string, view: HostRunView): void;
   hostView(sessionId: string): HostRunView | undefined;
+  /**
+   * Declares a process-wide host capability (see `HOST_VIEW_CAPABILITY`
+   * above). Reference-counted, not last-build-wins: `src/stack.ts` rebuilds
+   * its stack sequentially (previous stack disposed at the top of the next
+   * build, per AGENTS.md), but a defensive rebuild or a test harness that
+   * builds more than one stack in the same process must not have the
+   * SECOND build's dispose accidentally clear the capability out from under
+   * a still-live FIRST stack (or vice versa) — counting handles that
+   * correctly regardless of build/dispose interleaving, whereas "last build
+   * wins" would not. Returns a release function; calling it more than once
+   * is a no-op (idempotent, matching every other dispose() in this
+   * codebase).
+   */
+  declareHostCapability(name: string, version: number): () => void;
+  /** True once ANY currently-live declaration of `name` exists (see `declareHostCapability`). */
+  hasHostCapability(name: string): boolean;
   isSealed(sessionId: string): boolean;
   /** Resolves once this sessionId is sealed (immediately if already sealed). Never rejects.
    *
@@ -132,6 +164,7 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
   private readonly sealed = new Set<string>();
   private readonly sealResults = new Map<string, { facts: RunExitFacts; done: Promise<KillAllReport> }>();
   private readonly sealWaiters = new Map<string, Array<() => void>>();
+  private readonly capabilities = new Map<string, { version: number; count: number }>();
 
   register(entry: Omit<ChildBashEntry, "generation">): { generation: number; unregister(): void } {
     const generation = (this.generations.get(entry.sessionId) ?? 0) + 1;
@@ -172,6 +205,27 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
   }
   hostView(sessionId: string): HostRunView | undefined {
     return this.hosts.get(sessionId);
+  }
+  declareHostCapability(name: string, version: number): () => void {
+    const current = this.capabilities.get(name);
+    if (current) {
+      current.count += 1;
+      current.version = version;
+    } else {
+      this.capabilities.set(name, { version, count: 1 });
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const entry = this.capabilities.get(name);
+      if (!entry) return; // already dropped (e.g. by a defensive extra release) — nothing to do
+      entry.count -= 1;
+      if (entry.count <= 0) this.capabilities.delete(name);
+    };
+  }
+  hasHostCapability(name: string): boolean {
+    return (this.capabilities.get(name)?.count ?? 0) > 0;
   }
   isSealed(sessionId: string): boolean {
     return this.sealed.has(sessionId);
@@ -312,4 +366,40 @@ export function getChildBashRegistry(): ChildBashRegistry {
   const created = new ChildBashRegistryImpl();
   g[CHILD_BASH_REGISTRY_KEY] = created;
   return created;
+}
+
+/**
+ * Defensive host-side declare (child-bash no-host-view diag plan, L1 todo
+ * #20): `registry` is the `Symbol.for` global singleton, so a host stack
+ * running NEW code can still end up holding an OLD-shaped registry object
+ * (whichever side called `getChildBashRegistry()` first in this process won
+ * the singleton's shape). A missing method must never throw — it just means
+ * this capability cannot be declared at all, which degrades to exactly the
+ * old (no capability, always-silent) behavior everywhere that reads it.
+ */
+export function declareHostBashViewCapability(registry: ChildBashRegistry): () => void {
+  const withCap = registry as Partial<ChildBashRegistry>;
+  try {
+    return typeof withCap.declareHostCapability === "function"
+      ? withCap.declareHostCapability(HOST_VIEW_CAPABILITY, HOST_VIEW_CAPABILITY_VERSION)
+      : () => undefined;
+  } catch {
+    return () => undefined;
+  }
+}
+
+/**
+ * Defensive child-side read counterpart to `declareHostBashViewCapability`
+ * — same "old-shaped object, missing method" concern, this time on the read
+ * path (§ per the plan: "子会话读取时用可选调用/typeof 检查"). Never throws;
+ * an old/absent method reads as "not declared" (silent, matches an
+ * un-reloaded host with no `attachHost` wiring at all).
+ */
+export function hostBashViewCapabilityDeclared(registry: ChildBashRegistry): boolean {
+  const withCap = registry as Partial<ChildBashRegistry>;
+  try {
+    return typeof withCap.hasHostCapability === "function" ? withCap.hasHostCapability(HOST_VIEW_CAPABILITY) : false;
+  } catch {
+    return false;
+  }
 }

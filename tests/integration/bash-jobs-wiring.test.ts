@@ -16,6 +16,11 @@ import {
   readBashJobTail,
 } from "../../src/stack.js";
 import { probePid, readProcStartTime } from "../../src/bash/process.js";
+import {
+  getChildBashRegistry,
+  HOST_VIEW_CAPABILITY,
+  HOST_VIEW_CAPABILITY_VERSION,
+} from "../../src/bash/child-registry.js";
 import { sanitizeSessionDirName } from "../../src/bash/session-dirs.js";
 import { createJobRecord, type JobRecord } from "../../src/bash/types.js";
 import type { BashJobManager } from "../../src/bash/manager.js";
@@ -905,4 +910,87 @@ describe("S7 index wiring: session_shutdown policy table (§3.7)", () => {
       }
     }
   });
+});
+
+describe("L1 todo #20: host-view capability declaration lifecycle across stack rebuild", () => {
+  it.runIf(posix)(
+    "declares the capability on build and keeps it live across a same-module rebuild (no observable gap)",
+    () => {
+      const dir = join(tmpRoot, "cap-rebuild");
+      const registry = getChildBashRegistry();
+      const first = buildSessionStack(fakePi().pi, ctx, settingsWith(dir), types, []);
+      expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(true);
+      // Same-module rebuild (new/fork/resume): the top of the next build
+      // releases the FIRST stack's declaration before re-declaring for the
+      // second — both are synchronous with no `await` in between, so nothing
+      // in this process can ever observe the capability as false here.
+      const second = buildSessionStack(fakePi().pi, ctx, settingsWith(dir), types, []);
+      expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(true);
+      first.bashJobs?.dispose();
+      second.bashJobs?.dispose();
+      second.hostBashViewCapability.dispose();
+    },
+  );
+
+  it.runIf(posix)(
+    "session_shutdown's dispose and the next build's top-of-build release are both idempotent (dual-path teardown never double-releases)",
+    () => {
+      const dir = join(tmpRoot, "cap-dual-path");
+      const registry = getChildBashRegistry();
+      const stack = buildSessionStack(fakePi().pi, ctx, settingsWith(dir), types, []);
+      expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(true);
+      // index.ts's session_shutdown path.
+      stack.hostBashViewCapability.dispose();
+      // A second call (e.g. a defensive extra dispose, or the next build's
+      // module-level handoff finding the SAME handle already released) must
+      // never throw and must never under/over-release a sibling declaration.
+      expect(() => stack.hostBashViewCapability.dispose()).not.toThrow();
+      stack.bashJobs?.dispose();
+    },
+  );
+
+  it.runIf(posix)(
+    "a same-module rebuild's automatic top-of-build release already retired the OLD stack's handle — disposing it again afterwards is a safe no-op that never touches the NEW stack's live declaration",
+    () => {
+      const dirA = join(tmpRoot, "cap-multi-a");
+      const dirB = join(tmpRoot, "cap-multi-b");
+      const registry = getChildBashRegistry();
+      const a = buildSessionStack(fakePi().pi, ctx, settingsWith(dirA), types, []);
+      const bCtx = {
+        ...ctx,
+        sessionManager: { getEntries: () => [], getSessionId: () => "session-b-cap" },
+      } as ExtensionContext;
+      // Building B is the "same-module rebuild" path: its own top-of-build
+      // already released A's declaration via the module-level handoff before
+      // B declares its own — so by the time B exists, A's handle is already a
+      // spent no-op (matches AGENTS.md: "the previous session's pieces are
+      // disposed at the top of the next build").
+      const b = buildSessionStack(fakePi().pi, bCtx, settingsWith(dirB), types, []);
+      expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(true);
+      a.hostBashViewCapability.dispose(); // already-spent handle — must not throw, must not affect B's live declaration
+      expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(true);
+      b.hostBashViewCapability.dispose();
+      expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(false);
+      a.bashJobs?.dispose();
+      b.bashJobs?.dispose();
+    },
+  );
+
+  it.runIf(posix)(
+    "two truly concurrent declarations on the registry itself (bypassing the sequential stack handoff) are reference-counted — releasing one never clears the still-live other",
+    () => {
+      const registry = getChildBashRegistry();
+      const releaseExtra = registry.declareHostCapability(HOST_VIEW_CAPABILITY, HOST_VIEW_CAPABILITY_VERSION);
+      try {
+        const dir = join(tmpRoot, "cap-truly-concurrent");
+        const stack = buildSessionStack(fakePi().pi, ctx, settingsWith(dir), types, []);
+        expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(true);
+        stack.hostBashViewCapability.dispose();
+        expect(registry.hasHostCapability(HOST_VIEW_CAPABILITY)).toBe(true); // the extra, independent declaration is still live
+        stack.bashJobs?.dispose();
+      } finally {
+        releaseExtra();
+      }
+    },
+  );
 });

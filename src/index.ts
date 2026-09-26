@@ -716,6 +716,11 @@ export default function activate(pi: ExtensionAPI): void {
     // worktreeLate.dispose() just above (a scan still resolving when the session ends must
     // never surface a stale prompt into a torn-down UI).
     stack.worktreeOrphansStartup?.dispose();
+    // child-bash no-host-view diag plan (L1 todo #20): covers the fresh-
+    // module `/reload` case the same way as worktreeOrphansStartup just
+    // above — idempotent, so this and buildSessionStack's own top-of-build
+    // release can never double-release.
+    stack.hostBashViewCapability.dispose();
     // bash auto-background §3.7: reload/new/resume/fork always keep the
     // processes (the next stack adopts them); only a real `quit` consults
     // shutdownPolicy, and even `kill` is bounded best-effort — a background

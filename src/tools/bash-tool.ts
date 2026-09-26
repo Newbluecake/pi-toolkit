@@ -138,6 +138,17 @@ export interface BashToolDeps {
    */
   toolBudgetMs?: () => number | undefined;
   /**
+   * L1 todo #20: sink for the one-time "no host view attached, using the
+   * static tool budget" diagnostic below. Absent ⇒ dropped silently (the
+   * conservative default). This module deliberately stays agnostic about
+   * WHERE it goes / whether it is worth recording at all — that decision
+   * (host-view capability declared or not, see `src/bash/child-registry.ts`)
+   * lives entirely in the caller (`src/bash/child.ts`), which is the side
+   * that actually knows about the registry. Never called for anything else;
+   * exceptions from a thrown `diag` are swallowed by the caller, never here.
+   */
+  diag?: (message: string) => void;
+  /**
    * §2.6/§5.2 deadline switch for the description suffix. Absent or disabled ⇒
    * the description is byte-identical to today's (golden fixture).
    */
@@ -381,10 +392,20 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
             deadlineAt = startedAt + budget;
             if (!warnedStaticDeadline) {
               warnedStaticDeadline = true;
-              warn(
-                `bash auto-background: no host view attached; using the static tool budget ` +
-                  `(${budget}ms) as the return deadline for this call`,
-              );
+              // L1 todo #20: this used to be `warn(...)` (console.warn), which
+              // corrupts the host TUI paint stream from a same-process child
+              // session. `deps.diag` (absent ⇒ dropped) is the non-TUI sink
+              // the caller wires up; whether it is worth recording at all is
+              // entirely the caller's call (host-view capability declared or
+              // not — see BashToolDeps.diag's doc).
+              try {
+                deps.diag?.(
+                  `bash auto-background: no host view attached; using the static tool budget ` +
+                    `(${budget}ms) as the return deadline for this call`,
+                );
+              } catch {
+                /* diagnostics must never break the return path */
+              }
             }
           }
         }

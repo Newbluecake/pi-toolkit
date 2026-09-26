@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import type { RunExitFacts } from "../../src/core/types.js";
 import {
   CHILD_BASH_REGISTRY_KEY,
+  HOST_VIEW_CAPABILITY,
   KILL_ALL_BACKSTOP_MARGIN_MS,
   REGISTRY_CAP,
+  declareHostBashViewCapability,
   getChildBashRegistry,
+  hostBashViewCapabilityDeclared,
   type ChildBashEntry,
+  type ChildBashRegistry,
   type KillAllReport,
 } from "../../src/bash/child-registry.js";
 
@@ -388,5 +392,77 @@ describe("child-registry: FIFO capacity bound (T2, no blanket clear)", () => {
     expect(late.sealedCalls).toBe(1); // the late entry was sealed (its first and only)
     expect(killCalls).toBe(1); // but the memoized killAll still killed at most once across both seals
     // And the entry still unregisters normally (no zombie in `entries`).
+  });
+});
+
+describe("child-registry: host capability declaration (child-bash no-host-view diag, L1 todo #20)", () => {
+  it("is undeclared by default for a name nobody has declared yet", () => {
+    const registry = getChildBashRegistry();
+    expect(registry.hasHostCapability(`nobody-declared-${randomUUID()}`)).toBe(false);
+  });
+
+  it("declareHostCapability makes hasHostCapability true until release() is called", () => {
+    const registry = getChildBashRegistry();
+    const name = `cap-${randomUUID()}`;
+    const release = registry.declareHostCapability(name, 1);
+    expect(registry.hasHostCapability(name)).toBe(true);
+    release();
+    expect(registry.hasHostCapability(name)).toBe(false);
+  });
+
+  it("release() is idempotent: calling it twice never under-releases a DIFFERENT still-live declaration", () => {
+    const registry = getChildBashRegistry();
+    const name = `cap-idempotent-${randomUUID()}`;
+    const releaseA = registry.declareHostCapability(name, 1);
+    const releaseB = registry.declareHostCapability(name, 1); // a second, independent "stack" declares the same name
+    releaseA();
+    releaseA(); // double-release must not decrement twice
+    expect(registry.hasHostCapability(name)).toBe(true); // B's declaration is still live
+    releaseB();
+    expect(registry.hasHostCapability(name)).toBe(false);
+  });
+
+  it("reference-counts across multiple concurrent declarations — releasing one never clears another still-live one (multi-stack-in-one-process safety)", () => {
+    const registry = getChildBashRegistry();
+    const name = `cap-refcount-${randomUUID()}`;
+    const release1 = registry.declareHostCapability(name, 1);
+    const release2 = registry.declareHostCapability(name, 1);
+    const release3 = registry.declareHostCapability(name, 1);
+    release1();
+    expect(registry.hasHostCapability(name)).toBe(true);
+    release2();
+    expect(registry.hasHostCapability(name)).toBe(true);
+    release3();
+    expect(registry.hasHostCapability(name)).toBe(false);
+  });
+
+  it("declareHostBashViewCapability / hostBashViewCapabilityDeclared use HOST_VIEW_CAPABILITY and never throw against an OLD-shaped registry object missing the new methods (cross-module-version safety)", () => {
+    // Mirrors a registry object created by an older child-registry.ts module
+    // version sharing this process's `Symbol.for` singleton slot — it has
+    // every method THIS test file's real registry needs elsewhere, but not
+    // the two new capability methods.
+    const oldShaped = {
+      register: () => ({ generation: 1, unregister: () => undefined }),
+      attachHost: () => undefined,
+      hostView: () => undefined,
+      isSealed: () => false,
+      whenSealed: () => Promise.resolve(),
+      sealAndKill: () => undefined,
+      sealAll: () => Promise.resolve(),
+      // declareHostCapability / hasHostCapability deliberately absent.
+    } as unknown as ChildBashRegistry;
+    expect(() => declareHostBashViewCapability(oldShaped)).not.toThrow();
+    const release = declareHostBashViewCapability(oldShaped);
+    expect(() => release()).not.toThrow(); // the no-op release must also be safe to call
+    expect(() => hostBashViewCapabilityDeclared(oldShaped)).not.toThrow();
+    expect(hostBashViewCapabilityDeclared(oldShaped)).toBe(false); // undeclared reads as silent-default
+  });
+
+  it("declareHostBashViewCapability / hostBashViewCapabilityDeclared round-trip through HOST_VIEW_CAPABILITY on a real (current) registry", () => {
+    const registry = getChildBashRegistry();
+    expect(hostBashViewCapabilityDeclared(registry)).toBe(registry.hasHostCapability(HOST_VIEW_CAPABILITY));
+    const release = declareHostBashViewCapability(registry);
+    expect(hostBashViewCapabilityDeclared(registry)).toBe(true);
+    release();
   });
 });

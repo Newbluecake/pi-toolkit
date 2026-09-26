@@ -38,7 +38,7 @@ import {
 import { createProcessPort } from "./bash/process.js";
 import { previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
-import { getChildBashRegistry, type HostRunView } from "./bash/child-registry.js";
+import { getChildBashRegistry, declareHostBashViewCapability, type HostRunView } from "./bash/child-registry.js";
 import { dueAtFor, effectiveDeadlineAt } from "./core/deadline.js";
 import { formatDuration } from "./ui/fleet-panel.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
@@ -217,6 +217,18 @@ let previousWorktreeLate: { dispose(): void } | undefined;
  * stack gets rebuilt/torn down can NEVER fire a stale notify after the fact.
  */
 let previousWorktreeOrphansStartup: { dispose(): void } | undefined;
+/**
+ * child-bash no-host-view diag plan (L1 todo #20): the previous build's
+ * release for the "host-view" capability declaration on the process-global
+ * `ChildBashRegistry`, released at the top of the next build. Reference-
+ * counted on the registry side (not "last build wins", see
+ * `ChildBashRegistry.declareHostCapability`'s doc) precisely so this
+ * same-module rebuild handoff can never clear a declaration a DIFFERENT,
+ * still-live stack in this process also holds — release() is idempotent, so
+ * this dual-path teardown (also index.ts's `session_shutdown`, covering the
+ * fresh-module `/reload` case) can never double-release.
+ */
+let previousHostBashViewCapabilityRelease: (() => void) | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -898,6 +910,17 @@ export interface Stack {
    * disposes it directly (covers `/reload`, which resets the module-level handoff variable).
    */
   worktreeOrphansStartup?: { dispose(): void };
+  /**
+   * child-bash no-host-view diag plan (L1 todo #20): releases this stack's
+   * "host-view" capability declaration on the process-global
+   * `ChildBashRegistry`. Dual-path teardown, same discipline as
+   * `worktreeOrphansStartup` — the top of the NEXT `buildSessionStack`
+   * releases it (same-module rebuild) AND index.ts's `session_shutdown`
+   * disposes it directly (covers `/reload`, which resets the module-level
+   * handoff variable). Idempotent (release-once), so both paths firing is
+   * always safe.
+   */
+  hostBashViewCapability: { dispose(): void };
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -1322,6 +1345,8 @@ export function buildSessionStack(
   previousWorktreeLate = undefined;
   previousWorktreeOrphansStartup?.dispose();
   previousWorktreeOrphansStartup = undefined;
+  previousHostBashViewCapabilityRelease?.();
+  previousHostBashViewCapabilityRelease = undefined;
 
   // consult (plan §5.1/§6 C-9): fork-copy GC — once per session build, no
   // timer. Unconditional (runs even with consult.enabled=false so leftovers
@@ -1645,6 +1670,12 @@ export function buildSessionStack(
   // value assigned further down in this same function (same forward-
   // reference pattern as spawnRef/consultRef above).
   const childBashRegistry = getChildBashRegistry();
+  // L1 todo #20: this stack really does run the `attachHost` wiring below
+  // (`onSessionSeen`) — declare it once, released at the top of the NEXT
+  // build (module-level handoff above) and by index.ts's session_shutdown
+  // (the `/reload` fresh-module case).
+  const hostBashViewCapabilityRelease = declareHostBashViewCapability(childBashRegistry);
+  previousHostBashViewCapabilityRelease = hostBashViewCapabilityRelease;
   const pendingToolReturns = new Map<string, number>();
   const warnedToolLag = new Set<string>();
   const hostViewFor = (runId: RunId): HostRunView => ({
@@ -2410,6 +2441,7 @@ export function buildSessionStack(
     worktreeLate,
     worktreeOrphans,
     worktreeOrphansStartup,
+    hostBashViewCapability: { dispose: hostBashViewCapabilityRelease },
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
     ...(bashJobRecovery ? { bashJobRecovery } : {}),

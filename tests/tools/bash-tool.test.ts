@@ -900,6 +900,7 @@ describe("bash override tool — T15 two-layer race (§3.6)", () => {
       host: () => undefined,
       toolBudgetMs: () => 8_000,
       now: () => FAKE_NOW,
+      diag: (message) => harness.warnings.push(message),
       warn: (message) => harness.warnings.push(message),
     });
     const first = tool.execute("call-1", { command: "npm test" }, undefined, undefined, makeCtx("/repo"));

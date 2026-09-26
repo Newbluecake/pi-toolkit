@@ -18,9 +18,15 @@ import { createJobStore } from "./job-store.js";
 import { createProcessPort } from "./process.js";
 import { sanitizeSessionDirName } from "./session-dirs.js";
 import { isTerminalJobStatus, previewCommand, type JobId, type JobRecord } from "./types.js";
-import { getChildBashRegistry, type ChildBashRegistry, type KillAllReport } from "./child-registry.js";
+import {
+  getChildBashRegistry,
+  hostBashViewCapabilityDeclared,
+  type ChildBashRegistry,
+  type KillAllReport,
+} from "./child-registry.js";
 import { createBashTool } from "../tools/bash-tool.js";
 import { createBashJobTool } from "../tools/bash-job-tool.js";
+import { recordBashDiag } from "./diag.js";
 
 /**
  * bash-timeout-grace plan §3.4-3.7 (P5): the child (subagent) session half of
@@ -328,6 +334,14 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
           maxExtensions: config.maxExtensions,
           maxTimeoutFactor: config.maxTimeoutFactor,
         }),
+        // L1 todo #20: lets `bash-tool.ts` stay agnostic about the registry
+        // — this closure decides whether the one-time "no host view
+        // attached" notice is worth recording at all (host-view capability
+        // declared) and, if so, records it through the non-TUI sink instead
+        // of console.warn (see `src/bash/diag.ts`).
+        diag: (message) => {
+          if (hostBashViewCapabilityDeclared(registry)) recordBashDiag(pi, message);
+        },
         warn,
       }),
       ensureManager,
@@ -365,9 +379,17 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
       if (!host) {
         if (!warnedNoHostView) {
           warnedNoHostView = true;
-          warn(
-            "bash job settle-hold: no host view attached yet; skipping this settle (no watchdog bound to check against)",
-          );
+          // L1 todo #20: was `warn(...)` (console.warn) — corrupts the host TUI
+          // paint stream from this same-process child session. Only recorded
+          // when a host stack has actually declared the host-view capability
+          // (a genuine timing/wiring problem); an old/un-reloaded host that
+          // never declares it is expected to have no view, silently.
+          if (hostBashViewCapabilityDeclared(registry)) {
+            recordBashDiag(
+              pi,
+              "bash job settle-hold: no host view attached yet; skipping this settle (no watchdog bound to check against)",
+            );
+          }
         }
         return undefined;
       }

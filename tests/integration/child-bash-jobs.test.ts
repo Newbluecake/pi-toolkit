@@ -7,7 +7,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import { bashJobsEnabled, checkBashToolReturnLag, scheduleBashJobRecovery } from "../../src/stack.js";
 import { computeHoldCap, HOLD_MIN_MS, MARGIN_HOLD_MS, W_HOLD_MS, wireChildBashJobs } from "../../src/bash/child.js";
-import { getChildBashRegistry, type HostRunView } from "../../src/bash/child-registry.js";
+import {
+  getChildBashRegistry,
+  declareHostBashViewCapability,
+  type HostRunView,
+} from "../../src/bash/child-registry.js";
 import { FakeClock } from "../../src/core/clock.js";
 import { formatExitFacts } from "../../src/tools/result-text.js";
 import type { JobRecord } from "../../src/bash/types.js";
@@ -29,6 +33,7 @@ function fakePi() {
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const tools = new Map<string, { name: string; execute: (...args: never[]) => unknown }>();
   const sent: { message: Record<string, unknown>; options?: { triggerTurn?: boolean } }[] = [];
+  const entries: { customType: string; data: unknown }[] = [];
   const pi = {
     registerTool: (tool: { name: string; execute: (...args: never[]) => unknown }) => tools.set(tool.name, tool),
     registerCommand: () => undefined,
@@ -38,7 +43,9 @@ function fakePi() {
     sendMessage: (message: Record<string, unknown>, options?: { triggerTurn?: boolean }) => {
       sent.push({ message, ...(options ? { options } : {}) });
     },
-    appendEntry: () => undefined,
+    appendEntry: (customType: string, data?: unknown) => {
+      entries.push({ customType, data });
+    },
     events: { on: () => () => undefined, emit: () => undefined },
     exec: async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
   };
@@ -47,7 +54,7 @@ function fakePi() {
     for (const handler of handlers.get(event) ?? []) results.push(await handler(payload, ctx));
     return results;
   };
-  return { pi: pi as unknown as ExtensionAPI, tools, sent, emit, handlers };
+  return { pi: pi as unknown as ExtensionAPI, tools, sent, entries, emit, handlers };
 }
 
 function fakeCtx(sessionId: string, cwd: string): ExtensionContext {
@@ -187,12 +194,12 @@ describe.skipIf(!posix)("wireChildBashJobs lazy manager + notification routing (
 
 describe.skipIf(!posix)("agent_before_settle placement checks (§3.5, T20)", () => {
   async function makeChild(overrides: Partial<AgentSettings["bashJobs"]> = {}) {
-    const { pi, tools, emit } = fakePi();
+    const { pi, tools, emit, entries } = fakePi();
     const sessionId = randomUUID();
     const dir = tmpDir();
     wireChildBashJobs(pi, { settings: settingsWith(overrides, dir) });
     const ctx = fakeCtx(sessionId, dir);
-    return { pi, tools, emit, sessionId, ctx, dir };
+    return { pi, tools, emit, sessionId, ctx, dir, entries };
   }
   function settleEvent(overrides: { outcome?: string; canContinue?: boolean; entries?: unknown[] } = {}) {
     return {
@@ -236,6 +243,35 @@ describe.skipIf(!posix)("agent_before_settle placement checks (§3.5, T20)", () 
     await bash.execute("call-1", { command: "sleep 5", run_in_background: true }, undefined, undefined, ctx);
     const [result] = await emit("agent_before_settle", settleEvent(), ctx);
     expect(result).toBeUndefined();
+  });
+
+  it("L1 todo #20: no host view + no declared host-view capability (old/un-reloaded host) ⇒ no diagnostic entry recorded", async () => {
+    const { tools, emit, ctx, entries } = await makeChild();
+    const bash = tools.get("bash")!;
+    await bash.execute("call-1", { command: "sleep 5", run_in_background: true }, undefined, undefined, ctx);
+    await emit("agent_before_settle", settleEvent(), ctx);
+    expect(entries.some((e) => e.customType === "subagent:bash-diag")).toBe(false);
+  });
+
+  it("L1 todo #20: no host view but the host HAS declared the host-view capability (real timing/wiring problem) ⇒ one diagnostic entry, recorded once", async () => {
+    const release = declareHostBashViewCapability(getChildBashRegistry());
+    try {
+      const { tools, emit, ctx, entries } = await makeChild();
+      const bash = tools.get("bash")!;
+      await bash.execute("call-1", { command: "sleep 5", run_in_background: true }, undefined, undefined, ctx);
+      await emit("agent_before_settle", settleEvent(), ctx);
+      await emit("agent_before_settle", settleEvent(), ctx); // a second settle must not record a second entry
+      const diagEntries = entries.filter((e) => e.customType === "subagent:bash-diag");
+      // The bash tool's OWN "no host view attached, static budget" diagnostic
+      // (a different once-per-instance latch, fired on the earlier `bash`
+      // call above) also lands here — filter down to the settle-hold one.
+      const settleHoldDiags = diagEntries.filter((e) =>
+        String((e.data as { message?: string }).message).includes("settle-hold"),
+      );
+      expect(settleHoldDiags).toHaveLength(1);
+    } finally {
+      release();
+    }
   });
 
   it("放行: host.stopping()", async () => {
