@@ -1,11 +1,17 @@
 /**
  * LAN generation scope (plan §3): a disposable tree of unref'd timers and
  * deferred cleanups, used by `startHub`'s `rootScope` (hub lifetime) and by
- * `hub/lan-controller.ts`'s per-`start()` child scope (LD, W3). Dispose is
- * idempotent, cascades to children first (most specific torn down first),
- * then runs its own defers in reverse registration order, each bounded by
- * `DEFER_DEADLINE_MS` so a wedged cleanup (e.g. a db child process ignoring
- * SIGTERM) can never block hub shutdown — errors are only logged.
+ * the per-LAN-assembly child scope handed to `LanFrontendDeps.scope`
+ * (`hub/lan-assembly.ts`'s `build()`, S1-W3 LD — plan §15.8's documented
+ * deviation: LC's `hub/http.ts` self-hosts the bind → 60s tick → 421-
+ * recompute → revoke lifecycle directly rather than through a separate
+ * `lan-controller.ts`, so this scope's only consumers are `hub.ts`'s
+ * `rootScope` and whatever `LanFrontendDeps.scope` is threaded into). Dispose
+ * is idempotent, cascades to children first (most specific torn down
+ * first), then runs its own defers in reverse registration order, each
+ * bounded by `DEFER_DEADLINE_MS` so a wedged cleanup (e.g. a db child
+ * process ignoring SIGTERM) can never block hub shutdown — errors are only
+ * logged.
  */
 import type { HubLog } from "./ports.js";
 

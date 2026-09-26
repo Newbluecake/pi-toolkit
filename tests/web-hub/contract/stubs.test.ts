@@ -4,25 +4,17 @@
  * name) when called, and does nothing else observable. When W2/W3 fills in a
  * package, the corresponding `it(...)` below MUST be deleted — its continued
  * presence/pass would mean the stub was never replaced.
+ *
+ * S1-W3 LD has filled in `lan-assembly.ts`'s `defaultLanAssembly.build` —
+ * every stub this file ever guarded has now been replaced, so there is
+ * nothing left to assert here (an empty `describe` would just be dead
+ * weight); see `hub-lan.test.ts` and `hub-lan-config.test.ts` for the real
+ * coverage that replaced it.
  */
-import { describe, expect, it } from "vitest";
-import { defaultLanAssembly } from "../../../src/web-hub/hub/lan-assembly.js";
-import type { Scope } from "../../../src/web-hub/hub/lifecycle.js";
-import type { HubLog } from "../../../src/web-hub/hub/ports.js";
-
-const noopLog: HubLog = { info() {}, warn() {}, error() {} };
+import { describe, it } from "vitest";
 
 describe("W1 stubs throw E_NOT_IMPLEMENTED:<pkg> (contract ①)", () => {
-  it("lan-assembly.ts: defaultLanAssembly.build ⇒ LD", async () => {
-    await expect(
-      defaultLanAssembly.build({
-        cfg: { port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
-        paths: {} as never,
-        log: noopLog,
-        now: () => 0,
-        scope: {} as Scope,
-        onStatus: () => {},
-      }),
-    ).rejects.toThrow("E_NOT_IMPLEMENTED:LD");
+  it("no stubs remain (S1-W2/W3 filled in LP, LC and LD)", () => {
+    // Intentionally empty — see file header.
   });
 });

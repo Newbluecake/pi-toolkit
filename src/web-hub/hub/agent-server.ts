@@ -6,11 +6,22 @@
  *
  * A connection superseded by a reclaim (`AgentConn.close("reclaimed")`) never
  * reports `onClose` — the registry record already belongs to the new socket.
+ *
+ * `lan_req` / `hub_ctl` (plan §8, S1-W3 LD 包): dispatched to `deps.admin`
+ * (`admin.ts`) *before* `registry.onFrame` is ever called — same-uid admin
+ * frames must never enter the registry, the bus, or this file's own normal
+ * per-frame logging (§8.1 "不进 registry、bus 和普通日志"); `admin.ts` owns
+ * the dedicated audit log line instead. `deps.admin` is `undefined` in every
+ * P1/direct-unit-test caller (agent-server.test.ts) — `hello_ack.caps` is
+ * only emitted when it is provided (only `hub.ts`'s real assembly does),
+ * which is also why those tests' exact `toEqual` on `hello_ack` stays
+ * byte-identical (§1.4.4).
  */
 import type net from "node:net";
 import { decodeAgentFrame, LIMITS, TIMING, type AgentFrame, type HubFrame } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import { PROTO, protoCompatible } from "../protocol/version.js";
+import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
 
@@ -25,7 +36,17 @@ const RETRY_PROTO_MS = 30_000;
 
 export function createAgentServer(
   server: import("node:net").Server,
-  deps: { registry: Registry; config: HubConfig; log: HubLog; now: () => number; httpPort: () => number },
+  deps: {
+    registry: Registry;
+    config: HubConfig;
+    log: HubLog;
+    now: () => number;
+    httpPort: () => number;
+    /** Only `hub.ts`'s real assembly provides this (plan §8, S1-W3 LD); direct unit tests of
+     * this module never do, which is exactly what keeps their `hello_ack` `toEqual` assertions
+     * byte-identical (§1.4.4) — `caps` is omitted entirely, not `undefined`-valued, when absent. */
+    admin?: AdminHandler;
+  },
 ): AgentServer {
   const { registry, config, log, now } = deps;
   const conns = new Set<{ sock: net.Socket; teardown: () => void }>();
@@ -38,6 +59,7 @@ export function createAgentServer(
     }
     sock.unref();
     let agentKey: string | undefined;
+    let agentPid: number | undefined;
     let hadBye = false;
     let superseded = false;
     let finished = false;
@@ -105,6 +127,7 @@ export function createAgentServer(
         }
         clearTimeout(helloTimer);
         agentKey = registry.register(hello, conn).agentKey;
+        agentPid = hello.agentId.pid;
         write({
           t: "hello_ack",
           hubVersion: config.pluginVersion,
@@ -114,6 +137,7 @@ export function createAgentServer(
           pingMs: TIMING.pingMs,
           leaseMs: TIMING.staleMs,
           http: { port: deps.httpPort() },
+          ...(deps.admin === undefined ? {} : { caps: deps.admin.caps() }),
         });
         return;
       }
@@ -123,6 +147,23 @@ export function createAgentServer(
       if (frame.t === "ping") {
         write({ t: "pong", ts: frame.ts });
         registry.onFrame(agentKey, frame);
+        return;
+      }
+      // §8.1: same-uid admin frames never reach the registry, the bus, or this file's own
+      // per-frame logging — dispatched to `admin.ts` instead (which owns the audit log line).
+      if (frame.t === "lan_req") {
+        if (deps.admin !== undefined) {
+          deps.admin
+            .handleLanReq(frame, { agentKey, ...(agentPid === undefined ? {} : { agentPid }) })
+            .then(write, (err: unknown) =>
+              log.error("web-hub agent-server: admin lan_req handler rejected", { error: String(err) }),
+            );
+        }
+        return;
+      }
+      if (frame.t === "hub_ctl") {
+        write({ t: "hub_ctl_ack", rid: frame.rid });
+        deps.admin?.handleShutdown({ agentKey, ...(agentPid === undefined ? {} : { agentPid }) });
         return;
       }
       registry.onFrame(agentKey, frame);
