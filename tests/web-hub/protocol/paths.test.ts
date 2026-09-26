@@ -140,10 +140,4 @@ describe("ensurePrivateDir", () => {
     });
     expect(chmodCalls).toBe(0);
   });
-
-  it("XDG_SOCKET_DIR_POLICY / TMP_SOCKET_DIR_POLICY enforcement is LP's job in W1 (stub)", async () => {
-    const dir = join(tmp(), "xdg");
-    await expect(ensurePrivateDir(dir, XDG_SOCKET_DIR_POLICY)).rejects.toThrow("E_NOT_IMPLEMENTED:LP");
-    await expect(ensurePrivateDir(dir, TMP_SOCKET_DIR_POLICY)).rejects.toThrow("E_NOT_IMPLEMENTED:LP");
-  });
 });

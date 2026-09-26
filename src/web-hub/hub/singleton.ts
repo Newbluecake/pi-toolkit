@@ -23,9 +23,11 @@
  *    registers a dirty record); only ECONNREFUSED/ENOENT count as dead (EAGAIN
  *    = backlog full = a wedged but live hub) ⇒ unlink + listen once more.
  *    Once bound, `identity` (dev/ino of the socket + its containing dir) is
- *    captured via a minimal `lstat`-only helper — W1 does *not* call the
- *    exported `verifyBoundSocket` (that stub enforces symlink/owner checks,
- *    LP's job; see `protocol/paths.ts`).
+ *    captured via `protocol/paths.ts`'s `verifyBoundSocket` (LP, S1-W2) —
+ *    symlink/owner hygiene on both the socket and its directory, plus this
+ *    call site's own TOCTOU check that the directory's identity hasn't
+ *    changed since the pre-bind `ensurePrivateDir` call. `startFence` below
+ *    uses the very same function for its periodic check (§1.3.2).
  * ③ The lock is released as soon as the socket is bound: from then on the
  *    bound socket itself is the mutual-exclusion token (later starters hit
  *    EADDRINUSE and their probe succeeds). hub.json is written by `hub.ts`.
@@ -78,10 +80,11 @@
 import { createHash } from "node:crypto";
 import { chmod, lstat, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import net from "node:net";
-import { dirname } from "node:path";
 import {
   PrivateDirError,
   ensurePrivateDir,
+  verifyBoundSocket,
+  type DirIdentity,
   type FsDeps,
   type HubPaths,
   type PrivateDirReason,
@@ -150,14 +153,30 @@ export async function acquireSingleton(paths: HubPaths, deps?: SingletonDeps): P
   const now = deps?.now ?? Date.now;
   const signal = deps?.signal;
 
+  let dirBefore: DirIdentity;
   try {
-    await raced(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, deps?.fs), signal);
-    if (paths.socketDir !== paths.stateDir) {
-      await raced(ensurePrivateDir(paths.socketDir, paths.policies.socketDir, deps?.fs), signal);
-    }
+    dirBefore = await raced(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, deps?.fs), signal);
   } catch (err) {
     if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
     return { kind: "failed", error: `state dir: ${errMsg(err)}` };
+  }
+  if (paths.socketDir !== paths.stateDir) {
+    try {
+      dirBefore = await raced(ensurePrivateDir(paths.socketDir, paths.policies.socketDir, deps?.fs), signal);
+    } catch (err) {
+      if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
+      // LP: a socketDir policy violation (XDG/TMP enforcement) is reported with its precise
+      // `PrivateDirReason` and does not fall back to another socket candidate (§1.3.1 table's
+      // "候选选择" row) — the caller must fix or remove the offending entry.
+      if (err instanceof PrivateDirError) {
+        return {
+          kind: "failed",
+          error: `socket dir ${paths.socketDir} unavailable: ${err.reason}; remove that entry or set XDG_RUNTIME_DIR`,
+          reason: err.reason,
+        };
+      }
+      return { kind: "failed", error: `socket dir: ${errMsg(err)}` };
+    }
   }
 
   // ⓪ instance guard (held until release(); closed on every non-owner return)
@@ -187,7 +206,7 @@ export async function acquireSingleton(paths: HubPaths, deps?: SingletonDeps): P
   }
   let handedOver = false;
   try {
-    const r = await acquireFileSingleton(paths, probeMs, lockStaleMs, now, guard, deps?.fs, signal);
+    const r = await acquireFileSingleton(paths, probeMs, lockStaleMs, now, guard, deps?.fs, signal, dirBefore);
     handedOver = r.kind === "owner";
     return r;
   } finally {
@@ -203,6 +222,7 @@ async function acquireFileSingleton(
   guard: net.Server | undefined,
   fsDeps: SingletonFsDeps | undefined,
   signal: AbortSignal | undefined,
+  dirBefore: DirIdentity,
 ): Promise<SingletonResult> {
   // ① start lock (kept outside the release-bearing try/finally below: an early return here
   // never actually held the lock, so it must never call releaseLock — that matters when the
@@ -234,7 +254,7 @@ async function acquireFileSingleton(
   try {
     result = aborted(signal)
       ? { kind: "failed", error: "start aborted", reason: "aborted" }
-      : await bindAndOwn(paths, probeMs, guard, fsDeps, signal); // ② bind + identity
+      : await bindAndOwn(paths, probeMs, guard, fsDeps, signal, dirBefore); // ② bind + identity
   } catch (err) {
     if (aborted(signal)) result = { kind: "failed", error: "start aborted", reason: "aborted" };
     else throw err;
@@ -262,6 +282,7 @@ async function bindAndOwn(
   guard: net.Server | undefined,
   fsDeps: SingletonFsDeps | undefined,
   signal: AbortSignal | undefined,
+  dirBefore: DirIdentity,
 ): Promise<SingletonResult> {
   let bound = await listenOn(paths.socketPath);
   if (bound.kind === "inuse") {
@@ -271,7 +292,7 @@ async function bindAndOwn(
     if (bound.kind === "inuse") return { kind: "failed", error: "socket still in use after unlink" };
   }
   if (bound.kind === "error") return { kind: "failed", error: `listen: ${bound.error}` };
-  return bindIdentityAndOwn(paths, bound.server, guard, fsDeps, signal);
+  return bindIdentityAndOwn(paths, bound.server, guard, fsDeps, signal, dirBefore);
 }
 
 /** Identity computation + the `owner` result's `release()` closure (§1.3.2's ② continued). */
@@ -281,16 +302,24 @@ async function bindIdentityAndOwn(
   guard: net.Server | undefined,
   fsDeps: SingletonFsDeps | undefined,
   signal: AbortSignal | undefined,
+  dirBefore: DirIdentity,
 ): Promise<SingletonResult> {
   const chmodFn = fsDeps?.chmod ?? chmod;
   const lstatFn = fsDeps?.lstat ?? lstat;
   const renameFn = fsDeps?.rename ?? rename;
   let identity: SocketIdentity;
   try {
+    // LP: bind + fence share one verification function (§1.3.2). `verifyBoundSocket` itself
+    // only rejects hygiene violations (wrong type / symlink / wrong owner); the TOCTOU check
+    // against `dirBefore` (did the socket directory get swapped between `ensurePrivateDir`
+    // and this bind?) is this call site's own job — see `protocol/paths.ts`'s file header for
+    // why the shared function can't do that comparison itself.
+    const verified = await raced(verifyBoundSocket(paths.socketPath, dirBefore, fsDeps), signal);
+    if (verified.dir.dev !== dirBefore.dev || verified.dir.ino !== dirBefore.ino) {
+      throw new Error(`web-hub: ${paths.socketDir} identity changed between directory check and bind`);
+    }
     await raced(chmodFn(paths.socketPath, 0o600), signal);
-    const socketSt = await raced(lstatFn(paths.socketPath), signal);
-    const dirSt = await raced(lstatFn(paths.socketDir), signal);
-    identity = { socket: { dev: socketSt.dev, ino: socketSt.ino }, dir: { dev: dirSt.dev, ino: dirSt.ino } };
+    identity = verified;
   } catch (err) {
     await closeServer(server);
     if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
@@ -395,10 +424,8 @@ export function startFence(
   firstMs: number = Math.min(DEFAULT_FENCE_FIRST_MS, intervalMs),
   deps?: Partial<FsDeps> & { checkDeadlineMs?: number; ioStrikes?: number },
 ): () => void {
-  const lstatFn = deps?.lstat ?? lstat;
   const checkDeadlineMs = deps?.checkDeadlineMs ?? DEFAULT_FENCE_CHECK_DEADLINE_MS;
   const ioStrikes = deps?.ioStrikes ?? DEFAULT_FENCE_IO_STRIKES;
-  const dir = dirname(socketPath);
   let stopped = false;
   let inFlight = false;
   let ioStrikeCount = 0;
@@ -419,44 +446,41 @@ export function startFence(
   async function checkAsync(): Promise<void> {
     if (stopped || inFlight) return;
     inFlight = true;
-    // Review fix #7: the socket-lstat and dir-lstat share one checkDeadlineMs budget — the
-    // dir check only gets whatever the socket check didn't spend, so a single check can cost
-    // at most checkDeadlineMs in total, not checkDeadlineMs per lstat call.
-    const deadlineAt = Date.now() + checkDeadlineMs;
     try {
-      const st = await withDeadline(lstatFn(socketPath), remainingMs(deadlineAt));
+      // Bind and fence share one verification function (§1.3.2); review fix #7: the socket-lstat
+      // and dir-lstat verifyBoundSocket performs internally share this single checkDeadlineMs
+      // budget (wrapping the whole call, not each lstat separately) — a single check can cost
+      // at most checkDeadlineMs in total wall-clock time.
+      let seen: SocketIdentity | undefined;
+      let err: unknown;
+      try {
+        seen = await withDeadline(verifyBoundSocket(socketPath, identity.dir, deps), checkDeadlineMs);
+      } catch (e) {
+        err = e;
+      }
       if (stopped) return;
-      if (st.isSymbolicLink()) {
-        ioStrikeCount = 0;
-        lost("socket-symlink");
+      if (err !== undefined) {
+        const why = fenceLossOf(err, identity, undefined);
+        if (why === "io") {
+          noteIoStrike();
+        } else {
+          ioStrikeCount = 0;
+          lost(why);
+        }
         return;
       }
-      if (!st.isSocket()) {
+      const s = seen!;
+      const drifted =
+        s.socket.dev !== identity.socket.dev ||
+        s.socket.ino !== identity.socket.ino ||
+        s.dir.dev !== identity.dir.dev ||
+        s.dir.ino !== identity.dir.ino;
+      if (drifted) {
         ioStrikeCount = 0;
-        lost("socket-not-socket");
-        return;
-      }
-      if (st.dev !== identity.socket.dev || st.ino !== identity.socket.ino) {
-        ioStrikeCount = 0;
-        lost("socket-replaced");
-        return;
-      }
-      const dst = await withDeadline(lstatFn(dir), remainingMs(deadlineAt));
-      if (stopped) return;
-      if (dst.dev !== identity.dir.dev || dst.ino !== identity.dir.ino) {
-        ioStrikeCount = 0;
-        lost("dir-replaced");
+        lost(fenceLossOf(undefined, identity, s));
         return;
       }
       ioStrikeCount = 0;
-    } catch (err) {
-      if (stopped) return;
-      if (errCode(err) === "ENOENT") {
-        ioStrikeCount = 0;
-        lost("socket-missing");
-        return;
-      }
-      noteIoStrike();
     } finally {
       inFlight = false;
     }
@@ -475,10 +499,6 @@ export function startFence(
     clearInterval(timer);
   }
   return stop;
-}
-
-function remainingMs(deadlineAt: number): number {
-  return Math.max(0, deadlineAt - Date.now());
 }
 
 // ---------------------------------------------------------------------------

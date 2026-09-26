@@ -10,12 +10,6 @@ import { buildContext, createLanTransport } from "../../../src/web-hub/hub/http.
 import { defaultLanAssembly } from "../../../src/web-hub/hub/lan-assembly.js";
 import type { Scope } from "../../../src/web-hub/hub/lifecycle.js";
 import type { HubLog } from "../../../src/web-hub/hub/ports.js";
-import {
-  TMP_SOCKET_DIR_POLICY,
-  XDG_SOCKET_DIR_POLICY,
-  ensurePrivateDir,
-  verifyBoundSocket,
-} from "../../../src/web-hub/protocol/paths.js";
 
 const noopLog: HubLog = { info() {}, warn() {}, error() {} };
 
@@ -41,19 +35,5 @@ describe("W1 stubs throw E_NOT_IMPLEMENTED:<pkg> (contract ①)", () => {
     expect(() =>
       createLanTransport({ handleRequest: async () => {}, log: noopLog, connGuard: { admit: () => undefined } }),
     ).toThrow("E_NOT_IMPLEMENTED:LC");
-  });
-
-  it("protocol/paths.ts: ensurePrivateDir(dir, XDG_SOCKET_DIR_POLICY) ⇒ LP", async () => {
-    await expect(ensurePrivateDir("/run/user/1000", XDG_SOCKET_DIR_POLICY)).rejects.toThrow("E_NOT_IMPLEMENTED:LP");
-  });
-
-  it("protocol/paths.ts: ensurePrivateDir(dir, TMP_SOCKET_DIR_POLICY) ⇒ LP", async () => {
-    await expect(ensurePrivateDir("/tmp/pi-webhub-1000", TMP_SOCKET_DIR_POLICY)).rejects.toThrow(
-      "E_NOT_IMPLEMENTED:LP",
-    );
-  });
-
-  it("protocol/paths.ts: verifyBoundSocket(...) ⇒ LP", async () => {
-    await expect(verifyBoundSocket("/tmp/x/hub.sock", { dev: 0, ino: 0 })).rejects.toThrow("E_NOT_IMPLEMENTED:LP");
   });
 });
