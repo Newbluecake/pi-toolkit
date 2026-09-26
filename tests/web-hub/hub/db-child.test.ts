@@ -287,6 +287,105 @@ skipIfNoSqlite("maintenance script (open-check-migrate)", () => {
     }
   });
 
+  // Review fix (§4.1/§4.3 "损坏"): the object-name check above passes for a table/index that
+  // still exists under the right name but whose *shape* was silently damaged — a dropped
+  // column, a widened NOT NULL, an index rebuilt on the wrong column, or a missing FK. These
+  // cases previously sailed through as a "valid" db.
+  it("a column is dropped from an existing table (name still present) ⇒ db-invalid", async () => {
+    const t = tmp();
+    try {
+      await runMaint(t.dbFile, "open-check-migrate");
+      const { createRequire } = await import("node:module");
+      const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+      const db = new DatabaseSync(t.dbFile);
+      db.exec("ALTER TABLE sessions DROP COLUMN bound_origin");
+      db.close();
+      const res = await runMaint(t.dbFile, "open-check-migrate");
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe("db-invalid");
+      expect(res.detail).toContain("sessions.bound_origin");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("a NOT NULL constraint is widened away on rebuild (column still present) ⇒ db-invalid", async () => {
+    const t = tmp();
+    try {
+      await runMaint(t.dbFile, "open-check-migrate");
+      const { createRequire } = await import("node:module");
+      const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+      const db = new DatabaseSync(t.dbFile);
+      db.exec(`
+        PRAGMA foreign_keys=OFF;
+        ALTER TABLE sessions RENAME TO sessions_old;
+        CREATE TABLE sessions (
+          sid_hash BLOB PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          epoch INTEGER NOT NULL, bound_origin TEXT,
+          created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL, absolute_expires_at INTEGER NOT NULL, created_ip TEXT NOT NULL) STRICT;
+        INSERT INTO sessions SELECT * FROM sessions_old;
+        DROP TABLE sessions_old;
+        CREATE INDEX sessions_expiry ON sessions(expires_at);
+      `);
+      db.close();
+      const res = await runMaint(t.dbFile, "open-check-migrate");
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe("db-invalid");
+      expect(res.detail).toContain("sessions.bound_origin");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("sessions_expiry index rebuilt on the wrong column (index still exists by name) ⇒ db-invalid", async () => {
+    const t = tmp();
+    try {
+      await runMaint(t.dbFile, "open-check-migrate");
+      const { createRequire } = await import("node:module");
+      const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+      const db = new DatabaseSync(t.dbFile);
+      db.exec("DROP INDEX sessions_expiry");
+      db.exec("CREATE INDEX sessions_expiry ON sessions(created_at)");
+      db.close();
+      const res = await runMaint(t.dbFile, "open-check-migrate");
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe("db-invalid");
+      expect(res.detail).toContain("sessions_expiry");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("the sessions→users foreign key is dropped on rebuild (columns otherwise intact) ⇒ db-invalid", async () => {
+    const t = tmp();
+    try {
+      await runMaint(t.dbFile, "open-check-migrate");
+      const { createRequire } = await import("node:module");
+      const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+      const db = new DatabaseSync(t.dbFile);
+      db.exec(`
+        PRAGMA foreign_keys=OFF;
+        ALTER TABLE sessions RENAME TO sessions_old;
+        CREATE TABLE sessions (
+          sid_hash BLOB PRIMARY KEY, user_id INTEGER NOT NULL,
+          epoch INTEGER NOT NULL, bound_origin TEXT NOT NULL,
+          created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL, absolute_expires_at INTEGER NOT NULL, created_ip TEXT NOT NULL) STRICT;
+        INSERT INTO sessions SELECT * FROM sessions_old;
+        DROP TABLE sessions_old;
+        CREATE INDEX sessions_expiry ON sessions(expires_at);
+      `);
+      db.close();
+      const res = await runMaint(t.dbFile, "open-check-migrate");
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe("db-invalid");
+      expect(res.detail).toContain("sessions.user_id");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   it("checkpoint-passive / checkpoint-truncate on an existing db succeed", async () => {
     const t = tmp();
     try {

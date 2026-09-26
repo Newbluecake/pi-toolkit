@@ -83,6 +83,7 @@ import net from "node:net";
 import {
   PrivateDirError,
   ensurePrivateDir,
+  identityEquals,
   verifyBoundSocket,
   type DirIdentity,
   type FsDeps,
@@ -315,7 +316,7 @@ async function bindIdentityAndOwn(
     // and this bind?) is this call site's own job — see `protocol/paths.ts`'s file header for
     // why the shared function can't do that comparison itself.
     const verified = await raced(verifyBoundSocket(paths.socketPath, dirBefore, fsDeps), signal);
-    if (verified.dir.dev !== dirBefore.dev || verified.dir.ino !== dirBefore.ino) {
+    if (!identityEquals(verified.dir, dirBefore)) {
       throw new Error(`web-hub: ${paths.socketDir} identity changed between directory check and bind`);
     }
     await raced(chmodFn(paths.socketPath, 0o600), signal);
@@ -410,8 +411,8 @@ export function fenceLossOf(err: unknown, identity: SocketIdentity, seen: Socket
     return "io"; // E_DEADLINE / EIO / EACCES / anything else non-PrivateDirError
   }
   if (seen !== undefined) {
-    if (seen.socket.dev !== identity.socket.dev || seen.socket.ino !== identity.socket.ino) return "socket-replaced";
-    if (seen.dir.dev !== identity.dir.dev || seen.dir.ino !== identity.dir.ino) return "dir-replaced";
+    if (!identityEquals(seen.socket, identity.socket)) return "socket-replaced";
+    if (!identityEquals(seen.dir, identity.dir)) return "dir-replaced";
   }
   return "io";
 }
@@ -470,11 +471,7 @@ export function startFence(
         return;
       }
       const s = seen!;
-      const drifted =
-        s.socket.dev !== identity.socket.dev ||
-        s.socket.ino !== identity.socket.ino ||
-        s.dir.dev !== identity.dir.dev ||
-        s.dir.ino !== identity.dir.ino;
+      const drifted = !identityEquals(s.socket, identity.socket) || !identityEquals(s.dir, identity.dir);
       if (drifted) {
         ioStrikeCount = 0;
         lost(fenceLossOf(undefined, identity, s));

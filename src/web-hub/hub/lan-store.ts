@@ -146,7 +146,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     },
 
     async createSession(input, opts) {
-      const sid = randomBytes(24).toString("base64url");
+      const sid = randomBytes(32).toString("base64url");
       const sidHash = sha256Base64Url(sid);
       await dbClient.call(
         "createSession",
@@ -164,7 +164,14 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     },
 
     async touchSession(sidHash, now2, opts) {
-      const raw = await dbClient.call<RawSession | undefined>("touchSession", { sidHash, now: now2 }, opts);
+      // §4.2 "同 sid 去重与配额": fold concurrent touches for the same sidHash into one
+      // in-flight IPC (db-client.ts's dedup, keyed here so it never collides with any
+      // other op's dedupKey); the 9th distinct rider on the same key gets E_RATE.
+      const raw = await dbClient.call<RawSession | undefined>(
+        "touchSession",
+        { sidHash, now: now2 },
+        { ...opts, dedupKey: `touchSession:${sidHash}` },
+      );
       return decodeSession(raw);
     },
 
@@ -172,7 +179,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
       const raw = await dbClient.call<RawSession | undefined>(
         "touchSession",
         { sidHash, now: now2 },
-        { ...opts, reserved: true },
+        { ...opts, reserved: true, dedupKey: `touchSession:${sidHash}` },
       );
       return decodeSession(raw);
     },

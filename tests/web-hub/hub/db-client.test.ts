@@ -205,13 +205,66 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
     const t = tmp();
     await migrate(t.dbFile);
     try {
-      const c = make(t.dbFile, { interactiveSlots: 1, queueSlots: 5, deadlineMs: 150 });
-      const holder = c.call("__block", { ms: 5000 }).catch(() => undefined);
+      // interactiveSlots:0 ⇒ nothing is ever dispatched to the (perfectly healthy) child;
+      // every call just sits in the queue until its own admission deadline fires. This
+      // isolates "genuinely overloaded queue, child never touched" from "an in-flight op got
+      // stuck and the child was SIGKILLed" (the dedicated "in-flight deadline" test above) —
+      // a single long-blocking holder call would (review fix) also get its *own* stuck-deadline
+      // fired no later than any later-admitted queued call's deadline, SIGKILLing the child and
+      // (correctly, post-fix) rejecting the queued call with E_DB via the exit path before its
+      // own queue-deadline timer ever gets a chance to fire E_BUSY.
+      const c = make(t.dbFile, { interactiveSlots: 0, queueSlots: 5, deadlineMs: 150 });
       const queued = c.call("getUser", { username: "admin" }).catch((e: unknown) => e);
       const err = await queued;
       expect(err).toBeInstanceOf(DbClientError);
       expect((err as DbClientError).code).toBe("E_BUSY");
-      await holder;
+    } finally {
+      t.cleanup();
+    }
+  }, 10_000);
+
+  it("subprocess exit rejects an in-flight AND a still-queued call immediately — fail-closed across a restart, not 'ride out on the next child' (plan §4.2)", async () => {
+    const t = tmp();
+    await migrate(t.dbFile);
+    try {
+      const realSpawn = (await import("node:child_process")).spawn;
+      let capturedChild: ReturnType<typeof realSpawn> | undefined;
+      const c = make(t.dbFile, {
+        interactiveSlots: 1,
+        queueSlots: 5,
+        // Deliberately long: with the pre-fix behavior (queued calls left alone on exit,
+        // redispatched to the respawned child) this deadline would never fire and `queued`
+        // below would *resolve* with a real user row once the ~50ms backoff respawn lands —
+        // the exact "executes across a restart" bug this test guards against. With the fix,
+        // `queued` rejects immediately on exit, long before this deadline or the respawn.
+        deadlineMs: 5_000,
+        backoffMs: [50, 100, 200],
+        spawnFn: ((...args: Parameters<typeof realSpawn>) => {
+          const child = realSpawn(...args);
+          capturedChild = child;
+          return child;
+        }) as typeof realSpawn,
+      });
+      const inFlight = c.call("__block", { ms: 5_000 }).catch((e: unknown) => e);
+      // Give the __block call a moment to actually dispatch (become in-flight, occupying the
+      // single interactive slot) before the second call is admitted — it must land in the queue.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const queued = c.call("getUser", { username: "admin" }).catch((e: unknown) => e);
+      const killedAt = Date.now();
+      capturedChild?.kill("SIGKILL");
+      const [inFlightErr, queuedErr] = await Promise.all([inFlight, queued]);
+      const elapsedMs = Date.now() - killedAt;
+      expect(inFlightErr).toBeInstanceOf(DbClientError);
+      expect((inFlightErr as DbClientError).code).toBe("E_DB");
+      expect(queuedErr).toBeInstanceOf(DbClientError);
+      expect((queuedErr as DbClientError).code).toBe("E_DB");
+      // Rejected essentially synchronously with the exit event — well before the first
+      // backoff respawn (50ms) could ever have redispatched it to a fresh child.
+      expect(elapsedMs).toBeLessThan(40);
+      // The client still recovers after respawn: a fresh call succeeds.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const after = await c.call("getUser", { username: "admin" });
+      expect((after as { username: string }).username).toBe("admin");
     } finally {
       t.cleanup();
     }

@@ -15,6 +15,7 @@ import {
   TMP_SOCKET_DIR_POLICY,
   XDG_SOCKET_DIR_POLICY,
   ensurePrivateDir,
+  identityEquals,
   verifyBoundSocket,
 } from "../../../src/web-hub/protocol/paths.js";
 
@@ -110,6 +111,39 @@ describe("ensurePrivateDir: TMP_SOCKET_DIR_POLICY (/tmp fallback: create/repair 
     mkdirSync(dir, { mode: 0o755 });
     chmodSync(dir, 0o755);
     await ensurePrivateDir(dir, TMP_SOCKET_DIR_POLICY);
+    expect((await import("node:fs")).statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it("repairing a wider mode also fires the onWarn channel (review fix, §1.3.1 'chmod 0700 + warn')", async () => {
+    const parent = stickyParent();
+    const dir = join(parent, "pi-webhub-1234");
+    mkdirSync(dir, { mode: 0o755 });
+    chmodSync(dir, 0o755);
+    const warnings: Array<{ dir: string; detail: string }> = [];
+    await ensurePrivateDir(dir, TMP_SOCKET_DIR_POLICY, {
+      onWarn: (d, detail) => warnings.push({ dir: d, detail }),
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.dir).toBe(dir);
+    expect(warnings[0]!.detail).toContain("755");
+    expect(warnings[0]!.detail).toContain("0700");
+  });
+
+  it("a dir already at 0700 is a no-op and never fires onWarn", async () => {
+    const parent = stickyParent();
+    const dir = join(parent, "pi-webhub-1234");
+    await ensurePrivateDir(dir, TMP_SOCKET_DIR_POLICY); // creates fresh at 0700
+    let warned = false;
+    await ensurePrivateDir(dir, TMP_SOCKET_DIR_POLICY, { onWarn: () => (warned = true) });
+    expect(warned).toBe(false);
+  });
+
+  it("onWarn is optional — omitting it repairs silently (byte-identical to pre-fix behavior)", async () => {
+    const parent = stickyParent();
+    const dir = join(parent, "pi-webhub-1234");
+    mkdirSync(dir, { mode: 0o755 });
+    chmodSync(dir, 0o755);
+    await expect(ensurePrivateDir(dir, TMP_SOCKET_DIR_POLICY)).resolves.toBeDefined();
     expect((await import("node:fs")).statSync(dir).mode & 0o777).toBe(0o700);
   });
 
@@ -262,5 +296,56 @@ describe("verifyBoundSocket", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+});
+
+describe("identityEquals (review fix, §1.3.5 contract)", () => {
+  it("true iff both dev and ino match", () => {
+    expect(identityEquals({ dev: 1, ino: 2 }, { dev: 1, ino: 2 })).toBe(true);
+    expect(identityEquals({ dev: 1, ino: 2 }, { dev: 1, ino: 3 })).toBe(false);
+    expect(identityEquals({ dev: 1, ino: 2 }, { dev: 9, ino: 2 })).toBe(false);
+  });
+});
+
+describe("verifyBoundSocket call-site contract: every production caller must diff via identityEquals", () => {
+  // Review fix (§1.3.5): `verifyBoundSocket` deliberately never compares its own return value
+  // against a caller-supplied reference (see that function's "Contract" doc). This is a source
+  // scan over every production `.ts` file (excluding this module's own definition and any
+  // *.test.ts) enumerating every call site of `verifyBoundSocket(` and asserting the same file
+  // also imports and uses the shared `identityEquals` comparison helper — so a future call site
+  // added without wiring the comparison in fails this test instead of silently shipping a
+  // TOCTOU/fence hole.
+  it("every file that calls verifyBoundSocket( also imports and uses identityEquals(", async () => {
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const { join: joinPath } = await import("node:path");
+    const srcRoot = joinPath(import.meta.dirname, "..", "..", "..", "src", "web-hub");
+
+    function walk(dir: string): string[] {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir)) {
+        const p = joinPath(dir, entry);
+        const st = statSync(p);
+        if (st.isDirectory()) out.push(...walk(p));
+        else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(p);
+      }
+      return out;
+    }
+
+    const files = walk(srcRoot);
+    const callers: string[] = [];
+    for (const file of files) {
+      if (file.endsWith(joinPath("protocol", "paths.ts"))) continue; // the definition itself
+      const text = readFileSync(file, "utf8");
+      // Match real calls, not the doc-comment mentions of the name (those don't have a `(`
+      // immediately after in call position within this codebase's prose style) — look for the
+      // literal call syntax `verifyBoundSocket(`.
+      if (/\bverifyBoundSocket\(/.test(text)) {
+        callers.push(file);
+        expect(text, `${file} calls verifyBoundSocket( but never imports identityEquals`).toMatch(/\bidentityEquals\b/);
+      }
+    }
+    // Sanity: this scan must actually have found the known production call site(s) — an empty
+    // result would make the assertions above vacuously true.
+    expect(callers.some((f) => f.endsWith(joinPath("hub", "singleton.ts")))).toBe(true);
   });
 });

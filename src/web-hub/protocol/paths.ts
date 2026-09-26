@@ -34,6 +34,14 @@
  * in the signature (frozen, §1.3.1) purely to document what the caller's own
  * comparison is against; the bind-time caller (`singleton.ts`) does exactly
  * that comparison itself right after calling this function.
+ *
+ * **Contract (review fix, LP §1.3.5)**: `verifyBoundSocket` itself never diffs its
+ * return value against `dirBefore` (or against any previously recorded identity) —
+ * every call site MUST perform that comparison itself, using the exported
+ * `identityEquals` pure helper (never a hand-rolled `dev`/`ino` equality check, so a
+ * future call site can't silently get the field pair wrong). Enforced by
+ * `tests/web-hub/protocol/paths-private-dir.test.ts`'s source scan over every
+ * production call site of `verifyBoundSocket`.
  */
 
 import { Buffer } from "node:buffer";
@@ -82,6 +90,13 @@ export interface DirIdentity {
   readonly ino: number;
 }
 
+/** Pure equality check for `DirIdentity` (review fix, LP §1.3.5): the one comparison
+ * primitive every `verifyBoundSocket` call site must use — see that function's
+ * "Contract" doc above. */
+export function identityEquals(a: DirIdentity, b: DirIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
 export interface HubPaths {
   stateDir: string;
   socketPath: string;
@@ -115,6 +130,15 @@ export class PrivateDirError extends Error {
 
 export type FsDeps = Pick<typeof import("node:fs/promises"), "lstat" | "stat" | "mkdir" | "chmod" | "realpath"> & {
   getuid(): number;
+  /**
+   * Review fix (LP, §1.3.1): a testable warning sink. `ensurePrivateDir` calls this
+   * (instead of throwing) when `TMP_SOCKET_DIR_POLICY`'s `repairMode` chmods a widened
+   * `/tmp` fallback directory back to 0700 ("宽模式 ⇒ chmod 0700 + warn") — optional and
+   * never required: omitting it just means the repair happens silently, so no existing
+   * caller/test that doesn't wire it up changes behavior. `hub.ts`/`singleton.ts` default
+   * it to `log.warn(...)`; tests inject their own to observe the repair without a logger.
+   */
+  onWarn?: (dir: string, detail: string) => void;
 };
 
 function defaultFsDeps(): FsDeps {
@@ -274,7 +298,9 @@ async function ensureTmpSocketDir(dir: string, fs: FsDeps): Promise<DirIdentity>
   if ((st.mode & 0o777) !== 0o700) {
     // repairMode:true — the sticky parent means no other uid can swap this entry out from under
     // us between this check and the chmod, so repairing in place (rather than rejecting) is safe.
+    const before = (st.mode & 0o777).toString(8);
     await fs.chmod(dir, 0o700);
+    fs.onWarn?.(dir, `web-hub: ${dir} mode ${before} widened, repaired to 0700`);
     const repaired = await fs.lstat(dir);
     return { dev: repaired.dev, ino: repaired.ino };
   }

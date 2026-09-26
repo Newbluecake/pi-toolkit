@@ -114,6 +114,65 @@ describe("bind-time TOCTOU: socketDir identity changing between ensurePrivateDir
   });
 });
 
+describe("bind-time socket verification (§1.3.5): the freshly-bound socket itself fails hygiene", () => {
+  // §1.3.5's migration checklist explicitly calls for wiring-level coverage of "bind 后 lstat(socket)
+  // 是 symlink / 不是 socket / 属主不对" through the real `acquireSingleton` path (not just unit tests of
+  // `verifyBoundSocket` called directly, which `paths-private-dir.test.ts` already covers). All three
+  // tamper the *first* `lstat` call — which, with the default short-home layout (`socketDir ===
+  // stateDir`), is `verifyBoundSocket`'s own socket-path lstat performed right after `listen()`
+  // succeeds — and confirm `acquireSingleton` maps every one of them to the same `reason:"socket-verify"`
+  // (`bindIdentityAndOwn`'s catch-all) and leaves the listener closed with nothing bound behind.
+
+  function firstCallTamper(mutate: (st: { isSymbolicLink(): boolean; isSocket(): boolean; uid: number }) => void): {
+    lstat: typeof lstat;
+    calls: () => number;
+  } {
+    let calls = 0;
+    const fake = (async (path: Parameters<typeof lstat>[0]) => {
+      const real = await lstat(path);
+      calls++;
+      if (calls === 1) mutate(real as unknown as { isSymbolicLink(): boolean; isSocket(): boolean; uid: number });
+      return real;
+    }) as typeof lstat;
+    return { lstat: fake, calls: () => calls };
+  }
+
+  it("the bound socket appears to be a symlink ⇒ reason:'socket-verify', server closed, socket path gone", async () => {
+    const p = paths();
+    const tamper = firstCallTamper((st) => {
+      st.isSymbolicLink = () => true;
+    });
+    const r = await acquireSingleton(p, { probeMs: 50, guardName: null, fs: { lstat: tamper.lstat } });
+    expect(r.kind).toBe("failed");
+    if (r.kind === "failed") expect(r.reason).toBe("socket-verify");
+    expect(tamper.calls()).toBeGreaterThanOrEqual(1);
+    expect(existsSync(p.socketPath)).toBe(false);
+  });
+
+  it("the bound path appears not to be a socket at all ⇒ reason:'socket-verify', server closed, socket path gone", async () => {
+    const p = paths();
+    const tamper = firstCallTamper((st) => {
+      st.isSocket = () => false;
+    });
+    const r = await acquireSingleton(p, { probeMs: 50, guardName: null, fs: { lstat: tamper.lstat } });
+    expect(r.kind).toBe("failed");
+    if (r.kind === "failed") expect(r.reason).toBe("socket-verify");
+    expect(existsSync(p.socketPath)).toBe(false);
+  });
+
+  it("the bound socket appears owned by a different uid ⇒ reason:'socket-verify', server closed, socket path gone", async () => {
+    const p = paths();
+    const realUid = process.getuid?.() ?? 0;
+    const tamper = firstCallTamper((st) => {
+      st.uid = realUid + 1;
+    });
+    const r = await acquireSingleton(p, { probeMs: 50, guardName: null, fs: { lstat: tamper.lstat } });
+    expect(r.kind).toBe("failed");
+    if (r.kind === "failed") expect(r.reason).toBe("socket-verify");
+    expect(existsSync(p.socketPath)).toBe(false);
+  });
+});
+
 describe("startFence: real (not mocked) directory-identity and socket-identity drift", () => {
   it("the socket directory being replaced (same-path socket preserved, new dir inode) ⇒ onLost('dir-replaced')", async () => {
     const p = paths();
