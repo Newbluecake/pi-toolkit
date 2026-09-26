@@ -57,6 +57,19 @@ export function parseHubLanConfig(raw: unknown): { ok: true; lan: HubLanConfig }
     const parsed = parseOrigin(origin);
     if (parsed === undefined) return { ok: false, detail: `externalOrigins[${i}]=${origin}: origin-syntax` };
     if (parsed.scheme !== "https") return { ok: false, detail: `externalOrigins[${i}]=${origin}: origin-not-https` };
+    // §2.4: the *host* part of an externalOrigins entry must independently clear
+    // classifyHostToken's allow-list (fqdn/single-label/ipv4/dot-local/localhost) --
+    // canonicalHostKey/parseOrigin deliberately let numeric/denylisted hosts through
+    // (canonicalization ≠ allow-listing). In practice a bare numeric single-label host
+    // never reaches this check: WHATWG's URL parser already rejects it one step earlier
+    // (parseOrigin's `new URL()` call fails outright once the last label is all-digits
+    // and overflows a uint32, matching real-browser navigation behavior) -- but the
+    // classifyHostToken call stays here for defense in depth / consistency with every
+    // other host-classification call site, and it is what actually rejects denylisted
+    // hosts ("https://dev"), which do survive `new URL()` unchanged.
+    const hostOnly = parsed.hostKey.slice(0, parsed.hostKey.lastIndexOf(":"));
+    const hostCls = classifyHostToken(hostOnly);
+    if (!hostCls.ok) return { ok: false, detail: `externalOrigins[${i}]=${origin}: ${hostCls.reason}` };
     externalOrigins.push(canonicalOrigin(parsed.scheme, parsed.hostKey));
   }
 
@@ -65,4 +78,20 @@ export function parseHubLanConfig(raw: unknown): { ok: true; lan: HubLanConfig }
   }
 
   return { ok: true, lan: { port, extraHosts, trustProxyFrom, externalOrigins } };
+}
+
+/**
+ * Cross-field check main.ts runs after a successful `parseHubLanConfig`
+ * (plan §9.1: "webHub.lan.port ... 且不等于 webHub.port"). Kept out of
+ * `parseHubLanConfig` itself since that function's frozen signature
+ * (§1.4.3) takes only the raw LAN config, not the loopback port.
+ */
+export function checkLanPortConflict(
+  lan: HubLanConfig,
+  loopbackPort: number,
+): { ok: true } | { ok: false; detail: string } {
+  if (lan.port === loopbackPort) {
+    return { ok: false, detail: `port=${lan.port}: must not equal webHub.port` };
+  }
+  return { ok: true };
 }

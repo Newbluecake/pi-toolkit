@@ -33,6 +33,7 @@ import { TIMING } from "../protocol/messages.js";
 import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
 import type {
   AgentView,
+  ConnGuard,
   FrontendDeps,
   FrontendFactory,
   HostSnapshot,
@@ -289,11 +290,11 @@ export function buildContext(
   };
 }
 
-/** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` port isn't frozen elsewhere in W1, so it stays unexported/loose here until LC (W2) fills this in. */
+/** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` is now frozen in `hub/ports.ts` (review fix #9). */
 export interface LanTransportCtx {
   handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext): Promise<void>;
   log: HubLog;
-  connGuard: unknown;
+  connGuard: ConnGuard;
 }
 
 export function createLanTransport(_ctx: LanTransportCtx): LanTransport {

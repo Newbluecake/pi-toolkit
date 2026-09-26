@@ -21,11 +21,11 @@
 import { resolveHubPaths } from "../protocol/paths.js";
 import { installProcessHandlers, startHub, type StartHubDeps } from "./hub.js";
 import { createHttpFrontend } from "./http.js";
-import { parseHubLanConfig } from "./lan-config.js";
+import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
 
-export { parseHubLanConfig } from "./lan-config.js";
+export { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
 
 function fail(message: string, code: number): never {
   try {
@@ -53,12 +53,19 @@ async function main(): Promise<void> {
   const startDeps: StartHubDeps = {};
   if (config.lan !== undefined) {
     const parsed = parseHubLanConfig(config.lan);
-    if (parsed.ok) {
-      config = { ...config, lan: parsed.lan };
-    } else {
+    if (!parsed.ok) {
       const { lan: _drop, ...rest } = config;
       config = rest;
       startDeps.lanConfigError = { detail: parsed.detail };
+    } else {
+      const conflict = checkLanPortConflict(parsed.lan, config.port);
+      if (!conflict.ok) {
+        const { lan: _drop, ...rest } = config;
+        config = rest;
+        startDeps.lanConfigError = { detail: conflict.detail };
+      } else {
+        config = { ...config, lan: parsed.lan };
+      }
     }
   }
 

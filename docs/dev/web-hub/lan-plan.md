@@ -1395,6 +1395,10 @@ W1 只有一个包，不需要预检；W2 五包（含 LP）与 W3 两包的 spe
 | 6   | 一般 | crash handler 的 `STEP_DEADLINE_MS = 3s` 与 10s 是否统一     | **保持 3s 为 crash 专用硬退出**：进程状态不可信，尽快 respawn 优于完整清理；信号 / idle / fence 路径用 `HUB_CLOSE_DEADLINE_MS = 10s`；写入 §1.4.2 表、§3.1 表、§13、验收 #34（SIGTERM ≤ 10s）/ #35（crash 对照）与 W1 单测（`process.exit` spy）                                                                                                                                                                                                                |
 | —   | 用户 | v8 之后不再做文档复审                                        | §11 W1 重定义为**接口包**：落地清单 A（类型）/ B（完整实现）/ C（桩，抛 `E_NOT_IMPLEMENTED:<包>`）、typecheck 门槛与编译期契约测试、契约测试 ①–⑪、合入门槛「代码评审 + 四件套」；W1 通过前其它包不得开工；W2 只填实桩、改签名 ⇒ 回 W1；LP 的硬化行为从 S0 移到 W2（依赖 W1 的签名），§16 Q-2 相应更新；Q24                                                                                                                                                      |
 
+### 15.8 W1 代码评审（gpt-sol，打回；实施偏差记录，不再更新方案正文——Q24）
+
+按 Q24「之后的分歧以代码 + typecheck + 契约测试为准，方案文档只在 §15 追加实施偏差记录」处理：W1 代码评审打回 10 项（typecheck 未覆盖 `types.test-d.ts`、`lan.port` 未与 `webHub.port` 互斥校验、`externalOrigins` 未反查 `classifyHostToken`、`lan_req`/`lan_res` 判别联合不严格、singleton 启动路径残留同步 fs、fence 单次检查两次 lstat 各领一份预算、`hub-json` 的 patchLan/close 时序、`ConnGuard` 冻结为 `unknown`，以及本行）均已在代码与测试中修复（commit 见 `feat/web-hub-lan` 分支），不逐条改写本文件正文。唯一影响正文措辞的一项：§11 落地清单 B 中「`hostKey`」一词判定为文档笔误——按 §2.2 的 `RequestContext.hostKey` 字段理解，未实现为独立导出函数；`hub/http.ts`/`protocol/lan.ts` 均以此为准。
+
 ---
 
 ## 16. 待用户确认

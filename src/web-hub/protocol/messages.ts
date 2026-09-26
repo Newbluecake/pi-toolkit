@@ -7,7 +7,7 @@
  * literal plus total serialized size (≤ MAX_FRAME_BYTES). Unknown frame types —
  * including RESERVED_FRAME_TYPES — decode to `undefined` and are ignored.
  */
-import { Type, type TObject } from "@sinclair/typebox";
+import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { MAX_FRAME_BYTES } from "./ndjson.js";
 import type { LanStatus } from "./lan.js";
@@ -416,48 +416,86 @@ const BranchReqSchema = Type.Object({
   maxBytes: Type.Number(),
 });
 
-// --- S1 LAN control-plane frames (§8.1) ---
+// --- S1 LAN control-plane frames (§8.1): each op / ok variant is its own strict
+// (additionalProperties:false) schema, matching the discriminated-union TS types above
+// exactly — "passwd" requires username+password and rejects them on "info"/"unlock";
+// "ok:true" and "ok:false" are mutually exclusive (the latter requires code+message,
+// the former forbids them) (review fix #4). ---
 
-const LanReqSchema = Type.Object({
-  t: Type.Literal("lan_req"),
-  rid: Type.String(),
-  op: Type.Union([Type.Literal("info"), Type.Literal("passwd"), Type.Literal("unlock")]),
-  username: Type.Optional(Type.String()),
-  password: Type.Optional(Type.String()),
-});
+const LanReqInfoSchema = Type.Object(
+  { t: Type.Literal("lan_req"), rid: Type.String(), op: Type.Literal("info") },
+  { additionalProperties: false },
+);
+const LanReqPasswdSchema = Type.Object(
+  {
+    t: Type.Literal("lan_req"),
+    rid: Type.String(),
+    op: Type.Literal("passwd"),
+    username: Type.String(),
+    password: Type.String(),
+  },
+  { additionalProperties: false },
+);
+const LanReqUnlockSchema = Type.Object(
+  { t: Type.Literal("lan_req"), rid: Type.String(), op: Type.Literal("unlock") },
+  { additionalProperties: false },
+);
+const LanReqSchema = Type.Union([LanReqInfoSchema, LanReqPasswdSchema, LanReqUnlockSchema]);
 
-const HubCtlSchema = Type.Object({
-  t: Type.Literal("hub_ctl"),
-  rid: Type.String(),
-  op: Type.Literal("shutdown"),
-  reason: Type.Literal("restart"),
-});
+const HubCtlSchema = Type.Object(
+  {
+    t: Type.Literal("hub_ctl"),
+    rid: Type.String(),
+    op: Type.Literal("shutdown"),
+    reason: Type.Literal("restart"),
+  },
+  { additionalProperties: false },
+);
 
-const HubCtlAckSchema = Type.Object({
-  t: Type.Literal("hub_ctl_ack"),
-  rid: Type.String(),
-});
+const HubCtlAckSchema = Type.Object(
+  {
+    t: Type.Literal("hub_ctl_ack"),
+    rid: Type.String(),
+  },
+  { additionalProperties: false },
+);
 
-// `info` is validated loosely (`lan: Type.Unknown()`): `LanStatus` is a discriminated union pinned by
-// the exported TS type and by `tests/web-hub/contract/types.test-d.ts`, not duplicated here — the
-// same posture as `WireMessageSchema` / `WireEventSchema` for same-user-trusted payloads.
-const LanInfoPayloadSchema = Type.Object({
-  username: Type.String(),
-  initialPassword: Type.Optional(Type.String()),
-  initialLogin: Type.Optional(Type.Object({ ip: Type.String(), at: Type.Number() })),
-  lan: Type.Unknown(),
-});
+// `info.lan` is validated loosely (`Type.Unknown()`): `LanStatus` is a discriminated union
+// pinned by the exported TS type and by `tests/web-hub/contract/types.test-d.ts`, not
+// duplicated here — the same posture as `WireMessageSchema`/`WireEventSchema` for same-
+// user-trusted payloads. Every other field is strict (additionalProperties:false).
+const LanInfoPayloadSchema = Type.Object(
+  {
+    username: Type.String(),
+    initialPassword: Type.Optional(Type.String()),
+    initialLogin: Type.Optional(Type.Object({ ip: Type.String(), at: Type.Number() }, { additionalProperties: false })),
+    lan: Type.Unknown(),
+  },
+  { additionalProperties: false },
+);
 
-const LanResSchema = Type.Object({
-  t: Type.Literal("lan_res"),
-  rid: Type.String(),
-  ok: Type.Boolean(),
-  info: Type.Optional(LanInfoPayloadSchema),
-  code: Type.Optional(Type.String()),
-  message: Type.Optional(Type.String()),
-});
+const LanResOkSchema = Type.Object(
+  {
+    t: Type.Literal("lan_res"),
+    rid: Type.String(),
+    ok: Type.Literal(true),
+    info: Type.Optional(LanInfoPayloadSchema),
+  },
+  { additionalProperties: false },
+);
+const LanResErrSchema = Type.Object(
+  {
+    t: Type.Literal("lan_res"),
+    rid: Type.String(),
+    ok: Type.Literal(false),
+    code: Type.String(),
+    message: Type.String(),
+  },
+  { additionalProperties: false },
+);
+const LanResSchema = Type.Union([LanResOkSchema, LanResErrSchema]);
 
-const agentFrameSchemas: Readonly<Record<string, TObject>> = {
+const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   hello: HelloSchema,
   bye: ByeSchema,
   session: SessionFrameSchema,
@@ -474,7 +512,7 @@ const agentFrameSchemas: Readonly<Record<string, TObject>> = {
   hub_ctl: HubCtlSchema,
 };
 
-const hubFrameSchemas: Readonly<Record<string, TObject>> = {
+const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   hello_ack: HelloAckSchema,
   hello_reject: HelloRejectSchema,
   snapshot_req: SnapshotReqSchema,
@@ -499,7 +537,7 @@ export function decodeHubFrame(raw: unknown): HubFrame | undefined {
   return decodeWith(hubFrameSchemas, raw) as HubFrame | undefined;
 }
 
-function decodeWith(schemas: Readonly<Record<string, TObject>>, raw: unknown): object | undefined {
+function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): object | undefined {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   if (!withinFrameBudget(raw)) return undefined;
   const t = (raw as Record<string, unknown>)["t"];

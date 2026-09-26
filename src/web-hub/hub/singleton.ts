@@ -14,6 +14,12 @@
  * ① `open(start.lock, "wx")` (content `pid ts`; stale = holder pid dead or
  *    mtime older than `lockStaleMs` ⇒ unlink + retry once; live holder ⇒ back
  *    off once, then `exists` if a hub answers, else retry the lock once).
+ *    Review fix #5: every lock/probe/release file op (`open`/`stat`/
+ *    `readFile`/`unlink`/`rename`) is `fs.promises`, not `*Sync` — the whole
+ *    step is inside `acquireFileSingleton`'s single try/catch/finally, raced
+ *    against the startup `signal` via `raced()`, and any abort-triggered
+ *    rejection is re-thrown (never misclassified as e.g. "lock vanished,
+ *    retry is safe") so the outer catch can report `{reason:"aborted"}`.
  * ② `listen(sock)`; `EADDRINUSE` ⇒ connect-probe with a `probeMs` deadline
  *    (connect success = alive — no `hello` is sent, so the live hub never
  *    registers a dirty record); only ECONNREFUSED/ENOENT count as dead (EAGAIN
@@ -32,17 +38,24 @@
  * `acquireSingleton` return promptly once the deadline fires); a late bind
  * that only notices the abort *after* it already owns the socket closes the
  * server (which unlinks the still-ours path via libuv) before returning
- * `{kind:"failed", reason:"aborted"}`.
+ * `{kind:"failed", reason:"aborted"}`. `releaseLock`'s own cleanup is
+ * deliberately *not* raced against the signal — releasing a lock we already
+ * hold must run to completion even after abort; the outer `withSignal` wrap
+ * around the whole `acquireSingleton(...)` call at the `hub.ts` call site
+ * already bounds how long anyone actually *waits* for it.
  *
  * Fence: `startFence` compares a fresh `lstat` against the identity recorded
  * at bind time; `fenceLossOf` classifies the mismatch/error into a `FenceLoss`
  * (§1.3.2) — `"io"` (timeout or an unclassified error) only fires `onLost`
  * after `ioStrikes` consecutive occurrences, everything else fires once,
- * immediately.
+ * immediately. Review fix #7: the socket-lstat and dir-lstat of a single
+ * check share one `checkDeadlineMs` budget (the dir check gets whatever the
+ * socket check didn't spend), not `checkDeadlineMs` each — a single slow
+ * check can cost at most `checkDeadlineMs` wall-clock time in total.
  */
 import { createHash } from "node:crypto";
-import { closeSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { chmod, lstat } from "node:fs/promises";
+import { realpathSync, statSync } from "node:fs";
+import { chmod, lstat, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import net from "node:net";
 import { dirname } from "node:path";
 import {
@@ -68,7 +81,7 @@ export const DEFAULT_LOCK_STALE_MS = 10_000;
 export const DEFAULT_FENCE_MS = 30_000;
 /** First fence check comes early: a path removed right after startup must not leave the hub unreachable for 30s. */
 export const DEFAULT_FENCE_FIRST_MS = 2_000;
-/** Single fence check's own upper bound (§3.1); 3 consecutive timeouts before `onLost("io")` fires. */
+/** Single fence check's *total* upper bound (§3.1; both lstat calls share this budget, review fix #7); 3 consecutive timeouts before `onLost("io")` fires. */
 export const DEFAULT_FENCE_CHECK_DEADLINE_MS = 5_000;
 export const DEFAULT_FENCE_IO_STRIKES = 3;
 const RELEASE_DEADLINE_MS = 2_000;
@@ -117,7 +130,7 @@ export async function acquireSingleton(paths: HubPaths, deps?: SingletonDeps): P
   let guard: net.Server | undefined;
   if (guardName !== undefined) {
     const g = await acquireGuard(guardName, probeMs);
-    if (g.kind === "busy") return existsResult(paths, g.holderPid);
+    if (g.kind === "busy") return existsResult(paths, g.holderPid, signal);
     if (g.kind === "held") guard = g.server;
     // "off": no abstract namespace / foreign squatter ⇒ ①–③ only
   }
@@ -140,17 +153,26 @@ async function acquireFileSingleton(
   fsDeps: Partial<FsDeps> | undefined,
   signal: AbortSignal | undefined,
 ): Promise<SingletonResult> {
-  // ① start lock
-  let lock = tryLock(paths.startLock, now());
-  if (lock === "busy" && lockIsStale(paths.startLock, lockStaleMs, now())) {
-    safeUnlink(paths.startLock);
-    lock = tryLock(paths.startLock, now());
-  }
-  if (lock === "busy") {
-    await delay(probeMs);
-    if (await probeAlive(paths.socketPath, probeMs)) return existsResult(paths);
-    lock = tryLock(paths.startLock, now());
-    if (lock === "busy") return { kind: "failed", error: "start lock held by a live starter" };
+  // ① start lock (kept outside the release-bearing try/finally below: an early return here
+  // never actually held the lock, so it must never call releaseLock — that matters when the
+  // lock file's content happens to match our own pid, e.g. tests that simulate "a live
+  // starter" by writing `${process.pid} ${ts}` into the lock file).
+  let lock: "ok" | "busy" | { error: string };
+  try {
+    lock = await tryLock(paths.startLock, now(), signal);
+    if (lock === "busy" && (await lockIsStale(paths.startLock, lockStaleMs, now(), signal))) {
+      await safeUnlink(paths.startLock, signal);
+      lock = await tryLock(paths.startLock, now(), signal);
+    }
+    if (lock === "busy") {
+      await raced(delay(probeMs), signal);
+      if (await probeAlive(paths.socketPath, probeMs)) return await existsResult(paths, undefined, signal);
+      lock = await tryLock(paths.startLock, now(), signal);
+      if (lock === "busy") return { kind: "failed", error: "start lock held by a live starter" };
+    }
+  } catch (err) {
+    if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
+    throw err;
   }
   if (typeof lock === "object") return { kind: "failed", error: `start lock: ${lock.error}` };
 
@@ -159,8 +181,8 @@ async function acquireFileSingleton(
     // ② bind
     let bound = await listenOn(paths.socketPath);
     if (bound.kind === "inuse") {
-      if (await probeAlive(paths.socketPath, probeMs)) return existsResult(paths);
-      safeUnlink(paths.socketPath);
+      if (await probeAlive(paths.socketPath, probeMs)) return await existsResult(paths, undefined, signal);
+      await safeUnlink(paths.socketPath, signal);
       bound = await listenOn(paths.socketPath);
       if (bound.kind === "inuse") return { kind: "failed", error: "socket still in use after unlink" };
     }
@@ -205,7 +227,7 @@ async function acquireFileSingleton(
         let didPark = false;
         if (!ours) {
           try {
-            renameSync(paths.socketPath, parked);
+            await rename(paths.socketPath, parked);
             didPark = true;
           } catch {
             didPark = false; // nothing there (ENOENT) — close's unlink is harmless
@@ -214,7 +236,7 @@ async function acquireFileSingleton(
         await closeServer(server);
         if (didPark) {
           try {
-            renameSync(parked, paths.socketPath);
+            await rename(parked, paths.socketPath);
           } catch {
             // best effort
           }
@@ -224,9 +246,14 @@ async function acquireFileSingleton(
         if (guard !== undefined) await closeServer(guard);
       },
     };
+  } catch (err) {
+    if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
+    throw err;
   } finally {
-    // ③ release the lock — only if it is still ours.
-    releaseLock(paths.startLock);
+    // ③ release the lock — only if it is still ours. Never raced against `signal`: releasing a
+    // lock we hold must run to completion even after abort (the caller's own `withSignal` wrap
+    // around the whole `acquireSingleton(...)` call already bounds how long anyone *waits*).
+    await releaseLock(paths.startLock);
   }
 }
 
@@ -304,8 +331,12 @@ export function startFence(
   async function checkAsync(): Promise<void> {
     if (stopped || inFlight) return;
     inFlight = true;
+    // Review fix #7: the socket-lstat and dir-lstat share one checkDeadlineMs budget — the
+    // dir check only gets whatever the socket check didn't spend, so a single check can cost
+    // at most checkDeadlineMs in total, not checkDeadlineMs per lstat call.
+    const deadlineAt = Date.now() + checkDeadlineMs;
     try {
-      const st = await withDeadline(lstatFn(socketPath), checkDeadlineMs);
+      const st = await withDeadline(lstatFn(socketPath), remainingMs(deadlineAt));
       if (stopped) return;
       if (st.isSymbolicLink()) {
         ioStrikeCount = 0;
@@ -322,7 +353,7 @@ export function startFence(
         lost("socket-replaced");
         return;
       }
-      const dst = await withDeadline(lstatFn(dir), checkDeadlineMs);
+      const dst = await withDeadline(lstatFn(dir), remainingMs(deadlineAt));
       if (stopped) return;
       if (dst.dev !== identity.dir.dev || dst.ino !== identity.dir.ino) {
         ioStrikeCount = 0;
@@ -356,6 +387,10 @@ export function startFence(
     clearInterval(timer);
   }
   return stop;
+}
+
+function remainingMs(deadlineAt: number): number {
+  return Math.max(0, deadlineAt - Date.now());
 }
 
 // ---------------------------------------------------------------------------
@@ -430,7 +465,7 @@ function askGuard(name: string, deadlineMs: number): Promise<GuardAnswer> {
   });
 }
 
-/** `/proc/<pid>` owned by our uid (unreadable ⇒ trust: same-uid processes are never hidden from us). */
+/** `/proc/<pid>` owned by our uid (unreadable ⇒ trust: same-uid processes are never hidden from us). Not part of review fix #5's scope (a /proc probe, not our own state dir). */
 function sameUid(pid: number): boolean {
   const uid = process.getuid?.();
   if (uid === undefined) return true;
@@ -442,34 +477,47 @@ function sameUid(pid: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// helpers
+// helpers — lock / probe / release (review fix #5: fs.promises, abort-aware)
 // ---------------------------------------------------------------------------
 
-function tryLock(file: string, ts: number): "ok" | "busy" | { error: string } {
-  let fd: number;
+async function tryLock(
+  file: string,
+  ts: number,
+  signal: AbortSignal | undefined,
+): Promise<"ok" | "busy" | { error: string }> {
+  let handle;
   try {
-    fd = openSync(file, "wx", 0o600);
+    handle = await raced(open(file, "wx", 0o600), signal);
   } catch (err) {
+    if (aborted(signal)) throw err;
     if (errCode(err) === "EEXIST") return "busy";
     return { error: errMsg(err) };
   }
   try {
-    writeSync(fd, `${process.pid} ${ts}\n`);
-  } catch {
+    await raced(handle.writeFile(`${process.pid} ${ts}\n`), signal);
+  } catch (err) {
+    if (aborted(signal)) throw err;
     // content is advisory; mtime still marks freshness
   } finally {
-    closeSync(fd);
+    await handle.close();
   }
   return "ok";
 }
 
-function lockIsStale(file: string, staleMs: number, now: number): boolean {
+async function lockIsStale(
+  file: string,
+  staleMs: number,
+  now: number,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
   let mtimeMs: number;
-  let content = "";
+  let content: string;
   try {
-    mtimeMs = statSync(file).mtimeMs;
-    content = readFileSync(file, "utf8");
+    const st = await raced(stat(file), signal);
+    mtimeMs = st.mtimeMs;
+    content = await raced(readFile(file, "utf8"), signal);
   } catch (err) {
+    if (aborted(signal)) throw err;
     return errCode(err) === "ENOENT"; // vanished meanwhile ⇒ retry is safe
   }
   if (now - mtimeMs > staleMs) return true;
@@ -478,12 +526,23 @@ function lockIsStale(file: string, staleMs: number, now: number): boolean {
   return false; // empty (being written) or live holder
 }
 
-function releaseLock(file: string): void {
+/** Never raced against `signal` — see the file-header note on `releaseLock`. */
+async function releaseLock(file: string): Promise<void> {
   try {
-    const pid = Number.parseInt(readFileSync(file, "utf8").trim().split(/\s+/)[0] ?? "", 10);
-    if (pid === process.pid) unlinkSync(file);
+    const content = await readFile(file, "utf8");
+    const pid = Number.parseInt(content.trim().split(/\s+/)[0] ?? "", 10);
+    if (pid === process.pid) await unlink(file);
   } catch {
     // gone already
+  }
+}
+
+async function safeUnlink(file: string, signal: AbortSignal | undefined): Promise<void> {
+  try {
+    await raced(unlink(file), signal);
+  } catch (err) {
+    if (aborted(signal)) throw err;
+    // ignore
   }
 }
 
@@ -534,18 +593,24 @@ function isDeadConnectError(err: unknown): boolean {
   return code === "ECONNREFUSED" || code === "ENOENT";
 }
 
-function existsResult(paths: HubPaths, holderPid?: number): SingletonResult {
-  const hubPid = holderPid ?? readHubPid(paths.hubJson);
+async function existsResult(
+  paths: HubPaths,
+  holderPid: number | undefined,
+  signal: AbortSignal | undefined,
+): Promise<SingletonResult> {
+  const hubPid = holderPid ?? (await readHubPid(paths.hubJson, signal));
   return hubPid === undefined ? { kind: "exists" } : { kind: "exists", hubPid };
 }
 
-function readHubPid(file: string): number | undefined {
+async function readHubPid(file: string, signal: AbortSignal | undefined): Promise<number | undefined> {
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown };
+    const content = await raced(readFile(file, "utf8"), signal);
+    const parsed = JSON.parse(content) as { pid?: unknown };
     return typeof parsed.pid === "number" && Number.isInteger(parsed.pid) && pidAlive(parsed.pid)
       ? parsed.pid
       : undefined;
-  } catch {
+  } catch (err) {
+    if (aborted(signal)) throw err;
     return undefined;
   }
 }
@@ -559,14 +624,6 @@ function closeServer(server: net.Server): Promise<void> {
       resolve();
     });
   });
-}
-
-function safeUnlink(file: string): void {
-  try {
-    unlinkSync(file);
-  } catch {
-    // ignore
-  }
 }
 
 /** Bounded, ref'd on purpose (see probeAlive). */

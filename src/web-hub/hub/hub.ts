@@ -20,7 +20,7 @@
  * idle monitor fires); every timer here is unref'd.
  */
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import type { LanStatus } from "../protocol/lan.js";
 import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
 import { PROTO } from "../protocol/version.js";
@@ -174,7 +174,7 @@ export async function startHub(
       socket: paths.socketPath,
       port: httpPort,
       startedAt: info.startedAt,
-      ...identityFields(),
+      ...(await withSignal(identityFields(), startup.signal)),
       ...(initialLan === undefined ? {} : { lan: initialLan }),
     }); // ⑦
 
@@ -303,10 +303,10 @@ export function installProcessHandlers(hub: RunningHub, log: HubLog): () => void
 // ---------------------------------------------------------------------------
 
 /** Linux: field 22 (1-indexed) of `/proc/self/stat`; other platforms return `{}` (no identity fields). */
-function identityFields(): Pick<HubRecord, "procStartTicks" | "argv"> {
+async function identityFields(): Promise<Pick<HubRecord, "procStartTicks" | "argv">> {
   if (process.platform !== "linux") return {};
   try {
-    const stat = readFileSync("/proc/self/stat", "utf8");
+    const stat = await readFile("/proc/self/stat", "utf8");
     const afterComm = stat
       .slice(stat.lastIndexOf(")") + 1)
       .trim()

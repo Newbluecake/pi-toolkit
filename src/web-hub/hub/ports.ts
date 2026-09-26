@@ -108,6 +108,53 @@ export interface HostsPort {
 }
 
 // ---------------------------------------------------------------------------
+// §6.3 ConnGuard（审查修复 #9：冻结接口、以 lease 替代 peerIp 键释放）
+// ---------------------------------------------------------------------------
+
+/**
+ * A connection's admission lease (§6.3). `admit()` allocates a monotonic
+ * `seq` internally and tracks this lease's *own* category so that `release()`
+ * always decrements the right pool/IP counter even when the same `peerIp`
+ * holds several concurrent connections — releasing by `peerIp` alone (as an
+ * earlier draft of this port did) would double-release or mis-attribute
+ * category transitions across those connections. `release()` is idempotent;
+ * `enterLoginPending()`/`enterAuthed()` move this lease out of the
+ * eligible-for-eviction `unauth` category (§6.3's class table) and are also
+ * idempotent (a repeated call is a no-op).
+ */
+export interface ConnLease {
+  readonly peerIp: string;
+  readonly viaTrustedProxy: boolean;
+  enterLoginPending(): void;
+  enterAuthed(): void;
+  release(): void;
+}
+
+export interface ConnGuard {
+  /**
+   * Admit a new connection into the direct or proxy pool (by
+   * `viaTrustedProxy`). Returns `undefined` when §6.3's eviction rules found
+   * nothing evictable and the pool is at capacity — the caller must
+   * `socket.destroy()` the new connection without a response. LC (W2) wires
+   * this to `net.Server`'s `connection`/`close` events; W1's port stays
+   * decoupled from `net.Socket` on purpose (easier to fake in tests).
+   */
+  admit(args: { peerIp: string; viaTrustedProxy: boolean }): ConnLease | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// port-level cancellation (审查修复 #9): every port operation that may queue or
+// run long enough to matter accepts an optional AbortSignal so a disconnected
+// caller's waiter can be removed instead of leaking until its own deadline.
+// Concrete deadline *values* stay each port's own implementation detail (not
+// frozen here) — only the cancellation shape is part of the frozen surface.
+// ---------------------------------------------------------------------------
+
+export interface PortOptions {
+  signal?: AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
 // §4 LanStorePort（W1 保守占位 — 见文件头说明）
 // ---------------------------------------------------------------------------
 
@@ -138,31 +185,23 @@ export interface LanSessionRecord {
 }
 
 export interface LanStorePort {
-  getUser(username: string): Promise<LanUserRecord | undefined>;
-  initialInfo(): Promise<
-    { username: string; initialPassword?: string; initialLogin?: { ip: string; at: number } } | undefined
-  >;
-  createSession(input: {
-    userId: number;
-    epoch: number;
-    boundOrigin: string;
-    createdIp: string;
-    now: number;
-  }): Promise<{ sidHash: string }>;
-  touchSession(sidHash: string, now: number): Promise<LanSessionRecord | undefined>;
-  deleteSession(sidHash: string): Promise<void>;
-  deleteAllSessions(userId: number): Promise<void>;
-  setPassword(input: {
-    username: string;
-    kdf: "scrypt";
-    n: number;
-    r: number;
-    p: number;
-    salt: Uint8Array;
-    hash: Uint8Array;
-  }): Promise<void>;
-  markInitialLogin(username: string, ip: string, at: number): Promise<void>;
-  purgeExpired(now: number): Promise<number>;
+  getUser(username: string, opts?: PortOptions): Promise<LanUserRecord | undefined>;
+  initialInfo(
+    opts?: PortOptions,
+  ): Promise<{ username: string; initialPassword?: string; initialLogin?: { ip: string; at: number } } | undefined>;
+  createSession(
+    input: { userId: number; epoch: number; boundOrigin: string; createdIp: string; now: number },
+    opts?: PortOptions,
+  ): Promise<{ sidHash: string }>;
+  touchSession(sidHash: string, now: number, opts?: PortOptions): Promise<LanSessionRecord | undefined>;
+  deleteSession(sidHash: string, opts?: PortOptions): Promise<void>;
+  deleteAllSessions(userId: number, opts?: PortOptions): Promise<void>;
+  setPassword(
+    input: { username: string; kdf: "scrypt"; n: number; r: number; p: number; salt: Uint8Array; hash: Uint8Array },
+    opts?: PortOptions,
+  ): Promise<void>;
+  markInitialLogin(username: string, ip: string, at: number, opts?: PortOptions): Promise<void>;
+  purgeExpired(now: number, opts?: PortOptions): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +217,7 @@ export interface KdfParams {
 }
 
 export interface KdfPort {
-  run(password: string, params: KdfParams): Promise<Uint8Array>;
+  run(password: string, params: KdfParams, opts?: PortOptions): Promise<Uint8Array>;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,9 +232,15 @@ export interface LoginLimiterPort {
 }
 
 export interface KdfAdmissionPort {
+  /**
+   * Queues for a KDF run slot (§6.2's fair-scheduling waiter). Must honor
+   * `opts.signal`: an aborted/disconnected caller's waiter is removed from
+   * the queue instead of leaking until it would have otherwise timed out.
+   */
   acquire(
     clientIp: string,
     fresh: boolean,
+    opts?: PortOptions,
   ): Promise<{ ok: true; release(): void } | { ok: false; retryAfterMs: number }>;
 }
 
