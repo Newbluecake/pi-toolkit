@@ -82,6 +82,15 @@ function fakeManager(options: { waitResolvesImmediately?: boolean } = {}): FakeM
     async create() {
       throw new Error("unused");
     },
+    reserve() {
+      throw new Error("unused in bash_job tests");
+    },
+    cancelReserve() {},
+    markBackgroundedSync() {},
+    async extend(): Promise<never> {
+      throw new Error("unused in bash_job tests");
+    },
+    async waitAllExit() {},
     get(jobId) {
       return records.get(jobId);
     },
@@ -646,7 +655,7 @@ describe("bash_job — wait timeout streak (repeated timing-out waits escalate g
 
 // ── T16 (bash-timeout-grace §2.6/§3.6): extend, schema trimming, D budgets ─
 
-import type { ExtendJobOutcome } from "../../src/tools/bash-tool.js";
+import type { ExtendJobOutcome } from "../../src/bash/manager.js";
 import type { JobDeadline, JobDeadlinePolicy } from "../../src/bash/types.js";
 import type { HostRunView } from "../../src/bash/child-registry.js";
 import { BashJobToolExtendParams } from "../../src/tools/bash-job-tool.js";
@@ -668,31 +677,24 @@ function makeDeadline(over: Partial<JobDeadline> = {}): JobDeadline {
   };
 }
 
-/** Deadline-aware fake: adds the frozen §3.6 surface to the base fake. */
+/** Deadline fake: the base fake plus a scriptable `extend` (§2.6). */
 function fakeDeadlineManager(): FakeManager & {
   extendCalls: { jobId: string; extendMs: number; reason?: string }[];
   extendOutcome: ExtendJobOutcome | undefined;
   setExtendOutcome(outcome: ExtendJobOutcome): void;
-  persistNever: boolean;
 } {
   const base = fakeManager();
   const extendCalls: { jobId: string; extendMs: number; reason?: string }[] = [];
   const holder: {
     extendOutcome: ExtendJobOutcome | undefined;
-    persistNever: boolean;
-  } = { extendOutcome: undefined, persistNever: false };
+  } = { extendOutcome: undefined };
   return Object.assign(base, {
     extendCalls,
     ...holder,
     setExtendOutcome(outcome: ExtendJobOutcome) {
       holder.extendOutcome = outcome;
     },
-    reserve() {
-      throw new Error("unused in bash_job tests");
-    },
-    cancelReserve() {},
-    markBackgroundedSync() {},
-    extend(jobId: string, extendMs: number, reason?: string) {
+    async extend(jobId: string, extendMs: number, reason?: string): Promise<ExtendJobOutcome> {
       extendCalls.push({ jobId, extendMs, ...(reason !== undefined ? { reason } : {}) });
       if (holder.extendOutcome !== undefined) return holder.extendOutcome;
       throw new Error("test must setExtendOutcome first");
@@ -720,7 +722,7 @@ describe("bash_job — T16 extend (§2.6)", () => {
         ...({ lastReason: "test needs more time" } as Partial<JobDeadline>),
       }),
     };
-    manager.setExtendOutcome({ ok: true, record: extended, persisted: Promise.resolve() });
+    manager.setExtendOutcome({ ok: true, record: extended, persistPending: false });
     const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
     const response = await tool.execute(
       "tc",
@@ -743,38 +745,32 @@ describe("bash_job — T16 extend (§2.6)", () => {
     expect((response.details as Record<string, unknown>).persistPending).toBeUndefined();
   });
 
-  it("notes persist pending when the write-behind record does not confirm within 2s (R7)", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    try {
-      const manager = fakeDeadlineManager();
-      const before = makeRecord({ jobId: "b_EXTE0002", backgroundedAt: NOW - 30_000, deadline: makeDeadline() });
-      manager.put(before);
-      manager.setExtendOutcome({
-        ok: true,
-        record: {
-          ...before,
-          deadline: makeDeadline({ dueAt: NOW + 660_000, extensions: 1, grantedMs: 600_000, seq: 1 }),
-        },
-        persisted: new Promise(() => {}), // store chain hangs
-      });
-      const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
-      const pending = tool.execute(
-        "tc",
-        { action: "extend", job_id: "b_EXTE0002", extend_s: 600 },
-        undefined,
-        undefined,
-        {} as never,
-      );
-      await vi.advanceTimersByTimeAsync(1_999);
-      const early = await Promise.race([pending.then(() => "done"), Promise.resolve("pending")]);
-      expect(early).toBe("pending"); // R7: never blocks longer than 2s
-      await vi.advanceTimersByTimeAsync(1);
-      const response = await pending;
-      expect(response.content[0]!.text).toContain("persist pending");
-      expect(response.details).toMatchObject({ persistPending: true });
-    } finally {
-      vi.useRealTimers();
-    }
+  it("notes persist pending when the manager reports the write-behind record unconfirmed (R7)", async () => {
+    // The 2s bound itself is the manager's (P3: tests/bash/manager.test.ts
+    // "extend() waits at most 2s for the disk write and reports persistPending
+    // on timeout"); at this layer the contract is simply that a persistPending
+    // outcome is surfaced, never silently dropped and never blocking further.
+    const manager = fakeDeadlineManager();
+    const before = makeRecord({ jobId: "b_EXTE0002", backgroundedAt: NOW - 30_000, deadline: makeDeadline() });
+    manager.put(before);
+    manager.setExtendOutcome({
+      ok: true,
+      record: {
+        ...before,
+        deadline: makeDeadline({ dueAt: NOW + 660_000, extensions: 1, grantedMs: 600_000, seq: 1 }),
+      },
+      persistPending: true, // the store write is still queued past its 2s budget
+    });
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
+    const response = await tool.execute(
+      "tc",
+      { action: "extend", job_id: "b_EXTE0002", extend_s: 600 },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(response.content[0]!.text).toContain("persist pending");
+    expect(response.details).toMatchObject({ persistPending: true });
   });
 
   it.each([

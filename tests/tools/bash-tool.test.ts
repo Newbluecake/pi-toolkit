@@ -5,7 +5,12 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createBashJobManager, type BashJobManager, type CreatedJob } from "../../src/bash/manager.js";
+import {
+  createBashJobManager,
+  type BashJobManager,
+  type CreatedJob,
+  type ReservedJob,
+} from "../../src/bash/manager.js";
 import { createJobStore } from "../../src/bash/job-store.js";
 import type { HostRunView } from "../../src/bash/child-registry.js";
 import type { JobRecord } from "../../src/bash/types.js";
@@ -130,6 +135,7 @@ interface Harness {
   dir: string;
   port: FakePort;
   manager: BashJobManager;
+  clock: FakeClock;
   warnings: string[];
   ctx: ExtensionContext;
 }
@@ -155,11 +161,15 @@ async function makeHarness(options: { maxBackgroundJobs?: number } = {}): Promis
     warn: (message) => warnings.push(message),
     ...(options.maxBackgroundJobs !== undefined ? { maxBackgroundJobs: options.maxBackgroundJobs } : {}),
   });
-  disposers.push(() => {
+  disposers.push(async () => {
     manager.dispose();
-    return rm(dir, { recursive: true, force: true });
+    // markBackgroundedSync/deadline back-writes are fire-and-forget through
+    // the store's chain (R5/R10) — drain them before rmdir or a late
+    // writeAtomic recreates a file mid-removal (ENOTEMPTY).
+    await manager.drain();
+    await rm(dir, { recursive: true, force: true });
   });
-  return { dir, port, manager, warnings, ctx: makeCtx(dir) };
+  return { dir, port, manager, clock, warnings, ctx: makeCtx(dir) };
 }
 
 function makeCtx(cwd: string): ExtensionContext {
@@ -315,8 +325,32 @@ describe("bash override tool — T1 built-in golden equivalence", () => {
       const overrideAbort = new AbortController();
       const overrideRun = capture(() => tool.execute("call-2", params, overrideAbort.signal, undefined, harness.ctx));
       if (scenario.kind === "abort") {
-        await settle(5);
+        // The fake process emits its chunks one setImmediate after the spawn
+        // resolves (FakePort.script). Since P3, an abort cancels/kills the
+        // job synchronously (plan §3.6 — no spawn survives an abort, and a
+        // running job is killed at once), so the abort must land *after* the
+        // scripted output has been produced and relayed, which is the scenario
+        // this equivalence asserts ("output, then the user hits Esc").
+        await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
+        await waitFor(() => (harness.manager.list()[0]?.logBytes ?? 0) > 0, "the scripted output to be teed");
         overrideAbort.abort();
+      }
+      if (scenario.kind === "timeout") {
+        // §2.6: the timeout now lives in the manager (no tool-local timer),
+        // and this harness's clock is a FakeClock — advance it in lockstep
+        // with real event-loop turns so the 50ms deadline fires exactly like
+        // the built-in's real setTimeout did.
+        let finished = false;
+        const stop = (): void => {
+          finished = true;
+        };
+        void overrideRun.then(stop, stop);
+        void (async () => {
+          while (!finished) {
+            harness.clock.advance(10);
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        })();
       }
       const overrideResult = await overrideRun;
 
@@ -395,6 +429,10 @@ describe("bash override tool — auto-background", () => {
     const tool = toolFor(harness, HUGE_THRESHOLD_MS);
     const run = tool.execute("call-1", { command: "sleep 900" }, controller.signal, undefined, harness.ctx);
     await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
+    // §3.6: the abort kills the job synchronously now, so let the scripted
+    // `partial` output land first — the assertion is about output that exists
+    // *before* the abort, exactly like the built-in tool's real processes.
+    await waitFor(() => (harness.manager.list()[0]?.logBytes ?? 0) > 0, "the scripted output to be teed");
     controller.abort();
 
     // Byte-identical to the built-in: accumulated output, blank line, status.
@@ -659,11 +697,7 @@ class FakeDeadlineHarness {
       async drain() {},
       dispose() {},
       // ── the frozen §3.6 surface ──────────────────────────────────────────
-      reserve(init: { command: string; cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number }): {
-        jobId: string;
-        logPath: string;
-        started: Promise<unknown>;
-      } {
+      reserve(init: { command: string; cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number }): ReservedJob {
         const jobId = `b_FAKEn${++harness.n}`.replace("n", "");
         let resolveStarted: FakeReservation["resolveStarted"] = () => {};
         const started = new Promise<{ ok: true; job: CreatedJob } | { ok: false; error: Error }>((resolve) => {
@@ -701,7 +735,8 @@ class FakeDeadlineHarness {
         if (r) r.backgroundedSync += 1;
       },
       extend() {
-        return { ok: false, reason: "no_timeout" as const };
+        // Real signature: async, with the 2s persist race inside the manager.
+        return Promise.resolve({ ok: false, reason: "no_timeout" as const });
       },
     } as unknown as BashJobManager;
   }

@@ -8,9 +8,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Millis } from "../core/types.js";
 import type { HostRunView } from "../bash/child-registry.js";
-import type { JobExtensionReason } from "../bash/deadline.js";
-import type { BashJobManager, CreatedJob, CreateJobInit } from "../bash/manager.js";
-import type { JobDeadlinePolicy, JobId, JobRecord } from "../bash/types.js";
+import type { BashJobManager, CreatedJob, ReservedJob } from "../bash/manager.js";
+import type { JobDeadlinePolicy, JobId } from "../bash/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 
 /**
@@ -47,9 +46,9 @@ import { formatDuration } from "../ui/fleet-panel.js";
  * runs first sets the latch (`backgrounded` / `foregroundDone`) in its
  * synchronous callback prologue, so "R and `started`/`exit` arrive in the same
  * tick" has exactly one winner. The background branch never awaits
- * `markBackgrounded` — a deadline-aware manager gets the synchronous
- * `markBackgroundedSync` and the caller is handed `job_id`/`logPath` right
- * away (`pid starting` until the spawn completes).
+ * `markBackgrounded` — the manager's synchronous `markBackgroundedSync`
+ * (write-behind persistence, R5/R10) hands the caller `job_id`/`logPath`
+ * right away (`pid starting` until the spawn completes).
  *
  * Layering: no session/stack state is captured — the manager and the threshold
  * arrive as getters so `src/index.ts` (main session) / `src/bash/child.ts`
@@ -96,66 +95,6 @@ export interface BashBackgroundDetails {
 }
 
 export type BashOverrideDetails = BashToolDetails | BashBackgroundDetails | undefined;
-
-// ── frozen P3 manager surface (bash-timeout-grace §3.6 / §2.3) ─────────────
-
-/**
- * §3.6 `manager.reserve()`'s result: the synchronous control plane for one
- * bash call. `jobId`/`logPath` are known the instant `reserve()` returns, so
- * the outer race can hand the call back without waiting for the spawn, the
- * staged-record persist, or anything else.
- */
-export interface ReservedBashJob {
-  readonly jobId: JobId;
-  readonly logPath: string;
-  /**
-   * R12: settles `{ok:false}` on every failure path (persist timeout, spawn
-   * rejection, cancellation/seal) — **never rejects** — and by construction
-   * within the 30s staged-persist budget. The tool's foreground path throws
-   * `error` verbatim; the background path simply keeps running it.
-   */
-  readonly started: Promise<StartedOutcome>;
-}
-
-export type StartedOutcome = { ok: true; job: CreatedJob } | { ok: false; error: Error };
-
-/**
- * §2.3/§2.6 `manager.extend()`'s result: the synchronous in-memory
- * adjudication plus the write-behind persistence handle the tool waits on for
- * at most 2s (R7) before noting `persist pending`.
- */
-export type ExtendJobOutcome =
-  { ok: true; record: JobRecord; persisted: Promise<unknown> } | { ok: false; reason: JobExtensionReason };
-
-/**
- * The deadline-aware `BashJobManager` surface P4's tools program against
- * (implemented by P3 in `src/bash/manager.ts`; frozen by the plan's §3.6/§2.3
- * tables). Until P3 lands, `asDeadlineAware()` reports the real manager as
- * *not* deadline-aware and both tools take their byte-identical legacy paths.
- */
-export interface DeadlineAwareBashJobManager extends BashJobManager {
-  /** Sync. Throws on admission refusal (sealed run: `run is ending; no new bash jobs`). */
-  reserve(init: CreateJobInit & { timeoutMs?: Millis }): ReservedBashJob;
-  /** Sync; total over `staged(persisting)` / `staged(spawning)` / `running`. */
-  cancelReserve(jobId: JobId): void;
-  /** Sync memory write; persistence is write-behind through the store chain (R5/R10). */
-  markBackgroundedSync(jobId: JobId): void;
-  /**
-   * Sync adjudication (applyJobExtension) → re-armed timer → `onDeadline(extended)`.
-   * Throws `stale bash job manager` once the manager is disposed (R8).
-   */
-  extend(jobId: JobId, extendMs: Millis, reason?: string): ExtendJobOutcome;
-}
-
-/** Runtime capability check: does this manager implement the §3.6 surface? */
-export function asDeadlineAware(manager: BashJobManager): DeadlineAwareBashJobManager | undefined {
-  const candidate = manager as Partial<DeadlineAwareBashJobManager>;
-  return typeof candidate.reserve === "function" &&
-    typeof candidate.cancelReserve === "function" &&
-    typeof candidate.markBackgroundedSync === "function"
-    ? (candidate as DeadlineAwareBashJobManager)
-    : undefined;
-}
 
 // ── deadline surface settings (§5.2 switch) ────────────────────────────────
 
@@ -360,14 +299,13 @@ interface InnerParams {
 
 /**
  * Per-call bookkeeping shared between the injected `exec` and the outer race.
- * With a deadline-aware manager, `reservation` is set the moment `reserve()`
- * returns (synchronously, E33) so the outer race can hand the call back before
- * any pid exists; `job` (the pid-bearing `CreatedJob`) follows once `started`
- * settles `{ok:true}`.
+ * `reservation` is set the moment `reserve()` returns (synchronously, E33) so
+ * the outer race can hand the call back before any pid exists; `job` (the
+ * pid-bearing `CreatedJob`) follows once `started` settles `{ok:true}`.
  */
 interface CallState {
   job?: CreatedJob;
-  reservation?: ReservedBashJob;
+  reservation?: ReservedJob;
   jobReady: Promise<CreatedJob | undefined>;
   resolveJobReady: (job: CreatedJob | undefined) => void;
 }
@@ -577,53 +515,43 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
           }
         }
 
-        const deadlineManager = asDeadlineAware(manager);
         const autoBackgrounded = params.run_in_background !== true;
         const elapsedMs = now() - startedAt;
 
-        // §3.6/P4 acceptance: the background branch never awaits markBackgrounded
-        // for a deadline-aware manager — the sync memory write is enough to hand
-        // the call back, persistence is write-behind. The legacy manager (P3
-        // not merged) keeps today's awaited patch so the record is marked by
-        // the time the caller observes the return.
-        const handOff = (jobId: JobId): Promise<void> => {
-          if (deadlineManager) {
-            deadlineManager.markBackgroundedSync(jobId);
-            return Promise.resolve();
-          }
-          return manager.markBackgrounded(jobId).then(
-            () => undefined,
-            () => undefined,
-          );
+        // §3.6/P4 acceptance: the background branch never awaits
+        // `markBackgrounded` — the manager's synchronous memory write is enough
+        // to hand the call back; persistence is write-behind through the
+        // store's chain (R5/R10).
+        const handOff = (jobId: JobId): void => {
+          manager.markBackgroundedSync(jobId);
         };
 
-        const finishWithJob = (known: CreatedJob, handoff: Promise<void>): void => {
-          void handoff.then(() =>
-            resolveOuter({
-              content: [
-                {
-                  type: "text" as const,
-                  text: autoBackgrounded
-                    ? formatAutoBackgroundText(known.jobId, elapsedMs, known.logPath)
-                    : formatExplicitBackgroundText(known.jobId, known.pid, known.logPath),
-                },
-              ],
-              details: {
-                jobId: known.jobId,
-                background: true,
-                ...(autoBackgrounded ? { autoBackgrounded: true as const } : {}),
-                pid: known.pid,
-                logPath: known.logPath,
-              } satisfies BashBackgroundDetails,
-            }),
-          );
+        const finishWithJob = (known: CreatedJob): void => {
+          resolveOuter({
+            content: [
+              {
+                type: "text" as const,
+                text: autoBackgrounded
+                  ? formatAutoBackgroundText(known.jobId, elapsedMs, known.logPath)
+                  : formatExplicitBackgroundText(known.jobId, known.pid, known.logPath),
+              },
+            ],
+            details: {
+              jobId: known.jobId,
+              background: true,
+              ...(autoBackgrounded ? { autoBackgrounded: true as const } : {}),
+              pid: known.pid,
+              logPath: known.logPath,
+            } satisfies BashBackgroundDetails,
+          });
         };
 
         if (state.job !== undefined) {
           // The pid is already known: hand the call back right here.
           const job = state.job;
           adoptInnerPromise(manager, job.jobId, settled, warn);
-          finishWithJob(job, handOff(job.jobId));
+          handOff(job.jobId);
+          finishWithJob(job);
           return;
         }
         if (childMode && state.reservation !== undefined) {
@@ -631,24 +559,23 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
           // finishes starting up in the background (`pid starting`).
           const reservation = state.reservation;
           adoptInnerPromise(manager, reservation.jobId, settled, warn);
-          void handOff(reservation.jobId).then(() =>
-            resolveOuter({
-              content: [
-                {
-                  type: "text" as const,
-                  text: autoBackgrounded
-                    ? formatAutoBackgroundTextStarting(reservation.jobId, elapsedMs, reservation.logPath)
-                    : formatExplicitBackgroundTextStarting(reservation.jobId, reservation.logPath),
-                },
-              ],
-              details: {
-                jobId: reservation.jobId,
-                background: true,
-                ...(autoBackgrounded ? { autoBackgrounded: true as const } : {}),
-                logPath: reservation.logPath,
-              } satisfies BashBackgroundDetails,
-            }),
-          );
+          handOff(reservation.jobId);
+          resolveOuter({
+            content: [
+              {
+                type: "text" as const,
+                text: autoBackgrounded
+                  ? formatAutoBackgroundTextStarting(reservation.jobId, elapsedMs, reservation.logPath)
+                  : formatExplicitBackgroundTextStarting(reservation.jobId, reservation.logPath),
+              },
+            ],
+            details: {
+              jobId: reservation.jobId,
+              background: true,
+              ...(autoBackgrounded ? { autoBackgrounded: true as const } : {}),
+              logPath: reservation.logPath,
+            } satisfies BashBackgroundDetails,
+          });
           return;
         }
 
@@ -661,7 +588,8 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
             const awaited = await Promise.race([state.jobReady, settled.then(() => undefined)]);
             if (awaited !== undefined) {
               adoptInnerPromise(manager, awaited.jobId, settled, warn);
-              finishWithJob(awaited, handOff(awaited.jobId));
+              handOff(awaited.jobId);
+              finishWithJob(awaited);
             } else deliverSettledOutcome(await settled);
           } catch (error) {
             rejectOuter(error);
@@ -780,12 +708,16 @@ function errorText(error: unknown): string {
  * kills the tree and throws `timeout:<s>`, otherwise the exit code is
  * returned (`null` when signalled).
  *
- * §3.6 (deadline-aware manager): the local timeout timer is gone — the
- * `timeoutMs` travels to the manager inside `reserve()` and the deadline
- * (foreground kill / grace / extend) is adjudicated there; this layer only
- * translates a `timed_out` exit record back into pi's `timeout:<s>` error so
- * the foreground text stays byte-identical. Abort at either await ⇒ sync
- * `cancelReserve` + `aborted`.
+ * §3.6: the local timeout timer is gone — the `timeoutMs` travels to the
+ * manager inside `reserve()` and the deadline (foreground kill / grace /
+ * extend) is adjudicated there; this layer only translates a `timed_out` exit
+ * record back into pi's `timeout:<s>` error so the foreground text stays
+ * byte-identical. Abort while `started` is pending ⇒ sync `cancelReserve` +
+ * `aborted` (nothing spawned yet); abort after ⇒ `cancelReserve` (a kill for
+ * a running job) and the exit is still awaited before `aborted` is thrown —
+ * pi's own `waitForChildProcess`-then-check semantics, so the drain flushes
+ * the process's last output through `onData` before the caller sees the
+ * rejection.
  */
 async function execViaManager(
   manager: BashJobManager,
@@ -805,14 +737,12 @@ async function execViaManager(
     throw new Error("aborted");
   }
 
-  const deadlineManager = asDeadlineAware(manager);
-  if (deadlineManager) return execViaReserve(deadlineManager, state, command, cwd, options, timeoutMs);
-  return execViaCreate(manager, state, command, cwd, options, timeoutMs);
+  return execViaReserve(manager, state, command, cwd, options, timeoutMs);
 }
 
 /** §3.6 inner layer over `reserve()` / `started` / `job.exit`. */
 async function execViaReserve(
-  manager: DeadlineAwareBashJobManager,
+  manager: BashJobManager,
   state: CallState,
   command: string,
   cwd: string,
@@ -824,7 +754,7 @@ async function execViaReserve(
   },
   timeoutMs: number | undefined,
 ): Promise<{ exitCode: number | null }> {
-  let reservation: ReservedBashJob;
+  let reservation: ReservedJob;
   try {
     reservation = manager.reserve({
       command,
@@ -850,8 +780,10 @@ async function execViaReserve(
     () => state.resolveJobReady(undefined), // defensive: started never rejects (R12)
   );
 
-  // Abort ⇒ synchronously cancel (all three staged/running substates, §3.6)
-  // and surface pi's own `aborted` error without waiting for the exit.
+  // Abort ⇒ synchronously cancel (all three staged/running substates, §3.6).
+  // The `abortSignal` rejection only guards the `await started` race (nothing
+  // has spawned yet, so there is no exit worth waiting for); once the job is
+  // running, an abort cancels/kills it and the exit below is still awaited.
   let onAbortReserve: (() => void) | undefined = undefined;
   const abortSignal = new Promise<never>((_resolve, reject) => {
     onAbortReserve = () => reject(new Error("aborted"));
@@ -870,74 +802,17 @@ async function execViaReserve(
     }
     const started = await Promise.race([reservation.started, abortSignal]);
     if (!started.ok) throw started.error;
-    const record = await Promise.race([started.job.exit, abortSignal]);
+    // pi's own semantics (built-in `waitForChildProcess` → aborted check):
+    // the exit is awaited unconditionally — a caller abort kills the job via
+    // `cancelReserve` and the bounded exit/drain finalization flushes the
+    // process's remaining output through `onData` before the rejection, so
+    // the foreground error text stays byte-identical to the built-in tool.
+    const record = await started.job.exit;
     if (options.signal?.aborted) throw new Error("aborted");
     if (record.status === "timed_out") throw new Error(`timeout:${options.timeout}`);
     return { exitCode: record.exitCode };
   } finally {
     if (options.signal) options.signal.removeEventListener("abort", handleAbort);
-  }
-}
-
-/** Today's path over `manager.create()` — unchanged, used until P3 lands. */
-async function execViaCreate(
-  manager: BashJobManager,
-  state: CallState,
-  command: string,
-  cwd: string,
-  options: {
-    onData: (data: Buffer) => void;
-    signal?: AbortSignal;
-    timeout?: number;
-    env?: NodeJS.ProcessEnv;
-  },
-  timeoutMs: number | undefined,
-): Promise<{ exitCode: number | null }> {
-  let job: CreatedJob;
-  try {
-    job = await manager.create({
-      command,
-      cwd,
-      ...(options.env !== undefined ? { env: options.env } : {}),
-      onData: (chunk) => options.onData(Buffer.from(chunk, "utf8")),
-    });
-  } catch (error) {
-    state.resolveJobReady(undefined);
-    throw error;
-  }
-  state.job = job;
-  state.resolveJobReady(job);
-
-  let timedOut = false;
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const killTree = (reason: "killed" | "timed_out"): void => {
-    void manager.kill(job.jobId).catch(() => undefined);
-    // `kill()` pins `killed` synchronously before its first await, so this
-    // relabels the pending exit for the timeout path (§2.3 `timed_out`).
-    manager.noteTermination(job.jobId, reason);
-  };
-  const onAbort = (): void => killTree("killed");
-
-  try {
-    if (timeoutMs !== undefined) {
-      timeoutHandle = unrefTimer(
-        setTimeout(() => {
-          timedOut = true;
-          killTree("timed_out");
-        }, timeoutMs),
-      );
-    }
-    if (options.signal) {
-      if (options.signal.aborted) onAbort();
-      else options.signal.addEventListener("abort", onAbort, { once: true });
-    }
-    const record = await job.exit;
-    if (options.signal?.aborted) throw new Error("aborted");
-    if (timedOut) throw new Error(`timeout:${options.timeout}`);
-    return { exitCode: record.exitCode };
-  } finally {
-    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-    if (options.signal) options.signal.removeEventListener("abort", onAbort);
   }
 }
 

@@ -3,10 +3,15 @@ import { Text } from "@earendil-works/pi-tui";
 import { formatSize, truncateTail, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { HostRunView } from "../bash/child-registry.js";
 import type { Millis } from "../core/types.js";
-import type { BashJobManager, JobOutputRead } from "../bash/manager.js";
+import {
+  EXTEND_PERSIST_TIMEOUT_MS,
+  type BashJobManager,
+  type ExtendJobOutcome,
+  type JobOutputRead,
+} from "../bash/manager.js";
 import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobId, type JobRecord } from "../bash/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
-import { asDeadlineAware, MARGIN_RETURN_MS, type BashDeadlineSurface, type ExtendJobOutcome } from "./bash-tool.js";
+import { MARGIN_RETURN_MS, type BashDeadlineSurface } from "./bash-tool.js";
 import {
   createPollGuard,
   createTimeoutStreak,
@@ -53,8 +58,6 @@ export const MAX_WAIT_MS = 120_000;
 export const STATUS_TAIL_BYTES = 2048;
 /** Lines of log tail `status` shows out of those bytes. */
 export const STATUS_TAIL_LINES = 20;
-/** §2.6/R7: how long `extend` waits for its write-behind persistence. */
-export const EXTEND_PERSIST_WAIT_MS = 2_000;
 /** §2.6: `reason` cap for `extend`. */
 export const EXTEND_REASON_MAX_CHARS = 200;
 /** §2.6: the `extend_s` shown in the grace line as a concrete suggestion. */
@@ -586,10 +589,11 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       }
 
       if (params.action === "extend") {
-        // §2.6: `extend` exists only on the enabled surface, and only a
-        // deadline-aware manager can adjudicate it.
-        const deadlineManager = asDeadlineAware(manager);
-        if (!deadlineManager || typeof deadlineManager.extend !== "function") {
+        // §2.6/§5.2: `extend` exists only on the enabled surface. The schema is
+        // trimmed while the deadline feature is off, so reaching here means a
+        // stale surface — refuse by the same settings switch that trimmed it,
+        // never by probing the manager's shape at runtime.
+        if (!extendEnabled) {
           throw new Error(
             `bash_job(action: "extend") is not available in this session ` +
               "(the bash job deadline feature is disabled)",
@@ -608,9 +612,14 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         }
         const at = now();
         const before = manager.get(jobId);
+        // §2.6/R7: the manager adjudicates the extension synchronously in
+        // memory (timers/waiters already reflect it) and waits at most
+        // EXTEND_PERSIST_TIMEOUT_MS (2s) for the write-behind record itself;
+        // `persistPending: true` means the write is still queued, which is
+        // noted in the output instead of blocking the model any further.
         let outcome: ExtendJobOutcome;
         try {
-          outcome = deadlineManager.extend(jobId, Math.round(extendSeconds * 1000), reason || undefined);
+          outcome = await manager.extend(jobId, Math.round(extendSeconds * 1000), reason || undefined);
         } catch (error) {
           // R8: a disposed manager throws `stale bash job manager` — surface it.
           throw error instanceof Error ? error : new Error(String(error));
@@ -622,28 +631,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
           // Unreachable for a real manager (ok implies an extended deadline).
           throw new Error(`bash job ${jobId} was extended but carries no deadline`);
         }
-        // R7: the adjudication above is already in effect in memory; wait for
-        // the write-behind persistence at most EXTEND_PERSIST_WAIT_MS, then
-        // note `persist pending` instead of blocking the model.
-        let persistPending = false;
-        await new Promise<void>((resolve) => {
-          const timer = unrefTimer(
-            setTimeout(() => {
-              persistPending = true;
-              resolve();
-            }, EXTEND_PERSIST_WAIT_MS),
-          );
-          void Promise.resolve(outcome.persisted).then(
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-          );
-        });
+        const persistPending = outcome.persistPending;
         const previousDueAt = before?.deadline?.dueAt;
         const grantedMs =
           previousDueAt !== undefined ? Math.max(0, deadline.dueAt - previousDueAt) : deadline.grantedMs;
@@ -657,7 +645,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         if (persistPending) {
           lines.push(
             "[persist pending: the extension is already in effect; the job record on disk has not confirmed it " +
-              `within ${formatDuration(EXTEND_PERSIST_WAIT_MS)}]`,
+              `within ${formatDuration(EXTEND_PERSIST_TIMEOUT_MS)}]`,
           );
         }
         lines.push(formatLogFileHint(record.logPath));
