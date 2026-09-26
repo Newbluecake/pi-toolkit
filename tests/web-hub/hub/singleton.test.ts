@@ -10,7 +10,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import net from "node:net";
 import { join } from "node:path";
 import { resolveHubPaths, type HubPaths } from "../../../src/web-hub/protocol/paths.js";
@@ -19,6 +19,7 @@ import {
   instanceGuardName,
   pidAlive,
   startFence,
+  DEFAULT_LOCK_STALE_MS,
   type SingletonResult,
 } from "../../../src/web-hub/hub/singleton.js";
 import { tmpDirs, waitFor } from "./helpers.js";
@@ -514,6 +515,43 @@ describe("late abort after the owner value is already constructed (review fix #2
     if (again.kind === "owner") await again.release();
   });
 
+  it("review fix round 4 #2: a live-pid lock left behind by a hung releaseLock() is reclaimed after the DEFAULT lockStaleMs elapses (injected clock, not a real 10s wait)", async () => {
+    // The `lockStaleMs: 0` cases above deliberately bypass the default staleness window to test
+    // *fast* cleanup paths in isolation. This one instead proves the pre-existing default-window
+    // mechanism itself still reclaims a leftover lock, without actually sleeping DEFAULT_LOCK_STALE_MS
+    // (10s) of real wall-clock time — `now` is one of `acquireSingleton`'s own injectable deps.
+    const p = paths();
+    const controller = new AbortController();
+    const hungReadFile = (async (file: Parameters<typeof readFile>[0], enc: Parameters<typeof readFile>[1]) => {
+      if (file === p.startLock) {
+        controller.abort();
+        return new Promise<never>(() => {});
+      }
+      return readFile(file, enc as Parameters<typeof readFile>[1]);
+    }) as typeof readFile;
+
+    const first = await acquireSingleton(p, {
+      probeMs: 50,
+      signal: controller.signal,
+      fs: { readFile: hungReadFile },
+    });
+    expect(first.kind).toBe("failed");
+    expect(existsSync(p.startLock)).toBe(true); // left behind, live pid (this process), fresh mtime
+
+    // Immediately afterward, with the DEFAULT lockStaleMs (not overridden) and an unshifted clock,
+    // a fresh attempt is correctly refused — the lock still looks fresh and live.
+    const tooSoon = await acquireSingleton(p, { probeMs: 50 });
+    expect(tooSoon.kind).toBe("failed");
+    expect(existsSync(p.startLock)).toBe(true); // still there — not stolen
+
+    // Advance the clock *acquireSingleton itself sees* well past DEFAULT_LOCK_STALE_MS, without
+    // waiting any real time for it. Real mtimes are untouched; only the comparison's "now" moves.
+    const now = (): number => Date.now() + DEFAULT_LOCK_STALE_MS + 5_000;
+    const again = track(await acquireSingleton(p, { probeMs: 200, now }));
+    expect(again.kind).toBe("owner");
+    if (again.kind === "owner") await again.release();
+  });
+
   it("release()'s own lstat/rename calls are bounded (a wedged disk during release does not hang it)", async () => {
     const p = paths();
     let callCount = 0;
@@ -531,5 +569,112 @@ describe("late abort after the owner value is already constructed (review fix #2
     await o.release();
     expect(Date.now() - started).toBeLessThan(2_500); // bounded by RELEASE_DEADLINE_MS (2s), not hung forever
     expect(callCount).toBeGreaterThan(2); // release() really did call the (hanging) lstat
+  });
+});
+
+describe("review fix round 4 #1: signal.aborted must propagate through instanceGuardName/sameUid/askGuard", () => {
+  // Previously these swallowed an abort mid-flight and either returned a fallback value
+  // (instanceGuardName: kept the un-resolved spelling; sameUid: assumed "same uid") or never
+  // noticed the signal at all (askGuard/listenOn), letting guard acquisition finish as if the
+  // caller hadn't already given up. All three now propagate the abort, caught by acquireSingleton's
+  // single try/catch around the whole guard section, which reports `{kind:"failed",
+  // reason:"aborted"}` and leaves no residue (no lock file, no socket, no guard left bound).
+
+  it("instanceGuardName itself rethrows on abort, rather than falling back to the configured spelling", async () => {
+    // Unit-level pin: acquireGuard's own entry check (below) would also catch this abort once
+    // control returns to acquireSingleton, so the integration test after this one can pass even
+    // if instanceGuardName's own catch regressed back to swallowing. Calling it directly is the
+    // only way to pin *this* fix specifically.
+    const p = paths();
+    const controller = new AbortController();
+    const hungRealpath = (async (_path: Parameters<typeof realpath>[0]) => {
+      controller.abort();
+      return new Promise<never>(() => {});
+    }) as typeof realpath;
+    await expect(instanceGuardName(p, { signal: controller.signal, fs: { realpath: hungRealpath } })).rejects.toThrow();
+  });
+
+  it("an abort landing mid-realpath (inside instanceGuardName) fails as aborted, before any lock/socket exists", async () => {
+    const p = paths();
+    const controller = new AbortController();
+    let reached = false;
+    const hungRealpath = (async (path: Parameters<typeof realpath>[0]) => {
+      reached = true;
+      controller.abort(); // fires *during* the unraced realpath call
+      return new Promise<never>(() => {}); // never resolves — only the abort must end this
+    }) as typeof realpath;
+
+    const started = Date.now();
+    const r = await acquireSingleton(p, {
+      probeMs: 200,
+      signal: controller.signal,
+      fs: { realpath: hungRealpath },
+    });
+    expect(reached).toBe(true);
+    expect(Date.now() - started).toBeLessThan(500); // rejects on the abort, not stuck on the hung realpath
+    expect(r.kind).toBe("failed");
+    if (r.kind === "failed") expect(r.reason).toBe("aborted");
+    expect(existsSync(p.startLock)).toBe(false);
+    expect(existsSync(p.socketPath)).toBe(false);
+
+    // no residue: a fresh, unaborted attempt succeeds cleanly right afterward.
+    const again = track(await acquireSingleton(p, { probeMs: 100 }));
+    expect(again.kind).toBe("owner");
+  });
+
+  it("an abort landing mid-stat (inside sameUid, verifying the guard holder's pid) fails as aborted, guard not stolen", async () => {
+    const p = paths();
+    // Answers with OUR OWN pid — alive, and (absent the abort) would pass sameUid, i.e. this
+    // exercises the "verify uid" step specifically, not the pid-liveness or answer-parsing steps.
+    const squat = net.createServer((s) => s.end(`${process.pid}\n`));
+    const name = (await instanceGuardName(p))!;
+    await new Promise<void>((resolve) => squat.listen(name, () => resolve()));
+    try {
+      const controller = new AbortController();
+      let reached = false;
+      const hungStat = (async (path: Parameters<typeof stat>[0], opts?: Parameters<typeof stat>[1]) => {
+        // only the /proc/<pid> lookup (sameUid's own call) hangs; ensurePrivateDir's stat of the
+        // state dir, earlier in the same acquireSingleton call, must go through untouched.
+        if (path === `/proc/${process.pid}`) {
+          reached = true;
+          controller.abort();
+          return new Promise<never>(() => {});
+        }
+        return stat(path, opts as Parameters<typeof stat>[1]);
+      }) as typeof stat;
+
+      const started = Date.now();
+      const r = await acquireSingleton(p, {
+        probeMs: 500,
+        signal: controller.signal,
+        fs: { stat: hungStat },
+      });
+      expect(reached).toBe(true);
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(r.kind).toBe("failed");
+      if (r.kind === "failed") expect(r.reason).toBe("aborted");
+      expect(existsSync(p.socketPath)).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => squat.close(() => resolve()));
+    }
+  });
+
+  it("an abort landing mid-askGuard (probing a live guard holder) fails as aborted, guard not stolen", async () => {
+    const p = paths();
+    const silent = net.createServer(() => undefined); // accepts, never answers
+    const name = (await instanceGuardName(p))!;
+    await new Promise<void>((resolve) => silent.listen(name, () => resolve()));
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 20); // abort mid-probe, well before probeMs
+      const started = Date.now();
+      const r = await acquireSingleton(p, { probeMs: 2_000, signal: controller.signal });
+      expect(Date.now() - started).toBeLessThan(500); // aborted promptly, not stuck until probeMs
+      expect(r.kind).toBe("failed");
+      if (r.kind === "failed") expect(r.reason).toBe("aborted");
+      expect(existsSync(p.socketPath)).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
   });
 });
