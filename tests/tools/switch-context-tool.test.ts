@@ -5,6 +5,7 @@ import {
   createSwitchContextTool,
 } from "../../src/tools/switch-context-tool.js";
 import { PendingHandoffStore } from "../../src/context-switch/store.js";
+import type { TodoTrackerSnapshot } from "../../src/todo/nudge.js";
 
 type CompactCallbacks = { onComplete: () => void; onError: (error: Error) => void };
 
@@ -16,7 +17,14 @@ function params(extra: Record<string, unknown> = {}) {
   return { goal, progress, next_steps: next, ...extra };
 }
 
-function harness(options: { mode?: "print" | "json"; now?: () => number; cooldownMs?: number } = {}) {
+function harness(
+  options: {
+    mode?: "print" | "json";
+    now?: () => number;
+    cooldownMs?: number;
+    todoTracker?: () => TodoTrackerSnapshot;
+  } = {},
+) {
   let callbacks: CompactCallbacks | undefined;
   const compact = vi.fn((next_: CompactCallbacks) => {
     callbacks = next_;
@@ -30,6 +38,7 @@ function harness(options: { mode?: "print" | "json"; now?: () => number; cooldow
     sendUserMessage,
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.cooldownMs === undefined ? {} : { cooldownMs: options.cooldownMs }),
+    ...(options.todoTracker === undefined ? {} : { todoTracker: options.todoTracker }),
   });
   const execute = (args: Record<string, unknown> = params()) =>
     tool.execute!("call", args as never, undefined as never, undefined as never, ctx as never);
@@ -150,5 +159,63 @@ describe("tools/switch-context-tool", () => {
     };
     await tool.execute!("call", params() as never, undefined as never, undefined as never, ctx as never);
     expect(() => callbacks!.onComplete()).not.toThrow();
+  });
+});
+
+describe("tools/switch-context-tool: todo-nudge handoff advisory", () => {
+  it("appends the advisory when open tasks exist and evidence fired", async () => {
+    const h = harness({ todoTracker: () => ({ openTaskCount: 2, turnsSinceTouch: 1, hasEvidence: true }) });
+    const result = await h.execute();
+    expect(result.content[0]?.text).toContain("2 个未完成任务");
+    expect(result.content[0]?.text).toContain("已 1 轮未更新");
+    expect(result.content[0]?.text).toContain("请先 TaskUpdate 再切换");
+    // Advisory-only: the switch itself is unaffected.
+    expect(result.details).toMatchObject({ ok: true });
+    expect(h.compact).toHaveBeenCalledOnce();
+  });
+
+  it("appends the advisory when open tasks exist and >=10 turns passed without evidence", async () => {
+    const h = harness({ todoTracker: () => ({ openTaskCount: 1, turnsSinceTouch: 10, hasEvidence: false }) });
+    const result = await h.execute();
+    expect(result.content[0]?.text).toContain("1 个未完成任务");
+  });
+
+  it("omits the advisory with no open tasks", async () => {
+    const h = harness({ todoTracker: () => ({ openTaskCount: 0, turnsSinceTouch: 100, hasEvidence: true }) });
+    const result = await h.execute();
+    expect(result.content[0]?.text).not.toContain("未完成任务");
+  });
+
+  it("omits the advisory with open tasks but neither evidence nor enough elapsed turns", async () => {
+    const h = harness({ todoTracker: () => ({ openTaskCount: 2, turnsSinceTouch: 3, hasEvidence: false }) });
+    const result = await h.execute();
+    expect(result.content[0]?.text).not.toContain("未完成任务");
+  });
+
+  it("omits the advisory entirely when no todoTracker dep was injected (nudge disabled/child session)", async () => {
+    const h = harness();
+    const result = await h.execute();
+    expect(result.content[0]?.text).not.toContain("未完成任务");
+  });
+
+  it("never blocks the switch when the todoTracker throws", async () => {
+    const h = harness({
+      todoTracker: () => {
+        throw new Error("boom");
+      },
+    });
+    const result = await h.execute();
+    expect(result.details).toMatchObject({ ok: true });
+    expect(h.compact).toHaveBeenCalledOnce();
+  });
+
+  it("only appends the advisory to the successful switch path, not to early-return errors", async () => {
+    const h = harness({
+      mode: "print",
+      todoTracker: () => ({ openTaskCount: 3, turnsSinceTouch: 50, hasEvidence: true }),
+    });
+    const result = await h.execute();
+    expect(result.details).toEqual({ ok: false, reason: "non_interactive_mode" });
+    expect(result.content[0]?.text).not.toContain("未完成任务");
   });
 });

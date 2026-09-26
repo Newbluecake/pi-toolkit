@@ -244,6 +244,27 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   },
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
+  // Main-session todo staleness nudge (todo-nudge plan): all four keys are
+  // plain turn counts, never durations — no `time: true`, no seconds/ms split.
+  "todo.nudge.enabled": bool(
+    "todo.nudge.enabled",
+    "Main-session todo staleness nudge: hidden reminder when in_progress tasks go stale (off = zero new handlers)",
+  ),
+  "todo.nudge.graceTurns": count(
+    "todo.nudge.graceTurns",
+    1,
+    "Turns to wait after the first completion/git evidence before nudging",
+  ),
+  "todo.nudge.fallbackTurns": count(
+    "todo.nudge.fallbackTurns",
+    1,
+    "Turns with zero evidence before the fallback nudge fires",
+  ),
+  "todo.nudge.cooldownTurns": count(
+    "todo.nudge.cooldownTurns",
+    1,
+    "Turns to suppress re-nudging after a nudge fires (doubles per consecutive no-touch nudge, capped at 4x)",
+  ),
   "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (main session only)"),
   "feishuNotify.enabled": bool("feishuNotify.enabled", "Feishu notification cards (main session only)"),
   "sessionNav.enabled": bool(

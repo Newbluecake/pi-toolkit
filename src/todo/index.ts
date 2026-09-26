@@ -18,11 +18,34 @@
 // so existing session data keeps loading: STATE_ENTRY "claude-code-todo-state"
 // (state.ts), LEGACY_STATUS_KEY "claude-code-todo-status", widget key
 // "claude-code-todo", command `/tasklist`.
+//
+// todo-nudge (L1 feature, opt-in via `deps`): a main-session-only staleness
+// tracker piggybacked on the same closure. `deps` defaults to `{}` so every
+// existing `wireTodo(pi)` call keeps registering zero extra handlers — the
+// tracker only turns on when `deps.nudge?.enabled` is true AND
+// `deps.isChildSession` is falsy (child subagent sessions never enable it).
+// All Task* tool calls funnel through the single `enqueue()` choke point, so
+// hooking it there is the one place that sees every touch (list/get included,
+// per spec) without touching each of the five tool bodies.
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { TodoPanel, TodoWidget } from "./ui.js";
+import { WORKFLOW_NOTIFICATION_TYPE } from "../adapters/workflow-notice.js";
+import { BASH_JOB_NOTIFICATION_TYPE } from "../stack.js";
+import {
+  buildNudgeText,
+  DEFAULT_NUDGE_CONFIG,
+  initNudgeState,
+  isGitWriteCommand,
+  recordEvidence,
+  recordTodoTouch,
+  tickTurn,
+  type NudgeConfig,
+  type NudgeState,
+  type TodoTrackerSnapshot,
+} from "./nudge.js";
 import {
   activeBlockers,
   cloneState,
@@ -96,12 +119,54 @@ type ToolDetails = {
   unblocked?: Task[] | undefined;
 };
 
-export function wireTodo(pi: ExtensionAPI): void {
+/** Opt-in wiring for the main-session todo staleness nudge (L1 feature). Defaults keep `wireTodo(pi)` a no-op addition. */
+export interface TodoNudgeDeps {
+  /** True in a re-activated child subagent session (src/index.ts's `isChildSession`) — the tracker never turns on there. */
+  readonly isChildSession?: boolean;
+  readonly nudge?: NudgeConfig & { readonly enabled: boolean };
+  /** Injected `pi.sendMessage`, matching the compact-hint/quota-hint hook shape (hidden, never triggers a new turn). */
+  readonly sendMessage?: (
+    message: { customType: string; content: string; display: boolean; details?: unknown },
+    options: { triggerTurn: false },
+  ) => void;
+}
+
+export interface TodoWireResult {
+  /**
+   * Present only while the staleness tracker is active (main session +
+   * `nudge.enabled`); lets switch_context append its own handoff advisory
+   * through a small read-only snapshot instead of depending on todo
+   * internals (docs task spec — "port", not a shared module).
+   */
+  getTrackerSnapshot?: () => TodoTrackerSnapshot;
+}
+
+/** Hidden customType for the nudge message (new, todo-nudge plan); `subagent:*` prefix matches the repo's existing channel convention. */
+export const TODO_NUDGE_CUSTOM_TYPE = "subagent:todo-nudge";
+/** Run/subagent completion notification customType (stack.ts's createNotificationReceiptHook uses the same literal). */
+const RUN_NOTIFICATION_CUSTOM_TYPE = "subagent:notification";
+/** Bash tool_execution_start/end correlation map is bounded — a session with hundreds of concurrent bash calls is not realistic, and an unbounded map would be the one module-scope-shaped leak this feature could introduce. */
+const MAX_PENDING_BASH_COMMANDS = 32;
+
+export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireResult {
   let state = emptyState();
   let currentUI: ExtensionUIContext | undefined;
   let queue: Promise<void> = Promise.resolve();
 
+  const nudgeConfig: NudgeConfig = deps.nudge ?? DEFAULT_NUDGE_CONFIG;
+  const nudgeTrackingEnabled = !deps.isChildSession && (deps.nudge?.enabled ?? false);
+  let nudgeState: NudgeState = initNudgeState(nudgeConfig);
+  const pendingBashCommands = new Map<string, string>();
+
+  const noteTodoTouch = (): void => {
+    nudgeState = recordTodoTouch(nudgeState, nudgeConfig);
+  };
+
   const restore = (ctx: ExtensionContext): void => {
+    // Session boundary (session_start/session_tree/session_compact all call
+    // restore()): the nudge counters restart clean — counting turns/evidence
+    // across a context reset or a brand-new session would be meaningless.
+    nudgeState = initNudgeState(nudgeConfig);
     // Legacy cleanup is capability-gated, not mode-gated: any session with a
     // functional status bridge clears the slot written by pre-isolation
     // versions (widget-only UI cannot be concatenated into HUD's footer
@@ -137,6 +202,9 @@ export function wireTodo(pi: ExtensionAPI): void {
   };
 
   const enqueue = <T>(work: () => T): Promise<T> => {
+    // Every Task* tool execute funnels through here — including the
+    // read-only List/Get calls, which the spec explicitly counts as a touch.
+    noteTodoTouch();
     const run = queue.then(work);
     queue = run.then(
       () => undefined,
@@ -350,6 +418,90 @@ export function wireTodo(pi: ExtensionAPI): void {
     if (ctx.mode === "tui") ctx.ui.setWidget(WIDGET_KEY, undefined);
     currentUI = undefined;
   });
+
+  if (nudgeTrackingEnabled) {
+    // E1: a completion notification (subagent / workflow / bash job) entered
+    // the session. message_start fires for every message regardless of
+    // display, matching stack.ts's createNotificationReceiptHook pattern.
+    pi.on("message_start", (event) => {
+      const message = (event as { message?: { role?: string; customType?: string } }).message;
+      if (message?.role !== "custom") return;
+      if (
+        message.customType === RUN_NOTIFICATION_CUSTOM_TYPE ||
+        message.customType === WORKFLOW_NOTIFICATION_TYPE ||
+        message.customType === BASH_JOB_NOTIFICATION_TYPE
+      ) {
+        nudgeState = recordEvidence(nudgeState, "e1");
+      }
+    });
+
+    // E2: a successful bash "git commit|merge|cherry-pick|rebase|revert".
+    // tool_execution_end never carries the command text, so the command is
+    // captured on tool_execution_start and correlated by toolCallId —
+    // toolName "bash" catches both pi's built-in tool and this repo's
+    // same-name auto-background override (bash-tool.ts), which passes the
+    // built-in's resolve/reject through verbatim: a non-zero exit code
+    // always throws there, so `!isError` already means "exit 0", no separate
+    // exit-code parsing needed.
+    pi.on("tool_execution_start", (event) => {
+      const e = event as { toolCallId?: unknown; toolName?: unknown; args?: unknown };
+      if (e.toolName !== "bash" || typeof e.toolCallId !== "string") return;
+      const command = (e.args as { command?: unknown } | undefined)?.command;
+      if (typeof command !== "string") return;
+      if (pendingBashCommands.size >= MAX_PENDING_BASH_COMMANDS) {
+        const oldestKey = pendingBashCommands.keys().next().value;
+        if (oldestKey !== undefined) pendingBashCommands.delete(oldestKey);
+      }
+      pendingBashCommands.set(e.toolCallId, command);
+    });
+    pi.on("tool_execution_end", (event) => {
+      const e = event as { toolCallId?: unknown; toolName?: unknown; isError?: unknown; result?: unknown };
+      if (e.toolName !== "bash" || typeof e.toolCallId !== "string") return;
+      const command = pendingBashCommands.get(e.toolCallId);
+      pendingBashCommands.delete(e.toolCallId);
+      if (command === undefined || e.isError) return;
+      // An auto-/explicitly backgrounded call returns early with
+      // `details.background: true` — that says nothing about the git command's
+      // final exit. Its settle arrives later as a bash-job notification, which
+      // E1 already counts, so never score E2 on the early return.
+      const details = (e.result as { details?: { background?: unknown } } | undefined)?.details;
+      if (details?.background === true) return;
+      if (isGitWriteCommand(command)) nudgeState = recordEvidence(nudgeState, "e2");
+    });
+
+    // E3 + trigger evaluation. Hidden message, never triggers a new turn.
+    pi.on("turn_end", () => {
+      const hasInProgressTask = state.tasks.some((task) => task.status === "in_progress");
+      const result = tickTurn(nudgeState, nudgeConfig, hasInProgressTask);
+      nudgeState = result.state;
+      if (!result.fire) return;
+      const inProgressTasks = state.tasks.filter((task) => task.status === "in_progress");
+      const text = buildNudgeText({ e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3 }, inProgressTasks);
+      try {
+        deps.sendMessage?.(
+          {
+            customType: TODO_NUDGE_CUSTOM_TYPE,
+            content: text,
+            display: false,
+            details: { e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3 },
+          },
+          { triggerTurn: false },
+        );
+      } catch (error) {
+        console.warn(`[pi-subagent] todo nudge send failed: ${String(error)}`);
+      }
+    });
+
+    return {
+      getTrackerSnapshot: (): TodoTrackerSnapshot => ({
+        openTaskCount: state.tasks.filter((task) => task.status !== "completed").length,
+        turnsSinceTouch: nudgeState.e3,
+        hasEvidence: nudgeState.e1 + nudgeState.e2 >= 1,
+      }),
+    };
+  }
+
+  return {};
 }
 
 function appendUnblockedNotice(text: string, unblocked?: Task[]): string {

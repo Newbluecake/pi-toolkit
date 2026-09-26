@@ -109,18 +109,32 @@ export default function activate(pi: ExtensionAPI): void {
   // child session is still subject to the agent type's `tools` allowlist
   // (tool-scope), and none of these names is in RESERVED_TOOL_NAMES.
   const preGuardSettings = readSettingsNoMigrate();
-  if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
-  if (preGuardSettings.todo.enabled) wireTodo(pi);
 
-  // HOST_KEY/g 上移到 pre-guard 区（Symbol.for 幂等，与下方守卫同一个 symbol），
-  // 因为 memory 装配需要知道本次激活是否在子会话里（memory-plan §4.2）。
+  // HOST_KEY/g moved here (Symbol.for is idempotent, same symbol as the guard
+  // below): both memory wiring and todo-nudge need to know whether this
+  // activation is happening in a child session (memory-plan §4.2).
   const HOST_KEY = Symbol.for("pi-subagent:host");
   const g = globalThis as Record<symbol, unknown>;
-  // 此刻 HOST_KEY 已被认领 ⇒ 本次激活发生在子会话（主会话 /reload 先
-  // session_shutdown 释放再 re-activate，此刻必然未认领）。已知边界（§4.3）：
-  // 若未来 pi 改成「先 activate 再 shutdown」，主会话重载瞬间此值误为 true，
-  // 后果仅限该瞬间 memory 注入/拒写走子会话策略，有明确报错文案。
+  // HOST_KEY already claimed at this point ⇒ this activation is happening in
+  // a child session (the main session's /reload releases the claim on
+  // session_shutdown before re-activating, so it can never be claimed here).
+  // Known boundary (§4.3): if pi ever switches to "activate before shutdown",
+  // the main session's reload instant would misread isChildSession as true;
+  // the blast radius is limited to that instant's memory injection/write
+  // gating and todo-nudge tracker gating, both with clear error copy.
   const isChildSession = Boolean(g[HOST_KEY]);
+
+  if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
+  // todo-nudge (L1 feature): the tracker only turns on for the main session
+  // with todo.nudge.enabled; sendMessage matches the compact-hint/quota-hint
+  // hidden-message shape (display:false, triggerTurn:false, never sendUserMessage).
+  const todoWiring = preGuardSettings.todo.enabled
+    ? wireTodo(pi, {
+        isChildSession,
+        nudge: preGuardSettings.todo.nudge,
+        sendMessage: (message, options) => pi.sendMessage(message, options),
+      })
+    : undefined;
 
   // Sysprompt M2/M3: the hub is created before memory registers into it so
   // the memory section lands first in the fold order (registration order ==
@@ -395,6 +409,11 @@ export default function activate(pi: ExtensionAPI): void {
         createSwitchContextTool({
           store: handoffStore,
           sendUserMessage: (text) => pi.sendUserMessage(text),
+          // todo-nudge switch-before hint (L1 feature): only wired when the
+          // tracker is actually active — wireTodo returns no port at all
+          // when todo.nudge is disabled or todo itself is off, so a disabled
+          // feature stays byte-identical to "not injected".
+          ...(todoWiring?.getTrackerSnapshot ? { todoTracker: todoWiring.getTrackerSnapshot } : {}),
         }),
       );
       // 模型自写的交接文本在这里变成 pi 压缩条目的 summary（零摘要 LLM 调用）。

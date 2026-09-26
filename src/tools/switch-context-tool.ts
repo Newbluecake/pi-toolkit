@@ -3,6 +3,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { renderHandoffCore, validateHandoff } from "../context-switch/handoff.js";
 import type { PendingHandoffStore } from "../context-switch/store.js";
+import { buildHandoffAdvisory, type TodoTrackerSnapshot } from "../todo/nudge.js";
 
 /**
  * "switch_context" — 上下文切换：模型把"要带到下一段上下文的状态"写进参数，
@@ -65,6 +66,12 @@ export interface SwitchContextToolDeps {
   /** 两次切换之间的最小间隔。默认 60s。 */
   cooldownMs?: number;
   now?: () => number;
+  /**
+   * todo-nudge 的只读端口（L1 feature）：给一句"交接会带走 N 个未完成任务"的
+   * 提示，不依赖 todo 模块内部——只读一个状态快照。省略时（todo.nudge 关闭/
+   * 未启用）这条提示完全不出现，行为与功能不存在时一致。
+   */
+  todoTracker?: () => TodoTrackerSnapshot;
 }
 
 export const SWITCH_RESUME_TEXT =
@@ -200,11 +207,22 @@ export function createSwitchContextTool(deps: SwitchContextToolDeps): ToolDefini
       }
 
       // ctx.compact() 同步 abort 当前 run，这个返回值可能永远到不了模型；真正的交接在 onComplete。
+      // todo-nudge 切换前提示（L1 feature）：只提示、不阻止；快照读取失败（best effort）
+      // 时静默跳过，绝不能让一个可见性特性把真正的切换拖垮。
+      let advisory: string | undefined;
+      if (deps.todoTracker) {
+        try {
+          advisory = buildHandoffAdvisory(deps.todoTracker());
+        } catch {
+          advisory = undefined;
+        }
+      }
+      const baseText = "Context switch triggered. This turn ends now; work resumes with your handoff as the context.";
       return {
         content: [
           {
             type: "text" as const,
-            text: "Context switch triggered. This turn ends now; work resumes with your handoff as the context.",
+            text: advisory ? `${baseText}\n\n${advisory}` : baseText,
           },
         ],
         details: { ok: true as const, seq, keepRecent },
