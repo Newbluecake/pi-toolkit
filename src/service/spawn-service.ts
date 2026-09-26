@@ -150,6 +150,15 @@ export interface SpawnService {
    * port; a pool that doesn't implement it is a no-op here, never a throw).
    */
   setConcurrencyLimit(n: number): void;
+  /**
+   * L1 todo #19 (list_subagents): current pool occupancy on demand, WITHOUT
+   * spawning — same admission-time `slotfulLabel` count and `slotsInfo` call
+   * the pool-full reject/queue paths above already use (never `deps.pool.stats`,
+   * for the identical reason those paths avoid it: `stats.inUse` only updates
+   * deep inside the runtime adapter, after H2/worktree creation, so it lags
+   * the atomic admission reservation this method must mirror).
+   */
+  slots(): SlotsInfo;
 }
 export interface SpawnServiceDeps {
   types: AgentTypeRegistry;
@@ -999,6 +1008,10 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     resolveResume,
     setConcurrencyLimit(n) {
       deps.pool.setLimit?.(n);
+    },
+    slots() {
+      const limit = deps.pool.stats?.limit ?? 0;
+      return slotsInfo(limit, slotfulLabel.size, Math.max(0, slotfulLabel.size - limit));
     },
     snapshots: () => [...records.values()],
   };

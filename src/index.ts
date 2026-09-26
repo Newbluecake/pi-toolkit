@@ -41,6 +41,7 @@ import { createSpawnService, type SpawnService } from "./service/spawn-service.j
 import { publishBackgroundStatus } from "./service/background-status.js";
 import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool } from "./tools/result-tool.js";
+import { createListSubagentsTool } from "./tools/list-subagents-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createSetModelTool } from "./tools/set-model-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
@@ -362,6 +363,14 @@ export default function activate(pi: ExtensionAPI): void {
       resultMaxChars: () => settings.resultMaxChars,
       markdownTheme: resolveMarkdownTheme,
       workflows: forwardWorkflowQuery(holder),
+    }),
+  );
+  pi.registerTool(
+    createListSubagentsTool({
+      query: forwardQuery(holder),
+      spawn: { slots: () => requireStack(holder).spawn.slots() },
+      workflow: { activity: { list: () => requireStack(holder).workflow.activity.list() } },
+      now: () => systemClock.now(),
     }),
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
@@ -837,6 +846,7 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     resolveRun: (handle) => requireStack(holder).spawn.resolveRun(handle),
     resolveResume: (handle) => requireStack(holder).spawn.resolveResume(handle),
     setConcurrencyLimit: (n) => requireStack(holder).spawn.setConcurrencyLimit(n),
+    slots: () => requireStack(holder).spawn.slots(),
   };
 }
 function forwardResolveRun(holder: { current?: Stack }) {

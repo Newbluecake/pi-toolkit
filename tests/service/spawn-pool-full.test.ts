@@ -274,3 +274,32 @@ describe("SpawnService pool-full admission (L1)", () => {
     expect("error" in admitted).toBe(false);
   });
 });
+
+/** L1 todo #19 (list_subagents): `SpawnService.slots()` — same admission-time `slotfulLabel` accounting as the pool-full reject path above, read WITHOUT spawning. */
+describe("SpawnService.slots() (L1 todo #19)", () => {
+  it("reports free capacity before any admission", () => {
+    const service = createSpawnService(deps(3));
+    expect(service.slots()).toEqual({ limit: 3, inUse: 0, free: 3 });
+  });
+
+  it("reflects in-flight admissions, capped at the limit, with queued counting the overflow", async () => {
+    const service = createSpawnService(deps(2));
+    await spawnOk(service, { type: "worker", prompt: "a", label: "task-a" });
+    expect(service.slots()).toEqual({ limit: 2, inUse: 1, free: 1 });
+    await spawnOk(service, { type: "worker", prompt: "b", label: "task-b" });
+    expect(service.slots()).toEqual({ limit: 2, inUse: 2, free: 0 });
+    // A third, queue-policy admission is accepted past the limit (kept in `slotfulLabel`
+    // as a queued occupant) instead of rejected — slots() must report it as queued, never
+    // as extra inUse (inUse stays capped at limit, matching formatSlots' contract).
+    const queued = service.spawn({ type: "worker", prompt: "c", label: "task-c", poolFullPolicy: "queue" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(service.slots()).toEqual({ limit: 2, inUse: 2, free: 0, queued: 1 });
+    void queued; // never settles in this test (hangingRunner); just needed the admission side effect
+  });
+
+  it("reports the unlimited sentinel (limit<=0) as bare running-count, never free/queued", async () => {
+    const service = createSpawnService(deps(0));
+    await spawnOk(service, { type: "worker", prompt: "a", label: "task-a" });
+    expect(service.slots()).toEqual({ limit: 0, inUse: 1 });
+  });
+});

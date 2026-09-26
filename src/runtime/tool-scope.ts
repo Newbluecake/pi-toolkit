@@ -47,6 +47,11 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // MCP/late-registered same-name tool from handing a run job-management
   // powers (extend/kill/wait/status/list) it was never granted.
   "bash_job",
+  // list_subagents (todo #19): host-registered only, same treatment as
+  // get_subagent_result/steer_subagent above — never pushed to
+  // grantedReserved, so deny-by-default strips an MCP/late-registered
+  // same-name tool from every child session.
+  "list_subagents",
 ];
 
 /**
