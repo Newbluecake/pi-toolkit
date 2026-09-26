@@ -146,6 +146,7 @@ import {
   type WorktreeOrphanScanResult,
 } from "./extensions/worktree-orphans.js";
 import { FleetWidgetController } from "./ui/fleet-widget.js";
+import { TODO_WIDGET_MOUNTED_EVENT } from "./ui/widget-mount-events.js";
 import type { GoalSession, GoalSessionStartReason } from "./goal/state.js";
 import { readBackGoalRecord } from "./goal/store.js";
 import { buildResumeHintText, goalBadgeText } from "./goal/texts.js";
@@ -2103,6 +2104,13 @@ export function buildSessionStack(
             readBashTail: (record: JobRecord, sizeHint?: number) => readBashJobTail(bashJobs, record, sizeHint),
           }
         : {}),
+      // Todo widget mount-order fix: the todo widget (src/todo/index.ts)
+      // announces its own hidden→visible transitions on this channel; see
+      // src/ui/widget-mount-events.ts for the full rationale. `pi.events` is
+      // the same cross-module bus both sides already use elsewhere in this
+      // file, so this wiring never imports either module's implementation
+      // into the other.
+      onExternalWidgetMounted: (handler) => pi.events.on(TODO_WIDGET_MOUNTED_EVENT, handler),
     });
     widgetRef.current = widget;
     previousFleetWidget = widget;

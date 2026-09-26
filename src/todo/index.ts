@@ -34,6 +34,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { TodoPanel, TodoWidget } from "./ui.js";
 import { WORKFLOW_NOTIFICATION_TYPE } from "../adapters/workflow-notice.js";
 import { BASH_JOB_NOTIFICATION_TYPE } from "../stack.js";
+import { TODO_WIDGET_MOUNTED_EVENT } from "../ui/widget-mount-events.js";
 import {
   buildNudgeText,
   DEFAULT_NUDGE_CONFIG,
@@ -152,6 +153,19 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   let state = emptyState();
   let currentUI: ExtensionUIContext | undefined;
   let queue: Promise<void> = Promise.resolve();
+  // Mount-once + update-in-place (same pattern as FleetWidgetController in
+  // src/ui/fleet-widget.ts): `mountedWidget` tracks whether WIDGET_KEY is
+  // currently registered so an ordinary task-list change only triggers a
+  // repaint of the already-mounted component instead of a fresh
+  // `ui.setWidget` call — pi's setExtensionWidget always does a Map
+  // delete()+set(), so a repeat call on every task touch was what kept
+  // shoving the todo widget below the fleet (agent tree) widget once both
+  // had been re-set at least once. `TodoWidget` itself needs no per-update
+  // data push (its constructor closes over `() => state.tasks`, so it
+  // always reads the live state on its own next render); `requestRenderFn`
+  // is only there to ask the host to actually repaint between mounts.
+  let mountedWidget = false;
+  let requestRenderFn: (() => void) | undefined;
 
   const nudgeConfig: NudgeConfig = deps.nudge ?? DEFAULT_NUDGE_CONFIG;
   const nudgeTrackingEnabled = !deps.isChildSession && (deps.nudge?.enabled ?? false);
@@ -192,13 +206,37 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     if (!ui) return;
     const tasks = state.tasks;
     if (tasks.length === 0) {
-      ui.setWidget(WIDGET_KEY, undefined);
+      // Empty ⇒ hidden: unmount (matches pre-existing behavior) and forget
+      // the mount so the NEXT non-empty transition remounts fresh.
+      if (mountedWidget) {
+        mountedWidget = false;
+        requestRenderFn = undefined;
+        ui.setWidget(WIDGET_KEY, undefined);
+      }
       return;
     }
 
-    ui.setWidget(WIDGET_KEY, (_tui, theme) => new TodoWidget(() => state.tasks, theme), {
-      placement: "aboveEditor",
-    });
+    if (mountedWidget) {
+      // Already visible: an ordinary task-list change repaints the mounted
+      // component in place — no setWidget call, so pi's widget Map (and its
+      // insertion-order-derived render order) never moves.
+      requestRenderFn?.();
+      return;
+    }
+
+    mountedWidget = true;
+    ui.setWidget(
+      WIDGET_KEY,
+      (tui, theme) => {
+        requestRenderFn = typeof tui?.requestRender === "function" ? () => tui.requestRender() : undefined;
+        return new TodoWidget(() => state.tasks, theme);
+      },
+      { placement: "aboveEditor" },
+    );
+    // Announce the hidden→visible transition so the fleet widget (if it is
+    // itself currently mounted) can remount to fall back to the end of pi's
+    // widget Map, i.e. after this fresh todo entry. See widget-mount-events.ts.
+    pi.events?.emit(TODO_WIDGET_MOUNTED_EVENT, { at: Date.now() });
   };
 
   const enqueue = <T>(work: () => T): Promise<T> => {
@@ -416,6 +454,8 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   pi.on("session_compact", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", (_event, ctx) => {
     if (ctx.mode === "tui") ctx.ui.setWidget(WIDGET_KEY, undefined);
+    mountedWidget = false;
+    requestRenderFn = undefined;
     currentUI = undefined;
   });
 

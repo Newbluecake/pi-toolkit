@@ -1194,6 +1194,98 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(callCount); // nothing after dispose
   });
 
+  describe("onExternalWidgetMounted (todo widget mount-order fix)", () => {
+    function fakeExternalSignal() {
+      const handlers = new Set<() => void>();
+      return {
+        subscribeCount: 0,
+        unsubscribeCount: 0,
+        fire(this: { subscribeCount: number; unsubscribeCount: number }) {
+          for (const handler of handlers) handler();
+        },
+        onExternalWidgetMounted(this: { subscribeCount: number; unsubscribeCount: number }, handler: () => void) {
+          this.subscribeCount++;
+          handlers.add(handler);
+          return () => {
+            this.unsubscribeCount++;
+            handlers.delete(handler);
+          };
+        },
+      };
+    }
+
+    it("resorts (fresh setWidget call) when the fleet widget is visible and the signal fires", () => {
+      const clock = new FakeClock(NOW);
+      const ui = fakeUi();
+      const signal = fakeExternalSignal();
+      const query = fakeQuery([snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) })]);
+      new FleetWidgetController({
+        ui,
+        query,
+        clock,
+        onExternalWidgetMounted: signal.onExternalWidgetMounted.bind(signal),
+      });
+      expect(signal.subscribeCount).toBe(1);
+      expect(ui.mountCount).toBe(1); // initial mount
+      const callsBefore = ui.calls.length;
+
+      signal.fire();
+
+      // A second component factory was installed (the resort) — a real setWidget
+      // call, not just an in-place update.
+      expect(ui.mountCount).toBe(2);
+      expect(ui.calls.length).toBeGreaterThan(callsBefore);
+      expect(ui.calls[ui.calls.length - 1]!.key).toBe(FLEET_WIDGET_KEY);
+      expect(typeof ui.calls[ui.calls.length - 1]!.content).toBe("function");
+      // The tree content itself is unaffected by the resort.
+      expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s Σ1s"]);
+    });
+
+    it("is a no-op while the fleet widget is hidden (no runs active)", () => {
+      const clock = new FakeClock(NOW);
+      const ui = fakeUi();
+      const signal = fakeExternalSignal();
+      new FleetWidgetController({
+        ui,
+        query: fakeQuery([]),
+        clock,
+        onExternalWidgetMounted: signal.onExternalWidgetMounted.bind(signal),
+      });
+      expect(ui.mountCount).toBe(0);
+      const callsBefore = ui.calls.length;
+
+      signal.fire();
+
+      expect(ui.mountCount).toBe(0); // still hidden — nothing to resort
+      expect(ui.calls).toHaveLength(callsBefore);
+    });
+
+    it("unsubscribes on dispose — a later signal fire does nothing and never throws", () => {
+      const clock = new FakeClock(NOW);
+      const ui = fakeUi();
+      const signal = fakeExternalSignal();
+      const query = fakeQuery([snapshot({ runId: "live-0000" })]);
+      const widget = new FleetWidgetController({
+        ui,
+        query,
+        clock,
+        onExternalWidgetMounted: signal.onExternalWidgetMounted.bind(signal),
+      });
+      widget.dispose();
+      expect(signal.unsubscribeCount).toBe(1);
+      const callsAfterDispose = ui.calls.length;
+      expect(() => signal.fire()).not.toThrow();
+      expect(ui.calls).toHaveLength(callsAfterDispose); // dead controller ignores it
+    });
+
+    it("absent dep (default, pre-feature behavior): the controller never subscribes", () => {
+      const clock = new FakeClock(NOW);
+      const ui = fakeUi();
+      const query = fakeQuery([snapshot({ runId: "live-0000" })]);
+      expect(() => new FleetWidgetController({ ui, query, clock })).not.toThrow();
+    });
+  });
+
   it("non-interactive host without setWidget → inert: no throw, no timer, refresh is a no-op", () => {
     const clock = new FakeClock(NOW);
     const query = fakeQuery([snapshot({ runId: "live-0000" })]);

@@ -1027,6 +1027,16 @@ export interface FleetWidgetDeps {
   terminalLingerMs?: number;
   awaitNotificationMs?: number;
   pruneReceipts?: (keepRunIds: ReadonlySet<string>, now: number) => void;
+  /**
+   * Subscribe to a signal meaning "a sibling aboveEditor widget just
+   * transitioned from hidden to visible" (see src/ui/widget-mount-events.ts
+   * for the full rationale). Returns an unsubscribe function, matching
+   * pi's own EventBus.on shape so the wiring in src/stack.ts can pass
+   * `pi.events.on.bind(pi.events)` (partially applied to the right
+   * channel) directly without either side importing the other's module.
+   * Absent ⇒ the controller never re-sorts itself (pre-feature behavior).
+   */
+  onExternalWidgetMounted?: (handler: () => void) => () => void;
 }
 
 export class FleetWidgetController {
@@ -1047,6 +1057,8 @@ export class FleetWidgetController {
   private requestRenderFn: (() => void) | undefined;
   /** H1 observer; merge into the session's SubagentExtensionPoints fan-out. */
   readonly lifecycle: SubagentExtensionPoints;
+  /** Unsubscribe for `deps.onExternalWidgetMounted`; cleared in dispose(). */
+  private unsubscribeExternalMount: (() => void) | undefined;
   /** D2: cache is controller-owned because renderFrame must stay synchronous. */
   private readonly bashTailCache = new Map<string, { text: string; observedSize: number; terminal: boolean }>();
   private readonly bashTailInflight = new Set<string>();
@@ -1057,6 +1069,9 @@ export class FleetWidgetController {
     const candidate = deps.ui?.setWidget;
     this.setWidget = typeof candidate === "function" ? (candidate as SetWidgetFn).bind(deps.ui) : undefined;
     this.lifecycle = { onLifecycle: () => this.refresh() };
+    if (deps.onExternalWidgetMounted) {
+      this.unsubscribeExternalMount = deps.onExternalWidgetMounted(() => this.handleExternalWidgetMounted());
+    }
     if (!this.live) return; // inert: disabled or no setWidget capability
     this.refresh();
     if (!this.live) return; // initial push already hit a degenerate host — stay inert, no tick
@@ -1111,6 +1126,23 @@ export class FleetWidgetController {
         console.warn(`[pi-subagent] fleet widget refresh failed (frame dropped, tick continues): ${detail}`);
       }
     }
+  }
+
+  /**
+   * A sibling widget (todo) just transitioned hidden→visible, which pi's
+   * setExtensionWidget always renders as a fresh Map entry appended at the
+   * end — landing BELOW the fleet widget if the fleet widget is already
+   * mounted. Force this controller's own next `push()` to go through the
+   * fresh-mount branch (a `setWidget` call, i.e. delete()+set() on the SAME
+   * key) so it moves back to the end of the Map, i.e. below the just-mounted
+   * sibling. No-op while the fleet widget itself is hidden (nothing to
+   * re-sort) or inert.
+   */
+  private handleExternalWidgetMounted(): void {
+    if (!this.live || !this.treeComponent) return;
+    this.treeComponent = undefined;
+    this.requestRenderFn = undefined;
+    this.refresh();
   }
 
   /** Unguarded refresh core — never call directly, always go through refresh(). */
@@ -1294,6 +1326,8 @@ export class FleetWidgetController {
       this.treeComponent = undefined;
       this.requestRenderFn = undefined;
       this.stopTimer();
+      this.unsubscribeExternalMount?.();
+      this.unsubscribeExternalMount = undefined;
     }
   }
 
@@ -1311,6 +1345,8 @@ export class FleetWidgetController {
     if (this.disposed) return;
     this.disposed = true;
     this.stopTimer();
+    this.unsubscribeExternalMount?.();
+    this.unsubscribeExternalMount = undefined;
     if (this.setWidget && !this.uiDead) {
       try {
         this.setWidget(FLEET_WIDGET_KEY, undefined);
