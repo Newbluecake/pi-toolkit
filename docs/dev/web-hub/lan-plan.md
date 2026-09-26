@@ -1399,6 +1399,13 @@ W1 只有一个包，不需要预检；W2 五包（含 LP）与 W3 两包的 spe
 
 按 Q24「之后的分歧以代码 + typecheck + 契约测试为准，方案文档只在 §15 追加实施偏差记录」处理：W1 代码评审打回 10 项（typecheck 未覆盖 `types.test-d.ts`、`lan.port` 未与 `webHub.port` 互斥校验、`externalOrigins` 未反查 `classifyHostToken`、`lan_req`/`lan_res` 判别联合不严格、singleton 启动路径残留同步 fs、fence 单次检查两次 lstat 各领一份预算、`hub-json` 的 patchLan/close 时序、`ConnGuard` 冻结为 `unknown`，以及本行）均已在代码与测试中修复（commit 见 `feat/web-hub-lan` 分支），不逐条改写本文件正文。唯一影响正文措辞的一项：§11 落地清单 B 中「`hostKey`」一词判定为文档笔误——按 §2.2 的 `RequestContext.hostKey` 字段理解，未实现为独立导出函数；`hub/http.ts`/`protocol/lan.ts` 均以此为准。
 
+**W2 实施偏差（主会话授权，2026-09-26）**：
+
+- 冻结接口加法例外 ①：`protocol/paths.ts` 的 `FsDeps` 新增可选字段 `onWarn?`（TMP 宽模式 `chmod 0700` 时的 warning sink，§1.3.1；hub.ts 默认接 `log.warn`）。纯加法、可选，不改变任何既有调用方；另导出纯函数 `identityEquals`，`verifyBoundSocket` 的 `dirBefore` 比较由调用方统一经它完成（契约写在 paths.ts 头注释，源码扫描测试穷举调用点）。
+- 冻结接口加法例外 ②：`hub/ports.ts` 的 `ConnLease` 新增 `leaveLoginPending()`（登录终结路径回到可淘汰状态）。
+- LC 架构偏差接受：LAN 生命周期（bind → 60s tick → 421 重算 → revoke）由 `hub/http.ts` 自持；W3-LD 不再另写 `lan-controller.ts`，只做 startHub 接线 / admin / hub.json。
+- LE 定下的 `WebHubSettings.lan` / `WebHubControl.lan` 接口由 W3-LI 直接采用。
+
 ---
 
 ## 16. 待用户确认
