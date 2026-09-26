@@ -290,12 +290,13 @@ function buildMergedBlockText(
  * 闸门状态必须与 event.gateBlocked（镜像 evaluateQuotaGate 的判定，含降位当场重建）
  * 一致——另一窗口仍耗时绝不写「已放行」。
  */
-export function buildQuotaRecoveryText(event: QuotaRecoveryEvent, now: Millis): string {
+export function buildQuotaRecoveryText(event: QuotaRecoveryEvent, now: Millis, label?: string): string {
   const v = event.verdict;
+  const name = label ?? v.provider;
   const readings = v.windows.length > 0 ? `，当前 ${readingsText(v)}` : "";
   const allReset = v.windows.length > 0 && v.windows.every((w) => event.resetScopes.has(w.scope));
   const resetPart = allReset ? "窗口已重置" : `${[...event.resetScopes].map(formatScope).join("、")} 窗口已重置`;
-  const head = `[quota 恢复] ${v.provider} ${resetPart}${readings}`;
+  const head = `[quota 恢复] ${name} ${resetPart}${readings}`;
   if (!event.gateBlocked) return `${head}，spawn 闸门已放行，可恢复派单。`;
   // 闸门仍拦：如实写哪个窗口仍受限（未重置且 ≥ L2 者优先）；全重置但读数仍过
   // 闸门线（gateLevel 低 / 速率预测抬级）也照实说，绝不写「已放行」。
@@ -310,7 +311,24 @@ export function buildQuotaRecoveryText(event: QuotaRecoveryEvent, now: Millis): 
           )
           .join("，")
       : `重置后读数仍触发闸门（等级 L${v.level}）`;
-  return `${head}，${stillText}，spawn 闸门仍拦截，请继续避开 ${v.provider} 的新任务。`;
+  return `${head}，${stillText}，spawn 闸门仍拦截，请继续避开 ${name} 的新任务。`;
+}
+
+/**
+ * 同池合并的恢复播报（2026-09-26 用户反馈重复）：`zai-coding-cn` 与 `zai` 同 key 同池时
+ * 两条恢复播报除名字外逐字相同，合并为一条，标签写成 `zai-coding-cn / zai`。分组键与
+ * L2/L3 的 `groupSamePool` 同源（poolSignature），另加闸门状态与已重置窗口集合——任一不同
+ * 就分开说。顺序按各组首个事件出现的顺序。
+ */
+export function buildQuotaRecoveryTexts(events: readonly QuotaRecoveryEvent[], now: Millis): string[] {
+  const groups = new Map<string, { event: QuotaRecoveryEvent; providers: string[] }>();
+  for (const e of events) {
+    const key = `${e.gateBlocked ? 1 : 0}#${[...e.resetScopes].sort().join(",")}#${poolSignature(e.verdict)}`;
+    const g = groups.get(key);
+    if (g === undefined) groups.set(key, { event: e, providers: [e.verdict.provider] });
+    else g.providers.push(e.verdict.provider);
+  }
+  return [...groups.values()].map(({ event, providers }) => buildQuotaRecoveryText(event, now, providers.join(" / ")));
 }
 
 type QuotaSection = { readonly verdict: ProviderVerdict; readonly alternatives: AlternativeInput };

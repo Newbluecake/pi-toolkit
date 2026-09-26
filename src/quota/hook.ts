@@ -28,7 +28,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Millis } from "../core/types.js";
 import { gridStep, QUOTA_HYSTERESIS_PCT, type ProviderVerdict, type QuotaRecoveryEvent } from "./ladder.js";
-import { buildQuotaMessage, buildQuotaRecoveryText, type AlternativeSelection } from "./render.js";
+import { buildQuotaMessage, buildQuotaRecoveryTexts, type AlternativeSelection } from "./render.js";
 import type { LadderLevel } from "./types.js";
 
 export const QUOTA_CUSTOM_TYPE = "subagent:quota";
@@ -228,7 +228,7 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
     }
 
     // ⑤ 一轮一条合并消息（恢复块在前——它改变派单决策，比走势 tick 更重要）。
-    const parts: string[] = recoveryEvents.map((event) => buildQuotaRecoveryText(event, t));
+    const parts: string[] = buildQuotaRecoveryTexts(recoveryEvents, t);
     const body = sections.length > 0 ? buildQuotaMessage(sections, t) : "";
     if (body !== "") parts.push(body);
     try {

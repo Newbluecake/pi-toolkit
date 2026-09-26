@@ -12,6 +12,7 @@ import {
   buildQuotaBlockText,
   buildQuotaMessage,
   buildQuotaRecoveryText,
+  buildQuotaRecoveryTexts,
   buildQuotaTickText,
   buildQuotaWarnText,
   dedupeVerdicts,
@@ -750,6 +751,26 @@ describe("recovery block (额度恢复播报)", () => {
     expect(text).toContain("窗口已重置，当前 5h 55%");
     expect(text).toContain("重置后读数仍触发闸门（等级 L2），spawn 闸门仍拦截");
     expect(text).not.toContain("已放行");
+  });
+
+  it("merges same-pool recoveries (zai-coding-cn / zai) into one line", () => {
+    const pool = [w("5h", 0, 0, "none"), w("week", 98, 3, "pct", { resetAt: RWEEK })];
+    const ev = (provider: string) =>
+      recovery({
+        provider,
+        resetScopes: new Set<WindowScope>(["5h"]),
+        verdict: verdict({ provider, level: 3, windows: pool }),
+        gateBlocked: true,
+      });
+    const texts = buildQuotaRecoveryTexts([ev("zai-coding-cn"), ev("zai")], NOW);
+    expect(texts).toEqual([
+      "[quota 恢复] zai-coding-cn / zai 5h 窗口已重置，当前 5h 0% · 7d 98%，7d 仍 98% ⚠，" +
+        "spawn 闸门仍拦截，请继续避开 zai-coding-cn / zai 的新任务。",
+    ]);
+    // 不同池 / 闸门状态不同 ⇒ 分开
+    const other = recovery();
+    expect(buildQuotaRecoveryTexts([ev("zai"), other], NOW)).toHaveLength(2);
+    expect(buildQuotaRecoveryTexts([ev("zai-coding-cn"), { ...ev("zai"), gateBlocked: false }], NOW)).toHaveLength(2);
   });
 
   it("window-less verdict (defensive) keeps the reset scopes without readings", () => {
