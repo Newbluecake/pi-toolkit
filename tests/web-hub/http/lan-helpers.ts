@@ -162,6 +162,19 @@ export function lanRequest(
     body?: string;
     host?: string;
     localAddress?: string;
+    /**
+     * TCP dial target — defaults to `127.0.0.1`, which is what the LC unit suites in this
+     * directory want: they intentionally send a *spoofed* `Host`/`X-Forwarded-Host` header over
+     * a real loopback connection to exercise the allow-list/origin logic without needing a
+     * second real interface. That trick stops working once `trustProxyFrom` contains
+     * `127.0.0.1` (a common real deployment: a local reverse proxy) — per plan §2.4/§6.3,
+     * `resolveProxy` treats *every* connection whose peer is a `trustProxyFrom` entry as arriving
+     * via that proxy, headers or not, so a same-peer "direct" request would 400 on missing
+     * `X-Forwarded-*` instead of exercising the direct path at all. `destHost` lets a caller (the
+     * LI e2e suite, `tests/integration/web-hub-lan.test.ts`) actually dial the machine's real
+     * non-loopback LAN address so the peer IP is genuinely outside `trustProxyFrom`.
+     */
+    destHost?: string;
   } = {},
 ): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
@@ -169,7 +182,7 @@ export function lanRequest(
     if (opts.body !== undefined) headers["Content-Length"] = String(Buffer.byteLength(opts.body));
     const req = httpRequest(
       {
-        host: "127.0.0.1",
+        host: opts.destHost ?? "127.0.0.1",
         port,
         method: opts.method ?? "GET",
         path: opts.path ?? "/",
@@ -280,6 +293,7 @@ export function lanPostJson(
   body: unknown,
   headers: Record<string, string> = {},
   localAddress?: string,
+  destHost?: string,
 ): Promise<RawResponse> {
   const host = headers.Host ?? `127.0.0.1:${port}`;
   const origin = headers.Origin ?? `http://${host}`;
@@ -289,6 +303,7 @@ export function lanPostJson(
     headers: { ...LAN_JSON_HEADERS, Origin: origin, ...headers },
     body: JSON.stringify(body),
     ...(localAddress === undefined ? {} : { localAddress }),
+    ...(destHost === undefined ? {} : { destHost }),
   });
 }
 

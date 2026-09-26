@@ -200,13 +200,27 @@ export function parseSseBlock(block: string): SseEvent | undefined {
 
 export function openSse(
   port: number,
-  opts: { cookie?: string; lastEventId?: number | string; path?: string; host?: string } = {},
+  opts: {
+    cookie?: string;
+    lastEventId?: number | string;
+    path?: string;
+    host?: string;
+    /** TCP dial target, defaults to `127.0.0.1` — see `lan-helpers.ts`'s `lanRequest.destHost` for
+     * why this must be separate from the (possibly spoofed) `Host` header. */
+    destHost?: string;
+  } = {},
 ): Promise<SseConn> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = { Host: opts.host ?? `127.0.0.1:${port}`, Accept: "text/event-stream" };
     if (opts.cookie !== undefined) headers.Cookie = opts.cookie;
     if (opts.lastEventId !== undefined) headers["Last-Event-ID"] = String(opts.lastEventId);
-    const req = httpRequest({ host: "127.0.0.1", port, path: opts.path ?? "/api/events", headers, agent: false });
+    const req = httpRequest({
+      host: opts.destHost ?? "127.0.0.1",
+      port,
+      path: opts.path ?? "/api/events",
+      headers,
+      agent: false,
+    });
     req.on("error", reject);
     req.on("response", (res) => {
       const events: SseEvent[] = [];

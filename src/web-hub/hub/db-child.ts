@@ -121,7 +121,7 @@ const stmtDeleteAllSessions = db.prepare('DELETE FROM sessions WHERE user_id=?')
 const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=?, initial_login_ip=? WHERE username=? AND initial_login_at IS NULL');
 const stmtUpdateUser = db.prepare('UPDATE users SET kdf=?, n=?, r=?, p=?, salt=?, hash=?, epoch=epoch+1, initial_password=NULL, initial_created_at=NULL, updated_at=? WHERE username=?');
 const stmtInsertUser = db.prepare('INSERT INTO users (username, kdf, n, r, p, salt, hash, epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)');
-const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users WHERE initial_password IS NOT NULL LIMIT 1');
+const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users LIMIT 1');
 const stmtPurge = db.prepare('DELETE FROM sessions WHERE sid_hash IN (SELECT sid_hash FROM sessions WHERE expires_at<=? OR absolute_expires_at<=? LIMIT 256)');
 
 function handle(op, args) {
@@ -137,7 +137,8 @@ ${testHooks}
     case 'initialInfo': {
       const row = stmtInitialInfo.get();
       if (!row) return undefined;
-      const out = { username: row.username, initialPassword: row.initial_password };
+      const out = { username: row.username };
+      if (row.initial_password !== null) out.initialPassword = row.initial_password;
       if (row.initial_login_ip !== null && row.initial_login_at !== null) {
         out.initialLogin = { ip: row.initial_login_ip, at: row.initial_login_at };
       }

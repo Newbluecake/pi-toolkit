@@ -221,6 +221,16 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
     expect(summary).toEqual({ username: "admin", initialPasswordInUse: false });
   });
 
+  it("initialInfo still finds the user (no initialPassword field) after setPassword clears it (LD review fix: the query used to filter WHERE initial_password IS NOT NULL, so the only row disappeared entirely once the password changed, misreporting E_NO_USER)", async () => {
+    const { scryptSync, randomBytes } = await import("node:crypto");
+    const salt = randomBytes(16);
+    const hash = scryptSync("anotherpass1", salt, 32, { N: 32768, r: 8, p: 1, maxmem: 128 * 32768 * 8 + 1024 * 1024 });
+    await store.setPassword({ username: "admin", kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
+    const info = await store.initialInfo();
+    expect(info?.username).toBe("admin");
+    expect(info?.initialPassword).toBeUndefined();
+  });
+
   it("purgeExpired deletes only sessions past either expiry and returns the count", async () => {
     const now = 8_000_000;
     await store.createSession({ userId: 1, epoch: 1, boundOrigin: "http://x", createdIp: "1.1.1.1", now });

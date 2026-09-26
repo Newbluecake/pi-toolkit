@@ -1,24 +1,18 @@
 // lan-plan.md §11 "S1-W3（LD ∥ LI）" row, LI's e2e: a *really* lifted hub (real
 // `startHub` + real `createHttpFrontend`, real SQLite-backed `LanStorePort`
-// once LD's `defaultLanAssembly` lands) driven purely at the wire level
-// (unix-socket admin frames `lan_req`/`hub_ctl` + real `http.request`/SSE for
-// the browser side) — no `activate()`/pi assembly needed for what this file
-// covers (that side is already exercised by `tests/web-hub/agent/{lan-status,
+// via LD's `defaultLanAssembly`) driven purely at the wire level (unix-socket
+// admin frames `lan_req`/`hub_ctl` + real `http.request`/SSE for the browser
+// side) — no `activate()`/pi assembly needed for what this file covers (that
+// side is already exercised by `tests/web-hub/agent/{lan-status,
 // passwd-prompt,restart,wiring-lan}.test.ts`, LE's suite, all green).
 //
-// Gate (per S1-W3 dispatch instructions, docs/dev/web-hub/lan-plan.md §11 LI
-// row): S1-W3-LD (`hub/{hub,main,agent-server,admin,lifecycle}.ts` wiring +
-// the real `defaultLanAssembly.build()`) has not merged into this worktree's
-// branch — `defaultLanAssembly` is still W1's stub (`throw
-// E_NOT_IMPLEMENTED:LD`) and there is no `lan_req`/`hub_ctl` dispatch wired
-// into `agent-server.ts` (`admin.ts` doesn't exist yet on this branch). This
-// whole suite is written to the plan's LI row and is otherwise ready to run
-// against the real assembly; it is skipped until LD lands so this branch
-// stays green. The gate is a static, side-effect-free check (reads
-// `defaultLanAssembly.build`'s own source text — never calls it) so it flips
-// to `false` automatically once LD replaces the stub; the main session
-// removes this `skipIf` once that happens (per the dispatch instructions) —
-// no other change to this file should be needed.
+// Gate: S1-W3-LD has merged on this branch (`defaultLanAssembly` is the real
+// SQLite-backed assembly, not the W1 stub), so the only remaining gate is the
+// environmental one every other SQLite-backed suite in this repo uses
+// (`hasNodeSqlite()` — plan §4.3): skip on a Node build without `node:sqlite`
+// rather than statically probing `defaultLanAssembly.build`'s source text (a
+// regex on a function's `toString()` is not an environment check and stopped
+// being one the moment LD landed).
 //
 // Scope note: "会话 jsonl 中没有初始密码" (the LI row's last clause) is
 // exercised at the *agent/command* layer instead, where it actually lives —
@@ -34,7 +28,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultLanAssembly } from "../../src/web-hub/hub/lan-assembly.js";
+import { hasNodeSqlite } from "../../src/web-hub/hub/db.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
 import type { HubConfig, HubLanConfig } from "../../src/web-hub/hub/ports.js";
@@ -45,14 +39,11 @@ import { openSse, type SseConn } from "../web-hub/http/helpers.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
 
-/** See the file header — a static, side-effect-free probe of the W1 stub. */
-const LAN_ASSEMBLY_IS_STUB = /E_NOT_IMPLEMENTED:LD/.test(defaultLanAssembly.build.toString());
-if (LAN_ASSEMBLY_IS_STUB) {
+/** Environmental gate only (plan §4.3's own convention) — never a stand-in for "LD hasn't merged". */
+const NO_NODE_SQLITE = !(await hasNodeSqlite());
+if (NO_NODE_SQLITE) {
   // eslint-disable-next-line no-console
-  console.warn(
-    "[web-hub-lan.test.ts] S1-W3-LD has not merged on this branch (defaultLanAssembly is still the W1 stub) " +
-      "⇒ skipping the LAN e2e suite; see this file's header comment.",
-  );
+  console.warn("[web-hub-lan.test.ts] this Node build has no node:sqlite ⇒ skipping the LAN e2e suite.");
 }
 
 /** First non-loopback IPv4 this machine actually has (net-hosts.ts §2.1① auto-discovers every
@@ -147,7 +138,7 @@ async function waitLanOn(hub: RunningHub, ms = 10_000): Promise<{ port: number }
   return { port: status.port };
 }
 
-describe.skipIf(LAN_ASSEMBLY_IS_STUB)("web-hub LAN e2e (real hub, plan §11 LI row)", () => {
+describe.skipIf(NO_NODE_SQLITE)("web-hub LAN e2e (real hub, plan §11 LI row)", () => {
   let home: { home: string; restore: () => void } | undefined;
   let hub: RunningHub | undefined;
   let admin: TestClient | undefined;
@@ -195,12 +186,19 @@ describe.skipIf(LAN_ASSEMBLY_IS_STUB)("web-hub LAN e2e (real hub, plan §11 LI r
     expect(initialPassword).toBeDefined();
 
     const host = `${ip}:${port}`;
-    const loginRes = await lanPostJson(port, "/api/login", { username, password: initialPassword }, { Host: host });
+    const loginRes = await lanPostJson(
+      port,
+      "/api/login",
+      { username, password: initialPassword },
+      { Host: host },
+      undefined,
+      ip,
+    );
     expect(loginRes.status).toBe(200);
     const cookie = (loginRes.headers["set-cookie"]?.[0] ?? "").split(";")[0]!;
     expect(cookie).toMatch(/^pwh_lan=/);
 
-    const sse = await openSse(port, { host, cookie });
+    const sse = await openSse(port, { host, cookie, destHost: ip });
     sseConns.push(sse);
     await sse.waitFor((e) => e.event === "hello");
   });
@@ -226,7 +224,19 @@ describe.skipIf(LAN_ASSEMBLY_IS_STUB)("web-hub LAN e2e (real hub, plan §11 LI r
 
     // Replaying the proxy-bound cookie on the direct (http, loopback) origin must 401 (§2.4/§6.4:
     // the two entry kinds' origin sets are disjoint even though they share this host/hub).
-    const direct = await lanRequest(port, { path: "/api/session", headers: { Cookie: proxyCookie } });
+    // `bringUp()`'s `trustProxyFrom: ["127.0.0.1"]` means *any* connection whose peer is
+    // `127.0.0.1` is treated as arriving via that trusted proxy (plan §2.4/§6.3's `resolveProxy`:
+    // membership in `trustProxyFrom` is peer-IP-keyed, not header-gated) — a "direct" probe must
+    // therefore originate from a genuinely different peer, not just omit proxy headers while still
+    // dialing 127.0.0.1 (that would 400 on missing `X-Forwarded-Proto`, never reaching the origin
+    // check this test wants). `127.0.0.2` (a distinct loopback alias, same convention as
+    // `tests/web-hub/http/lan-hostbind.test.ts`) is outside `trustProxyFrom` and always available,
+    // unlike a real second interface.
+    const direct = await lanRequest(port, {
+      path: "/api/session",
+      headers: { Cookie: proxyCookie },
+      localAddress: "127.0.0.2",
+    });
     expect(direct.status).toBe(401);
   });
 
@@ -236,11 +246,18 @@ describe.skipIf(LAN_ASSEMBLY_IS_STUB)("web-hub LAN e2e (real hub, plan §11 LI r
     const { username, initialPassword } = await readInfo(admin!);
     const host = `${ip}:${port}`;
 
-    const loginRes = await lanPostJson(port, "/api/login", { username, password: initialPassword }, { Host: host });
+    const loginRes = await lanPostJson(
+      port,
+      "/api/login",
+      { username, password: initialPassword },
+      { Host: host },
+      undefined,
+      ip,
+    );
     expect(loginRes.status).toBe(200);
     const oldCookie = (loginRes.headers["set-cookie"]?.[0] ?? "").split(";")[0]!;
 
-    const sse = await openSse(port, { host, cookie: oldCookie });
+    const sse = await openSse(port, { host, cookie: oldCookie, destHost: ip });
     sseConns.push(sse);
     await sse.waitFor((e) => e.event === "hello");
 
@@ -261,7 +278,7 @@ describe.skipIf(LAN_ASSEMBLY_IS_STUB)("web-hub LAN e2e (real hub, plan §11 LI r
     const authEv = sse.events.find((e) => e.event === "auth")!;
     expect((authEv.data as { reason?: string }).reason).toBe("revoked");
 
-    const stale = await lanRequest(port, { path: "/api/session", headers: { Cookie: oldCookie }, host });
+    const stale = await lanRequest(port, { path: "/api/session", headers: { Cookie: oldCookie }, host, destHost: ip });
     expect(stale.status).toBe(401);
   });
 
@@ -271,7 +288,14 @@ describe.skipIf(LAN_ASSEMBLY_IS_STUB)("web-hub LAN e2e (real hub, plan §11 LI r
     const { username, initialPassword } = await readInfo(admin!);
     const host = `${ip}:${port}`;
 
-    const loginRes = await lanPostJson(port, "/api/login", { username, password: initialPassword }, { Host: host });
+    const loginRes = await lanPostJson(
+      port,
+      "/api/login",
+      { username, password: initialPassword },
+      { Host: host },
+      undefined,
+      ip,
+    );
     const cookie = (loginRes.headers["set-cookie"]?.[0] ?? "").split(";")[0]!;
 
     const ack = await sendCtlShutdown(admin!);
@@ -290,7 +314,12 @@ describe.skipIf(LAN_ASSEMBLY_IS_STUB)("web-hub LAN e2e (real hub, plan §11 LI r
     hub = respawned;
     await waitLanOn(hub);
 
-    const afterRestart = await lanRequest(port, { path: "/api/session", headers: { Cookie: cookie }, host });
+    const afterRestart = await lanRequest(port, {
+      path: "/api/session",
+      headers: { Cookie: cookie },
+      host,
+      destHost: ip,
+    });
     expect(afterRestart.status).toBe(200); // L7: LAN sessions survive a hub restart (SQLite persists)
   });
 });
