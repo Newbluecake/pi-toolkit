@@ -6,13 +6,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createLanStore, type LanStore } from "../../../src/web-hub/hub/lan-store.js";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { memLog } from "./helpers.js";
 
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
+// L8 "用户名默认系统登录名": the real `createLanStore` seeds this OS username, not the P1
+// literal `"admin"` — asserted against whatever account this test process actually runs as.
+const USERNAME = userInfo().username;
 
 function tmp(): { dir: string; dbFile: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "wh-lan-store-"));
@@ -37,12 +40,12 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
 
   it("bootstraps exactly one initial user with a plaintext initial password (Q14)", async () => {
     const info = await store.initialInfo();
-    expect(info?.username).toBe("admin");
+    expect(info?.username).toBe(USERNAME);
     expect(typeof info?.initialPassword).toBe("string");
     expect(info?.initialPassword?.length).toBeGreaterThan(0);
     expect(info?.initialLogin).toBeUndefined();
 
-    const user = await store.getUser("admin");
+    const user = await store.getUser(USERNAME);
     expect(user?.kdf).toBe("scrypt");
     expect(user?.salt).toBeInstanceOf(Uint8Array);
     expect(user?.hash.byteLength).toBe(32);
@@ -168,10 +171,10 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
 
     const salt = randomBytes(16);
     const hash = scryptSync("newpass1234", salt, 32, { N: 32768, r: 8, p: 1, maxmem: 128 * 32768 * 8 + 1024 * 1024 });
-    await store.setPassword({ username: "admin", kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
+    await store.setPassword({ username: USERNAME, kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
 
     expect(await store.touchSession(sidHash, now + 2)).toBeUndefined(); // session deleted
-    const user = await store.getUser("admin");
+    const user = await store.getUser(USERNAME);
     expect(user?.epoch).toBe(2);
     expect(user?.initialPassword).toBeUndefined();
     expect(Buffer.from(user!.hash).equals(Buffer.from(hash))).toBe(true);
@@ -202,10 +205,10 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
   });
 
   it("markInitialLogin sets ip/at once; a second call doesn't overwrite it", async () => {
-    await store.markInitialLogin("admin", "10.0.0.5", 42);
+    await store.markInitialLogin(USERNAME, "10.0.0.5", 42);
     let info = await store.initialInfo();
     expect(info?.initialLogin).toEqual({ ip: "10.0.0.5", at: 42 });
-    await store.markInitialLogin("admin", "10.0.0.9", 99);
+    await store.markInitialLogin(USERNAME, "10.0.0.9", 99);
     info = await store.initialInfo();
     expect(info?.initialLogin).toEqual({ ip: "10.0.0.5", at: 42 }); // unchanged
   });
@@ -213,21 +216,21 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
   it("getUserSummary reports initialPasswordInUse by userId, flips false after setPassword", async () => {
     const { scryptSync, randomBytes } = await import("node:crypto");
     let summary = await store.getUserSummary(1);
-    expect(summary).toEqual({ username: "admin", initialPasswordInUse: true });
+    expect(summary).toEqual({ username: USERNAME, initialPasswordInUse: true });
     const salt = randomBytes(16);
     const hash = scryptSync("anotherpass1", salt, 32, { N: 32768, r: 8, p: 1, maxmem: 128 * 32768 * 8 + 1024 * 1024 });
-    await store.setPassword({ username: "admin", kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
+    await store.setPassword({ username: USERNAME, kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
     summary = await store.getUserSummary(1);
-    expect(summary).toEqual({ username: "admin", initialPasswordInUse: false });
+    expect(summary).toEqual({ username: USERNAME, initialPasswordInUse: false });
   });
 
   it("initialInfo still finds the user (no initialPassword field) after setPassword clears it (LD review fix: the query used to filter WHERE initial_password IS NOT NULL, so the only row disappeared entirely once the password changed, misreporting E_NO_USER)", async () => {
     const { scryptSync, randomBytes } = await import("node:crypto");
     const salt = randomBytes(16);
     const hash = scryptSync("anotherpass1", salt, 32, { N: 32768, r: 8, p: 1, maxmem: 128 * 32768 * 8 + 1024 * 1024 });
-    await store.setPassword({ username: "admin", kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
+    await store.setPassword({ username: USERNAME, kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
     const info = await store.initialInfo();
-    expect(info?.username).toBe("admin");
+    expect(info?.username).toBe(USERNAME);
     expect(info?.initialPassword).toBeUndefined();
   });
 
@@ -256,7 +259,7 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
   it("AbortSignal aborted before the call rejects immediately without touching the subprocess", async () => {
     const ac = new AbortController();
     ac.abort();
-    await expect(store.getUser("admin", { signal: ac.signal })).rejects.toBeInstanceOf(Error);
+    await expect(store.getUser(USERNAME, { signal: ac.signal })).rejects.toBeInstanceOf(Error);
   });
 });
 

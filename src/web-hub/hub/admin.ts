@@ -22,6 +22,10 @@
  * literal boolean).
  */
 import type { LanReqFrame, LanResFrame } from "../protocol/messages.js";
+// L8 "密码 ≥10 位": shared with the TUI `/webhub passwd` client-side precheck
+// (`agent/passwd-prompt.ts`'s `MIN_LAN_PASSWORD_LENGTH`) so a password the client accepts is
+// never turned around and rejected by the hub — review fix, this used to be a locally-defined 8.
+import { MIN_LAN_PASSWORD_LENGTH } from "../protocol/lan.js";
 import { defaultKdfParams } from "./kdf.js";
 import type { HubLog, KdfPort, LanFacade, LanStatus, LanStorePort, LoginLimiterPort } from "./ports.js";
 
@@ -53,7 +57,9 @@ export interface AdminDeps {
   now?: () => number;
 }
 
-const MIN_PASSWORD_LEN = 8;
+// L8 "密码 ≥10 位": shared with the TUI `/webhub passwd` client-side precheck
+// (`agent/passwd-prompt.ts`'s `MIN_LAN_PASSWORD_LENGTH`) so a password the client accepts is
+// never turned around and rejected by the hub — review fix, this used to be a locally-defined 8.
 const REDACT_KEY_RE = /pass(word)?|initial/i;
 
 function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
@@ -134,14 +140,14 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     const store = deps.store();
     const kdf = deps.kdf();
     if (!deps.hasLan() || store === undefined || kdf === undefined) return noLan(rid, "passwd", meta);
-    if (username.trim().length === 0 || password.length < MIN_PASSWORD_LEN) {
+    if (username.trim().length === 0 || password.length < MIN_LAN_PASSWORD_LENGTH) {
       audit("passwd", { ok: false, code: "E_BAD_REQUEST" }, meta);
       return {
         t: "lan_res",
         rid,
         ok: false,
         code: "E_BAD_REQUEST",
-        message: `username must be non-empty and password must be at least ${MIN_PASSWORD_LEN} characters`,
+        message: `username must be non-empty and password must be at least ${MIN_LAN_PASSWORD_LENGTH} characters`,
       };
     }
     const params = defaultKdfParams();

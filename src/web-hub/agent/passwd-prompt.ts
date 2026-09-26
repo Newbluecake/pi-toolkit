@@ -15,9 +15,10 @@
 import { randomUUID } from "node:crypto";
 import { type Component, matchesKey, parseKey } from "@earendil-works/pi-tui";
 import type { LanReqFrame, LanResFrame } from "../protocol/messages.js";
+// L8 "密码 ≥10 位": shared with the hub-side enforcement in `hub/admin.ts` so a password this
+// client-side precheck accepts is never turned around and rejected by the hub (or vice versa).
+import { MAX_LAN_PASSWORD_LENGTH, MIN_LAN_PASSWORD_LENGTH } from "../protocol/lan.js";
 
-const MIN_PASSWORD_LENGTH = 10;
-const MAX_PASSWORD_LENGTH = 256;
 const MASK_CHAR = "•";
 
 export interface MaskedInputTuiLike {
@@ -120,7 +121,7 @@ export async function runPasswdPrompt(deps: PasswdPromptDeps): Promise<PasswdOut
   const p2 = await deps.promptPassword("确认新密码");
   if (p2 === undefined) return { ok: false, reason: "cancelled" };
   if (p1 !== p2) return { ok: false, reason: "mismatch" };
-  if (p1.length < MIN_PASSWORD_LENGTH || p1.length > MAX_PASSWORD_LENGTH) {
+  if (p1.length < MIN_LAN_PASSWORD_LENGTH || p1.length > MAX_LAN_PASSWORD_LENGTH) {
     return { ok: false, reason: "invalid-length" };
   }
   const frame: LanReqFrame = { t: "lan_req", rid: randomUUID(), op: "passwd", username, password: p1 };
@@ -141,7 +142,7 @@ export function formatPasswdOutcomeMessage(outcome: PasswdOutcome): string {
     case "mismatch":
       return "两次输入的密码不一致，未修改。";
     case "invalid-length":
-      return `密码长度必须在 ${MIN_PASSWORD_LENGTH}..${MAX_PASSWORD_LENGTH} 之间。`;
+      return `密码长度必须在 ${MIN_LAN_PASSWORD_LENGTH}..${MAX_LAN_PASSWORD_LENGTH} 之间。`;
     case "rejected":
       return `修改失败：${outcome.message}`;
   }

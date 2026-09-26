@@ -36,6 +36,7 @@
  */
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { userInfo } from "node:os";
 import { promisify } from "node:util";
 import type { LanOffReason } from "../protocol/lan.js";
 import { checkDbFiles, CHECKPOINT_PASSIVE_INTERVAL_MS, MAINT_DEADLINE_MS } from "./db.js";
@@ -45,6 +46,10 @@ import type { HubLog, LanSessionRecord, LanStorePort, LanUserRecord, LanUserSumm
 import { hashSid as sharedHashSid } from "./sid-hash.js";
 
 const execFileP = promisify(execFile);
+
+/** P1's original literal, kept as the fallback whenever `os.userInfo()` can't produce a usable
+ * name (review fix, L8 "用户名默认系统登录名"). */
+const FALLBACK_INITIAL_USERNAME = "admin";
 
 export interface LanStore extends LanStorePort {
   /** §4.2 reserved-channel `touchSession` for the SSE tick — see file header. */
@@ -97,7 +102,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   if (!fileCheck.ok) return { ok: false, reason: fileCheck.reason, detail: fileCheck.detail };
 
   const maintDeadline = deps.maintOpenDeadlineMs ?? MAINT_DEADLINE_MS["open-check-migrate"];
-  const maintResult = await runMaint(deps.dbFile, "open-check-migrate", maintDeadline);
+  const maintResult = await runMaint(deps.dbFile, "open-check-migrate", maintDeadline, resolveInitialUsername(log));
   if (!maintResult.ok) return maintResult;
 
   const dbClient = createDbClient({
@@ -232,12 +237,41 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
 // maintenance one-shot invocation
 // ---------------------------------------------------------------------------
 
+/**
+ * L8 "用户名默认系统登录名": `os.userInfo().username` — main-thread-only, no I/O beyond what
+ * `node:os` already does synchronously in memory (never touches the db, never spawns a
+ * subprocess). Only consulted once, right before the one-shot "open-check-migrate" maintenance
+ * call that seeds the very first user row on a fresh v1 schema — on an existing db this value is
+ * computed and then simply unused (`buildMaintScript` only reads `initialUsername` inside the
+ * `user_version === 0` branch). An empty/missing username or a thrown `os.userInfo()` (some
+ * minimal/containerized environments have no NSS/passwd entry for the running uid) must never
+ * abort LAN startup — falls back to `FALLBACK_INITIAL_USERNAME` (P1's original literal) and logs
+ * the reason for the fallback.
+ */
+function resolveInitialUsername(log: HubLog): string {
+  try {
+    const name = userInfo().username;
+    if (typeof name === "string" && name.length > 0) return name;
+    log.warn("web-hub lan-store: os.userInfo().username was empty, falling back to the P1 default username", {
+      fallback: FALLBACK_INITIAL_USERNAME,
+    });
+    return FALLBACK_INITIAL_USERNAME;
+  } catch (err) {
+    log.warn("web-hub lan-store: os.userInfo() threw, falling back to the P1 default username", {
+      fallback: FALLBACK_INITIAL_USERNAME,
+      error: String(err),
+    });
+    return FALLBACK_INITIAL_USERNAME;
+  }
+}
+
 async function runMaint(
   dbFile: string,
   op: "open-check-migrate" | "checkpoint-passive" | "checkpoint-truncate",
   deadlineMs: number,
+  initialUsername: string = FALLBACK_INITIAL_USERNAME,
 ): Promise<{ ok: true } | { ok: false; reason: LanOffReason; detail?: string }> {
-  const script = buildMaintScript();
+  const script = buildMaintScript({ initialUsername });
   try {
     const { stdout } = await execFileP(process.execPath, ["--disable-warning=ExperimentalWarning", "-e", script], {
       env: {

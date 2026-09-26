@@ -34,7 +34,13 @@ export function dbTestModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean
 
 const COMMON_PRELUDE = `
 'use strict';
-const { DatabaseSync } = require('node:sqlite');
+let DatabaseSync;
+let __sqliteErr;
+try {
+  ({ DatabaseSync } = require('node:sqlite'));
+} catch (err) {
+  __sqliteErr = err;
+}
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const DB_PATH = process.env.PI_WEBHUB_DB_PATH;
@@ -227,7 +233,13 @@ process.stdout.on('error', () => {});
 // short-lived maintenance subprocess (§4.2 "维护子进程（短命）")
 // ---------------------------------------------------------------------------
 
-export function buildMaintScript(): string {
+export function buildMaintScript(opts: { initialUsername?: string } = {}): string {
+  // L8 "用户名默认系统登录名": `lan-store.ts`'s `createLanStore` resolves the real value via
+  // `os.userInfo().username` (falling back to the P1 literal `"admin"` on any failure) and
+  // passes it in — this module has no `node:os` dependency of its own, so any caller that omits
+  // `initialUsername` (e.g. tests exercising the maintenance script directly) keeps the original
+  // P1 behavior. `JSON.stringify` embeds it as a safe string literal in the generated script text.
+  const initialUsername = JSON.stringify(opts.initialUsername ?? "admin");
   const pragmaBusy = `db.exec('PRAGMA busy_timeout=' + Math.max(0, Number(process.env.PI_WEBHUB_DB_DEADLINE_MS || '0') - 500) + ';');`;
   return `${COMMON_PRELUDE}
 function reply(obj) {
@@ -280,7 +292,7 @@ function run() {
           const salt = crypto.randomBytes(16);
           const hash = crypto.scryptSync(password, salt, 32, { N: 32768, r: 8, p: 1, maxmem: 128 * 32768 * 8 + 1024 * 1024 });
           db.prepare('INSERT INTO users (username, kdf, n, r, p, salt, hash, epoch, initial_password, initial_created_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?,?,?)')
-            .run('admin', 'scrypt', 32768, 8, 1, salt, hash, password, now, now, now);
+            .run(${initialUsername}, 'scrypt', 32768, 8, 1, salt, hash, password, now, now, now);
           db.exec('COMMIT');
         } catch (err) {
           try { db.exec('ROLLBACK'); } catch {}

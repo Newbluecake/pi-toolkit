@@ -10,6 +10,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type { LanAssembly, LanFrontendDeps } from "../../../src/web-hub/hub/ports.js";
@@ -28,6 +29,11 @@ import { config, connectClient, tmpDirs, waitFor, hello, type TestClient } from 
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
 
 const tmp = tmpDirs();
+// L8 "用户名默认系统登录名": the real `defaultLanAssembly` → `createLanStore` seeds this OS
+// username, not the P1 literal `"admin"` — not to be confused with the unrelated `audit: "admin"`
+// log-category tag several assertions below match on (that string is always literally "admin",
+// hub/admin.ts's own fixed audit-line marker, regardless of the LAN account's real username).
+const USERNAME = userInfo().username;
 const hubs: RunningHub[] = [];
 const clients: TestClient[] = [];
 
@@ -237,7 +243,7 @@ skipIfNoSqlite(
       const res = await c.waitFrame((f) => f["t"] === "lan_res");
       expect(res["ok"]).toBe(true);
       const info = (res as Record<string, unknown>)["info"] as Record<string, unknown>;
-      expect(info["username"]).toBe("admin");
+      expect(info["username"]).toBe(USERNAME);
       expect(typeof info["initialPassword"]).toBe("string");
       expect((info["initialPassword"] as string).length).toBeGreaterThan(0);
       expect(info["lan"]).toMatchObject({ state: "on", port: 34567 });
@@ -255,7 +261,7 @@ skipIfNoSqlite(
       await waitFor(() => hub.lanStatus()?.state === "on");
       await waitFor(() => sink.store !== undefined);
 
-      await sink.store!.markInitialLogin("admin", "192.168.1.40", 1_700_000_000_000);
+      await sink.store!.markInitialLogin(USERNAME, "192.168.1.40", 1_700_000_000_000);
 
       const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
       const c = await client(paths.socketPath);
@@ -294,12 +300,12 @@ skipIfNoSqlite(
       c.send(hello());
       await c.waitFrame((f) => f["t"] === "hello_ack");
 
-      c.send({ t: "lan_req", rid: "r1", op: "passwd", username: "admin", password: "correct-horse-battery" });
+      c.send({ t: "lan_req", rid: "r1", op: "passwd", username: USERNAME, password: "correct-horse-battery" });
       const res = await c.waitFrame((f) => f["t"] === "lan_res" && f["rid"] === "r1");
       expect(res).toEqual({ t: "lan_res", rid: "r1", ok: true });
 
       expect(fe.revokeCalls).toEqual([{ userId: 1 }]);
-      const updated = await sink.store!.getUser("admin");
+      const updated = await sink.store!.getUser(USERNAME);
       expect(updated?.initialPassword).toBeUndefined();
       expect(updated?.epoch).toBe(2);
 
