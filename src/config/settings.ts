@@ -11,8 +11,13 @@ import {
 } from "../compact-hint/threshold.js";
 // web-hub (plan 包 I): the settings type is owned by package D; `import type`
 // only, so this pre-guard module never loads the web-hub runtime graph.
-import type { WebHubSettings } from "../web-hub/agent/index.js";
-export type { WebHubSettings };
+import type { WebHubLanSettings, WebHubSettings } from "../web-hub/agent/index.js";
+export type { WebHubSettings, WebHubLanSettings };
+// web-hub LAN (S1-W3 LI, lan-plan.md §9.1): host-token / origin classification is W1-frozen and
+// shared by every layer that needs to agree on what counts as a valid host — settings validation
+// (here, L16 第一处) is one of those layers, alongside `hub/main.ts`'s `parseHubLanConfig` (L16
+// 第二处) and the request pipeline. Pure functions only, no pi import, no side effects.
+import { canonicalOrigin, classifyHostToken, parseOrigin, type InvalidHostToken } from "../web-hub/protocol/lan.js";
 // quota (阶梯阈值按窗口区分): WindowScope is a zero-pi-import type from src/quota/types.ts
 // (plan 分层纪律) —— type-only import, no runtime dependency on the quota module graph.
 import type { WindowScope } from "../quota/types.js";
@@ -495,6 +500,20 @@ export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
   unknownPriceMode: "static",
 };
 
+/**
+ * `webHub.lan.*` defaults (lan-plan.md sec 9.1 / sec 11 W3-LI): all five keys are non-live
+ * (captured at activate; change -> /reload). `extraHosts`/`trustProxyFrom`/`externalOrigins` are
+ * comma-separated strings on disk (sec 9.1's table) and are validated into this `string[]` shape
+ * (LE's frozen `WebHubLanSettings`, fed straight into `HubLanConfig`) by `parseWebHubLanBlock`.
+ */
+export const DEFAULT_WEBHUB_LAN_SETTINGS: WebHubLanSettings = {
+  enabled: false,
+  port: 7879,
+  extraHosts: [],
+  trustProxyFrom: [],
+  externalOrigins: [],
+};
+
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
   budget: DEFAULT_BUDGET,
@@ -632,7 +651,14 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     maxConcurrent: 2,
   },
   hud: { enabled: true, autoFetchMinutes: 5 },
-  webHub: { enabled: false, autoStart: true, port: 7878, idleExitMinutes: 10, nodeLoader: "" },
+  webHub: {
+    enabled: false,
+    autoStart: true,
+    port: 7878,
+    idleExitMinutes: 10,
+    nodeLoader: "",
+    lan: DEFAULT_WEBHUB_LAN_SETTINGS,
+  },
   webSearch: { enabled: true },
   todo: { enabled: true },
   askUser: { enabled: true },
@@ -1149,21 +1175,128 @@ export function parseMemorySettings(input: unknown): MemorySettings {
  * web-hub settings block (plan 包 I): field-level fallback to defaults, never
  * throws (parseHudSettings 同款). `port` must be an integer in 0..65535 (0 =
  * ephemeral); `idleExitMinutes` must be finite and ≥ 1.
+ *
+ * `webHub.lan.*` (plan §9.1, S1-W3 LI): parsed by `parseWebHubLanBlock` below — same helper used
+ * by `parseWebHubLanValidation` (exported for status-line consumers, e.g. `/webhub status`) so the
+ * accepted/rejected classification of every host token never drifts between the two call sites.
  */
 export function parseWebHubSettings(input: unknown): WebHubSettings {
   const defaults = DEFAULT_SETTINGS.webHub;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults, lan: { ...defaults.lan! } };
   const record = input as Record<string, unknown>;
   const port = record.port;
   const idle = record.idleExitMinutes;
   const nodeLoader = record.nodeLoader;
+  const resolvedPort =
+    typeof port === "number" && Number.isInteger(port) && port >= 0 && port <= 65_535 ? port : defaults.port;
   return {
     enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
     autoStart: typeof record.autoStart === "boolean" ? record.autoStart : defaults.autoStart,
-    port: typeof port === "number" && Number.isInteger(port) && port >= 0 && port <= 65_535 ? port : defaults.port,
+    port: resolvedPort,
     idleExitMinutes: typeof idle === "number" && Number.isFinite(idle) && idle >= 1 ? idle : defaults.idleExitMinutes,
     nodeLoader: typeof nodeLoader === "string" ? nodeLoader : defaults.nodeLoader,
+    lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
   };
+}
+
+function splitLanCsv(raw: unknown): string[] {
+  if (typeof raw !== "string") return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+}
+
+/** §9.1 `webHub.lan.extraHosts`: 逐项 `classifyHostToken`；合法项进入白名单，非法项进入 `invalidExtraHosts`（不进白名单，不报错）。 */
+function validateExtraHosts(raw: unknown): { hosts: string[]; invalid: InvalidHostToken[] } {
+  const hosts: string[] = [];
+  const invalid: InvalidHostToken[] = [];
+  for (const token of splitLanCsv(raw)) {
+    const cls = classifyHostToken(token);
+    if (cls.ok) hosts.push(cls.host);
+    else invalid.push({ token, reason: cls.reason });
+  }
+  return { hosts, invalid };
+}
+
+/** §2.4 `webHub.lan.trustProxyFrom`: 逐项必须是 IPv4 字面量；非法项静静丢弃（不单独列表，跟随 `proxyMismatch` 同步处理）。 */
+function validateTrustProxyFrom(raw: unknown): string[] {
+  const out: string[] = [];
+  for (const token of splitLanCsv(raw)) {
+    const cls = classifyHostToken(token);
+    if (cls.ok && cls.kind === "ipv4") out.push(cls.host);
+  }
+  return out;
+}
+
+/** §2.4 `webHub.lan.externalOrigins`: 逐项 `parseOrigin` + scheme 必须 `https` + 主机部分再过 `classifyHostToken`。 */
+function validateExternalOrigins(raw: unknown): string[] {
+  const out: string[] = [];
+  for (const token of splitLanCsv(raw)) {
+    const parsed = parseOrigin(token);
+    if (parsed === undefined || parsed.scheme !== "https") continue;
+    const hostOnly = parsed.hostKey.slice(0, parsed.hostKey.lastIndexOf(":"));
+    const hostCls = classifyHostToken(hostOnly);
+    if (!hostCls.ok) continue;
+    out.push(canonicalOrigin(parsed.scheme, parsed.hostKey));
+  }
+  return out;
+}
+
+export interface WebHubLanParseResult {
+  lan: WebHubLanSettings;
+  /** §9.1: settings 解析时被丢弃的 `extraHosts` 项（status 列出，never `bad-config`）。 */
+  invalidExtraHosts: InvalidHostToken[];
+  /** §2.4: `trustProxyFrom`/`externalOrigins` 只设了其中一半 ⇒ 两者都被清空（fail-closed）。 */
+  proxyMismatch: boolean;
+}
+
+/**
+ * `webHub.lan` 块的唯一解析入口（L16 第一处，§9.1）。`webHubPort` 是已解析的 `webHub.port`（同时不能与
+ * `lan.port` 相等，否则回退到默认 lan.port；默认本身碰撞的极端情形留给 hub 启动时的第二道校验，§9.1/§4）。
+ * 从不 throw，从不修改入入参。
+ */
+export function parseWebHubLanBlock(input: unknown, webHubPort: number): WebHubLanParseResult {
+  const defaults = DEFAULT_WEBHUB_LAN_SETTINGS;
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { lan: { ...defaults }, invalidExtraHosts: [], proxyMismatch: false };
+  }
+  const record = input as Record<string, unknown>;
+  const enabled = typeof record.enabled === "boolean" ? record.enabled : defaults.enabled;
+  const portRaw = record.port;
+  let port =
+    typeof portRaw === "number" && Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65_535
+      ? portRaw
+      : defaults.port;
+  if (port === webHubPort) port = defaults.port; // §9.1: 必须与 webHub.port 不同；碰撞回退默认（若默认亦碰撞，hub 层的 checkLanPortConflict 否决）
+  const { hosts: extraHosts, invalid: invalidExtraHosts } = validateExtraHosts(record.extraHosts);
+  let trustProxyFrom = validateTrustProxyFrom(record.trustProxyFrom);
+  let externalOrigins = validateExternalOrigins(record.externalOrigins);
+  let proxyMismatch = false;
+  if ((trustProxyFrom.length === 0) !== (externalOrigins.length === 0)) {
+    trustProxyFrom = [];
+    externalOrigins = [];
+    proxyMismatch = true;
+  }
+  return {
+    lan: { enabled, port, extraHosts, trustProxyFrom, externalOrigins },
+    invalidExtraHosts,
+    proxyMismatch,
+  };
+}
+
+/**
+ * Settings-level LAN warnings (plan §9.1/§2.4) for status-line consumers — pure re-derivation of
+ * the same raw `webHub.lan` block `parseWebHubSettings` already validated, so `/webhub status`
+ * (or any other caller wired with the raw settings snapshot) can render `formatInvalidExtraHostsLine`/
+ * `formatProxyMismatchLine` (`web-hub/agent/lan-status.ts`) without re-implementing §2.1/§2.4.
+ */
+export function parseWebHubLanValidation(
+  input: unknown,
+  webHubPort: number,
+): { invalidExtraHosts: InvalidHostToken[]; proxyMismatch: boolean } {
+  const { invalidExtraHosts, proxyMismatch } = parseWebHubLanBlock(input, webHubPort);
+  return { invalidExtraHosts, proxyMismatch };
 }
 
 /** Parse the optional deferred-reload settings block (parseCacheTtlSettings 同款容错, never throws). */
