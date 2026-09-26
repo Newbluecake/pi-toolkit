@@ -332,6 +332,8 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   concurrently with the journal flush, never gating it) annotates a replayed child's summary with
   `replayStale:"gone"|"moved"` if its branch was moved/deleted between the load-time snapshot and settle —
   it never revises the settle the script already received. Design: `docs/dev/workflow-worktree/replay-verify-plan.md`.
+  **todo #21**: `buildJournalConfig`'s pre-boot `store.load()` is bounded by `WorkflowRunBudget.journalLoadMs`
+  (default 5s); a timed-out load degrades that run to fully live and skips writing the journal (`WorkflowOutcome.replay.loadError`), never fails the run.
   Design:
   `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md`,
   `docs/dev/workflow-worktree/plan.md`.

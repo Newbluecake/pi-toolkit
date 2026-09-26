@@ -103,7 +103,8 @@ export const WorkflowToolParams = Type.Object({
     Type.String({
       description:
         "Journal namespace for replay/caching across runs. Omit to disable both replay and journal writes " +
-        "(every agent() call runs live, nothing is recorded).",
+        "(every agent() call runs live, nothing is recorded). If loading the journal takes too long (slow/hung disk), " +
+        "this run silently falls back to live-only and skips writing it this time; see WorkflowOutcome.replay.loadError.",
     }),
   ),
   noReplay: Type.Optional(
@@ -426,6 +427,11 @@ export function renderOutcomeText(outcome: WorkflowOutcome): string {
     parts.push(
       `replay: ${outcome.replay.hits} hit, ${outcome.replay.misses} miss, ${outcome.replay.skipped} skipped, ${outcome.replay.corruptLines} corrupt${isoSuffix}`,
     );
+    if (outcome.replay.loadError !== undefined) {
+      parts.push(
+        `WARNING: journal not used this run (${outcome.replay.loadError}) \u2014 every agent() call ran live and nothing was written to the journal.`,
+      );
+    }
   }
   return parts.join("\n");
 }

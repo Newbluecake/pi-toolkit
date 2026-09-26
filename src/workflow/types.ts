@@ -208,6 +208,17 @@ export interface WorkflowReplayStats {
     readonly stale: number;
     readonly probeError?: string;
   };
+  /**
+   * todo #21: set only when `orchestrator.ts#buildJournalConfig`'s pre-boot
+   * `store.load()` exceeded `budget.journalLoadMs` — e.g. `"journal load
+   * timed out"`. Every field above then reflects a fully-live run (`hits:0`,
+   * every submission counted under `skipped` with reason `"no_replay"`) and
+   * the journal was **not** written this run (an unknown-content file is
+   * never appended onto blind — see `JournalRunConfig.loadError`'s doc).
+   * Absent on every other run, matching this interface's other optional
+   * fields.
+   */
+  readonly loadError?: string;
 }
 
 export interface WorkflowChildSummary {
@@ -436,6 +447,21 @@ export interface WorkflowRunBudget {
   readonly replayTtlMs?: Millis;
   /** M3.5 JS4 (§6.6): bounds the pre-terminal best-effort journal flush. Optional, default 2_000. */
   readonly journalFlushMs?: Millis;
+  /**
+   * todo #21: bounds `orchestrator.ts#buildJournalConfig`'s pre-boot
+   * `store.load()` read — a journal-enabled workflow must stay boot-bounded
+   * even against a hung/slow filesystem (this project's zero-hang
+   * invariant). Optional, default 5_000 (§dev-flow default-choice pattern:
+   * generous enough for a JSONL file of any size a single workflow run's
+   * own history plausibly reaches — `journalFlushMs`'s battle-tested 2_000
+   * default covers a *write*, and a *read* of the same file is normally
+   * faster still — while still well inside `scriptLoadMs`'s neighborhood, so
+   * a timeout here reads as "the disk is the problem", not "we chose too
+   * small a number"). A timeout degrades this run to fully live and skips
+   * writing the journal (see `JournalRunConfig.loadError`); it never fails
+   * the run.
+   */
+  readonly journalLoadMs?: Millis;
   /**
    * M3.4 WT7 (§4.1/§7.2 WI8): a single phase's own budget. `0`/undefined =
    * unlimited (workflow's own WT8 `workflowTotalMs` still applies). On

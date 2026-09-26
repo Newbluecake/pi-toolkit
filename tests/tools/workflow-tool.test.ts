@@ -518,6 +518,17 @@ describe("renderOutcomeText: replay stats line (replay-verify plan D11/§6 test 
     );
     expect(body).toContain("1 wt-verified, 0 wt-unverified, 1 wt-stale");
   });
+
+  it("#21: a journal load timeout surfaces loadError as a live-only / not-written warning", () => {
+    const body = renderOutcomeText(
+      fakeOutcome({
+        replay: { hits: 0, misses: 0, skipped: 2, corruptLines: 0, loadError: "journal load timed out" },
+      }),
+    );
+    expect(body).toContain("replay: 0 hit, 0 miss, 2 skipped, 0 corrupt");
+    expect(body).toContain("journal not used this run (journal load timed out)");
+    expect(body).toContain("nothing was written to the journal");
+  });
 });
 
 describe("renderWorktreeBlock (workflow-worktree plan D5 §4 render, §6 test 23)", () => {

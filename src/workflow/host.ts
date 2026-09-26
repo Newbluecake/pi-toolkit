@@ -284,6 +284,17 @@ export interface JournalRunConfig {
   readonly replayTtlMs?: Millis;
   readonly journalFlushMs?: Millis;
   /**
+   * todo #21: set when `orchestrator.ts#buildJournalConfig`'s bounded
+   * `store.load()` exceeded `journalLoadMs` before boot. When present,
+   * `noReplay` above is forced `true` (every submission is `skip:"no_replay"`)
+   * and `store` has already been swapped for a no-op-`append`/`flush`
+   * variant — this field exists purely so the reason surfaces on
+   * `WorkflowOutcome.replay.loadError` instead of silently looking like an
+   * ordinary empty journal. Absent (not e.g. `false`) on every other run,
+   * matching this file's other optional-field conventions.
+   */
+  readonly loadError?: string;
+  /**
    * RP9, mutable: `true` until the worker's `meta` message says otherwise
    * (see orchestrator.ts's `onMeta` wiring — updated *before* boot()
    * resolves the script's first turn, so no `agent()` call can ever observe
@@ -1837,6 +1848,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         skipped: replayStats.skipped,
         corruptLines: deps.journal.index.stats.corruptLines,
         ...(replayTainted ? { tainted: true as const } : {}),
+        ...(deps.journal.loadError !== undefined ? { loadError: deps.journal.loadError } : {}),
         ...(iso !== undefined
           ? {
               isolation: {

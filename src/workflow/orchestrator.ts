@@ -17,11 +17,12 @@ import {
   type WorkflowDeadlineState,
   type WorkflowExtendOutcome,
 } from "./deadline.js";
-import { createJournalStore } from "./journal.js";
+import { createJournalStore, type JournalStore } from "./journal.js";
 import { buildReplayIndex } from "./replay.js";
 import { verifyIsolatedEntries } from "./isolation-verify.js";
 import { assertHeartbeatBudgetInvariant, startRunawayWatchdog } from "./runaway.js";
 import type {
+  JournalEntry,
   OrphanChildSummary,
   ReplayScope,
   SerializedError,
@@ -130,6 +131,16 @@ export interface OrchestratorDeps {
    */
   journalRootDir?: string;
   /**
+   * M3.5 §6.5, testing seam (todo #21): overrides the real filesystem-backed
+   * `createJournalStore` factory `buildJournalConfig` otherwise calls.
+   * Production wiring (stack.ts) never sets this — the default stays a real
+   * `JournalStore`. Exists purely so tests can exercise `store.load()` never
+   * resolving (or rejecting) without depending on unreliable real-filesystem
+   * timing — the same DI seam `createWorkerHost` already is for the worker
+   * thread.
+   */
+  journalStoreFactory?(deps: { readonly clock: Clock }): JournalStore;
+  /**
    * replay-verify plan D4.2/D4.3: the `min(gitTimeoutMs, 5_000)`-style cap
    * for the load-time isolation-verify probe (stack.ts derives it from
    * `settings.worktree.gitTimeoutMs`, keeping this module decoupled from
@@ -216,14 +227,66 @@ function sanitizeJournalName(name: string): string {
  * listener the instant the worker's own `meta` message arrives (RP9).
  */
 async function buildJournalConfig(deps: OrchestratorDeps, req: OrchestratorRunRequest): Promise<JournalRunConfig> {
-  const store = createJournalStore({ clock: deps.clock });
+  const store = (deps.journalStoreFactory ?? createJournalStore)({ clock: deps.clock });
   const dir = `${deps.journalRootDir}/${sanitizeJournalName(req.journal as string)}`;
-  const { entries, corruptLines } = await store.load(dir);
+  // todo #21: `store.load()` reads (at most) one JSONL file, but had no
+  // bound of its own — an FS that hangs on `readFile` (a wedged NFS mount, a
+  // stuck lock) would keep a journal-enabled workflow's boot uncapped,
+  // violating this project's own zero-hang invariant. Reuses the exact same
+  // bounded-wait primitive isolation-verify.ts's `runBoundedProbe` is built
+  // on (`withDeadline`) rather than a new one; unlike that probe there is no
+  // `AbortSignal` half here — `JournalStore.load()` has no cancellation
+  // contract, so a load that outlives `loadTimeoutMs` simply keeps running in
+  // the background and its eventual result (success or failure) is silently
+  // discarded (no `.then` is ever attached beyond `withDeadline`'s own
+  // internal one, which no-ops once `done` is set) — it can produce no
+  // side effect on this run.
+  const loadTimeoutMs = req.budget.journalLoadMs ?? 5_000;
+  const loadResult = await withDeadline(store.load(dir), loadTimeoutMs, deps.clock, "journal_load");
+  let entries: readonly JournalEntry[];
+  let corruptLines: number;
+  let loadError: string | undefined;
+  let writeStore = store;
+  if (loadResult.ok) {
+    entries = loadResult.value.entries;
+    corruptLines = loadResult.value.corruptLines;
+  } else if (loadResult.reason === "timeout") {
+    // GW4 extended to boot time (todo #21): a load that didn't finish in time
+    // is worse than no journal at all — its true content is unknown, so it
+    // must never be partially trusted. This run is demoted to fully live:
+    // `noReplay` below forces every `agent()` submission to `skip` (never a
+    // `hit`), and `writeStore` is swapped for a no-op `append`/`flush` so
+    // this run never appends onto a file whose current tail it never saw —
+    // doing so could interleave a fresh entry ahead of the (still in-flight,
+    // silently-discarded) historical batch once the slow read eventually
+    // lands, corrupting chain ordering for a *future* run's replay. The
+    // *next* run gets an uncontested, fresh attempt at loading the same file.
+    console.warn(
+      `[pi-subagent] workflow "${req.workflowId}"'s journal load exceeded ${loadTimeoutMs}ms — this run proceeds ` +
+        "live-only (no replay hits, journal not written this run); see todo #21.",
+    );
+    entries = [];
+    corruptLines = 0;
+    loadError = "journal load timed out";
+    writeStore = { ...store, append: () => {}, flush: async () => ({ written: 0, pending: 0 }) };
+  } else {
+    // A genuine rejection (not a timeout) is unchanged from before this bound
+    // existed: `journal.ts#load` itself never rejects in production (every
+    // FS error is caught internally and folded into "no journal yet"), so
+    // this branch only fires for a non-conforming `JournalStore` (e.g. a
+    // test double). Re-thrown so `run()`'s `await buildJournalConfig(...)`
+    // rejects exactly as an unguarded `await store.load(dir)` would have —
+    // this bound only caps *how long* we wait, it does not change what a
+    // real failure does.
+    const err = new Error(loadResult.error.message);
+    if (loadResult.error.stack !== undefined) err.stack = loadResult.error.stack;
+    throw err;
+  }
   const scope: ReplayScope = req.replayScope ?? "chain";
   const index = buildReplayIndex(entries, corruptLines, scope);
-  const noReplay = req.noReplay ?? false;
+  const noReplay = loadError !== undefined ? true : (req.noReplay ?? false);
   const base: JournalRunConfig = {
-    store,
+    store: writeStore,
     dir,
     index,
     scope,
@@ -231,6 +294,7 @@ async function buildJournalConfig(deps: OrchestratorDeps, req: OrchestratorRunRe
     ...(req.budget.replayTtlMs !== undefined ? { replayTtlMs: req.budget.replayTtlMs } : {}),
     ...(req.budget.journalFlushMs !== undefined ? { journalFlushMs: req.budget.journalFlushMs } : {}),
     deterministic: { current: true },
+    ...(loadError !== undefined ? { loadError } : {}),
   };
   // replay-verify plan D4/D9: `off` (the default absent-spawner/absent-method
   // fail-closed value) leaves `base` untouched — byte-identical to pre-plan
@@ -586,13 +650,21 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
 
     const workerHost = deps.createWorkerHost();
 
-    // M3.5 §6.5/§6.6: load (once, before boot) whatever journal history exists
-    // for this namespace and build the scope-appropriate `ReplayIndex` —
-    // deliberately *not* bounded by a dedicated deadline (a small JSONL read
-    // is not expected to be the long pole here; an FS that hangs on `readFile`
-    // is an environment problem out of this milestone's scope, same
-    // simplification class as §6.6's own "withDeadline(scriptLoadMs) 由调用方施加"
-    // note for the *store*, just not exercised by this orchestrator slice).
+    // M3.5 §6.5/§6.6, bounded per todo #21: load (once, before boot) whatever
+    // journal history exists for this namespace and build the
+    // scope-appropriate `ReplayIndex`. `buildJournalConfig` itself now bounds
+    // the `store.load()` read (`journalLoadMs`, see its own doc) instead of
+    // awaiting it unbounded — the previous simplification note here ("an FS
+    // that hangs on readFile is out of scope") is retired; that is now
+    // exactly the case this bound exists to cap.
+    //
+    // Total pre-boot wait upper bound contributed by this call:
+    //   journalLoadMs (this bound)
+    //     + (isolationReplayMode === "verify" ? min(isolationVerifyTimeoutMs ?? 5_000, 5_000) + 500 : 0)
+    // (the `+500` is `runBoundedProbe`'s own outer-`withDeadline` slack —
+    // isolation-verify.ts). Added on top of the already-bounded `scriptLoadMs`
+    // check just above, so `run()`'s total wait before `boot()` stays
+    // `scriptLoadMs + journalLoadMs + verify-probe-bound`, never unbounded.
     const journalConfig: JournalRunConfig | undefined =
       req.journal !== undefined && deps.journalRootDir !== undefined ? await buildJournalConfig(deps, req) : undefined;
     // M3.6 RP11 (§6.3 RW3'): `content` scope cannot see the implicit

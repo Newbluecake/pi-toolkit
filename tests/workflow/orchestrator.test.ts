@@ -596,3 +596,189 @@ describe("orchestrator.ts: replay-verify plan D4 probe wiring + isolationCwd pin
     expect(outcome.replay?.isolation?.stale).toBe(0);
   }, 20_000);
 });
+
+/**
+ * todo #21: `buildJournalConfig`'s pre-boot `store.load()` used to be
+ * awaited with no bound of its own — a hung/slow filesystem could keep a
+ * journal-enabled workflow's boot uncapped, violating this project's own
+ * zero-hang invariant. These tests exercise the bound (`WorkflowRunBudget.
+ * journalLoadMs`) through the REAL `createOrchestrator`, injecting a fake
+ * `JournalStore` via the new `OrchestratorDeps.journalStoreFactory` testing
+ * seam (the same DI shape `createWorkerHost` already is) so the load's
+ * timing is fully controlled by `FakeClock` rather than real (unreliable)
+ * filesystem latency.
+ */
+describe("orchestrator.ts: journal load is bounded (todo #21)", () => {
+  const JOURNAL_BUDGET: WorkflowRunBudget = {
+    ...BASE_BUDGET,
+    workerBootMs: 2_000,
+    hostCallMs: 5_000,
+    maxParallel: 8,
+    maxChildren: 50,
+    maxBatchItems: 50,
+    childBudgetPolicy: "inherit_remaining",
+    journalLoadMs: 500,
+  };
+
+  /** Polls via real `setTimeout` ticks (not just microtasks) until `pred()` is true or the wall-clock budget is exhausted — same shape as the replay-verify describe block above. */
+  async function waitUntil(pred: () => boolean, maxWaitMs = 10_000, stepMs = 5): Promise<void> {
+    const deadline = Date.now() + maxWaitMs;
+    while (!pred() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, stepMs));
+    }
+  }
+
+  async function flushIo(n = 10): Promise<void> {
+    for (let i = 0; i < n; i += 1) await new Promise((r) => setImmediate(r));
+  }
+
+  async function waitForWorker(factory: { worker: () => unknown }): Promise<void> {
+    await waitUntil(() => {
+      try {
+        factory.worker();
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** A `ChildSpawner` that genuinely "executes" whatever prompt it is given (used to prove a call went LIVE, not replayed). */
+  function makeLiveSpawner(): { spawner: ChildSpawner; spawnedPrompts: string[] } {
+    const spawnedPrompts: string[] = [];
+    let n = 0;
+    const promptByRunId = new Map<string, string>();
+    const spawner: ChildSpawner = {
+      spawn: async (r) => {
+        spawnedPrompts.push(r.prompt);
+        const runId = `r${++n}`;
+        promptByRunId.set(runId, r.prompt);
+        return { runId };
+      },
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({
+          runId,
+          status: "completed" as const,
+          text: `live:${promptByRunId.get(runId) ?? ""}`,
+        })),
+        pending: [],
+      }),
+      configHashOf: () => "hash",
+    };
+    return { spawner, spawnedPrompts };
+  }
+
+  /** A `ChildSpawner` whose `spawn` throws if ever called — used to assert a replay hit never reaches it. */
+  function makeMustNotSpawnSpawner(): ChildSpawner {
+    return {
+      spawn: async () => {
+        throw new Error("must not spawn on a replay hit");
+      },
+      abort: async () => true,
+      waitAll: async () => ({ settled: [], pending: [] }),
+      configHashOf: () => "hash",
+    };
+  }
+
+  it("a journal load that never resolves still lets boot start once journalLoadMs fires: the run completes fully live, replay.loadError is set, and the journal is not written", async () => {
+    const clock = new FakeClock();
+    const factory = fakeSpawnWorkerFactory();
+    const appendSpy = vi.fn();
+    const flushSpy = vi.fn(async () => ({ written: 0, pending: 0 }));
+    const journalStoreFactory = () => ({
+      load: () => new Promise<never>(() => {}), // never resolves, never rejects
+      append: appendSpy,
+      flush: flushSpy,
+    });
+    const { spawner, spawnedPrompts } = makeLiveSpawner();
+    const deps = {
+      clock,
+      createWorkerHost: () => createWorkerHost({ clock, spawnWorker: factory.spawnWorker }),
+      spawner,
+      journalRootDir: "/fake-root",
+      journalStoreFactory,
+    };
+    const orch = createOrchestrator(deps);
+    const runPromise = orch.run(req({ budget: JOURNAL_BUDGET, journal: "hang" }));
+    await flushIo(); // let buildJournalConfig reach withDeadline(store.load(...)) and arm its timer
+    expect(() => factory.worker()).toThrow(); // boot has NOT started — still awaiting the load
+    clock.advance(500); // journalLoadMs fires
+    await waitForWorker(factory);
+    factory.workerData().commPort.postMessage({ kind: "host_call", id: "1", op: "agent", args: { prompt: "hi" } });
+    await flushIo();
+    expect(spawnedPrompts).toEqual(["hi"]); // genuinely live — nothing to replay from anyway, but this proves the run kept going
+    factory.workerData().commPort.postMessage({ kind: "script_returned", result: "ok" });
+    const outcome = await runPromise;
+    expect(outcome.status).toBe("completed"); // a timed-out load degrades the run to live-only, it never fails it (GW4)
+    expect(outcome.replay?.loadError).toBe("journal load timed out");
+    expect(outcome.replay?.hits).toBe(0);
+    expect(outcome.replay?.misses).toBe(0);
+    expect(outcome.replay?.skipped).toBe(1); // forced skip:"no_replay" for every submission this run
+    expect(appendSpy).not.toHaveBeenCalled(); // never appended onto a journal we never actually saw
+  }, 20_000);
+
+  it("a journal load slower than real disk but still within journalLoadMs replays normally", async () => {
+    const clock = new FakeClock();
+    const factory = fakeSpawnWorkerFactory();
+    const seededEntry: JournalEntry = buildEntry({
+      scope: "chain",
+      key: taskKeyOf({ agentType: "general-purpose", agentTypeConfigHash: "hash", prompt: "hi" }),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "general-purpose",
+      value: "cached-result",
+      completedAt: 0,
+      durationMs: 1,
+    });
+    const journalStoreFactory = () => ({
+      load: () =>
+        new Promise<{ entries: JournalEntry[]; corruptLines: number }>((resolve) => {
+          clock.setTimer(200, () => resolve({ entries: [seededEntry], corruptLines: 0 })); // < journalLoadMs (500)
+        }),
+      append: vi.fn(),
+      flush: vi.fn(async () => ({ written: 0, pending: 0 })),
+    });
+    const deps = {
+      clock,
+      createWorkerHost: () => createWorkerHost({ clock, spawnWorker: factory.spawnWorker }),
+      spawner: makeMustNotSpawnSpawner(),
+      journalRootDir: "/fake-root",
+      journalStoreFactory,
+    };
+    const orch = createOrchestrator(deps);
+    const runPromise = orch.run(req({ budget: JOURNAL_BUDGET, journal: "slow-ok" }));
+    await flushIo();
+    clock.advance(200); // the load's own delay fires, well before journalLoadMs's 500ms deadline
+    await waitForWorker(factory);
+    factory.workerData().commPort.postMessage({ kind: "host_call", id: "1", op: "agent", args: { prompt: "hi" } });
+    await flushIo();
+    factory.workerData().commPort.postMessage({ kind: "script_returned", result: "ok" });
+    const outcome = await runPromise;
+    expect(outcome.status).toBe("completed");
+    expect(outcome.replay?.loadError).toBeUndefined();
+    expect(outcome.replay?.hits).toBe(1);
+    const child = outcome.children.find((c) => c.callId === "1");
+    expect(child?.source).toBe("replay");
+    expect(child?.textPreview).toBe("cached-result");
+  }, 20_000);
+
+  it("a genuine store.load() rejection (not a timeout) still fails the run, exactly as an unguarded await would have", async () => {
+    const clock = new FakeClock();
+    const factory = fakeSpawnWorkerFactory();
+    const journalStoreFactory = () => ({
+      load: () => Promise.reject(new Error("boom: disk exploded")),
+      append: vi.fn(),
+      flush: vi.fn(async () => ({ written: 0, pending: 0 })),
+    });
+    const deps = {
+      clock,
+      createWorkerHost: () => createWorkerHost({ clock, spawnWorker: factory.spawnWorker }),
+      journalRootDir: "/fake-root",
+      journalStoreFactory,
+    };
+    const orch = createOrchestrator(deps);
+    await expect(orch.run(req({ budget: JOURNAL_BUDGET, journal: "boom" }))).rejects.toThrow(/boom: disk exploded/);
+    expect(() => factory.worker()).toThrow(); // boot never started
+  }, 20_000);
+});

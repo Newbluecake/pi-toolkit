@@ -45,6 +45,10 @@ export function buildWorkflowRunBudget(settings: AgentSettings): WorkflowRunBudg
     reconcileMs: 1_000,
     replayTtlMs: settings.workflow.replayTtlMs,
     journalFlushMs: 2_000,
+    // todo #21: `store.load()`'s own bound (see `WorkflowRunBudget.journalLoadMs`
+    // doc for the default's rationale) — no `settings.workflow.budget` surface
+    // yet, same convention as `journalFlushMs`/`reconcileMs` above.
+    journalLoadMs: 5_000,
     ...(merged.phaseTotalMs > 0 ? { phaseTotalMs: merged.phaseTotalMs } : {}),
     // workflow-agent-queue §4.1 (stage B): the subagent grace/extension knobs,
     // reused verbatim; extend.enabled=false closes grace and extension alike (D-16).
