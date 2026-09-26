@@ -122,8 +122,10 @@ export function withSignal<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-function toAbortError(signal: AbortSignal): Error {
-  const reason: unknown = signal.reason;
+function toAbortError(signal: AbortSignal | undefined): Error {
+  const reason: unknown = signal?.reason;
   if (reason instanceof Error) return reason;
   return new Error(typeof reason === "string" ? reason : "web-hub: aborted");
 }
+
+export { toAbortError };

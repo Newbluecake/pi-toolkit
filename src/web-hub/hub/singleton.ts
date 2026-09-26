@@ -88,7 +88,7 @@ import {
   type SocketIdentity,
 } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
-import { withDeadline, withSignal } from "./lifecycle.js";
+import { withDeadline, withSignal, toAbortError } from "./lifecycle.js";
 
 export { pidAlive } from "../protocol/pid.js";
 
@@ -161,16 +161,29 @@ export async function acquireSingleton(paths: HubPaths, deps?: SingletonDeps): P
   }
 
   // ⓪ instance guard (held until release(); closed on every non-owner return)
-  const guardName =
-    deps?.guardName === undefined
-      ? await instanceGuardName(paths, { signal, fs: deps?.fs })
-      : (deps.guardName ?? undefined);
+  //
+  // Review fix round 4 #1: instanceGuardName/acquireGuard/askGuard/sameUid all notice `signal`
+  // now (not just "best effort, fall back on abort") — an abort mid-realpath/mid-stat/mid-probe
+  // used to be swallowed by a bare `catch { return fallback }`, letting guard acquisition finish
+  // as if nothing happened. Everything in this section throws on abort instead, caught by the
+  // single try/catch below, which reports `{kind:"failed", reason:"aborted"}` and self-cleans any
+  // guard server that happened to finish binding *after* the abort was noticed.
   let guard: net.Server | undefined;
-  if (guardName !== undefined) {
-    const g = await acquireGuard(guardName, probeMs, signal);
-    if (g.kind === "busy") return existsResult(paths, g.holderPid, signal, deps?.fs);
-    if (g.kind === "held") guard = g.server;
-    // "off": no abstract namespace / foreign squatter ⇒ ①–③ only
+  try {
+    const guardName =
+      deps?.guardName === undefined
+        ? await instanceGuardName(paths, { signal, fs: deps?.fs })
+        : (deps.guardName ?? undefined);
+    if (guardName !== undefined) {
+      const g = await acquireGuard(guardName, probeMs, signal, deps?.fs);
+      if (g.kind === "busy") return await existsResult(paths, g.holderPid, signal, deps?.fs);
+      if (g.kind === "held") guard = g.server;
+      // "off": no abstract namespace / foreign squatter ⇒ ①–③ only
+    }
+  } catch (err) {
+    if (guard !== undefined) await closeServer(guard);
+    if (aborted(signal)) return { kind: "failed", error: "start aborted", reason: "aborted" };
+    throw err;
   }
   let handedOver = false;
   try {
@@ -491,8 +504,11 @@ export async function instanceGuardName(
   try {
     const realpathFn = env.fs?.realpath ?? realpath;
     dir = await raced(realpathFn(dir), env.signal);
-  } catch {
-    // keep the configured spelling
+  } catch (err) {
+    // Review fix round 4 #1: a real ENOENT/EACCES etc. still falls back to the configured
+    // spelling (best effort), but an abort must propagate — swallowing it here would let guard
+    // acquisition continue (and possibly report success/exists) after the caller already gave up.
+    if (aborted(env.signal)) throw err;
   }
   const uid = env.uid ?? process.getuid?.() ?? 0;
   const h = createHash("sha256").update(dir).digest("hex").slice(0, 24);
@@ -501,19 +517,34 @@ export async function instanceGuardName(
 
 type GuardResult = { kind: "held"; server: net.Server } | { kind: "busy"; holderPid?: number } | { kind: "off" };
 
-async function acquireGuard(name: string, probeMs: number, signal: AbortSignal | undefined): Promise<GuardResult> {
+// Review fix round 4 #1: checked before the bind (skip pointless work if already aborted) and
+// again right after it resolves (a late-completing bind must self-close, not be reported as
+// "held", if the caller already gave up while we were waiting on it) — the probe itself
+// (`askGuard`) is threaded the same `signal` so it can reject early too, instead of only ever
+// timing out via its own `probeMs` deadline.
+async function acquireGuard(
+  name: string,
+  probeMs: number,
+  signal: AbortSignal | undefined,
+  fsDeps: SingletonFsDeps | undefined,
+): Promise<GuardResult> {
+  if (aborted(signal)) throw toAbortError(signal);
   const bound = await listenOn(name, (sock) => {
     sock.on("error", () => undefined);
     sock.end(`${process.pid}\n`);
   });
   if (bound.kind === "ok") {
+    if (aborted(signal)) {
+      await closeServer(bound.server); // late bind after abort: self-clean, don't report "held"
+      throw toAbortError(signal);
+    }
     bound.server.unref(); // the hub socket (or a bounded startup wait) holds the loop, never the guard
     return { kind: "held", server: bound.server };
   }
   if (bound.kind === "error") return { kind: "off" }; // e.g. no abstract namespace support
-  const answer = await askGuard(name, probeMs);
+  const answer = await askGuard(name, probeMs, signal);
   if (answer.kind === "silent") return { kind: "busy" }; // stopped/wedged holder: never steal
-  if (answer.kind === "pid" && pidAlive(answer.pid) && (await sameUid(answer.pid, signal))) {
+  if (answer.kind === "pid" && pidAlive(answer.pid) && (await sameUid(answer.pid, signal, fsDeps))) {
     return { kind: "busy", holderPid: answer.pid };
   }
   return { kind: "off" }; // refused / foreign or dead pid: not one of our hubs
@@ -521,16 +552,33 @@ async function acquireGuard(name: string, probeMs: number, signal: AbortSignal |
 
 type GuardAnswer = { kind: "pid"; pid: number } | { kind: "silent" } | { kind: "bogus" };
 
-/** Bounded by `deadlineMs`; ref'd on purpose (see probeAlive). */
-function askGuard(name: string, deadlineMs: number): Promise<GuardAnswer> {
-  return new Promise((resolve) => {
+/**
+ * Bounded by `deadlineMs`; ref'd on purpose (see probeAlive). Review fix round 4 #1: also
+ * cancelable via `signal` — an abort rejects immediately (socket destroyed, timer cleared)
+ * instead of only ever settling once `deadlineMs` elapses.
+ */
+function askGuard(name: string, deadlineMs: number, signal: AbortSignal | undefined): Promise<GuardAnswer> {
+  return new Promise((resolve, reject) => {
+    if (aborted(signal)) {
+      reject(toAbortError(signal));
+      return;
+    }
     let settled = false;
     let buf = "";
     const sock = net.connect(name);
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.destroy();
+      reject(toAbortError(signal));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const done = (a: GuardAnswer): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       sock.destroy();
       resolve(a);
     };
@@ -555,13 +603,22 @@ function askGuard(name: string, deadlineMs: number): Promise<GuardAnswer> {
  * never hidden from us). Review fix #3 (v2): `fs.promises.stat`, raced
  * against the startup `signal`, instead of a blocking `statSync` call.
  */
-async function sameUid(pid: number, signal: AbortSignal | undefined): Promise<boolean> {
+async function sameUid(
+  pid: number,
+  signal: AbortSignal | undefined,
+  fsDeps: SingletonFsDeps | undefined,
+): Promise<boolean> {
   const uid = process.getuid?.();
   if (uid === undefined) return true;
+  const statFn = fsDeps?.stat ?? stat;
   try {
-    const st = await raced(stat(`/proc/${pid}`), signal);
+    const st = await raced(statFn(`/proc/${pid}`), signal);
     return st.uid === uid;
-  } catch {
+  } catch (err) {
+    // Review fix round 4 #1: an unreadable /proc entry (ENOENT/EACCES) still trusts — same-uid
+    // processes are never hidden from us — but an abort must propagate instead of being folded
+    // into that same trusting default.
+    if (aborted(signal)) throw err;
     return true;
   }
 }
