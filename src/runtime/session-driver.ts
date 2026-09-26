@@ -12,6 +12,24 @@ import type {
 } from "../core/types.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
+
+/**
+ * child-context-switch plan P0 (§2.1 step 2 `details.source` / §2.3.1): the
+ * marker a boundary-draft compaction entry carries in `details.source` so
+ * this driver (and `PiSessionHandle.getSwitchTail()` below) can recognize
+ * "this compaction is OUR committed switch_context, not pi's own summary or
+ * another extension's". Owned here (not by the — separately owned —
+ * boundary-draft builder) because both the entry_appended mapping in
+ * `mapEvent` and `getSwitchTail()` need the exact same literal; other
+ * packages import it rather than re-declaring the string.
+ */
+export const CHILD_SWITCH_CONTEXT_SOURCE = "pi-toolkit:switch_context";
+/** child-context-switch plan P0 (§2.3.1 point 1): customType of the entry the child-session extension appends at `agent_end` when a committed switch was never followed by a subsequent model request. */
+export const CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE = "subagent:switch-selfcheck";
+/** child-context-switch plan §3.1 (point 4): customType of the entry the capability state machine (owned by a later package) appends on a disablement/other non-fatal capability notice. */
+export const CHILD_SWITCH_CAPABILITY_CUSTOM_TYPE = "subagent:switch-capability";
+/** child-context-switch plan §2.4 ("成本计入子 run"): customType of the child keepalive service's audit entries (owned by a later package). Only entries with a positive `costUsd` fold into this run's usage accumulator. */
+export const CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE = "subagent:cache-keepalive";
 export interface DisposeReport {
   returned: boolean;
   error?: RunOutcome["error"];
@@ -41,6 +59,19 @@ export interface SessionHandle {
   /** Apply a thinking level; pi clamps it to the model's capabilities. */
   setThinkingLevel?(level: string): void;
   getUsage(): RunOutcome["usage"];
+  /**
+   * child-context-switch plan P0 (§2.3.1 v3.1, runner settlement fallback):
+   * synchronous, read-only check of the current branch for the LAST
+   * committed boundary-draft switch_context compaction (identified by
+   * `details.source === CHILD_SWITCH_CONTEXT_SOURCE`), and whether any
+   * assistant message entry follows it. Used as a fallback self-check that
+   * does not depend on `agent_end` firing, `appendEntry` succeeding, or the
+   * event being forwarded through `bind()` — only on pi's own persisted
+   * branch. Returns `undefined` when no such compaction exists on the
+   * branch at all (no switch was ever committed in this run; the self-check
+   * does not apply and must not affect settlement).
+   */
+  getSwitchTail?(): { seq: number; entryId: string; assistantAfter: boolean } | undefined;
 }
 export interface SessionDriver {
   create(spec: SessionSpec): Promise<SessionHandle>;
@@ -145,6 +176,64 @@ export function toolResultRunIds(message: unknown): readonly string[] | undefine
   return ids.length > 0 ? ids : undefined;
 }
 
+/**
+ * child-context-switch plan P0 (§2.1 step 2 / §2.3.1 point 4 / §2.4): map a
+ * raw pi `entry_appended` SessionEntry onto the (at most one) DriverEvent it
+ * carries for this plan. All three shapes recognized here are written by
+ * OTHER packages' child-session extensions (the boundary-draft turn_end
+ * handler, the capability state machine, the child keepalive service) — this
+ * function is pure structural recognition, defensive against any other
+ * entry shape (unrelated custom entries, plain compactions, …), which it
+ * passes through as `undefined` (no event).
+ */
+function mapEntryAppended(entry: unknown): DriverEvent | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const r = entry as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  if (r["type"] === "compaction" && r["fromHook"] === true) {
+    const details = r["details"] as Record<string, unknown> | undefined;
+    if (details?.["source"] !== CHILD_SWITCH_CONTEXT_SOURCE) return undefined;
+    const dropped = details["dropped"] as Record<string, unknown> | undefined;
+    return {
+      t: "context_switch",
+      seq: num(details["seq"]),
+      keepRecent: Boolean(details["keepRecent"]),
+      dropped: {
+        fromEntryId: str(dropped?.["fromEntryId"]),
+        toEntryId: str(dropped?.["toEntryId"]),
+        entries: num(dropped?.["entries"]),
+        tokensBefore: num(dropped?.["tokensBefore"]),
+        tokensAfterEstimate: num(dropped?.["tokensAfterEstimate"]),
+      },
+    };
+  }
+  if (r["type"] !== "custom") return undefined;
+  const data = r["data"] as Record<string, unknown> | undefined;
+  if (r["customType"] === CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE) {
+    if (data?.["ok"] !== false) return undefined;
+    return { t: "switch_selfcheck_failed", reason: str(data["reason"]) || "unknown" };
+  }
+  if (r["customType"] === CHILD_SWITCH_CAPABILITY_CUSTOM_TYPE) {
+    return { t: "switch_capability", reason: str(data?.["reason"]) || "unknown" };
+  }
+  if (r["customType"] === CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE) {
+    const costUsd = data?.["costUsd"];
+    if (typeof costUsd !== "number" || !Number.isFinite(costUsd) || costUsd <= 0) return undefined;
+    return {
+      t: "message_end",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: num(data?.["cacheReadTokens"]),
+        cacheWrite: num(data?.["cacheWriteTokens"]),
+        costUsd,
+      },
+    };
+  }
+  return undefined;
+}
+
 function mapEvent(e: any): DriverEvent | undefined {
   if (!e || typeof e.type !== "string") return undefined;
   const t = e.type;
@@ -194,8 +283,19 @@ function mapEvent(e: any): DriverEvent | undefined {
     };
   if (t === "auto_retry_end") return { t: "retry_end", success: Boolean(e.success) };
   if (t === "compaction_start") return { t: "compaction_start", reason: String(e.reason) };
-  if (t === "compaction_end") return { t: "compaction_end", aborted: Boolean(e.aborted) };
+  if (t === "compaction_end") {
+    const aborted = Boolean(e.aborted);
+    // child-context-switch plan P0 (§2.3.1): pi's own compaction failed
+    // (threshold summarization error, overflow compact-and-retry exhausted,
+    // …) iff it carries a non-empty errorMessage and was not aborted — an
+    // aborted compaction is a cancellation, not a failure, even if pi also
+    // happened to set errorMessage on it. `bind()` below emits the companion
+    // `compaction_failed` diagnostic event only in this exact case.
+    const hasError = typeof e.errorMessage === "string" && e.errorMessage.length > 0;
+    return { t: "compaction_end", aborted, ...(hasError && !aborted ? { failed: true as const } : {}) };
+  }
   if (t === "agent_settled") return { t: "settled" };
+  if (t === "entry_appended") return mapEntryAppended(e.entry);
   if (t === "message_update") {
     // pi streams token-by-token via assistantMessageEvent (pi-ai
     // AssistantMessageEvent): text_delta carries answer text, thinking_delta
@@ -273,6 +373,45 @@ class PiSessionHandle implements SessionHandle {
   }
   getUsage() {
     return undefined;
+  }
+  /**
+   * child-context-switch plan P0 (§2.3.1 v3.1): see the SessionHandle
+   * interface doc above. `getBranch()` returns entries in persisted (root
+   * to leaf) order, so the LAST matching compaction on the branch is the
+   * most recent one; scanning forward from just after it for an assistant
+   * `message` entry decides `assistantAfter`.
+   */
+  getSwitchTail(): { seq: number; entryId: string; assistantAfter: boolean } | undefined {
+    const branch = this.session.sessionManager.getBranch() as unknown as ReadonlyArray<Record<string, unknown>>;
+    if (!Array.isArray(branch)) return undefined;
+    let foundIndex = -1;
+    let foundEntry: Record<string, unknown> | undefined;
+    for (let i = 0; i < branch.length; i++) {
+      const entry = branch[i];
+      const details = entry?.["details"] as Record<string, unknown> | undefined;
+      if (
+        entry?.["type"] === "compaction" &&
+        entry["fromHook"] === true &&
+        details?.["source"] === CHILD_SWITCH_CONTEXT_SOURCE
+      ) {
+        foundIndex = i;
+        foundEntry = entry;
+      }
+    }
+    if (foundIndex < 0 || !foundEntry) return undefined;
+    const details = foundEntry["details"] as Record<string, unknown> | undefined;
+    const seq = typeof details?.["seq"] === "number" ? (details["seq"] as number) : 0;
+    const entryId = typeof foundEntry["id"] === "string" ? (foundEntry["id"] as string) : "";
+    let assistantAfter = false;
+    for (let i = foundIndex + 1; i < branch.length; i++) {
+      const e2 = branch[i];
+      const message = e2?.["message"] as { role?: unknown } | undefined;
+      if (e2?.["type"] === "message" && message?.role === "assistant") {
+        assistantAfter = true;
+        break;
+      }
+    }
+    return { seq, entryId, assistantAfter };
   }
   /** set_model: thin wrappers, same style as steer/getModelRef above. */
   setModel(model: unknown) {
@@ -403,7 +542,26 @@ export class PiSessionDriver implements SessionDriver {
       const mapped = mapEvent(event);
       if (!mapped) return;
       onEvent(mapped);
-      if ((mapped.t !== "message_end" && mapped.t !== "compaction_end") || contextSamplingDisabled) return;
+      // child-context-switch plan P0 (§2.3.1): pi's own compaction failing is
+      // ALSO surfaced as a dedicated best-effort diagnostic event (in addition
+      // to the `compaction_end{failed:true}` flag above), carrying the raw
+      // reason/message pi gave us — never emitted for an aborted compaction.
+      if (mapped.t === "compaction_end" && mapped.failed === true) {
+        const raw = event as { errorMessage?: unknown; reason?: unknown };
+        onEvent({
+          t: "compaction_failed",
+          reason: typeof raw.reason === "string" ? raw.reason : "unknown",
+          message: typeof raw.errorMessage === "string" ? raw.errorMessage : "compaction failed",
+        });
+      }
+      // §2.4: a committed switch_context rewrites the child session's context
+      // just like a compaction does, so it gets the same post-event context
+      // usage resample as message_end/compaction_end.
+      if (
+        (mapped.t !== "message_end" && mapped.t !== "compaction_end" && mapped.t !== "context_switch") ||
+        contextSamplingDisabled
+      )
+        return;
       const getContextUsage = (session as { getContextUsage?: unknown }).getContextUsage;
       if (typeof getContextUsage !== "function") {
         contextSamplingDisabled = true;
@@ -422,4 +580,4 @@ export class PiSessionDriver implements SessionDriver {
     p.then(cb, () => undefined).catch(() => undefined);
   }
 }
-export { mapEvent };
+export { mapEvent, PiSessionHandle };

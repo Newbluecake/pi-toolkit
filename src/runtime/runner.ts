@@ -296,6 +296,25 @@ function startError(e: unknown): ErrorInfo {
   const message = raw.length > START_ERROR_MESSAGE_CAP ? `${raw.slice(0, START_ERROR_MESSAGE_CAP - 1)}…` : raw;
   return { kind: "internal", message, retryable: false };
 }
+/**
+ * child-context-switch plan P0 (§2.3.1, runner error concatenation): a
+ * `compactionFailures` entry is only worth appending to a live `turnError`
+ * when it is not stale — i.e. it postdates both the most recent successful
+ * boundary-draft switch (`contextSwitches.last.at`) and the most recent
+ * successful pi auto-compaction (`lastCompactionOkAt`). Without this check a
+ * failure from turns ago, long since superseded by a later successful
+ * compaction/switch, would keep getting glued onto an unrelated later
+ * turnError forever.
+ */
+function compactionFailureAnnotation(diag: RunState["diag"]): string | undefined {
+  const failures = diag.compactionFailures;
+  if (!failures || failures.length === 0) return undefined;
+  const last = failures[failures.length - 1]!;
+  const switchAt = diag.contextSwitches?.last?.at ?? -Infinity;
+  const okAt = diag.lastCompactionOkAt ?? -Infinity;
+  if (last.at <= switchAt || last.at <= okAt) return undefined;
+  return `; auto-compaction failed (${last.reason}): ${last.message}`;
+}
 /** Guard verdict: settled value, deadline, cancel signal, or the awaited promise's own rejection. */
 type GuardResult<T> = { ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" } | GuardRejected;
 interface GuardRejected {
@@ -533,6 +552,13 @@ export class RuntimeRunner implements Runner {
     let ticket: SlotTicket | undefined;
     let handle: SessionHandle | undefined;
     let createP: Promise<SessionHandle> | undefined;
+    // child-context-switch plan P0 (§2.3.1 point 3): the FIRST
+    // switch_selfcheck_failed reason observed for this (runId, generation),
+    // latched here rather than read back out of `state.diag` at settlement
+    // time so a later successful switch (or any other diag write) can never
+    // clobber it — once the extension has told us the run ended right after
+    // an unconsumed switch, that verdict is final for this run.
+    let selfcheckLatch: string | undefined;
     const dispatch = (input: RunInput) => {
       const out = reduce(state, { generation: gen, input }, budget);
       state = out.state;
@@ -633,6 +659,12 @@ export class RuntimeRunner implements Runner {
       const bound = await this.guard(
         this.d.driver.bind(handle, (e) => {
           dispatch({ kind: "session_event", at: this.d.clock.now(), event: e });
+          // child-context-switch plan P0 (§2.3.1 point 3): fold the diagnostic
+          // into the state machine FIRST (above), then latch locally — the
+          // local latch is what settlement actually reads (see promptError
+          // below); the diag write is display/get_subagent_result plumbing
+          // only. First value wins (see selfcheckLatch's own doc above).
+          if (e.t === "switch_selfcheck_failed" && selfcheckLatch === undefined) selfcheckLatch = e.reason;
           // X11 TS3: setActiveTools only ever happens at a turn boundary, never
           // mid tool_exec. TS-race guard: re-check terminality *after*
           // dispatch() above has already folded this same event into the
@@ -687,7 +719,31 @@ export class RuntimeRunner implements Runner {
       // crash looks like "completed with empty text".
       const turnError = prompted.ok ? handle.getTurnError?.() : undefined;
       const promptError = ((): ErrorInfo | undefined => {
-        if (prompted.ok) return turnError === undefined ? undefined : error(turnError, "model");
+        if (prompted.ok) {
+          // child-context-switch plan P0 (§2.3.1 point 3): self-check failure
+          // takes priority over turnError — the run must never settle
+          // `completed`/`failed(model)` on the switch-before text/message
+          // when the run ended right after a committed switch without ever
+          // reaching a subsequent model request. The extension-reported
+          // latch wins when present; otherwise fall back to a synchronous,
+          // driver-independent read of pi's own persisted branch (does not
+          // depend on agent_end firing, appendEntry succeeding, or the event
+          // being forwarded through bind() — v3.1 §3.1 failure-mode table).
+          const selfcheckReason =
+            selfcheckLatch ??
+            (() => {
+              const tail = handle?.getSwitchTail?.();
+              return tail !== undefined && !tail.assistantAfter
+                ? "run ended right after switch_context (pi runtime semantics changed)"
+                : undefined;
+            })();
+          if (selfcheckReason !== undefined) {
+            const base = `context switch self-check failed: ${selfcheckReason}`;
+            return error(turnError === undefined ? base : `${base}; turn error: ${turnError}`, "model");
+          }
+          if (turnError === undefined) return undefined;
+          return error(`${turnError}${compactionFailureAnnotation(state.diag) ?? ""}`, "model");
+        }
         if (prompted.reason === "timeout") return error("timeout", "timeout");
         // prompt() itself rejected (pi threw before/while running the turn —
         // e.g. "No API key found for <provider>.") on a run nobody asked to

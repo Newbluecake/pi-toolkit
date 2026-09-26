@@ -9,6 +9,8 @@ import {
 import { deliveryKey } from "./delivery-key.js";
 import { isTerminalStatus } from "./status.js";
 import type {
+  CompactionFailureRecord,
+  ContextSwitchDiag,
   DeadlineBudget,
   DeadlineNotice,
   EffectEnvelope,
@@ -56,6 +58,12 @@ function accumulateUsage(prev: UsageDelta | undefined, delta: UsageDelta | undef
  * meaningful trail in the UI, small enough that persist_snapshot stays cheap.
  */
 export const TOOL_HISTORY_CAP = 30;
+
+/**
+ * child-context-switch plan P0 (§2.3.1): bounded ring cap for
+ * RunDiagnostics.compactionFailures ("限 3 条" in the plan).
+ */
+export const COMPACTION_FAILURES_CAP = 3;
 
 /** Maximum persisted dispatch prompt used by agent-tree previews and /agent status. */
 export const TASK_PROMPT_CAP = 4096;
@@ -531,6 +539,47 @@ export function reduce(
   // emitting a persistence effect.
   if (input.kind === "session_event" && input.event.t === "context_usage")
     return { state: { ...state, diag: { ...state.diag, contextUsage: input.event.usage } }, effects: [] };
+  // child-context-switch plan P0 (§2.3.1/§2.4): three more best-effort
+  // diagnostics snapshots, kept in the exact same unconditional position as
+  // context_usage above (before the generation check, before the terminal
+  // dispatch) so they are accepted in EVERY state — including terminal and
+  // stale-generation — as a pure diag patch: no effect, lastEventAt/
+  // lastEventType left untouched, state.outcome (already sealed post-settle)
+  // never touched either (same limitation as context_usage: a trailing event
+  // after terminal updates state.diag but not the frozen outcome snapshot).
+  if (input.kind === "session_event" && input.event.t === "context_switch") {
+    const e = input.event;
+    const prev = state.diag.contextSwitches;
+    const next: ContextSwitchDiag = {
+      ...prev,
+      count: (prev?.count ?? 0) + 1,
+      last: { seq: e.seq, keepRecent: e.keepRecent, at: input.at, dropped: e.dropped },
+    };
+    return { state: { ...state, diag: { ...state.diag, contextSwitches: next } }, effects: [] };
+  }
+  if (input.kind === "session_event" && input.event.t === "compaction_failed") {
+    const e = input.event;
+    const prevList = state.diag.compactionFailures ?? [];
+    const record: CompactionFailureRecord = { reason: e.reason, message: e.message, at: input.at };
+    const nextList = [...prevList, record].slice(-COMPACTION_FAILURES_CAP);
+    return { state: { ...state, diag: { ...state.diag, compactionFailures: nextList } }, effects: [] };
+  }
+  if (input.kind === "session_event" && input.event.t === "switch_selfcheck_failed") {
+    const e = input.event;
+    const prev = state.diag.contextSwitches;
+    const next: ContextSwitchDiag = { ...prev, count: prev?.count ?? 0, selfcheck: { reason: e.reason, at: input.at } };
+    return { state: { ...state, diag: { ...state.diag, contextSwitches: next } }, effects: [] };
+  }
+  if (input.kind === "session_event" && input.event.t === "switch_capability") {
+    const e = input.event;
+    const prev = state.diag.contextSwitches;
+    const next: ContextSwitchDiag = {
+      ...prev,
+      count: prev?.count ?? 0,
+      capability: { reason: e.reason, at: input.at },
+    };
+    return { state: { ...state, diag: { ...state.diag, contextSwitches: next } }, effects: [] };
+  }
   // set_model: a mid-run model switch is a display-only diagnostics patch —
   // it must not enter/re-arm any phase timer (plan D-5) and emits no effects.
   // Kept next to context_usage for the same reason: it is best-effort
@@ -731,6 +780,13 @@ export function reduce(
       // turn_end drives the turns counter (G4 diagnostics + outcome.turns);
       // without this branch every run reported turns: 0.
       ...(e.t === "turn_end" ? { turns: state.diag.turns + 1 } : {}),
+      // child-context-switch plan P0 (§2.3.1): a non-aborted, non-failed
+      // compaction_end is pi's own automatic compaction succeeding — recorded
+      // so the runner's settlement error assembly can tell a stale
+      // compactionFailures entry (superseded by a later success) from a live
+      // one. Threaded the same way as usage/absorbed below (flows through
+      // every downstream branch via `{...state.diag, ...base}`).
+      ...(e.t === "compaction_end" && !e.aborted && e.failed !== true ? { lastCompactionOkAt: input.at } : {}),
       // X9: threaded through every downstream branch below via `{...state.diag, ...base}`
       // so the accumulator is updated regardless of which phase/branch handles this event
       // (including the abort_grace/reap early-return branch immediately below).

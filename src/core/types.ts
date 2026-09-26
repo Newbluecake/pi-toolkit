@@ -420,12 +420,67 @@ export type DriverEvent =
   | { t: "retry_start"; attempt: number; maxAttempts: number; delayMs: Millis }
   | { t: "retry_end"; success: boolean }
   | { t: "compaction_start"; reason: string }
-  | { t: "compaction_end"; aborted: boolean }
+  /**
+   * child-context-switch plan P0 (§2.3.1): `failed` is set (true only, never
+   * false — exactOptionalPropertyTypes) by the driver when pi's own raw
+   * event carried a non-empty `errorMessage` and `aborted` is false — i.e.
+   * pi's automatic compaction itself failed (threshold summarization error,
+   * overflow compact-and-retry exhausted, …). Absent/undefined means the
+   * compaction was either aborted or genuinely succeeded; the driver also
+   * emits a companion `compaction_failed` event in that same case (never for
+   * an aborted compaction) so the reducer can keep a bounded failure ring
+   * independent of this per-event flag.
+   */
+  | { t: "compaction_end"; aborted: boolean; failed?: true }
   | { t: "settled" }
   | { t: "text_delta"; delta: string }
   | { t: "thinking_delta"; delta: string }
   /** set_model: the live session's model was switched mid-run (display-only diag patch; see state-machine.ts reduce's early-return branch). */
   | { t: "model_changed"; model: { provider: string; id: string } }
+  /**
+   * child-context-switch plan P0 (§2.3.1/§2.4): three best-effort diagnostic
+   * events, all handled in the SAME reduce() branch as `context_usage` above
+   * (accepted in every state including terminal/stale-generation, patch
+   * `diag` only, no effect, `lastEventAt`/`lastEventType` untouched — see
+   * state-machine.ts). The session driver maps them from `entry_appended`
+   * (a `fromHook` compaction whose `details.source` is the switch tool's
+   * marker; a `subagent:switch-selfcheck`/`subagent:switch-capability`
+   * custom entry written by the child-session extension) and from a
+   * `compaction_end` event that carries a non-aborted `errorMessage`.
+   *
+   * `context_switch`: one successful boundary-draft context switch was
+   * committed to the branch (child-context-switch plan §2.1 step 2).
+   */
+  | {
+      t: "context_switch";
+      seq: number;
+      keepRecent: boolean;
+      dropped: {
+        fromEntryId: string;
+        toEntryId: string;
+        entries: number;
+        tokensBefore: number;
+        tokensAfterEstimate: number;
+      };
+    }
+  /** pi's own automatic compaction failed (threshold summarization error, overflow retry exhausted, …). `reason` mirrors pi's own `compaction_end.reason` ("manual" | "threshold" | "overflow"); `message` is pi's `errorMessage`. */
+  | { t: "compaction_failed"; reason: string; message: string }
+  /**
+   * The child-session extension detected, at `agent_end`, that its own
+   * boundary-draft switch was committed but the run ended right after it
+   * without the run ever reaching a subsequent model request (pi runtime
+   * semantics changed underneath the plan's assumptions — §3.1 L3(b)). The
+   * runner latches the FIRST such reason for this run and gives it priority
+   * over `turnError` when settling (never over an existing cancel/timeout).
+   */
+  | { t: "switch_selfcheck_failed"; reason: string }
+  /**
+   * The process-level switch_context capability state machine (child-context-
+   * switch plan §3.1, owned by a later package) recorded a disablement or
+   * other non-fatal capability event for this run's session. Diagnostic only
+   * — never affects this run's outcome (unlike switch_selfcheck_failed).
+   */
+  | { t: "switch_capability"; reason: string }
   /**
    * bash-timeout-grace plan §3.1/§3.8 (P0b, frozen): the runner's synchronous,
    * end-of-run snapshot of this run's child bash jobs (RunnerDeps.sealSession,
@@ -472,6 +527,49 @@ export interface RunExitFacts {
   bashJobs: RunExitJob[];
   bashJobsMore?: number;
   hold?: { rounds: number; cap: number; exhausted: boolean };
+}
+
+/**
+ * child-context-switch plan P0 (§2.1 step 2 `details.dropped`): the entry
+ * range a committed boundary-draft switch_context dropped from the child
+ * session's context, mirrored verbatim from the compaction entry's own
+ * `details.dropped` (written by the — separately owned — boundary-draft
+ * builder). Display/diagnostic only; never re-derived here.
+ */
+export interface ContextSwitchDroppedRange {
+  fromEntryId: string;
+  toEntryId: string;
+  entries: number;
+  tokensBefore: number;
+  tokensAfterEstimate: number;
+}
+/**
+ * child-context-switch plan P0 (§2.3.1): best-effort diagnostics folded into
+ * `RunDiagnostics.contextSwitches` by the three new DriverEvent kinds
+ * (`context_switch` / `switch_selfcheck_failed` / `switch_capability`),
+ * surfaced through `get_subagent_result` and the completion notice.
+ * `count`/`last` are written by successful switches; `selfcheck` is the
+ * (run-fatal) self-check-failed latch also read by the runner's settlement
+ * priority (§2.3.1 point 3); `capability` is a non-fatal capability-state
+ * notice owned by a later package's capability state machine (§3.1) — this
+ * package only carries the diagnostic plumbing for it.
+ */
+export interface ContextSwitchDiag {
+  count: number;
+  last?: { seq: number; keepRecent: boolean; at: Millis; dropped: ContextSwitchDroppedRange };
+  selfcheck?: { reason: string; at: Millis };
+  capability?: { reason: string; at: Millis };
+}
+/**
+ * child-context-switch plan P0 (§2.3.1): one observed failure of pi's own
+ * automatic compaction (threshold summarization error, overflow
+ * compact-and-retry exhausted, …), bounded ring capped at 3 (FIFO) by the
+ * reducer. `reason` mirrors pi's own `compaction_end.reason`.
+ */
+export interface CompactionFailureRecord {
+  reason: string;
+  message: string;
+  at: Millis;
 }
 /**
  * set_model switch result union (docs/dev/set-model/set-model-plan.md §4.1).
@@ -683,6 +781,33 @@ export interface RunDiagnostics {
    * or the feature never fired (e.g. the run never bound a session).
    */
   exitFacts?: RunExitFacts;
+  /**
+   * child-context-switch plan P0 (§2.3.1/§2.4): best-effort diagnostics for
+   * the child-session switch_context boundary-draft feature (owned by a
+   * later package's turn_end handler/capability state machine — this package
+   * only wires the driver mapping + reducer patch + runner settlement).
+   * Written by the `context_switch` / `switch_selfcheck_failed` /
+   * `switch_capability` session events, same best-effort branch as
+   * `contextUsage` above (accepted in every state, no effect, does not
+   * touch `lastEventAt`/`lastEventType`).
+   */
+  contextSwitches?: ContextSwitchDiag;
+  /**
+   * child-context-switch plan P0 (§2.3.1): bounded ring (cap 3, FIFO) of pi's
+   * own automatic-compaction failures observed via `compaction_end{errorMessage}`
+   * (non-aborted). The runner's settlement error-message assembly appends the
+   * most recent entry's reason/message to a live `turnError` when it postdates
+   * both the last successful switch and the last successful pi compaction
+   * (`lastCompactionOkAt`) — see runner.ts.
+   */
+  compactionFailures?: CompactionFailureRecord[];
+  /**
+   * child-context-switch plan P0 (§2.3.1): timestamp of the most recent
+   * non-aborted, non-failed `compaction_end` — i.e. the last time pi's own
+   * automatic compaction actually succeeded. Used only to decide whether a
+   * `compactionFailures` entry is stale (superseded by a later success).
+   */
+  lastCompactionOkAt?: Millis;
 }
 export interface DiagSummary {
   phase: RunPhase;

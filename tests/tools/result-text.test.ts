@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatExitFacts, truncateResultText } from "../../src/tools/result-text.js";
-import type { RunExitFacts } from "../../src/core/types.js";
+import {
+  formatCompactionFailureNote,
+  formatContextSwitches,
+  formatExitFacts,
+  truncateResultText,
+} from "../../src/tools/result-text.js";
+import type { CompactionFailureRecord, ContextSwitchDiag, RunExitFacts } from "../../src/core/types.js";
 
 describe("truncateResultText", () => {
   it("keeps head and tail, eliding the middle, and adds a transcript guide", () => {
@@ -172,5 +177,74 @@ describe("formatExitFacts (bash-timeout-grace plan \u00a73.7)", () => {
     expect(lines[1]).toBe(
       "Settle hold budget exhausted (40/40 reminders); the run was released with jobs still running.",
     );
+  });
+});
+
+/**
+ * child-context-switch plan P0 (§2.3.1, result text line): formatContextSwitches
+ * renders RunDiagnostics.contextSwitches into the one-line summary the
+ * (later-package) get_subagent_result formatter appends.
+ */
+describe("formatContextSwitches (child-context-switch plan P0 §2.3.1)", () => {
+  it("returns undefined when there is nothing to report", () => {
+    expect(formatContextSwitches(undefined)).toBeUndefined();
+    expect(formatContextSwitches({ count: 0 })).toBeUndefined();
+  });
+
+  it("renders the count alone when there is no `last`", () => {
+    const diag: ContextSwitchDiag = { count: 0, selfcheck: { reason: "run-ended-after-switch", at: 1 } };
+    expect(formatContextSwitches(diag)).toBe("context switches: 0 \u2014 self-check failed: run-ended-after-switch");
+  });
+
+  it("renders count + dropped tokens/entries/last-entry from `last`", () => {
+    const diag: ContextSwitchDiag = {
+      count: 2,
+      last: {
+        seq: 2,
+        keepRecent: true,
+        at: 100,
+        dropped: { fromEntryId: "e1", toEntryId: "e9", entries: 6, tokensBefore: 5000, tokensAfterEstimate: 800 },
+      },
+    };
+    expect(formatContextSwitches(diag)).toBe(
+      "context switches: 2 (dropped ~4200 tokens / 6 entries; last at entry e9)",
+    );
+  });
+
+  it("appends a capability-disabled note when present", () => {
+    const diag: ContextSwitchDiag = { count: 1, capability: { reason: "l1-event-shape", at: 5 } };
+    expect(formatContextSwitches(diag)).toBe("context switches: 1 \u2014 capability disabled: l1-event-shape");
+  });
+});
+
+/**
+ * child-context-switch plan P0 (§2.3.1): formatCompactionFailureNote renders
+ * a trailing note for pi's own most recent auto-compaction failure, unless
+ * the run's own error.message already mentions it (the runner's own
+ * settlement annotation already covers that case for a live failure).
+ */
+describe("formatCompactionFailureNote (child-context-switch plan P0 §2.3.1)", () => {
+  const failures: CompactionFailureRecord[] = [
+    { reason: "threshold", message: "first failure", at: 1 },
+    { reason: "overflow", message: "second failure", at: 2 },
+  ];
+
+  it("returns undefined with no failures recorded", () => {
+    expect(formatCompactionFailureNote(undefined)).toBeUndefined();
+    expect(formatCompactionFailureNote([])).toBeUndefined();
+  });
+
+  it("renders the LAST failure's message", () => {
+    expect(formatCompactionFailureNote(failures)).toBe("auto-compaction failed: second failure");
+  });
+
+  it("suppresses the note when errorMessage already mentions it (runner already appended it)", () => {
+    expect(
+      formatCompactionFailureNote(failures, "provider crashed; auto-compaction failed (overflow): second failure"),
+    ).toBeUndefined();
+  });
+
+  it("still renders when errorMessage is present but doesn't mention this failure (e.g. a completed run)", () => {
+    expect(formatCompactionFailureNote(failures, "unrelated text")).toBe("auto-compaction failed: second failure");
   });
 });

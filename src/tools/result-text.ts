@@ -1,5 +1,5 @@
 import { formatDuration } from "../core/format.js";
-import type { RunExitFacts, RunExitJob } from "../core/types.js";
+import type { CompactionFailureRecord, ContextSwitchDiag, RunExitFacts, RunExitJob } from "../core/types.js";
 
 export interface TruncatedResultText {
   /** The body, plus a truncation marker when the body exceeded maxChars. */
@@ -95,4 +95,49 @@ export function formatExitFacts(facts: RunExitFacts | undefined): string | undef
     );
   }
   return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+/**
+ * child-context-switch plan P0 (§2.3.1, result text line): renders
+ * `RunOutcome.diag.contextSwitches` into the one-line summary
+ * `get_subagent_result`'s formatOutcome (src/tools/result-tool.ts, wired by
+ * the child-wiring package) appends to a subagent's result text and the
+ * parent completion notice reuses. Returns `undefined` when the run never
+ * produced any context-switch diagnostics at all (the common case: the
+ * feature is off, or the run never called switch_context).
+ */
+export function formatContextSwitches(contextSwitches: ContextSwitchDiag | undefined): string | undefined {
+  if (!contextSwitches) return undefined;
+  const { count, last, selfcheck, capability } = contextSwitches;
+  if (count <= 0 && last === undefined && selfcheck === undefined && capability === undefined) return undefined;
+  const parts: string[] = [`context switches: ${count}`];
+  if (last) {
+    const droppedTokens = Math.max(0, last.dropped.tokensBefore - last.dropped.tokensAfterEstimate);
+    parts.push(
+      `(dropped ~${droppedTokens} tokens / ${last.dropped.entries} entries; last at entry ${last.dropped.toEntryId})`,
+    );
+  }
+  if (capability) parts.push(`\u2014 capability disabled: ${capability.reason}`);
+  if (selfcheck) parts.push(`\u2014 self-check failed: ${selfcheck.reason}`);
+  return parts.join(" ");
+}
+
+/**
+ * child-context-switch plan P0 (§2.3.1): renders a trailing note for the
+ * most recent pi auto-compaction failure, unless `errorMessage` (the run's
+ * own `error.message`) already mentions it — the runner's own settlement
+ * error concatenation (runner.ts's `compactionFailureAnnotation`) already
+ * does that for a LIVE (non-stale) failure that caused this particular run
+ * to fail; this is the fallback for every other case (a stale failure
+ * superseded by a later success, or a run that completed despite an
+ * earlier recorded compaction failure).
+ */
+export function formatCompactionFailureNote(
+  compactionFailures: readonly CompactionFailureRecord[] | undefined,
+  errorMessage?: string,
+): string | undefined {
+  if (!compactionFailures || compactionFailures.length === 0) return undefined;
+  const last = compactionFailures[compactionFailures.length - 1]!;
+  if (errorMessage && errorMessage.includes(last.message)) return undefined;
+  return `auto-compaction failed: ${last.message}`;
 }

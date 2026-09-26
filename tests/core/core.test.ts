@@ -1632,6 +1632,12 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
           "compaction_end",
           "settled",
           "text_delta",
+          // child-context-switch plan P0 (§2.3.1/§2.4): the three best-effort
+          // diagnostic kinds, same exemption family as context_usage above.
+          "context_switch",
+          "compaction_failed",
+          "switch_selfcheck_failed",
+          "switch_capability",
         ] as const);
         switch (eventKind) {
           case "turn_start":
@@ -1640,6 +1646,29 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
             return { kind, at, event: { t: "turn_end", toolResults: Math.floor(next() * 3) } };
           case "message_end":
             return { kind, at, event: { t: "message_end" } };
+          case "context_switch":
+            return {
+              kind,
+              at,
+              event: {
+                t: "context_switch",
+                seq: Math.floor(next() * 5),
+                keepRecent: next() < 0.5,
+                dropped: {
+                  fromEntryId: "e1",
+                  toEntryId: "e5",
+                  entries: Math.floor(next() * 10),
+                  tokensBefore: 1000,
+                  tokensAfterEstimate: 100,
+                },
+              },
+            };
+          case "compaction_failed":
+            return { kind, at, event: { t: "compaction_failed", reason: "threshold", message: "x" } };
+          case "switch_selfcheck_failed":
+            return { kind, at, event: { t: "switch_selfcheck_failed", reason: "run-ended-after-switch" } };
+          case "switch_capability":
+            return { kind, at, event: { t: "switch_capability", reason: "l1-event-shape" } };
           case "context_usage":
             return {
               kind,
