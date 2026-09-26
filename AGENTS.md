@@ -116,7 +116,17 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   text verbatim; `firstKeptEntryId` is pi's cut point, or a sentinel that drops everything before it
   for `keep_recent:false`), `session-facts.ts` (live runs / bash jobs / open todos / session file —
   every port degrades silently). Tool surface: `src/tools/switch-context-tool.ts`. Design:
-  `docs/dev/context-switch/context-switch-plan.md`.
+  `docs/dev/context-switch/context-switch-plan.md`. **Child-session switch_context** (child-context-switch
+  plan §2/§3, `src/context-switch/child.ts` + `capability.ts`): every non-consult child run is granted
+  `switch_context` (turn_end handler commits a boundary draft on top of `event.entries`), gated by a
+  process-wide runtime capability state machine — never pi's version — walking `unknown →
+static-ok(L0 export probe) → observed(L1 turn_end shape) → ready(L2 zero-impact
+`subagent:boundary-probe`commit probe: ok iff the probe's`sourceEntry`exists in the projection
+with`messages.length === 0`, not "absent from entries") → verifying → verified(L3 first-use
+self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`verified` L0-L3
+  failure disables immediately, a post-`verified` recheck disables only after 2 consecutive
+  uncommitted). All rejection reasons fold into `diag.contextSwitches.rejected[]` (FIFO cap 5),
+  readable from `get_subagent_result`.
 - `src/cache-ttl/` — prompt-cache TTL mode (auto/on/off) wiring: status-bar indicator plus
   persisted settings override. Adaptive 1h upgrades are bounded by two write budgets — a USD
   marginal-cost gate (`adaptiveWriteBudgetUsd`, default $1, `0` = gate off) as the primary and
@@ -143,7 +153,17 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   武装空档（`armedGaps`，保活证明过读中的那些——人为午休不算）；已覆盖续期读崩塌 ⇒ 学到路由 1h 寿命上界
   `learned1hLifeMs`，cover 封顶为其 0.8 倍；被 ping 撑住的空档不做 1h 判决。经济学仿真（含 5 策略 × 12 负载的
   策略矩阵）：`tests/cache-ttl/adaptive-economics.test.ts`。
-  Design: `docs/dev/cache-ttl-adaptive/plan.md`.
+  Design: `docs/dev/cache-ttl-adaptive/plan.md`. **Child-session keepalive** (child-context-switch
+  plan §2.4, `src/cache-ttl/child.ts` + `child-registry.ts`): capture-only (never rewrites the
+  outgoing payload); limits 11/window · 24/run · 4 concurrent · $1.5/run · $10/24h process-rolling
+  (`ping-ledger.ts`), no price info ⇒ no ping (`usd-unpriced`); ping cost folds into the child run's
+  own `usage.costUsd` (fleet/HUD visible); disposed on `agent_settled` and defensively via the
+  registry's `onReaped`.
+- `src/child/` — child-session assembly entry point (`wire.ts`'s `wireChildSession`, called from
+  `src/index.ts` pre-guard when `isChildSession`, alongside `wireMemory`/`wireChildBashJobs`): composes
+  `wireChildContextSwitch` + `wireChildKeepalive`, wiring their one cross-cutting signal (a committed
+  boundary switch invalidates the keepalive prefix like a compaction does). Reads only the existing
+  `isChildSession` boolean — does not touch `HOST_KEY`.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
@@ -333,7 +353,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   CHANGELOG is generated from them.
 - Tool parameters use `@sinclair/typebox` schemas (the only runtime dependency).
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
-  `>=0.87.0 <0.88.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`.
+  `>=0.87.0 <0.88.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
+  `npm run test:conformance` (real `AgentSession` boundary-draft contract + runtime capability
+  self-check, `tests/conformance/`) — it never gates pi-compat's structural probes (I14), it just
+  tells you ahead of users whether `src/context-switch/capability.ts` still reaches `verified`.
 
 ## pi-extension specifics (easy to get wrong)
 
