@@ -1,6 +1,6 @@
-# workflow isolation 调用的「校验分支后回放」（todo #13，选项 C，L2）— 方案 v2
+# workflow isolation 调用的「校验分支后回放」（todo #13，选项 C，L2）— 方案 v2.1
 
-> 状态：v2。v1（`25980d3`）评审打回 7 条（严重 3、一般 4），本版逐条处置，见文末「v1→v2 评审处置」。文末「用户确认（2026-09-26）」的四条决定**原样保留、不变**。前置：`docs/dev/workflow-worktree/plan.md` v2.1 已全部实施（§0 决定 4 选了回放方案 A，并把「校验分支后回放」另记 todo，也就是本方案）。
+> 状态：v2.1。v2 复审「有条件通过」，3 条条件的处置见文末「v2→v2.1 处置」。v1（`25980d3`）评审打回 7 条（严重 3、一般 4），本版逐条处置，见文末「v1→v2 评审处置」。文末「用户确认（2026-09-26）」的四条决定**原样保留、不变**。前置：`docs/dev/workflow-worktree/plan.md` v2.1 已全部实施（§0 决定 4 选了回放方案 A，并把「校验分支后回放」另记 todo，也就是本方案）。
 > 本方案只包含本文件。实现按 §5 的两个包**串行**进行，并且与 child-context-switch 的合入顺序按 §5.2 约定。
 
 ## 0. 结论速览
@@ -169,12 +169,12 @@ interface JournalEntry {
   - **单次结算**：一个 `settled` 标记，先到者生效；晚到的 resolve 或 reject 被吞掉（reject 还要 `.catch` 防止 unhandled），不会产生第二次回调或第二次写 `verified`。
   - 返回后清掉 timer，`vi.getTimerCount()` 回到基线。
 - `timeoutMs = min(settings.worktree.gitTimeoutMs, 5_000)`。
-- 进程清理：`pi.exec` 收到 abort 后 SIGTERM，5 秒后 SIGKILL（`exec.js`）。pi 那个 5 秒的 SIGKILL timer 是 ref 的，属于 pi 自身的代码；workflow 只在主会话运行（非 print 模式），不会因此卡住 `pi -p`，列入 §7。
+- **保证的是「workflow 不 hang」，不是「返回时进程已清理」**：
+  - `runBoundedProbe` 在约 `timeoutMs + 500`（最多约 5.5 秒）时一定返回，这与子进程是否已经退出无关。
+  - 子进程的回收由 `pi.exec` 自己负责（`exec.js:21-31`）：abort 或 timeout 时先发 SIGTERM，如果进程不响应，**再等 5 秒**才发 SIGKILL；而 `exec.js:43-46` 的 Promise 要等进程真正退出才 resolve。所以一个不理会 SIGTERM 的 git，最坏会在 probe 返回之后再存活约 5 秒，然后被 SIGKILL 回收；它那次晚到的 resolve 被单次结算吞掉。
+  - pi 那个 5 秒的 SIGKILL timer 是 ref 的，属于 pi 自身的代码；workflow 只在主会话运行（非 print 模式），不会因此卡住 `pi -p`，列入 §7。
 - 失败、超时、端口缺失（老的或假的 spawner）⇒ `verified` 为空，记录 `probeError`，**workflow 照常启动**，候选按 `worktree_unverified` 走 live。
-- **`store.load()` 没有 deadline**：这是既有简化（`orchestrator.ts:542-548` 注释写明有意如此），不属于本方案范围。理由：
-  - 本方案不改变它：探测在 load **之后**执行，自身有界，不依赖 load 是否有界；
-  - 给 load 加 deadline 会改变所有带 journal 的 workflow 的启动语义（超时后是按空 journal 继续，还是失败），应该单独立项。
-  - 在 §7 登记，建议另开 todo：「journal load 硬上限」。
+- **范围收窄：本方案只保证「新增的 probe 不 hang」**。它**不**保证带 journal 的 workflow 启动整体有界：probe 之前的 `store.load()` 没有时间上限（既有简化，`orchestrator.ts:542-548` 注释写明有意如此），由已立的 **todo #21「workflow journal.load() 加硬时间上限」** 处理，本方案不改动它，也不依赖它。
 
 #### D4.4 保证语义：加载时快照 + 终态诊断（评审 #6）
 
@@ -275,16 +275,16 @@ if (journal && outcome.status === "completed") {
 
 #### D6.3 不变量
 
-| #   | 不变量                                                                                                                                                                                                              | 如何保证 / 由哪条测试钉住                                                                                                                 |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| I1  | 每个调用（包括隔离调用）的 lookup 键和 occurrence 键都用**未折叠**的 `chainDigestBefore` 计算；折叠只影响**之后**提交的调用。                                                                                       | 伪代码 `chainKey` 在任何折叠之前算出；§6 第 14 条（a）。                                                                                  |
-| I2  | `chainDigest` 只在同步段里被修改：:868 的推进、F1、F2。从 journal 块开始到 F2 之间没有 await。                                                                                                                      | 代码注释与 lint 式测试：`handleAgent` 源码里 journal 块到 F2 之间不出现 `await`（读源码断言），以及并发提交的属性测试；§6 第 14 条（f）。 |
-| I3  | 只有 accepted 的隔离调用会折叠，每次调用最多折叠一次（F1 与 F2 互斥）。                                                                                                                                             | 命中后提前 return；§6 第 14 条（b）。                                                                                                     |
-| I4  | 以下路径**不折叠**：invalid_args（:770-790，在 journal 块之前，链本来就不推进）、maxChildren、BW2、D2 `isolation_unavailable`、worktree 关闭时被阻止的命中、experts 未解析、off 模式、content scope、没有 journal。 | §6 第 14 条（c）：这些路径下，后续调用的键与「该调用只推进 taskKey、不存在隔离」的一次运行逐字节相同。                                    |
-| I5  | accepted 之后的**异步**失败（入队后被 withheld、phase 超时、stopOwned、spawn error :1079-1103、orphaned、子 run failed/aborted/timed_out）**保留折叠，不回滚**。回滚会让已经读到折叠后摘要的后续提交错位。          | 这些路径都在同步段之后；§6 第 14 条（d）。沿用现有先例：D2 染色和 experts 染色同样在准入时置位，派发失败也不撤销。                        |
-| I6  | fail-safe：一个 live 的 `isoId` 只有在带着它的条目被写入时，未来运行里才可能被命中；写入需要 completed 且 `committed`（带 sha）或 `clean`。所以 I5 保留下来的折叠最多造成未来的 miss，永远不会造成错误命中。        | nonce 是每次 run 的 `randomUUID()`；§6 第 14 条（d）（e）。                                                                               |
-| I7  | 命中时折叠用的是 `entry.worktree.isoId`，与写下该条目的那次 live 运行折叠的值相同，所以下游命中的条目一定来自「上游就是这个结果」的运行。                                                                           | §6 第 14 条（e），三次运行的序列。                                                                                                        |
-| I8  | off、没有 journal、content scope 时，`chainDigest` 序列与方案 A 逐字节相同。                                                                                                                                        | §6 第 15 条：在同一段脚本上记录每次提交的 `chainDigestBefore`，与 v1 前的基线对比。                                                       |
+| #   | 不变量                                                                                                                                                                                                              | 如何保证 / 由哪条测试钉住                                                                                                                                                                                                                                  |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| I1  | 每个调用（包括隔离调用）的 lookup 键和 occurrence 键都用**未折叠**的 `chainDigestBefore` 计算；折叠只影响**之后**提交的调用。                                                                                       | 伪代码 `chainKey` 在任何折叠之前算出；§6 第 14 条（a）。                                                                                                                                                                                                   |
+| I2  | `chainDigest` 只在同步段里被修改：:868 的推进、F1、F2。从 journal 块开始到 F2 之间没有 await。                                                                                                                      | 代码注释与 lint 式测试：`handleAgent` 源码里 journal 块到 F2 之间不出现 `await`（读源码断言），以及并发提交的属性测试；§6 第 14 条（f）。                                                                                                                  |
+| I3  | 只有 accepted 的隔离调用会折叠，每次调用最多折叠一次（F1 与 F2 互斥）。                                                                                                                                             | 命中后提前 return；§6 第 14 条（b）。                                                                                                                                                                                                                      |
+| I4  | 以下路径**不折叠**：invalid_args（:770-790，在 journal 块之前，链本来就不推进）、maxChildren、BW2、D2 `isolation_unavailable`、worktree 关闭时被阻止的命中、experts 未解析、off 模式、content scope、没有 journal。 | §6 第 14 条（c）：这些路径下，该调用之后的 `chainDigest` 恰好等于 `nextChainDigest(before, taskKey)`（taskKey 仍是含 `isolation` 的隔离 taskKey，`journal.ts:68-78`），并且与「同一隔离 taskKey、只关闭 iso 折叠」的基线运行里后续调用的键序列逐字节相同。 |
+| I5  | accepted 之后的**异步**失败（入队后被 withheld、phase 超时、stopOwned、spawn error :1079-1103、orphaned、子 run failed/aborted/timed_out）**保留折叠，不回滚**。回滚会让已经读到折叠后摘要的后续提交错位。          | 这些路径都在同步段之后；§6 第 14 条（d）。沿用现有先例：D2 染色和 experts 染色同样在准入时置位，派发失败也不撤销。                                                                                                                                         |
+| I6  | fail-safe：一个 live 的 `isoId` 只有在带着它的条目被写入时，未来运行里才可能被命中；写入需要 completed 且 `committed`（带 sha）或 `clean`。所以 I5 保留下来的折叠最多造成未来的 miss，永远不会造成错误命中。        | nonce 是每次 run 的 `randomUUID()`；§6 第 14 条（d）（e）。                                                                                                                                                                                                |
+| I7  | 命中时折叠用的是 `entry.worktree.isoId`，与写下该条目的那次 live 运行折叠的值相同，所以下游命中的条目一定来自「上游就是这个结果」的运行。                                                                           | §6 第 14 条（e），三次运行的序列。                                                                                                                                                                                                                         |
+| I8  | off、没有 journal、content scope 时，`chainDigest` 序列与方案 A 逐字节相同。                                                                                                                                        | §6 第 15 条：在同一段脚本上记录每次提交的 `chainDigestBefore`，与 v1 前的基线对比。                                                                                                                                                                        |
 
 #### D6.4 效果
 
@@ -329,7 +329,7 @@ experts D15 否决「把不可复现标记混进 digest」，理由有三：会�
 
 ### D10 零 hang
 
-- 新增的 await 只有两处：加载时探测（≤ `timeoutMs + 500`，最多约 5.5 秒），以及终态复核（≤ 2 秒，与 flush 并行）。两处都可中止、单次结算、失败时降级。
+- 新增的 await 只有两处：加载时探测（≤ `timeoutMs + 500`，最多约 5.5 秒），以及终态复核（≤ 2 秒，与 flush 并行）。两处都可中止、单次结算、失败时降级；「有界」指这两处 await 本身按时返回，被中止的子进程由 `pi.exec` 在其后最多约 5 秒内以 SIGKILL 回收（D4.3）。`store.load()` 不在此列（todo #21）。
 - H3 仍然是报告前最多 5 条命令，D5 和 D5a 的时域不变。
 - 命中路径和折叠都是同步的；journal 写入仍是 fire-and-forget（JS1）。
 
@@ -341,21 +341,21 @@ experts D15 否决「把不可复现标记混进 digest」，理由有三：会�
 
 ## 3. 场景
 
-| 场景                                          | 结果                                                                                                     |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| 分支完好，指向记录的 commit                   | 通过，命中，下游（chain）继续命中。                                                                      |
-| 合并了分支但没删                              | 通过。再合并一次是「Already up to date」。                                                               |
-| 合并后删除分支（包括 squash、rebase 合并）    | 不通过 ⇒ live（用户确认 2），重复一次子 run。                                                            |
-| 分支被 rebase、强推，或者追加了提交           | 不通过 ⇒ live，下游（chain）随之 miss。                                                                  |
-| 仓库整体移动了目录                            | ref 跟着仓库走，cwd 是新位置 ⇒ 通过。                                                                    |
-| 在仓库子目录里启动 workflow                   | 探测在子目录执行（for-each-ref 照常工作）；H2 收到同一个 cwd ⇒ 同一个仓库。                              |
-| run 中途 `process.chdir` 到别处               | 探测、H2、终态复核都用启动时钉住的 cwd（D4.1），不受影响。                                               |
-| 在另一个 clone 里使用同一个 journal namespace | 分支不存在 ⇒ live；如果恰好有同名分支并且 sha 相同，通过是正确的（内容相同）。                           |
-| 不是 git 仓库                                 | 探测非 0 ⇒ live ⇒ H2 按现有规则 `failed(config)`。                                                       |
-| git 卡住（锁、NFS）                           | abort 加 SIGTERM；约 5.5 秒后降级为 live。                                                               |
-| 快照之后、命中之前分支被删或强推              | 仍然命中（快照语义，D4.4），返回的 `commit` 仍然可以合并；outcome 标注 `branch gone` 或 `branch moved`。 |
-| 同一个键有多条隔离条目，最新一条校验失败      | live，不回退到更早的条目。                                                                               |
-| 手工编辑 journal                              | 正则校验不通过 ⇒ corrupt；digest 不是 MAC，不在威胁模型内。                                              |
+| 场景                                          | 结果                                                                                                         |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 分支完好，指向记录的 commit                   | 通过，命中，下游（chain）继续命中。                                                                          |
+| 合并了分支但没删                              | 通过。再合并一次是「Already up to date」。                                                                   |
+| 合并后删除分支（包括 squash、rebase 合并）    | 不通过 ⇒ live（用户确认 2），重复一次子 run。                                                                |
+| 分支被 rebase、强推，或者追加了提交           | 不通过 ⇒ live，下游（chain）随之 miss。                                                                      |
+| 仓库整体移动了目录                            | ref 跟着仓库走，cwd 是新位置 ⇒ 通过。                                                                        |
+| 在仓库子目录里启动 workflow                   | 探测在子目录执行（for-each-ref 照常工作）；H2 收到同一个 cwd ⇒ 同一个仓库。                                  |
+| run 中途 `process.chdir` 到别处               | 探测、H2、终态复核都用启动时钉住的 cwd（D4.1），不受影响。                                                   |
+| 在另一个 clone 里使用同一个 journal namespace | 分支不存在 ⇒ live；如果恰好有同名分支并且 sha 相同，通过是正确的（内容相同）。                               |
+| 不是 git 仓库                                 | 探测非 0 ⇒ live ⇒ H2 按现有规则 `failed(config)`。                                                           |
+| git 卡住（锁、NFS）                           | abort 加 SIGTERM；约 5.5 秒后返回并降级为 live；不响应 SIGTERM 的进程由 `pi.exec` 再过约 5 秒 SIGKILL 回收。 |
+| 快照之后、命中之前分支被删或强推              | 仍然命中（快照语义，D4.4），返回的 `commit` 仍然可以合并；outcome 标注 `branch gone` 或 `branch moved`。     |
+| 同一个键有多条隔离条目，最新一条校验失败      | live，不回退到更早的条目。                                                                                   |
+| 手工编辑 journal                              | 正则校验不通过 ⇒ corrupt；digest 不是 MAC，不在威胁模型内。                                                  |
 
 ## 4. 接口变更汇总
 
@@ -526,7 +526,11 @@ node -e 'const s=require("/tmp/wf-rv-spec.json").find(p=>p.id===process.argv[1])
      - 端口在 abort 之后才 resolve 或 reject ⇒ 被吞掉，没有第二次回调，`verified` 不变，没有 unhandled rejection；
      - 返回后 `vi.getTimerCount()` 回到基线；
    - 候选为空、off、`noReplay`、`worktreeAvailable` 为 false ⇒ 端口调用次数为 0。
-10. **真实进程清理**（isolation-verify.test 的 integration 块）：stack 的 probe 适配器接到一个会 sleep 的假 `git`（PATH 前置一个脚本），超时后该 pid 在 SIGTERM 宽限内消失（`process.kill(pid, 0)` 抛 ESRCH），结果只结算一次。
+10. **真实子进程**（isolation-verify.test 的 integration 块；stack 的 probe 适配器，经真实 `pi.exec` 语义的 `execCommand`，PATH 前置假 `git` 脚本，脚本把自己的 pid 写进临时文件）：
+    - (a) 普通 sleep 的假 git：probe 在 `timeoutMs + 500` 内返回空结果，SIGTERM 后进程随即退出；
+    - (b) **SIGTERM-resistant** 的假 git（`trap '' TERM; sleep 60`）：probe 仍然在 `timeoutMs + 500` 内返回（断言返回时刻，而不是进程状态）；返回时进程**允许**还活着；在返回后约 5 秒（加宽限，轮询上限 8 秒）进程被 SIGKILL 回收（`process.kill(pid, 0)` 抛 ESRCH）；
+    - (c) 两种情况下结果都只结算一次（回调计数为 1，`verified` 只写一次），晚到的 resolve 不产生第二次回调，也没有 unhandled rejection；
+    - 真实计时，整条用例 `testTimeout` 设为 20 秒。
 11. host-replay-verify.test（chain）：
     - 首跑写下游；
     - run 2 校验通过 ⇒ 隔离调用和下游全部命中，spawner 调用次数为 0；
@@ -546,7 +550,7 @@ node -e 'const s=require("/tmp/wf-rv-spec.json").find(p=>p.id===process.argv[1])
 14. **`isoId` 折叠不变量（评审 #3）**，host-iso-fold.property.test，用 FakeClock、假 spawner，并记录每次提交的 `chainDigestBefore`：
     - (a) I1：隔离调用自身的 lookup 键与 occurrence 等于 `nextChainDigest(before, taskKey)`，与折叠无关；
     - (b) I3：一次调用至多折叠一次；命中折叠值 === `entry.worktree.isoId`；
-    - (c) I4：maxChildren、BW2、D2 拒绝、worktree 关闭时被阻止的命中、experts 未解析这几条路径下，后续调用的键序列与「把该调用替换为同 taskKey 的非隔离、被拒调用」的运行逐字节相同；
+    - (c) I4：maxChildren、BW2、D2 拒绝、worktree 关闭时被阻止的命中、experts 未解析这几条路径下，① 直接断言该调用之后 `chainDigest === nextChainDigest(before, isolatedTaskKey)`（没有 `iso:` 折叠）；② 与基线运行对比：同一段脚本、同一个隔离 taskKey，只通过测试钩子关闭 iso 折叠（F1/F2 置为 no-op），后续调用的键序列逐字节相同。注意：taskKeyOf 把 `isolation` 纳入 key（`journal.ts:68-78`），所以不能拿非隔离调用做基线；
     - (d) I5/I6：入队后被 withheld、spawn error、子 run failed 时折叠保留（后续键包含 `iso:`），并且下一次运行里这些下游全部 miss、不会错误命中；
     - (e) I7：三次运行（live → 命中 → 删除分支后 live）的命中与 miss 表完全符合预期；
     - (f) I2：随机交错的并发 `agent()` 提交（parallel 加排队）下，链摘要序列只取决于到达顺序；另有一条读源码的断言：`handleAgent` 从 journal 块到 F2 之间没有 `await`。
@@ -572,8 +576,8 @@ node -e 'const s=require("/tmp/wf-rv-spec.json").find(p=>p.id===process.argv[1])
 - **回放拿到的分支来自上一次运行**：可能已经合并过，也可能基于较旧的 HEAD。这与 journal「不检查仓库状态」的既有语义一致（D3.1）。outcome 会标出 `(replayed @sha7)`。
 - **快照语义**：快照之后分支被移动，命中照样发生，但结果带 `commit`，并在终态标注 `branch gone`/`branch moved`（D4.4）。
 - **journal 垃圾条目**：上游 live 却最终没写（`pending`/`kept`/失败）时，下游条目写在不可达的链下，数量有界，受 TTL 约束，永不错误命中（D6.5）。
-- **`store.load()` 没有 deadline**：既有问题，不在本方案范围内，建议另开 todo（D4.3）。
-- **pi exec 的 SIGKILL 回退 timer 是 ref 的**（pi 自身代码，5 秒）：只影响主会话，workflow 不在 print 模式运行。
+- **`store.load()` 没有 deadline**：既有问题，由 todo #21 处理；本方案只保证新增的 probe 不 hang（D4.3）。
+- **pi exec 的 SIGKILL 回退 timer 是 ref 的**（pi 自身代码，5 秒）：不响应 SIGTERM 的 git 会在 probe 返回之后再存活最多约 5 秒；只影响主会话，workflow 不在 print 模式运行。
 - **`clean` 与 linkPaths**：违反只读约定、写进 linkPaths 的改动不可见（D9 已接受风险的延伸）。
 - **journal 降级不兼容**：旧版本把新条目当成 corrupt。
 - **content scope 仍要第三次运行才有收益**：弱模式，已接受。
@@ -607,3 +611,13 @@ node -e 'const s=require("/tmp/wf-rv-spec.json").find(p=>p.id===process.argv[1])
 | 7   | 一般 | 与 child-context-switch 的冲突                                            | 逐文件列出交点。v2 让 P1 不再改 `runtime-adapter.ts`，消除与 ccs P3 的冲突。合入顺序：P1 随时合入；P2 晚于 ccs P1/P2；如果 ccs P3 改了 `stack.ts`/`settings.ts`，就排在 P3 之后。每次合入后重跑 replay 与 worktree 测试、ccs 测试和全量门禁。拆开测试文件，避免两包共用测试文件。                                                                                                                                                            | §5.1、§5.2、§5.3              |
 
 用户确认的四条决定（默认 verify、精确 sha、不补写、chain 折叠）在 v2 中均未改变；v2 没有新增需要用户确认的问题。
+
+## v2→v2.1 处置
+
+| #   | 复审条件                                                                                            | 处置                                                                                                                                                              | 落点                           |
+| --- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| 1   | I4 的「替换为同 taskKey 的非隔离调用」不成立（taskKeyOf 含 `isolation`，`journal.ts:68-78`）        | 改为两个断言：直接断言 `chainDigest === nextChainDigest(before, isolatedTaskKey)`；并与「同一隔离 taskKey、只关闭 iso 折叠」的基线运行对比键序列                  | D6.3 I4、§6 第 14 条（c）      |
+| 2   | SIGTERM 不响应时 pi.exec 要再等 5 秒才 SIGKILL（`exec.js:21-31,43-46`），「返回时进程已清理」不成立 | 保证改为「workflow 不 hang（约 5.5 秒返回）」，残留进程由 pi.exec 之后的 SIGKILL 回收；增加 SIGTERM-resistant 子进程测试（按时返回、约 5 秒后被回收、只结算一次） | D4.3、D10、§3、§6 第 10 条、§7 |
+| 3   | journal.load() 无上限已另立 todo #21                                                                | 文案收窄为「新增 probe 不 hang」，引用 todo #21，不再暗示带 journal 的 workflow 启动整体有界                                                                      | D4.3、D10、§7                  |
+
+用户确认的四条决定不变；v2.1 没有新增需要用户确认的问题。
