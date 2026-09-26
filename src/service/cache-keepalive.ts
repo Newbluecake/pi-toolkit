@@ -24,6 +24,7 @@ import {
   TICK_INTERVAL_MS,
   TTL_SAFETY_MARGIN_MS,
   cacheReadCostUsd,
+  cacheWriteCostUsd,
   compareFingerprint,
   consumeUpgrade as consumeUpgradeReducer,
   createInitialSessionTotals,
@@ -52,6 +53,7 @@ import {
   type WindowState,
 } from "../cache-ttl/keepalive-state.js";
 import { buildPingRequest, preparePingPayload, sendKeepalivePing, type PingOutcome } from "../cache-ttl/ping-client.js";
+import type { ChildKeepaliveLedger, Lease } from "../cache-ttl/ping-ledger.js";
 import type { CacheTtlSettings } from "../config/settings.js";
 import type { AdaptiveSnapshot } from "../cache-ttl/adaptive.js";
 import type { Millis } from "../core/types.js";
@@ -63,9 +65,18 @@ interface KeepaliveModelInfo {
   id: string;
   baseUrl: string;
   headers?: Record<string, string> | undefined;
-  cost?: { cacheRead?: number; tiers?: { inputTokensAbove: number; cacheRead?: number }[] } | undefined;
+  cost?:
+    | {
+        cacheRead?: number;
+        /** child-ka-core: pi-ai's cache-WRITE rate ($ per million tokens), used to charge `proven-write` / possibly-billed unproven outcomes against the child $ budgets. */
+        cacheWrite?: number;
+        tiers?: { inputTokensAbove: number; cacheRead?: number; cacheWrite?: number }[];
+      }
+    | undefined;
   /** Anthropic-messages compat flag (pi's own default is `true` when unset). See `report()`'s `supportsLongCacheRetention`. */
   compat?: { supportsLongCacheRetention?: boolean } | undefined;
+  /** child-ka-core: presence (any retention key) means pi's own native `CacheWarmer` is already eligible for this model/route — see `safeNativeWarmerActive()`. */
+  promptCache?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -84,6 +95,25 @@ function isRetryablePingOutcome(outcome: PingOutcome): boolean {
   if (outcome.kind === "network") return true;
   if (outcome.kind === "http") return RETRYABLE_HTTP_STATUSES.has(outcome.status);
   return false;
+}
+
+/**
+ * child-ka-core (plan.md §2.4 "计费"): whether the server provably never
+ * processed a ping request — no cache read OR write could have happened, so
+ * the budget charge for it is 0. Per §2.4's literal wording ("经重试最终仍是
+ * 『服务端未处理』类（network / 可重试状态码）计 0"), this is EXACTLY the same
+ * kind set that `isRetryablePingOutcome()` uses to decide whether to retry —
+ * only network (no response headers received at all) and the retryable HTTP
+ * statuses (`RETRYABLE_HTTP_STATUSES`) qualify. `"no-usage"` is a 200
+ * response: the server DID process the request, so a missing/zero `usage`
+ * object is not proof of no billing (a proxy/relay route can omit cache
+ * fields on an already-billed response) — it is charged the conservative
+ * upper bound below, same as `"accepted-then-lost"` / `"malformed"` / a
+ * non-retryable HTTP status. Confirmed against plan intent (author consult,
+ * 2026 review): the plan never meant to special-case `"no-usage"` as $0.
+ */
+function isNeverProcessedOutcome(outcome: PingOutcome): boolean {
+  return isRetryablePingOutcome(outcome);
 }
 
 const EMPTY_FINGERPRINT: CaptureFingerprint = {
@@ -203,6 +233,38 @@ export interface CacheKeepaliveDeps {
   switchImminent?: () => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
   emit?: (channel: string, payload: unknown) => void;
+  // -- child-ka-core (docs/dev/child-context-switch/plan.md §2.4/§7 P1) -------
+  // Every field below defaults to "off" (undefined/false) ⇒ the main session's
+  // existing behavior is byte-identical unless a caller (P3's `src/cache-ttl/
+  // child.ts`) explicitly opts in. None of these are read from `settings`
+  // (`CacheTtlSettings`) directly — they are runtime/wiring decisions, not
+  // persisted user settings (the persisted `cacheTtl.child*` keys exist so
+  // that wiring layer can derive these values, see settings.ts).
+  /** Feeds `KeepaliveConfig.allowHeadless` (gate #4/G2's extra `"print"` allowance). */
+  allowHeadless?: boolean;
+  /** Feeds `KeepaliveConfig.maxSessionPings` (per-run proven-hit cap across all windows). */
+  maxSessionPings?: number;
+  /**
+   * Process-wide ping admission ledger (concurrency slot + rolling-24h $
+   * budget, `src/cache-ttl/ping-ledger.ts`). Absent ⇒ no budget/concurrency
+   * gating is EVER applied — `runBudgetUsd`/`processBudgetUsd`/`maxConcurrentPings`
+   * below are only consulted when this is set.
+   */
+  pingLedger?: ChildKeepaliveLedger;
+  /** This run's own $ spend cap, checked before `pingLedger.tryAcquire` using the running total of actually-charged `budgetChargeUsd` (seeded by `runSpentSeedUsd`). `0` = never ping (this run). Absent ⇒ unbounded. */
+  runBudgetUsd?: number;
+  /** Seeds the run-level $ spend counter — resume continuity (summing a resumed session's prior audit entries) is the wiring layer's job, not this service's. Default 0. */
+  runSpentSeedUsd?: number;
+  /** Rolling 24h process-wide $ budget, passed to `pingLedger.tryAcquire` on every call (so `/agent settings` changes apply live). Only meaningful together with `pingLedger`. */
+  processBudgetUsd?: number;
+  /** Process-wide concurrent-ping slot cap, passed to `pingLedger.tryAcquire` on every call. Only meaningful together with `pingLedger`. */
+  maxConcurrentPings?: number;
+  /** Races the auth-resolution await against this timeout (ms); on timeout the reservation/budget are refunded/released and nothing is counted — the request never left. Absent (main session) ⇒ unbounded (today's behavior). */
+  authTimeoutMs?: number;
+  /** `audit()` additionally carries `costUsd`/`budgetChargeUsd`/`runSpentUsd`/`processSpentUsd24h` fields. Default false — the main session's audit entries stay byte-identical. */
+  reportCost?: boolean;
+  /** `false` ⇒ never call `ctx.ui.setStatus` (child sessions have no status bar to write). Default true (main session unaffected). */
+  statusBar?: boolean;
 }
 
 const AUDIT_CUSTOM_TYPE = "subagent:cache-keepalive";
@@ -230,6 +292,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private abortController: AbortController | undefined;
   /** Ping-retry backoff wait (user requirement 2026-09-26) — cleared/resolved by `dispose()` so a pending retry never wedges past teardown. */
   private pendingRetry: { timer: TimerHandle; resolve: () => void } | undefined;
+  /** child-ka-core: pending `withTimeout` auth-race timer, so `dispose()` can reject it immediately (same convention as `pendingRetry`). */
+  private pendingAuthTimeout: { timer: TimerHandle; reject: () => void } | undefined;
   private lockedAuthHeaderKeys: string | undefined;
   private activeTools = 0;
   private uiPrompts = 0;
@@ -241,11 +305,16 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private lastPingDiagnostics: KeepalivePingDiagnostics | undefined;
   /** Mirrors `cache-ttl.ts`'s mode/dirty closure (see `syncModeState`'s doc comment). "auto" is a safe default: it never renders the `→1h` upgrade hint on its own. */
   private modeState: { mode: CacheDisplayMode; dirty: boolean } = { mode: "auto", dirty: false };
+  /** child-ka-core: this run's cumulative ACTUALLY-CHARGED $ spend (never includes reservations that were later revoked). Seeded by `deps.runSpentSeedUsd` so a resumed session continues its prior total. */
+  private runSpentUsd: number;
+  /** child-ka-core: the ledger lease currently held for an in-flight ping, if any — `dispose()`'s defensive backstop settles it if `runPing`'s own `finally` somehow never ran. */
+  private currentLease: Lease | undefined;
 
   constructor(private readonly deps: CacheKeepaliveDeps) {
     this.clock = deps.clock ?? systemClock;
     this.ownSessionId = deps.sessionId;
     this.instanceId = `${deps.sessionId}#${this.clock.now()}#${randomUUID().slice(0, 8)}`;
+    this.runSpentUsd = Math.max(0, deps.runSpentSeedUsd ?? 0);
   }
 
   // -- I-K6 + I-K9: unified entry guard ------------------------------------
@@ -281,6 +350,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       maxPings: s.keepaliveMaxPings,
       minPrefixTokens: s.keepaliveMinPrefixTokens,
       upgradeAfterBudget: s.keepaliveUpgradeAfterBudget,
+      ...(this.deps.allowHeadless !== undefined ? { allowHeadless: this.deps.allowHeadless } : {}),
+      ...(this.deps.maxSessionPings !== undefined ? { maxSessionPings: this.deps.maxSessionPings } : {}),
     };
   }
 
@@ -308,6 +379,93 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     } catch {
       return false;
     }
+  }
+
+  /** child-ka-core: true when `ctx.model` declares `promptCache` (pi's own native `CacheWarmer` is eligible for this model/route) — never let a throw/read failure break a tick. */
+  private safeNativeWarmerActive(): boolean {
+    try {
+      const model = this.safeModel();
+      return model?.promptCache !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * child-ka-core (plan.md §2.4): the extra child-only admission checks run
+   * AFTER `evaluateTick` has already decided "ping" — they need the model's
+   * cost data and the process-wide ledger, neither of which the pure
+   * `evaluateTick` touches. `deps.pingLedger` absent (main session, or a
+   * child session that hasn't opted in) ⇒ always allow, byte-identical to
+   * today. Order mirrors plan.md §2.4 exactly: unpriced → run budget →
+   * ledger (concurrency slot + process budget).
+   */
+  private childPingGate(
+    capture: CapturedRequest,
+    now: Millis,
+  ):
+    | { allow: true; estimateUsd: number | undefined; lease: Lease | undefined }
+    | { allow: false; reason: TickSkipReason; terminal: boolean; estimateUsd: number | undefined } {
+    const ledger = this.deps.pingLedger;
+    if (!ledger) return { allow: true, estimateUsd: undefined, lease: undefined };
+
+    const model = this.safeModel();
+    const estimateUsd = cacheReadCostUsd(model?.cost, capture.prefix.tokens);
+    if (estimateUsd === undefined) {
+      return { allow: false, reason: "usd-unpriced", terminal: true, estimateUsd: undefined };
+    }
+
+    const runBudgetUsd = this.deps.runBudgetUsd ?? Number.POSITIVE_INFINITY;
+    if (this.runSpentUsd + estimateUsd > runBudgetUsd) {
+      return { allow: false, reason: "usd-run", terminal: true, estimateUsd };
+    }
+
+    const acquired = ledger.tryAcquire({
+      holderId: this.instanceId,
+      estimateUsd,
+      maxConcurrent: this.deps.maxConcurrentPings ?? Number.POSITIVE_INFINITY,
+      processBudgetUsd: this.deps.processBudgetUsd ?? Number.POSITIVE_INFINITY,
+      now,
+    });
+    if (!acquired.ok) {
+      return { allow: false, reason: acquired.reason, terminal: acquired.reason === "usd-process", estimateUsd };
+    }
+    return { allow: true, estimateUsd, lease: acquired.lease };
+  }
+
+  /** child-ka-core: the `budgetChargeUsd`/`runSpentUsd`/`processSpentUsd24h` triad shared by every cost-carrying audit entry. */
+  /**
+   * child-ka-core: the `budgetChargeUsd`/`runSpentUsd`/`processSpentUsd24h`
+   * triad shared by every cost-carrying audit entry. `spent24h` only reflects
+   * SETTLED charges — the current ping's own charge is settled into the
+   * ledger strictly AFTER this is called (in `runPing`'s outer `finally`), so
+   * `chargeUsd` is added explicitly to report the correct "including this
+   * one" cumulative figure.
+   */
+  private budgetFields(chargeUsd: number, now: Millis): Record<string, unknown> {
+    return {
+      budgetChargeUsd: chargeUsd,
+      runSpentUsd: this.runSpentUsd,
+      processSpentUsd24h: (this.deps.pingLedger?.spent24h(now) ?? 0) + chargeUsd,
+    };
+  }
+
+  /**
+   * child-ka-core (plan.md §2.4 "计费"): the $ actually charged for a resolved
+   * ping outcome, against a $ budget — NEVER against `usage.costUsd` (that
+   * field is reserved for known real spend, and this is sometimes a
+   * conservative estimate, see `isNeverProcessedOutcome`'s doc comment).
+   */
+  private budgetChargeForOutcome(
+    outcome: PingOutcome,
+    capture: CapturedRequest,
+    model: KeepaliveModelInfo | undefined,
+  ): number {
+    if (outcome.kind === "proven-hit") return cacheReadCostUsd(model?.cost, outcome.cacheReadTokens) ?? 0;
+    if (outcome.kind === "proven-write") return cacheWriteCostUsd(model?.cost, outcome.cacheWriteTokens) ?? 0;
+    if (isNeverProcessedOutcome(outcome)) return 0;
+    // "possibly billed" (accepted-then-lost, malformed): conservative upper bound.
+    return cacheWriteCostUsd(model?.cost, capture.prefix.tokens) ?? 0;
   }
 
   private armed(): boolean {
@@ -347,6 +505,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   }
 
   private publishVisibility(): void {
+    if (this.deps.statusBar === false) return;
     safeSetStatus(
       this.deps.ctx,
       renderCacheStatus(
@@ -405,6 +564,51 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     resolve();
   }
 
+  /**
+   * child-ka-core (plan.md §2.4): races `promise` against `ms` using the
+   * injected `Clock` (never a bare `setTimeout` — must be driven by
+   * `FakeClock` in tests and stay unref'd in production). On timeout the
+   * caller sees a rejection and treats it exactly like an auth failure
+   * (refund the reservation, count nothing — the request never left).
+   * `dispose()` rejects any pending wait immediately, same convention as
+   * `cancelPendingRetry`, so a disposed service never leaves a stray timer.
+   */
+  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timer = this.clock.setTimer(ms, () => {
+        if (settled) return;
+        settled = true;
+        this.pendingAuthTimeout = undefined;
+        reject(new Error("cache-keepalive: auth resolution timed out"));
+      });
+      this.pendingAuthTimeout = {
+        timer,
+        reject: () => {
+          if (settled) return;
+          settled = true;
+          reject(new Error("cache-keepalive: disposed while waiting for auth"));
+        },
+      };
+      promise.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          this.clock.clearTimer(timer);
+          this.pendingAuthTimeout = undefined;
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          this.clock.clearTimer(timer);
+          this.pendingAuthTimeout = undefined;
+          reject(error);
+        },
+      );
+    });
+  }
+
   // -- timer (UsageBroadcaster self-arming/self-stopping pattern) ---------
 
   private arm(): void {
@@ -428,6 +632,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       window: this.window,
       currentFingerprint: capture ? this.currentFingerprintFor(capture) : EMPTY_FINGERPRINT,
       adaptiveCovered: this.safeAdaptiveCovers(),
+      nativeWarmerActive: this.safeNativeWarmerActive(),
     });
     this.window = result.window;
     switch (result.decision.kind) {
@@ -440,201 +645,260 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         if (!result.decision.terminal) this.arm();
         return;
       case "ping": {
+        const gate = this.childPingGate(capture!, now);
+        if (!gate.allow) {
+          this.lastSkip = gate.reason;
+          if (
+            this.deps.reportCost &&
+            (gate.reason === "usd-unpriced" || gate.reason === "usd-run" || gate.reason === "usd-process")
+          ) {
+            this.audit("budget-stop", {
+              reason: gate.reason,
+              estimateUsd: gate.estimateUsd,
+              ...this.budgetFields(0, now),
+            });
+          }
+          if (!gate.terminal) this.arm();
+          return;
+        }
         const pingStartedAt = now;
         this.window = onPingStarted(this.window, pingStartedAt);
         const pingEpoch = this.window.windowEpoch;
+        this.currentLease = gate.lease;
         this.arm(); // keep ticking while the ping is in flight (plan.md §8.3)
-        void this.runPing(pingEpoch, capture!);
+        void this.runPing(pingEpoch, capture!, gate.lease);
         return;
       }
     }
   }
 
-  private async runPing(pingEpoch: number, capture: CapturedRequest): Promise<void> {
-    const refundBudget = (): void => {
-      if (!this.sameEpoch(pingEpoch)) return;
-      this.window = { ...this.window, pingInFlight: false, pings: Math.max(0, this.window.pings - 1) };
-    };
-
-    const model = this.safeModel();
-    if (!model) {
-      refundBudget();
-      return;
-    }
-
-    let auth: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
+  private async runPing(pingEpoch: number, capture: CapturedRequest, lease?: Lease): Promise<void> {
+    // child-ka-core: every exit path below — including every existing early
+    // `return` — must settle the lease exactly once with whatever charge was
+    // actually incurred (default 0 = "never processed" / "nothing left this
+    // process"). Wrapping the whole body is simpler and safer than threading a
+    // settle-call through each early return individually.
+    let chargeUsd = 0;
     try {
-      auth = await this.deps.ctx.modelRegistry.getApiKeyAndHeaders(model as never);
-    } catch {
-      refundBudget();
-      return;
-    }
-    // I-K8: await return point #1.
-    if (!this.sameEpoch(pingEpoch)) return;
+      const refundBudget = (): void => {
+        if (!this.sameEpoch(pingEpoch)) return;
+        this.window = { ...this.window, pingInFlight: false, pings: Math.max(0, this.window.pings - 1) };
+      };
 
-    if (!auth.ok) {
-      refundBudget();
-      return; // request never left — not counted as unproven (plan.md §8.4).
-    }
-
-    const headerKeys = Object.keys(auth.headers ?? {})
-      .sort()
-      .join(",");
-    if (this.lockedAuthHeaderKeys === undefined) this.lockedAuthHeaderKeys = headerKeys;
-
-    // G7 (M4): safety-critical fingerprint recheck now that auth is resolved.
-    // M1 fix: refund BEFORE invalidating — `invalidateReducer` bumps windowEpoch,
-    // and `refundBudget`'s own `sameEpoch` guard requires the *old* epoch to
-    // still match. Invalidating first made the refund unreachable (dead code),
-    // permanently leaking `pingInFlight: true` and an already-spent `pings`
-    // unit for a request that never left this process.
-    const currentFp = this.currentFingerprintFor(capture);
-    const diff = compareFingerprint(capture.fingerprint, currentFp);
-    if (diff !== undefined) {
-      refundBudget();
-      if (this.sameEpoch(pingEpoch)) {
-        this.window = invalidateReducer(this.window, `fingerprint-drift:${diff.field}`);
+      const model = this.safeModel();
+      if (!model) {
+        refundBudget();
+        return;
       }
-      return;
-    }
 
-    // m2: re-check the TTL margin after the (possibly slow) auth await.
-    const now = this.clock.now();
-    if (this.window.aliveUntil !== undefined && now >= this.window.aliveUntil - TTL_SAFETY_MARGIN_MS) {
-      refundBudget();
-      return;
-    }
-
-    const body = preparePingPayload(capture.payload);
-    const authHeaders: Record<string, string> = {};
-    for (const [key, value] of Object.entries(auth.headers ?? {})) {
-      if (typeof value === "string") authHeaders[key] = value;
-    }
-    // Root-cause fix: replay the request's VERBATIM captured headers
-    // (`capture.headers`, from `before_provider_headers` — see `cache-ttl.ts`)
-    // and only fill in auth keys that are entirely missing from that capture.
-    // No more hand-assembled/hardcoded headers here (see `buildPingRequest`'s
-    // doc comment for why that was the actual bug).
-    const baseUrl = auth.baseUrl ?? model.baseUrl;
-    const { request, headerSource, filledAuthKeys } = buildPingRequest(body, baseUrl, capture.headers, {
-      ...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
-      headers: authHeaders,
-    });
-    // Diagnostics captured up front (before the network call) so every audit
-    // entry below — proven or unproven — carries the same "why did/didn't this
-    // ping land" facts, instead of only a bare kind/counter (the original gap
-    // that forced session-file archaeology to diagnose the real-environment
-    // failure this fix addresses).
-    const diagnostics = {
-      elapsedSinceCaptureMs: this.clock.now() - capture.capturedAt,
-      prefixTokens: capture.prefix.tokens,
-      prefixSource: capture.prefix.source,
-      headerSource,
-      // Key NAMES only — never values, which may carry secrets (auth tokens etc.).
-      headerKeyDiff: filledAuthKeys,
-      model: model.id,
-      baseUrl,
-    };
-
-    // Ping retry (user requirement 2026-09-26, docs/dev/cache-ttl-keepalive/plan.md
-    // "ping 重试" section): only outcomes that PROVE the server never processed the
-    // request (no cache billing possible) are retried — `network` and a fixed set of
-    // transient HTTP statuses (`isRetryablePingOutcome`). `accepted-then-lost` and
-    // every other unproven kind are final on the first attempt: the server may already
-    // have billed a write. Up to `PING_MAX_ATTEMPTS - 1` retries, backed off by
-    // `PING_RETRY_DELAYS_MS`; every await return point re-checks `sameEpoch` (I-K8 —
-    // covers epoch bump from a real request / invalidate / dispose in one guard) and
-    // silently abandons (no proven/unproven counting at all) on mismatch. The whole
-    // sequence is also bounded by the window's remaining TTL margin: a retry that
-    // would land past `aliveUntil - TTL_SAFETY_MARGIN_MS` is skipped and the LAST
-    // outcome is used as final instead.
-    let outcome: PingOutcome | undefined;
-    let attempts = 0;
-    for (;;) {
-      attempts += 1;
-      const controller = new AbortController();
-      this.abortController = controller;
+      let auth: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
       try {
-        outcome = await sendKeepalivePing(request, {
-          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
-          signal: controller.signal,
-        });
-      } finally {
-        if (this.abortController === controller) this.abortController = undefined;
+        const authPromise = this.deps.ctx.modelRegistry.getApiKeyAndHeaders(model as never);
+        auth =
+          this.deps.authTimeoutMs !== undefined
+            ? await this.withTimeout(authPromise, this.deps.authTimeoutMs)
+            : await authPromise;
+      } catch {
+        // Covers both a genuine auth rejection AND our own `withTimeout` timeout
+        // (child-ka-core, plan.md §2.4's `authTimeoutMs`) — either way the request
+        // never left this process, so refund and count nothing (plan.md §8.4).
+        refundBudget();
+        return;
       }
-
-      this.audit("ping-attempt", { attempt: attempts, outcomeKind: outcome.kind });
-
-      // I-K8: await return point — the one that matters most (§7.5 "abort 与迟到返回").
+      // I-K8: await return point #1.
       if (!this.sameEpoch(pingEpoch)) return;
 
-      if (outcome.kind === "proven-hit" || !isRetryablePingOutcome(outcome) || attempts >= PING_MAX_ATTEMPTS) {
-        break;
+      if (!auth.ok) {
+        refundBudget();
+        return; // request never left — not counted as unproven (plan.md §8.4).
       }
 
-      const delayMs = PING_RETRY_DELAYS_MS[attempts - 1]!;
-      const nowBeforeBackoff = this.clock.now();
-      const remainingMs =
-        this.window.aliveUntil !== undefined
-          ? this.window.aliveUntil - TTL_SAFETY_MARGIN_MS - nowBeforeBackoff
-          : undefined;
-      if (remainingMs !== undefined && remainingMs < delayMs) {
-        // Not enough TTL headroom left for another attempt (req #2) — stop retrying
-        // and fall through with this outcome as final; still onUnproven-counted below.
-        break;
+      const headerKeys = Object.keys(auth.headers ?? {})
+        .sort()
+        .join(",");
+      if (this.lockedAuthHeaderKeys === undefined) this.lockedAuthHeaderKeys = headerKeys;
+
+      // G7 (M4): safety-critical fingerprint recheck now that auth is resolved.
+      // M1 fix: refund BEFORE invalidating — `invalidateReducer` bumps windowEpoch,
+      // and `refundBudget`'s own `sameEpoch` guard requires the *old* epoch to
+      // still match. Invalidating first made the refund unreachable (dead code),
+      // permanently leaking `pingInFlight: true` and an already-spent `pings`
+      // unit for a request that never left this process.
+      const currentFp = this.currentFingerprintFor(capture);
+      const diff = compareFingerprint(capture.fingerprint, currentFp);
+      if (diff !== undefined) {
+        refundBudget();
+        if (this.sameEpoch(pingEpoch)) {
+          this.window = invalidateReducer(this.window, `fingerprint-drift:${diff.field}`);
+        }
+        return;
       }
 
-      await this.sleep(delayMs);
-      // I-K8: await return point after the backoff wait.
-      if (!this.sameEpoch(pingEpoch)) return;
+      // m2: re-check the TTL margin after the (possibly slow) auth await.
+      const now = this.clock.now();
+      if (this.window.aliveUntil !== undefined && now >= this.window.aliveUntil - TTL_SAFETY_MARGIN_MS) {
+        refundBudget();
+        return;
+      }
+
+      const body = preparePingPayload(capture.payload);
+      const authHeaders: Record<string, string> = {};
+      for (const [key, value] of Object.entries(auth.headers ?? {})) {
+        if (typeof value === "string") authHeaders[key] = value;
+      }
+      // Root-cause fix: replay the request's VERBATIM captured headers
+      // (`capture.headers`, from `before_provider_headers` — see `cache-ttl.ts`)
+      // and only fill in auth keys that are entirely missing from that capture.
+      // No more hand-assembled/hardcoded headers here (see `buildPingRequest`'s
+      // doc comment for why that was the actual bug).
+      const baseUrl = auth.baseUrl ?? model.baseUrl;
+      const { request, headerSource, filledAuthKeys } = buildPingRequest(body, baseUrl, capture.headers, {
+        ...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
+        headers: authHeaders,
+      });
+      // Diagnostics captured up front (before the network call) so every audit
+      // entry below — proven or unproven — carries the same "why did/didn't this
+      // ping land" facts, instead of only a bare kind/counter (the original gap
+      // that forced session-file archaeology to diagnose the real-environment
+      // failure this fix addresses).
+      const diagnostics = {
+        elapsedSinceCaptureMs: this.clock.now() - capture.capturedAt,
+        prefixTokens: capture.prefix.tokens,
+        prefixSource: capture.prefix.source,
+        headerSource,
+        // Key NAMES only — never values, which may carry secrets (auth tokens etc.).
+        headerKeyDiff: filledAuthKeys,
+        model: model.id,
+        baseUrl,
+      };
+
+      // Ping retry (user requirement 2026-09-26, docs/dev/cache-ttl-keepalive/plan.md
+      // "ping 重试" section): only outcomes that PROVE the server never processed the
+      // request (no cache billing possible) are retried — `network` and a fixed set of
+      // transient HTTP statuses (`isRetryablePingOutcome`). `accepted-then-lost` and
+      // every other unproven kind are final on the first attempt: the server may already
+      // have billed a write. Up to `PING_MAX_ATTEMPTS - 1` retries, backed off by
+      // `PING_RETRY_DELAYS_MS`; every await return point re-checks `sameEpoch` (I-K8 —
+      // covers epoch bump from a real request / invalidate / dispose in one guard) and
+      // silently abandons (no proven/unproven counting at all) on mismatch. The whole
+      // sequence is also bounded by the window's remaining TTL margin: a retry that
+      // would land past `aliveUntil - TTL_SAFETY_MARGIN_MS` is skipped and the LAST
+      // outcome is used as final instead.
+      let outcome: PingOutcome | undefined;
+      let attempts = 0;
+      for (;;) {
+        attempts += 1;
+        const controller = new AbortController();
+        this.abortController = controller;
+        try {
+          outcome = await sendKeepalivePing(request, {
+            ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+            signal: controller.signal,
+          });
+        } finally {
+          if (this.abortController === controller) this.abortController = undefined;
+        }
+
+        this.audit("ping-attempt", { attempt: attempts, outcomeKind: outcome.kind });
+
+        // I-K8: await return point — the one that matters most (§7.5 "abort 与迟到返回").
+        if (!this.sameEpoch(pingEpoch)) return;
+
+        if (outcome.kind === "proven-hit" || !isRetryablePingOutcome(outcome) || attempts >= PING_MAX_ATTEMPTS) {
+          break;
+        }
+
+        const delayMs = PING_RETRY_DELAYS_MS[attempts - 1]!;
+        const nowBeforeBackoff = this.clock.now();
+        const remainingMs =
+          this.window.aliveUntil !== undefined
+            ? this.window.aliveUntil - TTL_SAFETY_MARGIN_MS - nowBeforeBackoff
+            : undefined;
+        if (remainingMs !== undefined && remainingMs < delayMs) {
+          // Not enough TTL headroom left for another attempt (req #2) — stop retrying
+          // and fall through with this outcome as final; still onUnproven-counted below.
+          break;
+        }
+
+        await this.sleep(delayMs);
+        // I-K8: await return point after the backoff wait.
+        if (!this.sameEpoch(pingEpoch)) return;
+      }
+
+      if (outcome.kind === "proven-hit") {
+        const applied = onProvenHit(this.window, this.session, pingEpoch, outcome, this.config().intervalMs);
+        if (applied.applied) {
+          this.window = applied.window;
+          this.session = applied.session;
+          this.lastPingDiagnostics = {
+            ...diagnostics,
+            at: this.clock.now(),
+            outcomeKind: outcome.kind,
+            cacheReadInputTokens: outcome.cacheReadTokens,
+            cacheCreationInputTokens: 0,
+            attempts,
+          };
+          // child-ka-core: charge/report only once the epoch check above has
+          // confirmed this result still belongs to the current window.
+          chargeUsd = this.budgetChargeForOutcome(outcome, capture, model);
+          this.runSpentUsd += chargeUsd;
+          const costFields = this.deps.reportCost
+            ? {
+                costUsd: cacheReadCostUsd(model.cost, outcome.cacheReadTokens),
+                ...this.budgetFields(chargeUsd, this.clock.now()),
+              }
+            : {};
+          this.audit("proven-hit", {
+            ...diagnostics,
+            cacheReadTokens: outcome.cacheReadTokens,
+            cacheReadInputTokens: outcome.cacheReadTokens,
+            cacheCreationInputTokens: 0,
+            attempts,
+            ...costFields,
+          });
+        }
+      } else {
+        const applied = onUnproven(this.window, this.session, pingEpoch, outcome.kind, this.clock.now());
+        if (applied.applied) {
+          this.window = applied.window;
+          this.session = applied.session;
+          const cacheCreationInputTokens = outcome.kind === "proven-write" ? outcome.cacheWriteTokens : undefined;
+          this.lastPingDiagnostics = {
+            ...diagnostics,
+            at: this.clock.now(),
+            outcomeKind: outcome.kind,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens,
+            attempts,
+          };
+          chargeUsd = this.budgetChargeForOutcome(outcome, capture, model);
+          this.runSpentUsd += chargeUsd;
+          const costFields = this.deps.reportCost
+            ? {
+                ...(outcome.kind === "proven-write"
+                  ? { costUsd: cacheWriteCostUsd(model.cost, outcome.cacheWriteTokens) }
+                  : {}),
+                ...this.budgetFields(chargeUsd, this.clock.now()),
+              }
+            : {};
+          this.audit("unproven", {
+            ...diagnostics,
+            unprovenKind: outcome.kind,
+            disabled: applied.session.disabled !== undefined,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens,
+            attempts,
+            ...costFields,
+          });
+        }
+      }
+      this.publishVisibility();
+    } finally {
+      if (lease) {
+        lease.settle(this.clock.now(), chargeUsd);
+        if (this.currentLease === lease) this.currentLease = undefined;
+      }
     }
-
-    if (outcome.kind === "proven-hit") {
-      const applied = onProvenHit(this.window, this.session, pingEpoch, outcome, this.config().intervalMs);
-      if (applied.applied) {
-        this.window = applied.window;
-        this.session = applied.session;
-        this.lastPingDiagnostics = {
-          ...diagnostics,
-          at: this.clock.now(),
-          outcomeKind: outcome.kind,
-          cacheReadInputTokens: outcome.cacheReadTokens,
-          cacheCreationInputTokens: 0,
-          attempts,
-        };
-        this.audit("proven-hit", {
-          ...diagnostics,
-          cacheReadTokens: outcome.cacheReadTokens,
-          cacheReadInputTokens: outcome.cacheReadTokens,
-          cacheCreationInputTokens: 0,
-          attempts,
-        });
-      }
-    } else {
-      const applied = onUnproven(this.window, this.session, pingEpoch, outcome.kind, this.clock.now());
-      if (applied.applied) {
-        this.window = applied.window;
-        this.session = applied.session;
-        const cacheCreationInputTokens = outcome.kind === "proven-write" ? outcome.cacheWriteTokens : undefined;
-        this.lastPingDiagnostics = {
-          ...diagnostics,
-          at: this.clock.now(),
-          outcomeKind: outcome.kind,
-          cacheReadInputTokens: 0,
-          cacheCreationInputTokens,
-          attempts,
-        };
-        this.audit("unproven", {
-          ...diagnostics,
-          unprovenKind: outcome.kind,
-          disabled: applied.session.disabled !== undefined,
-          cacheReadInputTokens: 0,
-          cacheCreationInputTokens,
-          attempts,
-        });
-      }
-    }
-    this.publishVisibility();
   }
 
   // -- KeepalivePort --------------------------------------------------------
@@ -791,7 +1055,29 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     }
     this.abortController = undefined;
     this.cancelPendingRetry();
-    safeSetStatus(this.deps.ctx, undefined);
+    if (this.pendingAuthTimeout) {
+      const { timer, reject } = this.pendingAuthTimeout;
+      this.pendingAuthTimeout = undefined;
+      this.clock.clearTimer(timer);
+      try {
+        reject();
+      } catch {
+        // best-effort.
+      }
+    }
+    // child-ka-core: defensive backstop — `runPing`'s own `finally` should
+    // already have settled this (its abort/reject above ultimately unwinds
+    // through the same try/finally), but a lease left held past dispose must
+    // never linger and count against the process-wide concurrency cap.
+    if (this.currentLease) {
+      try {
+        this.currentLease.settle(this.clock.now(), 0);
+      } catch {
+        // best-effort.
+      }
+      this.currentLease = undefined;
+    }
+    if (this.deps.statusBar !== false) safeSetStatus(this.deps.ctx, undefined);
   }
 }
 

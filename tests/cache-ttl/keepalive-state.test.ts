@@ -7,6 +7,7 @@ import {
   buildFingerprint,
   buildCacheStatusSnapshot,
   cacheReadCostUsd,
+  cacheWriteCostUsd,
   closeWindowAccounting,
   compareFingerprint,
   consumeUpgrade,
@@ -1336,5 +1337,202 @@ describe("renderAdaptiveReportLines — dual write budget line", () => {
         line.startsWith("adaptive entry fee:"),
       ) ?? "";
     expect(fee).toContain("exhausted (no new prefix)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-K1 (child-ka-core, docs/dev/child-context-switch/plan.md §2.4/§7 P1):
+// `KeepaliveConfig.allowHeadless`/`maxSessionPings`, the two new pure gates
+// they drive in `evaluateTick`, `nativeWarmerActive`, and `cacheWriteCostUsd`.
+// ---------------------------------------------------------------------------
+
+describe("evaluateTick — child-ka-core: allowHeadless (gate #4/G2)", () => {
+  it("main session default (allowHeadless unset): print/json/batch still rejected", () => {
+    for (const mode of ["print", "json", "batch"]) {
+      const result = evaluateTick({
+        now: 1000,
+        mode,
+        armed: true,
+        config: config(),
+        session: baseSession(),
+        window: armedWindow(),
+        currentFingerprint: fingerprint(),
+      });
+      expect(result.decision).toEqual({ kind: "skip", reason: "mode", terminal: true });
+    }
+  });
+
+  it("allowHeadless: true additionally allows print (a child session's run mode)", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "print",
+      armed: true,
+      config: config({ allowHeadless: true }),
+      session: baseSession(),
+      window: armedWindow(),
+      currentFingerprint: fingerprint(),
+    });
+    expect(result.decision).not.toEqual({ kind: "skip", reason: "mode", terminal: true });
+  });
+
+  it("allowHeadless: true does not resurrect json/batch — only print", () => {
+    for (const mode of ["json", "batch"]) {
+      const result = evaluateTick({
+        now: 1000,
+        mode,
+        armed: true,
+        config: config({ allowHeadless: true }),
+        session: baseSession(),
+        window: armedWindow(),
+        currentFingerprint: fingerprint(),
+      });
+      expect(result.decision).toEqual({ kind: "skip", reason: "mode", terminal: true });
+    }
+  });
+
+  it("tui/rpc are unaffected by allowHeadless either way", () => {
+    for (const mode of ["tui", "rpc"]) {
+      for (const allowHeadless of [undefined, true, false]) {
+        const result = evaluateTick({
+          now: 1000,
+          mode,
+          armed: true,
+          config: config({ allowHeadless }),
+          session: baseSession(),
+          window: armedWindow(),
+          currentFingerprint: fingerprint(),
+        });
+        expect(result.decision).not.toEqual({ kind: "skip", reason: "mode", terminal: true });
+      }
+    }
+  });
+});
+
+describe("evaluateTick — child-ka-core: maxSessionPings (per-run proven-hit cap, session-cap)", () => {
+  it("undefined (main session default) never triggers session-cap regardless of session.pings", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession({ pings: 1_000_000 }),
+      window: armedWindow(),
+      currentFingerprint: fingerprint(),
+    });
+    expect(result.decision).not.toMatchObject({ reason: "session-cap" });
+  });
+
+  it("session.pings >= maxSessionPings ⇒ session-cap, terminal", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config({ maxSessionPings: 24 }),
+      session: baseSession({ pings: 24 }),
+      window: armedWindow(),
+      currentFingerprint: fingerprint(),
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "session-cap", terminal: true });
+  });
+
+  it("session.pings just below maxSessionPings still pings normally", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config({ maxSessionPings: 24 }),
+      session: baseSession({ pings: 23 }),
+      window: armedWindow({ nextPingAt: 0 }),
+      currentFingerprint: fingerprint(),
+    });
+    expect(result.decision).toEqual({ kind: "ping" });
+  });
+
+  it("maxSessionPings: 0 ⇒ session-cap immediately (0 = never ping this run)", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config({ maxSessionPings: 0 }),
+      session: baseSession({ pings: 0 }),
+      window: armedWindow(),
+      currentFingerprint: fingerprint(),
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "session-cap", terminal: true });
+  });
+
+  it("session-cap wins over session-disabled's absence but session-disabled (#2) still wins over it when both apply", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config({ maxSessionPings: 1 }),
+      session: baseSession({ pings: 5, disabled: { reason: "proven-write", at: 1 } }),
+      window: armedWindow(),
+      currentFingerprint: fingerprint(),
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "session-disabled", terminal: true });
+  });
+});
+
+describe("evaluateTick — child-ka-core: nativeWarmerActive (avoid double-warming pi's own CacheWarmer)", () => {
+  it("absent/false ⇒ today's behavior (unaffected)", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession(),
+      window: armedWindow({ nextPingAt: 0 }),
+      currentFingerprint: fingerprint(),
+      nativeWarmerActive: false,
+    });
+    expect(result.decision).toEqual({ kind: "ping" });
+  });
+
+  it("true ⇒ native-warmer, terminal, wins over an otherwise-pingable window", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession(),
+      window: armedWindow(),
+      currentFingerprint: fingerprint(),
+      nativeWarmerActive: true,
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "native-warmer", terminal: true });
+  });
+});
+
+describe("cacheWriteCostUsd (child-ka-core, mirrors cacheReadCostUsd's tier selection)", () => {
+  it("returns undefined for an unknown/zero rate, tokens<=0, or no cost model", () => {
+    expect(cacheWriteCostUsd(undefined, 10_000)).toBeUndefined();
+    expect(cacheWriteCostUsd({}, 10_000)).toBeUndefined();
+    expect(cacheWriteCostUsd({ cacheWrite: 0 }, 10_000)).toBeUndefined();
+    expect(cacheWriteCostUsd({ cacheWrite: 5 }, 0)).toBeUndefined();
+    expect(cacheWriteCostUsd({ cacheWrite: 5 }, -1)).toBeUndefined();
+  });
+
+  it("prices at the base rate ($/M tokens)", () => {
+    expect(cacheWriteCostUsd({ cacheWrite: 5 }, 1_000_000)).toBe(5);
+    expect(cacheWriteCostUsd({ cacheWrite: 12.5 }, 500_000)).toBeCloseTo(6.25, 6);
+  });
+
+  it("selects the highest matching tier (mirrors pi-ai models.js calculateCost)", () => {
+    const cost = { cacheWrite: 12.5, tiers: [{ inputTokensAbove: 272_000, cacheWrite: 25 }] };
+    expect(cacheWriteCostUsd(cost, 100_000)).toBeCloseTo(1.25, 6); // base rate, below the tier threshold
+    expect(cacheWriteCostUsd(cost, 300_000)).toBeCloseTo(7.5, 6); // tier rate: 300_000 > 272_000
+  });
+
+  it("does not confuse the read and write rates — independent of cacheReadCostUsd", () => {
+    const cost = { cacheRead: 1, cacheWrite: 12.5 };
+    expect(cacheReadCostUsd(cost, 1_000_000)).toBe(1);
+    expect(cacheWriteCostUsd(cost, 1_000_000)).toBe(12.5);
+  });
+
+  it("a tier missing cacheWrite falls back to the base rate for that tier boundary", () => {
+    const cost = { cacheWrite: 12.5, tiers: [{ inputTokensAbove: 272_000, cacheRead: 2 }] }; // no cacheWrite on the tier
+    expect(cacheWriteCostUsd(cost, 300_000)).toBeCloseTo(3.75, 6); // still the base 12.5 rate
   });
 });

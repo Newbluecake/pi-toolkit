@@ -271,6 +271,20 @@ export interface KeepaliveConfig {
   maxPings: number;
   minPrefixTokens: number;
   upgradeAfterBudget: boolean;
+  /**
+   * child-ka-core (plan.md §2.4/§3): additionally allow `mode === "print"`
+   * through gate #4 (G2) — a child (subagent) session's run mode. Default
+   * `undefined`/falsy ⇒ today's behavior (only `tui`/`rpc`), so the main
+   * session is byte-identical unless a caller explicitly opts in.
+   */
+  allowHeadless?: boolean;
+  /**
+   * child-ka-core: cumulative PROVEN-HIT ping cap across the whole run (all
+   * windows), independent of the per-window `maxPings`. Checked against
+   * `session.pings` (plan.md §2.4: "`session.pings >= maxSessionPings`").
+   * Default `undefined` = unbounded (today's behavior).
+   */
+  maxSessionPings?: number;
 }
 
 /**
@@ -305,6 +319,24 @@ export type TickSkipReason =
   | "adaptive-1h"
   | "cache-expired"
   | "budget-exhausted"
+  /** child-ka-core: per-run proven-hit cap (`config.maxSessionPings`) reached — pure, checked in `evaluateTick`. */
+  | "session-cap"
+  /** child-ka-core: pi's own native `CacheWarmer` already handles this model/route (declares `promptCache`) — pinging too would double-warm. Pure, checked in `evaluateTick` via `nativeWarmerActive`. */
+  | "native-warmer"
+  /**
+   * child-ka-core: the process-wide ping ledger denied a concurrency slot
+   * (non-terminal, re-armed at the normal 15s tick like any other
+   * non-terminal skip) or the rolling 24h $ budget (terminal). Decided in
+   * the SERVICE layer (`cache-keepalive.ts`'s `onTick`, which owns the
+   * ledger) — `evaluateTick` never produces these; they only share this
+   * union so `report().lastSkip` has one consistent type.
+   */
+  | "global-cap"
+  | "usd-process"
+  /** child-ka-core: this run's own $ budget (`runBudgetUsd`) would be exceeded by this ping's estimated cost. Decided in the service layer, see `"global-cap"`. */
+  | "usd-run"
+  /** child-ka-core: the model/route has no cost data at all — a budget can't be enforced without a price. Decided in the service layer, see `"global-cap"`. */
+  | "usd-unpriced"
   | "not-due";
 
 export type InvalidateReason =
@@ -351,6 +383,13 @@ export interface EvaluateTickInput {
    * ⇒ false (keepalive-only sessions are unchanged).
    */
   adaptiveCovered?: boolean;
+  /**
+   * child-ka-core: true when pi's own native `CacheWarmer` is already handling
+   * this model/route (it declares `promptCache`) — the caller (service layer)
+   * derives this from `ctx.model`; `evaluateTick` itself never reads `ctx`.
+   * Absent/false ⇒ today's behavior.
+   */
+  nativeWarmerActive?: boolean;
 }
 
 export interface TickResult {
@@ -360,7 +399,7 @@ export interface TickResult {
 }
 
 export function evaluateTick(input: EvaluateTickInput): TickResult {
-  const { config, session, window, armed, mode, now, currentFingerprint, adaptiveCovered } = input;
+  const { config, session, window, armed, mode, now, currentFingerprint, adaptiveCovered, nativeWarmerActive } = input;
 
   const skip = (reason: TickSkipReason, terminal: boolean): TickResult => ({
     decision: { kind: "skip", reason, terminal },
@@ -371,11 +410,23 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   if (!config.enabled) return skip("disabled", true);
   // #2 — I-K7: session-level breaker, never reset by a real request.
   if (session.disabled !== undefined) return skip("session-disabled", true);
+  // #2.5 — child-ka-core: per-run proven-hit cap across all windows, independent of
+  // (and checked before) the per-window #14 budget below. `undefined` ⇒ unbounded
+  // (today's behavior — main session never sets this).
+  if (config.maxSessionPings !== undefined && session.pings >= config.maxSessionPings) {
+    return skip("session-cap", true);
+  }
   // #3
   const capture = window.capture;
   if (capture === undefined) return skip("no-capture", true);
-  // #4 — G2
-  if (!RUN_MODES_ALLOWING_PING.has(mode)) return skip("mode", true);
+  // #4 — G2. child-ka-core: `allowHeadless` additionally allows "print" (a child
+  // session's run mode) — the main session never sets this, so its behavior is
+  // byte-identical (only "tui"/"rpc" pass).
+  const modeAllowed = RUN_MODES_ALLOWING_PING.has(mode) || (config.allowHeadless === true && mode === "print");
+  if (!modeAllowed) return skip("mode", true);
+  // #4.5 — child-ka-core: pi's own native CacheWarmer already handles this
+  // model/route (declares `promptCache`) — pinging too would double-warm it.
+  if (nativeWarmerActive === true) return skip("native-warmer", true);
   // #5 — G3 + G4
   if (capture.fingerprint.api !== ANTHROPIC_MESSAGES_API || PING_DENY_PROVIDERS.has(capture.fingerprint.provider)) {
     return skip("not-anthropic", true);
@@ -870,12 +921,35 @@ export function consumeUpgrade(window: WindowState, input: ConsumeUpgradeInput):
 export interface KeepaliveCostTier {
   inputTokensAbove: number;
   cacheRead?: number;
+  /** child-ka-core: mirrors pi-ai's per-tier cache-WRITE rate (models.json's `tiers[].cacheWrite`). */
+  cacheWrite?: number;
 }
 
 /** Minimal structural echo of pi-ai's `Model["cost"]` shape (models.js `calculateCost`). */
 export interface KeepaliveCostModel {
   cacheRead?: number;
+  /** child-ka-core: pi-ai's cache-WRITE rate (models.json's `cost.cacheWrite`, $ per million tokens). */
+  cacheWrite?: number;
   tiers?: KeepaliveCostTier[];
+}
+
+/** Shared tier-selection walk (highest `inputTokensAbove` strictly below `tokens`) used by both `cacheReadCostUsd` and `cacheWriteCostUsd` — mirrors pi-ai `models.js`'s `calculateCost`. */
+function tieredRate(
+  cost: KeepaliveCostModel,
+  tokens: number,
+  base: number | undefined,
+  pickTier: (tier: KeepaliveCostTier) => number | undefined,
+): number | undefined {
+  let rate = base;
+  let matchedThreshold = -1;
+  for (const tier of cost.tiers ?? []) {
+    const tierRate = pickTier(tier);
+    if (tokens > tier.inputTokensAbove && tier.inputTokensAbove > matchedThreshold && tierRate !== undefined) {
+      rate = tierRate;
+      matchedThreshold = tier.inputTokensAbove;
+    }
+  }
+  return rate;
 }
 
 /**
@@ -886,14 +960,21 @@ export interface KeepaliveCostModel {
  */
 export function cacheReadCostUsd(cost: KeepaliveCostModel | undefined, tokens: number): number | undefined {
   if (!cost || tokens <= 0) return undefined;
-  let rate = cost.cacheRead;
-  let matchedThreshold = -1;
-  for (const tier of cost.tiers ?? []) {
-    if (tokens > tier.inputTokensAbove && tier.inputTokensAbove > matchedThreshold && tier.cacheRead !== undefined) {
-      rate = tier.cacheRead;
-      matchedThreshold = tier.inputTokensAbove;
-    }
-  }
+  const rate = tieredRate(cost, tokens, cost.cacheRead, (t) => t.cacheRead);
+  if (rate === undefined || rate === 0) return undefined;
+  return (rate / 1_000_000) * tokens;
+}
+
+/**
+ * child-ka-core (plan.md §2.4): same tier-selection as `cacheReadCostUsd`,
+ * applied to the cache-WRITE rate — used to price a `proven-write` outcome
+ * (actual `cacheWriteTokens`) and the conservative upper-bound charge for an
+ * unproven-but-possibly-billed outcome (estimated on `prefix.tokens`).
+ * Returns `undefined` (never `0`) when the rate is unknown or zero.
+ */
+export function cacheWriteCostUsd(cost: KeepaliveCostModel | undefined, tokens: number): number | undefined {
+  if (!cost || tokens <= 0) return undefined;
+  const rate = tieredRate(cost, tokens, cost.cacheWrite, (t) => t.cacheWrite);
   if (rate === undefined || rate === 0) return undefined;
   return (rate / 1_000_000) * tokens;
 }

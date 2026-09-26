@@ -288,7 +288,7 @@ src/index.ts (pre-guard, wireMemory 之后)
 - 每次 ping 前（在 `tryAcquire` 之前）估算 `estimateUsd = cacheReadCostUsd(model.cost, capture.prefix.tokens)`（tier 感知）：
   - 模型没有 cost 信息 ⇒ `skip("usd-unpriced", terminal)`：价格不明就无法守预算。
   - `runSpent + estimate > runBudget` ⇒ `skip("usd-run", terminal)`；ledger 拒绝 ⇒ `skip("usd-process", terminal)`。本实例停止 ping，并写一条 `budget-stop` 审计。下一个子 run 重新判定。
-- 计费（`settle(charge)` 与 `runSpent`）：proven-hit 按实际 `cacheReadTokens × read 价`；proven-write 按实际 `cacheWriteTokens × write 价`；经重试最终仍是「服务端未处理」类（network / 可重试状态码）计 0；`accepted-then-lost` 等「服务端可能已计费写入」的终局 unproven 按上界 `prefixTokens × write 价` 计入预算。它只进预算账本和审计的 `budgetChargeUsd`，**不进** run 的 `usage.costUsd`，因为那不是已知的实际花费。
+- 计费（`settle(charge)` 与 `runSpent`）：proven-hit 按实际 `cacheReadTokens × read 价`；proven-write 按实际 `cacheWriteTokens × write 价`；经重试最终仍是「服务端未处理」类（network / 可重试状态码，与 ping 重试用的同一集合）计 0；`no-usage`（200 但 `usage` 缺失或显式全零——响应头已收到，服务端已处理请求，缺字段/全零不构成「未处理」的证据，可能是中转路由吞了 cache 字段）与非重试 HTTP 状态码、`accepted-then-lost`、`malformed` 等「服务端可能已计费写入」的终局 unproven 一律按上界 `prefixTokens × write 价` 计入预算。它只进预算账本和审计的 `budgetChargeUsd`，**不进** run 的 `usage.costUsd`，因为那不是已知的实际花费。
 - `runSpent` 在惰性构造时从当前分支已有的 `subagent:cache-keepalive` 审计条目的 `budgetChargeUsd` 求和作种子，所以 resume 续写同一会话文件时不会重置。
 - **默认值推算**：
   - 实测（本机会话审计，373 次 proven-hit）：前缀中位数 269k、最大 499k tokens；模型为 `claude-opus-5-5`（249 次，read $0.20/M）、`claude-opus-5`（93 次，$0.50/M）、`claude-opus-4-8`（6 次）。单次 ping 中位数约 $0.054（opus-5-5）/ $0.135（opus-5），实测最大约 $0.25。

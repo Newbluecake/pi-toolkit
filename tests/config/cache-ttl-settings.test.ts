@@ -24,6 +24,11 @@ describe("cache-ttl keepalive settings", () => {
       adaptiveColdCooldownMs: 1_200_000,
       adaptiveColdMinHorizonMs: 600_000,
       adaptiveHistoryGapSignal: true,
+      childKeepalive: true,
+      childKeepaliveMaxPingsPerRun: 24,
+      childKeepaliveMaxConcurrent: 4,
+      childKeepaliveRunBudgetUsd: 1.5,
+      childKeepaliveProcessBudgetUsd: 10,
     });
   });
 
@@ -93,6 +98,11 @@ describe("cache-ttl keepalive settings", () => {
       adaptiveColdCooldownMs: 600_000,
       adaptiveColdMinHorizonMs: 0,
       adaptiveHistoryGapSignal: false,
+      childKeepalive: true,
+      childKeepaliveMaxPingsPerRun: 24,
+      childKeepaliveMaxConcurrent: 4,
+      childKeepaliveRunBudgetUsd: 1.5,
+      childKeepaliveProcessBudgetUsd: 10,
     });
   });
 
@@ -260,5 +270,68 @@ describe("adaptiveWriteBudgetUsd — spec bounds must mirror the parser", () => 
     const parsed = parseSettingValue(spec, "0.5");
     expect(parsed.ok).toBe(true);
     expect(parseCacheTtlSettings({ adaptiveWriteBudgetUsd: 0.5 }).adaptiveWriteBudgetUsd).toBe(0.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// child-ka-core (docs/dev/child-context-switch/plan.md §2.4/§4): the five new
+// persisted keys the child keepalive core reads through (P1 doesn't wire them
+// up itself — that's P3's `src/cache-ttl/child.ts` — but the settings surface
+// must exist, parse tolerantly, and clamp per §4's table).
+// ---------------------------------------------------------------------------
+
+describe("cache-ttl child keepalive settings (child-ka-core plan.md §4)", () => {
+  it("defaults: childKeepalive on, 24/run, concurrency 4, $1.5/run, $10/24h process", () => {
+    expect(DEFAULT_SETTINGS.cacheTtl.childKeepalive).toBe(true);
+    expect(DEFAULT_SETTINGS.cacheTtl.childKeepaliveMaxPingsPerRun).toBe(24);
+    expect(DEFAULT_SETTINGS.cacheTtl.childKeepaliveMaxConcurrent).toBe(4);
+    expect(DEFAULT_SETTINGS.cacheTtl.childKeepaliveRunBudgetUsd).toBe(1.5);
+    expect(DEFAULT_SETTINGS.cacheTtl.childKeepaliveProcessBudgetUsd).toBe(10);
+  });
+
+  it("falls back field-by-field on malformed child keys, never throws", () => {
+    const parsed = parseCacheTtlSettings({
+      childKeepalive: "nope",
+      childKeepaliveMaxPingsPerRun: -1,
+      childKeepaliveMaxConcurrent: 0,
+      childKeepaliveRunBudgetUsd: -1,
+      childKeepaliveProcessBudgetUsd: -1,
+    });
+    expect(parsed.childKeepalive).toBe(true);
+    expect(parsed.childKeepaliveMaxPingsPerRun).toBe(24);
+    expect(parsed.childKeepaliveMaxConcurrent).toBe(4);
+    expect(parsed.childKeepaliveRunBudgetUsd).toBe(1.5);
+    expect(parsed.childKeepaliveProcessBudgetUsd).toBe(10);
+  });
+
+  it("accepts valid overrides, including 0 = never ping", () => {
+    const parsed = parseCacheTtlSettings({
+      childKeepalive: false,
+      childKeepaliveMaxPingsPerRun: 0,
+      childKeepaliveMaxConcurrent: 8,
+      childKeepaliveRunBudgetUsd: 0,
+      childKeepaliveProcessBudgetUsd: 0,
+    });
+    expect(parsed.childKeepalive).toBe(false);
+    expect(parsed.childKeepaliveMaxPingsPerRun).toBe(0);
+    expect(parsed.childKeepaliveMaxConcurrent).toBe(8);
+    expect(parsed.childKeepaliveRunBudgetUsd).toBe(0);
+    expect(parsed.childKeepaliveProcessBudgetUsd).toBe(0);
+  });
+
+  it("clamps childKeepaliveMaxConcurrent into [1, 32]", () => {
+    expect(parseCacheTtlSettings({ childKeepaliveMaxConcurrent: 0 }).childKeepaliveMaxConcurrent).toBe(4);
+    expect(parseCacheTtlSettings({ childKeepaliveMaxConcurrent: 33 }).childKeepaliveMaxConcurrent).toBe(4);
+    expect(parseCacheTtlSettings({ childKeepaliveMaxConcurrent: 1 }).childKeepaliveMaxConcurrent).toBe(1);
+    expect(parseCacheTtlSettings({ childKeepaliveMaxConcurrent: 32 }).childKeepaliveMaxConcurrent).toBe(32);
+  });
+
+  it("clamps the two USD budgets into their documented ranges and never floors a fractional value", () => {
+    expect(parseCacheTtlSettings({ childKeepaliveRunBudgetUsd: 1001 }).childKeepaliveRunBudgetUsd).toBe(1.5);
+    expect(parseCacheTtlSettings({ childKeepaliveRunBudgetUsd: -1 }).childKeepaliveRunBudgetUsd).toBe(1.5);
+    expect(parseCacheTtlSettings({ childKeepaliveRunBudgetUsd: 0.25 }).childKeepaliveRunBudgetUsd).toBe(0.25);
+    expect(parseCacheTtlSettings({ childKeepaliveProcessBudgetUsd: 10_001 }).childKeepaliveProcessBudgetUsd).toBe(10);
+    expect(parseCacheTtlSettings({ childKeepaliveProcessBudgetUsd: -1 }).childKeepaliveProcessBudgetUsd).toBe(10);
+    expect(parseCacheTtlSettings({ childKeepaliveProcessBudgetUsd: 0.5 }).childKeepaliveProcessBudgetUsd).toBe(0.5);
   });
 });

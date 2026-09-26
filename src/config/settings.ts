@@ -227,6 +227,18 @@ export interface CacheTtlSettings {
   adaptiveColdMinHorizonMs: number;
   /** 是否启用 S4 历史长空档弱信号（只影响热升级）。Default true. */
   adaptiveHistoryGapSignal: boolean;
+  /** child-ka-core（docs/dev/child-context-switch/plan.md §2.4/§4）：子会话保活总开关。
+   *  Default true；false ⇒ 子会话不注册 capture/keepalive，不写审计条目，无网络（还受上面的
+   *  `keepalive` 总开关约束）。 */
+  childKeepalive: boolean;
+  /** 每 run（累计所有窗口）proven-hit ping 上限；`0` = 子会话不 ping。Default 24。 */
+  childKeepaliveMaxPingsPerRun: number;
+  /** 全进程子会话保活并发上限。Default 4，钳位 [1, 32]。 */
+  childKeepaliveMaxConcurrent: number;
+  /** 每 run 的保活美元预算；`0` = 子会话不 ping。Default 1.5，钳位 [0, 1000]。 */
+  childKeepaliveRunBudgetUsd: number;
+  /** 全进程滚动 24h 保活美元预算；`0` = 子会话不 ping。Default 10，钳位 [0, 10000]。 */
+  childKeepaliveProcessBudgetUsd: number;
 }
 
 /**
@@ -620,6 +632,11 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     adaptiveColdCooldownMs: 1_200_000,
     adaptiveColdMinHorizonMs: 600_000,
     adaptiveHistoryGapSignal: true,
+    childKeepalive: true,
+    childKeepaliveMaxPingsPerRun: 24,
+    childKeepaliveMaxConcurrent: 4,
+    childKeepaliveRunBudgetUsd: 1.5,
+    childKeepaliveProcessBudgetUsd: 10,
   },
   quota: {
     enabled: true,
@@ -1054,6 +1071,21 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
     adaptiveColdCooldownMs: num(value.adaptiveColdCooldownMs, defaults.adaptiveColdCooldownMs, 60_000, 7_200_000),
     adaptiveColdMinHorizonMs: num(value.adaptiveColdMinHorizonMs, defaults.adaptiveColdMinHorizonMs, 0, 7_200_000),
     adaptiveHistoryGapSignal: bool(value.adaptiveHistoryGapSignal, defaults.adaptiveHistoryGapSignal),
+    childKeepalive: bool(value.childKeepalive, defaults.childKeepalive),
+    childKeepaliveMaxPingsPerRun: num(
+      value.childKeepaliveMaxPingsPerRun,
+      defaults.childKeepaliveMaxPingsPerRun,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    childKeepaliveMaxConcurrent: num(value.childKeepaliveMaxConcurrent, defaults.childKeepaliveMaxConcurrent, 1, 32),
+    childKeepaliveRunBudgetUsd: usd(value.childKeepaliveRunBudgetUsd, defaults.childKeepaliveRunBudgetUsd, 0, 1000),
+    childKeepaliveProcessBudgetUsd: usd(
+      value.childKeepaliveProcessBudgetUsd,
+      defaults.childKeepaliveProcessBudgetUsd,
+      0,
+      10_000,
+    ),
   };
 }
 /**
