@@ -203,10 +203,16 @@ async function settle(times = 30): Promise<void> {
  * `vi.useFakeTimers` too).
  */
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-  for (let i = 0; i < 5_000; i++) {
+  // Wall-clock bound, not an iteration count: 5000 setImmediate turns can
+  // elapse before a single libuv-threadpool fs round-trip on a slow CI runner
+  // (seen on GitHub Actions). performance.now() is never faked by these tests
+  // (they only fake setTimeout/clearTimeout).
+  const deadline = performance.now() + 10_000;
+  while (performance.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setImmediate(resolve));
   }
+  if (predicate()) return;
   throw new Error(`timed out waiting for ${label}`);
 }
 

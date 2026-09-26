@@ -492,11 +492,15 @@ describe("D9 linkPaths: top-level Agent AND a workflow child concurrently readin
       ]);
       await vi.waitFor(
         async () => {
-          const topBranch = await realExec("git", ["branch", "--list", `pi-agent-${topLevel.runId}`], { cwd: repo });
-          const wfBranch = await realExec("git", ["branch", "--list", `pi-agent-${workflowSpawn.runId}`], {
-            cwd: repo,
-          });
-          if (!topBranch.stdout.trim() || !wfBranch.stdout.trim()) throw new Error("branches not committed yet");
+          // H3 runs `git switch -c <branch>` BEFORE `git add`/`git commit`, so
+          // the branch ref exists (pointing at the base commit) for a moment
+          // before the change lands — wait for the committed file itself, not
+          // just the ref (CI race: the ref alone showed only the base files).
+          const tip = async (runId: string) =>
+            (await realExec("git", ["show", "--name-only", "--format=", `pi-agent-${runId}`], { cwd: repo })).stdout;
+          const [topTip, wfTip] = await Promise.all([tip(topLevel.runId), tip(workflowSpawn.runId)]);
+          if (!topTip.includes("top-change.txt") || !wfTip.includes("wf-change.txt"))
+            throw new Error("branches not committed yet");
         },
         { timeout: 10_000, interval: 100 },
       );
