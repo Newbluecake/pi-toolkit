@@ -110,15 +110,21 @@ On by default (POSIX only): overrides pi's built-in `bash` under the same name �
 
 The `bash_job` tool manages jobs (`job_id` accepts a unique prefix): `status` (state + log tail + path) / `wait` (bounded, 30s default, 120s hard cap) / `kill` (whole process group, idempotent, pid-reuse safe) / `list`. **No `output` action** — the log is a plain file at `~/.pi/agent/bash-jobs/<sessionId>/<job>.log`; analyze it with `read`/`tail`/`grep` directly.
 
-| Key                          | Default                     | Meaning                                                                              |
-| ---------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
-| `bashJobs.autoBackgroundS`   | `290`                       | Foreground bash auto-backgrounds past this; `0` = feature off (built-in untouched)   |
-| `bashJobs.maxLogBytes`       | `10485760`                  | Per-job log cap; writing stops with a truncation mark, **the process keeps running** |
-| `bashJobs.maxBackgroundJobs` | `8`                         | Concurrent background job cap                                                        |
-| `bashJobs.retentionS`        | `86400`                     | Retention for terminal job JSON/logs; `<=0` disables cleanup                         |
-| `bashJobs.shutdownPolicy`    | `"keep"`                    | On real pi quit, keep or kill running jobs; reload/new/resume/fork always keep       |
-| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`     | Job state/log root (laid out per `<sessionId>/`)                                     |
-| `bashJobs.shellPath`         | `$SHELL`(whitelist)→ `bash` | Shell for commands (`$SHELL` only when basename ∈ {bash, zsh, sh})                   |
+| Key                                 | Default                     | Meaning                                                                                                                  |
+| ----------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `bashJobs.autoBackgroundS`          | `290`                       | Foreground bash auto-backgrounds past this; `0` = feature off (built-in untouched)                                       |
+| `bashJobs.maxLogBytes`              | `10485760`                  | Per-job log cap; writing stops with a truncation mark, **the process keeps running**                                     |
+| `bashJobs.maxBackgroundJobs`        | `8`                         | Concurrent background job cap                                                                                            |
+| `bashJobs.retentionS`               | `86400`                     | Retention for terminal job JSON/logs; `<=0` disables cleanup                                                             |
+| `bashJobs.shutdownPolicy`           | `"keep"`                    | On real pi quit, keep or kill running jobs; reload/new/resume/fork always keep                                           |
+| `bashJobs.dir`                      | `~/.pi/agent/bash-jobs`     | Job state/log root (laid out per `<sessionId>/`)                                                                         |
+| `bashJobs.shellPath`                | `$SHELL`(whitelist)→ `bash` | Shell for commands (`$SHELL` only when basename ∈ {bash, zsh, sh})                                                       |
+| `bashJobs.timeoutGraceS`            | `60`                        | Grace window once a backgrounded job with an explicit `timeout` hits it; `0` = no grace                                  |
+| `bashJobs.maxExtensions`            | `3`                         | Max `bash_job(action:"extend")` calls per job; `0` = extend disabled (D-6 ⇒ no grace either)                             |
+| `bashJobs.maxTimeoutFactor`         | `3`                         | Hard ceiling for grace+extensions = this many times the original `timeout`; `1` = zero headroom                          |
+| `bashJobs.childSessions`            | `true`                      | Whether child (subagent) sessions register their own `bash`/`bash_job`; `false` = none, no grant                         |
+| `bashJobs.childSettleHold`          | `true`                      | Whether a settling child run with non-terminal background jobs is reminded and held instead of ending immediately        |
+| `bashJobs.childSettleHoldMaxRounds` | `0`                         | Cap on settle-hold reminder rounds; `0` = auto-derived (bounded) from the run's own deadline/extension budget, plan §3.5 |
 
 Behavior notes:
 
@@ -127,6 +133,7 @@ Behavior notes:
 - **Sensitive output lands on disk** (0600/0700, same threat model as session files) until `retentionS` expiry — redirect secrets away.
 - **Self-contained logs**: when a process reaches a terminal state, a conclusion line is appended (e.g. `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s`) — `tail -3` tells you the ending; appended even past `maxLogBytes`.
 - **Adoption after restart/reload**: still-running jobs are re-adopted in the next session and keep notifying; jobs whose pid ownership can't be confirmed are marked, never killed.
+- **Job-level timeout grace + extension** (only for backgrounded jobs with an explicit `timeout`): hitting the deadline first enters the `timeoutGraceS` grace window with a notice (main session: a `bash-job:timeout` message + TUI); whoever called `bash` decides whether to extend via `bash_job(action:"extend", job_id, extend_s)` (bounded by `maxExtensions` calls, total length capped at `maxTimeoutFactor`× the original timeout). Child (subagent) sessions add a settle layer: a settling run with non-terminal background jobs is reminded across a bounded number of rounds instead of ending immediately (`childSettleHold`, round cap `childSettleHoldMaxRounds`), until the jobs finish or the round budget runs out; when the run does end, every still-running job is sealed and killed, and both a released job and a settle-held one surface in the terminal notice. Design: [`docs/dev/bash-timeout-grace/plan.md`](docs/dev/bash-timeout-grace/plan.md).
 
 ## /goal — objective-driven loop
 

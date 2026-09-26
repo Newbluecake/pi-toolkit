@@ -107,15 +107,21 @@ Claude Code 风格的 cwd-keyed 被动记忆：每个会话自动把当前项目
 
 `bash_job` 工具管理这些 job（`job_id` 支持唯一前缀）：`status`（状态 + 日志尾部 + 路径）/ `wait`（有界阻塞，默认 30s 硬顶 120s）/ `kill`（杀整个进程组，幂等 + pid 复用防护）/ `list`。**没有 `output` 动作**——日志就是 `~/.pi/agent/bash-jobs/<sessionId>/<job>.log` 普通文件，`read`/`tail`/`grep` 直接分析比任何工具参数都灵活。
 
-| 键                           | 默认                     | 含义                                                                        |
-| ---------------------------- | ------------------------ | --------------------------------------------------------------------------- |
-| `bashJobs.autoBackgroundS`   | `290`                    | 前台 bash 超过该时长转后台；`0` = 整个功能关闭（内置 bash 零变化）          |
-| `bashJobs.maxLogBytes`       | `10485760`               | 单 job 日志上限；写满停写标记截断，**进程继续跑**                           |
-| `bashJobs.maxBackgroundJobs` | `8`                      | 并发后台 job 上限                                                           |
-| `bashJobs.retentionS`        | `86400`                  | 终态 job 的 JSON/日志保留时长；`<=0` 关闭清理                               |
-| `bashJobs.shutdownPolicy`    | `"keep"`                 | pi 真退出时对仍在跑的 job：`keep` / `kill`；reload/new/resume/fork 一律保留 |
-| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`  | job 状态与日志的 root（按 `<sessionId>/` 分层）                             |
-| `bashJobs.shellPath`         | `$SHELL`(白名单)→ `bash` | 执行命令的 shell（`$SHELL` 仅 basename ∈ {bash, zsh, sh} 时采用）           |
+| 键                                  | 默认                     | 含义                                                                              |
+| ----------------------------------- | ------------------------ | --------------------------------------------------------------------------------- |
+| `bashJobs.autoBackgroundS`          | `290`                    | 前台 bash 超过该时长转后台；`0` = 整个功能关闭（内置 bash 零变化）                |
+| `bashJobs.maxLogBytes`              | `10485760`               | 单 job 日志上限；写满停写标记截断，**进程继续跑**                                 |
+| `bashJobs.maxBackgroundJobs`        | `8`                      | 并发后台 job 上限                                                                 |
+| `bashJobs.retentionS`               | `86400`                  | 终态 job 的 JSON/日志保留时长；`<=0` 关闭清理                                     |
+| `bashJobs.shutdownPolicy`           | `"keep"`                 | pi 真退出时对仍在跑的 job：`keep` / `kill`；reload/new/resume/fork 一律保留       |
+| `bashJobs.dir`                      | `~/.pi/agent/bash-jobs`  | job 状态与日志的 root（按 `<sessionId>/` 分层）                                   |
+| `bashJobs.shellPath`                | `$SHELL`(白名单)→ `bash` | 执行命令的 shell（`$SHELL` 仅 basename ∈ {bash, zsh, sh} 时采用）                 |
+| `bashJobs.timeoutGraceS`            | `60`                     | 已转后台的 job 到达显式 `timeout` 时的宽限时长；`0` = 关宽限（到点直接杀）        |
+| `bashJobs.maxExtensions`            | `3`                      | `bash_job(action:"extend")` 可用的最大续期次数；`0` = 禁 extend（D-6 → 也无宽限） |
+| `bashJobs.maxTimeoutFactor`         | `3`                      | 宽限+续期的硬上限 = 原 `timeout` 的几倍；`1` = 零 headroom（不可续、无宽限）      |
+| `bashJobs.childSessions`            | `true`                   | 子（subagent）会话是否注册自己的 `bash`/`bash_job`；`false` = 完全不注册、不授权  |
+| `bashJobs.childSettleHold`          | `true`                   | 子会话收尾时若仍有非终态后台 job，是否提醒并推迟结束（而不是直接结束并杀掉它们）  |
+| `bashJobs.childSettleHoldMaxRounds` | `0`                      | 收尾提醒轮数上限；`0` = 根据 run 自己的截止/续期预算自动推导（有限，见方案 §3.5） |
 
 行为要点：
 
@@ -124,6 +130,7 @@ Claude Code 风格的 cwd-keyed 被动记忆：每个会话自动把当前项目
 - **敏感输出会落盘**（0600/0700，与 session 文件同威胁模型），直到 `retentionS` 过期——仍应重定向敏感输出。
 - **日志自洽**：进程终态时日志尾部追加一行结论（形如 `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s`），`tail -3` 即知结局；写满 `maxLogBytes` 也照样追加。
 - **重启/reload 后收养**：仍在跑的 job 在下一个 session 被重新接管并继续通知；pid 归属无法确认的 job 只标记不杀。
+- **job 级到期宽限 + 续期**（仅已转后台且带显式 `timeout` 的 job）：到期先进入 `timeoutGraceS` 宽限并提醒（主会话 `bash-job:timeout` 消息 + TUI），谁调用 bash 谁决定用 `bash_job(action:"extend", job_id, extend_s)` 续命；总长度不超 `maxTimeoutFactor` 倍、最多续 `maxExtensions` 次。子（subagent）会话多一层收尾行为：若轮到结束时仍有非终态后台 job（`childSettleHold`），会被有界轮数地提醒而非立即结束，直到 job 结束或轮预算耗尽（`childSettleHoldMaxRounds`）；run 结束时强制封存并杀全部未结束的 job，退出行与收尾过的 job 都会进终态通知。设计见 [`docs/dev/bash-timeout-grace/plan.md`](docs/dev/bash-timeout-grace/plan.md)。
 
 ## /goal 目标驱动持续运行
 

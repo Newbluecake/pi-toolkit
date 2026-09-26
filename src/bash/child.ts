@@ -430,9 +430,26 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
       const stillNonTerminal = after.filter((record) => !isTerminalJobStatus(record.status));
       const stillIds = new Set(stillNonTerminal.map((record) => record.jobId));
       const finishedThisRound = after.filter((record) => ids.includes(record.jobId) && !stillIds.has(record.jobId));
-      const gracingNow = stillNonTerminal.filter(
-        (record) => record.deadline?.graceUntil !== undefined && record.deadline.graceUntil <= now + hold,
-      );
+      // §3.5 "同窗合并": report every job that is *currently* in its grace
+      // window at wake time — not only jobs whose `graceUntil` happens to
+      // fall before this round's nominal ceiling (`now + hold`, what this
+      // code checked until P5b's T21(d)/(e) timeline test caught it). A
+      // grace window is short by construction (`timeoutGraceMs`, default
+      // 60s) — if a job is in `stillNonTerminal` with `graceUntil` set at
+      // all, its grace has not yet expired (an expired grace kills the job,
+      // which then drops out of `stillNonTerminal`), so it is by definition
+      // "about to be killed soon". Gating on `now + hold` instead silently
+      // dropped the common case where a job's timeout lands in the back
+      // half of a hold window (`onset > hold - graceMs` — e.g. a 100s
+      // timeout inside a 120s hold with the default 60s grace): the round
+      // that witnesses the onset always failed this check (its ceiling is
+      // fixed at round-start `now + hold`, independent of when within the
+      // round the onset actually happens), and by the time a *later*
+      // round's larger ceiling would have satisfied it, the job had already
+      // been killed and dropped out of `stillNonTerminal` — so the
+      // grace-specific wording could never fire for that job, only the
+      // generic "still running" wording (which never nudges `extend`).
+      const gracingNow = stillNonTerminal.filter((record) => record.deadline?.graceUntil !== undefined);
 
       let text: string;
       if (stillNonTerminal.length === 0) {

@@ -519,6 +519,262 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
     });
   });
 
+  /**
+   * (d)/(e) full FakeClock timelines (P5b acceptance leftover): unlike
+   * (a)-(c)/(f) above, these two drive real jobs all the way to a real
+   * `timed_out` terminal status (grace expiry ⇒ kill), not just through
+   * onset. `killForDeadline`'s actual SIGTERM/SIGKILL delivery and the
+   * child process's `exit` event are on the REAL event loop/clock
+   * (`src/bash/process.ts`, `DEFAULT_KILL_GRACE_MS`) — independent of the
+   * `FakeClock` injected into the manager's own deadline arithmetic. A
+   * single `clock.advance()` call is synchronous end-to-end, so jumping
+   * straight from "before a kill trigger" to "past the next hold's own
+   * natural end" in one call never gives the real exit event a chance to
+   * land — the hold's own `waitAllExit` would then resolve (via its
+   * fake-clock-armed per-job timeout) against a STALE `running` status.
+   * Each step below therefore stops exactly at a kill-trigger instant,
+   * `settleReal()`s (a real macrotask turn) to let the real process
+   * actually exit and `applyTransition` flip the record to `timed_out`,
+   * and only then advances further. (This is a test-harness concern, not a
+   * production one: real deployments use `systemClock` for both halves, so
+   * real seconds always separate a kill trigger from the next timer.)
+   *
+   * Driving this exposed a real `src/bash/child.ts` bug (fixed alongside
+   * this test, see the comment on `gracingNow` below): the settle-hold
+   * summary's "job(s) in grace window" wording was gated on
+   * `graceUntil <= (round-start now) + hold`, i.e. a ceiling FROZEN at the
+   * round's own start, not on "is this job presently gracing". Whenever a
+   * job's timeout landed in the back half of a hold window relative to its
+   * own `timeoutGraceMs` (exactly A/B/C's case here: onset 90s into a 120s
+   * round with the default 60s grace), the round that witnessed the onset
+   * always failed that ceiling check (falling back to the generic "still
+   * running" wording, which never mentions grace or nudges `extend`), and
+   * by the time a later round's larger ceiling would have satisfied it the
+   * job was already killed and gone from `stillNonTerminal` — so the
+   * grace-specific wording could NEVER fire for that job. Confirmed via a
+   * throwaway spike against the pre-fix code before touching `child.ts`.
+   */
+  describe("(d)/(e) full timelines: real grace/kill transitions drive the settle-hold summary text", () => {
+    it("(d) 多 timeout job，同窗: G0=10, one merged grace reminder for {A,B,C} at t=100s, silent kill at t=160s, a second reminder for {D} at t=300s, E times out directly at t=500s with no reminder", async () => {
+      const { pi, tools, emit } = fakePi();
+      const sessionId = randomUUID();
+      const dir = tmpDir();
+      const clock = new FakeClock(0);
+      wireChildBashJobs(pi, { settings: settingsWith({}, dir), clock });
+      const ctx = fakeCtx(sessionId, dir);
+      const bash = tools.get("bash")!;
+      const bashJob = tools.get("bash_job")!;
+
+      async function createJob(label: string, timeoutS: number): Promise<string> {
+        const r = (await bash.execute(
+          label,
+          { command: "sleep 30", timeout: timeoutS, run_in_background: true },
+          undefined,
+          undefined,
+          ctx,
+        )) as { details?: { jobId?: string } };
+        return r.details!.jobId!;
+      }
+      async function extend(jobId: string, extendS: number): Promise<void> {
+        const res = (await bashJob.execute(
+          `extend-${jobId}-${extendS}`,
+          { action: "extend", job_id: jobId, extend_s: extendS },
+          undefined,
+          undefined,
+          ctx,
+        )) as { details?: { extended?: boolean } };
+        expect(res.details?.extended).toBe(true);
+      }
+
+      // A/B/C: plain 100s timeout, default policy (3 extensions, 60s grace) ⇒ remaining 3 each.
+      const jobA = await createJob("call-a", 100);
+      const jobB = await createJob("call-b", 100);
+      const jobC = await createJob("call-c", 100);
+      // D/E: start at 200s, extended up to their plan-specified `dueAt` BEFORE t0 so `extensions`
+      // already reflects "2 of 3 used" (D) / "3 of 3 used, exhausted" (E) at the freeze instant.
+      // hardAt = 200s*3 = 600s comfortably covers every extend below (no clamping).
+      const jobD = await createJob("call-d", 200);
+      const jobE = await createJob("call-e", 200);
+      await settleReal(200); // let all 5 real spawns actually reach `running` before extending/advancing.
+
+      await extend(jobD, 50); // dueAt 200s -> 250s, extensions=1
+      await extend(jobD, 50); // dueAt 250s -> 300s, extensions=2 (remaining 1)
+      await extend(jobE, 100); // dueAt 200s -> 300s, extensions=1
+      await extend(jobE, 100); // dueAt 300s -> 400s, extensions=2
+      await extend(jobE, 100); // dueAt 400s -> 500s, extensions=3 (remaining 0, exhausted ⇒ D-6, no grace at t=500s)
+
+      const ABS_D = 1_800_000; // 30-minute absolute watchdog/hard deadline, matching the plan's own example.
+      const E = 3; // run-level maxExtensions.
+      attachHost(sessionId, { watchdogDueAt: () => ABS_D, hardDeadlineAt: () => ABS_D, maxExtensions: () => E });
+
+      clock.advance(10_000); // t0 = 10s: first hold entry ⇒ freezes G0/cap.
+      const t0 = 10_000;
+      const g0 = 3 + 3 + 3 + 1 + 0; // A,B,C unspent(3 each) + D remaining 1 + E remaining 0 (exhausted, D-6)
+      expect(g0).toBe(10);
+      const rWaitBase = Math.ceil((ABS_D - t0) / W_HOLD_MS) + 2 + E; // 15 + 2 + 3 = 20
+      const rWait = rWaitBase + g0; // 30
+      const expectedCap = computeHoldCap(0, ABS_D, t0, E, [
+        jobWithRemaining(jobA, 3, 0),
+        jobWithRemaining(jobB, 3, 0),
+        jobWithRemaining(jobC, 3, 0),
+        jobWithRemaining(jobD, 3, 2),
+        jobWithRemaining(jobE, 3, 3),
+      ]);
+      expect(expectedCap).toBe(2 * rWait); // 60
+
+      async function round(steps: { advanceMs: number; settle?: boolean }[]): Promise<string> {
+        const p = emit(
+          "agent_before_settle",
+          { outcome: "completed", context: { canContinue: true }, entries: [] },
+          ctx,
+        );
+        for (const step of steps) {
+          clock.advance(step.advanceMs);
+          if (step.settle) await settleReal(200); // real macrotask turn: let a triggered kill's real exit land.
+        }
+        const [result] = (await p) as [{ entries: { content?: string }[]; continue: boolean } | undefined];
+        expect(result?.continue).toBe(true);
+        return result?.entries.at(-1)?.content ?? "";
+      }
+
+      // Round 1 (t0=10s -> 100s): A/B/C's shared onset wakes the hold early — exactly ONE reminder,
+      // job set exactly {A,B,C} (§3.5 同窗合并), D/E not yet due.
+      const r1 = await round([{ advanceMs: 90_000 }]);
+      expect(r1).toMatch(/grace window/);
+      for (const id of [jobA, jobB, jobC]) expect(r1).toContain(id);
+      for (const id of [jobD, jobE]) expect(r1).not.toContain(id);
+
+      // Round 2 (100s -> 160s kill trigger, settle, -> 220s natural end): A/B/C's grace expires and
+      // they are killed WITHOUT a dedicated wake (kill isn't a `graceGate` event) — this round settles
+      // via its own natural hold timeout, not early, and reports the generic "still running" wording
+      // (D/E) plus a "finished since last reminder" summary for A/B/C. No third job set is ever reported.
+      const r2 = await round([{ advanceMs: 60_000, settle: true }, { advanceMs: 60_000 }]);
+      expect(r2).not.toMatch(/grace window/);
+      expect(r2).toMatch(/Finished since last reminder/);
+      for (const id of [jobA, jobB, jobC]) expect(r2).toContain(id);
+      for (const id of [jobD, jobE]) expect(r2).toContain(id);
+
+      // Round 3 (220s -> 300s): D's onset wakes the hold early — the SECOND (and last) grace reminder,
+      // job set exactly {D} (A/B/C long dead, E not yet due).
+      const r3 = await round([{ advanceMs: 80_000 }]);
+      expect(r3).toMatch(/grace window/);
+      expect(r3).toContain(jobD);
+      for (const id of [jobA, jobB, jobC, jobE]) expect(r3).not.toContain(id);
+
+      // Round 4 (300s -> 360s kill trigger, settle, -> 420s natural end): D killed, same silent-kill
+      // shape as round 2 (no dedicated wake), generic "still running" (E) + "finished" (D).
+      const r4 = await round([{ advanceMs: 60_000, settle: true }, { advanceMs: 60_000 }]);
+      expect(r4).not.toMatch(/grace window/);
+      expect(r4).toContain(jobE);
+      expect(r4).toContain(jobD);
+
+      // Round 5 (420s -> 500s E's own timeout, settle): E's extensions are exhausted (3/3) ⇒
+      // `jobExtendability` is `limit_reached` ⇒ D-6 ⇒ `resumeDeadline` goes straight to `expire`
+      // (kill), never `enterGrace` ⇒ never an onDeadline("grace") event ⇒ NO reminder at all for E,
+      // exactly the plan's "t=500 E 直接 timed_out 无提醒". All 5 jobs are now terminal ⇒ "all done".
+      const r5 = await round([{ advanceMs: 80_000, settle: true }]);
+      expect(r5).toMatch(/finished/i);
+      expect(r5).toContain(jobE);
+
+      // 宽限类 rounds = 2 (rounds 1 and 3 — the only two matching "grace window"); total rounds = 5,
+      // comfortably within the R_wait=30 passive bound (Q3) and far under cap=60 (Q1).
+      const graceRounds = [r1, r2, r3, r4, r5].filter((text) => /grace window/.test(text)).length;
+      expect(graceRounds).toBe(2);
+
+      const sealed = getChildBashRegistry().sealAndKill(sessionId, 200);
+      expect(sealed?.facts.hold).toEqual({ rounds: 5, cap: expectedCap, exhausted: false });
+      expect(5).toBeLessThanOrEqual(rWait); // Q3: total rounds never exceed the passive R_wait bound
+      await sealed?.done;
+    }, 30_000);
+
+    it("(e) 多 timeout job，错开: A/B/C timeout 100/160/220s each produce their own grace reminder, one job per reminder, in 3 different hold windows", async () => {
+      const { pi, tools, emit } = fakePi();
+      const sessionId = randomUUID();
+      const dir = tmpDir();
+      const clock = new FakeClock(0);
+      // A shorter grace (30s, vs. the 60s default) keeps a job's own kill-trigger instant strictly
+      // before the NEXT job's onset (60s apart) — real production code doesn't care about this, it's
+      // only needed so this test's own `settleReal()` checkpoints (see the class comment above) land
+      // in an unambiguous order.
+      wireChildBashJobs(pi, { settings: settingsWith({ timeoutGraceMs: 30_000 }, dir), clock });
+      const ctx = fakeCtx(sessionId, dir);
+      const bash = tools.get("bash")!;
+
+      async function createJob(label: string, timeoutS: number): Promise<string> {
+        const r = (await bash.execute(
+          label,
+          { command: "sleep 30", timeout: timeoutS, run_in_background: true },
+          undefined,
+          undefined,
+          ctx,
+        )) as { details?: { jobId?: string } };
+        return r.details!.jobId!;
+      }
+
+      const jobA = await createJob("call-a", 100);
+      const jobB = await createJob("call-b", 160);
+      const jobC = await createJob("call-c", 220);
+      await settleReal(200);
+
+      attachHost(sessionId, {
+        watchdogDueAt: () => 1_800_000,
+        hardDeadlineAt: () => 1_800_000,
+        maxExtensions: () => 3,
+      });
+
+      async function round(steps: { advanceMs: number; settle?: boolean }[]): Promise<string> {
+        const p = emit(
+          "agent_before_settle",
+          { outcome: "completed", context: { canContinue: true }, entries: [] },
+          ctx,
+        );
+        for (const step of steps) {
+          clock.advance(step.advanceMs);
+          if (step.settle) await settleReal(200);
+        }
+        const [result] = (await p) as [{ entries: { content?: string }[]; continue: boolean } | undefined];
+        expect(result?.continue).toBe(true);
+        return result?.entries.at(-1)?.content ?? "";
+      }
+
+      // Round 1 (0 -> 100s): A's onset, alone. B/C not due yet.
+      const r1 = await round([{ advanceMs: 100_000 }]);
+      expect(r1).toMatch(/grace window/);
+      expect(r1).toContain(jobA);
+      expect(r1).not.toContain(jobB);
+      expect(r1).not.toContain(jobC);
+
+      // Round 2 (100s -> 130s A's kill trigger, settle, -> 160s B's onset): A dead before B ever
+      // enters grace ⇒ the reminder's job set is {B} alone, never {A,B}.
+      const r2 = await round([{ advanceMs: 30_000, settle: true }, { advanceMs: 30_000 }]);
+      expect(r2).toMatch(/grace window/);
+      expect(r2).not.toContain(jobA);
+      expect(r2).toContain(jobB);
+      expect(r2).not.toContain(jobC);
+
+      // Round 3 (160s -> 190s B's kill trigger, settle, -> 220s C's onset): same shape, job set {C}.
+      const r3 = await round([{ advanceMs: 30_000, settle: true }, { advanceMs: 30_000 }]);
+      expect(r3).toMatch(/grace window/);
+      expect(r3).not.toContain(jobA);
+      expect(r3).not.toContain(jobB);
+      expect(r3).toContain(jobC);
+
+      // Round 4 (220s -> 250s C's kill trigger, settle): C's own death resolves `waitAllExit`
+      // immediately (it was the only job left) ⇒ "all done", no further reminder.
+      const r4 = await round([{ advanceMs: 30_000, settle: true }]);
+      expect(r4).toMatch(/finished/i);
+      expect(r4).toContain(jobC);
+
+      // Exactly 3 grace reminders, each naming exactly one job, each its own hold window (round 1-3).
+      const graceRounds = [r1, r2, r3].filter((text) => /grace window/.test(text));
+      expect(graceRounds).toHaveLength(3);
+
+      const sealed = getChildBashRegistry().sealAndKill(sessionId, 200);
+      expect(sealed?.facts.hold?.rounds).toBe(4);
+      await sealed?.done;
+    }, 30_000);
+  });
+
   it("(a) 对抗模型: rounds are capped at the derived formula's value; hold.exhausted flips true and the exit facts render the budget line", async () => {
     const { pi, tools, emit } = fakePi();
     const sessionId = randomUUID();

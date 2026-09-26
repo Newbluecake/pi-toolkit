@@ -91,7 +91,15 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated — suppressed (never deferred) while subagents/background bash are still running, since a stopped main session with busy background is not task end.
 - `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →
   log tee → settle → notify → recover after restart), persisted job store. POSIX only; when the
-  setting is off, pi's built-in bash stays untouched.
+  setting is off, pi's built-in bash stays untouched. Job-level timeout grace (`bashJobs.timeoutGraceS`,
+  `maxExtensions`, `maxTimeoutFactor`; pure arithmetic in `src/bash/deadline.ts`) lets a background job
+  with an explicit `timeout` enter one grace-window notice instead of dying outright, extendable via
+  `bash_job(action:"extend")`. Child (subagent) sessions additionally get `src/bash/child.ts`
+  (`wireChildBashJobs`, lazily built per session, not on `session_start`): an `agent_before_settle`
+  settle-hold keeps a run with non-terminal jobs alive across bounded reminder rounds
+  (`bashJobs.childSettleHold`, `childSettleHoldMaxRounds` — `0` auto-derives the cap from the run's own
+  deadline/extension budget plus outstanding job grace, §3.5's `R_wait`/`G0`). Design:
+  `docs/dev/bash-timeout-grace/plan.md`.
 - `src/compact-hint/` — turn_end hook that watches context usage and nudges the model toward a
   context handoff (`switch_context`, or `compact_context` when `compact.switchTool` is off) at a
   configurable threshold, plus stepped usage-tick reports so the model can perceive context usage at
