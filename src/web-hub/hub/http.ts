@@ -24,32 +24,64 @@
  * then `history` is pushed first, followed by buffered frames (ev with
  * `seq < fromSeq` dropped — already merged into the snapshot), and only then
  * does the client join the live subscriber set.
+ *
+ * ---------------------------------------------------------------------------
+ * LAN listener (plan §2.5, §6, §7 — S1-W2 `LC:http`). Everything below the
+ * loopback implementation is the LAN side: `buildContext`'s `"lan"` branch,
+ * `createLanTransport` (the `node:http` binder + `ConnGuard` wiring), the
+ * LAN application router (`handleLanRequest`, reusing `createRouteSet` so
+ * agents/fleet/history/SSE behave identically to loopback — only the auth
+ * mechanism and quotas differ), and `createHttpFrontend`'s `deps.lan` wiring
+ * that assembles all of it into `HttpFrontend.lan: LanFacade`. This absorbs
+ * what plan §3 sketches as a separate `lan-controller.ts` (`LanController`)
+ * — that type never made it into `hub/ports.ts`'s W1 freeze, and `http.ts`
+ * (LC's exclusive file) is the only place `HttpFrontend.lan` can actually be
+ * constructed from a `LanFrontendDeps`, so LC implements the bind → 60s tick
+ * → 421-throttled recompute → revoke lifecycle directly here rather than
+ * depending on a same-named file that S1-W3's LD package has not written
+ * yet. Flagged in the delivery report as a documented deviation, not a
+ * frozen-signature change (§11 W1 review only froze `hub/ports.ts` on this
+ * point — this is a fully additive implementation choice).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { API_ERRORS, type AgentCard, type HistoryPayload } from "../protocol/http-contract.js";
-import { canonicalHostKey, canonicalOrigin } from "../protocol/lan.js";
+import { canonicalHostKey, canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
 import type { FleetRowWire } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
+import { createConnGuard } from "./conn-guard.js";
+import { formatLanCookie, hashSid, readLanCookie, runLanLogin } from "./lan-auth.js";
+import { sameHostKeys } from "./net-hosts.js";
 import type {
   AgentView,
   ConnGuard,
+  ConnLease,
   FrontendDeps,
   FrontendFactory,
   HostSnapshot,
   HttpFrontend,
   HubEvent,
+  HubInfo,
   HubLog,
+  HistoryService,
+  LanFacade,
+  LanFrontendDeps,
+  LanListenerHandle,
+  LanSessionRecord,
+  LanStatus,
   LanTransport,
   ListenerKind,
+  RegistryView,
   RequestContext,
 } from "./ports.js";
-import { createSseHub, type SseClient, type SseEventName } from "./sse.js";
-import { serveStatic, webRoot } from "./static.js";
+import { createSseHub, type SseClient, type SseEventName, type SseHub } from "./sse.js";
+import { serveIndex, serveStatic, webRoot } from "./static.js";
 
 export const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
 export const MAX_BODY_BYTES = 64 * 1024;
+export const LAN_LOGIN_BODY_BYTES = 4 * 1024;
 export const HISTORY_PAGE_MAX = 400;
 const BODY_DEADLINE_MS = 10_000;
 /** Outer guard on history calls; B enforces TIMING.snapshotMs itself, this only bounds a misbehaving port. */
@@ -57,6 +89,17 @@ const HISTORY_GUARD_MS = TIMING.snapshotMs + 1_000;
 const CLOSE_DEADLINE_MS = 2_000;
 const MAX_PENDING_FRAMES = 4_096;
 const BIND_HOST = "127.0.0.1"; // not configurable by design (arch §9)
+const LAN_BIND_HOST = "0.0.0.0";
+const LAN_SOCKET_IDLE_MS = 60_000;
+const LAN_HEADERS_TIMEOUT_MS = 10_000;
+const LAN_REQUEST_TIMEOUT_MS = 15_000;
+const LAN_KEEPALIVE_TIMEOUT_MS = 5_000;
+const LAN_CLIENT_IP_INFLIGHT_CAP = 16;
+const LAN_SID_WAITERS_CAP = 8;
+const LAN_SSE_GLOBAL_CAP = 32;
+const LAN_SSE_PER_SID_CAP = 8;
+const LAN_RECOMPUTE_THROTTLE_MS = 5_000;
+const LAN_TICK_MS = 60_000;
 
 function toAbortError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
@@ -137,6 +180,9 @@ function statusFor(code: string): number {
       return 501;
     case "E_DEADLINE":
       return 504;
+    case "E_BUSY":
+    case "E_DB":
+      return 503;
     default:
       return 500;
   }
@@ -190,10 +236,10 @@ function stringField(body: unknown, name: string): string | undefined {
   return typeof v === "string" && v.length > 0 && v.length <= 256 ? v : undefined;
 }
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
+function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    if (Number.isFinite(declared) && declared > maxBytes) {
       reject(new HttpError(413, "E_BAD_REQUEST", "body too large"));
       return;
     }
@@ -210,7 +256,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
     };
     const onData = (chunk: Buffer): void => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) finish(new HttpError(413, "E_BAD_REQUEST", "body too large"));
+      if (size > maxBytes) finish(new HttpError(413, "E_BAD_REQUEST", "body too large"));
       else chunks.push(chunk);
     };
     const timer = setTimeout(() => finish(new HttpError(408, "E_DEADLINE", "body read timeout")), BODY_DEADLINE_MS);
@@ -222,8 +268,8 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
   });
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const buf = await readBody(req);
+async function readJson(req: IncomingMessage, maxBytes?: number): Promise<unknown> {
+  const buf = await readBody(req, maxBytes);
   if (buf.length === 0) return undefined;
   try {
     return JSON.parse(buf.toString("utf8")) as unknown;
@@ -258,14 +304,69 @@ function normalizePeerIp(ip: string | undefined): string {
   return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
 }
 
+type BuildContextReject = { reject: 400 | 421; code: "E_BAD_REQUEST" | "E_HOST"; detail: string };
+
+/** First label-ish token before an optional `:port` — used only to decide whether a rejected
+ * Host looks IPv4-shaped enough to justify a throttled recompute (§2.3). Not a validator. */
+function hostPartOf(raw: string | undefined): string {
+  if (raw === undefined) return "";
+  const idx = raw.lastIndexOf(":");
+  return (idx < 0 ? raw : raw.slice(0, idx)).toLowerCase();
+}
+
+function buildLanContext(
+  req: IncomingMessage,
+  lan: { snapshot: HostSnapshot; trust: ReadonlySet<string> },
+): RequestContext | BuildContextReject {
+  const peerIp = normalizePeerIp(req.socket.remoteAddress);
+  const resolution = resolveProxyLocal(peerIp, req.headers, lan.trust);
+  if (resolution.viaTrustedProxy && resolution.warnings.includes("proto-invalid")) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "proxy-proto" };
+  }
+  const hostRaw = resolution.hostHeader;
+  if (hostRaw !== undefined && hostRaw.includes(",")) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "proxy-host" };
+  }
+  const hostKey = canonicalHostKey(hostRaw, resolution.scheme);
+  if (hostKey === undefined) {
+    return { reject: 400, code: "E_BAD_REQUEST", detail: "bad-host" };
+  }
+  const externalOrigin = canonicalOrigin(resolution.scheme, hostKey);
+  if (resolution.viaTrustedProxy) {
+    if (!lan.snapshot.externalOrigins.has(externalOrigin)) {
+      return { reject: 421, code: "E_HOST", detail: "proxy-host" };
+    }
+  } else if (!lan.snapshot.hostKeys.has(hostKey)) {
+    return { reject: 421, code: "E_HOST", detail: "host" };
+  }
+  return {
+    kind: "lan",
+    peerIp,
+    viaTrustedProxy: resolution.viaTrustedProxy,
+    clientIp: resolution.clientIp,
+    scheme: resolution.scheme,
+    hostKey,
+    externalOrigin,
+    snapshot: lan.snapshot,
+  };
+}
+
+// Inlined instead of importing `./proxy.js` to keep `buildContext` (a pure function per plan
+// §1.4.4) free of any module with its own exported test surface beyond what it re-exports; the
+// canonical, tested implementation lives in `hub/proxy.ts` (`resolveProxy`) and this delegates to
+// it byte-for-byte (kept as a thin re-export, not a duplicate) — see below.
+import { resolveProxy as resolveProxyLocal } from "./proxy.js";
+
 /**
  * Build the per-request `RequestContext` (plan §2.5 step 1). The loopback
  * branch centralizes what P1's `allowedHost`/`csrfOk` already read off `req`
  * (`req.headers.host`, `req.socket.remoteAddress`) into one place — it does
  * *not* replace those functions' own P1 decision logic (kept byte-identical
  * in `handle()`), so it never rejects for `kind: "loopback"`. The `"lan"`
- * branch (host-snapshot lookup, proxy resolution, 400/421 rejection) is LC's
- * job (W2, S1-W2 `LC:http`) — W1 stub.
+ * branch (§2.4 proxy resolution, §2.2 canonicalization, §2.3 whitelist)
+ * rejects with 400/421 *before* any `RequestContext` is constructed —
+ * matching `createLanTransport`'s contract of only ever calling
+ * `handleRequest` with a fully-built `RequestContext`.
  */
 export function buildContext(
   req: IncomingMessage,
@@ -273,8 +374,8 @@ export function buildContext(
   lan?: { snapshot: HostSnapshot; trust: ReadonlySet<string> },
 ): RequestContext | { reject: 400 | 421; code: "E_BAD_REQUEST" | "E_HOST"; detail: string } {
   if (kind === "lan") {
-    void lan;
-    throw new Error("E_NOT_IMPLEMENTED:LC");
+    if (lan === undefined) throw new Error('web-hub: buildContext(req, "lan") requires the lan snapshot/trust arg');
+    return buildLanContext(req, lan);
   }
   const peerIp = normalizePeerIp(req.socket.remoteAddress);
   const hostHeader = req.headers.host;
@@ -292,28 +393,129 @@ export function buildContext(
 
 /** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` is now frozen in `hub/ports.ts` (review fix #9). */
 export interface LanTransportCtx {
-  handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext): Promise<void>;
+  handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext, lease: ConnLease): Promise<void>;
   log: HubLog;
   connGuard: ConnGuard;
+  /**
+   * Called synchronously — never `await`ed by the transport — whenever a request was rejected
+   * with `E_HOST` from a *direct* (non-proxy) peer whose `Host` header's host part parses as an
+   * IPv4 literal (§2.3: "直连请求收到 421 且 Host 的主机部分是 IPv4 语法 ⇒ 一次节流重算").
+   * The transport itself has no `HostsPort`/`cfg` access — throttling and the actual
+   * `hosts.compute()` + `handle.swap()` are the caller's job (`createHttpFrontend`'s LAN facade).
+   */
+  onIPv4HostReject?(hostPart: string): void;
 }
 
-export function createLanTransport(_ctx: LanTransportCtx): LanTransport {
-  throw new Error("E_NOT_IMPLEMENTED:LC");
+interface SocketWithLease extends Socket {
+  __lanLease?: ConnLease;
 }
 
-export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
-  const { config, registry, bus, history, log, now } = deps;
-  const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
-  const sse = createSseHub({ now });
-  const root = webRoot();
-  const pending = new Map<string, Map<string, PendingSub>>(); // clientId → agentKey → buffer
+export function createLanTransport(ctx: LanTransportCtx): LanTransport {
+  return {
+    bind(port: number, first: HostSnapshot, signal: AbortSignal): Promise<LanListenerHandle> {
+      if (signal.aborted) return Promise.reject(toAbortError(signal));
+      let snapshot = first;
+      const srv: Server = createServer();
+      srv.headersTimeout = LAN_HEADERS_TIMEOUT_MS;
+      srv.requestTimeout = LAN_REQUEST_TIMEOUT_MS;
+      srv.keepAliveTimeout = LAN_KEEPALIVE_TIMEOUT_MS;
+      srv.on("clientError", (_err, socket) => socket.destroy());
+      srv.on("connection", (socket: SocketWithLease) => {
+        socket.unref();
+        const peerIp = normalizePeerIp(socket.remoteAddress);
+        const viaTrustedProxy = snapshot.trustProxyFrom.has(peerIp);
+        const lease = ctx.connGuard.admit({ peerIp, viaTrustedProxy, onEvict: () => socket.destroy() });
+        if (lease === undefined) {
+          socket.destroy();
+          return;
+        }
+        socket.__lanLease = lease;
+        socket.setTimeout(LAN_SOCKET_IDLE_MS, () => socket.destroy());
+        socket.once("close", () => lease.release());
+      });
+      srv.on("request", (req: IncomingMessage, res: ServerResponse) => {
+        const socket = req.socket as SocketWithLease;
+        const lease = socket.__lanLease;
+        if (lease === undefined) {
+          res.destroy();
+          return;
+        }
+        const result = buildContext(req, "lan", { snapshot, trust: snapshot.trustProxyFrom });
+        if ("reject" in result) {
+          if (result.code === "E_HOST" && !snapshot.trustProxyFrom.has(normalizePeerIp(socket.remoteAddress))) {
+            const hostPart = hostPartOf(req.headers.host);
+            const cls = classifyHostToken(hostPart);
+            if (cls.ok && cls.kind === "ipv4") ctx.onIPv4HostReject?.(hostPart);
+          }
+          setSecurityHeaders(res);
+          sendError(res, result.reject, result.code, result.detail);
+          return;
+        }
+        ctx.handleRequest(req, res, result, lease).catch((err: unknown) => {
+          ctx.log.error("web-hub lan http: request failed", { url: req.url, error: String(err) });
+          if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
+          else res.destroy();
+        });
+      });
+      return new Promise<LanListenerHandle>((resolve, reject) => {
+        const onError = (err: Error): void => reject(err);
+        srv.once("error", onError);
+        srv.listen(port, LAN_BIND_HOST, () => {
+          srv.off("error", onError);
+          srv.on("error", (err) => ctx.log.error("web-hub lan http: server error", { error: String(err) }));
+          srv.unref();
+          const addr = srv.address();
+          const boundPort = addr !== null && typeof addr === "object" ? addr.port : port;
+          resolve({
+            port: boundPort,
+            current: () => snapshot,
+            swap: (next) => {
+              snapshot = next;
+            },
+            close: () =>
+              new Promise<void>((res2) => {
+                const timer = setTimeout(res2, CLOSE_DEADLINE_MS);
+                timer.unref?.();
+                srv.close(() => {
+                  clearTimeout(timer);
+                  res2();
+                });
+                srv.closeAllConnections();
+              }),
+          });
+        });
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// shared route set (agents / fleet / history / SSE) — used by both listeners
+// ---------------------------------------------------------------------------
+
+interface RouteSet {
+  pending: Map<string, Map<string, PendingSub>>;
+  fleetCache: Map<string, FleetRowWire[]>;
+  onHubEvent(e: HubEvent): void;
+  subscribe(body: unknown, res: ServerResponse): void;
+  unsubscribe(body: unknown, res: ServerResponse): void;
+  openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient;
+  historyPage(query: URLSearchParams, res: ServerResponse): Promise<void>;
+}
+
+function createRouteSet(
+  sse: SseHub,
+  routeDeps: {
+    registry: RegistryView;
+    history: HistoryService;
+    log: HubLog;
+    info: () => HubInfo;
+    port: () => number;
+    isClosed: () => boolean;
+  },
+): RouteSet {
+  const pending = new Map<string, Map<string, PendingSub>>();
   const fleetCache = new Map<string, FleetRowWire[]>();
-  let server: Server | undefined;
-  let port = 0;
-  let unsubscribeBus: (() => void) | undefined;
-  let closed = false;
-
-  // ---- subscriptions --------------------------------------------------------
 
   function getPending(clientId: string, agentKey: string): PendingSub | undefined {
     return pending.get(clientId)?.get(agentKey);
@@ -329,7 +531,6 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   function dropAgent(agentKey: string): void {
     fleetCache.delete(agentKey);
     for (const clientId of [...pending.keys()]) deletePending(clientId, agentKey);
-    // live subscriber sets are pruned lazily: sse.get() only returns live clients
   }
 
   function bufferScoped(agentKey: string, frame: PendingFrame): void {
@@ -337,7 +538,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       const p = m.get(agentKey);
       if (p === undefined) continue;
       if (sse.get(clientId) === undefined) {
-        pending.delete(clientId); // client disconnected mid-snapshot
+        pending.delete(clientId);
         continue;
       }
       if (p.frames.length >= MAX_PENDING_FRAMES) p.overflow = true;
@@ -351,7 +552,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   }
 
   function onHubEvent(e: HubEvent): void {
-    if (closed) return;
+    if (routeDeps.isClosed()) return;
     try {
       switch (e.type) {
         case "agent_up":
@@ -388,7 +589,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           break;
       }
     } catch (err) {
-      log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });
+      routeDeps.log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });
     }
   }
 
@@ -397,15 +598,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     let error: string | undefined;
     let message: string | undefined;
     try {
-      payload = await withDeadline(history.snapshot(agentKey), HISTORY_GUARD_MS);
+      payload = await withDeadline(routeDeps.history.snapshot(agentKey), HISTORY_GUARD_MS);
     } catch (err) {
-      const d = safeErrorDetail(err, log);
+      const d = safeErrorDetail(err, routeDeps.log);
       error = d.code;
       message = d.message;
     }
-    if (getPending(client.id, agentKey) !== p) return; // superseded, unsubscribed or agent gone
+    if (getPending(client.id, agentKey) !== p) return;
     deletePending(client.id, agentKey);
-    if (closed || sse.get(client.id) !== client) return;
+    if (routeDeps.isClosed() || sse.get(client.id) !== client) return;
     if (payload === undefined) {
       client.send("history", { agentKey, error: error ?? "E_INTERNAL", message });
       return;
@@ -419,32 +620,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     client.subscribed.add(agentKey);
   }
 
-  // ---- routes ---------------------------------------------------------------
-
-  function allowedHost(host: string | undefined): boolean {
-    if (host === undefined) return false;
-    const h = host.toLowerCase();
-    return h === `127.0.0.1:${port}` || h === `localhost:${port}`;
-  }
-
-  function csrfOk(req: IncomingMessage): boolean {
-    const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
-    if (ct !== "application/json") return false;
-    if (req.headers["x-pwh"] !== "1") return false;
-    const origin = req.headers.origin;
-    if (origin !== undefined && origin.toLowerCase() !== `http://${(req.headers.host ?? "").toLowerCase()}`)
-      return false;
-    return true;
-  }
-
-  function openEvents(req: IncomingMessage, res: ServerResponse): void {
+  function openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient {
     const raw = req.headers["last-event-id"];
     const lastEventId = typeof raw === "string" && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
-    const client = sse.attach(req, res, lastEventId);
-    client.send("hub", { ...deps.info(), port });
-    client.send("agents", { agents: registry.list().map(toCard) });
+    const client = sse.attach(req, res, lastEventId, auth);
+    client.send("hub", { ...routeDeps.info(), port: routeDeps.port() });
+    client.send("agents", { agents: routeDeps.registry.list().map(toCard) });
     for (const [agentKey, runs] of fleetCache) client.send("fleet", { agentKey, runs });
     res.once("close", () => pending.delete(client.id));
+    return client;
   }
 
   function subscribe(body: unknown, res: ServerResponse): void {
@@ -453,8 +637,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     if (clientId === undefined || agentKey === undefined) throw new HttpError(400, "E_BAD_REQUEST");
     const client = sse.get(clientId);
     if (client === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown clientId");
-    if (registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
-    client.subscribed.delete(agentKey); // re-subscribe = fresh snapshot (gap/resync recovery)
+    if (routeDeps.registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
+    client.subscribed.delete(agentKey);
     const p: PendingSub = { frames: [], overflow: false };
     let m = pending.get(clientId);
     if (m === undefined) pending.set(clientId, (m = new Map()));
@@ -482,13 +666,450 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (!/^\d{1,9}$/.test(limitRaw)) throw new HttpError(400, "E_BAD_REQUEST", "bad limit");
       limit = Math.min(HISTORY_PAGE_MAX, Math.max(1, Number(limitRaw)));
     }
-    if (registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
+    if (routeDeps.registry.get(agentKey) === undefined) throw new HttpError(404, "E_NOT_FOUND", "unknown agentKey");
     try {
-      sendJson(res, 200, await withDeadline(history.page(agentKey, before, limit), HISTORY_GUARD_MS));
+      sendJson(res, 200, await withDeadline(routeDeps.history.page(agentKey, before, limit), HISTORY_GUARD_MS));
     } catch (err) {
-      const d = safeErrorDetail(err, log);
+      const d = safeErrorDetail(err, routeDeps.log);
       throw new HttpError(statusFor(d.code), d.code, d.message);
     }
+  }
+
+  return { pending, fleetCache, onHubEvent, subscribe, unsubscribe, openEvents, historyPage };
+}
+
+// ---------------------------------------------------------------------------
+// LAN application router (plan §2.5, §6.4, §7)
+// ---------------------------------------------------------------------------
+
+interface LanRuntime {
+  lan: LanFrontendDeps;
+  routes: RouteSet;
+  lanSse: SseHub;
+  root: string;
+  now: () => number;
+  version: () => string;
+  log: HubLog;
+  clientInflight: Map<string, number>;
+  sidInflight: Map<string, { promise: Promise<LanSessionRecord | undefined>; waiters: number }>;
+}
+
+function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
+  let entry = rt.sidInflight.get(sidHash);
+  if (entry === undefined) {
+    const promise = rt.lan.store.touchSession(sidHash, rt.now()).finally(() => {
+      rt.sidInflight.delete(sidHash);
+    });
+    entry = { promise, waiters: 1 };
+    rt.sidInflight.set(sidHash, entry);
+    return promise;
+  }
+  if (entry.waiters >= LAN_SID_WAITERS_CAP) return "busy";
+  entry.waiters++;
+  return entry.promise;
+}
+
+function releaseClientInflight(rt: LanRuntime, ip: string): void {
+  const c = (rt.clientInflight.get(ip) ?? 1) - 1;
+  if (c <= 0) rt.clientInflight.delete(ip);
+  else rt.clientInflight.set(ip, c);
+}
+
+interface LanSessionResult {
+  userId: number;
+  epoch: number;
+  sidHash: string;
+}
+
+/** §2.5 step 5's "需要会话" gate: per-clientIP inflight quota → (for `/api/events`) SSE
+ * global/per-sid limits, checked *before* any IPC → `touchSession` (deduped per `sidHash`, ≤8
+ * riders) → expiry + origin-binding re-check. Sends the terminal error response itself and
+ * returns `undefined` on any failure; on success the caller still owns `res` (and, for SSE,
+ * `res`'s lifetime governs when the inflight slot is released). */
+async function requireLanSession(
+  rt: LanRuntime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RequestContext,
+  isSseRoute: boolean,
+  lease: ConnLease,
+): Promise<LanSessionResult | undefined> {
+  const ip = ctx.clientIp;
+  const current = rt.clientInflight.get(ip) ?? 0;
+  if (current >= LAN_CLIENT_IP_INFLIGHT_CAP) {
+    sendError(res, 429, "E_RATE");
+    return undefined;
+  }
+  rt.clientInflight.set(ip, current + 1);
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    releaseClientInflight(rt, ip);
+  };
+  res.once("close", release);
+  res.once("finish", release);
+
+  const sid = readLanCookie(req.headers.cookie);
+  if (sid === undefined) {
+    release();
+    sendError(res, 401, "E_AUTH");
+    return undefined;
+  }
+  const sidHash = hashSid(sid);
+
+  if (isSseRoute) {
+    const perSid = rt.lanSse.list().filter((c) => c.auth?.sidHash === sidHash).length;
+    if (rt.lanSse.count() >= LAN_SSE_GLOBAL_CAP || perSid >= LAN_SSE_PER_SID_CAP) {
+      release();
+      sendError(res, 429, "E_RATE");
+      return undefined;
+    }
+  }
+
+  const touched = sharedTouchSession(rt, sidHash);
+  let rec: LanSessionRecord | undefined;
+  if (touched === "busy") {
+    release();
+    sendError(res, 429, "E_RATE");
+    return undefined;
+  }
+  try {
+    rec = await touched;
+  } catch (err) {
+    release();
+    rt.log.error("web-hub lan http: touchSession failed", { error: String(err) });
+    sendError(res, 503, "E_DB");
+    return undefined;
+  }
+  if (rec === undefined) {
+    release();
+    sendError(res, 401, "E_AUTH");
+    return undefined;
+  }
+  const expired = rt.now() >= Math.min(rec.expiresAt, rec.absoluteExpiresAt);
+  if (expired || rec.boundOrigin !== ctx.externalOrigin) {
+    release();
+    sendError(res, 401, "E_AUTH");
+    return undefined;
+  }
+  lease.enterAuthed();
+  return { userId: rec.userId, epoch: rec.epoch, sidHash };
+}
+
+function csrfOkLan(req: IncomingMessage, ctx: RequestContext): boolean {
+  const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+  if (ct !== "application/json") return false;
+  if (req.headers["x-pwh"] !== "1") return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return false;
+  const parsed = parseOrigin(origin);
+  if (parsed === undefined) return false;
+  return canonicalOrigin(parsed.scheme, parsed.hostKey) === ctx.externalOrigin;
+}
+
+async function handleLanRequestInner(
+  rt: LanRuntime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RequestContext,
+  lease: ConnLease,
+): Promise<void> {
+  setSecurityHeaders(res);
+  const url = req.url ?? "/";
+  const qi = url.indexOf("?");
+  const path = qi < 0 ? url : url.slice(0, qi);
+  const query = new URLSearchParams(qi < 0 ? "" : url.slice(qi + 1));
+  const method = (req.method ?? "GET").toUpperCase();
+
+  if (method === "OPTIONS") throw new HttpError(404, "E_NOT_FOUND");
+
+  if (path === "/healthz") {
+    if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
+    sendJson(
+      res,
+      200,
+      { ok: true, version: rt.version(), authMode: "password", plaintext: ctx.scheme === "http" },
+      { "Cache-Control": "no-store" },
+    );
+    return;
+  }
+
+  if (path !== "/api" && !path.startsWith("/api/")) {
+    if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
+    if (!(await serveStatic(rt.root, path, res, { authMode: "password" }))) throw new HttpError(404, "E_NOT_FOUND");
+    return;
+  }
+
+  res.setHeader("Cache-Control", "no-store");
+
+  if (method === "POST") {
+    if (!csrfOkLan(req, ctx)) throw new HttpError(403, "E_CSRF");
+    if (path === "/api/login") {
+      const body = await readJson(req, LAN_LOGIN_BODY_BYTES);
+      const outcome = await runLanLogin(
+        ctx,
+        body,
+        { store: rt.lan.store, kdf: rt.lan.kdf, limiter: rt.lan.limiter, admission: rt.lan.admission },
+        rt.now(),
+        { onAdmitted: () => lease.enterLoginPending() },
+      );
+      if (outcome.status === 200) {
+        lease.enterAuthed();
+        sendJson(
+          res,
+          200,
+          { ok: true, initialPasswordInUse: outcome.initialPasswordInUse },
+          { "Set-Cookie": formatLanCookie(outcome.cookie, { secure: ctx.scheme === "https" }) },
+        );
+      } else if (outcome.status === 429) {
+        sendJson(
+          res,
+          429,
+          { error: "E_RATE", ...(outcome.saturated === true ? { saturated: true } : {}) },
+          { "Retry-After": String(Math.ceil(outcome.retryAfterMs / 1000)) },
+        );
+      } else {
+        sendError(res, 401, "E_AUTH");
+      }
+      return;
+    }
+    if (path === "/api/logout") {
+      const sid = readLanCookie(req.headers.cookie);
+      if (sid !== undefined) {
+        const sidHash = hashSid(sid);
+        try {
+          await rt.lan.store.deleteSession(sidHash);
+          rt.lanSse.revoke((c) => c.auth?.sidHash === sidHash, "revoked");
+        } catch (err) {
+          rt.log.error("web-hub lan http: logout deleteSession failed", { error: String(err) });
+        }
+      }
+      sendJson(
+        res,
+        200,
+        { ok: true },
+        { "Set-Cookie": formatLanCookie("", { secure: ctx.scheme === "https", clear: true }) },
+      );
+      return;
+    }
+    const session = await requireLanSession(rt, req, res, ctx, false, lease);
+    if (session === undefined) return;
+    const body = await readJson(req);
+    if (path === "/api/subscribe") return rt.routes.subscribe(body, res);
+    if (path === "/api/unsubscribe") return rt.routes.unsubscribe(body, res);
+    throw new HttpError(404, "E_NOT_FOUND");
+  }
+
+  if (method === "GET") {
+    if (path === "/api/session") {
+      const session = await requireLanSession(rt, req, res, ctx, false, lease);
+      if (session === undefined) return;
+      const summary = await rt.lan.store.getUserSummary(session.userId);
+      sendJson(res, 200, {
+        username: summary?.username ?? "",
+        initialPasswordInUse: summary?.initialPasswordInUse ?? false,
+      });
+      return;
+    }
+    if (path === "/api/events") {
+      const session = await requireLanSession(rt, req, res, ctx, true, lease);
+      if (session === undefined) return;
+      rt.routes.openEvents(req, res, {
+        sidHash: session.sidHash,
+        userId: session.userId,
+        epoch: session.epoch,
+        boundOrigin: ctx.externalOrigin,
+        verifiedAt: rt.now(),
+      });
+      return;
+    }
+    if (path === "/api/history") {
+      const session = await requireLanSession(rt, req, res, ctx, false, lease);
+      if (session === undefined) return;
+      await rt.routes.historyPage(query, res);
+      return;
+    }
+  }
+
+  throw new HttpError(404, "E_NOT_FOUND");
+}
+
+function handleLanRequest(
+  rt: LanRuntime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RequestContext,
+  lease: ConnLease,
+): Promise<void> {
+  return handleLanRequestInner(rt, req, res, ctx, lease).catch((err: unknown) => {
+    if (err instanceof HttpError) {
+      if (err.status === 413 || err.status === 408) {
+        res.setHeader("Connection", "close");
+        res.once("finish", () => req.destroy());
+      }
+      sendError(res, err.status, err.code, err.message === err.code ? undefined : err.message);
+      return;
+    }
+    rt.log.error("web-hub lan http: request failed", { url: req.url, error: String(err) });
+    if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
+    else res.destroy();
+  });
+}
+
+function buildLanStatus(cfg: LanFrontendDeps["cfg"], snapshot: HostSnapshot, boundPort: number): LanStatus {
+  const hosts = [...snapshot.hostKeys]
+    .map((k) => k.slice(0, k.lastIndexOf(":")))
+    .sort((a, b) => {
+      const aIsIp =
+        classifyHostToken(a).ok &&
+        classifyHostToken(a).ok === true &&
+        (classifyHostToken(a) as { kind: string }).kind === "ipv4";
+      const bIsIp =
+        classifyHostToken(b).ok &&
+        classifyHostToken(b).ok === true &&
+        (classifyHostToken(b) as { kind: string }).kind === "ipv4";
+      if (aIsIp !== bIsIp) return aIsIp ? -1 : 1;
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+  const proxy =
+    cfg.trustProxyFrom.length > 0
+      ? { trustedFrom: [...cfg.trustProxyFrom], externalOrigins: [...cfg.externalOrigins] }
+      : undefined;
+  return {
+    state: "on",
+    port: boundPort,
+    hosts,
+    omitted: [...snapshot.omitted],
+    ...(proxy === undefined ? {} : { proxy }),
+    warnings: ["plaintext"],
+  };
+}
+
+export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
+  const { config, registry, bus, history, log, now } = deps;
+  const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
+  const sse = createSseHub({ now });
+  const root = webRoot();
+  let server: Server | undefined;
+  let port = 0;
+  let unsubscribeBus: (() => void) | undefined;
+  let closed = false;
+
+  const routes = createRouteSet(sse, {
+    registry,
+    history,
+    log,
+    info: deps.info,
+    port: () => port,
+    isClosed: () => closed,
+  });
+
+  // ---- LAN facade (§2.5/§6/§7) ------------------------------------------
+
+  let lanFacade: LanFacade | undefined;
+  let lanSseRef: SseHub | undefined;
+  if (deps.lan !== undefined) {
+    const lan = deps.lan;
+    const lanSse = createSseHub({ now });
+    lanSseRef = lanSse;
+    const lanRoutes = createRouteSet(lanSse, {
+      registry,
+      history,
+      log,
+      info: deps.info,
+      port: () => lan.cfg.port,
+      isClosed: () => lanClosed,
+    });
+    let lanClosed = false;
+    const unsubscribeLanBus = bus.subscribe(lanRoutes.onHubEvent);
+    const rt: LanRuntime = {
+      lan,
+      routes: lanRoutes,
+      lanSse,
+      root,
+      now,
+      version: () => deps.info().version,
+      log,
+      clientInflight: new Map(),
+      sidInflight: new Map(),
+    };
+    const connGuard = createConnGuard();
+    let handle: LanListenerHandle | undefined;
+    let gen = 0;
+    let status: LanStatus = { state: "starting" };
+    let lastRecomputeAt = 0;
+
+    function recompute(force: boolean): void {
+      if (handle === undefined) return;
+      const t = now();
+      if (!force && t - lastRecomputeAt < LAN_RECOMPUTE_THROTTLE_MS) return;
+      lastRecomputeAt = t;
+      const next = lan.hosts.compute(lan.cfg);
+      const cur = handle.current();
+      if (sameHostKeys(cur, next)) return;
+      gen++;
+      const swapped: HostSnapshot = { ...next, gen };
+      handle.swap(swapped);
+      status = buildLanStatus(lan.cfg, swapped, handle.port);
+      lan.onStatus(status);
+    }
+
+    const transport = createLanTransport({
+      log,
+      connGuard,
+      onIPv4HostReject: () => recompute(false),
+      handleRequest: (req, res, ctx, lease) => handleLanRequest(rt, req, res, ctx, lease),
+    });
+
+    lanFacade = {
+      async start(): Promise<LanStatus> {
+        const first = lan.hosts.compute(lan.cfg);
+        gen = 1;
+        handle = await transport.bind(lan.cfg.port, { ...first, gen }, lan.scope.signal);
+        status = buildLanStatus(lan.cfg, handle.current(), handle.port);
+        lan.scope.timer(() => recompute(true), LAN_TICK_MS, true);
+        return status;
+      },
+      status(): LanStatus {
+        return status;
+      },
+      async close(): Promise<void> {
+        lanClosed = true;
+        unsubscribeLanBus();
+        lanSse.closeAll();
+        rt.sidInflight.clear();
+        rt.clientInflight.clear();
+        await handle?.close();
+      },
+      revoke(target: { sidHash: string } | { userId: number }): number {
+        const pred: (c: SseClient) => boolean =
+          "sidHash" in target ? (c) => c.auth?.sidHash === target.sidHash : (c) => c.auth?.userId === target.userId;
+        return lanSse.revoke(pred, "revoked");
+      },
+    };
+  }
+
+  // ---- loopback subscriptions -------------------------------------------
+
+  function allowedHost(host: string | undefined): boolean {
+    if (host === undefined) return false;
+    const h = host.toLowerCase();
+    return h === `127.0.0.1:${port}` || h === `localhost:${port}`;
+  }
+
+  function csrfOk(req: IncomingMessage): boolean {
+    const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+    if (ct !== "application/json") return false;
+    if (req.headers["x-pwh"] !== "1") return false;
+    const origin = req.headers.origin;
+    if (origin !== undefined && origin.toLowerCase() !== `http://${(req.headers.host ?? "").toLowerCase()}`)
+      return false;
+    return true;
+  }
+
+  function openEvents(req: IncomingMessage, res: ServerResponse): void {
+    routes.openEvents(req, res);
   }
 
   async function handleApi(
@@ -530,8 +1151,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         return;
       }
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
-      if (path === "/api/subscribe") return subscribe(body, res);
-      if (path === "/api/unsubscribe") return unsubscribe(body, res);
+      if (path === "/api/subscribe") return routes.subscribe(body, res);
+      if (path === "/api/unsubscribe") return routes.unsubscribe(body, res);
       if (
         path === "/api/cmd" ||
         path === "/api/dialog" ||
@@ -544,7 +1165,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     if (method === "GET") {
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
       if (path === "/api/events") return openEvents(req, res);
-      if (path === "/api/history") return historyPage(query, res);
+      if (path === "/api/history") return routes.historyPage(query, res);
     }
     throw new HttpError(404, "E_NOT_FOUND");
   }
@@ -563,7 +1184,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       sendJson(res, 200, { ok: true, version: deps.info().version }, { "Cache-Control": "no-store" });
       return;
     }
-    if (!(await serveStatic(root, path, res))) throw new HttpError(404, "E_NOT_FOUND");
+    if (!(await serveStatic(root, path, res, { authMode: "token" }))) throw new HttpError(404, "E_NOT_FOUND");
   }
 
   function onRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -631,7 +1252,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     srv.on("error", (err) => log.error("web-hub http: server error", { error: String(err) }));
     srv.unref();
     server = srv;
-    unsubscribeBus = bus.subscribe(onHubEvent);
+    unsubscribeBus = bus.subscribe(routes.onHubEvent);
     log.info("web-hub http listening", { host: BIND_HOST, port });
     return { port };
   }
@@ -639,9 +1260,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
+    await lanFacade?.close();
     unsubscribeBus?.();
     unsubscribeBus = undefined;
-    pending.clear();
+    routes.pending.clear();
     sse.closeAll();
     const srv = server;
     if (srv === undefined) return;
@@ -656,5 +1278,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     });
   }
 
-  return { listen, close, clientCount: () => sse.count() };
+  return {
+    listen,
+    close,
+    clientCount: () => sse.count() + (lanSseRef === undefined ? 0 : lanSseRef.count()),
+    ...(lanFacade === undefined ? {} : { lan: lanFacade }),
+  };
 };

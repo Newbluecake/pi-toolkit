@@ -6,7 +6,6 @@
  * presence/pass would mean the stub was never replaced.
  */
 import { describe, expect, it } from "vitest";
-import { buildContext, createLanTransport } from "../../../src/web-hub/hub/http.js";
 import { defaultLanAssembly } from "../../../src/web-hub/hub/lan-assembly.js";
 import type { Scope } from "../../../src/web-hub/hub/lifecycle.js";
 import type { HubLog } from "../../../src/web-hub/hub/ports.js";
@@ -25,15 +24,5 @@ describe("W1 stubs throw E_NOT_IMPLEMENTED:<pkg> (contract ①)", () => {
         onStatus: () => {},
       }),
     ).rejects.toThrow("E_NOT_IMPLEMENTED:LD");
-  });
-
-  it('http.ts: buildContext(req, "lan") ⇒ LC', () => {
-    expect(() => buildContext({ headers: {}, socket: {} } as never, "lan")).toThrow("E_NOT_IMPLEMENTED:LC");
-  });
-
-  it("http.ts: createLanTransport(...) ⇒ LC", () => {
-    expect(() =>
-      createLanTransport({ handleRequest: async () => {}, log: noopLog, connGuard: { admit: () => undefined } }),
-    ).toThrow("E_NOT_IMPLEMENTED:LC");
   });
 });
