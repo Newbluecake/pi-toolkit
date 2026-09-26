@@ -526,6 +526,19 @@ describe("HUD recovery countdown (resets …)", () => {
       windows: [w("5h", 12, 0, "none"), w("week", 95, 2, "pct", { resetAt: NOW + TWO_D_11H })],
     });
     expect(renderQuotaStatus([at95], NOW, 600_000)).toBe("quota zai 12%/95%");
+    // 95.4% 显示为 95% ⇒ 与段内数字口径一致，不显示倒计时；95.6% 显示 96% ⇒ 显示
+    const at954 = verdict({
+      provider: "zai-coding-cn",
+      level: 2,
+      windows: [w("5h", 12, 0, "none"), w("week", 95.4, 2, "pct", { resetAt: NOW + TWO_D_11H })],
+    });
+    expect(renderQuotaStatus([at954], NOW, 600_000)).toBe("quota zai 12%/95%");
+    const at956 = verdict({
+      provider: "zai-coding-cn",
+      level: 3,
+      windows: [w("5h", 12, 0, "none"), w("week", 95.6, 3, "pct", { resetAt: NOW + TWO_D_11H })],
+    });
+    expect(renderQuotaStatus([at956], NOW, 600_000)).toBe("quota zai 12%/96% resets 2d11h");
     // 5h 97% 在前、7d 100% 在后 ⇒ 取较晚的重置
     const both = verdict({
       provider: "kimi-coding",
@@ -771,6 +784,13 @@ describe("recovery block (额度恢复播报)", () => {
     const other = recovery();
     expect(buildQuotaRecoveryTexts([ev("zai"), other], NOW)).toHaveLength(2);
     expect(buildQuotaRecoveryTexts([ev("zai-coding-cn"), { ...ev("zai"), gateBlocked: false }], NOW)).toHaveLength(2);
+    // 同池但已重置窗口集合不同 ⇒ 分开
+    expect(
+      buildQuotaRecoveryTexts(
+        [ev("zai-coding-cn"), { ...ev("zai"), resetScopes: new Set<WindowScope>(["5h", "week"]) }],
+        NOW,
+      ),
+    ).toHaveLength(2);
   });
 
   it("window-less verdict (defensive) keeps the reset scopes without readings", () => {
