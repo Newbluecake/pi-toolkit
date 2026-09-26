@@ -108,7 +108,8 @@ export interface HostsPort {
 }
 
 // ---------------------------------------------------------------------------
-// §6.3 ConnGuard（审查修复 #9：冻结接口、以 lease 替代 peerIp 键释放）
+// §6.3 ConnGuard（审查修复 #9、1轮：冻结接口、以 lease 替代 peerIp 键释放；审查修复 #4、2轮：
+// admit() 新增 onEvict 回调，使“淡汰旧连接并 destroy”（§6.3）可表达
 // ---------------------------------------------------------------------------
 
 /**
@@ -135,11 +136,25 @@ export interface ConnGuard {
    * Admit a new connection into the direct or proxy pool (by
    * `viaTrustedProxy`). Returns `undefined` when §6.3's eviction rules found
    * nothing evictable and the pool is at capacity — the caller must
-   * `socket.destroy()` the new connection without a response. LC (W2) wires
-   * this to `net.Server`'s `connection`/`close` events; W1's port stays
-   * decoupled from `net.Socket` on purpose (easier to fake in tests).
+   * `socket.destroy()` the *new* connection without a response.
+   *
+   * `args.onEvict` is registered against the returned lease and is invoked
+   * *at most once* — synchronously, from within a *later* `admit()` call,
+   * never from this call — if §6.3's eviction rules pick *this* connection
+   * to make room for that later admission. The caller must
+   * `socket.destroy()` its *own* connection when `onEvict` fires; this is
+   * how eviction is expressed without `ConnGuard` needing to hold a
+   * `net.Socket` reference itself (§6.3: "淡汰 = socket.destroy()（无 HTTP
+   * 响应。。。选择、计数、destroy、接纳都在同一个同步的 connection 处理块中完成"，
+   * so `onEvict` firing and this `admit()` call returning happen in the same
+   * synchronous turn). `onEvict` firing does *not* itself call `release()`
+   * — the evicted connection's own `socket.destroy()`/`'close'` handling is
+   * still responsible for that, same as any other connection closing.
+   * LC (W2) wires this to `net.Server`'s `connection`/`close` events; W1's
+   * port stays decoupled from `net.Socket` on purpose (easier to fake in
+   * tests).
    */
-  admit(args: { peerIp: string; viaTrustedProxy: boolean }): ConnLease | undefined;
+  admit(args: { peerIp: string; viaTrustedProxy: boolean; onEvict: () => void }): ConnLease | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,15 +199,46 @@ export interface LanSessionRecord {
   absoluteExpiresAt: number;
 }
 
+/**
+ * §7 / §5.2: what `GET /api/session` needs, keyed by `userId` (which
+ * `touchSession`'s `LanSessionRecord` already carries) — kept as its own
+ * narrow lookup rather than widening `LanSessionRecord` itself, since
+ * `initialPasswordInUse` has nothing to do with session validity and every
+ * *other* `touchSession` call site (SSE open/subscribe/unsubscribe/history,
+ * §4.2) has no use for it. `initialPasswordInUse` is `users.initial_password
+ * IS NOT NULL` (§5.2: "只要初始密码还在使用").
+ */
+export interface LanUserSummary {
+  username: string;
+  initialPasswordInUse: boolean;
+}
+
 export interface LanStorePort {
   getUser(username: string, opts?: PortOptions): Promise<LanUserRecord | undefined>;
+  /**
+   * 审查修复 #5（v2）: backs `GET /api/session` (§7) — the endpoint only has a
+   * `userId` (from `touchSession`'s `LanSessionRecord`), never a username.
+   */
+  getUserSummary(userId: number, opts?: PortOptions): Promise<LanUserSummary | undefined>;
   initialInfo(
     opts?: PortOptions,
   ): Promise<{ username: string; initialPassword?: string; initialLogin?: { ip: string; at: number } } | undefined>;
+  /**
+   * 审查修复 #5（v2）: raw vs. hash semantics (§6.4 "库中只存 sha256(sid)"). The
+   * store generates a random raw session id internally, persists only its
+   * `sha256`, and returns the **raw** id — the caller sets it directly as
+   * the `pwh_lan` cookie value and never sees/handles the hash. This is the
+   * only place a raw sid ever exists outside a request's own `Cookie`
+   * header; every other method below (`touchSession`/`deleteSession`) takes
+   * `sidHash` because by the time a *later* request needs to look a session
+   * up, the caller only has the cookie's raw value on hand and is the one
+   * hashing it (matching §4.2's own prose, which names the parameter
+   * `sidHash`, not `sid`).
+   */
   createSession(
     input: { userId: number; epoch: number; boundOrigin: string; createdIp: string; now: number },
     opts?: PortOptions,
-  ): Promise<{ sidHash: string }>;
+  ): Promise<{ sid: string }>;
   touchSession(sidHash: string, now: number, opts?: PortOptions): Promise<LanSessionRecord | undefined>;
   deleteSession(sidHash: string, opts?: PortOptions): Promise<void>;
   deleteAllSessions(userId: number, opts?: PortOptions): Promise<void>;

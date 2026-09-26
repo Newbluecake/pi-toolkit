@@ -83,9 +83,14 @@ export function classifyHostToken(token: string): HostTokenResult {
   // ⑤ localhost (before the denylist / numeric checks — never denylisted, v6 #6).
   if (host === "localhost") return { ok: true, kind: "localhost", host };
   // ⑥ numeric last label (WHATWG URL parses it as a numeric IPv4-like host; Chromium rejects it
-  //    before the request ever reaches the server — lan-spike-results.md §5).
+  //    before the request ever reaches the server — lan-spike-results.md §5). Decimal ("123"),
+  //    and hex ("0x7f") all count — WHATWG's IPv4 parser accepts both forms for a lone/last part
+  //    (confirmed empirically: `new URL("https://0x7f").host` → "0.0.0.127"); octal ("017") is
+  //    already covered by the decimal check below since it is composed entirely of digit
+  //    characters. This check must run on the *raw* token (see `parseOrigin`'s header comment
+  //    for why feeding it a WHATWG-already-rewritten host would defeat the whole point).
   const lastLabel = labels[labels.length - 1]!;
-  if (/^[0-9]+$/.test(lastLabel)) return { ok: false, reason: "numeric" };
+  if (/^[0-9]+$/.test(lastLabel) || /^0x[0-9a-f]+$/i.test(lastLabel)) return { ok: false, reason: "numeric" };
   // ⑦ single-label denylist.
   if (labels.length === 1 && (SINGLE_LABEL_DENYLIST as readonly string[]).includes(host)) {
     return { ok: false, reason: "denylisted" };
@@ -157,20 +162,27 @@ export function canonicalOrigin(scheme: "http" | "https", hostKey: string): stri
  * Parse an `Origin` header value. Rejects non-http(s) schemes, embedded
  * userinfo, and a non-root path/search/hash (a bare origin's pathname is `""`
  * or `"/"`, both accepted).
+ *
+ * Deliberately does **not** use `new URL(origin).host` for the host part
+ * (review fix, W1 v2): WHATWG's URL parser silently rewrites a numeric-
+ * looking authority into a dotted-quad IPv4 address before we ever see it
+ * (`new URL("https://123").host === "0.0.0.123"`, `"https://0x7f".host ===
+ * "0.0.0.127"`, `"https://1.2".host === "1.0.0.2"`) — classifying *that*
+ * output would let a config author write `https://123` and have it
+ * silently accepted as a real IPv4 literal instead of being rejected as
+ * `numeric` (§2.1 rule ⑥). Instead this parses the `scheme://[user@]host[/]`
+ * shape directly with a regex, so `classifyHostToken`/`canonicalHostKey`
+ * always see the *raw* authority the caller actually wrote.
  */
+const ORIGIN_RE = /^(https?):\/\/(?:([^/?#]*)@)?([^/?#]*)(\/)?$/i;
+
 export function parseOrigin(origin: string): { scheme: "http" | "https"; hostKey: string } | undefined {
-  let url: URL;
-  try {
-    url = new URL(origin);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-  if (url.username !== "" || url.password !== "") return undefined;
-  if (url.pathname !== "" && url.pathname !== "/") return undefined;
-  if (url.search !== "" || url.hash !== "") return undefined;
-  const scheme = url.protocol === "https:" ? "https" : "http";
-  const hostKey = canonicalHostKey(url.host, scheme);
+  const m = ORIGIN_RE.exec(origin);
+  if (m === null) return undefined;
+  const [, schemeRaw, userinfo, hostPort] = m;
+  if (userinfo !== undefined) return undefined; // embedded userinfo rejected
+  const scheme = schemeRaw!.toLowerCase() === "https" ? "https" : "http";
+  const hostKey = canonicalHostKey(hostPort, scheme);
   if (hostKey === undefined) return undefined;
   return { scheme, hostKey };
 }
