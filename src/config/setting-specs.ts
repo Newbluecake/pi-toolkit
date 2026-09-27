@@ -208,7 +208,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "compact.dynamicThreshold.mode": choice(
     "compact.dynamicThreshold.mode",
     ["off", "shadow", "on"],
-    "Price-aware dynamic hint line (default on; shadow = compute + telemetry only)",
+    "Price-aware dynamic hint line (default on; when usable it fires INSTEAD OF the static hint line, which becomes a fallback for when it isn't; shadow = compute + telemetry only)",
   ),
   "compact.dynamicThreshold.minHintPercent": {
     ...count("compact.dynamicThreshold.minHintPercent", 0, "Never hint before this share of the window"),
@@ -218,7 +218,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ...count(
       "compact.dynamicThreshold.maxQualityPercent",
       0,
-      "Quality ceiling (uncalibrated safety cap); never hint later than this",
+      "Quality ceiling (uncalibrated safety cap); never hint later than this — the static threshold no longer overrides it while dynamic is usable",
     ),
     max: 100,
   } as SettingSpec,

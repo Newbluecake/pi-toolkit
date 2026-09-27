@@ -384,13 +384,13 @@ describe("dynamic threshold §3.4 (D1)", () => {
     if (stillUsable.usable) expect(stillUsable.writePricingApproximate).toBe(true);
   });
 
-  it("§3.6 合成三行：percent 线、绝对线、绝对线超窗自动失效（动态层不得复活）", () => {
+  it("§3.6 合成三行：percent 线、绝对线、绝对线超窗自动失效（动态层不得复活）；2026-09-27 起 usable ⇒ 动态线单独生效（不再取 min）", () => {
     const dynamic = compute(); // usable, hintTokens ≈ 385_626
     expect(dynamic.usable).toBe(true);
     if (!dynamic.usable) return;
     const dyn = dynamic.hintTokens;
 
-    // percent=75, tokens=0 ⇒ min(750k, dyn)
+    // percent=75, tokens=0，static 判活，usable ⇒ dyn 单独生效
     expect(staticHintActive({ percent: 75, tokensK: 0 }, 1_000_000, 16_384)).toBe(true);
     expect(
       composeHintLineTokens({
@@ -400,9 +400,9 @@ describe("dynamic threshold §3.4 (D1)", () => {
         mode: "on",
         dynamic,
       }),
-    ).toBe(Math.min(750_000, dyn));
+    ).toBe(dyn);
 
-    // percent=0, tokens=500（绝对线 500k，低于窗口）⇒ min(500k, dyn)
+    // percent=0, tokens=500（绝对线 500k，低于窗口），static 判活，usable ⇒ dyn 单独生效
     expect(staticHintActive({ percent: 0, tokensK: 500 }, 1_000_000, 16_384)).toBe(true);
     expect(
       composeHintLineTokens({
@@ -412,7 +412,7 @@ describe("dynamic threshold §3.4 (D1)", () => {
         mode: "on",
         dynamic,
       }),
-    ).toBe(Math.min(500_000, dyn));
+    ).toBe(dyn);
 
     // percent=0, tokens=2000（绝对线 2M > 窗口 1M ⇒ 自动失效）⇒ hint 关闭，动态不得复活
     expect(staticHintActive({ percent: 0, tokensK: 2_000 }, 1_000_000, 16_384)).toBe(false);
@@ -426,7 +426,7 @@ describe("dynamic threshold §3.4 (D1)", () => {
       }),
     ).toBe(0);
 
-    // mode off/shadow ⇒ 静态线；动态退化（usable:false）⇒ 静态线（与现行行为逐字节一致）
+    // mode off/shadow ⇒ 静态线；动态退化（usable:false）⇒ 静态线（现行行为，逐字节一致，兜底）
     const staticTokens = 750_000;
     for (const mode of ["off", "shadow"] as const) {
       expect(

@@ -214,19 +214,20 @@ describe("T-D3-ON-LINE: on + Opus 5.5 价格 + 静态 75%/500k ⇒ hint 在约 4
   });
 });
 
-describe("T-D3-ON-NEVER-LATER: 静态设 30% ⇒ 动态不得推到 40%", () => {
-  it("keeps the earlier static line and the static marker", () => {
+describe("T-D3-DYNAMIC-PRIORITY: 静态设 30% ⇒ 动态（39%）可用时独占生效，即便比静态线更晚（2026-09-27 决策，替代原 T-D3-ON-NEVER-LATER）", () => {
+  it("the dynamic hint line wins outright; crossing the earlier static line alone never fires", () => {
     const rig0 = mkRuntime({});
     const rig = mkHook(rig0.runtime, { thresholdPercent: 30, thresholdTokens: 0 });
-    let tokens = 250_000;
-    rig.hook({}, ctxOf(rig, { tokens }));
-    expect(ticksOf(rig)[0]?.content).toContain("hint 30% · static"); // 静态线更早 ⇒ static 标记
-    tokens = 301_000;
-    rig.hook({}, ctxOf(rig, { tokens }));
+    rig.hook({}, ctxOf(rig, { tokens: 350_000 }));
+    expect(ticksOf(rig)[0]?.content).toContain("hint 39% · cost"); // 动态线独占生效（不再是 static）
+    // 350k=35% 早已越过静态 30%，但动态线（39%）才是生效线 ⇒ 尚未 hint
+    expect(hintsOf(rig)).toHaveLength(0);
+    // +800/turn 渐进升到动态线（同前一个描述块的手法）
+    for (let tokens = 350_800; tokens <= 400_000; tokens += 800) rig.hook({}, ctxOf(rig, { tokens }));
     const hint = hintsOf(rig)[0];
     expect(hint).toBeDefined();
-    expect((hint?.details as { thresholdPercent: number }).thresholdPercent).toBe(30); // 不是 39/40
-    expect(hint?.content).not.toContain("价格模型"); // 无动态 note
+    expect((hint?.details as { thresholdPercent: number }).thresholdPercent).toBe(39); // 动态线，不是 30
+    expect(hint?.content).toContain("价格模型"); // 动态 note：阈值确实来自价格模型
   });
 });
 
@@ -317,8 +318,11 @@ describe("T-D3-STATE-MACHINE (P2-1：逐行验证 §9.2 转换表)", () => {
 });
 
 describe("T-D3-TIER-EXEMPT: 跨档前一次性提醒突破冷却，每个 B 一次", () => {
-  it("fires once inside [B−margin, B] despite the hint cooldown, then never again for the same B", () => {
+  it("fires once inside [B-margin, B] despite the hint cooldown, then never again for the same B", () => {
     // W=400k，档边界 B=200k（跨档后 cacheRead 翻倍）；g 恒 800 ⇒ margin = max(1600, 4k) = 4k。
+    // 2026-09-27 起动态线独占生效：默认 maxQualityPercent=60 会让 argmin 直接落在 B 本身（quality cap
+    // 240k > B），与常规 hint 重合，测不出跨档票单独绕过冷却的效果；收紧 maxQualityPercent=40（cap=160k
+    // < B）让常规 hint 先于 B 触发（basis quality-cap，无 tier note），再让跨档票单独验证绕过冷却。
     const tiered = {
       ...OPUS,
       contextWindow: 400_000,
@@ -331,8 +335,8 @@ describe("T-D3-TIER-EXEMPT: 跨档前一次性提醒突破冷却，每个 B 一�
       },
     };
     let nowMs = 1;
-    const rig0 = mkRuntime({});
-    const rig = mkHook(rig0.runtime, { thresholdPercent: 30, thresholdTokens: 0 }, () => nowMs);
+    const rig0 = mkRuntime({ config: { maxQualityPercent: 40 } });
+    const rig = mkHook(rig0.runtime, {}, () => nowMs);
     let tokens = 120_000;
     const turn = () => {
       nowMs += 1;
@@ -340,13 +344,14 @@ describe("T-D3-TIER-EXEMPT: 跨档前一次性提醒突破冷却，每个 B 一�
       tokens += 800;
     };
     turn(); // 30% 基线
-    turn(); // 30.2% ⇒ 静态线 30% 越线 ⇒ hint #1（冷却开始；静态线生效 ⇒ 无动态 note）
+    while (hintsOf(rig).length === 0 && tokens <= 170_000) turn(); // 越过动态线（40%，quality-cap）⇒ hint #1
     expect(hintsOf(rig)).toHaveLength(1);
     expect(hintsOf(rig)[0]?.content).not.toContain("跨进高价档");
-    // 爬到 B−margin（196k）之前：常规路径被冷却/闩锁挡住
+    expect((hintsOf(rig)[0]?.details as { thresholdPercent: number }).thresholdPercent).toBe(40); // 动态线（quality-cap）
+    // 爬到 B-margin（196k）之前：常规路径被冷却/闩锁挡住
     while (tokens < 195_000) turn();
     expect(hintsOf(rig)).toHaveLength(1); // 冷却期内无第二次
-    // 进入 [B−margin, B] = [196k, 200k] ⇒ 跨档票突破冷却发一次
+    // 进入 [B-margin, B] = [196k, 200k] ⇒ 跨档票突破冷却发一次
     while (hintsOf(rig).length < 2 && tokens <= 205_000) turn();
     const tierHint = hintsOf(rig)[1];
     expect(tierHint).toBeDefined();

@@ -265,12 +265,25 @@ describe("dynamic hint line in set_compact_threshold query (P1-11)", () => {
     const query = await tool.execute("1", {}, undefined, undefined, ctx());
     const text = query.content[0]?.text ?? "";
     expect(text).toContain("Dynamic hint line: 41% (cost; C* 16%, g 1200 tokens/turn, R $10.00 uncalibrated)");
-    expect(text).toContain("your configured 75% stays the upper bound.");
+    expect(text).toContain("this line now fires instead of your configured 75%");
     // set 分支不变：不追加动态行，行为照旧
     const set = await tool.execute("2", { percent: 70 }, undefined, undefined, ctx());
     expect(set.content[0]?.text).not.toContain("Dynamic hint line");
     expect(current.thresholdPercent).toBe(70);
     expect(set.details).toMatchObject({ ok: true, action: "set", thresholdPercent: 70 });
+  });
+
+  it("on + usable but static hint explicitly disabled ⇒ query says NOT applied (no hint fires)", async () => {
+    const current = state();
+    const tool = createSetCompactThresholdTool({
+      getState: () => current,
+      compactToolEnabled: () => true,
+      dynamic: { view: () => usableView },
+    });
+    await tool.execute("1", { percent: 0 }, undefined, undefined, ctx());
+    const text = (await tool.execute("2", {}, undefined, undefined, ctx())).content[0]?.text ?? "";
+    expect(text).toContain("NOT applied: hint disabled by your static setting");
+    expect(text).not.toContain("now fires instead of");
   });
 
   it("shadow marks computed-but-not-applied; off adds no dynamic line", async () => {
@@ -281,6 +294,7 @@ describe("dynamic hint line in set_compact_threshold query (P1-11)", () => {
     });
     const shadow = await shadowTool.execute("1", {}, undefined, undefined, ctx());
     expect(shadow.content[0]?.text).toContain("[shadow: computed but NOT applied]");
+    expect(shadow.content[0]?.text).toContain("your configured 75% still fires.");
     const offTool = createSetCompactThresholdTool({
       getState: () => state(),
       compactToolEnabled: () => true,

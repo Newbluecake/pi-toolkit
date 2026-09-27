@@ -1002,15 +1002,15 @@ describe("dynamic threshold status section (P1-11)", () => {
         .split("\n")
         .find((l) => l.startsWith("Compact thresholds:"));
 
-    it("static line earlier (the live case) ⇒ the static percent, dynamic shown as context", () => {
+    it("dynamic usable ⇒ the dynamic percent fires even when it is later than the static line (2026-09-27: static is fallback-only)", () => {
       const view = { ...usableView, hintPercent: 60, hintTokens: 600_000, basis: "quality-cap" };
-      expect(head(view)).toContain("hint 50% (static; dyn 60% quality-cap)");
-      expect(head(view)).not.toContain("hint 60%");
+      expect(head(view)).toContain("hint 60% (dyn·quality-cap; static 50% fallback)");
+      expect(head(view)).not.toContain("hint 50%");
     });
 
-    it("dynamic line earlier ⇒ the dynamic percent, static shown as context", () => {
+    it("dynamic line earlier ⇒ the dynamic percent, static shown as fallback context", () => {
       const view = { ...usableView, hintPercent: 41, hintTokens: 410_000, basis: "cost" };
-      expect(head(view)).toContain("hint 41% (dyn·cost; static 50%)");
+      expect(head(view)).toContain("hint 41% (dyn·cost; static 50% fallback)");
     });
 
     it("shadow ⇒ the static line fires; dynamic is labelled shadow", () => {

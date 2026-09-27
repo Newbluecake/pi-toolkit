@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { composeHintLineTokens, resolveEffectiveHint } from "../../../src/compact-hint/dynamic/threshold.js";
-import { effectiveThresholdPercentWithTokens, thresholdLineTokens } from "../../../src/compact-hint/threshold.js";
+import { resolveEffectiveHint } from "../../../src/compact-hint/dynamic/threshold.js";
+import { effectiveThresholdPercentWithTokens } from "../../../src/compact-hint/threshold.js";
 
 /** Same seeded PRNG as the other dynamic-threshold property tests (mulberry32). */
 function mulberry32(seed: number): () => number {
@@ -14,7 +14,10 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-/** The hook's inline composition before it moved into resolveEffectiveHint (cd0d209). */
+/** The hook's inline composition before it moved into resolveEffectiveHint (cd0d209).
+ *  Updated 2026-09-27 for the new semantics: a usable dynamic line wins outright (no more
+ *  min against the static line) — the static line only stays active as a fallback when
+ *  dynamic is unavailable, and a user-disabled static line is never resurrected. */
 function legacyHookComposition(
   percent: number,
   tokensK: number,
@@ -22,23 +25,10 @@ function legacyHookComposition(
   reserve: number,
   dyn: { hintTokens: number; hintPercent: number } | undefined,
 ): { percent: number; dynamicWon: boolean } {
-  let effective = effectiveThresholdPercentWithTokens(percent, tokensK, window, reserve);
-  let won = false;
-  if (dyn !== undefined) {
-    const composed = composeHintLineTokens({
-      staticLines: { percent, tokensK },
-      window,
-      reserveTokens: reserve,
-      mode: "on",
-      dynamic: { usable: true, hintTokens: dyn.hintTokens },
-    });
-    const staticTokens = thresholdLineTokens(percent, tokensK, window);
-    if (composed > 0 && composed < staticTokens) {
-      effective = Math.min(effective, dyn.hintPercent);
-      won = true;
-    }
-  }
-  return { percent: effective, dynamicWon: won };
+  const staticEffective = effectiveThresholdPercentWithTokens(percent, tokensK, window, reserve);
+  if (staticEffective <= 0) return { percent: 0, dynamicWon: false };
+  if (dyn === undefined) return { percent: staticEffective, dynamicWon: false };
+  return { percent: dyn.hintPercent, dynamicWon: true };
 }
 
 describe("resolveEffectiveHint (shared by the compact-hint hook and /agent status)", () => {
@@ -65,7 +55,7 @@ describe("resolveEffectiveHint (shared by the compact-hint hook and /agent statu
     }
   });
 
-  it("the live acceptance case: static 75%/500k on 1M fires at 50%, a 60% dynamic line loses", () => {
+  it("the live acceptance case: static 75%/500k on 1M fires at 50% baseline, but a 60% usable dynamic line now wins outright", () => {
     const window = 1_000_000;
     const r = resolveEffectiveHint({
       staticEffectivePercent: effectiveThresholdPercentWithTokens(75, 500, window, 16_384),
@@ -74,10 +64,10 @@ describe("resolveEffectiveHint (shared by the compact-hint hook and /agent statu
       reserveTokens: 16_384,
       dynamic: { hintTokens: 600_000, hintPercent: 60 },
     });
-    expect(r).toEqual({ percent: 50, dynamicWon: false });
+    expect(r).toEqual({ percent: 60, dynamicWon: true });
   });
 
-  it("an earlier dynamic line wins; a disabled static line is never resurrected", () => {
+  it("a usable dynamic line wins even when later than the static line; a disabled static line is never resurrected", () => {
     const window = 1_000_000;
     const base = { staticLines: { percent: 75, tokensK: 500 }, window, reserveTokens: 16_384 };
     expect(

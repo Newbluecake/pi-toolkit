@@ -1140,3 +1140,32 @@ D1–D3 三包施工时逐条报告的偏差在此汇总（格式：**方案位�
 | 8   | §10.3 渲染示例（`g 1.2k/turn (σ 0.9k, n=37)`）                                      | 第 2 行**省略样本数**段（渲染为 `g 1.2k/turn (σ 0.9k)`）                                                                                                        | `DynamicStatusView` 未透出样本计数；status 是诊断视图不是统计报表，行宽优先留给价格/C*/g/σ/S0 本体                                                                          |
 | 9   | §5.2/§12 D2（遥测记录形状）                                                         | telemetry.ts 的局部快照类型（`ThresholdSnapshot`/`EstimateSnapshot`/`PriceSnapshot` 等）保留，**不与** D1 的 `DynamicThresholdOutcome`/`EstimatorState` 合并    | 两者职责不同：D1 类型是判别联合的内存对象（`undefined` 语义、永不落盘），遥测快照是全可空（`null` 语义）+ 带 `v:2` 版本字段的序列化切片；合并会让任一侧的缺失语义污染另一侧 |
 | 10  | §11.1（`CompactSettings` 新增 `dynamicThreshold`）                                  | 既有 `tests/config/compact-settings.test.ts` 的**严格（整对象）期望随新字段更新**（同 commit 内）                                                               | 该套件对 `CompactSettings` 做整形状断言，新增合法字段必须同步期望，否则要么编译失败要么断言误报；顺带把默认值（`mode="on"` 等）钉死在旧套件里                               |
+
+## 13. 2026-09-27 用户决策：静态线降为兜底
+
+**原因**：默认参数下静态 hint 线 50%（`DEFAULT_HINT_THRESHOLD_PERCENT` 一路走到 `state.thresholdPercent`
+的运行时默认，见 `src/compact-hint/threshold.ts`）与动态层的合成上限 `maxQualityPercent`（默认 60）之间
+出现了一段死区：D3 的 `min(静态线, 动态线)` 合成规则（§3.6，`82b2b40`/`cd0d209`）永远取更早的那条，
+静态 50% 恒早于 60%，于是 `maxQualityPercent` 从未真正生效过——它存在的意义（「未校准的安全上限，允许
+用量涨到比静态默认更晚」）被静态线单方面吃掉了。
+
+**新语义**（`composeHintLineTokens` / `resolveEffectiveHint`，`src/compact-hint/dynamic/threshold.ts`）：
+
+- `dynamicThreshold.mode="on"` 且当轮 `computeDynamicThreshold` 返回 `usable:true` ⇒ **hint 线只听动态线**
+  （`hintLineTokens = dyn.hintTokens`，不再与静态线取 `min`）。质量上限 `maxQualityPercent` 由动态层自己的
+  `clamp(..., cap)` 负责，不再被静态线覆盖成死区。
+- `usable:false`（任意 `DegradeReason`：`price-unknown`、窗口 `< 32k`、`infeasible-range`、内部错误等）
+  ⇒ 静态线独占（现行行为，逐字节不变）。
+- `mode !== "on"`（`off` / `shadow`）⇒ 静态线独占（`off` 逐字节回滚保证 `T-D3-OFF-GOLDEN`；`shadow` 只算
+  不用）。
+- **静态线被用户显式关闭时保持无 hint**：`staticHintActive`（判活谓词）为假时，动态层不得复活——用户
+  显式关闭 hint 的意图应被尊重，即便动态线本身可用。这一条在合成规则里保持不变（§3.6 原表的第三行）。
+
+**影响面**：`composeHintLineTokens`、`resolveEffectiveHint`（`src/compact-hint/dynamic/threshold.ts`）、
+`src/commands/status.ts`（`renderHintHead`：动态可用时把动态线标为生效线，静态线标注 `fallback`）、
+`src/tools/set-compact-threshold-tool.ts`（query 文案：`on` 模式下动态线可用时改为「fires instead of your
+configured …」，`shadow` 模式保持「your configured … still fires」）、以及对应单测
+（`tests/compact-hint/dynamic/effective-hint.test.ts`、`tests/compact-hint/dynamic/threshold.test.ts`、
+`tests/commands/status.test.ts`、`tests/tools/set-compact-threshold-tool.test.ts`）。`mode=off`/`shadow`
+路径与 golden fixture `tests/fixtures/compact-hint-golden.json` 逐字节不变，未触碰 force 线与 usage tick
+网格。

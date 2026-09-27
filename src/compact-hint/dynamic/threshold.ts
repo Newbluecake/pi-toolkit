@@ -6,7 +6,8 @@
  * 可行线都返回 `{ usable: false, reason }`（P0-1），绝不把 0 当线。
  *
  * `forceAtPercent` / `forceAtTokens` / `forceScaling` 的表达式一字不改（S3：force 是
- * 安全网）；动态层只输出 hint 线，与静态线的 min 合成规则见 `composeHintLineTokens`（§3.6）。
+ * 安全网）；动态层只输出 hint 线，与静态线的合成规则见 `composeHintLineTokens`（§3.6，
+ * 2026-09-27 起：动态可用时独占生效，静态线降为退化/off/shadow 时的兜底）。
  */
 
 import { effectiveThresholdPercentWithTokens, thresholdLineTokens, windowScaledForcePercent } from "../threshold.js";
@@ -428,20 +429,20 @@ export interface ComposeHintLineArgs {
 }
 
 /**
- * 动态线与静态线的合成（D3：min，动态线只能提前）：
- * - 今天没有线（判活谓词为假）⇒ 0，动态层不得复活；
- * - mode !== "on"（off / shadow）⇒ 静态线；
- * - 动态退化（usable:false）⇒ 静态线（现行行为，逐字节一致）；
- * - 否则 min(静态线, 动态线)。
- * `staticHintActive ⇒ staticTokens > 0`（由两个既有函数的定义域保证），min 永远有意义。
+ * 动态线与静态线的合成（2026-09-27 用户决策：动态可用时独占，静态线降为兜底——
+ * 见 dynamic-threshold-plan.md 文末「静态线降为兜底」一节）：
+ * - 今天没有线（静态判活谓词为假）⇒ 0，动态层不得复活（静态线被用户显式关闭时应被尊重）；
+ * - mode !== "on"（off / shadow）⇒ 静态线（逐字节回滚保证，T-D3-OFF-GOLDEN）；
+ * - 动态退化（usable:false，任意 DegradeReason）⇒ 静态线（兜底）；
+ * - 否则动态线单独生效（不再与静态线取 min——质量上限 `maxQualityPercent` 由动态层自己的
+ *   `clamp(..., cap)` 负责，不再被静态线覆盖成死区）。
  */
 export function composeHintLineTokens(args: ComposeHintLineArgs): number {
   const { staticLines, window: w, reserveTokens, mode, dynamic } = args;
   if (!staticHintActive(staticLines, w, reserveTokens)) return 0;
-  const staticTokens = thresholdLineTokens(staticLines.percent, staticLines.tokensK, w);
-  if (mode !== "on") return staticTokens;
-  if (!dynamic.usable) return staticTokens;
-  return Math.min(staticTokens, dynamic.hintTokens);
+  if (mode !== "on") return thresholdLineTokens(staticLines.percent, staticLines.tokensK, w);
+  if (!dynamic.usable) return thresholdLineTokens(staticLines.percent, staticLines.tokensK, w);
+  return dynamic.hintTokens;
 }
 
 export interface EffectiveHintArgs {
@@ -457,21 +458,16 @@ export interface EffectiveHintArgs {
 /**
  * The hint percent the hook actually fires at, plus whether the dynamic line won. Shared by
  * the compact-hint hook and `/agent status` so the status line can never disagree with the
- * real trigger: the dynamic line only wins when it is strictly earlier in token terms (D3).
+ * real trigger.
+ *
+ * 2026-09-27 用户决策（dynamic-threshold-plan.md 文末「静态线降为兜底」一节）：动态线可用时
+ * 独占生效（不再与静态线取 min）——质量上限由动态层自己的 `maxQualityPercent` 负责，不再被
+ * 静态线覆盖成死区。静态线只在动态不可用（`dynamic === undefined`，即 mode !== "on" 或退化）
+ * 时才生效；静态线被用户显式关闭（`staticHintActive` 为假）时保持无 hint —— 动态层不得复活。
  */
 export function resolveEffectiveHint(args: EffectiveHintArgs): { percent: number; dynamicWon: boolean } {
   const { staticEffectivePercent, staticLines, window: w, reserveTokens, dynamic } = args;
+  if (!staticHintActive(staticLines, w, reserveTokens)) return { percent: 0, dynamicWon: false };
   if (dynamic === undefined) return { percent: staticEffectivePercent, dynamicWon: false };
-  const composed = composeHintLineTokens({
-    staticLines,
-    window: w,
-    reserveTokens,
-    mode: "on",
-    dynamic: { usable: true, hintTokens: dynamic.hintTokens },
-  });
-  const staticTokens = thresholdLineTokens(staticLines.percent, staticLines.tokensK, w);
-  if (composed > 0 && composed < staticTokens) {
-    return { percent: Math.min(staticEffectivePercent, dynamic.hintPercent), dynamicWon: true };
-  }
-  return { percent: staticEffectivePercent, dynamicWon: false };
+  return { percent: dynamic.hintPercent, dynamicWon: true };
 }

@@ -116,11 +116,14 @@ export function createSetCompactThresholdTool(
             // §10.5 样例：`Dynamic hint line: 41% (cost; C* 16%, g 1.2k/turn, R $10 uncalibrated) — …`
             const cStar = view.cStarPercent !== null ? `; C* ${view.cStarPercent}%` : "";
             const g = view.g !== null ? `, g ${Math.round(view.g)} tokens/turn` : "";
-            dynamicLine =
-              `\nDynamic hint line: ${view.hintPercent}% (${view.basis ?? "—"}${cStar}${g}, ` +
-              `R $${view.rUsd.toFixed(2)} uncalibrated)${
-                view.mode === "shadow" ? " [shadow: computed but NOT applied]" : ""
-              } — your configured ${formatThreshold(state.thresholdPercent, state.thresholdTokens, window)} stays the upper bound.`;
+            const staticLabel = formatThreshold(state.thresholdPercent, state.thresholdTokens, window);
+            const trailing =
+              view.mode === "shadow"
+                ? ` [shadow: computed but NOT applied] — your configured ${staticLabel} still fires.`
+                : effective <= 0
+                  ? ` [NOT applied: hint disabled by your static setting ${staticLabel}; no hint fires].`
+                  : ` — this line now fires instead of your configured ${staticLabel} (2026-09-27: static is fallback-only, used only when dynamic is unavailable).`;
+            dynamicLine = `\nDynamic hint line: ${view.hintPercent}% (${view.basis ?? "—"}${cStar}${g}, R $${view.rUsd.toFixed(2)} uncalibrated)${trailing}`;
           } else {
             dynamicLine = `\nDynamic hint line: inactive (${
               view.degradeReason ?? "unknown"

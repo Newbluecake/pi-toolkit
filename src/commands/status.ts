@@ -637,9 +637,10 @@ function formatUsdPerM(value: number | null | undefined): string {
 }
 
 /**
- * Line-1 head: the hint percent that actually fires (static vs dynamic composed exactly like the
- * hook, via the shared resolveEffectiveHint), with the losing line shown for context. Without the
- * static facts (older host) it falls back to the bare dynamic line.
+ * Line-1 head: the hint percent that actually fires (dynamic wins whenever usable — the static
+ * line is now a fallback, shown for context, per the 2026-09-27 decision in
+ * dynamic-threshold-plan.md's "静态线降为兜底" section), via the shared resolveEffectiveHint.
+ * Without the static facts (older host) it falls back to the bare dynamic line.
  */
 function renderHintHead(
   view: DynamicStatusView,
@@ -657,7 +658,8 @@ function renderHintHead(
       ? `hint ${staticEffective}% (static; shadow ${dynLabel})`
       : `hint off (static off; shadow ${dynLabel})`;
   }
-  // D3: a disabled static line stays disabled — the dynamic layer never resurrects a hint.
+  // A disabled static line stays disabled — the dynamic layer never resurrects a hint (explicit
+  // user opt-out is honored even though the dynamic line otherwise takes priority).
   if (staticEffective <= 0) return `hint off (static off; ${dynLabel} not applied)`;
   const resolved = resolveEffectiveHint({
     staticEffectivePercent: staticEffective,
@@ -670,8 +672,8 @@ function renderHintHead(
         : undefined,
   });
   return resolved.dynamicWon
-    ? `hint ${resolved.percent}% (dyn·${view.basis ?? "—"}; static ${staticEffective}%)`
-    : `hint ${resolved.percent}% (static; ${dynLabel})`;
+    ? `hint ${resolved.percent}% (dyn·${view.basis ?? "—"}; static ${staticEffective}% fallback)`
+    : `hint ${resolved.percent}% (static fallback; ${dynLabel} not applied)`;
 }
 
 /**

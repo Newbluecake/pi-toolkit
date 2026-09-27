@@ -129,9 +129,14 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   the generic forced compaction when the model ignores it — the safety net is never removed. On top
   of that, a price-aware dynamic hint line (`dynamic/` subdirectory: pure-function layer + telemetry
   - the pi-facing wire; plan: `docs/dev/compact-hint/dynamic-threshold-plan.md`) is on by default
-    (`compact.dynamicThreshold.mode=on`) and composes with the static line via `min` — it can only
-    fire earlier, never later; `off` restores byte-identical pre-feature behavior, pinned by the
-    golden fixture `tests/fixtures/compact-hint-golden.json` (never regenerate it). Its switch
+    (`compact.dynamicThreshold.mode=on`) and, whenever it is usable, fires INSTEAD OF the static
+    line — 2026-09-27 decision: the static line is demoted to a fallback, used only while the
+    dynamic line is unavailable (`mode` off/shadow or a `usable:false` degrade), so its own quality
+    ceiling `maxQualityPercent` is no longer dead code under a lower static default; an explicitly
+    disabled static line (`staticHintActive` false) still suppresses hint entirely — the dynamic
+    layer never resurrects a hint the user turned off. `off` restores byte-identical pre-feature
+    behavior, pinned by the golden fixture `tests/fixtures/compact-hint-golden.json` (never
+    regenerate it). Its switch
     telemetry (`~/.pi/agent/telemetry/compact-switch.jsonl`, 0600, append-only, 2 MiB rotation)
     records aggregate numbers only — never any paths.
 - `src/context-switch/` — model-authored context handoff: `handoff.ts` (validation + markdown
