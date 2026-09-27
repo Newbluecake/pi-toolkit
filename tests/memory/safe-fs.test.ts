@@ -3,13 +3,16 @@
 // no-clobber create/rename, canonicalization + the slug-directory trust
 // exception, and the lock-file primitives lock.ts composes.
 
+import { execSync } from "node:child_process";
 import {
   closeSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -20,6 +23,7 @@ import { MemoryError } from "../../src/memory/paths.js";
 import {
   appendLegacy,
   canonicalDir,
+  canonicalDirState,
   createExclusive,
   ensurePrivateDir,
   isDirFollowOutside,
@@ -30,9 +34,11 @@ import {
   openRegular,
   readRegular,
   readRegularHead,
+  removeFlatDir,
   renameNoClobber,
   replaceAtomic,
   statRegularIfExists,
+  unlinkRegular,
   writeAll,
   writeInPlaceLegacy,
   writeTempRegular,
@@ -284,5 +290,289 @@ describe("writeAll", () => {
       closeSync(fd);
     }
     expect(readFileSync(path, "utf8")).toBe("all of this");
+  });
+});
+
+describe("RegularStat/RegularFileEntry nlink", () => {
+  it("statRegularIfExists reports nlink 1 for a plain file, 2 after a hard link", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "a.md"), "hi");
+    expect(statRegularIfExists(dir, "a.md")?.nlink).toBe(1);
+    linkSync(join(dir, "a.md"), join(dir, "b.md"));
+    expect(statRegularIfExists(dir, "a.md")?.nlink).toBe(2);
+  });
+
+  it("listRegular reports nlink per entry", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "a.md"), "hi");
+    linkSync(join(dir, "a.md"), join(dir, "b.md"));
+    const { files } = listRegular(dir, { names: "legacy" });
+    const byName = new Map(files.map((f) => [f.name, f]));
+    expect(byName.get("a.md")?.nlink).toBe(2);
+    expect(byName.get("b.md")?.nlink).toBe(2);
+  });
+});
+
+describe("canonicalDirState", () => {
+  it("ok for a real directory, distinguishing linked", () => {
+    const dir = tmp();
+    const result = canonicalDirState(dir);
+    expect(result.state).toBe("ok");
+    if (result.state === "ok") {
+      expect(result.dir.real).toBe(dir);
+      expect(result.dir.linked).toBe(false);
+    }
+  });
+
+  it("missing for a nonexistent path", () => {
+    const dir = tmp();
+    expect(canonicalDirState(join(dir, "nope"))).toEqual({ state: "missing" });
+  });
+
+  it("not-dir when the canonical target exists but is a file", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "file.md"), "hi");
+    expect(canonicalDirState(join(dir, "file.md"))).toEqual({ state: "not-dir" });
+  });
+
+  it("canonicalDir keeps its own collapsed undefined-on-non-ok behavior", () => {
+    const dir = tmp();
+    expect(canonicalDir(join(dir, "nope"))).toBeUndefined();
+    writeFileSync(join(dir, "file.md"), "hi");
+    expect(canonicalDir(join(dir, "file.md"))).toBeUndefined();
+    expect(canonicalDir(dir)).toEqual({ display: dir, real: dir, linked: false });
+  });
+});
+
+describe("unlinkRegular", () => {
+  it("deletes a plain regular file", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "a.md"), "hi");
+    unlinkRegular(dir, "a.md");
+    expect(readdirSync(dir)).not.toContain("a.md");
+  });
+
+  it("refuses a symlink, leaving it in place", () => {
+    const dir = tmp();
+    const outside = tmp();
+    writeFileSync(join(outside, "secret.md"), "shh");
+    symlinkSync(join(outside, "secret.md"), join(dir, "link.md"));
+    expect(() => unlinkRegular(dir, "link.md")).toThrow(MemoryError);
+    expect(readdirSync(dir)).toContain("link.md");
+    expect(readdirSync(outside)).toContain("secret.md");
+  });
+
+  it("refuses a directory", () => {
+    const dir = tmp();
+    mkdirSync(join(dir, "sub"));
+    expect(() => unlinkRegular(dir, "sub")).toThrow(MemoryError);
+    expect(readdirSync(dir)).toContain("sub");
+  });
+
+  it("refuses a FIFO", () => {
+    const dir = tmp();
+    execSync(`mkfifo ${JSON.stringify(join(dir, "pipe"))}`);
+    expect(() => unlinkRegular(dir, "pipe")).toThrow(MemoryError);
+    expect(readdirSync(dir)).toContain("pipe");
+  });
+
+  it("refuses a name with a path separator or `..`, deleting nothing", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "a.md"), "hi");
+    expect(() => unlinkRegular(dir, "../a.md")).toThrow(MemoryError);
+    expect(() => unlinkRegular(dir, "sub/a.md")).toThrow(MemoryError);
+    expect(() => unlinkRegular(dir, "..")).toThrow(MemoryError);
+    expect(readdirSync(dir)).toContain("a.md");
+  });
+});
+
+describe("removeFlatDir", () => {
+  it("deletes a directory containing only regular files", () => {
+    const dir = tmp();
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const id = "20260101T000000000Z-1-abcdef";
+    mkdirSync(join(backup, id));
+    writeFileSync(join(backup, id, "manifest.json"), "{}");
+    writeFileSync(join(backup, id, "a.md"), "hi");
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, id);
+    expect(result).toEqual({ removed: true, count: 2 });
+    expect(readdirSync(backup)).not.toContain(id);
+  });
+
+  it("refuses (and deletes nothing) when a child is a symlink", () => {
+    const dir = tmp();
+    const outside = tmp();
+    writeFileSync(join(outside, "secret.md"), "shh");
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const id = "id-with-symlink";
+    mkdirSync(join(backup, id));
+    writeFileSync(join(backup, id, "a.md"), "hi");
+    symlinkSync(join(outside, "secret.md"), join(backup, id, "link.md"));
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, id);
+    expect(result).toEqual({ removed: false, reason: "not-flat" });
+    expect(readdirSync(join(backup, id)).sort()).toEqual(["a.md", "link.md"]);
+  });
+
+  it("refuses (and deletes nothing) when a child is a subdirectory", () => {
+    const dir = tmp();
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const id = "id-with-subdir";
+    mkdirSync(join(backup, id));
+    writeFileSync(join(backup, id, "a.md"), "hi");
+    mkdirSync(join(backup, id, "nested"));
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, id);
+    expect(result).toEqual({ removed: false, reason: "not-flat" });
+    expect(readdirSync(join(backup, id)).sort()).toEqual(["a.md", "nested"]);
+  });
+
+  it("refuses (and deletes nothing) when a child is a FIFO", () => {
+    const dir = tmp();
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const id = "id-with-fifo";
+    mkdirSync(join(backup, id));
+    writeFileSync(join(backup, id, "a.md"), "hi");
+    execSync(`mkfifo ${JSON.stringify(join(backup, id, "pipe"))}`);
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, id);
+    expect(result).toEqual({ removed: false, reason: "not-flat" });
+    expect(readdirSync(join(backup, id)).sort()).toEqual(["a.md", "pipe"]);
+  });
+
+  it("refuses when the child itself is a symlink (never dereferenced)", () => {
+    const dir = tmp();
+    const outside = tmp();
+    mkdirSync(join(outside, "real-id"));
+    writeFileSync(join(outside, "real-id", "a.md"), "hi");
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    symlinkSync(join(outside, "real-id"), join(backup, "linked-id"));
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, "linked-id");
+    expect(result).toEqual({ removed: false, reason: "symlink" });
+    expect(readdirSync(join(outside, "real-id"))).toContain("a.md");
+  });
+
+  it("reports not-found for a missing child", () => {
+    const dir = tmp();
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    expect(removeFlatDir(parent, "nope")).toEqual({ removed: false, reason: "not-found" });
+  });
+
+  it("reports not-directory when the child is a plain file", () => {
+    const dir = tmp();
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    writeFileSync(join(backup, "not-a-dir"), "hi");
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    expect(removeFlatDir(parent, "not-a-dir")).toEqual({ removed: false, reason: "not-directory" });
+    expect(readdirSync(backup)).toContain("not-a-dir");
+  });
+
+  it("refuses a childName with a path separator or `..`, deleting nothing", () => {
+    const dir = tmp();
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    mkdirSync(join(backup, "id1"));
+    writeFileSync(join(backup, "id1", "a.md"), "hi");
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    expect(removeFlatDir(parent, "../id1")).toEqual({ removed: false, reason: "bad-name" });
+    expect(removeFlatDir(parent, "id1/nested")).toEqual({ removed: false, reason: "bad-name" });
+    expect(readdirSync(backup)).toContain("id1");
+  });
+
+  it("refuses (and touches nothing outside) when the target is already a symlink to an outside directory before the call", () => {
+    // Simulates the pre-fix TOCTOU: by the time removeFlatDir runs, the
+    // caller's earlier canonicalDirState check is stale and `childName` now
+    // names a symlink to a directory outside the memory tree.
+    const dir = tmp();
+    const outside = tmp();
+    writeFileSync(join(outside, "secret.md"), "shh");
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const id = "raced-to-symlink";
+    symlinkSync(outside, join(backup, id));
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, id);
+    expect(result).toEqual({ removed: false, reason: "symlink" });
+    // the symlink itself must be restored under its original name, not left
+    // dangling under a quarantine name, and the outside target is untouched
+    expect(readdirSync(backup)).toContain(id);
+    expect(readdirSync(outside)).toEqual(["secret.md"]);
+  });
+
+  it("race: a new entry inserted into the quarantine dir between verification and delete ⇒ partial removal, nothing outside touched", () => {
+    const dir = tmp();
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const id = "racy-insert";
+    mkdirSync(join(backup, id));
+    writeFileSync(join(backup, id, "a.md"), "hi");
+    writeFileSync(join(backup, id, "b.md"), "hi2");
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, id, {
+      beforeDelete: (quarantinePath) => {
+        // simulate something writing into the quarantine dir mid-operation —
+        // in production this is unreachable (the quarantine name is random
+        // and private to this call), but the code must still degrade safely
+        writeFileSync(join(quarantinePath, "late-insert.md"), "surprise");
+      },
+    });
+    expect(result).toEqual({ removed: true, count: 2, partial: true });
+    // the original name is gone (backup considered removed by the caller)
+    expect(readdirSync(backup)).not.toContain(id);
+    // the leftover lives under a dot-prefixed quarantine name, invisible to
+    // normal enumeration, holding only the raced-in entry (both verified
+    // regular files were actually deleted)
+    const leftovers = readdirSync(backup).filter((n) => n.startsWith(".rm-"));
+    expect(leftovers).toHaveLength(1);
+    expect(readdirSync(join(backup, leftovers[0]!))).toEqual(["late-insert.md"]);
+  });
+
+  it("race: quarantine dir itself swapped for a symlink to an outside directory between verification and delete ⇒ refuses, nothing deleted", () => {
+    const dir = tmp();
+    const outside = tmp();
+    writeFileSync(join(outside, "secret.md"), "shh");
+    const backup = join(dir, ".backup");
+    mkdirSync(backup);
+    const id = "racy-swap";
+    mkdirSync(join(backup, id));
+    writeFileSync(join(backup, id, "a.md"), "hi");
+    const parent = canonicalDir(backup);
+    if (!parent) throw new Error("expected canonical dir");
+    const result = removeFlatDir(parent, id, {
+      beforeDelete: (quarantinePath) => {
+        // replace the quarantine directory itself with a symlink to an
+        // outside directory — the dev/ino identity recheck must catch this
+        rmSync(quarantinePath, { recursive: true });
+        symlinkSync(outside, quarantinePath);
+      },
+    });
+    expect(result).toEqual({ removed: false, reason: "not-directory" });
+    // nothing outside was touched, and the swapped-in symlink itself is left
+    // exactly where the hook put it (under the quarantine name) — never
+    // renamed back over the original name, never deleted
+    expect(readdirSync(outside)).toEqual(["secret.md"]);
+    expect(readdirSync(backup)).not.toContain(id);
+    const leftovers = readdirSync(backup).filter((n) => n.startsWith(".rm-"));
+    expect(leftovers).toHaveLength(1);
   });
 });

@@ -27,6 +27,7 @@ import {
   readSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeSync,
@@ -47,6 +48,15 @@ function codeOf(err: unknown): string | undefined {
   return isErrnoException(err) ? err.code : undefined;
 }
 
+/** Generic filesystem-safe basename check (P0-c): non-empty, no path
+ *  separator, no NUL byte, not `.`/`..`. Used by the delete primitives below
+ *  — their targets (`.trash/<id>-<name>`, `.backup/<id>`) are not always
+ *  `*.md` (e.g. `manifest.json`), so `NAME_RE`/`isV2Name` don't apply; this
+ *  is only a path-traversal/injection guard, not a filename-format rule. */
+function isSafeName(name: string): boolean {
+  return name !== "" && name !== "." && name !== ".." && !name.includes("/") && !name.includes("\0");
+}
+
 // ───────────────────────────── directory trust ─────────────────────────────
 
 export interface CanonicalDir {
@@ -59,25 +69,39 @@ export interface CanonicalDir {
 }
 
 /**
- * Canonicalize a display directory path once. Missing directory → undefined
- * (callers on the write path `mkdirSync` first); canonical target exists but
- * is not a directory → undefined (treated as "no memory here").
+ * Canonicalize a display directory path once, distinguishing WHY it failed
+ * (P0-c, doctor D14 "canonical target is not a directory" vs. "no memory
+ * here" needed separate states). `canonicalDir` below is the pre-existing
+ * collapsed form (`ok` → the dir, anything else → `undefined`) — its own
+ * signature/behavior is unchanged.
  */
-export function canonicalDir(display: string): CanonicalDir | undefined {
+export type CanonicalDirState = { state: "ok"; dir: CanonicalDir } | { state: "missing" } | { state: "not-dir" };
+
+export function canonicalDirState(display: string): CanonicalDirState {
   let real: string;
   try {
     real = realpathSync(display);
   } catch {
-    return undefined;
+    return { state: "missing" };
   }
   let st;
   try {
     st = lstatSync(real);
   } catch {
-    return undefined;
+    return { state: "missing" };
   }
-  if (!st.isDirectory()) return undefined;
-  return { display, real, linked: real !== display };
+  if (!st.isDirectory()) return { state: "not-dir" };
+  return { state: "ok", dir: { display, real, linked: real !== display } };
+}
+
+/**
+ * Canonicalize a display directory path once. Missing directory → undefined
+ * (callers on the write path `mkdirSync` first); canonical target exists but
+ * is not a directory → undefined (treated as "no memory here").
+ */
+export function canonicalDir(display: string): CanonicalDir | undefined {
+  const result = canonicalDirState(display);
+  return result.state === "ok" ? result.dir : undefined;
 }
 
 /** `canonicalDir(memoryDirFor(cwd, paths))` — the cwd-keyed convenience form
@@ -130,6 +154,7 @@ export interface RegularFileEntry {
   path: string;
   size: number;
   mtimeMs: number;
+  nlink: number;
 }
 
 export type SkippedKind = "symlink" | "dangling" | "not-file" | "bad-name";
@@ -196,7 +221,7 @@ export function listRegular(
       skipped.push({ name, kind: "not-file" });
       continue;
     }
-    files.push({ name, path, size: st.size, mtimeMs: st.mtimeMs });
+    files.push({ name, path, size: st.size, mtimeMs: st.mtimeMs, nlink: st.nlink });
   }
   return { files, skipped };
 }
@@ -210,6 +235,7 @@ export interface RegularStat {
   mode: number;
   mtimeMs: number;
   ctimeMs: number;
+  nlink: number;
 }
 
 function toRegularStat(st: {
@@ -219,8 +245,17 @@ function toRegularStat(st: {
   mode: number;
   mtimeMs: number;
   ctimeMs: number;
+  nlink: number;
 }): RegularStat {
-  return { dev: st.dev, ino: st.ino, size: st.size, mode: st.mode, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs };
+  return {
+    dev: st.dev,
+    ino: st.ino,
+    size: st.size,
+    mode: st.mode,
+    mtimeMs: st.mtimeMs,
+    ctimeMs: st.ctimeMs,
+    nlink: st.nlink,
+  };
 }
 
 /**
@@ -489,6 +524,219 @@ export function appendLegacy(dir: string, name: string, data: Buffer): { totalBy
   } finally {
     closeSync(fd);
   }
+}
+
+// ───────────────────────────── delete primitives (P0-c) ─────────────────────────────
+
+/**
+ * Delete a single regular file by name. Used for physical eviction beyond a
+ * retention count (`.trash` eviction past 20 entries) — the entry itself was
+ * already put there by `renameNoClobber`/a caller-controlled rename, so this
+ * is the second half of that lifecycle, not a general-purpose delete. `name`
+ * is checked with `isSafeName` (path-traversal guard, not a filename-format
+ * rule — `.trash`/`.backup` entries are not all `*.md`); the target is then
+ * `lstatSync`-checked and MUST be a plain regular file (symlink / directory /
+ * FIFO / socket / etc. ⇒ refused, nothing is deleted).
+ */
+export function unlinkRegular(dir: string, name: string): void {
+  if (!isSafeName(name)) throw new MemoryError(`refused to delete ${JSON.stringify(name)}: invalid name`);
+  const path = join(dir, name);
+  const st = lstatSync(path);
+  if (st.isSymbolicLink()) throw new MemoryError(`refused to delete ${name}: is a symlink`);
+  if (!st.isFile()) throw new MemoryError(`refused to delete ${name}: not a regular file`);
+  // lstat-then-unlink TOCTOU (P0-c review): if `path` is swapped between the
+  // checks above and this call, `unlinkSync` still cannot escape outside
+  // `dir` — swapped to a directory ⇒ EISDIR/EPERM, nothing deleted; swapped
+  // to a symlink ⇒ only the symlink entry itself is removed (unlink never
+  // follows a symlink), never its target. So the residual window can only
+  // ever delete a directory ENTRY named `name` inside `dir`, never reach
+  // through a symlink to something outside it.
+  unlinkSync(path);
+}
+
+export type RemoveFlatDirResult =
+  | { removed: true; count: number; partial?: true }
+  | { removed: false; reason: "not-found" | "symlink" | "not-directory" | "not-flat" | "bad-name" };
+
+export interface RemoveFlatDirHooks {
+  /** Test-only race injection point: called once every quarantined child has
+   *  been verified as a plain regular file and the quarantine directory's
+   *  own identity (dev/ino) has been recorded, but before anything is
+   *  deleted. Lets tests simulate a concurrent entry insertion (⇒ `rmdir`
+   *  below fails ENOTEMPTY) or a swap of the quarantine directory itself
+   *  (⇒ the dev/ino recheck below refuses to delete) and assert nothing
+   *  outside the quarantine directory is ever touched. Production callers
+   *  never pass this. */
+  beforeDelete?: (quarantinePath: string) => void;
+}
+
+/** Pick a `.rm-<random>` name under `dirParent` that does not currently
+ *  exist. Dot-prefixed, so it can never collide with a real backup/trash id
+ *  (none of this file's id-naming conventions produce a leading dot) and is
+ *  invisible to `listDirNames`-based enumeration of legitimate entries. */
+function pickQuarantineName(dirParent: string): string {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const candidate = `.rm-${randomBytes(6).toString("hex")}`;
+    try {
+      lstatSync(join(dirParent, candidate));
+    } catch (err) {
+      if (codeOf(err) === "ENOENT") return candidate;
+      throw err;
+    }
+  }
+  throw new MemoryError(`could not allocate a quarantine name under ${dirParent}`);
+}
+
+/**
+ * Delete `<parent.real>/<childName>` ONLY if it is a real directory (never a
+ * symlink) containing nothing but plain regular files (a "flat" directory) —
+ * used to physically remove an old `.backup/<id>/` past the retention count
+ * (P4 tidy). Any child entry that is itself a symlink, a subdirectory, or
+ * any other non-regular type refuses the WHOLE operation: nothing is deleted,
+ * not even the regular siblings. `parent` must already be canonicalized
+ * (`canonicalDir`/`canonicalDirState`) — this never realpaths on its own.
+ * Returns a result instead of throwing, matching `listRegular`/`lockCreate`'s
+ * style for an expected-outcome (not exceptional) refusal.
+ *
+ * Isolate-then-delete (P0-c fix): Node has no `openat`/`unlinkat`, so a
+ * classic lstat-then-readdir-then-unlink walk down `childName` has a TOCTOU
+ * window — if the verified directory is swapped for a symlink after the
+ * checks above but before the walk, deletion can follow it outside the
+ * memory tree. Instead, the directory ENTRY is `renameSync`'d out of the way
+ * FIRST: rename acts on the entry itself, never on a symlink's target, so
+ * whatever `childName` names at that instant — real directory or something
+ * swapped in — is what moves, and nothing can reach it via the original name
+ * again. Every check below (symlink? directory? flat? still the same
+ * inode?) runs against the quarantined copy; any failure rolls the entry
+ * back to its original name (best effort) and deletes nothing.
+ */
+export function removeFlatDir(
+  parent: CanonicalDir,
+  childName: string,
+  hooks?: RemoveFlatDirHooks,
+): RemoveFlatDirResult {
+  if (!isSafeName(childName)) return { removed: false, reason: "bad-name" };
+  const dirPath = join(parent.real, childName);
+  const quarantinePath = join(parent.real, pickQuarantineName(parent.real));
+
+  try {
+    renameSync(dirPath, quarantinePath);
+  } catch (err) {
+    if (codeOf(err) === "ENOENT") return { removed: false, reason: "not-found" };
+    throw err;
+  }
+
+  const rollback = (): void => {
+    try {
+      renameSync(quarantinePath, dirPath);
+    } catch {
+      // Could not move it back (e.g. something now occupies the original
+      // name) — leave it under the quarantine name. That name is
+      // dot-prefixed and never produced by real id generation, so no
+      // listing/enumeration code mistakes it for a legitimate backup/trash
+      // entry; it is simply orphaned until a human cleans it up. Nothing
+      // has been deleted.
+    }
+  };
+
+  let st;
+  try {
+    st = lstatSync(quarantinePath);
+  } catch (err) {
+    if (codeOf(err) === "ENOENT") return { removed: false, reason: "not-found" };
+    throw err;
+  }
+  if (st.isSymbolicLink()) {
+    rollback();
+    return { removed: false, reason: "symlink" };
+  }
+  if (!st.isDirectory()) {
+    rollback();
+    return { removed: false, reason: "not-directory" };
+  }
+  const identity = { dev: st.dev, ino: st.ino };
+
+  let names: string[];
+  try {
+    names = readdirSync(quarantinePath);
+  } catch (err) {
+    rollback();
+    if (codeOf(err) === "ENOENT") return { removed: false, reason: "not-found" };
+    throw err;
+  }
+  const children: string[] = [];
+  for (const name of names) {
+    const childPath = join(quarantinePath, name);
+    let cst;
+    try {
+      cst = lstatSync(childPath);
+    } catch (err) {
+      if (codeOf(err) === "ENOENT") continue; // vanished between readdir and lstat — nothing to verify or delete
+      rollback();
+      throw err;
+    }
+    if (cst.isSymbolicLink() || cst.isDirectory() || !cst.isFile()) {
+      rollback();
+      return { removed: false, reason: "not-flat" };
+    }
+    children.push(name);
+  }
+
+  hooks?.beforeDelete?.(quarantinePath);
+
+  // Optional hardening: if the quarantine directory itself was swapped out
+  // from under us between verification and here, stop — delete nothing.
+  // Nothing in the real filesystem can address `quarantinePath` by name (a
+  // freshly random name under a directory only this call renamed into), so
+  // this can only fire via `hooks.beforeDelete` in tests; it turns
+  // "impossible in practice" into "provably checked".
+  let st2;
+  try {
+    st2 = lstatSync(quarantinePath);
+  } catch (err) {
+    if (codeOf(err) === "ENOENT") return { removed: false, reason: "not-found" };
+    throw err;
+  }
+  if (st2.isSymbolicLink() || !st2.isDirectory() || st2.dev !== identity.dev || st2.ino !== identity.ino) {
+    // Whatever is at `quarantinePath` now is not the directory we verified —
+    // leave it exactly where it is (under the quarantine name, not the
+    // original name) and refuse without deleting or renaming anything.
+    return { removed: false, reason: "not-directory" };
+  }
+
+  // Every name in `children` was verified regular at verification time.
+  // `unlinkSync` never follows a symlink, so even if a name were replaced
+  // with a symlink to an outside file in the (test-only) window above, this
+  // removes only the directory entry inside the quarantine dir, never an
+  // outside target.
+  let deleted = 0;
+  for (const name of children) {
+    try {
+      unlinkSync(join(quarantinePath, name));
+      deleted++;
+    } catch (err) {
+      if (codeOf(err) === "ENOENT") continue; // already gone
+      throw err;
+    }
+  }
+
+  try {
+    rmdirSync(quarantinePath);
+  } catch (err) {
+    if (codeOf(err) === "ENOTEMPTY" || codeOf(err) === "EEXIST") {
+      // A new entry was inserted into the quarantine directory after
+      // verification (only reachable via `hooks.beforeDelete` in tests —
+      // `quarantinePath`'s random name is otherwise unguessable). From the
+      // caller's point of view the backup IS gone: nothing lives under the
+      // original name anymore. The quarantine directory and whatever raced
+      // into it are left behind under the dot-prefixed quarantine name
+      // (invisible to normal enumeration) rather than being force-deleted —
+      // deletion never widens beyond what was verified regular.
+      return { removed: true, count: deleted, partial: true };
+    }
+    throw err;
+  }
+  return { removed: true, count: deleted };
 }
 
 // ───────────────────────────── lock-file primitives (consumed by lock.ts) ─────────────────────────────

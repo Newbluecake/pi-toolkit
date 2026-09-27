@@ -110,8 +110,14 @@ export const TIERED_TEMPLATES = {
 export type MemoryCommand = "view" | "create" | "str_replace" | "insert" | "delete" | "rename" | "search";
 export type MemoryLegacyAction = "list" | "write" | "append";
 
+/** P2 §4.2's alias surface: `normalizeMemoryCall` accepts the legacy
+ *  `write`/`append` aliases alongside the official v2 commands and folds
+ *  them into a `NormalizedCall` — `op` therefore ranges over both, not just
+ *  `MemoryCommand` (P0-c). */
+export type MemoryOp = MemoryCommand | "write" | "append";
+
 export interface NormalizedCall {
-  op: MemoryCommand;
+  op: MemoryOp;
   target?: string;
   dest?: string;
   body?: string;
