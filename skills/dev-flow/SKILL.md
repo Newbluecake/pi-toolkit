@@ -141,18 +141,20 @@ sonnet → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [ask
 
 ## 各阶段模型分工
 
-| 阶段                   | 首选      | 次选                                                                     | 说明                                                                                                                           |
-| ---------------------- | --------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| **核心调度**（主会话） | opus-5.5  | opus-5 → kimi-k3（有订阅额度时）                                         | 任务拆解、派单、汇总、裁定                                                                                                     |
-| **代码探索**           | sonnet    | glm-5.3 / kimi-k3（有订阅额度时优先）                                    | `subagent_type=Explore`，只读定位代码/梳理调用链                                                                               |
-| **架构设计**           | opus-5.5  | opus-5 → gpt-6-astra（兜底）                                             | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                          |
-| **方案制定**           | opus-5.5  | opus-5 → sonnet（简单方案）                                              | `subagent_type=Plan`                                                                                                           |
-| **前端开发**           | sonnet    | opus-5.5（视觉设计/疑难）→ kimi-k3                                       | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                         |
-| **复杂任务方案**       | opus-5.5  | opus-5 → gpt-6-astra（兜底）                                             | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                      |
-| **疑难攻坚**           | opus-5.5  | gpt-6-astra（兜底）                                                      | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                 |
-| **方案评审**           | gpt-6-sol | gpt-5.6-sol → opus-5（方案非 opus 系时）→ kimi-k3                        | `subagent_type=reviewer`；必须与方案模型异源                                                                                   |
-| **开发实施**           | sonnet    | kimi-k3 / glm-5.3（有订阅额度时）→ gpt-6-sol（可用资源紧张时）→ opus-5.5 | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                    |
-| **任务验收**           | gpt-6-sol | gpt-5.6-sol → kimi-k3 → glm-5.3                                          | `subagent_type=verifier`；必须与开发模型异源（gpt-6-sol 做开发时验收改派 Claude 系或 kimi）；打回后复验优先 resume 原 verifier |
+| 阶段                   | 首选               | 次选                                              | 说明                                                                                                                           |
+| ---------------------- | ------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **核心调度**（主会话） | opus-5.5           | opus-5 → kimi-k3（有订阅额度时）                  | 任务拆解、派单、汇总、裁定                                                                                                     |
+| **代码探索**           | sonnet             | glm-5.3 / kimi-k3（有订阅额度时优先）             | `subagent_type=Explore`，只读定位代码/梳理调用链                                                                               |
+| **架构设计**           | opus-5.5           | opus-5 → gpt-6-astra（兜底）                      | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                          |
+| **方案制定**           | opus-5.5           | opus-5 → sonnet（简单方案）                       | `subagent_type=Plan`                                                                                                           |
+| **前端开发**           | sonnet             | opus-5.5（视觉设计/疑难）→ kimi-k3                | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                         |
+| **复杂任务方案**       | opus-5.5           | opus-5 → gpt-6-astra（兜底）                      | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                      |
+| **疑难攻坚**           | opus-5.5           | gpt-6-astra（兜底）                               | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                 |
+| **方案评审**           | gpt-6-sol          | gpt-5.6-sol → opus-5（方案非 opus 系时）→ kimi-k3 | `subagent_type=reviewer`；必须与方案模型异源                                                                                   |
+| **开发实施**           | sonnet ⇄ gpt-6-sol | kimi-k3 / glm-5.3（有订阅额度时）→ opus-5.5       | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                    |
+| **任务验收**           | gpt-6-sol          | gpt-5.6-sol → kimi-k3 → glm-5.3                   | `subagent_type=verifier`；必须与开发模型异源（gpt-6-sol 做开发时验收改派 Claude 系或 kimi）；打回后复验优先 resume 原 verifier |
+
+开发双首选（2026-09）：sonnet 与 gpt-6-sol 并列，多个开发包并行时按包分摊（gpt-6-sol 更便宜、上下文 1.05M）；**gpt-6-sol 开发的包，验收改派 Claude 系（sonnet）**，不派任何 GPT 系。
 
 路由现状（2026-09）：kimi-coding / zai 订阅常耗尽，默认表以按量线（cr-anthropic / cr-response /
 zhipu-pool）为准；[quota] 显示订阅有余量且候选胜任时可替换同阶段首选。

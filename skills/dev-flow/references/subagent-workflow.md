@@ -77,7 +77,7 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 
 Explore=`cr-anthropic/claude-sonnet-5`，Plan=`cr-anthropic/claude-opus-5-5`，
 reviewer / verifier = gpt-6-sol（`cr-response/gpt-6-sol`）→ gpt-5.6-sol（`cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`），
-dev=`cr-anthropic/claude-sonnet-5`（资源紧张时 gpt-6-sol，此时 verifier 改派 Claude 系或 kimi）；有订阅额度时 kimi-k3 / glm-5.3 可替换同阶段首选；
+dev=`cr-anthropic/claude-sonnet-5` ⇄ `cr-response/gpt-6-sol`（并列首选、按包分摊；gpt-6-sol 开发的包 verifier 改派 Claude 系）；有订阅额度时 kimi-k3 / glm-5.3 可替换同阶段首选；
 gpt-5.6-terra / gpt-6-astra 只作兜底。以 SKILL.md「各阶段模型分工」表为准。
 
 `agent()` 返回 `null` 不区分「用户跳过」与「模型失败」；严格按序回退由主会话根据失败通知重派，
