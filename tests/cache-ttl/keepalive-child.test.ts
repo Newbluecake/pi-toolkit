@@ -764,3 +764,67 @@ describe("child keepalive — T-K9: worst-case budget behavior", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// todo #28 — precise nextPingAt timer + terminal-skip diagnostic, child-session path.
+// Same underlying `CacheKeepaliveServiceImpl` as the main-session tests in
+// keepalive-lifecycle.test.ts, wired child-flavored here (allowHeadless, no status
+// bar, armed only via activeTools — mirrors src/cache-ttl/child.ts's wiring).
+// ---------------------------------------------------------------------------
+
+describe("child keepalive — todo #28: precise nextPingAt timer", () => {
+  it("the precise timer fires exactly at nextPingAt even though the periodic tick's phase would only reach the window during a transient not-armed instant (real-machine repro: 3 windows, 1 hit)", async () => {
+    const clock = new FakeClock(0);
+    const h = harness(clock, "s1");
+    const sid = getSid(h);
+    // The periodic tick's phase is anchored to t=0 (this arm() call), not to the window's
+    // own start — a real, common case for a child session (tool activity already ticking
+    // before the request that opens the window it needs to protect).
+    h.service.noteToolStart(sid, h.service.instanceId);
+    clock.advance(1);
+    h.service.noteRequest(capture({ sessionId: sid }, h.service.instanceId, 270_000));
+    h.service.noteRequestSettled(sid, h.service.instanceId);
+    // nextPingAt = 1 + 240_000 = 240_001; cutoff = 1 + 300_000 - 45_000 = 255_001. The
+    // periodic grid (0, 15_000, 30_000, ...) does not include 240_001 — its first point
+    // inside [240_001, 255_001) is 255_000, not nextPingAt itself.
+    clock.advance(240_000); // -> t=240_001: only the precise timer lands here
+    await flush();
+    expect(h.service.report().session.pings).toBe(1); // proven-hit via the precise timer
+    expect(h.service.report().window.lastReadStartedAt).toBe(240_001);
+
+    // The tool goes idle EXACTLY at the periodic grid's one in-window opportunity (255_000)
+    // and only comes back after the cutoff (255_001) — under periodic-only ticks this is
+    // precisely what would sink the window (not-armed skip at 255_000, cache-expired at the
+    // next tick 270_000). Post-fix this is moot (the window already succeeded above); confirms
+    // nothing regresses.
+    clock.advance(14_998); // -> t=254_999
+    h.service.noteToolEnd(sid, h.service.instanceId);
+    clock.advance(6_000); // -> t=260_999
+    h.service.noteToolStart(sid, h.service.instanceId); // armed again, too late to matter
+    await flush();
+    expect(h.service.report().session.pings).toBe(1); // unchanged — no phantom second ping
+    expect(h.service.report().session.unprovenTotal).toBe(0);
+  });
+
+  it("terminal-skip diagnostic: exactly one jsonl audit entry per window (child sessions have no /cache-ttl status to read `report().lastTerminalSkip` from — the audit trail is their only observable record)", async () => {
+    const clock = new FakeClock(0);
+    const h = harness(clock, "s1", { settings: { ...BASE_SETTINGS, keepaliveMaxPings: 1 } });
+    const sid = getSid(h);
+    arm(h);
+    clock.advance(240_000);
+    await flush();
+    expect(h.service.report().window.pings).toBe(1);
+
+    // Re-arm the loop a few times — each re-arm re-observes the SAME "budget-exhausted"
+    // terminal verdict for this window; the audit trail must not repeat it.
+    for (let i = 0; i < 3; i += 1) {
+      h.service.noteToolStart(sid, h.service.instanceId);
+      clock.advance(15_000);
+    }
+    const terminalAudits = h.appendEntry.mock.calls.filter(
+      ([, data]: [string, { kind?: string }]) => data.kind === "terminal-skip",
+    );
+    expect(terminalAudits).toHaveLength(1);
+    expect((terminalAudits[0]![1] as { reason?: string }).reason).toBe("budget-exhausted");
+  });
+});

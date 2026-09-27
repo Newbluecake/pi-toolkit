@@ -188,10 +188,11 @@ describe("cache-keepalive service — tick self-arm / self-stop", () => {
     const { service, clock } = harness();
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
-    expect(clock.pendingTimers).toBe(1);
+    // todo #28: the periodic 15s tick AND the new precise `nextPingAt` one-shot timer are both pending.
+    expect(clock.pendingTimers).toBe(2);
     clock.advance(200_000); // still short of the 240s interval
     expect(service.report().window.pings).toBe(0);
-    expect(clock.pendingTimers).toBe(1); // kept re-arming (not-due, non-terminal)
+    expect(clock.pendingTimers).toBe(2); // kept re-arming (not-due, non-terminal) + the still-pending exact timer
     clock.advance(45_000); // crosses the 240s interval
     await flush();
     expect(service.report().window.pings).toBe(1);
@@ -473,6 +474,11 @@ describe("cache-keepalive service — M1 fingerprint-drift-after-auth refund (va
     const { service, clock, ctx } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
     (ctx.modelRegistry.getApiKeyAndHeaders as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       // Simulate the model changing out from under us while the auth await is pending.
+      // Real auth resolution is never synchronous (network/keychain I/O) — the mutation
+      // must land AFTER an actual await, not as a side effect of merely CALLING the mock,
+      // otherwise it becomes visible to a synchronously-coincident tick (todo #28's exact
+      // timer can legitimately fire in the same batch as the periodic one at this interval).
+      await Promise.resolve();
       (ctx.model as { id: string }).id = "claude-drifted";
       return { ok: true, apiKey: "sk-ant-api-x", headers: {} };
     });
@@ -495,6 +501,7 @@ describe("cache-keepalive service — M1 fingerprint-drift-after-auth refund (va
     const fetchImpl = vi.fn();
     const { service, clock, ctx } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
     (ctx.modelRegistry.getApiKeyAndHeaders as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await Promise.resolve(); // see the model-drift test's comment above
       (ctx.model as { baseUrl: string }).baseUrl = "https://drifted.example.com";
       return { ok: true, apiKey: "sk-ant-api-x", headers: {} };
     });
@@ -678,5 +685,202 @@ describe("cache-keepalive service — F1 arbitration with adaptive", () => {
     const gone = harness().service;
     gone.dispose();
     expect(gone.gapHorizonMs(30_000)).toBeUndefined();
+  });
+});
+
+// todo #28: at the default/max-safe `keepaliveIntervalMs` (240s), the gap between
+// `nextPingAt` and the cache-expired cutoff is exactly one `TICK_INTERVAL_MS` (15s) —
+// see `MAX_SAFE_KEEPALIVE_INTERVAL_MS`'s doc comment in keepalive-state.ts. The 15s
+// periodic tick's own coarse phase can therefore miss the window (real-machine repro:
+// 3 windows, 1 hit) whenever its one guaranteed in-window opportunity happens to land
+// at a moment some OTHER gate (armed/adaptive/...) transiently fails. The fix adds a
+// second, independent one-shot timer scheduled EXACTLY at `nextPingAt` (reusing
+// `onTick()`/`evaluateTick` verbatim — every existing gate still applies).
+describe("cache-keepalive service — todo #28: precise nextPingAt timer", () => {
+  it("fires exactly at nextPingAt, catching a window the periodic tick's coarse phase would sink (its one in-window opportunity coincides with a transient not-armed instant)", async () => {
+    const { service, clock } = harness({ backgroundBusy: () => false });
+    // The periodic tick's phase is anchored to t=0 (this arm() call), NOT to the window's
+    // own start — a real, common case (tool activity already ticking before the capture
+    // that opens the window it needs to protect).
+    service.noteToolStart("s1", service.instanceId);
+    clock.advance(1);
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    // nextPingAt = 1 + 240_000 = 240_001; cutoff = 1 + 300_000 - 45_000 = 255_001.
+    // The periodic grid (0, 15_000, 30_000, ...) does NOT include 240_001 — its first
+    // point inside [240_001, 255_001) is 255_000, not nextPingAt itself.
+    clock.advance(240_000); // -> t=240_001: only the new precise timer lands here
+    await flush();
+    expect(service.report().session.pings).toBe(1); // proven-hit via the precise timer
+    expect(service.report().window.lastReadStartedAt).toBe(240_001); // reads exactly at nextPingAt
+
+    // Confirms the scenario is genuinely adversarial for periodic-only polling: the tool
+    // goes idle EXACTLY at the periodic grid's one in-window opportunity (255_000) and only
+    // comes back after the cutoff (255_001) — under periodic-only ticks (pre-fix) this is
+    // precisely what sinks the window (not-armed skip at 255_000, then cache-expired at the
+    // next tick, 270_000). Post-fix this is moot (the window already succeeded above); the
+    // point is that nothing here regresses.
+    clock.advance(14_998); // -> t=254_999
+    service.noteToolEnd("s1", service.instanceId);
+    clock.advance(6_000); // -> t=260_999: crosses 255_000 (not-armed) and the cutoff
+    service.noteToolStart("s1", service.instanceId); // armed again, too late to matter
+    await flush();
+    expect(service.report().session.pings).toBe(1); // unchanged — no phantom second ping
+    expect(service.report().session.unprovenTotal).toBe(0); // not-armed is silent, never a breaker hit
+  });
+
+  it("a periodic tick and the precise timer tied at exactly the same due time still ping only once (existing pingInFlight guard, no double HTTP call)", async () => {
+    const fetchImpl = vi.fn(provenHitFetch());
+    const { service, clock } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    // Anchoring both noteRequest and the periodic arm() at the same t=0 makes the periodic
+    // grid (multiples of 15_000) include nextPingAt (240_000) exactly — the tie case.
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // not 2
+    expect(service.report().window.pings).toBe(1);
+    expect(service.report().session.pings).toBe(1);
+  });
+
+  it("a new real request cancels and reschedules the precise timer to the NEW window's nextPingAt (never accumulates a leaked one); dispose leaves nothing pending", async () => {
+    const { service, clock } = harness();
+    service.noteRequest(capture({}, service.instanceId, 30_000));
+    service.noteRequestSettled("s1", service.instanceId);
+    expect(clock.pendingTimers).toBe(2); // periodic tick + the precise nextPingAt timer
+
+    clock.advance(60_000); // -> t=60_000, well before the first window's nextPingAt (240_000)
+    service.noteRequest(capture({}, service.instanceId, 40_000)); // re-opens the window
+    service.noteRequestSettled("s1", service.instanceId);
+    expect(clock.pendingTimers).toBe(2); // the stale exact timer was replaced, never grows to 3
+
+    clock.advance(240_000); // -> t=300_000 = the SECOND window's nextPingAt (60_000 + 240_000)
+    await flush();
+    expect(service.report().session.pings).toBe(1); // pinged at the RESCHEDULED deadline
+
+    service.dispose();
+    expect(clock.pendingTimers).toBe(0); // both the periodic tick and the precise timer are gone
+  });
+});
+
+// todo #28 P1 (verifier finding): `setEnabled(false)` used to only flip `enabledOverride`
+// and refresh the UI, leaving the precise exact timer armed at the OLD `nextPingAt` — if
+// re-enabled the window could ping at that stale instant. A terminal skip reached via the
+// PERIODIC tick (not the exact timer's own self-clearing callback) could likewise leave a
+// still-pending exact timer behind. Fixed: `setEnabled(false)`/generic terminal-skip paths
+// now call `clearExactTimer()`, and `setEnabled(true)` re-syncs against the CURRENT window.
+describe("cache-keepalive service — todo #28 P1: setEnabled(false) cancels the stale exact timer", () => {
+  it("disabling cancels the pending exact timer — the old nextPingAt never fires a ping", async () => {
+    const fetchImpl = vi.fn(provenHitFetch());
+    const { service, clock } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    expect(clock.pendingTimers).toBe(2); // periodic tick + the precise nextPingAt timer
+
+    service.setEnabled(false);
+    expect(clock.pendingTimers).toBe(1); // exact timer cancelled; periodic tick still pending
+
+    clock.advance(240_000); // -> nextPingAt (240_000) — pre-fix the exact timer would fire here
+    await flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(service.report().session.pings).toBe(0);
+    expect(clock.pendingTimers).toBe(0); // periodic tick hit the terminal "disabled" skip and stopped re-arming
+  });
+
+  it("disabling then re-enabling does not ping at the old, now-stale nextPingAt instant", async () => {
+    const fetchImpl = vi.fn(provenHitFetch());
+    const { service, clock } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    service.setEnabled(false);
+
+    clock.advance(300_000); // well past the cache-expired cutoff (255_001) while disabled
+    service.setEnabled(true); // re-syncs against the CURRENT window — nextPingAt is now in the past
+    clock.advance(0); // let the immediately-due re-synced timer (if any) fire
+    await flush();
+
+    expect(fetchImpl).not.toHaveBeenCalled(); // no ping at the stale instant — cache-expired by now
+    expect(service.report().session.pings).toBe(0);
+  });
+
+  it("a terminal skip reached via the PERIODIC tick (adaptive-1h cover) also drops the pending exact timer", async () => {
+    let covers = false;
+    const fetchImpl = vi.fn(provenHitFetch());
+    const { service, clock } = harness({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      adaptiveCoversPrefix: () => covers,
+    });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    expect(clock.pendingTimers).toBe(2); // periodic tick (due 15_000) + exact timer (due 240_000)
+
+    covers = true; // becomes covered before nextPingAt — only the periodic tick observes this first
+    clock.advance(15_000); // fires the periodic tick, NOT the exact timer
+    expect(service.report().lastSkip).toBe("adaptive-1h");
+    expect(clock.pendingTimers).toBe(0); // both the periodic tick (terminal, no re-arm) and the exact timer are gone
+
+    clock.advance(225_000); // -> t=240_000, the ORIGINAL nextPingAt — nothing left to fire
+    await flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(service.report().session.pings).toBe(0);
+  });
+});
+
+// todo #28: terminal skips used to be entirely silent (no audit/diagnostic), making a
+// real-machine "why didn't it ping" question require session-file archaeology. A window
+// that ends in a terminal skip now gets exactly one lightweight diagnostic (never per-tick
+// spam) — surfaced both through `report().lastTerminalSkip` (the main session's existing
+// status-command channel) and a `subagent:cache-keepalive` jsonl audit entry (child
+// sessions' only observable trail, since they have no interactive status command).
+describe("cache-keepalive service — todo #28: terminal-skip diagnostic (once per window)", () => {
+  it("records exactly one audit entry + report field per window even when the terminal skip re-fires across several re-arms", async () => {
+    const { service, clock, appendEntry } = harness({ settings: { ...SETTINGS, keepaliveMaxPings: 1 } });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000);
+    await flush();
+    expect(service.report().window.pings).toBe(1); // the one allowed ping
+
+    // Re-arm the loop several times via tool activity — each re-arm re-evaluates the SAME
+    // terminal "budget-exhausted" verdict for this window; the diagnostic must not repeat.
+    for (let i = 0; i < 3; i += 1) {
+      service.noteToolStart("s1", service.instanceId);
+      clock.advance(15_000);
+      service.noteToolEnd("s1", service.instanceId);
+    }
+
+    const terminalAudits = appendEntry.mock.calls.filter(
+      ([, data]: [string, { kind?: string }]) => data.kind === "terminal-skip",
+    );
+    expect(terminalAudits).toHaveLength(1);
+    expect((terminalAudits[0]![1] as { reason?: string }).reason).toBe("budget-exhausted");
+    expect(service.report().lastTerminalSkip).toMatchObject({ reason: "budget-exhausted" });
+
+    // A brand-new window (real request bumps windowEpoch) gets its OWN diagnostic.
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000);
+    await flush();
+    // budget-exhausted is only DETECTED on the tick after the one that pinged — give it
+    // one more re-arm/tick, same as the first window's loop above.
+    service.noteToolStart("s1", service.instanceId);
+    clock.advance(15_000);
+    service.noteToolEnd("s1", service.instanceId);
+    const terminalAuditsAfter = appendEntry.mock.calls.filter(
+      ([, data]: [string, { kind?: string }]) => data.kind === "terminal-skip",
+    );
+    expect(terminalAuditsAfter).toHaveLength(2);
+  });
+
+  it("a session with no capture yet (nothing has pinged) never gets the diagnostic — only a window that actually held a capture counts as 'died'", () => {
+    const { service, clock, appendEntry } = harness();
+    service.noteToolStart("s1", service.instanceId); // arms the loop; no noteRequest() ever happened
+    clock.advance(15_000);
+    expect(service.report().lastSkip).toBe("no-capture");
+    const terminalAudits = appendEntry.mock.calls.filter(
+      ([, data]: [string, { kind?: string }]) => data.kind === "terminal-skip",
+    );
+    expect(terminalAudits).toHaveLength(0);
+    expect(service.report().lastTerminalSkip).toBeUndefined();
   });
 });

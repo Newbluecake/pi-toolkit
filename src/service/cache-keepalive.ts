@@ -289,6 +289,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private disposed = false;
   private enabledOverride: boolean | undefined;
   private timer: TimerHandle | undefined;
+  /** todo #28: precise one-shot timer for `window.nextPingAt` — see `syncExactTimer`'s doc comment. */
+  private exactTimer: TimerHandle | undefined;
+  /** The `nextPingAt` value `exactTimer` is currently scheduled for, or `undefined` when none is pending. */
+  private exactTimerFor: Millis | undefined;
+  /** todo #28: the `windowEpoch` a terminal-skip diagnostic was already recorded for — one per window. */
+  private terminalSkipAuditedEpoch: number | undefined;
+  /** See `KeepaliveReport.lastTerminalSkip`. */
+  private lastTerminalSkip: { reason: TickSkipReason; at: Millis; windowEpoch: number } | undefined;
   private abortController: AbortController | undefined;
   /** Ping-retry backoff wait (user requirement 2026-09-26) — cleared/resolved by `dispose()` so a pending retry never wedges past teardown. */
   private pendingRetry: { timer: TimerHandle; resolve: () => void } | undefined;
@@ -612,11 +620,90 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   // -- timer (UsageBroadcaster self-arming/self-stopping pattern) ---------
 
   private arm(): void {
-    if (this.disposed) return;
+    // Idempotent (todo #28): the exact-timer's own `onTick()` call can reach
+    // here while a periodic tick is ALREADY pending (same `nextPingAt`, tied
+    // due time) — without this guard, `this.timer` would be overwritten and
+    // the still-pending periodic entry would be orphaned (leaked, and would
+    // fire a redundant duplicate `onTick()` later). Safe: every existing
+    // caller already only wants "a tick is scheduled", not "a NEW tick".
+    if (this.disposed || this.timer !== undefined) return;
     this.timer = this.clock.setTimer(TICK_INTERVAL_MS, () => {
       this.timer = undefined;
       this.onTick();
     });
+  }
+
+  /**
+   * Precise one-shot timer for `window.nextPingAt` (todo #28 — field incident:
+   * at the default/max-safe `keepaliveIntervalMs` the gap between `nextPingAt`
+   * and the cache-expired cutoff is exactly one `TICK_INTERVAL_MS`, see
+   * `MAX_SAFE_KEEPALIVE_INTERVAL_MS`'s doc comment. The 15s periodic tick's
+   * coarse granularity can miss that one window (e.g. it happens to land at a
+   * moment where `armed()` just flipped false, while an earlier, more precise
+   * check would have caught the window while still armed — real-machine
+   * repro: 3 windows, 1 hit). This schedules a SECOND, independent
+   * `clock.setTimer` landing EXACTLY at `nextPingAt` and reuses `onTick()`
+   * verbatim — every gate (armed/budget/adaptive/fingerprint/...) still
+   * applies; this only removes the polling-granularity risk.
+   *
+   * Rescheduled at every point that changes `window.nextPingAt` or clears
+   * `window.capture` (new real request, a resolved ping's next deadline,
+   * invalidate, dispose). Deliberately NOT called from the generic
+   * terminal-skip path in `onTick()` — `nextPingAt` is unchanged there (still
+   * in the past), so rescheduling would compute `delay=0` and refire in the
+   * same `FakeClock.advance()`/microtask turn forever.
+   *
+   * A coincident fire with the periodic tick is deduped by the SAME
+   * `pingInFlight` state `onTick()`'s own "ping" branch already checks — see
+   * `arm()`'s idempotency guard for the mirror-image protection (no orphaned
+   * periodic timer left behind when the exact timer's own `onTick()` call
+   * tries to re-arm while a periodic entry is still pending).
+   */
+  private syncExactTimer(): void {
+    if (this.disposed) {
+      this.clearExactTimer();
+      return;
+    }
+    const nextPingAt = this.window.nextPingAt;
+    if (nextPingAt === undefined || this.window.capture === undefined || !this.config().enabled) {
+      this.clearExactTimer();
+      return;
+    }
+    if (this.exactTimerFor === nextPingAt) return; // already scheduled for this exact instant
+    this.clearExactTimer();
+    this.exactTimerFor = nextPingAt;
+    const delay = Math.max(0, nextPingAt - this.clock.now());
+    this.exactTimer = this.clock.setTimer(delay, () => {
+      this.exactTimer = undefined;
+      this.exactTimerFor = undefined;
+      this.onTick();
+    });
+  }
+
+  private clearExactTimer(): void {
+    if (this.exactTimer) this.clock.clearTimer(this.exactTimer);
+    this.exactTimer = undefined;
+    this.exactTimerFor = undefined;
+  }
+
+  /**
+   * todo #28: a TERMINAL skip on a window that still had a capture means this
+   * window just permanently lost its ability to ping (budget exhausted, cache
+   * judged dead, fingerprint/route mismatch, adaptive cover, ...) — worth one
+   * lightweight diagnostic so "why didn't it ping" doesn't need session-file
+   * archaeology. Deduped per `windowEpoch`: a window re-armed by
+   * `noteToolStart`/`noteUiPromptStart` after the periodic loop already
+   * terminally stopped must not spam the audit trail with the same verdict.
+   * A globally-disabled feature (`no-capture`/`disabled`/...) has no capture
+   * to speak of — not "a window died", just "nothing was happening" — so it's
+   * excluded.
+   */
+  private auditTerminalSkipOnce(reason: TickSkipReason): void {
+    if (this.window.capture === undefined) return;
+    if (this.terminalSkipAuditedEpoch === this.window.windowEpoch) return;
+    this.terminalSkipAuditedEpoch = this.window.windowEpoch;
+    this.lastTerminalSkip = { reason, at: this.clock.now(), windowEpoch: this.window.windowEpoch };
+    this.audit("terminal-skip", { reason });
   }
 
   private onTick(): void {
@@ -639,9 +726,21 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       case "invalidate":
         this.lastSkip = undefined;
         this.audit("invalidate", { reason: result.decision.reason });
+        this.syncExactTimer(); // todo #28: capture just got cleared — cancel any pending exact timer.
         return;
       case "skip":
         this.lastSkip = result.decision.reason;
+        if (result.decision.terminal) {
+          this.auditTerminalSkipOnce(result.decision.reason);
+          // todo #28 P1 fix: a terminal skip means this window can never ping again
+          // without a new real request (which re-arms via `noteRequest`'s own
+          // `syncExactTimer()` call) — cancel any exact timer still pending for the
+          // now-moot `nextPingAt` instead of leaving it to fire a redundant, merely
+          // idempotent re-evaluation later. `clearExactTimer()`, not `syncExactTimer()`:
+          // `nextPingAt` is unchanged here (still in the past relative to `now`), so
+          // re-syncing would compute `delay=0` and refire in the same clock turn.
+          this.clearExactTimer();
+        }
         if (!result.decision.terminal) this.arm();
         return;
       case "ping": {
@@ -658,6 +757,10 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
               ...this.budgetFields(0, now),
             });
           }
+          // todo #28 P1 fix: same rationale as the terminal `skip` branch above —
+          // a terminal gate denial (budget exhausted, unpriced route) ends this
+          // window's ability to ping; drop the stale exact timer with it.
+          if (gate.terminal) this.clearExactTimer();
           if (!gate.terminal) this.arm();
           return;
         }
@@ -730,6 +833,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         refundBudget();
         if (this.sameEpoch(pingEpoch)) {
           this.window = invalidateReducer(this.window, `fingerprint-drift:${diff.field}`);
+          this.syncExactTimer();
         }
         return;
       }
@@ -830,6 +934,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         if (applied.applied) {
           this.window = applied.window;
           this.session = applied.session;
+          this.syncExactTimer(); // todo #28: nextPingAt just advanced — reschedule the precise timer.
           this.lastPingDiagnostics = {
             ...diagnostics,
             at: this.clock.now(),
@@ -862,6 +967,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         if (applied.applied) {
           this.window = applied.window;
           this.session = applied.session;
+          this.syncExactTimer(); // todo #28: window.capture just got cleared — cancels the exact timer.
           const cacheCreationInputTokens = outcome.kind === "proven-write" ? outcome.cacheWriteTokens : undefined;
           this.lastPingDiagnostics = {
             ...diagnostics,
@@ -918,6 +1024,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.session = result.session;
     this.lastSkip = undefined;
     if (this.timer === undefined) this.arm();
+    this.syncExactTimer();
     this.publishVisibility();
   }
 
@@ -931,6 +1038,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     const inst = instance ?? this.instanceId;
     if (!this.accept(sid, inst)) return;
     this.window = invalidateReducer(this.window, reason);
+    this.syncExactTimer();
   }
 
   private safeSwitchImminent(): boolean {
@@ -968,6 +1076,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       costUsd: cacheReadCostUsd(model?.cost, this.session.cacheReadTokens),
       dropped: { ...this.dropped },
       lastSkip: this.lastSkip,
+      lastTerminalSkip: this.lastTerminalSkip,
       prefixSource: this.window.capture?.prefix.source,
       supportsLongCacheRetention: this.supportsLongCacheRetention(),
       lastPingDiagnostics: this.lastPingDiagnostics,
@@ -1003,6 +1112,17 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
   setEnabled(on: boolean): void {
     this.enabledOverride = on;
+    // todo #28 P1 fix: `config().enabled` is read by `syncExactTimer` itself, so
+    // disabling must actively cancel any exact timer already armed for the old
+    // `nextPingAt` (it would otherwise still fire once re-enabled lands on a
+    // stale instant) and re-enabling must re-arm against the CURRENT window —
+    // `syncExactTimer` itself no-ops when the window has since gone stale
+    // (`capture === undefined` or `nextPingAt === undefined`).
+    if (on) {
+      this.syncExactTimer();
+    } else {
+      this.clearExactTimer();
+    }
     this.publishVisibility();
   }
 
@@ -1048,6 +1168,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.disposed = true;
     if (this.timer) this.clock.clearTimer(this.timer);
     this.timer = undefined;
+    this.clearExactTimer();
     try {
       this.abortController?.abort();
     } catch {

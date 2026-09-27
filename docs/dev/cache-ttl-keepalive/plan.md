@@ -1290,3 +1290,80 @@ attempt, outcomeKind })`；最终落地的 `KeepalivePingDiagnostics`（`lastPin
   接线）时必须用 `pi install <本包路径>`（或等价的 settings.json `packages` 注册），
   **不能只用 `-e`/`--no-extensions`**，否则子会话静默拿不到本包，任何子会话专属特性都是死码，
   且没有任何报错或诊断能从内部感知到（本包代码从未被 import，无法自证）。
+
+## 附：todo #28 精确定时器修复漏 ping（2026-09-28）
+
+真机重测发现默认 `keepaliveIntervalMs=240s` 时可 ping 窗口 `[nextPingAt, aliveUntil-45s)`
+宽度恰为 `TICK_INTERVAL_MS`（15s，见 `MAX_SAFE_KEEPALIVE_INTERVAL_MS` 的注释），3 窗仅中 1——
+15s 周期 tick 的相位若与该窗口内唯一一次真正落在窗口里的时机遇上另一个瞬时门（典型是 `armed`
+刚好在那一刻翻假），这一次机会就永久错过，下一次 tick（+15s）已经落在 `cache-expired` 之后。
+纯周期 tick 本身（无额外瞬时门介入）在宽度==周期时数学上不可能整窗错过（任何相位下，区间
+`[nextPingAt, nextPingAt+15s)` 必含且只含该周期序列的恰好一个点）——真正致命的是"那一个点"
+恰好撞上瞬时门。
+
+**用户裁决的修复**：不改 240s 取值/费用论证；`window.nextPingAt` 确定后额外调度一个
+`clock.setTimer` 一次性精确定时器（`CacheKeepaliveServiceImpl.syncExactTimer`/`clearExactTimer`），
+到点直接复用 `onTick()`/`evaluateTick` 全部门禁（armed/budget/adaptive/fingerprint/...），15s
+周期 tick 保留作兜底。重排点：`noteRequest`（新窗口）、`runPing` 的 proven-hit（窗口延期）/
+unproven（capture 清空）/ping 中途发现 fingerprint drift、`invalidate()`、`onTick()` 自身的
+`#9 invalidate` 分支；`dispose()` 清理。`config.enabled=false` 或 `window.capture===undefined`
+时不调度（避免和 §6.1/§10.1 的钳位口径打架，也避免功能关闭时留一个 240s 外的孤儿定时器）。
+
+**双触发防护**：`arm()` 改为幂等（`this.timer !== undefined` 时直接返回）——否则 tick 与精确
+定时器凑巧同一 `now()` 触发时，后触发的那个在自己的 `onTick()` 里调 `arm()` 会覆盖 `this.timer`
+指针、把先前那个仍未触发的周期条目变成孤儿（泄漏 + 未来重复触发）。dedup 本身复用既有
+`pingInFlight` 状态：同一 tick-batch 内先触发的把 `pingInFlight` 置真，后触发的在
+`evaluateTick` 的 `#11` 就会被挡（`ping-in-flight`，非终态，正常重排），全程未新增 epoch 相关
+护栏（`pingEpoch`/`sameEpoch` 保持不变）。
+
+**terminal-skip 诊断**：`onTick()` 的 `skip` 分支里，`terminal===true` 且 `window.capture!==
+undefined`（排除"功能全局关闭/从未捕获过"这类"无事发生"，只算"窗口真的死过一次"）时调
+`auditTerminalSkipOnce`——按 `windowEpoch` 去重（同一窗口不管被重新 arm 几次只记一条），写入
+`this.lastTerminalSkip`（`KeepaliveReport` 新增的可选字段，主会话 `/cache-ttl status` 现有
+诊断通道能读到）并调 `this.audit("terminal-skip", {reason})`（沿用 `subagent:cache-keepalive`
+customType，`kind` 字段风格与 `proven-hit`/`unproven`/`invalidate` 一致——子会话没有交互式状态
+命令，这条 jsonl 审计是它唯一能看到的记录）。
+
+**测试与验证前失败的证明**（`tests/cache-ttl/keepalive-lifecycle.test.ts` 新增
+`describe("cache-keepalive service — todo #28: ...")` 两组共 7 个测试，`tests/cache-ttl/
+keepalive-child.test.ts` 追加子会话侧 2 个）：
+
+- 相位最差 + 瞬时 not-armed 撞车：工具在 t=0 启动（周期 tick 相位锚定于此），t=1 才真正
+  `noteRequest`（`nextPingAt=240001`，周期网格 0/15000/30000/.../255000 不含 240001，唯一
+  落在窗口内的周期节点是 255000）；精确定时器在 240001 时命中并 ping 成功；随后让工具恰好在
+  254999 停、260999 才重新开始（跨过 255000 和 255001 截止）验证不产生幽灵二次 ping 或误计
+  unproven。**用 `git stash`（仅两个源文件，验证后立即 `pop` 还原，diff 比对确认字节级还原）
+  临时移除修复重跑**：该测试报 `expected +0 to be 1`（从未 ping）。
+- tick 与精确定时器同一 `now()` 触发只 ping 一次：断言 `fetchImpl` 调用次数恰为 1（此测试修复前
+  也过，因为那时只有一个定时器——设计上是安全网，不是回归证明）。
+- 新真实请求取消并重排精确定时器到新窗口的 `nextPingAt`（`pendingTimers` 恰为 2，从不累积到
+  3）；`dispose()` 后归零。修复前：`noteRequest` 后 `pendingTimers` 只有 1（没有精确定时器可数），
+  断言直接失败（`expected 1 to be 2`）。
+- terminal-skip 诊断每窗口最多一条（`keepaliveMaxPings:1`，故意反复 `noteToolStart`+advance+
+  `noteToolEnd` 触发多次同一 verdict，只记一条；开新窗口后再记一条，共两条）；`no-capture`
+  （从未 `noteRequest` 过）不产生诊断。修复前：`appendEntry` 里过滤不到任何
+  `kind==="terminal-skip"` 记录，断言 `toHaveLength(1)` 失败（收到空数组）。
+- 子会话侧复用同一 `CacheKeepaliveServiceImpl`（`src/cache-ttl/child.ts` 只是不同的 deps 组装），
+  额外验证一次相位最差场景 + 一次 terminal-skip 去重，两者修复前同样失败（`expected +0 to be 1`
+  / 空数组）。
+
+修复过程中顺带发现并修好一个**由本次改动本身引入**的次生问题（validation-report Blocker M1
+的两个既有测试回归）：`FakeClock.advance()` 把同一 `due` 时刻的多个定时器完全同步地背靠背执行
+（不像真实 `setTimeout`——两个真实定时器回调之间 Node 会先把微任务队列排空一次），这两个测试的
+mock 在**被调用的同一拍**（尚未 `await` 任何东西）就同步改写 `ctx.model.id`/`baseUrl` 来模拟
+"auth 解析期间模型悄悄变了"；一旦精确定时器与周期 tick 真的会在同一刻背靠背触发，第二个
+（周期）tick 在纯态机层面看到的就是已经被污染的 `ctx.model`，会在自己的 `evaluateTick` 里比
+`pingInFlight`（`#11`）更早地命中 `#9` 的 fingerprint-drift `invalidate` 分支，把仍处于
+`pingInFlight` 状态的窗口直接判死（`invalidate()` 纯函数只碰 `capture`/`upgradePending`/
+`windowEpoch`，不清 `pingInFlight`/`pings`），导致真正在途的 `runPing` 之后自己的 epoch 校验
+必然不通过、永远没人退款——`pingInFlight`/`pings` 永久泄漏。这在真实生产环境不可能发生（真实
+`getApiKeyAndHeaders` 是真异步 I/O，不会在"被调用"这一同步瞬间就产生副作用；两个真实定时器
+之间 Node 总会先排空微任务），純属 `FakeClock` 的"同刻全同步"简化与两个测试里"不经 await 就
+同步改写共享状态"的 mock 手法叠加出的假象。修复：给这两个 mock 加一次 `await Promise.resolve()`
+（真实 auth 解析永不同步），使其忠实反映"漂移只能在真正 await 之后被观察到"，无需改动源码状态机
+本身。
+
+验证：`npx tsc --noEmit -p tsconfig.json`、
+`npx vitest run tests/cache-ttl tests/service tests/integration/child-keepalive.test.ts`
+（跑两次，742 passed）、`npm run -s format:check`、`npx vitest run` 全量（427 files / 6648
+passed / 2 skipped）均绿。

@@ -1013,6 +1013,18 @@ export interface KeepaliveReport {
   costUsd: number | undefined;
   dropped: { sessionMismatch: number; instanceMismatch: number; epochMismatch: number };
   lastSkip: TickSkipReason | undefined;
+  /**
+   * todo #28: the last TERMINAL skip that hit a window which still had a
+   * capture (i.e. a window that was actually able to ping, not merely a
+   * globally-disabled feature) — deduped to one per `windowEpoch` by the
+   * service (`auditTerminalSkipOnce`). This is the main session's "existing
+   * diag channel" for the terminal-skip diagnostic (`/cache-ttl status`);
+   * child sessions additionally get the same event as a
+   * `subagent:cache-keepalive` jsonl audit entry (`kind: "terminal-skip"`)
+   * via the shared `audit()` helper, since they have no interactive status
+   * command to read this field from.
+   */
+  lastTerminalSkip?: { reason: TickSkipReason; at: Millis; windowEpoch: number } | undefined;
   prefixSource: "usage" | "unknown" | undefined;
   /**
    * Corrective fix (unrelated to the header bug, same audit pass): mirrors
@@ -1428,5 +1440,9 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
     `dropped: sessionMismatch=${dropped.sessionMismatch} instanceMismatch=${dropped.instanceMismatch} epochMismatch=${dropped.epochMismatch}`,
   );
   if (report.lastSkip !== undefined) lines.push(`last skip: ${report.lastSkip}`);
+  if (report.lastTerminalSkip !== undefined) {
+    const t = report.lastTerminalSkip;
+    lines.push(`terminal skip: ${t.reason} @ ${t.at} (window #${t.windowEpoch})`);
+  }
   return lines;
 }
