@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Phone frames (375×812) — pi web-hub (mockup)</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body class="gallery-page">
+    <main class="phones">
+      <h1 class="gallery-title">
+        Phone · 375×812 <span>list → detail is one-column navigation; back = browser back</span>
+      </h1>
+      <div class="phones-row">
+        <figure class="phone">
+          <iframe id="frame-list" src="dashboard.html" title="Agent list on a phone" width="375" height="812"></iframe>
+          <figcaption>Agent list</figcaption>
+        </figure>
+        <figure class="phone">
+          <iframe
+            id="frame-detail"
+            src="dashboard.html#detail"
+            title="Agent detail on a phone"
+            width="375"
+            height="812"
+          ></iframe>
+          <figcaption>Agent detail · subagents + tool calls</figcaption>
+        </figure>
+        <figure class="phone">
+          <iframe id="frame-login" src="login.html" title="Sign in on a phone" width="375" height="812"></iframe>
+          <figcaption>Sign in (plain HTTP)</figcaption>
+        </figure>
+      </div>
+    </main>
+  </body>
+</html>

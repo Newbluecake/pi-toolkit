@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#141c20" media="(prefers-color-scheme: dark)" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Dashboard — pi web-hub (mockup)</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-logo" viewBox="0 0 24 24"><path d="M5 8h14M9.5 8v10M15 8v8a2 2 0 0 0 2 2" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" /></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24">
+        <path d="M12 3.8 2.9 19.5h18.2L12 3.8z" />
+        <path d="M12 10v4.2M12 17.1v.1" />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 11v5.5M12 7.8v.1" />
+      </symbol>
+      <symbol id="i-unlock" viewBox="0 0 24 24">
+        <rect x="4.5" y="11" width="15" height="10" rx="2" />
+        <path d="M8 11V7.5a4 4 0 0 1 7.7-1.5" />
+      </symbol>
+      <symbol id="i-key" viewBox="0 0 24 24">
+        <circle cx="8" cy="15" r="4" />
+        <path d="M11 12l8.5-8.5M16 7l2.5 2.5" />
+      </symbol>
+      <symbol id="i-unplug" viewBox="0 0 24 24">
+        <path d="M9 3v4M15 3v4M7 7h10v3.5a5 5 0 0 1-10 0V7zM12 15.5V21M3.5 3.5l17 17" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path d="M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4" />
+      </symbol>
+      <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" /></symbol>
+      <symbol id="i-chev-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6" /></symbol>
+      <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6" /></symbol>
+      <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" /></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24">
+        <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+        <path d="M7 9.5l3 2.5-3 2.5M13 15h4" />
+      </symbol>
+      <symbol id="i-cpu" viewBox="0 0 24 24">
+        <rect x="7" y="7" width="10" height="10" rx="2" />
+        <path d="M10 3.5V7M14 3.5V7M10 17v3.5M14 17v3.5M3.5 10H7M3.5 14H7M17 10h3.5M17 14h3.5" />
+      </symbol>
+      <symbol id="i-wrench" viewBox="0 0 24 24">
+        <path
+          d="M15 4.5a4.5 4.5 0 0 0-5.4 5.9L4.3 15.7a2 2 0 0 0 2.9 2.9l5.3-5.3a4.5 4.5 0 0 0 5.9-5.4l-2.6 2.6-2.4-.4-.4-2.4z"
+        />
+      </symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24">
+        <path
+          d="M11 3.5l1.8 5.2 5.2 1.8-5.2 1.8L11 17.5l-1.8-5.2L4 10.5l5.2-1.8zM18.5 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"
+        />
+      </symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 7.5V12l3 2" />
+      </symbol>
+      <symbol id="i-loader" viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" /></symbol>
+      <symbol id="i-branch" viewBox="0 0 24 24">
+        <circle cx="6.5" cy="5.5" r="2" />
+        <circle cx="6.5" cy="18.5" r="2" />
+        <circle cx="17.5" cy="8.5" r="2" />
+        <path d="M6.5 7.5v9M17.5 10.5a6 6 0 0 1-6 6h-3" />
+      </symbol>
+      <symbol id="i-logout" viewBox="0 0 24 24">
+        <path d="M14.5 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3.5M10 16l-4-4 4-4M6 12h9.5" />
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="6.5" />
+        <path d="M16 16l4 4" />
+      </symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24">
+        <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
+        <circle cx="12" cy="12" r="2.8" />
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect x="9" y="9" width="11" height="11" rx="2" />
+        <path d="M5.5 15V6a2 2 0 0 1 2-2H15" />
+      </symbol>
+      <symbol id="i-message" viewBox="0 0 24 24"><path d="M4.5 5h15v10.5h-9l-4.5 3.5v-3.5H4.5z" /></symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24">
+        <path d="M12 3.5l8.5 4.5-8.5 4.5L3.5 8zM3.5 12.5l8.5 4.5 8.5-4.5M3.5 16.5l8.5 4.5 8.5-4.5" />
+      </symbol>
+      <symbol id="i-swap" viewBox="0 0 24 24">
+        <path d="M5 8h13M15 4.5 18.5 8 15 11.5M19 16H6M9 12.5 5.5 16 9 19.5" />
+      </symbol>
+      <symbol id="i-ban" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M6 6l12 12" />
+      </symbol>
+      <symbol id="i-user" viewBox="0 0 24 24">
+        <circle cx="12" cy="8.5" r="3.8" />
+        <path d="M4.5 20.5a7.5 7.5 0 0 1 15 0" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path d="M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+      </symbol>
+      <symbol id="i-hash" viewBox="0 0 24 24"><path d="M9.5 4 8 20M16 4l-1.5 16M4.5 9h15M4 15h15" /></symbol>
+      <symbol id="i-inbox" viewBox="0 0 24 24">
+        <path d="M3.5 13.5 6 5.5h12l2.5 8V18a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z" />
+        <path d="M3.5 13.5H8l1.5 2.5h5l1.5-2.5h4.5" />
+      </symbol>
+      <symbol id="i-radio" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="2" />
+        <path d="M8 8a5.7 5.7 0 0 0 0 8M16 8a5.7 5.7 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" />
+      </symbol>
+    </svg>
+    <a class="skip-link" href="#transcript">Skip to conversation</a>
+    <h1 class="sr-only">pi web-hub dashboard</h1>
+
+    <div class="app">
+      <!-- ============================================================ top bar -->
+      <header class="topbar">
+        <span class="brand">
+          <span class="brand-mark"
+            ><svg class="icon" aria-hidden="true"><use href="#i-logo" /></svg
+          ></span>
+          <span translate="no">pi web-hub</span>
+        </span>
+        <span class="pill conn" data-conn="open" role="status"><span class="dot dot-live"></span>Live</span>
+        <span class="topbar-meta" translate="no">hub v0.2.1</span>
+        <span class="chip"
+          ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye" /></svg>Read-only</span
+        >
+        <span class="topbar-spacer"></span>
+        <span class="user-chip">
+          <svg class="icon" aria-hidden="true"><use href="#i-user" /></svg
+          ><span class="name" translate="no">bluecake</span>
+        </span>
+        <button class="btn btn-ghost" type="button" aria-label="Sign out">
+          <svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg><span class="lbl-md">Sign Out</span>
+        </button>
+      </header>
+
+      <!-- ============================================================ global notices -->
+      <div class="banners">
+        <details class="notice notice--warn notice-compact">
+          <summary>
+            <svg class="icon" aria-hidden="true"><use href="#i-key" /></svg>
+            <span class="notice-line"
+              ><strong>Change the initial password soon.</strong> Run <code translate="no">/webhub passwd</code> on the
+              host.</span
+            >
+            <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+          </summary>
+          <p class="notice-more">
+            The hub still accepts the password generated at setup, so anyone who saw it can sign in. This notice goes
+            away once the password is changed.
+          </p>
+        </details>
+      </div>
+
+      <div class="layout">
+        <!-- ============================================================ agent list -->
+        <nav class="sidebar" aria-label="Agents">
+          <div class="sidebar-head">
+            <h2 class="sidebar-title">Agents <span class="count num">6</span></h2>
+            <div class="search">
+              <svg class="icon" aria-hidden="true"><use href="#i-search" /></svg>
+              <input
+                class="input"
+                type="search"
+                name="agent-filter"
+                placeholder="Filter by path or session…"
+                aria-label="Filter agents"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+          </div>
+
+          <ul class="agent-list">
+            <li>
+              <a class="agent-card" href="#detail" aria-current="page" data-st="running">
+                <span class="agent-row1">
+                  <span class="dot dot-live"></span>
+                  <span class="agent-title" translate="no">ai/pi-toolkit</span>
+                  <span class="chip">TUI</span>
+                  <span class="agent-cost">$195.54</span>
+                </span>
+                <span class="agent-session">web-hub Vue 重写：视觉与交互设计</span>
+                <span class="agent-meta">
+                  <span class="model" translate="no">claude-opus-5-5</span>
+                  <span class="sep" aria-hidden="true">·</span>
+                  <span
+                    ><meter
+                      class="meter"
+                      min="0"
+                      max="100"
+                      low="70"
+                      high="85"
+                      optimum="0"
+                      value="62"
+                      aria-label="Context used"
+                    ></meter
+                    ><span class="num">62%</span></span
+                  >
+                  <span class="sep" aria-hidden="true">·</span>
+                  <span
+                    ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-branch" /></svg
+                    ><span class="num">4 running</span></span
+                  >
+                </span>
+                <span class="agent-flags"><span class="pill" data-st="running">Working</span></span>
+              </a>
+            </li>
+            <li>
+              <a class="agent-card" href="#detail" data-st="waiting">
+                <span class="agent-row1">
+                  <span class="dot"></span>
+                  <span class="agent-title" translate="no">ai/claude2api</span>
+                  <span class="chip">TUI</span>
+                  <span class="agent-cost">$4.82</span>
+                </span>
+                <span class="agent-session">修复 SSE 流在 30s 空闲后断开</span>
+                <span class="agent-meta">
+                  <span class="model" translate="no">gpt-5.6-sol</span>
+                  <span class="sep" aria-hidden="true">·</span>
+                  <span
+                    ><meter
+                      class="meter"
+                      min="0"
+                      max="100"
+                      low="70"
+                      high="85"
+                      optimum="0"
+                      value="18"
+                      aria-label="Context used"
+                    ></meter
+                    ><span class="num">18%</span></span
+                  >
+                </span>
+                <span class="agent-flags"
+                  ><span class="pill" data-st="waiting"
+                    ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-message" /></svg>Waiting on dialog</span
+                  ></span
+                >
+              </a>
+            </li>
+            <li>
+              <a class="agent-card" href="#detail" data-st="idle">
+                <span class="agent-row1">
+                  <span class="dot dot-hollow"></span>
+                  <span class="agent-title" translate="no">work/infra-bot</span>
+                  <span class="chip">RPC</span>
+                  <span class="agent-cost">$0.8731</span>
+                </span>
+                <span class="agent-session">nightly cron: dependency audit</span>
+                <span class="agent-meta">
+                  <span class="model" translate="no">claude-sonnet-5</span>
+                  <span class="sep" aria-hidden="true">·</span>
+                  <span
+                    ><meter
+                      class="meter"
+                      min="0"
+                      max="100"
+                      low="70"
+                      high="85"
+                      optimum="0"
+                      value="88"
+                      aria-label="Context used"
+                    ></meter
+                    ><span class="num">88%</span></span
+                  >
+                </span>
+              </a>
+            </li>
+            <li>
+              <a class="agent-card" href="#detail" data-st="idle">
+                <span class="agent-row1">
+                  <span class="dot dot-hollow"></span>
+                  <span class="agent-title" translate="no">ai/pi-toolkit</span>
+                  <span class="chip">TUI</span>
+                  <span class="agent-cost">$0</span>
+                </span>
+                <span class="agent-session mono" translate="no">01a0dd03</span>
+                <span class="agent-meta">
+                  <span class="model" translate="no">claude-opus-5-5</span>
+                  <span class="sep" aria-hidden="true">·</span>
+                  <span
+                    ><meter
+                      class="meter"
+                      min="0"
+                      max="100"
+                      low="70"
+                      high="85"
+                      optimum="0"
+                      value="0"
+                      aria-label="Context used"
+                    ></meter
+                    ><span class="num">0%</span></span
+                  >
+                </span>
+                <span class="agent-flags"
+                  ><span class="pill" data-st="idle"
+                    ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-info" /></svg>Plugin newer than
+                    hub</span
+                  ></span
+                >
+              </a>
+            </li>
+            <li class="agent-group">Stale &amp; offline</li>
+            <li>
+              <a class="agent-card" href="#detail" data-st="stale">
+                <span class="agent-row1">
+                  <span class="dot dot-dashed"></span>
+                  <span class="agent-title" translate="no">lab/rag-eval</span>
+                  <span class="chip">TUI</span>
+                  <span class="agent-cost">$12.06</span>
+                </span>
+                <span class="agent-session">召回评测：bge-m3 vs e5-large</span>
+                <span class="agent-flags"><span class="pill" data-st="stale">Stale · no heartbeat 3m</span></span>
+              </a>
+            </li>
+            <li>
+              <a class="agent-card" href="#detail" data-st="offline">
+                <span class="agent-row1">
+                  <span class="dot dot-hollow"></span>
+                  <span class="agent-title" translate="no">tmp/scratch</span>
+                  <span class="chip">TUI</span>
+                  <span class="agent-cost">$0.0214</span>
+                </span>
+                <span class="agent-session">(no session name)</span>
+                <span class="agent-flags"
+                  ><span class="pill" data-st="offline"
+                    ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-unplug" /></svg>Offline · process
+                    exited</span
+                  ></span
+                >
+              </a>
+            </li>
+          </ul>
+        </nav>
+
+        <!-- ============================================================ detail -->
+        <main class="detail" id="detail" aria-labelledby="detail-title">
+          <header class="detail-head">
+            <div class="detail-titlebar">
+              <a class="btn btn-ghost detail-back" href="#" aria-label="Back to agents"
+                ><svg class="icon icon-lg" aria-hidden="true"><use href="#i-chev-left" /></svg
+              ></a>
+              <h2 class="detail-title" id="detail-title">web-hub Vue 重写：视觉与交互设计</h2>
+              <span class="pill" data-st="running"><span class="dot dot-live"></span>Working</span>
+            </div>
+
+            <details class="session-info">
+              <summary class="session-sum" aria-label="Session details">
+                <span
+                  ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-folder" /></svg
+                  ><span class="trunc" translate="no">~/ai/pi-toolkit</span></span
+                >
+                <span class="grow"
+                  ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-cpu" /></svg
+                  ><span class="trunc" translate="no">cr-anthropic/claude-opus-5-5 · high</span></span
+                >
+                <span class="hide-sm"
+                  ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-hash" /></svg
+                  ><span class="trunc" translate="no">01a0d892</span></span
+                >
+                <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+              </summary>
+              <dl class="kv">
+                <div>
+                  <dt>cwd</dt>
+                  <dd translate="no">/home/bluecake/ai/pi-toolkit</dd>
+                  <button class="btn btn-ghost btn-icon" type="button" aria-label="Copy cwd">
+                    <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
+                <div>
+                  <dt>session</dt>
+                  <dd translate="no">01a0d892-5c1e-7a40-9e2b-4f6d0c8a1b37</dd>
+                  <button class="btn btn-ghost btn-icon" type="button" aria-label="Copy session id">
+                    <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
+                <div>
+                  <dt>model</dt>
+                  <dd translate="no">cr-anthropic/claude-opus-5-5 · thinking high</dd>
+                  <span></span>
+                </div>
+                <div>
+                  <dt>process</dt>
+                  <dd translate="no">TUI · pid 48213 · plugin 0.2.1</dd>
+                  <span></span>
+                </div>
+              </dl>
+            </details>
+
+            <dl class="metrics">
+              <div class="metric">
+                <dt>Context</dt>
+                <dd>
+                  <meter
+                    class="meter meter-lg"
+                    min="0"
+                    max="100"
+                    low="70"
+                    high="85"
+                    optimum="0"
+                    value="62"
+                    aria-label="Context used"
+                  ></meter>
+                  <span>62%</span><span class="aside hide-sm">124k / 200k</span>
+                </dd>
+              </div>
+              <div class="metric">
+                <dt>Cost</dt>
+                <dd>$195.54 <span class="aside">sub $36.17</span></dd>
+              </div>
+            </dl>
+          </header>
+
+          <div class="detail-body">
+            <!-- ============================================================ subagent tree -->
+            <details class="fleet" open>
+              <summary class="panel-head">
+                <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                <span class="panel-title">Subagents</span>
+                <span class="panel-stats">
+                  <span class="pill" data-st="running"><span class="dot"></span>4 running</span>
+                  <span class="num">8 total · $5.61</span>
+                </span>
+              </summary>
+              <div class="tree-scroll">
+                <ul class="tree" aria-label="Subagent tree">
+                  <li>
+                    <details open>
+                      <summary class="run" data-st="thinking">
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                        <span class="run-icon"
+                          ><svg class="icon" aria-hidden="true"><use href="#i-sparkle" /></svg
+                        ></span>
+                        <span class="run-name"
+                          ><b translate="no">Plan-vue-rewrite</b><span class="chip">Plan</span></span
+                        >
+                        <span class="run-activity"
+                          ><span class="phase">Thinking</span> Weighing Pinia vs. a plain reactive store for the SSE
+                          reducer…</span
+                        >
+                        <span class="run-nums"
+                          ><span class="model" translate="no">claude-opus-5-5</span><span class="time">6m02s</span
+                          ><span class="cost">$2.31</span></span
+                        >
+                      </summary>
+                      <ul>
+                        <li>
+                          <div class="run is-terminal" data-st="done">
+                            <span class="chev"></span>
+                            <span class="run-icon"
+                              ><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg
+                            ></span>
+                            <span class="run-name"><b>consult → main</b><span class="chip">consult</span></span>
+                            <span class="run-activity">answered: keep state.js reducer as-is, wrap in shallowRef</span>
+                            <span class="run-nums"
+                              ><span class="model" translate="no">claude-opus-5-5</span><span class="time">38s</span
+                              ><span class="cost">$0.0812</span></span
+                            >
+                          </div>
+                        </li>
+                      </ul>
+                    </details>
+                  </li>
+                  <li>
+                    <details open>
+                      <summary class="run" data-st="tool">
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                        <span class="run-icon"
+                          ><svg class="icon" aria-hidden="true"><use href="#i-wrench" /></svg
+                        ></span>
+                        <span class="run-name"
+                          ><b translate="no">ui-design</b><span class="chip">frontend-dev</span></span
+                        >
+                        <span class="run-activity"
+                          ><span class="phase">bash</span> deveye screenshot -o
+                          docs/dev/web-hub/ui-mockups/screenshots/dashboard-light.png</span
+                        >
+                        <span class="run-nums"
+                          ><span class="model" translate="no">claude-sonnet-5</span><span class="time">4m47s</span
+                          ><span class="cost">$1.07</span></span
+                        >
+                      </summary>
+                      <ul>
+                        <li>
+                          <div class="run" data-st="idle">
+                            <span class="chev"></span>
+                            <span class="run-icon"
+                              ><svg class="icon" aria-hidden="true"><use href="#i-clock" /></svg
+                            ></span>
+                            <span class="run-name"
+                              ><b translate="no">verifier-ui</b><span class="chip">general</span></span
+                            >
+                            <span class="run-activity"
+                              ><span class="phase">Queued</span> waiting for a slot (10/10 in use)</span
+                            >
+                            <span class="run-nums"
+                              ><span class="model" translate="no">gpt-5.6-sol</span><span class="time">1m12s</span
+                              ><span class="cost">—</span></span
+                            >
+                          </div>
+                        </li>
+                      </ul>
+                    </details>
+                  </li>
+                  <li>
+                    <details open>
+                      <summary class="run" data-st="running" data-hl="warn">
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                        <span class="run-icon"
+                          ><svg class="icon spin" aria-hidden="true"><use href="#i-loader" /></svg
+                        ></span>
+                        <span class="run-name"
+                          ><b translate="no">vue-port-batch</b><span class="chip">workflow</span></span
+                        >
+                        <span class="run-activity"
+                          ><span class="phase">Slow phase</span> tool_exec 4m12s in port-agent-list</span
+                        >
+                        <span class="run-nums"
+                          ><span class="model">—</span><span class="time">11m03s</span
+                          ><span class="cost">$1.06</span></span
+                        >
+                      </summary>
+                      <ul>
+                        <li>
+                          <div class="run" data-st="tool">
+                            <span class="chev"></span>
+                            <span class="run-icon"
+                              ><svg class="icon" aria-hidden="true"><use href="#i-wrench" /></svg
+                            ></span>
+                            <span class="run-name"
+                              ><b translate="no">port-agent-list</b><span class="chip">general</span></span
+                            >
+                            <span class="run-activity"
+                              ><span class="phase">edit</span> src/web-hub/web-vue/components/AgentList.vue</span
+                            >
+                            <span class="run-nums"
+                              ><span class="model" translate="no">claude-sonnet-5</span><span class="time">3m40s</span
+                              ><span class="cost">$0.6200</span></span
+                            >
+                          </div>
+                        </li>
+                        <li>
+                          <div class="run" data-st="failed" data-hl="crit">
+                            <span class="chev"></span>
+                            <span class="run-icon"
+                              ><svg class="icon" aria-hidden="true"><use href="#i-x" /></svg
+                            ></span>
+                            <span class="run-name"
+                              ><b translate="no">port-transcript</b><span class="chip">general</span></span
+                            >
+                            <span class="run-activity"
+                              ><span class="phase">Timed out</span> tool_exec exceeded its 10m budget</span
+                            >
+                            <span class="run-nums"
+                              ><span class="model" translate="no">claude-sonnet-5</span><span class="time">10m00s</span
+                              ><span class="cost">$0.4410</span></span
+                            >
+                          </div>
+                        </li>
+                      </ul>
+                    </details>
+                  </li>
+                  <li>
+                    <div class="run is-terminal" data-st="done">
+                      <span class="chev"></span>
+                      <span class="run-icon"
+                        ><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg
+                      ></span>
+                      <span class="run-name"
+                        ><b translate="no">explore-webhub</b><span class="chip">Explore</span></span
+                      >
+                      <span class="run-activity">report ready · 14 files read</span>
+                      <span class="run-nums"
+                        ><span class="model" translate="no">claude-sonnet-5</span><span class="time">2m14s</span
+                        ><span class="cost">$0.4120</span></span
+                      >
+                    </div>
+                  </li>
+                </ul>
+                <button class="btn btn-ghost run-more" type="button">Show 2 Finished Runs</button>
+              </div>
+            </details>
+
+            <!-- ============================================================ transcript -->
+            <section class="transcript" id="transcript" tabindex="-1" aria-label="Conversation">
+              <div class="tx-inner">
+                <button class="btn tx-older" type="button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-arrow-up" /></svg>Load Older Messages
+                </button>
+
+                <details class="tx-divider-wrap tx-item">
+                  <summary class="tx-divider">
+                    <span class="label"
+                      ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-layers" /></svg>Context compacted ·
+                      09:12</span
+                    >
+                  </summary>
+                  <div class="tx-summary">
+                    Goal: redesign the web-hub UI. Done so far: read render/*.js, captured the current page, generated a
+                    design system. Next: tokens, mockups, screenshots.
+                  </div>
+                </details>
+
+                <div class="msg-user tx-item">
+                  <!-- prettier-ignore -->
+                  <div class="bubble">现在的前端有点古朴，帮我把 web-hub 做得清新一点：浅色默认、暗色跟随系统，手机上也要好用。先出设计稿和截图，不改 src/。</div>
+                  <span class="msg-time">10:38</span>
+                </div>
+
+                <article class="msg-assistant tx-item">
+                  <span class="avatar"
+                    ><svg class="icon" aria-hidden="true"><use href="#i-logo" /></svg
+                  ></span>
+                  <div class="msg-main">
+                    <div class="msg-head">
+                      <span class="who">pi</span>
+                      <span class="end"><span translate="no">claude-opus-5-5</span><span>10:39</span></span>
+                    </div>
+                    <details class="thinking">
+                      <summary>
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-sparkle" /></svg>Thinking · 18 lines
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                      </summary>
+                      <!-- prettier-ignore -->
+                      <div class="thinking-text">The CSP is script-src 'self' and style-src 'self', so no inline style attributes.
+Fonts must be system stacks. Mobile is a primary surface…</div>
+                    </details>
+                    <div class="md">
+                      <!-- prettier-ignore -->
+                      <p>先把现状摸清楚：需要展示的数据都来自 <code>state.js</code> 的 reducer，渲染层只有 7 个模块。</p>
+                      <ul>
+                        <li>agent 卡片：<code>cwd</code> / <code>kind</code> / session / 花费 / busy</li>
+                        <li>子 agent 行：<code>FleetRowWire</code> 的 label、phaseLabel、model、elapsedMs、costUsd</li>
+                        <li>对话流：user / assistant / toolResult / custom / compaction</li>
+                      </ul>
+                    </div>
+                    <details class="tool" data-st="done">
+                      <summary class="tool-head">
+                        <span class="run-icon"
+                          ><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg
+                        ></span>
+                        <span class="tool-name" translate="no">read</span>
+                        <span class="tool-args" translate="no">src/web-hub/web/state.js</span>
+                        <span class="tool-end"><span>664 lines</span></span>
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                      </summary>
+                    </details>
+                    <details class="tool" data-st="done" open>
+                      <summary class="tool-head">
+                        <span class="run-icon"
+                          ><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg
+                        ></span>
+                        <span class="tool-name" translate="no">bash</span>
+                        <span class="tool-args" translate="no"
+                          >npm run typecheck &amp;&amp; npx vitest run tests/web-hub/web</span
+                        >
+                        <span class="tool-end"><span>exit 0</span></span>
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                      </summary>
+                      <div class="tool-body">
+                        <div class="tool-section">
+                          <div class="tool-label">Input</div>
+                          <pre class="pre" translate="no">
+{
+  "command": "npm run typecheck &amp;&amp; npx vitest run tests/web-hub/web",
+  "timeout": 300
+}</pre>
+                        </div>
+                        <div class="tool-section">
+                          <div class="tool-label">Output <span class="num">38 lines</span></div>
+                          <pre class="pre" translate="no">
+&gt; pi-toolkit@0.9.0 typecheck
+&gt; tsc --noEmit
+
+ ✓ tests/web-hub/web/state.test.ts (84 tests) 212ms
+ ✓ tests/web-hub/web/markdown.test.ts (41 tests) 38ms
+ ✓ tests/web-hub/web/no-innerhtml.test.ts (3 tests) 9ms
+ ✓ tests/web-hub/web/contract.test.ts (4 tests) 6ms
+
+ Test Files  11 passed (11)
+      Tests  236 passed (236)</pre>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="msg-meta"><span>$0.4213</span><span>·</span><span>18.2k tokens</span></div>
+                  </div>
+                </article>
+
+                <div class="tx-divider tx-item">
+                  <span class="label"
+                    ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-swap" /></svg>Model →
+                    <span translate="no">cr-anthropic/claude-opus-5-5</span></span
+                  >
+                </div>
+
+                <div class="msg-custom tx-item">
+                  <div class="kind">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="#i-branch" /></svg
+                    ><span translate="no">subagent:notice</span>
+                  </div>
+                  explore-webhub finished · completed in 2m14s · $0.4120 · report attached
+                </div>
+
+                <article class="msg-assistant tx-item">
+                  <span class="avatar"
+                    ><svg class="icon" aria-hidden="true"><use href="#i-logo" /></svg
+                  ></span>
+                  <div class="msg-main">
+                    <div class="msg-head">
+                      <span class="who">pi</span>
+                      <span class="end"><span translate="no">claude-opus-5-5</span><span>10:44</span></span>
+                    </div>
+                    <div class="md">
+                      <p>组件骨架如下，纯逻辑继续复用 <code>state.js</code>，Vue 只负责订阅和渲染：</p>
+                    </div>
+                    <div class="codeblock">
+                      <div class="codeblock-head">
+                        <span translate="no">vue</span>
+                        <button class="btn btn-ghost btn-icon" type="button" aria-label="Copy code">
+                          <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                        </button>
+                      </div>
+                      <pre translate="no"><code>&lt;script setup lang="ts"&gt;
+import { computed, shallowRef } from "vue";
+import { reduce, initialState, type State } from "../state.js";
+import { fleetTree } from "../render/fleet.js";
+
+const props = defineProps&lt;{ agentKey: string; rows: readonly FleetRowWire[]; collapsedByDefault?: boolean }&gt;();
+const emit = defineEmits&lt;{ (e: "select-run", runId: string): void; (e: "toggle", runId: string, open: boolean): void }&gt;();
+
+const tree = computed(() =&gt; fleetTree(props.rows)); // pure, unit-tested, unchanged from the vanilla build
+const running = computed(() =&gt; props.rows.filter((r) =&gt; !r.terminal).length);
+&lt;/script&gt;</code></pre>
+                    </div>
+                    <details class="tool" data-st="failed" open>
+                      <summary class="tool-head">
+                        <span class="run-icon"
+                          ><svg class="icon" aria-hidden="true"><use href="#i-x" /></svg
+                        ></span>
+                        <span class="tool-name" translate="no">edit</span>
+                        <span class="tool-args" translate="no">docs/dev/web-hub/ui-mockups/app.css</span>
+                        <span class="tool-end"><span>error</span></span>
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                      </summary>
+                      <div class="tool-body">
+                        <div class="tool-section is-error">
+                          <div class="tool-label">Result</div>
+                          <pre class="pre" translate="no">
+Could not find the exact text in docs/dev/web-hub/ui-mockups/app.css. The old text must match exactly including all whitespace and newlines.</pre>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="msg-meta"><span>$0.3907</span></div>
+                  </div>
+                </article>
+
+                <article class="msg-assistant is-streaming tx-item" aria-busy="true">
+                  <span class="avatar"
+                    ><svg class="icon" aria-hidden="true"><use href="#i-logo" /></svg
+                  ></span>
+                  <div class="msg-main">
+                    <div class="msg-head">
+                      <span class="who">pi</span>
+                      <span class="pill" data-st="running"><span class="dot dot-live"></span>Streaming…</span>
+                    </div>
+                    <details class="tool" data-st="running" open>
+                      <summary class="tool-head">
+                        <span class="tool-progress" aria-hidden="true"></span>
+                        <span class="run-icon"
+                          ><svg class="icon spin" aria-hidden="true"><use href="#i-loader" /></svg
+                        ></span>
+                        <span class="tool-name" translate="no">bash</span>
+                        <span class="tool-args" translate="no"
+                          >deveye screenshot --selector "#frame-detail" -o screenshots/mobile-detail-light.png</span
+                        >
+                        <span class="tool-end"><span class="num">12s</span></span>
+                        <svg class="icon icon-sm chev" aria-hidden="true"><use href="#i-chev-right" /></svg>
+                      </summary>
+                      <div class="tool-body">
+                        <div class="tool-section">
+                          <div class="tool-label">Live output</div>
+                          <pre class="pre" translate="no">
+Waiting for frame to settle…
+Capturing 375×812 @2x</pre>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="md">
+                      <!-- prettier-ignore -->
+                      <p>浅色截图完成，接下来切到暗色：同一份样稿用 <code>#mock-dark</code> 开关强制暗色，再逐帧截图<span class="caret" aria-hidden="true"></span></p>
+                    </div>
+                  </div>
+                </article>
+              </div>
+            </section>
+          </div>
+
+          <!-- ============================================================ dock -->
+          <div class="dock">
+            <span class="readonly"
+              ><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye" /></svg>Read-only<span class="long">
+                · reply from the terminal</span
+              ></span
+            >
+            <div class="dock-actions">
+              <label class="switch"><input type="checkbox" role="switch" name="follow" /> Follow</label>
+              <button class="btn btn-primary jump-latest" type="button">
+                <svg class="icon" aria-hidden="true"><use href="#i-arrow-down" /></svg>Latest<span class="badge-new"
+                  >3 new</span
+                >
+              </button>
+            </div>
+          </div>
+          <p class="sr-only" role="status">Assistant is responding. 4 subagents running.</p>
+        </main>
+      </div>
+    </div>
+
+    <label class="mock-controls"><input type="checkbox" id="mock-dark" /> Force dark (mockup only)</label>
+  </body>
+</html>
