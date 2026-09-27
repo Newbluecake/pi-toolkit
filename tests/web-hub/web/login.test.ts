@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mountAuthApp } from "../../../src/web-hub/web/app.js";
 import { BUSY_RETRY_MAX } from "../../../src/web-hub/web/password-client.js";
-import { fakeDocument, FakeElement } from "./fake-dom.js";
+import { fakeDocument, FakeElement, byClass } from "./fake-dom.js";
 
 /**
  * Full mountPasswordApp integration tests (plan §10, package LF): the login
@@ -393,5 +393,75 @@ describe("mountPasswordApp: login form", () => {
     await flush();
     expect(nodes.get("login-screen")!.hidden).toBe(false);
     expect(nodes.get("app")!.hidden).toBe(true);
+  });
+
+  it("dispose (logout → 回到登录页，P1-1): a render queued right before signout never lands, and rendering resumes cleanly after logging back in", async () => {
+    const { win, doc, nodes, c, paint, submit } = setup({
+      fetch: async (url) => (url === "/api/login" ? resp(200, { initialPassword: false }) : resp(200)),
+    });
+    const app = mountAuthApp(win, doc);
+    await flush();
+    submit("alice", "s3cret");
+    await flush();
+    const es1 = FakeES.all.at(-1)!;
+    const card = (agentKey: string, sessionId: string) => ({
+      agentKey,
+      kind: "tui",
+      pid: 1,
+      cwd: "/p/one",
+      state: "live",
+      pluginVersion: "1",
+      outdated: false,
+      session: { sessionId, cwd: "/p/one", reason: "startup", leafId: null, mode: "tui" },
+      prompts: [],
+    });
+    es1.emit("hello", { clientId: "c1" });
+    es1.emit("agents", { agents: [card("A", "s-A"), card("B", "s-B")] });
+    await flush();
+    // Settle the initial (auto-select-first) render the normal way before probing the logout race.
+    paint();
+    await flush();
+    expect(nodes.get("session-head")!.textContent).toContain("s-A");
+
+    // Select B, which flips `selected` and queues another render, but do NOT drain the queue this
+    // time — signout must land in the middle of it, exactly like the P1-1 report (rAF/fallback-timer
+    // race straddling a logout / "back to the login page").
+    const pendingBeforeSignout = c.pending();
+    byClass(nodes.get("agents")!, "agent-card")[1]!.dispatch("click");
+    await flush();
+    expect(c.pending()).toBeGreaterThan(pendingBeforeSignout);
+
+    nodes.get("signout")!.dispatch("click", {});
+    await flush();
+    expect(nodes.get("app")!.hidden).toBe(true);
+    // dispose() on the "auth" transition really cancelled the fallback timer (real clock()
+    // clearTimeout — §P1-1 "无残留 timer"), not just guarded it — and no new one got scheduled
+    // while logged out either.
+    expect(c.pending()).toBe(0);
+    // Draining the still-registered rAF (this harness has no cancelAnimationFrame; the `disposed`
+    // check inside `run()` is the defense-in-depth backstop) must not update the DOM.
+    paint();
+    expect(nodes.get("session-head")!.textContent).toContain("s-A");
+
+    // Log back in on the same mounted instance (no page reload) — disposing on logout must not
+    // permanently brick rendering: `onConn("open")` on the new stream has to lift the guard again.
+    submit("alice", "s3cret");
+    await flush();
+    const es2 = FakeES.all.at(-1)!;
+    expect(es2).not.toBe(es1);
+    es2.emit("hello", { clientId: "c2" });
+    es2.emit("agents", { agents: [card("A", "s-A2"), card("B", "s-B")] });
+    await flush();
+    paint();
+    await flush();
+    // `selected` ("B", from before the logout) is untouched by logout/login — confirms the render
+    // guard resumes, not that state got reset.
+    expect(app.getState()?.selected).toBe("B");
+    byClass(nodes.get("agents")!, "agent-card")[0]!.dispatch("click");
+    await flush();
+    paint();
+    await flush();
+    expect(app.getState()?.selected).toBe("A");
+    expect(nodes.get("session-head")!.textContent).toContain("s-A2");
   });
 });

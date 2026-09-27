@@ -10,8 +10,15 @@ import type {
   WireMessage,
 } from "../../../src/web-hub/protocol/messages.js";
 import type { HubEvent } from "../../../src/web-hub/hub/ports.js";
-import { createHistoryService, mergeSnapshot, readBranchFromFile } from "../../../src/web-hub/hub/history.js";
+import {
+  createHistoryService,
+  mergeSnapshot,
+  readBranchFromFile,
+  capEntriesByBytes,
+  MAX_HISTORY_PAYLOAD_BYTES,
+} from "../../../src/web-hub/hub/history.js";
 import { createRegistry, type AgentConn, type Registry } from "../../../src/web-hub/hub/registry.js";
+import { formatSseFrame } from "../../../src/web-hub/hub/sse.js";
 import { hello, memLog, recordBus, sleepReal, tmpDirs, waitFor } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -553,6 +560,229 @@ describe("history.page", () => {
     expect(first.hasMore).toBe(false);
     await expect(h.page(a.agentKey, "nope", 5)).rejects.toMatchObject({ code: "E_NOT_FOUND" });
     await expect(h.page("missing", "u1", 5)).rejects.toMatchObject({ code: "E_NOT_FOUND" });
+    h.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// byte budget (2026-09-27 regression): DEFAULT_TAIL_ENTRIES/PAGE_MAX only cap entry COUNT.
+// projectSessionEntry only bounds a single string field (LIMITS.textTruncateBytes, 64 KiB) —
+// a tail full of large multi-block messages had no total-byte ceiling before capEntriesByBytes.
+// ---------------------------------------------------------------------------
+
+describe("capEntriesByBytes", () => {
+  const bigEntry = (id: string, parentId: string | null, bytes: number): WireEntry => ({
+    id,
+    parentId,
+    type: "message",
+    timestamp: iso(1),
+    message: msg("assistant", 1, { content: "x".repeat(bytes) }),
+  });
+
+  it("fits within budget ⇒ returns everything unchanged, truncated:false", () => {
+    const entries = [bigEntry("a", null, 100), bigEntry("b", "a", 100)];
+    const out = capEntriesByBytes(entries, 10_000);
+    expect(out).toEqual({ entries, truncated: false });
+  });
+
+  it("trims from the OLDEST end (keeps the newest) once the budget is exceeded", () => {
+    // 3 entries at ~1 KB serialized each; a 1.5 KB budget can only fit the newest one or two.
+    const entries = [bigEntry("old", null, 1_000), bigEntry("mid", "old", 1_000), bigEntry("new", "mid", 1_000)];
+    const out = capEntriesByBytes(entries, 1_500);
+    expect(out.entries.map((e) => e.id)).toEqual(["new"]);
+    expect(out.truncated).toBe(true);
+  });
+
+  it("always keeps the single newest entry even if it alone exceeds the budget (never an empty payload)", () => {
+    const entries = [bigEntry("old", null, 100), bigEntry("huge", "old", 5_000)];
+    const out = capEntriesByBytes(entries, 1_000);
+    expect(out.entries.map((e) => e.id)).toEqual(["huge"]);
+    expect(out.truncated).toBe(true);
+  });
+
+  it("empty input ⇒ empty output, not truncated", () => {
+    expect(capEntriesByBytes([], 1_000)).toEqual({ entries: [], truncated: false });
+  });
+});
+
+describe("history.snapshot / history.page byte budget (regression: would fail before capEntriesByBytes)", () => {
+  // One oversized entry per tail slot (well under MAX_HISTORY_PAYLOAD_BYTES individually, but
+  // 400 of them — DEFAULT_TAIL_ENTRIES — would total ~40 MB, far over the 2 MiB budget) proves
+  // the wire payload itself is capped, not just documented as a risk.
+  const OVERSIZED_BYTES = 100_000; // 400 × 100 KB ≈ 40 MB uncapped
+
+  function writeOversizedFixture(count: number): { file: string; leaf: string } {
+    let parent: string | null = null;
+    const lines: string[] = [];
+    let leaf = "";
+    for (let i = 0; i < count; i++) {
+      const id = `m${i}`;
+      lines.push(
+        line({
+          type: "message",
+          id,
+          parentId: parent,
+          timestamp: iso(i),
+          message: msg("assistant", i, { content: "x".repeat(OVERSIZED_BYTES) }),
+        }),
+      );
+      parent = id;
+      leaf = id;
+    }
+    return { file: writeFixture(lines.join("")), leaf };
+  }
+
+  it("history.snapshot: a tail of large entries is trimmed to fit MAX_HISTORY_PAYLOAD_BYTES, hasMore:true", async () => {
+    const { file, leaf } = writeOversizedFixture(50); // 50 × 100 KB ≈ 5 MB, over the 2 MiB budget
+    const a = agent(file, leaf);
+    const h = createHistoryService({ registry: a.reg, log: memLog(), tailEntries: 50 });
+    const p = await h.snapshot(a.agentKey);
+    const totalBytes = Buffer.byteLength(JSON.stringify(p.entries), "utf8");
+    expect(totalBytes).toBeLessThanOrEqual(MAX_HISTORY_PAYLOAD_BYTES);
+    expect(p.entries.length).toBeLessThan(50); // some oldest entries were dropped
+    expect(p.entries.at(-1)?.id).toBe(leaf); // the newest is always kept
+    expect(p.hasMore).toBe(true);
+    h.dispose();
+  });
+
+  it("history.page: the same byte budget applies to a page response", async () => {
+    const { file, leaf } = writeOversizedFixture(50);
+    const a = agent(file, leaf);
+    const h = createHistoryService({ registry: a.reg, log: memLog() });
+    const p = await h.page(a.agentKey, leaf, 50);
+    const totalBytes = Buffer.byteLength(JSON.stringify(p.entries), "utf8");
+    expect(totalBytes).toBeLessThanOrEqual(MAX_HISTORY_PAYLOAD_BYTES);
+    expect(p.entries.length).toBeLessThan(49); // some oldest entries (before the leaf) were dropped
+    expect(p.hasMore).toBe(true);
+    h.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-2 (verifier finding): capEntriesByBytes only bounds the entries' OWN serialized bytes; it
+// has no idea about the JSON array's separators, HistoryPayload's other fields
+// (tailMessages/inflight/agentKey/fromSeq/hasMore/source/oldestEntryId), or — for snapshot()
+// specifically, whose payload actually goes out as an SSE frame — the `event: history\ndata:
+// ...\n\n` wrapper. Real repro: entries totaling 2,097,105 B (under the 2,097,152 B budget) plus a
+// non-empty tailMessages produced a complete SSE frame of 2,097,217 B, over budget.
+// ---------------------------------------------------------------------------
+
+describe("history.snapshot / history.page: the REAL wire unit (not just entries[]) fits MAX_HISTORY_PAYLOAD_BYTES", () => {
+  function writeChainFixture(count: number, bytesEach: number): { file: string; leaf: string } {
+    let parent: string | null = null;
+    const lines: string[] = [];
+    let leaf = "";
+    for (let i = 0; i < count; i++) {
+      const id = `m${i}`;
+      lines.push(
+        line({
+          type: "message",
+          id,
+          parentId: parent,
+          timestamp: iso(i),
+          message: msg("assistant", i, { content: "x".repeat(bytesEach) }),
+        }),
+      );
+      parent = id;
+      leaf = id;
+    }
+    return { file: writeFixture(lines.join("")), leaf };
+  }
+
+  it("history.snapshot: entries alone fit the budget (capEntriesByBytes' own pass would let them all through), but a non-empty tailMessages + inflight push the actual SSE frame over it — extra entries get trimmed until the real frame fits, newest kept, paging cursor stays consistent", async () => {
+    // `projectSessionEntry` truncates every entry's text to LIMITS.textTruncateBytes (64 KiB) —
+    // pick a per-entry content size under that ceiling and enough entries that their sum alone is
+    // comfortably under the 2 MiB budget (so capEntriesByBytes' own per-entry pass keeps all of
+    // them), leaving the tailMessages/inflight additions (never truncated, unlike entries) to be
+    // what actually forces the extra trim.
+    const N = 20;
+    const BYTES_EACH = 60_000; // 20 × ~60.1 KB ≈ 1.20 MB, comfortably under the 2 MiB budget on its own
+    const { file, leaf } = writeChainFixture(N, BYTES_EACH);
+    const a = agent(file, leaf);
+    const bigTailMessage: WireMessage = { role: "custom", customType: "probe:big", content: "y".repeat(700_000) };
+    a.replyWith({
+      recent: [{ seq: 1, message: bigTailMessage }],
+      seq: 1,
+      inflight: { tools: [{ toolCallId: "c1", toolName: "bash", args: { cmd: "z".repeat(200_000) } }] },
+    });
+    const h = createHistoryService({ registry: a.reg, log: memLog(), tailEntries: N });
+
+    const p = await h.snapshot(a.agentKey);
+
+    const frameBytes = Buffer.byteLength(formatSseFrame("history", p), "utf8");
+    expect(frameBytes).toBeLessThanOrEqual(MAX_HISTORY_PAYLOAD_BYTES);
+    expect(p.entries.length).toBeLessThan(N); // extra entries were dropped to make room for tailMessages/inflight
+    expect(p.entries.at(-1)?.id).toBe(leaf); // newest always kept
+    expect(p.hasMore).toBe(true);
+    expect(p.tailMessages).toHaveLength(1); // the tail message itself is never trimmed
+    // paging cursor (oldestEntryId) reflects the FINAL trimmed set, not the pre-verification one
+    expect(p.oldestEntryId).toBe(p.entries[0]?.id);
+    h.dispose();
+  });
+
+  it("history.snapshot: even the single newest entry, together with a tailMessages entry that alone breaches the budget, cannot fit — it is kept anyway (never an empty payload) and the real frame legitimately exceeds MAX_HISTORY_PAYLOAD_BYTES", async () => {
+    const { file, leaf } = writeChainFixture(1, 1_000); // the sole entry itself is tiny
+    const a = agent(file, leaf);
+    // Unlike entries, tailMessages are never truncated — a single one can alone exceed the whole
+    // budget, in which case dropping every entry (down to the always-kept newest) still isn't enough.
+    const bigTailMessage: WireMessage = {
+      role: "custom",
+      customType: "probe:big2",
+      content: "y".repeat(MAX_HISTORY_PAYLOAD_BYTES),
+    };
+    a.replyWith({ recent: [{ seq: 1, message: bigTailMessage }], seq: 1 });
+    const h = createHistoryService({ registry: a.reg, log: memLog(), tailEntries: 1 });
+
+    const p = await h.snapshot(a.agentKey);
+
+    expect(p.entries).toHaveLength(1);
+    expect(p.entries[0]?.id).toBe(leaf);
+    const frameBytes = Buffer.byteLength(formatSseFrame("history", p), "utf8");
+    expect(frameBytes).toBeGreaterThan(MAX_HISTORY_PAYLOAD_BYTES); // unavoidable, documented behavior
+    h.dispose();
+  });
+
+  it("history.page: the entries strictly before the cursor alone fit the budget, but page()'s bare JSON body (no SSE wrapper, no tailMessages) still carries enough of its own field overhead to push it over — trimmed further, paging cursor stays consistent", async () => {
+    // page() never has tailMessages/inflight, so the only real-vs-per-entry gap is the array's own
+    // brackets/commas plus HistoryPayload's other fields (agentKey/fromSeq/hasMore/source/
+    // oldestEntryId). Every entry is individually under LIMITS.textTruncateBytes (64 KiB, so none
+    // of them get truncated) and their sum sits just 30 B under the budget — comfortably enough
+    // margin for capEntriesByBytes' own per-entry pass to keep every one of them, but not enough
+    // for the wrapper fields on top. `beforeEntryId` itself (`cursor`) is excluded from the
+    // result, so it can be tiny and irrelevant to the budget.
+    let parent: string | null = null;
+    const lines: string[] = [];
+    const sizes = [...Array(31).fill(65_500), 62_045, 10]; // last size (10) is the excluded cursor
+    const ids: string[] = [];
+    for (const bytes of sizes) {
+      const id = `p${ids.length}`;
+      lines.push(
+        line({
+          type: "message",
+          id,
+          parentId: parent,
+          timestamp: iso(ids.length),
+          message: msg("assistant", ids.length, { content: "x".repeat(bytes) }),
+        }),
+      );
+      parent = id;
+      ids.push(id);
+    }
+    const cursorId = ids.at(-1)!;
+    const oldestId = ids[0]!;
+    const newestBeforeCursorId = ids.at(-2)!;
+    const realFile = writeFixture(lines.join(""));
+    const a = agent(realFile, cursorId);
+    const h = createHistoryService({ registry: a.reg, log: memLog() });
+
+    const p = await h.page(a.agentKey, cursorId, ids.length);
+
+    const bodyBytes = Buffer.byteLength(JSON.stringify(p), "utf8"); // page() sends this exact string as its HTTP body
+    expect(bodyBytes).toBeLessThanOrEqual(MAX_HISTORY_PAYLOAD_BYTES);
+    expect(p.entries.length).toBeLessThan(ids.length - 1); // at least the oldest had to go for the wrapper fields
+    expect(p.entries.at(-1)?.id).toBe(newestBeforeCursorId); // the newest entry before the cursor survives
+    expect(p.entries.some((e) => e.id === oldestId)).toBe(false);
+    expect(p.oldestEntryId).toBe(p.entries[0]?.id);
     h.dispose();
   });
 });

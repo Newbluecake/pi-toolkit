@@ -41,7 +41,18 @@ function setup() {
   const doc = { ...base, getElementById: (id: string) => nodes.get(id) ?? null };
   const rafs: Array<() => void> = [];
   const posts: Array<{ url: string; body: any }> = [];
-  const timers: Array<() => void> = [];
+  const timeouts: Array<() => void> = [];
+  // Real cancellation semantics (not the previous unconditional no-op `clearTimeout`/absent
+  // `cancelAnimationFrame`): `timeouts`/`rafs` still hold plain callables at the same
+  // indices/order existing tests already rely on (`.shift()`/`.slice()`), but each entry is a
+  // thin wrapper that skips the real callback once its id has been cancelled — needed to prove a
+  // disposed queueRender() actually left nothing runnable behind, not just that dispose() *called*
+  // clearTimeout/cancelAnimationFrame.
+  const timeoutCancelled = new Set<number>();
+  const rafCancelled = new Set<number>();
+  const cancelCalls = { timeout: 0, raf: 0 };
+  let timeoutSeq = 0;
+  let rafSeq = 0;
   const win = {
     fetch: async (url: string, init: any) => {
       posts.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
@@ -52,18 +63,40 @@ function setup() {
     location: { hash: "", pathname: "/", search: "" },
     history: { replaceState: () => {} },
     setTimeout: (fn: () => void) => {
-      timers.push(fn);
-      return timers.length;
+      const id = ++timeoutSeq;
+      timeouts.push(() => {
+        if (!timeoutCancelled.has(id)) fn();
+      });
+      return id;
     },
-    clearTimeout: () => {},
-    requestAnimationFrame: (fn: () => void) => rafs.push(fn),
+    clearTimeout: (id: number) => {
+      cancelCalls.timeout++;
+      timeoutCancelled.add(id);
+    },
+    requestAnimationFrame: (fn: () => void) => {
+      const id = ++rafSeq;
+      rafs.push(() => {
+        if (!rafCancelled.has(id)) fn();
+      });
+      return id;
+    },
+    cancelAnimationFrame: (id: number) => {
+      cancelCalls.raf++;
+      rafCancelled.add(id);
+    },
     addEventListener: () => {},
   };
   const app = mountApp(win, doc as any);
   const paint = () => {
     while (rafs.length) rafs.shift()!();
   };
-  return { app, nodes, posts, paint };
+  return {
+    app,
+    nodes,
+    posts,
+    paint,
+    timers: { rafs, timeouts, cancelCalls },
+  };
 }
 
 const card = (agentKey: string, cwd: string) => ({
@@ -135,5 +168,92 @@ describe("mountApp wiring", () => {
     expect(posts.filter((p) => p.url === "/api/subscribe")).toHaveLength(1);
     expect(app.getState().agents.get("A")!.needsResync).toBe(true);
     app.client.close();
+  });
+
+  it("render fallback: a click's re-render still lands even if requestAnimationFrame never fires (hidden/backgrounded tab, plan §regression 2026-09-27)", async () => {
+    const { app, nodes, posts, timers } = setup();
+    await flush();
+    const es = FakeES.all[0]!;
+    es.emit("hello", { clientId: "c1" });
+    es.emit("agents", { agents: [card("A", "/p/one"), card("B", "/p/two")] });
+    await flush();
+    es.emit("history", { agentKey: "A", entries: [], tailMessages: [], fromSeq: 1, hasMore: false, source: "file" });
+    // Settle the initial render the normal way (paint drains requestAnimationFrame) so we start
+    // from a known-good state before simulating the hidden-tab condition.
+    while (timers.rafs.length) timers.rafs.shift()!();
+    await flush();
+    expect(nodes.get("session-head")!.textContent).toContain("s-A");
+
+    // Click the second agent card. This dispatches `select` synchronously (network calls fire,
+    // same as the real bug report's /api/unsubscribe 200 + /api/subscribe 202), which schedules a
+    // re-render via both requestAnimationFrame AND the bounded setTimeout fallback.
+    const timeoutsBeforeClick = timers.timeouts.length;
+    byClass(nodes.get("agents")!, "agent-card")[1]!.dispatch("click");
+    await flush();
+    expect(posts.slice(-2)).toEqual([
+      { url: "/api/unsubscribe", body: { clientId: "c1", agentKey: "A" } },
+      { url: "/api/subscribe", body: { clientId: "c1", agentKey: "B" } },
+    ]);
+    // The reducer state already flipped (proves the click was handled) ...
+    expect(app.getState().selected).toBe("B");
+    // ... but the DOM must NOT have caught up yet: rAF was never drained (simulating a
+    // hidden/backgrounded tab, where Chromium suspends requestAnimationFrame indefinitely) and
+    // the fallback timer hasn't fired yet either.
+    expect(nodes.get("session-head")!.textContent).toContain("s-A");
+
+    // Fire every timer newly scheduled since the click (the click's own render fallback, plus
+    // each fetch call's REQUEST_TIMEOUT_MS deadline timer — firing an already-settled fetch's
+    // deadline is a documented no-op) instead of the never-firing rAF. Which of these is the
+    // render fallback is an implementation detail; draining all of them is robust to it.
+    const scheduled = timers.timeouts.slice(timeoutsBeforeClick);
+    expect(scheduled.length).toBeGreaterThan(0);
+    for (const fn of scheduled) fn();
+    expect(nodes.get("session-head")!.textContent).toContain("s-B");
+    app.client.close();
+  });
+
+  it("dispose (client.close(), P1-1): a render queued before close never executes, and neither the rAF nor the fallback timer is left runnable", async () => {
+    const { app, nodes, posts, timers } = setup();
+    await flush();
+    const es = FakeES.all[0]!;
+    es.emit("hello", { clientId: "c1" });
+    es.emit("agents", { agents: [card("A", "/p/one"), card("B", "/p/two")] });
+    await flush();
+    es.emit("history", { agentKey: "A", entries: [], tailMessages: [], fromSeq: 1, hasMore: false, source: "file" });
+    while (timers.rafs.length) timers.rafs.shift()!();
+    await flush();
+    expect(nodes.get("session-head")!.textContent).toContain("s-A");
+
+    // Click B: queues a render (both a rAF and the RENDER_FALLBACK_MS setTimeout race for it),
+    // exactly like the render-fallback test above, but this time close() fires before either one
+    // ever runs — simulating an unload/unmount that lands squarely inside the race window.
+    const rafsBeforeClick = timers.rafs.length;
+    const timeoutsBeforeClick = timers.timeouts.length;
+    byClass(nodes.get("agents")!, "agent-card")[1]!.dispatch("click");
+    await flush();
+    expect(posts.slice(-2)).toEqual([
+      { url: "/api/unsubscribe", body: { clientId: "c1", agentKey: "A" } },
+      { url: "/api/subscribe", body: { clientId: "c1", agentKey: "B" } },
+    ]);
+    expect(app.getState().selected).toBe("B");
+    expect(timers.rafs.length).toBeGreaterThan(rafsBeforeClick);
+    expect(timers.timeouts.length).toBeGreaterThan(timeoutsBeforeClick);
+
+    app.client.close();
+
+    // Draining every rAF/timeout scheduled since the click (the render's own rAF+fallback pair,
+    // plus any fetch deadline timers) must not update the DOM: dispose() cancelled the pending
+    // render before either callback could run, and each wrapper independently no-ops once
+    // cancelled/disposed even though this harness's clearTimeout/cancelAnimationFrame are now real
+    // (§P1-1 defense in depth — `run()` also re-checks `disposed`).
+    for (const fn of timers.rafs.slice(rafsBeforeClick)) fn();
+    for (const fn of timers.timeouts.slice(timeoutsBeforeClick)) fn();
+    expect(nodes.get("session-head")!.textContent).toContain("s-A");
+
+    // "无残留 timer": dispose() actually invoked the real cancellation APIs for both the rAF and
+    // the fallback timer (not merely relying on the `run()` guard), so a real browser's task queue
+    // would have nothing left to fire either.
+    expect(timers.cancelCalls.raf).toBeGreaterThan(0);
+    expect(timers.cancelCalls.timeout).toBeGreaterThan(0);
   });
 });

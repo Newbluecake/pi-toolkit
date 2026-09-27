@@ -313,6 +313,11 @@ export function createClient(deps) {
 
 const RESYNC_MIN_INTERVAL_MS = 2_000;
 const PAGE_TRIGGER_PX = 48;
+// requestAnimationFrame is suspended by the browser while the tab is hidden/backgrounded (no
+// guaranteed cadence) — without a bounded fallback, a state change (e.g. switching the selected
+// agent) made while the page isn't visible would sit un-rendered indefinitely with no sign
+// anything is wrong (the click's own network calls still fire; only the DOM never catches up).
+const RENDER_FALLBACK_MS = 200;
 
 /**
  * @param {any} win
@@ -368,9 +373,54 @@ function wireFleetUi(win, doc, makeClient) {
   const lastSubAt = new Map();
   let subTimer = /** @type {any} */ (null);
 
+  // Render lifecycle guard (regression: a queueRender()-scheduled rAF/fallback-timer pair could
+  // still fire and call render() after the UI has gone away — page unload, an explicit
+  // client.close() (token or password transport), or the client dropping back to "auth" (logout,
+  // session revoke/expiry). `disposed` gates queueRender() itself (defense in depth even if a
+  // fake/degraded environment's clearTimeout/cancelAnimationFrame is a no-op — see `run` below);
+  // `closedForGood` makes a real `close()` permanent, since neither transport ever reopens its
+  // stream after `close()`. A transient "auth" state (logout, revoke) is NOT permanent: the same
+  // client instance can log back in and reopen its stream, at which point `onConn("open")` lifts
+  // the guard again so rendering resumes.
+  let disposed = false;
+  let closedForGood = false;
+  /** @type {any} */
+  let pendingRafId = null;
+  /** @type {any} */
+  let pendingTimerId = null;
+
+  function cancelPendingRender() {
+    if (pendingRafId !== null && typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(pendingRafId);
+    }
+    if (pendingTimerId !== null) win.clearTimeout(pendingTimerId);
+    pendingRafId = null;
+    pendingTimerId = null;
+    renderQueued = false;
+  }
+
+  function dispose() {
+    disposed = true;
+    cancelPendingRender();
+  }
+
+  function disposeForGood() {
+    closedForGood = true;
+    dispose();
+  }
+
+  function resumeIfLive() {
+    if (closedForGood) return;
+    disposed = false;
+  }
+
   const client = makeClient({
     onMessage: dispatch,
-    onConn: (c) => dispatch({ event: "conn", data: { state: c } }),
+    onConn: (c) => {
+      if (c === "auth") dispose();
+      else if (c === "open") resumeIfLive();
+      dispatch({ event: "conn", data: { state: c } });
+    },
   });
 
   /** @param {{ event: string, data: any, id?: number }} msg */
@@ -418,16 +468,30 @@ function wireFleetUi(win, doc, makeClient) {
   }
 
   function queueRender() {
+    if (disposed) return;
     if (renderQueued) return;
     renderQueued = true;
-    const raf =
-      typeof win.requestAnimationFrame === "function"
-        ? win.requestAnimationFrame.bind(win)
-        : (/** @type {() => void} */ f) => win.setTimeout(f, 16);
-    raf(() => {
+    let done = false;
+    const run = () => {
+      // Defense in depth alongside `cancelPendingRender()`'s cancelAnimationFrame/clearTimeout
+      // calls: some environments' `clearTimeout`/`cancelAnimationFrame` are inert (e.g. a
+      // degraded/fake `win`), so a "cancelled" callback can still be invoked directly — both
+      // `done` (already-ran) and `disposed` (torn down since this render was queued) must gate
+      // the actual render() call independently of whether cancellation truly took effect.
+      if (done || disposed) return;
+      done = true;
+      if (pendingTimerId !== null) win.clearTimeout(pendingTimerId);
+      pendingRafId = null;
+      pendingTimerId = null;
       renderQueued = false;
       render();
-    });
+    };
+    if (typeof win.requestAnimationFrame === "function") {
+      pendingRafId = win.requestAnimationFrame(run);
+      pendingTimerId = win.setTimeout(run, RENDER_FALLBACK_MS);
+    } else {
+      pendingTimerId = win.setTimeout(run, 16);
+    }
   }
 
   /** @param {string} agentKey */
@@ -511,10 +575,19 @@ function wireFleetUi(win, doc, makeClient) {
     });
   });
 
-  win.addEventListener("pagehide", () => client.close());
+  // `close()` is the one genuinely final transport teardown both `createClient` and
+  // `createPasswordClient` expose (`closed = true`, never reopens the stream) — wrap it so any
+  // caller (pagehide below, an embedding page's own unmount, or a test's cleanup call) also
+  // permanently stops rendering, not just the transport.
+  const closeForGood = () => {
+    disposeForGood();
+    client.close();
+  };
+
+  win.addEventListener("pagehide", closeForGood);
   void client.start();
   queueRender();
-  return { client, getState: () => state };
+  return { client: { ...client, close: closeForGood }, getState: () => state };
 }
 
 // ---------------------------------------------------------------------------

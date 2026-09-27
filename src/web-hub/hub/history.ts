@@ -15,6 +15,7 @@
  * `session`), never from the browser; it must end in `.jsonl` and resolve
  * (realpath) to a regular `.jsonl` file.
  */
+import { Buffer } from "node:buffer";
 import { readFile, realpath, stat } from "node:fs/promises";
 import type { HistoryPayload } from "../protocol/http-contract.js";
 import { diffAppended, entryKey, messageKey, projectSessionEntry, reconcileRecent } from "../protocol/keys.js";
@@ -30,12 +31,19 @@ import {
 } from "../protocol/messages.js";
 import type { HistoryService, HubLog } from "./ports.js";
 import { HubError, type Registry } from "./registry.js";
+import { formatSseFrame } from "./sse.js";
 
 export const DEFAULT_TAIL_ENTRIES = 400;
 export const DEFAULT_MAX_FILE_BYTES = 256 << 20;
 export const LEAF_DEBOUNCE_MS = 500;
 export const APPEND_TAIL_ENTRIES = 64;
 export const DELIVERED_CAP = 512;
+// Same budget as the agent-side branch_reply fallback (agent/snapshot.ts's `buildBranchReply`):
+// `DEFAULT_TAIL_ENTRIES`/`PAGE_MAX` only cap entry COUNT — `projectSessionEntry` only bounds a
+// single string field (`LIMITS.textTruncateBytes`, 64 KiB), so a tail full of large multi-block
+// messages (many tool results/custom messages near the leaf) can still add up to tens of MB with
+// no ceiling before this. `capEntriesByBytes` below trims from the OLDEST end to fit it.
+export const MAX_HISTORY_PAYLOAD_BYTES = LIMITS.branchReplyBytes;
 const FILE_CACHE_SIZE = 4;
 const PAGE_MAX = 400;
 
@@ -151,6 +159,63 @@ function walkBranch(index: FileIndex, leafId: string): ReadResult {
     if (e !== undefined) entries.push(e);
   }
   return { ok: true, entries };
+}
+
+/**
+ * Trim `entries` (already `-tailEntries`/page-limit sliced, newest last) from the OLDEST end
+ * until the serialized total fits `maxBytes`. The single newest entry is always kept even if it
+ * alone exceeds the budget (never return an empty payload just because one entry is huge).
+ */
+export function capEntriesByBytes(
+  entries: readonly WireEntry[],
+  maxBytes: number,
+): { entries: WireEntry[]; truncated: boolean } {
+  if (entries.length === 0) return { entries: [], truncated: false };
+  let total = 0;
+  let cut = entries.length;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const size = Buffer.byteLength(JSON.stringify(entries[i]), "utf8");
+    if (i !== entries.length - 1 && total + size > maxBytes) break; // keep the newest unconditionally
+    total += size;
+    cut = i;
+  }
+  return { entries: entries.slice(cut), truncated: cut > 0 };
+}
+
+/**
+ * Build the final `HistoryPayload` for `snapshot()`/`page()`, trimming `entries` (already
+ * `-tailEntries`/page-limit sliced, newest last) so that the ACTUAL wire unit fits `maxBytes`
+ * (§P1-2 regression: `capEntriesByBytes` above only sums each entry's own serialized bytes — it
+ * has no idea about the JSON array's own brackets/commas, `HistoryPayload`'s other fields
+ * (`tailMessages`/`inflight`/`agentKey`/`fromSeq`/`hasMore`/`source`/`oldestEntryId`), or, for
+ * `snapshot()` specifically, the SSE `event: history\ndata: ...\n\n` frame wrapper that payload
+ * actually goes out inside — `page()`'s payload instead goes out as a bare `sendJson` HTTP body,
+ * a DIFFERENT real unit with no SSE wrapper at all. `build` renders the full payload for a
+ * candidate entries array (so `hasMore`/`oldestEntryId` are always correct for THAT candidate,
+ * not stale from before trimming) and `frame` renders the exact string the caller will actually
+ * send for it (an SSE frame vs. a bare JSON body) — both are call-site-supplied so this stays
+ * agnostic to which layer applies the budget. `capEntriesByBytes`'s per-entry pass runs first as
+ * a cheap common-case fast path (avoids re-serializing the whole payload once per removed entry
+ * for the overwhelmingly common case of already-well-under-budget histories); the loop below then
+ * verifies against the real wire string and keeps trimming from the oldest end — keeping the
+ * single newest entry unconditionally, exactly like `capEntriesByBytes` — if the first pass's
+ * narrower budget still undershot (large `tailMessages`/`inflight`, many-entry separator
+ * overhead, frame-wrapper bytes, ...).
+ */
+function buildCappedHistoryPayload(
+  entries: readonly WireEntry[],
+  maxBytes: number,
+  build: (entries: WireEntry[]) => HistoryPayload,
+  frame: (payload: HistoryPayload) => string,
+): HistoryPayload {
+  const first = capEntriesByBytes(entries, maxBytes);
+  let capped = first.entries;
+  let payload = build(capped);
+  while (capped.length > 1 && Buffer.byteLength(frame(payload), "utf8") > maxBytes) {
+    capped = capped.slice(1);
+    payload = build(capped);
+  }
+  return payload;
 }
 
 function createFileCache(): FileCache {
@@ -440,18 +505,28 @@ export function createHistoryService(deps: {
           else if (st.lastLeaf !== reply.leafId) historyService.onLeafChanged(agentKey, st.lastLeaf);
         }
 
-        const payload: HistoryPayload = {
-          agentKey,
+        return buildCappedHistoryPayload(
           entries,
-          tailMessages: merged.tailMessages,
-          fromSeq: merged.fromSeq,
-          hasMore: merged.entries.length > entries.length || base.truncated,
-          source: base.source,
-        };
-        if (merged.inflight !== undefined) payload.inflight = merged.inflight;
-        const oldest = entries[0]?.id;
-        if (oldest !== undefined) payload.oldestEntryId = oldest;
-        return payload;
+          MAX_HISTORY_PAYLOAD_BYTES,
+          (candidateEntries) => {
+            const payload: HistoryPayload = {
+              agentKey,
+              entries: candidateEntries,
+              tailMessages: merged.tailMessages,
+              fromSeq: merged.fromSeq,
+              hasMore:
+                merged.entries.length > entries.length || base.truncated || candidateEntries.length < entries.length,
+              source: base.source,
+            };
+            if (merged.inflight !== undefined) payload.inflight = merged.inflight;
+            const oldest = candidateEntries[0]?.id;
+            if (oldest !== undefined) payload.oldestEntryId = oldest;
+            return payload;
+          },
+          // `snapshot()`'s payload always goes out as an SSE frame (`runSnapshot` in http.ts:
+          // `client.send("history", payload)`), never a bare JSON body.
+          (payload) => formatSseFrame("history", payload),
+        );
       }).finally(() => {
         st.buffers.delete(buffer);
       });
@@ -469,17 +544,26 @@ export function createHistoryService(deps: {
         if (idx === -1) throw new HubError("E_NOT_FOUND");
         const start = Math.max(0, idx - lim);
         const entries = base.entries.slice(start, idx);
-        const payload: HistoryPayload = {
-          agentKey,
+        return buildCappedHistoryPayload(
           entries,
-          tailMessages: [],
-          fromSeq: view.seq + 1,
-          hasMore: start > 0 || base.truncated,
-          source: base.source,
-        };
-        const oldest = entries[0]?.id;
-        if (oldest !== undefined) payload.oldestEntryId = oldest;
-        return payload;
+          MAX_HISTORY_PAYLOAD_BYTES,
+          (candidateEntries) => {
+            const payload: HistoryPayload = {
+              agentKey,
+              entries: candidateEntries,
+              tailMessages: [],
+              fromSeq: view.seq + 1,
+              hasMore: start > 0 || base.truncated || candidateEntries.length < entries.length,
+              source: base.source,
+            };
+            const oldest = candidateEntries[0]?.id;
+            if (oldest !== undefined) payload.oldestEntryId = oldest;
+            return payload;
+          },
+          // `page()`'s payload goes out as a bare `sendJson` HTTP response body (http.ts's
+          // `GET /api/history` handler), never wrapped in an SSE frame.
+          (payload) => JSON.stringify(payload),
+        );
       });
     },
 
