@@ -75,10 +75,10 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 下表的角色→模型映射**同样适用于 workflow**：`agent()` 的 `opts.model` / `opts.thinking` 与 `Agent` 的同名参数同规则
 （完整 `provider/id` 优先；同 prompt 换模型不会命中 journal 旧结果），也可以继续写进 agent 类型 frontmatter 的 `model:`。
 
-Explore=`zai-coding-cn/glm-5.3`（→ `zai/glm-5.3` → sonnet），Plan=`kimi-coding/k3-256k`，
-reviewer=`cr-anthropic/claude-opus-5-5`（方案用 opus 档时改 `kimi-coding/k3-256k`），
-dev=`kimi-coding/k3-256k`，verifier=`zai-coding-cn/glm-5.3`（dev 用 glm 时改 `cr-anthropic/claude-sonnet-5`）；
-GPT 系（gpt-sol / gpt-terra / gpt-6）只作最后兜底。以 SKILL.md「各阶段模型分工」表为准。
+Explore=`cr-anthropic/claude-sonnet-5`，Plan=`cr-anthropic/claude-opus-5-5`，
+reviewer / verifier = gpt-6-sol（`<provider>/gpt-6-sol`，未加入 models.json 前跳过）→ gpt-5.6-sol（`cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`），
+dev=`cr-anthropic/claude-sonnet-5`（资源紧张时 gpt-6-sol，此时 verifier 改派 Claude 系或 kimi）；有订阅额度时 kimi-k3 / glm-5.3 可替换同阶段首选；
+gpt-5.6-terra / gpt-6-astra 只作兜底。以 SKILL.md「各阶段模型分工」表为准。
 
 `agent()` 返回 `null` 不区分「用户跳过」与「模型失败」；严格按序回退由主会话根据失败通知重派，
 workflow 内不做无脑 fallback。

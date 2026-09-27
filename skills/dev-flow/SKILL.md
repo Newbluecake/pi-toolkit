@@ -29,9 +29,9 @@ metadata:
 1. **精确 ID**：`Agent` 的 `model` 必须用速查表里的完整 `provider/modelId`；模糊别名会被
    `subagent-model-hints` 扩展 block。
 2. **按序回退**：首选报错（过载/429/超时/额度耗尽）就换下一个，不在同一模型上反复重试。
-   例外：**gpt-6-sol 是评审/验收首选、gpt-sol（5.6）第二优先级**（与 Claude 系的方案/开发模型天然异源，保证评审独立）；
-   gpt-terra / gpt-6 仍只作兜底。
-3. **fable / gpt-6（astra，≠ gpt-6-sol）只用于复杂任务**（L3），常规任务禁止动用。
+   例外：**gpt-6-sol 是评审/验收首选、gpt-5.6-sol 第二优先级**（与 Claude 系的方案/开发模型天然异源，保证评审独立）；
+   gpt-5.6-terra / gpt-6-astra 仍只作兜底。
+3. **fable / gpt-6-astra（≠ gpt-6-sol）只用于复杂任务**（L3），常规任务禁止动用。
 4. **能并行必并行**：判定可并行的任务必须在**同一条消息**中发出多个 `Agent` 调用，或在
    `SubagentWorkflow` 里用 `parallel()`/`pipeline()`；顺序派发不算并行。
    **同一轮并行超过 6 个 agent 必须用 `SubagentWorkflow`**（全局并发上限默认 6，第 7 个起在全局槽位排队且有排队超时；
@@ -56,18 +56,18 @@ metadata:
 
 ## 模型 ID 速查表
 
-| 别名      | 精确 ID（按优先级）                                                                                                                                  |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| sonnet    | `cr-anthropic/claude-sonnet-5`                                                                                                                       |
-| kimi-k3   | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                                         |
-| glm-5.3   | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                                                                              |
-| opus-5.5  | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）                                                                    |
-| opus-5    | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                                                                                         |
-| fable     | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                         |
-| gpt-6-sol | `<provider>/gpt-6-sol`（⚠️ 待测试后加入 models.json 再补全 provider；未加入前跳过、直接用 gpt-sol）；$2/$10，cacheRead $0.2，>272k 输入 2×/输出 1.5× |
-| gpt-sol   | `cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`（第二优先级；两线互为备份；zhipu 偶发 0 轮卡死）                                                |
-| gpt-terra | `cr-response/gpt-5.6-terra`                                                                                                                          |
-| gpt-6     | `cr-response/gpt-6-astra`                                                                                                                            |
+| 别名          | 精确 ID（按优先级）                                                                                                                                      |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sonnet        | `cr-anthropic/claude-sonnet-5`                                                                                                                           |
+| kimi-k3       | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                                             |
+| glm-5.3       | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                                                                                  |
+| opus-5.5      | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）                                                                        |
+| opus-5        | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                                                                                             |
+| fable         | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                             |
+| gpt-6-sol     | `<provider>/gpt-6-sol`（⚠️ 待测试后加入 models.json 再补全 provider；未加入前跳过、直接用 gpt-5.6-sol）；$2/$10，cacheRead $0.2，>272k 输入 2×/输出 1.5× |
+| gpt-5.6-sol   | `cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`（第二优先级；两线互为备份；zhipu 偶发 0 轮卡死）                                                    |
+| gpt-5.6-terra | `cr-response/gpt-5.6-terra`                                                                                                                              |
+| gpt-6-astra   | `cr-response/gpt-6-astra`                                                                                                                                |
 
 ### 疑难升级阶梯（fable 闸门）
 
@@ -145,14 +145,14 @@ sonnet → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [ask
 | ---------------------- | --------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
 | **核心调度**（主会话） | opus-5.5  | opus-5 → kimi-k3（有订阅额度时）                                         | 任务拆解、派单、汇总、裁定                                                                                                     |
 | **代码探索**           | sonnet    | glm-5.3 / kimi-k3（有订阅额度时优先）                                    | `subagent_type=Explore`，只读定位代码/梳理调用链                                                                               |
-| **架构设计**           | opus-5.5  | opus-5 → gpt-6（兜底）                                                   | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                          |
+| **架构设计**           | opus-5.5  | opus-5 → gpt-6-astra（兜底）                                             | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                          |
 | **方案制定**           | opus-5.5  | opus-5 → sonnet（简单方案）                                              | `subagent_type=Plan`                                                                                                           |
 | **前端开发**           | sonnet    | opus-5.5（视觉设计/疑难）→ kimi-k3                                       | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                         |
-| **复杂任务方案**       | opus-5.5  | opus-5 → gpt-6（兜底）                                                   | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                      |
-| **疑难攻坚**           | opus-5.5  | gpt-6（兜底）                                                            | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                 |
-| **方案评审**           | gpt-6-sol | gpt-sol → opus-5（方案非 opus 系时）→ kimi-k3                            | `subagent_type=reviewer`；必须与方案模型异源                                                                                   |
+| **复杂任务方案**       | opus-5.5  | opus-5 → gpt-6-astra（兜底）                                             | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                      |
+| **疑难攻坚**           | opus-5.5  | gpt-6-astra（兜底）                                                      | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                 |
+| **方案评审**           | gpt-6-sol | gpt-5.6-sol → opus-5（方案非 opus 系时）→ kimi-k3                        | `subagent_type=reviewer`；必须与方案模型异源                                                                                   |
 | **开发实施**           | sonnet    | kimi-k3 / glm-5.3（有订阅额度时）→ gpt-6-sol（可用资源紧张时）→ opus-5.5 | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                    |
-| **任务验收**           | gpt-6-sol | gpt-sol → kimi-k3 → glm-5.3                                              | `subagent_type=verifier`；必须与开发模型异源（gpt-6-sol 做开发时验收改派 Claude 系或 kimi）；打回后复验优先 resume 原 verifier |
+| **任务验收**           | gpt-6-sol | gpt-5.6-sol → kimi-k3 → glm-5.3                                          | `subagent_type=verifier`；必须与开发模型异源（gpt-6-sol 做开发时验收改派 Claude 系或 kimi）；打回后复验优先 resume 原 verifier |
 
 路由现状（2026-09）：kimi-coding / zai 订阅常耗尽，默认表以按量线（cr-anthropic / cr-response /
 zhipu-pool）为准；[quota] 显示订阅有余量且候选胜任时可替换同阶段首选。
@@ -199,14 +199,14 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 1. 主会话定车道 + TaskCreate 建 todo
 2‖3. 同一条消息派：Explore(sonnet) ‖ Plan(opus-5.5)
      —— 改动点未知、方案强依赖探索结论时才退化为先 Explore 后 Plan
-4‖5. 方案到手：立刻呈给用户确认，同时后台派 reviewer(gpt-6-sol → gpt-sol，可挂 Plan 为专家)
+4‖5. 方案到手：立刻呈给用户确认，同时后台派 reviewer(gpt-6-sol → gpt-5.6-sol，可挂 Plan 为专家)
      —— 用户读方案的时间 = 评审时间；两者都通过才开工（HARD GATE）
      —— 呈给用户的是**一页决策摘要**，不是整份方案：需拍板项走 `ask_user`（每项带推荐选项与一句理由）+
         关键取舍 / 主要风险 / 已由主会话裁定的项（各 1 行）+ 方案文件路径；长文档留给 agent。
      —— 评审轮数上限见「评审收敛规则」
 6. 并行开发：按文件域拆包，同消息派多个 dev / frontend-dev（先过冲突预检）；
    按「挂专家」矩阵决定是否 `experts: [Plan]`
-7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier(gpt-6-sol → gpt-sol) 只读 diff
+7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier(gpt-6-sol → gpt-5.6-sol) 只读 diff
 9. 主会话汇总验收结论，报告用户
 ```
 
@@ -218,7 +218,7 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
    —— 可与 Explore 同消息并行
 3. Plan 升级 opus-5.5（不可用时 opus-5），prompt 给出 arch.md 与 Explore 产物路径
    —— 方案被 reviewer 判 Blocker 且 opus-5.5 二次仍不过，才 ask_user 批准后升 fable
-4‖5. 评审（gpt-6-sol → gpt-sol → kimi-k3，须与方案模型 opus 档不同）∥ 用户确认（HARD GATE）
+4‖5. 评审（gpt-6-sol → gpt-5.6-sol → kimi-k3，须与方案模型 opus 档不同）∥ 用户确认（HARD GATE）
 6. 冲突预检 → 按文件域拆 ≥2 个写包同消息派 dev；跨包共享文件进冻结面；
    每个写包挂 `experts: [architect, Plan]`（L3 方案取舍多，默认必挂）
 7. 每包 dev 返回即派对应 verifier 验收（不等全部完成），主会话后台跑全量测试
