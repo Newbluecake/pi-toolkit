@@ -1,0 +1,160 @@
+/*
+ * pi web-hub — base reset & generic utilities (vue-plan.md v2.1 §3, §5.2 — P3 exclusive).
+ * Ported verbatim from `docs/dev/web-hub/ui-mockups/app.css`'s "base" section — mobile-first,
+ * no component-specific selectors here (those live in the sibling `primitives.css` /
+ * `shell.css` / `agents.css` / `detail.css` / `dock.css` / `login.css` / `notices.css` /
+ * `states.css`, each self-contained per plan §5.3). Depends only on `tokens.css` (P0 frozen).
+ * Loaded first (App.vue's import order, plan §5.3) so every later file can rely on this base.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  touch-action: manipulation; /* no double-tap delay; pinch-zoom still works */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+  line-height: var(--lh-tight);
+}
+
+a {
+  color: var(--c-primary);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  color: var(--c-primary-hover);
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+code,
+pre,
+kbd,
+.mono {
+  font-family: var(--font-mono);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-sm {
+  width: 14px;
+  height: 14px;
+}
+
+.icon-lg {
+  width: 20px;
+  height: 20px;
+}
+
+.sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--sp-2);
+  top: var(--sp-2);
+  transform: translateY(-64px);
+  z-index: 50;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.skip-link:focus-visible {
+  transform: none;
+}
+
+/* ---------------------------------------------------------------- responsive visibility helpers */
+/* `.hide-sm` reveals ≥481 content only (session-id chip in the session summary, hub version /
+ * read-only chip in the topbar); `.lbl-md` reveals a ≥481-only text label. Cross-component
+ * utilities, kept here (base.css) rather than duplicated per owning file. */
+.hide-sm,
+.lbl-md {
+  display: none;
+}
+
+@media (min-width: 481px) {
+  .hide-sm {
+    display: inline-flex;
+  }
+
+  .lbl-md {
+    display: inline;
+  }
+}

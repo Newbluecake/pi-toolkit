@@ -1,0 +1,199 @@
+/*
+ * pi web-hub — application shell (vue-plan.md v2.1 §3.2, §5.2 — P3 exclusive): the outer
+ * `.app` grid, top bar, brand mark, connection pill and the `.layout` split between the agent
+ * sidebar and the detail pane. Ported from `docs/dev/web-hub/ui-mockups/app.css`'s "app shell"
+ * section, with one deliberate breakpoint change per plan §0.3 (user-decided 2026-09-27): the
+ * mockup splits the sidebar/detail view at 1025px; this build splits at **768px** instead, with
+ * `--sidebar-w` narrowed to 260px there, widened back to 288px at 1025 and 340px at 1280 (tokens
+ * .css's own default of 320px is a dead fallback below 768 — no `.layout` split ever reads it).
+ *
+ * Unlike the mockup (which used `.app:has(#detail:target)` to show/hide the sidebar/detail with
+ * no JS), this build's list↔detail visibility is decided by `DashboardView.vue`'s own `v-if`
+ * (driven by `useMedia`'s `<768` query + the current route) — so `.sidebar`/`.detail` never
+ * need a CSS-only hidden state here; only their *width/border* look changes across breakpoints.
+ */
+
+.app {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  grid-template-columns: minmax(0, 1fr); /* never let nowrap content widen the page */
+  height: 100vh; /* fallback */
+  height: 100dvh; /* tracks the mobile address bar */
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: var(--topbar-h);
+  padding: 0 var(--sp-4);
+  padding-left: max(var(--sp-4), env(safe-area-inset-left));
+  padding-right: max(var(--sp-4), env(safe-area-inset-right));
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.brand {
+  display: inline-flex;
+  flex: none;
+  white-space: nowrap;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  letter-spacing: -0.01em;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #14a394, #0b7a70);
+  color: #fff;
+}
+
+.brand-mark .icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.2;
+}
+
+.conn {
+  --pill-fg: var(--c-success);
+  --pill-bg: var(--c-success-soft);
+}
+
+.conn[data-conn="connecting"] {
+  --pill-fg: var(--c-text-3);
+  --pill-bg: var(--c-sunken);
+}
+
+.conn[data-conn="reconnecting"] {
+  --pill-fg: var(--c-warning);
+  --pill-bg: var(--c-warning-soft);
+}
+
+.conn[data-conn="auth"] {
+  --pill-fg: var(--c-danger);
+  --pill-bg: var(--c-danger-soft);
+}
+
+.topbar-meta {
+  display: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.topbar .chip {
+  display: none;
+}
+
+.topbar-spacer {
+  flex: 1;
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+/* three-state theme toggle (system / light / dark) — not in the static mockup (which only had
+ * the JS-free `#mock-dark` demo checkbox); §3.9/§17.1's real switcher, styled to match the
+ * topbar's other icon buttons. `role="radiogroup"` over three `role="radio"` buttons. */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--c-sunken);
+}
+
+.theme-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: calc(var(--r-sm) - 2px);
+  background: transparent;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.theme-toggle button:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+}
+
+.theme-toggle button[aria-checked="true"] {
+  background: var(--c-surface);
+  color: var(--c-primary);
+  box-shadow: var(--shadow-1);
+}
+
+.banners {
+  display: flex;
+  flex-direction: column;
+}
+
+/* mobile-first: one column, list ⇄ detail navigation (component-level v-if, see file header) */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+}
+
+@media (min-width: 481px) {
+  .topbar-meta,
+  .topbar .chip {
+    display: inline-flex;
+  }
+}
+
+@media (min-width: 768px) {
+  /* `html:root` (specificity 0,1,1) intentionally outranks tokens.css's (P0 frozen) plain
+   * `:root { --sidebar-w: 320px; }` (specificity 0,1,0) — `main.ts` (also frozen) imports
+   * `tokens.css` *after* `App.vue`, so in the final single-CSS-file bundle (`cssCodeSplit:
+   * false`) tokens.css's rule always ends up textually last regardless of import order inside
+   * App.vue itself; without the extra specificity here, that later, unconditional rule would
+   * silently win over this media-scoped override at every width — verified against a real
+   * built bundle (`grep sidebar-w dist/web-hub-ui/assets/*.css`) before landing this fix. */
+  html:root {
+    --sidebar-w: 260px;
+  }
+
+  .layout {
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 1025px) {
+  html:root {
+    --sidebar-w: 288px;
+  }
+}
+
+@media (min-width: 1280px) {
+  html:root {
+    --sidebar-w: 340px;
+  }
+}
+
+@media (pointer: coarse) {
+  .theme-toggle button {
+    min-width: 44px;
+    height: 44px;
+  }
+}

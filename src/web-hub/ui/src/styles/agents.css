@@ -1,0 +1,271 @@
+/*
+ * pi web-hub — agent sidebar / list (vue-plan.md v2.1 §3.2, §5.1, §5.2 — P3 exclusive).
+ * `AgentList.vue` / `AgentCard.vue` render against these classes; ported from
+ * `docs/dev/web-hub/ui-mockups/app.css`'s "sidebar / agent list" section, with the
+ * "desktop list-in-sidebar" look (transparent card borders, hover highlight, block layout)
+ * moved from the mockup's 1025px breakpoint down to **768px** (plan §0.3 — see `shell.css`'s
+ * header comment for the full rationale). 481–767px keeps the mockup's tablet card-grid look
+ * (still full-width list navigation at that width, per §0.3's "481–767 单栏 + 卡片网格").
+ */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--c-surface);
+}
+
+.sidebar-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+}
+
+.sidebar-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.sidebar-title .count {
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+  letter-spacing: 0;
+}
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search .icon {
+  position: absolute;
+  left: 10px;
+  color: var(--c-text-3);
+  pointer-events: none;
+}
+
+.search .input {
+  min-height: 32px;
+  padding-left: 32px;
+  background: var(--c-sunken);
+  border-color: transparent;
+  font-size: var(--fs-sm);
+}
+
+.agent-list {
+  flex: 1;
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2) var(--sp-4);
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.agent-group {
+  padding: var(--sp-3) var(--sp-2) var(--sp-1);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.agent-card {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  margin: 2px 0;
+  padding: 10px var(--sp-3) 10px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  color: inherit;
+  text-decoration: none;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.agent-card:active {
+  background: var(--c-sunken);
+}
+
+.agent-card:hover {
+  background: var(--c-surface-2);
+  border-color: var(--c-border);
+  color: inherit;
+}
+
+.agent-card[aria-current="page"] {
+  background: var(--c-primary-soft);
+  border-color: color-mix(in srgb, var(--c-primary) 28%, transparent);
+}
+
+.agent-card[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: var(--r-pill);
+  background: var(--c-primary);
+}
+
+.agent-card[data-st="stale"] .agent-title,
+.agent-card[data-st="offline"] .agent-title,
+.agent-card[data-st="stale"] .agent-meta,
+.agent-card[data-st="offline"] .agent-meta {
+  opacity: 0.72;
+}
+
+.agent-row1 {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--fw-semibold);
+}
+
+.agent-cost {
+  margin-left: auto;
+  flex: none;
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-session {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  padding-left: 16px;
+}
+
+.agent-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding-left: 16px;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.agent-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.agent-meta .model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+}
+
+.agent-meta .sep {
+  color: var(--c-border-strong);
+}
+
+.agent-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-left: 16px;
+  margin-top: 2px;
+}
+
+.agent-flags .pill {
+  height: 20px;
+  font-size: var(--fs-2xs);
+}
+
+@media (min-width: 481px) {
+  .agent-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    align-content: start;
+    gap: var(--sp-2);
+    padding: var(--sp-1) var(--sp-4) var(--sp-6);
+  }
+
+  .agent-list > .agent-group {
+    grid-column: 1 / -1;
+  }
+
+  .agent-list > li > .agent-card {
+    height: 100%;
+    margin: 0;
+    border-color: var(--c-border);
+    background: var(--c-surface);
+  }
+
+  .agent-list > li > .agent-card[aria-current="page"] {
+    background: var(--c-primary-soft);
+    border-color: color-mix(in srgb, var(--c-primary) 28%, transparent);
+  }
+
+  .sidebar-head {
+    padding: var(--sp-4) var(--sp-4) var(--sp-2);
+  }
+}
+
+@media (min-width: 768px) {
+  .sidebar {
+    background: var(--c-surface);
+    border-right: 1px solid var(--c-border);
+  }
+
+  .sidebar-head {
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  }
+
+  .agent-list {
+    display: block;
+    padding: var(--sp-1) var(--sp-2) var(--sp-4);
+  }
+
+  .agent-list > li > .agent-card {
+    margin: 2px 0;
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .agent-list > li > .agent-card:hover {
+    background: var(--c-surface-2);
+    border-color: var(--c-border);
+  }
+
+  .agent-list > li > .agent-card[aria-current="page"] {
+    background: var(--c-primary-soft);
+    border-color: color-mix(in srgb, var(--c-primary) 28%, transparent);
+  }
+}
+
+@media (pointer: coarse) {
+  .search .input {
+    min-height: 44px;
+  }
+}

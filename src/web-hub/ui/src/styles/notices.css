@@ -1,0 +1,144 @@
+/*
+ * pi web-hub — notice banners (vue-plan.md v2.1 §3, §10, §5.2 — P3 exclusive).
+ * `NoticeBanner.vue` / `NoticeStack.vue` render against these classes; ported from
+ * `docs/dev/web-hub/ui-mockups/app.css`'s "notices" section. Depends on `tokens.css` +
+ * `base.css` + `primitives.css` (`.icon`, `.btn`).
+ */
+
+.notice {
+  --n-fg: var(--c-info);
+  --n-bg: var(--c-info-soft);
+  --n-border: transparent;
+  --n-text: var(--c-text-2);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--n-bg);
+  border-bottom: 1px solid var(--n-border);
+  color: var(--n-text);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+
+.notice > .icon {
+  margin-top: 1px;
+  color: var(--n-fg);
+}
+
+.notice strong {
+  color: var(--n-fg);
+  font-weight: var(--fw-semibold);
+}
+
+.notice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.notice-action {
+  flex: none;
+  margin: -4px 0;
+}
+
+.notice--warn {
+  --n-fg: var(--c-warning-text);
+  --n-bg: var(--c-warning-soft);
+  --n-border: var(--c-warning-border);
+  --n-text: var(--c-warning-text);
+}
+
+.notice--muted {
+  --n-fg: var(--st-offline);
+  --n-bg: var(--st-offline-soft);
+  --n-border: var(--c-border);
+  --n-text: var(--c-text-2);
+}
+
+.notice--danger {
+  --n-fg: var(--c-danger);
+  --n-bg: var(--c-danger-soft);
+  --n-border: var(--c-danger-border);
+  --n-text: var(--c-text);
+}
+
+.notice--boxed {
+  border: 1px solid var(--n-border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+}
+
+.notice code {
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: rgb(255 255 255 / 0.55);
+  font-size: 0.92em;
+}
+
+:root.theme-dark .notice code {
+  background: rgb(0 0 0 / 0.25);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.theme-light) .notice code {
+    background: rgb(0 0 0 / 0.25);
+  }
+}
+
+.banners:empty {
+  display: none;
+}
+
+/* compact notice: one line on phones (safety notices — initial password, plain HTTP — are never
+ * dismissible, only collapsible; §10), tap to expand the full sentence */
+details.notice-compact > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 36px;
+  list-style: none;
+  cursor: pointer;
+}
+
+details.notice-compact > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.notice-compact .notice-line {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; /* ≤2 lines on phones; full text on tap */
+  line-clamp: 2;
+  padding: 6px 0;
+}
+
+details.notice-compact .chev {
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+details.notice-compact[open] .chev {
+  transform: rotate(90deg);
+}
+
+details.notice-compact[open] .notice-line {
+  display: block;
+}
+
+details.notice-compact .notice-more {
+  padding: 0 0 var(--sp-2) 24px;
+}
+
+.notice.notice-compact {
+  display: block;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+@media (pointer: coarse) {
+  details.notice-compact > summary {
+    min-height: 44px;
+  }
+}

@@ -1,0 +1,264 @@
+/*
+ * pi web-hub — detail pane header + session info + metrics + the DetailBody wrapper
+ * (vue-plan.md v2.1 §3.2, §5.2, §5.3 — P3 exclusive). Ported from
+ * `docs/dev/web-hub/ui-mockups/app.css`'s "detail pane" section (up to, but excluding, the
+ * "subagent tree" section — `.fleet`/`.panel-*`/`.tree-scroll`/`.run*` belong to P4's
+ * `fleet.css`/`transcript.css`).
+ *
+ * `.detail-body` is the one class this file hands to P4: `AgentDetail.vue` applies it to its
+ * `<DetailBody>` instance (Vue's default single-root attrs-inheritance puts it straight on
+ * `DetailBody.vue`'s root `<section>`), so P4 only has to lay out *inside* an already flex:1,
+ * min-height:0, column-flex box — never having to duplicate this file's own sizing rules.
+ *
+ * Breakpoint note (plan §0.3): the mockup's "desktop, one-line title / back button hidden"
+ * treatment used a 1025px breakpoint, coupled to the sidebar/detail split. This build moves it
+ * to **768px** to match `shell.css`'s split breakpoint — below 768 only one of the agent list /
+ * detail pane is ever mounted at a time (so the back button is meaningful), at/above 768 both
+ * are mounted permanently side by side (so it is not).
+ */
+
+.detail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.detail-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-4) var(--sp-3);
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.detail-back {
+  display: inline-flex;
+  flex: none;
+  width: 44px;
+  min-height: 44px;
+  margin-left: -12px;
+  padding: 0;
+}
+
+.detail-titlebar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.detail-title {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; /* phones: two lines, then ellipsis */
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  letter-spacing: -0.01em;
+}
+
+/* session info: one-line summary, tap to expand full values (no hover tooltips) */
+.session-info > summary {
+  list-style: none;
+}
+
+.session-info > summary::-webkit-details-marker {
+  display: none;
+}
+
+.session-sum {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  min-height: 32px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.session-sum:hover {
+  background: var(--c-surface-2);
+}
+
+.session-sum > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.session-sum .trunc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--c-text-2);
+  font-family: var(--font-mono);
+}
+
+.session-sum .grow {
+  flex: 1 1 auto;
+}
+
+.session-sum .chev {
+  margin-left: auto;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.session-info[open] .session-sum .chev {
+  transform: rotate(90deg);
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px var(--sp-3);
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+}
+
+.kv > div {
+  display: contents;
+}
+
+.kv dt {
+  color: var(--c-text-3);
+}
+
+.kv dd {
+  margin: 0;
+  min-width: 0;
+  padding: 6px 0;
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  user-select: all; /* fallback copy path: navigator.clipboard is unavailable on plain-HTTP LAN */
+}
+
+.metrics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--c-sunken);
+}
+
+.metric {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.metric dt {
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.metric dd {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.metric .aside {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+}
+
+.detail-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* history waiting/error states (rendered directly by AgentDetail.vue when `agent.history` is
+ * not yet "loaded" — plan's AgentDetail/DetailBody split, see AgentDetail.vue's header
+ * comment) get a little breathing room since they sit directly in `.detail-body`, not inside
+ * P4's `.tx-inner` transcript padding wrapper. */
+.detail-body > .skel-stack,
+.detail-body > .notice {
+  margin: var(--sp-4);
+}
+
+@media (min-width: 481px) {
+  .detail-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--sp-1) var(--sp-6);
+    padding: var(--sp-1) var(--sp-6) var(--sp-3);
+  }
+
+  .detail-back,
+  .detail-titlebar,
+  .session-info {
+    grid-column: 1;
+  }
+
+  .metrics {
+    grid-column: 2;
+    grid-row: 2 / span 2;
+    align-self: center;
+    padding: 0;
+    background: none;
+    gap: var(--sp-6);
+  }
+
+  .metric {
+    justify-items: end;
+  }
+
+  .detail-title {
+    font-size: var(--fs-xl);
+  }
+}
+
+@media (min-width: 768px) {
+  .detail-back {
+    display: none;
+  }
+
+  .detail-title {
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+  }
+
+  .detail-head {
+    padding-top: var(--sp-3);
+  }
+
+  .metrics {
+    grid-row: 1 / span 2;
+  }
+}
+
+@media (pointer: coarse) {
+  .session-sum {
+    min-height: 44px;
+  }
+}

@@ -1,0 +1,92 @@
+/*
+ * pi web-hub — loading skeletons + empty states (vue-plan.md v2.1 §9, §5.2 — P3 exclusive).
+ * `EmptyState.vue` and any loading skeleton markup (`AgentDetail.vue`'s history-waiting state)
+ * render against these; ported from `docs/dev/web-hub/ui-mockups/app.css`'s "loading / empty"
+ * section. Depends on `tokens.css` + `base.css`.
+ */
+
+.skel {
+  display: block;
+  height: 10px;
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--c-sunken) 0%, var(--c-surface-2) 50%, var(--c-sunken) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+.skel-w40 {
+  width: 40%;
+}
+.skel-w60 {
+  width: 60%;
+}
+.skel-w80 {
+  width: 80%;
+}
+.skel-w90 {
+  width: 90%;
+}
+.skel-bubble {
+  width: 46%;
+  height: 40px;
+  border-radius: var(--r-lg);
+  align-self: flex-end;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.skel-stack {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-2);
+  max-width: 360px;
+  margin: var(--sp-12) auto;
+  padding: 0 var(--sp-4);
+  text-align: center;
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+}
+
+.empty-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: var(--sp-1);
+  border-radius: 12px;
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+}
+
+.empty-icon .icon {
+  width: 22px;
+  height: 22px;
+}
+
+.empty h2 {
+  color: var(--c-text);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+}
+
+.empty code {
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none !important;
+  }
+}

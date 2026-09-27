@@ -1,0 +1,314 @@
+/*
+ * pi web-hub — shared visual primitives (vue-plan.md v2.1 §3, §5.2 — P3 exclusive). Buttons,
+ * chips, status pills/dots, the context meter and the generic `.spin` rotation used by the
+ * connecting/loading pills. Ported from `docs/dev/web-hub/ui-mockups/app.css`'s "primitives"
+ * section. Depends on `tokens.css` + `base.css`.
+ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.btn:hover {
+  background: var(--c-surface-2);
+  border-color: var(--c-text-3);
+  color: var(--c-text);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn-primary {
+  border-color: var(--c-primary);
+  background: var(--c-primary);
+  color: var(--c-on-primary);
+}
+
+.btn-primary:hover {
+  border-color: var(--c-primary-hover);
+  background: var(--c-primary-hover);
+  color: var(--c-on-primary);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--c-text-2);
+}
+
+.btn-ghost:hover {
+  background: var(--c-sunken);
+  border-color: transparent;
+}
+
+.btn-icon {
+  width: 32px;
+  padding: 0;
+}
+
+.btn-lg {
+  min-height: 44px;
+  font-size: var(--fs-lg);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chip-mono {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0;
+}
+
+.input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-md);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.input::placeholder {
+  color: var(--c-text-3);
+}
+
+.input:hover {
+  border-color: var(--c-text-3);
+}
+
+.input:focus-visible {
+  outline: none;
+  border-color: var(--c-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-focus) 25%, transparent);
+}
+
+/* status pill: dot/icon + label, colour from the run/agent state */
+.pill {
+  --pill-fg: var(--st-idle);
+  --pill-bg: var(--st-idle-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--pill-bg);
+  color: var(--pill-fg);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+[data-st="running"] {
+  --pill-fg: var(--st-running);
+  --pill-bg: var(--st-running-soft);
+}
+[data-st="thinking"] {
+  --pill-fg: var(--st-thinking);
+  --pill-bg: var(--st-thinking-soft);
+}
+[data-st="tool"] {
+  --pill-fg: var(--st-tool);
+  --pill-bg: var(--st-tool-soft);
+}
+[data-st="idle"],
+[data-st="aborted"] {
+  --pill-fg: var(--st-idle);
+  --pill-bg: var(--st-idle-soft);
+}
+[data-st="queued"] {
+  --pill-fg: var(--st-idle);
+  --pill-bg: var(--st-idle-soft);
+}
+[data-st="done"] {
+  --pill-fg: var(--st-done);
+  --pill-bg: var(--st-done-soft);
+}
+[data-st="failed"],
+[data-st="timed_out"] {
+  --pill-fg: var(--st-failed);
+  --pill-bg: var(--st-failed-soft);
+}
+[data-st="waiting"],
+[data-st="stale"] {
+  --pill-fg: var(--st-stale);
+  --pill-bg: var(--st-stale-soft);
+}
+[data-st="offline"] {
+  --pill-fg: var(--st-offline);
+  --pill-bg: var(--st-offline-soft);
+}
+
+/* status dot (8px) — running gets a soft halo pulse (disabled under reduced motion) */
+.dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--pill-fg, var(--st-idle));
+}
+
+.dot-hollow {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--pill-fg);
+}
+
+.dot-dashed {
+  background: transparent;
+  outline: 1.5px dashed var(--pill-fg);
+  outline-offset: -1.5px;
+}
+
+[data-st="running"] > .dot::after,
+.dot-live::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--pill-fg, var(--st-running));
+  opacity: 0.35;
+  animation: halo var(--pulse) var(--ease-out) infinite;
+}
+
+@keyframes halo {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.45;
+  }
+  80%,
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+/* generic rotation utility (connecting pill's loader icon, retry/reload spinners) */
+.spin {
+  animation: spin 1s linear infinite;
+  transform-origin: center;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* context meter (<meter>, no inline widths — CSP style-src 'self') */
+.meter {
+  appearance: none;
+  display: block;
+  width: 56px;
+  height: 6px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--c-sunken);
+  overflow: hidden;
+}
+
+.meter-lg {
+  width: 120px;
+}
+
+.meter::-webkit-meter-bar {
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--c-sunken);
+  height: 6px;
+}
+
+.meter::-webkit-meter-optimum-value {
+  background: var(--c-primary);
+  border-radius: var(--r-pill);
+}
+
+.meter::-webkit-meter-suboptimum-value {
+  background: var(--c-warning);
+  border-radius: var(--r-pill);
+}
+
+.meter::-webkit-meter-even-less-good-value {
+  background: var(--c-danger);
+  border-radius: var(--r-pill);
+}
+
+.meter::-moz-meter-bar {
+  background: var(--c-primary);
+  border-radius: var(--r-pill);
+}
+
+.meter:-moz-meter-sub-optimum::-moz-meter-bar {
+  background: var(--c-warning);
+}
+
+.meter:-moz-meter-sub-sub-optimum::-moz-meter-bar {
+  background: var(--c-danger);
+}
+
+@media (pointer: coarse) {
+  .btn,
+  .btn-icon {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot::after,
+  .dot-live::after,
+  .spin {
+    animation: none !important;
+  }
+
+  .dot::after,
+  .dot-live::after {
+    opacity: 0.22;
+    transform: scale(1.15);
+  }
+}
