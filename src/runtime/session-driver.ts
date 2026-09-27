@@ -10,6 +10,7 @@ import type {
   SessionSpec,
   UsageDelta,
 } from "../core/types.js";
+import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
 
@@ -24,6 +25,25 @@ export type { KillableHandle, SessionSpec } from "../core/types.js";
  * packages import it rather than re-declaring the string.
  */
 export const CHILD_SWITCH_CONTEXT_SOURCE = "pi-toolkit:switch_context";
+/**
+ * todo #27 (child-extension-missing diagnostic): whether `spec` is a consult fork
+ * (`SpawnRequest.forkSessionFrom` threaded through untyped/structurally into the
+ * `SessionSpec` the driver sees — see `SessionSpec.forkSessionFrom`'s own doc comment in
+ * core/types.ts). Factored out as its own pure function so it (and
+ * `computeChildExtensionMissing` below) can be unit-tested directly without mocking pi's
+ * `createAgentSession`.
+ */
+export function isConsultForkSpec(spec: SessionSpec): boolean {
+  return typeof (spec as { forkSessionFrom?: unknown }).forkSessionFrom === "string";
+}
+/**
+ * todo #27: the actual create()/resume() decision — `true` (missing) iff this is NOT a
+ * consult fork AND the process-wide activation counter (src/child/activation-signal.ts)
+ * never advanced during the `[activationBefore, now]` window.
+ */
+export function computeChildExtensionMissing(activationBefore: number, isConsultFork: boolean): boolean {
+  return !isConsultFork && !childActivationAdvanced(activationBefore);
+}
 /** child-context-switch plan P0 (§2.3.1 point 1): customType of the entry the child-session extension appends at `agent_end` when a committed switch was never followed by a subsequent model request. */
 export const CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE = "subagent:switch-selfcheck";
 /** child-context-switch plan §3.1 (point 4): customType of the entry the capability state machine (owned by a later package) appends on a disablement/other non-fatal capability notice. */
@@ -74,6 +94,16 @@ export interface SessionHandle {
    * does not apply and must not affect settlement).
    */
   getSwitchTail?(): { seq: number; entryId: string; assistantAfter: boolean } | undefined;
+  /**
+   * todo #27 (child-extension-missing diagnostic): true iff this child
+   * session's own `activate()` was never observed running (see
+   * `src/child/activation-signal.ts`'s process-wide counter). Set once at
+   * construction by `PiSessionDriver.create()`/`resume()`, never for a
+   * consult fork. `bind()` reads it once to emit the companion
+   * `child_extension_missing` DriverEvent. Absent/false on every other
+   * `SessionHandle` implementation (fakes in tests) — no event fires there.
+   */
+  readonly childExtensionMissing?: boolean;
 }
 export interface SessionDriver {
   create(spec: SessionSpec): Promise<SessionHandle>;
@@ -323,7 +353,10 @@ class PiSessionHandle implements SessionHandle {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly killableHandles = new Set<KillableHandle>();
-  constructor(public readonly session: AgentSession) {
+  constructor(
+    public readonly session: AgentSession,
+    readonly childExtensionMissing: boolean = false,
+  ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
   }
@@ -567,6 +600,10 @@ export class PiSessionDriver implements SessionDriver {
     const cwd = resolved.cwd ?? process.cwd();
     const persist = resolved.persist ?? this.rememberAgents;
     const sessionManager = persist ? SessionManager.create(cwd) : SessionManager.inMemory(cwd);
+    // todo #27: snapshot BEFORE the awaited resourceLoader.reload()/activate() window — see
+    // src/child/activation-signal.ts for why "did the counter advance at all" (not "by exactly
+    // one") is the correct check here.
+    const activationBefore = childActivationSnapshot();
     return toCreateOptions(resolved, cwd)
       .then((options) =>
         createAgentSession({
@@ -575,18 +612,33 @@ export class PiSessionDriver implements SessionDriver {
           ...(persist ? {} : { persist: false }),
         } as Parameters<typeof createAgentSession>[0]),
       )
-      .then(({ session }) => new PiSessionHandle(session));
+      .then(
+        ({ session }) =>
+          new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec))),
+      );
   }
   resume(sessionFile: string, spec: SessionSpec) {
     const resolved = this.withResolvedModel(spec);
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
+    // todo #27: a consult fork's read-only tool domain (CONSULT_READONLY_TOOLS) makes the
+    // features this diagnostic protects (bash-job settle-hold, switch_context, memory,
+    // cache-ttl keepalive) irrelevant — skip the check so a consult call never false-positives
+    // (isConsultForkSpec/computeChildExtensionMissing below).
+    const activationBefore = childActivationSnapshot();
     return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
       .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
-      .then(({ session }) => new PiSessionHandle(session));
+      .then(
+        ({ session }) =>
+          new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec))),
+      );
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];
     if (!session) return Promise.reject(new Error("invalid pi session handle"));
+    // todo #27: fire once, synchronously, before subscribing — the companion diagnostic event
+    // for a child session that never activated this package at all (see SessionHandle's own
+    // doc comment and PiSessionHandle's constructor above for who sets this flag).
+    if (h.childExtensionMissing) onEvent({ t: "child_extension_missing" });
     let contextSamplingDisabled = false;
     session.subscribe((event: unknown) => {
       const mapped = mapEvent(event);

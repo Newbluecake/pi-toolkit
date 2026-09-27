@@ -342,6 +342,27 @@ describe("child-context-switch plan.md §2.3.1 (P3): formatOutcome renders diag.
   });
 });
 
+describe("todo #27 (child-extension-missing diagnostic): formatOutcome renders diag.childExtensionMissing", () => {
+  it("appends the child-extension-missing note when the field is true", async () => {
+    const snap = completedSnapshot();
+    snap.outcome!.diag.childExtensionMissing = true;
+    const query = queryForSnapshot(snap);
+    const tool = createResultTool({ query });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("pi-toolkit did not activate");
+  });
+
+  it("omits the note entirely when the field is absent (the common case)", async () => {
+    const snap = completedSnapshot();
+    const query = queryForSnapshot(snap);
+    const tool = createResultTool({ query });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).not.toContain("pi-toolkit did not activate");
+  });
+});
+
 describe("structured result + progress", () => {
   const queryFor = (snapshot: RunSnapshot): QueryService => ({
     get: () => snapshot,

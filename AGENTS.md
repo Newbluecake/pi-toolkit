@@ -76,7 +76,23 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   registry (`worktree-origin.ts`: worktree path → original cwd, `Symbol.for` global, FIFO-capped;
   written by `src/extensions/worktree.ts`, read by `src/memory/`). No pi imports.
 - `src/runtime/` — runner, session driver, watchdog, reaper, slot pool (concurrency), dynamic
-  tool scoping.
+  tool scoping. **Child-extension-missing diagnostic (todo #27)**: `session-driver.ts` rediscovers
+  extensions for every spawned child session purely from settings.json (the same `SettingsManager`/
+  `DefaultResourceLoader` discovery pi's own CLI uses) — never from whatever `-e <path>` /
+  `--no-extensions` flags the PARENT pi process itself was started with. If this package is loaded
+  into the parent that way (outside settings.json's `packages`/`extensions` list), every child
+  session it spawns never activates it at all, and bash-job settle-hold / switch_context / memory
+  injection / cache-ttl keepalive all silently do nothing for that run — use `pi install` instead so
+  settings.json actually lists the package. `src/child/activation-signal.ts`'s process-wide,
+  `Symbol.for`-keyed activation counter (incremented unconditionally from `src/index.ts`'s
+  `isChildSession` branch) lets the driver detect this synchronously, in-process, without parsing
+  settings.json itself: a non-consult `create()`/`resume()` call whose counter never advances during
+  its own create-await window emits a `child_extension_missing` DriverEvent, folded into
+  `RunDiagnostics.childExtensionMissing` (best-effort, diag-only, never affects the run) and surfaced
+  in `get_subagent_result`'s text (`formatChildExtensionMissing`); the runner also `console.warn`s
+  once per process (deduped). Consult forks are exempt (their read-only tool domain makes the
+  affected features moot) — detection, not inheritance, is the whole feature (no attempt to make a
+  child session inherit the parent's `-e` extension list).
 - `src/service/` — spawn/query services, run registry, target resolution (exact → prefix → label), and the global background-status provider shared with feishu-notify.
   Spawn admission rejects a `provider/id` unknown to the **host** model registry (typos; suggestions via `suggestModelRefs`).
   It cannot catch a host registry gone stale after `models.json` changed on disk: child sessions rebuild `ModelRuntime`

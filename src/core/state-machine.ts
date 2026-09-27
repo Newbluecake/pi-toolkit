@@ -607,6 +607,14 @@ export function reduce(
     const next: ContextSwitchDiag = { ...prev, count: prev?.count ?? 0, rejected: nextList };
     return { state: { ...state, diag: { ...state.diag, contextSwitches: next } }, effects: [] };
   }
+  // todo #27 (child-extension-missing diagnostic): same best-effort family as context_usage/
+  // context_switch above — accepted in every state (including terminal/stale-generation), pure
+  // diag patch, no effect, lastEventAt/lastEventType untouched. Session-driver.ts only ever
+  // emits this once, at bind() time, for a non-consult run whose child session never activated
+  // this package at all.
+  if (input.kind === "session_event" && input.event.t === "child_extension_missing") {
+    return { state: { ...state, diag: { ...state.diag, childExtensionMissing: true } }, effects: [] };
+  }
   // set_model: a mid-run model switch is a display-only diagnostics patch —
   // it must not enter/re-arm any phase timer (plan D-5) and emits no effects.
   // Kept next to context_usage for the same reason: it is best-effort

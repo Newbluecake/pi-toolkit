@@ -276,6 +276,19 @@ export interface RunnerDeps {
 export interface Runner {
   run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome>;
 }
+/**
+ * todo #27 (child-extension-missing diagnostic): the runner logs this once
+ * per process (deduped, see `RuntimeRunner.warnedChildExtensionMissing`) the
+ * first time it observes a `child_extension_missing` session_event — i.e.
+ * the first spawned child session that never activated pi-toolkit at all.
+ * Exported so tests can assert against the exact text instead of a fragile
+ * substring.
+ */
+export const CHILD_EXTENSION_MISSING_WARNING =
+  "a spawned child session never activated pi-toolkit (bash-job settle-hold, switch_context, memory and " +
+  "cache-ttl keepalive are unavailable for it and every future spawn in this process). The parent pi process " +
+  "likely loaded this package via -e/--no-extensions, outside settings.json, which child sessions never see " +
+  "(see AGENTS.md's src/runtime/ note) — use `pi install` instead.";
 const error = (e: unknown, kind: ErrorInfo["kind"] = "internal"): ErrorInfo => ({
   kind,
   message: e instanceof Error ? e.message : String(e),
@@ -333,6 +346,8 @@ export class RuntimeRunner implements Runner {
   private readonly activeHandles = new Map<string, { gen: number; handle: SessionHandle }>();
   /** bash-timeout-grace plan §3.2: runId -> generation already sealed, guarding sealBeforeTerminal's idempotency (I-SEAL). */
   private readonly sealedGenerations = new Map<string, number>();
+  /** todo #27: per-process (per-RuntimeRunner-instance) dedup latch for CHILD_EXTENSION_MISSING_WARNING. */
+  private warnedChildExtensionMissing = false;
   constructor(private readonly d: RunnerDeps) {}
   /** Public dispatch entry so external drivers (watchdog ticks, effect-failure feedback) can feed inputs into a specific, still-running (runId, generation) without touching another concurrent run (fixes the single-field-clobber hazard when limit > 1). */
   dispatchExternal(runId: string, generation: number, input: RunInput): void {
@@ -690,6 +705,14 @@ export class RuntimeRunner implements Runner {
           // below); the diag write is display/get_subagent_result plumbing
           // only. First value wins (see selfcheckLatch's own doc above).
           if (e.t === "switch_selfcheck_failed" && selfcheckLatch === undefined) selfcheckLatch = e.reason;
+          // todo #27: WARN once per process (this RuntimeRunner instance's lifetime, i.e. until
+          // the next /reload rebuilds a fresh one) the first time any spawned child session
+          // reports it never activated pi-toolkit at all — never for a consult fork (session-
+          // driver.ts's resume() never emits the event for one).
+          if (e.t === "child_extension_missing" && !this.warnedChildExtensionMissing) {
+            this.warnedChildExtensionMissing = true;
+            console.warn(`[pi-subagent] ${CHILD_EXTENSION_MISSING_WARNING}`);
+          }
           // X11 TS3: setActiveTools only ever happens at a turn boundary, never
           // mid tool_exec. TS-race guard: re-check terminality *after*
           // dispatch() above has already folded this same event into the

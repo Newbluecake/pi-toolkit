@@ -74,6 +74,7 @@ import { wireTodo } from "./todo/index.js";
 import { wireMemory } from "./memory/index.js";
 import { wireChildBashJobs } from "./bash/child.js";
 import { wireChildSession } from "./child/wire.js";
+import { markChildExtensionActivated } from "./child/activation-signal.js";
 import { getChildBashRegistry } from "./bash/child-registry.js";
 import { createPromptSectionHub } from "./sysprompt/hub.js";
 import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sections.js";
@@ -176,7 +177,15 @@ export default function activate(pi: ExtensionAPI): void {
   // session_start, which child sessions never receive, plan §0 fact 3). Both sub-features gate
   // themselves on their own settings internally (compact.childSessions / cacheTtl.childKeepalive);
   // calling this unconditionally keeps the gating logic in one place (src/child/wire.ts).
-  if (isChildSession) wireChildSession(pi, preGuardSettings);
+  //
+  // todo #27 (child-extension-missing diagnostic): mark the process-wide activation signal
+  // (src/child/activation-signal.ts) UNCONDITIONALLY here too — the session driver reads it
+  // to detect a child session that never activated this package at all (parent loaded it via
+  // `-e`/`--no-extensions`, outside settings.json). Must not depend on any feature setting.
+  if (isChildSession) {
+    markChildExtensionActivated();
+    wireChildSession(pi, preGuardSettings);
+  }
 
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
   // re-activates this extension inside every child. Without a guard, the

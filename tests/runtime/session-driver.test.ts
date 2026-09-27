@@ -5,11 +5,14 @@ import {
   CHILD_SWITCH_CONTEXT_SOURCE,
   CHILD_SWITCH_REJECTED_CUSTOM_TYPE,
   CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE,
+  computeChildExtensionMissing,
+  isConsultForkSpec,
   mapContextUsage,
   mapEvent,
   PiSessionDriver,
   PiSessionHandle,
 } from "../../src/runtime/session-driver.js";
+import { markChildExtensionActivated, childActivationSnapshot } from "../../src/child/activation-signal.js";
 
 /**
  * Regression: pi's Usage carries cost as nested `cost.total`, not a flat
@@ -466,5 +469,66 @@ describe("PiSessionHandle.getSwitchTail (§2.3.1 v3.1 runner settlement fallback
       { type: "compaction", id: "e2" },
     ]);
     expect(h.getSwitchTail()).toBeUndefined();
+  });
+});
+
+/**
+ * todo #27 (child-extension-missing diagnostic): pure decision-logic coverage for
+ * create()/resume()'s detection, isolated from createAgentSession/pi's real SDK (which needs
+ * model/auth resolution real tests here don't want to depend on) — see session-driver.ts's
+ * own doc comments on `isConsultForkSpec`/`computeChildExtensionMissing` for why they are
+ * factored out as standalone pure functions.
+ */
+describe("todo #27: isConsultForkSpec", () => {
+  it("true when spec.forkSessionFrom is a non-empty string", () => {
+    expect(isConsultForkSpec({ forkSessionFrom: "/tmp/fork.jsonl" } as never)).toBe(true);
+  });
+  it("false when forkSessionFrom is absent, or present but not a string", () => {
+    expect(isConsultForkSpec({})).toBe(false);
+    expect(isConsultForkSpec({ resumeFrom: "/tmp/x.jsonl" })).toBe(false);
+    expect(isConsultForkSpec({ forkSessionFrom: 123 } as never)).toBe(false);
+  });
+});
+
+describe("todo #27: computeChildExtensionMissing", () => {
+  it("true when the activation counter never advanced since the snapshot and this is not a consult fork", () => {
+    const before = childActivationSnapshot();
+    expect(computeChildExtensionMissing(before, false)).toBe(true);
+  });
+
+  it("false once the activation counter has advanced since the snapshot", () => {
+    const before = childActivationSnapshot();
+    markChildExtensionActivated();
+    expect(computeChildExtensionMissing(before, false)).toBe(false);
+  });
+
+  it("false for a consult fork even when the counter never advanced (consult exemption)", () => {
+    const before = childActivationSnapshot();
+    expect(computeChildExtensionMissing(before, true)).toBe(false);
+  });
+});
+
+describe("todo #27: bind() emits child_extension_missing exactly when the handle carries the flag", () => {
+  it("fires the event, synchronously, before subscribing, when handle.childExtensionMissing is true", async () => {
+    const session = { subscribe: () => undefined };
+    const events: unknown[] = [];
+    await new PiSessionDriver().bind({ session, childExtensionMissing: true } as never, (event) => events.push(event));
+    expect(events).toEqual([{ t: "child_extension_missing" }]);
+  });
+
+  it("does not fire when the handle's flag is false or absent (existing fake handles in other tests stay unaffected)", async () => {
+    const session = { subscribe: () => undefined };
+    const events: unknown[] = [];
+    await new PiSessionDriver().bind({ session, childExtensionMissing: false } as never, (event) => events.push(event));
+    await new PiSessionDriver().bind({ session } as never, (event) => events.push(event));
+    expect(events).toEqual([]);
+  });
+
+  it("PiSessionHandle's own childExtensionMissing constructor param defaults to false", () => {
+    const session = { sessionId: "s", sessionFile: undefined };
+    const h = new PiSessionHandle(session as never);
+    expect(h.childExtensionMissing).toBe(false);
+    const h2 = new PiSessionHandle(session as never, true);
+    expect(h2.childExtensionMissing).toBe(true);
   });
 });

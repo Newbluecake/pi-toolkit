@@ -20,6 +20,7 @@ import {
   formatExitFacts,
   formatContextSwitches,
   formatCompactionFailureNote,
+  formatChildExtensionMissing,
   truncateResultText,
 } from "./result-text.js";
 import type { RunExitFacts } from "../core/types.js";
@@ -511,6 +512,7 @@ function formatOutcome(
       exitFacts?: RunExitFacts;
       contextSwitches?: ContextSwitchDiag;
       compactionFailures?: CompactionFailureRecord[];
+      childExtensionMissing?: true;
     };
   },
   maxChars = 0,
@@ -531,7 +533,8 @@ function formatOutcome(
   // child-session switch_context boundary-draft diagnostics P0 already wired into `diag`.
   const contextSwitchesText = formatContextSwitches(outcome.diag?.contextSwitches);
   const compactionFailureText = formatCompactionFailureNote(outcome.diag?.compactionFailures, outcome.error?.message);
-  const exitSuffix = [exitFactsText, contextSwitchesText, compactionFailureText]
+  const childExtensionMissingText = formatChildExtensionMissing(outcome.diag?.childExtensionMissing);
+  const exitSuffix = [exitFactsText, contextSwitchesText, compactionFailureText, childExtensionMissingText]
     .filter((line): line is string => line !== undefined)
     .map((line) => `\n\n${line}`)
     .join("");

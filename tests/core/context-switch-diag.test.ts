@@ -62,6 +62,7 @@ describe("child-context-switch plan P0 (T-A/T-F4): best-effort diagnostic sessio
     { t: "switch_selfcheck_failed" as const, reason: "run-ended-after-switch" },
     { t: "switch_capability" as const, reason: "l1-event-shape" },
     { t: "context_switch_rejected" as const, reason: "unpersisted" },
+    { t: "child_extension_missing" as const },
   ];
 
   for (const event of events) {
@@ -248,6 +249,34 @@ describe("child-context-switch plan P0 (T-A): diag.contextSwitches / diag.compac
     );
     s = apply(s, { kind: "prompt_settled", text: "done" } as never, 11);
     expect(s.outcome?.diag.contextSwitches?.count).toBe(1);
+  });
+});
+
+describe("todo #27 (child-extension-missing diagnostic): diag.childExtensionMissing content", () => {
+  it("child_extension_missing sets diag.childExtensionMissing to true", () => {
+    let s = runningState();
+    expect(s.diag.childExtensionMissing).toBeUndefined();
+    s = apply(s, { kind: "session_event", event: { t: "child_extension_missing" } } as never, 10);
+    expect(s.diag.childExtensionMissing).toBe(true);
+  });
+
+  it("is independent of contextSwitches/compactionFailures — does not touch either", () => {
+    let s = runningState();
+    s = apply(
+      s,
+      { kind: "session_event", event: { t: "context_switch", seq: 1, keepRecent: true, dropped } } as never,
+      10,
+    );
+    s = apply(s, { kind: "session_event", event: { t: "child_extension_missing" } } as never, 11);
+    expect(s.diag.childExtensionMissing).toBe(true);
+    expect(s.diag.contextSwitches?.count).toBe(1);
+  });
+
+  it("lands in outcome.diag.childExtensionMissing after settle (finish copies diag, same as contextSwitches)", () => {
+    let s = runningState();
+    s = apply(s, { kind: "session_event", event: { t: "child_extension_missing" } } as never, 10);
+    s = apply(s, { kind: "prompt_settled", text: "done" } as never, 11);
+    expect(s.outcome?.diag.childExtensionMissing).toBe(true);
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatChildExtensionMissing,
   formatCompactionFailureNote,
   formatContextSwitches,
   formatExitFacts,
@@ -261,5 +262,23 @@ describe("formatCompactionFailureNote (child-context-switch plan P0 §2.3.1)", (
 
   it("still renders when errorMessage is present but doesn't mention this failure (e.g. a completed run)", () => {
     expect(formatCompactionFailureNote(failures, "unrelated text")).toBe("auto-compaction failed: second failure");
+  });
+});
+
+/**
+ * todo #27 (child-extension-missing diagnostic): formatChildExtensionMissing renders a
+ * trailing note when RunOutcome.diag.childExtensionMissing is `true`, and only then — same
+ * threading pattern as formatCompactionFailureNote/formatContextSwitches above.
+ */
+describe("formatChildExtensionMissing (todo #27)", () => {
+  it("returns undefined when the field is absent", () => {
+    expect(formatChildExtensionMissing(undefined)).toBeUndefined();
+  });
+
+  it("renders a note mentioning the affected features when the field is true", () => {
+    const text = formatChildExtensionMissing(true);
+    expect(text).toBeDefined();
+    expect(text).toContain("pi-toolkit did not activate");
+    expect(text).toContain("switch_context");
   });
 });

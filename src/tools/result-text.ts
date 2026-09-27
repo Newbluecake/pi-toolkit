@@ -152,3 +152,20 @@ export function formatCompactionFailureNote(
   if (errorMessage && errorMessage.includes(last.message)) return undefined;
   return `auto-compaction failed: ${last.message}`;
 }
+
+/**
+ * todo #27 (child-extension-missing diagnostic): renders a trailing note when
+ * `RunOutcome.diag.childExtensionMissing` is set — this run's child session never
+ * activated pi-toolkit at all (see `src/child/activation-signal.ts` and
+ * `session-driver.ts`'s `bind()`). Same threading pattern as `formatExitFacts`/
+ * `formatContextSwitches` above: `undefined` when the field is absent (every normal run,
+ * and every consult fork — the check never runs for one).
+ */
+export function formatChildExtensionMissing(childExtensionMissing: true | undefined): string | undefined {
+  if (!childExtensionMissing) return undefined;
+  return (
+    "pi-toolkit did not activate in the child session — bash-job settle-hold, switch_context, memory and " +
+    "cache-ttl keepalive were unavailable this run (parent likely loaded it via -e/--no-extensions, outside " +
+    "settings.json; see AGENTS.md's src/runtime/ note; use `pi install` instead)."
+  );
+}

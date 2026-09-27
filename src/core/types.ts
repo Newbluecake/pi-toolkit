@@ -524,7 +524,20 @@ export type DriverEvent =
    * see state-machine.ts reduce()'s dedicated branch for the exact placement
    * (after the generation check, before effect_failed/terminal(), §3.8) and
    * why it is NOT exempt from the generation check the way model_changed is. */
-  | { t: "exit_facts"; facts: RunExitFacts };
+  | { t: "exit_facts"; facts: RunExitFacts }
+  /**
+   * todo #27 (child-extension-missing diagnostic, session-driver.ts +
+   * src/child/activation-signal.ts): emitted synchronously by
+   * `PiSessionDriver.bind()` when this run's child session never activated
+   * pi-toolkit at all (the process-wide activation counter did not advance
+   * during the create/resume await window) — never emitted for a consult
+   * fork (its read-only tool domain makes the missing features moot, see
+   * `resume()`'s `isConsultFork` check). Diagnostic only, same best-effort
+   * family as `context_usage`/`compaction_failed` above: accepted in every
+   * state (see state-machine.ts's reduce()), no effect, `lastEventAt`/
+   * `lastEventType` untouched.
+   */
+  | { t: "child_extension_missing" };
 
 /**
  * bash-timeout-grace plan §3.1 (P0b, frozen): one child-session bash job as
@@ -849,6 +862,18 @@ export interface RunDiagnostics {
    * `compactionFailures` entry is stale (superseded by a later success).
    */
   lastCompactionOkAt?: Millis;
+  /**
+   * todo #27 (child-extension-missing diagnostic): set to `true` (never
+   * written otherwise — exactOptionalPropertyTypes) when this run's child
+   * session never activated pi-toolkit at all — see
+   * `src/child/activation-signal.ts` and the `child_extension_missing`
+   * DriverEvent above. Absent for every normal run, and never written for a
+   * consult fork (session-driver.ts's `resume()` skips the check for it).
+   * get_subagent_result surfaces it via `formatChildExtensionMissing`
+   * (src/tools/result-text.ts); the runner also WARNs once per process
+   * (dedup'd) the first time it observes the event.
+   */
+  childExtensionMissing?: true;
 }
 export interface DiagSummary {
   phase: RunPhase;
@@ -1003,6 +1028,18 @@ export interface SessionSpec {
   persist?: boolean;
   /** Existing session file to open for X2 resume. */
   resumeFrom?: string;
+  /**
+   * todo #27 (child-extension-missing diagnostic, purely a read hint for
+   * `PiSessionDriver.resume()`): mirrors `SpawnRequest.forkSessionFrom`
+   * (already threaded through untyped, structurally, from
+   * `ResolvedSpawnRequest` — see runner.ts's `req.forkSessionFrom ??
+   * req.resumeFrom` call site) so `resume()` can type-safely recognize "this
+   * is a consult fork" and skip the child-extension-missing check for it
+   * (consult's read-only tool domain makes the features that check protects
+   * irrelevant). Never read for any other purpose here — the actual file to
+   * open is still `resume()`'s own `sessionFile` argument.
+   */
+  forkSessionFrom?: string;
   /**
    * Additional tool definitions to register for this session (pi's
    * `createAgentSession({ customTools })`, see 2.9). Typed `unknown[]` here
