@@ -1,0 +1,6 @@
+## Memory (-fixture-repo) — 1 file(s)
+
+Topics (open one only when its "when" matches: memory view <name> [section] · memory search <words>; no memory tool: read ${MEMROOT}/-fixture-repo/<name>):
+- topic.md — This description is deliberately much longer than the 110-byte index-line cap so the tiered renderer must c… · when: This read_when clause is deliberately much longer than the 70-…
+
+<!-- pi-toolkit:memory -fixture-repo -->

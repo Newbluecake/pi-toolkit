@@ -1,0 +1,6 @@
+## Memory (-fixture-repo) — 2 file(s)
+
+Topics (open one only when its "when" matches: memory view <name> [section] · memory search <words>; no memory tool: read ${MEMROOT}/-fixture-repo/<name>):
+- (+2 archived)
+
+<!-- pi-toolkit:memory -fixture-repo -->

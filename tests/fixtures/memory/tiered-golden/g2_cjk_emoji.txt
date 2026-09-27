@@ -1,0 +1,6 @@
+## Memory (-fixture-repo) — 1 file(s)
+
+Topics (open one only when its "when" matches: memory view <name> [section] · memory search <words>; no memory tool: read ${MEMROOT}/-fixture-repo/<name>):
+- topic.md — 这是一段用于测试码点安全裁剪的中文描述，混入表情符号 📌🚀✅🔥🎯，长度… · 1k
+
+<!-- pi-toolkit:memory -fixture-repo -->

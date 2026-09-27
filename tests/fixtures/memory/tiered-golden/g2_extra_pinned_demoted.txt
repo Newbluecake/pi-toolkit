@@ -1,0 +1,9 @@
+## Memory (-fixture-repo) — 4 file(s)
+
+Topics (open one only when its "when" matches: memory view <name> [section] · memory search <words>; no memory tool: read ${MEMROOT}/-fixture-repo/<name>):
+- core.md — core · 1k · ⚠ over core budget
+- pinned-a.md 📌 — pinned a · 1k
+- pinned-b.md 📌 — pinned b · 1k
+- topic.md — topic · 1k
+
+<!-- pi-toolkit:memory -fixture-repo -->

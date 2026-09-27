@@ -1,0 +1,13 @@
+## Memory (-fixture-repo) — 12 file(s)
+
+Topics (open one only when its "when" matches: memory view <name> [section] · memory search <words>; no memory tool: read ${MEMROOT}/-fixture-repo/<name>):
+- topic-01.md — topic 01 · 1k
+- topic-02.md — topic 02 · 1k
+- topic-03.md — topic 03 · 1k
+- topic-04.md — topic 04 · 1k
+- topic-05.md — topic 05 · 1k
+- topic-06.md — topic 06 · 1k
+- topic-07.md — topic 07 · 1k
+- … +5 more
+
+<!-- pi-toolkit:memory -fixture-repo -->
