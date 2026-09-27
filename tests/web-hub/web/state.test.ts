@@ -452,6 +452,54 @@ describe("state.reduce", () => {
     expect(messageKey({ role: "custom", customType: "x", content: "y" })).toBeUndefined();
   });
 
+  describe("route (vue-plan.md v2.1 \u00a73.3 P1 compatibility extension)", () => {
+    it("before any route event: legacy auto-select-first behavior is unchanged", () => {
+      const s = reduce(initialState(), { event: "agents", data: [card("A"), card("B")] });
+      expect(s.selected).toBe("A");
+    });
+
+    it("route to a present agent selects it, overriding auto-select", () => {
+      let s = reduce(initialState(), { event: "agents", data: [card("A"), card("B")] });
+      expect(s.selected).toBe("A");
+      s = reduce(s, { event: "route", data: { agentKey: "B" } });
+      expect(s.selected).toBe("B");
+    });
+
+    it("route to a null agentKey (list view) clears selection and stays cleared across further agents frames", () => {
+      let s = reduce(initialState(), { event: "agents", data: [card("A")] });
+      s = reduce(s, { event: "route", data: { agentKey: null } });
+      expect(s.selected).toBeNull();
+      s = reduce(s, { event: "agent_up", data: { agent: card("B") } });
+      expect(s.selected).toBeNull(); // no auto-select once routed, even for a brand-new agent
+    });
+
+    it("deep link before the agents frame arrives: wanted is remembered and lands once agents shows up", () => {
+      let s = reduce(initialState(), { event: "route", data: { agentKey: "A" } });
+      expect(s.selected).toBeNull(); // not present yet
+      s = reduce(s, { event: "agents", data: [card("A"), card("B")] });
+      expect(s.selected).toBe("A"); // landed, not auto-selected "A" by list order coincidence
+      s = reduce(s, { event: "agents", data: [card("B")] }); // A goes away
+      expect(s.selected).toBeNull(); // no fallback to B
+      s = reduce(s, { event: "agent_up", data: { agent: card("A") } }); // A comes back
+      expect(s.selected).toBe("A");
+    });
+
+    it("routing to an unknown key twice is a no-op (same state object, no needless re-render trigger)", () => {
+      const s0 = reduce(initialState(), { event: "agents", data: [card("A")] });
+      const s1 = reduce(s0, { event: "route", data: { agentKey: "nope" } });
+      expect(s1.selected).toBeNull();
+      const s2 = reduce(s1, { event: "route", data: { agentKey: "nope" } });
+      expect(s2).toBe(s1);
+    });
+
+    it("routed selection survives an intervening legacy select (no dispatcher does this in the new UI, but reduce() must stay total)", () => {
+      let s = reduce(initialState(), { event: "agents", data: [card("A"), card("B")] });
+      s = reduce(s, { event: "route", data: { agentKey: "B" } });
+      s = reduce(s, { event: "select", data: { agentKey: "A" } }); // legacy event still works structurally
+      expect(s.selected).toBe("A");
+    });
+  });
+
   it("unknown events and malformed ev are ignored (same state object)", () => {
     const s = loaded();
     expect(reduce(s, { event: "nope", data: {} })).toBe(s);

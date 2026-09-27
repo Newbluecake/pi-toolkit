@@ -32,6 +32,7 @@
  * @typedef {{
  *   clientId: string | null, hub: any, conn: string, lastEventId?: number,
  *   selected: string | null, agents: Map<string, AgentState>, order: string[],
+ *   routed: boolean, wanted: string | null,
  * }} State
  * @typedef {{ event: string, data: any, id?: number }} Msg
  */
@@ -40,6 +41,12 @@
 export const LOCAL_EVENTS = Object.freeze([
   "conn", // {state:"connecting"|"open"|"reconnecting"|"auth"}
   "select", // {agentKey}
+  "route", // {agentKey: string | null} — vue-plan.md v2.1 §3.3 compatibility extension (P1): the
+  // hash router (§3.7) is the single source of truth for selection in the new UI. Once any
+  // `route` event has been dispatched, `withSelection` stops auto-picking the first live agent
+  // and instead only honors the last routed `agentKey` (or clears selection if it isn't/isn't
+  // yet present). The legacy UI never dispatches this event, so `routed` stays permanently
+  // false there and behavior is byte-for-byte unchanged.
   "subscribing", // {agentKey, clientId}
   "subscribed", // {agentKey}
   "subscribe_failed", // {agentKey, error}
@@ -52,7 +59,16 @@ export const LOCAL_EVENTS = Object.freeze([
 
 /** @returns {State} */
 export function initialState() {
-  return { clientId: null, hub: null, conn: "connecting", selected: null, agents: new Map(), order: [] };
+  return {
+    clientId: null,
+    hub: null,
+    conn: "connecting",
+    selected: null,
+    agents: new Map(),
+    order: [],
+    routed: false,
+    wanted: null,
+  };
 }
 
 /**
@@ -219,6 +235,11 @@ function reduceInner(s, event, d) {
       return typeof d.state === "string" && d.state !== s.conn ? { ...s, conn: d.state } : s;
     case "select":
       return key && s.agents.has(key) && s.selected !== key ? { ...s, selected: key } : s;
+    case "route": {
+      const wanted = typeof d.agentKey === "string" ? d.agentKey : null;
+      if (s.routed && s.wanted === wanted) return s; // no-op re-route to the same target
+      return withSelection({ ...s, routed: true, wanted });
+    }
     case "subscribing":
       if (!key || typeof d.clientId !== "string") return s;
       return updateAgent(s, key, (a) => ({
@@ -259,8 +280,20 @@ function reduceInner(s, event, d) {
   }
 }
 
-/** @param {State} s @returns {State} */
+/**
+ * The visible outcome of §3.7's routing: once any `route` event has been dispatched, the last
+ * routed `agentKey` (if present among `agents`) is the only thing that can select an agent —
+ * `withSelection` never falls back to auto-picking the first live one (a deep link to an agent
+ * that hasn't arrived yet, or one that just went away, must show "not connected", not silently
+ * jump to whatever else is in the list). Pre-P1 (or an old UI session that never dispatches
+ * `route`) `s.routed` stays `false` and this is byte-for-byte the original auto-select behavior.
+ * @param {State} s @returns {State}
+ */
 function withSelection(s) {
+  if (s.routed) {
+    const next = s.wanted !== null && s.agents.has(s.wanted) ? s.wanted : null;
+    return next === s.selected ? s : { ...s, selected: next };
+  }
   if (s.selected !== null && s.agents.has(s.selected)) return s;
   const first = s.order.find((k) => !s.agents.get(k)?.down) ?? s.order[0] ?? null;
   return first === s.selected ? s : { ...s, selected: first };
