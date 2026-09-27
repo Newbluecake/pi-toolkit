@@ -21,8 +21,19 @@
  * - `event: auth` (`{reason:"revoked"|"expired"}`) closes the stream
  *   immediately and reports the reason instead of waiting for the generic
  *   `error` path.
+ * - `subscribe`/`unsubscribe`/`page` mirror `createClient`'s REST calls (same
+ *   endpoints, same request shapes) minus the token-mode `withRelogin` dance
+ *   — a password-mode 401 means the cookie session is gone, already surfaced
+ *   via the `auth` SSE event / `probeSessionAfterClose`, not a re-login
+ *   token. `wireFleetUi` (shared with `app.js`) calls all three unconditionally,
+ *   so omitting any of them throws synchronously inside `effects()` on the
+ *   very first subscribe attempt — no `/api/subscribe` request is ever sent,
+ *   `sub.pending` never clears, and the transcript is stuck at "loading
+ *   history…" forever with no console.* output (the throw escapes the
+ *   triggering SSE/click callback as an uncaught exception, not a console
+ *   call).
  */
-import { API, SILENCE_MS, SSE_EVENTS } from "./contract.js";
+import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
 
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const LOGIN_TIMEOUT_MS = 25_000; // plan §10 "排队等待": KDF fair-scheduling wait can run up to 20s
@@ -233,6 +244,73 @@ export function createPasswordClient(deps) {
     deps.onUnauthenticated();
   }
 
+  /** @param {{ ok: boolean, status: number, json(): Promise<any> }} r */
+  async function errorOf(r) {
+    try {
+      const body = await r.json();
+      if (body && typeof body.error === "string") return body.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    return r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`;
+  }
+
+  /** @param {string} path @param {unknown} body */
+  function postApi(path, body) {
+    return request(
+      path,
+      { method: "POST", headers: { "Content-Type": "application/json", "X-PWH": "1" }, body: JSON.stringify(body) },
+      REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  /**
+   * Bug fix: `wireFleetUi` (shared with token-mode `createClient` in app.js) unconditionally
+   * calls `client.subscribe` / `client.unsubscribe` / `client.page` — this transport used to lack
+   * all three, so the very first subscribe attempt threw `TypeError: client.subscribe is not a
+   * function` synchronously inside `effects()`, before any `/api/subscribe` fetch was ever issued
+   * and before the `.then()` that clears `sub.pending` could run, wedging the transcript at
+   * "loading history…" forever with zero `/api/subscribe` or `/api/history` network activity (the
+   * exception escapes to the top of the triggering SSE/click callback, invisible unless something
+   * is listening for uncaught exceptions rather than `console.*` calls). No `withRelogin`/token
+   * dance here (unlike app.js): password-mode 401s mean the cookie session is gone, which is
+   * already surfaced via the SSE `auth` event / `probeSessionAfterClose`, not a re-login token.
+   * @param {string} clientId @param {string} agentKey @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+   */
+  async function subscribe(clientId, agentKey) {
+    try {
+      const r = await postApi(API.subscribe, { clientId, agentKey });
+      return r.ok ? { ok: true } : { ok: false, error: await errorOf(r) };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+
+  /** @param {string} clientId @param {string} agentKey */
+  async function unsubscribe(clientId, agentKey) {
+    try {
+      await postApi(API.unsubscribe, { clientId, agentKey });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
+   * @param {string} agentKey @param {string} before @param {number} [limit]
+   * @returns {Promise<{ ok: true, data: any } | { ok: false, error: string }>}
+   */
+  async function page(agentKey, before, limit = 200) {
+    const n = Math.max(1, Math.min(HISTORY_LIMIT_MAX, Math.floor(limit)));
+    const url = `${API.history}?agent=${encodeURIComponent(agentKey)}&before=${encodeURIComponent(before)}&limit=${n}`;
+    try {
+      const r = await request(url, { method: "GET" }, REQUEST_TIMEOUT_MS);
+      if (!r.ok) return { ok: false, error: await errorOf(r) };
+      return { ok: true, data: await r.json() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+
   function closeStream() {
     if (watchdog !== null) deps.clearTimeout(watchdog);
     if (reopenTimer !== null) deps.clearTimeout(reopenTimer);
@@ -393,6 +471,9 @@ export function createPasswordClient(deps) {
     },
     login,
     logout,
+    subscribe,
+    unsubscribe,
+    page,
     close() {
       closed = true;
       closeStream();

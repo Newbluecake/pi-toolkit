@@ -452,3 +452,74 @@ describe("createPasswordClient: logout()", () => {
     e.client.close();
   });
 });
+
+/**
+ * Regression: `wireFleetUi` (shared with token-mode `createClient`) calls
+ * `client.subscribe` / `client.unsubscribe` / `client.page` unconditionally
+ * from `effects()` and the scroll handler. Before the fix the password
+ * transport exposed none of the three, so the very first subscribe attempt
+ * threw `TypeError: client.subscribe is not a function` synchronously —
+ * before any fetch was issued — which wedged the transcript at "loading
+ * history…" forever with zero `/api/subscribe`/`/api/history` traffic
+ * (LAN mode live bug, see the fix commit).
+ */
+describe("createPasswordClient: subscribe() / unsubscribe() / page()", () => {
+  it("exposes subscribe, unsubscribe and page as functions", async () => {
+    const e = env();
+    await e.client.start();
+    expect(typeof e.client.subscribe).toBe("function");
+    expect(typeof e.client.unsubscribe).toBe("function");
+    expect(typeof e.client.page).toBe("function");
+    e.client.close();
+  });
+
+  it("subscribe() posts /api/subscribe with clientId/agentKey, X-PWH header, same-origin credentials", async () => {
+    const e = env({ fetch: async (url) => (url === "/api/subscribe" ? resp(200) : resp(200)) });
+    await e.client.start();
+    expect(await (e.client as any).subscribe("c1", "A")).toEqual({ ok: true });
+    const call = e.calls.find((c) => c.url === "/api/subscribe")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.credentials).toBe("same-origin");
+    expect(call.init.headers).toMatchObject({ "Content-Type": "application/json", "X-PWH": "1" });
+    expect(JSON.parse(call.init.body)).toEqual({ clientId: "c1", agentKey: "A" });
+    e.client.close();
+  });
+
+  it("subscribe() surfaces a non-ok response's error code (401 ⇒ session gone, no re-login token dance)", async () => {
+    const e = env({ fetch: async (url) => (url === "/api/subscribe" ? resp(401, { error: "E_AUTH" }) : resp(200)) });
+    await e.client.start();
+    expect(await (e.client as any).subscribe("c1", "A")).toEqual({ ok: false, error: "E_AUTH" });
+    expect(e.calls.filter((c) => c.url === "/api/subscribe")).toHaveLength(1); // no retry
+    e.client.close();
+  });
+
+  it("subscribe() network failure ⇒ { ok: false, error }", async () => {
+    const e = env({ fetch: async (url) => (url === "/api/subscribe" ? Promise.reject(new Error("boom")) : resp(200)) });
+    await e.client.start();
+    const r = await (e.client as any).subscribe("c1", "A");
+    expect(r.ok).toBe(false);
+    e.client.close();
+  });
+
+  it("unsubscribe() posts /api/unsubscribe, best-effort (swallows failures)", async () => {
+    const e = env({
+      fetch: async (url) => (url === "/api/unsubscribe" ? Promise.reject(new Error("boom")) : resp(200)),
+    });
+    await e.client.start();
+    await expect((e.client as any).unsubscribe("c1", "A")).resolves.toBeUndefined();
+    expect(e.calls.some((c) => c.url === "/api/unsubscribe" && JSON.parse(c.init.body).agentKey === "A")).toBe(true);
+    e.client.close();
+  });
+
+  it("page() builds the same /api/history URL shape as token mode and returns parsed payload", async () => {
+    const e = env({
+      fetch: async (url) =>
+        url.includes("agent=B") ? resp(404, { error: "E_NOT_FOUND" }) : resp(200, { agentKey: "A", entries: [] }),
+    });
+    await e.client.start();
+    expect(await (e.client as any).page("A", "e1", 9999)).toEqual({ ok: true, data: { agentKey: "A", entries: [] } });
+    expect(e.calls.some((c) => c.url === "/api/history?agent=A&before=e1&limit=400")).toBe(true); // clamped to HISTORY_LIMIT_MAX
+    expect(await (e.client as any).page("B", "x")).toEqual({ ok: false, error: "E_NOT_FOUND" });
+    e.client.close();
+  });
+});

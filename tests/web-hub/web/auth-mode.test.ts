@@ -141,6 +141,41 @@ describe("mountAuthApp: data-auth-mode gate", () => {
     (app as any).client.close();
   });
 
+  it(
+    'authMode="password": hello+agents auto-select actually calls /api/subscribe (regression — the password ' +
+      "transport used to lack subscribe/unsubscribe/page, so wireFleetUi's effects() threw synchronously on the " +
+      'first subscribe attempt and the transcript stayed "loading history…" forever with zero /api/subscribe ' +
+      "or /api/history traffic, exactly the LAN live-bug symptom)",
+    async () => {
+      const { win, doc, fetchCalls } = setup("password");
+      const app = mountAuthApp(win, doc);
+      await flush();
+      const es = FakeES.all[0]!;
+      es.emit("hello", { clientId: "c1" });
+      es.emit("agents", {
+        agents: [
+          {
+            agentKey: "A",
+            kind: "tui",
+            pid: 1,
+            cwd: "/p/one",
+            state: "live",
+            pluginVersion: "1",
+            outdated: false,
+            session: { sessionId: "s-A", cwd: "/p/one", reason: "startup", leafId: null, mode: "tui" },
+            prompts: [],
+          },
+        ],
+      });
+      await flush();
+      const subscribeCalls = fetchCalls.filter((c) => c.url === "/api/subscribe");
+      expect(subscribeCalls).toHaveLength(1);
+      expect(JSON.parse(subscribeCalls[0]!.init.body)).toEqual({ clientId: "c1", agentKey: "A" });
+      expect((app as any).getState().agents.get("A")!.sub).toMatchObject({ clientId: "c1" });
+      (app as any).client.close();
+    },
+  );
+
   for (const bad of [undefined, "", "TOKEN", "Password", "admin"]) {
     it(`authMode=${JSON.stringify(bad)} (missing/invalid) ⇒ error mode: no #t=, no localStorage, no fetch, no SSE`, async () => {
       const { win, doc, nodes, fetchCalls, storageCalls } = setup(bad);
