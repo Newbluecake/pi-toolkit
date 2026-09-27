@@ -259,7 +259,7 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     expect(notifications[0]!.level).toBe("warning");
   });
 
-  test("attachTidy: attached ⇒ /mem tidy reaches the (still-stubbed) P4 handler instead", async () => {
+  test("attachTidy: attached ⇒ /mem tidy reaches the real P4 handler instead", async () => {
     const host = fakePi();
     const result = wire(host);
     result.attachTidy({
@@ -271,7 +271,7 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     const cmd = host.commands.get("mem")!;
     const { ctx, notifications } = fakeUiCtx(cwd);
     await cmd.handler("tidy", ctx);
-    expect(notifications[0]!.message).toContain("not implemented yet (todo #22 P4)");
+    expect(notifications[0]!.message).toContain("no memory directory for");
     expect(notifications[0]!.level).toBe("warning");
   });
 

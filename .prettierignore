@@ -7,3 +7,9 @@ tests/fixtures/bash-tools-golden.json
 # (方案 §10.1 point 1) — must stay byte-identical to their source, which the
 # legacy golden (tests/fixtures/memory-legacy-golden.json) is pinned against.
 tests/fixtures/memory/current-5/
+# #22 memory optimize-plan P4 (§14.1 tidy-payloads / current-5-migrated): the
+# migration fixture's *.md files must stay byte-identical to the `content`
+# strings embedded in tidy-payloads/migration-current-5.json (nothing in the
+# real /mem tidy apply path ever runs prettier on proposal content) — same
+# rationale as current-5/ above.
+tests/fixtures/memory/current-5-migrated/
