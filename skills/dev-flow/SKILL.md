@@ -21,13 +21,16 @@ metadata:
 3. **闸门不空转**：用户确认与方案评审同时进行；澄清（交互阻塞）期间后台预热 Explore。
 4. **产物复用**：探索/方案落成文件，下游 prompt 直接给路径，禁止下游重复读同一批代码。
 5. **按需算力**：thinking 按阶段降档，机械改动用 `low`；模型报错立刻按回退链换，不原地重试。
+6. **计划是给 agent 的，摘要是给人的**：长方案文档只服务下游 agent 交接；呈给用户的永远是
+   一页决策摘要（见 L2 第 4 步），不让用户读 AI 长文。
 
 ## 铁律
 
 1. **精确 ID**：`Agent` 的 `model` 必须用速查表里的完整 `provider/modelId`；模糊别名会被
    `subagent-model-hints` 扩展 block。
 2. **按序回退**：首选报错（过载/429/超时/额度耗尽）就换下一个，不在同一模型上反复重试。
-   **GPT 系（gpt-sol / gpt-terra / gpt-6）在所有回退链中一律排最后，仅作兜底。**
+   例外：**gpt-sol 是评审/验收首选**（与 Claude 系的方案/开发模型天然异源，保证评审独立）；
+   gpt-terra / gpt-6 仍只作兜底。
 3. **fable / gpt-6 只用于复杂任务**（L3），常规任务禁止动用。
 4. **能并行必并行**：判定可并行的任务必须在**同一条消息**中发出多个 `Agent` 调用，或在
    `SubagentWorkflow` 里用 `parallel()`/`pipeline()`；顺序派发不算并行。
@@ -53,24 +56,24 @@ metadata:
 
 ## 模型 ID 速查表
 
-| 别名      | 精确 ID（按优先级）                                                               |
-| --------- | --------------------------------------------------------------------------------- |
-| kimi-k3   | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                      |
-| glm-5.3   | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                           |
-| opus-5.5  | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜） |
-| opus-5    | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                      |
-| sonnet    | `cr-anthropic/claude-sonnet-5` → `copilot-anthropic/claude-sonnet-4.6`            |
-| fable     | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）      |
-| gpt-sol   | `cr-response/gpt-5.6-sol` → `zhipu-pool/gpt-5.6-sol`                              |
-| gpt-terra | `cr-response/gpt-5.6-terra`                                                       |
-| gpt-6     | `cr-response/gpt-6-astra`                                                         |
+| 别名      | 精确 ID（按优先级）                                                                       |
+| --------- | ----------------------------------------------------------------------------------------- |
+| sonnet    | `cr-anthropic/claude-sonnet-5` → `copilot-anthropic/claude-sonnet-4.6`                    |
+| kimi-k3   | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                              |
+| glm-5.3   | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                   |
+| opus-5.5  | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）         |
+| opus-5    | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                              |
+| fable     | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）              |
+| gpt-sol   | `cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`（两线互为备份；zhipu 偶发 0 轮卡死） |
+| gpt-terra | `cr-response/gpt-5.6-terra`                                                               |
+| gpt-6     | `cr-response/gpt-6-astra`                                                                 |
 
 ### 疑难升级阶梯（fable 闸门）
 
 难度升级一律走这条阶梯，**不得跳级**：
 
 ```
-kimi-k3 → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [ask_user 批准] → fable
+sonnet → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [ask_user 批准] → fable
 ```
 
 - **凡用 opus 档一律优先 opus-5.5**：opus-5 更弱且更贵，只在 opus-5.5 不可用（额度/报错）时替补。
@@ -137,18 +140,21 @@ kimi-k3 → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [as
 
 ## 各阶段模型分工
 
-| 阶段                   | 首选     | 次选                                         | 说明                                                                                                   |
-| ---------------------- | -------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **核心调度**（主会话） | kimi-k3  | opus-5.5 → opus-5                            | 任务拆解、派单、汇总；启动时 `--model kimi-coding/k3-256k` 或 Ctrl+P                                   |
-| **代码探索**           | glm-5.3  | sonnet → gpt-terra（兜底）                   | `subagent_type=Explore`，只读定位代码/梳理调用链；glm 专家被 consult 也最便宜                          |
-| **架构设计**           | opus-5.5 | opus-5 → gpt-6（兜底）；简单 → kimi-k3       | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                  |
-| **方案制定**           | kimi-k3  | opus-5.5 → opus-5 → gpt-sol                  | `subagent_type=Plan`                                                                                   |
-| **前端开发**           | kimi-k3  | opus-5.5 → opus-5                            | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose |
-| **复杂任务方案**       | opus-5.5 | opus-5 → gpt-6（兜底）                       | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                              |
-| **疑难攻坚**           | opus-5.5 | gpt-6（兜底）                                | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                         |
-| **方案评审**           | opus-5.5 | opus-5 → kimi-k3 → glm-5.3 → gpt-sol（兜底） | `subagent_type=reviewer`；方案用 k3 系（L1/L2 默认）→ opus-5.5；方案用 opus 档（L3）→ kimi-k3 起步     |
-| **开发实施**           | kimi-k3  | glm-5.3 → sonnet → gpt-sol（兜底）           | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                            |
-| **任务验收**           | glm-5.3  | sonnet → kimi-k3 → gpt-sol（兜底）           | `subagent_type=verifier`；开发用 k3 系（默认）→ glm-5.3；开发用 glm-5.3 → sonnet                       |
+| 阶段                   | 首选     | 次选                                        | 说明                                                                                                   |
+| ---------------------- | -------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **核心调度**（主会话） | opus-5.5 | opus-5 → kimi-k3（有订阅额度时）            | 任务拆解、派单、汇总、裁定                                                                             |
+| **代码探索**           | sonnet   | glm-5.3 / kimi-k3（有订阅额度时优先）       | `subagent_type=Explore`，只读定位代码/梳理调用链                                                       |
+| **架构设计**           | opus-5.5 | opus-5 → gpt-6（兜底）                      | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                  |
+| **方案制定**           | opus-5.5 | opus-5 → sonnet（简单方案）                 | `subagent_type=Plan`                                                                                   |
+| **前端开发**           | sonnet   | opus-5.5（视觉设计/疑难）→ kimi-k3          | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose |
+| **复杂任务方案**       | opus-5.5 | opus-5 → gpt-6（兜底）                      | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                              |
+| **疑难攻坚**           | opus-5.5 | gpt-6（兜底）                               | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                         |
+| **方案评审**           | gpt-sol  | opus-5（方案非 opus 系时）→ kimi-k3         | `subagent_type=reviewer`；必须与方案模型异源                                                           |
+| **开发实施**           | sonnet   | kimi-k3 / glm-5.3（有订阅额度时）→ opus-5.5 | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                            |
+| **任务验收**           | gpt-sol  | kimi-k3 → glm-5.3                           | `subagent_type=verifier`；必须与开发模型异源；打回后复验优先 resume 原 verifier                        |
+
+路由现状（2026-09）：kimi-coding / zai 订阅常耗尽，默认表以按量线（cr-anthropic / cr-response /
+zhipu-pool）为准；[quota] 显示订阅有余量且候选胜任时可替换同阶段首选。
 
 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier /
 general / Explore），自带角色 prompt 与工具约束；调用时传 `subagent_type` 并按本表传 `model`。
@@ -175,8 +181,8 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 ### L1 快车道（1-2 轮 subagent）
 
 ```
-1. （改动点不明时）主会话 grep/read 定位，或派一个 Explore(glm-5.3, thinking=low)
-2. 派 dev（kimi-k3），prompt 要求：动手前先输出 3 行微方案
+1. （改动点不明时）主会话 grep/read 定位，或派一个 Explore(sonnet, thinking=low)
+2. 派 dev（sonnet），prompt 要求：动手前先输出 3 行微方案
    （改哪几个文件 / 怎么改 / 跑什么命令验证），然后一气改完
 3. 自验前移写死：dev 必须跑指定验证命令并贴真实输出
 4. 主会话抽查 git diff + 复跑验证命令，通过即收尾
@@ -190,13 +196,16 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 ```
 0. 需求模糊 → 主会话内跑 /skill:dev-clarify（同时后台预热 Explore）
 1. 主会话定车道 + TaskCreate 建 todo
-2‖3. 同一条消息派：Explore(glm-5.3) ‖ Plan(kimi-k3)
+2‖3. 同一条消息派：Explore(sonnet) ‖ Plan(opus-5.5)
      —— 改动点未知、方案强依赖探索结论时才退化为先 Explore 后 Plan
-4‖5. 方案到手：立刻贴给用户确认，同时后台派 reviewer(opus-5.5，可挂 Plan 为专家)
+4‖5. 方案到手：立刻呈给用户确认，同时后台派 reviewer(gpt-sol，可挂 Plan 为专家)
      —— 用户读方案的时间 = 评审时间；两者都通过才开工（HARD GATE）
+     —— 呈给用户的是**一页决策摘要**，不是整份方案：需拍板项走 `ask_user`（每项带推荐选项与一句理由）+
+        关键取舍 / 主要风险 / 已由主会话裁定的项（各 1 行）+ 方案文件路径；长文档留给 agent。
+     —— 评审轮数上限见「评审收敛规则」
 6. 并行开发：按文件域拆包，同消息派多个 dev / frontend-dev（先过冲突预检）；
    按「挂专家」矩阵决定是否 `experts: [Plan]`
-7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier(glm-5.3) 只读 diff
+7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier(gpt-sol) 只读 diff
 9. 主会话汇总验收结论，报告用户
 ```
 
@@ -208,7 +217,7 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
    —— 可与 Explore 同消息并行
 3. Plan 升级 opus-5.5（不可用时 opus-5），prompt 给出 arch.md 与 Explore 产物路径
    —— 方案被 reviewer 判 Blocker 且 opus-5.5 二次仍不过，才 ask_user 批准后升 fable
-4‖5. 评审（kimi-k3 → gpt-sol，须与方案模型 opus 档不同）∥ 用户确认（HARD GATE）
+4‖5. 评审（gpt-sol → kimi-k3，须与方案模型 opus 档不同）∥ 用户确认（HARD GATE）
 6. 冲突预检 → 按文件域拆 ≥2 个写包同消息派 dev；跨包共享文件进冻结面；
    每个写包挂 `experts: [architect, Plan]`（L3 方案取舍多，默认必挂）
 7. 每包 dev 返回即派对应 verifier 验收（不等全部完成），主会话后台跑全量测试
@@ -231,6 +240,17 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 
 **评审 ∥ 确认的补充规则**：用户先点头、reviewer 后报出 Blocker 时，必须停下重新确认，
 不得以「用户已同意」为由带病开工。
+
+### 评审收敛规则（防止评审无限升级）
+
+1. **两轮后主会话裁定**：同一方案被打回两轮后，第三轮起主会话逐条分诊——在既定威胁模型/范围内的
+   正确性或安全 Blocker 必须修；其余（边缘场景、对探索性/非发布阻塞部分的过度要求、范围外加固）
+   由主会话裁定并把理由写进方案的处置表，不再要求修。
+2. **范围与威胁模型由人定，不由评审升级**：评审把问题上升到新的威胁模型或新范围时（如「防同进程恶意
+   扩展」），主会话给出裁定或 `ask_user`，裁定写进方案后，后续评审不得重新争论。
+3. **复审收窄**：复审 prompt 写明「只核对上轮 N 条是否闭合，除 Blocker 外不提新范围问题」，优先
+   resume 原 reviewer（保留它上一轮的判据），thinking 可降一档。
+4. 超过 4 轮仍不收敛 ⇒ 方案拆小（把有争议的部分拆成后续项）或降低该部分的承诺，而不是继续打磨文档。
 
 ## 挂专家（consult）：何时必须传 `experts`
 
@@ -292,6 +312,7 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 - ≤3 个子任务还去写 `SubagentWorkflow` 脚本（同消息 3 个 `Agent` 调用更快）；4–6 个两者皆可，按是否需要挂专家/worktree 隔离选（分模型两边都行）。
 - 同一轮并行 >6 个 agent 仍用同消息 `Agent` 硬派（撞全局并发上限，后面的排队且可能排队超时）。
 - 打回重派 / 换模型接手时不挂上一轮 run 为专家，让新 agent 把已排除的路再踩一遍。
+- 把整份 AI 长方案甩给用户审；方案被打回 ≥3 轮仍逐条照改、不做主会话裁定。
 - 把所有上游一股脑挂成 `experts`，或拿 consult 替代交接包（文件坐标、验收标准不写进 prompt）。
 
 ## 并行调度（要点）
@@ -336,8 +357,9 @@ node ~/.agents/skills/dev-flow/scripts/conflict-check.mjs spec.json --cwd <仓�
 
 ## Agent 调用要点
 
-- **k3 调用顺序**：一律先 `kimi-coding/k3-256k`，失败按
+- **k3 调用顺序**（有订阅额度时）：先 `kimi-coding/k3-256k`，失败按
   `kimi-coding/k3` → `cr-kimi/kimi-k3` 回退。
+- **传输层故障**（stream 中断 / 502 / 503 / 0 轮无进展超时）：直接 `resume` 该 run 换线续跑，不必请示。
 - **后台 + 通知驱动**：主会话的 `Agent` 一律后台运行（立即返回 run_id，无需也无法选前台）。派发后主会话做不冲突的准备工作
   （整理验收清单、写 todo），没活干就直接结束本轮并说明在等哪些 subagent；收到完成通知再
   `get_subagent_result` 收结果。多个并行任务**按通知到达顺序逐个收取**，先完成先处理。
