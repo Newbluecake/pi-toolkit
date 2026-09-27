@@ -270,6 +270,7 @@ export default defineConfig({
 
 - 第 5 步读入并算过 sha256 的 Buffer 直接缓存；之后所有请求只从内存出字节，服务路径**零磁盘 I/O**——校验与服务之间不存在可被替换的窗口，比「服务时再比对 realpath+size+sha」更强，也更便宜（每请求 0 次 syscall）。`index.html` 的占位符替换在缓存 Buffer 上做（两种 authMode 各缓存一份）。
 - 代价：常驻内存 ≤ `UI_MAX_TOTAL_BYTES`（4 MiB 硬上限，超出即 `too-large`；预计实际 ≈ 0.5 MiB）；一次解析 ≈ 十来次 lstat/open + 读 ≤4 MiB + sha256，毫秒级。
+- （v2.1，复审 v2-2）口径：4 MiB 是**产物清单字节预算**（build-info 清单中文件 bytes 之和）。实际驻留上界 = 换代过渡期新旧两代缓存并存 ×（清单字节 + 两种 auth 模式各一份改写后的 index.html）≤ 2 × (4 MiB + 2 × index 上限 64 KiB) ≈ 8.3 MiB；新代解析成功并原子切换后旧代立即释放引用，测试断言切换后只持有一代。
 - **换代检测（重新构建/解压后无需重启 hub）**：缓存记录每个候选 `build-info.json` 的 `lstat` 指纹 `{dev, ino, size, mtimeMs, ctimeMs}`（不存在也是一种指纹）。只有 `/`、`/index.html` 请求触发探测，且距上次探测 ≥1s：两次 `lstat`，指纹变化 ⇒ 重新解析（single-flight，≤3s），`/` 等待新结果，期间其他请求继续出旧缓存；新结果原子替换。资源请求从不触发探测。已打开的旧页面引用的旧哈希资源在换代后 404，刷新即可（`index.html` 为 `no-cache`）。
 - 启动：hub 在写 hub.json 前 `await ui.refresh()`（≤3s，超时按未构建上报、后台继续）。
 
@@ -620,6 +621,8 @@ v2 追加：`.vue` 中禁止 `<style` 块；产物层另由 `check:web` 扫编�
 | P7  | `scripts/release/{package.sh,package-web-ui.sh(新)}`、`tests/release/web-ui-zip.test.ts`（新）、`src/web-hub/hub/unbuilt.ts` 与 `src/web-hub/agent/ui-status.ts` 的「方式一」文案段、`README.md`/`README.en.md` web-hub 段（构建 / release 附件安装 / git 安装说明）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 ### 5.3 各包验收要点
+
+> （v2.1，复审 v2-6）**串行 handoff**：P5b 改 P0/P2 文件（`scripts/web-hub/{check-ui-dist.ts,dev-hub.ts}`、`aliases.ts`/`ui/tsconfig.json`）、P7 改 P5a/P5b 文件（`unbuilt.ts`、`ui-status.ts` 文案段）不属越权：这些包在波次上严格串行（原所有包已合入、无其它 UI 包在跑），文件所有权在派单时随上表移交给后续包；派单 prompt 需逐文件列出这次移交。并行波次（W2 P1∥P2、W3 P3∥P4∥P5a）内仍严格按独占清单。
 
 - **P0**：`build:web` 产出 `dist/web-hub-ui/` 与合法 `build-info.json`；`check:web` 全过（含清单逐一对应、产物字符串扫描、体积预算）；`probe:csp` 结果（通过 / 按 §4.4.1 判定收紧）写入报告；`typecheck`（含 vue-tsc）/`test`/`format:check`/`build` 全绿；旧 UI 行为不变（`tests/web-hub/web/**` 全绿）；`git status` 无产物被跟踪；P0 **不含**任何 `components/{shell,agents,detail,fleet,transcript}/` 文件与 `tokens.css` 以外的样式文件。成本约 $4–6。
 - **P1**：§3.3–3.9 行为全部有测试；`transport-contract` 对两种模式跑同一套；§3.5 验收 1–6 全过；`hub-http-integration` 六个用例 password 全过（token 同套）；源码无 rAF；旧 state 用例零改动全绿。成本约 $5–8。
