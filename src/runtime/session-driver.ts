@@ -181,12 +181,27 @@ export function previewToolArgs(args: unknown, max = 80): string | undefined {
   if (typeof args === "string") text = args;
   else if (typeof args === "object") {
     const r = args as Record<string, unknown>;
+    const str = (k: string): string | undefined =>
+      typeof r[k] === "string" && (r[k] as string).trim().length > 0 ? (r[k] as string) : undefined;
+    // Addressed tools (consult: expert+question; message_agent: to+text) read
+    // best as "→ target: body" instead of a JSON blob.
+    const target = str("expert") ?? str("to");
+    const body = str("question") ?? str("text");
     const preferred = ["command", "path", "file_path", "pattern", "query", "description", "prompt", "url"];
-    const key = preferred.find((k) => typeof r[k] === "string" && (r[k] as string).length > 0);
-    if (key) text = r[key] as string;
+    const key = preferred.find((k) => str(k) !== undefined);
+    if (target !== undefined && body !== undefined) text = `→ ${target}: ${body}`;
+    else if (key) text = r[key] as string;
     else {
+      // Compact `key=value` pairs; only non-scalar values fall back to JSON.
       try {
-        text = JSON.stringify(r) ?? "";
+        text = Object.entries(r)
+          .filter(([, v]) => v !== undefined && v !== null && v !== "")
+          .map(([k, v]) =>
+            typeof v === "string" || typeof v === "number" || typeof v === "boolean"
+              ? `${k}=${String(v)}`
+              : `${k}=${JSON.stringify(v) ?? ""}`,
+          )
+          .join(" ");
       } catch {
         return undefined;
       }

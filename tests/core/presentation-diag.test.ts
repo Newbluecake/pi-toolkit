@@ -223,9 +223,16 @@ describe("M-A: previewToolArgs", () => {
     expect(previewToolArgs({ command: "npm test", timeout: 5 })).toBe("npm test");
     expect(previewToolArgs({ path: "/tmp/x.ts" })).toBe("/tmp/x.ts");
   });
-  it("falls back to compact JSON and collapses whitespace", () => {
-    expect(previewToolArgs({ n: 1 })).toBe('{"n":1}');
+  it("falls back to compact key=value pairs and collapses whitespace", () => {
+    expect(previewToolArgs({ n: 1 })).toBe("n=1");
+    expect(previewToolArgs({ run_id: "r_1", wait: false, opts: { a: 1 } })).toBe('run_id=r_1 wait=false opts={"a":1}');
     expect(previewToolArgs("a\n  b")).toBe("a b");
+  });
+  it("renders addressed tools (consult / message_agent) as → target: body", () => {
+    expect(previewToolArgs({ expert: "plan:auth", question: "why \n JWT?" })).toBe("→ plan:auth: why JWT?");
+    expect(previewToolArgs({ to: "root", kind: "finding", text: "done" })).toBe("→ root: done");
+    // Only one half present ⇒ no arrow form.
+    expect(previewToolArgs({ expert: "main" })).toBe("expert=main");
   });
   it("truncates to the cap with an ellipsis", () => {
     const out = previewToolArgs({ command: "x".repeat(200) })!;
