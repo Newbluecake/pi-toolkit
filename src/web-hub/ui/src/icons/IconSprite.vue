@@ -2,7 +2,7 @@
   Inline SVG sprite (vue-plan.md v2.1 §1.1, §3.2, §5.2 — P0 frozen). 33 `<symbol>`s copied
   verbatim from `docs/dev/web-hub/ui-mockups/dashboard.html`'s sprite block — same source, same
   `viewBox`/path data, so `AppIcon.vue`'s `<use href="#i-<name>">` renders identically to the
-  mockups. Rendered once by `App.vue`; every icon everywhere else is `<use>`, never a second
+  mockups (plus `monitor`/`moon`/`sun`, added in #26 W3 for the compact theme toggle). Rendered once by `App.vue`; every icon everywhere else is `<use>`, never a second
   copy of the paths. `names.ts`'s `ICON_NAMES` must stay in exact sync with the ids below
   (enforced by `tests/web-hub/ui/smoke.test.ts`).
 
@@ -73,6 +73,11 @@
       <path d="M14.5 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3.5M10 16l-4-4 4-4M6 12h9.5" />
     </symbol>
     <symbol id="i-message" viewBox="0 0 24 24"><path d="M4.5 5h15v10.5h-9l-4.5 3.5v-3.5H4.5z" /></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24">
+      <rect x="3" y="4.5" width="18" height="12" rx="1.5" />
+      <path d="M8.5 20h7M12 16.5V20" />
+    </symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" /></symbol>
     <symbol id="i-radio" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="2" />
       <path d="M8 8a5.7 5.7 0 0 0 0 8M16 8a5.7 5.7 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" />
@@ -87,6 +92,12 @@
     <symbol id="i-sparkle" viewBox="0 0 24 24">
       <path
         d="M11 3.5l1.8 5.2 5.2 1.8-5.2 1.8L11 17.5l-1.8-5.2L4 10.5l5.2-1.8zM18.5 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"
+      />
+    </symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="4" />
+      <path
+        d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"
       />
     </symbol>
     <symbol id="i-swap" viewBox="0 0 24 24">

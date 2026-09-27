@@ -14,6 +14,10 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
 import type { ThemeToggleEmits, ThemeToggleProps } from "../../contracts.js";
 import type { ThemePref } from "../../types.js";
+import AppIcon from "../../icons/AppIcon.vue";
+import type { IconName } from "../../icons/names.js";
+
+const ICON_FOR: Record<ThemePref, IconName> = { system: "monitor", light: "sun", dark: "moon" };
 
 const props = defineProps<ThemeToggleProps>();
 const emit = defineEmits<ThemeToggleEmits>();
@@ -62,6 +66,6 @@ function cycle(): void {
     :aria-label="`${t('shell.theme.groupLabel')}: ${t(OPTIONS.find((o) => o.value === modelValue)!.labelKey)} → ${t(OPTIONS.find((o) => o.value === nextValue)!.labelKey)}`"
     @click="cycle"
   >
-    {{ t(OPTIONS.find((o) => o.value === modelValue)!.labelKey).charAt(0) }}
+    <AppIcon :name="ICON_FOR[modelValue]" />
   </button>
 </template>
