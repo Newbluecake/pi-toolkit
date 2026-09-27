@@ -169,7 +169,8 @@
           "parentId": "e-alpha-3",
           "type": "model_change",
           "timestamp": "2026-09-27T09:01:00.000Z",
-          "summary": "switched model to cr-anthropic/claude-sonnet-5"
+          "provider": "cr-anthropic",
+          "modelId": "claude-sonnet-5"
         },
         {
           "id": "e-alpha-5",

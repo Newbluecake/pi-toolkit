@@ -18,6 +18,7 @@ const transcript = {
   compacted: "上下文已压缩",
   branchSummary: "分支摘要",
   modelChange: "模型 → {model}",
+  modelChangeUnknown: "未知模型",
   loadOlderMessages: "加载更早的消息",
   loadingOlder: "正在加载更早的消息…",
   loadingHistory: "正在加载历史…",

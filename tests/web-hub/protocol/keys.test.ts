@@ -84,18 +84,21 @@ describe("projectSessionEntry over the fixture", () => {
     expect(projected[0]).toBeUndefined();
   });
 
-  it("projects model_change / thinking_level_change bare", () => {
+  it("projects model_change / thinking_level_change with provider/modelId/thinkingLevel", () => {
     expect(projected[1]).toEqual({
       id: "32b5dd7e",
       parentId: null,
       type: "model_change",
       timestamp: "2026-09-25T13:16:24.316Z",
+      provider: "deepseek",
+      modelId: "deepseek-flash",
     });
     expect(projected[2]).toEqual({
       id: "14b6d8a0",
       parentId: "32b5dd7e",
       type: "thinking_level_change",
       timestamp: "2026-09-25T13:16:24.316Z",
+      thinkingLevel: "low",
     });
   });
 

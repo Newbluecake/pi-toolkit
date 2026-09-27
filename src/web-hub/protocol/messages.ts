@@ -47,6 +47,9 @@ export interface WireEntry {
   dataKey?: string; // custom(data)：customKey(customType, data) 预算值，data 本体不下发
   display?: boolean;
   truncated?: boolean;
+  provider?: string; // model_change
+  modelId?: string; // model_change
+  thinkingLevel?: string; // thinking_level_change
 }
 
 export interface SessionInfo {

@@ -95,7 +95,12 @@ export async function applicabilityOutcome(
  * viewport and expanded at ≥768, and the tree area never exceeds its dvh/vh cap. Renders nothing
  * at all when the selected agent has zero fleet rows (§6.4's own table: "无子 agent → 不渲染子
  * agent 面板（不占位）", `FleetPanel.vue`'s header comment) — that is this check's own third
- * not-applicable bucket, on top of the shared placeholder/no-agent split. */
+ * not-applicable bucket, on top of the shared placeholder/no-agent split. That not-applicable
+ * bucket is only legitimate when `ctx.expectFleetRows` is false (the fixture backing this cell
+ * genuinely never schedules a fleet frame for the routed agent — `visual.ts`'s own
+ * `fixtureExpectsFleetRows`); P1 fix (dashboard.json:330-416 vs. the old fixed `SETTLE_MS`): a
+ * cell whose fixture DOES promise fleet rows for this agent but still shows zero after
+ * `visual.ts`'s deterministic `.fleet .run` wait is a real regression, not a shrug. */
 async function checkFleetDefaultOpen(ctx: CheckContext): Promise<CheckOutcome> {
   const applicability = await bodyApplicability(ctx);
   const shared = await applicabilityOutcome("fleet-default-open", ctx, applicability);
@@ -105,7 +110,12 @@ async function checkFleetDefaultOpen(ctx: CheckContext): Promise<CheckOutcome> {
     if (!el) return { present: false, open: false, expectOpen: width >= 768 };
     return { present: true, open: el.open, expectOpen: width >= 768 };
   }, ctx.width);
-  if (!result.present) return pass("fleet-default-open", "not applicable: selected agent has no fleet rows");
+  if (!result.present) {
+    if (ctx.expectFleetRows) {
+      return outcome("fleet-default-open", false, "<.fleet> not found, but fixture promises fleet rows for this agent");
+    }
+    return pass("fleet-default-open", "not applicable: selected agent has no fleet rows");
+  }
   const ok = result.open === result.expectOpen;
   return outcome("fleet-default-open", ok, `width=${ctx.width} open=${result.open} expected=${result.expectOpen}`);
 }

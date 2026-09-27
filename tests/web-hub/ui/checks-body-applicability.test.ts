@@ -38,6 +38,7 @@ function fakeCtx(overrides: Partial<CheckContext> & { bodyHtml?: string }): Chec
     failedRequests: [],
     cspViolations: [],
     refreshCspViolations: async () => {},
+    expectFleetRows: false,
     ...overrides,
   };
 }
@@ -145,5 +146,31 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     });
     const closedOutcomes = await check.run(closedAtDesktopCtx);
     expect(closedOutcomes.find((o) => o.name === "fleet-default-open")?.ok).toBe(false);
+  });
+
+  it("P1 fix: expectFleetRows=true with no .fleet mounted is a real failure, not the zero-rows not-applicable pass", async () => {
+    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
+    const ctx = fakeCtx({
+      bodyHtml: `<div class="detail-body"><div class="transcript"></div></div>`,
+      scenario: "detail",
+      width: 1024,
+      expectFleetRows: true,
+    });
+    const outcomes = await check.run(ctx);
+    const fleet = outcomes.find((o) => o.name === "fleet-default-open");
+    expect(fleet?.ok).toBe(false);
+    expect(fleet?.detail).toMatch(/fixture promises fleet rows/);
+  });
+
+  it("expectFleetRows=true with .fleet actually mounted still evaluates the open/closed breakpoint normally", async () => {
+    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
+    const ctx = fakeCtx({
+      bodyHtml: `<div class="detail-body"><details class="fleet" open></details></div>`,
+      scenario: "detail",
+      width: 1024,
+      expectFleetRows: true,
+    });
+    const outcomes = await check.run(ctx);
+    expect(outcomes.find((o) => o.name === "fleet-default-open")?.ok).toBe(true);
   });
 });

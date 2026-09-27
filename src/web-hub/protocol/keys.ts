@@ -149,9 +149,17 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
       }
       return finish(entry, flag);
     }
-    case "model_change":
-    case "thinking_level_change":
-      return { id: r.id, parentId, type: r.type, timestamp: r.timestamp };
+    case "model_change": {
+      const entry: WireEntry = { id: r.id, parentId, type: "model_change", timestamp: r.timestamp };
+      if (typeof r.provider === "string") entry.provider = r.provider;
+      if (typeof r.modelId === "string") entry.modelId = r.modelId;
+      return entry;
+    }
+    case "thinking_level_change": {
+      const entry: WireEntry = { id: r.id, parentId, type: "thinking_level_change", timestamp: r.timestamp };
+      if (typeof r.thinkingLevel === "string") entry.thinkingLevel = r.thinkingLevel;
+      return entry;
+    }
     default:
       return undefined; // session 头 / label / session_info / usage / context_edit / 未知
   }

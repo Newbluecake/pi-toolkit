@@ -15,6 +15,7 @@ const transcript = {
   compacted: "Context compacted",
   branchSummary: "Branch summary",
   modelChange: "Model → {model}",
+  modelChangeUnknown: "unknown model",
   loadOlderMessages: "Load Older Messages",
   loadingOlder: "Loading older messages…",
   loadingHistory: "Loading history…",

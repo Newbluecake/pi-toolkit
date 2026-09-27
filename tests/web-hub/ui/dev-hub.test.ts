@@ -394,11 +394,76 @@ describe("dev-hub server — token mode", () => {
       });
       const cookie = cookieFrom(login.headers.get("set-cookie"));
 
-      await new Promise((r) => setTimeout(r, 60)); // let the atMs:20 script fire
+      // P1 fix (todo #26 W3 打回点 A, `dev-hub.ts`'s `openEvents`): script events now fire
+      // `atMs` after a CLIENT connects (as `DevHubScriptEvent`'s own doc comment always promised),
+      // not once at hub startup — a visual-harness matrix run reuses one hub across dozens of
+      // cells, and the old "once at hub boot" behavior meant only whichever cell happened to
+      // connect before that one global timer fired ever saw the scripted frame. So the first
+      // client here has to actually connect (starting its own `atMs:20` timer) before the
+      // `agent_down` can apply; a second, later-connecting client then sees the post-effect
+      // snapshot, same as before.
+      const firstSse = await openSse(hub.port, cookie);
+      await firstSse.waitFor("agent_down");
+      firstSse.close();
+
       const sse = await openSse(hub.port, cookie);
       const agentsFrame = await sse.waitFor("agents");
       expect((agentsFrame.data as { agents: unknown[] }).agents).toEqual([]);
       sse.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("P1 fix (todo #26 W3): a script event replays for EVERY client connection, not just whichever one connected first", async () => {
+    const fx = makeFixturesDir({
+      mini: {
+        agents: [
+          {
+            agentKey: "a1",
+            kind: "tui",
+            pid: 1,
+            cwd: "/x",
+            state: "live",
+            pluginVersion: "1.0.0",
+            outdated: false,
+            prompts: [],
+          },
+        ],
+        history: {},
+        script: [{ atMs: 15, event: "agent_down", data: { agentKey: "a1", reason: "quit" } }],
+      },
+    });
+    try {
+      const hub = await start({ mode: "token", scenario: "mini", fixturesDir: fx.dir });
+      const login = await fetch(hub.url + "/api/login", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ token: hub.token }),
+      });
+      const cookie = cookieFrom(login.headers.get("set-cookie"));
+
+      // First client: connects, sees the scripted agent_down.
+      const sse1 = await openSse(hub.port, cookie);
+      await sse1.waitFor("agent_down");
+      sse1.close();
+
+      // A second client connecting well after the first one's atMs window has already elapsed
+      // (simulating a later matrix cell reusing the same long-lived hub) must STILL see its own
+      // agent_down \u2014 the old "fire once at hub startup" behavior would have silently dropped
+      // this for every client past the first.
+      await new Promise((r) => setTimeout(r, 100));
+      const sse2 = await openSse(hub.port, cookie);
+      const down2 = await sse2.waitFor("agent_down");
+      expect((down2.data as { agentKey: string }).agentKey).toBe("a1");
+      sse2.close();
+
+      // A third client, later still, also sees it.
+      await new Promise((r) => setTimeout(r, 50));
+      const sse3 = await openSse(hub.port, cookie);
+      const down3 = await sse3.waitFor("agent_down");
+      expect((down3.data as { agentKey: string }).agentKey).toBe("a1");
+      sse3.close();
     } finally {
       fx.cleanup();
     }

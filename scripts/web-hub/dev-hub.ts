@@ -646,7 +646,31 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
       port,
     });
     client.send("agents", { agents: [...state.agents.values()].map(toCard) });
-    res.once("close", () => pending.delete(client.id));
+    // P1 fix (todo #26 W3 打回点 A): the fixture's own doc comment (`DevHubScriptEvent`) has
+    // always promised "atMs after A CLIENT's /api/events connects" — but this used to be
+    // scheduled exactly once, at `createDevHub()` time, i.e. relative to the HUB's own startup.
+    // A visual-harness matrix run reuses one hub across ~20-30 cells sequentially; only whichever
+    // cell happened to connect before that one global timer fired ever saw the scripted frame
+    // (e.g. a `fleet` row for the detail scenario) — every later cell connected to a `/api/events`
+    // stream that had already missed it forever, with no replay (script events aren't buffered by
+    // `Last-Event-ID` the way a real hub's own ring buffer would). Scheduling per-connection
+    // instead (as documented) means every fresh client — one per matrix cell — gets the full
+    // script replayed on its own timeline. Idempotent for every event kind actually used by the
+    // fixtures this harness drives (`fleet`/`agent_down`/`agent_up`/`agent_stale` all just
+    // set/delete/re-publish the same state), so a reconnect (e.g. `checks-common.ts`'s theme
+    // persistence check reloads the page 3x per cell) safely replays them again rather than lose
+    // them.
+    const clientTimers: ReturnType<typeof setTimeout>[] = [];
+    for (const ev of fixture.script ?? []) {
+      const t = setTimeout(() => applyScriptEvent(state, sse, ev, scoped), ev.atMs);
+      t.unref?.();
+      clientTimers.push(t);
+      scriptTimers.push(t);
+    }
+    res.once("close", () => {
+      pending.delete(client.id);
+      for (const t of clientTimers) clearTimeout(t);
+    });
     return client;
   }
 
@@ -848,12 +872,6 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
   });
   const addr = server.address();
   port = typeof addr === "object" && addr !== null ? addr.port : (opts.port ?? 0);
-
-  for (const ev of fixture.script ?? []) {
-    const t = setTimeout(() => applyScriptEvent(state, sse, ev, scoped), ev.atMs);
-    t.unref?.();
-    scriptTimers.push(t);
-  }
 
   log(`dev-hub: listening on http://127.0.0.1:${port} (mode=${opts.mode}, scenario=${opts.scenario})`);
   if (devToken !== undefined) log(`dev-hub: token=${devToken}`);

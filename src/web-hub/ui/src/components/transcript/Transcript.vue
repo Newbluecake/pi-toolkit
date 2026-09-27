@@ -192,7 +192,9 @@ function jumpToLatest(): void {
         <TxDivider
           v-else-if="entry.type === 'modelChange'"
           icon="swap"
-          :label="t('transcript.modelChange', { model: entry.model || '?' })"
+          :label="
+            entry.model ? t('transcript.modelChange', { model: entry.model }) : t('transcript.modelChangeUnknown')
+          "
         />
         <div v-else class="msg-other tx-item">
           <div class="msg-role">{{ entry.role }}</div>

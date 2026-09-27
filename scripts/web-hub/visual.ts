@@ -19,7 +19,7 @@ import { globSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createDevHub, DEFAULT_UI_DIST, type DevHubHandle } from "./dev-hub.js";
+import { createDevHub, DEFAULT_UI_DIST, loadFixture, type DevHubFixture, type DevHubHandle } from "./dev-hub.js";
 import { loadPlaywright, type PwBrowser, type PwContext, type PwPage } from "./lib/playwright.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -69,6 +69,13 @@ export interface CheckContext {
   readonly requests: readonly RequestRecord[];
   readonly failedRequests: readonly FailedRequestRecord[];
   readonly cspViolations: readonly CspViolation[];
+  /** True iff the fixture backing this cell's dev-hub declares a `fleet` script event for the
+   * currently routed agent (`agentKeyFromRoute`/`fixtureExpectsFleetRows`, computed once per
+   * scenario) — i.e. `.fleet` rows are known to be reachable, not merely possible. Lets
+   * `checks-body.ts`'s `checkFleetDefaultOpen` tell "this fixture genuinely has no fleet data"
+   * (still not-applicable) apart from "the fleet frame never got applied in time" (a real
+   * regression, per the P1 dashboard.json:330-416 timing bug this field exists to close). */
+  readonly expectFleetRows: boolean;
   /** Pulls `window.__pwhViolations` from the *current* document and merges it into
    * `cspViolations`. CSP violations are page-JS state that resets on every navigation, unlike
    * the Node-side request/console listeners (attached once, cover the whole context lifetime)
@@ -110,7 +117,7 @@ const DEFAULT_SCENARIOS: readonly ScenarioSpec[] = [
 ];
 
 const BREAKPOINTS: readonly number[] = [375, 481, 767, 768, 1024, 1025];
-const SCREENSHOT_ONLY_WIDTH = 1440;
+const EXTRA_WIDTH = 1440;
 const THEMES: readonly ("light" | "dark")[] = ["light", "dark"];
 const CELL_HEIGHT = 900;
 const SETTLE_MS = 200;
@@ -120,7 +127,6 @@ interface MatrixCell {
   readonly theme: "light" | "dark";
   readonly isMobile: boolean;
   readonly hasTouch: boolean;
-  readonly screenshotOnly: boolean;
   readonly label: string;
 }
 
@@ -134,7 +140,6 @@ function buildCells(): MatrixCell[] {
         theme,
         isMobile: mobile,
         hasTouch: mobile,
-        screenshotOnly: false,
         label: `${width}x${theme}${mobile ? "-touch" : ""}`,
       });
     }
@@ -144,17 +149,21 @@ function buildCells(): MatrixCell[] {
       theme,
       isMobile: false,
       hasTouch: true,
-      screenshotOnly: false,
       label: `1024x${theme}-touch`,
     });
   }
+  // P2's own `SCREENSHOT_ONLY_WIDTH` used to skip every check at 1440 (issue D, todo #26 W3
+  // 打回点 D) — a wide desktop cell that silently ran zero assertions, including
+  // `checks-shell.ts`'s own split/sidebar-width checks (`expectedSidebarWidth` already covers
+  // 1280+ → 340px) which are just as meaningful at 1440 as at 1025. Runs the same full check set
+  // as every other cell now — the "extra" here is purely that it isn't part of the documented
+  // breakpoint set, not that it gets special (lesser) treatment.
   for (const theme of THEMES) {
     cells.push({
-      width: SCREENSHOT_ONLY_WIDTH,
+      width: EXTRA_WIDTH,
       theme,
       isMobile: false,
       hasTouch: false,
-      screenshotOnly: true,
       label: `1440x${theme}`,
     });
   }
@@ -213,6 +222,38 @@ interface CellResult {
   readonly outcomes: CheckOutcome[];
 }
 
+/** Extracts the agent key `AgentDetail.vue` will end up routed to from a scenario's hash route
+ * (`"#/agent/agent-alpha"` → `"agent-alpha"`), or `undefined` for a non-agent route (`"#/"`). */
+export function agentKeyFromRoute(route: string): string | undefined {
+  const m = /^#\/agent\/(.+)$/.exec(route);
+  return m?.[1];
+}
+
+/** True iff `fixture`'s script declares a `fleet` frame — scoped (`DevHubScriptEvent.agentKey`)
+ * or embedded (`data.agentKey`, mirroring `dev-hub.ts`'s own fallback) — for `agentKey`, with at
+ * least one row. Used by `runCell` to decide whether it is worth waiting for `.fleet .run` to
+ * appear before screenshotting/checking (P1 fix: the P2 fixed `SETTLE_MS` was shorter than the
+ * fixture's own `atMs`, so the fleet frame never had a chance to land in time — see
+ * dashboard.json's `atMs: 250` fleet event vs. the old 200ms settle). */
+export function fixtureExpectsFleetRows(fixture: DevHubFixture, agentKey: string | undefined): boolean {
+  if (agentKey === undefined) return false;
+  for (const ev of fixture.script ?? []) {
+    if (ev.event !== "fleet") continue;
+    const dataAgentKey = (ev.data as { agentKey?: unknown } | undefined)?.agentKey;
+    const scopedKey = ev.agentKey ?? (typeof dataAgentKey === "string" ? dataAgentKey : undefined);
+    if (scopedKey !== agentKey) continue;
+    const runs = (ev.data as { runs?: unknown } | undefined)?.runs;
+    if (Array.isArray(runs) && runs.length > 0) return true;
+  }
+  return false;
+}
+
+/** Deterministic timeout for `.fleet .run` to appear once we know (`fixtureExpectsFleetRows`)
+ * that a fleet frame IS coming for the routed agent — generous enough to absorb the render
+ * gate's throttle window (`RenderGateOptions.intervalMs`, default 100ms) plus the fixture's own
+ * `atMs` delay, but still bounded (never an unbounded/poll-forever wait). */
+const FLEET_WAIT_TIMEOUT_MS = 5_000;
+
 async function runCell(
   browser: PwBrowser,
   hub: DevHubHandle,
@@ -220,6 +261,7 @@ async function runCell(
   cell: MatrixCell,
   checks: readonly CheckModule[],
   outDir: string,
+  expectFleetRows: boolean,
 ): Promise<CellResult> {
   const context = (await browser.newContext({
     viewport: { width: cell.width, height: CELL_HEIGHT },
@@ -292,6 +334,17 @@ async function runCell(
   } else {
     await page.goto(`${origin}/${scenario.route}`, { waitUntil: "load" });
   }
+  if (expectFleetRows) {
+    await page
+      .waitForFunction(() => document.querySelectorAll(".fleet .run").length > 0, {
+        timeout: FLEET_WAIT_TIMEOUT_MS,
+      })
+      .catch(() => {
+        // Timed out: leave it to `checks-body.ts`'s `checkFleetDefaultOpen` (told via
+        // `expectFleetRows` on `CheckContext`) to report this as a real failure — never swallow
+        // it silently, and never retry with a longer sleep.
+      });
+  }
   await page.waitForTimeout(SETTLE_MS);
   await refreshCspViolations();
 
@@ -299,7 +352,7 @@ async function runCell(
   await page.screenshot({ path: screenshotPath, fullPage: true });
 
   const outcomes: CheckOutcome[] = [];
-  if (!cell.screenshotOnly) {
+  {
     const ctx: CheckContext = {
       page,
       baseUrl: origin,
@@ -314,6 +367,7 @@ async function runCell(
       failedRequests,
       cspViolations,
       refreshCspViolations,
+      expectFleetRows,
     };
     for (const mod of checks) {
       const results = await mod.run(ctx);
@@ -392,10 +446,12 @@ async function main(): Promise<void> {
         root: opts.root,
         log: () => {},
       });
+      const fixture = await loadFixture(scenario.fixture);
+      const expectFleetRows = fixtureExpectsFleetRows(fixture, agentKeyFromRoute(scenario.route));
       try {
         console.log(`→ ${scenario.name} (${scenario.mode}, fixture=${scenario.fixture}) on ${hub.url}`);
         for (const cell of cells) {
-          const result = await runCell(browser, hub, scenario, cell, checks, opts.outDir);
+          const result = await runCell(browser, hub, scenario, cell, checks, opts.outDir, expectFleetRows);
           allResults.push(result);
           const failed = result.outcomes.filter((o) => !o.ok);
           console.log(
