@@ -33,6 +33,21 @@ export const ASSUMED_TTL_MS: Millis = 300_000;
 export const TTL_SAFETY_MARGIN_MS: Millis = 45_000;
 /** Scheduler tick precision (service layer; exported so tests/service code share one constant). */
 export const TICK_INTERVAL_MS: Millis = 15_000;
+/**
+ * Largest `intervalMs` that still leaves room for a "ping" decision to fire at all.
+ *
+ * `evaluateTick`'s #13 (`cache-expired`, checked at `now >= aliveUntil - TTL_SAFETY_MARGIN_MS`)
+ * runs BEFORE #15 (`not-due`, checked at `now < nextPingAt`) — see `onRealRequest`'s
+ * `aliveUntil = now + ASSUMED_TTL_MS` / `nextPingAt = now + intervalMs`. Once
+ * `intervalMs > ASSUMED_TTL_MS - TTL_SAFETY_MARGIN_MS - TICK_INTERVAL_MS`, `nextPingAt` falls at
+ * or after the cache-expired cutoff, so #13 always wins first and the window can NEVER reach
+ * `ping` — a session configured this way silently never pings, no matter how long a tool runs
+ * (found investigating todo #15's real-machine "never pings" report, 2026-09-27; the report's own
+ * default-settings case had exactly `TICK_INTERVAL_MS` = 15s of margin at the 240s default —
+ * this constant pins that margin so a user-configured `keepaliveIntervalMs` can't erase it).
+ * `src/config/settings.ts` clamps `keepaliveIntervalMs` to this value.
+ */
+export const MAX_SAFE_KEEPALIVE_INTERVAL_MS: Millis = ASSUMED_TTL_MS - TTL_SAFETY_MARGIN_MS - TICK_INTERVAL_MS;
 /** I-K7: consecutive unproven pings before the whole session is disabled. */
 export const UNPROVEN_STREAK_LIMIT = 2;
 /** I-K7: cumulative (non-consecutive) unproven pings before the whole session is disabled. */

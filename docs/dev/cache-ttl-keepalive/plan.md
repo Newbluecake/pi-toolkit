@@ -979,13 +979,13 @@ onPingStarted(now)
 
 ### 10.1 五个 spec（m1：数量统一）
 
-| 键（存储/展示）                        | 内部字段                   | 类型          | 默认           | 说明                                    |
-| -------------------------------------- | -------------------------- | ------------- | -------------- | --------------------------------------- |
-| `cacheTtl.keepalive`                   | `keepalive`                | boolean       | **true**       | 保活总开关（用户维持默认开）            |
-| `cacheTtl.keepaliveIntervalS`          | `keepaliveIntervalMs`      | 秒（内部 ms） | 240（240_000） | ping 间隔；parse 钳位 [60s, 280s]       |
-| `cacheTtl.keepaliveMaxPings`           | `keepaliveMaxPings`        | count         | 11             | 每窗口硬上限；0 = 关闭                  |
-| `cacheTtl.keepaliveMinPrefixTokens`    | `keepaliveMinPrefixTokens` | count         | 20000          | 前缀实测下界门槛                        |
-| `cacheTtl.keepaliveUpgradeAfterBudget` | 同名                       | boolean       | true           | 允许「下一次必写请求」升级成 1h（§6.3） |
+| 键（存储/展示）                        | 内部字段                   | 类型          | 默认           | 说明                                                 |
+| -------------------------------------- | -------------------------- | ------------- | -------------- | ---------------------------------------------------- |
+| `cacheTtl.keepalive`                   | `keepalive`                | boolean       | **true**       | 保活总开关（用户维持默认开）                         |
+| `cacheTtl.keepaliveIntervalS`          | `keepaliveIntervalMs`      | 秒（内部 ms） | 240（240_000） | ping 间隔；parse 钳位 [60s, 240s]（原 280s，见附录） |
+| `cacheTtl.keepaliveMaxPings`           | `keepaliveMaxPings`        | count         | 11             | 每窗口硬上限；0 = 关闭                               |
+| `cacheTtl.keepaliveMinPrefixTokens`    | `keepaliveMinPrefixTokens` | count         | 20000          | 前缀实测下界门槛                                     |
+| `cacheTtl.keepaliveUpgradeAfterBudget` | 同名                       | boolean       | true           | 允许「下一次必写请求」升级成 1h（§6.3）              |
 
 **不做设置项**（写死常量 + 注释）：`ASSUMED_TTL_MS`、`TTL_SAFETY_MARGIN_MS`、`TICK_INTERVAL_MS`、
 `PING_TIMEOUT_MS`、`UNPROVEN_STREAK_LIMIT = 2`、`UNPROVEN_TOTAL_LIMIT = 3`、`PING_DENY_PROVIDERS`。
@@ -1005,10 +1005,10 @@ onPingStarted(now)
 1. `src/config/settings.ts:133-135` — `CacheTtlSettings` 加 5 字段。
 2. `src/config/settings.ts:327` — `DEFAULT_SETTINGS.cacheTtl` 补默认值。
 3. `src/config/settings.ts:591-596` — `parseCacheTtlSettings` 改逐字段容错（抄 `parseMemorySettings`
-   的内联 `bool()/num()`，`settings.ts:624-643`；`keepaliveIntervalMs` 用 `num(raw, d, 60_000, 280_000)`）。
+   的内联 `bool()/num()`，`settings.ts:624-643`；`keepaliveIntervalMs` 用 `num(raw, d, 60_000, MAX_SAFE_KEEPALIVE_INTERVAL_MS)`，=240_000；原 280_000 见附录）。
 4. `src/config/settings.ts:390-416` — `TIME_SETTING_MS_PATHS` 追加 `"cacheTtl.keepaliveIntervalMs"`。
 5. `src/config/setting-specs.ts:236-240` 之后 — **5 条** spec：`bool` ×2、
-   `seconds("cacheTtl.keepaliveIntervalMs", {min:60, max:280, …})`（spec key 为 `…IntervalS`）、`count` ×2。
+   `seconds("cacheTtl.keepaliveIntervalMs", {min:60, max:240, …})`（spec key 为 `…IntervalS`）、`count` ×2。
 6. **不动 `src/ui/`**（编辑器直接读 `SETTING_SPECS`）。
 
 运行时快捷开关：`/cache-ttl keepalive on|off`（经 `port.setEnabled`，仅当前进程、不写盘；
@@ -1245,3 +1245,48 @@ attempt, outcomeKind })`；最终落地的 `KeepalivePingDiagnostics`（`lastPin
 测试：`tests/cache-ttl/keepalive-ping-retry.test.ts`（`FakeClock` 驱动：`network`→`proven-hit`
 两次尝试成功；三次 `network` 只计一次 unproven；`503→200`；`429→200`；`accepted-then-lost`
 和普通 4xx 不重试；抢占/`dispose()`/TTL 不足时不重试、不计数；`dispose()` 后无残留定时器）。
+
+---
+
+## 附：todo #15 真机验收复查（2026-09-27）
+
+真机验收发现子会话保活 ping 在默认设置下从不触发（3/3 次实测零 ping，含单次前台
+`sleep 260`/`sleep 285`，两者都满足 `minPrefixTokens`）。用真实 `AgentSession`（`pi install`
+注册本包 + `cr-anthropic/claude-sonnet-5` 真实网络请求，非 fake `modelRuntime.streamSimple`
+——后者会绕过 `before_provider_request`/`before_provider_headers`，见下）复现全链路：
+
+- **子会话把本包当 CLI `-e`/`--no-extensions` 临时扩展加载时，`wireChildKeepalive` 整条链路
+  零注册、零事件、零 tick**——不是超时，是从未被调用。根因：`src/runtime/session-driver.ts` 的
+  `toCreateOptions()`（`PiSessionDriver.create()` 的唯一子会话构造路径）只在 `spec.systemPrompt`
+  非空时才自建 `resourceLoader`，且那个 `resourceLoader` 完全依 `SettingsManager`
+  （project/global `settings.json` 的 `packages`/`extensions` 字段）重新发现扩展——对顶层
+  `pi` 进程启动时给的 `-e <path>`/`--no-extensions` CLI 覆盖**零可见性**（`SessionSpec` 从无
+  `resourceLoader`/`extensionPaths` 字段，`src/core/types.ts:983-1003`）。这与
+  `docs/dev/child-context-switch/plan.md:54`「每个子会话各有一个 resource loader，会重新
+  import 并 activate() 本扩展」的既有认知一致，只是没人验证过它对 CLI 覆盖不透明。
+- **同一份 prompt、同一模型，改用标准注册方式（`pi install <本包路径>`，落进
+  `settings.json` 的 `packages`）后，keepalive 端到端工作正常**：`wireChildKeepalive` 的
+  `config()` 正确带上 `allowHeadless:true`/`maxSessionPings:24`；prefix 实测 27869 tokens
+  （读大文件后）；`evaluateTick` 在 `nextPingAt`（capture 后 +240s）到 `aliveUntil − 45s`
+  之间的 15 秒窗口里判定 `ping`；`sleep 260` 单次前台 tool_exec 期间该窗口被一次 tick
+  命中，真实 HTTP ping 打出、`proven-hit`、窗口按 `pingStartedAt` 续期。**结论：保活机制本身
+  没有 bug**——`docs/dev/cache-ttl-keepalive/acceptance.md`/本文件描述的行为在正确装配下
+  成立，问题最可能出在真机验收用的是前一种（CLI `-e`）临时加载方式，让子会话根本没拿到本包。
+  （案例①「bash_job 轮询 7 分钟」若真的看到了 `bash_job` 工具，说明那次至少注册成功了本包，
+  与本条不完全吻合——留作未解之谜；但即使注册成功，频繁的真实请求本身会不断把 `nextPingAt`
+  往后推，7 分钟内每次轮询都可能提前于窗口打开就被下一次真实请求重置，属于设计内的
+  「流量本身在续命，不需要 ping」，不是 bug，见 §1.5 的现有分析表。）
+- **顺带发现一个真实、可独立复现的配置钳位缺陷**（与真机验收结果无直接因果，但同一次调查中
+  发现，已修）：`src/config/settings.ts` 的 `keepaliveIntervalMs` 钳位区间原是
+  `[60_000, 280_000]`，但本节 §6.1 早就明文否决了 280s（「余量 20s，抖动即越界」）——叠加
+  `TTL_SAFETY_MARGIN_MS=45_000` 后，任何 `intervalMs > 240_000` 都会让 `nextPingAt` 落在
+  `evaluateTick` 判定 `cache-expired`（#13）之后，#15 的 `ping` 分支永远够不到，配置了就等于
+  永久关闭保活、且没有任何提示。改为按常量派生的
+  `MAX_SAFE_KEEPALIVE_INTERVAL_MS = ASSUMED_TTL_MS − TTL_SAFETY_MARGIN_MS − TICK_INTERVAL_MS`
+  （= 240_000，恰好等于默认值，钳死用户配置到安全区）；回归测试：
+  `tests/config/cache-ttl-settings.test.ts`「clamps keepaliveIntervalMs into [60s, 240s]」。
+- **建议**：`docs/dev/cache-ttl-keepalive/acceptance.md`、`live-acceptance-tmux.md`
+  一类真机验收记录补一条明确要求——验收子会话专属特性（保活、`switch_context`、bash-job
+  接线）时必须用 `pi install <本包路径>`（或等价的 settings.json `packages` 注册），
+  **不能只用 `-e`/`--no-extensions`**，否则子会话静默拿不到本包，任何子会话专属特性都是死码，
+  且没有任何报错或诊断能从内部感知到（本包代码从未被 import，无法自证）。

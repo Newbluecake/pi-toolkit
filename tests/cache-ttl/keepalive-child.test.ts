@@ -230,7 +230,7 @@ describe("child keepalive — T-K3b: lease held across retries denies a concurre
   it("A holds the slot through 3 network-failure attempts (2s/5s backoff); B is global-cap throughout; B succeeds once A settles", async () => {
     const clock = new FakeClock(0);
     const ledger = createChildKeepaliveLedger();
-    // A short interval (still within the production-clamped [60s,280s] range) gives
+    // A short interval (still within the production-clamped [60s,240s] range) gives
     // B's post-denial retry (15s later) enough TTL headroom before the 45s safety
     // margin's cutoff — with the plan's own 240s default, a global-cap retry has
     // NO slack at all (nextPingAt=240s, cutoff=255s, first retry is due AT 255s).

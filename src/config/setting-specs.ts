@@ -377,8 +377,9 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "cacheTtl.keepalive": bool("cacheTtl.keepalive", "Master switch for prompt-cache keepalive pings"),
   "cacheTtl.keepaliveIntervalS": seconds("cacheTtl.keepaliveIntervalMs", {
     min: 60,
-    max: 280,
-    description: "Interval between keepalive pings",
+    max: 240,
+    description:
+      "Interval between keepalive pings (max 240s: longer intervals can never ping before the 5m TTL safety margin)",
   }),
   "cacheTtl.keepaliveMaxPings": count(
     "cacheTtl.keepaliveMaxPings",

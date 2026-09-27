@@ -119,7 +119,7 @@ describe("cache-ttl keepalive settings", () => {
     );
   });
 
-  it("clamps keepaliveIntervalMs into [60s, 280s]", () => {
+  it('clamps keepaliveIntervalMs into [60s, 240s] (todo #15 real-machine finding: values above 240s leave zero margin between `nextPingAt` and the `cache-expired` cutoff, so a window can NEVER reach a "ping" decision — see MAX_SAFE_KEEPALIVE_INTERVAL_MS\'s doc comment)', () => {
     expect(parseCacheTtlSettings({ keepaliveIntervalMs: 1_000 }).keepaliveIntervalMs).toBe(
       DEFAULT_SETTINGS.cacheTtl.keepaliveIntervalMs,
     );
@@ -127,7 +127,17 @@ describe("cache-ttl keepalive settings", () => {
       DEFAULT_SETTINGS.cacheTtl.keepaliveIntervalMs,
     );
     expect(parseCacheTtlSettings({ keepaliveIntervalMs: 60_000 }).keepaliveIntervalMs).toBe(60_000);
-    expect(parseCacheTtlSettings({ keepaliveIntervalMs: 280_000 }).keepaliveIntervalMs).toBe(280_000);
+    // 240_000 (the default, and MAX_SAFE_KEEPALIVE_INTERVAL_MS) is the largest value that still
+    // leaves TICK_INTERVAL_MS of ping-eligible margin — accepted as-is.
+    expect(parseCacheTtlSettings({ keepaliveIntervalMs: 240_000 }).keepaliveIntervalMs).toBe(240_000);
+    // Anything above that (this used to accept up to 280_000, a value that can never actually
+    // ping — regression pinned here) falls back to the safe default instead of being honored.
+    expect(parseCacheTtlSettings({ keepaliveIntervalMs: 250_000 }).keepaliveIntervalMs).toBe(
+      DEFAULT_SETTINGS.cacheTtl.keepaliveIntervalMs,
+    );
+    expect(parseCacheTtlSettings({ keepaliveIntervalMs: 280_000 }).keepaliveIntervalMs).toBe(
+      DEFAULT_SETTINGS.cacheTtl.keepaliveIntervalMs,
+    );
   });
 
   it("keepaliveIntervalMs is registered as a duration field (seconds on disk)", () => {
@@ -146,7 +156,7 @@ describe("cache-ttl keepalive settings", () => {
       path: "cacheTtl.keepaliveIntervalMs",
       time: true,
       min: 60,
-      max: 280,
+      max: 240,
     });
     expect(SETTING_SPECS["cacheTtl.keepaliveMaxPings"]).toMatchObject({
       kind: "number",

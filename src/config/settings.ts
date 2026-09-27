@@ -5,6 +5,7 @@ import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget, Millis } from "../core/types.js";
 import { dedupeLinkPaths } from "../extensions/worktree-link-paths.js";
 import type { WorktreeSettings } from "../extensions/worktree-settings.js";
+import { MAX_SAFE_KEEPALIVE_INTERVAL_MS } from "../cache-ttl/keepalive-state.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import {
   DEFAULT_FORCE_THRESHOLD_PERCENT,
@@ -222,7 +223,10 @@ export interface CacheTtlSettings {
   mode: CacheTtlMode;
   /** 保活总开关。Default true. */
   keepalive: boolean;
-  /** ping 间隔（内部 ms；文件存 keepaliveIntervalS 秒）。Default 240_000 (240s)，钳位 [60s, 280s]。 */
+  /** ping 间隔（内部 ms；文件存 keepaliveIntervalS 秒）。Default 240_000 (240s)，钳位 [60s, 240s]
+   *  （`MAX_SAFE_KEEPALIVE_INTERVAL_MS`：曾允许到 280s，但那正是 plan.md §6.1 明确否决的取值——
+   *  相对 `ASSUMED_TTL_MS − TTL_SAFETY_MARGIN_MS` 只剩负余量，永远到不了 evaluateTick 的 #15，
+   *  一律在 #13 被判 cache-expired，即配置了也永不 ping；todo #15 真机验收复查时发现，2026-09-27）。 */
   keepaliveIntervalMs: number;
   /** 每窗口硬上限；0 = 关闭。Default 11。 */
   keepaliveMaxPings: number;
@@ -1085,7 +1089,12 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
           ? "adaptive"
           : defaults.mode,
     keepalive: bool(value.keepalive, defaults.keepalive),
-    keepaliveIntervalMs: num(value.keepaliveIntervalMs, defaults.keepaliveIntervalMs, 60_000, 280_000),
+    keepaliveIntervalMs: num(
+      value.keepaliveIntervalMs,
+      defaults.keepaliveIntervalMs,
+      60_000,
+      MAX_SAFE_KEEPALIVE_INTERVAL_MS,
+    ),
     keepaliveMaxPings: num(value.keepaliveMaxPings, defaults.keepaliveMaxPings, 0, Number.MAX_SAFE_INTEGER),
     keepaliveMinPrefixTokens: num(
       value.keepaliveMinPrefixTokens,
