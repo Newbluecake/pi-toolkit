@@ -56,18 +56,18 @@ metadata:
 
 ## 模型 ID 速查表
 
-| 别名          | 精确 ID（按优先级）                                                                                                                                      |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| sonnet        | `cr-anthropic/claude-sonnet-5`                                                                                                                           |
-| kimi-k3       | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                                             |
-| glm-5.3       | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                                                                                  |
-| opus-5.5      | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）                                                                        |
-| opus-5        | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                                                                                             |
-| fable         | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                             |
-| gpt-6-sol     | `<provider>/gpt-6-sol`（⚠️ 待测试后加入 models.json 再补全 provider；未加入前跳过、直接用 gpt-5.6-sol）；$2/$10，cacheRead $0.2，>272k 输入 2×/输出 1.5× |
-| gpt-5.6-sol   | `cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`（第二优先级；两线互为备份；zhipu 偶发 0 轮卡死）                                                    |
-| gpt-5.6-terra | `cr-response/gpt-5.6-terra`                                                                                                                              |
-| gpt-6-astra   | `cr-response/gpt-6-astra`                                                                                                                                |
+| 别名          | 精确 ID（按优先级）                                                                                                |
+| ------------- | ------------------------------------------------------------------------------------------------------------------ |
+| sonnet        | `cr-anthropic/claude-sonnet-5`                                                                                     |
+| kimi-k3       | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                       |
+| glm-5.3       | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                                            |
+| opus-5.5      | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）                                  |
+| opus-5        | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                                                       |
+| fable         | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                       |
+| gpt-6-sol     | `cr-response/gpt-6-sol`（zhipu-pool 暂不提供：503 not available）；$2/$10，cacheRead $0.2，>272k 输入 2×/输出 1.5× |
+| gpt-5.6-sol   | `cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`（第二优先级；两线互为备份；zhipu 偶发 0 轮卡死）              |
+| gpt-5.6-terra | `cr-response/gpt-5.6-terra`                                                                                        |
+| gpt-6-astra   | `cr-response/gpt-6-astra`                                                                                          |
 
 ### 疑难升级阶梯（fable 闸门）
 
