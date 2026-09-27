@@ -37,6 +37,25 @@ export function isExpectedPreLoginAuthProbe(record: { readonly url: string; read
   return EXPECTED_PRE_LOGIN_401_PATHS.has(pathname);
 }
 
+/** `applyThemeAndReload` (below, the theme three-state check) calls `page.reload()` up to three
+ * times per cell to exercise `theme-init.js`'s refresh-persistence — each reload tears down the
+ * previous document's in-flight `EventSource` at `/api/events`, and the browser reports that as
+ * a `requestfailed` with `errorText === "net::ERR_ABORTED"` (Chromium's own
+ * navigation-cancelled-this-fetch signal, not an application error). Only that exact
+ * reason+path pair is allowlisted here \u2014 an aborted request anywhere else, or any other reason
+ * on `/api/events` (a real connection failure), still fails the check. See
+ * `tests/web-hub/ui/checks-common-401-allowlist.test.ts`. */
+export function isExpectedReloadAbort(record: { readonly url: string; readonly reason: string }): boolean {
+  if (record.reason !== "net::ERR_ABORTED") return false;
+  let pathname: string;
+  try {
+    pathname = new URL(record.url).pathname;
+  } catch {
+    return false;
+  }
+  return pathname === API_EVENTS_PATH;
+}
+
 /** Chrome/CDP itself (not page-authored code) also mirrors a same failed resource load into the
  * console as an `error`-level message shaped `"Failed to load resource: the server responded
  * with a status of <code> (<statusText>) [<url>]"` (`visual.ts`'s console listener appends the
@@ -76,7 +95,7 @@ async function checkNoCrossOriginRequests(ctx: CheckContext): Promise<CheckOutco
 }
 
 async function checkNoFailedRequests(ctx: CheckContext): Promise<CheckOutcome> {
-  const unexpected = ctx.failedRequests.filter((r) => !isExpectedPreLoginAuthProbe(r));
+  const unexpected = ctx.failedRequests.filter((r) => !isExpectedPreLoginAuthProbe(r) && !isExpectedReloadAbort(r));
   return outcome(
     "no-failed-requests",
     unexpected.length === 0,

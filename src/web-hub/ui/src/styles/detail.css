@@ -151,9 +151,10 @@
 
 .metrics {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--sp-4);
+  gap: var(--sp-2) var(--sp-4);
   margin: 0;
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-md);
@@ -209,7 +210,13 @@
 
 @media (min-width: 481px) {
   .detail-head {
-    grid-template-columns: minmax(0, 1fr) auto;
+    /* `minmax(0, 1fr)` let `.metrics`' auto column (whose max-content width grows once the
+     * token-count aside — `.hide-sm` — turns on at this exact breakpoint) crush column 1 down
+     * to 0px, taking `.session-info`'s `summary.session-sum` touch target with it
+     * (checks-shell.ts's `shell-touch-targets-44px`, only ever observed right at 481px). A
+     * fixed floor keeps the title/session-info column usable; `.metrics` overflowing its own
+     * `auto` track at the narrowest widths is the lesser regression. */
+    grid-template-columns: minmax(180px, 1fr) auto;
     gap: var(--sp-1) var(--sp-6);
     padding: var(--sp-1) var(--sp-6) var(--sp-3);
   }

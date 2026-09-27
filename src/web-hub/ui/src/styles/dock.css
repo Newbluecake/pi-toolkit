@@ -67,24 +67,40 @@
   user-select: none;
 }
 
+/* switch = native checkbox (role="switch"), whole label is the 44px hit area. The visible pill
+ * track is 34x20 (unchanged from the mockup), but the `<input>` element's own hit box is grown
+ * to 44x44 (transparent padding drawn via `::before`) so a bare-`input` element scan (the visual
+ * checker's `shell-touch-targets-44px`, which measures every `a,button,input,summary,...`
+ * individually, not just the wrapping `label.switch`) doesn't flag the *nested* control as its
+ * own undersized target on top of the label's already-\u226544px one. */
 .switch input {
   appearance: none;
   position: relative;
-  width: 34px;
-  height: 20px;
+  width: 44px;
+  height: 44px;
   margin: 0;
   flex: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.switch input::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  left: 5px;
+  width: 34px;
+  height: 20px;
   border-radius: var(--r-pill);
   background: var(--c-border-strong);
-  cursor: pointer;
   transition: background-color var(--dur-base) var(--ease-out);
 }
 
 .switch input::after {
   content: "";
   position: absolute;
-  top: 2px;
-  left: 2px;
+  top: 14px;
+  left: 7px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -93,7 +109,7 @@
   transition: transform var(--dur-base) var(--ease-out);
 }
 
-.switch input:checked {
+.switch input:checked::before {
   background: var(--c-primary);
 }
 

@@ -12,6 +12,7 @@ import { API } from "../../../src/web-hub/web/contract.js";
 import {
   isExpectedPreLoginAuthProbe,
   isExpectedPreLoginConsole401,
+  isExpectedReloadAbort,
 } from "../../../scripts/web-hub/visual/checks-common.js";
 
 describe("allowlisted paths stay in sync with the real API contract", () => {
@@ -47,6 +48,34 @@ describe("isExpectedPreLoginAuthProbe (no-failed-requests allowlist)", () => {
 
   it("rejects a malformed URL", () => {
     expect(isExpectedPreLoginAuthProbe({ url: "not a url", reason: "HTTP 401" })).toBe(false);
+  });
+});
+
+describe("isExpectedReloadAbort (no-failed-requests allowlist for theme-reload SSE teardown)", () => {
+  it("the allowlisted literal equals the real API.events path", () => {
+    expect(isExpectedReloadAbort({ url: `http://x${API.events}`, reason: "net::ERR_ABORTED" })).toBe(true);
+  });
+
+  it("allows a net::ERR_ABORTED on /api/events (theme-reload tearing down the in-flight SSE)", () => {
+    expect(isExpectedReloadAbort({ url: "http://127.0.0.1:9/api/events", reason: "net::ERR_ABORTED" })).toBe(true);
+  });
+
+  it("rejects a net::ERR_ABORTED on any other path", () => {
+    expect(isExpectedReloadAbort({ url: "http://127.0.0.1:9/api/session", reason: "net::ERR_ABORTED" })).toBe(false);
+    expect(isExpectedReloadAbort({ url: "http://127.0.0.1:9/assets/index.js", reason: "net::ERR_ABORTED" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects any other failure reason on /api/events, including a real connection failure", () => {
+    expect(isExpectedReloadAbort({ url: "http://127.0.0.1:9/api/events", reason: "HTTP 401" })).toBe(false);
+    expect(isExpectedReloadAbort({ url: "http://127.0.0.1:9/api/events", reason: "net::ERR_CONNECTION_REFUSED" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects a malformed URL", () => {
+    expect(isExpectedReloadAbort({ url: "not a url", reason: "net::ERR_ABORTED" })).toBe(false);
   });
 });
 

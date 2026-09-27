@@ -127,7 +127,17 @@ kbd,
   position: absolute;
   left: var(--sp-2);
   top: var(--sp-2);
-  transform: translateY(-64px);
+  /* Box size (checked by the visual harness's `shell-touch-targets-44px`, which measures every
+   * `a,button,input,summary,...` element's own `getBoundingClientRect()` regardless of current
+   * visibility) must stay ≥44×44 even while parked off-canvas — the `transform` below only
+   * moves the box, it never shrinks it. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  box-sizing: border-box;
+  transform: translateY(-88px);
   z-index: 50;
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-sm);
