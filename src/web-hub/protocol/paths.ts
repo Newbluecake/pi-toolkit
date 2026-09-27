@@ -45,7 +45,9 @@
  */
 
 import { Buffer } from "node:buffer";
+import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 export const SOCKET_PATH_MAX_BYTES = 100;
 
@@ -152,6 +154,30 @@ function defaultFsDeps(): FsDeps {
 /** `<home>/.pi/agent/web-hub` */
 export function webHubStateDir(home: string): string {
   return `${home}/.pi/agent/web-hub`;
+}
+
+/**
+ * The Vue UI build shipped inside the package itself (vue-plan.md §2.1 candidate 1,
+ * P5a). Resolved relative to this module's own file URL so it stays correct
+ * regardless of the process cwd or whether this package is consumed via `jiti`
+ * (pi's git-install path) or from `dist/` (npm). `paths.ts` lives at
+ * `src/web-hub/protocol/paths.ts`; three levels up is the package root, so
+ * `../../../dist/web-hub-ui/` resolves to `<packageRoot>/dist/web-hub-ui/`.
+ */
+export function packageUiDistDir(): string {
+  return fileURLToPath(new URL("../../../dist/web-hub-ui/", import.meta.url));
+}
+
+/**
+ * `<home>/.pi/agent/web-hub-ui` — the external UI root (vue-plan.md §2.1 candidate 2,
+ * P5a). Version-specific subdirectories (`<webHubUiDir(home)>/<hubVersion>/`) are
+ * populated by hand (release zip unpacked by the user) or by
+ * `scripts/release/package-web-ui.sh`; this function only resolves the parent.
+ * Same `home` as `webHubStateDir` — hub always uses `<home>/.pi/agent`, never
+ * `PI_CODING_AGENT_DIR`.
+ */
+export function webHubUiDir(home: string): string {
+  return `${home}/.pi/agent/web-hub-ui`;
 }
 
 function dirnameOf(p: string): string {
@@ -405,3 +431,80 @@ function errMsg(err: unknown): string {
 function byteLength(p: string): number {
   return Buffer.from(p, "utf8").length;
 }
+
+// ---------------------------------------------------------------------------
+// checkTrustedEntry (P5a, vue-plan.md §2.1 — UI root trust check, check-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check-only trust check for a UI root entry (directory or file), reused by
+ * `src/web-hub/hub/ui-root.ts`'s `verifyUiRoot` for every trust boundary in
+ * vue-plan.md §2.1's candidate-root verification (root dir, its parent dir,
+ * each subdirectory, and — ahead of the O_NOFOLLOW-opened read that actually
+ * touches file bytes — the files themselves): `lstat` (never follows a
+ * symlink itself), owner must be the current uid **or 0** (root — a
+ * system-wide `sudo npm i -g` install is still trustworthy, same rationale as
+ * sshd's `StrictModes`), and `(mode & 0o022) === 0` (no group/other *write*
+ * bit — UI assets are public content, unlike the 0o077 secrecy bar
+ * `ensureXdgSocketDir` enforces, so 0755/0644 must pass). Deliberately does
+ * **not** `mkdir`/`chmod` anything — the UI root must only ever be inspected,
+ * never repaired, unlike `ensurePrivateDir`. Reuses this module's `FsDeps` /
+ * `PrivateDirError` / `PrivateDirReason` vocabulary (`symlink` /
+ * `not-directory` / `owner-mismatch` / `mode` / `io`) rather than inventing a
+ * parallel one.
+ */
+export async function checkTrustedEntry(
+  path: string,
+  kind: "dir" | "file",
+  deps?: Partial<FsDeps>,
+): Promise<DirIdentity> {
+  const fs = { ...defaultFsDeps(), ...deps };
+  let st: Awaited<ReturnType<typeof lstat>>;
+  try {
+    st = await fs.lstat(path);
+  } catch (err) {
+    throw new PrivateDirError("io", path, `web-hub: ${path}: ${errMsg(err)}`);
+  }
+  if (st.isSymbolicLink()) throw new PrivateDirError("symlink", path, `web-hub: ${path} is a symlink`);
+  const wantsDir = kind === "dir";
+  if (wantsDir ? !st.isDirectory() : !st.isFile()) {
+    throw new PrivateDirError(
+      "not-directory",
+      path,
+      `web-hub: ${path} is not a ${wantsDir ? "directory" : "regular file"}`,
+    );
+  }
+  const uid = fs.getuid();
+  if (st.uid !== uid && st.uid !== 0) {
+    throw new PrivateDirError("owner-mismatch", path, `web-hub: ${path} owned by uid ${st.uid}, expected ${uid} or 0`);
+  }
+  if ((st.mode & 0o022) !== 0) {
+    throw new PrivateDirError(
+      "mode",
+      path,
+      `web-hub: ${path} mode ${(st.mode & 0o777).toString(8)} is group/other-writable`,
+    );
+  }
+  return { dev: st.dev, ino: st.ino };
+}
+
+// ---------------------------------------------------------------------------
+// TRUSTED_FILE_OPEN_FLAGS (P5a review fix — hang-safe open flags for a
+// trust-checked file)
+// ---------------------------------------------------------------------------
+
+/**
+ * `O_RDONLY | O_NOFOLLOW`, plus `O_NONBLOCK` when the platform exposes it
+ * (`fs.constants.O_NONBLOCK` is `undefined` on Windows, so this falls back to
+ * plain `O_RDONLY | O_NOFOLLOW` there). `O_NOFOLLOW` alone closes the
+ * lstat→open symlink TOCTOU, but a FIFO (or other special file) swapped in at
+ * the checked path is not a symlink and would still make a blocking
+ * `open(O_RDONLY)` hang forever waiting for a writer; `O_NONBLOCK` makes the
+ * open itself return immediately regardless of file type, so the caller can
+ * safely `fstat` the resulting handle and reject anything that isn't a
+ * regular file before ever reading from it. A regular file's read behavior
+ * is unaffected by `O_NONBLOCK` — only a FIFO/device's is — so this is safe
+ * to use unconditionally for a subsequent normal (blocking) read.
+ */
+export const TRUSTED_FILE_OPEN_FLAGS: number =
+  fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0);
