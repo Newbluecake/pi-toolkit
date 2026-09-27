@@ -12,6 +12,7 @@
 // helper) because the cache/freeze behavior is otherwise unobservable:
 // identical output twice cannot distinguish a cache hit from a re-render.
 
+import { MEMORY_TOOL_V2_TEXT } from "../../src/memory/tool-surface.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -241,11 +242,11 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     expect(tool.description).not.toContain("not implemented");
   });
 
-  test("toolSurface:'v2' registers the (still-stubbed) tool-v2.ts factory instead", () => {
+  test("toolSurface:'v2' registers the real tool-v2.ts factory instead", () => {
     const host = fakePi();
     wire(host, { toolSurface: "v2" });
     const tool = host.tools.get("memory")!;
-    expect(tool.description).toContain("not implemented yet (todo #22 P2)");
+    expect(tool.description).toBe(MEMORY_TOOL_V2_TEXT.description);
   });
 
   test("attachTidy: unattached ⇒ /mem tidy reports 'tidy unavailable in this session'", async () => {
