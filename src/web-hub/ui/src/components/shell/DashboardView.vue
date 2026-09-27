@@ -14,7 +14,7 @@
   768px, always both at/above it.
 -->
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
 import { useTicker } from "../../composables/useTicker.js";
@@ -79,6 +79,20 @@ function onRetry(agentKey: string): void {
   props.hub.dispatch({ event: "retry", data: { agentKey } });
 }
 
+// ui-design §6.2/§4.4.2: below 768px, Escape returns from the detail view to the list, same
+// destination as the back button — but only while a detail view is actually showing (narrow +
+// `route.name === "agent"`) and never while the key press is part of text entry/IME composition.
+function onKeydown(ev: KeyboardEvent): void {
+  if (ev.key !== "Escape" || ev.isComposing) return;
+  if (!narrow.value || props.route.name !== "agent") return;
+  const target = ev.target as HTMLElement | null;
+  if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
+  onBack();
+}
+
+onMounted(() => window.addEventListener("keydown", onKeydown));
+onUnmounted(() => window.removeEventListener("keydown", onKeydown));
+
 /**
  * `DashboardViewProps.hub` is deliberately typed as the frozen, minimal `HubHandle`
  * (`state`/`dispatch` only — `types.ts`'s own header: "components never call the reducer
@@ -115,6 +129,13 @@ function onLoadOlder(agentKey: string): void {
         @retry="onRetry(selectedAgent!.key)"
         @load-older="onLoadOlder(selectedAgent!.key)"
       />
+      <div v-else-if="route.name === 'agent'" class="detail">
+        <EmptyState icon="inbox" :title="t('detail.notConnectedTitle')" :body="t('detail.notConnectedBody')">
+          <template #actions>
+            <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
+          </template>
+        </EmptyState>
+      </div>
       <div v-else class="detail">
         <EmptyState icon="inbox" :title="t('detail.selectAgentTitle')" :body="t('detail.selectAgentBody')" />
       </div>

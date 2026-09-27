@@ -15,7 +15,10 @@
         "cwd": "/home/dev/pi-toolkit",
         "reason": "user",
         "leafId": "e-alpha-6",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "thinkingLevel": "medium",
         "mode": "tui"
       },
@@ -23,7 +26,11 @@
         "leafId": "e-alpha-6",
         "busy": true,
         "pending": false,
-        "contextUsage": { "tokens": 84000, "contextWindow": 200000, "percent": 42 },
+        "contextUsage": {
+          "tokens": 84000,
+          "contextWindow": 200000,
+          "percent": 42
+        },
         "costUsd": 1.23,
         "subagentCostUsd": 0.42
       },
@@ -43,11 +50,25 @@
         "cwd": "/home/dev/service-beta",
         "reason": "user",
         "leafId": "e-beta-3",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "mode": "tui"
       },
-      "status": { "leafId": "e-beta-3", "busy": false, "pending": true, "costUsd": 0.31 },
-      "prompts": [{ "kind": "confirm", "title": "Apply the DB migration now?", "since": 1700000030000 }]
+      "status": {
+        "leafId": "e-beta-3",
+        "busy": false,
+        "pending": true,
+        "costUsd": 0.31
+      },
+      "prompts": [
+        {
+          "kind": "confirm",
+          "title": "Apply the DB migration now?",
+          "since": 1700000030000
+        }
+      ]
     },
     {
       "agentKey": "agent-gamma",
@@ -65,7 +86,12 @@
         "leafId": "e-gamma-1",
         "mode": "rpc"
       },
-      "status": { "leafId": "e-gamma-1", "busy": false, "pending": false, "costUsd": 0.02 },
+      "status": {
+        "leafId": "e-gamma-1",
+        "busy": false,
+        "pending": false,
+        "costUsd": 0.02
+      },
       "prompts": []
     },
     {
@@ -84,7 +110,11 @@
         "leafId": "e-delta-2",
         "mode": "tui"
       },
-      "status": { "leafId": "e-delta-2", "busy": false, "pending": false },
+      "status": {
+        "leafId": "e-delta-2",
+        "busy": false,
+        "pending": false
+      },
       "prompts": []
     },
     {
@@ -103,7 +133,11 @@
         "leafId": "e-epsilon-1",
         "mode": "tui"
       },
-      "status": { "leafId": "e-epsilon-1", "busy": false, "pending": false },
+      "status": {
+        "leafId": "e-epsilon-1",
+        "busy": false,
+        "pending": false
+      },
       "prompts": []
     },
     {
@@ -122,7 +156,11 @@
         "leafId": "e-zeta-1",
         "mode": "rpc"
       },
-      "status": { "leafId": "e-zeta-1", "busy": false, "pending": false },
+      "status": {
+        "leafId": "e-zeta-1",
+        "busy": false,
+        "pending": false
+      },
       "prompts": []
     }
   ],
@@ -139,7 +177,11 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-09-27T09:00:00.000Z",
-          "message": { "role": "user", "content": "Please refactor the auth module and add tests." }
+          "message": {
+            "role": "user",
+            "timestamp": 1790499600000,
+            "content": "Please refactor the auth module and add tests."
+          }
         },
         {
           "id": "e-alpha-2",
@@ -148,12 +190,20 @@
           "timestamp": "2026-09-27T09:00:12.000Z",
           "message": {
             "role": "assistant",
+            "timestamp": 1790499612000,
             "content": [
               {
                 "type": "text",
                 "text": "Sure — here's the reconciliation helper the tests rely on:\n\n```typescript\nexport function reconcile(prev: Row[], next: Row[]): Patch[] {\n  const byId = new Map(prev.map((r) => [r.id, r]));\n  const patches: Patch[] = [];\n  for (const row of next) {\n    const before = byId.get(row.id);\n    if (before === undefined) patches.push({ kind: \"insert\", row });\n    else if (!shallowEqual(before, row)) patches.push({ kind: \"update\", row });\n    byId.delete(row.id);\n  }\n  for (const gone of byId.values()) patches.push({ kind: \"remove\", id: gone.id });\n  return patches;\n}\n```\n\nNow running the test suite."
               },
-              { "type": "toolCall", "id": "call-1", "name": "bash", "args": { "command": "npm test -- auth" } }
+              {
+                "type": "toolCall",
+                "id": "call-1",
+                "name": "bash",
+                "args": {
+                  "command": "npm test -- auth"
+                }
+              }
             ]
           }
         },
@@ -162,7 +212,12 @@
           "parentId": "e-alpha-2",
           "type": "message",
           "timestamp": "2026-09-27T09:00:20.000Z",
-          "message": { "role": "toolResult", "toolCallId": "call-1", "content": "42 passed, 0 failed" }
+          "message": {
+            "role": "toolResult",
+            "timestamp": 1790499620000,
+            "toolCallId": "call-1",
+            "content": "42 passed, 0 failed"
+          }
         },
         {
           "id": "e-alpha-4",
@@ -177,7 +232,11 @@
           "parentId": "e-alpha-4",
           "type": "message",
           "timestamp": "2026-09-27T09:01:05.000Z",
-          "message": { "role": "user", "content": "Now delegate the migration write-up to a subagent." }
+          "message": {
+            "role": "user",
+            "timestamp": 1790499665000,
+            "content": "Now delegate the migration write-up to a subagent."
+          }
         },
         {
           "id": "e-alpha-6",
@@ -186,20 +245,36 @@
           "timestamp": "2026-09-27T09:01:10.000Z",
           "message": {
             "role": "assistant",
-            "content": [{ "type": "text", "text": "Delegating now — see the fleet panel for progress." }]
+            "timestamp": 1790499670000,
+            "content": [
+              {
+                "type": "text",
+                "text": "Delegating now — see the fleet panel for progress."
+              }
+            ]
           }
         }
       ],
       "tailMessages": [
-        { "role": "user", "content": "Now delegate the migration write-up to a subagent." },
-        { "role": "assistant", "content": "Delegating now — see the fleet panel for progress." }
+        {
+          "role": "user",
+          "timestamp": 1790499665000,
+          "content": "Now delegate the migration write-up to a subagent."
+        },
+        {
+          "role": "assistant",
+          "timestamp": 1790499670000,
+          "content": "Delegating now — see the fleet panel for progress."
+        }
       ],
       "inflight": {
         "tools": [
           {
             "toolCallId": "call-2",
             "toolName": "bash",
-            "args": { "command": "npm run build" },
+            "args": {
+              "command": "npm run build"
+            },
             "partial": "compiling...\n> tsc -p tsconfig.build.json\n"
           }
         ]
@@ -216,19 +291,35 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-09-27T08:50:00.000Z",
-          "message": { "role": "user", "content": "Prep the release checklist." }
+          "message": {
+            "role": "user",
+            "timestamp": 1790499000000,
+            "content": "Prep the release checklist."
+          }
         },
         {
           "id": "e-beta-2",
           "parentId": "e-beta-1",
           "type": "message",
           "timestamp": "2026-09-27T08:50:30.000Z",
-          "message": { "role": "assistant", "content": "Checklist ready. Should I apply the DB migration now?" }
+          "message": {
+            "role": "assistant",
+            "timestamp": 1790499030000,
+            "content": "Checklist ready. Should I apply the DB migration now?"
+          }
         }
       ],
       "tailMessages": [
-        { "role": "user", "content": "Prep the release checklist." },
-        { "role": "assistant", "content": "Checklist ready. Should I apply the DB migration now?" }
+        {
+          "role": "user",
+          "timestamp": 1790499000000,
+          "content": "Prep the release checklist."
+        },
+        {
+          "role": "assistant",
+          "timestamp": 1790499030000,
+          "content": "Checklist ready. Should I apply the DB migration now?"
+        }
       ]
     },
     "agent-gamma": {
@@ -242,10 +333,20 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-09-27T03:00:00.000Z",
-          "message": { "role": "assistant", "content": "Nightly cleanup finished: removed 12 stale worktrees." }
+          "message": {
+            "role": "assistant",
+            "timestamp": 1790478000000,
+            "content": "Nightly cleanup finished: removed 12 stale worktrees."
+          }
         }
       ],
-      "tailMessages": [{ "role": "assistant", "content": "Nightly cleanup finished: removed 12 stale worktrees." }]
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1790478000000,
+          "content": "Nightly cleanup finished: removed 12 stale worktrees."
+        }
+      ]
     },
     "agent-delta": {
       "agentKey": "agent-delta",
@@ -258,17 +359,31 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-09-26T18:00:00.000Z",
-          "message": { "role": "user", "content": "Reproduce bug #512." }
+          "message": {
+            "role": "user",
+            "timestamp": 1790445600000,
+            "content": "Reproduce bug #512."
+          }
         },
         {
           "id": "e-delta-2",
           "parentId": "e-delta-1",
           "type": "message",
           "timestamp": "2026-09-26T18:05:00.000Z",
-          "message": { "role": "assistant", "content": "Reproduced: null pointer in the legacy exporter path." }
+          "message": {
+            "role": "assistant",
+            "timestamp": 1790445900000,
+            "content": "Reproduced: null pointer in the legacy exporter path."
+          }
         }
       ],
-      "tailMessages": [{ "role": "assistant", "content": "Reproduced: null pointer in the legacy exporter path." }]
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1790445900000,
+          "content": "Reproduced: null pointer in the legacy exporter path."
+        }
+      ]
     },
     "agent-epsilon": {
       "agentKey": "agent-epsilon",
@@ -281,10 +396,20 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-09-25T12:00:00.000Z",
-          "message": { "role": "assistant", "content": "Docs pass complete; connection has since gone stale." }
+          "message": {
+            "role": "assistant",
+            "timestamp": 1790337600000,
+            "content": "Docs pass complete; connection has since gone stale."
+          }
         }
       ],
-      "tailMessages": [{ "role": "assistant", "content": "Docs pass complete; connection has since gone stale." }]
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1790337600000,
+          "content": "Docs pass complete; connection has since gone stale."
+        }
+      ]
     },
     "agent-zeta": {
       "agentKey": "agent-zeta",
@@ -299,12 +424,17 @@
           "timestamp": "2026-09-27T07:00:00.000Z",
           "message": {
             "role": "assistant",
+            "timestamp": 1790492400000,
             "content": "One-off query done; this agent goes offline shortly after connect."
           }
         }
       ],
       "tailMessages": [
-        { "role": "assistant", "content": "One-off query done; this agent goes offline shortly after connect." }
+        {
+          "role": "assistant",
+          "timestamp": 1790492400000,
+          "content": "One-off query done; this agent goes offline shortly after connect."
+        }
       ]
     }
   },
@@ -321,7 +451,11 @@
             "parentId": null,
             "type": "message",
             "timestamp": "2026-09-27T08:59:00.000Z",
-            "message": { "role": "user", "content": "(session start) opened pi-toolkit." }
+            "message": {
+              "role": "user",
+              "timestamp": 1790499540000,
+              "content": "(session start) opened pi-toolkit."
+            }
           }
         ],
         "tailMessages": []
@@ -416,6 +550,13 @@
         ]
       }
     },
-    { "atMs": 2000, "event": "agent_down", "data": { "agentKey": "agent-zeta", "reason": "quit" } }
+    {
+      "atMs": 2000,
+      "event": "agent_down",
+      "data": {
+        "agentKey": "agent-zeta",
+        "reason": "quit"
+      }
+    }
   ]
 }
