@@ -23,6 +23,8 @@ export interface TidyPromptInput {
 
 const RULES = [
   "Return ONLY a JSON object matching the provided schema — no prose outside it.",
+  "This is a proposal for the /mem tidy command to validate and present in its confirmation UI. Do not apply it, " +
+    "ask the main session to apply it, or write any files yourself.",
   '`files[]` lists EVERY target file exactly once: action "keep" (untouched), "rewrite" (new `content` replaces it), ' +
     '"create" (a brand-new file, `content` required), "delete" (dropped — content must be accounted for below), or ' +
     '"rename" (same or new `content`, `newName` required).',

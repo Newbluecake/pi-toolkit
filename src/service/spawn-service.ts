@@ -434,7 +434,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // the outcome through spawnAndWait/waitOutcome). Session_create
       // failures never reach here (the runner's own catch folds them into
       // prompt_settled). T-8 locks this.
-      if (req.parentRunId === undefined) deps.notifyTerminalFailure?.(failed);
+      if (req.parentRunId === undefined && !req.suppressDelivery) deps.notifyTerminalFailure?.(failed);
     } finally {
       // Release every key acquired at spawn time (targetId AND sessionFile) —
       // deleting only req.resumeFrom leaks the targetId lock forever once

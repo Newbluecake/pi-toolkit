@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
-import { MemoryRunStore } from "../../src/core/store.js";
+import { MemoryOutboxStore, MemoryRunStore } from "../../src/core/store.js";
+import { createNotifier } from "../../src/delivery/notifier.js";
 import type { AgentTypeConfig, DeliveryPayload, RunDiagnostics, RunSnapshot } from "../../src/core/types.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle, SessionSpec } from "../../src/runtime/session-driver.js";
@@ -394,6 +395,64 @@ describe("service/runtime-adapter: X10 structured output injection + double vali
     required: ["answer"],
     additionalProperties: false,
   };
+
+  it.each([false, true])("caller-owned schema run=%s does not send a completion notice", async (expectAck) => {
+    const clock = new FakeClock();
+    const sent: DeliveryPayload[] = [];
+    const outbox = createNotifier({
+      store: new MemoryOutboxStore(),
+      sender: (payload) => {
+        sent.push(payload);
+      },
+      cancelBuffered: () => undefined,
+    });
+    const driver: SessionDriver = {
+      create: async (s) => {
+        const tool = (s.customTools as Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }>).find(
+          (t) => t.name === "StructuredOutput",
+        );
+        return handle({
+          prompt: async () => {
+            await tool!.execute("tc", { answer: 42 }, undefined, undefined, {});
+          },
+        });
+      },
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, { driver, notifier: outbox });
+    const running = runner.run(
+      spec(schemaType, { schema, ...(expectAck ? { expectAck: true, suppressDelivery: true } : {}) }),
+    );
+    await drain(clock, 10);
+    expect((await running).structuredResult).toEqual({ answer: 42 });
+    expect(sent).toHaveLength(expectAck ? 0 : 1);
+    expect(outbox.stats.delivered).toBe(expectAck ? 0 : 1);
+  });
+
+  it("caller-owned config failure never enqueues a notice", async () => {
+    const clock = new FakeClock();
+    const sent: DeliveryPayload[] = [];
+    const outbox = createNotifier({
+      store: new MemoryOutboxStore(),
+      sender: (payload) => {
+        sent.push(payload);
+      },
+      cancelBuffered: () => undefined,
+    });
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, { driver, notifier: outbox });
+    const outcome = await runner.run(
+      spec(schemaType, { schema, expectAck: true, suppressDelivery: true, deadlineAt: 0 }),
+    );
+    expect(outcome.status).toBe("failed");
+    expect(sent).toHaveLength(0);
+    expect(outbox.stats.pending).toBe(0);
+  });
 
   it("injects StructuredOutput; a valid submission produces outcome.structuredResult and status completed", async () => {
     const clock = new FakeClock();

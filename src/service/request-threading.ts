@@ -48,6 +48,7 @@ const NOT_THREADED = [
   "thinkingOverride", // merged with type.thinkingLevel into sessionSpec.thinkingLevel by the runtime adapter
   "budgetOverride", // already merged into RunnerSpec.budget
   "expectAck", // consumed by spawn-service for the caller-ack hold registry
+  "suppressDelivery", // consumed by the runtime adapter / spawn failure fallback; caller owns completion reporting
   "isolation", // consumed by the X1 worktree extension via H2, not threaded
   "schema", // consumed by the adapter to inject the StructuredOutput tool
   "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)

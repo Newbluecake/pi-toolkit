@@ -191,6 +191,21 @@ export interface StartupReminder {
   /** Structurally an `ExtensionHandler<SessionStartEvent>` — ready for
    *  `pi.on("session_start", reminder.check)` (wired by `wireMemory`). */
   check: ExtensionHandler<SessionStartEvent>;
+  /** /reload starts a new activation and may repeat the reminder. */
+  reset(): void;
+}
+
+const REMINDER_KEY = Symbol.for("pi-subagent:memory-doctor-reminders");
+const REMINDER_CAPACITY = 256;
+
+function lastNotified(): Map<string, string> {
+  const global = globalThis as Record<symbol, unknown>;
+  let map = global[REMINDER_KEY] as Map<string, string> | undefined;
+  if (!map) {
+    map = new Map();
+    global[REMINDER_KEY] = map;
+  }
+  return map;
 }
 
 /**
@@ -198,19 +213,23 @@ export interface StartupReminder {
  * fired at most once per session (`notifiedSessions`, keyed by
  * `ctx.sessionManager.getSessionId()`) and deduplicated across sessions in
  * the same process by a per-cwd error/D01 fingerprint (`lastNotified`) —
- * both maps live in this factory's closure (no module-scope state, so a
- * fresh call per `wireMemory`/`activate()` naturally resets on `/reload`).
+ * the session set lives in this factory's closure; the cwd map lives on a
+ * process-global Symbol so a new activation during /new keeps deduplicating.
+ * /reload explicitly clears that map through reset().
  * Never calls `sendMessage`/`appendEntry`/spawns anything — `ctx.ui.notify`
  * only.
  */
 export function createStartupReminder(deps: CreateStartupReminderDeps): StartupReminder {
   const notifiedSessions = new Set<string>();
-  const lastNotified = new Map<string, string>();
   const settings = deps.settings;
   const now = deps.now ?? (() => Date.now());
   const renderPort = deps.renderTieredPort ?? DEFAULT_RENDER_PORT;
 
   return {
+    reset: () => {
+      notifiedSessions.clear();
+      lastNotified().clear();
+    },
     check: (_event, ctx) => {
       if (deps.isChildSession || !settings.doctor.notifyOnStart || !ctx.hasUI) return;
       let sessionId: string | undefined;
@@ -232,10 +251,13 @@ export function createStartupReminder(deps: CreateStartupReminderDeps): StartupR
       if (relevant.length === 0) return;
 
       const fingerprint = fingerprintFindings(relevant);
-      if (lastNotified.get(cwd) === fingerprint) return;
+      const recent = lastNotified();
+      if (recent.get(cwd) === fingerprint) return;
 
       if (sessionId !== undefined) notifiedSessions.add(sessionId);
-      lastNotified.set(cwd, fingerprint);
+      recent.delete(cwd);
+      recent.set(cwd, fingerprint);
+      if (recent.size > REMINDER_CAPACITY) recent.delete(recent.keys().next().value!);
       ctx.ui.notify(startupReminderText(relevant), "warning");
     },
   };

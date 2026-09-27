@@ -8,7 +8,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   countBySeverity,
@@ -526,6 +526,10 @@ describe("handleMemDoctorCommand (real fs)", () => {
 });
 
 describe("createStartupReminder (§6.3)", () => {
+  beforeEach(() => {
+    delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:memory-doctor-reminders")];
+  });
+
   function baseDeps(cwd: string, paths: ReturnType<typeof materializeFixture>["paths"], isChildSession = false) {
     return { isChildSession, paths, now: () => NOW_MS, settings: DEFAULT_SETTINGS.memory };
   }

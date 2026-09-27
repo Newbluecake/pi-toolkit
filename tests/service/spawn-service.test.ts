@@ -507,6 +507,24 @@ describe("SpawnService: CC4 CP1 (deadlineAt admission check)", () => {
     expect(service.expectsAck(started.runId)).toBe(false);
   });
 
+  it("caller-owned runner failure settles without sending a terminal notification", async () => {
+    const notified: RunOutcome[] = [];
+    const service = createSpawnService({
+      ...deps({
+        run: async () => {
+          throw new Error("driver failed");
+        },
+      }),
+      notifyTerminalFailure: (value) => notified.push(value),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "tidy", expectAck: true, suppressDelivery: true });
+    if ("error" in started) throw new Error(started.error.message);
+    const waited = await service.waitOutcome(started.runId);
+    expect(waited.kind).toBe("settled");
+    if (waited.kind === "settled") expect(waited.outcome.status).toBe("failed");
+    expect(notified).toHaveLength(0);
+  });
+
   it("P3: waitOutcome acknowledges fast and waiter settlements but not pending", async () => {
     const fastAcked: RunOutcome[] = [];
     const fast = createSpawnService({

@@ -257,6 +257,9 @@ export interface TidySpawnRequest {
   schema?: JsonSchema;
   /** §7.0: always `"readonly"` — never widened, never optional. */
   toolDomain: "readonly";
+  /** The command owns the result; no completion message may reach the model. */
+  expectAck: true;
+  suppressDelivery: true;
 }
 
 export type TidySpawnOutcome = { runId: RunId; label?: string } | { error: { message: string } };

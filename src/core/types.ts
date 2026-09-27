@@ -261,6 +261,8 @@ export interface SpawnRequest {
   parentRunId?: RunId;
   /** Caller will synchronously acknowledge the terminal outcome. */
   expectAck?: boolean;
+  /** Caller owns all completion reporting; suppress terminal outbox delivery. */
+  suppressDelivery?: boolean;
   /**
    * Request an isolated git worktree for this run. Created from the current
    * HEAD (uncommitted main-checkout changes are not visible); on reap all

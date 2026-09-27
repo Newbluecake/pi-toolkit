@@ -291,6 +291,31 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     expect(child.handlers.get("session_start")).toHaveLength(2); // hub + freeze reset, no reminder
   });
 
+  test("startup reminder survives /new activation but resets on /reload; changed fingerprint reminds again", () => {
+    seedMemoryFile("pitfalls.md", "---\npin: true\n---\n# Pitfalls\n");
+    const activate = () => {
+      const host = fakePi();
+      wireMemory(host.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: false, sections: host.hub });
+      return host;
+    };
+    const start = (host: Host, id: string) => {
+      const { ctx, notifications } = fakeUiCtx(cwd);
+      (ctx as any).sessionManager = { getSessionId: () => id };
+      emit(host, "session_start", { type: "session_start", reason: "new" }, ctx);
+      return notifications;
+    };
+    const first = activate();
+    expect(start(first, "s1")).toHaveLength(1);
+    const second = activate(); // pi may reactivate extensions when replacing a session
+    expect(start(second, "s2")).toHaveLength(0);
+    seedMemoryFile("leak.md", "---\ntopic: leak\n---\n# Leak\npassword: supersecretvalue\n");
+    expect(start(second, "s3")).toHaveLength(1);
+    const third = activate();
+    expect(start(third, "s4")).toHaveLength(0);
+    emit(third, "session_shutdown", { type: "session_shutdown", reason: "reload" });
+    expect(start(activate(), "s5")).toHaveLength(1);
+  });
+
   test("tiered freeze keeps the pre-write block until session_start; a pre-render write freezes no block", async () => {
     const host = fakePi();
     wire(host, { layout: "tiered", toolSurface: "v2", freezeInjectionAfterWrite: true });

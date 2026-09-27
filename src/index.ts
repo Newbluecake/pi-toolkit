@@ -921,6 +921,8 @@ function mapTidySpawnRequest(req: TidySpawnRequest): SpawnRequest {
     ...(req.totalMs === undefined ? {} : { budgetOverride: { totalMs: req.totalMs } }),
     ...(req.schema === undefined ? {} : { schema: req.schema }),
     toolDomain: req.toolDomain,
+    expectAck: req.expectAck,
+    suppressDelivery: req.suppressDelivery,
   };
 }
 function forwardSpawn(holder: { current?: Stack }): SpawnService {

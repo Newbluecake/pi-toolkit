@@ -335,14 +335,10 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   // independently.
   let disposed = false;
   const perRun = new Map<string, RunnerCallbacks>();
-  // CC2: runs spawned with a parentRunId (i.e. workflow/nested children, X3)
-  // must not enqueue a top-level completion notification (workflow design
-  // §7.4 gap ① "child ownership" / §8.2 CC2). Tracked by runId, set at the
-  // start of run() (before any await) and cleared in its `finally`, so the
-  // shared enqueue_delivery interpreter below — which only sees the effect
-  // payload, not the originating RunnerSpec — can still tell child runs
-  // apart from top-level ones.
-  const childRunIds = new Set<string>();
+  // CC2 child runs and caller-owned runs (e.g. /mem tidy) report through
+  // their owner, never through top-level completion/deadline notifications.
+  // Keep the run id until adapter finally so all terminal effect paths see it.
+  const notificationSuppressedRunIds = new Set<string>();
   const schemaRunIds = new Set<string>();
   const policyPendingRunIds = new Map<string, number>();
   let runtime!: RuntimeRunner;
@@ -355,11 +351,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       },
       enqueue_delivery: (e) => {
         if (e.kind !== "enqueue_delivery") return;
-        // CC2: child runs are consumed exclusively by their owner (the parent
-        // run / future workflow orchestrator), never by the top-level outbox
-        // — otherwise every child of a busy parent would independently spam a
-        // top-level completion notification (workflow design §8.2 CC2).
-        if (childRunIds.has(e.payload.runId)) return;
+        // Child and caller-owned runs report exclusively through their owner;
+        // neither enters the top-level completion outbox.
+        if (notificationSuppressedRunIds.has(e.payload.runId)) return;
         const hold = schemaRunIds.has(e.payload.runId);
         if (hold) policyPendingRunIds.set(e.payload.runId, e.payload.generation);
         deps.notifier.enqueue(e.payload, { hold });
@@ -372,7 +366,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       },
       // timeout-notify: grace/extended notices ride the effect bus
       // (best_effort); CC2 filtering lives inside deadlineNoticeHandler.
-      notify_deadline: deadlineNoticeHandler(childRunIds, deps.onDeadlineNotice),
+      notify_deadline: deadlineNoticeHandler(notificationSuppressedRunIds, deps.onDeadlineNotice),
     },
     (runId, generation, kind, err) => runtime.notifyEffectFailed(runId, generation, kind as RunEffect["kind"], err),
   );
@@ -486,7 +480,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
    * lifecycle event. Persist + emit here through the same channels the
    * effect interpreter uses for state-machine-driven outcomes.
    */
-  const settleConfigFailure = (runId: string, error: ErrorInfo, label?: string): RunOutcome => {
+  const settleConfigFailure = (
+    runId: string,
+    error: ErrorInfo,
+    label?: string,
+    suppressDelivery = false,
+  ): RunOutcome => {
     const now = deps.clock.now();
     const outcome = failedConfigOutcome(runId, error, now, label);
     const snapshot: RunSnapshot = {
@@ -505,7 +504,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     perRun.get(runId)?.onLifecycle?.(event);
     deps.onLifecycle?.(event);
     merged.onLifecycle?.(event); // H1: run lifecycle bypass observer
-    if (!childRunIds.has(runId)) {
+    if (!notificationSuppressedRunIds.has(runId) && !suppressDelivery) {
       try {
         deps.notifier.enqueue({
           key: deliveryKey(runId, outcome.diag.generation),
@@ -536,7 +535,8 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   return {
     async run(spec, callbacks) {
       if (callbacks) perRun.set(spec.runId, callbacks);
-      if (spec.request.parentRunId !== undefined) childRunIds.add(spec.runId); // CC2
+      if (spec.request.parentRunId !== undefined || spec.request.suppressDelivery)
+        notificationSuppressedRunIds.add(spec.runId); // CC2 + caller-owned
       if (spec.request.schema !== undefined) schemaRunIds.add(spec.runId);
       // X10: captures the last StructuredOutput submission for this run, if
       // any. Populated (only) by the injected tool's onSubmit below; read
@@ -585,6 +585,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               retryable: false,
             },
             spec.request.label,
+            spec.request.suppressDelivery,
           );
         // Per-spawn thinkingOverride (Agent tool `thinking` param) wins over
         // the agent type's configured thinkingLevel; neither set => leave the
@@ -790,7 +791,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           if (!resolved.ok) {
             h2Controller.abort();
             abandonReason = resolved.timedOut ? "startup_timeout" : "h2_failed";
-            return settleConfigFailure(spec.runId, resolved.error, spec.request.label);
+            return settleConfigFailure(spec.runId, resolved.error, spec.request.label, spec.request.suppressDelivery);
           }
           sessionSpec = resolved.value;
           // D10: write the cwd cell exactly once, now that H2 has finished
@@ -1000,7 +1001,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           }
         }
         perRun.delete(spec.runId);
-        childRunIds.delete(spec.runId); // CC2
+        notificationSuppressedRunIds.delete(spec.runId); // CC2 + caller-owned
         const generation = policyPendingRunIds.get(spec.runId);
         if (generation !== undefined) {
           policyPendingRunIds.delete(spec.runId);

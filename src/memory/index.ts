@@ -105,6 +105,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       renderTieredPort: tieredRender,
     });
     pi.on("session_start", reminder.check);
+    pi.on("session_shutdown", (event) => {
+      if (event.reason === "reload") reminder.reset();
+    });
   }
   opts.sections.register(
     "pi_project_memory",

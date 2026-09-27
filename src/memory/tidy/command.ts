@@ -297,6 +297,8 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
     totalMs: settings.tidy.timeoutMs,
     schema: TIDY_SCHEMA,
     toolDomain: "readonly",
+    expectAck: true,
+    suppressDelivery: true,
   });
   if ("error" in spawnRes) {
     ctx.ui.notify(`tidy spawn failed: ${spawnRes.error.message} — zero writes`, "warning");

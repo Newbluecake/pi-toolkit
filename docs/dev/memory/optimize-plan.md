@@ -572,7 +572,7 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 - 仅**主会话**（`!isChildSession`）且 `ctx.hasUI` 且 `memory.doctor.notifyOnStart`；子会话、consult、print/RPC 无 UI 会话从不提醒。
 - 触发：`session_start` 后首次（同步体检，毫秒级）存在 **error** 级条目或 D01。
 - **每会话一次**：闭包 `notifiedSessions: Set<sessionId>`。
-- **去重**：闭包 `lastNotified: Map<cwd, fingerprint>`，`fingerprint = sha1(按 id+file 排序的 error/D01 条目)`；同一进程内（`/new`、`/resume`、`/fork` 反复切换）指纹未变 ⇒ 不再提醒；`/reload` 重建闭包后允许再提醒一次。
+- **去重**：进程级 `Symbol.for` 有界 FIFO `lastNotified: Map<cwd, fingerprint>`（不放模块作用域），`fingerprint = sha1(按 id+file 排序的 error/D01 条目)`；同一进程内（`/new`、`/resume`、`/fork` 反复切换，含扩展重新激活）指纹未变 ⇒ 不再提醒；`/reload` 的 `session_shutdown` 显式清空后允许再提醒一次。
 
 ## 7. `/mem tidy`（手动；主会话模型 + 输出/成本硬上限 + 逐文件确认）
 
@@ -585,7 +585,7 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 | `/mem tidy --frontmatter [file…]`                     | **零**     | 确定性补元数据模式（决策 12 附加条件，§7.4）                                                                              |
 | `/mem restore [<id>]` / `/mem restore --trash [<id>]` | 零         | 恢复 tidy/frontmatter 备份或软删除文件（§7.5）                                                                            |
 
-仅主会话且 `ctx.hasUI`；子会话/无 UI ⇒ notify 说明并返回。spawn 端口由 `src/index.ts` 在 post-guard 通过 `wireMemory` 返回的 `attachTidy(port)` 注入，`port` 经 holder 读当前 stack：`{ spawn, waitOutcome, abort, snapshot(runId) }`（`snapshot` = `query.get`）；未注入 ⇒ `tidy unavailable in this session`。
+仅主会话且 `ctx.hasUI`；子会话/无 UI ⇒ notify 说明并返回。spawn 端口由 `src/index.ts` 在 post-guard 通过 `wireMemory` 返回的 `attachTidy(port)` 注入，`port` 经 holder 读当前 stack：`{ spawn, waitOutcome, abort, snapshot(runId) }`（`snapshot` = `query.get`）；未注入 ⇒ `tidy unavailable in this session`。提案 run 带 `expectAck:true` 和 `suppressDelivery:true`，由命令领取结果；adapter 不入完成通知 outbox（包括失败路径），只有 UI 确认后的程序化 apply 可以写盘并备份。
 
 ### 7.0 提案阶段零写入能力（复审 新-1 阻塞项；复审 v3-1/2/3；用户决策 N5 = A）
 
@@ -871,7 +871,7 @@ A1–A4、A6 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设
 - R4：派一个 verifier 子 agent（工具表无 memory）⇒ 其请求的 memory 段为 core 档、guide 为 `read` 变体，模型能用 `read <真实路径>` 打开主题。
 - R5：`/mem doctor` 输出合理；启动提醒只出现一次，`/new` 后不重复。
 - R6：`/mem tidy --dry-run` 零 spawn；`/mem tidy --frontmatter` 走完；`/mem tidy`（主会话模型）走完逐文件确认、报告含实际成本；`.backup/<id>` 存在；下一轮恰好一条 update；`/mem restore` 能还原并正确报告冲突。
-- R7：`layout=legacy` + `toolSurface=legacy` + `/reload` ⇒ memory 段与 R0 逐字节相同（`touch -d` 固定与 R0 相同 mtime）。
+- R7：设置 `layout=legacy` + `toolSurface=legacy` 后 `/reload` 再 `/new` ⇒ memory 段与 R0 逐字节相同（`touch -d` 固定与 R0 相同 mtime）。**设置切换需新会话或 `/new` 才重新计算**；sysprompt 快照在 `/reload` 时逐字节恢复（by design），不能拿旧会话的 reload 作为新设置生效的判断。
 - 清理：按确切路径删 `/tmp/memacc`、`/tmp/memacc-root`；R0 若用了 P0-a worktree，按确切路径 `git worktree remove`。E1 的清理见 §11.2「清理」。
 
 ### 11.2 零工具命中率评测（后续包 E1，非发布阻塞；探索性指标；评审 v1 #4、复审 v1-4、复审 v3-4、复审 v4-3/4、复审 v5-1/2）

@@ -638,6 +638,13 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
       }),
     );
     const { ui, selectCalls } = makeUi({ confirm: [true], select: ["Apply", "Apply"] });
+    const select = ui.select;
+    ui.select = async (title, options) => {
+      expect(readFileSync(join(fx!.memDir, "a.md"), "utf8")).toContain("original");
+      expect(readFileSync(join(fx!.memDir, "b.md"), "utf8")).toContain("original");
+      expect(readdirSync(fx!.memDir)).not.toContain(".backup");
+      return select(title, options);
+    };
     const ctx = makeCtx(fx.cwd, ui);
     let afterWriteCalls = 0;
     await handleMemTidyCommand("tidy", "", ctx, {
@@ -649,6 +656,11 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
     expect(afterWriteCalls).toBe(1);
     expect(selectCalls).toHaveLength(2);
     expect(selectCalls[0]?.options[0]).toBe("Apply"); // clean files offer Apply first
+    const [id] = readdirSync(join(fx.memDir, ".backup"));
+    expect(id).toBeDefined();
+    expect(readFileSync(join(fx.memDir, ".backup", id!, "a.md"), "utf8")).toContain("original");
+    expect(readFileSync(join(fx.memDir, ".backup", id!, "b.md"), "utf8")).toContain("original");
+    expect(fp.spawnReqs[0]).toMatchObject({ toolDomain: "readonly", expectAck: true, suppressDelivery: true });
   });
 
   it("K1: Skip leaves the file untouched", async () => {
@@ -664,6 +676,7 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
     const ctx = makeCtx(fx.cwd, ui);
     await handleMemTidyCommand("tidy", "", ctx, baseDeps(fp, { paths: fx.paths }));
     expect(readFileSync(join(fx.memDir, "a.md"), "utf8")).toContain("original");
+    expect(readdirSync(fx.memDir)).not.toContain(".backup");
   });
 
   it("K1: Abort all ⇒ zero writes even if earlier files were about to Apply", async () => {
