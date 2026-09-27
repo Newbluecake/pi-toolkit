@@ -1,27 +1,28 @@
 # todo #22 memory 优化：实施方案（层级 2）
 
-> 状态：方案稿 **v2**（2026-09-26，dev-flow L2「方案制定」修订稿；v1 = 3f921b7 被评审打回）。
-> 输入：`docs/dev/memory/optimize-plan-review-v1.md`（下称「评审 v1」，**10 条问题 + 14 条决策意见 + 用户决策，权威**）；
+> 状态：方案稿 **v3**（2026-09-27，dev-flow L2「方案制定」二次修订；v1 = 3f921b7、v2 = 0a29469 均被评审打回）。
+> 输入：`docs/dev/memory/optimize-plan-review-v2.md`（下称「复审 v2」，**复审问题清单 + 用户决策 N1–N3 + 主会话对 v1-7 的裁定，权威**）；
+> `docs/dev/memory/optimize-plan-review-v1.md`（下称「评审 v1」，10 条问题 + 14 条决策意见 + 用户决策）；
 > `docs/dev/memory/design-review-2026-09-26.md`（下称「设计评审」）§2 量化、§4 契约、§6 P0–P2、§6A 工具层；
 > `docs/dev/memory/memory-plan.md`（下称「memory-plan」）；`docs/dev/sysprompt-stable/plan.md`（下称「ss-plan」）§4.1 不变量 I1–I9；
-> 代码 `src/memory/*.ts`、`src/sysprompt/hub.ts`、`src/prompt-sections/*.ts`、`src/config/{settings,setting-specs}.ts`、`src/runtime/tool-scope.ts`、`src/consult/`。
+> 代码 `src/memory/*.ts`、`src/sysprompt/hub.ts`、`src/prompt-sections/*.ts`、`src/config/{settings,setting-specs,agent-types}.ts`、`src/runtime/tool-scope.ts`、`src/service/{runtime-adapter,spawn-service}.ts`、`src/consult/`。
 > 用户已选**层级 2**：注入改造 + 工具层 T1–T3 + 零成本体检 + 手动 `/mem tidy`。不做空闲自动整理；T4 `Agent({memory})`、T5 关键词预取只在 §13 预留接口。
-> 逐条处置见文末 §16「v1→v2 处置」。
+> 逐条处置：v1→v2 见 §16；**v2→v3 见文末 §17**。
 
 ## 0. 摘要
 
-| 维度                 | 现状（设计评审 §2.3 实测）                                                     | 本方案目标                                                                                                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 主会话首轮 memory 块 | 3,851B（约 1,100 token），pitfalls 截一半，quota/multi 只剩 138B/157B 半截片段 | **硬上限** `memory.blockBytes`=2,400B（UTF-8 字节，含标题/引导语/sentinel），**零半截文件**，超预算按确定性阶梯降级（§2.3）                                                |
-| 子会话首轮           | 与主会话相同 3.8KB × N                                                         | 默认 `core` 档：core + 一行主题名；按子会话实际可用工具（memory / read / 都没有）选引导语（§2.4）                                                                          |
-| 索引                 | 仅文件名 + 大小，按 mtime 排序；兜底路径是 `<file>` 占位                       | `文件 — description · when: read_when · Nk`，与 mtime 无关的确定性排序；引导语给**真实绝对目录**                                                                           |
-| 无意义尾部更新       | touch 文件 ⇒ 索引重排 ⇒ 整块 update                                            | 渲染与 mtime 无关 ⇒ touch 零 update；主题正文改动不改块（除非跨 kB 档或改 frontmatter）                                                                                    |
-| 工具                 | list / write（整文件覆盖）/ append，读靠通用 `read`                            | 官方命令名 + **官方字段名**（`path/file_text/old_str/new_str/insert_line/insert_text/old_path/new_path/view_range`）+ `section/query` 扩展 + 旧 `action/name/content` 别名 |
-| 工具面字节           | 1,333B（description 312 + snippet 58 + guidelines 546 + parameters 417）       | **1,443B**（口径见 §4.5，golden 逐字节钉住，上限 1,500B）                                                                                                                  |
-| 写入反馈             | 只回字节数                                                                     | 回预算占用 + **精确重复行**坐标；core / 主题超硬上限拒写并给拆分建议                                                                                                       |
-| 文件系统安全         | 读写都跟随 symlink；append 先查后写可越过上限；create/rename 有 TOCTOU         | 全路径 `O_NOFOLLOW` + fstat 普通文件校验；目录锁串行化变更；`link()` 原子 no-clobber（§3）                                                                                 |
-| 治理                 | 无                                                                             | `/mem doctor` 零成本体检；`/mem tidy`（默认主会话模型，输出字节 + 成本硬上限，超限中止）；`--dry-run` 零成本预览；`--frontmatter` 确定性补元数据                           |
-| 回退                 | —                                                                              | `memory.layout=legacy` + `memory.toolSurface=legacy` ⇒ 注入与工具字节级回到 #22 之前（唯一刻意偏差：symlink 拒绝，§3.1）                                                   |
+| 维度                 | 现状（设计评审 §2.3 实测）                                                     | 本方案目标                                                                                                                                                                                                                                           |
+| -------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 主会话首轮 memory 块 | 3,851B（约 1,100 token），pitfalls 截一半，quota/multi 只剩 138B/157B 半截片段 | **硬上限** `memory.blockBytes`=2,400B（UTF-8 字节，含标题/引导语/sentinel），**零半截文件**，超预算按确定性阶梯降级（§2.3）                                                                                                                          |
+| 子会话首轮           | 与主会话相同 3.8KB × N                                                         | 默认 `core` 档：core + 一行主题名；按子会话实际可用工具（memory / read / 都没有）选引导语（§2.4）                                                                                                                                                    |
+| 索引                 | 仅文件名 + 大小，按 mtime 排序；兜底路径是 `<file>` 占位                       | `文件 — description · when: read_when · Nk`，与 mtime 无关的确定性排序；引导语给**真实绝对目录**                                                                                                                                                     |
+| 无意义尾部更新       | touch 文件 ⇒ 索引重排 ⇒ 整块 update                                            | 渲染与 mtime 无关 ⇒ touch 零 update；主题正文改动不改块（除非跨 kB 档或改 frontmatter）                                                                                                                                                              |
+| 工具                 | list / write（整文件覆盖）/ append，读靠通用 `read`                            | 官方命令名 + **官方字段名**（`path/file_text/old_str/new_str/insert_line/insert_text/old_path/new_path/view_range`）+ `section/query` 扩展 + 旧 `action/name/content` 别名                                                                           |
+| 工具面字节           | 1,333B（description 312 + snippet 58 + guidelines 546 + parameters 417）       | **1,443B**（UTF-8 字节；runtime `typebox@1.3.27` 与 devDep `@sinclair/typebox@0.34.52` 实测相同，但 JSON 键序不同 ⇒ golden 用 canonical JSON 比较，§4.5；上限 1,500B）                                                                               |
+| 写入反馈             | 只回字节数                                                                     | 回预算占用 + **精确重复行**坐标；core / 主题超硬上限拒写并给拆分建议                                                                                                                                                                                 |
+| 文件系统安全         | 读写都跟随 symlink；append 先查后写可越过上限；create/rename 有 TOCTOU         | 目录内**文件级** symlink 全路径拒绝（含 legacy）；slug 目录 symlink 允许但每次操作 canonicalize 一次（用户显式信任）；目录锁串行化全部变更（含 `/mem import`）；临时文件替换保证全写或不写；`link()` 原子 no-clobber；fs 原语只在 `safe-fs.ts`（§3） |
+| 治理                 | 无                                                                             | `/mem doctor` 零成本体检；`/mem tidy`（默认主会话模型；提案 run 由 runtime 强制只读工具域，零写入能力；输出字节 + 成本硬上限，无价模型允许但标「无成本保证」）；`--dry-run` 零成本预览；`--frontmatter` 确定性补元数据                               |
+| 回退                 | —                                                                              | `memory.layout=legacy` + `memory.toolSurface=legacy` ⇒ 注入与工具字节级回到 #22 之前（唯一刻意偏差：文件级 symlink / 非普通文件拒绝，§3.1；文件名接受规则不变）                                                                                      |
 
 **核心设计取舍**：保留 stable snapshot + tail update 机制和 `subagent:prompt-sections` 持久化（设计评审 §5.1），只换「provider 返回什么」。hub 只做一处向后兼容改动（`pointerHint` 允许函数，**在 hub 内求值、异常降级，P0 实现并测试**），`stable-section.ts` / `fold.ts` / `update-message.ts` / `store.ts` 不动。
 
@@ -36,6 +37,20 @@
 7. 零工具命中率改为可测：固定 10 题问题集、baseline 对照、工具调用计数口径（§11.2）。
 8. P0 提交时 `layout`/`toolSurface` 默认值保持 `legacy`，P5 集成后才翻转默认 ⇒ master 每个提交都可发布。
 
+### 0.2 v3 相对 v2 的主要变化（复审 v2）
+
+1. **tidy 提案阶段零写入能力**（新-1，阻塞）：新增 runtime 强制的只读工具域 `SpawnRequest.toolDomain: "readonly"`，与 consult 复用同一强制点与同一常量 `CONSULT_READONLY_TOOLS`（外加 `StructuredOutput`），agent type 与 H2 扩展都不能加宽；tidy 的 spawn 恒带该字段；越权写入测试（§7.0、§10 N 组）。
+2. **access 判定**（新-2）：无法确认 active tools ⇒ `none`；consult 明示为 `read`（只读四工具）（§2.4）。
+3. **`tool.ts` 原位保留为 legacy**（新-3）：v2 工厂放新文件 `tool-v2.ts`，`tests/memory/tool.test.ts` 零迁移；P0 每个提交都可发布（§2.7、§14）。
+4. **fixture 精确子目录所有权**（新-4）：禁止 `tests/fixtures/memory/**` 泛匹配（§14.2）。
+5. **工具面 golden 用 canonical JSON**（v1-1）：两版 typebox 实测字节相同、键序不同（§4.5）。
+6. **L5 按最终文本计算**（v1-3）：最小框架 `M` 为真实文本；L5 只允许不可约的 header + sentinel 超限；property 对实际输出字节断言（§2.3）。
+7. **命中率评测降为探索性指标**（v1-4）：固定运行器（HOME 重定向注入设置、`--no-extensions -e`、超时/重试/归类/版本记录）、每题每组 5 次、`must`/`mustNot` 判定（§11.2）。
+8. **import 入锁、临时文件替换、fs 原语下沉 `safe-fs`**（v1-6）：import 级守卫只放行 `safe-fs.ts`；`lock.ts` 零 fs import（§3）。
+9. **slug 目录 symlink canonicalize + 信任语义；`NAME_RE` 仅 v2 路径**（v1-7 主会话裁定）（§3.1）。
+10. **无价模型 tidy 允许 + 警告**（N1）：删除 `memory.tidy.allowUnpriced`，只保留回合/输出字节/超时硬上限（§7.1、§9）。
+11. **包拆分**：P0 从两个提交变为三个（新增独立的 `P0-r` runtime 只读工具域）；P0-b 不再搬迁 `tool.ts`（§14）。
+
 ## 1. 现状要点（只列方案依赖的事实）
 
 - `memorySection`（`src/memory/inject.ts:112-137`）是 hub 的同步 provider；RenderCache 键为 `cwd + inlineMax:byteCap:indexMax`，指纹 `name:size:floor(mtimeMs)`（`render.ts:83-101`）。
@@ -46,6 +61,11 @@
 - `/mem`（`command.ts`）：`cwd = ctx.cwd` **未做 worktree-origin 解析**（与工具/注入不一致，本方案顺手修）。
 - 子会话类型影响：内置 `Plan` 工具含 `memory`；用户的 `verifier` / `reviewer` / `Explore` 工具表不含 `memory`；consult 只读域 `CONSULT_READONLY_TOOLS = read/grep/find/ls`（`tool-scope.ts:75`）。子会话扩展实例可通过 `pi.getActiveTools()` 读到本会话实际工具表（`src/context-switch/child.ts:470` 已有先例）。
 - 已有 memory 测试（`tests/memory/*.test.ts`、`tests/sysprompt/memory-section.test.ts`）用 `DEFAULT_SETTINGS.memory`。
+- **typebox 双版本**：`package.json` devDep `@sinclair/typebox ^0.34.49`（装 0.34.52）；pi 0.87.1 运行时把 `@sinclair/typebox` 别名到自带的 `typebox@1.3.27`（extension loader `getAliases()` / `VIRTUAL_MODULES`）。两版对同一 schema 的 `JSON.stringify` 字节数相同但**键序不同**（0.34：`{"const":"view","type":"string"}`；1.3：`{"type":"string","const":"view"}`）——v2「序列化结果相同」的说法不成立（复审 v1-1）。
+- 内置 `Plan` 工具表 `["read","bash","web_search","memory"]`（`src/config/agent-types.ts:153`）含 `bash`；用户同名 agent 文件会**遮蔽**内置类型（first-registered wins）——agent type 不是安全边界（复审 新-1）。
+- runtime-adapter 对 consult run 在 H2 之后强制 `sessionSpec.tools = CONSULT_READONLY_TOOLS`，enforcer policy 用同一常量、零 grant，所有注入分支 `!isConsultRun` 守卫（`src/service/runtime-adapter.ts:600-775,785`）——§7.0 复用的只读先例。
+- `tests/memory/tool.test.ts:14` 直接 import `src/memory/tool.ts` 的 `createMemoryTool` / `MemoryToolParams`；`tests/memory/store.test.ts` 同步调用 `importProject` / `importAll`。
+- legacy `listMemory` 接受任意 `*.md` 文件名（无 `NAME_RE`），只有 `writeMemoryFile` 校验 `NAME_RE`；`importProject` 无锁、`existsSync`→`writeFileSync` 有 TOCTOU 且跟随 symlink；`discoverCCProjects` 对 CC 根用 `statSync`（跟随）。
 - 真实目录 5 文件、12,706B；pitfalls.md `pin: true` 5,115B，其 `##` 节字节：用户偏好 1,030 / 并发 546 / git 1,153 / 运行时 1,115 / 已落地 1,023；其余 4 个文件均 `source: agent`、无 description、无 read_when、有 H1 标题。
 - 主会话模型可从 `ctx.model`（`Model | undefined`，含 `provider/id/cost`）读取；价格表 `cost.{input,output,cacheRead,cacheWrite}` 单位 USD / 1M token。consult 已有首请求估价先例 `estimateFirstRequestUsd`（`src/consult/tool.ts:403`）与回合边界成本闸 `createCapWatcher`（`src/consult/watcher.ts`）。
 
@@ -53,13 +73,13 @@
 
 ### 2.1 文件角色与准入规则（「禁止半截文件」）
 
-| 角色         | 判定                                                                                                       | 注入方式                                                     |
-| ------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| primary core | `core.md` 存在 ⇒ 它；否则按文件名序第一个 `pin: true` 且非 archived 的文件（**降级**，D01 标注为迁移过渡） | 整文件；放不下则**整节准入**（见下）；再放不下 ⇒ 只进索引    |
-| extra pinned | 其余 `pin: true`、非 archived 的文件                                                                       | 只允许**整文件**放进剩余 core 预算；放不下 ⇒ 只进索引并标 📌 |
-| topic        | 其余全部                                                                                                   | **永不内联**，只进索引                                       |
-| archived     | frontmatter `status: archived`                                                                             | 不进索引，只计数（`+N archived`）；`view` / `search` 仍可达  |
-| 不可寻址     | 非普通文件（symlink、目录、FIFO…）或不符合 `NAME_RE`                                                       | 不渲染、不计数、不读取；体检 D14 报告                        |
+| 角色         | 判定                                                                                                                                                             | 注入方式                                                     |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| primary core | `core.md` 存在 ⇒ 它；否则按文件名序第一个 `pin: true` 且非 archived 的文件（**降级**，D01 标注为迁移过渡）                                                       | 整文件；放不下则**整节准入**（见下）；再放不下 ⇒ 只进索引    |
+| extra pinned | 其余 `pin: true`、非 archived 的文件                                                                                                                             | 只允许**整文件**放进剩余 core 预算；放不下 ⇒ 只进索引并标 📌 |
+| topic        | 其余全部                                                                                                                                                         | **永不内联**，只进索引                                       |
+| archived     | frontmatter `status: archived`                                                                                                                                   | 不进索引，只计数（`+N archived`）；`view` / `search` 仍可达  |
+| 不可寻址     | 非普通文件（文件级 symlink、目录、FIFO…）；**v2 路径**（tiered 渲染、v2 工具、体检、tidy）另加「不符合 `NAME_RE`」——legacy 路径保持「任意 `*.md`」旧规则（§3.1） | 不渲染、不计数、不读取；体检 D14 报告                        |
 
 **pin 语义收敛**（决策 1）：`pin: true` 从「内联优先级 + 可被截断」收敛为「申请进入 core 预算（整文件）」。它不再保证出现在块里；放不下时体检 D03 提示拆分。无 `core.md` 时的降级 primary 允许整节准入——这是当前真实目录（pitfalls.md pinned、无 core.md）迁移前仍能拿到「用户偏好」整节的依据；降级状态永远伴随体检 D01（info）与启动提醒（§6.3），明确它只是迁移过渡。
 
@@ -135,26 +155,39 @@ interface TieredRenderResult {
   omittedSections: string[]; // primary 被跳过的节名
   demotedPinned: string[]; // 降级进索引的 extra pinned
   fullIndexLines: number; // 以完整行出现的索引项数
-  tailKind: "none" | "compact" | "overflow" | "archived-only";
+  tailKind: "none" | "compact" | "overflow" | "archived-only" | "frame-only";
 }
 ```
 
+**记号**（复审 v1-3：全部是**真实渲染文本**的 UTF-8 字节，不是估算）：
+
+- `H` = header 行；`S` = `sentinel + "\n"`；`G` = 按 access 取的 guide 行（§2.2 表，`<dir>` 已替换为真实路径）。
+- `Tmax = "- … +" + L + " more" + (A > 0 ? " (+" + A + " archived)" : "")`：`L` = 全部非 archived 可寻址文件数（最坏情况下任何文件——含 primary——都可能落入索引，故取总数），`A` = archived 数。实际尾行要么是只在放得下时才选用的 compact 名单，要么是计数 ≤ `L` 的溢出行 / archived-only 行 ⇒ 任何实际尾行超出 `bytes(Tmax)` 的部分都由步骤 5 从 `rem` 支付，溢出行与 archived-only 行本身恒 ≤ `bytes(Tmax)`（十进制位数单调）。
+- **最小正常框架** `M = H + "\n\n" + G + "\n" + Tmax + "\n\n" + S`，由导出纯函数 `minimalFrame(input): string` 生成，与渲染器共用 `TIERED_TEMPLATES` 常量（不另写一份字节公式）。
+- **不可约形式** `I = H + "\n\n" + S`：header 是 hub `title` / `skipIf` / update 文案的锚，sentinel 是 legacy 以来的双注入防护契约，二者都不能删。
+
 **分配顺序**（固定，不可配置）：
 
-1. **框架** `F = bytes(header + "\n\n" + guide + "\n" + "\n\n" + sentinel + "\n")`；无可列项时不含 guide。**尾行预留** `Ov = bytes("- … +" + total + " more (+" + archived + " archived)")`（按最大可能计）。
-2. 若 `F + Ov > B` ⇒ **L5 frame-only**：输出 `header + "\n\n" + "- … +<N> files (memory view)"（或 access 对应的 read 形式） + "\n\n" + sentinel + "\n"`，不再尝试 core 与索引。这是唯一允许超过 `B` 的情形（超长 slug），体检 D09 error。
-3. **索引保底** `idxFloor = min(bytes(compact 名单含全部可列项), 240)`；**core 可用额** `coreAvail = max(0, min(C, B − F − Ov − idxFloor))`。
-4. primary：`part = "### " + name + "\n" + fence? + body`；`bytes(part) ≤ coreAvail` ⇒ 整文件；否则整节准入（省略行计入）⇒ **L2**；preamble + 省略行仍放不下 ⇒ 不内联、进索引 ⇒ **L4**。
-5. extra pinned：按文件名序，整文件（含前置 `\n\n`）放得进 `coreAvail − 已用` 就放；否则进索引 📌 ⇒ **L3**。
-6. **索引剩余** `rem = B − F − coreUsed − coreJoins`。取最大的 `k ≤ min(indexMax, 可列项数)`，使 `bytes(前 k 条完整行及换行) + bytes(尾行(k)) ≤ rem`，其中尾行(k) 是「剩余项的 compact 名单，名字按序贪心加入直到放不下，余数记入 `+N more`」；compact 连一个名字都放不下 ⇒ 溢出行。`k < 可列项数` ⇒ **L1**。因 `Ov` 已预留，`k = 0` + 溢出行必定放得下。
+1. `bytes(M) > B` ⇒ **L5 frame-only**（步骤 8）；否则进入正常分配，**预留** `R = bytes(M)`。
+2. **索引保底** `idxFloor = min(240, max(0, bytes(compactAll) − bytes(Tmax)))`（`compactAll` = 含全部可列项的 compact 名单行）；**core 可用额** `coreAvail = max(0, min(C, B − R − idxFloor))`。
+3. primary：`part = "### " + name + "\n" + fence? + body`，连同其后的 `"\n\n"` 一起计入 core 用量；`≤ coreAvail` ⇒ 整文件；否则整节准入（省略行计入，后缀按 access 取、含真实 `<dir>`）⇒ **L2**；preamble + 省略行仍放不下 ⇒ 不内联、进索引 ⇒ **L4**。
+4. extra pinned：按文件名序，整文件（含其后 `"\n\n"`）放得进 `coreAvail − 已用` 就放；否则进索引 📌 ⇒ **L3**。
+5. **索引剩余** `rem = B − R − coreUsed`（`coreUsed` 含 join）。取最大的 `k ≤ min(indexMax, 可列项数)`，使 `Σ bytes(前 k 条完整行 + "\n") + max(0, bytes(尾行(k)) − bytes(Tmax)) ≤ rem`；尾行(k) = 剩余项的 compact 名单（名字按序贪心加入直到放不下，余数记 `+N more`），连一个名字都放不下 ⇒ 溢出行。`k = 0` + 溢出行恒成立。`k < 可列项数` ⇒ **L1**。
+6. 无可列项时省略 `G` 及其换行（输出只会更短）。
 7. 全部完整放下且无 archived ⇒ **L0**。
+8. **L5 frame-only 文本** = `H + "\n\n" + line5 + "\n\n" + S`，`line5` 按序取第一个使总字节 ≤ B 的候选：①access 形式——`- … +<N> files — memory view`（`memory` / `memory+read`）、`- … +<N> files — read <dir>/`（`read`）、`- … +<N> files (not openable in this session)`（`none`）；②通用 `- … +<N> files`；都放不下 ⇒ 输出 `I`。`N` = 可寻址文件总数（与 header 一致）。
 
-**不变量**（property test，seeded 300 例随机 fixture：slug 1–400B、0–60 文件、description 0–400B、CJK/emoji、随机 pin/archived/stale）：
+**L5 是否允许超限**：只允许**不可约部分**超限——仅当 `bytes(I) > B`（slug 极长：header 与 sentinel 各含一次 slug；`B` 最小 800 ⇒ slug 约 350B 以上才可能）时输出恰为 `I` 且超过 `B`；其余 L5 输出一律 ≤ B。D09 对 L5 报 error，写明实际字节与 `B`。
 
-- I-M1：`level ≤ 4 ⇒ bytes(text) ≤ B`；`level = 5 ⇔ F + Ov > B`。
+**不变量**（property test，seeded 300 例随机 fixture：slug 1–1,200B、0–60 文件、description 0–400B、CJK/emoji、随机 pin/archived/stale、四种 access、`B`∈[800, 16384]；**每条都对实际输出 `Buffer.byteLength(result.text, "utf8")` 断言**，不信任渲染器自报的中间量）：
+
+- I-M1a：`result.bytes === Buffer.byteLength(result.text, "utf8")`。
+- I-M1b：`level ≤ 4 ⇒ bytes(text) ≤ B`。
+- I-M1c：`level = 5 ⇔ bytes(minimalFrame(input)) > B`（测试独立调用 `minimalFrame` 复算）。
+- I-M1d：`level = 5 ⇒ bytes(text) ≤ max(B, bytes(I))`；且 `bytes(text) > B ⇒ text === I`。
 - I-M2：输出只依赖（文件名、frontmatter、正文字节、sizeTier、access、设置），改 mtime / readdir 顺序不改变任何字节。
 - I-M3：出现在块中的每个 `## ` 节与源文件逐字相等；不出现 `truncated`。
-- I-M4：每个可寻址非 archived 文件要么内联，要么以完整行出现，要么计入尾行的名字或 `+N`——总数守恒（`N` 与 header 一致）。
+- I-M4：L0–L4 下每个可寻址非 archived 文件要么内联，要么以完整行出现，要么计入尾行的名字或 `+N`——总数守恒（`N` 与 header 一致）；L5 下 `N` 出现在 header（及 `line5`，若有）。
 
 **子会话 core 档**用同一函数，只把步骤 6 的 `k` 固定为 0（全部走 compact 名单）。
 
@@ -170,13 +203,17 @@ interface TieredRenderResult {
 
 - `injectInChildSessions` 保留为总开关：`false` ⇒ 一律 `none`（向后兼容）。
 - `layout=legacy` 时 `childProfile` 只有 `none` 生效，其余值都注入旧块（保证「legacy = 旧行为」）。
-- **access 判定**（决策 4 附加条件「无 read 工具的自定义 agent 需明确降级」）：`wireMemory` 持有 `pi`，provider 渲染时调用 `pi.getActiveTools()`（try/catch；抛错或不存在 ⇒ 视为 `read`），据 `memory` / `read` 是否在列得出 `memory+read | memory | read | none`。结果**按会话粘住**（第一次渲染时求值，`session_start` 时清空），避免动态工具重定向在会话中途改变块文本、制造 tail update。主会话同样适用。`none` 时块仍含 core（规则本身有价值），索引只给名单、引导语明说「本会话无法打开」。
+- **access 判定**（决策 4 附加条件 + 复审 新-2）：provider 渲染时调用 `pi.getActiveTools()`，结果交给纯函数 `accessFromTools(tools: readonly string[] | undefined, toolSurface)`：
+  1. `getActiveTools` 不存在、抛错或返回非数组 ⇒ `tools = undefined` ⇒ **`none`**。无法确认就按最保守的「本会话打不开」渲染，绝不假设有 `read`（tool-scope allowlist 证明自定义 agent 可以没有 `read`）。
+  2. **consult 明示例外**：`tools` 与 `CONSULT_READONLY_TOOLS`（import `src/runtime/tool-scope.ts` 的同一常量）集合相等 ⇒ `read`。consult 的工具域由 runtime-adapter 在 H2 之后强制为这四个（pi allowlist 与 enforcer 同源），所以 consult 永远是 `read`；tidy 只读域（四个 + `StructuredOutput`，§7.0）按规则 3 也得 `read`。
+  3. 其余：由 `memory ∈ tools`（且 `toolSurface=v2`；legacy 工具面没有 view/search，视为不存在）与 `read ∈ tools` 组合出 `memory+read | memory | read | none`。
+     结果**按会话粘住**（首次渲染求值，`session_start` 时清空），避免会话中途工具变化改变块文本、制造 tail update。主会话同样适用（主会话 `getActiveTools` 正常可用）。`none` 时块仍含 core（规则本身有价值），索引只给名单，guide 明说「本会话无法打开」。
 - **agent type 映射**：本期不做（需要 host→child 通道，与 T4 同一件事，§13）。
 - **consult**：fork 会话在 `session_start` 恢复专家的 `subagent:prompt-sections` 快照。专家是子 agent（core 档）且 access 相同 ⇒ 零 update。专家是主会话（`experts:["main"]`）⇒ 快照是主会话完整块，consult 子会话 live 是 core 档 + `read` access（`CONSULT_READONLY_TOOLS`）⇒ **首轮恰好一条 tail update**（≤ B）。代价已知、有界，测试钉住。
 
 ### 2.5 渲染缓存与「touch ≠ 正文变化」
 
-- 指纹函数 `memoryFingerprint` 仍是失效键（readdir + lstat，便宜；P0 把其 `statSync` 换成 `lstatSync` 并跳过非普通文件，legacy 输出对普通文件不变）。
+- 指纹函数 `memoryFingerprint` 仍是失效键（readdir + lstat，便宜；P0 把其 `statSync` 换成 safe-fs 的 lstat 列举并跳过非普通文件；文件名规则保持 legacy，普通文件的指纹不变）。
 - **区分 touch 与正文变化靠渲染确定性（I-M2），不靠指纹**：touch ⇒ 缓存 miss ⇒ 重渲染 ⇒ 文本逐字相同 ⇒ hub `live === announced` ⇒ **零 tail update**。
 - 每文件元数据缓存 `MetaCache`（闭包内，键 `name`，值 `{dev, ino, size, mtimeNs, sha1, meta}`）：lstat 变化才重读该文件；重读后 sha1 相同则复用解析结果。
 - topic 文件只读头部（≤4KB，frontmatter + 首个 H1）；primary / extra pinned 读全文；一律经 `safe-fs.readRegular*`（§3.1）。
@@ -223,58 +260,77 @@ export interface SectionRegistration {
 1. `memory.layout=legacy` ⇒ memory section 文本与 #22 之前**逐字节相同**（任意 `systemPrompt.mode`，含 `session_start` reason = `new` / `reload` / `resume` 三种恢复路径，决策 10 附加条件）。
 2. `memory.toolSurface=legacy` ⇒ memory 工具定义（name/label/description/promptSnippet/promptGuidelines/parameters）与执行输出逐字节相同。
 3. `systemPrompt.mode=legacy` 只保证 hub 折叠机制不变，**不隐含** `memory.layout=legacy`（两个开关正交）。
-4. **唯一刻意偏差**：symlink 与非普通文件在 legacy 下同样被跳过（读）/ 拒绝（写）（§3.1，新决策 N2）。golden fixture 不含 symlink，因此逐字节断言不受影响；偏差由 §10 B 组测试单独钉住。
+4. **唯一刻意偏差**：目录内**文件级** symlink 与非普通文件在 legacy 下同样被跳过（读）/ 拒绝（写）（§3.1，用户决策 N2）。**文件名接受规则不变**：legacy 路径仍接受任意 `*.md`，`NAME_RE` 只在 v2 路径启用（主会话裁定：legacy 字节级不变优先）。golden fixture 不含 symlink，另有 `synthetic/legacy-names/`（非白名单文件名）钉住 legacy 接受规则；偏差本身由 §10 B 组单独钉住。
 
-保证手段：P0 第一个提交在**未改动的代码**上按 §10.1 协议生成 `tests/fixtures/memory-legacy-golden.json`（永不重新生成，同 compact-hint 黄金规则）；`render.ts` 只允许「新增导出」和「把文件打开原语换成 `safe-fs`」两类改动；现 `tool.ts` 原样搬到 `tool-legacy.ts`。
+保证手段：P0 第一个提交在**未改动的代码**上按 §10.1 协议生成 `tests/fixtures/memory-legacy-golden.json`（永不重新生成，同 compact-hint 黄金规则）；`render.ts` 只允许「新增导出」和「把文件打开原语换成 `safe-fs`」两类改动；现 `src/memory/tool.ts` **原位保留为 legacy 实现，P0–P5 全程零改动**（v2 工厂放新文件 `tool-v2.ts`），既有 `tests/memory/tool.test.ts` 无需迁移（复审 新-3）。
 
 ## 3. 文件系统安全与并发（评审 v1 #6、#7）
 
-### 3.1 `safe-fs.ts`：统一拒绝 symlink 与非普通文件（P0，冻结）
+### 3.1 `safe-fs.ts`：memory 模块唯一的 fs 出入口（P0，冻结）
 
-所有读取、注入、`view`/`search`、体检、tidy 快照/备份/应用、restore、CC import 目标写入，**一律**经 `src/memory/safe-fs.ts`，禁止在 `src/memory/**` 其它文件直接调用 `readFileSync`/`writeFileSync`/`statSync`/`appendFileSync`（P0 加一条 grep 守卫测试：`src/memory/**/*.ts` 除 `safe-fs.ts`、`paths.ts` 外不得出现这些标识符）。
+所有读取、注入、`view`/`search`、体检、tidy 快照/备份/应用、restore、CC import、目录锁，**一律**经 `src/memory/safe-fs.ts`。
 
-| 函数                                               | 语义                                                                                                                                                                                                                                         |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `listRegular(dir)`                                 | `readdirSync(dir, { withFileTypes: true })` + 对每个 `*.md` `lstatSync`：只保留 `isFile() && !isSymbolicLink()` 且名字过 `NAME_RE` 的项；其余进 `skipped[]`（`{name, kind: "symlink" \| "dangling" \| "not-file" \| "bad-name"}`）供体检 D14 |
-| `openRegular(dir, name, flags)`                    | `openSync(join(dir,name), flags \| O_NOFOLLOW)`；随后 `fstatSync(fd).isFile()` 否则关闭并抛 `MemoryError("not a regular file")`。`O_NOFOLLOW` 使「lstat 后被换成 symlink」的交换攻击在 open 时以 `ELOOP` 失败（无 TOCTOU 窗口）              |
-| `readRegular(dir, name)` / `readRegularHead(…, n)` | 基于 `openRegular` 的全文 / 头部读取，返回 `{ text, stat: { dev, ino, size, mtimeNs, ctimeNs } }`（`fstatSync(fd, { bigint: true })`）                                                                                                       |
-| `writeTempRegular(dir, name, data)`                | 在 `dir` 下 `openSync(".<name>.<pid>.<rand8>.tmp", O_CREAT\|O_EXCL\|O_WRONLY\|O_NOFOLLOW, 0o600)` 写入 + `fsyncSync`，返回临时名                                                                                                             |
-| `replaceAtomic(dir, tmp, name)`                    | `renameSync(tmp, name)`（rename 替换目标目录项本身，不跟随目标 symlink）                                                                                                                                                                     |
-| `createExclusive(dir, tmp, name)`                  | `linkSync(tmp, name)`（目标存在 ⇒ `EEXIST`，原子 no-clobber）+ `unlinkSync(tmp)`；`EPERM/ENOTSUP`（文件系统不支持硬链接）⇒ 退化为「持锁下 `lstat` 不存在再 `renameSync`」，并在结果里带 `note: non-atomic create (no hard links)`            |
-| `renameNoClobber(dir, from, to)`                   | 持锁下 `lstat(from)` 为普通文件 → `linkSync(from, to)`（`EEXIST` ⇒ 目标已存在）→ `unlinkSync(from)`；无硬链接支持时同上退化                                                                                                                  |
-| `ensurePrivateDir(path)`                           | `mkdirSync(recursive, 0o700)` 后 `lstatSync`：必须 `isDirectory() && !isSymbolicLink()`，否则抛错（用于 `.trash` / `.backup/<id>` / `.lock` 所在目录）                                                                                       |
+**守卫**（复审 v1-6）：`src/memory/**/*.ts` 中**只有 `safe-fs.ts`** 可以引用 `node:fs` / `fs` / `node:fs/promises`（静态 import、`require(...)`、动态 `import(...)` 都算；`import type` 除外）。P0 守卫测试 `tests/memory/fs-guard.test.ts` 做 import 级扫描——比 v2 的标识符黑名单严格（`openSync`/`renameSync`/`linkSync`/`unlinkSync` 等也被覆盖），例外清单只有 `src/memory/safe-fs.ts` 一项；`lock.ts` 与 `tidy/**` 不是例外。新增例外 = 冻结面变更。
 
-- **memory 目录本身**（`<memoryRoot>/<slug>`）：允许是 symlink（用户用 dotfiles 同步整个目录属于用户自己的配置），所有文件操作都在其内部按上表进行；`.trash` / `.backup` 子目录必须是真实目录（新决策 N2）。
-- **legacy 路径同样加固**：`store.listMemory` / `writeMemoryFile` / `importProject` 与 `render.ts` 的 `readHead` / `readFileSync` 换成 `safe-fs` 原语。对普通文件的输出逐字节不变（legacy golden 守护）；symlink 项在 legacy 下被跳过/拒绝——§2.7 口径 4 的唯一偏差。
+**目录信任语义**（主会话裁定 v1-7）：
+
+- `<memoryRoot>`、`<memoryRoot>/<slug>` 及其祖先目录是**用户配置**，允许是符号链接（例如把 memory 目录挪到别处同步）。同 uid 信任模型下，能创建该链接的人本来就能直接写这些文件，所以链接目标被视为**用户显式信任的位置**，其中的普通 `.md` 照常注入。这是写进 AGENTS.md、`/mem path` 输出与体检 D14 的明确语义，不是遗漏。
+- **每次操作 canonicalize 一次**：`canonicalMemoryDir(cwd, paths) → { display, real, linked } | undefined`。`display = memoryDirFor(cwd)`（已做 worktree-origin 解析）；`real = realpathSync(display)`；随后 `lstat(real).isDirectory()`，否则视为无 memory 并报 D14 error；目录不存在 ⇒ `undefined`（读路径视为空目录，写路径先 `mkdir` 再 canonicalize）。一次渲染 / 一条工具命令 / 一次 import / 一次 tidy apply / 一次 restore 内的所有文件操作都用同一个 `real` 拼路径——操作中途目录链接被改指，也不会跨目录混读混写。
+- **渲染文本里的 `<dir>` 用 `display`**（稳定、用户认得；改指链接不改块文本 ⇒ 不制造 tail update），fs 操作一律用 `real`。`linked` 时 `/mem path` 与 D14（info）显示 `display → real`。
+- **目录内**：文件级符号链接一律拒绝（读跳过、写拒绝，含 legacy 全部路径，用户决策 N2）；`.trash` / `.backup` / `.backup/<id>` 必须是真实目录（`ensurePrivateDir`）；`.lock` 以 `O_EXCL|O_NOFOLLOW` 创建。
+
+**文件名规则**（主会话裁定 v1-7）：`listRegular(real, { names })` 的 `names: "v2"` ⇒ 只保留过 `NAME_RE` 的项（tiered 渲染、v2 工具、体检、tidy）；`names: "legacy"` ⇒ 任意以 `.md` 结尾的名字（legacy 渲染与指纹、legacy 工具 list、`layout=legacy` 下的 `/mem` / `/mem list`），与 #22 前逐字节一致。两种规则下文件级 symlink / 非普通文件都被跳过。legacy **写入**本来就校验 `NAME_RE`（`writeMemoryFile`），不变。
+
+| 函数                                                    | 语义                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `canonicalMemoryDir(cwd, paths)`                        | 见上「目录信任语义」                                                                                                                                                                                                                                                                  |
+| `listRegular(dir, { names })`                           | `readdirSync(dir, { withFileTypes: true })` + 对每个 `*.md` `lstatSync`：只保留 `isFile() && !isSymbolicLink()`（`names:"v2"` 时再过 `NAME_RE`）；其余进 `skipped[]`（`{name, kind: "symlink" \| "dangling" \| "not-file" \| "bad-name"}`，`bad-name` 只在 v2 出现）供 D14            |
+| `openRegular(dir, name, flags)`                         | `openSync(join(dir,name), flags \| O_NOFOLLOW)`；随后 `fstatSync(fd).isFile()`，否则关闭并抛 `MemoryError("not a regular file")`。`O_NOFOLLOW` 使「lstat 后被换成 symlink」的交换攻击在 open 时以 `ELOOP` 失败（无 TOCTOU 窗口）                                                      |
+| `readRegular(dir, name)` / `readRegularHead(…, n)`      | 基于 `openRegular` 的全文 / 头部读取，返回 `{ text, stat: { dev, ino, size, mode, mtimeNs, ctimeNs } }`（`fstatSync(fd, { bigint: true })`）                                                                                                                                          |
+| `writeAll(fd, buf)`                                     | 循环 `writeSync` 直到写完（Node 的 `writeSync` 不保证一次写完）；写入 0 字节或抛错 ⇒ 抛 `MemoryError("short write: k/n bytes")`。**本模块所有写都经它**                                                                                                                               |
+| `writeTempRegular(dir, name, data, mode)`               | 在 `dir` 下 `openSync(".<name>.<pid>.<rand8>.tmp", O_CREAT\|O_EXCL\|O_WRONLY\|O_NOFOLLOW, mode)` + `writeAll` + `fsyncSync`，返回临时名；**任何失败 ⇒ 关闭并 `unlinkSync` 临时文件后重抛（目标零改动）**。`mode`：替换已有文件时取原文件 `mode & 0o777`，新建为 0600                  |
+| `replaceAtomic(dir, tmp, name)`                         | `renameSync(tmp, name)`（rename 替换目标目录项本身，不跟随目标 symlink）                                                                                                                                                                                                              |
+| `createExclusive(dir, tmp, name)`                       | `linkSync(tmp, name)`（目标存在 ⇒ `EEXIST`，原子 no-clobber）+ `unlinkSync(tmp)`；`EPERM/ENOTSUP`（不支持硬链接）⇒ 退化为「持锁下 `lstat` 不存在再 `renameSync`」，结果带 `note: non-atomic create (no hard links)`                                                                   |
+| `renameNoClobber(dir, from, to)`                        | 持锁下 `lstat(from)` 为普通文件 → `linkSync(from, to)`（`EEXIST` ⇒ 目标已存在）→ `unlinkSync(from)`；无硬链接支持时同上退化                                                                                                                                                           |
+| `ensurePrivateDir(path)`                                | `mkdirSync(recursive, 0o700)` 后 `lstatSync`：必须 `isDirectory() && !isSymbolicLink()`，否则抛错（`.trash` / `.backup/<id>`）                                                                                                                                                        |
+| `writeInPlaceLegacy(dir, name, data)`                   | legacy `write` 专用：`openRegular(O_WRONLY\|O_CREAT\|O_TRUNC, 0o600)` + `writeAll`——与 `writeFileSync` 相同的就地截断语义（保留 inode 与已有权限），只多了 `O_NOFOLLOW`；失败时残留部分内容，与 #22 前 `writeFileSync` 相同（legacy 冻结语义）                                        |
+| `appendLegacy(dir, name, data)`                         | legacy `append` 专用：`openRegular(O_WRONLY\|O_APPEND\|O_CREAT, 0o600)` → `fstat` 得 `size0` → `writeAll`；失败时若 `fstat.size === size0 + 已写字节`（期间无他人插写）⇒ `ftruncateSync(fd, size0)` 回滚后抛错，否则不截断（不抹掉他人追加），错误注明 `partial append left in place` |
+| `lockCreate` / `lockRead` / `lockBreak` / `lockRelease` | §3.2 的锁文件原语：`O_CREAT\|O_EXCL\|O_WRONLY\|O_NOFOLLOW, 0o600` 创建 + `writeAll`（`EEXIST` ⇒ 返回 `false`）；读回 `{ payload, mtimeMs }`；`renameSync(".lock", ".lock.stale-<token>")` + `unlinkSync`；按 token 释放                                                               |
+| `isDirFollowOutside(path)`                              | **唯一跟随符号链接的原语**，只给 `discoverCCProjects` 探测 CC 源目录（memory 目录之外、用户自己的 `~/.claude/projects/*/memory`）；函数名即声明                                                                                                                                       |
+
+- **legacy 路径同样加固**：`store.listMemory` / `writeMemoryFile` / `importProject` / `discoverCCProjects` 与 `render.ts` 的 `readHead` / `readFileSync` / `memoryFingerprint` 全部换成上表原语（文件名规则用 `names:"legacy"`）。普通文件的输出逐字节不变（legacy golden 守护）；文件级 symlink 在 legacy 下被跳过/拒绝——§2.7 口径 4 的唯一偏差。
 - `nlink > 1` 的硬链接无法判定是否指向目录外，只在体检 D14 报 info，不拒绝。
 - 平台：`fs.constants.O_NOFOLLOW` 不存在（非 POSIX）时退化为 `lstat → open → fstat` 并比对 `dev/ino`，不一致即拒绝（仓库其余部分已是 POSIX-only，此为防御）。
 
 ### 3.2 目录锁 `lock.ts`（P0，冻结）
 
-所有**变更**（v2 的 create/str_replace/insert/delete/rename/write/append、tidy apply、`--frontmatter` apply、restore）在同一 memory 目录上串行化：
+所有**变更**（v2 的 create/str_replace/insert/delete/rename/write/append、tidy apply、`--frontmatter` apply、restore、**`/mem import`**（`importProject` / `importAll`，复审 v1-6））在同一 memory 目录（canonical `real`）上串行化：
 
-- 锁文件 `<memDir>/.lock`，`openSync(O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW, 0o600)` 获得，内容 `{"pid":…,"host":…,"token":"<rand16>","at":<ms>}`。
-- `withMemoryDirLock<T>(dir, body: () => T, opts?: { timeoutMs?: number }): Promise<T>`：`body` **必须是同步函数**（持锁期间不 await，避免事件循环插入 `before_agent_start` 读到半应用状态）；获取失败每 25ms 重试，总等待默认 2,000ms（`setTimeout(...).unref()`，不阻塞 `pi -p` 退出），超时抛 `MemoryError("memory dir busy (lock held by pid N since Ts); retry")`。
-- **陈旧锁**：锁文件 mtime 早于 30s，或同 host 且 `process.kill(pid, 0)` 报 `ESRCH` ⇒ 打破：`renameSync(".lock", ".lock.stale-<token>")`（只有一个打破者能成功）后 `unlinkSync`，重新竞争。
-- 释放：读回 token 相符才 `unlinkSync`（防止误删别人刚拿到的锁）；`finally` 中执行，异常不外泄。
+- **`lock.ts` 零 fs import**：只用 safe-fs 的 `lockCreate/lockRead/lockBreak/lockRelease`、`node:os` 的 `hostname()` 与定时器；fs 守卫对它不开例外。
+- 锁文件 `<real>/.lock`，内容 `{"pid":…,"host":…,"token":"<rand16>","at":<ms>}`。
+- `withMemoryDirLock<T>(dir, body: () => T, opts?: { timeoutMs?: number }): Promise<T>`：`body` **必须是同步函数**（持锁期间不 await，避免事件循环插入 `before_agent_start` 读到半应用状态）；获取失败每 25ms 重试，总等待默认 2,000ms（`setTimeout(...).unref()`，不阻塞 `pi -p` 退出），超时抛 `MemoryError("memory dir busy (lock held by pid N since Ts); retry")`。body 执行超过 5s ⇒ WARN（陈旧阈值 30s 的安全余量）。
+- **陈旧锁**：锁文件 mtime 早于 30s，或同 host 且 `process.kill(pid, 0)` 报 `ESRCH` ⇒ `lockBreak`（rename 只有一个打破者能成功）后重新竞争。
+- 释放：`lockRelease` 读回 token 相符才删除（防止误删别人刚拿到的锁）；`finally` 中执行，异常不外泄。
 - 读取类命令（view/search/list、注入、体检）**不取锁**：它们读的是 rename 原子替换后的完整文件，最多看到旧版本，不会看到半写内容。
 
 ### 3.3 各变更的原子语义（明确接受的并发语义）
 
-| 操作                                                         | 语义                                                                                                                                                                                                                                              |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 读-改-写（str_replace/insert/write 覆盖、tidy/restore 应用） | 持锁：`readRegular` 得 `{text, stat0}` → 计算新内容 → `writeTempRegular` → 复查 `lstat(bigint)` 的 `dev/ino/size/mtimeNs/ctimeNs` 与 `stat0` 一致 → `replaceAtomic`；不一致 ⇒ 删临时文件并报 `changed concurrently; view and retry`（不自动重试） |
-| create                                                       | 持锁：`writeTempRegular` → `createExclusive`（`EEXIST` ⇒ `already exists`）                                                                                                                                                                       |
-| rename                                                       | 持锁：`renameNoClobber`                                                                                                                                                                                                                           |
-| delete（软删除）                                             | 持锁：`ensurePrivateDir(.trash)` → `renameSync(name, .trash/<id>-<name>)`，`id = <YYYYMMDDTHHmmssSSSZ>-<pid>-<rand6>`（唯一，决策 6）；随后按文件名时间序淘汰到 20 个（淘汰也只删 `.trash` 内普通文件）                                           |
-| append（v2）                                                 | 持锁：`openRegular(O_WRONLY\|O_APPEND[\|O_CREAT], 0o600)` → `fstat` 得当前 size → 若末字节非 `\n` 补换行 → 检查 `size + appended ≤ 适用上限`（§4.4）否则**整次拒绝、零字节写入** → `writeSync` 一次写完 → close。frontmatter 不动（R4）           |
-| append（legacy toolSurface）                                 | 冻结语义：无锁 O_APPEND（与 #22 前逐字节一致），只加 §3.1 symlink 拒绝                                                                                                                                                                            |
+| 操作                                                         | 语义                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 读-改-写（str_replace/insert/write 覆盖、tidy/restore 应用） | 持锁：`readRegular` 得 `{text, stat0}` → 计算新内容 → `writeTempRegular` → 复查 `lstat(bigint)` 的 `dev/ino/size/mtimeNs/ctimeNs` 与 `stat0` 一致 → `replaceAtomic`；不一致 ⇒ 删临时文件并报 `changed concurrently; view and retry`（不自动重试）                                                                                                                                                                                                 |
+| create                                                       | 持锁：`writeTempRegular` → `createExclusive`（`EEXIST` ⇒ `already exists`）                                                                                                                                                                                                                                                                                                                                                                       |
+| rename                                                       | 持锁：`renameNoClobber`                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| delete（软删除）                                             | 持锁：`ensurePrivateDir(.trash)` → `renameSync(name, .trash/<id>-<name>)`，`id = <YYYYMMDDTHHmmssSSSZ>-<pid>-<rand6>`（唯一，决策 6）；随后按文件名时间序淘汰到 20 个（淘汰也只删 `.trash` 内普通文件）                                                                                                                                                                                                                                           |
+| append（v2）                                                 | 持锁：`readRegular` 得 `{text, stat0}` → 末字节非 `\n` 则补换行 → 检查变更后大小 ≤ 适用上限（§4.4），否则**整次拒绝** → 新内容 = 原字节原样 + 追加字节（frontmatter 不动，R4）→ `writeTempRegular`（保留原 mode）→ 复查 `stat0` → `replaceAtomic`。**全写或不写**：短写 / ENOSPC 只会失败在临时文件上，目标零改动（复审 v1-6，放弃 v2 的「O_APPEND + 一次 writeSync」）。代价：每次 append 读写整个文件（≤ `maxFileBytes`，可忽略）               |
+| write / append（legacy toolSurface）                         | 冻结语义：无锁，与 #22 前成功路径逐字节一致；write 经 `writeInPlaceLegacy`、append 经 `appendLegacy`（都拒 symlink；append 短写尽力回滚，§3.1）                                                                                                                                                                                                                                                                                                   |
+| import（`/mem import`，两种 surface 共用）                   | `importProject` 改为 `async`：目标目录 `mkdir` + canonicalize 后 `withMemoryDirLock`；源文件经 `readRegular(srcDir, name)`（CC 源里的文件级 symlink 同样跳过，计入 `skipped`）；非 `--force` ⇒ `writeTempRegular` + `createExclusive`（`EEXIST` ⇒ `skipped++`，消除 `existsSync`→写 的 TOCTOU）；`--force` ⇒ 目标是普通文件则临时文件替换，是 symlink 则跳过；`importAll` 逐项串行 await。普通文件的产物字节与返回值同 #22 前（legacy golden A6） |
 
 **接受的语义边界**（写进 `tool.ts` 文件头注释与 AGENTS.md）：
 
 - 在所有写者都是 v2 memory 工具 / tidy / restore 的前提下，硬上限与「不覆盖他人改动」严格成立（锁串行化）。
 - **不合作写者**（用户编辑器、legacy toolSurface 的另一进程、Claude Code）不取锁：读-改-写的最终 `lstat` 复查把丢失更新窗口缩到「复查到 rename」之间的微秒级，未完全消除；append 上限在混用 legacy 进程时可被对方的单次写越过（最多对方一次写入的字节）。这两点是明确接受的残余风险，不再宣称「无锁 O_APPEND + 硬上限」。
 - 锁超时是用户可见错误，不静默降级为无锁写。
+- legacy toolSurface 的 write/append 与 #22 前一样无锁；legacy append 的短写回滚是尽力而为（期间有他人插写则不回滚，只报错）。
 
 ## 4. 工具层 T1–T3
 
@@ -306,7 +362,7 @@ export const MemoryToolParamsV2 = Type.Object({
 ```
 
 - 参数不带逐项 description（字节预算，§4.5）；命令语法集中写在工具 `description` 一处。
-- `view_range` 用 `Type.Array(minItems/maxItems)` 而非 `Type.Tuple`，兼容运行时 typebox 1.x 别名（实测 0.34 与 1.3 序列化同为 861B）。
+- `view_range` 用 `Type.Array(minItems/maxItems)` 而非 `Type.Tuple`，兼容运行时 typebox 1.x 别名（实测 0.34.52 与 1.3.27 序列化字节数同为 861B，但键序不同，见 §4.5）。
 - `exactOptionalPropertyTypes` 下所有可选字段按 `params.x !== undefined` 判断。
 
 ### 4.2 别名、互斥与优先级（纯函数 `normalizeMemoryCall(params) → NormalizedCall | Error`，P2）
@@ -397,7 +453,14 @@ toolSurfaceBytes(def) =
   bytes(JSON.stringify(def.parameters));
 ```
 
-`name`/`label` 为常量不计。`JSON.stringify` 不序列化 typebox 的 symbol 键；0.34（devDep，测试环境）与 1.3（pi 运行时别名）对本 schema 序列化结果相同（已实测）。
+`name`/`label` 为常量不计。`JSON.stringify` 不序列化 typebox 的 symbol 键（`[Kind]` 等）。
+
+**跨 typebox 版本口径**（复审 v1-1）：pi 0.87.1 运行时把 `@sinclair/typebox` 别名到自带 `typebox@1.3.27`；测试环境用 devDep `@sinclair/typebox@0.34.52`。二者对同一 schema 产出**相同的键值集合、不同的键序**，因此本方案**不声称跨版本 JSON 文本相同**：
+
+- golden 存 **canonical JSON**：`canonicalJson(v)` = 对象键按码点序递归排序、数组保持原序、`JSON.stringify` 无空白；比较时被测对象同样 canonicalize 后逐字节比较。
+- 字节预算按 `toolSurfaceBytes`（原始 `JSON.stringify`，不 canonicalize）计算；键序不改变字节数，测试在两个 typebox 下分别计算并断言**两者相等且 ≤ 上限**。
+- 「运行时 typebox」由测试从 pi 包自身解析：`createRequire(import.meta.resolve("@earendil-works/pi-coding-agent")).resolve("typebox")`——跟随 pi 实际锁定的版本，不依赖 hoisting、不新增依赖；解析失败 ⇒ 测试失败（不 skip）。
+- 实测（2026-09-27，两版各构建一次）：v2 parameters 原始 861B / canonical 861B（两版相同）；legacy parameters 417B / 417B；两版 canonical 文本逐字节相等、原始文本不等。合计见下。
 
 **v2 冻结文本**（P0 写入 `tool-surface.ts`，逐字节 golden）：
 
@@ -410,7 +473,7 @@ toolSurfaceBytes(def) =
 
 **实测合计 1,443B**（legacy 1,333B，净增 110B；主会话 memory 块约省 1.6KB，子会话更多）。命令枚举保留为 Literal Union（模型得到枚举约束）；若改成纯字符串可降到 1,105B，但失去 schema 级约束，不采用。
 
-**验收**：`tests/fixtures/memory-tool-surface.json` 存 legacy 与 v2 两份完整序列化文本（`{description, promptSnippet, promptGuidelines, parameters}` 的 JSON），测试断言：①序列化逐字节等于 golden；②v2 `toolSurfaceBytes ≤ 1,500`、legacy `= 1,333`；③promptGuidelines 恰 1 行。改动任何工具文本都必须同步修订本节与 golden（视为冻结面变更，上报主会话）。
+**验收**：`tests/fixtures/memory-tool-surface.json` 存 legacy 与 v2 两份 `{description, promptSnippet, promptGuidelines, parameters}` 的 **canonical JSON**（另附只作记录、不参与比较的 `typeboxDev` / `typeboxRuntime` 版本号与 `generatedAt`）。测试断言：①两个 typebox 下 canonical 序列化均逐字节等于 golden，golden 本身再 canonicalize 一次不变（防止有人改回原始文本比较）；②两个 typebox 下 v2 `toolSurfaceBytes` 相等且 ≤ 1,500，legacy 均 = 1,333；③promptGuidelines 恰 1 行。legacy 工具定义在 `tool.ts` 中全程零改动，改前改后的运行时都用同一个 typebox 构建同一组 `Type.*` 调用，因此 canonical 相等即运行时原始字节相等。改动任何工具文本都必须同步修订本节与 golden（冻结面变更，上报主会话）。
 
 ## 5. frontmatter 契约
 
@@ -446,20 +509,20 @@ source: agent
 
 纯函数 `runDoctor(snapshot, settings) → DoctorFinding[]`（`src/memory/doctor.ts`），每条 `{ id, severity: "error"|"warn"|"info", file?, line?, message, fix? }`：
 
-| id  | 级别       | 规则                                                                                                                                                                                                                    |
-| --- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D01 | info       | 无 `core.md`，正以 pinned 文件降级充当 core（迁移过渡，提示 `/mem tidy`）                                                                                                                                               |
-| D02 | error      | primary core 正文 > `coreBytes`（含整节准入后仍有省略节、或 L4 未内联）                                                                                                                                                 |
-| D03 | warn       | `pin: true` 文件未能整文件进入 core 预算                                                                                                                                                                                |
-| D04 | warn       | 非 core 文件 > `topicWarnBytes`                                                                                                                                                                                         |
-| D05 | error      | 非 core 文件 > `topicMaxBytes`                                                                                                                                                                                          |
-| D06 | warn/info  | topic / extra pinned 缺 description（warn）；topic 缺 read_when（info）                                                                                                                                                 |
-| D07 | error/info | frontmatter 结构错误：未闭合、超 40 行/2KB、status 非枚举、updated 非法（error）；长度超限（info）                                                                                                                      |
-| D08 | info/warn  | `status: stale`（info）；`updated` 超 `doctor.staleDays`（默认 60，warn）                                                                                                                                               |
-| D09 | warn/error | 主会话块降级：L1–L4 warn（写明级别与被折叠/省略的项）；L5（框架超 `blockBytes`，超长 slug）error。**原 D10 并入此条**                                                                                                   |
-| D11 | warn       | 多个文件同一 `topic`                                                                                                                                                                                                    |
-| D13 | error      | 疑似密钥：`sk-[A-Za-z0-9]{20,}`、`AKIA[0-9A-Z]{16}`、`ghp_[A-Za-z0-9]{30,}`、`xox[bap]-[A-Za-z0-9-]{10,}`、`-----BEGIN [A-Z ]*PRIVATE KEY-----`、`(password\|secret\|token)\s*[:=]\s*\S{8,}`；输出打码为前 4 字符 + `…` |
-| D14 | info/warn  | 不可寻址项：不符合 `NAME_RE` 的 `.md`（info）；symlink / dangling symlink / 非普通文件（warn，「已跳过，不会注入」）；`nlink > 1`（info）                                                                               |
+| id  | 级别       | 规则                                                                                                                                                                                                                                                      |
+| --- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D01 | info       | 无 `core.md`，正以 pinned 文件降级充当 core（迁移过渡，提示 `/mem tidy`）                                                                                                                                                                                 |
+| D02 | error      | primary core 正文 > `coreBytes`（含整节准入后仍有省略节、或 L4 未内联）                                                                                                                                                                                   |
+| D03 | warn       | `pin: true` 文件未能整文件进入 core 预算                                                                                                                                                                                                                  |
+| D04 | warn       | 非 core 文件 > `topicWarnBytes`                                                                                                                                                                                                                           |
+| D05 | error      | 非 core 文件 > `topicMaxBytes`                                                                                                                                                                                                                            |
+| D06 | warn/info  | topic / extra pinned 缺 description（warn）；topic 缺 read_when（info）                                                                                                                                                                                   |
+| D07 | error/info | frontmatter 结构错误：未闭合、超 40 行/2KB、status 非枚举、updated 非法（error）；长度超限（info）                                                                                                                                                        |
+| D08 | info/warn  | `status: stale`（info）；`updated` 超 `doctor.staleDays`（默认 60，warn）                                                                                                                                                                                 |
+| D09 | warn/error | 主会话块降级：L1–L4 warn（写明级别与被折叠/省略的项）；L5（框架超 `blockBytes`，超长 slug）error。**原 D10 并入此条**                                                                                                                                     |
+| D11 | warn       | 多个文件同一 `topic`                                                                                                                                                                                                                                      |
+| D13 | error      | 疑似密钥：`sk-[A-Za-z0-9]{20,}`、`AKIA[0-9A-Z]{16}`、`ghp_[A-Za-z0-9]{30,}`、`xox[bap]-[A-Za-z0-9-]{10,}`、`-----BEGIN [A-Z ]*PRIVATE KEY-----`、`(password\|secret\|token)\s*[:=]\s*\S{8,}`；输出打码为前 4 字符 + `…`                                   |
+| D14 | info/warn  | 不可寻址项：v2 路径下不符合 `NAME_RE` 的 `.md`（info）；文件级 symlink / dangling symlink / 非普通文件（warn，「已跳过，不会注入」）；`nlink > 1`（info）；slug 目录是符号链接（info，显示 `display → real` 与信任语义）；canonical 目标不是目录（error） |
 
 ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15（CC drift）、D16（总量 > tidy 输入上限）**延后**（§13；D16 的信息由 `/mem tidy` 自身的输入上限提示覆盖）。
 
@@ -489,17 +552,32 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 
 仅主会话且 `ctx.hasUI`；子会话/无 UI ⇒ notify 说明并返回。spawn 端口由 `src/index.ts` 在 post-guard 通过 `wireMemory` 返回的 `attachTidy(port)` 注入，`port` 经 holder 读当前 stack：`{ spawn, waitOutcome, abort, snapshot(runId) }`（`snapshot` = `query.get`）；未注入 ⇒ `tidy unavailable in this session`。
 
+### 7.0 提案阶段零写入能力（复审 新-1，阻塞项）
+
+v2 依赖「Plan 只读 + 子会话 memory 只读」，但内置 `Plan` 工具表含 `bash`，且用户同名 agent 文件可遮蔽内置类型——agent type 不是安全边界，子会话 memory 只读也挡不住 bash 改文件。v3 把零写入做成 **runtime 强制的工具域**，与 consult 用同一套机制：
+
+- **冻结接口**（P0-r，`src/core/types.ts`）：`SpawnRequest.toolDomain?: "readonly"`。只给进程内调用方（本方案的 tidy）用；Agent 工具、RPC、workflow `agent()` opts、`/task` 都显式构造 request、不透传未知键，因此无法设置该字段（N6 测试钉住）。
+- **强制点**（`src/service/runtime-adapter.ts`，与 consult §5.4 B-1/B-2/B-3 同位）：`readonlyDomain = isConsultRun || spec.request.toolDomain === "readonly"`：
+  1. 所有注入分支（message_agent / set_model / nested Agent / consult / bash_job / switch_context）由 `!isConsultRun` 改为 `!readonlyDomain` 守卫；唯一例外：`toolDomain:"readonly"` 且带 `schema` 时仍注入 `StructuredOutput`（tidy 靠它交提案；consult 不带 schema，行为逐字节不变）。
+  2. **H2 之后**强制 `sessionSpec.tools = [...CONSULT_READONLY_TOOLS, ...(schema ? ["StructuredOutput"] : [])]`——任何 agent type 的 `tools`、任何 `resolveSessionSpec` 扩展都不能加宽。
+  3. enforcer policy：`buildToolScopePolicy({ tools: CONSULT_READONLY_TOOLS, granted: schema ? ["StructuredOutput"] : [] })`，每个回合边界重算，迟注册的 `bash` / `edit` / `write` / `memory` / MCP 工具被剥离并 WARN。
+  4. spawn 准入（`src/service/spawn-service.ts`）：`toolDomain` 与 `isolation` / `forkSessionFrom` / `resumeFrom` 同时出现 ⇒ `config` 错误（tidy 从不组合，防御未来误用）。
+- 结果：该域内不存在 `bash` / `edit` / `write`，`memory` 工具不在 allowlist（子会话里注册了也被剥离）⇒ 提案 run **没有任何能写文件的工具**。`read/grep/find/ls` 只能读（提示词已含全部目标文件正文，工具只是可选）。
+- tidy 侧：`TidyPort.spawn` 的请求类型把 `toolDomain: "readonly"` 设为**必填字面量**，漏传编译不过；`memory.tidy.agentType` 只决定系统提示词与模型提示，**不能加宽工具**（设置描述写明）。
+- **残余面（明确接受）**：①主会话模型事后用 `Agent({ resume: "mem-tidy" })` 续跑是一个**新 run**，不继承 `toolDomain`——那是主会话自身的权限，tidy 永不消费续跑结果；②同 uid 的其它进程/扩展仍可直接写 memory 目录——由应用阶段逐文件 sha256 复查兜底（§7.3 步骤 7）。
+- 测试：§10 N 组（runtime 侧工具表、policy、H2 覆盖、越权写入端到端）+ K15（tidy 请求带 `toolDomain`）。
+
 ### 7.1 模型与成本（用户决策 11、评审 v1 #8）
 
 - **模型解析顺序**：`memory.tidy.model`（只接受严格 `provider/id`，否则解析时回落 `""` 并 WARN）⇒ `ctx.model`（当前主会话模型，命令执行瞬间读取）⇒ 两者都没有 ⇒ 拒绝（`no model to run tidy`）。解析结果以 `modelOverride` 传给 spawn，`thinkingOverride: "low"`。
-- **价格**：`ctx.modelRegistry` 查该模型 `cost`（USD / 1M token）；`input > 0 || output > 0` 视为有价。**无价模型** ⇒ 默认拒绝并提示在设置里指定有价 `tidy.model`；`memory.tidy.allowUnpriced=true` 时放行，但此时成本只受回合数、输出字节与超时约束（新决策 N1）。
+- **价格**（用户决策 N1）：`ctx.modelRegistry` 查该模型 `cost`（USD / 1M token）；`input > 0 || output > 0` 视为有价。**无价模型允许运行 + 警告**：不做估价闸，cap watcher 的美元闸关闭（`maxCostUsd` 不适用），只保留三道硬上限——`tidy.maxTurns`（回合）、`tidy.maxOutputBytes`（输出字节，§7.2）、`tidy.timeoutMs`（超时）。所有展示面都明确写 **no cost guarantee**：确认框、`--dry-run` 预览、tidy 报告（`cost: unknown — no price info for <provider/id>, no cost guarantee`）。
 - **预估上界**（派发前，纯函数 `estimateTidyUsd`，与 consult `estimateFirstRequestUsd` 同口径）：
   `inTok = ceil(promptBytes / 2)`；`outTok = ceil(min(maxOutputBytes, 1.25 × inputBytes + 4096) / 2) + 2048`（thinking 余量）；
   `est = (inTok × max(cost.input, cost.cacheWrite) + outTok × cost.output) / 1e6`。按 2 B/token 保守估（中文 UTF-8 3B/字、约 1–1.5 字/token）。
-  `est > maxCostUsd` ⇒ **不派发**，提示缩小文件范围、配更便宜的 `tidy.model` 或调高上限。
-- **运行中中止**：复用 `createCapWatcher({ maxTurns: tidy.maxTurns, maxCostUsd: tidy.maxCostUsd })`，由 1s 间隔（`unref`）轮询 `port.snapshot(runId)` 喂入；回合边界上 `diag.usage.costUsd > maxCostUsd` 或回合数到顶 ⇒ `port.abort(runId, "user_stop")` ⇒ 零写入，报告 `tidy aborted: cost cap $X reached ($Y spent)`。
+  （仅有价模型）`est > maxCostUsd` ⇒ **不派发**，提示缩小文件范围、配更便宜的 `tidy.model` 或调高上限。
+- **运行中中止**：复用 `createCapWatcher({ maxTurns: tidy.maxTurns, maxCostUsd: tidy.maxCostUsd })`，由 1s 间隔（`unref`）轮询 `port.snapshot(runId)` 喂入；回合边界上 `diag.usage.costUsd > maxCostUsd` 或回合数到顶 ⇒ `port.abort(runId, "user_stop")` ⇒ 零写入，报告 `tidy aborted: cost cap $X reached ($Y spent)`。无价模型只启用回合闸（`maxCostUsd` 传 `undefined`），报告写 `aborted: turn cap reached (cost unknown)`。
 - **有效上界**：成本 ≤ `max(est, maxCostUsd)` + 最后一回合（与 consult 相同的界，最后一回合的输出被 §7.2 的 schema 长度约束封顶）；时长 ≤ `tidy.timeoutMs`（显式 `totalMs` ⇒ 无宽限、不可延长）+ 外层 `withTimeout(timeoutMs + 5s)`。终局 `usage.costUsd > maxCostUsd`（仅可能发生在最后一回合）⇒ 提案仍可展示但每个选择框标题带 `over cost cap`，报告中写明实际花费。
-- **费用确认**：`ui.confirm("memory tidy", "<n> files · <in>kB in · <provider/id> · est ≤$<est> (cap $<cap>) · ≤<turns> turns · timeout <T>s. Continue?")`，取消 ⇒ 零 spawn。
+- **费用确认**：`ui.confirm("memory tidy", "<n> files · <in>kB in · <provider/id> · est ≤$<est> (cap $<cap>) · ≤<turns> turns · timeout <T>s. Continue?")`，取消 ⇒ 零 spawn。无价模型的文案改为 `"<n> files · <in>kB in · <provider/id> · ⚠ no price info — no cost guarantee (bounded only by ≤<turns> turns · ≤<out>kB output · timeout <T>s). Continue?"`。
 
 ### 7.2 输出硬上限（评审 v1 #8）
 
@@ -525,10 +603,10 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 
 ### 7.3 流程
 
-1. **快照**：经 `safe-fs.readRegular` 读取目标文件（默认全部非 archived 可寻址文件；总量 > `tidy.maxInputBytes`（48KB）⇒ 提示指定文件并返回），记录每文件 `sha256` 与 stat。symlink/非普通文件从不进入快照（§3.1）。
+1. **快照**：在 canonical 目录（§3.1）上经 `safe-fs.readRegular` 读取目标文件（v2 文件名规则）（默认全部非 archived 可寻址文件；总量 > `tidy.maxInputBytes`（48KB）⇒ 提示指定文件并返回），记录每文件 `sha256` 与 stat。symlink/非普通文件从不进入快照（§3.1）。
 2. **零成本预处理**：跑 `runDoctor`；无 `core.md` ⇒ 迁移模式提示词（§8）。
 3. **估价 + 确认**（§7.1）。`--dry-run` 到此展示后返回。
-4. **派发**：`spawn({ type: tidy.agentType (默认 "Plan"), prompt, label: "mem-tidy", thinkingOverride: "low", budgetOverride: { totalMs: tidy.timeoutMs }, schema: TIDY_SCHEMA, cwd, modelOverride })` + cap watcher + `waitOutcome`。子 agent 只产出提案、不写文件（Plan 只读 + 子会话 memory 只读；应用前的 sha 复查可检出越权写）。
+4. **派发**：`spawn({ type: tidy.agentType (默认 "Plan"), prompt, label: "mem-tidy", thinkingOverride: "low", budgetOverride: { totalMs: tidy.timeoutMs }, schema: TIDY_SCHEMA, cwd, modelOverride, toolDomain: "readonly" })` + cap watcher + `waitOutcome`。提案 run 由 runtime 强制只读工具域（§7.0），没有任何写文件的工具；应用前的 sha 复查另外兜底同 uid 外部写入。
 5. **校验提案**（`src/memory/tidy/validate.ts`，纯函数）：输出字节上限；schema；文件名过 `NAME_RE`；core 提案 ≤ `coreBytes`、topic ≤ `topicMaxBytes`；frontmatter 合法；**内容守恒**——原文件每条非空、非标题行（归一化后）必须出现在某个输出文件中或列在 `dropped[]` 里并附理由，否则该文件标 `⚠ N lines unaccounted`，默认选项变为 Skip；**手写文件**的提案降级为「建议」：可看 diff、可用 editor 复制，但没有 Apply 选项（用户决策 5）。
 6. **逐文件确认**：`ui.select("tidy 2/6 · quota.md · rewrite · 1.6k→0.9k · <reason ≤120B>", ["Apply", "Edit then apply", "View diff", "Skip", "Abort all"])`；View diff ⇒ `ui.editor(title, unifiedDiff)` 后回到选择；Edit ⇒ `ui.editor` 预填新内容，结果重走步骤 5 的校验。diff 由 `src/memory/tidy/diff.ts`（行级 LCS，文件 ≤16KB、≤400 行，超出退化为整文件替换视图）生成。**diff 只走 UI，绝不进入会话上下文。**
 7. **一次性应用**（`applyTidy`，所有决定收齐后）：`withMemoryDirLock` 内**同步**执行——
@@ -555,7 +633,7 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 
 ### 7.6 测试口径（摘要，全文见 §10 K 组）
 
-超时、spawn 失败、schema 非法、输出超字节上限、估价超上限、运行中 cost cap、用户在确认处取消 ⇒ 零写入；`--dry-run` ⇒ spawn 调用 0 次且目录逐文件 sha 前后相同（含无 `.backup` 生成）；restore 冲突与失败路径均有用例。
+超时、spawn 失败、schema 非法、输出超字节上限、估价超上限、运行中 cost cap、用户在确认处取消 ⇒ 零写入；`--dry-run` ⇒ spawn 调用 0 次且目录逐文件 sha 前后相同（含无 `.backup` 生成）；restore 冲突与失败路径均有用例；无价模型走「允许 + 警告」路径并逐一验证回合/输出字节/超时三道硬上限；spawn 请求恒带 `toolDomain:"readonly"`，runtime 侧只读域由 §10 N 组钉住。
 
 ## 8. 迁移（现有 5 个文件）
 
@@ -572,25 +650,24 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 
 新增（均为 non-live：activate 时捕获，改后 `/reload`；与现有 memory 键一致）：
 
-| 键                                           | 默认                                          | 范围/取值                      | 理由                                                |
-| -------------------------------------------- | --------------------------------------------- | ------------------------------ | --------------------------------------------------- |
-| `memory.layout`                              | `"tiered"`（**P0 暂为 `"legacy"`，P5 翻转**） | `tiered` \| `legacy`           | legacy = 旧渲染器逐字节回退                         |
-| `memory.toolSurface`                         | `"v2"`（**P0 暂为 `"legacy"`，P5 翻转**）     | `v2` \| `legacy`               | legacy = 旧工具定义逐字节回退                       |
-| `memory.childProfile`                        | `"core"`                                      | `core` \| `full` \| `none`     | 子会话 token 放大是设计评审 §2.4 的最大浪费         |
-| `memory.coreBytes`                           | 1600                                          | 256–8192，钳 ≤ blockBytes−600  | 设计评审 §4.2：约 450 token                         |
-| `memory.blockBytes`                          | 2400                                          | 800–16384                      | 设计评审 §4.2 总目标约 685 token                    |
-| `memory.topicWarnBytes`                      | 8192                                          | 1024–maxFileBytes              | 设计评审 §4.2「单文件 2–8KB」                       |
-| `memory.topicMaxBytes`                       | 16384                                         | ≥topicWarnBytes，≤maxFileBytes | 设计评审 §4.2「超过 16KB 要求拆分」                 |
-| `memory.doctor.notifyOnStart`                | true                                          | bool                           | 只走 UI，不花 token                                 |
-| `memory.doctor.staleDays`                    | 60                                            | 7–3650                         | 设计评审 §6 P1-6 取宽松值                           |
-| `memory.tidy.agentType`                      | `"Plan"`                                      | 字符串                         | 内置只读类型                                        |
-| `memory.tidy.model`                          | `""`                                          | `""` 或严格 `provider/id`      | `""` = 当前主会话模型（用户决策 11）                |
-| `memory.tidy.timeoutMs`（文件存 `timeoutS`） | 180000                                        | 30s–1800s                      | 登记进 `TIME_SETTING_MS_PATHS`，spec 用 `seconds()` |
-| `memory.tidy.maxInputBytes`                  | 49152                                         | 8192–262144                    | 约 16–24k token                                     |
-| `memory.tidy.maxOutputBytes`                 | 65536                                         | 4096–262144                    | 输出字节硬上限（评审 v1 #8）                        |
-| `memory.tidy.maxCostUsd`                     | 2.0                                           | 0.05–50（不允许 0）            | 单次成本上限；主会话模型可能是贵档，给 2 美元余量   |
-| `memory.tidy.maxTurns`                       | 4                                             | 1–20                           | 提示词已含全文，正常 1–2 回合                       |
-| `memory.tidy.allowUnpriced`                  | false                                         | bool                           | 新决策 N1                                           |
+| 键                                           | 默认                                          | 范围/取值                      | 理由                                                                                      |
+| -------------------------------------------- | --------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `memory.layout`                              | `"tiered"`（**P0 暂为 `"legacy"`，P5 翻转**） | `tiered` \| `legacy`           | legacy = 旧渲染器逐字节回退                                                               |
+| `memory.toolSurface`                         | `"v2"`（**P0 暂为 `"legacy"`，P5 翻转**）     | `v2` \| `legacy`               | legacy = 旧工具定义逐字节回退                                                             |
+| `memory.childProfile`                        | `"core"`                                      | `core` \| `full` \| `none`     | 子会话 token 放大是设计评审 §2.4 的最大浪费                                               |
+| `memory.coreBytes`                           | 1600                                          | 256–8192，钳 ≤ blockBytes−600  | 设计评审 §4.2：约 450 token                                                               |
+| `memory.blockBytes`                          | 2400                                          | 800–16384                      | 设计评审 §4.2 总目标约 685 token                                                          |
+| `memory.topicWarnBytes`                      | 8192                                          | 1024–maxFileBytes              | 设计评审 §4.2「单文件 2–8KB」                                                             |
+| `memory.topicMaxBytes`                       | 16384                                         | ≥topicWarnBytes，≤maxFileBytes | 设计评审 §4.2「超过 16KB 要求拆分」                                                       |
+| `memory.doctor.notifyOnStart`                | true                                          | bool                           | 只走 UI，不花 token                                                                       |
+| `memory.doctor.staleDays`                    | 60                                            | 7–3650                         | 设计评审 §6 P1-6 取宽松值                                                                 |
+| `memory.tidy.agentType`                      | `"Plan"`                                      | 字符串                         | 只决定提示词/模型提示；工具域由 runtime 强制只读（§7.0），不能加宽                        |
+| `memory.tidy.model`                          | `""`                                          | `""` 或严格 `provider/id`      | `""` = 当前主会话模型（用户决策 11）                                                      |
+| `memory.tidy.timeoutMs`（文件存 `timeoutS`） | 180000                                        | 30s–1800s                      | 登记进 `TIME_SETTING_MS_PATHS`，spec 用 `seconds()`                                       |
+| `memory.tidy.maxInputBytes`                  | 49152                                         | 8192–262144                    | 约 16–24k token                                                                           |
+| `memory.tidy.maxOutputBytes`                 | 65536                                         | 4096–262144                    | 输出字节硬上限（评审 v1 #8）                                                              |
+| `memory.tidy.maxCostUsd`                     | 2.0                                           | 0.05–50（不允许 0）            | 单次成本上限，仅对有价模型生效（无价模型见 §7.1 N1）；主会话模型可能是贵档，给 2 美元余量 |
+| `memory.tidy.maxTurns`                       | 4                                             | 1–20                           | 提示词已含全文，正常 1–2 回合                                                             |
 
 保留且语义不变：`enabled`、`injectInChildSessions`（总开关）、`allowWriteInChildSessions`、`freezeInjectionAfterWrite`、`maxFileBytes`、`maxWriteBytes`；`indexMax` 两种 layout 共用；`inlineMax` / `byteCap` 只在 `layout=legacy` 下生效（spec 描述注明）。
 
@@ -600,25 +677,27 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 
 ### 10.1 fixture 与 golden 生成协议（评审 v1 #9）
 
-1. **fixture**：`tests/fixtures/memory/current-5/*.md` = 真实 5 文件在 P0 当时的副本（提交前跑一次 D13 同款正则 + 人工过目，无密钥）；合成 fixture `tests/fixtures/memory/synthetic/<case>/`（long-slug、many-files、long-desc、cjk-emoji、no-core、core-over、extra-pinned、archived-only、code-fence-heading）。symlink / dangling / swap 场景**只在测试运行时**于临时目录创建，不入库。
+1. **fixture**：`tests/fixtures/memory/current-5/*.md` = 真实 5 文件在 P0 当时的副本（提交前跑一次 D13 同款正则 + 人工过目，无密钥）；合成 fixture `tests/fixtures/memory/synthetic/<case>/`（long-slug、huge-slug（`bytes(I) > B`）、many-files、long-desc、cjk-emoji、no-core、core-over、extra-pinned、archived-only、code-fence-heading、legacy-names（`My Notes.md`、`.hidden.md`、`中文.md` 与一个合法名——钉住 legacy 接受任意 `*.md`、v2 只认 `NAME_RE`））；CC 导入源 `tests/fixtures/memory/cc-source/<slug>/memory/*.md`（A6）。symlink / dangling / swap 场景**只在测试运行时**于临时目录创建，不入库。
 2. **物化**：测试助手 `tests/memory/helpers/fixture-dir.ts` 的 `materializeFixture(name)`：`mkdtempSync(join(os.tmpdir(), "memfx-"))` 下建 `root/<slug>/`，复制文件，按 fixture 内 `mtimes.json`（缺省：按文件名序 `2026-09-01T00:00:00Z + i×60s`）`utimesSync`；`cwd` 固定为 `/fixture/repo`（slug `-fixture-repo`）；返回 `{ paths, cwd, memDir, cleanup }`。
 3. **禁止真实 home**：golden 相关 suite 的 `beforeEach` 里 `vi.stubEnv("HOME", <tmp>/nohome)` 与 `vi.stubEnv("ARMORY_MEMORY_ROOT", <tmp>/root)`，并断言 `paths.memoryRoot.startsWith(os.tmpdir())`；任何代码意外走 `defaultPaths()` 也落在临时目录。
 4. **时间**：`vi.useFakeTimers({ toFake: ["Date"] })` + `vi.setSystemTime(new Date("2026-09-26T00:00:00.000Z"))`；store 调用显式传 `nowIso` 同值。
 5. **路径占位**：序列化 golden 时把临时根的所有出现替换为 `${MEMROOT}`；比较时先把 golden 中的占位替换回本次临时根，再**逐字节**比较。
-6. **生成**：`UPDATE_MEMORY_GOLDEN=1 npx vitest run tests/memory/legacy-golden.test.ts` 写 `tests/fixtures/memory-legacy-golden.json`（含 `sourceCommit`、`generatedAt`）；环境变量未设置时测试只比较；设置了但 golden 已存在 ⇒ 测试失败（永不覆盖）。**legacy golden 必须在 P0 第一个提交里生成**，该提交 `git diff --stat -- src/` 为空（verifier 核对）。
+6. **生成**：`UPDATE_MEMORY_GOLDEN=1 npx vitest run tests/memory/legacy-golden.test.ts` 写 `tests/fixtures/memory-legacy-golden.json`（含 `sourceCommit`、`generatedAt`——二者只作记录，比较时剔除，复审 v1-9）；环境变量未设置时测试只比较；设置了但 golden 已存在 ⇒ 测试失败（永不覆盖）。**legacy golden 必须在 P0 第一个提交里生成**，该提交 `git diff --stat -- src/` 为空（verifier 核对）。
 7. tiered golden（`tests/fixtures/memory/tiered-golden/*.txt`）由 P1 用同一协议生成；verifier（不同模型）须对照 §2.2/§2.3 逐行审阅 golden 文本并在报告中确认；合入后同样永不自动再生（改格式 = 方案修订）。
+8. **所有权**：每个 fixture 子目录只归一个包写（§14.2 表）；新增子目录必须先在 §14.2 登记，禁止任何包按 `tests/fixtures/memory/**` 泛匹配写入（复审 新-4）。
 
 ### 10.2 用例
 
 **A. legacy 黄金（P0）** — `tests/memory/legacy-golden.test.ts`
 
-1. `renderMemoryBlock` 在 current-5 / 空目录 / 单文件 / 超 indexMax / `inlineMax=0` / `byteCap=0` 下的输出 == golden。
+1. `renderMemoryBlock` 在 current-5 / 空目录 / 单文件 / 超 indexMax / `inlineMax=0` / `byteCap=0` / `synthetic/legacy-names` 下的输出 == golden（legacy-names 证明非白名单文件名在 legacy 下照旧出现）。
 2. `layout=legacy` 时 `memorySection` 输出 == golden（主会话、子会话，`childProfile=core` 也注入旧块）。
 3. `systemPrompt.mode` ∈ {stable, live, legacy} × `session_start` reason ∈ {new, reload, resume}（resume/reload 从预置的 `subagent:prompt-sections` 条目恢复）⇒ system prompt 中 memory 段逐字节 == golden 且零 update（决策 10 附加条件）。
-4. `toolSurface=legacy` 时工具定义序列化 == golden；list/write/append 输出（固定时间、占位根）== golden。
-5. 既有 `tests/memory/*`、`tests/sysprompt/memory-section.test.ts` 显式钉 `layout:"legacy", toolSurface:"legacy"` 后全绿。
+4. `toolSurface=legacy` 时工具定义 canonical 序列化 == golden（§4.5）；list/write/append 输出（固定时间、占位根）== golden。
+5. `tests/memory/inject.test.ts`、`tests/memory/wire.test.ts`、`tests/sysprompt/memory-section.test.ts` 显式钉 `layout:"legacy", toolSurface:"legacy"`；`tests/memory/store.test.ts` / `command.test.ts` 的 import 用例改为 `await`（`importProject` 变 async）；`tests/memory/tool.test.ts` 直接调用 legacy 工厂 `createMemoryTool`，与默认值无关，**零改动**；全绿。
+6. CC import：`cc-source` fixture 下 `importProject` / `importAll`（含 `--force` 与重复导入 skipped）的产物字节与返回值 == golden（测试写 `await importProject(...)`，对 P0-a 的同步返回值同样成立）。
 
-A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置键，随 P0-b 提交。
+A1–A4、A6 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置键，随 P0-b 提交。
 
 **B. safe-fs / lock（P0）** — `tests/memory/safe-fs.test.ts`、`lock.test.ts`
 
@@ -629,13 +708,17 @@ A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置�
 5. `createExclusive` 对已存在目标 ⇒ `EEXIST`；并发两次 create 同名（两个 Promise）⇒ 恰一个成功。
 6. `renameNoClobber` 目标存在 ⇒ 拒绝且两个文件字节不变。
 7. lock：两个 `withMemoryDirLock` 串行执行（时间线断言无重叠）；超时报 busy；陈旧锁（mtime 回拨 / 不存在的 pid）被打破；释放时 token 不符不删；重试定时器全部 `unref`（`process.getActiveResourcesInfo()` 无残留 Timeout）。
-8. v2 append 并发：`Promise.all` 两个各自单独不超限、合起来超限的 append ⇒ 恰一个成功，文件 ≤ 上限，失败者零字节写入。
+8. v2 append 并发：`Promise.all` 两个各自单独不超限、合起来超限的 append ⇒ 恰一个成功，文件 ≤ 上限，失败者零字节写入；成功者的原有字节（含 frontmatter）逐字节保留。
 9. `.trash` / `.backup` 被预置为 symlink ⇒ `ensurePrivateDir` 拒绝。
-10. grep 守卫：`src/memory/**` 除 `safe-fs.ts`/`paths.ts` 外无直接 `readFileSync|writeFileSync|appendFileSync|statSync`。
+10. fs 守卫（`tests/memory/fs-guard.test.ts`）：`src/memory/**/*.ts` 除 `safe-fs.ts` 外无任何 `node:fs` / `fs` / `node:fs/promises` 引用（静态 import、`require`、动态 import；`import type` 除外）；`lock.ts` 必须通过。
+11. 短写：safe-fs 测试钩子让 `writeSync` 返回部分字节或抛 `ENOSPC` ⇒ v2 append / 读-改-写 / create 的目标字节不变、临时文件已清理；legacy append 期间无插写 ⇒ 被 `ftruncate` 回滚，有插写 ⇒ 不截断且错误注明 `partial append left in place`。
+12. slug 目录 symlink：`<root>/<slug>` 链到外部目录 ⇒ 读写正常，所有 fs 调用使用 realpath（spy）；块中 `<dir>` 显示 display 路径；操作中途改指链接（钩子）⇒ 本次操作全部落在旧 `real`；canonical 目标是文件 ⇒ 视为无 memory、D14 error。
+13. import 锁：两个 `importProject` 并发 ⇒ 串行（时间线无重叠）；与 v2 写并发 ⇒ 互斥；非 force 且目标已存在 ⇒ skipped、字节不变；目标是 symlink ⇒ 跳过、外部文件不变；CC 源文件是 symlink ⇒ 跳过并计入 skipped。
+14. 文件名规则：`legacy-names` 下 `listRegular(names:"legacy")` 含全部 `.md`；`names:"v2"` 只含合法名，其余记 `bad-name`。
 
 **C. hub pointerHint（P0）** — `tests/sysprompt/hub.test.ts` 追加 P-1–P-5（§2.6）。
 
-**D. 工具面（P0）** — `tests/memory/tool-surface.test.ts`：§4.5 三条断言；v2 schema 在 0.34 与运行时 `typebox`（1.x）下 `JSON.stringify` 相同。
+**D. 工具面（P0）** — `tests/memory/tool-surface.test.ts`：§4.5 三条断言，在 devDep `@sinclair/typebox` 与从 pi 包解析出的运行时 `typebox` 下各跑一遍；`canonicalJson` 单测（键排序递归、数组保序、无空白）。
 
 **E. frontmatter / meta（P0）** — `tests/memory/meta.test.ts`：成对引号、CRLF、重复键、`；` 切词、未闭合、>40 行、status/updated 校验、H1 回退、drift header 剥离后取 H1、节切分（preamble / `##` / `###` 归属 / 代码围栏内的 `##`）。
 
@@ -644,13 +727,13 @@ A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置�
 **G. tiered 渲染（P1）** — `tests/memory/tiered.test.ts`
 
 1. current-5 ⇒ `bytes ≤ 2400`、level 2；5 个文件名全部出现；pitfalls 以 H1 + 「用户偏好」整节出现，省略行列出其余 4 节；无 `truncated`；输出 == tiered golden。
-2. 合成 fixture 逐个 == golden：long-slug（L5，且 `F + Ov > B`）、many-files（L1，compact 尾行；再小的预算退化为溢出行）、long-desc（码点安全裁剪、每行 ≤200B）、cjk-emoji、no-core（无 primary ⇒ 无 core 部分）、core-over（L2 → 更小预算 L4 且 ⚠ 行排首位）、extra-pinned（L3，📌）、archived-only（`- (+M archived)`）、code-fence-heading（围栏内 `##` 不切节）。
-3. property：I-M1–I-M4，seeded 300 例（固定种子，失败打印种子）。
+2. 合成 fixture 逐个 == golden：long-slug（L5：`bytes(minimalFrame) > B`，输出含 `line5` 且 ≤ B）、huge-slug（`bytes(I) > B` ⇒ 输出恰为 `I`）、many-files（L1，compact 尾行；再小的预算退化为溢出行）、long-desc（码点安全裁剪、每行 ≤200B）、cjk-emoji、no-core（无 primary ⇒ 无 core 部分）、core-over（L2 → 更小预算 L4 且 ⚠ 行排首位）、extra-pinned（L3，📌）、archived-only（`- (+M archived)`）、code-fence-heading（围栏内 `##` 不切节）。
+3. property：I-M1a–I-M1d、I-M2–I-M4，seeded 300 例（固定种子，失败打印种子），全部对 `Buffer.byteLength(result.text)` 断言。
 4. touch / 改 mtime 顺序 / readdir 顺序打乱 ⇒ 字节相同。
 5. access 四变体 guide 与省略行后缀；`toolSurface=legacy` 下 `memory` 视为不存在；`<dir>` 为真实绝对路径（= `memoryDirFor(cwd)`），块中不含字面 `<dir>`。
 6. `sizeTier` 边界 0/1/1024/1025/2048/2049。
 7. `childProfile=core` ⇒ k=0；`none` ⇒ `""`；`injectInChildSessions=false` 压过一切；`layout=legacy` 下 childProfile 只有 none 生效。
-8. access 按会话粘住：同会话内 `getActiveTools` 变化不改块；`session_start` 后重新求值；`getActiveTools` 抛错 ⇒ `read`。
+8. access：`getActiveTools` 不存在 / 抛错 / 返回非数组 ⇒ `none`；返回 `CONSULT_READONLY_TOOLS` ⇒ `read`；四个 + `StructuredOutput` ⇒ `read`；自定义 agent 无 read 无 memory ⇒ `none`；按会话粘住：同会话内 `getActiveTools` 变化不改块，`session_start` 后重新求值。
 9. MetaCache：touch 只重读 1 个文件（spy 计数）。
 
 **H. hub 集成（P1 + P5）** — `tests/sysprompt/memory-tiered-section.test.ts`
@@ -670,7 +753,7 @@ A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置�
 4. insert：按行、按节末尾；落在 frontmatter 内报错；`insert_line: 0` + frontmatter ⇒ 规范化并注明；两者都给/都不给报错。
 5. delete：进 `.trash/<唯一 id>-<name>`、同名连删两次 id 不同、保留 20 个；rename：目标存在报错、非法名报错、frontmatter 保留。
 6. search：坐标格式；多词得分排序；上限 20；字面匹配（`.*` 不当正则）；CJK；archived 标记；description/read_when 命中。
-7. **别名 / 互斥**（评审 v1 #5）：官方形态 `{command:"create", path:"/memories/a.md", file_text}`、`{command:"insert", path, insert_line, insert_text}`、`{command:"rename", old_path, new_path}`、`{command:"str_replace", path, old_str, new_str}` 全部成功；旧形态 `{action:"write", name, content}`、`{action:"append", name, content}`、`{action:"list"}` 成功；`path`+`name` 同值接受带 note、异值报错；`file_text`+`content` 异值报错；`command`+`action` 报错；`create` 带 `insert_text` 报错并提示字段名；无关字段忽略并出 note。
+7. **别名 / 互斥**（评审 v1 #5）：官方形态 `{command:"create", path:"/memories/a.md", file_text}`、`{command:"insert", path, insert_line, insert_text}`、`{command:"rename", old_path, new_path}`、`{command:"str_replace", path, old_str, new_str}` 全部成功；旧形态 `{action:"write", name, content}`、`{action:"append", name, content}`、`{action:"list"}` 成功；`path`+`name` 同值接受带 note、异值报错；`file_text`+`content` 异值报错；`command`+`action` 报错；`create` 带 `insert_text` 报错并提示字段名；无关字段忽略并出 note；另收录 Anthropic 官方文档的示例 payload 原样（`view` / `create` / `str_replace` / `insert` / `delete` / `rename` 各一例，测试注释记录来源 URL 与抄录日期，复审 v1-5）全部成功。
 8. **手写文件**（用户决策 5）：str_replace / insert / append 成功 + 警告、frontmatter 字节不变；触及 frontmatter 的 str_replace 被拒；write 覆盖 / delete / rename 被拒且文件不变；CC 导入副本按手写处理。
 9. T3：预算行数值正确（含 level）；精确重复行命中（列表前缀/大小写/空白差异视为相同）与未命中样例（<16 码点不报）；硬上限只在变大时生效；topicWarn 警告；append 超限整次拒绝。
 10. 子会话：所有变更命令拒绝、view/search 可用；`allowWriteInChildSessions=true` 放行。
@@ -683,7 +766,7 @@ A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置�
 
 1. Apply / Edit then apply / View diff→返回 / Skip / Abort all 路径。
 2. 模型：`tidy.model=""` ⇒ `modelOverride` 等于 `ctx.model` 的 provider/id；设置了严格值 ⇒ 用设置；都没有 ⇒ 拒绝。
-3. 成本：估价 > 上限 ⇒ 零 spawn；无价模型 ⇒ 默认拒绝、`allowUnpriced` 放行；cap watcher 在回合边界 costUsd 超限 ⇒ `abort` 被调用、零写入；回合数到顶同理；终局超限 ⇒ 标题带 `over cost cap`。
+3. 成本：估价 > 上限 ⇒ 零 spawn；无价模型 ⇒ 允许，确认框 / dry-run / 报告均含 `no cost guarantee`，美元闸不启用而回合闸、输出字节闸、超时仍生效（各一例）；cap watcher 在回合边界 costUsd 超限 ⇒ `abort` 被调用、零写入；回合数到顶同理；终局超限 ⇒ 标题带 `over cost cap`。
 4. 输出：`outputBytes` 超 `maxOutputBytes` ⇒ 整份作废零写入；单文件超 core/topic 上限 ⇒ 该项不可 Apply。
 5. `--dry-run`：spawn 0 次、ui 展示估价、目录逐文件 sha 前后相同、无 `.backup`。
 6. 写前备份存在（manifest、before/after sha）；保留 10 份；`/mem restore` 往返后字节相同。
@@ -695,61 +778,87 @@ A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置�
 12. `--frontmatter`：current-5 ⇒ 4 个 agent topic 文件提案（description=H1），pitfalls（primary core）不补 description；再跑一次零提案；手写文件只建议。
 13. 迁移模式：current-5 + 预制迁移 payload ⇒ 内容守恒通过、新块 ≤ blockBytes、core ≤ coreBytes。
 14. symlink 夹具 ⇒ 快照、备份、restore 都不触碰目录外文件。
+15. 只读域：假 port 记录的 spawn 请求恒带 `toolDomain:"readonly"`、无 `isolation`；`memory.tidy.agentType` 设为工具表含 bash/write 的自定义类型时请求照样带 `toolDomain`（工具实际被剥离由 N 组保证）；`--dry-run` 零 spawn。
 
-**L. 装配（P0/P5）** — `tests/memory/wire.test.ts`：layout/toolSurface 选择正确的工厂；`attachTidy` 只在主会话被调用；`/mem` cwd 走 worktree-origin 解析；P5 默认值翻转后 `DEFAULT_SETTINGS.memory.layout === "tiered"`。
+**L. 装配（P0/P5）** — `tests/memory/wire.test.ts`：layout 选择正确的渲染路由，toolSurface 选择 `tool.ts`（legacy）或 `tool-v2.ts`；`attachTidy` 只在主会话被调用；`/mem` cwd 走 worktree-origin 解析；P5 默认值翻转后 `DEFAULT_SETTINGS.memory.layout === "tiered"`。
 
 **M. 可发现性代理（P5，确定性）** — `tests/memory/discoverability.test.ts`：对 §11.2 问题集中每个 topic 题，断言迁移后 fixture（`current-5-migrated`，由 K13 的预制 payload 落盘生成）的索引行（description/when）至少包含该题一个关键词；迁移前 fixture 至少出现目标文件名。
+
+**N. runtime 只读工具域（P0-r）** — `tests/service/runtime-adapter-readonly-domain.test.ts`、`tests/service/spawn-readonly-domain.test.ts`
+
+1. `toolDomain:"readonly"` + agent type `tools: ["read","bash","edit","write","memory"]` ⇒ `sessionSpec.tools` 恰为 `CONSULT_READONLY_TOOLS` + `StructuredOutput`（带 schema）/ 恰为四个（不带 schema）；agent type 无 `tools` 字段时同样。
+2. H2 扩展在 `resolveSessionSpec` 中加入 `bash` / `write` ⇒ 被 H2 之后的强制覆盖。
+3. policy：`bash` / `edit` / `write` / `memory` / `message_agent` / `bash_job` / `switch_context` / `Agent` / `set_model` / `consult` 全部 blocked；模拟回合边界迟注册 `bash` ⇒ `setActiveTools` 剥离 + WARN。
+4. 注入：customTools 只含 `StructuredOutput`（带 schema）或为空；`bashJobGrant` / `childSwitchContextGrant` 不生效。
+5. **越权写入端到端**（假 session driver + 临时 memory 目录）：子会话脚本依次尝试调用 `bash`（`echo x >> a.md`）、`write`、`edit`、`memory`（create）⇒ 每次都得到「工具不存在」，目录逐文件 sha256 前后相同。
+6. 准入：与 `isolation` / `forkSessionFrom` / `resumeFrom` 组合 ⇒ config 错误；Agent 工具参数 schema、RPC spawn schema、workflow `agent()` opts 校验都不接受 `toolDomain`（带上即被拒或被忽略且不进 request）。
+7. 回归：`tests/service/runtime-adapter-consult.test.ts`、`tests/consult/freeze-surface.test.ts` 原样绿（consult 行为不变）。
 
 ## 11. 真机验收与零工具命中率评测（主会话，P5 后）
 
 ### 11.1 真机步骤（tmux，方法见 memory `live-acceptance-tmux.md`）
 
-- R0 基线：在 **P0-a 提交之上、P0-b 合入之前**（src 与 master 相同）执行，scratch cwd `/tmp/memacc`，`ARMORY_MEMORY_ROOT=/tmp/memacc-root`，把当前 5 文件复制到 `/tmp/memacc-root/-tmp-memacc/`（不碰真实 `~/.pi/agent/memory`），`/record on`，发一个用户轮，导出首请求 system 中的 memory 段作为 legacy 对照；同时跑 §11.2 的 baseline 组。
+- R0 基线：在 **P0-a 提交之上、P0-r / P0-b 合入之前**（src 与 master 相同）执行，scratch cwd `/tmp/memacc`，`ARMORY_MEMORY_ROOT=/tmp/memacc-root`，把当前 5 文件复制到 `/tmp/memacc-root/-tmp-memacc/`（不碰真实 `~/.pi/agent/memory`），`/record on`，发一个用户轮，导出首请求 system 中的 memory 段作为 legacy 对照；同时用 §11.2 运行器跑 baseline 组。
 - R1：新代码下首请求 memory 段 ≤2,400B、无 `truncated`、兜底路径为 `/tmp/memacc-root/-tmp-memacc/…` 真实路径。
-- R2：§11.2 评测三组全部跑完并达标。
+- R2：§11.2 评测三组全部跑完、报告落盘（探索性指标，不设硬门禁；出现退化信号时上报用户）。
 - R3：让模型 `str_replace` 一条 ⇒ 下一用户轮 system 哈希不变、`cacheRead ≥ 上一前缀 × 0.9`、出现一条 update；`touch` 一个文件 ⇒ 下一轮无 update。
 - R4：派一个 verifier 子 agent（工具表无 memory）⇒ 其请求的 memory 段为 core 档、guide 为 `read` 变体，模型能用 `read <真实路径>` 打开主题。
 - R5：`/mem doctor` 输出合理；启动提醒只出现一次，`/new` 后不重复。
 - R6：`/mem tidy --dry-run` 零 spawn；`/mem tidy --frontmatter` 走完；`/mem tidy`（主会话模型）走完逐文件确认、报告含实际成本；`.backup/<id>` 存在；下一轮恰好一条 update；`/mem restore` 能还原并正确报告冲突。
 - R7：`layout=legacy` + `toolSurface=legacy` + `/reload` ⇒ memory 段与 R0 逐字节相同（`touch -d` 固定与 R0 相同 mtime）。
-- 清理：按确切路径删 `/tmp/memacc`、`/tmp/memacc-root`；恢复被评测脚本临时改动的设置文件（脚本自带备份与 `trap` 还原）。
+- 清理：按确切路径删 `/tmp/memacc`、`/tmp/memacc-root`；按确切路径删 `/tmp/memeval-*` 临时根与 `git worktree remove /tmp/memeval-base`；评测经 HOME 重定向注入设置，从不改动真实 `~/.pi/agent/pi-subagent.json`（§11.2）。
 
-### 11.2 零工具命中率评测（评审 v1 #4）
+### 11.2 零工具命中率评测（探索性指标；评审 v1 #4、复审 v1-4）
 
-**问题集**（P0 冻结为 `docs/dev/memory/eval/questions.json`，每题：`id`、问句、`source`（期望文件/节）、`class`（core/topic）、`expect`（判定正确的正则））：
+**定位**：**探索性指标，不作硬门禁**（新决策 N4，推荐）。每题每组 5 次仍只能发现大幅退化；硬门禁由确定性测试承担——M 组（可发现性代理）、G1（current-5 字节/级别/无截断）、R1 / R3 / R4 / R7 真机步骤。评测结果只用来发现明显退化并驱动 guide/索引文案调整。
 
-| id  | class | 问句（摘要）                           | source                          | expect（正则摘要）                   |
-| --- | ----- | -------------------------------------- | ------------------------------- | ------------------------------------ |
-| Q1  | core  | 本仓库提交代码有什么规则？             | pitfalls › 用户偏好             | `git commit <精确路径>\|git add -A`  |
-| Q2  | core  | stream 中断或 502 时该怎么处理子任务？ | pitfalls › 用户偏好             | `resume`                             |
-| Q3  | core  | 开发包和验收分别用什么模型？           | pitfalls › 用户偏好             | `claude-sonnet-5` 且 `gpt-5.6-sol`   |
-| Q4  | topic | 本机 subagent 并发上限是多少？         | pitfalls › 并发（迁移前被省略） | `concurrencyLimit\s*=?\s*10\|\b10\b` |
-| Q5  | topic | 1h 与 5m 的 prompt cache 能互相读吗？  | cache-ttl.md                    | `分离\|separate\|不能`               |
-| Q6  | topic | 判断缓存命中应该用什么基准？           | cache-ttl.md                    | `0\.5`                               |
-| Q7  | topic | quota 5h 窗口的阶梯阈值是多少？        | quota.md                        | `50.*75.*90`                         |
-| Q8  | topic | 真机验收怎么驱动独立 pi 实例？         | live-acceptance-tmux.md         | `tmux`                               |
-| Q9  | topic | 这台机器 bash 工具实际是什么 shell？   | pitfalls › 运行时               | `zsh`                                |
-| Q10 | topic | consult fork 要不要裁剪工具输出？      | multi-agent-experiments.md      | `不做\|no\b`                         |
+**问题集**（P0-a 冻结为 `docs/dev/memory/eval/questions.json`；每题 `{id, class, question, source, must: string[], mustNot: string[]}`；正则大小写不敏感，只在最终答案文本上判定；`correct` = `must` **全部**命中且 `mustNot` **无一**命中。P0-a 的 verifier 对照 current-5 原文逐题复核：照抄正确事实的答案必中，常见错误答案必不中）：
 
-**运行**：脚本 `scripts/dev/memory-eval.mjs`（P0 提交，R0 前即可用）对每题执行 `pi --mode json --no-session --model cr-anthropic/claude-sonnet-5 --thinking low "<问句>"`，cwd `/tmp/memacc`、`ARMORY_MEMORY_ROOT` 指向临时根（无 AGENTS.md，答案只能来自 memory）；每题每组 **2 次**。三组：`baseline`（R0，master legacy）、`tiered-pre`（新代码、current-5 原样）、`tiered-post`（新代码、`current-5-migrated`）。
+| id  | class | 问句（摘要）                           | source                          | must（全部命中）                                        | mustNot                           |
+| --- | ----- | -------------------------------------- | ------------------------------- | ------------------------------------------------------- | --------------------------------- |
+| Q1  | core  | 本仓库提交代码有什么规则？             | pitfalls › 用户偏好             | `git commit`；`精确\|exact\|specific`                   | —                                 |
+| Q2  | core  | stream 中断或 502 时该怎么处理子任务？ | pitfalls › 用户偏好             | `resume`；`换线\|another route\|switch`                 | `先问\|ask (the )?user`           |
+| Q3  | core  | 开发包和验收分别用什么模型？           | pitfalls › 用户偏好             | `claude-sonnet-5`；`gpt-5\.6-sol`                       | —                                 |
+| Q4  | topic | 本机 subagent 并发上限是多少？         | pitfalls › 并发（迁移前被省略） | `\b10\b`；`concurrencyLimit\|并发`                      | —                                 |
+| Q5  | topic | 1h 与 5m 的 prompt cache 能互相读吗？  | cache-ttl.md                    | `不能\|无法\|不可\|cannot\|can't\|separate\|分离`       | `可以互相读\|can read each other` |
+| Q6  | topic | 判断缓存命中应该用什么基准？           | cache-ttl.md                    | `0\.5`                                                  | —                                 |
+| Q7  | topic | quota 5h 窗口的阶梯阈值是多少？        | quota.md                        | `50`；`75`；`90`                                        | `95\|98`（周窗口的值）            |
+| Q8  | topic | 真机验收怎么驱动独立 pi 实例？         | live-acceptance-tmux.md         | `tmux`                                                  | —                                 |
+| Q9  | topic | 这台机器 bash 工具实际是什么 shell？   | pitfalls › 运行时               | `zsh`                                                   | —                                 |
+| Q10 | topic | consult fork 要不要裁剪工具输出？      | multi-agent-experiments.md      | `不(做\|需要?\|用)?裁剪\|no(t)? trim\|without trimming` | —                                 |
 
-**统计口径**（从 JSONL 事件解析）：
+每个问句后固定追加 `\n\nAnswer in at most two sentences.`，限制长度，减少「列举多个候选碰巧命中」的假阳性。
 
-- `T_all` = `tool_execution_start` 事件数；
-- `T_mem` = 其中 `toolName === "memory"`，或 `toolName ∈ {read, grep, find, ls, bash}` 且参数中出现 memory 根路径的调用数；
-- `zero` = `T_all === 0`；
-- `hit1` = 第一个 memory 相关调用的目标（`path`/`name`/`query` 命中文件，或 read 路径）即期望文件；
-- `correct` = 最终 assistant 文本匹配 `expect`。
-- 结果写 `docs/dev/memory/eval/results-<date>.md`（每题每组两次的明细 + 汇总表）。
+**运行器**（`scripts/dev/memory-eval.mjs`，P0-a 提交；无依赖 Node 脚本）：
 
-**达标线**：
+| 项         | 固定值                                                                                                                                                                                                                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 隔离       | 每组一个临时根 `/tmp/memeval-<group>-<ts>/`：`home/`（`HOME` 指向它；toolkit 设置文件路径由 `homedir()` 决定，脚本在 `home/.pi/agent/pi-subagent.json` 写入该组设置——**从不改动真实设置文件**）、`root/`（`ARMORY_MEMORY_ROOT`，复制该组 fixture）、`repo/`（cwd，空目录，无 AGENTS.md） |
+| pi 配置    | `PI_CODING_AGENT_DIR=<真实 ~/.pi/agent>`（只为读 models/auth）、`--no-session`、`PI_SKIP_VERSION_CHECK=1`、`PI_TELEMETRY=0`                                                                                                                                                              |
+| extension  | `--no-extensions -e <检出>/index.ts`（不加载已安装的 pi-toolkit 包或其它扩展）。baseline：`git worktree add /tmp/memeval-base <P0-a sha>` + `ln -s <repo>/node_modules`；tiered 两组：P5 提交的干净检出。工作树脏（`git status --porcelain` 非空）⇒ 脚本拒绝运行                         |
+| 其它加载   | `--no-skills --no-prompt-templates --no-context-files --no-themes`                                                                                                                                                                                                                       |
+| 工具       | `--tools read,grep,find,ls,memory`（三组相同；去掉 bash/edit/write，避免副作用）                                                                                                                                                                                                         |
+| 模型       | `--model cr-anthropic/claude-sonnet-5 --thinking low`；JSONL 中 assistant 消息的实际 provider/model 与之不符 ⇒ 该次记 `model_mismatch`                                                                                                                                                   |
+| 设置       | baseline `{"memory":{"enabled":true}}`；tiered-pre / tiered-post `{"memory":{"enabled":true,"layout":"tiered","toolSurface":"v2"}}`（P5 后即默认值，显式写出防漂移）；其余键缺省                                                                                                         |
+| 调用       | `child_process.spawn("pi", ["--mode","json",…flags, prompt])`（不经 shell）；stdout 按 LF 分帧、去掉可选 `\r`（`docs/json.md` 要求，不用 readline）；stderr 另存                                                                                                                         |
+| 超时       | 每次 180s：到时 SIGTERM，5s 后 SIGKILL                                                                                                                                                                                                                                                   |
+| 重复与顺序 | 每题每组 **5 次**；三组交错执行（Q1-base、Q1-pre、Q1-post、…），题序按固定种子打乱，摊平上游时段波动                                                                                                                                                                                     |
+| 重试       | 只重试**传输层失败**：退出码非 0 且 stderr 匹配 `429\|5\d\d\|ECONNRESET\|stream (ended\|interrupted)\|overloaded`，或最后一条 assistant `stopReason:"error"`；最多 2 次，间隔 15s / 45s，次数记入明细。超时、非法 JSONL、模型不符不重试                                                  |
+| 记录       | 结果头部：`pi --version`、`node --version`、各组检出 sha、脚本 sha256、问题集 sha256、各组设置 JSON、完整 flags、模型、起止时间                                                                                                                                                          |
 
-1. core 题（Q1–Q3，每组 6 次）：`tiered-pre` 的 `zero ∧ correct` ≥ 5/6，且不低于 baseline。
-2. topic 题（Q4–Q10，每组 14 次）：`tiered-pre` 的平均 `T_mem` ≤ baseline 平均 `T_mem`；`hit1` ≥ 10/14；`correct` ≥ baseline − 1。
-3. `tiered-post`：topic 题 `hit1` ≥ 12/14，平均 `T_mem` ≤ 1.3；core 题同第 1 条。
-4. 任一条不达标 ⇒ 回到 P1 调整 guide/索引文案（冻结面变更，走方案修订），不调预算默认值。
+**每次运行的归类**（互斥，按序判定）：`timeout` → `spawn_error`（进程起不来）→ `invalid_jsonl`（任一非空行 `JSON.parse` 失败，或首条记录不是 `type:"session"` 头）→ `exit_nonzero`（重试耗尽）→ `no_final`（没有 `agent_settled`，或没有 role=assistant 的 `message_end`）→ `model_mismatch` → `ok`。只有 `ok` 进入指标分母，其余逐类计数列在汇总表；某组非 `ok` 占比 > 20% ⇒ 该组标 `unreliable`，不据此下结论。
 
-## 12. 决策（v1 的 14 条 + 用户决策 + 评审附加条件；新决策 N1–N3 待拍板）
+**指标**（只从 `ok` 运行解析；最终答案 = 最后一条 role=assistant `message_end` 的文本块拼接）：
+
+- `T_all` = `tool_execution_start` 事件数；`T_mem` = 其中 `toolName === "memory"`，或 `toolName ∈ {read, grep, find, ls}` 且参数中出现 memory 根路径的调用数；
+- `zero` = `T_all === 0`；`hit1` = 第一个 memory 相关调用的目标（`path` / `name` / `query` 命中的文件，或 read 路径）即期望文件；`correct` 如上；
+- 每个比率附 Wilson 95% 区间。
+
+**报告与解读**：写 `docs/dev/memory/eval/results-<date>.md`（明细 + 汇总 + 运行元数据）。参考线（非门禁）：core 题 `tiered-pre` 的 `zero ∧ correct` 不低于 baseline；topic 题平均 `T_mem` 不高于 baseline；`tiered-post` topic `hit1` ≥ 80%。**退化信号**：同一指标 tiered 与 baseline 的 Wilson 区间不重叠且下降 ≥ 20 个百分点 ⇒ 主会话上报用户，由用户决定是否回 P1 修改 guide/索引文案（冻结面变更，走方案修订）；不调预算默认值。
+
+**成本**：3 组 × 10 题 × 5 次 = 150 次调用（不含重试）；无 skills / context files 时首请求约 8–12k 输入 token，按 sonnet 档估 **$5–10**。
+
+## 12. 决策（v1 的 14 条 + 用户决策 + 评审附加条件 + N1–N3 已拍板；v3 新决策 N4–N5 待拍板）
 
 | #   | 决策                                                                                | 状态                       | 附加条件与落地位置                                                                                                                      |
 | --- | ----------------------------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
@@ -769,11 +878,17 @@ A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置�
 | 14  | 本期包含 `/mem restore`                                                             | 按推荐                     | 显式确认、逐文件 hash 冲突检测、pre-restore 备份失败即中止、失败报告（§7.5）                                                            |
 | —   | 精简范围                                                                            | **用户决策**               | `similar.ts`/D12/D15/D16 延后；T3 只做精确重复行（§4.4、§6.1、§13）                                                                     |
 
-**新决策（需用户拍板）**：
+**决策 N1–N3（用户 2026-09-26 已拍板）与主会话裁定**：
 
-- **N1 无价模型能否跑 tidy**：主会话模型若没有价格信息（`cost` 全 0），成本上限无法执行。A（推荐）默认拒绝，提示指定有价 `tidy.model`，`memory.tidy.allowUnpriced=true` 可放行（此时只受回合数/输出字节/超时约束）；B 直接放行但在确认框里警告。推荐 A：与 child keepalive「无价不 ping」一致，且符合评审「反对无成本上界」。
-- **N2 symlink 策略范围**：A（推荐）memory 目录内的 symlink 文件在**所有**路径（含 `layout=legacy` / `toolSurface=legacy`）一律跳过/拒绝，只有 `<memoryRoot>/<slug>` 目录本身允许是 symlink；B 只在 v2 路径拒绝、legacy 保持跟随。推荐 A：legacy 跟随 symlink 就是评审 #7 的注入外泄面，逐字节回退不应包括安全缺陷；golden 不含 symlink，不受影响。代价：若用户曾把单个 memory 文件软链到别处（如 CC 目录），升级后该文件不再注入（体检 D14 会提示）。
-- **N3 手写文件的 provenance 翻转**：A（推荐）模型不能修改手写文件的 frontmatter（str_replace/insert 触及 frontmatter 即拒），翻成 `source: agent` 只能由用户做；B 允许模型 str_replace frontmatter。推荐 A：否则模型可以两步绕过「覆盖/删除/改名拒绝」，用户决策 5 形同虚设。
+- **N1 无价模型 tidy**：**允许 + 警告**。不做估价闸与美元闸，只保留 `maxTurns` / `maxOutputBytes` / `timeoutMs` 硬上限；确认框、`--dry-run`、报告明确写 no cost guarantee；删除 `memory.tidy.allowUnpriced`（§7.1、§9）。
+- **N2 symlink 范围**：全部路径（含 legacy）拒绝**文件级**符号链接（§3.1）。
+- **N3 手写文件 provenance**：模型不能改手写文件的 frontmatter（§4.3）。
+- **主会话裁定（复审 v1-7）**：`<memoryRoot>/<slug>` 目录本身是符号链接**仍允许**，每次操作 canonicalize 一次并写明「用户显式信任的配置」；目录内文件是符号链接一律拒绝。`NAME_RE` 只在 v2 路径启用，legacy 保持原文件名接受规则，字节级不变（§3.1、§2.7）。
+
+**v3 新决策（需用户拍板）**：
+
+- **N4 命中率评测定位**：A（推荐）探索性指标、不作硬门禁——每题每组 5 次（150 次调用，约 $5–10），退化信号（Wilson 区间不重叠且下降 ≥ 20pp）只触发上报；B 硬门禁——要有统计功效需每题每组 ≥ 20 次（≥ 600 次调用，成本与耗时 4 倍以上），且上游路由波动仍可能误报。推荐 A：硬门禁已由确定性测试 M/G1 与真机 R1/R3/R4/R7 承担。
+- **N5 tidy 零写入的实现位置**：A（推荐）runtime 只读工具域 `SpawnRequest.toolDomain:"readonly"`——复用 consult 的强制点与常量，改 `src/core/types.ts` / `src/service/runtime-adapter.ts` / `src/service/spawn-service.ts`，独立提交 P0-r，consult 行为不变；B 新增内置只读 agent type `memory-tidy`（工具只有 read/grep/find/ls）——改动小，但①用户同名 agent 文件可遮蔽内置类型，不构成安全边界；②内置类型会出现在每个会话的 agent-types 提示词段，改变全体用户的 system prompt 字节；③仍需 runtime 兜底才能防 H2 扩展加宽。推荐 A。
 
 ## 13. 延后项与接口预留
 
@@ -794,61 +909,76 @@ A1–A4 随 P0-a（src 零改动）提交并生成 golden；A5 需要新设置�
 ### 14.1 包与依赖
 
 ```text
-P0 冻结面（串行，先行；两个有序提交）
+P0 冻结面（串行，先行；三个有序提交 P0-a → P0-r → P0-b）
  ├─▶ P1 注入层 ─┐
  ├─▶ P2 工具层 ─┤
  ├─▶ P3 体检   ─┼─▶ P5 集成 + 默认值翻转 + 文档 + 真机/评测（主会话）
  └─▶ P4 tidy   ─┘
 ```
 
-**P0 冻结面**（1 个 dev 包；产出的签名/文本在后续包中只能上报、不能自改）
+**P0 冻结面**（1 个 dev 包、三个有序提交；产出的签名/文本在后续包中只能上报、不能自改。每个提交单独跑全量 typecheck / test / format，**每个提交都可发布**）
 
-- **提交 P0-a（src 零改动）**：`tests/fixtures/memory/current-5/`、`synthetic/`、`tests/memory/helpers/fixture-dir.ts`、`tests/memory/legacy-golden.test.ts` + 按 §10.1 生成的 `tests/fixtures/memory-legacy-golden.json`；`docs/dev/memory/eval/questions.json`、`scripts/dev/memory-eval.mjs`。verifier 核对 `git show --stat` 无 `src/` 路径。**R0 基线与 baseline 评测在此提交之上、P0-b 合入前执行**（行为与 master 相同）。
-- **提交 P0-b**：
-  - `src/memory/safe-fs.ts`、`src/memory/lock.ts`（完整实现 + B 组测试）；
-  - `src/memory/store.ts`：改用 safe-fs；导出 `resolveMemoryFile`、`assertAllowWrite`；legacy `writeMemoryFile`/`listMemory`/`importProject` 行为除 symlink 外不变；
-  - `src/memory/render.ts`：只换 safe-fs 读取原语 + `memoryFingerprint` 改 lstat（legacy golden 守护）；
-  - `src/memory/tool-legacy.ts`：现 `tool.ts` 原样搬迁（`createLegacyMemoryTool`）；
-  - `src/memory/tool-surface.ts`：§4.5 v2 冻结文本与 schema + `toolSurfaceBytes` + D 组测试与 `tests/fixtures/memory-tool-surface.json`；
-  - `src/memory/contracts.ts`（类型 + 常量）：`MemoryMeta`、`MemoryAccess`、`ChildProfile`、`TieredRenderOptions`、`TieredRenderResult`、`TIERED_TEMPLATES`、`BudgetReport`、`NormalizedCall`、`DoctorFinding`/`DoctorId`、`TidyProposal`/`TidyDecision`/`TidyManifest`、`TIDY_SCHEMA`、`TidyPort`；
-  - `src/memory/meta.ts`（完整实现 + E 组测试）；
-  - `src/sysprompt/hub.ts`：§2.6 `pointerHint` 函数求值 + 异常降级 + C 组测试；
-  - `src/config/settings.ts`、`setting-specs.ts`：§9 全部键（`layout`/`toolSurface` 默认 **legacy**）+ `TIME_SETTING_MS_PATHS` + F 组测试；
-  - `src/memory/index.ts` / `command.ts` / `src/index.ts`：装配骨架——按设置选择工厂；`/mem` 分发 `doctor` / `tidy` / `restore` 到桩；`attachTidy(port)` 与 post-guard holder 接线；`/mem` cwd 解析 worktree-origin；`getActiveTools` 端口传给 inject；
-  - 桩文件（签名冻结、函数体 `throw new Error("not implemented")` 或返回空；只有 `layout=tiered`/`toolSurface=v2` 或 `/mem doctor|tidy|restore` 才会触达，默认 legacy 下不可达）：`tiered.ts`、`tool.ts`（v2 工厂）、`edit.ts`、`search.ts`、`budget.ts`、`normalize.ts`、`doctor.ts`、`doctor-command.ts`、`tidy/{prompt,validate,diff,cost,apply,frontmatter,restore,command}.ts`；
-  - 既有 memory 测试钉 `layout/toolSurface: "legacy"`；L 组装配测试。
-- 验收：A–F、L 全绿；全量 typecheck/test/format 绿；接口清单与本文 §2–§7 一致；默认设置下行为与 master 逐字节一致（A 组）。
+- **提交 P0-a（src 零改动）**：`tests/fixtures/memory/current-5/`、`tests/fixtures/memory/synthetic/`（含 `legacy-names/`、`huge-slug/`）、`tests/fixtures/memory/cc-source/`、`tests/memory/helpers/fixture-dir.ts`、`tests/memory/legacy-golden.test.ts`（A1–A4、A6）+ 按 §10.1 生成的 `tests/fixtures/memory-legacy-golden.json`；`docs/dev/memory/eval/questions.json`、`scripts/dev/memory-eval.mjs`。verifier 核对 `git show --stat` 无 `src/` 路径，并对照 current-5 原文复核问题集正则。**R0 基线与 baseline 评测在此提交之上、P0-r / P0-b 合入前执行**（行为与 master 相同）。
+- **提交 P0-r（runtime 只读工具域，§7.0；不碰 `src/memory/`）**：`src/core/types.ts`（`SpawnRequest.toolDomain`）、`src/service/runtime-adapter.ts`（`readonlyDomain` 强制点）、`src/service/spawn-service.ts`（准入组合校验）；N 组测试 `tests/service/runtime-adapter-readonly-domain.test.ts`、`tests/service/spawn-readonly-domain.test.ts`。无调用方时零行为变化，consult 回归测试原样绿 ⇒ 可单独发布。
+- **提交 P0-b（memory 冻结面）**：
+  - `src/memory/safe-fs.ts`、`src/memory/lock.ts`（完整实现；`lock.ts` 零 fs import）+ B 组测试 `tests/memory/{safe-fs,lock,fs-guard}.test.ts`；
+  - `src/memory/store.ts`：全部改用 safe-fs（`names:"legacy"`）；导出 `resolveMemoryFile`、`assertAllowWrite`；`importProject` / `importAll` 改 `async` 并入锁（§3.3）；其余 legacy 行为除文件级 symlink 外不变；
+  - `src/memory/render.ts`：只换 safe-fs 读取原语 + `memoryFingerprint` 改 lstat 列举（legacy golden 守护）；
+  - `src/memory/tool.ts`：**不改**（legacy 实现原位保留，复审 新-3）；
+  - `src/memory/tool-surface.ts`：§4.5 v2 冻结文本与 schema + `toolSurfaceBytes` + `canonicalJson` + D 组测试 `tests/memory/tool-surface.test.ts` 与 `tests/fixtures/memory-tool-surface.json`；
+  - `src/memory/contracts.ts`（类型 + 常量）：`MemoryMeta`、`MemoryAccess`、`ChildProfile`、`TieredRenderOptions`、`TieredRenderResult`、`TIERED_TEMPLATES`、`BudgetReport`、`NormalizedCall`、`DoctorFinding`/`DoctorId`、`TidyProposal`/`TidyDecision`/`TidyManifest`、`TIDY_SCHEMA`、`TidyPort`（`spawn` 请求类型含必填 `toolDomain: "readonly"`）；
+  - `src/memory/meta.ts`（完整实现 + E 组测试 `tests/memory/meta.test.ts`）；
+  - `src/sysprompt/hub.ts`：§2.6 `pointerHint` 函数求值 + 异常降级 + C 组测试（`tests/sysprompt/hub.test.ts` 追加）；
+  - `src/config/settings.ts`、`setting-specs.ts`：§9 全部键（`layout` / `toolSurface` 默认 **legacy**；无 `allowUnpriced`）+ `TIME_SETTING_MS_PATHS` + F 组测试（`tests/config/memory-settings.test.ts`）；
+  - `src/memory/index.ts` / `command.ts` / `src/index.ts`：装配骨架——按 toolSurface 选择 `tool.ts` 或 `tool-v2.ts`，按 layout 路由渲染；`/mem` 分发 `doctor` / `tidy` / `restore` 到桩、`import` 改为 await；`attachTidy(port)` 与 post-guard holder 接线（port 的 spawn 映射到带 `toolDomain` 的 `SpawnRequest`）；`/mem` cwd 解析 worktree-origin；`getActiveTools` 端口传给 inject；
+  - 桩文件（签名冻结，函数体 `throw new Error("not implemented")` 或返回空；只有 `layout=tiered` / `toolSurface=v2` 或 `/mem doctor|tidy|restore` 才会触达，默认 legacy 下不可达）：`tiered.ts`、`tool-v2.ts`、`edit.ts`、`search.ts`、`budget.ts`、`normalize.ts`、`doctor.ts`、`doctor-command.ts`、`tidy/{prompt,validate,diff,cost,apply,frontmatter,restore,command}.ts`；`inject.ts` 只加 layout 路由（tiered 分支调桩）；
+  - 既有测试：`tests/memory/{inject,wire}.test.ts`、`tests/sysprompt/memory-section.test.ts` 钉 `layout/toolSurface: "legacy"`；`tests/memory/{store,command}.test.ts` import 用例改 await；`tests/memory/tool.test.ts` 零改动；A5 追加进 `tests/memory/legacy-golden.test.ts`；L 组装配测试进 `tests/memory/wire.test.ts`。
+- 验收：A–F、L、N 全绿；全量 typecheck / test / format 绿；接口清单与本文 §2–§7 一致；默认设置下行为与 master 逐字节一致（A 组）。
 
-**P0 冻结面完整性核对**（评审要求「冻结面归 P0 是否仍完整」）：跨包共享的一切都在 P0——hub（P1 不再改）、safe-fs/lock（P2/P4 共用）、contracts 模板与 schema（P1/P3/P4）、工具面文本（P2 不改）、settings（全部读）、装配骨架（P5 只翻默认值）。P1–P4 之间剩余的运行时依赖只有「P2 的块估算调用 P1 的 `renderTiered`」「P3 的 D09 调用 `renderTiered`」「P4 调用 P3 的 `runDoctor`」，全部经 P0 冻结的签名，开发期用桩/注入端口测试，真实串联在 P5。
+**P0 冻结面完整性核对**：跨包共享的一切都在 P0——hub（P1 不再改）、safe-fs / lock（P2 / P4 共用）、runtime 只读工具域（P4 消费，P0-r）、contracts 模板与 schema（P1 / P3 / P4）、工具面文本（P2 不改）、settings（全部读）、装配骨架（P5 只翻默认值）。P1–P4 之间剩余的运行时依赖只有「P2 的块估算调用 P1 的 `renderTiered`」「P3 的 D09 调用 `renderTiered`」「P4 调用 P3 的 `runDoctor`」，全部经 P0 冻结的签名，开发期用桩/注入端口测试，真实串联在 P5。
 
 **并行写包**（P0 合入后同一条消息派发，各挂 `experts: [本方案 Plan label]`，`isolation:"worktree"`）：
 
-| 包        | 内容                                                                                                                                                                            | 文件域（独占）                                                                                                                                                         | 验收口径                                                                |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| P1 注入层 | `renderTiered`（分配 + 降级阶梯）、整节准入、MetaCache、TieredRenderCache、childProfile、access 粘住、memory pointer 函数、inject 路由、tiered golden                           | `src/memory/tiered.ts`、`src/memory/inject.ts`；`tests/memory/tiered.test.ts`、`tests/sysprompt/memory-tiered-section.test.ts`、`tests/fixtures/memory/tiered-golden/` | G 组、H1–H6；current-5 实测字节与级别写进包报告；verifier 逐行审 golden |
-| P2 工具层 | v2 工具工厂、`normalizeMemoryCall` 别名/互斥、七个命令、手写文件规则、锁内原子写、T3 预算与精确重复行、硬上限                                                                   | `src/memory/tool.ts`、`edit.ts`、`search.ts`、`budget.ts`、`normalize.ts`；`tests/memory/{tool-v2,edit,search,budget,normalize}.test.ts`                               | I 组；块估算经注入的 `renderBlock` 端口测试                             |
-| P3 体检   | D01–D09、D11、D13、D14，`/mem doctor`，`/mem` 摘要行，启动提醒（去重）                                                                                                          | `src/memory/doctor.ts`、`doctor-command.ts`；`tests/memory/doctor.test.ts`                                                                                             | J 组；零 spawn、零 sendMessage                                          |
-| P4 tidy   | prompt（含迁移模式）、cost（估价 + cap watcher 接线）、validate（输出上限/内容守恒/手写降级）、diff、apply（锁/备份/manifest/sha/单次失效）、frontmatter 模式、restore、UI 编排 | `src/memory/tidy/*.ts`；`tests/memory/{tidy,tidy-cost,restore}.test.ts`                                                                                                | K1–K9、K11–K14                                                          |
+| 包        | 内容                                                                                                                                                                                              | 文件域（独占）                                                                                                                                                         | 验收口径                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| P1 注入层 | `renderTiered`（`minimalFrame` + 分配 + 降级阶梯）、整节准入、MetaCache、TieredRenderCache、childProfile、access（`accessFromTools`）粘住、memory pointer 函数、inject tiered 分支、tiered golden | `src/memory/tiered.ts`、`src/memory/inject.ts`；`tests/memory/tiered.test.ts`、`tests/sysprompt/memory-tiered-section.test.ts`；`tests/fixtures/memory/tiered-golden/` | G 组、H1–H6；current-5 实测字节与级别写进包报告；verifier 逐行审 golden |
+| P2 工具层 | v2 工具工厂、`normalizeMemoryCall` 别名/互斥、七个命令、手写文件规则、锁内原子写（含临时文件替换式 append）、T3 预算与精确重复行、硬上限                                                          | `src/memory/tool-v2.ts`、`edit.ts`、`search.ts`、`budget.ts`、`normalize.ts`；`tests/memory/{tool-v2,edit,search,budget,normalize}.test.ts`                            | I 组；块估算经注入的 `renderBlock` 端口测试                             |
+| P3 体检   | D01–D09、D11、D13、D14（含 linked 目录），`/mem doctor`，`/mem` 摘要行，启动提醒（去重）                                                                                                          | `src/memory/doctor.ts`、`doctor-command.ts`；`tests/memory/doctor.test.ts`；`tests/fixtures/memory/doctor-golden/`                                                     | J 组；零 spawn、零 sendMessage                                          |
+| P4 tidy   | prompt（含迁移模式）、cost（估价 + cap watcher + N1 无价路径）、validate、diff、apply（锁/备份/manifest/sha/单次失效）、frontmatter 模式、restore、UI 编排、只读域请求                            | `src/memory/tidy/*.ts`；`tests/memory/{tidy,tidy-cost,restore}.test.ts`；`tests/fixtures/memory/tidy-payloads/`、`tests/fixtures/memory/current-5-migrated/`           | K1–K9、K11–K15                                                          |
 
-**P5 集成 + 文档**（主会话，或 1 个 dev 包 + 主会话真机）：跨包测试（H 组依赖真实 tiered 的用例、I9 真实块估算、K10 一次 update、M 组）；**翻转默认值** `layout:"tiered"`、`toolSurface:"v2"`（`settings.ts` 两个默认值 + spec 描述 + F/L 组断言）；`AGENTS.md` 中 `src/memory/` 一段（含 §3.3 接受的并发语义）、`docs/dev/memory/memory-plan.md` 顶部指向本文、本文状态改为「已实施」；真机 R1–R7 与 §11.2 的 `tiered-pre` / `tiered-post` 评测。
+**P5 集成 + 文档**（主会话，或 1 个 dev 包 + 主会话真机）：跨包测试（H 组依赖真实 tiered 的用例、I9 真实块估算、K10 一次 update、M 组 `tests/memory/discoverability.test.ts`）；**翻转默认值** `layout:"tiered"`、`toolSurface:"v2"`（`settings.ts` 两个默认值 + spec 描述 + `tests/config/memory-settings.test.ts` / `tests/memory/wire.test.ts` 的默认值断言）；`AGENTS.md` 中 `src/memory/` 一段（含 §3.1 目录信任语义、§3.3 接受的并发语义）与 `src/service/` 一段（`toolDomain:"readonly"`）、`docs/dev/memory/memory-plan.md` 顶部指向本文、本文状态改为「已实施」；真机 R1–R7 与 §11.2 的 `tiered-pre` / `tiered-post` 评测。
 
 ### 14.2 文件域冲突表
 
-| 文件                                                       | P0                                   | P1                  | P2         | P3         | P4                                     | P5                         |
-| ---------------------------------------------------------- | ------------------------------------ | ------------------- | ---------- | ---------- | -------------------------------------- | -------------------------- |
-| `src/config/settings.ts`、`setting-specs.ts`               | 写                                   | 读                  | 读         | 读         | 读                                     | 只改 2 个默认值 + 描述     |
-| `src/sysprompt/hub.ts`                                     | 写                                   | 读                  | —          | —          | —                                      | —                          |
-| `src/memory/{contracts,meta,safe-fs,lock,tool-surface}.ts` | 写                                   | 读                  | 读         | 读         | 读                                     | —                          |
-| `src/memory/store.ts`、`render.ts`                         | 写（safe-fs 替换）                   | 读                  | 读         | 读         | 读                                     | —                          |
-| `src/memory/tool-legacy.ts`                                | 写（搬迁）                           | —                   | —          | —          | —                                      | —                          |
-| `src/memory/{index,command}.ts`、`src/index.ts`            | 写                                   | —                   | —          | —          | —                                      | 小修（仅集成缺陷，需上报） |
-| `src/memory/{tiered,inject}.ts`                            | 桩                                   | 写                  | 读（端口） | 读（端口） | —                                      | —                          |
-| `src/memory/{tool,edit,search,budget,normalize}.ts`        | 桩                                   | —                   | 写         | —          | —                                      | —                          |
-| `src/memory/{doctor,doctor-command}.ts`                    | 桩                                   | —                   | —          | 写         | 读（端口）                             | —                          |
-| `src/memory/tidy/*`                                        | 桩                                   | —                   | —          | —          | 写                                     | —                          |
-| `tests/fixtures/memory/**`、`memory-*-golden.json`         | 写（legacy、tool-surface、fixtures） | 写 `tiered-golden/` | —          | —          | 写 `current-5-migrated` payload（K13） | 读                         |
-| `docs/dev/memory/eval/**`、`scripts/dev/memory-eval.mjs`   | 写                                   | —                   | —          | —          | —                                      | 写 `results-*.md`          |
-| `AGENTS.md`、`docs/dev/memory/*.md`                        | —                                    | —                   | —          | —          | —                                      | 写                         |
+所有权按**精确路径 / 精确子目录**登记（复审 新-4）；任何包都不得按 `tests/fixtures/memory/**` 泛匹配写入，也不得新建未登记的子目录——需要时先上报主会话登记。
+
+| 文件 / 目录                                                                                                                         | P0                | P1         | P2         | P3         | P4            | P5                                        |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ---------- | ---------- | ---------- | ------------- | ----------------------------------------- |
+| `src/core/types.ts`、`src/service/{runtime-adapter,spawn-service}.ts`                                                               | 写（P0-r）        | —          | —          | —          | 读（经 port） | —                                         |
+| `src/config/settings.ts`、`setting-specs.ts`                                                                                        | 写（P0-b）        | 读         | 读         | 读         | 读            | 只改 2 个默认值 + 描述                    |
+| `src/sysprompt/hub.ts`                                                                                                              | 写（P0-b）        | 读         | —          | —          | —             | —                                         |
+| `src/memory/{contracts,meta,safe-fs,lock,tool-surface}.ts`                                                                          | 写（P0-b）        | 读         | 读         | 读         | 读            | —                                         |
+| `src/memory/store.ts`、`render.ts`                                                                                                  | 写（P0-b）        | 读         | 读         | 读         | 读            | —                                         |
+| `src/memory/tool.ts`（legacy）                                                                                                      | **全程零改动**    | —          | —          | —          | —             | —                                         |
+| `src/memory/{index,command}.ts`、`src/index.ts`                                                                                     | 写（P0-b）        | —          | —          | —          | —             | 小修（仅集成缺陷，需上报）                |
+| `src/memory/{tiered,inject}.ts`                                                                                                     | 桩 / 路由（P0-b） | 写         | 读（端口） | 读（端口） | —             | —                                         |
+| `src/memory/{tool-v2,edit,search,budget,normalize}.ts`                                                                              | 桩（P0-b）        | —          | 写         | —          | —             | —                                         |
+| `src/memory/{doctor,doctor-command}.ts`                                                                                             | 桩（P0-b）        | —          | —          | 写         | 读（端口）    | —                                         |
+| `src/memory/tidy/*`                                                                                                                 | 桩（P0-b）        | —          | —          | —          | 写            | —                                         |
+| `tests/fixtures/memory/current-5/`、`synthetic/`、`cc-source/`；`tests/fixtures/memory-legacy-golden.json`；`tests/memory/helpers/` | 写（P0-a）        | 读         | 读         | 读         | 读            | 读                                        |
+| `tests/fixtures/memory-tool-surface.json`                                                                                           | 写（P0-b）        | —          | 读         | —          | —             | 读                                        |
+| `tests/fixtures/memory/tiered-golden/`                                                                                              | —                 | 写         | —          | —          | —             | 读                                        |
+| `tests/fixtures/memory/doctor-golden/`                                                                                              | —                 | —          | —          | 写         | —             | 读                                        |
+| `tests/fixtures/memory/tidy-payloads/`、`current-5-migrated/`                                                                       | —                 | —          | —          | —          | 写            | 读（M 组）                                |
+| `tests/service/{runtime-adapter,spawn}-readonly-domain.test.ts`                                                                     | 写（P0-r）        | —          | —          | —          | —             | —                                         |
+| `tests/memory/{legacy-golden,safe-fs,lock,fs-guard,tool-surface,meta}.test.ts`、`tests/sysprompt/hub.test.ts`                       | 写（P0-a / P0-b） | —          | —          | —          | —             | —                                         |
+| `tests/memory/{inject,store,command}.test.ts`、`tests/sysprompt/memory-section.test.ts`                                             | 写（P0-b）        | —          | —          | —          | —             | —                                         |
+| `tests/memory/wire.test.ts`、`tests/config/memory-settings.test.ts`                                                                 | 写（P0-b）        | —          | —          | —          | —             | 只改默认值断言                            |
+| `tests/memory/tool.test.ts`                                                                                                         | **全程零改动**    | —          | —          | —          | —             | —                                         |
+| 各包新测试文件（见上表「文件域」列）                                                                                                | —                 | 写（本包） | 写（本包） | 写（本包） | 写（本包）    | 写 `tests/memory/discoverability.test.ts` |
+| `docs/dev/memory/eval/questions.json`、`scripts/dev/memory-eval.mjs`                                                                | 写（P0-a）        | —          | —          | —          | —             | 读                                        |
+| `docs/dev/memory/eval/results-*.md`                                                                                                 | —                 | —          | —          | —          | —             | 写                                        |
+| `AGENTS.md`、`docs/dev/memory/*.md`                                                                                                 | —                 | —          | —          | —          | —             | 写                                        |
 
 冻结面纪律：任何包需要改 P0 标「写」的文件 ⇒ 停下上报主会话，由主会话统一改完再推送（dev-flow 规则 9）。P1–P4 文件域互不相交；四个写包按 pitfalls「>2 写包同树用 worktree」用 `isolation:"worktree"`（P0 合入 master 之后从 HEAD 建）。
 
@@ -865,12 +995,15 @@ P0 冻结面（串行，先行；两个有序提交）
 | 锁残留阻塞写入                                | 30s 陈旧判定 + 死 pid 判定；超时是可见错误；`/mem doctor` 可显示锁持有者（D14 附带）                |
 | 硬链接不可用的文件系统                        | `createExclusive`/`renameNoClobber` 退化为持锁检查 + rename，并在结果中注明                         |
 | 新工具面 + 别名让模型困惑                     | 官方字段名为主、旧字段只在 description 末尾一句；§11.2 评测观察工具调用错误率                       |
-| `tool-legacy.ts` 与 v2 双份维护               | legacy 冻结只修 bug；golden 保护；2 个版本后评估移除                                                |
+| `tool.ts`（legacy）与 `tool-v2.ts` 双份维护   | legacy 冻结只修 bug；golden 保护；2 个版本后评估移除                                                |
+| runtime 只读工具域改动波及 consult            | 强制点与 consult 同位、同常量；consult 回归测试（N7）原样绿；P0-r 独立提交便于回滚                  |
+| 命中率评测噪声大                              | 定位为探索性指标（N4）；硬门禁由 M / G1 与真机 R 步骤承担；归类剔除传输层失败                       |
+| legacy append 短写残留                        | legacy 冻结语义与 #22 前相同；`appendLegacy` 无插写时回滚；v2 append 改为临时文件替换，全写或不写   |
 
 ## 15. 本文与相关文档的关系
 
 - 设计依据：设计评审 §2、§4、§6、§6A；sysprompt 不变量：ss-plan §4.1。
-- 评审输入：`optimize-plan-review-v1.md`（v1 评审 + 用户决策）；v2 评审意见另存 `optimize-plan-review-v2.md`。
+- 评审输入：`optimize-plan-review-v1.md`（v1 评审 + 用户决策）；`optimize-plan-review-v2.md`（v2 复审 + 用户决策 N1–N3 + 主会话裁定，v3 修订输入）。
 - 实施完成后：memory-plan 顶部加指针；AGENTS.md `src/memory/` 段更新。
 
 ## 16. v1→v2 处置
@@ -892,3 +1025,24 @@ P0 冻结面（串行，先行；两个有序提交）
 | 精简                  | 用户    | 按评审精简                                               | 同 #10                                                                                                                                                                                                          | §13                |
 | 决策 1–4、6–10、12–14 | 按推荐  | 评审附加条件                                             | 逐条写入 §12 表「附加条件与落地位置」列                                                                                                                                                                         | §12                |
 | —                     | 新增    | master 中间态可发布性                                    | P0 默认 `layout`/`toolSurface` 保持 legacy、桩在默认配置下不可达；P5 集成后翻转默认值                                                                                                                           | §9、§14.1          |
+
+## 17. v2→v3 处置
+
+| 复审 # | 严重度           | 问题                                                                  | v3 处置                                                                                                                                                                                                                                                                                                        | 位置                      |
+| ------ | ---------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| v1-1   | 严重             | 0.34.52 与 runtime 1.3.27 键序不同，不能「逐字节相同」                | 自行用两版实测：v2 parameters 均 861B、合计均 1,443B，legacy parameters 均 417B；canonical 文本相等、原始文本不等。golden 改存 canonical JSON（键递归排序），字节预算按原始 `JSON.stringify` 在两版下分别计算并断言相等 ≤ 1,500；运行时 typebox 从 pi 包自身解析，解析失败即测试失败；不再声称跨版本文本相同   | §1、§4.5、§10 D           |
+| v1-2   | 已闭合           | P0 hub 求值                                                           | 保持 P0 冻结，P1 不改 hub                                                                                                                                                                                                                                                                                      | §2.6                      |
+| v1-3   | 严重             | L5 判据含 guide、`Ov` 未覆盖实际文案，`level=5 ⇔ F+Ov>B` 与输出不等价 | 判据改为真实文本 `M = minimalFrame(input)`（含 access 对应 guide 与最坏尾行 `Tmax`）；L5 文本按候选 `line5` 逐级退到不可约形式 `I`；只允许 `I` 超限（slug 极长）；I-M1a–d 全部对 `Buffer.byteLength(result.text)` 断言，I-M1c 由测试独立调用 `minimalFrame` 复算                                               | §2.3、§10 G2/G3           |
+| v1-4   | 严重             | 运行器未固定、重复次数少、判定宽松                                    | 定位为探索性指标（N4）；运行器固定 HOME 重定向注入设置、`--no-extensions -e`、禁用 skills/templates/context files、工具表、模型、180s 超时、传输层重试规则、七类互斥归类、版本与配置记录；每题每组 5 次、交错执行、Wilson 区间；判定改为 `must` 全中且 `mustNot` 全不中，答案限两句                            | §11.2、§12 N4             |
+| v1-5   | 已闭合           | 官方字段                                                              | 验收补官方文档示例 payload 原样（记录来源 URL）                                                                                                                                                                                                                                                                | §10 I7                    |
+| v1-6   | 严重             | import 未入锁；append 短写；守卫与 lock.ts 冲突                       | `importProject`/`importAll` 改 async 并入锁、no-clobber 用 `createExclusive`；v2 append 改临时文件替换（全写或不写），所有写经 `writeAll`，临时文件失败即清理；legacy append 短写尽力回滚；锁原语下沉 safe-fs，`lock.ts` 零 fs import；守卫改 import 级，只放行 `safe-fs.ts`                                   | §3.1–§3.3、§10 B10–B13    |
+| v1-7   | 严重             | slug 目录 symlink 被跟随；`NAME_RE` 改变 legacy                       | 按主会话裁定：slug 目录 symlink 允许，每次操作 `canonicalMemoryDir` 一次、fs 用 `real`、文本用 `display`，写明用户显式信任语义并在 `/mem path`、D14 显示；目录内文件级 symlink 一律拒绝（含 legacy）；`listRegular({names})` 区分 v2 / legacy，legacy 接受任意 `*.md`，`legacy-names` fixture 进 legacy golden | §2.1、§2.7、§3.1、§6.1    |
+| v1-8   | 已闭合（有条件） | `allowUnpriced` 放弃美元上限                                          | 按 N1：无价模型允许 + 警告，删除 `allowUnpriced`；确认框、dry-run、报告明示 no cost guarantee；只保留回合 / 输出字节 / 超时硬上限并各有测试                                                                                                                                                                    | §7.1、§9、§10 K3          |
+| v1-9   | 已闭合           | golden 生成                                                           | `sourceCommit` / `generatedAt` 只作记录，比较时剔除                                                                                                                                                                                                                                                            | §10.1                     |
+| v1-10  | 已闭合           | 精简                                                                  | 不变                                                                                                                                                                                                                                                                                                           | §13                       |
+| 新-1   | 阻塞             | tidy 用 Plan（含 bash），提案阶段可写文件                             | 新增 runtime 只读工具域 `SpawnRequest.toolDomain:"readonly"`：注入分支跳过、H2 后强制 `CONSULT_READONLY_TOOLS` + `StructuredOutput`、enforcer 同源 policy、准入组合校验；tidy spawn 恒带该字段（类型必填）；N 组含越权写入端到端测试；实现位置作为 N5 请用户确认                                               | §7.0、§7.3、§10 N、§12 N5 |
+| 新-2   | 严重             | 「无 read 降 none」与「查不到按 read」冲突                            | `accessFromTools`：查不到 / 抛错 / 非数组 ⇒ `none`；与 `CONSULT_READONLY_TOOLS` 集合相等 ⇒ `read`（consult 明示例外）；其余按工具组合                                                                                                                                                                          | §2.4、§10 G8              |
+| 新-3   | 严重             | P0-b 换掉 `tool.ts` 导致 `tool.test.ts` 断                            | `tool.ts` 原位保留为 legacy、全程零改动，v2 工厂放 `tool-v2.ts`；`tool.test.ts` 零迁移；受 P0-b 影响的既有测试逐个列入 P0-b 文件域                                                                                                                                                                             | §2.7、§14.1、§14.2        |
+| 新-4   | 一般             | `tests/fixtures/memory/**` 多包写入重叠                               | 按精确子目录登记所有权（P0-a：current-5 / synthetic / cc-source；P1：tiered-golden；P3：doctor-golden；P4：tidy-payloads / current-5-migrated），禁止泛匹配和未登记子目录                                                                                                                                      | §10.1 第 8 条、§14.2      |
+| N1–N3  | 用户决策         | 无价模型 / symlink 范围 / provenance                                  | 全部落地                                                                                                                                                                                                                                                                                                       | §12                       |
+| 包拆分 | —                | —                                                                     | P0 变为 P0-a → P0-r → P0-b 三个可独立发布的提交；P2 文件域 `tool.ts` → `tool-v2.ts`；P3/P4 增加 fixture 子目录；K15、N 组新增                                                                                                                                                                                  | §14                       |
