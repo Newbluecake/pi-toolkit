@@ -10,23 +10,13 @@
 // so every new field falls back to its documented default there; tests
 // inject the rest directly.
 //
-// Two more pieces this package's file domain is responsible for, per
-// §14.1's P3 row ("`/mem` 摘要行，启动提醒（去重）"), but that neither
-// `command.ts` nor `src/index.ts` (both P0-frozen, "P5 小修（仅集成缺陷）"
-// only) currently call anywhere:
-//   - `summaryLine` (doctor.ts) is ready for `command.ts`'s `list`/default
-//     branches to append after the file listing (§6.2) — not wired here.
-//   - `createStartupReminder` below returns a `.check` callback matching
-//     pi's `ExtensionHandler<SessionStartEvent>` shape exactly, ready for
-//     `pi.on("session_start", reminder.check)` — not registered here.
-// Both are fully implemented and unit-tested against fakes/injected ctx;
-// the one-line wiring into `command.ts`/`src/index.ts` is the P5 "集成缺陷"
-// this package's delivery report calls out.
+// P5 production wiring appends the summary in `command.ts` and registers the
+// startup reminder in `index.ts`; both paths use the real renderer/doctor.
 
 import { createHash } from "node:crypto";
 import type { ExtensionCommandContext, ExtensionHandler, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
-import { DEFAULT_SETTINGS, type MemorySettings } from "../config/settings.js";
+import type { MemorySettings } from "../config/settings.js";
 import type { DoctorFinding, TieredRenderInput, TieredRenderResult } from "./contracts.js";
 import {
   formatDoctorReport,
@@ -38,23 +28,19 @@ import {
 } from "./doctor.js";
 import { parseMemoryMeta } from "./meta.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
-import { canonicalDir, listRegular, readRegular } from "./safe-fs.js";
+import { canonicalDirState, listRegular, readRegular } from "./safe-fs.js";
 import { renderTiered } from "./tiered.js";
 
 export type RenderTieredPort = (input: TieredRenderInput) => TieredRenderResult;
 
-/** Real production port: P1's `renderTiered` (still a §14.1 stub that
- *  throws until that package lands — callers below always wrap this in a
- *  try/catch, so a throw degrades to "no render info" rather than crashing
- *  `/mem doctor` or the startup reminder; §14.1's "跨包依赖…真实串联在 P5"). */
+/** Real production port: P1's `renderTiered`. Errors are still handled as
+ * best-effort degradation by the command/reminder callers. */
 const DEFAULT_RENDER_PORT: RenderTieredPort = (input) => renderTiered(input);
 
 export interface DoctorCommandDeps {
   paths?: MemoryPaths;
-  /** Defaults to `DEFAULT_SETTINGS.memory` — `command.ts` never threads the
-   *  live settings object through today (another small P5 wiring gap; see
-   *  this package's delivery report). */
-  settings?: MemorySettings;
+  /** Production callers thread the activate-time settings snapshot. */
+  settings: MemorySettings;
   renderTieredPort?: RenderTieredPort;
   /** Clock for D08's staleDays comparison. Defaults to `Date.now`. */
   now?: () => number;
@@ -82,7 +68,8 @@ function buildSnapshot(
   now: () => number,
 ): DoctorSnapshot {
   const display = memoryDirFor(cwd, paths);
-  const canon = canonicalDir(display);
+  const state = canonicalDirState(display);
+  const canon = state.state === "ok" ? state.dir : undefined;
   const dir = canon ? canon.real : display;
 
   const { files: regularFiles, skipped } = listRegular(dir, { names: "v2" });
@@ -95,7 +82,7 @@ function buildSnapshot(
     }
     const fallbackTopic = rf.name.replace(/\.md$/, "");
     const { meta, errors } = parseMemoryMeta(content, fallbackTopic);
-    return { name: rf.name, size: rf.size, meta, metaErrors: errors, content };
+    return { name: rf.name, size: rf.size, meta, metaErrors: errors, content, nlink: rf.nlink };
   });
 
   let render: TieredRenderResult | undefined;
@@ -109,7 +96,7 @@ function buildSnapshot(
       indexMax: settings.indexMax,
     });
   } catch {
-    render = undefined; // P1 stub (pre-P5) or a genuine renderer error — D02/D09 just sit out
+    render = undefined; // renderer errors are best-effort; D02/D09 simply sit out
   }
 
   const skippedOut: readonly DoctorSkippedFile[] = skipped.map((s) => ({ name: s.name, kind: s.kind }));
@@ -118,11 +105,7 @@ function buildSnapshot(
     cwd,
     files,
     skipped: skippedOut,
-    // `canonicalTargetNotDir` is always `false` here — safe-fs's
-    // `canonicalDir` can't currently distinguish "no memory dir yet" from
-    // "the slug path exists but resolves to a non-directory" (both -> undefined);
-    // see this package's delivery report for the requested addition.
-    canonicalTargetNotDir: false,
+    canonicalTargetNotDir: state.state === "not-dir",
     ...(canon?.linked ? { slugDirLinked: { display: canon.display, real: canon.real } } : {}),
     ...(render ? { render } : {}),
     nowMs: now(),
@@ -140,6 +123,17 @@ function runDoctorFor(
   return runDoctor(snapshot, toDoctorSettings(settings));
 }
 
+/** P5 shared health port for the v2 directory view and tidy integration. */
+export function collectDoctorFindings(
+  cwd: string,
+  paths: MemoryPaths | undefined,
+  settings: MemorySettings,
+  renderPort: RenderTieredPort = DEFAULT_RENDER_PORT,
+  now: () => number = () => Date.now(),
+): DoctorFinding[] {
+  return runDoctorFor(cwd, paths, settings, renderPort, now);
+}
+
 /**
  * `/mem doctor` — full listing (§6.2): `ctx.ui.notify` normally, or
  * `ctx.ui.editor` (read-only display — the return value is discarded) once
@@ -154,7 +148,7 @@ export async function handleMemDoctorCommand(
 ): Promise<void> {
   if (!ctx.hasUI) return;
   const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
-  const settings = deps.settings ?? DEFAULT_SETTINGS.memory;
+  const settings = deps.settings;
   const now = deps.now ?? (() => Date.now());
   const renderPort = deps.renderTieredPort ?? DEFAULT_RENDER_PORT;
   const findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now);
@@ -188,14 +182,14 @@ function startupReminderText(findings: readonly DoctorFinding[]): string {
 export interface CreateStartupReminderDeps {
   isChildSession: boolean;
   paths?: MemoryPaths;
-  settings?: MemorySettings;
+  settings: MemorySettings;
   renderTieredPort?: RenderTieredPort;
   now?: () => number;
 }
 
 export interface StartupReminder {
   /** Structurally an `ExtensionHandler<SessionStartEvent>` — ready for
-   *  `pi.on("session_start", reminder.check)` (a P5 one-line wiring). */
+   *  `pi.on("session_start", reminder.check)` (wired by `wireMemory`). */
   check: ExtensionHandler<SessionStartEvent>;
 }
 
@@ -212,7 +206,7 @@ export interface StartupReminder {
 export function createStartupReminder(deps: CreateStartupReminderDeps): StartupReminder {
   const notifiedSessions = new Set<string>();
   const lastNotified = new Map<string, string>();
-  const settings = deps.settings ?? DEFAULT_SETTINGS.memory;
+  const settings = deps.settings;
   const now = deps.now ?? (() => Date.now());
   const renderPort = deps.renderTieredPort ?? DEFAULT_RENDER_PORT;
 

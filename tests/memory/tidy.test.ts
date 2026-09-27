@@ -618,12 +618,16 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
     expect(notifications.at(-1)?.message).toContain("zero writes");
   });
 
-  it("K1/K5: full apply path — Apply on every file, applies to disk, reports cost", async () => {
+  it("K1/K5/K10: batch apply writes every file and fires one post-write refresh", async () => {
     fx = materializeEmptyFixture();
     writeMemAt(fx.memDir, "a.md", "---\nsource: agent\n---\n\n# a\noriginal\n", "2026-09-01T00:00:00.000Z");
+    writeMemAt(fx.memDir, "b.md", "---\nsource: agent\n---\n\n# b\noriginal\n", "2026-09-01T00:00:00.000Z");
     const fp = makeFakePort();
     const proposal = {
-      files: [{ name: "a.md", action: "rewrite", content: "# a\noriginal\n\nupdated by tidy\n", reason: "cleanup" }],
+      files: [
+        { name: "a.md", action: "rewrite", content: "# a\noriginal\n\nupdated by tidy\n", reason: "cleanup" },
+        { name: "b.md", action: "rewrite", content: "# b\n\nupdated by tidy\n", reason: "cleanup" },
+      ],
       dropped: [],
     };
     fp.settle(
@@ -633,7 +637,7 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
         usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, costUsd: 0.12 },
       }),
     );
-    const { ui, selectCalls } = makeUi({ confirm: [true], select: ["Apply"] });
+    const { ui, selectCalls } = makeUi({ confirm: [true], select: ["Apply", "Apply"] });
     const ctx = makeCtx(fx.cwd, ui);
     let afterWriteCalls = 0;
     await handleMemTidyCommand("tidy", "", ctx, {
@@ -641,8 +645,10 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
       onAfterWrite: () => afterWriteCalls++,
     });
     expect(readFileSync(join(fx.memDir, "a.md"), "utf8")).toContain("updated by tidy");
+    expect(readFileSync(join(fx.memDir, "b.md"), "utf8")).toContain("updated by tidy");
     expect(afterWriteCalls).toBe(1);
-    expect(selectCalls[0]?.options[0]).toBe("Apply"); // clean file ⇒ Apply offered first
+    expect(selectCalls).toHaveLength(2);
+    expect(selectCalls[0]?.options[0]).toBe("Apply"); // clean files offer Apply first
   });
 
   it("K1: Skip leaves the file untouched", async () => {

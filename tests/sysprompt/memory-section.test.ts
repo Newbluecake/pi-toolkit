@@ -88,7 +88,7 @@ function fixture(settings: Partial<MemorySettings> = {}) {
   const cache = new RenderCache();
   const frozenBlocks = new Map<string, string | undefined>();
   const memDeps = {
-    settings: { ...DEFAULT_SETTINGS.memory, ...settings },
+    settings: { ...DEFAULT_SETTINGS.memory, layout: "legacy", toolSurface: "legacy", ...settings },
     isChildSession: false,
     cache,
     frozenBlocks,

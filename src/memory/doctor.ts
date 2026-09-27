@@ -16,12 +16,10 @@
 // fields are additive-only and simply leave the corresponding rules silent
 // when omitted, never throw.
 //
-// Two known, reported gaps in the frozen `safe-fs.ts` surface mean
-// `doctor-command.ts`'s REAL (fs-backed) snapshot can never populate
-// `nlink` or `canonicalTargetNotDir` today — see this package's delivery
-// report. Both rules are fully implemented and unit-tested here against a
-// hand-fed snapshot; they simply never fire through the live `/mem doctor`
-// command until a small safe-fs addition lands.
+// `doctor-command.ts`'s real (fs-backed) snapshot populates `nlink` from
+// safe-fs `RegularFileEntry.nlink` and `canonicalTargetNotDir` from
+// `canonicalDirState` (P0-c); hand-fed snapshots may still omit them, in
+// which case the corresponding D14 rules stay silent.
 
 import { parseFrontmatter } from "./frontmatter.js";
 import { formatSize } from "./render.js";
@@ -64,7 +62,7 @@ export interface DoctorSnapshot {
   slugDirLinked?: { display: string; real: string };
   /** The slug path exists but its canonical target is not a directory
    *  (D14 error). Best-effort — a caller whose fs layer can't distinguish
-   *  this from "no memory yet" (today's `safe-fs.canonicalDir`) must leave
+   *  this from "no memory yet" (e.g. plain `safe-fs.canonicalDir`) must leave
    *  this `false`/omitted, never `true` without being sure. */
   canonicalTargetNotDir?: boolean;
   /** Precomputed tiered-render outcome (§2.3), used only by D02/D09.

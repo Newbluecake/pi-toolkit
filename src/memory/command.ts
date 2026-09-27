@@ -22,11 +22,13 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
+import type { MemorySettings } from "../config/settings.js";
 import type { TidyPort } from "./contracts.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
 import { formatSize } from "./render.js";
-import { handleMemDoctorCommand } from "./doctor-command.js";
+import { handleMemDoctorCommand, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
+import { summaryLine } from "./doctor.js";
 import { handleMemTidyCommand } from "./tidy/command.js";
 
 export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
@@ -53,6 +55,11 @@ export interface CreateMemCommandDeps {
   /** §7's spawn port; undefined ⇒ "tidy unavailable in this session". Wired
    *  by `wireMemory`'s `attachTidy` (post-guard, main session only). */
   getTidyPort?: () => TidyPort | undefined;
+  /** Activate-time memory settings shared by doctor and tidy. */
+  settings?: MemorySettings;
+  renderBlock?: RenderTieredPort;
+  runDoctor?: typeof import("./doctor.js").runDoctor;
+  onAfterWrite?: (cwd: string) => void;
 }
 
 export function createMemCommand(deps: CreateMemCommandDeps): { description: string; handler: CommandHandler } {
@@ -64,17 +71,24 @@ export function createMemCommand(deps: CreateMemCommandDeps): { description: str
       const a = (args ?? "").trim();
       const [sub, ...rest] = a.split(/\s+/);
       const cwd = resolveCwd(ctx);
+      const doctorTrailer = (): string => {
+        if (!deps.settings) return "";
+        return `\n${summaryLine(
+          collectDoctorFindings(cwd, deps.paths, deps.settings, deps.renderBlock, () => Date.now()),
+        )}`;
+      };
+      const listMessage = (emptyHint: string): string => {
+        const files = listMemory(cwd, deps.paths);
+        const body = files.length ? files.map((f) => `  ${f.name} (${formatSize(f.size)})`).join("\n") : emptyHint;
+        return body + doctorTrailer();
+      };
       try {
         if (sub === "path") {
           if (ctx.hasUI) ctx.ui.notify(`memory dir: ${memoryDirFor(cwd, deps.paths)}`, "info");
           return;
         }
         if (sub === "list") {
-          const files = listMemory(cwd, deps.paths);
-          const msg = files.length
-            ? files.map((f) => `  ${f.name} (${formatSize(f.size)})`).join("\n")
-            : `(no memory for ${cwd})`;
-          if (ctx.hasUI) ctx.ui.notify(msg, "info");
+          if (ctx.hasUI) ctx.ui.notify(listMessage(`(no memory for ${cwd})`), "info");
           return;
         }
         if (sub === "import") {
@@ -113,7 +127,13 @@ export function createMemCommand(deps: CreateMemCommandDeps): { description: str
         }
         if (sub === "doctor") {
           await handleMemDoctorCommand(rest.join(" "), ctx, {
+            settings:
+              deps.settings ??
+              (() => {
+                throw new Error("memory settings unavailable");
+              })(),
             ...(deps.paths === undefined ? {} : { paths: deps.paths }),
+            ...(deps.renderBlock === undefined ? {} : { renderTieredPort: deps.renderBlock }),
           });
           return;
         }
@@ -122,15 +142,20 @@ export function createMemCommand(deps: CreateMemCommandDeps): { description: str
             ...(deps.paths === undefined ? {} : { paths: deps.paths }),
             isChildSession,
             getTidyPort,
+            settings: () =>
+              deps.settings ??
+              (() => {
+                throw new Error("memory settings unavailable");
+              })(),
+            ...(deps.runDoctor === undefined ? {} : { runDoctor: deps.runDoctor }),
+            ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
           });
           return;
         }
         // default: list
-        const files = listMemory(cwd, deps.paths);
-        const msg = files.length
-          ? files.map((f) => `  ${f.name} (${formatSize(f.size)})`).join("\n")
-          : `(no memory for ${cwd} — run /mem import to bring in Claude Code memory)`;
-        if (ctx.hasUI) ctx.ui.notify(msg, "info");
+        if (ctx.hasUI)
+          ctx.ui.notify(listMessage(`(no memory for ${cwd} — run /mem import to bring in Claude Code memory)`), "info");
+        return;
       } catch (err) {
         if (ctx.hasUI) ctx.ui.notify(`memory error: ${(err as Error).message}`, "warning");
       }

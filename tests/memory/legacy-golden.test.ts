@@ -233,7 +233,7 @@ describe("A1 — renderMemoryBlock legacy golden", () => {
 describe("A2 — memorySection legacy golden", () => {
   function deps(fx: { paths: MemoryPaths }, isChildSession: boolean): MemorySectionDeps {
     return {
-      settings: DEFAULT_SETTINGS.memory,
+      settings: { ...DEFAULT_SETTINGS.memory, layout: "legacy", toolSurface: "legacy" },
       isChildSession,
       cache: new RenderCache(),
       frozenBlocks: new Map(),
@@ -314,7 +314,7 @@ describe("A3 — systemPrompt.mode × session_start reason golden", () => {
     it(`mode=${mode}: new / resume / reload all fold the memory section byte-identically, zero updates`, () => {
       const fx = materializeFixture("current-5");
       const memDeps = (): MemorySectionDeps => ({
-        settings: DEFAULT_SETTINGS.memory,
+        settings: { ...DEFAULT_SETTINGS.memory, layout: "legacy", toolSurface: "legacy" },
         isChildSession: false,
         cache: new RenderCache(),
         frozenBlocks: new Map(),

@@ -6,24 +6,15 @@
  * optional fields, never a required one, so that existing call stays valid).
  *
  * Cross-package dependency (§14.1: "P2 的块估算调用 P1 的 renderTiered") is
- * an injected port, optional and a no-op until P5 wires it:
- * - `deps.renderBlock`: P1's `renderTiered`, used only for the T3 budget
- *   line's/`view`'s directory-listing "block X/Yk (LN)" segment. Omitted
- *   (as it is through P0–P4) ⇒ that segment is skipped — in the spirit of
- *   §4.4's "layout=legacy 时只报文件大小".
- *
- * A `runDoctor`-backed "doctor: N error M warn" summary segment in the
- * directory listing (§6.2) is intentionally NOT wired here: §14.1 lists
- * exactly three sanctioned cross-package runtime calls (P2→P1, P3→P1,
- * P4→P3) and a P2→P3 dependency is not one of them. This package's `view`
- * directory listing omits that segment; P5 (or a follow-up) can splice it
- * in without touching this file's tested logic.
+ * an injected port; production P5 wiring passes the real renderer for the T3
+ * budget and v2 directory listing. The P3 doctor summary is also passed by
+ * production wiring as a best-effort footer.
  */
 
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
-import type { TieredRenderInput, TieredRenderResult } from "./contracts.js";
+import type { MemoryOp, TieredRenderInput, TieredRenderResult } from "./contracts.js";
 import {
   findStrReplaceMatches,
   frontmatterEndOffset,
@@ -34,7 +25,8 @@ import {
 import { frontmatterSource, upsertFrontmatterFields } from "./frontmatter.js";
 import { withMemoryDirLock } from "./lock.js";
 import { descriptionOrHeading, parseMemoryMeta } from "./meta.js";
-import { normalizeMemoryCall, type MemoryOpV2, type NormalizedCall } from "./normalize.js";
+import { normalizeMemoryCall } from "./normalize.js";
+import type { NormalizedCall } from "./contracts.js";
 import { memoryDirFor, MemoryError, toSlug, type MemoryPaths } from "./paths.js";
 import { formatSize } from "./render.js";
 import {
@@ -48,6 +40,7 @@ import {
   renameNoClobber,
   replaceAtomic,
   statRegularIfExists,
+  unlinkRegular,
   writeTempRegular,
   type RegularRead,
   type RegularStat,
@@ -62,9 +55,10 @@ export interface MemoryToolV2Deps {
   isChildSession: boolean;
   onAfterWrite: (cwd: string) => void;
   paths?: MemoryPaths;
-  /** §14.1's sanctioned P1 dependency, injected as a port (see file header).
-   *  Real wiring lands in P5; every P0–P4 call site omits it. */
+  /** §14.1's sanctioned P1 dependency, injected as a port. */
   renderBlock?: (input: TieredRenderInput) => TieredRenderResult;
+  /** P5's real P3 health port for directory-view summary. */
+  doctorSummary?: (cwd: string) => string;
 }
 
 type ToolTextResult = { content: { type: "text"; text: string }[]; details: undefined };
@@ -80,7 +74,7 @@ function resolveCwd(ctx: ExtensionContext | undefined): string {
   return resolveWorktreeOrigin(raw) ?? raw;
 }
 
-const READ_ONLY_OPS = new Set<MemoryOpV2>(["view", "search"]);
+const READ_ONLY_OPS = new Set<MemoryOp>(["view", "search"]);
 
 function isHandWritten(content: string): boolean {
   return frontmatterSource(content) !== "agent";
@@ -315,6 +309,13 @@ function renderDirectoryListing(cwd: string, real: string, deps: MemoryToolV2Dep
       // best-effort footer segment only — never fail the whole listing
     }
   }
+  if (deps.doctorSummary) {
+    try {
+      footerParts.push(deps.doctorSummary(cwd));
+    } catch {
+      // health summary is best effort and must not make view fail
+    }
+  }
   const footer = footerParts.length > 0 ? `\n${footerParts.join(" · ")}` : "";
   return `Memory for ${cwd} (${toSlug(cwd)}):\n${lines.join("\n")}${footer}`;
 }
@@ -433,7 +434,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     return resolved.name;
   }
 
-  function assertWritable(op: MemoryOpV2): void {
+  function assertWritable(op: MemoryOp): void {
     if (deps.isChildSession && !settings.allowWriteInChildSessions && !READ_ONLY_OPS.has(op)) {
       throw new Error(
         "child sessions are read-only for memory by default; enable memory.allowWriteInChildSessions to allow writes",
@@ -447,14 +448,20 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       .map((f) => ({ file: f.name, lines: f.body.split("\n") }));
   }
 
-  function budgetLineFor(real: string, name: string, newBody: string, duplicateSourceLines: readonly string[]): string {
+  function budgetLineFor(
+    cwd: string,
+    real: string,
+    name: string,
+    newBody: string,
+    duplicateSourceLines: readonly string[],
+  ): string {
     const files = readAllV2(real);
     const core = determinePrimaryCore(files);
     const isCore = isCoreFile(name, files);
     const corpus = corpusExcept(real, name);
     const duplicates = findExactDuplicates(duplicateSourceLines, corpus);
     const blockInput: TieredRenderInput = {
-      cwd: "",
+      cwd,
       profile: "full",
       access: "memory",
       coreBytes: limits.coreBytes,
@@ -471,7 +478,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     return [report.line, ...report.warnings.map((w) => `⚠ ${w}`)].join("\n");
   }
 
-  async function doCreate(real: string, name: string, fileText: string): Promise<string> {
+  async function doCreate(cwd: string, real: string, name: string, fileText: string): Promise<string> {
     assertWithinWriteLimit(fileText, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
       const existing = statRegularIfExists(real, name);
@@ -486,12 +493,13 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       assertWithinHardLimit(name, isCoreFile(name, readAllV2(real)), finalContent, 0, limits);
       const tmp = writeTempRegular(real, name, Buffer.from(finalContent, "utf8"), 0o600);
       createExclusive(real, tmp, name);
-      const budgetLine = budgetLineFor(real, name, finalContent, finalContent.split("\n"));
+      const budgetLine = budgetLineFor(cwd, real, name, finalContent, finalContent.split("\n"));
       return `created ${name} (${formatSize(Buffer.byteLength(finalContent, "utf8"))})\n${budgetLine}`;
     });
   }
 
   async function doStrReplace(
+    cwd: string,
     real: string,
     name: string,
     oldStr: string | undefined,
@@ -529,13 +537,14 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       commitReplace(real, name, existing.stat, Buffer.from(finalContent, "utf8"), existing.stat.mode & 0o777);
       const snippet = renderSnippet(finalContent, matchLineOf(finalContent, matchIndex));
       const newLines = (newStr ?? "").split("\n");
-      const budgetLine = budgetLineFor(real, name, finalContent, newLines);
+      const budgetLine = budgetLineFor(cwd, real, name, finalContent, newLines);
       const warn = handWritten ? "⚠ edited a user-authored file; frontmatter left untouched\n" : "";
       return `${warn}edited ${name}:\n${snippet}\n${budgetLine}`;
     });
   }
 
   async function doInsert(
+    cwd: string,
     real: string,
     name: string,
     insertLine: number | undefined,
@@ -566,14 +575,14 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       assertWithinHardLimit(name, isCore, finalContent, existing.stat.size, limits);
       commitReplace(real, name, existing.stat, Buffer.from(finalContent, "utf8"), existing.stat.mode & 0o777);
       const snippet = renderSnippet(finalContent, target.afterLine + 1);
-      const budgetLine = budgetLineFor(real, name, finalContent, insertLines);
+      const budgetLine = budgetLineFor(cwd, real, name, finalContent, insertLines);
       const warn = handWritten ? "⚠ edited a user-authored file; frontmatter left untouched\n" : "";
       const noteLine = target.note ? `${target.note}\n` : "";
       return `${warn}${noteLine}edited ${name}:\n${snippet}\n${budgetLine}`;
     });
   }
 
-  async function doOverwrite(real: string, name: string, body: string): Promise<string> {
+  async function doOverwrite(cwd: string, real: string, name: string, body: string): Promise<string> {
     assertWithinWriteLimit(body, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
       const existing = readExisting(real, name);
@@ -590,12 +599,12 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       assertWithinHardLimit(name, isCore, finalContent, existing?.stat.size ?? 0, limits);
       const mode = existing ? existing.stat.mode & 0o777 : 0o600;
       commitReplace(real, name, existing?.stat, Buffer.from(finalContent, "utf8"), mode);
-      const budgetLine = budgetLineFor(real, name, finalContent, finalContent.split("\n"));
+      const budgetLine = budgetLineFor(cwd, real, name, finalContent, finalContent.split("\n"));
       return `wrote ${name} (${formatSize(Buffer.byteLength(finalContent, "utf8"))})\n${budgetLine}`;
     });
   }
 
-  async function doAppend(real: string, name: string, content: string): Promise<string> {
+  async function doAppend(cwd: string, real: string, name: string, content: string): Promise<string> {
     assertWithinWriteLimit(content, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
       const existing = readExisting(real, name);
@@ -609,7 +618,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       assertWithinHardLimit(name, isCore, finalContent, existing?.stat.size ?? 0, limits);
       const mode = existing ? existing.stat.mode & 0o777 : 0o600;
       commitReplace(real, name, existing?.stat, Buffer.from(finalContent, "utf8"), mode);
-      const budgetLine = budgetLineFor(real, name, finalContent, content.split("\n"));
+      const budgetLine = budgetLineFor(cwd, real, name, finalContent, content.split("\n"));
       const warn = handWritten ? "⚠ appended to a user-authored file; frontmatter left untouched\n" : "";
       return `${warn}appended to ${name} (+${formatSize(Buffer.byteLength(appended, "utf8"))}, total ${formatSize(Buffer.byteLength(finalContent, "utf8"))})\n${budgetLine}`;
     });
@@ -642,7 +651,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     const sorted = files.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0)); // newest-name-first (ids sort lexically by time)
     for (const f of sorted.slice(TRASH_KEEP)) {
       try {
-        renameNoClobber(trashPath, f.name, `.gone-${f.name}`);
+        unlinkRegular(trashPath, f.name);
       } catch {
         // best effort; a failed prune never blocks the delete itself
       }
@@ -728,19 +737,19 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
         case "create": {
           const name = nameFor(normalized.target, real);
           if (normalized.body === undefined) throw new Error("create requires file_text (or content)");
-          const out = await doCreate(real, name, normalized.body);
+          const out = await doCreate(cwd, real, name, normalized.body);
           deps.onAfterWrite(cwd);
           return text(out);
         }
         case "str_replace": {
           const name = nameFor(normalized.target, real);
-          const out = await doStrReplace(real, name, normalized.oldStr, normalized.newStr);
+          const out = await doStrReplace(cwd, real, name, normalized.oldStr, normalized.newStr);
           deps.onAfterWrite(cwd);
           return text(out);
         }
         case "insert": {
           const name = nameFor(normalized.target, real);
-          const out = await doInsert(real, name, normalized.insertLine, normalized.section, normalized.body);
+          const out = await doInsert(cwd, real, name, normalized.insertLine, normalized.section, normalized.body);
           deps.onAfterWrite(cwd);
           return text(out);
         }
@@ -761,14 +770,14 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
         case "write": {
           const name = nameFor(normalized.target, real);
           if (normalized.body === undefined) throw new Error('action:"write" requires file_text (or content)');
-          const out = await doOverwrite(real, name, normalized.body);
+          const out = await doOverwrite(cwd, real, name, normalized.body);
           deps.onAfterWrite(cwd);
           return text(out);
         }
         case "append": {
           const name = nameFor(normalized.target, real);
           if (normalized.body === undefined) throw new Error('action:"append" requires content (or insert_text)');
-          const out = await doAppend(real, name, normalized.body);
+          const out = await doAppend(cwd, real, name, normalized.body);
           deps.onAfterWrite(cwd);
           return text(out);
         }

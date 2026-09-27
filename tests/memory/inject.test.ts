@@ -68,7 +68,7 @@ function makeSection(
   const cache = new RenderCache();
   const frozenBlocks = over.frozenBlocks ?? new Map<string, string | undefined>();
   const deps: MemorySectionDeps = {
-    settings: { ...DEFAULT_SETTINGS.memory, ...over.settings },
+    settings: { ...DEFAULT_SETTINGS.memory, layout: "legacy", toolSurface: "legacy", ...over.settings },
     isChildSession: over.isChildSession ?? false,
     cache,
     frozenBlocks,

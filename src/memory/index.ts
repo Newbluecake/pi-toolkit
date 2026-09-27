@@ -14,8 +14,8 @@
  *
  * todo #22 optimize-plan P0-b:
  * - `memory.toolSurface` selects `tool.ts` (legacy, unchanged, §2.7 复审
- *   新-3) or `tool-v2.ts` (P2's stub today) — default stays `"legacy"`
- *   through P0–P4 (§9).
+ *   新-3) or `tool-v2.ts` (P2's implementation) — defaults are tiered/v2 after P5;
+ *   explicit legacy settings preserve the old paths (§9).
  * - `wireMemory` returns `{ attachTidy }`: `src/index.ts` (post-guard, main
  *   session only) calls it once with a `TidyPort` that reads the CURRENT
  *   session stack (same late-bound `holder.current` pattern the rest of
@@ -38,6 +38,10 @@ import { memorySection } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
 import { createMemoryTool } from "./tool.js";
 import { createMemoryToolV2 } from "./tool-v2.js";
+import { renderTiered } from "./tiered.js";
+import { runDoctor } from "./doctor.js";
+import { createStartupReminder, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
+import { summaryLine } from "./doctor.js";
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
@@ -46,6 +50,10 @@ export interface WireMemoryOpts {
    *  section into the system prompt; created by src/index.ts before memory
    *  is wired so registration order == fold order (memory first). */
   sections: PromptSectionHub;
+  /** Cross-package P5 ports. Defaults are intentionally absent only for
+   *  direct unit callers; production wiring always supplies these. */
+  renderBlock?: RenderTieredPort;
+  runDoctor?: typeof runDoctor;
 }
 
 export interface WireMemoryResult {
@@ -59,6 +67,9 @@ export interface WireMemoryResult {
 export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryResult {
   const cache = new RenderCache();
   const frozenBlocks = new Map<string, string | undefined>();
+  const lastBlocks = new Map<string, string | undefined>();
+  const tieredRender = opts.renderBlock ?? renderTiered;
+  const doctorRunner = opts.runDoctor ?? runDoctor;
   const budget: InjectBudget = {
     inlineMax: opts.settings.inlineMax,
     byteCap: opts.settings.byteCap,
@@ -71,7 +82,13 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   // the write takes effect next session.
   const onAfterWrite = (cwd: string): void => {
     if (opts.settings.freezeInjectionAfterWrite) {
-      frozenBlocks.set(cwd, cache.peek(cwd, budget)?.block);
+      // The tiered cache has more dimensions than legacy's InjectBudget. The
+      // last provider result is the exact block that was in the prompt, so it
+      // is the correct freeze source for either layout (including an explicit
+      // "no block" result before the first render).
+      frozenBlocks.set(cwd, lastBlocks.has(cwd) ? lastBlocks.get(cwd) : cache.peek(cwd, budget)?.block);
+    } else if (opts.settings.layout === "tiered") {
+      lastBlocks.delete(cwd);
     } else {
       cache.delete(cwd);
     }
@@ -79,7 +96,16 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
 
   pi.on("session_start", () => {
     frozenBlocks.clear();
+    lastBlocks.clear();
   });
+  if (!opts.isChildSession) {
+    const reminder = createStartupReminder({
+      settings: opts.settings,
+      isChildSession: false,
+      renderTieredPort: tieredRender,
+    });
+    pi.on("session_start", reminder.check);
+  }
   opts.sections.register(
     "pi_project_memory",
     memorySection({
@@ -87,7 +113,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       isChildSession: opts.isChildSession,
       cache,
       frozenBlocks,
-      // 方案 §2.4/§14.1：装配骨架把 `pi.getActiveTools` 传给 inject 并保存（P0-b
+      onRender: (cwd, block) => lastBlocks.set(cwd, block),
       // 自己不消费，俛 legacy layout 不调用它；tiered 的 `accessFromTools` 计算属于 P1）。
       // 防御地抖错把它包成安全函数：`pi.getActiveTools` 缺失或抛错都降级为 `[]`
       // （同 `context-switch/child.ts:470` 的这个先例）。
@@ -100,9 +126,17 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       },
     }),
   );
+  const doctorSummary = (cwd: string): string =>
+    summaryLine(collectDoctorFindings(cwd, undefined, opts.settings, tieredRender));
   pi.registerTool(
     opts.settings.toolSurface === "v2"
-      ? createMemoryToolV2({ settings: opts.settings, isChildSession: opts.isChildSession, onAfterWrite })
+      ? createMemoryToolV2({
+          settings: opts.settings,
+          isChildSession: opts.isChildSession,
+          onAfterWrite,
+          ...(opts.settings.layout === "tiered" ? { renderBlock: tieredRender } : {}),
+          doctorSummary,
+        })
       : createMemoryTool({ settings: opts.settings, isChildSession: opts.isChildSession, onAfterWrite }),
   );
   pi.registerCommand(
@@ -110,6 +144,10 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     createMemCommand({
       isChildSession: opts.isChildSession,
       getTidyPort: () => tidyPort,
+      settings: opts.settings,
+      renderBlock: tieredRender,
+      runDoctor: doctorRunner,
+      onAfterWrite,
     }),
   );
   return {

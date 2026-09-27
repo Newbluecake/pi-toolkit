@@ -13,7 +13,7 @@
 // identical output twice cannot distinguish a cache hit from a re-render.
 
 import { MEMORY_TOOL_V2_TEXT } from "../../src/memory/tool-surface.js";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -234,12 +234,99 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     return { ctx, notifications };
   }
 
-  test("toolSurface:'legacy' (default) registers the legacy tool.ts factory", () => {
+  test("toolSurface:'legacy' explicitly registers the legacy tool.ts factory", () => {
     const host = fakePi();
     wire(host);
     const tool = host.tools.get("memory")!;
     expect(tool.description).toContain("Claude-Code-compatible");
     expect(tool.description).not.toContain("not implemented");
+  });
+
+  test("default settings register v2, inject tiered, and surface doctor in list/view", async () => {
+    const host = fakePi();
+    wireMemory(host.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: false, sections: host.hub });
+    seedMemoryFile("core.md", "---\nsource: agent\n---\n# Core\n");
+    seedMemoryFile("topic.md", "---\nsource: agent\n---\n# Topic\n");
+    const tool = host.tools.get("memory")!;
+    expect(tool.description).toBe(MEMORY_TOOL_V2_TEXT.description);
+    const injected = hookOf(host)("BASE")?.systemPrompt ?? "";
+    expect(injected).toContain("### core.md");
+    expect(injected).toContain("- topic.md");
+    const ctx = fakeUiCtx(cwd);
+    await host.commands.get("mem")!.handler("", ctx.ctx);
+    await host.commands.get("mem")!.handler("list", ctx.ctx);
+    expect(ctx.notifications.map((n) => n.message)).toEqual([
+      expect.stringContaining("doctor: 1 warn — /mem doctor"),
+      expect.stringContaining("doctor: 1 warn — /mem doctor"),
+    ]);
+    const view = await tool.execute("v1", { command: "view" }, undefined, undefined, ctx.ctx);
+    const text = (view.content[0] as { text: string }).text;
+    expect(text).toContain("block ");
+    expect(text).toContain("doctor: 1 warn — /mem doctor");
+  });
+
+  test("startup doctor reminder is UI-only, main-only and deduplicated by fingerprint", () => {
+    const host = fakePi();
+    wireMemory(host.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: false, sections: host.hub });
+    seedMemoryFile("topic.md", "# Topic\n");
+    const context = (id: string) => {
+      const { ctx, notifications } = fakeUiCtx(cwd);
+      (ctx as any).sessionManager = { getSessionId: () => id };
+      return { ctx, notifications };
+    };
+    const first = context("s1");
+    emit(host, "session_start", { type: "session_start", reason: "new" }, first.ctx);
+    emit(host, "session_start", { type: "session_start", reason: "new" }, first.ctx);
+    expect(first.notifications).toHaveLength(0); // D06 warns alone do not trigger
+    seedMemoryFile("pitfalls.md", "---\npin: true\n---\n# Pitfalls\n");
+    const second = context("s2");
+    emit(host, "session_start", { type: "session_start", reason: "new" }, second.ctx);
+    expect(second.notifications).toHaveLength(1);
+    expect(second.notifications[0]!.message).toContain("no core.md");
+    const third = context("s3");
+    emit(host, "session_start", { type: "session_start", reason: "new" }, third.ctx);
+    expect(third.notifications).toHaveLength(0);
+    const child = fakePi();
+    wireMemory(child.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: true, sections: child.hub });
+    expect(child.handlers.get("session_start")).toHaveLength(2); // hub + freeze reset, no reminder
+  });
+
+  test("tiered freeze keeps the pre-write block until session_start; a pre-render write freezes no block", async () => {
+    const host = fakePi();
+    wire(host, { layout: "tiered", toolSurface: "v2", freezeInjectionAfterWrite: true });
+    seedMemoryFile("core.md", "---\nsource: agent\n---\n# Core\nalpha\n");
+    const hook = hookOf(host);
+    const before = hook("BASE")!.systemPrompt;
+    const tool = host.tools.get("memory")!;
+    await tool.execute(
+      "e1",
+      { command: "str_replace", path: "core.md", old_str: "alpha", new_str: "bravo" },
+      undefined,
+      undefined,
+      fakeCtx(cwd).ctx,
+    );
+    expect(readFileSync(join(memRoot, cwd.replace(/\/+$/, "").replace(/\//g, "-"), "core.md"), "utf8")).toContain(
+      "bravo",
+    );
+    expect(hook("BASE")!.systemPrompt).toBe(before);
+    emit(host, "session_start", { type: "session_start", reason: "new" }, fakeCtx(cwd).ctx);
+    expect(hook("BASE")!.systemPrompt).toContain("bravo");
+
+    const other = fakePi();
+    wire(other, { layout: "tiered", toolSurface: "v2", freezeInjectionAfterWrite: true });
+    const otherHook = hookOf(other);
+    await other.tools
+      .get("memory")!
+      .execute(
+        "e2",
+        { command: "create", path: "new.md", file_text: "# New\n" },
+        undefined,
+        undefined,
+        fakeCtx(cwd).ctx,
+      );
+    expect(otherHook("BASE")).toBeUndefined();
+    emit(other, "session_start", { type: "session_start", reason: "new" }, fakeCtx(cwd).ctx);
+    expect(otherHook("BASE")!.systemPrompt).toContain("new.md");
   });
 
   test("toolSurface:'v2' registers the real tool-v2.ts factory instead", () => {

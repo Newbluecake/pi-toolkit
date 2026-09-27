@@ -463,7 +463,7 @@ describe("handleMemDoctorCommand (real fs)", () => {
     const fx = materializeFixture("current-5");
     try {
       const ctx = fakeExtensionContext({ cwd: fx.cwd });
-      await handleMemDoctorCommand("", ctx, { paths: fx.paths, now: () => NOW_MS });
+      await handleMemDoctorCommand("", ctx, { paths: fx.paths, settings: DEFAULT_SETTINGS.memory, now: () => NOW_MS });
       expect(ctx.ui.editor).not.toHaveBeenCalled();
       expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
       const [text] = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
@@ -491,7 +491,7 @@ describe("handleMemDoctorCommand (real fs)", () => {
     try {
       // point at a cwd with no memory files at all
       const ctx = fakeExtensionContext({ cwd: "/fixture/nothing-here" });
-      await handleMemDoctorCommand("", ctx, { paths: fx.paths, now: () => NOW_MS });
+      await handleMemDoctorCommand("", ctx, { paths: fx.paths, settings: DEFAULT_SETTINGS.memory, now: () => NOW_MS });
       const [text] = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
       expect(text).toBe("/mem doctor: no findings — memory looks healthy.");
     } finally {
@@ -513,7 +513,7 @@ describe("handleMemDoctorCommand (real fs)", () => {
         );
       }
       const ctx = fakeExtensionContext({ cwd: fx.cwd });
-      await handleMemDoctorCommand("", ctx, { paths: fx.paths, now: () => NOW_MS });
+      await handleMemDoctorCommand("", ctx, { paths: fx.paths, settings: DEFAULT_SETTINGS.memory, now: () => NOW_MS });
       expect(ctx.ui.notify).not.toHaveBeenCalled();
       expect(ctx.ui.editor).toHaveBeenCalledTimes(1);
       const [title, body] = (ctx.ui.editor as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
@@ -649,6 +649,7 @@ if (UPDATE_DOCTOR_GOLDEN && existsSync(DOCTOR_GOLDEN_PATH)) {
 describe("doctor-golden (current-5, generate-once §10.1)", () => {
   it("runDoctor(current-5) via the real command path matches the checked-in golden", async () => {
     const fx = materializeFixture("current-5");
+    vi.stubEnv("ARMORY_MEMORY_ROOT", fx.paths.memoryRoot);
     try {
       const notify = vi.fn();
       const ctx = {
@@ -657,7 +658,7 @@ describe("doctor-golden (current-5, generate-once §10.1)", () => {
         cwd: fx.cwd,
         sessionManager: { getSessionId: () => "s" },
       } as unknown as ExtensionCommandContext;
-      await handleMemDoctorCommand("", ctx, { paths: fx.paths, now: () => NOW_MS });
+      await handleMemDoctorCommand("", ctx, { paths: fx.paths, settings: DEFAULT_SETTINGS.memory, now: () => NOW_MS });
       const [text] = notify.mock.calls[0] as [string, string];
       if (UPDATE_DOCTOR_GOLDEN) {
         mkdirSync(DOCTOR_GOLDEN_DIR, { recursive: true });
@@ -667,6 +668,7 @@ describe("doctor-golden (current-5, generate-once §10.1)", () => {
         expect(text).toBe(golden.report);
       }
     } finally {
+      vi.unstubAllEnvs();
       fx.cleanup();
     }
   });

@@ -1,8 +1,6 @@
 // memory-plan §7.10 + todo #22 optimize-plan §9 (P0-b): memory.* settings
-// block — parser tolerance + spec surface, including the new tiered-layout
-// / tool-surface / doctor / tidy knobs. `layout`/`toolSurface` default to
-// `"legacy"` at this stage (§9's "every P0-P4 commit stays publishable");
-// P5 flips both defaults to `"tiered"`/`"v2"`.
+// block — parser tolerance + spec surface. P5 defaults are tiered/v2;
+// explicit legacy remains the byte-compatible opt-out.
 
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, loadSettings, parseMemorySettings } from "../../src/config/settings.js";
@@ -11,7 +9,7 @@ import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../sr
 const defaults = DEFAULT_SETTINGS.memory;
 
 describe("memory settings", () => {
-  it("pins the defaults (todo #22 P0: layout/toolSurface still legacy)", () => {
+  it("pins the P5 defaults (tiered injection + v2 tool surface)", () => {
     expect(defaults).toEqual({
       enabled: true,
       injectInChildSessions: true,
@@ -22,8 +20,8 @@ describe("memory settings", () => {
       indexMax: 15,
       maxFileBytes: 262_144,
       maxWriteBytes: 65_536,
-      layout: "legacy",
-      toolSurface: "legacy",
+      layout: "tiered",
+      toolSurface: "v2",
       childProfile: "core",
       coreBytes: 1600,
       blockBytes: 2400,
@@ -175,9 +173,9 @@ describe("memory settings", () => {
   it("layout / toolSurface / childProfile are enum knobs, falling back on garbage", () => {
     expect(parseMemorySettings({ layout: "tiered" }).layout).toBe("tiered");
     expect(parseMemorySettings({ layout: "legacy" }).layout).toBe("legacy");
-    expect(parseMemorySettings({ layout: "bogus" }).layout).toBe("legacy");
+    expect(parseMemorySettings({ layout: "bogus" }).layout).toBe("tiered");
     expect(parseMemorySettings({ toolSurface: "v2" }).toolSurface).toBe("v2");
-    expect(parseMemorySettings({ toolSurface: "bogus" }).toolSurface).toBe("legacy");
+    expect(parseMemorySettings({ toolSurface: "bogus" }).toolSurface).toBe("v2");
     expect(parseMemorySettings({ childProfile: "full" }).childProfile).toBe("full");
     expect(parseMemorySettings({ childProfile: "none" }).childProfile).toBe("none");
     expect(parseMemorySettings({ childProfile: "bogus" }).childProfile).toBe("core");
@@ -283,7 +281,7 @@ describe("memory settings", () => {
     expect(SETTING_SPECS["memory.childProfile"]).toMatchObject({ kind: "enum", values: ["core", "full", "none"] });
     expect(SETTING_SPECS["memory.tidy.timeoutS"]).toMatchObject({ path: "memory.tidy.timeoutMs", time: true });
     expect(SETTING_SPECS["memory.tidy.maxCostUsd"]).toMatchObject({ kind: "number", min: 0.05, max: 50 });
-    expect(defaultOf(SETTING_SPECS["memory.layout"]!)).toBe("legacy");
-    expect(defaultOf(SETTING_SPECS["memory.toolSurface"]!)).toBe("legacy");
+    expect(defaultOf(SETTING_SPECS["memory.layout"]!)).toBe("tiered");
+    expect(defaultOf(SETTING_SPECS["memory.toolSurface"]!)).toBe("v2");
   });
 });

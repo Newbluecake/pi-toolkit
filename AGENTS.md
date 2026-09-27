@@ -102,7 +102,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   (`slotfulLabel`, never `SlotPool.stats.inUse` — that only updates deep inside the runtime adapter, after H2/worktree
   creation) reaches `concurrencyLimit`; every successful `spawn()` call also returns `slots` (limit/inUse/free, same
   slotless-exclusion rule as the real pool) for the Agent tool to surface. Workflow children/consult/resume/`/task`
-  never set `poolFullPolicy` and keep the legacy queue-and-`queueWaitMs`-timeout behavior.
+  never set `poolFullPolicy` and keep the legacy queue-and-`queueWaitMs`-timeout behavior. Tidy proposals use
+  `SpawnRequest.toolDomain: "readonly"`, which is consumed at admission/runtime and forces only the builtin
+  read-only tools plus the runtime-owned `StructuredOutput`; the field is deliberately not threaded into child
+  request prompts or ordinary runs.
 - `src/ask-user/` — merged interactive `ask_user` tool and TUI/RPC question components; emits `ask-user:activity` while an active TUI component receives input. `normalize.ts` repairs presentation-layer input instead of failing the call: explicit headers are always trimmed/width-capped (a blank one is dropped so the RPC answer key falls back to the question text), and missing headers are derived + de-duplicated in multi-question calls **only** (a single question never gets one invented, so its answer key stays the question text). Headers the model duplicated verbatim are still rejected — they collide as RPC answer keys.
 - `src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated — suppressed (never deferred) while subagents/background bash are still running, since a stopped main session with busy background is not task end.
 - `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →
@@ -224,16 +227,7 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
 - `src/todo/` — merged pi-claude-todo: TaskCreate/List/Get/Update/Delete + aboveEditor widget
   (key `claude-code-todo`, coexists with the fleet widget) + `/tasklist`. Persists via the
   `claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only.
-- `src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`.
-  Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`,
-  pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead
-  of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail
-  update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin
-  frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The `memory` tool
-  lists/writes/appends (child sessions read-only by default, writes carry `source: agent` provenance);
-  `/mem` covers list/path/import from Claude Code. `paths|frontmatter|store|render` are pi-free; `index.ts`
-  (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure;
-  registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
+- `src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:tiered` injection and `toolSurface:v2` official-field tool surface; explicit `legacy` settings remain the byte-compatible opt-out. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports D01-D14 health and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The `memory` tool lists/writes/appends (child sessions read-only by default, writes carry `source: agent` provenance); `/mem` covers list/path/import/doctor/tidy/restore. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
 - `src/sysprompt/` + `src/prompt-sections/` — system-prompt stabilization: the three dynamic sections
   (project memory, agent types, available models) that used to get re-appended to `before_agent_start`'s
   `{ systemPrompt }` every turn — invalidating the whole cached prefix on every write — now fold a

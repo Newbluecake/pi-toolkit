@@ -1,28 +1,11 @@
 // §4.2 v2 alias/mutual-exclusion normalization — P2 real implementation
 // (todo #22 optimize-plan §14.1).
 //
-// **Frozen-surface gap (reported, not self-fixed — see this package's final
-// report)**: contracts.ts's frozen `NormalizedCall.op: MemoryCommand` only
-// allows the 7 `command` literals, but §4.2's alias table and §4.3's command
-// table both require `action:"write"`/`action:"append"` to flow through
-// `normalizeMemoryCall` as their OWN ops (distinct write-overwrite vs.
-// create's no-clobber vs. append's frontmatter-preserving-append semantics
-// — confirmed with the plan author, who called this a P0 oversight and
-// recommended widening `contracts.ts` to `op: MemoryCommand | "write" |
-// "append"`). Since nothing outside this package (`src/memory/normalize.ts`
-// + `tool-v2.ts`) consumes `contracts.ts`'s `NormalizedCall`/`MemoryCommand`
-// today, this file defines its OWN slightly-widened `NormalizedCall` (same
-// shape, `op` widened) instead of editing the frozen file — `tool-v2.ts`
-// imports the type FROM HERE, never from `contracts.js` directly.
+// `NormalizedCall` and `MemoryOp` are frozen contracts shared by the v2 tool
+// and normalizer; P5 no longer keeps a local widened copy.
 
-import type { MemoryCommand, NormalizedCall as FrozenNormalizedCall } from "./contracts.js";
+import type { MemoryCommand, MemoryOp, NormalizedCall } from "./contracts.js";
 import type { MemoryToolParamsV2 } from "./tool-surface.js";
-
-export type MemoryOpV2 = MemoryCommand | "write" | "append";
-
-export interface NormalizedCall extends Omit<FrozenNormalizedCall, "op"> {
-  op: MemoryOpV2;
-}
 
 const TARGET_FIELDS = ["path", "name", "old_path"] as const;
 type TargetField = (typeof TARGET_FIELDS)[number];
@@ -32,7 +15,7 @@ type BodyField = (typeof BODY_FIELDS)[number];
 
 /** Per-op accepted body field aliases, primary alias first (used to build
  *  the "X takes A (or B)" error message — §4.2 rule 2). */
-const BODY_ACCEPT: Partial<Record<MemoryOpV2, readonly [BodyField, BodyField]>> = {
+const BODY_ACCEPT: Partial<Record<MemoryOp, readonly [BodyField, BodyField]>> = {
   create: ["file_text", "content"],
   write: ["file_text", "content"],
   insert: ["insert_text", "content"],
@@ -70,7 +53,7 @@ function resolveAliasSlot(
 /** §4.2 rule 5: op defaults to "view"; `command`/`action` are mutually
  *  exclusive (always an error when both given, never compared for equality
  *  — they carry different semantics even when superficially compatible). */
-function resolveOp(params: MemoryToolParamsV2): MemoryOpV2 {
+function resolveOp(params: MemoryToolParamsV2): MemoryOp {
   if (params.command !== undefined && params.action !== undefined) {
     throw new Error("command and action are mutually exclusive");
   }

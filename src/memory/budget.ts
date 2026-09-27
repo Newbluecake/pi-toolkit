@@ -3,11 +3,8 @@
 //
 // §14.1's only sanctioned P2→P1 runtime dependency ("P2 的块估算调用 P1 的
 // renderTiered") is wired here as an INJECTED PORT (`renderBlock`) rather
-// than a direct import of `tiered.ts` — P1 is developed in parallel and its
-// `renderTiered` is a throwing stub through P0–P4; real wiring lands in P5
-// (§14.1's "全部经 P0 冻结的签名，开发期用桩/注入端口测试，真实串联在
-// P5"). `computeBudgetReport`'s exact call shape is verified against a FAKE
-// port in `tests/memory/budget.test.ts`; P5 passes the real `renderTiered`.
+// than a direct import of `tiered.ts`. Production P5 passes the real renderer;
+// focused tests keep using a small fake port so this module remains isolated.
 //
 // Zero pi/typebox imports; independently unit-testable.
 

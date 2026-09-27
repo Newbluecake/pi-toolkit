@@ -91,14 +91,11 @@ export interface MemorySettings {
   /** 单次 write/append 的 content 字节上限。Default 65_536（64KB）；解析时 clamp 到 ≤ maxFileBytes。 */
   maxWriteBytes: number;
   // ─────────────────────── todo #22 optimize-plan §9 (P0-b) ───────────────────────
-  /** tiered vs. legacy injection renderer. P0 default stays `"legacy"` (§14.1's
-   *  "every commit must be publishable" invariant — P1's `tiered.ts` is still a
-   *  stub); P5 flips the default to `"tiered"`. `"legacy"` = byte-identical to
-   *  pre-#22 (§2.7's one accepted deviation: a file-level symlink inside the
-   *  memory dir is refused/skipped instead of followed). */
+  /** tiered vs. legacy injection renderer. P5 defaults to `"tiered"`; explicit
+   * `"legacy"` remains the byte-compatible opt-out. */
   layout: MemoryLayout;
-  /** v2 vs. legacy `memory` tool factory. P0 default stays `"legacy"` (P2's
-   *  `tool-v2.ts` is still a stub); P5 flips the default to `"v2"`. */
+  /** v2 vs. legacy `memory` tool factory. P5 defaults to `"v2"`; explicit
+   * `"legacy"` remains the byte-compatible opt-out. */
   toolSurface: MemoryToolSurface;
   /** Child-session injection tier (§2.4) — only takes effect under
    *  `layout:"tiered"`; `layout:"legacy"` only honors `"none"` (everything
@@ -830,8 +827,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     indexMax: 15,
     maxFileBytes: 262_144,
     maxWriteBytes: 65_536,
-    layout: "legacy",
-    toolSurface: "legacy",
+    layout: "tiered",
+    toolSurface: "v2",
     childProfile: "core",
     coreBytes: 1600,
     blockBytes: 2400,

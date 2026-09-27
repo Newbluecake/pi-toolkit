@@ -166,6 +166,27 @@ describe("H1 — stable: writing memory produces one tail update, frozen head un
     expect(third?.message).toBeUndefined(); // settled: live === announced from turn 2
     rmSync(fx.tmp, { recursive: true, force: true });
   });
+  test("batch changes settle as exactly one update on the next turn", () => {
+    const fx = fixture();
+    const host = fakePi();
+    const hub = makeHub(host);
+    registerMemory(hub, fx.memDeps);
+    const ctx = fakeCtx(fx.cwd, "s1");
+    writeFile(fx.memoryDir, "core.md", "---\npin: true\n---\n\n# core\n\nold\n", 1000);
+    writeFile(fx.memoryDir, "topic.md", "---\ndescription: topic\n---\n\n# topic\n", 1000);
+    beforeAgentStart(host, "BASE", ctx);
+    beforeAgentStart(host, "BASE", ctx); // settle the initial snapshot
+
+    writeFile(fx.memoryDir, "core.md", "---\npin: true\n---\n\n# core\n\nnew\n", 2000);
+    writeFile(fx.memoryDir, "topic.md", "---\ndescription: topic updated\n---\n\n# topic\n", 2000);
+    const update = beforeAgentStart(host, "BASE", ctx);
+    expect(update?.message).toBeDefined();
+    expect(update!.message.customType).toBe(SECTION_UPDATE_CUSTOM_TYPE);
+    expect(update!.message.content).toContain("new");
+    expect(update!.message.content).toContain("topic updated");
+    expect(beforeAgentStart(host, "BASE", ctx)?.message).toBeUndefined();
+    rmSync(fx.tmp, { recursive: true, force: true });
+  });
 });
 
 // ═══════════════════════════ H2 — touch / sub-kB-tier change ⇒ zero update ═

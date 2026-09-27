@@ -1,5 +1,7 @@
 # pi-toolkit 融合 armory-memory — 实施方案（memory-merge plan v2）
 
+> P5 已实施：默认 `layout:tiered` + `toolSurface:v2` 已接通真实 tiered renderer、doctor、tidy 和启动提醒；显式 legacy 设置仍保留兼容回退。完整施工与验证口径见 [`docs/dev/memory/optimize-plan.md`](./optimize-plan.md)。
+
 > 落盘路径：`docs/dev/memory/memory-plan.md`。
 > 本文档是施工唯一口径；冻结接口见 §8.3，两个并行写包不得偏离。
 

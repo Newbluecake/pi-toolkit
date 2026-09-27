@@ -20,6 +20,7 @@ import { DEFAULT_SETTINGS, type MemorySettings } from "../../src/config/settings
 import { memoryDirFor, type MemoryPaths } from "../../src/memory/paths.js";
 import { createMemoryToolV2, type MemoryToolV2Deps } from "../../src/memory/tool-v2.js";
 import type { TieredRenderInput, TieredRenderResult } from "../../src/memory/contracts.js";
+import { renderTiered } from "../../src/memory/tiered.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -530,6 +531,17 @@ describe("I9: T3 budget feedback + hard upper limits", () => {
     const out = textOf(await exec(tool, { command: "create", path: "quota.md", file_text: "hi" }, fakeCtx(fx.cwd)));
     expect(out).toMatch(/budget: quota\.md/);
     expect(out).toMatch(/block .*\(L2\)/);
+  });
+
+  test("budget line uses the real tiered renderer when the wire passes it", async () => {
+    const fx = fixture();
+    vi.stubEnv("ARMORY_MEMORY_ROOT", fx.paths.memoryRoot);
+    const { tool } = makeTool(fx, { renderBlock: (input) => renderTiered(input) });
+    const out = textOf(
+      await exec(tool, { command: "create", path: "quota.md", file_text: "# quota\n" }, fakeCtx(fx.cwd)),
+    );
+    expect(out).toMatch(/budget: quota\.md/);
+    expect(out).toMatch(/block .*\/2\.[0-9]k \(L[0-5]\)/);
   });
 
   test("exact duplicate line is flagged; a short/novel line is not", async () => {

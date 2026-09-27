@@ -44,9 +44,7 @@ export interface TidyCommandDeps {
   paths?: MemoryPaths;
   isChildSession: boolean;
   getTidyPort: () => TidyPort | undefined;
-  /** Defaults to `DEFAULT_SETTINGS.memory` — production wiring (reading the
-   *  live settings snapshot) is P5's integration job for the OUTER
-   *  `src/memory/command.ts` (P4 does not touch that file, §14.2). */
+  /** Activate-time settings snapshot shared with doctor/tidy. */
   settings?: () => MemorySettings;
   /** P3's `runDoctor`, injected for testability — P3 may still be a stub in
    *  this package's own dev loop (§14.1's "开发期用桩/注入端口测试"); falls
@@ -57,8 +55,7 @@ export interface TidyCommandDeps {
   now?: () => Date;
   /** Called once after a successful apply/restore with >=1 entry (§7.3
    *  step 7's "调用一次 onAfterWrite" — the memory-block re-render hook).
-   *  Default no-op; real wiring is P5's job (same file-domain reason as
-   *  `settings` above). */
+   *  Production wiring passes `wireMemory`'s invalidation callback. */
   onAfterWrite?: (cwd: string) => void;
 }
 

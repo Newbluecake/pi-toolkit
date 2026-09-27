@@ -53,15 +53,14 @@ export interface MemorySectionDeps {
   cache: RenderCache;
   frozenBlocks: Map<string, string | undefined>;
   paths?: MemoryPaths;
-  /**
-   * 方案 §2.4/§14.1的 `pi.getActiveTools()` 端口：P0-b 只把它从装配骨架（`wireMemory`）
-   * 传递到这里并保存（本接口字段本身就是存储处）；tiered layout 的
-   * `accessFromTools` 真实计算属于 P1（真实实现之前 `renderTiered` 本身就会 `throw`，
-   * 传什么 `access` 都不受影响）；legacy layout 不消费它。可选（未接入的旧调用方/测试
-   * fixture 无需追加）—— `wireMemory` 总是会传。调用方必须自己抓异常（`pi.getActiveTools`
-   * 缺失/抛错时的容错是调用方的职责，同 `context-switch/child.ts:470`）。
-   */
+  /** §2.4/§14.1 `pi.getActiveTools()` port. `wireMemory` supplies this from
+   * the host; legacy layout ignores it, while the tiered path uses the real
+   * `accessFromTools` computation. Direct tests may omit it; missing or
+   * throwing host APIs are collapsed by the caller. */
   getActiveTools?: () => string[];
+  /** Called for each non-frozen provider result so P5 can freeze the exact
+   * tiered block that was last injected after a write. */
+  onRender?: (cwd: string, block: string | undefined) => void;
 }
 
 /** `ctx.cwd` is an `assertActive()`-guarded getter (pc87:runner.js:565-568);
@@ -226,7 +225,9 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
     indexMax: deps.settings.indexMax,
   };
   let block: string | undefined;
+  let usedFrozen = false;
   if (deps.frozenBlocks.has(cwd)) {
+    usedFrozen = true;
     // Frozen source (§5.5): may be a captured `undefined` (R3), which flows
     // to the same "nothing to inject" exit below.
     block = deps.frozenBlocks.get(cwd);
@@ -272,6 +273,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
       deps.cache.set(cwd, budget, fingerprint, block);
     }
   }
+  if (!usedFrozen) deps.onRender?.(cwd, block);
   return block ?? "";
 }
 

@@ -359,12 +359,12 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "memory.layout": choice(
     "memory.layout",
     ["tiered", "legacy"],
-    "Injection renderer: tiered (budgeted) or legacy (byte-identical to pre-#22)",
+    "Injection renderer: tiered (budgeted, default) or legacy (byte-identical to pre-#22)",
   ),
   "memory.toolSurface": choice(
     "memory.toolSurface",
     ["v2", "legacy"],
-    "memory tool factory: v2 (official field names) or legacy",
+    "memory tool factory: v2 (official field names, default) or legacy",
   ),
   "memory.childProfile": choice(
     "memory.childProfile",
