@@ -3,3 +3,7 @@ dist/
 coverage/
 package-lock.json
 tests/fixtures/bash-tools-golden.json
+# #22 memory optimize-plan P0-a: verbatim copies of real project-memory files
+# (方案 §10.1 point 1) — must stay byte-identical to their source, which the
+# legacy golden (tests/fixtures/memory-legacy-golden.json) is pinned against.
+tests/fixtures/memory/current-5/

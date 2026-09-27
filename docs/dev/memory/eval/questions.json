@@ -1,0 +1,97 @@
+{
+  "$schema": "no external schema — see docs/dev/memory/optimize-plan.md §11.2 for the format contract",
+  "note": "Frozen in commit P0-a per §14.1. Every `must`/`mustNot` is a case-insensitive regex evaluated ONLY on the final answer text (never on retrieved context). `correct` = every `must` entry matches AND no `mustNot` entry matches. Each question is fixed to append '\\n\\nAnswer in at most two sentences.' by the (later, non-blocking) E1 runner — not part of this frozen set. Sources are tests/fixtures/memory/current-5/*.md, copied verbatim from the real ~/.pi/agent/memory project dir at the time of this commit — see that file for the exact line each `must`/`mustNot` was checked against.",
+  "questions": [
+    {
+      "id": "Q1",
+      "class": "core",
+      "question": "本仓库提交代码有什么规则？",
+      "source": "pitfalls.md › 用户偏好",
+      "must": ["git commit", "精确|exact|specific"],
+      "mustNot": [
+        "git add -A",
+        "不.{0,6}(精确|exact|specific)",
+        "无.{0,6}(精确|exact|specific)",
+        "without (an? )?exact",
+        "no need (for|to) (be )?exact"
+      ]
+    },
+    {
+      "id": "Q2",
+      "class": "core",
+      "question": "stream 中断或 502 时该怎么处理子任务？",
+      "source": "pitfalls.md › 用户偏好",
+      "must": ["resume", "换线|another route|switch"],
+      "mustNot": ["先问|ask (the )?user", "不.{0,6}resume", "no need to resume", "without resuming"]
+    },
+    {
+      "id": "Q3",
+      "class": "core",
+      "question": "开发包和验收分别用什么模型？",
+      "source": "pitfalls.md › 用户偏好",
+      "must": ["claude-sonnet-5", "gpt-5\\.6-sol"],
+      "mustNot": [
+        "同.{0,4}模型",
+        "the same model for (both|dev and (verification|accept))",
+        "不.{0,6}gpt-5\\.6-sol",
+        "not gpt-5\\.6-sol"
+      ]
+    },
+    {
+      "id": "Q4",
+      "class": "topic",
+      "question": "本机 subagent 并发上限是多少？",
+      "source": "pitfalls.md › 并发（迁移前被省略）",
+      "must": ["\\b10\\b", "concurrencyLimit|并发"],
+      "mustNot": ["没有(并发)?上限|无上限|unlimited"]
+    },
+    {
+      "id": "Q5",
+      "class": "topic",
+      "question": "1h 与 5m 的 prompt cache 能互相读吗？",
+      "source": "cache-ttl.md",
+      "must": ["不能\\b|无法|不可|cannot|can't|separate|分离"],
+      "mustNot": ["可以互相读\\b|can read each other", "都可以读|both (are )?readable"]
+    },
+    {
+      "id": "Q6",
+      "class": "topic",
+      "question": "判断缓存命中应该用什么基准？",
+      "source": "cache-ttl.md",
+      "must": ["0\\.5"],
+      "mustNot": ["不.{0,6}0\\.5", "并非.{0,6}0\\.5", "not\\s+0\\.5", "isn't\\s+0\\.5"]
+    },
+    {
+      "id": "Q7",
+      "class": "topic",
+      "question": "quota 5h 窗口的阶梯阈值是多少？",
+      "source": "quota.md",
+      "must": ["50", "75", "90"],
+      "mustNot": ["95|98", "不是\\s*50\\b|不是\\s*75\\b|不是\\s*90\\b"]
+    },
+    {
+      "id": "Q8",
+      "class": "topic",
+      "question": "真机验收怎么驱动独立 pi 实例？",
+      "source": "live-acceptance-tmux.md",
+      "must": ["tmux"],
+      "mustNot": ["不(是|用|需要)?\\s*tmux|without tmux|not (using )?tmux"]
+    },
+    {
+      "id": "Q9",
+      "class": "topic",
+      "question": "这台机器 bash 工具实际是什么 shell？",
+      "source": "pitfalls.md › 运行时",
+      "must": ["zsh"],
+      "mustNot": ["不是\\s*zsh|并非zsh|not zsh|isn't zsh"]
+    },
+    {
+      "id": "Q10",
+      "class": "topic",
+      "question": "consult fork 要不要裁剪工具输出？",
+      "source": "multi-agent-experiments.md",
+      "must": ["不(做|需要?|用)?裁剪|no(t)? trim|without trimming"],
+      "mustNot": []
+    }
+  ]
+}
