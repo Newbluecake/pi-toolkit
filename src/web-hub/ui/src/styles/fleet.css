@@ -1,0 +1,326 @@
+/**
+ * Subagent tree panel styles (ui-design.md §5.3, §6.4/§6.6, vue-plan.md v2.1 §1.1/§3.2/§5.2 —
+ * P4 exclusive). Class names and structure are ported verbatim from
+ * `docs/dev/web-hub/ui-mockups/app.css`'s `.fleet`/`.tree`/`.run` block (`FleetPanel.vue` /
+ * `FleetNode.vue` render exactly this markup) so the Vue build matches the approved mockup
+ * pixel-for-pixel; imported once, by `FleetPanel.vue` only (plan §1.1).
+ *
+ * `.run[data-st="…"]` / `.tool[data-st="…"]`-style rules live per-file (this file only defines
+ * the `.run` ones) rather than in a shared `primitives.css` `[data-st=…]` block — P3 owns that
+ * file and P4 must stay independently buildable/testable without it (plan §5.2/§5.4: P3 ∥ P4,
+ * neither depends on the other's files). `RunVisualState` has twelve values but the design
+ * token set (`tokens.css`) only defines eight `--st-*` pairs — `idle`/`queued`/`aborted` share
+ * the neutral `idle` color, `failed`/`timed_out` share `failed`, `waiting`/`stale` share `stale`
+ * (ui-design.md §3.2's own color table already groups them this way).
+ */
+
+.fleet {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.fleet > summary {
+  list-style: none;
+}
+
+.fleet > summary::-webkit-details-marker {
+  display: none;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 44px;
+  padding: 0 var(--sp-4);
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fs-sm);
+}
+
+.panel-head:hover {
+  background: var(--c-surface-2);
+}
+
+.panel-head .chev {
+  color: var(--c-text-3);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+details[open] > .panel-head .chev {
+  transform: rotate(90deg);
+}
+
+.panel-title {
+  font-weight: var(--fw-semibold);
+}
+
+.panel-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.tree-scroll {
+  max-height: 34dvh; /* the tree never pushes the conversation off screen (mobile default) */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--sp-2) var(--sp-2);
+}
+
+.tree,
+.tree ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tree ul {
+  position: relative;
+  margin-left: 10px;
+  padding-left: 8px;
+  border-left: 1px solid var(--c-border);
+}
+
+.tree details > summary {
+  list-style: none;
+}
+
+.tree details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.run {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "icon name nums"
+    ". activity activity";
+  align-items: center;
+  column-gap: var(--sp-2);
+  min-height: 44px;
+  padding: 6px var(--sp-2);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+}
+
+summary.run {
+  cursor: pointer;
+}
+
+.run:hover {
+  background: var(--c-surface-2);
+}
+
+.run .chev {
+  grid-area: chev;
+  display: none;
+  color: var(--c-text-3);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+details[open] > summary.run .chev {
+  transform: rotate(90deg);
+}
+
+.run-icon {
+  grid-area: icon;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-sm);
+  background: var(--pill-bg);
+  color: var(--pill-fg);
+}
+
+.run-icon .icon {
+  width: 13px;
+  height: 13px;
+  stroke-width: 2;
+}
+
+.run-name {
+  grid-area: name;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.run-name b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--fw-semibold);
+}
+
+.run-activity {
+  grid-area: activity;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.run-activity .phase {
+  color: var(--pill-fg);
+  font-family: var(--font-sans);
+  font-weight: var(--fw-semibold);
+}
+
+.run-nums {
+  grid-area: nums;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.run-nums .model {
+  font-family: var(--font-mono);
+}
+
+.run-nums .cost {
+  min-width: 52px;
+  text-align: right;
+  color: var(--c-text-2);
+  font-family: var(--font-mono);
+}
+
+.run.is-terminal .run-name b,
+.run.is-terminal .run-activity {
+  color: var(--c-text-3);
+  font-weight: var(--fw-medium);
+}
+
+.run[data-hl="warn"] {
+  box-shadow: inset 2px 0 0 var(--c-warning);
+  background: color-mix(in srgb, var(--c-warning-soft) 70%, transparent);
+}
+
+.run[data-hl="crit"] {
+  box-shadow: inset 2px 0 0 var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger-soft) 70%, transparent);
+}
+
+.run-more {
+  margin: var(--sp-1) 0 0 var(--sp-2);
+}
+
+/* status → { --pill-fg, --pill-bg } for `.run-icon`/`.run-activity .phase`/the highlight box-shadows */
+.run[data-st="running"] {
+  --pill-fg: var(--st-running);
+  --pill-bg: var(--st-running-soft);
+}
+.run[data-st="thinking"] {
+  --pill-fg: var(--st-thinking);
+  --pill-bg: var(--st-thinking-soft);
+}
+.run[data-st="tool"] {
+  --pill-fg: var(--st-tool);
+  --pill-bg: var(--st-tool-soft);
+}
+.run[data-st="idle"],
+.run[data-st="queued"],
+.run[data-st="aborted"] {
+  --pill-fg: var(--st-idle);
+  --pill-bg: var(--st-idle-soft);
+}
+.run[data-st="done"] {
+  --pill-fg: var(--st-done);
+  --pill-bg: var(--st-done-soft);
+}
+.run[data-st="failed"],
+.run[data-st="timed_out"] {
+  --pill-fg: var(--st-failed);
+  --pill-bg: var(--st-failed-soft);
+}
+.run[data-st="waiting"],
+.run[data-st="stale"] {
+  --pill-fg: var(--st-stale);
+  --pill-bg: var(--st-stale-soft);
+}
+.run[data-st="offline"] {
+  --pill-fg: var(--st-offline);
+  --pill-bg: var(--st-offline-soft);
+}
+
+/* running node icon (loader) spins; §3.5 bans requestAnimationFrame repo-wide, but a plain CSS
+ * keyframe animation is unaffected by that rule (it's the compositor, not JS-driven RAF work) */
+.spin {
+  animation: fleet-spin 1s linear infinite;
+  transform-origin: center;
+}
+
+@keyframes fleet-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .panel-head {
+    min-height: 44px;
+  }
+}
+
+/* ================================================================ tablet 481–1024 */
+@media (min-width: 481px) {
+  .tree-scroll {
+    padding: 0 var(--sp-4) var(--sp-3);
+  }
+
+  .tree ul {
+    margin-left: 21px;
+    padding-left: 12px;
+  }
+
+  .run {
+    grid-template-columns: 18px 20px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "chev icon name nums"
+      ". . activity activity";
+  }
+
+  .run .chev {
+    display: block;
+  }
+}
+
+/* ================================================================ desktop >1024: single-line rows */
+@media (min-width: 1025px) {
+  .tree-scroll {
+    max-height: 30vh;
+  }
+
+  .run {
+    grid-template-columns: 18px 20px minmax(120px, 1.2fr) minmax(0, 2fr) auto;
+    grid-template-areas: "chev icon name activity nums";
+    min-height: 36px;
+    padding: 4px var(--sp-2);
+  }
+}
+
+@media (max-width: 1279px) {
+  .run-nums .model {
+    display: none;
+  }
+}
