@@ -64,7 +64,7 @@ metadata:
 | opus-5.5  | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）         |
 | opus-5    | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                              |
 | fable     | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）              |
-| gpt-sol   | `zhipu-pool/gpt-5.6-sol`（资源充足，首选）→ `cr-response/gpt-5.6-sol`（偶发 stream 中断） |
+| gpt-sol   | `cr-response/gpt-5.6-sol` ⇄ `zhipu-pool/gpt-5.6-sol`（两线互为备份；zhipu 偶发 0 轮卡死） |
 | gpt-terra | `cr-response/gpt-5.6-terra`                                                               |
 | gpt-6     | `cr-response/gpt-6-astra`                                                                 |
 
@@ -153,8 +153,7 @@ sonnet → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [ask
 | **开发实施**           | sonnet   | kimi-k3 / glm-5.3（有订阅额度时）→ opus-5.5 | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                            |
 | **任务验收**           | gpt-sol  | kimi-k3 → glm-5.3                           | `subagent_type=verifier`；必须与开发模型异源；打回后复验优先 resume 原 verifier                        |
 
-路由现状（2026-09）：zhipu-pool 的 gpt-sol 资源充足，评审/验收/调查类只读任务优先派它，可多开并行；
-kimi-coding / zai 订阅常耗尽，默认表以按量线（cr-anthropic / cr-response /
+路由现状（2026-09）：kimi-coding / zai 订阅常耗尽，默认表以按量线（cr-anthropic / cr-response /
 zhipu-pool）为准；[quota] 显示订阅有余量且候选胜任时可替换同阶段首选。
 
 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier /
