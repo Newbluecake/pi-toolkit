@@ -1144,3 +1144,62 @@ describe("scheduleBashJobRecovery dual-timer orderings (§2.5 step 4/6, T31 P5 s
     handle.dispose();
   });
 });
+
+describe.skipIf(!posix)("todo #30: resume of an already-settled child session must not permanently refuse bash", () => {
+  /**
+   * End-to-end reproduction of the reported bug at the real seam between
+   * two consecutive `wireChildBashJobs` activations sharing one sessionId
+   * (exactly what a resumed child session is: pi's `SessionManager.open()`
+   * reads the session file's own header `id`, so `ctx.sessionManager.
+   * getSessionId()` reproduces run-1's exact sessionId in run-2). Drives
+   * both the host-side signals a real stack emits (`onSessionSeen` \u2192
+   * `attachHost`, `sealSession`/`onReaped` \u2192 `sealAndKill`, both
+   * carrying the run's own runId \u2014 see `src/stack.ts`) and the child-side
+   * `wireChildBashJobs` call each run gets from its own `activate()`.
+   *
+   * Before the fix: run-2's first `bash` call threw "run is ending; no new
+   * bash jobs" (src/bash/manager.ts's `reserve()`, gated by `child.ts`'s
+   * `admit: () => !registry.isSealed(sessionId)`) because `sealAndKill`'s
+   * `sealed` Set is keyed only by sessionId and never un-seals \u2014 every
+   * single bash/bash_job call for the rest of the resumed run was refused.
+   */
+  it("a resumed run's bash tool succeeds after the prior run of the same sessionId sealed the registry", async () => {
+    const sessionId = randomUUID();
+    const dir = tmpDir();
+    const run1Id = `run1-${randomUUID()}`;
+    const run2Id = `run2-${randomUUID()}`;
+    const registry = getChildBashRegistry();
+
+    // run-1: host attaches, child registers (via its first bash call), then settles (seals).
+    attachHost(sessionId, { runId: run1Id });
+    const run1 = fakePi();
+    wireChildBashJobs(run1.pi, { settings: settingsWith({}, dir) });
+    const ctx1 = fakeCtx(sessionId, dir);
+    const bash1 = run1.tools.get("bash")!;
+    const r1 = (await bash1.execute("call-1", { command: "true" }, undefined, undefined, ctx1)) as {
+      isError?: boolean;
+    };
+    expect(r1.isError).not.toBe(true);
+    const sealed = registry.sealAndKill(sessionId, 50, run1Id); // mirrors sealBeforeTerminal/sealSession at run-1's settle
+    expect(sealed).toBeDefined();
+    await sealed?.done;
+    expect(registry.isSealed(sessionId)).toBe(true);
+
+    // resume: a NEW run for the SAME sessionId. The host attaches its view
+    // BEFORE this run's own activate() (onSessionSeen fires on session_created,
+    // long before extension_bind/the first tool call — see runner.ts).
+    attachHost(sessionId, { runId: run2Id });
+    const run2 = fakePi();
+    wireChildBashJobs(run2.pi, { settings: settingsWith({}, dir) });
+    const ctx2 = fakeCtx(sessionId, dir);
+    const bash2 = run2.tools.get("bash")!;
+    const r2 = (await bash2.execute("call-2", { command: "echo resumed-ok" }, undefined, undefined, ctx2)) as {
+      isError?: boolean;
+      details?: { exitCode?: number };
+      content?: unknown;
+    };
+    expect(r2.isError).not.toBe(true);
+    expect(JSON.stringify(r2)).not.toContain("run is ending");
+    expect(registry.isSealed(sessionId)).toBe(false);
+  }, 10_000);
+});

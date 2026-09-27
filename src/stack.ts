@@ -1775,14 +1775,17 @@ export function buildSessionStack(
       // the two late-arrival paths (E18), which never had a chance to run
       // through the runner's own `sealBeforeTerminal` first.
       if (sessionId !== undefined) {
-        childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS);
+        childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS, runId);
         // child-context-switch plan.md §2.4 终态 ③ (P3): same defensive fan-out — the child's own
         // agent_settled path (src/cache-ttl/child.ts) already disposes its keepalive service in
-        // the normal case; this only matters when that path was somehow never taken.
-        getChildKeepaliveDisposeRegistry().disposeSession(sessionId);
+        // the normal case; this only matters when that path was somehow never taken. P1 review
+        // fix (todo #30 follow-up): pass this call's own runId through so a resumed run's fresher
+        // registration (a different runId, see child.ts's register()) is never disposed by an old
+        // run's late-arriving onReaped fan-out.
+        getChildKeepaliveDisposeRegistry().disposeSession(sessionId, runId);
       }
     },
-    sealSession: (runId, sessionId) => childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS)?.facts,
+    sealSession: (runId, sessionId) => childBashRegistry.sealAndKill(sessionId, BASH_JOB_SEAL_GRACE_MS, runId)?.facts,
     onSessionSeen: (runId, sessionId) => {
       childBashRegistry.attachHost(sessionId, hostViewFor(runId));
       // §3.6 boundary telemetry: correlate any pending noteToolReturn calls

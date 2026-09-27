@@ -203,6 +203,159 @@ describe("child-registry: sealAndKill idempotency (T2)", () => {
   });
 });
 
+describe("child-registry: resume unseal (todo #30)", () => {
+  const hostView = (runId: string) => ({
+    runId,
+    watchdogDueAt: () => undefined,
+    hardDeadlineAt: () => undefined,
+    maxExtensions: () => 0,
+    stopping: () => false,
+    noteToolReturn: () => undefined,
+  });
+
+  /**
+   * Reproduces the bug exactly (fixed by this change, fails without it): a
+   * child session's bash manager is sealed at run-1's settle time
+   * (`sealAndKill(sid, ..., runId1)`, mirroring `sealBeforeTerminal`/
+   * `sealSession`). `resume` (same session file ⇒ pi's `SessionManager`
+   * reproduces the exact same sessionId) starts run-2: the host attaches a
+   * NEW runId for the same sessionId (`attachHost`, mirroring
+   * `onSessionSeen`) before the child ever calls bash, then the child's
+   * lazily-built manager calls `register()` on its first bash/bash_job
+   * tool call. Before the fix this permanently threw "run is ending; no
+   * new bash jobs" for the entire resumed run because `sealed` never
+   * expires and is keyed only by sessionId, not by runId.
+   */
+  it("register() admits a resumed run's manager after a prior run of the SAME sessionId sealed it", async () => {
+    const registry = getChildBashRegistry();
+    const sid = randomUUID();
+    const runId1 = randomUUID();
+    const runId2 = randomUUID();
+
+    // run-1: attach host, register, then settle (seal).
+    registry.attachHost(sid, hostView(runId1));
+    const run1 = fakeEntry(sid);
+    registry.register(run1.entry);
+    const sealed1 = registry.sealAndKill(sid, 0, runId1);
+    expect(sealed1).toBeDefined();
+    expect(registry.isSealed(sid)).toBe(true);
+
+    // resume: a NEW run for the SAME sessionId. The host attaches its view
+    // (a fresh runId) before the child's manager ever registers — exactly
+    // the ordering `onSessionSeen`/`onStateChange` guarantee (session_created
+    // dispatches before extension_bind, long before any tool call).
+    registry.attachHost(sid, hostView(runId2));
+    const run2 = fakeEntry(sid);
+    const result = registry.register(run2.entry);
+    expect(result.generation).toBeGreaterThan(0);
+    expect(run2.sealedCalls).toBe(0); // NOT immediately sealed — this is the fix
+    expect(registry.isSealed(sid)).toBe(false); // admit() reads this directly
+
+    // The resumed run's own eventual settle can seal it again, independently.
+    const sealed2 = registry.sealAndKill(sid, 0, runId2);
+    expect(sealed2).toBeDefined();
+    expect(registry.isSealed(sid)).toBe(true);
+    expect(run2.sealedCalls).toBe(1);
+    await Promise.all([sealed1?.done, sealed2?.done]);
+  });
+
+  it("isSealed() alone (the admit() closure's own check) also unseals a resumed run's sessionId", () => {
+    const registry = getChildBashRegistry();
+    const sid = randomUUID();
+    const runId1 = randomUUID();
+    const runId2 = randomUUID();
+
+    registry.attachHost(sid, hostView(runId1));
+    registry.sealAndKill(sid, 0, runId1);
+    expect(registry.isSealed(sid)).toBe(true);
+
+    registry.attachHost(sid, hostView(runId2));
+    expect(registry.isSealed(sid)).toBe(false); // unsealed as a side effect
+    expect(registry.isSealed(sid)).toBe(false); // stays unsealed on repeat reads
+  });
+
+  it("a same-run late register (no host-view change) stays sealed — no regression on the original race", () => {
+    const registry = getChildBashRegistry();
+    const sid = randomUUID();
+    const runId1 = randomUUID();
+
+    registry.attachHost(sid, hostView(runId1));
+    registry.sealAndKill(sid, 0, runId1); // no entry registered yet — sealed anyway (documented behavior)
+    const late = fakeEntry(sid);
+    const result = registry.register(late.entry); // same runId still attached — must NOT unseal
+    expect(result.generation).toBeGreaterThan(0);
+    expect(late.sealedCalls).toBe(1); // still immediately sealed
+    expect(registry.isSealed(sid)).toBe(true);
+  });
+
+  /**
+   * P1 review fix (bash-timeout-grace / todo #30 follow-up, §3.3/§3.9): reproduces the SECOND
+   * bug the review found (fails without the fix — verified manually by reverting the
+   * stale-caller guard at the top of `sealAndKill`). The prior test above covers the ORIGINAL
+   * (already-fixed) shape: a resume's own `register()`/`isSealed()` correctly unseals a
+   * sessionId a PRIOR run sealed. This one covers the OPPOSITE, previously-unhandled ordering:
+   * run-1's own on-time `sealAndKill` already sealed and killed ITS entry; a resume (run-2) then
+   * attaches its host view and registers a brand-new entry FOR THE SAME sessionId (exactly as
+   * `onSessionSeen`/`register()` guarantee — host attaches before any tool call); only THEN does
+   * run-1's late, defensive `onReaped` fan-out (`src/stack.ts`'s `sealAndKill(sid, grace, runId1)`
+   * second call) finally arrive, well after run-2 is already live. Before the fix this re-sealed
+   * the (now current) sessionId under run-1's stale runId and deleted+onSealed()+killAll()'d
+   * run-2's OWN freshly-registered entry — a completely live, unrelated run silently losing bash
+   * admission and having its jobs killed out from under it.
+   */
+  it("a stale caller's late sealAndKill (old run's defensive onReaped fan-out) after a resume's host+entry are already live must not touch the new run's entry (P1 §3.3/§3.9)", async () => {
+    const registry = getChildBashRegistry();
+    const sid = randomUUID();
+    const runId1 = randomUUID();
+    const runId2 = randomUUID();
+
+    // run-1: normal on-time seal (mirrors sealBeforeTerminal, synchronous, ahead of onReaped).
+    registry.attachHost(sid, hostView(runId1));
+    const run1 = fakeEntry(sid);
+    registry.register(run1.entry);
+    const sealed1 = registry.sealAndKill(sid, 0, runId1);
+    expect(sealed1).toBeDefined();
+    await sealed1?.done;
+
+    // resume: run-2 attaches its host view and registers ITS OWN entry — fully live before
+    // run-1's late fan-out ever arrives.
+    registry.attachHost(sid, hostView(runId2));
+    const run2 = fakeEntry(sid);
+    registry.register(run2.entry);
+    expect(registry.isSealed(sid)).toBe(false);
+    expect(run2.sealedCalls).toBe(0);
+
+    // LATE: run-1's own defensive onReaped fan-out finally fires (a second, redundant
+    // `sealAndKill(sid, grace, runId1)` call for the SAME already-sealed-and-killed run-1) —
+    // this must be a complete no-op now that run-2 owns the sessionId.
+    const lateResult = registry.sealAndKill(sid, 0, runId1);
+    expect(lateResult).toBeUndefined();
+
+    // run-2's live entry must be completely untouched: not sealed, onSealed() never called a
+    // second time, killAll() never invoked against it.
+    expect(registry.isSealed(sid)).toBe(false);
+    expect(run2.sealedCalls).toBe(0);
+    expect(run2.killAllCallCount()).toBe(0);
+
+    // run-2's own eventual settle can still seal it normally, independently.
+    const sealed2 = registry.sealAndKill(sid, 0, runId2);
+    expect(sealed2).toBeDefined();
+    expect(run2.sealedCalls).toBe(1);
+    await sealed2?.done;
+  });
+
+  it("without a fresher attachHost (no host wiring at all, or the pre-fix caller that omits runId), the seal stays sticky — conservative fallback", () => {
+    const registry = getChildBashRegistry();
+    const sid = randomUUID();
+    registry.sealAndKill(sid, 0); // no runId passed (back-compat call shape)
+    expect(registry.isSealed(sid)).toBe(true);
+    const late = fakeEntry(sid);
+    registry.register(late.entry);
+    expect(late.sealedCalls).toBe(1);
+    expect(registry.isSealed(sid)).toBe(true);
+  });
+});
+
 describe("child-registry: whenSealed (T2)", () => {
   it("resolves immediately for an already-sealed sessionId", async () => {
     const registry = getChildBashRegistry();

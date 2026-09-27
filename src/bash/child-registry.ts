@@ -89,7 +89,7 @@ export interface HostRunView {
 }
 
 export interface ChildBashRegistry {
-  /** Registers (or re-registers) this session's bash job manager. Generation is monotonic per sessionId (starts at 1, survives re-registration). Registering into an already-sealed sessionId immediately calls the new entry's `onSealed()` (defensive: the session is ending regardless of registration order) and does not retain the entry for a future `sealAndKill`. */
+  /** Registers (or re-registers) this session's bash job manager. Generation is monotonic per sessionId (starts at 1, survives re-registration). Registering into an already-sealed sessionId immediately calls the new entry's `onSealed()` (defensive: the session is ending regardless of registration order) and does not retain the entry for a future `sealAndKill` -- UNLESS a resume has since attached a host view for that sessionId under a different runId than the one that sealed it (todo #30: `sealed` never auto-expires by itself, and a resumed run reuses its prior run's exact sessionId, so this is the only signal that tells "still the same, already-ending run" apart from "a brand-new run that happens to share this sessionId"), in which case the stale seal is cleared first and registration proceeds normally. */
   register(entry: Omit<ChildBashEntry, "generation">): { generation: number; unregister(): void };
   attachHost(sessionId: string, view: HostRunView): void;
   hostView(sessionId: string): HostRunView | undefined;
@@ -109,6 +109,7 @@ export interface ChildBashRegistry {
   declareHostCapability(name: string, version: number): () => void;
   /** True once ANY currently-live declaration of `name` exists (see `declareHostCapability`). */
   hasHostCapability(name: string): boolean;
+  /** True once `sessionId` is sealed AND no fresher (resumed) run has since attached a host view for it (todo #30: same stale-seal check as `register()` -- a resume's own `admit()` closure calls this directly, so the check has to live here too, not only in `register()`). A stale hit clears the seal as a side effect (permanent unseal, not a one-off answer). */
   isSealed(sessionId: string): boolean;
   /** Resolves once this sessionId is sealed (immediately if already sealed). Never rejects.
    *
@@ -123,15 +124,35 @@ export interface ChildBashRegistry {
   whenSealed(sessionId: string): Promise<void>;
   /**
    * Synchronous, idempotent per sessionId: the FIRST call seals the session
-   * (irreversible), synchronously reads `exitFacts()` + calls `onSealed()` on
-   * the registered entry (if any) and starts `killAll` (NOT awaited — the
-   * returned `done` promise is for the caller to observe, never to block
-   * on). Every subsequent call for the same sessionId returns `undefined`.
+   * (irreversible for THIS run), synchronously reads `exitFacts()` + calls
+   * `onSealed()` on the registered entry (if any) and starts `killAll` (NOT
+   * awaited -- the returned `done` promise is for the caller to observe,
+   * never to block on). Every subsequent call for the same sessionId AND the
+   * same run returns `undefined`.
    * A sessionId with no registered entry still becomes sealed on first call
    * (so a late `register()` for it is treated as already-sealed) but the
    * call itself returns `undefined` (nothing to report or kill).
+   * `runId` (todo #30, optional for back-compat) records which run caused
+   * this seal; a LATER call for the same sessionId under a DIFFERENT runId
+   * (a resume reusing this sessionId) is treated as a fresh seal for that
+   * new run -- not the idempotent no-op above -- since `register()`/
+   * `isSealed()` already unseal a resumed run's session as soon as its own
+   * host view attaches, well before it would ever reach here.
+   * P1 review fix (§3.3/§3.9): the opposite direction is ALSO guarded --
+   * when THIS CALL's own `runId` no longer matches the runId currently
+   * `attachHost`-ed for `sessionId` (i.e. a fresher run has since attached,
+   * so this call itself is the stale one -- the classic shape is `onReaped`'s
+   * defensive fan-out for an old run arriving after a resume's host view is
+   * already live), the call is a total no-op: it returns `undefined` without
+   * touching `sealed`/`entries`/`sealedRunId` for `sessionId` at all, never
+   * re-sealing or killing whatever is currently registered there (which, by
+   * then, can only ever be the NEWER run's own entry).
    */
-  sealAndKill(sessionId: string, graceMs: number): { facts: RunExitFacts; done: Promise<KillAllReport> } | undefined;
+  sealAndKill(
+    sessionId: string,
+    graceMs: number,
+    runId?: string,
+  ): { facts: RunExitFacts; done: Promise<KillAllReport> } | undefined;
   /** Best-effort fan-out of sealAndKill to every currently-registered (not yet sealed) entry, bounded by graceMs (session_shutdown, S6). Never rejects. */
   sealAll(graceMs: number): Promise<void>;
 }
@@ -162,14 +183,59 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
   private readonly generations = new Map<string, number>();
   private readonly hosts = new Map<string, HostRunView>();
   private readonly sealed = new Set<string>();
+  // todo #30 fix: the runId that CAUSED sealAndKill(sessionId) to seal, so a
+  // later register()/isSealed() for the SAME sessionId can tell apart "still
+  // the same (already-sealed) run" from "a brand-new run that reused this
+  // sessionId" (resume — pi's `SessionManager.open()` reads the session file's
+  // own header `id`, so resuming a session file always reproduces the exact
+  // same sessionId the prior run had). `sealed` itself deliberately stays a
+  // simple Set (isSealed()/whenSealed() keep their existing O(1) semantics for
+  // the still-live/still-sealed case) — this map is consulted ONLY at the two
+  // points that would otherwise treat a resumed run as permanently sealed.
+  private readonly sealedRunId = new Map<string, string>();
   private readonly sealResults = new Map<string, { facts: RunExitFacts; done: Promise<KillAllReport> }>();
   private readonly sealWaiters = new Map<string, Array<() => void>>();
   private readonly capabilities = new Map<string, { version: number; count: number }>();
+
+  /**
+   * todo #30 fix: true when `sessionId` is sealed but a DIFFERENT runId has
+   * since attached a host view for it (`attachHost`, called from
+   * `onSessionSeen` on every state change of the run that owns that
+   * sessionId, always with a fresh runId per spawn — including resume). That
+   * combination is only possible when the run that caused the seal has ended
+   * and a genuinely new run (a resume reusing the same session file/sessionId)
+   * has since started; `sealBeforeTerminal`/`sealAndKill` never fire twice for
+   * the SAME run (I-SEAL idempotency), so a same-run late register can never
+   * observe a different runId here. Undefined `sealedRunId` (a seal recorded
+   * before this fix shipped, or one whose bookkeeping entry was FIFO-evicted)
+   * conservatively answers false — the pre-fix behavior — rather than risk
+   * unsealing a session that might still be the same run.
+   */
+  private isStaleSealFromPriorRun(sessionId: string): boolean {
+    const sealedFor = this.sealedRunId.get(sessionId);
+    if (sealedFor === undefined) return false;
+    const currentRunId = this.hosts.get(sessionId)?.runId;
+    return currentRunId !== undefined && currentRunId !== sealedFor;
+  }
+
+  /** todo #30 fix: clears every sealed-bookkeeping trace of `sessionId` so it is admitted exactly like a never-sealed one. */
+  private clearStaleSeal(sessionId: string): void {
+    this.sealed.delete(sessionId);
+    this.sealedRunId.delete(sessionId);
+    this.sealResults.delete(sessionId);
+  }
 
   register(entry: Omit<ChildBashEntry, "generation">): { generation: number; unregister(): void } {
     const generation = (this.generations.get(entry.sessionId) ?? 0) + 1;
     fifoSet(this.generations, entry.sessionId, generation, REGISTRY_CAP);
     const full: ChildBashEntry = { ...entry, generation };
+    if (this.sealed.has(entry.sessionId) && this.isStaleSealFromPriorRun(entry.sessionId)) {
+      // todo #30: a resume reusing this sessionId — the seal belongs to the
+      // PRIOR run that already ended; this run is brand new and must be
+      // admitted normally (fall through to the unsealed registration path
+      // below), not treated as already-ending.
+      this.clearStaleSeal(entry.sessionId);
+    }
     if (this.sealed.has(entry.sessionId)) {
       // Already sealed (a race: the run ended before/while this session's
       // manager finished starting up) — this entry is never retained for a
@@ -228,6 +294,17 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
     return (this.capabilities.get(name)?.count ?? 0) > 0;
   }
   isSealed(sessionId: string): boolean {
+    // todo #30 fix: mirrors register()'s stale-seal detection so a resumed
+    // run's manager (whose `admit()` closure calls this directly, not
+    // through register()) never gets stuck refusing every job forever
+    // because a prior run of this same sessionId sealed it. Mutates the
+    // registry (clears the stale seal) so the effect is a permanent unseal,
+    // not just a one-off answer — subsequent calls (from either the resumed
+    // run's own admit() or a later register()) stay consistent.
+    if (this.sealed.has(sessionId) && this.isStaleSealFromPriorRun(sessionId)) {
+      this.clearStaleSeal(sessionId);
+      return false;
+    }
     return this.sealed.has(sessionId);
   }
   whenSealed(sessionId: string): Promise<void> {
@@ -253,9 +330,47 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
     });
   }
 
-  sealAndKill(sessionId: string, graceMs: number): { facts: RunExitFacts; done: Promise<KillAllReport> } | undefined {
+  sealAndKill(
+    sessionId: string,
+    graceMs: number,
+    runId?: string,
+  ): { facts: RunExitFacts; done: Promise<KillAllReport> } | undefined {
+    // P1 review fix (todo #30 follow-up, §3.3/§3.9): if THIS CALL's own
+    // runId no longer matches the runId currently attached for this
+    // sessionId (`attachHost`, driven by `onSessionSeen` on every state
+    // change — always ahead of any tool call/registration for that run),
+    // the caller itself is stale: a resume has already attached a fresher
+    // run's host view for this sessionId. This only happens for the
+    // defensive, asynchronous `onReaped` fan-out (`src/stack.ts`) racing a
+    // resume that started in the meantime — `sealBeforeTerminal` (the
+    // runner's `finally` block) calls `sealSession`/`sealAndKill`
+    // SYNCHRONOUSLY, strictly before the async `runReap().then(() =>
+    // notifyReaped(...))` chain that fires `onReaped`, so the run's OWN
+    // on-time seal (below, taken with the runId that WAS current at that
+    // moment) has already sealed and killed its own entry/jobs by the time
+    // this stale, redundant call could ever arrive. A stale caller is
+    // therefore a total no-op: it must NOT touch `sealed`/`entries`/
+    // `sealedRunId` for this sessionId at all — those now belong to the
+    // newer, live run — and it must be checked BEFORE the stale-SEAL (as
+    // opposed to stale-CALLER) handling below, which answers a different
+    // question (whether the FLAG is stale, not whether THIS CALL is).
+    // There is deliberately no attempt to salvage/kill the old run's own
+    // entry here: by the time a newer host is attached, `entries` (keyed
+    // only by sessionId) may already have been overwritten by the new run's
+    // own `register()`, so reading it now could only ever observe the NEW
+    // run's entry — never the old one — and touching it would risk exactly
+    // the corruption this fix prevents.
+    const currentRunId = this.hosts.get(sessionId)?.runId;
+    if (runId !== undefined && currentRunId !== undefined && currentRunId !== runId) return undefined;
+    // todo #30 fix: same stale-seal-from-a-prior-run check as isSealed()/
+    // register() -- a direct sealAndKill call (session_shutdown's sealAll,
+    // or the defensive onReaped/sealSession fan-out) must not treat a
+    // resumed run's OWN termination as a no-op just because the sessionId
+    // it reused was sealed by the run it resumed from.
+    if (this.sealed.has(sessionId) && this.isStaleSealFromPriorRun(sessionId)) this.clearStaleSeal(sessionId);
     if (this.sealed.has(sessionId)) return undefined;
     this.sealed.add(sessionId);
+    if (runId !== undefined) fifoSet(this.sealedRunId, sessionId, runId, REGISTRY_CAP);
     // Cap the sealed-set the same way as the live bookkeeping — a sessionId
     // is never reused, so evicting the oldest one only means a very old,
     // long-finished run's isSealed()/whenSealed() would (harmlessly) answer

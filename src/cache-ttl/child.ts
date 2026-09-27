@@ -16,6 +16,7 @@ import { CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE } from "../runtime/session-driver.js"
 import { createRequestCapture, captureRequest, type CapturedRequestBase } from "./cache-ttl.js";
 import { getChildKeepaliveLedger } from "./ping-ledger.js";
 import { getChildKeepaliveDisposeRegistry } from "./child-registry.js";
+import { getChildBashRegistry } from "../bash/child-registry.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "../service/cache-keepalive.js";
 import type { InvalidateReason } from "./keepalive-state.js";
 import { prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
@@ -93,10 +94,22 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
     });
     service = svc;
     capture = createRequestCapture(svc);
-    getChildKeepaliveDisposeRegistry().register(sessionId, () => {
-      disposed = true;
-      svc.dispose();
-    });
+    // P1 review fix (todo #30 follow-up, §3.3/§3.9): this run's own runId, read from the bash
+    // registry's host view (attached by `onSessionSeen` well before this lazily-built service
+    // ever registers — same ordering invariant `ChildBashRegistry` itself relies on). Lets
+    // `disposeSession`'s defensive `onReaped` fan-out (src/stack.ts) tell apart "this run's own
+    // dispose" from "a resumed run's dispose callback that has since overwritten this sessionId's
+    // entry" — without it, an old run's late-arriving onReaped could dispose a NEWER run's live
+    // keepalive service purely because they share the resumed sessionId.
+    const runId = getChildBashRegistry().hostView(sessionId)?.runId;
+    getChildKeepaliveDisposeRegistry().register(
+      sessionId,
+      () => {
+        disposed = true;
+        svc.dispose();
+      },
+      runId,
+    );
     return svc;
   }
 
