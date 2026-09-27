@@ -52,6 +52,10 @@ const NOT_THREADED = [
   "schema", // consumed by the adapter to inject the StructuredOutput tool
   "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)
   "poolFullPolicy", // consumed entirely by spawn() admission (L1) — decided and resolved before start()/RunnerSpec ever exist
+  // P0-r (todo #22 optimize-plan §7.0 point 5): consumed by the runtime adapter to decide
+  // readonlyDomain (tool set / policy / provenance / customTools narrowing); the runner never
+  // sees this field verbatim — it only ever executes the toolScope the adapter already built.
+  "toolDomain",
 ] as const;
 
 type ClassifiedKeys = (typeof THREADED)[number] | (typeof NOT_THREADED)[number];

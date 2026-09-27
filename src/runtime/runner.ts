@@ -721,6 +721,19 @@ export class RuntimeRunner implements Runner {
           if (e.t === "turn_end" && req.toolScope && !isTerminalStatus(state.status)) {
             req.toolScope.enforcer.onTurnBoundary(handle!, req.toolScope.policy);
           }
+          // P0-r (todo #22 optimize-plan §7.0 point 6b): additive turn_start
+          // re-application, ONLY when this run's policy carries `provenance`
+          // (the readonly tool domain) — every other run's policy has no
+          // `provenance` and this branch never fires for it, preserving
+          // "only at bind/turn_end" byte-for-byte. Same terminal-status guard
+          // as turn_end above (N11 ³).
+          if (
+            e.t === "turn_start" &&
+            req.toolScope?.policy.provenance !== undefined &&
+            !isTerminalStatus(state.status)
+          ) {
+            req.toolScope.enforcer.onTurnBoundary(handle!, req.toolScope.policy);
+          }
         }),
         bindBudget.ms,
         cancel,

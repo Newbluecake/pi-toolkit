@@ -469,6 +469,24 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // effects: no runId, no index writes, no H2, no worktree, no slot.
       if (req.deadlineAt !== undefined && req.deadlineAt <= now())
         return { error: { kind: "config", message: "deadlineAt already expired", retryable: false } };
+      // P0-r (todo #22 optimize-plan §7.0 point 4): toolDomain:"readonly" never
+      // combines with isolation / forkSessionFrom / resumeFrom — tidy never
+      // needs any of them, and combining them would be a latent misuse
+      // waiting to happen (e.g. a readonly consult-like run also asking for a
+      // worktree). Zero side effects, same admission discipline as the CC4
+      // check right above.
+      if (
+        req.toolDomain === "readonly" &&
+        (req.isolation !== undefined || req.forkSessionFrom !== undefined || req.resumeFrom !== undefined)
+      ) {
+        return {
+          error: {
+            kind: "config",
+            message: 'toolDomain:"readonly" cannot be combined with isolation, forkSessionFrom, or resumeFrom',
+            retryable: false,
+          },
+        };
+      }
       // L1 (agent-tool pool-full plan §1): reject-policy admission check —
       // zero side effects, runs before type/model/quota/nesting checks and
       // strictly before ANY mutable write, so a rejected call never creates a

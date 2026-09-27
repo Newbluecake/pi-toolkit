@@ -342,6 +342,25 @@ export interface SpawnRequest {
    * requests, which never occupy a conceptual slot in the first place.
    */
   poolFullPolicy?: "reject" | "queue";
+  /**
+   * P0-r (todo #22 memory optimize-plan §7.0/§7.0.0): request the runtime's
+   * forced read-only tool domain for this run — same enforcement point as a
+   * consult run (`forkSessionFrom`), reused so `/mem tidy`'s proposal-drafting
+   * subagent gets zero write-capable tools without a second mechanism.
+   * `readonlyDomain = isConsultRun || toolDomain === "readonly"`
+   * (runtime-adapter.ts). Threat model (§7.0.0): this defends against the
+   * RUN'S OWN MODEL calling a write tool, not against a same-process
+   * malicious extension — trusting same-process code is this package's
+   * existing trust boundary (see consult's identical premise). Only ever set
+   * by an in-process caller (the tidy port) that constructs its own
+   * `SpawnRequest` field-by-field; the Agent tool / RPC spawn / workflow
+   * `agent()` opts all reject or silently drop an unknown key, so a model
+   * can never set this itself (N6). Mutually exclusive with `isolation` /
+   * `forkSessionFrom` / `resumeFrom` — spawn admission rejects the
+   * combination as a config error (§7.0 point 4) since tidy never needs any
+   * of them and combining them would be a latent misuse waiting to happen.
+   */
+  toolDomain?: "readonly";
 }
 /**
  * M-A (presentation): one observed tool call of a run, kept in

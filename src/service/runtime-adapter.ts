@@ -300,6 +300,18 @@ export function appendPromptNotes(prompt: string, notes?: readonly string[]): st
 }
 
 /**
+ * P0-r (\u00a77.0 point 6a): best-effort display name for a WARN log line —
+ * `sessionSpec.customTools` is `unknown[]` (core/types.ts keeps core free of
+ * `@earendil-works/*` imports), so this reads the informal `{ name: string }`
+ * shape every tool definition (ours and pi's `ToolDefinition`) actually has
+ * at runtime without asserting a concrete type.
+ */
+function customToolName(tool: unknown): string {
+  const name = (tool as { name?: unknown } | null)?.name;
+  return typeof name === "string" ? name : "?";
+}
+
+/**
  * The real cross-layer seam: bridges the L2 execution engine (RuntimeRunner,
  * hang-proof but call-shaped as `run(req, budget)`) to the L3 service
  * contract (ports.Runner, call-shaped as `run(spec, callbacks)`), and wires
@@ -536,6 +548,13 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       // request produced exclusively by the consult tool (plan §4.3). Gates
       // the read-only tool domain AND every injection skip below.
       const isConsultRun = spec.request.forkSessionFrom !== undefined;
+      // P0-r (todo #22 optimize-plan §7.0 point 1): the runtime-forced readonly
+      // tool domain also covers a plain (non-consult) request that opted into
+      // it via SpawnRequest.toolDomain (today: /mem tidy's proposal-drafting
+      // subagent). Only conditions 1-3 and 6 below switch from isConsultRun to
+      // readonlyDomain — consult's OWN prompt/displayMeta/onReaped branches
+      // (L819/843/889-area) stay on isConsultRun, unaffected by tidy.
+      const readonlyDomain = isConsultRun || spec.request.toolDomain === "readonly";
       // consult §4.4 early-exit bookkeeping: set right before the runner is
       // entered. Every return/throw before that point (settleConfigFailure,
       // pre-runner sync throws) never reaches the runner's own finally, so
@@ -598,9 +617,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // consult §5.4 B-1: a consulted expert copy gets NONE of the injected
         // tools (message_agent / set_model / nested Agent / StructuredOutput /
         // consult) — every injection branch below is explicitly
-        // !isConsultRun-guarded rather than relying on the implicit "a
-        // consult request carries no consultExperts" premise (review-2 #13).
-        if (deps.fabric && !isConsultRun) {
+        // !readonlyDomain-guarded (P0-r §7.0 point 1 widens this from
+        // !isConsultRun so a toolDomain:"readonly" tidy run gets the same
+        // treatment) rather than relying on the implicit "a consult request
+        // carries no consultExperts" premise (review-2 #13). StructuredOutput
+        // below is the one deliberate exception — see its own comment.
+        if (deps.fabric && !readonlyDomain) {
           customTools.push(
             createMessageAgentTool({
               router: deps.fabric.router,
@@ -636,8 +658,8 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // reads (unreliable inside child sessions) — which also keeps the
         // tool 100% unit-testable.
         // consult §5.4 B-1: a consulted expert copy gets none of the injected
-        // tools — read-only four only.
-        if (!isConsultRun) {
+        // tools — read-only four only. P0-r §7.0 point 1: widened to readonlyDomain.
+        if (!readonlyDomain) {
           customTools.push(
             createSetModelTool({
               selfRunId: spec.runId,
@@ -648,7 +670,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           );
           grantedReserved.push("set_model");
         }
-        if (!isConsultRun && spec.type.canSpawn?.length && deps.nestedSpawn) {
+        if (!readonlyDomain && spec.type.canSpawn?.length && deps.nestedSpawn) {
           const port = deps.nestedSpawn();
           if (port) {
             customTools.push(
@@ -671,27 +693,41 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         }
         // consult injection (plan §6 C-12, after set_model): only a run whose
         // dispatcher attached a resolved expert whitelist gets the consult
-        // tool — and never a consult run itself (explicit !isConsultRun,
-        // review-2 #13).
-        if (!isConsultRun && spec.request.consultExperts?.length && deps.consult) {
+        // tool — and never a readonly-domain run itself (widened from
+        // !isConsultRun to !readonlyDomain, P0-r §7.0 point 1; review-2 #13).
+        if (!readonlyDomain && spec.request.consultExperts?.length && deps.consult) {
           const consultTool = deps.consult(spec.runId, () => askerCwd, spec.request.consultExperts);
           if (consultTool !== undefined) {
             customTools.push(consultTool);
             grantedReserved.push("consult");
           }
         }
+        // P0-r §7.0 point 1 ("唯一例外"): every OTHER injection branch above moved
+        // from !isConsultRun to !readonlyDomain, but this one deliberately did
+        // NOT — toolDomain:"readonly" (tidy) always sets `schema` and needs
+        // StructuredOutput to submit its proposal, while a consult run
+        // (isConsultRun) never sets `schema` in the first place (existing
+        // invariant, unchanged by this package). Leaving the guard as
+        // `!isConsultRun` therefore already does the right thing for BOTH
+        // cases with zero special-casing: tidy (isConsultRun===false) still
+        // gets it when schema is set, consult (isConsultRun===true) still
+        // never does. `readonlyDomain` only decides whether to Object.freeze
+        // the tool definition (§7.0.0 hygiene — pi never rewrites customTools
+        // definitions, §1) and whether pi's own `tools` allowlist and the
+        // enforcer policy's `provenance` map need to carry "StructuredOutput"
+        // (handled after H2, below).
         if (!isConsultRun && spec.request.schema !== undefined) {
           const schema = spec.request.schema;
-          customTools.push(
-            createStructuredOutputTool({
-              schema,
-              onSubmit: (value) => {
-                const result = validateAgainstSchema(schema, value);
-                if (result.ok) structured.value = value;
-                return result;
-              },
-            }),
-          );
+          const structuredOutputTool = createStructuredOutputTool({
+            schema,
+            onSubmit: (value) => {
+              const result = validateAgainstSchema(schema, value);
+              if (result.ok) structured.value = value;
+              return result;
+            },
+          });
+          if (readonlyDomain) Object.freeze(structuredOutputTool);
+          customTools.push(structuredOutputTool);
           grantedReserved.push("StructuredOutput");
         }
         // bash-timeout-grace plan §3.10 (P5): no customTools injection — `bash`/
@@ -706,15 +742,19 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           bashJobGrant({
             ...(spec.type.tools !== undefined ? { typeTools: spec.type.tools } : {}),
             childBashJobs: deps.childBashJobsEnabled ?? false,
-            consult: isConsultRun,
+            // P0-r §7.0 point 1 (complements review v3-3, review-2 #13): widened from
+            // isConsultRun to readonlyDomain — a tidy run with bashJobs.childSessions
+            // on AND an agent type that declares `bash` would otherwise get bash_job.
+            consult: readonlyDomain,
           })
         ) {
           grantedReserved.push("bash_job");
         }
         // child-context-switch plan.md §4 (user confirm 2): switch_context is granted to every
         // non-consult child run, gated only by the wiring layer's live capability read (never
-        // granted once the process-wide state machine has disabled the feature).
-        if (!isConsultRun && (deps.childSwitchContextGrant?.() ?? false)) {
+        // granted once the process-wide state machine has disabled the feature). P0-r §7.0 point 1:
+        // widened to readonlyDomain so a tidy run never gets it either.
+        if (!readonlyDomain && (deps.childSwitchContextGrant?.() ?? false)) {
           grantedReserved.push("switch_context");
         }
         if (customTools.length)
@@ -764,25 +804,80 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               spec.request.isolation === "worktree" && sessionSpec.cwd !== undefined && sessionSpec.cwd !== preH2Cwd,
           };
         }
-        // consult §5.4 B-2: FORCE the read-only tool domain AFTER H2, so no
-        // extension (worktree or future) can ever widen a consult run's
-        // tools. Same constant as the enforcer policy below — single source
-        // (CONSULT_READONLY_TOOLS), never a second list. This also activates
-        // grep/find/ls, which pi only activates when named in `tools` (an
-        // unset `tools` means read/bash/edit/write — the two fixture shapes
-        // `tools: undefined` and `tools: ["bash","write"]` both collapse to
-        // the read-only four here).
-        if (isConsultRun) sessionSpec = { ...sessionSpec, tools: [...CONSULT_READONLY_TOOLS] };
+        // consult §5.4 B-2 / P0-r §7.0 points 2/6a: FORCE the read-only tool
+        // domain AFTER H2 (widened from isConsultRun to readonlyDomain), so no
+        // extension (worktree or future) can ever widen it. Same constant as
+        // the enforcer policy below — single source (CONSULT_READONLY_TOOLS),
+        // never a second list. This also activates grep/find/ls, which pi only
+        // activates when named in `tools` (an unset `tools` means
+        // read/bash/edit/write — the two fixture shapes `tools: undefined` and
+        // `tools: ["bash","write"]` both collapse to the read-only four here).
+        // A tidy run (readonlyDomain via toolDomain, never via isConsultRun —
+        // it always sets `schema`) additionally allows "StructuredOutput" by
+        // name so pi's own registry filter (M1 below) doesn't drop it; a
+        // consult run never sets schema, so this collapses to exactly
+        // CONSULT_READONLY_TOOLS for it — byte-identical to before. Read off
+        // `grantedReserved` (not `spec.request.schema` directly) so this
+        // exactly tracks whether the StructuredOutput injection branch above
+        // actually fired — that branch stays gated on `!isConsultRun`, so a
+        // (hypothetical, never real) consult request that carried a schema
+        // would still correctly get nothing here.
+        const readonlyHasSchema = grantedReserved.includes("StructuredOutput");
+        if (readonlyDomain) {
+          sessionSpec = {
+            ...sessionSpec,
+            tools: [...CONSULT_READONLY_TOOLS, ...(readonlyHasSchema ? ["StructuredOutput"] : [])],
+          };
+          // §7.0 point 6a: narrow customTools down to ONLY the tool instance(s)
+          // THIS adapter call itself created (object identity, not name) —
+          // anything H2 or a later extension added, under any name (including
+          // "read"/"StructuredOutput"), is dropped and WARNed once. The local
+          // `customTools` array above holds at most the StructuredOutput
+          // instance just created (nothing else is ever pushed into it while
+          // readonlyDomain is true, since every other injection branch above
+          // is !readonlyDomain-guarded) — so this is exactly "keep the one we
+          // made, drop everything else".
+          const ownedTools = new Set(customTools);
+          const beforeNarrowing = sessionSpec.customTools ?? [];
+          const kept = beforeNarrowing.filter((t) => ownedTools.has(t));
+          if (kept.length !== beforeNarrowing.length) {
+            const droppedNames = beforeNarrowing
+              .filter((t) => !ownedTools.has(t))
+              .map((t) => `${customToolName(t)}(sdk)`);
+            console.warn(
+              `[pi-subagent] readonly domain: dropped custom tool(s) from run ${spec.runId}: ${droppedNames.join(", ")}`,
+            );
+          }
+          sessionSpec = { ...sessionSpec, customTools: kept };
+        }
         // X11: re-applied at bind and every turn_end (runtime/runner.ts), not
         // just once here — this is what actually closes the MCP-late-registration
         // gap (architecture §7.5). `undefined` allow-list preserves the pre-X11
         // behavior for agent types without a `tools` field: no restriction
         // beyond the always-on reserved-name protection.
-        // consult §5.4 B-3: a consult run's policy is built from the SAME
-        // constant as the pi-level allowlist above, with no grants at all.
+        // consult §5.4 B-3 / P0-r §7.0 points 3/6b: a readonly-domain run's
+        // policy is built from the SAME constant as the pi-level allowlist
+        // above, with no grants beyond StructuredOutput (when a schema was
+        // requested), plus a `provenance` map so the enforcer also verifies
+        // each surviving name's actual tool-implementation source (§7.0.0
+        // defense-in-depth — fail-closed against a same-named custom tool
+        // shadowing a builtin one, §1 "pi 同名覆盖").
+        const readonlyProvenance = readonlyDomain
+          ? new Map<string, string>([
+              ["read", "builtin"],
+              ["grep", "builtin"],
+              ["find", "builtin"],
+              ["ls", "builtin"],
+              ...(readonlyHasSchema ? ([["StructuredOutput", "sdk"]] as [string, string][]) : []),
+            ])
+          : undefined;
         const toolScope = {
-          policy: isConsultRun
-            ? buildToolScopePolicy({ tools: CONSULT_READONLY_TOOLS, granted: [] })
+          policy: readonlyDomain
+            ? buildToolScopePolicy({
+                tools: CONSULT_READONLY_TOOLS,
+                granted: readonlyHasSchema ? ["StructuredOutput"] : [],
+                ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
+              })
             : buildToolScopePolicy({
                 ...(spec.type.tools ? { tools: spec.type.tools } : {}),
                 granted: grantedReserved,
@@ -800,6 +895,17 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               console.warn(
                 `[pi-subagent] tool scope: setActiveTools failed for run ${spec.runId} (retried at next turn boundary): ${error instanceof Error ? error.message : String(error)}`,
               ),
+            // P0-r §7.0 point 6b: a shadowed builtin/StructuredOutput was stripped
+            // for THIS run — always reported (bind included), since a mismatch
+            // here is itself the misconfiguration signal, not an expected
+            // baseline strip.
+            onShadowed: (entries) => {
+              for (const e of entries) {
+                console.warn(
+                  `[pi-subagent] readonly domain: removed shadowed tool ${e.name} (source: ${e.actual ?? "unknown"}, expected ${e.expected}) from run ${spec.runId}`,
+                );
+              }
+            },
           }),
         };
         // D9 ("只读提示的 prompt 路径", v2.1 condition 4): `promptNotes` is NOT a

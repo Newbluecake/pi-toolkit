@@ -68,6 +68,13 @@ describe("threadThroughRequestFields", () => {
     const resolved: Pick<ResolvedSpawnRequest, "forkSessionFrom"> = { forkSessionFrom: out.forkSessionFrom };
     expect(resolved.forkSessionFrom).toBe("/tmp/consult/fork-1.jsonl");
   });
+
+  it("P0-r (todo #22 optimize-plan §7.0 point 5): toolDomain is consumed by the runtime adapter, never threaded verbatim", () => {
+    const req: SpawnRequest = { type: "Plan", prompt: "tidy", toolDomain: "readonly" };
+    const out = threadThroughRequestFields(req);
+    expect(Object.prototype.hasOwnProperty.call(out, "toolDomain")).toBe(false);
+    expect(out).toEqual({});
+  });
 });
 
 /**

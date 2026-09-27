@@ -68,6 +68,15 @@ export interface SessionHandle {
   readonly killableHandles: ReadonlySet<KillableHandle>;
   setActiveTools(names: string[]): void;
   getActiveTools(): string[];
+  /**
+   * P0-r (todo #22 optimize-plan §7.0 point 6b): `name -> sourceInfo.source`
+   * ("builtin" / "sdk" / an extension's own source string) for every tool
+   * currently registered on the session, regardless of active/inactive.
+   * Optional — only ever called by the tool-scope enforcer when a policy
+   * carries `provenance` (the readonly tool domain); every other run never
+   * touches this. See `toolSourcesOf` below for the production implementation.
+   */
+  getToolSources?(): ReadonlyMap<string, string>;
   getLastAssistantText(): string | undefined;
   getTurnError?(): string | undefined;
   /** M-B2: the session's *actual* model (ground truth — covers runs with no spawn-time override/type default). */
@@ -349,6 +358,29 @@ function mapEvent(e: any): DriverEvent | undefined {
   return undefined;
 }
 
+/**
+ * P0-r (todo #22 optimize-plan §7.0 point 6b): pure mapping from a live pi
+ * `AgentSession`'s tool registry to `name -> sourceInfo.source`. Exported as
+ * a standalone function (not only reachable through `PiSessionHandle`) so the
+ * readonly-domain integration test (N10) can wrap the SAME production logic
+ * around a real `AgentSession` it builds itself. `session.getAllTools()`
+ * returns every registered tool (active or not) with `sourceInfo.source`
+ * already resolved by pi itself ("builtin" for `_baseToolDefinitions`,
+ * "sdk" for `customTools`, the extension's own source string for anything an
+ * extension registered — see pi's `_refreshToolRegistry`). A read failure
+ * (disposed session, unexpected shape) degrades to an empty Map rather than
+ * throwing — the caller (tool-scope's enforcer) treats a missing entry as
+ * "unknown source", which is fail-closed for the readonly domain.
+ */
+export function toolSourcesOf(session: AgentSession): ReadonlyMap<string, string> {
+  try {
+    const tools = session.getAllTools();
+    return new Map(tools.map((t) => [t.name, t.sourceInfo.source]));
+  } catch {
+    return new Map();
+  }
+}
+
 class PiSessionHandle implements SessionHandle {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
@@ -385,6 +417,10 @@ class PiSessionHandle implements SessionHandle {
   }
   getActiveTools() {
     return this.session.getActiveToolNames();
+  }
+  /** P0-r (\u00a77.0 point 6b): thin wrapper around the module-level pure function. */
+  getToolSources(): ReadonlyMap<string, string> {
+    return toolSourcesOf(this.session);
   }
   getLastAssistantText() {
     return this.session.getLastAssistantText();
