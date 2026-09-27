@@ -1,5 +1,5 @@
-// P0-a legacy golden suite (方案 docs/dev/memory/optimize-plan.md §10.1 / §10.2 A组,
-// A1–A4、A6; A5 needs a setting key that doesn't exist yet — deferred to P0-b).
+// P0-a/P0-b legacy golden suite (方案 docs/dev/memory/optimize-plan.md §10.1 / §10.2
+// A组, A1–A6; A5 needed the layout/toolSurface setting keys — added in P0-b).
 //
 // This file — and ONLY this file, run with UPDATE_MEMORY_GOLDEN=1 — generates
 // tests/fixtures/memory-legacy-golden.json. src/ is untouched by this commit
@@ -528,22 +528,84 @@ describe("A4 — memory tool surface (toolSurface=legacy) golden", () => {
   });
 });
 
-// ═══════════════════════════ A6 — CC import golden ═════════════════════════
+// ═══════════════════════════ A5 — explicit layout/toolSurface legacy pin ═══
+// todo #22 optimize-plan §10.2 A5 (deferred from P0-a — the setting keys did
+// not exist yet). Proves two things the P0-b settings additions must not
+// break: (a) explicitly setting `layout:"legacy"` / `toolSurface:"legacy"`
+// (as opposed to relying on the DEFAULT_SETTINGS.memory default) renders
+// BYTE-IDENTICAL output to A1/A2/A4's golden; (b) every brand-new P0-b-only
+// field (coreBytes/blockBytes/topicWarnBytes/topicMaxBytes/childProfile/
+// doctor/tidy) is completely inert on the legacy path — legacy output does
+// not change no matter what those fields are set to.
+
+describe("A5 — explicit layout/toolSurface legacy pin", () => {
+  function explicitLegacySettings() {
+    return {
+      ...DEFAULT_SETTINGS.memory,
+      layout: "legacy" as const,
+      toolSurface: "legacy" as const,
+      // Deliberately far from the defaults — legacy must ignore all of these.
+      childProfile: "full" as const,
+      coreBytes: 999,
+      blockBytes: 12_000,
+      topicWarnBytes: 500,
+      topicMaxBytes: 500,
+    };
+  }
+
+  it("memorySection main session — explicit legacy pin matches the a2_main golden", () => {
+    const fx = materializeFixture("current-5");
+    const settings = explicitLegacySettings();
+    const section = memorySection({
+      settings,
+      isChildSession: false,
+      cache: new RenderCache(),
+      frozenBlocks: new Map(),
+      paths: fx.paths,
+    });
+    const live = section.provider({ ctx: fakeCtx(fx.cwd), promptText: "", optionsCwd: fx.cwd });
+    goldenCheck("a2_main", live, fx.paths.memoryRoot); // same golden id as A2 — must be byte-identical
+    fx.cleanup();
+  });
+
+  it("memorySection child session — explicit legacy pin matches the a2_child golden regardless of childProfile", () => {
+    const fx = materializeFixture("current-5");
+    const settings = explicitLegacySettings();
+    const section = memorySection({
+      settings,
+      isChildSession: true,
+      cache: new RenderCache(),
+      frozenBlocks: new Map(),
+      paths: fx.paths,
+    });
+    const live = section.provider({ ctx: fakeCtx(fx.cwd), promptText: "", optionsCwd: fx.cwd });
+    goldenCheck("a2_child", live, fx.paths.memoryRoot);
+    fx.cleanup();
+  });
+
+  it('memory tool (legacy factory) is unaffected by an explicit toolSurface:"legacy" in its settings', () => {
+    const fx = materializeFixture("current-5");
+    const settings = explicitLegacySettings();
+    const def = createMemoryTool({ settings, isChildSession: false, onAfterWrite: () => {} });
+    goldenCheck("a4_tool_def", canonicalToolDef(def), "@@none@@"); // same golden id as A4 — must be byte-identical
+    fx.cleanup();
+  });
+});
 
 describe("A6 — CC import (importProject / importAll) golden", () => {
-  it("importProject — fresh import", () => {
+  it("importProject — fresh import", async () => {
     const cc = materializeCCFixture();
-    const result = importProject("demo-project", false, cc.paths);
+    const result = await importProject("demo-project", false, cc.paths);
     const notesBody = readFileSync(join(cc.paths.memoryRoot, "demo-project", "notes.md"), "utf8");
     const playbookBody = readFileSync(join(cc.paths.memoryRoot, "demo-project", "playbook.md"), "utf8");
     goldenCheck("a6_import_project", { result, notesBody, playbookBody }, cc.paths.memoryRoot);
 
     // Re-running without --force skips both (idempotent).
-    const skipResult = importProject("demo-project", false, cc.paths);
+    const skipResult = await importProject("demo-project", false, cc.paths);
     goldenCheck("a6_import_project_skip", skipResult, cc.paths.memoryRoot);
 
     // --force re-copies from the (untouched) CC source, byte-identical.
-    const forceResult = importProject("demo-project", true, cc.paths);
+    const forceResult = await importProject("demo-project", true, cc.paths);
     const notesBodyAfterForce = readFileSync(join(cc.paths.memoryRoot, "demo-project", "notes.md"), "utf8");
     goldenCheck(
       "a6_import_project_force",
@@ -554,9 +616,9 @@ describe("A6 — CC import (importProject / importAll) golden", () => {
     cc.cleanup();
   });
 
-  it("importAll — discovers every CC project with a memory/ dir", () => {
+  it("importAll — discovers every CC project with a memory/ dir", async () => {
     const cc = materializeCCFixture();
-    const results = importAll(false, cc.paths);
+    const results = await importAll(false, cc.paths);
     goldenCheck("a6_import_all", results, cc.paths.memoryRoot);
     cc.cleanup();
   });

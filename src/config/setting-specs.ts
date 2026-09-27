@@ -355,6 +355,94 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "memory.indexMax": count("memory.indexMax", 1, "Memory index entries before the … +N more fold"),
   "memory.maxFileBytes": count("memory.maxFileBytes", 1024, "Per-memory-file size cap in bytes"),
   "memory.maxWriteBytes": count("memory.maxWriteBytes", 256, "Single memory write/append content cap in bytes"),
+  // todo #22 optimize-plan §9 (P0-b): tiered layout / v2 tool surface knobs.
+  "memory.layout": choice(
+    "memory.layout",
+    ["tiered", "legacy"],
+    "Injection renderer: tiered (budgeted) or legacy (byte-identical to pre-#22)",
+  ),
+  "memory.toolSurface": choice(
+    "memory.toolSurface",
+    ["v2", "legacy"],
+    "memory tool factory: v2 (official field names) or legacy",
+  ),
+  "memory.childProfile": choice(
+    "memory.childProfile",
+    ["core", "full", "none"],
+    "Child-session injection tier under layout:tiered (core/full/none)",
+  ),
+  "memory.coreBytes": {
+    ...count("memory.coreBytes", 256, "Primary-core byte budget within a tiered block (clamped to ≤ blockBytes-600)"),
+    max: 8192,
+  } as SettingSpec,
+  "memory.blockBytes": {
+    ...count("memory.blockBytes", 800, "Hard byte cap for the whole tiered ## Memory block"),
+    max: 16384,
+  } as SettingSpec,
+  "memory.topicWarnBytes": {
+    ...count("memory.topicWarnBytes", 1024, "Non-core file size that triggers a doctor warn (D04)"),
+    max: 4 * 1024 * 1024,
+  } as SettingSpec,
+  "memory.topicMaxBytes": {
+    ...count(
+      "memory.topicMaxBytes",
+      1024,
+      "Non-core file size a write/append is rejected past (D05); ≥ topicWarnBytes",
+    ),
+    max: 4 * 1024 * 1024,
+  } as SettingSpec,
+  "memory.doctor.notifyOnStart": bool(
+    "memory.doctor.notifyOnStart",
+    "Main-session startup reminder when /mem doctor would report an error (zero model cost)",
+  ),
+  "memory.doctor.staleDays": {
+    ...count("memory.doctor.staleDays", 7, "updated age (days) past which a file is flagged stale (D08 warn)"),
+    max: 3650,
+  } as SettingSpec,
+  "memory.tidy.agentType": {
+    kind: "string",
+    path: "memory.tidy.agentType",
+    description:
+      "Agent type for the tidy proposal subagent's prompt/model hint only — tools are always forced readonly (§7.0)",
+  },
+  "memory.tidy.model": {
+    kind: "string",
+    path: "memory.tidy.model",
+    description: 'Strict provider/id for /mem tidy, or "" to use the current main-session model',
+  },
+  "memory.tidy.timeoutS": seconds("memory.tidy.timeoutMs", {
+    min: 30,
+    max: 1800,
+    hint: "hard total budget of a tidy run (no grace, no extension)",
+    description: "/mem tidy run timeout",
+  }),
+  "memory.tidy.maxInputBytes": {
+    ...count(
+      "memory.tidy.maxInputBytes",
+      8192,
+      "Total input bytes a tidy/restore snapshot may cover before asking to narrow the file set",
+    ),
+    max: 262_144,
+  } as SettingSpec,
+  "memory.tidy.maxOutputBytes": {
+    ...count(
+      "memory.tidy.maxOutputBytes",
+      4096,
+      "Hard cap on the tidy proposal's total output bytes; over this the whole proposal is discarded",
+    ),
+    max: 262_144,
+  } as SettingSpec,
+  "memory.tidy.maxCostUsd": {
+    kind: "number",
+    path: "memory.tidy.maxCostUsd",
+    min: 0.05,
+    max: 50,
+    description: "Cumulative cost cap (USD) for a tidy run; only enforced for a priced model",
+  },
+  "memory.tidy.maxTurns": {
+    ...count("memory.tidy.maxTurns", 1, "Turn-boundary cap for a tidy run"),
+    max: 20,
+  } as SettingSpec,
   "extend.notify": choice(
     "extend.notify",
     ["background", "always", "off"],

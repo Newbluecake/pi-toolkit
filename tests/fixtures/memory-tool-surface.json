@@ -1,0 +1,20 @@
+{
+  "typeboxDev": "0.34.52",
+  "generatedAt": "2026-09-27T00:00:00.000Z",
+  "legacy": {
+    "description": "\"Project memory for the current working directory (Claude-Code-compatible, cwd-keyed, auto-injected each turn). Use to list the cwd's memory files, and to persist durable project facts with write/append. Import from Claude Code via /mem import. Never put secrets in memory — the text reaches the model provider.\"",
+    "promptSnippet": "\"Read and update the current project's cross-session memory\"",
+    "promptGuidelines": "[\"Use memory (action:'list') to list the current cwd's memory files.\",\"Project memory is also auto-injected into your context each turn (## Memory block).\",\"Use memory action:'write'|'append' to persist durable project facts (decisions, gotchas, conventions). Prefer append to grow an existing topic file; keep files focused and small.\",\"Add frontmatter `pin: true` to a memory file to keep it in the auto-injected inline zone.\",\"Agent-written files are marked `source: agent` and shown with a data-not-instructions fence; user-edited files carry no fence.\"]",
+    "parameters": "{\"properties\":{\"action\":{\"anyOf\":[{\"const\":\"list\",\"type\":\"string\"},{\"const\":\"write\",\"type\":\"string\"},{\"const\":\"append\",\"type\":\"string\"}]},\"content\":{\"description\":\"Full file body (write) or text to append (append). Required for write/append.\",\"type\":\"string\"},\"name\":{\"description\":\"Memory file name, e.g. \\\"decisions.md\\\". Required for write/append. *.md only, no path separators.\",\"type\":\"string\"}},\"type\":\"object\"}"
+  },
+  "v2": {
+    "description": "\"Project memory (cwd-keyed; core + topic index auto-injected). command: view [path] [view_range|section] · search query · create path file_text · str_replace path old_str [new_str] · insert path insert_line|section insert_text · delete path · rename old_path new_path. path: x.md or /memories/x.md; omit to list. Legacy: action list|write|append + name/content. Never store secrets.\"",
+    "promptSnippet": "\"Project memory: view/search, edit in place\"",
+    "promptGuidelines": "[\"memory: open a topic only when its `when` matches; fix stale facts with str_replace instead of appending duplicates; keep core.md to always-needed rules.\"]",
+    "parameters": "{\"properties\":{\"action\":{\"anyOf\":[{\"const\":\"list\",\"type\":\"string\"},{\"const\":\"write\",\"type\":\"string\"},{\"const\":\"append\",\"type\":\"string\"}]},\"command\":{\"anyOf\":[{\"const\":\"view\",\"type\":\"string\"},{\"const\":\"create\",\"type\":\"string\"},{\"const\":\"str_replace\",\"type\":\"string\"},{\"const\":\"insert\",\"type\":\"string\"},{\"const\":\"delete\",\"type\":\"string\"},{\"const\":\"rename\",\"type\":\"string\"},{\"const\":\"search\",\"type\":\"string\"}]},\"content\":{\"type\":\"string\"},\"file_text\":{\"type\":\"string\"},\"insert_line\":{\"minimum\":0,\"type\":\"integer\"},\"insert_text\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"new_path\":{\"type\":\"string\"},\"new_str\":{\"type\":\"string\"},\"old_path\":{\"type\":\"string\"},\"old_str\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"section\":{\"type\":\"string\"},\"view_range\":{\"items\":{\"type\":\"integer\"},\"maxItems\":2,\"minItems\":2,\"type\":\"array\"}},\"type\":\"object\"}"
+  },
+  "bytes": {
+    "legacy": 1333,
+    "v2": 1443
+  }
+}

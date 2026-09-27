@@ -565,8 +565,9 @@ export interface ImportResult {
   bytes: number;
   skipped: number;
 }
-export function importProject(slug: string, force?: boolean, paths?: MemoryPaths): ImportResult;
-export function importAll(force?: boolean, paths?: MemoryPaths): ImportResult[];
+export function importProject(slug: string, force?: boolean, paths?: MemoryPaths): Promise<ImportResult>;
+export function importAll(force?: boolean, paths?: MemoryPaths): Promise<ImportResult[]>;
+// #22 optimize-plan P0-b 起为 async，入目录锁（§3.3；错误一律以 rejection 返回，不再同步抷出）。
 export function discoverCCProjects(paths?: MemoryPaths): string[];
 
 // render.ts

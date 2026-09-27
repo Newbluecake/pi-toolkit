@@ -12,11 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  assertAllowWrite,
   discoverCCProjects,
   DRIFT_HEADER,
   importAll,
   importProject,
   listMemory,
+  resolveMemoryFile,
   writeMemoryFile,
   type WriteOptions,
 } from "../../src/memory/store.js";
@@ -72,6 +74,37 @@ describe("listMemory", () => {
     expect(files.map((f) => f.name)).toEqual(["good.md"]);
     expect(files[0]?.path).toBe(join(dir, "good.md"));
     expect(files[0]?.size).toBe(1);
+  });
+
+  it("slug directory itself a symlink: lists through the REAL target, output equivalent to a plain dir (打回修复 §3.1)", () => {
+    const { paths, cwd, dir } = fixture();
+    const real = `${dir}-real`;
+    writeRaw(real, "alpha.md", "alpha body", 5_000);
+    writeRaw(real, "beta.md", "beta body", 6_000);
+    symlinkSync(real, dir); // `dir` (the display slug path) does not exist yet — becomes a symlink to `real`
+    const viaSymlink = listMemory(cwd, paths);
+
+    // Baseline: an equivalent PLAIN (non-symlink) directory with the same files.
+    const baseline = fixture();
+    writeRaw(baseline.dir, "alpha.md", "alpha body", 5_000);
+    writeRaw(baseline.dir, "beta.md", "beta body", 6_000);
+    const viaPlain = listMemory(baseline.cwd, baseline.paths);
+
+    expect(viaSymlink.map((f) => ({ name: f.name, size: f.size, mtimeMs: f.mtimeMs }))).toEqual(
+      viaPlain.map((f) => ({ name: f.name, size: f.size, mtimeMs: f.mtimeMs })),
+    );
+    // The actual fs read happened against the REAL target, not the symlink display path.
+    expect(viaSymlink.every((f) => f.path.startsWith(real))).toBe(true);
+  });
+
+  it("slug-dir symlink + a file-level symlink inside it: the file-level symlink is still refused everywhere (N2, combined case)", () => {
+    const { paths, cwd, dir } = fixture();
+    const real = `${dir}-real`;
+    writeRaw(real, "good.md", "g");
+    symlinkSync(join(real, "missing.md"), join(real, "bad.md"));
+    symlinkSync(real, dir);
+    const files = listMemory(cwd, paths);
+    expect(files.map((f) => f.name)).toEqual(["good.md"]);
   });
 });
 
@@ -157,6 +190,45 @@ describe("writeMemoryFile — basics", () => {
   });
 });
 
+// P0-b 打回修复（§14.1）：`assertAllowWrite` / `resolveMemoryFile` 打回前未导出，新增最小单测。
+describe("assertAllowWrite (R7, extracted from writeMemoryFile's own gate)", () => {
+  it("throws MemoryError('writes not allowed') when allowWrite is not exactly true", () => {
+    expect(() => assertAllowWrite(false)).toThrow(new MemoryError("writes not allowed"));
+  });
+
+  it("does not throw when allowWrite is true", () => {
+    expect(() => assertAllowWrite(true)).not.toThrow();
+  });
+});
+
+describe("resolveMemoryFile (方案 §4.2 第 4 条, P2 tool-v2 的路径围栏， P0 从 store 抽出)", () => {
+  const dir = "/mem/-proj-app";
+
+  it('undefined / "" / "/memories" / "/memories/" all mean "the directory itself"', () => {
+    for (const input of [undefined, "", "/memories", "/memories/"]) {
+      expect(resolveMemoryFile(input, dir)).toEqual({ kind: "dir" });
+    }
+  });
+
+  it("strips a leading /memories/ prefix before validating the file name", () => {
+    expect(resolveMemoryFile("/memories/notes.md", dir)).toEqual({ kind: "file", name: "notes.md" });
+  });
+
+  it("accepts a bare *.md name (no /memories/ prefix)", () => {
+    expect(resolveMemoryFile("notes.md", dir)).toEqual({ kind: "file", name: "notes.md" });
+  });
+
+  it("rejects a path that fails NAME_RE (path separators, non-.md, etc.)", () => {
+    for (const bad of ["/memories/../x.md", "/memories/a/b.md", "/memories/x.txt", "../x.md"]) {
+      expect(() => resolveMemoryFile(bad, dir), bad).toThrow(MemoryError);
+    }
+  });
+
+  it("a name that passes NAME_RE resolves under the given dir, with dirname(resolve(dir,name)) === dir (the second guard's happy path)", () => {
+    expect(resolveMemoryFile("notes.md", `${dir}/nested`)).toEqual({ kind: "file", name: "notes.md" });
+  });
+});
+
 describe("writeMemoryFile — provenance (B1)", () => {
   it("write without frontmatter prepends source: agent + updated (injected nowIso)", () => {
     const { paths, cwd, dir } = fixture();
@@ -199,10 +271,10 @@ describe("importProject", () => {
     return { paths: f.paths, srcDir };
   }
 
-  it("copies files with the pi-toolkit drift-header, 0600, dir 0700", () => {
+  it("copies files with the pi-toolkit drift-header, 0600, dir 0700", async () => {
     const { paths, srcDir } = ccFixture();
     writeFileSync(join(srcDir, "notes.md"), "cc body");
-    const res = importProject("-proj-a", false, paths);
+    const res = await importProject("-proj-a", false, paths);
     const destFile = join(paths.memoryRoot, "-proj-a", "notes.md");
     expect(res).toMatchObject({ project: "-proj-a", files: 1, skipped: 0 });
     expect(readFileSync(destFile, "utf8")).toBe(DRIFT_HEADER + "cc body");
@@ -211,36 +283,37 @@ describe("importProject", () => {
     expect(statSync(join(paths.memoryRoot, "-proj-a")).mode & 0o777).toBe(0o700); // Nit 9
   });
 
-  it("counts bytes with Buffer.byteLength (multibyte fixture, Nit 9)", () => {
+  it("counts bytes with Buffer.byteLength (multibyte fixture, Nit 9)", async () => {
     const { paths, srcDir } = ccFixture();
     writeFileSync(join(srcDir, "cn.md"), "中文"); // 6 bytes, length 2
-    const res = importProject("-proj-a", false, paths);
+    const res = await importProject("-proj-a", false, paths);
     expect(res.bytes).toBe(6);
   });
 
-  it("is idempotent (skip) unless force", () => {
+  it("is idempotent (skip) unless force", async () => {
     const { paths, srcDir } = ccFixture();
     writeFileSync(join(srcDir, "notes.md"), "v1");
-    importProject("-proj-a", false, paths);
+    await importProject("-proj-a", false, paths);
     const destFile = join(paths.memoryRoot, "-proj-a", "notes.md");
     writeFileSync(destFile, "locally edited");
-    const skipped = importProject("-proj-a", false, paths);
+    const skipped = await importProject("-proj-a", false, paths);
     expect(skipped).toMatchObject({ files: 0, skipped: 1 });
     expect(readFileSync(destFile, "utf8")).toBe("locally edited");
-    const forced = importProject("-proj-a", true, paths);
+    const forced = await importProject("-proj-a", true, paths);
     expect(forced).toMatchObject({ files: 1, skipped: 0 });
     expect(readFileSync(destFile, "utf8")).toBe(DRIFT_HEADER + "v1");
   });
 
-  it("throws MemoryError when the source project has no memory", () => {
+  it("rejects with a MemoryError when the source project has no memory (async: a rejected Promise, never a synchronous throw)", async () => {
     const { paths } = fixture();
-    expect(() => importProject("-nope", false, paths)).toThrow(MemoryError);
+    const call = importProject("-nope", false, paths);
+    await expect(call).rejects.toThrow(MemoryError);
   });
 
-  it("import output carries NO provenance frontmatter (drift-header is its provenance)", () => {
+  it("import output carries NO provenance frontmatter (drift-header is its provenance)", async () => {
     const { paths, srcDir } = ccFixture();
     writeFileSync(join(srcDir, "notes.md"), "body");
-    importProject("-proj-a", false, paths);
+    await importProject("-proj-a", false, paths);
     const text = readFileSync(join(paths.memoryRoot, "-proj-a", "notes.md"), "utf8");
     expect(text).not.toContain("source: agent");
   });
@@ -270,18 +343,18 @@ describe("discoverCCProjects", () => {
 });
 
 describe("importAll", () => {
-  it("aggregates results across discovered projects", () => {
+  it("aggregates results across discovered projects", async () => {
     const { paths } = fixture();
     for (const slug of ["-a", "-b"]) {
       const dir = join(paths.ccProjectsRoot, slug, "memory");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "n.md"), `body ${slug}`);
     }
-    const results = importAll(false, paths);
+    const results = await importAll(false, paths);
     expect(results.map((r) => r.project)).toEqual(["-a", "-b"]);
     expect(results.every((r) => r.files === 1)).toBe(true);
     // second run: everything skipped
-    const again = importAll(false, paths);
+    const again = await importAll(false, paths);
     expect(again.every((r) => r.files === 0 && r.skipped === 1)).toBe(true);
   });
 });

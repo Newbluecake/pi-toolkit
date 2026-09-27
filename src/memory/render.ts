@@ -6,11 +6,10 @@
 //
 // Zero pi/typebox imports; independently unit-testable.
 
-import { closeSync, openSync, readSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
 import { frontmatterSource, isPinned, stripFrontmatter } from "./frontmatter.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "./paths.js";
 import { listMemory, type MemoryFile } from "./store.js";
+import { canonicalDir, listRegular, readRegular, readRegularHead } from "./safe-fs.js";
 
 export interface InjectBudget {
   inlineMax: number;
@@ -77,28 +76,19 @@ export function truncateAtSection(body: string, budgetBytes: number): string {
  * Content fingerprint of a cwd's memory dir: all `*.md` as
  * `${name}:${size}:${floor(mtimeMs)}` sorted by name, joined with "\n"
  * (Nit 10). Missing dir / readdir failure → "" (same as an empty dir, so both
- * hit the cached empty result); per-file stat failure → entry skipped (same
- * TOCTOU posture as listMemory).
+ * hit the cached empty result); a file-level symlink (or any other
+ * non-regular entry) is skipped, same TOCTOU/trust posture as `listMemory`
+ * (P0-b routes this through `safe-fs.listRegular`, §2.7 decision N2).
  */
 export function memoryFingerprint(cwd: string, paths?: MemoryPaths): string {
-  const dir = memoryDirFor(cwd, paths);
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return "";
-  }
-  const parts: string[] = [];
-  for (const name of entries) {
-    if (!name.endsWith(".md")) continue;
-    try {
-      const st = statSync(join(dir, name));
-      parts.push(`${name}:${st.size}:${Math.floor(st.mtimeMs)}`);
-    } catch {
-      continue;
-    }
-  }
-  return parts.sort().join("\n");
+  const display = memoryDirFor(cwd, paths);
+  const canon = canonicalDir(display);
+  const dir = canon ? canon.real : display;
+  const { files } = listRegular(dir, { names: "legacy" });
+  return files
+    .map((f) => `${f.name}:${f.size}:${Math.floor(f.mtimeMs)}`)
+    .sort()
+    .join("\n");
 }
 
 /** Human-friendly size with auto-scaling unit: 100B / 2.0kB / 1.5MB.
@@ -110,24 +100,12 @@ export function formatSize(size: number): string {
 }
 
 /** First `bytes` of a file as utf8 (pin detection reads heads only, §5.1.2).
- *  Any failure → "" (treated as unpinned). */
-function readHead(path: string, bytes: number): string {
-  let fd: number | undefined;
+ *  Any failure (missing, symlink, raced delete) → "" (treated as unpinned). */
+function readHead(dir: string, name: string, bytes: number): string {
   try {
-    fd = openSync(path, "r");
-    const buf = Buffer.alloc(bytes);
-    const n = readSync(fd, buf, 0, bytes, 0);
-    return buf.subarray(0, n).toString("utf8");
+    return readRegularHead(dir, name, bytes).text;
   } catch {
     return "";
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        // ignore
-      }
-    }
   }
 }
 
@@ -141,10 +119,16 @@ export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: Mem
   const files = listMemory(cwd, paths);
   if (files.length === 0) return undefined;
   const slug = toSlug(cwd);
+  // P0-b 打回修复（§3.1）：读/注入渲染是 READ 操作，路径 fs I/O 固定到 canonicalize 后的
+  // real 目录（slug 目录为 symlink 时不经过 display 路径）；legacy 输出文本中出现的路径仍然是
+  // display（没有目录级 symlink 时 real === display，legacy golden 不受影响）。
+  const display = memoryDirFor(cwd, paths);
+  const canon = canonicalDir(display);
+  const dir = canon ? canon.real : display;
 
   // pin detection: head reads only, per-file fault isolated
   const pinOf = new Map<string, boolean>();
-  for (const f of files) pinOf.set(f.path, isPinned(readHead(f.path, 512)));
+  for (const f of files) pinOf.set(f.path, isPinned(readHead(dir, f.name, 512)));
 
   const indexLines = files.slice(0, budget.indexMax).map((f) => {
     const mark = pinOf.get(f.path) ? "📌 " : "";
@@ -166,9 +150,9 @@ export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: Mem
     if (remaining <= 0) break;
     let raw: string;
     try {
-      raw = readFileSync(f.path, "utf8");
+      raw = readRegular(dir, f.name).text;
     } catch {
-      continue; // raced delete — skip this file (TOCTOU)
+      continue; // raced delete / became a symlink — skip this file (TOCTOU)
     }
     const fenced = frontmatterSource(raw) === "agent";
     const body = stripDriftHeader(stripFrontmatter(raw)).trim();
@@ -187,7 +171,7 @@ export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: Mem
   let out = header;
   if (inline.length > 0) out += `\n\nPinned & recent:\n${inline.join("\n\n")}`;
   if (inline.length < files.length) {
-    out += `\n\n(Older files are in the index only — use the \`read\` tool to open \`${memoryDirFor(cwd, paths)}/<file>\`.)`;
+    out += `\n\n(Older files are in the index only — use the \`read\` tool to open \`${display}/<file>\`.)`;
   }
   out += `\n\n${injectionSentinel(slug)}\n`;
   return out;

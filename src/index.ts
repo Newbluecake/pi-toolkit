@@ -4,7 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { RunSnapshot, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
+import type { RunSnapshot, SpawnRequest, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
@@ -72,6 +72,7 @@ import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/work
 import { registerWebSearchTool } from "./web-search/index.js";
 import { wireTodo } from "./todo/index.js";
 import { wireMemory } from "./memory/index.js";
+import type { TidySpawnRequest } from "./memory/contracts.js";
 import { wireChildBashJobs } from "./bash/child.js";
 import { wireChildSession } from "./child/wire.js";
 import { markChildExtensionActivated } from "./child/activation-signal.js";
@@ -157,8 +158,13 @@ export default function activate(pi: ExtensionAPI): void {
   // injectInChildSessions=true, aligned with the original plugin). M3: memory
   // registers a section into the hub instead of its own before_agent_start
   // hook — the hub folds memory -> agent types -> models in one handler.
+  // todo #22 optimize-plan P0-b: the return value is captured so the
+  // post-guard block below (main session only, structurally — a child
+  // session returns before that code ever runs) can attach a real
+  // `TidyPort` for `/mem tidy`/`/mem restore`.
+  let memoryWiring: ReturnType<typeof wireMemory> | undefined;
   if (preGuardSettings.memory.enabled)
-    wireMemory(pi, { settings: preGuardSettings.memory, isChildSession, sections: promptHub });
+    memoryWiring = wireMemory(pi, { settings: preGuardSettings.memory, isChildSession, sections: promptHub });
 
   // bash-timeout-grace plan §3.4 (P5): the child (subagent) session half of
   // the auto-background feature — pre-guard, same rationale as memory/todo/
@@ -210,6 +216,16 @@ export default function activate(pi: ExtensionAPI): void {
   // later reload into the inert branch).
   const settings = loadSettingsFromFile();
   const holder: { current?: Stack } = {};
+  // todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session
+  // stack, same late-bound `holder.current` pattern as `forwardSpawn` below.
+  // Only reached for the main session — structurally guaranteed by the
+  // HOST_KEY early-return above, so this never runs for a child session.
+  memoryWiring?.attachTidy({
+    spawn: (req) => requireStack(holder).spawn.spawn(mapTidySpawnRequest(req)),
+    waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
+    abort: (runId, cause) => requireStack(holder).spawn.abort(runId, cause),
+    snapshot: (runId) => holder.current?.query.get(runId),
+  });
   const releaseBackgroundStatus = publishBackgroundStatus(() => {
     const stack = holder.current;
     // Background workflows count as running subagent work (between child runs they have no live run).
@@ -889,6 +905,23 @@ export function mentionAutocompleteEntries(holder: { current?: Stack }): readonl
 function requireStack(holder: { current?: Stack }): Stack {
   if (!holder.current) throw new Error("pi-subagent: no active session yet");
   return holder.current;
+}
+/** todo #22 optimize-plan §7.0 (P0-b): projects the memory module's narrow
+ *  `TidySpawnRequest` onto a real `SpawnRequest`, always forcing the P0-r
+ *  readonly tool domain literal through untouched — `wireMemory`'s
+ *  `TidyPort` is the only caller. */
+function mapTidySpawnRequest(req: TidySpawnRequest): SpawnRequest {
+  return {
+    type: req.type,
+    prompt: req.prompt,
+    ...(req.label === undefined ? {} : { label: req.label }),
+    ...(req.cwd === undefined ? {} : { cwd: req.cwd }),
+    ...(req.modelOverride === undefined ? {} : { modelOverride: req.modelOverride }),
+    ...(req.thinkingOverride === undefined ? {} : { thinkingOverride: req.thinkingOverride }),
+    ...(req.totalMs === undefined ? {} : { budgetOverride: { totalMs: req.totalMs } }),
+    ...(req.schema === undefined ? {} : { schema: req.schema }),
+    toolDomain: req.toolDomain,
+  };
 }
 function forwardSpawn(holder: { current?: Stack }): SpawnService {
   return {

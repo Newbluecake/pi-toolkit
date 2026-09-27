@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -121,6 +121,34 @@ describe("renderMemoryBlock — inline zone & byte budget", () => {
     const cut = renderMemoryBlock(CWD, budget({ byteCap: 21 }), paths);
     expect(cut).toContain("…(truncated");
     expect(cut).not.toContain("\uFFFD"); // never half a character
+  });
+});
+
+describe("renderMemoryBlock — slug-dir symlink (打回修复 §3.1: I/O via real path, output text keeps the display path)", () => {
+  it("a symlinked slug dir renders byte-identical output to the equivalent plain dir when everything fits inline (no path text leaks either way)", () => {
+    const baseline = fixture();
+    writeMem(baseline.dir, "a.md", "alpha content", 1_000);
+    const baselineBlock = renderMemoryBlock(CWD, budget(), baseline.paths);
+
+    const linked = fixture();
+    const real = `${linked.dir}-real`;
+    writeMem(real, "a.md", "alpha content", 1_000);
+    symlinkSync(real, linked.dir);
+    const linkedBlock = renderMemoryBlock(CWD, budget(), linked.paths);
+
+    expect(linkedBlock).toBe(baselineBlock);
+    expect(linkedBlock).toContain("### a.md\nalpha content");
+  });
+
+  it("the '(Older files...)' footer shows the DISPLAY (symlink) path, never the resolved real target, while content is read through the real target", () => {
+    const { paths, dir } = fixture();
+    const real = `${dir}-real`;
+    for (let i = 0; i < 3; i++) writeMem(real, `f${i}.md`, `body ${i}`, 1_000 + i);
+    symlinkSync(real, dir);
+    const block = renderMemoryBlock(CWD, budget({ inlineMax: 1 }), paths);
+    expect(block).toContain(`\`${dir}/<file>\``); // display path, verbatim
+    expect(block).not.toContain(real); // real target never leaks into output text
+    expect(block).toContain("### f2.md\nbody 2"); // newest file's body WAS read (via the real dir)
   });
 });
 
@@ -291,6 +319,21 @@ describe("memoryFingerprint", () => {
     writeMem(dir, "a.md", "x", 1_000); // shrink
     const fp4 = memoryFingerprint(CWD, paths);
     expect(fp4).toContain("a.md:1:1000000");
+  });
+
+  it("slug directory itself a symlink: fingerprint is computed from the REAL target and matches the equivalent plain-dir layout (打回修复 §3.1)", () => {
+    const baseline = fixture();
+    writeMem(baseline.dir, "a.md", "alpha", 1_000);
+    const baselineFp = memoryFingerprint(CWD, baseline.paths);
+
+    const linked = fixture();
+    const real = `${linked.dir}-real`;
+    writeMem(real, "a.md", "alpha", 1_000);
+    symlinkSync(real, linked.dir);
+    const linkedFp = memoryFingerprint(CWD, linked.paths);
+
+    expect(linkedFp).toBe(baselineFp);
+    expect(linkedFp).not.toBe("");
   });
 });
 

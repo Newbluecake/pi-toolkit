@@ -1,34 +1,69 @@
 /**
  * `/mem` slash command — human surface for project memory
- * (memory-plan §5.4): list / path / import [--force] [slug|all].
+ * (memory-plan §5.4): list / path / import [--force] [slug|all] / doctor /
+ * tidy / restore.
  *
  * Translated line-by-line from the standalone @getpipher/armory-memory
  * plugin, with the repository command-handler error convention applied:
  * errors go to `ctx.ui.notify(…, "warning")` and are NEVER thrown (the
  * memory *tool* deliberately throws instead — see §6.4).
+ *
+ * todo #22 optimize-plan P0-b:
+ * - `cwd` now resolves worktree origin (§1's "顺手修" — the tool and inject
+ *   hook already did this; `/mem` was the odd one out).
+ * - `import` awaits the now-async `importAll` / `importProject` (§3.3);
+ *   an explicit slug list is a serial `for…of` `await` loop, NOT
+ *   `Promise.all` — the first rejection stops the batch and already-imported
+ *   slugs keep their results, matching the pre-#22 synchronous behavior.
+ * - `doctor` / `tidy` / `restore` dispatch to the (still-stubbed) P3/P4
+ *   command handlers; their "not implemented yet" rejection flows through
+ *   the same try/catch → warning notify as every other command error.
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
+import type { TidyPort } from "./contracts.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
 import { formatSize } from "./render.js";
+import { handleMemDoctorCommand } from "./doctor-command.js";
+import { handleMemTidyCommand } from "./tidy/command.js";
 
 export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
-const DESCRIPTION = "Project memory. /mem · /mem list · /mem import [--force] [slug|all] · /mem path";
+const DESCRIPTION =
+  "Project memory. /mem · /mem list · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy · /mem restore";
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
   return `  ${r.project}: ${r.files} imported${s}`;
 }
 
-export function createMemCommand(deps: { paths?: MemoryPaths }): { description: string; handler: CommandHandler } {
+/** B3-consistent cwd resolution (matches the tool / inject hook): a worktree
+ *  child session keys reads/writes to the MAIN repository's memory dir. */
+function resolveCwd(ctx: ExtensionCommandContext): string {
+  const raw = ctx?.cwd ?? process.cwd();
+  return resolveWorktreeOrigin(raw) ?? raw;
+}
+
+export interface CreateMemCommandDeps {
+  paths?: MemoryPaths;
+  /** Default false — used only by the `/mem tidy`/`/mem restore` gate (§7). */
+  isChildSession?: boolean;
+  /** §7's spawn port; undefined ⇒ "tidy unavailable in this session". Wired
+   *  by `wireMemory`'s `attachTidy` (post-guard, main session only). */
+  getTidyPort?: () => TidyPort | undefined;
+}
+
+export function createMemCommand(deps: CreateMemCommandDeps): { description: string; handler: CommandHandler } {
+  const isChildSession = deps.isChildSession ?? false;
+  const getTidyPort = deps.getTidyPort ?? (() => undefined);
   return {
     description: DESCRIPTION,
     handler: async (args, ctx) => {
       const a = (args ?? "").trim();
       const [sub, ...rest] = a.split(/\s+/);
-      const cwd = ctx?.cwd ?? process.cwd();
+      const cwd = resolveCwd(ctx);
       try {
         if (sub === "path") {
           if (ctx.hasUI) ctx.ui.notify(`memory dir: ${memoryDirFor(cwd, deps.paths)}`, "info");
@@ -53,9 +88,14 @@ export function createMemCommand(deps: { paths?: MemoryPaths }): { description: 
                 ctx.ui.notify("No Claude Code projects found at ~/.claude/projects/ — nothing to import.", "warning");
               return;
             }
-            results = importAll(force, deps.paths);
+            results = await importAll(force, deps.paths);
           } else {
-            results = targets.map((s) => importProject(s, force, deps.paths));
+            // Serial, NOT Promise.all (§3.3): the first rejection stops the
+            // batch here — already-imported slugs keep their results.
+            results = [];
+            for (const s of targets) {
+              results.push(await importProject(s, force, deps.paths));
+            }
           }
           const total = results.reduce(
             (acc, r) => {
@@ -69,6 +109,20 @@ export function createMemCommand(deps: { paths?: MemoryPaths }): { description: 
             `Imported ${total.files} file(s)${total.skipped ? `, ${total.skipped} skipped` : ""}.\n` +
             results.map(fmtImport).join("\n");
           if (ctx.hasUI) ctx.ui.notify(summary, "info");
+          return;
+        }
+        if (sub === "doctor") {
+          await handleMemDoctorCommand(rest.join(" "), ctx, {
+            ...(deps.paths === undefined ? {} : { paths: deps.paths }),
+          });
+          return;
+        }
+        if (sub === "tidy" || sub === "restore") {
+          await handleMemTidyCommand(sub, rest.join(" "), ctx, {
+            ...(deps.paths === undefined ? {} : { paths: deps.paths }),
+            isChildSession,
+            getTidyPort,
+          });
           return;
         }
         // default: list

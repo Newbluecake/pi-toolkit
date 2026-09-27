@@ -46,7 +46,16 @@ export type SectionProvider = (input: SectionProviderInput) => Live;
 export interface SectionRegistration {
   provider: SectionProvider;
   title: string | ((input: SectionProviderInput) => string);
-  pointerHint?: string;
+  /**
+   * todo #22 optimize-plan §2.6: a function is evaluated ONCE, only when the
+   * resolved update's `kind === "pointer"`, with the SAME `input` the
+   * provider just received. Never called for `update`/`removed` entries. A
+   * throw / non-string / thenable return omits the hint (never fails the
+   * update, never re-enters the section's snapshot/announced state) and
+   * WARNs once per section per `activate()`. A plain string behaves exactly
+   * as before (byte-identical) — it's passed through unconditionally.
+   */
+  pointerHint?: string | ((input: SectionProviderInput) => string);
   skipIf?: (input: SectionProviderInput) => boolean;
 }
 
@@ -85,6 +94,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   let firstRequestPending = true;
   let lastPersisted: string | undefined;
   let warnedPersist = false;
+  const warnedPointerHint = new Set<SectionName>();
 
   const names = (): SectionName[] => [...registrations.keys()];
   const freshStates = (): Map<SectionName, SectionState> =>
@@ -105,6 +115,37 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
 
   function titleOf(registration: SectionRegistration, input: SectionProviderInput): string {
     return typeof registration.title === "function" ? registration.title(input) : registration.title;
+  }
+
+  /**
+   * §2.6: a function `pointerHint` is called ONLY here (from a pointer-kind
+   * update), in its OWN try/catch — a throw here must never make the
+   * section fall into `sectionTexts`'s outer catch (which would drop this
+   * turn's whole update and roll the section back to its last snapshot).
+   */
+  function resolveFunctionPointerHint(
+    name: SectionName,
+    fn: (input: SectionProviderInput) => string,
+    input: SectionProviderInput,
+  ): string | undefined {
+    let value: unknown;
+    try {
+      value = fn(input);
+    } catch {
+      if (!warnedPointerHint.has(name)) {
+        warnedPointerHint.add(name);
+        log(`prompt section "${name}" pointerHint function threw; omitting the hint`);
+      }
+      return undefined;
+    }
+    if (typeof value !== "string" || value === "" || isThenable(value)) {
+      if (!warnedPointerHint.has(name)) {
+        warnedPointerHint.add(name);
+        log(`prompt section "${name}" pointerHint function returned a non-usable value; omitting the hint`);
+      }
+      return undefined;
+    }
+    return value;
   }
 
   function persist(): void {
@@ -194,10 +235,16 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
         states.set(name, resolved.state);
         texts.push(resolved.text);
         if (collectUpdates && resolved.update) {
+          const pointerHint =
+            typeof registration.pointerHint === "string"
+              ? registration.pointerHint
+              : registration.pointerHint !== undefined && resolved.update.kind === "pointer"
+                ? resolveFunctionPointerHint(name, registration.pointerHint, input)
+                : undefined;
           updates.push({
             section: name,
             title: titleOf(registration, input),
-            ...(registration.pointerHint === undefined ? {} : { pointerHint: registration.pointerHint }),
+            ...(pointerHint === undefined ? {} : { pointerHint }),
             // The frozen head never carried this section (empty snapshot) ⇒ the update adds it.
             ...(resolved.state.snapshot === "" ? { absentFromHead: true } : {}),
             ...resolved.update,

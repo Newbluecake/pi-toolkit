@@ -90,6 +90,73 @@ export interface MemorySettings {
   maxFileBytes: number;
   /** 单次 write/append 的 content 字节上限。Default 65_536（64KB）；解析时 clamp 到 ≤ maxFileBytes。 */
   maxWriteBytes: number;
+  // ─────────────────────── todo #22 optimize-plan §9 (P0-b) ───────────────────────
+  /** tiered vs. legacy injection renderer. P0 default stays `"legacy"` (§14.1's
+   *  "every commit must be publishable" invariant — P1's `tiered.ts` is still a
+   *  stub); P5 flips the default to `"tiered"`. `"legacy"` = byte-identical to
+   *  pre-#22 (§2.7's one accepted deviation: a file-level symlink inside the
+   *  memory dir is refused/skipped instead of followed). */
+  layout: MemoryLayout;
+  /** v2 vs. legacy `memory` tool factory. P0 default stays `"legacy"` (P2's
+   *  `tool-v2.ts` is still a stub); P5 flips the default to `"v2"`. */
+  toolSurface: MemoryToolSurface;
+  /** Child-session injection tier (§2.4) — only takes effect under
+   *  `layout:"tiered"`; `layout:"legacy"` only honors `"none"` (everything
+   *  else still injects the old block, §2.7's "legacy = old behavior"). */
+  childProfile: ChildProfile;
+  /** Primary-core byte budget within a tiered block. Default 1600; clamped to
+   *  ≤ `blockBytes - 600` at parse time. */
+  coreBytes: number;
+  /** Hard byte cap for the whole tiered `## Memory` block. Default 2400. */
+  blockBytes: number;
+  /** Non-core file size that triggers a doctor warn (D04). Default 8192. */
+  topicWarnBytes: number;
+  /** Non-core file size that a write/append is rejected past (D05). Default
+   *  16384; ≥ `topicWarnBytes`. */
+  topicMaxBytes: number;
+  doctor: MemoryDoctorSettings;
+  tidy: MemoryTidySettings;
+}
+
+export type MemoryLayout = "tiered" | "legacy";
+export type MemoryToolSurface = "v2" | "legacy";
+export type ChildProfile = "core" | "full" | "none";
+
+export interface MemoryDoctorSettings {
+  /** Main-session, UI-only, once-per-session(+fingerprint) `/mem doctor`-style
+   *  startup reminder when an error-level finding (or D01, no core.md) exists.
+   *  Default true. */
+  notifyOnStart: boolean;
+  /** `updated` age (days) past which a file is flagged stale (D08 warn).
+   *  Default 60. */
+  staleDays: number;
+}
+
+export interface MemoryTidySettings {
+  /** Agent type used for the tidy proposal-drafting subagent's system prompt
+   *  / model hint ONLY — the runtime forces `toolDomain:"readonly"` (§7.0)
+   *  regardless of this type's own `tools` list, so it can never widen what
+   *  the proposal run can do. Default "Plan". */
+  agentType: string;
+  /** Strict `provider/id`, or "" to use the current main-session model at
+   *  dispatch time (§7.1). Default "". */
+  model: string;
+  /** Hard total budget for a tidy run (no grace, no extension). File stores
+   *  `tidy.timeoutS`. Default 180_000 (180s). */
+  timeoutMs: number;
+  /** Total input bytes a tidy/restore snapshot may cover before `/mem tidy`
+   *  asks the user to narrow the file set. Default 49_152. */
+  maxInputBytes: number;
+  /** Hard cap on the tidy proposal's total output bytes (§7.2); over this,
+   *  the WHOLE proposal is discarded, zero writes. Default 65_536. */
+  maxOutputBytes: number;
+  /** Cumulative cost cap (USD) for a tidy run; only enforced for a priced
+   *  model (§7.1's N1: an unpriced model runs with a "no cost guarantee"
+   *  warning instead of this gate). Default 2.0; never 0. */
+  maxCostUsd: number;
+  /** Turn-boundary cap; a tidy run is aborted (zero writes) once it would
+   *  start turn `maxTurns + 1`. Default 4. */
+  maxTurns: number;
 }
 
 export type RunawayPolicy = "diagnose_only" | "terminate_on_stall";
@@ -763,6 +830,23 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     indexMax: 15,
     maxFileBytes: 262_144,
     maxWriteBytes: 65_536,
+    layout: "legacy",
+    toolSurface: "legacy",
+    childProfile: "core",
+    coreBytes: 1600,
+    blockBytes: 2400,
+    topicWarnBytes: 8192,
+    topicMaxBytes: 16384,
+    doctor: { notifyOnStart: true, staleDays: 60 },
+    tidy: {
+      agentType: "Plan",
+      model: "",
+      timeoutMs: 180_000,
+      maxInputBytes: 49_152,
+      maxOutputBytes: 65_536,
+      maxCostUsd: 2.0,
+      maxTurns: 4,
+    },
   },
   reload: { defer: true },
   systemPrompt: { wakeReplay: true, mode: "stable", adoptForeignForcedPrompt: false },
@@ -831,6 +915,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "goal.untilCmdTimeoutMs",
   "goal.deliveryWatchdogMs",
   "consult.timeoutMs",
+  "memory.tidy.timeoutMs",
   "cacheTtl.keepaliveIntervalMs",
   "cacheTtl.adaptiveColdCooldownMs",
   "cacheTtl.adaptiveColdMinHorizonMs",
@@ -1309,7 +1394,46 @@ export function parseMemorySettings(input: unknown): MemorySettings {
   const bool = (raw: unknown, fallback: boolean): boolean => (typeof raw === "boolean" ? raw : fallback);
   const num = (raw: unknown, fallback: number, min: number, max: number): number =>
     typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? Math.floor(raw) : fallback;
+  const numFloat = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? raw : fallback;
+  const choice = <T extends string>(raw: unknown, values: readonly T[], fallback: T): T =>
+    typeof raw === "string" && (values as readonly string[]).includes(raw) ? (raw as T) : fallback;
   const maxFileBytes = num(value.maxFileBytes, defaults.maxFileBytes, 1024, 4 * 1024 * 1024);
+
+  const blockBytes = num(value.blockBytes, defaults.blockBytes, 800, 16384);
+  const coreBytes = Math.min(num(value.coreBytes, defaults.coreBytes, 256, 8192), Math.max(0, blockBytes - 600));
+  const topicWarnBytes = num(value.topicWarnBytes, defaults.topicWarnBytes, 1024, maxFileBytes);
+  const topicMaxBytes = Math.max(
+    num(value.topicMaxBytes, defaults.topicMaxBytes, topicWarnBytes, maxFileBytes),
+    topicWarnBytes,
+  );
+
+  const doctorRaw = value.doctor;
+  const doctorObj: Record<string, unknown> =
+    doctorRaw && typeof doctorRaw === "object" && !Array.isArray(doctorRaw)
+      ? (doctorRaw as Record<string, unknown>)
+      : {};
+  const doctor: MemoryDoctorSettings = {
+    notifyOnStart: bool(doctorObj.notifyOnStart, defaults.doctor.notifyOnStart),
+    staleDays: num(doctorObj.staleDays, defaults.doctor.staleDays, 7, 3650),
+  };
+
+  const tidyRaw = value.tidy;
+  const tidyObj: Record<string, unknown> =
+    tidyRaw && typeof tidyRaw === "object" && !Array.isArray(tidyRaw) ? (tidyRaw as Record<string, unknown>) : {};
+  const tidy: MemoryTidySettings = {
+    agentType:
+      typeof tidyObj.agentType === "string" && tidyObj.agentType.trim() !== ""
+        ? tidyObj.agentType
+        : defaults.tidy.agentType,
+    model: typeof tidyObj.model === "string" ? tidyObj.model : defaults.tidy.model,
+    timeoutMs: num(tidyObj.timeoutMs, defaults.tidy.timeoutMs, 30_000, 1_800_000),
+    maxInputBytes: num(tidyObj.maxInputBytes, defaults.tidy.maxInputBytes, 8192, 262_144),
+    maxOutputBytes: num(tidyObj.maxOutputBytes, defaults.tidy.maxOutputBytes, 4096, 262_144),
+    maxCostUsd: numFloat(tidyObj.maxCostUsd, defaults.tidy.maxCostUsd, 0.05, 50),
+    maxTurns: num(tidyObj.maxTurns, defaults.tidy.maxTurns, 1, 20),
+  };
+
   return {
     enabled: bool(value.enabled, defaults.enabled),
     injectInChildSessions: bool(value.injectInChildSessions, defaults.injectInChildSessions),
@@ -1320,6 +1444,15 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     indexMax: num(value.indexMax, defaults.indexMax, 1, 100),
     maxFileBytes,
     maxWriteBytes: Math.min(num(value.maxWriteBytes, defaults.maxWriteBytes, 256, 4 * 1024 * 1024), maxFileBytes),
+    layout: choice<MemoryLayout>(value.layout, ["tiered", "legacy"], defaults.layout),
+    toolSurface: choice<MemoryToolSurface>(value.toolSurface, ["v2", "legacy"], defaults.toolSurface),
+    childProfile: choice<ChildProfile>(value.childProfile, ["core", "full", "none"], defaults.childProfile),
+    coreBytes,
+    blockBytes,
+    topicWarnBytes,
+    topicMaxBytes,
+    doctor,
+    tidy,
   };
 }
 

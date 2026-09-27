@@ -43,6 +43,7 @@ import {
   type InjectBudget,
   type RenderCache,
 } from "./render.js";
+import { renderTiered } from "./tiered.js";
 
 export interface MemorySectionDeps {
   settings: MemorySettings; // 静态（Nit 7）
@@ -50,6 +51,15 @@ export interface MemorySectionDeps {
   cache: RenderCache;
   frozenBlocks: Map<string, string | undefined>;
   paths?: MemoryPaths;
+  /**
+   * 方案 §2.4/§14.1的 `pi.getActiveTools()` 端口：P0-b 只把它从装配骨架（`wireMemory`）
+   * 传递到这里并保存（本接口字段本身就是存储处）；tiered layout 的
+   * `accessFromTools` 真实计算属于 P1（真实实现之前 `renderTiered` 本身就会 `throw`，
+   * 传什么 `access` 都不受影响）；legacy layout 不消费它。可选（未接入的旧调用方/测试
+   * fixture 无需追加）—— `wireMemory` 总是会传。调用方必须自己抓异常（`pi.getActiveTools`
+   * 缺失/抛错时的容错是调用方的职责，同 `context-switch/child.ts:470`）。
+   */
+  getActiveTools?: () => string[];
 }
 
 /** `ctx.cwd` is an `assertActive()`-guarded getter (pc87:runner.js:565-568);
@@ -87,6 +97,24 @@ function renderLive(deps: MemorySectionDeps, cwd: string): Live {
     // Frozen source (§5.5): may be a captured `undefined` (R3), which flows
     // to the same "nothing to inject" exit below.
     block = deps.frozenBlocks.get(cwd);
+  } else if (deps.settings.layout === "tiered") {
+    // todo #22 optimize-plan §2 (P1, not yet built): route to the tiered
+    // renderer. `renderTiered` is a stub that throws until P1 ships — the
+    // caller's try/catch degrades that to SKIP, so this branch is only ever
+    // reachable when an operator explicitly sets `layout:"tiered"` ahead of
+    // P1/P5 (§9's default stays "legacy" through P0–P4). `access` stays the
+    // conservative "none" here: real `accessFromTools(deps.getActiveTools())`
+    // computation is P1's job (§2.4) — `deps.getActiveTools` is already wired
+    // through from `wireMemory` (§14.1) so P1 only has to consume it, not
+    // re-plumb the assembly layer.
+    block = renderTiered({
+      cwd,
+      profile: deps.isChildSession ? "core" : "full",
+      access: "none",
+      coreBytes: deps.settings.coreBytes,
+      blockBytes: deps.settings.blockBytes,
+      indexMax: deps.settings.indexMax,
+    }).text;
   } else {
     const fingerprint = memoryFingerprint(cwd, deps.paths);
     const cached = deps.cache.get(cwd, budget, fingerprint);

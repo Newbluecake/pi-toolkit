@@ -1,12 +1,13 @@
 // memory-plan §7.6: the `/mem` command handler. Driven directly with an
 // inline fake ExtensionCommandContext; per-test tmpdir + paths injection.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createMemCommand } from "../../src/memory/command.js";
+import { forgetWorktreeOrigin, recordWorktreeOrigin } from "../../src/core/worktree-origin.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "../../src/memory/paths.js";
 import { DRIFT_HEADER } from "../../src/memory/store.js";
 
@@ -136,5 +137,37 @@ describe("/mem command (§7.6)", () => {
     await cmd.handler("import -no-such-project", bad.ctx);
     expect(bad.notifications[0]!.level).toBe("warning");
     expect(bad.notifications[0]!.message).toContain("memory error");
+  });
+
+  test("todo #22 §3.3: an explicit slug list is serial — the first rejection stops the batch, already-imported slugs keep their files", async () => {
+    const fx = fixture();
+    ccProject(fx, "a", { "a.md": "A" });
+    ccProject(fx, "c", { "c.md": "C" });
+    const cmd = createMemCommand({ paths: fx.paths });
+    const { ctx, notifications } = fakeCtx(fx.cwd);
+    await cmd.handler("import a bad c", ctx);
+    expect(notifications[0]!.level).toBe("warning");
+    expect(notifications[0]!.message).toContain("memory error");
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(fx.paths.memoryRoot, "a", "a.md"))).toBe(true); // "a" imported before the failure
+    expect(existsSync(join(fx.paths.memoryRoot, "c"))).toBe(false); // "c" never reached
+  });
+
+  test("todo #22 §1's “顺手修”: /mem cwd resolves worktree origin, matching the tool/inject hook (B3)", async () => {
+    const fx = fixture();
+    const mainCwd = join(fx.tmp, "main");
+    const wtCwd = join(fx.tmp, "wt");
+    mkdirSync(mainCwd, { recursive: true });
+    mkdirSync(wtCwd, { recursive: true });
+    recordWorktreeOrigin(wtCwd, mainCwd);
+    try {
+      const cmd = createMemCommand({ paths: fx.paths });
+      const { ctx, notifications } = fakeCtx(wtCwd);
+      await cmd.handler("path", ctx);
+      expect(notifications[0]!.message).toContain(memoryDirFor(realpathSync(mainCwd), fx.paths));
+      expect(notifications[0]!.message).not.toContain(memoryDirFor(wtCwd, fx.paths));
+    } finally {
+      forgetWorktreeOrigin(wtCwd);
+    }
   });
 });

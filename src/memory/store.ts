@@ -4,12 +4,37 @@
 // limits (Buffer.byteLength, not string.length), 0600 files / 0700 dirs, the
 // structural allowWrite gate (R7), and agent provenance frontmatter on write.
 //
+// todo #22 optimize-plan P0-b: every fs primitive now routes through
+// `safe-fs.ts` (§3.1's file-level-symlink refusal + canonicalized-directory
+// trust) instead of calling `node:fs` directly — this file has zero fs
+// imports (enforced by `tests/memory/fs-guard.test.ts`). `importProject` /
+// `importAll` are now `async` and run inside `withMemoryDirLock` (§3.3);
+// every other function's SUCCESSFUL-PATH behavior is byte-identical to
+// #22-before (legacy golden, `tests/memory/legacy-golden.test.ts`) — the one
+// deliberate deviation is that a file-level symlink inside the memory dir is
+// now refused/skipped instead of followed (§2.7's decision N2).
+//
 // Zero pi/typebox imports; independently unit-testable.
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { upsertFrontmatterFields } from "./frontmatter.js";
 import { MemoryError, memoryDirFor, defaultPaths, type MemoryPaths } from "./paths.js";
+import {
+  appendLegacy,
+  canonicalDir,
+  createExclusive,
+  ensureMemoryDir,
+  isDirFollowOutside,
+  listDirNames,
+  listRegular,
+  readRegular,
+  replaceAtomic,
+  statRegularIfExists,
+  writeInPlaceLegacy,
+  writeTempRegular,
+  type RegularRead,
+} from "./safe-fs.js";
+import { withMemoryDirLock } from "./lock.js";
 
 export interface MemoryFile {
   name: string; // filename, e.g. "playbook.md"
@@ -19,28 +44,24 @@ export interface MemoryFile {
 }
 
 /** List *.md memory files for a cwd, newest-first. Empty array if none /
- *  missing / unreadable. Per-file stat failures (e.g. dangling symlinks) are
- *  skipped, not fatal — 方案 §5.1.6 TOCTOU. */
+ *  missing / unreadable. A file-level symlink (or any other non-regular
+ *  entry) is skipped, not fatal (方案 §5.1.6 TOCTOU / §2.7 决策 N2).
+ *
+ *  P0-b 打回修复（§3.1）：listing is a READ, so it goes through the
+ *  canonicalized (real) slug directory like every other fs primitive here —
+ *  a slug directory that is itself a symlink (§3.1's trusted trust model)
+ *  must list its REAL target, not silently see an empty/missing dir at the
+ *  display path. A missing/non-directory display path falls back to the
+ *  display path itself, which `listRegular` already turns into `[]` on a
+ *  failed `readdir` (unchanged behavior for the non-symlink case). */
 export function listMemory(cwd: string, paths?: MemoryPaths): MemoryFile[] {
-  const dir = memoryDirFor(cwd, paths);
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  const files: MemoryFile[] = [];
-  for (const name of entries) {
-    if (!name.endsWith(".md")) continue;
-    try {
-      const path = join(dir, name);
-      const st = statSync(path);
-      files.push({ name, path, size: st.size, mtimeMs: st.mtimeMs });
-    } catch {
-      continue; // raced delete / dangling symlink — skip this entry
-    }
-  }
-  return files.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+  const display = memoryDirFor(cwd, paths);
+  const canon = canonicalDir(display);
+  const dir = canon ? canon.real : display;
+  const { files } = listRegular(dir, { names: "legacy" });
+  return files
+    .map((f) => ({ name: f.name, path: f.path, size: f.size, mtimeMs: f.mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
 }
 
 // ───────────────────────────── write / append ─────────────────────────────
@@ -65,13 +86,66 @@ export interface WriteResult {
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
 
+/** R7 结构性写闸门：调用方必须显式传 true，否则拒绝（方案 §5.3）。
+ *  P0-b：从 `writeMemoryFile` 内联的同款检查抽出并导出（方案 §14.1），供 tool-v2/edit/search
+ *  （P2）复用同一道闸门，不各自写一份。行为与现有内联检查完全一致（同一错误消息）。 */
+export function assertAllowWrite(allowWrite: boolean): void {
+  if (allowWrite !== true) throw new MemoryError("writes not allowed");
+}
+
+const MEMORIES_PREFIX = "/memories/";
+
+export type MemoryFileTarget = { kind: "dir" } | { kind: "file"; name: string };
+
+/**
+ * Normalize a v2-tool-surface `path`/`name` value into either "the directory
+ * itself" or a single in-fence file name (方案 §4.2 第 4 条). P0-b: extracted
+ * from `store.ts`'s own write-path fence so P2's `normalizeMemoryCall` can
+ * reuse the SAME fence instead of redefining it (§14.1) — not yet called by
+ * anything in P0-b's own legacy path (`tool.ts` is untouched, 复审 新-3).
+ *
+ * A leading `/memories/` prefix is stripped first; the empty string,
+ * `/memories`, `/memories/`, or `undefined` all mean "the directory itself".
+ * Anything else must pass BOTH `NAME_RE` (the same `*.md` whitelist
+ * `writeMemoryFile` enforces) AND `dirname(resolve(dir, name)) === resolve(dir)`
+ * (belt-and-suspenders against any future `NAME_RE` gap letting a path
+ * separator / `..` segment through) — a violation throws `MemoryError`,
+ * never silently degrades to "treat as directory".
+ */
+export function resolveMemoryFile(pathOrName: string | undefined, dir: string): MemoryFileTarget {
+  const raw = pathOrName ?? "";
+  const stripped = raw.startsWith(MEMORIES_PREFIX) ? raw.slice(MEMORIES_PREFIX.length) : raw;
+  if (stripped === "" || stripped === "/memories" || stripped === "/memories/") return { kind: "dir" };
+  if (!NAME_RE.test(stripped)) {
+    throw new MemoryError(`invalid memory path ${JSON.stringify(raw)} — *.md only, no path separators`);
+  }
+  const base = resolve(dir);
+  const resolved = resolve(base, stripped);
+  if (dirname(resolved) !== base) {
+    throw new MemoryError(`invalid memory path ${JSON.stringify(raw)} — escapes the memory directory`);
+  }
+  return { kind: "file", name: stripped };
+}
+
+function tryReadExisting(dir: string, name: string): RegularRead | undefined {
+  try {
+    return readRegular(dir, name);
+  } catch (err) {
+    if (err instanceof MemoryError) throw err; // symlink / non-regular: reject the write, don't silently treat as absent
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+}
+
 /**
  * Write (replace) or append a single memory file under memoryDirFor(cwd).
  *
- * Safety model（方案 §5.3）：目录围栏（仅 memoryDirFor(cwd) 内 *.md，文件名
- * 白名单正则 + resolve 双保险）、体积双上限、0600/0700、结构性 allowWrite
- * 闸门。write 自动 upsert provenance frontmatter（source: agent + updated）；
- * append 是纯 O_APPEND 追加、绝不动 frontmatter（R4 原子性取舍）。
+ * Safety model（方案 §5.3, P0-b: §3）：目录围栏（仅 memoryDirFor(cwd) 内 *.md，
+ * 文件名白名单正则 + resolve 双保险）、体积双上限、0600/0700、结构性
+ * allowWrite 闸门、canonicalized-directory 信任（slug 目录 symlink 允许，
+ * 目录内文件级 symlink 一律拒绝）。write 自动 upsert provenance frontmatter
+ * （source: agent + updated）；append 是纯 append-only 追加、绝不动
+ * frontmatter（R4 原子性取舍）。
  *
  * All violations throw MemoryError — callers (the tool layer) translate to
  * thrown Error per repo convention (Nit 13).
@@ -83,48 +157,38 @@ export function writeMemoryFile(
   opts: WriteOptions,
   paths?: MemoryPaths,
 ): WriteResult {
-  if (opts.allowWrite !== true) throw new MemoryError("writes not allowed");
+  assertAllowWrite(opts.allowWrite);
   if (!NAME_RE.test(name)) {
     throw new MemoryError(`invalid memory file name ${JSON.stringify(name)} — *.md only, no path separators`);
   }
-  const dir = memoryDirFor(cwd, paths);
-  const path = resolve(dir, name);
-  if (dirname(path) !== resolve(dir)) {
-    throw new MemoryError(`invalid memory file name ${JSON.stringify(name)} — escapes the memory dir`);
-  }
+  const display = memoryDirFor(cwd, paths);
   const contentBytes = Buffer.byteLength(content, "utf8");
   if (contentBytes > opts.maxWriteBytes) {
     throw new MemoryError(
       `content is ${contentBytes}B, over the per-write limit of ${opts.maxWriteBytes}B — split it into smaller writes`,
     );
   }
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  ensureMemoryDir(display);
+  const canon = canonicalDir(display);
+  if (!canon) throw new MemoryError(`memory directory for ${cwd} is not accessible`);
+  const dir = canon.real;
 
   if (opts.append) {
-    // Pure O_APPEND: never read-modify-write the file, never touch its
-    // frontmatter (R4 — concurrent appends must not clobber each other).
-    let existing = 0;
-    let needsNewline = false;
-    try {
-      const st = statSync(path);
-      existing = st.size;
-      if (st.size > 0) {
-        const tail = readFileSync(path, "utf8");
-        needsNewline = !tail.endsWith("\n");
-      }
-    } catch {
-      // not created yet
-    }
+    // Pure append: never read-modify-write the file's frontmatter (R4 —
+    // concurrent appends must not clobber each other's provenance).
+    const existingFile = tryReadExisting(dir, name);
+    const existingBytes = existingFile ? existingFile.stat.size : 0;
+    const needsNewline = existingFile !== undefined && existingBytes > 0 && !existingFile.text.endsWith("\n");
     const appended = (needsNewline ? "\n" : "") + content;
     const appendedBytes = Buffer.byteLength(appended, "utf8");
-    if (existing + appendedBytes > opts.maxFileBytes) {
+    if (existingBytes + appendedBytes > opts.maxFileBytes) {
       throw new MemoryError(
-        `append would grow ${name} to ${existing + appendedBytes}B, over the ${opts.maxFileBytes}B file cap`,
+        `append would grow ${name} to ${existingBytes + appendedBytes}B, over the ${opts.maxFileBytes}B file cap`,
       );
     }
-    const created = existing === 0 && !existsSync(path);
-    appendFileSync(path, appended, { encoding: "utf8", mode: 0o600 });
-    return { path, bytesWritten: contentBytes, totalBytes: statSync(path).size, created };
+    const created = existingFile === undefined;
+    const { totalBytes } = appendLegacy(dir, name, Buffer.from(appended, "utf8"));
+    return { path: join(dir, name), bytesWritten: contentBytes, totalBytes, created };
   }
 
   // write (replace): upsert agent provenance into the NEW content（方案 §5.3 矩阵）。
@@ -134,9 +198,14 @@ export function writeMemoryFile(
   if (finalBytes > opts.maxFileBytes) {
     throw new MemoryError(`write would make ${name} ${finalBytes}B, over the ${opts.maxFileBytes}B file cap`);
   }
-  const created = !existsSync(path);
-  writeFileSync(path, finalContent, { encoding: "utf8", mode: 0o600 });
-  return { path, bytesWritten: contentBytes, totalBytes: statSync(path).size, created };
+  const existedStat = statRegularIfExists(dir, name); // throws for a symlinked/non-regular target (N2)
+  writeInPlaceLegacy(dir, name, Buffer.from(finalContent, "utf8"));
+  return {
+    path: join(dir, name),
+    bytesWritten: contentBytes,
+    totalBytes: finalBytes,
+    created: existedStat === undefined,
+  };
 }
 
 // ───────────────────────────── Import (CC → Pi) ─────────────────────────────
@@ -161,32 +230,60 @@ export interface ImportResult {
  * prepended. Re-running skips files that already exist at the destination
  * (unless force). Import 产物不加 provenance frontmatter（drift-header 已是
  * 其溯源标记，双标注重叠有害 —— 方案 §5.4）。
+ *
+ * P0-b（方案 §3.3 复审 v1-6）: `async`（任何失败都是 rejection，绝不同步抛
+ * 出），持整个目标目录锁贯穿整次导入；非 force 用 `createExclusive`
+ * 消除「先查后写」TOCTOU；CC 源里的文件级 symlink 同样跳过并计入 skipped。
  */
-export function importProject(slug: string, force = false, paths?: MemoryPaths): ImportResult {
+export async function importProject(slug: string, force = false, paths?: MemoryPaths): Promise<ImportResult> {
   const p = paths ?? defaultPaths();
-  const src = join(p.ccProjectsRoot, slug, "memory");
-  const dest = join(p.memoryRoot, slug);
-  if (!existsSync(src)) {
-    throw new MemoryError(`no CC memory at ${src}`);
+  const srcDir = join(p.ccProjectsRoot, slug, "memory");
+  if (!isDirFollowOutside(srcDir)) {
+    throw new MemoryError(`no CC memory at ${srcDir}`);
   }
-  mkdirSync(dest, { recursive: true, mode: 0o700 });
+  const destDisplay = join(p.memoryRoot, slug);
+  ensureMemoryDir(destDisplay);
+  const canon = canonicalDir(destDisplay);
+  if (!canon) throw new MemoryError(`memory directory for ${slug} is not accessible`);
+  const real = canon.real;
 
-  let files = 0;
-  let bytes = 0;
-  let skipped = 0;
-  const entries = readdirSync(src).filter((n) => n.endsWith(".md"));
-  for (const name of entries) {
-    const destPath = join(dest, name);
-    if (existsSync(destPath) && !force) {
-      skipped++;
-      continue;
+  return withMemoryDirLock(real, () => {
+    const { files: srcFiles } = listRegular(srcDir, { names: "legacy" });
+    let files = 0;
+    let bytes = 0;
+    let skipped = 0;
+    for (const { name } of srcFiles) {
+      let body: string;
+      try {
+        body = readRegular(srcDir, name).text;
+      } catch {
+        skipped++; // symlink / raced delete in the CC source — never fatal
+        continue;
+      }
+      const data = Buffer.from(DRIFT_HEADER + body, "utf8");
+      if (force) {
+        try {
+          statRegularIfExists(real, name); // throws for an existing symlink — force never clobbers it
+        } catch {
+          skipped++;
+          continue;
+        }
+        const tmp = writeTempRegular(real, name, data, 0o600);
+        replaceAtomic(real, tmp, name);
+      } else {
+        const tmp = writeTempRegular(real, name, data, 0o600);
+        try {
+          createExclusive(real, tmp, name);
+        } catch {
+          skipped++; // already exists — idempotent re-import
+          continue;
+        }
+      }
+      files++;
+      bytes += Buffer.byteLength(body, "utf8");
     }
-    const body = readFileSync(join(src, name), "utf8");
-    writeFileSync(destPath, DRIFT_HEADER + body, { encoding: "utf8", mode: 0o600 });
-    files++;
-    bytes += Buffer.byteLength(body, "utf8");
-  }
-  return { project: slug, piDir: dest, files, bytes, skipped };
+    return { project: slug, piDir: real, files, bytes, skipped };
+  });
 }
 
 /** Discover all CC projects that have a memory/ dir, sorted. Per-entry
@@ -194,24 +291,22 @@ export function importProject(slug: string, force = false, paths?: MemoryPaths):
  *  (Nit 8 TOCTOU). */
 export function discoverCCProjects(paths?: MemoryPaths): string[] {
   const root = (paths ?? defaultPaths()).ccProjectsRoot;
-  let entries: string[];
-  try {
-    entries = readdirSync(root);
-  } catch {
-    return [];
-  }
+  const entries = listDirNames(root);
   const out: string[] = [];
   for (const d of entries) {
-    try {
-      if (statSync(join(root, d, "memory")).isDirectory()) out.push(d);
-    } catch {
-      continue; // dangling symlink / raced delete — skip this entry
-    }
+    if (isDirFollowOutside(join(root, d, "memory"))) out.push(d);
   }
   return out.sort();
 }
 
-/** Import every CC project's memory into pi (idempotent). */
-export function importAll(force = false, paths?: MemoryPaths): ImportResult[] {
-  return discoverCCProjects(paths).map((slug) => importProject(slug, force, paths));
+/** Import every CC project's memory into pi (idempotent). Serial `await` —
+ *  §3.3: the first failure stops the batch, already-imported projects keep
+ *  their results (same semantics `/mem import all` relied on pre-#22). */
+export async function importAll(force = false, paths?: MemoryPaths): Promise<ImportResult[]> {
+  const slugs = discoverCCProjects(paths);
+  const results: ImportResult[] = [];
+  for (const slug of slugs) {
+    results.push(await importProject(slug, force, paths));
+  }
+  return results;
 }

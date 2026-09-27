@@ -15,7 +15,7 @@ import {
   type PromptSectionHubOpts,
   type SectionRegistration,
 } from "../../src/sysprompt/hub.js";
-import { SKIP, type Live } from "../../src/prompt-sections/stable-section.js";
+import { POINTED, SKIP, type Live } from "../../src/prompt-sections/stable-section.js";
 import { PROMPT_SECTIONS_ENTRY_TYPE } from "../../src/prompt-sections/store.js";
 
 // ---------------------------------------------------------------------------
@@ -654,5 +654,116 @@ describe("persistence (U6, §4.9)", () => {
     sessionStart(host, "startup", {}); // no sessionManager at all
     s.setLive("A");
     expect(beforeAgentStart(host, "BASE")).toEqual({ systemPrompt: "BASE\n\nA" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// todo #22 optimize-plan §2.6 (P0-b): function-valued pointerHint. P-1–P-5.
+// ---------------------------------------------------------------------------
+
+/** A section whose live value cycles through a caller-supplied sequence on
+ *  each provider call, with a configurable pointerHint (string or function). */
+function testSectionWithHint(pointerHint: SectionRegistration["pointerHint"]): {
+  reg: SectionRegistration;
+  setLive: (v: Live) => void;
+} {
+  let live: Live = "seed";
+  const reg: SectionRegistration = {
+    provider: () => live,
+    title: "## Hinted Section",
+    ...(pointerHint === undefined ? {} : { pointerHint }),
+  };
+  return { reg, setLive: (v) => (live = v) };
+}
+
+/** Drives a section past its 3-update budget into the POINTED state: seed,
+ *  then 3 "update"-kind turns (sentCount 0→3), then a 4th distinct value
+ *  whose update is `kind: "pointer"`. Returns that 4th turn's result. */
+function driveToPointer(host: FakePi, section: { setLive: (v: Live) => void }): any {
+  beforeAgentStart(host, "BASE"); // seed: snapshot = "seed"
+  section.setLive("v1");
+  beforeAgentStart(host, "BASE");
+  section.setLive("v2");
+  beforeAgentStart(host, "BASE");
+  section.setLive("v3");
+  beforeAgentStart(host, "BASE"); // sentCount now 3
+  section.setLive("v4");
+  return beforeAgentStart(host, "BASE"); // 4th distinct value ⇒ pointer
+}
+
+describe("pointerHint (§2.6 P-1–P-5)", () => {
+  test("P-1: a STRING pointerHint is passed through unconditionally, byte-identical to before", () => {
+    const host = fakePi();
+    const hub = makeHub(host);
+    const s = testSectionWithHint("Refresh via the test tool.");
+    hub.register("pi_subagent_types", s.reg);
+    const r = driveToPointer(host, s);
+    expect(r.message.content).toContain("Refresh via the test tool.");
+  });
+
+  test("P-2: a FUNCTION pointerHint is called exactly once on a pointer update, with the provider's input", () => {
+    const host = fakePi();
+    const hub = makeHub(host);
+    const seenInputs: unknown[] = [];
+    let calls = 0;
+    const s = testSectionWithHint((input) => {
+      calls++;
+      seenInputs.push(input);
+      return "dynamic hint text";
+    });
+    hub.register("pi_subagent_types", s.reg);
+    const r = driveToPointer(host, s);
+    expect(calls).toBe(1);
+    expect(r.message.content).toContain("dynamic hint text");
+    expect(seenInputs).toHaveLength(1);
+    expect((seenInputs[0] as any).promptText).toBe("BASE");
+  });
+
+  test("P-3: a function that throws ⇒ pointer message has no hint text, section state stays POINTED, no exception escapes", () => {
+    const host = fakePi();
+    const hub = makeHub(host);
+    const s = testSectionWithHint(() => {
+      throw new Error("boom");
+    });
+    hub.register("pi_subagent_types", s.reg);
+    const r = driveToPointer(host, s);
+    expect(r.message).toBeDefined();
+    expect(r.message.content).not.toContain("boom");
+    expect(hub._state("pi_subagent_types")?.announced).toBe(POINTED);
+    expect(host.logs.some((l) => l.includes("pointerHint function threw"))).toBe(true);
+    // only warns once even if driven further (announced stays POINTED so no more pointer updates fire)
+    host.logs.length = 0;
+  });
+
+  test("P-4: thenable / number / empty-string returns are all treated as 'no hint', each WARNing once", () => {
+    for (const badReturn of [Promise.resolve("nope"), 42, ""]) {
+      const host = fakePi();
+      const hub = makeHub(host);
+      const s = testSectionWithHint(() => badReturn as unknown as string);
+      hub.register("pi_subagent_types", s.reg);
+      const r = driveToPointer(host, s);
+      expect(r.message.content).not.toContain("nope");
+      expect(host.logs.some((l) => l.includes("pointerHint function"))).toBe(true);
+    }
+  });
+
+  test("P-5: the function is NEVER called for update/removed-kind entries (only pointer)", () => {
+    const host = fakePi();
+    const hub = makeHub(host);
+    let calls = 0;
+    const s = testSectionWithHint(() => {
+      calls++;
+      return "should not appear yet";
+    });
+    hub.register("pi_subagent_types", s.reg);
+    beforeAgentStart(host, "BASE"); // seed
+    s.setLive("update-1");
+    const afterUpdate = beforeAgentStart(host, "BASE"); // kind: "update"
+    expect(calls).toBe(0);
+    expect(afterUpdate.message.content).not.toContain("should not appear yet");
+    s.setLive(""); // kind: "removed"
+    const afterRemoved = beforeAgentStart(host, "BASE");
+    expect(calls).toBe(0);
+    expect(afterRemoved.message.content).not.toContain("should not appear yet");
   });
 });
