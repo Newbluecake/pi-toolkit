@@ -201,10 +201,17 @@ describe.skipIf(!posix)("agent_before_settle placement checks (§3.5, T20)", () 
     const ctx = fakeCtx(sessionId, dir);
     return { pi, tools, emit, sessionId, ctx, dir, entries };
   }
+  // 真机语义（agent-session.js `_buildBoundaryContext`）：`agent_before_settle`
+  // 的入口 `context.canContinue` 是 pi 在任何草稿注入之前算出的值——纯文本收尾
+  // + 无排队/待发消息时恒为 false（`hasNonSystemContext && finalRole !==
+  // "assistant"` 判 false，且没有 queued messages）。默认值改成 false 正是复现
+  // 「模型纯文本收尾、后台 job 仍在跑」这一目标场景；SUT 不应再读这个字段（见
+  // src/bash/child.ts 的长注释），下面每个既有放行/保持测试在这个默认值下必须
+  // 仍然成立，才算证明修复没有引入新的隐式依赖。
   function settleEvent(overrides: { outcome?: string; canContinue?: boolean; entries?: unknown[] } = {}) {
     return {
       outcome: overrides.outcome ?? "completed",
-      context: { canContinue: overrides.canContinue ?? true },
+      context: { canContinue: overrides.canContinue ?? false },
       entries: overrides.entries ?? [],
     };
   }
@@ -215,10 +222,16 @@ describe.skipIf(!posix)("agent_before_settle placement checks (§3.5, T20)", () 
     expect(result).toBeUndefined();
   });
 
-  it("放行: canContinue === false", async () => {
-    const { emit, ctx } = await makeChild();
-    const [result] = await emit("agent_before_settle", settleEvent({ canContinue: false }), ctx);
-    expect(result).toBeUndefined();
+  it("真机验收回归：不再以 event.context.canContinue 作放行条件 — 纯文本收尾场景下 pi 把它算成 false，收尾保持仍必须触发", async () => {
+    const { tools, emit, sessionId, ctx } = await makeChild();
+    const bash = tools.get("bash")!;
+    await bash.execute("call-1", { command: "sleep 5", run_in_background: true }, undefined, undefined, ctx);
+    attachHost(sessionId, { watchdogDueAt: () => Date.now() + 60_000 });
+    const [result] = (await emit("agent_before_settle", settleEvent({ canContinue: false }), ctx)) as [
+      { continue?: boolean } | undefined,
+    ];
+    expect(result).not.toBeUndefined();
+    expect(result?.continue).toBe(true);
   });
 
   it("放行: no manager ever built (no bash call this run)", async () => {
@@ -346,7 +359,7 @@ describe.skipIf(!posix)("agent_before_settle wake reasons (§3.5, T22/T23)", () 
     return { pi, tools, emit, sessionId, ctx, dir };
   }
   function settleEvent() {
-    return { outcome: "completed", context: { canContinue: true }, entries: [] };
+    return { outcome: "completed", context: { canContinue: false }, entries: [] };
   }
 
   it("T22: a job entering its grace window wakes the hold early with a grace reminder", async () => {
@@ -408,7 +421,7 @@ describe("§3.5 round-budget cap (Q1, representative T21 case)", () => {
     // Small watchdog headroom → `hold = min(120s, headroom-15s)`; must stay
     // ≥ HOLD_MIN (5s) or the settle-hold releases immediately (check 8).
     attachHost(sessionId, { watchdogDueAt: () => Date.now() + 20_000 });
-    const settleEvent = () => ({ outcome: "completed", context: { canContinue: true }, entries: [] });
+    const settleEvent = () => ({ outcome: "completed", context: { canContinue: false }, entries: [] });
 
     const [r1] = (await emit("agent_before_settle", settleEvent(), ctx)) as [{ continue: boolean } | undefined];
     expect(r1?.continue).toBe(true);
@@ -441,7 +454,7 @@ describe("§3.5 round-budget cap (Q1, representative T21 case)", () => {
  */
 describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap", () => {
   function settleEvent() {
-    return { outcome: "completed", context: { canContinue: true }, entries: [] };
+    return { outcome: "completed", context: { canContinue: false }, entries: [] };
   }
 
   /**
@@ -625,7 +638,7 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
       async function round(steps: { advanceMs: number; settle?: boolean }[]): Promise<string> {
         const p = emit(
           "agent_before_settle",
-          { outcome: "completed", context: { canContinue: true }, entries: [] },
+          { outcome: "completed", context: { canContinue: false }, entries: [] },
           ctx,
         );
         for (const step of steps) {
@@ -725,7 +738,7 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
       async function round(steps: { advanceMs: number; settle?: boolean }[]): Promise<string> {
         const p = emit(
           "agent_before_settle",
-          { outcome: "completed", context: { canContinue: true }, entries: [] },
+          { outcome: "completed", context: { canContinue: false }, entries: [] },
           ctx,
         );
         for (const step of steps) {

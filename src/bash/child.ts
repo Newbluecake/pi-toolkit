@@ -370,9 +370,27 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
   pi.on(
     "agent_before_settle",
     async (event: AgentBeforeSettleEvent): Promise<AgentBeforeSettleEventResult | undefined> => {
-      // §3.5 放行检查 1-5.
+      // §3.5 放行检查 1, 4-5（原检查 3「event.context.canContinue」已删 —
+      // 真机验收发现它读的是 pi 在任何草稿注入之前算出的入口 context：纯文本收尾
+      // + 无排队消息这一目标场景下 pi 恒把它算成 false，导致收尾保持从未触发。
+      //
+      // 证据（node_modules/@earendil-works/pi-coding-agent@0.87.1 dist/core）：
+      // `extensions/runner.js`「emitBoundary(baseEvent, buildContext)」在循环最外层先
+      // `context = await buildContext(entries=[])`——这是本 handler 唯一一次看到的
+      // `event.context`，此时 `entries` 还是空数组，尚未包含我们即将追加的草稿。
+      // `agent-session.js`「_runBeforeSettleBoundary()」随后 `_commitBoundaryDrafts
+      // (result.entries)`（真正把草稿写进会话）再算 `finalContext =
+      // this._buildBoundaryContext([], "agent_before_settle")`——这次 drafts 参数是
+      // 空数组，但草稿已经通过 `_commitBoundaryDrafts` 落进真实会话分支，所以
+      // `finalContext` 看到的是提交后的状态。pi 只用这个 `finalContext.canContinue`
+      // 校验我们返回的 `continue:true` 是否合法（`shouldContinue && !finalContext.
+      // canContinue` 才报错并强制放行）——我们的草稿始终是 `custom_message`
+      // （`_buildBoundaryContext`「contextCanContinue = hasNonSystemContext &&
+      // finalRole !== "assistant"」判非 assistant 角色），只要会话里已有非 system
+      // 内容，提交后 `finalContext.canContinue` 就是 true。所以「continue 仅在
+      // context.canContinue 时生效」（E9）说的是 pi 对最终 context 的校验，不是本
+      // handler 入口的前置条件——旧检查 3 是误读，径直删除，不用等价判断替代。
       if (event.outcome !== "completed") return undefined;
-      if (!event.context.canContinue) return undefined;
       const m = manager; // Never built (no bash call this run) ⇒ nothing to hold for.
       if (!m || !sessionId || registry.isSealed(sessionId)) return undefined;
       const host = registry.hostView(sessionId);
