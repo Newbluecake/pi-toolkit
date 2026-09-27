@@ -69,4 +69,18 @@ describe("LoginView.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     const on = mount(LoginView, { props: { ...baseProps(), initialPasswordHint: true } });
     expect(on.text()).toContain("Change the initial password");
   });
+
+  it("renders Chinese copy when navigator.languages starts with zh-CN (submit label + a login error, matching the English case above)", () => {
+    const original = Object.getOwnPropertyDescriptor(window.navigator, "languages");
+    Object.defineProperty(window.navigator, "languages", { value: ["zh-CN"], configurable: true });
+    try {
+      const wrapper = mount(LoginView, {
+        props: { ...baseProps(), error: { key: "errors.invalid" } },
+      });
+      expect(wrapper.find('button[type="submit"]').text()).toBe("\u767b\u5f55");
+      expect(wrapper.find(".form-error").text()).toContain("\u7528\u6237\u540d\u6216\u5bc6\u7801\u9519\u8bef");
+    } finally {
+      if (original) Object.defineProperty(window.navigator, "languages", original);
+    }
+  });
 });

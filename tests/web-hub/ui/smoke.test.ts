@@ -1,20 +1,32 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 import App from "../../../src/web-hub/ui/src/App.vue";
 import IconSprite from "../../../src/web-hub/ui/src/icons/IconSprite.vue";
 import { ICON_NAMES } from "../../../src/web-hub/ui/src/icons/names.js";
 
 /**
- * Mount-level smoke test (vue-plan.md v2.1 §5.2 — P0): proves the whole build/mount pipeline
- * (SFC compile → `@vue/test-utils` mount → happy-dom render) actually works end-to-end before
- * any real feature exists — a signal P1–P5 can trust once they add real components.
+ * Mount-level smoke test (vue-plan.md v2.1 §5.2 — P0/P3): proves the whole build/mount pipeline
+ * (SFC compile → `@vue/test-utils` mount → happy-dom render) actually works end-to-end. Updated
+ * for the P3 shell (`App.vue` no longer renders the P0 "under construction" placeholder text):
+ * asserts the real icon sprite plus the real auth-mode-unknown gate (see `app-gate.test.ts` for
+ * the full auth-mode matrix this is a minimal cross-check of).
  */
-describe("App.vue placeholder", () => {
-  it("mounts without throwing and renders the icon sprite + a placeholder", () => {
+describe("App.vue shell", () => {
+  afterEach(() => {
+    delete document.documentElement.dataset["authMode"];
+  });
+
+  it("mounts without throwing and renders the icon sprite", () => {
     const wrapper = mount(App);
     expect(wrapper.find("svg.sprite").exists()).toBe(true);
-    expect(wrapper.text()).toContain("under construction");
+  });
+
+  it("missing data-auth-mode renders the TokenGate auth-mode-unknown gate, not the P0 placeholder", () => {
+    const wrapper = mount(App);
+    expect(wrapper.find(".login-page").exists()).toBe(true);
+    expect(wrapper.find("button.notice-action").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("under construction");
   });
 
   it("IconSprite.vue defines exactly one <symbol> per ICON_NAMES entry, no more, no fewer", () => {

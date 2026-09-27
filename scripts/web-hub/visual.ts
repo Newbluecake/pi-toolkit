@@ -240,8 +240,10 @@ async function runCell(
   const page = (await context.newPage()) as unknown as ExtPage;
   const origin = hub.url;
   page.on("console", (arg: unknown) => {
-    const msg = arg as { type(): string; text(): string };
-    if (msg.type() === "error") consoleErrors.push(msg.text());
+    const msg = arg as { type(): string; text(): string; location?: () => { url?: string } };
+    if (msg.type() !== "error") return;
+    const loc = typeof msg.location === "function" ? msg.location() : undefined;
+    consoleErrors.push(loc?.url ? `${msg.text()} [${loc.url}]` : msg.text());
   });
   page.on("pageerror", (arg: unknown) => {
     const err = arg as Error;
@@ -268,7 +270,28 @@ async function runCell(
     cspViolations.push(...fresh);
   }
 
-  await page.goto(`${origin}/${scenario.route}`, { waitUntil: "load" });
+  // Token mode: `page.goto(origin + scenario.route)` never authenticates — the token/session
+  // exchange only happens client-side, triggered by a `#t=<token>` fragment (`token-client.js`'s
+  // `start()`, see `useHashRoute.ts`'s ordering-constraint doc comment). Without it every token
+  // scenario (dashboard/detail/states/long) sits at `conn==="auth"` ⇒ `TokenGate` forever. Load
+  // the login fragment first, wait deterministically for the authenticated shell (`.app`) to
+  // mount (never a fixed sleep — `openStream()`'s SSE `hello` frame timing is not fixed), then
+  // move to the scenario's real route as a client-side hash assignment (never a second `#`
+  // concatenated onto the goto URL, and never a second full navigation, which would re-run
+  // `start()` against an already-cleared fragment and race the just-established session).
+  if (scenario.mode === "token") {
+    if (hub.token === undefined)
+      throw new Error(`visual: dev-hub in token mode returned no token for scenario "${scenario.name}"`);
+    await page.goto(`${origin}/#t=${encodeURIComponent(hub.token)}`, { waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector(".app") !== null, { timeout: 15_000 });
+    if (scenario.route !== "#/") {
+      await page.evaluate((route) => {
+        window.location.hash = route;
+      }, scenario.route);
+    }
+  } else {
+    await page.goto(`${origin}/${scenario.route}`, { waitUntil: "load" });
+  }
   await page.waitForTimeout(SETTLE_MS);
   await refreshCspViolations();
 
