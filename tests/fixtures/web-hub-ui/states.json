@@ -1,0 +1,251 @@
+{
+  "agents": [
+    {
+      "agentKey": "agent-heavy",
+      "kind": "tui",
+      "pid": 42001,
+      "cwd": "/home/dev/big-monorepo",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-heavy-1",
+        "name": "context nearly full",
+        "cwd": "/home/dev/big-monorepo",
+        "reason": "user",
+        "leafId": "e-heavy-3",
+        "model": { "provider": "cr-anthropic", "id": "claude-opus-5-5" },
+        "thinkingLevel": "high",
+        "mode": "tui"
+      },
+      "status": {
+        "leafId": "e-heavy-3",
+        "busy": true,
+        "pending": false,
+        "contextUsage": { "tokens": 194000, "contextWindow": 200000, "percent": 97 },
+        "costUsd": 12.87,
+        "subagentCostUsd": 3.5
+      },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-error",
+      "kind": "tui",
+      "pid": 42002,
+      "cwd": "/home/dev/flaky-service",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-error-1",
+        "name": "tool failed mid-run",
+        "cwd": "/home/dev/flaky-service",
+        "reason": "user",
+        "leafId": "e-error-3",
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-error-3", "busy": false, "pending": false, "costUsd": 0.09 },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-fresh",
+      "kind": "rpc",
+      "pid": 42003,
+      "cwd": "/home/dev/just-connected",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-compacted",
+      "kind": "tui",
+      "pid": 42004,
+      "cwd": "/home/dev/huge-history",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-compacted-1",
+        "name": "long-running investigation",
+        "cwd": "/home/dev/huge-history",
+        "reason": "user",
+        "leafId": "e-compacted-3",
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-compacted-3", "busy": false, "pending": false, "costUsd": 4.2 },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-verylongpath",
+      "kind": "tui",
+      "pid": 42005,
+      "cwd": "/home/dev/workspaces/customer-projects/acme-corp/backend-services/payments-gateway/src/handlers",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-longpath-1",
+        "cwd": "/home/dev/workspaces/customer-projects/acme-corp/backend-services/payments-gateway/src/handlers",
+        "reason": "user",
+        "leafId": "e-longpath-1",
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-longpath-1", "busy": false, "pending": true },
+      "prompts": [{ "kind": "confirm", "title": "Deploy payments-gateway to staging?", "since": 1700000090000 }]
+    }
+  ],
+  "history": {
+    "agent-heavy": {
+      "agentKey": "agent-heavy",
+      "fromSeq": 1,
+      "hasMore": true,
+      "oldestEntryId": "e-heavy-1",
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-heavy-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T10:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "Trace every call site of the deprecated cache API across the monorepo."
+          }
+        },
+        {
+          "id": "e-heavy-2",
+          "parentId": "e-heavy-1",
+          "type": "compaction",
+          "timestamp": "2026-09-27T10:20:00.000Z",
+          "summary": "Compacted 340 earlier entries (file tree walk + grep results) to stay under budget.",
+          "firstKeptEntryId": "e-heavy-2"
+        },
+        {
+          "id": "e-heavy-3",
+          "parentId": "e-heavy-2",
+          "type": "message",
+          "timestamp": "2026-09-27T10:20:05.000Z",
+          "message": { "role": "assistant", "content": "Resuming the trace with the compacted summary in context." }
+        }
+      ],
+      "tailMessages": [{ "role": "assistant", "content": "Resuming the trace with the compacted summary in context." }],
+      "inflight": {
+        "message": { "role": "assistant", "content": "Still scanning packages/ap" },
+        "tools": [
+          {
+            "toolCallId": "call-h1",
+            "toolName": "grep",
+            "args": { "pattern": "CacheApi\\.get" },
+            "partial": "packages/api/src/legacy.ts:42\npackages/api/src/legacy.ts:88\n"
+          }
+        ]
+      }
+    },
+    "agent-error": {
+      "agentKey": "agent-error",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-error-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T09:40:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "toolCall",
+                "id": "call-e1",
+                "name": "bash",
+                "args": { "command": "./deploy.sh --env staging" }
+              }
+            ]
+          }
+        },
+        {
+          "id": "e-error-2",
+          "parentId": "e-error-1",
+          "type": "message",
+          "timestamp": "2026-09-27T09:40:12.000Z",
+          "message": {
+            "role": "toolResult",
+            "toolCallId": "call-e1",
+            "isError": true,
+            "content": "Error: deploy.sh exited with code 1\n  at attemptDeploy (deploy.sh:52)\n  connection refused: staging-db.internal:5432"
+          }
+        },
+        {
+          "id": "e-error-3",
+          "parentId": "e-error-2",
+          "type": "message",
+          "timestamp": "2026-09-27T09:40:20.000Z",
+          "message": {
+            "role": "assistant",
+            "content": "The staging DB looks unreachable — want me to retry or check the VPN?"
+          }
+        }
+      ],
+      "tailMessages": [
+        { "role": "assistant", "content": "The staging DB looks unreachable — want me to retry or check the VPN?" }
+      ]
+    },
+    "agent-fresh": {
+      "agentKey": "agent-fresh",
+      "fromSeq": 0,
+      "hasMore": false,
+      "source": "file",
+      "entries": [],
+      "tailMessages": []
+    },
+    "agent-compacted": {
+      "agentKey": "agent-compacted",
+      "fromSeq": 1,
+      "hasMore": true,
+      "oldestEntryId": "e-compacted-1",
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-compacted-1",
+          "parentId": null,
+          "type": "branch_summary",
+          "timestamp": "2026-09-27T05:00:00.000Z",
+          "summary": "Forked from the main investigation branch after the first 900 messages."
+        },
+        {
+          "id": "e-compacted-2",
+          "parentId": "e-compacted-1",
+          "type": "thinking_level_change",
+          "timestamp": "2026-09-27T05:00:01.000Z",
+          "summary": "thinking level raised to high"
+        },
+        {
+          "id": "e-compacted-3",
+          "parentId": "e-compacted-2",
+          "type": "message",
+          "timestamp": "2026-09-27T05:00:10.000Z",
+          "message": { "role": "assistant", "content": "Picking the investigation back up from the branch summary." }
+        }
+      ],
+      "tailMessages": [{ "role": "assistant", "content": "Picking the investigation back up from the branch summary." }]
+    },
+    "agent-verylongpath": {
+      "agentKey": "agent-verylongpath",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-longpath-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T11:00:00.000Z",
+          "message": { "role": "assistant", "content": "Ready to deploy payments-gateway to staging — confirm?" }
+        }
+      ],
+      "tailMessages": [{ "role": "assistant", "content": "Ready to deploy payments-gateway to staging — confirm?" }]
+    }
+  }
+}

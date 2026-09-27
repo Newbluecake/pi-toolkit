@@ -1,0 +1,420 @@
+{
+  "agents": [
+    {
+      "agentKey": "agent-alpha",
+      "kind": "tui",
+      "pid": 41001,
+      "cwd": "/home/dev/pi-toolkit",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-alpha-1",
+        "sessionFile": "/home/dev/.pi/agent/sessions/sess-alpha-1.jsonl",
+        "name": "refactor auth module",
+        "cwd": "/home/dev/pi-toolkit",
+        "reason": "user",
+        "leafId": "e-alpha-6",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "thinkingLevel": "medium",
+        "mode": "tui"
+      },
+      "status": {
+        "leafId": "e-alpha-6",
+        "busy": true,
+        "pending": false,
+        "contextUsage": { "tokens": 84000, "contextWindow": 200000, "percent": 42 },
+        "costUsd": 1.23,
+        "subagentCostUsd": 0.42
+      },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-beta",
+      "kind": "tui",
+      "pid": 41002,
+      "cwd": "/home/dev/service-beta",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-beta-1",
+        "name": "release checklist",
+        "cwd": "/home/dev/service-beta",
+        "reason": "user",
+        "leafId": "e-beta-3",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-beta-3", "busy": false, "pending": true, "costUsd": 0.31 },
+      "prompts": [{ "kind": "confirm", "title": "Apply the DB migration now?", "since": 1700000030000 }]
+    },
+    {
+      "agentKey": "agent-gamma",
+      "kind": "rpc",
+      "pid": 41003,
+      "cwd": "/home/dev/scripts",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-gamma-1",
+        "name": "nightly cleanup",
+        "cwd": "/home/dev/scripts",
+        "reason": "cron",
+        "leafId": "e-gamma-1",
+        "mode": "rpc"
+      },
+      "status": { "leafId": "e-gamma-1", "busy": false, "pending": false, "costUsd": 0.02 },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-delta",
+      "kind": "tui",
+      "pid": 41004,
+      "cwd": "/home/dev/legacy-tool",
+      "state": "live",
+      "pluginVersion": "1.1.0",
+      "outdated": true,
+      "session": {
+        "sessionId": "sess-delta-1",
+        "name": "bugfix #512",
+        "cwd": "/home/dev/legacy-tool",
+        "reason": "user",
+        "leafId": "e-delta-2",
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-delta-2", "busy": false, "pending": false },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-epsilon",
+      "kind": "tui",
+      "pid": 41005,
+      "cwd": "/home/dev/docs-site",
+      "state": "stale",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-epsilon-1",
+        "name": "docs pass",
+        "cwd": "/home/dev/docs-site",
+        "reason": "user",
+        "leafId": "e-epsilon-1",
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-epsilon-1", "busy": false, "pending": false },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-zeta",
+      "kind": "rpc",
+      "pid": 41006,
+      "cwd": "/home/dev/one-off",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-zeta-1",
+        "name": "one-off query",
+        "cwd": "/home/dev/one-off",
+        "reason": "user",
+        "leafId": "e-zeta-1",
+        "mode": "rpc"
+      },
+      "status": { "leafId": "e-zeta-1", "busy": false, "pending": false },
+      "prompts": []
+    }
+  ],
+  "history": {
+    "agent-alpha": {
+      "agentKey": "agent-alpha",
+      "fromSeq": 1,
+      "hasMore": true,
+      "oldestEntryId": "e-alpha-1",
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-alpha-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T09:00:00.000Z",
+          "message": { "role": "user", "content": "Please refactor the auth module and add tests." }
+        },
+        {
+          "id": "e-alpha-2",
+          "parentId": "e-alpha-1",
+          "type": "message",
+          "timestamp": "2026-09-27T09:00:12.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Sure — here's the reconciliation helper the tests rely on:\n\n```typescript\nexport function reconcile(prev: Row[], next: Row[]): Patch[] {\n  const byId = new Map(prev.map((r) => [r.id, r]));\n  const patches: Patch[] = [];\n  for (const row of next) {\n    const before = byId.get(row.id);\n    if (before === undefined) patches.push({ kind: \"insert\", row });\n    else if (!shallowEqual(before, row)) patches.push({ kind: \"update\", row });\n    byId.delete(row.id);\n  }\n  for (const gone of byId.values()) patches.push({ kind: \"remove\", id: gone.id });\n  return patches;\n}\n```\n\nNow running the test suite."
+              },
+              { "type": "toolCall", "id": "call-1", "name": "bash", "args": { "command": "npm test -- auth" } }
+            ]
+          }
+        },
+        {
+          "id": "e-alpha-3",
+          "parentId": "e-alpha-2",
+          "type": "message",
+          "timestamp": "2026-09-27T09:00:20.000Z",
+          "message": { "role": "toolResult", "toolCallId": "call-1", "content": "42 passed, 0 failed" }
+        },
+        {
+          "id": "e-alpha-4",
+          "parentId": "e-alpha-3",
+          "type": "model_change",
+          "timestamp": "2026-09-27T09:01:00.000Z",
+          "summary": "switched model to cr-anthropic/claude-sonnet-5"
+        },
+        {
+          "id": "e-alpha-5",
+          "parentId": "e-alpha-4",
+          "type": "message",
+          "timestamp": "2026-09-27T09:01:05.000Z",
+          "message": { "role": "user", "content": "Now delegate the migration write-up to a subagent." }
+        },
+        {
+          "id": "e-alpha-6",
+          "parentId": "e-alpha-5",
+          "type": "message",
+          "timestamp": "2026-09-27T09:01:10.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "Delegating now — see the fleet panel for progress." }]
+          }
+        }
+      ],
+      "tailMessages": [
+        { "role": "user", "content": "Now delegate the migration write-up to a subagent." },
+        { "role": "assistant", "content": "Delegating now — see the fleet panel for progress." }
+      ],
+      "inflight": {
+        "tools": [
+          {
+            "toolCallId": "call-2",
+            "toolName": "bash",
+            "args": { "command": "npm run build" },
+            "partial": "compiling...\n> tsc -p tsconfig.build.json\n"
+          }
+        ]
+      }
+    },
+    "agent-beta": {
+      "agentKey": "agent-beta",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-beta-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T08:50:00.000Z",
+          "message": { "role": "user", "content": "Prep the release checklist." }
+        },
+        {
+          "id": "e-beta-2",
+          "parentId": "e-beta-1",
+          "type": "message",
+          "timestamp": "2026-09-27T08:50:30.000Z",
+          "message": { "role": "assistant", "content": "Checklist ready. Should I apply the DB migration now?" }
+        }
+      ],
+      "tailMessages": [
+        { "role": "user", "content": "Prep the release checklist." },
+        { "role": "assistant", "content": "Checklist ready. Should I apply the DB migration now?" }
+      ]
+    },
+    "agent-gamma": {
+      "agentKey": "agent-gamma",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-gamma-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T03:00:00.000Z",
+          "message": { "role": "assistant", "content": "Nightly cleanup finished: removed 12 stale worktrees." }
+        }
+      ],
+      "tailMessages": [{ "role": "assistant", "content": "Nightly cleanup finished: removed 12 stale worktrees." }]
+    },
+    "agent-delta": {
+      "agentKey": "agent-delta",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-delta-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-26T18:00:00.000Z",
+          "message": { "role": "user", "content": "Reproduce bug #512." }
+        },
+        {
+          "id": "e-delta-2",
+          "parentId": "e-delta-1",
+          "type": "message",
+          "timestamp": "2026-09-26T18:05:00.000Z",
+          "message": { "role": "assistant", "content": "Reproduced: null pointer in the legacy exporter path." }
+        }
+      ],
+      "tailMessages": [{ "role": "assistant", "content": "Reproduced: null pointer in the legacy exporter path." }]
+    },
+    "agent-epsilon": {
+      "agentKey": "agent-epsilon",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-epsilon-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-25T12:00:00.000Z",
+          "message": { "role": "assistant", "content": "Docs pass complete; connection has since gone stale." }
+        }
+      ],
+      "tailMessages": [{ "role": "assistant", "content": "Docs pass complete; connection has since gone stale." }]
+    },
+    "agent-zeta": {
+      "agentKey": "agent-zeta",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-zeta-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T07:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": "One-off query done; this agent goes offline shortly after connect."
+          }
+        }
+      ],
+      "tailMessages": [
+        { "role": "assistant", "content": "One-off query done; this agent goes offline shortly after connect." }
+      ]
+    }
+  },
+  "historyOlder": {
+    "agent-alpha": {
+      "e-alpha-1": {
+        "agentKey": "agent-alpha",
+        "fromSeq": 0,
+        "hasMore": false,
+        "source": "file",
+        "entries": [
+          {
+            "id": "e-alpha-0",
+            "parentId": null,
+            "type": "message",
+            "timestamp": "2026-09-27T08:59:00.000Z",
+            "message": { "role": "user", "content": "(session start) opened pi-toolkit." }
+          }
+        ],
+        "tailMessages": []
+      }
+    }
+  },
+  "script": [
+    {
+      "atMs": 250,
+      "event": "fleet",
+      "agentKey": "agent-alpha",
+      "data": {
+        "agentKey": "agent-alpha",
+        "runs": [
+          {
+            "runId": "run-root",
+            "label": "alpha main",
+            "type": "general",
+            "status": "running",
+            "phaseLabel": "delegating",
+            "elapsedMs": 120000,
+            "phaseMs": 5000,
+            "costUsd": 0.42,
+            "highlight": "none",
+            "terminal": false
+          },
+          {
+            "runId": "run-child-1",
+            "parentRunId": "run-root",
+            "label": "explore auth flow",
+            "type": "general",
+            "model": "cr-anthropic/claude-sonnet-5",
+            "status": "running",
+            "phaseLabel": "exploring",
+            "elapsedMs": 60000,
+            "phaseMs": 20000,
+            "toolTrail": "read,grep,edit",
+            "streamLine": "Investigating token refresh path...",
+            "highlight": "warn",
+            "terminal": false
+          },
+          {
+            "runId": "run-grandchild-1",
+            "parentRunId": "run-child-1",
+            "label": "grep call sites",
+            "type": "general",
+            "status": "completed",
+            "phaseLabel": "done",
+            "elapsedMs": 15000,
+            "phaseMs": 0,
+            "costUsd": 0.03,
+            "highlight": "none",
+            "terminal": true
+          },
+          {
+            "runId": "run-grandchild-2",
+            "parentRunId": "run-child-1",
+            "label": "write regression test",
+            "type": "general",
+            "status": "running",
+            "phaseLabel": "writing test",
+            "elapsedMs": 8000,
+            "phaseMs": 8000,
+            "highlight": "none",
+            "terminal": false
+          },
+          {
+            "runId": "run-child-2",
+            "parentRunId": "run-root",
+            "label": "migration write-up",
+            "type": "general-purpose",
+            "status": "completed",
+            "phaseLabel": "done",
+            "elapsedMs": 45000,
+            "phaseMs": 0,
+            "costUsd": 0.11,
+            "highlight": "none",
+            "terminal": true
+          },
+          {
+            "runId": "run-child-3",
+            "parentRunId": "run-root",
+            "label": "flaky e2e probe",
+            "type": "general",
+            "status": "failed",
+            "phaseLabel": "error",
+            "elapsedMs": 10000,
+            "phaseMs": 0,
+            "highlight": "crit",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    { "atMs": 2000, "event": "agent_down", "data": { "agentKey": "agent-zeta", "reason": "quit" } }
+  ]
+}

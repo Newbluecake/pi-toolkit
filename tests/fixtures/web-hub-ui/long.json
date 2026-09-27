@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "agentKey": "agent-long",
+      "kind": "tui",
+      "pid": 43001,
+      "cwd": "/home/dev/pi-toolkit",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-long-1",
+        "name": "1000-message scroll perf probe",
+        "cwd": "/home/dev/pi-toolkit",
+        "reason": "user",
+        "leafId": "e-1000",
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-1000", "busy": false, "pending": false, "costUsd": 8.4 },
+      "prompts": []
+    }
+  ],
+  "history": {},
+  "historyGenerate": { "agentKey": "agent-long", "count": 1000 }
+}

@@ -1,0 +1,102 @@
+{
+  "agents": [
+    {
+      "agentKey": "agent-stream",
+      "kind": "tui",
+      "pid": 44001,
+      "cwd": "/home/dev/pi-toolkit",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-stream-1",
+        "name": "live streaming probe",
+        "cwd": "/home/dev/pi-toolkit",
+        "reason": "user",
+        "leafId": "e-stream-1",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-stream-1", "busy": true, "pending": false, "costUsd": 0.06 },
+      "prompts": []
+    }
+  ],
+  "history": {
+    "agent-stream": {
+      "agentKey": "agent-stream",
+      "fromSeq": 1,
+      "hasMore": false,
+      "source": "file",
+      "entries": [
+        {
+          "id": "e-stream-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-09-27T12:00:00.000Z",
+          "message": { "role": "user", "content": "Stream me a short status update, token by token." }
+        }
+      ],
+      "tailMessages": [{ "role": "user", "content": "Stream me a short status update, token by token." }],
+      "inflight": { "message": { "role": "assistant", "content": "" }, "tools": [] }
+    }
+  },
+  "script": [
+    {
+      "atMs": 200,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 2, "e": { "type": "message_start", "role": "assistant" } }
+    },
+    {
+      "atMs": 400,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 3, "e": { "type": "message_update", "delta": "Build " } }
+    },
+    {
+      "atMs": 600,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 4, "e": { "type": "message_update", "delta": "is " } }
+    },
+    {
+      "atMs": 800,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 5, "e": { "type": "message_update", "delta": "green. " } }
+    },
+    {
+      "atMs": 1000,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 6, "e": { "type": "message_update", "delta": "Tests: " } }
+    },
+    {
+      "atMs": 1200,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 7, "e": { "type": "message_update", "delta": "312 passed, " } }
+    },
+    {
+      "atMs": 1400,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 8, "e": { "type": "message_update", "delta": "0 failed." } }
+    },
+    {
+      "atMs": 1600,
+      "event": "ev",
+      "agentKey": "agent-stream",
+      "data": { "agentKey": "agent-stream", "seq": 9, "e": { "type": "message_end" } }
+    },
+    {
+      "atMs": 1600,
+      "event": "status",
+      "agentKey": "agent-stream",
+      "data": {
+        "agentKey": "agent-stream",
+        "status": { "leafId": "e-stream-2", "busy": false, "pending": false, "costUsd": 0.07 }
+      }
+    }
+  ]
+}
