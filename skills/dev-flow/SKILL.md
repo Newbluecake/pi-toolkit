@@ -58,7 +58,7 @@ metadata:
 
 | 别名      | 精确 ID（按优先级）                                                                       |
 | --------- | ----------------------------------------------------------------------------------------- |
-| sonnet    | `cr-anthropic/claude-sonnet-5` → `copilot-anthropic/claude-sonnet-4.6`                    |
+| sonnet    | `cr-anthropic/claude-sonnet-5`                                                            |
 | kimi-k3   | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                              |
 | glm-5.3   | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                   |
 | opus-5.5  | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）         |
