@@ -1,0 +1,242 @@
+/*
+ * pi web-hub — design tokens (vue-plan.md v2.1 §1.1, §5.2 — P0 frozen). Verbatim copy of
+ * `docs/dev/web-hub/ui-mockups/tokens.css`, minus the mockup-only `#mock-dark` checkbox
+ * selector (the Vue build toggles `.theme-dark` on `<html>` at runtime instead — see
+ * `public/theme-init.js` and `composables/useTheme.ts`).
+ * Light is the default. Dark follows prefers-color-scheme unless the root carries
+ * `.theme-light`; `.theme-dark` forces dark.
+ * No external resources: system font stacks only, icons are inline SVG.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---------------------------------------------------------------- neutrals */
+  --c-bg: #f4f7f7; /* app canvas (cool, faintly minty) */
+  --c-surface: #ffffff; /* panels, cards */
+  --c-surface-2: #f8fafa; /* hover / raised-subtle */
+  --c-sunken: #eef3f3; /* code, inputs, meters track */
+  --c-border: #e1e8e9;
+  --c-border-strong: #c9d4d6;
+  --c-text: #132026; /* 16.6:1 on surface */
+  --c-text-2: #3b4a52; /* 9.2:1 */
+  --c-text-3: #5a6a72; /* 5.6:1 — lowest level allowed for readable text */
+  --c-scrim: rgb(19 32 38 / 0.32);
+
+  /* ---------------------------------------------------------------- brand */
+  --c-primary: #0b7a70; /* teal, 5.2:1 on white */
+  --c-primary-hover: #09665e;
+  --c-primary-soft: #e3f4f1;
+  --c-on-primary: #ffffff;
+  --c-on-primary-soft: #0a5f58;
+  --c-accent: #7046d8; /* violet — thinking / secondary highlight */
+  --c-accent-soft: #f0ebfd;
+  --c-focus: #1f8f84;
+  --c-user-bubble: #e6f4f1;
+
+  /* ---------------------------------------------------------------- semantic */
+  --c-success: #177a3e;
+  --c-success-soft: #e6f4ea;
+  --c-warning: #9a5a06;
+  --c-warning-soft: #fff7e8;
+  --c-warning-border: #f3dcae;
+  --c-warning-text: #7a4604; /* 7.3:1 on warning-soft */
+  --c-danger: #c0262d;
+  --c-danger-soft: #fdeeee;
+  --c-danger-border: #f5c9cb;
+  --c-info: #1f5fc4;
+  --c-info-soft: #e8f0fc;
+
+  /* ---------------------------------------------------------------- run / agent state */
+  --st-running: #0b7a70;
+  --st-running-soft: #e3f4f1;
+  --st-thinking: #7046d8;
+  --st-thinking-soft: #f0ebfd;
+  --st-tool: #1f5fc4;
+  --st-tool-soft: #e8f0fc;
+  --st-idle: #5a6a72;
+  --st-idle-soft: #edf1f2;
+  --st-done: #177a3e;
+  --st-done-soft: #e6f4ea;
+  --st-failed: #c0262d;
+  --st-failed-soft: #fdeeee;
+  --st-stale: #8f6412;
+  --st-stale-soft: #fbf3e2;
+  --st-offline: #5e6b73;
+  --st-offline-soft: #edf0f1;
+
+  /* ---------------------------------------------------------------- type */
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
+    "Source Han Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono",
+    "Noto Sans Mono CJK SC", monospace;
+  --fs-2xs: 11px; /* badges / chips only, always weight 600 */
+  --fs-xs: 12px; /* meta lines */
+  --fs-sm: 13px; /* dense UI, code */
+  --fs-md: 14px; /* body (desktop) */
+  --fs-lg: 16px; /* section titles, mobile body, form inputs */
+  --fs-xl: 18px; /* detail title */
+  --fs-2xl: 22px; /* login title */
+  --lh-tight: 1.25;
+  --lh-snug: 1.4;
+  --lh-body: 1.55;
+  --lh-code: 1.5;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+
+  /* ---------------------------------------------------------------- space (4/8 grid) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-12: 48px;
+
+  /* ---------------------------------------------------------------- shape */
+  --r-xs: 4px; /* inline code, meters */
+  --r-sm: 6px; /* buttons, inputs, chips */
+  --r-md: 10px; /* cards, tool cards */
+  --r-lg: 14px; /* bubbles, login card */
+  --r-pill: 999px;
+  --shadow-1: 0 1px 2px rgb(16 32 38 / 0.05);
+  --shadow-2: 0 1px 2px rgb(16 32 38 / 0.04), 0 4px 12px -2px rgb(16 32 38 / 0.08);
+  --shadow-3: 0 2px 4px rgb(16 32 38 / 0.04), 0 12px 32px -8px rgb(16 32 38 / 0.16);
+  --ring: 0 0 0 2px var(--c-surface), 0 0 0 4px var(--c-focus);
+
+  /* ---------------------------------------------------------------- layout */
+  --topbar-h: 48px;
+  --sidebar-w: 320px;
+  --transcript-max: 880px;
+
+  /* ---------------------------------------------------------------- motion */
+  --dur-fast: 120ms; /* hover, press */
+  --dur-base: 180ms; /* expand / collapse, pill colour */
+  --dur-slow: 240ms; /* mobile view slide */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --pulse: 1.6s; /* running dot halo */
+  --blink: 1.05s; /* streaming caret */
+}
+
+/* dark: system preference (unless the user pinned light) … */
+@media (prefers-color-scheme: dark) {
+  :root:not(.theme-light) {
+    color-scheme: dark;
+    --c-bg: #0d1417;
+    --c-surface: #141c20;
+    --c-surface-2: #192328;
+    --c-sunken: #10171a;
+    --c-border: #243037;
+    --c-border-strong: #33424a;
+    --c-text: #e4ecee;
+    --c-text-2: #b6c3c8;
+    --c-text-3: #8d9da4;
+    --c-scrim: rgb(0 0 0 / 0.5);
+    --c-primary: #3ccbb9;
+    --c-primary-hover: #5fd8c8;
+    --c-primary-soft: #12302d;
+    --c-on-primary: #062522;
+    --c-on-primary-soft: #8ae6d9;
+    --c-accent: #a98bf5;
+    --c-accent-soft: #231c3a;
+    --c-focus: #5fd8c8;
+    --c-user-bubble: #153330;
+    --c-success: #4cc77e;
+    --c-success-soft: #13291c;
+    --c-warning: #e5a93d;
+    --c-warning-soft: #2a2112;
+    --c-warning-border: #4a3a1c;
+    --c-warning-text: #f0c77a;
+    --c-danger: #f2767a;
+    --c-danger-soft: #2e1719;
+    --c-danger-border: #52282b;
+    --c-info: #72a7f5;
+    --c-info-soft: #16243a;
+    --st-running: #3ccbb9;
+    --st-running-soft: #12302d;
+    --st-thinking: #a98bf5;
+    --st-thinking-soft: #231c3a;
+    --st-tool: #72a7f5;
+    --st-tool-soft: #16243a;
+    --st-idle: #8d9da4;
+    --st-idle-soft: #1b2428;
+    --st-done: #4cc77e;
+    --st-done-soft: #13291c;
+    --st-failed: #f2767a;
+    --st-failed-soft: #2e1719;
+    --st-stale: #d6a84e;
+    --st-stale-soft: #2a2112;
+    --st-offline: #7d8b92;
+    --st-offline-soft: #1a2125;
+    --shadow-1: none;
+    --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.02);
+    --shadow-3: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+  }
+}
+
+/* … or forced (class on <html>, set by public/theme-init.js / useTheme()) */
+:root.theme-dark {
+  color-scheme: dark;
+  --c-bg: #0d1417;
+  --c-surface: #141c20;
+  --c-surface-2: #192328;
+  --c-sunken: #10171a;
+  --c-border: #243037;
+  --c-border-strong: #33424a;
+  --c-text: #e4ecee;
+  --c-text-2: #b6c3c8;
+  --c-text-3: #8d9da4;
+  --c-scrim: rgb(0 0 0 / 0.5);
+  --c-primary: #3ccbb9;
+  --c-primary-hover: #5fd8c8;
+  --c-primary-soft: #12302d;
+  --c-on-primary: #062522;
+  --c-on-primary-soft: #8ae6d9;
+  --c-accent: #a98bf5;
+  --c-accent-soft: #231c3a;
+  --c-focus: #5fd8c8;
+  --c-user-bubble: #153330;
+  --c-success: #4cc77e;
+  --c-success-soft: #13291c;
+  --c-warning: #e5a93d;
+  --c-warning-soft: #2a2112;
+  --c-warning-border: #4a3a1c;
+  --c-warning-text: #f0c77a;
+  --c-danger: #f2767a;
+  --c-danger-soft: #2e1719;
+  --c-danger-border: #52282b;
+  --c-info: #72a7f5;
+  --c-info-soft: #16243a;
+  --st-running: #3ccbb9;
+  --st-running-soft: #12302d;
+  --st-thinking: #a98bf5;
+  --st-thinking-soft: #231c3a;
+  --st-tool: #72a7f5;
+  --st-tool-soft: #16243a;
+  --st-idle: #8d9da4;
+  --st-idle-soft: #1b2428;
+  --st-done: #4cc77e;
+  --st-done-soft: #13291c;
+  --st-failed: #f2767a;
+  --st-failed-soft: #2e1719;
+  --st-stale: #d6a84e;
+  --st-stale-soft: #2a2112;
+  --st-offline: #7d8b92;
+  --st-offline-soft: #1a2125;
+  --shadow-1: none;
+  --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.02);
+  --shadow-3: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}

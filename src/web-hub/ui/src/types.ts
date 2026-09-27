@@ -1,0 +1,198 @@
+/**
+ * View-model types shared by every Vue component (vue-plan.md v2.1 §3.2, §5.2 — P0 frozen).
+ *
+ * Frozen: after P0 lands, extend only by adding OPTIONAL fields — never remove/rename/narrow
+ * an existing field or widen a required one, and never touch this file from a package other
+ * than the main session (plan §5.2's "冻结面" escalation flow covers everything else).
+ *
+ * `AgentState` / `Prompt` / `LiveTool` / `Item` / `Sub` / `HubState` mirror the shapes
+ * `@logic/state.js`'s JSDoc `@typedef`s document (that file stays the single behavioral
+ * source of truth — `reduce()`/`initialState()` are pure JS, unit-tested in
+ * `tests/web-hub/web/state.test.ts`). Duplicating them here as real TS interfaces — rather than
+ * `import("@logic/state.js").AgentState`-style JSDoc-type imports — keeps `vue-tsc` checking
+ * of every `.vue` file's `<script setup lang="ts">` robust to how far TS's JS-JSDoc inference
+ * happens to reach, at the cost of needing to keep the two in sync by hand (P1's `route`/
+ * `routed`/`wanted` extension, plan §3.3, only touches reducer-internal fields not surfaced
+ * here, so this file doesn't need a change for it).
+ */
+import type { Ref } from "vue";
+import type { ConnState } from "./transport/types.js";
+
+export type { ConnState };
+
+// ---------------------------------------------------------------------------
+// @logic/state.js mirror (read-only view — the reducer itself lives in JS)
+// ---------------------------------------------------------------------------
+
+export interface Prompt {
+  readonly kind: string;
+  readonly title?: string;
+  readonly since: number;
+}
+
+export interface LiveTool {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args: unknown;
+  readonly partial?: string;
+  readonly result?: unknown;
+  readonly isError?: boolean;
+  readonly done: boolean;
+  readonly truncated?: boolean;
+}
+
+export type ItemKind = "message" | "custom" | "compaction" | "branch_summary" | "model_change";
+
+export interface Item {
+  readonly id: string;
+  readonly kind: ItemKind;
+  readonly entryId?: string;
+  readonly seq?: number;
+  readonly key?: string;
+  readonly message?: Record<string, unknown>;
+  readonly entry?: Record<string, unknown>;
+  readonly truncated?: boolean;
+}
+
+export interface Sub {
+  readonly clientId: string;
+  readonly pending: boolean;
+  readonly failed?: boolean;
+}
+
+export type HistoryState = "none" | "waiting" | "loaded" | "error";
+
+/** Mirrors `@logic/state.js`'s `AgentState` typedef. */
+export interface AgentState {
+  readonly key: string;
+  readonly card: Record<string, unknown>;
+  readonly down: boolean;
+  readonly downReason?: string;
+  readonly session?: Record<string, unknown>;
+  readonly status?: Record<string, unknown>;
+  readonly prompts: readonly Prompt[];
+  readonly fleet: readonly unknown[];
+  readonly items: readonly Item[];
+  readonly uid: number;
+  readonly lastSeq: number;
+  readonly streaming: Record<string, unknown> | null;
+  readonly tools: readonly LiveTool[];
+  readonly history: HistoryState;
+  readonly historyError?: string;
+  readonly hasMore: boolean;
+  readonly oldestEntryId?: string;
+  readonly paging: boolean;
+  readonly needsResync: boolean;
+  readonly sub: Sub | null;
+}
+
+/** Mirrors `@logic/state.js`'s `State` typedef (renamed to avoid colliding with the DOM global). */
+export interface HubState {
+  readonly clientId: string | null;
+  readonly hub: Record<string, unknown> | null;
+  readonly conn: ConnState;
+  readonly lastEventId?: number;
+  readonly selected: string | null;
+  readonly agents: ReadonlyMap<string, AgentState>;
+  readonly order: readonly string[];
+}
+
+/**
+ * `useHub()`'s return shape (P1's exclusive `composables/useHub.ts` implements this — this
+ * frozen interface is what every other component (via `contracts.ts`) is allowed to depend
+ * on). `state` is the render-gated view (`renderGate.ts`, plan §3.5) of the reducer's `raw`;
+ * `dispatch` feeds every local UI event `@logic/state.js`'s `LOCAL_EVENTS` (plus the P1-added
+ * `"route"`) understands — components never call the reducer directly.
+ */
+export interface HubHandle {
+  readonly state: Readonly<Ref<HubState>>;
+  dispatch(msg: { event: string; data?: unknown; id?: number }): void;
+}
+
+// ---------------------------------------------------------------------------
+// derived / presentation-only view models
+// ---------------------------------------------------------------------------
+
+/** Mirrors `@logic/render/tools.js`'s `ToolView` typedef. */
+export interface ToolView {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args: unknown;
+  readonly state: "running" | "done" | "error" | "pending";
+  readonly partial?: string;
+  readonly result?: string;
+  readonly truncated?: boolean;
+}
+
+/** ui-design.md §3.2's run/agent state vocabulary — one shared enum for cards, pills, fleet rows and tool cards. */
+export type RunVisualState =
+  | "running"
+  | "thinking"
+  | "tool"
+  | "idle"
+  | "queued"
+  | "done"
+  | "failed"
+  | "timed_out"
+  | "waiting"
+  | "stale"
+  | "offline"
+  | "aborted";
+
+/** `AgentList.vue` / `AgentCard.vue` row model (ui-design.md §5.1). */
+export interface AgentCardView {
+  readonly key: string;
+  readonly kind: "tui" | "rpc";
+  readonly shortCwd: string;
+  /** Session name, else the first 8 chars of `sessionId`, else `"(no session name)"`. */
+  readonly sessionLabel: string;
+  /** Model id without the provider prefix; `""` when unknown. */
+  readonly modelShort: string;
+  readonly contextPercent: number | null;
+  readonly runningSubCount: number;
+  /** Pre-formatted `own [+ sub $x]` cost label (tabular-nums display string). */
+  readonly costLabel: string;
+  readonly visualState: RunVisualState;
+  /** Status pill text; `null` when idle and nothing worth flagging. */
+  readonly statusLabel: string | null;
+  readonly stale: boolean;
+  readonly down: boolean;
+  readonly outdated: boolean;
+}
+
+/** `@logic/render/fleet.js`'s `fleetTree(rows)` output, folded into a renderable nested tree. */
+export interface FleetTreeNode {
+  readonly row: Record<string, unknown>; // FleetRowWire (protocol/messages.ts) — kept structural here to avoid a hard @protocol dependency in a UI-only type
+  readonly depth: number;
+  readonly children: readonly FleetTreeNode[];
+}
+
+/** ui-design.md §10 — global/agent-level notice banners. */
+export type NoticeTone = "info" | "warn" | "danger" | "muted";
+
+export interface NoticeAction {
+  readonly label: string;
+}
+
+export interface Notice {
+  readonly id: string;
+  readonly tone: NoticeTone;
+  readonly title: string;
+  readonly body?: string;
+  readonly action?: NoticeAction;
+  /** Safety notices (initial password, plaintext HTTP) are never dismissible. */
+  readonly persistent: boolean;
+}
+
+/** `usePasswordAuth`'s (P1) mapped view of `LoginResult.kind` for `LoginView.vue`. */
+export interface LoginErrorView {
+  readonly key: string;
+  readonly params?: Readonly<Record<string, string | number>>;
+  readonly countdownS?: number;
+}
+
+/** `useHashRoute.ts` (§3.7) — the single source of truth for "which agent is selected". */
+export type Route = { readonly name: "list" } | { readonly name: "agent"; readonly key: string };
+
+/** §3.9 — three-state theme preference persisted under the `pwh_theme` localStorage key. */
+export type ThemePref = "system" | "light" | "dark";

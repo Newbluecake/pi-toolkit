@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createClient, readHashToken, TOKEN_KEY, REQUEST_TIMEOUT_MS } from "../../../src/web-hub/web/app.js";
+import { createClient, readHashToken, TOKEN_KEY, REQUEST_TIMEOUT_MS } from "../../../src/web-hub/web/token-client.js";
 import { SILENCE_MS } from "../../../src/web-hub/web/contract.js";
 
 /** Deterministic timer queue (no real timers, nothing can hang). */

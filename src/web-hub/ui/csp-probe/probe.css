@@ -1,0 +1,32 @@
+/* CSP probe external stylesheet (vue-plan.md v2.1 §4.4.1, §5.2 — P0). All CSS the probe needs
+ * lives here, loaded via a same-origin `<link>` (Vite `cssCodeSplit: false` bundles it into one
+ * file) — none of it is ever inlined into HTML or JS, matching `style-src 'self'`. */
+.probe-root {
+  width: 500px;
+}
+.pct-box {
+  width: var(--pct);
+  height: 10px;
+  background: #0b7a70;
+}
+.width-box {
+  height: 10px;
+  background: #1f5fc4;
+}
+.vshow-box {
+  height: 10px;
+}
+.level-1 {
+  background: rgb(11, 122, 112);
+}
+.level-2 {
+  background: rgb(31, 95, 196);
+}
+.level-3 {
+  background: rgb(192, 38, 45);
+}
+.s {
+  display: inline-block;
+  width: 2px;
+  height: 2px;
+}

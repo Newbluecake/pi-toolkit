@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>pwh csp-probe (negative control)</title>
+  </head>
+  <body>
+    <!-- Deliberate CSP violation: a static inline `style=` attribute. `style-src 'self'` has no
+         `'unsafe-inline'`, so the browser must fire exactly one `style-src-attr` violation and
+         must NOT apply the color — this is the probe's own self-test (plan §4.4.1's "反向对照"):
+         if this page passes cleanly, the probe can't actually detect a real violation and the
+         whole exercise is void. -->
+    <div id="target" style="color: rgb(1, 2, 3)" data-probe="negative">forbidden inline style</div>
+    <script type="module" src="./negative.ts"></script>
+  </body>
+</html>

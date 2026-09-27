@@ -10,6 +10,7 @@
     "index.ts",
     "ask-user.ts",
     "feishu-notify.ts",
+    "src/web-hub/ui/**",
     "node_modules",
     "dist"
   ]

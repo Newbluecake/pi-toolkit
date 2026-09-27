@@ -30,8 +30,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Build web UI
+        run: npm run build:web && npm run check:web
+
       - name: Test
         run: npm test
+        env:
+          PWH_REQUIRE_UI_DIST: "1"
 
       - name: Build
         run: npm run build
