@@ -18,6 +18,7 @@
 import { LIMITS, type FORWARDED_EVENTS, type InflightState, type SnapshotReplyBody } from "../protocol/messages.js";
 import type { WireEvent, WireMessage } from "../protocol/messages.js";
 import { truncateText } from "../protocol/keys.js";
+import { ASK_USER_MARKER } from "../../ask-user/channel-handler.js";
 
 export interface EventTap {
   handle(event: { type: string } & Record<string, unknown>): void;
@@ -67,7 +68,7 @@ export function createEventTap(
   let recentRing: Array<{ seq: number; message: WireMessage }> = [];
   let inflightMessage: unknown;
   const tools = new Map<string, InflightTool>();
-  let promptStack: Array<{ kind: string; title?: string; since: number }> = [];
+  let promptStack: Array<{ kind: string; title?: string; since: number; dialogId?: string }> = [];
   let baseCost = 0;
   let addedCost = 0;
 
@@ -284,23 +285,41 @@ export function createEventTap(
         break;
       }
       case "ui_prompt_start": {
-        const p: { kind: string; title?: string; since: number } = { kind: str(event.kind), since: opts.now() };
-        if (typeof event.title === "string") p.title = event.title;
+        const kind = str(event.kind);
+        const raw = pick(type, event, ["kind", "title"]);
+        const attributed = attributePrompt(raw);
+        // The RPC marker is an implementation detail.  It is useful to the
+        // bridge while matching, but must never be sent to the browser (even
+        // when a stale event arrives after its dialog was closed).
+        if (kind === "select" && attributed.title === ASK_USER_MARKER) attributed.title = "ask_user";
+        const p: { kind: string; title?: string; since: number; dialogId?: string } = {
+          kind,
+          since: opts.now(),
+        };
+        if (typeof attributed.title === "string") p.title = attributed.title;
+        if (typeof attributed.dialogId === "string") p.dialogId = attributed.dialogId;
         promptStack.push(p);
-        e = attributePrompt(pick(type, event, ["kind", "title"]));
+        e = attributed;
         break;
       }
       case "ui_prompt_end": {
         const kind = str(event.kind);
         const title = typeof event.title === "string" ? event.title : undefined;
-        for (let i = promptStack.length - 1; i >= 0; i--) {
+        let dialogId: string | undefined;
+        for (let i = promptStack.length - 1; i >= 0; i -= 1) {
           const p = promptStack[i]!;
-          if (p.kind === kind && (title === undefined || p.title === title)) {
+          if (
+            p.kind === kind &&
+            (title === undefined || p.title === title || (title === ASK_USER_MARKER && p.title === "ask_user"))
+          ) {
+            dialogId = p.dialogId;
             promptStack.splice(i, 1);
             break;
           }
         }
         e = pick(type, event, ["kind", "title"]);
+        if (e.title === ASK_USER_MARKER) e.title = "ask_user";
+        if (dialogId !== undefined) e.dialogId = dialogId;
         break;
       }
       default:
@@ -343,7 +362,7 @@ export function createEventTap(
       if (message !== undefined) state.message = message;
       return state;
     },
-    prompts: () => promptStack.map((p) => ({ ...p })),
+    prompts: () => promptStack.map((p) => ({ ...p })) as SnapshotReplyBody["prompts"],
     costUsd: () => baseCost + addedCost,
     resetForSession: (initialCostUsd: number) => {
       resetState();

@@ -15,7 +15,7 @@ import { HEADER_MAX_CHARS, InputSchema } from "./types.js";
 import { AskUserComponent } from "./component.js";
 import { answerValueText } from "./submit-view.js";
 import { validateInput } from "./validate.js";
-import type { AskUserRemotePort } from "./remote.js";
+import { createDialogRace, type AskUserRemotePort, type AskUserRemoteSession, type RemoteOutcome } from "./remote.js";
 
 /**
  * execute returns the SDK's normal tool result. Errors are thrown so Pi can
@@ -48,37 +48,144 @@ function cancelledResult(questions: Question[], text: string): ExecuteResult {
 }
 
 async function runTuiInteraction(
+  toolCallId: string,
   questions: Question[],
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
   pi: ExtensionAPI,
+  remote: (() => AskUserRemotePort | undefined) | undefined,
 ): Promise<Result | null> {
-  return ctx.ui.custom<Result | null>((tui, theme, _keybindings, done) => {
-    const component = new AskUserComponent(questions, tui, theme as ThemeLike, done, {
-      onActivity: () => pi.events?.emit("ask-user:activity", {}),
+  const protoQuestions = toProtoQuestions(questions);
+  const race = createDialogRace();
+  let remoteOutcome: RemoteOutcome | undefined;
+  let component: AskUserComponent | undefined;
+  let session: AskUserRemoteSession | undefined;
+
+  try {
+    session = remote?.()?.open({ toolCallId, questions: protoQuestions, allowCancel: true });
+    session?.setOnRemote((outcome) => {
+      if (!race.claim("web")) return false;
+      remoteOutcome = outcome;
+      // `cancel()` is idempotent and is also safe before the component factory
+      // has returned.  The latter is the important factory-before-render race.
+      component?.cancel();
+      return true;
     });
-    if (signal) signal.addEventListener("abort", () => component.cancel(), { once: true });
-    return component;
-  });
+
+    const localResult = await ctx.ui.custom<Result | null>((tui, theme, _keybindings, done) => {
+      component = new AskUserComponent(
+        questions,
+        tui,
+        theme as ThemeLike,
+        (result) => {
+          if (race.winner === "web") return done(null);
+          race.claim("tui");
+          done(result);
+        },
+        { onActivity: () => pi.events?.emit("ask-user:activity", {}) },
+      );
+      if (race.winner === "web") queueMicrotask(() => component?.cancel());
+      if (signal)
+        signal.addEventListener(
+          "abort",
+          () => {
+            if (race.claim("abort")) component?.cancel();
+          },
+          { once: true },
+        );
+      return component;
+    });
+
+    if (race.winner === "web") {
+      if (remoteOutcome?.kind === "answer") {
+        return {
+          questions,
+          answers: protoAnswersToResult(questions, protoQuestions, remoteOutcome.answers),
+          cancelled: false,
+        };
+      }
+      return { questions, answers: {}, cancelled: true };
+    }
+
+    const winner = race.winner;
+    session?.close(winner === "abort" ? "abort" : "tui", localResult?.cancelled ? "cancelled" : "answered");
+    return localResult;
+  } catch (error) {
+    if (race.claim("error")) session?.close("error", "aborted");
+    throw error;
+  }
+}
+
+function combinedSignal(signal: AbortSignal | undefined, local: AbortController): AbortSignal | undefined {
+  if (signal === undefined) return local.signal;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([signal, local.signal]);
+  const combined = new AbortController();
+  const abort = (): void => combined.abort();
+  if (signal.aborted || local.signal.aborted) combined.abort();
+  else {
+    signal.addEventListener("abort", abort, { once: true });
+    local.signal.addEventListener("abort", abort, { once: true });
+  }
+  return combined.signal;
 }
 
 async function runRpcInteraction(
+  toolCallId: string,
   questions: Question[],
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
+  remote: (() => AskUserRemotePort | undefined) | undefined,
 ): Promise<Result> {
   const protoQuestions = toProtoQuestions(questions);
-  const answers = await askUserInteract(
-    {
-      mode: ctx.mode,
-      hasUI: ctx.hasUI,
-      ui: { select: ctx.ui.select.bind(ctx.ui) },
-    },
-    protoQuestions,
-    { signal, allowCancel: true },
-  );
-  if (answers === null) return { questions, answers: {}, cancelled: true };
-  return { questions, answers: protoAnswersToResult(questions, protoQuestions, answers), cancelled: false };
+  const race = createDialogRace();
+  const localAbort = new AbortController();
+  let remoteOutcome: RemoteOutcome | undefined;
+  let session: AskUserRemoteSession | undefined;
+
+  try {
+    // RPC has a real select channel, so it participates in the same race.  A
+    // port that cannot attach simply returns undefined and leaves the legacy
+    // RPC path byte-for-byte unchanged.
+    session = remote?.()?.open({ toolCallId, questions: protoQuestions, allowCancel: true });
+    session?.setOnRemote((outcome) => {
+      if (!race.claim("web")) return false;
+      remoteOutcome = outcome;
+      localAbort.abort();
+      return true;
+    });
+
+    const answers = await askUserInteract(
+      {
+        mode: ctx.mode,
+        hasUI: ctx.hasUI,
+        ui: { select: ctx.ui.select.bind(ctx.ui) },
+      },
+      protoQuestions,
+      { signal: combinedSignal(signal, localAbort), allowCancel: true },
+    );
+    if (race.winner === "web") {
+      if (remoteOutcome?.kind === "answer") {
+        return {
+          questions,
+          answers: protoAnswersToResult(questions, protoQuestions, remoteOutcome.answers),
+          cancelled: false,
+        };
+      }
+      return { questions, answers: {}, cancelled: true };
+    }
+    if (answers === null) {
+      if (signal?.aborted) race.claim("abort");
+      else race.claim("tui");
+      session?.close(race.winner === "abort" ? "abort" : "tui", "cancelled");
+      return { questions, answers: {}, cancelled: true };
+    }
+    race.claim("tui");
+    session?.close("tui", "answered");
+    return { questions, answers: protoAnswersToResult(questions, protoQuestions, answers), cancelled: false };
+  } catch (error) {
+    if (race.claim("error")) session?.close("error", "aborted");
+    throw error;
+  }
 }
 
 type Outcome =
@@ -127,7 +234,7 @@ Don't:
 export interface AskUserWireOptions {
   remote?: () => AskUserRemotePort | undefined;
 }
-export default function (pi: ExtensionAPI, _opts?: AskUserWireOptions): void {
+export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
   pi.registerTool({
     name: "ask_user",
     label: "Ask User",
@@ -168,8 +275,8 @@ export default function (pi: ExtensionAPI, _opts?: AskUserWireOptions): void {
       try {
         interactionResult =
           ctx.mode === "rpc"
-            ? await runRpcInteraction(questions, signal, ctx)
-            : await runTuiInteraction(questions, signal, ctx, pi);
+            ? await runRpcInteraction(_toolCallId, questions, signal, ctx, opts?.remote)
+            : await runTuiInteraction(_toolCallId, questions, signal, ctx, pi, opts?.remote);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (ctx.mode === "rpc") disableAskUser(pi);

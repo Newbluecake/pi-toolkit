@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ASK_USER_MARKER } from "../../../src/ask-user/channel-handler.js";
 import { createEventTap } from "../../../src/web-hub/agent/event-tap.js";
 import { LIMITS, type WireEvent } from "../../../src/web-hub/protocol/messages.js";
 
@@ -231,5 +232,28 @@ describe("event tap — recent / inflight / prompts / cost", () => {
     expect(tap.inflight()).toBeUndefined();
     expect(tap.prompts()).toEqual([]);
     expect(timers.every((t) => t.cancelled)).toBe(true);
+  });
+
+  it("carries dialog attribution into prompt snapshots and sanitizes RPC markers", () => {
+    const { tap, out } = harness();
+    tap.handle({ type: "ui_prompt_start", reason: "ui_prompt", kind: "select", title: ASK_USER_MARKER });
+    expect(out[0]?.e).toMatchObject({ type: "ui_prompt_start", kind: "select", title: "ask_user" });
+    const attributed = createEventTap(() => undefined, {
+      now: () => 1,
+      setTimer: () => ({ cancel: () => undefined }),
+      attributePrompt: (event) => ({ ...event, title: "ask_user", dialogId: "ask:t" }),
+    });
+    attributed.handle({ type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" });
+    expect(attributed.prompts()).toEqual([{ kind: "custom", since: 1, title: "ask_user", dialogId: "ask:t" }]);
+    attributed.handle({ type: "ui_prompt_end", reason: "ui_prompt", kind: "custom" });
+    expect(attributed.prompts()).toEqual([]);
+    expect(out[0]?.e.type).toBe("ui_prompt_start");
+  });
+
+  it("does not invent dialog attribution without an open-dialog callback", () => {
+    const { tap, out } = harness();
+    tap.handle({ type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" });
+    expect(out[0]?.e).toEqual({ type: "ui_prompt_start", kind: "custom" });
+    expect(tap.prompts()).toEqual([{ kind: "custom", since: 1_000 }]);
   });
 });
