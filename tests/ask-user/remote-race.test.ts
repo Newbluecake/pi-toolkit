@@ -125,4 +125,61 @@ describe("ask_user remote race", () => {
     expect(race.claim("tui")).toBe(false);
     expect(race.winner).toBe("web");
   });
+
+  it("reports an Esc cancel as (tui, cancelled), not answered", async () => {
+    const h = harness();
+    let component: AskUserComponent | undefined;
+    const pending = h.tool.execute(
+      "call",
+      params,
+      undefined,
+      undefined,
+      tuiContext((value) => {
+        component = value;
+      }),
+    );
+    await Promise.resolve();
+    component!.cancel();
+    await pending;
+    expect(h.session!.closed).toEqual(["tui", "cancelled"]);
+  });
+
+  it("reports an abort signal as (abort, aborted), not answered (TUI)", async () => {
+    const h = harness();
+    const controller = new AbortController();
+    let component: AskUserComponent | undefined;
+    const pending = h.tool.execute(
+      "call",
+      params,
+      controller.signal,
+      undefined,
+      tuiContext((value) => {
+        component = value;
+      }),
+    );
+    await Promise.resolve();
+    controller.abort();
+    await pending;
+    expect(component).toBeDefined();
+    expect(h.session!.closed).toEqual(["abort", "aborted"]);
+  });
+
+  it("reports an abort signal as (abort, aborted), not cancelled (RPC)", async () => {
+    const h = harness();
+    const controller = new AbortController();
+    const pending = h.tool.execute("call", params, controller.signal, undefined, {
+      mode: "rpc",
+      hasUI: true,
+      ui: {
+        select: async (_question: string, _options: string[], opts?: { signal?: AbortSignal }) =>
+          new Promise<string | undefined>((resolve) => {
+            opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+          }),
+      },
+    });
+    await Promise.resolve();
+    controller.abort();
+    await pending;
+    expect(h.session!.closed).toEqual(["abort", "aborted"]);
+  });
 });

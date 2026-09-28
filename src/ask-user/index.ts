@@ -108,7 +108,19 @@ async function runTuiInteraction(
     }
 
     const winner = race.winner;
-    session?.close(winner === "abort" ? "abort" : "tui", localResult?.cancelled ? "cancelled" : "answered");
+    // §5.2: localResult === null means the component was cancelled without an answer —
+    // distinguish the abort signal ("aborted") from an Esc cancel ("cancelled"); a
+    // non-null result with cancelled=true is the component's own cancel path.
+    session?.close(
+      winner === "abort" ? "abort" : "tui",
+      localResult === null
+        ? winner === "abort"
+          ? "aborted"
+          : "cancelled"
+        : localResult.cancelled
+          ? "cancelled"
+          : "answered",
+    );
     return localResult;
   } catch (error) {
     if (race.claim("error")) session?.close("error", "aborted");
@@ -176,7 +188,7 @@ async function runRpcInteraction(
     if (answers === null) {
       if (signal?.aborted) race.claim("abort");
       else race.claim("tui");
-      session?.close(race.winner === "abort" ? "abort" : "tui", "cancelled");
+      session?.close(race.winner === "abort" ? "abort" : "tui", race.winner === "abort" ? "aborted" : "cancelled");
       return { questions, answers: {}, cancelled: true };
     }
     race.claim("tui");
