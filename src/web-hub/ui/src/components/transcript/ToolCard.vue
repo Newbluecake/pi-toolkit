@@ -69,7 +69,7 @@ const hasBody = computed(
     <div v-if="hasBody" class="tool-body">
       <div v-if="argsText !== undefined" class="tool-section">
         <div class="tool-label">{{ t("transcript.tool.input") }}</div>
-        <pre class="pre" translate="no">{{ argsText }}</pre>
+        <pre class="pre" translate="no" tabindex="0">{{ argsText }}</pre>
       </div>
       <div v-if="view.partial !== undefined && view.partial !== ''" class="tool-section">
         <div class="tool-label">
@@ -78,13 +78,13 @@ const hasBody = computed(
             {{ t("transcript.tool.showFull") }}
           </button>
         </div>
-        <pre class="pre" translate="no">{{ displayedPartial }}</pre>
+        <pre class="pre" translate="no" tabindex="0">{{ displayedPartial }}</pre>
       </div>
       <div v-if="view.result !== undefined" class="tool-section" :class="{ 'is-error': view.state === 'error' }">
         <div class="tool-label">
           {{ view.state === "error" ? t("transcript.tool.result") : t("transcript.tool.output") }}
         </div>
-        <pre class="pre" translate="no">{{ view.result }}</pre>
+        <pre class="pre" translate="no" tabindex="0">{{ view.result }}</pre>
       </div>
     </div>
   </details>

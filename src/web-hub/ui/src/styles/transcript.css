@@ -284,6 +284,13 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   max-height: 420px;
 }
 
+/* Scrollable code/output regions are keyboard-focusable (axe scrollable-region-focusable);
+   keep the ring inside the block so it is not clipped by the card. */
+.codeblock pre:focus-visible,
+.pre:focus-visible {
+  outline-offset: -2px;
+}
+
 /* thinking */
 .thinking > summary,
 .tool > summary {

@@ -79,6 +79,8 @@ describe("MarkdownView.vue", () => {
     const wrapper = mount(MarkdownView, { props: { text: "```js\nconst x = 1;\n```" } });
     expect(wrapper.find(".codeblock").exists()).toBe(true);
     expect(wrapper.get("pre code").text()).toBe("const x = 1;");
+    // axe scrollable-region-focusable: the horizontally scrollable <pre> must be keyboard-focusable.
+    expect(wrapper.get(".codeblock pre").attributes("tabindex")).toBe("0");
   });
 
   it("re-parses when the text prop changes (streaming tail updates)", async () => {

@@ -60,6 +60,6 @@ async function copy(): Promise<void> {
         <AppIcon name="copy" />
       </button>
     </div>
-    <pre ref="preEl" translate="no"><code>{{ text }}</code></pre>
+    <pre ref="preEl" translate="no" tabindex="0"><code>{{ text }}</code></pre>
   </div>
 </template>
