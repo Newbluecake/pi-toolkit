@@ -1,0 +1,93 @@
+{
+  "$comment": "Hub lifecycle states (control-plan.md v2.1 §6.6/§6.7, §9.3): the initial `hub` frame carries supersedePending with a RELATIVE countdown (`supersedeDeadlineInMs`, converted to an absolute deadline at startup — v2.1 '最晚 HH:MM 升级' banner); the script then walks the hub through the forced-upgrade path (restarting + forced + draining, §6.7.3 30-min cap) 1.5s after each client connects, and finally `stopping` (terminal '/webhub stop' banner) at 30s for interactive dev:hub sessions. One idle controllable agent keeps the detail view routable while banners change.",
+  "hubState": {
+    "caps": ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
+    "state": "running",
+    "nextVersion": "1.6.0",
+    "supersedePending": true,
+    "supersedeDeadlineInMs": 1500000
+  },
+  "agents": [
+    {
+      "agentKey": "agent-alpha",
+      "kind": "tui",
+      "pid": 45001,
+      "cwd": "/home/dev/pi-toolkit",
+      "state": "live",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-alpha-1",
+      "session": {
+        "sessionId": "sess-alpha-1",
+        "name": "hub state banner demo",
+        "cwd": "/home/dev/pi-toolkit",
+        "reason": "user",
+        "leafId": "e-alpha-2",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-alpha-2", "busy": false, "pending": false },
+      "prompts": []
+    }
+  ],
+  "history": {
+    "agent-alpha": {
+      "agentKey": "agent-alpha",
+      "entries": [
+        {
+          "id": "e-alpha-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": { "role": "user", "timestamp": 1700000000000, "content": "walk me through the hub states" }
+        },
+        {
+          "id": "e-alpha-2",
+          "parentId": "e-alpha-1",
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000004000,
+            "content": "supersedePending → forced restarting → stopping. Watch the top banner."
+          }
+        }
+      ],
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1700000004000,
+          "content": "supersedePending → forced restarting → stopping. Watch the top banner."
+        }
+      ],
+      "fromSeq": 1,
+      "hasMore": false,
+      "oldestEntryId": "e-alpha-1",
+      "source": "file"
+    }
+  },
+  "script": [
+    {
+      "atMs": 1500,
+      "event": "hub",
+      "data": {
+        "state": "restarting",
+        "nextVersion": "1.6.0",
+        "forced": true,
+        "draining": true,
+        "supersedePending": true
+      }
+    },
+    {
+      "atMs": 30000,
+      "event": "hub",
+      "data": {
+        "state": "stopping",
+        "supersedePending": false,
+        "forced": false,
+        "draining": false
+      }
+    }
+  ]
+}

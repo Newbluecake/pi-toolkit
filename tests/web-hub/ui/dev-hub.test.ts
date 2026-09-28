@@ -897,3 +897,755 @@ describe("visual.ts — isSameOrigin (strict Origin comparison, verifier fix)", 
     expect(isSameOrigin("not a url", origin)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// P2 control plane (control-plan.md v2.1 §9.3, §12.3 C6)
+// ---------------------------------------------------------------------------
+
+import { DEV_HUB_LATE_SETTLE_MS, type DevHubControlRequest } from "../../../scripts/web-hub/dev-hub.js";
+import {
+  CONTROL_SELECTORS,
+  CONTROL_SCENARIOS,
+  isControlActionCell,
+  isControlApiPath,
+  isControlAxeCell,
+  isControlScenario,
+} from "../../../scripts/web-hub/visual/checks-control.js";
+
+/** Deterministic 20-char ids satisfying dev-hub's `/^[A-Za-z0-9_-]{16,64}$/` rule. */
+let cmdIdSeq = 0;
+function cmdId(): string {
+  return `testcmd_${String(++cmdIdSeq).padStart(12, "0")}`;
+}
+
+async function loginToken(hub: DevHubHandle): Promise<string> {
+  const login = await fetch(hub.url + "/api/login", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ token: hub.token }),
+  });
+  expect(login.status).toBe(200);
+  return cookieFrom(login.headers.get("set-cookie"));
+}
+
+/** Control writes go through `postRaw` (never `fetch`) so the `Origin` header is explicit —
+ * §6.3's strict write CSRF makes it required, and undici would never send one on its own. */
+async function postControl(
+  hub: DevHubHandle,
+  path: "/api/cmd" | "/api/dialog",
+  cookie: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: any }> {
+  const { status, body: b } = await postRaw(hub.port, path, body, {
+    ...JSON_HEADERS,
+    Cookie: cookie,
+    Origin: `http://127.0.0.1:${hub.port}`,
+    ...headers,
+  });
+  return { status, body: b };
+}
+
+async function loginPassword(hub: DevHubHandle): Promise<string> {
+  const { status, setCookie } = await postRaw(
+    hub.port,
+    "/api/login",
+    { username: "admin", password: "admin" },
+    { ...JSON_HEADERS, Origin: `http://127.0.0.1:${hub.port}` },
+  );
+  expect(status).toBe(200);
+  return cookieFrom(setCookie);
+}
+
+/** Polls `fn` until it returns non-undefined (bounded — a missing condition is a test failure,
+ * never a hang). */
+async function waitFor<T>(fn: () => T | undefined, ms = 4_000): Promise<T> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const hit = fn();
+    if (hit !== undefined) return hit;
+    if (Date.now() > deadline) throw new Error("waitFor: condition never became true");
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+describe("dev-hub control plane — fixtures (C6)", () => {
+  it("all four new scenario fixtures validate", async () => {
+    for (const name of CONTROL_SCENARIOS) {
+      const fixture = await loadFixture(name, FIXTURES_DIR);
+      expect(Array.isArray(fixture.agents)).toBe(true);
+    }
+  });
+
+  it("control.json: busy agent with a 3-item queue (web×2 + terminal×1), old agent without control, stale agent", async () => {
+    const fixture = await loadFixture("control", FIXTURES_DIR);
+    const alpha = fixture.agents.find((a) => a.agentKey === "agent-alpha")!;
+    expect(alpha.control).toBe(true);
+    expect(alpha.status?.busy).toBe(true);
+    const queue = (alpha.status as { queue?: Array<{ source: string; cmdId?: string }> }).queue!;
+    expect(queue).toHaveLength(3);
+    expect(queue.filter((q) => q.source === "web")).toHaveLength(2);
+    expect(queue.filter((q) => q.source === "web").every((q) => typeof q.cmdId === "string")).toBe(true);
+    expect(queue.some((q) => q.source === "tui")).toBe(true);
+    const old = fixture.agents.find((a) => a.agentKey === "agent-old")!;
+    expect(old.control).toBeUndefined();
+    expect(fixture.agents.some((a) => a.state === "stale")).toBe(true);
+    const ctlItems = (fixture.ctl?.["agent-alpha"]?.items ?? []) as Array<{ state: string }>;
+    for (const state of ["queued", "consumed", "unconfirmed", "late_ok"]) {
+      expect(ctlItems.some((i) => i.state === state)).toBe(true);
+    }
+  });
+
+  it("ask-user.json: open single- and multi-question dialogs plus dual-channel race demo data", async () => {
+    const fixture = await loadFixture("ask-user", FIXTURES_DIR);
+    const single = fixture.dialogs?.["agent-alpha"]?.open[0]!;
+    expect(single.questions).toHaveLength(1);
+    expect(single.allowCancel).toBe(true);
+    const multi = fixture.dialogs?.["agent-beta"]?.open[0]!;
+    expect(multi.questions).toHaveLength(3);
+    expect(multi.questions.some((q) => q.multiSelect === true)).toBe(true);
+    expect(multi.questions.some((q) => q.allowOther === true && typeof q.context === "string")).toBe(true);
+    const gamma = fixture.dialogs?.["agent-gamma"]!;
+    expect(gamma.closed.some((c) => c.by === "web" && typeof c.cmdId === "string")).toBe(true);
+    const race = fixture.script?.find((s) => s.event === "dialogs" && s.agentKey === "agent-gamma");
+    expect(race).toBeDefined();
+    const raceClosed = (race!.data as { closed: Array<{ by: string }> }).closed;
+    expect(raceClosed.some((c) => c.by === "tui")).toBe(true);
+  });
+
+  it("commands.json: kinds × policies × output badges matrix", async () => {
+    const fixture = await loadFixture("commands", FIXTURES_DIR);
+    const items = fixture.commands?.["agent-alpha"]?.items ?? [];
+    for (const kind of ["builtin", "extension", "template", "skill"]) {
+      expect(items.some((i) => i.kind === kind)).toBe(true);
+    }
+    for (const policy of ["allow", "confirm", "deny"]) {
+      expect(items.some((i) => i.policy === policy)).toBe(true);
+    }
+    expect(items.some((i) => i.policyBusy === "confirm")).toBe(true);
+    expect(items.some((i) => i.output === "captured")).toBe(true);
+    expect(items.some((i) => i.output === "terminal")).toBe(true);
+  });
+
+  it("hub-states.json: supersedePending relative countdown + forced/stopping script steps", async () => {
+    const fixture = await loadFixture("hub-states", FIXTURES_DIR);
+    expect(fixture.hubState?.supersedePending).toBe(true);
+    expect(fixture.hubState?.supersedeDeadlineInMs).toBeGreaterThan(0);
+    const hubEvents = (fixture.script ?? []).filter((s) => s.event === "hub");
+    expect(
+      hubEvents.some(
+        (s) =>
+          (s.data as { state?: string }).state === "restarting" && (s.data as { forced?: boolean }).forced === true,
+      ),
+    ).toBe(true);
+    expect(hubEvents.some((s) => (s.data as { state?: string }).state === "stopping")).toBe(true);
+  });
+});
+
+describe("dev-hub control plane — POST /api/cmd", () => {
+  it("prompt on a busy agent: observed + steer behavior, recorded request with Origin header, ctl SSE pushed", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    await sse.waitFor("agents");
+    const id = cmdId();
+    const { status, body } = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id,
+      op: "prompt",
+      text: "steer the busy turn",
+    });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: true, id, data: { op: "prompt", delivery: "observed", behavior: "steer" } });
+    const ctl = await sse.waitFor("ctl");
+    const ctlData = ctl.data as { agentKey: string; items: Array<{ cmdId: string; state: string }> };
+    expect(ctlData.agentKey).toBe("agent-alpha");
+    expect(ctlData.items[0]).toMatchObject({ cmdId: id, state: "queued" });
+    const rec = hub.controlRequests().find((r: DevHubControlRequest) => r.id === id)!;
+    expect(rec.origin).toBe(`http://127.0.0.1:${hub.port}`);
+    expect(rec.responseStatus).toBe(200);
+    sse.close();
+  });
+
+  it("prompt on an idle agent starts a new turn (behavior idle); matching expect.sessionId passes", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const { status, body } = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-beta",
+      id: cmdId(),
+      op: "prompt",
+      text: "new turn",
+      expect: { sessionId: "sess-beta-1" },
+    });
+    expect(status).toBe(200);
+    expect(body.data).toMatchObject({ op: "prompt", delivery: "observed", behavior: "idle" });
+  });
+
+  it("expect.sessionId mismatch → 409 E_SESSION_CHANGED (not retryable, effect none), cached for replay", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const id = cmdId();
+    const req = {
+      agentKey: "agent-beta",
+      id,
+      op: "prompt",
+      text: "stale session",
+      expect: { sessionId: "sess-WRONG" },
+    };
+    const first = await postControl(hub, "/api/cmd", cookie, req);
+    expect(first.status).toBe(409);
+    expect(first.body).toMatchObject({ error: "E_SESSION_CHANGED", retryable: false, effect: "none" });
+    const replay = await postControl(hub, "/api/cmd", cookie, req);
+    expect(replay.status).toBe(409);
+    expect(replay.body.error).toBe("E_SESSION_CHANGED");
+  });
+
+  it("[compacting] and [stale-ctx] markers → 409 retryable (effect none), never cached", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    for (const [marker, code] of [
+      ["[compacting]", "E_BUSY_COMPACTING"],
+      ["[stale-ctx]", "E_STALE_CTX"],
+    ] as const) {
+      const id = cmdId();
+      const req = { agentKey: "agent-beta", id, op: "prompt", text: `${marker} body` };
+      const first = await postControl(hub, "/api/cmd", cookie, req);
+      expect(first.status).toBe(409);
+      expect(first.body).toMatchObject({ error: code, retryable: true, effect: "none" });
+      // Retryable effect-none failures are NOT cached — the same id may execute again (§3.4).
+      const retry = await postControl(hub, "/api/cmd", cookie, { ...req, text: "clean body" });
+      expect(retry.status).toBe(200);
+    }
+  });
+
+  it("unknown → queryOnly: [timeout] 504s with effect unknown, ledger settles late, cmd_late broadcasts", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    await sse.waitFor("agents");
+    const id = cmdId();
+    const req = { agentKey: "agent-alpha", id, op: "prompt", text: "[timeout] slow prompt" };
+    const first = await postControl(hub, "/api/cmd", cookie, req);
+    expect(first.status).toBe(504);
+    expect(first.body).toMatchObject({ error: "E_DEADLINE", retryable: true, effect: "unknown" });
+
+    const running = await postControl(hub, "/api/cmd", cookie, { ...req, queryOnly: true });
+    expect(running.status).toBe(200);
+    expect(running.body.data).toMatchObject({ op: "query", state: "running" });
+
+    const late = await sse.waitFor("cmd_late", DEV_HUB_LATE_SETTLE_MS + 3_000);
+    expect(late.data).toMatchObject({ agentKey: "agent-alpha", id, op: "prompt", ok: true });
+
+    const settled = await postControl(hub, "/api/cmd", cookie, { ...req, queryOnly: true });
+    expect(settled.status).toBe(200);
+    expect(settled.body).toMatchObject({
+      ok: true,
+      id,
+      dup: true,
+      data: { op: "query", state: "ok", result: { ok: true } },
+    });
+    sse.close();
+  });
+
+  it("queryOnly for a never-seen id → 404 E_UNKNOWN_ID (provably never executed)", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const { status, body } = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "prompt",
+      text: "never sent",
+      queryOnly: true,
+    });
+    expect(status).toBe(404);
+    expect(body).toMatchObject({ error: "E_UNKNOWN_ID", retryable: false, effect: "none" });
+  });
+
+  it("same id + same payload replays as dup without re-executing; same id + different payload → 409", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const id = cmdId();
+    const req = { agentKey: "agent-beta", id, op: "prompt", text: "exactly once" };
+    const first = await postControl(hub, "/api/cmd", cookie, req);
+    expect(first.status).toBe(200);
+    const dup = await postControl(hub, "/api/cmd", cookie, req);
+    expect(dup.status).toBe(200);
+    expect(dup.body).toMatchObject({ ok: true, id, dup: true });
+    const reused = await postControl(hub, "/api/cmd", cookie, { ...req, text: "different payload" });
+    expect(reused.status).toBe(409);
+    expect(reused.body.error).toBe("E_BAD_REQUEST");
+    expect(reused.body.message).toMatch(/id reused/);
+  });
+
+  it("agent routing: unknown agent 404, old agent (no control) 409 E_UNSUPPORTED, stale agent 503 E_AGENT_GONE", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const base = { id: cmdId(), op: "prompt", text: "hi" };
+    expect((await postControl(hub, "/api/cmd", cookie, { ...base, agentKey: "agent-nope" })).status).toBe(404);
+    const old = await postControl(hub, "/api/cmd", cookie, { ...base, agentKey: "agent-old", id: cmdId() });
+    expect(old.status).toBe(409);
+    expect(old.body.error).toBe("E_UNSUPPORTED");
+    const stale = await postControl(hub, "/api/cmd", cookie, { ...base, agentKey: "agent-stale", id: cmdId() });
+    expect(stale.status).toBe(503);
+    expect(stale.body.error).toBe("E_AGENT_GONE");
+  });
+
+  it("abort echoes wasBusy from the agent card", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const busy = await postControl(hub, "/api/cmd", cookie, { agentKey: "agent-alpha", id: cmdId(), op: "abort" });
+    expect(busy.body.data).toMatchObject({ op: "abort", wasBusy: true });
+    const idle = await postControl(hub, "/api/cmd", cookie, { agentKey: "agent-beta", id: cmdId(), op: "abort" });
+    expect(idle.body.data).toMatchObject({ op: "abort", wasBusy: false });
+  });
+
+  it("steer/stop subagent paths: ok, E_NOT_FOUND, E_NOT_RUNNING, alreadyTerminal, escalatedTo", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const okSteer = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "steer_subagent",
+      runId: "r_ABC123",
+      text: "hurry up",
+    });
+    expect(okSteer.status).toBe(200);
+    expect(
+      (
+        await postControl(hub, "/api/cmd", cookie, {
+          agentKey: "agent-alpha",
+          id: cmdId(),
+          op: "steer_subagent",
+          runId: "r_missing_1",
+          text: "hello?",
+        })
+      ).status,
+    ).toBe(404);
+    const notRunning = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "steer_subagent",
+      runId: "r_OLD_done",
+      text: "too late",
+    });
+    expect(notRunning.status).toBe(409);
+    expect(notRunning.body.error).toBe("E_NOT_RUNNING");
+    const already = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "abort_subagent",
+      runId: "r_OLD_done",
+    });
+    expect(already.body.data).toMatchObject({ op: "abort_subagent", alreadyTerminal: true });
+    const stopped = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "abort_subagent",
+      runId: "r_ABC123",
+    });
+    expect(stopped.body.data).toMatchObject({ op: "abort_subagent", escalatedTo: "L2" });
+  });
+
+  it("command op: unknown command 404, deny 409, confirm two-step, never falls through to text", async () => {
+    const hub = await start({ mode: "token", scenario: "commands" });
+    const cookie = await loginToken(hub);
+    const unknown = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "nosuchcmd",
+      args: "",
+    });
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error).toBe("E_UNKNOWN_COMMAND");
+    const denied = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "quit",
+      args: "",
+    });
+    expect(denied.status).toBe(409);
+    expect(denied.body.error).toBe("E_COMMAND_DENIED");
+    const needsConfirm = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "thirdparty-thing",
+      args: "--force",
+    });
+    expect(needsConfirm.status).toBe(409);
+    expect(needsConfirm.body.error).toBe("E_CONFIRM_REQUIRED");
+    const confirmed = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "thirdparty-thing",
+      args: "--force",
+      confirm: true,
+    });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.data).toMatchObject({ kind: "extension", completion: "unknown", captured: false });
+  });
+
+  it("command op: builtin /session sync output, busy /compact async + cmd_late, captured /agent status output", async () => {
+    const hub = await start({ mode: "token", scenario: "commands" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    await sse.waitFor("agents");
+
+    const session = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "session",
+      args: "",
+    });
+    expect(session.status).toBe(200);
+    expect(session.body.data).toMatchObject({ kind: "builtin", completion: "sync" });
+    const output = session.body.data.output as { entries: Array<{ kind: string; text: string }> };
+    expect(output.entries[0]).toMatchObject({ kind: "text" });
+    expect(output.entries[0]!.text).toContain("sess-alpha-1");
+
+    // The agent is busy ⇒ /compact's policyBusy flips to confirm (§4.6 table).
+    const compactBlocked = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "compact",
+      args: "",
+    });
+    expect(compactBlocked.status).toBe(409);
+    expect(compactBlocked.body.error).toBe("E_CONFIRM_REQUIRED");
+    const compact = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "compact",
+      args: "",
+      confirm: true,
+    });
+    expect(compact.status).toBe(200);
+    expect(compact.body.data).toMatchObject({ kind: "builtin", completion: "async" });
+    const late = await sse.waitFor("cmd_late", DEV_HUB_LATE_SETTLE_MS + 3_000);
+    expect(late.data).toMatchObject({ agentKey: "agent-alpha", op: "command", ok: true });
+
+    const captured = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "agent",
+      args: "status",
+    });
+    expect(captured.status).toBe(200);
+    expect(captured.body.data).toMatchObject({ kind: "extension", completion: "sync", captured: true });
+    const capOut = captured.body.data.output as { entries: Array<{ kind: string }> };
+    expect(capOut.entries.some((e) => e.kind === "notify")).toBe(true);
+
+    const template = await postControl(hub, "/api/cmd", cookie, {
+      agentKey: "agent-alpha",
+      id: cmdId(),
+      op: "command",
+      name: "daily-standup",
+      args: "",
+    });
+    expect(template.body.data).toMatchObject({ kind: "template", completion: "unknown" });
+    sse.close();
+  });
+
+  it("strict write CSRF (§6.3 D8): missing/wrong Origin or cross-site Sec-Fetch-Site → 403 E_CSRF", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const req = { agentKey: "agent-alpha", id: cmdId(), op: "abort" };
+    const noOrigin = await postRaw(hub.port, "/api/cmd", req, { ...JSON_HEADERS, Cookie: cookie });
+    expect(noOrigin.status).toBe(403);
+    const wrongOrigin = await postControl(
+      hub,
+      "/api/cmd",
+      cookie,
+      { ...req, id: cmdId() },
+      { Origin: "http://evil.example" },
+    );
+    expect(wrongOrigin.status).toBe(403);
+    const crossSite = await postControl(
+      hub,
+      "/api/cmd",
+      cookie,
+      { ...req, id: cmdId() },
+      { "Sec-Fetch-Site": "cross-site" },
+    );
+    expect(crossSite.status).toBe(403);
+    const sameSite = await postControl(
+      hub,
+      "/api/cmd",
+      cookie,
+      { ...req, id: cmdId() },
+      { "Sec-Fetch-Site": "same-origin" },
+    );
+    expect(sameSite.status).toBe(200);
+    const unauthed = await postControl(hub, "/api/cmd", "", { ...req, id: cmdId() });
+    expect(unauthed.status).toBe(401);
+  });
+});
+
+describe("dev-hub control plane — POST /api/dialog", () => {
+  const single = { agentKey: "agent-alpha", dialogId: "ask:tc-single-1", epoch: "epoch-alpha-1" };
+
+  it("first answer wins the race: 200 + dialogs SSE closed by web with the winning cmdId; second answer → 409", async () => {
+    const hub = await start({ mode: "token", scenario: "ask-user" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    await sse.waitFor("agents");
+    const id = cmdId();
+    const win = await postControl(hub, "/api/dialog", cookie, {
+      ...single,
+      id,
+      action: "answer",
+      answers: [{ selected: ["Plan A — rewrite"], other: null }],
+    });
+    expect(win.status).toBe(200);
+    expect(win.body).toMatchObject({ ok: true, id });
+    const frame = await sse.waitFor("dialogs");
+    const data = frame.data as {
+      agentKey: string;
+      open: unknown[];
+      closed: Array<{ dialogId: string; by: string; cmdId?: string }>;
+    };
+    expect(data.agentKey).toBe("agent-alpha");
+    expect(data.open).toHaveLength(0);
+    expect(data.closed[0]).toMatchObject({ dialogId: "ask:tc-single-1", by: "web", cmdId: id });
+    const lose = await postControl(hub, "/api/dialog", cookie, {
+      ...single,
+      id: cmdId(),
+      action: "answer",
+      answers: [{ selected: ["Plan B — patch"], other: null }],
+    });
+    expect(lose.status).toBe(409);
+    expect(lose.body).toMatchObject({ error: "E_DIALOG_CLOSED", retryable: false, effect: "none" });
+    sse.close();
+  });
+
+  it("stale epoch → 409 E_DIALOG_CLOSED{stale}", async () => {
+    const hub = await start({ mode: "token", scenario: "ask-user" });
+    const cookie = await loginToken(hub);
+    const { status, body } = await postControl(hub, "/api/dialog", cookie, {
+      ...single,
+      epoch: "epoch-OLD",
+      id: cmdId(),
+      action: "answer",
+      answers: [{ selected: ["Plan A — rewrite"], other: null }],
+    });
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ error: "E_DIALOG_CLOSED", message: "stale" });
+  });
+
+  it("E_BAD_ANSWER: wrong count, unknown label, multi-value on single-select, Other when disallowed — dialog stays open", async () => {
+    const hub = await start({ mode: "token", scenario: "ask-user" });
+    const cookie = await loginToken(hub);
+    const answer = (answers: unknown) =>
+      postControl(hub, "/api/dialog", cookie, { ...single, id: cmdId(), action: "answer", answers });
+    expect((await answer([])).body.error).toBe("E_BAD_ANSWER");
+    expect((await answer([{ selected: ["Plan C"], other: null }])).body.error).toBe("E_BAD_ANSWER");
+    expect((await answer([{ selected: ["Plan A — rewrite", "Plan B — patch"], other: null }])).body.error).toBe(
+      "E_BAD_ANSWER",
+    );
+    const noOther = await postControl(hub, "/api/dialog", cookie, {
+      agentKey: "agent-gamma",
+      dialogId: "ask:tc-race-1",
+      epoch: "epoch-gamma-1",
+      id: cmdId(),
+      action: "answer",
+      answers: [{ selected: ["answer from the web"], other: "sneaky free text" }],
+    });
+    // gamma's race dialog may have been closed by the script (700ms) — accept either the
+    // answer-validation 400 (dialog still open) or the race-lost 409, but never a 200.
+    expect([400, 409]).toContain(noOther.status);
+    if (noOther.status === 400) expect(noOther.body.error).toBe("E_BAD_ANSWER");
+    // The single-question dialog is still open after all those failures.
+    const stillOpen = await answer([{ selected: ["Plan B — patch"], other: null }]);
+    expect(stillOpen.status).toBe(200);
+  });
+
+  it("multi-question dialog: full valid answer (multiSelect + Other) → 200", async () => {
+    const hub = await start({ mode: "token", scenario: "ask-user" });
+    const cookie = await loginToken(hub);
+    const { status } = await postControl(hub, "/api/dialog", cookie, {
+      agentKey: "agent-beta",
+      dialogId: "ask:tc-multi-1",
+      epoch: "epoch-beta-1",
+      id: cmdId(),
+      action: "answer",
+      answers: [
+        { selected: ["staging"], other: null },
+        { selected: ["unit + integration green", "visual matrix green"], other: null },
+        { selected: ["nothing — proceed"], other: "ship it Friday" },
+      ],
+    });
+    expect(status).toBe(200);
+  });
+
+  it("cancel: allowed → 200 outcome cancelled; allowCancel:false → 400", async () => {
+    const hub = await start({ mode: "token", scenario: "ask-user" });
+    const cookie = await loginToken(hub);
+    const cancel = await postControl(hub, "/api/dialog", cookie, { ...single, id: cmdId(), action: "cancel" });
+    expect(cancel.status).toBe(200);
+    const denied = await postControl(hub, "/api/dialog", cookie, {
+      agentKey: "agent-gamma",
+      dialogId: "ask:tc-race-1",
+      epoch: "epoch-gamma-1",
+      id: cmdId(),
+      action: "cancel",
+    });
+    // Same script-race caveat as above: 400 (still open, cancel not allowed) or 409 (tui won).
+    expect([400, 409]).toContain(denied.status);
+    if (denied.status === 400) expect(denied.body.error).toBe("E_BAD_REQUEST");
+  });
+});
+
+describe("dev-hub control plane — hub states + slots", () => {
+  it("the hub frame carries fixture hubState: caps, supersedePending and an absolute future deadline", async () => {
+    const hub = await start({ mode: "token", scenario: "hub-states" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    const frame = await sse.waitFor("hub");
+    const data = frame.data as {
+      caps?: string[];
+      state?: string;
+      supersedePending?: boolean;
+      supersedeDeadlineAt?: number;
+      nextVersion?: string;
+    };
+    expect(data.caps).toContain("cmd.v1");
+    expect(data.caps).toContain("ctl.v2");
+    expect(data.state).toBe("running");
+    expect(data.supersedePending).toBe(true);
+    expect(data.nextVersion).toBe("1.6.0");
+    expect(data.supersedeDeadlineAt).toBeGreaterThan(Date.now());
+    sse.close();
+  });
+
+  it("a script hub event rebroadcasts the forced-restarting state (merged, countdown preserved)", async () => {
+    const hub = await start({ mode: "token", scenario: "hub-states" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    await sse.waitFor("hub");
+    const forced = await waitFor(() =>
+      sse.events.find((e) => e.event === "hub" && (e.data as { state?: string }).state === "restarting"),
+    );
+    const data = forced.data as { forced?: boolean; draining?: boolean; supersedeDeadlineAt?: number };
+    expect(data.forced).toBe(true);
+    expect(data.draining).toBe(true);
+    expect(data.supersedeDeadlineAt).toBeGreaterThan(Date.now());
+    sse.close();
+  });
+
+  it("subscribe delivers the fixture's dialogs/ctl/commands slots right after the history snapshot", async () => {
+    const hub = await start({ mode: "token", scenario: "control" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    const agentsFrame = await sse.waitFor("agents");
+    const cards = (agentsFrame.data as { agents: Array<{ agentKey: string; dialogs?: { open: unknown[] } }> }).agents;
+    expect(cards.find((c) => c.agentKey === "agent-alpha")?.dialogs).toBeUndefined(); // no dialogs in control.json
+    const clientId = (sse.events.find((e) => e.event === "hello")?.data as { clientId: string }).clientId;
+    await postRaw(
+      hub.port,
+      "/api/subscribe",
+      { clientId, agentKey: "agent-alpha" },
+      { ...JSON_HEADERS, Cookie: cookie },
+    );
+    await sse.waitFor("history");
+    const ctl = await sse.waitFor("ctl");
+    expect(ctl.data).toMatchObject({ agentKey: "agent-alpha", sessionId: "sess-alpha-1" });
+    expect((ctl.data as { items: unknown[] }).items.length).toBeGreaterThan(0);
+    sse.close();
+  });
+
+  it("the agents frame carries the dialogs slot on cards (ask-user fixture)", async () => {
+    const hub = await start({ mode: "token", scenario: "ask-user" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    const agentsFrame = await sse.waitFor("agents");
+    const cards = (
+      agentsFrame.data as { agents: Array<{ agentKey: string; dialogs?: { open: Array<{ dialogId: string }> } }> }
+    ).agents;
+    const alpha = cards.find((c) => c.agentKey === "agent-alpha");
+    expect(alpha?.dialogs?.open[0]?.dialogId).toBe("ask:tc-single-1");
+    sse.close();
+  });
+});
+
+describe("dev-hub control plane — password mode", () => {
+  it("/api/cmd works with the LAN write gate: Origin required, 200 with it, 403 without", async () => {
+    const hub = await start({ mode: "password", scenario: "control" });
+    const cookie = await loginPassword(hub);
+    const ok = await postControl(hub, "/api/cmd", cookie, { agentKey: "agent-alpha", id: cmdId(), op: "abort" });
+    expect(ok.status).toBe(200);
+    const noOrigin = await postRaw(
+      hub.port,
+      "/api/cmd",
+      { agentKey: "agent-alpha", id: cmdId(), op: "abort" },
+      { ...JSON_HEADERS, Cookie: cookie },
+    );
+    expect(noOrigin.status).toBe(403);
+    const crossSite = await postControl(
+      hub,
+      "/api/cmd",
+      cookie,
+      { agentKey: "agent-alpha", id: cmdId(), op: "abort" },
+      { "Sec-Fetch-Site": "cross-site" },
+    );
+    expect(crossSite.status).toBe(403);
+  });
+});
+
+describe("checks-control.ts framework — pure helpers", () => {
+  it("isControlScenario gates exactly the four C6 scenarios", () => {
+    for (const s of ["control", "ask-user", "commands", "hub-states"]) expect(isControlScenario(s)).toBe(true);
+    for (const s of ["dashboard", "detail", "login", "states", "long", ""]) expect(isControlScenario(s)).toBe(false);
+    expect([...CONTROL_SCENARIOS].sort()).toEqual(["ask-user", "commands", "control", "hub-states"]);
+  });
+
+  it("isControlApiPath matches only the two write endpoints", () => {
+    expect(isControlApiPath("http://127.0.0.1:1/api/cmd")).toBe(true);
+    expect(isControlApiPath("http://127.0.0.1:1/api/dialog")).toBe(true);
+    expect(isControlApiPath("http://127.0.0.1:1/api/cmd/extra")).toBe(false);
+    expect(isControlApiPath("http://127.0.0.1:1/api/events")).toBe(false);
+    expect(isControlApiPath("not a url")).toBe(false);
+  });
+
+  it("action/axe cell gating picks one representative cell per theme rule", () => {
+    expect(isControlActionCell("control", 1024, false, "light")).toBe(true);
+    expect(isControlActionCell("control", 1024, true, "light")).toBe(false);
+    expect(isControlActionCell("control", 1024, false, "dark")).toBe(false);
+    expect(isControlActionCell("control", 375, false, "light")).toBe(false);
+    expect(isControlActionCell("dashboard", 1024, false, "light")).toBe(false);
+    expect(isControlAxeCell("ask-user", 375, true)).toBe(true);
+    expect(isControlAxeCell("ask-user", 1024, false)).toBe(true);
+    expect(isControlAxeCell("ask-user", 1024, true)).toBe(false);
+    expect(isControlAxeCell("ask-user", 768, false)).toBe(false);
+    expect(isControlAxeCell("dashboard", 375, true)).toBe(false);
+  });
+
+  it("the selector contract names every component family C5 must render", () => {
+    for (const key of [
+      "composer",
+      "stopButton",
+      "queueList",
+      "controlNotice",
+      "topbarControlChip",
+      "topbarReadonlyChip",
+      "askUserForm",
+      "askUserTab",
+      "askUserOther",
+      "askUserSubmit",
+      "hubStateBanner",
+      "commandPalette",
+      "commandResult",
+      "dock",
+      "transcriptItem",
+    ] as const) {
+      expect(typeof CONTROL_SELECTORS[key]).toBe("string");
+      expect(CONTROL_SELECTORS[key].length).toBeGreaterThan(0);
+    }
+  });
+});

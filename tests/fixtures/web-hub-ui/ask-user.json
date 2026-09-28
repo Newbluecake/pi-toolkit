@@ -1,0 +1,262 @@
+{
+  "$comment": "ask_user dual-channel scenario (control-plan.md v2.1 §5, §9.3): agent-alpha has an open SINGLE-question dialog (allowCancel), agent-beta an open MULTI-question dialog (3 questions: single with header, multiSelect, one with context+allowOther), agent-gamma carries the dual-channel RACE demo data — a dialog the script closes by \"tui\" 700ms after each client connects (web form must collapse 'Answered in the terminal'), plus an already-closed entry won by another browser (`by:\"web\"` with the winning cmdId, §3.5 reconciliation). A live web answer to any open dialog wins the race and moves it open→closed with the request's own cmdId.",
+  "hubState": {
+    "caps": ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
+    "state": "running"
+  },
+  "agents": [
+    {
+      "agentKey": "agent-alpha",
+      "kind": "tui",
+      "pid": 43001,
+      "cwd": "/home/dev/pi-toolkit",
+      "state": "live",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-alpha-1",
+      "session": {
+        "sessionId": "sess-alpha-1",
+        "name": "single-question ask_user",
+        "cwd": "/home/dev/pi-toolkit",
+        "reason": "user",
+        "leafId": "e-alpha-2",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-alpha-2", "busy": true, "pending": true },
+      "prompts": [{ "kind": "custom", "title": "ask_user", "since": 1700000200000, "dialogId": "ask:tc-single-1" }]
+    },
+    {
+      "agentKey": "agent-beta",
+      "kind": "tui",
+      "pid": 43002,
+      "cwd": "/home/dev/service-beta",
+      "state": "live",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-beta-1",
+      "session": {
+        "sessionId": "sess-beta-1",
+        "name": "multi-question ask_user",
+        "cwd": "/home/dev/service-beta",
+        "reason": "user",
+        "leafId": "e-beta-2",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-beta-2", "busy": true, "pending": true },
+      "prompts": [{ "kind": "custom", "title": "ask_user", "since": 1700000210000, "dialogId": "ask:tc-multi-1" }]
+    },
+    {
+      "agentKey": "agent-gamma",
+      "kind": "tui",
+      "pid": 43003,
+      "cwd": "/home/dev/race-demo",
+      "state": "live",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-gamma-1",
+      "session": {
+        "sessionId": "sess-gamma-1",
+        "name": "dual-channel race demo",
+        "cwd": "/home/dev/race-demo",
+        "reason": "user",
+        "leafId": "e-gamma-2",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "mode": "tui"
+      },
+      "status": { "leafId": "e-gamma-2", "busy": true, "pending": true },
+      "prompts": [{ "kind": "custom", "title": "ask_user", "since": 1700000220000, "dialogId": "ask:tc-race-1" }]
+    }
+  ],
+  "history": {
+    "agent-alpha": {
+      "agentKey": "agent-alpha",
+      "entries": [
+        {
+          "id": "e-alpha-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": { "role": "user", "timestamp": 1700000000000, "content": "ask me which plan to take" }
+        },
+        {
+          "id": "e-alpha-2",
+          "parentId": "e-alpha-1",
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000004000,
+            "content": "One decision is needed before I continue."
+          }
+        }
+      ],
+      "tailMessages": [
+        { "role": "assistant", "timestamp": 1700000004000, "content": "One decision is needed before I continue." }
+      ],
+      "fromSeq": 1,
+      "hasMore": false,
+      "oldestEntryId": "e-alpha-1",
+      "source": "file"
+    },
+    "agent-beta": {
+      "agentKey": "agent-beta",
+      "entries": [
+        {
+          "id": "e-beta-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": { "role": "user", "timestamp": 1700000000000, "content": "plan the rollout with me" }
+        },
+        {
+          "id": "e-beta-2",
+          "parentId": "e-beta-1",
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "message": { "role": "assistant", "timestamp": 1700000004000, "content": "Three questions coming up." }
+        }
+      ],
+      "tailMessages": [{ "role": "assistant", "timestamp": 1700000004000, "content": "Three questions coming up." }],
+      "fromSeq": 1,
+      "hasMore": false,
+      "oldestEntryId": "e-beta-1",
+      "source": "file"
+    }
+  },
+  "dialogs": {
+    "agent-alpha": {
+      "epoch": "epoch-alpha-1",
+      "open": [
+        {
+          "dialogId": "ask:tc-single-1",
+          "source": "ask_user",
+          "toolCallId": "tc-single-1",
+          "questions": [
+            {
+              "question": "Which implementation plan should I take?",
+              "context": "Plan A rewrites the module; plan B patches it in place.",
+              "options": [
+                { "label": "Plan A — rewrite", "description": "Cleaner result, larger diff, needs full re-review" },
+                { "label": "Plan B — patch", "description": "Minimal diff, keeps the known quirks" }
+              ]
+            }
+          ],
+          "allowCancel": true,
+          "openedAt": 1700000200000
+        }
+      ],
+      "closed": []
+    },
+    "agent-beta": {
+      "epoch": "epoch-beta-1",
+      "open": [
+        {
+          "dialogId": "ask:tc-multi-1",
+          "source": "ask_user",
+          "toolCallId": "tc-multi-1",
+          "questions": [
+            {
+              "question": "Roll out to which environment first?",
+              "header": "Env",
+              "options": [
+                { "label": "staging", "description": "Full synthetic traffic, zero user impact" },
+                { "label": "canary", "description": "5% of production traffic" }
+              ]
+            },
+            {
+              "question": "Which checks gate the rollout?",
+              "header": "Gates",
+              "multiSelect": true,
+              "options": [
+                { "label": "unit + integration green" },
+                { "label": "visual matrix green" },
+                { "label": "manual QA sign-off" }
+              ]
+            },
+            {
+              "question": "Anything else I should know before proceeding?",
+              "context": "Free text is fine; leave empty to skip.",
+              "options": [{ "label": "nothing — proceed" }],
+              "allowOther": true
+            }
+          ],
+          "allowCancel": true,
+          "openedAt": 1700000210000
+        }
+      ],
+      "closed": []
+    },
+    "agent-gamma": {
+      "epoch": "epoch-gamma-1",
+      "open": [
+        {
+          "dialogId": "ask:tc-race-1",
+          "source": "ask_user",
+          "toolCallId": "tc-race-1",
+          "questions": [
+            {
+              "question": "The terminal is about to answer this — race it if you like.",
+              "options": [{ "label": "answer from the web" }, { "label": "let the terminal win" }],
+              "allowOther": false
+            }
+          ],
+          "allowCancel": false,
+          "openedAt": 1700000220000
+        }
+      ],
+      "closed": [
+        {
+          "dialogId": "ask:tc-earlier-1",
+          "by": "web",
+          "outcome": "answered",
+          "cmdId": "webcmd_gamma_win1a",
+          "at": 1700000190000
+        },
+        {
+          "dialogId": "ask:tc-earlier-0",
+          "by": "tui",
+          "outcome": "answered",
+          "at": 1700000180000
+        }
+      ]
+    }
+  },
+  "script": [
+    {
+      "atMs": 700,
+      "event": "dialogs",
+      "agentKey": "agent-gamma",
+      "data": {
+        "agentKey": "agent-gamma",
+        "epoch": "epoch-gamma-1",
+        "open": [],
+        "closed": [
+          {
+            "dialogId": "ask:tc-race-1",
+            "by": "tui",
+            "outcome": "answered",
+            "at": 1700000221000
+          },
+          {
+            "dialogId": "ask:tc-earlier-1",
+            "by": "web",
+            "outcome": "answered",
+            "cmdId": "webcmd_gamma_win1a",
+            "at": 1700000190000
+          },
+          {
+            "dialogId": "ask:tc-earlier-0",
+            "by": "tui",
+            "outcome": "answered",
+            "at": 1700000180000
+          }
+        ]
+      }
+    }
+  ]
+}

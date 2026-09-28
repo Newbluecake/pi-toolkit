@@ -1,0 +1,177 @@
+{
+  "$comment": "Web slash-command scenario (control-plan.md v2.1 §4.6/§4.9, §9.3): one busy controllable agent whose `commands` slot covers the full CommandInfoWire matrix — kinds (builtin / extension / template / skill) × policies (allow / confirm / deny, incl. policyBusy flipping /compact to confirm while busy) × output badges (captured = pi-toolkit own, terminal = third-party). POST /api/cmd op:\"command\" against this fixture resolves policy from this slot; builtin demo names (session/compact/model/name/thinking/new) work even without a slot entry.",
+  "hubState": {
+    "caps": ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
+    "state": "running"
+  },
+  "agents": [
+    {
+      "agentKey": "agent-alpha",
+      "kind": "tui",
+      "pid": 44001,
+      "cwd": "/home/dev/pi-toolkit",
+      "state": "live",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-alpha-1",
+      "session": {
+        "sessionId": "sess-alpha-1",
+        "name": "command palette demo",
+        "cwd": "/home/dev/pi-toolkit",
+        "reason": "user",
+        "leafId": "e-alpha-2",
+        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "thinkingLevel": "medium",
+        "mode": "tui"
+      },
+      "status": {
+        "leafId": "e-alpha-2",
+        "busy": true,
+        "pending": false,
+        "contextUsage": { "tokens": 120000, "contextWindow": 200000, "percent": 60 }
+      },
+      "prompts": []
+    }
+  ],
+  "history": {
+    "agent-alpha": {
+      "agentKey": "agent-alpha",
+      "entries": [
+        {
+          "id": "e-alpha-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": { "role": "user", "timestamp": 1700000000000, "content": "show me the command palette states" }
+        },
+        {
+          "id": "e-alpha-2",
+          "parentId": "e-alpha-1",
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000004000,
+            "content": "allow / confirm / deny, captured vs terminal output — all in the slot."
+          }
+        }
+      ],
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1700000004000,
+          "content": "allow / confirm / deny, captured vs terminal output — all in the slot."
+        }
+      ],
+      "fromSeq": 1,
+      "hasMore": false,
+      "oldestEntryId": "e-alpha-1",
+      "source": "file"
+    }
+  },
+  "commands": {
+    "agent-alpha": {
+      "epoch": "epoch-alpha-1",
+      "items": [
+        {
+          "name": "session",
+          "kind": "builtin",
+          "description": "Show session info",
+          "policy": "allow",
+          "output": "captured"
+        },
+        {
+          "name": "compact",
+          "kind": "builtin",
+          "description": "Compact the session context",
+          "policy": "allow",
+          "policyBusy": "confirm",
+          "output": "captured"
+        },
+        {
+          "name": "model",
+          "kind": "builtin",
+          "description": "Switch model (provider/id)",
+          "policy": "allow",
+          "output": "captured"
+        },
+        {
+          "name": "name",
+          "kind": "builtin",
+          "description": "Rename the session",
+          "policy": "allow",
+          "output": "captured"
+        },
+        {
+          "name": "thinking",
+          "kind": "builtin",
+          "description": "Set thinking level",
+          "policy": "allow",
+          "output": "captured"
+        },
+        { "name": "new", "kind": "builtin", "description": "Start a new session", "policy": "confirm" },
+        { "name": "quit", "kind": "builtin", "description": "Exit pi", "policy": "deny" },
+        { "name": "resume", "kind": "builtin", "description": "Resume a session (terminal picker)", "policy": "deny" },
+        {
+          "name": "agent",
+          "kind": "extension",
+          "description": "Subagent fleet status and settings",
+          "policy": "allow",
+          "output": "captured"
+        },
+        {
+          "name": "tasklist",
+          "kind": "extension",
+          "description": "Show the task list",
+          "policy": "allow",
+          "output": "captured"
+        },
+        {
+          "name": "mem",
+          "kind": "extension",
+          "description": "Project memory (list/doctor/tidy)",
+          "policy": "allow",
+          "output": "captured"
+        },
+        {
+          "name": "cache-ttl",
+          "kind": "extension",
+          "description": "Prompt-cache TTL status",
+          "policy": "allow",
+          "output": "captured"
+        },
+        {
+          "name": "webhub",
+          "kind": "extension",
+          "description": "Manage the web hub",
+          "policy": "deny",
+          "output": "captured"
+        },
+        {
+          "name": "goal",
+          "kind": "extension",
+          "description": "Objective-driven loop",
+          "policy": "confirm",
+          "output": "captured"
+        },
+        {
+          "name": "resume-recent",
+          "kind": "extension",
+          "description": "Recent sessions picker (terminal)",
+          "policy": "deny",
+          "output": "captured"
+        },
+        {
+          "name": "thirdparty-thing",
+          "kind": "extension",
+          "description": "A third-party extension command",
+          "policy": "confirm",
+          "output": "terminal"
+        },
+        { "name": "skill:review-code", "kind": "skill", "description": "Run the code-review skill", "policy": "allow" },
+        { "name": "daily-standup", "kind": "template", "description": "Standup prompt template", "policy": "allow" }
+      ]
+    }
+  }
+}

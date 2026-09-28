@@ -34,6 +34,39 @@
  * `long` fixture) that synthesizes a large, deterministic transcript at request time instead of
  * checking 1000 JSON entries into the repo.
  *
+ * P2 control plane (control-plan.md v2.1 §9.3, §12.3 C6): dev-hub also fakes the write surface —
+ * `POST /api/cmd` and `POST /api/dialog` (§6.2 request/response shapes, §6.3's stricter *write*
+ * CSRF: `Origin` REQUIRED + `Sec-Fetch-Site` must be `same-origin` when present, on BOTH modes)
+ * — so the frontend's `transport.command()`/`dialog()` and every new control state (§7) can be
+ * developed and visually exercised without a real pi process. Behavior is deterministic, driven
+ * by request-content markers instead of a scripted agent:
+ *   - success paths: prompt (observed, or `delivery:"unobserved"` when the text contains
+ *     `[unobserved]`), abort (`wasBusy` from the card), steer/stop subagent, builtin bridge
+ *     (`session` sync output, `compact` async), captured pi-toolkit commands (`captured:true`
+ *     with demo `CommandOutputWire`), third-party commands (`captured:false,
+ *     completion:"unknown"`), template/skill commands;
+ *   - failure paths: `[compacting]` → 409 `E_BUSY_COMPACTING`, `[stale-ctx]` → 409
+ *     `E_STALE_CTX` (both retryable/effect none), `expect.sessionId` mismatch → 409
+ *     `E_SESSION_CHANGED`, `[reject]` in steer text → 422 `E_SUBAGENT_REJECTED`, runId
+ *     `r_missing…` → 404 `E_NOT_FOUND`, runId `…_done` → 409 `E_NOT_RUNNING` (steer) /
+ *     `alreadyTerminal` (stop), unknown command → 404 `E_UNKNOWN_COMMAND`, policy `deny` → 409
+ *     `E_COMMAND_DENIED`, policy `confirm` without `confirm:true` → 409 `E_CONFIRM_REQUIRED`,
+ *     dialog races → 409 `E_DIALOG_CLOSED`, malformed answers → 400 `E_BAD_ANSWER`;
+ *   - the unknown→queryOnly path: text/args containing `[timeout]` answers 504 `E_DEADLINE`
+ *     (`effect:"unknown"`), keeps the fake ledger entry `running`, then settles it as ok
+ *     `DEV_HUB_LATE_SETTLE_MS` later and broadcasts an SSE `cmd_late` — a following
+ *     `queryOnly:true` request with the same id first sees `state:"running"`, then the settled
+ *     `dup` result. `[slow]` simply delays the (successful) response `DEV_HUB_SLOW_MS`.
+ * Every cmd/dialog request is recorded (path, body fields, `Origin`/`Sec-Fetch-Site` headers,
+ * response status/code) and exposed on the handle as `controlRequests()` — the K16
+ * Origin-echo probe (`visual/checks-control.ts --probe`) and `dev-hub.test.ts` read it back.
+ * Hub-level states (v2.1 §6.6/§6.7) come from the fixture: `hubState` (caps,
+ * `state:"stopping"|"restarting"`, `nextVersion`, `supersedePending`,
+ * `supersedeDeadlineAt`/`supersedeDeadlineInMs` — the relative form is converted to an absolute
+ * deadline at startup so a checked-in fixture never goes stale — `forced`, `draining`) is
+ * merged into the SSE `hub` frame, and script events named `hub`/`dialogs`/`ctl`/`commands`/
+ * `cmd_late` rebroadcast updated slots/states on the fixture's own timeline.
+ *
  * Exit codes when run as a CLI: this script only exits on `--help`/parse failure (2) or a fatal
  * startup error (1); otherwise it runs until killed (`SIGINT`/`SIGTERM` close the server first).
  */
@@ -50,7 +83,19 @@ import { createSseHub, type SseClient, type SseEventName, type SseHub } from "..
 import { createUiServer, type UiServer } from "../../src/web-hub/hub/static.js";
 import { canonicalOrigin, parseOrigin } from "../../src/web-hub/protocol/lan.js";
 import type { AgentCard, HistoryPayload } from "../../src/web-hub/protocol/http-contract.js";
-import type { FleetRowWire, WireEntry, WireMessage } from "../../src/web-hub/protocol/messages.js";
+import type {
+  CtlItemWire,
+  CommandInfoWire,
+  CommandOutputWire,
+  DialogClosedWire,
+  DialogWire,
+  FleetRowWire,
+  QueueItemWire,
+  SessionInfo,
+  StatusInfo,
+  WireEntry,
+  WireMessage,
+} from "../../src/web-hub/protocol/messages.js";
 import { PROTO } from "../../src/web-hub/protocol/version.js";
 import { readPackageVersion } from "../../src/web-hub/ui/build-info-plugin.js";
 import { readFile, realpath, stat } from "node:fs/promises";
@@ -168,10 +213,14 @@ export const FIXTURES_DIR = resolve(REPO_ROOT, "tests/fixtures/web-hub-ui");
  * (routed through `sse.publish(event, data, agentKey)`, reaching only clients subscribed to that
  * `agentKey` — `agentKey` is required on the fixture entry so the routing has something to key
  * on); every other event (`agent_up`/`agent_down`/`agent_stale`/`session`/`status`/`fleet`/
- * `prompt`) is a *global* broadcast (`sse.publish(event, data)`, no third argument — reaches every
- * connected client whether or not it ever subscribed) — a fixture entry may still carry
- * `agentKey` on one of these for `applyScriptEvent`'s own in-memory agent-list bookkeeping, it is
- * simply never passed to `sse.publish` for them. */
+ * `prompt`, plus the P2 control frames `dialogs`/`ctl`/`commands`/`cmd_late` and the hub
+ * lifecycle frame `hub`) is a *global* broadcast (`sse.publish(event, data)`, no third argument —
+ * reaches every connected client whether or not it ever subscribed) — a fixture entry may still
+ * carry `agentKey` on one of these for `applyScriptEvent`'s own in-memory bookkeeping (agent
+ * list, dialogs/ctl/commands slots, hub state), it is simply never passed to `sse.publish` for
+ * them. `hub` events are MERGED into the current hub state and rebroadcast as a full `hub` frame
+ * (same shape as the attach-time one); `dialogs`/`ctl`/`commands` events replace their slot
+ * before broadcasting, so a late-connecting client sees the post-effect state too. */
 export interface DevHubScriptEvent {
   readonly atMs: number;
   readonly event: SseEventName;
@@ -186,6 +235,39 @@ export interface DevHubHistoryGenerate {
   readonly count: number;
 }
 
+/** Fields merged into the SSE `hub` frame (§6.6/v2.1: caps, hub lifecycle states for
+ * `HubStateBanner`). A checked-in fixture uses `supersedeDeadlineInMs` (relative) instead of
+ * `supersedeDeadlineAt` so the countdown demo never expires in the repo; dev-hub converts it to
+ * `Date.now() + ms` at startup and never sends the relative key on the wire. */
+export interface DevHubHubState {
+  readonly caps?: readonly string[];
+  readonly state?: "running" | "stopping" | "restarting";
+  readonly nextVersion?: string;
+  readonly supersedePending?: boolean;
+  readonly supersedeDeadlineAt?: number;
+  readonly supersedeDeadlineInMs?: number;
+  readonly forced?: boolean;
+  readonly draining?: boolean;
+}
+
+/** §3.2 slots, keyed by agentKey. `dialogs` seeds both the `agents`-frame card field and the
+ * post-subscribe `dialogs` frame (§6.6), and is the state `POST /api/dialog` mutates (a web
+ * answer moves the dialog `open` → `closed{by:"web", cmdId}` — the dual-channel race demo). */
+export interface DevHubDialogsSlot {
+  readonly epoch: string;
+  readonly open: readonly DialogWire[];
+  readonly closed: readonly DialogClosedWire[];
+}
+export interface DevHubCtlSlot {
+  readonly epoch: string;
+  readonly sessionId: string;
+  readonly items: readonly CtlItemWire[];
+}
+export interface DevHubCommandsSlot {
+  readonly epoch: string;
+  readonly items: readonly CommandInfoWire[];
+}
+
 export interface DevHubFixture {
   readonly agents: readonly AgentCard[];
   /** Keyed by agentKey; returned verbatim as the `history` SSE frame after `/api/subscribe`. */
@@ -195,6 +277,10 @@ export interface DevHubFixture {
   readonly historyOlder?: Readonly<Record<string, Readonly<Record<string, HistoryPayload>>>>;
   readonly script?: readonly DevHubScriptEvent[];
   readonly historyGenerate?: DevHubHistoryGenerate;
+  readonly hubState?: DevHubHubState;
+  readonly dialogs?: Readonly<Record<string, DevHubDialogsSlot>>;
+  readonly ctl?: Readonly<Record<string, DevHubCtlSlot>>;
+  readonly commands?: Readonly<Record<string, DevHubCommandsSlot>>;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -271,6 +357,74 @@ export function validateFixture(raw: unknown, sourceLabel: string): DevHubFixtur
       typeof historyGenerate["count"] !== "number"
     ) {
       throw new Error(`${sourceLabel}: "historyGenerate" must be { agentKey, count }`);
+    }
+  }
+  const hubState = raw["hubState"];
+  if (hubState !== undefined) {
+    if (!isRecord(hubState)) throw new Error(`${sourceLabel}: "hubState" must be an object`);
+    for (const key of Object.keys(hubState)) {
+      if (
+        ![
+          "caps",
+          "state",
+          "nextVersion",
+          "supersedePending",
+          "supersedeDeadlineAt",
+          "supersedeDeadlineInMs",
+          "forced",
+          "draining",
+        ].includes(key)
+      ) {
+        throw new Error(`${sourceLabel}: hubState has unknown key "${key}"`);
+      }
+    }
+    if (hubState["caps"] !== undefined && !Array.isArray(hubState["caps"])) {
+      throw new Error(`${sourceLabel}: hubState.caps must be an array`);
+    }
+    if (
+      hubState["state"] !== undefined &&
+      hubState["state"] !== "running" &&
+      hubState["state"] !== "stopping" &&
+      hubState["state"] !== "restarting"
+    ) {
+      throw new Error(`${sourceLabel}: hubState.state must be running|stopping|restarting`);
+    }
+  }
+  const dialogs = raw["dialogs"];
+  if (dialogs !== undefined) {
+    if (!isRecord(dialogs)) throw new Error(`${sourceLabel}: "dialogs" must be an object`);
+    for (const [agentKey, slot] of Object.entries(dialogs)) {
+      if (
+        !isRecord(slot) ||
+        typeof slot["epoch"] !== "string" ||
+        !Array.isArray(slot["open"]) ||
+        !Array.isArray(slot["closed"])
+      ) {
+        throw new Error(`${sourceLabel}: dialogs["${agentKey}"] must be { epoch, open[], closed[] }`);
+      }
+    }
+  }
+  const ctl = raw["ctl"];
+  if (ctl !== undefined) {
+    if (!isRecord(ctl)) throw new Error(`${sourceLabel}: "ctl" must be an object`);
+    for (const [agentKey, slot] of Object.entries(ctl)) {
+      if (
+        !isRecord(slot) ||
+        typeof slot["epoch"] !== "string" ||
+        typeof slot["sessionId"] !== "string" ||
+        !Array.isArray(slot["items"])
+      ) {
+        throw new Error(`${sourceLabel}: ctl["${agentKey}"] must be { epoch, sessionId, items[] }`);
+      }
+    }
+  }
+  const commands = raw["commands"];
+  if (commands !== undefined) {
+    if (!isRecord(commands)) throw new Error(`${sourceLabel}: "commands" must be an object`);
+    for (const [agentKey, slot] of Object.entries(commands)) {
+      if (!isRecord(slot) || typeof slot["epoch"] !== "string" || !Array.isArray(slot["items"])) {
+        throw new Error(`${sourceLabel}: commands["${agentKey}"] must be { epoch, items[] }`);
+      }
     }
   }
   return raw as unknown as DevHubFixture;
@@ -393,11 +547,49 @@ export interface DevHubHandle {
   readonly scenario: string;
   /** Only set for `mode: "token"` — the bearer token a browser would exchange at `/api/login`. */
   readonly token?: string;
+  /** Every `/api/cmd` + `/api/dialog` request this dev-hub instance has answered (newest last,
+   * capped at 256) — the K16 Origin-echo probe and `dev-hub.test.ts` read headers/statuses back
+   * from here instead of standing up their own capture server. */
+  controlRequests(): readonly DevHubControlRequest[];
   close(): Promise<void>;
 }
 
 const BIND_HOST = "127.0.0.1";
 const DEV_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+/** How long a `[timeout]`-marked command stays `running` in the fake ledger before settling as
+ * ok and broadcasting `cmd_late` (the unknown→queryOnly demo path, §3.4/§4.5). Exported so
+ * `dev-hub.test.ts` can bound its waits instead of hard-coding a number. */
+export const DEV_HUB_LATE_SETTLE_MS = 900;
+/** How long a `[slow]`-marked command delays its (successful) response — exercises the
+ * browser's in-flight state without ever tripping the 16s fetch timeout. */
+export const DEV_HUB_SLOW_MS = 1_200;
+
+/** One recorded `/api/cmd` or `/api/dialog` request (control-plan §9.3 "记录请求"). Headers are
+ * kept because the K16 Origin-echo probe (`visual/checks-control.ts --probe`) reads them back
+ * in-process; `responseStatus`/`responseCode` are filled in when the response is sent. */
+export interface DevHubControlRequest {
+  readonly path: "/api/cmd" | "/api/dialog";
+  readonly at: number;
+  agentKey?: string;
+  id?: string;
+  op?: string;
+  origin?: string;
+  secFetchSite?: string;
+  responseStatus?: number;
+  responseCode?: string;
+}
+
+/** Fake per-hub idempotency ledger (§3.4/§4.5's hub LRU + agent 台账, merged — dev-hub is both
+ * ends). `done` entries only ever hold successes and non-retryable failures (retryable,
+ * effect-none failures are never stored, exactly like the real hub); `running` entries are the
+ * `[timeout]` path, settled later by `scheduleLateSettle`. */
+interface DevLedgerEntry {
+  readonly payload: string;
+  state: "running" | "done";
+  status?: number;
+  body?: unknown;
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   if (res.headersSent || res.destroyed) return;
@@ -492,6 +684,28 @@ function csrfOkLan(req: IncomingMessage, selfOrigin: string): boolean {
   return canonicalOrigin(parsed.scheme, parsed.hostKey) === selfOrigin;
 }
 
+/** §6.3 step 2's extra write-endpoint rule (D8, both listeners): `Sec-Fetch-Site`, WHEN the
+ * browser sends one at all, must be `same-origin`. Absent is fine — K16 measured LAN plain-HTTP
+ * Chromium sending no `Sec-Fetch-Site` at all, and the real gate deliberately doesn't require it. */
+function secFetchSiteOk(req: IncomingMessage): boolean {
+  const sfs = req.headers["sec-fetch-site"];
+  if (sfs === undefined) return true;
+  return sfs.toLowerCase() === "same-origin";
+}
+
+/** The loopback *write* gate (§6.3 step 2, stricter than `csrfOk`): JSON + `X-PWH: 1` +
+ * `Origin` REQUIRED and equal to `http://<Host>` + `secFetchSiteOk`. Used only for
+ * `/api/cmd`/`/api/dialog` in `--mode token`. */
+function csrfOkWriteLoopback(req: IncomingMessage): boolean {
+  const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+  if (ct !== "application/json") return false;
+  if (req.headers["x-pwh"] !== "1") return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return false;
+  if (origin.toLowerCase() !== `http://${(req.headers.host ?? "").toLowerCase()}`) return false;
+  return secFetchSiteOk(req);
+}
+
 function loginErrorResponse(kind: LoginErrorKind, res: ServerResponse): void {
   switch (kind) {
     case "invalid":
@@ -517,8 +731,33 @@ function loginErrorResponse(kind: LoginErrorKind, res: ServerResponse): void {
   }
 }
 
+interface MutableDialogsSlot {
+  epoch: string;
+  open: DialogWire[];
+  closed: DialogClosedWire[];
+}
+interface MutableCtlSlot {
+  readonly epoch: string;
+  readonly sessionId: string;
+  items: CtlItemWire[];
+}
+interface MutableCommandsSlot {
+  readonly epoch: string;
+  items: CommandInfoWire[];
+}
+
 interface DevAgentState {
   agents: Map<string, AgentCard>;
+  dialogs: Map<string, MutableDialogsSlot>;
+  ctl: Map<string, MutableCtlSlot>;
+  commands: Map<string, MutableCommandsSlot>;
+}
+
+/** Side-effecting merge hook for scripted `hub` frames (v2.1 §6.7 states): the script event's
+ * data is merged into dev-hub's current hub state and the full resulting `hub` frame (same
+ * shape `openEvents` sends at attach) is returned for broadcast. */
+export interface DevHubScriptHooks {
+  mergeHubState(data: Record<string, unknown>): Record<string, unknown>;
 }
 
 /** Mirrors the real hub's `PendingFrame`/`PendingSub`/`MAX_PENDING_FRAMES` (`hub/http.ts`): frames
@@ -540,7 +779,9 @@ interface PendingSub {
 const MAX_PENDING_FRAMES = 4_096;
 
 /** Real hub events that are routed to every connected client, filtered by neither `subscribed`
- * nor `clientId` (`hub/http.ts`'s `onHubEvent`, the non-`scoped()` branches). */
+ * nor `clientId` (`hub/http.ts`'s `onHubEvent`, the non-`scoped()` branches). The P2 control
+ * events (`dialogs`/`ctl`/`commands`/`cmd_late`) are global too — their payload carries the
+ * `agentKey` (§6.6); `hub` is the hub's own lifecycle frame (v2.1 §6.7). */
 const GLOBAL_SSE_EVENTS: ReadonlySet<SseEventName> = new Set([
   "agent_up",
   "agent_down",
@@ -549,6 +790,11 @@ const GLOBAL_SSE_EVENTS: ReadonlySet<SseEventName> = new Set([
   "status",
   "fleet",
   "prompt",
+  "dialogs",
+  "ctl",
+  "commands",
+  "cmd_late",
+  "hub",
 ]);
 
 /** Applies one scripted frame's side-effect to the in-memory agent-list mirror (so a client that
@@ -562,6 +808,7 @@ function applyScriptEvent(
   sse: SseHub,
   ev: DevHubScriptEvent,
   scoped: (event: SseEventName, data: unknown, agentKey: string) => void,
+  hooks: DevHubScriptHooks,
 ): void {
   if (ev.event === "agent_down" && isRecord(ev.data) && typeof ev.data["agentKey"] === "string") {
     state.agents.delete(ev.data["agentKey"]);
@@ -577,6 +824,50 @@ function applyScriptEvent(
     const existing = state.agents.get(ev.data["agentKey"]);
     if (existing !== undefined) state.agents.set(ev.data["agentKey"], { ...existing, state: "stale" });
     sse.publish("agent_stale", ev.data);
+    return;
+  }
+  if (ev.event === "hub" && isRecord(ev.data)) {
+    sse.publish("hub", hooks.mergeHubState(ev.data));
+    return;
+  }
+  if (ev.event === "dialogs" && isRecord(ev.data) && typeof ev.data["agentKey"] === "string") {
+    // Slot update mirrors what a real agent's `dialogs` frame does to the hub registry: the
+    // whole slot is replaced (covering the dual-channel race demo — e.g. `by:"tui"` closing a
+    // dialog the web form is displaying) BEFORE the broadcast, so a client connecting right
+    // after sees the post-effect state in the `agents` frame too.
+    if (typeof ev.data["epoch"] === "string" && Array.isArray(ev.data["open"]) && Array.isArray(ev.data["closed"])) {
+      state.dialogs.set(ev.data["agentKey"], {
+        epoch: ev.data["epoch"],
+        open: ev.data["open"] as DialogWire[],
+        closed: ev.data["closed"] as DialogClosedWire[],
+      });
+    }
+    sse.publish("dialogs", ev.data);
+    return;
+  }
+  if (ev.event === "ctl" && isRecord(ev.data) && typeof ev.data["agentKey"] === "string") {
+    if (
+      typeof ev.data["epoch"] === "string" &&
+      typeof ev.data["sessionId"] === "string" &&
+      Array.isArray(ev.data["items"])
+    ) {
+      state.ctl.set(ev.data["agentKey"], {
+        epoch: ev.data["epoch"],
+        sessionId: ev.data["sessionId"],
+        items: ev.data["items"] as CtlItemWire[],
+      });
+    }
+    sse.publish("ctl", ev.data);
+    return;
+  }
+  if (ev.event === "commands" && isRecord(ev.data) && typeof ev.data["agentKey"] === "string") {
+    if (typeof ev.data["epoch"] === "string" && Array.isArray(ev.data["items"])) {
+      state.commands.set(ev.data["agentKey"], {
+        epoch: ev.data["epoch"],
+        items: ev.data["items"] as CommandInfoWire[],
+      });
+    }
+    sse.publish("commands", ev.data);
     return;
   }
   if (GLOBAL_SSE_EVENTS.has(ev.event)) {
@@ -616,9 +907,163 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     log(`dev-hub: static serving via devServeStatic (raw fallback, no build-info.json manifest at ${root})`);
   }
 
-  const state: DevAgentState = { agents: new Map(fixture.agents.map((a) => [a.agentKey, a])) };
+  const state: DevAgentState = {
+    agents: new Map(fixture.agents.map((a) => [a.agentKey, a])),
+    dialogs: new Map(
+      Object.entries(fixture.dialogs ?? {}).map(([k, s]) => [
+        k,
+        { epoch: s.epoch, open: [...s.open], closed: [...s.closed] },
+      ]),
+    ),
+    ctl: new Map(Object.entries(fixture.ctl ?? {}).map(([k, s]) => [k, { ...s, items: [...s.items] }])),
+    commands: new Map(
+      Object.entries(fixture.commands ?? {}).map(([k, s]) => [k, { epoch: s.epoch, items: [...s.items] }]),
+    ),
+  };
   const sse = createSseHub({ now: () => Date.now(), pingMs: 15_000 });
   const pending = new Map<string, Map<string, PendingSub>>(); // clientId -> agentKey -> PendingSub
+
+  // --- hub lifecycle state (v2.1 §6.6/§6.7): fixture-seeded, script-`hub`-event-mutable -------
+  const hubStateStartedAt = Date.now();
+  const hubStateMutable: Record<string, unknown> = {};
+  {
+    const seed = fixture.hubState;
+    if (seed !== undefined) {
+      if (seed.caps !== undefined) hubStateMutable["caps"] = [...seed.caps];
+      if (seed.state !== undefined) hubStateMutable["state"] = seed.state;
+      if (seed.nextVersion !== undefined) hubStateMutable["nextVersion"] = seed.nextVersion;
+      if (seed.supersedePending !== undefined) hubStateMutable["supersedePending"] = seed.supersedePending;
+      if (seed.supersedeDeadlineAt !== undefined) hubStateMutable["supersedeDeadlineAt"] = seed.supersedeDeadlineAt;
+      if (seed.supersedeDeadlineInMs !== undefined) {
+        hubStateMutable["supersedeDeadlineAt"] = hubStateStartedAt + seed.supersedeDeadlineInMs;
+      }
+      if (seed.forced !== undefined) hubStateMutable["forced"] = seed.forced;
+      if (seed.draining !== undefined) hubStateMutable["draining"] = seed.draining;
+    }
+  }
+  function hubFrame(): Record<string, unknown> {
+    return {
+      version: "0.0.0-dev-hub",
+      buildId: "dev-hub@fixture",
+      pid: process.pid,
+      startedAt: hubStateStartedAt,
+      proto: PROTO,
+      port,
+      ...hubStateMutable,
+    };
+  }
+  const scriptHooks: DevHubScriptHooks = {
+    mergeHubState(data: Record<string, unknown>): Record<string, unknown> {
+      if (typeof data["supersedeDeadlineInMs"] === "number") {
+        hubStateMutable["supersedeDeadlineAt"] = Date.now() + data["supersedeDeadlineInMs"];
+      }
+      for (const [k, v] of Object.entries(data)) {
+        if (k === "supersedeDeadlineInMs") continue; // dev-only relative form, never on the wire
+        hubStateMutable[k] = v;
+      }
+      return hubFrame();
+    },
+  };
+
+  // --- fake control plane (§6.2 endpoints, §3.4/§4.5 ledger, §9.3 request recording) ----------
+  const ledger = new Map<string, DevLedgerEntry>();
+  const controlRequests: DevHubControlRequest[] = [];
+  const CONTROL_REQUEST_LOG_CAP = 256;
+  const lateTimers: ReturnType<typeof setTimeout>[] = [];
+  let queueSeq = 0;
+
+  function recordControlRequest(
+    req: IncomingMessage,
+    path: "/api/cmd" | "/api/dialog",
+    body: unknown,
+  ): DevHubControlRequest {
+    const rec: DevHubControlRequest = { path, at: Date.now() };
+    const agentKey = stringField(body, "agentKey");
+    const id = stringField(body, "id");
+    const op = stringField(body, "op") ?? stringField(body, "action");
+    if (agentKey !== undefined) rec.agentKey = agentKey;
+    if (id !== undefined) rec.id = id;
+    if (op !== undefined) rec.op = op;
+    if (typeof req.headers.origin === "string") rec.origin = req.headers.origin;
+    const sfs = req.headers["sec-fetch-site"];
+    if (typeof sfs === "string") rec.secFetchSite = sfs;
+    controlRequests.push(rec);
+    if (controlRequests.length > CONTROL_REQUEST_LOG_CAP) {
+      controlRequests.splice(0, controlRequests.length - CONTROL_REQUEST_LOG_CAP);
+    }
+    return rec;
+  }
+
+  /** Dedupe digest: the whole request body minus the transport-only keys (`id`, `queryOnly`,
+   * `retry`) — same id + different remaining payload ⇒ 409 "id reused" (§3.4). */
+  function payloadDigest(path: string, body: unknown): string {
+    if (!isRecord(body)) return path;
+    const rest: Record<string, unknown> = { ...body };
+    delete rest["id"];
+    delete rest["queryOnly"];
+    delete rest["retry"];
+    return path + "\n" + JSON.stringify(rest);
+  }
+
+  function scheduleLateSettle(
+    agentKey: string,
+    id: string,
+    op: string,
+    entry: DevLedgerEntry,
+    settledBody: Record<string, unknown>,
+    lateSseData: Record<string, unknown>,
+  ): void {
+    const t = setTimeout(() => {
+      entry.state = "done";
+      entry.status = 200;
+      entry.body = settledBody;
+      // §6.6: `cmd_late` is a broadcast and NEVER carries `output` (the initiating page fetches
+      // it back with `queryOnly`) — `lateSseData` is deliberately the caller's stripped shape.
+      sse.publish("cmd_late", { agentKey, id, op, ok: true, data: lateSseData });
+    }, DEV_HUB_LATE_SETTLE_MS);
+    t.unref?.();
+    lateTimers.push(t);
+  }
+
+  /** Upserts one item into the agent's `ctl` slot (§4.3/§4.5 projection, ≤32, newest first) and
+   * broadcasts it — a web prompt becoming visible in the pending-items UI without a page reload. */
+  function bumpCtl(agentKey: string, card: AgentCard, item: CtlItemWire): void {
+    const existing = state.ctl.get(agentKey);
+    const slot: MutableCtlSlot = existing ?? {
+      epoch: card.epoch ?? "dev-epoch-1",
+      sessionId: card.session?.sessionId ?? "dev-session",
+      items: [],
+    };
+    slot.items = [item, ...slot.items.filter((i) => i.cmdId !== item.cmdId)].slice(0, 32);
+    state.ctl.set(agentKey, slot);
+    sse.publish("ctl", { agentKey, epoch: slot.epoch, sessionId: slot.sessionId, items: slot.items });
+  }
+
+  /** Mirrors §4.4's queue mirror: a successfully queued web prompt joins `status.queue` (with
+   * its cmdId) and the new status is broadcast — the web message visibly lining up behind TUI
+   * entries, exactly like the real agent would report it. */
+  function pushQueueItem(
+    agentKey: string,
+    card: AgentCard,
+    text: string,
+    deliver: "steer" | "followUp",
+    cmdId: string,
+  ): void {
+    const status: StatusInfo = { ...(card.status ?? { leafId: null, busy: true, pending: false }) };
+    const item: QueueItemWire = {
+      id: `q-web-${++queueSeq}`,
+      text: text.length > 200 ? text.slice(0, 199) + "…" : text,
+      deliver,
+      source: "web",
+      cmdId,
+      at: Date.now(),
+    };
+    status.queue = [...(status.queue ?? []), item].slice(-32);
+    status.pending = true;
+    const next: AgentCard = { ...card, status };
+    state.agents.set(agentKey, next);
+    sse.publish("status", { agentKey, status });
+  }
 
   function getPending(clientId: string, agentKey: string): PendingSub | undefined {
     return pending.get(clientId)?.get(agentKey);
@@ -714,7 +1159,11 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
   }
 
   function toCard(a: AgentCard): AgentCard {
-    return a;
+    // §6.6: the `agents` frame's cards carry the dialogs slot's current value (open ask_user
+    // badges on the list view without subscribing first).
+    const slot = state.dialogs.get(a.agentKey);
+    if (slot === undefined) return a;
+    return { ...a, dialogs: { epoch: slot.epoch, open: slot.open, closed: slot.closed } };
   }
 
   function handleSubscribe(clientId: string, agentKey: string, res: ServerResponse): void {
@@ -751,6 +1200,21 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
         if (!client.send(f.event, f.data)) return;
       }
       if (p.overflow) client.send("gap", { agentKey, fromSeq: payload.fromSeq });
+      // §6.6: the control slots this fixture seeds are delivered with the snapshot — a client
+      // that just subscribed sees the same open dialogs / pending items / command list as one
+      // that was connected all along, without waiting for the next slot refresh.
+      const dSlot = state.dialogs.get(agentKey);
+      if (dSlot !== undefined) {
+        client.send("dialogs", { agentKey, epoch: dSlot.epoch, open: dSlot.open, closed: dSlot.closed });
+      }
+      const cSlot = state.ctl.get(agentKey);
+      if (cSlot !== undefined) {
+        client.send("ctl", { agentKey, epoch: cSlot.epoch, sessionId: cSlot.sessionId, items: cSlot.items });
+      }
+      const cmdSlot = state.commands.get(agentKey);
+      if (cmdSlot !== undefined) {
+        client.send("commands", { agentKey, epoch: cmdSlot.epoch, items: cmdSlot.items });
+      }
       client.subscribed.add(agentKey);
     });
   }
@@ -761,6 +1225,545 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     sendJson(res, 200, { ok: true });
   }
 
+  // ----------------------------------------------------------------------
+  // fake control plane: POST /api/cmd + POST /api/dialog (§6.2 shapes)
+  // ----------------------------------------------------------------------
+
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolveP) => {
+      const t = setTimeout(resolveP, ms);
+      t.unref?.();
+    });
+  }
+
+  function expectSessionMismatch(body: unknown, card: AgentCard): boolean {
+    const e = field(body, "expect");
+    if (!isRecord(e)) return false;
+    const sid = e["sessionId"];
+    if (typeof sid !== "string" || sid.length === 0) return false;
+    return card.session?.sessionId !== sid;
+  }
+
+  /** Demo `CommandOutputWire` for captured pi-toolkit commands (§4.9) — the kind variety
+   * (`notify`/`status`/`text`/`interactive` + `needsTerminal`) `CommandResult.vue` has to render. */
+  function demoCommandOutput(name: string, args: string): CommandOutputWire {
+    switch (name) {
+      case "agent":
+        return { entries: [{ kind: "notify", level: "info", text: "2 agents · 1 running · slots 3/8 free" }] };
+      case "tasklist":
+        return {
+          entries: [
+            {
+              kind: "notify",
+              level: "info",
+              text: "#1 finish the queue mirror (in_progress)\n#2 run full gates (pending)",
+            },
+          ],
+        };
+      case "mem":
+        return {
+          entries: [
+            { kind: "text", title: "mem doctor", text: "D01 ok · D02 ok · 12 files · 3.1 KiB" },
+            { kind: "interactive", title: "mem doctor", text: "editor" },
+          ],
+          needsTerminal: true,
+        };
+      case "cache-ttl":
+        return { entries: [{ kind: "status", key: "cache-ttl", text: "ttl auto · 5m" }] };
+      case "webhub":
+        return { entries: [{ kind: "notify", level: "info", text: `hub running · 127.0.0.1:${port}` }] };
+      default:
+        return {
+          entries: [{ kind: "notify", level: "info", text: `/${name}${args.length > 0 ? " " + args : ""} done` }],
+        };
+    }
+  }
+
+  /** Dedupe replay + `queryOnly` answer (§3.4/§4.5). Returns `{answered:false, digest}` when the
+   * request must actually execute; any other outcome (dup replay, query answer, id-reuse 409,
+   * E_UNKNOWN_ID, still-running 504) is fully sent here. */
+  function ledgerReplay(
+    path: "/api/cmd" | "/api/dialog",
+    body: unknown,
+    id: string,
+    rec: DevHubControlRequest,
+    res: ServerResponse,
+  ): { answered: true } | { answered: false; digest: string } {
+    const digest = payloadDigest(path, body);
+    const existing = ledger.get(id);
+    if (existing !== undefined && existing.payload !== digest) {
+      rec.responseStatus = 409;
+      rec.responseCode = "E_BAD_REQUEST";
+      sendJson(res, 409, {
+        error: "E_BAD_REQUEST",
+        message: "id reused with a different payload",
+        id,
+        retryable: false,
+        effect: "none",
+      });
+      return { answered: true };
+    }
+    if (field(body, "queryOnly") === true) {
+      if (existing === undefined) {
+        rec.responseStatus = 404;
+        rec.responseCode = "E_UNKNOWN_ID";
+        sendJson(res, 404, { error: "E_UNKNOWN_ID", id, retryable: false, effect: "none" });
+        return { answered: true };
+      }
+      let data: unknown;
+      if (existing.state === "running") {
+        data = { op: "query", state: "running" };
+      } else if (existing.status === 200) {
+        const b = existing.body;
+        data = { op: "query", state: "ok", result: { ok: true, data: isRecord(b) ? b["data"] : undefined } };
+      } else {
+        const b = existing.body;
+        const code = isRecord(b) && typeof b["error"] === "string" ? b["error"] : "E_DEADLINE";
+        data = { op: "query", state: "failed", result: { ok: false, code, retryable: false, effect: "none" } };
+      }
+      rec.responseStatus = 200;
+      sendJson(res, 200, { ok: true, id, dup: true, data });
+      return { answered: true };
+    }
+    if (existing !== undefined) {
+      if (existing.state === "running") {
+        rec.responseStatus = 504;
+        rec.responseCode = "E_DEADLINE";
+        sendJson(res, 504, { error: "E_DEADLINE", id, retryable: true, effect: "unknown" });
+        return { answered: true };
+      }
+      rec.responseStatus = existing.status ?? 200;
+      const b = existing.body;
+      sendJson(res, existing.status ?? 200, isRecord(b) && b["ok"] === true ? { ...b, dup: true } : b);
+      return { answered: true };
+    }
+    return { answered: false, digest };
+  }
+
+  interface FailOpts {
+    readonly message?: string;
+    readonly retryable: boolean;
+    readonly effect?: "none" | "unknown";
+    /** Terminal (non-retryable) failures are cached in the ledger — a same-id retry replays
+     * them (§3.4 "done 只存成功与不可重试失败"). */
+    readonly terminal?: boolean;
+  }
+
+  async function handleCmd(req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
+    const rec = recordControlRequest(req, "/api/cmd", body);
+    let storeDone: ((status: number, responseBody: unknown) => void) | undefined;
+    const fail = (status: number, code: string, opts: FailOpts): void => {
+      rec.responseStatus = status;
+      rec.responseCode = code;
+      const id = stringField(body, "id");
+      const responseBody: Record<string, unknown> = { error: code };
+      if (opts.message !== undefined) responseBody["message"] = opts.message;
+      if (id !== undefined) responseBody["id"] = id;
+      responseBody["retryable"] = opts.retryable;
+      if (opts.effect !== undefined) responseBody["effect"] = opts.effect;
+      if (opts.terminal === true) storeDone?.(status, responseBody);
+      sendJson(res, status, responseBody);
+    };
+    const ok200 = (data: unknown): void => {
+      const id = stringField(body, "id")!;
+      const responseBody = { ok: true, id, data };
+      storeDone?.(200, responseBody);
+      rec.responseStatus = 200;
+      sendJson(res, 200, responseBody);
+    };
+
+    const agentKey = stringField(body, "agentKey");
+    const id = stringField(body, "id");
+    const op = stringField(body, "op");
+    if (agentKey === undefined || id === undefined || op === undefined) {
+      return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "agentKey/id/op required" });
+    }
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(id)) {
+      return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "bad id format" });
+    }
+    const card = state.agents.get(agentKey);
+    if (card === undefined) return fail(404, "E_NOT_FOUND", { retryable: false, effect: "none" });
+    if (card.state === "stale") return fail(503, "E_AGENT_GONE", { retryable: false, effect: "none" });
+    // §6.3 step 6: an agent that never advertised control (`AgentCard.control`) gets no frame
+    // forwarded at all — same 409 the real router answers for an old pi-toolkit.
+    if (card.control !== true) return fail(409, "E_UNSUPPORTED", { retryable: false, effect: "none" });
+
+    const gate = ledgerReplay("/api/cmd", body, id, rec, res);
+    if (gate.answered) return;
+    const digest = gate.digest;
+    storeDone = (status, responseBody) =>
+      ledger.set(id, { payload: digest, state: "done", status, body: responseBody });
+
+    if (op === "prompt") {
+      const text = field(body, "text");
+      if (typeof text !== "string" || text.trim().length === 0 || Buffer.byteLength(text, "utf8") > 48 * 1024) {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "empty or oversized text" });
+      }
+      if (expectSessionMismatch(body, card)) {
+        return fail(409, "E_SESSION_CHANGED", { retryable: false, effect: "none", terminal: true });
+      }
+      if (text.includes("[compacting]")) return fail(409, "E_BUSY_COMPACTING", { retryable: true, effect: "none" });
+      if (text.includes("[stale-ctx]")) return fail(409, "E_STALE_CTX", { retryable: true, effect: "none" });
+      if (text.includes("[timeout]")) {
+        const entry: DevLedgerEntry = { payload: digest, state: "running" };
+        ledger.set(id, entry);
+        scheduleLateSettle(
+          agentKey,
+          id,
+          "prompt",
+          entry,
+          { ok: true, id, data: { op: "prompt", delivery: "unobserved" } },
+          { op: "prompt", delivery: "unobserved" },
+        );
+        return fail(504, "E_DEADLINE", { retryable: true, effect: "unknown", message: "agent deadline" });
+      }
+      if (text.includes("[slow]")) await delay(DEV_HUB_SLOW_MS);
+      const busy = card.status?.busy === true;
+      const behavior: "idle" | "steer" | "followUp" = busy
+        ? field(body, "deliver") === "followUp"
+          ? "followUp"
+          : "steer"
+        : "idle";
+      const delivery = text.includes("[unobserved]");
+      if (behavior !== "idle") {
+        pushQueueItem(agentKey, card, text, behavior, id);
+      }
+      const now = Date.now();
+      bumpCtl(agentKey, card, {
+        cmdId: id,
+        op: "prompt",
+        state: delivery ? "dispatched" : behavior === "idle" ? "started" : "queued",
+        behavior,
+        at: now,
+        updatedAt: now,
+      });
+      return ok200({ op: "prompt", delivery: delivery ? "unobserved" : "observed", behavior });
+    }
+
+    if (op === "abort") {
+      if (expectSessionMismatch(body, card)) {
+        return fail(409, "E_SESSION_CHANGED", { retryable: false, effect: "none", terminal: true });
+      }
+      return ok200({ op: "abort", wasBusy: card.status?.busy === true });
+    }
+
+    if (op === "steer_subagent") {
+      const runId = stringField(body, "runId");
+      const text = field(body, "text");
+      if (runId === undefined || typeof text !== "string") {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "runId/text required" });
+      }
+      if (runId.startsWith("r_missing")) {
+        return fail(404, "E_NOT_FOUND", { retryable: false, effect: "none", terminal: true });
+      }
+      if (runId.endsWith("_done")) {
+        return fail(409, "E_NOT_RUNNING", { retryable: false, effect: "none", terminal: true });
+      }
+      if (text.includes("[reject]")) {
+        return fail(422, "E_SUBAGENT_REJECTED", {
+          retryable: false,
+          effect: "none",
+          terminal: true,
+          message: "steer_rejected: run is draining",
+        });
+      }
+      if (text.includes("[timeout]")) {
+        const entry: DevLedgerEntry = { payload: digest, state: "running" };
+        ledger.set(id, entry);
+        scheduleLateSettle(
+          agentKey,
+          id,
+          "steer_subagent",
+          entry,
+          { ok: true, id, data: { op: "steer_subagent" } },
+          { op: "steer_subagent" },
+        );
+        return fail(504, "E_DEADLINE", { retryable: true, effect: "unknown", message: "steer deadline" });
+      }
+      if (text.includes("[slow]")) await delay(DEV_HUB_SLOW_MS);
+      return ok200({ op: "steer_subagent" });
+    }
+
+    if (op === "abort_subagent") {
+      const runId = stringField(body, "runId");
+      if (runId === undefined) {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "runId required" });
+      }
+      if (runId.startsWith("r_missing")) {
+        return fail(404, "E_NOT_FOUND", { retryable: false, effect: "none", terminal: true });
+      }
+      if (runId.endsWith("_done")) return ok200({ op: "abort_subagent", alreadyTerminal: true });
+      if (runId.includes("timeout")) {
+        const entry: DevLedgerEntry = { payload: digest, state: "running" };
+        ledger.set(id, entry);
+        scheduleLateSettle(
+          agentKey,
+          id,
+          "abort_subagent",
+          entry,
+          { ok: true, id, data: { op: "abort_subagent", escalatedTo: "L2" } },
+          { op: "abort_subagent", escalatedTo: "L2" },
+        );
+        return fail(504, "E_DEADLINE", { retryable: true, effect: "unknown", message: "stop deadline" });
+      }
+      return ok200({ op: "abort_subagent", escalatedTo: "L2" });
+    }
+
+    if (op === "command") {
+      const name = stringField(body, "name");
+      const argsRaw = field(body, "args");
+      const args = typeof argsRaw === "string" ? argsRaw : "";
+      if (name === undefined || !/^[A-Za-z0-9:_.-]{1,64}$/.test(name)) {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "bad command name" });
+      }
+      const slot = state.commands.get(agentKey);
+      const item = slot?.items.find((i) => i.name === name);
+      const BUILTIN_DEMO: ReadonlySet<string> = new Set(["session", "compact", "model", "name", "thinking", "new"]);
+      if (item === undefined && !BUILTIN_DEMO.has(name)) {
+        // §4.6: an unrecognized /xxx NEVER falls through to the model as plain text.
+        return fail(404, "E_UNKNOWN_COMMAND", { retryable: false, effect: "none" });
+      }
+      const kind: "extension" | "template" | "builtin" =
+        item === undefined
+          ? "builtin"
+          : item.kind === "skill"
+            ? "template"
+            : item.kind === "template"
+              ? "template"
+              : item.kind;
+      const busy = card.status?.busy === true;
+      const policy =
+        item === undefined ? "allow" : busy && item.policyBusy !== undefined ? item.policyBusy : item.policy;
+      if (policy === "deny") {
+        return fail(409, "E_COMMAND_DENIED", {
+          retryable: false,
+          effect: "none",
+          terminal: true,
+          message: `/${name} is only available in the terminal`,
+        });
+      }
+      if (policy === "confirm" && field(body, "confirm") !== true) {
+        return fail(409, "E_CONFIRM_REQUIRED", {
+          retryable: false,
+          effect: "none",
+          terminal: true,
+          message: `Run /${name}${args.length > 0 ? " " + args : ""} on ${agentKey}?`,
+        });
+      }
+      if (args.includes("[timeout]")) {
+        const entry: DevLedgerEntry = { payload: digest, state: "running" };
+        ledger.set(id, entry);
+        scheduleLateSettle(
+          agentKey,
+          id,
+          "command",
+          entry,
+          { ok: true, id, data: { op: "command", kind, completion: "sync" } },
+          { op: "command", kind, completion: "sync" },
+        );
+        return fail(504, "E_DEADLINE", { retryable: true, effect: "unknown", message: "command deadline" });
+      }
+      if (args.includes("[slow]")) await delay(DEV_HUB_SLOW_MS);
+      if (kind === "builtin") {
+        if (name === "compact") {
+          // §4.6: compact is async — the HTTP receipt says so, and the completion (or failure)
+          // arrives later as a `cmd_late` broadcast; the initiating page refetches with queryOnly.
+          ok200({ op: "command", kind: "builtin", completion: "async" });
+          const t = setTimeout(() => {
+            sse.publish("cmd_late", {
+              agentKey,
+              id,
+              op: "command",
+              ok: true,
+              data: { op: "command", kind: "builtin", completion: "sync" },
+            });
+          }, DEV_HUB_LATE_SETTLE_MS);
+          t.unref?.();
+          lateTimers.push(t);
+          return;
+        }
+        if (name === "session") {
+          const s = card.session;
+          const text =
+            s === undefined
+              ? `${agentKey} · no active session`
+              : `${s.sessionId} · ${s.name ?? "(unnamed)"} · ${s.model === undefined ? "no model" : `${s.model.provider}/${s.model.id}`} · ${s.cwd}`;
+          return ok200({
+            op: "command",
+            kind: "builtin",
+            completion: "sync",
+            output: { entries: [{ kind: "text", text }] },
+          });
+        }
+        if (name === "new") {
+          // K22 path: the command ctx switches sessions — demo the §4.6 "会话/状态槽变化" echo.
+          const s = card.session;
+          if (s !== undefined) {
+            const nextSession: SessionInfo = { ...s, sessionId: `${s.sessionId}-web-${++queueSeq}` };
+            state.agents.set(agentKey, { ...card, session: nextSession });
+            sse.publish("session", { agentKey, session: nextSession });
+          }
+          return ok200({ op: "command", kind: "builtin", completion: "sync" });
+        }
+        return ok200({
+          op: "command",
+          kind: "builtin",
+          completion: "sync",
+          output: { entries: [{ kind: "text", text: `/${name}${args.length > 0 ? " " + args : ""} applied` }] },
+        });
+      }
+      if (kind === "template") {
+        return ok200({ op: "command", kind: "template", completion: "unknown" });
+      }
+      // extension: pi-toolkit's own commands are captured (§4.9 output echo); third-party stays
+      // completion:"unknown", captured:false — "output only visible in the terminal".
+      if (item?.output === "captured") {
+        return ok200({
+          op: "command",
+          kind: "extension",
+          completion: "sync",
+          captured: true,
+          output: demoCommandOutput(name, args),
+        });
+      }
+      return ok200({ op: "command", kind: "extension", completion: "unknown", captured: false });
+    }
+
+    return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: `unknown op "${op}"` });
+  }
+
+  async function handleDialog(req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
+    const rec = recordControlRequest(req, "/api/dialog", body);
+    let storeDone: ((status: number, responseBody: unknown) => void) | undefined;
+    const fail = (status: number, code: string, opts: FailOpts): void => {
+      rec.responseStatus = status;
+      rec.responseCode = code;
+      const id = stringField(body, "id");
+      const responseBody: Record<string, unknown> = { error: code };
+      if (opts.message !== undefined) responseBody["message"] = opts.message;
+      if (id !== undefined) responseBody["id"] = id;
+      responseBody["retryable"] = opts.retryable;
+      if (opts.effect !== undefined) responseBody["effect"] = opts.effect;
+      if (opts.terminal === true) storeDone?.(status, responseBody);
+      sendJson(res, status, responseBody);
+    };
+
+    const agentKey = stringField(body, "agentKey");
+    const id = stringField(body, "id");
+    const dialogId = stringField(body, "dialogId");
+    const epoch = stringField(body, "epoch");
+    const action = stringField(body, "action");
+    if (
+      agentKey === undefined ||
+      id === undefined ||
+      dialogId === undefined ||
+      epoch === undefined ||
+      (action !== "answer" && action !== "cancel")
+    ) {
+      return fail(400, "E_BAD_REQUEST", {
+        retryable: false,
+        effect: "none",
+        message: "agentKey/id/dialogId/epoch/action required",
+      });
+    }
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(id)) {
+      return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "bad id format" });
+    }
+    const card = state.agents.get(agentKey);
+    if (card === undefined) return fail(404, "E_NOT_FOUND", { retryable: false, effect: "none" });
+    if (card.state === "stale") return fail(503, "E_AGENT_GONE", { retryable: false, effect: "none" });
+    if (card.control !== true) return fail(409, "E_UNSUPPORTED", { retryable: false, effect: "none" });
+
+    const gate = ledgerReplay("/api/dialog", body, id, rec, res);
+    if (gate.answered) return;
+    const digest = gate.digest;
+    storeDone = (status, responseBody) =>
+      ledger.set(id, { payload: digest, state: "done", status, body: responseBody });
+
+    const slot = state.dialogs.get(agentKey);
+    if (slot === undefined || slot.epoch !== epoch) {
+      // §3.5: stale epoch (/reload) or never-seen dialogId — indistinguishable from "already
+      // closed", and deliberately so.
+      return fail(409, "E_DIALOG_CLOSED", { retryable: false, effect: "none", terminal: true, message: "stale" });
+    }
+    const dialog = slot.open.find((d) => d.dialogId === dialogId);
+    if (dialog === undefined) {
+      return fail(409, "E_DIALOG_CLOSED", { retryable: false, effect: "none", terminal: true, message: "stale" });
+    }
+    if (action === "cancel" && dialog.allowCancel !== true) {
+      return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "cancel not allowed" });
+    }
+    if (action === "answer") {
+      const answers = field(body, "answers");
+      if (!Array.isArray(answers)) {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "answers required" });
+      }
+      if (answers.length !== dialog.questions.length) {
+        return fail(400, "E_BAD_ANSWER", {
+          retryable: false,
+          effect: "none",
+          terminal: true,
+          message: `expected ${dialog.questions.length} answer(s), got ${answers.length}`,
+        });
+      }
+      for (const [i, q] of dialog.questions.entries()) {
+        const a: unknown = answers[i];
+        if (!isRecord(a) || !Array.isArray(a["selected"]) || !(typeof a["other"] === "string" || a["other"] === null)) {
+          return fail(400, "E_BAD_ANSWER", {
+            retryable: false,
+            effect: "none",
+            terminal: true,
+            message: "malformed answer",
+          });
+        }
+        const selected = a["selected"];
+        for (const s of selected) {
+          if (typeof s !== "string" || !q.options.some((o) => o.label === s)) {
+            return fail(400, "E_BAD_ANSWER", {
+              retryable: false,
+              effect: "none",
+              terminal: true,
+              message: `unknown option for question ${i + 1}`,
+            });
+          }
+        }
+        if (q.multiSelect !== true && selected.length > 1) {
+          return fail(400, "E_BAD_ANSWER", {
+            retryable: false,
+            effect: "none",
+            terminal: true,
+            message: "single-select question got multiple values",
+          });
+        }
+        if (a["other"] !== null && q.allowOther === false) {
+          return fail(400, "E_BAD_ANSWER", {
+            retryable: false,
+            effect: "none",
+            terminal: true,
+            message: "free-text answer not allowed for this question",
+          });
+        }
+      }
+    }
+    // Dual-channel arbitration (§5, D3): first claim wins. This request just won — any LATER
+    // answer (web or TUI) hits the `dialog === undefined` branch above with E_DIALOG_CLOSED and
+    // reads the winner's cmdId from `closed[]` (§3.5's "claim 了但响应丢失" reconciliation).
+    slot.open = slot.open.filter((d) => d.dialogId !== dialogId);
+    const closedEntry: DialogClosedWire = {
+      dialogId,
+      by: "web",
+      outcome: action === "answer" ? "answered" : "cancelled",
+      cmdId: id,
+      at: Date.now(),
+    };
+    slot.closed = [closedEntry, ...slot.closed].slice(0, 8);
+    sse.publish("dialogs", { agentKey, epoch: slot.epoch, open: slot.open, closed: slot.closed });
+    const responseBody = { ok: true, id };
+    storeDone(200, responseBody);
+    rec.responseStatus = 200;
+    sendJson(res, 200, responseBody);
+  }
+
   function openEvents(req: IncomingMessage, res: ServerResponse): SseClient {
     // Real hub's `openEvents` (`hub/http.ts`): a well-formed `Last-Event-ID` drives the SSE ring
     // replay/resync path in `sse.attach`; dev-hub ignoring the header entirely (as before this
@@ -768,14 +1771,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     const raw = req.headers["last-event-id"];
     const lastEventId = typeof raw === "string" && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
     const client = sse.attach(req, res, lastEventId);
-    client.send("hub", {
-      version: "0.0.0-dev-hub",
-      buildId: "dev-hub@fixture",
-      pid: process.pid,
-      startedAt: Date.now(),
-      proto: PROTO,
-      port,
-    });
+    client.send("hub", hubFrame());
     client.send("agents", { agents: [...state.agents.values()].map(toCard) });
     // P1 fix (todo #26 W3 打回点 A): the fixture's own doc comment (`DevHubScriptEvent`) has
     // always promised "atMs after A CLIENT's /api/events connects" — but this used to be
@@ -793,7 +1789,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     // them.
     const clientTimers: ReturnType<typeof setTimeout>[] = [];
     for (const ev of fixture.script ?? []) {
-      const t = setTimeout(() => applyScriptEvent(state, sse, ev, scoped), ev.atMs);
+      const t = setTimeout(() => applyScriptEvent(state, sse, ev, scoped, scriptHooks), ev.atMs);
       t.unref?.();
       clientTimers.push(t);
       scriptTimers.push(t);
@@ -865,9 +1861,17 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     if (method === "POST") {
       // Password mode fakes the real *LAN* password auth surface, so its CSRF gate mirrors
       // `csrfOkLan` (Origin REQUIRED); token mode fakes the loopback surface (`csrfOk`, Origin
-      // optional) — the two are deliberately not interchangeable, same as the real hub.
-      const csrfPass =
-        opts.mode === "password" ? csrfOkLan(req, canonicalOrigin("http", `127.0.0.1:${port}`)) : csrfOk(req);
+      // optional) — the two are deliberately not interchangeable, same as the real hub. The two
+      // control endpoints additionally apply §6.3 step 2's STRICTER write gate (D8): Origin is
+      // required on BOTH modes, and `Sec-Fetch-Site` must be `same-origin` whenever present.
+      const isWriteEndpoint = path === "/api/cmd" || path === "/api/dialog";
+      const csrfPass = isWriteEndpoint
+        ? opts.mode === "password"
+          ? csrfOkLan(req, canonicalOrigin("http", `127.0.0.1:${port}`)) && secFetchSiteOk(req)
+          : csrfOkWriteLoopback(req)
+        : opts.mode === "password"
+          ? csrfOkLan(req, canonicalOrigin("http", `127.0.0.1:${port}`))
+          : csrfOk(req);
       if (!csrfPass) {
         sendError(res, 403, "E_CSRF");
         return;
@@ -932,6 +1936,14 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
 
       if (!isAuthed()) {
         sendError(res, 401, "E_AUTH");
+        return;
+      }
+      if (path === "/api/cmd") {
+        await handleCmd(req, res, body);
+        return;
+      }
+      if (path === "/api/dialog") {
+        await handleDialog(req, res, body);
         return;
       }
       if (path === "/api/subscribe") {
@@ -1021,8 +2033,12 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     mode: opts.mode,
     scenario: opts.scenario,
     ...(devToken === undefined ? {} : { token: devToken }),
+    controlRequests(): readonly DevHubControlRequest[] {
+      return controlRequests;
+    },
     async close(): Promise<void> {
       for (const t of scriptTimers) clearTimeout(t);
+      for (const t of lateTimers) clearTimeout(t);
       sse.closeAll();
       await new Promise<void>((resolveP) => server.close(() => resolveP()));
       const { rm } = await import("node:fs/promises");
@@ -1083,7 +2099,10 @@ const HELP = `Usage: npm run dev:hub -- [--mode token|password] [--scenario <nam
                           [--initial-password]
 
 Fake-data hub for local frontend dev + the visual acceptance harness (vue-plan.md §4.5).
-Scenarios come from tests/fixtures/web-hub-ui/<name>.json (dashboard, states, empty, long, streaming).`;
+Scenarios come from tests/fixtures/web-hub-ui/<name>.json: dashboard, states, empty, long, streaming (P1);
+control, ask-user, commands, hub-states (P2 control plane — control-plan.md §9.3).
+The P2 scenarios also answer POST /api/cmd + /api/dialog (success / 409 / 504 unknown → queryOnly /
+cmd_late / slow paths — see the module doc comment for the [marker] triggers).`;
 
 async function main(): Promise<void> {
   if (process.argv.slice(2).includes("--help") || process.argv.slice(2).includes("-h")) {
