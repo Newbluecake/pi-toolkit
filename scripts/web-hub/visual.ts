@@ -114,6 +114,11 @@ const DEFAULT_SCENARIOS: readonly ScenarioSpec[] = [
   { name: "login", mode: "password", fixture: "empty", route: "#/" },
   { name: "states", mode: "token", fixture: "states", route: "#/" },
   { name: "long", mode: "token", fixture: "long", route: "#/agent/agent-long" },
+  // #32 C6 (plan §9.3): P2 control-plane scenarios, backed by tests/fixtures/web-hub-ui/*.json.
+  { name: "control", mode: "token", fixture: "control", route: "#/agent/agent-alpha" },
+  { name: "ask-user", mode: "token", fixture: "ask-user", route: "#/agent/agent-alpha" },
+  { name: "commands", mode: "token", fixture: "commands", route: "#/agent/agent-alpha" },
+  { name: "hub-states", mode: "token", fixture: "hub-states", route: "#/" },
 ];
 
 const BREAKPOINTS: readonly number[] = [375, 481, 767, 768, 1024, 1025];
