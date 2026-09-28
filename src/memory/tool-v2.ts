@@ -323,9 +323,12 @@ function renderDirectoryListing(cwd: string, real: string, deps: MemoryToolV2Dep
 // ───────────────────────────── view (single file) ─────────────────────────────
 
 function numberedLines(lines: readonly string[], from: number, to: number): string {
+  // Gutter width tracks the largest displayed number (like `cat -n`) instead of
+  // a fixed 6 — a 13-line file must not show "     7".
+  const width = String(to).length;
   const out: string[] = [];
   for (let i = from; i <= to; i++) {
-    out.push(`${String(i).padStart(6, " ")}\t${lines[i - 1] ?? ""}`);
+    out.push(`${String(i).padStart(width, " ")}\t${lines[i - 1] ?? ""}`);
   }
   return out.join("\n");
 }
