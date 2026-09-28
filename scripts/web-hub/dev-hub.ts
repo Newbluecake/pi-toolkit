@@ -581,9 +581,11 @@ export interface DevHubControlRequest {
 }
 
 /** Fake per-hub idempotency ledger (§3.4/§4.5's hub LRU + agent 台账, merged — dev-hub is both
- * ends). `done` entries only ever hold successes and non-retryable failures (retryable,
- * effect-none failures are never stored, exactly like the real hub); `running` entries are the
- * `[timeout]` path, settled later by `scheduleLateSettle`. */
+ * ends), keyed by `principal|agentKey|id` exactly like the real hub LRU (§3.4: a browser `id` is
+ * only unique per user ACTION, so two agents — or two principals — must be able to reuse the same
+ * id without tripping a false id-reuse 409). `done` entries only ever hold successes and
+ * non-retryable failures (retryable, effect-none failures are never stored, exactly like the real
+ * hub); `running` entries are the `[timeout]` path, settled later by `scheduleLateSettle`. */
 interface DevLedgerEntry {
   readonly payload: string;
   state: "running" | "done";
@@ -967,6 +969,12 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
 
   // --- fake control plane (§6.2 endpoints, §3.4/§4.5 ledger, §9.3 request recording) ----------
   const ledger = new Map<string, DevLedgerEntry>();
+  /** §3.4's hub LRU key is `principal | agentKey | id`; loopback's principal is `"token"`, LAN's
+   * is `"lan:<user>"` (password mode has the single fixed dev credential). Function declaration
+   * (hoisted) so it may sit above `devUsername`'s const — it only runs during request handling. */
+  function ledgerKeyOf(agentKey: string, id: string): string {
+    return `${opts.mode === "password" ? `lan:${devUsername}` : "token"}|${agentKey}|${id}`;
+  }
   const controlRequests: DevHubControlRequest[] = [];
   const CONTROL_REQUEST_LOG_CAP = 256;
   const lateTimers: ReturnType<typeof setTimeout>[] = [];
@@ -1244,6 +1252,28 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     return card.session?.sessionId !== sid;
   }
 
+  /** §3.2 wire shape for the optional `expect` precondition (D17/D21): when present it must be an
+   * object whose `sessionId` (when given) is a non-empty string — a malformed precondition is a
+   * 400, never silently ignored (§6.3 step 5 "JSON 形状"). */
+  function expectFieldError(body: unknown): string | undefined {
+    const e = field(body, "expect");
+    if (e === undefined) return undefined;
+    if (!isRecord(e)) return "expect must be an object";
+    const sid = e["sessionId"];
+    if (sid !== undefined && (typeof sid !== "string" || sid.length === 0)) {
+      return "expect.sessionId must be a non-empty string";
+    }
+    return undefined;
+  }
+
+  /** §3.2 `CmdArgs`: `deliver` only ever takes `"steer" | "followUp"` (required on prompt,
+   * optional on command) — any other value is a 400, never a silent fallback to steer. */
+  function deliverFieldError(body: unknown): string | undefined {
+    const d = field(body, "deliver");
+    if (d === undefined) return undefined;
+    return d === "steer" || d === "followUp" ? undefined : 'deliver must be "steer" or "followUp"';
+  }
+
   /** Demo `CommandOutputWire` for captured pi-toolkit commands (§4.9) — the kind variety
    * (`notify`/`status`/`text`/`interactive` + `needsTerminal`) `CommandResult.vue` has to render. */
   function demoCommandOutput(name: string, args: string): CommandOutputWire {
@@ -1281,16 +1311,18 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
 
   /** Dedupe replay + `queryOnly` answer (§3.4/§4.5). Returns `{answered:false, digest}` when the
    * request must actually execute; any other outcome (dup replay, query answer, id-reuse 409,
-   * E_UNKNOWN_ID, still-running 504) is fully sent here. */
+   * E_UNKNOWN_ID, still-running 504) is fully sent here. `key` is the §3.4 composite ledger key
+   * (`principal|agentKey|id`); `id` remains the raw browser id for response bodies. */
   function ledgerReplay(
     path: "/api/cmd" | "/api/dialog",
     body: unknown,
+    key: string,
     id: string,
     rec: DevHubControlRequest,
     res: ServerResponse,
   ): { answered: true } | { answered: false; digest: string } {
     const digest = payloadDigest(path, body);
-    const existing = ledger.get(id);
+    const existing = ledger.get(key);
     if (existing !== undefined && existing.payload !== digest) {
       rec.responseStatus = 409;
       rec.responseCode = "E_BAD_REQUEST";
@@ -1388,16 +1420,22 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     // forwarded at all — same 409 the real router answers for an old pi-toolkit.
     if (card.control !== true) return fail(409, "E_UNSUPPORTED", { retryable: false, effect: "none" });
 
-    const gate = ledgerReplay("/api/cmd", body, id, rec, res);
+    const ledgerKey = ledgerKeyOf(agentKey, id);
+    const gate = ledgerReplay("/api/cmd", body, ledgerKey, id, rec, res);
     if (gate.answered) return;
     const digest = gate.digest;
     storeDone = (status, responseBody) =>
-      ledger.set(id, { payload: digest, state: "done", status, body: responseBody });
+      ledger.set(ledgerKey, { payload: digest, state: "done", status, body: responseBody });
 
     if (op === "prompt") {
       const text = field(body, "text");
       if (typeof text !== "string" || text.trim().length === 0 || Buffer.byteLength(text, "utf8") > 48 * 1024) {
         return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "empty or oversized text" });
+      }
+      // §6.3 step 5 / §3.2 CmdArgs: wire-shape validation comes before any routing or execution.
+      const promptFieldError = deliverFieldError(body) ?? expectFieldError(body);
+      if (promptFieldError !== undefined) {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: promptFieldError });
       }
       if (expectSessionMismatch(body, card)) {
         return fail(409, "E_SESSION_CHANGED", { retryable: false, effect: "none", terminal: true });
@@ -1406,7 +1444,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
       if (text.includes("[stale-ctx]")) return fail(409, "E_STALE_CTX", { retryable: true, effect: "none" });
       if (text.includes("[timeout]")) {
         const entry: DevLedgerEntry = { payload: digest, state: "running" };
-        ledger.set(id, entry);
+        ledger.set(ledgerKey, entry);
         scheduleLateSettle(
           agentKey,
           id,
@@ -1469,7 +1507,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
       }
       if (text.includes("[timeout]")) {
         const entry: DevLedgerEntry = { payload: digest, state: "running" };
-        ledger.set(id, entry);
+        ledger.set(ledgerKey, entry);
         scheduleLateSettle(
           agentKey,
           id,
@@ -1495,7 +1533,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
       if (runId.endsWith("_done")) return ok200({ op: "abort_subagent", alreadyTerminal: true });
       if (runId.includes("timeout")) {
         const entry: DevLedgerEntry = { payload: digest, state: "running" };
-        ledger.set(id, entry);
+        ledger.set(ledgerKey, entry);
         scheduleLateSettle(
           agentKey,
           id,
@@ -1511,10 +1549,22 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
 
     if (op === "command") {
       const name = stringField(body, "name");
-      const argsRaw = field(body, "args");
-      const args = typeof argsRaw === "string" ? argsRaw : "";
       if (name === undefined || !/^[A-Za-z0-9:_.-]{1,64}$/.test(name)) {
         return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "bad command name" });
+      }
+      // §6.3 step 5 / §3.2 CmdArgs: `args` is a string ≤ 16 KiB UTF-8 (never silently coerced),
+      // `deliver`/`expect` follow the same wire-shape rules as prompt.
+      const argsRaw = field(body, "args");
+      if (argsRaw !== undefined && typeof argsRaw !== "string") {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "args must be a string" });
+      }
+      const args = argsRaw ?? "";
+      if (Buffer.byteLength(args, "utf8") > 16 * 1024) {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: "args exceeds 16 KiB" });
+      }
+      const cmdFieldError = deliverFieldError(body) ?? expectFieldError(body);
+      if (cmdFieldError !== undefined) {
+        return fail(400, "E_BAD_REQUEST", { retryable: false, effect: "none", message: cmdFieldError });
       }
       const slot = state.commands.get(agentKey);
       const item = slot?.items.find((i) => i.name === name);
@@ -1552,7 +1602,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
       }
       if (args.includes("[timeout]")) {
         const entry: DevLedgerEntry = { payload: digest, state: "running" };
-        ledger.set(id, entry);
+        ledger.set(ledgerKey, entry);
         scheduleLateSettle(
           agentKey,
           id,
@@ -1569,7 +1619,15 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
           // §4.6: compact is async — the HTTP receipt says so, and the completion (or failure)
           // arrives later as a `cmd_late` broadcast; the initiating page refetches with queryOnly.
           ok200({ op: "command", kind: "builtin", completion: "async" });
+          // P1 fix (verifier 打回点 3): the async terminal state must be written BACK into the
+          // ledger — the receipt above cached `completion:"async"`, so without this write-back a
+          // post-`cmd_late` queryOnly refetch replays the stale async receipt forever instead of
+          // the settled `completion:"sync"` (§3.5 "迟到 cmd_late ⇒ unknown/done ⇒ 回缓存").
+          const entry = ledger.get(ledgerKey);
           const t = setTimeout(() => {
+            if (entry !== undefined && entry.state === "done") {
+              entry.body = { ok: true, id, data: { op: "command", kind: "builtin", completion: "sync" } };
+            }
             sse.publish("cmd_late", {
               agentKey,
               id,
@@ -1674,11 +1732,12 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
     if (card.state === "stale") return fail(503, "E_AGENT_GONE", { retryable: false, effect: "none" });
     if (card.control !== true) return fail(409, "E_UNSUPPORTED", { retryable: false, effect: "none" });
 
-    const gate = ledgerReplay("/api/dialog", body, id, rec, res);
+    const ledgerKey = ledgerKeyOf(agentKey, id);
+    const gate = ledgerReplay("/api/dialog", body, ledgerKey, id, rec, res);
     if (gate.answered) return;
     const digest = gate.digest;
     storeDone = (status, responseBody) =>
-      ledger.set(id, { payload: digest, state: "done", status, body: responseBody });
+      ledger.set(ledgerKey, { payload: digest, state: "done", status, body: responseBody });
 
     const slot = state.dialogs.get(agentKey);
     if (slot === undefined || slot.epoch !== epoch) {
@@ -1741,6 +1800,19 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
             effect: "none",
             terminal: true,
             message: "free-text answer not allowed for this question",
+          });
+        }
+        // P1 fix (verifier 打回点 1): every question must actually be ANSWERED — at least one
+        // selected option, or a non-empty Other. An all-empty answer (`selected:[], other:null`
+        // or a blank Other string) is a 400 E_BAD_ANSWER and the dialog stays open (this return
+        // precedes the `slot.open` mutation below).
+        const otherText = a["other"];
+        if (selected.length === 0 && (otherText === null || otherText.trim().length === 0)) {
+          return fail(400, "E_BAD_ANSWER", {
+            retryable: false,
+            effect: "none",
+            terminal: true,
+            message: `question ${i + 1} needs a selection or an Other answer`,
           });
         }
       }

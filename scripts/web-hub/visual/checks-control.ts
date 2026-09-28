@@ -23,8 +23,11 @@
  *    a real headless browser through a login + a same-origin `POST /api/cmd`, and reads the
  *    request's `Origin`/`Sec-Fetch-Site` headers back from dev-hub's recorded
  *    `controlRequests()` (K16), plus the page's `crypto.randomUUID`/`getRandomValues`
- *    availability (K18). Only Chromium is resolvable offline on this machine (`lib/playwright.ts`
- *    pin) — K16's Firefox/WebKit rows remain W5 真机 items, and the probe says so in its output.
+ *    availability (K18) — asserted on BOTH the loopback origin (secure context: both present)
+ *    and a real LAN plain-HTTP origin (`http://<lan-ip>`, not a secure context: `randomUUID`
+ *    absent, `getRandomValues` present). Only Chromium is resolvable offline on this machine
+ *    (`lib/playwright.ts` pin) — K16's Firefox/WebKit rows remain W5 真机 items, and the probe
+ *    says so in its output.
  *    Exit codes: 0 = all probes ok, 1 = a probe assertion failed, 2 = browser unavailable or
  *    usage error.
  *
@@ -34,15 +37,17 @@
  */
 import { readFileSync } from "node:fs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import type { CheckContext, CheckModule, CheckOutcome, ExtPage } from "../visual.js";
 import { formatAxeViolations, type AxeViolationLike } from "./checks-e2e.js";
 import { createDevHub, type DevHubHandle } from "../dev-hub.js";
-import { loadPlaywright, type PwBrowser } from "../lib/playwright.js";
+import { loadPlaywright, type PwBrowser, type PwChromium } from "../lib/playwright.js";
 
 function outcome(name: string, ok: boolean, detail?: string): CheckOutcome {
   return ok ? { name, ok } : { name, ok, detail: detail ?? "failed" };
@@ -211,14 +216,21 @@ async function checkStopButtonTwoStep(ctx: CheckContext): Promise<CheckOutcome[]
 }
 
 /** §9.3 "Composer 键位": Enter sends (desktop), Shift+Enter inserts a newline, an IME
- * composition session suppresses the send. Alt+Enter (followUp) is exercised the same way when
- * the agent is busy — asserted via the POST body's `deliver` field once C5 lands. */
+ * composition session suppresses the send, and Alt+Enter on the BUSY routed agent (control.json's
+ * agent-alpha is busy) queues as followUp — asserted on the wire via the POST body's `deliver`
+ * field (D4). `ctx.requests` records URLs only, so the Alt+Enter assertion attaches its own
+ * request listener capturing `postData` for the two control write endpoints. */
 async function checkComposerKeys(ctx: CheckContext): Promise<CheckOutcome[]> {
   if (!isControlActionCell(ctx.scenario, ctx.width, ctx.hasTouch, ctx.theme)) return [];
   const page = asControlPage(ctx);
   const present = await page.evaluate((sel) => document.querySelector(sel.composer) !== null, CONTROL_SELECTORS);
   if (!present) return [];
   const results: CheckOutcome[] = [];
+  const controlPostBodies: Array<string | null> = [];
+  page.on("request", (arg: unknown) => {
+    const req = arg as { url(): string; postData(): string | null };
+    if (isControlApiPath(req.url())) controlPostBodies.push(req.postData());
+  });
 
   // Enter sends.
   let before = countControlPosts(ctx);
@@ -269,6 +281,36 @@ async function checkComposerKeys(ctx: CheckContext): Promise<CheckOutcome[]> {
       "control-composer-ime-no-send",
       countControlPosts(ctx) === before,
       `posts ${before}→${countControlPosts(ctx)}`,
+    ),
+  );
+
+  // Alt+Enter (busy agent ⇒ followUp, D4): must POST /api/cmd once with body
+  // `deliver:"followUp"` — the wire assertion is what separates this from a plain steer.
+  before = countControlPosts(ctx);
+  const bodiesBefore = controlPostBodies.length;
+  await page.click(CONTROL_SELECTORS.composer);
+  await page.keyboard.type(" alt-enter probe");
+  await page.keyboard.press("Alt+Enter");
+  await page.waitForTimeout(500);
+  const newBodies = controlPostBodies.slice(bodiesBefore);
+  const followUpSent = newBodies.some((b) => {
+    if (b === null) return false;
+    try {
+      const parsed: unknown = JSON.parse(b);
+      if (typeof parsed !== "object" || parsed === null) return false;
+      const rec = parsed as Record<string, unknown>;
+      return rec["op"] === "prompt" && rec["deliver"] === "followUp";
+    } catch {
+      return false;
+    }
+  });
+  results.push(
+    outcome(
+      "control-composer-alt-enter-followup",
+      countControlPosts(ctx) === before + 1 && followUpSent,
+      `posts ${before}→${countControlPosts(ctx)}, bodies=[${newBodies
+        .map((b) => (b === null ? "∅" : b.slice(0, 160)))
+        .join(" | ")}]`,
     ),
   );
   return results;
@@ -419,13 +461,98 @@ export interface ProbeResult {
 const PROBE_INDEX_HTML =
   '<!doctype html><html data-auth-mode="__AUTH_MODE__"><head><meta charset="utf-8"><title>pwh probe</title></head><body>probe</body></html>';
 
+/** First non-internal IPv4 (K18 needs a genuinely non-loopback origin: 127/8 and `localhost` are
+ * potentially trustworthy, so probing over loopback would mask the LAN plain-HTTP case). */
+function firstLanIPv4(): string | undefined {
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family === "IPv4" && !a.internal) return a.address;
+    }
+  }
+  return undefined;
+}
+
+interface CryptoProbeShape {
+  readonly randomUUID: string;
+  readonly getRandomValues: string;
+  readonly secureContext: boolean;
+}
+
+/**
+ * K18, LAN half (control-plan.md §2.1) — a REAL assertion, not a note: over plain HTTP on a
+ * non-loopback origin the page must NOT be a secure context, `crypto.randomUUID`
+ * ([SecureContext]-only) must be ABSENT, and `crypto.getRandomValues` (the one `newCmdId`
+ * actually depends on, §3.4) must still work. Primary route: a throwaway server bound to
+ * 0.0.0.0, visited through this machine's real LAN IP (`http://<lan-ip>:<port>`). Fallback when
+ * no non-loopback interface exists (e.g. a sandboxed CI container): a
+ * `--host-resolver-rules`-mapped `.invalid` hostname, which is likewise not a potentially
+ * trustworthy origin. Either way the report fails (ok:false) when the invariants break.
+ */
+async function probeLanPlainHttpCrypto(
+  chromium: PwChromium,
+  executablePath: string,
+  browser: PwBrowser,
+): Promise<ProbeReport> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(PROBE_INDEX_HTML.replace("__AUTH_MODE__", "token"));
+  });
+  await new Promise<void>((resolveP, rejectP) => {
+    server.once("error", rejectP);
+    server.listen(0, "0.0.0.0", () => resolveP());
+  });
+  let fallbackBrowser: PwBrowser | undefined;
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const lanIp = firstLanIPv4();
+    let origin: string;
+    let via: string;
+    let br: PwBrowser = browser;
+    if (lanIp !== undefined) {
+      origin = `http://${lanIp}:${port}`;
+      via = "lan-ip";
+    } else {
+      origin = `http://pwh-k18-probe.invalid:${port}`;
+      via = "host-resolver-rules";
+      fallbackBrowser = await chromium.launch({
+        headless: true,
+        executablePath,
+        args: ["--host-resolver-rules=MAP pwh-k18-probe.invalid 127.0.0.1"],
+      });
+      br = fallbackBrowser;
+    }
+    const context = await br.newContext({ viewport: { width: 1024, height: 768 } });
+    const page = await context.newPage();
+    await page.goto(origin + "/", { waitUntil: "load" });
+    const probe = await page.evaluate(() => ({
+      randomUUID: typeof window.crypto?.randomUUID,
+      getRandomValues: typeof window.crypto?.getRandomValues,
+      secureContext: window.isSecureContext,
+    }));
+    await context.close();
+    return {
+      probe: "k18-crypto-lan-plain-http",
+      engine: "chromium",
+      origin,
+      via,
+      ...probe,
+      ok: probe.secureContext === false && probe.randomUUID === "undefined" && probe.getRandomValues === "function",
+      note: "plain HTTP off-loopback is not a secure context: randomUUID must be absent (SecureContext-only), getRandomValues must survive (frontend newCmdId depends on it)",
+    };
+  } finally {
+    await fallbackBrowser?.close();
+    await new Promise<void>((resolveP) => server.close(() => resolveP()));
+  }
+}
+
 /**
  * K16: a same-origin `fetch` POST to `/api/cmd` from a real browser must carry
  * `Origin: http://127.0.0.1:<port>` (loopback write gate, §6.3 D8) and, when the engine sends
  * one, `Sec-Fetch-Site: same-origin`. K18: `crypto.getRandomValues` must exist even where
- * `crypto.randomUUID` doesn't (LAN plain HTTP; on 127.0.0.1 both exist because loopback is a
- * secure context — the probe reports the values verbatim and only fails if `getRandomValues`
- * is missing, which is the one the frontend's `newCmdId` depends on).
+ * `crypto.randomUUID` doesn't — asserted for real on both halves: loopback (secure context, both
+ * present) and LAN plain HTTP via `probeLanPlainHttpCrypto` (`http://<lan-ip>` or a
+ * resolver-mapped `.invalid` fallback: not a secure context, `randomUUID` absent,
+ * `getRandomValues` — the one the frontend's `newCmdId` depends on — present).
  */
 export async function runControlProbe(
   opts: { log?: (line: string) => void } = {},
@@ -479,11 +606,12 @@ export async function runControlProbe(
     );
 
     const recorded = hub.controlRequests().find((r) => r.id === cmdId);
-    const cryptoProbe = await page.evaluate(() => ({
+    const cryptoProbe: CryptoProbeShape = await page.evaluate(() => ({
       randomUUID: typeof window.crypto?.randomUUID,
       getRandomValues: typeof window.crypto?.getRandomValues,
       secureContext: window.isSecureContext,
     }));
+    const lanCrypto = await probeLanPlainHttpCrypto(pw.chromium, pw.executablePath, browser);
 
     const reports: ProbeReport[] = [
       {
@@ -501,9 +629,13 @@ export async function runControlProbe(
       {
         probe: "k18-crypto",
         ...cryptoProbe,
-        ok: cryptoProbe.getRandomValues === "function",
-        note: "127.0.0.1 is a secure context so randomUUID exists here; the LAN plain-HTTP case (absent) was verified in the S0 spike (§2.1 K18)",
+        ok:
+          cryptoProbe.secureContext === true &&
+          cryptoProbe.randomUUID === "function" &&
+          cryptoProbe.getRandomValues === "function",
+        note: "127.0.0.1 is a secure context so BOTH exist here; the LAN plain-HTTP case (randomUUID absent, getRandomValues present) is asserted by the k18-crypto-lan-plain-http probe below",
       },
+      lanCrypto,
     ];
     log(JSON.stringify(reports));
     return { kind: "ok", result: { ok: reports.every((r) => r.ok), reports } };

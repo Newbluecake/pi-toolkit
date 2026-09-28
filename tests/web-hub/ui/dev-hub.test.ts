@@ -1353,6 +1353,39 @@ describe("dev-hub control plane — POST /api/cmd", () => {
     sse.close();
   });
 
+  it("/compact: the async terminal state is written BACK into the ledger — post-cmd_late queryOnly sees completion:sync", async () => {
+    const hub = await start({ mode: "token", scenario: "commands" });
+    const cookie = await loginToken(hub);
+    const sse = await openSse(hub.port, cookie);
+    await sse.waitFor("agents");
+    const req = { agentKey: "agent-alpha", id: cmdId(), op: "command", name: "compact", args: "", confirm: true };
+    const first = await postControl(hub, "/api/cmd", cookie, req);
+    expect(first.status).toBe(200);
+    expect(first.body.data).toMatchObject({ kind: "builtin", completion: "async" });
+    // Before the late settle, queryOnly legitimately replays the async receipt.
+    const early = await postControl(hub, "/api/cmd", cookie, { ...req, queryOnly: true });
+    expect(early.body.data).toMatchObject({
+      op: "query",
+      state: "ok",
+      result: { ok: true, data: { completion: "async" } },
+    });
+    await sse.waitFor("cmd_late", DEV_HUB_LATE_SETTLE_MS + 3_000);
+    // P1 regression (verifier 打回点 3, port 45677 repro): after cmd_late the ledger holds the
+    // SETTLED receipt, so the initiating page's queryOnly refetch learns the terminal state.
+    const settled = await postControl(hub, "/api/cmd", cookie, { ...req, queryOnly: true });
+    expect(settled.status).toBe(200);
+    expect(settled.body).toMatchObject({
+      ok: true,
+      dup: true,
+      data: {
+        op: "query",
+        state: "ok",
+        result: { ok: true, data: { op: "command", kind: "builtin", completion: "sync" } },
+      },
+    });
+    sse.close();
+  });
+
   it("strict write CSRF (§6.3 D8): missing/wrong Origin or cross-site Sec-Fetch-Site → 403 E_CSRF", async () => {
     const hub = await start({ mode: "token", scenario: "control" });
     const cookie = await loginToken(hub);
@@ -1464,6 +1497,25 @@ describe("dev-hub control plane — POST /api/dialog", () => {
     // The single-question dialog is still open after all those failures.
     const stillOpen = await answer([{ selected: ["Plan B — patch"], other: null }]);
     expect(stillOpen.status).toBe(200);
+  });
+
+  it("empty answer (no selection AND no Other) → 400 E_BAD_ANSWER, dialog stays open", async () => {
+    const hub = await start({ mode: "token", scenario: "ask-user" });
+    const cookie = await loginToken(hub);
+    const answer = (answers: unknown) =>
+      postControl(hub, "/api/dialog", cookie, { ...single, id: cmdId(), action: "answer", answers });
+    // The exact verifier repro (port 45676): `selected:[] + other:null` was wrongly accepted 200.
+    const empty = await answer([{ selected: [], other: null }]);
+    expect(empty.status).toBe(400);
+    expect(empty.body).toMatchObject({ error: "E_BAD_ANSWER", retryable: false, effect: "none" });
+    // A whitespace-only Other is no answer either.
+    const blankOther = await answer([{ selected: [], other: "   " }]);
+    expect(blankOther.status).toBe(400);
+    expect(blankOther.body.error).toBe("E_BAD_ANSWER");
+    // The dialog never closed: a real answer afterwards still wins the race with 200.
+    const real = await answer([{ selected: ["Plan B — patch"], other: null }]);
+    expect(real.status).toBe(200);
+    expect(real.body).toMatchObject({ ok: true });
   });
 
   it("multi-question dialog: full valid answer (multiSelect + Other) → 200", async () => {
