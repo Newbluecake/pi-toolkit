@@ -59,7 +59,7 @@ export function createEventTap(
     setTimer: (ms: number, fn: () => void) => { cancel(): void };
     /** seq of the ev frame the sink just emitted (recent[] carries it for snapshot reconciliation). */
     currentSeq?: () => number;
-    attributePrompt?: (event: Record<string, unknown>) => Record<string, unknown>;
+    attributePrompt?: (event: WireEvent) => WireEvent;
   },
 ): EventTap {
   const currentSeq = opts.currentSeq ?? (() => 0);
