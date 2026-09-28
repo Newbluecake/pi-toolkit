@@ -13,14 +13,21 @@
  * All state lives in the `createAuth` closure (no module-level mutable state).
  */
 import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import type { HubLog } from "./ports.js";
+import { cleanupTokenTemps, replaceTokenAtomic } from "../protocol/token-file.js";
 
 export interface Auth {
-  token(): string; // 首次 wx+0600 创建（32B base64url）；mode 宽于 0600 → chmod + warn
-  login(candidate: unknown, now: number): { ok: true; sid: string } | { ok: false; code: "E_AUTH" | "E_RATE" }; // sha256 后 timingSafeEqual；5 失败/60s
-  check(cookieHeader: string | undefined, now: number): boolean; // pwh_sid，12h 滑动
+  token(): string;
+  /** Re-read the complete token file after recovery/atomic replacement. */
+  reload(): string;
+  /** Rotate the bearer token and invalidate every loopback session. */
+  rotateToken(): { token: string; revoked: number };
+  revokeAllSessions(): number;
+  authGen(): number;
+  login(candidate: unknown, now: number): { ok: true; sid: string } | { ok: false; code: "E_AUTH" | "E_RATE" };
+  check(cookieHeader: string | undefined, now: number): boolean;
   logout(sid: string): void;
 }
 
@@ -54,6 +61,7 @@ export function createAuth(opts: { tokenFile: string; randomBytes?: (n: number) 
   const { tokenFile, log } = opts;
   let cached: string | undefined;
   let cachedDigest: Buffer | undefined;
+  let generation = 0;
   const failures: number[] = []; // timestamps of recent failed logins
   const sessions = new Map<string, number>(); // sid → expiresAt (insertion order ≈ age)
 
@@ -61,28 +69,23 @@ export function createAuth(opts: { tokenFile: string; randomBytes?: (n: number) 
     return rand(32).toString("base64url");
   }
 
-  function writeFresh(flags: "wx" | "w"): string {
+  function writeFresh(): string {
     const value = newToken();
-    const fd = openSync(tokenFile, flags, 0o600);
-    try {
-      fchmodSync(fd, 0o600); // umask can only narrow, but an existing file ("w") keeps its old mode
-      writeSync(fd, `${value}\n`);
-    } finally {
-      closeSync(fd);
-    }
+    replaceTokenAtomic(tokenFile, value);
     return value;
   }
 
   function loadToken(): string {
     mkdirSync(dirname(tokenFile), { recursive: true, mode: 0o700 });
+    let st;
     try {
-      const value = writeFresh("wx");
+      st = statSync(tokenFile);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      const value = writeFresh();
       log.info("web-hub token created", { file: tokenFile });
       return value;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    const st = statSync(tokenFile);
     if ((st.mode & 0o077) !== 0) {
       chmodSync(tokenFile, 0o600);
       log.warn("web-hub token file mode too wide; fixed to 0600", {
@@ -90,20 +93,47 @@ export function createAuth(opts: { tokenFile: string; randomBytes?: (n: number) 
         mode: (st.mode & 0o777).toString(8),
       });
     }
-    const value = readFileSync(tokenFile, "utf8").trim();
+    let value = "";
+    try {
+      value = readFileSync(tokenFile, "utf8").trim();
+    } catch {
+      /* corrupt/unreadable is regenerated below */
+    }
     if (value.length < MIN_TOKEN_CHARS || !/^[A-Za-z0-9_-]+$/.test(value)) {
       log.warn("web-hub token file corrupt; regenerated", { file: tokenFile });
-      return writeFresh("w");
+      return writeFresh();
     }
     return value;
   }
 
   function token(): string {
     if (cached === undefined) {
+      cleanupTokenTemps(tokenFile);
       cached = loadToken();
       cachedDigest = sha256(cached);
     }
     return cached;
+  }
+
+  function reload(): string {
+    cached = undefined;
+    cachedDigest = undefined;
+    return token();
+  }
+
+  function revokeAllSessions(): number {
+    const n = sessions.size;
+    sessions.clear();
+    generation++;
+    return n;
+  }
+
+  function rotateToken(): { token: string; revoked: number } {
+    const next = newToken();
+    replaceTokenAtomic(tokenFile, next);
+    cached = next;
+    cachedDigest = sha256(next);
+    return { token: next, revoked: revokeAllSessions() };
   }
 
   function pruneFailures(now: number): void {
@@ -160,5 +190,5 @@ export function createAuth(opts: { tokenFile: string; randomBytes?: (n: number) 
     sessions.delete(sid);
   }
 
-  return { token, login, check, logout };
+  return { token, reload, rotateToken, revokeAllSessions, authGen: () => generation, login, check, logout };
 }

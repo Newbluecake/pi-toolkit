@@ -17,6 +17,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, join } from "node:path";
 import type { HubConfig } from "../hub/ports.js";
 import { TIMING } from "../protocol/messages.js";
+import { readStopMarkerSync, type StopMarkerRead } from "../protocol/stop-marker.js";
 
 export interface LauncherPlan {
   execPath: string;
@@ -128,8 +129,17 @@ export function shouldSpawnHub(opts: {
   launcherOk: boolean;
   lastSpawnAt: number | undefined;
   now: number;
+  /** Stop marker is read on every admission, never cached. Omitted is the legacy/test default. */
+  stop?: "absent" | "stopped" | "unknown";
+  stoppedFile?: string;
+  readStop?: (file: string) => StopMarkerRead;
+  blocked?: boolean;
 }): boolean {
-  if (!opts.autoStart || opts.headless || !opts.launcherOk) return false;
+  if (!opts.autoStart || opts.headless || !opts.launcherOk || opts.blocked === true) return false;
+  const stop =
+    opts.stop ??
+    (opts.stoppedFile === undefined ? "absent" : (opts.readStop ?? readStopMarkerSync)(opts.stoppedFile).state);
+  if (stop !== "absent") return false;
   return opts.lastSpawnAt === undefined || opts.now - opts.lastSpawnAt >= TIMING.spawnThrottleMs;
 }
 

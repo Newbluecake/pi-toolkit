@@ -674,6 +674,7 @@ class Connection implements HubConnection {
         launcherOk: !("error" in this.opts.launcher),
         lastSpawnAt: this.lastSpawnAt,
         now,
+        stoppedFile: this.opts.paths.stoppedFile,
       });
     if (!ok) return false;
     this.lastSpawnAt = now;
