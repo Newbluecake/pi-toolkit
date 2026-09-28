@@ -17,6 +17,7 @@ import {
   type CmdFrame,
   type SessionInfo,
 } from "../../../src/web-hub/protocol/messages.js";
+import { writeStopMarkerSync } from "../../../src/web-hub/protocol/stop-marker.js";
 import { MAX_FRAME_BYTES } from "../../../src/web-hub/protocol/ndjson.js";
 import {
   ackFrame,
@@ -614,6 +615,52 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
       t: "hello",
       caps: ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"],
     });
+  });
+
+  it("C10: a lower-version agent yields auto-start during supersede, then resumes after yield", () => {
+    vi.useFakeTimers();
+    const spawn = vi.fn();
+    const n = fakeNet();
+    const t = { value: 1_000 };
+    const conn = acquireConnection(
+      opts({
+        netConnect: n.netConnect,
+        spawn,
+        now: () => t.value,
+        settings: { ...SETTINGS, autoStart: true },
+        launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+      }),
+    );
+    const first = n.sockets[0]!;
+    first.emit("connect");
+    first.hub(ackFrame());
+    first.hub({ t: "superseded", nextVersion: "2.0.0", yieldMs: 10_000 });
+    expect(conn.status().state).toBe("backoff");
+    vi.advanceTimersByTime(0);
+    n.sockets[n.sockets.length - 1]!.fail("ENOENT");
+    expect(spawn).not.toHaveBeenCalled();
+    t.value += 10_000;
+    vi.advanceTimersByTime(500);
+    n.sockets[n.sockets.length - 1]!.fail("ENOENT");
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("C8: a stop marker is read at each spawn admission and blocks auto-start", () => {
+    const spawn = vi.fn();
+    const n = fakeNet();
+    const stopFile = `${tmp.dir}/stopped`;
+    const o = opts({
+      netConnect: n.netConnect,
+      spawn,
+      paths: { ...pathsIn(tmp.dir), stoppedFile: stopFile },
+      settings: { ...SETTINGS, autoStart: true },
+      launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+    });
+    vi.useFakeTimers();
+    writeStopMarkerSync(stopFile);
+    acquireConnection(o);
+    n.sockets[0]!.fail("ENOENT");
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it("capsExtra (frozen hook) can add extra caps to hello without editing connection.ts again", () => {

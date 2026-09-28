@@ -52,6 +52,8 @@ export function createAgentServer(
      * absent — never omitted, since agent-side D14 slot gating treats a missing `caps` as a
      * pre-P2 hub. */
     admin?: AdminHandler;
+    /** C8/C10: scan rotate.intent on every successful hello. */
+    onHello?: () => void;
   },
 ): AgentServer {
   const { registry, config, log, now } = deps;
@@ -133,6 +135,11 @@ export function createAgentServer(
         }
         clearTimeout(helloTimer);
         agentKey = registry.register(hello, conn).agentKey;
+        try {
+          deps.onHello?.();
+        } catch (err) {
+          log.error("web-hub agent-server: hello recovery hook failed", { error: String(err) });
+        }
         agentPid = hello.agentId.pid;
         write({
           t: "hello_ack",

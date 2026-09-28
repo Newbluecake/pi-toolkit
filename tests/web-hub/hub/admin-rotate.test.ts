@@ -1,6 +1,6 @@
 // plan §6.7.1 — handleRotateToken 完整序列 + recoverRotateIntent 崩溃注入矩阵（C8）。
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -13,7 +13,9 @@ import {
 } from "../../../src/web-hub/protocol/rotate-intent.js";
 import { readTokenFile, replaceTokenAtomic } from "../../../src/web-hub/protocol/token-file.js";
 import type { Auth } from "../../../src/web-hub/hub/auth.js";
-import type { HubLog } from "../../../src/web-hub/hub/ports.js";
+import { startHub } from "../../../src/web-hub/hub/hub.js";
+import type { FrontendFactory, HubLog } from "../../../src/web-hub/hub/ports.js";
+import { resolveHubPaths } from "../../../src/web-hub/protocol/paths.js";
 
 let dir: string;
 let tokenFile: string;
@@ -102,6 +104,67 @@ describe("handleRotateToken: online ①-⑤ sequence and call order", () => {
     expect(result).toEqual({ token: "new-hot-token", revoked: { loopback: 1, lan: 3 } });
     // The intent file must be gone after a clean run (step ⑤).
     expect(readRotateIntentSync(rotateIntentFile)).toEqual({ state: "absent" });
+  });
+
+  it("startup recovery completes before the first auth.token(), listen completion, and hub.json write", async () => {
+    const home = join(dir, "home");
+    const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
+    mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(paths.tokenFile, "old-token\n", { mode: 0o600 });
+    writeRotateIntentSync(paths.rotateIntentFile!, {
+      v: 1,
+      id: newRotateIntentId(),
+      at: Date.now(),
+      by: "hub",
+      pid: process.pid,
+      phase: "intent",
+    });
+    const calls: string[] = [];
+    const auth = fakeAuth({
+      reload: () => {
+        calls.push("auth.reload");
+        return "reloaded";
+      },
+      token: () => {
+        calls.push("auth.token");
+        expect(readRotateIntentSync(paths.rotateIntentFile!).state).toBe("absent");
+        expect(readTokenFile(paths.tokenFile)).not.toBe("old-token");
+        return "new-token";
+      },
+    });
+    const frontend: FrontendFactory = () => {
+      const f = {
+        listen: async () => {
+          calls.push("fe.listen");
+          auth.token();
+          return { port: 45678 };
+        },
+        close: async () => {},
+        clientCount: () => 0,
+        ui: {
+          serve: async () => false,
+          refresh: async () => ({ state: "unbuilt" as const, candidates: [] }),
+          status: () => ({ state: "unbuilt" as const, candidates: [] }),
+        },
+      };
+      return Object.assign(f, { auth });
+    };
+    const running = await startHub(
+      {
+        v: 1,
+        home,
+        port: 0,
+        idleExitMinutes: 10,
+        pluginVersion: "1.2.3",
+        buildId: "1.2.3@abc",
+      },
+      frontend,
+    );
+    if ("exists" in running) throw new Error("unexpected existing hub");
+    calls.push("hub.json");
+    expect(calls.indexOf("auth.token")).toBeGreaterThan(calls.indexOf("fe.listen"));
+    expect(calls.indexOf("hub.json")).toBeGreaterThan(calls.indexOf("auth.token"));
+    await running.close("test");
   });
 
   it("skips LAN revoke calls entirely when hasLan() is false", async () => {

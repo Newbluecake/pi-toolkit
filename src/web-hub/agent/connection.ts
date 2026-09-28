@@ -46,7 +46,8 @@ import type {
 import { decodeHubFrame, LIMITS, TIMING } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import type { HubPaths } from "../protocol/paths.js";
-import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, protoCompatible } from "../protocol/version.js";
+import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, compareVersions, protoCompatible } from "../protocol/version.js";
+import { readStopMarkerSync } from "../protocol/stop-marker.js";
 import type { WebHubSettings, WebHubStatusView } from "./index.js";
 import { type LauncherPlan, shouldSpawnHub } from "./launcher.js";
 
@@ -252,6 +253,8 @@ class Connection implements HubConnection {
   private protoRejected = false;
   private agentKey: string | undefined;
   private hubVersion: string | undefined;
+  /** C10: lower-version agents yield hub auto-start to a newer installation. */
+  private yieldUntil = 0;
   private httpPort: number | undefined;
   private lastError: string | undefined;
   private lastViewKey = "";
@@ -548,9 +551,18 @@ class Connection implements HubConnection {
             effect: "none",
           });
         return;
-      case "superseded":
+      case "superseded": {
+        const higherOrEqual = compareVersions(this.opts.pluginVersion, frame.nextVersion) >= 0;
+        this.yieldUntil = higherOrEqual ? 0 : this.opts.now() + Math.max(0, frame.yieldMs);
+        // The old hub is about to close. Drop this link now so a higher-version
+        // installation can claim the socket without waiting for silence timeout.
+        if (this.link === "live") {
+          this.teardownSocket();
+          this.enterBackoff(0);
+        }
         this.callBinding((b) => b.onSuperseded?.(frame));
         return;
+      }
       case "snapshot_req":
         if (this.link === "live") this.callBinding((b) => b.onSnapshotReq(frame.rid));
         return;
@@ -666,7 +678,12 @@ class Connection implements HubConnection {
   private maybeSpawn(now: number): boolean {
     const spawn = this.opts.spawn;
     if (spawn === undefined) return false;
+    const stoppedFile = this.opts.paths.stoppedFile;
+    // Read the machine-wide stop marker before *every* admission decision,
+    // even when another local block (yield/spawnBlocked) will reject it.
+    const stop = stoppedFile === undefined ? undefined : readStopMarkerSync(stoppedFile).state;
     const ok =
+      now >= this.yieldUntil &&
       this.opts.spawnBlocked?.() !== true &&
       shouldSpawnHub({
         autoStart: this.opts.settings.autoStart,
@@ -674,6 +691,9 @@ class Connection implements HubConnection {
         launcherOk: !("error" in this.opts.launcher),
         lastSpawnAt: this.lastSpawnAt,
         now,
+        ...(stoppedFile === undefined
+          ? {}
+          : { stoppedFile, readStop: readStopMarkerSync, ...(stop === undefined ? {} : { stop }) }),
       });
     if (!ok) return false;
     this.lastSpawnAt = now;

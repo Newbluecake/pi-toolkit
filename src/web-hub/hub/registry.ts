@@ -58,6 +58,8 @@ export interface Registry extends RegistryView {
    * pending)/`cmd_late` frames after the fact. Overwrites any previous handler (at most one
    * router is ever attached in practice). */
   setLateResultHandler(handler: (agentKey: string, frame: CmdResultFrame | CmdLateFrame) => void): void;
+  /** C10: send a control frame to every live agent; a factory may tailor it per agent. */
+  broadcast(frame: HubFrame | ((agentKey: string, view: AgentView) => HubFrame)): void;
 }
 
 export interface AgentConn {
@@ -121,6 +123,9 @@ export function createRegistry(deps: {
   pidAlive?: (pid: number) => boolean;
   /** Addition: hub plugin version, used for `AgentCard.outdated` (agent older than hub). */
   hubVersion?: string;
+  /** C10 hooks; optional so older direct registry consumers remain unchanged. */
+  onVersion?: (pluginVersion: string) => void;
+  onTick?: () => void;
 }): Registry {
   const { now, log } = deps;
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
@@ -228,6 +233,17 @@ export function createRegistry(deps: {
       lateResultHandler = handler;
     },
 
+    broadcast(frame) {
+      for (const r of records.values()) {
+        if (r.phase !== "live" || r.conn === undefined) continue;
+        try {
+          r.conn.send(typeof frame === "function" ? frame(r.agentKey, view(r)) : frame);
+        } catch (err) {
+          log.warn("agent broadcast failed", { agentKey: r.agentKey, error: String(err) });
+        }
+      }
+    },
+
     list() {
       return [...records.values()].map(view);
     },
@@ -279,6 +295,7 @@ export function createRegistry(deps: {
         log.info("agent reclaimed", { agentKey: existing.agentKey, from: prevPhase, epochChanged });
         if (prevPhase === "stale") publish({ type: "agent_up", agent: card(existing) });
         if (epochChanged) publish({ type: "gap", agentKey: existing.agentKey, fromSeq: 0 });
+        deps.onVersion?.(hello.pluginVersion);
         return { agentKey: existing.agentKey, reclaimed: true };
       }
       const agentKey = newAgentKey(hello.agentId);
@@ -312,6 +329,7 @@ export function createRegistry(deps: {
       byAgentId.set(idKey, agentKey);
       log.info("agent up", { agentKey, pid: r.agentId.pid, kind: r.kind, cwd: r.cwd, version: r.pluginVersion });
       publish({ type: "agent_up", agent: card(r) });
+      deps.onVersion?.(hello.pluginVersion);
       return { agentKey, reclaimed: false };
     },
 
@@ -487,6 +505,7 @@ export function createRegistry(deps: {
           down(r, "reaped");
         }
       }
+      deps.onTick?.();
     },
 
     request<R extends AgentFrame>(agentKey: string, frame: HubFrame & { rid: string }, deadlineMs: number) {

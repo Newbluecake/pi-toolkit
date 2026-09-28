@@ -27,6 +27,7 @@ import { PROTO, P2_HUB_CAPS } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { createCommandRouter } from "./commands.js";
+import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
 import { createHistoryService } from "./history.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
@@ -141,7 +142,15 @@ export async function startHub(
     const owner = single; // narrow once here; closures defined below (e.g. `close`) don't retain flow narrowing
     cleanup.push(() => owner.release());
 
-    const registry = createRegistry({ now, log, hubVersion: config.pluginVersion });
+    let supersede: SupersedeController | undefined;
+    let recoverRotateOnHello: (() => void) | undefined;
+    const registry = createRegistry({
+      now,
+      log,
+      hubVersion: config.pluginVersion,
+      onVersion: (pluginVersion) => supersede?.observe(pluginVersion),
+      onTick: () => supersede?.tick(),
+    });
     const history = createHistoryService({ registry, log });
     cleanup.push(async () => history.dispose());
     let httpPort = 0;
@@ -183,6 +192,9 @@ export async function startHub(
       now,
       httpPort: () => httpPort,
       admin,
+      // C10/C8: every hello is also a rotate-intent recovery opportunity. The
+      // callback is assigned before the first listener can accept a connection.
+      onHello: () => recoverRotateOnHello?.(),
     });
     cleanup.push(() => agentServer.close());
 
@@ -209,6 +221,7 @@ export async function startHub(
     // any other rejection (a real bug, an injected test double's `E_NOT_IMPLEMENTED:LD`, …) still
     // propagates to this function's own outer `catch` below and fails `startHub` as before.
     let lanAssemblyOff: { reason: LanOffReason; detail?: string } | undefined;
+    let kdfInFlight = 0;
     if (config.lan !== undefined) {
       try {
         lanDeps = await withSignal(
@@ -233,6 +246,22 @@ export async function startHub(
           throw err;
         }
       }
+    }
+    if (lanDeps !== undefined) {
+      // KDF work is not part of the command router's in-flight counter, but it
+      // must keep the quiet replacement path from cutting across a login.
+      const originalKdfRun = lanDeps.kdf.run;
+      lanDeps.kdf.run = (...args: Parameters<typeof originalKdfRun>) => {
+        kdfInFlight++;
+        try {
+          return Promise.resolve(originalKdfRun(...args)).finally(() => {
+            kdfInFlight = Math.max(0, kdfInFlight - 1);
+          });
+        } catch (err) {
+          kdfInFlight = Math.max(0, kdfInFlight - 1);
+          throw err;
+        }
+      };
     }
 
     // §6.7.1 (C8) — "意图恢复是 hub 启动的第一步": before `auth.token()`'s first real call (inside
@@ -266,6 +295,7 @@ export async function startHub(
      * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
     let lanClosedByRotateScan = false;
 
+    const commandRouter = createCommandRouter({ registry, log, now });
     const fe = frontend({
       config,
       paths,
@@ -281,7 +311,7 @@ export async function startHub(
       // §6.1 (C3): the real command router — hub-side idempotent LRU, agent-capability
       // admission, effect classification, queryOnly, drain — replacing C0's always-`E_UNSUPPORTED`
       // stub. `registry` (constructed above) is the same instance the agent socket layer feeds.
-      commands: createCommandRouter({ registry, log, now }),
+      commands: commandRouter,
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
@@ -289,6 +319,131 @@ export async function startHub(
     // next real call is `auth.token()` inside `fe.listen()` below, so there is nothing cached yet
     // in the startup path; this still matters once the periodic scan reuses the same helper).
     (fe as HttpFrontendExt).auth?.reload();
+
+    // C10: assemble version replacement only after the command router and
+    // frontend exist; agents cannot hello before listen() below completes.
+    supersede = createSupersede({
+      hubVersion: config.pluginVersion,
+      now,
+      ...(paths.stoppedFile === undefined ? {} : { stopFile: paths.stoppedFile }),
+      openDialogs: () =>
+        registry.list().flatMap((a) => {
+          const dialogs = a.dialogs as { open?: unknown[] } | null | undefined;
+          const count = dialogs?.open?.length ?? 0;
+          return count === 0 ? [] : [{ agentKey: a.agentKey, count }];
+        }),
+      inflight: () => commandRouter.inflight(),
+      kdfInflight: () => kdfInFlight,
+      stateChanged: (s) => {
+        if (s === undefined) {
+          delete info.state;
+          delete info.nextVersion;
+          info.supersedePending = false;
+          delete info.supersedeDeadlineAt;
+          delete info.forced;
+          delete info.draining;
+        } else {
+          info.supersedePending = true;
+          info.nextVersion = s.nextVersion;
+          info.supersedeDeadlineAt = s.deadlineAt;
+          if (s.forced === true) info.forced = true;
+        }
+      },
+      audit: (op, fields) => log.info("web-hub admin op", { audit: "admin", op, ...fields }),
+      log,
+      restart: async ({ nextVersion, forced, openDialogs, inflightAtDrain }) => {
+        info.state = "restarting";
+        info.nextVersion = nextVersion;
+        info.supersedePending = true;
+        info.forced = forced;
+        info.draining = forced;
+        if (forced) {
+          const drained = await commandRouter.drain();
+          info.draining = false;
+          log.info("web-hub supersede drain", {
+            nextVersion,
+            forced,
+            inflightAtDrain,
+            drainTimedOut: drained.timedOut,
+            inflight: drained.inflight,
+          });
+        }
+        const openByAgent = new Map(openDialogs.map((x) => [x.agentKey, x.count]));
+        registry.broadcast((agentKey) => {
+          const count = openByAgent.get(agentKey) ?? 0;
+          return {
+            t: "superseded",
+            nextVersion,
+            yieldMs: SUPERSEDE_YIELD_MS,
+            ...(forced ? { forced: true as const } : {}),
+            ...(count > 0 ? { openDialogs: count } : {}),
+          };
+        });
+        await close("superseded");
+      },
+    });
+    const supersedeTimer = setInterval(() => supersede?.tick(), 250);
+    supersedeTimer.unref();
+    cleanup.push(async () => {
+      clearInterval(supersedeTimer);
+      supersede?.dispose();
+    });
+
+    const scanRotateIntent = async (): Promise<void> => {
+      const revokeLan =
+        lanDeps === undefined
+          ? undefined
+          : async (): Promise<number> => (await (lanDeps!.store as Partial<LanStore>).revokeAllSessions?.()) ?? 0;
+      const outcome = await recoverRotateIntent({
+        paths: {
+          tokenFile: paths.tokenFile,
+          rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
+        },
+        log,
+        hasLan: config.lan !== undefined && lanDeps !== undefined,
+        ...(revokeLan === undefined ? {} : { revokeLan }),
+        now,
+        audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
+      });
+      if (!outcome.recovered) return;
+      (fe as HttpFrontendExt).auth?.reload();
+      (fe as HttpFrontendExt).revokeAllSse?.();
+      if (outcome.lanBlocked === true) {
+        lanBlockedByRotate = true;
+        if (fe.lan !== undefined) {
+          lanClosedByRotateScan = true;
+          log.warn(
+            "web-hub: closing the LAN listener (rotate revoke failed); run /webhub restart to re-open it once the pending rotate completes",
+          );
+          void fe.lan
+            .close()
+            .catch((err: unknown) =>
+              log.error("web-hub: failed to close LAN listener after rotate revoke failure", { error: String(err) }),
+            );
+        }
+        hubJson.patchLan({ state: "off", reason: "rotate-pending" });
+        return;
+      }
+      if (fe.lan !== undefined) {
+        (fe.lan as LanFacadeExt | undefined)?.revokeAll?.();
+        (fe as HttpFrontendExt).bumpLanRevokeGen?.();
+      }
+      if (lanBlockedByRotate && fe.lan !== undefined && !lanClosedByRotateScan) {
+        lanBlockedByRotate = false;
+        void fe.lan.start().then(
+          (s) => hubJson.patchLan(s),
+          (err: unknown) =>
+            log.error("web-hub: LAN start() (post rotate-pending recovery) rejected unexpectedly", {
+              error: String(err),
+            }),
+        );
+      }
+    };
+    recoverRotateOnHello = () => {
+      void scanRotateIntent().catch((err: unknown) =>
+        log.error("web-hub: hello rotate-intent scan failed", { error: String(err) }),
+      );
+    };
 
     httpPort = (await withSignal(fe.listen({ signal: startup.signal }), startup.signal)).port; // ⑥
 
@@ -374,77 +529,12 @@ export async function startHub(
     // recovery helper against whatever is on disk right now \u2014 catches an intent this hub process
     // didn't itself create (the offline agent path, or another hub racing this one), and retries a
     // previously-`lanBlocked` revoke once the LAN store is healthy again. NOTE (delivery report):
-    // the plan also asks for a scan on every agent `hello`; that hook lives in `agent-server.ts`
-    // (owned by C3, not in this package's W3 file list) and is therefore not wired here \u2014 the
-    // 10s cadence below is the only trigger this package can deliver on its own.
+    // The same recovery helper is also invoked by agent-server.ts on every
+    // successful hello; this timer covers offline rotations and quiet periods.
     const rotateScan = setInterval(() => {
-      const revokeLan =
-        lanDeps === undefined
-          ? undefined
-          : async (): Promise<number> => {
-              const store = lanDeps!.store as Partial<LanStore>;
-              return (await store.revokeAllSessions?.()) ?? 0;
-            };
-      void recoverRotateIntent({
-        paths: {
-          tokenFile: paths.tokenFile,
-          rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
-        },
-        log,
-        hasLan: config.lan !== undefined && lanDeps !== undefined,
-        ...(revokeLan === undefined ? {} : { revokeLan }),
-        now,
-        audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
-      })
-        .then((outcome) => {
-          if (!outcome.recovered) return;
-          (fe as HttpFrontendExt).auth?.reload();
-          // §6.7.1 运行期 row (C8 review P1): a rotation this process didn't initiate must
-          // invalidate exactly like the online path — already-open loopback SSE streams die
-          // (their cookie predates the new token); on the LAN side the SSE sweep + revoke-gen
-          // bump mirror `admin.ts`'s ④.
-          (fe as HttpFrontendExt).revokeAllSse?.();
-          if (outcome.lanBlocked === true) {
-            lanBlockedByRotate = true;
-            // The listener may already be open from this boot — fail closed. NOTE:
-            // `LanFacade.close()` is permanent (no in-process restart), so after the pending
-            // rotate completes a `/webhub restart` is required to re-open LAN; the scan keeps
-            // retrying the revoke in the meantime (main-session ruling — the plan's "重新 start()"
-            // assumed a restartable facade).
-            if (fe.lan !== undefined) {
-              lanClosedByRotateScan = true;
-              log.warn(
-                "web-hub: closing the LAN listener (rotate revoke failed); run /webhub restart to re-open it once the pending rotate completes",
-              );
-              void fe.lan.close().catch((err: unknown) =>
-                log.error("web-hub: failed to close LAN listener after rotate revoke failure", {
-                  error: String(err),
-                }),
-              );
-            }
-            hubJson.patchLan({ state: "off", reason: "rotate-pending" });
-            return;
-          }
-          if (fe.lan !== undefined) {
-            (fe.lan as LanFacadeExt | undefined)?.revokeAll?.();
-            (fe as HttpFrontendExt).bumpLanRevokeGen?.();
-          }
-          if (lanBlockedByRotate && fe.lan !== undefined && !lanClosedByRotateScan) {
-            // Previously blocked at startup (the listener never opened), now resolved — open it.
-            lanBlockedByRotate = false;
-            void fe.lan.start().then(
-              (s) => hubJson.patchLan(s),
-              (err: unknown) => {
-                log.error("web-hub: LAN start() (post rotate-pending recovery) rejected unexpectedly", {
-                  error: String(err),
-                });
-              },
-            );
-          }
-        })
-        .catch((err: unknown) => {
-          log.error("web-hub: periodic rotate-intent scan failed", { error: String(err) });
-        });
+      void scanRotateIntent().catch((err: unknown) =>
+        log.error("web-hub: periodic rotate-intent scan failed", { error: String(err) }),
+      );
     }, ROTATE_SCAN_MS);
     rotateScan.unref();
 
@@ -471,6 +561,8 @@ export async function startHub(
       if (closing !== undefined) return closing;
       const inner = (async (): Promise<void> => {
         log.info("hub closing", { reason });
+        supersede?.dispose();
+        clearInterval(supersedeTimer);
         stopFence();
         idle.stop();
         clearInterval(tick);
