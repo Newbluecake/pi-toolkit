@@ -2,7 +2,12 @@
  * Process-level command ledger (plan §4.5/D7/D15, §9.1 v2 addendum).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createCommandLedger, LEDGER_CAPACITY, type LedgerResult } from "../../../src/web-hub/agent/ledger.js";
+import {
+  createCommandLedger,
+  LEDGER_CAPACITY,
+  LEDGER_MAX_RUNNING,
+  type LedgerResult,
+} from "../../../src/web-hub/agent/ledger.js";
 
 const LEDGER_KEY = Symbol.for("pi-subagent:web-hub:cmd-ledger");
 
@@ -208,5 +213,64 @@ describe("createCommandLedger — countRunning", () => {
     expect(ledger.countRunning("steer_subagent")).toBe(2);
     ledger.settle("a", OK, 1001);
     expect(ledger.countRunning("steer_subagent")).toBe(1);
+  });
+});
+
+// todo #32 finding 4 / plan \u00a74.5 rule 3: "running \u9879\u53d7 op \u7ea7\u5e76\u53d1\u4e0a\u9650\u7ea6\u675f\uff08\u6bcf agent \u5728\u9014 \u2264 16\uff0c\u8d85\u51fa E_RATE\uff09"
+describe("createCommandLedger — running capacity (\u00a74.5 rule 3)", () => {
+  it("the 17th concurrently-new id is rejected with kind:'capacity', no entry created", () => {
+    const ledger = createCommandLedger();
+    for (let i = 0; i < LEDGER_MAX_RUNNING; i++) {
+      const outcome = ledger.begin(`r${i}`, "steer_subagent", { op: "steer_subagent", i }, 1000);
+      expect(outcome.kind).toBe("new");
+    }
+    expect(ledger.countRunning()).toBe(LEDGER_MAX_RUNNING);
+    const outcome = ledger.begin("overflow", "steer_subagent", { op: "steer_subagent", i: 999 }, 1000);
+    expect(outcome.kind).toBe("capacity");
+    expect(ledger.get("overflow")).toBeUndefined();
+  });
+
+  it("settling one running entry frees capacity for a new one", () => {
+    const ledger = createCommandLedger();
+    for (let i = 0; i < LEDGER_MAX_RUNNING; i++) {
+      ledger.begin(`r${i}`, "steer_subagent", { op: "steer_subagent", i }, 1000);
+    }
+    ledger.settle("r0", OK, 1001);
+    const outcome = ledger.begin("next", "steer_subagent", { op: "steer_subagent", i: 1000 }, 1002);
+    expect(outcome.kind).toBe("new");
+  });
+
+  it("an existing id (dup/running/digest_mismatch) is unaffected by the cap even when full", () => {
+    const ledger = createCommandLedger();
+    for (let i = 0; i < LEDGER_MAX_RUNNING; i++) {
+      ledger.begin(`r${i}`, "steer_subagent", { op: "steer_subagent", i }, 1000);
+    }
+    // same id, same payload, still running \u21d2 "running", not "capacity"
+    expect(ledger.begin("r0", "steer_subagent", { op: "steer_subagent", i: 0 }, 1001).kind).toBe("running");
+    ledger.settle("r1", OK, 1001);
+    // dup after settling, even while other entries keep the ledger at/near capacity
+    expect(ledger.begin("r1", "steer_subagent", { op: "steer_subagent", i: 1 }, 1002).kind).toBe("dup");
+  });
+});
+
+describe("createCommandLedger — session-scoped ctl frame (todo #32 finding 4 / \u00a74.5)", () => {
+  it("frame() only includes entries created for the requesting session", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("a", "abort", { op: "abort" }, 1000, { sessionId: "sess-1" });
+    ledger.settle("a", OK, 1001);
+    ledger.begin("b", "abort", { op: "abort" }, 1000, { sessionId: "sess-2" });
+    ledger.settle("b", OK, 1001);
+    const frame1 = ledger.frame("sess-1", "epoch", 2000);
+    expect(frame1.items.map((i) => i.cmdId)).toEqual(["a"]);
+    const frame2 = ledger.frame("sess-2", "epoch", 2000);
+    expect(frame2.items.map((i) => i.cmdId)).toEqual(["b"]);
+  });
+
+  it("entries created without a sessionId (back-compat / no caller-supplied session) show up in every session's frame", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("a", "abort", { op: "abort" }, 1000); // no sessionId
+    ledger.settle("a", OK, 1001);
+    expect(ledger.frame("sess-1", "epoch", 2000).items.map((i) => i.cmdId)).toEqual(["a"]);
+    expect(ledger.frame("sess-other", "epoch", 2000).items.map((i) => i.cmdId)).toEqual(["a"]);
   });
 });

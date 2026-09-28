@@ -228,7 +228,10 @@ export type CmdErrorCode =
   | "E_COMMAND_DENIED"
   | "E_CONFIRM_REQUIRED"
   | "E_DEADLINE"
-  | "E_HUB_RESTARTING";
+  | "E_HUB_RESTARTING"
+  | "E_RATE"; // todo #32 finding 4 / §4.5 rule 3: 16-in-flight ledger capacity, agent-side (not the
+// hub-level login-throttle E_RATE from protocol/http-contract.ts's API_ERRORS, though the wire
+// string is the same).
 export type CmdEffect = "none" | "unknown";
 export type CmdResultBody =
   | { ok: true; dup?: true; data: CmdData }

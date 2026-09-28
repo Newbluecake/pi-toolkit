@@ -140,7 +140,7 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
     expectTypeOf<CmdFrame["queryOnly"]>().toEqualTypeOf<true | undefined>();
   });
 
-  it("CmdErrorCode is exactly the 17 documented literals (incl. v2.1 E_HUB_RESTARTING)", () => {
+  it("CmdErrorCode is exactly the 18 documented literals (incl. v2.1 E_HUB_RESTARTING, todo #32 E_RATE)", () => {
     expectTypeOf<CmdErrorCode>().toEqualTypeOf<
       | "E_UNSUPPORTED"
       | "E_STALE_CTX"
@@ -159,6 +159,7 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "E_CONFIRM_REQUIRED"
       | "E_DEADLINE"
       | "E_HUB_RESTARTING"
+      | "E_RATE"
     >();
   });
 

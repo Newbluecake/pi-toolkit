@@ -181,3 +181,73 @@ describe("D15 — abort_subagent timeout ⇒ late", () => {
     expect(h.sent[1]).toMatchObject({ t: "cmd_late", id: "c1", ok: true });
   });
 });
+
+// todo #32 finding 4 (D15): the busy lock used to only get released as a side effect of a *new*
+// request for the same runId. A run that finishes while its steer is hung forever, with nobody
+// ever asking about that runId again, would keep the lock (and the late-slot accounting derived
+// from it) wedged until the process re-reads the ledger for some other reason.
+describe("D15 — releaseSettledSteerLocks (1Hz sample, independent of any new request)", () => {
+  it("frees a runId's busy lock once its run reaches a terminal status, with no new request for it", () => {
+    let status = "running";
+    const query: QueryControlPort = {
+      get: () => ({ status }),
+      steer: () => new Promise(() => {}),
+      stop: () => Promise.resolve({ ok: true, escalatedTo: "L2" }),
+    };
+    const h = makeHarness(query);
+    h.handler.handle(frame("c1", { op: "steer_subagent", runId: "r1", text: "go" }));
+    h.timers.fireByMs(5000); // times out ⇒ lock still held (late)
+    status = "completed"; // the run settles on its own, nobody asks about r1 again
+    h.handler.releaseSettledSteerLocks();
+    // now a *fresh* steer for the same runId falls straight through to the not-running precheck
+    // instead of E_BUSY_STEER — proof the lock was actually released by the sampling call above,
+    // not lazily by this second `handle()` itself (the pre-existing lazy path is covered by the
+    // "the run reaching a terminal status releases the busy lock" test above, which never calls
+    // `releaseSettledSteerLocks()`).
+    h.handler.handle(frame("c2", { op: "steer_subagent", runId: "r1", text: "again" }));
+    expect(h.sent[1]).toMatchObject({ ok: false, code: "E_NOT_RUNNING" });
+  });
+
+  it("is a no-op when there is no `query` port wired (control:false / not-yet-attached)", () => {
+    const { pi } = fakePi();
+    const { ctx } = fakeCtx({ mode: "tui" });
+    const timers = fakeTimerQueue();
+    const originEntry = { appendOrigin: vi.fn(), notify: vi.fn(), dispose: vi.fn() };
+    const deps: CommandHandlerDeps = {
+      pi,
+      getCtx: () => ctx,
+      getSessionId: () => "sess-1",
+      ledger: createCommandLedger(),
+      queueMirror: createQueueMirror(),
+      compactionState: {
+        get manualCompacting() {
+          return false;
+        },
+        dispose() {},
+      },
+      originEntry,
+      builtinBridge: { execute: () => ({ ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "none" }) },
+      controlEnabled: () => true,
+      now: () => 1000,
+      send: () => {},
+      onChanged: () => {},
+      setTimer: timers.setTimer,
+    };
+    const handler = createCommandHandler(deps);
+    expect(() => handler.releaseSettledSteerLocks()).not.toThrow();
+  });
+
+  it("leaves an active (still-running) lock untouched", () => {
+    const query: QueryControlPort = {
+      get: () => ({ status: "running" }),
+      steer: () => new Promise(() => {}),
+      stop: () => Promise.resolve({ ok: true, escalatedTo: "L2" }),
+    };
+    const h = makeHarness(query);
+    h.handler.handle(frame("c1", { op: "steer_subagent", runId: "r1", text: "go" }));
+    h.timers.fireByMs(5000);
+    h.handler.releaseSettledSteerLocks(); // status is still "running" — must not release
+    h.handler.handle(frame("c2", { op: "steer_subagent", runId: "r1", text: "again" }));
+    expect(h.sent[1]).toMatchObject({ ok: false, code: "E_BUSY_STEER" });
+  });
+});

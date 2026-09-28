@@ -158,7 +158,7 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
     expect(hub!.all().find((f) => f.t === "cmd_result")).toMatchObject({ ok: false, code: "E_UNSUPPORTED" });
   });
 
-  it("dialog_answer never reaches commandHandler (routed exclusively to the dialog bridge stub, which never replies)", async () => {
+  it("dialog_answer is routed exclusively to the dialog bridge (never reaches commandHandler) and gets a real reply once the bridge is wired (todo #32 finding 2)", async () => {
     await connectFullCaps();
     hub!.send(
       hub!.conns[0]!,
@@ -169,8 +169,50 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
         answers: [{ selected: ["a"], other: null }],
       }),
     );
-    await new Promise((r) => setTimeout(r, 60));
-    expect(hub!.all().some((f) => f.t === "cmd_result")).toBe(false);
+    // The dialog was never opened, so the bridge replies E_DIALOG_CLOSED — the point of this test
+    // is that it replies *at all* (the wired bridge, not the unconfigured pre-fix stub that never
+    // called `send`), and that the reply never touches the ledger-backed `commandHandler` path
+    // (no separate E_UNSUPPORTED/E_STALE_CTX from that side).
+    await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === "cmd0000000000001"));
+    expect(hub!.all().find((f) => f.t === "cmd_result" && f.id === "cmd0000000000001")).toMatchObject({
+      ok: false,
+      code: "E_DIALOG_CLOSED",
+    });
+  });
+
+  it("askUserRemote() returns a live port that opens a dialog reaching the wire (todo #32 finding 2: was hardcoded to undefined)", async () => {
+    const { control } = await connectFullCaps();
+    const port = control.askUserRemote();
+    expect(port).toBeDefined();
+    const session = port!.open({
+      toolCallId: "tool-1",
+      questions: [{ question: "Q", header: "Q", options: [{ label: "A" }, { label: "B" }], allowOther: true }],
+      allowCancel: true,
+    });
+    expect(session).toBeDefined();
+    await waitUntil(() => hub!.all().some((f) => f.t === "dialogs" && f.open.length > 0));
+    const opened = hub!.all().find((f) => f.t === "dialogs" && f.open.length > 0) as Extract<
+      AgentFrame,
+      { t: "dialogs" }
+    >;
+    const dialogId = opened.open[0]!.dialogId;
+    let claimed: unknown;
+    session!.setOnRemote((outcome) => {
+      claimed = outcome;
+      return true;
+    });
+    hub!.send(
+      hub!.conns[0]!,
+      cmdFrame("cmd0000000000002", {
+        op: "dialog_answer",
+        dialogId,
+        epoch: opened.epoch,
+        answers: [{ selected: ["A"], other: null }],
+      }),
+    );
+    await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === "cmd0000000000002"));
+    expect(hub!.all().find((f) => f.t === "cmd_result" && f.id === "cmd0000000000002")).toMatchObject({ ok: true });
+    expect(claimed).toMatchObject({ kind: "answer" });
   });
 });
 

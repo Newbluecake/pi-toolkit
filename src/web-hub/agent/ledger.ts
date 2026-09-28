@@ -39,6 +39,11 @@ export interface LedgerEntry {
   /** prompt-matching text only; cleared once the entry reaches a terminal `promptState`. */
   text?: string;
   runId?: string;
+  /** todo #32 finding 4: the session that created this entry (§4.5 "ctl 槽 = 台账中「本 session、
+   * 最近更新」的投影"). Absent for entries created before this field existed / by callers that
+   * never pass one — `frame()` always includes those (back-compat), it only ever excludes an
+   * entry that carries a *different* session's id. */
+  sessionId?: string;
   promptState?: PromptSubState;
   behavior?: PromptBehavior;
   reason?: PromptReason;
@@ -50,7 +55,8 @@ export type BeginOutcome =
   | { kind: "new"; entry: LedgerEntry }
   | { kind: "dup"; result: LedgerResult }
   | { kind: "running" }
-  | { kind: "digest_mismatch" };
+  | { kind: "digest_mismatch" }
+  | { kind: "capacity" };
 
 export interface LedgerQuerySnapshot {
   state: "running" | "ok" | "failed";
@@ -61,7 +67,13 @@ export interface LedgerQuerySnapshot {
 export interface CommandLedger {
   /** §4.5 rule 1: get-or-create the `running` entry for `id`. `payload` is hashed (never stored
    * verbatim) to detect the same id reused for a different request. */
-  begin(id: string, op: CmdOp, payload: unknown, now: number, extra?: { text?: string; runId?: string }): BeginOutcome;
+  begin(
+    id: string,
+    op: CmdOp,
+    payload: unknown,
+    now: number,
+    extra?: { text?: string; runId?: string; sessionId?: string },
+  ): BeginOutcome;
   get(id: string): LedgerEntry | undefined;
   /** Settle a running entry to a terminal state. A retryable, effect:"none" failure is deleted
    * instead of cached (D7 rule 2) so a retry re-executes from scratch. `opts.late` marks this as
@@ -81,6 +93,8 @@ export interface CommandLedger {
 const LEDGER_KEY = Symbol.for("pi-subagent:web-hub:cmd-ledger");
 export const LEDGER_CAPACITY = 512;
 export const LEDGER_TTL_MS = 30 * 60_000;
+/** todo #32 finding 4 / plan §4.5 rule 3: "running 项受 op 级并发上限约束（每 agent 在途 ≤ 16，超出 E_RATE）". */
+export const LEDGER_MAX_RUNNING = 16;
 const CTL_MAX_ITEMS = 32;
 
 interface LedgerBag {
@@ -150,6 +164,12 @@ function wireState(e: LedgerEntry): CtlItemWire["state"] {
   return e.result?.ok === false ? "failed" : "ok";
 }
 
+function countRunningIn(bag: LedgerBag, op?: CmdOp): number {
+  let n = 0;
+  for (const e of bag.entries.values()) if (e.state === "running" && (op === undefined || e.op === op)) n += 1;
+  return n;
+}
+
 export function createCommandLedger(): CommandLedger {
   const bag = processLedgerBag();
   return {
@@ -158,9 +178,11 @@ export function createCommandLedger(): CommandLedger {
       const digest = digestOf(payload);
       const existing = bag.entries.get(id);
       if (existing === undefined) {
+        if (countRunningIn(bag) >= LEDGER_MAX_RUNNING) return { kind: "capacity" };
         const entry: LedgerEntry = { id, op, payloadDigest: digest, state: "running", at: now, updatedAt: now };
         if (extra?.text !== undefined) entry.text = extra.text;
         if (extra?.runId !== undefined) entry.runId = extra.runId;
+        if (extra?.sessionId !== undefined) entry.sessionId = extra.sessionId;
         bag.entries.set(id, entry);
         return { kind: "new", entry };
       }
@@ -211,15 +233,14 @@ export function createCommandLedger(): CommandLedger {
     frame(sessionId, epoch, now) {
       sweep(bag, now);
       const items = [...bag.entries.values()]
+        .filter((e) => e.sessionId === undefined || e.sessionId === sessionId)
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .slice(0, CTL_MAX_ITEMS)
         .map(toWireItem);
       return { t: "ctl", epoch, sessionId, items };
     },
     countRunning(op) {
-      let n = 0;
-      for (const e of bag.entries.values()) if (e.state === "running" && (op === undefined || e.op === op)) n += 1;
-      return n;
+      return countRunningIn(bag, op);
     },
     dispose() {
       /* the process-level table outlives any single instance/session — nothing to release here */

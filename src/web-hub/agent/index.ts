@@ -273,6 +273,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     } catch {
       /* stale ctx */
     }
+    commandHandler.releaseSettledSteerLocks();
     const rows = projectFleet(readFleet(), now(), deps.fleetTypeOf);
     const fp = fleetFingerprint(rows);
     if (fp !== lastFleetFp) {
@@ -311,7 +312,25 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     ...(deps.query !== undefined ? { query: deps.query } : {}),
   });
-  const dialogBridge = createDialogBridge();
+  const remoteAskUserEnabled = (): boolean =>
+    settings.control !== false && settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
+  const dialogBridge = createDialogBridge({
+    setSlot: (kind, f) => conn?.setSlot(kind, f),
+    isAttached: () => attached,
+    notify: (message) => {
+      const x = ctx;
+      try {
+        if (x === undefined || x.mode !== "tui" || !x.hasUI) return;
+        x.ui.notify(message);
+      } catch {
+        /* a stale ctx / notify failure must never affect the reply already sent */
+      }
+    },
+    now,
+    enabled: remoteAskUserEnabled(),
+    epoch: MODULE_INSTANCE,
+    send: (frame) => conn?.send(frame),
+  });
   const binding: BindingPort = {
     onCmd: (frame) => {
       // dialog_answer/dialog_cancel are routed straight to the dialog bridge (C2's `dialogs.ts`) —
@@ -492,6 +511,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     generation += 1;
     stopTick();
     commandHandler.onSessionBoundary();
+    dialogBridge.detachAll();
     tap.dispose();
     setStatusLine(undefined);
     const reason = reasonOf(event);
@@ -507,6 +527,22 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       tap.handle(event as { type: string } & Record<string, unknown>);
       if (type === "input") commandHandler.onInputEvent(event as InputEventLike);
       if (type === "message_start") commandHandler.onMessageStart(event as MessageStartLike);
+      if ((type === "session_compact" || type === "session_compact_failed") && reasonOf(event) === "manual") {
+        // D26 (spike K13, todo #32 finding 1): pi emits `session_compact` before clearing
+        // `_compactionAbortController` — re-sampling the queue mirror right here, synchronously,
+        // would race pi's own not-yet-settled state. Defer at least one tick (unref'd
+        // setTimeout(0)) before touching `ctx` again for this boundary.
+        compactionState.deferAfterManualCompaction(() => {
+          if (!attached) return;
+          const x2 = ctx;
+          if (x2 === undefined) return;
+          try {
+            commandHandler.onPendingSample(x2.hasPendingMessages());
+          } catch {
+            /* stale ctx */
+          }
+        });
+      }
       if (STATUS_EVENTS.has(type)) publishStatus();
       if (SESSION_EVENTS.has(type)) publishSession(sessionOverride(type, event));
     });
@@ -684,7 +720,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // byte-identically once the ref is actually populated.
     capture: createCommandCapture(),
     internalExec: async () => ({ ok: false, code: "E_UNSUPPORTED" }),
-    askUserRemote: () => undefined,
+    askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
     admin,
     status: () => conn?.status() ?? { state: "off", attached: false },
     url: () => hubUrl(paths, conn),

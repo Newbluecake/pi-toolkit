@@ -100,6 +100,30 @@ describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
     expect(h.originEntry.appendOrigin).toHaveBeenCalledWith("prompt", "c1", ORIGIN, "steer");
   });
 
+  it("a sendUserMessage that synchronously fires the observing input event in the same call stack is still observed (todo #32 finding 3: the real path can do exactly this)", () => {
+    const h = makeHarness();
+    // Simulate pi's real behaviour: `sendUserMessage` can, on some code paths (idle/streaming),
+    // synchronously run the input handler chain \u2014 including web-hub's own observer \u2014 before
+    // returning. If the pending-observation bookkeeping isn't in place *before* this call, the
+    // observer finds nothing to settle and the reply wrongly falls through to the 3s timeout.
+    h.deps.pi.sendUserMessage = (text: string) => {
+      h.handler.onInputEvent({ text, source: "extension", streamingBehavior: "steer" });
+    };
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    expect(h.sent).toEqual([
+      {
+        t: "cmd_result",
+        rid: "r-c1",
+        id: "c1",
+        ok: true,
+        data: { op: "prompt", delivery: "observed", behavior: "steer" },
+      },
+    ]);
+    // the 3s timer must have been registered-then-cancelled, not left dangling to double-reply
+    h.timers.fireByMs(3000);
+    expect(h.sent).toHaveLength(1);
+  });
+
   it("observed before the 3s window ⇒ ok{delivery:'observed', behavior} immediately, HTTP timer cancelled", () => {
     const h = makeHarness();
     h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));

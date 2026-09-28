@@ -13,6 +13,17 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export interface CompactionState {
   readonly manualCompacting: boolean;
+  /**
+   * D26 (spike K13, todo #32 finding 1): schedule `fn` to run strictly after the current tick
+   * (`setTimeout(fn, 0)`, unref'd) — pi emits `session_compact` *before* clearing
+   * `_compactionAbortController` (`agent-session.js:1941` vs `:1957`), so anything reacting to a
+   * manual compaction ending that dispatches (or reads pi state derived from it, e.g.
+   * `hasPendingMessages()`) must never do so synchronously inside that event handler's own call
+   * stack — a synchronous `pi.sendUserMessage()` there is silently swallowed (no `message_start`,
+   * no error). Every caller reacting to a manual compaction's end MUST route through this instead
+   * of acting directly in the `session_compact`/`session_compact_failed` handler body.
+   */
+  deferAfterManualCompaction(fn: () => void): void;
   dispose(): void;
 }
 
@@ -34,6 +45,10 @@ export function createCompactionState(pi: ExtensionAPI): CompactionState {
   return {
     get manualCompacting() {
       return manual;
+    },
+    deferAfterManualCompaction(fn) {
+      const t = setTimeout(fn, 0);
+      t.unref();
     },
     dispose() {
       for (const off of [offBefore, offOk, offFailed]) {

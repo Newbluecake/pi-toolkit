@@ -69,6 +69,15 @@ export interface CommandHandler {
   onMessageStart(ev: MessageStartLike): void;
   /** §4.4 row 3: the 1 Hz `hasPendingMessages()` sample. */
   onPendingSample(hasPending: boolean): void;
+  /**
+   * todo #32 finding 4 (D15): release any per-run steer busy lock whose run has reached a
+   * terminal status, sampled independently of any new request for that run — the lock used to
+   * only get released as a side effect of `handleSteer` handling a *new* request for the exact
+   * same runId (and by then the "still running?" precheck right above it had already returned
+   * `E_NOT_RUNNING`, so it never actually ran). Call this on every status sample (index.ts's 1Hz
+   * tick) so a run that finished while its steer hung forever doesn't wedge that runId's lock.
+   */
+  releaseSettledSteerLocks(): void;
   /** §4.4 row 4: session_start/session_shutdown boundary. */
   onSessionBoundary(): void;
   dispose(): void;
@@ -143,7 +152,10 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
   /** §4.5 rule 1 / §4.2 "公共前置": ledger get-or-create, replying (and returning `proceed:false`)
    * for the dup/running/digest-mismatch outcomes so every op handler shares one code path. */
   function beginOrReply(frame: CmdFrame, extra?: { text?: string; runId?: string }): boolean {
-    const outcome = deps.ledger.begin(frame.id, frame.cmd.op, frame.cmd, deps.now(), extra);
+    const outcome = deps.ledger.begin(frame.id, frame.cmd.op, frame.cmd, deps.now(), {
+      ...extra,
+      sessionId: deps.getSessionId(),
+    });
     switch (outcome.kind) {
       case "new":
         return true;
@@ -158,6 +170,11 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         return false;
       case "digest_mismatch":
         deps.send(toResultFrame(frame, errResult("E_BAD_REQUEST", false, "none", "id reused")));
+        return false;
+      case "capacity":
+        // todo #32 finding 4 / plan §4.5 rule 3: 16 concurrent `running` ledger entries per agent;
+        // no entry was created, no side effect happened — retryable once something else settles.
+        deps.send(toResultFrame(frame, errResult("E_RATE", true, "none", "too many in-flight commands")));
         return false;
     }
   }
@@ -191,21 +208,31 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     deps.ledger.updatePrompt(frame.id, { promptState: "dispatched" }, deps.now());
     deps.originEntry.appendOrigin("prompt", frame.id, frame.origin, cmd.deliver);
+    // todo #32 finding 3: the pending-observation entry MUST exist before `sendUserMessage` is
+    // called — on the real path `sendUserMessage` can synchronously fire the `input` event (same
+    // tick, same call stack) that observes this very prompt. Registering the entry afterwards means
+    // `onInputEvent` finds no `pendingObservation` record to settle, so the HTTP reply falls through
+    // to the 3s timeout and wrongly reports `unobserved` even though it *was* observed.
+    const pending = registerObservation(frame, cmd.deliver);
     try {
       deps.pi.sendUserMessage(cmd.text, { deliverAs: cmd.deliver, expandPromptTemplates: false });
     } catch {
+      if (pendingObservation.delete(frame.id)) pending.timer.cancel();
       return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
     }
-    waitForObservation(frame, cmd.deliver);
   }
 
-  function waitForObservation(frame: CmdFrame, deliver: "steer" | "followUp"): void {
+  function registerObservation(
+    frame: CmdFrame,
+    deliver: "steer" | "followUp",
+  ): { frame: CmdFrame; deliver: "steer" | "followUp"; timer: Timer } {
     const timer = deps.setTimer(PROMPT_HTTP_WAIT_MS, () => {
       if (pendingObservation.delete(frame.id)) {
         settleAndReply(frame, okResult({ op: "prompt", delivery: "unobserved" }));
       }
     });
-    pendingObservation.set(frame.id, { frame, deliver, timer });
+    const entry = { frame, deliver, timer };
+    pendingObservation.set(frame.id, entry);
     deps.setTimer(PROMPT_UNOBSERVED_FINALIZE_MS, () => {
       const e = deps.ledger.get(frame.id);
       if (e !== undefined && e.promptState === "dispatched") {
@@ -213,6 +240,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         deps.onChanged();
       }
     });
+    return entry;
   }
 
   function scheduleIdleStartedTimeout(cmdId: string, text: string): void {
@@ -502,6 +530,11 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         changed = true;
       }
       if (changed) deps.onChanged();
+    },
+    releaseSettledSteerLocks() {
+      const query = deps.query?.();
+      if (query === undefined || pendingSteerByRun.size === 0) return;
+      for (const runId of [...pendingSteerByRun.keys()]) releaseStaleRunLock(runId, query);
     },
     onSessionBoundary() {
       const cleared = deps.queueMirror.clearAll();
