@@ -132,4 +132,46 @@ describe("shouldSpawnHub", () => {
     expect(shouldSpawnHub({ ...base, autoStart: false })).toBe(false);
     expect(shouldSpawnHub({ ...base, launcherOk: false })).toBe(false);
   });
+
+  describe("stop marker gate (plan \u00a76.7.2, C8)", () => {
+    it("stop:'stopped' blocks a spawn even when every other gate would allow it", () => {
+      expect(shouldSpawnHub({ ...base, stop: "stopped" })).toBe(false);
+    });
+
+    it("stop:'unknown' fails closed \u2014 blocks a spawn just like 'stopped'", () => {
+      expect(shouldSpawnHub({ ...base, stop: "unknown" })).toBe(false);
+    });
+
+    it("stop:'absent' falls through to the normal 30s throttle logic", () => {
+      expect(shouldSpawnHub({ ...base, stop: "absent" })).toBe(true);
+      expect(shouldSpawnHub({ ...base, stop: "absent", lastSpawnAt: base.now - TIMING.spawnThrottleMs + 1 })).toBe(
+        false,
+      );
+    });
+
+    it("omitting stop/stoppedFile defaults to 'absent' \u2014 byte-identical pre-v2.1 behavior", () => {
+      expect(shouldSpawnHub(base)).toBe(true);
+    });
+
+    it("stoppedFile provided \u2192 reads via the injected readStop, never the real readStopMarkerSync, exactly once per call (no caching)", () => {
+      const readStop = vi.fn(() => ({ state: "absent" }) as const);
+      expect(shouldSpawnHub({ ...base, stoppedFile: "/fake/stopped", readStop })).toBe(true);
+      expect(readStop).toHaveBeenCalledTimes(1);
+      expect(readStop).toHaveBeenCalledWith("/fake/stopped");
+      // A second call re-reads instead of reusing a cached result from the first.
+      expect(shouldSpawnHub({ ...base, stoppedFile: "/fake/stopped", readStop })).toBe(true);
+      expect(readStop).toHaveBeenCalledTimes(2);
+    });
+
+    it("stoppedFile + injected readStop returning 'stopped' blocks the spawn", () => {
+      const readStop = vi.fn(() => ({ state: "stopped" }) as const);
+      expect(shouldSpawnHub({ ...base, stoppedFile: "/fake/stopped", readStop })).toBe(false);
+    });
+
+    it("an explicit stop takes priority over stoppedFile/readStop (never reads the file when stop is already classified)", () => {
+      const readStop = vi.fn(() => ({ state: "absent" }) as const);
+      expect(shouldSpawnHub({ ...base, stop: "stopped", stoppedFile: "/fake/stopped", readStop })).toBe(false);
+      expect(readStop).not.toHaveBeenCalled();
+    });
+  });
 });

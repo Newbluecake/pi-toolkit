@@ -52,6 +52,12 @@ const execFileP = promisify(execFile);
 const FALLBACK_INITIAL_USERNAME = "admin";
 
 export interface LanStore extends LanStorePort {
+  /** §6.7.1 step ④ (rotate token, C8): single-transaction revoke of every LAN session — bumps
+   * every user's epoch and deletes every session row. Deliberately NOT on the frozen
+   * `LanStorePort` (same widening rule as `touchSessionReserved` above): the rotate-token flow
+   * needs the concrete `LanStore`, not the port-narrowed `LanFrontendDeps.store`. Returns the
+   * number of session rows removed. */
+  revokeAllSessions(opts?: PortOptions): Promise<number>;
   /** §4.2 reserved-channel `touchSession` for the SSE tick — see file header. */
   touchSessionReserved(sidHash: string, now: number, opts?: PortOptions): Promise<LanSessionRecord | undefined>;
   /** Fires (at most once) when the underlying `db-client` gives up after
@@ -196,6 +202,10 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
 
     async deleteAllSessions(userId, opts) {
       await dbClient.call("deleteAllSessions", { userId }, opts);
+    },
+
+    async revokeAllSessions(opts) {
+      return await dbClient.call<number>("revokeAllSessions", {}, opts);
     },
 
     async setPassword(input, opts) {

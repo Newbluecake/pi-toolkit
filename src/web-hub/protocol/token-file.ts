@@ -15,6 +15,12 @@ import {
 import { randomBytes } from "node:crypto";
 import { dirname, basename } from "node:path";
 
+/** 32 random bytes, base64url — shared by `auth.ts` and `admin.ts`'s rotate-intent recovery so
+ * both a live `Auth.rotateToken()` and a from-disk startup/scan recovery mint tokens the same way. */
+export function generateToken(randomBytesImpl: (n: number) => Buffer = randomBytes): string {
+  return randomBytesImpl(32).toString("base64url");
+}
+
 /** Replace a token without ever exposing a partially-written file. */
 export function replaceTokenAtomic(file: string, token: string): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });

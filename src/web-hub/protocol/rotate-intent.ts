@@ -5,13 +5,14 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 
 export interface RotateIntent {
   v: 1;
@@ -88,7 +89,8 @@ function valid(value: unknown): value is RotateIntent {
 export function readRotateIntentSync(file: string): IntentRead {
   try {
     const st = lstatSync(file);
-    if (!st.isFile() || st.uid !== (process.getuid?.() ?? st.uid)) return { state: "unreadable", code: "E_OWNER" };
+    if (!st.isFile()) return { state: "unreadable", code: "E_NOT_REGULAR" };
+    if (st.uid !== (process.getuid?.() ?? st.uid)) return { state: "unreadable", code: "E_OWNER" };
     let parsed: unknown;
     try {
       parsed = JSON.parse(readFileSync(file, "utf8"));
@@ -130,4 +132,28 @@ export function advanceRotateIntentSync(
   const next = { ...intent, phase };
   writeRotateIntentSync(file, next);
   return next;
+}
+
+/** Mirrors `token-file.ts`'s `cleanupTokenTemps` — remove stale atomic-write leftovers after a crash. */
+export function cleanupRotateIntentTemps(file: string): void {
+  const dir = dirname(file);
+  const prefix = `${basename(file)}.`;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith(prefix) && name.endsWith(".tmp")) {
+        try {
+          unlinkSync(`${dir}/${name}`);
+        } catch {
+          /* raced with another cleanup */
+        }
+      }
+    }
+  } catch {
+    /* state directory may not exist yet */
+  }
+}
+
+/** Generate a fresh 16-byte-hex rotate id (plan §6.7.1: `id: string /* 16B hex *\/`). */
+export function newRotateIntentId(): string {
+  return randomBytes(16).toString("hex");
 }

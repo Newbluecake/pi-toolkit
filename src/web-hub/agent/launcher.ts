@@ -129,13 +129,23 @@ export function shouldSpawnHub(opts: {
   launcherOk: boolean;
   lastSpawnAt: number | undefined;
   now: number;
-  /** Stop marker is read on every admission, never cached. Omitted is the legacy/test default. */
+  /**
+   * Stop marker gate (plan §6.7.2): `absent` is the only state that ever allows a spawn
+   * (fail-closed on `unknown`). Read fresh on every admission — never cached — either via the
+   * pre-classified `stop` (tests / a caller that already read it this tick) or by reading
+   * `stoppedFile` synchronously right here (production). Both omitted ⇒ legacy/test default of
+   * `absent` (byte-identical pre-v2.1 behavior for every existing caller).
+   *
+   * NOTE (plan §12.3/§12.5): the only production call site is `connection.ts`'s `maybeSpawn`,
+   * which is a frozen face not owned by this package (C8) — wiring `stoppedFile` through that
+   * call is C10's job at W4 (`launcher.ts C8 → C10`, `connection.ts` 冻结面 → C10). This function
+   * is delivered and unit-tested standalone; end-to-end auto-spawn gating lands with C10.
+   */
   stop?: "absent" | "stopped" | "unknown";
   stoppedFile?: string;
   readStop?: (file: string) => StopMarkerRead;
-  blocked?: boolean;
 }): boolean {
-  if (!opts.autoStart || opts.headless || !opts.launcherOk || opts.blocked === true) return false;
+  if (!opts.autoStart || opts.headless || !opts.launcherOk) return false;
   const stop =
     opts.stop ??
     (opts.stoppedFile === undefined ? "absent" : (opts.readStop ?? readStopMarkerSync)(opts.stoppedFile).state);

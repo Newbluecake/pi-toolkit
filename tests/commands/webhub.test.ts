@@ -112,7 +112,134 @@ describe("/webhub command", () => {
   it("unknown subcommand ⇒ usage warning", async () => {
     const notes = await run("bogus", { control: control() });
     expect(notes[0]!.level).toBe("warning");
-    expect(notes[0]!.message).toContain("/webhub [status|open|passwd|unlock|restart]");
+    expect(notes[0]!.message).toContain("/webhub [status|open|passwd|unlock|restart|stop|start|token rotate]");
+  });
+});
+
+describe("/webhub stop|start|token rotate (plan §6.7.1/§6.7.2, C8)", () => {
+  it("stop: delegates to control.admin.stop() and formats every outcome kind", async () => {
+    const calls: string[] = [];
+    const c = control({
+      admin: {
+        stop: async () => {
+          calls.push("stop");
+          return { kind: "stopped" };
+        },
+        start: async () => ({ kind: "started" }),
+        rotateToken: async () => ({ kind: "offline" }),
+      },
+    });
+    const notes = await run("stop", { control: c });
+    expect(calls).toEqual(["stop"]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.level).toBe("info");
+    expect(notes[0]!.message).toContain("已停止");
+  });
+
+  it("stop: marker-write-failed ⇒ error level, hub message says it was NOT stopped", async () => {
+    const c = control({
+      admin: {
+        stop: async () => ({ kind: "marker-write-failed", message: "EACCES" }),
+        start: async () => ({ kind: "started" }),
+        rotateToken: async () => ({ kind: "offline" }),
+      },
+    });
+    const notes = await run("stop", { control: c });
+    expect(notes[0]!.level).toBe("error");
+    expect(notes[0]!.message).toContain("未停止");
+    expect(notes[0]!.message).toContain("EACCES");
+  });
+
+  it("start: delegates to control.admin.start()", async () => {
+    const calls: string[] = [];
+    const c = control({
+      admin: {
+        stop: async () => ({ kind: "stopped" }),
+        start: async () => {
+          calls.push("start");
+          return { kind: "started" };
+        },
+        rotateToken: async () => ({ kind: "offline" }),
+      },
+    });
+    const notes = await run("start", { control: c });
+    expect(calls).toEqual(["start"]);
+    expect(notes[0]!.level).toBe("info");
+    expect(notes[0]!.message).toContain("删除");
+  });
+
+  it("start: marker-remove-failed ⇒ warning, mentions the code and that it still spawned once", async () => {
+    const c = control({
+      admin: {
+        stop: async () => ({ kind: "stopped" }),
+        start: async () => ({ kind: "started-marker-remove-failed", code: "EACCES" }),
+        rotateToken: async () => ({ kind: "offline" }),
+      },
+    });
+    const notes = await run("start", { control: c });
+    expect(notes[0]!.level).toBe("warning");
+    expect(notes[0]!.message).toContain("EACCES");
+  });
+
+  it("token rotate: delegates to control.admin.rotateToken() and reports revoked counts", async () => {
+    const calls: string[] = [];
+    const c = control({
+      admin: {
+        stop: async () => ({ kind: "stopped" }),
+        start: async () => ({ kind: "started" }),
+        rotateToken: async () => {
+          calls.push("rotate");
+          return { kind: "rotated", path: "online", revoked: { loopback: 2, lan: 3 } };
+        },
+      },
+    });
+    const notes = await run("token rotate", { control: c });
+    expect(calls).toEqual(["rotate"]);
+    expect(notes[0]!.level).toBe("info");
+    expect(notes[0]!.message).toContain("revoked 5 sessions");
+    expect(notes[0]!.message).toContain("loopback 2");
+    expect(notes[0]!.message).toContain("lan 3");
+  });
+
+  it("token rotate: offline / unknown / stale-hub / error outcomes each format distinctly", async () => {
+    const outcomes = ["offline", "unknown", "stale-hub", "error"] as const;
+    for (const kind of outcomes) {
+      const c = control({
+        admin: {
+          stop: async () => ({ kind: "stopped" }),
+          start: async () => ({ kind: "started" }),
+          rotateToken: async () =>
+            kind === "error" ? { kind: "error", message: "boom" } : ({ kind } as { kind: typeof kind }),
+        },
+      });
+      const notes = await run("token rotate", { control: c });
+      expect(notes, kind).toHaveLength(1);
+      if (kind === "offline") expect(notes[0]!.message).toContain("offline");
+      if (kind === "unknown") expect(notes[0]!.level).toBe("warning");
+      if (kind === "stale-hub") expect(notes[0]!.message).toContain("过旧");
+      if (kind === "error") {
+        expect(notes[0]!.level).toBe("error");
+        expect(notes[0]!.message).toContain("boom");
+      }
+    }
+  });
+
+  it("token without 'rotate' ⇒ usage warning, never calls rotateToken()", async () => {
+    const calls: string[] = [];
+    const c = control({
+      admin: {
+        stop: async () => ({ kind: "stopped" }),
+        start: async () => ({ kind: "started" }),
+        rotateToken: async () => {
+          calls.push("rotate");
+          return { kind: "offline" };
+        },
+      },
+    });
+    const notes = await run("token", { control: c });
+    expect(calls).toEqual([]);
+    expect(notes[0]!.level).toBe("warning");
+    expect(notes[0]!.message).toContain("/webhub token rotate");
   });
 });
 
@@ -121,7 +248,16 @@ describe("getArgumentCompletions", () => {
 
   it("returns all subcommands for an empty prefix", () => {
     const items = cmd().getArgumentCompletions!("")!;
-    expect(items!.map((i) => i.value).sort()).toEqual(["open", "passwd", "restart", "status", "unlock"]);
+    expect(items!.map((i) => i.value).sort()).toEqual([
+      "open",
+      "passwd",
+      "restart",
+      "start",
+      "status",
+      "stop",
+      "token",
+      "unlock",
+    ]);
     expect(items!.every((i) => typeof i.description === "string" && i.description.length > 0)).toBe(true);
   });
 

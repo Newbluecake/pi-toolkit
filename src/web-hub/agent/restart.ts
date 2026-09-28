@@ -66,10 +66,9 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function raceAck(deps: RestartDeps): Promise<boolean> {
-  const frame: HubCtlFrame = { t: "hub_ctl", rid: randomUUID(), op: "shutdown", reason: "restart" };
+async function raceAck(deps: Pick<RestartDeps, "request">, frame: HubCtlFrame, cap: string): Promise<boolean> {
   const acked = deps
-    .request(frame, "ctl.v1")
+    .request(frame, cap)
     .then((res) => res.t === "hub_ctl_ack")
     .catch(() => false);
   const timedOut = delay(ACK_DEADLINE_MS).then(() => false);
@@ -141,7 +140,8 @@ export function ctlLivenessProbe(pid: number, kill?: (pid: number, signal: 0) =>
 
 export async function restartHub(deps: RestartDeps): Promise<RestartOutcome> {
   if (deps.isLiveWithCap("ctl.v1")) {
-    if (await raceAck(deps)) {
+    const frame: HubCtlFrame = { t: "hub_ctl", rid: randomUUID(), op: "shutdown", reason: "restart" };
+    if (await raceAck(deps, frame, "ctl.v1")) {
       const record = deps.readHubRecord();
       const pid = record?.pid;
       const exited = pid === undefined ? true : await waitExit(deps, pid);
@@ -152,6 +152,41 @@ export async function restartHub(deps: RestartDeps): Promise<RestartOutcome> {
       return {
         kind: "failed",
         message: "hub 已确认 shutdown 但 5s 内未退出，未自动重启。",
+      };
+    }
+    // no ack within the deadline: the hub may be hung — fall through to the /proc fallback.
+  }
+  return fallback(deps);
+}
+
+/**
+ * `/webhub stop` (plan §6.7.2, C8). The stop MARKER itself is the caller's job (written before
+ * this is ever called, and never rolled back on failure here — "写失败 ⇒ 报错且不停 hub" is
+ * enforced by the caller not calling this at all when the write failed; "发信号后即使卡住，标记已在
+ * 磁盘上，之后仍会阻止自动拉起" is exactly why this function's own failure modes never touch the
+ * marker). Same ack/exit racing as `restartHub`, but:
+ *  - `ctl.v2` live ⇒ `reason:"stop"` (a real P2.1 hub, distinguishes the two reasons in its own
+ *    audit log — behaviorally identical to "restart" either way, both just shut the process down).
+ *  - only `ctl.v1` (an older P2 hub, pre-C8) ⇒ `reason:"restart"` ("旧 hub 只认它；效果相同：退出，
+ *    标记阻止重拉", plan §6.7.2) — the stop marker written by the caller is what actually prevents
+ *    the respawn a plain restart-reason shutdown would otherwise invite.
+ *  - hub not live at all (or the ack/exit deadline blows past) ⇒ falls back to the same
+ *    identity-verified `/proc` SIGTERM path `restartHub` uses, UNCHANGED — `fallback()` never
+ *    calls `deps.spawn()`, so no `stop`-specific respawn-suppression is needed there.
+ */
+export async function stopHub(deps: RestartDeps): Promise<RestartOutcome> {
+  const cap = deps.isLiveWithCap("ctl.v2") ? "ctl.v2" : deps.isLiveWithCap("ctl.v1") ? "ctl.v1" : undefined;
+  if (cap !== undefined) {
+    const reason: "stop" | "restart" = cap === "ctl.v2" ? "stop" : "restart";
+    const frame: HubCtlFrame = { t: "hub_ctl", rid: randomUUID(), op: "shutdown", reason };
+    if (await raceAck(deps, frame, cap)) {
+      const record = deps.readHubRecord();
+      const pid = record?.pid;
+      const exited = pid === undefined ? true : await waitExit(deps, pid);
+      if (exited) return { kind: "restarted" };
+      return {
+        kind: "failed",
+        message: "hub 已确认 shutdown 但 5s 内未退出；stop 标记已写入，其它终端仍不会自动拉起。",
       };
     }
     // no ack within the deadline: the hub may be hung — fall through to the /proc fallback.

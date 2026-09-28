@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { restartHub, type HubIdentityRecord, type RestartDeps } from "../../../src/web-hub/agent/restart.js";
-import type { HubCtlAckFrame, LanResFrame } from "../../../src/web-hub/protocol/messages.js";
+import { restartHub, stopHub, type HubIdentityRecord, type RestartDeps } from "../../../src/web-hub/agent/restart.js";
+import type { HubCtlAckFrame, HubCtlFrame, LanResFrame } from "../../../src/web-hub/protocol/messages.js";
 import type { IdentityVerdict } from "../../../src/web-hub/agent/proc-identity.js";
 
 function baseDeps(over: Partial<RestartDeps> = {}): RestartDeps {
@@ -228,5 +228,105 @@ describe("ctlLivenessProbe (plan §8.2: the ctl path reads no /proc)", () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync(new URL("../../../src/web-hub/agent/index.ts", import.meta.url), "utf8");
     expect(src).toMatch(/pidAlive: \(pid\) => ctlLivenessProbe\(pid\)/);
+  });
+});
+
+describe("stopHub (plan §6.7.2, C8: /webhub stop — marker is the caller's job, this never spawns)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("ctl.v2 live ⇒ sends reason:'stop', pid exits ⇒ { kind: 'restarted' }, never calls spawn()", async () => {
+    const record: HubIdentityRecord = { pid: 777, procStartTicks: 1, argv: ["a"] };
+    let alive = true;
+    const spawn = vi.fn();
+    const sentFrames: HubCtlFrame[] = [];
+    const deps = baseDeps({
+      isLiveWithCap: (cap) => cap === "ctl.v1" || cap === "ctl.v2",
+      request: async (frame): Promise<HubCtlAckFrame> => {
+        sentFrames.push(frame);
+        return { t: "hub_ctl_ack", rid: frame.rid };
+      },
+      readHubRecord: () => record,
+      pidAlive: () => alive,
+      spawn,
+      now: () => Date.now(),
+    });
+    const done = vi.fn();
+    void stopHub(deps).then(done);
+    await vi.advanceTimersByTimeAsync(50);
+    alive = false;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(done).toHaveBeenCalledWith({ kind: "restarted" });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(sentFrames).toHaveLength(1);
+    expect(sentFrames[0]).toMatchObject({ op: "shutdown", reason: "stop" });
+  });
+
+  it("only ctl.v1 (older P2 hub, pre-C8) ⇒ sends reason:'restart' instead", async () => {
+    const record: HubIdentityRecord = { pid: 778, procStartTicks: 1, argv: ["a"] };
+    const sentFrames: HubCtlFrame[] = [];
+    const deps = baseDeps({
+      isLiveWithCap: (cap) => cap === "ctl.v1",
+      request: async (frame): Promise<HubCtlAckFrame> => {
+        sentFrames.push(frame);
+        return { t: "hub_ctl_ack", rid: frame.rid };
+      },
+      readHubRecord: () => record,
+      pidAlive: () => false,
+      now: () => Date.now(),
+    });
+    const outcome = await stopHub(deps);
+    expect(outcome).toEqual({ kind: "restarted" });
+    expect(sentFrames[0]).toMatchObject({ op: "shutdown", reason: "restart" });
+  });
+
+  it("ack times out ⇒ falls back to the same /proc identity path restartHub uses, still never spawns", async () => {
+    const record: HubIdentityRecord = { pid: 779, procStartTicks: 1, argv: ["a"] };
+    const kill = vi.fn();
+    const spawn = vi.fn();
+    const deps = baseDeps({
+      isLiveWithCap: (cap) => cap === "ctl.v2",
+      request: () => new Promise<LanResFrame>(() => {}), // never resolves ⇒ ACK_DEADLINE_MS timeout
+      readHubRecord: () => record,
+      verifyIdentity: async (): Promise<IdentityVerdict> => ({ ok: true }),
+      readStartTicksNow: async () => 1,
+      kill,
+      spawn,
+    });
+    const done = vi.fn();
+    void stopHub(deps).then(done);
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(done).toHaveBeenCalledWith({ kind: "signalled" });
+    expect(kill).toHaveBeenCalledWith(779, "SIGTERM");
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("not live at all ⇒ falls back immediately, never spawns", async () => {
+    const spawn = vi.fn();
+    const outcome = await stopHub(baseDeps({ isLiveWithCap: () => false, spawn }));
+    expect(outcome.kind).toBe("manual"); // no hub.json in baseDeps()'s default readHubRecord
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("ack acked but pid never exits within 5s ⇒ failed, no spawn", async () => {
+    const record: HubIdentityRecord = { pid: 780, procStartTicks: 1, argv: ["a"] };
+    const spawn = vi.fn();
+    const deps = baseDeps({
+      isLiveWithCap: (cap) => cap === "ctl.v2",
+      request: async (frame): Promise<HubCtlAckFrame> => ({ t: "hub_ctl_ack", rid: frame.rid }),
+      readHubRecord: () => record,
+      pidAlive: () => true,
+      spawn,
+      now: () => Date.now(),
+    });
+    const done = vi.fn();
+    void stopHub(deps).then(done);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(done.mock.calls[0]?.[0]?.kind).toBe("failed");
+    expect(spawn).not.toHaveBeenCalled();
   });
 });

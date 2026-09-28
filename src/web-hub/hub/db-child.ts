@@ -175,6 +175,22 @@ ${crashAfterCommit}
       stmtDeleteAllSessions.run(args.userId);
       return null;
     }
+    case 'revokeAllSessions': {
+      // §6.7.1 step ④: single transaction — bump every user's epoch (belt-and-suspenders in case a
+      // session row survives the delete below for any reason) and delete every session row.
+      let revoked = 0;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.exec('UPDATE users SET epoch = epoch + 1');
+        revoked = db.prepare('DELETE FROM sessions').run().changes;
+        db.exec('COMMIT');
+      } catch (err) {
+        try { db.exec('ROLLBACK'); } catch {}
+        throw err;
+      }
+${crashAfterCommit}
+      return revoked;
+    }
     case 'setPassword': {
       db.exec('BEGIN IMMEDIATE');
       try {

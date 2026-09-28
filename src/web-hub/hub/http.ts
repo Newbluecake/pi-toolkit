@@ -1515,8 +1515,15 @@ interface CmdAuthHandled {
  * write-endpoint body-read budget (§3.3 step ④) → body parsing/validation → the §6.5
  * per-category/per-agent/per-IP buckets (skipped, C3 P1 fix, on an idempotent-hit — §6.5 "幂等
  * 命中不扣令牌") → the §3.3 step ⑤ forward-or-refuse threshold → a `stillAuthorized`
- * recheck (§6.3 step ⑥; no token-rotation/authGen infra exists yet — C8's job — so this call site
- * simply re-invokes `authorize()` a second time, which already catches a concurrent logout) →
+ * recheck (§6.3 step ⑥). C8 §6.7.1 note: the plan's §6.3 row 3/7 "记下 authGen" / "转发前复核
+ * authGen/lanRevokeGen" is satisfied WITHOUT a separate generation-number compare — the rotate-
+ * token flow (`admin.ts`'s `Auth.rotateToken()` clearing the loopback session Map,
+ * `LanStore.revokeAllSessions()` deleting every LAN session row) makes this exact second
+ * `authorize()` call fail on its own once a rotation has landed: loopback's `auth.check()`
+ * re-reads the (now-empty) session Map, LAN's `requireLanSession()` re-touches the (now-deleted)
+ * session row. Both listeners' `authorize()` closures are the very same functions used for the
+ * first check, so a rotation landing between the two calls is caught with zero extra plumbing —
+ * `Auth.authGen()` exists (`auth.ts`) for audit/diagnostics only, not as a load-bearing gate →
  * `commands.request()`.
  *
  * C3 P1 fix (plan §3.3 D16): the `ReqDeadline` is created at the very top, before CSRF/auth, so
@@ -1764,6 +1771,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   const { config, registry, bus, history, log, now } = deps;
   const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
   const sse = createSseHub({ now });
+  // \u00a76.7.1 (C8): bumped by `bumpLanRevokeGen()` (duck-typed extra below, called from
+  // `admin.ts`'s `handleRotateToken`/recovery-scan callers) and read back by the LAN write-path's
+  // `genNow` closure \u2014 mirrors `auth.authGen()` for the loopback listener (\u00a76.3 steps \u2462/\u2466).
+  let lanRevokeGen = 0;
   // §6.5 (C3): one shared token-bucket limiter for every write endpoint on both listeners
   // (bucket keys already carry the listener label, so there is no cross-listener bleed-through).
   const cmdLimit = createCmdLimit(now);
@@ -1793,7 +1804,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
 
   // ---- LAN facade (§2.5/§6/§7) ------------------------------------------
 
-  let lanFacade: LanFacade | undefined;
+  // §6.7.1 (C8): `revokeAll` is a duck-typed extra beyond the frozen `LanFacade` (same widening
+  // pattern used elsewhere in this file) — `admin.ts`'s rotate-token flow needs to kill every
+  // open LAN SSE stream, not just one target's, which the frozen `revoke(target)` can't express.
+  let lanFacade: (LanFacade & { revokeAll?(): number }) | undefined;
   let lanSseRef: SseHub | undefined;
   if (deps.lan !== undefined) {
     const lan = deps.lan;
@@ -1958,6 +1972,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         const pred: (c: SseClient) => boolean =
           "sidHash" in target ? (c) => c.auth?.sidHash === target.sidHash : (c) => c.auth?.userId === target.userId;
         return lanSse.revoke(pred, "revoked");
+      },
+      revokeAll(): number {
+        return lanSse.revoke(() => true, "revoked");
       },
     };
 
@@ -2202,11 +2219,24 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     });
   }
 
-  return {
+  const frontend: HttpFrontend = {
     listen,
     close,
     clientCount: () => sse.count() + (lanSseRef === undefined ? 0 : lanSseRef.count()),
     ui,
     ...(lanFacade === undefined ? {} : { lan: lanFacade }),
   };
+  // §6.7.1 (C8) — duck-typed extras beyond the frozen `HttpFrontend` (same widening pattern as
+  // `storeWithUnavailable` above): `hub.ts` casts `fe` to reach these when wiring `admin.ts`'s
+  // rotate-token deps and its own startup/periodic recovery. Attached via `Object.assign` (not
+  // the object literal itself) so that literal still gets full excess-property checking against
+  // the frozen `HttpFrontend` shape — every other caller of this factory stays byte-identical.
+  return Object.assign(frontend, {
+    auth,
+    revokeAllSse: () => sse.revoke(() => true, "revoked"),
+    bumpLanRevokeGen: () => {
+      lanRevokeGen++;
+    },
+    lanRevokeGen: () => lanRevokeGen,
+  });
 };

@@ -24,7 +24,7 @@ import { readFile } from "node:fs/promises";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
 import { PROTO, P2_HUB_CAPS } from "../protocol/version.js";
-import { createAdminHandler } from "./admin.js";
+import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { createCommandRouter } from "./commands.js";
 import { createHistoryService } from "./history.js";
@@ -45,6 +45,20 @@ import type {
 import type { FsDeps } from "../protocol/paths.js";
 import { createRegistry } from "./registry.js";
 import { acquireSingleton, startFence } from "./singleton.js";
+import type { Auth } from "./auth.js";
+import type { LanStore } from "./lan-store.js";
+
+/**
+ * §6.7.1 (C8) — the duck-typed extras `http.ts`'s `createHttpFrontend` attaches beyond the
+ * frozen `HttpFrontend` shape (same widening pattern as `storeWithUnavailable` in `http.ts`
+ * itself): never part of the `HttpFrontend` type, only ever reached through this cast.
+ */
+type HttpFrontendExt = HttpFrontend & {
+  auth?: Auth;
+  revokeAllSse?(): number;
+  bumpLanRevokeGen?(): void;
+};
+type LanFacadeExt = NonNullable<HttpFrontend["lan"]> & { revokeAll?(): number };
 
 export interface RunningHub {
   paths: HubPaths;
@@ -58,6 +72,10 @@ export interface RunningHub {
 }
 
 export const REGISTRY_TICK_MS = 5_000;
+/** \u00a76.7.1 (C8) "hub \u8fd0\u884c\u671f": "\u6bcf 10s\uff08unref\uff09\u4e0e\u6bcf\u6b21 agent hello \u65f6" \u2014 the hello-triggered half
+ * lives in `agent-server.ts` (C3's file, out of this package's W3 list); this constant only
+ * covers the timer half. */
+export const ROTATE_SCAN_MS = 10_000;
 /** Overall startup cancellation budget (§3.1); a single `AbortController` covers steps ①–⑦. */
 export const HUB_START_DEADLINE_MS = 20_000;
 /** Overall shutdown budget (§3.1); individual steps still use the smaller `STEP_DEADLINE_MS`. */
@@ -144,6 +162,19 @@ export async function startHub(
       lanStatus: () => hubJson.current()?.lan,
       shutdown: (reason) => void close(reason),
       now,
+      // §6.7.1 (C8): same lazy-closure pattern as the getters above — `fe`/`lanDeps` aren't
+      // declared until further down this same function body, but these closures are only ever
+      // invoked later (once an actual `hub_ctl{rotate_token}` frame arrives, always well after
+      // startup finishes).
+      auth: () => (fe as HttpFrontendExt).auth!,
+      rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
+      revokeLanSessions: async () => {
+        const store = lanDeps?.store as Partial<LanStore> | undefined;
+        return (await store?.revokeAllSessions?.()) ?? 0;
+      },
+      revokeLoopbackSse: () => (fe as HttpFrontendExt).revokeAllSse?.() ?? 0,
+      revokeLanSse: () => (fe.lan as LanFacadeExt | undefined)?.revokeAll?.() ?? 0,
+      bumpLanRevokeGen: () => (fe as HttpFrontendExt).bumpLanRevokeGen?.(),
     });
     const agentServer = createAgentServer(owner.server, {
       registry,
@@ -204,6 +235,33 @@ export async function startHub(
       }
     }
 
+    // §6.7.1 (C8) — "意图恢复是 hub 启动的第一步": before `auth.token()`'s first real call (inside
+    // `fe.listen()`), before `fe.lan.start()`, before the first `hubJson.write()` — synchronously
+    // finish whichever half of a previous rotation didn't complete before a crash. `hasLan` here
+    // is gated on `lanAssemblyOff === undefined` too: a store that never opened has nothing to
+    // revoke against, and that (unrelated) off-status already covers the user-visible outcome.
+    const revokeLanForRecovery =
+      lanDeps !== undefined
+        ? async (): Promise<number> => {
+            const store = lanDeps!.store as Partial<LanStore>;
+            return (await store.revokeAllSessions?.()) ?? 0;
+          }
+        : undefined;
+    const rotateRecovery: RotateRecoveryOutcome = await withSignal(
+      recoverRotateIntent({
+        paths: {
+          tokenFile: paths.tokenFile,
+          rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
+        },
+        log,
+        hasLan: config.lan !== undefined && lanAssemblyOff === undefined,
+        ...(revokeLanForRecovery === undefined ? {} : { revokeLan: revokeLanForRecovery }),
+        now,
+      }),
+      startup.signal,
+    );
+    let lanBlockedByRotate = rotateRecovery.lanBlocked === true;
+
     const fe = frontend({
       config,
       paths,
@@ -223,6 +281,10 @@ export async function startHub(
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
+    // §6.7.1: "恢复后无条件 auth.reload()，双保险" — cheap even when nothing was recovered (the very
+    // next real call is `auth.token()` inside `fe.listen()` below, so there is nothing cached yet
+    // in the startup path; this still matters once the periodic scan reuses the same helper).
+    (fe as HttpFrontendExt).auth?.reload();
 
     httpPort = (await withSignal(fe.listen({ signal: startup.signal }), startup.signal)).port; // ⑥
 
@@ -243,9 +305,16 @@ export async function startHub(
               reason: lanAssemblyOff.reason,
               ...(lanAssemblyOff.detail === undefined ? {} : { detail: lanAssemblyOff.detail }),
             }
-          : fe.lan !== undefined
-            ? { state: "starting" }
-            : undefined;
+          : lanBlockedByRotate
+            ? // §6.7.1: "LAN listener 不开放，LanStatus{state:"off", reason:"rotate-pending"}，意图保留，
+              // loopback 照常可用" — token is already new (recovery finished ①–② already), only the
+              // LAN half of invalidation failed/timed out, so `fe.lan` itself is left intact
+              // (the periodic scan calls `start()` once recovery finally succeeds) — only its own
+              // `start()` call is skipped this boot.
+              { state: "off", reason: "rotate-pending" }
+            : fe.lan !== undefined
+              ? { state: "starting" }
+              : undefined;
     hubJson.write({
       pid: process.pid,
       nonce: randomBytes(12).toString("base64url"),
@@ -261,7 +330,7 @@ export async function startHub(
     }); // ⑦
 
     clearTimeout(startTimer); // startup complete; further cancellation is close()'s job
-    if (fe.lan !== undefined) {
+    if (fe.lan !== undefined && !lanBlockedByRotate) {
       // Review fix (LC, plan §1.4/§3, W3 acceptance item 1/3): `LanFacade.start()` is bounded by
       // its own `LAN_START_DEADLINE_MS` and always *resolves* with a correctly classified
       // `LanStatus` (`off/timeout`, `off/listen-failed`, ...) instead of rejecting for any
@@ -297,6 +366,58 @@ export async function startHub(
     }, REGISTRY_TICK_MS);
     tick.unref();
 
+    // \u00a76.7.1 (C8) "hub \u8fd0\u884c\u671f" row: every `ROTATE_SCAN_MS` (unref), re-run the same
+    // recovery helper against whatever is on disk right now \u2014 catches an intent this hub process
+    // didn't itself create (the offline agent path, or another hub racing this one), and retries a
+    // previously-`lanBlocked` revoke once the LAN store is healthy again. NOTE (delivery report):
+    // the plan also asks for a scan on every agent `hello`; that hook lives in `agent-server.ts`
+    // (owned by C3, not in this package's W3 file list) and is therefore not wired here \u2014 the
+    // 10s cadence below is the only trigger this package can deliver on its own.
+    const rotateScan = setInterval(() => {
+      const revokeLan =
+        lanDeps === undefined
+          ? undefined
+          : async (): Promise<number> => {
+              const store = lanDeps!.store as Partial<LanStore>;
+              return (await store.revokeAllSessions?.()) ?? 0;
+            };
+      void recoverRotateIntent({
+        paths: {
+          tokenFile: paths.tokenFile,
+          rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
+        },
+        log,
+        hasLan: config.lan !== undefined && lanDeps !== undefined,
+        ...(revokeLan === undefined ? {} : { revokeLan }),
+        now,
+      })
+        .then((outcome) => {
+          if (!outcome.recovered) return;
+          (fe as HttpFrontendExt).auth?.reload();
+          if (outcome.lanBlocked === true) {
+            lanBlockedByRotate = true;
+            hubJson.patchLan({ state: "off", reason: "rotate-pending" });
+            return;
+          }
+          if (lanBlockedByRotate && fe.lan !== undefined) {
+            // Previously blocked, now resolved \u2014 open the LAN listener this boot never did.
+            lanBlockedByRotate = false;
+            void fe.lan.start().then(
+              (s) => hubJson.patchLan(s),
+              (err: unknown) => {
+                log.error("web-hub: LAN start() (post rotate-pending recovery) rejected unexpectedly", {
+                  error: String(err),
+                });
+              },
+            );
+          }
+        })
+        .catch((err: unknown) => {
+          log.error("web-hub: periodic rotate-intent scan failed", { error: String(err) });
+        });
+    }, ROTATE_SCAN_MS);
+    rotateScan.unref();
+
     const stopFence = startFence(paths.socketPath, owner.identity, (why) => {
       log.warn("socket fence lost: another hub owns the socket path", { why });
       void close("fence");
@@ -323,6 +444,7 @@ export async function startHub(
         stopFence();
         idle.stop();
         clearInterval(tick);
+        clearInterval(rotateScan);
         await bounded(fe.close());
         history.dispose();
         await bounded(agentServer.close());

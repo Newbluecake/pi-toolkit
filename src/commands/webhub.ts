@@ -15,12 +15,19 @@
  *                       `runPasswdPrompt` 拒绝）
  *   /webhub unlock   —— 清空登录限流（收紧/饱和状态解除）
  *   /webhub restart  —— 见 plan §8.2；`control.lan.restart()` 已经实现两条路径
+ *   /webhub stop     —— 见 plan §6.7.2；写机器级 stop 标记 → 尝试优雅关闭 hub（ctl.v2：
+ *                       `reason:"stop"`；ctl.v1：`reason:"restart"`；都无 ⇒ `/proc` 身份验证后
+ *                       SIGTERM）；标记存在期间所有 TUI 的自动拉起都被抑制
+ *   /webhub start    —— 删除 stop 标记并立即拉起（删除失败仍按显式意图 spawn 一次 + 警告）
+ *   /webhub token rotate —— 见 plan §6.7.1；在线：`hub_ctl{rotate_token}`（作废 loopback + 全部
+ *                       LAN 会话）；离线：本地写意图 + 原子替换 token（不碰 LAN 会话）
  *
  * control 经 holder 式 getter 惰性读取（/reload 后指向新 activate 的实例）。
  */
 import { spawn } from "node:child_process";
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { LanAdminResult, WebHubControl, WebHubStatusView } from "../web-hub/agent/index.js";
+import type { RotateOutcome, StartOutcome, StopOutcome } from "../web-hub/agent/admin-cmds.js";
 import { formatPasswdOutcomeMessage, type PasswdOutcome } from "../web-hub/agent/passwd-prompt.js";
 import type { RestartOutcome } from "../web-hub/agent/restart.js";
 import {
@@ -56,7 +63,7 @@ export interface WebHubCommandDeps {
   lanSettingsWarnings?: () => WebHubLanSettingsWarnings;
 }
 
-const USAGE = "用法：/webhub [status|open|passwd|unlock|restart]";
+const USAGE = "用法：/webhub [status|open|passwd|unlock|restart|stop|start|token rotate]";
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
   try {
@@ -211,7 +218,80 @@ async function runRestart(ctx: ExtensionCommandContext, control: WebHubControl):
   notify(ctx, message, level);
 }
 
-const SUBCOMMANDS = new Set(["status", "open", "passwd", "unlock", "restart"]);
+export function formatStopOutcomeMessage(outcome: StopOutcome): {
+  message: string;
+  level: "info" | "warning" | "error";
+} {
+  switch (outcome.kind) {
+    case "stopped":
+      return { message: "hub 已停止（机器级 stop 标记已写入，/webhub start 恢复）。", level: "info" };
+    case "marker-write-failed":
+      return { message: `stop 标记写入失败（${outcome.message}），hub 未停止。`, level: "error" };
+    case "signalled":
+      return { message: "stop 标记已写入；旧 hub 身份校验通过，已发送 SIGTERM。", level: "info" };
+    case "manual":
+      return { message: `stop 标记已写入；${outcome.message}`, level: "warning" };
+    case "failed":
+      return { message: `stop 标记已写入；${outcome.message}`, level: "error" };
+    case "restarted":
+      return { message: "hub 已停止（机器级 stop 标记已写入，/webhub start 恢复）。", level: "info" };
+  }
+}
+
+export function formatStartOutcomeMessage(outcome: StartOutcome): { message: string; level: "info" | "warning" } {
+  switch (outcome.kind) {
+    case "started":
+      return { message: "stop 标记已删除，hub 正在拉起。", level: "info" };
+    case "started-marker-remove-failed":
+      return {
+        message: `stop 标记无法删除（${outcome.code}），但已按显式意图拉起一次；其它终端仍不会自动拉起。`,
+        level: "warning",
+      };
+  }
+}
+
+export function formatRotateOutcomeMessage(outcome: RotateOutcome): {
+  message: string;
+  level: "info" | "warning" | "error";
+} {
+  switch (outcome.kind) {
+    case "rotated":
+      return {
+        message:
+          `token rotated · revoked ${outcome.revoked.loopback + outcome.revoked.lan} sessions ` +
+          `(loopback ${outcome.revoked.loopback}, lan ${outcome.revoked.lan}) · run /webhub open for a new link`,
+        level: "info",
+      };
+    case "unknown":
+      return { message: "结果未知，/webhub status 查看（hub 若已写意图，运行期扫描会补完）。", level: "warning" };
+    case "offline":
+      return { message: "token rotated offline · LAN sessions revoked when the hub next starts", level: "info" };
+    case "stale-hub":
+      return { message: "hub 版本过旧（缺 ctl.v2），先 /webhub restart。", level: "warning" };
+    case "error":
+      return { message: `token rotate 失败：${outcome.message}`, level: "error" };
+  }
+}
+
+async function runStop(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
+  const outcome = await control.admin.stop();
+  const { message, level } = formatStopOutcomeMessage(outcome);
+  notify(ctx, message, level);
+}
+
+async function runStart(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
+  const outcome = await control.admin.start();
+  const { message, level } = formatStartOutcomeMessage(outcome);
+  notify(ctx, message, level);
+}
+
+async function runTokenRotate(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
+  const outcome = await control.admin.rotateToken();
+  const { message, level } = formatRotateOutcomeMessage(outcome);
+  notify(ctx, message, level);
+}
+
+const SUBCOMMANDS = new Set(["status", "open", "passwd", "unlock", "restart", "stop", "start", "token"]);
 
 /** 子命令集合的唯一来源是上面的 SUBCOMMANDS（补全从这里派生，避免漂移）。 */
 const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
@@ -220,6 +300,9 @@ const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
   passwd: "设置局域网访问密码（仅 TUI）",
   unlock: "清空登录限流",
   restart: "重启 hub",
+  stop: "停止 hub（写机器级 stop 标记，抵制自动拉起）",
+  start: "删除 stop 标记并拉起 hub",
+  token: "token 相关管理（rotate）",
 };
 
 export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
@@ -257,6 +340,10 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
         notify(ctx, "/webhub passwd 不接受任何参数。", "warning");
         return;
       }
+      if (sub === "token" && tokens[1] !== "rotate") {
+        notify(ctx, "用法：/webhub token rotate", "warning");
+        return;
+      }
       const control = deps.control();
       if (control === undefined) {
         notify(ctx, "web-hub 未启用（webHub.enabled=false）或尚未初始化；启用后 /reload 生效。", "warning");
@@ -274,6 +361,15 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
           return;
         case "restart":
           await runRestart(ctx, control);
+          return;
+        case "stop":
+          await runStop(ctx, control);
+          return;
+        case "start":
+          await runStart(ctx, control);
+          return;
+        case "token":
+          await runTokenRotate(ctx, control);
           return;
         default:
           await runStatus(ctx, control, deps);
