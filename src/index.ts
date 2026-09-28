@@ -853,6 +853,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     webHubRef.current = wireWebHub(pi, {
       settings: settings.webHub,
       fleet: () => holder.current?.query.list() ?? [],
+      query: () => holder.current?.query,
+      askUserEnabled: () => settings.askUser.enabled,
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;
