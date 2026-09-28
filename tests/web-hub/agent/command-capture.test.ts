@@ -12,6 +12,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { wrapCommandApi, type CommandCapturePort } from "../../../src/web-hub/agent/command-capture.js";
+import { wireWebHub } from "../../../src/web-hub/agent/index.js";
+import { SETTINGS } from "./helpers.js";
 
 /** A minimal fake ExtensionAPI that records every call and its `this` receiver. */
 function fakeApi(): ExtensionAPI & { calls: Array<{ prop: string; args: unknown[]; self: unknown }> } {
@@ -158,5 +160,54 @@ describe("wrapCommandApi — capture wired later (dynamic lookup, not frozen at 
     const out = await registeredCommand.handler("x", ctx);
     expect(out).toBe("plain");
     expect(capture.finish).not.toHaveBeenCalled();
+  });
+});
+
+describe("wireWebHub ⇒ activate() assembly wiring (todo #32 P0 fix #2)", () => {
+  // Mirrors src/index.ts's real wiring order exactly: `wrapCommandApi(rawPi, () =>
+  // commandCaptureRef.current)` runs at activate()'s very first line, `wireWebHub(pi, ...)` runs
+  // later (inside the `settings.webHub.enabled` gate), and only THEN does
+  // `if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;`
+  // populate the ref. Before this fix `wireWebHub()`'s returned object never had a `capture` key
+  // at runtime (only in the `WebHubControl` type declaration) so that `if` was always false and
+  // the ref stayed permanently unset — every web-originated command invocation's `getCapture()`
+  // call kept returning `undefined` forever, identical to the "web-hub disabled" case.
+  it("wireWebHub()'s return value actually carries a capture port (not just declared in the type)", async () => {
+    const control = wireWebHub(fakeApi(), { settings: SETTINGS, fleet: () => [] });
+    expect(control.capture).toBeDefined();
+    expect(typeof control.capture!.arm).toBe("function");
+    expect(typeof control.capture!.take).toBe("function");
+    // C0 fast-path stub semantics (§12.1 C0): no capture is ever claimed — pure passthrough.
+    expect(control.capture!.take("whatever", "args")).toBeUndefined();
+  });
+
+  it("end-to-end: commandCaptureRef gets populated and a web-registered command's handler reaches it (previously unreachable)", async () => {
+    const raw = fakeApi();
+    const commandCaptureRef: { current?: CommandCapturePort } = {}; // mirrors src/index.ts's own ref
+    const pi = wrapCommandApi(raw, () => commandCaptureRef.current); // activate()'s first line
+
+    // A command registered BEFORE the ref is populated (e.g. another extension's own
+    // activate()) must still consult the capture dynamically on every invocation, not a frozen
+    // snapshot — same invariant as the "capture wired later" describe block above.
+    const handler = vi.fn(async () => "ok");
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as {
+      handler: (a: string, c: ExtensionCommandContext) => unknown;
+    };
+
+    // wireWebHub() runs later, inside the `settings.webHub.enabled` gate.
+    const control = wireWebHub(pi, { settings: SETTINGS, fleet: () => [] });
+    expect(control.capture).toBeDefined();
+
+    // Exactly src/index.ts's own line: `if (webHubRef.current.capture !== undefined)
+    // commandCaptureRef.current = webHubRef.current.capture;`
+    if (control.capture !== undefined) commandCaptureRef.current = control.capture;
+    expect(commandCaptureRef.current).toBe(control.capture);
+
+    const takeSpy = vi.spyOn(commandCaptureRef.current!, "take");
+    await registeredCommand.handler("hello", ctx);
+    // The whole point of the fix: the web call path can now actually reach `capture.take(...)`.
+    expect(takeSpy).toHaveBeenCalledWith("mycmd", "hello");
+    expect(handler).toHaveBeenCalledWith("hello", ctx); // and (still, C0 fast path) runs plainly
   });
 });

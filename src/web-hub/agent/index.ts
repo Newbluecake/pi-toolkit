@@ -53,7 +53,7 @@ import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
 import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
-import type { CommandCapturePort } from "./command-capture.js";
+import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
 import { createCommandHandler } from "./commands.js";
 import { createDialogBridge } from "./dialogs.js";
 import { createAdminCommands, type AdminCommands } from "./admin-cmds.js";
@@ -602,6 +602,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
 
   const admin = createAdminCommands();
   return {
+    // todo #32 P0 fix: without this, `src/index.ts`'s `if (webHubRef.current.capture !== undefined)
+    // commandCaptureRef.current = webHubRef.current.capture;` line never fires, so the web call
+    // path (`wrapCommandApi`'s `getCapture()`) can never reach a capture port at all. It stays
+    // `command-capture.ts`'s C0 fast-path stub (`arm` no-op, `take` returns undefined), which is
+    // what makes this a zero-visible-change addition: every existing command still runs
+    // byte-identically once the ref is actually populated.
+    capture: createCommandCapture(),
     internalExec: async () => ({ ok: false, code: "E_UNSUPPORTED" }),
     askUserRemote: () => undefined,
     admin,
