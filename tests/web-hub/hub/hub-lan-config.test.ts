@@ -24,7 +24,16 @@ afterEach(async () => {
 function fakeFrontend(): FrontendFactory & { deps: FrontendDeps[] } {
   const f = ((deps: FrontendDeps): HttpFrontend => {
     f.deps.push(deps);
-    return { listen: async () => ({ port: 40077 }), close: async () => {}, clientCount: () => 0 };
+    return {
+      listen: async () => ({ port: 40077 }),
+      close: async () => {},
+      clientCount: () => 0,
+      ui: {
+        serve: async () => false,
+        refresh: async () => ({ state: "unbuilt" as const, candidates: [] }),
+        status: () => ({ state: "unbuilt" as const, candidates: [] }),
+      },
+    };
   }) as FrontendFactory & { deps: FrontendDeps[] };
   f.deps = [];
   return f;

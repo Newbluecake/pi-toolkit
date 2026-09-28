@@ -4,7 +4,8 @@
  * `src/web-hub/protocol/` wire shapes closely enough for P1/P3/P4 frontend work and for
  * `visual.ts` to drive with a headless browser.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,8 @@ import {
   type DevHubHandle,
 } from "../../../scripts/web-hub/dev-hub.js";
 import { isSameOrigin } from "../../../scripts/web-hub/visual.js";
+import { readPackageVersion } from "../../../src/web-hub/ui/build-info-plugin.js";
+import { PROTO } from "../../../src/web-hub/protocol/version.js";
 
 const JSON_HEADERS = { "Content-Type": "application/json", "X-PWH": "1" } as const;
 
@@ -224,6 +227,72 @@ describe("dev-hub fixtures", () => {
     expect(() => validateFixture({ agents: [], history: {}, script: [{ atMs: 1 }] }, "bad3.json")).toThrow(/script/);
     expect(() => validateFixture(null, "bad4.json")).toThrow(/object/);
     expect(() => validateFixture({}, "bad5.json")).toThrow(/agents/);
+  });
+});
+
+function sha256(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+/** A manifest-carrying root (`build-info.json` present) — P5b 打回点 2: proves `createDevHub`
+ * routes through the real production `createUiServer` (not the raw `devServeStatic` fallback)
+ * whenever `--root` looks like an actual build, by asserting on behavior only `createUiServer`
+ * has: the immutable `assets/*-<hash>.*` cache header and manifest-only serving (an unlisted path
+ * 404s even though its extension is otherwise servable). */
+async function makeManifestUiRoot(): Promise<{ dir: string; cleanup: () => void }> {
+  const base = mkdtempSync(join(tmpdir(), "pwh-devhub-manifest-"));
+  const parent = join(base, "dist");
+  mkdirSync(parent, { mode: 0o755 });
+  const dir = join(parent, "web-hub-ui");
+  mkdirSync(join(dir, "assets"), { recursive: true, mode: 0o755 });
+  const indexHtml = '<!doctype html><html data-auth-mode="__AUTH_MODE__"><body><div id="root"></div></body></html>';
+  const assetJs = "console.log('asset')";
+  writeFileSync(join(dir, "index.html"), indexHtml, { mode: 0o644 });
+  writeFileSync(join(dir, "assets", "index-abcd1234.js"), assetJs, { mode: 0o644 });
+  const info = {
+    v: 1,
+    version: await readPackageVersion(),
+    proto: { major: PROTO.major },
+    builtAt: "2026-01-01T00:00:00.000Z",
+    commit: "abcdefabcdef",
+    files: [
+      { path: "index.html", bytes: Buffer.byteLength(indexHtml), sha256: sha256(Buffer.from(indexHtml)) },
+      {
+        path: "assets/index-abcd1234.js",
+        bytes: Buffer.byteLength(assetJs),
+        sha256: sha256(Buffer.from(assetJs)),
+      },
+    ],
+  };
+  writeFileSync(join(dir, "build-info.json"), JSON.stringify(info), { mode: 0o644 });
+  return { dir, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+describe("dev-hub static serving — manifest root routes through createUiServer (P5b 打回点 2)", () => {
+  it("a build-info.json-carrying root gets the immutable hashed-asset cache header createUiServer sets (devServeStatic never sends this)", async () => {
+    const { dir, cleanup } = await makeManifestUiRoot();
+    try {
+      const hub = await start({ mode: "token", root: dir, scenario: "empty" });
+      const res = await fetch(hub.url + "/assets/index-abcd1234.js");
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      const index = await fetch(hub.url + "/");
+      expect(index.headers.get("cache-control")).toBe("no-cache");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a path not present in the manifest 404s even with an otherwise-servable extension (manifest-only serving, no raw filesystem fallback)", async () => {
+    const { dir, cleanup } = await makeManifestUiRoot();
+    try {
+      writeFileSync(join(dir, "stray.js"), "console.log('not in manifest')", { mode: 0o644 });
+      const hub = await start({ mode: "token", root: dir, scenario: "empty" });
+      const res = await fetch(hub.url + "/stray.js");
+      expect(res.status).toBe(404);
+    } finally {
+      cleanup();
+    }
   });
 });
 

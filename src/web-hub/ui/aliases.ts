@@ -18,8 +18,8 @@
  */
 import { fileURLToPath } from "node:url";
 
-/** `src/web-hub/web/` */
-export const LOGIC_DIR = fileURLToPath(new URL("../web", import.meta.url));
+/** `src/web-hub/ui/src/logic/` */
+export const LOGIC_DIR = fileURLToPath(new URL("./src/logic", import.meta.url));
 
 /** `src/web-hub/protocol/` */
 export const PROTOCOL_DIR = fileURLToPath(new URL("../protocol", import.meta.url));

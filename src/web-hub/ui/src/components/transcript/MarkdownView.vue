@@ -10,7 +10,7 @@
 -->
 <script setup lang="ts">
 import { computed } from "vue";
-import { parseMarkdown } from "@logic/render/markdown.js";
+import { parseMarkdown } from "@logic/markdown.js";
 import type { MarkdownViewProps } from "../../contracts.js";
 import type { MdNode } from "./markdown-types.js";
 import MdBlock from "./MdBlock.vue";

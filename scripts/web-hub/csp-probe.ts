@@ -14,17 +14,42 @@
  * Playwright/Chromium unavailable (offline cache miss and no network).
  */
 import { createServer, type Server } from "node:http";
-import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { CSP } from "../../src/web-hub/hub/http.js";
-import { serveStatic } from "../../src/web-hub/hub/static.js";
 import { loadPlaywright, type PwPage } from "./lib/playwright.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const VITE_CONFIG = resolve(REPO_ROOT, "src/web-hub/ui/vite.config.ts");
 const PROBE_OUT_DIR = resolve(REPO_ROOT, "node_modules/.cache/pwh-csp-probe");
 const PORT = 42111;
+const PROBE_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+
+/** Minimal static server for the probe's own build output (a plain Vite `outDir`, not a
+ * manifest-verified UI root) — deliberately simpler than `hub/static.ts`'s `createUiServer`,
+ * which trusts nothing without a signed manifest; this script's own output is the only thing it
+ * ever serves, from a fixed `node_modules/.cache/` path this process itself just built. */
+async function serveProbeFile(urlPath: string, res: import("node:http").ServerResponse): Promise<boolean> {
+  const rel = urlPath.split("?")[0] === "/" ? "index.html" : (urlPath.split("?")[0] ?? "").replace(/^\//, "");
+  if (rel.includes("..") || rel.includes("\0")) return false;
+  const ct = PROBE_CONTENT_TYPES[extname(rel).toLowerCase()];
+  if (ct === undefined) return false;
+  try {
+    const data = await readFile(resolve(PROBE_OUT_DIR, rel));
+    res.writeHead(200, { "Content-Type": ct, "Content-Length": data.length });
+    res.end(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
 const INIT_SCRIPT = `
   window.__pwhViolations = [];
   document.addEventListener("securitypolicyviolation", (e) => {
@@ -41,7 +66,7 @@ async function startServer(): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
     res.setHeader("Content-Security-Policy", CSP);
     res.setHeader("X-Content-Type-Options", "nosniff");
-    void serveStatic(PROBE_OUT_DIR, req.url ?? "/", res).then((served) => {
+    void serveProbeFile(req.url ?? "/", res).then((served) => {
       if (!served && !res.headersSent) {
         res.writeHead(404).end();
       }

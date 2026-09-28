@@ -8,8 +8,8 @@
  * `state.js`'s `resultText` — never re-implements them. `indexTools` is duplicated from
  * `tool-index.ts` (see that file's header for why).
  */
-import { itemRenderKey, messageText } from "@logic/render/transcript.js";
-import { safeJson, toolView } from "@logic/render/tools.js";
+import { itemRenderKey, messageText } from "@logic/transcript.js";
+import { safeJson, toolView } from "@logic/tools.js";
 import { resultText } from "@logic/state.js";
 import type { AgentState, Item, ToolView } from "../../types.js";
 import { indexTools, type ToolIndex } from "./tool-index.js";

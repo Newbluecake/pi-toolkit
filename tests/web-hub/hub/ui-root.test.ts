@@ -589,8 +589,8 @@ describe("createUiRootService: 换代 (redeploy) detection via build-info.json f
   });
 });
 
-describe("ui-root.ts is a new, unwired module (§5.3 P5a acceptance: 'not imported by any production code')", () => {
-  it("no production file (outside tests, outside this module itself) imports ui-root.js", async () => {
+describe("ui-root.ts is wired into production code (vue-plan.md v2.1 §2.1, §5.2 — P5b's atomic switch)", () => {
+  it("exactly the P5b files that were granted the switch import ui-root.js — nothing else", async () => {
     const { readdirSync, readFileSync: readFileSyncFn, statSync } = await import("node:fs");
     const { join: joinPath } = await import("node:path");
     const srcRoot = joinPath(import.meta.dirname, "..", "..", "..", "src");
@@ -606,6 +606,19 @@ describe("ui-root.ts is a new, unwired module (§5.3 P5a acceptance: 'not import
       return out;
     }
 
+    // P5b's own independent-file list (vue-plan.md v2.1 §5.2) — the only production files
+    // allowed to import `ui-root.js` once the atomic switch landed.
+    const EXPECTED_IMPORTERS = new Set(
+      [
+        joinPath("hub", "static.ts"),
+        joinPath("hub", "http.ts"),
+        joinPath("hub", "hub-json.ts"),
+        joinPath("hub", "ports.ts"),
+        joinPath("agent", "index.ts"),
+        joinPath("agent", "ui-status.ts"),
+      ].map((rel) => joinPath(srcRoot, "web-hub", rel)),
+    );
+
     const files = walk(srcRoot);
     const importers: string[] = [];
     for (const file of files) {
@@ -614,6 +627,6 @@ describe("ui-root.ts is a new, unwired module (§5.3 P5a acceptance: 'not import
       const text = readFileSyncFn(file, "utf8");
       if (/from\s+["']\.{0,2}\/?.*ui-root\.js["']/.test(text)) importers.push(file);
     }
-    expect(importers).toEqual([]);
+    expect(new Set(importers)).toEqual(EXPECTED_IMPORTERS);
   });
 });

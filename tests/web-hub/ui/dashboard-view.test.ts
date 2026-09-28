@@ -2,7 +2,7 @@
 import { mount } from "@vue/test-utils";
 import { ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { initialState, reduce } from "../../../src/web-hub/web/state.js";
+import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import DashboardView from "../../../src/web-hub/ui/src/components/shell/DashboardView.vue";
 import type { HubHandle, HubState, Route } from "../../../src/web-hub/ui/src/types.js";
 

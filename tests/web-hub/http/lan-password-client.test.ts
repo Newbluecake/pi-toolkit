@@ -1,7 +1,7 @@
 /**
  * LC + LF integration (real HTTP route + the actual browser-side password-mode client, plan
  * §11's "LF+LC 联调测试（真实 http 路由 + 前端解析）" requirement — LC review fixes #6/#7,
- * lan-plan.md §15.9): `createPasswordClient` (`src/web-hub/web/password-client.js`) driven
+ * lan-plan.md §15.9): `createPasswordClient` (`src/web-hub/ui/src/logic/password-client.js`) driven
  * against a *real* `createHttpFrontend` LAN listener, through a `fetch` adapter backed by real
  * `node:http` requests (`lanRequest` from `./lan-helpers.js`) rather than a hand-mocked response.
  * This is exactly the seam the two review findings slipped through: unit tests on either side
@@ -9,7 +9,7 @@
  * between them was invisible until both were wired together for real.
  */
 import { describe, expect, it } from "vitest";
-import { createPasswordClient } from "../../../src/web-hub/web/password-client.js";
+import { createPasswordClient } from "../../../src/web-hub/ui/src/logic/password-client.js";
 import { lanPostJson, lanRequest, seedLanUser, startLan } from "./lan-helpers.js";
 
 interface FetchResponse {

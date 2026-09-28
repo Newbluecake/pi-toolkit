@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
-import { initialState, reduce } from "../../../src/web-hub/web/state.js";
+import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import DetailBody from "../../../src/web-hub/ui/src/components/body/DetailBody.vue";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
 

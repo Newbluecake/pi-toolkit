@@ -1,19 +1,28 @@
 #!/usr/bin/env -S npx tsx
 /**
- * `npm run check:web` (vue-plan.md v2.1 §1.2, §4.1, §4.3, §5.2 — P0). Guards the *production*
- * build output (`dist/web-hub-ui/`, `npm run build:web` must have already run) against every
- * CSP/security invariant the plan pins down, plus manifest/size hygiene. Never touches
- * `src/`.
+ * `npm run check:web` (vue-plan.md v2.1 §1.2, §4.1, §4.3, §5.2 — P0; §2.1/§5.2 P5b addendum).
+ * Guards the *production* build output (`dist/web-hub-ui/`, `npm run build:web` must have
+ * already run) against every CSP/security invariant the plan pins down, plus manifest/size
+ * hygiene. Never touches `src/`.
  *
- * P5b later adds a `verifyUiRoot` pass on top of this (hub-side trust checks); this script only
- * checks what a build tool can check about its own output.
+ * P5b addendum: after every P0-era check passes, this also runs the hub's own `verifyUiRoot`
+ * (`hub/ui-root.ts`, §2.1) against `dist/web-hub-ui/` with the exact `{version, protoMajor}`
+ * the real hub would expect from a package it shipped at this `package.json` version — the same
+ * check the running hub performs before ever trusting this directory as its `"package"`
+ * candidate. This closes the gap a CI build could otherwise slip through: every earlier check
+ * here inspects file *contents*; `verifyUiRoot` additionally re-validates the exact trust
+ * boundary (ownership/mode/symlinks/manifest hash) the hub itself applies, so a CI artifact that
+ * passes `check:web` is guaranteed servable, not just well-formed.
  */
 import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { readPackageVersion } from "../../src/web-hub/ui/build-info-plugin.js";
+import { verifyUiRoot } from "../../src/web-hub/hub/ui-root.js";
 import { isAllowedUiPath, parseUiBuildInfo, type UiBuildInfo } from "../../src/web-hub/protocol/ui-manifest.js";
+import { PROTO } from "../../src/web-hub/protocol/version.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const DIST_DIR = resolve(REPO_ROOT, "dist/web-hub-ui");
@@ -163,6 +172,14 @@ async function main(): Promise<void> {
   }
 
   await checkManifest(files);
+
+  const version = await readPackageVersion();
+  const verified = await verifyUiRoot(DIST_DIR, { version, protoMajor: PROTO.major });
+  if (!verified.ok) {
+    fail(
+      `hub's own verifyUiRoot rejected dist/web-hub-ui/: ${verified.reason}${verified.detail ? ` (${verified.detail})` : ""}`,
+    );
+  }
 
   console.log(
     `✓ check:web — dist/web-hub-ui/ OK (${files.length} files, JS ${jsGzipTotal}B gz, CSS ${cssGzipTotal}B gz)`,

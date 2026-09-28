@@ -8,7 +8,7 @@
 -->
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { safeJson, summarizeArgs } from "@logic/render/tools.js";
+import { safeJson, summarizeArgs } from "@logic/tools.js";
 import type { ToolCardProps } from "../../contracts.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";

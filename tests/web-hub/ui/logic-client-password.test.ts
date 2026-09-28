@@ -6,8 +6,8 @@ import {
   CLOSE_PROBE_MAX,
   CLOSE_PROBE_BACKOFF_MS,
   BACKOFF_MIN_MS,
-} from "../../../src/web-hub/web/password-client.js";
-import { SILENCE_MS } from "../../../src/web-hub/web/contract.js";
+} from "../../../src/web-hub/ui/src/logic/password-client.js";
+import { SILENCE_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 
 /**
  * Unit tests for the password-mode transport (plan §10, package LF).
@@ -131,6 +131,14 @@ afterEach(() => {
 });
 
 describe("createPasswordClient: startup / #t= / session probe", () => {
+  // P5b 打回点 4 equivalent — see the matching test in logic-client.test.ts's module comment for
+  // why this lives here instead of app-gate.test.ts (App.vue is out of P5b's editable surface).
+  it("construction alone (no start()) never calls fetch or opens an EventSource", () => {
+    const e = env();
+    expect(e.calls).toHaveLength(0);
+    expect(FakeES.all).toHaveLength(0);
+  });
+
   it("never sends the hash token; only clears it via replaceState", async () => {
     const e = env({ hash: "#t=deadbeef" });
     await e.client.start();

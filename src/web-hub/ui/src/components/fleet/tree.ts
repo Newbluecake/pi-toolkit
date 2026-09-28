@@ -10,7 +10,7 @@
  * `stack[depth - 1]` (or becomes a root at `depth === 0`), then becomes `stack[depth]` for
  * whatever comes next.
  */
-import { fleetTree } from "@logic/render/fleet.js";
+import { fleetTree } from "@logic/fleet.js";
 import type { FleetRowWire } from "@protocol/messages.js";
 import type { FleetTreeNode } from "../../types.js";
 

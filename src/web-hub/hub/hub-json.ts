@@ -21,6 +21,7 @@ import { chmodSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "
 import type { LanStatus } from "../protocol/lan.js";
 import type { HubLog } from "./ports.js";
 import type { PROTO } from "../protocol/version.js";
+import type { UiStatus } from "./ui-root.js";
 
 export interface HubRecord {
   pid: number;
@@ -34,6 +35,9 @@ export interface HubRecord {
   procStartTicks?: number;
   argv?: string[];
   lan?: LanStatus;
+  /** vue-plan.md v2.1 §2.1（P5b）：解析出的 Vue UI 状态，供 `/webhub status`（§2.3）读取。与
+   * 下面的 `lan` 同样的“首次 write() 前先排队”语义——见 `patchUi`。 */
+  ui?: UiStatus;
 }
 
 export interface HubJsonWriter {
@@ -43,7 +47,11 @@ export interface HubJsonWriter {
    * `write()`, queue it as `pendingLan` so the eventual `write()` picks it up (and it takes
    * priority over whatever `lan` that `write()` call's own record carries). No-op once sealed. */
   patchLan(lan: LanStatus): void;
-  /** The record last passed to `write()`/`patchLan()`, if any (never re-read from disk). */
+  /** Merge `ui` into the current in-memory record, then `write()` it — or, before the first
+   * `write()`, queue it as `pendingUi` so the eventual `write()` picks it up (mirrors `patchLan`
+   * exactly, §2.1: "hub.ts 收到后重写 hub.json.ui"). No-op once sealed. */
+  patchUi(ui: UiStatus): void;
+  /** The record last passed to `write()`/`patchLan()`/`patchUi()`, if any (never re-read from disk). */
   current(): HubRecord | undefined;
   /** Delete the file iff its `pid` still matches this process, then seal the writer. */
   removeIfOurs(): void;
@@ -53,12 +61,16 @@ export function createHubJsonWriter(file: string, log: HubLog): HubJsonWriter {
   let record: HubRecord | undefined;
   let everWritten = false;
   let pendingLan: LanStatus | undefined;
+  let pendingUi: UiStatus | undefined;
   let sealed = false;
 
   function write(next: HubRecord): void {
     if (sealed) return;
-    record = pendingLan !== undefined ? { ...next, lan: pendingLan } : next;
+    record = next;
+    if (pendingLan !== undefined) record = { ...record, lan: pendingLan };
+    if (pendingUi !== undefined) record = { ...record, ui: pendingUi };
     pendingLan = undefined;
+    pendingUi = undefined;
     everWritten = true;
     try {
       const tmp = `${file}.${process.pid}.tmp`;
@@ -79,9 +91,19 @@ export function createHubJsonWriter(file: string, log: HubLog): HubJsonWriter {
     write({ ...record, lan });
   }
 
+  function patchUi(ui: UiStatus): void {
+    if (sealed) return;
+    if (record === undefined) {
+      pendingUi = ui; // no base record yet — queue it for the eventual write()
+      return;
+    }
+    write({ ...record, ui });
+  }
+
   return {
     write,
     patchLan,
+    patchUi,
     current: () => record,
     removeIfOurs: () => {
       try {

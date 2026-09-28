@@ -16,7 +16,7 @@
  *     `bye{handover}`, the new one reconnects with the same agentId / new epoch.
  * An activate without a matching session_start takes no connection.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,9 @@ import {
 } from "./connection.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
+import { formatUiStatusLines } from "./ui-status.js";
+import { packageUiDistDir } from "../protocol/paths.js";
+import type { UiStatus } from "../hub/ui-root.js";
 import { resolveJitiCli, spawnHub, type LauncherPlan } from "./launcher.js";
 import { MaskedInputComponent, runPasswdPrompt, type PasswdOutcome } from "./passwd-prompt.js";
 import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
@@ -114,6 +117,10 @@ export interface WebHubControl {
     /** Runs the full interactive TUI flow (username → masked password twice → `lan_req passwd`). */
     changePasswordInteractive(): Promise<PasswdOutcome>;
     restart(): Promise<RestartOutcome>;
+  };
+  /** vue-plan.md v2.1 §2.3（P5b）：Vue UI 状态行，同样直接读 `hub.json`（无需 admin socket）。 */
+  ui: {
+    statusLines(): string[];
   };
 }
 
@@ -398,6 +405,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     procStartTicks?: number;
     argv?: string[];
     lan?: LanStatus;
+    ui?: UiStatus;
   }
 
   const readHubJsonRecord = (): HubJsonSnapshot | undefined => {
@@ -410,10 +418,43 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         rec.argv = parsed.argv as string[];
       }
       if (parsed.lan !== undefined) rec.lan = parsed.lan as LanStatus;
+      // structural validation only — a malformed `ui` (old hub, corrupt write) is treated as
+      // "absent" (agent/ui-status.ts's `formatUiStatusLines` fallback path), never thrown.
+      if (isStructurallyUiStatus(parsed.ui)) rec.ui = parsed.ui as UiStatus;
       return rec;
     } catch {
       return undefined;
     }
+  };
+
+  /** §2.3's "结构校验失败当作缺失" — just enough shape-checking to safely narrow `unknown` to
+   * `UiStatus` without importing a schema validator; `formatUiStatusLines` only ever reads the
+   * fields checked here. */
+  function isStructurallyUiStatus(v: unknown): v is UiStatus {
+    if (v === null || typeof v !== "object") return false;
+    const o = v as Record<string, unknown>;
+    if (o.state === "unbuilt") return Array.isArray(o.candidates);
+    if (o.state === "ok") {
+      return (
+        typeof o.source === "string" &&
+        typeof o.version === "string" &&
+        typeof o.commit === "string" &&
+        typeof o.builtAt === "string" &&
+        Array.isArray(o.candidates)
+      );
+    }
+    return false;
+  }
+
+  /** §2.3 pi 侧提示：`hub.json` 的 `ui` 字段（hub 未运行/旧 hub 时缺失 ⇒ 回退本地
+   * `existsSync` 检查）。 */
+  const uiStatusLines = (): string[] => {
+    const rec = readHubJsonRecord();
+    const pkgRoot = pluginRoot();
+    const version = packageVersionSync();
+    const pkgDir = pkgRoot ?? packageUiDistDir();
+    const hasLocalDist = existsSync(join(packageUiDistDir(), "build-info.json"));
+    return formatUiStatusLines(rec?.ui, { pkgDir, version, hasLocalDist });
   };
 
   /** §9.3 LAN status lines, straight off `hub.json` — no admin RPC needed. */
@@ -530,6 +571,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       unlock: lanUnlock,
       changePasswordInteractive,
       restart,
+    },
+    ui: {
+      statusLines: uiStatusLines,
     },
   };
 }

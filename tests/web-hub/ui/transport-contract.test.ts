@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { createTokenTransport, TOKEN_KEY } from "../../../src/web-hub/ui/src/transport/token.js";
 import { createPasswordTransport } from "../../../src/web-hub/ui/src/transport/password.js";
-import { HISTORY_LIMIT_MAX } from "../../../src/web-hub/web/contract.js";
+import { HISTORY_LIMIT_MAX } from "../../../src/web-hub/ui/src/logic/contract.js";
 import type { HubTransport, PasswordTransport } from "../../../src/web-hub/ui/src/transport/types.js";
 
 /**

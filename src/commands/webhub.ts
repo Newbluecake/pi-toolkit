@@ -165,6 +165,8 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
   if (infoRes.ok && infoRes.value !== undefined) {
     notifyAll(ctx, formatInitialPasswordLines(infoRes.value, uiModeOf(ctx)), "warning");
   }
+  const uiLines = control.ui.statusLines();
+  notifyAll(ctx, uiLines, uiLines[0]?.startsWith("ui=ok") ? "info" : "warning");
 }
 
 async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {
@@ -183,6 +185,9 @@ async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, dep
   // best-effort: LAN section degrades silently when the admin socket isn't live (plan §9.3 "open").
   const infoRes = await control.lan.info();
   if (infoRes.ok) notifyAll(ctx, formatLanOpenLines(infoRes.value), "info");
+  // \u00a72.3\uff1aUI \u672a\u6784\u5efa\u65f6\u4ecd\u6253\u5f00\u672a\u6784\u5efa\u9875\uff08\u672c\u8eab\u5c31\u7ed9\u51fa\u6b65\u9aa4\uff09\uff0c\u4f46\u4ecd\u5728\u547d\u4ee4\u884c\u63d0\u9192\u4e00\u6b21\u3002
+  const uiLines = control.ui.statusLines();
+  if (uiLines.length > 0 && !uiLines[0]?.startsWith("ui=ok")) notifyAll(ctx, uiLines, "warning");
 }
 
 async function runPasswd(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {

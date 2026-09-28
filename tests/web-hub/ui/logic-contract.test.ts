@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import * as proto from "../../../src/web-hub/protocol/http-contract.js";
-import * as web from "../../../src/web-hub/web/contract.js";
-import { initialState, reduce } from "../../../src/web-hub/web/state.js";
-import { createClient } from "../../../src/web-hub/web/app.js";
+import * as web from "../../../src/web-hub/ui/src/logic/contract.js";
+import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
+import { createClient } from "../../../src/web-hub/ui/src/logic/token-client.js";
 
 describe("web/contract.js mirrors protocol/http-contract.ts", () => {
+  it("SSE_EVENTS is the same array reference as protocol/http-contract.ts's (P5b \u6253\u56de\u70b9 4: imported, not copied)", () => {
+    expect(web.SSE_EVENTS).toBe(proto.SSE_EVENTS);
+  });
+
+  it("API_ERRORS is the same array reference as protocol/http-contract.ts's (P5b \u6253\u56de\u70b9 4: imported, not copied)", () => {
+    expect(web.API_ERRORS).toBe(proto.API_ERRORS);
+  });
+
   it("SSE_EVENTS deep-equal (same names, same order)", () => {
     expect([...web.SSE_EVENTS]).toEqual([...proto.SSE_EVENTS]);
   });

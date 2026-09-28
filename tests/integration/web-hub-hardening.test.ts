@@ -38,6 +38,11 @@ function fakeFrontend(): FakeFrontend {
       listen: async () => ({ port: 0 }),
       close: async () => {},
       clientCount: () => 0,
+      ui: {
+        serve: async () => false,
+        refresh: async () => ({ state: "unbuilt" as const, candidates: [] }),
+        status: () => ({ state: "unbuilt" as const, candidates: [] }),
+      },
     };
   }) as FakeFrontend;
   f.deps = [];

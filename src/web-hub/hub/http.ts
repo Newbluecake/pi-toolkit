@@ -77,7 +77,8 @@ import type {
   RequestContext,
 } from "./ports.js";
 import { createSseHub, type SseClient, type SseEventName, type SseHub } from "./sse.js";
-import { serveIndex, serveStatic, webRoot } from "./static.js";
+import { createUiServer, type CreateUiServerOptions, type UiServer } from "./static.js";
+import { buildUiCandidates } from "./ui-root.js";
 
 export const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
@@ -747,7 +748,7 @@ export interface LanRuntime {
   lan: LanFrontendDeps;
   routes: RouteSet;
   lanSse: SseHub;
-  root: string;
+  ui: UiServer;
   now: () => number;
   version: () => string;
   log: HubLog;
@@ -1007,7 +1008,15 @@ async function handleLanRequestInner(
 
   if (path !== "/api" && !path.startsWith("/api/")) {
     if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
-    if (!(await serveStatic(rt.root, path, res, { authMode: "password" }))) throw new HttpError(404, "E_NOT_FOUND");
+    const acceptLanguage = req.headers["accept-language"];
+    if (
+      !(await rt.ui.serve(path, res, {
+        authMode: "password",
+        ...(typeof acceptLanguage === "string" ? { acceptLanguage } : {}),
+      }))
+    ) {
+      throw new HttpError(404, "E_NOT_FOUND");
+    }
     return;
   }
 
@@ -1198,7 +1207,14 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   const { config, registry, bus, history, log, now } = deps;
   const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
   const sse = createSseHub({ now });
-  const root = webRoot();
+  const ui: UiServer =
+    deps.ui ??
+    createUiServer({
+      candidates: buildUiCandidates({ home: config.home, hubVersion: config.pluginVersion }),
+      hubVersion: config.pluginVersion,
+      log,
+      ...(deps.onUiStatus === undefined ? {} : { onStatus: deps.onUiStatus }),
+    } satisfies CreateUiServerOptions);
   let server: Server | undefined;
   let port = 0;
   let unsubscribeBus: (() => void) | undefined;
@@ -1238,7 +1254,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       lan,
       routes: lanRoutes,
       lanSse,
-      root,
+      ui,
       now,
       version: () => deps.info().version,
       log,
@@ -1503,7 +1519,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       sendJson(res, 200, { ok: true, version: deps.info().version }, { "Cache-Control": "no-store" });
       return;
     }
-    if (!(await serveStatic(root, path, res, { authMode: "token" }))) throw new HttpError(404, "E_NOT_FOUND");
+    const acceptLanguage = req.headers["accept-language"];
+    if (
+      !(await ui.serve(path, res, {
+        authMode: "token",
+        ...(typeof acceptLanguage === "string" ? { acceptLanguage } : {}),
+      }))
+    ) {
+      throw new HttpError(404, "E_NOT_FOUND");
+    }
   }
 
   function onRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -1601,6 +1625,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     listen,
     close,
     clientCount: () => sse.count() + (lanSseRef === undefined ? 0 : lanSseRef.count()),
+    ui,
     ...(lanFacade === undefined ? {} : { lan: lanFacade }),
   };
 };

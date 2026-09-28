@@ -17,7 +17,7 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
-      "@logic/*": ["../web/*"],
+      "@logic/*": ["./src/logic/*"],
       "@protocol/*": ["../protocol/*"]
     }
   },

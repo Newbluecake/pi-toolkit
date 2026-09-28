@@ -46,6 +46,9 @@ function baseControl(over: Partial<WebHubControl> = {}): WebHubControl {
       changePasswordInteractive: async () => ({ ok: false, reason: "no-cap" }),
       restart: async () => ({ kind: "manual", message: "not wired in this fake" }),
     },
+    ui: {
+      statusLines: () => [],
+    },
     ...over,
   };
 }

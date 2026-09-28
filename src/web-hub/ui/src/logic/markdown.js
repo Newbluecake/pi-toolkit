@@ -1,10 +1,14 @@
 /**
- * Whitelisted markdown (plan §包 E): fenced code blocks, inline code,
- * bold/italic, lists, links (http/https only), headings, paragraphs. Anything
- * else stays literal text. `toDom` only uses createElement + text nodes, so raw
- * HTML in the source (`<script>`) always ends up as inert text.
+ * Whitelisted markdown parser (vue-plan.md v2.1 §3.1/§3.10, §5.2 — P5b cleanup): fenced code
+ * blocks, inline code, bold/italic, lists, links (http/https only), headings, paragraphs.
+ * Anything else stays literal text.
+ *
+ * DOM rendering used to live here too (`toDom`/`renderMarkdown`, built on the legacy
+ * `render/dom.js`'s `el()`); the Vue UI renders the same `MdNode[]` output with
+ * `MarkdownView.vue`/`MdBlock.vue`/`MdInline.vue` (§3.10) instead, so those two functions —
+ * and this file's only reason to depend on `dom.js` — are deleted here (P5b, §3.1's
+ * disposition table: "保留 isSafeHref/parseMarkdown；toDom/renderMarkdown P5b 删").
  */
-import { el } from "./dom.js";
 
 /**
  * @typedef {{ type: "text", text: string } | { type: "code", text: string }
@@ -198,68 +202,4 @@ function findClose(src, from, mark) {
     at = src.indexOf(mark, at + (glued ? 2 : 1));
   }
   return -1;
-}
-
-/**
- * @param {MdNode[]} nodes
- * @param {Document} doc
- * @returns {DocumentFragment}
- */
-export function toDom(nodes, doc) {
-  const frag = doc.createDocumentFragment();
-  for (const n of nodes) frag.appendChild(blockDom(n, doc));
-  return frag;
-}
-
-/** @param {MdNode} n @param {Document} doc @returns {Node} */
-function blockDom(n, doc) {
-  switch (n.type) {
-    case "code_block": {
-      const code = el(doc, "code", n.lang ? { class: `lang-${n.lang.replace(/[^A-Za-z0-9_+-]/g, "")}` } : null);
-      code.textContent = n.text;
-      return el(doc, "pre", { class: "md-pre" }, [code]);
-    }
-    case "heading":
-      return el(doc, `h${Math.min(6, Math.max(3, n.level + 2))}`, { class: "md-h" }, inlineDom(n.children, doc));
-    case "list":
-      return el(
-        doc,
-        n.ordered ? "ol" : "ul",
-        { class: "md-list" },
-        n.items.map((item) => el(doc, "li", null, inlineDom(item, doc))),
-      );
-    default:
-      return el(doc, "p", { class: "md-p" }, inlineDom(n.children, doc));
-  }
-}
-
-/** @param {Inline[]} nodes @param {Document} doc @returns {Node[]} */
-function inlineDom(nodes, doc) {
-  return nodes.map((n) => {
-    switch (n.type) {
-      case "code": {
-        const code = el(doc, "code", { class: "md-code" });
-        code.textContent = n.text;
-        return code;
-      }
-      case "strong":
-        return el(doc, "strong", null, inlineDom(n.children, doc));
-      case "em":
-        return el(doc, "em", null, inlineDom(n.children, doc));
-      case "link":
-        return el(
-          doc,
-          "a",
-          { href: n.href, rel: "noopener noreferrer nofollow", target: "_blank" },
-          inlineDom(n.children, doc),
-        );
-      default:
-        return doc.createTextNode(n.text);
-    }
-  });
-}
-
-/** Convenience: markdown string → fragment. @param {unknown} text @param {Document} doc */
-export function renderMarkdown(text, doc) {
-  return toDom(parseMarkdown(text), doc);
 }

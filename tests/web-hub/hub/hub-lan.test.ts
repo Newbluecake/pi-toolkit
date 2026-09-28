@@ -84,6 +84,11 @@ function fakeFrontendWithLan(opts: { port?: number } = {}): FakeFrontendWithLan 
         f.closed++;
       },
       clientCount: () => 0,
+      ui: {
+        serve: async () => false,
+        refresh: async () => ({ state: "unbuilt" as const, candidates: [] }),
+        status: () => ({ state: "unbuilt" as const, candidates: [] }),
+      },
       ...(lan === undefined ? {} : { lan }),
     };
   }) as FakeFrontendWithLan;

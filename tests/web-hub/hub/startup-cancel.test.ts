@@ -88,6 +88,11 @@ function fakeFrontend(opts: { hang?: "listen" } = {}): FrontendFactory & { close
         f.closed++;
       },
       clientCount: () => 0,
+      ui: {
+        serve: async () => false,
+        refresh: async () => ({ state: "unbuilt" as const, candidates: [] }),
+        status: () => ({ state: "unbuilt" as const, candidates: [] }),
+      },
     };
   }) as FrontendFactory & { closed: number };
   f.closed = 0;
@@ -258,6 +263,11 @@ describe("startup cancellation chain: results that resolve *after* the deadline 
         }),
       close: async () => {},
       clientCount: () => 0,
+      ui: {
+        serve: async () => false,
+        refresh: async () => ({ state: "unbuilt" as const, candidates: [] }),
+        status: () => ({ state: "unbuilt" as const, candidates: [] }),
+      },
     })) as FrontendFactory;
 
     const p = startHub(config({ home }), fe, { uid });

@@ -4,10 +4,9 @@
  * server that speaks the real hub↔browser wire protocol (`src/web-hub/protocol/`) closely enough
  * for local frontend development and the P2 visual-acceptance harness (`visual.ts`), without ever
  * touching a real pi agent process. It never imports `hub.ts`/`registry.ts`/`db.ts`/anything that
- * talks to a live agent — only the frozen protocol types, `hub/static.ts` (`serveStatic`/
- * `serveIndex`/`webRoot` — P5b later swaps this call site to `createUiServer`, this file stays a
- * thin caller either way), `hub/http.ts`'s exported `CSP` constant (so a dev/visual run is tested
- * against the exact same security header the real hub sends), `hub/sse.ts`'s reusable fan-out
+ * talks to a live agent — only the frozen protocol types, `hub/http.ts`'s exported `CSP`
+ * constant (so a dev/visual run is tested against the exact same security header the real hub
+ * sends), `hub/sse.ts`'s reusable fan-out
  * (`createSseHub`), `protocol/lan.ts`'s pure `parseOrigin`/`canonicalOrigin` (Origin-header
  * canonicalization, used to mirror the real LAN CSRF gate — `csrfOkLan` — for password mode) and
  * — for `--mode token` only — the real `hub/auth.ts` bearer-token exchange (the actual mechanism,
@@ -16,6 +15,19 @@
  * `pwh_lan`, distinct from token mode's loopback `pwh_sid`) with a deliberately simpler *fake*
  * credential check: a single fixed in-memory pair plus a `--login-error` escape hatch to force any
  * of the real error responses on demand (there is no KDF/db/rate-limit queue to model here).
+ *
+ * Static serving (P5b 打回点 2, vue-plan.md v2.1 §5.2): whenever `--root`/`opts.root` (default
+ * `DEFAULT_UI_DIST`, i.e. `dist/web-hub-ui/`) carries a `build-info.json` manifest, this now
+ * serves through the exact same production module the real hub uses —
+ * `hub/static.ts`'s `createUiServer` (manifest-verified, `expect.version` pinned to this repo's
+ * own `package.json` version via `readPackageVersion()` since a locally built `dist/web-hub-ui/`
+ * is always built at the checked-out version) — so a `dev:hub`/`visual:web` run exercises the
+ * exact same URL mapping, cache headers, and CSP posture production does, not a parallel
+ * reimplementation that could silently drift. `devServeStatic`/`devServeIndex` below (a small,
+ * unverified raw-directory static server, same containment/extension-whitelist checks as the
+ * legacy `serveStatic` this replaces) is kept ONLY as the fallback for a `--root` with no manifest
+ * at all — almost always a hand-written test fixture `index.html` `dev-hub.test.ts` points
+ * `--root` at directly, which the production trust model was never meant to accept.
  *
  * Served data comes from `tests/fixtures/web-hub-ui/<scenario>.json` (`DevHubFixture`, validated
  * at load time by `validateFixture`) plus an optional `historyGenerate` directive (used by the
@@ -26,7 +38,7 @@
  * startup error (1); otherwise it runs until killed (`SIGINT`/`SIGTERM` close the server first).
  */
 import { randomBytes } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -35,14 +47,116 @@ import { createAuth, readCookie, SESSION_COOKIE } from "../../src/web-hub/hub/au
 import { CSP } from "../../src/web-hub/hub/http.js";
 import { formatLanCookie, LAN_SESSION_COOKIE, readLanCookie } from "../../src/web-hub/hub/lan-auth.js";
 import { createSseHub, type SseClient, type SseEventName, type SseHub } from "../../src/web-hub/hub/sse.js";
-import { serveIndex, serveStatic } from "../../src/web-hub/hub/static.js";
+import { createUiServer, type UiServer } from "../../src/web-hub/hub/static.js";
 import { canonicalOrigin, parseOrigin } from "../../src/web-hub/protocol/lan.js";
 import type { AgentCard, HistoryPayload } from "../../src/web-hub/protocol/http-contract.js";
 import type { FleetRowWire, WireEntry, WireMessage } from "../../src/web-hub/protocol/messages.js";
 import { PROTO } from "../../src/web-hub/protocol/version.js";
+import { readPackageVersion } from "../../src/web-hub/ui/build-info-plugin.js";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { extname, resolve as resolvePath, sep } from "node:path";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 export const DEFAULT_UI_DIST = resolve(REPO_ROOT, "dist/web-hub-ui");
+
+const DEV_STATIC_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+};
+const DEV_STATIC_MAX_BYTES = 8 * 1024 * 1024;
+const DEV_AUTH_MODE_PLACEHOLDER = 'data-auth-mode="__AUTH_MODE__"';
+
+function devWithin(root: string, target: string): boolean {
+  const base = root.endsWith(sep) ? root : root + sep;
+  return target.startsWith(base);
+}
+
+/** Decode + validate a URL path into a root-relative path, or undefined if unsafe (same rules
+ * the legacy `hub/static.ts` used to apply — kept here since P5b deleted that module's copy, see
+ * the module doc comment). */
+function devSafeRelativePath(urlPath: string): string | undefined {
+  const raw = urlPath.split("?")[0]!.split("#")[0]!;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return undefined;
+  }
+  if (!decoded.startsWith("/")) return undefined;
+  if (decoded.includes("\0") || decoded.includes("\\") || decoded.includes("..")) return undefined;
+  const rel = decoded === "/" ? "index.html" : decoded.slice(1);
+  const segments = rel.split("/");
+  if (segments.some((s) => s.length === 0 || s.startsWith("."))) return undefined;
+  if (!(extname(rel).toLowerCase() in DEV_STATIC_CONTENT_TYPES)) return undefined;
+  return rel;
+}
+
+async function devTryServe(root: string, rel: string, res: ServerResponse): Promise<boolean> {
+  const absRoot = resolvePath(root);
+  const target = resolvePath(absRoot, rel);
+  if (!devWithin(absRoot, target)) return false;
+  let data: Buffer;
+  try {
+    const [realRoot, realTarget] = await Promise.all([realpath(absRoot), realpath(target)]);
+    if (!devWithin(realRoot, realTarget)) return false;
+    const st = await stat(realTarget);
+    if (!st.isFile() || st.size > DEV_STATIC_MAX_BYTES) return false;
+    data = await readFile(realTarget);
+  } catch {
+    return false;
+  }
+  if (res.headersSent || res.destroyed) return true;
+  res.writeHead(200, {
+    "Content-Type": DEV_STATIC_CONTENT_TYPES[extname(rel).toLowerCase()]!,
+    "Content-Length": data.length,
+    "Cache-Control": "no-cache",
+  });
+  res.end(data);
+  return true;
+}
+
+async function devServeIndex(root: string, res: ServerResponse, authMode: "token" | "password"): Promise<boolean> {
+  const absRoot = resolvePath(root);
+  const target = resolvePath(absRoot, "index.html");
+  if (!devWithin(absRoot, target)) return false;
+  let text: string;
+  try {
+    const [realRoot, realTarget] = await Promise.all([realpath(absRoot), realpath(target)]);
+    if (!devWithin(realRoot, realTarget)) return false;
+    const st = await stat(realTarget);
+    if (!st.isFile() || st.size > DEV_STATIC_MAX_BYTES) return false;
+    text = await readFile(realTarget, "utf8");
+  } catch {
+    return false;
+  }
+  if (res.headersSent || res.destroyed) return true;
+  const body = text.includes(DEV_AUTH_MODE_PLACEHOLDER)
+    ? text.replace(DEV_AUTH_MODE_PLACEHOLDER, `data-auth-mode="${authMode}"`)
+    : text;
+  const data = Buffer.from(body, "utf8");
+  res.writeHead(200, {
+    "Content-Type": DEV_STATIC_CONTENT_TYPES[".html"]!,
+    "Content-Length": data.length,
+    "Cache-Control": "no-cache",
+  });
+  res.end(data);
+  return true;
+}
+
+async function devServeStatic(
+  root: string,
+  urlPath: string,
+  res: ServerResponse,
+  opts?: { authMode?: "token" | "password" },
+): Promise<boolean> {
+  const rel = devSafeRelativePath(urlPath);
+  if (rel === undefined) return false;
+  if (rel === "index.html" && opts?.authMode !== undefined) return devServeIndex(root, res, opts.authMode);
+  return devTryServe(root, rel, res);
+}
 export const FIXTURES_DIR = resolve(REPO_ROOT, "tests/fixtures/web-hub-ui");
 
 // ---------------------------------------------------------------------------
@@ -485,6 +599,23 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
   const root = opts.root ?? DEFAULT_UI_DIST;
   const fixture = await loadFixture(opts.scenario, opts.fixturesDir ?? FIXTURES_DIR);
 
+  // See module doc comment above: a manifest present -> route through the real production
+  // static server instead of the raw fallback.
+  const hasManifest = existsSync(join(root, "build-info.json"));
+  const uiServer: UiServer | undefined = hasManifest
+    ? createUiServer({
+        candidates: [{ ok: true, spec: { kind: "package", dir: root } }],
+        hubVersion: await readPackageVersion(),
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+      })
+    : undefined;
+  if (uiServer !== undefined) {
+    const status = await uiServer.refresh();
+    log(`dev-hub: static serving via createUiServer (production path), root=${root}, ui status=${status.state}`);
+  } else {
+    log(`dev-hub: static serving via devServeStatic (raw fallback, no build-info.json manifest at ${root})`);
+  }
+
   const state: DevAgentState = { agents: new Map(fixture.agents.map((a) => [a.agentKey, a])) };
   const sse = createSseHub({ now: () => Date.now(), pingMs: 15_000 });
   const pending = new Map<string, Map<string, PendingSub>>(); // clientId -> agentKey -> PendingSub
@@ -713,7 +844,15 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
         sendError(res, 404, "E_NOT_FOUND");
         return;
       }
-      const served = await serveStatic(root, path, res, { authMode: opts.mode });
+      const served =
+        uiServer !== undefined
+          ? await uiServer.serve(path, res, {
+              authMode: opts.mode,
+              ...(typeof req.headers["accept-language"] === "string"
+                ? { acceptLanguage: req.headers["accept-language"] }
+                : {}),
+            })
+          : await devServeStatic(root, path, res, { authMode: opts.mode });
       if (!served) sendError(res, 404, "E_NOT_FOUND");
       return;
     }

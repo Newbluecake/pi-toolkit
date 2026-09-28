@@ -31,6 +31,11 @@ function fakeFrontend(opts: { port?: number; failListen?: boolean } = {}): FakeF
         f.closed++;
       },
       clientCount: () => f.clients,
+      ui: {
+        serve: async () => false,
+        refresh: async () => ({ state: "unbuilt", candidates: [] }),
+        status: () => ({ state: "unbuilt", candidates: [] }),
+      },
     };
   }) as FakeFrontend;
   f.deps = [];

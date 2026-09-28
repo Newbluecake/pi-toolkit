@@ -22,6 +22,8 @@ import type { AgentId, FleetRowWire, SessionInfo, StatusInfo, WireEntry, WireEve
 import type { HubPaths } from "../protocol/paths.js";
 import type { PROTO } from "../protocol/version.js";
 import type { Scope } from "./lifecycle.js";
+import type { UiServer } from "./static.js";
+import type { UiStatus } from "./ui-root.js";
 
 export type { LanOffReason, LanStatus } from "../protocol/lan.js";
 
@@ -399,6 +401,15 @@ export interface FrontendDeps {
   info: () => HubInfo;
   now: () => number;
   lan?: LanFrontendDeps;
+  /** vue-plan.md v2.1 §2.1/§5.2（P5b）：Vue UI 服务；省略时 `createHttpFrontend` 自建
+   * （`config.home`/`config.pluginVersion` 构造 `buildUiCandidates` + `createUiServer`），可注入
+   * 以便测试 helper 与 `hub.ts` 共享同一实例、把其 `status()` 灌进 `hub.json` 的 `ui` 字段。 */
+  ui?: UiServer;
+  /** vue-plan.md v2.1 §2.1（P5b）：仅在 `deps.ui` 省略时生效——`createHttpFrontend` 自建默认 UI
+   * 服务时把这个回调接到 `createUiServer({ onStatus })`，让 `hub.ts` 在每次实际状态变化（含首次
+   * resolve）时收到通知去 `hubJson.patchUi(status)`，与 `LanFrontendDeps.onStatus` 对 `LanStatus`
+   * 的做法完全对称。 */
+  onUiStatus?: (status: UiStatus) => void;
 }
 
 export interface HttpFrontend {
@@ -406,6 +417,10 @@ export interface HttpFrontend {
   close(): Promise<void>; // 变更语义：同时关闭 lan（如有），先 lan 再 loopback
   clientCount(): number; // 变更语义：两个 listener 的 SSE 之和（idle 判定不变）
   lan?: LanFacade; // 仅当 deps.lan !== undefined
+  /** vue-plan.md v2.1 §2.1（P5b）：最终生效的 Vue UI 服务（`deps.ui` 或本工厂自建的默认值）——
+   * `hub.ts` 读它的 `status()` 灌进 `hub.json` 的 `ui` 字段，并在首次写 hub.json 前调一次
+   * `refresh()`。 */
+  ui: UiServer;
 }
 
 export type FrontendFactory = (deps: FrontendDeps) => HttpFrontend;

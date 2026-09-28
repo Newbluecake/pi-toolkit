@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 /**
  * Static CSP/XSS guard over the whole Vue UI (vue-plan.md v2.1 §4.3, §5.2 — P0, extended
  * without modification by every later package that adds files under these globs). Supersedes
- * `tests/web-hub/web/no-innerhtml.test.ts` for `src/web-hub/ui/**` (that test keeps covering
- * the legacy `src/web-hub/web/**` frontend until P5b deletes it).
+ * the legacy `tests/web-hub/web/no-innerhtml.test.ts` (deleted in P5b along with the rest of
+ * `src/web-hub/web/**` — the pure-logic modules that test used to also cover moved under
+ * `src/web-hub/ui/src/logic/**`, which this file's UI_DIR glob already includes, so nothing
+ * in that coverage was lost).
  */
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const UI_DIR = "src/web-hub/ui";

@@ -85,13 +85,18 @@ describe("web-hub boundary", () => {
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
 
-  it("agent/** does not import ../hub/** (ports.js type-only imports excepted)", () => {
+  it("agent/** does not import ../hub/** (ports.js / ui-root.js type-only imports excepted)", () => {
     const agentFiles = globSync("src/web-hub/agent/**/*.ts", { cwd: ROOT }).map((f) => resolve(ROOT, f));
     const offenders: string[] = [];
+    // vue-plan.md v2.1 §2.3 (P5b): `hub.json`'s `ui` field is a `UiStatus` (`hub/ui-root.js`) —
+    // the agent side (`/webhub status`) reads it back and needs the same type. `ports.js` stays
+    // the only allowed *value* boundary (agent never imports hub logic); this only widens the
+    // type-only exception the same way `ports.js` already had one.
+    const TYPE_ONLY_ALLOWED = new Set(["../hub/ports.js", "../hub/ui-root.js"]);
     for (const file of agentFiles) {
       for (const { spec, typeOnly } of scanImports(file)) {
         const isHubImport = spec.startsWith("../hub/");
-        const allowed = isHubImport && spec === "../hub/ports.js" && typeOnly;
+        const allowed = isHubImport && TYPE_ONLY_ALLOWED.has(spec) && typeOnly;
         if (isHubImport && !allowed) offenders.push(`${relative(ROOT, file)} → "${spec}" (typeOnly=${typeOnly})`);
       }
     }

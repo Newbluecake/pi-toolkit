@@ -8,7 +8,7 @@
  * (other status codes, other paths, a 401 elsewhere) must still fail the check.
  */
 import { describe, expect, it } from "vitest";
-import { API } from "../../../src/web-hub/web/contract.js";
+import { API } from "../../../src/web-hub/ui/src/logic/contract.js";
 import {
   isExpectedPreLoginAuthProbe,
   isExpectedPreLoginConsole401,

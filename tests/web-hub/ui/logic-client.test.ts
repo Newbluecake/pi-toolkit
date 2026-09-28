@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createClient, readHashToken, TOKEN_KEY, REQUEST_TIMEOUT_MS } from "../../../src/web-hub/web/token-client.js";
-import { SILENCE_MS } from "../../../src/web-hub/web/contract.js";
+import {
+  createClient,
+  readHashToken,
+  TOKEN_KEY,
+  REQUEST_TIMEOUT_MS,
+} from "../../../src/web-hub/ui/src/logic/token-client.js";
+import { SILENCE_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 
 /** Deterministic timer queue (no real timers, nothing can hang). */
 function clock() {
@@ -121,6 +126,18 @@ describe("readHashToken", () => {
 });
 
 describe("createClient", () => {
+  // P5b 打回点 4 equivalent (app-gate.test.ts covers `App.vue`'s auth-mode gate, which is
+  // out of P5b's editable surface — `ui/src/logic/**` only — so the network-inert half of that
+  // guarantee is asserted here instead, at the transport layer `App.vue`'s gate is built on: an
+  // invalid/unknown auth mode in `App.vue` means no transport is ever constructed at all, and this
+  // proves the other half — even bare construction (no `start()`) never fires a request — so
+  // there is no code path, gated or not, that can leak a request before an explicit `start()`.
+  it("construction alone (no start()) never calls fetch or opens an EventSource", () => {
+    const e = env();
+    expect(e.calls).toHaveLength(0);
+    expect(FakeES.all).toHaveLength(0);
+  });
+
   it("hash token → POST /api/login with X-PWH:1 → stored → hash cleared → one EventSource", async () => {
     const e = env({ hash: "#t=tok123" });
     await e.client.start();

@@ -61,6 +61,29 @@ describe("App.vue auth-mode gate (vue-plan.md v2.1 §1.1, §5.2)", () => {
     wrapper.unmount();
   });
 
+  it.each([undefined, "bogus"])(
+    "data-auth-mode %s: issues zero fetch requests and opens zero EventSource connections",
+    async (mode) => {
+      setAuthMode(mode);
+      const fetchSpy = vi.fn(() => Promise.reject(new Error("fetch must not be called")));
+      const esCtor = vi.fn();
+      class SpyEventSource extends FakeEventSource {
+        constructor(url: string) {
+          super(url);
+          esCtor(url);
+        }
+      }
+      vi.stubGlobal("fetch", fetchSpy);
+      vi.stubGlobal("EventSource", SpyEventSource);
+      const wrapper = mount(App);
+      await flush();
+      await flush();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(esCtor).not.toHaveBeenCalled();
+      wrapper.unmount();
+    },
+  );
+
   it("missing data-auth-mode renders the auth-mode-unknown gate (a Reload action, no sign-in form)", async () => {
     setAuthMode(undefined);
     const wrapper = mount(App);

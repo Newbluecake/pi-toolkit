@@ -204,11 +204,20 @@ export async function startHub(
       log,
       info: () => info,
       now,
+      onUiStatus: (s) => hubJson.patchUi(s),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
 
     httpPort = (await withSignal(fe.listen({ signal: startup.signal }), startup.signal)).port; // ⑥
+
+    // vue-plan.md v2.1 §2.1（P5b）："启动：hub 在写 hub.json 前 await ui.refresh()（≤3s，超时按未构建
+    // 上报、后台继续）" — `refresh()` itself is single-flight and bounded by `UI_ROOT_RESOLVE_TIMEOUT_MS`
+    // (ui-root.ts), so this can never itself blow the hub's own `HUB_START_DEADLINE_MS` budget. This
+    // first `refresh()` call is also what fires `onUiStatus` for the initial status (wired above), so
+    // `hubJson`'s `pendingUi` picks it up before `write()` below even runs (same queue-before-first-
+    // write race `lan`'s `onStatus` already relies on, §2.1's "诊断" bullet).
+    const initialUi = await withSignal(fe.ui.refresh(), startup.signal);
 
     const initialLan: LanStatus | undefined =
       deps.lanConfigError !== undefined
@@ -233,6 +242,7 @@ export async function startHub(
       startedAt: info.startedAt,
       ...(await withSignal(identityFields(), startup.signal)),
       ...(initialLan === undefined ? {} : { lan: initialLan }),
+      ui: initialUi,
     }); // ⑦
 
     clearTimeout(startTimer); // startup complete; further cancellation is close()'s job

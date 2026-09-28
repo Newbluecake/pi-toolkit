@@ -1,38 +1,63 @@
 /**
- * `serveIndex`/`serveStatic`'s `authMode` substitution (plan §1.4.5, §7 —
- * LC's `hub/static.ts` addition). Uses a temp static root, not the real
- * `src/web-hub/web/` tree (LF, S1-W2, has not injected the
- * `data-auth-mode="__AUTH_MODE__"` placeholder into the shipped
- * `index.html` yet — this pins the substitution mechanics on their own).
+ * `createUiServer`'s `authMode` substitution through the LAN listener's own auth mode
+ * (vue-plan.md v2.1 §2.1/§2.4, §7 — P5b). Pre-P5b this pinned `serveIndex`/`serveStatic`
+ * directly; those functions are gone (replaced by `createUiServer`, see `static.test.ts` for the
+ * unit-level coverage of substitution/caching/cache-headers) — this file now only proves the
+ * mechanics through a real `createUiServer` instance, independent of any HTTP server.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { serveIndex, serveStatic } from "../../../src/web-hub/hub/static.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { createUiServer } from "../../../src/web-hub/hub/static.js";
+import type { UiCandidatePlan } from "../../../src/web-hub/hub/ui-root.js";
 
-let dir: string;
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "pwh-static-authmode-"));
-});
+let base: string;
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  if (base !== undefined) rmSync(base, { recursive: true, force: true });
 });
+
+function rootDir(): string {
+  base = realpathSync(mkdtempSync(join(tmpdir(), "pwh-lan-static-")));
+  const parent = join(base, "dist");
+  mkdirSync(parent, { mode: 0o755 });
+  return join(parent, "web-hub-ui");
+}
+
+function sha256(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+function writeRoot(dir: string, indexHtml: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  const info = {
+    v: 1,
+    version: "1.2.3",
+    proto: { major: 1 },
+    builtAt: "t1",
+    commit: "abcdefabcdef",
+    files: [{ path: "index.html", bytes: Buffer.byteLength(indexHtml), sha256: sha256(Buffer.from(indexHtml)) }],
+  };
+  writeFileSync(join(dir, "index.html"), indexHtml, { mode: 0o644 });
+  writeFileSync(join(dir, "build-info.json"), JSON.stringify(info), { mode: 0o644 });
+}
+
+function candidates(dir: string): UiCandidatePlan[] {
+  return [{ ok: true, spec: { kind: "package", dir } }];
+}
 
 async function withResponse<T>(
-  fn: (res: import("node:http").ServerResponse) => Promise<T> | T,
-): Promise<{ status: number; body: string; result: T }> {
-  let result!: T;
+  fn: (res: import("node:http").ServerResponse) => Promise<T>,
+): Promise<{ status: number; body: string }> {
   const server: Server = createServer((_req, res) => {
-    void (async () => {
-      result = await fn(res);
-    })();
+    void fn(res);
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const addr = server.address();
   const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-  const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+  const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
     const req = httpRequest({ host: "127.0.0.1", port, path: "/" }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
@@ -42,47 +67,59 @@ async function withResponse<T>(
     req.end();
   });
   await new Promise<void>((r) => server.close(() => r()));
-  return { status, body, result };
+  return result;
 }
 
-describe("serveIndex (plan §1.4.5)", () => {
-  it("replaces the single data-auth-mode placeholder with the literal mode", async () => {
-    writeFileSync(join(dir, "index.html"), '<!doctype html><html data-auth-mode="__AUTH_MODE__"><body></body></html>');
-    const { status, body } = await withResponse((res) => serveIndex(dir, res, "password"));
+describe("createUiServer authMode substitution (plan §2.1/§2.4)", () => {
+  it("replaces the single data-auth-mode placeholder with the literal mode (password)", async () => {
+    const dir = rootDir();
+    writeRoot(dir, '<!doctype html><html data-auth-mode="__AUTH_MODE__"><body></body></html>');
+    const ui = createUiServer({
+      candidates: candidates(dir),
+      hubVersion: "1.2.3",
+      log: { info() {}, warn() {}, error() {} },
+    });
+    const { status, body } = await withResponse((res) => ui.serve("/", res, { authMode: "password" }));
     expect(status).toBe(200);
     expect(body).toContain('data-auth-mode="password"');
     expect(body).not.toContain("__AUTH_MODE__");
   });
 
   it("token mode substitutes the same placeholder with 'token'", async () => {
-    writeFileSync(join(dir, "index.html"), '<html data-auth-mode="__AUTH_MODE__"></html>');
-    const { body } = await withResponse((res) => serveIndex(dir, res, "token"));
+    const dir = rootDir();
+    writeRoot(dir, '<html data-auth-mode="__AUTH_MODE__"></html>');
+    const ui = createUiServer({
+      candidates: candidates(dir),
+      hubVersion: "1.2.3",
+      log: { info() {}, warn() {}, error() {} },
+    });
+    const { body } = await withResponse((res) => ui.serve("/", res, { authMode: "token" }));
     expect(body).toContain('data-auth-mode="token"');
   });
 
   it("a template without the placeholder is served byte-unchanged (no error, no partial match)", async () => {
     const original = "<!doctype html><title>hub</title>";
-    writeFileSync(join(dir, "index.html"), original);
-    const { body } = await withResponse((res) => serveIndex(dir, res, "password"));
+    const dir = rootDir();
+    writeRoot(dir, original);
+    const ui = createUiServer({
+      candidates: candidates(dir),
+      hubVersion: "1.2.3",
+      log: { info() {}, warn() {}, error() {} },
+    });
+    const { body } = await withResponse((res) => ui.serve("/", res, { authMode: "password" }));
     expect(body).toBe(original);
   });
 
-  it("serveStatic('/', ...) with opts.authMode routes through serveIndex", async () => {
-    writeFileSync(join(dir, "index.html"), '<html data-auth-mode="__AUTH_MODE__"></html>');
-    const { body } = await withResponse((res) => serveStatic(dir, "/", res, { authMode: "password" }));
-    expect(body).toContain('data-auth-mode="password"');
-  });
-
-  it("serveStatic('/', ...) without opts (P1 call shape) does not substitute anything", async () => {
-    writeFileSync(join(dir, "index.html"), '<html data-auth-mode="__AUTH_MODE__"></html>');
-    const { body } = await withResponse((res) => serveStatic(dir, "/", res));
-    expect(body).toContain("__AUTH_MODE__");
-  });
-
   it("Content-Length reflects the post-substitution byte length", async () => {
-    writeFileSync(join(dir, "index.html"), '<html data-auth-mode="__AUTH_MODE__"></html>');
+    const dir = rootDir();
+    writeRoot(dir, '<html data-auth-mode="__AUTH_MODE__"></html>');
+    const ui = createUiServer({
+      candidates: candidates(dir),
+      hubVersion: "1.2.3",
+      log: { info() {}, warn() {}, error() {} },
+    });
     const server: Server = createServer((_req, res) => {
-      void serveIndex(dir, res, "password");
+      void ui.serve("/", res, { authMode: "password" });
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     const addr = server.address();

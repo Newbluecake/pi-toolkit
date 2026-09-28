@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { initialState, messageKey, needsSubscribe, reduce, selectedAgent } from "../../../src/web-hub/web/state.js";
+import {
+  initialState,
+  messageKey,
+  needsSubscribe,
+  reduce,
+  selectedAgent,
+} from "../../../src/web-hub/ui/src/logic/state.js";
 
 type Msg = { event: string; data: any; id?: number };
 const run = (msgs: Msg[], s = initialState()) => msgs.reduce((acc, m) => reduce(acc, m), s);

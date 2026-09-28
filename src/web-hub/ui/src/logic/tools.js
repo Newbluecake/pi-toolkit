@@ -1,10 +1,15 @@
 /**
- * Tool cards (plan §包 E): a collapsed `<details>` per tool call showing
- * name + one-line args summary, expanding to args / partial output / result.
- * Truncated payloads (agent-side 64 KiB cap) carry a visible marker.
+ * Tool call view model (vue-plan.md v2.1 §3.1, §5.2 — P5b cleanup): a `ToolView` combining a
+ * transcript `toolCall` content block, an optional `toolResult` message, and optional live
+ * `tool_execution_*` state into one running/done/error/pending shape.
+ *
+ * DOM rendering (`renderToolCard`/`pre`, built on the legacy `render/dom.js`'s `el()`) is
+ * deleted here (P5b, §3.1's disposition table: "保留 toolView/summarizeArgs/safeJson；
+ * renderToolCard/pre P5b 删") — the Vue UI renders the same `ToolView` with `ToolCard.vue`
+ * (§3.2/§5.2 P4).
  */
-import { clip, el } from "./dom.js";
-import { resultText } from "../state.js";
+import { clip } from "../format";
+import { resultText } from "./state.js";
 
 /**
  * @typedef {{ toolCallId: string, toolName: string, args: unknown,
@@ -65,34 +70,4 @@ export function toolView(call, resultMsg, live) {
   }
   if (!view.truncated && /\[truncated\b/i.test(view.result ?? "")) view.truncated = true;
   return view;
-}
-
-const STATE_MARK = { running: "▸", done: "✓", error: "✗", pending: "·" };
-
-/**
- * @param {Document} doc
- * @param {ToolView} v
- * @returns {HTMLElement}
- */
-export function renderToolCard(doc, v) {
-  const summary = el(doc, "summary", { class: "tool-sum" }, [
-    el(doc, "span", { class: `tool-mark tool-${v.state}` }, STATE_MARK[v.state]),
-    el(doc, "span", { class: "tool-name" }, v.toolName),
-    el(doc, "span", { class: "tool-args" }, summarizeArgs(v.args)),
-    v.truncated ? el(doc, "span", { class: "badge badge-trunc", title: "payload truncated" }, "truncated") : null,
-  ]);
-  const body = el(doc, "div", { class: "tool-body" });
-  if (v.args !== undefined)
-    body.appendChild(pre(doc, "tool-in", typeof v.args === "string" ? v.args : safeJson(v.args, true)));
-  if (v.partial !== undefined && v.partial !== "") body.appendChild(pre(doc, "tool-partial", v.partial));
-  if (v.result !== undefined)
-    body.appendChild(pre(doc, v.state === "error" ? "tool-out tool-err" : "tool-out", v.result));
-  return el(doc, "details", { class: `tool tool-${v.state}`, "data-key": v.toolCallId }, [summary, body]);
-}
-
-/** @param {Document} doc @param {string} cls @param {string} text */
-function pre(doc, cls, text) {
-  const node = el(doc, "pre", { class: cls });
-  node.textContent = text;
-  return node;
 }
