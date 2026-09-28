@@ -78,6 +78,10 @@ export interface CommandHandler {
    * tick) so a run that finished while its steer hung forever doesn't wedge that runId's lock.
    */
   releaseSettledSteerLocks(): void;
+  /** §4.6/D22: the builtin bridge's async completions (`/compact`, `/model`) land after
+   * `handleCommand`'s immediate settle — route them through the same late path as a late steer
+   * result (ledger upgrade `{late:true}` + `cmd_late` frame), never a bare `conn.send`. */
+  handleBridgeLate(frame: CmdFrame, result: LedgerResult): void;
   /** §4.4 row 4: session_start/session_shutdown boundary. */
   onSessionBoundary(): void;
   dispose(): void;
@@ -535,6 +539,9 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       const query = deps.query?.();
       if (query === undefined || pendingSteerByRun.size === 0) return;
       for (const runId of [...pendingSteerByRun.keys()]) releaseStaleRunLock(runId, query);
+    },
+    handleBridgeLate(frame, result) {
+      settleLate(frame, result);
     },
     onSessionBoundary() {
       const cleared = deps.queueMirror.clearAll();

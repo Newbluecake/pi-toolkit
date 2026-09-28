@@ -78,10 +78,9 @@ describe("listSlashCommands — commands slot (§3.2 CommandsFrame, ≤400 items
     expect(compact).toMatchObject({ kind: "builtin", policy: "allow", policyBusy: "confirm" });
     const quit = items.find((i) => i.name === "quit");
     expect(quit).toMatchObject({ kind: "builtin", policy: "deny" });
-    // 24 BUILTIN_SLASH_COMMANDS names + the defensive literal "exit" = 25, minus the 7 bridge
-    // names the bridge dispatches directly = 18 deny names + 7 bridge-dispatched names = 25...
-    // (7 bridge + 19 deny, since "debug" is also denied) = 26 total builtin-kind entries.
-    expect(items.filter((i) => i.kind === "builtin").length).toBe(26);
+    // 7 bridge + 21 deny names (19 + pi's two hidden easter-egg built-ins) = 28 total
+    // builtin-kind entries.
+    expect(items.filter((i) => i.kind === "builtin").length).toBe(28);
   });
   it("deduplicates by name (a pi.getCommands() entry wins over the builtin table)", () => {
     const items = listSlashCommands(port([{ name: "session", source: "extension" }]));
@@ -108,6 +107,6 @@ describe("listSlashCommands — commands slot (§3.2 CommandsFrame, ≤400 items
   it("degrades to just the builtin table when pi is undefined", () => {
     const items = listSlashCommands(undefined);
     expect(items.every((i) => i.kind === "builtin")).toBe(true);
-    expect(items.length).toBe(26);
+    expect(items.length).toBe(28);
   });
 });

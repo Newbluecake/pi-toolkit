@@ -55,6 +55,11 @@ export const BUILTIN_DENY_NAMES: ReadonlySet<string> = new Set([
   "quit",
   "debug",
   "exit",
+  // pi 0.87.1's two hidden easter-egg built-ins (interactive-mode.js:2566-2573) — denying them
+  // explicitly keeps the classification table in sync with pi's real TUI command set instead of
+  // relying on the unknown-command fallback (which also denies, but invisibly).
+  "arminsayshi",
+  "dementedelves",
 ]);
 
 function builtinPolicy(name: string, args: string): PolicyDecision | undefined {

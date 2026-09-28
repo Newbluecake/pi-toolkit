@@ -59,7 +59,8 @@ import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
 import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
-import { createBuiltinBridge } from "./builtin-bridge.js";
+import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
+import { listSlashCommands } from "./slash.js";
 import { createDialogBridge } from "./dialogs.js";
 import { createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
@@ -218,7 +219,24 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const queueMirror = createQueueMirror();
   const compactionState = createCompactionState(pi);
   const originEntry = createOriginEntry(pi);
-  const builtinBridge = createBuiltinBridge();
+  // One capture instance for the whole control (`WebHubControl.capture`, the builtin bridge's
+  // §4.9 echo and the commands slot's `output` badge) — the return value used to build a second,
+  // disconnected one (todo #32 C11 wiring).
+  const commandCapture = createCommandCapture();
+  // Late-bound: the bridge is constructed before the command handler (which it needs for the
+  // §4.6/D22 async-completion channel), so sendLate goes through this ref. Before the handler
+  // exists (or after a settle raced ahead) the late frame is simply dropped — bounded, and the
+  // ledger already carries `completion:"unknown"` from the immediate reply.
+  const bridgeLate: { current?: BuiltinBridgeDeps["sendLate"] } = {};
+  const builtinBridge = createBuiltinBridge({
+    pi,
+    getCtx: () => ctx,
+    getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    now,
+    capture: () => commandCapture,
+    overrides: () => deps.settings.webCommandPolicy,
+    sendLate: (frame, result) => bridgeLate.current?.(frame, result),
+  });
   registerOriginEntryRenderer(pi);
 
   const readFleet = (): readonly RunSnapshot[] => {
@@ -312,6 +330,22 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     ...(deps.query !== undefined ? { query: deps.query } : {}),
   });
+  bridgeLate.current = (frame, result) => commandHandler.handleBridgeLate(frame, result);
+
+  /** §3.2 commands slot: the web's slash palette (policy + §4.9 output badge), refreshed on
+   * (re)connect and `resources_discover` (extensions loaded mid-session change the list). */
+  const publishCommands = (): void => {
+    const c = conn;
+    if (c === undefined) return;
+    c.setSlot("commands", {
+      t: "commands",
+      epoch: MODULE_INSTANCE,
+      items: listSlashCommands(pi, {
+        ...(deps.settings.webCommandPolicy !== undefined ? { overrides: deps.settings.webCommandPolicy } : {}),
+        output: (name) => (commandCapture.owns?.(name) === true ? "captured" : undefined),
+      }),
+    });
+  };
   const remoteAskUserEnabled = (): boolean =>
     settings.control !== false && settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
   const dialogBridge = createDialogBridge({
@@ -456,6 +490,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // The dialogs slot exists (D14-gated, only actually sent once the hub advertises dialog.v1) so
     // C2 only replaces `dialogBridge.frame()`'s content, not this call.
     c.setSlot("dialogs", dialogBridge.frame());
+    publishCommands();
     publishStatus();
     publishCtl();
     onTick();
@@ -518,6 +553,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const detachReason =
       reason === "reload" || reason === "new" || reason === "resume" || reason === "fork" ? reason : "quit";
     conn?.detach(detachReason);
+  });
+
+  // `resources_discover` has a result contract (extra resource paths), so it stays out of
+  // FORWARDED_EVENTS' fire-and-forget loop; we only use it as the signal to refresh the
+  // commands slot (mid-session extension loads change the slash palette).
+  pi.on("resources_discover", () => {
+    if (attached) publishCommands();
+    return {};
   });
 
   for (const type of FORWARDED_EVENTS) {
@@ -718,7 +761,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `command-capture.ts`'s C0 fast-path stub (`arm` no-op, `take` returns undefined), which is
     // what makes this a zero-visible-change addition: every existing command still runs
     // byte-identically once the ref is actually populated.
-    capture: createCommandCapture(),
+    capture: commandCapture,
     internalExec: async () => ({ ok: false, code: "E_UNSUPPORTED" }),
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
     admin,
