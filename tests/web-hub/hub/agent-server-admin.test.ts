@@ -1,10 +1,9 @@
 /**
- * `agent-server.ts`'s admin wiring (plan §8 — S1-W3 LD 包): `hello_ack.caps`
- * only appears when `deps.admin` is supplied (P1/direct-unit-test callers —
- * `agent-server.test.ts` — never pass it, keeping their exact `toEqual`
- * byte-identical, §1.4.4); `lan_req`/`hub_ctl` frames are dispatched to
- * `deps.admin` and never reach `registry.onFrame`/the bus/the normal
- * per-frame log (§8.1); `hub_ctl_ack` is sent before `handleShutdown` runs.
+ * `agent-server.ts`'s admin wiring (plan §8 — S1-W3 LD 包; caps merge updated for C3, plan §3.1):
+ * `hello_ack.caps` is always sent — `[...admin.caps(), ...P2_HUB_CAPS]` when `deps.admin` is
+ * supplied, plain `P2_HUB_CAPS` when it is not (`agent-server.test.ts`'s direct-unit-test callers);
+ * `lan_req`/`hub_ctl` frames are dispatched to `deps.admin` and never reach `registry.onFrame`/the
+ * bus/the normal per-frame log (§8.1); `hub_ctl_ack` is sent before `handleShutdown` runs.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import net from "node:net";
@@ -13,6 +12,7 @@ import type { LanReqFrame, LanResFrame } from "../../../src/web-hub/protocol/mes
 import type { AdminHandler, AdminMeta } from "../../../src/web-hub/hub/admin.js";
 import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/agent-server.js";
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
+import { P2_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, tmpDirs, type TestClient } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -67,21 +67,21 @@ afterEach(async () => {
 });
 
 describe("agent-server + admin wiring (plan §8)", () => {
-  it("no deps.admin ⇒ hello_ack omits caps entirely (P1 shape, §1.4.4)", async () => {
+  it("no deps.admin ⇒ hello_ack.caps degrades to plain P2_HUB_CAPS (C3, plan §3.1 — never omitted)", async () => {
     await setup();
     const c = await client();
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect("caps" in ack).toBe(false);
+    expect(ack["caps"]).toEqual([...P2_HUB_CAPS]);
   });
 
-  it("deps.admin present ⇒ hello_ack.caps comes straight from admin.caps()", async () => {
+  it("deps.admin present ⇒ hello_ack.caps is admin.caps() plus P2_HUB_CAPS (C3, plan §3.1)", async () => {
     const admin = fakeAdmin({ caps: () => ["ctl.v1", "lan.v1"] });
     await setup(admin);
     const c = await client();
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1"]);
+    expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS]);
   });
 
   it("lan_req is dispatched to admin.handleLanReq with agentKey/agentPid, and its reply is written back verbatim", async () => {

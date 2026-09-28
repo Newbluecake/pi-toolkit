@@ -97,7 +97,11 @@ import {
   createReqDeadline,
   deriveBudget,
   FORWARD_MIN_REMAINING_MS,
+  LAN_AUTH_CAP_MS,
+  LAN_AUTH_RESERVE_MS,
+  raceDeadline,
   WRITE_TOTAL_MS,
+  type ReqDeadline,
 } from "./req-deadline.js";
 import { HubError } from "./registry.js";
 import { createSseHub, type SseClient, type SseEventName, type SseHub } from "./sse.js";
@@ -119,6 +123,11 @@ const LAN_BIND_HOST = "0.0.0.0";
 const LAN_SOCKET_IDLE_MS = 60_000;
 const LAN_HEADERS_TIMEOUT_MS = 10_000;
 const LAN_REQUEST_TIMEOUT_MS = 15_000;
+/** §3.3 nesting invariant (C3 acceptance): both listeners' Node HTTP `requestTimeout` share this
+ * one value — `srv.requestTimeout` below (loopback) and `LAN_REQUEST_TIMEOUT_MS` (LAN) must never
+ * drift apart, since `deadline-nesting.test.ts` asserts `WRITE_TOTAL_MS(13s) < LAN_REQUEST_TIMEOUT_MS
+ * (15s) < ui/*-client.js's CMD_REQUEST_TIMEOUT_MS (16s, the browser fetch AbortController)`. */
+export { LAN_REQUEST_TIMEOUT_MS };
 const LAN_KEEPALIVE_TIMEOUT_MS = 5_000;
 const LAN_CLIENT_IP_INFLIGHT_CAP = 16;
 const LAN_SID_WAITERS_CAP = 8;
@@ -796,6 +805,11 @@ export interface LanRuntime {
   registry?: RegistryView;
   commands?: CommandRouter | undefined;
   cmdLimit?: CmdLimit;
+  /** C3 P1 fix (plan §6.4): 429-audit throttle map, shared with the loopback listener (same
+   * instance `createHttpFrontend` passes to both `dispatchCmdOrDialog` call sites) so a given
+   * throttle key's reject line is written at most once per `RATE_AUDIT_WINDOW_MS` regardless of
+   * which listener the flood is coming from. */
+  rejectAudit429?: Map<string, number>;
 }
 
 function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
@@ -939,12 +953,28 @@ async function requireLanSession(
   ctx: RequestContext,
   isSseRoute: boolean,
   lease: ConnLease,
+  /** §3.3 step ② (C3 P1 fix): when supplied (only the `/api/cmd`/`/api/dialog` write pipeline
+   * does), races the shared `touchSession` lookup against this many ms so a slow/hung db can never
+   * silently eat the whole request-level `ReqDeadline` budget. A timeout degrades to the exact
+   * same 503 `E_DB` branch a real `touchSession` rejection already takes below — the underlying
+   * shared promise is never cancelled (other waiters on the same `sidHash` still get their
+   * result), this request just stops waiting on it. */
+  authDeadlineMs?: number,
+  /** §6.4 (C3 P1 fix): when supplied (same callers as `authDeadlineMs`), the failure `code` sent
+   * to the client is also mirrored here so `dispatchCmdOrDialog` can write its own reject-phase
+   * audit line — this function keeps sending the response itself either way, this is purely an
+   * out-param for audit correlation. */
+  authFailure?: { code?: string },
 ): Promise<LanSessionResult | undefined> {
+  const fail = (status: number, code: string): undefined => {
+    if (authFailure !== undefined) authFailure.code = code;
+    sendError(res, status, code);
+    return undefined;
+  };
   const ip = ctx.clientIp;
   const current = rt.clientInflight.get(ip) ?? 0;
   if (current >= LAN_CLIENT_IP_INFLIGHT_CAP) {
-    sendError(res, 429, "E_RATE");
-    return undefined;
+    return fail(429, "E_RATE");
   }
   rt.clientInflight.set(ip, current + 1);
   let released = false;
@@ -959,8 +989,7 @@ async function requireLanSession(
   const sid = readLanCookie(req.headers.cookie);
   if (sid === undefined) {
     release();
-    sendError(res, 401, "E_AUTH");
-    return undefined;
+    return fail(401, "E_AUTH");
   }
   const sidHash = hashSid(sid);
 
@@ -968,8 +997,7 @@ async function requireLanSession(
     const perSid = rt.lanSse.list().filter((c) => c.auth?.sidHash === sidHash).length;
     if (rt.lanSse.count() >= LAN_SSE_GLOBAL_CAP || perSid >= LAN_SSE_PER_SID_CAP) {
       release();
-      sendError(res, 429, "E_RATE");
-      return undefined;
+      return fail(429, "E_RATE");
     }
   }
 
@@ -977,27 +1005,23 @@ async function requireLanSession(
   let rec: LanSessionRecord | undefined;
   if (touched === "busy") {
     release();
-    sendError(res, 429, "E_RATE");
-    return undefined;
+    return fail(429, "E_RATE");
   }
   try {
-    rec = await touched;
+    rec = authDeadlineMs === undefined ? await touched : await raceDeadline(touched, authDeadlineMs);
   } catch (err) {
     release();
     rt.log.error("web-hub lan http: touchSession failed", { error: String(err) });
-    sendError(res, 503, "E_DB");
-    return undefined;
+    return fail(503, "E_DB");
   }
   if (rec === undefined) {
     release();
-    sendError(res, 401, "E_AUTH");
-    return undefined;
+    return fail(401, "E_AUTH");
   }
   const expired = rt.now() >= Math.min(rec.expiresAt, rec.absoluteExpiresAt);
   if (expired || rec.boundOrigin !== ctx.externalOrigin) {
     release();
-    sendError(res, 401, "E_AUTH");
-    return undefined;
+    return fail(401, "E_AUTH");
   }
   lease.enterAuthed();
   return { userId: rec.userId, epoch: rec.epoch, sidHash, absoluteExpiresAt: rec.absoluteExpiresAt };
@@ -1061,15 +1085,19 @@ async function handleLanRequestInner(
     if (path === "/api/cmd" || path === "/api/dialog") {
       return dispatchCmdOrDialog(req, res, path, {
         listener: "lan",
+        ip: ctx.clientIp,
         strictCsrfOk: () => strictCsrfOk(req, ctx.externalOrigin),
-        authorize: async () => {
-          const session = await requireLanSession(rt, req, res, ctx, false, lease);
-          if (session === undefined) return "handled";
+        authorize: async (deadline) => {
+          const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, LAN_AUTH_RESERVE_MS);
+          const authFailure: { code?: string } = {};
+          const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+          if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
           return { ip: ctx.clientIp, user: `u${session.userId}` };
         },
         registry: rt.registry ?? { list: () => [], get: () => undefined },
         commands: rt.commands,
         limit: rt.cmdLimit ?? createCmdLimit(rt.now),
+        rejectAudit429: rt.rejectAudit429 ?? new Map(),
         log: rt.log,
         now: rt.now,
       });
@@ -1474,65 +1502,121 @@ interface CmdAuthResult {
   user?: string;
 }
 
-/** Shared write-endpoint pipeline for both listeners (§6.3): strict CSRF → auth → a coarse
- * per-principal flood guard + the hub-wide in-flight cap → the write-endpoint body-read budget
- * (§3.3 step ④) → body parsing/validation → the §6.5 per-category/per-agent/per-IP buckets →
- * the §3.3 step ⑤ forward-or-refuse threshold → a `stillAuthorized` recheck (§6.3 step ⑥; no
- * token-rotation/authGen infra exists yet — C8's job — so this call site simply re-invokes
- * `authorize()` a second time, which already catches a concurrent logout) → `commands.request()`.
+interface CmdAuthHandled {
+  handled: true;
+  /** C3 P1 fix (plan §6.4): the error code `authorize()` already sent to the client (401
+   * `E_AUTH` / 429 `E_RATE` / 503 `E_DB`), mirrored back purely so `dispatchCmdOrDialog` can write
+   * its own reject-phase audit line — `authorize()` still owns sending the actual response. */
+  code: string;
+}
+
+/** Shared write-endpoint pipeline for both listeners (§6.3): request-scoped deadline + reqId →
+ * strict CSRF → auth → a coarse per-principal flood guard + the hub-wide in-flight cap → the
+ * write-endpoint body-read budget (§3.3 step ④) → body parsing/validation → the §6.5
+ * per-category/per-agent/per-IP buckets (skipped, C3 P1 fix, on an idempotent-hit — §6.5 "幂等
+ * 命中不扣令牌") → the §3.3 step ⑤ forward-or-refuse threshold → a `stillAuthorized`
+ * recheck (§6.3 step ⑥; no token-rotation/authGen infra exists yet — C8's job — so this call site
+ * simply re-invokes `authorize()` a second time, which already catches a concurrent logout) →
+ * `commands.request()`.
+ *
+ * C3 P1 fix (plan §3.3 D16): the `ReqDeadline` is created at the very top, before CSRF/auth, so
+ * it covers the *entire* pipeline including LAN auth's own `touchSession` wait (`authorize`'s LAN
+ * closure races it against a budget derived from `deadline.remaining()`) — previously it was only
+ * created after `authorize()` had already resolved, so a slow/hung auth step silently ate into (or
+ * exceeded) the nominal 13s budget with no accounting for it at all.
+ *
+ * C3 P1 fix (plan §6.4): every reject before a `CmdFrame` is ever built (CSRF/auth/rate-limit)
+ * now writes its own `phase:"reject"` audit line (previously only the deadline-derived rejects
+ * did) — 401/CSRF omit `user` (not yet authenticated); 429s are throttled to at most one audit
+ * line per throttle key per `RATE_AUDIT_WINDOW_MS` (`opts.rejectAudit429`) since the token bucket
+ * itself keeps admitting/rejecting far more often than that.
+ *
  * `authorize()` mirrors `requireLanSession`'s own contract: on failure it sends its own error
- * response and this function returns immediately without doing anything else. */
+ * response and returns `{ handled: true, code }`; this function returns immediately without doing
+ * anything else once that happens (after writing its own audit line). */
+const RATE_AUDIT_WINDOW_MS = 60_000;
+
 async function dispatchCmdOrDialog(
   req: IncomingMessage,
   res: ServerResponse,
   path: "/api/cmd" | "/api/dialog",
   opts: {
     listener: "loopback" | "lan";
+    /** Known synchronously before `authorize()` ever runs (LAN: `ctx.clientIp`; loopback:
+     * `normalizePeerIp(req.socket.remoteAddress)`) — needed for the CSRF-reject audit line, which
+     * fires before authentication. */
+    ip: string;
     strictCsrfOk: () => boolean;
-    authorize: () => Promise<CmdAuthResult | "handled">;
+    authorize: (deadline: ReqDeadline) => Promise<CmdAuthResult | CmdAuthHandled>;
     registry: RegistryView;
     commands: CommandRouter | undefined;
     limit: CmdLimit;
+    /** C3 P1 fix (plan §6.4): shared across both listeners (same instance as `opts.limit`'s
+     * caller passes) so a 429 audit line for a given throttle key is written at most once per
+     * `RATE_AUDIT_WINDOW_MS`, independent of how many times the underlying token bucket itself
+     * re-rejects in that window. */
+    rejectAudit429: Map<string, number>;
     log: HubLog;
     now: () => number;
   },
 ): Promise<void> {
   const { listener, commands, limit, log, now } = opts;
   res.setHeader("Cache-Control", "no-store");
-  if (!opts.strictCsrfOk()) throw new HttpError(403, "E_CSRF");
 
-  const authed = await opts.authorize();
-  if (authed === "handled") return;
+  const reqDeadline = createReqDeadline(now, WRITE_TOTAL_MS);
+  const reqId = randomBytes(8).toString("hex");
+  const endpoint: "cmd" | "dialog" = path === "/api/cmd" ? "cmd" : "dialog";
+
+  const auditReject = (fields: { ip?: string; user?: string; code: string; agentKey?: string; op?: string }): void => {
+    auditControl(log, {
+      phase: "reject",
+      reqId,
+      endpoint,
+      listener,
+      ok: false,
+      ...fields,
+    });
+  };
+  const auditRateLimited = (throttleKey: string, fields: { ip?: string; user?: string; agentKey?: string }): void => {
+    const t = now();
+    const last = opts.rejectAudit429.get(throttleKey);
+    if (last !== undefined && t - last < RATE_AUDIT_WINDOW_MS) return;
+    opts.rejectAudit429.set(throttleKey, t);
+    auditReject({ code: "E_RATE", ...fields });
+  };
+
+  if (!opts.strictCsrfOk()) {
+    auditReject({ ip: opts.ip, code: "E_CSRF" });
+    throw new HttpError(403, "E_CSRF");
+  }
+
+  const authed = await opts.authorize(reqDeadline);
+  if ("handled" in authed) {
+    auditReject({ ip: opts.ip, code: authed.code });
+    return;
+  }
   const { ip, user } = authed;
 
   if (commands === undefined) throw new HttpError(501, "E_NOT_IMPLEMENTED");
 
-  const reqDeadline = createReqDeadline(now, WRITE_TOTAL_MS);
-  const reqId = randomBytes(8).toString("hex");
   const principalKey = `${listener}:${user ?? "token"}`;
 
   const pre = limit.admit(`${principalKey}:pre`, 30, 1_000);
   if (!pre.ok) {
     res.setHeader("Retry-After", String(Math.ceil(pre.retryAfterMs / 1000)));
+    auditRateLimited(`pre:${principalKey}`, { ip, ...(user === undefined ? {} : { user }) });
     sendError(res, 429, "E_RATE");
     return;
   }
   if (commands.inflight() >= HUB_INFLIGHT_CAP) {
+    auditRateLimited("inflight:hub", { ip, ...(user === undefined ? {} : { user }) });
     sendError(res, 429, "E_RATE");
     return;
   }
 
   const bodyMs = deriveBudget(reqDeadline.remaining(), BODY_CAP_MS, BODY_RESERVE_MS);
   if (bodyMs <= 0) {
-    auditControl(log, {
-      phase: "reject",
-      reqId,
-      listener,
-      ip,
-      ...(user === undefined ? {} : { user }),
-      ok: false,
-      code: "E_DEADLINE",
-    });
+    auditReject({ ip, ...(user === undefined ? {} : { user }), code: "E_DEADLINE" });
     throw new HttpError(408, "E_DEADLINE", "no budget left to read the request body");
   }
   const body = await readJson(req, MAX_BODY_BYTES, bodyMs);
@@ -1541,49 +1625,54 @@ async function dispatchCmdOrDialog(
   if ("error" in parsed) throw new HttpError(400, parsed.error, parsed.message);
   const { agentKey, id, queryOnly, cmd } = parsed;
 
-  const cat = limitCategoryFor(cmd, queryOnly === true);
-  const fine = limit.admit(`${principalKey}:${cat.name}`, cat.capacity, cat.refillMs);
-  if (!fine.ok) {
-    res.setHeader("Retry-After", String(Math.ceil(fine.retryAfterMs / 1000)));
-    sendError(res, 429, "E_RATE");
-    return;
-  }
-  if (listener === "lan") {
-    const perIp = limit.admit(`lan-ip:${ip}`, 20, 2_000);
-    if (!perIp.ok) {
-      res.setHeader("Retry-After", String(Math.ceil(perIp.retryAfterMs / 1000)));
+  // C3 P1 fix (plan §6.5 "幂等命中（dup）不扣令牌"): a retried/still-running duplicate of the
+  // same user action (same principal|agentKey|id) never spends a token from the per-category/
+  // per-IP/per-agent buckets below — `CommandRouter.peekIdempotent` is a side-effect-free lookup of
+  // the exact key `commands.request()` itself would use; absent on a test double, this just
+  // degrades to the old always-charge behavior.
+  const originForPeek: CmdOrigin = { listener, ip, reqId, ...(user === undefined ? {} : { user }) };
+  const dup = commands.peekIdempotent?.(originForPeek, agentKey, id) !== undefined;
+
+  if (!dup) {
+    const cat = limitCategoryFor(cmd, queryOnly === true);
+    const fine = limit.admit(`${principalKey}:${cat.name}`, cat.capacity, cat.refillMs);
+    if (!fine.ok) {
+      res.setHeader("Retry-After", String(Math.ceil(fine.retryAfterMs / 1000)));
+      auditRateLimited(`fine:${principalKey}:${cat.name}`, { ip, ...(user === undefined ? {} : { user }), agentKey });
+      sendError(res, 429, "E_RATE");
+      return;
+    }
+    if (listener === "lan") {
+      const perIp = limit.admit(`lan-ip:${ip}`, 20, 2_000);
+      if (!perIp.ok) {
+        res.setHeader("Retry-After", String(Math.ceil(perIp.retryAfterMs / 1000)));
+        auditRateLimited(`lan-ip:${ip}`, { ip, ...(user === undefined ? {} : { user }), agentKey });
+        sendError(res, 429, "E_RATE");
+        return;
+      }
+    }
+    const perAgent = limit.admit(`agent:${agentKey}`, 30, 1_000);
+    if (!perAgent.ok) {
+      res.setHeader("Retry-After", String(Math.ceil(perAgent.retryAfterMs / 1000)));
+      auditRateLimited(`agent:${agentKey}`, { ip, ...(user === undefined ? {} : { user }), agentKey });
       sendError(res, 429, "E_RATE");
       return;
     }
   }
-  const perAgent = limit.admit(`agent:${agentKey}`, 30, 1_000);
-  if (!perAgent.ok) {
-    res.setHeader("Retry-After", String(Math.ceil(perAgent.retryAfterMs / 1000)));
-    sendError(res, 429, "E_RATE");
-    return;
-  }
 
   const remaining = reqDeadline.remaining();
   if (remaining < FORWARD_MIN_REMAINING_MS) {
-    auditControl(log, {
-      phase: "reject",
-      reqId,
-      id,
-      op: cmd.op,
-      listener,
-      ip,
-      ...(user === undefined ? {} : { user }),
-      agentKey,
-      ok: false,
-      code: "E_DEADLINE",
-    });
+    auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: "E_DEADLINE" });
     throw new HttpError(504, "E_DEADLINE");
   }
 
   // §6.3 step ⑥ ("stillAuthorized 钩子"): re-run the same authorization right before the frame
   // is ever sent, catching a logout/rotation that raced the body read above.
-  const stillAuthed = await opts.authorize();
-  if (stillAuthed === "handled") return;
+  const stillAuthed = await opts.authorize(reqDeadline);
+  if ("handled" in stillAuthed) {
+    auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: stillAuthed.code });
+    return;
+  }
 
   const { agentDeadlineMs } = computeAgentBudgets(remaining);
   const origin: CmdOrigin = { listener, ip, reqId, ...(user === undefined ? {} : { user }) };
@@ -1656,6 +1745,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // §6.5 (C3): one shared token-bucket limiter for every write endpoint on both listeners
   // (bucket keys already carry the listener label, so there is no cross-listener bleed-through).
   const cmdLimit = createCmdLimit(now);
+  // C3 P1 fix (§6.4): shared 429-audit throttle map for both listeners, same lifetime as `cmdLimit`.
+  const rejectAudit429 = new Map<string, number>();
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -1713,6 +1804,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       registry,
       commands: deps.commands,
       cmdLimit,
+      rejectAudit429,
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -1911,18 +2003,20 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (path === "/api/cmd" || path === "/api/dialog") {
         return dispatchCmdOrDialog(req, res, path, {
           listener: "loopback",
+          ip: normalizePeerIp(req.socket.remoteAddress),
           strictCsrfOk: () =>
             strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
-          authorize: async () => {
+          authorize: async (_deadline) => {
             if (!auth.check(req.headers.cookie, now())) {
               sendError(res, 401, "E_AUTH");
-              return "handled";
+              return { handled: true, code: "E_AUTH" };
             }
             return { ip: normalizePeerIp(req.socket.remoteAddress) };
           },
           registry,
           commands: deps.commands,
           limit: cmdLimit,
+          rejectAudit429,
           log,
           now,
         });
@@ -2033,7 +2127,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     auth.token(); // create / repair the token file up front
     const srv = createServer(onRequest);
     srv.headersTimeout = 10_000;
-    srv.requestTimeout = 15_000;
+    srv.requestTimeout = LAN_REQUEST_TIMEOUT_MS;
     srv.on("connection", (socket) => socket.unref());
     srv.on("clientError", (_err, socket) => socket.destroy());
     let abortedLate = false;

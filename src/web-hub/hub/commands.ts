@@ -103,6 +103,12 @@ function unsupported(): CmdResultBody {
   return { ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "none" };
 }
 
+/** A8 correlation (plan §6.4): `dialog_answer`/`dialog_cancel` go through `/api/dialog`, every
+ * other op through `/api/cmd`. */
+function endpointFor(op: CmdOp): "cmd" | "dialog" {
+  return op === "dialog_answer" || op === "dialog_cancel" ? "dialog" : "cmd";
+}
+
 function toResultFrame(frame: CmdFrame, body: CmdResultBody): CmdResultFrame {
   return body.ok
     ? {
@@ -237,9 +243,21 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
     }
   });
 
+  /** Every write() call site in this module already sets `op`/`agentKey` on the record it passes
+   * in — this wraps `auditControl` once to also fold in the A8 correlation fields (plan §6.4:
+   * `linkGen`/`agentPid`/`endpoint`) from those two, instead of repeating the lookup at every call
+   * site. Best-effort: an already-retired agent (`registry.get` returns `undefined`) just omits
+   * `agentPid`/`linkGen`, same as any other best-effort audit field. */
   function write(record: ControlAuditRecord): void {
     try {
-      auditControl(log, record);
+      const view = record.agentKey === undefined ? undefined : registry.get(record.agentKey);
+      const linkGen = record.agentKey === undefined ? undefined : registry.getLinkGen(record.agentKey);
+      auditControl(log, {
+        ...(record.op === undefined ? {} : { endpoint: endpointFor(record.op as CmdOp) }),
+        ...(view === undefined ? {} : { agentPid: view.pid }),
+        ...(linkGen === undefined ? {} : { linkGen }),
+        ...record,
+      });
     } catch (err) {
       log.error("web-hub commands: audit write threw", { error: String(err) });
     }
@@ -621,6 +639,11 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
 
     inflight() {
       return inflightCount;
+    },
+
+    peekIdempotent(origin, agentKey, id) {
+      const key = `${principalOf(origin)}|${agentKey}|${id}`;
+      return lru.get(key)?.state;
     },
   };
 }

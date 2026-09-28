@@ -24,6 +24,7 @@ import type {
   CmdErrorCode,
   CmdFrame,
   CmdOp,
+  CmdOrigin,
   CmdResultFrame,
   CommandInfoWire,
   DialogClosedWire,
@@ -428,6 +429,13 @@ export interface CommandRouter {
   request(frame: CmdFrame, agentKey: string): Promise<CmdResultFrame>;
   drain(): Promise<{ inflight: number; timedOut: boolean }>;
   inflight(): number;
+  /** C3 P1 fix (plan §6.5 "幂等命中（dup）不扣令牌"): best-effort, side-effect-free peek of the hub-side
+   * idempotency LRU for `principal|agentKey|id` (the exact key `request()` itself would use) —
+   * `http.ts`'s per-category/per-IP/per-agent rate limiters call this *before* spending a token so
+   * a retried/still-running duplicate of the same user action is never charged twice. Optional so
+   * a test double that only cares about `request()`/`drain()`/`inflight()` can omit it — `http.ts`
+   * degrades to always charging the token (old behavior) when it is absent. */
+  peekIdempotent?(origin: CmdOrigin, agentKey: string, id: string): "inflight" | "unknown" | "done" | undefined;
 }
 
 export interface FrontendDeps {

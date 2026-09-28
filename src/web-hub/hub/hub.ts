@@ -161,16 +161,13 @@ export async function startHub(
       pid: process.pid,
       startedAt: now(),
       proto: PROTO,
-      // C0 stub: mirrors `hello_ack.caps` (admin.caps() only) -- P2_HUB_CAPS is not yet
-      // broadcast anywhere (zero visible change); C3 wires the real value once the command
-      // router / dialog bridge / superseded machinery actually land.
       // C3 (plan §3.1/§6.6): browser-facing capability list (SSE `hub` frame's `caps`,
       // `HubInfo.caps`) always advertises the P2 control-plane capabilities the hub itself now
-      // supports, on top of whatever `admin.caps()` reports (`ctl.v1`/`lan.v1`). This is
-      // deliberately *not* mirrored onto `hello_ack.caps` (the agent-facing frame) — that field
-      // stays admin-only (unchanged P1 behavior) since nothing in this codebase consumes it yet
-      // (agent-side `connection.ts`'s D14 slot-gating is a later package's job) and changing it
-      // would only ripple into unrelated admin/LAN caps assertions outside this package's scope.
+      // supports, on top of whatever `admin.caps()` reports (`ctl.v1`/`lan.v1`). This now matches
+      // `hello_ack.caps` (the agent-facing frame, wired in `agent-server.ts`) byte-for-byte —
+      // both are frozen-protocol invariants (§3.1's compat matrix), and agent-side
+      // `connection.ts`'s D14 slot gating reads `hello_ack.caps` to decide whether to ever send
+      // the `dialogs`/`ctl`/`commands` slots at all.
       caps: [...admin.caps(), ...P2_HUB_CAPS],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);

@@ -739,14 +739,17 @@ describe("token (loopback) + real HTTP: useHub end-to-end (vue-plan.md v2.1 \u00
 
 // ---------------------------------------------------------------------------
 // control-plane write endpoints (control-plan v2.1 §9.2, package C4): the frontend transport's
-// command()/dialog() against a REAL hub in both auth modes. C3 hasn't landed yet, so /api/cmd
-// and /api/dialog are still the C0 stub (501 E_NOT_IMPLEMENTED) — this pins the transport's
-// error mapping end-to-end (headers, cookie auth, body, outcome shape). When C3 turns the
-// endpoints live, update these assertions to the real acceptance (200/dup semantics) — file
-// owner: C4 (plan §12.3).
+// command()/dialog() against a REAL hub in both auth modes. Neither harness below wires a
+// `deps.commands` (no `CommandRouter`, no connected test agent) — exercising the real
+// 200/dup/E_UNSUPPORTED acceptance path needs a full socket-connected agent, out of scope for
+// this file's fixture. With C3 landed, `dispatchCmdOrDialog` (`hub/http.ts`) now handles
+// `/api/cmd`/`/api/dialog` on BOTH listeners uniformly (previously the LAN listener had no route
+// registered for them at all → 404 `E_NOT_FOUND`); with no `commands` wired, both now consistently
+// hit the same `commands === undefined` guard → 501 `E_NOT_IMPLEMENTED` (file owner: C4, plan
+// §12.3; assertions updated for C3 per its own acceptance note).
 // ---------------------------------------------------------------------------
 
-describe("control endpoints vs the real hub (C0 stub era: 501 mapping, §6.2 error body)", () => {
+describe("control endpoints vs the real hub (C3: uniform 501 without a wired CommandRouter, §6.2 error body)", () => {
   let lan: PasswordHarness;
   let tok: TokenHarness;
   afterEach(async () => {
@@ -755,13 +758,15 @@ describe("control endpoints vs the real hub (C0 stub era: 501 mapping, §6.2 err
     HttpEventSource.instances = [];
   });
 
-  it("password (LAN): command()/dialog() reach the authenticated router and map the stub rejection", async () => {
+  it("password (LAN): command()/dialog() reach the authenticated router and hit the C3 dispatch pipeline's E_NOT_IMPLEMENTED guard (no CommandRouter wired)", async () => {
     lan = await startPasswordHub();
     const c = buildPasswordClient(lan.port);
     await c.auth.submit({ username: "alice", password: "correct-horse-battery-1" });
     await waitUntil(() => c.hub.state.value.order.length > 0);
-    // LAN stub era: the LAN router has no /api/cmd|/api/dialog entry at all ⇒ 404 E_NOT_FOUND
-    // (loopback has an explicit 501 stub — see the token variant). C3 wires both for real.
+    // C3: the LAN listener now routes /api/cmd|/api/dialog through the same dispatchCmdOrDialog
+    // pipeline as loopback (previously it had no route at all → 404 E_NOT_FOUND). This harness
+    // never wires `deps.commands`, so both listeners now uniformly hit the same guard → 501
+    // E_NOT_IMPLEMENTED (see the token variant below).
     const cmd = await c.hub.transport.command({
       agentKey: AGENT_KEY,
       id: "cmd-1",
@@ -769,7 +774,7 @@ describe("control endpoints vs the real hub (C0 stub era: 501 mapping, §6.2 err
       text: "hi",
       deliver: "steer",
     });
-    expect(cmd).toMatchObject({ ok: false, error: "E_NOT_FOUND", effect: "none" });
+    expect(cmd).toMatchObject({ ok: false, error: "E_NOT_IMPLEMENTED", effect: "none" });
     const dlg = await c.hub.transport.dialog({
       agentKey: AGENT_KEY,
       id: "d-1",
@@ -777,7 +782,7 @@ describe("control endpoints vs the real hub (C0 stub era: 501 mapping, §6.2 err
       epoch: "e",
       action: "cancel",
     });
-    expect(dlg).toMatchObject({ ok: false, error: "E_NOT_FOUND", effect: "none" });
+    expect(dlg).toMatchObject({ ok: false, error: "E_NOT_IMPLEMENTED", effect: "none" });
     c.hub.dispose();
     c.scope.stop();
   });

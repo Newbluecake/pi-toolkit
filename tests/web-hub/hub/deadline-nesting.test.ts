@@ -11,6 +11,9 @@ import {
   REGISTRY_WAIT_RESERVE_MS,
   WRITE_TOTAL_MS,
 } from "../../../src/web-hub/hub/req-deadline.js";
+import { LAN_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/hub/http.js";
+import { CMD_REQUEST_TIMEOUT_MS as TOKEN_CMD_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/ui/src/logic/token-client.js";
+import { CMD_REQUEST_TIMEOUT_MS as PASSWORD_CMD_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/ui/src/logic/password-client.js";
 
 /** Deterministic xorshift-ish PRNG so a failure is reproducible without pulling in a fuzzing lib. */
 function prng(seed: number): () => number {
@@ -61,6 +64,20 @@ describe("§3.3 nested deadline invariant (plan: agentDeadlineMs <= registryWait
   it("the forward-or-refuse threshold sits strictly below WRITE_TOTAL_MS", () => {
     expect(FORWARD_MIN_REMAINING_MS).toBeLessThan(WRITE_TOTAL_MS);
   });
+
+  it(
+    "§3.3's outer nesting invariant holds across process boundaries: server WRITE_TOTAL_MS(13s) < both" +
+      " listeners' Node requestTimeout(15s) < the browser fetch AbortController(16s) (C3 acceptance)",
+    () => {
+      expect(WRITE_TOTAL_MS).toBe(13_000);
+      expect(WRITE_TOTAL_MS).toBeLessThan(LAN_REQUEST_TIMEOUT_MS);
+      expect(LAN_REQUEST_TIMEOUT_MS).toBe(15_000);
+      expect(LAN_REQUEST_TIMEOUT_MS).toBeLessThan(TOKEN_CMD_REQUEST_TIMEOUT_MS);
+      expect(LAN_REQUEST_TIMEOUT_MS).toBeLessThan(PASSWORD_CMD_REQUEST_TIMEOUT_MS);
+      expect(TOKEN_CMD_REQUEST_TIMEOUT_MS).toBe(16_000);
+      expect(PASSWORD_CMD_REQUEST_TIMEOUT_MS).toBe(16_000);
+    },
+  );
 
   it("body budget derivation matches deriveBudget directly (no separate formula drift)", () => {
     for (const remaining of [0, 1_000, 4_999, 5_000, 5_001, 9_000, WRITE_TOTAL_MS]) {

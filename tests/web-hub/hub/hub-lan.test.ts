@@ -24,6 +24,7 @@ import type {
 } from "../../../src/web-hub/hub/ports.js";
 import type { LanStore } from "../../../src/web-hub/hub/lan-store.js";
 import { resolveHubPaths } from "../../../src/web-hub/protocol/paths.js";
+import { P2_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, tmpDirs, waitFor, hello, type TestClient } from "./helpers.js";
 
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
@@ -122,7 +123,7 @@ async function client(sockPath: string): Promise<TestClient> {
 }
 
 describe("startHub + defaultLanAssembly (plan \u00a71.4, \u00a78) \u2014 config.lan undefined", () => {
-  it("fe.lan is undefined, hub.json has no lan field, no db file, no lan.v1 cap, agentServer.hello_ack has ctl.v1 only", async () => {
+  it("fe.lan is undefined, hub.json has no lan field, no db file, no lan.v1 cap, agentServer.hello_ack has ctl.v1 + P2_HUB_CAPS", async () => {
     const home = tmp.make("wh-lan-off-");
     const fe = fakeFrontendWithLan();
     const uid = process.getuid?.() ?? 0;
@@ -142,7 +143,7 @@ describe("startHub + defaultLanAssembly (plan \u00a71.4, \u00a78) \u2014 config.
     const c = await client(paths.socketPath);
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect(ack["caps"]).toEqual(["ctl.v1"]);
+    expect(ack["caps"]).toEqual(["ctl.v1", ...P2_HUB_CAPS]);
 
     c.send({ t: "lan_req", rid: "r1", op: "info" });
     const lanRes = await c.waitFrame((f) => f["t"] === "lan_res");
@@ -242,7 +243,7 @@ skipIfNoSqlite(
       const c = await client(paths.socketPath);
       c.send(hello());
       const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-      expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1"]);
+      expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS]);
 
       c.send({ t: "lan_req", rid: "r1", op: "info" });
       const res = await c.waitFrame((f) => f["t"] === "lan_res");

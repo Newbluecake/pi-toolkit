@@ -97,6 +97,35 @@ describe("POST /api/cmd (LAN) - gate order + K16 (plan section 6.3/2.1)", () => 
     expect(router.calls).toHaveLength(0);
   });
 
+  it("no session cookie writes a phase:reject audit line with code E_AUTH (plan §6.4, C3 P1 fix)", async () => {
+    const router = fakeRouter(okReply);
+    const h = await startLan({ commands: router });
+    harnesses.push(h);
+    const res = await lanPostJson(h.port, "/api/cmd", abortBody());
+    expect(res.status).toBe(401);
+    const audits = h.logLines
+      .filter((l) => (l.data as Record<string, unknown> | undefined)?.["audit"] === "control")
+      .map((l) => l.data as Record<string, unknown>);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ phase: "reject", code: "E_AUTH", endpoint: "cmd", listener: "lan", ok: false });
+    expect(audits[0]).not.toHaveProperty("user");
+  });
+
+  it("a hung touchSession degrades to 503 E_DB well within the write-endpoint's own 13s budget (plan §3.3 step ②, C3 P1 fix)", async () => {
+    const router = fakeRouter(okReply);
+    const h = await startLan({ commands: router });
+    harnesses.push(h);
+    const cookie = await loggedIn(h);
+    h.store.touchSession = () => new Promise(() => {}); // never resolves
+    const started = Date.now();
+    const res = await lanPostJson(h.port, "/api/cmd", abortBody(), { Cookie: cookie });
+    const elapsed = Date.now() - started;
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toMatchObject({ error: "E_DB" });
+    expect(elapsed).toBeLessThan(6_000);
+    expect(router.calls).toHaveLength(0);
+  }, 10_000);
+
   it("commands router not wired ⇒ 501 E_NOT_IMPLEMENTED", async () => {
     const h = await startLan();
     harnesses.push(h);

@@ -26,6 +26,12 @@ export const AGENT_TOTAL_RESERVE_MS = 1_500;
 export const REGISTRY_WAIT_GRACE_MS = 1_000;
 export const REGISTRY_WAIT_RESERVE_MS = 300;
 
+/** §3.3 step ② (C3 P1 fix): LAN `touchSession` races against `min(LAN_AUTH_CAP_MS, remaining -
+ * LAN_AUTH_RESERVE_MS)` of the write-endpoint's own `ReqDeadline`, so a hung/slow db can never
+ * silently consume the whole 13s budget before body/router/agent even get a chance to run. */
+export const LAN_AUTH_CAP_MS = 3_000;
+export const LAN_AUTH_RESERVE_MS = 7_000;
+
 export interface ReqDeadline {
   readonly at: number;
   remaining(): number;

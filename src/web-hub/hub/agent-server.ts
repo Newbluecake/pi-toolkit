@@ -11,16 +11,20 @@
  * (`admin.ts`) *before* `registry.onFrame` is ever called — same-uid admin
  * frames must never enter the registry, the bus, or this file's own normal
  * per-frame logging (§8.1 "不进 registry、bus 和普通日志"); `admin.ts` owns
- * the dedicated audit log line instead. `deps.admin` is `undefined` in every
- * P1/direct-unit-test caller (agent-server.test.ts) — `hello_ack.caps` is
- * only emitted when it is provided (only `hub.ts`'s real assembly does),
- * which is also why those tests' exact `toEqual` on `hello_ack` stays
- * byte-identical (§1.4.4).
+ * the dedicated audit log line instead.
+ *
+ * `hello_ack.caps` (C3, plan §3.1 — verified P0 fix): ALWAYS present, always
+ * `[...admin.caps(), ...P2_HUB_CAPS]` (or just `P2_HUB_CAPS` when `deps.admin`
+ * is absent, e.g. `agent-server.test.ts`'s direct-unit-test callers). This is
+ * a frozen-protocol invariant, not a C0/P1 admin-wiring artifact: agent-side
+ * `connection.ts`'s D14 slot gating reads `hello_ack.caps ?? []` to decide
+ * whether to ever send the `dialogs`/`ctl`/`commands` slots at all — omitting
+ * `caps` here makes every hub look like a pre-P2 hub to every agent.
  */
 import type net from "node:net";
 import { decodeAgentFrame, LIMITS, TIMING, type AgentFrame, type HubFrame } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
-import { PROTO, protoCompatible } from "../protocol/version.js";
+import { P2_HUB_CAPS, PROTO, protoCompatible } from "../protocol/version.js";
 import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
@@ -43,8 +47,10 @@ export function createAgentServer(
     now: () => number;
     httpPort: () => number;
     /** Only `hub.ts`'s real assembly provides this (plan §8, S1-W3 LD); direct unit tests of
-     * this module never do, which is exactly what keeps their `hello_ack` `toEqual` assertions
-     * byte-identical (§1.4.4) — `caps` is omitted entirely, not `undefined`-valued, when absent. */
+     * this module (`agent-server.test.ts`) never do. Either way `hello_ack.caps` is always sent
+     * (C3, plan §3.1): `[...admin.caps(), ...P2_HUB_CAPS]` when present, plain `P2_HUB_CAPS` when
+     * absent — never omitted, since agent-side D14 slot gating treats a missing `caps` as a
+     * pre-P2 hub. */
     admin?: AdminHandler;
   },
 ): AgentServer {
@@ -137,7 +143,7 @@ export function createAgentServer(
           pingMs: TIMING.pingMs,
           leaseMs: TIMING.staleMs,
           http: { port: deps.httpPort() },
-          ...(deps.admin === undefined ? {} : { caps: deps.admin.caps() }),
+          caps: [...(deps.admin?.caps() ?? []), ...P2_HUB_CAPS],
         });
         return;
       }

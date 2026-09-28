@@ -218,3 +218,111 @@ describe("POST /api/cmd — rate limiting (plan §6.5)", () => {
     expect(router.calls).toHaveLength(10);
   });
 });
+
+describe('POST /api/cmd — idempotent hit skips the rate limiter (plan §6.5 "\u5e42\u7b49\u547d\u4e2d\u4e0d\u6263\u4ee4\u724c", C3 P1 fix)', () => {
+  function fakeRouterWithIdempotency(reply: FakeRouter["reply"]): FakeRouter & {
+    peekIdempotent: NonNullable<CommandRouter["peekIdempotent"]>;
+  } {
+    const calls: CmdFrame[] = [];
+    const done = new Set<string>();
+    return {
+      calls,
+      reply,
+      async request(frame, agentKey) {
+        calls.push(frame);
+        const r = await reply(frame);
+        done.add(`${agentKey}|${frame.id}`);
+        return r;
+      },
+      async drain() {
+        return { inflight: 0, timedOut: false };
+      },
+      inflight() {
+        return 0;
+      },
+      peekIdempotent(_origin, agentKey, id) {
+        return done.has(`${agentKey}|${id}`) ? "done" : undefined;
+      },
+    };
+  }
+
+  it("a done dup retried well past the per-category bucket capacity still succeeds (fine/perIp/perAgent admits skipped)", async () => {
+    const router = fakeRouterWithIdempotency(okReply);
+    deps.commands = router;
+    const id = "d".repeat(16);
+    const first = await postJson(port, "/api/cmd", abortBody(id), cmdHeaders());
+    expect(first.status).toBe(200);
+    // "abort" is the "stop" category: burst 10, refill 1/2s. Without the C3 P1 dup-skip fix, the
+    // 11th retry of this SAME id would 429 (the bucket only had 9 tokens left after the first call).
+    for (let i = 0; i < 15; i++) {
+      const res = await postJson(port, "/api/cmd", abortBody(id), cmdHeaders());
+      expect(res.status).toBe(200);
+    }
+    expect(router.calls).toHaveLength(16); // this double doesn't itself cache — it only reports peekIdempotent
+  });
+
+  it("control (no peekIdempotent on the router double): the same retried id DOES exhaust the bucket", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    const id = "e".repeat(16);
+    for (let i = 0; i < 10; i++) {
+      const res = await postJson(port, "/api/cmd", abortBody(id), cmdHeaders());
+      expect(res.status).toBe(200);
+    }
+    const eleventh = await postJson(port, "/api/cmd", abortBody(id), cmdHeaders());
+    expect(eleventh.status).toBe(429);
+  });
+});
+
+describe("POST /api/cmd — reject-phase audit lines (plan §6.4, C3 P1 fix)", () => {
+  function controlAudits(): Record<string, unknown>[] {
+    return deps.logLines
+      .filter((l) => (l.data as Record<string, unknown> | undefined)?.["audit"] === "control")
+      .map((l) => l.data as Record<string, unknown>);
+  }
+
+  it("CSRF rejection (missing Origin) writes a phase:reject audit line without a user field", async () => {
+    const res = await postJson(port, "/api/cmd", abortBody(), { Cookie: cookie });
+    expect(res.status).toBe(403);
+    const audits = controlAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      phase: "reject",
+      code: "E_CSRF",
+      endpoint: "cmd",
+      listener: "loopback",
+      ok: false,
+    });
+    expect(audits[0]).not.toHaveProperty("user");
+  });
+
+  it("auth rejection (no cookie) writes a phase:reject audit line with code E_AUTH, no user field", async () => {
+    const res = await postJson(port, "/api/cmd", abortBody(), { Origin: origin });
+    expect(res.status).toBe(401);
+    const audits = controlAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ phase: "reject", code: "E_AUTH", endpoint: "cmd", ok: false });
+    expect(audits[0]).not.toHaveProperty("user");
+  });
+
+  it("429s are throttled to at most one audit line per throttle key within the audit window", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    for (let i = 0; i < 10; i++) {
+      await postJson(port, "/api/cmd", abortBody(`a${i}`.padEnd(16, "0")), cmdHeaders());
+    }
+    const before = controlAudits().length;
+    const first429 = await postJson(port, "/api/cmd", abortBody("b".repeat(16)), cmdHeaders());
+    expect(first429.status).toBe(429);
+    const second429 = await postJson(port, "/api/cmd", abortBody("c".repeat(16)), cmdHeaders());
+    expect(second429.status).toBe(429);
+    const third429 = await postJson(port, "/api/cmd", abortBody("f".repeat(16)), cmdHeaders());
+    expect(third429.status).toBe(429);
+    const after = controlAudits().filter((a) => a["phase"] === "reject" && a["code"] === "E_RATE");
+    expect(after.length - 0).toBeGreaterThanOrEqual(1);
+    // All three 429s share the same throttle key (`fine:loopback:token:stop`, the "stop" category
+    // bucket the first 10 abort calls already exhausted) — only the first should have produced an
+    // audit line.
+    expect(controlAudits().length).toBe(before + 1);
+  });
+});
