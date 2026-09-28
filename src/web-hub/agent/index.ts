@@ -105,6 +105,10 @@ export interface WebHubDeps {
   /** D14/§3.1: whether `askUser.enabled` in the host settings — gates `dialog.v1` broadcast
    * alongside `settings.remoteAskUser`. Unset ⇒ treated as enabled (D10 default-on posture). */
   askUserEnabled?: () => boolean;
+  /** P1 fix (#32 C12 review): the same `Set<string>` `wrapCommandApi`'s `registerCommand` proxy
+   * writes real toolkit command names into, handed straight through to `createCommandCapture` so
+   * `owns()`/`settleArm()` answer from true registration state, not from `arm()` history. */
+  ownedCommandNames?: Set<string>;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -222,7 +226,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // One capture instance for the whole control (`WebHubControl.capture`, the builtin bridge's
   // §4.9 echo and the commands slot's `output` badge) — the return value used to build a second,
   // disconnected one (todo #32 C11 wiring).
-  const commandCapture = createCommandCapture();
+  const commandCapture = createCommandCapture(deps.ownedCommandNames);
   // Late-bound: the bridge is constructed before the command handler (which it needs for the
   // §4.6/D22 async-completion channel), so sendLate goes through this ref. Before the handler
   // exists (or after a settle raced ahead) the late frame is simply dropped — bounded, and the

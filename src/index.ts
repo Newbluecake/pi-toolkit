@@ -111,7 +111,13 @@ function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): SubagentExtens
  */
 export default function activate(rawPi: ExtensionAPI): void {
   const commandCaptureRef: { current?: CommandCapturePort } = {};
-  const pi = wrapCommandApi(rawPi, () => commandCaptureRef.current);
+  // P1 fix (#32 C12 review): the set `wrapCommandApi`'s `registerCommand` proxy writes real
+  // toolkit command names into, at real registration time — long before `commandCaptureRef.current`
+  // is ever assigned (web-hub wiring runs last in this function). Handed to `createCommandCapture`
+  // below by the same object reference, so `owns()`/`settleArm()` see every name registered so far
+  // with no backfill step (see `command-capture.ts`'s doc comment above `createCommandCaptureEngine`).
+  const ownedCommandNames = new Set<string>();
+  const pi = wrapCommandApi(rawPi, () => commandCaptureRef.current, ownedCommandNames);
   // Merged plugins (plugin-merge) that must stay available in EVERY session,
   // child subagent sessions included — they register BEFORE the HOST_KEY
   // guard below. Settings here come from the read-only loader: the full
@@ -855,6 +861,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       fleet: () => holder.current?.query.list() ?? [],
       query: () => holder.current?.query,
       askUserEnabled: () => settings.askUser.enabled,
+      ownedCommandNames,
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;

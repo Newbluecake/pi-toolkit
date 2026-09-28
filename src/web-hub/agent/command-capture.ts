@@ -113,6 +113,9 @@ export interface CommandCaptureEngine extends CommandCapturePort {
   settleArm(): void;
   finish(cmdId: string): void;
   owns(name: string): boolean;
+  /** Records a name as pi-toolkit-owned (real `registerCommand` time — see the doc comment above
+   * {@link createCommandCaptureEngine} for why this is separate from `arm()`). */
+  registerOwned(name: string): void;
   collect(entry: CommandOutputEntry): void;
   output(): CommandOutputWire | undefined;
   /** cmdId-scoped variants used internally by {@link wrapCommandApi}. */
@@ -121,36 +124,33 @@ export interface CommandCaptureEngine extends CommandCapturePort {
 }
 
 /**
- * Real implementation of the agent-side command-output capture engine (plan §4.9). Claiming
- * (`arm`/`take`/`settleArm`) is driven by the future dispatcher (`builtin-bridge.ts`, package C11)
- * exactly as described in §4.9 point 3: `arm(inv)` writes a single synchronous slot; `take(name,
- * args)` is what `wrapCommandApi`'s wrapped handler calls when pi invokes the registered command,
- * checking the sync slot first and the FIFO fallback queue second (both matched by exact
- * `name`+`args`, mirroring the plan's `name + "\0" + args` key); `settleArm()` — called by the
- * dispatcher right after its `pi.sendUserMessage(...)` call returns — moves a still-unclaimed slot
- * into the fallback queue (TTL = min(5s, the invocation's own remaining deadline)) so a
- * settle-deferred command can still be claimed later, or drops it once its deadline has already
- * elapsed.
- *
- * Ownership (`owns`) is intentionally *not* derived by having `wrapCommandApi` track every
- * `registerCommand` name and somehow hand that set to whatever capture object shows up later
- * through the late-bound `getCapture()` — the two frozen call sites
- * (`wrapCommandApi(rawPi, () => commandCaptureRef.current)` in `src/index.ts`, `createCommandCapture()`
- * in `src/web-hub/agent/index.ts`) pass no such channel, and nothing outside this file can. Instead
- * `owns(name)` answers "has this engine ever armed `name`" — sound because `arm()` is only ever
- * called (by the future dispatcher) for names the caller already classified as pi-toolkit's own
- * extension commands (§4.9's whole premise: only pi-toolkit's *own* `registerCommand` calls ever
- * pass through the wrapped `pi`, since third-party extensions get their own, unwrapped `pi` from
- * their own `activate()` — this proxy is never handed to them).
+ * Ownership (`owns`) is derived from a name set that is populated exactly once, at real
+ * `registerCommand` time — never from `arm()`. `wrapCommandApi`'s `registerCommand` proxy is the
+ * only thing that ever sees a pi-toolkit `registerCommand(name, …)` call (third-party extensions
+ * get their own, unwrapped `pi` from their own `activate()` — this proxy is never handed to them),
+ * so it is also the only correct place to decide "this name belongs to pi-toolkit". That proxy runs
+ * long before any capture object exists (`wrapCommandApi(rawPi, () => commandCaptureRef.current)` is
+ * the very first line of `activate()`; the capture itself is only built once web-hub wires up, near
+ * the end) — so ownership can't be pushed into a not-yet-existing capture at registration time.
+ * Instead, `wrapCommandApi` and `createCommandCaptureEngine` are handed the *same* `Set<string>`
+ * object by reference (`deps.ownedNames` here, the `ownedNames` parameter there): whichever side
+ * writes to it first, the other side always reads the up-to-date membership, because it's the same
+ * object — no backfill/replay step needed. `arm()` intentionally does **not** touch this set: arming
+ * merely reflects what the (future) web dispatcher *believes* is a pi-toolkit command by name, which
+ * is exactly the belief a same-named third-party command would let it hold mistakenly; only real
+ * registration state can arbitrate that. `settleArm()` now gates fallback-queue admission on
+ * `ownedNames.has(invocation.name)`, and `owns(name)` answers the same set directly.
  */
-export function createCommandCaptureEngine(deps: { now?: () => number } = {}): CommandCaptureEngine {
+export function createCommandCaptureEngine(
+  deps: { now?: () => number; ownedNames?: Set<string> } = {},
+): CommandCaptureEngine {
   const now = deps.now ?? Date.now;
+  const ownedNames = deps.ownedNames ?? new Set<string>();
   let syncSlot: CaptureInvocation | undefined;
   const queue: QueuedInvocation[] = [];
   const windows = new Map<string, Window>();
   const retainedOrder: string[] = [];
   const activeStack: string[] = [];
-  const seenNames = new Set<string>();
 
   function openWindow(cmdId: string): void {
     const timer = setTimeout(() => {
@@ -176,7 +176,6 @@ export function createCommandCaptureEngine(deps: { now?: () => number } = {}): C
 
   function arm(invocation: CaptureInvocation): void {
     syncSlot = invocation;
-    seenNames.add(invocation.name);
   }
 
   function take(name: string, args: string): CaptureInvocation | undefined {
@@ -201,7 +200,7 @@ export function createCommandCaptureEngine(deps: { now?: () => number } = {}): C
     if (syncSlot === undefined) return;
     const invocation = syncSlot;
     syncSlot = undefined;
-    if (!seenNames.has(invocation.name)) return;
+    if (!ownedNames.has(invocation.name)) return;
     const ttl = Math.min(FALLBACK_TTL_MS, Math.max(0, invocation.deadlineAt - now()));
     if (ttl <= 0) return;
     const timer = setTimeout(() => {
@@ -223,7 +222,13 @@ export function createCommandCaptureEngine(deps: { now?: () => number } = {}): C
   }
 
   function owns(name: string): boolean {
-    return seenNames.has(name);
+    return ownedNames.has(name);
+  }
+
+  /** Called by `wrapCommandApi`'s `registerCommand` proxy at real registration time (and directly
+   * by tests that want to simulate a genuine toolkit registration without going through the proxy). */
+  function registerOwned(name: string): void {
+    ownedNames.add(name);
   }
 
   function collectFor(cmdId: string, rawEntry: CommandOutputEntry): void {
@@ -268,6 +273,7 @@ export function createCommandCaptureEngine(deps: { now?: () => number } = {}): C
     settleArm,
     finish,
     owns,
+    registerOwned,
     collectFor,
     outputFor,
     collect(entry) {
@@ -282,9 +288,12 @@ export function createCommandCaptureEngine(deps: { now?: () => number } = {}): C
   };
 }
 
-/** Production factory (`src/web-hub/agent/index.ts`'s frozen zero-arg call site). */
-export function createCommandCapture(): CommandCapturePort {
-  return createCommandCaptureEngine();
+/** Production factory (`src/web-hub/agent/index.ts`'s call site). `ownedNames` is the same
+ * `Set<string>` object `wrapCommandApi` writes into at real `registerCommand` time — `src/index.ts`
+ * creates it once and passes it to both sides (see the doc comment above
+ * {@link createCommandCaptureEngine}). */
+export function createCommandCapture(ownedNames?: Set<string>): CommandCapturePort {
+  return createCommandCaptureEngine(ownedNames !== undefined ? { ownedNames } : {});
 }
 
 /** Structural view `wrapCommandApi` casts a `CommandCapturePort` to — sound because any capture it
@@ -434,7 +443,11 @@ async function runCaptured(
  * invocation was never claimed — e.g. a human typing the same command on the terminal) is the
  * exact original passthrough, unchanged.
  */
-export function wrapCommandApi<T extends ExtensionAPI>(pi: T, getCapture: () => CommandCapturePort | undefined): T {
+export function wrapCommandApi<T extends ExtensionAPI>(
+  pi: T,
+  getCapture: () => CommandCapturePort | undefined,
+  ownedNames?: Set<string>,
+): T {
   return new Proxy(pi, {
     get(target, property) {
       if (property !== "registerCommand") {
@@ -450,6 +463,7 @@ export function wrapCommandApi<T extends ExtensionAPI>(pi: T, getCapture: () => 
         name: string,
         command: Omit<RegisteredCommand, "name" | "sourceInfo">,
       ): unknown {
+        ownedNames?.add(name);
         const handler = command.handler;
         if (typeof handler !== "function") return Reflect.apply(register, target, [name, command]);
         const wrapped = {

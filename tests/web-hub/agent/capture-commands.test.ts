@@ -129,6 +129,7 @@ describe("createCommandCaptureEngine — arm/take/settleArm claiming (§4.9 poin
     const now = { t: 0 };
     const engine = createCommandCaptureEngine({ now: () => now.t });
     const inv = invocationOf({ deadlineAt: 10_000 });
+    engine.registerOwned(inv.name);
     engine.arm(inv);
     engine.settleArm(); // never taken synchronously (the "settle-deferred" case)
     expect(engine.take(inv.name, inv.args)).toEqual(inv); // claimed later, from the queue
@@ -150,6 +151,7 @@ describe("createCommandCaptureEngine — arm/take/settleArm claiming (§4.9 poin
       const now = { t: 0 };
       const engine = createCommandCaptureEngine({ now: () => now.t });
       const inv = invocationOf({ deadlineAt: 100_000 }); // deadline far away ⇒ ttl caps at 5s
+      engine.registerOwned(inv.name);
       engine.arm(inv);
       engine.settleArm();
       now.t = 4_000;
@@ -166,6 +168,7 @@ describe("createCommandCaptureEngine — arm/take/settleArm claiming (§4.9 poin
       const now = { t: 0 };
       const engine = createCommandCaptureEngine({ now: () => now.t });
       const inv = invocationOf({ deadlineAt: 100_000 });
+      engine.registerOwned(inv.name);
       engine.arm(inv);
       engine.settleArm();
       now.t = 5_001;
@@ -182,6 +185,7 @@ describe("createCommandCaptureEngine — arm/take/settleArm claiming (§4.9 poin
       const now = { t: 0 };
       const engine = createCommandCaptureEngine({ now: () => now.t });
       const inv = invocationOf({ deadlineAt: 2_000 }); // only 2s left, below the 5s ceiling
+      engine.registerOwned(inv.name);
       engine.arm(inv);
       engine.settleArm();
       now.t = 2_001;
@@ -196,23 +200,40 @@ describe("createCommandCaptureEngine — arm/take/settleArm claiming (§4.9 poin
     const now = { t: 5_000 };
     const engine = createCommandCaptureEngine({ now: () => now.t });
     const inv = invocationOf({ deadlineAt: 1_000 }); // deadline already in the past
+    engine.registerOwned(inv.name);
     engine.arm(inv);
     engine.settleArm();
     expect(engine.take(inv.name, inv.args)).toBeUndefined();
   });
 
-  it("owns(name) is true once a name has been armed, false for anything never armed", () => {
+  it("owns(name) reflects real registerCommand-time registration, never arm() history", () => {
     const engine = createCommandCaptureEngine();
     expect(engine.owns("mycmd")).toBe(false);
-    engine.arm(invocationOf({ name: "mycmd" }));
+    engine.arm(invocationOf({ name: "mycmd" })); // arming alone must NOT establish ownership
+    expect(engine.owns("mycmd")).toBe(false);
+    engine.registerOwned("mycmd");
     expect(engine.owns("mycmd")).toBe(true);
     expect(engine.owns("othercmd")).toBe(false);
+  });
+
+  it("a third-party command sharing a toolkit-armed name (never registered through the wrapper) is not falsely owned: settleArm() drops it instead of queueing it, and a later take() never claims it", () => {
+    const now = { t: 0 };
+    const engine = createCommandCaptureEngine({ now: () => now.t });
+    // Simulates the review scenario: the (future) web dispatcher arms an invocation for a name it
+    // believes is pi-toolkit's own, but no `registerCommand` call through `wrapCommandApi` ever
+    // actually claimed that name (a third-party extension registered it directly on the raw `pi`).
+    const collide = invocationOf({ name: "collide", deadlineAt: 10_000 });
+    expect(engine.owns("collide")).toBe(false);
+    engine.arm(collide);
+    engine.settleArm();
+    expect(engine.take(collide.name, collide.args)).toBeUndefined(); // never queued, never claimed
   });
 
   it("FIFO: two queued invocations of the same name+args are claimed in arrival order", () => {
     const now = { t: 0 };
     const engine = createCommandCaptureEngine({ now: () => now.t });
     const first = invocationOf({ cmdId: "c1", deadlineAt: 10_000 });
+    engine.registerOwned(first.name);
     engine.arm(first);
     engine.settleArm();
     const second = invocationOf({ cmdId: "c2", deadlineAt: 10_000 });
@@ -234,8 +255,9 @@ describe("wrapCommandApi captured path — the real ctx/ui table (§4.9 point 4/
       setTitle: [],
     };
     const api = fakeApi();
-    const engine = createCommandCaptureEngine();
-    const pi = wrapCommandApi(api, () => engine);
+    const ownedNames = new Set<string>();
+    const engine = createCommandCaptureEngine({ ownedNames });
+    const pi = wrapCommandApi(api, () => engine, ownedNames);
     return { recorder, api, engine, pi };
   }
 
