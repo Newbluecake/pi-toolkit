@@ -18,7 +18,23 @@
  */
 import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
 import type { HostTokenRejectReason, LanOffReason, LanStatus } from "../protocol/lan.js";
-import type { AgentId, FleetRowWire, SessionInfo, StatusInfo, WireEntry, WireEvent } from "../protocol/messages.js";
+import type {
+  AgentId,
+  CmdData,
+  CmdErrorCode,
+  CmdFrame,
+  CmdOp,
+  CmdResultFrame,
+  CommandInfoWire,
+  DialogClosedWire,
+  DialogWire,
+  CtlItemWire,
+  FleetRowWire,
+  SessionInfo,
+  StatusInfo,
+  WireEntry,
+  WireEvent,
+} from "../protocol/messages.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { PROTO } from "../protocol/version.js";
 import type { Scope } from "./lifecycle.js";
@@ -371,7 +387,17 @@ export type HubEvent =
   | { type: "fleet"; agentKey: string; runs: FleetRowWire[] }
   | { type: "prompt"; agentKey: string; prompts: AgentCard["prompts"] }
   | { type: "gap"; agentKey: string; fromSeq: number }
-  | { type: "append"; agentKey: string; entries: WireEntry[] };
+  | { type: "append"; agentKey: string; entries: WireEntry[] }
+  // §3.2/§6.6 (C0 P0 fix): the four control-plane bus events every future package (C1/C3) needs
+  // to publish from `registry.onFrame`'s `dialogs`/`ctl`/`commands`/`cmd_result`(late) cases and
+  // `http.ts`'s `onHubEvent` needs to forward as SSE — shapes pinned to §6.6's documented SSE
+  // payloads (`dialogs{agentKey,epoch,open,closed}`, `ctl{agentKey,epoch,sessionId,items}`,
+  // `commands{agentKey,epoch,items}`, `cmd_late{agentKey,id,op,ok,code?,data?}`); never carries
+  // `CommandOutputWire`'s `output` (§4.9/§6.6: never broadcast over SSE).
+  | { type: "dialogs"; agentKey: string; epoch: string; open: DialogWire[]; closed: DialogClosedWire[] }
+  | { type: "ctl"; agentKey: string; epoch: string; sessionId: string; items: CtlItemWire[] }
+  | { type: "commands"; agentKey: string; epoch: string; items: CommandInfoWire[] }
+  | { type: "cmd_late"; agentKey: string; id: string; op: CmdOp; ok: boolean; code?: CmdErrorCode; data?: CmdData };
 
 export interface HubBus {
   subscribe(fn: (e: HubEvent) => void): () => void;
@@ -399,10 +425,7 @@ export interface HubInfo {
 }
 
 export interface CommandRouter {
-  request(
-    frame: import("../protocol/messages.js").CmdFrame,
-    agentKey: string,
-  ): Promise<import("../protocol/messages.js").CmdResultFrame>;
+  request(frame: CmdFrame, agentKey: string): Promise<CmdResultFrame>;
   drain(): Promise<{ inflight: number; timedOut: boolean }>;
   inflight(): number;
 }
@@ -417,6 +440,13 @@ export interface FrontendDeps {
   info: () => HubInfo;
   now: () => number;
   lan?: LanFrontendDeps;
+  /** §6.1 (C0 P0 fix): hub's command router (`hub/commands.ts`'s `createCommandRouter()` at C0 —
+   * a fast-path stub that always answers `E_UNSUPPORTED`, never broadcasts new caps; C3 replaces
+   * it with the real §6.3 gated implementation). Optional so a `FrontendFactory` that ignores it
+   * (or a test double) keeps `createHttpFrontend`'s existing behavior (no `/api/cmd` wiring,
+   * 501/404 unchanged) byte-identical — `hub.ts`'s `startHub` constructs the C0 stub and passes
+   * it through unconditionally (zero visible change: reading this key is opt-in for the factory). */
+  commands?: CommandRouter;
   /** vue-plan.md v2.1 §2.1/§5.2（P5b）：Vue UI 服务；省略时 `createHttpFrontend` 自建
    * （`config.home`/`config.pluginVersion` 构造 `buildUiCandidates` + `createUiServer`），可注入
    * 以便测试 helper 与 `hub.ts` 共享同一实例、把其 `status()` 灌进 `hub.json` 的 `ui` 字段。 */

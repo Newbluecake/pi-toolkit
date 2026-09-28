@@ -16,13 +16,16 @@ import type { RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type {
   ConnGuard,
   ConnLease,
+  CommandRouter,
   FrontendDeps,
   HubConfig,
+  HubEvent,
   KdfAdmissionPort,
   LanStorePort,
   LanUserSummary,
   PortOptions,
 } from "../../../src/web-hub/hub/ports.js";
+import type { CommandRouter as CommandsCommandRouter } from "../../../src/web-hub/hub/commands.js";
 import type { SseEventName } from "../../../src/web-hub/hub/sse.js";
 import type { FenceLoss, SingletonResult } from "../../../src/web-hub/hub/singleton.js";
 import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
@@ -180,5 +183,51 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
     expectTypeOf<Shutdown["reason"]>().toEqualTypeOf<"restart" | "stop">();
     type Rotate = Extract<HubCtlFrame, { op: "rotate_token" }>;
     expectTypeOf<Rotate>().not.toHaveProperty("reason");
+  });
+
+  it("HubEvent includes dialogs/ctl/commands/cmd_late (todo #32 P0 fix, plan §3.2/§6.1/§6.6)", () => {
+    expectTypeOf<HubEvent["type"]>().toEqualTypeOf<
+      | "agent_up"
+      | "agent_down"
+      | "agent_stale"
+      | "session"
+      | "ev"
+      | "status"
+      | "fleet"
+      | "prompt"
+      | "gap"
+      | "append"
+      | "dialogs"
+      | "ctl"
+      | "commands"
+      | "cmd_late"
+    >();
+    // §6.6's documented SSE payload shapes, pinned on the bus event itself.
+    type Dialogs = Extract<HubEvent, { type: "dialogs" }>;
+    expectTypeOf<Dialogs>().toHaveProperty("agentKey");
+    expectTypeOf<Dialogs>().toHaveProperty("epoch");
+    expectTypeOf<Dialogs>().toHaveProperty("open");
+    expectTypeOf<Dialogs>().toHaveProperty("closed");
+    type Ctl = Extract<HubEvent, { type: "ctl" }>;
+    expectTypeOf<Ctl>().toHaveProperty("sessionId");
+    expectTypeOf<Ctl>().toHaveProperty("items");
+    type Commands = Extract<HubEvent, { type: "commands" }>;
+    expectTypeOf<Commands>().toHaveProperty("items");
+    type CmdLate = Extract<HubEvent, { type: "cmd_late" }>;
+    expectTypeOf<CmdLate["op"]>().not.toBeUnknown();
+    expectTypeOf<CmdLate["ok"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<CmdLate["code"]>().toEqualTypeOf<CmdErrorCode | undefined>();
+  });
+
+  it("FrontendDeps.commands is an optional CommandRouter (todo #32 P0 fix, plan §6.1)", () => {
+    expectTypeOf<FrontendDeps>().toHaveProperty("commands");
+    expectTypeOf<undefined>().toMatchTypeOf<FrontendDeps["commands"]>();
+    expectTypeOf<CommandRouter>().toMatchTypeOf<NonNullable<FrontendDeps["commands"]>>();
+  });
+
+  it("hub/commands.ts's CommandRouter is the SAME type as ports.ts's, not a competing duplicate (unified §6.1 signature)", () => {
+    expectTypeOf<CommandsCommandRouter>().toEqualTypeOf<CommandRouter>();
+    // both call it `request`, not `run` — a signature mismatch here would fail to compile.
+    expectTypeOf<CommandRouter["request"]>().not.toBeUnknown();
   });
 });

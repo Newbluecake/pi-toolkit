@@ -26,6 +26,7 @@ import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity }
 import { PROTO } from "../protocol/version.js";
 import { createAdminHandler } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
+import { createCommandRouter } from "./commands.js";
 import { createHistoryService } from "./history.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
@@ -209,6 +210,10 @@ export async function startHub(
       info: () => info,
       now,
       onUiStatus: (s) => hubJson.patchUi(s),
+      // §6.1 (C0 P0 fix): constructed here so the frontend factory can reach it via
+      // `FrontendDeps.commands` — today's stub always answers `E_UNSUPPORTED` and is never read
+      // by `createHttpFrontend` (zero visible change); C3 replaces `createCommandRouter()`'s body.
+      commands: createCommandRouter(),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
