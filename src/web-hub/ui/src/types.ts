@@ -84,6 +84,11 @@ export interface AgentState {
   readonly paging: boolean;
   readonly needsResync: boolean;
   readonly sub: Sub | null;
+  readonly dialogs?: { epoch: string; open: readonly unknown[]; closed: readonly unknown[] };
+  readonly queue?: readonly unknown[];
+  readonly pendingCtl?: readonly unknown[];
+  readonly ctl?: readonly unknown[];
+  readonly commands?: readonly unknown[];
 }
 
 /** Mirrors `@logic/state.js`'s `State` typedef (renamed to avoid colliding with the DOM global). */
@@ -95,6 +100,13 @@ export interface HubState {
   readonly selected: string | null;
   readonly agents: ReadonlyMap<string, AgentState>;
   readonly order: readonly string[];
+  readonly control?: boolean;
+  readonly hubState?: "running" | "stopping" | "restarting";
+  readonly nextVersion?: string;
+  readonly supersedePending?: boolean;
+  readonly supersedeDeadlineAt?: number;
+  readonly forced?: boolean;
+  readonly draining?: boolean;
 }
 
 /**
@@ -104,8 +116,31 @@ export interface HubState {
  * `dispatch` feeds every local UI event `@logic/state.js`'s `LOCAL_EVENTS` (plus the P1-added
  * `"route"`) understands — components never call the reducer directly.
  */
+export interface CmdOutcome {
+  readonly ok: boolean;
+  readonly data?: unknown;
+  readonly error?: string;
+  readonly message?: string;
+  readonly retryable?: boolean;
+  readonly effect?: "none" | "unknown";
+}
+export interface ControlHandle {
+  sendPrompt(agentKey: string, text: string, deliver: "steer" | "followUp"): Promise<CmdOutcome>;
+  abort(agentKey: string): Promise<CmdOutcome>;
+  steerSub(agentKey: string, runId: string, text: string): Promise<CmdOutcome>;
+  stopSub(agentKey: string, runId: string): Promise<CmdOutcome>;
+  answerDialog(agentKey: string, dialogId: string, epoch: string, answers: unknown): Promise<CmdOutcome>;
+  cancelDialog(agentKey: string, dialogId: string, epoch: string): Promise<CmdOutcome>;
+  runCommand(agentKey: string, name: string, args: string, opts?: { confirm?: true }): Promise<CmdOutcome>;
+  query(agentKey: string, id: string): Promise<CmdOutcome>;
+  retry(agentKey: string, id: string): Promise<CmdOutcome>;
+  discard(agentKey: string, id: string): void;
+  draft(agentKey: string): string;
+  setDraft(agentKey: string, text: string): void;
+}
 export interface HubHandle {
   readonly state: Readonly<Ref<HubState>>;
+  readonly control?: ControlHandle;
   dispatch(msg: { event: string; data?: unknown; id?: number }): void;
 }
 

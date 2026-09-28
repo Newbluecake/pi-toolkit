@@ -269,6 +269,14 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     path: "webHub.nodeLoader",
     description: "web-hub: explicit jiti-cli path override (escape hatch when pi bundles no jiti)",
   },
+  "webHub.control": bool("webHub.control", "web-hub: accept browser control commands"),
+  "webHub.remoteAskUser": bool("webHub.remoteAskUser", "web-hub: allow browser ask_user answers"),
+  "webHub.webCommands": bool("webHub.webCommands", "web-hub: allow browser slash commands"),
+  "webHub.webCommandPolicy": {
+    kind: "string",
+    path: "webHub.webCommandPolicy",
+    description: "web-hub: JSON command policy overrides (allow|confirm|deny)",
+  },
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
   // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`

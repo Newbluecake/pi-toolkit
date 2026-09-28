@@ -30,6 +30,39 @@ export interface TransportHooks {
  * module stays free of a hard `@protocol` dependency so it can be typechecked standalone;
  * `Result<import("@protocol/http-contract.js").HistoryPayload>` is what call sites actually use.
  */
+export interface CmdRequest {
+  agentKey: string;
+  id: string;
+  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command";
+  text?: string;
+  deliver?: "steer" | "followUp";
+  runId?: string;
+  name?: string;
+  args?: string;
+  confirm?: true;
+  expect?: { sessionId?: string };
+  queryOnly?: true;
+}
+export interface DialogRequest {
+  agentKey: string;
+  id: string;
+  dialogId: string;
+  epoch: string;
+  action: "answer" | "cancel";
+  answers?: readonly { selected: readonly string[]; other: string | null }[];
+  queryOnly?: true;
+}
+export type CmdOutcome =
+  | { readonly ok: true; readonly data?: unknown; readonly dup?: boolean }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly message?: string;
+      readonly retryable: boolean;
+      readonly retryAfterS?: number;
+      readonly effect?: "none" | "unknown";
+    };
+
 export interface HubTransport {
   readonly mode: "token" | "password";
   start(): Promise<void>;
@@ -37,6 +70,8 @@ export interface HubTransport {
   subscribe(clientId: string, agentKey: string): Promise<{ ok: boolean; error?: string }>;
   unsubscribe(clientId: string, agentKey: string): Promise<void>;
   page<T = unknown>(agentKey: string, before: string, limit?: number): Promise<Result<T>>;
+  command(req: CmdRequest): Promise<CmdOutcome>;
+  dialog(req: DialogRequest): Promise<CmdOutcome>;
 }
 
 /** `@logic/password-client.js`'s `login()` return shape (JSDoc-documented there; mirrored here). */

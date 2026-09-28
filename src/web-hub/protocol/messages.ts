@@ -64,6 +64,15 @@ export interface SessionInfo {
   mode: "tui" | "rpc";
 }
 
+export interface QueueItemWire {
+  id: string;
+  text: string;
+  deliver: "steer" | "followUp";
+  source: "web" | "tui" | "extension";
+  cmdId?: string;
+  at: number;
+}
+
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -71,6 +80,8 @@ export interface StatusInfo {
   contextUsage?: { tokens: number; contextWindow: number; percent: number };
   costUsd?: number;
   subagentCostUsd?: number;
+  queue?: QueueItemWire[];
+  queueDropped?: string[];
 }
 
 export interface FleetRowWire {
@@ -133,6 +144,177 @@ export interface SnapshotReplyBody {
   fleet: FleetRowWire[];
 }
 
+// ---------------------------------------------------------------------------
+// P2 control-plane frames (§3.2). These are additive to the P1 wire surface.
+// ---------------------------------------------------------------------------
+export type CmdOp =
+  "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "dialog_answer" | "dialog_cancel" | "command";
+
+export interface CmdOrigin {
+  listener: "loopback" | "lan";
+  ip: string;
+  user?: string;
+  reqId: string;
+}
+export interface CmdExpect {
+  sessionId?: string;
+}
+export interface DialogAnswerWire {
+  selected: string[];
+  other: string | null;
+}
+export interface AskUserOptionWire {
+  label: string;
+  description?: string;
+}
+export interface AskUserQuestionWire {
+  question: string;
+  header?: string;
+  context?: string;
+  options: AskUserOptionWire[];
+  multiSelect?: boolean;
+  allowOther?: boolean;
+}
+export type CmdArgs =
+  | { op: "prompt"; text: string; deliver: "steer" | "followUp"; expect?: CmdExpect }
+  | { op: "abort"; expect?: CmdExpect }
+  | { op: "steer_subagent"; runId: string; text: string }
+  | { op: "abort_subagent"; runId: string }
+  | { op: "dialog_answer"; dialogId: string; epoch: string; answers: DialogAnswerWire[] }
+  | { op: "dialog_cancel"; dialogId: string; epoch: string }
+  | { op: "command"; name: string; args: string; confirm?: true; deliver?: "steer" | "followUp"; expect?: CmdExpect };
+export interface CommandOutputEntry {
+  kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
+  level?: "info" | "warning" | "error";
+  key?: string;
+  title?: string;
+  text: string;
+  clipped?: true;
+}
+export interface CommandOutputWire {
+  entries: CommandOutputEntry[];
+  truncated?: { droppedEntries: number; droppedBytes: number };
+  needsTerminal?: true;
+}
+export type PromptDelivery = "observed" | "unobserved";
+export type CmdData =
+  | { op: "prompt"; delivery: PromptDelivery; behavior?: "idle" | "steer" | "followUp" }
+  | { op: "abort"; wasBusy: boolean }
+  | { op: "steer_subagent" }
+  | { op: "abort_subagent"; escalatedTo?: "L2" | "L3" | "L4"; alreadyTerminal?: boolean }
+  | { op: "dialog_answer" | "dialog_cancel" }
+  | {
+      op: "command";
+      kind: "extension" | "template" | "builtin";
+      completion: "sync" | "async" | "unknown" | "timeout";
+      captured?: boolean;
+      output?: CommandOutputWire;
+    }
+  | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody };
+export type CmdErrorCode =
+  | "E_UNSUPPORTED"
+  | "E_STALE_CTX"
+  | "E_BUSY_COMPACTING"
+  | "E_BUSY_STEER"
+  | "E_SESSION_CHANGED"
+  | "E_BAD_REQUEST"
+  | "E_NOT_FOUND"
+  | "E_UNKNOWN_ID"
+  | "E_NOT_RUNNING"
+  | "E_SUBAGENT_REJECTED"
+  | "E_DIALOG_CLOSED"
+  | "E_BAD_ANSWER"
+  | "E_UNKNOWN_COMMAND"
+  | "E_COMMAND_DENIED"
+  | "E_CONFIRM_REQUIRED"
+  | "E_DEADLINE"
+  | "E_HUB_RESTARTING";
+export type CmdEffect = "none" | "unknown";
+export type CmdResultBody =
+  | { ok: true; dup?: true; data: CmdData }
+  | { ok: false; code: CmdErrorCode; message?: string; retryable: boolean; effect: CmdEffect };
+export interface CmdFrame {
+  t: "cmd";
+  rid: string;
+  id: string;
+  deadlineMs: number;
+  origin: CmdOrigin;
+  queryOnly?: true;
+  retry?: true;
+  cmd: CmdArgs;
+}
+export type CmdResultFrame = { t: "cmd_result"; rid: string; id: string } & CmdResultBody;
+export type CmdLateFrame = { t: "cmd_late"; id: string; op: CmdOp; at: number } & CmdResultBody;
+export interface DialogWire {
+  dialogId: string;
+  source: "ask_user";
+  toolCallId: string;
+  questions: AskUserQuestionWire[];
+  allowCancel: boolean;
+  openedAt: number;
+}
+export interface DialogClosedWire {
+  dialogId: string;
+  by: "tui" | "web" | "abort" | "session" | "error";
+  outcome: "answered" | "cancelled" | "aborted";
+  cmdId?: string;
+  at: number;
+}
+export interface DialogsFrame {
+  t: "dialogs";
+  epoch: string;
+  open: DialogWire[];
+  closed: DialogClosedWire[];
+}
+export interface CtlItemWire {
+  cmdId: string;
+  op: CmdOp;
+  state:
+    | "dispatched"
+    | "observed"
+    | "started"
+    | "queued"
+    | "consumed"
+    | "dropped"
+    | "unconfirmed"
+    | "running"
+    | "ok"
+    | "failed"
+    | "late_ok"
+    | "late_failed";
+  behavior?: "idle" | "steer" | "followUp";
+  reason?: "unobserved" | "not-started" | "not-delivered" | "session" | "timeout";
+  code?: CmdErrorCode;
+  at: number;
+  updatedAt: number;
+}
+export interface CtlFrame {
+  t: "ctl";
+  epoch: string;
+  sessionId: string;
+  items: CtlItemWire[];
+}
+export interface CommandInfoWire {
+  name: string;
+  kind: "extension" | "template" | "skill" | "builtin";
+  description?: string;
+  policy: "allow" | "confirm" | "deny";
+  policyBusy?: "allow" | "confirm" | "deny";
+  output?: "captured" | "terminal";
+}
+export interface CommandsFrame {
+  t: "commands";
+  epoch: string;
+  items: CommandInfoWire[];
+}
+export interface SupersededFrame {
+  t: "superseded";
+  nextVersion: string;
+  yieldMs: number;
+  forced?: true;
+  openDialogs?: number;
+}
+
 // agent→hub
 export type AgentFrame =
   | {
@@ -159,6 +341,11 @@ export type AgentFrame =
   | { t: "gap"; fromSeq: number }
   | { t: "ping"; ts: number }
   | { t: "pong"; ts: number }
+  | CmdResultFrame
+  | CmdLateFrame
+  | DialogsFrame
+  | CtlFrame
+  | CommandsFrame
   | LanReqFrame
   | HubCtlFrame;
 
@@ -169,16 +356,14 @@ export type LanReqFrame =
   | { t: "lan_req"; rid: string; op: "passwd"; username: string; password: string }
   | { t: "lan_req"; rid: string; op: "unlock" };
 
-export interface HubCtlFrame {
-  t: "hub_ctl";
-  rid: string;
-  op: "shutdown";
-  reason: "restart";
-}
+export type HubCtlFrame =
+  | { t: "hub_ctl"; rid: string; op: "shutdown"; reason: "restart" | "stop" }
+  | { t: "hub_ctl"; rid: string; op: "rotate_token" };
 
 export interface HubCtlAckFrame {
   t: "hub_ctl_ack";
   rid: string;
+  revoked?: { loopback: number; lan: number };
 }
 
 /** `lan_res{ok:true}.info` (§8.1); `lan` 字段是 `hub.json.lan` 同样的 `LanStatus`（定义在 `protocol/lan.ts`，避免与 `hub/ports.ts` 循环引用）。 */
@@ -209,6 +394,8 @@ export type HubFrame =
   | { t: "hello_reject"; code: "E_PROTO" | "E_BAD_HELLO" | "E_TICKET"; message: string; retryAfterMs: number }
   | { t: "snapshot_req"; rid: string }
   | { t: "branch_req"; rid: string; maxBytes: number }
+  | CmdFrame
+  | SupersededFrame
   | { t: "ping"; ts: number }
   | { t: "pong"; ts: number }
   | LanResFrame
@@ -280,6 +467,17 @@ const SessionInfoSchema = Type.Object({
   mode: Type.Union([Type.Literal("tui"), Type.Literal("rpc")]),
 });
 
+const QueueItemSchema = Type.Object(
+  {
+    id: Type.String(),
+    text: Type.String(),
+    deliver: Type.Union([Type.Literal("steer"), Type.Literal("followUp")]),
+    source: Type.Union([Type.Literal("web"), Type.Literal("tui"), Type.Literal("extension")]),
+    cmdId: Type.Optional(Type.String()),
+    at: Type.Number(),
+  },
+  { additionalProperties: false },
+);
 const StatusInfoSchema = Type.Object({
   leafId: Type.Union([Type.String(), Type.Null()]),
   busy: Type.Boolean(),
@@ -289,6 +487,8 @@ const StatusInfoSchema = Type.Object({
   ),
   costUsd: Type.Optional(Type.Number()),
   subagentCostUsd: Type.Optional(Type.Number()),
+  queue: Type.Optional(Type.Array(QueueItemSchema)),
+  queueDropped: Type.Optional(Type.Array(Type.String())),
 });
 
 const FleetRowSchema = Type.Object({
@@ -445,20 +645,314 @@ const LanReqUnlockSchema = Type.Object(
 );
 const LanReqSchema = Type.Union([LanReqInfoSchema, LanReqPasswdSchema, LanReqUnlockSchema]);
 
-const HubCtlSchema = Type.Object(
-  {
-    t: Type.Literal("hub_ctl"),
-    rid: Type.String(),
-    op: Type.Literal("shutdown"),
-    reason: Type.Literal("restart"),
-  },
-  { additionalProperties: false },
-);
+const HubCtlSchema = Type.Union([
+  Type.Object(
+    {
+      t: Type.Literal("hub_ctl"),
+      rid: Type.String(),
+      op: Type.Literal("shutdown"),
+      reason: Type.Union([Type.Literal("restart"), Type.Literal("stop")]),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { t: Type.Literal("hub_ctl"), rid: Type.String(), op: Type.Literal("rotate_token") },
+    { additionalProperties: false },
+  ),
+]);
 
 const HubCtlAckSchema = Type.Object(
   {
     t: Type.Literal("hub_ctl_ack"),
     rid: Type.String(),
+    revoked: Type.Optional(Type.Object({ loopback: Type.Integer(), lan: Type.Integer() })),
+  },
+  { additionalProperties: false },
+);
+
+const CmdOriginSchema = Type.Object(
+  {
+    listener: Type.Union([Type.Literal("loopback"), Type.Literal("lan")]),
+    ip: Type.String(),
+    user: Type.Optional(Type.String()),
+    reqId: Type.String(),
+  },
+  { additionalProperties: false },
+);
+const CmdExpectSchema = Type.Object({ sessionId: Type.Optional(Type.String()) }, { additionalProperties: false });
+const DialogAnswerSchema = Type.Object(
+  { selected: Type.Array(Type.String()), other: Type.Union([Type.String(), Type.Null()]) },
+  { additionalProperties: false },
+);
+const CommandOutputEntrySchema = Type.Object(
+  {
+    kind: Type.Union([
+      Type.Literal("notify"),
+      Type.Literal("widget"),
+      Type.Literal("status"),
+      Type.Literal("text"),
+      Type.Literal("error"),
+      Type.Literal("interactive"),
+    ]),
+    level: Type.Optional(Type.Union([Type.Literal("info"), Type.Literal("warning"), Type.Literal("error")])),
+    key: Type.Optional(Type.String()),
+    title: Type.Optional(Type.String()),
+    text: Type.String(),
+    clipped: Type.Optional(Type.Literal(true)),
+  },
+  { additionalProperties: false },
+);
+const CommandOutputSchema = Type.Object(
+  {
+    entries: Type.Array(CommandOutputEntrySchema),
+    truncated: Type.Optional(Type.Object({ droppedEntries: Type.Integer(), droppedBytes: Type.Integer() })),
+    needsTerminal: Type.Optional(Type.Literal(true)),
+  },
+  { additionalProperties: false },
+);
+const PromptArgsSchema = Type.Object(
+  {
+    op: Type.Literal("prompt"),
+    text: Type.String(),
+    deliver: Type.Union([Type.Literal("steer"), Type.Literal("followUp")]),
+    expect: Type.Optional(CmdExpectSchema),
+  },
+  { additionalProperties: false },
+);
+const AbortArgsSchema = Type.Object(
+  { op: Type.Literal("abort"), expect: Type.Optional(CmdExpectSchema) },
+  { additionalProperties: false },
+);
+const SteerArgsSchema = Type.Object(
+  { op: Type.Literal("steer_subagent"), runId: Type.String(), text: Type.String() },
+  { additionalProperties: false },
+);
+const StopArgsSchema = Type.Object(
+  { op: Type.Literal("abort_subagent"), runId: Type.String() },
+  { additionalProperties: false },
+);
+const DialogAnswerArgsSchema = Type.Object(
+  {
+    op: Type.Literal("dialog_answer"),
+    dialogId: Type.String(),
+    epoch: Type.String(),
+    answers: Type.Array(DialogAnswerSchema),
+  },
+  { additionalProperties: false },
+);
+const DialogCancelArgsSchema = Type.Object(
+  { op: Type.Literal("dialog_cancel"), dialogId: Type.String(), epoch: Type.String() },
+  { additionalProperties: false },
+);
+const CommandArgsSchema = Type.Object(
+  {
+    op: Type.Literal("command"),
+    name: Type.String({ pattern: "^[A-Za-z0-9:_.-]{1,64}$" }),
+    args: Type.String(),
+    confirm: Type.Optional(Type.Literal(true)),
+    deliver: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")])),
+    expect: Type.Optional(CmdExpectSchema),
+  },
+  { additionalProperties: false },
+);
+const CmdSchema = Type.Object(
+  {
+    t: Type.Literal("cmd"),
+    rid: Type.String(),
+    id: Type.String({ pattern: "^[A-Za-z0-9_-]{16,64}$" }),
+    deadlineMs: Type.Number(),
+    origin: CmdOriginSchema,
+    queryOnly: Type.Optional(Type.Literal(true)),
+    retry: Type.Optional(Type.Literal(true)),
+    cmd: Type.Union([
+      PromptArgsSchema,
+      AbortArgsSchema,
+      SteerArgsSchema,
+      StopArgsSchema,
+      DialogAnswerArgsSchema,
+      DialogCancelArgsSchema,
+      CommandArgsSchema,
+    ]),
+  },
+  { additionalProperties: false },
+);
+const CmdDataSchema = Type.Unknown();
+const CmdResultSchema = Type.Union([
+  Type.Object(
+    {
+      t: Type.Literal("cmd_result"),
+      rid: Type.String(),
+      id: Type.String(),
+      ok: Type.Literal(true),
+      dup: Type.Optional(Type.Literal(true)),
+      data: CmdDataSchema,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      t: Type.Literal("cmd_result"),
+      rid: Type.String(),
+      id: Type.String(),
+      ok: Type.Literal(false),
+      code: Type.String(),
+      message: Type.Optional(Type.String()),
+      retryable: Type.Boolean(),
+      effect: Type.Union([Type.Literal("none"), Type.Literal("unknown")]),
+    },
+    { additionalProperties: false },
+  ),
+]);
+const CmdLateSchema = Type.Union([
+  Type.Object(
+    {
+      t: Type.Literal("cmd_late"),
+      id: Type.String(),
+      op: Type.String(),
+      at: Type.Number(),
+      ok: Type.Literal(true),
+      dup: Type.Optional(Type.Literal(true)),
+      data: CmdDataSchema,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      t: Type.Literal("cmd_late"),
+      id: Type.String(),
+      op: Type.String(),
+      at: Type.Number(),
+      ok: Type.Literal(false),
+      code: Type.String(),
+      message: Type.Optional(Type.String()),
+      retryable: Type.Boolean(),
+      effect: Type.Union([Type.Literal("none"), Type.Literal("unknown")]),
+    },
+    { additionalProperties: false },
+  ),
+]);
+const AskQuestionSchema = Type.Object(
+  {
+    question: Type.String(),
+    header: Type.Optional(Type.String()),
+    context: Type.Optional(Type.String()),
+    options: Type.Array(
+      Type.Object({ label: Type.String(), description: Type.Optional(Type.String()) }, { additionalProperties: false }),
+    ),
+    multiSelect: Type.Optional(Type.Boolean()),
+    allowOther: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+const DialogOpenSchema = Type.Object(
+  {
+    dialogId: Type.String(),
+    source: Type.Literal("ask_user"),
+    toolCallId: Type.String(),
+    questions: Type.Array(AskQuestionSchema),
+    allowCancel: Type.Boolean(),
+    openedAt: Type.Number(),
+  },
+  { additionalProperties: false },
+);
+const DialogClosedSchema = Type.Object(
+  {
+    dialogId: Type.String(),
+    by: Type.Union([
+      Type.Literal("tui"),
+      Type.Literal("web"),
+      Type.Literal("abort"),
+      Type.Literal("session"),
+      Type.Literal("error"),
+    ]),
+    outcome: Type.Union([Type.Literal("answered"), Type.Literal("cancelled"), Type.Literal("aborted")]),
+    cmdId: Type.Optional(Type.String()),
+    at: Type.Number(),
+  },
+  { additionalProperties: false },
+);
+const DialogsSchema = Type.Object(
+  {
+    t: Type.Literal("dialogs"),
+    epoch: Type.String(),
+    open: Type.Array(DialogOpenSchema),
+    closed: Type.Array(DialogClosedSchema),
+  },
+  { additionalProperties: false },
+);
+const CtlItemSchema = Type.Object(
+  {
+    cmdId: Type.String(),
+    op: Type.Union([
+      Type.Literal("prompt"),
+      Type.Literal("abort"),
+      Type.Literal("steer_subagent"),
+      Type.Literal("abort_subagent"),
+      Type.Literal("dialog_answer"),
+      Type.Literal("dialog_cancel"),
+      Type.Literal("command"),
+    ]),
+    state: Type.Union([
+      Type.Literal("dispatched"),
+      Type.Literal("observed"),
+      Type.Literal("started"),
+      Type.Literal("queued"),
+      Type.Literal("consumed"),
+      Type.Literal("dropped"),
+      Type.Literal("unconfirmed"),
+      Type.Literal("running"),
+      Type.Literal("ok"),
+      Type.Literal("failed"),
+      Type.Literal("late_ok"),
+      Type.Literal("late_failed"),
+    ]),
+    behavior: Type.Optional(Type.Union([Type.Literal("idle"), Type.Literal("steer"), Type.Literal("followUp")])),
+    reason: Type.Optional(
+      Type.Union([
+        Type.Literal("unobserved"),
+        Type.Literal("not-started"),
+        Type.Literal("not-delivered"),
+        Type.Literal("session"),
+        Type.Literal("timeout"),
+      ]),
+    ),
+    code: Type.Optional(Type.String()),
+    at: Type.Number(),
+    updatedAt: Type.Number(),
+  },
+  { additionalProperties: false },
+);
+const CtlSchema = Type.Object(
+  { t: Type.Literal("ctl"), epoch: Type.String(), sessionId: Type.String(), items: Type.Array(CtlItemSchema) },
+  { additionalProperties: false },
+);
+const CommandInfoSchema = Type.Object(
+  {
+    name: Type.String(),
+    kind: Type.Union([
+      Type.Literal("extension"),
+      Type.Literal("template"),
+      Type.Literal("skill"),
+      Type.Literal("builtin"),
+    ]),
+    description: Type.Optional(Type.String()),
+    policy: Type.Union([Type.Literal("allow"), Type.Literal("confirm"), Type.Literal("deny")]),
+    policyBusy: Type.Optional(Type.Union([Type.Literal("allow"), Type.Literal("confirm"), Type.Literal("deny")])),
+    output: Type.Optional(Type.Union([Type.Literal("captured"), Type.Literal("terminal")])),
+  },
+  { additionalProperties: false },
+);
+const CommandsSchema = Type.Object(
+  { t: Type.Literal("commands"), epoch: Type.String(), items: Type.Array(CommandInfoSchema) },
+  { additionalProperties: false },
+);
+const SupersededSchema = Type.Object(
+  {
+    t: Type.Literal("superseded"),
+    nextVersion: Type.String(),
+    yieldMs: Type.Number(),
+    forced: Type.Optional(Type.Literal(true)),
+    openDialogs: Type.Optional(Type.Integer()),
   },
   { additionalProperties: false },
 );
@@ -513,6 +1007,11 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   pong: PongSchema,
   lan_req: LanReqSchema,
   hub_ctl: HubCtlSchema,
+  cmd_result: CmdResultSchema,
+  cmd_late: CmdLateSchema,
+  dialogs: DialogsSchema,
+  ctl: CtlSchema,
+  commands: CommandsSchema,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -520,6 +1019,8 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   hello_reject: HelloRejectSchema,
   snapshot_req: SnapshotReqSchema,
   branch_req: BranchReqSchema,
+  cmd: CmdSchema,
+  superseded: SupersededSchema,
   ping: PingSchema,
   pong: PongSchema,
   lan_res: LanResSchema,

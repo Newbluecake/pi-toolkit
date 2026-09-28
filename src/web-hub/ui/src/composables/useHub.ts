@@ -20,6 +20,7 @@ import { initialState, needsSubscribe, reduce } from "@logic/state.js";
 import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
 import { createRenderGate, type RenderPriority } from "./renderGate.js";
 import type { HubTransport, TransportHooks } from "../transport/types.js";
+import { createControl } from "./useControl.js";
 import type { HubHandle, HubState } from "../types.js";
 
 /** Whatever `@logic/state.js`'s JSDoc `initialState()`/`reduce()` actually traffic in — kept
@@ -160,9 +161,11 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     onMessage: (msg) => dispatch(msg),
     onConn: (c) => dispatch({ event: "conn", data: { state: c } }),
   });
+  const control = createControl(transport, dispatch);
 
   return {
     state: state as Readonly<ShallowRef<HubState>>,
+    control,
     dispatch,
     transport,
     loadOlder,

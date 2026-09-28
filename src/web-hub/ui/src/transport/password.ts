@@ -53,6 +53,8 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     unsubscribe: (clientId, agentKey) => client.unsubscribe(clientId, agentKey),
     page: <T = unknown>(agentKey: string, before: string, limit?: number) =>
       client.page(agentKey, before, limit) as Promise<Result<T>>,
+    command: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
+    dialog: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
     login: (username, password) => client.login(username, password),
     logout: () => client.logout(),
   } satisfies PasswordTransport;

@@ -810,6 +810,10 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     port: 7878,
     idleExitMinutes: 10,
     nodeLoader: "",
+    control: true,
+    remoteAskUser: true,
+    webCommands: true,
+    webCommandPolicy: {},
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
   },
   webSearch: { enabled: true },
@@ -1475,12 +1479,34 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
   const idle = record.idleExitMinutes;
   const nodeLoader = record.nodeLoader;
   const resolvedPort = resolveWebHubPort(record);
+  const policy: Record<string, "allow" | "confirm" | "deny"> = {};
+  let rawPolicy: unknown = record.webCommandPolicy;
+  if (typeof rawPolicy === "string") {
+    try {
+      rawPolicy = JSON.parse(rawPolicy);
+    } catch {
+      rawPolicy = undefined;
+    }
+  }
+  if (rawPolicy !== null && typeof rawPolicy === "object" && !Array.isArray(rawPolicy)) {
+    for (const [key, value] of Object.entries(rawPolicy as Record<string, unknown>)) {
+      if (
+        /^[A-Za-z0-9:_.-]{1,64}(?: [A-Za-z0-9:_.-]{1,64})?$/.test(key) &&
+        (value === "allow" || value === "confirm" || value === "deny")
+      )
+        policy[key] = value;
+    }
+  }
   return {
     enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
     autoStart: typeof record.autoStart === "boolean" ? record.autoStart : defaults.autoStart,
     port: resolvedPort,
     idleExitMinutes: typeof idle === "number" && Number.isFinite(idle) && idle >= 1 ? idle : defaults.idleExitMinutes,
     nodeLoader: typeof nodeLoader === "string" ? nodeLoader : defaults.nodeLoader,
+    control: typeof record.control === "boolean" ? record.control : (defaults.control ?? true),
+    remoteAskUser: typeof record.remoteAskUser === "boolean" ? record.remoteAskUser : (defaults.remoteAskUser ?? true),
+    webCommands: typeof record.webCommands === "boolean" ? record.webCommands : (defaults.webCommands ?? true),
+    webCommandPolicy: policy,
     lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
   };
 }

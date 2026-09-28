@@ -81,11 +81,13 @@ import { createPromptSectionHub } from "./sysprompt/hub.js";
 import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sections.js";
 import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
+import { wrapCommandApi, type CommandCapturePort } from "./web-hub/agent/command-capture.js";
 import wireFeishuNotify from "./feishu-notify/index.js";
 import { wireSessionNav } from "./session-nav/index.js";
 import { wireDeferredReload, type DeferredReloadDeps } from "./reload/index.js";
 import type { DeferredReloadController } from "./reload/defer.js";
 import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
+import type { AskUserRemotePort } from "./ask-user/remote.js";
 import type { WorkflowQueryPort } from "./tools/workflow-target.js";
 
 /**
@@ -107,7 +109,9 @@ function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): SubagentExtens
  * ExtensionAPI). Tools close over a mutable holder so they always call
  * through to the current session's stack. session_shutdown drains bounded.
  */
-export default function activate(pi: ExtensionAPI): void {
+export default function activate(rawPi: ExtensionAPI): void {
+  const commandCaptureRef: { current?: CommandCapturePort } = {};
+  const pi = wrapCommandApi(rawPi, () => commandCaptureRef.current);
   // Merged plugins (plugin-merge) that must stay available in EVERY session,
   // child subagent sessions included — they register BEFORE the HOST_KEY
   // guard below. Settings here come from the read-only loader: the full
@@ -130,6 +134,7 @@ export default function activate(pi: ExtensionAPI): void {
   // the blast radius is limited to that instant's memory injection/write
   // gating and todo-nudge tracker gating, both with clear error copy.
   const isChildSession = Boolean(g[HOST_KEY]);
+  const askUserRemoteRef: { current?: () => AskUserRemotePort | undefined } = {};
 
   if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
   // todo-nudge (L1 feature): the tracker only turns on for the main session
@@ -273,7 +278,7 @@ export default function activate(pi: ExtensionAPI): void {
   // a doomed tool in every subagent's tool list. Deliberately placed BEFORE the
   // compat gate: ask_user is independent of the subagent core, so a disabled
   // core (bad pi version) must not take it down.
-  if (settings.askUser.enabled) wireAskUser(pi);
+  if (settings.askUser.enabled) wireAskUser(pi, { remote: () => askUserRemoteRef.current?.() });
 
   wireCacheTtl(pi, settings, {
     keepalive: () => holder.current?.keepalive,
@@ -849,6 +854,8 @@ export default function activate(pi: ExtensionAPI): void {
       settings: settings.webHub,
       fleet: () => holder.current?.query.list() ?? [],
     });
+    askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
+    if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;
     // §9.1/§2.4 diagnostic snapshot (invalid `extraHosts` tokens / `trustProxyFrom`↔`externalOrigins`
     // mismatch) — same non-live, activate-time capture as `settings` itself; without this the
     // production `/webhub status` never surfaced these settings-level warnings even though

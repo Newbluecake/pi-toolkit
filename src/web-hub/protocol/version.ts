@@ -7,20 +7,22 @@
  */
 
 /** Wire protocol version negotiated in `hello` / `hello_ack`. */
-export const PROTO = { major: 1, minor: 0 } as const;
+export const PROTO = { major: 1, minor: 1 } as const;
 
 /** Capabilities advertised by a P1 agent in `hello.caps`. */
 export const P1_CAPS = ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"] as const;
+export const P2_AGENT_CAPS = ["cmd.v1", "dialog.v1", "command.v1"] as const;
+export const P2_HUB_CAPS = ["cmd.v1", "dialog.v1", "command.v1", "ctl.v2"] as const;
 
-/** Frame types reserved for P2/P3. P1 decoders must ignore (return undefined for) them. */
-export const RESERVED_FRAME_TYPES = [
-  "cmd",
-  "cmd_result",
-  "dialog_open",
-  "dialog_closed",
-  "dialog_answer",
-  "superseded",
-] as const; // P2/P3，P1 解码时忽略
+/** D14: capability required before a control-plane slot is sent. */
+export const SLOT_REQUIRED_CAP = {
+  dialogs: "dialog.v1",
+  ctl: "cmd.v1",
+  commands: "command.v1",
+} as const;
+
+/** D1/D2: names are permanently reserved and must not be reused. */
+export const RESERVED_FRAME_TYPES = ["dialog_open", "dialog_closed", "dialog_answer"] as const;
 
 /**
  * Compare two semver strings by their core three segments (major.minor.patch).

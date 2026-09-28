@@ -15,6 +15,7 @@ import { HEADER_MAX_CHARS, InputSchema } from "./types.js";
 import { AskUserComponent } from "./component.js";
 import { answerValueText } from "./submit-view.js";
 import { validateInput } from "./validate.js";
+import type { AskUserRemotePort } from "./remote.js";
 
 /**
  * execute returns the SDK's normal tool result. Errors are thrown so Pi can
@@ -123,7 +124,10 @@ Don't:
 - Flattening question/header/options to the top level — wrap them in questions:[...].
 - Including an "Other" option — it is added automatically.`;
 
-export default function (pi: ExtensionAPI): void {
+export interface AskUserWireOptions {
+  remote?: () => AskUserRemotePort | undefined;
+}
+export default function (pi: ExtensionAPI, _opts?: AskUserWireOptions): void {
   pi.registerTool({
     name: "ask_user",
     label: "Ask User",

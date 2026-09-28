@@ -34,6 +34,8 @@ import type {
   AgentFrame,
   AgentId,
   AgentKind,
+  CmdFrame,
+  SupersededFrame,
   HubCtlAckFrame,
   HubCtlFrame,
   HubFrame,
@@ -44,7 +46,7 @@ import type {
 import { decodeHubFrame, LIMITS, TIMING } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import type { HubPaths } from "../protocol/paths.js";
-import { P1_CAPS, PROTO, protoCompatible } from "../protocol/version.js";
+import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, protoCompatible } from "../protocol/version.js";
 import type { WebHubSettings, WebHubStatusView } from "./index.js";
 import { type LauncherPlan, shouldSpawnHub } from "./launcher.js";
 
@@ -91,6 +93,8 @@ export interface BindingPort {
   onSnapshotReq(rid: string): void;
   onBranchReq(rid: string, maxBytes: number): void;
   onStateChange(v: WebHubStatusView): void;
+  onCmd?(frame: CmdFrame): void;
+  onSuperseded?(frame: SupersededFrame): void;
 }
 
 export interface HubConnection {
@@ -118,8 +122,11 @@ export interface HubConnection {
   readonly caps: readonly string[];
 }
 
-export type SlotKind = "session" | "status" | "fleet" | "prompts";
-const SLOT_ORDER: readonly SlotKind[] = ["session", "status", "fleet", "prompts"];
+export type SlotKind = "session" | "status" | "fleet" | "prompts" | "dialogs" | "ctl" | "commands";
+const SLOT_ORDER: readonly SlotKind[] = ["session", "status", "fleet", "prompts", "dialogs", "ctl", "commands"];
+function slotCap(kind: SlotKind): string | undefined {
+  return (SLOT_REQUIRED_CAP as Record<string, string | undefined>)[kind];
+}
 
 export interface AcquireOptions {
   buildId: string;
@@ -137,6 +144,7 @@ export interface AcquireOptions {
   spawn?: () => void;
   /** Jitter source (tests). */
   random?: () => number;
+  spawnBlocked?: () => boolean;
 }
 
 /**
@@ -316,7 +324,8 @@ class Connection implements HubConnection {
   setSlot(kind: SlotKind, frame: AgentFrame): void {
     try {
       this.slots.set(kind, frame);
-      if (this.link === "live") this.writeRaw(frame);
+      const required = slotCap(kind);
+      if (this.link === "live" && (required === undefined || this.helloCaps.includes(required))) this.writeRaw(frame);
     } catch {
       /* never throw */
     }
@@ -485,7 +494,13 @@ class Connection implements HubConnection {
         this.pingTimer.unref();
         for (const kind of SLOT_ORDER) {
           const slot = this.slots.get(kind);
-          if (slot !== undefined && this.socket === sock) this.writeRaw(slot);
+          const required = slotCap(kind);
+          if (
+            slot !== undefined &&
+            this.socket === sock &&
+            (required === undefined || this.helloCaps.includes(required))
+          )
+            this.writeRaw(slot);
         }
         this.flushGap();
         this.notify();
@@ -515,6 +530,23 @@ class Connection implements HubConnection {
         }
         return;
       }
+      case "cmd":
+        if (this.link !== "live") return;
+        if (this.binding?.onCmd !== undefined) this.callBinding((b) => b.onCmd?.(frame));
+        else
+          this.send({
+            t: "cmd_result",
+            rid: frame.rid,
+            id: frame.id,
+            ok: false,
+            code: "E_STALE_CTX",
+            retryable: true,
+            effect: "none",
+          });
+        return;
+      case "superseded":
+        this.callBinding((b) => b.onSuperseded?.(frame));
+        return;
       case "snapshot_req":
         if (this.link === "live") this.callBinding((b) => b.onSnapshotReq(frame.rid));
         return;
@@ -630,13 +662,15 @@ class Connection implements HubConnection {
   private maybeSpawn(now: number): boolean {
     const spawn = this.opts.spawn;
     if (spawn === undefined) return false;
-    const ok = shouldSpawnHub({
-      autoStart: this.opts.settings.autoStart,
-      headless: this.opts.headless === true,
-      launcherOk: !("error" in this.opts.launcher),
-      lastSpawnAt: this.lastSpawnAt,
-      now,
-    });
+    const ok =
+      this.opts.spawnBlocked?.() !== true &&
+      shouldSpawnHub({
+        autoStart: this.opts.settings.autoStart,
+        headless: this.opts.headless === true,
+        launcherOk: !("error" in this.opts.launcher),
+        lastSpawnAt: this.lastSpawnAt,
+        now,
+      });
     if (!ok) return false;
     this.lastSpawnAt = now;
     this.spawnWindowUntil = now + TIMING.spawnWindowMs;

@@ -240,6 +240,15 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const tokens = args.trim() === "" ? [] : args.trim().split(/\s+/);
       const sub = tokens[0] ?? "status";
+      if (sub === "__exec") {
+        const control = deps.control();
+        if (control === undefined) {
+          notify(ctx, "web-hub 未启用。", "warning");
+          return;
+        }
+        await control.internalExec(tokens.slice(1).join(" "), ctx);
+        return;
+      }
       if (sub !== "status" && !SUBCOMMANDS.has(sub)) {
         notify(ctx, USAGE, "warning");
         return;

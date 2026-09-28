@@ -52,14 +52,7 @@ describe("protoCompatible", () => {
 describe("constants", () => {
   it("P1_CAPS / RESERVED_FRAME_TYPES are stable", () => {
     expect([...P1_CAPS]).toEqual(["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"]);
-    expect([...RESERVED_FRAME_TYPES]).toEqual([
-      "cmd",
-      "cmd_result",
-      "dialog_open",
-      "dialog_closed",
-      "dialog_answer",
-      "superseded",
-    ]);
-    expect(PROTO).toEqual({ major: 1, minor: 0 });
+    expect([...RESERVED_FRAME_TYPES]).toEqual(["dialog_open", "dialog_closed", "dialog_answer"]);
+    expect(PROTO).toEqual({ major: 1, minor: 1 });
   });
 });

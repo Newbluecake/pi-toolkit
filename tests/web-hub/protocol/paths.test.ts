@@ -30,6 +30,8 @@ describe("resolveHubPaths", () => {
       tokenFile: "/home/u/.pi/agent/web-hub/token",
       logFile: "/home/u/.pi/agent/web-hub/hub.log",
       startLock: "/home/u/.pi/agent/web-hub/start.lock",
+      stoppedFile: "/home/u/.pi/agent/web-hub/stopped",
+      rotateIntentFile: "/home/u/.pi/agent/web-hub/rotate.intent",
       dbFile: "/home/u/.pi/agent/web-hub/hub.db",
       policies: { stateDir: STATE_DIR_POLICY, socketDir: STATE_DIR_POLICY },
     });

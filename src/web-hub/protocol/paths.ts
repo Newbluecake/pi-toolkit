@@ -107,6 +107,9 @@ export interface HubPaths {
   tokenFile: string;
   logFile: string;
   startLock: string;
+  /** v2.1 control-plane stop/rotate state markers. */
+  stoppedFile?: string;
+  rotateIntentFile?: string;
   policies: { readonly stateDir: DirPolicy; readonly socketDir: DirPolicy };
   dbFile: string; // §4.1
 }
@@ -208,6 +211,8 @@ export function resolveHubPaths(env: HubPathsEnv): HubPaths {
     tokenFile: `${stateDir}/token`,
     logFile: `${stateDir}/hub.log`,
     startLock: `${stateDir}/start.lock`,
+    stoppedFile: `${stateDir}/stopped`,
+    rotateIntentFile: `${stateDir}/rotate.intent`,
     dbFile: `${stateDir}/hub.db`,
     policies: { stateDir: STATE_DIR_POLICY, socketDir: policyFor(socketDir, stateDir, env.xdgRuntimeDir) },
   };

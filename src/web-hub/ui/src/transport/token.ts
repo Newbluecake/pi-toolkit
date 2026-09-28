@@ -64,5 +64,7 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       if (isFinalAuthFailure(r)) deps.onConn("auth");
       return r;
     },
+    command: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
+    dialog: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
   } satisfies HubTransport;
 }

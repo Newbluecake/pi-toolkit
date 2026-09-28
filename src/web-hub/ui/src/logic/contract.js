@@ -41,6 +41,8 @@ export const API = Object.freeze({
   subscribe: "/api/subscribe",
   unsubscribe: "/api/unsubscribe",
   history: "/api/history",
+  cmd: "/api/cmd",
+  dialog: "/api/dialog",
 });
 
 /** Client-side SSE silence limit: no frame (hub pings every 15s) for this long ⇒ reconnect. */

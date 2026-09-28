@@ -126,6 +126,8 @@ export function formatLanOffLine(status: Extract<LanStatus, { state: "off" }>, p
       return "未开启：局域网入口启动超时（30s），详见 hub.log。";
     case "bad-config":
       return `未开启：hub 收到的 LAN 配置无效（${detail}）。`;
+    case "rotate-pending":
+      return "未开启：token 轮换尚未完成（rotate-pending），请执行 /webhub restart 重试。";
   }
 }
 

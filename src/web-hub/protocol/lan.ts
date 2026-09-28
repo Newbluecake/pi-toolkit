@@ -219,7 +219,8 @@ export type LanOffReason =
   | "db-unavailable"
   | "listen-failed"
   | "bad-config"
-  | "timeout";
+  | "timeout"
+  | "rotate-pending";
 
 export type LanStatus =
   | { state: "starting" }

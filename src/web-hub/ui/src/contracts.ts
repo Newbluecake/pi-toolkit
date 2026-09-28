@@ -151,9 +151,62 @@ export interface StatusPillProps {
   readonly label: string;
 }
 
+export interface ComposerProps {
+  readonly enabled: boolean;
+  readonly draft?: string;
+  readonly busy?: boolean;
+}
+export interface ComposerEmits {
+  send: [text: string, deliver: "steer" | "followUp"];
+}
+export interface DeliverSwitchProps {
+  readonly busy: boolean;
+  readonly modelValue: "steer" | "followUp";
+}
+export interface DeliverSwitchEmits {
+  "update:modelValue": [value: "steer" | "followUp"];
+}
+export interface StopButtonProps {
+  readonly busy: boolean;
+  readonly queueCount?: number;
+}
+export interface StopButtonEmits {
+  stop: [];
+}
+export interface QueueListProps {
+  readonly items: readonly unknown[];
+}
+export interface QueueListEmits {
+  retry: [id: string];
+  discard: [id: string];
+}
+export interface ControlNoticeProps {
+  readonly plaintext?: boolean;
+  readonly mode?: "token" | "password";
+}
+export interface AskUserFormProps {
+  readonly dialog: unknown;
+  readonly suspended?: boolean;
+}
+export interface AskUserFormEmits {
+  answer: [answers: unknown];
+  cancel: [];
+}
+export interface AskUserQuestionProps {
+  readonly question: unknown;
+}
+export interface FleetActionsProps {
+  readonly agentKey: string;
+  readonly runId: string;
+  readonly enabled: boolean;
+}
 export interface DetailDockProps {
   readonly following: boolean;
   readonly newCount: number;
+  readonly control?: import("./types.js").ControlHandle;
+  readonly queue?: readonly unknown[];
+  readonly busy?: boolean;
+  readonly readonlyReason?: string;
 }
 export interface DetailDockEmits {
   "update:following": [value: boolean];

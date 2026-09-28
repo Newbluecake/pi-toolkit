@@ -59,9 +59,11 @@ export function createEventTap(
     setTimer: (ms: number, fn: () => void) => { cancel(): void };
     /** seq of the ev frame the sink just emitted (recent[] carries it for snapshot reconciliation). */
     currentSeq?: () => number;
+    attributePrompt?: (event: Record<string, unknown>) => Record<string, unknown>;
   },
 ): EventTap {
   const currentSeq = opts.currentSeq ?? (() => 0);
+  const attributePrompt = opts.attributePrompt ?? ((event) => event);
   let recentRing: Array<{ seq: number; message: WireMessage }> = [];
   let inflightMessage: unknown;
   const tools = new Map<string, InflightTool>();
@@ -285,7 +287,7 @@ export function createEventTap(
         const p: { kind: string; title?: string; since: number } = { kind: str(event.kind), since: opts.now() };
         if (typeof event.title === "string") p.title = event.title;
         promptStack.push(p);
-        e = pick(type, event, ["kind", "title"]);
+        e = attributePrompt(pick(type, event, ["kind", "title"]));
         break;
       }
       case "ui_prompt_end": {

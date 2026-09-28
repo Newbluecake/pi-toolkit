@@ -53,6 +53,10 @@ import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
 import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
+import type { CommandCapturePort } from "./command-capture.js";
+import { createCommandHandler } from "./commands.js";
+import { createAdminCommands, type AdminCommands } from "./admin-cmds.js";
+import type { AskUserRemotePort } from "../../ask-user/remote.js";
 
 export interface WebHubLanSettings {
   enabled: boolean;
@@ -68,13 +72,23 @@ export interface WebHubSettings {
   port: number;
   idleExitMinutes: number;
   nodeLoader: string;
+  control?: boolean;
+  remoteAskUser?: boolean;
+  webCommands?: boolean;
+  webCommandPolicy?: Record<string, "allow" | "confirm" | "deny">;
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
 } // I 在 settings.ts `import type` 并 re-export（D 不改 settings.ts）
 
+export interface QueryControlPort {
+  get(runId: string): { status: string } | undefined;
+  steer(runId: string, text: string): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }>;
+  stop(runId: string, cause: "user_stop"): Promise<unknown>;
+}
 export interface WebHubDeps {
   settings: WebHubSettings;
-  fleet: () => readonly RunSnapshot[]; // I: () => holder.current?.query.list() ?? []
+  fleet: () => readonly RunSnapshot[];
+  query?: () => QueryControlPort | undefined; // I: () => holder.current?.query.list() ?? []
   fleetTypeOf?: (runId: string) => string | undefined;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
@@ -93,6 +107,7 @@ export interface WebHubStatusView {
   hubVersion?: string;
   httpPort?: number;
   lastError?: string;
+  stopMarker?: "absent" | "stopped" | "unknown";
   attached: boolean;
 }
 
@@ -102,6 +117,10 @@ export type LanAdminResult<T> =
   | { ok: false; reason: "rejected"; code: string; message: string };
 
 export interface WebHubControl {
+  readonly capture?: CommandCapturePort;
+  internalExec(args: string, ctx: unknown): Promise<{ ok: false; code: "E_UNSUPPORTED" }>;
+  askUserRemote(): AskUserRemotePort | undefined;
+  readonly admin: AdminCommands;
   status(): WebHubStatusView;
   /** http://127.0.0.1:<port>/#t=<token>; port from hello_ack (live) or hub.json (pid alive); else a hint. */
   url(): { url: string } | { hint: string };
@@ -231,7 +250,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     }
   };
 
+  const commandHandler = createCommandHandler({ send: (frame) => conn?.send(frame) });
   const binding: BindingPort = {
+    onCmd: (frame) => commandHandler.handle(frame),
+    onSuperseded: () => {},
     onSnapshotReq: (rid) => {
       const c = conn;
       const x = ctx;
@@ -562,7 +584,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       now,
     });
 
+  const admin = createAdminCommands();
   return {
+    internalExec: async () => ({ ok: false, code: "E_UNSUPPORTED" }),
+    askUserRemote: () => undefined,
+    admin,
     status: () => conn?.status() ?? { state: "off", attached: false },
     url: () => hubUrl(paths, conn),
     lan: {
@@ -649,6 +675,10 @@ export interface WebHubStatusTheme {
 export function statusLineText(v: WebHubStatusView, theme?: WebHubStatusTheme): string | undefined {
   const paint = (color: string, marker: string): string =>
     theme === undefined ? `web ${marker}` : `${theme.fg("dim", "web")} ${theme.fg(color, marker)}`;
+  if (v.stopMarker === "stopped")
+    return theme === undefined ? "web stopped" : `${theme.fg("dim", "web")} ${theme.fg("error", "stopped")}`;
+  if (v.stopMarker === "unknown")
+    return theme === undefined ? "web stop?" : `${theme.fg("dim", "web")} ${theme.fg("error", "stop?")}`;
   switch (v.state) {
     case "live":
       return paint("success", "●");

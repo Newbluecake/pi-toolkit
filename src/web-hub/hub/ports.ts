@@ -389,6 +389,22 @@ export interface HubInfo {
   pid: number;
   startedAt: number;
   proto: typeof PROTO;
+  caps: readonly string[];
+  state?: "running" | "stopping" | "restarting";
+  nextVersion?: string;
+  supersedePending?: boolean;
+  supersedeDeadlineAt?: number;
+  forced?: boolean;
+  draining?: boolean;
+}
+
+export interface CommandRouter {
+  request(
+    frame: import("../protocol/messages.js").CmdFrame,
+    agentKey: string,
+  ): Promise<import("../protocol/messages.js").CmdResultFrame>;
+  drain(): Promise<{ inflight: number; timedOut: boolean }>;
+  inflight(): number;
 }
 
 export interface FrontendDeps {
