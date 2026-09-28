@@ -24,13 +24,17 @@ const defaults = DEFAULT_SETTINGS.webHub;
 const lanDefaults = defaults.lan!;
 
 describe("web-hub settings", () => {
-  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值)", () => {
+  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {})", () => {
     expect(defaults).toEqual({
       enabled: false,
       autoStart: true,
       port: 7878,
       idleExitMinutes: 10,
       nodeLoader: "",
+      control: true,
+      remoteAskUser: true,
+      webCommands: true,
+      webCommandPolicy: {},
       lan: { enabled: false, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
     });
   });
@@ -88,6 +92,10 @@ describe("web-hub settings", () => {
       port: 9000,
       idleExitMinutes: 30,
       nodeLoader: "/x/jiti.mjs",
+      control: true,
+      remoteAskUser: true,
+      webCommands: true,
+      webCommandPolicy: {},
       lan: lanDefaults,
     });
     expect(parseWebHubSettings({ enabled: true, port: -1 })).toEqual({ ...defaults, enabled: true });
@@ -331,5 +339,75 @@ describe("web-hub settings", () => {
       );
       expect(currentValue).toBe("x.local");
     });
+  });
+});
+
+// v2.1 control-plane settings (plan §8): webHub.control / webHub.remoteAskUser /
+// webHub.webCommands / webHub.webCommandPolicy — all non-live, activate-time snapshot.
+describe("web-hub control-plane settings (plan §8)", () => {
+  it("defaults: control/remoteAskUser/webCommands true, webCommandPolicy {}", () => {
+    expect(defaults.control).toBe(true);
+    expect(defaults.remoteAskUser).toBe(true);
+    expect(defaults.webCommands).toBe(true);
+    expect(defaults.webCommandPolicy).toEqual({});
+  });
+
+  it("parses explicit booleans and falls back to default for non-boolean garbage", () => {
+    expect(parseWebHubSettings({ control: false }).control).toBe(false);
+    expect(parseWebHubSettings({ remoteAskUser: false }).remoteAskUser).toBe(false);
+    expect(parseWebHubSettings({ webCommands: false }).webCommands).toBe(false);
+    for (const garbage of ["yes", 1, null, [], {}]) {
+      expect(parseWebHubSettings({ control: garbage }).control, JSON.stringify(garbage)).toBe(true);
+      expect(parseWebHubSettings({ remoteAskUser: garbage }).remoteAskUser, JSON.stringify(garbage)).toBe(true);
+      expect(parseWebHubSettings({ webCommands: garbage }).webCommands, JSON.stringify(garbage)).toBe(true);
+    }
+  });
+
+  it("webCommandPolicy accepts a plain object of name -> allow|confirm|deny", () => {
+    const parsed = parseWebHubSettings({
+      webCommandPolicy: { compact: "confirm", "webhub restart": "deny", reload: "allow" },
+    });
+    expect(parsed.webCommandPolicy).toEqual({ compact: "confirm", "webhub restart": "deny", reload: "allow" });
+  });
+
+  it("webCommandPolicy accepts a JSON-encoded string (TUI settings editor shape)", () => {
+    const parsed = parseWebHubSettings({ webCommandPolicy: '{"compact":"confirm"}' });
+    expect(parsed.webCommandPolicy).toEqual({ compact: "confirm" });
+  });
+
+  it("webCommandPolicy drops entries with an invalid name or a non-allow|confirm|deny value", () => {
+    const parsed = parseWebHubSettings({
+      webCommandPolicy: { "bad name!": "deny", ok: "maybe", good: "allow" },
+    });
+    expect(parsed.webCommandPolicy).toEqual({ good: "allow" });
+  });
+
+  it("webCommandPolicy falls back to {} for non-object / unparseable-JSON input", () => {
+    for (const garbage of ["not json", 42, null, [], true]) {
+      expect(parseWebHubSettings({ webCommandPolicy: garbage }).webCommandPolicy, JSON.stringify(garbage)).toEqual({});
+    }
+  });
+
+  it("exposes all four keys in SETTING_SPECS, none live", () => {
+    for (const key of ["webHub.control", "webHub.remoteAskUser", "webHub.webCommands", "webHub.webCommandPolicy"]) {
+      expect(isKnownSettingKey(key), key).toBe(true);
+      const spec = SETTING_SPECS[key]!;
+      expect(spec.live, key).toBeUndefined();
+    }
+    expect(SETTING_SPECS["webHub.control"]).toMatchObject({ kind: "boolean", path: "webHub.control" });
+    expect(SETTING_SPECS["webHub.remoteAskUser"]).toMatchObject({ kind: "boolean", path: "webHub.remoteAskUser" });
+    expect(SETTING_SPECS["webHub.webCommands"]).toMatchObject({ kind: "boolean", path: "webHub.webCommands" });
+    expect(SETTING_SPECS["webHub.webCommandPolicy"]).toMatchObject({
+      kind: "string",
+      path: "webHub.webCommandPolicy",
+    });
+  });
+
+  it("is wired into loadSettings", () => {
+    const s = loadSettings({ webHub: { control: false, webCommandPolicy: { compact: "deny" } } });
+    expect(s.webHub.control).toBe(false);
+    expect(s.webHub.webCommandPolicy).toEqual({ compact: "deny" });
+    expect(s.webHub.remoteAskUser).toBe(true);
+    expect(s.webHub.webCommands).toBe(true);
   });
 });

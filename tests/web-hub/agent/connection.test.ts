@@ -10,7 +10,13 @@ import {
   type BindingPort,
   type HubConnection,
 } from "../../../src/web-hub/agent/connection.js";
-import { LIMITS, TIMING, type AgentFrame, type SessionInfo } from "../../../src/web-hub/protocol/messages.js";
+import {
+  LIMITS,
+  TIMING,
+  type AgentFrame,
+  type CmdFrame,
+  type SessionInfo,
+} from "../../../src/web-hub/protocol/messages.js";
 import { MAX_FRAME_BYTES } from "../../../src/web-hub/protocol/ndjson.js";
 import {
   ackFrame,
@@ -472,5 +478,151 @@ describe("connection over a real unix socket (fake hub)", () => {
     await waitUntil(() => b.snaps.length === 1, 3_000, "snapshot_req");
     expect(b.snaps).toEqual(["r1"]);
     expect(b.states).toContain("live");
+  });
+});
+
+// P2 control-plane routing (plan §3.2/§6.7.3, package C0): `cmd`/`superseded` decode hooks and
+// D14's per-slot cap gating (dialogs/ctl/commands only sent once the HUB's hello_ack advertises
+// the matching cap — SLOT_REQUIRED_CAP).
+describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", () => {
+  function bindingWithCmd(): BindingPort & { cmds: CmdFrame[]; superseded: number } {
+    const cmds: CmdFrame[] = [];
+    let superseded = 0;
+    return {
+      cmds,
+      get superseded() {
+        return superseded;
+      },
+      onSnapshotReq: () => undefined,
+      onBranchReq: () => undefined,
+      onStateChange: () => undefined,
+      onCmd: (frame) => cmds.push(frame),
+      onSuperseded: () => {
+        superseded++;
+      },
+    };
+  }
+
+  const CMD: CmdFrame = {
+    t: "cmd",
+    rid: "r1",
+    id: "AAAAAAAAAAAAAAAA",
+    deadlineMs: 5000,
+    origin: { listener: "loopback", ip: "127.0.0.1", reqId: "0123456789abcdef" },
+    cmd: { op: "abort" },
+  };
+
+  it("a cmd frame reaches binding.onCmd while live", () => {
+    const { conn, sock } = liveFake();
+    const b = bindingWithCmd();
+    conn.attach(b, SESSION);
+    sock().hub(CMD);
+    expect(b.cmds).toEqual([CMD]);
+  });
+
+  it("a cmd frame is ignored (no cmd_result reply) once the link is no longer live", () => {
+    const { conn, sock } = liveFake();
+    const b = bindingWithCmd();
+    conn.attach(b, SESSION);
+    const s1 = sock();
+    s1.fail("EPIPE"); // ⇒ backoff, socket dropped
+    expect(conn.status().state).toBe("backoff");
+    // the dead socket emitting more frames must not reach the (now stale) binding
+    s1.hub(CMD);
+    expect(b.cmds).toEqual([]);
+  });
+
+  it("a cmd frame with no onCmd hook gets an immediate E_STALE_CTX cmd_result (never silently dropped)", () => {
+    const { conn, sock } = liveFake();
+    conn.attach(
+      { onSnapshotReq: () => undefined, onBranchReq: () => undefined, onStateChange: () => undefined },
+      SESSION,
+    );
+    const s = sock();
+    s.hub(CMD);
+    expect(s.frames()).toContainEqual({
+      t: "cmd_result",
+      rid: "r1",
+      id: "AAAAAAAAAAAAAAAA",
+      ok: false,
+      code: "E_STALE_CTX",
+      retryable: true,
+      effect: "none",
+    });
+    void conn;
+  });
+
+  it("a superseded frame reaches binding.onSuperseded regardless of link state", () => {
+    const { conn, sock } = liveFake();
+    const b = bindingWithCmd();
+    conn.attach(b, SESSION);
+    sock().hub({ t: "superseded", nextVersion: "9.9.9", yieldMs: 1000 });
+    expect(b.superseded).toBe(1);
+  });
+
+  it("D14: a `commands` slot is sent once live when the hub advertised command.v1", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(binding(), SESSION);
+    conn.setSlot("commands", { t: "commands", epoch: "e1", items: [] });
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    s.hub(ackFrame("a1-abcdef", 4242, ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "command.v1"]));
+    expect(s.types()).toContain("commands");
+  });
+
+  it("D14: a `commands` slot is withheld when the hub's hello_ack lacks command.v1 (old hub)", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(binding(), SESSION);
+    conn.setSlot("commands", { t: "commands", epoch: "e1", items: [] });
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    s.hub(ackFrame()); // P1-only caps (no command.v1/dialog.v1/cmd.v1)
+    expect(s.types()).not.toContain("commands");
+  });
+
+  it("D14: `dialogs` needs dialog.v1 and `ctl` needs cmd.v1, independently gated", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(binding(), SESSION);
+    conn.setSlot("dialogs", { t: "dialogs", epoch: "e1", open: [], closed: [] });
+    conn.setSlot("ctl", { t: "ctl", epoch: "e1", sessionId: "s1", items: [] });
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    // only cmd.v1 advertised: ctl slot goes out, dialogs does not
+    s.hub(ackFrame("a1-abcdef", 4242, ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "cmd.v1"]));
+    expect(s.types()).toContain("ctl");
+    expect(s.types()).not.toContain("dialogs");
+  });
+
+  it("D14 also gates the live-set path (setSlot after live), not just the reconnect replay", () => {
+    const { conn, sock } = liveFake(); // P1-only caps by default (ackFrame())
+    conn.attach(binding(), SESSION);
+    const before = sock().types().length;
+    conn.setSlot("commands", { t: "commands", epoch: "e1", items: [] });
+    expect(sock().types().length).toBe(before); // withheld: no command.v1
+    conn.setSlot("status", { t: "status", leafId: null, busy: false, pending: false }); // ungated slot, unaffected
+    expect(sock().types()).toContain("status");
+  });
+
+  it("hello.caps stays P1-only by default", () => {
+    const n = fakeNet();
+    acquireConnection(opts({ netConnect: n.netConnect }));
+    n.sockets[0]!.emit("connect");
+    expect(n.sockets[0]!.frames()[0]).toMatchObject({
+      t: "hello",
+      caps: ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"],
+    });
+  });
+
+  it("capsExtra (frozen hook) can add extra caps to hello without editing connection.ts again", () => {
+    const n = fakeNet();
+    acquireConnection(opts({ netConnect: n.netConnect, capsExtra: () => ["cmd.v1"] }));
+    n.sockets[0]!.emit("connect");
+    expect(n.sockets[0]!.frames()[0]).toMatchObject({
+      t: "hello",
+      caps: ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "cmd.v1"],
+    });
   });
 });

@@ -26,6 +26,14 @@ import type {
 import type { SseEventName } from "../../../src/web-hub/hub/sse.js";
 import type { FenceLoss, SingletonResult } from "../../../src/web-hub/hub/singleton.js";
 import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
+import type {
+  CmdArgs,
+  CmdData,
+  CmdErrorCode,
+  CmdFrame,
+  CommandOutputWire,
+  HubCtlFrame,
+} from "../../../src/web-hub/protocol/messages.js";
 
 describe("types.test-d.ts (plan §11 typecheck contract)", () => {
   it("P1-shaped FrontendDeps (no `lan`) is still assignable to FrontendDeps", () => {
@@ -111,5 +119,66 @@ describe("types.test-d.ts (plan §11 typecheck contract)", () => {
     expectTypeOf<Parameters<LanStorePort["getUserSummary"]>[0]>().toEqualTypeOf<number>();
     expectTypeOf<Awaited<ReturnType<LanStorePort["getUserSummary"]>>>().toEqualTypeOf<LanUserSummary | undefined>();
     expectTypeOf<LanUserSummary>().toEqualTypeOf<{ username: string; initialPasswordInUse: boolean }>();
+  });
+});
+
+// P2 control-plane frozen surface (plan §3.1/§3.2, package C0).
+describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
+  it("CmdArgs is a discriminated union keyed by op, one variant per CmdOp", () => {
+    expectTypeOf<CmdArgs["op"]>().toEqualTypeOf<
+      "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "dialog_answer" | "dialog_cancel" | "command"
+    >();
+  });
+
+  it("CmdFrame.cmd is exactly CmdArgs; CmdFrame.id/deadlineMs/origin are required", () => {
+    expectTypeOf<CmdFrame["cmd"]>().toEqualTypeOf<CmdArgs>();
+    expectTypeOf<CmdFrame>().toHaveProperty("deadlineMs");
+    expectTypeOf<CmdFrame["deadlineMs"]>().toEqualTypeOf<number>();
+    expectTypeOf<CmdFrame["queryOnly"]>().toEqualTypeOf<true | undefined>();
+  });
+
+  it("CmdErrorCode is exactly the 17 documented literals (incl. v2.1 E_HUB_RESTARTING)", () => {
+    expectTypeOf<CmdErrorCode>().toEqualTypeOf<
+      | "E_UNSUPPORTED"
+      | "E_STALE_CTX"
+      | "E_BUSY_COMPACTING"
+      | "E_BUSY_STEER"
+      | "E_SESSION_CHANGED"
+      | "E_BAD_REQUEST"
+      | "E_NOT_FOUND"
+      | "E_UNKNOWN_ID"
+      | "E_NOT_RUNNING"
+      | "E_SUBAGENT_REJECTED"
+      | "E_DIALOG_CLOSED"
+      | "E_BAD_ANSWER"
+      | "E_UNKNOWN_COMMAND"
+      | "E_COMMAND_DENIED"
+      | "E_CONFIRM_REQUIRED"
+      | "E_DEADLINE"
+      | "E_HUB_RESTARTING"
+    >();
+  });
+
+  it("CmdData's command variant carries kind/completion/captured?/output? (v2.1)", () => {
+    type CommandData = Extract<CmdData, { op: "command" }>;
+    expectTypeOf<CommandData["kind"]>().toEqualTypeOf<"extension" | "template" | "builtin">();
+    expectTypeOf<CommandData["completion"]>().toEqualTypeOf<"sync" | "async" | "unknown" | "timeout">();
+    expectTypeOf<CommandData["captured"]>().toEqualTypeOf<boolean | undefined>();
+    expectTypeOf<CommandData["output"]>().toEqualTypeOf<CommandOutputWire | undefined>();
+  });
+
+  it("CommandOutputWire.entries[].kind covers all 6 documented kinds", () => {
+    expectTypeOf<CommandOutputWire["entries"][number]["kind"]>().toEqualTypeOf<
+      "notify" | "widget" | "status" | "text" | "error" | "interactive"
+    >();
+    expectTypeOf<CommandOutputWire["needsTerminal"]>().toEqualTypeOf<true | undefined>();
+  });
+
+  it("HubCtlFrame is a union of shutdown{reason} and rotate_token (v2.1; no shared reason field)", () => {
+    expectTypeOf<HubCtlFrame["op"]>().toEqualTypeOf<"shutdown" | "rotate_token">();
+    type Shutdown = Extract<HubCtlFrame, { op: "shutdown" }>;
+    expectTypeOf<Shutdown["reason"]>().toEqualTypeOf<"restart" | "stop">();
+    type Rotate = Extract<HubCtlFrame, { op: "rotate_token" }>;
+    expectTypeOf<Rotate>().not.toHaveProperty("reason");
   });
 });
