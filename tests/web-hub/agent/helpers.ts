@@ -197,17 +197,64 @@ export function fakePi(): {
   const pi = {
     on(event: string, handler: Handler) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      return () => {
+        handlers.set(
+          event,
+          (handlers.get(event) ?? []).filter((h) => h !== handler),
+        );
+      };
     },
     registerTool() {},
     registerCommand() {},
+    registerEntryRenderer() {},
     sendMessage() {},
+    sendUserMessage() {},
     appendEntry() {},
+    getCommands() {
+      return [];
+    },
     events: { on: () => () => undefined, emit: () => undefined },
   };
   const fire = (ev: string, event: unknown, ctx: unknown): void => {
     for (const h of handlers.get(ev) ?? []) h(event, ctx);
   };
   return { pi: pi as unknown as ExtensionAPI, handlers, fire };
+}
+
+/** Deterministic stand-in for `commands.ts`'s `Timer`-returning `setTimer` seam: timers only fire
+ * when a test explicitly asks for the ones scheduled with an exact `ms` value (commands.ts always
+ * calls `setTimer` with one of a small fixed set of constants, so this is precise enough without
+ * needing a full virtual clock). */
+export interface FakeTimerQueue {
+  setTimer(ms: number, fn: () => void): { cancel(): void };
+  /** Synchronously invoke (and remove) every not-yet-cancelled timer scheduled with exactly this
+   * `ms` value, in registration order. */
+  fireByMs(ms: number): void;
+  pendingCount(): number;
+}
+export function fakeTimerQueue(): FakeTimerQueue {
+  let seq = 0;
+  const timers = new Map<number, { ms: number; fn: () => void }>();
+  return {
+    setTimer(ms, fn) {
+      const id = (seq += 1);
+      timers.set(id, { ms, fn });
+      return {
+        cancel: () => {
+          timers.delete(id);
+        },
+      };
+    },
+    fireByMs(ms) {
+      for (const [id, t] of [...timers]) {
+        if (t.ms === ms) {
+          timers.delete(id);
+          t.fn();
+        }
+      }
+    },
+    pendingCount: () => timers.size,
+  };
 }
 
 export interface FakeCtxState {
@@ -217,7 +264,10 @@ export interface FakeCtxState {
   sessionFile?: string;
   sessionId: string;
   idle: boolean;
+  pending: boolean;
   statusCalls: Array<[string, string | undefined]>;
+  notifyCalls: Array<[string, string | undefined]>;
+  abortCalls: number;
   hasUI?: boolean;
   uiInput?: (title: string, placeholder?: string) => Promise<string | undefined>;
   uiCustom?: (factory: unknown) => Promise<unknown>;
@@ -231,7 +281,10 @@ export function fakeCtx(init: Partial<FakeCtxState> = {}): { ctx: ExtensionConte
     sessionFile: "/tmp/fake-session.jsonl",
     sessionId: "sess-1",
     idle: true,
+    pending: false,
     statusCalls: [],
+    notifyCalls: [],
+    abortCalls: 0,
     ...init,
   };
   const ctx = {
@@ -248,6 +301,9 @@ export function fakeCtx(init: Partial<FakeCtxState> = {}): { ctx: ExtensionConte
       setStatus: (key: string, text: string | undefined) => {
         state.statusCalls.push([key, text]);
       },
+      notify: (message: string, type?: string) => {
+        state.notifyCalls.push([message, type]);
+      },
       input: (title: string, placeholder?: string) =>
         state.uiInput !== undefined ? state.uiInput(title, placeholder) : Promise.resolve(undefined),
       custom: (factory: unknown) =>
@@ -261,7 +317,10 @@ export function fakeCtx(init: Partial<FakeCtxState> = {}): { ctx: ExtensionConte
       getSessionName: () => undefined,
     },
     isIdle: () => state.idle,
-    hasPendingMessages: () => false,
+    abort: () => {
+      state.abortCalls += 1;
+    },
+    hasPendingMessages: () => state.pending,
     getContextUsage: () => ({ tokens: 1000, contextWindow: 200_000, percent: 0.5 }),
   };
   return { ctx: ctx as unknown as ExtensionContext, state };

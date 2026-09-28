@@ -12,12 +12,18 @@ import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
 import type { FleetRowWire, StatusInfo } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
+import type { QueueMirror } from "./queue-mirror.js";
 
 /** Web rows: more than the TUI widget, still bounded. */
 const WEB_MAX_ACTIVE_ROWS = 64;
 const WEB_RECENT_TERMINAL = 8;
 
-export function readStatus(ctx: ExtensionContext, tap: EventTap, fleet: readonly RunSnapshot[]): StatusInfo {
+export function readStatus(
+  ctx: ExtensionContext,
+  tap: EventTap,
+  fleet: readonly RunSnapshot[],
+  queueMirror?: QueueMirror,
+): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
     busy: safe(() => !ctx.isIdle(), false),
@@ -39,6 +45,12 @@ export function readStatus(ctx: ExtensionContext, tap: EventTap, fleet: readonly
     }
   }
   if (anySub) status.subagentCostUsd = sub;
+  if (queueMirror !== undefined) {
+    const items = queueMirror.items();
+    if (items.length > 0) status.queue = items.slice();
+    const dropped = queueMirror.takeDropped();
+    if (dropped.length > 0) status.queueDropped = dropped;
+  }
   return status;
 }
 

@@ -54,7 +54,12 @@ import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js"
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
-import { createCommandHandler } from "./commands.js";
+import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
+import { createCommandLedger } from "./ledger.js";
+import { createQueueMirror } from "./queue-mirror.js";
+import { createCompactionState } from "./compaction-state.js";
+import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
+import { createBuiltinBridge } from "./builtin-bridge.js";
 import { createDialogBridge } from "./dialogs.js";
 import { createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
@@ -81,16 +86,24 @@ export interface WebHubSettings {
   lan?: WebHubLanSettings;
 } // I 在 settings.ts `import type` 并 re-export（D 不改 settings.ts）
 
+export type StopResult =
+  | { ok: true; escalatedTo: "L2" | "L3" | "L4" }
+  | { ok: false; reason: "unknown_run" }
+  | { ok: false; reason: "already_terminal"; status: string }
+  | { ok: false; reason: "stop_failed"; escalatedTo: "L2" | "L3" | "L4" };
 export interface QueryControlPort {
   get(runId: string): { status: string } | undefined;
   steer(runId: string, text: string): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }>;
-  stop(runId: string, cause: "user_stop"): Promise<unknown>;
+  stop(runId: string, cause: "user_stop"): Promise<StopResult>;
 }
 export interface WebHubDeps {
   settings: WebHubSettings;
   fleet: () => readonly RunSnapshot[];
   query?: () => QueryControlPort | undefined; // I: () => holder.current?.query.list() ?? []
   fleetTypeOf?: (runId: string) => string | undefined;
+  /** D14/§3.1: whether `askUser.enabled` in the host settings — gates `dialog.v1` broadcast
+   * alongside `settings.remoteAskUser`. Unset ⇒ treated as enabled (D10 default-on posture). */
+  askUserEnabled?: () => boolean;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -201,6 +214,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
   );
 
+  const commandLedger = createCommandLedger();
+  const queueMirror = createQueueMirror();
+  const compactionState = createCompactionState(pi);
+  const originEntry = createOriginEntry(pi);
+  const builtinBridge = createBuiltinBridge();
+  registerOriginEntryRenderer(pi);
+
   const readFleet = (): readonly RunSnapshot[] => {
     try {
       return deps.fleet();
@@ -225,7 +245,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const c = conn;
     const x = ctx;
     if (c === undefined || x === undefined) return;
-    const s = readStatus(x, tap, readFleet());
+    const s = readStatus(x, tap, readFleet(), queueMirror);
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
   };
@@ -248,6 +268,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     } catch {
       /* stale ctx */
     }
+    try {
+      commandHandler.onPendingSample(x.hasPendingMessages());
+    } catch {
+      /* stale ctx */
+    }
     const rows = projectFleet(readFleet(), now(), deps.fleetTypeOf);
     const fp = fleetFingerprint(rows);
     if (fp !== lastFleetFp) {
@@ -256,14 +281,47 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     }
   };
 
-  const commandHandler = createCommandHandler({ send: (frame) => conn?.send(frame) });
+  const publishCtl = (): void => {
+    const c = conn;
+    if (c === undefined) return;
+    const sessionId = safe(() => ctx?.sessionManager.getSessionId() ?? "", "");
+    c.setSlot("ctl", { ...commandLedger.frame(sessionId, MODULE_INSTANCE, now()) });
+  };
+
+  const commandHandler = createCommandHandler({
+    pi,
+    getCtx: () => ctx,
+    getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    ledger: commandLedger,
+    queueMirror,
+    compactionState,
+    originEntry,
+    builtinBridge,
+    controlEnabled: () => settings.control !== false,
+    now,
+    send: (frame) => conn?.send(frame),
+    onChanged: () => {
+      publishStatus();
+      publishCtl();
+    },
+    setTimer: (ms, fn) => {
+      const t = setTimeout(fn, ms);
+      t.unref();
+      return { cancel: () => clearTimeout(t) };
+    },
+    ...(deps.query !== undefined ? { query: deps.query } : {}),
+  });
   const dialogBridge = createDialogBridge();
   const binding: BindingPort = {
     onCmd: (frame) => {
-      // C0 wiring point (plan §12.3): dialog_answer/dialog_cancel route through the dialog
-      // bridge stub first — always inert here (`handle()` is a no-op, the bridge never replies) —
-      // so C2 only has to fill in `dialogs.ts`'s own logic without touching this call site again.
-      if (frame.cmd.op === "dialog_answer" || frame.cmd.op === "dialog_cancel") dialogBridge.handle(frame);
+      // dialog_answer/dialog_cancel are routed straight to the dialog bridge (C2's `dialogs.ts`) —
+      // never through `commandHandler`, which would otherwise have to special-case them right back
+      // out again (they never carry a ledger entry: the dialog bridge owns its own open/closed
+      // bookkeeping, §5).
+      if (frame.cmd.op === "dialog_answer" || frame.cmd.op === "dialog_cancel") {
+        dialogBridge.handle(frame);
+        return;
+      }
       commandHandler.handle(frame);
     },
     onSuperseded: () => {},
@@ -278,7 +336,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           seq: c.seq,
           ctx: x,
           tap,
-          status: readStatus(x, tap, snaps),
+          status: readStatus(x, tap, snaps, queueMirror),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
       );
@@ -343,6 +401,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     return config;
   };
 
+  const capsExtra = (): readonly string[] => {
+    const control = settings.control !== false;
+    if (!control) return [];
+    const caps: string[] = ["cmd.v1"];
+    const remoteAskUser = settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
+    if (remoteAskUser) caps.push("dialog.v1");
+    if (settings.webCommands !== false) caps.push("command.v1");
+    return caps;
+  };
+
   const connectWith = (info: { pluginVersion: string; buildId: string }): void => {
     const x = ctx;
     if (!attached || x === undefined) return;
@@ -362,13 +430,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       spawn: () => {
         if (!("error" in plan)) spawnHub(plan, hubMainPath, config, deps.spawnImpl);
       },
+      capsExtra,
     });
     conn = c;
     c.attach(binding, sessionInfo(x, sessionReason));
-    // C0 wiring point: the dialogs slot exists (D14-gated, never actually sent while no hub
-    // advertises dialog.v1) so C2 only replaces `dialogBridge.frame()`'s content, not this call.
+    // The dialogs slot exists (D14-gated, only actually sent once the hub advertises dialog.v1) so
+    // C2 only replaces `dialogBridge.frame()`'s content, not this call.
     c.setSlot("dialogs", dialogBridge.frame());
     publishStatus();
+    publishCtl();
     onTick();
     setStatusLine(statusLineText(c.status(), readStatusTheme(x)));
   };
@@ -395,6 +465,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lastLeaf = undefined;
     lastFleetFp = undefined;
     tap.resetForSession(Number.NaN);
+    commandHandler.onSessionBoundary();
     // O(branch entries) cost sum, deferred so session_start returns at once.
     const im = setImmediate(() => {
       if (gen !== generation) return;
@@ -420,6 +491,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     attached = false;
     generation += 1;
     stopTick();
+    commandHandler.onSessionBoundary();
     tap.dispose();
     setStatusLine(undefined);
     const reason = reasonOf(event);
@@ -433,6 +505,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (!attached) return;
       if (c !== undefined) ctx = c;
       tap.handle(event as { type: string } & Record<string, unknown>);
+      if (type === "input") commandHandler.onInputEvent(event as InputEventLike);
+      if (type === "message_start") commandHandler.onMessageStart(event as MessageStartLike);
       if (STATUS_EVENTS.has(type)) publishStatus();
       if (SESSION_EVENTS.has(type)) publishSession(sessionOverride(type, event));
     });
