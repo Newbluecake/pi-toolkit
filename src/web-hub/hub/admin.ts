@@ -396,6 +396,15 @@ export async function recoverRotateIntent(deps: RotateRecoveryDeps): Promise<Rot
     removeRotateIntentSync(deps.paths.rotateIntentFile);
   } catch (err) {
     deps.log.warn("web-hub admin: rotate-intent delete failed after recovery (no LAN)", { error: String(err) });
+    deps.audit?.({
+      ok: false,
+      path: "recovery",
+      by: intent.by,
+      phase: "token-written",
+      code: "E_INTENT_DELETE",
+      revoked: { lan: 0 },
+    });
+    return { recovered: true };
   }
   deps.audit?.({ ok: true, path: "recovery", by: intent.by, phase: "token-written", revoked: { lan: 0 } });
   return { recovered: true };
