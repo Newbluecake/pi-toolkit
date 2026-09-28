@@ -66,7 +66,7 @@ const COPY: Readonly<Record<UiLang, Copy>> = {
   zh: {
     title: "Web UI 尚未构建",
     reason: "未找到匹配当前版本的已构建产物，因此显示本说明页（本页本身返回 200）。",
-    method1Title: "方式一：下载 release 附件（推荐，不受 pi update 清理影响）",
+    method1Title: "方式一：下载并手工解压 release 附件（推荐，不受 pi update 清理影响）",
     method1Intro: (linkHtml, zipName) =>
       `从 ${linkHtml} 下载 ${escapeHtml(zipName)} 与 ${escapeHtml(`${zipName}.sha256`)}，校验后解压到 ~/.pi/agent/，刷新本页即可（无需重启 hub）：`,
     method2Title: "方式二：从源码构建",
@@ -79,7 +79,7 @@ const COPY: Readonly<Record<UiLang, Copy>> = {
     title: "Web UI not built yet",
     reason:
       "No built UI artifact matching this version was found, so this page is shown instead (it still returns HTTP 200).",
-    method1Title: "Option 1: download the release attachment (recommended — survives pi update)",
+    method1Title: "Option 1: download and manually extract the release attachment (recommended — survives pi update)",
     method1Intro: (linkHtml, zipName) =>
       `Download ${escapeHtml(zipName)} and ${escapeHtml(`${zipName}.sha256`)} from ${linkHtml}, verify the checksum, then unzip into ~/.pi/agent/ and refresh this page (no hub restart needed):`,
     method2Title: "Option 2: build from source",

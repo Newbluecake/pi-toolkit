@@ -44,7 +44,7 @@ export interface FormatUiStatusOptions {
 function installMethodLines(o: FormatUiStatusOptions): string[] {
   const zipName = `pi-toolkit-web-ui-${o.version}.zip`;
   return [
-    `方式一（推荐，不受 pi update 清理影响）：从 ${releaseUrlFor(o.version)} 下载 ${zipName} 与 ${zipName}.sha256，` +
+    `方式一（推荐，不受 pi update 清理影响）：从 ${releaseUrlFor(o.version)} 下载 ${zipName} 与 ${zipName}.sha256，手工校验并解压：` +
       `校验后 unzip -o ${zipName} -d ~/.pi/agent/，无需重启 hub。`,
     `方式二（源码构建）：cd ${o.pkgDir} && npm install --include=dev --no-audit --no-fund && npm run build:web` +
       `（注意 pi update 会清掉包内产物，需要重新执行）。`,

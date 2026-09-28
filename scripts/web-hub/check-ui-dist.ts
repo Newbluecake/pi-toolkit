@@ -41,6 +41,8 @@ const FORBIDDEN_JS_PATTERNS: Array<{ name: string; re: RegExp }> = [
 const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
   /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+/,
   /^https:\/\/vuejs\.org\//, // Vue runtime's own `warn()` error-reference links (first-party framework code, not a fetch)
+  /^https:\/\/link\.vuejs\.org\//, // Vue production feature-flag diagnostics, not a resource fetch
+  /^https:\/\/cli\.vuejs\.org\//, // Vue compiler compatibility diagnostics, not a resource fetch
   /^http:\/\/www\.w3\.org\//, // XML namespace URIs (createElementNS("http://www.w3.org/2000/svg", ...)) — identifiers, never fetched
 ];
 const JS_BUDGET_GZIP_BYTES = 120 * 1024;
@@ -81,11 +83,14 @@ async function checkIndexHtml(html: string): Promise<void> {
 }
 
 function scanForbiddenPatterns(source: string, file: string): void {
+  // Vue's production runtime carries this diagnostic as a literal string; it is
+  // not markup and cannot create a script element under the CSP.
+  const scanSource = source.replace(/Cannot mutate <script setup> binding [^\n]*?\),/g, "");
   for (const { name, re } of FORBIDDEN_JS_PATTERNS) {
-    if (re.test(source)) fail(`${file}: forbidden pattern "${name}"`);
+    if (re.test(scanSource)) fail(`${file}: forbidden pattern "${name}"`);
   }
   const urlRe = /https?:\/\/[^\s"'()<>`;]+/g;
-  for (const m of source.matchAll(urlRe)) {
+  for (const m of scanSource.matchAll(urlRe)) {
     const url = m[0];
     if (!EXTERNAL_URL_ALLOWLIST.some((allow) => allow.test(url))) {
       fail(`${file}: external resource reference not on the allowlist: ${url}`);

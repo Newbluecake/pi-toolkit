@@ -22,7 +22,15 @@ pi install git:github.com/Newbluecake/pi-toolkit
 pi update --extension git:github.com/Newbluecake/pi-toolkit
 ```
 
-也可以从 [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases) 下载 zip（已含编译产物），解压后 `pi install ./pi-toolkit`（本地路径方式，不参与 `pi update`）。
+也可以从 [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases) 下载总 zip。下载后解压，并在解压目录执行：
+
+```sh
+cd pi-toolkit
+npm install --omit=dev
+pi install .
+```
+
+总 zip 可直接作为本地 pi 扩展安装（本地路径方式，不参与 `pi update`）。Web UI 另有 `pi-toolkit-web-ui-<version>.zip` 附件：手工解压到 `~/.pi/agent/`，即可安装到 `~/.pi/agent/web-hub-ui/<version>/`，无需重启 hub。
 
 ## Subagent 系统
 

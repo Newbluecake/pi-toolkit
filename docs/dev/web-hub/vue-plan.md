@@ -20,7 +20,7 @@ Vue 3 SFC + Vite；产物不进 git（npm 包 / release zip 携带，本地 `npm
 - 新增约 25 MB devDependencies 同意（§1.4）。
 - 旧前端在 P5b **一次性删除**（不加运行时开关）。
 - 未构建页返回 **200**；语言**只自动检测**（无手动切换）；对话流**窗口化上限 300** 个挂载条目（不做虚拟滚动）。
-- todo #29（release 总 zip 不能作为 pi 扩展安装）**本期不修**；P7 的 UI zip 与总 zip 相互独立，不依赖 #29。
+- todo #29（release 总 zip 不能作为 pi 扩展安装）**并入本期 P7**：总 zip 必须携带 pi 的 jiti 源码入口、`src/` 与 `skills/`，并可按 README 步骤本地安装；P7 同时产出独立 UI zip。
 
 ### 0.3 对设计稿的修订（实现口径，覆盖 ui-design.md 对应句）
 
@@ -214,7 +214,8 @@ export default defineConfig({
 
 ### 1.6 release（`scripts/release/package.sh`，P7）
 
-- `npm run build` 之后追加 `npm run build:web && npm run check:web`；总 zip 的 `cp -r dist` 自动带上 `dist/web-hub-ui/`（总 zip 能否作为扩展安装是 todo #29，本期不修，与下面的 UI zip 无关）。
+- `npm run build` 之后追加 `npm run build:web && npm run check:web`；总 zip 的 `cp -r dist` 自动带上 `dist/web-hub-ui/`。
+- **todo #29 已并入 P7**：总 zip 追加 `index.ts`、`index.js`、`src/`、`skills/` 及 `package.json` 声明的 pi 装配文件；README 改为解压后 `npm install --omit=dev`、`pi install .`，并由结构测试验证可安装内容。
 - **UI zip（本期必做）**：新脚本 `scripts/release/package-web-ui.sh <version> [outDir]`（package.sh 调用；独立成文件以便测试直接驱动，测试用 `PWH_UI_DIST` 覆盖产物目录）：
   1. 读 `dist/web-hub-ui/build-info.json`，`version` ≠ `<version>` ⇒ 退出 1；`find dist/web-hub-ui -type l` 非空 ⇒ 退出 1（软链不进 zip）。
   2. 暂存 `release/stage-ui/web-hub-ui/<version>/` ← `cp -R dist/web-hub-ui/.`；`chmod -R u=rwX,go=rX`（解压后天然满足 hub 的「非 group/world 可写」校验）。
@@ -632,7 +633,7 @@ v2 追加：`.vue` 中禁止 `<style` 块；产物层另由 `check:web` 扫编�
 - **P5a**：§4.2 的 ui-root / unbuilt / paths-trusted 用例全过；模块未被任何生产代码 import（`git grep` 证明惰性）。成本约 $4–6。
 - **P6**：§4.4.2 全矩阵 + axe 0 违规 + 读图无结构性偏差。失败项按文件归属列清单 → 主会话把 P3 文件的问题退回 P3（优先 `resume` 原 run；不可 resume 时新派 frontend-dev 并挂 `experts: [P3 label, Plan label]`），P4 同理 → 原包修完后 P6 verifier 复跑直至全绿。P6 自身只写 `checks-e2e.ts`（跨区域整合断言：列表→详情→对话流全流程、主题切换后各区域配色、窄屏折叠与深链组合）。成本约 $3–5 + 退回修复 $2–6。
 - **P5b**：全量门禁绿；`static.test.ts` 覆盖映射/缓存头/未构建页（两种模式 × 两种语言）；`check:web` 追加的 `verifyUiRoot` 通过；§4.6 真机验收（token + LAN + 未构建页 + 隐藏页）通过；`git grep "src/web-hub/web"` 只剩文档里的历史引用；revert 该提交即可恢复旧 UI。成本约 $6–9。
-- **P7**：`tests/release/web-ui-zip.test.ts` 全过；本机跑一次 `scripts/release/package.sh`（dry：不发布）产出两个新文件且 sha256 校验通过；§4.6 包外根真机验收通过；README 中英两份步骤与未构建页一致。成本约 $2–4。
+- **P7**：`tests/release/web-ui-zip.test.ts` 与 `package-zip.test.ts` 全过；本机跑一次 `scripts/release/package.sh`（dry：不发布）产出两个 zip 与各自 sha256 校验通过；总 zip 含 `index.ts`/`src/`/`skills/`/`package.json`/`dist/web-hub-ui/build-info.json` 且可按 README 本地安装；§4.6 包外根真机验收通过；README 中英两份步骤与未构建页一致。成本约 $2–4。
 
 ### 5.4 冲突预检要点
 
@@ -672,7 +673,7 @@ v2 追加：`.vue` 中禁止 `<style` 块；产物层另由 `check:web` 扫编�
 4. 产物目录 `dist/web-hub-ui/`；包外目录 `~/.pi/agent/web-hub-ui/<ver>/`。
 5. 未构建页 200，语言按 `Accept-Language`，LAN 模式不显示主机路径。
 6. i18n 只自动检测；只做窗口化（上限 300），不做虚拟滚动。
-7. todo #29 本期不修，UI zip 独立于它。
+7. todo #29 并入 P7：总 zip 可安装化；UI zip 仍是独立的手工解压附件。
 
 ### 6.3 仍待复审确认
 

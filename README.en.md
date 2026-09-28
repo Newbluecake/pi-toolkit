@@ -22,7 +22,15 @@ pi install git:github.com/Newbluecake/pi-toolkit
 pi update --extension git:github.com/Newbluecake/pi-toolkit
 ```
 
-Or download the zip (prebuilt) from [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases), extract, and `pi install ./pi-toolkit` (local-path installs don't participate in `pi update`).
+Or download the total zip (prebuilt) from [GitHub Releases](https://github.com/Newbluecake/pi-toolkit/releases). Extract it, then run:
+
+```sh
+cd pi-toolkit
+npm install --omit=dev
+pi install .
+```
+
+The total zip is installable as a local pi extension (local-path installs do not participate in `pi update`). The release also contains a separate `pi-toolkit-web-ui-<version>.zip`; extract it manually into `~/.pi/agent/` to install `~/.pi/agent/web-hub-ui/<version>/`, without restarting the hub.
 
 ## The subagent system
 
