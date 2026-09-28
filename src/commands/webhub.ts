@@ -177,6 +177,12 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
 }
 
 async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {
+  // §6.7.2: an explicit open clears the machine-level stop marker first (best-effort — the open
+  // itself proceeds either way, with a warning when the marker couldn't be removed).
+  const clear = await control.admin.clearStopMarker();
+  if (clear.kind === "clear-failed") {
+    notify(ctx, `stop 标记无法删除（${clear.code}），其它终端仍不会自动拉起 hub。`, "warning");
+  }
   const res = control.url();
   if ("hint" in res) {
     notify(ctx, res.hint, "warning");
@@ -213,6 +219,11 @@ async function runUnlock(ctx: ExtensionCommandContext, control: WebHubControl): 
 }
 
 async function runRestart(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
+  // §6.7.2: same explicit-intent marker clear as `/webhub open`.
+  const clear = await control.admin.clearStopMarker();
+  if (clear.kind === "clear-failed") {
+    notify(ctx, `stop 标记无法删除（${clear.code}），其它终端仍不会自动拉起 hub。`, "warning");
+  }
   const outcome = await control.lan.restart();
   const { message, level } = formatRestartOutcomeMessage(outcome);
   notify(ctx, message, level);

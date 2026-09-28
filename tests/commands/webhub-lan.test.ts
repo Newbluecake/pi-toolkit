@@ -49,6 +49,12 @@ function baseControl(over: Partial<WebHubControl> = {}): WebHubControl {
     ui: {
       statusLines: () => [],
     },
+    admin: {
+      stop: async () => ({ kind: "stopped" }),
+      start: async () => ({ kind: "started" }),
+      clearStopMarker: async () => ({ kind: "cleared" }),
+      rotateToken: async () => ({ kind: "offline" }),
+    },
     ...over,
   };
 }

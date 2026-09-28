@@ -257,10 +257,14 @@ export async function startHub(
         hasLan: config.lan !== undefined && lanAssemblyOff === undefined,
         ...(revokeLanForRecovery === undefined ? {} : { revokeLan: revokeLanForRecovery }),
         now,
+        audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
       }),
       startup.signal,
     );
     let lanBlockedByRotate = rotateRecovery.lanBlocked === true;
+    /** Set when the runtime scan had to close an already-open LAN listener (permanent) — the
+     * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
+    let lanClosedByRotateScan = false;
 
     const fe = frontend({
       config,
@@ -390,17 +394,43 @@ export async function startHub(
         hasLan: config.lan !== undefined && lanDeps !== undefined,
         ...(revokeLan === undefined ? {} : { revokeLan }),
         now,
+        audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
       })
         .then((outcome) => {
           if (!outcome.recovered) return;
           (fe as HttpFrontendExt).auth?.reload();
+          // §6.7.1 运行期 row (C8 review P1): a rotation this process didn't initiate must
+          // invalidate exactly like the online path — already-open loopback SSE streams die
+          // (their cookie predates the new token); on the LAN side the SSE sweep + revoke-gen
+          // bump mirror `admin.ts`'s ④.
+          (fe as HttpFrontendExt).revokeAllSse?.();
           if (outcome.lanBlocked === true) {
             lanBlockedByRotate = true;
+            // The listener may already be open from this boot — fail closed. NOTE:
+            // `LanFacade.close()` is permanent (no in-process restart), so after the pending
+            // rotate completes a `/webhub restart` is required to re-open LAN; the scan keeps
+            // retrying the revoke in the meantime (main-session ruling — the plan's "重新 start()"
+            // assumed a restartable facade).
+            if (fe.lan !== undefined) {
+              lanClosedByRotateScan = true;
+              log.warn(
+                "web-hub: closing the LAN listener (rotate revoke failed); run /webhub restart to re-open it once the pending rotate completes",
+              );
+              void fe.lan.close().catch((err: unknown) =>
+                log.error("web-hub: failed to close LAN listener after rotate revoke failure", {
+                  error: String(err),
+                }),
+              );
+            }
             hubJson.patchLan({ state: "off", reason: "rotate-pending" });
             return;
           }
-          if (lanBlockedByRotate && fe.lan !== undefined) {
-            // Previously blocked, now resolved \u2014 open the LAN listener this boot never did.
+          if (fe.lan !== undefined) {
+            (fe.lan as LanFacadeExt | undefined)?.revokeAll?.();
+            (fe as HttpFrontendExt).bumpLanRevokeGen?.();
+          }
+          if (lanBlockedByRotate && fe.lan !== undefined && !lanClosedByRotateScan) {
+            // Previously blocked at startup (the listener never opened), now resolved — open it.
             lanBlockedByRotate = false;
             void fe.lan.start().then(
               (s) => hubJson.patchLan(s),

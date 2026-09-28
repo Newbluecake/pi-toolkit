@@ -51,7 +51,7 @@ export interface AdminHandler {
   handleLanReq(frame: LanReqFrame, meta: AdminMeta): Promise<LanResFrame>;
   /** Caller (`agent-server.ts`) sends the `hub_ctl_ack` itself *before* calling this — this
    * function only triggers the actual close, fire-and-forget from the caller's perspective. */
-  handleShutdown(meta: AdminMeta): void;
+  handleShutdown(meta: AdminMeta, reason: "restart" | "stop"): void;
   /**
    * §6.7.1 online `hub_ctl{op:"rotate_token"}` path (`by:"hub"`): write intent → atomic token
    * replace → advance intent phase → invalidate everything (loopback session map + SSE, LAN
@@ -242,9 +242,9 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
       }
     },
 
-    handleShutdown(meta) {
-      audit("shutdown", { ok: true }, meta);
-      deps.shutdown("restart");
+    handleShutdown(meta, reason) {
+      audit(reason === "stop" ? "stop" : "shutdown", { ok: true }, meta);
+      deps.shutdown(reason);
     },
 
     async handleRotateToken(meta) {
@@ -293,7 +293,11 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
           error: String(err),
         });
       }
-      audit("rotate_token", { ok: true, path: "online", by: "hub", revoked: { loopback, lan } }, meta);
+      audit(
+        "rotate_token",
+        { ok: true, path: "online", by: "hub", phase: "token-written", revoked: { loopback, lan } },
+        meta,
+      );
       return { token, revoked: { loopback, lan } };
     },
   };
@@ -311,6 +315,9 @@ export interface RotateRecoveryDeps {
    * recovery pass cannot complete the LAN half and must fail closed (`lanBlocked: true`). */
   revokeLan?: () => Promise<number>;
   now?: () => number;
+  /** §6.7.1 audit row (`{"audit":"admin","op":"rotate_token","path":"recovery",…}`) — the caller
+   * (hub.ts) binds the log line; recoveries used to leave no audit trail at all (C8 review). */
+  audit?: (fields: Record<string, unknown>) => void;
 }
 
 export interface RotateRecoveryOutcome {
@@ -352,24 +359,37 @@ export async function recoverRotateIntent(deps: RotateRecoveryDeps): Promise<Rot
       intent = advanceRotateIntentSync(deps.paths.rotateIntentFile, intent, "token-written");
     } catch (err) {
       deps.log.error("web-hub admin: rotate-intent token recovery failed", { error: String(err) });
+      deps.audit?.({ ok: false, path: "recovery", phase: "intent", code: "E_TOKEN_RECOVER" });
       return { recovered: true, lanBlocked: deps.hasLan };
     }
   }
   if (deps.hasLan) {
-    if (deps.revokeLan === undefined) return { recovered: true, lanBlocked: true };
+    if (deps.revokeLan === undefined) {
+      deps.audit?.({ ok: false, path: "recovery", phase: "token-written", code: "E_LAN_UNAVAILABLE" });
+      return { recovered: true, lanBlocked: true };
+    }
     let lanRevoked: number;
     try {
       lanRevoked = await deps.revokeLan();
     } catch (err) {
       deps.log.error("web-hub admin: rotate-intent LAN revoke failed during recovery", { error: String(err) });
+      deps.audit?.({ ok: false, path: "recovery", phase: "token-written", code: "E_LAN_REVOKE" });
       return { recovered: true, lanBlocked: true };
     }
     try {
       removeRotateIntentSync(deps.paths.rotateIntentFile);
     } catch (err) {
       deps.log.warn("web-hub admin: rotate-intent delete failed after LAN recovery", { error: String(err) });
+      deps.audit?.({
+        ok: false,
+        path: "recovery",
+        phase: "token-written",
+        code: "E_INTENT_DELETE",
+        revoked: { lan: lanRevoked },
+      });
       return { recovered: true, lanRevoked, lanBlocked: true };
     }
+    deps.audit?.({ ok: true, path: "recovery", by: intent.by, phase: "token-written", revoked: { lan: lanRevoked } });
     return { recovered: true, lanRevoked };
   }
   try {
@@ -377,5 +397,6 @@ export async function recoverRotateIntent(deps: RotateRecoveryDeps): Promise<Rot
   } catch (err) {
     deps.log.warn("web-hub admin: rotate-intent delete failed after recovery (no LAN)", { error: String(err) });
   }
+  deps.audit?.({ ok: true, path: "recovery", by: intent.by, phase: "token-written", revoked: { lan: 0 } });
   return { recovered: true };
 }

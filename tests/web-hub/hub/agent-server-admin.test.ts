@@ -30,7 +30,7 @@ function fakeAdmin(over: Partial<AdminHandler> = {}): AdminHandler & { calls: Ar
       calls.push({ op: frame.op, meta });
       return { t: "lan_res", rid: frame.rid, ok: true };
     },
-    handleShutdown(meta: AdminMeta) {
+    handleShutdown(meta: AdminMeta, reason: "restart" | "stop") {
       calls.push({ op: "shutdown", meta });
     },
     ...over,
@@ -137,6 +137,47 @@ describe("agent-server + admin wiring (plan §8)", () => {
     // *observed* the ack frame, the call already happened; the ordering that matters (write
     // scheduled before the shutdown side effect) is enforced by agent-server.ts itself.
     expect(order).toContain("handleShutdown");
+  });
+
+  it("hub_ctl rotate_token routes to admin.handleRotateToken and acks with revoked (C8 P0)", async () => {
+    const order: string[] = [];
+    const admin = fakeAdmin({
+      handleShutdown: () => {
+        order.push("handleShutdown");
+      },
+      handleRotateToken: async (meta: AdminMeta) => {
+        order.push("handleRotateToken");
+        return { token: "tok-new", revoked: { loopback: 2, lan: 3 } };
+      },
+    } as Partial<AdminHandler>);
+    await setup(admin);
+    const c = await client();
+    c.send(hello());
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+
+    c.send({ t: "hub_ctl", rid: "rid-rot", op: "rotate_token" });
+    const ack = await c.waitFrame((f) => f["t"] === "hub_ctl_ack");
+    // P0 regression: rotate_token must never reach the shutdown path, and the ack carries the
+    // revocation counts once the (async) handler resolves.
+    expect(ack).toEqual({ t: "hub_ctl_ack", rid: "rid-rot", revoked: { loopback: 2, lan: 3 } });
+    expect(order).toEqual(["handleRotateToken"]);
+  });
+
+  it("hub_ctl shutdown passes the stop reason through to admin.handleShutdown", async () => {
+    const reasons: string[] = [];
+    const admin = fakeAdmin({
+      handleShutdown: (_meta: AdminMeta, reason: "restart" | "stop") => {
+        reasons.push(reason);
+      },
+    } as Partial<AdminHandler>);
+    await setup(admin);
+    const c = await client();
+    c.send(hello());
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+
+    c.send({ t: "hub_ctl", rid: "rid-stop", op: "shutdown", reason: "stop" });
+    await c.waitFrame((f) => f["t"] === "hub_ctl_ack");
+    expect(reasons).toEqual(["stop"]);
   });
 
   it("hub_ctl never reaches registry.onFrame or the bus", async () => {

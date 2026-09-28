@@ -233,9 +233,17 @@ describe("createAdminHandler (plan §8)", () => {
     it("handleShutdown invokes deps.shutdown('restart') and audits", () => {
       const calls: string[] = [];
       const { deps, log } = baseDeps({ shutdown: (reason) => calls.push(reason) });
-      createAdminHandler(deps).handleShutdown({ agentKey: "a1", agentPid: 42 });
+      createAdminHandler(deps).handleShutdown({ agentKey: "a1", agentPid: 42 }, "restart");
       expect(calls).toEqual(["restart"]);
       expect(log.lines.some((l) => (l.data as Record<string, unknown> | undefined)?.["op"] === "shutdown")).toBe(true);
+    });
+
+    it("handleShutdown with reason 'stop' shuts down with 'stop' and audits op=stop (C8)", () => {
+      const calls: string[] = [];
+      const { deps, log } = baseDeps({ shutdown: (reason) => calls.push(reason) });
+      createAdminHandler(deps).handleShutdown({ agentKey: "a1" }, "stop");
+      expect(calls).toEqual(["stop"]);
+      expect(log.lines.some((l) => (l.data as Record<string, unknown> | undefined)?.["op"] === "stop")).toBe(true);
     });
   });
 

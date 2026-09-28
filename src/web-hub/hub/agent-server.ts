@@ -168,8 +168,23 @@ export function createAgentServer(
         return;
       }
       if (frame.t === "hub_ctl") {
+        const meta = { agentKey, ...(agentPid === undefined ? {} : { agentPid }) };
+        if (frame.op === "rotate_token") {
+          // §6.7.1 (C8 verifier P0): the online rotate MUST NOT fall through to the shutdown
+          // path — every hub_ctl op used to be acked and then shut the hub down.
+          if (deps.admin !== undefined) {
+            void deps.admin.handleRotateToken(meta).then(
+              ({ revoked }) => write({ t: "hub_ctl_ack", rid: frame.rid, revoked }),
+              (err: unknown) =>
+                log.error("web-hub agent-server: admin rotate_token handler rejected", { error: String(err) }),
+            );
+          } else {
+            write({ t: "hub_ctl_ack", rid: frame.rid });
+          }
+          return;
+        }
         write({ t: "hub_ctl_ack", rid: frame.rid });
-        deps.admin?.handleShutdown({ agentKey, ...(agentPid === undefined ? {} : { agentPid }) });
+        deps.admin?.handleShutdown(meta, frame.reason);
         return;
       }
       registry.onFrame(agentKey, frame);

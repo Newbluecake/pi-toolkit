@@ -49,9 +49,14 @@ export type StopOutcome = { kind: "stopped" } | { kind: "marker-write-failed"; m
 
 export type StartOutcome = { kind: "started" } | { kind: "started-marker-remove-failed"; code: string };
 
+/** §6.7.2: `/webhub open` and `/webhub restart` are explicit intents too — they remove the stop
+ * marker (ENOENT counts as success) without spawning (the caller's own flow does that). */
+export type ClearStopMarkerOutcome = { kind: "cleared" } | { kind: "clear-failed"; code: string };
+
 export interface AdminCommands {
   stop(): Promise<StopOutcome>;
   start(): Promise<StartOutcome>;
+  clearStopMarker(): Promise<ClearStopMarkerOutcome>;
   rotateToken(): Promise<RotateOutcome>;
 }
 
@@ -194,6 +199,15 @@ export function createAdminCommands(): AdminCommands {
       }
       respawnSoon();
       return { kind: "started" };
+    },
+
+    async clearStopMarker(): Promise<ClearStopMarkerOutcome> {
+      try {
+        removeStopMarkerSync(currentPaths().stoppedFile);
+        return { kind: "cleared" };
+      } catch (err) {
+        return { kind: "clear-failed", code: (err as NodeJS.ErrnoException).code ?? "EUNKNOWN" };
+      }
     },
 
     async rotateToken(): Promise<RotateOutcome> {
