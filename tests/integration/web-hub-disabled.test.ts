@@ -180,8 +180,16 @@ describe("web-hub disabled ⇒ zero side effects (plan §6, §9 #7)", () => {
     const changed = diffEventTypes(enabledHandlers, baselineHandlers);
     // §4.2/D13: `compaction-state.ts` also listens on `session_before_compact` (not itself part
     // of `FORWARDED_EVENTS` — it never forwards to the wire, it only tracks the manual-compaction
-    // window for the `prompt` op's `E_BUSY_COMPACTING` precheck).
-    const expected = new Set(["session_start", "session_shutdown", "session_before_compact", ...FORWARDED_EVENTS]);
+    // window for the `prompt` op's `E_BUSY_COMPACTING` precheck). #32 C11 wiring also subscribes
+    // `resources_discover` (has a result contract, so it can't join FORWARDED_EVENTS) to refresh
+    // the commands slot when extensions load mid-session.
+    const expected = new Set([
+      "session_start",
+      "session_shutdown",
+      "session_before_compact",
+      "resources_discover",
+      ...FORWARDED_EVENTS,
+    ]);
     expect(changed.length).toBeGreaterThan(0);
     for (const event of changed) expect(expected.has(event), `unexpected diff on ${event}`).toBe(true);
     // D registers one handler on every forwarded event type.
