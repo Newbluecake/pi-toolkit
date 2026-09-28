@@ -1,5 +1,5 @@
 {
-  "$comment": "Hub lifecycle states (control-plan.md v2.1 §6.6/§6.7, §9.3): the initial `hub` frame carries supersedePending with a RELATIVE countdown (`supersedeDeadlineInMs`, converted to an absolute deadline at startup — v2.1 '最晚 HH:MM 升级' banner); the script then walks the hub through the forced-upgrade path (restarting + forced + draining, §6.7.3 30-min cap) 1.5s after each client connects, and finally `stopping` (terminal '/webhub stop' banner) at 30s for interactive dev:hub sessions. One idle controllable agent keeps the detail view routable while banners change.",
+  "$comment": "Hub lifecycle states (control-plan.md v2.1 §6.6/§6.7, §9.3): the initial `hub` frame carries supersedePending with a RELATIVE countdown (`supersedeDeadlineInMs`, converted to an absolute deadline at startup — v2.1 '最晚 HH:MM 升级' banner); the script then walks the hub through a stop-marker-blocked pause (D25/§6.7.3, 0.8s: `supersedeBlocked:\"stopped\"` — 'upgrade paused' banner) followed by the forced-upgrade path (restarting + forced + draining, §6.7.3 30-min cap) 1.5s after each client connects, and finally `stopping` (terminal '/webhub stop' banner) at 30s for interactive dev:hub sessions. One idle controllable agent keeps the detail view routable while banners change.",
   "hubState": {
     "caps": ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
     "state": "running",
@@ -68,6 +68,16 @@
     }
   },
   "script": [
+    {
+      "atMs": 800,
+      "event": "hub",
+      "data": {
+        "state": "running",
+        "nextVersion": "1.6.0",
+        "supersedePending": true,
+        "supersedeBlocked": "stopped"
+      }
+    },
     {
       "atMs": 1500,
       "event": "hub",

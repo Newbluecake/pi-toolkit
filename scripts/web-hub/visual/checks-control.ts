@@ -493,15 +493,24 @@ async function checkHubStateBanner(ctx: CheckContext): Promise<CheckOutcome[]> {
   }, CONTROL_SELECTORS);
   if (info === null) return [];
   const out = [outcome("control-hub-state-banner-text", info.text.length > 0, "banner rendered empty")];
-  // v2.1 §7.7: pending ⇒ countdown "最晚 HH:MM"; restarting ⇒ version + forced/draining note;
-  // stopping ⇒ the /webhub start pointer. The fixture's script flips states at 1.5s/30s, so
-  // which of the three a given cell sees is timing-dependent — all three are well-formed.
+  // v2.1 §7.7: pending ⇒ countdown "最晚 HH:MM"; blocked ⇒ stop-marker pause note (D25 §6.7.3);
+  // restarting ⇒ version + forced/draining note; stopping ⇒ the /webhub start pointer. The
+  // fixture's script flips states at 0.8s/1.5s/30s, so which of the four a given cell sees is
+  // timing-dependent — all four are well-formed.
   if (info.state === "pending") {
     out.push(
       outcome(
         "control-hub-state-countdown",
         /\d{2}:\d{2}/.test(info.text),
         `pending banner without HH:MM deadline: ${info.text.slice(0, 120)}`,
+      ),
+    );
+  } else if (info.state === "blocked") {
+    out.push(
+      outcome(
+        "control-hub-state-blocked-copy",
+        /paused|\u6682\u505c/i.test(info.text) && info.text.includes("/webhub start"),
+        `blocked banner missing pause note / /webhub start pointer: ${info.text.slice(0, 120)}`,
       ),
     );
   } else if (info.state === "restarting") {
