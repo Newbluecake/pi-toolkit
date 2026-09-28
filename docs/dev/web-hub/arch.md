@@ -102,6 +102,12 @@ pi 侧关键事实（explore §Q1–Q6 + 本次补核）：
 
 ### 3.4 浏览器前端（Q3 结论）
 
+> **废止注记（todo #26，vue-plan.md v2.1，P5b 原子切换）**：下面的“零构建”决策已被推翻。前端重写为
+> Vue 3 SFC + Vite（`src/web-hub/ui/`，产物 `dist/web-hub-ui/` 不进 git，`npm run build:web` 本地构建），
+> hub 改为经签名清单校验的 `createUiServer`（`hub/static.ts` + `hub/ui-root.ts`）服务。旧前端
+> `src/web-hub/web/` 已删除，其纯逻辑迁至 `src/web-hub/ui/src/logic/`。详见
+> `docs/dev/web-hub/vue-plan.md`。以下正文仅作历史记录保留。
+
 - **原生 ES modules + 手写 JS（JSDoc 注解）**，放 `src/web-hub/web/`（`index.html`、`app.js`、`render/*.js`、`style.css`），hub 从包目录静态直出，零构建、零打包。`.js` 不在 tsc `include` 的 allowJs 范围内，不影响 typecheck/build；prettier 照常格式化。
 - 渲染安全：所有模型/工具输出一律 `textContent`；markdown 用自写**白名单**渲染器（代码块/行内码/粗斜体/列表/链接 `http(s)` only），禁止 `innerHTML` 拼接原文。
 - 若后续复杂度上升，可 vendor 单文件 preact+htm（带 LICENSE，放 `web/vendor/`），不引 npm 依赖。v1 不做。

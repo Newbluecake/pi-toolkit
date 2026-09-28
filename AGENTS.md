@@ -264,11 +264,24 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   entries, disk-cached under `<agent>/cache/session-nav/`). Post-guard, TUI-only.
 - `src/web-hub/` — browser UI over a per-machine hub daemon (`webHub.enabled`, default off ⇒ zero wiring,
   zero network, zero disk; post-guard, child sessions inert). `protocol/` (frame/key/path contracts shared by
-  both sides), `hub/` (singleton daemon: composition root `hub.ts`, process entry `main.ts` run through pi's
-  bundled jiti-cli, HTTP/SSE/auth/static; never imports pi), `agent/` (pi-side client `wireWebHub`: process-
-  level connection on a `Symbol.for` global, reused across /new·/resume·/fork, handed over on /reload),
-  `web/` (no-build static frontend, innerHTML banned). Wired at the end of `src/index.ts` after
-  `wireDeferredReload`. P1 is read-only. Design: `docs/dev/web-hub/{arch,plan}.md`. LAN access (S1,
+  both sides, incl. `ui-manifest.ts`'s `UiBuildInfo`/`parseUiBuildInfo`/`isAllowedUiPath` — the build-time
+  manifest schema both the Vite plugin and the hub-side verifier trust), `hub/` (singleton daemon: composition
+  root `hub.ts`, process entry `main.ts` run through pi's bundled jiti-cli, HTTP/SSE/auth/static; never imports
+  pi), `agent/` (pi-side client `wireWebHub`: process-level connection on a `Symbol.for` global, reused across
+  /new·/resume·/fork, handed over on /reload), `ui/` (the Vue 3 SFC frontend source, built by `npm run
+build:web` into `dist/web-hub-ui/` — not checked in; `ui/src/logic/` holds the pure, DOM-free logic ported
+  from the pre-Vue frontend, imported through the `@logic` alias). Wired at the end of `src/index.ts` after
+  `wireDeferredReload`. P1 is read-only. Design: `docs/dev/web-hub/{arch,plan,vue-plan}.md`. **UI serving
+  (todo #26 vue-plan.md v2.1 §2.1, P5b)**: `hub/static.ts`'s `createUiServer` resolves a verified root —
+  package-bundled `dist/web-hub-ui/` first, else the external, version-pinned
+  `~/.pi/agent/web-hub-ui/<hubVersion>/` (`hub/ui-root.ts`'s `resolveUiRoot`/`verifyUiRoot`: symlink/owner/mode/
+  manifest-hash checks, TOCTOU-safe — bytes are read and hashed once at resolve time, served purely from
+  memory afterward) — and serves an HTTP-200 "not built yet" placeholder (`hub/unbuilt.ts`) when neither
+  candidate verifies, with install instructions gated by auth mode (token/loopback sees absolute paths and
+  rejection reasons; password/LAN sees neither). `agent/ui-status.ts` renders the same status for
+  `/webhub status`/`open`, reading `hub.json`'s `ui` field (`hub-json.ts`'s `patchUi`, mirroring `patchLan`).
+  The legacy zero-build `src/web-hub/web/` frontend (`no-innerhtml`-enforced, hand-written JS) was deleted in
+  this same switch — its pure logic lives on under `ui/src/logic/`. LAN access (S1,
   `webHub.lan.enabled`, default off): username/password auth over plain HTTP on `0.0.0.0:<webHub.lan.port>`,
   host allow-list + optional trusted-reverse-proxy origin (`webHub.lan.{trustProxyFrom,externalOrigins}`) for
   HTTPS termination, SQLite-backed sessions in a SIGKILL-able child process, and `/webhub passwd|unlock|restart`
