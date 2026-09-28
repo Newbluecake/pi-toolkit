@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -68,6 +68,28 @@ describe("buildInfoPlugin", () => {
     );
     // sorted by path
     expect(parsed.info.files.map((f) => f.path)).toEqual([...parsed.info.files.map((f) => f.path)].sort());
+  });
+
+  it("normalizes the dist tree to 0755 dirs / 0644 files regardless of the builder's umask", async () => {
+    const outDir = tmpOutDir();
+    writeFileSync(join(outDir, "index.html"), "<html></html>");
+    mkdirSync(join(outDir, "assets"));
+    writeFileSync(join(outDir, "assets", "index-deadbeef.js"), "console.log(1)");
+    chmodSync(outDir, 0o775);
+    chmodSync(join(outDir, "assets"), 0o777);
+    chmodSync(join(outDir, "index.html"), 0o666);
+    chmodSync(join(outDir, "assets", "index-deadbeef.js"), 0o664);
+
+    const plugin = buildInfoPlugin();
+    (plugin.configResolved as (c: unknown) => void)(fakeResolvedConfig(outDir, outDir));
+    await (plugin.closeBundle as () => Promise<void>)();
+
+    const mode = (p: string): number => statSync(p).mode & 0o777;
+    expect(mode(outDir)).toBe(0o755);
+    expect(mode(join(outDir, "assets"))).toBe(0o755);
+    expect(mode(join(outDir, "index.html"))).toBe(0o644);
+    expect(mode(join(outDir, "assets", "index-deadbeef.js"))).toBe(0o644);
+    expect(mode(join(outDir, "build-info.json"))).toBe(0o644);
   });
 
   it("refuses to write a manifest when the output tree contains a symlink", async () => {

@@ -10,7 +10,7 @@
  */
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
@@ -77,6 +77,20 @@ async function walkFiles(dir: string, base: string): Promise<string[]> {
   return out;
 }
 
+/**
+ * Normalize the dist tree to 0755 dirs / 0644 files. Vite creates the output with the builder's
+ * umask, and a group-writable tree (umask 002) is rightly rejected by the hub's trust check
+ * (`verifyUiRoot` / `ui-root.ts`: owner ∈ {self, root}, `mode & 0o022 === 0`).
+ */
+async function normalizeModes(dir: string): Promise<void> {
+  await chmod(dir, 0o755);
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const abs = join(dir, entry.name);
+    if (entry.isDirectory()) await normalizeModes(abs);
+    else if (entry.isFile()) await chmod(abs, 0o644);
+  }
+}
+
 async function hashFile(path: string): Promise<UiManifestFile> {
   const buf = await readFile(path);
   const bytes = (await stat(path)).size;
@@ -115,6 +129,7 @@ export function buildInfoPlugin(): Plugin {
         files,
       };
       await writeFile(join(outDir, BUILD_INFO_FILE), `${JSON.stringify(info, null, 2)}\n`, "utf8");
+      await normalizeModes(outDir);
     },
   };
 }
