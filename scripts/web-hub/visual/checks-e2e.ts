@@ -23,9 +23,14 @@
  * already-selected agent) and to a small, deliberately chosen subset of the width×theme matrix
  * (never every cell) — each mutating check (click/reload/keyboard) costs real wall-clock time
  * and the ui-design.md requirement it verifies does not vary per extra breakpoint once one
- * narrow and one split-view width have been exercised.
+ * narrow and one split-view width have been exercised. The one exception is the axe audit
+ * (group E), which §5.3's "axe 0 违规" gate applies to BOTH theme cells (color-contrast is
+ * theme-dependent) of dashboard/detail/login/states at the same two representative widths.
  */
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import type { CheckContext, CheckModule, CheckOutcome, ExtPage } from "../visual.js";
+import { loadFixture } from "../dev-hub.js";
 import { THEME_STORAGE_KEY } from "../../../src/web-hub/ui/src/composables/useTheme.js";
 
 function outcome(name: string, ok: boolean, detail?: string): CheckOutcome {
@@ -41,6 +46,13 @@ function pass(name: string, detail?: string): CheckOutcome {
  * `visual.ts` itself uses to extend `lib/playwright.ts`'s minimal `PwPage`. */
 interface E2EPage extends ExtPage {
   keyboard: { press(key: string): Promise<void> };
+}
+
+/** Playwright's real `waitForFunction(pageFunction, arg, options)` — `PwPage`'s frozen minimal
+ * type only declares the no-arg form, and an interface extension can't overload it compatibly,
+ * so the one call site that needs an argument casts here (same cast-only pattern as E2EPage). */
+interface WaitForArgPage {
+  waitForFunction(fn: (arg: string) => boolean, arg: string, opts?: { timeout?: number }): Promise<unknown>;
 }
 
 function asE2EPage(ctx: CheckContext): E2EPage {
@@ -97,6 +109,18 @@ export function isFocusWalkWidth(width: number, hasTouch: boolean): boolean {
   return width === 375 || (width === 1024 && !hasTouch);
 }
 
+/** vue-plan.md v2.1 §4.4.2's axe row covers dashboard/login/states × light/dark; the dispatch
+ * adds `detail` (the screen with by far the most interactive markup) and pins the audit to the
+ * same two representative widths every other mutating check in this module uses — one narrow,
+ * one split — in BOTH theme cells, since axe's wcag2aa set includes color-contrast and the two
+ * themes have fully independent token sets (`styles/tokens.css`). `long` stays out: its 1000-entry
+ * fixture exists to stress windowing (§6.6), not to add a fifth accessibility surface. */
+export const AXE_SCENARIOS: readonly string[] = ["dashboard", "detail", "login", "states"];
+
+export function isAxeCell(scenario: string, width: number, hasTouch: boolean): boolean {
+  return AXE_SCENARIOS.includes(scenario) && (width === 375 || (width === 1024 && !hasTouch));
+}
+
 export interface SimpleRect {
   readonly x: number;
   readonly y: number;
@@ -114,6 +138,91 @@ export function rectsIntersect(a: SimpleRect, b: SimpleRect, epsilonPx = 1): boo
   const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
   const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
   return overlapX > epsilonPx && overlapY > epsilonPx;
+}
+
+/** The slice of a dev-hub fixture this module's pagination assertions need — deliberately NOT
+ * `DevHubFixture` itself so the pure helpers stay unit-testable with inline literals (the real
+ * `DevHubFixture` from `dev-hub.ts` is structurally assignable to this). */
+export interface FixtureOlderShape {
+  readonly historyOlder?: Readonly<Record<string, Readonly<Record<string, { readonly entries?: readonly unknown[] }>>>>;
+  readonly history?: Readonly<Record<string, { readonly entries?: readonly unknown[] }>>;
+}
+
+export interface OlderExpectation {
+  /** True iff the fixture declares at least one `historyOlder` page for the agent — the detail
+   * view MUST then render a `.tx-older` button, and its absence is a product regression, never
+   * a "not applicable" pass (verifier finding: the previous version passed silently either way). */
+  readonly expected: boolean;
+  /** The `before` cursor key of the first declared page (for failure messages), if any. */
+  readonly before: string | null;
+  /** A distinctive message text from the older page's entries that MUST become visible in the
+   * transcript after a successful round trip — `null` only when the page carries no textual
+   * message entries at all (content assertion then degrades to the item-count assertion). */
+  readonly text: string | null;
+}
+
+function firstMessageText(entries: readonly unknown[]): string | null {
+  for (const entry of entries) {
+    const message = (entry as { message?: unknown } | null)?.message;
+    if (message === null || typeof message !== "object") continue;
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === "string" && content.trim().length > 0) return content.trim();
+    if (Array.isArray(content)) {
+      for (const part of content as readonly unknown[]) {
+        const p = part as { type?: unknown; text?: unknown } | null;
+        if (p !== null && p.type === "text" && typeof p.text === "string" && p.text.trim().length > 0) {
+          return p.text.trim();
+        }
+      }
+    }
+  }
+  return null;
+}
+
+export function olderExpectation(fixture: FixtureOlderShape, agentKey: string): OlderExpectation {
+  const pages = fixture.historyOlder?.[agentKey];
+  if (pages === undefined) return { expected: false, before: null, text: null };
+  const before = Object.keys(pages)[0];
+  if (before === undefined) return { expected: false, before: null, text: null };
+  return { expected: true, before, text: firstMessageText(pages[before]?.entries ?? []) };
+}
+
+/** The LAST textual message of the agent's initial history page — used as the "initial render
+ * has fully settled" landmark before any item counting (the render gate's 100ms throttle can
+ * still have tail entries queued when the first `.tx-item` mounts). */
+export function historyLandmark(fixture: FixtureOlderShape, agentKey: string): string | null {
+  const entries = fixture.history?.[agentKey]?.entries ?? [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const text = firstMessageText([entries[i]]);
+    if (text !== null) return text;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// axe result shaping (pure, unit-tested — the audit itself needs a real page)
+// ---------------------------------------------------------------------------
+
+export interface AxeViolationLike {
+  readonly id: string;
+  readonly impact?: string | null;
+  readonly nodes?: ReadonlyArray<{ readonly target?: unknown }>;
+}
+
+/** One line per violated rule: `rule-id(impact)@selector | selector (+N more)`. axe's
+ * `node.target` is a selector array (one string per shadow-DOM level) — joined with a space for
+ * the common flat case. Bounded at `maxLen` so a pathological page can't blow up report.txt. */
+export function formatAxeViolations(violations: readonly AxeViolationLike[], maxLen = 1200): string {
+  const parts = violations.map((v) => {
+    const nodes = v.nodes ?? [];
+    const selectors = nodes
+      .slice(0, 3)
+      .map((n) => (Array.isArray(n.target) ? (n.target as readonly unknown[]).join(" ") : String(n.target ?? "?")));
+    const extra = nodes.length > 3 ? ` (+${nodes.length - 3} more)` : "";
+    return `${v.id}(${v.impact ?? "?"})@${selectors.join(" | ")}${extra}`;
+  });
+  const out = parts.join("; ");
+  return out.length > maxLen ? out.slice(0, maxLen - 1) + "…" : out;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +308,18 @@ async function checkListDetailBackFlow(ctx: CheckContext): Promise<CheckOutcome[
 async function checkLoadOlderGrowsTranscript(ctx: CheckContext): Promise<CheckOutcome[]> {
   if (!isLoadOlderCell(ctx.scenario, ctx.width, ctx.hasTouch, ctx.theme)) return [];
   const page = asE2EPage(ctx);
+  // The detail scenario's contract (visual.ts's DEFAULT_SCENARIOS): fixture `dashboard`, routed
+  // to agent-alpha. The pagination expectation is DERIVED from that fixture, not assumed — the
+  // same `loadFixture` the harness's own dev-hub boot uses, so a fixture edit that drops
+  // `historyOlder` flips this check back to a declared not-applicable instead of a stale fail.
+  const agentKey = "agent-alpha";
+  let fixture: FixtureOlderShape;
+  try {
+    fixture = await loadFixture("dashboard");
+  } catch (err) {
+    return [outcome("e2e-load-older-button-present", false, `dashboard fixture unreadable: ${String(err)}`)];
+  }
+  const expectation = olderExpectation(fixture, agentKey);
 
   await page.evaluate((h) => {
     window.location.hash = h;
@@ -208,32 +329,101 @@ async function checkLoadOlderGrowsTranscript(ctx: CheckContext): Promise<CheckOu
     .catch(() => {});
 
   const hasOlder = await page.evaluate(() => document.querySelector(".tx-older") !== null);
-  if (!hasOlder) {
-    return [pass("e2e-load-older-grows-transcript", "not applicable: no .tx-older button for this fixture/agent")];
+  if (!expectation.expected) {
+    return [
+      pass("e2e-load-older-grows-transcript", "not applicable: fixture declares no historyOlder for agent-alpha"),
+    ];
   }
+  if (!hasOlder) {
+    return [
+      outcome(
+        "e2e-load-older-button-present",
+        false,
+        `fixture declares historyOlder["${agentKey}"]["${expectation.before ?? "?"}"] but no .tx-older button rendered`,
+      ),
+    ];
+  }
+  const results: CheckOutcome[] = [pass("e2e-load-older-button-present")];
 
+  // Render settle before counting: `waitForFunction(.tx-item > 0)` returns after the FIRST item
+  // mounts, but the render gate (100ms throttle) can still have the remaining initial entries
+  // queued — a `beforeCount` taken that early makes the later growth assertion false-pass. Wait
+  // for the fixture's own last history message as the "initial render complete" landmark.
+  const landmark = historyLandmark(fixture, agentKey);
+  if (landmark !== null) {
+    await (page as unknown as WaitForArgPage)
+      .waitForFunction((text) => (document.querySelector(".transcript")?.textContent ?? "").includes(text), landmark, {
+        timeout: 5_000,
+      })
+      .catch(() => {});
+  }
+  const beforeCount = await page.evaluate(() => document.querySelectorAll(".tx-item").length);
   await page.click(".tx-older");
-  // `tests/fixtures/web-hub-ui/dashboard.json`'s `historyOlder["agent-alpha"]` page reports
-  // `hasMore: false` — the deterministic, content-independent signal that the round trip (click
-  // → `hub.loadOlder` → real `/api/history` request → dispatched `page` event → re-render)
-  // actually completed is the "Load Older Messages" button disappearing. (Whether the fetched
-  // entry itself becomes *visible* additionally depends on `state.js`'s legacy `messageKey`
-  // role+timestamp dedup, which this fixture's entries — lacking their own `message.timestamp`,
-  // only an entry-level one — happen to collide on; that is a fixture-data quality finding for
-  // whoever owns `dashboard.json`, not a P3/P4 regression, and is reported separately rather
-  // than encoded as a flaky content assertion here.)
+  // dashboard.json's `historyOlder["agent-alpha"]` page reports `hasMore: false` — the
+  // deterministic signal that the network round trip (click → `hub.loadOlder` → real
+  // `/api/history` request → dispatched `page` event) completed is the button disappearing. But
+  // a disappearing button alone proves nothing about the DATA (verifier finding): P4's designed
+  // flow (plan §3.6 前插锚点 — `Transcript.vue`'s `paging` watcher shifts the window `start`
+  // forward by exactly the prepended count so the viewport never jumps) parks freshly fetched
+  // older items behind the `TxHiddenGap` affordance ("N earlier messages hidden · Show") instead
+  // of revealing them outright. The full user-visible round trip is therefore TWO clicks:
+  // `.tx-older` (fetch) then `.tx-window-gap` (reveal) — and only after the second must the old
+  // message's own text be present in the transcript.
   const settled = await page
     .waitForFunction(() => document.querySelector(".tx-older") === null, { timeout: 5_000 })
     .then(() => true)
     .catch(() => false);
-  const stillPaging = await page.evaluate(() => document.querySelector(".tx-divider .label") !== null);
-  return [
+  results.push(
     outcome(
       "e2e-load-older-round-trips",
       settled,
-      settled ? undefined : `still-paging=${stillPaging} — .tx-older never cleared after click`,
+      settled ? undefined : ".tx-older never cleared after click (paging divider stuck or page event never applied)",
     ),
-  ];
+  );
+  if (!settled) return results;
+
+  const gapShown = await page
+    .waitForFunction(() => document.querySelector(".tx-window-gap") !== null, { timeout: 3_000 })
+    .then(() => true)
+    .catch(() => false);
+  results.push(
+    outcome(
+      "e2e-load-older-anchor-gap-shown",
+      gapShown,
+      gapShown
+        ? undefined
+        : "no .tx-window-gap after the page landed — the prepend anchor must park fetched items behind the hidden-gap affordance",
+    ),
+  );
+  if (!gapShown) return results;
+
+  await page.click(".tx-window-gap");
+  await page
+    .waitForFunction(() => document.querySelector(".tx-window-gap") === null, { timeout: 3_000 })
+    .catch(() => {});
+  const after = await page.evaluate(() => ({
+    count: document.querySelectorAll(".tx-item").length,
+    text: document.querySelector(".transcript")?.textContent ?? "",
+  }));
+  results.push(
+    outcome(
+      "e2e-load-older-grows-transcript",
+      after.count > beforeCount,
+      `tx-item count before=${beforeCount} after=${after.count} (fetch + reveal)`,
+    ),
+  );
+  if (expectation.text !== null) {
+    const found = after.text.includes(expectation.text);
+    const shown = expectation.text.length > 60 ? expectation.text.slice(0, 60) + "…" : expectation.text;
+    results.push(
+      outcome(
+        "e2e-load-older-content-visible",
+        found,
+        `older page's message "${shown}" ${found ? "found" : "NOT found"} in .transcript after fetch + reveal`,
+      ),
+    );
+  }
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,20 +628,25 @@ interface FocusStep {
   readonly inDock: boolean;
 }
 
-/** Presses Tab up to `maxSteps` times, recording the focused element after each press. Stops
- * early once focus leaves the page onto `<body>` (Chromium's signal that the tab order has run
- * out of focusable elements and moved to browser chrome) — a bounded walk, never poll-forever,
- * matching this repo's own `csp-probe`/`visual.ts` convention of deterministic timeouts over
- * unbounded loops. */
-/** Presses Tab up to `maxSteps` times, recording the focused element after each press. Stops
- * early once focus leaves the page onto `<body>` (Chromium's signal that the tab order has run
- * out of focusable elements and moved to browser chrome) — a bounded walk, never poll-forever,
- * matching this repo's own `csp-probe`/`visual.ts` convention of deterministic timeouts over
- * unbounded loops. The terminal `<body>` step itself is never included in the returned list —
- * its bounding rect is the whole viewport, which trivially "overlaps" everything including the
- * dock, and it isn't a real focusable page element to begin with. */
-async function walkTabOrder(page: E2EPage, maxSteps: number): Promise<FocusStep[]> {
+export interface TabWalk {
+  readonly steps: readonly FocusStep[];
+  /** True iff focus landed on `<body>` at least once mid-walk (recorded as a `BODY` marker in
+   * diagnostic traces). In headless Chromium Tab from the last page element wraps back to the
+   * document start, so a `<body>` landing is EITHER tab-order exhaustion (end of the cycle) OR a
+   * transient focus loss — the fixture's timed SSE script events keep arriving during the walk,
+   * and a re-render that detaches the currently-focused node drops `activeElement` to `<body>`
+   * mid-order. The walker therefore does NOT stop at the first `<body>` (that was the W4-verifier
+   * false negative at detail/1024: 12 steps, BODY, walk aborted before ever reaching the dock):
+   * it keeps walking through it and terminates only when the cycle demonstrably repeats (the
+   * first step's selector comes back around) or `maxSteps` is exhausted — so a dock that exists
+   * in the tab order is always reached within one full document cycle, while a dock that truly
+   * never receives focus still fails, now with the full selector trace attached. */
+  readonly wrapped: boolean;
+}
+
+async function walkTabOrder(page: E2EPage, maxSteps: number): Promise<TabWalk> {
   const steps: FocusStep[] = [];
+  let wrapped = false;
   for (let i = 0; i < maxSteps; i++) {
     await page.keyboard.press("Tab");
     const step = await page.evaluate(() => {
@@ -467,10 +662,24 @@ async function walkTabOrder(page: E2EPage, maxSteps: number): Promise<FocusStep[
         isBody: el.tagName === "BODY",
       };
     });
-    if (step === null || step.isBody) break;
+    if (step === null) break;
+    if (step.isBody) {
+      wrapped = true;
+      continue;
+    }
+    // Cycle-complete detection after a wrap: the first step's selector has come back around.
+    // (Selector granularity is deliberate — good enough for termination, and the full trace is
+    // only ever used as failure diagnostics.)
+    if (wrapped && steps.length > 0 && step.selector === steps[0]?.selector) break;
     steps.push({ selector: step.selector, rect: step.rect, inDock: step.inDock });
   }
-  return steps;
+  return { steps, wrapped: wrapped };
+}
+
+/** Bounded one-line trace of a walk for failure details, with `BODY` markers for wrap points. */
+function traceWalk(walk: TabWalk, maxLen = 600): string {
+  const out = walk.steps.map((s) => s.selector).join(" → ") + (walk.wrapped ? " (with BODY wrap)" : "");
+  return out.length > maxLen ? out.slice(0, maxLen - 1) + "…" : out;
 }
 
 async function checkKeyboardFocusOrder(ctx: CheckContext): Promise<CheckOutcome[]> {
@@ -486,11 +695,15 @@ async function checkKeyboardFocusOrder(ctx: CheckContext): Promise<CheckOutcome[
   // "first Tab reaches the skip link" assertion depend on unrelated sibling checks' click
   // history instead of testing what a real visitor's first keypress after loading the page
   // does. A full reload resets that browser-internal state exactly like a fresh page load would.
+  await page.evaluate((h) => {
+    window.location.hash = h;
+  }, AGENT_ALPHA_ROUTE_LITERAL);
   await page.reload({ waitUntil: "load" });
   await page.waitForFunction(() => document.querySelector(".detail-head") !== null, { timeout: 8_000 }).catch(() => {});
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
-  const steps = await walkTabOrder(page, 80);
+  const walk = await walkTabOrder(page, 80);
+  const { steps } = walk;
   const results: CheckOutcome[] = [];
 
   const first = steps[0];
@@ -509,11 +722,28 @@ async function checkKeyboardFocusOrder(ctx: CheckContext): Promise<CheckOutcome[
     return { x: r.x, y: r.y, width: r.width, height: r.height };
   });
   if (dockRect === null) {
-    results.push(pass("e2e-focus-order-dock-reachable", "not applicable: .dock not found"));
-    results.push(pass("e2e-focus-order-no-overlap-with-dock", "not applicable: .dock not found"));
+    // The detail scenario is routed to a CONNECTED agent (dashboard.json's agent-alpha) whose
+    // composer (P3's `DetailDock.vue`) must always render — a missing dock is a product
+    // regression, never a "not applicable" pass (verifier finding: absence was silently passed).
+    results.push(
+      outcome(
+        "e2e-focus-order-dock-reachable",
+        false,
+        ".dock not rendered on a connected agent's detail view — DetailDock.vue must mount the composer",
+      ),
+    );
+    results.push(
+      outcome("e2e-focus-order-no-overlap-with-dock", false, ".dock not rendered — overlap cannot be verified"),
+    );
   } else {
     const dockReached = steps.some((s) => s.inDock);
-    results.push(outcome("e2e-focus-order-dock-reachable", dockReached, `${steps.length} tab step(s) walked`));
+    results.push(
+      outcome(
+        "e2e-focus-order-dock-reachable",
+        dockReached,
+        `${steps.length} tab step(s): ${traceWalk(walk) || "(none)"}`,
+      ),
+    );
 
     const overlapping = steps.filter(
       (s) => !s.inDock && s.rect.width > 0 && s.rect.height > 0 && rectsIntersect(s.rect, dockRect),
@@ -527,6 +757,96 @@ async function checkKeyboardFocusOrder(ctx: CheckContext): Promise<CheckOutcome[
     );
   }
 
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// group E — axe-core accessibility audit (vue-plan.md v2.1 §4.4.2 axe row, §5.3 P6 "axe 0 违规")
+// ---------------------------------------------------------------------------
+
+/** Injection trade-off (deviation from §4.4.2's "另开 bypassCSP: true 的 context", documented per
+ * dispatch): `CheckContext` exposes only the cell's existing `page` — no browser/context factory
+ * — so a second bypass-CSP context is not reachable from a check module without changing P2's
+ * frozen `visual.ts`. `page.addScriptTag({ path })` is NOT an alternative here: it injects an
+ * inline `<script>`, which the dev-hub's real production CSP (`script-src 'self'`, no
+ * 'unsafe-inline') would block — and the block would fire a `securitypolicyviolation` into the
+ * very listener `checks-common.ts` asserts on. Playwright's CDP-level `page.evaluate(source)` is
+ * not governed by page CSP at all, so evaluating the axe source string gives the same audit
+ * against the same real-CSP DOM with zero CSP surface changes. axe itself is pure DOM analysis
+ * (no network, no eval), so nothing else in its path touches CSP either. */
+let cachedAxeSource: string | undefined;
+
+function axeSource(): string {
+  if (cachedAxeSource === undefined) {
+    cachedAxeSource = readFileSync(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
+  }
+  return cachedAxeSource;
+}
+
+/** ExtPage's typed `evaluate` only accepts function arguments; Playwright's runtime also accepts
+ * a source string (the standard axe-playwright injection path). Cast-only, same pattern as
+ * E2EPage above. */
+interface StringEvalPage {
+  evaluate(script: string): Promise<unknown>;
+}
+
+interface AxeAudit {
+  readonly wcag: readonly AxeViolationLike[];
+  readonly bestPractice: readonly AxeViolationLike[];
+}
+
+async function checkAxeAccessibility(ctx: CheckContext): Promise<CheckOutcome[]> {
+  if (!isAxeCell(ctx.scenario, ctx.width, ctx.hasTouch)) return [];
+  const page = asE2EPage(ctx);
+  const suffix = `${ctx.width}x${ctx.theme}`;
+
+  // Re-assert the scenario's canonical route: sibling checks in this module (and glob-earlier
+  // modules) may have left the page on a probe route like `#/agent/e2e-does-not-exist`.
+  const route = ctx.scenario === "detail" ? AGENT_ALPHA_ROUTE_LITERAL : "#/";
+  await page.evaluate((h) => {
+    if (window.location.hash !== h) window.location.hash = h;
+  }, route);
+  await page
+    .waitForFunction(() => document.querySelector(".app, .login-page") !== null, { timeout: 5_000 })
+    .catch(() => {});
+  await page.waitForTimeout(200);
+
+  let audit: AxeAudit | null;
+  try {
+    await (page as unknown as StringEvalPage).evaluate(axeSource());
+    const raw = await page.evaluate(async () => {
+      const w = window as unknown as {
+        axe?: { run(context: unknown, options: unknown): Promise<{ violations: readonly unknown[] }> };
+      };
+      if (w.axe === undefined) return null;
+      const wcag = await w.axe.run(document, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] } });
+      const best = await w.axe.run(document, { runOnly: { type: "tag", values: ["best-practice"] } });
+      return { wcag: wcag.violations, bestPractice: best.violations };
+    });
+    audit = raw as AxeAudit | null;
+  } catch (err) {
+    return [outcome(`e2e-axe-wcag2-${suffix}`, false, `axe audit threw: ${String(err)}`)];
+  }
+  if (audit === null) {
+    return [outcome(`e2e-axe-wcag2-${suffix}`, false, "axe-core source evaluated but window.axe is undefined")];
+  }
+
+  const results: CheckOutcome[] = [
+    outcome(
+      `e2e-axe-wcag2-${suffix}`,
+      audit.wcag.length === 0,
+      audit.wcag.length === 0 ? undefined : `${audit.wcag.length} violation(s): ${formatAxeViolations(audit.wcag)}`,
+    ),
+  ];
+  // best-practice is advisory per dispatch: always reported, never failing.
+  results.push(
+    pass(
+      `e2e-axe-best-practice-${suffix}`,
+      audit.bestPractice.length === 0
+        ? "0 advisory finding(s)"
+        : `${audit.bestPractice.length} advisory (not failing): ${formatAxeViolations(audit.bestPractice, 600)}`,
+    ),
+  );
   return results;
 }
 
@@ -554,6 +874,7 @@ export const check: CheckModule = {
       outcomes.push(...(await checkNarrowDeepLinkCombination(ctx)));
       outcomes.push(...(await checkDeepLinkToMissingAgentEmptyState(ctx)));
       outcomes.push(...(await checkKeyboardFocusOrder(ctx)));
+      outcomes.push(...(await checkAxeAccessibility(ctx)));
     } finally {
       // Leave the page exactly how the next glob-loaded check module (`checks-shell.ts`, sorted
       // after this file) expects to find it — see this file's header comment.

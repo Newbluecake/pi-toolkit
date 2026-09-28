@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_ALPHA_ROUTE,
+  AXE_SCENARIOS,
+  formatAxeViolations,
+  historyLandmark,
+  isAxeCell,
   isFocusWalkWidth,
   isListDetailFlowCell,
   isLoadOlderCell,
@@ -9,6 +13,7 @@ import {
   isNotConnectedEmptyState,
   isThemeConsistencyWidth,
   NOT_CONNECTED_TITLE,
+  olderExpectation,
   rectsIntersect,
 } from "../../../scripts/web-hub/visual/checks-e2e.js";
 
@@ -123,6 +128,148 @@ describe("isFocusWalkWidth", () => {
     expect(isFocusWalkWidth(1024, false)).toBe(true);
     expect(isFocusWalkWidth(1024, true)).toBe(false);
     expect(isFocusWalkWidth(1025, false)).toBe(false);
+  });
+});
+
+describe("isAxeCell", () => {
+  it("covers dashboard/detail/login/states at 375 and mouse-1024, in both themes' cells (theme-independent gate)", () => {
+    for (const scenario of AXE_SCENARIOS) {
+      expect(isAxeCell(scenario, 375, true)).toBe(true);
+      expect(isAxeCell(scenario, 1024, false)).toBe(true);
+    }
+    expect(AXE_SCENARIOS).toEqual(["dashboard", "detail", "login", "states"]);
+  });
+
+  it("excludes long, the 1024 pointer:coarse pass, and every other width", () => {
+    expect(isAxeCell("long", 375, true)).toBe(false);
+    expect(isAxeCell("detail", 1024, true)).toBe(false);
+    for (const w of [481, 767, 768, 1025, 1440]) expect(isAxeCell("detail", w, false)).toBe(false);
+  });
+});
+
+describe("olderExpectation", () => {
+  it("is expected=false when the fixture declares no historyOlder for the agent", () => {
+    expect(olderExpectation({}, "agent-alpha")).toEqual({ expected: false, before: null, text: null });
+    expect(olderExpectation({ historyOlder: {} }, "agent-alpha").expected).toBe(false);
+    expect(olderExpectation({ historyOlder: { "agent-beta": {} } }, "agent-alpha").expected).toBe(false);
+  });
+
+  it("extracts the first string-content message text and the before cursor", () => {
+    const fixture = {
+      historyOlder: {
+        "agent-alpha": {
+          "e-alpha-1": {
+            entries: [
+              {
+                id: "e-alpha-0",
+                type: "message",
+                message: { role: "user", content: "(session start) opened pi-toolkit." },
+              },
+            ],
+          },
+        },
+      },
+    };
+    expect(olderExpectation(fixture, "agent-alpha")).toEqual({
+      expected: true,
+      before: "e-alpha-1",
+      text: "(session start) opened pi-toolkit.",
+    });
+  });
+
+  it("extracts text from array-content messages (skipping non-text parts and non-message entries)", () => {
+    const fixture = {
+      historyOlder: {
+        a: {
+          b: {
+            entries: [
+              { id: "x", type: "model_change" },
+              {
+                id: "y",
+                type: "message",
+                message: {
+                  role: "assistant",
+                  content: [
+                    { type: "toolCall", id: "c" },
+                    { type: "text", text: "older answer" },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+    expect(olderExpectation(fixture, "a").text).toBe("older answer");
+  });
+
+  it("degrades to text=null when the older page carries no textual message (count-only assertion)", () => {
+    const fixture = { historyOlder: { a: { b: { entries: [{ id: "x", type: "model_change" }] } } } };
+    const e = olderExpectation(fixture, "a");
+    expect(e.expected).toBe(true);
+    expect(e.text).toBeNull();
+  });
+});
+
+describe("historyLandmark", () => {
+  it("returns the last textual message of the initial history page", () => {
+    const fixture = {
+      history: {
+        a: {
+          entries: [
+            { id: "e1", type: "message", message: { role: "user", content: "first question" } },
+            { id: "e2", type: "model_change" },
+            {
+              id: "e3",
+              type: "message",
+              message: { role: "assistant", content: [{ type: "text", text: "last answer" }] },
+            },
+          ],
+        },
+      },
+    };
+    expect(historyLandmark(fixture, "a")).toBe("last answer");
+  });
+
+  it("is null when the agent has no history or no textual message", () => {
+    expect(historyLandmark({}, "a")).toBeNull();
+    expect(historyLandmark({ history: { a: { entries: [{ id: "e1", type: "model_change" }] } } }, "a")).toBeNull();
+  });
+});
+
+describe("formatAxeViolations", () => {
+  it("renders rule id, impact, and up to three target selectors per rule", () => {
+    const out = formatAxeViolations([
+      {
+        id: "color-contrast",
+        impact: "serious",
+        nodes: [
+          { target: [".topbar .brand"] },
+          { target: [".dock input"] },
+          { target: [".sidebar a"] },
+          { target: [".fleet summary"] },
+        ],
+      },
+    ]);
+    expect(out).toBe("color-contrast(serious)@.topbar .brand | .dock input | .sidebar a (+1 more)");
+  });
+
+  it("joins shadow-DOM selector arrays and tolerates missing impact/targets", () => {
+    const out = formatAxeViolations([
+      { id: "region", impact: null, nodes: [{ target: ["html", "body", "div.app"] }, {}] },
+    ]);
+    expect(out).toBe("region(?)@html body div.app | ?");
+  });
+
+  it("bounds the output at maxLen with an ellipsis", () => {
+    const violations = Array.from({ length: 50 }, (_, i) => ({
+      id: `rule-${i}`,
+      impact: "minor",
+      nodes: [{ target: [`selector-${i}`] }],
+    }));
+    const out = formatAxeViolations(violations, 200);
+    expect(out.length).toBeLessThanOrEqual(200);
+    expect(out.endsWith("…")).toBe(true);
   });
 });
 
