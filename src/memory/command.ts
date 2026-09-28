@@ -62,11 +62,53 @@ export interface CreateMemCommandDeps {
   onAfterWrite?: (cwd: string) => void;
 }
 
-export function createMemCommand(deps: CreateMemCommandDeps): { description: string; handler: CommandHandler } {
+const MEM_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
+  { value: "list", description: "列出项目记忆文件（默认）" },
+  { value: "path", description: "显示记忆目录路径" },
+  { value: "import", description: "从 Claude Code 导入记忆 [--force] [slug|all]" },
+  { value: "doctor", description: "记忆健康检查（D01-D14）" },
+  { value: "tidy", description: "治理记忆 [--dry-run|--frontmatter] [file…]" },
+  { value: "restore", description: "恢复 tidy 备份 [--trash]" },
+];
+
+const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; description: string }>> = {
+  tidy: [
+    { value: "tidy --dry-run", description: "只预览，不写入" },
+    { value: "tidy --frontmatter", description: "只整理 frontmatter" },
+  ],
+  restore: [{ value: "restore --trash", description: "从回收项恢复" }],
+  import: [{ value: "import --force", description: "覆盖已存在的同名文件" }],
+};
+
+export function createMemCommand(deps: CreateMemCommandDeps): {
+  description: string;
+  getArgumentCompletions: (argumentPrefix: string) => { value: string; label: string; description: string }[];
+  handler: CommandHandler;
+} {
   const isChildSession = deps.isChildSession ?? false;
   const getTidyPort = deps.getTidyPort ?? (() => undefined);
   return {
     description: DESCRIPTION,
+    getArgumentCompletions: (argumentPrefix: string) => {
+      try {
+        const a = (argumentPrefix ?? "").trimStart();
+        const tokens = a.split(/\s+/).filter(Boolean);
+        const partial = a.endsWith(" ") || a === "" ? "" : (tokens[tokens.length - 1] ?? "");
+        const head = tokens.length > 1 || (tokens.length === 1 && a.endsWith(" ")) ? tokens[0] : undefined;
+        if (head !== undefined) {
+          return (MEM_SECOND_LEVEL[head] ?? [])
+            .filter((item) => item.value.slice(head.length + 1).startsWith(partial))
+            .map((item) => ({ ...item, label: item.value }));
+        }
+        return MEM_SUBCOMMANDS.filter((item) => item.value.startsWith(partial)).map((item) => ({
+          value: item.value,
+          label: item.value,
+          description: item.description,
+        }));
+      } catch {
+        return [];
+      }
+    },
     handler: async (args, ctx) => {
       const a = (args ?? "").trim();
       const [sub, ...rest] = a.split(/\s+/);

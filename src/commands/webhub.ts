@@ -213,11 +213,30 @@ async function runRestart(ctx: ExtensionCommandContext, control: WebHubControl):
 
 const SUBCOMMANDS = new Set(["status", "open", "passwd", "unlock", "restart"]);
 
+/** 子命令集合的唯一来源是上面的 SUBCOMMANDS（补全从这里派生，避免漂移）。 */
+const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
+  status: "查看 web-hub 状态（默认）",
+  open: "打开浏览器 UI",
+  passwd: "设置局域网访问密码（仅 TUI）",
+  unlock: "清空登录限流",
+  restart: "重启 hub",
+};
+
 export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
       "web-hub 浏览器 UI：/webhub status 查看状态；/webhub open 打开浏览器；" +
       "/webhub passwd|unlock|restart 管理局域网访问（LAN，plan §9.3）。",
+    getArgumentCompletions: (argumentPrefix: string) => {
+      try {
+        const prefix = argumentPrefix.trim();
+        return [...SUBCOMMANDS]
+          .filter((value) => value.startsWith(prefix))
+          .map((value) => ({ value, label: value, description: SUBCOMMAND_DESCRIPTIONS[value] ?? "" }));
+      } catch {
+        return [];
+      }
+    },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const tokens = args.trim() === "" ? [] : args.trim().split(/\s+/);
       const sub = tokens[0] ?? "status";

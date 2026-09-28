@@ -115,3 +115,23 @@ describe("/webhub command", () => {
     expect(notes[0]!.message).toContain("/webhub [status|open|passwd|unlock|restart]");
   });
 });
+
+describe("getArgumentCompletions", () => {
+  const cmd = () => createWebHubCommand({ control: () => undefined });
+
+  it("returns all subcommands for an empty prefix", () => {
+    const items = cmd().getArgumentCompletions!("")!;
+    expect(items!.map((i) => i.value).sort()).toEqual(["open", "passwd", "restart", "status", "unlock"]);
+    expect(items!.every((i) => typeof i.description === "string" && i.description.length > 0)).toBe(true);
+  });
+
+  it("filters by prefix", () => {
+    const items = cmd().getArgumentCompletions!(" un")!;
+    expect(items!.map((i) => i.value)).toEqual(["unlock"]);
+  });
+
+  it("returns an empty array for an unknown prefix and never throws", () => {
+    expect(cmd().getArgumentCompletions!("bogus")).toEqual([]);
+    expect(cmd().getArgumentCompletions!(undefined as unknown as string)).toEqual([]);
+  });
+});

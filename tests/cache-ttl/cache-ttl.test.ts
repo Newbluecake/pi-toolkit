@@ -254,3 +254,42 @@ describe("cache TTL settings", () => {
     expect(failing.persist).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("/cache-ttl getArgumentCompletions", () => {
+  it("returns all subcommands for an empty prefix and filters by prefix", () => {
+    const state = setup("on");
+    const cmd = state.commands.get("cache-ttl");
+    expect(
+      cmd
+        .getArgumentCompletions("")!
+        .map((i: any) => i.value)
+        .sort(),
+    ).toEqual(["adaptive", "auto", "keepalive", "off", "on", "save", "status"]);
+    expect(cmd.getArgumentCompletions("ad")!.map((i: any) => i.value)).toEqual(["adaptive"]);
+  });
+
+  it("second level: keepalive on/off", () => {
+    const state = setup("on");
+    const cmd = state.commands.get("cache-ttl");
+    expect(
+      cmd
+        .getArgumentCompletions("keepalive ")!
+        .map((i: any) => i.value)
+        .sort(),
+    ).toEqual(["keepalive off", "keepalive on"]);
+    expect(
+      cmd
+        .getArgumentCompletions("keepalive o")!
+        .map((i: any) => i.value)
+        .sort(),
+    ).toEqual(["keepalive off", "keepalive on"]);
+  });
+
+  it("unknown prefix returns empty and never throws", () => {
+    const state = setup("on");
+    const cmd = state.commands.get("cache-ttl");
+    expect(cmd.getArgumentCompletions("bogus")).toEqual([]);
+    expect(cmd.getArgumentCompletions("keepalive bogus")).toEqual([]);
+    expect(() => cmd.getArgumentCompletions(null as unknown as string)).not.toThrow();
+  });
+});

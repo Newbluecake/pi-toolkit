@@ -435,6 +435,29 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   const USAGE = "usage: /cache-ttl on | off | auto | adaptive | save | keepalive on|off | status";
   pi.registerCommand("cache-ttl", {
     description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|adaptive|save|keepalive on|off|status]",
+    getArgumentCompletions: (argumentPrefix: string) => {
+      try {
+        const a = (argumentPrefix ?? "").trimStart();
+        const tokens = a.split(/\s+/).filter(Boolean);
+        const partial = a.endsWith(" ") || a === "" ? "" : (tokens[tokens.length - 1] ?? "");
+        if (tokens[0] === "keepalive" && (tokens.length > 1 || a.endsWith(" "))) {
+          return ["on", "off"]
+            .filter((v) => v.startsWith(partial))
+            .map((v) => ({ value: `keepalive ${v}`, label: v, description: "keepalive " + v }));
+        }
+        return [
+          { value: "on", label: "on", description: "强制 1h TTL" },
+          { value: "off", label: "off", description: "关闭 TTL 覆写" },
+          { value: "auto", label: "auto", description: "自动模式" },
+          { value: "adaptive", label: "adaptive", description: "自适应 TTL" },
+          { value: "save", label: "save", description: "持久化当前模式" },
+          { value: "keepalive", label: "keepalive", description: "保活开关（on|off）" },
+          { value: "status", label: "status", description: "查看保活/自适应状态" },
+        ].filter((item) => item.value.startsWith(partial));
+      } catch {
+        return [];
+      }
+    },
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
       const [head, ...rest] = arg.split(/\s+/).filter(Boolean);

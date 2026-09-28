@@ -171,3 +171,40 @@ describe("/mem command (§7.6)", () => {
     }
   });
 });
+
+describe("/mem getArgumentCompletions", () => {
+  test("empty prefix returns all subcommands", () => {
+    const fx = fixture();
+    const cmd = createMemCommand({ paths: fx.paths });
+    const items = cmd.getArgumentCompletions("")!;
+    expect(items.map((i) => i.value).sort()).toEqual(["doctor", "import", "list", "path", "restore", "tidy"]);
+  });
+
+  test("prefix filters subcommands", () => {
+    const fx = fixture();
+    const cmd = createMemCommand({ paths: fx.paths });
+    expect(cmd.getArgumentCompletions("d")!.map((i) => i.value)).toEqual(["doctor"]);
+  });
+
+  test("second level: tidy options and restore --trash", () => {
+    const fx = fixture();
+    const cmd = createMemCommand({ paths: fx.paths });
+    expect(
+      cmd
+        .getArgumentCompletions("tidy ")!
+        .map((i) => i.value)
+        .sort(),
+    ).toEqual(["tidy --dry-run", "tidy --frontmatter"]);
+    expect(cmd.getArgumentCompletions("tidy --d")!.map((i) => i.value)).toEqual(["tidy --dry-run"]);
+    expect(cmd.getArgumentCompletions("restore ")!.map((i) => i.value)).toEqual(["restore --trash"]);
+    expect(cmd.getArgumentCompletions("import ")!.map((i) => i.value)).toEqual(["import --force"]);
+  });
+
+  test("unknown prefix returns empty and never throws", () => {
+    const fx = fixture();
+    const cmd = createMemCommand({ paths: fx.paths });
+    expect(cmd.getArgumentCompletions("bogus")).toEqual([]);
+    expect(cmd.getArgumentCompletions("tidy --bogus")).toEqual([]);
+    expect(() => cmd.getArgumentCompletions(null as unknown as string)).not.toThrow();
+  });
+});
