@@ -4,6 +4,7 @@ import {
   readHashToken,
   TOKEN_KEY,
   REQUEST_TIMEOUT_MS,
+  CMD_REQUEST_TIMEOUT_MS,
 } from "../../../src/web-hub/ui/src/logic/token-client.js";
 import { SILENCE_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 
@@ -302,5 +303,113 @@ describe("createClient", () => {
     await e.c.advance(120_000);
     expect(FakeES.all).toHaveLength(1);
     expect(e.c.pending()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// command()/dialog() (control-plan v2.1 §7.2, package C4)
+// ---------------------------------------------------------------------------
+
+describe("createClient: command()/dialog() (§7.2: withRelogin + 16s budget, §3.3)", () => {
+  const req = { agentKey: "A", id: "cmd-1", op: "prompt", text: "hi", deliver: "steer" };
+
+  it("command(): POST /api/cmd with X-PWH:1 and the verbatim body; 200 {ok:true,id,dup?,data} ⇒ ok outcome", async () => {
+    const e = env({
+      fetch: async (url) =>
+        url === "/api/cmd"
+          ? resp(200, { ok: true, id: "cmd-1", dup: true, data: { delivery: "observed" } })
+          : resp(200),
+    });
+    const r = await (e.client as any).command(req);
+    expect(r).toEqual({ ok: true, data: { delivery: "observed" }, dup: true });
+    const call = e.calls.find((c) => c.url === "/api/cmd")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body)).toEqual(req);
+    e.client.close();
+  });
+
+  it("dialog(): POST /api/dialog; error body maps {error,message,retryable,effect}", async () => {
+    const e = env({
+      fetch: async (url) =>
+        url === "/api/dialog"
+          ? resp(409, { error: "E_DIALOG_CLOSED", message: "stale", retryable: false, effect: "none" })
+          : resp(200),
+    });
+    const r = await (e.client as any).dialog({
+      agentKey: "A",
+      id: "d1",
+      dialogId: "ask:t1",
+      epoch: "e",
+      action: "answer",
+    });
+    expect(r).toEqual({ ok: false, error: "E_DIALOG_CLOSED", message: "stale", retryable: false, effect: "none" });
+    e.client.close();
+  });
+
+  it("429 carries Retry-After into retryAfterS; retryable by default", async () => {
+    const e = env({
+      fetch: async (url) =>
+        url === "/api/cmd"
+          ? {
+              ok: false,
+              status: 429,
+              headers: { get: (n: string) => (n === "Retry-After" ? "4" : null) },
+              json: async () => ({ error: "E_RATE" }),
+            }
+          : resp(200),
+    });
+    const r = await (e.client as any).command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_RATE", retryable: true, retryAfterS: 4 });
+    e.client.close();
+  });
+
+  it("401 with a stored token: exactly one silent re-login, then the SAME body is replayed (D7 dedupe)", async () => {
+    const seen: string[] = [];
+    const e = env({
+      stored: "tok",
+      fetch: async (url, init) => {
+        seen.push(url);
+        if (url === "/api/login") return resp(200);
+        if (url === "/api/cmd")
+          return seen.filter((u) => u === "/api/login").length > 0
+            ? resp(200, { ok: true, id: "cmd-1", data: {} })
+            : resp(401, { error: "E_AUTH" });
+        return resp(200);
+      },
+    });
+    const r = await (e.client as any).command(req);
+    expect(r).toEqual({ ok: true, data: {}, dup: false });
+    const cmdCalls = e.calls.filter((c) => c.url === "/api/cmd");
+    expect(cmdCalls).toHaveLength(2);
+    expect(JSON.parse(cmdCalls[0]!.init.body)).toEqual(JSON.parse(cmdCalls[1]!.init.body)); // same id, same payload
+    e.client.close();
+  });
+
+  it("401 with no stored token ⇒ E_AUTH without a login attempt", async () => {
+    const e = env({ fetch: async (url) => (url === "/api/cmd" ? resp(401, { error: "E_AUTH" }) : resp(200)) });
+    const r = await (e.client as any).command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_AUTH", retryable: false, effect: "none" });
+    expect(e.calls.some((c) => c.url === "/api/login")).toBe(false);
+    e.client.close();
+  });
+
+  it(`fetch timeout after CMD_REQUEST_TIMEOUT_MS (${CMD_REQUEST_TIMEOUT_MS}) ⇒ E_DEADLINE{effect:"unknown"}, never auto re-executed (§3.3)`, async () => {
+    const e = env({ fetch: async (url) => (url === "/api/cmd" ? new Promise(() => {}) : resp(200)) });
+    const p = (e.client as any).command(req);
+    await e.c.advance(CMD_REQUEST_TIMEOUT_MS);
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" });
+    expect(e.calls.filter((c) => c.url === "/api/cmd")).toHaveLength(1); // no automatic retry
+    e.client.close();
+  });
+
+  it('network error ⇒ E_NETWORK{effect:"unknown"} (browser cannot tell whether the hub received it, §3.4)', async () => {
+    const e = env({
+      fetch: async (url) => (url === "/api/cmd" ? Promise.reject(new TypeError("fetch failed")) : resp(200)),
+    });
+    const r = await (e.client as any).command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_NETWORK", retryable: true, effect: "unknown" });
+    e.client.close();
   });
 });

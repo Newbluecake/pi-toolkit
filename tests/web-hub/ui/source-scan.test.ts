@@ -53,6 +53,10 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
   ["template: option (forces the full Vue build)", /\btemplate\s*:\s*["'`]/],
   ["requestAnimationFrame (banned — renderGate.ts owns scheduling, plan §3.5)", /\brequestAnimationFrame\b/],
   ["<Transition> (uses rAF internally, plan §3.5)", /<Transition\b/],
+  // control-plan K18/§2.1 (C4): LAN plaintext HTTP has no crypto.randomUUID — ids come from
+  // crypto.getRandomValues (@logic/control.js's newCmdId). The prose mentions above are
+  // stripped with the comments, so this only ever fires on real usage.
+  ["crypto.randomUUID (banned — K18: absent on LAN plaintext; use getRandomValues)", /\brandomUUID\s*\(/],
 ];
 
 /** localStorage is only legitimate for the theme preference and the token-mode transport. */

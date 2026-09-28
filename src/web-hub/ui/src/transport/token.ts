@@ -16,7 +16,7 @@
  */
 import { API } from "@logic/contract.js";
 import { createClient } from "@logic/token-client.js";
-import type { HubTransport, Result } from "./types.js";
+import type { CmdOutcome, HubTransport, Result } from "./types.js";
 
 export type TokenTransportDeps = Parameters<typeof createClient>[0];
 
@@ -64,7 +64,18 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       if (isFinalAuthFailure(r)) deps.onConn("auth");
       return r;
     },
-    command: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
-    dialog: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
+    command: async (req) => {
+      // §7.2: the client already replays once through withRelogin on a 401; a FINAL E_AUTH
+      // means the stored token itself is dead — flip to the login view (same rule as
+      // subscribe/page above).
+      const r = (await client.command(req)) as CmdOutcome;
+      if (isFinalAuthFailure(r)) deps.onConn("auth");
+      return r;
+    },
+    dialog: async (req) => {
+      const r = (await client.dialog(req)) as CmdOutcome;
+      if (isFinalAuthFailure(r)) deps.onConn("auth");
+      return r;
+    },
   } satisfies HubTransport;
 }

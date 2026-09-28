@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { useHub } from "../../../src/web-hub/ui/src/composables/useHub.js";
-import type { HubTransport, Result, TransportHooks } from "../../../src/web-hub/ui/src/transport/types.js";
+import type { CmdOutcome, HubTransport, Result, TransportHooks } from "../../../src/web-hub/ui/src/transport/types.js";
 
 /** Deterministic fake timer queue (see render-gate.test.ts for the same shape). */
 function fakeClock() {
@@ -57,6 +57,8 @@ function fakeTransport() {
     ok: true,
     data: { entries: [], hasMore: false },
   };
+  let commandResult: CmdOutcome = { ok: true, data: {} };
+  let dialogResult: CmdOutcome = { ok: true, data: {} };
 
   const transport: HubTransport = {
     mode: "token",
@@ -73,12 +75,22 @@ function fakeTransport() {
       calls.push({ method: "page", args: [agentKey, before, limit] });
       return pageResult as Result<unknown>;
     },
+    command: async (req) => {
+      calls.push({ method: "command", args: [req] });
+      return commandResult;
+    },
+    dialog: async (req) => {
+      calls.push({ method: "dialog", args: [req] });
+      return dialogResult;
+    },
   };
 
   return {
     calls,
     setSubscribeResult: (r: { ok: boolean; error?: string }) => (subscribeResult = r),
     setPageResult: (r: typeof pageResult) => (pageResult = r),
+    setCommandResult: (r: CmdOutcome) => (commandResult = r),
+    setDialogResult: (r: CmdOutcome) => (dialogResult = r),
     hooks: () => hooksRef!,
     createTransport: (hooks: TransportHooks): HubTransport => {
       hooksRef = hooks;
@@ -344,6 +356,134 @@ describe("useHub (vue-plan.md v2.1 §3.3, §5.2 — P1): dispatch, subscribe eff
     t.hooks().onConn("open");
     await flush();
     expect(hub.state.value.conn).toBe("open");
+    hub.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// control plane (control-plan v2.1 §7.1/§7.7, package C4)
+// ---------------------------------------------------------------------------
+
+describe("useHub — control plane (§7.1/§7.7)", () => {
+  function make() {
+    const t = fakeTransport();
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: fakeClock().setTimeout,
+      clearTimeout: fakeClock().clearTimeout,
+    });
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A")] });
+    return { t, hub };
+  }
+  const pendingOf = (hub: ReturnType<typeof make>["hub"], id: string) =>
+    (hub.state.value.agents.get("A")?.pendingCtl as Array<Record<string, unknown>> | undefined)?.find(
+      (i) => i.id === id,
+    );
+
+  it("control.sendPrompt: optimistic ctl_send lands in state; D21 expect.sessionId comes from the agent's session", async () => {
+    const { t, hub } = make();
+    const p = hub.control!.sendPrompt("A", "hello", "steer");
+    await flush();
+    const outcome = await p;
+    expect(outcome).toEqual({ ok: true, data: {} });
+    const req = t.calls.find((c) => c.method === "command")!.args[0] as Record<string, unknown>;
+    expect(req).toMatchObject({ agentKey: "A", op: "prompt", text: "hello", deliver: "steer" });
+    expect(req.expect).toEqual({ sessionId: "s1" }); // card("A")'s session.sessionId — D21 (§7.7)
+    const item = pendingOf(hub, String(req.id));
+    // prompt ok without a delivery ⇒ unobserved (§7.3: afterwards the ctl slot drives progress)
+    expect(item).toMatchObject({ state: "unobserved" });
+    hub.dispose();
+  });
+
+  it("unknown outcome ⇒ exactly ONE automatic queryOnly while the agent is live (§3.5), never a re-execution", async () => {
+    const { t, hub } = make();
+    t.setCommandResult({ ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" });
+    await hub.control!.sendPrompt("A", "hello", "steer");
+    await flush();
+    const cmds = t.calls.filter((c) => c.method === "command");
+    expect(cmds).toHaveLength(2); // the original send + one auto queryOnly
+    const original = cmds[0]!.args[0] as Record<string, unknown>;
+    const query = cmds[1]!.args[0] as Record<string, unknown>;
+    expect(query).toMatchObject({ id: original.id, op: "prompt", text: "hello", queryOnly: true });
+
+    // the query answer (E_DEADLINE again) drops the item back to unknown — but the one-shot
+    // guard blocks any further automatic query
+    await flush();
+    expect(t.calls.filter((c) => c.method === "command")).toHaveLength(2);
+    expect(pendingOf(hub, String(original.id))).toMatchObject({ state: "unknown" });
+    hub.dispose();
+  });
+
+  it("queryOnly answer ok ⇒ the pending item is done (dup semantics, §4.5)", async () => {
+    const { t, hub } = make();
+    t.setCommandResult({ ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" });
+    await hub.control!.steerSub("A", "r_1", "focus");
+    await flush();
+    const cmds = () => t.calls.filter((c) => c.method === "command");
+    expect(cmds()).toHaveLength(2); // send + the one automatic queryOnly (shot consumed)
+    const id = String((cmds()[0]!.args[0] as Record<string, unknown>).id);
+    expect(pendingOf(hub, id)).toMatchObject({ state: "unknown" }); // query also failed ⇒ stays unknown
+
+    // the one-shot guard blocks further AUTOMATIC queries…
+    hub.dispatch({ event: "agent_stale", data: { agentKey: "A" } });
+    await flush();
+    expect(cmds()).toHaveLength(2);
+
+    // …but a MANUAL query is always allowed, and an ok answer resolves the item
+    t.setCommandResult({ ok: true, data: { op: "query", state: "ok", result: { ok: true, data: {} } } });
+    await hub.control!.query("A", id);
+    await flush();
+    expect(cmds()).toHaveLength(3);
+    expect(pendingOf(hub, id)).toBeUndefined(); // resolved ⇒ removed from pendingCtl
+    hub.dispose();
+  });
+
+  it("agent_down marks in-flight items offline; agent_up re-arms exactly one auto query (§3.5)", async () => {
+    const { t, hub } = make();
+    // the agent is already down when the (possibly-executed) result arrives ⇒ no auto query
+    hub.dispatch({ event: "agent_down", data: { agentKey: "A", reason: "reap" } });
+    t.setCommandResult({ ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" });
+    await hub.control!.sendPrompt("A", "hello", "steer");
+    await flush();
+    const id = String((t.calls.find((c) => c.method === "command")!.args[0] as Record<string, unknown>).id);
+    expect(pendingOf(hub, id)).toMatchObject({ state: "unknown" });
+    expect(t.calls.filter((c) => c.method === "command")).toHaveLength(1); // down ⇒ no query
+
+    t.setCommandResult({ ok: true, data: { op: "query", state: "ok", result: { ok: true, data: {} } } });
+    hub.dispatch({ event: "agent_up", data: { agent: card("A") } });
+    await flush();
+    const cmds = t.calls.filter((c) => c.method === "command");
+    expect(cmds).toHaveLength(2); // the original send + the one re-armed auto queryOnly
+    expect(cmds[1]!.args[0]).toMatchObject({ id, queryOnly: true });
+    expect(pendingOf(hub, id)).toBeUndefined();
+    await flush();
+    expect(t.calls.filter((c) => c.method === "command")).toHaveLength(2); // still one shot
+    hub.dispose();
+  });
+
+  it("cmd_late for a pending command item arms exactly one output-fetching query (v2.1 §7.7)", async () => {
+    const { t, hub } = make();
+    t.setCommandResult({ ok: true, data: { completion: "async" } });
+    await hub.control!.runCommand("A", "compact", "");
+    await flush();
+    const id = String((t.calls.find((c) => c.method === "command")!.args[0] as Record<string, unknown>).id);
+    expect(pendingOf(hub, id)).toMatchObject({ state: "running" });
+
+    t.setCommandResult({
+      ok: true,
+      data: { op: "query", state: "ok", result: { ok: true, data: { output: { entries: [] } } } },
+    });
+    hub.dispatch({ event: "cmd_late", data: { agentKey: "A", id, op: "command", ok: true } });
+    await flush();
+    const queries = t.calls.filter((c) => c.method === "command" && (c.args[0] as { queryOnly?: boolean }).queryOnly);
+    expect(queries).toHaveLength(1); // the output fetch — SSE cmd_late never carries output (§6.6)
+    expect(pendingOf(hub, id)).toBeUndefined(); // query answered ok ⇒ done
+    await flush();
+    expect(
+      t.calls.filter((c) => c.method === "command" && (c.args[0] as { queryOnly?: boolean }).queryOnly),
+    ).toHaveLength(1);
     hub.dispose();
   });
 });

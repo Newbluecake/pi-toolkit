@@ -11,11 +11,21 @@
  * file). Splitting it out means the new Vue UI (`src/web-hub/ui/`) can reuse this pure
  * transport through the `@logic` alias without ever pulling in `app.js`'s bottom-of-file
  * "mount if #app exists" side effect.
+ *
+ * Control plane (control-plan v2.1 §7.2, package C4): `command()`/`dialog()` POST the
+ * idempotent write endpoints. A 401 goes through the same `withRelogin` dance as
+ * subscribe/page — replaying the same body with the same `id` after a silent re-login is
+ * safe (D7: hub LRU + agent ledger dedupe it). The fetch budget is 16s (§3.3: above the
+ * server's 13s request deadline, below the listener's requestTimeout + network slack); on
+ * timeout the outcome is `E_DEADLINE{effect:"unknown"}` — never auto re-executed, the
+ * queryOnly flow (§3.4) decides.
  */
 import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
+import { outcomeFromError, outcomeFromResponse } from "./control.js";
 
 export const TOKEN_KEY = "pwh_token";
 export const REQUEST_TIMEOUT_MS = 10_000;
+export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
 export const WATCHDOG_TICK_MS = 5_000;
 export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
@@ -70,9 +80,10 @@ export function createClient(deps) {
   /**
    * @param {string} url
    * @param {any} init
+   * @param {number} [timeoutMs]
    * @returns {Promise<{ ok: boolean, status: number, json(): Promise<any> }>}
    */
-  async function request(url, init) {
+  async function request(url, init, timeoutMs = REQUEST_TIMEOUT_MS) {
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
     /** @type {any} */
@@ -81,7 +92,7 @@ export function createClient(deps) {
       t = timer(() => {
         ac?.abort();
         reject(new Error("E_DEADLINE"));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
     });
     try {
       return await Promise.race([
@@ -93,13 +104,17 @@ export function createClient(deps) {
     }
   }
 
-  /** @param {string} path @param {unknown} body */
-  function postRaw(path, body) {
-    return request(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-PWH": "1" },
-      body: JSON.stringify(body),
-    });
+  /** @param {string} path @param {unknown} body @param {number} [timeoutMs] */
+  function postRaw(path, body, timeoutMs) {
+    return request(
+      path,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PWH": "1" },
+        body: JSON.stringify(body),
+      },
+      timeoutMs,
+    );
   }
 
   /** @param {string} token @returns {Promise<boolean>} */
@@ -222,6 +237,31 @@ export function createClient(deps) {
     armWatchdog();
   }
 
+  /**
+   * §7.2: `withRelogin(() => postRaw(API.cmd, req))` — a 401 re-logs in silently and replays
+   * the SAME body (same id ⇒ deduped, D7). Timeout/network ⇒ outcomeFromError's
+   * `effect:"unknown"` mapping (queryOnly flow, never auto re-execute).
+   * @param {unknown} req @returns {Promise<import("./control.js").CmdOutcome>}
+   */
+  async function command(req) {
+    try {
+      const r = await withRelogin(() => postRaw(API.cmd, req, CMD_REQUEST_TIMEOUT_MS));
+      return await outcomeFromResponse(r);
+    } catch (e) {
+      return outcomeFromError(e);
+    }
+  }
+
+  /** @param {unknown} req @returns {Promise<import("./control.js").CmdOutcome>} */
+  async function dialog(req) {
+    try {
+      const r = await withRelogin(() => postRaw(API.dialog, req, CMD_REQUEST_TIMEOUT_MS));
+      return await outcomeFromResponse(r);
+    } catch (e) {
+      return outcomeFromError(e);
+    }
+  }
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -267,6 +307,8 @@ export function createClient(deps) {
         return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
       }
     },
+    command,
+    dialog,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

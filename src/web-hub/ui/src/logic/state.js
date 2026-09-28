@@ -10,10 +10,20 @@
  * entry id; non-custom messages additionally by messageKey (`role:timestamp`,
  * toolResult + `:toolCallId`); custom messages are NOT deduped by key (content
  * keys collide) — live ones are deduped by `ev` seq, appended ones by entry id.
+ *
+ * Control-plane (control-plan v2.1 §7.3/§7.7, package C4): the `dialogs`/`ctl`/`commands`/
+ * `cmd_late` SSE frames land in per-agent slots, `status.queue`/`queueDropped` feed the
+ * queue mirror, local `ctl_send`/`ctl_result`/`ctl_retry`/`ctl_discard` events drive the
+ * `pendingCtl` optimistic-item state machine (the transitions themselves live in
+ * `./control.js`'s pure `pendingTransition`), and the `hub` frame's `caps`/`state`/
+ * supersede fields surface as top-level `control`/`hubState`/… — all ADDITIVE cases; no
+ * pre-P2 event's semantics changed.
  */
 
 /**
  * @typedef {{ kind: string, title?: string, since: number }} Prompt
+ * @typedef {{ epoch: string, open: any[], closed: any[] }} DialogsState
+ * @typedef {import("./control.js").PendingItem} PendingCtlItem
  * @typedef {{ toolCallId: string, toolName: string, args: unknown, partial?: string,
  *   result?: unknown, isError?: boolean, done: boolean, truncated?: boolean }} LiveTool
  * @typedef {{ id: string, kind: "message" | "custom" | "compaction" | "branch_summary" | "model_change",
@@ -28,14 +38,20 @@
  *   history: "none" | "waiting" | "loaded" | "error", historyError?: string | undefined,
  *   hasMore: boolean, oldestEntryId?: string | undefined, paging: boolean,
  *   needsResync: boolean, sub: Sub | null,
+ *   dialogs?: DialogsState | undefined, queue?: any[] | undefined,
+ *   pendingCtl: PendingCtlItem[], ctl?: any[] | undefined, commands?: any[] | undefined,
  * }} AgentState
  * @typedef {{
  *   clientId: string | null, hub: any, conn: string, lastEventId?: number,
  *   selected: string | null, agents: Map<string, AgentState>, order: string[],
  *   routed: boolean, wanted: string | null,
+ *   control: boolean, hubState?: "running" | "stopping" | "restarting" | undefined,
+ *   nextVersion?: string | undefined, supersedePending: boolean,
+ *   supersedeDeadlineAt?: number | undefined, forced: boolean, draining: boolean,
  * }} State
  * @typedef {{ event: string, data: any, id?: number }} Msg
  */
+import { pendingTransition } from "./control.js";
 
 /** Local (non-SSE) events understood by `reduce`. */
 export const LOCAL_EVENTS = Object.freeze([
@@ -55,6 +71,10 @@ export const LOCAL_EVENTS = Object.freeze([
   "paging", // {agentKey}
   "page", // HistoryPayload from GET /api/history
   "page_failed", // {agentKey, error}
+  "ctl_send", // {agentKey, item} — optimistic pendingCtl item (§7.3)
+  "ctl_result", // {agentKey, id, transition} — a pendingTransition event (§7.7)
+  "ctl_retry", // {agentKey, id} — failed item back to sending (same id)
+  "ctl_discard", // {agentKey, id} — drop the item
 ]);
 
 /** @returns {State} */
@@ -68,6 +88,10 @@ export function initialState() {
     order: [],
     routed: false,
     wanted: null,
+    control: false,
+    supersedePending: false,
+    forced: false,
+    draining: false,
   };
 }
 
@@ -96,7 +120,31 @@ function newAgent(card) {
     paging: false,
     needsResync: false,
     sub: null,
+    pendingCtl: [],
+    ...(card.dialogs && typeof card.dialogs === "object" ? { dialogs: card.dialogs } : {}),
   };
+}
+
+/**
+ * Map every pending item through `fn` (which returns the next item, the same item, or `null`
+ * to remove). Reference-preserving: returns the SAME array when nothing changed, so callers
+ * can keep the reducer's no-op ⇒ same-state invariant.
+ * @param {PendingCtlItem[]} list @param {(it: PendingCtlItem) => PendingCtlItem | null} fn
+ * @returns {PendingCtlItem[]}
+ */
+function transitionPending(list, fn) {
+  let out = null;
+  for (let i = 0; i < list.length; i++) {
+    const it = /** @type {PendingCtlItem} */ (list[i]);
+    const next = fn(it);
+    if (out) {
+      if (next !== null) out.push(next);
+    } else if (next !== it) {
+      out = [...list.slice(0, i)];
+      if (next !== null) out.push(next);
+    }
+  }
+  return out ?? list;
 }
 
 /**
@@ -159,8 +207,22 @@ function reduceInner(s, event, d) {
       for (const [k, a] of s.agents) agents.set(k, a.sub ? { ...a, sub: null } : a);
       return { ...s, clientId: typeof d.clientId === "string" ? d.clientId : null, agents };
     }
-    case "hub":
-      return { ...s, hub: d };
+    case "hub": {
+      // §7.3/§7.7 + §6.6: caps negotiate the control plane (missing cmd.v1 ⇒ read-only UI);
+      // state/nextVersion/supersede* drive HubStateBanner (v2.1: countdown, forced, draining).
+      const caps = Array.isArray(d.caps) ? d.caps : [];
+      return {
+        ...s,
+        hub: d,
+        control: caps.includes("cmd.v1"),
+        hubState: d.state === "running" || d.state === "stopping" || d.state === "restarting" ? d.state : undefined,
+        nextVersion: typeof d.nextVersion === "string" ? d.nextVersion : undefined,
+        supersedePending: d.supersedePending === true,
+        supersedeDeadlineAt: typeof d.supersedeDeadlineAt === "number" ? d.supersedeDeadlineAt : undefined,
+        forced: d.forced === true,
+        draining: d.draining === true,
+      };
+    }
     case "ping":
       return s;
     case "resync": {
@@ -199,6 +261,9 @@ function reduceInner(s, event, d) {
         streaming: null,
         tools: a.tools.filter((t) => t.done),
         prompts: [],
+        // §3.5: in-flight control items become "结果未知，agent 已离线" — never auto re-executed;
+        // useHub's effect queryOnly's them once the agent is live again.
+        pendingCtl: transitionPending(a.pendingCtl, (it) => pendingTransition(it, { type: "offline" })),
       }));
     case "agent_stale":
       if (!key) return s;
@@ -210,7 +275,20 @@ function reduceInner(s, event, d) {
       return updateAgent(s, key, (a) => applySession(a, d.session));
     case "status":
       if (!key || !d.status) return s;
-      return updateAgent(s, key, (a) => ({ ...a, status: d.status, card: { ...a.card, status: d.status } }));
+      return updateAgent(s, key, (a) => {
+        /** @type {AgentState} */
+        const next = { ...a, status: d.status, card: { ...a.card, status: d.status } };
+        // §7.3: the D6 queue mirror rides the status slot; queueDropped cmdIds transition the
+        // matching optimistic items to `dropped` (back to the terminal editor / discarded).
+        if (Array.isArray(d.status.queue)) next.queue = d.status.queue;
+        if (Array.isArray(d.status.queueDropped) && d.status.queueDropped.length > 0) {
+          const dropped = new Set(d.status.queueDropped.filter((/** @type {any} */ x) => typeof x === "string"));
+          next.pendingCtl = transitionPending(next.pendingCtl, (it) =>
+            dropped.has(it.id) ? pendingTransition(it, { type: "dropped" }) : it,
+          );
+        }
+        return next;
+      });
     case "fleet":
       if (!key) return s;
       return updateAgent(s, key, (a) => ({ ...a, fleet: Array.isArray(d.runs) ? d.runs : [] }));
@@ -229,6 +307,69 @@ function reduceInner(s, event, d) {
     case "append":
       if (!key || !Array.isArray(d.entries)) return s;
       return updateAgent(s, key, (a) => (a.history === "loaded" ? appendEntries(a, d.entries) : a));
+
+    // ---------------------------------------------------------------- control plane (§7.3/§7.7)
+    case "dialogs": {
+      // DialogsFrame slot (D2, overwrite semantics). closed[] also settles this tab's own
+      // dialog_* pending items: cmdId === id ⇒ this request won (§3.5); anything else lost.
+      if (!key) return s;
+      const epoch = typeof d.epoch === "string" ? d.epoch : "";
+      const open = Array.isArray(d.open) ? d.open : [];
+      const closed = Array.isArray(d.closed) ? d.closed : [];
+      return updateAgent(s, key, (a) => {
+        let pendingCtl = a.pendingCtl;
+        for (const c of closed) {
+          if (!c || typeof c.dialogId !== "string") continue;
+          pendingCtl = transitionPending(pendingCtl, (it) =>
+            (it.kind === "dialog_answer" || it.kind === "dialog_cancel") && it.dialogId === c.dialogId
+              ? pendingTransition(it, {
+                  type: "dialog_closed",
+                  ...(typeof c.cmdId === "string" ? { cmdId: c.cmdId } : {}),
+                  ...(typeof c.by === "string" ? { by: c.by } : {}),
+                })
+              : it,
+          );
+        }
+        return { ...a, dialogs: { epoch, open, closed }, pendingCtl };
+      });
+    }
+    case "ctl": {
+      // Prompt-ledger slot (§4.3/§4.5): raw items kept on `agent.ctl`; entries merge into the
+      // matching local pending item by cmdId (§7.7) — never creating new ones.
+      if (!key) return s;
+      const items = Array.isArray(d.items) ? d.items : [];
+      return updateAgent(s, key, (a) => {
+        const byCmdId = new Map();
+        for (const e of items) {
+          if (e && typeof e.cmdId === "string") byCmdId.set(e.cmdId, e);
+        }
+        const pendingCtl = transitionPending(a.pendingCtl, (it) => {
+          const entry = byCmdId.get(it.id);
+          return entry ? pendingTransition(it, { type: "ctl", entry }) : it;
+        });
+        return { ...a, ctl: items, pendingCtl };
+      });
+    }
+    case "commands":
+      // §4.6 commands slot (completion + policy badges for the composer).
+      if (!key) return s;
+      return updateAgent(s, key, (a) => ({ ...a, commands: Array.isArray(d.items) ? d.items : [] }));
+    case "cmd_late":
+      // D15: a result that settled after the HTTP response was lost — terminates the pending
+      // item (command-kind items arm a one-shot queryOnly to fetch the output, v2.1 §7.7).
+      if (!key || typeof d.id !== "string") return s;
+      return updateAgent(s, key, (a) => {
+        const pendingCtl = transitionPending(a.pendingCtl, (it) =>
+          it.id === d.id
+            ? pendingTransition(it, {
+                type: "late",
+                ok: d.ok === true,
+                ...(typeof d.code === "string" ? { code: d.code } : {}),
+              })
+            : it,
+        );
+        return pendingCtl === a.pendingCtl ? a : { ...a, pendingCtl };
+      });
 
     // ---------------------------------------------------------------- local
     case "conn":
@@ -275,6 +416,38 @@ function reduceInner(s, event, d) {
     case "page_failed":
       if (!key) return s;
       return updateAgent(s, key, (a) => ({ ...a, paging: false }));
+    case "ctl_send":
+      // Optimistic item for a just-dispatched control request (§7.3). Same id replaces (retry).
+      if (!key || !d.item || typeof d.item.id !== "string") return s;
+      return updateAgent(s, key, (a) => ({
+        ...a,
+        pendingCtl: [...a.pendingCtl.filter((it) => it.id !== d.item.id), d.item],
+      }));
+    case "ctl_result": {
+      // A pendingTransition event for one item — the reducer stays a thin shell around
+      // ./control.js's pure state machine so components and tests share one definition.
+      if (!key || typeof d.id !== "string" || !d.transition || typeof d.transition !== "object") return s;
+      return updateAgent(s, key, (a) => {
+        const pendingCtl = transitionPending(a.pendingCtl, (it) =>
+          it.id === d.id ? pendingTransition(it, d.transition) : it,
+        );
+        return pendingCtl === a.pendingCtl ? a : { ...a, pendingCtl };
+      });
+    }
+    case "ctl_retry":
+      if (!key || typeof d.id !== "string") return s;
+      return updateAgent(s, key, (a) => {
+        const pendingCtl = transitionPending(a.pendingCtl, (it) =>
+          it.id === d.id ? pendingTransition(it, { type: "retry" }) : it,
+        );
+        return pendingCtl === a.pendingCtl ? a : { ...a, pendingCtl };
+      });
+    case "ctl_discard":
+      if (!key || typeof d.id !== "string") return s;
+      return updateAgent(s, key, (a) => {
+        const pendingCtl = a.pendingCtl.filter((it) => it.id !== d.id);
+        return pendingCtl.length === a.pendingCtl.length ? a : { ...a, pendingCtl };
+      });
     default:
       return s;
   }
@@ -311,6 +484,7 @@ function mergeCard(a, card) {
     prompts: Array.isArray(card.prompts) ? card.prompts : a.prompts,
   };
   if (card.session) next = applySession(next, card.session);
+  if (card.dialogs && typeof card.dialogs === "object") next = { ...next, dialogs: card.dialogs };
   return next;
 }
 

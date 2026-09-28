@@ -68,6 +68,9 @@ function priorityFor(msg: DispatchMsg): RenderPriority {
   return "now";
 }
 
+/** Bounded FIFO guard for the one-shot automatic queryOnly (§3.5) — see runControlEffects. */
+const AUTO_QUERY_CAP = 256;
+
 export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptions<TTimer>): UseHubHandle {
   const now = opts.now ?? Date.now;
   const resyncMinIntervalMs = opts.resyncMinIntervalMs ?? 2_000;
@@ -76,6 +79,7 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
   const state = shallowRef<HubState>(raw as unknown as HubState) as ShallowRef<HubState>;
 
   const lastSubAt = new Map<string, number>();
+  const autoQueried = new Set<string>(); // §3.5: one automatic queryOnly per pending item id
   let subTimer: TTimer | null = null;
   let prevSelected: string | null = null;
   let disposed = false;
@@ -117,6 +121,7 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
         dispatch({ event: "unsubscribed", data: { agentKey: old } });
       }
     }
+    runControlEffects();
     const key = needsSubscribe(raw);
     const clientId = raw.clientId;
     if (key === undefined || clientId === null) return;
@@ -142,6 +147,40 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     });
   }
 
+  /**
+   * control-plan §3.5/§7.7: a pending item in `unknown` (fetch timeout / agent_gone — possibly
+   * executed) gets exactly ONE automatic queryOnly once its agent is live — never an automatic
+   * re-execution. A command-kind item armed with `lateQuery` (reducer's cmd_late case, v2.1)
+   * also gets one query to fetch the full result (SSE cmd_late never carries output, §6.6).
+   * Both guards self-clear: query_start transitions the item out of `unknown`/`lateQuery`, and
+   * `autoQueried` blocks the unknown-driven path from ever firing twice for the same id.
+   */
+  function runControlEffects(): void {
+    for (const [agentKey, a] of raw.agents) {
+      if (a.down) continue;
+      const pending = (a as { pendingCtl?: unknown }).pendingCtl;
+      if (!Array.isArray(pending)) continue;
+      for (const it of pending as Array<Record<string, unknown>>) {
+        if (!it || typeof it.id !== "string") continue;
+        if (it.lateQuery === true && it.state === "querying") {
+          void control.query(agentKey, it.id); // query_start clears lateQuery ⇒ fires once
+          continue;
+        }
+        if (it.state === "unknown") {
+          const qk = `${agentKey}|${it.id}`;
+          if (autoQueried.has(qk)) continue;
+          autoQueried.add(qk);
+          while (autoQueried.size > AUTO_QUERY_CAP) {
+            const oldest = autoQueried.values().next().value;
+            if (oldest === undefined) break;
+            autoQueried.delete(oldest);
+          }
+          void control.query(agentKey, it.id);
+        }
+      }
+    }
+  }
+
   function loadOlder(agentKey: string): void {
     if (disposed) return;
     const a = raw.agents.get(agentKey);
@@ -161,7 +200,14 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     onMessage: (msg) => dispatch(msg),
     onConn: (c) => dispatch({ event: "conn", data: { state: c } }),
   });
-  const control = createControl(transport, dispatch);
+  const control = createControl(transport, dispatch, {
+    // D21: prompt/abort/command carry `expect.sessionId` of the session currently shown (§7.7).
+    getSessionId: (agentKey) => {
+      const session = raw.agents.get(agentKey)?.session as { sessionId?: unknown } | undefined;
+      return typeof session?.sessionId === "string" ? session.sessionId : undefined;
+    },
+    now,
+  });
 
   return {
     state: state as Readonly<ShallowRef<HubState>>,

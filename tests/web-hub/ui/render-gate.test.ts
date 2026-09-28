@@ -326,3 +326,73 @@ describe("renderGate (vue-plan.md v2.1 §3.5): hidden-page rule + #25 regression
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// control-plane events through useHub (control-plan v2.1 §7.1/§9.1, package C4):
+// hidden page ⇒ reducer still runs, ZERO commits; back to visible ⇒ exactly one flush.
+// ---------------------------------------------------------------------------
+
+describe("renderGate × useHub: control-plane frames honor the hidden-page rule (§7.1)", () => {
+  it("hidden: dialogs / ctl_send / ctl_result / cmd_late mutate raw state but never commit; visibilitychange flushes once", async () => {
+    const { useHub } = await import("../../../src/web-hub/ui/src/composables/useHub.js");
+    const clock = fakeClock();
+    const { doc, win, setHidden, fireDocEvent } = fakeDocWin(true); // hidden from the start
+    const el = document.createElement("div");
+    let mutations = 0;
+    const mo = new MutationObserver(() => mutations++);
+    mo.observe(el, { childList: true });
+
+    const hub = useHub({
+      createTransport: () => ({
+        mode: "token",
+        start: async () => {},
+        close: () => {},
+        subscribe: async () => ({ ok: true }),
+        unsubscribe: async () => {},
+        page: async () => ({ ok: true, data: {} }),
+        command: async () => ({ ok: true, data: { delivery: "observed" } }),
+        dialog: async () => ({ ok: true, data: {} }),
+      }),
+      doc,
+      win,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+    });
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({
+      event: "agents",
+      data: [
+        {
+          agentKey: "A",
+          kind: "tui",
+          pid: 1,
+          cwd: "/tmp/p",
+          state: "live",
+          pluginVersion: "1.0.0",
+          outdated: false,
+          prompts: [],
+        },
+      ],
+    });
+    const send = hub.control!.sendPrompt("A", "hi", "steer"); // ctl_send + (async) ctl_result
+    hub.dispatch({ event: "dialogs", data: { agentKey: "A", epoch: "e1", open: [], closed: [] } });
+    hub.dispatch({ event: "cmd_late", data: { agentKey: "A", id: "other", op: "prompt", ok: true } });
+    await send;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    clock.advance(10_000);
+    expect(mutations).toBe(0); // hidden ⇒ zero DOM writes even though the reducer moved
+    expect(hub.state.value.agents.has("A")).toBe(false); // nothing committed yet
+
+    setHidden(false);
+    fireDocEvent("visibilitychange");
+    expect(mutations).toBe(0); // the gate's commit writes state.value, not our probe el —
+    // but exactly ONE state commit must have happened, carrying every buffered frame
+    const a = hub.state.value.agents.get("A")!;
+    expect(a.dialogs).toEqual({ epoch: "e1", open: [], closed: [] });
+    expect(a.pendingCtl).toHaveLength(1);
+    expect((a.pendingCtl[0] as { state?: unknown }).state).toBe("observed");
+    hub.dispose();
+    mo.disconnect();
+  });
+});

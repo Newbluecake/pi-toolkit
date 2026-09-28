@@ -9,7 +9,7 @@
  */
 import { API } from "@logic/contract.js";
 import { createPasswordClient } from "@logic/password-client.js";
-import type { PasswordTransport, Result } from "./types.js";
+import type { CmdOutcome, PasswordTransport, Result } from "./types.js";
 
 export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
 
@@ -28,8 +28,12 @@ export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
  * (the reducer's own `d.state !== s.conn` guard, `state.js`'s `case "conn"`), so this is never a
  * double show. Regression coverage: `tests/web-hub/ui/transport-contract.test.ts`'s "REST 401 on
  * subscribe/unsubscribe/page reports onConn('auth')" block (one case per method).
+ *
+ * C4 (control-plan §7.2): `/api/cmd` and `/api/dialog` join the same set — the client's
+ * `command()`/`dialog()` are one-shot too, so a 401 there is exactly the same "lost cookie
+ * session" signal and must remount `LoginView` identically.
  */
-const REST_AUTH_PATHS: ReadonlySet<string> = new Set([API.subscribe, API.unsubscribe]);
+const REST_AUTH_PATHS: ReadonlySet<string> = new Set([API.subscribe, API.unsubscribe, API.cmd, API.dialog]);
 
 function isRestAuthEndpoint(url: string): boolean {
   return REST_AUTH_PATHS.has(url) || url.startsWith(API.history);
@@ -53,8 +57,8 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     unsubscribe: (clientId, agentKey) => client.unsubscribe(clientId, agentKey),
     page: <T = unknown>(agentKey: string, before: string, limit?: number) =>
       client.page(agentKey, before, limit) as Promise<Result<T>>,
-    command: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
-    dialog: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false, effect: "none" }),
+    command: (req) => client.command(req) as Promise<CmdOutcome>,
+    dialog: (req) => client.dialog(req) as Promise<CmdOutcome>,
     login: (username, password) => client.login(username, password),
     logout: () => client.logout(),
   } satisfies PasswordTransport;

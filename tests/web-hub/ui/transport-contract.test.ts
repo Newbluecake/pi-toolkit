@@ -366,3 +366,101 @@ describe("401 REST responses report onConn('auth') on both transports (vue-plan.
     expect(p.onConnCalls).not.toContain("auth");
   });
 });
+
+// ---------------------------------------------------------------------------
+// command()/dialog() — control-plan v2.1 §7.2 (package C4), same suite both modes
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: command()/dialog() (§7.2 — identical wire + outcome mapping both modes)", (_mode, make) => {
+  const req = { agentKey: "A", id: "cmd-1", op: "prompt" as const, text: "hi", deliver: "steer" as const };
+  const dlg = { agentKey: "A", id: "d1", dialogId: "ask:t1", epoch: "e1", action: "answer" as const };
+
+  it("command(): POST /api/cmd with X-PWH:1 and the verbatim JSON body; 200 {ok:true,id,dup?,data} ⇒ ok outcome", async () => {
+    const h = make(async (url) =>
+      url === "/api/cmd" ? resp(200, { ok: true, id: "cmd-1", dup: true, data: { delivery: "observed" } }) : resp(200),
+    );
+    const r = await h.transport.command(req);
+    expect(r).toEqual({ ok: true, data: { delivery: "observed" }, dup: true });
+    const call = h.fetchCalls.find((c) => c.url === "/api/cmd")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body ?? "{}")).toEqual(req);
+  });
+
+  it("dialog(): POST /api/dialog; agent error body maps to {error,message,retryable,effect}", async () => {
+    const h = make(async (url) =>
+      url === "/api/dialog"
+        ? resp(409, { error: "E_DIALOG_CLOSED", message: "stale", retryable: false, effect: "none" })
+        : resp(200),
+    );
+    const r = await h.transport.dialog(dlg);
+    expect(r).toEqual({ ok: false, error: "E_DIALOG_CLOSED", message: "stale", retryable: false, effect: "none" });
+  });
+
+  it("429: Retry-After header becomes retryAfterS; retryable defaults true (§6.2)", async () => {
+    const h = make(async (url) =>
+      url === "/api/cmd" ? resp(429, { error: "E_RATE" }, { "Retry-After": "3" }) : resp(200),
+    );
+    const r = await h.transport.command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_RATE", retryable: true, retryAfterS: 3 });
+  });
+
+  it("504 with effect unknown passes through (registry wait timeout, §3.5)", async () => {
+    const h = make(async (url) =>
+      url === "/api/cmd" ? resp(504, { error: "E_DEADLINE", retryable: true, effect: "unknown" }) : resp(200),
+    );
+    const r = await h.transport.command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" });
+  });
+
+  it('fetch timeout (16s browser budget, §3.3) ⇒ E_DEADLINE{effect:"unknown"} and exactly one attempt', async () => {
+    const h = make(async (url) => (url === "/api/cmd" ? new Promise<FetchResponse>(() => {}) : resp(200)));
+    const p = h.transport.command(req);
+    h.clock.advance(16_000);
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" });
+    expect(h.fetchCalls.filter((c) => c.url === "/api/cmd")).toHaveLength(1);
+  });
+
+  it('network error ⇒ E_NETWORK{effect:"unknown"} (§3.4: possibly received ⇒ queryOnly flow, never auto re-execute)', async () => {
+    const h = make(async (url) => (url === "/api/cmd" ? Promise.reject(new TypeError("fetch failed")) : resp(200)));
+    const r = await h.transport.command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_NETWORK", retryable: true, effect: "unknown" });
+  });
+
+  it("a final 401 (session truly gone) reports onConn('auth') — token: after the silent re-login fails; password: one-shot", async () => {
+    const h = make(async (url) =>
+      url === "/api/cmd" || url === "/api/dialog" ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const r = await h.transport.command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+    const r2 = await h.transport.dialog(dlg);
+    expect(r2).toMatchObject({ ok: false, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth").length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("token transport: command() 401 recovery (§7.2: withRelogin replay is id-safe, D7)", () => {
+  it("a 401 with a stored token silently re-logs in and replays the SAME command body", async () => {
+    const h = makeToken(async (url, init) => {
+      void init;
+      if (url === "/api/login") return resp(200);
+      if (url === "/api/cmd") {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn ? resp(200, { ok: true, id: "cmd-1", data: {} }) : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const r = await h.transport.command({ agentKey: "A", id: "cmd-1", op: "abort" });
+    expect(r).toEqual({ ok: true, data: {}, dup: false });
+    const cmdCalls = h.fetchCalls.filter((c) => c.url === "/api/cmd");
+    expect(cmdCalls).toHaveLength(2);
+    expect(cmdCalls[0]!.init.body).toBe(cmdCalls[1]!.init.body); // same id ⇒ hub/agent dedupe (dup)
+    expect(h.onConnCalls).not.toContain("auth"); // recovered — no login-view flash
+  });
+});

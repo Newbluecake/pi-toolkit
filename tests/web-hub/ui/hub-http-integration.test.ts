@@ -736,3 +736,69 @@ describe("token (loopback) + real HTTP: useHub end-to-end (vue-plan.md v2.1 \u00
     await waitUntil(() => h.fe.clientCount() === 0);
   }, 10_000);
 });
+
+// ---------------------------------------------------------------------------
+// control-plane write endpoints (control-plan v2.1 §9.2, package C4): the frontend transport's
+// command()/dialog() against a REAL hub in both auth modes. C3 hasn't landed yet, so /api/cmd
+// and /api/dialog are still the C0 stub (501 E_NOT_IMPLEMENTED) — this pins the transport's
+// error mapping end-to-end (headers, cookie auth, body, outcome shape). When C3 turns the
+// endpoints live, update these assertions to the real acceptance (200/dup semantics) — file
+// owner: C4 (plan §12.3).
+// ---------------------------------------------------------------------------
+
+describe("control endpoints vs the real hub (C0 stub era: 501 mapping, §6.2 error body)", () => {
+  let lan: PasswordHarness;
+  let tok: TokenHarness;
+  afterEach(async () => {
+    if (lan) await lan.cleanup();
+    if (tok) await tok.cleanup();
+    HttpEventSource.instances = [];
+  });
+
+  it("password (LAN): command()/dialog() reach the authenticated router and map the stub rejection", async () => {
+    lan = await startPasswordHub();
+    const c = buildPasswordClient(lan.port);
+    await c.auth.submit({ username: "alice", password: "correct-horse-battery-1" });
+    await waitUntil(() => c.hub.state.value.order.length > 0);
+    // LAN stub era: the LAN router has no /api/cmd|/api/dialog entry at all ⇒ 404 E_NOT_FOUND
+    // (loopback has an explicit 501 stub — see the token variant). C3 wires both for real.
+    const cmd = await c.hub.transport.command({
+      agentKey: AGENT_KEY,
+      id: "cmd-1",
+      op: "prompt",
+      text: "hi",
+      deliver: "steer",
+    });
+    expect(cmd).toMatchObject({ ok: false, error: "E_NOT_FOUND", effect: "none" });
+    const dlg = await c.hub.transport.dialog({
+      agentKey: AGENT_KEY,
+      id: "d-1",
+      dialogId: "ask:t1",
+      epoch: "e",
+      action: "cancel",
+    });
+    expect(dlg).toMatchObject({ ok: false, error: "E_NOT_FOUND", effect: "none" });
+    c.hub.dispose();
+    c.scope.stop();
+  });
+
+  it("token (loopback): command()/dialog() after the silent cold-start login map 501 E_NOT_IMPLEMENTED", async () => {
+    tok = await startTokenHub();
+    const c = buildTokenClient(tok.port, tok.token);
+    void c.hub.start();
+    await waitUntil(() => c.hub.state.value.order.length > 0, 6_000);
+    const cmd = await c.hub.transport.command({ agentKey: AGENT_KEY, id: "cmd-2", op: "abort" });
+    expect(cmd).toMatchObject({ ok: false, error: "E_NOT_IMPLEMENTED", effect: "none" });
+    const dlg = await c.hub.transport.dialog({
+      agentKey: AGENT_KEY,
+      id: "d-2",
+      dialogId: "ask:t1",
+      epoch: "e",
+      action: "answer",
+      answers: [],
+    });
+    expect(dlg).toMatchObject({ ok: false, error: "E_NOT_IMPLEMENTED", effect: "none" });
+    c.hub.dispose();
+    c.scope.stop();
+  }, 10_000);
+});

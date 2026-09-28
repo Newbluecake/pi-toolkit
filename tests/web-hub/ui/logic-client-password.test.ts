@@ -6,6 +6,7 @@ import {
   CLOSE_PROBE_MAX,
   CLOSE_PROBE_BACKOFF_MS,
   BACKOFF_MIN_MS,
+  CMD_REQUEST_TIMEOUT_MS,
 } from "../../../src/web-hub/ui/src/logic/password-client.js";
 import { SILENCE_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 
@@ -528,6 +529,77 @@ describe("createPasswordClient: subscribe() / unsubscribe() / page()", () => {
     expect(await (e.client as any).page("A", "e1", 9999)).toEqual({ ok: true, data: { agentKey: "A", entries: [] } });
     expect(e.calls.some((c) => c.url === "/api/history?agent=A&before=e1&limit=400")).toBe(true); // clamped to HISTORY_LIMIT_MAX
     expect(await (e.client as any).page("B", "x")).toEqual({ ok: false, error: "E_NOT_FOUND" });
+    e.client.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// command()/dialog() (control-plan v2.1 §7.2, package C4)
+// ---------------------------------------------------------------------------
+
+describe("createPasswordClient: command()/dialog() (§7.2: one-shot postApi, 16s budget, §3.3)", () => {
+  const req = { agentKey: "A", id: "cmd-1", op: "prompt", text: "hi", deliver: "steer" };
+
+  it("command(): POST /api/cmd with X-PWH:1 and the verbatim body; 200 ⇒ ok outcome", async () => {
+    const e = env({
+      fetch: async (url) =>
+        url === "/api/cmd" ? resp(200, { ok: true, id: "cmd-1", data: { wasBusy: true } }) : resp(200),
+    });
+    const r = await (e.client as any).command(req);
+    expect(r).toEqual({ ok: true, data: { wasBusy: true }, dup: false });
+    const call = e.calls.find((c) => c.url === "/api/cmd")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body)).toEqual(req);
+    e.client.close();
+  });
+
+  it("dialog(): POST /api/dialog; error body maps {error,message,retryable,effect,retryAfterS}", async () => {
+    const e = env({
+      fetch: async (url) => (url === "/api/dialog" ? resp(429, { error: "E_RATE" }, "7") : resp(200)),
+    });
+    const r = await (e.client as any).dialog({
+      agentKey: "A",
+      id: "d1",
+      dialogId: "ask:t1",
+      epoch: "e",
+      action: "cancel",
+    });
+    expect(r).toMatchObject({ ok: false, error: "E_RATE", retryable: true, retryAfterS: 7 });
+    e.client.close();
+  });
+
+  it("401 ⇒ one-shot E_AUTH (NO relogin dance — a lost cookie session, surfaced for onConn('auth'))", async () => {
+    const e = env({ fetch: async (url) => (url === "/api/cmd" ? resp(401, { error: "E_AUTH" }) : resp(200)) });
+    const r = await (e.client as any).command(req);
+    expect(r).toMatchObject({ ok: false, error: "E_AUTH", retryable: false, effect: "none" });
+    expect(e.calls.filter((c) => c.url === "/api/cmd")).toHaveLength(1);
+    expect(e.calls.some((c) => c.url === "/api/login")).toBe(false);
+    e.client.close();
+  });
+
+  it(`fetch timeout after CMD_REQUEST_TIMEOUT_MS (${CMD_REQUEST_TIMEOUT_MS}) ⇒ E_DEADLINE{effect:"unknown"}, no automatic retry`, async () => {
+    const e = env({ fetch: async (url) => (url === "/api/cmd" ? new Promise(() => {}) : resp(200)) });
+    const p = (e.client as any).command(req);
+    await e.c.advance(CMD_REQUEST_TIMEOUT_MS);
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" });
+    expect(e.calls.filter((c) => c.url === "/api/cmd")).toHaveLength(1);
+    e.client.close();
+  });
+
+  it('network error ⇒ E_NETWORK{effect:"unknown"} (§3.4)', async () => {
+    const e = env({
+      fetch: async (url) => (url === "/api/dialog" ? Promise.reject(new TypeError("fetch failed")) : resp(200)),
+    });
+    const r = await (e.client as any).dialog({
+      agentKey: "A",
+      id: "d1",
+      dialogId: "ask:t1",
+      epoch: "e",
+      action: "answer",
+    });
+    expect(r).toMatchObject({ ok: false, error: "E_NETWORK", retryable: true, effect: "unknown" });
     e.client.close();
   });
 });

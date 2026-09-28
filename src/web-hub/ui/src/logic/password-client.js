@@ -32,10 +32,16 @@
  *   history…" forever with no console.* output (the throw escapes the
  *   triggering SSE/click callback as an uncaught exception, not a console
  *   call).
+ * - Control plane (control-plan v2.1 §7.2, package C4): `command()`/`dialog()` are one-shot
+ *   `postApi` calls to the write endpoints (16s budget, §3.3) — NO relogin dance: a
+ *   password-mode 401 means the cookie session is gone and is surfaced as `E_AUTH` (the
+ *   `transport/password.ts` wrapper maps it to `onConn("auth")` via REST_AUTH_PATHS).
  */
 import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
+import { outcomeFromError, outcomeFromResponse } from "./control.js";
 
 export const REQUEST_TIMEOUT_MS = 10_000;
+export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
 export const LOGIN_TIMEOUT_MS = 25_000; // plan §10 "排队等待": KDF fair-scheduling wait can run up to 20s
 export const WATCHDOG_TICK_MS = 5_000;
 export const BACKOFF_MIN_MS = 1_000;
@@ -255,12 +261,12 @@ export function createPasswordClient(deps) {
     return r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`;
   }
 
-  /** @param {string} path @param {unknown} body */
-  function postApi(path, body) {
+  /** @param {string} path @param {unknown} body @param {number} [timeoutMs] */
+  function postApi(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
     return request(
       path,
       { method: "POST", headers: { "Content-Type": "application/json", "X-PWH": "1" }, body: JSON.stringify(body) },
-      REQUEST_TIMEOUT_MS,
+      timeoutMs,
     );
   }
 
@@ -308,6 +314,30 @@ export function createPasswordClient(deps) {
       return { ok: true, data: await r.json() };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+
+  /**
+   * §7.2: one-shot write endpoint, 16s budget (§3.3). No withRelogin — a 401 is a lost cookie
+   * session, surfaced as `E_AUTH` for the transport wrapper to route to `onConn("auth")`.
+   * @param {unknown} req @returns {Promise<import("./control.js").CmdOutcome>}
+   */
+  async function command(req) {
+    try {
+      const r = await postApi(API.cmd, req, CMD_REQUEST_TIMEOUT_MS);
+      return await outcomeFromResponse(r);
+    } catch (e) {
+      return outcomeFromError(e);
+    }
+  }
+
+  /** @param {unknown} req @returns {Promise<import("./control.js").CmdOutcome>} */
+  async function dialog(req) {
+    try {
+      const r = await postApi(API.dialog, req, CMD_REQUEST_TIMEOUT_MS);
+      return await outcomeFromResponse(r);
+    } catch (e) {
+      return outcomeFromError(e);
     }
   }
 
@@ -474,6 +504,8 @@ export function createPasswordClient(deps) {
     subscribe,
     unsubscribe,
     page,
+    command,
+    dialog,
     close() {
       closed = true;
       closeStream();

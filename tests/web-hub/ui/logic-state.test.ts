@@ -513,3 +513,208 @@ describe("state.reduce", () => {
     expect(reduce(s, { event: "ev", data: { agentKey: "Z", seq: 1, e: { type: "turn_start" } } })).toBe(s);
   });
 });
+
+// ---------------------------------------------------------------------------
+// control plane (control-plan v2.1 §7.3/§7.7, package C4)
+// ---------------------------------------------------------------------------
+
+describe("state.reduce — control plane (§7.3/§7.7)", () => {
+  const base = () => loaded();
+  const send = (agentKey: string, item: Record<string, unknown>): Msg => ({
+    event: "ctl_send",
+    data: { agentKey, item },
+  });
+  const result = (agentKey: string, id: string, transition: unknown): Msg => ({
+    event: "ctl_result",
+    data: { agentKey, id, transition },
+  });
+
+  it("hub frame: caps negotiate control; state/nextVersion/supersede fields surface (§6.6/§7.3)", () => {
+    let s = reduce(initialState(), { event: "hub", data: { version: "1.0.0", caps: ["ev.v1", "cmd.v1"] } });
+    expect(s.control).toBe(true);
+    expect(s.hubState).toBeUndefined();
+    s = reduce(s, {
+      event: "hub",
+      data: {
+        version: "1.0.0",
+        caps: [],
+        state: "restarting",
+        nextVersion: "1.1.0",
+        supersedePending: true,
+        supersedeDeadlineAt: 1234,
+        forced: true,
+        draining: true,
+      },
+    });
+    expect(s.control).toBe(false); // no cmd.v1 ⇒ read-only
+    expect(s.hubState).toBe("restarting");
+    expect(s.nextVersion).toBe("1.1.0");
+    expect(s.supersedePending).toBe(true);
+    expect(s.supersedeDeadlineAt).toBe(1234);
+    expect(s.forced).toBe(true);
+    expect(s.draining).toBe(true);
+  });
+
+  it("initial state: control off, no supersede flags", () => {
+    const s = initialState();
+    expect(s.control).toBe(false);
+    expect(s.supersedePending).toBe(false);
+  });
+
+  it("ctl_send appends an optimistic item; same id replaces (retry)", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "sending", at: 1 }));
+    s = reduce(s, send("A", { id: "c2", kind: "abort", state: "sending", at: 2 }));
+    expect(A(s).pendingCtl.map((i) => i.id)).toEqual(["c1", "c2"]);
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "sending", at: 3 }));
+    expect(A(s).pendingCtl.map((i) => i.id)).toEqual(["c2", "c1"]);
+    expect(A(s).pendingCtl[1]!.at).toBe(3);
+  });
+
+  it("ctl_result drives the pendingTransition machine: prompt ok ⇒ observed; abort ok ⇒ removed", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "sending", at: 1 }));
+    s = reduce(s, send("A", { id: "c2", kind: "abort", state: "sending", at: 2 }));
+    s = reduce(
+      s,
+      result("A", "c1", { type: "result", outcome: { ok: true, data: { delivery: "observed", behavior: "idle" } } }),
+    );
+    s = reduce(s, result("A", "c2", { type: "result", outcome: { ok: true, data: {} } }));
+    expect(A(s).pendingCtl).toHaveLength(1);
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c1", state: "observed", behavior: "idle" });
+  });
+
+  it("ctl_retry / ctl_discard: failed item back to sending / removed", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "sending", at: 1 }));
+    s = reduce(
+      s,
+      result("A", "c1", { type: "result", outcome: { ok: false, error: "E_RATE", retryable: true, effect: "none" } }),
+    );
+    expect(A(s).pendingCtl[0]).toMatchObject({ state: "failed", error: "E_RATE" });
+    s = reduce(s, { event: "ctl_retry", data: { agentKey: "A", id: "c1" } });
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c1", state: "sending" });
+    s = reduce(s, { event: "ctl_discard", data: { agentKey: "A", id: "c1" } });
+    expect(A(s).pendingCtl).toEqual([]);
+  });
+
+  it("status frame: queue mirror lands on agent.queue; queueDropped transitions the optimistic item (§7.3)", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "queued", at: 1 }));
+    s = reduce(s, {
+      event: "status",
+      data: {
+        agentKey: "A",
+        status: {
+          leafId: null,
+          busy: true,
+          pending: true,
+          queue: [{ id: "q1", text: "hi", deliver: "steer", source: "web", cmdId: "c1", at: 1 }],
+        },
+      },
+    });
+    expect(A(s).queue).toHaveLength(1);
+    s = reduce(s, {
+      event: "status",
+      data: { agentKey: "A", status: { leafId: null, busy: false, pending: false, queue: [], queueDropped: ["c1"] } },
+    });
+    expect(A(s).queue).toEqual([]);
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c1", state: "dropped" });
+  });
+
+  it("dialogs frame: slot overwrite; agents-frame cards carry dialogs too (§6.6)", () => {
+    let s = reduce(initialState(), {
+      event: "agents",
+      data: [card("A", { dialogs: { epoch: "e0", open: [], closed: [] } })],
+    });
+    expect(A(s).dialogs).toEqual({ epoch: "e0", open: [], closed: [] });
+    const open = [
+      { dialogId: "ask:t1", source: "ask_user", toolCallId: "t1", questions: [], allowCancel: true, openedAt: 1 },
+    ];
+    s = reduce(s, { event: "dialogs", data: { agentKey: "A", epoch: "e1", open, closed: [] } });
+    expect(A(s).dialogs).toEqual({ epoch: "e1", open, closed: [] });
+  });
+
+  it("dialogs.closed settles this tab's dialog item: cmdId match ⇒ won (removed); otherwise lost (E_DIALOG_CLOSED)", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "dialog_answer", dialogId: "ask:t1", state: "sending", at: 1 }));
+    s = reduce(s, send("A", { id: "c2", kind: "dialog_answer", dialogId: "ask:t2", state: "sending", at: 2 }));
+    s = reduce(s, {
+      event: "dialogs",
+      data: {
+        agentKey: "A",
+        epoch: "e1",
+        open: [],
+        closed: [
+          { dialogId: "ask:t1", by: "web", outcome: "answered", cmdId: "c1", at: 10 },
+          { dialogId: "ask:t2", by: "tui", outcome: "answered", at: 11 },
+        ],
+      },
+    });
+    expect(A(s).pendingCtl).toHaveLength(1);
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c2", state: "failed", error: "E_DIALOG_CLOSED", message: "tui" });
+  });
+
+  it("ctl frame: raw items on agent.ctl; entries merge into pending items by cmdId (never creating new ones)", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "observed", at: 1 }));
+    const items = [
+      { cmdId: "c1", op: "prompt", state: "queued", behavior: "steer", at: 1, updatedAt: 2 },
+      { cmdId: "other-tab", op: "prompt", state: "started", at: 3, updatedAt: 3 },
+    ];
+    s = reduce(s, { event: "ctl", data: { agentKey: "A", epoch: "e1", sessionId: "s1", items } });
+    expect(A(s).ctl).toEqual(items);
+    expect(A(s).pendingCtl).toHaveLength(1); // "other-tab" never materializes a local item
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c1", state: "queued" });
+    // consumed ⇒ the optimistic item is done
+    s = reduce(s, {
+      event: "ctl",
+      data: {
+        agentKey: "A",
+        epoch: "e1",
+        sessionId: "s1",
+        items: [{ cmdId: "c1", op: "prompt", state: "consumed", at: 1, updatedAt: 4 }],
+      },
+    });
+    expect(A(s).pendingCtl).toEqual([]);
+  });
+
+  it("commands frame: agent.commands slot (§4.6 completion/policies)", () => {
+    let s = base();
+    const items = [{ name: "compact", kind: "builtin", policy: "allow", policyBusy: "confirm" }];
+    s = reduce(s, { event: "commands", data: { agentKey: "A", epoch: "e1", items } });
+    expect(A(s).commands).toEqual(items);
+  });
+
+  it("cmd_late: terminates the matching pending item; command-kind arms lateQuery (v2.1 §7.7)", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "steer_subagent", runId: "r_1", state: "unknown", at: 1 }));
+    s = reduce(s, send("A", { id: "c2", kind: "command", name: "compact", state: "running", at: 2 }));
+    s = reduce(s, { event: "cmd_late", data: { agentKey: "A", id: "c1", op: "steer_subagent", ok: true } });
+    expect(A(s).pendingCtl.map((i) => i.id)).toEqual(["c2"]);
+    s = reduce(s, { event: "cmd_late", data: { agentKey: "A", id: "c2", op: "command", ok: true } });
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c2", state: "querying", lateQuery: true });
+    // unknown id ⇒ no-op (same object)
+    const before = s;
+    s = reduce(s, { event: "cmd_late", data: { agentKey: "A", id: "nope", op: "prompt", ok: true } });
+    expect(s).toBe(before);
+  });
+
+  it("agent_down: in-flight pending items become unknown+offline (§3.5), settled ones untouched", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "sending", at: 1 }));
+    s = reduce(s, send("A", { id: "c2", kind: "prompt", state: "observed", at: 2 }));
+    s = reduce(s, { event: "agent_down", data: { agentKey: "A", reason: "reap" } });
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c1", state: "unknown", offline: true });
+    expect(A(s).pendingCtl[1]).toMatchObject({ id: "c2", state: "observed" });
+  });
+
+  it("control events for unknown agents / malformed payloads are no-ops", () => {
+    const s = base();
+    expect(reduce(s, send("Z", { id: "c1", kind: "prompt", state: "sending", at: 1 }))).toBe(s);
+    expect(reduce(s, { event: "ctl_send", data: { agentKey: "A", item: { noId: true } } })).toBe(s);
+    expect(reduce(s, { event: "ctl_result", data: { agentKey: "A", id: "c1" } })).toBe(s);
+    expect(reduce(s, { event: "dialogs", data: { agentKey: "Z", epoch: "e", open: [], closed: [] } })).toBe(s);
+    expect(reduce(s, { event: "cmd_late", data: { agentKey: "A" } })).toBe(s);
+  });
+});
