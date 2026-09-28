@@ -1294,3 +1294,98 @@ describe("web-hub control-plane integration (#32 C7) — forced supersede", () =
     higher.sock.destroy();
   }, 25_000);
 });
+
+// ===========================================================================
+// C7 P2 leftover — SSE live forwarding for the ctl / commands / cmd_late slots.
+// The C7 http.ts `onHubEvent` fix added these three forwarding arms, but until
+// now only `dialogs` had a registry→bus→SSE live-push regression assertion
+// (the ask_user dual-channel scenarios above); every test below waits on a
+// REAL SSE stream for the live event, never on a ledger/snapshot read.
+// ===========================================================================
+
+describe("web-hub control-plane integration (#32 C7) — SSE live forwarding of ctl/commands/cmd_late", () => {
+  let env: Env | undefined;
+  afterEach(async () => {
+    if (env !== undefined) await teardown(env);
+    env = undefined;
+  });
+
+  it("an observed prompt settle ⇒ the ctl slot is pushed live over SSE with the ledger item shape", async () => {
+    env = await setup();
+    const sse = await openBrowser(env);
+    const id = cmdId("ctl1");
+    const p = postJson(
+      env.hub.httpPort,
+      "/api/cmd",
+      { agentKey: env.agentKey, id, op: "prompt", text: "ctl live forward", deliver: "steer" },
+      cmdHeaders(env),
+    );
+    await waitUntil(() => env!.pi.sent.length === 1, 3_000, "sendUserMessage called");
+    await fireInput(env, { text: "ctl live forward", source: "extension" });
+    expect((await p).status).toBe(200);
+
+    // The observation settle republishes the ctl slot (commands.ts onChanged → publishCtl →
+    // setSlot → ctl frame → registry publish → http.ts onHubEvent) — the browser must see it
+    // as a live `ctl` event carrying this cmdId at promptState "observed".
+    const ctlEv = await sse.waitFor(
+      (ev) =>
+        ev.event === "ctl" &&
+        Array.isArray(ev.data.items) &&
+        (ev.data.items as Array<{ cmdId?: string; state?: string }>).some(
+          (i) => i.cmdId === id && i.state === "observed",
+        ),
+      5_000,
+    );
+    expect(ctlEv.data).toMatchObject({ agentKey: env.agentKey, sessionId: "ctl-session" });
+    expect(typeof ctlEv.data.epoch).toBe("string");
+    const item = (ctlEv.data.items as Array<Record<string, unknown>>).find((i) => i.cmdId === id)!;
+    expect(item).toMatchObject({ cmdId: id, op: "prompt", state: "observed", behavior: "idle" });
+    expect(typeof item.at).toBe("number");
+    expect(typeof item.updatedAt).toBe("number");
+  }, 15_000);
+
+  it("resources_discover ⇒ the refreshed commands slot is pushed live over SSE", async () => {
+    env = await setup();
+    const sse = await openBrowser(env);
+    // The initial commands slot was published at attach time, before this browser connected —
+    // `resources_discover` is the mid-session republish trigger (agent/index.ts's own handler),
+    // so the event below can only have arrived as a live push.
+    await env.pi.fire("resources_discover", { type: "resources_discover" }, env.ctx);
+    const cmdEv = await sse.waitFor(
+      (ev) => ev.event === "commands" && Array.isArray(ev.data.items) && ev.data.items.length > 0,
+      5_000,
+    );
+    expect(cmdEv.data).toMatchObject({ agentKey: env.agentKey });
+    expect(typeof cmdEv.data.epoch).toBe("string");
+    const webhub = (cmdEv.data.items as Array<Record<string, unknown>>).find((i) => i.name === "webhub");
+    expect(webhub).toMatchObject({ name: "webhub", kind: "extension" });
+    expect(["allow", "confirm", "deny"]).toContain(webhub?.policy);
+  }, 15_000);
+
+  it("/compact's async completion ⇒ the late settle is pushed live over SSE as cmd_late", async () => {
+    env = await setup();
+    const sse = await openBrowser(env);
+    const id = cmdId("late1");
+    const res = await postJson(
+      env.hub.httpPort,
+      "/api/cmd",
+      { agentKey: env.agentKey, id, op: "command", name: "compact", args: "" },
+      cmdHeaders(env),
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ ok: true, data: { kind: "builtin", completion: "async" } });
+
+    // The fake ctx.compact fires onComplete ~10ms later → builtin-bridge sendLate →
+    // commandHandler.handleBridgeLate → settleLate → cmd_late wire frame → registry publish →
+    // http.ts onHubEvent. The synchronous cmd_result already answered the POST above, so this
+    // SSE event is the deterministic late-settlement path (no steer-timer race involved).
+    const lateEv = await sse.waitFor((ev) => ev.event === "cmd_late" && ev.data.id === id, 5_000);
+    expect(lateEv.data).toMatchObject({
+      agentKey: env.agentKey,
+      id,
+      op: "command",
+      ok: true,
+      data: { op: "command", kind: "builtin", completion: "sync" },
+    });
+  }, 15_000);
+});
