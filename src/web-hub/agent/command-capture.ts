@@ -26,9 +26,19 @@ export interface CommandCapturePort {
   output?(): unknown;
 }
 
-/** C0 fast path: no capture means the original ExtensionAPI object is returned unchanged. */
+/**
+ * C0 fast path: `registerCommand` is the only property ever intercepted (K25
+ * primary path "tool / \u4e8b\u4ef6 / appendEntry / \u5d4c\u5957\u547d\u4ee4\u5747\u900f\u4f20"). The
+ * capture lookup is dynamic (`getCapture()` is called again on every
+ * `registerCommand` call and again on every actual command invocation), never
+ * cached at wrap time \u2014 caching it here would freeze the pre-wiring "no
+ * capture yet" snapshot for the whole process lifetime, since `wrapCommandApi`
+ * runs once at the very top of `activate()`, before `commandCaptureRef` is
+ * ever assigned. With no capture wired (the whole of C0), every branch below
+ * degrades to a plain `Reflect.apply`/`Reflect.get` passthrough with `this`
+ * bound to `target` \u2014 byte-identical behavior to the unwrapped `pi`.
+ */
 export function wrapCommandApi<T extends ExtensionAPI>(pi: T, getCapture: () => CommandCapturePort | undefined): T {
-  if (getCapture() === undefined) return pi;
   return new Proxy(pi, {
     get(target, property) {
       if (property !== "registerCommand") {
