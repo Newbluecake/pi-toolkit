@@ -1,0 +1,668 @@
+/*
+ * pi web-hub — control plane (control-plan.md v2.1 §7.4/§7.5/§7.7, §12.3 — C5 exclusive).
+ * Composer + delivery switch + stop button + queue list + command palette/confirm/result +
+ * persistent control notice + TopBar control chip + hub-state banner + fleet inline actions.
+ * All colours/sizes come from tokens.css; no fixed positioning anywhere (the dock stays in the
+ * document flow — ui-design §5.4/K19).
+ */
+
+/* --- small shared additions (primitives.css is frozen — these live here) --- */
+
+.btn-xs {
+  min-height: 32px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
+.btn-danger,
+.stop-btn.armed,
+.command-confirm-run.armed {
+  background: var(--c-danger);
+  color: #fff;
+}
+
+.btn-danger:hover,
+.stop-btn.armed:hover,
+.command-confirm-run.armed:hover {
+  background: var(--c-danger);
+  filter: brightness(0.92);
+}
+
+/* --- dock control layout --- */
+
+.dock-ctl {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  padding-bottom: max(var(--sp-2), env(safe-area-inset-bottom));
+}
+
+.dock-ctl .dock-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+}
+
+.dock-ctl .dock-actions {
+  margin-left: 0;
+}
+
+/* --- composer (§7.4) --- */
+
+.composer {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+}
+
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px; /* touch target (§7.4) */
+  max-height: calc(22px * 8 + 16px); /* 8 rows */
+  padding: 10px var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-lg); /* 16px — iOS doesn't zoom on focus (§7.4/K19) */
+  line-height: 22px;
+  resize: none;
+  field-sizing: content; /* auto-grow where supported; CSSOM fallback in Composer.vue */
+}
+
+.composer textarea:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+  border-color: var(--c-focus);
+}
+
+.composer textarea:disabled {
+  opacity: 0.6;
+}
+
+.composer-send {
+  flex: none;
+  min-height: 44px;
+}
+
+.composer-send .send-icon {
+  display: none;
+}
+
+.cmd-badge {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 10px;
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+
+.composer-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-left: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.send-as-text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  cursor: pointer;
+}
+
+.cmd-denied {
+  color: var(--c-danger);
+  font-weight: var(--fw-medium);
+}
+
+/* --- delivery switch (§7.4/§7.5) --- */
+
+.deliver-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  margin-bottom: 6px;
+  border-radius: var(--r-sm);
+  background: var(--c-sunken);
+  flex: none;
+}
+
+.deliver-switch button {
+  min-height: 32px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: calc(var(--r-sm) - 2px);
+  background: transparent;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.deliver-switch button[aria-checked="true"] {
+  background: var(--c-surface);
+  color: var(--c-primary);
+  box-shadow: var(--shadow-1);
+}
+
+.deliver-select {
+  min-height: 44px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+
+.deliver-idle {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  align-self: center;
+}
+
+/* --- stop button (two-step) --- */
+
+.stop-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+.stop-btn {
+  min-height: 44px;
+  border: 1px solid var(--c-danger-border);
+  color: var(--c-danger);
+  background: var(--c-surface);
+}
+
+.stop-queue-note {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* --- queue list (§7.4/§7.7) --- */
+
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.queue-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+}
+
+.queue-item[data-state="failed"] {
+  border-color: var(--c-danger-border);
+  background: var(--c-danger-soft);
+}
+
+.queue-item[data-state="dropped"],
+.queue-item[data-state="notExecuted"] {
+  border-style: dashed;
+}
+
+.queue-badges {
+  display: inline-flex;
+  gap: var(--sp-1);
+  flex: none;
+}
+
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+}
+
+.queue-actions {
+  display: inline-flex;
+  gap: var(--sp-1);
+  flex: none;
+}
+
+.queue-note {
+  flex-basis: 100%;
+  color: var(--c-text-3);
+}
+
+.chip-muted {
+  /* no opacity tricks (axe color-contrast): solid tokens with ≥4.5:1 on both themes */
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+}
+
+.state-chip {
+  font-weight: var(--fw-semibold);
+}
+
+/* --- persistent control notice (§7.6) --- */
+
+.control-notice {
+  border-bottom: 1px solid var(--c-warning-border);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+.control-notice summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  cursor: pointer;
+  list-style: none;
+  font-weight: var(--fw-medium);
+}
+
+.control-notice summary::-webkit-details-marker {
+  display: none;
+}
+
+.control-notice summary:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.control-notice .notice-toggle {
+  margin-left: auto;
+  color: var(--c-warning-text);
+  font-weight: var(--fw-regular);
+  text-decoration: underline;
+}
+
+.control-notice .notice-body {
+  margin: 0;
+  padding: 0 var(--sp-3) var(--sp-2);
+  line-height: 1.5;
+}
+
+/* --- TopBar control chip (§7.4) --- */
+
+.topbar .control-chip {
+  border: 1px solid var(--c-warning-border);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+}
+
+/* --- hub state banner (v2.1 §7.7) --- */
+
+.hub-state-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-info-soft);
+  color: var(--c-info);
+  font-size: var(--fs-xs);
+}
+
+.hub-state-banner[data-state="stopping"] {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  border-color: var(--c-danger-border);
+}
+
+.hub-state-banner[data-state="restarting"] {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  border-color: var(--c-warning-border);
+}
+
+.hub-state-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.hub-state-sub {
+  margin-left: var(--sp-1);
+  font-weight: var(--fw-medium);
+}
+
+.hub-state-detail {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--c-text-3);
+}
+
+/* --- command palette (§7.7) --- */
+
+.command-palette {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+}
+
+.command-item {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-bottom: 1px solid var(--c-border);
+  background: transparent;
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-item:last-child {
+  border-bottom: 0;
+}
+
+.command-item:hover {
+  background: var(--c-surface-2);
+}
+
+.command-item.denied {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.command-name {
+  font-family: var(--font-mono, monospace);
+  font-weight: var(--fw-semibold);
+}
+
+.command-desc {
+  flex: 1;
+  min-width: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-badges {
+  display: inline-flex;
+  gap: var(--sp-1);
+}
+
+.policy-chip[data-policy="allow"] {
+  background: var(--c-success-soft);
+  color: var(--c-success);
+}
+
+.policy-chip[data-policy="confirm"] {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.policy-chip[data-policy="deny"] {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.command-denied-reason {
+  flex-basis: 100%;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
+.command-empty {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* --- command confirm (§7.7) --- */
+
+.command-confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-warning-border);
+  border-radius: var(--r-md);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  font-size: var(--fs-sm);
+}
+
+.command-confirm-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.command-confirm-hint {
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+/* --- command result (v2.1 §4.9) --- */
+
+.command-result {
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  font-size: var(--fs-sm);
+}
+
+.command-result-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.command-result-head b {
+  font-family: var(--font-mono, monospace);
+}
+
+.command-result-dismiss {
+  margin-left: auto;
+}
+
+.command-output {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.command-output pre {
+  margin: 0;
+  padding: var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--c-sunken);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.command-output pre.output-error {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.output-notify {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: 0;
+}
+
+.output-key {
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-3);
+  text-transform: uppercase;
+}
+
+.command-waiting-terminal,
+.command-terminal-only,
+.command-needs-terminal,
+.command-truncated,
+.command-error {
+  margin: 0;
+  padding: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.command-error {
+  color: var(--c-danger);
+}
+
+/* --- fleet inline actions (§7.4) --- */
+
+.fleet-actions {
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.fleet-steer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.fleet-steer-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+
+.fleet-actions-note[data-kind="err"] {
+  color: var(--c-danger);
+}
+
+.fleet-actions-note {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.run-actions-toggle {
+  min-width: 32px;
+  font-weight: var(--fw-semibold);
+}
+
+/* --- agent-card needs-answer badge + transcript web badge --- */
+
+.badge-answer {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.badge-web {
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--c-info-soft);
+  color: var(--c-info);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+}
+
+/* --- narrow (≤480px): iconified Stop/Send in one row (§7.5) --- */
+
+@media (max-width: 480px) {
+  .composer-send .lbl-md,
+  .stop-btn .lbl-md {
+    display: none;
+  }
+
+  .composer-send .send-icon {
+    display: inline-flex;
+  }
+
+  .composer-send,
+  .stop-btn {
+    min-width: 44px;
+    padding: 0 var(--sp-2);
+    justify-content: center;
+  }
+}
+
+/* --- coarse pointers: every new interactive target ≥44px (§7.5, ui-design §3.12) --- */
+
+@media (pointer: coarse) {
+  .topbar .control-chip {
+    min-height: 44px;
+    padding: 0 var(--sp-2);
+  }
+
+  .control-notice summary {
+    min-height: 44px;
+  }
+
+  .deliver-switch button,
+  .btn-xs,
+  .command-item,
+  .run-actions-toggle {
+    min-height: 44px;
+  }
+
+  .run-actions-toggle,
+  .btn-xs {
+    min-width: 44px;
+  }
+
+  .command-item {
+    align-items: center;
+  }
+
+  .fleet-steer-input {
+    min-height: 44px;
+  }
+}

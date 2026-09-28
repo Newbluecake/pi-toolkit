@@ -8,13 +8,15 @@
   and to the root list in `FleetPanel.vue`).
 -->
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, inject, ref, watch } from "vue";
 import type { FleetNodeProps } from "../../contracts.js";
 import type { FleetRowWire } from "@protocol/messages.js";
 import { formatDuration, formatUsd, clip } from "../../format.js";
 import { fleetRowVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import FleetActions from "./FleetActions.vue";
 import { FLEET_STATE_ICON, fleetStateSpins } from "./state-icon.js";
 import { useFoldSiblings } from "./use-fold-siblings.js";
 
@@ -69,6 +71,14 @@ const hasChildren = computed(() => props.node.children.length > 0);
 // ui-design.md §5.3: "有子节点的行可折叠（默认展开；深度 ≥3 默认折叠）"
 const initialOpen = props.depth < 3;
 const childrenFold = useFoldSiblings(() => props.node.children);
+
+// control-plan §7.4 (C5): non-terminal rows get a "⋯" toggle expanding inline Steer/Stop
+// actions — only when the control plane is negotiated for this agent (CONTROL_CTX is provided
+// by AgentDetail; absent ⇒ read-only UI, and FleetActions itself renders nothing without it).
+const controlCtx = inject(CONTROL_CTX, null);
+const actionsAvailable = computed(() => controlCtx !== null && controlCtx.enabled && !terminal.value);
+const actionsOpen = ref(false);
+const runId = computed(() => String(row.value.runId));
 </script>
 
 <template>
@@ -89,7 +99,23 @@ const childrenFold = useFoldSiblings(() => props.node.children);
           <span class="time">{{ elapsedLabel }}</span>
           <span class="cost">{{ costLabel }}</span>
         </span>
+        <button
+          v-if="actionsAvailable"
+          class="btn btn-ghost btn-xs run-actions-toggle"
+          type="button"
+          :aria-expanded="actionsOpen"
+          :aria-label="t('control.fleetActionsAria')"
+          @click.stop.prevent="actionsOpen = !actionsOpen"
+        >
+          &#x2026;
+        </button>
       </summary>
+      <FleetActions
+        v-if="actionsOpen && actionsAvailable"
+        :agent-key="controlCtx!.agentKey"
+        :run-id="runId"
+        :enabled="true"
+      />
       <ul>
         <FleetNode
           v-for="child in childrenFold.visible.value"
@@ -129,6 +155,22 @@ const childrenFold = useFoldSiblings(() => props.node.children);
         <span class="time">{{ elapsedLabel }}</span>
         <span class="cost">{{ costLabel }}</span>
       </span>
+      <button
+        v-if="actionsAvailable"
+        class="btn btn-ghost btn-xs run-actions-toggle"
+        type="button"
+        :aria-expanded="actionsOpen"
+        :aria-label="t('control.fleetActionsAria')"
+        @click="actionsOpen = !actionsOpen"
+      >
+        &#x2026;
+      </button>
     </div>
+    <FleetActions
+      v-if="actionsOpen && actionsAvailable"
+      :agent-key="controlCtx!.agentKey"
+      :run-id="runId"
+      :enabled="true"
+    />
   </li>
 </template>

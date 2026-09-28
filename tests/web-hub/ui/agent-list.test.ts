@@ -83,3 +83,39 @@ describe("AgentList.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     expect(withoutLabel.find(".agent-flags").exists()).toBe(false);
   });
 });
+
+/**
+ * `AgentCard.vue` needs-answer badge (control-plan.md v2.1 §7.4 — C5 追加): an agent with an
+ * open ask_user dialog gets the "Needs answer" badge (visualState stays `waiting`); the frozen
+ * `AgentCardView` has no dialogs field, so the card reads the App.vue-provided `HUB_CTX` state.
+ */
+import { ref } from "vue";
+import AgentCard from "../../../src/web-hub/ui/src/components/agents/AgentCard.vue";
+import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import type { HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
+
+function hubWithDialogs(open: readonly unknown[]): HubHandle {
+  const agents = new Map([["agent-1", { dialogs: { epoch: "e1", open, closed: [] } }]]);
+  return { state: ref({ agents } as unknown as HubState), dispatch: () => {} };
+}
+
+describe("AgentCard.vue needs-answer badge (C5, §7.4)", () => {
+  it("open dialogs ⇒ 'Needs answer' badge; none ⇒ no badge; no HUB_CTX ⇒ no badge", () => {
+    const withOpen = mount(AgentCard, {
+      props: { card: card({ visualState: "waiting", statusLabel: "Waiting on dialog" }), selected: false },
+      global: { provide: { [HUB_CTX as symbol]: hubWithDialogs([{ dialogId: "ask:1" }]) } },
+    });
+    expect(withOpen.find(".badge-answer").exists()).toBe(true);
+    expect(withOpen.text()).toContain("Needs answer");
+    expect(withOpen.text()).toContain("Waiting on dialog"); // visualState pill unchanged
+
+    const withNone = mount(AgentCard, {
+      props: { card: card(), selected: false },
+      global: { provide: { [HUB_CTX as symbol]: hubWithDialogs([]) } },
+    });
+    expect(withNone.find(".badge-answer").exists()).toBe(false);
+
+    const noHub = mount(AgentCard, { props: { card: card(), selected: false } });
+    expect(noHub.find(".badge-answer").exists()).toBe(false);
+  });
+});

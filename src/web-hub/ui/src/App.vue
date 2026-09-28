@@ -14,7 +14,7 @@
   mis-parsed as an agent key.
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import "./styles/base.css";
 import "./styles/primitives.css";
 import "./styles/notices.css";
@@ -24,10 +24,16 @@ import "./styles/detail.css";
 import "./styles/dock.css";
 import "./styles/login.css";
 import "./styles/states.css";
+// #32 C5 (control-plan.md v2.1 §7.4/§7.6): control-plane + ask_user dialog styles.
+import "./styles/control.css";
+import "./styles/dialog.css";
 import IconSprite from "./icons/IconSprite.vue";
 import { browserLocalStorage } from "./components/shell/themeStorage.js";
 import { hubVersionStamp } from "@logic/build-stamp.js";
+import ControlNotice from "./components/control/ControlNotice.vue";
+import { CONTROL_ENV, HUB_CTX, type ControlEnv } from "./components/control/controlContext.js";
 import DashboardView from "./components/shell/DashboardView.vue";
+import HubStateBanner from "./components/shell/HubStateBanner.vue";
 import LoginView from "./components/shell/LoginView.vue";
 import NoticeStack from "./components/shell/NoticeStack.vue";
 import TokenGate from "./components/shell/TokenGate.vue";
@@ -116,10 +122,22 @@ if (authMode !== "unknown") {
   }
 
   hub = useHub({ createTransport, doc: document, win: window, ...sharedTimers });
+
+  // #32 C5 (control-plan v2.1 §7.1/§7.4): the control plane reaches components via inject —
+  // the frozen `contracts.ts` props of TopBar/AgentDetail/AgentCard have no hub/control field.
+  provide(HUB_CTX, hub);
+  provide(CONTROL_ENV, {
+    authMode,
+    plaintext: authMode === "password" && window.location.protocol === "http:",
+    dialogDrafts: new Map(),
+    noticeExpanded: ref(false),
+  } satisfies ControlEnv);
 }
 
 const route = hashRoute?.route;
 const conn = computed<ConnState>(() => hub?.state.value.conn ?? "connecting");
+// C5: control negotiated (hub caps include cmd.v1) ⇒ persistent ControlNotice + Control chip.
+const controlOn = computed(() => hub?.state.value.control === true);
 const hubVersion = computed<string | null>(() => {
   const h = hub?.state.value.hub as { version?: unknown; buildId?: unknown } | null | undefined;
   return hubVersionStamp(h?.version, h?.buildId);
@@ -197,6 +215,8 @@ onUnmounted(() => {
         @update:theme="onThemeChange"
         @signout="onSignOut"
       />
+      <HubStateBanner />
+      <ControlNotice v-if="controlOn" />
       <NoticeStack :notices="globalNotices" @action="() => {}" />
       <DashboardView :hub="hub!" :route="route!" />
     </div>

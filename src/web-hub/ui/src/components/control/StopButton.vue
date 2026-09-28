@@ -1,0 +1,75 @@
+<!--
+  Stop button with a two-step inline confirm (control-plan.md v2.1 §7.4 — C5): first click ARMS
+  (danger colour, 4s auto-revert, Esc reverts, `aria-live` announcement — never a native
+  `confirm()`, which is hostile on mobile and untestable), second click within the window emits
+  `stop`. K12's conclusion is surfaced in the armed label: queued messages survive an abort
+  (pi has no clearQueue extension surface), so the armed copy says so when `queueCount > 0`.
+-->
+<script setup lang="ts">
+import { computed, onUnmounted, ref } from "vue";
+import { useI18n } from "../../composables/useI18n.js";
+import type { StopButtonEmits, StopButtonProps } from "../../contracts.js";
+import AppIcon from "../../icons/AppIcon.vue";
+
+const props = defineProps<StopButtonProps>();
+const emit = defineEmits<StopButtonEmits>();
+const { t } = useI18n();
+
+const ARM_MS = 4000;
+
+const armed = ref(false);
+let armTimer: ReturnType<typeof setTimeout> | undefined;
+
+function disarm(): void {
+  armed.value = false;
+  if (armTimer !== undefined) {
+    clearTimeout(armTimer);
+    armTimer = undefined;
+  }
+}
+
+function onClick(): void {
+  if (!props.busy) return;
+  if (!armed.value) {
+    armed.value = true;
+    armTimer = setTimeout(disarm, ARM_MS);
+    return;
+  }
+  disarm();
+  emit("stop");
+}
+
+function onKeydown(ev: KeyboardEvent): void {
+  if (ev.key === "Escape" && armed.value) {
+    ev.stopPropagation();
+    disarm();
+  }
+}
+
+onUnmounted(disarm);
+
+const label = computed(() => (armed.value ? t("control.stopConfirm") : t("control.stop")));
+const queueNote = computed(() =>
+  armed.value && (props.queueCount ?? 0) > 0 ? t("control.stopQueueNote", { n: props.queueCount ?? 0 }) : "",
+);
+</script>
+
+<template>
+  <span v-if="busy" class="stop-wrap">
+    <button
+      v-if="busy"
+      class="btn stop-btn"
+      :class="{ armed }"
+      type="button"
+      :data-armed="armed ? 'true' : undefined"
+      :aria-label="t('control.stopAria')"
+      @click="onClick"
+      @keydown="onKeydown"
+    >
+      <AppIcon name="ban" class="icon-sm" />
+      <span class="lbl-md">{{ label }}</span>
+    </button>
+    <span v-if="armed" class="stop-live sr-only" role="status">{{ t("control.stopArmed") }}</span>
+    <span v-if="queueNote" class="stop-queue-note">{{ queueNote }}</span>
+  </span>
+</template>

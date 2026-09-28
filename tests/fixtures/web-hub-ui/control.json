@@ -22,7 +22,10 @@
         "cwd": "/home/dev/pi-toolkit",
         "reason": "user",
         "leafId": "e-alpha-4",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "thinkingLevel": "medium",
         "mode": "tui"
       },
@@ -30,7 +33,11 @@
         "leafId": "e-alpha-4",
         "busy": true,
         "pending": true,
-        "contextUsage": { "tokens": 96000, "contextWindow": 200000, "percent": 48 },
+        "contextUsage": {
+          "tokens": 96000,
+          "contextWindow": 200000,
+          "percent": 48
+        },
         "costUsd": 2.04,
         "queue": [
           {
@@ -76,10 +83,18 @@
         "cwd": "/home/dev/service-beta",
         "reason": "user",
         "leafId": "e-beta-2",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "mode": "tui"
       },
-      "status": { "leafId": "e-beta-2", "busy": false, "pending": false, "costUsd": 0.18 },
+      "status": {
+        "leafId": "e-beta-2",
+        "busy": false,
+        "pending": false,
+        "costUsd": 0.18
+      },
       "prompts": []
     },
     {
@@ -96,10 +111,17 @@
         "cwd": "/home/dev/legacy-app",
         "reason": "user",
         "leafId": "e-old-2",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "mode": "tui"
       },
-      "status": { "leafId": "e-old-2", "busy": false, "pending": false },
+      "status": {
+        "leafId": "e-old-2",
+        "busy": false,
+        "pending": false
+      },
       "prompts": []
     },
     {
@@ -120,7 +142,11 @@
         "leafId": "e-stale-1",
         "mode": "rpc"
       },
-      "status": { "leafId": "e-stale-1", "busy": true, "pending": false },
+      "status": {
+        "leafId": "e-stale-1",
+        "busy": true,
+        "pending": false
+      },
       "prompts": []
     }
   ],
@@ -133,7 +159,11 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-01-01T00:00:00.000Z",
-          "message": { "role": "user", "timestamp": 1700000000000, "content": "wire the P2 control plane" }
+          "message": {
+            "role": "user",
+            "timestamp": 1700000000000,
+            "content": "wire the P2 control plane"
+          }
         },
         {
           "id": "e-alpha-2",
@@ -151,7 +181,11 @@
           "parentId": "e-alpha-2",
           "type": "message",
           "timestamp": "2026-01-01T00:01:00.000Z",
-          "message": { "role": "user", "timestamp": 1700000060000, "content": "also keep the queue visible" }
+          "message": {
+            "role": "user",
+            "timestamp": 1700000060000,
+            "content": "also keep the queue visible"
+          }
         },
         {
           "id": "e-alpha-4",
@@ -161,16 +195,20 @@
           "message": {
             "role": "assistant",
             "timestamp": 1700000070000,
-            "content": "Queue mirror is next — web and terminal entries share one FIFO."
+            "content": "Queue mirror is next — web and terminal entries share one FIFO.\n\n```sh\nnpm run build:web && npm run check:web\n```"
           }
         }
       ],
       "tailMessages": [
-        { "role": "user", "timestamp": 1700000060000, "content": "also keep the queue visible" },
+        {
+          "role": "user",
+          "timestamp": 1700000060000,
+          "content": "also keep the queue visible"
+        },
         {
           "role": "assistant",
           "timestamp": 1700000070000,
-          "content": "Queue mirror is next — web and terminal entries share one FIFO."
+          "content": "Queue mirror is next — web and terminal entries share one FIFO.\n\n```sh\nnpm run build:web && npm run check:web\n```"
         }
       ],
       "fromSeq": 1,
@@ -186,17 +224,31 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-01-01T00:00:00.000Z",
-          "message": { "role": "user", "timestamp": 1700000000000, "content": "idle scratch session" }
+          "message": {
+            "role": "user",
+            "timestamp": 1700000000000,
+            "content": "idle scratch session"
+          }
         },
         {
           "id": "e-beta-2",
           "parentId": "e-beta-1",
           "type": "message",
           "timestamp": "2026-01-01T00:00:03.000Z",
-          "message": { "role": "assistant", "timestamp": 1700000003000, "content": "Ready when you are." }
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000003000,
+            "content": "Ready when you are."
+          }
         }
       ],
-      "tailMessages": [{ "role": "assistant", "timestamp": 1700000003000, "content": "Ready when you are." }],
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1700000003000,
+          "content": "Ready when you are."
+        }
+      ],
       "fromSeq": 1,
       "hasMore": false,
       "oldestEntryId": "e-beta-1",

@@ -75,6 +75,18 @@ describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
         `${UI_DIR}/src/contracts.ts`,
         `${UI_DIR}/src/components/body/DetailBody.vue`,
         `${UI_DIR}/csp-probe/Probe.vue`,
+        // #32 C5 (control-plan §12.3): control-plane components must stay inside the scan.
+        `${UI_DIR}/src/components/control/Composer.vue`,
+        `${UI_DIR}/src/components/control/StopButton.vue`,
+        `${UI_DIR}/src/components/control/QueueList.vue`,
+        `${UI_DIR}/src/components/control/ControlNotice.vue`,
+        `${UI_DIR}/src/components/control/CommandPalette.vue`,
+        `${UI_DIR}/src/components/control/CommandConfirm.vue`,
+        `${UI_DIR}/src/components/control/CommandResult.vue`,
+        `${UI_DIR}/src/components/dialog/AskUserForm.vue`,
+        `${UI_DIR}/src/components/dialog/AskUserQuestion.vue`,
+        `${UI_DIR}/src/components/fleet/FleetActions.vue`,
+        `${UI_DIR}/src/components/shell/HubStateBanner.vue`,
       ]),
     );
     expect(files.length).toBeGreaterThan(5);

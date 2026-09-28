@@ -15,6 +15,7 @@ const common = {
   copied: "已复制",
   selectedPressCopy: "已选中 — 请按复制",
   readonly: "只读",
+  needsAnswer: "待回答",
   "status.running": "运行中",
   "status.thinking": "思考中",
   "status.tool": "运行工具中",

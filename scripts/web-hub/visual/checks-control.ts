@@ -322,25 +322,140 @@ async function checkComposerKeys(ctx: CheckContext): Promise<CheckOutcome[]> {
  * `/api/dialog` (409 on a lost race) and dev-hub.test.ts. */
 async function checkAskUserFormStructure(ctx: CheckContext): Promise<CheckOutcome[]> {
   if (ctx.scenario !== "ask-user") return [];
-  const info = await ctx.page.evaluate((sel) => {
+  const readForm = (sel: typeof CONTROL_SELECTORS) => {
     const form = document.querySelector(sel.askUserForm);
     if (!form) return null;
     return {
       tabs: form.querySelectorAll(sel.askUserTab).length,
+      questions: form.querySelectorAll("fieldset").length,
       hasOther: form.querySelector(sel.askUserOther) !== null,
       submitDisabled: (form.querySelector(sel.askUserSubmit) as HTMLButtonElement | null)?.disabled ?? null,
     };
-  }, CONTROL_SELECTORS);
-  if (info === null) return [];
-  return [
-    outcome("control-ask-user-tabs-per-question", info.tabs >= 1, `tabs=${info.tabs}`),
-    outcome("control-ask-user-other-input", info.hasOther, "no [data-other] input"),
+  };
+  // Phase 1: the scenario route (agent-alpha) is a SINGLE-question dialog — no tabs by design
+  // (§7.4: tabs only for multi-question), but the Other affordance and submit gating apply.
+  const single = await ctx.page.evaluate(readForm, CONTROL_SELECTORS);
+  if (single === null) return [];
+  const outcomes: CheckOutcome[] = [
+    outcome("control-ask-user-single-no-tabs", single.tabs === 0 && single.questions === 1, JSON.stringify(single)),
+    outcome("control-ask-user-other-input", single.hasOther, "no [data-other] input"),
     outcome(
       "control-ask-user-submit-gated",
-      info.submitDisabled !== null,
-      `submitDisabled=${String(info.submitDisabled)}`,
+      single.submitDisabled === true,
+      `submitDisabled=${String(single.submitDisabled)} (unanswered form must not be submittable)`,
     ),
   ];
+  // Phase 2: agent-beta carries the MULTI-question dialog — one header tab per question, all
+  // questions mounted (v-show), Submit still gated until every question is answered.
+  await ctx.page.evaluate(() => {
+    window.location.hash = "#/agent/agent-beta";
+  });
+  await ctx.page.waitForTimeout(600);
+  const multi = await ctx.page.evaluate(readForm, CONTROL_SELECTORS);
+  if (multi !== null) {
+    outcomes.push(
+      outcome(
+        "control-ask-user-tabs-per-question",
+        multi.tabs === 3 && multi.questions === 3,
+        `tabs=${multi.tabs} questions=${multi.questions}`,
+      ),
+      outcome(
+        "control-ask-user-multi-submit-gated",
+        multi.submitDisabled === true,
+        `submitDisabled=${String(multi.submitDisabled)}`,
+      ),
+    );
+  }
+  // Restore the scenario route for later check modules (same discipline as checks-e2e.ts).
+  await ctx.page.evaluate(() => {
+    window.location.hash = "#/agent/agent-alpha";
+  });
+  await ctx.page.waitForTimeout(400);
+  return outcomes;
+}
+
+/** §9.3/v2.1 §7.7 "命令模式": typing `/` into the composer opens the palette with policy
+ * badges; a denied command never POSTs; `/session` (builtin bridge, sync captured output)
+ * round-trips through `POST /api/cmd` and renders a `.command-result` with the output text. */
+async function checkCommandMode(ctx: CheckContext): Promise<CheckOutcome[]> {
+  if (ctx.scenario !== "commands") return [];
+  if (!isControlActionCell(ctx.scenario, ctx.width, ctx.hasTouch, ctx.theme)) return [];
+  const page = asControlPage(ctx);
+  const present = await page.evaluate((sel) => document.querySelector(sel.composer) !== null, CONTROL_SELECTORS);
+  if (!present) return [];
+  const results: CheckOutcome[] = [];
+
+  const clearComposer = async (): Promise<void> => {
+    await page.click(CONTROL_SELECTORS.composer);
+    await page.keyboard.press("Control+A");
+    await page.keyboard.press("Backspace");
+  };
+
+  // 1. palette opens with a policy badge for an allow command.
+  await page.click(CONTROL_SELECTORS.composer);
+  await page.keyboard.type("/se");
+  await page.waitForTimeout(300);
+  const palette = await page.evaluate((sel) => {
+    const el = document.querySelector(sel.commandPalette);
+    if (!el) return null;
+    const first = el.querySelector(".command-item");
+    return {
+      items: el.querySelectorAll(".command-item").length,
+      policy: first?.querySelector(".policy-chip")?.textContent ?? null,
+      outputBadge: first?.querySelector(".chip-muted")?.textContent ?? null,
+    };
+  }, CONTROL_SELECTORS);
+  results.push(
+    outcome(
+      "control-command-palette-opens",
+      palette !== null && palette.items >= 1 && palette.policy !== null,
+      palette === null ? "palette never opened" : JSON.stringify(palette),
+    ),
+  );
+
+  // 2. a denied command never reaches the wire (§4.6 "绝不回落为文本").
+  await clearComposer();
+  await page.keyboard.type("/quit");
+  await page.waitForTimeout(300);
+  let before = countControlPosts(ctx);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+  const denied = await page.evaluate((sel) => {
+    const el = document.querySelector(sel.commandPalette);
+    return el?.querySelector(".command-item.denied") !== null && el?.querySelector(".command-item.denied") !== undefined
+      ? true
+      : (el?.textContent ?? "").includes("Terminal only");
+  }, CONTROL_SELECTORS);
+  results.push(
+    outcome(
+      "control-command-deny-never-posts",
+      countControlPosts(ctx) === before && denied,
+      `posts ${before}→${countControlPosts(ctx)}, deniedShown=${denied}`,
+    ),
+  );
+
+  // 3. /session executes and the captured output renders (CommandOutputWire entries, §4.9).
+  await clearComposer();
+  await page.keyboard.type("/session");
+  await page.waitForTimeout(200);
+  before = countControlPosts(ctx);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(800);
+  const result = await page.evaluate((sel) => {
+    const el = document.querySelector(sel.commandResult);
+    return el === null ? null : { state: el.getAttribute("data-state"), text: (el.textContent ?? "").slice(0, 300) };
+  }, CONTROL_SELECTORS);
+  results.push(
+    outcome(
+      "control-command-result-output",
+      countControlPosts(ctx) === before + 1 &&
+        result !== null &&
+        result.state === "done" &&
+        result.text.includes("sess-alpha"),
+      `posts ${before}→${countControlPosts(ctx)}, result=${JSON.stringify(result)}`,
+    ),
+  );
+  return results;
 }
 
 /** §9.3 "TopBar chip 切换": with control negotiated the top bar shows the Control chip (never
@@ -368,12 +483,45 @@ async function checkTopBarChip(ctx: CheckContext): Promise<CheckOutcome[]> {
  * non-empty states, never a blank bar. */
 async function checkHubStateBanner(ctx: CheckContext): Promise<CheckOutcome[]> {
   if (ctx.scenario !== "hub-states") return [];
-  const text = await ctx.page.evaluate((sel) => {
+  const info = await ctx.page.evaluate((sel) => {
     const banner = document.querySelector(sel.hubStateBanner);
-    return banner === null ? null : (banner.textContent ?? "").trim();
+    if (banner === null) return null;
+    return {
+      state: banner.getAttribute("data-state") ?? "",
+      text: (banner.textContent ?? "").trim(),
+    };
   }, CONTROL_SELECTORS);
-  if (text === null) return [];
-  return [outcome("control-hub-state-banner-text", text.length > 0, "banner rendered empty")];
+  if (info === null) return [];
+  const out = [outcome("control-hub-state-banner-text", info.text.length > 0, "banner rendered empty")];
+  // v2.1 §7.7: pending ⇒ countdown "最晚 HH:MM"; restarting ⇒ version + forced/draining note;
+  // stopping ⇒ the /webhub start pointer. The fixture's script flips states at 1.5s/30s, so
+  // which of the three a given cell sees is timing-dependent — all three are well-formed.
+  if (info.state === "pending") {
+    out.push(
+      outcome(
+        "control-hub-state-countdown",
+        /\d{2}:\d{2}/.test(info.text),
+        `pending banner without HH:MM deadline: ${info.text.slice(0, 120)}`,
+      ),
+    );
+  } else if (info.state === "restarting") {
+    out.push(
+      outcome(
+        "control-hub-state-restarting-copy",
+        info.text.includes("1.6.0") && /forced|Draining/i.test(info.text),
+        `restarting banner missing version/forced note: ${info.text.slice(0, 120)}`,
+      ),
+    );
+  } else if (info.state === "stopping") {
+    out.push(
+      outcome(
+        "control-hub-state-stopping-copy",
+        info.text.includes("/webhub start"),
+        `stopping banner missing /webhub start: ${info.text.slice(0, 120)}`,
+      ),
+    );
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +584,7 @@ export const check: CheckModule = {
     outcomes.push(...(await checkStopButtonTwoStep(ctx)));
     outcomes.push(...(await checkComposerKeys(ctx)));
     outcomes.push(...(await checkAskUserFormStructure(ctx)));
+    outcomes.push(...(await checkCommandMode(ctx)));
     outcomes.push(...(await checkTopBarChip(ctx)));
     outcomes.push(...(await checkHubStateBanner(ctx)));
     outcomes.push(...(await checkControlAxe(ctx)));

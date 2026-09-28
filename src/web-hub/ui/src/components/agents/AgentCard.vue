@@ -5,14 +5,24 @@
   back/forward, middle-click-open-in-new-tab and Tab-order all work for free (ui-design §6.2).
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, inject } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { formatPercent } from "../../format.js";
 import type { AgentCardProps } from "../../contracts.js";
+import { HUB_CTX } from "../control/controlContext.js";
 
 const props = defineProps<AgentCardProps>();
 const { t, lang } = useI18n();
+
+// §7.4 (C5): an open ask_user dialog adds a "Needs answer" badge (the visual state pill keeps
+// showing `waiting`). The frozen `AgentCardView` has no dialogs field, so the card looks its
+// own agent up in the App.vue-provided `HUB_CTX` state (no provider ⇒ no badge).
+const hub = inject(HUB_CTX, null);
+const needsAnswer = computed(() => {
+  const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
+  return Array.isArray(dialogs?.open) && dialogs.open.length > 0;
+});
 
 const dotClass = computed(() => {
   switch (props.card.visualState) {
@@ -75,8 +85,11 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       </template>
     </span>
 
-    <span v-if="card.statusLabel" class="agent-flags">
-      <span class="pill" :data-st="card.visualState">
+    <span v-if="card.statusLabel || needsAnswer" class="agent-flags">
+      <span v-if="needsAnswer" class="pill badge-answer">
+        <AppIcon name="message" class="icon-sm" />{{ t("common.needsAnswer") }}
+      </span>
+      <span v-if="card.statusLabel" class="pill" :data-st="card.visualState">
         <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
         <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
         <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />

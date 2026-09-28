@@ -73,3 +73,85 @@ describe("NoticeStack.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     expect(wrapper.findAll(".notice")).toHaveLength(0);
   });
 });
+
+/**
+ * `detail/agentNotices.ts` §5.6 横幅去重 (control-plan.md v2.1 — C5 追加): a prompt attributed
+ * (via `dialogId`, K8) to an OPEN ask_user dialog must NOT feed the "Waiting on a dialog in the
+ * terminal" banner — the web answer form replaces it; unattributed prompts (other extension
+ * dialogs) keep the banner unchanged.
+ */
+import { buildAgentNotices } from "../../../src/web-hub/ui/src/components/detail/agentNotices.js";
+import { useI18n } from "../../../src/web-hub/ui/src/composables/useI18n.js";
+import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
+
+describe("agentNotices §5.6 dialog-banner dedup (C5)", () => {
+  const { t } = useI18n(["en-US"]);
+  const base = {
+    key: "agent-a",
+    card: {},
+    down: false,
+    prompts: [],
+    fleet: [],
+    items: [],
+    uid: 0,
+    lastSeq: 0,
+    streaming: null,
+    tools: [],
+    history: "loaded",
+    hasMore: false,
+    paging: false,
+    needsResync: false,
+    sub: null,
+  } as const;
+
+  function agentWith(prompts: readonly unknown[], dialogs?: unknown): AgentState {
+    return {
+      ...base,
+      prompts: prompts as AgentState["prompts"],
+      ...(dialogs !== undefined ? { dialogs } : {}),
+    } as unknown as AgentState;
+  }
+
+  it("an open-dialog-attributed prompt produces NO waiting banner", () => {
+    const notices = buildAgentNotices(
+      agentWith([{ kind: "custom", title: "ask_user", since: 1, dialogId: "ask:tc-1" }], {
+        epoch: "e1",
+        open: [{ dialogId: "ask:tc-1" }],
+        closed: [],
+      }),
+      t,
+    );
+    expect(notices).toEqual([]);
+  });
+
+  it("a prompt whose dialogId is not open (or has none) keeps the banner", () => {
+    const unattributed = buildAgentNotices(agentWith([{ kind: "custom", title: "picker", since: 1 }]), t);
+    expect(unattributed).toHaveLength(1);
+    expect(unattributed[0]!.id).toBe("agent-waiting");
+    const closedOnly = buildAgentNotices(
+      agentWith([{ kind: "custom", title: "ask_user", since: 1, dialogId: "ask:tc-1" }], {
+        epoch: "e1",
+        open: [],
+        closed: [{ dialogId: "ask:tc-1" }],
+      }),
+      t,
+    );
+    expect(closedOnly).toHaveLength(1);
+  });
+
+  it("mixed prompts: the banner counts only the unattributed ones", () => {
+    const notices = buildAgentNotices(
+      agentWith(
+        [
+          { kind: "custom", title: "ask_user", since: 1, dialogId: "ask:tc-1" },
+          { kind: "custom", title: "resume picker", since: 2 },
+        ],
+        { epoch: "e1", open: [{ dialogId: "ask:tc-1" }], closed: [] },
+      ),
+      t,
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.body).toContain("resume picker");
+    expect(notices[0]!.body).not.toContain("+1");
+  });
+});

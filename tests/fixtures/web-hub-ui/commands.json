@@ -21,7 +21,10 @@
         "cwd": "/home/dev/pi-toolkit",
         "reason": "user",
         "leafId": "e-alpha-2",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "thinkingLevel": "medium",
         "mode": "tui"
       },
@@ -29,7 +32,11 @@
         "leafId": "e-alpha-2",
         "busy": true,
         "pending": false,
-        "contextUsage": { "tokens": 120000, "contextWindow": 200000, "percent": 60 }
+        "contextUsage": {
+          "tokens": 120000,
+          "contextWindow": 200000,
+          "percent": 60
+        }
       },
       "prompts": []
     }
@@ -43,7 +50,11 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-01-01T00:00:00.000Z",
-          "message": { "role": "user", "timestamp": 1700000000000, "content": "show me the command palette states" }
+          "message": {
+            "role": "user",
+            "timestamp": 1700000000000,
+            "content": "show me the command palette states"
+          }
         },
         {
           "id": "e-alpha-2",
@@ -53,7 +64,7 @@
           "message": {
             "role": "assistant",
             "timestamp": 1700000004000,
-            "content": "allow / confirm / deny, captured vs terminal output — all in the slot."
+            "content": "allow / confirm / deny, captured vs terminal output — all in the slot.\n\n```sh\nnpm run build:web && npm run check:web\n```"
           }
         }
       ],
@@ -61,7 +72,7 @@
         {
           "role": "assistant",
           "timestamp": 1700000004000,
-          "content": "allow / confirm / deny, captured vs terminal output — all in the slot."
+          "content": "allow / confirm / deny, captured vs terminal output — all in the slot.\n\n```sh\nnpm run build:web && npm run check:web\n```"
         }
       ],
       "fromSeq": 1,
@@ -110,9 +121,24 @@
           "policy": "allow",
           "output": "captured"
         },
-        { "name": "new", "kind": "builtin", "description": "Start a new session", "policy": "confirm" },
-        { "name": "quit", "kind": "builtin", "description": "Exit pi", "policy": "deny" },
-        { "name": "resume", "kind": "builtin", "description": "Resume a session (terminal picker)", "policy": "deny" },
+        {
+          "name": "new",
+          "kind": "builtin",
+          "description": "Start a new session",
+          "policy": "confirm"
+        },
+        {
+          "name": "quit",
+          "kind": "builtin",
+          "description": "Exit pi",
+          "policy": "deny"
+        },
+        {
+          "name": "resume",
+          "kind": "builtin",
+          "description": "Resume a session (terminal picker)",
+          "policy": "deny"
+        },
         {
           "name": "agent",
           "kind": "extension",
@@ -169,8 +195,18 @@
           "policy": "confirm",
           "output": "terminal"
         },
-        { "name": "skill:review-code", "kind": "skill", "description": "Run the code-review skill", "policy": "allow" },
-        { "name": "daily-standup", "kind": "template", "description": "Standup prompt template", "policy": "allow" }
+        {
+          "name": "skill:review-code",
+          "kind": "skill",
+          "description": "Run the code-review skill",
+          "policy": "allow"
+        },
+        {
+          "name": "daily-standup",
+          "kind": "template",
+          "description": "Standup prompt template",
+          "policy": "allow"
+        }
       ]
     }
   }

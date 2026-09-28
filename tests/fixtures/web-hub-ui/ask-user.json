@@ -21,11 +21,25 @@
         "cwd": "/home/dev/pi-toolkit",
         "reason": "user",
         "leafId": "e-alpha-2",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "mode": "tui"
       },
-      "status": { "leafId": "e-alpha-2", "busy": true, "pending": true },
-      "prompts": [{ "kind": "custom", "title": "ask_user", "since": 1700000200000, "dialogId": "ask:tc-single-1" }]
+      "status": {
+        "leafId": "e-alpha-2",
+        "busy": true,
+        "pending": true
+      },
+      "prompts": [
+        {
+          "kind": "custom",
+          "title": "ask_user",
+          "since": 1700000200000,
+          "dialogId": "ask:tc-single-1"
+        }
+      ]
     },
     {
       "agentKey": "agent-beta",
@@ -43,11 +57,25 @@
         "cwd": "/home/dev/service-beta",
         "reason": "user",
         "leafId": "e-beta-2",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "mode": "tui"
       },
-      "status": { "leafId": "e-beta-2", "busy": true, "pending": true },
-      "prompts": [{ "kind": "custom", "title": "ask_user", "since": 1700000210000, "dialogId": "ask:tc-multi-1" }]
+      "status": {
+        "leafId": "e-beta-2",
+        "busy": true,
+        "pending": true
+      },
+      "prompts": [
+        {
+          "kind": "custom",
+          "title": "ask_user",
+          "since": 1700000210000,
+          "dialogId": "ask:tc-multi-1"
+        }
+      ]
     },
     {
       "agentKey": "agent-gamma",
@@ -65,11 +93,25 @@
         "cwd": "/home/dev/race-demo",
         "reason": "user",
         "leafId": "e-gamma-2",
-        "model": { "provider": "cr-anthropic", "id": "claude-sonnet-5" },
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
         "mode": "tui"
       },
-      "status": { "leafId": "e-gamma-2", "busy": true, "pending": true },
-      "prompts": [{ "kind": "custom", "title": "ask_user", "since": 1700000220000, "dialogId": "ask:tc-race-1" }]
+      "status": {
+        "leafId": "e-gamma-2",
+        "busy": true,
+        "pending": true
+      },
+      "prompts": [
+        {
+          "kind": "custom",
+          "title": "ask_user",
+          "since": 1700000220000,
+          "dialogId": "ask:tc-race-1"
+        }
+      ]
     }
   ],
   "history": {
@@ -81,7 +123,11 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-01-01T00:00:00.000Z",
-          "message": { "role": "user", "timestamp": 1700000000000, "content": "ask me which plan to take" }
+          "message": {
+            "role": "user",
+            "timestamp": 1700000000000,
+            "content": "ask me which plan to take"
+          }
         },
         {
           "id": "e-alpha-2",
@@ -91,12 +137,16 @@
           "message": {
             "role": "assistant",
             "timestamp": 1700000004000,
-            "content": "One decision is needed before I continue."
+            "content": "One decision is needed before I continue.\n\n```sh\nnpm run build:web && npm run check:web\n```"
           }
         }
       ],
       "tailMessages": [
-        { "role": "assistant", "timestamp": 1700000004000, "content": "One decision is needed before I continue." }
+        {
+          "role": "assistant",
+          "timestamp": 1700000004000,
+          "content": "One decision is needed before I continue.\n\n```sh\nnpm run build:web && npm run check:web\n```"
+        }
       ],
       "fromSeq": 1,
       "hasMore": false,
@@ -111,17 +161,31 @@
           "parentId": null,
           "type": "message",
           "timestamp": "2026-01-01T00:00:00.000Z",
-          "message": { "role": "user", "timestamp": 1700000000000, "content": "plan the rollout with me" }
+          "message": {
+            "role": "user",
+            "timestamp": 1700000000000,
+            "content": "plan the rollout with me"
+          }
         },
         {
           "id": "e-beta-2",
           "parentId": "e-beta-1",
           "type": "message",
           "timestamp": "2026-01-01T00:00:04.000Z",
-          "message": { "role": "assistant", "timestamp": 1700000004000, "content": "Three questions coming up." }
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000004000,
+            "content": "Three questions coming up."
+          }
         }
       ],
-      "tailMessages": [{ "role": "assistant", "timestamp": 1700000004000, "content": "Three questions coming up." }],
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1700000004000,
+          "content": "Three questions coming up."
+        }
+      ],
       "fromSeq": 1,
       "hasMore": false,
       "oldestEntryId": "e-beta-1",
@@ -141,8 +205,14 @@
               "question": "Which implementation plan should I take?",
               "context": "Plan A rewrites the module; plan B patches it in place.",
               "options": [
-                { "label": "Plan A — rewrite", "description": "Cleaner result, larger diff, needs full re-review" },
-                { "label": "Plan B — patch", "description": "Minimal diff, keeps the known quirks" }
+                {
+                  "label": "Plan A — rewrite",
+                  "description": "Cleaner result, larger diff, needs full re-review"
+                },
+                {
+                  "label": "Plan B — patch",
+                  "description": "Minimal diff, keeps the known quirks"
+                }
               ]
             }
           ],
@@ -164,8 +234,14 @@
               "question": "Roll out to which environment first?",
               "header": "Env",
               "options": [
-                { "label": "staging", "description": "Full synthetic traffic, zero user impact" },
-                { "label": "canary", "description": "5% of production traffic" }
+                {
+                  "label": "staging",
+                  "description": "Full synthetic traffic, zero user impact"
+                },
+                {
+                  "label": "canary",
+                  "description": "5% of production traffic"
+                }
               ]
             },
             {
@@ -173,15 +249,25 @@
               "header": "Gates",
               "multiSelect": true,
               "options": [
-                { "label": "unit + integration green" },
-                { "label": "visual matrix green" },
-                { "label": "manual QA sign-off" }
+                {
+                  "label": "unit + integration green"
+                },
+                {
+                  "label": "visual matrix green"
+                },
+                {
+                  "label": "manual QA sign-off"
+                }
               ]
             },
             {
               "question": "Anything else I should know before proceeding?",
               "context": "Free text is fine; leave empty to skip.",
-              "options": [{ "label": "nothing — proceed" }],
+              "options": [
+                {
+                  "label": "nothing — proceed"
+                }
+              ],
               "allowOther": true
             }
           ],
@@ -201,7 +287,14 @@
           "questions": [
             {
               "question": "The terminal is about to answer this — race it if you like.",
-              "options": [{ "label": "answer from the web" }, { "label": "let the terminal win" }],
+              "options": [
+                {
+                  "label": "answer from the web"
+                },
+                {
+                  "label": "let the terminal win"
+                }
+              ],
               "allowOther": false
             }
           ],

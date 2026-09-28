@@ -193,3 +193,61 @@ describe("i18n resolves through the real MESSAGES table (regression: not just th
     expect(wrapper.get(".panel-title").text()).toBe("Subagents");
   });
 });
+
+/**
+ * `FleetNode.vue` + `FleetActions.vue` (control-plan.md v2.1 §7.4 — C5 追加): with the frozen
+ * `CONTROL_CTX` provided and enabled, non-terminal rows show the "⋯" toggle that expands inline
+ * Steer/Stop actions; terminal rows never do; without the inject nothing shows at all.
+ */
+import FleetNode from "../../../src/web-hub/ui/src/components/fleet/FleetNode.vue";
+import { buildFleetTree } from "../../../src/web-hub/ui/src/components/fleet/tree.js";
+import { CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.js";
+
+function leafNode(runId: string, terminal: boolean) {
+  const tree = buildFleetTree([row({ runId, terminal })]);
+  return tree[0]!;
+}
+
+const NOOP_CONTROL = {
+  sendPrompt: () => Promise.resolve({ ok: true as const }),
+  abort: () => Promise.resolve({ ok: true as const }),
+  steerSub: () => Promise.resolve({ ok: true as const }),
+  stopSub: () => Promise.resolve({ ok: true as const }),
+  answerDialog: () => Promise.resolve({ ok: true as const }),
+  cancelDialog: () => Promise.resolve({ ok: true as const }),
+  runCommand: () => Promise.resolve({ ok: true as const }),
+  query: () => Promise.resolve({ ok: true as const }),
+  retry: () => Promise.resolve({ ok: true as const }),
+  discard: () => {},
+  draft: () => "",
+  setDraft: () => {},
+};
+
+describe("FleetNode.vue ⋯ control actions (C5, §7.4)", () => {
+  it("non-terminal row + CONTROL_CTX ⇒ ⋯ toggle expands FleetActions", async () => {
+    const wrapper = mount(FleetNode, {
+      props: { node: leafNode("r_live", false), depth: 0, now: 0 },
+      global: { provide: { [CONTROL_CTX as symbol]: { agentKey: "agent-a", control: NOOP_CONTROL, enabled: true } } },
+    });
+    const toggle = wrapper.find(".run-actions-toggle");
+    expect(toggle.exists()).toBe(true);
+    expect(wrapper.find(".fleet-actions").exists()).toBe(false);
+    await toggle.trigger("click");
+    expect(wrapper.find(".fleet-actions").exists()).toBe(true);
+    expect(wrapper.find(".fleet-steer-input").exists()).toBe(true);
+    expect(wrapper.find(".stop-btn").exists()).toBe(true);
+  });
+
+  it("terminal rows never show the toggle, even with control enabled", () => {
+    const wrapper = mount(FleetNode, {
+      props: { node: leafNode("r_done", true), depth: 0, now: 0 },
+      global: { provide: { [CONTROL_CTX as symbol]: { agentKey: "agent-a", control: NOOP_CONTROL, enabled: true } } },
+    });
+    expect(wrapper.find(".run-actions-toggle").exists()).toBe(false);
+  });
+
+  it("no CONTROL_CTX inject ⇒ no toggle (read-only UI)", () => {
+    const wrapper = mount(FleetNode, { props: { node: leafNode("r_live", false), depth: 0, now: 0 } });
+    expect(wrapper.find(".run-actions-toggle").exists()).toBe(false);
+  });
+});

@@ -12,6 +12,8 @@ const common = {
   copied: "Copied",
   selectedPressCopy: "Selected — press Copy",
   readonly: "Read-only",
+  // #32 C5 (control-plan §7.4): agent-card badge for an open ask_user dialog.
+  needsAnswer: "Needs answer",
   "status.running": "Working",
   "status.thinking": "Thinking",
   "status.tool": "Running tool",

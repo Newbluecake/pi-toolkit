@@ -1,0 +1,232 @@
+/*
+ * pi web-hub — ask_user dialog (control-plan.md v2.1 §5/§7.4, §12.3 — C5 exclusive).
+ * The dual-channel answer form that replaces the "waiting on a dialog" banner in the detail
+ * pane, plus its folded/epoch notes.
+ */
+
+.ask-user-slot {
+  border-bottom: 1px solid var(--c-border);
+}
+
+.ask-user-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-warning-soft);
+}
+
+.ask-user-form[data-suspended] {
+  background: var(--c-sunken);
+}
+
+.ask-dual-hint {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.ask-suspended {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--c-info-soft);
+  color: var(--c-info);
+  font-size: var(--fs-xs);
+}
+
+.ask-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--c-sunken);
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.ask-tabs button {
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: calc(var(--r-sm) - 2px);
+  background: transparent;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ask-tabs button[aria-selected="true"] {
+  background: var(--c-surface);
+  color: var(--c-primary);
+  box-shadow: var(--shadow-1);
+}
+
+.ask-question {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.ask-question-text {
+  padding: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.ask-context {
+  margin: var(--sp-1) 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+}
+
+.ask-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-height: 44px; /* touch target (§7.4) */
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.ask-option:hover {
+  background: var(--c-surface);
+}
+
+.ask-option input[type="radio"],
+.ask-option input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin-top: 3px;
+  flex: none;
+  accent-color: var(--c-primary);
+}
+
+.ask-option input:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+}
+
+.ask-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ask-option-label {
+  font-size: var(--fs-md);
+  color: var(--c-text);
+}
+
+.ask-option-desc {
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.ask-other-input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-lg); /* 16px — no iOS focus zoom (§7.4/K19) */
+}
+
+.ask-other-input:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.ask-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.ask-actions .btn {
+  min-height: 44px;
+}
+
+.ask-actions .btn.armed {
+  background: var(--c-danger);
+  color: #fff;
+}
+
+.ask-epoch-note,
+.ask-folded {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* --- coarse pointers: 44px hit areas (§7.5) — the bare radio/checkbox inputs are measured
+ * individually by the visual harness, so they grow to a 44px transparent box with the visible
+ * control drawn by ::before (same trick as dock.css's `.switch input`). --- */
+
+@media (pointer: coarse) {
+  .ask-tabs button {
+    min-height: 44px;
+  }
+
+  .ask-other-input {
+    min-height: 44px;
+  }
+
+  .ask-option input[type="radio"],
+  .ask-option input[type="checkbox"] {
+    appearance: none;
+    width: 44px;
+    height: 44px;
+    margin: 0 0 0 -12px;
+    position: relative;
+    background: transparent;
+  }
+
+  .ask-option input[type="radio"]::before,
+  .ask-option input[type="checkbox"]::before {
+    content: "";
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--c-border-strong);
+    background: var(--c-surface);
+  }
+
+  .ask-option input[type="radio"]::before {
+    border-radius: 50%;
+  }
+
+  .ask-option input[type="checkbox"]::before {
+    border-radius: var(--r-xs);
+  }
+
+  .ask-option input[type="radio"]:checked::before,
+  .ask-option input[type="checkbox"]:checked::before {
+    border-color: var(--c-primary);
+    background: var(--c-primary);
+    box-shadow: inset 0 0 0 3px var(--c-surface);
+  }
+}
