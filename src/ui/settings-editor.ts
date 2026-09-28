@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { isWebInvocation } from "../web-hub/agent/command-capture.js";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -493,7 +494,7 @@ export function themeColorize(theme: SettingsEditorTheme | undefined): SettingsE
  * when the overlay is not available at all.
  */
 export function canOpenSettingsEditor(ctx: ExtensionCommandContext): boolean {
-  return ctx.mode === "tui" && typeof ctx.ui.custom === "function";
+  return ctx.mode === "tui" && typeof ctx.ui.custom === "function" && !isWebInvocation(ctx);
 }
 
 /**

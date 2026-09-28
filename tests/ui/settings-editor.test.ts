@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +23,7 @@ import {
 } from "../../src/config/setting-specs.js";
 import {
   SettingsEditorModel,
+  canOpenSettingsEditor,
   createSettingsEditorComponent,
   decodeSettingsEditorInput,
   describeRow,
@@ -622,5 +624,34 @@ describe("L1: SettingsStore.onWrite (agent-tool pool-full plan \u00a74)", () => 
     if (!parsed.ok) throw new Error("unreachable");
     expect(() => writeSetting(s, "concurrencyLimit", parsed)).not.toThrow();
     expect(s.current.concurrencyLimit).toBe(4);
+  });
+});
+
+describe("canOpenSettingsEditor — plan §4.9 point 6 / D22 (package C12: web-hub command capture)", () => {
+  function ctxOf(mode: "tui" | "rpc" | "print" | "json", webInvocation?: boolean): ExtensionCommandContext {
+    return {
+      mode,
+      ui: { custom: async () => undefined },
+      ...(webInvocation !== undefined ? { webInvocation } : {}),
+    } as unknown as ExtensionCommandContext;
+  }
+
+  it("true for a genuine TUI invocation with no web capture involved", () => {
+    expect(canOpenSettingsEditor(ctxOf("tui"))).toBe(true);
+  });
+
+  it("false for a web-hub-claimed invocation even though the underlying session is still TUI mode — this is the whole point: `ctxProxy`'s captured `custom()` never opens the real overlay, so `openSettingsEditor` must never be allowed past this gate to (wrongly) report success", () => {
+    expect(canOpenSettingsEditor(ctxOf("tui", true))).toBe(false);
+  });
+
+  it("still false for a non-TUI mode regardless of webInvocation", () => {
+    expect(canOpenSettingsEditor(ctxOf("rpc"))).toBe(false);
+    expect(canOpenSettingsEditor(ctxOf("rpc", true))).toBe(false);
+    expect(canOpenSettingsEditor(ctxOf("print"))).toBe(false);
+  });
+
+  it("false when ui.custom is missing, web or not", () => {
+    const ctx = { mode: "tui", ui: {} } as unknown as ExtensionCommandContext;
+    expect(canOpenSettingsEditor(ctx)).toBe(false);
   });
 });

@@ -240,6 +240,47 @@ describe("wireTodo tools", () => {
     expect(list.content[0]?.text).toBe("No tasks.");
   });
 
+  // plan §4.9 point 6 / D22 (package C12): a web-hub-claimed `/tasklist` (no
+  // args) must fall back to the text listing — never the TUI-only custom
+  // overlay — and must never become the long-lived widget host, since
+  // `currentUI` is shared by every *other* future `refreshWidget()` call
+  // (TaskCreate/TaskUpdate/session_start), not just this one invocation.
+  test("web-invoked /tasklist (no args) falls back to formatTaskList text and never becomes the widget host", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const tuiCtx = fakeCtx(host, "tui");
+    await host.handlers.get("session_start")?.({}, tuiCtx);
+    await exec(host, "TaskCreate", { subject: "A", description: "do A" }, tuiCtx);
+    host.notifications.length = 0;
+    host.widgetCalls.length = 0;
+
+    const webWidgetCalls: unknown[] = [];
+    const webCtx = {
+      ...(tuiCtx as unknown as Record<string, unknown>),
+      webInvocation: true,
+      ui: {
+        ...(tuiCtx as unknown as { ui: Record<string, unknown> }).ui,
+        setWidget: (key: string, content: unknown) => webWidgetCalls.push({ key, content }),
+      },
+    } as unknown as ExtensionContext;
+
+    const command = host.commands.get("tasklist");
+    await command?.handler("", webCtx);
+
+    // Text fallback (formatTaskList via notify), never the custom overlay.
+    expect(host.notifications.some((n) => n.includes("do A"))).toBe(true);
+    expect(webWidgetCalls).toHaveLength(0);
+
+    // `currentUI` must not have been swapped to the web ctx's ui: force the
+    // widget to unmount (`/tasklist clear` on the REAL tui ctx) and confirm
+    // that `ui.setWidget(WIDGET_KEY, undefined)` call still lands on the
+    // terminal ctx's setWidget, not the (now-defunct) web one.
+    host.widgetCalls.length = 0;
+    await command?.handler("clear", tuiCtx);
+    expect(host.widgetCalls.some((c) => c.key === "claude-code-todo" && c.content === undefined)).toBe(true);
+    expect(webWidgetCalls).toHaveLength(0);
+  });
+
   test("TaskUpdate reports Unblocked in the tool text and notifies via ctx.ui when completing a task unblocks another", async () => {
     const host = fakePi();
     wireTodo(host.pi);

@@ -29,6 +29,7 @@
 // per spec) without touching each of the five tool bodies.
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { isWebInvocation } from "../web-hub/agent/command-capture.js";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { TodoPanel, TodoWidget } from "./ui.js";
@@ -418,8 +419,13 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     description: "Show the Claude Code-style task list, or clear it with /tasklist clear",
     handler: async (args, ctx) => {
       // TUI gate (revision N5): same rule as restore() — a rpc/child session
-      // must never become the widget owner.
-      if (ctx.mode === "tui") currentUI = ctx.ui;
+      // must never become the widget owner. A web-claimed invocation keeps
+      // `ctx.mode === "tui"` (it is genuinely a TUI session, just also
+      // reached over the web-hub capture proxy — plan §4.9 point 6), so it
+      // must be excluded here too, or `currentUI` (the long-lived widget
+      // host used by every *other* future `refreshWidget()` call) would get
+      // swapped for this one invocation's short-lived capture proxy.
+      if (ctx.mode === "tui" && !isWebInvocation(ctx)) currentUI = ctx.ui;
       if (args.trim().toLowerCase() === "clear") {
         if (
           ctx.hasUI &&
@@ -434,7 +440,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
         ctx.ui.notify("Task list cleared.", "info");
         return;
       }
-      if (ctx.mode !== "tui") {
+      if (ctx.mode !== "tui" || isWebInvocation(ctx)) {
         ctx.ui.notify(formatTaskList(state), "info");
         return;
       }
