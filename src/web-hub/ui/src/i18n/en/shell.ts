@@ -6,6 +6,7 @@ const shell = {
   skipToConversation: "Skip to conversation",
   dashboardHeading: "pi web-hub dashboard",
   hubVersion: "hub {v}",
+  uiBuild: "ui {v}",
   signOut: "Sign out",
   "conn.connecting": "Connecting…",
   "conn.open": "Live",

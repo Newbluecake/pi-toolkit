@@ -9,6 +9,7 @@ const shell = {
   skipToConversation: "跳转到对话",
   dashboardHeading: "pi web-hub 仪表盘",
   hubVersion: "hub {v}",
+  uiBuild: "ui {v}",
   signOut: "退出登录",
   "conn.connecting": "连接中…",
   "conn.open": "在线",

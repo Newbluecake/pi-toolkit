@@ -26,6 +26,7 @@ import "./styles/login.css";
 import "./styles/states.css";
 import IconSprite from "./icons/IconSprite.vue";
 import { browserLocalStorage } from "./components/shell/themeStorage.js";
+import { hubVersionStamp } from "@logic/build-stamp.js";
 import DashboardView from "./components/shell/DashboardView.vue";
 import LoginView from "./components/shell/LoginView.vue";
 import NoticeStack from "./components/shell/NoticeStack.vue";
@@ -120,8 +121,8 @@ if (authMode !== "unknown") {
 const route = hashRoute?.route;
 const conn = computed<ConnState>(() => hub?.state.value.conn ?? "connecting");
 const hubVersion = computed<string | null>(() => {
-  const h = hub?.state.value.hub as { version?: unknown } | null | undefined;
-  return typeof h?.version === "string" ? h.version : null;
+  const h = hub?.state.value.hub as { version?: unknown; buildId?: unknown } | null | undefined;
+  return hubVersionStamp(h?.version, h?.buildId);
 });
 
 /** Password: authenticated once the SSE stream is open (or transiently reconnecting) — during

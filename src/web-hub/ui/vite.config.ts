@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import vue from "@vitejs/plugin-vue";
 import { defineConfig, type UserConfig } from "vite";
 import { uiAliases } from "./aliases.js";
-import { buildInfoPlugin, readPackageVersion, resolveCommit } from "./build-info-plugin.js";
+import { buildInfoPlugin, builtAtNow, readPackageVersion, resolveCommit } from "./build-info-plugin.js";
 import { PROTO } from "../protocol/version.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
@@ -34,18 +34,21 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
   if (command === "build") process.env["NODE_ENV"] = "production";
   const cspProbe = mode === "csp-probe";
   const [version, commit] = await Promise.all([readPackageVersion(), resolveCommit()]);
+  // One timestamp for both the bundle define and the manifest, so the TopBar build stamp and
+  // `build-info.json`'s `builtAt` never drift apart.
+  const builtAt = builtAtNow();
 
   return {
     root: cspProbe ? resolve(here, "csp-probe") : here,
     base: "/",
     publicDir: cspProbe ? false : "public",
-    plugins: [vue(), ...(cspProbe ? [] : [buildInfoPlugin()])],
+    plugins: [vue(), ...(cspProbe ? [] : [buildInfoPlugin({ builtAt })])],
     resolve: { alias: uiAliases },
     define: {
       __VUE_OPTIONS_API__: "false",
       __VUE_PROD_DEVTOOLS__: "false",
       __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: "false",
-      __PWH_UI_BUILD__: JSON.stringify({ version, proto: { major: PROTO.major }, commit }),
+      __PWH_UI_BUILD__: JSON.stringify({ version, proto: { major: PROTO.major }, commit, builtAt }),
     },
     build: {
       outDir: cspProbe

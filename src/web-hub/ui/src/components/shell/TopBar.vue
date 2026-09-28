@@ -10,6 +10,8 @@
 import { computed } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { UI_BUILD } from "../../build-info.js";
+import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
 import ThemeToggle from "./ThemeToggle.vue";
 
@@ -18,6 +20,7 @@ const emit = defineEmits<TopBarEmits>();
 const { t } = useI18n();
 
 const connLabelKey = computed(() => `shell.conn.${props.conn}`);
+const uiStamp = computed(() => uiBuildStamp(UI_BUILD));
 </script>
 
 <template>
@@ -35,6 +38,7 @@ const connLabelKey = computed(() => `shell.conn.${props.conn}`);
     </span>
 
     <span v-if="hubVersion" class="topbar-meta" translate="no">{{ t("shell.hubVersion", { v: hubVersion }) }}</span>
+    <span v-if="uiStamp" class="topbar-meta" translate="no">{{ t("shell.uiBuild", { v: uiStamp }) }}</span>
     <span class="chip"><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span>
 
     <span class="topbar-spacer"></span>

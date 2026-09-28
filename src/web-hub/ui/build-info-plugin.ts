@@ -47,7 +47,7 @@ function runGit(args: string[]): Promise<string | undefined> {
   });
 }
 
-function builtAtNow(): string {
+export function builtAtNow(): string {
   const epoch = process.env["SOURCE_DATE_EPOCH"];
   if (epoch !== undefined && epoch !== "") {
     const n = Number(epoch);
@@ -98,7 +98,7 @@ async function hashFile(path: string): Promise<UiManifestFile> {
   return { path, bytes, sha256 };
 }
 
-export function buildInfoPlugin(): Plugin {
+export function buildInfoPlugin(options?: { builtAt?: string }): Plugin {
   let outDir = "";
   return {
     name: "pwh:build-info",
@@ -124,7 +124,7 @@ export function buildInfoPlugin(): Plugin {
         v: 1,
         version: await readPackageVersion(),
         proto: { major: PROTO.major },
-        builtAt: builtAtNow(),
+        builtAt: options?.builtAt ?? builtAtNow(),
         commit: await resolveCommit(),
         files,
       };

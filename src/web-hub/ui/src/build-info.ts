@@ -11,6 +11,7 @@ export interface UiRuntimeBuild {
   readonly version: string;
   readonly proto: { readonly major: number };
   readonly commit: string;
+  readonly builtAt: string;
 }
 
 export const UI_BUILD: UiRuntimeBuild = __PWH_UI_BUILD__;

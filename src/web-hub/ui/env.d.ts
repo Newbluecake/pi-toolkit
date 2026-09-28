@@ -18,4 +18,5 @@ declare const __PWH_UI_BUILD__: {
   readonly version: string;
   readonly proto: { readonly major: number };
   readonly commit: string;
+  readonly builtAt: string;
 };
