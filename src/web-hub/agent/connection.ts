@@ -145,6 +145,10 @@ export interface AcquireOptions {
   /** Jitter source (tests). */
   random?: () => number;
   spawnBlocked?: () => boolean;
+  /** D19/§3.1: extra caps to advertise in `hello.caps` beyond P1_CAPS (e.g. `cmd.v1`/`dialog.v1`/
+   * `command.v1`, gated by higher-level settings the caller owns). Frozen hook — `connection.ts`
+   * never computes these itself; unset ⇒ byte-identical P1-only hello (zero visible change). */
+  capsExtra?: () => readonly string[];
 }
 
 /**
@@ -453,7 +457,7 @@ class Connection implements HubConnection {
       kind: this.opts.kind,
       launcher,
       cwd: this.opts.cwd,
-      caps: [...P1_CAPS],
+      caps: [...P1_CAPS, ...(this.opts.capsExtra?.() ?? [])],
     };
   }
 

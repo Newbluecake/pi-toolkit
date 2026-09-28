@@ -55,6 +55,7 @@ import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
 import type { CommandCapturePort } from "./command-capture.js";
 import { createCommandHandler } from "./commands.js";
+import { createDialogBridge } from "./dialogs.js";
 import { createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 
@@ -192,6 +193,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         return { cancel: () => clearTimeout(t) };
       },
       currentSeq: () => conn?.seq ?? 0,
+      // C0 frozen call-site slot (plan §12.3): identity no-op until C2 wires the real dialog-
+      // correlation logic into `event-tap.ts`. Pre-adding this key here — rather than leaving C2
+      // to add it during W2 — keeps C1's (this file's own owner from W2) and C2's parallel edits
+      // to non-overlapping keys of this same options object.
+      attributePrompt: (e) => e,
     },
   );
 
@@ -251,8 +257,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const commandHandler = createCommandHandler({ send: (frame) => conn?.send(frame) });
+  const dialogBridge = createDialogBridge();
   const binding: BindingPort = {
-    onCmd: (frame) => commandHandler.handle(frame),
+    onCmd: (frame) => {
+      // C0 wiring point (plan §12.3): dialog_answer/dialog_cancel route through the dialog
+      // bridge stub first — always inert here (`handle()` is a no-op, the bridge never replies) —
+      // so C2 only has to fill in `dialogs.ts`'s own logic without touching this call site again.
+      if (frame.cmd.op === "dialog_answer" || frame.cmd.op === "dialog_cancel") dialogBridge.handle(frame);
+      commandHandler.handle(frame);
+    },
     onSuperseded: () => {},
     onSnapshotReq: (rid) => {
       const c = conn;
@@ -352,6 +365,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
     conn = c;
     c.attach(binding, sessionInfo(x, sessionReason));
+    // C0 wiring point: the dialogs slot exists (D14-gated, never actually sent while no hub
+    // advertises dialog.v1) so C2 only replaces `dialogBridge.frame()`'s content, not this call.
+    c.setSlot("dialogs", dialogBridge.frame());
     publishStatus();
     onTick();
     setStatusLine(statusLineText(c.status(), readStatusTheme(x)));
