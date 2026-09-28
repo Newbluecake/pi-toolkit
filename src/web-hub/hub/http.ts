@@ -686,6 +686,31 @@ function createRouteSet(
         case "append":
           scoped("append", { agentKey: e.agentKey, entries: e.entries }, e.agentKey);
           break;
+        // control-plane P2 slots/broadcasts (ports.ts's HubEvent doc comment: "http.ts 的 onHubEvent
+        // 需要转发为 SSE" — registry.ts publishes these (dialogs/ctl/commands/cmd_late) but this
+        // switch never forwarded them, so a subscribed browser never saw a live ask_user dialog /
+        // command ledger / late steer settlement open or change (only the subscribe-time snapshot
+        // via AgentCard.dialogs) even though the frontend reducer (`logic/state.js`) already has a
+        // `case "dialogs"`/`"ctl"`/`"commands"`/`"cmd_late"` waiting for exactly this event name).
+        case "dialogs":
+          sse.publish("dialogs", { agentKey: e.agentKey, epoch: e.epoch, open: e.open, closed: e.closed });
+          break;
+        case "ctl":
+          sse.publish("ctl", { agentKey: e.agentKey, epoch: e.epoch, sessionId: e.sessionId, items: e.items });
+          break;
+        case "commands":
+          sse.publish("commands", { agentKey: e.agentKey, epoch: e.epoch, items: e.items });
+          break;
+        case "cmd_late":
+          sse.publish("cmd_late", {
+            agentKey: e.agentKey,
+            id: e.id,
+            op: e.op,
+            ok: e.ok,
+            ...(e.code === undefined ? {} : { code: e.code }),
+            ...(e.data === undefined ? {} : { data: e.data }),
+          });
+          break;
       }
     } catch (err) {
       routeDeps.log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });
