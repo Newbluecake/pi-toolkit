@@ -851,8 +851,198 @@ async function checkAxeAccessibility(ctx: CheckContext): Promise<CheckOutcome[]>
 }
 
 // ---------------------------------------------------------------------------
-// module entry
+// group F — control-plane cross-region full flow (#32 C7, control-plan.md v2.1 §12.3: C7's own
+// checks-e2e.ts addition on top of C5/C6's per-component checks-control.ts probes)
 // ---------------------------------------------------------------------------
+
+/** One representative desktop cell, deliberately NOT `checks-control.ts`'s own action cell
+ * (1024x!touch x light) — that cell already carries residual mutation from
+ * `checkStopButtonTwoStep`/`checkComposerKeys` (checks-control.ts loads and runs before this
+ * file, alphabetically) by the time this module's checks run on the SAME cell. Picking the dark
+ * cell instead means this flow starts from a pristine composer/stop-button and can run its own
+ * list→detail→send→queue→abort narrative without either check module stepping on the other's
+ * assumptions — same isolation discipline this file's header already documents for route state. */
+function isControlFlowCell(scenario: string, width: number, theme: "light" | "dark", hasTouch: boolean): boolean {
+  return scenario === "control" && width === 1024 && theme === "dark" && !hasTouch;
+}
+
+/** Same single representative cell as `isControlFlowCell` — `checkAskUserFormStructure`
+ * (checks-control.ts) runs on every cell of the `ask-user` scenario but always restores the
+ * route to `#/agent/agent-alpha` with a fresh (unanswered) draft before finishing, so any cell is
+ * safe here; reusing the exact same cell just keeps this module's own cost/consistency story
+ * simple (one flow, one cell, per scenario). */
+function isAskUserAnswerCell(scenario: string, width: number, theme: "light" | "dark", hasTouch: boolean): boolean {
+  return scenario === "ask-user" && width === 1024 && theme === "dark" && !hasTouch;
+}
+
+/** `ExtPage`'s `keyboard` cast (E2EPage) only declares `press`; this flow also needs `type` to
+ * fill the composer textarea through real keyboard events (same input path a human/`v-model`
+ * expects), matching `checks-control.ts`'s own `ControlPage` cast pattern. */
+interface TypingPage extends ExtPage {
+  keyboard: { type(text: string): Promise<void>; press(key: string): Promise<void> };
+}
+
+function asTypingPage(ctx: CheckContext): TypingPage {
+  return ctx.page as unknown as TypingPage;
+}
+
+/** `POST /api/cmd` + `POST /api/dialog` are the two control-plane write endpoints (mirrors
+ * `checks-control.ts`'s own `isControlApiPath` — duplicated rather than imported: that file
+ * already imports FROM this one for the axe helpers, and this module intentionally never
+ * imports back to avoid a two-file cycle). */
+function isControlWriteApi(url: string): boolean {
+  try {
+    const p = new URL(url).pathname;
+    return p === "/api/cmd" || p === "/api/dialog";
+  } catch {
+    return false;
+  }
+}
+
+function countControlWrites(ctx: CheckContext): number {
+  return ctx.requests.filter((r) => isControlWriteApi(r.url)).length;
+}
+
+/** The full narrative §9.2/§12.3 asks for beyond `checks-control.ts`'s per-component probes:
+ * list → detail → compose+send on a BUSY agent → the new item lands in the LIVE `.queue-list`
+ * (a real POST /api/cmd → dev-hub `pushQueueItem` → SSE `status` → Vue re-render round trip —
+ * `checks-control.ts`'s composer checks only ever count POSTs, they never assert the queue DOM
+ * actually grew) → the two-step stop button aborts. */
+async function checkControlSendQueueAbortFlow(ctx: CheckContext): Promise<CheckOutcome[]> {
+  if (!isControlFlowCell(ctx.scenario, ctx.width, ctx.theme, ctx.hasTouch)) return [];
+  const page = asTypingPage(ctx);
+  const results: CheckOutcome[] = [];
+
+  await page.evaluate(() => {
+    window.location.hash = "#/";
+  });
+  await page
+    .waitForFunction(() => document.querySelector('a.agent-card[href="#/agent/agent-alpha"]') !== null, {
+      timeout: 5_000,
+    })
+    .catch(() => {});
+  const hasCard = await page.evaluate(
+    () => document.querySelector('a.agent-card[href="#/agent/agent-alpha"]') !== null,
+  );
+  if (!hasCard) return [outcome("e2e-control-flow", false, "agent-alpha card not found in the list view")];
+
+  await page.click('a.agent-card[href="#/agent/agent-alpha"]');
+  await page
+    .waitForFunction(() => document.querySelector(".detail-title") !== null, { timeout: 5_000 })
+    .catch(() => {});
+  const afterNav = await page.evaluate(() => ({
+    hash: window.location.hash,
+    hasComposer: document.querySelector(".composer textarea") !== null,
+    hasStop: document.querySelector(".stop-btn") !== null,
+    queueCountBefore: document.querySelectorAll(".queue-list .queue-item").length,
+  }));
+  results.push(outcome("e2e-control-flow-list-to-detail", afterNav.hash === AGENT_ALPHA_ROUTE, afterNav.hash));
+  if (!afterNav.hasComposer || !afterNav.hasStop) {
+    results.push(outcome("e2e-control-flow-detail-controls-present", false, JSON.stringify(afterNav)));
+    return results;
+  }
+
+  const probeText = "e2e control flow probe " + Date.now();
+  await page.click(".composer textarea");
+  await page.keyboard.type(probeText);
+  await page.waitForTimeout(150);
+  const postsBeforeSend = countControlWrites(ctx);
+  await page.click(".composer [data-send]");
+  await (page as unknown as WaitForArgPage)
+    .waitForFunction(
+      (needle: string) =>
+        Array.from(document.querySelectorAll(".queue-list .queue-item .queue-text")).some((el) =>
+          (el.textContent ?? "").includes(needle),
+        ),
+      probeText,
+      { timeout: 5_000 },
+    )
+    .catch(() => {});
+  const afterSend = await page.evaluate((needle: string) => {
+    const items = Array.from(document.querySelectorAll(".queue-list .queue-item .queue-text")).map(
+      (el) => el.textContent ?? "",
+    );
+    return { count: items.length, matched: items.some((t) => t.includes(needle)) };
+  }, probeText);
+  results.push(
+    outcome(
+      "e2e-control-flow-send-posts-once",
+      countControlWrites(ctx) === postsBeforeSend + 1,
+      `posts ${postsBeforeSend}→${countControlWrites(ctx)}`,
+    ),
+  );
+  results.push(
+    outcome(
+      "e2e-control-flow-send-lands-in-live-queue",
+      afterSend.count > afterNav.queueCountBefore && afterSend.matched,
+      `queueCountBefore=${afterNav.queueCountBefore} after=${JSON.stringify(afterSend)}`,
+    ),
+  );
+
+  const postsBeforeStop = countControlWrites(ctx);
+  await page.click(".stop-btn");
+  await page.waitForTimeout(300);
+  const armed = await page.evaluate(() => document.querySelector(".stop-btn")?.getAttribute("data-armed") === "true");
+  await page.click(".stop-btn");
+  await page.waitForTimeout(500);
+  results.push(
+    outcome(
+      "e2e-control-flow-stop-two-step-aborts",
+      armed && countControlWrites(ctx) === postsBeforeStop + 1,
+      `armed=${armed}, posts ${postsBeforeStop}→${countControlWrites(ctx)}`,
+    ),
+  );
+
+  await page.evaluate(() => {
+    window.location.hash = "#/";
+  });
+  return results;
+}
+
+/** Beyond `checks-control.ts`'s `checkAskUserFormStructure` (which only ever inspects the form's
+ * shape, never submits): select the first option, submit, and confirm the LIVE round trip — a
+ * real `POST /api/dialog` → dev-hub closes the dialog → SSE `dialogs` push → `AgentDetail`
+ * unmounts the now-answered form. */
+async function checkAskUserAnswerFlow(ctx: CheckContext): Promise<CheckOutcome[]> {
+  if (!isAskUserAnswerCell(ctx.scenario, ctx.width, ctx.theme, ctx.hasTouch)) return [];
+  const page = asTypingPage(ctx);
+  const present = await page.evaluate(() => document.querySelector(".ask-user-form") !== null);
+  if (!present) return [];
+
+  const submitDisabledBefore = await page.evaluate(
+    () => (document.querySelector(".ask-user-form [data-submit]") as HTMLButtonElement | null)?.disabled ?? null,
+  );
+  await page.click('.ask-user-form input[type="radio"]');
+  await page.waitForTimeout(150);
+  const submitDisabledAfterPick = await page.evaluate(
+    () => (document.querySelector(".ask-user-form [data-submit]") as HTMLButtonElement | null)?.disabled ?? null,
+  );
+  const results: CheckOutcome[] = [
+    outcome(
+      "e2e-ask-user-answer-enables-submit",
+      submitDisabledBefore === true && submitDisabledAfterPick === false,
+      `before=${String(submitDisabledBefore)} after=${String(submitDisabledAfterPick)}`,
+    ),
+  ];
+
+  const postsBefore = countControlWrites(ctx);
+  await page.click(".ask-user-form [data-submit]");
+  await page
+    .waitForFunction(() => document.querySelector(".ask-user-form") === null, { timeout: 5_000 })
+    .catch(() => {});
+  const formGone = await page.evaluate(() => document.querySelector(".ask-user-form") === null);
+  results.push(
+    outcome(
+      "e2e-ask-user-answer-round-trip-closes-dialog",
+      formGone && countControlWrites(ctx) === postsBefore + 1,
+      `formGone=${formGone}, posts ${postsBefore}→${countControlWrites(ctx)}`,
+    ),
+  );
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// module entry
 
 /** `AGENT_ALPHA_ROUTE` needs no runtime dependency on `window`, but referencing it as a plain
  * top-level `const` from inside a `page.evaluate(() => ...)` closure would try to serialize this
@@ -875,6 +1065,8 @@ export const check: CheckModule = {
       outcomes.push(...(await checkDeepLinkToMissingAgentEmptyState(ctx)));
       outcomes.push(...(await checkKeyboardFocusOrder(ctx)));
       outcomes.push(...(await checkAxeAccessibility(ctx)));
+      outcomes.push(...(await checkControlSendQueueAbortFlow(ctx)));
+      outcomes.push(...(await checkAskUserAnswerFlow(ctx)));
     } finally {
       // Leave the page exactly how the next glob-loaded check module (`checks-shell.ts`, sorted
       // after this file) expects to find it — see this file's header comment.
