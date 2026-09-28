@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
-import { P2_HUB_CAPS, PROTO } from "../protocol/version.js";
+import { PROTO } from "../protocol/version.js";
 import { createAdminHandler } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { createHistoryService } from "./history.js";
@@ -160,7 +160,10 @@ export async function startHub(
       pid: process.pid,
       startedAt: now(),
       proto: PROTO,
-      caps: [...P2_HUB_CAPS],
+      // C0 stub: mirrors `hello_ack.caps` (admin.caps() only) -- P2_HUB_CAPS is not yet
+      // broadcast anywhere (zero visible change); C3 wires the real value once the command
+      // router / dialog bridge / superseded machinery actually land.
+      caps: admin.caps(),
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
 
