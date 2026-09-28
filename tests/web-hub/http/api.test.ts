@@ -279,8 +279,8 @@ describe("GET /api/history", () => {
 });
 
 describe("reserved P2/P3 endpoints and misc", () => {
-  it("cmd/dialog/headless ⇒ 501 E_NOT_IMPLEMENTED after auth + CSRF", async () => {
-    for (const path of ["/api/cmd", "/api/dialog", "/api/headless", "/api/headless/a1/close"]) {
+  it("headless ⇒ 501 E_NOT_IMPLEMENTED after auth + CSRF", async () => {
+    for (const path of ["/api/headless", "/api/headless/a1/close"]) {
       const res = await postJson(port, path, { agentKey: "a1" }, { Cookie: cookie });
       expect(res.status, path).toBe(501);
       expect(JSON.parse(res.body)).toEqual({ error: "E_NOT_IMPLEMENTED" });
@@ -288,6 +288,27 @@ describe("reserved P2/P3 endpoints and misc", () => {
       expect((await rawRequest(port, { method: "POST", path, headers: { Cookie: cookie }, body: "{}" })).status).toBe(
         403,
       );
+    }
+  });
+
+  it("cmd/dialog ⇒ 501 E_NOT_IMPLEMENTED once past the (stricter) CSRF + auth gate; without deps.commands wired, no LRU/rate-limit state is ever touched", async () => {
+    const origin = `http://127.0.0.1:${port}`;
+    for (const path of ["/api/cmd", "/api/dialog"]) {
+      const ok = await postJson(port, path, { agentKey: "a1", id: "a".repeat(16) }, { Cookie: cookie, Origin: origin });
+      expect(ok.status, path).toBe(501);
+      expect(JSON.parse(ok.body)).toEqual({ error: "E_NOT_IMPLEMENTED" });
+      // D8: unlike the loose CSRF on every other write endpoint, cmd/dialog require Origin.
+      const noOrigin = await postJson(port, path, { agentKey: "a1" }, { Cookie: cookie });
+      expect(noOrigin.status, `${path} no Origin`).toBe(403);
+      expect(JSON.parse(noOrigin.body)).toEqual({ error: "E_CSRF" });
+      // CSRF is checked before auth (§6.3 step order) — no cookie + no Origin ⇒ still 403, not 401.
+      expect((await postJson(port, path, {})).status, `${path} no cookie, no Origin`).toBe(403);
+      const noCookie = await postJson(port, path, {}, { Origin: origin });
+      expect(noCookie.status, `${path} no cookie`).toBe(401);
+      expect(
+        (await rawRequest(port, { method: "POST", path, headers: { Cookie: cookie, Origin: origin }, body: "{}" }))
+          .status,
+      ).toBe(403);
     }
   });
 

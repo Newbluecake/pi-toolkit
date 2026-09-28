@@ -18,6 +18,11 @@ import {
   type AgentFrame,
   type AgentId,
   type AgentKind,
+  type CmdLateFrame,
+  type CmdResultFrame,
+  type CommandInfoWire,
+  type DialogClosedWire,
+  type DialogWire,
   type FleetRowWire,
   type HubFrame,
   type SessionInfo,
@@ -39,6 +44,20 @@ export interface Registry extends RegistryView {
    * `append` / compaction `gap`) publish on the same bus the frontend reads.
    */
   publish(e: HubEvent): void;
+  /** plan §6.1/§3.1 (C3): raw caps this agent last declared in `hello.caps` (P2_AGENT_CAPS —
+   * `cmd.v1`/`dialog.v1`/`command.v1` — plus whatever P1 caps it also sent); used by
+   * `hub/commands.ts`'s router to gate `/api/cmd`/`/api/dialog` admission (§3.1 compat matrix,
+   * §6.3 step 6) without widening the frozen `AgentView`/`AgentCard` surface in `ports.ts`. */
+  getCaps(agentKey: string): readonly string[] | undefined;
+  /** plan §3.5 (D17): hub-internal `Rec.linkGen`, incremented on every register()/reclaim; not
+   * part of the frozen `AgentView` surface (audit/log field only). */
+  getLinkGen(agentKey: string): number | undefined;
+  /** plan §3.2/§3.5 (C3): post-construction hook -- `hub/commands.ts`'s router is built *from*
+   * a `Registry` instance, so it cannot be one of `createRegistry()`'s own constructor deps
+   * (that would be circular); this lets it register for late-arriving `cmd_result` (no matching
+   * pending)/`cmd_late` frames after the fact. Overwrites any previous handler (at most one
+   * router is ever attached in practice). */
+  setLateResultHandler(handler: (agentKey: string, frame: CmdResultFrame | CmdLateFrame) => void): void;
 }
 
 export interface AgentConn {
@@ -78,6 +97,15 @@ interface Rec {
   lastFrameAt: number;
   disconnectedAt: number;
   seq: number;
+  /** plan §3.1/§6.1 (C3): raw `hello.caps`, updated on every register()/reclaim. */
+  caps: string[];
+  /** plan §3.5 (D17): hub-internal generation, bumped on every register()/reclaim. */
+  linkGen: number;
+  /** plan §3.2/§6.6 (C3): latest `dialogs` slot, surfaced on `AgentCard.dialogs` (§6.6 "AgentCard
+   * 带 dialogs 当前值"). */
+  dialogs: { epoch: string; open: DialogWire[]; closed: DialogClosedWire[] } | undefined;
+  ctl: { epoch: string; sessionId: string } | undefined;
+  commands: CommandInfoWire[] | undefined;
 }
 
 interface Pending {
@@ -101,6 +129,12 @@ export function createRegistry(deps: {
   const listeners = new Set<(e: HubEvent) => void>();
   const pending = new Map<string, Pending>();
   let ridCounter = 0;
+  /** plan section 3.2/3.5 (C3): late-arriving `cmd_result` (no matching pending)/`cmd_late`
+   * handed to `hub/commands.ts`'s router so it can upgrade its own LRU/audit. Fired synchronously
+   * from `onFrame`; exceptions are caught and logged, never rethrown. Set post-construction via
+   * `setLateResultHandler()` below (not a constructor dep) since the router is built *from* this
+   * registry instance. */
+  let lateResultHandler: ((agentKey: string, frame: CmdResultFrame | CmdLateFrame) => void) | undefined;
 
   const bus: HubBus = {
     subscribe(fn) {
@@ -131,9 +165,12 @@ export function createRegistry(deps: {
       pluginVersion: r.pluginVersion,
       outdated: deps.hubVersion !== undefined && compareVersions(r.pluginVersion, deps.hubVersion) < 0,
       prompts: r.prompts.map((p) => ({ ...p })),
+      control: r.caps.includes("cmd.v1"),
+      epoch: r.epoch,
     };
     if (r.session !== undefined) c.session = r.session;
     if (r.status !== undefined) c.status = r.status;
+    if (r.dialogs !== undefined) c.dialogs = { ...r.dialogs };
     return c;
   }
 
@@ -187,6 +224,10 @@ export function createRegistry(deps: {
     bus,
     publish,
 
+    setLateResultHandler(handler) {
+      lateResultHandler = handler;
+    },
+
     list() {
       return [...records.values()].map(view);
     },
@@ -194,6 +235,14 @@ export function createRegistry(deps: {
     get(agentKey) {
       const r = records.get(agentKey);
       return r === undefined ? undefined : view(r);
+    },
+
+    getCaps(agentKey) {
+      return records.get(agentKey)?.caps;
+    },
+
+    getLinkGen(agentKey) {
+      return records.get(agentKey)?.linkGen;
     },
 
     register(hello, conn) {
@@ -224,6 +273,8 @@ export function createRegistry(deps: {
         existing.buildId = hello.buildId;
         existing.connectedAt = t;
         existing.lastFrameAt = t;
+        existing.caps = [...hello.caps];
+        existing.linkGen++;
         if (epochChanged) existing.seq = 0;
         log.info("agent reclaimed", { agentKey: existing.agentKey, from: prevPhase, epochChanged });
         if (prevPhase === "stale") publish({ type: "agent_up", agent: card(existing) });
@@ -251,6 +302,11 @@ export function createRegistry(deps: {
         lastFrameAt: t,
         disconnectedAt: 0,
         seq: 0,
+        caps: [...hello.caps],
+        linkGen: 1,
+        dialogs: undefined,
+        ctl: undefined,
+        commands: undefined,
       };
       records.set(agentKey, r);
       byAgentId.set(idKey, agentKey);
@@ -333,6 +389,59 @@ export function createRegistry(deps: {
             }
           }
           p.resolve(frame);
+          return;
+        }
+        // plan section 3.2/6.1 (C3): `cmd_result` normally resolves a pending `registry.request()`
+        // (same rid-keyed dance as snapshot_reply/branch_reply above); a `cmd_result` whose rid has
+        // no pending entry (hub's own wait already timed out, or a stray duplicate) is a late
+        // result, handed to the late-result handler (section 3.5 table row: delayed cmd_result or
+        // cmd_late). Unlike a genuine `cmd_late` wire frame, a late `cmd_result` carries no `op`,
+        // so it cannot be re-shaped into the frozen `cmd_late` bus/SSE event (which requires one) -
+        // only the handler (LRU/audit bookkeeping, keyed by `id` alone) observes it.
+        case "cmd_result": {
+          const p = pending.get(frame.rid);
+          if (p !== undefined && p.agentKey === agentKey) {
+            pending.delete(frame.rid);
+            clearTimeout(p.timer);
+            p.resolve(frame);
+            return;
+          }
+          try {
+            lateResultHandler?.(agentKey, frame);
+          } catch (err) {
+            log.error("onLateResult threw", { agentKey, error: String(err) });
+          }
+          return;
+        }
+        case "cmd_late": {
+          try {
+            lateResultHandler?.(agentKey, frame);
+          } catch (err) {
+            log.error("onLateResult threw", { agentKey, error: String(err) });
+          }
+          publish({
+            type: "cmd_late",
+            agentKey,
+            id: frame.id,
+            op: frame.op,
+            ok: frame.ok,
+            ...(frame.ok ? { data: frame.data } : { code: frame.code }),
+          });
+          return;
+        }
+        case "dialogs": {
+          r.dialogs = { epoch: frame.epoch, open: frame.open, closed: frame.closed };
+          publish({ type: "dialogs", agentKey, epoch: frame.epoch, open: frame.open, closed: frame.closed });
+          return;
+        }
+        case "ctl": {
+          r.ctl = { epoch: frame.epoch, sessionId: frame.sessionId };
+          publish({ type: "ctl", agentKey, epoch: frame.epoch, sessionId: frame.sessionId, items: frame.items });
+          return;
+        }
+        case "commands": {
+          r.commands = frame.items;
+          publish({ type: "commands", agentKey, epoch: frame.epoch, items: frame.items });
           return;
         }
         default:

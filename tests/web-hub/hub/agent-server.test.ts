@@ -182,3 +182,25 @@ describe("agent-server liveness and limits", () => {
     expect(agentServer.connectionCount()).toBe(0);
   });
 });
+
+describe("agent-server: P2 caps pass-through (plan §3.1/§6.1, C3)", () => {
+  it("hello.caps (cmd.v1/dialog.v1/command.v1) reach the registry via the normal hello handshake, gating /api/cmd admission downstream", async () => {
+    const c = await client();
+    c.send(hello({ caps: ["ev.v1", "cmd.v1", "dialog.v1", "command.v1"] }));
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+    expect(registry.getCaps("a4242-nonceA")).toEqual(["ev.v1", "cmd.v1", "dialog.v1", "command.v1"]);
+    expect(registry.get("a4242-nonceA")?.control).toBe(true);
+  });
+
+  it("a cmd_result/cmd_late/dialogs/ctl/commands frame sent by the agent reaches the registry unmodified (no special-casing in agent-server.ts, unlike lan_req/hub_ctl)", async () => {
+    const events = recordBus(registry);
+    const c = await client();
+    c.send(hello());
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+    c.send({ t: "dialogs", epoch: "epoch-1", open: [], closed: [] });
+    c.send({ t: "ctl", epoch: "epoch-1", sessionId: "s1", items: [] });
+    c.send({ t: "commands", epoch: "epoch-1", items: [] });
+    await waitFor(() => events.map((e) => e.type).includes("commands"));
+    expect(events.map((e) => e.type)).toEqual(["agent_up", "dialogs", "ctl", "commands"]);
+  });
+});

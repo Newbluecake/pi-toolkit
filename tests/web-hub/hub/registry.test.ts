@@ -323,3 +323,169 @@ describe("registry.request", () => {
     expect(h.reg.get(agentKey)?.seq).toBe(9);
   });
 });
+
+describe("registry: P2 control-plane additions (plan §3.1/§3.2/§3.5/§6.1, C3)", () => {
+  it("hello.caps flow into getCaps(); AgentCard.control/epoch are derived from them", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello({ caps: ["ev.v1", "cmd.v1", "dialog.v1"] }), fakeConn());
+    expect(h.reg.getCaps(agentKey)).toEqual(["ev.v1", "cmd.v1", "dialog.v1"]);
+    const card = h.reg.get(agentKey)!;
+    expect(card.control).toBe(true);
+    expect(card.epoch).toBe("epoch-1");
+  });
+
+  it("no cmd.v1 ⇒ control:false", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello({ caps: ["ev.v1"] }), fakeConn());
+    expect(h.reg.get(agentKey)!.control).toBe(false);
+  });
+
+  it("getCaps/getLinkGen return undefined for an unknown agentKey", () => {
+    const h = harness();
+    expect(h.reg.getCaps("nope")).toBeUndefined();
+    expect(h.reg.getLinkGen("nope")).toBeUndefined();
+  });
+
+  it("linkGen increments on every register()/reclaim, starting at 1", () => {
+    const h = harness();
+    const conn1 = fakeConn();
+    const { agentKey } = h.reg.register(hello(), conn1);
+    expect(h.reg.getLinkGen(agentKey)).toBe(1);
+    h.reg.register(hello(), fakeConn()); // reclaim (same agentId, still "live")
+    expect(h.reg.getLinkGen(agentKey)).toBe(2);
+    h.reg.onClose(agentKey, false);
+    h.clock.t += TIMING.detachGraceMs;
+    h.reg.tick(h.clock.t);
+    h.reg.register(hello(), fakeConn()); // stale → live reclaim
+    expect(h.reg.getLinkGen(agentKey)).toBe(3);
+  });
+
+  it("reclaim refreshes caps (an agent that upgrades caps on reconnect is picked up)", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello({ caps: ["ev.v1"] }), fakeConn());
+    expect(h.reg.getCaps(agentKey)).toEqual(["ev.v1"]);
+    h.reg.register(hello({ caps: ["ev.v1", "cmd.v1"] }), fakeConn());
+    expect(h.reg.getCaps(agentKey)).toEqual(["ev.v1", "cmd.v1"]);
+  });
+
+  it("dialogs/ctl/commands frames update the record and broadcast the matching bus event", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.events.length = 0;
+    const dialogsFrame = {
+      t: "dialogs" as const,
+      epoch: "epoch-1",
+      open: [
+        {
+          dialogId: "ask:1",
+          source: "ask_user" as const,
+          toolCallId: "tc1",
+          questions: [{ question: "q?", options: [{ label: "a" }] }],
+          allowCancel: true,
+          openedAt: 1,
+        },
+      ],
+      closed: [],
+    };
+    h.reg.onFrame(agentKey, dialogsFrame);
+    h.reg.onFrame(agentKey, { t: "ctl", epoch: "epoch-1", sessionId: "s1", items: [] });
+    h.reg.onFrame(agentKey, {
+      t: "commands",
+      epoch: "epoch-1",
+      items: [{ name: "session", kind: "builtin", policy: "allow" }],
+    });
+    expect(types(h.events)).toEqual(["dialogs", "ctl", "commands"]);
+    expect(h.events[0]).toMatchObject({ type: "dialogs", agentKey, open: dialogsFrame.open });
+    expect(h.reg.get(agentKey)?.dialogs).toEqual({ epoch: "epoch-1", open: dialogsFrame.open, closed: [] });
+  });
+
+  it("cmd_result resolves a matching pending registry.request() by rid", async () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello(), conn);
+    const p = h.reg.request(
+      agentKey,
+      {
+        t: "cmd",
+        rid: "",
+        id: "a".repeat(16),
+        deadlineMs: 1000,
+        origin: { listener: "loopback", ip: "127.0.0.1", reqId: "r".repeat(16) },
+        cmd: { op: "abort" },
+      },
+      1000,
+    );
+    const rid = (conn.sent.at(-1) as { rid: string }).rid;
+    h.reg.onFrame(agentKey, {
+      t: "cmd_result",
+      rid,
+      id: "a".repeat(16),
+      ok: true,
+      data: { op: "abort", wasBusy: false },
+    });
+    await expect(p).resolves.toMatchObject({ ok: true, data: { wasBusy: false } });
+  });
+
+  it("a cmd_result whose rid has no pending entry is handed to setLateResultHandler and does not throw or crash", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    const seen: unknown[] = [];
+    h.reg.setLateResultHandler((k, frame) => seen.push([k, frame]));
+    h.reg.onFrame(agentKey, {
+      t: "cmd_result",
+      rid: "no-such-rid",
+      id: "a".repeat(16),
+      ok: true,
+      data: { op: "abort", wasBusy: false },
+    });
+    expect(seen).toEqual([
+      [
+        agentKey,
+        { t: "cmd_result", rid: "no-such-rid", id: "a".repeat(16), ok: true, data: { op: "abort", wasBusy: false } },
+      ],
+    ]);
+  });
+
+  it("cmd_late always goes to setLateResultHandler and publishes a cmd_late bus event", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.events.length = 0;
+    const seen: unknown[] = [];
+    h.reg.setLateResultHandler((k, frame) => seen.push([k, frame]));
+    h.reg.onFrame(agentKey, {
+      t: "cmd_late",
+      id: "a".repeat(16),
+      op: "steer_subagent",
+      at: 1,
+      ok: true,
+      data: { op: "steer_subagent" },
+    });
+    expect(seen).toHaveLength(1);
+    expect(types(h.events)).toEqual(["cmd_late"]);
+    expect(h.events[0]).toMatchObject({
+      type: "cmd_late",
+      agentKey,
+      id: "a".repeat(16),
+      op: "steer_subagent",
+      ok: true,
+    });
+  });
+
+  it("a throwing setLateResultHandler is caught and logged, never crashes onFrame", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.reg.setLateResultHandler(() => {
+      throw new Error("boom");
+    });
+    expect(() =>
+      h.reg.onFrame(agentKey, {
+        t: "cmd_late",
+        id: "a".repeat(16),
+        op: "abort",
+        at: 1,
+        ok: true,
+        data: { op: "abort", wasBusy: false },
+      }),
+    ).not.toThrow();
+  });
+});

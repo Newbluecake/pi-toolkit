@@ -45,16 +45,30 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
+import { randomBytes } from "node:crypto";
 import { API_ERRORS, type AgentCard, type HistoryPayload } from "../protocol/http-contract.js";
 import { canonicalHostKey, canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
-import type { FleetRowWire } from "../protocol/messages.js";
+import type {
+  CmdArgs,
+  CmdErrorCode,
+  CmdExpect,
+  CmdFrame,
+  CmdOp,
+  CmdOrigin,
+  CmdResultFrame,
+  DialogAnswerWire,
+  FleetRowWire,
+} from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
+import { auditControl } from "./audit.js";
+import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import { createConnGuard } from "./conn-guard.js";
 import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import type {
   AgentView,
+  CommandRouter,
   ConnGuard,
   ConnLease,
   FrontendDeps,
@@ -76,6 +90,16 @@ import type {
   RegistryView,
   RequestContext,
 } from "./ports.js";
+import {
+  BODY_CAP_MS,
+  BODY_RESERVE_MS,
+  computeAgentBudgets,
+  createReqDeadline,
+  deriveBudget,
+  FORWARD_MIN_REMAINING_MS,
+  WRITE_TOTAL_MS,
+} from "./req-deadline.js";
+import { HubError } from "./registry.js";
 import { createSseHub, type SseClient, type SseEventName, type SseHub } from "./sse.js";
 import { createUiServer, type CreateUiServerOptions, type UiServer } from "./static.js";
 import { buildUiCandidates } from "./ui-root.js";
@@ -256,7 +280,11 @@ function stringField(body: unknown, name: string): string | undefined {
   return typeof v === "string" && v.length > 0 && v.length <= 256 ? v : undefined;
 }
 
-function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<Buffer> {
+function readBody(
+  req: IncomingMessage,
+  maxBytes: number = MAX_BODY_BYTES,
+  maxMs: number = BODY_DEADLINE_MS,
+): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const declared = Number(req.headers["content-length"]);
     if (Number.isFinite(declared) && declared > maxBytes) {
@@ -279,7 +307,7 @@ function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Prom
       if (size > maxBytes) finish(new HttpError(413, "E_BAD_REQUEST", "body too large"));
       else chunks.push(chunk);
     };
-    const timer = setTimeout(() => finish(new HttpError(408, "E_DEADLINE", "body read timeout")), BODY_DEADLINE_MS);
+    const timer = setTimeout(() => finish(new HttpError(408, "E_DEADLINE", "body read timeout")), Math.max(0, maxMs));
     timer.unref?.();
     req.on("data", onData);
     req.once("end", () => finish(undefined));
@@ -288,8 +316,8 @@ function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Prom
   });
 }
 
-async function readJson(req: IncomingMessage, maxBytes?: number): Promise<unknown> {
-  const buf = await readBody(req, maxBytes);
+async function readJson(req: IncomingMessage, maxBytes?: number, maxMs?: number): Promise<unknown> {
+  const buf = await readBody(req, maxBytes, maxMs);
   if (buf.length === 0) return undefined;
   try {
     return JSON.parse(buf.toString("utf8")) as unknown;
@@ -761,6 +789,13 @@ export interface LanRuntime {
    * folds `db-invalid:kdf` into `LanStatus.warnings` — set by the login path's
    * `onCorruptKdfParams`, read by `buildLanStatus` via the closure in `createHttpFrontend`. */
   markKdfInvalid: () => void;
+  /** plan §6.1/§6.3 (C3): P2 control-plane wiring for `POST /api/cmd`/`/api/dialog` on the LAN
+   * listener — optional so `LanRuntime` literals built by other tests (e.g.
+   * `lan-sse-verifiedat.test.ts`, unrelated to cmd/dialog) don't need to supply them; the real
+   * assembly in `createHttpFrontend` always sets all three. */
+  registry?: RegistryView;
+  commands?: CommandRouter | undefined;
+  cmdLimit?: CmdLimit;
 }
 
 function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
@@ -1023,6 +1058,22 @@ async function handleLanRequestInner(
   res.setHeader("Cache-Control", "no-store");
 
   if (method === "POST") {
+    if (path === "/api/cmd" || path === "/api/dialog") {
+      return dispatchCmdOrDialog(req, res, path, {
+        listener: "lan",
+        strictCsrfOk: () => strictCsrfOk(req, ctx.externalOrigin),
+        authorize: async () => {
+          const session = await requireLanSession(rt, req, res, ctx, false, lease);
+          if (session === undefined) return "handled";
+          return { ip: ctx.clientIp, user: `u${session.userId}` };
+        },
+        registry: rt.registry ?? { list: () => [], get: () => undefined },
+        commands: rt.commands,
+        limit: rt.cmdLimit ?? createCmdLimit(rt.now),
+        log: rt.log,
+        now: rt.now,
+      });
+    }
     if (!csrfOkLan(req, ctx)) throw new HttpError(403, "E_CSRF");
     if (path === "/api/login") {
       const body = await readJson(req, LAN_LOGIN_BODY_BYTES);
@@ -1169,6 +1220,401 @@ function handleLanRequest(
   });
 }
 
+// ---------------------------------------------------------------------------
+// P2 control plane: POST /api/cmd, POST /api/dialog (plan §6.2/§6.3/§3.3, C3)
+// ---------------------------------------------------------------------------
+
+const CMD_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const COMMAND_NAME_RE = /^[A-Za-z0-9:_.-]{1,64}$/;
+const PROMPT_TEXT_MAX_BYTES = 48 * 1024;
+const STEER_TEXT_MAX_BYTES = 16 * 1024;
+const OTHER_TEXT_MAX_BYTES = 4 * 1024;
+const COMMAND_ARGS_MAX_BYTES = 16 * 1024;
+/** §6.5 "hub 在途命令总数 ≤ 32". */
+const HUB_INFLIGHT_CAP = 32;
+
+function byteLenOk(s: string, max: number): boolean {
+  return Buffer.byteLength(s, "utf8") <= max;
+}
+
+interface ParsedCmdRequest {
+  agentKey: string;
+  id: string;
+  queryOnly?: true;
+  cmd: CmdArgs;
+}
+type ParseOutcome = ParsedCmdRequest | { error: string; message: string };
+
+function parseExpect(body: unknown): CmdExpect | undefined {
+  const e = field(body, "expect");
+  if (e === undefined || e === null) return undefined;
+  const sid = field(e, "sessionId");
+  return typeof sid === "string" && sid.length > 0 ? { sessionId: sid } : undefined;
+}
+
+function parseCmdBody(body: unknown): ParseOutcome {
+  const agentKey = stringField(body, "agentKey");
+  const id = stringField(body, "id");
+  if (agentKey === undefined) return { error: "E_BAD_REQUEST", message: "agentKey required" };
+  if (id === undefined || !CMD_ID_RE.test(id)) return { error: "E_BAD_REQUEST", message: "bad id" };
+  const queryOnlyFlag = field(body, "queryOnly") === true;
+  const op = field(body, "op");
+  const expect = parseExpect(body);
+  if (typeof op !== "string") return { error: "E_BAD_REQUEST", message: "op required" };
+  switch (op) {
+    case "prompt": {
+      const text = field(body, "text");
+      const deliver = field(body, "deliver");
+      if (typeof text !== "string" || text.trim().length === 0 || !byteLenOk(text, PROMPT_TEXT_MAX_BYTES)) {
+        return { error: "E_BAD_REQUEST", message: "text required" };
+      }
+      if (deliver !== "steer" && deliver !== "followUp") return { error: "E_BAD_REQUEST", message: "deliver required" };
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "prompt", text, deliver, ...(expect === undefined ? {} : { expect }) },
+      };
+    }
+    case "abort":
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "abort", ...(expect === undefined ? {} : { expect }) },
+      };
+    case "steer_subagent": {
+      const runId = field(body, "runId");
+      const text = field(body, "text");
+      if (typeof runId !== "string" || runId.length === 0) return { error: "E_BAD_REQUEST", message: "runId required" };
+      if (typeof text !== "string" || !byteLenOk(text, STEER_TEXT_MAX_BYTES)) {
+        return { error: "E_BAD_REQUEST", message: "text required" };
+      }
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "steer_subagent", runId, text },
+      };
+    }
+    case "abort_subagent": {
+      const runId = field(body, "runId");
+      if (typeof runId !== "string" || runId.length === 0) return { error: "E_BAD_REQUEST", message: "runId required" };
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "abort_subagent", runId },
+      };
+    }
+    case "command": {
+      const name = field(body, "name");
+      const argsRaw = field(body, "args");
+      if (typeof name !== "string" || !COMMAND_NAME_RE.test(name))
+        return { error: "E_BAD_REQUEST", message: "bad name" };
+      const args = typeof argsRaw === "string" ? argsRaw : "";
+      if (!byteLenOk(args, COMMAND_ARGS_MAX_BYTES)) return { error: "E_BAD_REQUEST", message: "args too large" };
+      const confirm = field(body, "confirm") === true;
+      const deliverRaw = field(body, "deliver");
+      const deliver = deliverRaw === "steer" || deliverRaw === "followUp" ? deliverRaw : undefined;
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: {
+          op: "command",
+          name,
+          args,
+          ...(confirm ? { confirm: true as const } : {}),
+          ...(deliver === undefined ? {} : { deliver }),
+          ...(expect === undefined ? {} : { expect }),
+        },
+      };
+    }
+    default:
+      return { error: "E_BAD_REQUEST", message: "unknown op" };
+  }
+}
+
+function parseDialogBody(body: unknown): ParseOutcome {
+  const agentKey = stringField(body, "agentKey");
+  const id = stringField(body, "id");
+  const dialogId = stringField(body, "dialogId");
+  const epoch = stringField(body, "epoch");
+  const action = field(body, "action");
+  if (agentKey === undefined) return { error: "E_BAD_REQUEST", message: "agentKey required" };
+  if (id === undefined || !CMD_ID_RE.test(id)) return { error: "E_BAD_REQUEST", message: "bad id" };
+  if (dialogId === undefined || epoch === undefined)
+    return { error: "E_BAD_REQUEST", message: "dialogId/epoch required" };
+  const queryOnlyFlag = field(body, "queryOnly") === true;
+  if (action === "cancel") {
+    return {
+      agentKey,
+      id,
+      ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+      cmd: { op: "dialog_cancel", dialogId, epoch },
+    };
+  }
+  if (action === "answer") {
+    const answersRaw = field(body, "answers");
+    if (!Array.isArray(answersRaw)) return { error: "E_BAD_REQUEST", message: "answers required" };
+    const answers: DialogAnswerWire[] = [];
+    for (const a of answersRaw as unknown[]) {
+      const selectedRaw = field(a, "selected");
+      const otherRaw = field(a, "other");
+      if (!Array.isArray(selectedRaw) || !selectedRaw.every((s) => typeof s === "string")) {
+        return { error: "E_BAD_REQUEST", message: "bad answer" };
+      }
+      if (otherRaw !== null && otherRaw !== undefined && typeof otherRaw !== "string") {
+        return { error: "E_BAD_REQUEST", message: "bad answer" };
+      }
+      if (typeof otherRaw === "string" && !byteLenOk(otherRaw, OTHER_TEXT_MAX_BYTES)) {
+        return { error: "E_BAD_REQUEST", message: "other too large" };
+      }
+      answers.push({ selected: selectedRaw as string[], other: typeof otherRaw === "string" ? otherRaw : null });
+    }
+    return {
+      agentKey,
+      id,
+      ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+      cmd: { op: "dialog_answer", dialogId, epoch, answers },
+    };
+  }
+  return { error: "E_BAD_REQUEST", message: "action required" };
+}
+
+interface LimitCategory {
+  name: string;
+  capacity: number;
+  refillMs: number;
+}
+
+/** §6.5's per-op-category buckets; `queryOnly` always uses the generous "query" bucket
+ * regardless of the wrapped op. */
+function limitCategoryFor(cmd: CmdArgs, queryOnly: boolean): LimitCategory {
+  if (queryOnly) return { name: "query", capacity: 20, refillMs: 1_000 };
+  switch (cmd.op) {
+    case "abort":
+    case "abort_subagent":
+      return { name: "stop", capacity: 10, refillMs: 2_000 };
+    case "dialog_answer":
+    case "dialog_cancel":
+      return { name: "dialog", capacity: 6, refillMs: 3_000 };
+    default:
+      return { name: "cmd", capacity: 10, refillMs: 3_000 };
+  }
+}
+
+/** §6.3 D8: write-endpoint CSRF is *stricter* than the read/subscribe endpoints' — `Origin`
+ * must always be present (loopback's own `csrfOk` above tolerates a missing one; LAN's
+ * `csrfOkLan` already required it) and, when a browser sends `Sec-Fetch-Site` at all, it must say
+ * `same-origin` (K16 spike finding: a LAN plaintext direct-IP request carries `Origin` but *no*
+ * `Sec-Fetch-Site` at all — that combination must still pass). */
+function strictCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
+  const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+  if (ct !== "application/json") return false;
+  if (req.headers["x-pwh"] !== "1") return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return false;
+  const parsed = parseOrigin(origin);
+  if (parsed === undefined) return false;
+  if (canonicalOrigin(parsed.scheme, parsed.hostKey) !== expectedOrigin) return false;
+  const sfs = req.headers["sec-fetch-site"];
+  if (typeof sfs === "string" && sfs.toLowerCase() !== "same-origin") return false;
+  return true;
+}
+
+function cmdErrorStatus(code: CmdErrorCode): number {
+  switch (code) {
+    case "E_BAD_REQUEST":
+    case "E_BAD_ANSWER":
+      return 400;
+    case "E_NOT_FOUND":
+    case "E_UNKNOWN_COMMAND":
+    case "E_UNKNOWN_ID":
+      return 404;
+    case "E_UNSUPPORTED":
+    case "E_DIALOG_CLOSED":
+    case "E_NOT_RUNNING":
+    case "E_SESSION_CHANGED":
+    case "E_COMMAND_DENIED":
+    case "E_CONFIRM_REQUIRED":
+    case "E_STALE_CTX":
+    case "E_BUSY_COMPACTING":
+    case "E_BUSY_STEER":
+      return 409;
+    case "E_SUBAGENT_REJECTED":
+      return 422;
+    case "E_DEADLINE":
+      return 504;
+    case "E_HUB_RESTARTING":
+      return 503;
+    default:
+      return 500;
+  }
+}
+
+function sendCmdResult(res: ServerResponse, reply: CmdResultFrame): void {
+  if (reply.ok) {
+    sendJson(res, 200, { ok: true, id: reply.id, ...(reply.dup === true ? { dup: true } : {}), data: reply.data });
+    return;
+  }
+  const status = cmdErrorStatus(reply.code);
+  sendJson(res, status, {
+    error: reply.code,
+    id: reply.id,
+    retryable: reply.retryable,
+    effect: reply.effect,
+    ...(reply.message === undefined ? {} : { message: reply.message }),
+  });
+}
+
+interface CmdAuthResult {
+  ip: string;
+  user?: string;
+}
+
+/** Shared write-endpoint pipeline for both listeners (§6.3): strict CSRF → auth → a coarse
+ * per-principal flood guard + the hub-wide in-flight cap → the write-endpoint body-read budget
+ * (§3.3 step ④) → body parsing/validation → the §6.5 per-category/per-agent/per-IP buckets →
+ * the §3.3 step ⑤ forward-or-refuse threshold → a `stillAuthorized` recheck (§6.3 step ⑥; no
+ * token-rotation/authGen infra exists yet — C8's job — so this call site simply re-invokes
+ * `authorize()` a second time, which already catches a concurrent logout) → `commands.request()`.
+ * `authorize()` mirrors `requireLanSession`'s own contract: on failure it sends its own error
+ * response and this function returns immediately without doing anything else. */
+async function dispatchCmdOrDialog(
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: "/api/cmd" | "/api/dialog",
+  opts: {
+    listener: "loopback" | "lan";
+    strictCsrfOk: () => boolean;
+    authorize: () => Promise<CmdAuthResult | "handled">;
+    registry: RegistryView;
+    commands: CommandRouter | undefined;
+    limit: CmdLimit;
+    log: HubLog;
+    now: () => number;
+  },
+): Promise<void> {
+  const { listener, commands, limit, log, now } = opts;
+  res.setHeader("Cache-Control", "no-store");
+  if (!opts.strictCsrfOk()) throw new HttpError(403, "E_CSRF");
+
+  const authed = await opts.authorize();
+  if (authed === "handled") return;
+  const { ip, user } = authed;
+
+  if (commands === undefined) throw new HttpError(501, "E_NOT_IMPLEMENTED");
+
+  const reqDeadline = createReqDeadline(now, WRITE_TOTAL_MS);
+  const reqId = randomBytes(8).toString("hex");
+  const principalKey = `${listener}:${user ?? "token"}`;
+
+  const pre = limit.admit(`${principalKey}:pre`, 30, 1_000);
+  if (!pre.ok) {
+    res.setHeader("Retry-After", String(Math.ceil(pre.retryAfterMs / 1000)));
+    sendError(res, 429, "E_RATE");
+    return;
+  }
+  if (commands.inflight() >= HUB_INFLIGHT_CAP) {
+    sendError(res, 429, "E_RATE");
+    return;
+  }
+
+  const bodyMs = deriveBudget(reqDeadline.remaining(), BODY_CAP_MS, BODY_RESERVE_MS);
+  if (bodyMs <= 0) {
+    auditControl(log, {
+      phase: "reject",
+      reqId,
+      listener,
+      ip,
+      ...(user === undefined ? {} : { user }),
+      ok: false,
+      code: "E_DEADLINE",
+    });
+    throw new HttpError(408, "E_DEADLINE", "no budget left to read the request body");
+  }
+  const body = await readJson(req, MAX_BODY_BYTES, bodyMs);
+
+  const parsed = path === "/api/cmd" ? parseCmdBody(body) : parseDialogBody(body);
+  if ("error" in parsed) throw new HttpError(400, parsed.error, parsed.message);
+  const { agentKey, id, queryOnly, cmd } = parsed;
+
+  const cat = limitCategoryFor(cmd, queryOnly === true);
+  const fine = limit.admit(`${principalKey}:${cat.name}`, cat.capacity, cat.refillMs);
+  if (!fine.ok) {
+    res.setHeader("Retry-After", String(Math.ceil(fine.retryAfterMs / 1000)));
+    sendError(res, 429, "E_RATE");
+    return;
+  }
+  if (listener === "lan") {
+    const perIp = limit.admit(`lan-ip:${ip}`, 20, 2_000);
+    if (!perIp.ok) {
+      res.setHeader("Retry-After", String(Math.ceil(perIp.retryAfterMs / 1000)));
+      sendError(res, 429, "E_RATE");
+      return;
+    }
+  }
+  const perAgent = limit.admit(`agent:${agentKey}`, 30, 1_000);
+  if (!perAgent.ok) {
+    res.setHeader("Retry-After", String(Math.ceil(perAgent.retryAfterMs / 1000)));
+    sendError(res, 429, "E_RATE");
+    return;
+  }
+
+  const remaining = reqDeadline.remaining();
+  if (remaining < FORWARD_MIN_REMAINING_MS) {
+    auditControl(log, {
+      phase: "reject",
+      reqId,
+      id,
+      op: cmd.op,
+      listener,
+      ip,
+      ...(user === undefined ? {} : { user }),
+      agentKey,
+      ok: false,
+      code: "E_DEADLINE",
+    });
+    throw new HttpError(504, "E_DEADLINE");
+  }
+
+  // §6.3 step ⑥ ("stillAuthorized 钩子"): re-run the same authorization right before the frame
+  // is ever sent, catching a logout/rotation that raced the body read above.
+  const stillAuthed = await opts.authorize();
+  if (stillAuthed === "handled") return;
+
+  const { agentDeadlineMs } = computeAgentBudgets(remaining);
+  const origin: CmdOrigin = { listener, ip, reqId, ...(user === undefined ? {} : { user }) };
+  const frame: CmdFrame = {
+    t: "cmd",
+    rid: "",
+    id,
+    deadlineMs: agentDeadlineMs,
+    origin,
+    ...(queryOnly === true ? { queryOnly: true as const } : {}),
+    cmd,
+  };
+
+  try {
+    const reply = await commands.request(frame, agentKey);
+    sendCmdResult(res, reply);
+  } catch (err) {
+    if (err instanceof HubError && err.code === "E_AGENT_GONE") {
+      const stillKnown = opts.registry.get(agentKey) !== undefined;
+      sendJson(res, 503, { error: "E_AGENT_GONE", retryable: stillKnown, effect: "unknown" });
+      return;
+    }
+    if (err instanceof HubError && err.code === "E_DEADLINE") {
+      sendJson(res, 504, { error: "E_DEADLINE", retryable: true, effect: "unknown" });
+      return;
+    }
+    log.error("web-hub http: cmd dispatch failed", { error: String(err) });
+    sendJson(res, 500, { error: "E_INTERNAL" });
+  }
+}
+
 function buildLanStatus(
   cfg: LanFrontendDeps["cfg"],
   snapshot: HostSnapshot,
@@ -1207,6 +1653,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   const { config, registry, bus, history, log, now } = deps;
   const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
   const sse = createSseHub({ now });
+  // §6.5 (C3): one shared token-bucket limiter for every write endpoint on both listeners
+  // (bucket keys already carry the listener label, so there is no cross-listener bleed-through).
+  const cmdLimit = createCmdLimit(now);
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -1261,6 +1710,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       clientInflight: new Map(),
       sidInflight: new Map(),
       absoluteExpiryTimers: new Map(),
+      registry,
+      commands: deps.commands,
+      cmdLimit,
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -1456,6 +1908,25 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   ): Promise<void> {
     res.setHeader("Cache-Control", "no-store");
     if (method === "POST") {
+      if (path === "/api/cmd" || path === "/api/dialog") {
+        return dispatchCmdOrDialog(req, res, path, {
+          listener: "loopback",
+          strictCsrfOk: () =>
+            strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
+          authorize: async () => {
+            if (!auth.check(req.headers.cookie, now())) {
+              sendError(res, 401, "E_AUTH");
+              return "handled";
+            }
+            return { ip: normalizePeerIp(req.socket.remoteAddress) };
+          },
+          registry,
+          commands: deps.commands,
+          limit: cmdLimit,
+          log,
+          now,
+        });
+      }
       if (!csrfOk(req)) throw new HttpError(403, "E_CSRF");
       const body = await readJson(req);
       if (path === "/api/login") {
@@ -1488,13 +1959,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
       if (path === "/api/subscribe") return routes.subscribe(body, res);
       if (path === "/api/unsubscribe") return routes.unsubscribe(body, res);
-      if (
-        path === "/api/cmd" ||
-        path === "/api/dialog" ||
-        path === "/api/headless" ||
-        path.startsWith("/api/headless/")
-      )
-        throw new HttpError(501, "E_NOT_IMPLEMENTED"); // P2/P3 — middleware already applied
+      if (path === "/api/headless" || path.startsWith("/api/headless/")) throw new HttpError(501, "E_NOT_IMPLEMENTED"); // P3 — middleware already applied
       throw new HttpError(404, "E_NOT_FOUND");
     }
     if (method === "GET") {

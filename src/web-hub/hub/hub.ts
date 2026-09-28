@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
-import { PROTO } from "../protocol/version.js";
+import { PROTO, P2_HUB_CAPS } from "../protocol/version.js";
 import { createAdminHandler } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { createCommandRouter } from "./commands.js";
@@ -164,7 +164,14 @@ export async function startHub(
       // C0 stub: mirrors `hello_ack.caps` (admin.caps() only) -- P2_HUB_CAPS is not yet
       // broadcast anywhere (zero visible change); C3 wires the real value once the command
       // router / dialog bridge / superseded machinery actually land.
-      caps: admin.caps(),
+      // C3 (plan §3.1/§6.6): browser-facing capability list (SSE `hub` frame's `caps`,
+      // `HubInfo.caps`) always advertises the P2 control-plane capabilities the hub itself now
+      // supports, on top of whatever `admin.caps()` reports (`ctl.v1`/`lan.v1`). This is
+      // deliberately *not* mirrored onto `hello_ack.caps` (the agent-facing frame) — that field
+      // stays admin-only (unchanged P1 behavior) since nothing in this codebase consumes it yet
+      // (agent-side `connection.ts`'s D14 slot-gating is a later package's job) and changing it
+      // would only ripple into unrelated admin/LAN caps assertions outside this package's scope.
+      caps: [...admin.caps(), ...P2_HUB_CAPS],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
 
@@ -212,8 +219,10 @@ export async function startHub(
       onUiStatus: (s) => hubJson.patchUi(s),
       // §6.1 (C0 P0 fix): constructed here so the frontend factory can reach it via
       // `FrontendDeps.commands` — today's stub always answers `E_UNSUPPORTED` and is never read
-      // by `createHttpFrontend` (zero visible change); C3 replaces `createCommandRouter()`'s body.
-      commands: createCommandRouter(),
+      // §6.1 (C3): the real command router — hub-side idempotent LRU, agent-capability
+      // admission, effect classification, queryOnly, drain — replacing C0's always-`E_UNSUPPORTED`
+      // stub. `registry` (constructed above) is the same instance the agent socket layer feeds.
+      commands: createCommandRouter({ registry, log, now }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());

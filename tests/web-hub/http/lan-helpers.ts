@@ -19,6 +19,7 @@ import { createHostsPort } from "../../../src/web-hub/hub/net-hosts.js";
 import { createKdfAdmission } from "../../../src/web-hub/hub/kdf-admission.js";
 import { createLoginLimiter, type LoginLimiter } from "../../../src/web-hub/hub/ratelimit.js";
 import type { HubEvent, HubLanConfig, HttpFrontend, LanStatus } from "../../../src/web-hub/hub/ports.js";
+import type { CommandRouter } from "../../../src/web-hub/hub/ports.js";
 import { PROTO } from "../../../src/web-hub/protocol/version.js";
 import { captureLog, type LogLine } from "./helpers.js";
 import { testHubPaths } from "../helpers/paths.js";
@@ -73,6 +74,10 @@ export async function startLan(
      * itself (e.g. to exercise the deadline or a close()∥start() race). `status`/`port` on the
      * returned harness are then just the pre-start placeholders (`{state:"starting"}` / `0`).  */
     autoStart?: boolean;
+    /** plan §6.1/§6.3 (C3): a fake/real `CommandRouter` for `/api/cmd`/`/api/dialog` tests —
+     * omitted (undefined) preserves every existing caller's behavior byte-for-byte (those
+     * endpoints answer 501, same as before this option existed). */
+    commands?: CommandRouter;
   } = {},
 ): Promise<LanHarness> {
   const clock = opts.clock ?? fakeClock();
@@ -132,6 +137,7 @@ export async function startLan(
     info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
     now: clock.now,
     lan: { cfg, store, kdf, limiter, admission, hosts, scope, onStatus: (s) => (lastStatus = s) },
+    ...(opts.commands === undefined ? {} : { commands: opts.commands }),
   });
 
   if (fe.lan === undefined) throw new Error("test bug: fe.lan not constructed");
