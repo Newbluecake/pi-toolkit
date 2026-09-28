@@ -482,17 +482,32 @@ interface CryptoProbeShape {
  * K18, LAN half (control-plan.md §2.1) — a REAL assertion, not a note: over plain HTTP on a
  * non-loopback origin the page must NOT be a secure context, `crypto.randomUUID`
  * ([SecureContext]-only) must be ABSENT, and `crypto.getRandomValues` (the one `newCmdId`
- * actually depends on, §3.4) must still work. Primary route: a throwaway server bound to
- * 0.0.0.0, visited through this machine's real LAN IP (`http://<lan-ip>:<port>`). Fallback when
- * no non-loopback interface exists (e.g. a sandboxed CI container): a
- * `--host-resolver-rules`-mapped `.invalid` hostname, which is likewise not a potentially
- * trustworthy origin. Either way the report fails (ok:false) when the invariants break.
+ * actually depends on, §3.4) must still work. The only route is a throwaway server bound to
+ * 0.0.0.0, visited through this machine's real LAN IP (`http://<lan-ip>:<port>`) — a fake
+ * origin (e.g. a `--host-resolver-rules`-mapped `.invalid` hostname) would only re-prove the
+ * loopback case and is NOT accepted. With no non-loopback interface (e.g. a sandboxed CI
+ * container) the probe reports an explicit SKIP (`ok:false`, `via:"skip-no-lan"`) so the
+ * absence of evidence is visible in the report instead of being laundered into a pass.
  */
 async function probeLanPlainHttpCrypto(
   chromium: PwChromium,
   executablePath: string,
   browser: PwBrowser,
 ): Promise<ProbeReport> {
+  const lanIp = firstLanIPv4();
+  if (lanIp === undefined) {
+    return {
+      probe: "k18-crypto-lan-plain-http",
+      engine: "chromium",
+      origin: "",
+      via: "skip-no-lan",
+      randomUUID: "",
+      getRandomValues: "",
+      secureContext: false,
+      ok: false,
+      note: "SKIP: no non-loopback IPv4 interface — the LAN plain-HTTP crypto invariants were NOT verified on this machine",
+    };
+  }
   const server = createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(PROBE_INDEX_HTML.replace("__AUTH_MODE__", "token"));
@@ -501,27 +516,11 @@ async function probeLanPlainHttpCrypto(
     server.once("error", rejectP);
     server.listen(0, "0.0.0.0", () => resolveP());
   });
-  let fallbackBrowser: PwBrowser | undefined;
   try {
     const port = (server.address() as AddressInfo).port;
-    const lanIp = firstLanIPv4();
-    let origin: string;
-    let via: string;
-    let br: PwBrowser = browser;
-    if (lanIp !== undefined) {
-      origin = `http://${lanIp}:${port}`;
-      via = "lan-ip";
-    } else {
-      origin = `http://pwh-k18-probe.invalid:${port}`;
-      via = "host-resolver-rules";
-      fallbackBrowser = await chromium.launch({
-        headless: true,
-        executablePath,
-        args: ["--host-resolver-rules=MAP pwh-k18-probe.invalid 127.0.0.1"],
-      });
-      br = fallbackBrowser;
-    }
-    const context = await br.newContext({ viewport: { width: 1024, height: 768 } });
+    const origin = `http://${lanIp}:${port}`;
+    const via = "lan-ip";
+    const context = await browser.newContext({ viewport: { width: 1024, height: 768 } });
     const page = await context.newPage();
     await page.goto(origin + "/", { waitUntil: "load" });
     const probe = await page.evaluate(() => ({
@@ -540,7 +539,6 @@ async function probeLanPlainHttpCrypto(
       note: "plain HTTP off-loopback is not a secure context: randomUUID must be absent (SecureContext-only), getRandomValues must survive (frontend newCmdId depends on it)",
     };
   } finally {
-    await fallbackBrowser?.close();
     await new Promise<void>((resolveP) => server.close(() => resolveP()));
   }
 }
