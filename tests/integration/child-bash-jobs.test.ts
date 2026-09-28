@@ -1163,7 +1163,7 @@ describe.skipIf(!posix)("todo #30: resume of an already-settled child session mu
    * `sealed` Set is keyed only by sessionId and never un-seals \u2014 every
    * single bash/bash_job call for the rest of the resumed run was refused.
    */
-  it("a resumed run's bash tool succeeds after the prior run of the same sessionId sealed the registry", async () => {
+  it("a resumed run's bash tool succeeds after a legacy host sealed the same sessionId", async () => {
     const sessionId = randomUUID();
     const dir = tmpDir();
     const run1Id = `run1-${randomUUID()}`;
@@ -1180,7 +1180,10 @@ describe.skipIf(!posix)("todo #30: resume of an already-settled child session mu
       isError?: boolean;
     };
     expect(r1.isError).not.toBe(true);
-    const sealed = registry.sealAndKill(sessionId, 50, run1Id); // mirrors sealBeforeTerminal/sealSession at run-1's settle
+    // Model a seal created before #30's runId plumbing (the same metadata-less
+    // tombstone also comes from the quit-time sealAll fan-out). This is the
+    // state that survives a host /reload in the process-global registry.
+    const sealed = registry.sealAndKill(sessionId, 50);
     expect(sealed).toBeDefined();
     await sealed?.done;
     expect(registry.isSealed(sessionId)).toBe(true);

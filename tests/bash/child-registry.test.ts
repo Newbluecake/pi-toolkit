@@ -354,6 +354,35 @@ describe("child-registry: resume unseal (todo #30)", () => {
     expect(late.sealedCalls).toBe(1);
     expect(registry.isSealed(sid)).toBe(true);
   });
+
+  /**
+   * Regression for the real /reload boundary: a child can have been sealed by
+   * a pre-#30 host (or by the shutdown fan-out), which did not pass a runId to
+   * sealAndKill. The new host still sees the old host view in the process-wide
+   * registry, so attachHost is the first point that can prove this is a new
+   * run. Before the fix the missing sealedRunId made every resumed manager
+   * permanently reject bash even though the host had attached run-2.
+   */
+  it("attachHost clears a legacy seal with no sealed runId when the host run changes", () => {
+    const registry = getChildBashRegistry();
+    const sid = randomUUID();
+    const runId1 = randomUUID();
+    const runId2 = randomUUID();
+
+    registry.attachHost(sid, hostView(runId1));
+    registry.sealAndKill(sid, 0); // legacy/pre-#30 seal: no runId metadata
+    expect(registry.isSealed(sid)).toBe(true);
+    registry.attachHost(sid, hostView(runId1)); // same run: the S1 seal stays sticky
+    const lateSameRun = fakeEntry(sid);
+    registry.register(lateSameRun.entry);
+    expect(lateSameRun.sealedCalls).toBe(1);
+
+    registry.attachHost(sid, hostView(runId2)); // the real resume signal
+    const resumed = fakeEntry(sid);
+    registry.register(resumed.entry);
+    expect(resumed.sealedCalls).toBe(0);
+    expect(registry.isSealed(sid)).toBe(false);
+  });
 });
 
 describe("child-registry: whenSealed (T2)", () => {

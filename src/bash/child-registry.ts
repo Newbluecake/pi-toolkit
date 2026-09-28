@@ -267,6 +267,22 @@ class ChildBashRegistryImpl implements ChildBashRegistry {
   }
 
   attachHost(sessionId: string, view: HostRunView): void {
+    // A pre-#30 host (or the quit-time sealAll fan-out) can leave a seal
+    // without sealedRunId metadata. In that compatibility case, the old host
+    // view is the only surviving evidence of which run owned the seal. A
+    // different run attaching for the same sessionId is therefore sufficient
+    // to prove a resume and must clear the legacy tombstone before the child
+    // can lazily register its manager. This is deliberately done before
+    // storing the new view so the same-run late-register rule remains sticky.
+    const previous = this.hosts.get(sessionId);
+    if (
+      this.sealed.has(sessionId) &&
+      previous?.runId !== undefined &&
+      previous.runId !== view.runId &&
+      this.sealedRunId.get(sessionId) === undefined
+    ) {
+      this.clearStaleSeal(sessionId);
+    }
     fifoSet(this.hosts, sessionId, view, REGISTRY_CAP);
   }
   hostView(sessionId: string): HostRunView | undefined {
