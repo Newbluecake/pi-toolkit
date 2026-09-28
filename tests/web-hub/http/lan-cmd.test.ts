@@ -155,3 +155,59 @@ describe("POST /api/cmd (LAN) - gate order + K16 (plan section 6.3/2.1)", () => 
     expect(router.calls[0]!.deadlineMs).toBeLessThanOrEqual(8_000);
   });
 });
+
+describe("POST /api/cmd (LAN) — Blocker #1 fix (plan §3.3/§6.3 step ⑦): agent budget derives from the post-reauth remaining, not the stale pre-reauth snapshot", () => {
+  /** Wraps `h.store.touchSession` so the *second* call (the pre-forward "stillAuthorized" recheck
+   * — the LAN listener's `authorize()` closure is invoked once early and once again right before
+   * the frame is built) simulates spending `ms` of real request budget by advancing the harness's
+   * fake clock synchronously before resolving — no real timers/waiting needed since `ReqDeadline`
+   * only ever reads `h.clock.now()`. */
+  function delaySecondAuth(h: LanHarness, ms: number): void {
+    const original = h.store.touchSession.bind(h.store);
+    let call = 0;
+    h.store.touchSession = async (sidHash, now, opts) => {
+      call++;
+      if (call === 2) h.clock.advance(ms);
+      return original(sidHash, now, opts);
+    };
+  }
+
+  it("a slow-but-successful second reauth shrinks agentDeadlineMs well below the 8s cap a stale pre-reauth remaining would have produced", async () => {
+    const router = fakeRouter(okReply);
+    const h = await startLan({ commands: router });
+    harnesses.push(h);
+    const cookie = await loggedIn(h);
+    delaySecondAuth(h, 6_500); // leaves ~6.5s of the 13s WRITE_TOTAL_MS budget
+    const res = await lanPostJson(h.port, "/api/cmd", abortBody(), { Cookie: cookie });
+    expect(res.status).toBe(200);
+    expect(router.calls).toHaveLength(1);
+    // deriveBudget(~6500, 8000, 1500) ≈ 5000 — the pre-fix bug would have used the ~13000 remaining
+    // captured before the second reauth and always hit the 8000 cap instead.
+    expect(router.calls[0]!.deadlineMs).toBeLessThan(6_000);
+    expect(router.calls[0]!.deadlineMs).toBeGreaterThan(3_000);
+  });
+
+  it("a second reauth that burns past FORWARD_MIN_REMAINING_MS is rejected 504 without ever building/sending a frame", async () => {
+    const router = fakeRouter(okReply);
+    const h = await startLan({ commands: router });
+    harnesses.push(h);
+    const cookie = await loggedIn(h);
+    delaySecondAuth(h, 10_500); // leaves ~2.5s, below FORWARD_MIN_REMAINING_MS(3000)
+    const res = await lanPostJson(h.port, "/api/cmd", abortBody(), { Cookie: cookie });
+    expect(res.status).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({ error: "E_DEADLINE" });
+    expect(router.calls).toHaveLength(0);
+  });
+
+  it("the whole request still completes well inside the 13s WRITE_TOTAL_MS wall-clock budget when the second reauth is merely slow, not hung", async () => {
+    const router = fakeRouter(okReply);
+    const h = await startLan({ commands: router });
+    harnesses.push(h);
+    const cookie = await loggedIn(h);
+    delaySecondAuth(h, 6_500);
+    const started = Date.now();
+    const res = await lanPostJson(h.port, "/api/cmd", abortBody(), { Cookie: cookie });
+    expect(res.status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(2_000); // fake-clock advance, no real waiting involved
+  });
+});

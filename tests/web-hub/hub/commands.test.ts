@@ -294,4 +294,42 @@ describe("commands router: output byte budget (v2.1 \u00a74.9)", () => {
   });
 });
 
+describe("commands router: peekIdempotent digest check (C3 re-review Blocker #2, plan \u00a73.4/\u00a76.3)", () => {
+  it("same id + same payload \u21d2 peek reports the cached state (a real dup, http.ts may skip rate limiting)", async () => {
+    const h = harness();
+    const frame = promptFrame();
+    const p = h.router.request(frame, h.agentKey);
+    replyLatest(h, { ok: true, data: { op: "prompt", delivery: "observed" } });
+    await p;
+    expect(h.router.peekIdempotent!(origin(), h.agentKey, frame.id, frame.cmd)).toBe("done");
+  });
+
+  it("same id + DIFFERENT payload \u21d2 peek returns undefined, even though an LRU entry exists for that id (never a real dup \u2014 request() itself would reject it E_BAD_REQUEST)", async () => {
+    const h = harness();
+    const frame = promptFrame();
+    const p = h.router.request(frame, h.agentKey);
+    replyLatest(h, { ok: true, data: { op: "prompt", delivery: "observed" } });
+    await p;
+    const differentCmd = { op: "prompt" as const, text: "different", deliver: "steer" as const };
+    expect(h.router.peekIdempotent!(origin(), h.agentKey, frame.id, differentCmd)).toBeUndefined();
+    // and request() with that same different payload really does reject, confirming peek's undefined matches reality
+    const reused = await h.router.request({ ...frame, cmd: differentCmd }, h.agentKey);
+    expect(reused).toMatchObject({ ok: false, code: "E_BAD_REQUEST" });
+  });
+
+  it("unknown id \u21d2 undefined (no LRU entry at all)", () => {
+    const h = harness();
+    expect(h.router.peekIdempotent!(origin(), h.agentKey, "z".repeat(16), { op: "abort" })).toBeUndefined();
+  });
+
+  it('an inflight entry with the same payload reports "inflight"', async () => {
+    const h = harness();
+    const frame = promptFrame();
+    const p = h.router.request(frame, h.agentKey);
+    expect(h.router.peekIdempotent!(origin(), h.agentKey, frame.id, frame.cmd)).toBe("inflight");
+    replyLatest(h, { ok: true, data: { op: "prompt", delivery: "observed" } });
+    await p;
+  });
+});
+
 void vi; // referenced for future fake-timer extensions without an unused-import lint churn

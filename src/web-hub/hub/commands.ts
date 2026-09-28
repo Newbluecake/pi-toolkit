@@ -641,9 +641,15 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
       return inflightCount;
     },
 
-    peekIdempotent(origin, agentKey, id) {
+    peekIdempotent(origin, agentKey, id, cmd) {
       const key = `${principalOf(origin)}|${agentKey}|${id}`;
-      return lru.get(key)?.state;
+      const entry = lru.get(key);
+      if (entry === undefined) return undefined;
+      // Blocker #2 fix (plan \u00a73.4/\u00a76.3): a same-id-different-payload replay is never a real
+      // dup \u2014 `request()` itself would reject it with `E_BAD_REQUEST` rather than reuse the cached
+      // result, so the peek must not let it skip rate limiting either.
+      if (entry.digest !== digestOf(cmd)) return undefined;
+      return entry.state;
     },
   };
 }

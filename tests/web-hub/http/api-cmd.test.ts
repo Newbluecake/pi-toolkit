@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
+import { createCommandRouter } from "../../../src/web-hub/hub/commands.js";
+import { createRegistry } from "../../../src/web-hub/hub/registry.js";
 import type { CommandRouter } from "../../../src/web-hub/hub/ports.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import type { CmdFrame, CmdResultFrame } from "../../../src/web-hub/protocol/messages.js";
+import { fakeConn, hello, memLog, waitFor } from "../hub/helpers.js";
 import { fakeDeps, login, makeAgent, makeTmp, postJson, rawRequest, type FakeDeps } from "./helpers.js";
 
 let tmp: ReturnType<typeof makeTmp>;
@@ -274,6 +277,52 @@ describe('POST /api/cmd — idempotent hit skips the rate limiter (plan §6.5 "\
   });
 });
 
+describe("POST /api/cmd — Blocker #2 fix, against the REAL commands router (plan \u00a73.4/\u00a76.3, C3 re-review)", () => {
+  it("a same-id-DIFFERENT-payload replay never skips rate limiting, even though an LRU entry for that id already exists — each one still spends a token, and only the original payload ever reaches the agent", async () => {
+    const clock = { t: 1_000_000 };
+    const registry = createRegistry({ now: () => clock.t, log: memLog(), pidAlive: () => true });
+    const conn = fakeConn();
+    const { agentKey } = registry.register(hello({ caps: ["ev.v1", "cmd.v1"] }), conn);
+    deps.registry = registry;
+    deps.commands = createCommandRouter({ registry, log: memLog(), now: () => clock.t });
+
+    function replyLatestOk(): void {
+      const sent = conn.sent.filter((f) => (f as { t: string }).t === "cmd");
+      const last = sent.at(-1) as { rid: string; id: string };
+      registry.onFrame(agentKey, {
+        t: "cmd_result",
+        rid: last.rid,
+        id: last.id,
+        ok: true,
+        data: { op: "abort", wasBusy: false },
+      } as never);
+    }
+
+    const id = "f".repeat(16);
+    const p1 = postJson(port, "/api/cmd", { agentKey, id, op: "abort" }, cmdHeaders());
+    await waitFor(() => conn.sent.some((f) => (f as { t: string }).t === "cmd"));
+    replyLatestOk();
+    expect((await p1).status).toBe(200);
+
+    // 9 more calls with a DIFFERENT payload under the SAME id — the real router rejects each with
+    // E_BAD_REQUEST ("id reused with a different payload") and never forwards it to the agent, but
+    // Blocker #2's fix means `peekIdempotent` must NOT report this as a dup, so http.ts's own
+    // per-category rate limiter still charges a "stop"-bucket token (burst 10) for every one.
+    for (let i = 0; i < 9; i++) {
+      const res = await postJson(port, "/api/cmd", { agentKey, id, op: "abort_subagent", runId: "r1" }, cmdHeaders());
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.body)).toMatchObject({ error: "E_BAD_REQUEST" });
+    }
+    const eleventh = await postJson(
+      port,
+      "/api/cmd",
+      { agentKey, id, op: "abort_subagent", runId: "r1" },
+      cmdHeaders(),
+    );
+    expect(eleventh.status).toBe(429); // 1 (abort) + 9 (abort_subagent) = 10 tokens from the "stop" bucket (burst 10)
+    expect(conn.sent.filter((f) => (f as { t: string }).t === "cmd")).toHaveLength(1); // only the original ever reached the agent
+  });
+});
 describe("POST /api/cmd — reject-phase audit lines (plan §6.4, C3 P1 fix)", () => {
   function controlAudits(): Record<string, unknown>[] {
     return deps.logLines

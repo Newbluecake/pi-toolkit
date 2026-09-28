@@ -20,6 +20,7 @@ import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
 import type { HostTokenRejectReason, LanOffReason, LanStatus } from "../protocol/lan.js";
 import type {
   AgentId,
+  CmdArgs,
   CmdData,
   CmdErrorCode,
   CmdFrame,
@@ -434,8 +435,21 @@ export interface CommandRouter {
    * `http.ts`'s per-category/per-IP/per-agent rate limiters call this *before* spending a token so
    * a retried/still-running duplicate of the same user action is never charged twice. Optional so
    * a test double that only cares about `request()`/`drain()`/`inflight()` can omit it — `http.ts`
-   * degrades to always charging the token (old behavior) when it is absent. */
-  peekIdempotent?(origin: CmdOrigin, agentKey: string, id: string): "inflight" | "unknown" | "done" | undefined;
+   * degrades to always charging the token (old behavior) when it is absent.
+   *
+   * C3 re-review fix (Blocker #2, plan §3.4/§6.3): `cmd` is required and MUST be compared against
+   * the cached entry's own payload digest (the same `sha256(canonicalJSON(cmd))` `request()` uses
+   * for its own "id reused with a different payload" check) — a same-`id`-different-payload replay
+   * is never a real dup, so it must fall through to the caller's normal rate limiting exactly like
+   * a brand-new `id` would, even though an LRU entry for that key exists. Never a source of truth
+   * on its own: `request()` re-derives the same digest/state independently and is the only actual
+   * decision-maker (§3.4 D7) — this is purely an admission-time hint to skip token spend. */
+  peekIdempotent?(
+    origin: CmdOrigin,
+    agentKey: string,
+    id: string,
+    cmd: CmdArgs,
+  ): "inflight" | "unknown" | "done" | undefined;
 }
 
 export interface FrontendDeps {

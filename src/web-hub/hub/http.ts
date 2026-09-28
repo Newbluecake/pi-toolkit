@@ -1625,13 +1625,49 @@ async function dispatchCmdOrDialog(
   if ("error" in parsed) throw new HttpError(400, parsed.error, parsed.message);
   const { agentKey, id, queryOnly, cmd } = parsed;
 
-  // C3 P1 fix (plan §6.5 "幂等命中（dup）不扣令牌"): a retried/still-running duplicate of the
-  // same user action (same principal|agentKey|id) never spends a token from the per-category/
-  // per-IP/per-agent buckets below — `CommandRouter.peekIdempotent` is a side-effect-free lookup of
-  // the exact key `commands.request()` itself would use; absent on a test double, this just
-  // degrades to the old always-charge behavior.
+  // C3 re-review fix (Blocker #1, plan §3.3/§6.3 step ⑥⑦): a cheap, early bail-out on the
+  // pre-reauth budget — avoids spending a possibly-slow LAN `touchSession` round trip (step ⑦
+  // below) when the request is already doomed. This is *not* the authoritative check: that one
+  // runs again below, against the budget actually left once step ⑦ returns.
+  if (reqDeadline.remaining() < FORWARD_MIN_REMAINING_MS) {
+    auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: "E_DEADLINE" });
+    throw new HttpError(504, "E_DEADLINE");
+  }
+
+  // §6.3 step ⑦ ("stillAuthorized 钩子"): re-run the same authorization right before the frame
+  // is ever sent, catching a logout/rotation that raced the body read above. This is the last
+  // `await` before the dispatch decision below — everything from here to `commands.request()` is
+  // synchronous, on purpose (Blocker #2 fix, see the peek comment below).
+  const stillAuthed = await opts.authorize(reqDeadline);
+  if ("handled" in stillAuthed) {
+    auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: stillAuthed.code });
+    return;
+  }
+
+  // C3 re-review fix (Blocker #1): `remaining` — and everything derived from it below — MUST be
+  // read *after* the reauth above returns, not before it. A slow/hung LAN `touchSession` can burn
+  // several seconds of the request-level `ReqDeadline` inside `opts.authorize()`; computing
+  // `remaining` before that call (the previous bug) fed `computeAgentBudgets()` a budget that no
+  // longer reflected reality and could let the agent-facing frame's own deadline (plus the
+  // registry wait built on top of it) push the whole request past its 13s `WRITE_TOTAL_MS` cap.
+  const remaining = reqDeadline.remaining();
+  if (remaining < FORWARD_MIN_REMAINING_MS) {
+    auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: "E_DEADLINE" });
+    throw new HttpError(504, "E_DEADLINE");
+  }
+
+  // C3 re-review fix (Blocker #2, plan §3.4/§6.3): the idempotency peek — used only to decide
+  // whether the per-category/per-IP/per-agent buckets below get charged a token — is deliberately
+  // placed *here*, immediately after the last `await` above and with nothing but synchronous code
+  // between it and the `commands.request()` call further down. `peekIdempotent` itself now also
+  // compares the cached entry's payload digest (`cmd`) before reporting a hit, so a same-`id`-
+  // different-payload replay (which `request()` will reject with `E_BAD_REQUEST` regardless) can
+  // never masquerade as a dup and skip rate limiting. Keeping this adjacent to the actual forward
+  // call (no intervening `await`) also closes the TOCTOU window a re-reviewer flagged: nothing
+  // else in this process gets a chance to mutate/evict the hub's in-memory LRU entry between the
+  // peek and the router's own (authoritative) re-check of the exact same key.
   const originForPeek: CmdOrigin = { listener, ip, reqId, ...(user === undefined ? {} : { user }) };
-  const dup = commands.peekIdempotent?.(originForPeek, agentKey, id) !== undefined;
+  const dup = commands.peekIdempotent?.(originForPeek, agentKey, id, cmd) !== undefined;
 
   if (!dup) {
     const cat = limitCategoryFor(cmd, queryOnly === true);
@@ -1658,20 +1694,6 @@ async function dispatchCmdOrDialog(
       sendError(res, 429, "E_RATE");
       return;
     }
-  }
-
-  const remaining = reqDeadline.remaining();
-  if (remaining < FORWARD_MIN_REMAINING_MS) {
-    auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: "E_DEADLINE" });
-    throw new HttpError(504, "E_DEADLINE");
-  }
-
-  // §6.3 step ⑥ ("stillAuthorized 钩子"): re-run the same authorization right before the frame
-  // is ever sent, catching a logout/rotation that raced the body read above.
-  const stillAuthed = await opts.authorize(reqDeadline);
-  if ("handled" in stillAuthed) {
-    auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: stillAuthed.code });
-    return;
   }
 
   const { agentDeadlineMs } = computeAgentBudgets(remaining);
