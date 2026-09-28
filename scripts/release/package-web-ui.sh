@@ -36,5 +36,3 @@ rm -f "$ZIP" "$ZIP.sha256"
 (cd "$OUT_DIR" && sha256sum "pi-toolkit-web-ui-${VERSION}.zip" > "pi-toolkit-web-ui-${VERSION}.zip.sha256")
 rm -rf "$STAGE_DIR"
 
-echo "✅ $ZIP"
-echo "✅ $ZIP.sha256"

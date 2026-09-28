@@ -27,7 +27,11 @@ import { PROTO } from "../protocol/version.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 
-export default defineConfig(async ({ mode }): Promise<UserConfig> => {
+export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
+  // A shipped UI must be the production Vue build. Vite only defaults NODE_ENV when it is unset, so
+  // an inherited NODE_ENV (e.g. vitest children get "test") would otherwise leak dev-only runtime
+  // code (and its diagnostic strings) into dist/web-hub-ui.
+  if (command === "build") process.env["NODE_ENV"] = "production";
   const cspProbe = mode === "csp-probe";
   const [version, commit] = await Promise.all([readPackageVersion(), resolveCommit()]);
 
