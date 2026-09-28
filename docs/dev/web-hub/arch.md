@@ -194,6 +194,8 @@ SSE 下行帧 `event` 名：`hub`（版本/自身状态）、`agents`（全量�
 
 只向严格更高版本替换 ⇒ 不会乒乓。注：已运行的旧 TUI 进程拉起的是磁盘上的**当前**代码（jiti 现读源），跨安装位置（dev checkout vs 已安装）才会出现版本差。
 
+> **P2 实施注记**（#32 control-plan.md v2.1，C0–C12 已落地）：本节描述的 supersede/替换语义与实际实现一致——`supersedePending` 静默期检测、限流、`superseded` 帧、hub 优雅关闭均已在 `src/web-hub/agent/{connection,restart}.ts` + `src/web-hub/hub/registry.ts` 落地；v2.1 追加了 §6.7.3 的绝对等待上限（默认 30min）与强制替换路径（`forced:true`），以及 `/webhub stop`/`start`/`token rotate` 管理命令（本文档写作时尚未设计，见 control-plan.md §6.7）。`E_HUB_RESTARTING` 曾设想的"迟到查询返回 unknown"分支在实现中不可达——迟到结算改走进程级命令台账（control-plan.md §4.5 D7/D15），`queryOnly` 直接读台账终态，不依赖 hub 是否仍在 restarting。
+
 ## 5. 控制面
 
 ### 5.1 命令表（`cmd.op`）
@@ -219,6 +221,8 @@ SSE 下行帧 `event` 名：`hub`（版本/自身状态）、`agents`（全量�
 4. 结果 → `cmd_result`；会话替换后新 activate 经 global 连接 attach，发新 `session` 帧。nonce 过期未执行 ⇒ `E_DEADLINE`。
 
 〔需核实 K3〕注入命令在 idle 时是否同样立即分派、是否会在 TUI 历史里留下可见用户消息。
+
+> **P2 实施注记**：§5.1 命令表已按 control-plan.md 的 `cmd`/`cmd_result`/`cmd_late`（D1/D15/D17）落地并扩展——`prompt/abort/steer_subagent/abort_subagent` 之外新增了 `command`（斜杠命令，§4.6/§4.9）与 `switch_session`；`prompt` 的 `deliver` 字段现为必填（`E_BAD_REQUEST` 而非缺省 steer）。**K3 已真机验收关闭**（`live-acceptance-tmux.md`，deepseek-flash 实测）：网页 `prompt` 到达 idle agent 后立即触发新一轮，TUI 转录里以 `↳ web · local · #reqId8` 来源行留痕（§4.7），审计只记 `op:prompt,textLen`，无正文。
 
 ### 5.3 无头进程生命周期（Q5 结论）
 
@@ -273,6 +277,8 @@ UI 上下文由 runner 持有（`runner.setUIContext` 非导出面），唯一�
 | R7 普通消息       | 双端同时发消息不仲裁，按到达 pi 的顺序进 steer/followUp 队列                                                        |
 
 `dialog_open{dialogId, source:"ask_user", questions, allowCancel, openedAt}` / `dialog_closed{dialogId, by:"tui"|"web"|"timeout"|"abort"|"reaped"}`。
+
+> **P2 实施注记**：D1/D2（control-plan.md §0.3）作废了本节设想的 `dialog_open`/`dialog_closed`/`dialog_answer` 增量帧——实现改用覆盖式槽位帧 `dialogs{epoch,open,closed}`（`src/web-hub/protocol/messages.ts` 的 `RESERVED_FRAME_TYPES` 保留这三个名字不复用，避免未来误撞）；仲裁规则 R1-R5/R7 与「pi 进程是唯一仲裁者」的结论未变，`src/web-hub/agent/dialogs.ts`（TUI 双通道）+ `src/web-hub/hub/registry.ts`（覆盖式槽位广播）按此落地，网页/TUI 竞速、409「已在 <by> 作答」均见 control-plan.md §5.5/§9.2 场景4。**K5（`ctx.abort()` 对 compaction/retry 阶段的效果）已读码关闭**：`abort_subagent`/工具 `signal` abort 路径复用现有 `stack.query.stop()`/`AGENT_ABORTED_TEXT` 语义，未发现 compaction/retry 阶段的特殊交互，未再单独真机验证。本轮同时修复了一个真实缺口：`src/web-hub/hub/http.ts` 的 SSE 转发 switch 此前只转发 P1 事件（`status/fleet/agent_*/session/ev/gap/append`），完全没有把 `registry.ts` 已发布的 `dialogs`/`ctl`/`commands`/`cmd_late` 帧转给浏览器订阅者——即本节描述的对话框覆盖式槽位在生产环境里从未真正推给过网页（只能在 `subscribe` 快照瞬间看到），已在 `tests/integration/web-hub-control.test.ts` 的 ask_user 双通道场景中发现并修复（4 个新增 `sse.publish` case）。
 
 ## 7. 历史回放与去重
 

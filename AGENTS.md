@@ -106,7 +106,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `SpawnRequest.toolDomain: "readonly"`, which is consumed at admission/runtime and forces only the builtin
   read-only tools plus the runtime-owned `StructuredOutput`; the field is deliberately not threaded into child
   request prompts or ordinary runs.
-- `src/ask-user/` — merged interactive `ask_user` tool and TUI/RPC question components; emits `ask-user:activity` while an active TUI component receives input. `normalize.ts` repairs presentation-layer input instead of failing the call: explicit headers are always trimmed/width-capped (a blank one is dropped so the RPC answer key falls back to the question text), and missing headers are derived + de-duplicated in multi-question calls **only** (a single question never gets one invented, so its answer key stays the question text). Headers the model duplicated verbatim are still rejected — they collide as RPC answer keys.
+- `src/ask-user/` — merged interactive `ask_user` tool and TUI/RPC question components; emits `ask-user:activity` while an active TUI component receives input. `normalize.ts` repairs presentation-layer input instead of failing the call: explicit headers are always trimmed/width-capped (a blank one is dropped so the RPC answer key falls back to the question text), and missing headers are derived + de-duplicated in multi-question calls **only** (a single question never gets one invented, so its answer key stays the question text). Headers the model duplicated verbatim are still rejected — they collide as RPC answer keys. `remote.ts`'s `AskUserRemotePort` (P2, #32) is a late-bound, optional web-hub port: when `webHub.remoteAskUser` is on and a browser is connected, `wireAskUser` races the TUI component against the remote answer for the same dialog (whichever settles first wins; the loser gets cancelled/closed) — `remote()` returning `undefined` (web-hub off or disconnected) reproduces pre-P2 behavior byte-for-byte.
 - `src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated — suppressed (never deferred) while subagents/background bash are still running, since a stopped main session with busy background is not task end.
 - `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →
   log tee → settle → notify → recover after restart), persisted job store. POSIX only; when the
@@ -271,7 +271,16 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   /new·/resume·/fork, handed over on /reload), `ui/` (the Vue 3 SFC frontend source, built by `npm run
 build:web` into `dist/web-hub-ui/` — not checked in; `ui/src/logic/` holds the pure, DOM-free logic ported
   from the pre-Vue frontend, imported through the `@logic` alias). Wired at the end of `src/index.ts` after
-  `wireDeferredReload`. P1 is read-only. Design: `docs/dev/web-hub/{arch,plan,vue-plan}.md`. **UI serving
+  `wireDeferredReload`. P1 is read-only; **P2 (control-plane, #32, `docs/dev/web-hub/control-plan.md`)** layers a write
+  path on top — a single `cmd`/`cmd_result`/`cmd_late` channel (`op: prompt|abort|steer_subagent|abort_subagent|
+command|switch_session`, idempotent by cmdId, a process-level command ledger in `src/web-hub/agent/index.ts`
+  outlives any single hub restart), an ask_user dual-channel bridge (`src/ask-user/remote.ts`'s port +
+  `src/web-hub/agent/dialogs.ts`, TUI and web race for the same dialog, loser gets a 409/`dialog_closed`), web-
+  origin slash commands with pi-toolkit's own commands captured and echoed back to the browser
+  (`wrapCommandApi`, `captured:true` + the output text; a third-party extension's raw-registered command is
+  never captured, `captured:false`, terminal-only), version-supersede/`/webhub stop`/`start`/`token rotate`
+  admin flows, and a `hub-state-banner` covering pending/blocked/restarting/stopping. Design:
+  `docs/dev/web-hub/{arch,plan,vue-plan,control-plan}.md`. **UI serving
   (todo #26 vue-plan.md v2.1 §2.1, P5b)**: `hub/static.ts`'s `createUiServer` resolves a verified root —
   package-bundled `dist/web-hub-ui/` first, else the external, version-pinned
   `~/.pi/agent/web-hub-ui/<hubVersion>/` (`hub/ui-root.ts`'s `resolveUiRoot`/`verifyUiRoot`: symlink/owner/mode/
