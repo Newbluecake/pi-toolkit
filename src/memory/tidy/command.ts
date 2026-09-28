@@ -190,12 +190,16 @@ function buildFileTitle(
   f: TidyProposalFile,
   orig: TidySnapshotFile | undefined,
   overCostCap: boolean,
+  note?: string,
 ): string {
   const before = orig ? Buffer.byteLength(orig.body, "utf8") : 0;
   const after = f.content !== undefined ? Buffer.byteLength(f.content, "utf8") : before;
   const reason = f.reason.length > 120 ? `${f.reason.slice(0, 119)}…` : f.reason;
   const suffix = overCostCap ? " (over cost cap)" : "";
-  return `tidy ${String(index + 1)}/${String(total)} · ${effectiveName(f)} · ${f.action} · ${sizeKb(before)}→${sizeKb(after)} · ${reason}${suffix}`;
+  // The validation note is the ONLY explanation of why "Apply" is missing /
+  // why an edit bounced back — without it the confirm loop looks endless.
+  const noteText = note ? ` · ${note}` : "";
+  return `tidy ${String(index + 1)}/${String(total)} · ${effectiveName(f)} · ${f.action} · ${sizeKb(before)}→${sizeKb(after)}${noteText} · ${reason}${suffix}`;
 }
 
 function buildOptions(flag: TidyFileFlag | undefined, handWritten: boolean): string[] {
@@ -379,7 +383,7 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
     const handWritten = originalByName.get(f.name)?.handWritten === true;
     let flag = vres.fileFlags.get(f.name);
     for (;;) {
-      const title = buildFileTitle(i, targets.length, f, originalByName.get(f.name), overCostCap);
+      const title = buildFileTitle(i, targets.length, f, originalByName.get(f.name), overCostCap, flag?.note);
       const choice = await ctx.ui.select(title, buildOptions(flag, handWritten));
       if (choice === undefined || choice === "Abort all") {
         abortedAll = true;
@@ -397,7 +401,11 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
         f.content = edited;
         vres = validateTidyProposal(workingProposal(), validateCtx);
         flag = vres.fileFlags.get(f.name);
-        if (flag && !flag.canApply) continue; // still not applyable — show the new reason
+        if (flag && !flag.canApply) {
+          // still not applyable — say why, then re-show the menu (title carries the note too)
+          ctx.ui.notify(`tidy: ${f.name} still can't be applied — ${flag.note ?? "validation failed"}`, "warning");
+          continue;
+        }
         decisions.set(f.name, "apply");
         break;
       }

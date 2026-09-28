@@ -188,6 +188,12 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
   }
 
   const allOutputContent = proposal.files.map((f) => f.content).filter((c): c is string => c !== undefined);
+  // §2.1: `core.md` wins primary-core outright. When the proposal itself
+  // produces a core.md (the migration-mode case), a pinned legacy primary
+  // (e.g. `pitfalls.md` with `pin: true`) stops being primary after apply and
+  // must be judged against the topic cap, not the core cap — otherwise every
+  // migration proposal for it is un-applyable by construction.
+  const proposalProducesCore = proposal.files.some((f) => f.action !== "delete" && effectiveName(f) === "core.md");
 
   const fileFlags = new Map<string, TidyFileFlag>();
   for (const f of proposal.files) {
@@ -209,7 +215,7 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
         notes.push(`invalid frontmatter: ${errors[0] ?? ""}`);
       }
       const eff = effectiveName(f);
-      const isCore = eff === "core.md" || orig?.isPrimaryCore === true;
+      const isCore = eff === "core.md" || (orig?.isPrimaryCore === true && !proposalProducesCore);
       const cap = isCore ? ctx.coreBytes : ctx.topicMaxBytes;
       const size = Buffer.byteLength(f.content, "utf8");
       if (size > cap) {

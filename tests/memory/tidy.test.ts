@@ -210,6 +210,27 @@ describe("validateTidyProposal (§7.3 step 5)", () => {
     expect(res.fileFlags.get("topic.md")?.note).toMatch(/topic cap/);
   });
 
+  it("migration: a pinned primary is judged by the topic cap once the proposal creates core.md", () => {
+    const original = new Map<string, any>([
+      ["pitfalls.md", { name: "pitfalls.md", body: "# p\nline\n", handWritten: false, isPrimaryCore: true }],
+    ]);
+    const big = "# p\nline\n" + "z".repeat(6000);
+    const withCore: TidyProposal = {
+      files: [
+        { name: "pitfalls.md", action: "rewrite", content: big, reason: "r" },
+        { name: "core.md", action: "create", content: "# core\n", reason: "r" },
+      ],
+      dropped: [],
+    };
+    const ctx = { original, coreBytes: 1600, topicMaxBytes: 16384, maxOutputBytes: 65536 };
+    expect(validateTidyProposal(withCore, ctx).fileFlags.get("pitfalls.md")?.canApply).toBe(true);
+    // without a core.md in the proposal it stays primary \u21d2 core cap still applies
+    const noCore: TidyProposal = { files: [withCore.files[0]!], dropped: [] };
+    const flag = validateTidyProposal(noCore, ctx).fileFlags.get("pitfalls.md");
+    expect(flag?.canApply).toBe(false);
+    expect(flag?.note).toMatch(/core cap/);
+  });
+
   it("invalid frontmatter in proposed content ⇒ canApply:false", () => {
     const original = new Map<string, any>([
       ["a.md", { name: "a.md", body: "# a\n", handWritten: false, isPrimaryCore: false }],
