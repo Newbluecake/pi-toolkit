@@ -107,6 +107,8 @@ export interface HubState {
   readonly supersedeDeadlineAt?: number;
   readonly forced?: boolean;
   readonly draining?: boolean;
+  /** §6.7.3 ①: stop marker holding the supersede back — HubStateBanner's "升级已暂停" state. */
+  readonly supersedeBlocked?: "stopped" | "unknown";
 }
 
 /**

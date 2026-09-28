@@ -36,10 +36,12 @@ const nextVersion = computed(() => state.value?.nextVersion);
 const supersedePending = computed(() => state.value?.supersedePending === true);
 const forced = computed(() => state.value?.forced === true);
 const draining = computed(() => state.value?.draining === true);
+const supersedeBlocked = computed(() => state.value?.supersedeBlocked);
 
-const mode = computed<"stopping" | "restarting" | "pending" | null>(() => {
+const mode = computed<"stopping" | "restarting" | "blocked" | "pending" | null>(() => {
   if (hubState.value === "stopping") return "stopping";
   if (hubState.value === "restarting") return "restarting";
+  if (supersedePending.value && supersedeBlocked.value !== undefined) return "blocked";
   if (supersedePending.value) return "pending";
   return null;
 });
@@ -61,7 +63,7 @@ const expanded = ref(false);
 
 <template>
   <div v-if="mode !== null" class="hub-state-banner" :data-state="mode" role="status" :aria-label="t('hub.bannerAria')">
-    <AppIcon v-if="mode === 'stopping'" name="unplug" class="icon-sm" />
+    <AppIcon v-if="mode === 'stopping' || mode === 'blocked'" name="unplug" class="icon-sm" />
     <AppIcon v-else name="loader" class="icon-sm" :class="{ spin: mode === 'restarting' }" />
     <span class="hub-state-text">
       <template v-if="mode === 'stopping'">{{ t("hub.stopped") }}</template>
@@ -69,6 +71,10 @@ const expanded = ref(false);
         {{ t("hub.restarting", { v: nextVersion ?? "?" }) }}
         <span v-if="forced" class="hub-state-sub">{{ t("hub.forcedUpgrade") }}</span>
         <span v-else-if="draining" class="hub-state-sub">{{ t("hub.draining") }}</span>
+      </template>
+      <template v-else-if="mode === 'blocked'">
+        {{ t("hub.supersedeBlocked", { v: nextVersion ?? "?" }) }}
+        <span class="hub-state-sub">{{ t("hub.supersedeBlockedHint") }}</span>
       </template>
       <template v-else>
         {{ t("hub.supersedePending", { v: nextVersion ?? "?", time: deadlineLabel }) }}

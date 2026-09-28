@@ -14,6 +14,9 @@ export interface SupersedeState {
   since: number;
   deadlineAt: number;
   forced?: boolean;
+  /** §6.7.3 ①: a stop marker (stopped, or unreadable ⇒ fail-closed unknown) outranks the 30min
+   * deadline — while it holds the replacement is paused and the top bar shows "升级已暂停". */
+  blocked?: "stopped" | "unknown";
 }
 
 export interface SupersedeOpenDialog {
@@ -133,6 +136,20 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
     if (disposed || pending === undefined || running) return;
     const t = d.now();
     const stop = stopState();
+    // Surface blocked-state transitions to the SSE `info` frame (the 250ms tick cadence is the
+    // only place the stop marker is sampled, so this doubles as the "升级已暂停" data path).
+    const blockedNow = stop.state === "absent" ? undefined : (stop.state as "stopped" | "unknown");
+    if (pending.blocked !== blockedNow) {
+      const next = { ...pending };
+      if (blockedNow === undefined) {
+        delete next.blocked;
+        blockedLogged = false; // re-blocking re-audits
+      } else {
+        next.blocked = blockedNow;
+      }
+      pending = next;
+      emit();
+    }
     const quiet = d.openDialogs().every((x) => x.count === 0) && d.inflight() === 0 && (d.kdfInflight?.() ?? 0) === 0;
     if (quiet && stop.state === "absent") {
       begin(false, stop);

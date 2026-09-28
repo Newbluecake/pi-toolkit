@@ -92,6 +92,7 @@ export function initialState() {
     supersedePending: false,
     forced: false,
     draining: false,
+    supersedeBlocked: undefined,
   };
 }
 
@@ -221,6 +222,8 @@ function reduceInner(s, event, d) {
         supersedeDeadlineAt: typeof d.supersedeDeadlineAt === "number" ? d.supersedeDeadlineAt : undefined,
         forced: d.forced === true,
         draining: d.draining === true,
+        supersedeBlocked:
+          d.supersedeBlocked === "stopped" || d.supersedeBlocked === "unknown" ? d.supersedeBlocked : undefined,
       };
     }
     case "ping":

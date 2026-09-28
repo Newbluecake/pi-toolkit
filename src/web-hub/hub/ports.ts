@@ -424,6 +424,9 @@ export interface HubInfo {
   supersedeDeadlineAt?: number;
   forced?: boolean;
   draining?: boolean;
+  /** §6.7.3 ① (main-session frozen amendment): stop marker holding the replacement back —
+   * drives HubStateBanner's "升级已暂停" state. */
+  supersedeBlocked?: "stopped" | "unknown";
 }
 
 export interface CommandRouter {

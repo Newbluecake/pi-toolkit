@@ -381,7 +381,24 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       }
       commandHandler.handle(frame);
     },
-    onSuperseded: () => {},
+    onSuperseded: (frame) => {
+      // §6.7.3 forced path: the terminal user must hear that the hub is being replaced under
+      // them — and when dialogs are open, that web answering is suspended and the terminal is
+      // where to answer (the web form goes read-only-suspended on the same frame).
+      const x = ctx;
+      if (x === undefined) return;
+      try {
+        const open = typeof frame.openDialogs === "number" && frame.openDialogs > 0;
+        x.ui.notify(
+          open
+            ? `web-hub upgrading to v${frame.nextVersion}${frame.forced === true ? " (forced)" : ""} · answer ask_user in the terminal`
+            : `web-hub upgrading to v${frame.nextVersion}${frame.forced === true ? " (forced)" : ""}`,
+          "info",
+        );
+      } catch {
+        /* stale ctx */
+      }
+    },
     onSnapshotReq: (rid) => {
       const c = conn;
       const x = ctx;

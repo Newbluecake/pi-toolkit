@@ -68,6 +68,21 @@ describe("HubStateBanner.vue (§7.7)", () => {
     expect(w.find(".hub-state-detail").exists()).toBe(true);
   });
 
+  it("blocked ⇒ paused copy instead of the countdown (§6.7.3 ①)", () => {
+    const w = mountBanner({
+      hubState: "running",
+      supersedePending: true,
+      supersedeBlocked: "stopped",
+      nextVersion: "1.6.0",
+      supersedeDeadlineAt: Date.now() + 60_000,
+    } as Partial<HubState>);
+    expect(w.find(".hub-state-banner").attributes("data-state")).toBe("blocked");
+    expect(w.text()).toContain("paused");
+    expect(w.text()).toContain("/webhub start");
+    // The pending-mode expander and countdown stay hidden while blocked.
+    expect(w.find(".hub-state-toggle").exists()).toBe(false);
+  });
+
   it("no HUB_CTX provider ⇒ nothing renders (defensive)", () => {
     const wrapper = mount(HubStateBanner);
     mounted.push(wrapper);

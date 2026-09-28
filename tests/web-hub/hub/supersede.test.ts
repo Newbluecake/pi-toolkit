@@ -94,4 +94,38 @@ describe("hub supersede controller (C10)", () => {
     expect(supersedeWaitMs({ PI_WEBHUB_SUPERSEDE_MAX_WAIT_MS: "9" })).toBe(SUPERSEDE_DEFAULT_MAX_WAIT_MS);
     expect(supersedeWaitMs({ PI_WEBHUB_SUPERSEDE_MAX_WAIT_MS: "not-a-number" })).toBe(SUPERSEDE_DEFAULT_MAX_WAIT_MS);
   });
+
+  it("surfaces the blocked state on the controller state while a stop marker holds (§6.7.3 ①)", () => {
+    const h = harness();
+    h.ctl.observe("2.0.0");
+    expect(h.ctl.state()!.blocked).toBeUndefined();
+    h.setStop({ state: "stopped" });
+    h.ctl.tick();
+    expect(h.ctl.state()!.blocked).toBe("stopped");
+    h.setStop({ state: "unknown", code: "EIO" });
+    h.ctl.tick();
+    expect(h.ctl.state()!.blocked).toBe("unknown");
+    // Clearing the marker unblocks immediately and, the deadline having elapsed, forces at once.
+    h.setNow(h.ctl.state()!.deadlineAt);
+    h.setStop({ state: "absent" });
+    h.ctl.tick();
+    expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: true }));
+  });
+
+  it("the forced path is exempt from the 60s anti-flap throttle (§6.7.3 ②)", async () => {
+    const h = harness();
+    h.ctl.observe("2.0.0");
+    h.setOpen(0);
+    h.ctl.tick();
+    expect(h.restart).toHaveBeenCalledTimes(1); // quiet replacement completes
+    await Promise.resolve(); // let the restart promise settle (lastReplacementAt := now)
+    // A still-higher version arrives seconds later; its deadline elapses while a dialog is open.
+    h.setOpen(1);
+    h.ctl.observe("3.0.0");
+    h.setNow(h.ctl.state()!.deadlineAt);
+    h.ctl.tick();
+    // <60s since the last replacement: the quiet path would be throttled, the forced path is not.
+    expect(h.restart).toHaveBeenCalledTimes(2);
+    expect(h.restart).toHaveBeenLastCalledWith(expect.objectContaining({ forced: true, nextVersion: "3.0.0" }));
+  });
 });

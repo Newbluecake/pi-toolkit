@@ -342,11 +342,14 @@ export async function startHub(
           delete info.supersedeDeadlineAt;
           delete info.forced;
           delete info.draining;
+          delete info.supersedeBlocked;
         } else {
           info.supersedePending = true;
           info.nextVersion = s.nextVersion;
           info.supersedeDeadlineAt = s.deadlineAt;
           if (s.forced === true) info.forced = true;
+          if (s.blocked !== undefined) info.supersedeBlocked = s.blocked;
+          else delete info.supersedeBlocked;
         }
       },
       audit: (op, fields) => log.info("web-hub admin op", { audit: "admin", op, ...fields }),
@@ -360,7 +363,13 @@ export async function startHub(
         if (forced) {
           const drained = await commandRouter.drain();
           info.draining = false;
-          log.info("web-hub supersede drain", {
+          // §6.7.3's audit row carries `drainTimedOut` — folded into the SAME tagged audit
+          // channel (`audit:"admin"`), emitted here because the controller's begin()-time audit
+          // necessarily precedes the drain (C10 verifier finding).
+          log.info("web-hub admin op", {
+            audit: "admin",
+            op: "supersede",
+            phase: "drain",
             nextVersion,
             forced,
             inflightAtDrain,
