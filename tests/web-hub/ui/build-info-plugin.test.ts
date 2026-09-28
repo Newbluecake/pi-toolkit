@@ -71,7 +71,11 @@ describe("buildInfoPlugin", () => {
   });
 
   it("normalizes the dist tree to 0755 dirs / 0644 files regardless of the builder's umask", async () => {
-    const outDir = tmpOutDir();
+    const distDir = join(tmpOutDir(), "dist");
+    mkdirSync(distDir);
+    chmodSync(distDir, 0o775);
+    const outDir = join(distDir, "web-hub-ui");
+    mkdirSync(outDir);
     writeFileSync(join(outDir, "index.html"), "<html></html>");
     mkdirSync(join(outDir, "assets"));
     writeFileSync(join(outDir, "assets", "index-deadbeef.js"), "console.log(1)");
@@ -90,6 +94,8 @@ describe("buildInfoPlugin", () => {
     expect(mode(join(outDir, "index.html"))).toBe(0o644);
     expect(mode(join(outDir, "assets", "index-deadbeef.js"))).toBe(0o644);
     expect(mode(join(outDir, "build-info.json"))).toBe(0o644);
+    // the hub's trust check also covers the root's parent: group/other write is stripped there too
+    expect(mode(distDir)).toBe(0o755);
   });
 
   it("refuses to write a manifest when the output tree contains a symlink", async () => {

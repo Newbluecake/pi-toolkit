@@ -11,7 +11,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { chmod, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { join, relative, resolve as resolvePath } from "node:path";
+import { dirname, join, relative, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
 import { PROTO } from "../protocol/version.js";
@@ -130,6 +130,12 @@ export function buildInfoPlugin(): Plugin {
       };
       await writeFile(join(outDir, BUILD_INFO_FILE), `${JSON.stringify(info, null, 2)}\n`, "utf8");
       await normalizeModes(outDir);
+      // The hub's trust check also covers the UI root's parent (`dist/`); strip group/other write
+      // there too (never widen it), so a umask-002 checkout's `dist/` doesn't fail verifyUiRoot.
+      // Only when we own it (so a shared parent such as /tmp is never touched).
+      const parent = dirname(outDir);
+      const pst = await stat(parent);
+      if ((pst.mode & 0o022) !== 0 && pst.uid === process.getuid?.()) await chmod(parent, pst.mode & 0o7755);
     },
   };
 }
