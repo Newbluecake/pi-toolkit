@@ -16,6 +16,7 @@ function harness() {
   let stop: StopMarkerRead = { state: "absent" };
   const restart = vi.fn(async () => undefined);
   const audit = vi.fn();
+  const deferred: Array<() => void> = [];
   const ctl = createSupersede({
     hubVersion: "1.0.0",
     now: () => now,
@@ -26,6 +27,10 @@ function harness() {
     kdfInflight: () => kdf,
     restart,
     audit,
+    // Deterministic stand-in for the real `setTimeout(fn, 0)` default (acc32-B9): queued, not
+    // auto-run, so a test can update state (e.g. a late-arriving `dialogs` frame) *between*
+    // `observe()` and the deferred quiet check by calling `flushDeferred()` explicitly.
+    defer: (fn) => deferred.push(fn),
   });
   return {
     ctl,
@@ -36,6 +41,10 @@ function harness() {
     setInflight: (v: number) => (inflight = v),
     setKdf: (v: number) => (kdf = v),
     setStop: (v: StopMarkerRead) => (stop = v),
+    flushDeferred: () => {
+      const fns = deferred.splice(0);
+      for (const fn of fns) fn();
+    },
   };
 }
 
@@ -127,5 +136,35 @@ describe("hub supersede controller (C10)", () => {
     // <60s since the last replacement: the quiet path would be throttled, the forced path is not.
     expect(h.restart).toHaveBeenCalledTimes(2);
     expect(h.restart).toHaveBeenLastCalledWith(expect.objectContaining({ forced: true, nextVersion: "3.0.0" }));
+  });
+
+  it("the first quiet check after observe() is deferred, so a dialogs frame arriving right after hello (D14 reconnect replay) is not raced past (acc32-B9)", () => {
+    const h = harness();
+    // Reconnect scenario: the Rec was reaped while a dialog was open, so the fresh registration's
+    // hello arrives with no dialogs recorded yet — exactly what a brand-new Rec looks like.
+    h.setOpen(0);
+    h.ctl.observe("2.0.0");
+    // Before the fix, `observe()` called `tick()` synchronously right here and would already have
+    // replaced (`waitedMs:0`) while the dialog frame was still in flight.
+    expect(h.restart).not.toHaveBeenCalled();
+    // The reconnecting agent's `dialogs` frame lands (D14 replay) reporting the dialog that was
+    // open all along, updating the registry snapshot `openDialogs()` reads from.
+    h.setOpen(1);
+    // Now the deferred quiet check actually runs.
+    h.flushDeferred();
+    expect(h.restart).not.toHaveBeenCalled();
+    // Once the dialog closes, the (now-current) periodic tick correctly replaces.
+    h.setOpen(0);
+    h.ctl.tick();
+    expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
+  });
+
+  it("observe() still replaces promptly when there really is nothing open (no dialogs frame ever follows)", () => {
+    const h = harness();
+    h.setOpen(0);
+    h.ctl.observe("2.0.0");
+    expect(h.restart).not.toHaveBeenCalled();
+    h.flushDeferred();
+    expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
   });
 });

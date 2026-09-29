@@ -44,6 +44,17 @@ export interface SupersedeDeps {
   stateChanged?: (state: SupersedeState | undefined) => void;
   audit?: (op: "supersede" | "supersede_blocked", fields: Record<string, unknown>) => void;
   log?: { warn(msg: string, data?: object): void };
+  /**
+   * acc32-B9: the very first quiet check after `observe()` sees a version mismatch must not run
+   * synchronously inside the hello-processing call stack — a reconnecting agent's `dialogs` slot
+   * (D14: replayed once the connection is live, strictly *after* `hello`) may not have arrived
+   * yet, so an already-open ask_user dialog from before the reconnect would be invisible to
+   * `openDialogs()` at that exact instant and get raced past (`waitedMs:0` immediate replace).
+   * Defaults to a real `setTimeout(fn, 0)` (unref'd) so the check runs on a later turn of the
+   * event loop, after any frame that arrived in the same socket read as `hello` has been
+   * processed; injectable so tests can make the deferral deterministic instead of timer-based.
+   */
+  defer?: (fn: () => void) => void;
 }
 
 export interface SupersedeController {
@@ -74,6 +85,12 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
   if (deps === undefined) return createSupersedeStub();
   const d = deps;
   const waitMs = supersedeWaitMs(process.env, d.log);
+  const defer =
+    d.defer ??
+    ((fn: () => void) => {
+      const t = setTimeout(fn, 0);
+      t.unref?.();
+    });
   let pending: SupersedeState | undefined;
   let lastReplacementAt = Number.NEGATIVE_INFINITY;
   let blockedLogged = false;
@@ -176,7 +193,11 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
         pending = { ...pending, nextVersion: pluginVersion };
         emit();
       }
-      tick();
+      // acc32-B9: never quiet-check synchronously inside the hello call stack — defer so a
+      // `dialogs` frame that arrives right after this same `hello` (D14 reconnect replay) has a
+      // chance to update the registry first. `begin()`'s own re-entrancy guard (`running`) plus
+      // the periodic 250ms tick already cover any tick this defers past a dispose/replace.
+      defer(tick);
     },
     tick,
     dispose() {

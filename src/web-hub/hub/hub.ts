@@ -399,11 +399,17 @@ export async function startHub(
     });
     const supersedeTimer = setInterval(() => supersede?.tick(), 250);
     supersedeTimer.unref();
+    // acc32-B9 defense in depth: re-check quiet immediately whenever a `dialogs` slot changes
+    // (a dialog opening OR closing), rather than relying solely on the 250ms periodic tick —
+    // this is on top of (not instead of) `observe()`'s own deferred first check above.
+    const unsubscribeSupersedeOnDialogs = registry.bus.subscribe((e) => {
+      if (e.type === "dialogs") supersede?.tick();
+    });
     cleanup.push(async () => {
+      unsubscribeSupersedeOnDialogs();
       clearInterval(supersedeTimer);
       supersede?.dispose();
     });
-
     const scanRotateIntent = async (): Promise<void> => {
       const revokeLan =
         lanDeps === undefined
@@ -580,6 +586,7 @@ export async function startHub(
       if (closing !== undefined) return closing;
       const inner = (async (): Promise<void> => {
         log.info("hub closing", { reason });
+        unsubscribeSupersedeOnDialogs();
         supersede?.dispose();
         clearInterval(supersedeTimer);
         stopFence();
