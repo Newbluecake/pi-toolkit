@@ -447,8 +447,22 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     settleAndReply(frame, result);
     if (result.ok) {
-      const ctx = deps.getCtx();
-      if (ctx !== undefined) deps.originEntry.notify(ctx, `/${cmd.name}`, frame.origin);
+      // acc32-B5: pi's own `showStatus()` merges consecutive chat-status lines when nothing else
+      // was added to the transcript in between ("avoid log spam") — for an UNCAPTURED extension
+      // command (a third party's, run synchronously inside `builtinBridge.execute()` above,
+      // strictly before this line), the command's OWN `ctx.ui.notify(...)` call already landed
+      // in that same slot; firing our own "web ▸ /name …" attribution notify right after would
+      // silently OVERWRITE it (dedup, not append) — the only place a third-party command's
+      // output was ever visible at all, since `captured:false` means the web side never gets it
+      // either. Skip our own notify for exactly that case; pi-toolkit's own (captured) commands
+      // keep it — their real output also reaches the web via `capture`, so even a clobbered
+      // terminal line loses nothing.
+      const uncapturedExtension =
+        result.data.op === "command" && result.data.kind === "extension" && result.data.captured !== true;
+      if (!uncapturedExtension) {
+        const ctx = deps.getCtx();
+        if (ctx !== undefined) deps.originEntry.notify(ctx, `/${cmd.name}`, frame.origin);
+      }
     }
   }
 

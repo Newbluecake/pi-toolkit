@@ -1100,7 +1100,7 @@ describe("web-hub control-plane integration (#32 C7) — command output capture"
     expect(env.ctxState.notifyCalls.some(([msg]) => msg.includes("web ▸ /agent"))).toBe(true);
   }, 15_000);
 
-  it("a third-party command registered on the RAW (unwrapped) pi reference is never captured", async () => {
+  it("a third-party command registered on the RAW (unwrapped) pi reference is never captured, and its own terminal notify is not clobbered by our origin-attribution notify (acc32-B5)", async () => {
     env = await setup();
     env.pi.pi.registerCommand("thirdparty", {
       handler: (_args: string, ctx: ExtensionCommandContext) => {
@@ -1116,6 +1116,12 @@ describe("web-hub control-plane integration (#32 C7) — command output capture"
     expect(res.status).toBe(200);
     const body = JSON.parse(res.body) as { data: { captured?: boolean } };
     expect(body.data.captured).toBe(false);
+    // The third-party handler's own notify is the ONLY place its output is ever visible
+    // (captured:false ⇒ the web side never sees it either) — pi's real `showStatus()` merges
+    // back-to-back status lines added with nothing else in between, so firing our own
+    // "web ▸ /thirdparty …" attribution notify right after would have silently overwritten it.
+    expect(env.ctxState.notifyCalls.some(([msg]) => msg === "third party output")).toBe(true);
+    expect(env.ctxState.notifyCalls.some(([msg]) => msg.includes("web ▸ /thirdparty"))).toBe(false);
   }, 15_000);
 });
 
