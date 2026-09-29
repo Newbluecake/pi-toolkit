@@ -6,6 +6,8 @@
  * are wired together correctly inside `wireWebHub`.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { createWebHubCommand } from "../../../src/commands/webhub.js";
 import { currentConnection } from "../../../src/web-hub/agent/connection.js";
 import { wireWebHub, type WebHubDeps } from "../../../src/web-hub/agent/index.js";
 import type { AgentFrame, CmdFrame } from "../../../src/web-hub/protocol/messages.js";
@@ -53,14 +55,14 @@ function deps(over: Partial<WebHubDeps> = {}): WebHubDeps {
 const FULL_CAPS = ["cmd.v1", "dialog.v1", "command.v1", "ctl.v2"];
 
 /** Connects and completes the handshake with a hub advertising the full P2 cap set. */
-async function connectFullCaps(): Promise<{
+async function connectFullCaps(depsOver: Partial<WebHubDeps> = {}): Promise<{
   control: ReturnType<typeof wireWebHub>;
   fire: ReturnType<typeof fakePi>["fire"];
   sentUserMessages: ReturnType<typeof fakePi>["sentUserMessages"];
 }> {
   hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
   const { pi, fire, sentUserMessages } = fakePi();
-  const control = wireWebHub(pi, deps());
+  const control = wireWebHub(pi, deps(depsOver));
   const { ctx } = fakeCtx({ mode: "tui" });
   fire("session_start", { type: "session_start", reason: "startup" }, ctx);
   await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
@@ -238,6 +240,102 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
     const replay = await control.internalExec(`new ${nonce}`, execCtx);
     expect(replay).toEqual({ ok: false, code: "E_UNSUPPORTED" });
     expect(newSessionCalls).toBe(1);
+  });
+});
+
+describe("/webhub __exec nonce TTL boundary (acc32-B4 revised per verifier r_29729WTC: plan §4.6's 5s-TTL pendingExec slot, index.ts's `armExec`/`takeExec`)", () => {
+  /** Real end-to-end arming: dispatches `/new` over the socket exactly like a live web client
+   * would (the same cmdFrame → builtin-bridge → armExec path acc32-B4's own e2e test above
+   * exercises), so these boundary cases walk the real armExec→takeExec→newSession chain instead
+   * of poking the closure-private nonce slot directly. */
+  async function armNewNonce(nowFn: () => number): Promise<{
+    control: ReturnType<typeof wireWebHub>;
+    nonce: string;
+    execCtx: { newSession: () => Promise<{ cancelled: boolean }> };
+    newSessionCalls: () => number;
+  }> {
+    const { control, sentUserMessages } = await connectFullCaps({ now: nowFn });
+    hub!.send(hub!.conns[0]!, cmdFrame("cmd0000000000004", { op: "command", name: "new", args: "", confirm: true }));
+    await waitUntil(() => sentUserMessages.length > 0);
+    const match = sentUserMessages[0]!.text.match(/^\/webhub __exec new ([0-9a-f]{32})$/);
+    expect(match).not.toBeNull();
+    const nonce = match![1]!;
+    let calls = 0;
+    const execCtx = { newSession: async () => ((calls += 1), { cancelled: false }) };
+    return { control, nonce, execCtx, newSessionCalls: () => calls };
+  }
+
+  it("succeeds at exactly the 5s TTL boundary (now() === expiresAt, the inclusive edge)", async () => {
+    let t = 10_000;
+    const { control, nonce, execCtx, newSessionCalls } = await armNewNonce(() => t);
+    t += 5_000; // arming time + the full TTL, still allowed (takeExec rejects only now() > expiresAt)
+    const ok = await control.internalExec(`new ${nonce}`, execCtx);
+    expect(ok).toEqual({ ok: true });
+    expect(newSessionCalls()).toBe(1);
+  });
+
+  it("fails 1ms past the 5s TTL (now() > expiresAt)", async () => {
+    let t = 10_000;
+    const { control, nonce, execCtx, newSessionCalls } = await armNewNonce(() => t);
+    t += 5_001;
+    const bad = await control.internalExec(`new ${nonce}`, execCtx);
+    expect(bad).toEqual({ ok: false, code: "E_UNSUPPORTED" });
+    expect(newSessionCalls()).toBe(0);
+  });
+
+  it("fails when the already-consumed nonce is replayed, even well inside the original TTL window", async () => {
+    let t = 10_000;
+    const { control, nonce, execCtx, newSessionCalls } = await armNewNonce(() => t);
+    const first = await control.internalExec(`new ${nonce}`, execCtx);
+    expect(first).toEqual({ ok: true });
+    t += 1; // 4999ms of the original 5s window still remain
+    const replay = await control.internalExec(`new ${nonce}`, execCtx);
+    expect(replay).toEqual({ ok: false, code: "E_UNSUPPORTED" });
+    expect(newSessionCalls()).toBe(1);
+  });
+});
+
+describe("the full `/webhub __exec` command-handler path drives the real armExec→takeExec→newSession chain (acc32-B4 revised per verifier r_29729WTC)", () => {
+  function fakeCommandCtx(): {
+    ctx: ExtensionCommandContext;
+    notes: Array<[string, string | undefined]>;
+    newSessionCalls: () => number;
+  } {
+    const notes: Array<[string, string | undefined]> = [];
+    let calls = 0;
+    const ctx = {
+      ui: { notify: (message: string, level?: string) => notes.push([message, level]) },
+      newSession: async () => {
+        calls += 1;
+        return { cancelled: false };
+      },
+    } as unknown as ExtensionCommandContext;
+    return { ctx, notes, newSessionCalls: () => calls };
+  }
+
+  it("a real terminal-typed `/webhub __exec new <nonce>` succeeds silently and calls ctx.newSession(); a replay surfaces the command's own warning notify", async () => {
+    const { control, sentUserMessages } = await connectFullCaps();
+    hub!.send(hub!.conns[0]!, cmdFrame("cmd0000000000005", { op: "command", name: "new", args: "", confirm: true }));
+    await waitUntil(() => sentUserMessages.length > 0);
+    const match = sentUserMessages[0]!.text.match(/^\/webhub __exec new ([0-9a-f]{32})$/);
+    expect(match).not.toBeNull();
+    const nonce = match![1]!;
+
+    // This is `createWebHubCommand`'s REAL handler (not a fake `WebHubControl`, unlike
+    // tests/commands/webhub.test.ts) wired to the REAL `control` this session's builtin bridge
+    // armed the nonce through — the same object pi's own command dispatcher would hand the
+    // followUp `/webhub __exec new <nonce>` message to.
+    const webhubCmd = createWebHubCommand({ control: () => control });
+    const { ctx, notes, newSessionCalls } = fakeCommandCtx();
+    await webhubCmd.handler(`__exec new ${nonce}`, ctx);
+    expect(newSessionCalls()).toBe(1);
+    expect(notes).toHaveLength(0); // success is silent (no warning notify)
+
+    // Replaying the now-consumed nonce: internalExec rejects, and the command handler itself
+    // (not internalExec) is what surfaces the terminal warning.
+    await webhubCmd.handler(`__exec new ${nonce}`, ctx);
+    expect(newSessionCalls()).toBe(1);
+    expect(notes).toEqual([["无效或已过期的 /webhub __exec 调用。", "warning"]]);
   });
 });
 
