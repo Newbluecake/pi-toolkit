@@ -519,19 +519,26 @@ export async function startHub(
     const initialLan: LanStatus | undefined =
       deps.lanConfigError !== undefined
         ? { state: "off", reason: "bad-config", detail: deps.lanConfigError.detail }
-        : lanAssemblyOff !== undefined
-          ? {
-              state: "off",
-              reason: lanAssemblyOff.reason,
-              ...(lanAssemblyOff.detail === undefined ? {} : { detail: lanAssemblyOff.detail }),
-            }
-          : lanBlockedByRotate
-            ? // §6.7.1: "LAN listener 不开放，LanStatus{state:"off", reason:"rotate-pending"}，意图保留，
-              // loopback 照常可用" — token is already new (recovery finished ①–② already), only the
-              // LAN half of invalidation failed/timed out, so `fe.lan` itself is left intact
-              // (the periodic scan calls `start()` once recovery finally succeeds) — only its own
-              // `start()` call is skipped this boot.
-              { state: "off", reason: "rotate-pending" }
+        : lanBlockedByRotate
+          ? // acc32-B7 (verifier r_29729WTC): `rotate-pending` must outrank `lanAssemblyOff` here,
+            // not just come after it — a store that failed to open (e.g. `db-invalid`) is exactly
+            // the case where `recoverRotateIntent`'s fail-closed revoke also has no store to
+            // revoke against, so `lanBlockedByRotate` and `lanAssemblyOff` are routinely BOTH set
+            // at once. Checking `lanAssemblyOff` first (the original order) always won that race
+            // and reported the (real but less actionable) `db-invalid` reason while masking the
+            // fact that a rotation is stuck pending recovery — exactly the security-relevant state
+            // §6.7.1 requires `/webhub status` to surface ("lan off · rotate-pending · /webhub
+            // restart to retry"). `deps.lanConfigError` stays first: it implies `config.lan ===
+            // undefined` (the constructor guard above), so `hasLan` was `false` for the rotate
+            // recovery call and `lanBlockedByRotate` can never be true alongside it — no ordering
+            // conflict there.
+            { state: "off", reason: "rotate-pending" }
+          : lanAssemblyOff !== undefined
+            ? {
+                state: "off",
+                reason: lanAssemblyOff.reason,
+                ...(lanAssemblyOff.detail === undefined ? {} : { detail: lanAssemblyOff.detail }),
+              }
             : fe.lan !== undefined
               ? { state: "starting" }
               : undefined;

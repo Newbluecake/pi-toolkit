@@ -222,6 +222,43 @@ describe("startHub + LanAssembly.build() failures (plan section 1.4.2 / LD revie
     expect(readRotateIntentSync(paths.rotateIntentFile!).state).toBe("present");
   });
 
+  it("the SAME db-invalid + pending-rotate startup reports hub.json's initial lan status as rotate-pending, not db-invalid (acc32-B7 revised per verifier r_29729WTC: §6.7.1's priority between a blocked rotate and a broken LAN store)", async () => {
+    const home = tmp.make("wh-lan-offerror-rotate-priority-");
+    const fe = fakeFrontendWithLan();
+    const uid = process.getuid?.() ?? 0;
+    const paths = resolveHubPaths({ home, uid });
+    mkdirSync(paths.stateDir, { recursive: true });
+    writeRotateIntentSync(paths.rotateIntentFile!, {
+      v: 1,
+      id: newRotateIntentId(),
+      at: Date.now(),
+      by: "agent",
+      pid: 999,
+      phase: "token-written",
+    });
+    const offAssembly: LanAssembly = {
+      async build() {
+        throw new LanAssemblyOffError("db-invalid", "chmod 000");
+      },
+    };
+    const hub = await startHub(
+      { ...config({ home }), lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
+      fe,
+      { uid, lanAssembly: offAssembly },
+    );
+    if ("exists" in hub) throw new Error("unexpected exists");
+    hubs.push(hub);
+
+    // The rotate intent is kept (same fail-closed outcome as the test above) AND is stuck
+    // pending recovery — that fact must win the initial `hub.json` `lan` status over the (also
+    // true, but less actionable) `db-invalid` reason: before this fix, checking `lanAssemblyOff`
+    // ahead of `lanBlockedByRotate` always reported `db-invalid` here, hiding that a rotation was
+    // stuck. `/webhub status` reads this same field.
+    expect(readRotateIntentSync(paths.rotateIntentFile!).state).toBe("present");
+    const json = JSON.parse(readFileSync(paths.hubJson, "utf8")) as Record<string, unknown>;
+    expect(json["lan"]).toEqual({ state: "off", reason: "rotate-pending" });
+  });
+
   it("a non-LanAssemblyOffError build failure aborts startHub entirely (rejects, no RunningHub, hub.json never written)", async () => {
     const home = tmp.make("wh-lan-abort-");
     const fe = fakeFrontendWithLan();
