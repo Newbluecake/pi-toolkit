@@ -128,6 +128,16 @@ export interface WebHubStatusView {
   httpPort?: number;
   lastError?: string;
   stopMarker?: "absent" | "stopped" | "unknown";
+  /** acc32-B8 (plan §6.7.2): the marker's own timestamp, when `stopMarker === "stopped"` and the
+   * marker file's JSON carried one — lets `/webhub status` render "hub stopped since <time>".
+   * `statusLineText`'s compact HUD marker ignores this. */
+  stopMarkerAt?: number;
+  /** acc32-B8: the `readStopMarkerSync` error code, when `stopMarker === "unknown"` — lets
+   * `/webhub status` render "stop marker unreadable (<code>)". */
+  stopMarkerCode?: string;
+  /** acc32-B8: the stop-marker file path, when `stopMarker === "unknown"` — lets `/webhub status`
+   * render "check <path>". */
+  stopMarkerPath?: string;
   attached: boolean;
 }
 

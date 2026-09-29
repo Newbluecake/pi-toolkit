@@ -95,11 +95,24 @@ export function formatStatus(view: WebHubStatusView, url: { url: string } | { hi
   if (view.agentKey !== undefined) parts.push(`agentKey=${view.agentKey}`);
   if (view.hubVersion !== undefined) parts.push(`hub=${view.hubVersion}`);
   if (view.lastError !== undefined) parts.push(`lastError=${view.lastError}`);
-  // acc32-B8: surface the machine-level stop marker (connection.ts's `status()` now reads it) —
-  // `/webhub start` clears it and immediately spawns, so both messages point there.
-  if (view.stopMarker === "stopped") parts.push("stopped · /webhub start to resume");
-  else if (view.stopMarker === "unknown")
-    parts.push("autostart blocked · stop marker unreadable · /webhub start to retry");
+  // acc32-B8 (revised per verifier r_29729WTC, plan §6.7.2's exact wording): surface the
+  // machine-level stop marker (connection.ts's `status()` now reads it) with its full context —
+  // "stopped" carries the marker's own timestamp ("since <time>"), "unknown" carries the read
+  // error code and the marker file path so the operator knows what to go check. Both fall back to
+  // the plain (no-timestamp/no-code) wording when that extra data isn't available (older marker
+  // content, or a caller that hasn't populated it) rather than rendering a broken sentence.
+  if (view.stopMarker === "stopped") {
+    const since = view.stopMarkerAt !== undefined ? ` since ${new Date(view.stopMarkerAt).toISOString()}` : "";
+    parts.push(`hub stopped${since} · /webhub start to resume`);
+  } else if (view.stopMarker === "unknown") {
+    if (view.stopMarkerCode !== undefined && view.stopMarkerPath !== undefined) {
+      parts.push(
+        `autostart blocked · stop marker unreadable (${view.stopMarkerCode}) · check ${view.stopMarkerPath}, then /webhub start`,
+      );
+    } else {
+      parts.push("autostart blocked · stop marker unreadable · /webhub start to retry");
+    }
+  }
   if ("url" in url) parts.push(`url=${url.url.split("#")[0]!}`);
   else parts.push(url.hint);
   return parts.join(" ");

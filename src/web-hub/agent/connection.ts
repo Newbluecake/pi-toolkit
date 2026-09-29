@@ -368,9 +368,20 @@ class Connection implements HubConnection {
     // text already special-cases "stopped"/"unknown") but nothing ever populated it — read it
     // fresh here (mirrors `maybeSpawn()`'s own admission-time read; a plain `lstatSync`, cheap
     // and consistent with how `admin-cmds.ts`/`launcher.ts` already read it) so `/webhub status`
-    // and the HUD status line can actually surface "web stopped"/"web stop?".
+    // and the HUD status line can actually surface "web stopped"/"web stop?". Per plan §6.7.2's
+    // exact `/webhub status` wording, "stopped" needs the marker's timestamp and "unknown" needs
+    // the error code + the file path — carried on `stopMarkerAt`/`stopMarkerCode`/`stopMarkerPath`
+    // (statusLineText's compact HUD marker ignores all three).
     const stoppedFile = this.opts.paths.stoppedFile;
-    if (stoppedFile !== undefined) view.stopMarker = readStopMarkerSync(stoppedFile).state;
+    if (stoppedFile !== undefined) {
+      const read = readStopMarkerSync(stoppedFile);
+      view.stopMarker = read.state;
+      if (read.state === "stopped" && read.at !== undefined) view.stopMarkerAt = read.at;
+      else if (read.state === "unknown") {
+        view.stopMarkerCode = read.code;
+        view.stopMarkerPath = stoppedFile;
+      }
+    }
     return view;
   }
 

@@ -685,6 +685,20 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
       expect(conn.status().stopMarker).toBe("stopped");
     });
 
+    it("also surfaces the marker's own `at` timestamp as stopMarkerAt (acc32-B8 revised per verifier r_29729WTC, plan §6.7.2's 'hub stopped since <time>' wording)", () => {
+      const n = fakeNet();
+      const stopFile = `${tmp.dir}/stopped`;
+      writeStopMarkerSync(stopFile, { v: 1, at: 1_700_000_000_000, pid: 4242, by: "terminal" });
+      const conn = acquireConnection(
+        opts({ netConnect: n.netConnect, paths: { ...pathsIn(tmp.dir), stoppedFile: stopFile } }),
+      );
+      const status = conn.status();
+      expect(status.stopMarker).toBe("stopped");
+      expect(status.stopMarkerAt).toBe(1_700_000_000_000);
+      expect(status.stopMarkerCode).toBeUndefined();
+      expect(status.stopMarkerPath).toBeUndefined();
+    });
+
     it("no marker file present ⇒ stopMarker is 'absent', not left unset", () => {
       const n = fakeNet();
       const stopFile = `${tmp.dir}/stopped`; // never written
@@ -694,14 +708,18 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
       expect(conn.status().stopMarker).toBe("absent");
     });
 
-    it("an unreadable marker (not a regular file) reports 'unknown', not 'absent'", () => {
+    it("an unreadable marker (not a regular file) reports 'unknown', not 'absent', and carries the code + path (acc32-B8 revised per verifier r_29729WTC, plan §6.7.2's 'unreadable (<code>) · check <path>' wording)", () => {
       const n = fakeNet();
       const stopDir = `${tmp.dir}/stopped`; // a directory, not a file ⇒ E_NOT_REGULAR
       mkdirSync(stopDir);
       const conn = acquireConnection(
         opts({ netConnect: n.netConnect, paths: { ...pathsIn(tmp.dir), stoppedFile: stopDir } }),
       );
-      expect(conn.status().stopMarker).toBe("unknown");
+      const status = conn.status();
+      expect(status.stopMarker).toBe("unknown");
+      expect(status.stopMarkerCode).toBe("E_NOT_REGULAR");
+      expect(status.stopMarkerPath).toBe(stopDir);
+      expect(status.stopMarkerAt).toBeUndefined();
     });
 
     it("no `paths.stoppedFile` at all ⇒ stopMarker stays unset (never invents a value)", () => {

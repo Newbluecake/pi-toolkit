@@ -76,11 +76,36 @@ describe("formatStatus", () => {
     expect(line).toContain("stopped · /webhub start to resume");
   });
 
+  it("stopMarker:'stopped' + stopMarkerAt (acc32-B8 revised per verifier r_29729WTC, plan §6.7.2) renders 'hub stopped since <time> · /webhub start to resume'", () => {
+    const view: WebHubStatusView = {
+      state: "off",
+      attached: false,
+      stopMarker: "stopped",
+      stopMarkerAt: Date.parse("2026-01-02T03:04:05.000Z"),
+    };
+    const line = formatStatus(view, { hint: "hub 未运行" });
+    expect(line).toContain("hub stopped since 2026-01-02T03:04:05.000Z · /webhub start to resume");
+  });
+
   it("stopMarker:'unknown' (acc32-B8) appends an unreadable-marker hint", () => {
     const view: WebHubStatusView = { state: "off", attached: false, stopMarker: "unknown" };
     const line = formatStatus(view, { hint: "hub 未运行" });
     expect(line).toContain("autostart blocked");
     expect(line).toContain("stop marker unreadable");
+  });
+
+  it("stopMarker:'unknown' + code/path (acc32-B8 revised per verifier r_29729WTC, plan §6.7.2) renders the full 'unreadable (<code>) · check <path>, then /webhub start' text", () => {
+    const view: WebHubStatusView = {
+      state: "off",
+      attached: false,
+      stopMarker: "unknown",
+      stopMarkerCode: "EACCES",
+      stopMarkerPath: "/tmp/wh/stopped",
+    };
+    const line = formatStatus(view, { hint: "hub 未运行" });
+    expect(line).toContain(
+      "autostart blocked · stop marker unreadable (EACCES) · check /tmp/wh/stopped, then /webhub start",
+    );
   });
 
   it("stopMarker:'absent' (or unset) adds no extra text", () => {
