@@ -714,6 +714,12 @@ function createRouteSet(
             ...(e.data === undefined ? {} : { data: e.data }),
           });
           break;
+        case "hub":
+          // acc32-B6: mirrors `openEvents`' own connect-time "hub" send below — same shape, so
+          // the frontend's `case "hub"` reducer (already written for repeated frames) needs no
+          // changes.
+          sse.publish("hub", { ...routeDeps.info(), port: routeDeps.port() });
+          break;
       }
     } catch (err) {
       routeDeps.log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });

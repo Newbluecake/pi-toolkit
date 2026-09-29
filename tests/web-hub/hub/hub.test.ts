@@ -157,6 +157,65 @@ describe("startHub", () => {
   });
 });
 
+describe('startHub — hub_ctl{reason:"stop"} sets info.state and broadcasts (acc32-B6)', () => {
+  it("sets info.state to 'stopping' and pushes a live 'hub' bus event before closing", async () => {
+    const home = tmp.make("wh-hub-stop-");
+    const fe = fakeFrontend();
+    const hub = await start(home, fe);
+    const feDeps = fe.deps[0]!;
+    expect(feDeps.info().state).toBeUndefined();
+
+    const events: string[] = [];
+    let stateAtHubEvent: string | undefined;
+    feDeps.bus.subscribe((e) => {
+      events.push(e.type);
+      // Read `info()` synchronously inside the subscriber, in the same tick as the publish —
+      // `close()`'s own `supersede?.dispose()` (its first step) unconditionally deletes
+      // `info.state` moments later, so polling `info()` any LATER than this would already see
+      // it wiped back to `undefined` regardless of whether this fix works.
+      if (e.type === "hub") stateAtHubEvent = feDeps.info().state;
+    });
+
+    const client = await connectClient(hub.paths.socketPath);
+    client.send(hello());
+    await client.waitFrame((f) => f["t"] === "hello_ack");
+    client.send({ t: "hub_ctl", rid: "rid-stop", op: "shutdown", reason: "stop" });
+    await client.waitFrame((f) => f["t"] === "hub_ctl_ack");
+
+    // Before the fix, `info.state` was only ever mutated by the supersede (`restart`) path —
+    // the stop path left it `undefined` forever and never touched the bus, so an already-
+    // connected browser had no way to distinguish an intentional stop from a dropped connection.
+    expect(events).toContain("hub");
+    expect(stateAtHubEvent).toBe("stopping");
+
+    hubs.length = 0; // hub.close() is already underway (own path), don't double-close in afterEach
+    await hub.closed;
+    client.sock.destroy();
+  });
+
+  it("a plain restart (old ctl.v1 fallback / real /webhub restart) leaves info.state untouched", async () => {
+    const home = tmp.make("wh-hub-restart-");
+    const fe = fakeFrontend();
+    const hub = await start(home, fe);
+    const feDeps = fe.deps[0]!;
+    const events: string[] = [];
+    feDeps.bus.subscribe((e) => events.push(e.type));
+
+    const client = await connectClient(hub.paths.socketPath);
+    client.send(hello());
+    await client.waitFrame((f) => f["t"] === "hello_ack");
+    client.send({ t: "hub_ctl", rid: "rid-restart", op: "shutdown", reason: "restart" });
+    await client.waitFrame((f) => f["t"] === "hub_ctl_ack");
+
+    expect(feDeps.info().state).toBeUndefined();
+    expect(events).not.toContain("hub");
+
+    hubs.length = 0;
+    await hub.closed;
+    client.sock.destroy();
+  });
+});
+
 describe("installProcessHandlers", () => {
   it("SIGTERM ⇒ close('signal'); uninstall removes the listeners", async () => {
     const home = tmp.make("wh-hub-");

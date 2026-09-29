@@ -169,7 +169,20 @@ export async function startHub(
       limiter: () => lanDeps?.limiter,
       lan: () => fe.lan,
       lanStatus: () => hubJson.current()?.lan,
-      shutdown: (reason) => void close(reason),
+      shutdown: (reason) => {
+        // acc32-B6: only the NEW `reason:"stop"` protocol value maps to the dedicated "hub 已由
+        // 终端停止" banner — `info.state` used to only ever get set by the supersede path
+        // (`restart` below), so the stop path left it `undefined` and never broadcast anything,
+        // meaning a still-connected browser only ever saw the SSE connection drop (the generic
+        // "reconnecting" copy) with no way to distinguish an intentional stop from a network
+        // blip. `reason:"restart"` (old-agent `ctl.v1` fallback, or a real `/webhub restart`) is
+        // deliberately left alone — it is expected to bounce right back up.
+        if (reason === "stop") {
+          info.state = "stopping";
+          registry.publish({ type: "hub" });
+        }
+        void close(reason);
+      },
       now,
       // §6.7.1 (C8): same lazy-closure pattern as the getters above — `fe`/`lanDeps` aren't
       // declared until further down this same function body, but these closures are only ever

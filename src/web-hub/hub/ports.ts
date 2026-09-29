@@ -399,7 +399,15 @@ export type HubEvent =
   | { type: "dialogs"; agentKey: string; epoch: string; open: DialogWire[]; closed: DialogClosedWire[] }
   | { type: "ctl"; agentKey: string; epoch: string; sessionId: string; items: CtlItemWire[] }
   | { type: "commands"; agentKey: string; epoch: string; items: CommandInfoWire[] }
-  | { type: "cmd_late"; agentKey: string; id: string; op: CmdOp; ok: boolean; code?: CmdErrorCode; data?: CmdData };
+  | { type: "cmd_late"; agentKey: string; id: string; op: CmdOp; ok: boolean; code?: CmdErrorCode; data?: CmdData }
+  /** acc32-B6: a live push of the hub-level info snapshot (state/caps/supersede*) to every
+   * already-connected browser — without this, `info.state` mutations (e.g. "stopping") are only
+   * ever seen by a client that connects/reconnects AFTER the change; a live client's SSE
+   * connection just drops when the hub actually exits, showing the generic "reconnecting" copy
+   * instead of `HubStateBanner`'s dedicated stopped/restarting text. `http.ts`'s `onHubEvent`
+   * forwards this as the SAME "hub" SSE event name `openEvents`' connect-time send already uses
+   * (`logic/state.js`'s `case "hub"` already merges repeated frames of that name). */
+  | { type: "hub" };
 
 export interface HubBus {
   subscribe(fn: (e: HubEvent) => void): () => void;
