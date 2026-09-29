@@ -348,6 +348,9 @@ function toCard(v: AgentView): AgentCard {
   };
   if (v.session !== undefined) card.session = v.session;
   if (v.status !== undefined) card.status = v.status;
+  if (v.control !== undefined) card.control = v.control;
+  if (v.epoch !== undefined) card.epoch = v.epoch;
+  if (v.dialogs !== undefined) card.dialogs = v.dialogs;
   return card;
 }
 

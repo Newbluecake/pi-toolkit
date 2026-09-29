@@ -77,6 +77,23 @@ describe("GET /api/events", () => {
     expect(fe.clientCount()).toBe(1);
   });
 
+  it("agents snapshot carries control/epoch/dialogs (acc32-B1)", async () => {
+    deps.agents.set(
+      "a1",
+      makeAgent("a1", {
+        control: true,
+        epoch: "e1",
+        dialogs: { epoch: "e1", open: [{ dialogId: "ask:1", toolCallId: "1", allowCancel: true }], closed: [] },
+      }),
+    );
+    const { conn } = await events();
+    const cards = conn.events[2]!.data.agents as Array<Record<string, unknown>>;
+    const a1 = cards.find((c) => c.agentKey === "a1")!;
+    expect(a1.control).toBe(true);
+    expect(a1.epoch).toBe("e1");
+    expect(a1.dialogs).toMatchObject({ epoch: "e1", open: [{ dialogId: "ask:1" }] });
+  });
+
   it("global bus events reach every client; ev/gap only subscribers", async () => {
     const one = await events();
     const two = await events();
