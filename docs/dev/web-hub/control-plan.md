@@ -1289,6 +1289,21 @@ ControlNotice 选择：`authMode==="password" && plaintext` ⇒ plainHttp；`pas
 
 **遗留真机项（更新）**：步骤 10（手机/iOS，用户肉眼）；步骤 17 自动压缩分支；步骤 19 late/dup 微秒窗口；步骤 32 的 drain 期提交终态（见备注⑦）；accfix-N1 修复后应重验步骤 8 后半/26/32 的「恢复可答」。
 
+### 修复复验第二轮（accf2，2026-09-29）
+
+环境同 accfix 配方（tmux 驱动隔离 pi 实例：`HOME=/tmp/accf2-home`，cwd `/tmp/accf2-scratch`，deepseek/deepseek-flash；hub loopback 7978 / LAN 7979，全程未碰真实 hub 7878/7879——真实 hub pid 261705 前后一致；Playwright chromium 持久页 ×3 标签，自写 `/tmp` HTTP driver）。master HEAD `359b39a`（含 B3/N1/N2/N3 四个修复提交），`dist/web-hub-ui` 在 HEAD 重建（build-info commit `359b39a9a043`）。只复验、未改任何产品代码。
+
+| bug                | 结果 | 复验证据（对照原现象）                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------ | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| acc32-B3（第二轮） | ✅   | 本标签（tab a）网页作答 ⇒ 折叠文案「**Answered**」（closedHere 本页归因；修复前恒「Answered in another browser」，3/3 复现）；另一标签（tab b）⇒ 仍「Answered in another browser」✓。佐证：TUI `ask_user answered by web (local@127.0.0.1)`、审计 `dialog_answer ok:true dialogId:ask:call_00_AmItUn66EqPJf2qcv7DC3067`、closed 帧带 cmdId。修复（AgentDetail 本地生成 cmdId 并同步 track，不再读 props.pendingCtl）生效；后续 D4 作答再次一致（「Answered」，cmdId `Rb7lVG_qXJ8VlaLRUe7Yvg`）。 |
+| accfix-N1          | ✅   | ask_user 打开时 kill -9 hub（pid 2311090→2330935，agent 自动重拉）⇒ 页面**不刷新**表单重现：radio 组名 `ask-q-0`×3（修复前 `ask-q--1`）、单选互斥正常（checked `[false,true,false]`）、选中后 Submit 转 enabled、点击**真实提交成功**——审计 `dialog_answer ok:true dialogId:ask:call_00_ET_wPmhsceoedpHwmkC7R9k8851`、TUI `ask_user answered by web`、折叠「Answered」。「恢复可答」整链成立（前轮只成立一半）。                                                                                 |
+| accfix-N2          | ✅   | pi 连着 hub 时新开浏览器标签（tab c）⇒ SSE `agents` 快照帧**已带 `commands` 槽**（tasklist/mem/cache-ttl/goal/agent/task…）；该标签输入 `/n` 命令面板**立即**弹出补全 `/name`、`/new` + cmd 徽标（修复前快照丢槽、须等下一次 commands 发布，附着即恒无 palette）。                                                                                                                                                                                                                               |
+| accfix-N3          | ✅   | 终端作答（TUI 选「狗」）⇒ 网页折叠文案「**Answered in the terminal**」（不裸「Dialog closed」）；再开 D4 作答制造一次发布，closed[] 按 TTL(120s) 整批驱逐（实测发布后仅剩 D4 一条 ⇒ N3 记录已不在线上帧里），折叠条**仍**显示「Answered in the terminal」——首次判定缓存生效，页面全文无「Dialog closed」。                                                                                                                                                                                       |
+
+**方法学备注（增量）**：⑧ driver 触发命令面板须用原生 value setter + `InputEvent`，且裸 `/` 不展开补全、`/n` 这类带前缀输入才展开（`parseSlash` 行为）；⑨ ask_user 的 radio 无 aria-label（选项文本在 label 内），driver 按索引点击更稳；⑩ closed[] 的 TTL 驱逐只在下一次 dialogs 发布时发生（无独立定时器）——验证驱逐语义须再制造一次发布，单等 120s 不够。
+
+**遗留真机项（更新）**：步骤 10（手机/iOS，用户肉眼）；步骤 17 自动压缩分支；步骤 19 late/dup 微秒窗口；步骤 32 的 drain 期提交终态（见备注⑦）。本轮 4 项全绿，无新发现问题。
+
 ---
 
 ## 11. 风险与回滚
