@@ -20,7 +20,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, provide, ref, watch } from "vue";
-import { mergeQueue } from "@logic/control.js";
+import { mergeQueue, newCmdId } from "@logic/control.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
 import type { AgentDetailEmits, AgentDetailProps } from "../../contracts.js";
@@ -158,31 +158,28 @@ const hubSuspended = computed(() => hub?.state.value.hubState === "restarting");
 const seenOpen = new Set<string>();
 const folded = ref<readonly string[]>([]);
 
-/** acc32-B3: cmdIds THIS browser tab generated when answering/cancelling a dialog, keyed by
- * dialogId — `foldedNote` below compares a `closed{by:"web"}` record's `cmdId` against this to
- * tell "answered here" apart from "answered in a DIFFERENT browser tab" (both are `by:"web"`). */
+/** acc32-B3 (accfix): cmdIds THIS browser tab generated when answering/cancelling a dialog,
+ * keyed by dialogId — `foldedNote` below compares a `closed{by:"web"}` record's `cmdId` against
+ * this to tell "answered here" apart from "answered in a DIFFERENT browser tab" (both are
+ * `by:"web"`).
+ *
+ * accfix fix: the id is generated and recorded HERE, synchronously, before `control.answerDialog`/
+ * `cancelDialog` is even called — not read back out of `props.agent.pendingCtl` afterwards. The
+ * optimistic `pendingCtl` item lands in the reducer's `raw` state synchronously, but `props.agent`
+ * only reflects it once `useHub`'s render gate commits the next `state.value` snapshot (a
+ * throttled, deferred commit — see useHub.ts's `gate.request()`), which has NOT happened yet at
+ * the point right after the call returns. Reading `pendingCtl.value` there therefore always saw
+ * the PREVIOUS props snapshot ⇒ `mine` was permanently false. Generating the id ourselves and
+ * passing it straight into `control.answerDialog`/`cancelDialog` (which accept it as an optional
+ * override, defaulting to their own `newCmdId()` otherwise) sidesteps props timing entirely. */
 const myDialogCmdIds = new Map<string, Set<string>>();
-function trackOwnDialogCmdId(dialogId: string): void {
-  // `answerDialog`/`cancelDialog` dispatch their optimistic `pendingCtl` item synchronously
-  // before returning (useControl.ts's `sendDialog`), so the newest matching entry right after
-  // the call already carries the id just generated for this submission.
-  const pc = pendingCtl.value;
-  for (let i = pc.length - 1; i >= 0; i--) {
-    const it = pc[i]!;
-    if (
-      it["dialogId"] === dialogId &&
-      (it["kind"] === "dialog_answer" || it["kind"] === "dialog_cancel") &&
-      typeof it["id"] === "string"
-    ) {
-      let set = myDialogCmdIds.get(dialogId);
-      if (set === undefined) {
-        set = new Set();
-        myDialogCmdIds.set(dialogId, set);
-      }
-      set.add(it["id"]);
-      return;
-    }
+function trackOwnDialogCmdId(dialogId: string, id: string): void {
+  let set = myDialogCmdIds.get(dialogId);
+  if (set === undefined) {
+    set = new Set();
+    myDialogCmdIds.set(dialogId, set);
   }
+  set.add(id);
 }
 watch(
   openDialogs,
@@ -249,15 +246,17 @@ function dialogOutcome(p: Promise<CmdOutcome>): void {
 function onDialogAnswer(dialogId: string, answers: unknown): void {
   const c = control.value;
   if (!c) return;
-  dialogOutcome(c.answerDialog(props.agent.key, dialogId, dialogsEpoch.value, answers));
-  trackOwnDialogCmdId(dialogId);
+  const id = newCmdId();
+  trackOwnDialogCmdId(dialogId, id);
+  dialogOutcome(c.answerDialog(props.agent.key, dialogId, dialogsEpoch.value, answers, id));
 }
 
 function onDialogCancel(dialogId: string): void {
   const c = control.value;
   if (!c) return;
-  dialogOutcome(c.cancelDialog(props.agent.key, dialogId, dialogsEpoch.value));
-  trackOwnDialogCmdId(dialogId);
+  const id = newCmdId();
+  trackOwnDialogCmdId(dialogId, id);
+  dialogOutcome(c.cancelDialog(props.agent.key, dialogId, dialogsEpoch.value, id));
 }
 
 // --- follow-scroll plumbing (P3 original) ---------------------------------------------------

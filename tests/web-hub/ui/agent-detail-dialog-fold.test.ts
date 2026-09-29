@@ -8,11 +8,19 @@ import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlC
 import type { AgentState, CmdOutcome, ControlHandle, HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
 
 /**
- * AgentDetail.vue's `foldedNote()` (control-plan.md v2.1 §7.4/§5.4/§5.5 — C5, acc32-B3): a
- * `dialogs.closed[].by === "web"` record means SOME browser tab answered — comparing its
- * `cmdId` against the ids THIS mount generated (`trackOwnDialogCmdId`) tells "answered here"
- * apart from "answered in a different browser tab", which used to collapse to the same
- * (wrong, for the local case) "Answered in another browser" text.
+ * AgentDetail.vue's `foldedNote()` (control-plan.md v2.1 §7.4/§5.4/§5.5 — C5, acc32-B3 /
+ * accfix-B3): a `dialogs.closed[].by === "web"` record means SOME browser tab answered —
+ * comparing its `cmdId` against the ids THIS mount generated (`trackOwnDialogCmdId`) tells
+ * "answered here" apart from "answered in a different browser tab", which used to collapse to
+ * the same (wrong, for the local case) "Answered in another browser" text.
+ *
+ * accfix-B3 root cause: the id used to be recovered by scanning `props.agent.pendingCtl` right
+ * after the (fire-and-forget) `answerDialog`/`cancelDialog` call returned — but `props.agent` is
+ * a throttled render-gate snapshot (`useHub.ts`) that only updates on its own commit cadence, so
+ * that scan always saw the PREVIOUS snapshot and `mine` was permanently false. These tests'
+ * fake `ControlHandle` therefore deliberately does NOT mutate `agent.pendingCtl` at all — the fix
+ * must work from the id `AgentDetail.vue` generates and passes INTO `answerDialog`/`cancelDialog`
+ * itself, never from reading it back out of props.
  */
 
 const mounted: Array<ReturnType<typeof mount>> = [];
@@ -87,20 +95,17 @@ function fakeControl(over: Partial<ControlHandle> = {}): ControlHandle {
   };
 }
 
-describe("AgentDetail.vue — ask_user close-fold attribution (acc32-B3)", () => {
+describe("AgentDetail.vue — ask_user close-fold attribution (acc32-B3 / accfix-B3)", () => {
   it("this tab's own successful answer folds to a local 'answered' note, not 'another browser'", async () => {
     const agent = baseAgent();
     agent.dialogs = { epoch: "e1", open: [dialogWire("ask:1")], closed: [] };
-    let nextId = 0;
+    let capturedId: string | undefined;
     const control = fakeControl({
-      answerDialog: async (_agentKey, dialogId): Promise<CmdOutcome> => {
-        const id = `mine-${(nextId += 1)}`;
-        // Mirrors useControl.ts's `sendDialog`: the optimistic pendingCtl item lands
-        // synchronously, before this async function's caller even sees the returned promise.
-        (agent as unknown as { pendingCtl: unknown[] }).pendingCtl = [
-          ...((agent.pendingCtl as unknown[]) ?? []),
-          { id, kind: "dialog_answer", dialogId, state: "sending", at: 0 },
-        ];
+      // Deliberately does NOT touch `agent.pendingCtl` — the accfix-B3 regression is that the
+      // OLD code depended on that side channel (which lags props by a render-gate commit) to
+      // recover the id; the fix must work purely from the id passed INTO this call.
+      answerDialog: async (_agentKey, _dialogId, _epoch, _answers, id): Promise<CmdOutcome> => {
+        capturedId = id;
         return { ok: true };
       },
     });
@@ -109,14 +114,14 @@ describe("AgentDetail.vue — ask_user close-fold attribution (acc32-B3)", () =>
     expect(form.exists()).toBe(true);
     await form.vm.$emit("answer", [{ selected: ["A"], other: null }]);
     await nextTick();
-    const mineId = (agent.pendingCtl as Array<{ id: string }>)[0]!.id;
+    expect(capturedId).toBeDefined();
 
     // The dialog leaves `open`, and `closed[]` reports it answered by "web" with the SAME cmdId
-    // this tab's `answerDialog()` call just generated.
+    // this tab's `answerDialog()` call just generated and passed in.
     agent.dialogs = {
       epoch: "e1",
       open: [],
-      closed: [{ dialogId: "ask:1", by: "web", outcome: "answered", cmdId: mineId, at: 2 }],
+      closed: [{ dialogId: "ask:1", by: "web", outcome: "answered", cmdId: capturedId, at: 2 }],
     };
     await nextTick();
     await nextTick();
@@ -146,5 +151,38 @@ describe("AgentDetail.vue — ask_user close-fold attribution (acc32-B3)", () =>
     const note = w.find(".ask-folded");
     expect(note.exists()).toBe(true);
     expect(note.text()).toBe("Answered in another browser");
+  });
+
+  it("attribution does not depend on props.agent.pendingCtl reflecting the optimistic item yet (accfix-B3 regression)", async () => {
+    // Simulates the exact failure mode: `props.agent` never gets an updated `pendingCtl` at all
+    // during this test (the render-gate commit that would normally do so never happens here) —
+    // the OLD `trackOwnDialogCmdId` that scanned `pendingCtl.value` would have found nothing and
+    // permanently reported `mine === false`.
+    const agent = baseAgent();
+    agent.dialogs = { epoch: "e1", open: [dialogWire("ask:3")], closed: [] };
+    expect(agent.pendingCtl).toEqual([]);
+    let capturedId: string | undefined;
+    const control = fakeControl({
+      answerDialog: async (_agentKey, _dialogId, _epoch, _answers, id): Promise<CmdOutcome> => {
+        capturedId = id;
+        return { ok: true }; // agent.pendingCtl is intentionally left untouched
+      },
+    });
+    const w = mountDetail(agent, control);
+    const form = w.findComponent(AskUserForm);
+    await form.vm.$emit("answer", [{ selected: ["A"], other: null }]);
+    await nextTick();
+    expect(agent.pendingCtl).toEqual([]); // still untouched — proves attribution didn't need it
+
+    agent.dialogs = {
+      epoch: "e1",
+      open: [],
+      closed: [{ dialogId: "ask:3", by: "web", outcome: "answered", cmdId: capturedId, at: 2 }],
+    };
+    await nextTick();
+    await nextTick();
+
+    const note = w.find(".ask-folded");
+    expect(note.text()).toBe("Answered");
   });
 });

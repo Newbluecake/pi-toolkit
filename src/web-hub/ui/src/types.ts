@@ -131,8 +131,11 @@ export interface ControlHandle {
   abort(agentKey: string): Promise<CmdOutcome>;
   steerSub(agentKey: string, runId: string, text: string): Promise<CmdOutcome>;
   stopSub(agentKey: string, runId: string): Promise<CmdOutcome>;
-  answerDialog(agentKey: string, dialogId: string, epoch: string, answers: unknown): Promise<CmdOutcome>;
-  cancelDialog(agentKey: string, dialogId: string, epoch: string): Promise<CmdOutcome>;
+  // `id` is optional (defaults to a freshly generated one inside `createControl`) — the caller
+  // may instead generate it itself and pass it through, so it can be tracked synchronously
+  // BEFORE the wire round-trip settles (acc32-B3 fix, see AgentDetail.vue's `onDialogAnswer`).
+  answerDialog(agentKey: string, dialogId: string, epoch: string, answers: unknown, id?: string): Promise<CmdOutcome>;
+  cancelDialog(agentKey: string, dialogId: string, epoch: string, id?: string): Promise<CmdOutcome>;
   runCommand(agentKey: string, name: string, args: string, opts?: { confirm?: true }): Promise<CmdOutcome>;
   query(agentKey: string, id: string): Promise<CmdOutcome>;
   retry(agentKey: string, id: string): Promise<CmdOutcome>;

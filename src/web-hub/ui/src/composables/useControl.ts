@@ -125,8 +125,7 @@ export function createControl(
         { agentKey, id, op: "abort_subagent", runId },
       );
     },
-    answerDialog: (agentKey, dialogId, epoch, answers) => {
-      const id = newCmdId();
+    answerDialog: (agentKey, dialogId, epoch, answers, id = newCmdId()) => {
       return sendDialog(
         agentKey,
         { id, kind: "dialog_answer", dialogId, state: "sending", at: now() },
@@ -140,8 +139,7 @@ export function createControl(
         },
       );
     },
-    cancelDialog: (agentKey, dialogId, epoch) => {
-      const id = newCmdId();
+    cancelDialog: (agentKey, dialogId, epoch, id = newCmdId()) => {
       return sendDialog(
         agentKey,
         { id, kind: "dialog_cancel", dialogId, state: "sending", at: now() },
