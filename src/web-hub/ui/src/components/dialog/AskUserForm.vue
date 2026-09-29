@@ -72,7 +72,24 @@ function saveDraft(): void {
 
 const suspended = computed(() => props.suspended === true);
 
-provide(ASK_FORM, { questions: questions.value, selections, suspended, saveDraft });
+// accfix-N1: `questions` must stay a LIVE view, not a one-time snapshot of `questions.value` —
+// this component's <script setup> runs once per mount, but `props.dialog` (and therefore
+// `questions.value`) can be replaced with a new array (same dialogId, different array/item
+// identity) later without a remount, e.g. when a hub restart/version-replace restores this
+// dialog's slot in place. `AskUserQuestion.vue` looks itself up via
+// `form.questions.indexOf(props.question)` (object identity), so a stale snapshot here made
+// that lookup fail forever (`index === -1` ⇒ radio group name `ask-q--1`, every selection
+// silently dropped, Submit stuck disabled). A getter keeps `form.questions` reading the
+// current computed value on every access, so it advances in lockstep with the live `questions`
+// the template's `v-for` hands to `AskUserQuestion` as `props.question`.
+provide(ASK_FORM, {
+  get questions() {
+    return questions.value;
+  },
+  selections,
+  suspended,
+  saveDraft,
+});
 
 // --- tabs (multi-question; §7.4 "多题 = 顶部 tab（header）") ---
 const activeTab = ref(0);

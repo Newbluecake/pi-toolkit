@@ -233,3 +233,62 @@ describe("AskUserForm.vue — drafts (§3.5) + suspended (v2.1)", () => {
     expect(env.dialogDrafts.size).toBe(0);
   });
 });
+
+describe("AskUserForm.vue — restored dialog reference stays selectable (accfix-N1)", () => {
+  it("props.dialog replaced in place (same dialogId, new questions array/items) still yields a stable radio group and a submittable form", async () => {
+    // Mirrors a hub-restart/version-replace restore: the SAME mounted AskUserForm (dialogId
+    // and epoch unchanged ⇒ AgentDetail's `:key` doesn't remount it) receives a brand new
+    // `dialog` prop object whose `questions` array (and its item objects) are NEW references
+    // with equal content — exactly what a fresh subscribe snapshot after a hub reconnect sends.
+    const w = mountForm(SINGLE);
+    const radioBefore = w.find("input[type='radio']");
+    expect(radioBefore.attributes("name")).toBe("ask-q-0");
+
+    const restored = {
+      ...SINGLE,
+      questions: SINGLE.questions.map((q) => ({ ...q, options: q.options.map((o) => ({ ...o })) })),
+    };
+    await w.setProps({ dialog: restored });
+
+    // accfix-N1 regression: the OLD code kept a snapshot of the ORIGINAL `questions` array in
+    // the ASK_FORM context, so `AskUserQuestion`'s `indexOf(props.question)` against the NEW
+    // question object always returned -1 — `inputName` degenerated to `ask-q--1` and every
+    // selection was silently dropped by `setSelected`'s `i < 0` guard, leaving Submit disabled
+    // forever.
+    const radioAfter = w.find("input[type='radio']");
+    expect(radioAfter.attributes("name")).toBe("ask-q-0");
+
+    await radioAfter.setValue(true);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: ["Plan A — rewrite"], other: null }]]]);
+  });
+
+  it("restored multi-question dialog: each question keeps its own distinct, matching index", async () => {
+    const w = mountForm(MULTI);
+    const restored = {
+      ...MULTI,
+      questions: MULTI.questions.map((q) => ({ ...q, options: q.options.map((o) => ({ ...o })) })),
+    };
+    await w.setProps({ dialog: restored });
+
+    const tabs = w.findAll("[data-question-tab]");
+    await w.findAll(".ask-question")[0]!.find("input[type='radio']").setValue(true);
+    await tabs[1]!.trigger("click");
+    await w.findAll(".ask-question")[1]!.findAll("input[type='checkbox']")[0]!.setValue(true);
+    await tabs[2]!.trigger("click");
+    await w.findAll(".ask-question")[2]!.find("input[type='radio']").setValue(true);
+
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([
+      [
+        [
+          { selected: ["staging"], other: null },
+          { selected: ["unit + integration green"], other: null },
+          { selected: ["nothing — proceed"], other: null },
+        ],
+      ],
+    ]);
+  });
+});
