@@ -95,6 +95,22 @@ describe("createOriginEntry — notify (U6/D18)", () => {
     };
     expect(() => port.notify(ctx, "abort", LOOPBACK_ORIGIN)).not.toThrow();
   });
+
+  it("passes type:'warning' when avoidStatusMerge is requested (acc32-B5: the only ctx.ui.notify type pi's showStatus() merge-dedup does not apply to)", () => {
+    const { pi } = fakePi();
+    const port = createOriginEntry(pi);
+    const { ctx, state } = fakeCtx({ mode: "tui" });
+    port.notify(ctx, "/probe-cmd", LOOPBACK_ORIGIN, { avoidStatusMerge: true });
+    expect(state.notifyCalls).toEqual([["web ▸ /probe-cmd · loopback 127.0.0.1 · #9b0e11aa", "warning"]]);
+  });
+
+  it("keeps the plain (undefined) type when avoidStatusMerge is false/omitted", () => {
+    const { pi } = fakePi();
+    const port = createOriginEntry(pi);
+    const { ctx, state } = fakeCtx({ mode: "tui" });
+    port.notify(ctx, "/agent", LOOPBACK_ORIGIN, { avoidStatusMerge: false });
+    expect(state.notifyCalls).toEqual([["web ▸ /agent · loopback 127.0.0.1 · #9b0e11aa", undefined]]);
+  });
 });
 
 describe("registerOriginEntryRenderer (D27/K23: must return a real pi-tui Component)", () => {

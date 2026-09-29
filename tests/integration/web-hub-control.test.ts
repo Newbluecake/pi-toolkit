@@ -1100,7 +1100,7 @@ describe("web-hub control-plane integration (#32 C7) — command output capture"
     expect(env.ctxState.notifyCalls.some(([msg]) => msg.includes("web ▸ /agent"))).toBe(true);
   }, 15_000);
 
-  it("a third-party command registered on the RAW (unwrapped) pi reference is never captured, and its own terminal notify is not clobbered by our origin-attribution notify (acc32-B5)", async () => {
+  it("a third-party command registered on the RAW (unwrapped) pi reference is never captured, and both its own terminal notify and our origin-attribution notify are visible, in order (acc32-B5 revised per verifier r_29729WTC)", async () => {
     env = await setup();
     env.pi.pi.registerCommand("thirdparty", {
       handler: (_args: string, ctx: ExtensionCommandContext) => {
@@ -1116,12 +1116,19 @@ describe("web-hub control-plane integration (#32 C7) — command output capture"
     expect(res.status).toBe(200);
     const body = JSON.parse(res.body) as { data: { captured?: boolean } };
     expect(body.data.captured).toBe(false);
-    // The third-party handler's own notify is the ONLY place its output is ever visible
-    // (captured:false ⇒ the web side never sees it either) — pi's real `showStatus()` merges
-    // back-to-back status lines added with nothing else in between, so firing our own
-    // "web ▸ /thirdparty …" attribution notify right after would have silently overwritten it.
-    expect(env.ctxState.notifyCalls.some(([msg]) => msg === "third party output")).toBe(true);
-    expect(env.ctxState.notifyCalls.some(([msg]) => msg.includes("web ▸ /thirdparty"))).toBe(false);
+    // Plan §0.2/U6 requires a terminal notify for every successful non-prompt write op, third-
+    // party commands included, so both calls must fire, in order: the third-party handler's own
+    // notify first (run synchronously inside builtinBridge.execute()), then our attribution
+    // notify. Pitfall (see OriginEntryPort.notify's doc comment): pi's real `showStatus()` merges
+    // back-to-back status lines added with nothing else in between — our attribution notify is
+    // therefore sent as `ctx.ui.notify(msg, "warning")`, the one type pi routes to `showWarning`
+    // (always appends, never merges) instead of the merging `showStatus` path, so it cannot
+    // silently overwrite the command's own line in a real TUI.
+    const thirdPartyIdx = env.ctxState.notifyCalls.findIndex(([msg]) => msg === "third party output");
+    const originIdx = env.ctxState.notifyCalls.findIndex(([msg]) => msg.includes("web ▸ /thirdparty"));
+    expect(thirdPartyIdx).toBeGreaterThanOrEqual(0);
+    expect(originIdx).toBeGreaterThan(thirdPartyIdx);
+    expect(env.ctxState.notifyCalls[originIdx]?.[1]).toBe("warning");
   }, 15_000);
 });
 

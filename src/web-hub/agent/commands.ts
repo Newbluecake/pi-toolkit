@@ -447,21 +447,23 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     settleAndReply(frame, result);
     if (result.ok) {
-      // acc32-B5: pi's own `showStatus()` merges consecutive chat-status lines when nothing else
-      // was added to the transcript in between ("avoid log spam") — for an UNCAPTURED extension
-      // command (a third party's, run synchronously inside `builtinBridge.execute()` above,
-      // strictly before this line), the command's OWN `ctx.ui.notify(...)` call already landed
-      // in that same slot; firing our own "web ▸ /name …" attribution notify right after would
-      // silently OVERWRITE it (dedup, not append) — the only place a third-party command's
-      // output was ever visible at all, since `captured:false` means the web side never gets it
-      // either. Skip our own notify for exactly that case; pi-toolkit's own (captured) commands
-      // keep it — their real output also reaches the web via `capture`, so even a clobbered
-      // terminal line loses nothing.
+      // acc32-B5 (revised per verifier r_29729WTC): plan §0.2/U6 requires a terminal notify for
+      // EVERY successful non-prompt write op, third-party commands included — the earlier fix
+      // that skipped our own notify entirely for an UNCAPTURED extension command (a third
+      // party's, run synchronously inside `builtinBridge.execute()` above) restored that
+      // command's own notify visibility but silently dropped ours, which the plan does not
+      // allow. Both notifies now always fire; for the uncaptured-extension case specifically we
+      // pass `avoidStatusMerge: true` so ours doesn't silently overwrite the command's own
+      // `ctx.ui.notify(...)` call that just landed in the same pi `showStatus()` merge slot (see
+      // `OriginEntryPort.notify`'s doc comment for the underlying pi pitfall) — the only place a
+      // third-party command's output was ever visible at all, since `captured:false` means the
+      // web side never gets it either. Ordinary (own/captured/template) commands keep the plain
+      // style: there is no immediately-preceding foreign notify to protect against.
       const uncapturedExtension =
         result.data.op === "command" && result.data.kind === "extension" && result.data.captured !== true;
-      if (!uncapturedExtension) {
-        const ctx = deps.getCtx();
-        if (ctx !== undefined) deps.originEntry.notify(ctx, `/${cmd.name}`, frame.origin);
+      const ctx = deps.getCtx();
+      if (ctx !== undefined) {
+        deps.originEntry.notify(ctx, `/${cmd.name}`, frame.origin, { avoidStatusMerge: uncapturedExtension });
       }
     }
   }

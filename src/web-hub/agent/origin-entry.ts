@@ -35,8 +35,21 @@ export interface OriginEntryPort {
   appendOrigin(op: CmdOp, cmdId: string, origin: CmdOrigin, deliver?: "steer" | "followUp"): void;
   /** U6/D18: one compact notify line for a *successful* non-prompt write op. `opLabel` is the
    * caller-built op description (e.g. `"stop subagent r_58XP"`, `"/compact"`). No-ops outside
-   * `tui && hasUI`, and swallows any failure. */
-  notify(ctx: ExtensionContext, opLabel: string, origin: CmdOrigin): void;
+   * `tui && hasUI`, and swallows any failure.
+   *
+   * acc32-B5 pitfall (documented here, not just at the call site): pi's interactive-mode
+   * `showStatus()` merges two *consecutive* chat-status lines into one when nothing else was
+   * added to the transcript in between ("avoid log spam" — it compares the chat container's
+   * last two children against the ones its own previous `showStatus` call added, not by
+   * timing). `ctx.ui.notify(msg)` / `ctx.ui.notify(msg, "info")` both route to that merging
+   * `showStatus` path; only `"warning"`/`"error"` route to `showWarning`/`showError`, which
+   * *always* append unconditionally and never touch the merge-tracking state. So when a call
+   * site knows some other `ctx.ui.notify` may have just landed immediately before this one (a
+   * third-party command's own notify, run synchronously just above), passing
+   * `opts.avoidStatusMerge: true` is the only way — short of pi changing `showStatus` — to keep
+   * both lines visible instead of silently overwriting the earlier one. Ordinary callers (no
+   * immediately-preceding foreign notify to protect) can omit it and keep the plain dim style. */
+  notify(ctx: ExtensionContext, opLabel: string, origin: CmdOrigin, opts?: { avoidStatusMerge?: boolean }): void;
   dispose(): void;
 }
 
@@ -71,10 +84,14 @@ export function createOriginEntry(pi: ExtensionAPI): OriginEntryPort {
         /* stale ctx / detached session: must never block dispatch */
       }
     },
-    notify(ctx, opLabel, origin) {
+    notify(ctx, opLabel, origin, opts) {
       try {
         if (ctx.mode !== "tui" || !ctx.hasUI) return;
-        ctx.ui.notify(`web ▸ ${opLabel} · ${listenerAndIp(origin)} · #${origin.reqId.slice(0, 8)}`);
+        const msg = `web ▸ ${opLabel} · ${listenerAndIp(origin)} · #${origin.reqId.slice(0, 8)}`;
+        // acc32-B5: "warning" is the only type that bypasses pi's showStatus merge-dedup (see the
+        // OriginEntryPort.notify doc comment) — used only when the caller flags a clobber risk.
+        if (opts?.avoidStatusMerge === true) ctx.ui.notify(msg, "warning");
+        else ctx.ui.notify(msg);
       } catch {
         /* a stale ctx / notify failure must never affect the reply already sent */
       }

@@ -282,20 +282,22 @@ describe("createCommandHandler — command (delegates to BuiltinBridge, §4.6 ou
     h.handler.handle(frame("c1", { op: "command", name: "session", args: "" }));
     expect(h.builtinBridge.execute).toHaveBeenCalled();
     expect(h.sent[0]).toMatchObject({ ok: true });
-    expect(h.originEntry.notify).toHaveBeenCalledWith(expect.anything(), "/session", ORIGIN);
+    expect(h.originEntry.notify).toHaveBeenCalledWith(expect.anything(), "/session", ORIGIN, {
+      avoidStatusMerge: false,
+    });
   });
 
-  it("notifies on success for a CAPTURED extension command (own output already reaches the web via `capture`)", () => {
+  it("notifies on success for a CAPTURED extension command (own output already reaches the web via `capture`), plain style (no clobber risk)", () => {
     const h = makeHarness();
     (h.builtinBridge.execute as ReturnType<typeof vi.fn>).mockReturnValue({
       ok: true,
       data: { op: "command", kind: "extension", completion: "sync", captured: true },
     });
     h.handler.handle(frame("c1", { op: "command", name: "agent", args: "status" }));
-    expect(h.originEntry.notify).toHaveBeenCalledWith(expect.anything(), "/agent", ORIGIN);
+    expect(h.originEntry.notify).toHaveBeenCalledWith(expect.anything(), "/agent", ORIGIN, { avoidStatusMerge: false });
   });
 
-  it("does NOT notify on success for an UNCAPTURED (third-party) extension command — our own origin notify would silently overwrite the command's own terminal notify (acc32-B5: pi's showStatus() merges back-to-back status lines)", () => {
+  it("still notifies on success for an UNCAPTURED (third-party) extension command, but with avoidStatusMerge:true so our attribution notify does not silently overwrite the command's own terminal notify (acc32-B5 revised per verifier r_29729WTC: plan §0.2/U6 requires the terminal notify even for third-party commands; pi's showStatus() merges back-to-back status lines, so origin-entry.ts routes this one through ctx.ui.notify(msg, \"warning\") instead of skipping it)", () => {
     const h = makeHarness();
     (h.builtinBridge.execute as ReturnType<typeof vi.fn>).mockReturnValue({
       ok: true,
@@ -303,17 +305,21 @@ describe("createCommandHandler — command (delegates to BuiltinBridge, §4.6 ou
     });
     h.handler.handle(frame("c1", { op: "command", name: "probe-cmd", args: "x" }));
     expect(h.sent[0]).toMatchObject({ ok: true });
-    expect(h.originEntry.notify).not.toHaveBeenCalled();
+    expect(h.originEntry.notify).toHaveBeenCalledWith(expect.anything(), "/probe-cmd", ORIGIN, {
+      avoidStatusMerge: true,
+    });
   });
 
-  it("still notifies for template/skill-kind commands (never captured, but never emit their own ctx.ui.notify either — no clobber risk)", () => {
+  it("still notifies for template/skill-kind commands (never captured, but never emit their own ctx.ui.notify either — no clobber risk, plain style)", () => {
     const h = makeHarness();
     (h.builtinBridge.execute as ReturnType<typeof vi.fn>).mockReturnValue({
       ok: true,
       data: { op: "command", kind: "template", completion: "unknown" },
     });
     h.handler.handle(frame("c1", { op: "command", name: "skill:x", args: "" }));
-    expect(h.originEntry.notify).toHaveBeenCalledWith(expect.anything(), "/skill:x", ORIGIN);
+    expect(h.originEntry.notify).toHaveBeenCalledWith(expect.anything(), "/skill:x", ORIGIN, {
+      avoidStatusMerge: false,
+    });
   });
 
   it("degrades to E_UNSUPPORTED while builtinBridge is the C0/C11-pending stub", () => {
