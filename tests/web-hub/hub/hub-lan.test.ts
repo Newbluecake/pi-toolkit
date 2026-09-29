@@ -9,7 +9,7 @@
  * `hasNodeSqlite`), driven end-to-end through a real agent socket.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
@@ -24,6 +24,11 @@ import type {
 } from "../../../src/web-hub/hub/ports.js";
 import type { LanStore } from "../../../src/web-hub/hub/lan-store.js";
 import { resolveHubPaths } from "../../../src/web-hub/protocol/paths.js";
+import {
+  newRotateIntentId,
+  readRotateIntentSync,
+  writeRotateIntentSync,
+} from "../../../src/web-hub/protocol/rotate-intent.js";
 import { P2_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, tmpDirs, waitFor, hello, type TestClient } from "./helpers.js";
 
@@ -181,6 +186,40 @@ describe("startHub + LanAssembly.build() failures (plan section 1.4.2 / LD revie
     const paths = resolveHubPaths({ home, uid });
     const json = JSON.parse(readFileSync(paths.hubJson, "utf8")) as Record<string, unknown>;
     expect(json["lan"]).toEqual({ state: "off", reason: "db-too-large", detail: "hub.db exceeds 64 MiB" });
+  });
+
+  it("a pending rotate intent is NOT deleted when LAN assembly is off (acc32-B7): startup fails closed instead of silently revoking 0 sessions", async () => {
+    const home = tmp.make("wh-lan-offerror-rotate-");
+    const fe = fakeFrontendWithLan();
+    const uid = process.getuid?.() ?? 0;
+    const paths = resolveHubPaths({ home, uid });
+    mkdirSync(paths.stateDir, { recursive: true });
+    writeRotateIntentSync(paths.rotateIntentFile!, {
+      v: 1,
+      id: newRotateIntentId(),
+      at: Date.now(),
+      by: "agent",
+      pid: 999,
+      phase: "token-written",
+    });
+    const offAssembly: LanAssembly = {
+      async build() {
+        throw new LanAssemblyOffError("db-invalid", "chmod 000");
+      },
+    };
+    const hub = await startHub(
+      { ...config({ home }), lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
+      fe,
+      { uid, lanAssembly: offAssembly },
+    );
+    if ("exists" in hub) throw new Error("unexpected exists");
+    hubs.push(hub);
+
+    // Before the fix, `hasLan` was gated on LAN assembly having actually succeeded, so a
+    // `db-invalid`-off LAN was indistinguishable from "no LAN configured at all" —
+    // `recoverRotateIntent` took the no-LAN branch and deleted the intent without ever
+    // attempting (or even being asked to attempt) a LAN session revoke.
+    expect(readRotateIntentSync(paths.rotateIntentFile!).state).toBe("present");
   });
 
   it("a non-LanAssemblyOffError build failure aborts startHub entirely (rejects, no RunningHub, hub.json never written)", async () => {

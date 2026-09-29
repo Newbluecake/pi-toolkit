@@ -267,8 +267,14 @@ export async function startHub(
     // §6.7.1 (C8) — "意图恢复是 hub 启动的第一步": before `auth.token()`'s first real call (inside
     // `fe.listen()`), before `fe.lan.start()`, before the first `hubJson.write()` — synchronously
     // finish whichever half of a previous rotation didn't complete before a crash. `hasLan` here
-    // is gated on `lanAssemblyOff === undefined` too: a store that never opened has nothing to
-    // revoke against, and that (unrelated) off-status already covers the user-visible outcome.
+    // must NOT be gated on `lanAssemblyOff === undefined` (acc32-B7): a store that failed to open
+    // (e.g. `db-invalid` from a `chmod 000` on `hub.db`) may still hold real, unrevoked LAN
+    // session rows from before the fault — treating that as "no LAN, nothing to revoke" let the
+    // rotate intent get deleted while those rows stayed live, so once the DB fault cleared and the
+    // hub restarted, the pre-rotation sessions were still valid (200s, `sessions` rows unchanged).
+    // Passing `hasLan:true` here with `revokeLanForRecovery` left `undefined` (below) routes
+    // through `recoverRotateIntent`'s own `deps.revokeLan === undefined` branch, which already
+    // does the right fail-closed thing: `lanBlocked:true`, intent kept on disk for the next pass.
     const revokeLanForRecovery =
       lanDeps !== undefined
         ? async (): Promise<number> => {
@@ -283,7 +289,7 @@ export async function startHub(
           rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
         },
         log,
-        hasLan: config.lan !== undefined && lanAssemblyOff === undefined,
+        hasLan: config.lan !== undefined,
         ...(revokeLanForRecovery === undefined ? {} : { revokeLan: revokeLanForRecovery }),
         now,
         audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
@@ -409,7 +415,11 @@ export async function startHub(
           rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
         },
         log,
-        hasLan: config.lan !== undefined && lanDeps !== undefined,
+        // acc32-B7: same fix as the startup pass above — `hasLan` must not fold in whether LAN
+        // assembly ever succeeded (`lanDeps !== undefined`); a still-unopened store still needs
+        // `revokeLan === undefined` to reach `recoverRotateIntent`'s own fail-closed branch rather
+        // than being masked as "no LAN configured".
+        hasLan: config.lan !== undefined,
         ...(revokeLan === undefined ? {} : { revokeLan }),
         now,
         audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
