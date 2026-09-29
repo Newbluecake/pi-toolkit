@@ -148,7 +148,7 @@ export async function startHub(
       now,
       log,
       hubVersion: config.pluginVersion,
-      onVersion: (pluginVersion) => supersede?.observe(pluginVersion),
+      onVersion: (pluginVersion, agentKey) => supersede?.observe(pluginVersion, agentKey),
       onTick: () => supersede?.tick(),
     });
     const history = createHistoryService({ registry, log });
@@ -353,6 +353,29 @@ export async function startHub(
         }),
       inflight: () => commandRouter.inflight(),
       kdfInflight: () => kdfInFlight,
+      // acc32-B9: a reliable handshake for the first quiet judgment after a hello — resolve
+      // immediately if the registry already has *any* dialogs snapshot for this agent (a
+      // reclaimed/reconnected Rec whose `dialogs` field survived the reconnect, §registry.ts
+      // `register()`'s reclaim branch never touches it), otherwise wait for the one-shot
+      // `dialogs` bus event for this exact `agentKey` or the bounded timeout, whichever is first.
+      awaitDialogsSlot: (agentKey, timeoutMs) => {
+        if (registry.get(agentKey)?.dialogs !== undefined) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = (): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            unsubscribe();
+            resolve();
+          };
+          const unsubscribe = registry.bus.subscribe((e) => {
+            if (e.type === "dialogs" && e.agentKey === agentKey) finish();
+          });
+          const timer = setTimeout(finish, timeoutMs);
+          timer.unref();
+        });
+      },
       stateChanged: (s) => {
         if (s === undefined) {
           delete info.state;

@@ -123,8 +123,10 @@ export function createRegistry(deps: {
   pidAlive?: (pid: number) => boolean;
   /** Addition: hub plugin version, used for `AgentCard.outdated` (agent older than hub). */
   hubVersion?: string;
-  /** C10 hooks; optional so older direct registry consumers remain unchanged. */
-  onVersion?: (pluginVersion: string) => void;
+  /** C10 hooks; optional so older direct registry consumers remain unchanged.
+   * acc32-B9: `agentKey` lets the supersede controller wait for THIS agent's own `dialogs` slot
+   * frame before its first quiet judgment, instead of a same-tick/0ms guess. */
+  onVersion?: (pluginVersion: string, agentKey: string) => void;
   onTick?: () => void;
 }): Registry {
   const { now, log } = deps;
@@ -295,7 +297,7 @@ export function createRegistry(deps: {
         log.info("agent reclaimed", { agentKey: existing.agentKey, from: prevPhase, epochChanged });
         if (prevPhase === "stale") publish({ type: "agent_up", agent: card(existing) });
         if (epochChanged) publish({ type: "gap", agentKey: existing.agentKey, fromSeq: 0 });
-        deps.onVersion?.(hello.pluginVersion);
+        deps.onVersion?.(hello.pluginVersion, existing.agentKey);
         return { agentKey: existing.agentKey, reclaimed: true };
       }
       const agentKey = newAgentKey(hello.agentId);
@@ -329,7 +331,7 @@ export function createRegistry(deps: {
       byAgentId.set(idKey, agentKey);
       log.info("agent up", { agentKey, pid: r.agentId.pid, kind: r.kind, cwd: r.cwd, version: r.pluginVersion });
       publish({ type: "agent_up", agent: card(r) });
-      deps.onVersion?.(hello.pluginVersion);
+      deps.onVersion?.(hello.pluginVersion, agentKey);
       return { agentKey, reclaimed: false };
     },
 

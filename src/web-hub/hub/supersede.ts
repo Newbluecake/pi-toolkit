@@ -8,6 +8,12 @@ export const SUPERSEDE_MAX_WAIT_MS = SUPERSEDE_DEFAULT_MAX_WAIT_MS;
 export const SUPERSEDE_YIELD_MS = 10_000;
 export const SUPERSEDE_THROTTLE_MS = 60_000;
 export const SUPERSEDE_DRAIN_MAX_MS = 15_000;
+/** acc32-B9: how long `observe()` will wait for a newly-hello'd agent's first `dialogs` slot
+ * frame before treating it as "no open dialog" and letting the (now-current) quiet judgment
+ * proceed. Bounded per the task's "1–2s" guidance — long enough to cover the extra hub→agent→hub
+ * round trip past `hello_ack` that carries the replayed slot, short enough that a genuinely quiet
+ * hub still replaces promptly. */
+export const SUPERSEDE_DIALOGS_HANDSHAKE_MS = 1_500;
 
 export interface SupersedeState {
   nextVersion: string;
@@ -45,21 +51,32 @@ export interface SupersedeDeps {
   audit?: (op: "supersede" | "supersede_blocked", fields: Record<string, unknown>) => void;
   log?: { warn(msg: string, data?: object): void };
   /**
-   * acc32-B9: the very first quiet check after `observe()` sees a version mismatch must not run
-   * synchronously inside the hello-processing call stack — a reconnecting agent's `dialogs` slot
-   * (D14: replayed once the connection is live, strictly *after* `hello`) may not have arrived
-   * yet, so an already-open ask_user dialog from before the reconnect would be invisible to
-   * `openDialogs()` at that exact instant and get raced past (`waitedMs:0` immediate replace).
-   * Defaults to a real `setTimeout(fn, 0)` (unref'd) so the check runs on a later turn of the
-   * event loop, after any frame that arrived in the same socket read as `hello` has been
-   * processed; injectable so tests can make the deferral deterministic instead of timer-based.
+   * acc32-B9 (revised per verifier r_29729WTC): a `setTimeout(fn, 0)` defer off the hello call
+   * stack is not a reliable handshake — a reconnecting agent's `dialogs` slot frame (D14:
+   * replayed only *after* `hello_ack` reaches the agent, i.e. a full extra hub→agent→hub round
+   * trip beyond the `hello` that triggered `observe()`) can easily still be in flight when a
+   * same-process 0ms timer fires; that is exactly the `waitedMs:0` immediate-replace bug the
+   * plan's acceptance step 26/32 caught. The real fix has to actually wait for that frame:
+   * `awaitDialogsSlot(agentKey, timeoutMs)` resolves either when `agentKey`'s first `dialogs`
+   * frame lands (hub wires this to a one-shot `registry.bus` subscription, resolving immediately
+   * if the registry already has a snapshot for it) or after `timeoutMs` elapses, whichever is
+   * first — the bounded timeout is what keeps the "no open dialog" fast-replacement path from
+   * hanging on an agent that never sends the frame at all (an older/minimal agent build).
+   * `observe()` calls this at most once per `agentKey` (memoized) and only defers *that* agent's
+   * contribution to the first quiet judgment — the periodic 250ms tick and the dialogs-bus
+   * defense-in-depth re-check (hub.ts) are unaffected and keep running on their own schedule.
+   * Missing in `deps` (e.g. a minimal test harness) degrades to "already resolved" (old
+   * synchronous behavior), never to a permanent hang.
    */
-  defer?: (fn: () => void) => void;
+  awaitDialogsSlot?: (agentKey: string, timeoutMs: number) => Promise<void>;
 }
 
 export interface SupersedeController {
   state(): SupersedeState | undefined;
-  observe(pluginVersion: string): void;
+  /** `agentKey` is optional only for older/minimal callers; hub.ts always passes it (needed for
+   * the acc32-B9 dialogs handshake below — without it the first quiet check falls back to
+   * running as soon as `observe()` returns, the pre-fix synchronous behavior). */
+  observe(pluginVersion: string, agentKey?: string): void;
   tick(): void;
   dispose(): void;
 }
@@ -85,12 +102,10 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
   if (deps === undefined) return createSupersedeStub();
   const d = deps;
   const waitMs = supersedeWaitMs(process.env, d.log);
-  const defer =
-    d.defer ??
-    ((fn: () => void) => {
-      const t = setTimeout(fn, 0);
-      t.unref?.();
-    });
+  /** acc32-B9: agentKeys we've already started (or finished) a dialogs handshake for — each
+   * newly-hello'd agent gets at most one wait, never re-armed on a later `observe()` (e.g. a
+   * still-higher version arriving from the same connection). */
+  const dialogsAwaited = new Set<string>();
   let pending: SupersedeState | undefined;
   let lastReplacementAt = Number.NEGATIVE_INFINITY;
   let blockedLogged = false;
@@ -181,7 +196,7 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
 
   return {
     state: () => (pending === undefined ? undefined : { ...pending }),
-    observe(pluginVersion) {
+    observe(pluginVersion, agentKey) {
       if (disposed || compareVersions(pluginVersion, d.hubVersion) <= 0) return;
       const t = d.now();
       if (pending === undefined) {
@@ -193,11 +208,29 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
         pending = { ...pending, nextVersion: pluginVersion };
         emit();
       }
-      // acc32-B9: never quiet-check synchronously inside the hello call stack — defer so a
-      // `dialogs` frame that arrives right after this same `hello` (D14 reconnect replay) has a
-      // chance to update the registry first. `begin()`'s own re-entrancy guard (`running`) plus
-      // the periodic 250ms tick already cover any tick this defers past a dispose/replace.
-      defer(tick);
+      // acc32-B9: never quiet-check the first time on nothing but a same-tick/0ms guess — actually
+      // wait for THIS agent's `dialogs` slot frame (or the bounded handshake timeout) before
+      // letting its contribution count toward quiet. `dialogsAwaited` makes this at most once per
+      // agentKey; a missing `agentKey` (older/minimal caller) or a missing `awaitDialogsSlot` dep
+      // degrades to the old "resolved immediately" behavior rather than hanging. `begin()`'s own
+      // re-entrancy guard (`running`) plus the periodic 250ms tick and the dialogs-bus
+      // defense-in-depth re-check (hub.ts) already cover any tick this defers past a
+      // dispose/replace.
+      if (agentKey === undefined || dialogsAwaited.has(agentKey)) {
+        tick();
+        return;
+      }
+      dialogsAwaited.add(agentKey);
+      const wait = d.awaitDialogsSlot?.(agentKey, SUPERSEDE_DIALOGS_HANDSHAKE_MS) ?? Promise.resolve();
+      Promise.resolve(wait).then(
+        () => {
+          if (!disposed) tick();
+        },
+        (err: unknown) => {
+          d.log?.warn("web-hub: supersede awaitDialogsSlot failed", { agentKey, error: String(err) });
+          if (!disposed) tick();
+        },
+      );
     },
     tick,
     dispose() {

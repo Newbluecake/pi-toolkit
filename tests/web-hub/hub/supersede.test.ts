@@ -16,7 +16,10 @@ function harness() {
   let stop: StopMarkerRead = { state: "absent" };
   const restart = vi.fn(async () => undefined);
   const audit = vi.fn();
-  const deferred: Array<() => void> = [];
+  // acc32-B9: pending dialogs-slot handshake resolvers, keyed by agentKey. `settleDialogsWait`
+  // simulates whichever of "the frame arrived" / "the bounded timeout elapsed" the real
+  // `awaitDialogsSlot` would have resolved on — the controller treats both identically.
+  const dialogsResolvers = new Map<string, () => void>();
   const ctl = createSupersede({
     hubVersion: "1.0.0",
     now: () => now,
@@ -27,10 +30,10 @@ function harness() {
     kdfInflight: () => kdf,
     restart,
     audit,
-    // Deterministic stand-in for the real `setTimeout(fn, 0)` default (acc32-B9): queued, not
-    // auto-run, so a test can update state (e.g. a late-arriving `dialogs` frame) *between*
-    // `observe()` and the deferred quiet check by calling `flushDeferred()` explicitly.
-    defer: (fn) => deferred.push(fn),
+    awaitDialogsSlot: (agentKey) =>
+      new Promise<void>((resolve) => {
+        dialogsResolvers.set(agentKey, resolve);
+      }),
   });
   return {
     ctl,
@@ -41,9 +44,13 @@ function harness() {
     setInflight: (v: number) => (inflight = v),
     setKdf: (v: number) => (kdf = v),
     setStop: (v: StopMarkerRead) => (stop = v),
-    flushDeferred: () => {
-      const fns = deferred.splice(0);
-      for (const fn of fns) fn();
+    /** Resolves the pending dialogs-slot wait for `agentKey` and drains the microtask queue so
+     * `observe()`'s deferred `tick()` (its `.then()` continuation) actually runs. */
+    settleDialogsWait: async (agentKey: string) => {
+      dialogsResolvers.get(agentKey)?.();
+      dialogsResolvers.delete(agentKey);
+      await Promise.resolve();
+      await Promise.resolve();
     },
   };
 }
@@ -138,20 +145,22 @@ describe("hub supersede controller (C10)", () => {
     expect(h.restart).toHaveBeenLastCalledWith(expect.objectContaining({ forced: true, nextVersion: "3.0.0" }));
   });
 
-  it("the first quiet check after observe() is deferred, so a dialogs frame arriving right after hello (D14 reconnect replay) is not raced past (acc32-B9)", () => {
+  it("observe() waits for THIS agent's own dialogs-slot frame before the first quiet judgment, so a dialogs frame arriving after hello (D14 reconnect replay) is not raced past (acc32-B9)", async () => {
     const h = harness();
     // Reconnect scenario: the Rec was reaped while a dialog was open, so the fresh registration's
     // hello arrives with no dialogs recorded yet — exactly what a brand-new Rec looks like.
     h.setOpen(0);
-    h.ctl.observe("2.0.0");
-    // Before the fix, `observe()` called `tick()` synchronously right here and would already have
-    // replaced (`waitedMs:0`) while the dialog frame was still in flight.
+    h.ctl.observe("2.0.0", "a1");
+    // Before the fix, `observe()` called `tick()` synchronously (or after a bare 0ms timer) right
+    // here and would already have replaced (`waitedMs:0`) while the dialog frame was still in
+    // flight over the network.
     expect(h.restart).not.toHaveBeenCalled();
     // The reconnecting agent's `dialogs` frame lands (D14 replay) reporting the dialog that was
     // open all along, updating the registry snapshot `openDialogs()` reads from.
     h.setOpen(1);
-    // Now the deferred quiet check actually runs.
-    h.flushDeferred();
+    // Now the handshake resolves (simulating the frame's arrival) and the deferred quiet check
+    // actually runs.
+    await h.settleDialogsWait("a1");
     expect(h.restart).not.toHaveBeenCalled();
     // Once the dialog closes, the (now-current) periodic tick correctly replaces.
     h.setOpen(0);
@@ -159,12 +168,33 @@ describe("hub supersede controller (C10)", () => {
     expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
   });
 
-  it("observe() still replaces promptly when there really is nothing open (no dialogs frame ever follows)", () => {
+  it("observe() still replaces promptly once the bounded handshake timeout elapses when there really is nothing open (no dialogs frame ever follows)", async () => {
+    const h = harness();
+    h.setOpen(0);
+    h.ctl.observe("2.0.0", "a1");
+    expect(h.restart).not.toHaveBeenCalled();
+    // Simulates the bounded timeout firing rather than a frame arriving — the controller treats
+    // both identically, which is what keeps this path from hanging forever on an agent that never
+    // sends a `dialogs` frame at all.
+    await h.settleDialogsWait("a1");
+    expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
+  });
+
+  it("a missing agentKey (older/minimal caller) degrades to the pre-handshake synchronous check", () => {
     const h = harness();
     h.setOpen(0);
     h.ctl.observe("2.0.0");
-    expect(h.restart).not.toHaveBeenCalled();
-    h.flushDeferred();
     expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
+  });
+
+  it("a repeat observe() for an agentKey already being awaited does not start a second handshake wait", async () => {
+    const h = harness();
+    h.setOpen(1);
+    h.ctl.observe("2.0.0", "a1");
+    h.ctl.observe("3.0.0", "a1"); // still-higher version from the same connection
+    expect(h.ctl.state()?.nextVersion).toBe("3.0.0");
+    h.setOpen(0);
+    await h.settleDialogsWait("a1");
+    expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false, nextVersion: "3.0.0" }));
   });
 });
