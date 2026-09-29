@@ -23,11 +23,13 @@ const dialog = {
   // race-lost / terminal folding (§7.4: read dialogs.closed[].by)
   closedTui: "Answered in the terminal",
   closedWeb: "Answered in another browser",
+  closedHere: "Answered",
   closedAbort: "Agent aborted",
   closedSession: "Session ended",
   closedError: "Dialog closed with an error",
   cancelledTui: "Cancelled in the terminal",
   cancelledWeb: "Cancelled in another browser",
+  cancelledHere: "Cancelled",
   closedGeneric: "Dialog closed",
 } satisfies Record<string, string>;
 

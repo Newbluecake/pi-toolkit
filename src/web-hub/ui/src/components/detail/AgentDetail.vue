@@ -157,6 +157,33 @@ const hubSuspended = computed(() => hub?.state.value.hubState === "restarting");
  * (§7.4's post-409 collapse; also covers terminal-first answers and aborts). */
 const seenOpen = new Set<string>();
 const folded = ref<readonly string[]>([]);
+
+/** acc32-B3: cmdIds THIS browser tab generated when answering/cancelling a dialog, keyed by
+ * dialogId — `foldedNote` below compares a `closed{by:"web"}` record's `cmdId` against this to
+ * tell "answered here" apart from "answered in a DIFFERENT browser tab" (both are `by:"web"`). */
+const myDialogCmdIds = new Map<string, Set<string>>();
+function trackOwnDialogCmdId(dialogId: string): void {
+  // `answerDialog`/`cancelDialog` dispatch their optimistic `pendingCtl` item synchronously
+  // before returning (useControl.ts's `sendDialog`), so the newest matching entry right after
+  // the call already carries the id just generated for this submission.
+  const pc = pendingCtl.value;
+  for (let i = pc.length - 1; i >= 0; i--) {
+    const it = pc[i]!;
+    if (
+      it["dialogId"] === dialogId &&
+      (it["kind"] === "dialog_answer" || it["kind"] === "dialog_cancel") &&
+      typeof it["id"] === "string"
+    ) {
+      let set = myDialogCmdIds.get(dialogId);
+      if (set === undefined) {
+        set = new Set();
+        myDialogCmdIds.set(dialogId, set);
+      }
+      set.add(it["id"]);
+      return;
+    }
+  }
+}
 watch(
   openDialogs,
   (open) => {
@@ -171,12 +198,21 @@ watch(
 function foldedNote(dialogId: string): string {
   const c = closedDialogs.value.find((x) => x.dialogId === dialogId);
   if (c === undefined) return t("dialog.closedGeneric");
-  if (c.outcome === "cancelled") return c.by === "web" ? t("dialog.cancelledWeb") : t("dialog.cancelledTui");
+  // acc32-B3: `by === "web"` alone doesn't say WHICH browser tab — compare the closed record's
+  // `cmdId` (§5.4: "标记 closed{by:"web", cmdId}") against the ids THIS tab generated when it
+  // submitted an answer/cancel for this exact dialog (tracked by `trackOwnDialogCmdId` right
+  // after `onDialogAnswer`/`onDialogCancel` dispatch — the optimistic `pendingCtl` item, and
+  // therefore its generated id, is visible synchronously before the wire round-trip settles).
+  const mine = c.cmdId !== undefined && myDialogCmdIds.get(dialogId)?.has(c.cmdId) === true;
+  if (c.outcome === "cancelled") {
+    if (mine) return t("dialog.cancelledHere");
+    return c.by === "web" ? t("dialog.cancelledWeb") : t("dialog.cancelledTui");
+  }
   switch (c.by) {
     case "tui":
       return t("dialog.closedTui");
     case "web":
-      return t("dialog.closedWeb");
+      return mine ? t("dialog.closedHere") : t("dialog.closedWeb");
     case "abort":
       return t("dialog.closedAbort");
     case "session":
@@ -214,12 +250,14 @@ function onDialogAnswer(dialogId: string, answers: unknown): void {
   const c = control.value;
   if (!c) return;
   dialogOutcome(c.answerDialog(props.agent.key, dialogId, dialogsEpoch.value, answers));
+  trackOwnDialogCmdId(dialogId);
 }
 
 function onDialogCancel(dialogId: string): void {
   const c = control.value;
   if (!c) return;
   dialogOutcome(c.cancelDialog(props.agent.key, dialogId, dialogsEpoch.value));
+  trackOwnDialogCmdId(dialogId);
 }
 
 // --- follow-scroll plumbing (P3 original) ---------------------------------------------------

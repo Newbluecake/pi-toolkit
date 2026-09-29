@@ -23,11 +23,13 @@ const dialog = {
   epochChanged: "此表单是在终端重载前打开的——请检查后重新作答。",
   closedTui: "已在终端作答",
   closedWeb: "已在另一个浏览器作答",
+  closedHere: "已作答",
   closedAbort: "Agent 已中止",
   closedSession: "会话已结束",
   closedError: "对话框因错误关闭",
   cancelledTui: "已在终端取消",
   cancelledWeb: "已在另一个浏览器取消",
+  cancelledHere: "已取消",
   closedGeneric: "对话框已关闭",
 } satisfies Messages<typeof en>;
 
