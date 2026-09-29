@@ -197,4 +197,35 @@ describe("hub supersede controller (C10)", () => {
     await h.settleDialogsWait("a1");
     expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false, nextVersion: "3.0.0" }));
   });
+
+  it("the periodic tick must not outrun an in-flight handshake — quiet and forced both wait (acc32-B9 round 2)", async () => {
+    const h = harness();
+    h.setOpen(0);
+    h.ctl.observe("2.0.0", "a1"); // handshake starts, dialogs frame not yet arrived
+    // The production 250ms periodic tick fires while the handshake is still pending. Before the
+    // round-2 gate this judged quiet on incomplete information and replaced immediately
+    // (verifier repro: calls-before-handshake=1).
+    h.ctl.tick();
+    expect(h.restart).not.toHaveBeenCalled();
+    // The forced path waits too: an already-elapsed deadline must not begin mid-handshake.
+    h.setNow(h.ctl.state()!.deadlineAt);
+    h.ctl.tick();
+    expect(h.restart).not.toHaveBeenCalled();
+    // Handshake resolves (frame or bounded timeout) — its deferred tick now judges for real.
+    // Everything is quiet, so this takes the quiet branch even past the deadline (the existing
+    // quiet-preferred semantics); what matters is that it did not begin BEFORE the handshake.
+    await h.settleDialogsWait("a1");
+    expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
+
+    // And the forced branch itself, properly gated: a second agent's handshake while a dialog
+    // stays open past the deadline ⇒ forced:true only AFTER the handshake settles.
+    const h2 = harness();
+    h2.setOpen(1);
+    h2.ctl.observe("2.0.0", "a1");
+    h2.setNow(h2.ctl.state()!.deadlineAt);
+    h2.ctl.tick(); // periodic tick mid-handshake: must not force
+    expect(h2.restart).not.toHaveBeenCalled();
+    await h2.settleDialogsWait("a1"); // handshake settles, dialog still open, deadline elapsed
+    expect(h2.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: true }));
+  });
 });

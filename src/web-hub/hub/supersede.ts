@@ -106,6 +106,10 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
    * newly-hello'd agent gets at most one wait, never re-armed on a later `observe()` (e.g. a
    * still-higher version arriving from the same connection). */
   const dialogsAwaited = new Set<string>();
+  /** acc32-B9 (round 2): handshakes currently awaiting their first `dialogs` frame — while
+   * >0, tick() must not judge quiet/forced (the 250ms periodic tick would otherwise outrun
+   * the hello-path wait and replace under an open pre-hello dialog). */
+  let handshakesInFlight = 0;
   let pending: SupersedeState | undefined;
   let lastReplacementAt = Number.NEGATIVE_INFINITY;
   let blockedLogged = false;
@@ -182,6 +186,10 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
       pending = next;
       emit();
     }
+    // acc32-B9 (round 2): a dialogs handshake still in flight means openDialogs() would be
+    // judged on incomplete information — the periodic 250ms tick must not outrun it either
+    // (quiet AND forced both wait; the handshake is bounded by SUPERSEDE_DIALOGS_HANDSHAKE_MS).
+    if (handshakesInFlight > 0) return;
     const quiet = d.openDialogs().every((x) => x.count === 0) && d.inflight() === 0 && (d.kdfInflight?.() ?? 0) === 0;
     if (quiet && stop.state === "absent") {
       begin(false, stop);
@@ -221,12 +229,15 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
         return;
       }
       dialogsAwaited.add(agentKey);
+      handshakesInFlight += 1;
       const wait = d.awaitDialogsSlot?.(agentKey, SUPERSEDE_DIALOGS_HANDSHAKE_MS) ?? Promise.resolve();
       Promise.resolve(wait).then(
         () => {
+          handshakesInFlight -= 1;
           if (!disposed) tick();
         },
         (err: unknown) => {
+          handshakesInFlight -= 1;
           d.log?.warn("web-hub: supersede awaitDialogsSlot failed", { agentKey, error: String(err) });
           if (!disposed) tick();
         },

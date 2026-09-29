@@ -341,6 +341,9 @@ export async function startHub(
 
     // C10: assemble version replacement only after the command router and
     // frontend exist; agents cannot hello before listen() below completes.
+    // Cancel handles for in-flight acc32-B9 dialogs-handshake waits — drained on close/dispose
+    // so a pending one-shot bus subscription never outlives the hub.
+    const supersedeWaitCancels = new Set<() => void>();
     supersede = createSupersede({
       hubVersion: config.pluginVersion,
       now,
@@ -365,10 +368,14 @@ export async function startHub(
           const finish = (): void => {
             if (settled) return;
             settled = true;
+            supersedeWaitCancels.delete(finish);
             clearTimeout(timer);
             unsubscribe();
             resolve();
           };
+          // Registered so hub close/dispose can cancel a still-pending handshake wait
+          // immediately instead of leaking the bus subscription until the timeout fires.
+          supersedeWaitCancels.add(finish);
           const unsubscribe = registry.bus.subscribe((e) => {
             if (e.type === "dialogs" && e.agentKey === agentKey) finish();
           });
@@ -444,6 +451,7 @@ export async function startHub(
     cleanup.push(async () => {
       unsubscribeSupersedeOnDialogs();
       clearInterval(supersedeTimer);
+      for (const cancel of [...supersedeWaitCancels]) cancel();
       supersede?.dispose();
     });
     const scanRotateIntent = async (): Promise<void> => {
@@ -630,6 +638,7 @@ export async function startHub(
       const inner = (async (): Promise<void> => {
         log.info("hub closing", { reason });
         unsubscribeSupersedeOnDialogs();
+        for (const cancel of [...supersedeWaitCancels]) cancel();
         supersede?.dispose();
         clearInterval(supersedeTimer);
         stopFence();
