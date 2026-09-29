@@ -364,6 +364,13 @@ class Connection implements HubConnection {
     if (this.hubVersion !== undefined) view.hubVersion = this.hubVersion;
     if (this.link === "live" && this.httpPort !== undefined) view.httpPort = this.httpPort;
     if (this.lastError !== undefined) view.lastError = this.lastError;
+    // acc32-B8: `WebHubStatusView.stopMarker` existed as a field (and `index.ts`'s HUD/status
+    // text already special-cases "stopped"/"unknown") but nothing ever populated it — read it
+    // fresh here (mirrors `maybeSpawn()`'s own admission-time read; a plain `lstatSync`, cheap
+    // and consistent with how `admin-cmds.ts`/`launcher.ts` already read it) so `/webhub status`
+    // and the HUD status line can actually surface "web stopped"/"web stop?".
+    const stoppedFile = this.opts.paths.stoppedFile;
+    if (stoppedFile !== undefined) view.stopMarker = readStopMarkerSync(stoppedFile).state;
     return view;
   }
 

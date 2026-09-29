@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as net from "node:net";
+import { mkdirSync } from "node:fs";
 import {
   acquireConnection,
   currentConnection,
@@ -670,6 +671,44 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
     expect(n.sockets[0]!.frames()[0]).toMatchObject({
       t: "hello",
       caps: ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1", "cmd.v1"],
+    });
+  });
+
+  describe("status().stopMarker (acc32-B8)", () => {
+    it("reads a present stop marker into status().stopMarker", () => {
+      const n = fakeNet();
+      const stopFile = `${tmp.dir}/stopped`;
+      writeStopMarkerSync(stopFile);
+      const conn = acquireConnection(
+        opts({ netConnect: n.netConnect, paths: { ...pathsIn(tmp.dir), stoppedFile: stopFile } }),
+      );
+      expect(conn.status().stopMarker).toBe("stopped");
+    });
+
+    it("no marker file present ⇒ stopMarker is 'absent', not left unset", () => {
+      const n = fakeNet();
+      const stopFile = `${tmp.dir}/stopped`; // never written
+      const conn = acquireConnection(
+        opts({ netConnect: n.netConnect, paths: { ...pathsIn(tmp.dir), stoppedFile: stopFile } }),
+      );
+      expect(conn.status().stopMarker).toBe("absent");
+    });
+
+    it("an unreadable marker (not a regular file) reports 'unknown', not 'absent'", () => {
+      const n = fakeNet();
+      const stopDir = `${tmp.dir}/stopped`; // a directory, not a file ⇒ E_NOT_REGULAR
+      mkdirSync(stopDir);
+      const conn = acquireConnection(
+        opts({ netConnect: n.netConnect, paths: { ...pathsIn(tmp.dir), stoppedFile: stopDir } }),
+      );
+      expect(conn.status().stopMarker).toBe("unknown");
+    });
+
+    it("no `paths.stoppedFile` at all ⇒ stopMarker stays unset (never invents a value)", () => {
+      const n = fakeNet();
+      const { stoppedFile: _drop, ...rest } = pathsIn(tmp.dir);
+      const conn = acquireConnection(opts({ netConnect: n.netConnect, paths: rest }));
+      expect(conn.status().stopMarker).toBeUndefined();
     });
   });
 });

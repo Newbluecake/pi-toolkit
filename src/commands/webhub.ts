@@ -95,6 +95,11 @@ export function formatStatus(view: WebHubStatusView, url: { url: string } | { hi
   if (view.agentKey !== undefined) parts.push(`agentKey=${view.agentKey}`);
   if (view.hubVersion !== undefined) parts.push(`hub=${view.hubVersion}`);
   if (view.lastError !== undefined) parts.push(`lastError=${view.lastError}`);
+  // acc32-B8: surface the machine-level stop marker (connection.ts's `status()` now reads it) —
+  // `/webhub start` clears it and immediately spawns, so both messages point there.
+  if (view.stopMarker === "stopped") parts.push("stopped · /webhub start to resume");
+  else if (view.stopMarker === "unknown")
+    parts.push("autostart blocked · stop marker unreadable · /webhub start to retry");
   if ("url" in url) parts.push(`url=${url.url.split("#")[0]!}`);
   else parts.push(url.hint);
   return parts.join(" ");

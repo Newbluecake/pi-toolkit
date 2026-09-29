@@ -69,6 +69,26 @@ describe("formatStatus", () => {
     expect(line).toContain("lastError=ENOENT");
     expect(line).toContain("hub 未运行：state=backoff，见 /tmp/hub.log");
   });
+
+  it("stopMarker:'stopped' (acc32-B8) appends a resume hint", () => {
+    const view: WebHubStatusView = { state: "off", attached: false, stopMarker: "stopped" };
+    const line = formatStatus(view, { hint: "hub 未运行" });
+    expect(line).toContain("stopped · /webhub start to resume");
+  });
+
+  it("stopMarker:'unknown' (acc32-B8) appends an unreadable-marker hint", () => {
+    const view: WebHubStatusView = { state: "off", attached: false, stopMarker: "unknown" };
+    const line = formatStatus(view, { hint: "hub 未运行" });
+    expect(line).toContain("autostart blocked");
+    expect(line).toContain("stop marker unreadable");
+  });
+
+  it("stopMarker:'absent' (or unset) adds no extra text", () => {
+    const base = formatStatus({ state: "off", attached: false }, { hint: "hub 未运行" });
+    const withAbsent = formatStatus({ state: "off", attached: false, stopMarker: "absent" }, { hint: "hub 未运行" });
+    expect(withAbsent).toBe(base);
+    expect(base).not.toContain("/webhub start");
+  });
 });
 
 describe("/webhub command", () => {
