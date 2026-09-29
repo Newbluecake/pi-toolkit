@@ -622,6 +622,27 @@ describe("state.reduce — control plane (§7.3/§7.7)", () => {
     expect(A(s).pendingCtl[0]).toMatchObject({ id: "c1", state: "dropped" });
   });
 
+  it("status frame: queue omitted entirely (drained to empty, status.ts skips the field) still clears agent.queue (acc32-B2②)", () => {
+    let s = base();
+    s = reduce(s, {
+      event: "status",
+      data: {
+        agentKey: "A",
+        status: {
+          leafId: null,
+          busy: true,
+          pending: true,
+          queue: [{ id: "q1", text: "hi", deliver: "steer", source: "web", cmdId: "c1", at: 1 }],
+        },
+      },
+    });
+    expect(A(s).queue).toHaveLength(1);
+    // The mirror drained to empty server-side: `status.ts` omits `queue` from the frame entirely
+    // (it only assigns it "when non-empty") rather than sending `queue: []`.
+    s = reduce(s, { event: "status", data: { agentKey: "A", status: { leafId: null, busy: false, pending: false } } });
+    expect(A(s).queue).toEqual([]);
+  });
+
   it("dialogs frame: slot overwrite; agents-frame cards carry dialogs too (§6.6)", () => {
     let s = reduce(initialState(), {
       event: "agents",

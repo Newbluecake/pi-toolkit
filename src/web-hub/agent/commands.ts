@@ -513,7 +513,13 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         idleWatch.delete(cmdId);
         const e = deps.ledger.get(cmdId);
         if (e !== undefined && e.promptState === "observed") {
-          deps.ledger.updatePrompt(cmdId, { promptState: "started" }, deps.now());
+          // §4.3: unlike the queued path (dequeue → consumed), there is no separate "dequeue"
+          // event for an idle dispatch — the turn actually starting IS the terminal event, so
+          // `started` must transition straight to `consumed` here or it never leaves the
+          // ledger's active-looking state (acc32-B2①: the ctl slot kept reporting `started`
+          // forever — 30min TTL/capacity aside — and the web UI's queue list showed it as
+          // "queued" indefinitely).
+          deps.ledger.updatePrompt(cmdId, { promptState: "consumed" }, deps.now());
           changed = true;
         }
         break;

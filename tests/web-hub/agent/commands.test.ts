@@ -159,14 +159,14 @@ describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
     expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "unconfirmed", reason: "unobserved" });
   });
 
-  it("idle prompt observed then a matching message_start ⇒ promptState 'started'", () => {
+  it("idle prompt observed then a matching message_start ⇒ promptState transitions straight to 'consumed' (acc32-B2①: no dangling 'started')", () => {
     const h = makeHarness();
     h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
     // idle path: pi reports no streamingBehavior at all (agent was idle when it processed input)
     h.handler.onInputEvent({ text: "hi", source: "extension" });
     expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "observed", behavior: "idle" });
     h.handler.onMessageStart({ message: { role: "user", content: "hi" } });
-    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "started" });
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed" });
   });
 
   it("steer/followUp prompt observed ⇒ queued in the mirror, then consumed on message_start", () => {

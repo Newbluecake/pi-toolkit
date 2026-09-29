@@ -283,7 +283,10 @@ function reduceInner(s, event, d) {
         const next = { ...a, status: d.status, card: { ...a.card, status: d.status } };
         // §7.3: the D6 queue mirror rides the status slot; queueDropped cmdIds transition the
         // matching optimistic items to `dropped` (back to the terminal editor / discarded).
-        if (Array.isArray(d.status.queue)) next.queue = d.status.queue;
+        // acc32-B2②: the wire omits `queue` once empty (status.ts only sets it when non-empty)
+        // — default to `[]` here just like the "fleet"/"prompt" cases below already do, or the
+        // client keeps the last non-empty array forever once the server-side queue drains.
+        next.queue = Array.isArray(d.status.queue) ? d.status.queue : [];
         if (Array.isArray(d.status.queueDropped) && d.status.queueDropped.length > 0) {
           const dropped = new Set(d.status.queueDropped.filter((/** @type {any} */ x) => typeof x === "string"));
           next.pendingCtl = transitionPending(next.pendingCtl, (it) =>
