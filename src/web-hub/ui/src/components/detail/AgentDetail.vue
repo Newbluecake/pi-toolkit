@@ -192,15 +192,23 @@ watch(
   { immediate: true },
 );
 
-function foldedNote(dialogId: string): string {
-  const c = closedDialogs.value.find((x) => x.dialogId === dialogId);
-  if (c === undefined) return t("dialog.closedGeneric");
+/** accfix-N3: `dialogs.closed[]` is a bounded slot — once a dialogId's record scrolls out of it
+ * (enough OTHER dialogs closed after it), `foldedNote` used to lose the specific attribution
+ * ("Cancelled in the terminal") and silently degrade to the generic "Dialog closed" on the very
+ * next render, even though the fold row for that dialogId was still visible (`folded` is capped
+ * at 4, independent of `closed[]`'s own bound). Resolving and caching the note THE FIRST TIME a
+ * dialogId's closed record is seen keeps the specific text for as long as this mount cares about
+ * it (bounded FIFO, generous relative to `folded`'s 4-item display cap) — the generic fallback
+ * is reserved for dialogIds this mount truly never got a determinable outcome for. */
+const resolvedNotes = new Map<string, string>();
+const RESOLVED_NOTES_CAP = 32;
+function resolveClosedNote(c: DialogClosedWire): string {
   // acc32-B3: `by === "web"` alone doesn't say WHICH browser tab — compare the closed record's
   // `cmdId` (§5.4: "标记 closed{by:"web", cmdId}") against the ids THIS tab generated when it
   // submitted an answer/cancel for this exact dialog (tracked by `trackOwnDialogCmdId` right
   // after `onDialogAnswer`/`onDialogCancel` dispatch — the optimistic `pendingCtl` item, and
   // therefore its generated id, is visible synchronously before the wire round-trip settles).
-  const mine = c.cmdId !== undefined && myDialogCmdIds.get(dialogId)?.has(c.cmdId) === true;
+  const mine = c.cmdId !== undefined && myDialogCmdIds.get(c.dialogId)?.has(c.cmdId) === true;
   if (c.outcome === "cancelled") {
     if (mine) return t("dialog.cancelledHere");
     return c.by === "web" ? t("dialog.cancelledWeb") : t("dialog.cancelledTui");
@@ -217,6 +225,30 @@ function foldedNote(dialogId: string): string {
     default:
       return t("dialog.closedError");
   }
+}
+watch(
+  closedDialogs,
+  (list) => {
+    for (const c of list) {
+      if (resolvedNotes.has(c.dialogId)) continue; // resolve ONCE, before closed[] can evict it
+      resolvedNotes.set(c.dialogId, resolveClosedNote(c));
+      while (resolvedNotes.size > RESOLVED_NOTES_CAP) {
+        const oldest = resolvedNotes.keys().next().value;
+        if (oldest === undefined) break;
+        resolvedNotes.delete(oldest);
+      }
+    }
+  },
+  { immediate: true },
+);
+
+function foldedNote(dialogId: string): string {
+  const cached = resolvedNotes.get(dialogId);
+  if (cached !== undefined) return cached;
+  // accfix-N3: not resolved yet — either still genuinely `open`, or its `closed[]` record was
+  // evicted (bounded slot) before this mount ever observed it. This generic fallback is now
+  // reached ONLY in that narrow case, never as a degeneration of a note we once knew.
+  return t("dialog.closedGeneric");
 }
 
 /** §3.5: an epoch flip under a still-open dialogId ⇒ one-line stale hint (the form itself is

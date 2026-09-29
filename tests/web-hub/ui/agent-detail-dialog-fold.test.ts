@@ -186,3 +186,57 @@ describe("AgentDetail.vue — ask_user close-fold attribution (acc32-B3 / accfix
     expect(note.text()).toBe("Answered");
   });
 });
+
+describe("AgentDetail.vue — folded note survives closed[] eviction (accfix-N3)", () => {
+  it("a specific outcome resolved once stays specific even after its closed[] record scrolls out of the bounded slot", async () => {
+    const agent = baseAgent();
+    agent.dialogs = { epoch: "e1", open: [dialogWire("ask:n3")], closed: [] };
+    const control = fakeControl();
+    const w = mountDetail(agent, control);
+    expect(w.findComponent(AskUserForm).exists()).toBe(true);
+
+    // The dialog closes with a determinable outcome (cancelled in the terminal).
+    agent.dialogs = {
+      epoch: "e1",
+      open: [],
+      closed: [{ dialogId: "ask:n3", by: "tui", outcome: "cancelled", at: 2 }],
+    };
+    await nextTick();
+    await nextTick();
+    expect(w.find(".ask-folded").text()).toBe("Cancelled in the terminal");
+
+    // accfix-N3: `closed[]` is a bounded slot on the hub/agent side — the SAME dialogId's record
+    // can later scroll out of it (enough other dialogs closed after it) while the fold row for
+    // this dialogId is STILL shown (`folded` has its own, independent 4-item cap). Before the
+    // fix, `foldedNote` re-derived its text from `closedDialogs.value.find(...)` on every call,
+    // so losing the record degraded the note to the generic "Dialog closed" on the very next
+    // render — even though nothing about the ANSWER changed, only bookkeeping elsewhere evicted
+    // it.
+    agent.dialogs = { epoch: "e1", open: [], closed: [] };
+    await nextTick();
+    await nextTick();
+
+    const note = w.find(".ask-folded");
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toBe("Cancelled in the terminal");
+    expect(note.text()).not.toBe("Dialog closed");
+  });
+
+  it("a dialogId this mount never resolved (no closed[] record ever seen) still falls back to the generic note", async () => {
+    const agent = baseAgent();
+    agent.dialogs = { epoch: "e1", open: [dialogWire("ask:n3b")], closed: [] };
+    const control = fakeControl();
+    const w = mountDetail(agent, control);
+
+    // The dialog leaves `open` without EVER appearing in `closed[]` at all (e.g. it was already
+    // gone from the bounded slot by the time this tab observed the transition) — this is the
+    // one legitimate case the generic fallback text must still cover.
+    agent.dialogs = { epoch: "e1", open: [], closed: [] };
+    await nextTick();
+    await nextTick();
+
+    const note = w.find(".ask-folded");
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toBe("Dialog closed");
+  });
+});
