@@ -397,6 +397,14 @@ describe("registry: P2 control-plane additions (plan §3.1/§3.2/§3.5/§6.1, C3
     expect(types(h.events)).toEqual(["dialogs", "ctl", "commands"]);
     expect(h.events[0]).toMatchObject({ type: "dialogs", agentKey, open: dialogsFrame.open });
     expect(h.reg.get(agentKey)?.dialogs).toEqual({ epoch: "epoch-1", open: dialogsFrame.open, closed: [] });
+    // accfix-N2: `commands` must be readable back off the record (mirrors the `dialogs`
+    // assertion above) AND survive the `view()`/`card()` snapshot `list()`/`get()` return —
+    // that snapshot is exactly what `http.ts`'s `toCard()` copies onto the wire `AgentCard` a
+    // freshly-attaching browser tab receives.
+    expect(h.reg.get(agentKey)?.commands).toEqual([{ name: "session", kind: "builtin", policy: "allow" }]);
+    expect(h.reg.list().find((v) => v.agentKey === agentKey)?.commands).toEqual([
+      { name: "session", kind: "builtin", policy: "allow" },
+    ]);
   });
 
   it("cmd_result resolves a matching pending registry.request() by rid", async () => {

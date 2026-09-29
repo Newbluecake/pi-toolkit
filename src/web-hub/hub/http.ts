@@ -351,6 +351,12 @@ function toCard(v: AgentView): AgentCard {
   if (v.control !== undefined) card.control = v.control;
   if (v.epoch !== undefined) card.epoch = v.epoch;
   if (v.dialogs !== undefined) card.dialogs = v.dialogs;
+  // accfix-N2 (acc32-B1 same-shape residual): `commands` was left out of this copy — a browser
+  // tab that attaches (fresh page, reconnect, or a second tab) after the agent already sent its
+  // `commands` slot got a snapshot with no `commands` field at all, so it stayed in plain-prompt
+  // mode (no palette on `/`) until something else (e.g. the agent's own `/reload`) happened to
+  // resend a live `commands` SSE event.
+  if (v.commands !== undefined) card.commands = v.commands;
   return card;
 }
 

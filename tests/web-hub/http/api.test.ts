@@ -94,6 +94,25 @@ describe("GET /api/events", () => {
     expect(a1.dialogs).toMatchObject({ epoch: "e1", open: [{ dialogId: "ask:1" }] });
   });
 
+  it("agents snapshot carries commands (accfix-N2, same-shape residual of acc32-B1)", async () => {
+    // A browser tab that (re)attaches AFTER the agent already announced its `commands` slot
+    // must NOT get stuck without a palette until a live `commands` SSE event happens to fire
+    // again — the fleet-wide `agents` snapshot has to carry the last known value, same as it
+    // already does for `control`/`epoch`/`dialogs`.
+    deps.agents.set(
+      "a1",
+      makeAgent("a1", {
+        control: true,
+        epoch: "e1",
+        commands: [{ name: "session", kind: "builtin", policy: "allow" }],
+      }),
+    );
+    const { conn } = await events();
+    const cards = conn.events[2]!.data.agents as Array<Record<string, unknown>>;
+    const a1 = cards.find((c) => c.agentKey === "a1")!;
+    expect(a1.commands).toEqual([{ name: "session", kind: "builtin", policy: "allow" }]);
+  });
+
   it("global bus events reach every client; ev/gap only subscribers", async () => {
     const one = await events();
     const two = await events();

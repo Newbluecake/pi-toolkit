@@ -178,6 +178,10 @@ export function createRegistry(deps: {
     if (r.session !== undefined) c.session = r.session;
     if (r.status !== undefined) c.status = r.status;
     if (r.dialogs !== undefined) c.dialogs = { ...r.dialogs };
+    // accfix-N2: mirrors the `dialogs` line above — without this, a browser that (re)attaches
+    // after the agent already sent its `commands` slot never sees it on the fleet snapshot and
+    // stays stuck without a command palette until the agent happens to resend the frame.
+    if (r.commands !== undefined) c.commands = [...r.commands];
     return c;
   }
 

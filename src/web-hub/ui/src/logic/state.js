@@ -123,6 +123,10 @@ function newAgent(card) {
     sub: null,
     pendingCtl: [],
     ...(card.dialogs && typeof card.dialogs === "object" ? { dialogs: card.dialogs } : {}),
+    // accfix-N2: mirrors the `dialogs` line above — a browser attaching AFTER the agent already
+    // announced its `commands` slot (fresh tab, reconnect, second tab) must not sit without a
+    // command palette until a live `commands` SSE event happens to fire again.
+    ...(Array.isArray(card.commands) ? { commands: card.commands } : {}),
   };
 }
 
@@ -491,6 +495,9 @@ function mergeCard(a, card) {
   };
   if (card.session) next = applySession(next, card.session);
   if (card.dialogs && typeof card.dialogs === "object") next = { ...next, dialogs: card.dialogs };
+  // accfix-N2: same rationale as `newAgent` above — a card refresh (e.g. `agent_up` after a
+  // reconnect) that carries `commands` must fold it in, not just leave the previous value.
+  if (Array.isArray(card.commands)) next = { ...next, commands: card.commands };
   return next;
 }
 

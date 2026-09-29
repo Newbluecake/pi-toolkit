@@ -6,6 +6,7 @@
  */
 import type {
   AgentKind,
+  CommandInfoWire,
   InflightState,
   SessionInfo,
   StatusInfo,
@@ -87,6 +88,11 @@ export interface AgentCard {
   control?: boolean;
   epoch?: string;
   dialogs?: unknown;
+  /** accfix-N2: mirrors `dialogs` — the last known `commands` slot value, so a browser tab
+   * that attaches (or reattaches) AFTER the agent already announced its commands doesn't have
+   * to wait for a fresh live `commands` SSE event (which may never come again on its own) to
+   * enter command mode. */
+  commands?: CommandInfoWire[];
 }
 
 export interface HistoryPayload {

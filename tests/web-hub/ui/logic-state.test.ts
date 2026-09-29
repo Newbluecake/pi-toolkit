@@ -656,6 +656,22 @@ describe("state.reduce — control plane (§7.3/§7.7)", () => {
     expect(A(s).dialogs).toEqual({ epoch: "e1", open, closed: [] });
   });
 
+  it("agents-frame cards carry commands too (accfix-N2): a tab attaching after the fact still gets a palette", () => {
+    // Mirrors the `dialogs` case above — `hub/http.ts`'s `toCard()` now copies `commands` onto
+    // the wire `AgentCard` (accfix-N2), so a browser that (re)attaches after the agent already
+    // announced its commands must see them immediately off the fleet snapshot, not only via a
+    // live `commands` SSE event it may have missed.
+    const commands = [{ name: "session", kind: "builtin", policy: "allow" }];
+    let s = reduce(initialState(), { event: "agents", data: [card("A", { commands })] });
+    expect(A(s).commands).toEqual(commands);
+
+    // A subsequent `agent_up` refresh (e.g. after a reconnect) that still carries `commands`
+    // must keep folding it in via `mergeCard`, not silently drop the previous value.
+    const commands2 = [...commands, { name: "new", kind: "builtin", policy: "allow" }];
+    s = reduce(s, { event: "agent_up", data: { agent: card("A", { commands: commands2 }) } });
+    expect(A(s).commands).toEqual(commands2);
+  });
+
   it("dialogs.closed settles this tab's dialog item: cmdId match ⇒ won (removed); otherwise lost (E_DIALOG_CLOSED)", () => {
     let s = base();
     s = reduce(s, send("A", { id: "c1", kind: "dialog_answer", dialogId: "ask:t1", state: "sending", at: 1 }));
