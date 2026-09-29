@@ -16,11 +16,12 @@
  *     `bye{handover}`, the new one reconnects with the same agentId / new epoch.
  * An activate without a matching session_start takes no connection.
  */
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot } from "../../core/types.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
@@ -137,7 +138,7 @@ export type LanAdminResult<T> =
 
 export interface WebHubControl {
   readonly capture?: CommandCapturePort;
-  internalExec(args: string, ctx: unknown): Promise<{ ok: false; code: "E_UNSUPPORTED" }>;
+  internalExec(args: string, ctx: unknown): Promise<{ ok: true } | { ok: false; code: "E_UNSUPPORTED" }>;
   askUserRemote(): AskUserRemotePort | undefined;
   readonly admin: AdminCommands;
   status(): WebHubStatusView;
@@ -196,6 +197,22 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   let statusText: string | undefined;
   let buildInfo: Promise<{ pluginVersion: string; buildId: string }> | undefined;
   let launcher: LauncherPlan | { error: string } | undefined;
+  // §4.6 "/webhub __exec": one-shot, 5s-TTL nonce armed by the builtin bridge's `/new` dispatch
+  // and consumed by `internalExec` below (acc32-B4 — this closure slot never existed before, so
+  // the stub always returned E_UNSUPPORTED regardless of what nonce the terminal typed back in).
+  let pendingExec: { op: string; nonce: string; expiresAt: number } | undefined;
+  const EXEC_NONCE_TTL_MS = 5_000;
+  const armExec = (op: string): string => {
+    const nonce = randomBytes(16).toString("hex");
+    pendingExec = { op, nonce, expiresAt: now() + EXEC_NONCE_TTL_MS };
+    return nonce;
+  };
+  const takeExec = (op: string, nonce: string): boolean => {
+    const p = pendingExec;
+    if (p === undefined || p.op !== op || p.nonce !== nonce || now() > p.expiresAt) return false;
+    pendingExec = undefined;
+    return true;
+  };
 
   const tap = createEventTap(
     (e, droppable) => {
@@ -240,6 +257,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     capture: () => commandCapture,
     overrides: () => deps.settings.webCommandPolicy,
     sendLate: (frame, result) => bridgeLate.current?.(frame, result),
+    armExec,
   });
   registerOriginEntryRenderer(pi);
 
@@ -783,7 +801,23 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // what makes this a zero-visible-change addition: every existing command still runs
     // byte-identically once the ref is actually populated.
     capture: commandCapture,
-    internalExec: async () => ({ ok: false, code: "E_UNSUPPORTED" }),
+    internalExec: async (args, ctx) => {
+      const parts = args
+        .trim()
+        .split(/\s+/)
+        .filter((p) => p.length > 0);
+      const op = parts[0];
+      const nonce = parts[1];
+      if (op !== "new" || nonce === undefined || !takeExec(op, nonce)) {
+        return { ok: false, code: "E_UNSUPPORTED" };
+      }
+      try {
+        await (ctx as ExtensionCommandContext).newSession();
+      } catch {
+        return { ok: false, code: "E_UNSUPPORTED" };
+      }
+      return { ok: true };
+    },
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
     admin,
     status: () => conn?.status() ?? { state: "off", attached: false },

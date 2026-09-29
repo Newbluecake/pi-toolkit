@@ -192,8 +192,10 @@ export function fakePi(): {
   pi: ExtensionAPI;
   handlers: Map<string, Handler[]>;
   fire: (ev: string, event: unknown, ctx: unknown) => void;
+  sentUserMessages: Array<{ text: string; options?: unknown }>;
 } {
   const handlers = new Map<string, Handler[]>();
+  const sentUserMessages: Array<{ text: string; options?: unknown }> = [];
   const pi = {
     on(event: string, handler: Handler) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -208,7 +210,9 @@ export function fakePi(): {
     registerCommand() {},
     registerEntryRenderer() {},
     sendMessage() {},
-    sendUserMessage() {},
+    sendUserMessage(text: string, options?: unknown) {
+      sentUserMessages.push({ text, options });
+    },
     appendEntry() {},
     getCommands() {
       return [];
@@ -218,7 +222,7 @@ export function fakePi(): {
   const fire = (ev: string, event: unknown, ctx: unknown): void => {
     for (const h of handlers.get(ev) ?? []) h(event, ctx);
   };
-  return { pi: pi as unknown as ExtensionAPI, handlers, fire };
+  return { pi: pi as unknown as ExtensionAPI, handlers, fire, sentUserMessages };
 }
 
 /** Deterministic stand-in for `commands.ts`'s `Timer`-returning `setTimer` seam: timers only fire

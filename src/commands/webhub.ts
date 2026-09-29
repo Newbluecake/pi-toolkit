@@ -340,7 +340,8 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
           notify(ctx, "web-hub 未启用。", "warning");
           return;
         }
-        await control.internalExec(tokens.slice(1).join(" "), ctx);
+        const result = await control.internalExec(tokens.slice(1).join(" "), ctx);
+        if (!result.ok) notify(ctx, "无效或已过期的 /webhub __exec 调用。", "warning");
         return;
       }
       if (sub !== "status" && !SUBCOMMANDS.has(sub)) {

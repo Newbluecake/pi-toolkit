@@ -56,9 +56,10 @@ const FULL_CAPS = ["cmd.v1", "dialog.v1", "command.v1", "ctl.v2"];
 async function connectFullCaps(): Promise<{
   control: ReturnType<typeof wireWebHub>;
   fire: ReturnType<typeof fakePi>["fire"];
+  sentUserMessages: ReturnType<typeof fakePi>["sentUserMessages"];
 }> {
   hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
-  const { pi, fire } = fakePi();
+  const { pi, fire, sentUserMessages } = fakePi();
   const control = wireWebHub(pi, deps());
   const { ctx } = fakeCtx({ mode: "tui" });
   fire("session_start", { type: "session_start", reason: "startup" }, ctx);
@@ -66,7 +67,7 @@ async function connectFullCaps(): Promise<{
   const helloFrame = hub!.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
   hub!.send(hub!.conns[0]!, ackFrame(`a${helloFrame.agentId.pid}`, 4242, FULL_CAPS));
   await waitUntil(() => control.status().state === "live", 3_000, "live");
-  return { control, fire };
+  return { control, fire, sentUserMessages };
 }
 
 function cmdFrame(id: string, cmd: CmdFrame["cmd"]): AgentFrame & { t: "cmd" } {
@@ -213,6 +214,30 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
     await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === "cmd0000000000002"));
     expect(hub!.all().find((f) => f.t === "cmd_result" && f.id === "cmd0000000000002")).toMatchObject({ ok: true });
     expect(claimed).toMatchObject({ kind: "answer" });
+  });
+
+  it("/new's `/webhub __exec` nonce round-trips through internalExec and calls ctx.newSession() (acc32-B4)", async () => {
+    const { control, sentUserMessages } = await connectFullCaps();
+    hub!.send(hub!.conns[0]!, cmdFrame("cmd0000000000003", { op: "command", name: "new", args: "", confirm: true }));
+    await waitUntil(() => sentUserMessages.length > 0);
+    const match = sentUserMessages[0]!.text.match(/^\/webhub __exec new ([0-9a-f]{32})$/);
+    expect(match).not.toBeNull();
+    const nonce = match![1]!;
+
+    let newSessionCalls = 0;
+    const execCtx = { newSession: async () => (newSessionCalls += 1) && { cancelled: false } };
+    const bad = await control.internalExec(`new ${nonce}x`, execCtx);
+    expect(bad).toEqual({ ok: false, code: "E_UNSUPPORTED" });
+    expect(newSessionCalls).toBe(0);
+
+    const ok = await control.internalExec(`new ${nonce}`, execCtx);
+    expect(ok).toEqual({ ok: true });
+    expect(newSessionCalls).toBe(1);
+
+    // one-shot: the same nonce cannot be replayed.
+    const replay = await control.internalExec(`new ${nonce}`, execCtx);
+    expect(replay).toEqual({ ok: false, code: "E_UNSUPPORTED" });
+    expect(newSessionCalls).toBe(1);
   });
 });
 

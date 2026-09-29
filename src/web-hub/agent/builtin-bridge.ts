@@ -54,6 +54,14 @@ export interface BuiltinBridgeDeps {
    * `command` op has no late channel of its own to piggyback on, see the module doc comment).
    */
   sendLate?(frame: CmdFrame, result: CmdResultBody): void;
+  /**
+   * §4.6 `/webhub __exec`: arms the one-shot nonce that `/new`'s re-entry into the extension-
+   * command surface must present back (`index.ts`'s closure-scoped, 5s-TTL slot, consumed by
+   * `WebHubControl.internalExec`). Without it, `randomNonce()` below is generated but never
+   * registered anywhere `internalExec` can verify it against — `/new` would always report
+   * `completion:"unknown"` while never actually switching the session (acc32-B4).
+   */
+  armExec?(op: string): string;
 }
 
 const ARGS_MAX_BYTES = 16 * 1024;
@@ -293,8 +301,9 @@ function dispatchBuiltin(
     }
     case "new": {
       if (deps.pi === undefined) return errResult("E_UNSUPPORTED", false, "none");
+      const nonce = deps.armExec !== undefined ? deps.armExec("new") : randomNonce();
       try {
-        deps.pi.sendUserMessage(`/webhub __exec new ${randomNonce()}`, {
+        deps.pi.sendUserMessage(`/webhub __exec new ${nonce}`, {
           expandPromptTemplates: true,
           deliverAs: "followUp",
         });

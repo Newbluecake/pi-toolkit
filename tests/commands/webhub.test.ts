@@ -122,6 +122,30 @@ describe("/webhub command", () => {
   });
 });
 
+describe("/webhub __exec (plan §4.6, acc32-B4)", () => {
+  it("a successful internalExec is silent (no warning notify)", async () => {
+    const notes = await run("__exec new deadbeef", {
+      control: control({ internalExec: async () => ({ ok: true }) }),
+    });
+    expect(notes).toHaveLength(0);
+  });
+
+  it("a failed internalExec (invalid/expired nonce) warns", async () => {
+    const notes = await run("__exec new deadbeef", {
+      control: control({ internalExec: async () => ({ ok: false, code: "E_UNSUPPORTED" }) }),
+    });
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.level).toBe("warning");
+  });
+
+  it("control undefined ⇒ guidance message, internalExec never called", async () => {
+    const notes = await run("__exec new deadbeef", {});
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.level).toBe("warning");
+    expect(notes[0]!.message).toContain("web-hub 未启用");
+  });
+});
+
 describe("/webhub stop|start|token rotate (plan §6.7.1/§6.7.2, C8)", () => {
   it("stop: delegates to control.admin.stop() and formats every outcome kind", async () => {
     const calls: string[] = [];

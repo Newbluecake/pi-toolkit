@@ -412,6 +412,13 @@ describe("execute — builtin dispatch (§4.6 builtin row)", () => {
     expect(sent[0]?.text).toMatch(/^\/webhub __exec new [0-9a-f]{32}$/);
     expect(sent[0]?.options).toEqual({ expandPromptTemplates: true, deliverAs: "followUp" });
   });
+  it("/new uses deps.armExec's nonce when provided, so it can be verified later (acc32-B4)", () => {
+    const { pi, sent } = fakePi();
+    const armExec = (op: string) => `armed-${op}-nonce`;
+    const bridge = createBuiltinBridge(baseDeps({ pi, armExec }));
+    bridge.execute(frame("new", "", {}, true));
+    expect(sent[0]?.text).toBe("/webhub __exec new armed-new-nonce");
+  });
   it("/reload dispatches /agent reload as a followUp", () => {
     const { pi, sent } = fakePi();
     const bridge = createBuiltinBridge(baseDeps({ pi }));
