@@ -511,3 +511,48 @@ describe("useUploads: progress reporting", () => {
     expect(item.uploadedBytes).toBe(10);
   });
 });
+
+describe("useUploads: discard (§3.2 post-send tray clear — U5 patch, NEVER the abort endpoint)", () => {
+  it("discard clears ready items without calling abort; a user remove still calls abort", async () => {
+    const h = harness();
+    const r = h.uploads.add("A", [fakeFile("a.bin", 4)]);
+    await flush();
+    const id = r.added[0]!;
+    expect(h.uploads.tray("A").value[0]!.state).toBe("ready");
+    h.uploads.discard?.("A");
+    await flush();
+    // The just-sent prompt references the hub path — an abort would delete the committed file.
+    expect(h.calls.abort).toHaveLength(0);
+    expect(h.uploads.tray("A").value).toHaveLength(0);
+
+    // Contrast (plan-author ruling §6-U5 ④): the tray's user remove button still aborts.
+    const r2 = h.uploads.add("A", [fakeFile("b.bin", 4)]);
+    await flush();
+    h.uploads.remove("A", r2.added[0]!);
+    await flush();
+    expect(h.calls.abort.map((a) => a.id)).toEqual([r2.added[0]!]);
+  });
+
+  it("discard aborts the in-flight fetch locally (controller only) and never hits the abort endpoint", async () => {
+    const h = harness({}, { chunkBytes: 4, gatedChunk: true });
+    h.uploads.add("A", [fakeFile("a.bin", 64)]);
+    await flush();
+    expect(h.uploads.tray("A").value[0]!.state).toBe("uploading");
+    h.uploads.discard?.("A");
+    await flush();
+    expect(h.calls.chunk[0]!.signal?.aborted).toBe(true);
+    expect(h.calls.abort).toHaveLength(0);
+    expect(h.uploads.tray("A").value).toHaveLength(0);
+  });
+
+  it("discard(ids) drops only the listed ids and tolerates unknown ones", async () => {
+    const h = harness();
+    const r = h.uploads.add("A", [fakeFile("a.bin", 4), fakeFile("b.bin", 4)]);
+    await flush();
+    const [keep, drop] = r.added;
+    h.uploads.discard?.("A", [drop!, "not-an-id"]);
+    await flush();
+    expect(h.calls.abort).toHaveLength(0);
+    expect(h.uploads.tray("A").value.map((x) => x.id)).toEqual([keep]);
+  });
+});

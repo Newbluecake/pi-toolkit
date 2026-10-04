@@ -637,6 +637,9 @@ export function createUploadStore(deps: { root; now; log; audit; limits?; fs?: P
 - U4b：`logic/contract.js:36-46` `API` 追加 4 端点；`logic/token-client.js`（`postRaw`+`withRelogin`，chunk 用 `request()` `:87-107` 发 octet-stream，合并外部 `AbortSignal`）；
   `logic/password-client.js`（`postApi` `:265` / `request`，401 走 `onConn("auth")`，503 `E_BUSY` 复用退避）；`transport/{types,token,password}.ts` 追加可选 `upload?: UploadTransport`；
   `composables/useUploads.ts`（新）；`types.ts`（`ControlHandle` `:129-145`）追加可选 `uploads?`；`composables/useControl.ts` 在 `transport.upload` 存在时挂载。
+- U4b 补充（U5 施工时发现、方案作者裁定随 U5 合入）：`UploadsHandle` 增加可选成员 `discard(agentKey, ids?)`——§3.2 发送后清盘专用，
+  只走 reducer `removed` + 清本地 files/serverKnown/controllers（在途 fetch 本地 abort），**绝不调 abort 端点**（否则删掉刚被 prompt 引用的 committed 文件）；
+  用户点「移除」仍走 `remove()` + abort。后续项（不阻塞 U5）：hub 侧对已 `referencedAt`/pinned 的 committed 上传的显式 abort 应拒绝删文件（纵深防御）。
 
 验收：`tests/web-hub/ui/logic-upload.test.ts`（粘贴三情形、目录拒收、指纹、改名、状态机全转移表、`composePrompt` 48 KiB 边界、命令模式阻断、`canSendWithAttachments` 真值表、
 `uploadAvailability` 真值表）；`transport-contract.test.ts` 两 transport 同形 upload 用例（header/body、409 续传、404 判失败、401、超时）；`use-uploads.test.ts`（并发上限、续传、
@@ -647,6 +650,8 @@ abort 中断 fetch 并调 abort 端点、`E_BUSY` 自动重试）；`source-scan
 文件域：`components/control/Composer.vue`（`@paste`、拖拽、附件按钮、`AttachmentTray`、**`sendGate()` 作为唯一闸门**：`:80-85` 的 `canSend` 改为 `sendGate().ok`，
 `doSend`（`:108`）首行调用，`onKeydown`（`:118`）删除自身的 deny 早退（`:123`）改由 `sendGate` 覆盖、`onSendClick`（`:127`）不变；`doSend` 用 `composePrompt` 拼接后 emit 并清托盘；
 `import "../../styles/upload.css"`）、`components/control/AttachmentTray.vue`（新）、`styles/upload.css`（新）、`i18n/{en,zh}/upload.ts`（新）、`icons/`（仅追加）。
+**文件域例外（方案作者裁定）**：`composables/useUploads.ts` 与 `types.ts` 随本包附带 `UploadsHandle.discard` 增量补丁（见 §6-U4b 补充条）——
+U4b 的 handle 遗漏了「清托盘但不发 abort」入口，`doSend` 清盘只走 `discard()`。
 
 验收：`tests/web-hub/ui/composer-upload.test.ts`（新）：
 

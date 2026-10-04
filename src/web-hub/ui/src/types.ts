@@ -174,6 +174,14 @@ export interface UploadsHandle {
   retry(agentKey: string, id: string): void;
   /** §2.6/#8: `ready → failed` for attachments the hub reports evicted (`E_UPLOAD_GONE` off `/api/cmd`). */
   failGone(agentKey: string, ids: readonly string[]): void;
+  /** §3.2 (U5 patch, plan-author ruled file-domain exception): post-send tray clear — drops
+   * items WITHOUT calling the abort endpoint, because the just-sent prompt now references
+   * those hub paths (an abort would delete the committed file out from under it; hub-side
+   * pins only block sweep eviction, not an explicit abort). In-flight fetches are locally
+   * aborted (controller only); a never-committed server-side partial is left to the hub's
+   * 10-min idle voiding. Omitting `ids` clears the agent's whole tray. Optional per the
+   * frozen-types convention (additive members only); `createUploads` always provides it. */
+  discard?(agentKey: string, ids?: readonly string[]): void;
   /** Abort everything and drop all per-agent state (unmount / teardown). */
   dispose(): void;
 }

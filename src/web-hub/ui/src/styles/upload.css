@@ -1,0 +1,225 @@
+/*
+ * Upload UI (web-hub-upload plan §4.1–§4.4, package U5 — `docs/dev/web-hub-upload/plan.md`).
+ * Attachment tray, drop overlay, attach button, and the composer's gate/hint line. Imported
+ * by `components/control/Composer.vue` (same late-package pattern as transcript.css /
+ * fleet.css). Tokens only — light by default, dark follows the theme switch like the rest of
+ * the UI (no per-file dark overrides needed: every color below is a `tokens.css` var).
+ */
+
+/* --- attach button (§4.1 entry 3; §4.4: coarse pointers get a ≥44px target, always shown) --- */
+
+.composer-attach {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  width: 36px;
+  min-height: 44px; /* match .composer-send / textarea touch target (§7.4) */
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  cursor: pointer;
+}
+
+.composer-attach:hover:not(:disabled) {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+}
+
+.composer-attach:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+  border-color: var(--c-focus);
+}
+
+.composer-attach:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (pointer: coarse) {
+  .composer-attach {
+    width: 44px; /* §4.4: coarse pointers keep the full touch target */
+  }
+}
+
+/* --- drop overlay (§4.1 entry 2; .composer itself gets position:relative here) --- */
+
+.composer {
+  position: relative;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: calc(-1 * var(--sp-2));
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--c-primary);
+  border-radius: var(--r-md);
+  background: var(--c-primary-soft);
+  color: var(--c-on-primary-soft);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  pointer-events: none; /* overlay never swallows drags/clicks — the root keeps the events */
+}
+
+/* --- attachment tray (§4.2) --- */
+
+.attachment-tray {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.tray-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 28px;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.tray-icon {
+  flex: none;
+  color: var(--c-text-3);
+}
+
+.tray-item.is-failed .tray-icon {
+  color: var(--c-danger);
+}
+
+.tray-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text);
+}
+
+.tray-size {
+  flex: none;
+  color: var(--c-text-3);
+}
+
+.tray-state {
+  flex: none;
+}
+
+.tray-state.is-ready {
+  background: var(--c-success-soft);
+  border-color: var(--c-success);
+  color: var(--c-success);
+}
+
+.tray-item.is-removing {
+  opacity: 0.6;
+}
+
+.tray-progress {
+  flex: 1;
+  min-width: 64px;
+  max-width: 160px;
+  position: relative;
+  height: 4px;
+  margin-right: 36px; /* room for the % label parked right of the track */
+  border-radius: 2px;
+  background: var(--c-sunken);
+}
+
+.tray-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--c-primary);
+}
+
+.tray-progress-pct {
+  position: absolute;
+  left: calc(100% + var(--sp-2));
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  white-space: nowrap;
+}
+
+.tray-error {
+  min-width: 0;
+  color: var(--c-danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tray-retry {
+  flex: none;
+  min-height: 24px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
+.tray-remove {
+  flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-height: 24px;
+  padding: 0;
+  color: var(--c-text-3);
+}
+
+.tray-remove:hover {
+  color: var(--c-danger);
+}
+
+@media (pointer: coarse) {
+  .tray-remove {
+    width: 44px; /* §4.4: coarse pointers keep ≥44px targets */
+    min-height: 44px;
+  }
+}
+
+/* --- §4.2 plaintext warning: permanent while the tray is non-empty, NOT dismissible --- */
+
+.tray-plain-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-warning-border);
+  border-radius: var(--r-sm);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.tray-plain-warning .icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--c-warning);
+}
+
+/* --- composer hint line (gate blocks with a tray present + transient add/drop hints) --- */
+
+.composer-hint {
+  padding-left: var(--sp-1);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--c-warning-text);
+}
+
+.composer-hint.is-transient {
+  color: var(--c-text-3);
+}

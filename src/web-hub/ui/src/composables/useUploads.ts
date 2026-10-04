@@ -416,6 +416,26 @@ export function createUploads(opts: UploadsOptions): UploadsHandle {
       }
     },
 
+    discard(agentKey, ids) {
+      // §3.2's post-send tray clear (U5 patch — plan-author ruled this handle member was an
+      // U4b omission; remove()-ing a sent attachment would abort-delete the committed hub file
+      // the just-sent prompt now references). NEVER calls the abort endpoint: a local
+      // controller abort stops any in-flight fetch (sendGate normally guarantees only
+      // ready/removing items remain — this is the defensive path), and a never-committed
+      // server-side partial is left to the hub's 10-min idle voiding (§2.6).
+      const a = agents.get(agentKey);
+      if (a === undefined) return;
+      const targets = ids === undefined ? a.tray.value.map((x) => x.id) : ids;
+      for (const id of targets) {
+        if (typeof id !== "string") continue;
+        a.controllers.get(id)?.abort();
+        a.controllers.delete(id);
+        a.files.delete(id);
+        a.serverKnown.delete(id);
+        applyEvent(agentKey, id, { type: "removed" });
+      }
+    },
+
     dispose() {
       for (const a of agents.values()) {
         for (const ac of a.controllers.values()) ac.abort();

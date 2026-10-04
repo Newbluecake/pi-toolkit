@@ -2,7 +2,9 @@
   Inline SVG sprite (vue-plan.md v2.1 §1.1, §3.2, §5.2 — P0 frozen). 33 `<symbol>`s copied
   verbatim from `docs/dev/web-hub/ui-mockups/dashboard.html`'s sprite block — same source, same
   `viewBox`/path data, so `AppIcon.vue`'s `<use href="#i-<name>">` renders identically to the
-  mockups (plus `monitor`/`moon`/`sun`, added in #26 W3 for the compact theme toggle). Rendered once by `App.vue`; every icon everywhere else is `<use>`, never a second
+  mockups (plus `monitor`/`moon`/`sun`, added in #26 W3 for the compact theme toggle, and
+  `file`/`image`/`paperclip`, added by web-hub-upload U5 for the attachment tray/attach
+  button). Rendered once by `App.vue`; every icon everywhere else is `<use>`, never a second
   copy of the paths. `names.ts`'s `ICON_NAMES` must stay in exact sync with the ids below
   (enforced by `tests/web-hub/ui/smoke.test.ts`).
 
@@ -48,10 +50,19 @@
       <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
       <circle cx="12" cy="12" r="2.8" />
     </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24">
+      <path d="M6 3.5h7l5 5V20a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 6 20z" />
+      <path d="M13 3.5V9h5.5" />
+    </symbol>
     <symbol id="i-folder" viewBox="0 0 24 24">
       <path d="M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
     </symbol>
     <symbol id="i-hash" viewBox="0 0 24 24"><path d="M9.5 4 8 20M16 4l-1.5 16M4.5 9h15M4 15h15" /></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24">
+      <rect x="3.5" y="5" width="17" height="14" rx="2" />
+      <circle cx="9.2" cy="10.2" r="1.6" />
+      <path d="M4.5 17.5 10 12.5l3 3 3.3-3.3 3.2 3.1" />
+    </symbol>
     <symbol id="i-inbox" viewBox="0 0 24 24">
       <path d="M3.5 13.5 6 5.5h12l2.5 8V18a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z" />
       <path d="M3.5 13.5H8l1.5 2.5h5l1.5-2.5h4.5" />
@@ -78,6 +89,11 @@
       <path d="M8.5 20h7M12 16.5V20" />
     </symbol>
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" /></symbol>
+    <symbol id="i-paperclip" viewBox="0 0 24 24">
+      <path
+        d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57a4 4 0 1 1 5.66 5.66l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"
+      />
+    </symbol>
     <symbol id="i-radio" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="2" />
       <path d="M8 8a5.7 5.7 0 0 0 0 8M16 8a5.7 5.7 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" />
