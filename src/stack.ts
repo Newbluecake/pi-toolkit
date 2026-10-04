@@ -62,7 +62,7 @@ import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
 import { createFabricTree } from "./fabric/tree.js";
 import { formatMessage, type FabricRecord } from "./core/message.js";
-import { wrapWithRunLog } from "./adapters/pi-run-log.js";
+import { wrapWithRunLog, seedRunStoreFromEntries } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
 import {
   readScopedModels,
@@ -1461,7 +1461,12 @@ export function buildSessionStack(
       "[pi-subagent] ctx.sessionManager.getEntries unavailable; run-log/outbox degrade to in-memory (G5a read-back verification off).",
     );
   const runLogHost = { appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager };
-  const store = readBack ? wrapWithRunLog(new MemoryRunStore(), runLogHost) : new MemoryRunStore();
+  // G5a 补全（2026-10-04 事故）：把会话文件里的终态 run 快照种回内存 store，
+  // 否则进程重启后 resume/候选列表全空（条目明明还在盘上）。种 base 不种
+  // 写穿包装，避免旧条目被重复 appendEntry。
+  const baseStore = new MemoryRunStore();
+  if (readBack) seedRunStoreFromEntries(baseStore, prefetchedEntries);
+  const store = readBack ? wrapWithRunLog(baseStore, runLogHost) : baseStore;
   const pool = new SingleSlotPool(systemClock, settings.concurrencyLimit);
   const reaper = new EscalatingReaper(systemClock);
   // M4: watchdog 不再是空壳——通过 runnerRef 晚绑定到真实 runner（watchdog 先于
