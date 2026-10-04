@@ -20,6 +20,10 @@
  *   provider 曾真播报过（闩锁存在）时注入恢复块（含当前读数与闸门状态），
  *   同轮抑制该 provider 的常规块（每次观测重置至多一条）；send 失败 ⇒ 闩锁
  *   回滚 + 事件回队重试。
+ * - 可用播报（B 方案，2026-10-04 用户拍板）：本栈首次观测到窗口型 provider
+ *   真实读数低于 L1 ⇒ 一次性注入「订阅可用」——「无 [quota] 行 ≠ 没额度」
+ *   盲区的正向消解。每 provider 每栈至多一条；stale / reset-elapsed（读数
+ *   不真）与 demoted（刻意停放）都不播；send 失败 ⇒ 从已播集合移除重试。
  * - `sendMessage` / `verdicts` / `refresh` 抛被 catch：turn_end 不可拖垮。
  * - print/json 模式直接 return（子会话惰性，R12——钩子本身只在主会话注册，
  *   此门是双保险）。
@@ -28,7 +32,12 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Millis } from "../core/types.js";
 import { gridStep, QUOTA_HYSTERESIS_PCT, type ProviderVerdict, type QuotaRecoveryEvent } from "./ladder.js";
-import { buildQuotaMessage, buildQuotaRecoveryTexts, type AlternativeSelection } from "./render.js";
+import {
+  buildQuotaAvailableTexts,
+  buildQuotaMessage,
+  buildQuotaRecoveryTexts,
+  type AlternativeSelection,
+} from "./render.js";
 import type { LadderLevel } from "./types.js";
 
 export const QUOTA_CUSTOM_TYPE = "subagent:quota";
@@ -60,6 +69,9 @@ export interface QuotaHintState {
    * 判定门槛的能否重试——send 失败时回队，见下方回滚路径）。与 latches 同生命周期。
    */
   readonly recoveries: QuotaRecoveryEvent[];
+  /** 可用播报（B 方案）：本栈已播报过「订阅可用」的 provider——每 provider
+   * 每栈至多一条；send 失败时从集合移除（与闩锁回滚同路径），下一轮重试。 */
+  readonly availableAnnounced: Set<string>;
 }
 
 export interface QuotaHintDeps {
@@ -146,6 +158,8 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
       if (state.latches.has(event.provider)) recoveryEvents.push(event);
     }
     const recoveredProviders = new Set(recoveryEvents.map((e) => e.provider));
+    // 可用播报（B 方案）本轮新观测到的「低于 L1」provider。
+    const available: ProviderVerdict[] = [];
 
     const sections: { verdict: ProviderVerdict; alternatives: AlternativeSelection }[] = [];
     // 旧闩锁快照：minInterval 吞掉 / send 失败两条回滚路径共用（Minor 1/2）。
@@ -157,6 +171,13 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
         // （「本会话曾真播报过」）抹掉，恢复播报被静默吞掉（漏报）；真实读数落地后
         // 由恢复路径或下一轮的 L0 分支正常清闸。
         if (v.windows.some((w) => w.reason === "reset-elapsed")) continue;
+        // 可用播报（B 方案）：本栈首次观测到窗口型 provider 真实读数低于 L1 ⇒
+        // 一次性注入「订阅可用」。stale（M1：读数不真不进注入流）与 demoted
+        // （刻意停放中，播「可用」会诱导派单打脸）都不播。
+        if (v.windows.length > 0 && !v.stale && !v.demoted && !state.availableAnnounced.has(v.provider)) {
+          state.availableAnnounced.add(v.provider);
+          available.push(v);
+        }
         // 恢复 provider 的 L0 删闩锁要登记回滚：send 失败时恢复事件会回队重试，
         // 而重试的门槛（「曾播报」）就是这个闩锁——它不能随一次失败的发送消失。
         if (recoveredProviders.has(v.provider)) {
@@ -197,7 +218,7 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
       }
       sections.push({ verdict: v, alternatives });
     }
-    if (sections.length === 0 && recoveryEvents.length === 0) return;
+    if (sections.length === 0 && recoveryEvents.length === 0 && available.length === 0) return;
 
     const rollbackLatches = (): void => {
       for (const [provider, before] of latchesBefore) {
@@ -205,6 +226,8 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
           state.latches.delete(provider); // Minor 2：首次进入者用 delete
         else state.latches.set(provider, before);
       }
+      // 可用播报回滚：本轮新播报的 provider 从已播集合移除（下一轮重试）。
+      for (const v of available) state.availableAnnounced.delete(v.provider);
     };
 
     let maxLevel: LadderLevel = 0;
@@ -219,6 +242,7 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
     if (
       maxLevel < 3 &&
       recoveryEvents.length === 0 &&
+      available.length === 0 &&
       state.lastSentAt > 0 &&
       t - state.lastSentAt < state.minIntervalMs
     ) {
@@ -227,8 +251,10 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
       return;
     }
 
-    // ⑤ 一轮一条合并消息（恢复块在前——它改变派单决策，比走势 tick 更重要）。
+    // ⑤ 一轮一条合并消息（恢复块在前——它改变派单决策，比走势 tick 更重要；
+    //    可用播报次之——它同样直接改变派单路由）。
     const parts: string[] = buildQuotaRecoveryTexts(recoveryEvents, t);
+    parts.push(...buildQuotaAvailableTexts(available));
     const body = sections.length > 0 ? buildQuotaMessage(sections, t) : "";
     if (body !== "") parts.push(body);
     try {
@@ -255,6 +281,7 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
               demoted: s.verdict.demoted,
               windows: s.verdict.windows.map((w) => ({ scope: w.scope, usedPct: w.usedPct, level: w.level })),
             })),
+            ...(available.length > 0 ? { available: available.map((v) => v.provider) } : {}),
           },
         },
         { triggerTurn: false },

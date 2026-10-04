@@ -90,6 +90,7 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     latches: new Map<string, QuotaAnnounceLatch>(),
     lastSentAt: 0,
     recoveries: [],
+    availableAnnounced: new Set<string>(),
   };
   const pushRecovery = (event: QuotaRecoveryEvent): void => {
     if (hintState.recoveries.length >= QUOTA_RECOVERY_INBOX_CAP) hintState.recoveries.shift();

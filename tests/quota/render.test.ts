@@ -9,6 +9,7 @@ import type { LadderLevel, WindowScope } from "../../src/quota/types.js";
 import type { ProviderVerdict, QuotaRecoveryEvent, WindowVerdict } from "../../src/quota/ladder.js";
 import {
   alternativesAdvice,
+  buildQuotaAvailableTexts,
   buildQuotaBlockText,
   buildQuotaMessage,
   buildQuotaRecoveryText,
@@ -799,5 +800,33 @@ describe("recovery block (额度恢复播报)", () => {
       NOW,
     );
     expect(text).toBe("[quota 恢复] kimi-coding 5h、7d 窗口已重置，spawn 闸门已放行，可恢复派单。");
+  });
+});
+
+// 可用播报（B 方案）：同池合并与恢复播报同源；文本形态钉死（hook 测试断言逐字）。
+describe("buildQuotaAvailableTexts (plan B)", () => {
+  const pool = () => [w("5h", 0, 0, "none"), w("week", 2, 0, "none")];
+
+  it("renders one line per pool with current readings", () => {
+    expect(buildQuotaAvailableTexts([verdict({ level: 0, windows: pool() })])).toEqual([
+      "[quota] zai-coding-cn 订阅可用，当前 5h 0% · 7d 2%，可正常派单。",
+    ]);
+  });
+
+  it("merges same-pool providers and splits different pools", () => {
+    const merged = buildQuotaAvailableTexts([
+      verdict({ level: 0, windows: pool() }),
+      verdict({ provider: "zai", level: 0, windows: pool() }),
+    ]);
+    expect(merged).toEqual(["[quota] zai-coding-cn / zai 订阅可用，当前 5h 0% · 7d 2%，可正常派单。"]);
+    const split = buildQuotaAvailableTexts([
+      verdict({ level: 0, windows: pool() }),
+      verdict({ provider: "kimi-coding", level: 0, windows: [w("5h", 10, 0, "none")] }),
+    ]);
+    expect(split).toHaveLength(2);
+  });
+
+  it("empty input renders nothing", () => {
+    expect(buildQuotaAvailableTexts([])).toEqual([]);
   });
 });

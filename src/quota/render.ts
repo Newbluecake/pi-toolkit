@@ -331,6 +331,24 @@ export function buildQuotaRecoveryTexts(events: readonly QuotaRecoveryEvent[], n
   return [...groups.values()].map(({ event, providers }) => buildQuotaRecoveryText(event, now, providers.join(" / ")));
 }
 
+/**
+ * 可用播报块（B 方案，一次性/栈/provider）：本栈首次观测到窗口型 provider 低于 L1
+ * 时由 hook 注入——「无 [quota] 行 ≠ 没额度」盲区的正向消解。同池合并与恢复播报
+ * 同源（poolSignature）；不做闸门承诺（L0 本来就不拦；demoted/stale 由 hook 侧过滤）。
+ */
+export function buildQuotaAvailableTexts(verdicts: readonly ProviderVerdict[]): string[] {
+  const groups = new Map<string, { v: ProviderVerdict; providers: string[] }>();
+  for (const v of verdicts) {
+    const key = poolSignature(v);
+    const g = groups.get(key);
+    if (g === undefined) groups.set(key, { v, providers: [v.provider] });
+    else g.providers.push(v.provider);
+  }
+  return [...groups.values()].map(
+    ({ v, providers }) => `[quota] ${providers.join(" / ")} 订阅可用，当前 ${readingsText(v)}，可正常派单。`,
+  );
+}
+
 type QuotaSection = { readonly verdict: ProviderVerdict; readonly alternatives: AlternativeInput };
 
 /**

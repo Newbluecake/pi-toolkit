@@ -50,6 +50,7 @@ function makeState(over: Partial<QuotaHintState> = {}): QuotaHintState {
     latches: new Map<string, QuotaAnnounceLatch>(),
     lastSentAt: 0,
     recoveries: [],
+    availableAnnounced: new Set<string>(),
     ...over,
   };
 }
@@ -185,7 +186,11 @@ describe("createQuotaHintHook", () => {
     expect(h.sent[0]?.message.content).not.toContain("订阅优先");
   });
   it("L0: sends nothing, clears the provider latch, still lazy-refreshes", () => {
-    const h = harness({ verdicts: [verdict({ level: 0, windows: [w("5h", 5, 0, "none")] })] });
+    // 预填 availableAnnounced：本用例专测 L0 清閘锁，不涉可用播报（B 方案）。
+    const h = harness({
+      state: { availableAnnounced: new Set(["zai-coding-cn"]) },
+      verdicts: [verdict({ level: 0, windows: [w("5h", 5, 0, "none")] })],
+    });
     h.state.latches.set("zai-coding-cn", { level: 1, step: 60, at: 0, usedPct: 62 });
     h.hook({}, ctx());
     expect(h.sent).toHaveLength(0);
@@ -394,7 +399,8 @@ describe("reset-elapsed windows (no L3 injection, latch kept for the recovery ev
     });
 
   it("injects nothing for a window whose reset has elapsed (even past repeatMs) and keeps the latch", () => {
-    const h = harness({ verdicts: [elapsedKimi()] });
+    // 预填 availableAnnounced：本用例专测 reset-elapsed 与闩锁，不涉可用播报。
+    const h = harness({ state: { availableAnnounced: new Set(["kimi-coding"]) }, verdicts: [elapsedKimi()] });
     h.state.latches.set("kimi-coding", { level: 3, step: 100, at: 0, usedPct: 100 }); // 曾真播报过 L3
     h.clock = 10_000_000; // 远超 repeatMs：旧实现会在这里复读 L3
     h.hook({}, ctx());
@@ -489,7 +495,8 @@ describe("createQuotaHintHook recovery announcements", () => {
   });
 
   it("a provider that never announced gets no recovery message; the event is consumed silently", () => {
-    const h = harness({ verdicts: [l0Reset()] });
+    // 预填 availableAnnounced：本用例专测「未曾播报 ⇒ 恢复事件静默丢弃」，不涉可用播报。
+    const h = harness({ state: { availableAnnounced: new Set(["zai-coding-cn"]) }, verdicts: [l0Reset()] });
     h.state.recoveries.push(recoveryEvent());
     h.hook({}, ctx());
     expect(h.sent).toHaveLength(0);
@@ -570,6 +577,87 @@ describe("createQuotaHintHook recovery announcements", () => {
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]?.message.content).toContain("[quota 恢复]");
     expect(h.state.recoveries).toHaveLength(0);
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1); // 重试成功后不再重复
+    warn.mockRestore();
+  });
+});
+
+// 可用播报（B 方案，2026-10-04 用户拍板）：本栈首次观测到窗口型 provider 真实
+// 读数低于 L1 ⇒ 一次性注入「订阅可用」——「无 [quota] 行 ≠ 没额度」盲区消解。
+// 每 provider 每栈至多一条；stale/reset-elapsed/demoted 不播；send 失败回滚重试。
+describe("createQuotaHintHook availability announcements (plan B)", () => {
+  const l0Fresh = () => verdict({ level: 0, windows: [w("5h", 0, 0, "none"), w("week", 2, 0, "none")] });
+
+  it("first fresh L0 observation injects exactly one availability line with readings", () => {
+    const h = harness({ verdicts: [l0Fresh()] });
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.content).toBe("[quota] zai-coding-cn 订阅可用，当前 5h 0% · 7d 2%，可正常派单。");
+    expect(h.sent[0]?.message.customType).toBe(QUOTA_CUSTOM_TYPE);
+    expect(h.sent[0]?.message.details).toMatchObject({ available: ["zai-coding-cn"] });
+    expect(h.state.availableAnnounced.has("zai-coding-cn")).toBe(true);
+    h.hook({}, ctx()); // 下一轮同读数：零新增（每 provider 每栈至多一条）
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("same-pool providers merge into one line (zai-coding-cn / zai)", () => {
+    const overseas = verdict({ provider: "zai", level: 0, windows: [w("5h", 0, 0, "none"), w("week", 2, 0, "none")] });
+    const h = harness({ verdicts: [l0Fresh(), overseas] });
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("zai-coding-cn / zai 订阅可用");
+    expect(content.match(/订阅可用/g)).toHaveLength(1); // 合并为一条
+  });
+
+  it("stale / demoted / reset-elapsed / windowless verdicts never announce availability", () => {
+    const stale = verdict({ stale: true, level: 0, windows: [w("5h", 0, 0, "none")] });
+    const demoted = verdict({ provider: "zai", demoted: true, level: 0, windows: [w("5h", 0, 0, "none")] });
+    const elapsed = verdict({
+      provider: "kimi-coding",
+      level: 0,
+      windows: [w("5h", 8, 0, "none"), w("week", 100, 0, "reset-elapsed")],
+    });
+    const balance = verdict({ provider: "kimi-coding", level: 0, windows: [] });
+    for (const v of [stale, demoted, elapsed, balance]) {
+      const h = harness({ verdicts: [v] });
+      h.hook({}, ctx());
+      expect(h.sent).toHaveLength(0);
+      expect(h.state.availableAnnounced.size).toBe(0);
+    }
+  });
+
+  it("L1 first observation sends the normal tick only, no availability line", () => {
+    const h = harness({ verdicts: [verdict()] }); // 5h 62% L1
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.content).not.toContain("订阅可用");
+    expect(h.state.availableAnnounced.size).toBe(0);
+  });
+
+  it("availability bypasses the minInterval floor (one-shot, like recovery)", () => {
+    const h = harness({ verdicts: [verdict()] });
+    h.hook({}, ctx()); // L1 首发，lastSentAt=1_000
+    h.clock += 60_000; // 仍在 minIntervalMs(300_000) 内
+    h.setVerdicts([verdict({ provider: "kimi-coding", level: 0, windows: [w("5h", 0, 0, "none")] })]);
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.message.content).toContain("[quota] kimi-coding 订阅可用");
+  });
+
+  it("a failed send rolls back the announced mark; the retry announces once in total", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = harness({ verdicts: [l0Fresh()] });
+    h.failSend(true);
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(0);
+    expect(h.state.availableAnnounced.size).toBe(0); // 回滚
+    h.failSend(false);
+    h.clock += 60_000;
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.content).toContain("订阅可用");
     h.hook({}, ctx());
     expect(h.sent).toHaveLength(1); // 重试成功后不再重复
     warn.mockRestore();
