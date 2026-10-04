@@ -64,3 +64,44 @@ describe("CommandPalette.vue (§4.6/§7.7)", () => {
     expect(w.find(".command-empty").text()).toContain("never sent as plain text");
   });
 });
+
+/**
+ * Tiered match (name prefix > name substring > description substring), the web-hub analogue of
+ * what the TUI's own slash-command matcher already does — added because a skill-sourced command
+ * (e.g. `/dev-flow`, description "...model routing...") was only findable via its description,
+ * and the old filter was a bare `name.startsWith(query)`.
+ */
+const SKILL_COMMANDS = [
+  { name: "dev-flow", kind: "skill", description: "Standard workflow with model routing lanes", policy: "allow" },
+  { name: "foo", kind: "builtin", description: "unrelated", policy: "allow" },
+  { name: "routing-table", kind: "builtin", description: "show the routing table", policy: "allow" },
+  { name: "abc", kind: "builtin", description: "routing starts the description here", policy: "allow" },
+];
+
+describe("CommandPalette.vue — tiered match + sort (name prefix > name substring > description)", () => {
+  it("matches a query that only appears in the description, case-insensitively", () => {
+    const w = mountPalette({ commands: SKILL_COMMANDS, query: "ROUTING" });
+    const names = w.findAll(".command-name").map((n) => n.text());
+    expect(names).toContain("/dev-flow");
+    expect(names).not.toContain("/foo");
+  });
+
+  it("ranks name-prefix hits before name-substring hits before description-only hits", () => {
+    const w = mountPalette({ commands: SKILL_COMMANDS, query: "routing" });
+    const names = w.findAll(".command-name").map((n) => n.text());
+    // "routing-table": name prefix · "abc": description prefix-of-word but name has no "routing" ·
+    // "dev-flow": description substring only — prefix tier must sort before the description tier.
+    expect(names.indexOf("/routing-table")).toBeLessThan(names.indexOf("/dev-flow"));
+    expect(names).not.toContain("/foo");
+  });
+
+  it("a name-substring (non-prefix) hit ranks before a description-only hit", () => {
+    const commands = [
+      { name: "zz-routing", kind: "builtin", description: "nothing special", policy: "allow" },
+      { name: "dev-flow", kind: "skill", description: "mentions routing in prose", policy: "allow" },
+    ];
+    const w = mountPalette({ commands, query: "routing" });
+    const names = w.findAll(".command-name").map((n) => n.text());
+    expect(names).toEqual(["/zz-routing", "/dev-flow"]);
+  });
+});

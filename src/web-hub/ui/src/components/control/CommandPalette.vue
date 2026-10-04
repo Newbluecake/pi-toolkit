@@ -34,21 +34,39 @@ interface Row {
   readonly output: "captured" | "terminal" | null;
 }
 
+// Tiered match + sort (case-insensitive), so a skill reachable only through its description (the
+// TUI's own matching already does this; the web palette used to be name-prefix-only and simply
+// couldn't find it): ①name prefix ②name substring ③description substring, in that priority
+// order; anything matching none of the three is dropped. `Array#sort` is spec-stable, so rows
+// keep their original `commands`-slot relative order within the same tier.
+function matchRank(name: string, description: string, q: string): 0 | 1 | 2 | -1 {
+  if (q === "" || name.startsWith(q)) return 0;
+  if (name.includes(q)) return 1;
+  if (description.includes(q)) return 2;
+  return -1;
+}
+
 const rows = computed<readonly Row[]>(() => {
   const q = props.query.toLowerCase();
-  const out: Row[] = [];
+  const scored: Array<{ readonly rank: 0 | 1 | 2; readonly row: Row }> = [];
   for (const raw of props.commands) {
     const c = raw as CommandItem;
     if (typeof c.name !== "string" || c.name === "") continue;
-    if (q !== "" && !c.name.toLowerCase().startsWith(q)) continue;
-    out.push({
-      name: c.name,
-      description: typeof c.description === "string" ? c.description : "",
-      policy: commandPolicyFor([...props.commands], c.name, props.busy === true),
-      output: c.output === "captured" ? "captured" : c.output === "terminal" ? "terminal" : null,
+    const description = typeof c.description === "string" ? c.description : "";
+    const rank = matchRank(c.name.toLowerCase(), description.toLowerCase(), q);
+    if (rank === -1) continue;
+    scored.push({
+      rank,
+      row: {
+        name: c.name,
+        description,
+        policy: commandPolicyFor([...props.commands], c.name, props.busy === true),
+        output: c.output === "captured" ? "captured" : c.output === "terminal" ? "terminal" : null,
+      },
     });
   }
-  return out.slice(0, 50); // commands slot is ≤400 entries; the palette never scrolls forever
+  scored.sort((a, b) => a.rank - b.rank);
+  return scored.slice(0, 50).map((s) => s.row); // commands slot is ≤400 entries; palette never scrolls forever
 });
 
 const policyLabel = (p: Row["policy"]): string =>

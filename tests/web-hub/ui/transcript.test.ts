@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { mount, type VueWrapper } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import Transcript from "../../../src/web-hub/ui/src/components/transcript/Transcript.vue";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
@@ -86,6 +86,15 @@ async function mountTx(agent: AgentState, extraProps: Record<string, unknown> = 
   const wrapper = mount(Transcript, { props: { agent, following: true, narrow: false, ...extraProps } });
   await wrapper.vm.$nextTick();
   return wrapper;
+}
+
+/** Mutates (writable) `scrollTop`/`scrollHeight`/`clientHeight` on a real DOM element so the
+ * component's own scroll-compensation / resize-pin code can read AND assign them, same as a real
+ * scrollable box. */
+function setScrollGeometry(el: Element, { scrollTop, scrollHeight, clientHeight }: Record<string, number>): void {
+  Object.defineProperty(el, "scrollTop", { value: scrollTop, configurable: true, writable: true });
+  Object.defineProperty(el, "scrollHeight", { value: scrollHeight, configurable: true, writable: true });
+  Object.defineProperty(el, "clientHeight", { value: clientHeight, configurable: true, writable: true });
 }
 
 describe("Transcript.vue — windowing (ui-design.md §6.6, plan §3.6)", () => {
@@ -254,12 +263,6 @@ describe("Transcript.vue — follow / new-count / load-older (ui-design.md §5.4
     expect(emitted![emitted!.length - 1]).toEqual([true]);
   });
 
-  function setScrollGeometry(el: Element, { scrollTop, scrollHeight, clientHeight }: Record<string, number>): void {
-    Object.defineProperty(el, "scrollTop", { value: scrollTop, configurable: true });
-    Object.defineProperty(el, "scrollHeight", { value: scrollHeight, configurable: true });
-    Object.defineProperty(el, "clientHeight", { value: clientHeight, configurable: true });
-  }
-
   it("scrolling away from the bottom while following turns following off", async () => {
     const agent = agentWith(manyUserMessages(50));
     const wrapper = await mountTx(agent, { following: true });
@@ -287,6 +290,90 @@ describe("Transcript.vue — follow / new-count / load-older (ui-design.md §5.4
     setScrollGeometry(box, { scrollTop: 100, scrollHeight: 1000, clientHeight: 400 }); // distance 500
     await wrapper.get("#transcript").trigger("scroll");
     expect(wrapper.emitted("update:following")).toBeUndefined();
+  });
+});
+
+/**
+ * Follow-pin on in-place content growth (bug fix, item ①): streaming text that grows WITHIN an
+ * existing assistant message never changes `totalLen` (item/tool counts are unchanged), so the
+ * `domSignal` watcher never fires and the old behavior never re-pinned to the bottom until the
+ * NEXT item/tool appeared — the ResizeObserver on `.tx-inner` closes that gap independently.
+ * happy-dom ships a `ResizeObserver` global but (like jsdom) never actually fires it from real
+ * layout, so these tests install a fake one that records `observe()` calls and lets the test fire
+ * the callback by hand; the component coalesces the resulting pin through a microtask (rAF is
+ * banned repo-wide, `source-scan.test.ts`), hence the double `await Promise.resolve()` flush.
+ */
+describe("Transcript.vue — follow-pin on in-place content growth (ResizeObserver, bug fix)", () => {
+  type RoCallback = (entries: readonly unknown[], observer: unknown) => void;
+
+  class FakeResizeObserver {
+    static instances: FakeResizeObserver[] = [];
+    readonly observed: Element[] = [];
+    constructor(private readonly cb: RoCallback) {
+      FakeResizeObserver.instances.push(this);
+    }
+    observe(el: Element): void {
+      this.observed.push(el);
+    }
+    unobserve(): void {}
+    disconnect(): void {}
+    fire(): void {
+      this.cb([], this);
+    }
+  }
+
+  async function withFakeResizeObserver<T>(fn: () => Promise<T>): Promise<T> {
+    const original = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    FakeResizeObserver.instances = [];
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver = FakeResizeObserver;
+    try {
+      return await fn();
+    } finally {
+      (globalThis as { ResizeObserver?: unknown }).ResizeObserver = original;
+    }
+  }
+
+  it("pins scrollTop to scrollHeight when following and the content box resizes (no totalLen change)", async () => {
+    await withFakeResizeObserver(async () => {
+      const agent = agentWith(manyUserMessages(5));
+      const wrapper = await mountTx(agent, { following: true });
+      const box = wrapper.get("#transcript").element;
+      setScrollGeometry(box, { scrollTop: 0, scrollHeight: 100, clientHeight: 100 });
+      const ro = FakeResizeObserver.instances[0];
+      expect(ro).toBeTruthy();
+      expect(ro!.observed).toHaveLength(1); // observes `.tx-inner`, not the scroll box itself
+      // simulate in-place growth: streaming text widened an existing message, scrollHeight grows
+      setScrollGeometry(box, { scrollTop: 0, scrollHeight: 500, clientHeight: 100 });
+      ro!.fire();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(box.scrollTop).toBe(500);
+    });
+  });
+
+  it("never scrolls on resize while following is off (must not fight a user scrolled up)", async () => {
+    await withFakeResizeObserver(async () => {
+      const agent = agentWith(manyUserMessages(5));
+      const wrapper = await mountTx(agent, { following: false });
+      const box = wrapper.get("#transcript").element;
+      setScrollGeometry(box, { scrollTop: 10, scrollHeight: 500, clientHeight: 100 });
+      const ro = FakeResizeObserver.instances[0]!;
+      ro.fire();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(box.scrollTop).toBe(10);
+    });
+  });
+
+  it("disconnects the observer on unmount (no leaked pin after teardown)", async () => {
+    await withFakeResizeObserver(async () => {
+      const agent = agentWith(manyUserMessages(5));
+      const wrapper = await mountTx(agent, { following: true });
+      const ro = FakeResizeObserver.instances[0]!;
+      const disconnectSpy = vi.spyOn(ro, "disconnect");
+      wrapper.unmount();
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

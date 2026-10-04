@@ -46,7 +46,11 @@ const costLabel = computed(() => (props.assistant.costUsd === undefined ? "" : f
         </span>
       </div>
       <template v-for="(b, i) in assistant.blocks" :key="i">
-        <ThinkingBlock v-if="b.kind === 'thinking'" :text="b.text" />
+        <ThinkingBlock
+          v-if="b.kind === 'thinking'"
+          :text="b.text"
+          :live="assistant.streaming && i === assistant.blocks.length - 1"
+        />
         <MarkdownView v-else-if="b.kind === 'text'" :text="b.text" />
         <ToolCard v-else-if="b.kind === 'toolCall'" :view="b.view" />
         <div v-else class="tx-marker">{{ t("transcript.imagePlaceholder") }}</div>

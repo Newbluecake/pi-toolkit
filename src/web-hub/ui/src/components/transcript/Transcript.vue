@@ -11,7 +11,7 @@
   "jump to bottom" collapse into the same thing.
 -->
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { TranscriptEmits, TranscriptProps } from "../../contracts.js";
 import "../../styles/transcript.css";
 import { useI18n } from "../../composables/useI18n.js";
@@ -48,6 +48,7 @@ const view = computed(() => transcriptWindow.window.value);
 const windowedEntries = computed(() => build.value.entries.slice(view.value.start, view.value.end));
 
 const scrollBox = ref<HTMLElement | null>(null);
+const innerBox = ref<HTMLElement | null>(null);
 
 // ---------------------------------------------------------------------------
 // following / new-count
@@ -125,6 +126,36 @@ function showEarlier(): void {
   transcriptWindow.showEarlier();
 }
 
+// ---------------------------------------------------------------------------
+// follow-pin on in-place content growth (bug: streaming text grows an EXISTING
+// assistant message without changing `totalLen`/the window, so `domSignal` never fires and the
+// view never re-pins to the bottom — this observer catches that case independently). Bounded to
+// a single pin per microtask (several ResizeObserver entries can land in the same tick) and
+// never fires while `following` is off, so it can never fight the user scrolling up — rAF is
+// banned repo-wide (`tests/web-hub/ui/source-scan.test.ts`), hence the microtask coalesce
+// instead of the rAF throttle a vanilla implementation would reach for.
+let pinQueued = false;
+function schedulePin(): void {
+  if (pinQueued) return;
+  pinQueued = true;
+  void Promise.resolve().then(() => {
+    pinQueued = false;
+    const box = scrollBox.value;
+    if (box && props.following) box.scrollTop = box.scrollHeight;
+  });
+}
+
+let contentResizeObserver: ResizeObserver | undefined;
+onMounted(() => {
+  if (typeof ResizeObserver === "undefined" || !innerBox.value) return;
+  contentResizeObserver = new ResizeObserver(schedulePin);
+  contentResizeObserver.observe(innerBox.value);
+});
+onBeforeUnmount(() => {
+  contentResizeObserver?.disconnect();
+  contentResizeObserver = undefined;
+});
+
 // A server page landing while the client window was already sitting at `start === 0` (the only
 // condition under which `load-older` is ever emitted, see `onScroll`/the template button) grows
 // `agent.items` without changing what's *mounted* — shift `start` forward by exactly the growth
@@ -158,7 +189,7 @@ function jumpToLatest(): void {
     :aria-label="t('transcript.ariaLabel')"
     @scroll="onScroll"
   >
-    <div class="tx-inner">
+    <div ref="innerBox" class="tx-inner">
       <TxHiddenGap v-if="view.hiddenBefore > 0" direction="before" :count="view.hiddenBefore" @action="showEarlier" />
       <template v-else-if="agent.history === 'loaded' && agent.hasMore">
         <div v-if="agent.paging" class="tx-divider tx-item">
