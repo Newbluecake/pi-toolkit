@@ -202,6 +202,7 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "ctl"
       | "commands"
       | "cmd_late"
+      | "hub"
     >();
     // §6.6's documented SSE payload shapes, pinned on the bus event itself.
     type Dialogs = Extract<HubEvent, { type: "dialogs" }>;
