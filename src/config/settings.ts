@@ -796,7 +796,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   },
   consult: {
     enabled: true,
-    timeoutMs: 150_000,
+    // 默认 10min（2026-10-04 用户调整，原 150s 对真实专家咨询偏紧）。
+    timeoutMs: 600_000,
     maxAnswerChars: 2_000,
     maxTurns: 3,
     maxFirstRequestUsd: 2,

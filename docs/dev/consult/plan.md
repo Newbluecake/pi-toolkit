@@ -506,7 +506,7 @@ export interface ExpertIndex {
 ```ts
 export interface ConsultSettings {
   enabled: boolean; // default true（暴露面由 experts 白名单控制）
-  timeoutMs: number; // default 150_000（totalMs 硬顶）
+  timeoutMs: number; // default 600_000（totalMs 硬顶；2026-10-04 由 150s 调整为 10min）
   maxAnswerChars: number; // default 2_000（截断兜底 + prompt 指令）
   maxTurns: number; // default 3（turn 边界判定：第 maxTurns+1 个 turn 开始时 abort）
   maxFirstRequestUsd: number; // default 2（fork 前首轮预检阈值；0 = 关闭预检）

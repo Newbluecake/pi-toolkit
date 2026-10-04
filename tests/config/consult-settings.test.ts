@@ -13,7 +13,7 @@ describe("consult settings (plan §4.6, package A frozen surface)", () => {
   it("pins the seven fields and their defaults (P0-α③ calibrated $2 / $4)", () => {
     expect(defaults).toEqual({
       enabled: true,
-      timeoutMs: 150_000,
+      timeoutMs: 600_000,
       maxAnswerChars: 2_000,
       maxTurns: 3,
       maxFirstRequestUsd: 2,
@@ -111,7 +111,7 @@ describe("consult settings (plan §4.6, package A frozen surface)", () => {
     }
     expect(Object.keys(SETTING_SPECS).filter((k) => k.startsWith("consult."))).toEqual(keys);
     // 秒域展示：defaultOf 把时间键换算成秒。
-    expect(defaultOf(SETTING_SPECS["consult.timeoutS"]!)).toBe(150);
+    expect(defaultOf(SETTING_SPECS["consult.timeoutS"]!)).toBe(600);
     expect(defaultOf(SETTING_SPECS["consult.maxFirstRequestUsd"]!)).toBe(2);
     expect(defaultOf(SETTING_SPECS["consult.maxCostUsd"]!)).toBe(4);
   });
