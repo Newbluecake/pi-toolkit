@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { ASK_USER_MARKER } from "../../../src/ask-user/channel-handler.js";
 import { createDialogBridge } from "../../../src/web-hub/agent/dialogs.js";
+import type { DialogClosedWire, DialogsFrame } from "../../../src/web-hub/protocol/messages.js";
 
 const question = { question: "Q", header: "Q", options: [{ label: "A" }, { label: "B" }], allowOther: true };
 
-function make() {
+function make(over: { hubCaps?: () => readonly string[] } = {}) {
   const slots: unknown[] = [];
   let now = 1_000;
   const bridge = createDialogBridge({
@@ -13,6 +16,7 @@ function make() {
     isAttached: () => true,
     now: () => now,
     setSlot: (_kind, frame) => slots.push(frame),
+    ...(over.hubCaps === undefined ? {} : { hubCaps: over.hubCaps }),
   });
   return {
     bridge,
@@ -22,6 +26,17 @@ function make() {
     },
   };
 }
+
+/** The `DialogClosedSchema.by` union as every hub built BEFORE ask-user-async P3 validates it —
+ *  the compat matrix's "old hub" side. A degraded `by:"abort"` frame must pass THIS schema,
+ *  because an old hub drops the whole dialogs frame on any unknown `by` value. */
+const OLD_HUB_DIALOG_CLOSED_BY = Type.Union([
+  Type.Literal("tui"),
+  Type.Literal("web"),
+  Type.Literal("abort"),
+  Type.Literal("session"),
+  Type.Literal("error"),
+]);
 
 describe("dialog bridge", () => {
   it("keeps an open slot and closes it with the winning web cmd id", () => {
@@ -87,5 +102,67 @@ describe("dialog bridge", () => {
     expect(custom).toMatchObject({ dialogId: "ask:tool-1", kind: "custom" });
     const staleMarker = bridge.attributePrompt({ type: "ui_prompt_start", kind: "select", title: ASK_USER_MARKER });
     expect(staleMarker.title).toBe("ask_user");
+  });
+});
+
+describe("dialog bridge — background close passthrough / old-hub downgrade (ask-user-async §7.2, P3)", () => {
+  it('hub with dialog.bg.v1: close("background","aborted") is passed through on the wire (frame + published slot)', () => {
+    const { bridge, slots } = make({ hubCaps: () => ["dialog.v1", "dialog.bg.v1"] });
+    const session = bridge.open({ toolCallId: "bg-1", questions: [question], allowCancel: true })!;
+    session.close("background", "aborted");
+    expect(bridge.frame().closed).toEqual([{ dialogId: "ask:bg-1", by: "background", outcome: "aborted", at: 1_000 }]);
+    const published = slots.at(-1) as DialogsFrame;
+    expect(published.closed[0]).toMatchObject({ by: "background", outcome: "aborted" });
+  });
+
+  it('hub WITHOUT dialog.bg.v1 (old hub): the wire record degrades to by:"abort" and passes the old hub schema', () => {
+    const { bridge } = make({ hubCaps: () => ["dialog.v1"] });
+    const session = bridge.open({ toolCallId: "bg-2", questions: [question], allowCancel: true })!;
+    session.close("background", "aborted");
+    const entry = bridge.frame().closed[0] as DialogClosedWire;
+    expect(entry.by).toBe("abort");
+    expect(entry.outcome).toBe("aborted");
+    // The exact compat invariant: an old hub's 5-literal runtime schema must accept the frame —
+    // an unknown `by` there drops the WHOLE dialogs frame and freezes the web dialog list.
+    expect(Value.Check(OLD_HUB_DIALOG_CLOSED_BY, entry.by)).toBe(true);
+    expect(Value.Check(OLD_HUB_DIALOG_CLOSED_BY, "background")).toBe(false);
+  });
+
+  it("absent hubCaps option degrades too (fail-safe default keeps dialogs frames flowing)", () => {
+    const { bridge } = make();
+    const session = bridge.open({ toolCallId: "bg-3", questions: [question], allowCancel: true })!;
+    session.close("background", "aborted");
+    expect((bridge.frame().closed[0] as DialogClosedWire).by).toBe("abort");
+  });
+
+  it('hub upgrade mid-record: the internal record keeps "background" and re-emits it once the cap appears', () => {
+    let caps: readonly string[] = ["dialog.v1"];
+    const { bridge } = make({ hubCaps: () => caps });
+    const session = bridge.open({ toolCallId: "bg-4", questions: [question], allowCancel: true })!;
+    session.close("background", "aborted");
+    expect((bridge.frame().closed[0] as DialogClosedWire).by).toBe("abort");
+    caps = ["dialog.v1", "dialog.bg.v1"]; // hub upgraded + reconnected with the cap advertised
+    expect((bridge.frame().closed[0] as DialogClosedWire).by).toBe("background");
+  });
+
+  it("web answer and background close in the same tick: first finisher wins, the loser is inert", () => {
+    const { bridge } = make({ hubCaps: () => ["dialog.v1", "dialog.bg.v1"] });
+    const won = bridge.open({ toolCallId: "race-win", questions: [question], allowCancel: true })!;
+    won.setOnRemote(() => true);
+    expect(bridge.answer("ask:race-win", [{ selected: ["A"], other: null }], "web", "cmd-1", "epoch-1")).toMatchObject({
+      ok: true,
+    });
+    won.close("background", "aborted"); // same tick, after the web finish — must not overwrite
+    expect(bridge.frame().closed[0]).toMatchObject({ by: "web", outcome: "answered", cmdId: "cmd-1" });
+
+    const lost = bridge.open({ toolCallId: "race-lose", questions: [question], allowCancel: true })!;
+    lost.close("background", "aborted"); // background interrupted first
+    expect(bridge.answer("ask:race-lose", [{ selected: ["A"], other: null }], "web", "cmd-2", "epoch-1")).toMatchObject(
+      {
+        ok: false,
+        code: "E_DIALOG_CLOSED",
+      },
+    );
+    expect(bridge.frame().closed.at(-1)).toMatchObject({ by: "background", outcome: "aborted" });
   });
 });

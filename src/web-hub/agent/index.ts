@@ -401,6 +401,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     enabled: remoteAskUserEnabled(),
     epoch: MODULE_INSTANCE,
     send: (frame) => conn?.send(frame),
+    // ask-user-async §7.2 (P3): live hub caps — drives the by:"background" → "abort" downgrade
+    // in dialogs.ts while the connected hub lacks `dialog.bg.v1` (empty until hello_ack lands).
+    hubCaps: () => conn?.caps ?? [],
   });
   const binding: BindingPort = {
     onCmd: (frame) => {

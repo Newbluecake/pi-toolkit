@@ -255,6 +255,10 @@ function resolveClosedNote(c: DialogClosedWire): string {
       return mine ? t("dialog.closedHere") : t("dialog.closedWeb");
     case "abort":
       return t("dialog.closedAbort");
+    case "background":
+      // ask-user-async §7.2 (P3): a background completion interrupted the ask — the question
+      // is parked and the model will re-ask; there is nothing left for this tab to answer.
+      return t("dialog.closedBackground");
     case "session":
       return t("dialog.closedSession");
     default:

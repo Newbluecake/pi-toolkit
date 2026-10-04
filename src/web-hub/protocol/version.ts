@@ -23,6 +23,17 @@ export const P2_HUB_CAPS = ["cmd.v1", "dialog.v1", "command.v1", "ctl.v2"] as co
 export const UPLOAD_HUB_CAPS = ["upload.v1"] as const;
 export const UPLOAD_AGENT_CAPS = ["upload.v1", "upload.lan.v1"] as const;
 
+/**
+ * ask-user-async plan §7.2 (P3): the hub's runtime `DialogClosedSchema` understands
+ * `dialogs.closed[].by === "background"` (ask_user's background-completion interrupt close).
+ * Advertised exactly like UPLOAD_HUB_CAPS — on both hub cap surfaces (`hub.ts`'s browser-facing
+ * `HubInfo.caps` and `agent-server.ts`'s agent-facing `hello_ack.caps`, kept byte-identical).
+ * An agent whose bridge holds open ask_user dialogs degrades `by:"background"` to `"abort"`
+ * while the connected hub lacks this cap, so an un-upgraded hub never rejects the whole
+ * dialogs frame (which would freeze the web dialog list for the closed records' 120s TTL).
+ */
+export const DIALOG_BG_HUB_CAPS = ["dialog.bg.v1"] as const;
+
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {
   dialogs: "dialog.v1",

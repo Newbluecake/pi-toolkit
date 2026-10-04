@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DIALOG_BG_HUB_CAPS,
   P1_CAPS,
   PROTO,
   RESERVED_FRAME_TYPES,
@@ -54,5 +55,9 @@ describe("constants", () => {
     expect([...P1_CAPS]).toEqual(["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"]);
     expect([...RESERVED_FRAME_TYPES]).toEqual(["dialog_open", "dialog_closed", "dialog_answer"]);
     expect(PROTO).toEqual({ major: 1, minor: 1 });
+  });
+
+  it("DIALOG_BG_HUB_CAPS is stable (ask-user-async §7.2, P3)", () => {
+    expect([...DIALOG_BG_HUB_CAPS]).toEqual(["dialog.bg.v1"]);
   });
 });

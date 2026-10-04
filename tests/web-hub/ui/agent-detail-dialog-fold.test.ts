@@ -4,6 +4,8 @@ import { nextTick, reactive, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDetail.vue";
 import AskUserForm from "../../../src/web-hub/ui/src/components/dialog/AskUserForm.vue";
+import enDialog from "../../../src/web-hub/ui/src/i18n/en/dialog.js";
+import zhDialog from "../../../src/web-hub/ui/src/i18n/zh/dialog.js";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import type { AgentState, CmdOutcome, ControlHandle, HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
 
@@ -238,6 +240,51 @@ describe("AgentDetail.vue — folded note survives closed[] eviction (accfix-N3)
     const note = w.find(".ask-folded");
     expect(note.exists()).toBe(true);
     expect(note.text()).toBe("Dialog closed");
+  });
+});
+
+describe("AgentDetail.vue — background-interrupt close note (ask-user-async §7.2, P3)", () => {
+  it('by:"background" folds to the dedicated closedBackground note, not the generic/error fallback', async () => {
+    const agent = baseAgent();
+    agent.dialogs = { epoch: "e1", open: [dialogWire("ask:bg")], closed: [] };
+    const control = fakeControl();
+    const w = mountDetail(agent, control);
+    expect(w.findComponent(AskUserForm).exists()).toBe(true);
+
+    // A background completion interrupted the ask: outcome "aborted", by "background".
+    agent.dialogs = {
+      epoch: "e1",
+      open: [],
+      closed: [{ dialogId: "ask:bg", by: "background", outcome: "aborted", at: 2 }],
+    };
+    await nextTick();
+    await nextTick();
+
+    const note = w.find(".ask-folded");
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toBe(enDialog.closedBackground);
+    expect(note.text()).not.toContain("error");
+  });
+
+  it("an unknown by value never throws — it degrades to the error-note branch (old-UI safety, acceptance #3)", async () => {
+    const agent = baseAgent();
+    agent.dialogs = { epoch: "e1", open: [dialogWire("ask:unk")], closed: [] };
+    const control = fakeControl();
+    const w = mountDetail(agent, control);
+    agent.dialogs = {
+      epoch: "e1",
+      open: [],
+      // a future by value this build does not know — resolveClosedNote's default must eat it
+      closed: [{ dialogId: "ask:unk", by: "future-value" as never, outcome: "aborted", at: 2 }],
+    };
+    await nextTick();
+    await nextTick();
+    expect(w.find(".ask-folded").text()).toBe(enDialog.closedError);
+  });
+
+  it("the closedBackground copy follows plan §7.2 in both locales", () => {
+    expect(enDialog.closedBackground).toBe("Background task finished — the agent will re-ask");
+    expect(zhDialog.closedBackground).toBe("后台任务完成，问题已暂挂，模型会重新提问");
   });
 });
 

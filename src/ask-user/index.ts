@@ -88,19 +88,6 @@ function cancelledResult(questions: Question[], text: string): ExecuteResult {
   };
 }
 
-/**
- * §5.1 mapping table: a background win closes the remote session as `("background","aborted")`.
- * `AskUserRemoteSession.close`'s signature does not declare `"background"` yet (see remote.ts —
- * the web-hub protocol type it forwards into is P3's file domain), so this is the single,
- * documented cast site. P3 widens the union and removes the cast.
- */
-function closeSessionAsBackground(session: AskUserRemoteSession | undefined): void {
-  (session as (AskUserRemoteSession & { close(by: "background", outcome: "aborted"): void }) | undefined)?.close(
-    "background",
-    "aborted",
-  );
-}
-
 /** Per-execute background-interrupt context, assembled in execute() when the feature is wired
  *  AND enabled for this mode. Its absence reproduces the pre-feature paths exactly. */
 interface InteractionBackgroundContext {
@@ -207,7 +194,7 @@ async function runTuiInteraction(
       return { kind: "cancelled", by: "web" };
     }
     if (grant === "interrupted") {
-      closeSessionAsBackground(session);
+      session?.close("background", "aborted");
       return interruptedOutcome(bg!, interruptSummary, undefined);
     }
     session?.close("abort", "aborted");
@@ -253,7 +240,7 @@ async function runTuiInteraction(
     // §5.4 pre-open deferred check: completion notices are already steered and will arrive
     // with the next request — do not open a dialog the user would have to race against.
     if (bg !== undefined && bg.port.pendingTokens() > 0 && bg.deferralsUsed() < DEFER_CAP) {
-      closeSessionAsBackground(session);
+      session?.close("background", "aborted");
       return deferredOutcome(bg);
     }
 
@@ -299,7 +286,7 @@ async function runTuiInteraction(
     }
 
     if (race.winner === "background") {
-      closeSessionAsBackground(session);
+      session?.close("background", "aborted");
       const draft = component?.snapshotDraft();
       return interruptedOutcome(bg!, interruptSummary, draft);
     }
@@ -393,7 +380,7 @@ async function runRpcInteraction(
       bg?.coordinator.register(coordinatorAsk);
       // §5.4, RPC form (only reachable with backgroundInterrupt.rpc = true, §7.1).
       if (bg !== undefined && bg.port.pendingTokens() > 0 && bg.deferralsUsed() < DEFER_CAP) {
-        closeSessionAsBackground(session);
+        session?.close("background", "aborted");
         return deferredOutcome(bg);
       }
     }
@@ -422,7 +409,7 @@ async function runRpcInteraction(
       return { kind: "cancelled", by: "web" };
     }
     if (race.winner === "background") {
-      closeSessionAsBackground(session);
+      session?.close("background", "aborted");
       return interruptedOutcome(bg!, interruptSummary, undefined);
     }
     if (answers === null) {

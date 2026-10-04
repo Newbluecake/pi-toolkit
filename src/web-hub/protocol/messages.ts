@@ -258,7 +258,12 @@ export interface DialogWire {
 }
 export interface DialogClosedWire {
   dialogId: string;
-  by: "tui" | "web" | "abort" | "session" | "error";
+  /** Who closed the dialog. `"background"` (ask-user-async plan §7.2, P3) is ask_user's
+   *  background-completion interrupt close; hubs gate it on the `dialog.bg.v1` cap and the
+   *  agent bridge degrades it to `"abort"` for hubs that did not advertise the cap
+   *  (src/web-hub/agent/dialogs.ts) — an un-upgraded hub's runtime schema below drops the
+   *  whole dialogs frame on unknown `by` values. */
+  by: "tui" | "web" | "abort" | "session" | "error" | "background";
   outcome: "answered" | "cancelled" | "aborted";
   cmdId?: string;
   at: number;
@@ -867,6 +872,9 @@ const DialogClosedSchema = Type.Object(
       Type.Literal("abort"),
       Type.Literal("session"),
       Type.Literal("error"),
+      // ask-user-async §7.2 (P3): keep in lockstep with DialogClosedWire.by above; hubs that
+      // predate it reject the value, so agents downgrade it via the dialog.bg.v1 hub cap.
+      Type.Literal("background"),
     ]),
     outcome: Type.Union([Type.Literal("answered"), Type.Literal("cancelled"), Type.Literal("aborted")]),
     cmdId: Type.Optional(Type.String()),

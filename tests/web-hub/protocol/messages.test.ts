@@ -240,6 +240,34 @@ describe("decodeAgentFrame", () => {
   });
 });
 
+describe("decodeAgentFrame — dialogs closed.by (ask-user-async §7.2, P3)", () => {
+  const dialogsFrame = (by: unknown) => ({
+    t: "dialogs",
+    epoch: "epoch-1",
+    open: [],
+    closed: [{ dialogId: "ask:1", by, outcome: "aborted", at: 1 }],
+  });
+
+  it("keeps accepting every historical by value (old agent against the new hub schema)", () => {
+    for (const by of ["tui", "web", "abort", "session", "error"]) {
+      expect(decodeAgentFrame(dialogsFrame(by))).toMatchObject({ t: "dialogs" });
+    }
+  });
+
+  it("accepts the new background close value (new agent + new hub)", () => {
+    expect(decodeAgentFrame(dialogsFrame("background"))).toMatchObject({
+      t: "dialogs",
+      closed: [{ dialogId: "ask:1", by: "background", outcome: "aborted" }],
+    });
+  });
+
+  it("still rejects unknown by values and mistyped closed entries", () => {
+    expect(decodeAgentFrame(dialogsFrame("bogus"))).toBeUndefined();
+    expect(decodeAgentFrame({ t: "dialogs", epoch: "e", open: [], closed: [{ dialogId: "x" }] })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "dialogs", epoch: "e", open: [], closed: "none" })).toBeUndefined();
+  });
+});
+
 describe("decodeHubFrame", () => {
   const helloAck = {
     t: "hello_ack",

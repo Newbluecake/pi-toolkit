@@ -25,6 +25,7 @@ const dialog = {
   closedWeb: "已在另一个浏览器作答",
   closedHere: "已作答",
   closedAbort: "Agent 已中止",
+  closedBackground: "后台任务完成，问题已暂挂，模型会重新提问",
   closedSession: "会话已结束",
   closedError: "对话框因错误关闭",
   cancelledTui: "已在终端取消",

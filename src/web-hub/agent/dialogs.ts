@@ -8,6 +8,7 @@ import type {
   DialogWire,
   WireEvent,
 } from "../protocol/messages.js";
+import { DIALOG_BG_HUB_CAPS } from "../protocol/version.js";
 import { ASK_USER_MARKER } from "../../ask-user/channel-handler.js";
 import { encodeAnswer } from "../../ask-user/answer-codec.js";
 import type { AskUserAnswers, AskUserQuestion } from "../../ask-user/channel-handler.js";
@@ -36,6 +37,17 @@ export interface DialogBridgeOptions {
   enabled?: boolean;
   epoch?: string;
   send?: (frame: { t: "cmd_result"; rid: string; id: string } & CmdResultBody) => void;
+  /**
+   * ask-user-async plan §7.2 (P3): live caps of the connected hub (`hello_ack.caps`, e.g.
+   * `() => conn?.caps ?? []`). While the hub does not advertise `dialog.bg.v1`, `frame()` degrades
+   * `closed[].by === "background"` to `"abort"` on the wire: an un-upgraded hub's runtime
+   * `DialogClosedSchema` rejects unknown `by` values by dropping the WHOLE dialogs frame, which
+   * would freeze the web dialog list for the closed records' TTL (`CLOSED_TTL_MS`). The internal
+   * record keeps `"background"`, so once the hub is upgraded and the cap is advertised, the
+   * same record re-emits as `"background"`. An absent (or throwing) getter is treated as
+   * "hub lacks the cap" — the fail-safe direction keeps dialogs frames flowing.
+   */
+  hubCaps?: () => readonly string[];
 }
 
 export interface DialogBridge extends AskUserRemotePort {
@@ -131,6 +143,15 @@ export function createDialogBridge(options?: DialogBridgeOptions): DialogBridge 
   const isAttached = options?.isAttached ?? (() => true);
   const now = options?.now ?? Date.now;
   const epoch = options?.epoch ?? "";
+  const hubCaps = options?.hubCaps ?? (() => []);
+  const hubHasDialogBg = (): boolean => {
+    try {
+      const caps = hubCaps();
+      return DIALOG_BG_HUB_CAPS.some((cap) => caps.includes(cap));
+    } catch {
+      return false;
+    }
+  };
   const records = new Map<string, DialogRecord>();
   let closed: DialogClosedWire[] = [];
   let disposed = false;
@@ -161,7 +182,12 @@ export function createDialogBridge(options?: DialogBridgeOptions): DialogBridge 
             options: question.options.map((option) => ({ ...option })),
           })),
         })),
-      closed: closed.map((entry) => ({ ...entry })),
+      // ask-user-async §7.2 (P3): the by:"background" → "abort" downgrade happens HERE, at the
+      // wire boundary only — `closed` above keeps the original value so a hub upgrade (cap
+      // advertised on reconnect) re-emits the same record as "background" within its TTL.
+      closed: closed.map((entry) =>
+        entry.by === "background" && !hubHasDialogBg() ? { ...entry, by: "abort" as const } : { ...entry },
+      ),
     };
   };
 

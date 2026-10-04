@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { installProcessHandlers, startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
-import { P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
+import { DIALOG_BG_HUB_CAPS, P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, tmpDirs, waitFor } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -104,6 +104,23 @@ describe("startHub", () => {
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     expect(ack["caps"]).toEqual(expect.arrayContaining([...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS]));
     // the two surfaces must never drift apart (§3.1 compat matrix invariant, extended to uploads).
+    expect([...(ack["caps"] as string[])].sort()).toEqual([...browserCaps].sort());
+    c.sock.destroy();
+  });
+
+  it("ask-user-async §7.2 (P3): HubInfo.caps and hello_ack.caps both carry DIALOG_BG_HUB_CAPS (dialog.bg.v1) and agree byte-for-byte", async () => {
+    const home = tmp.make("wh-hub-dialog-bg-caps-");
+    const fe = fakeFrontend({ port: 40003 });
+    const hub = await start(home, fe);
+    const browserCaps = fe.deps[0]!.info().caps;
+    expect(browserCaps).toEqual(expect.arrayContaining([...P2_HUB_CAPS, ...DIALOG_BG_HUB_CAPS]));
+
+    const c = await connectClient(hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    expect(ack["caps"]).toEqual(expect.arrayContaining([...P2_HUB_CAPS, ...DIALOG_BG_HUB_CAPS]));
+    // same §3.1 invariant: the agent-facing and browser-facing cap lists never drift apart —
+    // the agent's by:"background" downgrade decision reads hello_ack.caps.
     expect([...(ack["caps"] as string[])].sort()).toEqual([...browserCaps].sort());
     c.sock.destroy();
   });

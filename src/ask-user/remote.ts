@@ -14,14 +14,13 @@ export interface AskUserRemoteSession {
   /**
    * Close the local side of the session. Calling this more than once is safe.
    *
-   * §5.1 also specifies `by: "background"` for the interrupt close. It is DELIBERATELY not in
-   * this signature yet: src/web-hub/agent/dialogs.ts's implementation forwards `by` into
-   * `DialogClosedWire["by"]` (src/web-hub/protocol/messages.ts), which only gains
-   * `"background"` in P3 — widening here would break that file's typecheck while web-hub is
-   * out of P1's file domain. index.ts performs the background close through a local,
-   * documented cast (closeSessionAsBackground); P3 widens this union and drops the cast.
+   * §5.1: a background-completion interrupt closes as `("background","aborted")`. The web-hub
+   * bridge (src/web-hub/agent/dialogs.ts) forwards `by` into `DialogClosedWire["by"]` and
+   * degrades `"background"` to `"abort"` for hubs that did not advertise `dialog.bg.v1`
+   * (ask-user-async plan §7.2) — an old hub's runtime schema would otherwise drop the whole
+   * dialogs frame.
    */
-  close(by: "tui" | "abort" | "error", outcome: "answered" | "cancelled" | "aborted"): void;
+  close(by: "tui" | "abort" | "error" | "background", outcome: "answered" | "cancelled" | "aborted"): void;
 }
 
 export interface AskUserRemotePort {

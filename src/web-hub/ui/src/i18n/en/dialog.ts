@@ -25,6 +25,7 @@ const dialog = {
   closedWeb: "Answered in another browser",
   closedHere: "Answered",
   closedAbort: "Agent aborted",
+  closedBackground: "Background task finished — the agent will re-ask",
   closedSession: "Session ended",
   closedError: "Dialog closed with an error",
   cancelledTui: "Cancelled in the terminal",
