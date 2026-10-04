@@ -59,8 +59,11 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
   ["crypto.randomUUID (banned — K18: absent on LAN plaintext; use getRandomValues)", /\brandomUUID\s*\(/],
 ];
 
-/** localStorage is only legitimate for the theme preference and the token-mode transport. */
-const LOCALSTORAGE_ALLOWED = /theme|token-client/i;
+/** localStorage is only legitimate for the theme preference, the token-mode transport, and a
+ * handful of pure UI-preference persistence spots added later (never auth/session data):
+ * `ControlNotice.vue`'s per-variant dismiss memory (user decision: "全部可关", §7.6 revision)
+ * and `AgentList.vue`'s desktop sidebar collapse state. */
+const LOCALSTORAGE_ALLOWED = /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {

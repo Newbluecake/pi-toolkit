@@ -240,3 +240,55 @@ describe("AgentDetail.vue — folded note survives closed[] eviction (accfix-N3)
     expect(note.text()).toBe("Dialog closed");
   });
 });
+
+describe("AgentDetail.vue — folded note auto-dismiss (bug fix: used to stay pinned forever)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a folded note disappears on its own ~8s after it first appears", async () => {
+    vi.useFakeTimers();
+    const agent = baseAgent();
+    agent.dialogs = { epoch: "e1", open: [dialogWire("ask:auto")], closed: [] };
+    const control = fakeControl();
+    const w = mountDetail(agent, control);
+    expect(w.findComponent(AskUserForm).exists()).toBe(true);
+
+    agent.dialogs = {
+      epoch: "e1",
+      open: [],
+      closed: [{ dialogId: "ask:auto", by: "tui", outcome: "cancelled", at: 2 }],
+    };
+    await nextTick();
+    await nextTick();
+    expect(w.find(".ask-folded").exists()).toBe(true);
+
+    vi.advanceTimersByTime(7999);
+    await nextTick();
+    expect(w.find(".ask-folded").exists()).toBe(true);
+
+    vi.advanceTimersByTime(2);
+    await nextTick();
+    expect(w.find(".ask-folded").exists()).toBe(false);
+  });
+
+  it("unmounting clears pending auto-dismiss timers (no stray setTimeout callbacks after teardown)", async () => {
+    vi.useFakeTimers();
+    const agent = baseAgent();
+    agent.dialogs = { epoch: "e1", open: [dialogWire("ask:unmount")], closed: [] };
+    const control = fakeControl();
+    const w = mountDetail(agent, control);
+    agent.dialogs = {
+      epoch: "e1",
+      open: [],
+      closed: [{ dialogId: "ask:unmount", by: "tui", outcome: "cancelled", at: 2 }],
+    };
+    await nextTick();
+    await nextTick();
+    expect(w.find(".ask-folded").exists()).toBe(true);
+
+    w.unmount();
+    mounted.pop(); // already unmounted here, don't double-unmount in afterEach
+    expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+  });
+});

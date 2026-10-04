@@ -304,6 +304,18 @@
   text-decoration: underline;
 }
 
+.control-notice .notice-dismiss {
+  flex: none;
+  height: 24px;
+  width: 24px;
+  min-height: 0;
+  color: var(--c-warning-text);
+}
+
+.control-notice .notice-dismiss:hover {
+  background: color-mix(in srgb, var(--c-warning-text) 14%, transparent);
+}
+
 .control-notice .notice-body {
   margin: 0;
   padding: 0 var(--sp-3) var(--sp-2);

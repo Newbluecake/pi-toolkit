@@ -22,6 +22,40 @@
   padding: var(--sp-3) var(--sp-3) var(--sp-2);
 }
 
+.sidebar-headrow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.sidebar-headrow .sidebar-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Desktop-only collapse toggle (mobile/tablet keep the always-expanded drawer behaviour — the
+ * toggle itself only appears, and `.is-collapsed` only takes effect, at/above the same 768px
+ * split breakpoint `shell.css` uses, so a narrower viewport can never get stuck hidden). */
+.sidebar-collapse-toggle {
+  display: none;
+  flex: none;
+}
+
+.new-session-btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.new-session-note {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.new-session-note[data-kind="err"] {
+  color: var(--c-danger);
+}
+
 .sidebar-title {
   display: flex;
   align-items: center;
@@ -240,6 +274,34 @@
 
   .sidebar-head {
     padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  }
+
+  .sidebar-collapse-toggle {
+    display: inline-flex;
+  }
+
+  /* Collapsed rail: `AgentList.vue` shrinks `.sidebar`'s own grid column by overriding
+   * `--sidebar-w` (an inline style on `<html>`, so it wins over this breakpoint's and every
+   * other breakpoint's plain `--sidebar-w` declaration without needing `!important` anywhere)
+   * down to a narrow rail just wide enough for the toggle button; everything else in the panel
+   * hides via this class rather than `v-if`, so the DOM/handlers stay mounted (no extra
+   * remount churn re-toggling) and nothing here needs to know about collapse at all. */
+  .sidebar.is-collapsed .sidebar-title,
+  .sidebar.is-collapsed .new-session-btn,
+  .sidebar.is-collapsed .search,
+  .sidebar.is-collapsed .new-session-note,
+  .sidebar.is-collapsed > .agent-list,
+  .sidebar.is-collapsed > .empty {
+    display: none;
+  }
+
+  .sidebar.is-collapsed .sidebar-head {
+    padding-left: var(--sp-2);
+    padding-right: var(--sp-2);
+  }
+
+  .sidebar.is-collapsed .sidebar-headrow {
+    justify-content: center;
   }
 
   .agent-list {

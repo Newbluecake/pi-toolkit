@@ -253,4 +253,69 @@ describe("Transcript.vue — follow / new-count / load-older (ui-design.md §5.4
     expect(emitted).toBeTruthy();
     expect(emitted![emitted!.length - 1]).toEqual([true]);
   });
+
+  function setScrollGeometry(el: Element, { scrollTop, scrollHeight, clientHeight }: Record<string, number>): void {
+    Object.defineProperty(el, "scrollTop", { value: scrollTop, configurable: true });
+    Object.defineProperty(el, "scrollHeight", { value: scrollHeight, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: clientHeight, configurable: true });
+  }
+
+  it("scrolling away from the bottom while following turns following off", async () => {
+    const agent = agentWith(manyUserMessages(50));
+    const wrapper = await mountTx(agent, { following: true });
+    const box = wrapper.get("#transcript").element;
+    // scrollHeight - scrollTop - clientHeight = 500 > NEAR_BOTTOM_PX (64)
+    setScrollGeometry(box, { scrollTop: 0, scrollHeight: 1000, clientHeight: 500 });
+    await wrapper.get("#transcript").trigger("scroll");
+    expect(wrapper.emitted("update:following")).toEqual([[false]]);
+  });
+
+  it("scrolling back to near the bottom by hand turns following back on (bug fix: used to stay un-followed)", async () => {
+    const agent = agentWith(manyUserMessages(50));
+    const wrapper = await mountTx(agent, { following: false });
+    const box = wrapper.get("#transcript").element;
+    // distance from bottom = 1000 - 950 - 50 = 0 <= NEAR_BOTTOM_PX (64)
+    setScrollGeometry(box, { scrollTop: 950, scrollHeight: 1000, clientHeight: 50 });
+    await wrapper.get("#transcript").trigger("scroll");
+    expect(wrapper.emitted("update:following")).toEqual([[true]]);
+  });
+
+  it("does not emit either way while still outside NEAR_BOTTOM_PX and following is already off", async () => {
+    const agent = agentWith(manyUserMessages(50));
+    const wrapper = await mountTx(agent, { following: false });
+    const box = wrapper.get("#transcript").element;
+    setScrollGeometry(box, { scrollTop: 100, scrollHeight: 1000, clientHeight: 400 }); // distance 500
+    await wrapper.get("#transcript").trigger("scroll");
+    expect(wrapper.emitted("update:following")).toBeUndefined();
+  });
+});
+
+/**
+ * `TxCustom.vue` markdown rendering (user-reported: notification-class custom messages —
+ * subagent completion notices, system notices — used to render their markdown SOURCE as raw
+ * `{{ text }}` characters instead of actual markdown). Mounted directly rather than through
+ * `Transcript.vue`'s full entry-building pipeline.
+ */
+import TxCustom from "../../../src/web-hub/ui/src/components/transcript/TxCustom.vue";
+
+describe("TxCustom.vue — markdown rendering", () => {
+  it("renders **bold**/lists through MarkdownView, not as raw asterisk/dash characters", () => {
+    const wrapper = mount(TxCustom, {
+      props: {
+        customType: "subagent:notice",
+        text: "**Run finished** —\n\n- step one\n- step two",
+        truncated: false,
+      },
+    });
+    expect(wrapper.get(".kind").text()).toContain("subagent:notice");
+    expect(wrapper.find(".md").exists()).toBe(true); // MarkdownView.vue's own root class
+    expect(wrapper.get("strong").text()).toBe("Run finished");
+    expect(wrapper.findAll("li")).toHaveLength(2);
+    expect(wrapper.html()).not.toContain("**Run finished**");
+  });
+
+  it("shows the truncated badge and never uses v-html", () => {
+    const wrapper = mount(TxCustom, { props: { customType: "notice", text: "hello", truncated: true } });
+    expect(wrapper.find(".badge-trunc").exists()).toBe(true);
+  });
 });

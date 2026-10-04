@@ -19,7 +19,7 @@
     the frozen `DetailDockProps`).
 -->
 <script setup lang="ts">
-import { computed, inject, provide, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
 import { mergeQueue, newCmdId } from "@logic/control.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
@@ -158,6 +158,36 @@ const hubSuspended = computed(() => hub?.state.value.hubState === "restarting");
 const seenOpen = new Set<string>();
 const folded = ref<readonly string[]>([]);
 
+/** Bug fix (user-reported): a folded "Answered/Cancelled here" note used to stay pinned at the
+ * top of the detail pane forever (until an agent switch remounted the whole component) — after
+ * a few rounds of ask_user, the top of the pane was wall-to-wall stale "Answered" lines. Each
+ * note now auto-clears itself ~8s after it first appears; the existing 4-item cap (`folded.value
+ * = next.slice(-4)` below) stays as a hard backstop regardless of the timer. */
+const FOLD_AUTO_DISMISS_MS = 8000;
+const foldTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleFoldDismiss(id: string): void {
+  if (foldTimers.has(id)) return;
+  const timer = setTimeout(() => {
+    foldTimers.delete(id);
+    folded.value = folded.value.filter((x) => x !== id);
+  }, FOLD_AUTO_DISMISS_MS);
+  foldTimers.set(id, timer);
+}
+
+function clearFoldTimer(id: string): void {
+  const timer = foldTimers.get(id);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    foldTimers.delete(id);
+  }
+}
+
+onBeforeUnmount(() => {
+  for (const timer of foldTimers.values()) clearTimeout(timer);
+  foldTimers.clear();
+});
+
 /** acc32-B3 (accfix): cmdIds THIS browser tab generated when answering/cancelling a dialog,
  * keyed by dialogId — `foldedNote` below compares a `closed{by:"web"}` record's `cmdId` against
  * this to tell "answered here" apart from "answered in a DIFFERENT browser tab" (both are
@@ -187,7 +217,12 @@ watch(
     for (const d of open) seenOpen.add(d.dialogId);
     const openIds = new Set(open.map((d) => d.dialogId));
     const next = [...seenOpen].filter((id) => !openIds.has(id));
-    folded.value = next.length > 0 ? next.slice(-4) : next; // bounded: only the 4 most recent folds
+    const bounded = next.length > 0 ? next.slice(-4) : next; // bounded: only the 4 most recent folds
+    const prevSet = new Set(folded.value);
+    for (const id of bounded) if (!prevSet.has(id)) scheduleFoldDismiss(id);
+    const boundedSet = new Set(bounded);
+    for (const id of folded.value) if (!boundedSet.has(id)) clearFoldTimer(id); // evicted by the cap
+    folded.value = bounded;
   },
   { immediate: true },
 );

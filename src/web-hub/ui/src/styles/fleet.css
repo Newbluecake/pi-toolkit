@@ -15,6 +15,7 @@
  */
 
 .fleet {
+  position: relative; /* anchors `.tree-scroll`'s floating dropdown, see below */
   flex: none;
   display: flex;
   flex-direction: column;
@@ -66,7 +67,23 @@ details[open] > .panel-head .chev {
   font-size: var(--fs-xs);
 }
 
+/* Floating dropdown, not in-flow (layout fix: the expanded tree used to push the transcript
+ * down and cover it on small screens — ui-design §5.3 only asked for a single-line summary
+ * always in flow). `.fleet` above owns the `position: relative` anchor; this panel is
+ * positioned off that, so the `<details>` box itself never grows past `.panel-head`'s one
+ * line, open or closed. Still independently scrollable (own max-height/overflow) and closed
+ * on outside click / Esc (`FleetPanel.vue`'s document pointerdown/keydown listeners). */
 .tree-scroll {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-top: none;
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  box-shadow: var(--shadow-3);
   max-height: 34dvh; /* the tree never pushes the conversation off screen (mobile default) */
   overflow-y: auto;
   overscroll-behavior: contain;

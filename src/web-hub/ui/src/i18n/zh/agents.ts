@@ -15,6 +15,11 @@ const agents = {
   emptyBodyTail: "并启动 pi；会话会在一秒内出现在这里。",
   runningCount: "{n} 个运行中",
   noSessionName: "（无会话名称）",
+  collapseSidebar: "收起侧边栏",
+  expandSidebar: "展开侧边栏",
+  newSession: "新建会话",
+  newSessionAria: "为当前选中的 agent 开启新会话（执行 /new）",
+  newSessionOk: "已开启新会话",
 } satisfies Messages<typeof en>;
 
 export default agents;

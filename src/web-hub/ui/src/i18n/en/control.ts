@@ -13,6 +13,7 @@ const control = {
   noticeTitle: "Control is on",
   noticeExpand: "Details",
   noticeCollapse: "Hide details",
+  noticeDismiss: "Dismiss this notice",
 
   // --- composer (§7.4/§7.6) ---
   placeholderIdle: "Message — starts a new turn",

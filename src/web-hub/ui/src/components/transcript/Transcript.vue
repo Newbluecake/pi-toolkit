@@ -3,7 +3,10 @@
   target)/§5.2 — P4). Owns: client-side windowing (`useTranscriptWindow`, cap 300 mounted
   `.tx-item`s), the scroll-anchor dance for prepended/appended content (the pure functions in
   `useFollowScroll.ts`), the near-top auto-`load-older` trigger, and the near-bottom
-  auto-un-follow + "N new" counting. `following`/`new-count` are owned by the caller (props +
+  auto-un-follow/auto-restore + "N new" counting: scrolling away from the bottom turns
+  `following` off, scrolling back to within `NEAR_BOTTOM_PX` of the bottom by hand turns it back
+  on (symmetric with the "N new" jump pill, so a user never gets stuck un-followed just because
+  they scrolled back down themselves). `following`/`new-count` are owned by the caller (props +
   emits, not local state) — see the file-level note below on how "turn Follow back on" and
   "jump to bottom" collapse into the same thing.
 -->
@@ -79,6 +82,12 @@ function onScroll(): void {
   if (!box) return;
   const distanceFromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
   if (props.following && distanceFromBottom > NEAR_BOTTOM_PX) emit("update:following", false);
+  // Symmetric auto-restore: scrolling back down to near the bottom turns `following` back on,
+  // same as the "N new" jump pill — without this, a user who scrolls away and then scrolls back
+  // to the tail by hand stayed un-followed forever. Strict `<=`/`>` on either side of the SAME
+  // threshold (not two offset bands) keeps the two branches mutually exclusive so a single
+  // scroll event can only ever flip one way, never oscillate.
+  else if (!props.following && distanceFromBottom <= NEAR_BOTTOM_PX) emit("update:following", true);
   if (box.scrollTop < PAGE_TRIGGER_PX && view.value.hiddenBefore === 0 && props.agent.hasMore && !props.agent.paging) {
     emit("load-older");
   }

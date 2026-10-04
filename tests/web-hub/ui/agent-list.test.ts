@@ -5,9 +5,13 @@
  * `aria-current` on the selected card.
  */
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import AgentList from "../../../src/web-hub/ui/src/components/agents/AgentList.vue";
 import type { AgentCardView } from "../../../src/web-hub/ui/src/types.js";
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 function card(over: Partial<AgentCardView> = {}): AgentCardView {
   return {
@@ -117,5 +121,158 @@ describe("AgentCard.vue needs-answer badge (C5, §7.4)", () => {
 
     const noHub = mount(AgentCard, { props: { card: card(), selected: false } });
     expect(noHub.find(".badge-answer").exists()).toBe(false);
+  });
+});
+
+/**
+ * Desktop collapse toggle (user-reported: the sidebar had no way to reclaim its width on a
+ * fixed desktop split). CSS-gated to >=768px (see `agents.css`), so this just checks the
+ * toggle/class/persistence contract — not real geometry (no layout engine in happy-dom).
+ */
+describe("AgentList.vue — desktop collapse toggle", () => {
+  it("starts expanded by default; toggle flips aria-pressed, the is-collapsed class, and persists", async () => {
+    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+    const toggle = wrapper.get(".sidebar-collapse-toggle");
+    expect(toggle.attributes("aria-pressed")).toBe("false");
+    expect(wrapper.find(".sidebar").classes()).not.toContain("is-collapsed");
+
+    await toggle.trigger("click");
+    expect(toggle.attributes("aria-pressed")).toBe("true");
+    expect(wrapper.find(".sidebar").classes()).toContain("is-collapsed");
+    expect(localStorage.getItem("webhub.agentList.collapsed")).toBe("1");
+
+    await toggle.trigger("click");
+    expect(wrapper.find(".sidebar").classes()).not.toContain("is-collapsed");
+    expect(localStorage.getItem("webhub.agentList.collapsed")).toBe("0");
+  });
+
+  it("starts collapsed on mount when localStorage already says so", () => {
+    localStorage.setItem("webhub.agentList.collapsed", "1");
+    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+    expect(wrapper.find(".sidebar").classes()).toContain("is-collapsed");
+    expect(wrapper.get(".sidebar-collapse-toggle").attributes("aria-pressed")).toBe("true");
+  });
+
+  it("collapsing never removes the search input / agent list from the DOM (CSS-only, mobile-safe)", async () => {
+    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+    await wrapper.get(".sidebar-collapse-toggle").trigger("click");
+    expect(wrapper.find("input.input").exists()).toBe(true);
+    expect(wrapper.find("ul.agent-list").exists()).toBe(true);
+  });
+});
+
+/**
+ * "New session" header button (web control-plane parity for `/new`): reuses the existing
+ * `ControlHandle.runCommand` channel against the SELECTED agent only; enabled mirrors
+ * `AgentDetail.vue`'s `controlEnabled` formula.
+ */
+import { HUB_CTX as HUB_CTX_KEY } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import type { ControlHandle } from "../../../src/web-hub/ui/src/types.js";
+
+function agentState(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { key: "a1", card: { control: true, state: "live" }, down: false, ...over };
+}
+
+function fakeControlHandle(over: Partial<ControlHandle> = {}): ControlHandle {
+  return {
+    sendPrompt: async () => ({ ok: true }),
+    abort: async () => ({ ok: true }),
+    steerSub: async () => ({ ok: true }),
+    stopSub: async () => ({ ok: true }),
+    answerDialog: async () => ({ ok: true }),
+    cancelDialog: async () => ({ ok: true }),
+    runCommand: async () => ({ ok: true }),
+    query: async () => ({ ok: true }),
+    retry: async () => ({ ok: true }),
+    discard: () => {},
+    draft: () => "",
+    setDraft: () => {},
+    ...over,
+  };
+}
+
+function hubWithAgent(
+  agentKey: string,
+  agentOver: Record<string, unknown> = {},
+  opts: { hubControl?: boolean; control?: ControlHandle } = {},
+): HubHandle {
+  const agents = new Map([[agentKey, agentState(agentOver)]]);
+  return {
+    state: ref({ control: opts.hubControl ?? true, agents } as unknown as HubState),
+    dispatch: () => {},
+    ...(opts.control ? { control: opts.control } : {}),
+  };
+}
+
+describe("AgentList.vue — 'New session' header button", () => {
+  it("disabled with no selected agent, even with control fully negotiated", () => {
+    const hub = hubWithAgent("a1", {}, { control: fakeControlHandle() });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    expect(wrapper.get(".new-session-btn").attributes("disabled")).toBeDefined();
+  });
+
+  it("disabled when the hub never negotiated cmd.v1", () => {
+    const hub = hubWithAgent("a1", {}, { hubControl: false, control: fakeControlHandle() });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    expect(wrapper.get(".new-session-btn").attributes("disabled")).toBeDefined();
+  });
+
+  it("disabled when the selected agent card lacks control, or is down", () => {
+    const hub1 = hubWithAgent("a1", { card: { control: false, state: "live" } }, { control: fakeControlHandle() });
+    const w1 = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub1 } },
+    });
+    expect(w1.get(".new-session-btn").attributes("disabled")).toBeDefined();
+
+    const hub2 = hubWithAgent("a1", { down: true }, { control: fakeControlHandle() });
+    const w2 = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub2 } },
+    });
+    expect(w2.get(".new-session-btn").attributes("disabled")).toBeDefined();
+  });
+
+  it("enabled for a live, controllable, selected agent — click runs runCommand(key, 'new', '')", async () => {
+    let captured: [string, string, string] | undefined;
+    const control = fakeControlHandle({
+      runCommand: async (agentKey, name, args) => {
+        captured = [agentKey, name, args];
+        return { ok: true };
+      },
+    });
+    const hub = hubWithAgent("a1", {}, { control });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    const btn = wrapper.get(".new-session-btn");
+    expect(btn.attributes("disabled")).toBeUndefined();
+    await btn.trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(captured).toEqual(["a1", "new", ""]);
+    expect(wrapper.get(".new-session-note").attributes("data-kind")).toBe("ok");
+  });
+
+  it("a failed call shows an inline err note (no toast)", async () => {
+    const control = fakeControlHandle({
+      runCommand: async () => ({ ok: false, error: "E_FAILED", message: "boom" }),
+    });
+    const hub = hubWithAgent("a1", {}, { control });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await wrapper.get(".new-session-btn").trigger("click");
+    await wrapper.vm.$nextTick();
+    const note = wrapper.get(".new-session-note");
+    expect(note.attributes("data-kind")).toBe("err");
+    expect(note.text()).toBe("boom");
   });
 });

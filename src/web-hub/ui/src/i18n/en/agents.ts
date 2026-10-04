@@ -13,6 +13,11 @@ const agents = {
   emptyBodyTail: "on; sessions appear here within a second.",
   runningCount: "{n} running",
   noSessionName: "(no session name)",
+  collapseSidebar: "Collapse sidebar",
+  expandSidebar: "Expand sidebar",
+  newSession: "New session",
+  newSessionAria: "Start a new session for the selected agent (runs /new)",
+  newSessionOk: "New session started",
 } satisfies Record<string, string>;
 
 export default agents;

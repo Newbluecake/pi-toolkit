@@ -9,9 +9,20 @@
   in the DOM / in `FleetNode.vue`'s own local `initialOpen`/`useFoldSiblings` state, not here —
   `DetailBody.vue` keys this whole component by the agent's key, so switching agents remounts it
   fresh (plan §3.3 "切 agent 时重置") with zero extra plumbing.
+
+  Layout fix (user-reported): the expanded tree used to sit in the document flow and push the
+  transcript down / off screen. The `<summary>` line still always stays in flow (one line,
+  never grows), but the tree itself (`.tree-scroll`) now renders as a floating dropdown
+  overlay positioned off `.fleet`'s own `position: relative` (`fleet.css`) instead — it paints
+  over the transcript rather than displacing it, on every breakpoint (mobile included: a
+  shorter `34dvh`-capped floating panel beats a half-screen in-flow tree on a phone just as
+  much as on desktop, so this build keeps one mechanism everywhere rather than branching per
+  width). Closed on Escape or on a pointerdown outside the panel, via a plain document-level
+  listener (`DashboardView.vue`'s own Escape-to-back handler is the closest existing precedent
+  for this pattern in this codebase).
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { FleetPanelProps } from "../../contracts.js";
 import "../../styles/fleet.css";
 import { formatUsd } from "../../format.js";
@@ -35,10 +46,36 @@ const totalCost = computed(() =>
   }, 0),
 );
 const rootFold = useFoldSiblings(() => tree.value);
+
+const detailsEl = ref<HTMLDetailsElement | null>(null);
+
+function closeOverlay(): void {
+  if (detailsEl.value) detailsEl.value.open = false;
+}
+
+function onDocumentPointerDown(ev: PointerEvent): void {
+  const el = detailsEl.value;
+  if (!el || !el.open) return;
+  if (ev.target instanceof Node && el.contains(ev.target)) return;
+  closeOverlay();
+}
+
+function onDocumentKeydown(ev: KeyboardEvent): void {
+  if (ev.key === "Escape" && detailsEl.value?.open) closeOverlay();
+}
+
+onMounted(() => {
+  document.addEventListener("pointerdown", onDocumentPointerDown);
+  document.addEventListener("keydown", onDocumentKeydown);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocumentPointerDown);
+  document.removeEventListener("keydown", onDocumentKeydown);
+});
 </script>
 
 <template>
-  <details v-if="totalCount > 0" class="fleet" :open="defaultOpen">
+  <details v-if="totalCount > 0" ref="detailsEl" class="fleet" :open="defaultOpen">
     <summary class="panel-head">
       <AppIcon name="chev-right" class="icon icon-sm chev" />
       <span class="panel-title">{{ t("fleet.panelTitle") }}</span>

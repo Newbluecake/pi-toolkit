@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import FleetPanel from "../../../src/web-hub/ui/src/components/fleet/FleetPanel.vue";
 import type { FleetRowWire } from "../../../src/web-hub/protocol/messages.js";
 
@@ -191,6 +191,68 @@ describe("i18n resolves through the real MESSAGES table (regression: not just th
   it("renders the English 'Subagents' title, not a raw i18n key", () => {
     const wrapper = mount(FleetPanel, { props: { rows: DASHBOARD_ROWS, now: 0, defaultOpen: true } });
     expect(wrapper.get(".panel-title").text()).toBe("Subagents");
+  });
+});
+
+describe("FleetPanel.vue — floating overlay (layout fix: the expanded tree used to push/cover the transcript)", () => {
+  const mounted: Array<ReturnType<typeof mount>> = [];
+  afterEach(() => {
+    for (const w of mounted.splice(0)) w.unmount();
+  });
+
+  it("stays a single-line summary in the document flow; the tree is a separately-positioned overlay", () => {
+    const wrapper = mount(FleetPanel, { props: { rows: DASHBOARD_ROWS, now: 0, defaultOpen: true } });
+    mounted.push(wrapper);
+    // the overlay markup (.tree-scroll) is still present/rendered; fleet.css positions it off
+    // `.fleet`'s own `position: relative` anchor — verified structurally here, pixel geometry is
+    // out of scope for a jsdom/happy-dom unit test (no real layout engine).
+    expect(wrapper.find(".tree-scroll").exists()).toBe(true);
+    expect(wrapper.find(".panel-head").exists()).toBe(true);
+  });
+
+  it("a pointerdown outside the panel closes it", async () => {
+    const wrapper = mount(FleetPanel, {
+      props: { rows: DASHBOARD_ROWS, now: 0, defaultOpen: true },
+      attachTo: document.body,
+    });
+    mounted.push(wrapper);
+    expect((wrapper.find(".fleet").element as HTMLDetailsElement).open).toBe(true);
+
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect((wrapper.find(".fleet").element as HTMLDetailsElement).open).toBe(false);
+  });
+
+  it("a pointerdown INSIDE the panel does not close it", async () => {
+    const wrapper = mount(FleetPanel, {
+      props: { rows: DASHBOARD_ROWS, now: 0, defaultOpen: true },
+      attachTo: document.body,
+    });
+    mounted.push(wrapper);
+    wrapper.get(".tree-scroll").element.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect((wrapper.find(".fleet").element as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it("Escape closes the open panel", async () => {
+    const wrapper = mount(FleetPanel, {
+      props: { rows: DASHBOARD_ROWS, now: 0, defaultOpen: true },
+      attachTo: document.body,
+    });
+    mounted.push(wrapper);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect((wrapper.find(".fleet").element as HTMLDetailsElement).open).toBe(false);
+  });
+
+  it("unmounting removes the document-level listeners (no stray handlers after teardown)", () => {
+    const wrapper = mount(FleetPanel, {
+      props: { rows: DASHBOARD_ROWS, now: 0, defaultOpen: true },
+      attachTo: document.body,
+    });
+    wrapper.unmount();
+    expect(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))).not.toThrow();
+    expect(() => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }))).not.toThrow();
   });
 });
 
