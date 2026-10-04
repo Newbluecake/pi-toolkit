@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSpawnService } from "../../src/service/spawn-service.js";
-import type { AgentTypeConfig, RunOutcome } from "../../src/core/types.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentTypeConfig, RunOutcome, RunSnapshot } from "../../src/core/types.js";
 import type { Runner, SlotPool } from "../../src/service/ports.js";
 
 const type: AgentTypeConfig = { name: "worker", description: "worker", systemPrompt: "", promptMode: "append" };
@@ -34,6 +37,39 @@ function deps(runner: Runner) {
   };
 }
 describe("SpawnService", () => {
+  // G5a 补全（2026-10-04 事故）：resolveResume 的 records 源接持久 store——
+  // 重启后进程内 records 为空，但种子恢复的 durableRecords 必须能让终态 run
+  // 可解析；未注入时保持旧行为（只见进程内 records）。
+  it("resolveResume finds terminal runs from durableRecords even with empty local records", () => {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-durable-"));
+    const file = join(dir, "sess.jsonl");
+    writeFileSync(file, "");
+    const seeded: RunSnapshot = {
+      runId: "r_OLDTERM",
+      generation: 1,
+      status: "completed",
+      phase: "settled",
+      deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+      diag: { ...outcome.diag, sessionFile: file },
+      outcome: { ...outcome, runId: "r_OLDTERM" },
+      updatedAt: 1,
+    };
+    const runner: Runner = { run: async (spec) => ({ ...outcome, runId: spec.runId }) };
+    const service = createSpawnService({ ...deps(runner), durableRecords: () => [seeded] });
+    const resolved = service.resolveResume("r_OLDTERM");
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.runId).toBe("r_OLDTERM");
+      expect(resolved.sessionFile).toBe(file);
+    }
+    // 前缀解析同生效。
+    const byPrefix = service.resolveResume("r_OLD");
+    expect(byPrefix.ok).toBe(true);
+    // 未注入 durableRecords ⇒ 回退进程内 records（旧行为）：同样的 id 不可见。
+    const legacy = createSpawnService(deps(runner));
+    expect(legacy.resolveResume("r_OLDTERM").ok).toBe(false);
+  });
+
   it("retries when runIdTaken rejects the first generated id", async () => {
     let first: string | undefined;
     const service = createSpawnService({

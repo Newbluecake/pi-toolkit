@@ -1812,6 +1812,9 @@ export function buildSessionStack(
     runner,
     budget: settings.budget,
     maxNestedDepth: settings.maxNestedDepth,
+    // G5a 补全：resume/get_result 的解析器 records 源接持久 store（重启后由
+    // pi-run-log 种子恢复），不再只看本进程生命周期的内存 Map。
+    durableRecords: () => store.list(),
     // D-16：extend.enabled=false 时合并后钳 maxExtensions=0，宽限/延长一并关闭
     extensionsEnabled: settings.extend.enabled,
     runIdTaken: (id) => taken.has(id),

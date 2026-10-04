@@ -212,6 +212,14 @@ export interface SpawnServiceDeps {
   runIdTaken?: (id: string) => boolean;
   /** Test seam for pre-populating the process-local label index. */
   labelIndex?: Map<string, SpawnLabelTarget>;
+  /**
+   * 终态 run 的**持久**视图（resolve-target.ts 的 "records are the durable,
+   * long-lived view" 设计本意）：stack 注入持久 store 的 list——重启后经
+   * pi-run-log 的种子恢复，resume/get_result 才能找到本进程生命周期之前的
+   * 终态 run（2026-10-04 事故：此前 records 与 liveSnapshots 都接进程内
+   * Map，重启即空）。未注入时回退进程内 records（既有行为）。
+   */
+  durableRecords?: () => readonly RunSnapshot[];
 }
 export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { snapshots(): readonly RunSnapshot[] } {
   const now = deps.now ?? (() => Date.now());
@@ -289,7 +297,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const targetDeps = () => ({
     labels,
     liveSnapshots: () => [...records.values()],
-    records: () => [...records.values()],
+    records: deps.durableRecords ?? (() => [...records.values()]),
     tombstones,
     now,
   });
