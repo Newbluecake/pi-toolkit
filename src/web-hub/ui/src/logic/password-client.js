@@ -118,9 +118,17 @@ export function createPasswordClient(deps) {
   const sleep = (ms) => new Promise((resolve) => timer(resolve, ms));
 
   /**
+   * Fetch with a deadline. The optional `signal` (web-hub-upload plan U4b: chunk
+   * abort-on-remove) is MERGED with the internal timeout controller — whoever fires first wins,
+   * and the shared controller aborts the underlying fetch either way. A pre-aborted signal never
+   * issues the fetch at all. External aborts surface as `Error("E_ABORT")`, timeouts as
+   * `Error("E_DEADLINE")`.
    * @param {string} url @param {any} init @param {number} timeoutMs
+   * @param {{ aborted?: boolean, addEventListener?: (t: string, fn: () => void, o?: any) => void,
+   *   removeEventListener?: (t: string, fn: () => void) => void }} [signal]
    */
-  async function request(url, init, timeoutMs) {
+  async function request(url, init, timeoutMs, signal) {
+    if (signal && signal.aborted === true) throw new Error("E_ABORT");
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
     /** @type {any} */
@@ -131,13 +139,33 @@ export function createPasswordClient(deps) {
         reject(new Error("E_DEADLINE"));
       }, timeoutMs);
     });
+    // External-signal merge: `Promise.race` attaches handlers to every racer, so the losers'
+    // later rejections (the aborted fetch itself) are swallowed rather than unhandled.
+    /** @type {Promise<never> | null} */
+    let externalAbort = null;
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      externalAbort = new Promise((_, reject) => {
+        onExternalAbort = () => {
+          ac?.abort();
+          reject(new Error("E_ABORT"));
+        };
+      });
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
     try {
-      return await Promise.race([
+      const racers = [
         deps.fetch(url, { credentials: "same-origin", ...init, ...(ac ? { signal: ac.signal } : {}) }),
         deadline,
-      ]);
+      ];
+      if (externalAbort !== null) racers.push(externalAbort);
+      return await Promise.race(racers);
     } finally {
       deps.clearTimeout(t);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
     }
   }
 
@@ -261,12 +289,13 @@ export function createPasswordClient(deps) {
     return r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`;
   }
 
-  /** @param {string} path @param {unknown} body @param {number} [timeoutMs] */
-  function postApi(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
+  /** @param {string} path @param {unknown} body @param {number} [timeoutMs] @param {any} [signal] */
+  function postApi(path, body, timeoutMs = REQUEST_TIMEOUT_MS, signal) {
     return request(
       path,
       { method: "POST", headers: { "Content-Type": "application/json", "X-PWH": "1" }, body: JSON.stringify(body) },
       timeoutMs,
+      signal,
     );
   }
 
@@ -340,6 +369,168 @@ export function createPasswordClient(deps) {
       return outcomeFromError(e);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // upload endpoints (web-hub-upload plan §1.2/§4.3, package U4b)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Upload response → outcome. Same table as `outcomeFromResponse` but keeps §1.2's
+   * upload-specific fields the cmd mapping drops: a 409 `E_UPLOAD_OFFSET` body's `received`
+   * (the authoritative resync offset) and the ok-body verbatim (`begin`'s `chunkBytes`/
+   * `received`, `commit`'s `path`). `r.json()` is read exactly once (a real `Response` body
+   * can only be consumed once).
+   * @param {{ ok: boolean, status: number, headers?: { get(name: string): string | null }, json(): Promise<any> }} r
+   */
+  async function uploadFromResponse(r) {
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body && typeof body === "object" ? body : {};
+    if (r.ok) return { ok: true, data: b };
+    const out = {
+      ok: false,
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
+      retryable: typeof b.retryable === "boolean" ? b.retryable : r.status === 429 || r.status >= 500,
+    };
+    if (typeof b.message === "string") out.message = b.message;
+    const raw = typeof r.headers?.get === "function" ? r.headers.get("Retry-After") : null;
+    const hn = raw === null || raw === undefined ? NaN : Number(raw);
+    const ra =
+      Number.isFinite(hn) && hn >= 0
+        ? hn
+        : typeof b.retryAfterS === "number" && b.retryAfterS >= 0
+          ? b.retryAfterS
+          : undefined;
+    if (ra !== undefined) out.retryAfterS = ra;
+    if (typeof b.received === "number" && Number.isFinite(b.received)) out.received = b.received;
+    return out;
+  }
+
+  /**
+   * Fetch-level failure for an upload call: timeout `E_DEADLINE` (retryable — §4.3 re-`begin`s
+   * for the authoritative `received`), external abort `E_ABORT` (never retryable — the tray
+   * item is being removed/retried), anything else `E_NETWORK`.
+   * @param {unknown} err
+   */
+  function uploadFromError(err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "E_DEADLINE") return { ok: false, error: "E_DEADLINE", retryable: true };
+    if (msg === "E_ABORT") return { ok: false, error: "E_ABORT", retryable: false };
+    return { ok: false, error: "E_NETWORK", message: msg, retryable: true };
+  }
+
+  /**
+   * §4.2/§1.2: 503 `E_BUSY` (startup scan not finished, §2.2.4) retries on the existing login
+   * busy backoff (`BUSY_RETRY_MAX`/`BUSY_RETRY_DEFAULT_MS`, `Retry-After` seconds when the hub
+   * sends one) before the (retryable) outcome surfaces. `send` never throws; a `close()` or an
+   * aborted signal ends the loop on the next attempt instead of sleeping forever.
+   * @param {() => Promise<any>} send
+   */
+  async function uploadWithBusyRetry(send) {
+    let busyAttempts = 0;
+    for (;;) {
+      const out = await send();
+      if (!(out.ok === false && out.error === "E_BUSY")) return out;
+      busyAttempts++;
+      if (busyAttempts > BUSY_RETRY_MAX || closed) return out;
+      const ms = out.retryAfterS !== undefined ? out.retryAfterS * 1000 : BUSY_RETRY_DEFAULT_MS;
+      await sleep(ms);
+      if (closed) return out; // closed during the backoff — stop hammering a dead client
+    }
+  }
+
+  /**
+   * The four upload endpoints (§1.2), one-shot `postApi`/`request` calls — no relogin dance
+   * (password mode has none): a 401 means the cookie session is gone, surfaced BOTH as the
+   * `E_AUTH` outcome and via `onConn("auth")` so `LoginView` remounts (the same signal the
+   * SSE `auth` event / `probeSessionAfterClose` give; `transport/password.ts`'s fetch-wrapper
+   * `REST_AUTH_PATHS` deliberately does NOT include the upload paths — firing it there too
+   * would double-report). `chunk` goes through `request()` as raw `application/octet-stream`
+   * bytes with the merged external abort signal so a tray remove interrupts the in-flight POST.
+   */
+  const upload = {
+    /**
+     * @param {{ agentKey: string, id: string, name: string, size: number, mime?: string }} p
+     * @param {any} [signal]
+     * @returns {Promise<any>}
+     */
+    async begin(p, signal) {
+      const out = await uploadWithBusyRetry(async () => {
+        try {
+          return await uploadFromResponse(await postApi(API.uploadBegin, p, CMD_REQUEST_TIMEOUT_MS, signal));
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+      if (out.ok === false && out.error === "E_AUTH") deps.onConn("auth");
+      return out;
+    },
+    /**
+     * @param {{ id: string, offset: number, bytes: Uint8Array }} p
+     * @param {any} [signal]
+     * @returns {Promise<any>}
+     */
+    async chunk(p, signal) {
+      const out = await uploadWithBusyRetry(async () => {
+        try {
+          const url = `${API.uploadChunk}?id=${encodeURIComponent(p.id)}&offset=${p.offset}`;
+          const r = await request(
+            url,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/octet-stream", "X-PWH": "1" },
+              body: p.bytes,
+            },
+            CMD_REQUEST_TIMEOUT_MS,
+            signal,
+          );
+          return await uploadFromResponse(r);
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+      if (out.ok === false && out.error === "E_AUTH") deps.onConn("auth");
+      return out;
+    },
+    /**
+     * @param {{ id: string }} p
+     * @param {any} [signal]
+     * @returns {Promise<any>}
+     */
+    async commit(p, signal) {
+      const out = await uploadWithBusyRetry(async () => {
+        try {
+          return await uploadFromResponse(await postApi(API.uploadCommit, p, CMD_REQUEST_TIMEOUT_MS, signal));
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+      if (out.ok === false && out.error === "E_AUTH") deps.onConn("auth");
+      return out;
+    },
+    /**
+     * Best-effort cleanup (§4.2 tray removal) — no external signal: an abort endpoint call
+     * must never be cancelled by the very removal that triggered it.
+     * @param {{ id: string }} p
+     * @returns {Promise<any>}
+     */
+    async abort(p) {
+      const out = await uploadWithBusyRetry(async () => {
+        try {
+          return await uploadFromResponse(await postApi(API.uploadAbort, p, CMD_REQUEST_TIMEOUT_MS));
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+      if (out.ok === false && out.error === "E_AUTH") deps.onConn("auth");
+      return out;
+    },
+  };
 
   function closeStream() {
     if (watchdog !== null) deps.clearTimeout(watchdog);
@@ -506,6 +697,7 @@ export function createPasswordClient(deps) {
     page,
     command,
     dialog,
+    upload,
     close() {
       closed = true;
       closeStream();

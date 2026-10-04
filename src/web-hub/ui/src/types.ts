@@ -126,6 +126,58 @@ export interface CmdOutcome {
   readonly retryable?: boolean;
   readonly effect?: "none" | "unknown";
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-upload plan §4.2/§4.3 (package U4b) — attachment tray view models
+// ---------------------------------------------------------------------------
+
+/** Mirrors `@logic/upload.js`'s (U4a) `Attachment` JSDoc typedef — that module stays the
+ * behavioral source of truth (`attachmentReduce`); this mirror exists for the same reason the
+ * other `@logic/state.js` mirrors below do: robust `vue-tsc` checking of `.vue` consumers. */
+export interface Attachment {
+  readonly id: string;
+  readonly name: string;
+  readonly size: number;
+  readonly mime: string | null;
+  readonly state: "queued" | "uploading" | "ready" | "failed" | "removing";
+  readonly uploadedBytes?: number;
+  /** Absolute hub path (ready items only) — what `composePrompt` folds into the prompt. */
+  readonly path?: string;
+  readonly error?: string;
+  readonly retryable?: boolean;
+  readonly message?: string;
+}
+
+/** Why `useUploads.add` refused a file (tray admission — U4a's header assigns caps/dedup to U4b). */
+export type AddRejectReason = "invalid" | "too-large" | "duplicate" | "too-many";
+
+export interface AddReject {
+  readonly file: unknown;
+  readonly reason: AddRejectReason;
+}
+
+export interface AddResult {
+  /** Ids of the attachments actually queued (already scheduled for upload). */
+  readonly added: readonly string[];
+  readonly rejected: readonly AddReject[];
+}
+
+/** `useUploads`'s (U4b) handle — exposed to Composer/AttachmentTray via `ControlHandle.uploads`. */
+export interface UploadsHandle {
+  /** The per-agent tray (Composer-local UI state, §4.3 — survives agent switches, lost on refresh). */
+  tray(agentKey: string): Readonly<Ref<readonly Attachment[]>>;
+  /** Tray admission: `UPLOAD_ATTACH_MAX_PER_MSG` count cap, 100 MiB size cap, `fileFingerprint` dedup. */
+  add(agentKey: string, files: readonly unknown[]): AddResult;
+  /** §4.2: mark `removing`, abort the in-flight request, call the `abort` endpoint, then drop. */
+  remove(agentKey: string, id: string): void;
+  /** §4.3: a failed item retries from scratch under a FRESH id (the reducer's `retry` transition). */
+  retry(agentKey: string, id: string): void;
+  /** §2.6/#8: `ready → failed` for attachments the hub reports evicted (`E_UPLOAD_GONE` off `/api/cmd`). */
+  failGone(agentKey: string, ids: readonly string[]): void;
+  /** Abort everything and drop all per-agent state (unmount / teardown). */
+  dispose(): void;
+}
+
 export interface ControlHandle {
   sendPrompt(agentKey: string, text: string, deliver: "steer" | "followUp"): Promise<CmdOutcome>;
   abort(agentKey: string): Promise<CmdOutcome>;
@@ -142,6 +194,8 @@ export interface ControlHandle {
   discard(agentKey: string, id: string): void;
   draft(agentKey: string): string;
   setDraft(agentKey: string, text: string): void;
+  /** Present only when the transport provides `upload` (U4b) — the attachment-tray driver. */
+  readonly uploads?: UploadsHandle;
 }
 export interface HubHandle {
   readonly state: Readonly<Ref<HubState>>;

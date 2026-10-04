@@ -18,6 +18,7 @@ import type { InjectionKey } from "vue";
 import { newCmdId } from "@logic/control.js";
 import type { ControlHandle, CmdOutcome } from "../types.js";
 import type { CmdRequest, DialogRequest, HubTransport } from "../transport/types.js";
+import { createUploads } from "./useUploads.js";
 
 export const CONTROL_CTX: InjectionKey<{ agentKey: string; control: ControlHandle; enabled: boolean }> =
   Symbol("web-hub-control");
@@ -91,6 +92,12 @@ export function createControl(
     retryable: false,
     effect: "none",
   });
+
+  // U4b (web-hub-upload plan §6): mount the tray driver only when the transport implements
+  // `upload` (both real adapters do; test fakes / future transports may not) — `ControlHandle.
+  // uploads` is optional for exactly that reason.
+  const uploadTransport = transport.upload;
+  const uploads = uploadTransport !== undefined ? createUploads({ upload: uploadTransport }) : undefined;
 
   return {
     sendPrompt: (agentKey, text, deliver) => {
@@ -190,6 +197,7 @@ export function createControl(
     },
     draft: (agentKey) => drafts.get(agentKey) ?? "",
     setDraft: (agentKey, text) => void drafts.set(agentKey, text),
+    ...(uploads !== undefined ? { uploads } : {}),
   };
 }
 

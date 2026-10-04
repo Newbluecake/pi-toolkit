@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as proto from "../../../src/web-hub/protocol/http-contract.js";
+import * as uploadProto from "../../../src/web-hub/protocol/upload.js";
 import * as web from "../../../src/web-hub/ui/src/logic/contract.js";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import { createClient } from "../../../src/web-hub/ui/src/logic/token-client.js";
@@ -32,6 +33,20 @@ describe("web/contract.js mirrors protocol/http-contract.ts", () => {
   it("API.session and API.logout point at the S1 LAN-only endpoints", () => {
     expect(web.API.session).toBe("/api/session");
     expect(web.API.logout).toBe("/api/logout");
+  });
+
+  // U4b (web-hub-upload plan §1.2): the four upload endpoints are imported from
+  // `protocol/upload.ts` — same anti-drift rule as SSE_EVENTS/API_ERRORS (same reference
+  // target), pinned against BOTH the protocol constants and the §1.2 literals.
+  it("API's upload endpoints are the protocol module's frozen paths (U4b §1.2)", () => {
+    expect(web.API.uploadBegin).toBe(uploadProto.UPLOAD_BEGIN_PATH);
+    expect(web.API.uploadChunk).toBe(uploadProto.UPLOAD_CHUNK_PATH);
+    expect(web.API.uploadCommit).toBe(uploadProto.UPLOAD_COMMIT_PATH);
+    expect(web.API.uploadAbort).toBe(uploadProto.UPLOAD_ABORT_PATH);
+    expect(web.API.uploadBegin).toBe("/api/upload/begin");
+    expect(web.API.uploadChunk).toBe("/api/upload/chunk");
+    expect(web.API.uploadCommit).toBe("/api/upload/commit");
+    expect(web.API.uploadAbort).toBe("/api/upload/abort");
   });
 
   it("reduce accepts every SSE event name without throwing (minimal / garbage payloads)", () => {

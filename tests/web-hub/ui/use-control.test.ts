@@ -1,11 +1,15 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { createControl, CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.js";
+import type { Attachment } from "../../../src/web-hub/ui/src/types.js";
 import type {
   CmdOutcome,
   CmdRequest,
   DialogRequest,
   HubTransport,
+  UploadBeginOk,
+  UploadOutcome,
+  UploadTransport,
 } from "../../../src/web-hub/ui/src/transport/types.js";
 
 /**
@@ -218,5 +222,57 @@ describe("createControl (§7.3)", () => {
 
   it("CONTROL_CTX is the provide/inject key for sub-agent actions (§7.4)", () => {
     expect(typeof CONTROL_CTX).toBe("symbol");
+  });
+});
+
+describe("createControl: uploads mount (web-hub-upload plan §6 U4b)", () => {
+  const fakeUpload: UploadTransport = {
+    begin: async (p) =>
+      ({
+        ok: true,
+        data: { id: p.id, chunkBytes: 4, maxBytes: 104857600, received: 0 },
+      }) as UploadOutcome<UploadBeginOk>,
+    chunk: async (p) => ({ ok: true, data: { received: p.offset + p.bytes.length } }),
+    commit: async (p) => ({ ok: true, data: { id: p.id, path: "/uploads/x/f.png", size: 1, mime: null } }),
+    abort: async () => ({ ok: true, data: { ok: true } }),
+  };
+
+  function transportWithUpload(withUpload: boolean): HubTransport {
+    const base: HubTransport = {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: async () => ({ ok: true }),
+      unsubscribe: async () => {},
+      page: async () => ({ ok: true, data: {} }),
+      command: async () => ({ ok: true, data: {} }) as CmdOutcome,
+      dialog: async () => ({ ok: true }) as unknown as CmdOutcome,
+    };
+    return withUpload ? { ...base, upload: fakeUpload } : base;
+  }
+
+  it("transport.upload present ⇒ ControlHandle.uploads is mounted and drives the tray end-to-end", async () => {
+    const dispatched: Array<{ event: string; data: any }> = [];
+    const control = createControl(transportWithUpload(true), (m) => dispatched.push({ event: m.event, data: m.data }));
+    expect(control.uploads).toBeDefined();
+    const file = {
+      name: "a.png",
+      size: 4,
+      type: "image/png",
+      lastModified: 1,
+      slice: () => ({ arrayBuffer: async () => new Uint8Array(4).buffer }),
+    };
+    const r = control.uploads!.add("A", [file]);
+    expect(r.added).toHaveLength(1);
+    for (let i = 0; i < 40; i++) await Promise.resolve();
+    const tray: readonly Attachment[] = control.uploads!.tray("A").value;
+    expect(tray).toHaveLength(1);
+    expect(tray[0]!.state).toBe("ready");
+    expect(tray[0]!.path).toBe("/uploads/x/f.png");
+  });
+
+  it("transport without upload ⇒ ControlHandle.uploads stays undefined (optional mount)", () => {
+    const control = createControl(transportWithUpload(false), () => {});
+    expect(control.uploads).toBeUndefined();
   });
 });

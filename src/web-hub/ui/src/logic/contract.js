@@ -23,6 +23,7 @@
  * also import `./contract.js` as a plain `.js`→`.js` sibling, the same broken direction).
  */
 import { API_ERRORS as PROTOCOL_API_ERRORS, SSE_EVENTS as PROTOCOL_SSE_EVENTS } from "@protocol/http-contract.ts";
+import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 
 /** SSE `event:` names pushed by the hub (order irrelevant, set must match) — same array as
  * `protocol/http-contract.ts`'s `SSE_EVENTS`, not a copy. */
@@ -32,7 +33,10 @@ export const SSE_EVENTS = Object.freeze(PROTOCOL_SSE_EVENTS);
  * `protocol/http-contract.ts`'s `API_ERRORS`, not a copy. */
 export const API_ERRORS = Object.freeze(PROTOCOL_API_ERRORS);
 
-/** Endpoints the P1 (read-only) frontend talks to; `logout`/`session` are LAN-only (S1, package LF). */
+/** Endpoints the P1 (read-only) frontend talks to; `logout`/`session` are LAN-only (S1, package LF).
+ * The four `/api/upload/*` paths (web-hub-upload plan §1.2, package U4b) are imported from the
+ * protocol module — same anti-drift rule as `SSE_EVENTS`/`API_ERRORS` above: the hub's routes
+ * (`hub/upload-http.ts`) and this object can never disagree. */
 export const API = Object.freeze({
   login: "/api/login",
   logout: "/api/logout",
@@ -43,6 +47,10 @@ export const API = Object.freeze({
   history: "/api/history",
   cmd: "/api/cmd",
   dialog: "/api/dialog",
+  uploadBegin: UPLOAD_BEGIN_PATH,
+  uploadChunk: UPLOAD_CHUNK_PATH,
+  uploadCommit: UPLOAD_COMMIT_PATH,
+  uploadAbort: UPLOAD_ABORT_PATH,
 });
 
 /** Client-side SSE silence limit: no frame (hub pings every 15s) for this long ⇒ reconnect. */

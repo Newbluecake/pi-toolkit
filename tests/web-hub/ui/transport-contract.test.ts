@@ -23,7 +23,7 @@ interface FetchResponse {
 
 type FetchImpl = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array },
 ) => Promise<FetchResponse>;
 
 function resp(status: number, body: unknown = {}, headers: Record<string, string> = {}): FetchResponse {
@@ -104,7 +104,7 @@ interface Harness {
   readonly transport: HubTransport;
   readonly fetchCalls: Array<{
     url: string;
-    init: { method?: string; headers?: Record<string, string>; body?: string };
+    init: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array };
   }>;
   readonly clock: ReturnType<typeof fakeClock>;
   readonly onConnCalls: string[];
@@ -462,5 +462,274 @@ describe("token transport: command() 401 recovery (§7.2: withRelogin replay is 
     expect(cmdCalls).toHaveLength(2);
     expect(cmdCalls[0]!.init.body).toBe(cmdCalls[1]!.init.body); // same id ⇒ hub/agent dedupe (dup)
     expect(h.onConnCalls).not.toContain("auth"); // recovered — no login-view flash
+  });
+});
+
+// ---------------------------------------------------------------------------
+// upload() — web-hub-upload plan §1.2/§4.3 (package U4b), same suite both modes
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: upload() (web-hub-upload plan §1.2 — identical wire both modes)", (_mode, make) => {
+  const beginBody = { agentKey: "A", id: "u".repeat(22), name: "shot.png", size: 5, mime: "image/png" };
+  const commitBody = { id: "u".repeat(22) };
+
+  it("implements the full UploadTransport surface on every adapter", () => {
+    const h = make();
+    const up = h.transport.upload;
+    expect(up).toBeDefined();
+    expect(typeof up!.begin).toBe("function");
+    expect(typeof up!.chunk).toBe("function");
+    expect(typeof up!.commit).toBe("function");
+    expect(typeof up!.abort).toBe("function");
+  });
+
+  it("begin(): POST /api/upload/begin with X-PWH:1 and the verbatim JSON body; 200 body rides as data", async () => {
+    const h = make(async (url) =>
+      url === "/api/upload/begin"
+        ? resp(200, { id: beginBody.id, chunkBytes: 4194304, maxBytes: 104857600, received: 0 })
+        : resp(200),
+    );
+    const r = await h.transport.upload!.begin(beginBody);
+    expect(r).toEqual({ ok: true, data: { id: beginBody.id, chunkBytes: 4194304, maxBytes: 104857600, received: 0 } });
+    const call = h.fetchCalls.find((c) => c.url === "/api/upload/begin")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["Content-Type"]).toBe("application/json");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual(beginBody);
+  });
+
+  it("chunk(): POST /api/upload/chunk?id&offset as application/octet-stream + X-PWH:1 with the RAW bytes (never JSON)", async () => {
+    const h = make(async (url) => (url.startsWith("/api/upload/chunk") ? resp(200, { received: 8 }) : resp(200)));
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const r = await h.transport.upload!.chunk({ id: beginBody.id, offset: 5, bytes });
+    expect(r).toEqual({ ok: true, data: { received: 8 } });
+    const call = h.fetchCalls.find((c) => c.url.startsWith("/api/upload/chunk"))!;
+    expect(call.url).toBe(`/api/upload/chunk?id=${beginBody.id}&offset=5`);
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["Content-Type"]).toBe("application/octet-stream");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(Array.from(call.init.body as Uint8Array)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("chunk(): 200 {received, dup:true} keeps `dup` in data (§2.5 idempotent replay)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/upload/chunk") ? resp(200, { received: 8, dup: true }) : resp(200),
+    );
+    const r = await h.transport.upload!.chunk({ id: beginBody.id, offset: 0, bytes: new Uint8Array(8) });
+    expect(r).toEqual({ ok: true, data: { received: 8, dup: true } });
+  });
+
+  it("409 E_UPLOAD_OFFSET carries the body's authoritative `received` on the outcome (§1.2 resync)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/upload/chunk") ? resp(409, { error: "E_UPLOAD_OFFSET", received: 4096 }) : resp(200),
+    );
+    const r = await h.transport.upload!.chunk({ id: beginBody.id, offset: 0, bytes: new Uint8Array(8) });
+    expect(r).toEqual({ ok: false, error: "E_UPLOAD_OFFSET", received: 4096, retryable: false });
+  });
+
+  it("404 maps to E_NOT_FOUND (voided upload / hub restart — §4.3: useUploads turns it into a retryable failed item)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/upload/chunk") ? resp(404, { error: "E_NOT_FOUND" }) : resp(200),
+    );
+    const r = await h.transport.upload!.chunk({ id: beginBody.id, offset: 0, bytes: new Uint8Array(8) });
+    expect(r).toEqual({ ok: false, error: "E_NOT_FOUND", retryable: false });
+  });
+
+  it("413 E_UPLOAD_TOO_LARGE / 409 E_UPLOAD_DISABLED surface verbatim with retryable:false", async () => {
+    const h = make(async (url) =>
+      url === "/api/upload/begin" ? resp(413, { error: "E_UPLOAD_TOO_LARGE" }) : resp(200),
+    );
+    expect(await h.transport.upload!.begin(beginBody)).toEqual({
+      ok: false,
+      error: "E_UPLOAD_TOO_LARGE",
+      retryable: false,
+    });
+    const h2 = make(async (url) =>
+      url === "/api/upload/begin" ? resp(409, { error: "E_UPLOAD_DISABLED", message: "no hardlink" }) : resp(200),
+    );
+    expect(await h2.transport.upload!.begin(beginBody)).toEqual({
+      ok: false,
+      error: "E_UPLOAD_DISABLED",
+      message: "no hardlink",
+      retryable: false,
+    });
+  });
+
+  it("429 E_RATE folds Retry-After into retryAfterS (token bucket, §2.4)", async () => {
+    const h = make(async (url) =>
+      url === "/api/upload/begin" ? resp(429, { error: "E_RATE" }, { "Retry-After": "3" }) : resp(200),
+    );
+    const r = await h.transport.upload!.begin(beginBody);
+    expect(r).toEqual({ ok: false, error: "E_RATE", retryable: true, retryAfterS: 3 });
+  });
+
+  it("fetch timeout (16s chunk budget, §4.3) ⇒ E_DEADLINE retryable and exactly one attempt", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/upload/chunk") ? new Promise<FetchResponse>(() => {}) : resp(200),
+    );
+    const p = h.transport.upload!.chunk({ id: beginBody.id, offset: 0, bytes: new Uint8Array(8) });
+    h.clock.advance(16_000);
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_DEADLINE", retryable: true });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/upload/chunk"))).toHaveLength(1);
+  });
+
+  it("an external AbortSignal aborts the in-flight chunk ⇒ E_ABORT retryable:false (§4.2 remove)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/upload/chunk") ? new Promise<FetchResponse>(() => {}) : resp(200),
+    );
+    const ac = new AbortController();
+    const p = h.transport.upload!.chunk({ id: beginBody.id, offset: 0, bytes: new Uint8Array(8) }, ac.signal);
+    await flush();
+    ac.abort();
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_ABORT", retryable: false });
+    expect(h.clock.pending()).toBe(0); // the merged timeout timer was cleaned up
+  });
+
+  it("a PRE-aborted signal never issues the request at all", async () => {
+    const h = make(async () => resp(200));
+    const ac = new AbortController();
+    ac.abort();
+    const r = await h.transport.upload!.commit(commitBody, ac.signal);
+    expect(r).toEqual({ ok: false, error: "E_ABORT", retryable: false });
+    expect(h.fetchCalls.filter((c) => c.url === "/api/upload/commit")).toHaveLength(0);
+  });
+
+  it("external abort wins over the internal timeout (whichever fires first — merge, not race-to-16s)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/upload/chunk") ? new Promise<FetchResponse>(() => {}) : resp(200),
+    );
+    const ac = new AbortController();
+    const p = h.transport.upload!.chunk({ id: beginBody.id, offset: 0, bytes: new Uint8Array(8) }, ac.signal);
+    await flush();
+    h.clock.advance(16_000); // the internal deadline fires FIRST…
+    ac.abort(); // …so the external abort must NOT change the outcome
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_DEADLINE", retryable: true });
+  });
+
+  it("commit(): POST /api/upload/commit; 200 {id,path,size,mime,dedup} rides verbatim", async () => {
+    const h = make(async (url) =>
+      url === "/api/upload/commit"
+        ? resp(200, {
+            id: commitBody.id,
+            path: "/home/u/.pi/agent/web-hub/uploads/s-1/x/shot.png",
+            size: 5,
+            mime: "image/png",
+            dedup: true,
+          })
+        : resp(200),
+    );
+    const r = await h.transport.upload!.commit(commitBody);
+    expect(r).toEqual({
+      ok: true,
+      data: {
+        id: commitBody.id,
+        path: "/home/u/.pi/agent/web-hub/uploads/s-1/x/shot.png",
+        size: 5,
+        mime: "image/png",
+        dedup: true,
+      },
+    });
+    const call = h.fetchCalls.find((c) => c.url === "/api/upload/commit")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual(commitBody);
+  });
+
+  it("abort(): POST /api/upload/abort {id}; 410/E_AGENT_GONE-style bodies map like any error", async () => {
+    const h = make(async (url) => (url === "/api/upload/abort" ? resp(200, { ok: true }) : resp(200)));
+    const r = await h.transport.upload!.abort(commitBody);
+    expect(r).toEqual({ ok: true, data: { ok: true } });
+    const call = h.fetchCalls.find((c) => c.url === "/api/upload/abort")!;
+    expect(JSON.parse(call.init.body as string)).toEqual(commitBody);
+  });
+
+  it("503 E_BUSY auto-retries on the existing busy backoff (§2.2.4 startup scan) until 200 — one caller-visible outcome", async () => {
+    let beginAttempts = 0;
+    const h = make(async (url) => {
+      if (url !== "/api/upload/begin") return resp(200);
+      beginAttempts++;
+      return beginAttempts === 1
+        ? resp(503, { error: "E_BUSY" }, { "Retry-After": "1" })
+        : resp(200, { received: 0, chunkBytes: 1024, maxBytes: 1 });
+    });
+    const p = h.transport.upload!.begin(beginBody);
+    await flush(); // first attempt ⇒ E_BUSY, backoff timer armed
+    h.clock.advance(1000); // Retry-After: 1s
+    const r = await p;
+    expect(r).toEqual({ ok: true, data: { received: 0, chunkBytes: 1024, maxBytes: 1 } });
+    expect(beginAttempts).toBe(2);
+  });
+
+  it("503 E_BUSY exhausts the bounded retries and surfaces the retryable error (password-client's BUSY_RETRY_MAX=5)", async () => {
+    let beginAttempts = 0;
+    const h = make(async (url) => {
+      if (url !== "/api/upload/begin") return resp(200);
+      beginAttempts++;
+      return resp(503, { error: "E_BUSY" }, { "Retry-After": "1" });
+    });
+    const p = h.transport.upload!.begin(beginBody);
+    for (let i = 0; i < 5; i++) {
+      await flush();
+      h.clock.advance(1000);
+    }
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_BUSY", retryable: true, retryAfterS: 1 });
+    expect(beginAttempts).toBe(6); // 1 + BUSY_RETRY_MAX(5)
+  });
+});
+
+describe("token transport: upload() 401 recovery (§7.2's withRelogin rule, applied to uploads)", () => {
+  const beginBody = { agentKey: "A", id: "u".repeat(22), name: "a.png", size: 1 };
+
+  it("a 401 with a stored token silently re-logs in and replays the SAME begin body (idempotent by id)", async () => {
+    const h = makeToken(async (url) => {
+      if (url === "/api/login") return resp(200);
+      if (url === "/api/upload/begin") {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn ? resp(200, { received: 0, chunkBytes: 1024, maxBytes: 1 }) : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const r = await h.transport.upload!.begin(beginBody);
+    expect(r).toEqual({ ok: true, data: { received: 0, chunkBytes: 1024, maxBytes: 1 } });
+    const begins = h.fetchCalls.filter((c) => c.url === "/api/upload/begin");
+    expect(begins).toHaveLength(2);
+    expect(begins[0]!.init.body).toBe(begins[1]!.init.body);
+    expect(h.onConnCalls).not.toContain("auth"); // recovered — no login-view flash
+  });
+
+  it("a FINAL 401 (no stored token) surfaces E_AUTH and reports onConn('auth') exactly once", async () => {
+    const h = makeToken(async (url) => (url === "/api/upload/begin" ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    const r = await h.transport.upload!.begin(beginBody);
+    expect(r).toEqual({ ok: false, error: "E_AUTH", retryable: false });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+describe("password transport: upload() 401 (one-shot — the cookie session is gone, §7.2)", () => {
+  const beginBody = { agentKey: "A", id: "u".repeat(22), name: "a.png", size: 1 };
+
+  it("a 401 surfaces E_AUTH and reports onConn('auth') exactly once (client-side; wrapper never double-fires)", async () => {
+    const h = makePassword(async (url) => (url === "/api/upload/begin" ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    const r = await h.transport.upload!.begin(beginBody);
+    expect(r).toEqual({ ok: false, error: "E_AUTH", retryable: false });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+    expect(h.fetchCalls.filter((c) => c.url === "/api/login")).toHaveLength(0); // no relogin machinery in password mode
+  });
+
+  it("a 401 on chunk reports onConn('auth') once too (same lost-session signal)", async () => {
+    const h = makePassword(async (url) =>
+      url.startsWith("/api/upload/chunk") ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const r = await h.transport.upload!.chunk({ id: "u".repeat(22), offset: 0, bytes: new Uint8Array(4) });
+    expect(r).toEqual({ ok: false, error: "E_AUTH", retryable: false });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
   });
 });

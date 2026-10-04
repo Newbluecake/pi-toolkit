@@ -29,6 +29,14 @@ export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser writ
 export const WATCHDOG_TICK_MS = 5_000;
 export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
+// web-hub-upload plan §4.2/§1.2 (package U4b): a 503 `E_BUSY` (startup scan not finished, §2.2.4)
+// is auto-retried on a bounded backoff before it ever reaches the tray. Mirrors
+// password-client's login busy policy (`BUSY_RETRY_MAX`/`BUSY_RETRY_DEFAULT_MS`) — restated
+// here rather than imported so the two transports stay independent modules (the same
+// duplication `REQUEST_TIMEOUT_MS` already carries); `transport-contract.test.ts`'s shared
+// upload suite pins both sides to identical behavior.
+export const UPLOAD_BUSY_RETRY_MAX = 5;
+export const UPLOAD_BUSY_RETRY_DEFAULT_MS = 2_000;
 const ES_CLOSED = 2;
 
 /** `#t=<token>` (optionally among other `&` params) → token. @param {unknown} hash */
@@ -78,12 +86,19 @@ export function createClient(deps) {
   };
 
   /**
+   * Fetch with a deadline. The optional `signal` (web-hub-upload plan U4b: chunk abort-on-remove)
+   * is MERGED with the internal timeout controller — whoever fires first wins, and the shared
+   * controller aborts the underlying fetch either way. A pre-aborted signal never issues the
+   * fetch at all. External aborts surface as `Error("E_ABORT")`, timeouts as `Error("E_DEADLINE")`.
    * @param {string} url
    * @param {any} init
    * @param {number} [timeoutMs]
+   * @param {{ aborted?: boolean, addEventListener?: (t: string, fn: () => void, o?: any) => void,
+   *   removeEventListener?: (t: string, fn: () => void) => void }} [signal]
    * @returns {Promise<{ ok: boolean, status: number, json(): Promise<any> }>}
    */
-  async function request(url, init, timeoutMs = REQUEST_TIMEOUT_MS) {
+  async function request(url, init, timeoutMs = REQUEST_TIMEOUT_MS, signal) {
+    if (signal && signal.aborted === true) throw new Error("E_ABORT");
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
     /** @type {any} */
@@ -94,18 +109,39 @@ export function createClient(deps) {
         reject(new Error("E_DEADLINE"));
       }, timeoutMs);
     });
+    // External-signal merge: a rejection racing the fetch/timeout; `Promise.race` attaches
+    // handlers to every racer, so the losers' later rejections (the aborted fetch itself) are
+    // swallowed rather than becoming unhandled rejections.
+    /** @type {Promise<never> | null} */
+    let externalAbort = null;
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      externalAbort = new Promise((_, reject) => {
+        onExternalAbort = () => {
+          ac?.abort();
+          reject(new Error("E_ABORT"));
+        };
+      });
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
     try {
-      return await Promise.race([
+      const racers = [
         deps.fetch(url, { credentials: "same-origin", ...init, ...(ac ? { signal: ac.signal } : {}) }),
         deadline,
-      ]);
+      ];
+      if (externalAbort !== null) racers.push(externalAbort);
+      return await Promise.race(racers);
     } finally {
       deps.clearTimeout(t);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
     }
   }
 
-  /** @param {string} path @param {unknown} body @param {number} [timeoutMs] */
-  function postRaw(path, body, timeoutMs) {
+  /** @param {string} path @param {unknown} body @param {number} [timeoutMs] @param {any} [signal] */
+  function postRaw(path, body, timeoutMs, signal) {
     return request(
       path,
       {
@@ -114,6 +150,7 @@ export function createClient(deps) {
         body: JSON.stringify(body),
       },
       timeoutMs,
+      signal,
     );
   }
 
@@ -262,6 +299,169 @@ export function createClient(deps) {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // upload endpoints (web-hub-upload plan §1.2/§4.3, package U4b)
+  // -------------------------------------------------------------------------
+
+  /** @param {number} ms */
+  const sleep = (ms) => new Promise((resolve) => timer(resolve, ms));
+
+  /**
+   * Upload response → outcome. Same table as `outcomeFromResponse` but keeps §1.2's
+   * upload-specific fields the cmd mapping drops: a 409 `E_UPLOAD_OFFSET` body's `received`
+   * (the authoritative resync offset) and the ok-body verbatim (`begin`'s `chunkBytes`/
+   * `received`, `commit`'s `path`). `r.json()` is read exactly once (a real `Response` body
+   * can only be consumed once).
+   * @param {{ ok: boolean, status: number, headers?: { get(name: string): string | null }, json(): Promise<any> }} r
+   */
+  async function uploadFromResponse(r) {
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body && typeof body === "object" ? body : {};
+    if (r.ok) return { ok: true, data: b };
+    const out = {
+      ok: false,
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
+      retryable: typeof b.retryable === "boolean" ? b.retryable : r.status === 429 || r.status >= 500,
+    };
+    if (typeof b.message === "string") out.message = b.message;
+    const raw = typeof r.headers?.get === "function" ? r.headers.get("Retry-After") : null;
+    const hn = raw === null || raw === undefined ? NaN : Number(raw);
+    const ra =
+      Number.isFinite(hn) && hn >= 0
+        ? hn
+        : typeof b.retryAfterS === "number" && b.retryAfterS >= 0
+          ? b.retryAfterS
+          : undefined;
+    if (ra !== undefined) out.retryAfterS = ra;
+    if (typeof b.received === "number" && Number.isFinite(b.received)) out.received = b.received;
+    return out;
+  }
+
+  /**
+   * Fetch-level failure for an upload call: timeout `E_DEADLINE` (retryable — §4.3 re-`begin`s
+   * for the authoritative `received`), external abort `E_ABORT` (never retryable — the tray
+   * item is being removed/retried, late events are swallowed by the reducer anyway), anything
+   * else `E_NETWORK`.
+   * @param {unknown} err
+   */
+  function uploadFromError(err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "E_DEADLINE") return { ok: false, error: "E_DEADLINE", retryable: true };
+    if (msg === "E_ABORT") return { ok: false, error: "E_ABORT", retryable: false };
+    return { ok: false, error: "E_NETWORK", message: msg, retryable: true };
+  }
+
+  /**
+   * §4.2/§1.2: 503 `E_BUSY` (startup scan) retries on the login busy backoff — `Retry-After`
+   * header seconds when present, else `UPLOAD_BUSY_RETRY_DEFAULT_MS` — at most
+   * `UPLOAD_BUSY_RETRY_MAX` times before the (retryable) outcome surfaces. `send` never throws
+   * (fetch failures are mapped inside); a client `close()` or an aborted signal ends the loop
+   * on the next attempt instead of sleeping forever.
+   * @param {() => Promise<any>} send
+   */
+  async function uploadWithBusyRetry(send) {
+    let busyAttempts = 0;
+    for (;;) {
+      const out = await send();
+      if (!(out.ok === false && out.error === "E_BUSY")) return out;
+      busyAttempts++;
+      if (busyAttempts > UPLOAD_BUSY_RETRY_MAX || closed) return out;
+      const ms = out.retryAfterS !== undefined ? out.retryAfterS * 1000 : UPLOAD_BUSY_RETRY_DEFAULT_MS;
+      await sleep(ms);
+      if (closed) return out; // closed during the backoff — stop hammering a dead client
+    }
+  }
+
+  /**
+   * The four upload endpoints (§1.2). All of them ride `withRelogin` — a 401 re-logs in
+   * silently with the stored token and replays: `begin`/`commit`/`abort` are idempotent by id,
+   * and a replayed `chunk` either lands (`offset+len === received` ⇒ `dup:true`) or 409s with
+   * the authoritative `received` for the caller to resync on. `chunk` goes through `request()`
+   * as raw `application/octet-stream` bytes (never JSON/base64) with the merged external
+   * abort signal so a tray remove interrupts the in-flight POST immediately.
+   */
+  const upload = {
+    /**
+     * @param {{ agentKey: string, id: string, name: string, size: number, mime?: string }} p
+     * @param {any} [signal]
+     * @returns {Promise<any>}
+     */
+    async begin(p, signal) {
+      return uploadWithBusyRetry(async () => {
+        try {
+          const r = await withRelogin(() => postRaw(API.uploadBegin, p, CMD_REQUEST_TIMEOUT_MS, signal));
+          return await uploadFromResponse(r);
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+    },
+    /**
+     * @param {{ id: string, offset: number, bytes: Uint8Array }} p
+     * @param {any} [signal]
+     * @returns {Promise<any>}
+     */
+    async chunk(p, signal) {
+      return uploadWithBusyRetry(async () => {
+        try {
+          const url = `${API.uploadChunk}?id=${encodeURIComponent(p.id)}&offset=${p.offset}`;
+          const r = await withRelogin(() =>
+            request(
+              url,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/octet-stream", "X-PWH": "1" },
+                body: p.bytes,
+              },
+              CMD_REQUEST_TIMEOUT_MS,
+              signal,
+            ),
+          );
+          return await uploadFromResponse(r);
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+    },
+    /**
+     * @param {{ id: string }} p
+     * @param {any} [signal]
+     * @returns {Promise<any>}
+     */
+    async commit(p, signal) {
+      return uploadWithBusyRetry(async () => {
+        try {
+          const r = await withRelogin(() => postRaw(API.uploadCommit, p, CMD_REQUEST_TIMEOUT_MS, signal));
+          return await uploadFromResponse(r);
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+    },
+    /**
+     * Best-effort cleanup (§4.2 tray removal) — no external signal: an abort endpoint call
+     * must never be cancelled by the very removal that triggered it.
+     * @param {{ id: string }} p
+     * @returns {Promise<any>}
+     */
+    async abort(p) {
+      return uploadWithBusyRetry(async () => {
+        try {
+          const r = await withRelogin(() => postRaw(API.uploadAbort, p, CMD_REQUEST_TIMEOUT_MS));
+          return await uploadFromResponse(r);
+        } catch (e) {
+          return uploadFromError(e);
+        }
+      });
+    },
+  };
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -309,6 +509,7 @@ export function createClient(deps) {
     },
     command,
     dialog,
+    upload,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

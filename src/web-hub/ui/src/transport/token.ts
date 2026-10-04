@@ -16,7 +16,16 @@
  */
 import { API } from "@logic/contract.js";
 import { createClient } from "@logic/token-client.js";
-import type { CmdOutcome, HubTransport, Result } from "./types.js";
+import type {
+  CmdOutcome,
+  HubTransport,
+  Result,
+  UploadBeginOk,
+  UploadChunkOk,
+  UploadCommitOk,
+  UploadOutcome,
+  UploadTransport,
+} from "./types.js";
 
 export type TokenTransportDeps = Parameters<typeof createClient>[0];
 
@@ -37,6 +46,23 @@ export { TOKEN_KEY, readHashToken } from "@logic/token-client.js";
  */
 function isFinalAuthFailure(r: { readonly ok: boolean; readonly error?: string }): boolean {
   return !r.ok && r.error === "E_AUTH";
+}
+
+/** The same final-E_AUTH rule `command`/`dialog` apply, for the four upload endpoints: the
+ * client's `withRelogin` already replayed once through a silent re-login, so a *final* E_AUTH
+ * means the stored token itself is dead — flip to the login view (never a double show:
+ * `useHub.ts`'s reducer no-ops a repeated `conn:auth`). */
+async function withAuthNotice<T>(deps: TokenTransportDeps, run: () => Promise<T>): Promise<T> {
+  const r = await run();
+  if (
+    typeof r === "object" &&
+    r !== null &&
+    (r as { ok?: unknown }).ok === false &&
+    (r as { error?: unknown }).error === "E_AUTH"
+  ) {
+    deps.onConn("auth");
+  }
+  return r;
 }
 
 export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
@@ -77,5 +103,16 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       if (isFinalAuthFailure(r)) deps.onConn("auth");
       return r;
     },
+    upload: {
+      // U4b (web-hub-upload plan §1.2): thin casts over the logic client's upload namespace —
+      // `transport-contract.test.ts`'s shared upload suite pins both adapters' wire behavior.
+      begin: (p, signal) =>
+        withAuthNotice(deps, () => client.upload.begin(p, signal) as Promise<UploadOutcome<UploadBeginOk>>),
+      chunk: (p, signal) =>
+        withAuthNotice(deps, () => client.upload.chunk(p, signal) as Promise<UploadOutcome<UploadChunkOk>>),
+      commit: (p, signal) =>
+        withAuthNotice(deps, () => client.upload.commit(p, signal) as Promise<UploadOutcome<UploadCommitOk>>),
+      abort: (p) => withAuthNotice(deps, () => client.upload.abort(p) as Promise<UploadOutcome<{ ok: boolean }>>),
+    } satisfies UploadTransport,
   } satisfies HubTransport;
 }

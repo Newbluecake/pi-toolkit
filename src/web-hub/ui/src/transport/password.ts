@@ -9,7 +9,16 @@
  */
 import { API } from "@logic/contract.js";
 import { createPasswordClient } from "@logic/password-client.js";
-import type { CmdOutcome, PasswordTransport, Result } from "./types.js";
+import type {
+  CmdOutcome,
+  PasswordTransport,
+  Result,
+  UploadBeginOk,
+  UploadChunkOk,
+  UploadCommitOk,
+  UploadOutcome,
+  UploadTransport,
+} from "./types.js";
 
 export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
 
@@ -61,5 +70,14 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     dialog: (req) => client.dialog(req) as Promise<CmdOutcome>,
     login: (username, password) => client.login(username, password),
     logout: () => client.logout(),
+    upload: {
+      // U4b (web-hub-upload plan §1.2): thin casts over the logic client's upload namespace.
+      // 401 → onConn("auth") lives INSIDE the client here (password mode has no relogin dance) —
+      // REST_AUTH_PATHS above deliberately excludes the upload paths so it never double-fires.
+      begin: (p, signal) => client.upload.begin(p, signal) as Promise<UploadOutcome<UploadBeginOk>>,
+      chunk: (p, signal) => client.upload.chunk(p, signal) as Promise<UploadOutcome<UploadChunkOk>>,
+      commit: (p, signal) => client.upload.commit(p, signal) as Promise<UploadOutcome<UploadCommitOk>>,
+      abort: (p) => client.upload.abort(p) as Promise<UploadOutcome<{ ok: boolean }>>,
+    } satisfies UploadTransport,
   } satisfies PasswordTransport;
 }
