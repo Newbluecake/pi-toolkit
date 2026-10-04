@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
-import { PROTO, P2_HUB_CAPS } from "../protocol/version.js";
+import { PROTO, P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { createCommandRouter } from "./commands.js";
@@ -224,7 +224,9 @@ export async function startHub(
       // both are frozen-protocol invariants (§3.1's compat matrix), and agent-side
       // `connection.ts`'s D14 slot gating reads `hello_ack.caps` to decide whether to ever send
       // the `dialogs`/`ctl`/`commands` slots at all.
-      caps: [...admin.caps(), ...P2_HUB_CAPS],
+      // web-hub-upload plan §5.1: hub also advertises UPLOAD_HUB_CAPS alongside P2_HUB_CAPS, on
+      // both this browser-facing frame and hello_ack (agent-server.ts) — kept byte-identical.
+      caps: [...admin.caps(), ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
 

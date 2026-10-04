@@ -121,6 +121,43 @@ describe("wireWebHub — caps broadcast (§3.1/D10)", () => {
     expect(hello.caps).toContain("cmd.v1");
     expect(hello.caps).not.toContain("command.v1");
   });
+
+  describe("web-hub-upload plan §5.1: webHub.uploads → upload.v1/upload.lan.v1 caps", () => {
+    async function helloFor(settings: Partial<WebHubDeps["settings"]>): Promise<string[]> {
+      await hub?.close();
+      hub = await startFakeHub(pathsIn(tmp.dir).socketPath);
+      const { pi, fire } = fakePi();
+      wireWebHub(pi, deps({ settings: { ...SETTINGS, ...settings } }));
+      const { ctx } = fakeCtx({ mode: "tui" });
+      fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+      await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
+      const hello = hub!.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
+      return hello.caps;
+    }
+
+    it('uploads:"on" (also the default/unset) advertises both upload.v1 and upload.lan.v1', async () => {
+      expect(await helloFor({ uploads: "on" })).toEqual(expect.arrayContaining(["upload.v1", "upload.lan.v1"]));
+      expect(await helloFor({})).toEqual(expect.arrayContaining(["upload.v1", "upload.lan.v1"]));
+    });
+
+    it('uploads:"loopback" advertises only upload.v1', async () => {
+      const caps = await helloFor({ uploads: "loopback" });
+      expect(caps).toContain("upload.v1");
+      expect(caps).not.toContain("upload.lan.v1");
+    });
+
+    it('uploads:"off" advertises neither', async () => {
+      const caps = await helloFor({ uploads: "off" });
+      expect(caps).not.toContain("upload.v1");
+      expect(caps).not.toContain("upload.lan.v1");
+    });
+
+    it("control:false drops upload caps too, regardless of uploads setting", async () => {
+      const caps = await helloFor({ uploads: "on", control: false });
+      expect(caps).not.toContain("upload.v1");
+      expect(caps).not.toContain("upload.lan.v1");
+    });
+  });
 });
 
 describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {

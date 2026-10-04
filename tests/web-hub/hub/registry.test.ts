@@ -340,6 +340,21 @@ describe("registry: P2 control-plane additions (plan §3.1/§3.2/§3.5/§6.1, C3
     expect(h.reg.get(agentKey)!.control).toBe(false);
   });
 
+  it("web-hub-upload plan U1 #10: AgentCard.upload/uploadLan are derived from upload.v1/upload.lan.v1 caps", () => {
+    const h = harness();
+    const full = h.reg.register(hello({ caps: ["ev.v1", "cmd.v1", "upload.v1", "upload.lan.v1"] }), fakeConn());
+    expect(h.reg.get(full.agentKey)!.upload).toBe(true);
+    expect(h.reg.get(full.agentKey)!.uploadLan).toBe(true);
+
+    const loopbackOnly = h.reg.register(hello({ caps: ["ev.v1", "cmd.v1", "upload.v1"] }), fakeConn());
+    expect(h.reg.get(loopbackOnly.agentKey)!.upload).toBe(true);
+    expect(h.reg.get(loopbackOnly.agentKey)!.uploadLan).toBe(false);
+
+    const none = h.reg.register(hello({ caps: ["ev.v1", "cmd.v1"] }), fakeConn());
+    expect(h.reg.get(none.agentKey)!.upload).toBe(false);
+    expect(h.reg.get(none.agentKey)!.uploadLan).toBe(false);
+  });
+
   it("getCaps/getLinkGen return undefined for an unknown agentKey", () => {
     const h = harness();
     expect(h.reg.getCaps("nope")).toBeUndefined();

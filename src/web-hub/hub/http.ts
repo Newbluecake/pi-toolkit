@@ -357,6 +357,10 @@ function toCard(v: AgentView): AgentCard {
   // mode (no palette on `/`) until something else (e.g. the agent's own `/reload`) happened to
   // resend a live `commands` SSE event.
   if (v.commands !== undefined) card.commands = v.commands;
+  // web-hub-upload plan U1 #10: toCard() is a whitelist copy — upload/uploadLan must be listed
+  // here explicitly or a browser that (re)attaches never sees them on the fleet snapshot.
+  if (v.upload !== undefined) card.upload = v.upload;
+  if (v.uploadLan !== undefined) card.uploadLan = v.uploadLan;
   return card;
 }
 

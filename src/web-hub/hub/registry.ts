@@ -174,6 +174,9 @@ export function createRegistry(deps: {
       prompts: r.prompts.map((p) => ({ ...p })),
       control: r.caps.includes("cmd.v1"),
       epoch: r.epoch,
+      // web-hub-upload plan §5.1/U1 #10: derived from hello caps, same pattern as `control`.
+      upload: r.caps.includes("upload.v1"),
+      uploadLan: r.caps.includes("upload.lan.v1"),
     };
     if (r.session !== undefined) c.session = r.session;
     if (r.status !== undefined) c.status = r.status;

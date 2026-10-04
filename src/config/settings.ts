@@ -814,6 +814,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     remoteAskUser: true,
     webCommands: true,
     webCommandPolicy: {},
+    uploads: "on",
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
   },
   webSearch: { enabled: true },
@@ -1507,8 +1508,15 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     remoteAskUser: typeof record.remoteAskUser === "boolean" ? record.remoteAskUser : (defaults.remoteAskUser ?? true),
     webCommands: typeof record.webCommands === "boolean" ? record.webCommands : (defaults.webCommands ?? true),
     webCommandPolicy: policy,
+    uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
   };
+}
+
+/** web-hub-upload plan §6 U1: `webHub.uploads` is tri-valued; any other value falls back to "on". */
+function parseUploadsSetting(raw: unknown, fallback: "on" | "loopback" | "off" | undefined): "on" | "loopback" | "off" {
+  if (raw === "on" || raw === "loopback" || raw === "off") return raw;
+  return fallback ?? "on";
 }
 
 /**

@@ -183,6 +183,15 @@ export function webHubUiDir(home: string): string {
   return `${home}/.pi/agent/web-hub-ui`;
 }
 
+/**
+ * `<home>/.pi/agent/web-hub/uploads` — web-hub-upload plan §2.1's upload root (additive, does
+ * not touch the frozen `HubPaths` shape; `webHubStateDir` stays the single source of truth for
+ * the `<home>/.pi/agent/web-hub` prefix).
+ */
+export function webHubUploadsDir(home: string): string {
+  return `${webHubStateDir(home)}/uploads`;
+}
+
 function dirnameOf(p: string): string {
   const idx = p.lastIndexOf("/");
   return idx <= 0 ? "/" : p.slice(0, idx);

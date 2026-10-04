@@ -34,6 +34,7 @@ import {
 } from "../protocol/messages.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
+import { UPLOAD_AGENT_CAPS } from "../protocol/version.js";
 import type { LanStatus } from "../protocol/lan.js";
 import {
   acquireConnection,
@@ -84,6 +85,10 @@ export interface WebHubSettings {
   remoteAskUser?: boolean;
   webCommands?: boolean;
   webCommandPolicy?: Record<string, "allow" | "confirm" | "deny">;
+  /** web-hub-upload plan §0/§5.1: file-upload availability. `"on"` (default) advertises both
+   * `upload.v1` and `upload.lan.v1`; `"loopback"` advertises only `upload.v1` (LAN uploads
+   * disabled); `"off"` advertises neither. Ignored (treated as `"off"`) when `control` is false. */
+  uploads?: "on" | "loopback" | "off";
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
 } // I 在 settings.ts `import type` 并 re-export（D 不改 settings.ts）
@@ -510,6 +515,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const remoteAskUser = settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
     if (remoteAskUser) caps.push("dialog.v1");
     if (settings.webCommands !== false) caps.push("command.v1");
+    // web-hub-upload plan §5.1: "on" (default) ⇒ both upload caps, "loopback" ⇒ upload.v1 only,
+    // "off" ⇒ neither.
+    const uploads = settings.uploads ?? "on";
+    if (uploads === "on") caps.push(...UPLOAD_AGENT_CAPS);
+    else if (uploads === "loopback") caps.push("upload.v1");
     return caps;
   };
 

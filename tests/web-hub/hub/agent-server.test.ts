@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { TIMING } from "../../../src/web-hub/protocol/messages.js";
 import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/agent-server.js";
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
-import { P2_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
+import { P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, recordBus, tmpDirs, waitFor, type TestClient } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -62,7 +62,7 @@ describe("agent-server handshake", () => {
       pingMs: TIMING.pingMs,
       leaseMs: TIMING.staleMs,
       http: { port: 7878 },
-      caps: [...P2_HUB_CAPS],
+      caps: [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS],
     });
     expect(registry.list()).toHaveLength(1);
     expect(agentServer.connectionCount()).toBe(1);

@@ -67,6 +67,13 @@ export const API_ERRORS = [
   "E_COMMAND_DENIED",
   "E_CONFIRM_REQUIRED", // S1 (LC review fix, lan-plan.md §15.9 #4, additive exception): LAN 登录 §6.2 每 IP
   // 退避锁定 — 之前登录 429 一律 E_RATE，令前端 §10 的倒计时/不自动重试分支永远不可达。
+  // web-hub-upload plan §1.2: upload endpoint error codes (v3 #4/#8 add E_UPLOAD_CONFLICT/E_UPLOAD_GONE).
+  "E_UPLOAD_TOO_LARGE",
+  "E_UPLOAD_QUOTA",
+  "E_UPLOAD_OFFSET",
+  "E_UPLOAD_DISABLED",
+  "E_UPLOAD_CONFLICT",
+  "E_UPLOAD_GONE",
 ] as const;
 
 /** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */
@@ -93,6 +100,10 @@ export interface AgentCard {
    * to wait for a fresh live `commands` SSE event (which may never come again on its own) to
    * enter command mode. */
   commands?: CommandInfoWire[];
+  /** web-hub-upload plan §5.1/U1 #10: whether this agent currently advertises `upload.v1` /
+   * `upload.lan.v1` (derived from its hello caps, same pattern as `control`). */
+  upload?: boolean;
+  uploadLan?: boolean;
 }
 
 export interface HistoryPayload {

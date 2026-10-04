@@ -113,6 +113,37 @@ describe("GET /api/events", () => {
     expect(a1.commands).toEqual([{ name: "session", kind: "builtin", policy: "allow" }]);
   });
 
+  it("web-hub-upload plan U1 #10: upload/uploadLan reach the browser consistently across the initial agents frame, agent_up, and a reconnect", async () => {
+    deps.agents.set("a1", makeAgent("a1", { control: true, upload: true, uploadLan: false }));
+
+    // 1) initial `agents` snapshot (toCard() whitelist copy).
+    const first = await events();
+    const initialCards = first.conn.events[2]!.data.agents as Array<Record<string, unknown>>;
+    const a1Initial = initialCards.find((c) => c.agentKey === "a1")!;
+    expect(a1Initial.upload).toBe(true);
+    expect(a1Initial.uploadLan).toBe(false);
+
+    // 2) a live `agent_up` bus event (registry's own `card()` output, not toCard()).
+    deps.agents.set("a2", makeAgent("a2", { control: true, upload: true, uploadLan: true }));
+    deps.emit({
+      type: "agent_up",
+      agent: { ...makeAgent("a2", { control: true, upload: true, uploadLan: true }) },
+    });
+    const up = await first.conn.waitFor((e) => e.event === "agent_up");
+    expect((up.data.agent as Record<string, unknown>).upload).toBe(true);
+    expect((up.data.agent as Record<string, unknown>).uploadLan).toBe(true);
+
+    // 3) reconnect (a fresh SSE attach re-runs openEvents ⇒ toCard() again).
+    const second = await events();
+    const reconnectCards = second.conn.events[2]!.data.agents as Array<Record<string, unknown>>;
+    const a1Reconnect = reconnectCards.find((c) => c.agentKey === "a1")!;
+    expect(a1Reconnect.upload).toBe(true);
+    expect(a1Reconnect.uploadLan).toBe(false);
+    const a2Reconnect = reconnectCards.find((c) => c.agentKey === "a2")!;
+    expect(a2Reconnect.upload).toBe(true);
+    expect(a2Reconnect.uploadLan).toBe(true);
+  });
+
   it("global bus events reach every client; ev/gap only subscribers", async () => {
     const one = await events();
     const two = await events();

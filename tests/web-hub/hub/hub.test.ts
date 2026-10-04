@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { installProcessHandlers, startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
+import { P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, tmpDirs, waitFor } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -88,6 +89,22 @@ describe("startHub", () => {
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     expect(ack["http"]).toEqual({ port: 40001 });
     expect(fe.deps[0]!.registry.list().map((a) => a.agentKey)).toEqual(["a4242-nonceA"]);
+    c.sock.destroy();
+  });
+
+  it("web-hub-upload plan §5.1: HubInfo.caps (browser-facing) and hello_ack.caps (agent-facing) both carry UPLOAD_HUB_CAPS and agree byte-for-byte", async () => {
+    const home = tmp.make("wh-hub-upload-caps-");
+    const fe = fakeFrontend({ port: 40002 });
+    const hub = await start(home, fe);
+    const browserCaps = fe.deps[0]!.info().caps;
+    expect(browserCaps).toEqual(expect.arrayContaining([...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS]));
+
+    const c = await connectClient(hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    expect(ack["caps"]).toEqual(expect.arrayContaining([...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS]));
+    // the two surfaces must never drift apart (§3.1 compat matrix invariant, extended to uploads).
+    expect([...(ack["caps"] as string[])].sort()).toEqual([...browserCaps].sort());
     c.sock.destroy();
   });
 

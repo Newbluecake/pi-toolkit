@@ -12,7 +12,7 @@ import type { LanReqFrame, LanResFrame } from "../../../src/web-hub/protocol/mes
 import type { AdminHandler, AdminMeta } from "../../../src/web-hub/hub/admin.js";
 import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/agent-server.js";
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
-import { P2_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
+import { P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, tmpDirs, type TestClient } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -67,21 +67,21 @@ afterEach(async () => {
 });
 
 describe("agent-server + admin wiring (plan §8)", () => {
-  it("no deps.admin ⇒ hello_ack.caps degrades to plain P2_HUB_CAPS (C3, plan §3.1 — never omitted)", async () => {
+  it("no deps.admin ⇒ hello_ack.caps degrades to plain P2_HUB_CAPS + UPLOAD_HUB_CAPS (C3, plan §3.1 — never omitted)", async () => {
     await setup();
     const c = await client();
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect(ack["caps"]).toEqual([...P2_HUB_CAPS]);
+    expect(ack["caps"]).toEqual([...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS]);
   });
 
-  it("deps.admin present ⇒ hello_ack.caps is admin.caps() plus P2_HUB_CAPS (C3, plan §3.1)", async () => {
+  it("deps.admin present ⇒ hello_ack.caps is admin.caps() plus P2_HUB_CAPS + UPLOAD_HUB_CAPS (C3, plan §3.1)", async () => {
     const admin = fakeAdmin({ caps: () => ["ctl.v1", "lan.v1"] });
     await setup(admin);
     const c = await client();
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS]);
+    expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS]);
   });
 
   it("lan_req is dispatched to admin.handleLanReq with agentKey/agentPid, and its reply is written back verbatim", async () => {

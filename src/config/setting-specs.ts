@@ -277,6 +277,11 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     path: "webHub.webCommandPolicy",
     description: "web-hub: JSON command policy overrides (allow|confirm|deny)",
   },
+  "webHub.uploads": choice(
+    "webHub.uploads",
+    ["on", "loopback", "off"],
+    "web-hub: file upload availability (on = loopback+LAN, loopback = loopback only, off = disabled)",
+  ),
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
   // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`

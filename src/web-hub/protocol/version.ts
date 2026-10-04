@@ -14,6 +14,15 @@ export const P1_CAPS = ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"] as cons
 export const P2_AGENT_CAPS = ["cmd.v1", "dialog.v1", "command.v1"] as const;
 export const P2_HUB_CAPS = ["cmd.v1", "dialog.v1", "command.v1", "ctl.v2"] as const;
 
+/**
+ * web-hub-upload plan §5.1: the upload caps advertised on each side of the hub↔agent socket.
+ * The hub advertises `UPLOAD_HUB_CAPS` in its own hello (additive to `P2_HUB_CAPS`); an agent
+ * advertises a subset of `UPLOAD_AGENT_CAPS` depending on `webHub.uploads` (`"on"` ⇒ both,
+ * `"loopback"` ⇒ `upload.v1` only, `"off"`/`control:false` ⇒ neither).
+ */
+export const UPLOAD_HUB_CAPS = ["upload.v1"] as const;
+export const UPLOAD_AGENT_CAPS = ["upload.v1", "upload.lan.v1"] as const;
+
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {
   dialogs: "dialog.v1",

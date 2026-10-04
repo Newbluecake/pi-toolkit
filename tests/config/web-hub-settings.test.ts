@@ -35,6 +35,7 @@ describe("web-hub settings", () => {
       remoteAskUser: true,
       webCommands: true,
       webCommandPolicy: {},
+      uploads: "on",
       lan: { enabled: false, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
     });
   });
@@ -96,6 +97,7 @@ describe("web-hub settings", () => {
       remoteAskUser: true,
       webCommands: true,
       webCommandPolicy: {},
+      uploads: "on",
       lan: lanDefaults,
     });
     expect(parseWebHubSettings({ enabled: true, port: -1 })).toEqual({ ...defaults, enabled: true });
@@ -409,5 +411,39 @@ describe("web-hub control-plane settings (plan §8)", () => {
     expect(s.webHub.webCommandPolicy).toEqual({ compact: "deny" });
     expect(s.webHub.remoteAskUser).toBe(true);
     expect(s.webHub.webCommands).toBe(true);
+  });
+});
+
+// web-hub-upload plan §6 U1: webHub.uploads is tri-valued ("on" | "loopback" | "off"), default "on".
+describe("webHub.uploads (web-hub-upload plan §6 U1)", () => {
+  it('defaults to "on"', () => {
+    expect(defaults.uploads).toBe("on");
+    expect(parseWebHubSettings({}).uploads).toBe("on");
+    expect(parseWebHubSettings(undefined).uploads).toBe("on");
+  });
+
+  it("accepts each of the three valid values", () => {
+    expect(parseWebHubSettings({ uploads: "on" }).uploads).toBe("on");
+    expect(parseWebHubSettings({ uploads: "loopback" }).uploads).toBe("loopback");
+    expect(parseWebHubSettings({ uploads: "off" }).uploads).toBe("off");
+  });
+
+  it('falls back to "on" for any invalid value, never throwing', () => {
+    for (const garbage of ["ON", "Loopback", "yes", 1, true, null, undefined, [], {}, ""]) {
+      expect(parseWebHubSettings({ uploads: garbage }).uploads, JSON.stringify(garbage)).toBe("on");
+    }
+  });
+
+  it("is wired into loadSettings", () => {
+    expect(loadSettings({ webHub: { uploads: "loopback" } }).webHub.uploads).toBe("loopback");
+    expect(loadSettings({ webHub: { uploads: "bogus" } }).webHub.uploads).toBe("on");
+  });
+
+  it("exposes webHub.uploads in SETTING_SPECS as a non-live enum", () => {
+    expect(isKnownSettingKey("webHub.uploads")).toBe(true);
+    const spec = SETTING_SPECS["webHub.uploads"]!;
+    expect(spec.live).toBeUndefined();
+    expect(spec).toMatchObject({ kind: "enum", path: "webHub.uploads", values: ["on", "loopback", "off"] });
+    expect(defaultOf(spec)).toBe("on");
   });
 });

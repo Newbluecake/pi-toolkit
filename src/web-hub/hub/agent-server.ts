@@ -24,7 +24,7 @@
 import type net from "node:net";
 import { decodeAgentFrame, LIMITS, TIMING, type AgentFrame, type HubFrame } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
-import { P2_HUB_CAPS, PROTO, protoCompatible } from "../protocol/version.js";
+import { P2_HUB_CAPS, PROTO, UPLOAD_HUB_CAPS, protoCompatible } from "../protocol/version.js";
 import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
@@ -150,7 +150,7 @@ export function createAgentServer(
           pingMs: TIMING.pingMs,
           leaseMs: TIMING.staleMs,
           http: { port: deps.httpPort() },
-          caps: [...(deps.admin?.caps() ?? []), ...P2_HUB_CAPS],
+          caps: [...(deps.admin?.caps() ?? []), ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS],
         });
         return;
       }
