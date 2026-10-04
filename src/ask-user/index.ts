@@ -8,9 +8,47 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { type Static } from "@sinclair/typebox";
 
+import type { AskUserBackgroundPort } from "./background.js";
 import { askUserInteract, protoAnswersToResult, toProtoQuestions } from "./channel-handler.js";
+import {
+  type BackgroundInterruptSettings,
+  type Clock,
+  type CompletionSummary,
+  type CoordinatorAsk,
+  DEFER_CAP,
+  DEFAULT_INTERRUPT_SETTINGS,
+  type InteractionOutcome,
+  InterruptCoordinator,
+  INTERRUPTED_RENDER_TEXT,
+  deferredResultText,
+  interruptedResultText,
+  normalizeInterruptSettings,
+  parkedNotifyText,
+  parkedReminderText,
+  parkedStatusText,
+  realClock,
+} from "./interrupt.js";
 import { normalizeQuestions } from "./normalize.js";
-import type { AskUserDetails, AnswerValue, InputQuestion, Option, Question, Result, ThemeLike } from "./types.js";
+import {
+  PARKED_CUSTOM_TYPE,
+  PARKED_REMINDER_CUSTOM_TYPE,
+  type ParkedRegistry,
+  createParkedRegistry,
+  questionFingerprint,
+  sanitizeParkedEntries,
+} from "./parked.js";
+import { type AskQueue, type AskQueueHandle, type QueueGrant, createAskQueue } from "./queue.js";
+import type {
+  AskUserDetails,
+  AnswerValue,
+  DraftSnapshot,
+  InputQuestion,
+  InterruptInfo,
+  Option,
+  Question,
+  Result,
+  ThemeLike,
+} from "./types.js";
 import { HEADER_MAX_CHARS, InputSchema } from "./types.js";
 import { AskUserComponent } from "./component.js";
 import { answerValueText } from "./submit-view.js";
@@ -31,6 +69,9 @@ const USER_CANCELLED_TEXT =
 const HEADLESS_TEXT =
   "Error: ask_user requires an interactive session. The tool has been disabled for this session. Do not retry — proceed without user input (make a defensible decision and state it) or wait for the user to reconnect.";
 
+/** Status-bar slot for the parked-question indicator (§4.4). */
+const STATUS_KEY = "ask-user";
+
 function disableAskUser(pi: ExtensionAPI): void {
   pi.setActiveTools(
     pi
@@ -47,6 +88,65 @@ function cancelledResult(questions: Question[], text: string): ExecuteResult {
   };
 }
 
+/**
+ * §5.1 mapping table: a background win closes the remote session as `("background","aborted")`.
+ * `AskUserRemoteSession.close`'s signature does not declare `"background"` yet (see remote.ts —
+ * the web-hub protocol type it forwards into is P3's file domain), so this is the single,
+ * documented cast site. P3 widens the union and removes the cast.
+ */
+function closeSessionAsBackground(session: AskUserRemoteSession | undefined): void {
+  (session as (AskUserRemoteSession & { close(by: "background", outcome: "aborted"): void }) | undefined)?.close(
+    "background",
+    "aborted",
+  );
+}
+
+/** Per-execute background-interrupt context, assembled in execute() when the feature is wired
+ *  AND enabled for this mode. Its absence reproduces the pre-feature paths exactly. */
+interface InteractionBackgroundContext {
+  settings: BackgroundInterruptSettings;
+  port: AskUserBackgroundPort;
+  coordinator: InterruptCoordinator;
+  clock: Clock;
+  fps: string[];
+  isReask: boolean;
+  initialDraft: DraftSnapshot | undefined;
+  /** Max per-question interrupt count over this call's fingerprints (budget check, §5.2.4). */
+  interruptsUsed(): number;
+  /** Max per-question deferral count over this call's fingerprints (§5.4 cap check). */
+  deferralsUsed(): number;
+  /** The re-asked dialog actually appeared (factory returned). */
+  notePresented(): void;
+}
+
+function deferredOutcome(bg: InteractionBackgroundContext): InteractionOutcome {
+  return {
+    kind: "deferred",
+    info: {
+      kind: "deferred",
+      completions: [],
+      attempt: bg.deferralsUsed() + 1,
+      limit: DEFER_CAP,
+      draftSaved: false,
+    },
+  };
+}
+
+function interruptedOutcome(
+  bg: InteractionBackgroundContext,
+  summary: CompletionSummary[] | undefined,
+  draft: DraftSnapshot | undefined,
+): InteractionOutcome {
+  const info: InterruptInfo = {
+    kind: "background",
+    completions: summary ?? [],
+    attempt: bg.interruptsUsed() + 1,
+    limit: bg.settings.maxPerQuestion,
+    draftSaved: draft !== undefined,
+  };
+  return draft !== undefined ? { kind: "interrupted", info, draft } : { kind: "interrupted", info };
+}
+
 async function runTuiInteraction(
   toolCallId: string,
   questions: Question[],
@@ -54,14 +154,70 @@ async function runTuiInteraction(
   ctx: ExtensionContext,
   pi: ExtensionAPI,
   remote: (() => AskUserRemotePort | undefined) | undefined,
-): Promise<Result | null> {
+  queue: AskQueue,
+  bg: InteractionBackgroundContext | undefined,
+): Promise<InteractionOutcome> {
   const protoQuestions = toProtoQuestions(questions);
   const race = createDialogRace();
   let remoteOutcome: RemoteOutcome | undefined;
   let component: AskUserComponent | undefined;
   let session: AskUserRemoteSession | undefined;
+  let queueHandle: AskQueueHandle | undefined;
+  let interruptSummary: CompletionSummary[] | undefined;
+  let lastActivityAt: number | undefined;
+  let mountedAt: number | undefined;
 
+  const cancelLocal = (): void => {
+    component?.cancel();
+    queueHandle?.wake("interrupted");
+  };
+
+  const coordinatorAsk: CoordinatorAsk | undefined = bg
+    ? {
+        active: () => race.winner === undefined,
+        budgetUsed: () => bg.interruptsUsed(),
+        lastActivityAt: () => lastActivityAt,
+        mountedAt: () => mountedAt,
+        isReask: () => bg.isReask,
+        setNotice: (text) => component?.setNotice(text),
+        interrupt: (summary) => {
+          if (race.claim("background")) {
+            interruptSummary = summary;
+            cancelLocal();
+          }
+        },
+      }
+    : undefined;
+
+  /** Early settlement for an ask that never reached ui.custom (§5.3 queued outcomes). */
+  const earlyQueueOutcome = (grant: Exclude<QueueGrant["kind"], "acquired">): InteractionOutcome => {
+    if (grant === "remote") {
+      // Web won while queued: the bridge already recorded the finish — never close here.
+      if (remoteOutcome?.kind === "answer") {
+        return {
+          kind: "answered",
+          by: "web",
+          result: {
+            questions,
+            answers: protoAnswersToResult(questions, protoQuestions, remoteOutcome.answers),
+            cancelled: false,
+          },
+        };
+      }
+      return { kind: "cancelled", by: "web" };
+    }
+    if (grant === "interrupted") {
+      closeSessionAsBackground(session);
+      return interruptedOutcome(bg!, interruptSummary, undefined);
+    }
+    session?.close("abort", "aborted");
+    return { kind: "aborted" };
+  };
+
+  let acquired = false;
   try {
+    // §5.3: the remote session opens at enqueue time so the web side sees (and can answer)
+    // the whole queue. On the fast path this is the same call order as before the feature.
     session = remote?.()?.open({ toolCallId, questions: protoQuestions, allowCancel: true });
     session?.setOnRemote((outcome) => {
       if (!race.claim("web")) return false;
@@ -69,8 +225,37 @@ async function runTuiInteraction(
       // `cancel()` is idempotent and is also safe before the component factory
       // has returned.  The latter is the important factory-before-render race.
       component?.cancel();
+      queueHandle?.wake("remote");
       return true;
     });
+    if (signal)
+      signal.addEventListener(
+        "abort",
+        () => {
+          if (race.claim("abort")) {
+            component?.cancel();
+            queueHandle?.wake("aborted");
+          }
+        },
+        { once: true },
+      );
+    if (coordinatorAsk !== undefined) bg?.coordinator.register(coordinatorAsk);
+
+    acquired = queue.tryAcquire();
+    if (!acquired) {
+      queueHandle = queue.enqueue();
+      const grant = await queueHandle.promise;
+      queueHandle = undefined;
+      if (grant.kind !== "acquired") return earlyQueueOutcome(grant.kind);
+      acquired = true;
+    }
+
+    // §5.4 pre-open deferred check: completion notices are already steered and will arrive
+    // with the next request — do not open a dialog the user would have to race against.
+    if (bg !== undefined && bg.port.pendingTokens() > 0 && bg.deferralsUsed() < DEFER_CAP) {
+      closeSessionAsBackground(session);
+      return deferredOutcome(bg);
+    }
 
     const localResult = await ctx.ui.custom<Result | null>((tui, theme, _keybindings, done) => {
       component = new AskUserComponent(
@@ -82,29 +267,41 @@ async function runTuiInteraction(
           race.claim("tui");
           done(result);
         },
-        { onActivity: () => pi.events?.emit("ask-user:activity", {}) },
-      );
-      if (race.winner === "web") queueMicrotask(() => component?.cancel());
-      if (signal)
-        signal.addEventListener(
-          "abort",
-          () => {
-            if (race.claim("abort")) component?.cancel();
+        {
+          onActivity: () => {
+            pi.events?.emit("ask-user:activity", {});
+            if (bg !== undefined) lastActivityAt = bg.clock.now();
           },
-          { once: true },
-        );
+          initialDraft: bg?.initialDraft,
+        },
+      );
+      if (bg !== undefined) {
+        mountedAt = bg.clock.now();
+        bg.notePresented();
+      }
+      if (race.winner === "web" || race.winner === "background") queueMicrotask(() => component?.cancel());
       return component;
     });
 
     if (race.winner === "web") {
       if (remoteOutcome?.kind === "answer") {
         return {
-          questions,
-          answers: protoAnswersToResult(questions, protoQuestions, remoteOutcome.answers),
-          cancelled: false,
+          kind: "answered",
+          by: "web",
+          result: {
+            questions,
+            answers: protoAnswersToResult(questions, protoQuestions, remoteOutcome.answers),
+            cancelled: false,
+          },
         };
       }
-      return { questions, answers: {}, cancelled: true };
+      return { kind: "cancelled", by: "web" };
+    }
+
+    if (race.winner === "background") {
+      closeSessionAsBackground(session);
+      const draft = component?.snapshotDraft();
+      return interruptedOutcome(bg!, interruptSummary, draft);
     }
 
     const winner = race.winner;
@@ -121,10 +318,16 @@ async function runTuiInteraction(
           ? "cancelled"
           : "answered",
     );
-    return localResult;
+    const classified = classifyOutcome(localResult, signal);
+    if (classified.kind === "completed") return { kind: "answered", by: "tui", result: classified.result };
+    if (classified.kind === "agent-aborted") return { kind: "aborted" };
+    return { kind: "cancelled", by: "tui" };
   } catch (error) {
     if (race.claim("error")) session?.close("error", "aborted");
     throw error;
+  } finally {
+    if (acquired) queue.release();
+    if (coordinatorAsk !== undefined) bg?.coordinator.unregister(coordinatorAsk);
   }
 }
 
@@ -147,12 +350,32 @@ async function runRpcInteraction(
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
   remote: (() => AskUserRemotePort | undefined) | undefined,
-): Promise<Result> {
+  bg: InteractionBackgroundContext | undefined,
+): Promise<InteractionOutcome> {
   const protoQuestions = toProtoQuestions(questions);
   const race = createDialogRace();
   const localAbort = new AbortController();
   let remoteOutcome: RemoteOutcome | undefined;
   let session: AskUserRemoteSession | undefined;
+  let interruptSummary: CompletionSummary[] | undefined;
+
+  // RPC has no keystroke/mount visibility: the coordinator sees no activity and no dwell.
+  const coordinatorAsk: CoordinatorAsk | undefined = bg
+    ? {
+        active: () => race.winner === undefined,
+        budgetUsed: () => bg.interruptsUsed(),
+        lastActivityAt: () => undefined,
+        mountedAt: () => undefined,
+        isReask: () => bg.isReask,
+        setNotice: () => undefined,
+        interrupt: (summary) => {
+          if (race.claim("background")) {
+            interruptSummary = summary;
+            localAbort.abort();
+          }
+        },
+      }
+    : undefined;
 
   try {
     // RPC has a real select channel, so it participates in the same race.  A
@@ -166,6 +389,15 @@ async function runRpcInteraction(
       return true;
     });
 
+    if (coordinatorAsk !== undefined) {
+      bg?.coordinator.register(coordinatorAsk);
+      // §5.4, RPC form (only reachable with backgroundInterrupt.rpc = true, §7.1).
+      if (bg !== undefined && bg.port.pendingTokens() > 0 && bg.deferralsUsed() < DEFER_CAP) {
+        closeSessionAsBackground(session);
+        return deferredOutcome(bg);
+      }
+    }
+
     const answers = await askUserInteract(
       {
         mode: ctx.mode,
@@ -178,25 +410,39 @@ async function runRpcInteraction(
     if (race.winner === "web") {
       if (remoteOutcome?.kind === "answer") {
         return {
-          questions,
-          answers: protoAnswersToResult(questions, protoQuestions, remoteOutcome.answers),
-          cancelled: false,
+          kind: "answered",
+          by: "web",
+          result: {
+            questions,
+            answers: protoAnswersToResult(questions, protoQuestions, remoteOutcome.answers),
+            cancelled: false,
+          },
         };
       }
-      return { questions, answers: {}, cancelled: true };
+      return { kind: "cancelled", by: "web" };
+    }
+    if (race.winner === "background") {
+      closeSessionAsBackground(session);
+      return interruptedOutcome(bg!, interruptSummary, undefined);
     }
     if (answers === null) {
       if (signal?.aborted) race.claim("abort");
       else race.claim("tui");
       session?.close(race.winner === "abort" ? "abort" : "tui", race.winner === "abort" ? "aborted" : "cancelled");
-      return { questions, answers: {}, cancelled: true };
+      return race.winner === "abort" ? { kind: "aborted" } : { kind: "cancelled", by: "tui" };
     }
     race.claim("tui");
     session?.close("tui", "answered");
-    return { questions, answers: protoAnswersToResult(questions, protoQuestions, answers), cancelled: false };
+    return {
+      kind: "answered",
+      by: "tui",
+      result: { questions, answers: protoAnswersToResult(questions, protoQuestions, answers), cancelled: false },
+    };
   } catch (error) {
     if (race.claim("error")) session?.close("error", "aborted");
     throw error;
+  } finally {
+    if (coordinatorAsk !== undefined) bg?.coordinator.unregister(coordinatorAsk);
   }
 }
 
@@ -208,6 +454,8 @@ type Outcome =
 /**
  * The only cancellation classification point. A submitted result wins a
  * submit/abort race; otherwise the signal distinguishes agent abort from Esc.
+ * Applies only to non-background winners (§5.1) — the background/deferred
+ * outcomes are classified at the race itself.
  */
 function classifyOutcome(result: Result | null, signal: AbortSignal | undefined): Outcome {
   if (result !== null && !result.cancelled) return { kind: "completed", result };
@@ -245,8 +493,98 @@ Don't:
 
 export interface AskUserWireOptions {
   remote?: () => AskUserRemotePort | undefined;
+  /**
+   * P2 wiring point (plan §3.3): the background-completion port. When this option itself is
+   * absent, ask_user is byte-for-byte identical to the pre-feature behavior — no port
+   * subscription, no timers, no parked persistence, no status/notify hooks.
+   */
+  background?: () => AskUserBackgroundPort | undefined;
+  /** P2 wiring point (§6.1): raw `askUser.backgroundInterrupt` settings record, normalized
+   *  per call (field-wise fallback). Absent = defaults. */
+  interrupt?: () => unknown;
+  /** Testing seam: clock override (fake clocks in tests; production uses the unref'd real one). */
+  clock?: Clock;
 }
+
 export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
+  const clock = opts?.clock ?? realClock;
+  const settingsOf = (): BackgroundInterruptSettings => normalizeInterruptSettings(opts?.interrupt?.());
+  const bgWired = opts?.background !== undefined;
+  const coordinator = new InterruptCoordinator({
+    port: () => opts?.background?.(),
+    settings: settingsOf,
+    clock,
+  });
+  const queue = createAskQueue();
+  const parked: ParkedRegistry = createParkedRegistry();
+  let runSeq = 0;
+  let currentUI: ExtensionContext["ui"] | undefined;
+
+  const updateStatus = (): void => {
+    if (!bgWired || currentUI === undefined || typeof currentUI.setStatus !== "function") return;
+    const count = settingsOf().enabled ? parked.items().length : 0;
+    currentUI.setStatus(STATUS_KEY, count > 0 ? parkedStatusText(count) : undefined);
+  };
+
+  const persist = (): void => {
+    if (!bgWired) return;
+    parked.prune(clock.now());
+    pi.appendEntry(PARKED_CUSTOM_TYPE, parked.snapshot());
+    updateStatus();
+  };
+
+  const restoreFromBranch = (ctx: ExtensionContext): void => {
+    if (ctx.mode === "tui") currentUI = ctx.ui;
+    // Bare contexts (tests, exotic hosts) may lack a session manager — degrade to an empty
+    // restore (repo convention: graceful degradation on missing host APIs). getBranch ONLY —
+    // getEntries() can resurrect a snapshot from an abandoned fork (§6.3).
+    const branch = typeof ctx.sessionManager?.getBranch === "function" ? ctx.sessionManager.getBranch() : [];
+    let data: unknown;
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const entry = branch[index] as { type?: string; customType?: string; data?: unknown };
+      if (entry?.type === "custom" && entry.customType === PARKED_CUSTOM_TYPE) {
+        data = entry.data;
+        break;
+      }
+    }
+    const items = (data as { items?: unknown } | undefined)?.items;
+    parked.load(sanitizeParkedEntries(items, clock.now()));
+    updateStatus();
+  };
+
+  if (bgWired) {
+    pi.on("session_start", (_event, ctx) => restoreFromBranch(ctx));
+    pi.on("session_tree", (_event, ctx) => restoreFromBranch(ctx));
+    pi.on("session_compact", (_event, ctx) => {
+      restoreFromBranch(ctx);
+      if (!settingsOf().enabled) return;
+      const items = parked.items();
+      if (items.length === 0) return;
+      // §6.4: bring the parked questions back into the compacted context WITHOUT triggering
+      // a turn — re-asking stays the model's decision (§4).
+      pi.sendMessage(
+        { customType: PARKED_REMINDER_CUSTOM_TYPE, display: true, content: parkedReminderText(items) },
+        { triggerTurn: false },
+      );
+    });
+    pi.on("session_shutdown", () => {
+      coordinator.dispose();
+      currentUI = undefined;
+    });
+    pi.on("agent_start", () => {
+      runSeq += 1;
+    });
+    pi.on("agent_settled", (_event, ctx) => {
+      if (!settingsOf().enabled || runSeq === 0) return;
+      const pending = parked.items().filter((item) => item.runSeq === runSeq);
+      if (pending.length === 0) return;
+      // §4.4: one Chinese notify listing the still-parked questions; never triggers a turn.
+      // Exactly-once per parked question: the flag clears as soon as the notify went out.
+      parked.markNotified(pending.map((item) => item.fp));
+      if (typeof ctx.ui?.notify === "function") ctx.ui.notify(parkedNotifyText(pending), "info");
+    });
+  }
+
   pi.registerTool({
     name: "ask_user",
     label: "Ask User",
@@ -283,12 +621,48 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
 
       if (signal?.aborted) return cancelledResult(questions, AGENT_ABORTED_TEXT);
 
-      let interactionResult: Result | null;
+      const isTui = ctx.mode === "tui";
+      if (bgWired && isTui) currentUI = ctx.ui;
+      const settings = settingsOf();
+      const port = opts?.background?.();
+      const bgActive = port !== undefined && settings.enabled && !port.disabled && (isTui || settings.rpc);
+      const fps = bgActive ? questions.map(questionFingerprint) : [];
+
+      let isReask = false;
+      let initialDraft: DraftSnapshot | undefined;
+      if (bgActive) {
+        const entries = fps.map((fp) => parked.find(fp));
+        isReask = entries.some((entry) => entry !== undefined);
+        if (isReask) {
+          const states = questions.map((question, index) => entries[index]?.draft);
+          if (states.some((state) => state !== undefined)) {
+            const activeTab = entries.find((entry) => entry?.draft !== undefined)?.draft?.activeTab ?? 0;
+            initialDraft = { states, activeTab };
+          }
+        }
+      }
+
+      const bg: InteractionBackgroundContext | undefined =
+        bgActive && port !== undefined
+          ? {
+              settings,
+              port,
+              coordinator,
+              clock,
+              fps,
+              isReask,
+              initialDraft,
+              interruptsUsed: () => Math.max(0, ...fps.map((fp) => parked.find(fp)?.interrupts ?? 0)),
+              deferralsUsed: () => Math.max(0, ...fps.map((fp) => parked.find(fp)?.deferrals ?? 0)),
+              notePresented: () => parked.noteReask(fps, clock.now()),
+            }
+          : undefined;
+
+      let outcome: InteractionOutcome;
       try {
-        interactionResult =
-          ctx.mode === "rpc"
-            ? await runRpcInteraction(_toolCallId, questions, signal, ctx, opts?.remote)
-            : await runTuiInteraction(_toolCallId, questions, signal, ctx, pi, opts?.remote);
+        outcome = isTui
+          ? await runTuiInteraction(_toolCallId, questions, signal, ctx, pi, opts?.remote, queue, bg)
+          : await runRpcInteraction(_toolCallId, questions, signal, ctx, opts?.remote, bg);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (ctx.mode === "rpc") disableAskUser(pi);
@@ -299,32 +673,75 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
         );
       }
 
-      const outcome = classifyOutcome(interactionResult, signal);
-      if (outcome.kind === "agent-aborted") return cancelledResult(questions, AGENT_ABORTED_TEXT);
-      if (outcome.kind === "user-cancelled") return cancelledResult(questions, USER_CANCELLED_TEXT);
-
-      const result = outcome.result;
-      const content: ExecuteResult["content"] = [
-        {
-          type: "text",
-          text: result.questions
-            .map((question) => {
-              const answer = result.answers[question.question];
-              return `"${question.question}" = "${answer ? answerValueText(answer) : "(no answer)"}"`;
-            })
-            .join("\n"),
-        },
-      ];
-      if (normalized.derivedHeaders > 0) {
-        content.push({
-          type: "text",
-          text: `(note: ${normalized.derivedHeaders} tab header(s) were auto-derived from the question text — pass a short "header" (<=${HEADER_MAX_CHARS} chars) per question next time.)`,
-        });
+      switch (outcome.kind) {
+        case "answered": {
+          // §5.2.1 budget reset: answered questions leave the parked registry.
+          if (bg !== undefined && parked.resolve(fps)) persist();
+          const result = outcome.result;
+          const content: ExecuteResult["content"] = [
+            {
+              type: "text",
+              text: result.questions
+                .map((question) => {
+                  const answer = result.answers[question.question];
+                  return `"${question.question}" = "${answer ? answerValueText(answer) : "(no answer)"}"`;
+                })
+                .join("\n"),
+            },
+          ];
+          if (normalized.derivedHeaders > 0) {
+            content.push({
+              type: "text",
+              text: `(note: ${normalized.derivedHeaders} tab header(s) were auto-derived from the question text — pass a short "header" (<=${HEADER_MAX_CHARS} chars) per question next time.)`,
+            });
+          }
+          return {
+            content,
+            details: result satisfies Result,
+          };
+        }
+        case "cancelled": {
+          // §5.2.1 budget reset on user cancel as well.
+          if (bg !== undefined && parked.resolve(fps)) persist();
+          return cancelledResult(questions, USER_CANCELLED_TEXT);
+        }
+        case "aborted":
+          // Parked entries stay untouched: the abort is the session going away, not the
+          // question being resolved.
+          return cancelledResult(questions, AGENT_ABORTED_TEXT);
+        case "interrupted": {
+          let info = outcome.info;
+          if (bg !== undefined) {
+            parked.recordInterrupt({ fps, questions, draft: outcome.draft, runSeq, now: clock.now() });
+            persist();
+            info = {
+              ...info,
+              attempt: Math.max(0, ...fps.map((fp) => parked.find(fp)?.interrupts ?? 0)),
+              draftSaved: fps.some((fp) => parked.find(fp)?.draft !== undefined),
+            };
+          }
+          return {
+            content: [{ type: "text", text: interruptedResultText(info.completions, info.attempt, info.limit) }],
+            details: { questions, answers: {}, cancelled: true, interrupted: info },
+          };
+        }
+        case "deferred": {
+          let info = outcome.info;
+          if (bg !== undefined) {
+            parked.recordDeferral({ fps, questions, runSeq, now: clock.now() });
+            persist();
+            info = {
+              ...info,
+              attempt: Math.max(0, ...fps.map((fp) => parked.find(fp)?.deferrals ?? 0)),
+            };
+          }
+          const pending = port?.pendingTokens() ?? 0;
+          return {
+            content: [{ type: "text", text: deferredResultText(pending) }],
+            details: { questions, answers: {}, cancelled: true, interrupted: info },
+          };
+        }
       }
-      return {
-        content,
-        details: result satisfies Result,
-      };
     },
 
     renderCall(args: Static<typeof InputSchema>, theme: ThemeLike, _context: RenderContext): TruncatedText {
@@ -346,6 +763,7 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
         return new Text(theme.fg("error", `✗ ${text}`), 0, 0);
       }
       const details = result.details;
+      if (details?.interrupted !== undefined) return new Text(theme.fg("warning", INTERRUPTED_RENDER_TEXT), 0, 0);
       if (!details || details.cancelled) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
 
       const box = new Box(0, 0);

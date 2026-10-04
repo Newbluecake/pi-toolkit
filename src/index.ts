@@ -25,6 +25,7 @@ import {
   bashJobsEnabled,
   BASH_JOB_SEAL_GRACE_MS,
   createCompactHintHook,
+  createBackgroundCompletionEventHook,
   createNotificationReceiptHook,
   type Stack,
 } from "./stack.js";
@@ -284,7 +285,15 @@ export default function activate(rawPi: ExtensionAPI): void {
   // a doomed tool in every subagent's tool list. Deliberately placed BEFORE the
   // compat gate: ask_user is independent of the subagent core, so a disabled
   // core (bad pi version) must not take it down.
-  if (settings.askUser.enabled) wireAskUser(pi, { remote: () => askUserRemoteRef.current?.() });
+  if (settings.askUser.enabled)
+    wireAskUser(pi, {
+      remote: () => askUserRemoteRef.current?.(),
+      // ask-user-async §3.3 (P2): holder-routed port — /reload 后自然指向新
+      // stack 的 hub；compat gate 失败 ⇒ holder 恒空 ⇒ 端口 undefined ⇒
+      // ask_user 与今天逐字节一致。interrupt 设置逐字段回落默认（§6.1）。
+      background: () => holder.current?.backgroundCompletions,
+      interrupt: () => settings.askUser.backgroundInterrupt,
+    });
 
   wireCacheTtl(pi, settings, {
     keepalive: () => holder.current?.keepalive,
@@ -311,6 +320,16 @@ export default function activate(rawPi: ExtensionAPI): void {
   // rebuilt per session_start and would accumulate duplicate handlers).
   // Handler lives in stack.ts so integration tests cover the real filter path.
   pi.on("message_start", createNotificationReceiptHook(holder));
+  // ask-user-async plan §3.3 (P2): holder-routed forwarding into the current
+  // stack's background-completion hub — message_start confirms minted tokens,
+  // agent_end/agent_settled bound the orphan-detection window. Registered
+  // once per activate() (post-guard: main session only — child sessions have
+  // no ask_user and no stack). P1 subscribes to the port itself at :287 when
+  // it lands; compat-gate failure ⇒ holder stays empty ⇒ all three no-op.
+  const backgroundCompletionHook = createBackgroundCompletionEventHook(holder);
+  pi.on("message_start", backgroundCompletionHook.onMessageStart);
+  pi.on("agent_end", backgroundCompletionHook.onAgentEnd);
+  pi.on("agent_settled", backgroundCompletionHook.onAgentSettled);
   // context-switch（docs/dev/context-switch/context-switch-plan.md）：工具与
   // session_before_compact 钩子之间的交接槽。每次 activate() 新建（/reload 后必须干净）。
   const handoffStore = new PendingHandoffStore();
@@ -721,6 +740,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     // Defensive: if pi ever fires session_start without a paired shutdown,
     // stop the previous stack's timer/RPC surfaces so they cannot double-fire.
     if (holder.current) {
+      // ask-user-async §3.3 (P2): stop the old hub's broadcast FIRST so a
+      // completion flushed by the teardown below can never reach the new
+      // session's ask_user (idempotent; shutdown is the other path).
+      holder.current.backgroundCompletions.dispose();
       holder.current.fleetWidget?.dispose();
       holder.current.keepalive?.dispose();
       holder.current.adaptive?.dispose();
@@ -751,6 +774,11 @@ export default function activate(rawPi: ExtensionAPI): void {
   pi.on("session_shutdown", async (event, ctx) => {
     const stack = holder.current;
     if (!stack) return;
+    // ask-user-async §3.3 (P2): FIRST — the hub stops broadcasting before the
+    // drain/seal below settles anything; completions surfacing during shutdown
+    // must not interrupt whatever session comes next. Idempotent (the next
+    // buildSessionStack's top-of-build dispose is the same call).
+    stack.backgroundCompletions.dispose();
     // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
     // re-imports this extension as a fresh module (jiti moduleCache:false), so
     // the module-level previousFleetWidget handoff in buildSessionStack never

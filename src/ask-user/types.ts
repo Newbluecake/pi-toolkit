@@ -1,5 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 
+import type { BackgroundCompletionKind } from "./background.js";
+
 export const OTHER_LABEL = "Other";
 export const HEADER_MAX_CHARS = 12;
 export const QUESTION_MAX_CHARS = 1000;
@@ -96,7 +98,43 @@ export const ResultSchema = Type.Object({
 });
 
 export type Result = Static<typeof ResultSchema>;
-export type AskUserDetails = Result;
+
+/** §6.2: metadata attached to the tool details when a dialog ended without an answer because
+ *  of the background-completion interrupt (or the pre-open deferred check). */
+export interface InterruptInfo {
+  kind: "background" | "deferred";
+  completions: { kind: BackgroundCompletionKind; count: number }[];
+  /** Per-question counter AFTER recording (first interrupt/deferral = 1). */
+  attempt: number;
+  limit: number;
+  draftSaved: boolean;
+}
+
+export type AskUserDetails = Result & { interrupted?: InterruptInfo };
+
+/** JSON-safe per-question component state for draft restore (§4, §6.3). `optionCount` is the
+ *  fingerprint's runtime double-check: a restored draft whose option count no longer matches
+ *  the question is dropped (defensive; the parked fingerprint already covers option labels). */
+export interface DraftQuestionState {
+  optionCount: number;
+  cursorIndex: number;
+  selectedIndex: number | null;
+  selectedIndices: number[];
+  confirmed: boolean;
+  freeTextValue: string | null;
+  freeDraft: string | null;
+  mode: QuestionMode;
+  draftText: string;
+  savedOptionsCursorIndex: number;
+}
+
+/** Whole-dialog draft: one slot per question (undefined = no draft for that question) plus the
+ *  tab the user was on. Produced by `AskUserComponent.snapshotDraft()`, consumed via the
+ *  `initialDraft` constructor option. */
+export interface DraftSnapshot {
+  states: (DraftQuestionState | undefined)[];
+  activeTab: number;
+}
 
 export interface ThemeLike {
   fg(token: string, text: string): string;

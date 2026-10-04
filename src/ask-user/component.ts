@@ -10,9 +10,12 @@ import {
 } from "./editor-ops.js";
 import { allOptions, renderQuestionView } from "./question-view.js";
 import { buildResult, getAnswerText, renderButtonBar, renderSubmitView } from "./submit-view.js";
+import { RESUMED_MARKER } from "./interrupt.js";
 import {
   createQuestionState,
   HEADER_MAX_CHARS,
+  type DraftQuestionState,
+  type DraftSnapshot,
   type Question,
   type QuestionState,
   type Result,
@@ -41,13 +44,15 @@ export class AskUserComponent implements Component {
   private _resolved = false;
   private sanitizer = createChunkSanitizer();
   private readonly onActivity: (() => void) | undefined;
+  private notice: string | undefined;
+  private readonly resumedWithDraft: boolean;
 
   constructor(
     questions: Question[],
     tui: TUILike,
     theme: ThemeLike,
     done: (result: Result | null) => void,
-    options: { onActivity?: (() => void) | undefined } = {},
+    options: { onActivity?: (() => void) | undefined; initialDraft?: DraftSnapshot | undefined } = {},
   ) {
     this.questions = questions;
     this.tui = tui;
@@ -55,6 +60,67 @@ export class AskUserComponent implements Component {
     this.done = done;
     this.onActivity = options.onActivity;
     this.states = questions.map(() => createQuestionState());
+    this.resumedWithDraft = options.initialDraft !== undefined ? this.applyDraft(options.initialDraft) : false;
+  }
+
+  /**
+   * §5.2.5 in-dialog notice line (background-interrupt status). Rendered as the last content
+   * line inside the border; `undefined` removes it, in which case render() output is
+   * byte-identical to the pre-feature component.
+   */
+  setNotice(text: string | undefined): void {
+    if (this.notice === text) return;
+    this.notice = text;
+    this.rerender();
+  }
+
+  /** §4/§6.3 draft snapshot: per-question state (Set serialized as array) + the active tab. */
+  snapshotDraft(): DraftSnapshot {
+    return {
+      states: this.questions.map((question, index) => this.serializeState(question, this.states[index]!)),
+      activeTab: this.activeTab,
+    };
+  }
+
+  private serializeState(question: Question, state: QuestionState): DraftQuestionState {
+    return {
+      optionCount: allOptions(question).length,
+      cursorIndex: state.cursorIndex,
+      selectedIndex: state.selectedIndex,
+      selectedIndices: [...state.selectedIndices],
+      confirmed: state.confirmed,
+      freeTextValue: state.freeTextValue,
+      freeDraft: state.freeDraft,
+      mode: state.mode,
+      draftText: state.draftText,
+      savedOptionsCursorIndex: state.savedOptionsCursorIndex,
+    };
+  }
+
+  /** Apply a parked draft question-by-question; a question whose option count no longer
+   *  matches silently keeps its fresh state (§6.3). Returns true when anything was restored. */
+  private applyDraft(draft: DraftSnapshot): boolean {
+    let applied = false;
+    this.questions.forEach((question, index) => {
+      const d = draft.states[index];
+      if (d === undefined || d.optionCount !== allOptions(question).length) return;
+      const state = this.states[index]!;
+      state.cursorIndex = Math.min(Math.max(0, d.cursorIndex), d.optionCount - 1);
+      state.selectedIndex =
+        d.selectedIndex !== null && d.selectedIndex >= 0 && d.selectedIndex < d.optionCount ? d.selectedIndex : null;
+      state.selectedIndices = new Set(
+        d.selectedIndices.filter((value) => Number.isInteger(value) && value >= 0 && value < d.optionCount),
+      );
+      state.confirmed = d.confirmed === true;
+      state.freeTextValue = d.freeTextValue;
+      state.freeDraft = d.freeDraft;
+      state.mode = d.mode === "freeform" ? "freeform" : "options";
+      state.draftText = d.draftText;
+      state.savedOptionsCursorIndex = Math.min(Math.max(0, d.savedOptionsCursorIndex), d.optionCount - 1);
+      applied = true;
+    });
+    if (applied) this.activeTab = Math.min(Math.max(0, draft.activeTab), this.questions.length);
+    return applied;
   }
 
   private get isSingle(): boolean {
@@ -84,6 +150,11 @@ export class AskUserComponent implements Component {
     };
     const t = this.theme;
 
+    if (this.resumedWithDraft) {
+      add(t.fg("dim", ` ${RESUMED_MARKER}`));
+      inner.push("");
+    }
+
     if (!this.isSingle) {
       this.renderTabBar(innerWidth, add);
       inner.push("");
@@ -111,6 +182,11 @@ export class AskUserComponent implements Component {
     if (!this.isSingle && this.activeTab < this.questions.length && !this.pendingCancel) {
       inner.push("");
       add(renderButtonBar(t, this.allConfirmed(), null));
+    }
+
+    if (this.notice !== undefined) {
+      inner.push("");
+      add(t.fg("dim", ` ${this.notice}`));
     }
 
     const lines: string[] = [t.fg("dim", `┌${"─".repeat(innerWidth)}┐`)];

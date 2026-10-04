@@ -84,6 +84,21 @@ export function probeReadBackEntries(host: { sessionManager?: { getEntries?: unk
  *     走掉，扩展侧 try/catch 抓不到投递失败——goal 因此用投递看门狗（观察新 run
  *     是否起来）而非错误回调。0.87 起 agent_settled 内请求的 run 被推迟到所有
  *     settled 处理器跑完，看门狗是定时器触发，不受影响。
+ *
+ * ask-user background interrupt（docs/dev/ask-user-async/plan.md §3.2，P2）依赖的
+ * 四个兼容假设（peer 升级时跑 `npm run test:conformance` 的 S0 组回归，C7–C11；
+ * 任一失败 ⇒ 不升，或把 askUser.backgroundInterrupt.enabled 默认改 false。行为检查
+ * 而非版本检查，I14 不引入版本分支；运行期兜底是 §2.4 的 orphan 自检，见
+ * src/service/background-completions.ts）：
+ *  A1. streaming 中 `sendMessage(…, {triggerTurn:true})` 在返回前同步入 steer 队列
+ *      （core/agent-session.js:2397-2405 → :1481-1519 的 agent.steer 在函数第一个
+ *      await 之前同步执行）——S0 C8 锁定。
+ *  A2. 注入时发 role "custom" 的 message_start，且 message.content 不被改写（与发送
+ *      字符串 ===）——S0 C7 锁定（§3.4 内容哈希确认的前提）。
+ *  A3. boundary 注入顺序 = 入队顺序；数量由 steeringMode 决定（one-at-a-time 取 1、
+ *      all 取全部）——S0 C9/C10 锁定。
+ *  A4. 非 streaming 发送立即起新 run，message_start 在该 run 内到达——S0 C11 锁定
+ *      （§3.4「非 streaming 不记 token」规则的前提）。
  */
 const ASSUMED_EVENTS_PRESENT = {
   tool_execution_start: true,

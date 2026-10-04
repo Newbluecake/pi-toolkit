@@ -160,6 +160,11 @@ import { createWorkflowChildSpawner } from "./workflow/spawner-adapter.js";
 import { parseForEachRef } from "./workflow/isolation-verify.js";
 import { createBackgroundWorkflows, type BackgroundWorkflows } from "./workflow/background.js";
 import { createWorkflowNoticeSink, redeliverPendingWorkflowNotices } from "./adapters/workflow-notice.js";
+import {
+  createBackgroundCompletionHub,
+  type BackgroundCompletionHub,
+  type SendMessageFn,
+} from "./service/background-completions.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 import type { WorkflowDeadlineNotice } from "./workflow/deadline.js";
 
@@ -173,6 +178,15 @@ let previousFleetWidget: FleetWidgetController | undefined;
 let previousUsageBroadcaster: UsageBroadcaster | undefined;
 let previousCoalescer: Coalescer | undefined;
 let previousAckHold: Coalescer | undefined;
+/**
+ * ask-user-async plan §3.3 (P2): the previous session's background-completion
+ * hub, disposed at the VERY TOP of the next build — before the old coalescer
+ * and bash manager, so a completion notice they still flush while being
+ * disposed can no longer broadcast to the new session's ask_user. The other
+ * two teardown paths are index.ts's session_start defensive block and the
+ * first line of session_shutdown (all three idempotent).
+ */
+let previousBackgroundCompletions: BackgroundCompletionHub | undefined;
 /**
  * bash auto-background §3.6: the previous session's job manager, disposed at
  * the top of the next build. `dispose()` only clears timers — it never kills a
@@ -575,8 +589,19 @@ function mainSessionFactsFrom(ctx: ExtensionContext): MainSessionFacts {
  * the completion notice bound to `pi.sendMessage` (the manager itself has no
  * pi imports). A rejecting `notify` means "retry on the next poll", so
  * `notifiedAt` is only stamped once the message actually went out.
+ *
+ * ask-user-async §3.3 (P2): `send` overrides the completion-notice channel
+ * (defaults to raw pi.sendMessage) so the hub mints/broadcasts on the REAL
+ * send; the deadline channel (`onDeadline` grace/extended) deliberately keeps
+ * raw pi.sendMessage — 用户拍板：bash 宽限/延长通知不打断。
  */
-function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: AgentSettings): BashJobManager {
+function buildBashJobManager(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  settings: AgentSettings,
+  send?: SendMessageFn,
+): BashJobManager {
+  const sendCompletionNotice: SendMessageFn = send ?? ((message, options) => pi.sendMessage(message, options));
   const config = settings.bashJobs;
   const rootDir = config.dir ?? join(getAgentDir(), "bash-jobs");
   const sessionId = currentSessionId(ctx);
@@ -641,7 +666,7 @@ function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: 
     },
     notify: async (record) => {
       const tail = managerRef.current ? await readBashJobTail(managerRef.current, record) : undefined;
-      pi.sendMessage(
+      sendCompletionNotice(
         {
           customType: BASH_JOB_NOTIFICATION_TYPE,
           content: formatBashJobNotification(record, tail?.text),
@@ -928,6 +953,17 @@ export interface Stack {
    * always safe.
    */
   hostBashViewCapability: { dispose(): void };
+  /**
+   * ask-user-async plan §3.2/§3.3 (P2): the background-completion hub — the
+   * provider half of the §3.1 AskUserBackgroundPort (P1's ask-user half
+   * subscribes via `holder.current?.backgroundCompletions`). Always
+   * constructed, even when askUser.backgroundInterrupt.enabled=false (the
+   * consumer-side gate is P1's). Teardown has THREE idempotent paths: the
+   * very top of the next buildSessionStack (before the old coalescer/bash
+   * manager), index.ts's session_start defensive block, and the first line
+   * of session_shutdown.
+   */
+  backgroundCompletions: BackgroundCompletionHub;
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -1317,6 +1353,26 @@ export function createNotificationReceiptHook(holder: {
 }
 
 /**
+ * ask-user-async plan §3.3 (P2): holder-routed forwarding of the three agent
+ * events the background-completion hub's token state machine consumes
+ * (message_start confirms, agent_end/agent_settled bound the orphan-detection
+ * window). Registered once per activate() in index.ts — never inside
+ * buildSessionStack — same pattern as createNotificationReceiptHook just
+ * above. Lives here so integration tests exercise the real forwarding path.
+ */
+export function createBackgroundCompletionEventHook(holder: { current?: Stack }): {
+  onMessageStart: (event: { message: { role?: string; customType?: string; content?: unknown } }) => void;
+  onAgentEnd: () => void;
+  onAgentSettled: () => void;
+} {
+  return {
+    onMessageStart: (event) => holder.current?.backgroundCompletions.noteMessageStart(event.message),
+    onAgentEnd: () => holder.current?.backgroundCompletions.noteAgentEnd(),
+    onAgentSettled: () => holder.current?.backgroundCompletions.noteAgentSettled(),
+  };
+}
+
+/**
  * quota-plan §4.1：HUD status key `"quota"`（与 `cache-ttl`/`goal` 并列分槽，
  * integration-map §8）。逐字照抄 cache-keepalive 的 safeSetStatus：try/catch +
  * `ctx.ui.setStatus` 双探测——陈旧 ctx / print 模式下静默（R8）。
@@ -1338,6 +1394,11 @@ export function buildSessionStack(
   /** /goal 读回口径（v4 条件 8）需要 session_start 的 reason；默认 "reload"（静默读回）。 */
   sessionReason: GoalSessionStartReason = "reload",
 ): Stack {
+  // ask-user-async plan §3.3 (P2): FIRST disposal of the rebuild — the old
+  // hub must stop broadcasting before the old coalescer/bash manager below
+  // flush their final completion notices during their own dispose.
+  previousBackgroundCompletions?.dispose();
+  previousBackgroundCompletions = undefined;
   // X7b: session rebuild — dispose the previous session's fleet widget
   // (stop its tick + setWidget(key, undefined)) before the new one mounts.
   previousFleetWidget?.dispose();
@@ -1373,6 +1434,20 @@ export function buildSessionStack(
   previousWorktreeOrphansStartup = undefined;
   previousHostBashViewCapabilityRelease?.();
   previousHostBashViewCapabilityRelease = undefined;
+
+  // ask-user-async plan §3.2/§3.3 (P2): the background-completion hub. Built
+  // unconditionally — when askUser.backgroundInterrupt.enabled=false the port
+  // simply has no subscribers (the consumer-side gate is P1's); the three
+  // send points below keep byte-identical pi.sendMessage semantics, the hub
+  // only adds bookkeeping + broadcast on top. `isStreaming` is sampled per
+  // send (A1/C8); `ctx.isIdle` missing (older pi) degrades to "never
+  // streaming" = no tokens, no interrupts — the safe direction.
+  const backgroundCompletions = createBackgroundCompletionHub({
+    isStreaming: () => typeof ctx.isIdle === "function" && !ctx.isIdle(),
+    now: () => systemClock.now(),
+  });
+  previousBackgroundCompletions = backgroundCompletions;
+  const sendCompletion = backgroundCompletions.createSender((message, options) => pi.sendMessage(message, options));
 
   // consult (plan §5.1/§6 C-9): fork-copy GC — once per session build, no
   // timer. Unconditional (runs even with consult.enabled=false so leftovers
@@ -1543,7 +1618,11 @@ export function buildSessionStack(
       const singleStats = stats[payload.key];
       // timeout-notify：完成文案带宽限/延长审计尾巴（无 overtime 时为空串）。
       const tail = payload.status === "completed" ? overtimeTail(snapshot?.diag) : "";
-      pi.sendMessage(
+      // ask-user-async §3.3 (P2): the REAL single-run completion send point —
+      // coalescer/ackHold/caller-ack suppression all happen before this, so
+      // the interrupt inherits every existing suppression rule for free.
+      sendCompletion(
+        "subagent",
         {
           customType: "subagent:notification",
           content: formatSingle(presented, singleStats !== undefined ? { stats: singleStats } : undefined) + tail,
@@ -1556,7 +1635,8 @@ export function buildSessionStack(
     }
     // Digest details are discriminated by kind. Consumers must inspect kind first and read items.
     const first = items[0]!;
-    pi.sendMessage(
+    sendCompletion(
+      "subagent",
       {
         customType: "subagent:notification",
         content: formatDigest(items, { stats }),
@@ -1564,6 +1644,8 @@ export function buildSessionStack(
         details: { ...first, kind: "digest", items },
       },
       { triggerTurn: true },
+      // §3.4: a digest mints ONE token carrying the item count.
+      items.length,
     );
   };
   /**
@@ -2088,7 +2170,9 @@ export function buildSessionStack(
   previousUsageBroadcaster = usageBroadcaster;
   // D5: build the manager before the widget so its synchronous first frame can
   // receive the manager-bound list/tail closures below.
-  const bashJobs = bashJobsEnabled(settings) ? buildBashJobManager(pi, ctx, settings) : undefined;
+  const bashJobs = bashJobsEnabled(settings)
+    ? buildBashJobManager(pi, ctx, settings, (message, options) => sendCompletion("bash", message, options))
+    : undefined;
   previousBashJobs = bashJobs;
 
   const keepalive = settings.cacheTtl.keepalive
@@ -2474,7 +2558,12 @@ export function buildSessionStack(
     activity: workflowActivity,
     createOrchestrator: createWorkflowOrchestrator,
     onSettled: createWorkflowNoticeSink({
-      sendMessage: (message, options) => pi.sendMessage(message, options),
+      // ask-user-async §3.3 (P2): the workflow completion send point. The sink
+      // DEPENDS on a synchronous throw to fall back to persisted re-delivery
+      // (workflow-notice.ts) — sendCompletion propagates it untouched. The
+      // re-delivery path below (`redeliverPendingWorkflowNotices`) keeps raw
+      // pi.sendMessage: a re-send is not a fresh completion and must not mint.
+      sendMessage: (message, options) => sendCompletion("workflow", message, options),
       appendEntry: (customType, data) => pi.appendEntry(customType, data),
       emit: (channel, payload) => pi.events.emit(channel, payload),
       usageOf: (runId) => query.get(runId)?.diag.usage,
@@ -2519,6 +2608,7 @@ export function buildSessionStack(
     worktreeOrphans,
     worktreeOrphansStartup,
     hostBashViewCapability: { dispose: hostBashViewCapabilityRelease },
+    backgroundCompletions,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
     ...(bashJobRecovery ? { bashJobRecovery } : {}),

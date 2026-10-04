@@ -4,14 +4,23 @@ export type RemoteOutcome =
   { kind: "answer"; answers: AskUserAnswers; origin: string } | { kind: "cancel"; origin: string };
 
 export interface DialogRace {
-  claim(by: "tui" | "web" | "abort" | "error"): boolean;
-  readonly winner: "tui" | "web" | "abort" | "error" | undefined;
+  claim(by: "tui" | "web" | "abort" | "error" | "background"): boolean;
+  readonly winner: "tui" | "web" | "abort" | "error" | "background" | undefined;
 }
 
 export interface AskUserRemoteSession {
   /** Return false when the local/TUI side has already won the race. */
   setOnRemote(fn: (outcome: RemoteOutcome) => boolean): void;
-  /** Close the local side of the session. Calling this more than once is safe. */
+  /**
+   * Close the local side of the session. Calling this more than once is safe.
+   *
+   * §5.1 also specifies `by: "background"` for the interrupt close. It is DELIBERATELY not in
+   * this signature yet: src/web-hub/agent/dialogs.ts's implementation forwards `by` into
+   * `DialogClosedWire["by"]` (src/web-hub/protocol/messages.ts), which only gains
+   * `"background"` in P3 — widening here would break that file's typecheck while web-hub is
+   * out of P1's file domain. index.ts performs the background close through a local,
+   * documented cast (closeSessionAsBackground); P3 widens this union and drops the cast.
+   */
   close(by: "tui" | "abort" | "error", outcome: "answered" | "cancelled" | "aborted"): void;
 }
 
