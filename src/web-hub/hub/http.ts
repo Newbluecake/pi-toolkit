@@ -61,11 +61,14 @@ import type {
 } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
-import { auditControl } from "./audit.js";
+import { auditControl, auditUpload, type UploadHttpMetrics } from "./audit.js";
 import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import { createConnGuard } from "./conn-guard.js";
 import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
+import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
+import { handleUploadRequest } from "./upload-http.js";
+import type { PinToken, UploadStore } from "./uploads.js";
 import type {
   AgentView,
   CommandRouter,
@@ -129,6 +132,11 @@ const LAN_REQUEST_TIMEOUT_MS = 15_000;
  * (15s) < ui/*-client.js's CMD_REQUEST_TIMEOUT_MS (16s, the browser fetch AbortController)`. */
 export { LAN_REQUEST_TIMEOUT_MS };
 const LAN_KEEPALIVE_TIMEOUT_MS = 5_000;
+/** web-hub-upload plan §1.3 (U3): a LAN chunk request's SECOND authorize (after the body read)
+ * shares the final ~1s of `UPLOAD_TOTAL_MS` with the disk write — its `touchSession` race keeps
+ * only this much in reserve for the write (the first authorize keeps `UPLOAD_TOTAL_MS -
+ * LAN_AUTH_CAP_MS` = 11s). */
+const UPLOAD_CHUNK_REAUTH_RESERVE_MS = 300;
 const LAN_CLIENT_IP_INFLIGHT_CAP = 16;
 const LAN_SID_WAITERS_CAP = 8;
 const LAN_SSE_GLOBAL_CAP = 32;
@@ -848,6 +856,11 @@ export interface LanRuntime {
    * assembly in `createHttpFrontend` always sets all three. */
   registry?: RegistryView;
   commands?: CommandRouter | undefined;
+  /** web-hub-upload plan §6 U3: upload store for the LAN `/api/upload/*` branch (same instance
+   * as the loopback listener's; absent ⇒ those endpoints answer 501). */
+  uploads?: UploadStore | undefined;
+  /** §5.4 (U3 P2-2): shared HTTP-layer upload reject counters (same instance as loopback's). */
+  uploadMetrics?: UploadHttpMetrics | undefined;
   cmdLimit?: CmdLimit;
   /** C3 P1 fix (plan §6.4): 429-audit throttle map, shared with the loopback listener (same
    * instance `createHttpFrontend` passes to both `dispatchCmdOrDialog` call sites) so a given
@@ -1140,10 +1153,48 @@ async function handleLanRequestInner(
         },
         registry: rt.registry ?? { list: () => [], get: () => undefined },
         commands: rt.commands,
+        uploads: rt.uploads,
         limit: rt.cmdLimit ?? createCmdLimit(rt.now),
         rejectAudit429: rt.rejectAudit429 ?? new Map(),
         log: rt.log,
         now: rt.now,
+      });
+    }
+    // web-hub-upload plan §1.2/§5.1 (U3): /api/upload/* — the same write-endpoint pipeline shape
+    // as /api/cmd (strict CSRF — `uploadCsrfOk` for octet-stream chunk bodies — double
+    // authorize, per-principal bucket); inserted before the generic `csrfOkLan` gate exactly like
+    // the cmd/dialog branch above. authorize copies the :cmd segment, except a CHUNK request's
+    // first authorize keeps `UPLOAD_TOTAL_MS - LAN_AUTH_CAP_MS` (11s) in reserve for body+write
+    // (§1.3) and its post-body reauth shares the final ~1s with the write.
+    if (path.startsWith("/api/upload/")) {
+      let authCalls = 0;
+      return handleUploadRequest(req, res, path, query, {
+        listener: "lan",
+        ip: ctx.clientIp,
+        csrfOk: (kind) =>
+          kind === "chunk" ? uploadCsrfOk(req, ctx.externalOrigin) : strictCsrfOk(req, ctx.externalOrigin),
+        authorize: async (deadline) => {
+          authCalls += 1;
+          const reserve =
+            path !== UPLOAD_CHUNK_PATH
+              ? LAN_AUTH_RESERVE_MS
+              : authCalls === 1
+                ? UPLOAD_TOTAL_MS - LAN_AUTH_CAP_MS
+                : UPLOAD_CHUNK_REAUTH_RESERVE_MS;
+          const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, reserve);
+          const authFailure: { code?: string } = {};
+          const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+          if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+          return { ip: ctx.clientIp, user: `u${session.userId}` };
+        },
+        registry: rt.registry ?? { list: () => [], get: () => undefined },
+        store: rt.uploads,
+        metrics: rt.uploadMetrics,
+        limit: rt.cmdLimit ?? createCmdLimit(rt.now),
+        rejectAudit429: rt.rejectAudit429 ?? new Map(),
+        log: rt.log,
+        now: rt.now,
+        io: { readBody, sendJson },
       });
     }
     if (!csrfOkLan(req, ctx)) throw new HttpError(403, "E_CSRF");
@@ -1496,6 +1547,25 @@ function strictCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
   return true;
 }
 
+/** web-hub-upload plan §5.2: chunk-endpoint CSRF — identical to `strictCsrfOk` except the
+ * Content-Type must be `application/octet-stream` (chunk bodies are raw bytes). Neither
+ * octet-stream nor `X-PWH` is CORS-safelisted, so a cross-origin request must preflight, and the
+ * hub answers every `OPTIONS` with 404. Both listeners use this (the loopback's lenient
+ * `csrfOk` must never cover an upload). */
+function uploadCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
+  const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+  if (ct !== "application/octet-stream") return false;
+  if (req.headers["x-pwh"] !== "1") return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return false;
+  const parsed = parseOrigin(origin);
+  if (parsed === undefined) return false;
+  if (canonicalOrigin(parsed.scheme, parsed.hostKey) !== expectedOrigin) return false;
+  const sfs = req.headers["sec-fetch-site"];
+  if (typeof sfs === "string" && sfs.toLowerCase() !== "same-origin") return false;
+  return true;
+}
+
 function cmdErrorStatus(code: CmdErrorCode): number {
   switch (code) {
     case "E_BAD_REQUEST":
@@ -1586,6 +1656,10 @@ interface CmdAuthHandled {
  * response and returns `{ handled: true, code }`; this function returns immediately without doing
  * anything else once that happens (after writing its own audit line). */
 const RATE_AUDIT_WINDOW_MS = 60_000;
+/** web-hub-upload plan §2.6 (v3 #8): post-forward bounded persistence wait for `referencedAt`
+ * — `min(REF_FLUSH_CAP_MS, reqDeadline.remaining() - REF_FLUSH_RESERVE_MS)`, skipped when ≤ 0. */
+const REF_FLUSH_CAP_MS = 1_000;
+const REF_FLUSH_RESERVE_MS = 300;
 
 async function dispatchCmdOrDialog(
   req: IncomingMessage,
@@ -1607,6 +1681,9 @@ async function dispatchCmdOrDialog(
      * `RATE_AUDIT_WINDOW_MS`, independent of how many times the underlying token bucket itself
      * re-rejects in that window. */
     rejectAudit429: Map<string, number>;
+    /** web-hub-upload plan §2.6 (v3 #8, U3): the upload store for reference pinning of
+     * prompt/steer texts. Undefined ⇒ prompts dispatch exactly as before (no pinning). */
+    uploads?: UploadStore | undefined;
     log: HubLog;
     now: () => number;
   },
@@ -1759,10 +1836,91 @@ async function dispatchCmdOrDialog(
     cmd,
   };
 
+  // web-hub-upload plan §2.6 (v3 #8, U3 hard gate): pin the prompt's referenced attachments
+  // SYNCHRONOUSLY in this no-await region, before the frame is ever forwarded — so no sweep can
+  // evict them out from under an in-flight prompt. Only fresh (non-dup, non-queryOnly)
+  // prompt/steer_subagent ops carry attachment blocks. A pin failure means a referenced file is
+  // already gone/evicting: refuse WITHOUT forwarding (effect "none"), telling the frontend which
+  // upload ids died so it can ask for a re-upload. Unknown/other-principals' paths are ignored by
+  // the store (no existence leak).
+  let pinToken: PinToken | undefined;
+  if (
+    opts.uploads !== undefined &&
+    !dup &&
+    queryOnly !== true &&
+    (cmd.op === "prompt" || cmd.op === "steer_subagent")
+  ) {
+    const pin = opts.uploads.pinForPrompt({ principal: principalKey, text: cmd.text });
+    if (!pin.ok) {
+      auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: "E_UPLOAD_GONE" });
+      auditUpload(log, {
+        phase: "reject",
+        op: "reference",
+        ok: false,
+        code: "E_UPLOAD_GONE",
+        reqId,
+        listener,
+        ip,
+        ...(user === undefined ? {} : { user }),
+        agentKey,
+        uploadId: pin.gone[0],
+      });
+      sendJson(res, 409, {
+        error: "E_UPLOAD_GONE",
+        id,
+        uploadIds: [...pin.gone],
+        retryable: false,
+        effect: "none",
+      });
+      return;
+    }
+    if (pin.token.ids.length > 0) pinToken = pin.token;
+  }
+
+  // §2.6 (v3 #8): settle pins SYNCHRONOUSLY the moment the forward settles (conservative
+  // "possibly delivered" classification: any throw — E_AGENT_GONE/E_DEADLINE/E_INTERNAL — or a
+  // reply with ok:true / effect:"unknown" counts as referenced; only effect:"none" releases),
+  // then a bounded best-effort meta.json flush (≤ min(1s, remaining-300ms)) before the reply goes
+  // out. A flush timeout/failure never changes the reply — the prompt is already delivered; the
+  // entry stays metaDirty and is retried by the 60s tick / every sweep.
+  let outcome: { reply: CmdResultFrame } | { err: unknown };
   try {
-    const reply = await commands.request(frame, agentKey);
-    sendCmdResult(res, reply);
+    outcome = { reply: await commands.request(frame, agentKey) };
   } catch (err) {
+    outcome = { err };
+  }
+  if (pinToken !== undefined) {
+    const uploads = opts.uploads!;
+    const referenced = "err" in outcome || outcome.reply.ok === true || outcome.reply.effect === "unknown";
+    uploads.settlePins(pinToken, referenced ? "referenced" : "released");
+    if (referenced) {
+      const flushMs = Math.min(REF_FLUSH_CAP_MS, reqDeadline.remaining() - REF_FLUSH_RESERVE_MS);
+      if (flushMs > 0) {
+        let flushed: "ok" | "timeout" | "error";
+        try {
+          flushed = await uploads.flushReferences(pinToken.ids, { at: now() + flushMs });
+        } catch {
+          flushed = "error";
+        }
+        if (flushed !== "ok") {
+          auditUpload(log, {
+            phase: "request",
+            op: "reference",
+            ok: false,
+            code: flushed === "timeout" ? "E_DEADLINE" : "E_INTERNAL",
+            reqId,
+            listener,
+            ip,
+            ...(user === undefined ? {} : { user }),
+            agentKey,
+          });
+        }
+      }
+    }
+  }
+
+  if ("err" in outcome) {
+    const err = outcome.err;
     if (err instanceof HubError && err.code === "E_AGENT_GONE") {
       const stillKnown = opts.registry.get(agentKey) !== undefined;
       sendJson(res, 503, { error: "E_AGENT_GONE", retryable: stillKnown, effect: "unknown" });
@@ -1774,7 +1932,9 @@ async function dispatchCmdOrDialog(
     }
     log.error("web-hub http: cmd dispatch failed", { error: String(err) });
     sendJson(res, 500, { error: "E_INTERNAL" });
+    return;
   }
+  sendCmdResult(res, outcome.reply);
 }
 
 function buildLanStatus(
@@ -1883,6 +2043,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       absoluteExpiryTimers: new Map(),
       registry,
       commands: deps.commands,
+      uploads: deps.uploads,
+      uploadMetrics: deps.uploadMetrics,
       cmdLimit,
       rejectAudit429,
       markKdfInvalid: () => {
@@ -2098,10 +2260,37 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           },
           registry,
           commands: deps.commands,
+          uploads: deps.uploads,
           limit: cmdLimit,
           rejectAudit429,
           log,
           now,
+        });
+      }
+      // web-hub-upload plan §1.2/§5.1 (U3): /api/upload/*, inserted before the generic `csrfOk`
+      // gate exactly like the cmd/dialog branch above; authorize copies that branch's loopback
+      // segment verbatim (a sync cookie-map lookup needs no deadline budgeting on either call).
+      if (path.startsWith("/api/upload/")) {
+        const expectedOrigin = canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "");
+        return handleUploadRequest(req, res, path, query, {
+          listener: "loopback",
+          ip: normalizePeerIp(req.socket.remoteAddress),
+          csrfOk: (kind) => (kind === "chunk" ? uploadCsrfOk(req, expectedOrigin) : strictCsrfOk(req, expectedOrigin)),
+          authorize: async (_deadline) => {
+            if (!auth.check(req.headers.cookie, now())) {
+              sendError(res, 401, "E_AUTH");
+              return { handled: true, code: "E_AUTH" };
+            }
+            return { ip: normalizePeerIp(req.socket.remoteAddress) };
+          },
+          registry,
+          store: deps.uploads,
+          metrics: deps.uploadMetrics,
+          limit: cmdLimit,
+          rejectAudit429,
+          log,
+          now,
+          io: { readBody, sendJson },
         });
       }
       if (!csrfOk(req)) throw new HttpError(403, "E_CSRF");

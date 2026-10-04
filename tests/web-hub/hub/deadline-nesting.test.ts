@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { UPLOAD_CHUNK_BODY_MS, UPLOAD_TOTAL_MS } from "../../../src/web-hub/protocol/upload.js";
 import {
   AGENT_TOTAL_CAP_MS,
   AGENT_TOTAL_RESERVE_MS,
@@ -7,6 +8,7 @@ import {
   computeAgentBudgets,
   deriveBudget,
   FORWARD_MIN_REMAINING_MS,
+  LAN_AUTH_CAP_MS,
   REGISTRY_WAIT_GRACE_MS,
   REGISTRY_WAIT_RESERVE_MS,
   WRITE_TOTAL_MS,
@@ -85,5 +87,15 @@ describe("§3.3 nested deadline invariant (plan: agentDeadlineMs <= registryWait
         Math.max(0, Math.min(BODY_CAP_MS, remaining - BODY_RESERVE_MS)),
       );
     }
+  });
+
+  it("web-hub-upload plan §1.3 (U3): the chunk request deadline nests inside the listener socket timeout chain", () => {
+    expect(UPLOAD_CHUNK_BODY_MS).toBe(12_000);
+    expect(UPLOAD_TOTAL_MS).toBe(14_000);
+    expect(UPLOAD_CHUNK_BODY_MS).toBeLessThan(UPLOAD_TOTAL_MS);
+    expect(UPLOAD_TOTAL_MS).toBeLessThan(LAN_REQUEST_TIMEOUT_MS);
+    expect(LAN_REQUEST_TIMEOUT_MS).toBeLessThan(TOKEN_CMD_REQUEST_TIMEOUT_MS);
+    // §1.3: the first LAN authorize keeps 11s of the 14s in reserve for body+write
+    expect(UPLOAD_TOTAL_MS - LAN_AUTH_CAP_MS).toBe(11_000);
   });
 });

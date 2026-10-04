@@ -112,6 +112,8 @@ export const UPLOAD_SWEEP_BUDGET_MS = 10_000;
 export const UPLOAD_BUSY_RETRY_AFTER_S = 2;
 /** Bounded retention of dedup'd terminal commit results (idempotent commit retries). */
 const FINISHED_MAX = 256;
+/** §5.4 stats row: op-latency reservoir size (ring) backing `stats().p50Ms/p95Ms`. */
+const LATENCY_RESERVOIR_MAX = 2_048;
 
 // ---------------------------------------------------------------------------
 // errors
@@ -304,6 +306,13 @@ export interface UploadStats {
   readonly committedBytes: number;
   readonly referencedFiles: number;
   readonly buckets: number;
+  /** §5.4 stats row: reject counts keyed by error code (store-side rejects only — the HTTP
+   * layer's pre-store rejects are merged in by `uploadStatsFields`). */
+  readonly rejectsByCode: Record<string, number>;
+  /** §5.4 stats row: op-latency percentiles (all begin/chunk/commit/abort completions, success
+   * and failure), from a bounded reservoir; `null` before the first op. */
+  readonly p50Ms: number | null;
+  readonly p95Ms: number | null;
   readonly counters: {
     readonly requests: number;
     readonly rejects: number;
@@ -311,6 +320,10 @@ export interface UploadStats {
     readonly evicted: number;
     readonly dedupHits: number;
     readonly timeouts: number;
+    /** §5.4 stats row: store-side E_RATE reject count (in-flight admission caps). */
+    readonly rateLimited: number;
+    /** §5.4 stats row: largest Retry-After the store ever handed out (seconds). */
+    readonly maxRetryAfterS: number;
     /** §2.6 #13: mutations dropped by the close gate (observable no-ops after `close()`). */
     readonly lateOps: number;
   };
@@ -332,6 +345,12 @@ export interface UploadStore {
   sweep(reason: "tick" | "quota"): Promise<SweepReport>;
   stats(): UploadStats;
   inflight(): number;
+  /** U3 (plan §5.1.2): the authoritative begin-time principal→agentKey binding for the commit
+   * agent-recheck. Only an OPEN in-flight upload owned by `principal` returns its agentKey —
+   * poisoned/committed/finished/unknown ids return `undefined` (their commit path needs no
+   * recheck: 404 or an idempotent replay of an already-committed upload). Synchronous: safe to
+   * call inside no-await regions. */
+  agentKeyOf(principal: string, id: string): string | undefined;
   /** §2.6 #13: poison everything un-committed, remove their dirs, retain committed files. */
   close(): Promise<void>;
 }
@@ -344,6 +363,12 @@ export interface UploadStoreDeps {
   readonly audit?: UploadAuditFn | undefined;
   readonly limits?: Partial<UploadLimits> | undefined;
   readonly fs?: Partial<UploadFsDeps> | undefined;
+  /** Test-only seam (U3 race-case acceptance): invoked — and awaited — after a sweep has
+   * selected a committed eviction candidate but BEFORE the per-id lock is taken, i.e. exactly the
+   * window in which `pinForPrompt` and the lock-side recheck race (plan §2.6 v3 #8 case (c)).
+   * Production wiring never passes it; when absent the call site is skipped entirely (zero
+   * production overhead). */
+  readonly onEvictCandidate?: ((id: string, reason: "ttl" | "quota") => void | Promise<void>) | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +478,36 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
   const pbInflightBytes = new Map<string, number>();
   let totalCommittedBytes = 0;
   let totalInflightBytes = 0;
-  const counters = { requests: 0, rejects: 0, poisoned: 0, evicted: 0, dedupHits: 0, timeouts: 0, lateOps: 0 };
+  const counters = {
+    requests: 0,
+    rejects: 0,
+    poisoned: 0,
+    evicted: 0,
+    dedupHits: 0,
+    timeouts: 0,
+    lateOps: 0,
+    rateLimited: 0,
+    maxRetryAfterS: 0,
+  };
+  /** §5.4 stats row: per-code reject counts + a bounded ring of op latencies (ms) for p50/p95. */
+  const rejectsByCode = new Map<string, number>();
+  const latencyMs: number[] = [];
+  let latencyCursor = 0;
+
+  function recordLatency(ms: number): void {
+    if (latencyMs.length < LATENCY_RESERVOIR_MAX) {
+      latencyMs.push(ms);
+      return;
+    }
+    latencyMs[latencyCursor] = ms;
+    latencyCursor = (latencyCursor + 1) % LATENCY_RESERVOIR_MAX;
+  }
+
+  function latencyPercentile(p: 50 | 95): number | null {
+    if (latencyMs.length === 0) return null;
+    const sorted = [...latencyMs].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(((sorted.length - 1) * p) / 100))]!;
+  }
 
   // -- §2.2.3 v3 #4 constructor-time probe ----------------------------------
   const initPromise: Promise<void> = (async () => {
@@ -811,6 +865,10 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
   /** Locked eviction of a committed file. The recheck + `evicting` set happen synchronously after
    *  lock acquisition — JS single-threading makes this non-interleavable with `pinForPrompt` (§2.6). */
   async function evictCommitted(rec: CommittedRec, reason: "ttl" | "quota", deadline: Deadline): Promise<boolean> {
+    // Test-only seam (U3): fires in the exact window between candidate selection and the per-id
+    // lock, so a test can land a `pinForPrompt` there and prove the in-lock recheck below is what
+    // saves the file. Never passed by production wiring.
+    if (deps.onEvictCandidate !== undefined) await deps.onEvictCandidate(rec.id, reason);
     return runLockedQuiet(rec.id, deadline, async () => {
       const live = committed.get(rec.id);
       if (live === undefined || live.state !== "committed") return false;
@@ -952,11 +1010,20 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     counters.requests++;
     const t0 = now();
     try {
-      return await fn();
+      const result = await fn();
+      recordLatency(now() - t0);
+      return result;
     } catch (err) {
+      recordLatency(now() - t0);
       counters.rejects++;
       const code = err instanceof UploadStoreError ? err.code : "E_INTERNAL";
+      rejectsByCode.set(code, (rejectsByCode.get(code) ?? 0) + 1);
       if (code === "E_DEADLINE") counters.timeouts++;
+      if (code === "E_RATE") {
+        counters.rateLimited++;
+        const ra = err instanceof UploadStoreError ? err.extra.retryAfterS : undefined;
+        if (typeof ra === "number") counters.maxRetryAfterS = Math.max(counters.maxRetryAfterS, ra);
+      }
       const base: UploadAuditEvent = { phase: "reject", op, ok: false, code, ms: now() - t0 };
       if (err instanceof UploadStoreError) {
         if (err.extra.received !== undefined) base.received = err.extra.received;
@@ -971,6 +1038,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
 
   async function begin(p: BeginParams, deadline: Deadline): Promise<BeginResult> {
     return guarded("begin", async () => {
+      const t0 = now();
       await initPromise;
       if (closing || closed) throw new UploadStoreError("E_HUB_RESTARTING", "hub is closing");
       if (storeState === "disabled") {
@@ -1111,6 +1179,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
         ext: extOf(safeName),
         mimeClass: mimeClassOf(mime),
         ...(mimeDropped ? { mimeDropped: true } : {}),
+        ms: now() - t0,
       });
       return { id: p.id, received: 0, maxBytes: limits.fileMaxBytes };
     });
@@ -1239,11 +1308,12 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
         throw new UploadStoreError("E_NOT_FOUND", "no such upload");
       }
       if (rec.state === "poisoned") throw new UploadStoreError("E_NOT_FOUND", "upload invalidated");
-      return runLocked(p.id, deadline, () => commitBody(p, deadline));
+      const t0 = now();
+      return runLocked(p.id, deadline, () => commitBody(p, deadline, t0));
     });
   }
 
-  async function commitBody(p: CommitParams, deadline: Deadline): Promise<CommitResult> {
+  async function commitBody(p: CommitParams, deadline: Deadline, t0: number): Promise<CommitResult> {
     const rec = inflight.get(p.id);
     if (rec === undefined || rec.principal !== p.principal || rec.state === "poisoned") {
       // a concurrent first commit may already have settled this id — idempotent result (v3 #4)
@@ -1335,6 +1405,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
           dedup: true,
           ext: extOf(rec.safeName),
           mimeClass: mimeClassOf(rec.mime),
+          ms: now() - t0,
         });
         return result;
       }
@@ -1458,6 +1529,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       dupChunks: rec.dupChunks,
       ext: extOf(rec.safeName),
       mimeClass: mimeClassOf(rec.mime),
+      ms: now() - t0,
     });
     return result;
   }
@@ -1466,6 +1538,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
 
   async function abort(p: CommitParams, deadline: Deadline): Promise<void> {
     return guarded("abort", async () => {
+      const t0 = now();
       await initPromise;
       if (closing || closed) throw new UploadStoreError("E_HUB_RESTARTING", "hub is closing");
       if (typeof p.id !== "string" || !UPLOAD_ID_RE.test(p.id)) {
@@ -1475,7 +1548,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       if (fin !== undefined) {
         if (fin.principal !== p.principal) throw new UploadStoreError("E_NOT_FOUND", "no such upload");
         finished.delete(p.id);
-        audit({ phase: "request", op: "abort", ok: true, uploadId: p.id });
+        audit({ phase: "request", op: "abort", ok: true, uploadId: p.id, ms: now() - t0 });
         return;
       }
       const com = committed.get(p.id);
@@ -1496,7 +1569,15 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
             throw err;
           }
           dropCommitted(live);
-          audit({ phase: "request", op: "abort", ok: true, uploadId: live.id, bucket: live.bucket, bytes: live.size });
+          audit({
+            phase: "request",
+            op: "abort",
+            ok: true,
+            uploadId: live.id,
+            bucket: live.bucket,
+            bytes: live.size,
+            ms: now() - t0,
+          });
         });
         return;
       }
@@ -1529,6 +1610,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
           bucket: live.bucket,
           bytes: live.size,
           received: live.received,
+          ms: now() - t0,
         });
       });
     });
@@ -1890,6 +1972,9 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       committedBytes: totalCommittedBytes,
       referencedFiles: referenced,
       buckets: buckets.size,
+      rejectsByCode: Object.fromEntries(rejectsByCode),
+      p50Ms: latencyPercentile(50),
+      p95Ms: latencyPercentile(95),
       counters: { ...counters },
     };
   }
@@ -1898,6 +1983,14 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     let open = 0;
     for (const r of inflight.values()) if (r.state === "open") open++;
     return open;
+  }
+
+  /** §5.1.2 (U3): the begin-time binding is the store's own record — nothing external can evict
+   *  or lose it while the upload is open. */
+  function agentKeyOf(principal: string, id: string): string | undefined {
+    const rec = inflight.get(id);
+    if (rec === undefined || rec.principal !== principal || rec.state !== "open") return undefined;
+    return rec.agentKey;
   }
 
   function close(): Promise<void> {
@@ -1975,6 +2068,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     sweep,
     stats,
     inflight: inflightCount,
+    agentKeyOf,
     close,
   };
 }

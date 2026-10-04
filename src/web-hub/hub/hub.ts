@@ -22,10 +22,17 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
-import { ensurePrivateDir, resolveHubPaths, type HubPaths, type SocketIdentity } from "../protocol/paths.js";
-import { PROTO, P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../protocol/version.js";
+import {
+  ensurePrivateDir,
+  resolveHubPaths,
+  webHubUploadsDir,
+  type HubPaths,
+  type SocketIdentity,
+} from "../protocol/paths.js";
+import { PROTO, P2_HUB_CAPS, UPLOAD_HUB_CAPS, DIALOG_BG_HUB_CAPS } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
+import { auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
 import { createCommandRouter } from "./commands.js";
 import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
 import { createHistoryService } from "./history.js";
@@ -34,6 +41,7 @@ import { createIdleMonitor } from "./idle.js";
 import { withDeadline, withSignal, createScope, type Scope } from "./lifecycle.js";
 import { createHubLog } from "./log.js";
 import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
+import { createUploadStore, type UploadStore } from "./uploads.js";
 import type {
   FrontendFactory,
   HttpFrontend,
@@ -83,6 +91,10 @@ export const HUB_START_DEADLINE_MS = 20_000;
 export const HUB_CLOSE_DEADLINE_MS = 10_000;
 /** Per-step bound for cleanup/close steps; kept separate from the crash-only hard exit in `installProcessHandlers`. */
 const STEP_DEADLINE_MS = 3_000;
+/** web-hub-upload plan §2.6 (U3): committed-file TTL sweep + `upload stats` aggregate row cadence. */
+const UPLOAD_SWEEP_TICK_MS = 30 * 60_000;
+/** §2.6: idle in-flight invalidation (10 min idle TTL) + dirty `referencedAt` flush retry cadence. */
+const UPLOAD_INFLIGHT_TICK_MS = 60_000;
 
 export interface StartHubDeps {
   now?: () => number;
@@ -226,7 +238,10 @@ export async function startHub(
       // the `dialogs`/`ctl`/`commands` slots at all.
       // web-hub-upload plan §5.1: hub also advertises UPLOAD_HUB_CAPS alongside P2_HUB_CAPS, on
       // both this browser-facing frame and hello_ack (agent-server.ts) — kept byte-identical.
-      caps: [...admin.caps(), ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS],
+      // ask-user-async plan §7.2 (P3): DIALOG_BG_HUB_CAPS joins the same two surfaces the same
+      // way — it gates `dialogs.closed[].by === "background"` (agents degrade to "abort"
+      // against hubs without the cap).
+      caps: [...admin.caps(), ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
 
@@ -317,6 +332,33 @@ export async function startHub(
     let lanClosedByRotateScan = false;
 
     const commandRouter = createCommandRouter({ registry, log, now });
+    // web-hub-upload plan §2.2/§2.6 (U3): the upload store is constructed unconditionally —
+    // `webHub.uploads` gating happens through agent hello caps (§5.1), not here. Construction
+    // never throws for an unusable root (the store disables itself and `begin` answers
+    // `E_UPLOAD_DISABLED`); a synchronous throw (a bug, not a fs state) degrades uploads to 501
+    // while the rest of the hub starts normally (plan §6 U3: "根校验失败 ⇒ 不传 store").
+    let uploads: UploadStore | undefined;
+    try {
+      uploads = createUploadStore({
+        root: webHubUploadsDir(config.home),
+        now,
+        log,
+        audit: (e) => auditUpload(log, e),
+      });
+    } catch (err) {
+      log.error("web-hub: upload store construction failed — /api/upload/* will answer 501", {
+        error: String(err),
+      });
+      uploads = undefined;
+    }
+    // §5.4 (U3 P2-2): HTTP-layer (pre-store) upload reject counters, shared by both listeners and
+    // merged into the 30-min `upload stats` row below.
+    const uploadMetrics = createUploadHttpMetrics();
+    // §2.6 #13: pushed BEFORE the frontend's own cleanup so the startup-failure reverse-order
+    // path also closes the store after the frontend stops accepting requests.
+    cleanup.push(async () => {
+      await uploads?.close();
+    });
     const fe = frontend({
       config,
       paths,
@@ -333,9 +375,19 @@ export async function startHub(
       // admission, effect classification, queryOnly, drain — replacing C0's always-`E_UNSUPPORTED`
       // stub. `registry` (constructed above) is the same instance the agent socket layer feeds.
       commands: commandRouter,
+      uploadMetrics,
+      ...(uploads === undefined ? {} : { uploads }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
+    // §2.2.4: the startup scan never blocks listen(); `begin` answers 503 E_BUSY until it lands.
+    if (uploads !== undefined) {
+      void uploads
+        .recover()
+        .catch((err: unknown) =>
+          log.error("web-hub: upload startup recovery rejected unexpectedly", { error: String(err) }),
+        );
+    }
     // §6.7.1: "恢复后无条件 auth.reload()，双保险" — cheap even when nothing was recovered (the very
     // next real call is `auth.token()` inside `fe.listen()` below, so there is nothing cached yet
     // in the startup path; this still matters once the periodic scan reuses the same helper).
@@ -616,6 +668,36 @@ export async function startHub(
     }, ROTATE_SCAN_MS);
     rotateScan.unref();
 
+    // web-hub-upload plan §2.6 (U3): upload lifecycle ticks (both unref'd). The 60s tick covers
+    // idle in-flight invalidation (10 min TTL) and retries dirty `referencedAt` persistence
+    // (sweep() always flushes dirty references first); the 30-min tick additionally writes the
+    // §5.4 `upload stats` aggregate row. `sweep("tick")`'s committed-file TTL eviction is
+    // exact-time based, so running it at both cadences changes nothing semantically.
+    const uploadInflightTick =
+      uploads === undefined
+        ? undefined
+        : setInterval(() => {
+            void uploads
+              .sweep("tick")
+              .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
+          }, UPLOAD_INFLIGHT_TICK_MS);
+    uploadInflightTick?.unref();
+    const uploadSweepTick =
+      uploads === undefined
+        ? undefined
+        : setInterval(() => {
+            void uploads
+              .sweep("tick")
+              .then(() => {
+                log.info("upload stats", {
+                  audit: "upload-stats",
+                  ...uploadStatsFields(uploads.stats(), uploadMetrics.snapshot()),
+                });
+              })
+              .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
+          }, UPLOAD_SWEEP_TICK_MS);
+    uploadSweepTick?.unref();
+
     const stopFence = startFence(paths.socketPath, owner.identity, (why) => {
       log.warn("socket fence lost: another hub owns the socket path", { why });
       void close("fence");
@@ -647,7 +729,14 @@ export async function startHub(
         idle.stop();
         clearInterval(tick);
         clearInterval(rotateScan);
+        if (uploadInflightTick !== undefined) clearInterval(uploadInflightTick);
+        if (uploadSweepTick !== undefined) clearInterval(uploadSweepTick);
         await bounded(fe.close());
+        // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
+        // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files
+        // are retained) before the rest of the teardown. The crash path may not reach this —
+        // those orphans are the next startup's sweep("startup") job (§2.2.4).
+        if (uploads !== undefined) await bounded(uploads.close());
         history.dispose();
         await bounded(agentServer.close());
         await bounded(rootScope.dispose());

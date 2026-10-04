@@ -42,6 +42,8 @@ import type { PROTO } from "../protocol/version.js";
 import type { Scope } from "./lifecycle.js";
 import type { UiServer } from "./static.js";
 import type { UiStatus } from "./ui-root.js";
+import type { UploadStore } from "./uploads.js";
+import type { UploadHttpMetrics } from "./audit.js";
 
 export type { LanOffReason, LanStatus } from "../protocol/lan.js";
 
@@ -480,6 +482,16 @@ export interface FrontendDeps {
    * 501/404 unchanged) byte-identical — `hub.ts`'s `startHub` constructs the C0 stub and passes
    * it through unconditionally (zero visible change: reading this key is opt-in for the factory). */
   commands?: CommandRouter;
+  /** web-hub-upload plan §2/§6 (U3): the hub's upload store (`hub/uploads.ts`, U2), constructed
+   * and closed by `hub.ts`. Optional so test doubles and pre-U3 assemblies keep compiling — when
+   * absent (or store construction failed in `hub.ts`), `/api/upload/*` answers 501
+   * `E_NOT_IMPLEMENTED` and everything else is byte-identical. */
+  uploads?: UploadStore;
+  /** web-hub-upload plan §5.4 (U3 P2-2): shared HTTP-layer upload reject counters — pre-store
+   * rejects (CSRF/auth/429/501/caps) are invisible to the store, so they are counted here and
+   * merged into the periodic `upload stats` row by `uploadStatsFields`. hub.ts owns the one
+   * instance; both listeners' `/api/upload/*` branches count into it. */
+  uploadMetrics?: UploadHttpMetrics;
   /** vue-plan.md v2.1 §2.1/§5.2（P5b）：Vue UI 服务；省略时 `createHttpFrontend` 自建
    * （`config.home`/`config.pluginVersion` 构造 `buildUiCandidates` + `createUiServer`），可注入
    * 以便测试 helper 与 `hub.ts` 共享同一实例、把其 `status()` 灌进 `hub.json` 的 `ui` 字段。 */
