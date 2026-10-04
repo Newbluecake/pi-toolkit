@@ -398,7 +398,10 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   user/model (multi-line advice/warning copy).
 - **Conventional Commits** (`feat|fix|docs|refactor|perf|test|chore|ci(scope): ...`); the
   CHANGELOG is generated from them.
-- Tool parameters use `@sinclair/typebox` schemas (the only runtime dependency).
+- Tool parameters use `@sinclair/typebox` schemas. It is host-provided (pi aliases it to its bundled
+  `typebox` at load time), so it lives in `peerDependencies` with a `"*"` range (+ `devDependencies`
+  for local tests) — never in `dependencies`: pi ≥1.0 warns, since an installed copy can bypass the
+  loader's module mapping and duplicate runtime modules. There are no runtime `dependencies`.
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
   `>=0.87.0 <0.88.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
   `npm run test:conformance` (real `AgentSession` boundary-draft contract + runtime capability
