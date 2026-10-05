@@ -70,10 +70,12 @@ function onControlChipClick(): void {
       v-if="controlOn"
       class="chip control-chip"
       type="button"
+      :aria-label="t('control.noticeTitle')"
+      :title="t('control.noticeTitle')"
       :aria-expanded="env?.noticeExpanded.value === true"
       @click="onControlChipClick"
     >
-      <AppIcon name="terminal" class="icon-sm" />{{ t("control.noticeTitle") }}
+      <AppIcon name="terminal" class="icon-sm" />
     </button>
     <span v-else class="chip readonly-chip"><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span>
 
