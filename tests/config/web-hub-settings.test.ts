@@ -38,6 +38,7 @@ describe("web-hub settings", () => {
       webCommandPolicy: {},
       uploads: "on",
       preview: "on",
+      subagentTranscript: "all",
       lan: { enabled: false, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
       spawn: {
         enabled: false,
@@ -111,6 +112,7 @@ describe("web-hub settings", () => {
       webCommandPolicy: {},
       uploads: "on",
       preview: "on",
+      subagentTranscript: "all",
       lan: lanDefaults,
       spawn: spawnDefaults,
     });
@@ -687,5 +689,42 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     const parsed = parseSettingValue(spec, " ~/a , /srv/b ,,");
     expect(parsed).toEqual({ ok: true, stored: "~/a,/srv/b", live: ["~/a", "/srv/b"] });
     expect(parseSettingValue(spec, "")).toEqual({ ok: true, stored: "", live: [] });
+  });
+});
+
+// web-hub-fleet-drawer plan §4.4 (F2): webHub.subagentTranscript is tri-valued
+// ("all" | "loopback" | "off"), default "all"（用户已拍板）.
+describe("webHub.subagentTranscript (web-hub-fleet-drawer plan §4.4, F2)", () => {
+  it('defaults to "all"', () => {
+    expect(defaults.subagentTranscript).toBe("all");
+    expect(parseWebHubSettings({}).subagentTranscript).toBe("all");
+    expect(parseWebHubSettings(undefined).subagentTranscript).toBe("all");
+  });
+
+  it("accepts each of the three valid values", () => {
+    expect(parseWebHubSettings({ subagentTranscript: "all" }).subagentTranscript).toBe("all");
+    expect(parseWebHubSettings({ subagentTranscript: "loopback" }).subagentTranscript).toBe("loopback");
+    expect(parseWebHubSettings({ subagentTranscript: "off" }).subagentTranscript).toBe("off");
+  });
+
+  it('falls back to "all" for any invalid value, never throwing', () => {
+    for (const garbage of ["ALL", "Loopback", "yes", 1, true, null, undefined, [], {}, ""]) {
+      expect(parseWebHubSettings({ subagentTranscript: garbage }).subagentTranscript, JSON.stringify(garbage)).toBe(
+        "all",
+      );
+    }
+  });
+
+  it("is wired into loadSettings", () => {
+    expect(loadSettings({ webHub: { subagentTranscript: "loopback" } }).webHub.subagentTranscript).toBe("loopback");
+    expect(loadSettings({ webHub: { subagentTranscript: "bogus" } }).webHub.subagentTranscript).toBe("all");
+  });
+
+  it("exposes webHub.subagentTranscript in SETTING_SPECS as a non-live enum", () => {
+    expect(isKnownSettingKey("webHub.subagentTranscript")).toBe(true);
+    const spec = SETTING_SPECS["webHub.subagentTranscript"]!;
+    expect(spec.live).toBeUndefined();
+    expect(spec).toMatchObject({ kind: "enum", path: "webHub.subagentTranscript", values: ["all", "loopback", "off"] });
+    expect(defaultOf(spec)).toBe("all");
   });
 });

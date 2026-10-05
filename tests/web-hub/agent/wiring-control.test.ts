@@ -388,3 +388,290 @@ describe("wireWebHub — status.queue reaches the wire (§4.4/D6)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// fleet-drawer (F2): runtx caps matrix (§8.4 #2, 18 combos), compat posture
+// (hello_ack.caps without runtx.v1 ⇒ run service silently inert — F0 reviewer's
+// ruling assigned to F2), and the wire-level run_tx_req/run_watch plumbing.
+// ---------------------------------------------------------------------------
+
+import type { RunDiagnostics, RunSnapshot } from "../../../src/core/types.js";
+import type { QueryControlPort } from "../../../src/web-hub/agent/index.js";
+import type { RunTxReplyFrame } from "../../../src/web-hub/protocol/run-transcript.js";
+
+function runDiag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
+  return {
+    createdAt: 0,
+    phase: "model_turn",
+    phaseEnteredAt: 0,
+    pendingTools: 0,
+    turns: 1,
+    escalation: [],
+    orphaned: false,
+    generation: 1,
+    degraded: [],
+    staleInputs: 0,
+    unkillable: [],
+    ...overrides,
+  };
+}
+
+function runSnap(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
+  return {
+    runId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    generation: 1,
+    status: "running",
+    phase: "model_turn",
+    deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+    diag: runDiag(),
+    updatedAt: 0,
+    ...overrides,
+  };
+}
+
+function fakeQuery(over: Partial<QueryControlPort> = {}): QueryControlPort & { observeCalls: string[] } {
+  const observeCalls: string[] = [];
+  return {
+    observeCalls,
+    get: () => undefined,
+    steer: async () => ({ ok: true }),
+    stop: async () => ({ ok: true, escalatedTo: "L2" }),
+    observe: (runId) => {
+      observeCalls.push(runId);
+      return { kind: "unknown" };
+    },
+    ...over,
+  };
+}
+
+describe("wireWebHub — runtx caps matrix (§8.4 #2: control × uploads × subagentTranscript = 18 combos)", () => {
+  const P1 = ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"];
+  const cases: Array<{ control: boolean; uploads: "on" | "loopback" | "off"; runtx: "all" | "loopback" | "off" }> = [];
+  for (const control of [true, false]) {
+    for (const uploads of ["on", "loopback", "off"] as const) {
+      for (const runtx of ["all", "loopback", "off"] as const) cases.push({ control, uploads, runtx });
+    }
+  }
+
+  it.each(cases)("control=$control uploads=$uploads subagentTranscript=$runtx", async ({ control, uploads, runtx }) => {
+    hub = await startFakeHub(pathsIn(tmp.dir).socketPath);
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ settings: { ...SETTINGS, control, uploads, subagentTranscript: runtx } }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
+    const hello = hub.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
+    const expected = [...P1];
+    // runtx is the READ plane: advertised regardless of `control`.
+    if (runtx === "all") expected.push("runtx.v1", "runtx.lan.v1");
+    else if (runtx === "loopback") expected.push("runtx.v1");
+    if (control) {
+      expected.push("cmd.v1", "dialog.v1", "command.v1");
+      if (uploads === "on") expected.push("upload.v1", "upload.lan.v1");
+      else if (uploads === "loopback") expected.push("upload.v1");
+    }
+    expect([...hello.caps].sort()).toEqual([...expected].sort());
+    await hub.close();
+    hub = undefined;
+    resetGlobals();
+  });
+});
+
+describe("wireWebHub — runtx compat posture (F0 reviewer ruling → F2)", () => {
+  it("hello_ack.caps WITHOUT runtx.v1 ⇒ run_tx_req unanswered and run_watch never observes", async () => {
+    hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
+    const query = fakeQuery({ get: () => ({ status: "running", diag: {} }) });
+    const { pi, fire } = fakePi();
+    const control = wireWebHub(pi, deps({ query: () => query }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
+    const helloFrame = hub.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
+    hub.send(hub.conns[0]!, ackFrame(`a${helloFrame.agentId.pid}`, 4242, FULL_CAPS)); // no runtx.v1
+    await waitUntil(() => control.status().state === "live", 3_000, "live");
+    hub.send(hub.conns[0]!, { t: "run_watch", runId: "r_ABCDEFGH", on: true });
+    hub.send(hub.conns[0]!, { t: "run_tx_req", rid: "q1", runId: "r_ABCDEFGH", limit: 50, maxBytes: 1 << 20 });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(hub.all().some((f) => f.t === "run_tx_reply")).toBe(false);
+    expect(hub.all().some((f) => f.t === "run_ev")).toBe(false);
+    expect(query.observeCalls).toEqual([]);
+  });
+
+  it('subagentTranscript:"off" ⇒ silently inert even when the hub advertises runtx.v1', async () => {
+    hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
+    const query = fakeQuery({ get: () => ({ status: "running", diag: {} }) });
+    const { pi, fire } = fakePi();
+    const control = wireWebHub(pi, deps({ settings: { ...SETTINGS, subagentTranscript: "off" }, query: () => query }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
+    const helloFrame = hub.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
+    expect(helloFrame.caps).not.toContain("runtx.v1");
+    hub.send(hub.conns[0]!, ackFrame(`a${helloFrame.agentId.pid}`, 4242, [...FULL_CAPS, "runtx.v1"]));
+    await waitUntil(() => control.status().state === "live", 3_000, "live");
+    hub.send(hub.conns[0]!, { t: "run_watch", runId: "r_ABCDEFGH", on: true });
+    hub.send(hub.conns[0]!, { t: "run_tx_req", rid: "q1", runId: "r_ABCDEFGH", limit: 50, maxBytes: 1 << 20 });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(hub.all().some((f) => f.t === "run_tx_reply")).toBe(false);
+    expect(query.observeCalls).toEqual([]);
+  });
+});
+
+describe("wireWebHub — runtx wire plumbing (F2)", () => {
+  const RUN = "r_ABCDEFGH";
+  const branchEntry = {
+    id: "e1",
+    parentId: null,
+    type: "message",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    message: { role: "user", content: [{ type: "text", text: "hello" }] },
+  };
+
+  async function connectRuntx(query: QueryControlPort): Promise<void> {
+    hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
+    const { pi, fire } = fakePi();
+    const control = wireWebHub(pi, deps({ query: () => query }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
+    const helloFrame = hub.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
+    hub.send(hub.conns[0]!, ackFrame(`a${helloFrame.agentId.pid}`, 4242, [...FULL_CAPS, "runtx.v1"]));
+    await waitUntil(() => control.status().state === "live", 3_000, "live");
+  }
+
+  it("terminal run ⇒ deterministic source:file reply (sessionFile + finalLeafId)", async () => {
+    const query = fakeQuery({
+      get: () => ({ status: "completed", diag: { sessionFile: "/tmp/run.jsonl", finalLeafId: "leaf-1" } }),
+    });
+    await connectRuntx(query);
+    hub!.send(hub!.conns[0]!, { t: "run_tx_req", rid: "q1", runId: RUN, limit: 50, maxBytes: 1 << 20 });
+    await waitUntil(() => hub!.all().some((f) => f.t === "run_tx_reply"));
+    const reply = hub!.all().find((f) => f.t === "run_tx_reply") as RunTxReplyFrame;
+    expect(reply).toEqual({
+      t: "run_tx_reply",
+      rid: "q1",
+      runId: RUN,
+      ok: true,
+      source: "file",
+      status: "completed",
+      sessionFile: "/tmp/run.jsonl",
+      finalLeafId: "leaf-1",
+    });
+  });
+
+  it("live run: run_watch attaches a tap (observe called), events flow as run_ev, snapshot answers watching:true", async () => {
+    let listener: { onEvent(e: unknown): void; onEnd(status: string): void } | undefined;
+    const query = fakeQuery({
+      get: () => ({ status: "running", diag: {} }),
+      branchOf: () => [branchEntry],
+      observe: (_id, l) => {
+        listener = l;
+        return { kind: "attached", detach: () => undefined };
+      },
+    });
+    await connectRuntx(query);
+    hub!.send(hub!.conns[0]!, { t: "run_watch", runId: RUN, on: true });
+    await waitUntil(() => listener !== undefined, 3_000, "observe attached");
+    listener!.onEvent({ type: "turn_start", turnIndex: 1 });
+    await waitUntil(() => hub!.all().some((f) => f.t === "run_ev"), 3_000, "run_ev");
+    const ev = hub!.all().find((f) => f.t === "run_ev") as Extract<AgentFrame, { t: "run_ev" }>;
+    expect(ev).toMatchObject({ runId: RUN, seq: 1, e: { type: "turn_start" } });
+    hub!.send(hub!.conns[0]!, { t: "run_tx_req", rid: "q2", runId: RUN, limit: 50, maxBytes: 1 << 20 });
+    await waitUntil(() => hub!.all().some((f) => f.t === "run_tx_reply" && f.rid === "q2"), 3_000, "reply");
+    const reply = hub!.all().find((f) => f.t === "run_tx_reply" && f.rid === "q2") as RunTxReplyFrame;
+    expect(reply).toMatchObject({ ok: true, source: "live", watching: true, seq: 1, tapId: ev.tapId });
+    if (reply.ok && reply.source === "live") expect(reply.entries.map((e) => e.id)).toEqual(["e1"]);
+  });
+
+  it("unknown run ⇒ E_NOT_FOUND/unknown_run", async () => {
+    await connectRuntx(fakeQuery());
+    hub!.send(hub!.conns[0]!, { t: "run_tx_req", rid: "q3", runId: RUN, limit: 50, maxBytes: 1 << 20 });
+    await waitUntil(() => hub!.all().some((f) => f.t === "run_tx_reply"));
+    expect(hub!.all().find((f) => f.t === "run_tx_reply")).toMatchObject({
+      ok: false,
+      code: "E_NOT_FOUND",
+      reason: "unknown_run",
+    });
+  });
+});
+
+describe("wireWebHub — fleet omitted counts (fleet-drawer §3.2/#12)", () => {
+  it("more terminal runs than the 8-row cap ⇒ the fleet slot carries omitted", async () => {
+    hub = await startFakeHub(pathsIn(tmp.dir).socketPath);
+    const terminals = Array.from({ length: 10 }, (_, i) =>
+      runSnap({ runId: `run-${i}`, status: "completed", phase: "settled", updatedAt: i }),
+    );
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ fleet: () => terminals }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "fleet"), 3_000, "fleet frame");
+    const fleet = hub.all().find((f) => f.t === "fleet") as Extract<AgentFrame, { t: "fleet" }>;
+    expect(fleet.runs).toHaveLength(8);
+    expect(fleet.omitted).toEqual({ active: 0, terminal: 2 });
+  });
+
+  it("nothing dropped ⇒ no omitted key on the fleet frame", async () => {
+    hub = await startFakeHub(pathsIn(tmp.dir).socketPath);
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ fleet: () => [runSnap()] }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "fleet"), 3_000, "fleet frame");
+    const fleet = hub.all().find((f) => f.t === "fleet") as Extract<AgentFrame, { t: "fleet" }>;
+    expect(fleet).not.toHaveProperty("omitted");
+  });
+});
+
+describe("wireWebHub — runtx session replacement (F2 P1 regression: reset, not kill)", () => {
+  const RUN = "r_CDEFGH12";
+
+  it("session_shutdown(new) → session_start: run service answers again; the old tap stays fully unbound", async () => {
+    hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
+    const listeners: Array<{ onEvent(e: unknown): void; onEnd(status: string): void }> = [];
+    const detaches: string[] = [];
+    const query = fakeQuery({
+      get: () => ({ status: "running", diag: {} }),
+      branchOf: () => [],
+      observe: (_id, l) => {
+        listeners.push(l);
+        return { kind: "attached", detach: () => detaches.push(_id) };
+      },
+    });
+    const { pi, fire } = fakePi();
+    const control = wireWebHub(pi, deps({ query: () => query }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
+    const helloFrame = hub.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
+    hub.send(hub.conns[0]!, ackFrame(`a${helloFrame.agentId.pid}`, 4242, [...FULL_CAPS, "runtx.v1"]));
+    await waitUntil(() => control.status().state === "live", 3_000, "live");
+    hub.send(hub.conns[0]!, { t: "run_watch", runId: RUN, on: true });
+    await waitUntil(() => listeners.length === 1, 3_000, "first tap attached");
+
+    // Same-activation session replacement (/new): shutdown → start, same wireWebHub instance.
+    fire("session_shutdown", { type: "session_shutdown", reason: "new" }, ctx);
+    expect(detaches).toEqual([RUN]); // old tap/observer fully unbound at the boundary
+    const { ctx: ctx2 } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "new" }, ctx2);
+    await waitUntil(() => control.status().state === "live", 3_000, "live after /new");
+
+    // The stale listener must never produce a frame in the new session.
+    listeners[0]!.onEvent({ type: "turn_start", turnIndex: 99 });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(hub.all().some((f) => f.t === "run_ev")).toBe(false);
+
+    // …and the run service answers the NEW session's watch/req (the P1 bug: permanently dead).
+    hub.send(hub.conns[0]!, { t: "run_watch", runId: RUN, on: true });
+    await waitUntil(() => listeners.length === 2, 3_000, "second tap attached");
+    listeners[1]!.onEvent({ type: "turn_start", turnIndex: 1 });
+    await waitUntil(() => hub!.all().some((f) => f.t === "run_ev"), 3_000, "run_ev after /new");
+    hub.send(hub.conns[0]!, { t: "run_tx_req", rid: "q9", runId: RUN, limit: 50, maxBytes: 1 << 20 });
+    await waitUntil(() => hub!.all().some((f) => f.t === "run_tx_reply" && f.rid === "q9"), 3_000, "reply after /new");
+    expect(hub.all().find((f) => f.t === "run_tx_reply" && f.rid === "q9")).toMatchObject({
+      ok: true,
+      source: "live",
+      watching: true,
+    });
+  });
+});

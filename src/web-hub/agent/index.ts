@@ -22,7 +22,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { RunSnapshot } from "../../core/types.js";
+import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } from "../../core/types.js";
+import { isTerminalStatus } from "../../core/status.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
 import type { HubSpawnConfig } from "../protocol/spawn.js";
@@ -36,7 +37,7 @@ import {
 } from "../protocol/messages.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
-import { UPLOAD_AGENT_CAPS } from "../protocol/version.js";
+import { UPLOAD_AGENT_CAPS, RUNTX_AGENT_CAPS } from "../protocol/version.js";
 import type { LanStatus } from "../protocol/lan.js";
 import {
   acquireConnection,
@@ -46,6 +47,7 @@ import {
   type BindingPort,
   type HubConnection,
 } from "./connection.js";
+import { createRunTranscripts, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
@@ -107,6 +109,10 @@ export interface WebHubSettings {
    * `PI_WEBHUB_CONFIG` deep-equal to the pre-preview shape. Non-live like the rest of webHub.*:
    * change needs `/reload` then `/webhub restart`. */
   preview?: PreviewMode;
+  /** web-hub-fleet-drawer plan §4.4 (F2): subagent-transcript (fleet drawer) availability.
+   * `"all"` (default) advertises `runtx.v1` + `runtx.lan.v1`; `"loopback"` only `runtx.v1`;
+   * `"off"` neither. This is the READ plane — deliberately independent of `control`. */
+  subagentTranscript?: "all" | "loopback" | "off";
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
   /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，
@@ -120,9 +126,15 @@ export type StopResult =
   | { ok: false; reason: "already_terminal"; status: string }
   | { ok: false; reason: "stop_failed"; escalatedTo: "L2" | "L3" | "L4" };
 export interface QueryControlPort {
-  get(runId: string): { status: string } | undefined;
+  get(runId: string): { status: string; diag?: { sessionFile?: string; finalLeafId?: string } } | undefined;
   steer(runId: string, text: string): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }>;
   stop(runId: string, cause: "user_stop"): Promise<StopResult>;
+  /** fleet-drawer §4.4 (F2): live-run branch peek for transcript snapshots — a structural
+   * passthrough of `QueryService.branchOf` (undefined for unknown/terminal/handle-less runs). */
+  branchOf?(runId: string): readonly unknown[] | undefined;
+  /** fleet-drawer §4.4 (F2): attach a live observer to a running run's session stream —
+   * `QueryService.observe`'s synchronous four-state verdict. */
+  observe?(runId: string, l: RunObserverListener): ObserveRunResult;
 }
 export interface WebHubDeps {
   settings: WebHubSettings;
@@ -276,6 +288,42 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const queueMirror = createQueueMirror();
   const compactionState = createCompactionState(pi);
   const originEntry = createOriginEntry(pi);
+
+  // fleet-drawer §4.4 (F2): the run-transcript service. Enabled only while the live link's
+  // hello_ack.caps carries runtx.v1 AND webHub.subagentTranscript ≠ "off" (§3.2 compat:
+  // anything else is silently ignored); reads go through the F1 QueryService passthroughs.
+  const runTxEnabled = (): boolean =>
+    (settings.subagentTranscript ?? "all") !== "off" && (conn?.caps.includes("runtx.v1") ?? false);
+  const runTxPort = (): RunTranscriptPort | undefined => {
+    const q = deps.query?.();
+    if (q === undefined) return undefined;
+    return {
+      info: (runId) => {
+        const s = q.get(runId);
+        if (s === undefined) return undefined;
+        const info: { status: string; terminal: boolean; sessionFile?: string; finalLeafId?: string } = {
+          status: s.status,
+          terminal: isTerminalStatus(s.status as RunStatus),
+        };
+        if (s.diag?.sessionFile !== undefined) info.sessionFile = s.diag.sessionFile;
+        if (s.diag?.finalLeafId !== undefined) info.finalLeafId = s.diag.finalLeafId;
+        return info;
+      },
+      branch: (runId) => q.branchOf?.(runId),
+      observe: (runId, l) => q.observe?.(runId, l) ?? { kind: "unknown" },
+    };
+  };
+  const runTx = createRunTranscripts({
+    port: runTxPort,
+    trySend: (frame, o) => conn?.trySend(frame, o) ?? "not_live",
+    enabled: runTxEnabled,
+    now,
+    setTimer: (ms, fn) => {
+      const t = setTimeout(fn, ms);
+      t.unref();
+      return { cancel: () => clearTimeout(t) };
+    },
+  });
   // One capture instance for the whole control (`WebHubControl.capture`, the builtin bridge's
   // §4.9 echo and the commands slot's `output` badge) — the return value used to build a second,
   // disconnected one (todo #32 C11 wiring).
@@ -354,8 +402,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const fp = fleetFingerprint(rows);
     if (fp !== lastFleetFp) {
       lastFleetFp = fp;
-      c.setSlot("fleet", { t: "fleet", runs: rows });
+      c.setSlot("fleet", { t: "fleet", runs: rows, ...(rows.omitted !== undefined ? { omitted: rows.omitted } : {}) });
     }
+    runTx.tick(); // §3.3 #3/#4: 1Hz gap retries + endedPending redelivery
   };
 
   const publishCtl = (): void => {
@@ -478,7 +527,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (!attached || c === undefined || x === undefined) return;
       c.send(buildBranchReply(rid, x, maxBytes));
     },
+    onRunTxReq: (frame) => {
+      if (attached) runTx.onReq(frame);
+    },
+    onRunWatch: (frame) => {
+      if (attached) runTx.onWatch(frame.runId, frame.on);
+    },
     onStateChange: (v) => {
+      runTx.onLink(v.state === "live"); // §3.3 #3: link-up retries gaps / pending ends
       if (attached) setStatusLine(statusLineText(v, readStatusTheme(ctx)));
     },
   };
@@ -554,9 +610,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const capsExtra = (): readonly string[] => {
+    const caps: string[] = [];
+    // fleet-drawer §4.4 (F2): runtx is the READ plane — advertised independently of `control`
+    // ("all" ⇒ runtx.v1 + runtx.lan.v1, "loopback" ⇒ runtx.v1 only, "off" ⇒ neither).
+    const runtx = settings.subagentTranscript ?? "all";
+    if (runtx === "all") caps.push(...RUNTX_AGENT_CAPS);
+    else if (runtx === "loopback") caps.push("runtx.v1");
     const control = settings.control !== false;
-    if (!control) return [];
-    const caps: string[] = ["cmd.v1"];
+    if (!control) return caps;
+    caps.push("cmd.v1");
     const remoteAskUser = settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
     if (remoteAskUser) caps.push("dialog.v1");
     if (settings.webCommands !== false) caps.push("command.v1");
@@ -652,6 +714,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     commandHandler.onSessionBoundary();
     dialogBridge.detachAll();
     tap.dispose();
+    // §4.4 (F2 verifier P1): session replacement is a RESET, not a kill — /new・/resume・/fork
+    // re-enter session_start inside this same activation and the run service must answer again
+    // (same lifecycle as tap.dispose() above / tap.resetForSession() on session_start).
+    runTx.resetForSession();
     setStatusLine(undefined);
     const reason = reasonOf(event);
     const detachReason =

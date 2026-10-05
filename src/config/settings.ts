@@ -866,6 +866,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     webCommandPolicy: {},
     uploads: "on",
     preview: "on",
+    subagentTranscript: "all",
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
   },
@@ -1632,6 +1633,7 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     webCommandPolicy: policy,
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
+    subagentTranscript: parseSubagentTranscriptSetting(record.subagentTranscript, defaults.subagentTranscript),
     lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
   };
@@ -1648,6 +1650,16 @@ function parseUploadsSetting(raw: unknown, fallback: "on" | "loopback" | "off" |
 function parsePreviewSetting(raw: unknown, fallback: "on" | "loopback" | "off" | undefined): "on" | "loopback" | "off" {
   if (raw === "on" || raw === "loopback" || raw === "off") return raw;
   return fallback ?? "on";
+}
+
+/** web-hub-fleet-drawer plan §4.4 (F2): `webHub.subagentTranscript` is tri-valued;
+ * any other value falls back to the default "all"（用户已拍板）. */
+function parseSubagentTranscriptSetting(
+  raw: unknown,
+  fallback: "all" | "loopback" | "off" | undefined,
+): "all" | "loopback" | "off" {
+  if (raw === "all" || raw === "loopback" || raw === "off") return raw;
+  return fallback ?? "all";
 }
 
 /**

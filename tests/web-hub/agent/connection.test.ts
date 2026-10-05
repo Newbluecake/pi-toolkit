@@ -730,3 +730,128 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// fleet-drawer §4.3 (F2): trySend's SendResult table + run frame routing.
+// `send()`'s behavior is byte-identical — pinned by every pre-existing test above.
+// ---------------------------------------------------------------------------
+
+const RUN_FRAME = { t: "run_gap", runId: "r_ABCDEFGH", tapId: "tap-test-1", fromSeq: 1 } as AgentFrame;
+
+describe("trySend (fleet-drawer §4.3, F2)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it("no link at all ⇒ not_live (nothing written, no gap machinery touched)", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    expect(conn.trySend(RUN_FRAME)).toBe("not_live");
+    expect(n.sockets[0]!.written).toEqual([]);
+  });
+
+  it("live + written ⇒ 'written' and the frame is on the wire", () => {
+    const { conn, sock } = liveFake();
+    expect(conn.trySend(RUN_FRAME)).toBe("written");
+    expect(sock().frames().at(-1)).toMatchObject({ t: "run_gap", fromSeq: 1 });
+  });
+
+  it("droppable over the 1 MiB soft cap ⇒ 'dropped' (nothing written)", () => {
+    const { conn, sock } = liveFake();
+    sock().writableLength = LIMITS.writeQueueBytes + 1;
+    expect(conn.trySend(RUN_FRAME, { droppable: true })).toBe("dropped");
+    expect(
+      sock()
+        .frames()
+        .some((f) => f.t === "run_gap"),
+    ).toBe(false);
+    // non-droppable frames are still written under soft-cap pressure
+    expect(conn.trySend(RUN_FRAME)).toBe("written");
+  });
+
+  it("an unencodable frame ⇒ 'failed' + one console.warn (deduped)", () => {
+    const { conn } = liveFake();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const bad = {
+      t: "run_ev",
+      runId: "r_ABCDEFGH",
+      tapId: "tap-test-1",
+      seq: 1,
+      e: { type: "turn_start", bad: 1n },
+    } as unknown as AgentFrame;
+    expect(conn.trySend(bad)).toBe("failed");
+    expect(conn.trySend(bad)).toBe("failed");
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("sock.write throwing ⇒ 'failed' and the link drops to backoff", () => {
+    const { conn, sock } = liveFake();
+    const s = sock();
+    s.write = () => {
+      throw Object.assign(new Error("boom"), { code: "EPIPE" });
+    };
+    expect(conn.trySend(RUN_FRAME)).toBe("failed");
+    expect(conn.status().state).toBe("backoff");
+  });
+
+  it("crossing the 4 MiB hard cap with the write ⇒ 'failed' and the socket is torn down", () => {
+    const { conn, sock } = liveFake();
+    const s = sock();
+    const realWrite = s.write.bind(s);
+    s.write = (chunk: string) => {
+      const r = realWrite(chunk);
+      s.writableLength = LIMITS.hardQueueBytes + 1;
+      return r;
+    };
+    expect(conn.trySend(RUN_FRAME)).toBe("failed");
+    expect(s.destroyed).toBe(true);
+    expect(conn.status().state).toBe("backoff");
+  });
+});
+
+describe("run frame routing (fleet-drawer §4.3, F2)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  function routedBinding() {
+    const reqs: string[] = [];
+    const watches: Array<{ runId: string; on: boolean }> = [];
+    const b: BindingPort = {
+      onSnapshotReq: () => undefined,
+      onBranchReq: () => undefined,
+      onStateChange: () => undefined,
+      onRunTxReq: (f) => reqs.push(f.rid),
+      onRunWatch: (f) => watches.push({ runId: f.runId, on: f.on }),
+    };
+    return { b, reqs, watches };
+  }
+
+  it("run_tx_req / run_watch reach the binding only on a live link", () => {
+    const n = fakeNet();
+    const { b, reqs, watches } = routedBinding();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(b, SESSION);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    // handshaking (not live yet): frames are ignored
+    s.hub({ t: "run_tx_req", rid: "r1", runId: "r_ABCDEFGH", limit: 200, maxBytes: 1024 });
+    s.hub({ t: "run_watch", runId: "r_ABCDEFGH", on: true });
+    expect(reqs).toEqual([]);
+    expect(watches).toEqual([]);
+    s.hub(ackFrame());
+    s.hub({ t: "run_tx_req", rid: "r2", runId: "r_ABCDEFGH", limit: 200, maxBytes: 1024 });
+    s.hub({ t: "run_watch", runId: "r_ABCDEFGH", on: true });
+    expect(reqs).toEqual(["r2"]);
+    expect(watches).toEqual([{ runId: "r_ABCDEFGH", on: true }]);
+  });
+
+  it("a binding without the optional handlers keeps the link alive (frames dropped silently)", () => {
+    const { conn, sock } = liveFake();
+    conn.attach(binding(), SESSION);
+    sock().hub({ t: "run_tx_req", rid: "r1", runId: "r_ABCDEFGH", limit: 200, maxBytes: 1024 });
+    sock().hub({ t: "run_watch", runId: "r_ABCDEFGH", on: false });
+    expect(conn.status().state).toBe("live");
+  });
+});

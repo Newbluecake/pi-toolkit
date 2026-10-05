@@ -287,6 +287,13 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["on", "loopback", "off"],
     "web-hub: in-browser preview of session-cwd files and session-shared uploads (on = loopback+LAN, loopback = loopback only, off = disabled; change: /reload then /webhub restart; use loopback if others use your LAN)",
   ),
+  // web-hub-fleet-drawer plan §4.4 (F2): subagent transcript (fleet drawer) read plane —
+  // independent of webHub.control; non-live like the rest of webHub.* (change → /reload).
+  "webHub.subagentTranscript": choice(
+    "webHub.subagentTranscript",
+    ["all", "loopback", "off"],
+    "web-hub: subagent transcript in the fleet drawer (all = loopback+LAN, loopback = loopback only, off = disabled)",
+  ),
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
   // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`

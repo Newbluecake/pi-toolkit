@@ -10,7 +10,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
-import type { FleetRowWire, StatusInfo } from "../protocol/messages.js";
+import type { FleetOmitted, FleetRowWire, StatusInfo } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
 
@@ -58,7 +58,7 @@ export function projectFleet(
   snaps: readonly RunSnapshot[],
   now: number,
   typeOf?: (id: string) => string | undefined,
-): FleetRowWire[] {
+): FleetProjection {
   const vm = buildFleetViewModel(snaps, {
     now,
     maxActiveRows: WEB_MAX_ACTIVE_ROWS,
@@ -66,7 +66,7 @@ export function projectFleet(
     ...(typeOf !== undefined ? { typeOf } : {}),
   });
   const byId = new Map(snaps.map((s) => [s.runId, s]));
-  return vm.rows.map((r) => {
+  const rows = vm.rows.map((r) => {
     const row: FleetRowWire = {
       runId: r.runId,
       status: r.status,
@@ -86,19 +86,32 @@ export function projectFleet(
     if (r.toolTrail !== undefined) row.toolTrail = r.toolTrail;
     if (r.streamLine !== undefined) row.streamLine = r.streamLine;
     return row;
-  });
+  }) as FleetProjection;
+  // fleet-drawer §4.4/#12: rows the 64-active/8-terminal caps dropped, so the browser can
+  // render "N more not listed". Absent when nothing was omitted.
+  const omittedActive = vm.activeCount - vm.shownActiveCount;
+  const omittedTerminal = vm.totalCount - vm.activeCount - (vm.rows.length - vm.shownActiveCount);
+  if (omittedActive > 0 || omittedTerminal > 0) rows.omitted = { active: omittedActive, terminal: omittedTerminal };
+  return rows;
 }
+
+/** `projectFleet`'s return: the wire rows plus the optional §3.2/#12 omission counts. */
+export type FleetProjection = FleetRowWire[] & { omitted?: FleetOmitted };
 
 /** In-flight tool segment's live duration suffix (`▸bash npm test · 3s`, `· 1m05s`, `· 250ms`). */
 const LIVE_DURATION_RE = / · \d+(?:ms|s|m\d{2}s|h\d{2}m)$/;
 
 export function fleetFingerprint(rows: readonly FleetRowWire[]): string {
-  return JSON.stringify(
-    rows.map((r) => {
+  // fleet-drawer §4.4: the omission counts ride the fingerprint too — a run settling into
+  // or out of the truncated tail must flip it even when the visible rows are unchanged.
+  const omitted = (rows as FleetProjection).omitted;
+  return JSON.stringify({
+    rows: rows.map((r) => {
       const { elapsedMs: _e, phaseMs: _p, toolTrail, ...rest } = r;
       return toolTrail === undefined ? rest : { ...rest, toolTrail: toolTrail.replace(LIVE_DURATION_RE, "") };
     }),
-  );
+    ...(omitted !== undefined ? { omitted } : {}),
+  });
 }
 
 function safe<T>(fn: () => T, fallback: T): T {

@@ -46,6 +46,7 @@ import type {
 import { decodeHubFrame, LIMITS, TIMING } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import type { HubPaths } from "../protocol/paths.js";
+import type { RunTxReqFrame, RunWatchFrame } from "../protocol/run-transcript.js";
 import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, compareVersions, protoCompatible } from "../protocol/version.js";
 import { readStopMarkerSync } from "../protocol/stop-marker.js";
 import type { WebHubSettings, WebHubStatusView } from "./index.js";
@@ -96,13 +97,33 @@ export interface BindingPort {
   onStateChange(v: WebHubStatusView): void;
   onCmd?(frame: CmdFrame): void;
   onSuperseded?(frame: SupersededFrame): void;
+  /** fleet-drawer §4.3 (F2): run-transcript snapshot/page request (live link only). */
+  onRunTxReq?(frame: RunTxReqFrame): void;
+  /** fleet-drawer §4.3 (F2): live-tap on/off (live link only; idempotent, no reply). */
+  onRunWatch?(frame: RunWatchFrame): void;
 }
+
+/**
+ * fleet-drawer §4.3 (F2, #6): `trySend`'s verdict — richer than `send()`'s fire-and-forget
+ * so the run-transcript channel can fold losses into its own seq/gap bookkeeping:
+ *  - `not_live`: no live link/socket — the frame never reached the wire;
+ *  - `dropped`: droppable frame discarded at the 1 MiB soft cap;
+ *  - `failed`: encode failure (warned once) or socket write/teardown mid-write;
+ *  - `written`: handed to the kernel buffer.
+ */
+export type SendResult = "written" | "dropped" | "not_live" | "failed";
 
 export interface HubConnection {
   readonly implVersion: string; // = `${buildId}#${MODULE_INSTANCE}`
   attach(binding: BindingPort, session: SessionInfo): void;
   detach(reason: "quit" | "reload" | "new" | "resume" | "fork"): void;
   send(frame: AgentFrame, opts?: { droppable?: boolean }): void;
+  /**
+   * fleet-drawer §4.3 (F2): `send()`'s reporting twin — identical write path and caps, but
+   * returns a {@link SendResult} instead of folding losses into the `ev` gap machinery.
+   * Never throws, never touches `seq`/`gapFrom` (run frames keep their own per-tap seq).
+   */
+  trySend(frame: AgentFrame, opts?: { droppable?: boolean }): SendResult;
   setSlot(kind: SlotKind, frame: AgentFrame): void;
   readonly bufferedBytes: number;
   nextSeq(): number;
@@ -253,6 +274,7 @@ class Connection implements HubConnection {
   private protoRejected = false;
   private agentKey: string | undefined;
   private hubVersion: string | undefined;
+  private encodeWarned = false;
   /** C10: lower-version agents yield hub auto-start to a newer installation. */
   private yieldUntil = 0;
   private httpPort: number | undefined;
@@ -325,6 +347,26 @@ class Connection implements HubConnection {
       this.writeRaw(frame);
     } catch {
       /* never throw into a pi event handler */
+    }
+  }
+
+  trySend(frame: AgentFrame, opts?: { droppable?: boolean }): SendResult {
+    try {
+      if (this.link !== "live" || this.socket === undefined) return "not_live";
+      if (opts?.droppable === true && this.bufferedBytes > LIMITS.writeQueueBytes) return "dropped";
+      const r = this.writeRaw(frame);
+      if (r === "written") return "written";
+      if (r === "encode_failed") {
+        // A frame that fails to encode is a bug in the frame itself, not the link — say so
+        // once per connection (the loss still folds into the caller's gap bookkeeping).
+        if (!this.encodeWarned) {
+          this.encodeWarned = true;
+          console.warn(`[pi-subagent] web-hub trySend: failed to encode ${frame.t} frame`);
+        }
+      }
+      return "failed";
+    } catch {
+      return "failed";
     }
   }
 
@@ -587,6 +629,12 @@ class Connection implements HubConnection {
       case "branch_req":
         if (this.link === "live") this.callBinding((b) => b.onBranchReq(frame.rid, frame.maxBytes));
         return;
+      case "run_tx_req":
+        if (this.link === "live") this.callBinding((b) => b.onRunTxReq?.(frame));
+        return;
+      case "run_watch":
+        if (this.link === "live") this.callBinding((b) => b.onRunWatch?.(frame));
+        return;
     }
   }
 
@@ -614,24 +662,26 @@ class Connection implements HubConnection {
   }
 
   /** Write one frame to the current socket; enforces the 4 MiB hard cap. */
-  private writeRaw(frame: AgentFrame): void {
+  private writeRaw(frame: AgentFrame): "written" | "encode_failed" | "socket_failed" {
     const sock = this.socket;
-    if (sock === undefined) return;
+    if (sock === undefined) return "socket_failed";
     let line: string;
     try {
       line = encodeFrame(frame);
     } catch {
-      return; // unserializable payload: drop, never throw
+      return "encode_failed"; // unserializable payload: drop, never throw
     }
     try {
       sock.write(line);
     } catch (err) {
       this.onSocketDown(sock, errCode(err) ?? "EWRITE", String(err));
-      return;
+      return "socket_failed";
     }
     if (this.socket === sock && sock.writableLength > LIMITS.hardQueueBytes) {
       this.onSocketDown(sock, "E_BACKPRESSURE", "write queue over 4 MiB");
+      return "socket_failed"; // the bytes went into a socket that is now destroyed
     }
+    return "written";
   }
 
   private onSocketDown(sock: Socket, code: string, message: string): void {
