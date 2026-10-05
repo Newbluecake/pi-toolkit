@@ -84,8 +84,10 @@ kbd,
 }
 
 .icon {
-  width: 16px;
-  height: 16px;
+  width: calc(
+    16px * var(--fs-scale, 1)
+  ); /* follow the user's font-scale preference (field report 2026-10-05: the composer's attach icon stayed tiny at 200%) */
+  height: calc(16px * var(--fs-scale, 1));
   flex: none;
   fill: none;
   stroke: currentColor;
@@ -95,13 +97,13 @@ kbd,
 }
 
 .icon-sm {
-  width: 14px;
-  height: 14px;
+  width: calc(14px * var(--fs-scale, 1));
+  height: calc(14px * var(--fs-scale, 1));
 }
 
 .icon-lg {
-  width: 20px;
-  height: 20px;
+  width: calc(20px * var(--fs-scale, 1));
+  height: calc(20px * var(--fs-scale, 1));
 }
 
 .sprite {

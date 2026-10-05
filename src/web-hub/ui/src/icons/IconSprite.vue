@@ -34,6 +34,7 @@
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></symbol>
     <symbol id="i-chev-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6" /></symbol>
     <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" /></symbol>
+    <symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" /></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 7.5V12l3 2" />

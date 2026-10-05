@@ -68,7 +68,6 @@
   flex: 1;
   min-width: 0;
   min-height: 44px; /* touch target (§7.4) */
-  max-height: calc(22px * 8 + 16px); /* 8 rows */
   padding: 10px var(--sp-3);
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-md);
@@ -76,7 +75,8 @@
   color: var(--c-text);
   font: inherit;
   font-size: var(--fs-lg); /* 16px — iOS doesn't zoom on focus (§7.4/K19) */
-  line-height: 22px;
+  line-height: 1.375; /* unitless — must scale with --fs-scale; a fixed 22px overlapped lines at 150%+ (field report 2026-10-05) */
+  max-height: calc(1.375em * 8 + 20px); /* 8 rows at the scaled line-height + padding */
   resize: none;
   field-sizing: content; /* auto-grow where supported; CSSOM fallback in Composer.vue */
 }
@@ -129,18 +129,35 @@
   font-weight: var(--fw-medium);
 }
 
-/* --- delivery switch (§7.4/§7.5) — 2026-10-05: always a native <select> at every width --- */
+/* --- delivery switch (§7.4/§7.5) — 2026-10-05: always a native <select> at every width;
+ * skinned (appearance:none + overlay chevron) so it matches the other header controls instead
+ * of the platform-default chrome (user field report: the bare select looked ugly) --- */
+
+.deliver-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 6px;
+  flex: none;
+}
 
 .deliver-select {
+  appearance: none;
   min-height: 44px;
-  margin-bottom: 6px;
-  padding: 0 var(--sp-2);
+  padding: 0 calc(var(--sp-6) + 14px) 0 var(--sp-3); /* right padding clears the overlay chevron */
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-sm);
   background: var(--c-surface);
   color: var(--c-text);
   font-size: var(--fs-sm);
-  flex: none;
+  cursor: pointer;
+}
+
+.deliver-caret {
+  position: absolute;
+  right: var(--sp-2);
+  pointer-events: none;
+  color: var(--c-text-3);
 }
 
 .deliver-idle {

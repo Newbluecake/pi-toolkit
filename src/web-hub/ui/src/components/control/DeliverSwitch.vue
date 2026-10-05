@@ -8,6 +8,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
+import AppIcon from "../../icons/AppIcon.vue";
 import type { DeliverSwitchEmits, DeliverSwitchProps } from "../../contracts.js";
 
 defineProps<DeliverSwitchProps>();
@@ -27,14 +28,16 @@ function onSelect(ev: Event): void {
 
 <template>
   <span v-if="!busy" class="deliver-idle">{{ t("control.idleHint") }}</span>
-  <select
-    v-else
-    class="deliver-select"
-    name="deliver"
-    :aria-label="t('control.deliverGroup')"
-    :value="modelValue"
-    @change="onSelect"
-  >
-    <option v-for="o in options" :key="o.value" :value="o.value">{{ o.label.value }}</option>
-  </select>
+  <span v-else class="deliver-wrap">
+    <select
+      class="deliver-select"
+      name="deliver"
+      :aria-label="t('control.deliverGroup')"
+      :value="modelValue"
+      @change="onSelect"
+    >
+      <option v-for="o in options" :key="o.value" :value="o.value">{{ o.label.value }}</option>
+    </select>
+    <AppIcon name="chev-down" class="icon-sm deliver-caret" />
+  </span>
 </template>
