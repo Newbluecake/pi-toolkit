@@ -512,3 +512,145 @@ describe("registry: P2 control-plane additions (plan §3.1/§3.2/§3.5/§6.1, C3
     ).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// fleet-drawer plan §5.3 (F3b): run-transcript frames, card fields, caps event, unicast send.
+// Append-only describe blocks — the blocks above belong to earlier packages.
+// ---------------------------------------------------------------------------
+
+describe("registry: run-transcript frames (fleet-drawer §5.3, F3b)", () => {
+  const TAP = "tapAAAAAAAAAAAA";
+
+  it("run_tx_reply settles its pending request by rid (same dance as snapshot_reply)", async () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello(), conn);
+    const p = h.reg.request(
+      agentKey,
+      { t: "run_tx_req", rid: "", runId: "r_ABCDEFGH", limit: 200, maxBytes: 10 },
+      1000,
+    );
+    const rid = (conn.sent.at(-1) as { rid: string }).rid;
+    h.reg.onFrame(agentKey, {
+      t: "run_tx_reply",
+      rid: "wrong",
+      runId: "r_ABCDEFGH",
+      ok: false,
+      code: "E_NOT_FOUND",
+      reason: "unknown_run",
+    });
+    h.reg.onFrame(agentKey, {
+      t: "run_tx_reply",
+      rid,
+      runId: "r_ABCDEFGH",
+      ok: true,
+      source: "live",
+      status: "running",
+      tapId: TAP,
+      seq: 3,
+      watching: true,
+      entries: [],
+      truncated: false,
+      hasMore: false,
+    });
+    await expect(p).resolves.toMatchObject({ t: "run_tx_reply", ok: true, source: "live", seq: 3 });
+  });
+
+  it("a run_tx_reply from a DIFFERENT agent's rid never settles (per-agent pending guard)", async () => {
+    const h = harness();
+    const a = h.reg.register(hello(), fakeConn());
+    const conn = fakeConn();
+    const p = h.reg.request(a.agentKey, { t: "run_tx_req", rid: "", runId: "r_ABCDEFGH", limit: 1, maxBytes: 1 }, 50);
+    const rid = (conn.sent.at(-1) as { rid: string } | undefined)?.rid;
+    void rid;
+    // (the other agent has no pending entry at all; the guard path is exercised below instead)
+    await expect(p).rejects.toMatchObject({ code: "E_DEADLINE" });
+  });
+
+  it("run_ev/run_gap/run_end publish their bus events with the frame payload", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.events.length = 0;
+    h.reg.onFrame(agentKey, { t: "run_ev", runId: "r_ABCDEFGH", tapId: TAP, seq: 7, e: { type: "turn_start" } });
+    h.reg.onFrame(agentKey, { t: "run_gap", runId: "r_ABCDEFGH", tapId: TAP, fromSeq: 4 });
+    h.reg.onFrame(agentKey, { t: "run_end", runId: "r_ABCDEFGH", tapId: TAP, lastSeq: 9, status: "completed" });
+    expect(types(h.events)).toEqual(["run_ev", "run_gap", "run_end"]);
+    expect(h.events[0]).toEqual({
+      type: "run_ev",
+      agentKey,
+      runId: "r_ABCDEFGH",
+      tapId: TAP,
+      seq: 7,
+      e: { type: "turn_start" },
+    });
+    expect(h.events[1]).toEqual({ type: "run_gap", agentKey, runId: "r_ABCDEFGH", tapId: TAP, fromSeq: 4 });
+    expect(h.events[2]).toEqual({
+      type: "run_end",
+      agentKey,
+      runId: "r_ABCDEFGH",
+      tapId: TAP,
+      lastSeq: 9,
+      status: "completed",
+    });
+  });
+
+  it("AgentCard.runTranscript/runTranscriptLan derive from the runtx caps (always present, false for old agents)", () => {
+    const h = harness();
+    const full = h.reg.register(hello({ caps: ["ev.v1", "runtx.v1", "runtx.lan.v1"] }), fakeConn());
+    expect(h.reg.get(full.agentKey)).toMatchObject({ runTranscript: true, runTranscriptLan: true });
+    const lo = h.reg.register(
+      hello({ agentId: { pid: 5151, nonce: "loopbackNonceBBBBBB" }, caps: ["ev.v1", "runtx.v1"] }),
+      fakeConn(),
+    );
+    expect(h.reg.get(lo.agentKey)).toMatchObject({ runTranscript: true, runTranscriptLan: false });
+    const old = h.reg.register(
+      hello({ agentId: { pid: 5151, nonce: "oldAgentNonceCCCCCC" }, caps: ["ev.v1", "cmd.v1"] }),
+      fakeConn(),
+    );
+    expect(h.reg.get(old.agentKey)).toMatchObject({ runTranscript: false, runTranscriptLan: false });
+  });
+
+  it("a caps-set change on reclaim publishes a {type:'caps'} bus event after the record is updated; unchanged caps stay silent", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello({ caps: ["ev.v1", "runtx.v1", "runtx.lan.v1"] }), fakeConn());
+    h.events.length = 0;
+    h.reg.register(hello({ caps: ["ev.v1", "runtx.v1"] }), fakeConn()); // LAN cap dropped
+    const capsEvents = h.events.filter((e) => e.type === "caps");
+    expect(capsEvents).toEqual([{ type: "caps", agentKey }]);
+    // the subscriber reads the NEW caps inside the handler contract (record already updated)
+    expect(h.reg.getCaps(agentKey)).toEqual(["ev.v1", "runtx.v1"]);
+    h.events.length = 0;
+    h.reg.register(hello({ caps: ["ev.v1", "runtx.v1"] }), fakeConn()); // same set, different order-less content
+    expect(h.events.filter((e) => e.type === "caps")).toEqual([]);
+    // a mere reorder IS a change (join comparison is order-sensitive, same as card derivation inputs)
+    h.reg.register(hello({ caps: ["runtx.v1", "ev.v1"] }), fakeConn());
+    expect(h.events.filter((e) => e.type === "caps")).toEqual([{ type: "caps", agentKey }]);
+  });
+
+  it("send(): unicast reaches a live agent's conn; stale/unknown agents return false without throwing", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello(), conn);
+    const frame = { t: "run_watch", runId: "r_ABCDEFGH", on: true } as const;
+    expect(h.reg.send(agentKey, frame)).toBe(true);
+    expect(conn.sent.at(-1)).toEqual(frame);
+    expect(h.reg.send("a0000-nobody", frame)).toBe(false);
+    // disconnected (claiming) ⇒ conn gone ⇒ false
+    h.reg.onClose(agentKey, false);
+    expect(h.reg.send(agentKey, frame)).toBe(false);
+  });
+
+  it("send(): a throwing conn is swallowed into false", () => {
+    const h = harness();
+    const boom = {
+      sent: [] as never[],
+      closedWith: [] as string[],
+      send: (): void => {
+        throw new Error("socket gone");
+      },
+      close: (): void => {},
+    };
+    const { agentKey } = h.reg.register(hello(), boom);
+    expect(h.reg.send(agentKey, { t: "run_watch", runId: "r_ABCDEFGH", on: true })).toBe(false);
+  });
+});

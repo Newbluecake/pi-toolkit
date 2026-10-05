@@ -24,7 +24,14 @@
 import type net from "node:net";
 import { decodeAgentFrame, LIMITS, TIMING, type AgentFrame, type HubFrame } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
-import { P2_HUB_CAPS, PROTO, UPLOAD_HUB_CAPS, DIALOG_BG_HUB_CAPS, protoCompatible } from "../protocol/version.js";
+import {
+  P2_HUB_CAPS,
+  PROTO,
+  UPLOAD_HUB_CAPS,
+  DIALOG_BG_HUB_CAPS,
+  RUNTX_HUB_CAPS,
+  protoCompatible,
+} from "../protocol/version.js";
 import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
@@ -162,6 +169,10 @@ export function createAgentServer(
             // ask-user-async plan §7.2 (P3): same surface rule as UPLOAD_HUB_CAPS — must stay
             // byte-identical with hub.ts's browser-facing HubInfo.caps.
             ...DIALOG_BG_HUB_CAPS,
+            // fleet-drawer plan §5.3 (F3b): same two-surface rule — inserted in the SAME
+            // position as hub.ts's HubInfo.caps fold so the two lists stay byte-identical
+            // (§8.4's caps-coexist test pins the set equality).
+            ...RUNTX_HUB_CAPS,
             // web-hub-spawn plan §SP10: conditional cap tail (spawn.v1) — same array instance
             // hub.ts feeds HubInfo.caps, so the two surfaces can never drift.
             ...(deps.extraHubCaps ?? []),

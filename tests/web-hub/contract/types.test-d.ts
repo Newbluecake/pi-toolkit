@@ -239,6 +239,12 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "cmd_late"
       | "hub"
       | "spawns"
+      // fleet-drawer plan §5.3 (F3b): the run-transcript bus events (direct-fanout, never
+      // SSE-broadcast) + the caps-change event (§5.2 re-validation trigger).
+      | "run_ev"
+      | "run_gap"
+      | "run_end"
+      | "caps"
     >();
     // §6.6's documented SSE payload shapes, pinned on the bus event itself.
     type Dialogs = Extract<HubEvent, { type: "dialogs" }>;

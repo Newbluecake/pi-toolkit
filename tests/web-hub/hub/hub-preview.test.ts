@@ -21,6 +21,7 @@ import {
   P2_HUB_CAPS,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
+  RUNTX_HUB_CAPS,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, tmpDirs } from "./helpers.js";
@@ -34,9 +35,10 @@ afterEach(async () => {
 });
 
 /** The pre-PV3 caps composition: admin.caps() always reports `ctl.v1` (no lan configured ⇒
- * no `lan.v1`), then the four frozen cap groups. */
+ * no `lan.v1`), then the frozen cap groups. fleet-drawer F3b appended RUNTX_HUB_CAPS after
+ * DIALOG_BG, ahead of any preview tail — the baseline tracks the current composition. */
 function baselineCaps(): string[] {
-  return ["ctl.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS];
+  return ["ctl.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...RUNTX_HUB_CAPS];
 }
 
 interface FakeFrontend extends FrontendFactory {

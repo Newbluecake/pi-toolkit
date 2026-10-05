@@ -380,6 +380,11 @@ function toCard(v: AgentView): AgentCard {
   // here explicitly or a browser that (re)attaches never sees them on the fleet snapshot.
   if (v.upload !== undefined) card.upload = v.upload;
   if (v.uploadLan !== undefined) card.uploadLan = v.uploadLan;
+  // fleet-drawer plan §5.3 (F3b): same whitelist rule — runTranscript/runTranscriptLan ride the
+  // initial `agents` snapshot (this copy), `agent_up`, and reconnect paths; registry's card()
+  // always sets them (false for a pre-F2 agent), so the copy is unconditional-in-practice.
+  if (v.runTranscript !== undefined) card.runTranscript = v.runTranscript;
+  if (v.runTranscriptLan !== undefined) card.runTranscriptLan = v.runTranscriptLan;
   return card;
 }
 

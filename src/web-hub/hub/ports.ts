@@ -39,6 +39,15 @@ import type {
   WireEvent,
 } from "../protocol/messages.js";
 import type { HubPaths } from "../protocol/paths.js";
+import type {
+  RunEndFrame,
+  RunEvFrame,
+  RunGapFrame,
+  RunEndPayload,
+  RunEvPayload,
+  RunHistoryError,
+  RunHistoryPayload,
+} from "../protocol/run-transcript.js";
 import type { HubSpawnConfig, SpawnsPayload } from "../protocol/spawn.js";
 import type { PROTO } from "../protocol/version.js";
 import type { Scope } from "./lifecycle.js";
@@ -391,6 +400,13 @@ export interface AgentView extends AgentCard {
 export interface RegistryView {
   list(): readonly AgentView[];
   get(agentKey: string): AgentView | undefined;
+  /** fleet-drawer plan §5.3 (F3b, v2 review fix #4): the raw hello caps `requireCap` gates run
+   * subscriptions against (§7.1 — never the UX-only `AgentCard.runTranscript*`). Delegates to
+   * `registry.ts`'s own `getCaps`. Optional only so narrow out-of-package test fakes that never
+   * touch the run channel keep compiling; the real `Registry` (the sole production
+   * `RegistryView`) always provides it — a missing method reads as "caps unknown" and run
+   * admission fails closed (E_NOT_FOUND). */
+  getCaps?(agentKey: string): readonly string[] | undefined;
 }
 
 export type HubEvent =
@@ -425,7 +441,20 @@ export type HubEvent =
   /** web-hub-spawn plan §SP1 (arch §6.4): the `spawns` SSE broadcast — carries the Public
    * projection ONLY (`SpawnsPayload`); owner detail never rides the bus. `http.ts` (SP9)
    * forwards it as the `spawns` SSE event and snapshots it on connect. */
-  | { type: "spawns"; payload: SpawnsPayload };
+  | { type: "spawns"; payload: SpawnsPayload }
+  // fleet-drawer plan §5.3 (F3b): the run-transcript channel's agent→hub frames, republished
+  // from `registry.onFrame`'s new cases. These are DIRECT-fanout events, never SSE-broadcast:
+  // `http.ts`'s `onHubEvent` deliberately has no case for them — `hub/run-transcript.ts`'s
+  // service is the sole consumer (it applies §3.3's state table, then fans out per-subscriber
+  // through its `RunSink`; a broadcast would push every subagent's stream to every browser).
+  | { type: "run_ev"; agentKey: string; runId: string; tapId: string; seq: number; e: WireEvent }
+  | { type: "run_gap"; agentKey: string; runId: string; tapId: string; fromSeq: number }
+  | { type: "run_end"; agentKey: string; runId: string; tapId: string; lastSeq: number; status: string }
+  /** fleet-drawer plan §5.3 (F3b): an agent re-hello'd and its caps set changed — run
+   * subscriptions must be re-validated against the new caps (§5.2 "caps 变化 ⇒ 回收不再合格的
+   * 订阅"). Published by `registry.register()`'s reclaim branch after the record is updated, so
+   * subscribers reading `getCaps()` inside the handler already see the new set. */
+  | { type: "caps"; agentKey: string };
 
 export interface HubBus {
   subscribe(fn: (e: HubEvent) => void): () => void;
@@ -435,6 +464,59 @@ export interface HistoryService {
   snapshot(agentKey: string): Promise<HistoryPayload>; // §7 步骤 1-4；deadline TIMING.snapshotMs → reject E_DEADLINE
   page(agentKey: string, beforeEntryId: string, limit: number): Promise<HistoryPayload>;
   onLeafChanged(agentKey: string, leafId: string | null): void; // status.leafId 变化时调用；有订阅者才工作，500ms 去抖；结果经 bus `append` 事件发出
+}
+
+// ---------------------------------------------------------------------------
+// fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service surface. Implemented by
+// `hub/run-transcript.ts` (`createRunTranscriptService`), wired into `FrontendDeps.runTx` by
+// `hub.ts`, consumed by F4's `hub/run-routes.ts`. Frozen here so both sides compile against
+// one shape.
+// ---------------------------------------------------------------------------
+
+/**
+ * The http layer's fan-out callbacks (§5.2 `setSink` — loopback and LAN each hand in ONE
+ * sink; subscriptions carry `${listener}:${clientId}` refs so the service knows which
+ * listener a cap re-validation targets). Every method is exception-guarded by the service —
+ * a throwing sink never breaks the state machine.
+ */
+export interface RunSink {
+  /** A `run_ev` that passed §3.3's checks: deliver to the run's live subscribers now, buffer
+   * for pending ones. */
+  ev(agentKey: string, runId: string, payload: RunEvPayload): void;
+  /** A seq-aligned `run_end` (already ledger-deduped): deliver once, terminal. */
+  end(agentKey: string, runId: string, payload: RunEndPayload): void;
+  /** §3.3 resync step 1: a resync round STARTED — swap the run's live subs to fresh pending
+   * objects (old identities void) and buffer; the settled snapshot follows as `history`. */
+  resyncStart(agentKey: string, runId: string): void;
+  /** A resync round settled: success payloads carry `resync:true` and replace the whole runTx
+   * state; an error payload means the round failed — deliver `run_history{error}` and drop the
+   * subs the round was covering. */
+  history(agentKey: string, runId: string, payload: RunHistoryPayload | RunHistoryError): void;
+  /** The service dropped subscriptions server-side: agent gone (all refs), resync storm (all
+   * refs), or a caps change invalidating `refs` (subset — deliver the error to exactly those
+   * and delete their subs; `refs === undefined` means every ref). */
+  dropped(agentKey: string, runId: string, err: RunHistoryError, refs?: string[]): void;
+}
+
+/** fleet-drawer plan §5.2: the hub-side run-transcript service (capability gate, watch
+ * refcounting, snapshot/page via `run_tx_req` + F3a's file reader, §3.3 state table,
+ * RunEndLedger, bus reactions). */
+export interface RunTranscriptService {
+  snapshot(agentKey: string, runId: string, listener: ListenerKind): Promise<RunHistoryPayload>;
+  page(
+    agentKey: string,
+    runId: string,
+    before: string,
+    limit: number,
+    listener: ListenerKind,
+  ): Promise<RunHistoryPayload>;
+  watch(agentKey: string, runId: string, ref: string): void; // ref = `${listener}:${clientId}`
+  unwatch(agentKey: string, runId: string, ref: string): void;
+  /** Direct §3.3 input (the service also receives the same frames via the bus; this is the
+   * explicit seam F4/tests can drive). */
+  onFrame(agentKey: string, f: RunEvFrame | RunGapFrame | RunEndFrame): void;
+  setSink(s: RunSink): void;
+  dispose(): void;
 }
 
 export interface HubInfo {
@@ -527,6 +609,10 @@ export interface FrontendDeps {
    * when absent, `GET /api/preview` answers exactly as today (§4.7 matrix: loopback 401/404,
    * LAN 404) and no `X-PWH-Preview-*` header is ever sent. */
   preview?: PreviewRoutes;
+  /** fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service. Optional so test doubles
+   * and pre-F4 assemblies keep compiling — when absent there is no `/api/run/*` wiring (F4
+   * builds `createRunRoutes` off this) and everything else is byte-identical. */
+  runTx?: RunTranscriptService;
 }
 
 export interface HttpFrontend {

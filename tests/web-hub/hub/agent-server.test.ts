@@ -4,8 +4,23 @@ import { join } from "node:path";
 import { TIMING } from "../../../src/web-hub/protocol/messages.js";
 import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/agent-server.js";
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
-import { DIALOG_BG_HUB_CAPS, P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
-import { config, connectClient, hello, memLog, recordBus, tmpDirs, waitFor, type TestClient } from "./helpers.js";
+import {
+  DIALOG_BG_HUB_CAPS,
+  P2_HUB_CAPS,
+  RUNTX_HUB_CAPS,
+  UPLOAD_HUB_CAPS,
+} from "../../../src/web-hub/protocol/version.js";
+import {
+  config,
+  connectClient,
+  hello,
+  memLog,
+  recordBus,
+  sleepReal,
+  tmpDirs,
+  waitFor,
+  type TestClient,
+} from "./helpers.js";
 
 const tmp = tmpDirs();
 let server: net.Server;
@@ -62,7 +77,7 @@ describe("agent-server handshake", () => {
       pingMs: TIMING.pingMs,
       leaseMs: TIMING.staleMs,
       http: { port: 7878 },
-      caps: [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS],
+      caps: [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...RUNTX_HUB_CAPS],
     });
     expect(registry.list()).toHaveLength(1);
     expect(agentServer.connectionCount()).toBe(1);
@@ -204,5 +219,62 @@ describe("agent-server: P2 caps pass-through (plan §3.1/§6.1, C3)", () => {
     c.send({ t: "commands", epoch: "epoch-1", items: [] });
     await waitFor(() => events.map((e) => e.type).includes("commands"));
     expect(events.map((e) => e.type)).toEqual(["agent_up", "dialogs", "ctl", "commands"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fleet-drawer plan §5.3 (F3b): run-transcript frames pass through the agent socket untouched
+// (no special-casing in agent-server.ts, unlike lan_req/hub_ctl) and hello_ack.caps stays
+// byte-identical with hub.ts's HubInfo.caps after the RUNTX fold (full parity matrix:
+// tests/web-hub/hub/caps-coexist.test.ts).
+// ---------------------------------------------------------------------------
+
+describe("agent-server: run-transcript frames (fleet-drawer §5.3, F3b)", () => {
+  it("run_ev/run_gap/run_end/run_tx_reply frames reach the registry and its bus unmodified", async () => {
+    const events = recordBus(registry);
+    const c = await client();
+    c.send(hello());
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+    const p = registry.request(
+      "a4242-nonceA",
+      { t: "run_tx_req", rid: "", runId: "r_ABCDEFGH", limit: 1, maxBytes: 1 },
+      1000,
+    );
+    const req = await c.waitFrame((f) => f["t"] === "run_tx_req");
+    const rid = req["rid"] as string;
+    c.send({ t: "run_ev", runId: "r_ABCDEFGH", tapId: "tapAAAAAAAAAAAA", seq: 1, e: { type: "turn_start" } });
+    c.send({ t: "run_gap", runId: "r_ABCDEFGH", tapId: "tapAAAAAAAAAAAA", fromSeq: 1 });
+    c.send({
+      t: "run_tx_reply",
+      rid,
+      runId: "r_ABCDEFGH",
+      ok: true,
+      source: "live",
+      status: "running",
+      tapId: "tapAAAAAAAAAAAA",
+      seq: 2,
+      watching: true,
+      entries: [],
+      truncated: false,
+      hasMore: false,
+    });
+    await expect(p).resolves.toMatchObject({ t: "run_tx_reply", ok: true, source: "live", seq: 2 });
+    c.send({ t: "run_end", runId: "r_ABCDEFGH", tapId: "tapAAAAAAAAAAAA", lastSeq: 2, status: "completed" });
+    await waitFor(() => events.some((e) => e.type === "run_end"));
+    expect(events.filter((e) => e.type.startsWith("run_")).map((e) => e.type)).toEqual([
+      "run_ev",
+      "run_gap",
+      "run_end",
+    ]);
+  });
+
+  it("a run_watch frame sent BY the agent is ignored (hub→agent direction; decode-side only)", async () => {
+    const events = recordBus(registry);
+    const c = await client();
+    c.send(hello());
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+    c.send({ t: "run_watch", runId: "r_ABCDEFGH", on: true });
+    await sleepReal(20);
+    expect(events.filter((e) => e.type.startsWith("run_"))).toEqual([]);
   });
 });

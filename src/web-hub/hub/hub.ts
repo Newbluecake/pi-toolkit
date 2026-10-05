@@ -35,6 +35,7 @@ import {
   P2_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
+  RUNTX_HUB_CAPS,
   SPAWN_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
@@ -52,6 +53,8 @@ import { withDeadline, withSignal, createScope, type Scope } from "./lifecycle.j
 import { createHubLog } from "./log.js";
 import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
 import { createReqDeadline, type ReqDeadline } from "./req-deadline.js";
+import { createRunFileReader } from "./run-file-reader.js";
+import { createRunTranscriptService } from "./run-transcript.js";
 import { probePlatform, type PlatformProbeDeps } from "./spawn/config.js";
 import { createDirService } from "./spawn/dirs.js";
 import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/first-prompt.js";
@@ -240,6 +243,19 @@ export async function startHub(
     });
     const history = createHistoryService({ registry, log });
     cleanup.push(async () => history.dispose());
+    // fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service + its F3a file reader —
+    // constructed unconditionally (per-request capability gating happens against the AGENT's
+    // hello caps in the service's `requireCap`, §7.1; an agent without `runtx.*` caps is simply
+    // refused there). The service owns no timers; `dispose()` drops its bus subscription and
+    // every held watch. Both the runtime `close()` below and this startup-failure `cleanup`
+    // entry dispose explicitly — the runtime path never runs the cleanup array (upload plan
+    // #13's finding), so `close()` carries its own calls next to `history.dispose()`.
+    const runFileReader = createRunFileReader({ now });
+    const runTx = createRunTranscriptService({ registry, reader: runFileReader, log, now });
+    cleanup.push(async () => {
+      runTx.dispose();
+      runFileReader.dispose();
+    });
     let httpPort = 0;
     // Admin control plane (plan §8, S1-W3 LD): constructed once, ahead of `lanDeps`/`fe`/`close`
     // (all still `undefined`/not-yet-declared at this point) — every getter below is a closure
@@ -323,7 +339,16 @@ export async function startHub(
       // web-hub-spawn plan §SP10: `extraHubCaps` (spawn.v1, only when `config.spawn` exists) is
       // the same array instance `agent-server.ts` appends to `hello_ack.caps` — same
       // append-only pattern as UPLOAD/DIALOG_BG before it.
-      caps: [...admin.caps(), ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...extraHubCaps],
+      // fleet-drawer plan §5.3 (F3b): RUNTX_HUB_CAPS joins the same two surfaces the same way
+      // (§8.4's caps-coexist test pins the set equality).
+      caps: [
+        ...admin.caps(),
+        ...P2_HUB_CAPS,
+        ...UPLOAD_HUB_CAPS,
+        ...DIALOG_BG_HUB_CAPS,
+        ...RUNTX_HUB_CAPS,
+        ...extraHubCaps,
+      ],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
     // web-hub-spawn plan §SP10 (arch §7.8 "/webhub stop、restart 在 TUI 提示中显示 hub.json 的
@@ -610,6 +635,9 @@ export async function startHub(
       ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
       ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
+      // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
+      // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
+      runTx,
     });
     cleanup.push(() => fe.close());
     // web-hub-preview plan v3 §4.5.1 (PV3): pushed right after the frontend's own entry so the
@@ -1020,6 +1048,11 @@ export async function startHub(
         // those orphans are the next startup's sweep("startup") job (§2.2.4).
         if (uploads !== undefined) await bounded(uploads.close());
         history.dispose();
+        // fleet-drawer plan §5.3 (F3b): explicit runtime-path dispose (the cleanup array is
+        // startup-failure-only, upload plan #13) — service first (drops the bus subscription
+        // and held watches), then the reader (fails in-flight scans as `busy`).
+        runTx.dispose();
+        runFileReader.dispose();
         await bounded(agentServer.close());
         await bounded(rootScope.dispose());
         await bounded(owner.release());

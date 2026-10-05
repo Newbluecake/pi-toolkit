@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { installProcessHandlers, startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
-import { DIALOG_BG_HUB_CAPS, P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
+import {
+  DIALOG_BG_HUB_CAPS,
+  P2_HUB_CAPS,
+  RUNTX_HUB_CAPS,
+  UPLOAD_HUB_CAPS,
+} from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, tmpDirs, waitFor } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -263,5 +268,38 @@ describe("installProcessHandlers", () => {
     uninstall();
     expect(process.listenerCount("SIGTERM")).toBe(before);
     await waitFor(() => !existsSync(hub.paths.socketPath));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fleet-drawer plan §5.3 (F3b): RUNTX caps on both hub surfaces + runTx assembly.
+// ---------------------------------------------------------------------------
+
+describe("startHub — fleet-drawer F3b runTx wiring", () => {
+  it("HubInfo.caps carries RUNTX_HUB_CAPS on the browser-facing surface (hello_ack parity pinned by caps-coexist)", async () => {
+    const home = tmp.make("wh-hub-runtx-");
+    const fe = fakeFrontend({ port: 40004 });
+    const hub = await start(home, fe);
+    void hub;
+    expect(fe.deps[0]!.info().caps).toEqual(expect.arrayContaining([...RUNTX_HUB_CAPS]));
+  });
+
+  it("FrontendDeps.runTx is the assembled RunTranscriptService and closes cleanly", async () => {
+    const home = tmp.make("wh-hub-runtx-svc-");
+    const fe = fakeFrontend({ port: 40005 });
+    const hub = await start(home, fe);
+    const runTx = fe.deps[0]!.runTx;
+    expect(runTx).toBeDefined();
+    expect(typeof runTx!.snapshot).toBe("function");
+    expect(typeof runTx!.page).toBe("function");
+    expect(typeof runTx!.watch).toBe("function");
+    expect(typeof runTx!.unwatch).toBe("function");
+    expect(typeof runTx!.setSink).toBe("function");
+    // an unknown agent fails closed through the service itself (requireCap first check)
+    await expect(runTx!.snapshot("a0000-nope", "r_ABCDEFGH", "loopback")).rejects.toMatchObject({
+      code: "E_NOT_FOUND",
+    });
+    hubs.length = 0;
+    await hub.close("test"); // exercises the explicit runTx/reader dispose in close()
   });
 });

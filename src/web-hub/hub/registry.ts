@@ -60,6 +60,12 @@ export interface Registry extends RegistryView {
   setLateResultHandler(handler: (agentKey: string, frame: CmdResultFrame | CmdLateFrame) => void): void;
   /** C10: send a control frame to every live agent; a factory may tailor it per agent. */
   broadcast(frame: HubFrame | ((agentKey: string, view: AgentView) => HubFrame)): void;
+  /** fleet-drawer plan §5.2 (F3b): unicast a REPLY-LESS control frame (`run_watch`) to one
+   * agent — `request()` cannot express a fire-and-forget frame. Returns whether it was sent
+   * (record exists, phase live, socket write did not throw); a false return is a caller-visible
+   * degrade (e.g. the run-transcript service leaves `watchOn` unset so unwatch won't send a
+   * spurious `{on:false}`), never an error. */
+  send(agentKey: string, frame: HubFrame): boolean;
 }
 
 export interface AgentConn {
@@ -177,6 +183,11 @@ export function createRegistry(deps: {
       // web-hub-upload plan §5.1/U1 #10: derived from hello caps, same pattern as `control`.
       upload: r.caps.includes("upload.v1"),
       uploadLan: r.caps.includes("upload.lan.v1"),
+      // fleet-drawer plan §5.3 (F3b): same derivation as `upload`/`uploadLan` — always present
+      // (false for a pre-F2 agent), UX-only (§7.1: the hub re-checks the live caps per request
+      // by listener; the card field is not a security boundary).
+      runTranscript: r.caps.includes("runtx.v1"),
+      runTranscriptLan: r.caps.includes("runtx.lan.v1"),
     };
     if (r.session !== undefined) c.session = r.session;
     if (r.status !== undefined) c.status = r.status;
@@ -253,6 +264,18 @@ export function createRegistry(deps: {
       }
     },
 
+    send(agentKey, frame) {
+      const r = records.get(agentKey);
+      if (r === undefined || r.phase !== "live" || r.conn === undefined) return false;
+      try {
+        r.conn.send(frame);
+        return true;
+      } catch (err) {
+        log.warn("agent send failed", { agentKey, error: String(err) });
+        return false;
+      }
+    },
+
     list() {
       return [...records.values()].map(view);
     },
@@ -287,6 +310,7 @@ export function createRegistry(deps: {
           }
         }
         const epochChanged = existing.epoch !== hello.epoch;
+        const capsChanged = existing.caps.join("\u0000") !== hello.caps.join("\u0000");
         existing.conn = conn;
         existing.phase = "live";
         existing.byeReason = undefined;
@@ -304,6 +328,11 @@ export function createRegistry(deps: {
         log.info("agent reclaimed", { agentKey: existing.agentKey, from: prevPhase, epochChanged });
         if (prevPhase === "stale") publish({ type: "agent_up", agent: card(existing) });
         if (epochChanged) publish({ type: "gap", agentKey: existing.agentKey, fromSeq: 0 });
+        // fleet-drawer plan §5.3 (F3b): a caps-set change on re-hello — the run-transcript
+        // service re-validates its held subscriptions against the NEW caps (§5.2 "回收不再合格的
+        // 订阅"). Published after the record is updated, so a handler reading getCaps() sees the
+        // new set; unchanged caps (ordinary reconnect) stay silent.
+        if (capsChanged) publish({ type: "caps", agentKey: existing.agentKey });
         deps.onVersion?.(hello.pluginVersion, existing.agentKey);
         return { agentKey: existing.agentKey, reclaimed: true };
       }
@@ -398,6 +427,41 @@ export function createRegistry(deps: {
           return;
         case "gap":
           publish({ type: "gap", agentKey, fromSeq: frame.fromSeq });
+          return;
+        // fleet-drawer plan §5.3 (F3b): run-transcript agent→hub frames. `run_tx_reply` settles
+        // its pending `registry.request()` by rid (same dance as snapshot_reply above); the three
+        // stream frames are stateless here — republished on the bus for the run-transcript
+        // service's §3.3 state table (ports.ts: these HubEvents are never SSE-broadcast).
+        case "run_tx_reply": {
+          const p = pending.get(frame.rid);
+          if (p === undefined || p.agentKey !== agentKey) return;
+          pending.delete(frame.rid);
+          clearTimeout(p.timer);
+          p.resolve(frame);
+          return;
+        }
+        case "run_ev":
+          publish({
+            type: "run_ev",
+            agentKey,
+            runId: frame.runId,
+            tapId: frame.tapId,
+            seq: frame.seq,
+            e: frame.e,
+          });
+          return;
+        case "run_gap":
+          publish({ type: "run_gap", agentKey, runId: frame.runId, tapId: frame.tapId, fromSeq: frame.fromSeq });
+          return;
+        case "run_end":
+          publish({
+            type: "run_end",
+            agentKey,
+            runId: frame.runId,
+            tapId: frame.tapId,
+            lastSeq: frame.lastSeq,
+            status: frame.status,
+          });
           return;
         case "bye":
           r.byeReason = frame.reason;

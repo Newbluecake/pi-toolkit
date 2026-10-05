@@ -12,7 +12,12 @@ import type { LanReqFrame, LanResFrame } from "../../../src/web-hub/protocol/mes
 import type { AdminHandler, AdminMeta } from "../../../src/web-hub/hub/admin.js";
 import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/agent-server.js";
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
-import { DIALOG_BG_HUB_CAPS, P2_HUB_CAPS, UPLOAD_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
+import {
+  DIALOG_BG_HUB_CAPS,
+  P2_HUB_CAPS,
+  RUNTX_HUB_CAPS,
+  UPLOAD_HUB_CAPS,
+} from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, tmpDirs, type TestClient } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -73,7 +78,7 @@ describe("agent-server + admin wiring (plan §8)", () => {
     const c = await client();
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect(ack["caps"]).toEqual([...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS]);
+    expect(ack["caps"]).toEqual([...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...RUNTX_HUB_CAPS]);
   });
 
   it("deps.admin present ⇒ hello_ack.caps is admin.caps() plus P2_HUB_CAPS + UPLOAD_HUB_CAPS + DIALOG_BG_HUB_CAPS (C3, plan §3.1)", async () => {
@@ -82,7 +87,14 @@ describe("agent-server + admin wiring (plan §8)", () => {
     const c = await client();
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS]);
+    expect(ack["caps"]).toEqual([
+      "ctl.v1",
+      "lan.v1",
+      ...P2_HUB_CAPS,
+      ...UPLOAD_HUB_CAPS,
+      ...DIALOG_BG_HUB_CAPS,
+      ...RUNTX_HUB_CAPS,
+    ]);
   });
 
   it("web-hub-spawn §SP10: deps.extraHubCaps is appended verbatim after the static tails (spawn.v1 rides last)", async () => {
@@ -92,7 +104,15 @@ describe("agent-server + admin wiring (plan §8)", () => {
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     const caps = ack["caps"] as string[];
-    expect(caps).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, "spawn.v1"]);
+    expect(caps).toEqual([
+      "ctl.v1",
+      "lan.v1",
+      ...P2_HUB_CAPS,
+      ...UPLOAD_HUB_CAPS,
+      ...DIALOG_BG_HUB_CAPS,
+      ...RUNTX_HUB_CAPS,
+      "spawn.v1",
+    ]);
     expect(caps[caps.length - 1]).toBe("spawn.v1");
   });
 
