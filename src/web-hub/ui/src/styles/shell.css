@@ -42,13 +42,20 @@
 
 .brand {
   display: inline-flex;
-  flex: none;
+  flex: 0 1 auto; /* may shrink: at large --fs-scale values the label truncates instead of
+                     pushing the bar's controls (theme / font-size) off the right edge */
+  min-width: 0;
   white-space: nowrap;
   align-items: center;
   gap: var(--sp-2);
   font-size: var(--fs-md);
   font-weight: var(--fw-semibold);
   letter-spacing: -0.01em;
+}
+
+.brand > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .brand-mark {
@@ -110,52 +117,131 @@
 }
 
 /* three-state theme toggle (system / light / dark) — not in the static mockup (which only had
- * the JS-free `#mock-dark` demo checkbox); §3.9/§17.1's real switcher, styled to match the
- * topbar's other icon buttons. `role="radiogroup"` over three `role="radio"` buttons. */
+ * 2026-10-05: dropdown form (user field report — the segmented radiogroup crowded the header).
+ * Trigger = ghost icon button with the CURRENT theme's icon; menu mirrors the fontscale popover. */
 .theme-toggle {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--r-sm);
+  flex: none;
+}
+
+.theme-trigger[aria-expanded="true"] {
   background: var(--c-sunken);
+  color: var(--c-text);
 }
 
-.theme-toggle button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: calc(var(--r-sm) - 2px);
-  background: transparent;
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-  font-weight: var(--fw-medium);
-  white-space: nowrap;
-  transition: background-color var(--dur-fast) var(--ease-out);
-}
-
-.theme-toggle button:hover {
-  background: var(--c-surface-2);
-  color: var(--c-text-2);
-}
-
-.theme-toggle button[aria-checked="true"] {
+.theme-menu {
+  position: absolute;
+  top: calc(100% + var(--sp-2));
+  right: 0;
+  z-index: 40; /* above the drawer scrim (30) */
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  max-width: calc(100vw - var(--sp-8));
+  padding: var(--sp-1);
   background: var(--c-surface);
-  color: var(--c-primary);
-  box-shadow: var(--shadow-1);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
 }
 
-/* font-size cycle button (FontScaleToggle.vue) — text glyph instead of an icon (the frozen
- * IconName set has no font-scale glyph); sized by the shared .btn-icon rules, 44px hit area
- * on coarse pointers via primitives.css. Keeps a fixed-ish glyph size (the base --fs-md still
- * scales with the user's own setting, which doubles as live feedback for the tap). */
+.theme-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 40px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-menu-item:hover {
+  background: var(--c-surface-2);
+}
+
+.theme-menu-item[aria-checked="true"] {
+  color: var(--c-primary);
+  font-weight: var(--fw-semibold);
+}
+
+.theme-menu-label {
+  flex: 1;
+}
+
+.theme-menu-check {
+  color: var(--c-primary);
+}
+
+@media (pointer: coarse) {
+  .theme-menu-item {
+    min-height: 44px;
+  }
+}
+
+/* font-size slider popover (FontScaleToggle.vue) — "Aa" trigger (text glyph; the frozen
+ * IconName set has no font-scale glyph) plus an absolute panel pinned below the button and
+ * right-aligned to it (the trigger sits at the top bar's right edge, so right alignment keeps
+ * the panel inside the viewport; the max-width guard covers ultra-narrow screens). */
+.fontscale-root {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
 .fontscale-toggle {
   font-weight: var(--fw-semibold);
   letter-spacing: 0;
+}
+
+.fontscale-toggle[aria-expanded="true"] {
+  background: var(--c-sunken);
+  color: var(--c-text);
+}
+
+.fontscale-popover {
+  position: absolute;
+  top: calc(100% + var(--sp-2));
+  right: 0;
+  z-index: 40; /* above the drawer scrim (30) */
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 260px;
+  max-width: calc(100vw - var(--sp-8));
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
+}
+
+.fontscale-popover input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--c-primary);
+}
+
+.fontscale-readout {
+  min-width: 4ch;
+  text-align: right;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (pointer: coarse) {
+  .fontscale-popover input[type="range"],
+  .fontscale-popover .btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
 }
 
 .banners {

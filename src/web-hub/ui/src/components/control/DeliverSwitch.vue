@@ -1,21 +1,18 @@
 <!--
   Delivery-mode switch (control-plan.md v2.1 §7.4/§7.5 — C5). Shown by the composer only while
-  the agent is busy: a two-option `role="radiogroup"` (Steer = 插话当前轮, default; Follow-up =
-  排到之后). On narrow/coarse layouts it collapses to a native `<select>` (§7.5: 原生可达).
+  the agent is busy: Steer = 插话当前轮 (default), Follow-up = 排到之后. 2026-10-05 (user field
+  report): always a native `<select>` dropdown at every width — the ≥481px two-button radiogroup
+  is retired (native select stays fully keyboard/touch accessible and costs the least header
+  space; §7.5's "原生可达" rationale now applies everywhere).
 -->
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { useMedia } from "../../composables/useMedia.js";
 import type { DeliverSwitchEmits, DeliverSwitchProps } from "../../contracts.js";
 
-const props = defineProps<DeliverSwitchProps>();
+defineProps<DeliverSwitchProps>();
 const emit = defineEmits<DeliverSwitchEmits>();
 const { t } = useI18n();
-
-// §7.5: ≤480px the radiogroup folds into a native select (same breakpoint as the dock's
-// iconified Stop/Send row in control.css).
-const narrow = useMedia(window, "(max-width: 480px)").matches;
 
 const options = [
   { value: "steer", label: computed(() => t("control.deliverSteer")) },
@@ -31,8 +28,8 @@ function onSelect(ev: Event): void {
 <template>
   <span v-if="!busy" class="deliver-idle">{{ t("control.idleHint") }}</span>
   <select
-    v-else-if="narrow"
-    class="deliver-switch deliver-select"
+    v-else
+    class="deliver-select"
     name="deliver"
     :aria-label="t('control.deliverGroup')"
     :value="modelValue"
@@ -40,17 +37,4 @@ function onSelect(ev: Event): void {
   >
     <option v-for="o in options" :key="o.value" :value="o.value">{{ o.label.value }}</option>
   </select>
-  <span v-else class="deliver-switch" role="radiogroup" :aria-label="t('control.deliverGroup')">
-    <button
-      v-for="o in options"
-      :key="o.value"
-      type="button"
-      role="radio"
-      :aria-checked="modelValue === o.value"
-      :class="{ active: modelValue === o.value }"
-      @click="emit('update:modelValue', o.value)"
-    >
-      {{ o.label.value }}
-    </button>
-  </span>
 </template>

@@ -99,12 +99,11 @@ describe("Composer.vue key map (§7.4)", () => {
 
   it("busy ⇒ Enter sends with the DeliverSwitch mode (default steer), switchable to followUp", async () => {
     const w = mountComposer({ busy: true });
-    expect(w.find(".deliver-switch").exists()).toBe(true);
+    expect(w.find("select.deliver-select").exists()).toBe(true);
     await w.find("textarea").setValue("steer this");
     await w.find("textarea").trigger("keydown", { key: "Enter" });
     await w.find("textarea").setValue("queued for later");
-    const radios = w.findAll(".deliver-switch button");
-    await radios[1]!.trigger("click"); // Follow-up
+    await w.find("select.deliver-select").setValue("followUp");
     await w.find("textarea").trigger("keydown", { key: "Enter" });
     expect(w.emitted("send")).toEqual([
       ["steer this", "steer"],

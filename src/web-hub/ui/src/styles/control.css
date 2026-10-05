@@ -129,45 +129,18 @@
   font-weight: var(--fw-medium);
 }
 
-/* --- delivery switch (§7.4/§7.5) --- */
-
-.deliver-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  margin-bottom: 6px;
-  border-radius: var(--r-sm);
-  background: var(--c-sunken);
-  flex: none;
-}
-
-.deliver-switch button {
-  min-height: 32px;
-  padding: 0 var(--sp-2);
-  border: 0;
-  border-radius: calc(var(--r-sm) - 2px);
-  background: transparent;
-  color: var(--c-text-3);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-medium);
-  cursor: pointer;
-}
-
-.deliver-switch button[aria-checked="true"] {
-  background: var(--c-surface);
-  color: var(--c-primary);
-  box-shadow: var(--shadow-1);
-}
+/* --- delivery switch (§7.4/§7.5) — 2026-10-05: always a native <select> at every width --- */
 
 .deliver-select {
   min-height: 44px;
+  margin-bottom: 6px;
   padding: 0 var(--sp-2);
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-sm);
   background: var(--c-surface);
   color: var(--c-text);
   font-size: var(--fs-sm);
+  flex: none;
 }
 
 .deliver-idle {
@@ -658,7 +631,6 @@
     min-height: 44px;
   }
 
-  .deliver-switch button,
   .btn-xs,
   .command-item,
   .run-actions-toggle {
