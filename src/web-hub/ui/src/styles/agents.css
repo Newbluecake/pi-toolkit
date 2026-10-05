@@ -246,14 +246,17 @@
 }
 
 .agent-flags .pill {
-  height: 20px;
+  min-height: calc(20px * var(--fs-scale, 1)); /* font-scale clipping fix, same as primitives .pill */
   font-size: var(--fs-2xs);
 }
 
 @media (min-width: 481px) {
   .agent-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    /* 2026-10-05 field report: a FIXED 300px track clips card content at 150%+ font scales
+     * (cards squeezed into multi-column with text cut at the cell edge). Scaling the track
+     * floor with --fs-scale keeps the column count honest: 200% ⇒ 600px floor ⇒ one column. */
+    grid-template-columns: repeat(auto-fill, minmax(calc(300px * var(--fs-scale, 1)), 1fr));
     align-content: start;
     gap: var(--sp-2);
     padding: var(--sp-1) var(--sp-4) var(--sp-6);

@@ -79,8 +79,10 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  height: 20px;
-  padding: 0 6px;
+  /* 2026-10-05 field report (tray ready badge): fixed 20px clipped the scaled text at 150%+ —
+   * the floor scales with --fs-scale and padding lets content grow past it. */
+  min-height: calc(20px * var(--fs-scale, 1));
+  padding: 1px 6px;
   border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
   background: var(--c-surface);
@@ -133,8 +135,8 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 22px;
-  padding: 0 8px;
+  min-height: calc(22px * var(--fs-scale, 1)); /* same font-scale clipping fix as .chip */
+  padding: 1px 8px;
   border-radius: var(--r-pill);
   background: var(--pill-bg);
   color: var(--pill-fg);
