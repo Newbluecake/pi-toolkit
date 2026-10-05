@@ -162,7 +162,11 @@ async function onNewSession(): Promise<void> {
   newSessionBusy.value = true;
   newSessionNote.value = null;
   try {
-    const outcome = await c.runCommand(key, "new", "");
+    // A dedicated button click IS the explicit intent: `/new` sits in the agent-side policy's
+    // `confirm` tier (command-policy.ts), and this button has no inline confirm UI, so without
+    // `confirm: true` every click bounced back as an E_CONFIRM_REQUIRED "error". Typed `/new` in
+    // DetailDock's command mode still goes through the two-step confirm.
+    const outcome = await c.runCommand(key, "new", "", { confirm: true });
     newSessionNote.value = outcome.ok
       ? { kind: "ok", text: t("agents.newSessionOk") }
       : { kind: "err", text: outcome.message ?? outcome.error ?? "E_FAILED" };

@@ -253,10 +253,10 @@ describe("AgentList.vue — 'New session' header button", () => {
   });
 
   it("enabled for a live, controllable, selected agent — click runs runCommand(key, 'new', '')", async () => {
-    let captured: [string, string, string] | undefined;
+    let captured: [string, string, string, unknown] | undefined;
     const control = fakeControlHandle({
-      runCommand: async (agentKey, name, args) => {
-        captured = [agentKey, name, args];
+      runCommand: async (agentKey, name, args, opts) => {
+        captured = [agentKey, name, args, opts];
         return { ok: true };
       },
     });
@@ -269,7 +269,7 @@ describe("AgentList.vue — 'New session' header button", () => {
     expect(btn.attributes("disabled")).toBeUndefined();
     await btn.trigger("click");
     await wrapper.vm.$nextTick();
-    expect(captured).toEqual(["a1", "new", ""]);
+    expect(captured).toEqual(["a1", "new", "", { confirm: true }]);
     expect(wrapper.get(".new-session-note").attributes("data-kind")).toBe("ok");
   });
 
@@ -458,10 +458,10 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
   });
 
   it("main button click still runs /new via the same-cwd action (menu regression)", async () => {
-    let captured: [string, string, string] | undefined;
+    let captured: [string, string, string, unknown] | undefined;
     const control = fakeControlHandle({
-      runCommand: async (agentKey, name, args) => {
-        captured = [agentKey, name, args];
+      runCommand: async (agentKey, name, args, opts) => {
+        captured = [agentKey, name, args, opts];
         return { ok: true };
       },
     });
@@ -473,7 +473,7 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
     });
     await wrapper.get(".new-session-btn").trigger("click");
     await wrapper.vm.$nextTick();
-    expect(captured).toEqual(["a1", "new", ""]);
+    expect(captured).toEqual(["a1", "new", "", { confirm: true }]);
   });
 });
 
