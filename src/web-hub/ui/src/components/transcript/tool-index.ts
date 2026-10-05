@@ -5,8 +5,11 @@
  * reused directly — see `entries.ts`); `indexTools` itself stays private there until P5b's
  * cleanup pass, and this package must not touch `src/web-hub/web/**` (plan §5.2's frozen-face
  * rule) — so it is duplicated here, unchanged in behavior, rather than exported upstream.
+ * 相同)。fleet-drawer §6.6 (F6):签名从 `AgentState` 收窄为 `TranscriptSource`(两者在这
+ * 三个字段上同构),让抽屉里的 RunTranscript 也能喂同一个内核。
  */
-import type { AgentState, LiveTool } from "../../types.js";
+import type { LiveTool } from "../../types.js";
+import type { TranscriptSource } from "../../contracts.js";
 
 export interface ToolIndex {
   readonly results: Map<string, Record<string, unknown>>;
@@ -24,7 +27,7 @@ function scanToolCalls(m: Record<string, unknown> | null | undefined, called: Se
   }
 }
 
-export function indexTools(a: AgentState): ToolIndex {
+export function indexTools(a: TranscriptSource): ToolIndex {
   const results = new Map<string, Record<string, unknown>>();
   const called = new Set<string>();
   for (const it of a.items) {

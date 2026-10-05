@@ -12,11 +12,16 @@ import {
  * P4/W3-integration fix (todo #26, "上一轮报告"点 1/2): `checks-body.ts`'s DOM-dependent checks
  * used to hard-fail (in `PWH_VISUAL_STRICT_BODY=1` mode) on any scenario/route that legitimately
  * never mounts `.detail-body` at all — `dashboard`/`states`/`login` all route to `#/`, which
- * never selects an agent, so `.fleet`/`.transcript` genuinely don't exist there. These tests
- * pin the shared `bodyApplicability()`/`applicabilityOutcome()` gate (placeholder App vs. no
- * agent selected vs. a real P3+ page ready for the per-check assertion) and the fleet-panel's
- * own "zero rows → no `.fleet` at all" not-applicable case (ui-design.md §6.4's "无子 agent →
- * 不渲染子 agent 面板（不占位）", already documented on `FleetPanel.vue`).
+ * never selects an agent, so `#fleet-drawer`/`.transcript` genuinely don't exist there. These
+ * tests pin the shared `bodyApplicability()`/`applicabilityOutcome()` gate (placeholder App vs.
+ * no agent selected vs. a real P3+ page ready for the per-check assertion) and the fleet
+ * drawer's own "zero rows → no `.fleet-summary-bar`/`#fleet-drawer` at all" not-applicable case
+ * (ui-design.md §9's "无子 agent → 不渲染", fleet-drawer §6.1's `v-if`).
+ *
+ * fleet-drawer F6: the old `<details class="fleet">` fixtures were migrated to the new DOM shape
+ * (`.detail[data-drawer][data-drawer-open]` + `.fleet-summary-bar` + `#fleet-drawer .tree .run`),
+ * matching `checkFleetDrawerOpen`'s post-F6 semantics (§6.2: docked 默认开 / overlay·fullscreen
+ * 挂载关闭).
  */
 
 function fakeCtx(overrides: Partial<CheckContext> & { bodyHtml?: string }): CheckContext {
@@ -99,7 +104,7 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     const outcomes = await check.run(ctx);
     const byName = new Map(outcomes.map((o) => [o.name, o]));
     for (const name of [
-      "fleet-default-open",
+      "fleet-drawer-open",
       "transcript-window-cap",
       "content-visibility-auto",
       "long-content-scrolls-within-block",
@@ -108,7 +113,7 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     }
   });
 
-  it("a mounted .detail-body whose agent has zero fleet rows reports fleet-default-open as not applicable, not a failure", async () => {
+  it("a mounted .detail-body whose agent has zero fleet rows reports fleet-drawer-open as not applicable, not a failure", async () => {
     process.env["PWH_VISUAL_STRICT_BODY"] = "1";
     const ctx = fakeCtx({
       bodyHtml: `<div class="detail-body"><div class="transcript"><div class="tx-item"></div></div></div>`,
@@ -116,7 +121,7 @@ describe("check.run — scenario/route guards (the actual regression from the pr
       width: 1024,
     });
     const outcomes = await check.run(ctx);
-    const fleet = outcomes.find((o) => o.name === "fleet-default-open");
+    const fleet = outcomes.find((o) => o.name === "fleet-drawer-open");
     expect(fleet?.ok).toBe(true);
     expect(fleet?.detail).toMatch(/no fleet rows/);
   });
@@ -129,26 +134,60 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     expect(transcript?.ok).toBe(false);
   });
 
-  it("a real <details class='fleet'> reflects its open/closed state against the 768px breakpoint", async () => {
-    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
-    const openCtx = fakeCtx({
-      bodyHtml: `<div class="detail-body"><details class="fleet" open></details></div>`,
-      scenario: "detail",
-      width: 1024,
-    });
-    const openOutcomes = await check.run(openCtx);
-    expect(openOutcomes.find((o) => o.name === "fleet-default-open")?.ok).toBe(true);
+  // fleet-drawer F6 的 DOM 形状:`.detail[data-drawer][data-drawer-open]` + 摘要行按钮 +
+  // `#fleet-drawer`(`.tree .run` 行在其中;drawer 有 fleet 行即挂载,关闭只是 display:none)。
+  const drawerHtml = (mode: "docked" | "overlay" | "fullscreen", open: boolean) =>
+    `<div class="detail" data-drawer="${mode}"${open ? " data-drawer-open" : ""}>` +
+    `<div class="detail-main"><div class="detail-body"></div>` +
+    `<button class="fleet-summary-bar" aria-expanded="${open}"></button></div>` +
+    `<aside id="fleet-drawer"><div class="tree-scroll"><ul class="tree"><li><div class="run"></div></li></ul></div></aside>` +
+    `</div>`;
 
-    const closedAtDesktopCtx = fakeCtx({
-      bodyHtml: `<div class="detail-body"><details class="fleet"></details></div>`,
-      scenario: "detail",
-      width: 1024,
-    });
-    const closedOutcomes = await check.run(closedAtDesktopCtx);
-    expect(closedOutcomes.find((o) => o.name === "fleet-default-open")?.ok).toBe(false);
+  it("the fleet drawer's data-drawer mode/open state is checked against the F6 breakpoints (1280 docked-default-open / 767 fullscreen)", async () => {
+    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
+    const dockedOpen = await check.run(
+      fakeCtx({ bodyHtml: drawerHtml("docked", true), scenario: "detail", width: 1280 }),
+    );
+    expect(dockedOpen.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(true);
+
+    const dockedClosed = await check.run(
+      fakeCtx({ bodyHtml: drawerHtml("docked", false), scenario: "detail", width: 1280 }),
+    );
+    expect(dockedClosed.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(false);
+
+    const overlayClosed = await check.run(
+      fakeCtx({ bodyHtml: drawerHtml("overlay", false), scenario: "detail", width: 1024 }),
+    );
+    expect(overlayClosed.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(true);
+
+    const overlayOpen = await check.run(
+      fakeCtx({ bodyHtml: drawerHtml("overlay", true), scenario: "detail", width: 1024 }),
+    );
+    expect(overlayOpen.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(false);
+
+    const fullClosed = await check.run(
+      fakeCtx({ bodyHtml: drawerHtml("fullscreen", false), scenario: "detail", width: 375 }),
+    );
+    expect(fullClosed.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(true);
   });
 
-  it("P1 fix: expectFleetRows=true with no .fleet mounted is a real failure, not the zero-rows not-applicable pass", async () => {
+  it("fleet-drawer-open fails when the summary bar's aria-expanded disagrees with data-drawer-open", async () => {
+    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
+    const ctx = fakeCtx({
+      bodyHtml:
+        `<div class="detail" data-drawer="overlay"><div class="detail-main"><div class="detail-body"></div>` +
+        `<button class="fleet-summary-bar" aria-expanded="true"></button></div>` +
+        `<aside id="fleet-drawer"><ul class="tree"><li><div class="run"></div></li></ul></aside></div>`,
+      scenario: "detail",
+      width: 1024,
+    });
+    const outcomes = await check.run(ctx);
+    const fleet = outcomes.find((o) => o.name === "fleet-drawer-open");
+    expect(fleet?.ok).toBe(false);
+    expect(fleet?.detail).toMatch(/aria-expanded/);
+  });
+
+  it("P1 fix: expectFleetRows=true with no #fleet-drawer mounted is a real failure, not the zero-rows not-applicable pass", async () => {
     process.env["PWH_VISUAL_STRICT_BODY"] = "1";
     const ctx = fakeCtx({
       bodyHtml: `<div class="detail-body"><div class="transcript"></div></div>`,
@@ -157,20 +196,37 @@ describe("check.run — scenario/route guards (the actual regression from the pr
       expectFleetRows: true,
     });
     const outcomes = await check.run(ctx);
-    const fleet = outcomes.find((o) => o.name === "fleet-default-open");
+    const fleet = outcomes.find((o) => o.name === "fleet-drawer-open");
     expect(fleet?.ok).toBe(false);
     expect(fleet?.detail).toMatch(/fixture promises fleet rows/);
   });
 
-  it("expectFleetRows=true with .fleet actually mounted still evaluates the open/closed breakpoint normally", async () => {
+  it("expectFleetRows=true with the drawer mounted still evaluates the F6 mode/open semantics normally", async () => {
     process.env["PWH_VISUAL_STRICT_BODY"] = "1";
     const ctx = fakeCtx({
-      bodyHtml: `<div class="detail-body"><details class="fleet" open></details></div>`,
+      bodyHtml: drawerHtml("docked", true),
       scenario: "detail",
-      width: 1024,
+      width: 1280,
       expectFleetRows: true,
     });
     const outcomes = await check.run(ctx);
-    expect(outcomes.find((o) => o.name === "fleet-default-open")?.ok).toBe(true);
+    expect(outcomes.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(true);
+  });
+
+  it("expectFleetRows=true with the drawer mounted but zero .tree .run rows is a real failure", async () => {
+    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
+    const ctx = fakeCtx({
+      bodyHtml:
+        `<div class="detail" data-drawer="docked" data-drawer-open><div class="detail-main"><div class="detail-body"></div>` +
+        `<button class="fleet-summary-bar" aria-expanded="true"></button></div>` +
+        `<aside id="fleet-drawer"><ul class="tree"></ul></aside></div>`,
+      scenario: "detail",
+      width: 1280,
+      expectFleetRows: true,
+    });
+    const outcomes = await check.run(ctx);
+    const fleet = outcomes.find((o) => o.name === "fleet-drawer-open");
+    expect(fleet?.ok).toBe(false);
+    expect(fleet?.detail).toMatch(/tree \.run is empty/);
   });
 });

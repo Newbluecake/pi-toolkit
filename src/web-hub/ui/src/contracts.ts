@@ -12,6 +12,7 @@ import type {
   AgentCardView,
   AgentState,
   ConnState,
+  FleetOmittedWire,
   FleetTreeNode,
   HubHandle,
   LoginErrorView,
@@ -205,26 +206,67 @@ export interface DetailBodyProps {
   readonly now: number;
   readonly following: boolean;
   readonly narrow: boolean;
+  /** fleet-drawer §6.3 (F6): 抽屉开合状态,透给 FleetSummaryBar 的 `aria-expanded`。 */
+  readonly drawerOpen?: boolean;
 }
 export interface DetailBodyEmits {
   "load-older": [];
   "update:following": [value: boolean];
   "new-count": [n: number];
+  /** fleet-drawer §6.3 (F6): FleetSummaryBar 的开关点击。 */
+  "toggle-drawer": [];
 }
 
 // ---------------------------------------------------------------------------
-// fleet/ (P4)
+// fleet/ + drawer/ (P4; fleet-drawer plan v2 §6.3 — F6 对 P0 冻结面的有意修订:
+// FleetPanelProps/FleetNodeProps 随浮层机制一起删除,换成抽屉时代的四组契约。)
 // ---------------------------------------------------------------------------
 
-export interface FleetPanelProps {
+/** fleet-drawer §6.2 的三种抽屉模式(视觉由 CSS 按 `.detail[data-drawer=…]` 决定,行为由 JS 决定)。 */
+export type FleetDrawerMode = "docked" | "overlay" | "fullscreen";
+
+export interface FleetSummaryBarProps {
   readonly rows: readonly FleetRowWire[];
-  readonly now: number;
-  readonly defaultOpen: boolean;
+  /** 抽屉当前是否打开(仅驱动 `aria-expanded`;docked+open 时整条由 CSS 隐藏)。 */
+  readonly open: boolean;
+}
+export interface FleetSummaryBarEmits {
+  toggle: [];
 }
 
-export interface FleetNodeProps {
-  readonly node: FleetTreeNode;
-  readonly depth: number;
+export interface FleetTreeProps {
+  readonly nodes: readonly FleetTreeNode[];
+  readonly now: number;
+  /** 递归层级(根为 0;≥3 层的子树默认折叠,「另有 N 个」只在根层级渲染)。 */
+  readonly depth?: number;
+  /** §6.3 孤儿行:父 run 不在投影行内的 runId 集合(它们被提升为根,加「父 run 未列出」chip)。 */
+  readonly orphans?: ReadonlySet<string>;
+  /** §3.2/#12: fleet 帧的 omitted 计数(仅根层级消费;`undefined` 显式允许 ——
+   *  `exactOptionalPropertyTypes` 下模板绑定的 `agent.fleetOmitted` 可能为 undefined)。 */
+  readonly omitted?: FleetOmittedWire | undefined;
+}
+
+export interface FleetDrawerProps {
+  readonly agent: AgentState;
+  readonly now: number;
+  readonly mode: FleetDrawerMode;
+  readonly open: boolean;
+}
+export interface FleetDrawerEmits {
+  close: [];
+}
+
+export interface RunHeaderProps {
+  readonly agent: AgentState;
+  readonly mode: FleetDrawerMode;
+}
+export interface RunHeaderEmits {
+  back: [];
+  close: [];
+}
+
+export interface RunTranscriptProps {
+  readonly agent: AgentState;
   readonly now: number;
 }
 
@@ -232,10 +274,25 @@ export interface FleetNodeProps {
 // transcript/ (P4)
 // ---------------------------------------------------------------------------
 
+/**
+ * fleet-drawer plan §6.6 (F6): `Transcript.vue` 的渲染内核只吃这 8 个字段 —— 主会话传整个
+ * `AgentState`(结构上兼容),抽屉传 `RunTxState` 的投影。F5 已保证两者的 items/streaming/
+ * tools/history 四态同构,`buildTxEntries`/`indexTools` 随之同步收窄。
+ */
+export type TranscriptSource = Pick<
+  AgentState,
+  "key" | "items" | "streaming" | "tools" | "history" | "historyError" | "hasMore" | "paging"
+>;
+
 export interface TranscriptProps {
-  readonly agent: AgentState;
+  readonly agent: TranscriptSource;
   readonly following: boolean;
   readonly narrow: boolean;
+  /** §6.6: 根节点的 DOM id(锚点/焦点回退目标)。主会话用默认的 `"transcript"`,抽屉里
+   * 传 `"run-transcript"`,保证两个 Transcript 并存时 id 不重复(U7)。 */
+  readonly anchorId?: string;
+  /** 覆盖 `transcript.ariaLabel` 的地标名(抽屉里用 `drawer.runTranscriptAria`)。 */
+  readonly ariaLabel?: string;
 }
 export interface TranscriptEmits {
   "load-older": [];

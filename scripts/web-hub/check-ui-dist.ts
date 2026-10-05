@@ -45,8 +45,12 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 ];
 // Budget history: 120 KiB since #26 P0; bumped to 128 KiB by web-hub-preview PV6 (2026-10-05) —
 // wiring `PathText`/`PreviewHost`/`usePreview` into App.vue pulls the whole preview feature into
-// the bundle for the first time (HEAD-only 116885 B, HEAD+PV6 122969 B gzip at the bump).
-const JS_BUDGET_GZIP_BYTES = 128 * 1024;
+// the bundle for the first time (HEAD-only 116885 B, HEAD+PV6 122969 B gzip at the bump);
+// bumped to 144 KiB by fleet-drawer F6 (2026-10-05) — the drawer components go live
+// (FleetDrawer/FleetTree/FleetSummaryBar/RunTranscript/RunHeader + summary.ts) and todo-web is
+// in flight in the same workspace (工作区实测 134388 B gzip,含在途 todo-web);the slack above
+// the measurement absorbs todo-web's landing without another immediate bump.
+const JS_BUDGET_GZIP_BYTES = 144 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}

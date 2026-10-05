@@ -71,9 +71,10 @@ export interface CheckContext {
   readonly cspViolations: readonly CspViolation[];
   /** True iff the fixture backing this cell's dev-hub declares a `fleet` script event for the
    * currently routed agent (`agentKeyFromRoute`/`fixtureExpectsFleetRows`, computed once per
-   * scenario) — i.e. `.fleet` rows are known to be reachable, not merely possible. Lets
-   * `checks-body.ts`'s `checkFleetDefaultOpen` tell "this fixture genuinely has no fleet data"
-   * (still not-applicable) apart from "the fleet frame never got applied in time" (a real
+   * scenario) — i.e. `#fleet-drawer .tree .run` rows (fleet-drawer F6) are known to be
+   * reachable, not merely possible. Lets `checks-body.ts`'s `checkFleetDrawerOpen` tell "this
+   * fixture genuinely has no fleet data" (still not-applicable) apart from "the fleet frame
+   * never got applied in time" (a real
    * regression, per the P1 dashboard.json:330-416 timing bug this field exists to close). */
   readonly expectFleetRows: boolean;
   /** Pulls `window.__pwhViolations` from the *current* document and merges it into
@@ -236,7 +237,8 @@ export function agentKeyFromRoute(route: string): string | undefined {
 
 /** True iff `fixture`'s script declares a `fleet` frame — scoped (`DevHubScriptEvent.agentKey`)
  * or embedded (`data.agentKey`, mirroring `dev-hub.ts`'s own fallback) — for `agentKey`, with at
- * least one row. Used by `runCell` to decide whether it is worth waiting for `.fleet .run` to
+ * least one row. Used by `runCell` to decide whether it is worth waiting for
+ * `#fleet-drawer .tree .run` (fleet-drawer F6) to
  * appear before screenshotting/checking (P1 fix: the P2 fixed `SETTLE_MS` was shorter than the
  * fixture's own `atMs`, so the fleet frame never had a chance to land in time — see
  * dashboard.json's `atMs: 250` fleet event vs. the old 200ms settle). */
@@ -253,7 +255,7 @@ export function fixtureExpectsFleetRows(fixture: DevHubFixture, agentKey: string
   return false;
 }
 
-/** Deterministic timeout for `.fleet .run` to appear once we know (`fixtureExpectsFleetRows`)
+/** Deterministic timeout for `#fleet-drawer .tree .run` to appear once we know (`fixtureExpectsFleetRows`)
  * that a fleet frame IS coming for the routed agent — generous enough to absorb the render
  * gate's throttle window (`RenderGateOptions.intervalMs`, default 100ms) plus the fixture's own
  * `atMs` delay, but still bounded (never an unbounded/poll-forever wait). */
@@ -340,12 +342,16 @@ async function runCell(
     await page.goto(`${origin}/${scenario.route}`, { waitUntil: "load" });
   }
   if (expectFleetRows) {
+    // fleet-drawer F6: the tree lives inside `#fleet-drawer`, which is MOUNTED whenever the
+    // agent has fleet rows (§6.1's `v-if`) regardless of the open state (`display:none` when
+    // closed) — so a plain DOM query works in every drawer mode, no need to open the drawer
+    // first and thereby perturb the mount-time open-state checks in `checks-body.ts`.
     await page
-      .waitForFunction(() => document.querySelectorAll(".fleet .run").length > 0, {
+      .waitForFunction(() => document.querySelectorAll("#fleet-drawer .tree .run").length > 0, {
         timeout: FLEET_WAIT_TIMEOUT_MS,
       })
       .catch(() => {
-        // Timed out: leave it to `checks-body.ts`'s `checkFleetDefaultOpen` (told via
+        // Timed out: leave it to `checks-body.ts`'s `checkFleetDrawerOpen` (told via
         // `expectFleetRows` on `CheckContext`) to report this as a real failure — never swallow
         // it silently, and never retry with a longer sleep.
       });

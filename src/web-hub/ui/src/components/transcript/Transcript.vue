@@ -36,7 +36,7 @@ import { buildTxEntries } from "./entries.js";
  * scroll-triggered pagination threshold (plan §3.6); not a frozen/shared constant elsewhere. */
 const PAGE_TRIGGER_PX = 96;
 
-const props = defineProps<TranscriptProps>();
+const props = withDefaults(defineProps<TranscriptProps>(), { anchorId: "transcript" });
 const emit = defineEmits<TranscriptEmits>();
 const { t } = useI18n();
 
@@ -183,10 +183,10 @@ function jumpToLatest(): void {
 <template>
   <section
     ref="scrollBox"
-    id="transcript"
+    :id="anchorId"
     class="transcript"
     tabindex="-1"
-    :aria-label="t('transcript.ariaLabel')"
+    :aria-label="ariaLabel ?? t('transcript.ariaLabel')"
     @scroll="onScroll"
   >
     <div ref="innerBox" class="tx-inner">

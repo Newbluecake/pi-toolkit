@@ -8,10 +8,10 @@
  * informational skip unless `PWH_VISUAL_STRICT_BODY=1` forces a hard fail; a real P3+ page with
  * no `.detail-body` mounted (no agent selected — `dashboard`/`states`/`login` never route past
  * `#/`) is reported *not applicable*, never a failure; only a `.detail-body` that IS mounted but
- * is still missing its expected child selector is a genuine regression. `checkFleetDefaultOpen`
+ * is still missing its expected child selector is a genuine regression. `checkFleetDrawerOpen`
  * layers its own extra not-applicable bucket on top: a mounted `.detail-body` whose agent has
- * zero fleet rows legitimately renders no `.fleet` at all (ui-design.md §6.4: "无子 agent → 不渲染
- * 子 agent 面板（不占位）", `FleetPanel.vue`'s own header comment). The `long` scenario is the one
+ * zero fleet rows legitimately renders no `.fleet-summary-bar`/`#fleet-drawer` at all
+ * (ui-design.md §9 "无子 agent → 不渲染", fleet-drawer §6.1's `v-if`). The `long` scenario is the one
  * that matters most for §6.6 — its fixture already has a 1000-message deep-linked agent
  * (`tests/fixtures/web-hub-ui/long.json`) exercising real windowing.
  *
@@ -60,10 +60,10 @@ async function isPlaceholderApp(ctx: CheckContext): Promise<boolean> {
  * `EmptyState` in the detail pane instead — ui-design.md §6.2's "select an agent" empty state).
  * Neither is a regression; both must be reported as *not applicable*, never fail — exactly the
  * same non-negotiable distinction `checks-shell.ts`'s own `ctx.scenario === "login" ? null : ...`
- * guards draw for shell-only checks. `checkFleetDefaultOpen` additionally treats a *present*
- * `.detail-body` with zero fleet rows as its own, separate not-applicable case (ui-design.md §6.4's
- * own table row: "无子 agent → 不渲染子 agent 面板（不占位）", already documented on
- * `FleetPanel.vue` itself) — that is a third bucket, not a missing-DOM one, so it is decided by
+ * guards draw for shell-only checks. `checkFleetDrawerOpen` additionally treats a *present*
+ * `.detail-body` with zero fleet rows as its own, separate not-applicable case (ui-design.md §9's
+ * "无子 agent → 不渲染", same rule the deleted `FleetPanel.vue` used to document) — that is a
+ * third bucket, not a missing-DOM one, so it is decided by
  * each check individually rather than folded into this shared helper. */
 export type BodyApplicability = "placeholder" | "no-agent" | "ready";
 
@@ -91,33 +91,69 @@ export async function applicabilityOutcome(
   return null;
 }
 
-/** ui-design.md §6.4/§6.6: the fleet panel starts collapsed (just the summary row) on a <768
- * viewport and expanded at ≥768, and the tree area never exceeds its dvh/vh cap. Renders nothing
- * at all when the selected agent has zero fleet rows (§6.4's own table: "无子 agent → 不渲染子
- * agent 面板（不占位）", `FleetPanel.vue`'s header comment) — that is this check's own third
- * not-applicable bucket, on top of the shared placeholder/no-agent split. That not-applicable
- * bucket is only legitimate when `ctx.expectFleetRows` is false (the fixture backing this cell
- * genuinely never schedules a fleet frame for the routed agent — `visual.ts`'s own
+/** ui-design.md §6.4/§6.6 + fleet-drawer plan v2 §6.2 (F6): the old `<details class="fleet">`
+ * panel is gone — the fleet UI is now the in-flow `.fleet-summary-bar` toggle plus the
+ * `#fleet-drawer` side drawer (`.tree .run` rows inside; the drawer is MOUNTED whenever the
+ * agent has fleet rows, `display:none` when closed, so row presence is a DOM query, not a
+ * visibility one). This check asserts the new open/visibility semantics: the `.detail`
+ * `data-drawer` mode matches the viewport (≥1280 docked / ≤767 fullscreen / else overlay),
+ * docked starts OPEN (localStorage `webhub.fleetDrawer.open` defaults to "1" — the harness runs
+ * a fresh profile), overlay/fullscreen start CLOSED per mount, and the summary bar's
+ * `aria-expanded` agrees with `[data-drawer-open]`. Renders nothing at all when the selected
+ * agent has zero fleet rows (ui-design §9 不占位; §6.1's `v-if`) — that is this check's own
+ * third not-applicable bucket, on top of the shared placeholder/no-agent split. That bucket is
+ * only legitimate when `ctx.expectFleetRows` is false (the fixture backing this cell genuinely
+ * never schedules a fleet frame for the routed agent — `visual.ts`'s own
  * `fixtureExpectsFleetRows`); P1 fix (dashboard.json:330-416 vs. the old fixed `SETTLE_MS`): a
- * cell whose fixture DOES promise fleet rows for this agent but still shows zero after
- * `visual.ts`'s deterministic `.fleet .run` wait is a real regression, not a shrug. */
-async function checkFleetDefaultOpen(ctx: CheckContext): Promise<CheckOutcome> {
+ * cell whose fixture DOES promise fleet rows for this agent but still shows zero `.tree .run`
+ * after `visual.ts`'s deterministic wait is a real regression, not a shrug. */
+async function checkFleetDrawerOpen(ctx: CheckContext): Promise<CheckOutcome> {
   const applicability = await bodyApplicability(ctx);
-  const shared = await applicabilityOutcome("fleet-default-open", ctx, applicability);
+  const shared = await applicabilityOutcome("fleet-drawer-open", ctx, applicability);
   if (shared !== null) return shared;
   const result = await ctx.page.evaluate((width: number) => {
-    const el = document.querySelector(".fleet") as HTMLDetailsElement | null;
-    if (!el) return { present: false, open: false, expectOpen: width >= 768 };
-    return { present: true, open: el.open, expectOpen: width >= 768 };
+    const detail = document.querySelector(".detail");
+    const bar = document.querySelector(".fleet-summary-bar");
+    const drawer = document.querySelector("#fleet-drawer");
+    if (!detail || !bar || !drawer) return { present: false as const };
+    const mode = detail.getAttribute("data-drawer");
+    const open = detail.hasAttribute("data-drawer-open");
+    return {
+      present: true as const,
+      mode,
+      open,
+      ariaExpanded: bar.getAttribute("aria-expanded"),
+      rows: drawer.querySelectorAll(".tree .run").length,
+      expectMode: width >= 1280 ? "docked" : width <= 767 ? "fullscreen" : "overlay",
+      expectOpen: width >= 1280, // §6.2: docked 持久化默认 "1";overlay/fullscreen 每次挂载关闭
+    };
   }, ctx.width);
   if (!result.present) {
     if (ctx.expectFleetRows) {
-      return outcome("fleet-default-open", false, "<.fleet> not found, but fixture promises fleet rows for this agent");
+      return outcome(
+        "fleet-drawer-open",
+        false,
+        "#fleet-drawer/.fleet-summary-bar not found, but fixture promises fleet rows for this agent",
+      );
     }
-    return pass("fleet-default-open", "not applicable: selected agent has no fleet rows");
+    return pass("fleet-drawer-open", "not applicable: selected agent has no fleet rows");
   }
-  const ok = result.open === result.expectOpen;
-  return outcome("fleet-default-open", ok, `width=${ctx.width} open=${result.open} expected=${result.expectOpen}`);
+  const problems: string[] = [];
+  if (result.mode !== result.expectMode) problems.push(`mode=${result.mode} expected=${result.expectMode}`);
+  if (result.open !== result.expectOpen) problems.push(`open=${result.open} expected=${result.expectOpen}`);
+  if (result.ariaExpanded !== String(result.open)) {
+    problems.push(`aria-expanded=${result.ariaExpanded} vs open=${result.open}`);
+  }
+  if (ctx.expectFleetRows && result.rows === 0) {
+    problems.push("fixture promises fleet rows but #fleet-drawer .tree .run is empty");
+  }
+  return outcome(
+    "fleet-drawer-open",
+    problems.length === 0,
+    problems.length > 0
+      ? `width=${ctx.width} ${problems.join("; ")}`
+      : `width=${ctx.width} mode=${result.mode} open=${result.open} rows=${result.rows}`,
+  );
 }
 
 /** ui-design.md §6.6: transcript windowing caps mounted `.tx-item`s at 300 total, 80 on a phone
@@ -191,7 +227,7 @@ export const check: CheckModule = {
   id: "body",
   async run(ctx: CheckContext): Promise<CheckOutcome[]> {
     return [
-      await checkFleetDefaultOpen(ctx),
+      await checkFleetDrawerOpen(ctx),
       await checkTranscriptWindowCap(ctx),
       await checkContentVisibilityAuto(ctx),
       await checkLongContentScrollsWithinBlock(ctx),

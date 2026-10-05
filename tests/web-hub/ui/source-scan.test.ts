@@ -65,9 +65,11 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
 
 /** localStorage is only legitimate for the theme preference, the token-mode transport, and a
  * handful of pure UI-preference persistence spots added later (never auth/session data):
- * `ControlNotice.vue`'s per-variant dismiss memory (user decision: "全部可关", §7.6 revision)
- * and `AgentList.vue`'s desktop sidebar collapse state. */
-const LOCALSTORAGE_ALLOWED = /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue/i;
+ * `ControlNotice.vue`'s per-variant dismiss memory (user decision: "全部可关", §7.6 revision),
+ * `AgentList.vue`'s desktop sidebar collapse state, and — fleet-drawer plan v2 §6.2/§8.3 (F6) —
+ * `drawer/FleetDrawer.vue`'s docked-mode open state (`webhub.fleetDrawer.open`, 默认 "1";
+ * overlay/fullscreen 不持久化). */
+const LOCALSTORAGE_ALLOWED = /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {
@@ -93,6 +95,13 @@ describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
         `${UI_DIR}/src/components/dialog/AskUserForm.vue`,
         `${UI_DIR}/src/components/dialog/AskUserQuestion.vue`,
         `${UI_DIR}/src/components/fleet/FleetActions.vue`,
+        // fleet-drawer F6(§8.3 canary):抽屉时代的组件必须留在扫描范围内(FleetPanel/
+        // FleetNode 已随浮层机制删除)。
+        `${UI_DIR}/src/components/fleet/FleetTree.vue`,
+        `${UI_DIR}/src/components/fleet/FleetSummaryBar.vue`,
+        `${UI_DIR}/src/components/drawer/FleetDrawer.vue`,
+        `${UI_DIR}/src/components/drawer/RunTranscript.vue`,
+        `${UI_DIR}/src/components/drawer/RunHeader.vue`,
         `${UI_DIR}/src/components/shell/HubStateBanner.vue`,
       ]),
     );

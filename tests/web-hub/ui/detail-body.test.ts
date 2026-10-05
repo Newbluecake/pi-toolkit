@@ -6,11 +6,12 @@ import DetailBody from "../../../src/web-hub/ui/src/components/body/DetailBody.v
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
 
 /**
- * `DetailBody.vue` (vue-plan.md v2.1 §1.1/§3.2/§5.2 — P4's takeover of the P0→P4 seam): proves
- * the seam itself works — `contracts.ts`'s frozen `DetailBodyProps`/`DetailBodyEmits` really do
- * drive `FleetPanel.vue` + `Transcript.vue`, and every emit from either child bubbles through
- * unchanged. Deliberately does *not* re-test `FleetPanel.vue`/`Transcript.vue`'s own behavior
- * (that's `fleet.test.ts`/`transcript.test.ts`'s job) — only the wiring between them.
+ * `DetailBody.vue` (vue-plan.md v2.1 §1.1/§3.2/§5.2 — P4's takeover of the P0→P4 seam;
+ * fleet-drawer plan v2 §6.3 — F6 换成 FleetSummaryBar): proves the seam itself works —
+ * `contracts.ts`'s `DetailBodyProps`/`DetailBodyEmits` really do drive `FleetSummaryBar.vue` +
+ * `Transcript.vue`, and every emit from either child bubbles through unchanged. Deliberately
+ * does *not* re-test `FleetSummaryBar.vue`/`Transcript.vue`'s own behavior (that's
+ * `fleet-tree.test.ts`/`transcript.test.ts`'s job) — only the wiring between them.
  */
 
 type Msg = { event: string; data: unknown; id?: number };
@@ -53,7 +54,7 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     expect(wrapper.findComponent({ name: "Transcript" }).exists()).toBe(true);
   });
 
-  it("renders the fleet tree when the agent has subagent rows", async () => {
+  it("renders the fleet summary bar when the agent has subagent rows", async () => {
     const agent = agentWith(
       [],
       [
@@ -70,14 +71,41 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
       ],
     );
     const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
-    expect(wrapper.find(".fleet").exists()).toBe(true);
-    expect(wrapper.text()).toContain("worker");
+    const bar = wrapper.find(".fleet-summary-bar");
+    expect(bar.exists()).toBe(true);
+    // 摘要行只有聚合计数(行名在抽屉里的树上 —— fleet-tree.test.ts 的职责)
+    expect(bar.text()).toContain("1 running");
+    expect(bar.attributes("aria-controls")).toBe("fleet-drawer");
   });
 
-  it("renders no fleet panel when there are no subagent rows", async () => {
+  it("renders no fleet summary bar when there are no subagent rows", async () => {
     const agent = agentWith([]);
     const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
-    expect(wrapper.find(".fleet").exists()).toBe(false);
+    expect(wrapper.find(".fleet-summary-bar").exists()).toBe(false);
+  });
+
+  it("forwards drawerOpen to the summary bar's aria-expanded and bubbles its toggle", async () => {
+    const agent = agentWith(
+      [],
+      [
+        {
+          runId: "r1",
+          label: "worker",
+          status: "running",
+          phaseLabel: "running",
+          elapsedMs: 1000,
+          phaseMs: 0,
+          highlight: "none",
+          terminal: false,
+        },
+      ],
+    );
+    const wrapper = mount(DetailBody, {
+      props: { agent, now: 0, following: true, narrow: false, drawerOpen: true },
+    });
+    expect(wrapper.get(".fleet-summary-bar").attributes("aria-expanded")).toBe("true");
+    await wrapper.get(".fleet-summary-bar").trigger("click");
+    expect(wrapper.emitted("toggle-drawer")).toEqual([[]]);
   });
 
   it("forwards load-older / update:following / new-count from Transcript to its own emit", async () => {

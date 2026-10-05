@@ -1,0 +1,197 @@
+/*
+ * fleet 抽屉样式(fleet-drawer plan v2 §6.2 — F6):三种模式的视觉全部在这里,由
+ * `.detail[data-drawer="docked|overlay|fullscreen"]`(+ `[data-drawer-open]`)驱动,JS 只管
+ * 行为(开合状态、Esc/外点、焦点)。基座 `.detail-split`/`.detail-main` 在 detail.css
+ * (无 fleet 的页面不加载本文件也要成立)。
+ *
+ * | 模式       | 视觉                                                                        |
+ * | ---------- | --------------------------------------------------------------------------- |
+ * | docked     | ≥1280px:split 变 grid,右列 `--drawer-w`(clamp(360px,30vw,520px));关闭即收列 |
+ * | overlay    | 768–1279px:absolute 浮在主栏右侧,min(420px,85%),z-index 30                  |
+ * | fullscreen | ≤767px:fixed 占满全屏,z-index 40(低于 base.css 跳转链接的 50)               |
+ *
+ * 抽屉关闭时三模式一律 `display:none`(对辅助技术同样隐藏,不需要额外的 aria-hidden)。
+ */
+
+.fleet-drawer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--c-surface);
+  border-left: 1px solid var(--c-border);
+}
+
+.detail:not([data-drawer-open]) .fleet-drawer {
+  display: none;
+}
+
+/* docked 且已打开时,摘要行按钮由 CSS 隐藏(§6.3:抽屉本身就是常驻的) */
+.detail[data-drawer="docked"][data-drawer-open] .fleet-summary-bar {
+  display: none;
+}
+
+/* ---- docked(≥1280px):grid 右列 ------------------------------------------------ */
+.detail[data-drawer="docked"] {
+  --drawer-w: clamp(360px, 30vw, 520px);
+}
+
+.detail[data-drawer="docked"] .detail-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0;
+}
+
+.detail[data-drawer="docked"][data-drawer-open] .detail-split {
+  grid-template-columns: minmax(0, 1fr) var(--drawer-w);
+}
+
+/* ---- overlay(768–1279px):浮在主栏右侧 ---------------------------------------- */
+.detail[data-drawer="overlay"] .fleet-drawer {
+  position: absolute;
+  inset-block: 0;
+  right: 0;
+  width: min(420px, 85%);
+  z-index: 30;
+  box-shadow: var(--shadow-3);
+}
+
+/* ---- fullscreen(≤767px):占满全屏 --------------------------------------------- */
+.detail[data-drawer="fullscreen"] .fleet-drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  border-left: none;
+}
+
+/* ---- 抽屉内部构件 -------------------------------------------------------------- */
+
+.drawer-head,
+.run-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 44px;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.drawer-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+/* §6.3: 浮层删除后,`.tree-scroll` 是抽屉内的静态滚动容器 */
+.tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--sp-2) var(--sp-2);
+}
+
+.run-head .drawer-back {
+  flex: none;
+}
+
+.run-head-icon {
+  flex: none;
+}
+
+.run-head-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-head-name b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--fw-semibold);
+}
+
+.run-head-status {
+  flex: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* §6.3 lastRow 回退:被选中的 run 移出投影行后的「不在列表中」标记 */
+.chip-notlisted {
+  color: var(--c-text-3);
+  border-style: dashed;
+}
+
+.drawer-close {
+  flex: none;
+}
+
+/* ---- RunTranscript(§6.6)------------------------------------------------------- */
+
+.run-tx {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.run-tx .transcript {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 迷你「↓ 最新」按钮(主区的在 DetailDock 里,抽屉自己带一个) */
+.run-tx-latest {
+  position: absolute;
+  right: var(--sp-3);
+  bottom: calc(var(--sp-3) + 8px);
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  box-shadow: var(--shadow-3);
+}
+
+.run-tx-foot {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--c-border);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.run-tx-foot:empty {
+  display: none;
+}
+
+.run-tx-badge {
+  color: var(--st-stale);
+  font-weight: var(--fw-semibold);
+}
+
+.chip-terminal {
+  color: var(--c-text-3);
+}
+
+.run-tx-activity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.run-tx-retry {
+  flex: none;
+}

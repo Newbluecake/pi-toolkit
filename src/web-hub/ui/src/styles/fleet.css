@@ -1,57 +1,43 @@
-/**
- * Subagent tree panel styles (ui-design.md §5.3, §6.4/§6.6, vue-plan.md v2.1 §1.1/§3.2/§5.2 —
- * P4 exclusive). Class names and structure are ported verbatim from
- * `docs/dev/web-hub/ui-mockups/app.css`'s `.fleet`/`.tree`/`.run` block (`FleetPanel.vue` /
- * `FleetNode.vue` render exactly this markup) so the Vue build matches the approved mockup
- * pixel-for-pixel; imported once, by `FleetPanel.vue` only (plan §1.1).
+/*
+ * fleet 树 + 摘要行样式(ui-design.md §5.3, §6.4/§6.6;fleet-drawer plan v2 §6.3 — F6)。
+ * `.tree`/`.run` 行样式从 `docs/dev/web-hub/ui-mockups/app.css` 原样移植(FleetTree.vue 渲染
+ * 同样的标记)。F6 起浮层机制删除:`.fleet` 面板和 `.tree-scroll` 的 absolute 浮层规则随
+ * FleetPanel.vue 一起移除 —— 摘要行是常驻文档流的 `.fleet-summary-bar` 按钮,树本体在
+ * 右侧抽屉里(`.tree-scroll` 改为抽屉内的静态滚动容器,规则在 drawer.css)。本文件由
+ * FleetTree.vue / FleetSummaryBar.vue 引入。
  *
- * `.run[data-st="…"]` / `.tool[data-st="…"]`-style rules live per-file (this file only defines
- * the `.run` ones) rather than in a shared `primitives.css` `[data-st=…]` block — P3 owns that
- * file and P4 must stay independently buildable/testable without it (plan §5.2/§5.4: P3 ∥ P4,
- * neither depends on the other's files). `RunVisualState` has twelve values but the design
- * token set (`tokens.css`) only defines eight `--st-*` pairs — `idle`/`queued`/`aborted` share
- * the neutral `idle` color, `failed`/`timed_out` share `failed`, `waiting`/`stale` share `stale`
- * (ui-design.md §3.2's own color table already groups them this way).
+ * `.run[data-st="…"]` 状态色规则保持在本文件(见下),与 P3 的 primitives.css 互不依赖。
  */
 
-.fleet {
-  position: relative; /* anchors `.tree-scroll`'s floating dropdown, see below */
+/* §6.3: 摘要行 —— 常驻文档流的一行按钮(原 `.fleet > summary.panel-head`)。 */
+.fleet-summary-bar {
   flex: none;
-  display: flex;
-  flex-direction: column;
-  background: var(--c-surface);
-  border-bottom: 1px solid var(--c-border);
-}
-
-.fleet > summary {
-  list-style: none;
-}
-
-.fleet > summary::-webkit-details-marker {
-  display: none;
-}
-
-.panel-head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  width: 100%;
   min-height: 44px;
   padding: 0 var(--sp-4);
+  border: 0;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
   cursor: pointer;
   user-select: none;
-  font-size: var(--fs-sm);
+  text-align: left;
 }
 
-.panel-head:hover {
+.fleet-summary-bar:hover {
   background: var(--c-surface-2);
 }
 
-.panel-head .chev {
+.fleet-summary-bar .chev {
   color: var(--c-text-3);
   transition: transform var(--dur-base) var(--ease-out);
 }
 
-details[open] > .panel-head .chev {
+.fleet-summary-bar[aria-expanded="true"] .chev {
   transform: rotate(90deg);
 }
 
@@ -65,29 +51,6 @@ details[open] > .panel-head .chev {
   gap: var(--sp-2);
   color: var(--c-text-3);
   font-size: var(--fs-xs);
-}
-
-/* Floating dropdown, not in-flow (layout fix: the expanded tree used to push the transcript
- * down and cover it on small screens — ui-design §5.3 only asked for a single-line summary
- * always in flow). `.fleet` above owns the `position: relative` anchor; this panel is
- * positioned off that, so the `<details>` box itself never grows past `.panel-head`'s one
- * line, open or closed. Still independently scrollable (own max-height/overflow) and closed
- * on outside click / Esc (`FleetPanel.vue`'s document pointerdown/keydown listeners). */
-.tree-scroll {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 20;
-  background: var(--c-surface);
-  border: 1px solid var(--c-border);
-  border-top: none;
-  border-radius: 0 0 var(--r-md) var(--r-md);
-  box-shadow: var(--shadow-3);
-  max-height: 34dvh; /* the tree never pushes the conversation off screen (mobile default) */
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 0 var(--sp-2) var(--sp-2);
 }
 
 .tree,
@@ -175,6 +138,42 @@ details[open] > summary.run .chev {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: var(--fw-semibold);
+}
+
+/* fleet-drawer §6.3 (F6): transcript 入口开放时 run 名包一层按钮(纯文本外观,点击在抽屉里
+ * 打开该 run 的对话);不开放时渲染裸 `<b>`,样式不变。 */
+.run-open {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.run-open:hover b,
+.run-open:focus-visible b {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* §6.3: 父 run 不在投影行内(被提升为根)的行内 chip。 */
+.chip-orphan {
+  color: var(--c-text-3);
+  border-style: dashed;
+}
+
+/* §3.2/#12: 树根部的「另有 N 个未列出」提示行(64 active / 8 terminal 投影上限裁掉的计数)。 */
+.fleet-omitted {
+  margin: var(--sp-1) 0 0;
+  padding: 0 var(--sp-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
 }
 
 .run-activity {
@@ -294,17 +293,13 @@ details[open] > summary.run .chev {
 }
 
 @media (pointer: coarse) {
-  .panel-head {
+  .fleet-summary-bar {
     min-height: 44px;
   }
 }
 
 /* ================================================================ tablet 481–1024 */
 @media (min-width: 481px) {
-  .tree-scroll {
-    padding: 0 var(--sp-4) var(--sp-3);
-  }
-
   .tree ul {
     margin-left: 21px;
     padding-left: 12px;
@@ -324,10 +319,6 @@ details[open] > summary.run .chev {
 
 /* ================================================================ desktop >1024: single-line rows */
 @media (min-width: 1025px) {
-  .tree-scroll {
-    max-height: 30vh;
-  }
-
   .run {
     grid-template-columns: 18px 20px minmax(120px, 1.2fr) minmax(0, 2fr) auto;
     grid-template-areas: "chev icon name activity nums";

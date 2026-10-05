@@ -277,6 +277,26 @@
   flex-direction: column;
 }
 
+/* fleet-drawer §6.1 (F6): `.detail` 的直接子节点变成 `.detail-split` —— 主栏 `.detail-main`
+ * 继承原来 `.detail` 的纵向 flex 语义(detail-head 留在 split 之外),抽屉是其兄弟节点。
+ * 这里只放与模式无关的基座;`[data-drawer=…]` 三模式的视觉(docked 的 grid 列、overlay 的
+ * 绝对定位、fullscreen 的 fixed)全部在 drawer.css(由 FleetDrawer.vue 引入——无 fleet 的
+ * 页面不加载它,此处基座保证布局仍然成立)。 */
+.detail-split {
+  position: relative; /* overlay 模式的抽屉定位锚点(drawer.css) */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.detail-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* history waiting/error states (rendered directly by AgentDetail.vue when `agent.history` is
  * not yet "loaded" — plan's AgentDetail/DetailBody split, see AgentDetail.vue's header
  * comment) get a little breathing room since they sit directly in `.detail-body`, not inside

@@ -11,7 +11,8 @@
 import { itemRenderKey, messageText } from "@logic/transcript.js";
 import { safeJson, toolView } from "@logic/tools.js";
 import { resultText } from "@logic/state.js";
-import type { AgentState, Item, ToolView } from "../../types.js";
+import type { Item, ToolView } from "../../types.js";
+import type { TranscriptSource } from "../../contracts.js";
 import { indexTools, type ToolIndex } from "./tool-index.js";
 
 export type AssistantBlockView =
@@ -173,7 +174,7 @@ export interface TxBuild {
   readonly renderKeys: readonly string[];
 }
 
-export function buildTxEntries(a: AgentState): TxBuild {
+export function buildTxEntries(a: TranscriptSource): TxBuild {
   const idx = indexTools(a);
   const entries: TxEntry[] = [];
   const renderKeys: string[] = [];

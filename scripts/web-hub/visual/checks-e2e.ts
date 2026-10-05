@@ -538,17 +538,27 @@ async function checkNarrowDeepLinkCombination(ctx: CheckContext): Promise<CheckO
   }, AGENT_ALPHA_ROUTE_LITERAL);
   await page.waitForFunction(() => document.querySelector(".detail-head") !== null, { timeout: 5_000 }).catch(() => {});
 
-  const layout = await page.evaluate(() => ({
-    hasSidebar: document.querySelector(".sidebar") !== null,
-    hasDetail: document.querySelector(".detail") !== null,
-    fleetOpen: (document.querySelector(".fleet") as HTMLDetailsElement | null)?.open ?? null,
-  }));
+  const layout = await page.evaluate(() => {
+    const drawer = document.querySelector("#fleet-drawer");
+    return {
+      hasSidebar: document.querySelector(".sidebar") !== null,
+      hasDetail: document.querySelector(".detail") !== null,
+      // fleet-drawer F6: ≤767px 是 fullscreen 模式,抽屉每次挂载关闭(§6.2)—— drawer 挂载
+      // 与否(v-if 有 fleet 行才挂)和开合状态分开读,null = 该 agent 没有 fleet UI。
+      fleetDrawerOpen:
+        drawer === null ? null : (document.querySelector(".detail")?.hasAttribute("data-drawer-open") ?? null),
+    };
+  });
   results.push(
     outcome("e2e-narrow-deeplink-single-view", !layout.hasSidebar && layout.hasDetail, JSON.stringify(layout)),
   );
-  if (layout.fleetOpen !== null) {
+  if (layout.fleetDrawerOpen !== null) {
     results.push(
-      outcome("e2e-narrow-deeplink-fleet-collapsed", layout.fleetOpen === false, `fleetOpen=${layout.fleetOpen}`),
+      outcome(
+        "e2e-narrow-deeplink-fleet-collapsed",
+        layout.fleetDrawerOpen === false,
+        `fleetDrawerOpen=${layout.fleetDrawerOpen}`,
+      ),
     );
   }
 

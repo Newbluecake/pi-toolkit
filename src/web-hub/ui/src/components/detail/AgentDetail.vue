@@ -19,6 +19,14 @@
     the frozen `DetailDockProps`).
   - `DETAIL_METRICS` (2026-10-05, user 现场拍板): a read-only contextUsage/cost source for the
     composer's `ContextRing` — the context metric's new home after leaving `DetailHeader`.
+
+  Fleet drawer (fleet-drawer plan v2 §6.1/§6.2 — F6): owns the drawer mode
+  (`useFleetDrawerMode`, ≥1280 docked / 768–1279 overlay / ≤767 fullscreen) and the open state
+  (`useFleetDrawerOpen` — docked 的持久化物理上写在 FleetDrawer.vue 里,overlay/fullscreen
+  每次挂载关闭),并把 `<main class="detail">` 重排成 `.detail-split`(主栏 `.detail-main`
+  + `FleetDrawer`)。FleetDrawer 位于本组件 provide 的 CONTROL_CTX 作用域内(§6.1),树里的
+  FleetActions 才能拿到控制面上下文。关闭抽屉时若有选中 run,一并 `selectRun(null)` 退订
+  (「没人看就不推」,§2);run 订阅的 transport 归 useHub 管,组件只走 HubHandle。
 -->
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
@@ -42,6 +50,7 @@ import DetailBody from "../body/DetailBody.vue";
 import DetailDock from "./DetailDock.vue";
 import DetailHeader from "./DetailHeader.vue";
 import NoticeBanner from "../shell/NoticeBanner.vue";
+import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
 const RETRY_NOTICE_ID = "history-error";
 
@@ -385,57 +394,105 @@ const dockCtlProps = computed(() => ({
   busy: busy.value,
   ...(readonlyReason.value !== null ? { readonlyReason: readonlyReason.value } : {}),
 }));
+
+// --- fleet drawer (fleet-drawer plan v2 §6.1/§6.2 — F6) --------------------------------------
+
+const drawerMode = useFleetDrawerMode(window).mode;
+const { open: drawerOpen, toggle: toggleDrawerState, close: closeDrawerState } = useFleetDrawerOpen(drawerMode);
+const hasFleet = computed(() => props.agent.fleet.length > 0);
+const selectedRunId = computed(() => props.agent.runSel ?? null);
+
+/** 退选正在看的 run(「没人看就不推」,§2;transport 拆除在 useHub 里)。所有关闭入口统一
+ * 走这个语义 —— Esc/外点/关闭按钮(onCloseDrawer)和摘要行按钮的关方向(onToggleDrawer)
+ * 一致,docked 的 toggle 也不搞「只是视觉收起」的双标(F6 验收 P1-1:overlay 下摘要按钮
+ * 关抽屉但订阅暗挂,就是没走这条路径造成的)。重开抽屉回到树,重选 run 时快照自动 resync。 */
+function deselectRun(): void {
+  if (typeof props.agent.runSel === "string") hub?.selectRun?.(props.agent.key, null);
+}
+
+function onToggleDrawer(): void {
+  if (drawerOpen.value) deselectRun(); // 关方向:统一退订;开方向不自动重选(展示树)
+  toggleDrawerState();
+}
+
+function onCloseDrawer(): void {
+  deselectRun();
+  closeDrawerState();
+}
 </script>
 
 <template>
-  <main class="detail" aria-labelledby="detail-title">
+  <main
+    class="detail"
+    aria-labelledby="detail-title"
+    :data-drawer="drawerMode"
+    :data-drawer-open="drawerOpen || undefined"
+  >
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 
-    <NoticeBanner v-for="notice in notices" :key="notice.id" :notice="notice" @action="onNoticeAction" />
+    <div class="detail-split">
+      <div class="detail-main">
+        <NoticeBanner v-for="notice in notices" :key="notice.id" :notice="notice" @action="onNoticeAction" />
 
-    <div v-if="agent.history === 'waiting'" class="detail-body" aria-busy="true">
-      <div class="skel-stack">
-        <span class="skel skel-bubble"></span>
-        <span class="skel skel-w90"></span><span class="skel skel-w80"></span><span class="skel skel-w60"></span>
-      </div>
-      <p class="sr-only" role="status">{{ t("detail.loadingHistory") }}</p>
-    </div>
+        <div v-if="agent.history === 'waiting'" class="detail-body" aria-busy="true">
+          <div class="skel-stack">
+            <span class="skel skel-bubble"></span>
+            <span class="skel skel-w90"></span><span class="skel skel-w80"></span><span class="skel skel-w60"></span>
+          </div>
+          <p class="sr-only" role="status">{{ t("detail.loadingHistory") }}</p>
+        </div>
 
-    <DetailBody
-      v-else
-      class="detail-body"
-      :agent="agent"
-      :now="now"
-      :following="following"
-      :narrow="narrow"
-      @load-older="emit('load-older')"
-      @update:following="onUpdateFollowing"
-      @new-count="onNewCount"
-    />
-
-    <!-- ask_user dialogs anchor just above the dock/Composer (user-requested 2026-10-05:
-         was pinned to the top banner slot, which forced mobile users to scroll up to answer) -->
-    <template v-if="controlEnabled">
-      <section v-for="d in openDialogs" :key="`${d.dialogId}:${dialogsEpoch}`" class="ask-user-slot">
-        <p v-if="epochStaleIds.includes(d.dialogId)" class="ask-epoch-note" role="status">
-          {{ t("dialog.epochChanged") }}
-        </p>
-        <AskUserForm
-          :dialog="d"
-          :suspended="hubSuspended"
-          @answer="onDialogAnswer(d.dialogId, $event)"
-          @cancel="onDialogCancel(d.dialogId)"
+        <DetailBody
+          v-else
+          class="detail-body"
+          :agent="agent"
+          :now="now"
+          :following="following"
+          :narrow="narrow"
+          :drawer-open="drawerOpen"
+          @load-older="emit('load-older')"
+          @update:following="onUpdateFollowing"
+          @new-count="onNewCount"
+          @toggle-drawer="onToggleDrawer"
         />
-      </section>
-    </template>
-    <p v-for="id in folded" :key="`folded-${id}`" class="ask-folded" role="status">{{ foldedNote(id) }}</p>
 
-    <DetailDock
-      :following="following"
-      :new-count="newCount"
-      v-bind="dockCtlProps"
-      @update:following="onUpdateFollowing"
-      @jump="onJump"
-    />
+        <!-- ask_user dialogs anchor just above the dock/Composer (user-requested 2026-10-05:
+             was pinned to the top banner slot, which forced mobile users to scroll up to answer) -->
+        <template v-if="controlEnabled">
+          <section v-for="d in openDialogs" :key="`${d.dialogId}:${dialogsEpoch}`" class="ask-user-slot">
+            <p v-if="epochStaleIds.includes(d.dialogId)" class="ask-epoch-note" role="status">
+              {{ t("dialog.epochChanged") }}
+            </p>
+            <AskUserForm
+              :dialog="d"
+              :suspended="hubSuspended"
+              @answer="onDialogAnswer(d.dialogId, $event)"
+              @cancel="onDialogCancel(d.dialogId)"
+            />
+          </section>
+        </template>
+        <p v-for="id in folded" :key="`folded-${id}`" class="ask-folded" role="status">{{ foldedNote(id) }}</p>
+
+        <DetailDock
+          :following="following"
+          :new-count="newCount"
+          v-bind="dockCtlProps"
+          @update:following="onUpdateFollowing"
+          @jump="onJump"
+        />
+      </div>
+
+      <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(树上的 FleetActions 需要它);
+           v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
+           FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
+      <FleetDrawer
+        v-if="hasFleet || selectedRunId !== null"
+        :agent="agent"
+        :now="now"
+        :mode="drawerMode"
+        :open="drawerOpen"
+        @close="onCloseDrawer"
+      />
+    </div>
   </main>
 </template>
