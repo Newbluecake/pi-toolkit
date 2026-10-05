@@ -1,0 +1,332 @@
+/*
+ * preview.css — web-hub-preview plan v3 §4.6 (package PV5). Token-driven only (colors,
+ * spacing, radii, shadows all come from tokens.css). Imported by `App.vue` in the PV6 wiring
+ * package — nothing imports it yet by design (PV5 ships components + styles, no wiring).
+ *
+ * Stacking contract: the overlay sits at z-index 60, above the drawer scrim (30), the
+ * popovers/menus (40) and the floating back-to-top toast (50) — a preview is modal, nothing
+ * transient may cover it.
+ */
+
+/* ---------------------------------------------------------------- inline path refs (PathText) */
+.path-ref {
+  color: var(--c-primary);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  border-radius: var(--r-xs);
+  overflow-wrap: anywhere;
+}
+
+.path-ref:hover {
+  background: var(--c-primary-soft);
+  text-decoration-style: solid;
+}
+
+.path-ref:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+/* A clickable code span keeps its inline-code look (md-code lives in transcript.css). */
+code.md-code.path-ref {
+  color: var(--c-primary);
+}
+
+/* §4.6: coarse pointers get a ≥44px hit area (negative margins keep the line box intact). */
+@media (pointer: coarse) {
+  .path-ref {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    margin-block: calc((44px - 1.4em) / -2);
+    padding-inline: var(--sp-1);
+    margin-inline: calc(-1 * var(--sp-1));
+  }
+}
+
+/* ---------------------------------------------------------------- overlay + panel */
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60; /* drawer scrim 30 · popovers 40 · back-to-top 50 — preview is modal above all */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: var(--c-scrim);
+}
+
+.preview-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(960px, 100%);
+  max-height: min(85vh, 900px);
+  overflow: hidden;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  outline: none;
+}
+
+/* §4.6: ≤767px goes full-screen, honoring safe-area and dynamic viewport height. */
+@media (max-width: 767px) {
+  .preview-overlay {
+    padding: 0;
+  }
+
+  .preview-panel {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* ---------------------------------------------------------------- header */
+.preview-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 48px;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.preview-header-icon {
+  flex: none;
+  color: var(--c-text-3);
+}
+
+.preview-title {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--c-text-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* long paths ellipsize at the FRONT — the basename side stays visible */
+  text-align: left;
+}
+
+.preview-close {
+  flex: none;
+}
+
+.preview-plaintext {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-warning-soft);
+  border-bottom: 1px solid var(--c-warning-border);
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- body */
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-3);
+}
+
+.preview-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  min-height: 200px;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+.preview-spinner {
+  width: 24px;
+  height: 24px;
+  color: var(--c-primary);
+  animation: preview-spin 1s linear infinite;
+}
+
+@keyframes preview-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-spinner {
+    animation: none;
+  }
+}
+
+.preview-meta {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.preview-note {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-4);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+.preview-note-icon {
+  width: 28px;
+  height: 28px;
+  color: var(--c-text-3);
+}
+
+.preview-note-title {
+  margin: 0;
+  color: var(--c-text);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.preview-note p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.preview-copy-path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 100%;
+}
+
+.preview-copy-path .md-code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+/* ---------------------------------------------------------------- image phase */
+.preview-image {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  height: 100%;
+}
+
+.preview-image-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.preview-image-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-sunken);
+  border-radius: var(--r-md);
+}
+
+.preview-image-body img.fit {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.preview-image-body.actual {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.preview-image-body.actual img {
+  max-width: none;
+}
+
+/* ---------------------------------------------------------------- text phase */
+.preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  height: 100%;
+}
+
+.preview-truncated {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+.preview-badge {
+  flex: none;
+  padding: 1px var(--sp-1);
+  background: var(--c-warning-soft);
+  border: 1px solid var(--c-warning-border);
+  border-radius: var(--r-xs);
+  color: var(--c-warning-text);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.preview-text-body {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: var(--sp-3);
+  overflow: auto;
+  background: var(--c-sunken);
+  border-radius: var(--r-md);
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-text-body:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.preview-text-actions {
+  display: flex;
+  justify-content: flex-end;
+}
