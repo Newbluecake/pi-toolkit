@@ -1,0 +1,519 @@
+/**
+ * web-hub-spawn plan §SP5 (arch v2 §7.7): `<stateDir>/spawns.json` persistence — the L1 anchor.
+ *
+ * Every managed child process exists on disk BEFORE it is forked (L1: a `launching` record is
+ * saved synchronously via `saveNow()`), and pid+identity land on disk in the same synchronous
+ * segment right after fork. All writes are synchronous `writeFileSync(0600)` → `renameSync`
+ * through a pid+gen-unique tmp name — the hub is single-threaded, so writes are naturally
+ * serialized; a process crash needs no fsync (the page cache survives the process), and a
+ * machine power loss kills the children too, so the shrunk file afterwards stays consistent.
+ *
+ * Close semantics (#5 hard gate): `flushAndClose()` cancels the debounce timer, writes pending
+ * dirty data exactly once, then turns every later write into a no-op. Write failures (ENOSPC,
+ * rename) mark the store unhealthy — the supervisor refuses NEW spawns while unhealthy ("if the
+ * intent cannot be persisted, do not fork", L1) but keeps writing on every state transition; the
+ * first success restores health. Error logs fire immediately on the first failure and then at
+ * most once per 60 s.
+ *
+ * Sync IO is never pretend-cancellable (arch §7.6): request paths check their deadline BEFORE
+ * calling in, and the work itself is bounded by size — payload ≤64 KiB (trim), read ≤256 KiB.
+ * `flushAndClose` deliberately persists even at zero remaining budget, mirroring the crash path
+ * ("budget 0: still one synchronous persist"): losing the final terminal state would orphan the
+ * record, which is the worse failure.
+ */
+import {
+  readFileSync as fsReadFileSync,
+  readdirSync as fsReaddirSync,
+  renameSync as fsRenameSync,
+  statSync as fsStatSync,
+  unlinkSync as fsUnlinkSync,
+  writeFileSync as fsWriteFileSync,
+} from "node:fs";
+import { basename, dirname } from "node:path";
+import {
+  SPAWN_NONTERMINAL_MAX,
+  SPAWN_TERMINAL_KEEP,
+  type FirstPromptState,
+  type SpawnEndReason,
+  type SpawnHint,
+  type SpawnState,
+} from "../../protocol/spawn.js";
+import type { HubLog } from "../ports.js";
+import type { ReqDeadline } from "../req-deadline.js";
+
+// ---------------------------------------------------------------------------
+// on-disk shape (arch §7.7, format v2)
+// ---------------------------------------------------------------------------
+
+/** `launching` is the intent-only internal state — persisted, never put on the wire (SP9). */
+export type StoredSpawnState = "launching" | SpawnState;
+
+const TERMINAL_STATES: ReadonlySet<string> = new Set(["exited", "failed"]);
+const ALL_STATES: ReadonlySet<string> = new Set(["launching", "starting", "live", "stopping", "exited", "failed"]);
+const END_REASONS: ReadonlySet<string> = new Set([
+  "user",
+  "lifetime",
+  "hub",
+  "crash",
+  "orphan",
+  "protocol_error",
+  "spawn_error",
+  "register_timeout",
+  "exited_early",
+  "cwd_mismatch",
+]);
+const HINTS: ReadonlySet<string> = new Set([
+  "register-timeout-hello",
+  "register-timeout-session",
+  "control-off",
+  "newer-plugin",
+  "cwd-mismatch",
+  "protocol-error",
+  "launcher-changed",
+]);
+const FIRST_PROMPT_STATES: ReadonlySet<string> = new Set(["pending", "sending", "delivered", "failed", "expired"]);
+
+export function isTerminalSpawnState(state: StoredSpawnState): boolean {
+  return TERMINAL_STATES.has(state);
+}
+
+/** Who wrote the file — `bootId` drives the reboot-recovery rule (arch §7.7 recovery table). */
+export interface WriterInfo {
+  pid: number;
+  startedAt: number;
+  bootId: string;
+}
+
+export interface StoredOwner {
+  listener: "loopback" | "lan";
+  /** `null` on loopback (matches arch §7.7's `"user": null` example), absent-safe on load. */
+  user?: string | null;
+  reqId: string;
+}
+
+export interface StoredExit {
+  code: number | null;
+  signal: string | null;
+  unconfirmed?: true;
+}
+
+export interface StoredFirstPrompt {
+  state: FirstPromptState;
+  /** The BODY is never persisted at any layer (arch §6.4) — only its length. */
+  textLen: number;
+  attempts?: number;
+}
+
+export interface StoredRecord {
+  spawnId: string;
+  state: StoredSpawnState;
+  cwd: string;
+  /** cwd pin (arch §4.5): dev/ino captured at admit, re-checked before fork. */
+  dev: number;
+  ino: number;
+  createdAt: number;
+  updatedAt: number;
+  owner: StoredOwner;
+  /** Identity quadruple — absent on `launching` records (arch §7.7). */
+  pid?: number;
+  procStartTicks?: number;
+  bootId?: string;
+  uid?: number;
+  agentKey?: string;
+  endReason?: SpawnEndReason | null;
+  exit?: StoredExit | null;
+  hint?: SpawnHint | null;
+  firstPrompt?: StoredFirstPrompt;
+  /** Basename of the stderr log inside the spawn logDir (SP5 `stderr-sink.ts`). */
+  stderrLog?: string;
+}
+
+// ---------------------------------------------------------------------------
+// store limits (plan §SP5; size bounds are the sync-IO time bound, arch §7.6)
+// ---------------------------------------------------------------------------
+
+/** Envelope version of `spawns.json`. A file with any other `v` reads as corrupt. */
+export const SPAWNS_FILE_VERSION = 2;
+/** Read cap: a larger file is foreign/corrupt — ignored, never parsed (plan §SP5). */
+export const SPAWNS_READ_MAX_BYTES = 256 * 1024;
+/** Write target: trim terminal records until the serialized envelope fits (plan §SP5). */
+export const SPAWNS_FILE_TARGET_BYTES = 64 * 1024;
+/** `markDirty()` trailing debounce window (unref'd timer). */
+export const SPAWNS_DEBOUNCE_MS = 200;
+/** First write failure logs immediately; later ones at most once per this window. */
+export const STORE_ERROR_LOG_THROTTLE_MS = 60_000;
+
+// ---------------------------------------------------------------------------
+// injectable sync fs surface (tests inject failures / observe tmp names)
+// ---------------------------------------------------------------------------
+
+export interface SyncFs {
+  readFileSync(path: string, opts: { encoding: "utf8" }): string;
+  writeFileSync(path: string, data: string, opts: { mode: number }): void;
+  renameSync(from: string, to: string): void;
+  unlinkSync(path: string): void;
+  statSync(path: string): { size: number };
+  readdirSync(path: string): string[];
+}
+
+const REAL_SYNC_FS: SyncFs = {
+  readFileSync: (p, o) => fsReadFileSync(p, o),
+  writeFileSync: (p, d, o) => fsWriteFileSync(p, d, o),
+  renameSync: (f, t) => fsRenameSync(f, t),
+  unlinkSync: (p) => fsUnlinkSync(p),
+  statSync: (p) => fsStatSync(p),
+  readdirSync: (p) => fsReaddirSync(p),
+};
+
+// ---------------------------------------------------------------------------
+// public result types
+// ---------------------------------------------------------------------------
+
+export interface SpawnStoreLoad {
+  writer?: WriterInfo;
+  records: StoredRecord[];
+  /** Set when the previous file could not be trusted (renamed away or oversize-ignored). */
+  corrupt?: true;
+}
+
+export type SpawnStoreWriteResult = { ok: true } | { ok: false; code: string };
+
+export interface SpawnStore {
+  /**
+   * Synchronous startup read (≤256 KiB). Parse/shape failure renames the file to
+   * `.corrupt-<ts>` (keeping only one) and yields empty records; an oversize file is ignored
+   * in place. An already-expired deadline skips the read entirely (empty records) — checking
+   * the budget before starting is the only deadline behavior sync IO promises (arch §7.6).
+   */
+  load(deadline: ReqDeadline): SpawnStoreLoad;
+  /** Synchronous write NOW — the L1 path (intent, pid+identity), bypassing the debounce. */
+  saveNow(records: readonly StoredRecord[]): SpawnStoreWriteResult;
+  /** Trailing 200 ms debounce; `get` is re-invoked at fire time so the write sees fresh data. */
+  markDirty(get: () => readonly StoredRecord[]): void;
+  /** Idempotent close (#5): cancel timer → write dirty data once → writes become no-ops. */
+  flushAndClose(deadline: ReqDeadline): void;
+  /** False after a write failure, true again after the next successful write. */
+  readonly healthy: boolean;
+  readonly closed: boolean;
+  /** Monotonic write counter — seeds from the loaded file so it survives hub restarts. */
+  readonly gen: number;
+}
+
+export interface SpawnStoreDeps {
+  /** Path of `spawns.json` (`webHubSpawnFiles(stateDir).spawnsJson`). */
+  file: string;
+  log: HubLog;
+  now(): number;
+  /** Partial override on top of the real sync fs (tests inject ENOSPC / rename failures). */
+  fs?: Partial<SyncFs>;
+  /** Defaults to `{pid: process.pid, startedAt: now(), bootId: /proc boot_id or ""}`. */
+  writer?: WriterInfo;
+}
+
+/** On-disk envelope (arch §7.7): `{v: 2, gen, writer, records}` — validated in `load()`. */
+export interface FileEnvelope {
+  v: number;
+  gen?: number;
+  writer?: WriterInfo;
+  records: StoredRecord[];
+}
+
+// ---------------------------------------------------------------------------
+// load-side validation — these records feed kill decisions (L5), so a shape
+// violation anywhere treats the WHOLE file as corrupt: partial state must never
+// be trusted for signals (plan §SP5 "解析失败 ⇒ corrupt").
+// ---------------------------------------------------------------------------
+
+function isRecordShapeOk(v: unknown): v is StoredRecord {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const r = v as Record<string, unknown>;
+  if (typeof r.spawnId !== "string" || r.spawnId.length === 0) return false;
+  if (typeof r.state !== "string" || !ALL_STATES.has(r.state)) return false;
+  if (typeof r.cwd !== "string") return false;
+  if (!Number.isFinite(r.dev) || !Number.isFinite(r.ino)) return false;
+  if (!Number.isFinite(r.createdAt) || !Number.isFinite(r.updatedAt)) return false;
+  const owner = r.owner;
+  if (owner === null || typeof owner !== "object" || Array.isArray(owner)) return false;
+  const o = owner as Record<string, unknown>;
+  if ((o.listener !== "loopback" && o.listener !== "lan") || typeof o.reqId !== "string" || o.reqId.length === 0) {
+    return false;
+  }
+  if (o.user !== undefined && o.user !== null && typeof o.user !== "string") return false;
+  if (r.pid !== undefined && !Number.isFinite(r.pid)) return false;
+  if (r.procStartTicks !== undefined && !Number.isFinite(r.procStartTicks)) return false;
+  if (r.uid !== undefined && !Number.isFinite(r.uid)) return false;
+  if (r.bootId !== undefined && typeof r.bootId !== "string") return false;
+  if (r.agentKey !== undefined && typeof r.agentKey !== "string") return false;
+  if (r.stderrLog !== undefined && typeof r.stderrLog !== "string") return false;
+  if (r.endReason !== undefined && r.endReason !== null && !END_REASONS.has(String(r.endReason))) return false;
+  if (r.hint !== undefined && r.hint !== null && !HINTS.has(String(r.hint))) return false;
+  if (r.exit !== undefined && r.exit !== null) {
+    const ex = r.exit as Record<string, unknown>;
+    if (ex === null || typeof ex !== "object" || Array.isArray(ex)) return false;
+    if (ex.code !== null && !Number.isFinite(ex.code as number)) return false;
+    if (ex.signal !== null && typeof ex.signal !== "string") return false;
+    if (ex.unconfirmed !== undefined && ex.unconfirmed !== true) return false;
+  }
+  if (r.firstPrompt !== undefined) {
+    const fp = r.firstPrompt as Record<string, unknown>;
+    if (fp === null || typeof fp !== "object" || Array.isArray(fp)) return false;
+    if (typeof fp.state !== "string" || !FIRST_PROMPT_STATES.has(fp.state)) return false;
+    if (!Number.isFinite(fp.textLen as number)) return false;
+    if (fp.attempts !== undefined && !Number.isFinite(fp.attempts as number)) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// trim (plan §SP5: non-terminal ≤16, terminal ≤20, then envelope ≤64 KiB)
+// ---------------------------------------------------------------------------
+
+function recordAgeKey(r: StoredRecord, terminal: boolean): number {
+  // Terminal age = when it ENDED (retention is a "recent history" list); non-terminal age =
+  // when it was CREATED (they are all live bookkeeping).
+  return terminal ? r.updatedAt : r.createdAt;
+}
+
+function capGroup(records: readonly StoredRecord[], terminal: boolean, max: number): StoredRecord[] {
+  const members: Array<{ key: number; i: number }> = [];
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i] as StoredRecord;
+    if (isTerminalSpawnState(r.state) === terminal) members.push({ key: recordAgeKey(r, terminal), i });
+  }
+  if (members.length <= max) return [...records];
+  members.sort((a, b) => a.key - b.key || a.i - b.i);
+  const evict = new Set(members.slice(0, members.length - max).map((m) => m.i));
+  return records.filter((_, i) => !evict.has(i));
+}
+
+function envelopeJson(records: readonly StoredRecord[], gen: number, writer: WriterInfo): string {
+  return JSON.stringify({ v: SPAWNS_FILE_VERSION, gen, writer, records });
+}
+
+/** True when the final envelope still exceeds the target with no terminal records left. */
+export function trimRecordsForWrite(
+  records: readonly StoredRecord[],
+  gen: number,
+  writer: WriterInfo,
+): { kept: StoredRecord[]; json: string; oversize: boolean } {
+  let kept = capGroup(records, false, SPAWN_NONTERMINAL_MAX);
+  kept = capGroup(kept, true, SPAWN_TERMINAL_KEEP);
+  let json = envelopeJson(kept, gen, writer);
+  while (Buffer.byteLength(json) > SPAWNS_FILE_TARGET_BYTES && kept.some((r) => isTerminalSpawnState(r.state))) {
+    const terminalCount = kept.filter((r) => isTerminalSpawnState(r.state)).length;
+    kept = capGroup(kept, true, terminalCount - 1);
+    json = envelopeJson(kept, gen, writer);
+  }
+  return { kept, json, oversize: Buffer.byteLength(json) > SPAWNS_FILE_TARGET_BYTES };
+}
+
+// ---------------------------------------------------------------------------
+// the store
+// ---------------------------------------------------------------------------
+
+export function createSpawnStore(deps: SpawnStoreDeps): SpawnStore {
+  const fs: SyncFs = { ...REAL_SYNC_FS, ...deps.fs };
+  const file = deps.file;
+  const dir = dirname(file);
+  const base = basename(file);
+  const log = deps.log;
+  const now = deps.now;
+
+  // Sync boot_id read (readBootId in protocol/proc-identity.ts is async; the store is all-sync,
+  // so it reads the same path through the injectable fs — "" when unavailable).
+  let bootId = "";
+  try {
+    const raw = fs.readFileSync("/proc/sys/kernel/random/boot_id", { encoding: "utf8" }).trim();
+    if (raw.length > 0) bootId = raw;
+  } catch {
+    /* non-Linux or unreadable — supervisor treats "" as unknown */
+  }
+  const writer: WriterInfo = deps.writer ?? { pid: process.pid, startedAt: now(), bootId };
+
+  let gen = 0;
+  let healthy = true;
+  let closed = false;
+  let dirty = false;
+  let pendingGet: (() => readonly StoredRecord[]) | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  let loggedCloseNoop = false;
+  let lastErrorLogAt = Number.NEGATIVE_INFINITY;
+
+  const tmpName = (g: number): string => `${file}.tmp-${process.pid}-${g}`;
+  const corruptPrefix = `${base}.corrupt-`;
+
+  function logWriteFailure(code: string, detail: string): void {
+    const t = now();
+    if (t - lastErrorLogAt < STORE_ERROR_LOG_THROTTLE_MS) return;
+    lastErrorLogAt = t;
+    log.error("spawn store: write failed", { file, code, detail });
+  }
+
+  function errCode(err: unknown): string {
+    const code = (err as { code?: unknown } | null)?.code;
+    return typeof code === "string" && code.length > 0 ? code : "E_IO";
+  }
+
+  function bestEffortUnlink(path: string): void {
+    try {
+      fs.unlinkSync(path);
+    } catch {
+      /* already gone / unwritable dir */
+    }
+  }
+
+  function renameToCorrupt(): void {
+    const target = `${dir}/${corruptPrefix}${now()}`;
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (name.startsWith(corruptPrefix)) bestEffortUnlink(`${dir}/${name}`);
+      }
+      fs.renameSync(file, target);
+    } catch (err) {
+      log.warn("spawn store: corrupt-rename failed", { file, code: errCode(err) });
+    }
+  }
+
+  function writeNow(records: readonly StoredRecord[]): SpawnStoreWriteResult {
+    gen += 1;
+    const { json, oversize } = trimRecordsForWrite(records, gen, writer);
+    if (oversize) {
+      // Never drop a non-terminal record to satisfy a soft size cap — that would break L1/L4
+      // recovery. The ≤256 KiB read cap still bounds the reader.
+      log.warn("spawn store: envelope exceeds target with no terminal records left", {
+        file,
+        bytes: Buffer.byteLength(json),
+      });
+    }
+    const tmp = tmpName(gen);
+    try {
+      fs.writeFileSync(tmp, json, { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      bestEffortUnlink(tmp);
+      healthy = false;
+      logWriteFailure(errCode(err), "write");
+      return { ok: false, code: errCode(err) };
+    }
+    healthy = true;
+    dirty = false;
+    // The data just written supersedes whatever a pending debounce would flush; drop it so
+    // "3 markDirty + saveNow" does not produce a duplicate write (plan §SP5 验收).
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    return { ok: true };
+  }
+
+  function fireDebounce(): void {
+    timer = undefined;
+    if (closed || !dirty) return;
+    writeNow(pendingGet?.() ?? []);
+  }
+
+  return {
+    load(deadline: ReqDeadline): SpawnStoreLoad {
+      if (closed) {
+        log.warn("spawn store: load() after close", { file });
+        return { records: [] };
+      }
+      if (deadline.expired()) {
+        log.warn("spawn store: load skipped, deadline expired", { file });
+        return { records: [] };
+      }
+      let raw: string;
+      try {
+        if (fs.statSync(file).size > SPAWNS_READ_MAX_BYTES) {
+          // Foreign/huge file: ignore in place (plan §SP5 "「>256 KiB 忽略」") — the next
+          // successful write replaces it anyway.
+          log.warn("spawn store: file over read cap, ignoring", { file });
+          return { records: [], corrupt: true };
+        }
+        raw = fs.readFileSync(file, { encoding: "utf8" });
+      } catch {
+        return { records: [] }; // ENOENT (fresh state dir) or unreadable — nothing to recover
+      }
+      let loadedGen: number | undefined;
+      let loadedWriter: WriterInfo | undefined;
+      let loadedRecords: StoredRecord[];
+      try {
+        const v: unknown = JSON.parse(raw);
+        if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("not-an-object");
+        const env = v as Record<string, unknown>;
+        if (env.v !== SPAWNS_FILE_VERSION || !Array.isArray(env.records)) throw new Error("bad-envelope");
+        if (!env.records.every(isRecordShapeOk)) throw new Error("bad-record");
+        if (
+          env.writer !== undefined &&
+          (env.writer === null ||
+            typeof env.writer !== "object" ||
+            !Number.isFinite((env.writer as Record<string, unknown>).pid as number) ||
+            !Number.isFinite((env.writer as Record<string, unknown>).startedAt as number))
+        ) {
+          throw new Error("bad-writer");
+        }
+        loadedGen = Number.isFinite(env.gen as number) ? (env.gen as number) : undefined;
+        loadedWriter = env.writer as WriterInfo | undefined;
+        loadedRecords = env.records as StoredRecord[];
+      } catch (err) {
+        renameToCorrupt();
+        log.warn("spawn store: corrupt spawns.json renamed, starting empty", {
+          file,
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        return { records: [], corrupt: true };
+      }
+      if (loadedGen !== undefined && loadedGen >= gen && loadedGen < 1e9) {
+        gen = loadedGen; // seed so file gen stays monotonic across hub restarts
+      }
+      return loadedWriter === undefined ? { records: loadedRecords } : { writer: loadedWriter, records: loadedRecords };
+    },
+
+    saveNow(records: readonly StoredRecord[]): SpawnStoreWriteResult {
+      if (closed) return { ok: false, code: "E_CLOSED" };
+      return writeNow(records);
+    },
+
+    markDirty(get: () => readonly StoredRecord[]): void {
+      if (closed) {
+        if (!loggedCloseNoop) {
+          loggedCloseNoop = true;
+          // HubLog has no debug level — info is the closest channel for a once-per-store note.
+          log.info("spawn store: markDirty after close is a no-op", { file });
+        }
+        return;
+      }
+      dirty = true;
+      pendingGet = get;
+      if (timer === undefined) {
+        timer = setTimeout(fireDebounce, SPAWNS_DEBOUNCE_MS);
+        timer.unref();
+      }
+    },
+
+    flushAndClose(deadline: ReqDeadline): void {
+      if (closed) return; // idempotent, zero side effects on repeat calls
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (dirty) {
+        // Sync IO is not cancellable and the crash path persists at budget 0 (arch §7.6) —
+        // write even with an expired deadline, but say so.
+        if (deadline.expired()) log.warn("spawn store: flushAndClose past deadline, persisting anyway", { file });
+        writeNow(pendingGet?.() ?? []);
+      }
+      closed = true;
+    },
+
+    get healthy(): boolean {
+      return healthy;
+    },
+    get closed(): boolean {
+      return closed;
+    },
+    get gen(): number {
+      return gen;
+    },
+  };
+}
