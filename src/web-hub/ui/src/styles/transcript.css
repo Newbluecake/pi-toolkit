@@ -571,20 +571,23 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   }
 }
 
-/* custom / marker / error in stream */
+/* custom / marker / error in stream — mirrors .msg-assistant's grid so the identity row and the
+ * content's left edge line up with assistant messages (2026-10-05 user field report; the dashed
+ * free-floating card is gone). The avatar column only exists ≥481px, same as .msg-assistant. */
 .msg-custom {
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px dashed var(--c-border-strong);
-  border-radius: var(--r-md);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: var(--sp-3);
   color: var(--c-text-2);
   font-size: var(--fs-sm);
 }
 
-.msg-custom .kind {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 2px;
+.msg-custom .avatar-notice {
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+}
+
+.msg-custom .kind-chip {
   color: var(--c-text-3);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
@@ -653,7 +656,8 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
     max-width: min(78%, 640px);
   }
 
-  .msg-assistant {
+  .msg-assistant,
+  .msg-custom {
     grid-template-columns: 28px minmax(0, 1fr);
   }
 

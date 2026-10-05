@@ -171,7 +171,11 @@ describe("Transcript.vue — item rendering", () => {
     expect(wrapper.get(".msg-assistant strong").text()).toBe("friend");
     expect(wrapper.text()).toContain("compacted summary");
     expect(wrapper.text()).toContain("cr-anthropic/claude-sonnet-5");
-    expect(wrapper.get(".msg-custom .kind").text()).toContain("subagent:notice");
+    // 2026-10-05: custom messages got the pi-style identity row (avatar + who + type chip)
+    const custom = wrapper.get(".msg-custom");
+    expect(custom.get(".kind-chip").text()).toContain("subagent:notice");
+    expect(custom.get(".msg-head .who").text()).toBe("subagent");
+    expect(custom.get(".avatar-notice").exists()).toBe(true);
     expect(wrapper.get(".msg-tool .tool-name").text()).toBe("bash");
   });
 
@@ -394,7 +398,8 @@ describe("TxCustom.vue — markdown rendering", () => {
         truncated: false,
       },
     });
-    expect(wrapper.get(".kind").text()).toContain("subagent:notice");
+    expect(wrapper.get(".kind-chip").text()).toContain("subagent:notice");
+    expect(wrapper.get(".msg-head .who").text()).toBe("subagent");
     expect(wrapper.find(".md").exists()).toBe(true); // MarkdownView.vue's own root class
     expect(wrapper.get("strong").text()).toBe("Run finished");
     expect(wrapper.findAll("li")).toHaveLength(2);

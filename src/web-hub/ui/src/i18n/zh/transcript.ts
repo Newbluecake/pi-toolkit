@@ -10,6 +10,8 @@ type Messages<T> = { [K in keyof T]: string };
 const transcript = {
   ariaLabel: "对话",
   who: "pi",
+  whoNotice: "通知",
+  whoSubagent: "子代理",
   streaming: "生成中…",
   thinking: "思考 · {n} 行",
   imagePlaceholder: "[图片]",

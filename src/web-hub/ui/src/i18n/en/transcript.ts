@@ -7,6 +7,8 @@
 const transcript = {
   ariaLabel: "Conversation",
   who: "pi",
+  whoNotice: "notice",
+  whoSubagent: "subagent",
   streaming: "Streaming…",
   thinking: "Thinking · {n} lines",
   imagePlaceholder: "[image]",
