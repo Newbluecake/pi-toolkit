@@ -44,6 +44,10 @@ export const SSE_EVENTS = [
   "run_history",
   "run_ev",
   "run_end",
+  // web-hub-delete-session plan v2 §2.3/§4.3: card removal (agent or managed-session) broadcast.
+  // Must stay BEFORE "spawns" for the same reason run_history/run_ev/run_end do — this file's
+  // own `.at(-1) === "spawns"` pin (see `spawn.test.ts:225`) must keep holding.
+  "agent_removed",
   "spawns", // web-hub-spawn arch §8.2: `SpawnsPayload` snapshot/broadcast (Public projection only)
 ] as const;
 
@@ -94,6 +98,9 @@ export const API_ERRORS = [
   "E_PREVIEW_UNSUPPORTED", // 415 — sniffed binary / non-regular file / unknown image dims
   "E_PREVIEW_TOO_LARGE", // 413 — over the byte or pixel cap (body: size/max/reason/dims)
   "E_PREVIEW_CHANGED", // 409 — content identity (or sha256) changed during the preview
+  // web-hub-delete-session plan v2 §2.4/§4.1/§4.3: the process may still be alive — refusal,
+  // record/卡片 untouched (body carries reason: AgentRemoveErrorReason, "online" | "exit-unconfirmed").
+  "E_AGENT_ONLINE",
 ] as const;
 
 /** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */
@@ -142,4 +149,44 @@ export interface HistoryPayload {
   hasMore: boolean;
   oldestEntryId?: string;
   source: "file" | "agent";
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-delete-session plan v2 §4.3 (frozen protocol face — P1/P2 import these, never
+// redefine the literals): POST /api/agents/remove, its request/response/error shapes, and the
+// `agent_removed` SSE payload.
+// ---------------------------------------------------------------------------
+
+/** `POST /api/agents/remove` path (§4.1). */
+export const AGENT_REMOVE_PATH = "/api/agents/remove";
+
+/**
+ * `POST /api/agents/remove` body (§4.1): exactly one of the two target forms — `agentKey` for
+ * an `AgentCard`, `spawnId` for a `SpawnRow`. Validation (pattern, `additionalProperties:
+ * false`) is the hub's own job (§2.9 `hub/agent-remove.ts`); this is the wire shape only.
+ */
+export type AgentRemoveRequest = { agentKey: string } | { spawnId: string };
+
+/**
+ * `POST /api/agents/remove` success bodies (§2.4 table rows 2/3/5, §4.1): 200 when the target
+ * is gone (deletion done, or already absent — idempotent), 202 when a managed session entered
+ * (or was already in) the stop grace and will be deleted once its death is confirmed.
+ */
+export type AgentRemoveResult =
+  { removed: true } | { removed: false; pending: true; spawnId: string; state: "stopping" };
+
+/**
+ * Shared reason union for the remove endpoint's two refusal codes (§2.4 table rows 3-6, §4.1):
+ * `E_AGENT_ONLINE` carries `"online"` (registry says connected) or `"exit-unconfirmed"`
+ * (terminal record but death not confirmed — process may still be alive, B-alive); the LAN
+ * policy gate reuses `E_SPAWN_DENIED` with `"lan-off"` instead of inventing a third code.
+ */
+export type AgentRemoveErrorReason = "online" | "exit-unconfirmed" | "lan-off";
+
+/**
+ * `agent_removed` SSE payload (§2.3): the browser drops `agentKey` from `agents`/`order`,
+ * records it in the reducer's `removed` set, and clears any scoped subscription for it.
+ */
+export interface AgentRemovedPayload {
+  agentKey: string;
 }

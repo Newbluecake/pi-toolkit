@@ -80,7 +80,10 @@ describe("protocol/preview — API_ERRORS tail (§4.1: four E_PREVIEW_* after E_
     expect(API_ERRORS[launcher + 2]).toBe("E_PREVIEW_UNSUPPORTED");
     expect(API_ERRORS[launcher + 3]).toBe("E_PREVIEW_TOO_LARGE");
     expect(API_ERRORS[launcher + 4]).toBe("E_PREVIEW_CHANGED");
-    expect(API_ERRORS[launcher + 5]).toBeUndefined(); // nothing sneaks in after them
+    // web-hub-delete-session plan v2 §4.3: E_AGENT_ONLINE is tail-appended right after the
+    // four E_PREVIEW_* codes (append-only — this file's job is just to keep that tail honest).
+    expect(API_ERRORS[launcher + 5]).toBe("E_AGENT_ONLINE");
+    expect(API_ERRORS[launcher + 6]).toBeUndefined(); // nothing sneaks in after them
   });
 
   it("contains each preview code exactly once (no reordering, no duplicates)", () => {

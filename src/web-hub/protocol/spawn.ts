@@ -64,6 +64,11 @@ export interface SpawnRecordPublic {
   hint?: SpawnHint;
   uiCancelledCount?: number;
   firstPrompt?: { state: FirstPromptState; code?: string };
+  /** web-hub-delete-session plan v2 §2.2: set while a delete is in flight (removeIntent, not
+   * yet deleted — either still non-terminal and going through the stop grace, or terminal and
+   * awaiting death confirmation). Absent once the record is gone (the browser never sees
+   * `removing:false`; it just stops receiving the record). */
+  removing?: true;
 }
 
 export interface SpawnRecordOwner extends SpawnRecordPublic {
@@ -149,6 +154,13 @@ export interface HubSpawnConfig {
 
 /** Same shape/source as `hub/http.ts`'s `CMD_ID_RE` — pinned equal by tests/web-hub/protocol/spawn.test.ts. */
 export const SPAWN_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+
+/**
+ * web-hub-delete-session plan v2 §2.5: `POST /api/headless`'s idempotency-LRU-hit-but-record-gone
+ * branch rejects with `E_BAD_REQUEST{reason: SPAWN_GONE_REASON}` instead of falling through to a
+ * fresh fork. Shared by `hub/spawn/routes.ts` and the UI's `classifySpawnError`.
+ */
+export const SPAWN_GONE_REASON = "spawn-gone";
 
 /**
  * First-prompt text cap, UTF-8 bytes (arch §4.6). Equal to `hub/http.ts`'s
