@@ -181,6 +181,42 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     state.idle = true;
     expect(readStatus(ctx, tap, [])).toMatchObject({ busy: false, costUsd: 2 });
   });
+
+  // todo-web plan §3.3/§7 (T3): the optional 5th seam — a getter ⇒ sampled
+  // projection in the same frame; no getter / empty list ⇒ the `todo` key is
+  // absent (toEqual pins key-level absence, not just undefined-vs-null).
+  it("readStatus: todo getter ⇒ status.todo sampled atomically; empty/absent ⇒ key missing", () => {
+    const { ctx } = fakeCtx({ leaf: "L9" });
+    const tap = noopTap();
+    tap.resetForSession(Number.NaN);
+    const populated = {
+      tasks: [
+        {
+          id: 1,
+          subject: "s",
+          description: "d",
+          status: "pending" as const,
+          blocks: [],
+          blockedBy: [],
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      nextId: 2,
+    };
+    const s = readStatus(ctx, tap, [], undefined, () => populated);
+    expect(s.todo).toMatchObject({
+      tasks: [{ id: 1, subject: "s", status: "pending" }],
+      total: 1,
+      counts: { open: 1, inProgress: 0, completed: 0, blocked: 0 },
+    });
+
+    const emptied = readStatus(ctx, tap, [], undefined, () => ({ tasks: [], nextId: 2 }));
+    expect("todo" in emptied).toBe(false);
+
+    const noGetter = readStatus(ctx, tap, []);
+    expect("todo" in noGetter).toBe(false);
+  });
 });
 
 describe("leaf probe + slots (wiring, fake timers)", () => {

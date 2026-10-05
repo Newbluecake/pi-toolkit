@@ -4,6 +4,7 @@ import { currentConnection } from "../../../src/web-hub/agent/connection.js";
 import { wireWebHub, WEB_HUB_STATUS_KEY, type WebHubDeps } from "../../../src/web-hub/agent/index.js";
 import type { AgentFrame } from "../../../src/web-hub/protocol/messages.js";
 import {
+  ackFrame,
   fakeCtx,
   fakeNet,
   fakePi,
@@ -236,5 +237,152 @@ describe("statusLineText colours (live marker green)", () => {
     expect(statusLineText({ state: "connecting" } as never, theme)).toBe("<dim>web</> <dim>○</>");
     expect(statusLineText({ state: "backoff" } as never, theme)).toBe("<dim>web</> <error>✗</>");
     expect(statusLineText({ state: "off" } as never, theme)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// todo-web plan §3.3/§3.4/§7 (T3): deps.todo → StatusInfo.todo through the
+// existing status-slot pipeline — initial publish, the 1Hz fingerprint gate,
+// the /new session-boundary reset, and reconnect slot replay.
+// ---------------------------------------------------------------------------
+describe("todo slot + 1Hz fingerprint gate (todo-web T3)", () => {
+  let tmp: ReturnType<typeof tmpDir>;
+  beforeEach(() => {
+    tmp = tmpDir("wh-d-todo-");
+    resetGlobals();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    resetGlobals();
+    vi.useRealTimers();
+    tmp.cleanup();
+  });
+
+  function todoWith(...subjects: string[]): import("../../../src/todo/state.js").TodoState {
+    return {
+      tasks: subjects.map((subject, i) => ({
+        id: i + 1,
+        subject,
+        description: `${subject} desc`,
+        status: "pending" as const,
+        blocks: [],
+        blockedBy: [],
+        createdAt: i + 1,
+        updatedAt: i + 1,
+      })),
+      nextId: subjects.length + 1,
+    };
+  }
+
+  it("getter ⇒ status frame carries todo; unchanged ticks stay silent; a mutation re-publishes within 2 ticks", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    let todoState = todoWith("t1");
+    wireWebHub(pi, deps({ netConnect: n.netConnect, todo: () => todoState }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(0); // ack ⇒ live ⇒ slot replay + publishStatus + onTick
+
+    const statusFrames = () => s.frames().filter((f) => f.t === "status");
+    expect(statusFrames().length).toBeGreaterThan(0);
+    expect(statusFrames().at(-1)).toMatchObject({
+      todo: { total: 1, counts: { open: 1, inProgress: 0, completed: 0, blocked: 0 } },
+    });
+
+    const before = statusFrames().length;
+    await vi.advanceTimersByTimeAsync(3_000); // leaf static, fleet empty, fingerprint static
+    expect(statusFrames().length).toBe(before); // the gate: no change ⇒ no frame
+
+    todoState = todoWith("t1", "t2"); // a TaskCreate the extension layer never sees as an event
+    await vi.advanceTimersByTimeAsync(2_000); // plan §7 T3: within 2 ticks
+    expect(statusFrames().length).toBeGreaterThan(before);
+    expect(statusFrames().at(-1)).toMatchObject({ todo: { total: 2 } });
+  });
+
+  it("no deps.todo ⇒ status frame carries no todo key at all", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(0);
+    const status = s
+      .frames()
+      .filter((f) => f.t === "status")
+      .at(-1)!;
+    expect("todo" in status).toBe(false);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(s.frames().filter((f) => f.t === "status")).toHaveLength(1); // gate also inert without a getter
+  });
+
+  it("/new (session_start) resets the gate: emptied state publishes a todo-less status frame", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    let todoState = todoWith("t1");
+    wireWebHub(pi, deps({ netConnect: n.netConnect, todo: () => todoState }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      s
+        .frames()
+        .filter((f) => f.t === "status")
+        .at(-1),
+    ).toMatchObject({ todo: { total: 1 } });
+
+    todoState = todoWith(); // /new ⇒ wireTodo's restore rebuilt an empty closure
+    fire("session_start", { type: "session_start", reason: "new" }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const last = s
+      .frames()
+      .filter((f) => f.t === "status")
+      .at(-1)!;
+    expect("todo" in last).toBe(false);
+  });
+
+  it("disconnect → reconnect replays the status slot with todo (overwrite-only slot semantics)", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    const todoState = todoWith("t1");
+    wireWebHub(pi, deps({ netConnect: n.netConnect, todo: () => todoState }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(0);
+
+    s.fail("ECONNRESET"); // link → backoff (0.5s ±20% ⇒ fires within 400–600ms)
+    // Advance just past the backoff window — a single long advance would let the
+    // 1s connect-timeout fire too (backoff + 1000ms), abandoning the socket before
+    // the test gets to complete the handshake on it.
+    await vi.advanceTimersByTimeAsync(700);
+    const s2 = n.sockets.at(-1)!;
+    expect(s2).not.toBe(s);
+    s2.emit("connect");
+    await vi.advanceTimersByTimeAsync(0); // hello goes out before the ack arrives
+    s2.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(0); // live ⇒ SLOT_ORDER replay
+
+    const replayed = s2.frames().filter((f) => f.t === "status");
+    expect(replayed.length).toBeGreaterThan(0);
+    expect(replayed.at(-1)).toMatchObject({ todo: { total: 1 } });
   });
 });

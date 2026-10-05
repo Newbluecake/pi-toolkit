@@ -895,6 +895,10 @@ export default function activate(rawPi: ExtensionAPI): void {
       query: () => holder.current?.query,
       askUserEnabled: () => settings.askUser.enabled,
       ownedCommandNames,
+      // todo-web plan §3.3 (T3): live todo closure for StatusInfo.todo (both gates
+      // already implicit — this block only runs with webHub.enabled, and todoWiring
+      // only exists with todo.enabled).
+      ...(todoWiring ? { todo: () => todoWiring.getTodoSnapshot() } : {}),
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;

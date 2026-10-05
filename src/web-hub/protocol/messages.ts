@@ -87,6 +87,40 @@ export interface QueueItemWire {
   at: number;
 }
 
+/**
+ * todo-web plan §3.1 (T2): one task row of `StatusInfo.todo`. `metadata`, `blocks`
+ * and `createdAt` deliberately stay agent-side (display-invisible; metadata is
+ * arbitrary agent data — never crossing the process boundary shrinks the
+ * injection surface). `blockedBy` carries `activeBlockers` (open blockers
+ * only), matching the TUI widget's `[blocked by #n]` line.
+ */
+export interface TodoTaskWire {
+  id: number;
+  subject: string; // ≤200 chars (todo's own createTask bound, passed through)
+  status: "pending" | "in_progress" | "completed";
+  owner?: string; // passed through (≤200 chars)
+  activeForm?: string;
+  blockedBy: number[];
+  /** Truncated to 240 UTF-8 bytes by the projection; empty string omitted. */
+  description?: string;
+  /** Present only when `description` was truncated. */
+  descTruncated?: true;
+}
+
+/** `StatusInfo.todo`'s body: a bounded, orderTasks-ordered projection of the main session's task list. */
+export interface TodoWire {
+  /** ≤ TODO_WIRE_MAX_TASKS (32), orderTasks order (completed sink to the bottom). */
+  tasks: TodoTaskWire[];
+  /** Full-population task count (includes capped-away rows); always = counts open+inProgress+completed. */
+  total: number;
+  /** Full-population counts; `blocked` = non-completed tasks with open blockers (TUI widget's gauge). */
+  counts: { open: number; inProgress: number; completed: number; blocked: number };
+  /** total - tasks.length, when the 32-task cap or the byte budget dropped rows. */
+  omitted?: number;
+  /** max(updatedAt) over the projected tasks ("recently updated" display). */
+  updatedAt: number;
+}
+
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -96,6 +130,11 @@ export interface StatusInfo {
   subagentCostUsd?: number;
   queue?: QueueItemWire[];
   queueDropped?: string[];
+  /** todo-web plan §2.1/D1 (T2): optional main-session task-list summary riding the existing
+   *  status slot lifecycle. Absent = no tasks / todo disabled / web-hub disabled (byte-equal to
+   *  the pre-feature shape). Decode side stays open-ended: `StatusFrameSchema` deliberately has
+   *  no `additionalProperties:false`, so older hubs pass newer frames through untouched. */
+  todo?: TodoWire;
 }
 
 export interface FleetRowWire {
@@ -518,6 +557,35 @@ const QueueItemSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+// todo-web plan §3.1 (T2): same nested-payload posture as QueueItemSchema above — the
+// task-row/todo bodies are pinned (additionalProperties:false) while the enclosing
+// StatusFrameSchema stays open-ended for forward compatibility.
+const TodoTaskSchema = Type.Object(
+  {
+    id: Type.Integer(),
+    subject: Type.String(),
+    status: Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")]),
+    owner: Type.Optional(Type.String()),
+    activeForm: Type.Optional(Type.String()),
+    blockedBy: Type.Array(Type.Integer()),
+    description: Type.Optional(Type.String()),
+    descTruncated: Type.Optional(Type.Literal(true)),
+  },
+  { additionalProperties: false },
+);
+const TodoWireSchema = Type.Object(
+  {
+    tasks: Type.Array(TodoTaskSchema),
+    total: Type.Integer(),
+    counts: Type.Object(
+      { open: Type.Integer(), inProgress: Type.Integer(), completed: Type.Integer(), blocked: Type.Integer() },
+      { additionalProperties: false },
+    ),
+    omitted: Type.Optional(Type.Integer()),
+    updatedAt: Type.Number(),
+  },
+  { additionalProperties: false },
+);
 const StatusInfoSchema = Type.Object({
   leafId: Type.Union([Type.String(), Type.Null()]),
   busy: Type.Boolean(),
@@ -529,6 +597,7 @@ const StatusInfoSchema = Type.Object({
   subagentCostUsd: Type.Optional(Type.Number()),
   queue: Type.Optional(Type.Array(QueueItemSchema)),
   queueDropped: Type.Optional(Type.Array(Type.String())),
+  todo: Type.Optional(TodoWireSchema),
 });
 
 const FleetRowSchema = Type.Object({

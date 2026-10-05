@@ -135,6 +135,16 @@ export interface TodoNudgeDeps {
 
 export interface TodoWireResult {
   /**
+   * Live read of this session's todo closure state (todo-web plan §3.3, T1).
+   * Unconditional — unlike `getTrackerSnapshot` below, which only exists while
+   * the nudge tracker is armed. `todo.enabled=false` keeps `wireTodo` itself
+   * from being called, so the getter is naturally absent there. Returns the
+   * closure-state reference (same pattern as TodoWidget's `() => state.tasks`);
+   * the web-hub projection (src/web-hub/agent/todo.ts) reads it synchronously
+   * and builds its own wire objects, so no clone is needed here.
+   */
+  getTodoSnapshot: () => TodoState;
+  /**
    * Present only while the staleness tracker is active (main session +
    * `nudge.enabled`); lets switch_context append its own handoff advisory
    * through a small read-only snapshot instead of depending on todo
@@ -539,6 +549,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     });
 
     return {
+      getTodoSnapshot: (): TodoState => state,
       getTrackerSnapshot: (): TodoTrackerSnapshot => ({
         openTaskCount: state.tasks.filter((task) => task.status !== "completed").length,
         turnsSinceTouch: nudgeState.e3,
@@ -547,7 +558,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     };
   }
 
-  return {};
+  return { getTodoSnapshot: (): TodoState => state };
 }
 
 function appendUnblockedNotice(text: string, unblocked?: Task[]): string {

@@ -59,6 +59,8 @@ import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
 import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
+import { todoLightFingerprint } from "./todo.js";
+import type { TodoState } from "../../todo/state.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
 import { createCommandLedger } from "./ledger.js";
@@ -148,6 +150,10 @@ export interface WebHubDeps {
    * writes real toolkit command names into, handed straight through to `createCommandCapture` so
    * `owns()`/`settleArm()` answer from true registration state, not from `arm()` history. */
   ownedCommandNames?: Set<string>;
+  /** todo-web plan §3.3 (T3): live main-session todo state for the `StatusInfo.todo`
+   *  projection. Unset (todo.enabled=false ⇒ `wireTodo` never ran) ⇒ the field is never
+   *  set — the status frame stays byte-equal to the pre-feature shape. */
+  todo?: () => TodoState;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -241,6 +247,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   let sessionReason = "startup";
   let lastLeaf: string | null | undefined;
   let lastFleetFp: string | undefined;
+  // todo-web plan §3.3 (T3): the todo fingerprint gate — same lifecycle as lastFleetFp
+  // (reset on session_start so the first tick after a /new・/resume・/fork always re-aligns).
+  let lastTodoFp: string | undefined;
   let tick: NodeJS.Timeout | undefined;
   let statusText: string | undefined;
   let buildInfo: Promise<{ pluginVersion: string; buildId: string }> | undefined;
@@ -369,7 +378,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const c = conn;
     const x = ctx;
     if (c === undefined || x === undefined) return;
-    const s = readStatus(x, tap, readFleet(), queueMirror);
+    const s = readStatus(x, tap, readFleet(), queueMirror, deps.todo);
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
   };
@@ -391,6 +400,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (leaf !== lastLeaf) publishStatus();
     } catch {
       /* stale ctx */
+    }
+    // todo-web plan §3.3 (T3): todo changes never fire an extension event either
+    // (Task* tool results settle inside the enqueue queue), so the same 1Hz tick
+    // carries a light-fingerprint gate — publish only on real change (lastFleetFp
+    // pattern). `deps.todo` reads only our own closure, so no stale-ctx guard needed.
+    const todoFp = deps.todo !== undefined ? todoLightFingerprint(deps.todo()) : undefined;
+    if (todoFp !== lastTodoFp) {
+      lastTodoFp = todoFp;
+      publishStatus();
     }
     try {
       commandHandler.onPendingSample(x.hasPendingMessages());
@@ -516,7 +534,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           seq: c.seq,
           ctx: x,
           tap,
-          status: readStatus(x, tap, snaps, queueMirror),
+          status: readStatus(x, tap, snaps, queueMirror, deps.todo),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
       );
@@ -684,6 +702,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     sessionReason = reasonOf(event);
     lastLeaf = undefined;
     lastFleetFp = undefined;
+    lastTodoFp = undefined;
     tap.resetForSession(Number.NaN);
     commandHandler.onSessionBoundary();
     // O(branch entries) cost sum, deferred so session_start returns at once.

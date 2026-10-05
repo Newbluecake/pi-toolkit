@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import {
   FORWARDED_EVENTS,
   LIMITS,
@@ -156,6 +158,67 @@ describe("decodeAgentFrame", () => {
     expect(decodeAgentFrame({ t: "status", leafId: 5, busy: true, pending: false })).toBeUndefined();
   });
 
+  // todo-web plan §3.1/§7 (T2): StatusInfo.todo rides the existing status frame —
+  // no new frame kind, no proto bump. The nested schema pins the wire shape
+  // (QueueItemSchema posture); the enclosing StatusFrameSchema stays open-ended
+  // so OLDER hubs (whose schema predates the field) pass the newer frame through.
+  const todoWire = {
+    tasks: [
+      {
+        id: 1,
+        subject: "wire the todo snapshot",
+        status: "in_progress",
+        activeForm: "wiring the todo snapshot",
+        blockedBy: [2],
+        description: "desc",
+        descTruncated: true,
+      },
+      { id: 2, subject: "plan", status: "completed", blockedBy: [] },
+    ],
+    total: 2,
+    counts: { open: 0, inProgress: 1, completed: 1, blocked: 0 },
+    updatedAt: 1790000000000,
+  } as const;
+
+  it("status frame with a well-formed todo passes and keeps the field", () => {
+    const decoded = decodeAgentFrame({ t: "status", ...status, todo: todoWire });
+    expect(decoded).toMatchObject({ t: "status", costUsd: 0.12 });
+    expect((decoded as { todo?: unknown }).todo).toEqual(todoWire);
+  });
+
+  it("status frame with a malformed todo is rejected whole; omitted todo still passes", () => {
+    expect(decodeAgentFrame({ t: "status", ...status, todo: 5 })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "status", ...status, todo: "x" })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "status", ...status, todo: {} })).toBeUndefined(); // missing tasks/total/counts
+    expect(decodeAgentFrame({ t: "status", ...status, todo: { ...todoWire, counts: { open: 1 } } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "status", ...status })).toBeDefined(); // pre-feature shape stays valid
+  });
+
+  it("forward compatibility: the pre-todo hub schema (open-ended top level) passes a todo-bearing frame", () => {
+    // Exactly the StatusFrameSchema shape as it existed before todo-web (no `todo`
+    // property, no additionalProperties:false) — replaying the old hub's decoder here
+    // pins the upgrade path: new agent + old hub coexist without a proto bump.
+    const legacyStatusFrameSchema = Type.Object({
+      t: Type.Literal("status"),
+      leafId: Type.Union([Type.String(), Type.Null()]),
+      busy: Type.Boolean(),
+      pending: Type.Boolean(),
+      contextUsage: Type.Optional(
+        Type.Object({ tokens: Type.Number(), contextWindow: Type.Number(), percent: Type.Number() }),
+      ),
+      costUsd: Type.Optional(Type.Number()),
+      subagentCostUsd: Type.Optional(Type.Number()),
+      queue: Type.Optional(
+        Type.Array(Type.Object({ id: Type.String(), text: Type.String() }, { additionalProperties: true })),
+      ),
+      queueDropped: Type.Optional(Type.Array(Type.String())),
+    });
+    const frame = { t: "status", ...status, todo: todoWire };
+    expect(Value.Check(legacyStatusFrameSchema, frame)).toBe(true);
+    // and the current schema of course accepts its own frame
+    expect(decodeAgentFrame(frame)).toBeDefined();
+  });
+
   it("accepts fleet and validates row shape", () => {
     expect(decodeAgentFrame({ t: "fleet", runs: [fleetRow] })).toMatchObject({ t: "fleet" });
     expect(decodeAgentFrame({ t: "fleet", runs: [{ ...fleetRow, highlight: "bogus" }] })).toBeUndefined();
@@ -189,6 +252,23 @@ describe("decodeAgentFrame", () => {
     expect(decodeAgentFrame({ ...reply, recent: [{ seq: 1, message: { role: 3 } }] })).toBeUndefined();
     expect(decodeAgentFrame({ ...reply, prompts: [{ kind: "select" }] })).toBeUndefined();
     expect(decodeAgentFrame({ ...reply, inflight: { tools: [{ toolCallId: "c" }] } })).toBeUndefined();
+  });
+
+  it("snapshot_reply carries status.todo through (todo-web T2)", () => {
+    const reply = {
+      t: "snapshot_reply",
+      rid: "r1",
+      seq: 7,
+      leafId: "leaf1",
+      recent: [],
+      prompts: [],
+      status: { leafId: "leaf1", busy: false, pending: false, todo: todoWire },
+      fleet: [],
+    };
+    const decoded = decodeAgentFrame(reply) as { status?: { todo?: unknown } } | undefined;
+    expect(decoded).toMatchObject({ t: "snapshot_reply", rid: "r1" });
+    expect(decoded?.status?.todo).toEqual(todoWire);
+    expect(decodeAgentFrame({ ...reply, status: { ...reply.status, todo: { tasks: "nope" } } })).toBeUndefined();
   });
 
   it("accepts branch_reply with loose WireEntry payloads", () => {

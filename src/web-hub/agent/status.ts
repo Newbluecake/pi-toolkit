@@ -13,6 +13,8 @@ import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
 import type { FleetOmitted, FleetRowWire, StatusInfo } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
+import { projectTodo } from "./todo.js";
+import type { TodoState } from "../../todo/state.js";
 
 /** Web rows: more than the TUI widget, still bounded. */
 const WEB_MAX_ACTIVE_ROWS = 64;
@@ -23,6 +25,7 @@ export function readStatus(
   tap: EventTap,
   fleet: readonly RunSnapshot[],
   queueMirror?: QueueMirror,
+  todo?: () => TodoState,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -50,6 +53,13 @@ export function readStatus(
     if (items.length > 0) status.queue = items.slice();
     const dropped = queueMirror.takeDropped();
     if (dropped.length > 0) status.queueDropped = dropped;
+  }
+  // todo-web plan §3.3 (T3): sampled in the same call as busy/leafId/queue so the
+  // browser never sees a torn "new leaf + stale todo" pair. No getter (todo
+  // disabled / child session) ⇒ field absent, byte-equal to the pre-feature shape.
+  if (todo !== undefined) {
+    const projected = projectTodo(todo());
+    if (projected !== undefined) status.todo = projected;
   }
   return status;
 }
