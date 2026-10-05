@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 /**
  * `NoticeBanner.vue` / `NoticeStack.vue` (ui-design.md §10, vue-plan.md v2.1 §3.2, §5.2 — P3).
- * Persistent notices render as a collapsible-but-never-dismissible `<details>`
- * (`notice-compact`); everything else is a plain banner whose action button dispatches
- * `action(notice.id)`.
+ * ALL notices render as a compact collapsible `<details>` (`notice-compact`) since 2026-10-05
+ * (user field report: full blocks ate too much phone vertical space); the action button lives in
+ * the expanded region and dispatches `action(notice.id)`.
  */
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
@@ -27,16 +27,18 @@ describe("NoticeBanner.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     expect(wrapper.find(".notice-more").text()).toBe("The hub still accepts the password generated at setup.");
   });
 
-  it("renders a non-persistent notice as a plain banner with role=alert for danger tone", () => {
+  it("renders a non-persistent notice in the same compact <details> with role=alert for danger tone", () => {
     const notice: Notice = { id: "session-expired", tone: "danger", title: "Session expired.", persistent: false };
     const wrapper = mount(NoticeBanner, { props: { notice } });
-    expect(wrapper.find("div.notice.notice--danger").attributes("role")).toBe("alert");
+    const el = wrapper.find("details.notice.notice--danger.notice-compact");
+    expect(el.exists()).toBe(true);
+    expect(el.find("summary").attributes("role")).toBe("alert");
   });
 
   it("a warn/info tone uses role=status", () => {
     const notice: Notice = { id: "reconnecting", tone: "warn", title: "Connection lost.", persistent: false };
     const wrapper = mount(NoticeBanner, { props: { notice } });
-    expect(wrapper.find("div.notice").attributes("role")).toBe("status");
+    expect(wrapper.find("details.notice summary").attributes("role")).toBe("status");
   });
 
   it("clicking the action button emits action(notice.id)", async () => {
