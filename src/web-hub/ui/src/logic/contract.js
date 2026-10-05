@@ -62,6 +62,11 @@ export const API = Object.freeze({
   // web-hub-preview plan v3 §4.1 (PV4): the single content-preview endpoint, imported from
   // `protocol/preview.ts` — same anti-drift rule as the upload paths above.
   preview: PREVIEW_PATH,
+  // @文件补全 (file-mention): the composer's file-search endpoint. Hand-written literal, NOT
+  // imported from `hub/file-search.ts` — that module is hub-side (imports `node:fs*`) and must
+  // never reach the browser bundle; `tests/web-hub/ui/logic-file-mention.test.ts` pins this
+  // literal against the hub constant instead.
+  filesSearch: "/api/files/search",
   // web-hub-fleet-drawer plan §3.1 (F0): the three run-transcript endpoints. Hand-written
   // literals, NOT imported from `protocol/run-transcript.ts`: that module also carries the
   // typebox frame schemas, and importing it here would drag `@sinclair/typebox` into the

@@ -54,6 +54,8 @@ import {
   runningMentionTargets,
 } from "@logic/mention.js";
 import { canSendWithAttachments, classifyPaste, collectDrop, pastedName, uploadAvailability } from "@logic/upload.js";
+import { buildFileSearchUrl, parseFileSearchResults } from "@logic/file-mention.js";
+import { API } from "@logic/contract.js";
 import { UPLOAD_ATTACH_MAX_PER_MSG } from "@protocol/upload.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { ComposerEmits, ComposerProps } from "../../contracts.js";
@@ -109,14 +111,18 @@ const slash = computed(() => parseSlash(text.value));
 const commandMode = computed(() => slash.value !== undefined && commandsEnabled.value && !sendAsText.value);
 
 // ---------------------------------------------------------------------------
-// @mention completion (web-hub task #11)
+// @mention completion (web-hub task #11) + @文件补全 (file-mention)
 // ---------------------------------------------------------------------------
-// A line-initial `@partial` token opens a panel of the session's RUNNING sub-agents (the
-// CONTROL_VIEW agent's fleet rows, `status === "running"` only — anything else would steer
-// into a guaranteed E_NOT_RUNNING agent-side). Picking inserts `@label `; the actual send
-// routing lives in DetailDock (`mentionSendRoute`), this component only completes text.
-// With no running sub-agent the panel never pops at all (user-confirmed: cleaner than an
-// empty-state row).
+// A line-initial `@partial` token opens a TWO-ZONE panel: the session's RUNNING sub-agents
+// (the CONTROL_VIEW agent's fleet rows, `status === "running"` only — anything else would
+// steer into a guaranteed E_NOT_RUNNING agent-side) and, once ≥1 character is typed, FILES
+// under the session cwd (debounced ~200ms `GET /api/files/search`; relative path shown,
+// picking inserts `@<absolute path> `). Keyboard navigation is CONTINUOUS across the two
+// zones (one flat index); the panel never pops while BOTH zones are empty (the task-#11
+// rule, generalized: runningTargets > 0 OR the file search has ever returned hits for this
+// token), and any file-search failure (network/401/…) silently degrades to the sub-agent
+// zone only. The actual send routing lives in DetailDock (`mentionSendRoute` + file-mention
+// expansion); this component only completes text.
 const rootEl = ref<HTMLElement | null>(null);
 const caret = ref(text.value.length);
 const mentionDismissed = ref(false); // Esc / outside-pointerdown latch, reset on any input
@@ -131,8 +137,105 @@ const runningTargets = computed(() => runningMentionTargets([...(view?.agent.val
 const mentionRows = computed(() =>
   mentionState.value.open ? filterMentionTargets(runningTargets.value, mentionState.value.query) : [],
 );
+
+// --- file zone (debounced search; silent degrade on any failure) -------------------------
+
+interface FilePanelRow {
+  readonly kind: "file";
+  readonly path: string;
+  readonly rel: string;
+}
+type PanelRow = { readonly kind: "agent"; readonly label: string; readonly runId: string } | FilePanelRow;
+
+const FILE_SEARCH_DEBOUNCE_MS = 200;
+const FILE_SEARCH_LIMIT = 20;
+
+const fileRows = ref<readonly FilePanelRow[]>([]);
+/** Armed once THIS token's search has returned ≥1 hit — keeps the panel (and its empty line)
+ * up while the user keeps typing past every match, exactly like the sub-agent zone's
+ * `runningTargets.length > 0` arm. Reset when the token closes. */
+const fileArmed = ref(false);
+let fileSeq = 0;
+let fileTimer: ReturnType<typeof setTimeout> | undefined;
+let fileCtl: AbortController | undefined;
+
+function stopFileSearch(): void {
+  if (fileTimer !== undefined) {
+    clearTimeout(fileTimer);
+    fileTimer = undefined;
+  }
+  fileSeq += 1; // any in-flight/stale response is dropped by the seq guard
+  fileCtl?.abort();
+  fileCtl = undefined;
+}
+
+function resetFileZone(): void {
+  stopFileSearch();
+  fileRows.value = [];
+  fileArmed.value = false;
+}
+
+async function doFileSearch(q: string, seq: number, key: string): Promise<void> {
+  const ctl = new AbortController();
+  fileCtl = ctl;
+  try {
+    const r = await fetch(buildFileSearchUrl(API.filesSearch, key, q, FILE_SEARCH_LIMIT), {
+      credentials: "same-origin",
+      method: "GET",
+      headers: { "X-PWH": "1" },
+      signal: ctl.signal,
+    });
+    if (seq !== fileSeq) return;
+    if (!r.ok) return; // 401/429/… — silent degrade to the sub-agent zone
+    let body: unknown;
+    try {
+      body = await r.json();
+    } catch {
+      return;
+    }
+    if (seq !== fileSeq) return;
+    const rows = parseFileSearchResults(body);
+    fileRows.value = rows.map((row) => ({ kind: "file" as const, path: row.path, rel: row.rel }));
+    if (rows.length > 0) fileArmed.value = true;
+  } catch {
+    /* network/abort — silent degrade */
+  } finally {
+    if (fileCtl === ctl) fileCtl = undefined;
+  }
+}
+
+// The token's query (null when the completion is closed): schedules/cancels the file search.
+watch(
+  () => (mentionState.value.open ? mentionState.value.query : null),
+  (q) => {
+    stopFileSearch();
+    fileRows.value = [];
+    if (q === null) {
+      fileArmed.value = false;
+      return;
+    }
+    if (q.length < 1) return; // bare "@": files need ≥1 character (sub-agents still list)
+    const seq = fileSeq;
+    const key = view?.agentKey ?? ctx?.agentKey ?? null;
+    if (key === null) return;
+    if (view?.agent.value.session === undefined) return; // no live session ⇒ hub answers 409
+    if (typeof fetch !== "function") return;
+    fileTimer = setTimeout(() => {
+      void doFileSearch(q, seq, key);
+    }, FILE_SEARCH_DEBOUNCE_MS);
+  },
+);
+
+const panelRows = computed<readonly PanelRow[]>(() => [
+  ...mentionRows.value.map((r) => ({ kind: "agent" as const, label: r.label, runId: r.runId })),
+  ...fileRows.value,
+]);
 const mentionOpen = computed(
-  () => mentionState.value.open && !mentionDismissed.value && !commandMode.value && runningTargets.value.length > 0,
+  () =>
+    mentionState.value.open &&
+    !mentionDismissed.value &&
+    !commandMode.value &&
+    (runningTargets.value.length > 0 || fileArmed.value),
 );
 // Reset the highlight only when the QUERY (or open) changes; a fleet wire refresh (~1Hz)
 // rebuilds the rows array with identical content — resetting on that would yank the user's
@@ -143,12 +246,12 @@ watch(
     mentionActive.value = 0;
   },
 );
-watch(mentionRows, (rows) => {
+watch(panelRows, (rows) => {
   if (mentionActive.value > rows.length - 1) mentionActive.value = Math.max(0, rows.length - 1);
 });
 
-function pickMention(label: string): void {
-  const applied = applyMentionPick(text.value, caret.value, label);
+function pickPanelRow(row: PanelRow): void {
+  const applied = applyMentionPick(text.value, caret.value, row.kind === "agent" ? row.label : row.path);
   text.value = applied.text;
   persistDraft();
   void nextTick(() => {
@@ -171,7 +274,8 @@ function onDocPointerDown(ev: Event): void {
 onMounted(() => document.addEventListener("pointerdown", onDocPointerDown, true));
 
 /** Mention key layer, called from `onKeydown` while the panel is open. Returns true when the
- * event was consumed (never reaches `composerKeyAction` — Enter picks instead of sending). */
+ * event was consumed (never reaches `composerKeyAction` — Enter picks instead of sending).
+ * Navigation spans BOTH zones (one flat index over `panelRows`). */
 function mentionKeydown(ev: KeyboardEvent): boolean {
   if (!mentionOpen.value) return false;
   if (ev.key === "Escape") {
@@ -179,17 +283,17 @@ function mentionKeydown(ev: KeyboardEvent): boolean {
     return true;
   }
   if (ev.key === "ArrowDown") {
-    mentionActive.value = moveMentionActive(mentionActive.value, 1, mentionRows.value.length);
+    mentionActive.value = moveMentionActive(mentionActive.value, 1, panelRows.value.length);
     return true;
   }
   if (ev.key === "ArrowUp") {
-    mentionActive.value = moveMentionActive(mentionActive.value, -1, mentionRows.value.length);
+    mentionActive.value = moveMentionActive(mentionActive.value, -1, panelRows.value.length);
     return true;
   }
   if (ev.key === "Enter" && !ev.shiftKey && !ev.altKey) {
-    const row = mentionRows.value[mentionActive.value] ?? mentionRows.value[0];
+    const row = panelRows.value[mentionActive.value] ?? panelRows.value[0];
     if (row === undefined) return false; // zero matches: fall through to the normal key map
-    pickMention(row.label);
+    pickPanelRow(row);
     return true;
   }
   return false;
@@ -266,6 +370,7 @@ function showHint(msg: string): void {
 }
 onUnmounted(() => {
   if (hintTimer !== undefined) clearTimeout(hintTimer);
+  resetFileZone();
   document.removeEventListener("pointerdown", onDocPointerDown, true);
 });
 
@@ -507,10 +612,13 @@ watch(
       :busy="busy"
       @pick="onPalettePick"
     />
-    <!-- @mention completion (task #11): rendered before the input row so it opens UPWARD from
-         the bottom-pinned composer. Rows are the session's running sub-agents; Enter/click
-         inserts `@label `, Esc/outside-pointerdown closes. -->
+    <!-- @mention completion (task #11 + file-mention): rendered before the input row so it
+         opens UPWARD from the bottom-pinned composer. TWO zones — the session's running
+         sub-agents, then files under the session cwd (relative path shown; pick inserts
+         `@<absolute path> `). Enter/click inserts, arrows navigate across BOTH zones,
+         Esc/outside-pointerdown closes. -->
     <div v-if="mentionOpen" class="mention-panel" role="listbox" :aria-label="t('control.mentionAria')">
+      <p v-if="mentionRows.length > 0" class="mention-zone">{{ t("control.mentionZone") }}</p>
       <button
         v-for="(row, i) in mentionRows"
         :key="row.runId"
@@ -519,13 +627,27 @@ watch(
         class="mention-item"
         :class="{ active: i === mentionActive }"
         :aria-selected="i === mentionActive"
-        @click="pickMention(row.label)"
+        @click="pickPanelRow({ kind: 'agent', label: row.label, runId: row.runId })"
         @mousemove="mentionActive = i"
       >
         <span class="mention-label" translate="no">@{{ row.label }}</span>
         <span class="chip chip-muted mention-status">{{ t("control.stateRunning") }}</span>
       </button>
-      <p v-if="mentionRows.length === 0" class="mention-empty">{{ t("control.mentionEmpty") }}</p>
+      <p v-if="fileRows.length > 0" class="mention-zone">{{ t("control.fileZone") }}</p>
+      <button
+        v-for="(row, i) in fileRows"
+        :key="row.path"
+        type="button"
+        role="option"
+        class="mention-item mention-file"
+        :class="{ active: i + mentionRows.length === mentionActive }"
+        :aria-selected="i + mentionRows.length === mentionActive"
+        @click="pickPanelRow({ kind: 'file', path: row.path, rel: row.rel })"
+        @mousemove="mentionActive = i + mentionRows.length"
+      >
+        <span class="mention-label" translate="no">{{ row.rel }}</span>
+      </button>
+      <p v-if="panelRows.length === 0" class="mention-empty">{{ t("control.mentionEmpty") }}</p>
     </div>
     <AttachmentTray
       v-if="trayItems.length > 0"

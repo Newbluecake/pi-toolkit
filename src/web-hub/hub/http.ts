@@ -64,6 +64,7 @@ import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.
 import { auditControl, auditUpload, type UploadHttpMetrics } from "./audit.js";
 import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import { createConnGuard } from "./conn-guard.js";
+import { createFileSearchRoutes, FILE_SEARCH_AUTH_RESERVE_MS, FILE_SEARCH_PATH } from "./file-search.js";
 import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
@@ -94,6 +95,7 @@ import type {
   LanStatus,
   LanTransport,
   ListenerKind,
+  FileSearchRoutes,
   PreviewRoutes,
   RegistryView,
   RequestContext,
@@ -967,6 +969,9 @@ export interface LanRuntime {
    * (§4.7 matrix: `mode:"loopback"` ⇒ LAN answers 404 exactly like not-enabled); absent ⇒
    * `GET /api/preview` on LAN keeps its original 404, byte-identical. */
   preview?: PreviewRoutes | undefined;
+  /** @文件补全 (file-mention): the file-search route frontend, same instance as the loopback
+   * listener's; same §4.7 gate as preview above (`mode === "on"` only, else original 404). */
+  fileSearch?: FileSearchRoutes | undefined;
 }
 
 function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
@@ -1283,6 +1288,27 @@ async function handleLanRequestInner(
       expectedOrigin: ctx.externalOrigin,
       authorize: async (deadline) => {
         const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, PREVIEW_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      sendJson,
+    });
+  }
+
+  // @文件补全 (file-mention): `GET /api/files/search` — dispatched right after the preview
+  // branch, same insertion point class (after headless/preview, before the method branches) and
+  // the same §4.7 LAN gate (`mode === "on"`; `mode:"loopback"` ⇒ the original 404 below,
+  // byte-identical). The LAN authorize segment mirrors preview's, but with file-search's own
+  // auth reserve (`FILE_SEARCH_AUTH_RESERVE_MS`: at least 2s of the 4s budget survives auth).
+  if (rt.fileSearch !== undefined && rt.fileSearch.mode === "on" && method === "GET" && path === FILE_SEARCH_PATH) {
+    return rt.fileSearch.handle(req, res, query, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, FILE_SEARCH_AUTH_RESERVE_MS);
         const authFailure: { code?: string } = {};
         const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
         if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
@@ -2156,6 +2182,16 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // keeps its legacy replies (401/404 per the §4.7 not-enabled matrix) and no `X-PWH-Preview-*`
   // header is ever sent, byte-identical to pre-PV3.
   const previewRoutes = deps.preview;
+  // @文件补全 (file-mention): the `GET /api/files/search` route frontend. Default-constructed
+  // from the preview line's presence/mode (the search endpoint is preview's completion
+  // sibling — same cwd-root security surface, same §4.7 listener matrix), so `hub.ts` needs no
+  // wiring of its own; an injected `deps.fileSearch` (tests) always wins. Absent ⇒ the
+  // endpoint keeps its legacy replies (unauth GET ⇒ 401, authed ⇒ 404), byte-identical.
+  const fileSearchRoutes: FileSearchRoutes | undefined =
+    deps.fileSearch ??
+    (previewRoutes === undefined
+      ? undefined
+      : createFileSearchRoutes({ mode: previewRoutes.mode, registry, log, now }));
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -2239,6 +2275,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       rejectAudit429,
       spawn: deps.spawn,
       preview: deps.preview,
+      /** @文件补全 (file-mention): same instance as the loopback listener's (or undefined when
+       * preview/file-search is not enabled — the LAN face then keeps its original 404). */
+      fileSearch: fileSearchRoutes,
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -2481,6 +2520,24 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     // budgeting, same as every other loopback branch).
     if (previewRoutes !== undefined && method === "GET" && path === PREVIEW_PATH) {
       return previewRoutes.handle(req, res, query, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        sendJson,
+      });
+    }
+    // @文件补全 (file-mention): `GET /api/files/search` — same insertion point as the preview
+    // branch above; absent ⇒ falls through to the original paths (unauth GET ⇒ 401, authed ⇒
+    // 404, byte-identical). The loopback authorize segment is the same sync cookie lookup.
+    if (fileSearchRoutes !== undefined && method === "GET" && path === FILE_SEARCH_PATH) {
+      return fileSearchRoutes.handle(req, res, query, {
         listener: "loopback",
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),

@@ -30,6 +30,13 @@
 import { computed, inject, onUnmounted, ref, watch } from "vue";
 import { commandPolicyFor, parseSlash } from "@logic/control.js";
 import { mentionSendRoute } from "@logic/mention.js";
+import { clientImageBudget, previewScopeOf } from "@logic/preview.js";
+import {
+  expandPromptWithFiles,
+  FILE_MENTION_MAX_FILES,
+  findFileMentionTokens,
+  isImagePath,
+} from "@logic/file-mention.js";
 import type { CommandOutputWire } from "@protocol/messages.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
@@ -38,13 +45,16 @@ import Composer from "../control/Composer.vue";
 import CommandConfirm from "../control/CommandConfirm.vue";
 import CommandResult from "../control/CommandResult.vue";
 import QueueList from "../control/QueueList.vue";
-import { CONTROL_VIEW } from "../control/controlContext.js";
+import { CONTROL_ENV, CONTROL_VIEW } from "../control/controlContext.js";
+import { HUB_CTX } from "../control/controlContext.js";
 
 const props = defineProps<DetailDockProps>();
 const emit = defineEmits<DetailDockEmits>();
 const { t } = useI18n();
 
 const view = inject(CONTROL_VIEW, null);
+const hub = inject(HUB_CTX, null);
+const env = inject(CONTROL_ENV, null);
 
 const ctlEnabled = computed(() =>
   view !== null ? view.enabled.value : props.control != null && props.readonlyReason === undefined,
@@ -221,7 +231,70 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
     void c.steerSub(key, mention.runId, mention.message).catch(() => {});
     return;
   }
-  void c.sendPrompt(key, text, deliver).catch(() => {});
+  // @文件补全 send expansion (file-mention): every `@<absolute path>` token under the
+  // session cwd gets its TEXT fetched through the preview endpoint and appended as an
+  // attachment-style block (≤ the shared 48 KiB prompt cap). Never blocks the send: no
+  // scope/transport, no tokens, or any failed fetch (image/binary/too large/timeout) just
+  // leaves the token as plain text — the path itself is model-readable — with a console note.
+  void expandFileRefs(text).then((expanded) => {
+    c.sendPrompt(key, expanded, deliver).catch(() => {});
+  });
+}
+
+/** Per-file fetch deadline — the preview transport's own 40s budget is for human-scale
+ * previews; a send must not hang on one dead file (5s here, all fetches in parallel). */
+const FILE_REF_FETCH_MS = 5_000;
+
+interface RefScope {
+  readonly agentKey: string;
+  readonly sessionId: string;
+  readonly cwd: string | null;
+}
+
+async function fetchFileText(path: string, scope: RefScope): Promise<{ path: string; text: string } | null> {
+  const preview = hub?.preview;
+  if (preview === undefined || scope.cwd === null) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FILE_REF_FETCH_MS);
+  try {
+    const r = await preview.fetch(
+      { agentKey: scope.agentKey, sessionId: scope.sessionId, path },
+      { signal: ctl.signal, maxPixels: clientImageBudget({ coarse: false }) },
+    );
+    if (!r.ok || r.kind !== "text") return null; // images/binary/unsupported — path stays
+    return { path, text: r.text };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The send-time file expansion: detect tokens under the session cwd, fetch their text in
+ * parallel (image extensions skipped up front), compose the block. Returns the ORIGINAL text
+ * unchanged whenever anything in the chain is unavailable — the send always proceeds. */
+async function expandFileRefs(text: string): Promise<string> {
+  const agent = view?.agent.value;
+  if (hub === null || view === null || agent === undefined) return text;
+  const scope = previewScopeOf({
+    mode: env?.authMode ?? "token",
+    hubCaps: (hub.state.value.hub as { caps?: unknown } | null | undefined)?.caps,
+    hasTransport: hub.preview !== undefined,
+    agentKey: view.agentKey,
+    session: agent.session,
+  });
+  if (scope === null || scope.cwd === null) return text;
+  const tokens = findFileMentionTokens(text, scope.cwd);
+  if (tokens.length === 0) return text;
+  const wanted = tokens.slice(0, FILE_MENTION_MAX_FILES).filter((tk) => !isImagePath(tk.path));
+  const settled = await Promise.all(wanted.map((tk) => fetchFileText(tk.path, scope)));
+  const fetched = settled.filter((r): r is { path: string; text: string } => r !== null);
+  const out = expandPromptWithFiles(text, scope.cwd, fetched);
+  // Skip notes stay OUT of the prompt (requirement: skip + console, 文案不进 prompt).
+  if (out.skipped.length > 0) {
+    console.warn("[web-hub] file mention not inlined:", out.skipped.join(", "));
+  }
+  return out.text;
 }
 
 function findPending(id: string): Record<string, unknown> | undefined {

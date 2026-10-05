@@ -630,6 +630,18 @@
   font-weight: var(--fw-semibold);
 }
 
+.mention-zone {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
 .mention-empty {
   margin: 0;
   padding: var(--sp-2) var(--sp-3);

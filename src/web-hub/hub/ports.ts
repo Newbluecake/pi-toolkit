@@ -609,6 +609,13 @@ export interface FrontendDeps {
    * when absent, `GET /api/preview` answers exactly as today (§4.7 matrix: loopback 401/404,
    * LAN 404) and no `X-PWH-Preview-*` header is ever sent. */
   preview?: PreviewRoutes;
+  /** @文件补全 (file-mention): the `GET /api/files/search` route frontend
+   * (`hub/file-search.ts`'s `createFileSearchRoutes`). Optional so test doubles keep
+   * compiling; `createHttpFrontend` default-constructs it from `deps.preview`'s presence
+   * and mode (the search endpoint is the preview line's completion sibling — same cwd-root
+   * security surface, same §4.7 listener matrix: LAN answers 404 unless `mode === "on"`),
+   * so an assembly that injects neither gets the exact pre-feature behavior back. */
+  fileSearch?: FileSearchRoutes;
   /** fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service. Optional so test doubles
    * and pre-F4 assemblies keep compiling — when absent there is no `/api/run/*` wiring (F4
    * builds `createRunRoutes` off this) and everything else is byte-identical. */
@@ -671,4 +678,18 @@ export interface PreviewRoutes {
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
   /** Idempotent; aborts every active request ("hub-close") and single-flight verify task. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// @文件补全 (file-mention): the file-search route frontend's surface, declared here for the
+// same reason as `PreviewRoutes` above — `FrontendDeps.fileSearch` needs the type to compile
+// before `hub/file-search.ts` exists from ports.ts's perspective. The io shape is REUSED from
+// preview (`PreviewRouteIo`: listener/ip/expectedOrigin/authorize/sendJson) — the dispatch
+// sites inject exactly the same objects; file-search never throws and owns its own status
+// table. No `dispose`: a search holds no fds (only in-flight readdir promises), bounded by
+// its per-request deadline + the res-close abort.
+// ---------------------------------------------------------------------------
+export interface FileSearchRoutes {
+  readonly mode: "on" | "loopback";
+  handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
 }

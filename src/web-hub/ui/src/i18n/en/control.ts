@@ -99,9 +99,11 @@ const control = {
   // --- fleet inline sub-agent actions (§7.4) ---
   fleetActionsAria: "Sub-agent actions",
 
-  // --- @mention completion (task #11) ---
-  mentionAria: "Running sub-agents",
-  mentionEmpty: "No matching sub-agent",
+  // --- @mention completion (task #11) + @文件补全 (file-mention) ---
+  mentionAria: "Mentions and files",
+  mentionZone: "Sub-agents",
+  fileZone: "Files",
+  mentionEmpty: "No matching sub-agent or file",
 
   // --- transcript web badge (§7.7, best-effort) ---
   badgeWeb: "web",
