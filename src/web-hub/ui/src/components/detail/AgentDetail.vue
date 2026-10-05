@@ -374,21 +374,6 @@ const dockCtlProps = computed(() => ({
 
     <NoticeBanner v-for="notice in notices" :key="notice.id" :notice="notice" @action="onNoticeAction" />
 
-    <template v-if="controlEnabled">
-      <section v-for="d in openDialogs" :key="`${d.dialogId}:${dialogsEpoch}`" class="ask-user-slot">
-        <p v-if="epochStaleIds.includes(d.dialogId)" class="ask-epoch-note" role="status">
-          {{ t("dialog.epochChanged") }}
-        </p>
-        <AskUserForm
-          :dialog="d"
-          :suspended="hubSuspended"
-          @answer="onDialogAnswer(d.dialogId, $event)"
-          @cancel="onDialogCancel(d.dialogId)"
-        />
-      </section>
-    </template>
-    <p v-for="id in folded" :key="`folded-${id}`" class="ask-folded" role="status">{{ foldedNote(id) }}</p>
-
     <div v-if="agent.history === 'waiting'" class="detail-body" aria-busy="true">
       <div class="skel-stack">
         <span class="skel skel-bubble"></span>
@@ -408,6 +393,23 @@ const dockCtlProps = computed(() => ({
       @update:following="onUpdateFollowing"
       @new-count="onNewCount"
     />
+
+    <!-- ask_user dialogs anchor just above the dock/Composer (user-requested 2026-10-05:
+         was pinned to the top banner slot, which forced mobile users to scroll up to answer) -->
+    <template v-if="controlEnabled">
+      <section v-for="d in openDialogs" :key="`${d.dialogId}:${dialogsEpoch}`" class="ask-user-slot">
+        <p v-if="epochStaleIds.includes(d.dialogId)" class="ask-epoch-note" role="status">
+          {{ t("dialog.epochChanged") }}
+        </p>
+        <AskUserForm
+          :dialog="d"
+          :suspended="hubSuspended"
+          @answer="onDialogAnswer(d.dialogId, $event)"
+          @cancel="onDialogCancel(d.dialogId)"
+        />
+      </section>
+    </template>
+    <p v-for="id in folded" :key="`folded-${id}`" class="ask-folded" role="status">{{ foldedNote(id) }}</p>
 
     <DetailDock
       :following="following"

@@ -5,7 +5,7 @@
  */
 
 .ask-user-slot {
-  border-bottom: 1px solid var(--c-border);
+  border-top: 1px solid var(--c-border);
 }
 
 .ask-user-form {
