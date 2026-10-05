@@ -16,6 +16,7 @@
  * change that breaks an existing caller must come back through W1's review
  * per §11's "改签名 ⇒ 回到 W1 文件重新过 typecheck + 契约测试".
  */
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
 import type { HostTokenRejectReason, LanOffReason, LanStatus } from "../protocol/lan.js";
 import type {
@@ -41,6 +42,7 @@ import type { HubPaths } from "../protocol/paths.js";
 import type { HubSpawnConfig, SpawnsPayload } from "../protocol/spawn.js";
 import type { PROTO } from "../protocol/version.js";
 import type { Scope } from "./lifecycle.js";
+import type { ReqDeadline } from "./req-deadline.js";
 import type { SpawnFrontendPort } from "./spawn/ports.js";
 import type { UiServer } from "./static.js";
 import type { UiStatus } from "./ui-root.js";
@@ -367,6 +369,10 @@ export interface HubConfig {
    * `webHub.spawn.enabled === true` (SP2's `buildHubConfig` omits the key otherwise — the key's
    * absence IS the wire-level "feature off" that keeps the §8.2 response matrix byte-identical). */
   spawn?: HubSpawnConfig;
+  /** web-hub-preview plan v3 §4.1 (PV1): preview availability — `"on"`/`"loopback"` only.
+   * `"off"` is the key's ABSENCE (same wire-level off pattern as `spawn`); `hub/main.ts`
+   * re-validates via `normalizeHubPreviewMode` and drops the whole key on anything else. */
+  preview?: "on" | "loopback";
 }
 
 export interface HubLog {
@@ -516,6 +522,11 @@ export interface FrontendDeps {
    * when absent, `/api/headless*` answers exactly as it does today (404/501 per the §8.2
    * not-enabled matrix) and no `spawns` SSE frame is ever sent. */
   spawn?: SpawnFrontendPort;
+  /** web-hub-preview plan v3 §4.5 (PV1): the preview route frontend (PV3's
+   * `createPreviewRoutes`). Optional so test doubles and pre-PV3 assemblies keep compiling —
+   * when absent, `GET /api/preview` answers exactly as today (§4.7 matrix: loopback 401/404,
+   * LAN 404) and no `X-PWH-Preview-*` header is ever sent. */
+  preview?: PreviewRoutes;
 }
 
 export interface HttpFrontend {
@@ -530,3 +541,48 @@ export interface HttpFrontend {
 }
 
 export type FrontendFactory = (deps: FrontendDeps) => HttpFrontend;
+
+// ---------------------------------------------------------------------------
+// web-hub-preview plan v3 §4.5 (PV1): the preview route frontend's frozen surface.
+// Hoisted HERE (not `hub/preview/routes.ts`, which is PV3's file) because PV1 only adds the
+// `FrontendDeps.preview` field — the type must exist for ports.ts to compile. PV3 implements
+// `createPreviewRoutes` against this shape; if it needs to refine a member signature, the
+// change comes back through ports.ts review (same rule as the W1 port freeze above).
+// ---------------------------------------------------------------------------
+
+/** Successful `authorize()`: the authenticated principal preview audits/limits charge to. */
+export interface PreviewAuthResult {
+  ip: string;
+  user?: string;
+}
+
+/** `authorize()` already sent its own error response (401/etc.); `code` is mirror-back only. */
+export interface PreviewAuthHandled {
+  handled: true;
+  code: string;
+}
+
+/** What `hub/http.ts` injects into every preview dispatch, one instance per request per listener
+ * (§4.5; mirrors `SpawnRouteIo`): `listener`/`ip`/`expectedOrigin` feed the CSRF + audit layers,
+ * `authorize` is the listener's own auth gate (loopback `auth.check`, LAN `requireLanSession`),
+ * `sendJson` is the shared response helper — routes answer via their own `PREVIEW_STATUS` table
+ * and never throw. */
+export interface PreviewRouteIo {
+  listener: "loopback" | "lan";
+  ip: string;
+  expectedOrigin: string;
+  authorize(deadline: ReqDeadline): Promise<PreviewAuthResult | PreviewAuthHandled>;
+  sendJson: (res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>) => void;
+}
+
+/** The frontend surface `createHttpFrontend` optionally carries (PV3 wires `FrontendDeps.preview`):
+ * `handle` dispatches `GET /api/preview` for ONE listener (LAN only when `mode === "on"`, §4.7);
+ * `dispose` is the bounded (≤1s), idempotent teardown `hub.close()` awaits between
+ * `spawnSup.shutdown` and `fe.close()`, and the startup-failure cleanup runs before `fe.close()`
+ * (§4.5.1's three exit paths). */
+export interface PreviewRoutes {
+  readonly mode: "on" | "loopback";
+  handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** Idempotent; aborts every active request ("hub-close") and single-flight verify task. */
+  dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
+}

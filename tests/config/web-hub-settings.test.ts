@@ -37,6 +37,7 @@ describe("web-hub settings", () => {
       webCommands: true,
       webCommandPolicy: {},
       uploads: "on",
+      preview: "on",
       lan: { enabled: false, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
       spawn: {
         enabled: false,
@@ -109,6 +110,7 @@ describe("web-hub settings", () => {
       webCommands: true,
       webCommandPolicy: {},
       uploads: "on",
+      preview: "on",
       lan: lanDefaults,
       spawn: spawnDefaults,
     });
@@ -457,6 +459,46 @@ describe("webHub.uploads (web-hub-upload plan §6 U1)", () => {
     expect(spec.live).toBeUndefined();
     expect(spec).toMatchObject({ kind: "enum", path: "webHub.uploads", values: ["on", "loopback", "off"] });
     expect(defaultOf(spec)).toBe("on");
+  });
+});
+
+// web-hub-preview plan v3 §4.1/U1 (PV1): webHub.preview is tri-valued like webHub.uploads,
+// default "on" (U1 — user ruling 2026-10-05, risk explicitly accepted per plan §5.1).
+describe("webHub.preview (web-hub-preview plan v3 §4.1/U1)", () => {
+  it('defaults to "on" (U1)', () => {
+    expect(defaults.preview).toBe("on");
+    expect(parseWebHubSettings({}).preview).toBe("on");
+    expect(parseWebHubSettings(undefined).preview).toBe("on");
+  });
+
+  it("accepts each of the three valid values", () => {
+    expect(parseWebHubSettings({ preview: "on" }).preview).toBe("on");
+    expect(parseWebHubSettings({ preview: "loopback" }).preview).toBe("loopback");
+    expect(parseWebHubSettings({ preview: "off" }).preview).toBe("off");
+  });
+
+  it('falls back to "on" for any invalid value, never throwing', () => {
+    for (const garbage of ["ON", "Loopback", "lan", "yes", 1, true, null, undefined, [], {}, ""]) {
+      expect(parseWebHubSettings({ preview: garbage }).preview, JSON.stringify(garbage)).toBe("on");
+    }
+  });
+
+  it("is wired into loadSettings", () => {
+    expect(loadSettings({ webHub: { preview: "loopback" } }).webHub.preview).toBe("loopback");
+    expect(loadSettings({ webHub: { preview: "off" } }).webHub.preview).toBe("off");
+    expect(loadSettings({ webHub: { preview: "bogus" } }).webHub.preview).toBe("on");
+  });
+
+  it("exposes webHub.preview in SETTING_SPECS as a non-live enum carrying the restart + loopback notes", () => {
+    expect(isKnownSettingKey("webHub.preview")).toBe(true);
+    const spec = SETTING_SPECS["webHub.preview"]!;
+    expect(spec.live).toBeUndefined();
+    expect(spec).toMatchObject({ kind: "enum", path: "webHub.preview", values: ["on", "loopback", "off"] });
+    expect(defaultOf(spec)).toBe("on");
+    // plan PV1: 设置说明必须写明 — 修改后需要 /reload 再 /webhub restart；
+    // LAN 上若有其他使用者建议 loopback（§5.1/U1 的缓解提示）
+    expect(spec.description).toContain("/reload then /webhub restart");
+    expect(spec.description).toContain("loopback if others use your LAN");
   });
 });
 

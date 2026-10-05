@@ -19,6 +19,7 @@
  * must still be able to write during/after teardown.
  */
 import { resolveHubPaths } from "../protocol/paths.js";
+import { normalizeHubPreviewMode } from "../protocol/preview.js";
 import { installProcessHandlers, startHub, type StartHubDeps } from "./hub.js";
 import { createHttpFrontend } from "./http.js";
 import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
@@ -88,6 +89,25 @@ async function main(): Promise<void> {
       }
     } else {
       config = { ...config, spawn: parsedSpawn.spawn };
+    }
+  }
+
+  // web-hub-preview plan v3 §4.1 (PV1): same fail-soft re-validation of config.preview — the
+  // wire carries "on"/"loopback" only ("off" is the key's absence, and the agent side never
+  // writes it), so anything else drops the whole key: preview stays off, the hub keeps running.
+  if (config.preview !== undefined) {
+    const rawPreview = config.preview;
+    const preview = normalizeHubPreviewMode(rawPreview);
+    if (preview === undefined) {
+      const { preview: _drop, ...rest } = config;
+      config = rest;
+      try {
+        process.stderr.write(`web-hub main: dropping config.preview: ${JSON.stringify(rawPreview)}\n`);
+      } catch {
+        /* stderr may be ignored */
+      }
+    } else {
+      config = { ...config, preview };
     }
   }
   startDeps.childUmask = inheritedUmask;

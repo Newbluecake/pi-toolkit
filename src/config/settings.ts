@@ -865,6 +865,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     webCommands: true,
     webCommandPolicy: {},
     uploads: "on",
+    preview: "on",
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
   },
@@ -1630,6 +1631,7 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     webCommands: typeof record.webCommands === "boolean" ? record.webCommands : (defaults.webCommands ?? true),
     webCommandPolicy: policy,
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
+    preview: parsePreviewSetting(record.preview, defaults.preview),
     lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
   };
@@ -1637,6 +1639,13 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
 
 /** web-hub-upload plan §6 U1: `webHub.uploads` is tri-valued; any other value falls back to "on". */
 function parseUploadsSetting(raw: unknown, fallback: "on" | "loopback" | "off" | undefined): "on" | "loopback" | "off" {
+  if (raw === "on" || raw === "loopback" || raw === "off") return raw;
+  return fallback ?? "on";
+}
+
+/** web-hub-preview plan v3 §4.1/U1 (PV1): `webHub.preview` is tri-valued like `webHub.uploads`;
+ * any other value falls back to the default "on" (U1). */
+function parsePreviewSetting(raw: unknown, fallback: "on" | "loopback" | "off" | undefined): "on" | "loopback" | "off" {
   if (raw === "on" || raw === "loopback" || raw === "off") return raw;
   return fallback ?? "on";
 }

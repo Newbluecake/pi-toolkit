@@ -219,11 +219,15 @@ describe("常量表 (arch §7 lifecycle/limit constants)", () => {
 // ---------------------------------------------------------------------------
 
 describe("响应矩阵词汇表 (arch §8.2, SP9 之前先钉在类型层)", () => {
-  it('SSE_EVENTS carries "spawns"; the four spawn error codes sit at API_ERRORS\' tail (after upload)', async () => {
+  it('SSE_EVENTS carries "spawns"; the four spawn error codes sit contiguously after upload\'s (tail order)', async () => {
     const { SSE_EVENTS, API_ERRORS } = await import("../../../src/web-hub/protocol/http-contract.js");
     expect(SSE_EVENTS).toContain("spawns");
     expect(SSE_EVENTS.at(-1)).toBe("spawns"); // 尾部追加，不打乱既有顺序
-    expect(API_ERRORS.slice(-4)).toEqual(["E_SPAWN_DENIED", "E_DIR", "E_LIMIT", "E_LAUNCHER"]);
+    // web-hub-preview PV1 又在 spawn 后面尾部追加了四个 E_PREVIEW_*，所以 spawn 的四个不再是
+    // 数组末尾，但必须仍连续、仍按原顺序跟在 upload 六码之后（§2.3 只许尾部追加）
+    const launcher = API_ERRORS.indexOf("E_LAUNCHER");
+    expect(launcher).toBeGreaterThan(-1);
+    expect(API_ERRORS.slice(launcher - 3, launcher + 1)).toEqual(["E_SPAWN_DENIED", "E_DIR", "E_LIMIT", "E_LAUNCHER"]);
   });
 
   it('SPAWN_HUB_CAP is "spawn.v1" (advertised only when config.spawn exists — SP10 wires it)', async () => {

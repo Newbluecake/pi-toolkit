@@ -43,6 +43,18 @@ export const DIALOG_BG_HUB_CAPS = ["dialog.bg.v1"] as const;
  */
 export const SPAWN_HUB_CAP = "spawn.v1";
 
+/**
+ * web-hub-preview plan v3 §4.1 (PV1): the two hub caps advertising the read-only content-preview
+ * endpoint (`GET /api/preview`). `PREVIEW_HUB_CAP` is declared whenever the feature is on
+ * (`webHub.preview` = `"loopback"` or `"on"`); `PREVIEW_LAN_HUB_CAP` only when the mode is
+ * `"on"` (the default, U1) — under the defaults BOTH are declared, on both hub cap surfaces
+ * (`HubInfo.caps` / `hello_ack.caps`; PV3's `extraHubCaps` fold, §4.7 caps 对照). A browser that
+ * doesn't see them renders paths as plain text. Preview adds NO agent↔hub frames and no SSE
+ * event, so PROTO stays 1.1 (same §2.3 rule as spawn).
+ */
+export const PREVIEW_HUB_CAP = "preview.v1";
+export const PREVIEW_LAN_HUB_CAP = "preview.lan.v1";
+
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {
   dialogs: "dialog.v1",

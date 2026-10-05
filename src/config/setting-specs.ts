@@ -282,6 +282,11 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["on", "loopback", "off"],
     "web-hub: file upload availability (on = loopback+LAN, loopback = loopback only, off = disabled)",
   ),
+  "webHub.preview": choice(
+    "webHub.preview",
+    ["on", "loopback", "off"],
+    "web-hub: in-browser preview of session-cwd files and session-shared uploads (on = loopback+LAN, loopback = loopback only, off = disabled; change: /reload then /webhub restart; use loopback if others use your LAN)",
+  ),
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
   // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`

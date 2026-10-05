@@ -81,6 +81,12 @@ export const API_ERRORS = [
   "E_DIR", // 400 — cwd admission / pin failures (reason in message)
   "E_LIMIT", // 409 — global / per-principal / starting-slot caps
   "E_LAUNCHER", // 503 — launcher fingerprint / persist / reaper unavailable
+  // web-hub-preview plan v3 §4.1 (PV1): preview endpoint error codes (tail-append after
+  // spawn's four, same §2.3 hot-file window rule — append only, never reorder).
+  "E_PREVIEW_DENIED", // 403 — cwd/upload admission refusal (body carries reason: PreviewDenyReason)
+  "E_PREVIEW_UNSUPPORTED", // 415 — sniffed binary / non-regular file / unknown image dims
+  "E_PREVIEW_TOO_LARGE", // 413 — over the byte or pixel cap (body: size/max/reason/dims)
+  "E_PREVIEW_CHANGED", // 409 — content identity (or sha256) changed during the preview
 ] as const;
 
 /** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */

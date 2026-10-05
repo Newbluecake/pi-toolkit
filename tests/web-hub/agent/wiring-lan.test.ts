@@ -70,7 +70,7 @@ describe("wireWebHub — LAN spawn config (plan §11 LE row: lan off ⇒ P1 深�
     const env = (spawnImpl.mock.calls[0] as unknown as [string, string[], { env: Record<string, string> }])[2].env;
     const config = JSON.parse(env.PI_WEBHUB_CONFIG) as Record<string, unknown>;
     expect(Object.keys(config).sort()).toEqual(
-      ["buildId", "home", "idleExitMinutes", "launcher", "pluginVersion", "port", "v"].sort(),
+      ["buildId", "home", "idleExitMinutes", "launcher", "pluginVersion", "port", "preview", "v"].sort(),
     );
     expect(config.lan).toBeUndefined();
     expect("lan" in config).toBe(false);

@@ -69,7 +69,8 @@ async function hubConfigFor(settings: WebHubSettings): Promise<Record<string, un
   return JSON.parse(env.PI_WEBHUB_CONFIG) as Record<string, unknown>;
 }
 
-/** The byte-exact pre-spawn hub config for this fixture (what the off cases must deep-equal). */
+/** The pre-spawn hub config shape PLUS the post-PV1 default `preview:"on"` (what the off
+ * cases must deep-equal — the "现状" baseline moves forward each time a default-on feature lands). */
 function baselineConfig(): Record<string, unknown> {
   return {
     v: 1,
@@ -79,6 +80,7 @@ function baselineConfig(): Record<string, unknown> {
     pluginVersion: "1.2.3",
     buildId: "1.2.3@test",
     launcher: [process.execPath, "/nonexistent/pi"],
+    preview: "on", // web-hub-preview PV1: default mode (U1)
   };
 }
 

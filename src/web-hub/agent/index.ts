@@ -26,6 +26,7 @@ import type { RunSnapshot } from "../../core/types.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
 import type { HubSpawnConfig } from "../protocol/spawn.js";
+import { PREVIEW_DEFAULT_MODE, type PreviewMode } from "../protocol/preview.js";
 import {
   FORWARDED_EVENTS,
   type AgentKind,
@@ -100,6 +101,12 @@ export interface WebHubSettings {
    * `upload.v1` and `upload.lan.v1`; `"loopback"` advertises only `upload.v1` (LAN uploads
    * disabled); `"off"` advertises neither. Ignored (treated as `"off"`) when `control` is false. */
   uploads?: "on" | "loopback" | "off";
+  /** web-hub-preview plan v3 §4.1/U1 (PV1): content-preview availability (`GET /api/preview`).
+   * Default `"on"` (U1: the user is the LAN's only user and explicitly accepts §5.1's risk);
+   * `"loopback"` keeps the endpoint off LAN; `"off"` leaves `HubConfig.preview` unset, keeping
+   * `PI_WEBHUB_CONFIG` deep-equal to the pre-preview shape. Non-live like the rest of webHub.*:
+   * change needs `/reload` then `/webhub restart`. */
+  preview?: PreviewMode;
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
   /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，
@@ -538,6 +545,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       };
       config.spawn = spawn;
     }
+    // web-hub-preview plan v3 §4.1 (PV1): preview mode rides PI_WEBHUB_CONFIG as its own key —
+    // "on" (default, U1)/"loopback" cross the wire for the hub to re-validate (main.ts drops
+    // anything else); "off" is the key's ABSENCE, the same wire-level off pattern as spawn/lan.
+    const preview = settings.preview ?? PREVIEW_DEFAULT_MODE;
+    if (preview !== "off") config.preview = preview;
     return config;
   };
 
