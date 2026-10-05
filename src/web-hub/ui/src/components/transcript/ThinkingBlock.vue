@@ -24,8 +24,14 @@ const AUTO_COLLAPSE_CHARS = 600;
 const props = defineProps<{ readonly text: string; readonly live?: boolean }>();
 const { t } = useI18n();
 
-const lineCount = computed(() => (props.text === "" ? 0 : props.text.split("\n").length));
-const isLong = computed(() => lineCount.value > AUTO_COLLAPSE_LINES || props.text.length > AUTO_COLLAPSE_CHARS);
+/**
+ * Models (notably Claude) end thinking with a trailing `\n\n`; under `white-space: pre-wrap` that
+ * renders as a visible blank line and inflates the line count. Leading/trailing blank space is
+ * never meaningful in thinking prose, so trim it for both display and counting.
+ */
+const shown = computed(() => props.text.trim());
+const lineCount = computed(() => (shown.value === "" ? 0 : shown.value.split("\n").length));
+const isLong = computed(() => lineCount.value > AUTO_COLLAPSE_LINES || shown.value.length > AUTO_COLLAPSE_CHARS);
 
 /** `undefined` until the user toggles it by hand; once set, auto logic never touches `isOpen` again. */
 const manualOverride = ref<boolean | undefined>(undefined);
@@ -51,6 +57,6 @@ function onSummaryClick(e: MouseEvent): void {
     <summary @click="onSummaryClick">
       <span>{{ t("transcript.thinking", { n: lineCount }) }}</span>
     </summary>
-    <div class="thinking-text">{{ text }}</div>
+    <div class="thinking-text">{{ shown }}</div>
   </details>
 </template>

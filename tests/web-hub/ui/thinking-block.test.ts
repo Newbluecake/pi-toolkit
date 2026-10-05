@@ -72,4 +72,9 @@ describe("ThinkingBlock.vue", () => {
     expect(wrapper.get(".thinking-text").text()).toBe("**not bold** <b>not html</b>");
     expect(wrapper.html()).not.toContain("<b>not html</b>");
   });
+  it("trims the trailing blank lines models append (no visible empty line, correct line count)", () => {
+    const wrapper = mount(ThinkingBlock, { props: { text: "\nfirst line\nsecond line\n\n", live: false } });
+    expect(wrapper.get(".thinking-text").element.textContent).toBe("first line\nsecond line");
+    expect(wrapper.get("summary").text()).toContain("2");
+  });
 });
