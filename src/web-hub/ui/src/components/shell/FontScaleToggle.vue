@@ -2,7 +2,7 @@
   Font-size slider popover (user feedback: too few steps, wants drag-to-adjust). The "Aa"
   trigger in the top bar opens a small popover pinned below/right-aligned to the button (the
   button sits at the bar's right edge, so right-aligning keeps the panel on-screen), with a
-  range slider (0.8–2.0, 0.05 steps), a live percentage readout, and a reset-to-100% button.
+  range slider (0.8–3.0, 0.05 steps), a live percentage readout, and a reset-to-100% button.
   Closes on Esc (focus returns to the trigger), on pointer down outside, or on re-clicking
   the trigger. Coarse-pointer ≥44px targets come from shell.css's `.fontscale-popover` rules.
 

@@ -6,7 +6,7 @@
 // class — tokens.css's `prefers-color-scheme` media query handles it.
 //
 // The same early-boot pass also applies the persisted font-scale preference
-// (`pwh_fontscale`, a decimal in [0.8, 2.0] — the slider composable aligns it to 5%
+// (`pwh_fontscale`, a decimal in [0.8, 3.0] — the slider composable aligns it to 5%
 // steps; here any in-range number is acceptable for pre-paint application) as the
 // `--fs-scale` custom property on <html>, so the user's chosen text size is in
 // effect on the very first paint instead of popping in when Vue mounts. Missing,
@@ -25,7 +25,7 @@
     else if (pref === "dark") document.documentElement.classList.add("theme-dark");
     var raw = window.localStorage.getItem("pwh_fontscale");
     var scale = raw === null ? NaN : window.parseFloat(raw);
-    if (window.isFinite(scale) && scale >= 0.8 && scale <= 2.0) {
+    if (window.isFinite(scale) && scale >= 0.8 && scale <= 3.0) {
       document.documentElement.style.setProperty("--fs-scale", String(scale));
     }
   } catch (e) {

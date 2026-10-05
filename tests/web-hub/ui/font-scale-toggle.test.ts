@@ -45,13 +45,13 @@ describe("theme-init.js font-scale early boot (numeric parse)", () => {
     expect(fsScale()).toBe("1.8");
   });
 
-  it.each(["1", "0.8", "2"])("applies boundary value %s", (v) => {
+  it.each(["1", "0.8", "3"])("applies boundary value %s", (v) => {
     window.localStorage.setItem("pwh_fontscale", v);
     runThemeInit();
     expect(fsScale()).toBe(v);
   });
 
-  it.each(["bogus", "0.5", "2.5", "Infinity"])(
+  it.each(["bogus", "0.5", "3.5", "Infinity"])(
     "sets nothing for %s (tokens.css's var(--fs-scale, 1) fallback is already 100%)",
     (v) => {
       window.localStorage.setItem("pwh_fontscale", v);
@@ -94,7 +94,7 @@ describe("FontScaleToggle.vue popover", () => {
     const range = wrapper.find('input[type="range"]');
     expect(range.exists()).toBe(true);
     expect(range.attributes("min")).toBe("0.8");
-    expect(range.attributes("max")).toBe("2");
+    expect(range.attributes("max")).toBe("3");
     expect(range.attributes("step")).toBe("0.05");
     expect(wrapper.find(".fontscale-readout").text()).toBe("100%");
     expect(wrapper.find("button.fontscale-reset").exists()).toBe(true);

@@ -32,7 +32,7 @@ function fakeDoc() {
   };
 }
 
-describe("useFontScale (pwh_fontscale → --fs-scale, continuous 0.8–2.0 / 0.05 steps)", () => {
+describe("useFontScale (pwh_fontscale → --fs-scale, continuous 0.8–3.0 / 0.05 steps)", () => {
   it("loadFontScale: default 1 when unset; valid stored decimals load aligned", () => {
     expect(loadFontScale(fakeStorage())).toBe(1);
     expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "1.25" }))).toBe(1.25);
@@ -47,7 +47,7 @@ describe("useFontScale (pwh_fontscale → --fs-scale, continuous 0.8–2.0 / 0.0
     expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "bogus" }))).toBe(1);
     expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "" }))).toBe(1);
     expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "0.5" }))).toBe(1); // below min
-    expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "2.5" }))).toBe(1); // above max
+    expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "3.5" }))).toBe(1); // above max
     expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "1.2abc" }))).toBe(1); // strict Number(), no partial parse
     expect(loadFontScale(fakeStorage({ [FONT_SCALE_STORAGE_KEY]: "Infinity" }))).toBe(1);
   });
@@ -61,10 +61,10 @@ describe("useFontScale (pwh_fontscale → --fs-scale, continuous 0.8–2.0 / 0.0
     expect(loadFontScale(storage)).toBe(1);
   });
 
-  it("alignFontScale: clamps to [0.8, 2.0] and snaps to the 0.05 grid", () => {
+  it("alignFontScale: clamps to [0.8, 3.0] and snaps to the 0.05 grid", () => {
     expect(alignFontScale(1)).toBe(1);
     expect(alignFontScale(0.5)).toBe(FONT_SCALE_MIN);
-    expect(alignFontScale(2.5)).toBe(FONT_SCALE_MAX);
+    expect(alignFontScale(3.5)).toBe(FONT_SCALE_MAX);
     expect(alignFontScale(1.13)).toBe(1.15);
     expect(alignFontScale(1.12)).toBe(1.1);
     expect(alignFontScale(1.8)).toBe(1.8); // no float noise
@@ -106,12 +106,12 @@ describe("useFontScale (pwh_fontscale → --fs-scale, continuous 0.8–2.0 / 0.0
     expect(storage.map.get(FONT_SCALE_STORAGE_KEY)).toBe("1.25");
     expect(doc.props.get("--fs-scale")).toBe("1.25");
     handle.setScale(9);
-    expect(storage.map.get(FONT_SCALE_STORAGE_KEY)).toBe("2"); // clamped
+    expect(storage.map.get(FONT_SCALE_STORAGE_KEY)).toBe("3"); // clamped
     // persistence round-trip: a fresh composable over the same storage picks the value back up
     const doc2 = fakeDoc();
     const handle2 = useFontScale({ storage, doc: doc2 });
-    expect(handle2.scale.value).toBe(2);
-    expect(doc2.props.get("--fs-scale")).toBe("2");
+    expect(handle2.scale.value).toBe(3);
+    expect(doc2.props.get("--fs-scale")).toBe("3");
   });
 
   it("preview(): applies live without touching storage (drag must not hammer localStorage)", () => {

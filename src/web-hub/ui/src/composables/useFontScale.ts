@@ -1,5 +1,5 @@
 /**
- * Continuous font-scale preference (80%–200%, 5% steps). A strict mirror of `useTheme.ts`'s
+ * Continuous font-scale preference (80%–300%, 5% steps). A strict mirror of `useTheme.ts`'s
  * precedent: `public/theme-init.js` already applies the persisted value as the `--fs-scale`
  * custom property on `<html>` before first paint (no flash of the wrong text size); this
  * composable is the *runtime* counterpart — reading the same `pwh_fontscale` storage key,
@@ -19,7 +19,7 @@ import { ref, type Ref } from "vue";
 export const FONT_SCALE_STORAGE_KEY = "pwh_fontscale";
 
 export const FONT_SCALE_MIN = 0.8;
-export const FONT_SCALE_MAX = 2.0;
+export const FONT_SCALE_MAX = 3.0; // 2026-10-05: user asked for up to 300%
 export const FONT_SCALE_STEP = 0.05;
 export const FONT_SCALE_DEFAULT = 1;
 
