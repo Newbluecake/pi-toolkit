@@ -336,8 +336,6 @@ details[open] > summary.run .chev {
   }
 }
 
-@media (max-width: 1279px) {
-  .run-nums .model {
-    display: none;
-  }
-}
+/* 2026-10-05 用户现场反馈：子 agent 行的模型名在 <1280px 被隐藏，手机上完全看不到各自用的
+ * 模型——用户明确要求显示。窄档布局是双行网格（name 列 minmax(0,1fr) 会先截断），模型名放出来
+ * 不会撑破行宽。 */
