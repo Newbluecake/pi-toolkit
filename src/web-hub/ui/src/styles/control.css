@@ -100,7 +100,7 @@
 
 .ctx-ring {
   position: absolute;
-  right: 0;
+  right: var(--sp-1); /* 2026-10-05 field report: ring hugged the input's right border */
   top: 0;
   bottom: 0;
   display: flex;
@@ -111,7 +111,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px; /* coarse-pointer touch target, always (not just @media coarse) */
+  width: 56px; /* fits the 50px ring (field report) while staying a generous touch target */
   min-height: 44px;
   margin: 0;
   padding: 0;
