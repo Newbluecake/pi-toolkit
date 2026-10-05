@@ -187,6 +187,64 @@ describe("AskUserForm.vue — submit gating + payload (§7.4)", () => {
   });
 });
 
+/**
+ * Regression coverage for the 2026-10-05 field report ("web-hub LAN user ticks every option on
+ * a multiSelect question, tool result keeps only the first"). Investigation across
+ * onToggle/setSelected (AskUserQuestion.vue), buildDialogAnswers (@logic/control.js),
+ * answer-codec.ts and dialogs.ts's encodeAnswers found every layer consistent for this exact
+ * shape; these tests pin the full click → emitted-payload path (plus the accfix-N1 live-
+ * `questions` identity-refresh case, the closest real mechanism to "the dialog was briefly
+ * re-rendered mid-fill") so a future regression along this path fails loudly.
+ */
+const MULTI_RECOMMENDED = {
+  dialogId: "ask:tc-multi-reco",
+  source: "ask_user",
+  toolCallId: "tc-multi-reco",
+  questions: [
+    {
+      question: "以下推荐项都同意吗？",
+      header: "其他",
+      multiSelect: true,
+      options: [
+        { label: "(Recommended) 删离线 TUI 卡片不发信号" },
+        { label: "(Recommended) 停掉自动刷新" },
+        { label: "(Recommended) 清空队列" },
+      ],
+    },
+  ],
+  allowCancel: true,
+  openedAt: 1,
+};
+const MULTI_RECOMMENDED_LABELS = MULTI_RECOMMENDED.questions[0]!.options.map((o) => o.label);
+
+describe("AskUserForm.vue — multiSelect ticks all survive to submit (field report regression)", () => {
+  it("ticking every option on a 3-option multiSelect question keeps all 3 in the emitted payload", async () => {
+    const w = mountForm(MULTI_RECOMMENDED);
+    const boxes = w.findAll("input[type='checkbox']");
+    expect(boxes).toHaveLength(3);
+    for (const box of boxes) await box.setValue(true);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: MULTI_RECOMMENDED_LABELS, other: null }]]]);
+  });
+
+  it(
+    "keeps already-ticked boxes and accepts further ticks after the dialog's questions array is" +
+      " replaced mid-fill (same dialogId, new object identities — e.g. a hub reconnect republish)",
+    async () => {
+      const w = mountForm(structuredClone(MULTI_RECOMMENDED));
+      let boxes = w.findAll("input[type='checkbox']");
+      await boxes[0]!.setValue(true);
+      await w.setProps({ dialog: structuredClone(MULTI_RECOMMENDED) });
+      boxes = w.findAll("input[type='checkbox']");
+      await boxes[1]!.setValue(true);
+      await boxes[2]!.setValue(true);
+      await w.find("[data-submit]").trigger("click");
+      expect(w.emitted("answer")).toEqual([[[{ selected: MULTI_RECOMMENDED_LABELS, other: null }]]]);
+    },
+  );
+});
+
 describe("AskUserForm.vue — drafts (§3.5) + suspended (v2.1)", () => {
   it("selections persist into CONTROL_ENV.dialogDrafts under (agentKey, epoch, dialogId)", async () => {
     const env = fakeEnv();
