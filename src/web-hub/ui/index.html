@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- lang is corrected to the detected UI language at boot (src/main.ts); this meta keeps
+         Chrome's translate offer off even before/without that (the UI is bilingual i18n). -->
+    <meta name="google" content="notranslate" />
     <meta name="theme-color" content="#0b7a70" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>pi web-hub</title>
