@@ -28,12 +28,13 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { formatAttachmentBlock, type UploadMetaV1 } from "../../../src/web-hub/protocol/upload.js";
 import {
   defaultUploadFsDeps,
   DIR_SYNC_FLAGS,
+  type ReadableUploadFileHandle,
   type UploadFileHandle,
   type UploadFsDeps,
 } from "../../../src/web-hub/hub/upload-fs.js";
@@ -43,6 +44,8 @@ import {
   UploadStoreError,
   type BeginParams,
   type CommitResult,
+  type OpenForPreviewParams,
+  type OpenForPreviewResult,
   type RecoverReport,
   type UploadAuditEvent,
   type UploadLimits,
@@ -176,15 +179,25 @@ function hookedHandles(
   };
 }
 
-function plainDelegate(fh: UploadFileHandle): UploadFileHandle {
+function plainDelegate(fh: UploadFileHandle): ReadableUploadFileHandle {
+  const readable = fh as ReadableUploadFileHandle; // real fs handles always carry read()
   return {
     write: (buf, off, len, pos) => fh.write(buf, off, len, pos),
+    read: (buf, off, len, pos) => readable.read(buf, off, len, pos),
     truncate: (n) => fh.truncate(n),
     datasync: () => fh.datasync(),
     sync: () => fh.sync(),
     stat: () => fh.stat(),
     close: () => fh.close(),
   };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 // ---------------------------------------------------------------------------
@@ -1556,5 +1569,499 @@ describe("stats and audit surfaces", () => {
     expect(audits.filter((a) => a.phase === "request" && a.op === "commit").length).toBe(1);
     expect(audits.filter((a) => a.phase === "reject" && a.code === "E_BAD_REQUEST").length).toBe(1);
     expect(audits.filter((a) => a.op === "chunk").length).toBe(0); // §5.4: chunk success has no audit line
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub-preview §4.2 — openForPreview (PV2b)
+// ---------------------------------------------------------------------------
+
+describe("preview read-back openForPreview (web-hub-preview §4.2, PV2b)", () => {
+  const AGENT = "a4242-nonce12"; // beginP's agentKey — same default for preview requests
+  const OTHER_SESSION = "sess999";
+
+  function pv(over: Partial<OpenForPreviewParams> = {}): OpenForPreviewParams {
+    return { principal: P1, listener: "lan", path: "", agentKey: AGENT, sessionId: "sess123", ...over };
+  }
+
+  function pvCtx(opts: { ms?: number; signal?: AbortSignal } = {}): {
+    deadline: ReturnType<typeof dl>;
+    signal: AbortSignal;
+  } {
+    return { deadline: dl(opts.ms ?? 5_000), signal: opts.signal ?? new AbortController().signal };
+  }
+
+  async function openPreview(
+    store: UploadStore,
+    over: Partial<OpenForPreviewParams> = {},
+    ctx = pvCtx(),
+  ): Promise<OpenForPreviewResult> {
+    return store.openForPreview(pv(over), ctx);
+  }
+
+  function deny(r: OpenForPreviewResult, code: "E_BUSY" | "E_NOT_FOUND" | "E_PREVIEW_CHANGED" | "E_DEADLINE"): void {
+    expect(r).toEqual({ ok: false, code });
+  }
+
+  interface CraftArgs {
+    id?: string;
+    bucket?: string;
+    safeName: string;
+    /** Present ⇒ the meta carries it (post-rework shape); absent ⇒ legacy meta with no field. */
+    diskName?: string | undefined;
+    content: string | Buffer;
+    principal?: string;
+    agentKey?: string;
+    committedAt?: number;
+    referencedAt?: number | null;
+  }
+
+  interface Crafted {
+    id: string;
+    path: string;
+    meta: UploadMetaV1;
+  }
+
+  /** Lay down a crash-recovery-style committed upload by hand (bypasses begin/chunk/commit):
+   *  `<root>/<bucket>/<id>/<fileName>` + meta.json, exactly what the startup scan expects. */
+  function craft(over: CraftArgs): Crafted {
+    const bucket = over.bucket ?? "s-sess123";
+    const id = over.id ?? nid();
+    const fileName = over.diskName ?? over.safeName;
+    const bytes = typeof over.content === "string" ? Buffer.from(over.content, "utf8") : over.content;
+    const dir = join(root, bucket, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, fileName), bytes);
+    const meta: UploadMetaV1 = {
+      v: 1,
+      id,
+      principal: over.principal ?? P1,
+      agentKey: over.agentKey ?? AGENT,
+      bucket,
+      safeName: over.safeName,
+      ...(over.diskName === undefined ? {} : { diskName: over.diskName }),
+      size: bytes.length,
+      mime: null,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      committedAt: over.committedAt ?? clock.now(),
+      referencedAt: over.referencedAt ?? null,
+    };
+    writeFileSync(join(dir, "meta.json"), JSON.stringify(meta));
+    return { id, path: join(dir, fileName), meta };
+  }
+
+  it("U3 matrix: owner / same-session peer / cross-session deny / session switch / loopback", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "hello!!", { name: "pic.png", mime: "image/png" });
+    const oks: Array<Extract<OpenForPreviewResult, { ok: true }>> = [];
+
+    // owner, same session (LAN) ⇒ own upload, shared:false
+    const own = await openPreview(store, { path: res.path });
+    expect(own).toMatchObject({
+      ok: true,
+      uploadId: res.id,
+      shared: false,
+      layout: "generated",
+      size: 7,
+      sha256: createHash("sha256").update("hello!!").digest("hex"),
+    });
+    if (own.ok) oks.push(own);
+
+    // a LAN peer naming the SAME (visible) session ⇒ shared read (U3)
+    const peer = await openPreview(store, { principal: P2, path: res.path });
+    expect(peer).toMatchObject({ ok: true, uploadId: res.id, shared: true });
+    if (peer.ok) oks.push(peer);
+
+    // a peer with a DIFFERENT session's request ⇒ deny (no existence leak) — also with another agentKey
+    deny(await openPreview(store, { principal: P2, path: res.path, sessionId: OTHER_SESSION }), "E_NOT_FOUND");
+    deny(
+      await openPreview(store, { principal: P2, path: res.path, agentKey: "a-other", sessionId: OTHER_SESSION }),
+      "E_NOT_FOUND",
+    );
+
+    // owner AFTER the session switched (bucket no longer matches) ⇒ still reads their own upload
+    const switched = await openPreview(store, { path: res.path, sessionId: OTHER_SESSION });
+    expect(switched).toMatchObject({ ok: true, shared: false });
+    if (switched.ok) oks.push(switched);
+
+    // a peer after the session switched ⇒ deny
+    deny(await openPreview(store, { principal: P2, path: res.path, sessionId: OTHER_SESSION }), "E_NOT_FOUND");
+
+    // loopback (machine owner) ⇒ unrestricted, still flagged shared for audit when not the owner
+    const loopback = await openPreview(store, {
+      principal: P3,
+      listener: "loopback",
+      path: res.path,
+      sessionId: OTHER_SESSION,
+    });
+    expect(loopback).toMatchObject({ ok: true, shared: true });
+    if (loopback.ok) oks.push(loopback);
+
+    for (const r of oks) await r.fh.close();
+  });
+
+  it("a-<agentKey> bucket: readable under the agent's current session by owner and peers; other agents deny", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "agentfile", { sessionId: undefined, name: "a.txt" });
+    expect(res.path).toContain(join(root, `a-${AGENT}`));
+
+    const own = await openPreview(store, { path: res.path, sessionId: "sess123" });
+    expect(own).toMatchObject({ ok: true, shared: false }); // owner — sessionOk not even needed
+    const peer = await openPreview(store, { principal: P2, path: res.path, sessionId: "sess123" });
+    expect(peer).toMatchObject({ ok: true, shared: true }); // sessionOk via the a-bucket rule
+    deny(
+      await openPreview(store, { principal: P2, path: res.path, agentKey: "a-other", sessionId: "sess123" }),
+      "E_NOT_FOUND",
+    );
+    for (const r of [own, peer]) if (r.ok) await r.fh.close();
+  });
+
+  it("a rec mid-eviction (state evicting) ⇒ E_NOT_FOUND", async () => {
+    let gateId: string | null = null;
+    const gate = deferred<void>();
+    let rmStalled = false;
+    const store = mkStore({
+      fs: {
+        rm: (p, opts) => {
+          if (gateId !== null && p === join(root, "s-sess123", gateId)) {
+            rmStalled = true;
+            return gate.promise.then(() => realFs.rm(p, opts));
+          }
+          return realFs.rm(p, opts);
+        },
+      },
+    });
+    await store.recover();
+    const res = await upload(store, "evictme");
+    gateId = res.id;
+    const abortP = store.abort({ principal: P1, id: res.id }, dl());
+    await waitFor(() => rmStalled); // abort is now inside rm with the rec already `evicting`
+    deny(await openPreview(store, { path: res.path }), "E_NOT_FOUND");
+    gate.resolve();
+    await abortP;
+    expect(existsSync(join(root, "s-sess123", res.id))).toBe(false);
+  });
+
+  it("a path under the root but not in the index ⇒ E_NOT_FOUND with ZERO fs calls (as is a visibility deny)", async () => {
+    let fsCalls = 0;
+    const counted: UploadFsDeps = {
+      ...realFs,
+      lstat: (p) => (fsCalls++, realFs.lstat(p)),
+      mkdir: (p, o) => (fsCalls++, realFs.mkdir(p, o)),
+      chmod: (p, m) => (fsCalls++, realFs.chmod(p, m)),
+      readdir: (p) => (fsCalls++, realFs.readdir(p)),
+      open: (p, fl, m) => (fsCalls++, realFs.open(p, fl, m)),
+      link: (a, b) => (fsCalls++, realFs.link(a, b)),
+      unlink: (p) => (fsCalls++, realFs.unlink(p)),
+      rename: (a, b) => (fsCalls++, realFs.rename(a, b)),
+      rm: (p, o) => (fsCalls++, realFs.rm(p, o)),
+      readFile: (p) => (fsCalls++, realFs.readFile(p)),
+    };
+    const store = mkStore({ fs: counted });
+    await store.recover();
+    const res = await upload(store, "counted");
+    const before = fsCalls;
+    deny(await openPreview(store, { path: join(root, "s-sess123", "nope0001aaaa1111zzzz", "f.txt") }), "E_NOT_FOUND");
+    // checks 1–4 are all pre-fs: a visibility deny on an INDEXED path also never touches the disk
+    deny(await openPreview(store, { principal: P2, path: res.path, sessionId: OTHER_SESSION }), "E_NOT_FOUND");
+    expect(fsCalls).toBe(before);
+    const ok = await openPreview(store, { path: res.path });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) await ok.fh.close();
+    expect(fsCalls).toBeGreaterThan(before); // control: a real open does
+  });
+
+  it("generated layout: the exact recorded path opens; any other spelling — including the ORIGINAL file name — denies", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "gen-bytes", { name: "final report.pdf" });
+    const r = await openPreview(store, { path: res.path });
+    expect(r).toMatchObject({ ok: true, layout: "generated", uploadId: res.id, size: 9, shared: false });
+    if (r.ok) {
+      await r.fh.close();
+    }
+    const dir = dirname(res.path);
+    // the sanitized ORIGINAL name exists only inside meta.json — never as an openable path
+    deny(await openPreview(store, { path: join(dir, "final_report.pdf") }), "E_NOT_FOUND");
+    // trailing slash and a wrong bucket are plain byPath misses
+    deny(await openPreview(store, { path: `${res.path}/` }), "E_NOT_FOUND");
+    deny(await openPreview(store, { path: join(root, "s-sess999", res.id, basename(res.path)) }), "E_NOT_FOUND");
+  });
+
+  it("restart recovery (v3-3): an old-format upload (no meta.diskName) recovers onto the legacy branch, opens end-to-end, and its sha256 re-verifies", async () => {
+    const bytes = "legacy-content-0123456789";
+    const crafted = craft({ safeName: "old_file.txt", content: bytes, committedAt: clock.now() - 1000 });
+    expect(readJson(join(dirname(crafted.path), "meta.json"))).not.toHaveProperty("diskName");
+    const store = mkStore();
+    const report = await store.recover();
+    expect(report.committed).toBe(1);
+    const r = await openPreview(store, { path: crafted.path });
+    expect(r).toMatchObject({
+      ok: true,
+      layout: "legacy",
+      uploadId: crafted.id,
+      size: bytes.length,
+      shared: false,
+      sha256: crafted.meta.sha256,
+    });
+    if (r.ok) {
+      // end-to-end read-back through the new positioned read(): whole file + sha256 re-check
+      const buf = Buffer.alloc(bytes.length);
+      let off = 0;
+      while (off < buf.length) {
+        const { bytesRead } = await r.fh.read(buf, off, buf.length - off, off);
+        if (bytesRead <= 0) break;
+        off += bytesRead;
+      }
+      expect(off).toBe(bytes.length);
+      expect(buf.toString("utf8")).toBe(bytes);
+      expect(createHash("sha256").update(buf).digest("hex")).toBe(crafted.meta.sha256);
+      await r.fh.close();
+    }
+    // the generated-form spelling of the same id does NOT open a legacy file
+    deny(await openPreview(store, { path: join(dirname(crafted.path), `${crafted.id}.txt`) }), "E_NOT_FOUND");
+  });
+
+  it("structural re-check refuses a name that is neither the generated form nor the safeName (tampered meta)", async () => {
+    // diskName locates the file for the scan, so this IS indexed — but preview must refuse it
+    const crafted = craft({ safeName: "f.txt", diskName: "evil.pdf", content: "abcd" });
+    const store = mkStore();
+    const report = await store.recover();
+    expect(report.committed).toBe(1);
+    deny(await openPreview(store, { path: crafted.path }), "E_NOT_FOUND"); // basename evil.pdf ≠ safeName f.txt
+    expect(existsSync(crafted.path)).toBe(true); // and nothing was deleted either
+  });
+
+  it("a legacy record whose safeName degenerates to the generated form still opens (classification is structural)", async () => {
+    const id = nid();
+    const crafted = craft({ id, safeName: `${id}.txt`, content: "degenerate" });
+    const store = mkStore();
+    await store.recover();
+    const r = await openPreview(store, { path: crafted.path });
+    // both branches open the same file here; the label follows the on-disk shape
+    expect(r).toMatchObject({ ok: true, layout: "generated" });
+    if (r.ok) await r.fh.close();
+  });
+
+  it("startup scan incomplete ⇒ E_BUSY; readable once the scan lands", async () => {
+    let release: (() => void) | undefined;
+    const store = mkStore({
+      fs: {
+        readdir: (p) =>
+          p === root
+            ? new Promise<string[]>((resolve) => {
+                release = () => resolve([]);
+              })
+            : realFs.readdir(p),
+      },
+    });
+    const rp = store.recover();
+    await waitFor(() => release !== undefined);
+    const unknown = join(root, "s-sess123", "x", "f.txt");
+    deny(await openPreview(store, { path: unknown }), "E_BUSY");
+    release!();
+    await rp;
+    deny(await openPreview(store, { path: unknown }), "E_NOT_FOUND"); // scan done ⇒ ordinary miss
+  });
+
+  it("a disabled store ⇒ E_NOT_FOUND; a closed store refuses preview opens (E_BUSY)", async () => {
+    const disabled = mkStore({ root: "/bad\u0001root" });
+    await disabled.recover();
+    deny(await openPreview(disabled, { path: "/bad/x/y" }), "E_NOT_FOUND");
+
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "bye");
+    await store.close();
+    deny(await openPreview(store, { path: res.path }), "E_BUSY");
+  });
+
+  it("dirChain replaced ⇒ E_PREVIEW_CHANGED, the anomaly is logged, and NOTHING is deleted", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "chain-bytes");
+    // swap <id>/ for a symlink to an outside decoy dir holding an equally-sized file — a
+    // deterministic identity change (rm+mkdir can re-use the freed inode on tmpfs)
+    const outside = mkdtempSync(join(tmpdir(), "wh-pv-"));
+    try {
+      writeFileSync(join(outside, basename(res.path)), "decoybytes!");
+      rmSync(dirname(res.path), { recursive: true, force: true });
+      symlinkSync(outside, dirname(res.path));
+      deny(await openPreview(store, { path: res.path }), "E_PREVIEW_CHANGED");
+      expect(log.lines.some((l) => l.level === "error" && l.msg.includes("upload preview"))).toBe(true);
+      // neither the replacement target nor the swapped link was deleted
+      expect(lstatSync(dirname(res.path)).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(outside, basename(res.path)))).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("on-disk size ≠ recorded size ⇒ E_PREVIEW_CHANGED and the handle is closed again (no fd leak)", async () => {
+    let opens = 0;
+    let closes = 0;
+    const store = mkStore({
+      fs: {
+        open: async (p, fl, m) => {
+          opens++;
+          const fh = await realFs.open(p, fl, m);
+          return {
+            ...plainDelegate(fh),
+            close: async () => {
+              closes++;
+              await fh.close();
+            },
+          };
+        },
+      },
+    });
+    await store.recover();
+    const res = await upload(store, "size-bytes-xx");
+    writeFileSync(res.path, "now-longer-than-recorded"); // 23 bytes ≠ 14 recorded
+    const o0 = opens;
+    const c0 = closes;
+    deny(await openPreview(store, { path: res.path }), "E_PREVIEW_CHANGED");
+    expect(opens - o0).toBe(1); // exactly one preview open attempted…
+    expect(closes - c0).toBe(1); // …and its handle was closed again
+  });
+
+  it("kind is decided by CONTENT, not the declared mime — the route-side sniff (fake here) reads via the returned handle", async () => {
+    const store = mkStore();
+    await store.recover();
+    const pngMagic = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(64, 1),
+    ]);
+    // sniff is PV2a's pure module; PV3 injects it at the route seam. This fake mirrors only its
+    // magic-number contract to prove the store's plumbing never consults rec.mime.
+    const fakeSniff = (sample: Uint8Array): "image" | "text" =>
+      sample.length >= 4 && sample[0] === 0x89 && sample[1] === 0x50 && sample[2] === 0x4e && sample[3] === 0x47
+        ? "image"
+        : "text";
+    const cases: Array<{ res: CommitResult; expected: "image" | "text" }> = [
+      { res: await upload(store, "plain text content", { name: "lie.png", mime: "image/png" }), expected: "text" },
+      { res: await upload(store, pngMagic, { name: "lie.txt", mime: "text/plain" }), expected: "image" },
+    ];
+    for (const { res, expected } of cases) {
+      const r = await openPreview(store, { path: res.path });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      const sample = Buffer.alloc(Math.min(r.size, 64 * 1024));
+      let off = 0;
+      while (off < sample.length) {
+        const { bytesRead } = await r.fh.read(sample, off, sample.length - off, off);
+        if (bytesRead <= 0) break;
+        off += bytesRead;
+      }
+      expect(fakeSniff(sample.subarray(0, off))).toBe(expected);
+      await r.fh.close();
+    }
+  });
+
+  it("a preview read is NOT a reference: the unreferenced 24h TTL still evicts on schedule", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "ttl-bytes");
+    const metaPath = join(dirname(res.path), "meta.json");
+    const metaBefore = readFileSync(metaPath);
+    clock.advance(23 * 3_600_000);
+    const r = await openPreview(store, { path: res.path });
+    expect(r.ok).toBe(true);
+    if (r.ok) await r.fh.close();
+    expect(readFileSync(metaPath).equals(metaBefore)).toBe(true); // no meta rewrite
+    expect(store.stats().referencedFiles).toBe(0); // no reference gained
+    expect((await store.sweep("tick")).evicted).toEqual([]); // 23h < 24h: untouched TTL
+    clock.advance(2 * 3_600_000); // past committedAt + 24h
+    expect((await store.sweep("tick")).evicted.map((e) => e.id)).toEqual([res.id]);
+    expect(existsSync(res.path)).toBe(false);
+  });
+
+  it("a referenced upload keeps its referencedAt across a preview read (7d TTL intact)", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "refpv");
+    const block = formatAttachmentBlock([{ path: res.path, mime: null, sizeLabel: "1 KB" }])!;
+    const pin = store.pinForPrompt({ principal: P1, text: `x\n${block}` });
+    expect(pin.ok).toBe(true);
+    if (!pin.ok) return;
+    store.settlePins(pin.token, "referenced");
+    expect(store.stats().referencedFiles).toBe(1);
+    const metaPath = join(dirname(res.path), "meta.json");
+    await store.sweep("tick"); // flushReferences persists the now-dirty meta.json
+    const metaBefore = readFileSync(metaPath);
+    const referencedAt = (JSON.parse(metaBefore.toString("utf8")) as UploadMetaV1).referencedAt;
+    expect(referencedAt).not.toBeNull();
+    clock.advance(25 * 3_600_000); // past the 24h unreferenced TTL
+    const r = await openPreview(store, { path: res.path });
+    expect(r.ok).toBe(true);
+    if (r.ok) await r.fh.close();
+    expect(readFileSync(metaPath).equals(metaBefore)).toBe(true); // referencedAt untouched, no rewrite
+    expect(store.stats().referencedFiles).toBe(1);
+    expect((await store.sweep("tick")).evicted).toEqual([]); // referenced: survives
+    clock.advance(7 * 24 * 3_600_000);
+    expect((await store.sweep("tick")).evicted.map((e) => e.id)).toEqual([res.id]);
+  });
+
+  it("UploadFileHandle.read does positioned partial reads and returns 0 at/past EOF", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "0123456789abcdefghij"); // 20 bytes
+    const r = await openPreview(store, { path: res.path });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = Buffer.alloc(3);
+    expect((await r.fh.read(b, 0, 3, 2)).bytesRead).toBe(3);
+    expect(b.toString("utf8")).toBe("234");
+    expect((await r.fh.read(b, 1, 2, 18)).bytesRead).toBe(2); // partial window ending at EOF
+    expect(b.toString("utf8", 1)).toBe("ij");
+    expect((await r.fh.read(b, 0, 3, 20)).bytesRead).toBe(0); // at EOF
+    expect((await r.fh.read(b, 0, 3, 100)).bytesRead).toBe(0); // past EOF
+    await r.fh.close();
+  });
+
+  it("ctx.signal: pre-aborted fails fast with zero fs; abort mid-open ⇒ E_DEADLINE and the eventual fd is late-closed", async () => {
+    let opens = 0;
+    let closes = 0;
+    let stallNext = false;
+    const waiters: Array<() => void> = [];
+    const store = mkStore({
+      fs: {
+        open: async (p, flags, mode) => {
+          const fh = await realFs.open(p, flags, mode);
+          opens++;
+          const wrapped: UploadFileHandle = {
+            ...plainDelegate(fh),
+            close: async () => {
+              closes++;
+              await fh.close();
+            },
+          };
+          if (stallNext) {
+            stallNext = false;
+            await new Promise<void>((r) => waiters.push(r));
+          }
+          return wrapped;
+        },
+      },
+    });
+    await store.recover();
+    const res = await upload(store, "abortme");
+
+    // pre-aborted: immediate E_DEADLINE, not even an open initiated
+    const o0 = opens;
+    deny(await openPreview(store, { path: res.path }, pvCtx({ signal: AbortSignal.abort() })), "E_DEADLINE");
+    expect(opens).toBe(o0);
+
+    // mid-flight: the abandoned open eventually resolves and is late-closed
+    const ctl = new AbortController();
+    stallNext = true;
+    const pending = openPreview(store, { path: res.path }, pvCtx({ signal: ctl.signal }));
+    await waitFor(() => opens === o0 + 1); // the preview open is now stalled inside fs.open
+    ctl.abort();
+    deny(await pending, "E_DEADLINE");
+    for (const w of waiters.splice(0)) w();
+    await waitFor(() => closes === opens); // late-close reaped the abandoned fd
   });
 });

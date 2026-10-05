@@ -27,7 +27,7 @@
  */
 
 import { createHash, type Hash } from "node:crypto";
-import { resolve as resolvePath, sep } from "node:path";
+import { basename, dirname, resolve as resolvePath, sep } from "node:path";
 import { PrivateDirError } from "../protocol/paths.js";
 import {
   bucketFor,
@@ -63,10 +63,12 @@ import {
   PART_CREATE_FLAGS,
   PART_WRITE_FLAGS,
   PROBE_CAP_MS,
+  TRUSTED_READ_FLAGS,
   type Deadline,
   type DirChain,
   type DirChainEntry,
   type FileStat,
+  type ReadableUploadFileHandle,
   type UploadFileHandle,
   type UploadFsDeps,
 } from "./upload-fs.js";
@@ -266,6 +268,31 @@ export interface CommitResult {
   readonly dedup?: true;
 }
 
+// -- web-hub-preview §4.2 (PV2b): read-only preview open ---------------------------------
+
+export interface OpenForPreviewParams {
+  readonly principal: string;
+  readonly listener: "loopback" | "lan";
+  readonly path: string;
+  readonly agentKey: string;
+  readonly sessionId: string;
+}
+
+/** §4.2's result-object contract — `openForPreview` never throws; the route layer maps `code`
+ *  onto web-hub-preview §4.3's response matrix. */
+export type OpenForPreviewResult =
+  | {
+      readonly ok: true;
+      readonly fh: ReadableUploadFileHandle;
+      readonly size: number;
+      readonly uploadId: string;
+      readonly sha256: string;
+      readonly layout: "generated" | "legacy";
+      /** Audit hint (§4.5): true iff the reader is not the uploader (U3 session-visible sharing). */
+      readonly shared: boolean;
+    }
+  | { readonly ok: false; readonly code: "E_BUSY" | "E_NOT_FOUND" | "E_PREVIEW_CHANGED" | "E_DEADLINE" };
+
 export interface PinToken {
   readonly ids: readonly string[];
 }
@@ -352,6 +379,14 @@ export interface UploadStore {
    * recheck: 404 or an idempotent replay of an already-committed upload). Synchronous: safe to
    * call inside no-await regions. */
   agentKeyOf(principal: string, id: string): string | undefined;
+  /** web-hub-preview §4.2 (PV2b): read-only preview open of a committed upload — exact byPath
+   *  index hit + generated/legacy structural re-check + U3 session-visibility + `O_NOFOLLOW`
+   *  open with dirChain/size re-verification. Never throws; never mutates indexes, counters,
+   *  `referencedAt` or TTL (reading is not referencing). */
+  openForPreview(
+    p: OpenForPreviewParams,
+    ctx: { deadline: Deadline; signal: AbortSignal },
+  ): Promise<OpenForPreviewResult>;
   /** §2.6 #13: poison everything un-committed, remove their dirs, retain committed files. */
   close(): Promise<void>;
 }
@@ -449,6 +484,18 @@ function mimeClassOf(mime: string | null): string | null {
 function diskNameFor(id: string, rawName: unknown): string {
   const ext = uploadDiskExt(rawName);
   return ext === undefined || ext === "part" ? id : `${id}.${ext}`;
+}
+
+/**
+ * web-hub-preview §4.2 step 3's generated-name predicate (`^<id>(\.[A-Za-z0-9]{1,16})?$`),
+ * done structurally: scanned `<id>` dir names come straight from `readdir` (attacker-shaped
+ * strings), so the id is never interpolated into a RegExp.
+ */
+function isGeneratedDiskName(id: string, name: string): boolean {
+  if (name === id) return true;
+  if (!name.startsWith(`${id}.`)) return false;
+  const ext = name.slice(id.length + 1);
+  return /^[A-Za-z0-9]{1,16}$/.test(ext);
 }
 
 const pbKey = (principal: string, bucket: string): string => `${principal}|${bucket}`;
@@ -2023,6 +2070,146 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     return rec.agentKey;
   }
 
+  // -- web-hub-preview §4.2 (PV2b): read-only preview open ------------------------
+
+  /**
+   * Read-only preview open of a committed upload (web-hub-preview plan §4.2). The route layer
+   * has ALREADY confirmed (§3.1 ⑤) that `(agentKey, sessionId)` is a currently-visible session;
+   * this adds the store's own checks: byPath exact-index hit, generated/legacy structural
+   * re-check of the requested spelling, the U3 session-visibility rule, then an `O_NOFOLLOW`
+   * open with dirChain identity + recorded-size re-verification. A failure never deletes
+   * anything; a success never mutates an index or counter — reading is not referencing
+   * (`referencedAt`/TTL untouched, §4.2 step 6).
+   */
+  async function openForPreview(
+    p: OpenForPreviewParams,
+    ctx: { deadline: Deadline; signal: AbortSignal },
+  ): Promise<OpenForPreviewResult> {
+    await initPromise;
+    if (scanState !== "done") return { ok: false, code: "E_BUSY" };
+    if (storeState === "disabled") return { ok: false, code: "E_NOT_FOUND" };
+    if (closing || closed) return { ok: false, code: "E_BUSY" };
+    const indexed = byPath.get(p.path);
+    if (indexed === undefined) return { ok: false, code: "E_NOT_FOUND" };
+    const rec = committed.get(indexed);
+    if (rec === undefined || rec.state === "evicting") return { ok: false, code: "E_NOT_FOUND" };
+
+    // Structural re-check (§4.2 step 3). Terminal state of the 2026-10 generated-name rework:
+    // `CommittedRec.diskName` is ALWAYS set — a legacy record (a meta written before the
+    // rework, no `diskName` field) carries `diskName === safeName` with its file at
+    // `<id>/<safeName>`. Layout is therefore classified STRUCTURALLY from the open name —
+    // "generated" iff it spells `<id>` or `<id>.<ext>` — and every other name falls to the
+    // legacy branch, which still requires basename === safeName and parent dir === `<id>`.
+    // (A legacy record whose safeName degenerates to exactly the generated form opens under
+    // either branch — same file, same checks; only the reported label differs.) The original
+    // client-declared name participates in matching ONLY through the legacy safeName rule.
+    const generated = isGeneratedDiskName(rec.id, rec.diskName);
+    const layout: "generated" | "legacy" = generated ? "generated" : "legacy";
+    const openName = generated ? rec.diskName : rec.safeName;
+    if (generated) {
+      if (basename(p.path) !== rec.diskName) return { ok: false, code: "E_NOT_FOUND" };
+    } else if (basename(p.path) !== rec.safeName || basename(dirname(p.path)) !== rec.id) {
+      return { ok: false, code: "E_NOT_FOUND" };
+    }
+
+    // Visibility (§4.2 step 4, ruling U3): the owner always reads their own upload (even after
+    // the session moved on); any authenticated principal reads uploads of the session the
+    // request names — or of the agent's session-less `a-` bucket; loopback is the machine
+    // owner. A denial is E_NOT_FOUND: never leak that a path exists for another session.
+    const owner = rec.principal === p.principal;
+    const sessionOk =
+      rec.bucket === bucketFor({ sessionId: p.sessionId, agentKey: p.agentKey }) || rec.bucket === `a-${p.agentKey}`;
+    if (!(p.listener === "loopback" || owner || sessionOk)) return { ok: false, code: "E_NOT_FOUND" };
+
+    // Open + re-verify (§4.2 step 5): `O_NOFOLLOW` regular-file open, parent-chain identity
+    // re-check, then the recorded-size re-check. Failures NEVER delete anything; a replaced
+    // dir chain, a non-regular final or a symlink-swapped final are logged anomalies mapping
+    // to E_PREVIEW_CHANGED (§4.3: 409).
+    const attempt = async (): Promise<OpenForPreviewResult> => {
+      let fh: UploadFileHandle;
+      try {
+        fh = await openFileNoFollow(rec.dirChain, openName, TRUSTED_READ_FLAGS, undefined, fs, ctx.deadline);
+      } catch (err) {
+        if (isUploadFsDeadline(err)) return { ok: false, code: "E_DEADLINE" };
+        if (err instanceof UploadFsError && (err.reason === "chain-mismatch" || err.reason === "not-regular")) {
+          log.error("web-hub upload preview: open re-check failed — nothing deleted", {
+            uploadId: rec.id,
+            reason: err.reason,
+          });
+          return { ok: false, code: "E_PREVIEW_CHANGED" };
+        }
+        const raw = errCodeOf(err);
+        if (raw === "ELOOP") {
+          log.error("web-hub upload preview: final replaced by symlink — refusing, nothing deleted", {
+            uploadId: rec.id,
+          });
+          return { ok: false, code: "E_PREVIEW_CHANGED" };
+        }
+        if (raw === "EMFILE" || raw === "ENFILE" || raw === "EAGAIN") return { ok: false, code: "E_BUSY" };
+        if (raw !== "ENOENT" && raw !== "ENOTDIR" && raw !== "EACCES" && raw !== "EPERM") {
+          log.warn("web-hub upload preview: open failed unexpectedly", { uploadId: rec.id, code: raw ?? "unknown" });
+        }
+        return { ok: false, code: "E_NOT_FOUND" };
+      }
+      const readable = fh as ReadableUploadFileHandle;
+      if (typeof readable.read !== "function") {
+        // only reachable with injected non-standard fs deps — fail closed, never leak the fd
+        await bestEffortClose(fh);
+        log.error("web-hub upload preview: handle lacks read()", { uploadId: rec.id });
+        return { ok: false, code: "E_NOT_FOUND" };
+      }
+      try {
+        const st = await fsStep(() => fh.stat(), ctx.deadline, now);
+        if (st.size !== rec.size) {
+          await bestEffortClose(fh);
+          return { ok: false, code: "E_PREVIEW_CHANGED" };
+        }
+      } catch (err) {
+        await bestEffortClose(fh);
+        if (isUploadFsDeadline(err)) return { ok: false, code: "E_DEADLINE" };
+        log.warn("web-hub upload preview: size re-check failed", {
+          uploadId: rec.id,
+          code: errCodeOf(err) ?? "unknown",
+        });
+        return { ok: false, code: "E_NOT_FOUND" };
+      }
+      return {
+        ok: true,
+        fh: readable,
+        size: rec.size,
+        uploadId: rec.id,
+        sha256: rec.sha256,
+        layout,
+        shared: !owner,
+      };
+    };
+
+    if (ctx.signal.aborted) return { ok: false, code: "E_DEADLINE" };
+    const opened = attempt();
+    // §4.2 ctx.signal: a caller that stops waiting (client disconnect / hub close) must not
+    // leak the fd its abandoned open eventually produces — the loser of this race late-closes.
+    const lateClose = (): void => {
+      void opened.then(
+        (r) => {
+          if (r.ok) void bestEffortClose(r.fh);
+        },
+        () => undefined,
+      );
+    };
+    const aborted = new Promise<"aborted">((resolve) => {
+      ctx.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+    });
+    const winner = await Promise.race([
+      opened.then((r): { kind: "open"; r: OpenForPreviewResult } => ({ kind: "open", r })),
+      aborted.then((): { kind: "abort" } => ({ kind: "abort" })),
+    ]);
+    if (winner.kind === "abort") {
+      lateClose();
+      return { ok: false, code: "E_DEADLINE" };
+    }
+    return winner.r;
+  }
+
   function close(): Promise<void> {
     if (closePromise !== null) return closePromise;
     closing = true;
@@ -2099,6 +2286,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     stats,
     inflight: inflightCount,
     agentKeyOf,
+    openForPreview,
     close,
   };
 }

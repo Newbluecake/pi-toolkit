@@ -139,6 +139,20 @@ export interface UploadFileHandle {
   close(): Promise<void>;
 }
 
+/**
+ * web-hub-preview §4.2 step 7 (PV2b): the handle `UploadStore.openForPreview` returns — an
+ * `UploadFileHandle` whose positioned `read` is REQUIRED (the preview sample/stream/verify
+ * paths all read through it; PV2a's `PreviewHandle` mirrors this shape).
+ *
+ * Widening sub-interface rather than a new member on `UploadFileHandle` itself, because the
+ * write-path handle fakes elsewhere are full `UploadFileHandle` literals in their own (for
+ * this package frozen) test files; the real `fs.promises.FileHandle` — and any delegate over
+ * it — satisfies this type as-is, so nothing but the preview surface changes.
+ */
+export interface ReadableUploadFileHandle extends UploadFileHandle {
+  read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
+}
+
 export interface UploadFsDeps {
   now(): number;
   getuid(): number;
