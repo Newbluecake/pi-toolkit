@@ -13,7 +13,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: flex-end;
+  align-self: center; /* 2026-10-05: user field report — flex-end left the paperclip hugging the textarea's bottom edge once it auto-grows */
   width: 36px;
   min-height: 44px; /* match .composer-send / textarea touch target (§7.4) */
   border: 1px solid var(--c-border-strong);

@@ -35,6 +35,16 @@ const controlOn = computed(() => hub?.state.value.control === true);
 const connLabelKey = computed(() => `shell.conn.${props.conn}`);
 const uiStamp = computed(() => uiBuildStamp(UI_BUILD));
 
+/** Full version info as the brand's tooltip — the inline metas are desktop-only (<1025px) so
+ * on phones/tablets this is the only place the hub/ui stamps remain visible (field report
+ * 2026-10-05: the wrapped meta texts crowded the fixed-height bar). */
+const brandTitle = computed(() => {
+  const parts = ["pi web-hub"];
+  if (props.hubVersion) parts.push(`hub ${props.hubVersion}`);
+  if (uiStamp.value) parts.push(`ui ${uiStamp.value}`);
+  return parts.join(" · ");
+});
+
 function onControlChipClick(): void {
   if (env) env.noticeExpanded.value = !env.noticeExpanded.value;
 }
@@ -42,7 +52,7 @@ function onControlChipClick(): void {
 
 <template>
   <header class="topbar">
-    <span class="brand">
+    <span class="brand" :title="brandTitle">
       <span class="brand-mark" aria-hidden="true"><AppIcon name="logo" /></span>
       <span translate="no">pi web-hub</span>
     </span>

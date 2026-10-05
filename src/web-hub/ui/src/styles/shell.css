@@ -98,6 +98,10 @@
   display: none;
   color: var(--c-text-3);
   font-size: var(--fs-xs);
+  white-space: nowrap; /* never wrap inside the fixed-height bar (field report 2026-10-05: the ui build stamp wrapped mid-string and spilled over the row below) */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .topbar .chip {
@@ -257,8 +261,15 @@
 }
 
 @media (min-width: 481px) {
-  .topbar-meta,
   .topbar .chip {
+    display: inline-flex;
+  }
+}
+
+/* version metas are desktop-only (2026-10-05 user field report: crowded on phones/tablets) —
+ * the full hub/ui stamps stay available via the brand's title tooltip. */
+@media (min-width: 1025px) {
+  .topbar-meta {
     display: inline-flex;
   }
 }
