@@ -412,7 +412,7 @@ export interface UploadStoreDeps {
 // ---------------------------------------------------------------------------
 
 /** Same shape as `hub/http.ts`'s `CMD_ID_RE` — the HTTP layer validates first; this re-checks. */
-const UPLOAD_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const UPLOAD_ID_RE = /^[A-Za-z0-9_-]{8,64}$/; // min 8 since 2026-10-05 (UI emits 8-char ids; 22-char legacy ids stay valid)
 const BUCKET_NAME_RE = /^[sa]-[A-Za-z0-9_-]{1,80}$/;
 const META_TMP_RE = /^\.meta\.[0-9a-f]+\.tmp$/;
 const ROOT_UNSAFE_RE = /[\x00-\x1F\x7F]/;
@@ -476,7 +476,7 @@ function mimeClassOf(mime: string | null): string | null {
  * Generated on-disk file name: `<uploadId>[.<ext>]` with `ext` from `uploadDiskExt(rawName)`.
  * The id is unique per upload and its exclusive `<id>/` directory already rules out collisions,
  * so the attacker-controlled original name never reaches the filesystem (2026-10 rework; the id
- * is `[A-Za-z0-9_-]{16,64}` — no dots, so the generated name can never collide with `meta.json`
+ * is `[A-Za-z0-9_-]{8,64}` — no dots, so the generated name can never collide with `meta.json`
  * or a `.meta.*.tmp` either). `part` is RESERVED for the in-flight `<diskName>.part` suffix: a
  * final named `<id>.part` would match the startup scan's orphan filter and be swept, so such
  * uploads (and every name without a legal ext) land extension-less as the bare id.

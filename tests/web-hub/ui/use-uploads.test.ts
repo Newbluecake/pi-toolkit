@@ -203,7 +203,7 @@ describe("useUploads: tray admission (§2.4/§2.5 — U4b's share of the U4a spl
     // The driver starts synchronously on add (§4.3), so the two admitted items may already be
     // uploading — "queued" itself is U4a's reducer state, matrix-tested in logic-upload.test.ts.
     expect(tray.every((x) => x.state === "uploading" || x.state === "queued")).toBe(true);
-    expect(tray.every((x) => /^[A-Za-z0-9_-]{16,64}$/.test(x.id))).toBe(true);
+    expect(tray.every((x) => /^[A-Za-z0-9_-]{8,64}$/.test(x.id))).toBe(true);
   });
 
   it("trays are per-agent and survive independently (§4.3 Composer-local state)", () => {

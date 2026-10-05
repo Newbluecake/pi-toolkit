@@ -27,7 +27,7 @@
  * synchronous-scheduling + `await`-driven, and `dispose()` is the only teardown path.
  */
 import { shallowRef, type ShallowRef } from "vue";
-import { newCmdId } from "@logic/control.js";
+import { newUploadId } from "@logic/control.js";
 import { attachmentReduce, fileFingerprint, planChunks } from "@logic/upload.js";
 import { UPLOAD_ATTACH_MAX_PER_MSG, UPLOAD_FILE_MAX_BYTES } from "@protocol/upload.js";
 import type { AddRejectReason, Attachment, UploadsHandle } from "../types.js";
@@ -51,7 +51,7 @@ type Abortish = { signal: AbortSignal; abort(): void };
 
 export interface UploadsOptions {
   upload: UploadTransport;
-  /** Id generator — defaults to `newCmdId` (K18: `getRandomValues`, never `randomUUID`). */
+  /** Id generator — defaults to `newUploadId` (8-char base64url; K18: `getRandomValues`, never `randomUUID`). */
   newId?(): string;
   /** Injectable for tests; defaults to the global `AbortController`. */
   AbortController?: new () => Abortish;
@@ -91,7 +91,7 @@ async function readSlice(file: UploadSource, offset: number, length: number): Pr
 
 export function createUploads(opts: UploadsOptions): UploadsHandle {
   const upload = opts.upload;
-  const newId = opts.newId ?? newCmdId;
+  const newId = opts.newId ?? newUploadId;
   const AC = opts.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
   const agents = new Map<string, AgentTray>();
 

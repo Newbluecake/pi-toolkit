@@ -54,7 +54,7 @@ import { UploadStoreError, type UploadStore } from "./uploads.js";
  * `http.ts`-free (http.ts imports this module). */
 const JSON_MAX_BYTES = 64 * 1024;
 /** Same shape as `http.ts`'s `CMD_ID_RE` — the store re-validates, this is the early 400. */
-const UPLOAD_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const UPLOAD_ID_RE = /^[A-Za-z0-9_-]{8,64}$/; // min 8 since 2026-10-05 (UI emits 8-char ids; 22-char legacy ids stay valid)
 /** 429-audit throttle window (same semantics as `dispatchCmdOrDialog`'s RATE_AUDIT_WINDOW_MS). */
 const RATE_AUDIT_WINDOW_MS = 60_000;
 

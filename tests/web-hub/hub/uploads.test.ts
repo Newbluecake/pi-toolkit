@@ -1562,12 +1562,16 @@ describe("stats and audit surfaces", () => {
 
     await upload(store, "zz");
     await expectCode(() => store.begin(beginP({ id: "short" }), dl()), "E_BAD_REQUEST");
+    // 2026-10-05: schema relaxed to {8,64} — the UI now emits 8-char ids (shorter on-disk paths);
+    // 7 chars is still rejected, legacy 22-char ids stay valid.
+    await upload(store, "eight-char id ok", { id: "Ab3kX9pQ" });
+    await expectCode(() => store.begin(beginP({ id: "1234567" }), dl()), "E_BAD_REQUEST");
     const stats = store.stats();
     expect(stats.counters.requests).toBeGreaterThan(0);
-    expect(stats.counters.rejects).toBe(1);
-    expect(audits.filter((a) => a.phase === "request" && a.op === "begin").length).toBe(1);
-    expect(audits.filter((a) => a.phase === "request" && a.op === "commit").length).toBe(1);
-    expect(audits.filter((a) => a.phase === "reject" && a.code === "E_BAD_REQUEST").length).toBe(1);
+    expect(stats.counters.rejects).toBe(2);
+    expect(audits.filter((a) => a.phase === "request" && a.op === "begin").length).toBe(2);
+    expect(audits.filter((a) => a.phase === "request" && a.op === "commit").length).toBe(2);
+    expect(audits.filter((a) => a.phase === "reject" && a.code === "E_BAD_REQUEST").length).toBe(2);
     expect(audits.filter((a) => a.op === "chunk").length).toBe(0); // §5.4: chunk success has no audit line
   });
 });

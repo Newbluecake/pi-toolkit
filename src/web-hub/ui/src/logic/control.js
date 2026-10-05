@@ -38,7 +38,23 @@
 /** §3.4: 16 random bytes → 22-char base64url id (matches the hub's `^[A-Za-z0-9_-]{16,64}$`). */
 export function newCmdId(getRandomValues = globalThis.crypto?.getRandomValues?.bind(globalThis.crypto)) {
   if (typeof getRandomValues !== "function") return "AAAAAAAAAAAAAAAAAAAAAA";
-  const bytes = new Uint8Array(16);
+  return randomBase64Url(getRandomValues, 16);
+}
+
+/**
+ * Upload ids (2026-10-05, user field report: the 22-char id made on-disk paths unwieldy —
+ * `s-<36>/<id22>/<id22>.<ext>`). 6 bytes → 8 chars base64url; 48 bits is plenty for a
+ * per-session bucket (birthday-bound ≈ 2^24 uploads) and `begin`'s id-reuse check rejects a
+ * genuine collision (the user just retries). Hub-side schema relaxed to `{8,64}` — older
+ * 22-char ids stay valid.
+ */
+export function newUploadId(getRandomValues = globalThis.crypto?.getRandomValues?.bind(globalThis.crypto)) {
+  if (typeof getRandomValues !== "function") return "AAAAAAAA";
+  return randomBase64Url(getRandomValues, 6);
+}
+
+function randomBase64Url(getRandomValues, byteCount) {
+  const bytes = new Uint8Array(byteCount);
   getRandomValues(bytes);
   return btoa(String.fromCharCode(...bytes))
     .replace(/\+/g, "-")
