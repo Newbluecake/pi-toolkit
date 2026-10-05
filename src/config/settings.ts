@@ -517,6 +517,26 @@ export interface SystemPromptSettings {
   adoptForeignForcedPrompt: boolean;
 }
 
+/**
+ * 会话标题模型生成（任务 #12）：会话未命名时用首条用户消息生成 ≤20 字标题
+ * 并 setSessionName（TUI resume 列表与 web-hub 列表/详情自动受益）。仅两个键
+ * （用户拍板的最小面）；失败静默、单会话只生成一次、子会话不触发由模块
+ * 不变量保证（src/title/title.ts），不是设置项。逐字段容错解析见
+ * parseTitleSettings（never throws）。
+ */
+export interface TitleSettings {
+  /** 总开关。false = 不注册任何 handler（行为与功能不存在时逐字节相同）。Default true。 */
+  enabled: boolean;
+  /**
+   * 标题模型，strict `provider/id`；空串 = 跟随当前会话模型。默认
+   * `zai-coding-cn/glm-5.3-flash`：订阅线（quota.providers 同源）里最便宜最快的
+   * flash 档——本机订阅单价 $0.12/M in、$0.42/M out（订阅额度内边际成本为 0），
+   * 一次标题 ≤512 token，成本可忽略；解析失败/异机无此 provider 时同样回落
+   * 当前会话模型（memory.tidy.model 同款约定）。
+   */
+  model: string;
+}
+
 export interface AgentSettings {
   concurrencyLimit: number;
   /** L1 (agent-tool pool-full plan §2): Agent tool pool-full dispatch policy. */
@@ -583,6 +603,8 @@ export interface AgentSettings {
   reload: ReloadSettings;
   /** system prompt 稳定化（sysprompt-stable §3.2）：S1 只含 wakeReplay。 */
   systemPrompt: SystemPromptSettings;
+  /** 会话标题模型生成（任务 #12）。Main-session only（post-guard 装配）。 */
+  title: TitleSettings;
 }
 
 /** Simple on/off settings group shared by the merged plugins (webSearch / todo). */
@@ -916,6 +938,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   },
   reload: { defer: true },
   systemPrompt: { wakeReplay: true, mode: "stable", adoptForeignForcedPrompt: false },
+  title: { enabled: true, model: "zai-coding-cn/glm-5.3-flash" },
 };
 /** Parse the optional `agent` settings block (L1). Field-by-field fallback to defaults, never throws. */
 export function parseAgentDispatchSettings(input: unknown): AgentDispatchSettings {
@@ -1124,6 +1147,7 @@ export function loadSettings(source: unknown): AgentSettings {
     memory: parseMemorySettings(value.memory),
     reload: parseReloadSettings(value.reload),
     systemPrompt: parseSystemPromptSettings(value.systemPrompt),
+    title: parseTitleSettings(value.title),
   });
 }
 
@@ -1827,6 +1851,19 @@ export function parseSystemPromptSettings(input: unknown): SystemPromptSettings 
       typeof value.adoptForeignForcedPrompt === "boolean"
         ? value.adoptForeignForcedPrompt
         : defaults.adoptForeignForcedPrompt,
+  };
+}
+
+/** Parse the optional `title` settings block（任务 #12）：逐字段回退默认，never throws；model 串只 trim 不校验——strict 校验在运行时 parseStrictModelRef，解析失败自行回落会话模型。 */
+export function parseTitleSettings(input: unknown): TitleSettings {
+  const defaults = DEFAULT_SETTINGS.title;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    // 空串是合法哨兵（跟随会话模型）：保留；非字符串回默认。运行时 strict 解析
+    // 失败/找不到 provider 也自行回落会话模型（见 TitleSettings.model 注释）。
+    model: typeof value.model === "string" ? value.model.trim() : defaults.model,
   };
 }
 

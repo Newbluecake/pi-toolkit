@@ -447,6 +447,16 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "sessionNav.enabled",
     "Session navigation: /resume-recent 48h window, /clear, bare exit, resume-list titles",
   ),
+  // 会话标题模型生成（任务 #12）：仅两个键，非 live（activate 时捕获，改后 /reload）。
+  "title.enabled": bool(
+    "title.enabled",
+    "Auto-generate a short session title from the first user message (main session only, silent on failure)",
+  ),
+  "title.model": {
+    kind: "string",
+    path: "title.model",
+    description: 'Strict provider/id for title generation, or "" to follow the session model',
+  },
   // Merged armory-memory (memory-plan §3.3): all nine keys are non-live
   // (captured at activate; change → /reload). byteCap needs a max that
   // count() cannot express (Nit 1) ⇒ spread + override.
