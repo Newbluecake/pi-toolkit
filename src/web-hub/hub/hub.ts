@@ -105,6 +105,10 @@ export interface StartHubDeps {
   lanAssembly?: LanAssembly;
   /** Set by `main.ts` when `parseHubLanConfig` rejects `config.lan`; mutually exclusive with `config.lan`. */
   lanConfigError?: { detail: string };
+  /** web-hub-spawn §SP2: the umask this hub process inherited before `main.ts` switched it to
+   * 0o077 (`process.umask(0o077)`'s return value). SP10 hands it to the spawn supervisor, which
+   * restores it around each fork so spawned pi processes keep the user's own umask. */
+  childUmask?: number;
 }
 
 export async function startHub(

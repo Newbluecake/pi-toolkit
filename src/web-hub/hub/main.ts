@@ -22,6 +22,7 @@ import { resolveHubPaths } from "../protocol/paths.js";
 import { installProcessHandlers, startHub, type StartHubDeps } from "./hub.js";
 import { createHttpFrontend } from "./http.js";
 import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
+import { parseHubSpawnConfig } from "./spawn/config.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
 
@@ -48,7 +49,10 @@ async function main(): Promise<void> {
   if (config.v !== 1 || typeof config.home !== "string" || config.home === "") {
     fail("PI_WEBHUB_CONFIG is not a v1 HubConfig", 2);
   }
-  process.umask(0o077); // before any file-system operation (§1.3.1)
+  // `process.umask(0o077)` returns the previous mask. web-hub-spawn §SP2: keep it and hand it to
+  // the hub via StartHubDeps.childUmask so the spawn supervisor (SP7/SP10) restores the user's own
+  // umask around each fork — children must not inherit the hub's private 0o077.
+  const inheritedUmask = process.umask(0o077); // before any file-system operation (§1.3.1)
 
   const startDeps: StartHubDeps = {};
   if (config.lan !== undefined) {
@@ -68,6 +72,25 @@ async function main(): Promise<void> {
       }
     }
   }
+
+  // web-hub-spawn §SP2: strict re-validation of config.spawn — any invalid field drops the whole
+  // key (feature off, everything else keeps running). No hub log exists yet (createHubLog comes
+  // below), so the warn goes to stderr, the same channel fail() uses.
+  if (config.spawn !== undefined) {
+    const parsedSpawn = parseHubSpawnConfig(config.spawn);
+    if (!parsedSpawn.ok) {
+      const { spawn: _drop, ...rest } = config;
+      config = rest;
+      try {
+        process.stderr.write(`web-hub main: dropping config.spawn: ${parsedSpawn.detail}\n`);
+      } catch {
+        /* stderr may be ignored */
+      }
+    } else {
+      config = { ...config, spawn: parsedSpawn.spawn };
+    }
+  }
+  startDeps.childUmask = inheritedUmask;
 
   const paths = resolveHubPaths({
     home: config.home,

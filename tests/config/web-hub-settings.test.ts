@@ -22,9 +22,10 @@ import {
 
 const defaults = DEFAULT_SETTINGS.webHub;
 const lanDefaults = defaults.lan!;
+const spawnDefaults = defaults.spawn!;
 
 describe("web-hub settings", () => {
-  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {})", () => {
+  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {}; web-hub-spawn §SP2: 补 spawn 八键默认值)", () => {
     expect(defaults).toEqual({
       enabled: false,
       autoStart: true,
@@ -37,6 +38,16 @@ describe("web-hub settings", () => {
       webCommandPolicy: {},
       uploads: "on",
       lan: { enabled: false, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
+      spawn: {
+        enabled: false,
+        roots: [],
+        maxProcesses: 4,
+        maxPerPrincipal: 2,
+        ratePerMinute: 3,
+        maxLifetimeMinutes: 720,
+        registerTimeoutS: 30,
+        lan: "off",
+      },
     });
   });
 
@@ -99,6 +110,7 @@ describe("web-hub settings", () => {
       webCommandPolicy: {},
       uploads: "on",
       lan: lanDefaults,
+      spawn: spawnDefaults,
     });
     expect(parseWebHubSettings({ enabled: true, port: -1 })).toEqual({ ...defaults, enabled: true });
   });
@@ -445,5 +457,193 @@ describe("webHub.uploads (web-hub-upload plan §6 U1)", () => {
     expect(spec.live).toBeUndefined();
     expect(spec).toMatchObject({ kind: "enum", path: "webHub.uploads", values: ["on", "loopback", "off"] });
     expect(defaultOf(spec)).toBe("on");
+  });
+});
+
+// web-hub-spawn plan §SP2 / arch v2 §6.2: webHub.spawn.* — default off, tolerant per-field parse
+// (numeric clamps, root-entry drop), eight spec keys, all non-live.
+describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
+  it("defaults: enabled=false, empty roots, arch §6.2 numeric defaults, lan off", () => {
+    expect(spawnDefaults).toEqual({
+      enabled: false,
+      roots: [],
+      maxProcesses: 4,
+      maxPerPrincipal: 2,
+      ratePerMinute: 3,
+      maxLifetimeMinutes: 720,
+      registerTimeoutS: 30,
+      lan: "off",
+    });
+    expect(parseWebHubSettings({}).spawn).toEqual(spawnDefaults);
+    expect(parseWebHubSettings(undefined).spawn).toEqual(spawnDefaults);
+    // non-object spawn blocks fall back wholesale, never throw
+    for (const garbage of [null, 0, "nope", true, [], ["/x"]]) {
+      expect(parseWebHubSettings({ spawn: garbage }).spawn, JSON.stringify(garbage)).toEqual(spawnDefaults);
+    }
+  });
+
+  it("enabled: keeps a real boolean, falls back to false for anything else", () => {
+    expect(parseWebHubSettings({ spawn: { enabled: true } }).spawn?.enabled).toBe(true);
+    for (const garbage of ["yes", 1, null, undefined, []]) {
+      expect(parseWebHubSettings({ spawn: { enabled: garbage } }).spawn?.enabled, JSON.stringify(garbage)).toBe(false);
+    }
+  });
+
+  it("roots: accepts both the CSV string and the JSON array form (splitLanCsv 同源)", () => {
+    expect(parseWebHubSettings({ spawn: { roots: "~/a, /srv/b ,~/c" } }).spawn?.roots).toEqual([
+      "~/a",
+      "/srv/b",
+      "~/c",
+    ]);
+    expect(parseWebHubSettings({ spawn: { roots: ["/srv/b", "~/a"] } }).spawn?.roots).toEqual(["/srv/b", "~/a"]);
+    // arrays may themselves carry commas (settings-editor stored form)
+    expect(parseWebHubSettings({ spawn: { roots: ["/a,/b"] } }).spawn?.roots).toEqual(["/a", "/b"]);
+  });
+
+  it("roots: drops entries that are not / or ~ prefixed, contain NUL, or exceed 4096 bytes", () => {
+    expect(parseWebHubSettings({ spawn: { roots: ["relative", "~/ok", "C:\\win", "/abs", ""] } }).spawn?.roots).toEqual(
+      ["~/ok", "/abs"],
+    );
+    expect(parseWebHubSettings({ spawn: { roots: ["/a\0b"] } }).spawn?.roots).toEqual([]);
+    expect(parseWebHubSettings({ spawn: { roots: ["/" + "x".repeat(4096)] } }).spawn?.roots).toEqual([]); // 4097 bytes
+    expect(parseWebHubSettings({ spawn: { roots: "/" + "x".repeat(4096) } }).spawn?.roots).toEqual([]);
+    // exactly 4096 bytes still passes
+    expect(parseWebHubSettings({ spawn: { roots: ["/" + "x".repeat(4095)] } }).spawn?.roots).toEqual([
+      "/" + "x".repeat(4095),
+    ]);
+  });
+
+  it("roots: keeps at most 16 entries (first 16 of the valid ones)", () => {
+    const twenty = Array.from({ length: 20 }, (_, i) => `/r${String(i)}`);
+    const roots = parseWebHubSettings({ spawn: { roots: twenty } }).spawn?.roots;
+    expect(roots).toHaveLength(16);
+    expect(roots?.[0]).toBe("/r0");
+    expect(roots?.[15]).toBe("/r15");
+  });
+
+  it("numeric fields clamp into arch §6.2's ranges (round, then clamp; never throw)", () => {
+    const s = parseWebHubSettings({
+      spawn: {
+        maxProcesses: 99, // -> 16
+        maxPerPrincipal: 0, // -> 1
+        ratePerMinute: 2.6, // round -> 3
+        maxLifetimeMinutes: 5, // -> 10
+        registerTimeoutS: 1e6, // -> 120
+      },
+    }).spawn!;
+    expect(s.maxProcesses).toBe(16);
+    expect(s.maxPerPrincipal).toBe(1);
+    expect(s.ratePerMinute).toBe(3);
+    expect(s.maxLifetimeMinutes).toBe(10);
+    expect(s.registerTimeoutS).toBe(120);
+    // mid-range values pass through untouched
+    const mid = parseWebHubSettings({
+      spawn: { maxProcesses: 8, maxPerPrincipal: 3, ratePerMinute: 10, maxLifetimeMinutes: 1440, registerTimeoutS: 60 },
+    }).spawn!;
+    expect(mid.maxProcesses).toBe(8);
+    expect(mid.maxPerPrincipal).toBe(3);
+    expect(mid.ratePerMinute).toBe(10);
+    expect(mid.maxLifetimeMinutes).toBe(1440);
+    expect(mid.registerTimeoutS).toBe(60);
+  });
+
+  it("numeric fields fall back to defaults for non-finite / non-number garbage", () => {
+    for (const garbage of ["4", NaN, Infinity, -Infinity, null, undefined, [], {}]) {
+      const s = parseWebHubSettings({ spawn: { maxProcesses: garbage } }).spawn!;
+      expect(s.maxProcesses, JSON.stringify(garbage)).toBe(spawnDefaults.maxProcesses);
+    }
+  });
+
+  it("lan: keeps off/known/roots, anything else falls back to off", () => {
+    expect(parseWebHubSettings({ spawn: { lan: "known" } }).spawn?.lan).toBe("known");
+    expect(parseWebHubSettings({ spawn: { lan: "roots" } }).spawn?.lan).toBe("roots");
+    for (const garbage of ["OFF", "any", 42, null, undefined, true, []]) {
+      expect(parseWebHubSettings({ spawn: { lan: garbage } }).spawn?.lan, JSON.stringify(garbage)).toBe("off");
+    }
+  });
+
+  it("is wired into loadSettings and round-trips a full block", () => {
+    const s = loadSettings({
+      webHub: {
+        spawn: {
+          enabled: true,
+          roots: "~/proj",
+          maxProcesses: 6,
+          maxPerPrincipal: 2,
+          ratePerMinute: 5,
+          maxLifetimeMinutes: 1440,
+          registerTimeoutS: 45,
+          lan: "known",
+        },
+      },
+    }).webHub.spawn;
+    expect(s).toEqual({
+      enabled: true,
+      roots: ["~/proj"],
+      maxProcesses: 6,
+      maxPerPrincipal: 2,
+      ratePerMinute: 5,
+      maxLifetimeMinutes: 1440,
+      registerTimeoutS: 45,
+      lan: "known",
+    });
+  });
+
+  it("exposes the eight webHub.spawn.* keys in SETTING_SPECS, all non-live", () => {
+    const keys = [
+      "webHub.spawn.enabled",
+      "webHub.spawn.roots",
+      "webHub.spawn.maxProcesses",
+      "webHub.spawn.maxPerPrincipal",
+      "webHub.spawn.ratePerMinute",
+      "webHub.spawn.maxLifetimeMinutes",
+      "webHub.spawn.registerTimeoutS",
+      "webHub.spawn.lan",
+    ];
+    for (const key of keys) {
+      expect(isKnownSettingKey(key), key).toBe(true);
+      const spec = SETTING_SPECS[key]!;
+      expect(spec.live, key).toBeUndefined();
+      expect(spec.time, key).toBeUndefined();
+      expect(currentOf(DEFAULT_SETTINGS, spec), key).not.toBe("(unset)");
+    }
+    expect(SETTING_SPECS["webHub.spawn.enabled"]).toMatchObject({ kind: "boolean", path: "webHub.spawn.enabled" });
+    expect(SETTING_SPECS["webHub.spawn.roots"]).toMatchObject({
+      kind: "string",
+      csv: true,
+      path: "webHub.spawn.roots",
+    });
+    // numeric knobs: editor bounds aligned with parseWebHubSpawnBlock's clamps
+    expect(SETTING_SPECS["webHub.spawn.maxProcesses"]).toMatchObject({
+      kind: "number",
+      path: "webHub.spawn.maxProcesses",
+      min: 1,
+      max: 16,
+      integer: true,
+    });
+    expect(SETTING_SPECS["webHub.spawn.maxPerPrincipal"]).toMatchObject({ min: 1, max: 16 });
+    expect(SETTING_SPECS["webHub.spawn.ratePerMinute"]).toMatchObject({ min: 1, max: 30 });
+    expect(SETTING_SPECS["webHub.spawn.maxLifetimeMinutes"]).toMatchObject({ min: 10, max: 10_080 });
+    expect(SETTING_SPECS["webHub.spawn.registerTimeoutS"]).toMatchObject({ min: 10, max: 120 });
+    expect(SETTING_SPECS["webHub.spawn.lan"]).toMatchObject({
+      kind: "enum",
+      path: "webHub.spawn.lan",
+      values: ["off", "known", "roots"],
+    });
+    // defaults surfaced in the editor (csv array → joined string)
+    expect(defaultOf(SETTING_SPECS["webHub.spawn.roots"]!)).toBe("");
+    expect(defaultOf(SETTING_SPECS["webHub.spawn.maxProcesses"]!)).toBe(4);
+    expect(defaultOf(SETTING_SPECS["webHub.spawn.lan"]!)).toBe("off");
+    // every description notes the /reload + /webhub restart dance (plan §SP2)
+    for (const key of keys) {
+      expect(SETTING_SPECS[key]!.description, key).toContain("/webhub restart");
+    }
+  });
+
+  it("parseSettingValue round-trips csv roots input through the stored/live split", () => {
+    const spec = SETTING_SPECS["webHub.spawn.roots"]!;
+    const parsed = parseSettingValue(spec, " ~/a , /srv/b ,,");
+    expect(parsed).toEqual({ ok: true, stored: "~/a,/srv/b", live: ["~/a", "/srv/b"] });
+    expect(parseSettingValue(spec, "")).toEqual({ ok: true, stored: "", live: [] });
   });
 });

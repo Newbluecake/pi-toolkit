@@ -14,9 +14,9 @@ import {
 } from "../compact-hint/threshold.js";
 // web-hub (plan 包 I): the settings type is owned by package D; `import type`
 // only, so this pre-guard module never loads the web-hub runtime graph.
-import type { WebHubLanSettings, WebHubSettings } from "../web-hub/agent/index.js";
+import type { WebHubLanSettings, WebHubSettings, WebHubSpawnSettings } from "../web-hub/agent/index.js";
 import type { WebHubLanSettingsWarnings } from "../commands/webhub.js";
-export type { WebHubSettings, WebHubLanSettings };
+export type { WebHubSettings, WebHubLanSettings, WebHubSpawnSettings };
 // web-hub LAN (S1-W3 LI, lan-plan.md §9.1): host-token / origin classification is W1-frozen and
 // shared by every layer that needs to agree on what counts as a valid host — settings validation
 // (here, L16 第一处) is one of those layers, alongside `hub/main.ts`'s `parseHubLanConfig` (L16
@@ -690,6 +690,23 @@ export const DEFAULT_WEBHUB_LAN_SETTINGS: WebHubLanSettings = {
   externalOrigins: [],
 };
 
+/**
+ * `webHub.spawn.*` defaults（web-hub-spawn arch v2 §6.2 / plan §SP2）：与 lan 块同为非 live——
+ * activate 时捕快照，改动需 `/reload` 后再 `/webhub restart` 才到达运行中的 hub（它们只随
+ * `PI_WEBHUB_CONFIG` 传输）。默认 `enabled:false` ⇒ `HubConfig.spawn` 不被构造（arch §8.2
+ * 未启用矩阵）。数值范围见 `parseWebHubSpawnBlock`（越界钳制、非法回落）。
+ */
+export const DEFAULT_WEBHUB_SPAWN_SETTINGS: WebHubSpawnSettings = {
+  enabled: false,
+  roots: [],
+  maxProcesses: 4,
+  maxPerPrincipal: 2,
+  ratePerMinute: 3,
+  maxLifetimeMinutes: 720,
+  registerTimeoutS: 30,
+  lan: "off",
+};
+
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
   agent: { queueWhenFull: false },
@@ -849,6 +866,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     webCommandPolicy: {},
     uploads: "on",
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
+    spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
   },
   webSearch: { enabled: true },
   todo: { enabled: true, nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 } },
@@ -1577,7 +1595,8 @@ function resolveWebHubPort(record: Record<string, unknown>): number {
 
 export function parseWebHubSettings(input: unknown): WebHubSettings {
   const defaults = DEFAULT_SETTINGS.webHub;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults, lan: { ...defaults.lan! } };
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    return { ...defaults, lan: { ...defaults.lan! }, spawn: parseWebHubSpawnBlock(undefined) };
   const record = input as Record<string, unknown>;
   const idle = record.idleExitMinutes;
   const nodeLoader = record.nodeLoader;
@@ -1612,6 +1631,7 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     webCommandPolicy: policy,
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
+    spawn: parseWebHubSpawnBlock(record.spawn),
   };
 }
 
@@ -1619,6 +1639,44 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
 function parseUploadsSetting(raw: unknown, fallback: "on" | "loopback" | "off" | undefined): "on" | "loopback" | "off" {
   if (raw === "on" || raw === "loopback" || raw === "off") return raw;
   return fallback ?? "on";
+}
+
+/**
+ * `webHub.spawn` 块解析（web-hub-spawn plan §SP2 / arch v2 §6.2；parseWebHubLanBlock 同款容错，
+ * never throws）：`roots` 复用 `splitLanCsv`（CSV 字符串或 JSON 数组皆可，与 lan 三键同源）；
+ * 数值按 arch §6.2 范围取整钳制，非法（非有限数）回落默认；`lan` 三选一。hub 侧
+ * `hub/spawn/config.ts` 的 `parseHubSpawnConfig` 会再做一次严格重校验。
+ */
+export function parseWebHubSpawnBlock(input: unknown): WebHubSpawnSettings {
+  const defaults = DEFAULT_WEBHUB_SPAWN_SETTINGS;
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ...defaults, roots: [] };
+  }
+  const record = input as Record<string, unknown>;
+  // arch §6.2: 每项 `/` 或 `~` 开头、无 NUL、≤4096 UTF-8 字节；非法项静静丢弃；最多 16 项。
+  const roots = splitLanCsv(record.roots)
+    .filter(
+      (entry) =>
+        (entry.startsWith("/") || entry.startsWith("~")) && !entry.includes("\0") && Buffer.byteLength(entry) <= 4096,
+    )
+    .slice(0, 16);
+  const lan = record.lan;
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
+    roots,
+    maxProcesses: clampSpawnInt(record.maxProcesses, 1, 16, defaults.maxProcesses),
+    maxPerPrincipal: clampSpawnInt(record.maxPerPrincipal, 1, 16, defaults.maxPerPrincipal),
+    ratePerMinute: clampSpawnInt(record.ratePerMinute, 1, 30, defaults.ratePerMinute),
+    maxLifetimeMinutes: clampSpawnInt(record.maxLifetimeMinutes, 10, 10_080, defaults.maxLifetimeMinutes),
+    registerTimeoutS: clampSpawnInt(record.registerTimeoutS, 10, 120, defaults.registerTimeoutS),
+    lan: lan === "off" || lan === "known" || lan === "roots" ? lan : defaults.lan,
+  };
+}
+
+/** arch §6.2 数值域的容错读取：有限数 ⇒ 取整后钳进 [min,max]；其余（字符串/NaN/Infinity/缺失）回落默认。 */
+function clampSpawnInt(raw: unknown, min: number, max: number, fallback: number): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(raw)));
 }
 
 /**

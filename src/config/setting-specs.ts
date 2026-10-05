@@ -312,6 +312,64 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "webHub.lan.externalOrigins",
     "web-hub LAN: allowed external https origins reachable via a trusted proxy, comma-separated",
   ),
+  // web-hub spawn (web-hub-spawn plan §SP2 / arch v2 §6.2; S1 is Linux-only, fail closed): eight
+  // keys under webHub.spawn.*. Like the rest of webHub.* they are non-live AND only reach a
+  // running hub inside PI_WEBHUB_CONFIG — every description carries the /reload + restart note.
+  // Numeric ranges mirror parseWebHubSpawnBlock's clamps (count() has no max ⇒ spread + override,
+  // askUser.backgroundInterrupt.maxPerQuestion 同款).
+  "webHub.spawn.enabled": bool(
+    "webHub.spawn.enabled",
+    "web-hub: spawn headless pi sessions in chosen dirs from the browser (default off; change: /reload then /webhub restart)",
+  ),
+  "webHub.spawn.roots": csvString(
+    "webHub.spawn.roots",
+    "web-hub spawn: extra allowed parent dirs, absolute or ~-prefixed, comma-separated (empty = known dirs only; change: /reload then /webhub restart)",
+  ),
+  "webHub.spawn.maxProcesses": {
+    ...count(
+      "webHub.spawn.maxProcesses",
+      1,
+      "web-hub spawn: global cap on live spawned sessions, 1-16 (change: /reload then /webhub restart)",
+    ),
+    max: 16,
+  } as SettingSpec,
+  "webHub.spawn.maxPerPrincipal": {
+    ...count(
+      "webHub.spawn.maxPerPrincipal",
+      1,
+      "web-hub spawn: per-user cap on live spawned sessions, 1-16 (change: /reload then /webhub restart)",
+    ),
+    max: 16,
+  } as SettingSpec,
+  "webHub.spawn.ratePerMinute": {
+    ...count(
+      "webHub.spawn.ratePerMinute",
+      1,
+      "web-hub spawn: per-user spawn rate cap per minute, 1-30 (change: /reload then /webhub restart)",
+    ),
+    max: 30,
+  } as SettingSpec,
+  "webHub.spawn.maxLifetimeMinutes": {
+    ...count(
+      "webHub.spawn.maxLifetimeMinutes",
+      10,
+      "web-hub spawn: absolute lifetime of a spawned session in minutes, 10-10080 (change: /reload then /webhub restart)",
+    ),
+    max: 10_080,
+  } as SettingSpec,
+  "webHub.spawn.registerTimeoutS": {
+    ...count(
+      "webHub.spawn.registerTimeoutS",
+      10,
+      "web-hub spawn: seconds from fork to a live session before the run fails, 10-120 (change: /reload then /webhub restart)",
+    ),
+    max: 120,
+  } as SettingSpec,
+  "webHub.spawn.lan": choice(
+    "webHub.spawn.lan",
+    ["off", "known", "roots"],
+    "web-hub spawn: LAN-side reachability - off / known dirs only / roots allowed (change: /reload then /webhub restart)",
+  ),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   // Main-session todo staleness nudge (todo-nudge plan): all four keys are

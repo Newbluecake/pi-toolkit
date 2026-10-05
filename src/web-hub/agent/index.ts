@@ -25,6 +25,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import type { RunSnapshot } from "../../core/types.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
+import type { HubSpawnConfig } from "../protocol/spawn.js";
 import {
   FORWARDED_EVENTS,
   type AgentKind,
@@ -75,6 +76,16 @@ export interface WebHubLanSettings {
   externalOrigins: string[];
 } // I 在 settings.ts 预定义五个 webHub.lan.* 键（§9.1），校验后按这个形状传进来；LE 只消费，不做自己的校验
 
+/**
+ * web-hub-spawn plan §SP2 / arch v2 §6.2: the settings-layer shape of `webHub.spawn` — the seven
+ * `HubSpawnConfig` policy fields plus `enabled`. Only `enabled === true` puts a `spawn` key into
+ * `HubConfig` (`buildHubConfig` below); the feature's wire-level off state is the key's absence
+ * (response matrix, arch §8.2).
+ */
+export interface WebHubSpawnSettings extends HubSpawnConfig {
+  enabled: boolean;
+}
+
 export interface WebHubSettings {
   enabled: boolean;
   autoStart: boolean;
@@ -91,6 +102,9 @@ export interface WebHubSettings {
   uploads?: "on" | "loopback" | "off";
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
+  /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，
+   * `PI_WEBHUB_CONFIG` 与 spawn 合入前深相等（arch §8.2 未启用矩阵）。 */
+  spawn?: WebHubSpawnSettings;
 } // I 在 settings.ts `import type` 并 re-export（D 不改 settings.ts）
 
 export type StopResult =
@@ -507,6 +521,22 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         externalOrigins: settings.lan.externalOrigins,
       };
       config.lan = lan;
+    }
+    // web-hub-spawn §SP2: only an explicitly enabled spawn block reaches the hub — `undefined`
+    // and `enabled:false` alike leave `config.spawn` unset, so the hub's "not enabled" response
+    // matrix (arch §8.2) stays byte-identical to a pre-spawn hub. Exactly the seven policy
+    // fields; `enabled` itself never crosses the wire.
+    if (settings.spawn?.enabled === true) {
+      const spawn: HubSpawnConfig = {
+        roots: settings.spawn.roots,
+        maxProcesses: settings.spawn.maxProcesses,
+        maxPerPrincipal: settings.spawn.maxPerPrincipal,
+        ratePerMinute: settings.spawn.ratePerMinute,
+        maxLifetimeMinutes: settings.spawn.maxLifetimeMinutes,
+        registerTimeoutS: settings.spawn.registerTimeoutS,
+        lan: settings.spawn.lan,
+      };
+      config.spawn = spawn;
     }
     return config;
   };
