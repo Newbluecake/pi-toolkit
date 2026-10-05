@@ -129,9 +129,10 @@
   font-weight: var(--fw-medium);
 }
 
-/* --- delivery switch (§7.4/§7.5) — 2026-10-05: always a native <select> at every width;
- * skinned (appearance:none + overlay chevron) so it matches the other header controls instead
- * of the platform-default chrome (user field report: the bare select looked ugly) --- */
+/* --- delivery switch (§7.4/§7.5) — custom dropdown menu (2026-10-05 v2: Android Chrome renders
+ * a native <select> as a full-screen OS picker dialog — user rejected that; the menu expands
+ * UPWARD inline because the composer hugs the screen's bottom edge). Mirrors the ThemeToggle
+ * dropdown conventions. --- */
 
 .deliver-wrap {
   position: relative;
@@ -141,10 +142,12 @@
   flex: none;
 }
 
-.deliver-select {
-  appearance: none;
+.deliver-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
   min-height: 44px;
-  padding: 0 calc(var(--sp-6) + 14px) 0 var(--sp-3); /* right padding clears the overlay chevron */
+  padding: 0 var(--sp-3);
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-sm);
   background: var(--c-surface);
@@ -153,11 +156,59 @@
   cursor: pointer;
 }
 
+.deliver-trigger[aria-expanded="true"] {
+  background: var(--c-sunken);
+}
+
 .deliver-caret {
-  position: absolute;
-  right: var(--sp-2);
-  pointer-events: none;
   color: var(--c-text-3);
+}
+
+.deliver-menu {
+  position: absolute;
+  bottom: calc(100% + var(--sp-2)); /* composer is at the screen bottom — open upward */
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 100%;
+  padding: var(--sp-1);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
+}
+
+.deliver-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 44px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.deliver-item:hover {
+  background: var(--c-surface-2);
+}
+
+.deliver-item[aria-checked="true"] {
+  color: var(--c-primary);
+  font-weight: var(--fw-semibold);
+}
+
+.deliver-item-label {
+  flex: 1;
+}
+
+.deliver-item-check {
+  color: var(--c-primary);
 }
 
 .deliver-idle {
