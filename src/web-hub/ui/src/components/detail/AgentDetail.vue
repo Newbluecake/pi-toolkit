@@ -265,6 +265,10 @@ watch(
  * is reserved for dialogIds this mount truly never got a determinable outcome for. */
 const resolvedNotes = new Map<string, string>();
 const RESOLVED_NOTES_CAP = 32;
+/** dialogIds whose outcome was this tab's own answer/cancel (no fold note shown). */
+const ownFolds = new Set<string>();
+/** Bumped whenever `resolvedNotes`/`ownFolds` (plain containers) change, so `visibleFolded` recomputes. */
+const notesVersion = ref(0);
 function resolveClosedNote(c: DialogClosedWire): string {
   // acc32-B3: `by === "web"` alone doesn't say WHICH browser tab — compare the closed record's
   // `cmdId` (§5.4: "标记 closed{by:"web", cmdId}") against the ids THIS tab generated when it
@@ -296,18 +300,35 @@ function resolveClosedNote(c: DialogClosedWire): string {
 watch(
   closedDialogs,
   (list) => {
+    let changed = false;
     for (const c of list) {
       if (resolvedNotes.has(c.dialogId)) continue; // resolve ONCE, before closed[] can evict it
-      resolvedNotes.set(c.dialogId, resolveClosedNote(c));
+      const note = resolveClosedNote(c);
+      resolvedNotes.set(c.dialogId, note);
+      changed = true;
+      // 2026-10 user request: a dialog THIS tab just answered/cancelled needs no "Answered" /
+      // "Cancelled" fold note — the user did it themselves a moment ago. Remote outcomes
+      // (terminal / other browser / background park / abort) keep their note.
+      if (note === t("dialog.closedHere") || note === t("dialog.cancelledHere")) ownFolds.add(c.dialogId);
       while (resolvedNotes.size > RESOLVED_NOTES_CAP) {
         const oldest = resolvedNotes.keys().next().value;
         if (oldest === undefined) break;
         resolvedNotes.delete(oldest);
+        ownFolds.delete(oldest);
       }
     }
+    if (changed) notesVersion.value += 1;
   },
   { immediate: true },
 );
+
+/** Fold rows actually rendered: drops this tab's own answered/cancelled dialogs, and also hides
+ * a dialog this tab submitted for while its closed record hasn't arrived yet (otherwise the
+ * generic "Dialog closed" would flash in between). */
+const visibleFolded = computed(() => {
+  void notesVersion.value; // re-evaluate when a closed record gets resolved
+  return folded.value.filter((id) => !ownFolds.has(id) && !(myDialogCmdIds.has(id) && !resolvedNotes.has(id)));
+});
 
 function foldedNote(dialogId: string): string {
   const cached = resolvedNotes.get(dialogId);
@@ -471,7 +492,7 @@ function onCloseDrawer(): void {
             />
           </section>
         </template>
-        <p v-for="id in folded" :key="`folded-${id}`" class="ask-folded" role="status">{{ foldedNote(id) }}</p>
+        <p v-for="id in visibleFolded" :key="`folded-${id}`" class="ask-folded" role="status">{{ foldedNote(id) }}</p>
 
         <DetailDock
           :following="following"

@@ -128,10 +128,9 @@ describe("AgentDetail.vue — ask_user close-fold attribution (acc32-B3 / accfix
     await nextTick();
     await nextTick();
 
-    const note = w.find(".ask-folded");
-    expect(note.exists()).toBe(true);
-    expect(note.text()).toBe("Answered");
-    expect(note.text()).not.toContain("another browser");
+    // 2026-10 user request: this tab's OWN answer gets no fold note at all (it is self-evident);
+    // the attribution is still resolved ("mine"), which is exactly what suppresses the note.
+    expect(w.find(".ask-folded").exists()).toBe(false);
   });
 
   it("a DIFFERENT browser tab's answer (unrelated cmdId) still folds to 'answered in another browser'", async () => {
@@ -184,8 +183,8 @@ describe("AgentDetail.vue — ask_user close-fold attribution (acc32-B3 / accfix
     await nextTick();
     await nextTick();
 
-    const note = w.find(".ask-folded");
-    expect(note.text()).toBe("Answered");
+    // attributed as "mine" ⇒ no fold note (2026-10: own answers/cancels are not echoed)
+    expect(w.find(".ask-folded").exists()).toBe(false);
   });
 });
 
