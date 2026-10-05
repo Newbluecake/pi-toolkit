@@ -21,7 +21,10 @@ import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
 import { createRenderGate, type RenderPriority } from "./renderGate.js";
 import type { HubTransport, TransportHooks } from "../transport/types.js";
 import { createControl } from "./useControl.js";
-import type { HubHandle, HubState } from "../types.js";
+import { createSpawn } from "./useSpawn.js";
+import { createNewSession } from "./useNewSession.js";
+import type { SpawnsPayload, SpawnPolicyWire } from "@protocol/spawn.js";
+import type { HubHandle, HubSpawnHandle, HubState } from "../types.js";
 
 /** Whatever `@logic/state.js`'s JSDoc `initialState()`/`reduce()` actually traffic in — kept
  * distinct from the frozen, hand-authored `HubState` view so this file never has to fight TS
@@ -47,6 +50,10 @@ export interface UseHubOptions<TTimer = ReturnType<typeof setTimeout>> {
   /** Forwarded to `createRenderGate` (§3.5 defaults: 100ms / 1000ms). */
   renderIntervalMs?: number;
   renderHiddenPollMs?: number;
+  /** web-hub-spawn SP11 / plan §3.2: where a 「我发起的」 flow navigates on `live`
+   * (`#/agent/<key>`). Default: a `route` dispatch (selection-level only — App.vue's hash
+   * router remains the URL owner; SP12/SP13 wires the real hash navigate). */
+  navigate?(agentKey: string): void;
 }
 
 export interface UseHubHandle extends HubHandle {
@@ -106,7 +113,11 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
         : { event: msg.event, data: msg.data ?? {}, id: msg.id },
     );
     if (next === raw) return; // no-op event: no effects, no render request (mirrors legacy app.js)
+    const prevSpawns = raw.spawns;
     raw = next;
+    // SP11: every `spawns` slot change (snapshot on reconnect, live broadcast) feeds the
+    // new-session orchestrator — it settles awaiting flows / refills retained first prompts.
+    if (raw.spawns !== prevSpawns) newSession.noteSpawns(raw.spawns);
     runEffects();
     gate.request(priorityFor(msg));
   }
@@ -209,9 +220,41 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     now,
   });
 
+  // ---------------------------------------------------------------------------
+  // web-hub-spawn SP11 (arch §8.3, plan §3.2): the headless-spawn call surface plus the
+  // new-session orchestrator. `list()` successes are remembered so the orchestrator's
+  // awaiting watchdog tracks the hub's real `registerTimeoutS` instead of the 30s default.
+  // ---------------------------------------------------------------------------
+  const spawnBase = createSpawn(transport);
+  let latestSpawnPolicy: SpawnPolicyWire | undefined;
+  const newSession = createNewSession({
+    start: (req) => spawnBase.start(req),
+    policy: () => latestSpawnPolicy,
+    control,
+    navigate: (agentKey) => {
+      if (opts.navigate !== undefined) opts.navigate(agentKey);
+      else dispatch({ event: "route", data: { agentKey } });
+    },
+    now,
+    setTimeout: opts.setTimeout,
+    clearTimeout: opts.clearTimeout,
+  });
+  const spawn: HubSpawnHandle = {
+    list: async () => {
+      const r = await spawnBase.list();
+      if (r.ok) latestSpawnPolicy = r.policy;
+      return r;
+    },
+    dirs: () => spawnBase.dirs(),
+    start: (req) => spawnBase.start(req),
+    stop: (spawnId, force) => spawnBase.stop(spawnId, force),
+    newSession,
+  };
+
   return {
     state: state as Readonly<ShallowRef<HubState>>,
     control,
+    spawn,
     dispatch,
     transport,
     loadOlder,
@@ -223,6 +266,7 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
         opts.clearTimeout(subTimer);
         subTimer = null;
       }
+      newSession.dispose();
       gate.dispose();
       transport.close();
     },

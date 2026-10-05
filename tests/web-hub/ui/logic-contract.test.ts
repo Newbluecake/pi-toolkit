@@ -89,3 +89,21 @@ describe("web/contract.js mirrors protocol/http-contract.ts", () => {
     });
   });
 });
+
+describe("web/contract.js API headless endpoints (web-hub-spawn SP11 / arch §8.2)", () => {
+  // `protocol/spawn.ts` (SP1) freezes the body/record TYPES but has no path constants, so
+  // these two literals are hand-written (same situation as API.session/API.logout above) —
+  // pin them against arch §8.2's route table here.
+  it("API.headless and API.headlessDirs point at the arch §8.2 endpoints", () => {
+    expect(web.API.headless).toBe("/api/headless");
+    expect(web.API.headlessDirs).toBe("/api/headless/dirs");
+  });
+
+  it("reduce tolerates a valid spawns frame (registered SSE event, overwrite slot)", () => {
+    const s = reduce(initialState(), {
+      event: "spawns",
+      data: { items: [{ spawnId: "sp1", state: "starting" }], active: 1, max: 4 },
+    });
+    expect(s.spawns).toEqual({ items: [{ spawnId: "sp1", state: "starting" }], active: 1, max: 4 });
+  });
+});

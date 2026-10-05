@@ -487,3 +487,146 @@ describe("useHub — control plane (§7.1/§7.7)", () => {
     hub.dispose();
   });
 });
+
+describe("useHub: spawn wiring (web-hub-spawn SP11)", () => {
+  /** Minimal harness with a spawn-capable fake transport. */
+  function makeSpawnHub() {
+    const clock = fakeClock();
+    const starts: unknown[] = [];
+    const transport: HubTransport = {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: async () => ({ ok: true }),
+      unsubscribe: async () => {},
+      page: async () => ({ ok: true, data: {} }),
+      command: async () => ({ ok: true }),
+      dialog: async () => ({ ok: true }),
+      spawn: {
+        list: async () => ({ ok: false as const, error: "E_NOT_FOUND", status: 404 }),
+        dirs: async () => ({ ok: false as const, error: "E_NOT_FOUND", status: 404 }),
+        start: async (req) => {
+          starts.push(req);
+          return { ok: true, data: { spawnId: "sp1", state: "starting" as const, cwd: "/real/p" } };
+        },
+        stop: async () => ({ ok: true as const, state: "stopping" as const }),
+      },
+    };
+    const hub = useHub({
+      createTransport: () => transport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+    });
+    return { hub, clock, starts };
+  }
+
+  it("handle.spawn is always constructed (list/dirs/start/stop + newSession); a transport without spawn degrades to E_UNSUPPORTED", async () => {
+    const t = fakeTransport();
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: fakeClock().setTimeout,
+      clearTimeout: fakeClock().clearTimeout,
+    });
+    expect(hub.spawn).toBeDefined();
+    expect(hub.spawn!.newSession.flow.value.phase).toBe("idle");
+    expect(await hub.spawn!.list()).toEqual({ ok: false, error: "E_UNSUPPORTED", status: 0 });
+    expect(await hub.spawn!.start({ id: "x".repeat(22), cwd: "/tmp" })).toEqual({
+      ok: false,
+      error: "E_UNSUPPORTED",
+      retryable: false,
+    });
+    hub.dispose();
+  });
+
+  it("a spawns SSE frame lands in state.spawns AND settles an awaiting new-session flow (noteSpawns wiring)", async () => {
+    const { hub } = makeSpawnHub();
+    await hub.spawn!.newSession.submit({ cwd: "~/p", firstPrompt: { text: "body", deliver: "steer" } });
+    expect(hub.spawn!.newSession.flow.value.phase).toBe("awaiting");
+
+    hub.dispatch({
+      event: "spawns",
+      data: {
+        items: [
+          {
+            spawnId: "sp1",
+            state: "live",
+            agentKey: "A",
+            createdAt: 1,
+            updatedAt: 2,
+            cwdLabel: "p",
+            origin: { listener: "loopback", reqId: "nope" },
+            firstPrompt: { state: "delivered" },
+          },
+        ],
+        active: 1,
+        max: 4,
+      },
+    });
+    await flush();
+    expect(hub.state.value.spawns).toMatchObject({ active: 1, max: 4 });
+    expect(hub.spawn!.newSession.flow.value).toMatchObject({ phase: "done", agentKey: "A" });
+    expect(hub.spawn!.newSession.stats().retainedTexts).toBe(0);
+    hub.dispose();
+  });
+
+  it("dispose() disposes the new-session orchestrator (watchdog cleared, retention emptied)", async () => {
+    const { hub, clock } = makeSpawnHub();
+    await hub.spawn!.newSession.submit({ cwd: "~/p", firstPrompt: { text: "body" } });
+    expect(clock.pending()).toBeGreaterThan(0);
+    hub.dispose();
+    expect(hub.spawn!.newSession.stats().retainedTexts).toBe(0);
+  });
+
+  it("a successful list() caches the policy for the awaiting watchdog (registerTimeoutS from the hub)", async () => {
+    const clock = fakeClock();
+    const starts: unknown[] = [];
+    const transport: HubTransport = {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: async () => ({ ok: true }),
+      unsubscribe: async () => {},
+      page: async () => ({ ok: true, data: {} }),
+      command: async () => ({ ok: true }),
+      dialog: async () => ({ ok: true }),
+      spawn: {
+        list: async () => ({
+          ok: true as const,
+          policy: {
+            allowed: true,
+            confirm: "unknown-dir" as const,
+            scope: "known" as const,
+            max: 4,
+            maxPerPrincipal: 2,
+            active: 0,
+            activeMine: 0,
+            registerTimeoutS: 5,
+            maxLifetimeMinutes: 720,
+          },
+          items: [],
+        }),
+        dirs: async () => ({ ok: true as const, recent: [] }),
+        start: async (req) => {
+          starts.push(req);
+          return { ok: true, data: { spawnId: "sp1", state: "starting" as const, cwd: "/real/p" } };
+        },
+        stop: async () => ({ ok: true as const, state: "stopping" as const }),
+      },
+    };
+    const hub = useHub({
+      createTransport: () => transport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+    });
+    await hub.spawn!.list(); // caches registerTimeoutS: 5
+    await hub.spawn!.newSession.submit({ cwd: "~/p" });
+    clock.advance(5_000 + 15_000); // policy-driven watchdog, not the 30s default
+    expect(hub.spawn!.newSession.flow.value.phase).toBe("unknown");
+    hub.dispose();
+  });
+});

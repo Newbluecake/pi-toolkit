@@ -48,6 +48,7 @@
  *   control: boolean, hubState?: "running" | "stopping" | "restarting" | undefined,
  *   nextVersion?: string | undefined, supersedePending: boolean,
  *   supersedeDeadlineAt?: number | undefined, forced: boolean, draining: boolean,
+ *   spawns: import("../../../protocol/spawn.js").SpawnsPayload | null,
  * }} State
  * @typedef {{ event: string, data: any, id?: number }} Msg
  */
@@ -93,6 +94,7 @@ export function initialState() {
     forced: false,
     draining: false,
     supersedeBlocked: undefined,
+    spawns: null,
   };
 }
 
@@ -236,6 +238,18 @@ function reduceInner(s, event, d) {
       const agents = new Map();
       for (const [k, a] of s.agents) agents.set(k, a.history !== "none" ? { ...a, needsResync: true } : a);
       return { ...s, agents };
+    }
+    case "spawns": {
+      // web-hub-spawn arch §8.2: the `SpawnsPayload` snapshot/broadcast (Public projection
+      // only). Overwrite semantics — a reconnect's snapshot wholesale replaces the slot (no
+      // merging, no clearing on `hello`: the hub re-sends the snapshot right after `agents`
+      // on every new SSE connection, so a stale slot survives only until then). Invalid
+      // payloads are ignored wholesale (same discipline as every other slot here).
+      if (!Array.isArray(d.items) || typeof d.active !== "number" || typeof d.max !== "number") return s;
+      for (const it of d.items) {
+        if (!it || typeof it !== "object" || typeof it.spawnId !== "string" || typeof it.state !== "string") return s;
+      }
+      return d === s.spawns ? s : { ...s, spawns: d };
     }
     case "agents": {
       const cards = Array.isArray(d) ? d : Array.isArray(d.agents) ? d.agents : [];

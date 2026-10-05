@@ -20,6 +20,11 @@ import type {
   CmdOutcome,
   HubTransport,
   Result,
+  SpawnDirsOutcome,
+  SpawnListOutcome,
+  SpawnOutcome,
+  SpawnStopOutcome,
+  SpawnTransport,
   UploadBeginOk,
   UploadChunkOk,
   UploadCommitOk,
@@ -114,5 +119,15 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
         withAuthNotice(deps, () => client.upload.commit(p, signal) as Promise<UploadOutcome<UploadCommitOk>>),
       abort: (p) => withAuthNotice(deps, () => client.upload.abort(p) as Promise<UploadOutcome<{ ok: boolean }>>),
     } satisfies UploadTransport,
+    spawn: {
+      // SP11 (web-hub-spawn plan, arch §8.3): thin casts over the logic client's spawn
+      // namespace — the client already shapes the arch §8.2 outcomes; the same final-E_AUTH
+      // rule as upload applies (withRelogin already replayed once inside the client).
+      list: () => withAuthNotice(deps, () => client.spawn.list() as Promise<SpawnListOutcome>),
+      dirs: () => withAuthNotice(deps, () => client.spawn.dirs() as Promise<SpawnDirsOutcome>),
+      start: (req) => withAuthNotice(deps, () => client.spawn.start(req) as Promise<SpawnOutcome>),
+      stop: (spawnId, force) =>
+        withAuthNotice(deps, () => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>),
+    } satisfies SpawnTransport,
   } satisfies HubTransport;
 }

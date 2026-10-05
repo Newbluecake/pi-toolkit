@@ -462,6 +462,135 @@ export function createClient(deps) {
     },
   };
 
+  // -------------------------------------------------------------------------
+  // headless-spawn endpoints (web-hub-spawn plan SP11 / arch §8.2–§8.3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Spawn response → outcome. Mirrors `uploadFromResponse`'s error mapping (Retry-After
+   * folding, `retryable` default 429/5xx) but keeps §8.2's spawn-specific fields: a 409
+   * `E_CONFIRM_REQUIRED` body's `resolvedCwd`/`reason` (the confirm view's inputs). Unlike
+   * uploads there is no busy-retry wrapper — spawn's 503 is `E_LAUNCHER`, a policy state the
+   * UI shows, never an auto-retry. `r.json()` is read exactly once.
+   * @param {{ ok: boolean, status: number, headers?: { get(name: string): string | null }, json(): Promise<any> }} r
+   */
+  async function spawnFromResponse(r) {
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body && typeof body === "object" ? body : {};
+    if (r.ok) return { ok: true, data: b, status: r.status };
+    /** @type {any} */
+    const out = {
+      ok: false,
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
+      retryable: typeof b.retryable === "boolean" ? b.retryable : r.status === 429 || r.status >= 500,
+      status: r.status,
+    };
+    if (typeof b.message === "string") out.message = b.message;
+    const raw = typeof r.headers?.get === "function" ? r.headers.get("Retry-After") : null;
+    const hn = raw === null || raw === undefined ? NaN : Number(raw);
+    const ra =
+      Number.isFinite(hn) && hn >= 0
+        ? hn
+        : typeof b.retryAfterS === "number" && b.retryAfterS >= 0
+          ? b.retryAfterS
+          : undefined;
+    if (ra !== undefined) out.retryAfterS = ra;
+    if (typeof b.resolvedCwd === "string") out.resolvedCwd = b.resolvedCwd;
+    if (typeof b.reason === "string") out.reason = b.reason;
+    return out;
+  }
+
+  /**
+   * Fetch-level failure for a spawn call (same table as `uploadFromError`): timeout
+   * `E_DEADLINE` (retryable — §3.2 resends the SAME id once; the hub's idempotency LRU
+   * dedupes it into `dup:true`), external abort `E_ABORT` (never retryable), anything else
+   * `E_NETWORK` (retryable — same resend rule).
+   * @param {unknown} err
+   */
+  function spawnFromError(err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "E_DEADLINE") return { ok: false, error: "E_DEADLINE", retryable: true, status: 0 };
+    if (msg === "E_ABORT") return { ok: false, error: "E_ABORT", retryable: false, status: 0 };
+    return { ok: false, error: "E_NETWORK", message: msg, retryable: true, status: 0 };
+  }
+
+  /**
+   * The four `/api/headless*` endpoints (arch §8.2). All ride `withRelogin` — a 401 re-logs in
+   * silently with the stored token and replays: `start` is idempotent by `id` (hub LRU ⇒
+   * `dup:true`, plan §3.2), `stop` is idempotent on a terminal record (202 with the current
+   * state), the two GETs are side-effect free. The GETs carry `X-PWH: 1` (arch §8.2's CSRF
+   * gate requires it on every `/api/headless*` request, reads included). 404s ride back
+   * verbatim — arch §8.3: the UI treats a list 404 as "feature off / LAN off ⇒ unavailable",
+   * never as an error worth surfacing.
+   */
+  const spawn = {
+    /** @returns {Promise<any>} */
+    async list() {
+      try {
+        const r = await withRelogin(() => request(API.headless, { method: "GET", headers: { "X-PWH": "1" } }));
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) return { ok: false, error: out.error, status: out.status };
+        const d = out.data;
+        return { ok: true, policy: d.policy, items: Array.isArray(d.items) ? d.items : [] };
+      } catch (e) {
+        return spawnFromError(e);
+      }
+    },
+    /** @returns {Promise<any>} */
+    async dirs() {
+      try {
+        const r = await withRelogin(() => request(API.headlessDirs, { method: "GET", headers: { "X-PWH": "1" } }));
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) return { ok: false, error: out.error, status: out.status };
+        const d = out.data;
+        return {
+          ok: true,
+          recent: Array.isArray(d.recent) ? d.recent : [],
+          ...(d.partial === true ? { partial: true } : {}),
+        };
+      } catch (e) {
+        return spawnFromError(e);
+      }
+    },
+    /** @param {unknown} req @returns {Promise<any>} */
+    async start(req) {
+      try {
+        const r = await withRelogin(() => postRaw(API.headless, req, CMD_REQUEST_TIMEOUT_MS));
+        const out = await spawnFromResponse(r);
+        if (out.ok === true) return { ok: true, data: out.data };
+        const { status: _status, ...rest } = out;
+        return rest;
+      } catch (e) {
+        const { status: _status, ...rest } = spawnFromError(e);
+        return rest;
+      }
+    },
+    /** @param {string} spawnId @param {boolean} [force] @returns {Promise<any>} */
+    async stop(spawnId, force) {
+      try {
+        const r = await withRelogin(() =>
+          postRaw(
+            `${API.headless}/${encodeURIComponent(spawnId)}/stop`,
+            force === true ? { force: true } : {},
+            CMD_REQUEST_TIMEOUT_MS,
+          ),
+        );
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) return { ok: false, error: out.error };
+        const d = out.data;
+        return { ok: true, state: typeof d.state === "string" ? d.state : "stopping" };
+      } catch (e) {
+        return { ok: false, error: spawnFromError(e).error };
+      }
+    },
+  };
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -510,6 +639,7 @@ export function createClient(deps) {
     command,
     dialog,
     upload,
+    spawn,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

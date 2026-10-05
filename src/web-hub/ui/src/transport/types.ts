@@ -7,6 +7,14 @@
  * adapters so the two transports can never silently diverge again (the exact regression class
  * 78dd76b was: password client missing `subscribe`/`page`).
  */
+import type {
+  DirEntryWire,
+  SpawnAccepted,
+  SpawnPolicyWire,
+  SpawnRecordPublic,
+  SpawnRequestBody,
+  SpawnState,
+} from "@protocol/spawn.js";
 
 /** SSE frame or local UI/transport event — same shape `@logic/state.js`'s `reduce(state, msg)` consumes. */
 export interface Msg {
@@ -27,8 +35,10 @@ export interface TransportHooks {
 /**
  * `HistoryPayload` is intentionally `unknown`-shaped here (not imported from
  * `@protocol/http-contract.js`) — `page()`'s wire payload is exactly `HistoryPayload`, but this
- * module stays free of a hard `@protocol` dependency so it can be typechecked standalone;
- * `Result<import("@protocol/http-contract.js").HistoryPayload>` is what call sites actually use.
+ * module keeps that one reference structural so its historical "typecheck standalone" property
+ * survives for the pre-spawn surface. SP11's spawn types DO import from `@protocol/spawn.js`
+ * (type-only — erased at compile time, so still zero runtime/bundle cost): the frozen protocol
+ * module is the single source of truth for those wire shapes and a hand mirror could drift.
  */
 export interface CmdRequest {
   agentKey: string;
@@ -76,6 +86,10 @@ export interface HubTransport {
    * test fakes / future transports can omit it — `useControl` only mounts the tray driver
    * (`ControlHandle.uploads`) when a transport provides one; both real adapters always do. */
   readonly upload?: UploadTransport;
+  /** web-hub-spawn plan SP11 / arch §8.3: the `/api/headless*` endpoints. Optional for exactly
+   * the same reason `upload` is — test fakes / future transports may omit it; `useSpawn`
+   * degrades to `E_UNSUPPORTED` then. Both real adapters always provide it. */
+  readonly spawn?: SpawnTransport;
 }
 
 /** `@logic/password-client.js`'s `login()` return shape (JSDoc-documented there; mirrored here). */
@@ -89,6 +103,50 @@ export interface PasswordTransport extends HubTransport {
   readonly mode: "password";
   login(username: string, password: string): Promise<LoginResult>;
   logout(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn plan SP11 / arch §8.2–§8.3 — the `/api/headless*` transport surface
+// ---------------------------------------------------------------------------
+
+/**
+ * `start()`'s outcome (arch §8.2's POST row): 202 ⇒ the accepted record handle (`dup:true`
+ * when the idempotent replay of the same `id` hit the hub's LRU — the same-id resend after a
+ * network error/timeout, plan §3.2). The error half keeps the cmd-style mapping plus the two
+ * 409 `E_CONFIRM_REQUIRED` fields the confirm view renders (`resolvedCwd` is the pinned
+ * realpath; `reason` says why a confirm is needed).
+ */
+export type SpawnOutcome =
+  | { readonly ok: true; readonly data: SpawnAccepted }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly message?: string;
+      readonly retryable: boolean;
+      readonly retryAfterS?: number;
+      /** 409 `E_CONFIRM_REQUIRED` (arch §6.3): the admitted realpath to echo back as `expectCwd`. */
+      readonly resolvedCwd?: string;
+      readonly reason?: string;
+    };
+
+export type SpawnListOutcome =
+  | { readonly ok: true; readonly policy: SpawnPolicyWire; readonly items: readonly SpawnRecordPublic[] }
+  /** 404 rides verbatim (arch §8.3: feature off / LAN `lan:"off"` ⇒ UI treats pick-dir as unavailable). */
+  | { readonly ok: false; readonly error: string; readonly status: number };
+
+export type SpawnDirsOutcome =
+  | { readonly ok: true; readonly recent: readonly DirEntryWire[]; readonly partial?: true }
+  | { readonly ok: false; readonly error: string; readonly status: number };
+
+export type SpawnStopOutcome =
+  { readonly ok: true; readonly state: SpawnState } | { readonly ok: false; readonly error: string };
+
+/** arch §8.3's `SpawnTransport` — the four `/api/headless*` endpoints, same shape on both adapters. */
+export interface SpawnTransport {
+  list(): Promise<SpawnListOutcome>;
+  dirs(): Promise<SpawnDirsOutcome>;
+  start(req: SpawnRequestBody): Promise<SpawnOutcome>;
+  stop(spawnId: string, force?: boolean): Promise<SpawnStopOutcome>;
 }
 
 // ---------------------------------------------------------------------------

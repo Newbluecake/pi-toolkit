@@ -13,6 +13,11 @@ import type {
   CmdOutcome,
   PasswordTransport,
   Result,
+  SpawnDirsOutcome,
+  SpawnListOutcome,
+  SpawnOutcome,
+  SpawnStopOutcome,
+  SpawnTransport,
   UploadBeginOk,
   UploadChunkOk,
   UploadCommitOk,
@@ -45,7 +50,11 @@ export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
 const REST_AUTH_PATHS: ReadonlySet<string> = new Set([API.subscribe, API.unsubscribe, API.cmd, API.dialog]);
 
 function isRestAuthEndpoint(url: string): boolean {
-  return REST_AUTH_PATHS.has(url) || url.startsWith(API.history);
+  // SP11 (web-hub-spawn plan, arch §8.3): `/api/headless*` joins the 401 ⇒ onConn("auth")
+  // set — the password client's spawn namespace deliberately does NOT fire it itself (the
+  // way upload's does), so this wrapper is the single reporter and nothing double-fires.
+  // `url.startsWith(API.headless)` covers `headless`, `headlessDirs` and `<id>/stop`.
+  return REST_AUTH_PATHS.has(url) || url.startsWith(API.history) || url.startsWith(API.headless);
 }
 
 export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTransport {
@@ -79,5 +88,14 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       commit: (p, signal) => client.upload.commit(p, signal) as Promise<UploadOutcome<UploadCommitOk>>,
       abort: (p) => client.upload.abort(p) as Promise<UploadOutcome<{ ok: boolean }>>,
     } satisfies UploadTransport,
+    spawn: {
+      // SP11 (web-hub-spawn plan, arch §8.3): thin casts over the logic client's spawn
+      // namespace. 401 ⇒ onConn("auth") is reported by the fetch wrapper above
+      // (`isRestAuthEndpoint` covers `/api/headless*`) — never inside the client.
+      list: () => client.spawn.list() as Promise<SpawnListOutcome>,
+      dirs: () => client.spawn.dirs() as Promise<SpawnDirsOutcome>,
+      start: (req) => client.spawn.start(req) as Promise<SpawnOutcome>,
+      stop: (spawnId, force) => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>,
+    } satisfies SpawnTransport,
   } satisfies PasswordTransport;
 }

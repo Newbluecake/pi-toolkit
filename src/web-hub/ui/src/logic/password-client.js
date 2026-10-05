@@ -532,6 +532,129 @@ export function createPasswordClient(deps) {
     },
   };
 
+  // -------------------------------------------------------------------------
+  // headless-spawn endpoints (web-hub-spawn plan SP11 / arch §8.2–§8.3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Spawn response → outcome (same table as token-client's). Keeps §8.2's spawn-specific
+   * fields: a 409 `E_CONFIRM_REQUIRED` body's `resolvedCwd`/`reason`. No busy-retry wrapper —
+   * spawn's 503 is `E_LAUNCHER`, a policy state the UI shows. `r.json()` is read exactly once.
+   * @param {{ ok: boolean, status: number, headers?: { get(name: string): string | null }, json(): Promise<any> }} r
+   */
+  async function spawnFromResponse(r) {
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body && typeof body === "object" ? body : {};
+    if (r.ok) return { ok: true, data: b, status: r.status };
+    /** @type {any} */
+    const out = {
+      ok: false,
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
+      retryable: typeof b.retryable === "boolean" ? b.retryable : r.status === 429 || r.status >= 500,
+      status: r.status,
+    };
+    if (typeof b.message === "string") out.message = b.message;
+    const raw = typeof r.headers?.get === "function" ? r.headers.get("Retry-After") : null;
+    const hn = raw === null || raw === undefined ? NaN : Number(raw);
+    const ra =
+      Number.isFinite(hn) && hn >= 0
+        ? hn
+        : typeof b.retryAfterS === "number" && b.retryAfterS >= 0
+          ? b.retryAfterS
+          : undefined;
+    if (ra !== undefined) out.retryAfterS = ra;
+    if (typeof b.resolvedCwd === "string") out.resolvedCwd = b.resolvedCwd;
+    if (typeof b.reason === "string") out.reason = b.reason;
+    return out;
+  }
+
+  /**
+   * Fetch-level failure for a spawn call (same table as token-client's): timeout `E_DEADLINE`
+   * (retryable — §3.2 resends the SAME id once; the hub's idempotency LRU dedupes it into
+   * `dup:true`), external abort `E_ABORT` (never retryable), anything else `E_NETWORK`.
+   * @param {unknown} err
+   */
+  function spawnFromError(err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "E_DEADLINE") return { ok: false, error: "E_DEADLINE", retryable: true, status: 0 };
+    if (msg === "E_ABORT") return { ok: false, error: "E_ABORT", retryable: false, status: 0 };
+    return { ok: false, error: "E_NETWORK", message: msg, retryable: true, status: 0 };
+  }
+
+  /**
+   * The four `/api/headless*` endpoints (arch §8.2), one-shot `postApi`/`request` calls — no
+   * relogin dance (password mode has none). Unlike the upload namespace above, a 401 does NOT
+   * call `deps.onConn("auth")` here: `transport/password.ts`'s fetch-wrapper `REST_AUTH_PATHS`
+   * covers the headless paths (firing here too would double-report). The GETs carry `X-PWH: 1`
+   * (arch §8.2's CSRF gate requires it on reads too). 404s ride back verbatim — arch §8.3: a
+   * list 404 means "feature off / LAN `lan:\"off\"`", not an error.
+   */
+  const spawn = {
+    /** @returns {Promise<any>} */
+    async list() {
+      try {
+        const r = await request(API.headless, { method: "GET", headers: { "X-PWH": "1" } }, REQUEST_TIMEOUT_MS);
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) return { ok: false, error: out.error, status: out.status };
+        const d = out.data;
+        return { ok: true, policy: d.policy, items: Array.isArray(d.items) ? d.items : [] };
+      } catch (e) {
+        return spawnFromError(e);
+      }
+    },
+    /** @returns {Promise<any>} */
+    async dirs() {
+      try {
+        const r = await request(API.headlessDirs, { method: "GET", headers: { "X-PWH": "1" } }, REQUEST_TIMEOUT_MS);
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) return { ok: false, error: out.error, status: out.status };
+        const d = out.data;
+        return {
+          ok: true,
+          recent: Array.isArray(d.recent) ? d.recent : [],
+          ...(d.partial === true ? { partial: true } : {}),
+        };
+      } catch (e) {
+        return spawnFromError(e);
+      }
+    },
+    /** @param {unknown} req @returns {Promise<any>} */
+    async start(req) {
+      try {
+        const r = await postApi(API.headless, req, CMD_REQUEST_TIMEOUT_MS);
+        const out = await spawnFromResponse(r);
+        if (out.ok === true) return { ok: true, data: out.data };
+        const { status: _status, ...rest } = out;
+        return rest;
+      } catch (e) {
+        const { status: _status, ...rest } = spawnFromError(e);
+        return rest;
+      }
+    },
+    /** @param {string} spawnId @param {boolean} [force] @returns {Promise<any>} */
+    async stop(spawnId, force) {
+      try {
+        const r = await postApi(
+          `${API.headless}/${encodeURIComponent(spawnId)}/stop`,
+          force === true ? { force: true } : {},
+          CMD_REQUEST_TIMEOUT_MS,
+        );
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) return { ok: false, error: out.error };
+        const d = out.data;
+        return { ok: true, state: typeof d.state === "string" ? d.state : "stopping" };
+      } catch (e) {
+        return { ok: false, error: spawnFromError(e).error };
+      }
+    },
+  };
+
   function closeStream() {
     if (watchdog !== null) deps.clearTimeout(watchdog);
     if (reopenTimer !== null) deps.clearTimeout(reopenTimer);
@@ -698,6 +821,7 @@ export function createPasswordClient(deps) {
     command,
     dialog,
     upload,
+    spawn,
     close() {
       closed = true;
       closeStream();

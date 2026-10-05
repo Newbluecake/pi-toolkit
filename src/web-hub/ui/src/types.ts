@@ -17,8 +17,20 @@
  */
 import type { Ref } from "vue";
 import type { ConnState } from "./transport/types.js";
+import type {
+  SpawnDirsOutcome,
+  SpawnListOutcome,
+  SpawnOutcome,
+  SpawnStopOutcome,
+  SpawnTransport,
+} from "./transport/types.js";
+import type { FirstPromptState, SpawnsPayload } from "@protocol/spawn.js";
 
 export type { ConnState };
+// Re-exported so a component only needs `import type { … } from "./types.js"` — never a
+// second, possibly-drifting import path for the same type (same rule as `HistoryPayload` in
+// `contracts.ts`).
+export type { SpawnDirsOutcome, SpawnListOutcome, SpawnOutcome, SpawnStopOutcome };
 
 // ---------------------------------------------------------------------------
 // @logic/state.js mirror (read-only view — the reducer itself lives in JS)
@@ -109,6 +121,10 @@ export interface HubState {
   readonly draining?: boolean;
   /** §6.7.3 ①: stop marker holding the supersede back — HubStateBanner's "升级已暂停" state. */
   readonly supersedeBlocked?: "stopped" | "unknown";
+  /** web-hub-spawn SP11 / arch §8.2: the `spawns` SSE slot (`SpawnsPayload` snapshot, Public
+   * projection only). `null` until the first valid `spawns` frame arrives (a hub with spawn
+   * disabled never sends one — the slot stays `null`, matching "feature off"). */
+  readonly spawns?: SpawnsPayload | null;
 }
 
 /**
@@ -208,7 +224,119 @@ export interface ControlHandle {
 export interface HubHandle {
   readonly state: Readonly<Ref<HubState>>;
   readonly control?: ControlHandle;
+  /** web-hub-spawn SP11: the `/api/headless*` call surface + the §3.2 new-session orchestrator.
+   * Optional per the frozen-types convention (additive members only) — `useHub` always
+   * provides it; component-level fakes may omit it (menus then hide every pick-dir entry via
+   * `spawnAvailability`'s no-cap/unknown states). */
+  readonly spawn?: HubSpawnHandle;
   dispatch(msg: { event: string; data?: unknown; id?: number }): void;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn plan SP11 / arch §8.3, plan §3.2 — new-session flow view models
+// ---------------------------------------------------------------------------
+
+/** `classifySpawnError`'s (`@logic/spawn.js`) taxonomy plus the two flow-local failure classes. */
+export type NewSessionFailKind =
+  | "confirm"
+  | "dir"
+  | "denied"
+  | "limit"
+  | "rate"
+  | "launcher"
+  | "deadline"
+  | "network"
+  | "spawn" // the record itself went failed/exited (hint/endReason carry the detail)
+  | "first-prompt"; // the session died before/while the first prompt could be delivered
+
+export interface NewSessionInput {
+  readonly cwd: string;
+  readonly firstPrompt?: { readonly text: string; readonly deliver?: "steer" | "followUp" };
+}
+
+/** The flow's mirror of the record's `firstPrompt` slot (plan §3.2 首条消息结果 row). */
+export interface FirstPromptMirror {
+  readonly state: FirstPromptState;
+  readonly code?: string;
+  /** Set on the terminal failed/expired mirror when the body went back into the composer draft. */
+  readonly refilled?: "draft";
+}
+
+/**
+ * plan §3.2's UI-side state machine (state lives in `useNewSession`, never in the reducer):
+ * `idle → submitting → (409 ⇒ confirming ⇢ cancel|confirm) → awaiting → done | failed`,
+ * plus `unknown` (the local watchdog timeout — keep listening, SSE snapshots still settle
+ * it). `input` rides every in-flight phase so a `failed` phase can offer retry (new id) and
+ * the DirPicker can restore the first-prompt body (`refilled:"picker"`).
+ */
+export type NewSessionFlow =
+  | { readonly phase: "idle" }
+  | { readonly phase: "submitting"; readonly reqId: string; readonly input: NewSessionInput }
+  | {
+      readonly phase: "confirming";
+      readonly reqId: string;
+      readonly input: NewSessionInput;
+      /** The admitted realpath from 409 `E_CONFIRM_REQUIRED` — rendered via textContent, echoed back as `expectCwd`. */
+      readonly resolvedCwd: string;
+      readonly reason?: string;
+    }
+  | {
+      readonly phase: "awaiting";
+      readonly reqId: string;
+      readonly spawnId: string;
+      readonly input: NewSessionInput;
+      readonly firstPrompt?: FirstPromptMirror;
+    }
+  | {
+      readonly phase: "done";
+      readonly spawnId: string;
+      readonly agentKey?: string;
+      readonly firstPrompt?: FirstPromptMirror;
+    }
+  | {
+      readonly phase: "failed";
+      readonly kind: NewSessionFailKind;
+      readonly message?: string;
+      readonly hint?: string;
+      readonly code?: string;
+      readonly retryAfterS?: number;
+      readonly reqId?: string;
+      readonly spawnId?: string;
+      readonly agentKey?: string;
+      readonly input?: NewSessionInput;
+      /** Where the retained first-prompt body went: composer draft vs. back to the DirPicker. */
+      readonly refilled?: "draft" | "picker";
+    }
+  | {
+      /** 状态未知: the local `registerTimeoutS+15s` watchdog fired — keep listening (SSE
+       * reconnect snapshots still settle this flow). */
+      readonly phase: "unknown";
+      readonly reqId: string;
+      readonly spawnId: string;
+      readonly input: NewSessionInput;
+    };
+
+/** `useNewSession`'s (SP11) handle — the plan §3.2 orchestrator. */
+export interface NewSessionHandle {
+  readonly flow: Readonly<Ref<NewSessionFlow>>;
+  /** Start a flow with a FRESH id. `false` when a submit is already in flight (double-click guard). */
+  submit(input: NewSessionInput): Promise<boolean>;
+  /** confirming ⇒ resend the SAME id with `confirm:true` + `expectCwd:resolvedCwd`. */
+  confirm(): Promise<void>;
+  /** confirming ⇒ idle; failed/done/unknown ⇒ dismissed to idle. */
+  cancel(): void;
+  /** failed ⇒ resubmit the same input under a NEW id (§3.2 失败后重试). */
+  retry(): Promise<boolean>;
+  /** `useHub` feeds every reducer `spawns` slot change through here. */
+  noteSpawns(payload: SpawnsPayload | null): void;
+  dispose(): void;
+  /** Test/diagnostic hooks (same pattern as the logic clients' `stats()`). */
+  stats(): { readonly retainedTexts: number };
+}
+
+/** `HubHandle.spawn` — arch §8.3's `SpawnTransport` plus the §3.2 orchestrator. */
+export interface HubSpawnHandle extends SpawnTransport {
+  readonly newSession: NewSessionHandle;
 }
 
 // ---------------------------------------------------------------------------

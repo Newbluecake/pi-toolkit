@@ -733,3 +733,184 @@ describe("password transport: upload() 401 (one-shot — the cookie session is g
     expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// spawn() — web-hub-spawn plan SP11 / arch §8.2–§8.3, same suite both modes
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: spawn() (web-hub-spawn SP11 / arch §8.2 — identical wire both modes)", (_mode, make) => {
+  const startBody = { id: "s".repeat(22), cwd: "~/proj", firstPrompt: { text: "hi", deliver: "steer" as const } };
+
+  it("implements the full SpawnTransport surface on every adapter", () => {
+    const h = make();
+    const sp = h.transport.spawn;
+    expect(sp).toBeDefined();
+    expect(typeof sp!.list).toBe("function");
+    expect(typeof sp!.dirs).toBe("function");
+    expect(typeof sp!.start).toBe("function");
+    expect(typeof sp!.stop).toBe("function");
+  });
+
+  it('list(): GET /api/headless with X-PWH:"1"; 200 {policy, items} rides as {policy, items}', async () => {
+    const h = make(async (url) =>
+      url === "/api/headless" ? resp(200, { policy: { allowed: true }, items: [{ spawnId: "sp1" }] }) : resp(200),
+    );
+    const r = await h.transport.spawn!.list();
+    expect(r).toEqual({ ok: true, policy: { allowed: true }, items: [{ spawnId: "sp1" }] });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless")!;
+    expect(call.init.method ?? "GET").toBe("GET");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it("list(): 404 rides back verbatim with its status (arch §8.3: UI treats it as unavailable, never an error)", async () => {
+    const h = make(async (url) => (url === "/api/headless" ? resp(404, { error: "E_NOT_FOUND" }) : resp(200)));
+    const r = await h.transport.spawn!.list();
+    expect(r).toEqual({ ok: false, error: "E_NOT_FOUND", status: 404 });
+  });
+
+  it('dirs(): GET /api/headless/dirs with X-PWH:"1"; partial:true survives', async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/dirs"
+        ? resp(200, { recent: [{ cwd: "/real/p", label: "p", at: 1 }], partial: true })
+        : resp(200),
+    );
+    const r = await h.transport.spawn!.dirs();
+    expect(r).toEqual({ ok: true, recent: [{ cwd: "/real/p", label: "p", at: 1 }], partial: true });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless/dirs")!;
+    expect(call.init.method ?? "GET").toBe("GET");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it("start(): POST /api/headless with X-PWH:1 and the verbatim JSON body; 202 rides as data (dup kept)", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless"
+        ? resp(202, { spawnId: "sp1", state: "starting", cwd: "/real/proj", dup: true, firstPrompt: "accepted" })
+        : resp(200),
+    );
+    const r = await h.transport.spawn!.start(startBody);
+    expect(r).toEqual({
+      ok: true,
+      data: { spawnId: "sp1", state: "starting", cwd: "/real/proj", dup: true, firstPrompt: "accepted" },
+    });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["Content-Type"]).toBe("application/json");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual(startBody);
+  });
+
+  it("start(): 409 E_CONFIRM_REQUIRED keeps resolvedCwd/reason (the confirm view's inputs)", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless"
+        ? resp(409, { error: "E_CONFIRM_REQUIRED", resolvedCwd: "/real/proj", reason: "unknown-dir" })
+        : resp(200),
+    );
+    const r = await h.transport.spawn!.start(startBody);
+    expect(r).toEqual({
+      ok: false,
+      error: "E_CONFIRM_REQUIRED",
+      retryable: false,
+      resolvedCwd: "/real/proj",
+      reason: "unknown-dir",
+    });
+  });
+
+  it("start(): 409 E_LIMIT / 403 E_SPAWN_DENIED / 503 E_LAUNCHER surface verbatim with retryable per status", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless"
+        ? resp(409, { error: "E_LIMIT", message: "global", limit: "global" as never } as never)
+        : resp(200),
+    );
+    expect(await h.transport.spawn!.start(startBody)).toMatchObject({ ok: false, error: "E_LIMIT", retryable: false });
+    const h2 = make(async (url) =>
+      url === "/api/headless" ? resp(503, { error: "E_LAUNCHER", retryAfterS: 30 }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.start(startBody)).toMatchObject({
+      ok: false,
+      error: "E_LAUNCHER",
+      retryable: true,
+      retryAfterS: 30,
+    });
+  });
+
+  it("start(): 429 E_RATE folds Retry-After into retryAfterS", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless" ? resp(429, { error: "E_RATE" }, { "Retry-After": "5" }) : resp(200),
+    );
+    const r = await h.transport.spawn!.start(startBody);
+    expect(r).toMatchObject({ ok: false, error: "E_RATE", retryable: true, retryAfterS: 5 });
+  });
+
+  it("start(): fetch timeout (16s browser budget, §3.3) ⇒ E_DEADLINE and exactly one attempt", async () => {
+    const h = make(async (url) => (url === "/api/headless" ? new Promise<FetchResponse>(() => {}) : resp(200)));
+    const p = h.transport.spawn!.start(startBody);
+    h.clock.advance(16_000);
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: "E_DEADLINE", retryable: true });
+    expect(h.fetchCalls.filter((c) => c.url === "/api/headless")).toHaveLength(1);
+  });
+
+  it("start(): network error ⇒ E_NETWORK retryable (useNewSession resends the same id once, §3.2)", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless" ? Promise.reject(new TypeError("fetch failed")) : resp(200),
+    );
+    const r = await h.transport.spawn!.start(startBody);
+    expect(r).toMatchObject({ ok: false, error: "E_NETWORK", retryable: true });
+  });
+
+  it("stop(): POST /api/headless/<id>/stop (encoded) with {force:true}; 202 {state} rides", async () => {
+    const h = make(async (url) => (url === "/api/headless/sp%201/stop" ? resp(202, { state: "stopping" }) : resp(200)));
+    const r = await h.transport.spawn!.stop("sp 1", true);
+    expect(r).toEqual({ ok: true, state: "stopping" });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless/sp%201/stop")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual({ force: true });
+  });
+
+  it("stop(): terminal-record idempotent 202 {state:'exited'} rides; 404 ⇒ E_NOT_FOUND", async () => {
+    const h = make(async (url) => (url === "/api/headless/sp1/stop" ? resp(202, { state: "exited" }) : resp(200)));
+    expect(await h.transport.spawn!.stop("sp1")).toEqual({ ok: true, state: "exited" });
+    const h2 = make(async (url) =>
+      url === "/api/headless/sp1/stop" ? resp(404, { error: "E_NOT_FOUND" }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.stop("sp1")).toEqual({ ok: false, error: "E_NOT_FOUND" });
+  });
+
+  it("a final 401 on any of the four endpoints reports onConn('auth') exactly once per call", async () => {
+    const h = make(async (url) => (url.startsWith("/api/headless") ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    expect(await h.transport.spawn!.list()).toMatchObject({ ok: false, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+    expect(await h.transport.spawn!.dirs()).toMatchObject({ ok: false, error: "E_AUTH" });
+    expect(await h.transport.spawn!.start(startBody)).toMatchObject({ ok: false, error: "E_AUTH" });
+    expect(await h.transport.spawn!.stop("sp1")).toEqual({ ok: false, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(4);
+  });
+});
+
+describe("token transport: spawn() 401 recovery (withRelogin, same-id replay is dup-safe)", () => {
+  const startBody = { id: "s".repeat(22), cwd: "~/proj" };
+
+  it("a 401 with a stored token silently re-logs in and replays the SAME start body (hub LRU dedupes)", async () => {
+    const h = makeToken(async (url) => {
+      if (url === "/api/login") return resp(200);
+      if (url === "/api/headless") {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn
+          ? resp(202, { spawnId: "sp1", state: "starting", cwd: "/real/proj", dup: true })
+          : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const r = await h.transport.spawn!.start(startBody);
+    expect(r).toEqual({ ok: true, data: { spawnId: "sp1", state: "starting", cwd: "/real/proj", dup: true } });
+    const posts = h.fetchCalls.filter((c) => c.url === "/api/headless");
+    expect(posts).toHaveLength(2);
+    expect(posts[0]!.init.body).toBe(posts[1]!.init.body); // same id ⇒ dup
+    expect(h.onConnCalls).not.toContain("auth"); // recovered — no login-view flash
+  });
+});

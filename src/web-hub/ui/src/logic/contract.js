@@ -51,6 +51,13 @@ export const API = Object.freeze({
   uploadChunk: UPLOAD_CHUNK_PATH,
   uploadCommit: UPLOAD_COMMIT_PATH,
   uploadAbort: UPLOAD_ABORT_PATH,
+  // web-hub-spawn plan SP11 / arch §8.2: the headless-spawn endpoints. Hand-written literals —
+  // `protocol/spawn.ts` (SP1) freezes the BODY/record types but has no path constants to mirror
+  // (same situation as `session`/`logout` above); `tests/web-hub/ui/logic-contract.test.ts`
+  // pins both literals. `headlessDirs` is GET-only in S1 (`?path=` ⇒ 400 browse-unavailable);
+  // the stop endpoint is `${headless}/<spawnId>/stop` (built at the call site).
+  headless: "/api/headless",
+  headlessDirs: "/api/headless/dirs",
 });
 
 /** Client-side SSE silence limit: no frame (hub pings every 15s) for this long ⇒ reconnect. */

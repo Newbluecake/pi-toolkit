@@ -755,3 +755,55 @@ describe("state.reduce — control plane (§7.3/§7.7)", () => {
     expect(reduce(s, { event: "cmd_late", data: { agentKey: "A" } })).toBe(s);
   });
 });
+
+describe("state.reduce: spawns slot (web-hub-spawn SP11 / arch §8.2)", () => {
+  const frame = (extra: Record<string, unknown> = {}) => ({
+    items: [
+      {
+        spawnId: "sp1",
+        state: "starting",
+        createdAt: 1,
+        updatedAt: 1,
+        cwdLabel: "p",
+        origin: { listener: "loopback", reqId: "r1" },
+      },
+    ],
+    active: 1,
+    max: 4,
+    ...extra,
+  });
+
+  it("initialState().spawns is null (a hub with spawn disabled never sends the frame)", () => {
+    expect(initialState().spawns).toBeNull();
+  });
+
+  it("a valid spawns frame overwrites the slot wholesale (overwrite semantics)", () => {
+    let s = reduce(initialState(), { event: "spawns", data: frame() });
+    expect(s.spawns).toMatchObject({ active: 1, max: 4 });
+    const next = frame({ items: [], active: 0 });
+    s = reduce(s, { event: "spawns", data: next });
+    expect(s.spawns).toMatchObject({ items: [], active: 0 });
+  });
+
+  it("invalid payloads are ignored wholesale (same state reference, slot untouched)", () => {
+    const s0 = reduce(initialState(), { event: "spawns", data: frame() });
+    for (const bad of [
+      { active: 1, max: 4 }, // items missing
+      { items: "x", active: 1, max: 4 },
+      { items: [], active: "1", max: 4 },
+      { items: [], active: 1 }, // max missing
+      { items: [{ state: "starting" }], active: 1, max: 4 }, // item without spawnId
+      { items: [null], active: 1, max: 4 },
+      { items: [{ spawnId: "sp1" }], active: 1, max: 4 }, // item without state
+    ]) {
+      expect(reduce(s0, { event: "spawns", data: bad }).spawns).toBe(s0.spawns);
+    }
+  });
+
+  it("hello does NOT clear the slot (the hub re-sends the snapshot right after agents)", () => {
+    let s = reduce(initialState(), { event: "spawns", data: frame() });
+    s = reduce(s, { event: "hello", data: { clientId: "c2" } });
+    expect(s.spawns).toMatchObject({ active: 1 });
+    expect(s.clientId).toBe("c2");
+  });
+});
