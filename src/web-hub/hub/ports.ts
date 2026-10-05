@@ -38,8 +38,10 @@ import type {
   WireEvent,
 } from "../protocol/messages.js";
 import type { HubPaths } from "../protocol/paths.js";
+import type { HubSpawnConfig, SpawnsPayload } from "../protocol/spawn.js";
 import type { PROTO } from "../protocol/version.js";
 import type { Scope } from "./lifecycle.js";
+import type { SpawnFrontendPort } from "./spawn/ports.js";
 import type { UiServer } from "./static.js";
 import type { UiStatus } from "./ui-root.js";
 import type { UploadStore } from "./uploads.js";
@@ -361,6 +363,10 @@ export interface HubConfig {
   buildId: string;
   launcher?: [string, string];
   lan?: HubLanConfig;
+  /** web-hub-spawn plan §SP1 (arch §6.2): the managed-spawn policy, present ONLY when
+   * `webHub.spawn.enabled === true` (SP2's `buildHubConfig` omits the key otherwise — the key's
+   * absence IS the wire-level "feature off" that keeps the §8.2 response matrix byte-identical). */
+  spawn?: HubSpawnConfig;
 }
 
 export interface HubLog {
@@ -409,7 +415,11 @@ export type HubEvent =
    * instead of `HubStateBanner`'s dedicated stopped/restarting text. `http.ts`'s `onHubEvent`
    * forwards this as the SAME "hub" SSE event name `openEvents`' connect-time send already uses
    * (`logic/state.js`'s `case "hub"` already merges repeated frames of that name). */
-  | { type: "hub" };
+  | { type: "hub" }
+  /** web-hub-spawn plan §SP1 (arch §6.4): the `spawns` SSE broadcast — carries the Public
+   * projection ONLY (`SpawnsPayload`); owner detail never rides the bus. `http.ts` (SP9)
+   * forwards it as the `spawns` SSE event and snapshots it on connect. */
+  | { type: "spawns"; payload: SpawnsPayload };
 
 export interface HubBus {
   subscribe(fn: (e: HubEvent) => void): () => void;
@@ -501,6 +511,11 @@ export interface FrontendDeps {
    * resolve）时收到通知去 `hubJson.patchUi(status)`，与 `LanFrontendDeps.onStatus` 对 `LanStatus`
    * 的做法完全对称。 */
   onUiStatus?: (status: UiStatus) => void;
+  /** web-hub-spawn plan §SP1 (arch §4.1): the managed-spawn route frontend (SP9's
+   * `createSpawnRoutes`). Optional so test doubles and pre-SP9 assemblies keep compiling —
+   * when absent, `/api/headless*` answers exactly as it does today (404/501 per the §8.2
+   * not-enabled matrix) and no `spawns` SSE frame is ever sent. */
+  spawn?: SpawnFrontendPort;
 }
 
 export interface HttpFrontend {

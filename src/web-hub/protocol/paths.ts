@@ -192,6 +192,16 @@ export function webHubUploadsDir(home: string): string {
   return `${webHubStateDir(home)}/uploads`;
 }
 
+/**
+ * web-hub-spawn arch §7.7/§7.8: `<stateDir>/spawns.json` (the 0600 spawn-intent/record store,
+ * SP5) and `<stateDir>/spawn/` (the 0700 stderr-log dir, one file per spawn). Takes the SAME
+ * `stateDir` the callers already resolved via `webHubStateDir(home)` so it never re-derives the
+ * prefix — additive, does not touch the frozen `HubPaths` shape.
+ */
+export function webHubSpawnFiles(stateDir: string): { spawnsJson: string; logDir: string } {
+  return { spawnsJson: `${stateDir}/spawns.json`, logDir: `${stateDir}/spawn` };
+}
+
 function dirnameOf(p: string): string {
   const idx = p.lastIndexOf("/");
   return idx <= 0 ? "/" : p.slice(0, idx);

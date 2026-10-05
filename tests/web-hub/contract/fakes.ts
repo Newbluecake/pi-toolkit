@@ -6,13 +6,19 @@
  * (`lan-assembly.ts`'s stub throws before ever constructing a `LanFrontendDeps`);
  * they exist purely so W2's LS/LC/LD packages can write tests against the
  * frozen port shapes before their real implementations land.
+ *
+ * web-hub-spawn plan §SP1 adds the spawn ports' fakes here under the same rule:
+ * SP8 develops against `fakeFirstPromptRouter` (and SP7 against
+ * `fakeSpawnRegistry`) before the real hub assembly (SP10) exists.
  */
 import { createHash, randomBytes, scryptSync } from "node:crypto";
 import type {
+  AgentView,
   ConnGuard,
   ConnLease,
   HostSnapshot,
   HostsPort,
+  HubEvent,
   HubLanConfig,
   KdfAdmissionPort,
   KdfPort,
@@ -22,6 +28,8 @@ import type {
   LanUserSummary,
   LoginLimiterPort,
 } from "../../../src/web-hub/hub/ports.js";
+import type { FirstPromptRouterPort, SpawnRegistryPort } from "../../../src/web-hub/hub/spawn/ports.js";
+import type { CmdFrame, CmdResultBody, CmdResultFrame } from "../../../src/web-hub/protocol/messages.js";
 import { canonicalHostKey } from "../../../src/web-hub/protocol/lan.js";
 
 export interface FakeLanStore extends LanStorePort {
@@ -324,4 +332,118 @@ export function fakeConnGuard(opts: { unauthCapDirect?: number; unauthCapProxy?:
       }
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn plan §SP1: spawn port fakes (same rule as the LAN fakes above —
+// SP7/SP8 tests develop against these before SP10's real assembly exists).
+// ---------------------------------------------------------------------------
+
+export interface FakeSpawnRegistry extends SpawnRegistryPort {
+  /** Test-only seed hook (not part of `SpawnRegistryPort`): registers an agent view + its caps. */
+  seedAgent(
+    key: string,
+    over?: { pid?: number; cwd?: string; state?: "live" | "stale"; caps?: readonly string[] },
+  ): void;
+  /** Test-only: remove a seeded agent (view AND caps). */
+  dropAgent(key: string): void;
+  /** Test-only: set/replace/clear an agent's caps (`getCaps` reads this). */
+  setCaps(key: string, caps: readonly string[] | undefined): void;
+  /** Every event `publish()` ever saw (bus subscribers included) — test introspection. */
+  readonly events: readonly HubEvent[];
+}
+
+function spawnAgentView(key: string, over: { pid?: number; cwd?: string; state?: "live" | "stale" }): AgentView {
+  const pid = over.pid ?? 5151;
+  return {
+    agentKey: key,
+    kind: "rpc",
+    pid,
+    cwd: over.cwd ?? "/tmp/work",
+    state: over.state ?? "live",
+    pluginVersion: "1.2.3",
+    outdated: false,
+    prompts: [],
+    agentId: { pid, nonce: "nonceAAAAAAAAAAAAAAA" },
+    connectedAt: 0,
+    lastFrameAt: 0,
+    seq: 0,
+  };
+}
+
+/** Minimal but real: views + caps maps, a synchronous fan-out bus, publish recorded in `events`. */
+export function fakeSpawnRegistry(): FakeSpawnRegistry {
+  const views = new Map<string, AgentView>();
+  const caps = new Map<string, readonly string[]>();
+  const events: HubEvent[] = [];
+  const listeners = new Set<(e: HubEvent) => void>();
+
+  const port = {
+    list: () => [...views.values()],
+    get: (agentKey: string) => views.get(agentKey),
+    bus: {
+      subscribe: (fn: (e: HubEvent) => void) => {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+    },
+    publish: (e: HubEvent) => {
+      events.push(e);
+      for (const fn of listeners) fn(e);
+    },
+    getCaps: (agentKey: string) => caps.get(agentKey),
+  } satisfies SpawnRegistryPort;
+
+  return {
+    ...port,
+    events,
+    seedAgent: (key, over = {}) => {
+      views.set(key, spawnAgentView(key, over));
+      if (over.caps !== undefined) caps.set(key, over.caps);
+    },
+    dropAgent: (key) => {
+      views.delete(key);
+      caps.delete(key);
+    },
+    setCaps: (key, next) => {
+      if (next === undefined) caps.delete(key);
+      else caps.set(key, next);
+    },
+  };
+}
+
+export interface FakeFirstPromptRouter extends FirstPromptRouterPort {
+  /** Every EXECUTED request (a same-id replay never lands here — it answers `dup`). */
+  readonly requests: ReadonlyArray<{ frame: CmdFrame; agentKey: string }>;
+  /** Queue a result body for the NEXT new id (FIFO); an empty queue answers the ok default. */
+  queueResult(body: CmdResultBody): void;
+}
+
+/**
+ * Minimal but real §4.6 semantics: an idempotency ledger keyed `agentKey|id` — the first request
+ * for a key EXECUTES (recorded in `requests`, answered from the queued-result FIFO or the ok
+ * default), any replay of the same key answers `{ ok: true, dup: true, data: <same> }` without
+ * executing again. This is the "agent 台账同 id 只执行一次" property SP8's tests lean on;
+ * `rid` is echoed back from the frame like the real router does.
+ */
+export function fakeFirstPromptRouter(): FakeFirstPromptRouter {
+  const requests: Array<{ frame: CmdFrame; agentKey: string }> = [];
+  const queued: CmdResultBody[] = [];
+  const ledger = new Map<string, CmdResultBody>();
+
+  const port = {
+    request: async (frame: CmdFrame, agentKey: string): Promise<CmdResultFrame> => {
+      const key = `${agentKey}|${frame.id}`;
+      const done = ledger.get(key);
+      if (done !== undefined && done.ok) {
+        return { t: "cmd_result", rid: frame.rid, id: frame.id, ok: true, dup: true, data: done.data };
+      }
+      const body = queued.shift() ?? { ok: true, data: { op: "prompt" as const, delivery: "observed" as const } };
+      ledger.set(key, body);
+      requests.push({ frame, agentKey });
+      return { t: "cmd_result", rid: frame.rid, id: frame.id, ...body };
+    },
+  } satisfies FirstPromptRouterPort;
+
+  return { ...port, requests, queueResult: (body) => void queued.push(body) };
 }

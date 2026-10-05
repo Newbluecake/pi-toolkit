@@ -11,6 +11,7 @@
  * `expectTypeOf(...).toEqualTypeOf<...>()` never throws) so a
  * collection/syntax regression is caught there too.
  */
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expectTypeOf, it } from "vitest";
 import type { RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type {
@@ -26,6 +27,13 @@ import type {
   PortOptions,
 } from "../../../src/web-hub/hub/ports.js";
 import type { CommandRouter as CommandsCommandRouter } from "../../../src/web-hub/hub/commands.js";
+import type { Registry } from "../../../src/web-hub/hub/registry.js";
+import type {
+  FirstPromptRouterPort,
+  SpawnFrontendPort,
+  SpawnRegistryPort,
+  SpawnRouteIo,
+} from "../../../src/web-hub/hub/spawn/ports.js";
 import type { SseEventName } from "../../../src/web-hub/hub/sse.js";
 import type { FenceLoss, SingletonResult } from "../../../src/web-hub/hub/singleton.js";
 import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
@@ -37,6 +45,17 @@ import type {
   CommandOutputWire,
   HubCtlFrame,
 } from "../../../src/web-hub/protocol/messages.js";
+import type {
+  DirEntryWire,
+  FirstPromptState,
+  HubSpawnConfig,
+  SpawnEndReason,
+  SpawnHint,
+  SpawnRecordOwner,
+  SpawnRecordPublic,
+  SpawnState,
+  SpawnsPayload,
+} from "../../../src/web-hub/protocol/spawn.js";
 
 describe("types.test-d.ts (plan §11 typecheck contract)", () => {
   it("P1-shaped FrontendDeps (no `lan`) is still assignable to FrontendDeps", () => {
@@ -203,6 +222,7 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "commands"
       | "cmd_late"
       | "hub"
+      | "spawns"
     >();
     // §6.6's documented SSE payload shapes, pinned on the bus event itself.
     type Dialogs = Extract<HubEvent, { type: "dialogs" }>;
@@ -231,5 +251,89 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
     expectTypeOf<CommandsCommandRouter>().toEqualTypeOf<CommandRouter>();
     // both call it `request`, not `run` — a signature mismatch here would fail to compile.
     expectTypeOf<CommandRouter["request"]>().not.toBeUnknown();
+  });
+});
+
+// web-hub-spawn plan §SP1 (v2.1, review #3 硬门槛): type-only ports + the frozen spawn wire
+// surface. These pins live here (not in tests/web-hub/protocol/*) because ONLY this file is
+// covered by `npm run typecheck`'s second tsc pass — plain vitest never evaluates type-level
+// expectTypeOf assertions.
+describe("types.test-d.ts (web-hub-spawn SP1 ports & wire surface)", () => {
+  it("Registry satisfies SpawnRegistryPort; CommandRouter satisfies FirstPromptRouterPort (#3)", () => {
+    expectTypeOf<Registry>().toMatchTypeOf<SpawnRegistryPort>();
+    expectTypeOf<CommandRouter>().toMatchTypeOf<FirstPromptRouterPort>();
+    // the ports are exactly the Picked members — nothing wider snuck in
+    expectTypeOf<keyof SpawnRegistryPort>().toEqualTypeOf<"list" | "get" | "bus" | "publish" | "getCaps">();
+    expectTypeOf<keyof FirstPromptRouterPort>().toEqualTypeOf<"request">();
+  });
+
+  it("HubEvent's spawns member carries the Public projection payload (SpawnsPayload)", () => {
+    type Spawns = Extract<HubEvent, { type: "spawns" }>;
+    expectTypeOf<Spawns["payload"]>().toEqualTypeOf<SpawnsPayload>();
+  });
+
+  it("FrontendDeps.spawn and HubConfig.spawn are optional and additive (SP9/SP2 fill them in)", () => {
+    expectTypeOf<undefined>().toMatchTypeOf<FrontendDeps["spawn"]>();
+    expectTypeOf<SpawnFrontendPort>().toMatchTypeOf<NonNullable<FrontendDeps["spawn"]>>();
+    expectTypeOf<undefined>().toMatchTypeOf<HubConfig["spawn"]>();
+    expectTypeOf<HubSpawnConfig>().toMatchTypeOf<NonNullable<HubConfig["spawn"]>>();
+    // P1/P2-era deps/config shapes (no spawn key) stay assignable — additions are optional only.
+    type PreSpawnDeps = Omit<FrontendDeps, "spawn">;
+    type PreSpawnConfig = Omit<HubConfig, "spawn">;
+    expectTypeOf<PreSpawnDeps>().toMatchTypeOf<FrontendDeps>();
+    expectTypeOf<PreSpawnConfig>().toMatchTypeOf<HubConfig>();
+  });
+
+  it("SpawnFrontendPort.handle/publicPayload keep their frozen signatures", () => {
+    expectTypeOf<Parameters<SpawnFrontendPort["handle"]>>().toEqualTypeOf<
+      [IncomingMessage, ServerResponse, string, string, URLSearchParams, SpawnRouteIo]
+    >();
+    expectTypeOf<Awaited<ReturnType<SpawnFrontendPort["handle"]>>>().toEqualTypeOf<void>();
+    expectTypeOf<ReturnType<SpawnFrontendPort["publicPayload"]>>().toEqualTypeOf<SpawnsPayload | undefined>();
+  });
+
+  it("spawn wire enums are exactly the frozen literal unions (arch §8.1)", () => {
+    expectTypeOf<SpawnState>().toEqualTypeOf<"starting" | "live" | "stopping" | "exited" | "failed">();
+    expectTypeOf<SpawnEndReason>().toEqualTypeOf<
+      | "user"
+      | "lifetime"
+      | "hub"
+      | "crash"
+      | "orphan"
+      | "protocol_error"
+      | "spawn_error"
+      | "register_timeout"
+      | "exited_early"
+      | "cwd_mismatch"
+    >();
+    expectTypeOf<SpawnHint>().toEqualTypeOf<
+      | "register-timeout-hello"
+      | "register-timeout-session"
+      | "control-off"
+      | "newer-plugin"
+      | "cwd-mismatch"
+      | "protocol-error"
+      | "launcher-changed"
+    >();
+    expectTypeOf<FirstPromptState>().toEqualTypeOf<"pending" | "sending" | "delivered" | "failed" | "expired">();
+    expectTypeOf<DirEntryWire>().toEqualTypeOf<{ cwd: string; label: string; at: number }>();
+  });
+
+  it("SpawnRecordOwner widens SpawnRecordPublic owner-only (arch §6.4: never on SSE)", () => {
+    expectTypeOf<NonNullable<SpawnRecordPublic["firstPrompt"]>>().toEqualTypeOf<{
+      state: FirstPromptState;
+      code?: string;
+    }>();
+    expectTypeOf<SpawnRecordOwner>().toHaveProperty("cwd");
+    expectTypeOf<SpawnRecordOwner>().toHaveProperty("hintDetail");
+    expectTypeOf<SpawnRecordOwner>().toHaveProperty("stderrTail");
+    expectTypeOf<SpawnRecordOwner>().toHaveProperty("uiCancelled");
+    // the owner's firstPrompt adds textLen/attempts — the body itself is NEVER on any type.
+    expectTypeOf<NonNullable<SpawnRecordOwner["firstPrompt"]>>().toEqualTypeOf<{
+      state: FirstPromptState;
+      code?: string;
+      textLen: number;
+      attempts: number;
+    }>();
   });
 });

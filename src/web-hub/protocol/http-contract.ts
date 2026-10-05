@@ -37,6 +37,7 @@ export const SSE_EVENTS = [
   "commands",
   "cmd_late",
   "ping",
+  "spawns", // web-hub-spawn arch §8.2: `SpawnsPayload` snapshot/broadcast (Public projection only)
 ] as const;
 
 export const API_ERRORS = [
@@ -74,6 +75,12 @@ export const API_ERRORS = [
   "E_UPLOAD_DISABLED",
   "E_UPLOAD_CONFLICT",
   "E_UPLOAD_GONE",
+  // web-hub-spawn plan §SP1 / arch §8.2: spawn endpoint error codes (added after upload's
+  // six, per the §2.3 hot-file window rule — tail-append only).
+  "E_SPAWN_DENIED", // 403 — policy/platform refusal before any record is created
+  "E_DIR", // 400 — cwd admission / pin failures (reason in message)
+  "E_LIMIT", // 409 — global / per-principal / starting-slot caps
+  "E_LAUNCHER", // 503 — launcher fingerprint / persist / reaper unavailable
 ] as const;
 
 /** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */

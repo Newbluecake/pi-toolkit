@@ -4,6 +4,14 @@
  * reused by an unrelated process while the hub was hung), not a security
  * boundary — same-uid processes are already fully trusted (plan §1.1).
  *
+ * web-hub-spawn SP1 split: the pure `/proc` parsers (`parseStartTicks`,
+ * `parseCmdline`, `parseUidLine`, `readStartTicksNow`) moved to
+ * `protocol/proc-identity.ts` so the spawn subsystem shares one identity
+ * definition; this file keeps the restart-specific pieces (`looksLikeHubArgv`,
+ * `verifyProcIdentity` — the hub-hung fallback ALSO checks the stored argv,
+ * which spawn identity deliberately does not) and re-exports the parsers so
+ * existing importers (`admin-cmds.ts`, `agent/index.ts`, tests) are unchanged.
+ *
  * Only ever consulted on the "hub hung, no ctl.v1 response" fallback path
  * (`restart.ts`): the happy path (`hub_ctl shutdown` acked over the socket)
  * never reads `/proc` at all (plan §11 LE row: "ctl 路径不读 /proc").
@@ -24,7 +32,32 @@
  * Any failure to read `/proc/<pid>/*` (process gone, no `/proc`, permission)
  * is `"no-proc"` — never treated as "verified".
  */
-import { readFile } from "node:fs/promises";
+export {
+  parseCmdline,
+  parsePgrp,
+  parseStartTicks,
+  parseUidLine,
+  readBootId,
+  readBtime,
+  readStartTicksNow,
+  readStatSync,
+  verifySpawnedIdentity,
+} from "../protocol/proc-identity.js";
+export type {
+  ProcIdentityDeps,
+  ProcSyncDeps,
+  SpawnedIdentity,
+  SpawnIdentityRejectReason,
+  SpawnIdentityVerdict,
+} from "../protocol/proc-identity.js";
+
+import {
+  parseCmdline,
+  parseStartTicks,
+  parseUidLine,
+  resolveProcIdentityDeps,
+  type ProcIdentityDeps,
+} from "../protocol/proc-identity.js";
 
 export interface ExpectedIdentity {
   pid: number;
@@ -36,27 +69,6 @@ export type IdentityRejectReason =
   "non-linux" | "argv-shape" | "no-proc" | "starttime-mismatch" | "cmdline-mismatch" | "uid-mismatch";
 
 export type IdentityVerdict = { ok: true } | { ok: false; reason: IdentityRejectReason };
-
-export interface ProcIdentityDeps {
-  /** Default: `node:fs/promises` `readFile(path, "utf8")`. */
-  readFile?: (path: string) => Promise<string>;
-  /** Default: `process.getuid()`. */
-  getuid?: () => number;
-  /** Default: `process.platform`. */
-  platform?: string;
-}
-
-function defaults(deps: ProcIdentityDeps | undefined): {
-  readFile: (p: string) => Promise<string>;
-  getuid: () => number;
-  platform: string;
-} {
-  return {
-    readFile: deps?.readFile ?? ((p: string) => readFile(p, "utf8")),
-    getuid: deps?.getuid ?? (() => process.getuid?.() ?? 0),
-    platform: deps?.platform ?? process.platform,
-  };
-}
 
 /** Stored-argv sanity check (plan §8.2: "3 项、以 jiti-cli.mjs 和 /src/web-hub/hub/main.ts 结尾"). */
 export function looksLikeHubArgv(argv: readonly string[]): boolean {
@@ -71,57 +83,11 @@ export function looksLikeHubArgv(argv: readonly string[]): boolean {
   );
 }
 
-/** Field 22 (1-indexed) of `/proc/<pid>/stat`; comm may contain `)` so split after the LAST one. */
-export function parseStartTicks(stat: string): number | undefined {
-  const close = stat.lastIndexOf(")");
-  if (close < 0) return undefined;
-  const rest = stat
-    .slice(close + 1)
-    .trim()
-    .split(/\s+/);
-  // fields after `pid (comm)`: state(0) ppid(1) ... starttime is index 19 (field 22 overall).
-  const raw = rest[19];
-  if (raw === undefined) return undefined;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-/** `/proc/<pid>/cmdline`: NUL-separated, trailing NUL produces one empty tail entry — dropped. */
-export function parseCmdline(raw: string): string[] {
-  const parts = raw.split("\0");
-  if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
-  return parts;
-}
-
-/** `Uid:\t<real>\t<effective>\t<saved>\t<fs>` line of `/proc/<pid>/status`. */
-export function parseUidLine(status: string): { real: number; effective: number } | undefined {
-  const line = status.split("\n").find((l) => l.startsWith("Uid:"));
-  if (line === undefined) return undefined;
-  const nums = line.slice(4).trim().split(/\s+/).map(Number);
-  const real = nums[0];
-  const effective = nums[1];
-  if (real === undefined || effective === undefined || !Number.isFinite(real) || !Number.isFinite(effective)) {
-    return undefined;
-  }
-  return { real, effective };
-}
-
-/** Just the starttime re-check used right before signalling (race window between check and kill). */
-export async function readStartTicksNow(pid: number, deps?: ProcIdentityDeps): Promise<number | undefined> {
-  const d = defaults(deps);
-  if (d.platform !== "linux") return undefined;
-  try {
-    return parseStartTicks(await d.readFile(`/proc/${pid}/stat`));
-  } catch {
-    return undefined;
-  }
-}
-
 export async function verifyProcIdentity(
   expected: ExpectedIdentity,
   deps?: ProcIdentityDeps,
 ): Promise<IdentityVerdict> {
-  const d = defaults(deps);
+  const d = resolveProcIdentityDeps(deps);
   if (d.platform !== "linux") return { ok: false, reason: "non-linux" };
   if (!looksLikeHubArgv(expected.argv)) return { ok: false, reason: "argv-shape" };
 

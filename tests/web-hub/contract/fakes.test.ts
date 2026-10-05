@@ -2,10 +2,15 @@
  * Behavioral tests for `fakeConnGuard` (plan §6.3; review fix #4, v2): the
  * fake is reused by W2's LC tests, so its eviction + `onEvict` wiring must
  * actually work, not just typecheck.
+ *
+ * web-hub-spawn §SP1 adds the spawn port fakes' behavior tests (same rule:
+ * SP7/SP8 reuse them, so they must actually behave like the ports).
  */
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { fakeConnGuard, fakeLanStore } from "./fakes.js";
+import { fakeConnGuard, fakeFirstPromptRouter, fakeLanStore, fakeSpawnRegistry } from "./fakes.js";
+import type { CmdFrame } from "../../../src/web-hub/protocol/messages.js";
+import type { SpawnsPayload } from "../../../src/web-hub/protocol/spawn.js";
 
 describe("fakeConnGuard (plan §6.3)", () => {
   it("admits under the cap without evicting anyone", () => {
@@ -245,5 +250,104 @@ describe("fakeLanStore: getUserSummary (plan §7, §5.2)", () => {
   it("returns undefined for an unknown userId", async () => {
     const store = fakeLanStore();
     expect(await store.getUserSummary(999)).toBeUndefined();
+  });
+});
+
+// web-hub-spawn plan §SP1: the spawn port fakes must actually behave (SP7/SP8 reuse them).
+describe("fakeSpawnRegistry (web-hub-spawn §SP1)", () => {
+  it("list/get read the seeded views; getCaps reads the seeded caps", () => {
+    const reg = fakeSpawnRegistry();
+    reg.seedAgent("a5151-abc", { pid: 5151, cwd: "/home/u/proj", caps: ["ev.v1", "dialog.v1"] });
+    reg.seedAgent("a4242-def", { pid: 4242, caps: [] });
+    expect(reg.list().map((v) => v.agentKey)).toEqual(["a5151-abc", "a4242-def"]);
+    expect(reg.get("a5151-abc")).toMatchObject({ pid: 5151, cwd: "/home/u/proj", state: "live", kind: "rpc" });
+    expect(reg.get("nope")).toBeUndefined();
+    expect(reg.getCaps("a5151-abc")).toEqual(["ev.v1", "dialog.v1"]);
+    expect(reg.getCaps("a4242-def")).toEqual([]);
+    expect(reg.getCaps("nope")).toBeUndefined();
+  });
+
+  it("setCaps replaces and clears; dropAgent removes view and caps together", () => {
+    const reg = fakeSpawnRegistry();
+    reg.seedAgent("k1", { caps: ["ev.v1"] });
+    reg.setCaps("k1", ["cmd.v1"]);
+    expect(reg.getCaps("k1")).toEqual(["cmd.v1"]);
+    reg.setCaps("k1", undefined);
+    expect(reg.getCaps("k1")).toBeUndefined();
+    reg.setCaps("k2", ["ev.v1"]); // caps without a view — getCaps still answers (registry does too)
+    expect(reg.getCaps("k2")).toEqual(["ev.v1"]);
+    reg.dropAgent("k1");
+    expect(reg.get("k1")).toBeUndefined();
+    expect(reg.getCaps("k1")).toBeUndefined();
+  });
+
+  it("publish fans out to bus subscribers synchronously and records every event", () => {
+    const reg = fakeSpawnRegistry();
+    const seen: string[] = [];
+    const off = reg.bus.subscribe((e) => seen.push(e.type));
+    const payload: SpawnsPayload = { items: [], active: 0, max: 4 };
+    reg.publish({ type: "spawns", payload });
+    reg.publish({ type: "agent_stale", agentKey: "k1" });
+    expect(seen).toEqual(["spawns", "agent_stale"]);
+    expect(reg.events.map((e) => e.type)).toEqual(["spawns", "agent_stale"]);
+    off();
+    reg.publish({ type: "agent_stale", agentKey: "k1" });
+    expect(seen).toHaveLength(2); // unsubscribed
+    expect(reg.events).toHaveLength(3); // events still records
+  });
+});
+
+describe("fakeFirstPromptRouter (web-hub-spawn §SP1)", () => {
+  function frame(id: string): CmdFrame {
+    return {
+      t: "cmd",
+      rid: "rid-1",
+      id,
+      deadlineMs: 8_000,
+      origin: { listener: "loopback", ip: "127.0.0.1", reqId: "r".repeat(16) },
+      cmd: { op: "prompt", text: "hi", deliver: "steer" },
+    };
+  }
+
+  it("executes a new id once, records it, echoes rid/id, and defaults to ok", async () => {
+    const router = fakeFirstPromptRouter();
+    const out = await router.request(frame("fp_sp_1"), "a5151-abc");
+    expect(out).toMatchObject({
+      t: "cmd_result",
+      rid: "rid-1",
+      id: "fp_sp_1",
+      ok: true,
+      data: { op: "prompt", delivery: "observed" },
+    });
+    expect(router.requests).toHaveLength(1);
+    expect(router.requests[0]).toMatchObject({ agentKey: "a5151-abc", frame: frame("fp_sp_1") });
+  });
+
+  it("replays a same-id request as dup:true without executing again (ledger semantics)", async () => {
+    const router = fakeFirstPromptRouter();
+    await router.request(frame("fp_sp_1"), "a1");
+    const replay = await router.request(frame("fp_sp_1"), "a1");
+    expect(replay).toMatchObject({ ok: true, dup: true, data: { op: "prompt", delivery: "observed" } });
+    expect(router.requests).toHaveLength(1); // executed exactly once
+  });
+
+  it("the same id for a DIFFERENT agentKey is a different ledger entry (per-agent key)", async () => {
+    const router = fakeFirstPromptRouter();
+    await router.request(frame("fp_sp_1"), "a1");
+    await router.request(frame("fp_sp_1"), "a2");
+    expect(router.requests).toHaveLength(2);
+  });
+
+  it("queued result bodies are consumed FIFO by successive new ids", async () => {
+    const router = fakeFirstPromptRouter();
+    router.queueResult({ ok: false, code: "E_DEADLINE", retryable: true, effect: "unknown" });
+    router.queueResult({ ok: true, data: { op: "prompt", delivery: "observed", behavior: "steer" } });
+    const first = await router.request(frame("fp_sp_1"), "a1");
+    const second = await router.request(frame("fp_sp_2"), "a1");
+    expect(first).toMatchObject({ ok: false, code: "E_DEADLINE", effect: "unknown" });
+    expect(second).toMatchObject({ ok: true, data: { behavior: "steer" } });
+    // queue exhausted: the default answers again
+    const third = await router.request(frame("fp_sp_3"), "a1");
+    expect(third).toMatchObject({ ok: true, data: { op: "prompt", delivery: "observed" } });
   });
 });

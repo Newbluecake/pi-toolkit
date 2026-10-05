@@ -34,6 +34,15 @@ export const UPLOAD_AGENT_CAPS = ["upload.v1", "upload.lan.v1"] as const;
  */
 export const DIALOG_BG_HUB_CAPS = ["dialog.bg.v1"] as const;
 
+/**
+ * web-hub-spawn plan §SP1 (arch §8.2): the hub cap advertising the managed-spawn feature set
+ * (`GET/POST /api/headless*`). Advertised only when `config.spawn` exists (SP10 folds it into
+ * `HubInfo.caps`/`hello_ack.caps` via `extraHubCaps`); a browser that doesn't see it hides the
+ * “选择目录新建” entry. Spawn adds NO agent↔hub frames, so PROTO stays 1.1 (§2.3: spawn 不升
+ * PROTO).
+ */
+export const SPAWN_HUB_CAP = "spawn.v1";
+
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {
   dialogs: "dialog.v1",
