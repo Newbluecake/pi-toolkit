@@ -436,8 +436,17 @@ class PiSessionHandle implements SessionHandle {
       throw explainPromptRejection(this.session, e);
     });
   }
-  steer(text: string) {
-    return this.session.steer(text);
+  /**
+   * pi 1.0 (0.99.0+) `AgentSession.steer()` resolves to a per-input
+   * `QueuedInputDisposition` instead of `void`. Our `SessionHandle.steer`
+   * contract stays `Promise<void>` — no caller wants the disposition yet —
+   * so we discard it here. TODO: surface the disposition (accepted vs
+   * dropped/blocked reasons) through `RunDiagnostics` when a consumer needs
+   * steer-admission visibility; until then keep this adapter the only place
+   * that knows pi's richer return type.
+   */
+  steer(text: string): Promise<void> {
+    return this.session.steer(text).then(() => undefined);
   }
   requestAbort() {
     this.session.abort();

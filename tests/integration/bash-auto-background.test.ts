@@ -181,6 +181,21 @@ function textOf(result: { content: { type: string; text?: string }[] }): string 
     .trim();
 }
 
+/** I5 golden: settle-kind capture — value OR error, never throws. */
+async function settleRun(p: Promise<unknown>): Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }> {
+  return p.then(
+    (value: unknown) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+}
+
+/** I5 golden: the resolved shape pi 1.0's built-in bash produces for a non-zero exit. */
+type FailingBashResult = {
+  content: { type: string; text?: string }[];
+  isError?: boolean;
+  structuredContent?: { exit_code?: number };
+};
+
 function backgroundDetails(result: { details?: unknown }): BashBackgroundDetails {
   const details = result.details as BashBackgroundDetails | undefined;
   if (!details || details.background !== true) {
@@ -477,15 +492,33 @@ describe("I5 short-command golden equivalence (real processes)", () => {
       expect(overridden).toEqual(expected);
       expect(textOf(overridden)).toBe("hi");
 
-      // …including the rejection path: a non-zero exit throws pi's own text.
+      // …including the failing path. pi 1.0 changed the built-in contract
+      // for non-zero exits: it now RESOLVES a result object (text ending in
+      // "Command exited with code N", `isError: true`, `structuredContent.
+      // exit_code`) where 0.87 rejected with an Error. The golden pin is
+      // settle-kind-agnostic: whichever way the built-in settles for `exit 3`,
+      // the override must settle identically, and a resolved payload must be
+      // field-for-field equal (toEqual compares all runtime fields, so
+      // isError / structuredContent / details are all pinned by it).
       const failing = { command: "echo oops >&2; exit 3" };
-      const overrideError = await run(bash, failing).catch((error: unknown) => error as Error);
-      const builtinError = await run(builtin as unknown as { execute: AnyTool["execute"] }, failing).catch(
-        (error: unknown) => error as Error,
-      );
-      expect(overrideError).toBeInstanceOf(Error);
-      expect((overrideError as Error).message).toBe((builtinError as Error).message);
-      expect((overrideError as Error).message).toContain("Command exited with code 3");
+      const overrideOutcome = await settleRun(run(bash, failing));
+      const builtinOutcome = await settleRun(run(builtin as unknown as { execute: AnyTool["execute"] }, failing));
+      expect(overrideOutcome.ok).toBe(builtinOutcome.ok);
+      if (builtinOutcome.ok) {
+        // pi 1.0.2 semantics: resolved `isError` result carrying the code.
+        expect(overrideOutcome.value).toEqual(builtinOutcome.value);
+        const result = overrideOutcome.value as FailingBashResult;
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent?.exit_code).toBe(3);
+        expect(textOf(result)).toContain("Command exited with code 3");
+        expect(textOf(result)).toContain("oops");
+      } else {
+        // 0.87 semantics (kept pinned in case pi ever reverts): rejection
+        // with pi's own message text.
+        expect(overrideOutcome.error).toBeInstanceOf(Error);
+        expect((overrideOutcome.error as Error).message).toBe((builtinOutcome.error as Error).message);
+        expect((overrideOutcome.error as Error).message).toContain("Command exited with code 3");
+      }
     },
     60_000,
   );

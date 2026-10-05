@@ -3,7 +3,7 @@ import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
   BashOperations,
   BashToolDetails,
-  ExtensionContext,
+  ExtensionToolContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Millis } from "../core/types.js";
@@ -686,8 +686,11 @@ function runInner(
   params: InnerParams,
   signal: AbortSignal | undefined,
   onUpdate: unknown,
-  ctx: ExtensionContext,
+  ctx: ExtensionToolContext,
 ): Promise<InnerResult> {
+  // pi 1.0: `ToolDefinition.execute` receives `ExtensionToolContext`
+  // (an `ExtensionContext` narrowed with `tools` + `executeTool`); our own
+  // override's execute ctx is exactly that, so it flows through untouched.
   return definition.execute(toolCallId, params as never, signal, onUpdate as never, ctx);
 }
 
