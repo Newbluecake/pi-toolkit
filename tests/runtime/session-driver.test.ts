@@ -532,3 +532,86 @@ describe("todo #27: bind() emits child_extension_missing exactly when the handle
     expect(h2.childExtensionMissing).toBe(true);
   });
 });
+
+/**
+ * fleet-drawer plan §4.1 (F1): PiSessionHandle's read port — the three
+ * optional methods the runner's sealBeforeTerminal / observeRun /
+ * peekRunBranch consume. Each is a thin passthrough over pi's own
+ * session-manager/subscribe seams; these tests pin the wiring (and the
+ * swallowing wrapper on observe) against a fake session.
+ */
+describe("PiSessionHandle fleet-drawer read port (§4.1): getLeafId / getBranchEntries / observe", () => {
+  function handleWith(session: Record<string, unknown>): PiSessionHandle {
+    return new PiSessionHandle(session as never);
+  }
+
+  it("getLeafId passes sessionManager.getLeafId() through — both a leaf id and null", () => {
+    const h = handleWith({ sessionManager: { getLeafId: () => "e_leaf_42" } });
+    expect(h.getLeafId!()).toBe("e_leaf_42");
+    const hNull = handleWith({ sessionManager: { getLeafId: () => null } });
+    expect(hNull.getLeafId!()).toBeNull();
+    // The runner, not the handle, owns the exception policy (sealBeforeTerminal try/catches):
+    // a throwing sessionManager read must propagate out of the handle untouched.
+    const hBoom = handleWith({
+      sessionManager: {
+        getLeafId: () => {
+          throw new Error("leaf read exploded");
+        },
+      },
+    });
+    expect(() => hBoom.getLeafId!()).toThrow("leaf read exploded");
+  });
+
+  it("getBranchEntries passes sessionManager.getBranch() through (same array instance, root→leaf)", () => {
+    const branch = [
+      { type: "message", id: "e1", message: { role: "user" } },
+      { type: "compaction", id: "e2", fromHook: true },
+      { type: "message", id: "e3", message: { role: "assistant", content: [] } },
+    ];
+    const h = handleWith({ sessionManager: { getBranch: () => branch } });
+    expect(h.getBranchEntries!()).toBe(branch);
+  });
+
+  it("observe subscribes to the session stream; events flow; the returned function unsubscribes", () => {
+    let listener: ((e: unknown) => void) | undefined;
+    let unsubscribed = 0;
+    const session = {
+      subscribe: (cb: (e: unknown) => void) => {
+        listener = cb;
+        return () => {
+          unsubscribed++;
+          listener = undefined;
+        };
+      },
+    };
+    const h = handleWith(session);
+    const seen: unknown[] = [];
+    const unsub = h.observe!((e) => seen.push(e));
+    listener?.({ type: "turn_start" });
+    listener?.({ type: "message_update", delta: "a" });
+    expect(seen).toEqual([{ type: "turn_start" }, { type: "message_update", delta: "a" }]);
+    unsub();
+    expect(unsubscribed).toBe(1);
+    listener?.({ type: "turn_end" });
+    expect(seen).toHaveLength(2);
+  });
+
+  it("observe swallows a throwing listener: it never propagates back into the session's dispatch loop", () => {
+    let listener: ((e: unknown) => void) | undefined;
+    const session = {
+      subscribe: (cb: (e: unknown) => void) => {
+        listener = cb;
+        return () => undefined;
+      },
+    };
+    const h = handleWith(session);
+    let calls = 0;
+    h.observe!(() => {
+      calls++;
+      throw new Error("observer exploded");
+    });
+    // Simulates pi's own event dispatch invoking the subscriber: must not throw.
+    expect(() => listener?.({ type: "turn_start" })).not.toThrow();
+    expect(calls).toBe(1);
+  });
+});

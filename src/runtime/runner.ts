@@ -18,10 +18,12 @@ import type {
   ExtendSource,
   LifecycleEvent,
   Millis,
+  ObserveRunResult,
   RunEffect,
   RunExitFacts,
   RunId,
   RunInput,
+  RunObserverListener,
   RunOutcome,
   RunSnapshot,
   RunState,
@@ -335,6 +337,22 @@ interface GuardRejected {
   reason: "error";
   error: unknown;
 }
+/**
+ * fleet-drawer plan §4.1 (#7): one registered observeRun listener, plus the
+ * runner-owned bookkeeping around it. `done` is the exactly-once latch for
+ * `onEnd` — it is checked-and-set by BOTH end paths (the terminal dispatch
+ * and the run() finally cleanup) and by `detach()`, so whichever wins, the
+ * observer's onEnd fires at most once and its session subscription is
+ * cancelled exactly once.
+ */
+interface RunObserver {
+  onEvent(e: unknown): void;
+  onEnd(status: string): void;
+  unsub?: () => void;
+  done: boolean;
+}
+/** fleet-drawer plan §4.1: per-run observer cap — beyond this, observeRun reports `no_session` (leak guard; the web-hub side caps taps at 8/agent). */
+const RUN_OBSERVER_CAP = 16;
 export class RuntimeRunner implements Runner {
   private readonly states = new Map<string, RunState>();
   private generation = new Map<string, number>();
@@ -346,6 +364,8 @@ export class RuntimeRunner implements Runner {
   private readonly activeHandles = new Map<string, { gen: number; handle: SessionHandle }>();
   /** bash-timeout-grace plan §3.2: runId -> generation already sealed, guarding sealBeforeTerminal's idempotency (I-SEAL). */
   private readonly sealedGenerations = new Map<string, number>();
+  /** fleet-drawer plan §4.1 (#7): runId -> { gen, observers } for live observeRun registrations. Cleared by endObservers (terminal dispatch / finally fallback) and by detach when the last observer leaves. */
+  private readonly runObservers = new Map<string, { gen: number; set: Set<RunObserver> }>();
   /** todo #27: per-process (per-RuntimeRunner-instance) dedup latch for CHILD_EXTENSION_MISSING_WARNING. */
   private warnedChildExtensionMissing = false;
   constructor(private readonly d: RunnerDeps) {}
@@ -477,6 +497,109 @@ export class RuntimeRunner implements Runner {
     return { ok: true, model: effective, ...(level === undefined ? {} : { thinking: level }) };
   }
   /**
+   * fleet-drawer plan §4.1 (#7): attach a live observer to a running run's
+   * session stream. Fully synchronous (no await in the body — the
+   * registration verdict is exact on the single JS event loop): `unknown`
+   * when the runId is unknown to this runner, `terminal` (nothing
+   * registered) when the run is already terminal, `no_session` when there is
+   * no observable handle for the run's CURRENT generation (still queued or
+   * creating; handle without `observe`; observer cap exceeded) or the
+   * subscribe call itself throws, `attached` otherwise. `onEnd` fires
+   * exactly once per successful attach — from the terminal dispatch or the
+   * run() finally cleanup, whichever reaches the done-latch first; `detach()`
+   * never fires onEnd. Every listener callback is exception-swallowed: a
+   * throwing observer can never affect the run's own outcome.
+   */
+  observeRun(runId: string, l: RunObserverListener): ObserveRunResult {
+    const state = this.states.get(runId);
+    if (!state) return { kind: "unknown" };
+    if (isTerminalStatus(state.status)) return { kind: "terminal", status: state.status };
+    const handleEntry = this.activeHandles.get(runId);
+    if (!handleEntry || handleEntry.gen !== state.generation) return { kind: "no_session" };
+    const observe = handleEntry.handle.observe;
+    if (!observe) return { kind: "no_session" };
+    let entry = this.runObservers.get(runId);
+    if (!entry || entry.gen !== state.generation) entry = { gen: state.generation, set: new Set() };
+    if (entry.set.size >= RUN_OBSERVER_CAP) return { kind: "no_session" };
+    const obs: RunObserver = { onEvent: l.onEvent, onEnd: l.onEnd, done: false };
+    try {
+      obs.unsub = observe.call(handleEntry.handle, (e: unknown) => {
+        if (obs.done) return;
+        try {
+          l.onEvent(e);
+        } catch {
+          /* listener must never break the session's event dispatch */
+        }
+      });
+    } catch {
+      return { kind: "no_session" };
+    }
+    entry.set.add(obs);
+    this.runObservers.set(runId, entry);
+    return {
+      kind: "attached",
+      detach: () => {
+        if (obs.done) return;
+        obs.done = true;
+        try {
+          obs.unsub?.();
+        } catch {
+          /* unsubscribe must never throw into the caller */
+        }
+        const cur = this.runObservers.get(runId);
+        if (cur) {
+          cur.set.delete(obs);
+          if (cur.set.size === 0) this.runObservers.delete(runId);
+        }
+      },
+    };
+  }
+  /**
+   * fleet-drawer plan §4.1: read-only snapshot of a running run's current
+   * persisted branch (`SessionHandle.getBranchEntries`), for live-run
+   * transcript snapshots. `undefined` when the run is unknown, terminal
+   * (handle already cleaned up), handle-less, or the read throws — callers
+   * (F2) re-read run info and take the terminal/file path in that case.
+   */
+  peekRunBranch(runId: string): readonly unknown[] | undefined {
+    const state = this.states.get(runId);
+    if (!state) return undefined;
+    const handleEntry = this.activeHandles.get(runId);
+    if (!handleEntry || handleEntry.gen !== state.generation) return undefined;
+    try {
+      return handleEntry.handle.getBranchEntries?.();
+    } catch {
+      return undefined;
+    }
+  }
+  /**
+   * fleet-drawer plan §4.1 (#7): fire onEnd for every observer of exactly
+   * this (runId, gen) — the shared body of the two end paths (terminal
+   * dispatch + run() finally fallback). Deletes the entry FIRST so a
+   * re-entrant observeRun from inside a callback sees a clean map (it would
+   * answer `terminal` anyway); each observer is done-latched so a second
+   * call is a no-op. Swallows every exception a callback raises.
+   */
+  private endObservers(runId: string, gen: number, status: string): void {
+    const entry = this.runObservers.get(runId);
+    if (!entry || entry.gen !== gen) return;
+    this.runObservers.delete(runId);
+    for (const obs of entry.set) {
+      if (obs.done) continue;
+      obs.done = true;
+      try {
+        obs.unsub?.();
+      } catch {
+        /* unsubscribe must never break the loop */
+      }
+      try {
+        obs.onEnd(status);
+      } catch {
+        /* observer must never break the runner */
+      }
+    }
+  }
+  /**
    * bash-timeout-grace plan §3.2 (P0b, frozen): synchronous, idempotent
    * pre-terminal seal (invariant I-SEAL). No-ops when there is no bound
    * session for this (runId, generation) — nothing to seal — or when this
@@ -490,6 +613,25 @@ export class RuntimeRunner implements Runner {
     const handleEntry = this.activeHandles.get(runId);
     if (!handleEntry || handleEntry.gen !== gen) return;
     this.sealedGenerations.set(runId, gen);
+    // fleet-drawer plan §4.1 (review blocker #1): read the session's leaf at
+    // the seal moment and dispatch it as its own metadata session_event —
+    // BEFORE the sealSession call (and thus strictly before the `if (facts
+    // === undefined) return;` gate below), so a run with no bash facts
+    // still records its leaf. Everything a reap hook appends afterwards is a
+    // descendant of this leaf, which is what makes the file-side branch walk
+    // deterministic. Best-effort: a missing capability or a throwing read
+    // simply leaves diag.finalLeafId unset (consumers report `leaf_unknown`).
+    try {
+      const leaf = handleEntry.handle.getLeafId?.();
+      if (typeof leaf === "string")
+        this.dispatchExternal(runId, gen, {
+          kind: "session_event",
+          at: this.d.clock.now(),
+          event: { t: "final_leaf", leafId: leaf },
+        });
+    } catch {
+      /* best-effort diagnostics — never break the seal path */
+    }
     let facts: RunExitFacts | undefined;
     try {
       facts = this.d.sealSession?.(runId, handleEntry.handle.sessionId);
@@ -575,6 +717,7 @@ export class RuntimeRunner implements Runner {
     // an unconsumed switch, that verdict is final for this run.
     let selfcheckLatch: string | undefined;
     const dispatch = (input: RunInput) => {
+      const wasTerminal = isTerminalStatus(state.status);
       const out = reduce(state, { generation: gen, input }, budget);
       state = out.state;
       this.states.set(req.runId, state);
@@ -584,6 +727,17 @@ export class RuntimeRunner implements Runner {
         /* observer must never break the dispatch loop */
       }
       this.d.effects.apply(req.runId, gen, out.effects);
+      // fleet-drawer plan §4.1 (#7): the linearization point of observeRun's
+      // end — the FIRST dispatch that moves this run terminal (single JS
+      // event loop: no interleaving with a concurrent registration, which
+      // itself is fully synchronous). Placed after states.set/onStateChange/
+      // effects.apply so a terminal snapshot is consistent before observer
+      // callbacks run; endObservers swallows every callback exception, and
+      // the run() finally below repeats it as a fallback for the one path
+      // where this site is skipped (a dispatch whose effects application
+      // threw before reaching here) — the per-observer `done` flag keeps
+      // onEnd exactly-once across the two racing sites.
+      if (!wasTerminal && isTerminalStatus(state.status)) this.endObservers(req.runId, gen, state.status);
     };
     this.dispatchers.set(req.runId, { gen, fn: dispatch, budget });
     try {
@@ -894,6 +1048,12 @@ export class RuntimeRunner implements Runner {
       if (hEntry && hEntry.gen === gen) this.activeHandles.delete(req.runId);
       const sealedGen = this.sealedGenerations.get(req.runId);
       if (sealedGen === gen) this.sealedGenerations.delete(req.runId);
+      // fleet-drawer plan §4.1 (#7): the second end path — the finally
+      // cleanup fires onEnd for any observer the terminal dispatch never
+      // reached (e.g. that dispatch's effects application threw before the
+      // endObservers site, or a degenerate exit with a non-terminal state).
+      // Idempotent with the dispatch path via the per-observer done latch.
+      this.endObservers(req.runId, gen, state.status);
     }
   }
   /** consult (§4.4): post-reap cleanup seam. Swallows everything — a cleanup callback must never affect the runner. */

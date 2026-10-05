@@ -1,4 +1,11 @@
-import type { DeadlineBudget, ExtendOutcome, ExtendSource, SetModelOutcome } from "../core/types.js";
+import type {
+  DeadlineBudget,
+  ExtendOutcome,
+  ExtendSource,
+  ObserveRunResult,
+  RunObserverListener,
+  SetModelOutcome,
+} from "../core/types.js";
 import type {
   AgentTypeConfig,
   DriverEvent,
@@ -54,6 +61,21 @@ export interface Runner {
   run(spec: RunnerSpec, callbacks?: RunnerCallbacks): Promise<RunOutcome>;
   abort?(runId: RunId, cause?: StopCause): Promise<{ ok: boolean; escalatedTo: "L2" | "L3" | "L4" }>;
   steer?(runId: RunId, text: string): Promise<void>;
+  /**
+   * fleet-drawer plan §4.1: read-only peek at a running run's current
+   * persisted branch (`RuntimeRunner.peekRunBranch`). `undefined` for
+   * unknown/terminal/handle-less runs — the caller re-reads run info and
+   * takes the terminal/file path in that case. Optional so existing Runner
+   * fakes/tests stay valid.
+   */
+  peekBranch?(runId: RunId): readonly unknown[] | undefined;
+  /**
+   * fleet-drawer plan §4.1 (#7): attach a live observer to a running run's
+   * session stream (`RuntimeRunner.observeRun`). Synchronous four-state
+   * verdict; `onEnd` exactly once per attach. Optional so existing Runner
+   * fakes/tests stay valid.
+   */
+  observe?(runId: RunId, l: RunObserverListener): ObserveRunResult;
   /** set_model: bounded mid-run model switch. Returns a reason union instead of
    *  throwing (unlike steer) so "unknown_model" stays distinguishable from
    *  "the session refused" — the tool turns the two into different, self-correcting messages. */

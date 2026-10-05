@@ -104,6 +104,30 @@ export interface SessionHandle {
    */
   getSwitchTail?(): { seq: number; entryId: string; assistantAfter: boolean } | undefined;
   /**
+   * fleet-drawer plan §4.1 (#1, review blocker #1): the session's current
+   * leaf entry id, read once by the runner's `sealBeforeTerminal` (the run's
+   * prompt-settle moment) and folded into `RunDiagnostics.finalLeafId` via
+   * the `final_leaf` session_event. Optional — absent on every test fake and
+   * any driver that cannot expose it (the run then simply carries no leaf,
+   * which downstream consumers report as the determined `leaf_unknown`).
+   */
+  getLeafId?(): string | null;
+  /**
+   * fleet-drawer plan §4.1: read-only snapshot of the session's current
+   * persisted branch (root→leaf order), for `RuntimeRunner.peekRunBranch` /
+   * live-run transcript snapshots. Optional for the same reason as
+   * getLeafId above; never mutates anything.
+   */
+  getBranchEntries?(): readonly unknown[];
+  /**
+   * fleet-drawer plan §4.1 (#7): attach a live event listener to the
+   * session's stream; returns the unsubscribe function. The implementation
+   * wraps the listener so a throwing callback can never propagate back into
+   * the session's own event dispatch loop. Optional — `observeRun` returns
+   * `no_session` when absent (still-queued runs, unsupported handles).
+   */
+  observe?(l: (e: unknown) => void): () => void;
+  /**
    * todo #27 (child-extension-missing diagnostic): true iff this child
    * session's own `activate()` was never observed running (see
    * `src/child/activation-signal.ts`'s process-wide counter). Set once at
@@ -556,6 +580,37 @@ class PiSessionHandle implements SessionHandle {
   }
   setThinkingLevel(level: string) {
     this.session.setThinkingLevel(level as never);
+  }
+  /**
+   * fleet-drawer plan §4.1 (#1): thin passthrough of pi's own
+   * `SessionManager.getLeafId()` (same read-only sessionManager seam as
+   * getSwitchTail/getOmittedOverflowTurnError above — callers, not this
+   * handle, own the exception policy).
+   */
+  getLeafId(): string | null {
+    return this.session.sessionManager.getLeafId();
+  }
+  /**
+   * fleet-drawer plan §4.1: thin passthrough of pi's `getBranch()` —
+   * persisted root→leaf order, read-only, same seam as getSwitchTail above.
+   */
+  getBranchEntries(): readonly unknown[] {
+    return this.session.sessionManager.getBranch();
+  }
+  /**
+   * fleet-drawer plan §4.1 (#7): `session.subscribe` with a swallowing
+   * wrapper — a throwing listener must never propagate back into pi's own
+   * event dispatch loop (the runner wraps `onEvent` again; this is the
+   * handle-side half of the two-layer containment).
+   */
+  observe(l: (e: unknown) => void): () => void {
+    return this.session.subscribe((e) => {
+      try {
+        l(e);
+      } catch {
+        /* listener errors never break the session's event loop */
+      }
+    });
   }
 }
 

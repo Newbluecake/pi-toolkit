@@ -2866,3 +2866,310 @@ describe("P15a/P15b: exit_facts session_event isolation (bash-timeout-grace plan
     expect(postTerminalChecks).toBeGreaterThan(0);
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * final_leaf (fleet-drawer plan §4.1, review blocker #1, frozen): the
+ * sibling metadata-only session_event of exit_facts above, dispatched by the
+ * runner's sealBeforeTerminal BEFORE the `if (facts === undefined) return;`
+ * gate (so a run without bash facts still records its leaf). Same family and
+ * same reduce() placement rules — hand-written coverage per the plan's F1
+ * acceptance, mirroring the exit_facts suite structure:
+ *   - every RunPhase accepts it as a pure diag patch when non-terminal;
+ *   - a terminal fixture gets an EXPLICIT reference-equal no-op;
+ *   - a stale-generation input only bumps staleInputs (never writes
+ *     finalLeafId);
+ *   - repeated insertion on a non-terminal state takes the latter value;
+ *   - it flows into outcome.diag / persist_snapshot at the first terminal
+ *     input thereafter. (Unlike exit_facts it is deliberately NOT mirrored
+ *     into DeliveryPayload — notifications never render a leaf id; consumers
+ *     read it off RunSnapshot.diag / outcome.diag instead.)
+ * ------------------------------------------------------------------------- */
+describe("final_leaf (fleet-drawer plan §4.1): metadata session_event", () => {
+  const leafOf = (n: number): string => `e_leaf_${n}`;
+  function finalLeafInput(at: number, leafId: string = leafOf(1)): RunInput {
+    return { kind: "session_event", at, event: { t: "final_leaf", leafId } };
+  }
+
+  for (const phase of RUN_PHASES) {
+    const before = fixture(phase);
+    const label = isTerminalStatus(before.status) ? "terminal ⇒ explicit no-op" : "non-terminal ⇒ diag patch";
+    it(`phase ${phase} (${label})`, () => {
+      const result = reduce(
+        before,
+        { generation: before.generation, input: finalLeafInput(before.diag.phaseEnteredAt + 1) },
+        budget,
+      );
+      expect(result.effects).toEqual([]);
+      if (isTerminalStatus(before.status)) {
+        // P15b-equivalent "终态之后再插入 ⇒ 状态对象引用相等": bypasses terminalUpdate entirely.
+        expect(result.state).toBe(before);
+        return;
+      }
+      expect(result.state.diag.finalLeafId).toBe(leafOf(1));
+      // Nothing else changed (P15a-equivalent): compare with finalLeafId stripped from both sides.
+      const { finalLeafId: _wl, ...restDiagWith } = result.state.diag;
+      const { finalLeafId: _base, ...restDiagBase } = before.diag;
+      expect(restDiagWith).toEqual(restDiagBase);
+      expect(result.state.phase).toBe(before.phase);
+      expect(result.state.status).toBe(before.status);
+      expect(result.state.armedTimers).toEqual(before.armedTimers);
+      expect(result.state.deadlines).toEqual(before.deadlines);
+      expect(result.state.slotHeld).toBe(before.slotHeld);
+    });
+  }
+
+  it("a stale-generation final_leaf only increments staleInputs, never writes finalLeafId", () => {
+    const before = fixture("model_turn");
+    const result = reduce(
+      before,
+      { generation: before.generation - 1, input: finalLeafInput(before.diag.phaseEnteredAt + 1) },
+      budget,
+    );
+    expect(result.effects).toEqual([]);
+    expect(result.state.diag.staleInputs).toBe(before.diag.staleInputs + 1);
+    expect(result.state.diag.finalLeafId).toBeUndefined();
+  });
+
+  it("repeated insertion on a non-terminal state takes the latter value", () => {
+    let s = fixture("model_turn");
+    s = apply(s, finalLeafInput(0, leafOf(1))).state;
+    expect(s.diag.finalLeafId).toBe(leafOf(1));
+    s = apply(s, finalLeafInput(1, leafOf(2))).state;
+    expect(s.diag.finalLeafId).toBe(leafOf(2));
+  });
+
+  it("flows into outcome.diag / persist_snapshot at the first terminal input (NOT into the delivery payload)", () => {
+    let s = fixture("model_turn");
+    s = apply(s, finalLeafInput(0)).state;
+    const result = reduce(
+      s,
+      { generation: s.generation, input: { kind: "prompt_settled", at: s.diag.phaseEnteredAt + 1, text: "done" } },
+      budget,
+    );
+    expect(result.state.status).toBe("completed");
+    expect(result.state.diag.finalLeafId).toBe(leafOf(1));
+    expect(result.state.outcome?.diag.finalLeafId).toBe(leafOf(1));
+    const snapshotEffect = result.effects.find((e) => e.effect.kind === "persist_snapshot");
+    expect(
+      snapshotEffect?.effect.kind === "persist_snapshot"
+        ? snapshotEffect.effect.snapshot.outcome?.diag.finalLeafId
+        : undefined,
+    ).toBe(leafOf(1));
+    // Boundary pin: the leaf id never rides the notification payload (unlike
+    // exitFacts) — delivery consumers don't render it.
+    const deliveryEffect = result.effects.find((e) => e.effect.kind === "enqueue_delivery");
+    expect(
+      deliveryEffect?.effect.kind === "enqueue_delivery"
+        ? (deliveryEffect.effect.payload as { finalLeafId?: string }).finalLeafId
+        : "unset",
+    ).toBeUndefined();
+  });
+
+  it("terminal no-op: final_leaf inserted AFTER settle never overwrites the sealed outcome", () => {
+    let s = fixture("model_turn");
+    s = apply(s, { kind: "prompt_settled", text: "done" }).state;
+    expect(s.status).toBe("completed");
+    const sealedDiag = s.diag;
+    const sealedOutcome = s.outcome;
+    const result = reduce(s, { generation: s.generation, input: finalLeafInput(s.diag.phaseEnteredAt + 1) }, budget);
+    expect(result.effects).toEqual([]);
+    expect(result.state).toBe(s);
+    expect(result.state.diag).toBe(sealedDiag);
+    expect(result.state.outcome).toBe(sealedOutcome);
+  });
+
+  it("a run with no leaf recorded keeps diag.finalLeafId absent (leaf_unknown downstream — never a fallback guess)", () => {
+    const s = apply(fixture("model_turn"), { kind: "prompt_settled", text: "done" }).state;
+    expect(s.status).toBe("completed");
+    expect(s.diag.finalLeafId).toBeUndefined();
+    expect(s.outcome?.diag.finalLeafId).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * P15a/P15b (fleet-drawer plan §4.1): property invariants for final_leaf,
+ * mirroring the exit_facts property suite above over the same random-walk
+ * state space (self-contained local helpers, same convention).
+ * ------------------------------------------------------------------------- */
+describe("P15a/P15b: final_leaf session_event isolation (fleet-drawer plan §4.1)", () => {
+  function rng(seed: number): () => number {
+    let value = seed >>> 0;
+    return () => {
+      value = (Math.imul(value ^ (value >>> 15), 1 | value) + 0x6d2b79f5) | 0;
+      return ((value ^ (value >>> 13)) >>> 0) / 4294967296;
+    };
+  }
+  /** Same shape as the exit_facts suite's generator (kept local, same convention). */
+  function randomInput(state: RunState, next: () => number): RunInput {
+    const at = Math.floor(next() * 1000) + 1;
+    const causes = ["parent_abort", "user_stop", "shutdown", "parent_gone"] as const;
+    if (state.phase === "queue_wait" && next() < 0.3) return { kind: "slot_acquired", at };
+    if (state.armedTimers.length && next() < 0.2) {
+      const timer = state.armedTimers[Math.floor(next() * state.armedTimers.length)];
+      return {
+        kind: "deadline_fired",
+        at,
+        timer,
+        reason: timer === "queue" ? "queue_timeout" : timer === "total" || timer === "total_grace" ? "total" : "idle",
+      };
+    }
+    if (next() < 0.15) return { kind: "stop_requested", at, cause: causes[Math.floor(next() * causes.length)] };
+    if (next() < 0.15)
+      return { kind: "deadline_extended", at, extendMs: 1_000 + Math.floor(next() * 100_000), source: "tool" };
+    if (next() < 0.15) {
+      const kinds = ["turn_start", "turn_end", "tool_start", "tool_end", "message_end", "text_delta"] as const;
+      const k = kinds[Math.floor(next() * kinds.length)]!;
+      const event =
+        k === "turn_end"
+          ? ({ t: k, toolResults: 0 } as const)
+          : k === "tool_start"
+            ? ({ t: k, toolCallId: "a", toolName: "bash" } as const)
+            : k === "tool_end"
+              ? ({ t: k, toolCallId: "a", toolName: "bash", isError: false } as const)
+              : k === "text_delta"
+                ? ({ t: k, delta: "x" } as const)
+                : ({ t: k } as const);
+      return { kind: "session_event", at, event };
+    }
+    if (next() < 0.1)
+      return {
+        kind: "effect_failed",
+        at,
+        effect: "dispose",
+        error: { kind: "internal", message: "e", retryable: next() < 0.5 },
+      };
+    if (next() < 0.15) return { kind: "prompt_settled", at };
+    return { kind: "phase_entered", at, phase: state.phase };
+  }
+  function leafAt(n: number): string {
+    return `e_leaf_${n}`;
+  }
+  function start(): RunState {
+    return reduce(createInitialState("r", 1, 0), { generation: 1, input: { kind: "enqueued", at: 0, budget } }, budget)
+      .state;
+  }
+
+  it("P15a: on any non-terminal prefix state, final_leaf changes only diag.finalLeafId", () => {
+    let nonTerminalSamples = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = rng(seed * 11 + 5);
+      let state = start();
+      for (let step = 0; step < 20; step++) {
+        if (!isTerminalStatus(state.status)) {
+          nonTerminalSamples++;
+          const at = state.diag.phaseEnteredAt + 1;
+          const leaf = leafAt(seed * 100 + step);
+          const withLeaf = reduce(
+            state,
+            {
+              generation: state.generation,
+              input: { kind: "session_event", at, event: { t: "final_leaf", leafId: leaf } },
+            },
+            budget,
+          );
+          expect(withLeaf.effects).toEqual([]);
+          expect(withLeaf.state.diag.finalLeafId).toBe(leaf);
+          const { finalLeafId: _wl, ...restWith } = withLeaf.state.diag;
+          const { finalLeafId: _base, ...restBase } = state.diag;
+          expect(restWith).toEqual(restBase);
+          expect(withLeaf.state.diag.lastEventAt).toBe(state.diag.lastEventAt);
+          expect(withLeaf.state.diag.lastEventType).toBe(state.diag.lastEventType);
+          expect(withLeaf.state.diag.lastTurnStartAt).toBe(state.diag.lastTurnStartAt);
+          expect(withLeaf.state.diag.turns).toBe(state.diag.turns);
+          expect(withLeaf.state.diag.usage).toEqual(state.diag.usage);
+          expect(withLeaf.state.diag.toolHistory).toEqual(state.diag.toolHistory);
+          expect(withLeaf.state.diag.contextUsage).toEqual(state.diag.contextUsage);
+          expect(withLeaf.state.diag.model).toEqual(state.diag.model);
+          expect(withLeaf.state.phase).toBe(state.phase);
+          expect(withLeaf.state.status).toBe(state.status);
+          expect(withLeaf.state.armedTimers).toEqual(state.armedTimers);
+          expect(withLeaf.state.deadlines).toEqual(state.deadlines);
+        }
+        const event = randomInput(state, next);
+        state = reduce(state, { generation: state.generation, input: event }, budget).state;
+      }
+    }
+    expect(nonTerminalSamples).toBeGreaterThan(1000);
+  });
+
+  it("P15b: final_leaf inserted right before the first terminal input surfaces in diag/outcome.diag/persist_snapshot; post-terminal insertion is a pure no-op", () => {
+    let firstTerminalTransitions = 0;
+    let snapshotChecks = 0;
+    let postTerminalChecks = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = rng(seed * 17 + 7);
+      let state = start();
+      for (let step = 0; step < 20; step++) {
+        if (isTerminalStatus(state.status)) {
+          postTerminalChecks++;
+          const leaf = leafAt(seed * 1000 + step);
+          const at = state.diag.phaseEnteredAt + 1;
+          const r = reduce(
+            state,
+            {
+              generation: state.generation,
+              input: { kind: "session_event", at, event: { t: "final_leaf", leafId: leaf } },
+            },
+            budget,
+          );
+          expect(r.state).toBe(state);
+          expect(r.effects).toEqual([]);
+          continue;
+        }
+        const event = randomInput(state, next);
+        const resultA = reduce(state, { generation: state.generation, input: event }, budget);
+        if (isTerminalStatus(resultA.state.status)) {
+          firstTerminalTransitions++;
+          const leaf = leafAt(seed * 1000 + step);
+          const preAt = "at" in event ? event.at : state.diag.phaseEnteredAt + 1;
+          const withLeaf = reduce(
+            state,
+            {
+              generation: state.generation,
+              input: { kind: "session_event", at: preAt, event: { t: "final_leaf", leafId: leaf } },
+            },
+            budget,
+          ).state;
+          const resultB = reduce(withLeaf, { generation: withLeaf.generation, input: event }, budget);
+          // diag
+          expect(resultA.state.diag.finalLeafId).toBeUndefined();
+          expect(resultB.state.diag.finalLeafId).toBe(leaf);
+          const { finalLeafId: _da, ...restDiagA } = resultA.state.diag;
+          const { finalLeafId: _db, ...restDiagB } = resultB.state.diag;
+          expect(restDiagB).toEqual(restDiagA);
+          expect(resultB.state.phase).toBe(resultA.state.phase);
+          expect(resultB.state.status).toBe(resultA.state.status);
+          expect(resultB.state.armedTimers).toEqual(resultA.state.armedTimers);
+          expect(resultB.state.deadlines).toEqual(resultA.state.deadlines);
+          // outcome.diag
+          const outcomeA = resultA.state.outcome;
+          const outcomeB = resultB.state.outcome;
+          if (outcomeA && outcomeB) {
+            expect(outcomeA.diag.finalLeafId).toBeUndefined();
+            expect(outcomeB.diag.finalLeafId).toBe(leaf);
+            const { diag: diagA, ...restOutcomeA } = outcomeA;
+            const { diag: diagB, ...restOutcomeB } = outcomeB;
+            expect(restOutcomeB).toEqual(restOutcomeA);
+            const { finalLeafId: _oa, ...restOutcomeDiagA } = diagA;
+            const { finalLeafId: _ob, ...restOutcomeDiagB } = diagB;
+            expect(restOutcomeDiagB).toEqual(restOutcomeDiagA);
+          }
+          // persist_snapshot (delivery payload deliberately carries no leaf id)
+          const snapA = resultA.effects.find((e) => e.effect.kind === "persist_snapshot");
+          const snapB = resultB.effects.find((e) => e.effect.kind === "persist_snapshot");
+          if (snapA?.effect.kind === "persist_snapshot" && snapB?.effect.kind === "persist_snapshot") {
+            snapshotChecks++;
+            expect(snapA.effect.snapshot.outcome?.diag.finalLeafId).toBeUndefined();
+            expect(snapB.effect.snapshot.outcome?.diag.finalLeafId).toBe(leaf);
+          }
+          state = resultA.state;
+          continue;
+        }
+        state = resultA.state;
+      }
+    }
+    expect(firstTerminalTransitions).toBeGreaterThan(100);
+    expect(snapshotChecks).toBeGreaterThan(50);
+    expect(postTerminalChecks).toBeGreaterThan(0);
+  });
+});

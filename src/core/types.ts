@@ -547,6 +547,22 @@ export type DriverEvent =
    * why it is NOT exempt from the generation check the way model_changed is. */
   | { t: "exit_facts"; facts: RunExitFacts }
   /**
+   * fleet-drawer plan §4.1 (review blocker #1, frozen): the session leaf id
+   * observed by `RuntimeRunner.sealBeforeTerminal` at the same pre-terminal
+   * seal point as `exit_facts` — "the run's prompt settled" is the moment
+   * this is read, and everything a reap hook may append afterwards is by
+   * construction a DESCENDANT of this leaf, so walking the persisted file
+   * from it yields a deterministic branch. Metadata-only, same family as
+   * `model_changed`/`exit_facts` (see state-machine.ts reduce()'s sibling
+   * branch): NOT exempt from the generation check, terminal states take an
+   * explicit reference-equal no-op, non-terminal states get a pure diag
+   * patch. Folded into `RunDiagnostics.finalLeafId`; consumers (web-hub
+   * fleet drawer, F2/F3) treat a missing value as a determined
+   * `leaf_unknown` error and NEVER fall back to the file's physical last
+   * line (append-only trees make that line an arbitrary branch tip).
+   */
+  | { t: "final_leaf"; leafId: string }
+  /**
    * todo #27 (child-extension-missing diagnostic, session-driver.ts +
    * src/child/activation-signal.ts): emitted synchronously by
    * `PiSessionDriver.bind()` when this run's child session never activated
@@ -664,6 +680,42 @@ export type SetModelOutcome =
   | { ok: false; reason: "timeout" }
   /** pi refused the switch (e.g. no API key for the provider). */
   | { ok: false; reason: "rejected"; detail: string };
+
+/**
+ * fleet-drawer plan §4.1 (#7): the synchronous registration verdict of
+ * `RuntimeRunner.observeRun` / `Runner.observe` / `QueryService.observe`.
+ * Defined here (not in runtime/runner.ts) for the same reason as
+ * SetModelOutcome above: core has no pi imports (I1) and runner / ports /
+ * query-service / the web-hub read port (F2) all share it.
+ *
+ * - `attached`: the observer is live on the run's current session; `detach()`
+ *   cancels the subscription WITHOUT firing `onEnd` (idempotent);
+ * - `terminal`: the run is already terminal — nothing was registered, the
+ *   caller reads the final state on its own;
+ * - `no_session`: the run exists and is non-terminal but has no observable
+ *   session right now (still queued / creating, handle lacks `observe`, or
+ *   the per-run observer cap (16) is exhausted);
+ * - `unknown`: no such run in this runner.
+ */
+export type ObserveRunResult =
+  | { kind: "attached"; detach(): void }
+  | { kind: "terminal"; status: string }
+  | { kind: "no_session" }
+  | { kind: "unknown" };
+/**
+ * fleet-drawer plan §4.1 (#7): the listener half of observeRun. `onEvent`
+ * receives the session's raw stream events (opaque `unknown` — I1);
+ * `onEnd(status)` fires EXACTLY ONCE per successful attach, either from the
+ * terminal dispatch (the linearization point: the central dispatch where
+ * `wasTerminal === false && terminal(state.status)`) or from the runner's
+ * finally cleanup as a fallback, whichever wins — a per-observer `done`
+ * flag guarantees the exactly-once contract across the two racing paths.
+ * Every listener callback is exception-swallowed by the runner.
+ */
+export interface RunObserverListener {
+  onEvent(e: unknown): void;
+  onEnd(status: string): void;
+}
 
 /** v1 只有工具一个来源（D-13）；预留联合类型扩展位。 */
 export type ExtendSource = "tool";
@@ -856,6 +908,16 @@ export interface RunDiagnostics {
    * or the feature never fired (e.g. the run never bound a session).
    */
   exitFacts?: RunExitFacts;
+  /**
+   * fleet-drawer plan §4.1 (review blocker #1): the session leaf id at the
+   * run's seal moment, written exactly once per (runId, generation) by the
+   * `final_leaf` session_event branch in reduce() (metadata-only patch,
+   * same family as `exitFacts` above). Absent when the run never bound a
+   * session, the handle/driver does not expose `getLeafId`, or the read
+   * threw — consumers must treat absence as the determined `leaf_unknown`
+   * error, never guess a fallback leaf.
+   */
+  finalLeafId?: string;
   /**
    * child-context-switch plan P0 (§2.3.1/§2.4): best-effort diagnostics for
    * the child-session switch_context boundary-draft feature (owned by a

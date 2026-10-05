@@ -645,6 +645,21 @@ export function reduce(
     return terminal(state.status)
       ? { state, effects: [] }
       : { state: { ...state, diag: { ...state.diag, exitFacts: input.event.facts } }, effects: [] };
+  // fleet-drawer plan §4.1 (review blocker #1): final_leaf is the sibling
+  // metadata-only session_event of exit_facts above, dispatched by the same
+  // `sealBeforeTerminal` point (strictly BEFORE the `if (facts === undefined)
+  // return;` gate in the runner, so a run without bash facts still gets its
+  // leaf). Identical shape and placement rules as exit_facts: after the
+  // generation check (a stale-generation final_leaf only bumps staleInputs
+  // via the branch above), before effect_failed and the terminal()
+  // dispatch — a terminal run gets an EXPLICIT reference-equal no-op
+  // (bypassing terminalUpdate), a non-terminal run gets a pure diag patch
+  // (P15a-style: lastEventAt/lastEventType and every other field untouched).
+  // Repeated insertion on the same non-terminal state takes the latter value.
+  if (input.kind === "session_event" && input.event.t === "final_leaf")
+    return terminal(state.status)
+      ? { state, effects: [] }
+      : { state: { ...state, diag: { ...state.diag, finalLeafId: input.event.leafId } }, effects: [] };
   // effect_failed is a recovery protocol, including after settlement. It must
   // run before the terminal read-only update so terminal effects can recover.
   if (input.kind === "effect_failed") return handleEffectFailed(state, input);

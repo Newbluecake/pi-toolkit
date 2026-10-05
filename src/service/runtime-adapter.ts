@@ -1042,6 +1042,17 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     steer(runId, text) {
       return runtime.steerRun(runId, text);
     },
+    // fleet-drawer plan §4.1: pure synchronous passthroughs to the runner's
+    // observeRun/peekRunBranch read port — the runner is the single source
+    // of truth for the four-state verdict and the branch snapshot (no
+    // registry cross-check here; a terminal run answers `terminal`/undefined
+    // by itself).
+    peekBranch(runId) {
+      return runtime.peekRunBranch(runId);
+    },
+    observe(runId, l) {
+      return runtime.observeRun(runId, l);
+    },
     setModel(runId, model, opts) {
       return runtime.setModelForRun(runId, model, opts ?? {});
     },

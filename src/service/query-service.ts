@@ -3,7 +3,9 @@ import type { Clock } from "../core/clock.js";
 import type {
   ExtendOutcome,
   ExtendSource,
+  ObserveRunResult,
   RunId,
+  RunObserverListener,
   RunOutcome,
   RunPhase,
   RunSnapshot,
@@ -31,6 +33,22 @@ export interface QueryService {
     runId: RunId,
     text: string,
   ): Promise<{ ok: true } | { ok: false; reason: "not_running" | "steer_timeout" | "steer_rejected"; detail?: string }>;
+  /**
+   * fleet-drawer plan §4.1: read-only peek at a running run's current
+   * persisted branch, for live-run transcript snapshots. `undefined` when
+   * the runner cannot serve it (unknown/terminal/handle-less run, or the
+   * runner predates the read port) — the caller re-reads run info and takes
+   * the terminal/file path in that case. Signatures use `unknown` (I1).
+   */
+  branchOf?(runId: RunId): readonly unknown[] | undefined;
+  /**
+   * fleet-drawer plan §4.1 (#7): attach a live observer to a running run's
+   * session stream. Synchronous four-state verdict (attached/terminal/
+   * no_session/unknown); `no_session` when the runner does not implement the
+   * read port at all. `onEnd` exactly once per attach; detach never fires
+   * onEnd. Signatures use `unknown` (I1).
+   */
+  observe?(runId: RunId, l: RunObserverListener): ObserveRunResult;
   /** set_model: mid-run model switch for a running run (plan §4.6). */
   setModel(
     runId: RunId,
@@ -135,6 +153,11 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
         return { ok: false, reason: "steer_rejected", detail: error instanceof Error ? error.message : String(error) };
       }
     },
+    // fleet-drawer plan §4.1: pure passthroughs — the runner is the single
+    // source of truth for both (four-state verdict / branch availability);
+    // no registry pre-check that could diverge from the runner's own view.
+    branchOf: (id) => deps.runner.peekBranch?.(id),
+    observe: (id, l) => deps.runner.observe?.(id, l) ?? { kind: "no_session" },
     async setModel(id, model, opts) {
       const snapshot = deps.registry.get(id);
       if (!snapshot || snapshot.status !== "running" || !deps.runner.setModel)
