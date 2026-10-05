@@ -163,6 +163,29 @@
   user-select: all; /* fallback copy path: navigator.clipboard is unavailable on plain-HTTP LAN */
 }
 
+/* ≤1024px field-report fix (2026-10-05): inside the header's minmax(180px,1fr) column the open
+ * kv panel's value cell was crushed to char-per-line wrapping. The OPEN details spans both
+ * columns (the summary keeps full width too — metrics drop to their own row, same as ≤480px),
+ * and each kv row stacks: label on its own line, value + copy button below. */
+@media (max-width: 1024px) {
+  .session-info[open] {
+    grid-column: 1 / -1;
+  }
+
+  .kv {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .kv dt {
+    grid-column: 1 / -1;
+    padding-top: var(--sp-2);
+  }
+
+  .kv dd {
+    padding: 0 0 var(--sp-2);
+  }
+}
+
 /* ≤480px the wrap is the sunken box; ≥481px (below) the box look moves off again and the wrap
  * becomes a plain grid item, identical to the pre-fold `.metrics` placement. */
 .metrics-wrap {
