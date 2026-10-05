@@ -147,6 +147,13 @@ if (authMode !== "unknown") {
 
 const route = hashRoute?.route;
 const conn = computed<ConnState>(() => hub?.state.value.conn ?? "connecting");
+
+/** Password mode only: the very first "connecting" tick must NOT flash the sign-in form — with
+ * a valid session cookie the SSE handshake resolves in a few hundred ms, so every refresh used
+ * to show the form for a blink (user field report 2026-10-05). Show a neutral boot splash until
+ * auth resolves (open/reconnecting ⇒ dashboard, "auth" ⇒ the form). "connecting" never recurs
+ * after boot (drops go "reconnecting"), so this is strictly boot-only. */
+const booting = computed(() => authMode === "password" && conn.value === "connecting");
 // C5: control negotiated (hub caps include cmd.v1) ⇒ persistent ControlNotice + Control chip.
 const controlOn = computed(() => hub?.state.value.control === true);
 const hubVersion = computed<string | null>(() => {
@@ -230,6 +237,10 @@ onUnmounted(() => {
       <ControlNotice v-if="controlOn" />
       <NoticeStack :notices="globalNotices" @action="() => {}" />
       <DashboardView :hub="hub!" :route="route!" />
+    </div>
+    <div v-else-if="booting" class="boot-splash" role="status">
+      <span class="boot-spinner" aria-hidden="true"></span>
+      <span class="sr-only">{{ t("shell.booting") }}</span>
     </div>
     <LoginView
       v-else-if="authMode === 'password'"

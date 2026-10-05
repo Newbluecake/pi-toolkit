@@ -103,12 +103,13 @@ describe("App.vue auth-mode gate (vue-plan.md v2.1 §1.1, §5.2)", () => {
     wrapper.unmount();
   });
 
-  it("password mode before authentication: shows the login form, not the dashboard shell", async () => {
+  it("password mode's first connecting tick shows a boot splash (no sign-in form flash), not the dashboard", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     setAuthMode("password");
     const wrapper = mount(App);
     await flush();
-    expect(wrapper.find("form.form").exists()).toBe(true);
+    expect(wrapper.find(".boot-splash").exists()).toBe(true);
+    expect(wrapper.find("form.form").exists()).toBe(false);
     expect(wrapper.find(".topbar").exists()).toBe(false);
     wrapper.unmount();
   });

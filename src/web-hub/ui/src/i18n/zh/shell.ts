@@ -15,6 +15,7 @@ const shell = {
   "conn.open": "在线",
   "conn.reconnecting": "重新连接中…",
   "conn.auth": "已注销",
+  booting: "加载中…",
   "theme.system": "跟随系统",
   "theme.light": "浅色",
   "theme.dark": "暗色",

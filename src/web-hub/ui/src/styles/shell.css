@@ -321,3 +321,23 @@
     height: 44px;
   }
 }
+
+/* boot splash — password mode's first "connecting" tick shows this neutral spinner instead of
+ * flashing the sign-in form on every refresh (user field report 2026-10-05; `spin` keyframes
+ * live in primitives.css). */
+.boot-splash {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-bg);
+}
+
+.boot-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--c-border);
+  border-top-color: var(--c-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}

@@ -12,6 +12,7 @@ const shell = {
   "conn.open": "Live",
   "conn.reconnecting": "Reconnecting…",
   "conn.auth": "Signed out",
+  booting: "Loading…",
   "theme.system": "System",
   "theme.light": "Light",
   "theme.dark": "Dark",
