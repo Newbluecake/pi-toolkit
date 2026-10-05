@@ -23,7 +23,7 @@
  * All timers (`setTimeout`) are `unref()`'d so a pending respawn/ready-timeout can never wedge
  * a print-mode hub shutdown.
  */
-import { type ChildProcess, spawn as defaultSpawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { NdjsonDecoder } from "../../protocol/ndjson.js";
 import type { HubLog } from "../ports.js";
 import type { ReqDeadline } from "../req-deadline.js";
@@ -51,7 +51,7 @@ export interface ReaperDeps {
   log: HubLog;
   now?: () => number;
   /** Injectable for tests; defaults to `node:child_process`'s `spawn`. */
-  spawnFn?: typeof defaultSpawn;
+  spawnFn?: typeof spawn;
   /** Injectable for tests; defaults to `buildReaperSource()` (real arch §7.3 timings). */
   script?: string;
   readyTimeoutMs?: number;
@@ -86,10 +86,23 @@ export interface Reaper {
   onRestart(cb: () => void): () => void;
 }
 
+/** `as`-free structural shim: a pipe that happens to carry `unref` (the runtime net.Socket)
+ *  gets unref'd; the plain-stream ChildProcess typing is silent about it — exactly what we want
+ *  (weak-typing rules forbid passing a `Writable` where `{unref?}` is declared, so narrow at
+ *  runtime instead). */
+function unrefQuietly(s: unknown): void {
+  if (typeof s === "object" && s !== null && "unref" in s && typeof s.unref === "function") s.unref();
+}
+
+/** The ready-handshake frame, narrowed without a cast (`hub/spawn/**` zero-`as` contract). */
+function isReadyFrame(v: unknown): boolean {
+  return typeof v === "object" && v !== null && "ok" in v && v.ok === "ready";
+}
+
 export function createReaper(deps: ReaperDeps): Reaper {
   const log = deps.log;
   const now = deps.now ?? Date.now;
-  const spawnFn = deps.spawnFn ?? defaultSpawn;
+  const spawnFn = deps.spawnFn ?? spawn;
   const script = deps.script ?? buildReaperSource();
   const readyTimeoutMs = deps.readyTimeoutMs ?? REAPER_READY_TIMEOUT_MS;
   const backoffMs = deps.backoffMs ?? DEFAULT_REAPER_BACKOFF_MS;
@@ -206,8 +219,8 @@ export function createReaper(deps: ReaperDeps): Reaper {
     c.unref();
     // Pipes are net.Socket instances at runtime (they carry unref); the ChildProcess typings
     // expose them as plain streams, so go through a narrow structural view.
-    (c.stdin as unknown as { unref?: () => void } | null)?.unref?.();
-    (c.stdout as unknown as { unref?: () => void } | null)?.unref?.();
+    unrefQuietly(c.stdin);
+    unrefQuietly(c.stdout);
 
     let readySettled = false;
     let readyOk = false;
@@ -232,9 +245,8 @@ export function createReaper(deps: ReaperDeps): Reaper {
     const dec = new NdjsonDecoder({
       maxFrameBytes: 64 * 1024,
       onFrame: (value) => {
-        const frame = value as { ok?: unknown };
         if (!readySettled) {
-          if (frame !== null && typeof frame === "object" && frame.ok === "ready") {
+          if (isReadyFrame(value)) {
             settleReady(true);
           } else {
             log.warn("web-hub spawn reaper: unexpected first frame", { frame: value });

@@ -21,14 +21,7 @@
  * ("budget 0: still one synchronous persist"): losing the final terminal state would orphan the
  * record, which is the worse failure.
  */
-import {
-  readFileSync as fsReadFileSync,
-  readdirSync as fsReaddirSync,
-  renameSync as fsRenameSync,
-  statSync as fsStatSync,
-  unlinkSync as fsUnlinkSync,
-  writeFileSync as fsWriteFileSync,
-} from "node:fs";
+import { readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import {
   SPAWN_NONTERMINAL_MAX,
@@ -157,12 +150,12 @@ export interface SyncFs {
 }
 
 const REAL_SYNC_FS: SyncFs = {
-  readFileSync: (p, o) => fsReadFileSync(p, o),
-  writeFileSync: (p, d, o) => fsWriteFileSync(p, d, o),
-  renameSync: (f, t) => fsRenameSync(f, t),
-  unlinkSync: (p) => fsUnlinkSync(p),
-  statSync: (p) => fsStatSync(p),
-  readdirSync: (p) => fsReaddirSync(p),
+  readFileSync: (p, o) => readFileSync(p, o),
+  writeFileSync: (p, d, o) => writeFileSync(p, d, o),
+  renameSync: (f, t) => renameSync(f, t),
+  unlinkSync: (p) => unlinkSync(p),
+  statSync: (p) => statSync(p),
+  readdirSync: (p) => readdirSync(p),
 };
 
 // ---------------------------------------------------------------------------
@@ -224,42 +217,75 @@ export interface FileEnvelope {
 // be trusted for signals (plan §SP5 "解析失败 ⇒ corrupt").
 // ---------------------------------------------------------------------------
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 function isRecordShapeOk(v: unknown): v is StoredRecord {
-  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
-  const r = v as Record<string, unknown>;
-  if (typeof r.spawnId !== "string" || r.spawnId.length === 0) return false;
-  if (typeof r.state !== "string" || !ALL_STATES.has(r.state)) return false;
-  if (typeof r.cwd !== "string") return false;
-  if (!Number.isFinite(r.dev) || !Number.isFinite(r.ino)) return false;
-  if (!Number.isFinite(r.createdAt) || !Number.isFinite(r.updatedAt)) return false;
-  const owner = r.owner;
-  if (owner === null || typeof owner !== "object" || Array.isArray(owner)) return false;
-  const o = owner as Record<string, unknown>;
-  if ((o.listener !== "loopback" && o.listener !== "lan") || typeof o.reqId !== "string" || o.reqId.length === 0) {
+  if (!isRecord(v)) return false;
+  const spawnId = v["spawnId"];
+  if (typeof spawnId !== "string" || spawnId.length === 0) return false;
+  const state = v["state"];
+  if (typeof state !== "string" || !ALL_STATES.has(state)) return false;
+  if (typeof v["cwd"] !== "string") return false;
+  const dev = v["dev"];
+  const ino = v["ino"];
+  if (typeof dev !== "number" || !Number.isFinite(dev) || typeof ino !== "number" || !Number.isFinite(ino)) {
     return false;
   }
-  if (o.user !== undefined && o.user !== null && typeof o.user !== "string") return false;
-  if (r.pid !== undefined && !Number.isFinite(r.pid)) return false;
-  if (r.procStartTicks !== undefined && !Number.isFinite(r.procStartTicks)) return false;
-  if (r.uid !== undefined && !Number.isFinite(r.uid)) return false;
-  if (r.bootId !== undefined && typeof r.bootId !== "string") return false;
-  if (r.agentKey !== undefined && typeof r.agentKey !== "string") return false;
-  if (r.stderrLog !== undefined && typeof r.stderrLog !== "string") return false;
-  if (r.endReason !== undefined && r.endReason !== null && !END_REASONS.has(String(r.endReason))) return false;
-  if (r.hint !== undefined && r.hint !== null && !HINTS.has(String(r.hint))) return false;
-  if (r.exit !== undefined && r.exit !== null) {
-    const ex = r.exit as Record<string, unknown>;
-    if (ex === null || typeof ex !== "object" || Array.isArray(ex)) return false;
-    if (ex.code !== null && !Number.isFinite(ex.code as number)) return false;
-    if (ex.signal !== null && typeof ex.signal !== "string") return false;
-    if (ex.unconfirmed !== undefined && ex.unconfirmed !== true) return false;
+  const createdAt = v["createdAt"];
+  const updatedAt = v["updatedAt"];
+  if (
+    typeof createdAt !== "number" ||
+    !Number.isFinite(createdAt) ||
+    typeof updatedAt !== "number" ||
+    !Number.isFinite(updatedAt)
+  ) {
+    return false;
   }
-  if (r.firstPrompt !== undefined) {
-    const fp = r.firstPrompt as Record<string, unknown>;
-    if (fp === null || typeof fp !== "object" || Array.isArray(fp)) return false;
-    if (typeof fp.state !== "string" || !FIRST_PROMPT_STATES.has(fp.state)) return false;
-    if (!Number.isFinite(fp.textLen as number)) return false;
-    if (fp.attempts !== undefined && !Number.isFinite(fp.attempts as number)) return false;
+  const owner = v["owner"];
+  if (!isRecord(owner)) return false;
+  const listener = owner["listener"];
+  const reqId = owner["reqId"];
+  if ((listener !== "loopback" && listener !== "lan") || typeof reqId !== "string" || reqId.length === 0) {
+    return false;
+  }
+  const user = owner["user"];
+  if (user !== undefined && user !== null && typeof user !== "string") return false;
+  const pid = v["pid"];
+  if (pid !== undefined && (typeof pid !== "number" || !Number.isFinite(pid))) return false;
+  const procStartTicks = v["procStartTicks"];
+  if (procStartTicks !== undefined && (typeof procStartTicks !== "number" || !Number.isFinite(procStartTicks))) {
+    return false;
+  }
+  const uid = v["uid"];
+  if (uid !== undefined && (typeof uid !== "number" || !Number.isFinite(uid))) return false;
+  if (v["bootId"] !== undefined && typeof v["bootId"] !== "string") return false;
+  if (v["agentKey"] !== undefined && typeof v["agentKey"] !== "string") return false;
+  if (v["stderrLog"] !== undefined && typeof v["stderrLog"] !== "string") return false;
+  const endReason = v["endReason"];
+  if (endReason !== undefined && endReason !== null && !END_REASONS.has(String(endReason))) return false;
+  const hint = v["hint"];
+  if (hint !== undefined && hint !== null && !HINTS.has(String(hint))) return false;
+  const exit = v["exit"];
+  if (exit !== undefined && exit !== null) {
+    if (!isRecord(exit)) return false;
+    const code = exit["code"];
+    if (code !== null && (typeof code !== "number" || !Number.isFinite(code))) return false;
+    const signal = exit["signal"];
+    if (signal !== null && typeof signal !== "string") return false;
+    const unconfirmed = exit["unconfirmed"];
+    if (unconfirmed !== undefined && unconfirmed !== true) return false;
+  }
+  const firstPrompt = v["firstPrompt"];
+  if (firstPrompt !== undefined) {
+    if (!isRecord(firstPrompt)) return false;
+    const fpState = firstPrompt["state"];
+    if (typeof fpState !== "string" || !FIRST_PROMPT_STATES.has(fpState)) return false;
+    const textLen = firstPrompt["textLen"];
+    if (typeof textLen !== "number" || !Number.isFinite(textLen)) return false;
+    const attempts = firstPrompt["attempts"];
+    if (attempts !== undefined && (typeof attempts !== "number" || !Number.isFinite(attempts))) return false;
   }
   return true;
 }
@@ -277,7 +303,8 @@ function recordAgeKey(r: StoredRecord, terminal: boolean): number {
 function capGroup(records: readonly StoredRecord[], terminal: boolean, max: number): StoredRecord[] {
   const members: Array<{ key: number; i: number }> = [];
   for (let i = 0; i < records.length; i++) {
-    const r = records[i] as StoredRecord;
+    const r = records[i];
+    if (r === undefined) continue; // noUncheckedIndexedAccess guard; unreachable for i < length
     if (isTerminalSpawnState(r.state) === terminal) members.push({ key: recordAgeKey(r, terminal), i });
   }
   if (members.length <= max) return [...records];
@@ -350,8 +377,16 @@ export function createSpawnStore(deps: SpawnStoreDeps): SpawnStore {
   }
 
   function errCode(err: unknown): string {
-    const code = (err as { code?: unknown } | null)?.code;
-    return typeof code === "string" && code.length > 0 ? code : "E_IO";
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      typeof err.code === "string" &&
+      err.code.length > 0
+    ) {
+      return err.code;
+    }
+    return "E_IO";
   }
 
   function bestEffortUnlink(path: string): void {
@@ -438,23 +473,35 @@ export function createSpawnStore(deps: SpawnStoreDeps): SpawnStore {
       let loadedWriter: WriterInfo | undefined;
       let loadedRecords: StoredRecord[];
       try {
-        const v: unknown = JSON.parse(raw);
-        if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("not-an-object");
-        const env = v as Record<string, unknown>;
-        if (env.v !== SPAWNS_FILE_VERSION || !Array.isArray(env.records)) throw new Error("bad-envelope");
-        if (!env.records.every(isRecordShapeOk)) throw new Error("bad-record");
-        if (
-          env.writer !== undefined &&
-          (env.writer === null ||
-            typeof env.writer !== "object" ||
-            !Number.isFinite((env.writer as Record<string, unknown>).pid as number) ||
-            !Number.isFinite((env.writer as Record<string, unknown>).startedAt as number))
-        ) {
-          throw new Error("bad-writer");
+        const parsed: unknown = JSON.parse(raw);
+        if (!isRecord(parsed)) throw new Error("not-an-object");
+        if (parsed["v"] !== SPAWNS_FILE_VERSION || !Array.isArray(parsed["records"])) {
+          throw new Error("bad-envelope");
         }
-        loadedGen = Number.isFinite(env.gen as number) ? (env.gen as number) : undefined;
-        loadedWriter = env.writer as WriterInfo | undefined;
-        loadedRecords = env.records as StoredRecord[];
+        const rawRecords: unknown[] = parsed["records"];
+        loadedRecords = [];
+        for (const item of rawRecords) {
+          if (!isRecordShapeOk(item)) throw new Error("bad-record");
+          loadedRecords.push(item);
+        }
+        const rawWriter = parsed["writer"];
+        if (rawWriter !== undefined) {
+          if (!isRecord(rawWriter)) throw new Error("bad-writer");
+          const wPid = rawWriter["pid"];
+          const wStarted = rawWriter["startedAt"];
+          if (
+            typeof wPid !== "number" ||
+            !Number.isFinite(wPid) ||
+            typeof wStarted !== "number" ||
+            !Number.isFinite(wStarted)
+          ) {
+            throw new Error("bad-writer");
+          }
+          const wBoot = rawWriter["bootId"];
+          loadedWriter = { pid: wPid, startedAt: wStarted, bootId: typeof wBoot === "string" ? wBoot : "" };
+        }
+        const rawGen = parsed["gen"];
+        loadedGen = typeof rawGen === "number" && Number.isFinite(rawGen) ? rawGen : undefined;
       } catch (err) {
         renameToCorrupt();
         log.warn("spawn store: corrupt spawns.json renamed, starting empty", {

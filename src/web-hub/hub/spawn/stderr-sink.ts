@@ -18,13 +18,8 @@
  * the in-flight write, if any, eventually lands. All of this is deliberate about the #10 hard
  * gate: nothing here allocates proportionally to stderr volume.
  */
-import {
-  mkdirSync as fsMkdirSync,
-  readdirSync as fsReaddirSync,
-  statSync as fsStatSync,
-  unlinkSync as fsUnlinkSync,
-} from "node:fs";
-import { open as fsOpen } from "node:fs/promises";
+import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { open } from "node:fs/promises";
 import {
   STDERR_FILE_MAX,
   STDERR_FILES_MAX,
@@ -55,12 +50,12 @@ export interface StderrFs {
 }
 
 const REAL_STDERR_FS: StderrFs = {
-  mkdirSync: (d, o) => fsMkdirSync(d, o),
-  readdirSync: (d) => fsReaddirSync(d),
-  statSync: (p) => fsStatSync(p),
-  unlinkSync: (p) => fsUnlinkSync(p),
+  mkdirSync: (d, o) => mkdirSync(d, o),
+  readdirSync: (d) => readdirSync(d),
+  statSync: (p) => statSync(p),
+  unlinkSync: (p) => unlinkSync(p),
   open: (p, mode) =>
-    fsOpen(p, "a", mode).then((h) => ({
+    open(p, "a", mode).then((h) => ({
       write: (buf: Uint8Array) => h.write(buf).then(() => undefined),
       close: () => h.close(),
     })),
@@ -236,8 +231,16 @@ export function createStderrSink(deps: StderrSinkDeps): StderrSink {
   }
 
   function errCode(err: unknown): string {
-    const code = (err as { code?: unknown } | null)?.code;
-    return typeof code === "string" && code.length > 0 ? code : "E_IO";
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      typeof err.code === "string" &&
+      err.code.length > 0
+    ) {
+      return err.code;
+    }
+    return "E_IO";
   }
 
   function closeHandle(): void {
