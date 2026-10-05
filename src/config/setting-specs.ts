@@ -447,16 +447,31 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "sessionNav.enabled",
     "Session navigation: /resume-recent 48h window, /clear, bare exit, resume-list titles",
   ),
-  // 会话标题模型生成（任务 #12）：仅两个键，非 live（activate 时捕获，改后 /reload）。
+  // 会话标题模型生成 v2（任务 #12 + 随任务动态刷新）：全部非 live（activate 时捕获，改后 /reload）。
   "title.enabled": bool(
     "title.enabled",
-    "Auto-generate a short session title from the first user message (main session only, silent on failure)",
+    "Auto-generate and refresh a short session title as the task progresses (main session only, silent on failure)",
   ),
   "title.model": {
     kind: "string",
     path: "title.model",
     description: 'Strict provider/id for title generation, or "" to follow the session model',
   },
+  "title.refreshEveryInputs": count(
+    "title.refreshEveryInputs",
+    0,
+    "Refresh the title once this many new user inputs land since the last generation; 0 disables this trigger",
+  ),
+  "title.refreshAfterMinutes": count(
+    "title.refreshAfterMinutes",
+    0,
+    "Refresh the title once >=1 new input and this many cumulative agent-run minutes have passed; 0 disables this trigger",
+  ),
+  "title.maxRefreshes": count(
+    "title.maxRefreshes",
+    0,
+    "Max refreshes per session (not counting the first title); 0 = first title only, never refresh",
+  ),
   // Merged armory-memory (memory-plan §3.3): all nine keys are non-live
   // (captured at activate; change → /reload). byteCap needs a max that
   // count() cannot express (Nit 1) ⇒ spread + override.

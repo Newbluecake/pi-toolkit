@@ -518,11 +518,13 @@ export interface SystemPromptSettings {
 }
 
 /**
- * 会话标题模型生成（任务 #12）：会话未命名时用首条用户消息生成 ≤20 字标题
- * 并 setSessionName（TUI resume 列表与 web-hub 列表/详情自动受益）。仅两个键
- * （用户拍板的最小面）；失败静默、单会话只生成一次、子会话不触发由模块
- * 不变量保证（src/title/title.ts），不是设置项。逐字段容错解析见
- * parseTitleSettings（never throws）。
+ * 会话标题模型生成 v2（任务 #12 + 随任务动态刷新，r1 评审裁定）：会话未命名时
+ * 用 before_agent_start 生成 ≤20 字首标；之后按里程碑（新增用户输入数/累计
+ * 运行时长）在 agent_settled 刷新——但只刷新自己写的标题，用户 /name 过的
+ * 永久不再动。`enabled`/`model` 是 v1 既有两键，三个新键是刷新里程碑/额度。
+ * 失败静默、在途互斥、过期结果隔离、所有权判定由模块不变量保证
+ * （src/title/title.ts），不是设置项。逐字段容错解析见 parseTitleSettings
+ * （never throws）。非 live（activate 时捕获，改后 /reload）。
  */
 export interface TitleSettings {
   /** 总开关。false = 不注册任何 handler（行为与功能不存在时逐字节相同）。Default true。 */
@@ -535,6 +537,12 @@ export interface TitleSettings {
    * 当前会话模型（memory.tidy.model 同款约定）。
    */
   model: string;
+  /** 自上次生成以来新增用户输入数达到此值即可刷新；0 = 关闭此条件。默认 4。 */
+  refreshEveryInputs: number;
+  /** 新增用户输入 ≥1 且累计运行时长（分钟）达到此值即可刷新；0 = 关闭此条件。默认 15。 */
+  refreshAfterMinutes: number;
+  /** 每会话刷新上限（不含首标）；0 = 只首标不刷新。默认 5。 */
+  maxRefreshes: number;
 }
 
 export interface AgentSettings {
@@ -938,7 +946,13 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   },
   reload: { defer: true },
   systemPrompt: { wakeReplay: true, mode: "stable", adoptForeignForcedPrompt: false },
-  title: { enabled: true, model: "zai-coding-cn/glm-5.3-flash" },
+  title: {
+    enabled: true,
+    model: "zai-coding-cn/glm-5.3-flash",
+    refreshEveryInputs: 4,
+    refreshAfterMinutes: 15,
+    maxRefreshes: 5,
+  },
 };
 /** Parse the optional `agent` settings block (L1). Field-by-field fallback to defaults, never throws. */
 export function parseAgentDispatchSettings(input: unknown): AgentDispatchSettings {
@@ -1854,16 +1868,21 @@ export function parseSystemPromptSettings(input: unknown): SystemPromptSettings 
   };
 }
 
-/** Parse the optional `title` settings block（任务 #12）：逐字段回退默认，never throws；model 串只 trim 不校验——strict 校验在运行时 parseStrictModelRef，解析失败自行回落会话模型。 */
+/** Parse the optional `title` settings block（任务 #12 + v2）：逐字段回退默认，never throws；model 串只 trim 不校验——strict 校验在运行时 parseStrictModelRef，解析失败自行回落会话模型。三个新计数键（r1 #12）：`Number.isSafeInteger(x) && x >= 0` 否则回默认；字符串数字（如 "4"）不接受。 */
 export function parseTitleSettings(input: unknown): TitleSettings {
   const defaults = DEFAULT_SETTINGS.title;
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const value = input as Record<string, unknown>;
+  const nonNegativeInt = (raw: unknown, fallback: number): number =>
+    typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : fallback;
   return {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
     // 空串是合法哨兵（跟随会话模型）：保留；非字符串回默认。运行时 strict 解析
     // 失败/找不到 provider 也自行回落会话模型（见 TitleSettings.model 注释）。
     model: typeof value.model === "string" ? value.model.trim() : defaults.model,
+    refreshEveryInputs: nonNegativeInt(value.refreshEveryInputs, defaults.refreshEveryInputs),
+    refreshAfterMinutes: nonNegativeInt(value.refreshAfterMinutes, defaults.refreshAfterMinutes),
+    maxRefreshes: nonNegativeInt(value.maxRefreshes, defaults.maxRefreshes),
   };
 }
 

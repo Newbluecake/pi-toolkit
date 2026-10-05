@@ -871,10 +871,17 @@ export default function activate(rawPi: ExtensionAPI): void {
   // Session navigation: main-session TUI only (custom editor, session picker).
   // Post-guard like the HUD; self-gates the editor install on ctx.mode.
   if (settings.sessionNav.enabled) wireSessionNav(pi);
-  // 会话标题模型生成（任务 #12）：post-guard = 仅主会话（TUI+RPC+json；子会话
-  // print 模式在 HOST_KEY 早退，结构上不可达）；wireTitle 再自查 isChildSession
-  // 作双保险。失败静默、单会话一次、已有名字跳过均由模块不变量保证。
-  if (settings.title.enabled) wireTitle(pi, { isChildSession, model: settings.title.model });
+  // 会话标题模型生成 v2（任务 #12 + 随任务动态刷新）：post-guard = 仅主会话（TUI+RPC+json；子会话
+  // print 模式在 HOST_KEY 早退，结构上不可达）；wireTitle 再自查 isChildSession 作双保险。
+  // 失败静默、在途互斥、过期结果隔离、所有权判定均由模块不变量保证。
+  if (settings.title.enabled)
+    wireTitle(pi, {
+      isChildSession,
+      model: settings.title.model,
+      refreshEveryInputs: settings.title.refreshEveryInputs,
+      refreshAfterMinutes: settings.title.refreshAfterMinutes,
+      maxRefreshes: settings.title.maxRefreshes,
+    });
   // Deferred /reload: main-session only (post-guard). MUST be wired after
   // wireSessionNav — pi dispatches session_start handlers in registration
   // order, and this one's editor install reads getEditorComponent() to wrap
