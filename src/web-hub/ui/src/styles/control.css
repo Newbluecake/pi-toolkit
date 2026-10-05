@@ -95,7 +95,7 @@
 /* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
  * no padding). `:has` keeps the component itself free of any padding logic. */
 .composer-input:has(.ctx-ring) textarea {
-  padding-right: 44px;
+  padding-right: 58px;
 }
 
 .ctx-ring {
@@ -133,13 +133,13 @@
 .ctx-ring-track {
   fill: none;
   stroke: var(--c-border);
-  stroke-width: 3.5;
+  stroke-width: 4.5;
 }
 
 .ctx-ring-bar {
   fill: none;
   stroke: var(--c-primary);
-  stroke-width: 3.5;
+  stroke-width: 4.5;
   stroke-linecap: round;
   transition: stroke var(--dur-base) var(--ease-out);
 }

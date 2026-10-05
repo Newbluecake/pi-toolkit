@@ -35,9 +35,9 @@ const subCost = computed(() => {
   return typeof sub === "number" && sub > 0 ? sub : null;
 });
 
-/* Fixed-px geometry (see the header comment): r=12 / stroke 3.5 inside a 30×30 viewBox.
+/* Fixed-px geometry (see the header comment): r=21 / stroke 4.5 inside a 50×50 viewBox (2026-10-05: +20px diameter per user).
  * (2026-10-05 field report: the original 22px ring read too small next to the input box.) */
-const R = 12;
+const R = 21;
 const CIRC = 2 * Math.PI * R;
 const dash = computed(() => {
   const p = percent.value;
@@ -96,9 +96,9 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       @click="open = !open"
       @keydown="onKeydown"
     >
-      <svg class="ctx-ring-svg" width="30" height="30" viewBox="0 0 30 30" aria-hidden="true" focusable="false">
-        <circle class="ctx-ring-track" cx="15" cy="15" :r="R" />
-        <circle class="ctx-ring-bar" cx="15" cy="15" :r="R" :stroke-dasharray="dash" transform="rotate(-90 15 15)" />
+      <svg class="ctx-ring-svg" width="50" height="50" viewBox="0 0 50 50" aria-hidden="true" focusable="false">
+        <circle class="ctx-ring-track" cx="25" cy="25" :r="R" />
+        <circle class="ctx-ring-bar" cx="25" cy="25" :r="R" :stroke-dasharray="dash" transform="rotate(-90 25 25)" />
       </svg>
     </button>
     <dl v-if="open" class="ctx-ring-panel" :aria-label="t('control.contextRingPanelAria')" @keydown="onKeydown">
