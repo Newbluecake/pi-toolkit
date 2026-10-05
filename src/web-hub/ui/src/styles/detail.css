@@ -312,11 +312,32 @@
     background: none;
   }
 
+  .detail-title {
+    font-size: var(--fs-xl);
+  }
+}
+
+/* 481–1024px mid-band (2026-10-05 field report: at 150%+ font scales the expanded metrics
+ * panel wraps into a misaligned label/value jumble): the phone-style fold stays available —
+ * the one-line summary chip lives in column 2, and EXPANDING it spans the panel full-width
+ * on its own row instead of squeezing into the auto column. */
+@media (min-width: 481px) and (max-width: 1024px) {
+  .metrics-wrap[data-collapsed="false"] {
+    grid-column: 1 / -1;
+    grid-row: auto;
+    align-self: stretch;
+    background: var(--c-sunken);
+    border-radius: var(--r-md);
+  }
+}
+
+/* ≥1025px desktop: fold inert — full metrics panel always visible, no summary chip. */
+@media (min-width: 1025px) {
   .metrics-summary {
     display: none;
   }
 
-  /* phones-only fold state is inert at/above 481px: the full panel always shows */
+  /* phones/mid-band fold state is inert here: the full panel always shows */
   .metrics-wrap[data-collapsed="true"] .metrics {
     display: flex;
   }
@@ -329,6 +350,11 @@
   .metric {
     justify-items: end;
   }
+
+  .metrics-wrap {
+    grid-row: 1 / span 2;
+  }
+}
 
   .detail-title {
     font-size: var(--fs-xl);
@@ -343,10 +369,6 @@
 
   .detail-head {
     padding-top: var(--sp-3);
-  }
-
-  .metrics-wrap {
-    grid-row: 1 / span 2;
   }
 }
 
