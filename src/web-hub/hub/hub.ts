@@ -25,14 +25,16 @@ import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import {
   ensurePrivateDir,
   resolveHubPaths,
+  webHubSpawnFiles,
   webHubUploadsDir,
   type HubPaths,
   type SocketIdentity,
 } from "../protocol/paths.js";
-import { PROTO, P2_HUB_CAPS, UPLOAD_HUB_CAPS, DIALOG_BG_HUB_CAPS } from "../protocol/version.js";
+import { PROTO, P2_HUB_CAPS, UPLOAD_HUB_CAPS, DIALOG_BG_HUB_CAPS, SPAWN_HUB_CAP } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
-import { auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
+import { auditSpawn, auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
+import { createCmdLimit } from "./cmd-limit.js";
 import { createCommandRouter } from "./commands.js";
 import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
 import { createHistoryService } from "./history.js";
@@ -41,6 +43,15 @@ import { createIdleMonitor } from "./idle.js";
 import { withDeadline, withSignal, createScope, type Scope } from "./lifecycle.js";
 import { createHubLog } from "./log.js";
 import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
+import { createReqDeadline, type ReqDeadline } from "./req-deadline.js";
+import { probePlatform, type PlatformProbeDeps } from "./spawn/config.js";
+import { createDirService } from "./spawn/dirs.js";
+import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/first-prompt.js";
+import type { SpawnFrontendPort } from "./spawn/ports.js";
+import { createReaper, type Reaper } from "./spawn/reaper.js";
+import { createSpawnRoutes } from "./spawn/routes.js";
+import { createSpawnStore } from "./spawn/store.js";
+import { createSpawnSupervisor, type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
 import { createUploadStore, type UploadStore } from "./uploads.js";
 import type {
   FrontendFactory,
@@ -76,7 +87,11 @@ export interface RunningHub {
   identity: SocketIdentity;
   lan?: import("./ports.js").LanFacade;
   lanStatus(): LanStatus | undefined;
-  close(reason: string): Promise<void>;
+  /** web-hub-spawn plan §SP10 (arch §7.6, review #4): optional per-call absolute deadline.
+   * The default (`HUB_CLOSE_DEADLINE_MS`) covers every legacy caller; `installProcessHandlers`'
+   * crash path passes a 2.5s deadline so the spawn subsystem's graded shutdown (wait budget 0 ⇒
+   * immediate SIGTERM + one synchronous persist) happens before the 3s hard exit. */
+  close(reason: string, opts?: { deadline?: ReqDeadline }): Promise<void>;
   readonly closed: Promise<string>;
 }
 
@@ -91,6 +106,10 @@ export const HUB_START_DEADLINE_MS = 20_000;
 export const HUB_CLOSE_DEADLINE_MS = 10_000;
 /** Per-step bound for cleanup/close steps; kept separate from the crash-only hard exit in `installProcessHandlers`. */
 const STEP_DEADLINE_MS = 3_000;
+/** web-hub-spawn plan §SP10: supervisor `init()`'s own startup budget (store load + orphan
+ * recovery + launcher check ≤1s + reaper ready ≤2s — see arch §4.2/§7.3), folded into the
+ * hub's overall `HUB_START_DEADLINE_MS` via `withSignal`. */
+const SPAWN_INIT_BUDGET_MS = 4_000;
 /** web-hub-upload plan §2.6 (U3): committed-file TTL sweep + `upload stats` aggregate row cadence. */
 const UPLOAD_SWEEP_TICK_MS = 30 * 60_000;
 /** §2.6: idle in-flight invalidation (10 min idle TTL) + dirty `referencedAt` flush retry cadence. */
@@ -109,6 +128,19 @@ export interface StartHubDeps {
    * 0o077 (`process.umask(0o077)`'s return value). SP10 hands it to the spawn supervisor, which
    * restores it around each fork so spawned pi processes keep the user's own umask. */
   childUmask?: number;
+  /** web-hub-spawn §SP10: test seams for the spawn assembly (production callers leave this
+   * undefined and get the real `probePlatform`/`createReaper`/`spawn`). `probe` feeds
+   * `probePlatform` (simulate non-Linux / broken procfs); `reaper`/`spawnFn` replace the real
+   * watchdog/fork; `wrapSupervisor`/`wrapFirstPrompt` let a test capture/spy on those surfaces
+   * (shutdown order/deadline, first-prompt freshness) without replacing them. Ignored entirely
+   * when `config.spawn` is undefined. */
+  spawnSeams?: {
+    probe?: PlatformProbeDeps;
+    reaper?: Reaper;
+    spawnFn?: SpawnSupervisorDeps["spawnFn"];
+    wrapSupervisor?: (sup: SpawnSupervisor) => SpawnSupervisor;
+    wrapFirstPrompt?: (fwd: FirstPromptForwarder) => FirstPromptForwarder;
+  };
 }
 
 export async function startHub(
@@ -157,14 +189,36 @@ export async function startHub(
     if (single.kind === "failed") throw new Error(`web-hub: ${single.error}`);
     const owner = single; // narrow once here; closures defined below (e.g. `close`) don't retain flow narrowing
     cleanup.push(() => owner.release());
+    // web-hub-spawn plan §SP10 (arch §7.1): `spawn.v1` rides BOTH cap surfaces whenever
+    // `config.spawn` exists — even when the platform probe or launcher check failed (the UI
+    // needs the cap to explain WHY spawn is unavailable, `GET /api/headless` carries the
+    // `policy.reason`). Absent (feature off) ⇒ caps stay byte-identical to pre-SP10.
+    const extraHubCaps: readonly string[] = config.spawn === undefined ? [] : [SPAWN_HUB_CAP];
 
     let supersede: SupersedeController | undefined;
+    // web-hub-spawn plan §SP10: the spawn assembly handles, declared early (same lazy-closure
+    // pattern as `supersede`) — the registry's `onVersion` below reads `spawnSup` long before
+    // the assembly itself is constructed further down (after `commandRouter`).
+    let spawnSup: SpawnSupervisor | undefined;
+    let spawnRoutes: SpawnFrontendPort | undefined;
+    let firstPromptFwd: FirstPromptForwarder | undefined;
     let recoverRotateOnHello: (() => void) | undefined;
     const registry = createRegistry({
       now,
       log,
       hubVersion: config.pluginVersion,
-      onVersion: (pluginVersion, agentKey) => supersede?.observe(pluginVersion, agentKey),
+      // web-hub-spawn plan §SP10 (arch §4.3 “版本观察”): a MANAGED agent's plugin version never
+      // reaches `supersede.observe` — a hub-spawned agent that merely loaded a newer pi-toolkit
+      // (settings.json pointing at a newer package) would otherwise trigger a hub version
+      // replacement that ends its own session with the stdin EOF; it only records a
+      // `hint:"newer-plugin"` on the spawn record instead.
+      onVersion: (pluginVersion, agentKey) => {
+        if (spawnSup?.isManaged(agentKey) === true) {
+          spawnSup.noteVersion(agentKey, pluginVersion);
+          return;
+        }
+        supersede?.observe(pluginVersion, agentKey);
+      },
       onTick: () => supersede?.tick(),
     });
     const history = createHistoryService({ registry, log });
@@ -221,6 +275,10 @@ export async function startHub(
       now,
       httpPort: () => httpPort,
       admin,
+      // web-hub-spawn plan §SP10 (arch §7.1): the SAME array instance feeds both this
+      // agent-facing `hello_ack.caps` and the browser-facing `HubInfo.caps` below — the two
+      // surfaces are frozen-protocol twins (§3.1 compat matrix) and can never drift.
+      extraHubCaps,
       // C10/C8: every hello is also a rotate-intent recovery opportunity. The
       // callback is assigned before the first listener can accept a connection.
       onHello: () => recoverRotateOnHello?.(),
@@ -245,9 +303,31 @@ export async function startHub(
       // ask-user-async plan §7.2 (P3): DIALOG_BG_HUB_CAPS joins the same two surfaces the same
       // way — it gates `dialogs.closed[].by === "background"` (agents degrade to "abort"
       // against hubs without the cap).
-      caps: [...admin.caps(), ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS],
+      // web-hub-spawn plan §SP10: `extraHubCaps` (spawn.v1, only when `config.spawn` exists) is
+      // the same array instance `agent-server.ts` appends to `hello_ack.caps` — same
+      // append-only pattern as UPLOAD/DIALOG_BG before it.
+      caps: [...admin.caps(), ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...extraHubCaps],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
+    // web-hub-spawn plan §SP10 (arch §7.8 "/webhub stop、restart 在 TUI 提示中显示 hub.json 的
+    // spawn.count"): the hub.json `spawn` summary — supervisor `liveCount` plus the policy
+    // `reason` whenever the loopback view of the policy is currently refusing spawns. Seeded
+    // into the step-⑦ `write()` below, then re-synced by the registry tick (change-gated).
+    function spawnStatusOf(sup: SpawnSupervisor): { count: number; reason?: string } {
+      const count = sup.liveCount();
+      const policy = sup.policy("loopback:token", "loopback", "http", false);
+      if (policy.allowed || policy.reason === undefined) return { count };
+      return { count, reason: policy.reason };
+    }
+    let lastSpawnStatus: { count: number; reason?: string } | undefined;
+    function syncSpawnStatus(): void {
+      if (spawnSup === undefined) return;
+      const next = spawnStatusOf(spawnSup);
+      const prev = lastSpawnStatus;
+      if (prev !== undefined && prev.count === next.count && prev.reason === next.reason) return;
+      lastSpawnStatus = next;
+      hubJson.patchSpawn(next);
+    }
 
     let lanDeps: LanFrontendDeps | undefined;
     // §4.1's recognized db-open failures degrade to loopback-only (never fail the whole hub) —
@@ -336,6 +416,107 @@ export async function startHub(
     let lanClosedByRotateScan = false;
 
     const commandRouter = createCommandRouter({ registry, log, now });
+    // ---------------------------------------------------------------------
+    // web-hub-spawn plan §SP10 (arch §4.1/§7): the managed-spawn assembly — the ONLY place
+    // SP1–SP9's parts meet. Everything below runs only when `config.spawn` exists (feature
+    // off ⇒ no reaper process, no spawns.json, no spawn key anywhere: caps/hub.json/FrontendDeps
+    // stay byte-identical, arch §8.2's not-enabled matrix). Order (plan §SP10): probe →
+    // store → reaper → dirs → first-prompt forwarder → supervisor → bounded init → routes.
+    // `registry` (above) and `commandRouter` (above) are passed directly as the supervisor's /
+    // forwarder's ports — no casts (#3 硬门槛: pinned by tests/web-hub/contract/types.test-d.ts).
+    if (config.spawn !== undefined) {
+      const spawnCfg = config.spawn;
+      const spawnFiles = webHubSpawnFiles(paths.stateDir);
+      const platform = probePlatform(deps.spawnSeams?.probe);
+      if (!platform.ok) {
+        // §7.1 fail closed: caps still carry spawn.v1 (so the UI can explain), but supervisor
+        // init() is a no-op past this point — no reaper, no spawns.json write, no fork.
+        log.warn("web-hub: spawn platform probe failed — managed spawn disabled (fail closed)", {
+          detail: platform.detail,
+        });
+      }
+      const spawnStore = createSpawnStore({ file: spawnFiles.spawnsJson, log, now });
+      const spawnReaper: Reaper = deps.spawnSeams?.reaper ?? createReaper({ log, now });
+      const spawnDirs = createDirService({
+        home: config.home,
+        // SP3: `process.env.PI_CODING_AGENT_DIR ?? `${home}/.pi/agent`` — source ② of known dirs.
+        agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent`,
+        roots: spawnCfg.roots,
+        registry,
+        spawnHistory: () => spawnSup?.records() ?? [],
+        now,
+      });
+      firstPromptFwd = createFirstPromptForwarder({
+        router: commandRouter,
+        now,
+        log,
+        audit: (r) => auditSpawn(log, r),
+        // SP9 hand-off (plan §SP10): the forwarder owns the AUTHORITATIVE first-prompt state;
+        // the supervisor's record slice (which its SSE `spawns` push renders, §6.4 Public
+        // projection) is advisory only. Sync the slice from the authoritative view BEFORE
+        // `noteSpawnChanged` so the SSE push and the GET snapshot (which reads
+        // `firstPrompt.state()` through SP9's routes) can never disagree.
+        onChange: (spawnId) => {
+          const sup = spawnSup;
+          if (sup === undefined) return;
+          const view = firstPromptFwd?.state(spawnId);
+          if (view !== undefined) {
+            const rec = sup.records().find((r) => r.spawnId === spawnId);
+            if (rec !== undefined) {
+              rec.firstPrompt = { state: view.state, textLen: view.textLen, attempts: view.attempts };
+            }
+          }
+          sup.noteSpawnChanged(spawnId);
+        },
+      });
+      if (deps.spawnSeams?.wrapFirstPrompt !== undefined) {
+        firstPromptFwd = deps.spawnSeams.wrapFirstPrompt(firstPromptFwd);
+      }
+      const rawSupervisor = createSpawnSupervisor({
+        cfg: spawnCfg,
+        registry,
+        log,
+        now,
+        store: spawnStore,
+        reaper: spawnReaper,
+        dirs: spawnDirs,
+        launcher: config.launcher,
+        env: process.env,
+        childUmask: deps.childUmask,
+        platform,
+        audit: (r) => auditSpawn(log, r),
+        pluginVersion: config.pluginVersion,
+        stderrDir: spawnFiles.logDir,
+        onLive: (rec) => {
+          if (rec.agentKey !== undefined && rec.sessionId !== undefined) {
+            firstPromptFwd?.onLive(rec.spawnId, rec.agentKey, rec.sessionId, rec.control === true);
+          }
+        },
+        onLink: (spawnId, linked) => firstPromptFwd?.onLink(spawnId, linked),
+        onTerminal: (spawnId, reason) => firstPromptFwd?.onTerminal(spawnId, reason),
+        ...(deps.spawnSeams?.spawnFn === undefined ? {} : { spawnFn: deps.spawnSeams.spawnFn }),
+      });
+      spawnSup =
+        deps.spawnSeams?.wrapSupervisor === undefined ? rawSupervisor : deps.spawnSeams.wrapSupervisor(rawSupervisor);
+      // Bounded init (plan §SP10: store load + orphan recovery + launcher check ≤1s + reaper
+      // ready ≤2s — 4s total budget); `withSignal` folds a startup abort into the same await.
+      await withSignal(spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)), startup.signal);
+      spawnRoutes = createSpawnRoutes({
+        supervisor: spawnSup,
+        dirs: spawnDirs,
+        firstPrompt: firstPromptFwd,
+        cfg: spawnCfg,
+        limit: createCmdLimit(now),
+        rejectAudit429: new Map(),
+        log,
+        now,
+      });
+      // Startup-failure path only (the runtime close() path wires its own call inside `close`):
+      // pushed AFTER the frontend's own cleanup entry further below, so the reverse-order
+      // release runs it BEFORE `fe.close()` — the same domain-first order `close()` uses
+      // (arch §7.6: spawn subsystem shuts down before the HTTP face stops accepting).
+      cleanup.push(() => spawnSup!.shutdown(createReqDeadline(now, STEP_DEADLINE_MS)));
+    }
     // web-hub-upload plan §2.2/§2.6 (U3): the upload store is constructed unconditionally —
     // `webHub.uploads` gating happens through agent hello caps (§5.1), not here. Construction
     // never throws for an unusable root (the store disables itself and `begin` answers
@@ -381,6 +562,7 @@ export async function startHub(
       commands: commandRouter,
       uploadMetrics,
       ...(uploads === undefined ? {} : { uploads }),
+      ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
@@ -414,6 +596,9 @@ export async function startHub(
         }),
       inflight: () => commandRouter.inflight(),
       kdfInflight: () => kdfInFlight,
+      // web-hub-spawn plan §SP10 (arch §7.8): quiet also requires zero busy managed spawns —
+      // replacing the hub under a busy web-spawned agent ends that session with the stdin EOF.
+      managedBusy: () => spawnSup?.busyCount() ?? 0,
       // acc32-B9: a reliable handshake for the first quiet judgment after a hello — resolve
       // immediately if the registry already has *any* dialogs snapshot for this agent (a
       // reclaimed/reconnected Rec whose `dialogs` field survived the reconnect, §registry.ts
@@ -608,6 +793,11 @@ export async function startHub(
             : fe.lan !== undefined
               ? { state: "starting" }
               : undefined;
+    let initialSpawn: { count: number; reason?: string } | undefined;
+    if (spawnSup !== undefined) {
+      initialSpawn = spawnStatusOf(spawnSup);
+      lastSpawnStatus = initialSpawn;
+    }
     hubJson.write({
       pid: process.pid,
       nonce: randomBytes(12).toString("base64url"),
@@ -619,6 +809,7 @@ export async function startHub(
       startedAt: info.startedAt,
       ...(await withSignal(identityFields(), startup.signal)),
       ...(initialLan === undefined ? {} : { lan: initialLan }),
+      ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ui: initialUi,
     }); // ⑦
 
@@ -656,6 +847,9 @@ export async function startHub(
       } catch (err) {
         log.error("registry tick threw", { error: String(err) });
       }
+      // web-hub-spawn plan §SP10: ride the same 5s tick to re-sync hub.json's `spawn` summary
+      // (pure in-memory compare; the file is only rewritten when the value actually changed).
+      syncSpawnStatus();
     }, REGISTRY_TICK_MS);
     tick.unref();
 
@@ -711,7 +905,9 @@ export async function startHub(
       counts: () => ({
         agents: Math.max(agentServer.connectionCount(), registry.list().length),
         sse: fe.clientCount(),
-        headless: 0,
+        // web-hub-spawn plan §SP10 (arch §7.8 "idle 自退"): a live managed child keeps the
+        // hub alive — the absolute lifetime deadline (§6.5 maxLifetimeMinutes) is the backstop.
+        headless: spawnSup?.liveCount() ?? 0,
       }),
       idleMs: Math.max(1, config.idleExitMinutes) * 60_000,
       now,
@@ -721,8 +917,13 @@ export async function startHub(
       },
     });
 
-    function close(reason: string): Promise<void> {
+    function close(reason: string, opts?: { deadline?: ReqDeadline }): Promise<void> {
       if (closing !== undefined) return closing;
+      // web-hub-spawn plan §SP10 (arch §7.6, review #4): one absolute deadline per close call —
+      // the default covers every legacy caller; `installProcessHandlers`' crash path passes a
+      // 2.5s one so the spawn subsystem degrades to "wait 0, SIGTERM now, persist once" before
+      // the 3s hard exit. Individual steps below still carry their own `bounded()` STEP caps.
+      const deadline: ReqDeadline = opts?.deadline ?? createReqDeadline(now, HUB_CLOSE_DEADLINE_MS);
       const inner = (async (): Promise<void> => {
         log.info("hub closing", { reason });
         unsubscribeSupersedeOnDialogs();
@@ -735,6 +936,15 @@ export async function startHub(
         clearInterval(rotateScan);
         if (uploadInflightTick !== undefined) clearInterval(uploadInflightTick);
         if (uploadSweepTick !== undefined) clearInterval(uploadSweepTick);
+        // web-hub-spawn plan §SP10 (arch §7.6): the spawn domain shuts down BEFORE the HTTP
+        // face stops accepting — supervisor.shutdown is itself bounded (graceful wait budget
+        // deriveBudget(r,3000,6500) ⇒ 0 on the crash deadline; verified SIGTERM to survivors;
+        // store.flushAndClose still persists once even at zero budget; reaper stdin closes
+        // LAST so its EOF-armed TERM→KILL escalation covers whatever outlives this process).
+        // The forwarder is disposed first: unsent first prompts become `expired{hub_restart}`
+        // (arch §4.6) while the bus is still live enough for the final `spawns` push.
+        firstPromptFwd?.dispose("hub_restart");
+        if (spawnSup !== undefined) await spawnSup.shutdown(deadline);
         await bounded(fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files
@@ -790,9 +1000,14 @@ export function installProcessHandlers(hub: RunningHub, log: HubLog): () => void
     log.error("uncaught exception", { error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
     // Crash-only hard exit stays at 3s (not unified with HUB_CLOSE_DEADLINE_MS, plan v8 §15.7 #6):
     // process state is untrusted after an uncaughtException, so a fast respawn beats a full cleanup.
+    // web-hub-spawn plan §SP10 (arch §7.6 "uncaughtException" row): hand close() a 2.5s deadline —
+    // the spawn subsystem's wait budget derives to 0, so it SIGTERMs the children immediately
+    // and still flushes spawns.json once (sync, in-memory) before the hard exit below.
     const force = setTimeout(() => process.exit(1), STEP_DEADLINE_MS);
     force.unref();
-    void hub.close("crash").finally(() => process.exit(1));
+    void hub
+      .close("crash", { deadline: createReqDeadline(Date.now, STEP_DEADLINE_MS - 500) })
+      .finally(() => process.exit(1));
   };
   const onRejection = (reason: unknown): void => {
     log.error("unhandled rejection", { error: String(reason) });

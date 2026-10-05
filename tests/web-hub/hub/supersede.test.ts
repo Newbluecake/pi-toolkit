@@ -13,6 +13,7 @@ function harness() {
   let open = 1;
   let inflight = 0;
   let kdf = 0;
+  let busy = 0;
   let stop: StopMarkerRead = { state: "absent" };
   const restart = vi.fn(async () => undefined);
   const audit = vi.fn();
@@ -28,6 +29,7 @@ function harness() {
     openDialogs: () => (open === 0 ? [] : [{ agentKey: "a1", count: open }]),
     inflight: () => inflight,
     kdfInflight: () => kdf,
+    managedBusy: () => busy,
     restart,
     audit,
     awaitDialogsSlot: (agentKey) =>
@@ -43,6 +45,7 @@ function harness() {
     setOpen: (v: number) => (open = v),
     setInflight: (v: number) => (inflight = v),
     setKdf: (v: number) => (kdf = v),
+    setBusy: (v: number) => (busy = v),
     setStop: (v: StopMarkerRead) => (stop = v),
     /** Resolves the pending dialogs-slot wait for `agentKey` and drains the microtask queue so
      * `observe()`'s deferred `tick()` (its `.then()` continuation) actually runs. */
@@ -80,6 +83,28 @@ describe("hub supersede controller (C10)", () => {
     h.setKdf(0);
     h.ctl.tick();
     expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
+  });
+
+  it("web-hub-spawn §SP10: busy managed spawns block the quiet path (managedBusy), but never the forced deadline path", () => {
+    const h = harness();
+    h.ctl.observe("2.0.0");
+    h.setOpen(0);
+    h.setInflight(0);
+    h.setKdf(0);
+    h.setBusy(1); // a web-spawned agent reports status.busy
+    h.ctl.tick();
+    expect(h.restart).not.toHaveBeenCalled();
+    h.setBusy(0);
+    h.ctl.tick();
+    expect(h.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: false }));
+    // forced: even with busy managed spawns, the 30-minute deadline still replaces (arch §7.8)
+    const h2 = harness();
+    h2.ctl.observe("2.0.0");
+    h2.setOpen(0);
+    h2.setBusy(2);
+    h2.setNow(h2.ctl.state()!.deadlineAt);
+    h2.ctl.tick();
+    expect(h2.restart).toHaveBeenCalledWith(expect.objectContaining({ forced: true }));
   });
 
   it("forces after the deadline, but stop and unknown markers fail closed", () => {

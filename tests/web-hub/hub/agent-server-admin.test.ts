@@ -38,7 +38,7 @@ function fakeAdmin(over: Partial<AdminHandler> = {}): AdminHandler & { calls: Ar
   return { ...admin, calls };
 }
 
-async function setup(admin?: AdminHandler): Promise<void> {
+async function setup(admin?: AdminHandler, extraHubCaps?: readonly string[]): Promise<void> {
   sockPath = join(tmp.make("wh-as-admin-"), "hub.sock");
   registry = createRegistry({ now: () => Date.now(), log: memLog(), pidAlive: () => true });
   server = net.createServer();
@@ -50,6 +50,7 @@ async function setup(admin?: AdminHandler): Promise<void> {
     now: () => Date.now(),
     httpPort: () => 7878,
     ...(admin === undefined ? {} : { admin }),
+    ...(extraHubCaps === undefined ? {} : { extraHubCaps }),
   });
 }
 
@@ -82,6 +83,17 @@ describe("agent-server + admin wiring (plan §8)", () => {
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     expect(ack["caps"]).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS]);
+  });
+
+  it("web-hub-spawn §SP10: deps.extraHubCaps is appended verbatim after the static tails (spawn.v1 rides last)", async () => {
+    const admin = fakeAdmin({ caps: () => ["ctl.v1", "lan.v1"] });
+    await setup(admin, ["spawn.v1"]);
+    const c = await client();
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    const caps = ack["caps"] as string[];
+    expect(caps).toEqual(["ctl.v1", "lan.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, "spawn.v1"]);
+    expect(caps[caps.length - 1]).toBe("spawn.v1");
   });
 
   it("lan_req is dispatched to admin.handleLanReq with agentKey/agentPid, and its reply is written back verbatim", async () => {

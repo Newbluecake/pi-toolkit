@@ -40,6 +40,11 @@ export interface SupersedeDeps {
   inflight: () => number;
   /** LAN KDF work is separate from command-router forwards. */
   kdfInflight?: () => number;
+  /** web-hub-spawn plan §SP10（arch §7.8 “受管 live agent 都不忙，且没有正在发送的首条消息”）：
+   * 受管 spawn 的 busy 计数（hub.ts 接 `spawnSup.busyCount()`）。>0 时 quiet 判据不成立——
+   * 一个网页拉起的 agent 正在干活时，版本替换会把它的会话随 stdin EOF 一起带走。可选
+   * （缺省拒 0，旧测试/最小 harness 不变）；强制路径（30 分钟上限）照常不受阻。 */
+  managedBusy?: () => number;
   /** Called after the state has entered restarting. Must drain, send the frame, and close. */
   restart: (args: {
     nextVersion: string;
@@ -190,7 +195,11 @@ export function createSupersede(deps?: SupersedeDeps): SupersedeController {
     // judged on incomplete information — the periodic 250ms tick must not outrun it either
     // (quiet AND forced both wait; the handshake is bounded by SUPERSEDE_DIALOGS_HANDSHAKE_MS).
     if (handshakesInFlight > 0) return;
-    const quiet = d.openDialogs().every((x) => x.count === 0) && d.inflight() === 0 && (d.kdfInflight?.() ?? 0) === 0;
+    const quiet =
+      d.openDialogs().every((x) => x.count === 0) &&
+      d.inflight() === 0 &&
+      (d.kdfInflight?.() ?? 0) === 0 &&
+      (d.managedBusy?.() ?? 0) === 0;
     if (quiet && stop.state === "absent") {
       begin(false, stop);
       return;

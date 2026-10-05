@@ -66,6 +66,39 @@ describe("createHubJsonWriter (plan §1.4.2)", () => {
     }
   });
 
+  // web-hub-spawn plan §SP10: patchSpawn mirrors patchLan/patchUi exactly.
+  it("patchSpawn() after write() merges spawn and re-writes; before write() it queues; sealed ⇒ no-op", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      const w = createHubJsonWriter(file, memLog());
+      // before the first write(): queued, no file created, current() stays undefined
+      w.patchSpawn({ count: 2, reason: "platform" });
+      expect(existsSync(file)).toBe(false);
+      expect(w.current()).toBeUndefined();
+
+      // the eventual write() picks the queued spawn up (overriding whatever that call carries)
+      w.write(baseRecord({ spawn: { count: 0 } }));
+      const onDisk = JSON.parse(readFileSync(file, "utf8")) as HubRecord;
+      expect(onDisk.spawn).toEqual({ count: 2, reason: "platform" });
+      expect(w.current()?.spawn).toEqual({ count: 2, reason: "platform" });
+
+      // after write(): plain merge + re-write, other fields untouched
+      w.patchSpawn({ count: 1 });
+      const merged = JSON.parse(readFileSync(file, "utf8")) as HubRecord;
+      expect(merged.spawn).toEqual({ count: 1 });
+      expect(merged.pid).toBe(process.pid);
+
+      // sealed after removeIfOurs(): a later patchSpawn can never resurrect the file
+      w.removeIfOurs();
+      expect(existsSync(file)).toBe(false);
+      w.patchSpawn({ count: 9 });
+      expect(existsSync(file)).toBe(false);
+      expect(w.current()?.spawn).toEqual({ count: 1 }); // unchanged — the patch was a no-op
+    } finally {
+      cleanup();
+    }
+  });
+
   it("patchLan() before the first write() is queued and merged into (overriding) that write()'s own lan", () => {
     const { file, cleanup } = tmpFile();
     try {

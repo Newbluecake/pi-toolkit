@@ -38,6 +38,12 @@ export interface HubRecord {
   /** vue-plan.md v2.1 §2.1（P5b）：解析出的 Vue UI 状态，供 `/webhub status`（§2.3）读取。与
    * 下面的 `lan` 同样的“首次 write() 前先排队”语义——见 `patchUi`。 */
   ui?: UiStatus;
+  /** web-hub-spawn plan §SP10（arch §7.8 “`/webhub stop`、`restart` 在 TUI 提示中显示
+   * hub.json 的 `spawn.count`”）：受管 spawn 的状态摘要。`count` 是 supervisor 的
+   * `liveCount()`（非终态记录数），`reason` 是策略不允许时的 `SpawnPolicyWire.reason`
+   * （platform/launcher/persist/reaper/cooldown/breaker）。与 `lan`/`ui` 同一“首次 write() 前
+   * 先排队”语义——见 `patchSpawn`。 */
+  spawn?: { count: number; reason?: string };
 }
 
 export interface HubJsonWriter {
@@ -51,6 +57,10 @@ export interface HubJsonWriter {
    * `write()`, queue it as `pendingUi` so the eventual `write()` picks it up (mirrors `patchLan`
    * exactly, §2.1: "hub.ts 收到后重写 hub.json.ui"). No-op once sealed. */
   patchUi(ui: UiStatus): void;
+  /** Merge `spawn` into the current in-memory record, then `write()` it — or, before the first
+   * `write()`, queue it as `pendingSpawn` (mirrors `patchLan`/`patchUi` exactly). No-op once
+   * sealed. web-hub-spawn plan §SP10. */
+  patchSpawn(spawn: { count: number; reason?: string }): void;
   /** The record last passed to `write()`/`patchLan()`/`patchUi()`, if any (never re-read from disk). */
   current(): HubRecord | undefined;
   /** Delete the file iff its `pid` still matches this process, then seal the writer. */
@@ -62,6 +72,7 @@ export function createHubJsonWriter(file: string, log: HubLog): HubJsonWriter {
   let everWritten = false;
   let pendingLan: LanStatus | undefined;
   let pendingUi: UiStatus | undefined;
+  let pendingSpawn: { count: number; reason?: string } | undefined;
   let sealed = false;
 
   function write(next: HubRecord): void {
@@ -69,8 +80,10 @@ export function createHubJsonWriter(file: string, log: HubLog): HubJsonWriter {
     record = next;
     if (pendingLan !== undefined) record = { ...record, lan: pendingLan };
     if (pendingUi !== undefined) record = { ...record, ui: pendingUi };
+    if (pendingSpawn !== undefined) record = { ...record, spawn: pendingSpawn };
     pendingLan = undefined;
     pendingUi = undefined;
+    pendingSpawn = undefined;
     everWritten = true;
     try {
       const tmp = `${file}.${process.pid}.tmp`;
@@ -100,10 +113,20 @@ export function createHubJsonWriter(file: string, log: HubLog): HubJsonWriter {
     write({ ...record, ui });
   }
 
+  function patchSpawn(spawn: { count: number; reason?: string }): void {
+    if (sealed) return;
+    if (record === undefined) {
+      pendingSpawn = spawn; // no base record yet — queue it for the eventual write()
+      return;
+    }
+    write({ ...record, spawn });
+  }
+
   return {
     write,
     patchLan,
     patchUi,
+    patchSpawn,
     current: () => record,
     removeIfOurs: () => {
       try {

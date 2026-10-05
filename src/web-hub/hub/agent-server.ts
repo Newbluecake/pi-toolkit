@@ -54,6 +54,11 @@ export function createAgentServer(
     admin?: AdminHandler;
     /** C8/C10: scan rotate.intent on every successful hello. */
     onHello?: () => void;
+    /** web-hub-spawn plan §SP10（arch §7.1）：hub 装配层逆来的追加 cap（`[SPAWN_HUB_CAP]`，仅
+     * `config.spawn` 存在时）——与 hub.ts 的 `HubInfo.caps` 共用同一个数组，保持两面字节一致
+     * （§3.1 compat matrix 不变量，同 UPLOAD/DIALOG_BG 的追加模式）。可选：缺省时 caps 与
+     * 追加前逐字节一致。 */
+    extraHubCaps?: readonly string[];
   },
 ): AgentServer {
   const { registry, config, log, now } = deps;
@@ -157,6 +162,9 @@ export function createAgentServer(
             // ask-user-async plan §7.2 (P3): same surface rule as UPLOAD_HUB_CAPS — must stay
             // byte-identical with hub.ts's browser-facing HubInfo.caps.
             ...DIALOG_BG_HUB_CAPS,
+            // web-hub-spawn plan §SP10: conditional cap tail (spawn.v1) — same array instance
+            // hub.ts feeds HubInfo.caps, so the two surfaces can never drift.
+            ...(deps.extraHubCaps ?? []),
           ],
         });
         return;
