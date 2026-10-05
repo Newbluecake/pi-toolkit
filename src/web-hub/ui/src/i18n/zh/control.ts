@@ -23,6 +23,9 @@ const control = {
   send: "发送",
   sendAria: "发送消息",
 
+  contextRingAria: "上下文已用 {p}——点击查看详情",
+  contextRingPanelAria: "上下文与花费详情",
+
   stop: "Stop",
   stopConfirm: "确认中止",
   stopAria: "中止当前轮",

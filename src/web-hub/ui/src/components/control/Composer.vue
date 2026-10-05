@@ -38,6 +38,10 @@
   keyboard path — Enter / Alt+Enter / click can never disagree. `doSend` emits the gate's own
   composed text (body + §3.1 attachment block, ≤48 KiB) and clears the tray via
   `uploads.discard` — NEVER `remove`, which would abort-delete the just-referenced hub files.
+
+  Context ring (2026-10-05, user 现场拍板): `ContextRing` sits inside the textarea's right edge
+  (`.composer-input` wrapper; the textarea's `padding-right` makes room via `:has`). It injects
+  `DETAIL_METRICS` itself and self-hides without a provider — nothing here reads the metrics.
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
@@ -51,6 +55,7 @@ import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
+import ContextRing from "./ContextRing.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
@@ -421,19 +426,24 @@ watch(
         aria-hidden="true"
         @change="onFilePick"
       />
-      <textarea
-        ref="textareaEl"
-        v-model="text"
-        :disabled="!enabled"
-        :placeholder="placeholder"
-        :aria-label="placeholder"
-        rows="1"
-        enterkeyhint="send"
-        @input="onInput"
-        @keydown="onKeydown"
-        @compositionstart="onCompositionStart"
-        @compositionend="onCompositionEnd"
-      ></textarea>
+      <div class="composer-input">
+        <textarea
+          ref="textareaEl"
+          v-model="text"
+          :disabled="!enabled"
+          :placeholder="placeholder"
+          :aria-label="placeholder"
+          rows="1"
+          enterkeyhint="send"
+          @input="onInput"
+          @keydown="onKeydown"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
+        ></textarea>
+        <!-- Context ring (2026-10-05 用户现场拍板): lives INSIDE the textarea's right edge;
+             self-hides when no DETAIL_METRICS provider/contextUsage exists. -->
+        <ContextRing />
+      </div>
       <button
         class="btn btn-primary composer-send"
         type="button"

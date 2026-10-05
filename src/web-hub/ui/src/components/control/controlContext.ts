@@ -59,6 +59,18 @@ export interface ControlView {
 }
 export const CONTROL_VIEW: InjectionKey<ControlView> = Symbol("web-hub-control-view");
 
+/** Read-only detail metrics (context usage + cost) provided by `AgentDetail` for the
+ * composer's `ContextRing` (2026-10-05, user 现场拍板: the context meter moved OUT of the
+ * detail header INTO the composer as a ring indicator with a click-through details panel).
+ * Inject-only so the frozen `ComposerProps` stay untouched — no provider (dashboard, read-only
+ * dock) or a `contextUsage` that never arrived ⇒ the ring renders nothing, zero errors. */
+export interface DetailMetricsView {
+  readonly contextUsage: ComputedRef<{ tokens: number; contextWindow: number; percent: number } | undefined>;
+  readonly costUsd: ComputedRef<number | undefined>;
+  readonly subagentCostUsd: ComputedRef<number | undefined>;
+}
+export const DETAIL_METRICS: InjectionKey<DetailMetricsView> = Symbol("web-hub-detail-metrics");
+
 /** §3.5 ask_user draft key. */
 export function dialogDraftKey(agentKey: string, epoch: string, dialogId: string): string {
   return [agentKey, epoch, dialogId].join("\u0000");

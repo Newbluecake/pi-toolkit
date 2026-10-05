@@ -19,7 +19,8 @@
  * below is a second guard aligned with the 1025px split.
  *
  * ≤480px metrics fold (todo #7): `.metrics-wrap` carries `data-collapsed` and a one-line
- * `.metrics-summary` toggle ("62% · $195.54"); the fold only applies below 481px — at/above
+ * `.metrics-summary` toggle ("$195.54" — cost-only since 2026-10-05, when the context metric
+ * moved into the composer's `ContextRing`); the fold only applies below 481px — at/above
  * it the summary button is hidden and the full `.metrics` panel always shows, exactly the
  * pre-fold layout.
  */
@@ -193,7 +194,7 @@
   background: var(--c-sunken);
 }
 
-/* one-line summary toggle ("62% · $195.54") — phones only; display:none ≥481px below */
+/* one-line summary toggle ("$195.54") — phones only; display:none ≥481px below */
 .metrics-summary {
   display: flex;
   align-items: center;

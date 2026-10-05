@@ -1,40 +1,41 @@
 <!--
   Detail pane header: back button (single-view bands: ≤767 via `narrow`, 481–1024 mid band via
   the injected `SIDEBAR_DRAWER` context), mid-band drawer toggle, title, status pill, session
-  info, context/cost metrics (ui-design.md §5.2, vue-plan.md v2.1 §3.2, §5.2 — P3 exclusive,
-  `components/detail/**`). web-hub-spawn SP12 adds, via `HUB_CTX` inject only (frozen props
-  untouched, kept deliberately local so the pending mobile-collapse line can still reflow this
-  header freely): the managed session's 「停止会话」 button and the first-prompt refill notice
-  (arch §9.1).
+  info, cost metric (ui-design.md §5.2, vue-plan.md v2.1 §3.2, §5.2 — P3 exclusive,
+  `components/detail/**`). 2026-10-05 (user 现场拍板): the CONTEXT metric moved out of this
+  header into the composer as `control/ContextRing.vue` (inject-only via `DETAIL_METRICS`); the
+  header's metrics panel now carries cost only. web-hub-spawn SP12 adds, via `HUB_CTX` inject
+  only (frozen props untouched, kept deliberately local so the pending mobile-collapse line can
+  still reflow this header freely): the managed session's 「停止会话」 button and the
+  first-prompt refill notice (arch §9.1).
 
   Mobile-adaptation package (todo #7), both additions inject/local-only like SP12:
   - `SIDEBAR_DRAWER` (DashboardView-provided): while the 481–1024px mid band shows a detail
     route, a 「show agents list」 toggle opens the sidebar as an overlay drawer, and the back
     button renders even though `narrow` is false (single-view navigation needs it).
-  - ≤480px metrics fold: the CONTEXT/COST panel collapses to a one-line summary
-    ("62% · $195.54") by default, tap to expand — a local `metricsCollapsed` ref plus
-    `data-collapsed` on `.metrics-wrap`; `detail.css` hides the summary button and ignores the
-    fold state entirely at/above 481px, so no media JS is needed here.
+  - ≤480px metrics fold: the COST panel collapses to a one-line summary ("$195.54") by default,
+    tap to expand — a local `metricsCollapsed` ref plus `data-collapsed` on `.metrics-wrap`;
+    `detail.css` hides the summary button and ignores the fold state entirely at/above 481px, so
+    no media JS is needed here.
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
-import { formatPercent, formatUsd, localeFor } from "../../format.js";
+import { formatUsd } from "../../format.js";
 import { managedFor } from "../../logic/spawn.js";
 import type { DetailHeaderEmits, DetailHeaderProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { SIDEBAR_DRAWER } from "../shell/sidebarDrawer.js";
 import "../../styles/spawn.css";
 import { cardOf, sessionOf, statusOf } from "./agentViews.js";
-import ContextMeter from "./ContextMeter.vue";
 import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
 
 const props = defineProps<DetailHeaderProps>();
 const emit = defineEmits<DetailHeaderEmits>();
-const { t, lang } = useI18n();
+const { t } = useI18n();
 
 const session = computed(() => sessionOf(props.agent));
 const card = computed(() => cardOf(props.agent));
@@ -50,15 +51,6 @@ const title = computed(() => {
   return typeof sessionId === "string" && sessionId !== "" ? sessionId.slice(0, 8) : t("agents.noSessionName");
 });
 
-const contextUsage = computed(() => status.value?.contextUsage);
-const contextMeterProps = computed(() => {
-  const usage = contextUsage.value;
-  return {
-    percent: usage?.percent ?? null,
-    ...(usage?.tokens !== undefined ? { tokens: usage.tokens } : {}),
-    ...(usage?.contextWindow !== undefined ? { window: usage.contextWindow } : {}),
-  };
-});
 const subCostLabel = computed(() => {
   const sub = status.value?.subagentCostUsd;
   return typeof sub === "number" && sub > 0 ? t("detail.subCost", { v: formatUsd(sub) }) : null;
@@ -73,10 +65,7 @@ const showBack = computed(() => props.narrow || drawer?.active.value === true);
 
 /** Default-collapsed on phones; `detail.css` only honors `data-collapsed` below 481px. */
 const metricsCollapsed = ref(true);
-const metricsSummary = computed(() => {
-  const pct = formatPercent(contextUsage.value?.percent, localeFor(lang));
-  return `${pct} · ${formatUsd(status.value?.costUsd)}`;
-});
+const metricsSummary = computed(() => formatUsd(status.value?.costUsd));
 function toggleMetrics(): void {
   metricsCollapsed.value = !metricsCollapsed.value;
 }
@@ -223,12 +212,6 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
         <AppIcon name="chev-right" class="icon-sm chev" />
       </button>
       <dl class="metrics">
-        <div class="metric">
-          <dt>{{ t("detail.contextLabel") }}</dt>
-          <dd>
-            <ContextMeter v-bind="contextMeterProps" />
-          </dd>
-        </div>
         <div class="metric">
           <dt>{{ t("detail.costLabel") }}</dt>
           <dd>

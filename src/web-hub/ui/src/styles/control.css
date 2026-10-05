@@ -81,6 +81,126 @@
   field-sizing: content; /* auto-grow where supported; CSSOM fallback in Composer.vue */
 }
 
+/* --- composer context ring (2026-10-05, user 现场拍板: the detail header's context metric
+ * moved here — `control/ContextRing.vue`). The ring's geometry (radius/stroke/svg size) is
+ * FIXED px — a graphic, not text, deliberately immune to `--fs-scale` (pwh_fontscale). --- */
+
+.composer-input {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+/* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
+ * no padding). `:has` keeps the component itself free of any padding logic. */
+.composer-input:has(.ctx-ring) textarea {
+  padding-right: 44px;
+}
+
+.ctx-ring {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+}
+
+.ctx-ring-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px; /* coarse-pointer touch target, always (not just @media coarse) */
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: pointer;
+}
+
+.ctx-ring-btn:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.ctx-ring-svg {
+  display: block;
+}
+
+.ctx-ring-track {
+  fill: none;
+  stroke: var(--c-border);
+  stroke-width: 3;
+}
+
+.ctx-ring-bar {
+  fill: none;
+  stroke: var(--c-primary);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke var(--dur-base) var(--ease-out);
+}
+
+.ctx-ring[data-tone="warn"] .ctx-ring-bar {
+  stroke: var(--c-warning);
+}
+
+.ctx-ring[data-tone="danger"] .ctx-ring-bar {
+  stroke: var(--c-danger);
+}
+
+/* Details panel — opens UPWARD (the composer hugs the screen's bottom edge; same orientation
+ * as the retired DeliverSwitch menu). */
+.ctx-ring-panel {
+  position: absolute;
+  bottom: calc(100% + var(--sp-2));
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 220px;
+  margin: 0;
+  padding: var(--sp-3);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
+}
+
+.ctx-ring-row {
+  display: grid;
+  gap: 2px;
+}
+
+.ctx-ring-row dt {
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ctx-ring-row dd {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ctx-ring-row .aside {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+}
+
 .composer textarea:focus-visible {
   outline: 2px solid var(--c-focus);
   outline-offset: 1px;

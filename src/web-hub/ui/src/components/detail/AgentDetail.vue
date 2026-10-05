@@ -17,6 +17,8 @@
     `restarting` state (§6.7.3 网页语义).
   - `DetailDock` receives `control`/`queue`/`busy`/`readonlyReason` (all optional additions to
     the frozen `DetailDockProps`).
+  - `DETAIL_METRICS` (2026-10-05, user 现场拍板): a read-only contextUsage/cost source for the
+    composer's `ContextRing` — the context metric's new home after leaving `DetailHeader`.
 -->
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
@@ -26,9 +28,16 @@ import { CONTROL_CTX } from "../../composables/useControl.js";
 import type { AgentDetailEmits, AgentDetailProps } from "../../contracts.js";
 import type { CmdOutcome, Notice } from "../../types.js";
 import type { DialogClosedWire, DialogWire } from "@protocol/messages.js";
-import { CONTROL_VIEW, HUB_CTX, type ControlView } from "../control/controlContext.js";
+import {
+  CONTROL_VIEW,
+  DETAIL_METRICS,
+  HUB_CTX,
+  type ControlView,
+  type DetailMetricsView,
+} from "../control/controlContext.js";
 import AskUserForm from "../dialog/AskUserForm.vue";
 import { buildAgentNotices } from "./agentNotices.js";
+import { statusOf } from "./agentViews.js";
 import DetailBody from "../body/DetailBody.vue";
 import DetailDock from "./DetailDock.vue";
 import DetailHeader from "./DetailHeader.vue";
@@ -127,6 +136,16 @@ const controlView: ControlView = {
   isWebMessage,
 };
 provide(CONTROL_VIEW, controlView);
+
+/** Read-only metrics for the composer's `ContextRing` (2026-10-05, user 现场拍板: the context
+ * meter left the detail header for a ring inside the composer). Unconditional — the ring
+ * self-hides when `contextUsage` has never been reported. */
+const detailMetrics: DetailMetricsView = {
+  contextUsage: computed(() => statusOf(props.agent)?.contextUsage),
+  costUsd: computed(() => statusOf(props.agent)?.costUsd),
+  subagentCostUsd: computed(() => statusOf(props.agent)?.subagentCostUsd),
+};
+provide(DETAIL_METRICS, detailMetrics);
 // Frozen seam for FleetActions (plan §7.4): only provided when a ControlHandle exists —
 // `useHub` creates it synchronously, so a null here means a control-less hub for the whole
 // mount. FleetActions treats a missing inject as "don't render" (component test pins this).

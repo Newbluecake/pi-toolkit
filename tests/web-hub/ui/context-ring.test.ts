@@ -1,0 +1,134 @@
+// @vitest-environment happy-dom
+/**
+ * `control/ContextRing.vue` (2026-10-05, user 现场拍板): the context metric's new home — an SVG
+ * progress ring inside the composer textarea's right edge, fed by the inject-only
+ * `DETAIL_METRICS` channel (`AgentDetail` provides). No provider / no contextUsage ⇒ renders
+ * nothing. Click toggles the upward details panel (context % + tokens, cost, sub-agent cost);
+ * Esc / outside click close it.
+ */
+import { flushPromises, mount } from "@vue/test-utils";
+import { computed } from "vue";
+import { describe, expect, it } from "vitest";
+import ContextRing from "../../../src/web-hub/ui/src/components/control/ContextRing.vue";
+import {
+  DETAIL_METRICS,
+  type DetailMetricsView,
+} from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+
+const CIRC = 2 * Math.PI * 8; // the component's fixed-px radius
+
+function metrics(over: {
+  percent?: number;
+  tokens?: number;
+  window?: number;
+  costUsd?: number;
+  subagentCostUsd?: number;
+  noUsage?: boolean;
+}): DetailMetricsView {
+  const usage = over.noUsage
+    ? undefined
+    : { tokens: over.tokens ?? 124_000, contextWindow: over.window ?? 200_000, percent: over.percent ?? 62 };
+  return {
+    contextUsage: computed(() => usage),
+    costUsd: computed(() => over.costUsd ?? 195.54),
+    subagentCostUsd: computed(() => over.subagentCostUsd),
+  };
+}
+
+function mountRing(m?: DetailMetricsView) {
+  return mount(ContextRing, {
+    global: m ? { provide: { [DETAIL_METRICS as symbol]: m } } : {},
+    attachTo: document.body,
+  });
+}
+
+describe("ContextRing.vue — render gating (2026-10-05)", () => {
+  it("no DETAIL_METRICS provider (dashboard / read-only dock) ⇒ renders nothing", () => {
+    const wrapper = mountRing();
+    expect(wrapper.find(".ctx-ring").exists()).toBe(false);
+    expect(wrapper.html()).toBe("<!--v-if-->");
+  });
+
+  it("provider without contextUsage yet ⇒ renders nothing", () => {
+    const wrapper = mountRing(metrics({ noUsage: true }));
+    expect(wrapper.find(".ctx-ring").exists()).toBe(false);
+  });
+
+  it("with contextUsage ⇒ ring button with a percent aria-label and a matching dasharray", () => {
+    const wrapper = mountRing(metrics({ percent: 62 }));
+    const btn = wrapper.get(".ctx-ring-btn");
+    expect(btn.attributes("aria-label")).toContain("62%");
+    expect(btn.attributes("aria-expanded")).toBe("false");
+    expect(wrapper.get(".ctx-ring-bar").attributes("stroke-dasharray")).toBe(`${0.62 * CIRC} ${CIRC}`);
+    expect(wrapper.get(".ctx-ring").attributes("data-tone")).toBe("ok");
+  });
+
+  it("clamps the dasharray for out-of-range percents", () => {
+    const wrapper = mountRing(metrics({ percent: 140 }));
+    expect(wrapper.get(".ctx-ring-bar").attributes("stroke-dasharray")).toBe(`${CIRC} ${CIRC}`);
+  });
+});
+
+describe("ContextRing.vue — color grading thresholds", () => {
+  it.each([
+    [0, "ok"],
+    [74, "ok"],
+    [75, "warn"],
+    [89, "warn"],
+    [90, "danger"],
+    [100, "danger"],
+  ] as const)("percent %i ⇒ data-tone %s", (percent, tone) => {
+    const wrapper = mountRing(metrics({ percent }));
+    expect(wrapper.get(".ctx-ring").attributes("data-tone")).toBe(tone);
+  });
+});
+
+describe("ContextRing.vue — details panel", () => {
+  it("click opens the panel with the full former header metrics; click again closes", async () => {
+    const wrapper = mountRing(metrics({ percent: 62, costUsd: 195.54, subagentCostUsd: 36.17 }));
+    const btn = wrapper.get(".ctx-ring-btn");
+    await btn.trigger("click");
+    expect(btn.attributes("aria-expanded")).toBe("true");
+    const panel = wrapper.get(".ctx-ring-panel");
+    expect(panel.text()).toContain("62%");
+    expect(panel.text()).toContain("124,000 / 200,000");
+    expect(panel.text()).toContain("$195.54");
+    expect(panel.text()).toContain("$36.17"); // sub-agent cost aside
+    await btn.trigger("click");
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+  });
+
+  it("no sub-agent cost ⇒ no aside", async () => {
+    const wrapper = mountRing(metrics({ subagentCostUsd: 0 }));
+    await wrapper.get(".ctx-ring-btn").trigger("click");
+    expect(wrapper.get(".ctx-ring-panel").text()).not.toContain("sub");
+  });
+
+  it("Escape closes the panel and refocuses the trigger", async () => {
+    const wrapper = mountRing(metrics({}));
+    const btn = wrapper.get(".ctx-ring-btn");
+    await btn.trigger("click");
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    await btn.trigger("keydown", { key: "Escape" });
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+    expect(document.activeElement).toBe(btn.element);
+  });
+
+  it("an outside click closes the panel", async () => {
+    const wrapper = mountRing(metrics({}));
+    await wrapper.get(".ctx-ring-btn").trigger("click");
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+  });
+
+  it("a click INSIDE the panel keeps it open", async () => {
+    const wrapper = mountRing(metrics({}));
+    await wrapper.get(".ctx-ring-btn").trigger("click");
+    const panel = wrapper.get(".ctx-ring-panel");
+    panel.element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+  });
+});

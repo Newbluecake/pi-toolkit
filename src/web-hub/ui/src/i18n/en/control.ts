@@ -24,6 +24,11 @@ const control = {
   send: "Send",
   sendAria: "Send message",
 
+  // --- composer context ring (2026-10-05, user 现场拍板: context metric moved here from the
+  // detail header; panel labels reuse the `detail` namespace) ---
+  contextRingAria: "Context used {p} — show details",
+  contextRingPanelAria: "Context and cost details",
+
   // --- stop button (two-step, §7.4) ---
   stop: "Stop",
   stopConfirm: "Confirm stop",

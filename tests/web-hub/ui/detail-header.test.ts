@@ -2,7 +2,9 @@
 /**
  * `DetailHeader.vue` (ui-design.md §5.2, vue-plan.md v2.1 §3.2, §5.2 — P3). Title fallback
  * chain (session name → sessionId prefix → "(no session name)"), the back button's `narrow`
- * gating, and the context/cost metrics.
+ * gating, and the cost metric. 2026-10-05 (user 现场拍板): the CONTEXT metric left this header
+ * for the composer's `ContextRing` (covered by context-ring.test.ts) — the metrics panel here
+ * carries cost only.
  */
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
@@ -83,12 +85,13 @@ describe("DetailHeader.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     expect(wrapper.emitted("back")).toHaveLength(1);
   });
 
-  it("renders the context percent and cost with the sub-agent cost aside", () => {
+  it("renders the cost with the sub-agent cost aside — and NO context metric (moved to the composer's ContextRing)", () => {
     const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
-    const metrics = wrapper.find(".metrics").text();
-    expect(metrics).toContain("62%");
-    expect(metrics).toContain("$195.54");
-    expect(metrics).toContain("$36.17");
+    const metrics = wrapper.find(".metrics");
+    expect(metrics.text()).toContain("$195.54");
+    expect(metrics.text()).toContain("$36.17");
+    expect(metrics.text()).not.toContain("62%");
+    expect(wrapper.find("meter").exists()).toBe(false);
   });
 
   it("session summary shows the short cwd and model/thinking level", () => {
@@ -259,19 +262,19 @@ import { computed } from "vue";
 import { SIDEBAR_DRAWER } from "../../../src/web-hub/ui/src/components/shell/sidebarDrawer.js";
 
 describe("DetailHeader.vue — ≤480px metrics fold (todo #7)", () => {
-  it("starts collapsed with a one-line percent · cost summary", () => {
+  it("starts collapsed with a one-line cost-only summary (context moved to the composer's ContextRing)", () => {
     const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: true } });
     const wrap = wrapper.get(".metrics-wrap");
     expect(wrap.attributes("data-collapsed")).toBe("true");
     const summary = wrapper.get(".metrics-summary");
-    expect(summary.text()).toContain("62%");
     expect(summary.text()).toContain("$195.54");
+    expect(summary.text()).not.toContain("62%");
     expect(summary.attributes("aria-expanded")).toBe("false");
     // the full panel stays in the DOM (CSS hides it ≤480px; ≥481px the fold state is inert)
     expect(wrapper.find(".metrics").exists()).toBe(true);
   });
 
-  it("falls back to dashes when no context usage has been reported yet", () => {
+  it("falls back to a dash when no cost has been reported yet", () => {
     const wrapper = mount(DetailHeader, { props: { agent: agent({ status: undefined }), narrow: true } });
     expect(wrapper.get(".metrics-summary").text()).toContain("—");
   });
