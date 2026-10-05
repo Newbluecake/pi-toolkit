@@ -307,6 +307,22 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   `config.spawn` exists. SP13's `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
   child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.test.ts` (real pi) are the
   S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`.
+  **Content preview (web-hub-preview plan v3, setting `webHub.preview` — `"on" | "loopback" | "off"`, default
+  `"on"` per the 2026-10-05 user ruling U1: sole LAN user behind password auth, risk explicitly accepted; change
+  is non-live — `/reload` then `/webhub restart`)**: an absolute path in a settled message (assistant text, user
+  bubble, or a ToolCard's Input section, all rendered through `ui/src/components/preview/PathText.vue` — never
+  `markdown.js`; streaming replies stay plain text until they settle) opens a read-only dialog via the single
+  endpoint `GET /api/preview` (`X-PWH: 1`; raw bytes + `X-PWH-Preview-*` metadata headers; no new SSE/frames).
+  Two admission classes: **upload attachments** (`hub/uploads.ts`'s `openForPreview`: structural re-check of the
+  generated `<uploadId>.<ext>` / legacy `<id>/<safeName>` layouts, sha256 re-verification) are shared with the
+  **session's viewers** (U3 — revises upload-plan §5.1's "uploader-only" read rule; writes/abort/dedup/pinning
+  stay principal-bound, recorded as an appended note in that plan), and **cwd files** (`hub/preview/admit.ts`:
+  the session.cwd subtree — home as cwd allowed per U2, guarded by the virtual-root + literal denylist — plus
+  realpath×2, dev/ino re-check, `O_NOFOLLOW` open, `/proc/self/fd` re-verification). Caps: text 256 KiB (UTF-8
+  boundary), images 16 MiB loopback / 4 MiB LAN / 40 MP (unparseable dims ⇒ reject; touch clients budget 20 MP);
+  preview reads never pin or extend upload TTLs. `mode:"loopback"` keeps the endpoint LAN-absent (404, byte-
+  identical to `off` on LAN) while loopback keeps previewing. Design + real-device acceptance:
+  `docs/dev/web-hub-preview/{plan,acceptance}.md`.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
   (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses

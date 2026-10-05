@@ -691,3 +691,11 @@ U4b 的 handle 遗漏了「清托盘但不发 abort」入口，`doSend` 清盘�
 3. transcript 中 `[web-hub attachments]` 块折叠为附件 chip（涉及 `components/transcript/**`，有在途改动），后续项。
 4. 会话结束时是否提前清理 bucket：当前不清（resume 需要），仅按 §2.6 TTL。
 5. （v3 #8 已知残余）`/api/cmd` 成功回包后、`meta.referencedAt` 持久化前 hub 崩溃 ⇒ 重启后该附件按未引用处理（24h TTL）。进程存活期间无此问题；如需消除须把持久化改为回包前强制完成，代价是存储故障会让 prompt 回包失败（与「prompt 已送达」事实矛盾），故不采用。
+
+---
+
+## 修订备注（web-hub-preview，2026-10-05，用户拍板）
+
+- §5.3「永不回传」：已由 web-hub-preview 方案新增只读回读通道 `GET /api/preview`（带 sha256 内容复核）。
+- §5.1「其他主体能看到路径但无法经 HTTP 读取」：修订为「附件内容对该会话的可见者共享，只读」；写入、abort、去重、引用钉住仍按主体绑定。
+  详见 docs/dev/web-hub-preview/plan.md §4.2、§5.4。本节为追加备注，上文原裁定保留以存档。

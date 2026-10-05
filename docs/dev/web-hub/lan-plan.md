@@ -38,6 +38,21 @@
 
 **追加（web-hub-spawn S1 / 预览，2026-10）：同 hub 全信任边界同样约束受管 spawn 与预览**。通过鉴权的网页主体彼此完全信任：任何主体都能停止任何受管会话（用户裁定，`POST /api/headless/:id/stop` 无属主检查）——web-hub 在设计上等价于本机用户的远程 shell，spawn 不引入新的多租户隔离。`spawns` SSE 只广播脱敏 Public 投影（`cwdLabel` 等）；`cwd`/`stderrTail`/`hintDetail`/`origin.user`/`firstPrompt.textLen` 仅经鉴权 GET 返回给 owner（例外：live 记录绑定 agent 卡片后 `cwd` 对非 owner 可见——卡片本就公开该值）；**首条消息正文任何层都不落盘**（内存持有、送达即弃、hub 重启即 `expired{hub_restart}`）。同理，未来的会话预览（transcript 读取）向任何通过鉴权的主体暴露会话文件内容——与本表「同 uid 完全可信」一致，不构成额外边界。LAN 明文直连下 `spawn.lan` 封顶为 `known` 目录且强制确认；`roots` 域需要受信代理 https 终端。详见 `docs/dev/web-hub-spawn/arch.md` §6.0/§6.4 与 `docs/dev/web-hub-spawn/acceptance.md` A7。
 
+**追加（web-hub-preview 内容预览，2026-10-05 用户裁定 U1/U2；PV8 落档）**：内容预览端点（`GET /api/preview`，点击消息里的路径只读预览 cwd 文件与上传附件）的权限**强于** prompt——它不经过 agent，transcript 中无痕，只有 hub 审计。对照表（preview plan §5.1）：
+
+| 维度     | 通过 prompt 让 agent 读                     | preview 端点                                            |
+| -------- | ------------------------------------------- | ------------------------------------------------------- |
+| 能力前提 | agent 声明 `cmd.v1`                         | 只看 `webHub.preview`（**只读 agent 同样生效**）        |
+| 中介     | 经过模型、pi 工具策略、扩展、沙箱、TUI 可见 | **不经过** agent                                        |
+| 留痕     | transcript 中所有查看者都能看到             | 只有 hub 审计（无路径原文），transcript 中**无痕**      |
+| 范围     | 任意路径                                    | 会话 cwd 子树（拒绝列表除外）+ 会话可见者共享的上传文件 |
+
+**用户裁定原文（U1，`webHub.preview` 默认值）**：默认值为 `mode:"on"`。所有经 LAN 认证的用户，都可以无痕读取任一 live 会话 cwd 下不在拒绝列表中的文件，以及该会话的上传附件。用户确认自己是 LAN 上唯一的使用者，并且已启用密码认证，**明示接受**这一风险。若将来 LAN 上出现其他使用者，应把 mode 改为 `"loopback"`（已写进设置说明；改 mode 需 `/reload` 后 `/webhub restart`）。
+
+**用户裁定原文（U2，home 作为 cwd 时的 LAN 预览）**：**允许**，靠拒绝列表兜底（若拒绝，大半用途就没了）。残余风险是 home 下未被拒绝列表覆盖的秘密（各类应用 token、私人笔记、没有列出的应用配置），在 LAN 上可以被读取。用户已知悉并接受；理由是拒绝这种情况会废掉大半用途。
+
+另（U3，2026-10-05 用户裁定，详见 preview plan §5.4 与 `docs/dev/web-hub-upload/plan.md` 文末修订备注）：上传附件在 LAN 上的可见范围由「仅上传者」修订为**会话可见者共享**（只读）；写入、abort、去重、引用钉住仍按主体绑定。`webHub.preview` 为 `"loopback"` 时 LAN 上该端点不存在（404，与 `off` 字节一致），不暴露 mode。
+
 ### 1.2 决策表（v7 版本）
 
 | #   | 问题                             | 决策                                                                                                                                                                                                                                                                                                                                                                                                                           | 依据                               |
