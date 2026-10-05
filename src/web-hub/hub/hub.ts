@@ -30,7 +30,15 @@ import {
   type HubPaths,
   type SocketIdentity,
 } from "../protocol/paths.js";
-import { PROTO, P2_HUB_CAPS, UPLOAD_HUB_CAPS, DIALOG_BG_HUB_CAPS, SPAWN_HUB_CAP } from "../protocol/version.js";
+import {
+  PROTO,
+  P2_HUB_CAPS,
+  UPLOAD_HUB_CAPS,
+  DIALOG_BG_HUB_CAPS,
+  SPAWN_HUB_CAP,
+  PREVIEW_HUB_CAP,
+  PREVIEW_LAN_HUB_CAP,
+} from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { auditSpawn, auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
@@ -50,6 +58,7 @@ import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/f
 import type { SpawnFrontendPort } from "./spawn/ports.js";
 import { createReaper, type Reaper } from "./spawn/reaper.js";
 import { createSpawnRoutes } from "./spawn/routes.js";
+import { createPreviewRoutes } from "./preview/routes.js";
 import { createSpawnStore } from "./spawn/store.js";
 import { createSpawnSupervisor, type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
 import { createUploadStore, type UploadStore } from "./uploads.js";
@@ -193,7 +202,15 @@ export async function startHub(
     // `config.spawn` exists — even when the platform probe or launcher check failed (the UI
     // needs the cap to explain WHY spawn is unavailable, `GET /api/headless` carries the
     // `policy.reason`). Absent (feature off) ⇒ caps stay byte-identical to pre-SP10.
-    const extraHubCaps: readonly string[] = config.spawn === undefined ? [] : [SPAWN_HUB_CAP];
+    // web-hub-preview plan v3 §4.1/§4.7 (PV3): the two preview caps ride the same two surfaces
+    // (same array instance — the §4.7 "两处声明的集合必须一致" invariant): `preview.v1` whenever
+    // `config.preview` exists (mode loopback OR on), `preview.lan.v1` only when mode is on.
+    // Absent (mode off) ⇒ caps stay byte-identical to pre-PV3.
+    const extraHubCaps: readonly string[] = [
+      ...(config.spawn === undefined ? [] : [SPAWN_HUB_CAP]),
+      ...(config.preview === undefined ? [] : [PREVIEW_HUB_CAP]),
+      ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
+    ];
 
     let supersede: SupersedeController | undefined;
     // web-hub-spawn plan §SP10: the spawn assembly handles, declared early (same lazy-closure
@@ -548,6 +565,30 @@ export async function startHub(
     cleanup.push(async () => {
       await uploads?.close();
     });
+    // web-hub-preview plan v3 §4.5/§6 (PV3): the preview route frontend — constructed only when
+    // `config.preview` exists (PV1: mode "off" is the key's ABSENCE, so the cap declaration and
+    // this construction read the same config key and can never disagree). Pure closure
+    // building: no fs, no I/O, nothing that can fail. The limiter is deliberately NOT passed —
+    // `createPreviewRoutes` defaults to its own private `CmdLimit` (§7-D14: preview bucket
+    // churn must never evict the cmd/upload lines' buckets).
+    const previewRoutes =
+      config.preview === undefined
+        ? undefined
+        : createPreviewRoutes({
+            mode: config.preview,
+            home: config.home,
+            uploadsRoot: webHubUploadsDir(config.home),
+            registry,
+            ...(uploads === undefined
+              ? {}
+              : {
+                  uploads: {
+                    openForPreview: (p, ctx) => uploads!.openForPreview(p, ctx),
+                  },
+                }),
+            log,
+            now,
+          });
     const fe = frontend({
       config,
       paths,
@@ -567,9 +608,18 @@ export async function startHub(
       uploadMetrics,
       ...(uploads === undefined ? {} : { uploads }),
       ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
+      ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
+    // web-hub-preview plan v3 §4.5.1 (PV3): pushed right after the frontend's own entry so the
+    // startup-failure reverse-order unwind runs preview dispose BEFORE `fe.close()` — the same
+    // domain-first order the runtime `close()` path below uses; before the spawn push so the two
+    // unwind in the same relative order as the runtime path (spawn shutdown → preview dispose →
+    // fe.close).
+    if (previewRoutes !== undefined) {
+      cleanup.push(() => previewRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    }
     // web-hub-spawn §SP10 (startup-failure path only — the runtime close() path wires its own
     // call inside `close`): pushed right after the frontend's entry so reverse-order release
     // runs the spawn shutdown BEFORE `fe.close()` (arch §7.6's domain-first order; see the
@@ -958,6 +1008,11 @@ export async function startHub(
         // (arch §4.6) while the bus is still live enough for the final `spawns` push.
         firstPromptFwd?.dispose("hub_restart");
         if (spawnSup !== undefined) await spawnSup.shutdown(deadline);
+        // web-hub-preview plan v3 §4.5.1 (PV3): preview dispose — after the spawn domain shuts
+        // down, BEFORE the HTTP face stops accepting. Bounded (≤1s inside dispose itself:
+        // verifier tasks aborted, every active request aborted "hub-close", head-sent streams
+        // destroyed) and idempotent (shares the startup-failure promise).
+        if (previewRoutes !== undefined) await bounded(previewRoutes.dispose("close", deadline));
         await bounded(fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files

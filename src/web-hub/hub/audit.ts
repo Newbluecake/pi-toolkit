@@ -292,3 +292,76 @@ export function auditSpawn(log: { info(msg: string, data?: object): void }, reco
   }
   log.info("spawn", out);
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-preview plan v3 §4.5 (PV3): preview audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * Preview audit record (plan v3 §4.5). NEVER carries the raw request path, any filename, the
+ * original upload name, file content or any hash of them (same discipline as
+ * `ControlAuditRecord`/`UploadAuditRecord`): `pathTag` is an HMAC-12 tag (per hub-process key)
+ * purely for correlating one process's own lines, `ext` a sanitized ≤16-char extension, `bytes`
+ * /`total` sizes only. `shared` is U3's audit hint — true iff an upload-class read was served to
+ * someone other than the uploader. One line per request, written in §3.1 ⑩'s `finally`
+ * (429 repeats are throttled by the routes to one line per `preview:${principal}` per 60s).
+ */
+export interface PreviewAuditRecord {
+  phase: "request";
+  listener?: "loopback" | "lan" | undefined;
+  ip?: string | undefined;
+  user?: string | undefined;
+  agentKey?: string | undefined;
+  /** §3.1 ⑥ request class: upload-root vs session-cwd subtree. */
+  cls?: "upload" | "cwd" | undefined;
+  /** sniffed content kind of the admitted file (undefined before ⑧ decided). */
+  kind?: "text" | "image" | undefined;
+  ok: boolean;
+  code?: string | undefined;
+  reason?: string | undefined;
+  verify?: "hashed" | "cached" | "joined" | undefined;
+  /** U3: upload-class read served to a non-uploader (session-visible sharing). */
+  shared?: boolean | undefined;
+  /** streamed/served bytes (⑨). */
+  bytes?: number | undefined;
+  /** admitted file size (⑦). */
+  total?: number | undefined;
+  truncated?: boolean | undefined;
+  ms?: number | undefined;
+  ext?: string | undefined;
+  /** HMAC-sha256(path)[0:12] under the routes instance's random key — never the path itself. */
+  pathTag?: string | undefined;
+}
+
+/** Runtime whitelist for `auditPreview` — anything not listed here is dropped, even if passed. */
+export const PREVIEW_AUDIT_KEYS = [
+  "phase",
+  "listener",
+  "ip",
+  "user",
+  "agentKey",
+  "cls",
+  "kind",
+  "ok",
+  "code",
+  "reason",
+  "verify",
+  "shared",
+  "bytes",
+  "total",
+  "truncated",
+  "ms",
+  "ext",
+  "pathTag",
+] as const;
+
+/** `log.info("preview", { audit: "preview", ...pick(record, PREVIEW_AUDIT_KEYS) })` (§4.5). */
+export function auditPreview(log: { info(msg: string, data?: object): void }, record: PreviewAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "preview" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of PREVIEW_AUDIT_KEYS) {
+    const v = raw[key];
+    if (v !== undefined) out[key] = v;
+  }
+  log.info("preview", out);
+}

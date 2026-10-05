@@ -1,10 +1,12 @@
 /**
- * web-hub-preview plan v3 / PV2a source-scan guard (mirrors `tests/web-hub/hub/upload-fs-guard.test.ts`).
+ * web-hub-preview plan v3 / PV2a+PV3 source-scan guard (mirrors `tests/web-hub/hub/upload-fs-guard.test.ts`).
  *
- * PV2a's kernel discipline: within `src/web-hub/hub/preview/`, ONLY `fs.ts` may import
+ * Kernel discipline: within `src/web-hub/hub/preview/`, ONLY `fs.ts` may import
  * `node:fs`/`fs`/`node:fs/promises` (static, dynamic or require — `import type` is exempt),
  * and NO file may contain `readFile(` (whole-file reads are architecturally banned: previews
- * stream bounded windows, verification streams 64 KiB chunks).
+ * stream bounded windows, verification streams 64 KiB chunks). PV3's `routes.ts` joins the
+ * scanned set with the same rules — it reaches disk exclusively through the PV2a kernels
+ * and PV2b's store.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -13,7 +15,7 @@ import { describe, expect, it } from "vitest";
 
 const PREVIEW_DIR = fileURLToPath(new URL("../../../../src/web-hub/hub/preview/", import.meta.url));
 const FS_FILE = "fs.ts";
-const KERNEL_FILES = ["sniff.ts", "admit.ts", "stream.ts", "verify.ts"] as const;
+const KERNEL_FILES = ["sniff.ts", "admit.ts", "stream.ts", "verify.ts", "routes.ts"] as const;
 
 /** Matches `node:fs` / `fs` / `node:fs/promises` (static, dynamic, require); `import type` is exempt. */
 const FS_MODULE_RE = /^(?:node:)?fs(?:\/promises)?$/;
@@ -45,7 +47,7 @@ describe("preview source scan (PV2a)", () => {
     expect(files.sort()).toEqual([...KERNEL_FILES, FS_FILE].sort());
   });
 
-  it("only fs.ts imports node:fs* — the four kernel files reach disk exclusively through it", () => {
+  it("only fs.ts imports node:fs* — every other file reaches disk exclusively through it", () => {
     for (const name of KERNEL_FILES) {
       const source = readFileSync(PREVIEW_DIR + name, "utf8");
       expect(fsImportLines(source), `${name} must not import node:fs*`).toEqual([]);

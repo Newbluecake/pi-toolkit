@@ -67,10 +67,12 @@ import { createConnGuard } from "./conn-guard.js";
 import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
+import { PREVIEW_PATH } from "../protocol/preview.js";
 import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
 import type { PinToken, UploadStore } from "./uploads.js";
 import type { SpawnFrontendPort } from "./spawn/ports.js";
+import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
 import type {
   AgentView,
   CommandRouter,
@@ -92,6 +94,7 @@ import type {
   LanStatus,
   LanTransport,
   ListenerKind,
+  PreviewRoutes,
   RegistryView,
   RequestContext,
 } from "./ports.js";
@@ -898,6 +901,11 @@ export interface LanRuntime {
    * gate (`publicPayload("lan") !== undefined`, i.e. `cfg.lan !== "off"`) passes — absent ⇒ the
    * LAN face stays byte-identical to the not-enabled matrix. */
   spawn?: SpawnFrontendPort | undefined;
+  /** web-hub-preview plan v3 §4.5/§4.7 (PV3): the preview route frontend, same instance as the
+   * loopback listener's. `handleLanRequestInner` only dispatches to it when `mode === "on"`
+   * (§4.7 matrix: `mode:"loopback"` ⇒ LAN answers 404 exactly like not-enabled); absent ⇒
+   * `GET /api/preview` on LAN keeps its original 404, byte-identical. */
+  preview?: PreviewRoutes | undefined;
 }
 
 function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
@@ -1198,6 +1206,28 @@ async function handleLanRequestInner(
       sendJson,
       sendError,
       HttpError,
+    });
+  }
+
+  // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — dispatched at the same spot
+  // as the spawn branch above (after headless, before the method branches). LAN additionally
+  // requires `mode === "on"` (§4.7: `mode:"loopback"` falls through to the original 404,
+  // byte-identical to not-enabled — D12). `authorize` mirrors the cmd/dialog branch's LAN
+  // segment, but with preview's own §3.1 ② reserve (`PREVIEW_AUTH_RESERVE_MS`: after auth at
+  // least 4s of the 8s admission budget must remain for the fs phases).
+  if (rt.preview !== undefined && rt.preview.mode === "on" && method === "GET" && path === PREVIEW_PATH) {
+    return rt.preview.handle(req, res, query, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, PREVIEW_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      sendJson,
     });
   }
 
@@ -2051,6 +2081,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // `/api/headless*` keeps its legacy replies (404/501 per the §8.2 not-enabled matrix) and no
   // `spawns` SSE frame is ever sent, byte-identical to pre-SP9.
   const spawnRoutes = deps.spawn;
+  // web-hub-preview plan v3 §4.5 (PV3): the preview route frontend — absent ⇒ `GET /api/preview`
+  // keeps its legacy replies (401/404 per the §4.7 not-enabled matrix) and no `X-PWH-Preview-*`
+  // header is ever sent, byte-identical to pre-PV3.
+  const previewRoutes = deps.preview;
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -2119,6 +2153,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       cmdLimit,
       rejectAudit429,
       spawn: deps.spawn,
+      preview: deps.preview,
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -2340,6 +2375,26 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         sendJson,
         sendError,
         HttpError,
+      });
+    }
+    // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — same insertion point as the
+    // spawn branch above (after headless, before the method branches). Absent ⇒ falls through
+    // to the original paths (unauth GET ⇒ 401, authed ⇒ 404 — the §4.7 not-enabled matrix,
+    // byte-identical). The loopback authorize segment is a sync cookie-map lookup (no deadline
+    // budgeting, same as every other loopback branch).
+    if (previewRoutes !== undefined && method === "GET" && path === PREVIEW_PATH) {
+      return previewRoutes.handle(req, res, query, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        sendJson,
       });
     }
     if (method === "POST") {

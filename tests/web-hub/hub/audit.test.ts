@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import {
   auditAdmin,
   auditControl,
+  auditPreview,
   auditSpawn,
   auditUpload,
   createUploadHttpMetrics,
+  PREVIEW_AUDIT_KEYS,
   SPAWN_AUDIT_KEYS,
   uploadStatsFields,
   type SpawnAuditRecord,
@@ -360,5 +362,70 @@ describe("auditSpawn (web-hub-spawn plan §SP9, arch §6.6)", () => {
     const routesSrc = readFileSync(new URL("../../../src/web-hub/hub/spawn/routes.ts", import.meta.url), "utf8");
     expect(routesSrc).not.toContain("stderr"); // stderr never flows through the route layer at all
     expect(routesSrc).not.toMatch(/\btext:\s*intent\.firstPrompt\.text/); // only LENGTHS may be fed in
+  });
+});
+
+describe("auditPreview (web-hub-preview plan v3 §4.5, PV3)", () => {
+  it('writes the whitelisted key set under audit:"preview" and drops unknown keys', () => {
+    const log = memLog();
+    auditPreview(log, {
+      phase: "request",
+      listener: "lan",
+      ip: "192.168.1.9",
+      user: "u2",
+      agentKey: "a1",
+      cls: "upload",
+      kind: "image",
+      ok: true,
+      verify: "joined",
+      shared: true,
+      bytes: 1024,
+      total: 1024,
+      truncated: false,
+      ms: 12,
+      ext: "png",
+      pathTag: "abc123def456",
+      // a deliberately smuggled extra field — must be dropped by the whitelist
+      ...({ path: "/home/user/secret.png", content: "raw" } as unknown as Record<string, never>),
+    } as never);
+    expect(log.lines).toHaveLength(1);
+    const line = log.lines[0]!;
+    expect(line.msg).toBe("preview");
+    const data = line.data as Record<string, unknown>;
+    expect(data["audit"]).toBe("preview");
+    expect(Object.keys(data).sort()).toEqual(
+      [
+        "audit",
+        "phase",
+        "listener",
+        "ip",
+        "user",
+        "agentKey",
+        "cls",
+        "kind",
+        "ok",
+        "verify",
+        "shared",
+        "bytes",
+        "total",
+        "truncated",
+        "ms",
+        "ext",
+        "pathTag",
+      ].sort(),
+    );
+    expect(data["path"]).toBeUndefined();
+    expect(data["content"]).toBeUndefined();
+  });
+
+  it("PREVIEW_AUDIT_KEYS carries no path/filename/content-bearing key (§4.5 永不记录路径原文)", () => {
+    expect(PREVIEW_AUDIT_KEYS).not.toContain("path");
+    expect(PREVIEW_AUDIT_KEYS).not.toContain("name");
+    expect(PREVIEW_AUDIT_KEYS).not.toContain("safeName");
+    expect(PREVIEW_AUDIT_KEYS).not.toContain("sha256");
+    const src = readFileSync(new URL("../../../src/web-hub/hub/preview/routes.ts", import.meta.url), "utf8");
+    // the routes only ever feed pathTag (HMAC-12) / ext into the audit accumulator
+    expect(src).toMatch(/acc\.pathTag = pathTagOf\(path\)/);
+    expect(src).not.toMatch(/acc\.(path|name|content)\b/);
   });
 });

@@ -99,3 +99,24 @@ describe("§3.3 nested deadline invariant (plan: agentDeadlineMs <= registryWait
     expect(UPLOAD_TOTAL_MS - LAN_AUTH_CAP_MS).toBe(11_000);
   });
 });
+
+describe("web-hub-preview plan v3 §3.1/§6 (PV3): preview budget nesting", () => {
+  it("§3.1 ②: LAN auth keeps ≥4s of the 8s admission budget for the fs phases", async () => {
+    const { PREVIEW_ADMIT_TOTAL_MS, PREVIEW_STREAM_MS, PREVIEW_VERIFY_MS } =
+      await import("../../../src/web-hub/protocol/preview.js");
+    const { LAN_AUTH_CAP_MS, deriveBudget } = await import("../../../src/web-hub/hub/req-deadline.js");
+    const { PREVIEW_AUTH_RESERVE_MS } = await import("../../../src/web-hub/hub/preview/routes.js");
+    expect(PREVIEW_AUTH_RESERVE_MS).toBe(4_000);
+    // at full remaining the auth budget is its 3s cap…
+    expect(deriveBudget(PREVIEW_ADMIT_TOTAL_MS, LAN_AUTH_CAP_MS, PREVIEW_AUTH_RESERVE_MS)).toBe(LAN_AUTH_CAP_MS);
+    // …and what CAN remain afterwards (≥ the 4s reserve) still covers the fs phases
+    expect(PREVIEW_ADMIT_TOTAL_MS - LAN_AUTH_CAP_MS).toBeGreaterThanOrEqual(PREVIEW_AUTH_RESERVE_MS);
+  });
+
+  it("§0 budget chain: ADMIT(8s) + STREAM.lan(30s) ≤ CLIENT_TIMEOUT(40s); VERIFY ≤ STREAM.lan", async () => {
+    const { PREVIEW_ADMIT_TOTAL_MS, PREVIEW_STREAM_MS, PREVIEW_VERIFY_MS, PREVIEW_CLIENT_TIMEOUT_MS } =
+      await import("../../../src/web-hub/protocol/preview.js");
+    expect(PREVIEW_ADMIT_TOTAL_MS + PREVIEW_STREAM_MS.lan).toBeLessThanOrEqual(PREVIEW_CLIENT_TIMEOUT_MS);
+    expect(PREVIEW_VERIFY_MS).toBeLessThanOrEqual(PREVIEW_STREAM_MS.lan);
+  });
+});
