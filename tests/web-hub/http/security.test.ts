@@ -37,6 +37,64 @@ afterEach(async () => {
   tmp.cleanup();
 });
 
+// ---------------------------------------------------------------------------
+// fleet-drawer plan §3.4/§5.4 (F4): the run routes sit INSIDE the existing gate
+// pipeline — CSRF → session — before any route logic; with no runTx service wired
+// (deps.runTx absent) an authenticated call answers 404, byte-identical to a hub
+// without the channel.
+// ---------------------------------------------------------------------------
+
+describe("run route gates (fleet-drawer F4)", () => {
+  beforeEach(async () => {
+    port = await start();
+    deps.agents.set("a1", makeAgent("a1"));
+  });
+
+  it("POST /api/run/subscribe: no session ⇒ 401 before anything else", async () => {
+    const r = await postJson(port, "/api/run/subscribe", { clientId: "c1", agentKey: "a1", runId: "r_ABCDEFGH" });
+    expect(r.status).toBe(401);
+    expect(JSON.parse(r.body)).toEqual({ error: "E_AUTH" });
+  });
+
+  it("POST /api/run/subscribe: session but no X-PWH header ⇒ 403 E_CSRF", async () => {
+    const cookie = await login(port, deps.paths.tokenFile);
+    const r = await postJson(
+      port,
+      "/api/run/subscribe",
+      { clientId: "c1", agentKey: "a1", runId: "r_ABCDEFGH" },
+      { Cookie: cookie, "X-PWH": "" },
+    );
+    expect(r.status).toBe(403);
+    expect(JSON.parse(r.body)).toEqual({ error: "E_CSRF" });
+  });
+
+  it("POST /api/run/subscribe: authenticated and CSRF-clean but no runTx wired ⇒ 404 (§8.1 not-enabled matrix)", async () => {
+    const cookie = await login(port, deps.paths.tokenFile);
+    const r = await postJson(
+      port,
+      "/api/run/subscribe",
+      { clientId: "c1", agentKey: "a1", runId: "r_ABCDEFGH" },
+      { Cookie: cookie },
+    );
+    expect(r.status).toBe(404);
+  });
+
+  it("GET /api/run/history: no session ⇒ 401; session but no runTx ⇒ 404", async () => {
+    const noAuth = await rawRequest(port, {
+      method: "GET",
+      path: "/api/run/history?agent=a1&run=r_ABCDEFGH&before=e1",
+    });
+    expect(noAuth.status).toBe(401);
+    const cookie = await login(port, deps.paths.tokenFile);
+    const authed = await rawRequest(port, {
+      method: "GET",
+      path: "/api/run/history?agent=a1&run=r_ABCDEFGH&before=e1",
+      headers: { Cookie: cookie },
+    });
+    expect(authed.status).toBe(404);
+  });
+});
+
 describe("host / auth / csrf gates", () => {
   beforeEach(async () => {
     port = await start();

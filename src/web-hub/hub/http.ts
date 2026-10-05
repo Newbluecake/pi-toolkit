@@ -97,6 +97,8 @@ import type {
   PreviewRoutes,
   RegistryView,
   RequestContext,
+  RunSink,
+  RunTranscriptService,
 } from "./ports.js";
 import {
   BODY_CAP_MS,
@@ -112,6 +114,7 @@ import {
   type ReqDeadline,
 } from "./req-deadline.js";
 import { HubError } from "./registry.js";
+import { combineRunSinks, createRunRoutes } from "./run-routes.js";
 import { createSseHub, type SseClient, type SseEventName, type SseHub } from "./sse.js";
 import { createUiServer, type CreateUiServerOptions, type UiServer } from "./static.js";
 import { buildUiCandidates } from "./ui-root.js";
@@ -637,6 +640,14 @@ interface RouteSet {
   unsubscribe(body: unknown, res: ServerResponse): void;
   openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient;
   historyPage(query: URLSearchParams, res: ServerResponse): Promise<void>;
+  /** fleet-drawer plan §5.4 (F4): the run-transcript routes — 404-shaped stubs when no service
+   * was wired (`deps.runTx` absent), byte-identical to a hub without the channel. */
+  runSubscribe(body: unknown, res: ServerResponse): void;
+  runUnsubscribe(body: unknown, res: ServerResponse): void;
+  runHistoryPage(query: URLSearchParams, res: ServerResponse): Promise<void>;
+  /** F4: this listener's run-route sink; combined by `createHttpFrontend` into the single
+   * `runTx.setSink` slot. `undefined` when no run-transcript service was wired. */
+  runSink: RunSink | undefined;
 }
 
 function createRouteSet(
@@ -653,10 +664,31 @@ function createRouteSet(
      * `spawns` frame, byte-identical to the not-enabled matrix. Also doubles as the live-push
      * gate in `onHubEvent`'s `case "spawns"`. */
     spawns?: () => SpawnsPayload | undefined;
+    /** fleet-drawer plan §5.4 (F4): this listener's identity — decides the cap requirement
+     * (`runtx.v1` vs `runtx.v1`+`runtx.lan.v1`) and the run-watch ref prefix of its routes. */
+    listener: ListenerKind;
+    now: () => number;
+    /** F4: the run-transcript service (F3b). Absent ⇒ `/api/run/*` answers 404 and no run SSE
+     * event is ever sent — byte-identical to a hub without the channel. */
+    runTx?: RunTranscriptService;
   },
 ): RouteSet {
   const pending = new Map<string, Map<string, PendingSub>>();
   const fleetCache = new Map<string, FleetRowWire[]>();
+  // F4 (fleet-drawer §5.4): one run-route instance per listener; the sink it exposes is
+  // combined with the other listener's by `createHttpFrontend` (the service's `setSink` is a
+  // single slot) — construction here, installation there.
+  const runRoutes =
+    routeDeps.runTx === undefined
+      ? undefined
+      : createRunRoutes(sse, {
+          listener: routeDeps.listener,
+          registry: routeDeps.registry,
+          runTx: routeDeps.runTx,
+          log: routeDeps.log,
+          isClosed: routeDeps.isClosed,
+          now: routeDeps.now,
+        });
 
   function getPending(clientId: string, agentKey: string): PendingSub | undefined {
     return pending.get(clientId)?.get(agentKey);
@@ -812,7 +844,10 @@ function createRouteSet(
     const sp = routeDeps.spawns?.();
     if (sp !== undefined) client.send("spawns", sp);
     for (const [agentKey, runs] of fleetCache) client.send("fleet", { agentKey, runs });
-    res.once("close", () => pending.delete(client.id));
+    res.once("close", () => {
+      pending.delete(client.id);
+      runRoutes?.onClientClose(client.id); // F4: run subs + watch refs die with the SSE conn
+    });
     return client;
   }
 
@@ -860,7 +895,28 @@ function createRouteSet(
     }
   }
 
-  return { pending, fleetCache, onHubEvent, subscribe, unsubscribe, openEvents, historyPage };
+  return {
+    pending,
+    fleetCache,
+    onHubEvent,
+    subscribe,
+    unsubscribe,
+    openEvents,
+    historyPage,
+    runSubscribe: (body, res) => {
+      if (runRoutes === undefined) throw new HttpError(404, "E_NOT_FOUND");
+      runRoutes.subscribe(body, res);
+    },
+    runUnsubscribe: (body, res) => {
+      if (runRoutes === undefined) throw new HttpError(404, "E_NOT_FOUND");
+      runRoutes.unsubscribe(body, res);
+    },
+    runHistoryPage: async (query, res) => {
+      if (runRoutes === undefined) throw new HttpError(404, "E_NOT_FOUND");
+      await runRoutes.historyPage(query, res);
+    },
+    runSink: runRoutes?.sink,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,6 +1434,10 @@ async function handleLanRequestInner(
     const body = await readJson(req);
     if (path === "/api/subscribe") return rt.routes.subscribe(body, res);
     if (path === "/api/unsubscribe") return rt.routes.unsubscribe(body, res);
+    // fleet-drawer plan §3.4/§5.4 (F4): run-transcript subscribe/unsubscribe — inside the same
+    // `csrfOkLan` + `requireLanSession` pipeline as the agent-level ones above.
+    if (path === "/api/run/subscribe") return rt.routes.runSubscribe(body, res);
+    if (path === "/api/run/unsubscribe") return rt.routes.runUnsubscribe(body, res);
     throw new HttpError(404, "E_NOT_FOUND");
   }
 
@@ -1412,6 +1472,12 @@ async function handleLanRequestInner(
       const session = await requireLanSession(rt, req, res, ctx, false, lease);
       if (session === undefined) return;
       await rt.routes.historyPage(query, res);
+      return;
+    }
+    if (path === "/api/run/history") {
+      const session = await requireLanSession(rt, req, res, ctx, false, lease);
+      if (session === undefined) return;
+      await rt.routes.runHistoryPage(query, res);
       return;
     }
   }
@@ -2111,6 +2177,11 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     port: () => port,
     isClosed: () => closed,
     ...(spawnRoutes === undefined ? {} : { spawns: () => spawnRoutes.publicPayload("loopback") }),
+    // F4 (fleet-drawer §5.4): the loopback listener's run routes — caps gated on `runtx.v1`
+    // (never `runtx.lan.v1`), refs prefixed `loopback:`.
+    listener: "loopback",
+    now,
+    ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
   });
 
   // ---- LAN facade (§2.5/§6/§7) ------------------------------------------
@@ -2120,6 +2191,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // open LAN SSE stream, not just one target's, which the frozen `revoke(target)` can't express.
   let lanFacade: (LanFacade & { revokeAll?(): number }) | undefined;
   let lanSseRef: SseHub | undefined;
+  // F4: the LAN route set's run sink, hoisted so the composite installation below (after both
+  // route sets exist) can reach it.
+  let lanRunSink: RunSink | undefined;
   if (deps.lan !== undefined) {
     const lan = deps.lan;
     const lanSse = createSseHub({ now });
@@ -2134,7 +2208,13 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       // LAN policy `off` ⇒ publicPayload("lan") is undefined ⇒ no `spawns` snapshot, no live
       // forward — the LAN SSE face stays byte-identical to not-enabled (arch §8.2 matrix).
       ...(spawnRoutes === undefined ? {} : { spawns: () => spawnRoutes.publicPayload("lan") }),
+      // F4 (fleet-drawer §5.4): the LAN listener's run routes — caps gated on `runtx.lan.v1`
+      // too, refs prefixed `lan:`.
+      listener: "lan",
+      now,
+      ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
     });
+    lanRunSink = lanRoutes.runSink;
     let lanClosed = false;
     const unsubscribeLanBus = bus.subscribe(lanRoutes.onHubEvent);
     // §5.1/§9.2 review fix (LC #2): sticky once set (a corrupt KDF row doesn't self-heal without
@@ -2326,6 +2406,18 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     }
   }
 
+  // fleet-drawer plan §5.4 (F4): the service's `setSink` is a single slot, so both listeners'
+  // run-route sinks are combined into one fan-out sink — each part acts only on its own `subs`,
+  // and its `dropped(refs)` filter matches refs by its own `${listener}:` prefix, so the two
+  // listeners' independent SseHub client-id spaces can never cross-route. Installed once here,
+  // after both route sets exist; run frames arriving before this point are silently dropped by
+  // the service (no sink yet), same as any pre-listen agent traffic.
+  if (deps.runTx !== undefined) {
+    const parts = [routes.runSink, lanRunSink].filter((s): s is RunSink => s !== undefined);
+    if (parts.length === 1) deps.runTx.setSink(parts[0]!);
+    else if (parts.length > 1) deps.runTx.setSink(combineRunSinks(parts));
+  }
+
   // ---- loopback subscriptions -------------------------------------------
 
   function allowedHost(host: string | undefined): boolean {
@@ -2483,6 +2575,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
       if (path === "/api/subscribe") return routes.subscribe(body, res);
       if (path === "/api/unsubscribe") return routes.unsubscribe(body, res);
+      // fleet-drawer plan §3.4/§5.4 (F4): run-transcript subscribe/unsubscribe — same CSRF /
+      // 64 KiB body / auth pipeline as the agent-level ones above (404 when no service wired).
+      if (path === "/api/run/subscribe") return routes.runSubscribe(body, res);
+      if (path === "/api/run/unsubscribe") return routes.runUnsubscribe(body, res);
       if (isHeadlessPath(path)) throw new HttpError(501, "E_NOT_IMPLEMENTED"); // P3 — spawn frontend not wired (SP9 matrix: not-enabled)
       throw new HttpError(404, "E_NOT_FOUND");
     }
@@ -2490,6 +2586,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
       if (path === "/api/events") return openEvents(req, res);
       if (path === "/api/history") return routes.historyPage(query, res);
+      if (path === "/api/run/history") return routes.runHistoryPage(query, res); // F4: same session gate as /api/history
     }
     throw new HttpError(404, "E_NOT_FOUND");
   }

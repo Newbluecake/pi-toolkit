@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createSseHub, formatSseFrame, type SseClient, type SseHub } from "../../../src/web-hub/hub/sse.js";
-import { fakeDeps, login, openSse, type SseConn } from "./helpers.js";
+import type { RunSink } from "../../../src/web-hub/hub/ports.js";
+import type { RunHistoryPayload } from "../../../src/web-hub/protocol/run-transcript.js";
+import { fakeDeps, login, makeAgent, openSse, postJson, type SseConn } from "./helpers.js";
 
 let server: Server | undefined;
 let hub: SseHub | undefined;
@@ -330,6 +332,133 @@ describe("spawns SSE slot (web-hub-spawn §SP9, arch §6.4/§8.2)", () => {
       await new Promise((r) => setTimeout(r, 80));
       expect(conn.events.some((e) => e.event === "spawns")).toBe(false);
       conn.close();
+      await fe.close();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fleet-drawer plan §8.4 item 3 / §3.4 (F4): the SSE layer's two run-channel pins —
+// (a) `runTranscript`/`runTranscriptLan` card fields survive ALL THREE delivery paths
+//     (initial `agents` frame, live `agent_up`, reconnect), and
+// (b) run frames are DIRECT sends: never in the replay ring, never carrying an id —
+//     a Last-Event-ID reconnect can never replay another tab's run traffic.
+// ---------------------------------------------------------------------------
+
+describe("run transcript SSE pins (fleet-drawer F4)", () => {
+  it("contract 2: runTranscript/runTranscriptLan on the initial agents frame, agent_up, and reconnect", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pwh-sse-run-"));
+    try {
+      const deps = fakeDeps(tmp);
+      deps.agents.set("a1", makeAgent("a1", { runTranscript: true, runTranscriptLan: true }));
+      deps.agents.set("a2", makeAgent("a2", { runTranscript: false, runTranscriptLan: false }));
+      const fe = createHttpFrontend(deps);
+      const port = (await fe.listen()).port;
+      const cookie = await login(port, deps.paths.tokenFile);
+      const conn = await openSse(port, { cookie });
+      conns.push(conn);
+      const agents = await conn.waitFor((e) => e.event === "agents");
+      const byKey = new Map<string, { runTranscript?: boolean; runTranscriptLan?: boolean }>(
+        agents.data.agents.map((a: { agentKey: string }) => [a.agentKey, a]),
+      );
+      expect(byKey.get("a1")).toMatchObject({ runTranscript: true, runTranscriptLan: true });
+      expect(byKey.get("a2")).toMatchObject({ runTranscript: false, runTranscriptLan: false });
+      // live path: agent_up carries the card verbatim (the registry record exists too, so a
+      // reconnect's snapshot sees it)
+      deps.agents.set("a3", makeAgent("a3", { runTranscript: true, runTranscriptLan: false }));
+      deps.emit({ type: "agent_up", agent: makeAgent("a3", { runTranscript: true, runTranscriptLan: false }) });
+      const up = await conn.waitFor((e) => e.event === "agent_up");
+      expect(up.data.agent).toMatchObject({ agentKey: "a3", runTranscript: true, runTranscriptLan: false });
+      conn.close();
+      // reconnect path: a fresh connection re-snapshots through the same toCard whitelist
+      const conn2 = await openSse(port, { cookie });
+      conns.push(conn2);
+      const agents2 = await conn2.waitFor((e) => e.event === "agents");
+      const again = new Map<string, { runTranscript?: boolean; runTranscriptLan?: boolean }>(
+        agents2.data.agents.map((a: { agentKey: string }) => [a.agentKey, a]),
+      );
+      expect(again.get("a1")).toMatchObject({ runTranscript: true, runTranscriptLan: true });
+      expect(again.get("a3")).toMatchObject({ runTranscript: true, runTranscriptLan: false });
+      conn2.close();
+      await fe.close();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("run frames are direct sends: no id, never in the replay ring (§3.4)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pwh-sse-ring-"));
+    try {
+      const deps = fakeDeps(tmp);
+      deps.agents.set("a1", makeAgent("a1"));
+      const pending: Array<(p: RunHistoryPayload) => void> = [];
+      const sinkRef: { sink?: RunSink } = {};
+      deps.runTx = {
+        snapshot: () =>
+          new Promise<RunHistoryPayload>((resolve) => {
+            pending.push(resolve);
+          }),
+        page: () => Promise.reject(new Error("unused")),
+        watch: () => {},
+        unwatch: () => {},
+        onFrame: () => {},
+        setSink: (s) => {
+          sinkRef.sink = s;
+        },
+        dispose: () => {},
+      };
+      const fe = createHttpFrontend(deps);
+      const port = (await fe.listen()).port;
+      const cookie = await login(port, deps.paths.tokenFile);
+      const conn = await openSse(port, { cookie });
+      conns.push(conn);
+      await conn.waitFor((e) => e.event === "agents");
+      const hello = conn.events.find((e) => e.event === "hello")!.data.clientId as string;
+      const sub = await postJson(
+        port,
+        "/api/run/subscribe",
+        { clientId: hello, agentKey: "a1", runId: "r_ABCDEFGH" },
+        { Cookie: cookie },
+      );
+      expect(sub.status).toBe(202);
+      pending[0]!({
+        agentKey: "a1",
+        runId: "r_ABCDEFGH",
+        entries: [],
+        tailMessages: [],
+        fromSeq: 1,
+        hasMore: false,
+        source: "live",
+        terminal: false,
+        status: "running",
+        live: true,
+      });
+      const hist = await conn.waitFor((e) => e.event === "run_history");
+      expect(hist.id).toBeUndefined(); // directed frame: no event id
+      // ring traffic the reconnect will replay…
+      deps.emit({ type: "agent_stale", agentKey: "a2" });
+      const stale = await conn.waitFor((e) => e.event === "agent_stale");
+      expect(stale.id).toBeDefined();
+      // …and run traffic that must NOT be replayable
+      sinkRef.sink!.ev("a1", "r_ABCDEFGH", {
+        agentKey: "a1",
+        runId: "r_ABCDEFGH",
+        tapId: "tapAAAAAAAAAAAA",
+        seq: 1,
+        e: { type: "turn_start" },
+      });
+      const ev = await conn.waitFor((e) => e.event === "run_ev");
+      expect(ev.id).toBeUndefined();
+      conn.close();
+      // reconnect from before the stale frame: replay carries the broadcast but no run_*
+      const conn2 = await openSse(port, { cookie, lastEventId: Number(stale.id) - 1 });
+      conns.push(conn2);
+      await conn2.waitFor((e) => e.event === "agent_stale");
+      await new Promise((r) => setTimeout(r, 120));
+      expect(conn2.events.some((e) => e.event.startsWith("run_"))).toBe(false);
+      conn2.close();
       await fe.close();
     } finally {
       rmSync(tmp, { recursive: true, force: true });
