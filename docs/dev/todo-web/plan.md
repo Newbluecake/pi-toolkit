@@ -1,6 +1,6 @@
 # todo list 上 web 页：实施方案 v1（任务 #10）
 
-> 状态：v1，待评审。
+> 状态：T1–T4 已落盘并验收（T1-T3 `183f825`、T4 `09cbeec`）；T5（卡片徽标）可选未做；v1 只读定案。
 > 需求：用户想在 web（web-hub 浏览器 UI）上看到主会话的 todo list（`src/todo/` 的 Task* 工具维护的任务列表，TUI 侧为 aboveEditor 小组件）。
 > **基线：`fa0395d`（master HEAD，fleet-drawer F5 已合入）**。本文引用代码一律以符号名为准，行号只作参考；只写方案，不改实现。
 >
