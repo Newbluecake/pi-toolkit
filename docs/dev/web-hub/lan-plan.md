@@ -36,6 +36,8 @@
 
 `/webhub restart` 的 `/proc` 身份校验保留，定位是**安全性（safety）**——防止 PID 复用时误杀无关进程——而不是安全防护（§8.2）。
 
+**追加（web-hub-spawn S1 / 预览，2026-10）：同 hub 全信任边界同样约束受管 spawn 与预览**。通过鉴权的网页主体彼此完全信任：任何主体都能停止任何受管会话（用户裁定，`POST /api/headless/:id/stop` 无属主检查）——web-hub 在设计上等价于本机用户的远程 shell，spawn 不引入新的多租户隔离。`spawns` SSE 只广播脱敏 Public 投影（`cwdLabel` 等）；`cwd`/`stderrTail`/`hintDetail`/`origin.user`/`firstPrompt.textLen` 仅经鉴权 GET 返回给 owner（例外：live 记录绑定 agent 卡片后 `cwd` 对非 owner 可见——卡片本就公开该值）；**首条消息正文任何层都不落盘**（内存持有、送达即弃、hub 重启即 `expired{hub_restart}`）。同理，未来的会话预览（transcript 读取）向任何通过鉴权的主体暴露会话文件内容——与本表「同 uid 完全可信」一致，不构成额外边界。LAN 明文直连下 `spawn.lan` 封顶为 `known` 目录且强制确认；`roots` 域需要受信代理 https 终端。详见 `docs/dev/web-hub-spawn/arch.md` §6.0/§6.4 与 `docs/dev/web-hub-spawn/acceptance.md` A7。
+
 ### 1.2 决策表（v7 版本）
 
 | #   | 问题                             | 决策                                                                                                                                                                                                                                                                                                                                                                                                                           | 依据                               |

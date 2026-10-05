@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseRouteHash, routeToHash, useHashRoute } from "../../../src/web-hub/ui/src/composables/useHashRoute.js";
 
 /** Minimal fake `Window` — plan §3.7. */
@@ -87,5 +89,20 @@ describe("useHashRoute", () => {
     handle.start();
     handle.dispose();
     expect(win._listenerCount("hashchange")).toBe(0);
+  });
+
+  // web-hub-spawn SP13（SP11/SP12 移交）：App.vue 把 useHub 的 navigate 选项接到真实 hash 路由。
+  // 行为两半已有各自的行为测试：use-new-session.test.ts（「我发起的」live ⇒ navigate(agentKey)
+  // 恰一次）与本文件上文（navigate ⇒ location.hash）；这里钉住组合本身——App.vue 必须以闭包把
+  // hashRoute.navigate 传给 useHub，且形状为 {name:"agent", key}（live ⇒ #/agent/<key>）。
+  it("App.vue wires useHub's navigate option to the real hash router (SP13 composition pin)", () => {
+    const src = readFileSync(resolve("src/web-hub/ui/src/App.vue"), "utf8");
+    expect(src).toMatch(
+      /navigate:\s*\(agentKey\)\s*=>\s*\{\s*hashRoute\?\.navigate\(\{\s*name:\s*"agent",\s*key:\s*agentKey,?\s*\}\);?\s*\}/,
+    );
+    // the option must reach the useHub call itself (not some dead closure)
+    const useHubCall = /hub = useHub\(\{[\s\S]*?\}\);/.exec(src);
+    expect(useHubCall).toBeDefined();
+    expect(useHubCall![0]).toContain("navigate:");
   });
 });

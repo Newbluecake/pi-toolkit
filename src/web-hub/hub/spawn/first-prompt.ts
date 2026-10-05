@@ -112,6 +112,10 @@ export interface FirstPromptForwarder {
   /** 记录进入终态仍未送达 ⇒ `expired{reason}`。 */
   onTerminal(spawnId: string, reason: "never_live" | "stopped"): void;
   state(spawnId: string): FirstPromptStateView | undefined;
+  /** SP13（SP10 验收遗留评估）：处于 sending（在途或退避重发）的未终态首条消息计数——
+   *  hub.ts 把它并入 supersede 的 `managedBusy`（一个替换中的 hub 会以 stdin EOF 结束会话，
+   *  首条消息在途时绝不算 quiet）。 */
+  sendingCount(): number;
   /** hub 关停：全部未送达 ⇒ `expired{hub_restart}`，随后整个 Map（含正文）清空。 */
   dispose(reason: "hub_restart"): void;
 }
@@ -318,6 +322,14 @@ export function createFirstPromptForwarder(deps: FirstPromptDeps): FirstPromptFo
         textLen: entry.textLen,
         attempts: entry.attempts,
       };
+    },
+
+    sendingCount() {
+      let n = 0;
+      for (const entry of entries.values()) {
+        if (entry.phase === "inflight" || entry.phase === "backoff") n += 1;
+      }
+      return n;
     },
 
     dispose(reason) {

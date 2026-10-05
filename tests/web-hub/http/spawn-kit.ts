@@ -221,6 +221,9 @@ export function fakeFirstPrompt(): FakeFirstPrompt {
     state(spawnId) {
       return views.get(spawnId);
     },
+    sendingCount() {
+      return 0;
+    },
     dispose() {},
   };
 }

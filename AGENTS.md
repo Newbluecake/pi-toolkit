@@ -295,6 +295,18 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   host allow-list + optional trusted-reverse-proxy origin (`webHub.lan.{trustProxyFrom,externalOrigins}`) for
   HTTPS termination, SQLite-backed sessions in a SIGKILL-able child process, and `/webhub passwd|unlock|restart`
   — design: `docs/dev/web-hub/lan-plan.md`.
+  **Managed spawn (S1, `webHub.spawn.enabled`, default off; Linux-only, fail-closed platform probe)**: the hub
+  itself forks `pi --mode rpc` children in user-chosen directories (`known ∪ roots` admission, loopback-only
+  by default — `spawn.lan` off/known/roots) via `/api/headless*` + the `spawns` SSE event (Public projection;
+  owner-only fields per-request; the first-prompt body never persists anywhere). Identity is
+  `bootId+starttime+uid` ONLY (pi rewrites `process.title`, so cmdline never identifies a child); children
+  inherit the USER's umask (main.ts captures its pre-0o077 mask and the supervisor swaps it around each fork).
+  Orphan invariants L1–L5: intent on disk before fork, an independent reaper watchdog child TERM→KILLs
+  tracked orphans ≤12s after ANY hub death, boot-time recovery re-verifies identity before signaling, and
+  every signal is preceded by a sync identity re-verify. `spawn.v1` rides both cap surfaces only when
+  `config.spawn` exists. SP13's `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
+  child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.test.ts` (real pi) are the
+  S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`.
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
   (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses

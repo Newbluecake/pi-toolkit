@@ -511,11 +511,15 @@ export async function startHub(
         log,
         now,
       });
-      // Startup-failure path only (the runtime close() path wires its own call inside `close`):
-      // pushed AFTER the frontend's own cleanup entry further below, so the reverse-order
-      // release runs it BEFORE `fe.close()` — the same domain-first order `close()` uses
-      // (arch §7.6: spawn subsystem shuts down before the HTTP face stops accepting).
-      cleanup.push(() => spawnSup!.shutdown(createReqDeadline(now, STEP_DEADLINE_MS)));
+      // SP13 (SP10 acceptance leftover P3): the shutdown entry itself is pushed AFTER the
+      // frontend's own cleanup entry further below — reverse-order release then runs it BEFORE
+      // `fe.close()`, the same domain-first order the runtime `close()` path uses (arch §7.6:
+      // spawn subsystem shuts down before the HTTP face stops accepting). The push CANNOT live
+      // here: it would run AFTER `fe.close()` in the startup-failure unwind (last pushed runs
+      // first), contradicting the order it was documenting. A frontend factory that throws
+      // before its own cleanup push leaves no shutdown call, but that path still ends the hub
+      // process — the reaper child's stdin EOF (L3) bounds any leak, and no spawn request can
+      // have arrived before `fe.listen()`.
     }
     // web-hub-upload plan §2.2/§2.6 (U3): the upload store is constructed unconditionally —
     // `webHub.uploads` gating happens through agent hello caps (§5.1), not here. Construction
@@ -566,6 +570,13 @@ export async function startHub(
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
     });
     cleanup.push(() => fe.close());
+    // web-hub-spawn §SP10 (startup-failure path only — the runtime close() path wires its own
+    // call inside `close`): pushed right after the frontend's entry so reverse-order release
+    // runs the spawn shutdown BEFORE `fe.close()` (arch §7.6's domain-first order; see the
+    // comment at the spawn assembly above for why the push had to live here, SP13 P3).
+    if (spawnSup !== undefined) {
+      cleanup.push(() => spawnSup.shutdown(createReqDeadline(now, STEP_DEADLINE_MS)));
+    }
     // §2.2.4: the startup scan never blocks listen(); `begin` answers 503 E_BUSY until it lands.
     if (uploads !== undefined) {
       void uploads
@@ -598,7 +609,9 @@ export async function startHub(
       kdfInflight: () => kdfInFlight,
       // web-hub-spawn plan §SP10 (arch §7.8): quiet also requires zero busy managed spawns —
       // replacing the hub under a busy web-spawned agent ends that session with the stdin EOF.
-      managedBusy: () => spawnSup?.busyCount() ?? 0,
+      // SP13（SP10 验收遗留评估）：busy 分量并入首条消息在途/退避重发计数（`sending` 状态）——
+      // 一条尚未送达的首条消息同样会被 hub 替换的 stdin EOF 打断，绝不计为 quiet。
+      managedBusy: () => (spawnSup?.busyCount() ?? 0) + (firstPromptFwd?.sendingCount() ?? 0),
       // acc32-B9: a reliable handshake for the first quiet judgment after a hello — resolve
       // immediately if the registry already has *any* dialogs snapshot for this agent (a
       // reclaimed/reconnected Rec whose `dialogs` field survived the reconnect, §registry.ts

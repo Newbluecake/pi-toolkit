@@ -143,11 +143,14 @@ interface FakeFrontend extends FrontendFactory {
   clients: number;
 }
 
-function fakeFrontend(order: string[]): FakeFrontend {
+function fakeFrontend(order: string[], listenFails = false): FakeFrontend {
   const f = ((deps: FrontendDeps): HttpFrontend => {
     f.deps.push(deps);
     return {
-      listen: async () => ({ port: 43210 }),
+      listen: async () => {
+        if (listenFails) throw new Error("listen failed (test)");
+        return { port: 43210 };
+      },
       close: async () => {
         order.push("fe.close");
         f.closed++;
@@ -183,12 +186,19 @@ interface StartKitOpts {
   withAssembly?: boolean;
   fakeTimers?: boolean;
   idleExitMinutes?: number;
+  /** SP13 (SP10 acceptance leftover P3): make `fe.listen()` reject — startHub then runs the
+   * reverse-order startup-failure unwind, whose spawn-shutdown/fe.close ORDER this kit pins. */
+  listenFails?: boolean;
 }
+
+/** SP13 P3: the `order` capture of the most recent FAILED startKit (the kit object never
+ * gets built on rejection — the order array is all that survives for the unwind assertions). */
+let lastFailureOrder: string[] | undefined;
 
 async function startKit(opts: StartKitOpts = {}): Promise<HubKit> {
   const home = tmp.make("wh-hubspawn-");
   const order: string[] = [];
-  const fe = fakeFrontend(order);
+  const fe = fakeFrontend(order, opts.listenFails === true);
   const spy = opts.withAssembly === true ? supSpy(order) : undefined;
   const child = opts.withAssembly === true ? new FakeChild(FAKE_PID) : undefined;
   let fwd: FirstPromptForwarder | undefined;
@@ -217,16 +227,22 @@ async function startKit(opts: StartKitOpts = {}): Promise<HubKit> {
           },
         }),
   };
-  const hub = await startHub(
-    config({
-      home,
-      launcher,
-      ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
-      ...(opts.idleExitMinutes === undefined ? {} : { idleExitMinutes: opts.idleExitMinutes }),
-    }),
-    fe,
-    deps,
-  );
+  let hub: RunningHub;
+  try {
+    hub = await startHub(
+      config({
+        home,
+        launcher,
+        ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
+        ...(opts.idleExitMinutes === undefined ? {} : { idleExitMinutes: opts.idleExitMinutes }),
+      }),
+      fe,
+      deps,
+    );
+  } catch (err) {
+    lastFailureOrder = order;
+    throw err;
+  }
   if ("exists" in hub) throw new Error("unexpected exists");
   hubs.push(hub);
   return {
@@ -411,6 +427,19 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     c.sock.destroy();
   });
 
+  it("SP13: managedBusy folds the first-prompt sending count into the supersede quiet gate (wiring pin)", async () => {
+    // `busyCount` alone misses the window where a live record's first prompt is still sending
+    // (agent not busy YET) — a hub replacement there ends the session mid-delivery. The wiring
+    // is one expression in hub.ts; behavioral halves are pinned by first-prompt.test.ts
+    // (sendingCount semantics) and supersede.test.ts (managedBusy blocks quiet), so this pins
+    // the composition itself against silent removal.
+    const src = readFileSync("src/web-hub/hub/hub.ts", "utf8");
+    const m = /managedBusy:\s*\(\)\s*=>[^\n]+/.exec(src);
+    expect(m).toBeDefined();
+    expect(m![0]).toContain("busyCount()");
+    expect(m![0]).toContain("sendingCount()");
+  });
+
   it("close(): supervisor.shutdown runs BEFORE fe.close and receives ≥9.5s of the 10s budget", async () => {
     const kit = await startKit({ spawn: SPAWN_CFG, withAssembly: true });
     hubs.length = 0; // close() runs its own path below
@@ -419,6 +448,24 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     expect(kit.order.indexOf("spawn-shutdown:end")).toBeLessThan(kit.order.indexOf("fe.close"));
     expect(kit.shutdownRemaining[0]).toBeGreaterThanOrEqual(9_500);
     await kit.hub.closed;
+  });
+
+  it("startup failure (fe.listen rejects): reverse-order unwind still shuts the spawn domain down BEFORE fe.close (SP13 P3)", async () => {
+    // The spawn shutdown entry used to be pushed at the assembly site (before the frontend's
+    // own entry), so the reverse-order unwind ran it AFTER fe.close — contradicting both its
+    // own comment and arch §7.6's domain-first order. SP13 moved the push next to fe.close's.
+    await expect(startKit({ spawn: SPAWN_CFG, withAssembly: true, listenFails: true })).rejects.toThrow(
+      "listen failed (test)",
+    );
+    hubs.length = 0; // startHub rejected — nothing was registered in `hubs`
+    const order = lastFailureOrder;
+    expect(order).toBeDefined();
+    const shutdownEnd = order!.indexOf("spawn-shutdown:end");
+    const feClose = order!.indexOf("fe.close");
+    expect(shutdownEnd).toBeGreaterThanOrEqual(0);
+    expect(feClose).toBeGreaterThanOrEqual(0);
+    expect(shutdownEnd).toBeLessThan(feClose);
+    expect(order!.indexOf("reaper.close")).toBeGreaterThanOrEqual(0); // shutdown ran to completion
   });
 
   it("deadline grading (#4): onCrash hands close() a ≤2.5s deadline; shutdown/reaper finish before process.exit", async () => {

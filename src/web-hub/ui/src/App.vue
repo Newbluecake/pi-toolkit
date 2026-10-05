@@ -121,7 +121,18 @@ if (authMode !== "unknown") {
       });
   }
 
-  hub = useHub({ createTransport, doc: document, win: window, ...sharedTimers });
+  // web-hub-spawn SP13（SP11/SP12 移交，plan §3.2）：「我发起的」记录 live 时的新会话跳转接到
+  // 真实 hash 路由（`#/agent/<key>`）——useHub 的 navigate 选项未接时只发一个内存 route 事件，
+  // URL/后退键从不感知；接到 hashRoute.navigate 后是真实 location.hash 变更。
+  hub = useHub({
+    createTransport,
+    doc: document,
+    win: window,
+    ...sharedTimers,
+    navigate: (agentKey) => {
+      hashRoute?.navigate({ name: "agent", key: agentKey });
+    },
+  });
 
   // #32 C5 (control-plan v2.1 §7.1/§7.4): the control plane reaches components via inject —
   // the frozen `contracts.ts` props of TopBar/AgentDetail/AgentCard have no hub/control field.

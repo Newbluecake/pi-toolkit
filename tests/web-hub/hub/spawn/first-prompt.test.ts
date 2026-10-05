@@ -165,6 +165,44 @@ describe("createFirstPromptForwarder（plan §SP8 表 / arch §4.6）", () => {
     expect(JSON.stringify(view) + JSON.stringify(audits)).not.toContain(TEXT);
   });
 
+  it("SP13 sendingCount：pending/在途/退避/终态全相位计数（supersede managedBusy 分量）", async () => {
+    const router = fakeFirstPromptRouter();
+    const { fp } = harness(router);
+    expect(fp.sendingCount()).toBe(0); // 空
+    fp.accept(
+      ID,
+      { text: TEXT, deliver: "followUp" },
+      { listener: "loopback", ip: "127.0.0.1", reqId: "req-1" },
+      clock + 60_000,
+    );
+    expect(fp.sendingCount()).toBe(0); // await-live ≠ sending
+    fp.onLive(ID, AGENT, SESSION, true);
+    expect(fp.sendingCount()).toBe(1); // 在途（router 替身默认立即回 ok 已送达）⇒ 已终态
+    await flush();
+    expect(fp.sendingCount()).toBe(0); // delivered ⇒ 不再计入
+
+    // 退避相位（E_DEADLINE 重发等待中）计入；次数用尽/送达后归零
+    for (let i = 0; i < 4; i++) router.queueResult(errBody("E_DEADLINE", true, "unknown"));
+    fp.accept(
+      "spawnBackoff000001",
+      { text: TEXT, deliver: "followUp" },
+      { listener: "loopback", ip: "127.0.0.1", reqId: "req-2" },
+      clock + 60_000,
+    );
+    fp.onLive("spawnBackoff000001", AGENT, SESSION, true);
+    await flush();
+    expect(fp.sendingCount()).toBe(1); // backoff（1s 退避定时器挂起）
+    await advance(1_000);
+    await flush();
+    expect(fp.sendingCount()).toBe(1); // 重发（第 2 次）后又回到退避（3s）
+    await advance(3_000);
+    await flush();
+    expect(fp.sendingCount()).toBe(1); // 第 3 次后仍在退避（9s）
+    await advance(9_000);
+    await flush();
+    expect(fp.sendingCount()).toBe(0); // 第 4 次用完 ⇒ expired ⇒ 归零
+  });
+
   it("重复 accept ⇒ warn 且不动既有状态", async () => {
     const router = fakeFirstPromptRouter();
     const { fp, log } = harness(router);
