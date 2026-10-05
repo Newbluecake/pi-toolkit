@@ -8,6 +8,7 @@ const agents = {
   filterPlaceholder: "Filter by path or session…",
   filterAria: "Filter agents",
   staleOffline: "Stale & Offline",
+  stopped: "Stopped",
   emptyTitle: "No pi sessions connected",
   emptyBodyLead: "Start pi on this machine with",
   emptyBodyTail: "on; sessions appear here within a second.",

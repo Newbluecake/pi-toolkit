@@ -162,6 +162,17 @@
   opacity: 0.72;
 }
 
+/* 已停止的 agent（pi 进程退出）：整张卡进一步压暗 + 「已停止」chip，与仅网络断连的
+ * stale 区分开（2026-10-05 用户现场反馈：停止状态在原设计上几乎不可辨）。 */
+.agent-card[data-st="offline"] {
+  opacity: 0.55;
+}
+
+.agent-card[data-st="offline"] .chip-stopped {
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+}
+
 .agent-row1 {
   display: flex;
   align-items: center;

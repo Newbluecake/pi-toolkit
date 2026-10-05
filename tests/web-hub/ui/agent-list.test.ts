@@ -43,6 +43,19 @@ describe("AgentList.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     expect(wrapper.find("li.agent-group").text()).toBe("Stale & Offline");
   });
 
+  it("offline agent gets the Stopped chip; live/stale cards do not", () => {
+    const cards = [
+      card({ key: "live", shortCwd: "live" }),
+      card({ key: "dead", shortCwd: "dead", down: true, stale: true, visualState: "offline", statusLabel: "Offline" }),
+    ];
+    const wrapper = mount(AgentList, { props: { cards, selectedKey: null, filter: "" } });
+    const dead = wrapper.find('a.agent-card[data-st="offline"]');
+    expect(dead.exists()).toBe(true);
+    expect(dead.find(".chip-stopped").text()).toBe("Stopped");
+    const live = wrapper.find('a.agent-card[data-st="running"]');
+    expect(live.find(".chip-stopped").exists()).toBe(false);
+  });
+
   it("marks the selected card's aria-current", () => {
     const cards = [card({ key: "a" }), card({ key: "b" })];
     const wrapper = mount(AgentList, { props: { cards, selectedKey: "b", filter: "" } });
