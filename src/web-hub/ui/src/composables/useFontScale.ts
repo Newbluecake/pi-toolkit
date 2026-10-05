@@ -1,21 +1,27 @@
 /**
- * Four-step font-scale preference (100% / 115% / 130% / 150%). A strict mirror of
- * `useTheme.ts`'s precedent: `public/theme-init.js` already applies the persisted value as
- * the `--fs-scale` custom property on `<html>` before first paint (no flash of the wrong
- * text size); this composable is the *runtime* counterpart — reading the same
- * `pwh_fontscale` storage key, writing the same property, and persisting further changes
- * made through `FontScaleToggle.vue`. Like `useTheme.ts`, it never touches the storage
- * global directly (deps are injected, `App.vue`/the toggle pass
- * `shell/themeStorage.ts`'s `browserLocalStorage()`), so this file stays clean under
- * `source-scan.test.ts`'s storage-identifier rule without needing a path exemption.
+ * Continuous font-scale preference (80%–200%, 5% steps). A strict mirror of `useTheme.ts`'s
+ * precedent: `public/theme-init.js` already applies the persisted value as the `--fs-scale`
+ * custom property on `<html>` before first paint (no flash of the wrong text size); this
+ * composable is the *runtime* counterpart — reading the same `pwh_fontscale` storage key,
+ * writing the same property, and persisting changes made through `FontScaleToggle.vue`'s
+ * slider popover. Like `useTheme.ts`, it never touches the storage global directly (deps are
+ * injected, the toggle passes `shell/themeStorage.ts`'s `browserLocalStorage()`), so this
+ * file stays clean under `source-scan.test.ts`'s storage-identifier rule without needing a
+ * path exemption.
+ *
+ * Storage holds the aligned decimal as a string ("1.25", "0.8", "1"). A stored value that is
+ * unparseable or outside [MIN, MAX] fails open to 1 (100%) — same fail-open philosophy as
+ * `theme-init.js`. Values passed in at runtime are clamped to the range and aligned to STEP,
+ * so the slider (or any future caller) can never put a misaligned value into the DOM.
  */
-import { ref, watch, type Ref } from "vue";
+import { ref, type Ref } from "vue";
 
 export const FONT_SCALE_STORAGE_KEY = "pwh_fontscale";
 
-/** Cycle order of the toggle: 100% → 115% → 130% → 150% → 100%. */
-export const FONT_SCALES = ["1", "1.15", "1.3", "1.5"] as const;
-export type FontScale = (typeof FONT_SCALES)[number];
+export const FONT_SCALE_MIN = 0.8;
+export const FONT_SCALE_MAX = 2.0;
+export const FONT_SCALE_STEP = 0.05;
+export const FONT_SCALE_DEFAULT = 1;
 
 export interface FontScaleStorage {
   getItem(key: string): string | null;
@@ -30,35 +36,41 @@ export interface FontScaleDocument {
   readonly documentElement: FontScaleDocumentElement;
 }
 
-function isFontScale(v: string | null): v is FontScale {
-  return (FONT_SCALES as readonly string[]).includes(v ?? "");
+/** Clamp to [MIN, MAX] and align to the nearest STEP (two decimals — 0.05 grid). */
+export function alignFontScale(value: number): number {
+  const clamped = Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, value));
+  return Number((Math.round(clamped / FONT_SCALE_STEP) * FONT_SCALE_STEP).toFixed(2));
 }
 
-/** Read the persisted preference, defaulting to `"1"` (matches `theme-init.js`'s fallback). */
-export function loadFontScale(storage: FontScaleStorage): FontScale {
+/** Storage/DOM string form of an aligned value: 1 → "1", 1.25 → "1.25", 0.8 → "0.8". */
+export function formatFontScale(value: number): string {
+  return String(alignFontScale(value));
+}
+
+/** Read the persisted preference; unparseable or out-of-range values fail open to 1. */
+export function loadFontScale(storage: FontScaleStorage): number {
   let raw: string | null = null;
   try {
     raw = storage.getItem(FONT_SCALE_STORAGE_KEY);
   } catch {
     /* storage disabled/unavailable — same fail-open-to-default behavior as theme-init.js */
   }
-  return isFontScale(raw) ? raw : "1";
+  if (raw === null) return FONT_SCALE_DEFAULT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < FONT_SCALE_MIN || parsed > FONT_SCALE_MAX) {
+    return FONT_SCALE_DEFAULT;
+  }
+  return alignFontScale(parsed);
 }
 
 /** Write `--fs-scale` on `<html>`; tokens.css's `calc(<px> * var(--fs-scale, 1))` does the rest. */
-export function applyFontScale(doc: FontScaleDocument, scale: FontScale): void {
-  doc.documentElement.style.setProperty("--fs-scale", scale);
+export function applyFontScale(doc: FontScaleDocument, scale: number): void {
+  doc.documentElement.style.setProperty("--fs-scale", String(scale));
 }
 
-/** Next step in the cycle (wraps 150% → 100%). */
-export function nextFontScale(current: FontScale): FontScale {
-  const idx = FONT_SCALES.indexOf(current);
-  return FONT_SCALES[(idx + 1) % FONT_SCALES.length]!;
-}
-
-/** Percent for labels/aria: "1" → 100, "1.15" → 115. */
-export function fontScalePercent(scale: FontScale): number {
-  return Math.round(Number(scale) * 100);
+/** Percent for labels/aria/readout: 1 → 100, 1.25 → 125. */
+export function fontScalePercent(scale: number): number {
+  return Math.round(scale * 100);
 }
 
 export interface UseFontScaleOptions {
@@ -67,39 +79,48 @@ export interface UseFontScaleOptions {
 }
 
 export interface FontScaleHandle {
-  readonly scale: Ref<FontScale>;
-  setScale(next: FontScale): void;
-  /** Advance one step in the 100→115→130→150→100 cycle. */
-  cycle(): void;
+  /** Current value — aligned to STEP and within [MIN, MAX]. */
+  readonly scale: Ref<number>;
+  /** Live-apply without persisting (slider `input` while dragging). */
+  preview(value: number): void;
+  /** Apply + persist (slider `change` on release, reset button). */
+  setScale(value: number): void;
+  /** Back to 100% (applied + persisted). */
+  reset(): void;
 }
 
 export function useFontScale(opts: UseFontScaleOptions): FontScaleHandle {
-  const scale = ref<FontScale>(loadFontScale(opts.storage)) as Ref<FontScale>;
+  const scale = ref(loadFontScale(opts.storage)) as Ref<number>;
 
   // theme-init.js already set the property pre-paint; this re-asserts it (harmless) so the
   // runtime state and the DOM can never drift apart.
   applyFontScale(opts.doc, scale.value);
 
-  watch(
-    scale,
-    (next) => {
-      try {
-        opts.storage.setItem(FONT_SCALE_STORAGE_KEY, next);
-      } catch {
-        /* storage disabled/unavailable — the in-memory preference still applies for this load */
-      }
-      applyFontScale(opts.doc, next);
-    },
-    { flush: "sync" }, // imperative side effect like useTheme's class swap — apply the moment setScale() is called
-  );
+  function persist(value: number): void {
+    try {
+      opts.storage.setItem(FONT_SCALE_STORAGE_KEY, formatFontScale(value));
+    } catch {
+      /* storage disabled/unavailable — the in-memory preference still applies for this load */
+    }
+  }
 
   return {
     scale,
-    setScale(next) {
-      scale.value = next;
+    // The slider's input/change split is deliberate: dragging must not hammer localStorage,
+    // so preview() skips persistence entirely instead of debouncing it.
+    preview(value) {
+      scale.value = alignFontScale(value);
+      applyFontScale(opts.doc, scale.value);
     },
-    cycle() {
-      scale.value = nextFontScale(scale.value);
+    setScale(value) {
+      scale.value = alignFontScale(value);
+      applyFontScale(opts.doc, scale.value);
+      persist(scale.value);
+    },
+    reset() {
+      scale.value = FONT_SCALE_DEFAULT;
+      applyFontScale(opts.doc, scale.value);
+      persist(scale.value);
     },
   };
 }

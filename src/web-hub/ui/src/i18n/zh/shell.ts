@@ -20,7 +20,8 @@ const shell = {
   "theme.dark": "暗色",
   "theme.groupLabel": "主题",
   "fontScale.label": "字号",
-  "fontScale.aria": "字号 {pct}%，点击切换到 {next}%",
+  "fontScale.aria": "字号 {pct}%",
+  "fontScale.reset": "重置",
 } satisfies Messages<typeof en>;
 
 export default shell;

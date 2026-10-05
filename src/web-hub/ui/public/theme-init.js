@@ -6,10 +6,11 @@
 // class — tokens.css's `prefers-color-scheme` media query handles it.
 //
 // The same early-boot pass also applies the persisted font-scale preference
-// (`pwh_fontscale`, one of "1" / "1.15" / "1.3" / "1.5") as the `--fs-scale`
-// custom property on <html>, so the user's chosen text size is in effect on
-// the very first paint instead of popping in when Vue mounts. "1" (the
-// default) and anything unrecognized set nothing — tokens.css's
+// (`pwh_fontscale`, a decimal in [0.8, 2.0] — the slider composable aligns it to 5%
+// steps; here any in-range number is acceptable for pre-paint application) as the
+// `--fs-scale` custom property on <html>, so the user's chosen text size is in
+// effect on the very first paint instead of popping in when Vue mounts. Missing,
+// unparseable, or out-of-range values set nothing — tokens.css's
 // `var(--fs-scale, 1)` fallback is already the 100% baseline.
 // `composables/useFontScale.ts` is the runtime counterpart (same storage key,
 // same property), exactly like `useTheme.ts` is for the theme classes.
@@ -22,9 +23,10 @@
     var pref = window.localStorage.getItem("pwh_theme");
     if (pref === "light") document.documentElement.classList.add("theme-light");
     else if (pref === "dark") document.documentElement.classList.add("theme-dark");
-    var scale = window.localStorage.getItem("pwh_fontscale");
-    if (scale === "1.15" || scale === "1.3" || scale === "1.5") {
-      document.documentElement.style.setProperty("--fs-scale", scale);
+    var raw = window.localStorage.getItem("pwh_fontscale");
+    var scale = raw === null ? NaN : window.parseFloat(raw);
+    if (window.isFinite(scale) && scale >= 0.8 && scale <= 2.0) {
+      document.documentElement.style.setProperty("--fs-scale", String(scale));
     }
   } catch (e) {
     /* localStorage unavailable — fall back to prefers-color-scheme / 100% font scale only */

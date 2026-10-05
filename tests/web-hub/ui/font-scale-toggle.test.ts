@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
 /**
- * `FontScaleToggle.vue` (shell top-bar font-size cycle button) + the `theme-init.js`
- * early-boot half of the font-scale feature: the init script must apply a persisted
- * `pwh_fontscale` to `<html>`'s `--fs-scale` before first paint (no flash of small text),
- * and the toggle must cycle 100→115→130→150→100, persist each step, and keep its aria-label
- * announcing current → next percentages.
+ * `FontScaleToggle.vue` (top-bar font-size slider popover) + the `theme-init.js` early-boot
+ * half of the feature: the init script must apply a persisted in-range `pwh_fontscale` to
+ * `<html>`'s `--fs-scale` before first paint (no flash of small text), and the popover must
+ * open/close via trigger/Esc/outside-pointer, live-preview slider drags without persisting
+ * until release, and reset to 100%.
  */
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -38,14 +38,20 @@ afterEach(() => {
   document.documentElement.style.removeProperty("--fs-scale");
 });
 
-describe("theme-init.js font-scale early boot", () => {
-  it("applies a persisted valid scale to <html> before paint", () => {
-    window.localStorage.setItem("pwh_fontscale", "1.5");
+describe("theme-init.js font-scale early boot (numeric parse)", () => {
+  it("applies a persisted in-range value to <html> before paint", () => {
+    window.localStorage.setItem("pwh_fontscale", "1.8");
     runThemeInit();
-    expect(fsScale()).toBe("1.5");
+    expect(fsScale()).toBe("1.8");
   });
 
-  it.each(["1", "bogus", "2"])(
+  it.each(["1", "0.8", "2"])("applies boundary value %s", (v) => {
+    window.localStorage.setItem("pwh_fontscale", v);
+    runThemeInit();
+    expect(fsScale()).toBe(v);
+  });
+
+  it.each(["bogus", "0.5", "2.5", "Infinity"])(
     "sets nothing for %s (tokens.css's var(--fs-scale, 1) fallback is already 100%)",
     (v) => {
       window.localStorage.setItem("pwh_fontscale", v);
@@ -68,44 +74,105 @@ describe("theme-init.js font-scale early boot", () => {
   });
 });
 
-describe("FontScaleToggle.vue", () => {
-  it("renders the Aa glyph with an aria-label announcing current → next percentage", () => {
+describe("FontScaleToggle.vue popover", () => {
+  it("renders the Aa trigger with aria-haspopup/expanded and the current percentage; popover starts closed", () => {
     const wrapper = mount(FontScaleToggle);
-    const button = wrapper.find("button");
-    expect(button.text()).toBe("Aa");
-    expect(button.attributes("aria-label")).toContain("100%");
-    expect(button.attributes("aria-label")).toContain("115%");
+    const trigger = wrapper.find("button.fontscale-toggle");
+    expect(trigger.text()).toBe("Aa");
+    expect(trigger.attributes("aria-haspopup")).toBe("dialog");
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    expect(trigger.attributes("aria-label")).toContain("100%");
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(false);
   });
 
-  it("clicking cycles 100→115→130→150→100, persisting each step and rewriting --fs-scale", async () => {
+  it("opens on trigger click (slider + readout + reset visible) and closes on re-click", async () => {
     const wrapper = mount(FontScaleToggle);
-    const button = wrapper.find("button");
-    const expected: Array<[string, string]> = [
-      ["1.15", "115%"],
-      ["1.3", "130%"],
-      ["1.5", "150%"],
-      ["1", "100%"],
-    ];
-    for (const [stored, pct] of expected) {
-      await button.trigger("click");
-      expect(window.localStorage.getItem("pwh_fontscale")).toBe(stored);
-      expect(fsScale()).toBe(stored);
-      expect(button.attributes("aria-label")).toContain(pct);
-    }
+    const trigger = wrapper.find("button.fontscale-toggle");
+    await trigger.trigger("click");
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(true);
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    const range = wrapper.find('input[type="range"]');
+    expect(range.exists()).toBe(true);
+    expect(range.attributes("min")).toBe("0.8");
+    expect(range.attributes("max")).toBe("2");
+    expect(range.attributes("step")).toBe("0.05");
+    expect(wrapper.find(".fontscale-readout").text()).toBe("100%");
+    expect(wrapper.find("button.fontscale-reset").exists()).toBe(true);
+    await trigger.trigger("click");
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(false);
   });
 
-  it("starts from the persisted scale (115% stored → first click goes to 130%)", async () => {
-    window.localStorage.setItem("pwh_fontscale", "1.15");
-    const wrapper = mount(FontScaleToggle);
-    expect(wrapper.find("button").attributes("aria-label")).toContain("115%");
-    await wrapper.find("button").trigger("click");
-    expect(window.localStorage.getItem("pwh_fontscale")).toBe("1.3");
+  it("closes on Escape and returns focus to the trigger", async () => {
+    const wrapper = mount(FontScaleToggle, { attachTo: document.body });
+    const trigger = wrapper.find("button.fontscale-toggle");
+    await trigger.trigger("click");
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(true);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(false);
+    expect(document.activeElement).toBe(trigger.element);
+    wrapper.unmount();
   });
 
-  it("falls back to 100% on a corrupted stored value", () => {
-    window.localStorage.setItem("pwh_fontscale", "bogus");
+  it("closes on pointer down outside, but not on pointer down inside", async () => {
+    const wrapper = mount(FontScaleToggle, { attachTo: document.body });
+    await wrapper.find("button.fontscale-toggle").trigger("click");
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(true);
+    // inside (the popover itself) — stays open
+    wrapper.find(".fontscale-popover").element.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(true);
+    // outside (document body) — closes
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("slider input live-previews without persisting; change persists the final value", async () => {
     const wrapper = mount(FontScaleToggle);
-    expect(wrapper.find("button").attributes("aria-label")).toContain("100%");
+    await wrapper.find("button.fontscale-toggle").trigger("click");
+    const range = wrapper.find('input[type="range"]');
+    const el = range.element as HTMLInputElement;
+
+    el.value = "1.8";
+    await range.trigger("input");
+    expect(fsScale()).toBe("1.8");
+    expect(wrapper.find(".fontscale-readout").text()).toBe("180%");
+    expect(window.localStorage.getItem("pwh_fontscale")).toBe(null); // not yet
+
+    el.value = "1.65";
+    await range.trigger("input");
+    expect(fsScale()).toBe("1.65");
+    expect(window.localStorage.getItem("pwh_fontscale")).toBe(null); // still not
+
+    await range.trigger("change");
+    expect(window.localStorage.getItem("pwh_fontscale")).toBe("1.65"); // persisted on release
+  });
+
+  it("reset returns to 100% and persists", async () => {
+    window.localStorage.setItem("pwh_fontscale", "1.5");
+    const wrapper = mount(FontScaleToggle);
+    await wrapper.find("button.fontscale-toggle").trigger("click");
+    expect(wrapper.find(".fontscale-readout").text()).toBe("150%");
+    await wrapper.find("button.fontscale-reset").trigger("click");
+    expect(wrapper.find(".fontscale-readout").text()).toBe("100%");
     expect(fsScale()).toBe("1");
+    expect(window.localStorage.getItem("pwh_fontscale")).toBe("1");
+    // popover stays open after reset
+    expect(wrapper.find(".fontscale-popover").exists()).toBe(true);
+  });
+
+  it("starts from the persisted scale; corrupted stored values fall back to 100%", async () => {
+    window.localStorage.setItem("pwh_fontscale", "1.35");
+    const ok = mount(FontScaleToggle);
+    expect(ok.find("button.fontscale-toggle").attributes("aria-label")).toContain("135%");
+    ok.unmount();
+
+    window.localStorage.setItem("pwh_fontscale", "bogus");
+    const bad = mount(FontScaleToggle);
+    expect(bad.find("button.fontscale-toggle").attributes("aria-label")).toContain("100%");
+    expect(fsScale()).toBe("1");
+    bad.unmount();
   });
 });

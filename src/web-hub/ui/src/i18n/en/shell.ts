@@ -17,7 +17,8 @@ const shell = {
   "theme.dark": "Dark",
   "theme.groupLabel": "Theme",
   "fontScale.label": "Font size",
-  "fontScale.aria": "Font size {pct}% — tap for {next}%",
+  "fontScale.aria": "Font size {pct}%",
+  "fontScale.reset": "Reset",
 } satisfies Record<string, string>;
 
 export default shell;
