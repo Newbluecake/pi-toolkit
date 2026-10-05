@@ -149,6 +149,15 @@
   box-shadow: var(--shadow-1);
 }
 
+/* font-size cycle button (FontScaleToggle.vue) — text glyph instead of an icon (the frozen
+ * IconName set has no font-scale glyph); sized by the shared .btn-icon rules, 44px hit area
+ * on coarse pointers via primitives.css. Keeps a fixed-ish glyph size (the base --fs-md still
+ * scales with the user's own setting, which doubles as live feedback for the tap). */
+.fontscale-toggle {
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0;
+}
+
 .banners {
   display: flex;
   flex-direction: column;

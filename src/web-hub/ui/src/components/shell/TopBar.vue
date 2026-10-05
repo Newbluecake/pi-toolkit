@@ -22,6 +22,7 @@ import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import ThemeToggle from "./ThemeToggle.vue";
+import FontScaleToggle from "./FontScaleToggle.vue";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -69,6 +70,7 @@ function onControlChipClick(): void {
     <span class="topbar-spacer"></span>
 
     <ThemeToggle :model-value="theme" @update:model-value="emit('update:theme', $event)" />
+    <FontScaleToggle />
 
     <button
       v-if="canSignOut"

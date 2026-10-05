@@ -72,13 +72,16 @@
   --font-mono:
     ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono",
     "Noto Sans Mono CJK SC", monospace;
-  --fs-2xs: 11px; /* badges / chips only, always weight 600 */
-  --fs-xs: 12px; /* meta lines */
-  --fs-sm: 13px; /* dense UI, code */
-  --fs-md: 14px; /* body (desktop) */
-  --fs-lg: 16px; /* section titles, mobile body, form inputs */
-  --fs-xl: 18px; /* detail title */
-  --fs-2xl: 22px; /* login title */
+  /* Font-size tokens scale with `--fs-scale` (user font-size preference, `pwh_fontscale`;
+   * set on <html> by `public/theme-init.js` pre-paint and `composables/useFontScale.ts` at
+   * runtime). The fallback `1` keeps the px values below byte-identical when unset. */
+  --fs-2xs: calc(11px * var(--fs-scale, 1)); /* badges / chips only, always weight 600 */
+  --fs-xs: calc(12px * var(--fs-scale, 1)); /* meta lines */
+  --fs-sm: calc(13px * var(--fs-scale, 1)); /* dense UI, code */
+  --fs-md: calc(14px * var(--fs-scale, 1)); /* body (desktop) */
+  --fs-lg: calc(16px * var(--fs-scale, 1)); /* section titles, mobile body, form inputs */
+  --fs-xl: calc(18px * var(--fs-scale, 1)); /* detail title */
+  --fs-2xl: calc(22px * var(--fs-scale, 1)); /* login title */
   --lh-tight: 1.25;
   --lh-snug: 1.4;
   --lh-body: 1.55;
