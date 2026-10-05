@@ -66,7 +66,7 @@ const queueNote = computed(() =>
       @click="onClick"
       @keydown="onKeydown"
     >
-      <AppIcon name="ban" class="icon-sm" />
+      <AppIcon name="stop" class="icon-sm" />
       <span class="lbl-md">{{ label }}</span>
     </button>
     <span v-if="armed" class="stop-live sr-only" role="status">{{ t("control.stopArmed") }}</span>

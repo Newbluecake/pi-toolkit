@@ -35,6 +35,9 @@
     <symbol id="i-chev-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6" /></symbol>
     <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" /></symbol>
     <symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" /></symbol>
+    <!-- media-player stop glyph: a FILLED square (its own fill/stroke attrs beat the .icon
+         fill:none inheritance). 2026-10-05 user request: Stop button shows ■ not 🚫. -->
+    <symbol id="i-stop" viewBox="0 0 24 24"><path d="M7 7h10v10H7z" fill="currentColor" stroke="none" /></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 7.5V12l3 2" />

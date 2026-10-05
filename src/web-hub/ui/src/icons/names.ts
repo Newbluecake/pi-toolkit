@@ -15,6 +15,7 @@ export type IconName =
   | "chev-left"
   | "chev-right"
   | "chev-down"
+  | "stop"
   | "clock"
   | "copy"
   | "cpu"
@@ -58,6 +59,7 @@ export const ICON_NAMES: readonly IconName[] = [
   "chev-left",
   "chev-right",
   "chev-down",
+  "stop",
   "clock",
   "copy",
   "cpu",
