@@ -40,7 +40,7 @@
 
 .dock-ctl .dock-row {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: var(--sp-2);
 }
 
@@ -60,7 +60,7 @@
 
 .composer-row {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: var(--sp-2);
 }
 
@@ -676,6 +676,12 @@
 
   .fleet-steer-input {
     min-height: 44px;
+  }
+
+  /* 2026-10-05 用户现场反馈：手机端输入框右侧按钮拥挤——触控设备上排距放宽到 12px */
+  .dock-ctl .dock-row,
+  .composer-row {
+    gap: var(--sp-3);
   }
 }
 
