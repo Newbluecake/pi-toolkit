@@ -27,6 +27,8 @@ import "./styles/states.css";
 // #32 C5 (control-plan.md v2.1 §7.4/§7.6): control-plane + ask_user dialog styles.
 import "./styles/control.css";
 import "./styles/dialog.css";
+// PV6 (web-hub-preview plan v3 §4.6): path-ref segments + the preview overlay.
+import "./styles/preview.css";
 import IconSprite from "./icons/IconSprite.vue";
 import { browserLocalStorage } from "./components/shell/themeStorage.js";
 import { hubVersionStamp } from "@logic/build-stamp.js";
@@ -38,11 +40,15 @@ import LoginView from "./components/shell/LoginView.vue";
 import NoticeStack from "./components/shell/NoticeStack.vue";
 import TokenGate from "./components/shell/TokenGate.vue";
 import TopBar from "./components/shell/TopBar.vue";
+import PreviewHost from "./components/preview/PreviewHost.vue";
+import { PREVIEW_CTX } from "./components/preview/previewContext.js";
 import { createAnnouncer } from "./composables/useAnnouncer.js";
 import { useHashRoute } from "./composables/useHashRoute.js";
 import { useHub } from "./composables/useHub.js";
 import { useI18n } from "./composables/useI18n.js";
+import { useMedia } from "./composables/useMedia.js";
 import { usePasswordAuth } from "./composables/usePasswordAuth.js";
+import { usePreview } from "./composables/usePreview.js";
 import { useTheme } from "./composables/useTheme.js";
 import { createTokenTransport } from "./transport/token.js";
 import type { HubTransport, TransportHooks } from "./transport/types.js";
@@ -147,6 +153,21 @@ if (authMode !== "unknown") {
     dialogDrafts: new Map(),
     noticeExpanded: ref(false),
   } satisfies ControlEnv);
+
+  // PV6 (web-hub-preview plan v3 §3.2/§4.6, D7): the App-level preview state machine. Scope
+  // derivation lives in `usePreview` (`previewScopeOf` — no transport/cap/session ⇒ `null`,
+  // and every `PathText` in the tree renders its DOM-equivalent plain text). `PREVIEW_CTX`
+  // also feeds `PreviewHost` (mounted below) and carries the §5.2 plaintext-LAN warning flag.
+  const preview = usePreview({
+    preview: hub.preview,
+    mode: authMode,
+    state: hub.state,
+    coarse: useMedia(window, "(pointer: coarse)").matches,
+  });
+  provide(PREVIEW_CTX, {
+    handle: preview,
+    plaintext: authMode === "password" && window.location.protocol === "http:",
+  });
 }
 
 const route = hashRoute?.route;
@@ -244,6 +265,7 @@ onUnmounted(() => {
       @submit="onSubmit"
     />
     <TokenGate v-else reason="token-invalid" />
+    <PreviewHost />
   </template>
   <p v-if="authMode !== 'unknown'" ref="announcerEl" class="sr-only" role="status" aria-live="polite"></p>
 </template>

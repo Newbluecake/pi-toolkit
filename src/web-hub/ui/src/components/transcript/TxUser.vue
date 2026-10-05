@@ -5,12 +5,17 @@
   best-effort off the agent's ctl ledger (`CONTROL_VIEW.isWebMessage` — timestamp proximity to
   a `started`/`consumed` ledger entry; any doubt ⇒ no badge). The inject is optional: mounted
   outside a detail pane (isolated tests) nothing changes.
+
+  PV6 (web-hub-preview plan v3 §4.6): the bubble's plain text renders through `PathText`, so
+  absolute paths a user pastes become clickable previews whenever a preview scope is live; with
+  no ctx/scope the rendered DOM is byte-identical to the bare text node it replaces.
 -->
 <script setup lang="ts">
 import { computed, inject } from "vue";
 import { formatDateTime } from "../../format.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_VIEW } from "../control/controlContext.js";
+import PathText from "../preview/PathText.vue";
 
 const props = defineProps<{
   readonly text: string;
@@ -28,7 +33,7 @@ const fromWeb = computed(() => view?.isWebMessage(props.timestamp) === true);
 
 <template>
   <div class="msg-user tx-item">
-    <div class="bubble">{{ text }}</div>
+    <div class="bubble"><PathText :text="text" /></div>
     <span v-if="fromWeb" class="badge badge-web" translate="no">{{ t("control.badgeWeb") }}</span>
     <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>
     <span v-if="timeLabel" class="msg-time" translate="no">{{ timeLabel }}</span>

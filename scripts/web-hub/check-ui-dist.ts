@@ -43,7 +43,10 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
   /^https:\/\/vuejs\.org\//, // Vue runtime's own `warn()` error-reference links (first-party framework code, not a fetch)
   /^http:\/\/www\.w3\.org\//, // XML namespace URIs (createElementNS("http://www.w3.org/2000/svg", ...)) — identifiers, never fetched
 ];
-const JS_BUDGET_GZIP_BYTES = 120 * 1024;
+// Budget history: 120 KiB since #26 P0; bumped to 128 KiB by web-hub-preview PV6 (2026-10-05) —
+// wiring `PathText`/`PreviewHost`/`usePreview` into App.vue pulls the whole preview feature into
+// the bundle for the first time (HEAD-only 116885 B, HEAD+PV6 122969 B gzip at the bump).
+const JS_BUDGET_GZIP_BYTES = 128 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}

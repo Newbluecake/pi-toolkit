@@ -5,6 +5,13 @@
   pure functions, reused unchanged. A running call's `partial` is tail-truncated to 200 lines /
   16 KiB (`tail-lines.ts`, ui-design.md §6.6) with a "Show full output" toggle that switches to
   the full text (still held in full in `state`, per the plan — this only gates what's *rendered*).
+
+  PV6 (web-hub-preview plan v3 修订 7): ONLY the Input section's `argsText` `<pre>` renders
+  through `PathText` (plain-text mode — read/edit/bash args carry absolute paths worth
+  previewing). The summary line stays untouched (`<summary>` click semantics conflict with the
+  details toggle), and Live/Output stay plain (read-only preview has no jump value there).
+  With no preview ctx/scope the `<pre>`'s DOM is identical to before, so select-all/copy are
+  unaffected.
 -->
 <script setup lang="ts">
 import { computed, ref } from "vue";
@@ -12,6 +19,7 @@ import { safeJson, summarizeArgs } from "@logic/tools.js";
 import type { ToolCardProps } from "../../contracts.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import PathText from "../preview/PathText.vue";
 import { tailLines } from "./tail-lines.js";
 
 const props = defineProps<ToolCardProps>();
@@ -69,7 +77,7 @@ const hasBody = computed(
     <div v-if="hasBody" class="tool-body">
       <div v-if="argsText !== undefined" class="tool-section">
         <div class="tool-label">{{ t("transcript.tool.input") }}</div>
-        <pre class="pre" translate="no" tabindex="0">{{ argsText }}</pre>
+        <pre class="pre" translate="no" tabindex="0"><PathText v-if="argsText !== undefined" :text="argsText" /></pre>
       </div>
       <div v-if="view.partial !== undefined && view.partial !== ''" class="tool-section">
         <div class="tool-label">

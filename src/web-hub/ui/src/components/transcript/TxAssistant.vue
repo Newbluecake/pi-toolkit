@@ -4,13 +4,19 @@
   image placeholder) + optional error line + cost meta. The streaming caret is rendered as a
   trailing sibling after the blocks rather than spliced into the last text run — visually
   equivalent ("still going") without teaching `MarkdownView.vue` about an external cursor.
+
+  PV6 (web-hub-preview plan v3 §4.6 流式抑制): provides `PATH_REFERENCES_SUSPENDED` — while
+  `assistant.streaming` is true every `PathText` below renders plain text (a half-typed path
+  must never become clickable mid-stream); when the message settles the flag flips back and the
+  settled blocks re-scan once.
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, provide } from "vue";
 import type { AssistantView } from "./entries.js";
 import { formatDateTime, formatUsd } from "../../format.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import { PATH_REFERENCES_SUSPENDED } from "../preview/previewContext.js";
 import MarkdownView from "./MarkdownView.vue";
 import ThinkingBlock from "./ThinkingBlock.vue";
 import ToolCard from "./ToolCard.vue";
@@ -25,6 +31,12 @@ const timeLabel = computed(() =>
     : formatDateTime(props.assistant.timestamp, lang === "zh" ? "zh-CN" : "en-US"),
 );
 const costLabel = computed(() => (props.assistant.costUsd === undefined ? "" : formatUsd(props.assistant.costUsd)));
+
+// §4.6 流式抑制: plain text while streaming, one re-scan when the message settles.
+provide(
+  PATH_REFERENCES_SUSPENDED,
+  computed(() => props.assistant.streaming),
+);
 </script>
 
 <template>
