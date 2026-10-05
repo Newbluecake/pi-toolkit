@@ -17,7 +17,7 @@
  */
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
-import type { FleetRowWire } from "@protocol/messages.js";
+import type { FleetRowWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { ConnState, PreviewTransport } from "./transport/types.js";
 import type {
   SpawnDirsOutcome,
@@ -33,6 +33,9 @@ export type { ConnState };
 // second, possibly-drifting import path for the same type (same rule as `HistoryPayload` in
 // `contracts.ts`).
 export type { SpawnDirsOutcome, SpawnListOutcome, SpawnOutcome, SpawnStopOutcome };
+// todo-web §4 (T4): the detail TodoPanel's prop type. `import type` only — the protocol
+// module never becomes a runtime dependency of the UI bundle through this file.
+export type { TodoTaskWire, TodoWire };
 
 // ---------------------------------------------------------------------------
 // @logic/state.js mirror (read-only view — the reducer itself lives in JS)
@@ -112,6 +115,10 @@ export interface AgentState {
   /** fleet-drawer §3.2/#12 (F5): counts of fleet rows the projection caps dropped (absent
    * when nothing was omitted) — drives the “另有 N 个未列出” rows in `FleetTree`. */
   readonly fleetOmitted?: FleetOmittedWire;
+  /** todo-web §4 (T4): the status reducer's mirror of `StatusInfo.todo` (the main session's
+   * task-list summary). Absent = no tasks / todo disabled / web-hub off — the detail header's
+   * TodoPanel renders nothing then. Optional per the frozen-types convention. */
+  readonly todo?: TodoWire;
 }
 
 /** Mirrors `@logic/state.js`'s `FleetOmitted` JSDoc typedef (the `fleet` frame's `omitted`). */

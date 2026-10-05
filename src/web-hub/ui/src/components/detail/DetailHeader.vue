@@ -32,6 +32,7 @@ import "../../styles/spawn.css";
 import { cardOf, sessionOf, statusOf } from "./agentViews.js";
 import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
+import TodoPanel from "./TodoPanel.vue";
 
 const props = defineProps<DetailHeaderProps>();
 const emit = defineEmits<DetailHeaderEmits>();
@@ -221,5 +222,9 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
         </div>
       </dl>
     </div>
+
+    <!-- todo-web T4: the main session's task list, mirrored onto `agent.todo` by the status
+         reducer; the panel renders nothing when the wire is absent or empty. -->
+    <TodoPanel v-if="agent.todo" :todo="agent.todo" />
   </header>
 </template>

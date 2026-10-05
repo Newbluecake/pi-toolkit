@@ -27,6 +27,10 @@
  * clearing received items (§3.6's "live 查看的内容保留"), and a `lastSeq` mismatch re-arms
  * `needsResync`. The entry/message cores (`historyCore`/`pageCore`/`eventCore`) are shared with the
  * main session — same code path, main-session behavior pinned unchanged by logic-state.test.ts.
+ *
+ * Todo panel (todo-web plan §4, package T4): the optional `StatusInfo.todo` task-list summary
+ * is mirrored off the status slot onto `AgentState.todo` (absent-means-cleared, same semantics
+ * as the `queue` mirror) for the detail header's read-only TodoPanel.
  */
 
 /**
@@ -58,6 +62,7 @@
  *   dialogs?: DialogsState | undefined, queue?: any[] | undefined,
  *   pendingCtl: PendingCtlItem[], ctl?: any[] | undefined, commands?: any[] | undefined,
  *   runSel: string | null, runTx: RunTxState | null, fleetOmitted?: FleetOmitted | undefined,
+ *   todo?: import("../../../protocol/messages.js").TodoWire | undefined,
  * }} AgentState
  * @typedef {{
  *   clientId: string | null, hub: any, conn: string, lastEventId?: number,
@@ -129,6 +134,19 @@ export function initialState() {
 }
 
 /**
+ * todo-web §4 (T4): minimal shape check for `StatusInfo.todo` before mirroring it onto the
+ * agent (`undefined` = absent/cleared — the panel renders nothing). Deliberately shallow:
+ * the hub's own schema already validated the frame; this only guards against a hand-rolled
+ * or legacy peer putting a non-object / task-less value in the slot.
+ * @param {any} status
+ * @returns {import("../../../protocol/messages.js").TodoWire | undefined}
+ */
+function todoFromStatus(status) {
+  const t = status !== null && typeof status === "object" ? status.todo : undefined;
+  return t !== null && typeof t === "object" && Array.isArray(t.tasks) ? t : undefined;
+}
+
+/**
  * @param {any} card
  * @returns {AgentState}
  */
@@ -139,6 +157,7 @@ function newAgent(card) {
     down: false,
     session: card.session,
     status: card.status,
+    todo: todoFromStatus(card.status),
     prompts: Array.isArray(card.prompts) ? card.prompts : [],
     fleet: [],
     items: [],
@@ -332,6 +351,12 @@ function reduceInner(s, event, d) {
       return updateAgent(s, key, (a) => {
         /** @type {AgentState} */
         const next = { ...a, status: d.status, card: { ...a.card, status: d.status } };
+        // todo-web §4 (T4): mirror the optional task-list summary off the status slot for the
+        // detail header's TodoPanel. Same absent-means-cleared semantics as the queue mirror
+        // below — the wire omits `todo` entirely once the last task is cleared (the agent-side
+        // projection returns `undefined`), and the whole-slot replace above alone would leave
+        // no single field the panel can read without re-narrowing `status` itself.
+        next.todo = todoFromStatus(d.status);
         // §7.3: the D6 queue mirror rides the status slot; queueDropped cmdIds transition the
         // matching optimistic items to `dropped` (back to the terminal editor / discarded).
         // acc32-B2②: the wire omits `queue` once empty (status.ts only sets it when non-empty)
@@ -649,6 +674,9 @@ function mergeCard(a, card) {
     prompts: Array.isArray(card.prompts) ? card.prompts : a.prompts,
   };
   if (card.session) next = applySession(next, card.session);
+  // todo-web T4: keep the mirror in lockstep with whichever status object won above
+  // (`card.status ?? a.status`) — a reconnect's `agent_up` card carries the same slot.
+  next.todo = todoFromStatus(next.status);
   if (card.dialogs && typeof card.dialogs === "object") next = { ...next, dialogs: card.dialogs };
   // accfix-N2: same rationale as `newAgent` above — a card refresh (e.g. `agent_up` after a
   // reconnect) that carries `commands` must fold it in, not just leave the previous value.

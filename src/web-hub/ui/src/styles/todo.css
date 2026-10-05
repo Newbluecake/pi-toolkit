@@ -1,0 +1,128 @@
+/*
+ * Task-list panel styles (todo-web plan §4/D4, package T4) — token-only, imported by
+ * `components/detail/TodoPanel.vue`. Deliberately its own file, not `styles/detail.css`:
+ * the in-flight fleet-drawer F6 line owns detail.css edits, and source-scan.test.ts bans
+ * scoped <style> blocks outright, so a dedicated stylesheet keeps T4's file domain disjoint.
+ * The summary row mirrors `.session-sum` / `.metrics-summary` grammar (detail.css), incl.
+ * the chevron rotate-on-open transition.
+ */
+
+.todo-panel {
+  margin-top: var(--sp-1);
+}
+
+.todo-sum {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  text-align: left;
+}
+
+.todo-sum:hover {
+  background: var(--c-surface-2);
+}
+
+.todo-sum-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todo-sum-blocked {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  color: var(--c-warning-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.todo-sum .chev {
+  margin-left: auto;
+  flex: none;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.todo-panel[data-open="true"] .todo-sum .chev {
+  transform: rotate(90deg);
+}
+
+.todo-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 6px 0;
+}
+
+.todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 3px 0;
+}
+
+.todo-ico {
+  flex: none;
+  margin-top: 2px;
+  color: var(--c-text-3);
+}
+
+.todo-item[data-status="in_progress"] .todo-ico {
+  color: var(--st-running);
+}
+
+.todo-item[data-status="completed"] .todo-ico {
+  color: var(--st-done);
+}
+
+.todo-item[data-status="completed"] .todo-subject {
+  color: var(--c-text-3);
+  text-decoration: line-through;
+}
+
+.todo-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.todo-subject {
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.todo-desc {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.todo-blocked {
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+.todo-more {
+  padding: 3px 0 3px calc(14px + var(--sp-2)); /* aligns with the subject column (icon + gap) */
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* coarse pointers: the fold toggle keeps a 44px hit box (ui-design §3.12, §7.5 precedent) */
+@media (pointer: coarse) {
+  .todo-sum {
+    min-height: 44px;
+  }
+}
