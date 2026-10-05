@@ -10,7 +10,7 @@ const shell = {
   dashboardHeading: "pi web-hub 仪表盘",
   hubVersion: "hub {v}",
   uiBuild: "ui {v}",
-  signOut: "退出登录",
+  signOut: "退出",
   "conn.connecting": "连接中…",
   "conn.open": "在线",
   "conn.reconnecting": "重新连接中…",
@@ -19,9 +19,6 @@ const shell = {
   "theme.system": "跟随系统",
   "theme.light": "浅色",
   "theme.dark": "暗色",
-  "theme.groupLabel": "主题",
-  "fontScale.label": "字号",
-  "fontScale.aria": "字号 {pct}%",
   "fontScale.reset": "重置",
 } satisfies Messages<typeof en>;
 
