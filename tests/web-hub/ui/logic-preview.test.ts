@@ -240,6 +240,37 @@ describe("logic/preview.js findPathRefs — property & performance", () => {
     findPathRefs(text, SCOPE);
     expect(Date.now() - t0).toBeLessThan(2_000);
   });
+
+  it("pathological '=/'.repeat (verifier P1: was O(n²), 25.5s at 64KB) — 64KB scans < 200ms", () => {
+    // `=` and `/` are both non-terminators and `=` is a START_CHAR, so every '/' in this
+    // string is a legal candidate start whose candidate runs to the end of the string —
+    // the exact shape that made the pre-fix rescan quadratic (remote main-thread freeze
+    // over the transcript, U3). The fix memoizes per terminator-free run.
+    const text = "=/".repeat(32_768); // 65_536 chars
+    const t0 = Date.now();
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    const ms = Date.now() - t0;
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs)).toEqual([]); // nothing in scope — all candidates rejected
+    expect(ms).toBeLessThan(200);
+  });
+
+  it("nested candidate after a rejected one is still found (why rejection can't jump to the run end)", () => {
+    // `/etc=/home/u/proj/a.ts`: the whole run is one candidate (rejected — not under cwd),
+    // but the `/` before `home` follows `=` (a START_CHAR), so it begins its OWN clickable
+    // candidate. The frozen rules recognize it; the linear fix must preserve that.
+    const text = "/etc=/home/u/proj/a.ts";
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "/home/u/proj/a.ts", path: "/home/u/proj/a.ts" }]);
+  });
+
+  it("nested candidates with line:col and punctuation tails keep per-start results", () => {
+    const text = "/x=/home/u/proj/a.ts:7.";
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "/home/u/proj/a.ts:7", path: "/home/u/proj/a.ts", line: 7 }]);
+  });
 });
 
 describe("logic/preview.js pathRefOfCode (inline-code twin)", () => {

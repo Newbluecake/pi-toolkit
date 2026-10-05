@@ -39,6 +39,7 @@ import {
   PREVIEW_HDR,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_IMAGE_MAX_PIXELS,
+  PREVIEW_PATH_MAX_BYTES,
   PREVIEW_TEXT_MAX_BYTES,
   PREVIEW_UPLOADS_MARKER,
   validatePreviewPath,
@@ -145,6 +146,24 @@ function splitLineCol(raw) {
  * survive as `kind:"text"`). A `null`/`undefined` scope yields the input as one text segment
  * (PathText's no-ctx / no-scope DOM-equivalence rule). Recognition stops after
  * `PREVIEW_MAX_REFS_PER_NODE` refs; the remainder of the node stays plain text.
+ *
+ * **Linear-scan design (verifier P1 fix, 2026-10):** every candidate starting inside the same
+ * terminator-free run ends at the SAME end index, so the end-scan, the trailing-punct strip
+ * and the `:line[:col]` tail parse are memoized ONCE per run instead of being redone per
+ * start position — the old `i = slash + 1` rescan made `"=/".repeat(n)` O(n²) (a remote
+ * main-thread-freeze DoS over the transcript, U3). Per candidate the results are computed
+ * from the memo with two O(1) adjustments (the strip's `> 1 char` guard and the line:col
+ * split's `path must precede the suffix` guard are both start-relative — see the derivation
+ * in `docs/dev/web-hub-preview/plan.md` §4.6; no start position can ever fall INSIDE a
+ * `:line[:col]` match because the match contains no `/`). Two cheap rejections keep the
+ * per-candidate cost O(1) whenever the full check would fail anyway (it is a pure AND, so
+ * short-circuiting it changes no outcome):
+ * - path longer than `PREVIEW_PATH_MAX_BYTES` UTF-16 units (units ≤ UTF-8 bytes ⇒
+ *   `validatePreviewPath` would reject);
+ * - no scope route possible: the cwd prefix misses on the raw text AND the uploads marker
+ *   (tracked with an amortized forward cursor) does not occur inside `[slash, pathEnd)`.
+ * Only candidates passing both do the real slice + `isClickable` (≤4096 units of work, and
+ * at most ~4096 such starts per run — the rest of a huge run is skipped in O(1) each).
  * @param {string} text @param {PathScope | null | undefined} scope
  * @returns {PathSegment[]}
  */
@@ -158,6 +177,25 @@ export function findPathRefs(text, scope) {
   let textStart = 0;
   let i = 0;
   const n = text.length;
+
+  // Per-call scope pre-computation (the scope never changes mid-scan): the exact cwd-prefix
+  // `isClickable` tests (`null` when the cwd route is impossible for every candidate), and a
+  // forward cursor for the uploads marker so `includes()` is never re-run from scratch.
+  const cwd = scope.cwd;
+  const cwdPrefix =
+    typeof cwd === "string" && cwd !== "" && cwd !== "/" ? `${cwd.endsWith("/") ? cwd.slice(0, -1) : cwd}/` : null;
+  const uploads = scope.uploads === true;
+  let markerNext = -2; // -2 = not computed yet; else first marker occurrence >= the last query
+
+  // Per-run memo (see the header): valid only for start positions < `spanEnd`.
+  let spanEnd = -1; // first terminator >= the run's first start (n when none)
+  let spanStrippedEnd = -1; // spanEnd minus the trailing `. : ! ?` run (with the >1 guard)
+  let spanLineColStart = -1; // absolute start of the `:line[:col]` tail match, -1 when none
+  /** @type {number | undefined} */
+  let spanLine;
+  /** @type {number | undefined} */
+  let spanCol;
+
   while (i < n && refs < PREVIEW_MAX_REFS_PER_NODE) {
     const slash = text.indexOf("/", i);
     if (slash === -1) break;
@@ -165,27 +203,59 @@ export function findPathRefs(text, scope) {
       i = slash + 1;
       continue;
     }
-    let end = slash + 1;
-    while (end < n && !isTerminator(text[end])) end++;
-    // Rule 2: sentence punctuation clinging to the end is never part of the path —
-    // strip `. : ! ?` repeatedly BEFORE the :line[:col] split so `/a/b:12.` still parses.
-    let stripped = text.slice(slash, end);
-    while (stripped.length > 1 && TRAILING_PUNCT_RE.test(stripped)) stripped = stripped.slice(0, -1);
-    const { path, line, col } = splitLineCol(stripped);
-    if (isClickable(path, scope)) {
-      if (textStart < slash) segments.push({ kind: "text", text: text.slice(textStart, slash) });
-      const refEnd = slash + stripped.length;
-      /** @type {PathSegment} */
-      const seg = { kind: "ref", text: text.slice(slash, refEnd), path };
-      if (line !== undefined) seg.line = line;
-      if (col !== undefined) seg.col = col;
-      segments.push(seg);
-      refs++;
-      textStart = refEnd;
-      i = refEnd;
-    } else {
-      i = slash + 1;
+    if (slash >= spanEnd) {
+      // New terminator-free run: scan its end once, then analyze its tail once.
+      let end = slash + 1;
+      while (end < n && !isTerminator(text[end])) end++;
+      spanEnd = end;
+      let stripped = end;
+      while (stripped > slash + 1 && TRAILING_PUNCT_RE.test(text[stripped - 1])) stripped--;
+      spanStrippedEnd = Math.max(slash + 1, stripped);
+      const m = LINE_COL_RE.exec(text.slice(slash, spanStrippedEnd));
+      if (m !== null && m.index > 0) {
+        spanLineColStart = slash + m.index;
+        spanLine = Number(m[1]);
+        spanCol = m[2] !== undefined ? Number(m[2]) : undefined;
+      } else {
+        spanLineColStart = -1;
+        spanLine = undefined;
+        spanCol = undefined;
+      }
     }
+    // Per-candidate results from the memo, exactly mirroring the original per-candidate
+    // strip (its "> 1 char remains" guard is start-relative) and line:col split (its
+    // "path must precede the suffix" guard; no start can sit inside the match — it has no `/`).
+    const strippedEnd = Math.max(spanStrippedEnd, slash + 1);
+    const hasLineCol = spanLineColStart !== -1 && slash < spanLineColStart;
+    const pathEnd = hasLineCol ? spanLineColStart : strippedEnd;
+    if (pathEnd - slash <= PREVIEW_PATH_MAX_BYTES) {
+      let scopePossible = cwdPrefix !== null && text.startsWith(cwdPrefix, slash);
+      if (!scopePossible && uploads) {
+        if (markerNext === -2) markerNext = text.indexOf(PREVIEW_UPLOADS_MARKER, slash);
+        while (markerNext !== -1 && markerNext < slash) {
+          markerNext = text.indexOf(PREVIEW_UPLOADS_MARKER, markerNext + 1);
+        }
+        scopePossible = markerNext !== -1 && markerNext + PREVIEW_UPLOADS_MARKER.length <= pathEnd;
+      }
+      if (scopePossible) {
+        const path = text.slice(slash, pathEnd);
+        if (isClickable(path, scope)) {
+          if (textStart < slash) segments.push({ kind: "text", text: text.slice(textStart, slash) });
+          /** @type {PathSegment} */
+          const seg = { kind: "ref", text: text.slice(slash, strippedEnd), path };
+          if (hasLineCol) {
+            seg.line = spanLine;
+            if (spanCol !== undefined) seg.col = spanCol;
+          }
+          segments.push(seg);
+          refs++;
+          textStart = strippedEnd;
+          i = strippedEnd;
+          continue;
+        }
+      }
+    }
+    i = slash + 1;
   }
   if (textStart < n) segments.push({ kind: "text", text: text.slice(textStart) });
   if (segments.length === 0) segments.push({ kind: "text", text });
