@@ -356,11 +356,6 @@
   }
 }
 
-  .detail-title {
-    font-size: var(--fs-xl);
-  }
-}
-
 @media (min-width: 768px) {
   .detail-title {
     -webkit-line-clamp: 1;
