@@ -66,7 +66,7 @@ const queueNote = computed(() =>
       @click="onClick"
       @keydown="onKeydown"
     >
-      <AppIcon name="stop" class="icon-sm" />
+      <AppIcon name="stop" class="icon" />
       <!-- 2026-10-05 user request: resting state is icon-only (the red square IS the affordance);
            the confirm copy still appears while armed (the two-step confirm's safety text). -->
       <span v-if="armed" class="lbl-md">{{ label }}</span>

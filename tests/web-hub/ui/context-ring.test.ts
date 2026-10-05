@@ -15,7 +15,7 @@ import {
   type DetailMetricsView,
 } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 
-const CIRC = 2 * Math.PI * 8; // the component's fixed-px radius
+const CIRC = 2 * Math.PI * 12; // matches ContextRing.vue's fixed-px radius (R=12)
 
 function metrics(over: {
   percent?: number;

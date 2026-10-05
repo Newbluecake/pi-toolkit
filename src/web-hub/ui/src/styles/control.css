@@ -133,13 +133,13 @@
 .ctx-ring-track {
   fill: none;
   stroke: var(--c-border);
-  stroke-width: 3;
+  stroke-width: 3.5;
 }
 
 .ctx-ring-bar {
   fill: none;
   stroke: var(--c-primary);
-  stroke-width: 3;
+  stroke-width: 3.5;
   stroke-linecap: round;
   transition: stroke var(--dur-base) var(--ease-out);
 }
@@ -214,6 +214,7 @@
 .composer-send {
   flex: none;
   min-height: 44px;
+  align-self: stretch; /* match the textarea as it grows (2026-10-05 field report: height mismatch) */
 }
 
 .composer-send .send-icon {
@@ -264,9 +265,12 @@
 
 .stop-btn {
   min-height: 44px;
-  border: 1px solid var(--c-danger-border);
+  align-self: stretch; /* same row-height match as .composer-send */
+  /* 2026-10-05 user request: resting state is JUST the red square — no frame. The armed
+   * (two-step confirm) state keeps its danger background via .stop-btn.armed above. */
+  border: 0;
   color: var(--c-danger);
-  background: var(--c-surface);
+  background: transparent;
 }
 
 .stop-queue-note {
