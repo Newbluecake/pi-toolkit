@@ -22,6 +22,8 @@ import type {
   PreviewOutcome,
   PreviewTransport,
   Result,
+  RunPageResult,
+  RunSubResult,
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
@@ -77,7 +79,10 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
     ...deps,
     fetch: async (url, init) => {
       const r = await deps.fetch(url, init);
-      if (r.status === 401 && url === API.unsubscribe) deps.onConn("auth");
+      // F5 (fleet-drawer §6.5): `/api/run/unsubscribe` joins `/api/unsubscribe` — both are
+      // fire-and-forget with no return value to inspect, so the fetch wrapper is the only
+      // place a dead-session 401 can surface (same class as the verifier fix above).
+      if (r.status === 401 && (url === API.unsubscribe || url === API.runUnsubscribe)) deps.onConn("auth");
       return r;
     },
   };
@@ -92,6 +97,22 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       return r;
     },
     unsubscribe: (clientId, agentKey) => client.unsubscribe(clientId, agentKey),
+    // F5 (fleet-drawer §6.5): the three `/api/run/*` endpoints — thin casts over the logic
+    // client's methods (which already did the withRelogin replay), plus the same final-E_AUTH
+    // rule as subscribe/page (runUnsubscribe is fire-and-forget: only the fetch wrapper above
+    // reports its 401). `transport-contract.test.ts`'s shared run suite pins wire parity with
+    // the password adapter.
+    runSubscribe: async (clientId, agentKey, runId) => {
+      const r = (await client.runSubscribe(clientId, agentKey, runId)) as RunSubResult;
+      if (isFinalAuthFailure(r)) deps.onConn("auth");
+      return r;
+    },
+    runUnsubscribe: (clientId, agentKey, runId) => client.runUnsubscribe(clientId, agentKey, runId),
+    runPage: async <T = unknown>(agentKey: string, runId: string, before: string, limit?: number) => {
+      const r = (await client.runPage(agentKey, runId, before, limit)) as RunPageResult<T>;
+      if (isFinalAuthFailure(r)) deps.onConn("auth");
+      return r;
+    },
     page: async <T = unknown>(agentKey: string, before: string, limit?: number) => {
       const r = (await client.page(agentKey, before, limit)) as Result<T>;
       if (isFinalAuthFailure(r)) deps.onConn("auth");

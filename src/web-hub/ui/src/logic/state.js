@@ -18,6 +18,15 @@
  * `./control.js`'s pure `pendingTransition`), and the `hub` frame's `caps`/`state`/
  * supersede fields surface as top-level `control`/`hubState`/… — all ADDITIVE cases; no
  * pre-P2 event's semantics changed.
+ *
+ * Fleet drawer (fleet-drawer plan §3.3/§6.5, package F5): every agent additionally carries the
+ * drawer's selected run (`runSel`) and its transcript (`runTx`). The runTx seq rules mirror §3.3's
+ * browser column: `run_history` wholesale REPLACES the state (`lastSeq = fromSeq - 1`), `run_ev`
+ * is appended only when `seq === lastSeq + 1` and the tapId matches (duplicates dropped, a hole
+ * sets `needsResync` for `useHub`'s rate-limited re-subscribe), `run_end` enters `terminal` WITHOUT
+ * clearing received items (§3.6's "live 查看的内容保留"), and a `lastSeq` mismatch re-arms
+ * `needsResync`. The entry/message cores (`historyCore`/`pageCore`/`eventCore`) are shared with the
+ * main session — same code path, main-session behavior pinned unchanged by logic-state.test.ts.
  */
 
 /**
@@ -30,6 +39,14 @@
  *   entryId?: string | undefined, seq?: number | undefined, key?: string | undefined, message?: any, entry?: any,
  *   truncated?: boolean | undefined }} Item
  * @typedef {{ clientId: string, pending: boolean, failed?: boolean }} Sub
+ * @typedef {{ active: number, terminal: number }} FleetOmitted
+ * @typedef {{ runId: string, tapId?: string | undefined, lastSeq: number, items: Item[],
+ *   keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[],
+ *   history: "none" | "waiting" | "loaded" | "error", historyError?: string | undefined,
+ *   reason?: string | undefined, hasMore: boolean, oldestEntryId?: string | undefined, paging: boolean,
+ *   terminal: boolean, status: string, live: boolean, source?: "live" | "file" | undefined,
+ *   pendingSince?: number | undefined, retries: number, lastRow?: any,
+ *   needsResync: boolean }} RunTxState
  * @typedef {{
  *   key: string, card: any, down: boolean, downReason?: string | undefined,
  *   session?: any, status?: any, prompts: Prompt[], fleet: any[],
@@ -40,6 +57,7 @@
  *   needsResync: boolean, sub: Sub | null,
  *   dialogs?: DialogsState | undefined, queue?: any[] | undefined,
  *   pendingCtl: PendingCtlItem[], ctl?: any[] | undefined, commands?: any[] | undefined,
+ *   runSel: string | null, runTx: RunTxState | null, fleetOmitted?: FleetOmitted | undefined,
  * }} AgentState
  * @typedef {{
  *   clientId: string | null, hub: any, conn: string, lastEventId?: number,
@@ -76,6 +94,18 @@ export const LOCAL_EVENTS = Object.freeze([
   "ctl_result", // {agentKey, id, transition} — a pendingTransition event (§7.7)
   "ctl_retry", // {agentKey, id} — failed item back to sending (same id)
   "ctl_discard", // {agentKey, id} — drop the item
+  // fleet-drawer plan §6.5 (F5): run-transcript slot. `run_select` picks/drops the drawer's run
+  // (resetting runTx — a re-select of the same run is the error state's manual retry),
+  // `run_subscribing` marks a subscribe attempt in flight (`at` feeds useHub's watchdog via
+  // `pendingSince`, `retries` rides along), `run_unsubscribed` clears the pending mark without
+  // touching received content, and `run_paging`/`run_page`/`run_page_failed` mirror `paging`/
+  // `page`/`page_failed` for `useHub.pageRun`.
+  "run_select", // {agentKey, runId: string | null}
+  "run_subscribing", // {agentKey, runId, at, retries}
+  "run_unsubscribed", // {agentKey, runId}
+  "run_paging", // {agentKey, runId}
+  "run_page", // RunHistoryPayload + {agentKey} (GET /api/run/history)
+  "run_page_failed", // {agentKey, runId, error, reason?}
 ]);
 
 /** @returns {State} */
@@ -124,6 +154,9 @@ function newAgent(card) {
     needsResync: false,
     sub: null,
     pendingCtl: [],
+    // fleet-drawer §6.5 (F5): the drawer's selected run + its transcript state.
+    runSel: null,
+    runTx: null,
     ...(card.dialogs && typeof card.dialogs === "object" ? { dialogs: card.dialogs } : {}),
     // accfix-N2: mirrors the `dialogs` line above — a browser attaching AFTER the agent already
     // announced its `commands` slot (fresh tab, reconnect, second tab) must not sit without a
@@ -315,7 +348,7 @@ function reduceInner(s, event, d) {
       });
     case "fleet":
       if (!key) return s;
-      return updateAgent(s, key, (a) => ({ ...a, fleet: Array.isArray(d.runs) ? d.runs : [] }));
+      return updateAgent(s, key, (a) => applyFleet(a, d));
     case "prompt":
       if (!key) return s;
       return updateAgent(s, key, (a) => ({ ...a, prompts: Array.isArray(d.prompts) ? d.prompts : [] }));
@@ -331,6 +364,36 @@ function reduceInner(s, event, d) {
     case "append":
       if (!key || !Array.isArray(d.entries)) return s;
       return updateAgent(s, key, (a) => (a.history === "loaded" ? appendEntries(a, d.entries) : a));
+
+    // ------------------------------------------------- fleet drawer run transcript (§3.3/§6.5, F5)
+    // Every wrapper preserves the reducer's no-op ⇒ same-state invariant: the apply* helper
+    // returns the SAME tx object on a dropped frame, and only then does the agent object (and
+    // state) stay identical.
+    case "run_history":
+      // SSE `run_history` (RunHistoryPayload | RunHistoryError); useHub also reuses this event
+      // locally to surface a failed runSubscribe POST — same shape, single code path.
+      if (!key || typeof d.runId !== "string") return s;
+      return updateAgent(s, key, (a) => {
+        if (!a.runTx || a.runTx.runId !== d.runId) return a;
+        const tx = applyRunHistory(a.runTx, d, a.fleet);
+        return tx === a.runTx ? a : { ...a, runTx: tx };
+      });
+    case "run_ev":
+      if (!key || typeof d.runId !== "string" || typeof d.seq !== "number" || !d.e || typeof d.e.type !== "string")
+        return s;
+      return updateAgent(s, key, (a) => {
+        if (!a.runTx || a.runTx.runId !== d.runId) return a;
+        const tx = applyRunEv(a.runTx, d);
+        return tx === a.runTx ? a : { ...a, runTx: tx };
+      });
+    case "run_end":
+      if (!key || typeof d.runId !== "string" || typeof d.lastSeq !== "number" || typeof d.status !== "string")
+        return s;
+      return updateAgent(s, key, (a) => {
+        if (!a.runTx || a.runTx.runId !== d.runId) return a;
+        const tx = applyRunEnd(a.runTx, d);
+        return tx === a.runTx ? a : { ...a, runTx: tx };
+      });
 
     // ---------------------------------------------------------------- control plane (§7.3/§7.7)
     case "dialogs": {
@@ -440,6 +503,84 @@ function reduceInner(s, event, d) {
     case "page_failed":
       if (!key) return s;
       return updateAgent(s, key, (a) => ({ ...a, paging: false }));
+    case "run_select":
+      // {agentKey, runId: string | null} — null deselects. Always resets runTx (a re-select of
+      // the same run is the error state's manual retry); `lastRow` is re-captured from the
+      // fleet rows on the next snapshot/subscribing if the run is still listed.
+      if (!key) return s;
+      return updateAgent(s, key, (a) => {
+        const runId = typeof d.runId === "string" ? d.runId : null;
+        return a.runSel === runId && a.runTx === null ? a : { ...a, runSel: runId, runTx: null };
+      });
+    case "run_subscribing": {
+      // {agentKey, runId, at, retries} — a subscribe attempt started. Content already received
+      // survives (§6.5: after a hello-caused re-subscribe the drawer keeps showing it behind a
+      // "reconnecting" badge — that badge is `pendingSince !== undefined` with loaded history).
+      if (!key || typeof d.runId !== "string") return s;
+      const at = typeof d.at === "number" ? d.at : 0;
+      const retries = typeof d.retries === "number" && d.retries >= 0 ? Math.floor(d.retries) : 0;
+      return updateAgent(s, key, (a) => {
+        const prev = a.runTx && a.runTx.runId === d.runId ? a.runTx : null;
+        const base = prev ?? newRunTx(d.runId);
+        return {
+          ...a,
+          runTx: {
+            ...base,
+            pendingSince: at,
+            retries,
+            needsResync: false,
+            history: prev && prev.history === "loaded" ? "loaded" : "waiting",
+            historyError: undefined,
+            reason: undefined,
+          },
+        };
+      });
+    }
+    case "run_unsubscribed":
+      // {agentKey, runId} — the subscription is gone (agent switch, deselect, E_BUSY cleanup).
+      // Only clears the pending mark: received content stays (a terminal replay keeps working
+      // from the same slot), and `needsResync` deliberately survives so a rate-limited
+      // re-subscribe still fires once the window passes.
+      if (!key || typeof d.runId !== "string") return s;
+      return updateAgent(s, key, (a) =>
+        a.runTx && a.runTx.runId === d.runId && a.runTx.pendingSince !== undefined
+          ? { ...a, runTx: { ...a.runTx, pendingSince: undefined } }
+          : a,
+      );
+    case "run_paging":
+      if (!key || typeof d.runId !== "string") return s;
+      return updateAgent(s, key, (a) =>
+        a.runTx && a.runTx.runId === d.runId && !a.runTx.paging ? { ...a, runTx: { ...a.runTx, paging: true } } : a,
+      );
+    case "run_page":
+      if (!key || typeof d.runId !== "string") return s;
+      return updateAgent(s, key, (a) => {
+        if (!a.runTx || a.runTx.runId !== d.runId) return a;
+        if (a.runTx.history !== "loaded") return { ...a, runTx: { ...a.runTx, paging: false } };
+        return { ...a, runTx: { ...a.runTx, ...pageCore(a.runTx, d), paging: false } };
+      });
+    case "run_page_failed": {
+      // {agentKey, runId, error, reason?} — §3.6: paging a terminal run whose session is gone
+      // (not_persisted & the other deny-class reasons) disables "load older" for good and
+      // records the reason for the hint; transient failures keep hasMore for a retry.
+      if (!key || typeof d.runId !== "string") return s;
+      const deny =
+        typeof d.reason === "string" &&
+        [
+          "not_persisted",
+          "unknown_run",
+          "file_missing",
+          "leaf_unknown",
+          "leaf_missing",
+          "too_large",
+          "parse_error",
+        ].includes(d.reason);
+      return updateAgent(s, key, (a) => {
+        if (!a.runTx || a.runTx.runId !== d.runId) return a;
+        if (!deny) return { ...a, runTx: { ...a.runTx, paging: false } };
+        return { ...a, runTx: { ...a.runTx, paging: false, hasMore: false, reason: d.reason } };
+      });
+    }
     case "ctl_send":
       // Optimistic item for a just-dispatched control request (§7.3). Same id replaces (retry).
       if (!key || !d.item || typeof d.item.id !== "string") return s;
@@ -615,13 +756,27 @@ function buildItems(a, entries) {
   return { items, keys, entryIds, uid };
 }
 
-/** @param {AgentState} a @param {any} d @returns {AgentState} */
-function applyHistory(a, d) {
-  if (d.error !== undefined && d.error !== null) {
-    return { ...a, history: "error", historyError: String(d.error), sub: a.sub ? { ...a.sub, pending: false } : a.sub };
-  }
-  const fresh = { ...a, items: [], keys: new Set(), entryIds: new Set() };
-  const built = buildItems(fresh, Array.isArray(d.entries) ? d.entries : []);
+// ---------------------------------------------------------------------------
+// transcript cores (fleet-drawer §6.5, F5): entry/message/page logic that depends ONLY on
+// {items, keys, entryIds, uid, streaming, tools} — shared verbatim by the main session
+// (AgentState) and the run transcript (RunTxState). Main-session behavior is byte-identical
+// to the pre-F5 inline code (pinned by logic-state.test.ts); the run wrappers below add the
+// seq/tapId/terminal rules from §3.3 on top.
+// ---------------------------------------------------------------------------
+
+/**
+ * A history snapshot wholesale replaces the transcript core (fresh sets — dedupe state does
+ * NOT carry over), folds `tailMessages`, derives `streaming`/live `tools` from `inflight`,
+ * and lands `lastSeq = fromSeq - 1`.
+ * @param {{ uid: number }} _c (core — only `uid` seeds the fresh id counter)
+ * @param {any} d
+ * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[], lastSeq: number, hasMore: boolean, oldestEntryId: string | undefined }}
+ */
+function historyCore(_c, d) {
+  const built = buildItems(
+    { items: [], keys: new Set(), entryIds: new Set(), uid: _c.uid },
+    Array.isArray(d.entries) ? d.entries : [],
+  );
   let uid = built.uid;
   const items = built.items;
   const keys = built.keys;
@@ -643,7 +798,6 @@ function applyHistory(a, d) {
     : [];
   const fromSeq = typeof d.fromSeq === "number" ? d.fromSeq : 0;
   return {
-    ...a,
     items,
     keys,
     entryIds: built.entryIds,
@@ -651,10 +805,40 @@ function applyHistory(a, d) {
     lastSeq: fromSeq - 1,
     streaming: inflight?.message ? cloneMessage(inflight.message) : null,
     tools,
-    history: "loaded",
-    historyError: undefined,
     hasMore: d.hasMore === true,
     oldestEntryId: typeof d.oldestEntryId === "string" ? d.oldestEntryId : undefined,
+  };
+}
+
+/**
+ * One older page prepends its entries ahead of the existing items; dedupe state carries over.
+ * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, oldestEntryId?: string | undefined }} c
+ * @param {any} d
+ * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, hasMore: boolean, oldestEntryId: string | undefined }}
+ */
+function pageCore(c, d) {
+  const built = buildItems(c, Array.isArray(d.entries) ? d.entries : []);
+  return {
+    items: [...built.items, ...c.items],
+    keys: built.keys,
+    entryIds: built.entryIds,
+    uid: built.uid,
+    hasMore: d.hasMore === true,
+    oldestEntryId: typeof d.oldestEntryId === "string" ? d.oldestEntryId : c.oldestEntryId,
+  };
+}
+
+/** @param {AgentState} a @param {any} d @returns {AgentState} */
+function applyHistory(a, d) {
+  if (d.error !== undefined && d.error !== null) {
+    return { ...a, history: "error", historyError: String(d.error), sub: a.sub ? { ...a.sub, pending: false } : a.sub };
+  }
+  const core = historyCore(a, d);
+  return {
+    ...a,
+    ...core,
+    history: "loaded",
+    historyError: undefined,
     paging: false,
     needsResync: false,
     sub: a.sub ? { ...a.sub, pending: false } : a.sub,
@@ -664,17 +848,7 @@ function applyHistory(a, d) {
 /** @param {AgentState} a @param {any} d @returns {AgentState} */
 function applyPage(a, d) {
   if (a.history !== "loaded") return { ...a, paging: false };
-  const built = buildItems(a, Array.isArray(d.entries) ? d.entries : []);
-  return {
-    ...a,
-    items: [...built.items, ...a.items],
-    keys: built.keys,
-    entryIds: built.entryIds,
-    uid: built.uid,
-    hasMore: d.hasMore === true,
-    oldestEntryId: typeof d.oldestEntryId === "string" ? d.oldestEntryId : a.oldestEntryId,
-    paging: false,
-  };
+  return { ...a, ...pageCore(a, d), paging: false };
 }
 
 /** SSE `append` (spike K7④): entries the event stream never carried. @param {AgentState} a @param {any[]} entries */
@@ -772,45 +946,56 @@ function applyDelta(streaming, e) {
 }
 
 /** @param {AgentState} a @param {number} seq @param {any} e @returns {AgentState} */
-function applyEvent(a, seq, e) {
+/**
+ * The transcript-only half of event application (F5 kernel): everything that depends just on
+ * {items, keys, entryIds, uid, streaming, tools}. Returns the SAME object when nothing
+ * changed (the main-session wrapper relies on that to keep the reducer's no-op ⇒ same-state
+ * invariant for its own no-op branches). `session_info_changed`/`model_select` are
+ * deliberately NOT here — they mutate the agent's session/card slots and stay in the
+ * main-session wrapper below (a run transcript has no session slot; those events are ignored
+ * for runs, exactly like they are when `a.session` is absent for the main session).
+ * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[] }} c
+ * @param {number} seq @param {any} e
+ */
+function eventCore(c, seq, e) {
   switch (e.type) {
     case "message_start":
-      if (e.message && e.message.role === "assistant") return { ...a, streaming: cloneMessage(e.message) };
-      return a;
+      if (e.message && e.message.role === "assistant") return { ...c, streaming: cloneMessage(e.message) };
+      return c;
     case "message_update":
-      return { ...a, streaming: applyDelta(a.streaming, e) };
+      return { ...c, streaming: applyDelta(c.streaming, e) };
     case "message_end": {
       const m = e.message;
-      if (!m || typeof m !== "object") return a;
-      const keys = new Set(a.keys);
+      if (!m || typeof m !== "object") return c;
+      const keys = new Set(c.keys);
       const it = messageItem(m, keys, `s:${seq}`, seq);
-      /** @type {AgentState} */
-      let next = { ...a, keys };
+      /** @type {any} */
+      const next = { ...c, keys };
       if (m.role === "assistant") next.streaming = null;
       if (m.role === "toolResult" && typeof m.toolCallId === "string") {
-        next.tools = a.tools.filter((t) => t.toolCallId !== m.toolCallId);
+        next.tools = c.tools.filter((t) => t.toolCallId !== m.toolCallId);
       }
-      if (it) next.items = [...a.items, it];
+      if (it) next.items = [...c.items, it];
       return next;
     }
     case "tool_execution_start": {
-      if (typeof e.toolCallId !== "string") return a;
+      if (typeof e.toolCallId !== "string") return c;
       const tool = { toolCallId: e.toolCallId, toolName: String(e.toolName ?? ""), args: e.args, done: false };
-      return { ...a, tools: [...a.tools.filter((t) => t.toolCallId !== e.toolCallId), tool] };
+      return { ...c, tools: [...c.tools.filter((t) => t.toolCallId !== e.toolCallId), tool] };
     }
     case "tool_execution_update": {
-      if (typeof e.toolCallId !== "string") return a;
+      if (typeof e.toolCallId !== "string") return c;
       const partial = typeof e.partial === "string" ? e.partial : resultText(e.partialResult);
       return {
-        ...a,
-        tools: upsertTool(a.tools, e, (t) => ({ ...t, partial, ...(e.truncated === true ? { truncated: true } : {}) })),
+        ...c,
+        tools: upsertTool(c.tools, e, (t) => ({ ...t, partial, ...(e.truncated === true ? { truncated: true } : {}) })),
       };
     }
     case "tool_execution_end": {
-      if (typeof e.toolCallId !== "string") return a;
+      if (typeof e.toolCallId !== "string") return c;
       return {
-        ...a,
-        tools: upsertTool(a.tools, e, (t) => ({
+        ...c,
+        tools: upsertTool(c.tools, e, (t) => ({
           ...t,
           done: true,
           result: e.result,
@@ -822,18 +1007,28 @@ function applyEvent(a, seq, e) {
     case "session_compact": {
       const ce = e.compactionEntry && typeof e.compactionEntry === "object" ? e.compactionEntry : undefined;
       const entryId = typeof ce?.id === "string" ? ce.id : undefined;
-      if (entryId && a.entryIds.has(entryId)) return a;
+      if (entryId && c.entryIds.has(entryId)) return c;
       const entry = {
         type: "compaction",
         summary: ce?.summary ?? e.summary,
         firstKeptEntryId: ce?.firstKeptEntryId ?? e.firstKeptEntryId,
       };
-      const entryIds = entryId ? new Set(a.entryIds).add(entryId) : a.entryIds;
+      const entryIds = entryId ? new Set(c.entryIds).add(entryId) : c.entryIds;
       /** @type {Item} */
       const it = { id: `s:${seq}`, kind: "compaction", entry, seq };
       if (entryId) it.entryId = entryId;
-      return { ...a, entryIds, items: [...a.items, it] };
+      return { ...c, entryIds, items: [...c.items, it] };
     }
+    case "agent_end":
+      return c.streaming ? { ...c, streaming: null } : c;
+    default:
+      return c; // turn_*, agent_start/settled, input, ui_prompt_* (banner comes from `prompt`)
+  }
+}
+
+/** @param {AgentState} a @param {number} seq @param {any} e @returns {AgentState} */
+function applyEvent(a, seq, e) {
+  switch (e.type) {
     case "session_info_changed":
       if (typeof e.name === "string" && a.session) {
         const session = { ...a.session, name: e.name };
@@ -849,11 +1044,164 @@ function applyEvent(a, seq, e) {
         return { ...a, session, card: { ...a.card, session } };
       }
       return a;
-    case "agent_end":
-      return a.streaming ? { ...a, streaming: null } : a;
-    default:
-      return a; // turn_*, agent_start/settled, input, ui_prompt_* (banner comes from `prompt`)
+    default: {
+      const c = {
+        items: a.items,
+        keys: a.keys,
+        entryIds: a.entryIds,
+        uid: a.uid,
+        streaming: a.streaming,
+        tools: a.tools,
+      };
+      const next = eventCore(c, seq, e);
+      return next === c ? a : { ...a, ...next };
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// run transcript (fleet-drawer §3.3/§6.5, F5)
+// ---------------------------------------------------------------------------
+
+/**
+ * A fresh runTx slot (fleet-drawer §6.5). `tapId`/`lastRow` are absent until a snapshot lands;
+ * `lastSeq` is a placeholder — the `history !== "loaded"` guard drops any `run_ev` that could
+ * conceivably arrive before the snapshot sets the real watermark (`lastSeq = fromSeq - 1`).
+ * @param {string} runId @returns {RunTxState}
+ */
+function newRunTx(runId) {
+  return {
+    runId,
+    lastSeq: 0,
+    items: [],
+    keys: new Set(),
+    entryIds: new Set(),
+    uid: 0,
+    streaming: null,
+    tools: [],
+    history: "waiting",
+    hasMore: false,
+    paging: false,
+    terminal: false,
+    status: "",
+    live: false,
+    retries: 0,
+    needsResync: false,
+  };
+}
+
+/**
+ * The last-seen fleet row for a run, or undefined. §6.3: when the selected run leaves the
+ * projected rows, `runTx.lastRow` keeps the LAST one seen so the drawer header keeps working.
+ * @param {any[]} rows @param {string} runId
+ */
+function rowForRun(rows, runId) {
+  for (const row of rows) {
+    if (row && typeof row === "object" && row.runId === runId) return row;
+  }
+  return undefined;
+}
+
+/** @param {any} d @returns {FleetOmitted | undefined} */
+function validOmitted(d) {
+  return d && typeof d === "object" && typeof d.active === "number" && typeof d.terminal === "number"
+    ? { active: d.active, terminal: d.terminal }
+    : undefined;
+}
+
+/**
+ * `fleet` frame: replaces the rows slot, folds `omitted` (F0's optional counts), and keeps
+ * `runTx.lastRow` fresh while the selected run is still listed (kept verbatim once it leaves —
+ * §6.3's "被选中的 run 移出 rows" case).
+ * @param {AgentState} a @param {any} d @returns {AgentState}
+ */
+function applyFleet(a, d) {
+  const runs = Array.isArray(d.runs) ? d.runs : [];
+  /** @type {AgentState} */
+  let next = { ...a, fleet: runs, fleetOmitted: validOmitted(d.omitted) };
+  if (a.runTx) {
+    const row = rowForRun(runs, a.runTx.runId);
+    if (row !== undefined && row !== a.runTx.lastRow) next = { ...next, runTx: { ...a.runTx, lastRow: row } };
+  }
+  return next;
+}
+
+/**
+ * `run_history` (§3.3): a snapshot wholesale REPLACES the runTx state — fresh dedupe sets,
+ * `lastSeq = fromSeq - 1`, inflight-derived streaming/tools. Also the error carrier
+ * (§3.5 `E_AGENT_GONE`, §3.6 denial vocabulary, and useHub's failed runSubscribe POST):
+ * an error keeps already-received content (§3.6: a live viewer's transcript stays).
+ * @param {RunTxState} tx @param {any} d @param {any[]} fleetRows
+ * @returns {RunTxState}
+ */
+function applyRunHistory(tx, d, fleetRows) {
+  if (d.error !== undefined && d.error !== null) {
+    return {
+      ...tx,
+      history: "error",
+      historyError: String(d.error),
+      reason: typeof d.reason === "string" ? d.reason : undefined,
+      pendingSince: undefined,
+      needsResync: false,
+      paging: false,
+    };
+  }
+  const core = historyCore(tx, d);
+  return {
+    ...tx,
+    ...core,
+    tapId: typeof d.tapId === "string" ? d.tapId : undefined,
+    history: "loaded",
+    historyError: undefined,
+    reason: undefined,
+    pendingSince: undefined,
+    needsResync: false,
+    paging: false,
+    terminal: d.terminal === true,
+    status: typeof d.status === "string" ? d.status : tx.status,
+    live: d.live === true,
+    source: d.source === "file" ? "file" : "live",
+    lastRow: tx.lastRow ?? rowForRun(fleetRows, tx.runId),
+  };
+}
+
+/**
+ * `run_ev` (§3.3 browser column): tapId mismatch or `seq <= lastSeq` ⇒ drop (duplicate);
+ * a hole (`seq !== lastSeq + 1`) ⇒ set `needsResync` (useHub re-subscribes, rate-limited) and
+ * drop the frame — the re-snapshot replays it; `seq === lastSeq + 1` ⇒ apply via the shared
+ * event core and advance the watermark.
+ * @param {RunTxState} tx @param {{ tapId?: unknown, seq: number, e: any }} d
+ * @returns {RunTxState}
+ */
+function applyRunEv(tx, d) {
+  if (tx.history !== "loaded") return tx; // buffered hub-side until run_history
+  if (tx.tapId !== undefined && d.tapId !== tx.tapId) return tx; // stale tap (pre-resync frame)
+  if (d.seq <= tx.lastSeq) return tx; // duplicate
+  if (d.seq !== tx.lastSeq + 1) return { ...tx, needsResync: true }; // hole ⇒ re-subscribe
+  const c = {
+    items: tx.items,
+    keys: tx.keys,
+    entryIds: tx.entryIds,
+    uid: tx.uid,
+    streaming: tx.streaming,
+    tools: tx.tools,
+  };
+  const next = eventCore(c, d.seq, d.e);
+  return { ...tx, ...next, lastSeq: d.seq };
+}
+
+/**
+ * `run_end` (§3.3): `lastSeq` matches the watermark ⇒ terminal (items kept — §3.6 explicitly
+ * forbids clearing a live viewer's received content), live off, streaming bubble dropped;
+ * a mismatch ⇒ `needsResync` (the re-snapshot takes the terminal-file path server-side).
+ * @param {RunTxState} tx @param {{ tapId?: unknown, lastSeq: number, status: string }} d
+ * @returns {RunTxState}
+ */
+function applyRunEnd(tx, d) {
+  if (tx.history !== "loaded") return tx; // hub buffers end behind history (§G8) — stale frame
+  if (tx.tapId !== undefined && d.tapId !== tx.tapId) return tx;
+  if (tx.lastSeq !== d.lastSeq) return { ...tx, needsResync: true };
+  return { ...tx, terminal: true, live: false, status: d.status, streaming: null, pendingSince: undefined };
 }
 
 /** @param {LiveTool[]} tools @param {any} e @param {(t: LiveTool) => LiveTool} fn */
@@ -907,4 +1255,28 @@ export function needsSubscribe(s) {
 /** @param {State} s @returns {AgentState | undefined} */
 export function selectedAgent(s) {
   return s.selected === null ? undefined : s.agents.get(s.selected);
+}
+
+/**
+ * The run `useHub` should (re)subscribe now, if any (fleet-drawer §6.5): the selected, live
+ * agent's `runSel`, when its runTx is missing, belongs to a different run, or carries
+ * `needsResync` (a §3.3 hole / `run_end` mismatch). Mirrors `needsSubscribe`'s guards: never
+ * while a subscribe is in flight (`pendingSince`), never for an `error` runTx (manual retry
+ * only — `selectRun` re-select resets it). This is HALF the truth: `useHub`'s own `runSubs`
+ * (this-tab subscription belief) covers the cases state can't see — a `hello`-caused
+ * clientId change that cleared `runSubs` while the runTx still looks healthy.
+ * @param {State} s
+ * @returns {{ agentKey: string, runId: string } | undefined}
+ */
+export function needsRunSubscribe(s) {
+  if (!s.clientId || s.selected === null) return undefined;
+  const a = s.agents.get(s.selected);
+  if (!a || a.down || typeof a.runSel !== "string") return undefined;
+  const tx = a.runTx;
+  if (tx && tx.runId === a.runSel) {
+    if (tx.pendingSince !== undefined) return undefined; // in flight
+    if (tx.history === "error") return undefined; // manual retry only
+    if (!tx.needsResync) return undefined;
+  }
+  return { agentKey: a.key, runId: a.runSel };
 }

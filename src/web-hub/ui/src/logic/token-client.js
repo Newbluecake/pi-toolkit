@@ -195,6 +195,30 @@ export function createClient(deps) {
     return r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`;
   }
 
+  /**
+   * fleet-drawer plan §3.4/§6.5 (F5): run-endpoint error reader — like `errorOf` but ALSO keeps
+   * the body's `message` as `reason` (the §3.6 denial vocabulary rides `message` on
+   * `/api/run/*`, e.g. 404 `{error:"E_NOT_FOUND", message:"not_persisted"}`). Reads the body
+   * exactly once — never pair with `errorOf` on the same response.
+   * @param {{ ok: boolean, status: number, json(): Promise<any> }} r
+   * @returns {Promise<{ error: string, reason?: string }>}
+   */
+  async function runErrorOf(r) {
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body && typeof body === "object" ? body : {};
+    const out = {
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
+    };
+    if (typeof b.message === "string") out.reason = b.message;
+    return out;
+  }
+
   function armWatchdog() {
     if (watchdog !== null) deps.clearTimeout(watchdog);
     watchdog = timer(() => {
@@ -749,6 +773,56 @@ export function createClient(deps) {
       try {
         const r = await withRelogin(() => request(url, { method: "GET" }));
         if (!r.ok) return { ok: false, error: await errorOf(r) };
+        return { ok: true, data: await r.json() };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+      }
+    },
+    // -----------------------------------------------------------------------
+    // run-transcript endpoints (fleet-drawer plan §3.4/§6.5, package F5)
+    // -----------------------------------------------------------------------
+    /**
+     * POST /api/run/subscribe — same `withRelogin` dance as `subscribe` (§6.5 table: a 401
+     * re-logs in silently and replays; the hub's sub is idempotent per clientId+run). 202
+     * `{ok:true}` means the snapshot rides SSE `run_history`; the §3.6 denial body's `message`
+     * is surfaced as `reason`.
+     * @param {string} clientId @param {string} agentKey @param {string} runId
+     * @returns {Promise<{ ok: true } | { ok: false, error: string, reason?: string }>}
+     */
+    async runSubscribe(clientId, agentKey, runId) {
+      try {
+        const r = await withRelogin(() => postRaw(API.runSubscribe, { clientId, agentKey, runId }));
+        if (r.ok) return { ok: true };
+        return { ok: false, ...(await runErrorOf(r)) };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+      }
+    },
+    /**
+     * POST /api/run/unsubscribe — fire-and-forget, failures swallowed (§6.5 table: “发出即不管，
+     * 吞掉失败（同 unsubscribe）”； the transport adapter's fetch wrapper still reports a 401 so
+     * a dead session surfaces, exactly like `unsubscribe`).
+     * @param {string} clientId @param {string} agentKey @param {string} runId
+     */
+    async runUnsubscribe(clientId, agentKey, runId) {
+      try {
+        await postRaw(API.runUnsubscribe, { clientId, agentKey, runId });
+      } catch {
+        /* best effort */
+      }
+    },
+    /**
+     * GET /api/run/history (§3.4: `?agent=&run=&before=&limit=`) — one older page for a run
+     * transcript; `live` is always false in the reply (the GET never attaches a tap).
+     * @param {string} agentKey @param {string} runId @param {string} before @param {number} [limit]
+     * @returns {Promise<{ ok: true, data: any } | { ok: false, error: string, reason?: string }>}
+     */
+    async runPage(agentKey, runId, before, limit = 200) {
+      const n = Math.max(1, Math.min(HISTORY_LIMIT_MAX, Math.floor(limit)));
+      const url = `${API.runHistory}?agent=${encodeURIComponent(agentKey)}&run=${encodeURIComponent(runId)}&before=${encodeURIComponent(before)}&limit=${n}`;
+      try {
+        const r = await withRelogin(() => request(url, { method: "GET" }));
+        if (!r.ok) return { ok: false, ...(await runErrorOf(r)) };
         return { ok: true, data: await r.json() };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };

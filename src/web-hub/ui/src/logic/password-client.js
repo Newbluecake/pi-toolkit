@@ -291,6 +291,31 @@ export function createPasswordClient(deps) {
     return r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`;
   }
 
+  /**
+   * fleet-drawer plan §3.4/§6.5 (F5): run-endpoint error reader — like `errorOf` but ALSO keeps
+   * the body's `message` as `reason` (the §3.6 denial vocabulary rides `message` on
+   * `/api/run/*`). Mirrors token-client's twin 1:1 (the two transports stay independent
+   * modules by design; `transport-contract.test.ts` pins behavioral parity). Reads the body
+   * exactly once — never pair with `errorOf` on the same response.
+   * @param {{ ok: boolean, status: number, json(): Promise<any> }} r
+   * @returns {Promise<{ error: string, reason?: string }>}
+   */
+  async function runErrorOf(r) {
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body && typeof body === "object" ? body : {};
+    const out = {
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
+    };
+    if (typeof b.message === "string") out.reason = b.message;
+    return out;
+  }
+
   /** @param {string} path @param {unknown} body @param {number} [timeoutMs] @param {any} [signal] */
   function postApi(path, body, timeoutMs = REQUEST_TIMEOUT_MS, signal) {
     return request(
@@ -342,6 +367,60 @@ export function createPasswordClient(deps) {
     try {
       const r = await request(url, { method: "GET" }, REQUEST_TIMEOUT_MS);
       if (!r.ok) return { ok: false, error: await errorOf(r) };
+      return { ok: true, data: await r.json() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // run-transcript endpoints (fleet-drawer plan §3.4/§6.5, package F5). One-shot
+  // `postApi`/`request` calls — no relogin dance (password mode has none): a 401 means the
+  // cookie session is gone and is reported by `transport/password.ts`'s fetch wrapper via
+  // `isRestAuthEndpoint` (REST_AUTH_PATHS covers both run POSTs, the prefix rule the GET).
+  // -------------------------------------------------------------------------
+
+  /**
+   * POST /api/run/subscribe — 202 `{ok:true}` means the snapshot rides SSE `run_history`; the
+   * §3.6 denial body's `message` is surfaced as `reason`.
+   * @param {string} clientId @param {string} agentKey @param {string} runId
+   * @returns {Promise<{ ok: true } | { ok: false, error: string, reason?: string }>}
+   */
+  async function runSubscribe(clientId, agentKey, runId) {
+    try {
+      const r = await postApi(API.runSubscribe, { clientId, agentKey, runId });
+      if (r.ok) return { ok: true };
+      return { ok: false, ...(await runErrorOf(r)) };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+
+  /**
+   * POST /api/run/unsubscribe — fire-and-forget, failures swallowed (§6.5 table, same as
+   * `unsubscribe`; a 401 still reaches `onConn("auth")` through the transport wrapper).
+   * @param {string} clientId @param {string} agentKey @param {string} runId
+   */
+  async function runUnsubscribe(clientId, agentKey, runId) {
+    try {
+      await postApi(API.runUnsubscribe, { clientId, agentKey, runId });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
+   * GET /api/run/history (§3.4: `?agent=&run=&before=&limit=`) — one older page for a run
+   * transcript; `live` is always false in the reply (the GET never attaches a tap).
+   * @param {string} agentKey @param {string} runId @param {string} before @param {number} [limit]
+   * @returns {Promise<{ ok: true, data: any } | { ok: false, error: string, reason?: string }>}
+   */
+  async function runPage(agentKey, runId, before, limit = 200) {
+    const n = Math.max(1, Math.min(HISTORY_LIMIT_MAX, Math.floor(limit)));
+    const url = `${API.runHistory}?agent=${encodeURIComponent(agentKey)}&run=${encodeURIComponent(runId)}&before=${encodeURIComponent(before)}&limit=${n}`;
+    try {
+      const r = await request(url, { method: "GET" }, REQUEST_TIMEOUT_MS);
+      if (!r.ok) return { ok: false, ...(await runErrorOf(r)) };
       return { ok: true, data: await r.json() };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
@@ -933,6 +1012,9 @@ export function createPasswordClient(deps) {
     subscribe,
     unsubscribe,
     page,
+    runSubscribe,
+    runUnsubscribe,
+    runPage,
     command,
     dialog,
     upload,

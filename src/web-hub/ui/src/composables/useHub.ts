@@ -16,7 +16,7 @@
  * `disposed` flag here only guards against a message/promise resolving after `dispose()`.
  */
 import { shallowRef, type ShallowRef } from "vue";
-import { initialState, needsSubscribe, reduce } from "@logic/state.js";
+import { initialState, needsRunSubscribe, needsSubscribe, reduce } from "@logic/state.js";
 import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
 import { createRenderGate, type RenderPriority } from "./renderGate.js";
 import type { HubTransport, TransportHooks } from "../transport/types.js";
@@ -45,8 +45,14 @@ export interface UseHubOptions<TTimer = ReturnType<typeof setTimeout>> {
   now?(): number;
   /** Minimum interval between (re)subscribe attempts for the same agent key — mirrors the
    * legacy `RESYNC_MIN_INTERVAL_MS` (2000ms) rate limit that keeps a flapping connection from
-   * storming `/api/subscribe`. */
+   * storming `/api/subscribe`. fleet-drawer §3.3 also routes run re-subscribes through this
+   * same window (its own map, same interval). */
   resyncMinIntervalMs?: number;
+  /** fleet-drawer plan §3.3/§6.5 (F5): how long a run subscribe may stay pending (202 sent,
+   * no `run_history` yet) before the watchdog re-subscribes — `RUN_TX.clientPendingMs`'s
+   * browser mirror (10s; pinned equal by use-hub.test.ts, since importing the protocol module
+   * here would drag typebox into the browser bundle). */
+  runPendingWatchdogMs?: number;
   /** Forwarded to `createRenderGate` (§3.5 defaults: 100ms / 1000ms). */
   renderIntervalMs?: number;
   renderHiddenPollMs?: number;
@@ -62,6 +68,14 @@ export interface UseHubHandle extends HubHandle {
    * isn't already paging (mirrors the legacy scroll-triggered `client.page()` call; the Vue UI
    * triggers it from `Transcript.vue`'s `load-older` emit instead of a scroll listener). */
   loadOlder(agentKey: string): void;
+  /** fleet-drawer plan §6.5 (F5): select/deselect the drawer's run for `agentKey`. A re-select
+   * of the same run resets its `runTx` (the error state's manual retry path); any other run of
+   * the agent still believed subscribed is torn down first (hub budget: 2 runs/client). */
+  selectRun(agentKey: string, runId: string | null): void;
+  /** fleet-drawer §6.5 (F5): fetch one older page of the selected run's transcript — a no-op
+   * unless its `runTx` is loaded, has more, and isn't already paging (or the transport lacks
+   * `runPage`). */
+  pageRun(agentKey: string): void;
   start(): Promise<void>;
   dispose(): void;
 }
@@ -81,6 +95,7 @@ const AUTO_QUERY_CAP = 256;
 export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptions<TTimer>): UseHubHandle {
   const now = opts.now ?? Date.now;
   const resyncMinIntervalMs = opts.resyncMinIntervalMs ?? 2_000;
+  const runPendingWatchdogMs = opts.runPendingWatchdogMs ?? 10_000;
 
   let raw: LogicState = initialState();
   const state = shallowRef<HubState>(raw as unknown as HubState) as ShallowRef<HubState>;
@@ -90,6 +105,54 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
   let subTimer: TTimer | null = null;
   let prevSelected: string | null = null;
   let disposed = false;
+
+  // ---------------------------------------------------------------------------
+  // fleet-drawer plan §6.5 (F5): run-subscription bookkeeping. `runSubs` is this tab's own
+  // belief of what the hub currently streams to THIS clientId — the half of the truth the
+  // reducer can't see (a `hello` changes the clientId out from under a healthy-looking runTx;
+  // a failed POST must clear the belief even though the reducer keeps the slot). `runRetries`
+  // counts watchdog re-subscribes (error state after 2, §6.5/U13) and is cleared the moment a
+  // subscription attempt SETTLES (snapshot/error landed — `runSettleEffects`), so a later
+  // pending episode always starts its U13 budget from zero. `runWatchdogs` is ONE timer per
+  // runKey (acceptance fix #1: a single global timer let one run's arm eat another's — timers
+  // are now created/replaced per key and cleared precisely on settle/unsubscribe/hello).
+  // `gen` is the attempt generation (acceptance fix #3): every async callback re-checks it, so
+  // a stale subscribe POST resolving after an agent switch / hello / manual re-select can
+  // never poison the new generation's state.
+  // ---------------------------------------------------------------------------
+  type RunSub = { agentKey: string; runId: string; clientId: string; gen: number };
+  const runSubs = new Map<string, RunSub>();
+  const runRetries = new Map<string, number>();
+  const lastRunSubAt = new Map<string, number>();
+  const runWatchdogs = new Map<string, { timer: TTimer; agentKey: string; runId: string }>();
+  let runSubGenSeq = 0;
+  let runSubTimer: TTimer | null = null;
+  let prevRunClientId: string | null = null;
+
+  /** Is the async result of subscribe attempt `gen` (issued under `clientId`) still the
+   * CURRENT subscription of `key`? False once the entry was replaced (a newer attempt),
+   * removed (unsubscribed/settled), or the SSE clientId moved on (hello) — the caller must
+   * drop the result silently instead of touching the new generation's state. */
+  function runAttemptLive(key: string, gen: number, clientId: string): boolean {
+    const cur = runSubs.get(key);
+    return cur !== undefined && cur.gen === gen && cur.clientId === clientId && cur.clientId === raw.clientId;
+  }
+
+  /** Precise teardown of one runKey's timer (acceptance fix #1 — never a stray fire). */
+  function clearRunWatchdog(key: string): void {
+    const w = runWatchdogs.get(key);
+    if (w === undefined) return;
+    runWatchdogs.delete(key);
+    opts.clearTimeout(w.timer);
+  }
+
+  /** F5 discipline: unref'd-in-Node timers (browser handles are numbers — the guard no-ops). */
+  function unrefIfAble(t: TTimer | null): void {
+    const u = t as unknown as { unref?: unknown } | null;
+    if (u !== null && typeof u.unref === "function") {
+      (u as { unref: () => void }).unref();
+    }
+  }
 
   const gate = createRenderGate<TTimer>({
     commit: () => {
@@ -126,13 +189,34 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     if (raw.selected !== prevSelected) {
       const old = prevSelected;
       prevSelected = raw.selected;
-      const oldAgent = old === null ? undefined : raw.agents.get(old);
-      if (old !== null && oldAgent?.sub && raw.clientId) {
-        void transport.unsubscribe(raw.clientId, old);
-        dispatch({ event: "unsubscribed", data: { agentKey: old } });
+      if (old !== null && raw.clientId) {
+        // F5 (fleet-drawer §6.4 #7): the OLD agent's run subscription is torn down FIRST —
+        // before the main `unsubscribe` below — so the transport call order is exactly
+        // runUnsubscribe(old run) → unsubscribe(old) → (nested effects) subscribe(new) …
+        const runIds: string[] = [];
+        for (const [k, v] of [...runSubs]) {
+          if (v.agentKey !== old) continue;
+          runSubs.delete(k);
+          runRetries.delete(k);
+          clearRunWatchdog(k);
+          runIds.push(v.runId);
+          void transport.runUnsubscribe?.(raw.clientId, old, v.runId);
+        }
+        const oldAgent = raw.agents.get(old);
+        if (oldAgent?.sub) {
+          void transport.unsubscribe(raw.clientId, old);
+          dispatch({ event: "unsubscribed", data: { agentKey: old } });
+        }
+        for (const runId of runIds) dispatch({ event: "run_unsubscribed", data: { agentKey: old, runId } });
       }
     }
     runControlEffects();
+    runSessionEffects();
+    runSettleEffects();
+    runFleetEffects();
+  }
+
+  function runSessionEffects(): void {
     const key = needsSubscribe(raw);
     const clientId = raw.clientId;
     if (key === undefined || clientId === null) return;
@@ -144,6 +228,7 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
           subTimer = null;
           runEffects();
         }, wait);
+        unrefIfAble(subTimer);
       }
       return;
     }
@@ -156,6 +241,185 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
           : { event: "subscribe_failed", data: { agentKey: key, error: r.error } },
       );
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // F5 (fleet-drawer §6.5): run-transcript effects — subscribe/re-subscribe the selected
+  // agent's `runSel`, watchdog a pending subscribe, self-heal E_BUSY, and re-subscribe after
+  // an SSE `hello` (clientId change). Run subscriptions are owned HERE, never by components.
+  // ---------------------------------------------------------------------------
+
+  function finishRunError(key: string, agentKey: string, runId: string, error: string, reason?: string): void {
+    runSubs.delete(key);
+    dispatch({
+      event: "run_history",
+      data: { agentKey, runId, error, ...(reason !== undefined ? { reason } : {}) },
+    });
+  }
+
+  /** Tear down every OTHER run this tab still believes subscribed (§6.5 E_BUSY self-heal).
+   * They belong to other agents/selections — their runTx slots keep their content, only the
+   * pending mark clears; a later re-select re-subscribes. */
+  function dropOtherRuns(keepKey: string): void {
+    const clientId = raw.clientId;
+    for (const [k, v] of [...runSubs]) {
+      if (k === keepKey) continue;
+      runSubs.delete(k);
+      runRetries.delete(k);
+      clearRunWatchdog(k);
+      if (clientId !== null) void transport.runUnsubscribe?.(clientId, v.agentKey, v.runId);
+      dispatch({ event: "run_unsubscribed", data: { agentKey: v.agentKey, runId: v.runId } });
+    }
+  }
+
+  /** One watchdog timer per runKey (acceptance fix #1): arming for an attempt replaces only
+   * THAT key's timer, so two pending runs can never eat each other's deadline. The callback
+   * captures the attempt's `gen` and drops itself when superseded. `agentKey`/`runId` ride
+   * along so `runSettleEffects` can inspect the state without parsing the composite key. */
+  function armRunWatchdog(key: string, gen: number, agentKey: string, runId: string): void {
+    clearRunWatchdog(key);
+    const timer = opts.setTimeout(() => {
+      runWatchdogs.delete(key);
+      if (disposed) return;
+      const sub = runSubs.get(key);
+      if (sub === undefined || sub.gen !== gen) return; // superseded attempt — nothing to do
+      if (sub.clientId !== raw.clientId) {
+        clearRunWatchdog(key); // stale SSE era — the hello branch already re-armed a fresh timer
+        return;
+      }
+      const tx = raw.agents.get(sub.agentKey)?.runTx;
+      if (tx === null || tx === undefined || tx.runId !== sub.runId) {
+        clearRunWatchdog(key); // this key is no longer the agent's current run — self-clean
+        return;
+      }
+      if (tx.pendingSince === undefined) return; // settled/unsubscribed meanwhile
+      // SSE reconnect in progress: no history can arrive yet — push the deadline, don't burn a retry.
+      if (raw.conn !== "open") {
+        armRunWatchdog(key, gen, agentKey, runId);
+        return;
+      }
+      const retries = runRetries.get(key) ?? 0;
+      if (retries >= 2) {
+        // §6.5/U13: two re-subscribes already burned — error state with a manual retry button.
+        runRetries.delete(key);
+        finishRunError(key, sub.agentKey, sub.runId, "E_DEADLINE");
+        return;
+      }
+      runRetries.set(key, retries + 1);
+      runSubs.delete(key);
+      startRunSubscribe(sub.agentKey, sub.runId);
+    }, runPendingWatchdogMs);
+    runWatchdogs.set(key, { timer, agentKey, runId });
+    unrefIfAble(timer);
+  }
+
+  /** Fire one run-subscribe attempt (initial, watchdog retry, or E_BUSY retry). Each attempt
+   * gets a fresh `gen`; every async continuation (the POST result AND the E_BUSY retry) must
+   * pass `runAttemptLive` first, so a stale promise resolving after an agent switch / hello /
+   * manual re-select is dropped silently instead of poisoning the new generation (acceptance
+   * fix #3). Failure modes: E_BUSY ⇒ drop the other runs and retry ONCE (same generation),
+   * then error; anything else ⇒ error state via the `run_history` error carrier (manual retry). */
+  function startRunSubscribe(agentKey: string, runId: string): void {
+    const clientId = raw.clientId;
+    if (disposed || clientId === null) return;
+    const key = `${agentKey}|${runId}`;
+    const gen = ++runSubGenSeq;
+    const at = now();
+    lastRunSubAt.set(key, at);
+    runSubs.set(key, { agentKey, runId, clientId, gen });
+    dispatch({ event: "run_subscribing", data: { agentKey, runId, at, retries: runRetries.get(key) ?? 0 } });
+    const post = (isRetry: boolean): void => {
+      const send = transport.runSubscribe;
+      if (send === undefined) {
+        finishRunError(key, agentKey, runId, "E_UNSUPPORTED");
+        return;
+      }
+      void send(clientId, agentKey, runId).then((r) => {
+        if (disposed) return;
+        if (!runAttemptLive(key, gen, clientId)) return; // superseded — drop the stale result
+        if (r.ok) return; // 202 — the snapshot rides SSE run_history
+        if (r.error === "E_BUSY" && !isRetry) {
+          dropOtherRuns(key);
+          post(true);
+          return;
+        }
+        finishRunError(key, agentKey, runId, r.error, r.reason);
+      });
+    };
+    post(false);
+    if (transport.runSubscribe !== undefined) armRunWatchdog(key, gen, agentKey, runId);
+  }
+
+  /**
+   * Acceptance fix #2's cleanup hook: runs after EVERY dispatch (from `runEffects`), observing
+   * the post-reduce state — the semantically closest point to the reducer's history handling
+   * (state.js's `run_history`/`run_end`) without useHub reaching into the reducer. A runKey's
+   * subscription attempt has SETTLED when the agent's runTx for it is no longer pending and
+   * holds a terminal outcome (`history:"loaded"` — the snapshot or run_end landed — or
+   * `history:"error"`): its watchdog timer and retry counter are done and get cleared, so a
+   * LATER pending episode (a §3.3 hole, a hello) always starts its §6.5/U13 budget from zero
+   * instead of inheriting a stale count and erroring early.
+   */
+  function runSettleEffects(): void {
+    if (runWatchdogs.size === 0) return;
+    for (const [key, w] of [...runWatchdogs]) {
+      const tx = raw.agents.get(w.agentKey)?.runTx;
+      if (
+        tx !== null &&
+        tx !== undefined &&
+        tx.runId === w.runId &&
+        tx.pendingSince === undefined &&
+        (tx.history === "loaded" || tx.history === "error")
+      ) {
+        clearRunWatchdog(key);
+        runRetries.delete(key);
+      }
+    }
+  }
+
+  function runFleetEffects(): void {
+    if (disposed) return;
+    // §6.5: a new SSE clientId (hello) invalidates every run subscription this tab believes in
+    // — the old client's subs died with the connection, so only the local bookkeeping needs
+    // clearing (runTx content deliberately survives; the selected run re-subscribes right away
+    // and shows the "reconnecting" pending badge meanwhile).
+    if (raw.clientId !== prevRunClientId) {
+      const had = [...runSubs.entries()];
+      runSubs.clear();
+      prevRunClientId = raw.clientId;
+      // Acceptance fix #1: every old-era timer goes with the old clientId — the re-subscribe
+      // below arms fresh ones (and stale attempt results are dropped by the gen check).
+      for (const [k] of had) {
+        runRetries.delete(k);
+        clearRunWatchdog(k);
+      }
+      for (const [, v] of had) dispatch({ event: "run_unsubscribed", data: { agentKey: v.agentKey, runId: v.runId } });
+    }
+    if (raw.conn !== "open" || raw.clientId === null) return;
+    const sel = raw.selected;
+    if (sel === null) return;
+    const a = raw.agents.get(sel);
+    if (!a || a.down || typeof a.runSel !== "string") return;
+    const runId = a.runSel;
+    const key = `${sel}|${runId}`;
+    const tx = a.runTx;
+    if (tx !== null && tx !== undefined && tx.runId === runId && tx.pendingSince !== undefined) return; // in flight
+    if (tx !== null && tx !== undefined && tx.runId === runId && tx.history === "error") return; // manual retry only
+    const stateWants = needsRunSubscribe(raw) !== undefined;
+    if (!stateWants && runSubs.has(key)) return; // subscribed and healthy
+    const wait = (lastRunSubAt.get(key) ?? 0) + resyncMinIntervalMs - now();
+    if (wait > 0) {
+      // §3.3 browser column: run re-subscribes share the main resync window (own map).
+      if (runSubTimer === null) {
+        runSubTimer = opts.setTimeout(() => {
+          runSubTimer = null;
+          runEffects();
+        }, wait);
+        unrefIfAble(runSubTimer);
+      }
+      return;
+    }
+    startRunSubscribe(sel, runId);
   }
 
   /**
@@ -203,6 +467,51 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
         r.ok
           ? { event: "page", data: { ...(r.data as Record<string, unknown>), agentKey } }
           : { event: "page_failed", data: { agentKey, error: r.error } },
+      );
+    });
+  }
+
+  function selectRun(agentKey: string, runId: string | null): void {
+    if (disposed) return;
+    // Tear down any OTHER run of this agent this tab still believes subscribed (hub budget:
+    // 2 distinct runs per client — §3.4's 503 E_BUSY is exactly this, and the E_BUSY self-heal
+    // drops the others anyway; doing it eagerly keeps the common switch under the budget).
+    const clientId = raw.clientId;
+    for (const [k, v] of [...runSubs]) {
+      if (v.agentKey !== agentKey) continue;
+      if (runId !== null && v.runId === runId) continue;
+      runSubs.delete(k);
+      runRetries.delete(k);
+      clearRunWatchdog(k);
+      if (clientId !== null) void transport.runUnsubscribe?.(clientId, agentKey, v.runId);
+      dispatch({ event: "run_unsubscribed", data: { agentKey, runId: v.runId } });
+    }
+    runRetries.delete(`${agentKey}|${runId ?? ""}`);
+    dispatch({ event: "run_select", data: { agentKey, runId } });
+  }
+
+  function pageRun(agentKey: string): void {
+    if (disposed) return;
+    const tx = raw.agents.get(agentKey)?.runTx;
+    if (!tx || tx.history !== "loaded" || !tx.hasMore || tx.paging || tx.oldestEntryId === undefined) return;
+    if (transport.runPage === undefined) return;
+    const runId = tx.runId;
+    const before = tx.oldestEntryId;
+    dispatch({ event: "run_paging", data: { agentKey, runId } });
+    void transport.runPage(agentKey, runId, before).then((r) => {
+      if (disposed) return;
+      dispatch(
+        r.ok
+          ? { event: "run_page", data: { ...(r.data as Record<string, unknown>), agentKey, runId } }
+          : {
+              event: "run_page_failed",
+              data: {
+                agentKey,
+                runId,
+                error: r.error,
+                ...("reason" in r && r.reason !== undefined ? { reason: r.reason } : {}),
+              },
+            },
       );
     });
   }
@@ -262,6 +571,8 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     dispatch,
     transport,
     loadOlder,
+    selectRun,
+    pageRun,
     start: () => transport.start(),
     dispose() {
       if (disposed) return;
@@ -270,6 +581,12 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
         opts.clearTimeout(subTimer);
         subTimer = null;
       }
+      if (runSubTimer !== null) {
+        opts.clearTimeout(runSubTimer);
+        runSubTimer = null;
+      }
+      for (const w of runWatchdogs.values()) opts.clearTimeout(w.timer);
+      runWatchdogs.clear();
       newSession.dispose();
       gate.dispose();
       transport.close();

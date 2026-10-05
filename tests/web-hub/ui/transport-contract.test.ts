@@ -1145,3 +1145,131 @@ describe("password transport: preview() 401 (one-shot — the cookie session is 
     expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// run-transcript endpoints (fleet-drawer plan §3.4/§6.5, package F5) — same suite both modes.
+// The wire shapes below are pinned against the F4 routes (`hub/run-routes.ts`: POST bodies
+// {clientId, agentKey, runId}, GET `/api/run/history?agent=&run=&before=&limit=`) and the
+// §3.6 error body `{error, message: RunTxReason}` whose `message` must surface as `reason`.
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: runSubscribe/runUnsubscribe/runPage (fleet-drawer §3.4/§6.5)", (_mode, make) => {
+  const RUN = "r_AB12CD34";
+
+  it("runSubscribe(): POST /api/run/subscribe with X-PWH:1 and a JSON {clientId, agentKey, runId} body; 202 ⇒ ok", async () => {
+    const h = make(async (url) => (url === "/api/run/subscribe" ? resp(202, { ok: true }) : resp(200)));
+    const r = await h.transport.runSubscribe!("c1", "agent-A", RUN);
+    expect(r).toEqual({ ok: true });
+    const call = h.fetchCalls.find((c) => c.url === "/api/run/subscribe");
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("POST");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call!.init.body ?? "{}")).toEqual({ clientId: "c1", agentKey: "agent-A", runId: RUN });
+  });
+
+  it("runSubscribe(): the §3.6 denial body's `message` surfaces as `reason` (E_NOT_FOUND/not_persisted)", async () => {
+    const h = make(async (url) =>
+      url === "/api/run/subscribe" ? resp(404, { error: "E_NOT_FOUND", message: "not_persisted" }) : resp(200),
+    );
+    const r = await h.transport.runSubscribe!("c1", "agent-A", RUN);
+    expect(r).toEqual({ ok: false, error: "E_NOT_FOUND", reason: "not_persisted" });
+  });
+
+  it("runUnsubscribe(): POST /api/run/unsubscribe with the same body shape, resolves void on any outcome (fire-and-forget)", async () => {
+    const h = make(async (url) => (url === "/api/run/unsubscribe" ? resp(200, { ok: true }) : resp(200)));
+    await expect(h.transport.runUnsubscribe!("c1", "agent-A", RUN)).resolves.toBeUndefined();
+    const call = h.fetchCalls.find((c) => c.url === "/api/run/unsubscribe");
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("POST");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call!.init.body ?? "{}")).toEqual({ clientId: "c1", agentKey: "agent-A", runId: RUN });
+    // even a network failure is swallowed (§6.5: 吞掉失败)
+    const h2 = make(async (url) =>
+      url === "/api/run/unsubscribe" ? Promise.reject(new TypeError("boom")) : resp(200),
+    );
+    await expect(h2.transport.runUnsubscribe!("c1", "agent-A", RUN)).resolves.toBeUndefined();
+  });
+
+  it(`runPage(): GET /api/run/history?agent&run&before&limit, limit clamped to HISTORY_LIMIT_MAX (${HISTORY_LIMIT_MAX})`, async () => {
+    const h = make(async () => resp(200, { entries: [], hasMore: false }));
+    const r = await h.transport.runPage!("agent-A", RUN, "entry-1", 999_999);
+    expect(r.ok).toBe(true);
+    const call = h.fetchCalls.find((c) => c.url.startsWith("/api/run/history"));
+    expect(call).toBeDefined();
+    expect(call!.init.method ?? "GET").toBe("GET");
+    expect(call!.url).toBe(`/api/run/history?agent=agent-A&run=${RUN}&before=entry-1&limit=${HISTORY_LIMIT_MAX}`);
+  });
+
+  it("runPage(): the denial body's `message` surfaces as `reason` (paging-time not_persisted disables load-older)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/run/history") ? resp(404, { error: "E_NOT_FOUND", message: "not_persisted" }) : resp(200),
+    );
+    const r = await h.transport.runPage!("agent-A", RUN, "entry-1");
+    expect(r).toEqual({ ok: false, error: "E_NOT_FOUND", reason: "not_persisted" });
+  });
+
+  it("runSubscribe(): a REST 401 with no successful recovery reports onConn('auth') exactly once (U12)", async () => {
+    const h = make(async (url) => (url === "/api/run/subscribe" ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    const r = await h.transport.runSubscribe!("c1", "A", RUN);
+    expect(r).toEqual({ ok: false, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+
+  it("runPage(): a REST 401 with no successful recovery reports onConn('auth') (U12)", async () => {
+    const h = make(async (url) => (url.startsWith("/api/run/history") ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    const r = await h.transport.runPage!("A", RUN, "e1");
+    expect(r).toEqual({ ok: false, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+
+  it("runUnsubscribe(): a REST 401 reports onConn('auth') even though the call itself is fire-and-forget (U12; same rule as unsubscribe)", async () => {
+    const h = make(async (url) => (url === "/api/run/unsubscribe" ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    await h.transport.runUnsubscribe!("c1", "A", RUN); // resolves void either way — onConn is the only signal
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+describe("token transport: run-method 401 recovery (fleet-drawer §6.5 — withRelogin replay, U12)", () => {
+  const RUN = "r_AB12CD34";
+
+  it("runSubscribe(): a 401 with a stored token silently re-logs in and replays the SAME body (never reports auth)", async () => {
+    const calls: string[] = [];
+    const h = makeToken(async (url) => {
+      calls.push(url);
+      if (url === "/api/login") return resp(200);
+      if (url === "/api/run/subscribe")
+        return calls.filter((u) => u === "/api/login").length > 0
+          ? resp(202, { ok: true })
+          : resp(401, { error: "E_AUTH" });
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const r = await h.transport.runSubscribe!("c1", "A", RUN);
+    expect(r).toEqual({ ok: true });
+    expect(calls.filter((u) => u === "/api/run/subscribe")).toHaveLength(2);
+    const bodies = h.fetchCalls.filter((c) => c.url === "/api/run/subscribe").map((c) => c.init.body);
+    expect(bodies[0]).toBe(bodies[1]); // same body replayed
+    expect(h.onConnCalls).not.toContain("auth"); // recovered — no login-form flash
+  });
+
+  it("runPage(): a 401 with a stored token re-logs in and replays the same GET", async () => {
+    const calls: string[] = [];
+    const h = makeToken(async (url) => {
+      calls.push(url);
+      if (url === "/api/login") return resp(200);
+      if (url.startsWith("/api/run/history"))
+        return calls.filter((u) => u === "/api/login").length > 0
+          ? resp(200, { entries: [] })
+          : resp(401, { error: "E_AUTH" });
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const r = await h.transport.runPage!("A", RUN, "e1");
+    expect(r.ok).toBe(true);
+    expect(calls.filter((u) => u.startsWith("/api/run/history"))).toHaveLength(2);
+    expect(h.onConnCalls).not.toContain("auth");
+  });
+});

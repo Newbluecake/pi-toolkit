@@ -17,6 +17,7 @@
  */
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
+import type { FleetRowWire } from "@protocol/messages.js";
 import type { ConnState, PreviewTransport } from "./transport/types.js";
 import type {
   SpawnDirsOutcome,
@@ -102,6 +103,65 @@ export interface AgentState {
   readonly pendingCtl?: readonly unknown[];
   readonly ctl?: readonly unknown[];
   readonly commands?: readonly unknown[];
+  /** fleet-drawer plan §6.5 (F5): the drawer's selected run (`null` = drawer closed for this
+   * agent). Optional per the frozen-types convention; the reducer always sets it. */
+  readonly runSel?: string | null;
+  /** fleet-drawer §6.5 (F5): the selected run's transcript state (§3.3 browser state machine).
+   * `null` until a run is selected; a `run_select` resets it to `null`. */
+  readonly runTx?: RunTxState | null;
+  /** fleet-drawer §3.2/#12 (F5): counts of fleet rows the projection caps dropped (absent
+   * when nothing was omitted) — drives the “另有 N 个未列出” rows in `FleetTree`. */
+  readonly fleetOmitted?: FleetOmittedWire;
+}
+
+/** Mirrors `@logic/state.js`'s `FleetOmitted` JSDoc typedef (the `fleet` frame's `omitted`). */
+export interface FleetOmittedWire {
+  readonly active: number;
+  readonly terminal: number;
+}
+
+/**
+ * Mirrors `@logic/state.js`'s `RunTxState` JSDoc typedef (fleet-drawer plan §6.5 — that file
+ * stays the behavioral source of truth; this mirror exists for the same reason the
+ * `AgentState` mirror above does: robust `vue-tsc` checking of `.vue` consumers).
+ *
+ * §3.3 browser state machine, for quick reference: `lastSeq = fromSeq - 1` after every
+ * `run_history` (wholesale replace); `run_ev` applies only at `seq === lastSeq + 1` with a
+ * matching `tapId`; a hole or a mismatched `run_end.lastSeq` sets `needsResync` (useHub
+ * re-subscribes, rate-limited); `terminal` never clears `items` (§3.6); `pendingSince !==
+ * undefined` is the connecting/reconnecting badge; `retries` is the watchdog attempt counter
+ * (error state after 2 — U13); `lastRow` keeps the last-seen `FleetRowWire` once the run
+ * leaves the projected rows (§6.3 — header fallback + “不在列表中” marker).
+ */
+export interface RunTxState {
+  readonly runId: string;
+  readonly tapId?: string;
+  readonly lastSeq: number;
+  readonly items: readonly Item[];
+  /** Internal dedupe sets (entry ids / message keys) — exposed for completeness; components
+   * read `items`, never these. */
+  readonly keys: ReadonlySet<string>;
+  readonly entryIds: ReadonlySet<string>;
+  readonly uid: number;
+  readonly streaming: Record<string, unknown> | null;
+  readonly tools: readonly LiveTool[];
+  readonly history: HistoryState;
+  readonly historyError?: string;
+  /** §3.6 denial reason (`not_persisted` …) — error states and disabled "load older" paging. */
+  readonly reason?: string;
+  readonly hasMore: boolean;
+  readonly oldestEntryId?: string;
+  readonly paging: boolean;
+  readonly terminal: boolean;
+  readonly status: string;
+  /** `live === false && !terminal` with `reason: undefined` maps to `watching:false` (§6.6). */
+  readonly live: boolean;
+  readonly source?: "live" | "file";
+  readonly pendingSince?: number;
+  readonly retries: number;
+  readonly lastRow?: FleetRowWire;
+  /** Internal: re-subscribe wanted (hole / run_end mismatch). useHub consumes; components don't. */
+  readonly needsResync: boolean;
 }
 
 /** Mirrors `@logic/state.js`'s `State` typedef (renamed to avoid colliding with the DOM global). */
@@ -235,6 +295,11 @@ export interface HubHandle {
    * `usePreview`'s scope derivation (`previewScopeOf`'s `hasTransport`) yields `null` without
    * it and every path in the transcript renders as plain text. */
   readonly preview?: PreviewTransport;
+  /** fleet-drawer plan §6.5 (F5): run-transcript selection + paging. Optional per the
+   * frozen-types convention — `useHub` always provides both; component-level fakes may omit
+   * them (the drawer then renders its not-connected state). */
+  readonly selectRun?: (agentKey: string, runId: string | null) => void;
+  readonly pageRun?: (agentKey: string) => void;
   dispatch(msg: { event: string; data?: unknown; id?: number }): void;
 }
 

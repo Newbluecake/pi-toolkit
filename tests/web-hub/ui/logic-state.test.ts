@@ -828,3 +828,76 @@ describe("state.reduce: spawns slot (web-hub-spawn SP11 / arch §8.2)", () => {
     expect(s.clientId).toBe("c2");
   });
 });
+
+// ---------------------------------------------------------------------------
+// fleet-drawer F5 appendix: pins the main-session halves of the §6.5 refactor.
+// `historyCore`/`pageCore`/`eventCore` were extracted from applyHistory/applyPage/applyEvent
+// (shared with RunTxState now) — the behaviors below moved through that refactor and had no
+// direct pin before.
+// ---------------------------------------------------------------------------
+
+describe("state.reduce — main-session pins across the F5 kernel extraction (fleet-drawer §6.5)", () => {
+  it("model_select / session_info_changed still patch the MAIN agent's session+card (agent-only wrapper cases)", () => {
+    let s = loaded();
+    s = run(
+      [
+        ev(10, { type: "session_info_changed", name: "renamed" }),
+        ev(11, { type: "model_select", model: { provider: "prov", id: "mid" } }),
+      ],
+      s,
+    );
+    expect(A(s).session).toMatchObject({ name: "renamed", model: { provider: "prov", id: "mid" } });
+    expect(A(s).card.session).toBe(A(s).session);
+    // without a session slot they stay inert (no crash, same agent object semantics)
+    const bare = run([{ event: "agents", data: [{ ...card("A"), session: undefined }] }]);
+    const bareNext = run([ev(5, { type: "session_info_changed", name: "x" })], bare);
+    expect(bareNext.agents.get("A")!.session).toBeUndefined();
+  });
+
+  it("hello keeps runTx content (§6.5: only useHub's runSubs clear — the reducer slot survives for the reconnect badge)", () => {
+    let s = run(
+      [
+        { event: "run_select", data: { agentKey: "A", runId: "r_AB12CD34" } },
+        { event: "run_subscribing", data: { agentKey: "A", runId: "r_AB12CD34", at: 1, retries: 0 } },
+        {
+          event: "run_history",
+          data: {
+            agentKey: "A",
+            runId: "r_AB12CD34",
+            entries: [userEntry("e1", 1000)],
+            tailMessages: [],
+            fromSeq: 4,
+            hasMore: false,
+            source: "live",
+            terminal: false,
+            status: "running",
+            live: true,
+          },
+        },
+      ],
+      loaded(),
+    );
+    s = reduce(s, { event: "hello", data: { clientId: "c2" } });
+    expect(s.clientId).toBe("c2");
+    expect(s.agents.get("A")!.sub).toBeNull(); // main sub cleared (pre-existing behavior)
+    expect(s.agents.get("A")!.runTx?.items.map((i: any) => i.entryId)).toEqual(["e1"]); // runTx untouched
+  });
+
+  it("fleet frame keeps runSel/runTx and never resurrects a dropped runTx", () => {
+    const selected = run([{ event: "run_select", data: { agentKey: "A", runId: "r_AB12CD34" } }], loaded());
+    const s = run(
+      [
+        {
+          event: "fleet",
+          data: { agentKey: "A", runs: [{ runId: "r_AB12CD34", status: "running", terminal: false }] },
+        },
+      ],
+      selected,
+    );
+    expect(s.agents.get("A")!.runSel).toBe("r_AB12CD34");
+    expect(s.agents.get("A")!.fleet).toHaveLength(1);
+    const noTx = run([{ event: "fleet", data: { agentKey: "A", runs: [] } }], selected);
+    expect(noTx.agents.get("A")!.runTx).toBeNull(); // no run_subscribing ever ran ⇒ fleet must not invent one
+    expect(noTx.agents.get("A")!.runSel).toBe("r_AB12CD34");
+  });
+});

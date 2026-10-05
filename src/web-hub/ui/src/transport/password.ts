@@ -15,6 +15,8 @@ import type {
   PreviewOutcome,
   PreviewTransport,
   Result,
+  RunPageResult,
+  RunSubResult,
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
@@ -49,7 +51,17 @@ export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
  * `command()`/`dialog()` are one-shot too, so a 401 there is exactly the same "lost cookie
  * session" signal and must remount `LoginView` identically.
  */
-const REST_AUTH_PATHS: ReadonlySet<string> = new Set([API.subscribe, API.unsubscribe, API.cmd, API.dialog]);
+const REST_AUTH_PATHS: ReadonlySet<string> = new Set([
+  API.subscribe,
+  API.unsubscribe,
+  API.cmd,
+  API.dialog,
+  // F5 (fleet-drawer §6.5): both run POSTs join the 401 ⇒ onConn("auth") set — the client's
+  // run methods are one-shot like subscribe, and runUnsubscribe otherwise drops a lost cookie
+  // session entirely. The GET (API.runHistory) rides the prefix rule below, next to API.history.
+  API.runSubscribe,
+  API.runUnsubscribe,
+]);
 
 function isRestAuthEndpoint(url: string): boolean {
   // SP11 (web-hub-spawn plan, arch §8.3): `/api/headless*` joins the 401 ⇒ onConn("auth")
@@ -62,7 +74,8 @@ function isRestAuthEndpoint(url: string): boolean {
     REST_AUTH_PATHS.has(url) ||
     url.startsWith(API.history) ||
     url.startsWith(API.headless) ||
-    url.startsWith(API.preview)
+    url.startsWith(API.preview) ||
+    url.startsWith(API.runHistory)
   );
 }
 
@@ -84,6 +97,15 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     unsubscribe: (clientId, agentKey) => client.unsubscribe(clientId, agentKey),
     page: <T = unknown>(agentKey: string, before: string, limit?: number) =>
       client.page(agentKey, before, limit) as Promise<Result<T>>,
+    // F5 (fleet-drawer §6.5): the three `/api/run/*` endpoints — thin casts over the logic
+    // client's methods. 401 ⇒ onConn("auth") is reported by the fetch wrapper above
+    // (`isRestAuthEndpoint` covers both POSTs exactly and the GET by prefix) — never inside
+    // the client, so nothing double-fires.
+    runSubscribe: (clientId, agentKey, runId) =>
+      client.runSubscribe(clientId, agentKey, runId) as Promise<RunSubResult>,
+    runUnsubscribe: (clientId, agentKey, runId) => client.runUnsubscribe(clientId, agentKey, runId),
+    runPage: <T = unknown>(agentKey: string, runId: string, before: string, limit?: number) =>
+      client.runPage(agentKey, runId, before, limit) as Promise<RunPageResult<T>>,
     command: (req) => client.command(req) as Promise<CmdOutcome>,
     dialog: (req) => client.dialog(req) as Promise<CmdOutcome>,
     login: (username, password) => client.login(username, password),

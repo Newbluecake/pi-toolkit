@@ -59,6 +59,13 @@ function fakeTransport() {
   };
   let commandResult: CmdOutcome = { ok: true, data: {} };
   let dialogResult: CmdOutcome = { ok: true, data: {} };
+  // F5 (fleet-drawer §6.5): the run-method surface — `runSubscribeResults` is consumed one per
+  // call (shift); the last entry repeats, so a single default `{ok:true}` means "always 202".
+  let runSubscribeResults: Array<{ ok: boolean; error?: string; reason?: string }> = [{ ok: true }];
+  let runPageResult: Result<{ entries: unknown[]; hasMore: boolean; oldestEntryId?: string }> = {
+    ok: true,
+    data: { entries: [], hasMore: false },
+  };
 
   const transport: HubTransport = {
     mode: "token",
@@ -74,6 +81,18 @@ function fakeTransport() {
     page: async (agentKey, before, limit) => {
       calls.push({ method: "page", args: [agentKey, before, limit] });
       return pageResult as Result<unknown>;
+    },
+    runSubscribe: async (clientId, agentKey, runId) => {
+      calls.push({ method: "runSubscribe", args: [clientId, agentKey, runId] });
+      const r = runSubscribeResults.length > 1 ? runSubscribeResults.shift()! : runSubscribeResults[0]!;
+      return r;
+    },
+    runUnsubscribe: async (clientId, agentKey, runId) => {
+      calls.push({ method: "runUnsubscribe", args: [clientId, agentKey, runId] });
+    },
+    runPage: async (agentKey, runId, before, limit) => {
+      calls.push({ method: "runPage", args: [agentKey, runId, before, limit] });
+      return runPageResult as Result<unknown>;
     },
     command: async (req) => {
       calls.push({ method: "command", args: [req] });
@@ -91,6 +110,8 @@ function fakeTransport() {
     setPageResult: (r: typeof pageResult) => (pageResult = r),
     setCommandResult: (r: CmdOutcome) => (commandResult = r),
     setDialogResult: (r: CmdOutcome) => (dialogResult = r),
+    setRunSubscribeResults: (r: Array<{ ok: boolean; error?: string; reason?: string }>) => (runSubscribeResults = r),
+    setRunPageResult: (r: typeof runPageResult) => (runPageResult = r),
     hooks: () => hooksRef!,
     createTransport: (hooks: TransportHooks): HubTransport => {
       hooksRef = hooks;
@@ -627,6 +648,567 @@ describe("useHub: spawn wiring (web-hub-spawn SP11)", () => {
     await hub.spawn!.newSession.submit({ cwd: "~/p" });
     clock.advance(5_000 + 15_000); // policy-driven watchdog, not the 30s default
     expect(hub.spawn!.newSession.flow.value.phase).toBe("unknown");
+    hub.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fleet-drawer plan §3.3/§6.5 (package F5): run-transcript wiring — subscription ownership,
+// watchdog, E_BUSY self-heal, hello re-subscribe, agent-switch ordering (§6.4 #7), paging.
+// ---------------------------------------------------------------------------
+
+describe("useHub: fleet-drawer run wiring (§6.5, F5)", () => {
+  const RUN = "r_AB12CD34";
+  // Distinct timestamps per id — messageKey dedupes `role:timestamp`, so identical stamps
+  // would make separate entries look like duplicates.
+  const entry = (id: string, role = "user") => ({
+    id,
+    parentId: null,
+    type: "message",
+    timestamp: new Date(1000 + id.charCodeAt(1)).toISOString(),
+    message: { role, content: `m-${id}`, timestamp: 1000 + id.charCodeAt(1) },
+  });
+
+  function make(opts: { resyncMinIntervalMs?: number; runPendingWatchdogMs?: number } = {}) {
+    const clock = fakeClock();
+    const t = fakeTransport();
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+      ...(opts.resyncMinIntervalMs === undefined ? {} : { resyncMinIntervalMs: opts.resyncMinIntervalMs }),
+      ...(opts.runPendingWatchdogMs === undefined ? {} : { runPendingWatchdogMs: opts.runPendingWatchdogMs }),
+    });
+    // The real token/password clients report conn "open" on the SSE hello BEFORE the hello
+    // frame dispatch; runFleetEffects gates on it (no subscribing with a dead stream).
+    t.hooks().onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A"), card("B")] });
+    return { t, hub, clock };
+  }
+
+  /** Select agent A + run, then deliver its snapshot — a loaded, subscribed runTx. */
+  function loadedRun(hub: ReturnType<typeof make>["hub"], runId = RUN, fromSeq = 11) {
+    hub.selectRun("A", runId);
+    hub.dispatch({
+      event: "run_history",
+      data: {
+        agentKey: "A",
+        runId,
+        entries: [entry("e1")],
+        tailMessages: [],
+        tapId: "tap_1",
+        fromSeq,
+        hasMore: false,
+        source: "live",
+        terminal: false,
+        status: "running",
+        live: true,
+      },
+    });
+  }
+
+  it("selectRun dispatches run_select and fires exactly one runSubscribe (202), no watchdog retry once history lands", async () => {
+    const { t, hub, clock } = make();
+    loadedRun(hub);
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toEqual([
+      { method: "runSubscribe", args: ["c1", "A", RUN] },
+    ]);
+    const tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx).toMatchObject({ runId: RUN, history: "loaded", lastSeq: 10, pendingSince: undefined });
+    clock.advance(60_000); // nothing pending — watchdog never fires
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(1);
+    hub.dispose();
+  });
+
+  it("selectRun(null) unsubscribes the run; switching runs tears the previous one down eagerly", async () => {
+    const { t, hub } = make({ resyncMinIntervalMs: 0 });
+    loadedRun(hub);
+    await flush();
+    t.calls.length = 0;
+    hub.selectRun("A", null);
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runUnsubscribe")).toEqual([
+      { method: "runUnsubscribe", args: ["c1", "A", RUN] },
+    ]);
+
+    // run→run switch from a subscribed run: the old unsubscribe goes out, then the new subscribe
+    loadedRun(hub);
+    await flush();
+    t.calls.length = 0;
+    hub.selectRun("A", "r_EF56GH78");
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runUnsubscribe")).toEqual([
+      { method: "runUnsubscribe", args: ["c1", "A", RUN] },
+    ]);
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toEqual([
+      { method: "runSubscribe", args: ["c1", "A", "r_EF56GH78"] },
+    ]);
+    hub.dispose();
+  });
+
+  it("U6/§6.4 #7: switching agents calls runUnsubscribe(旧 run) BEFORE unsubscribe(旧 agent)", async () => {
+    const { t, hub } = make({ resyncMinIntervalMs: 0 });
+    loadedRun(hub);
+    await flush();
+    t.calls.length = 0;
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    const idxRun = t.calls.findIndex((c) => c.method === "runUnsubscribe");
+    const idxMain = t.calls.findIndex((c) => c.method === "unsubscribe");
+    expect(idxRun).toBeGreaterThanOrEqual(0);
+    expect(idxMain).toBeGreaterThanOrEqual(0);
+    expect(idxRun).toBeLessThan(idxMain);
+    expect(t.calls[idxRun]!.args).toEqual(["c1", "A", RUN]);
+    hub.dispose();
+  });
+
+  it("U13 watchdog: no run_history within the window ⇒ resubscribe twice, then error state (manual retry via re-select)", async () => {
+    const { t, hub, clock } = make({ runPendingWatchdogMs: 10_000, resyncMinIntervalMs: 0 });
+    hub.selectRun("A", RUN);
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(1);
+    clock.advance(10_000); // retry #1
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(2);
+    const tx1 = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx1).toMatchObject({ pendingSince: expect.any(Number) as unknown, retries: 1, history: "waiting" });
+    clock.advance(10_000); // retry #2
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(3);
+    clock.advance(10_000); // third fire: retries already 2 ⇒ error
+    await flush();
+    const tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx).toMatchObject({ history: "error", historyError: "E_DEADLINE" });
+    clock.advance(30_000); // no further attempts from the error state
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(3);
+    // manual retry: re-select resets the slot and subscribes again
+    hub.selectRun("A", RUN);
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(4);
+    hub.dispose();
+  });
+
+  it("E_BUSY self-heal (§6.5): one immediate retry after dropping the other runs; persistent busy ⇒ error state", async () => {
+    const { t, hub } = make({ resyncMinIntervalMs: 0 });
+    t.setRunSubscribeResults([{ ok: false, error: "E_BUSY" }, { ok: true }]);
+    hub.selectRun("A", RUN);
+    await flush();
+    // busy once → retried once → 202; exactly two POSTs, no error state
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(2);
+    const tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx.history).not.toBe("error");
+
+    t.setRunSubscribeResults([
+      { ok: false, error: "E_BUSY" },
+      { ok: false, error: "E_BUSY" },
+    ]);
+    hub.selectRun("A", "r_EF56GH78"); // fresh select, fresh attempt
+    await flush();
+    const tx2 = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx2).toMatchObject({ history: "error", historyError: "E_BUSY" });
+    hub.dispose();
+  });
+
+  it("a failed runSubscribe POST (non-busy) lands in the error state immediately, no watchdog retry", async () => {
+    const { t, hub, clock } = make({ runPendingWatchdogMs: 10_000 });
+    t.setRunSubscribeResults([{ ok: false, error: "E_NOT_FOUND", reason: "unknown_run" }]);
+    hub.selectRun("A", RUN);
+    await flush();
+    const tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx).toMatchObject({ history: "error", historyError: "E_NOT_FOUND", reason: "unknown_run" });
+    clock.advance(30_000);
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(1);
+    hub.dispose();
+  });
+
+  it("§6.5 hello (clientId change): runTx content survives, the run re-subscribes under the new clientId", async () => {
+    const { t, hub } = make({ resyncMinIntervalMs: 0 });
+    loadedRun(hub);
+    await flush();
+    t.calls.length = 0;
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toEqual([
+      { method: "runSubscribe", args: ["c2", "A", RUN] },
+    ]);
+    const tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx).toMatchObject({
+      history: "loaded", // content preserved behind the reconnect badge…
+      pendingSince: expect.any(Number) as unknown, // …which is exactly the fresh pendingSince
+    });
+    hub.dispose();
+  });
+
+  it("a §3.3 hole (seq jump) re-subscribes once rate-limit allows; the snapshot heals needsResync", async () => {
+    const { t, hub, clock } = make({ resyncMinIntervalMs: 2_000 });
+    loadedRun(hub); // lastSeq 10
+    await flush();
+    t.calls.length = 0;
+    hub.dispatch({
+      event: "run_ev",
+      data: { agentKey: "A", runId: RUN, tapId: "tap_1", seq: 14, e: { type: "turn_start" } },
+    });
+    await flush();
+    let tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx.needsResync).toBe(true);
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(0); // inside the resync window
+    clock.advance(2_000);
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(1);
+    hub.dispatch({
+      event: "run_history",
+      data: {
+        agentKey: "A",
+        runId: RUN,
+        entries: [entry("e1"), entry("e2")],
+        tailMessages: [],
+        tapId: "tap_2",
+        fromSeq: 20,
+        hasMore: false,
+        source: "live",
+        terminal: false,
+        status: "running",
+        live: true,
+      },
+    });
+    await flush(); // let the render gate commit before reading state.value
+    tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx.needsResync).toBe(false);
+    expect(tx.lastSeq).toBe(19);
+    hub.dispose();
+  });
+
+  it("pageRun(): pages the run's oldest boundary through runPage and prepends; a not_persisted failure disables load-older", async () => {
+    const { t, hub } = make();
+    hub.selectRun("A", RUN);
+    hub.dispatch({
+      event: "run_history",
+      data: {
+        agentKey: "A",
+        runId: RUN,
+        entries: [entry("e5")],
+        tailMessages: [],
+        tapId: "tap_1",
+        fromSeq: 11,
+        hasMore: true,
+        oldestEntryId: "e5",
+        source: "live",
+        terminal: false,
+        status: "running",
+        live: true,
+      },
+    });
+    await flush();
+    t.setRunPageResult({ ok: true, data: { entries: [entry("e1")], hasMore: false, oldestEntryId: "e1" } });
+    hub.pageRun("A");
+    await flush();
+    expect(t.calls.filter((c) => c.method === "runPage")).toEqual([
+      { method: "runPage", args: ["A", RUN, "e5", undefined] },
+    ]);
+    let tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect((tx.items as Array<{ entryId?: string }>).map((i) => i.entryId)).toEqual(["e1", "e5"]);
+    expect(tx.hasMore).toBe(false);
+
+    // deny-class failure on the next page
+    hub.dispatch({
+      event: "run_history",
+      data: {
+        agentKey: "A",
+        runId: RUN,
+        entries: [entry("e5")],
+        tailMessages: [],
+        tapId: "tap_1",
+        fromSeq: 11,
+        hasMore: true,
+        oldestEntryId: "e5",
+        source: "live",
+        terminal: false,
+        status: "running",
+        live: true,
+      },
+    });
+    t.setRunPageResult({ ok: false, error: "E_NOT_FOUND" });
+    hub.pageRun("A");
+    await flush();
+    tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    // no reason in the Result shape ⇒ retryable (hasMore kept) — the reason-carrying path is
+    // pinned at the reducer level (logic-run-tx.test.ts); here we pin the transport round-trip
+    expect(tx.paging).toBe(false);
+    hub.dispose();
+  });
+
+  it("a transport without the run methods degrades to an E_UNSUPPORTED error state (never throws)", async () => {
+    const clock = fakeClock();
+    const transport: HubTransport = {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: async () => ({ ok: true }),
+      unsubscribe: async () => {},
+      page: async () => ({ ok: true, data: {} }),
+      command: async () => ({ ok: true }),
+      dialog: async () => ({ ok: true }),
+    };
+    let hooks: TransportHooks | undefined;
+    const hub = useHub({
+      createTransport: (h) => {
+        hooks = h;
+        return transport;
+      },
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+    });
+    hooks!.onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A")] });
+    hub.selectRun("A", RUN);
+    await flush();
+    const tx = (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+    expect(tx).toMatchObject({ history: "error", historyError: "E_UNSUPPORTED" });
+    hub.dispose();
+  });
+
+  it("dispose() clears the run watchdog (no post-dispose attempts)", async () => {
+    const { t, hub, clock } = make({ runPendingWatchdogMs: 10_000 });
+    hub.selectRun("A", RUN);
+    await flush();
+    hub.dispose();
+    clock.advance(60_000);
+    expect(t.calls.filter((c) => c.method === "runSubscribe")).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Acceptance fixes (F5 有条件通过): per-runKey watchdogs (#1), settle-cleared retry budget
+// (#2), and generation-guarded async callbacks (#3).
+// ---------------------------------------------------------------------------
+
+describe("useHub: run wiring acceptance fixes", () => {
+  const RUN_A = "r_AB12CD34";
+  const RUN_B = "r_EF56GH78";
+  const entry = (id: string, ts: number) => ({
+    id,
+    parentId: null,
+    type: "message",
+    timestamp: new Date(ts).toISOString(),
+    message: { role: "user", content: `m-${id}`, timestamp: ts },
+  });
+
+  function make() {
+    const clock = fakeClock();
+    const t = fakeTransport();
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+      resyncMinIntervalMs: 0,
+      runPendingWatchdogMs: 10_000,
+    });
+    t.hooks().onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A")] });
+    return { t, hub, clock };
+  }
+  const txOf = (hub: ReturnType<typeof make>["hub"]) =>
+    (hub.state.value.agents.get("A") as unknown as { runTx: Record<string, unknown> }).runTx!;
+  const subCalls = (t: ReturnType<typeof make>["t"], runId: string) =>
+    t.calls.filter((c) => c.method === "runSubscribe" && c.args[2] === runId).length;
+
+  it("#1 two concurrently-pending runKeys keep independent watchdogs (each fires, neither eats the other)", async () => {
+    const { t, hub, clock } = make();
+    // Key 1: a subscribed, pending run for A…
+    hub.selectRun("A", RUN_B);
+    await flush();
+    expect(subCalls(t, RUN_B)).toBe(1);
+    // Key 2: a SECOND pending run for the same agent via a raw `run_select` dispatch — a legal
+    // reducer input (HubHandle.dispatch is public) that bypasses selectRun's eager teardown,
+    // leaving two runSubs entries with two armed watchdogs (the multi-key tenancy #1 protects).
+    hub.dispatch({ event: "run_select", data: { agentKey: "A", runId: RUN_A } });
+    await flush();
+    expect(subCalls(t, RUN_A)).toBe(1);
+    expect(txOf(hub).runId).toBe(RUN_A);
+
+    // Both watchdogs fire at the window; the CURRENT key retries, the superseded one
+    // self-cleans without a retry — and crucially neither key's timer was destroyed by the
+    // other's arming (single-global-timer behavior).
+    clock.advance(10_000);
+    await flush();
+    expect(subCalls(t, RUN_A)).toBe(2); // current key's watchdog fired ⇒ retry #1
+    expect(subCalls(t, RUN_B)).toBe(1); // superseded key's watchdog fired ⇒ self-clean, no retry
+    clock.advance(10_000);
+    await flush();
+    expect(subCalls(t, RUN_A)).toBe(3); // retry #2
+    expect(txOf(hub).history).not.toBe("error");
+    clock.advance(10_000);
+    await flush();
+    expect(txOf(hub)).toMatchObject({ history: "error", historyError: "E_DEADLINE" }); // full U13 budget, not shortened
+
+    // The self-cleaned key starts a fresh episode with a full watchdog budget of its own.
+    hub.selectRun("A", RUN_B);
+    await flush();
+    expect(subCalls(t, RUN_B)).toBe(2);
+    clock.advance(10_000);
+    await flush();
+    expect(subCalls(t, RUN_B)).toBe(3); // independent timer, not inherited from RUN_A's episode
+    hub.dispose();
+  });
+
+  it("#2 a successful run_history settles the episode: retries reset, so the NEXT pending episode runs the full U13 budget", async () => {
+    const { t, hub, clock } = make();
+    hub.selectRun("A", RUN_A);
+    await flush();
+    clock.advance(10_000); // watchdog fire #1 of episode 1 (retries 0→1)
+    await flush();
+    expect(subCalls(t, RUN_A)).toBe(2);
+    expect(txOf(hub)).toMatchObject({ retries: 1, history: "waiting" });
+
+    // The retried attempt succeeds: run_history lands ⇒ settle clears the retry counter
+    // (and the armed watchdog) for this key.
+    hub.dispatch({
+      event: "run_history",
+      data: {
+        agentKey: "A",
+        runId: RUN_A,
+        entries: [entry("e1", 1001)],
+        tailMessages: [],
+        tapId: "tap_1",
+        fromSeq: 11,
+        hasMore: false,
+        source: "live",
+        terminal: false,
+        status: "running",
+        live: true,
+      },
+    });
+    await flush();
+    expect(txOf(hub)).toMatchObject({ history: "loaded", pendingSince: undefined });
+
+    // A NEW pending episode (a §3.3 hole ⇒ re-subscribe) must start from retries 0 — with a
+    // stale inherited counter it would error one fire early. The re-subscribe itself fires
+    // synchronously inside the hole dispatch's effects, consuming needsResync on the way.
+    hub.dispatch({
+      event: "run_ev",
+      data: { agentKey: "A", runId: RUN_A, tapId: "tap_1", seq: 40, e: { type: "turn_start" } },
+    });
+    await flush();
+    expect(subCalls(t, RUN_A)).toBe(3); // episode 2's initial subscribe
+    expect(txOf(hub)).toMatchObject({ pendingSince: expect.any(Number) as unknown, retries: 0 }); // ← the #2 pin
+
+    clock.advance(10_000);
+    await flush();
+    // fire #1: retry, NOT error. history stays "loaded" (episode 2's re-subscribe keeps the
+    // received content behind the pending badge — §6.5); the in-flight mark is pendingSince.
+    expect(txOf(hub)).toMatchObject({ retries: 1, history: "loaded", pendingSince: expect.any(Number) as unknown });
+    clock.advance(10_000);
+    await flush();
+    expect(txOf(hub)).toMatchObject({ retries: 2, history: "loaded", pendingSince: expect.any(Number) as unknown }); // fire #2: retry, NOT error
+    clock.advance(10_000);
+    await flush();
+    expect(txOf(hub)).toMatchObject({ history: "error", historyError: "E_DEADLINE" }); // fire #3: budget exhausted
+    expect(subCalls(t, RUN_A)).toBe(5); // ep2 initial + 2 retries; ep1 contributed 2
+    hub.dispose();
+  });
+
+  it("#3 a stale subscribe POST resolving after a hello (clientId change) is dropped — the new generation's state stays clean", async () => {
+    const clock = fakeClock();
+    const calls: Call[] = [];
+    /** Deferred controllers for runSubscribe call #N (index 0-based), so the test can resolve
+     * old promises AFTER the generation moved on. Unlisted calls resolve {ok:true}. */
+    const deferreds: Array<{ resolve: (r: { ok: boolean; error?: string; reason?: string }) => void }> = [];
+    const transport: HubTransport = {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: async () => ({ ok: true }),
+      unsubscribe: async () => {},
+      page: async () => ({ ok: true, data: {} }),
+      runSubscribe: (_c, _a, _r) => {
+        calls.push({ method: "runSubscribe", args: [_c, _a, _r] });
+        const i = calls.filter((x) => x.method === "runSubscribe").length - 1;
+        if (i < 2) {
+          return new Promise((resolve) => void deferreds.push({ resolve }));
+        }
+        return Promise.resolve({ ok: true });
+      },
+      runUnsubscribe: async (_c, a, r) => {
+        calls.push({ method: "runUnsubscribe", args: [_c, a, r] });
+      },
+      runPage: async () => ({ ok: true, data: {} }),
+      command: async () => ({ ok: true }),
+      dialog: async () => ({ ok: true }),
+    };
+    let hooks: TransportHooks | undefined;
+    const hub = useHub({
+      createTransport: (h) => {
+        hooks = h;
+        return transport;
+      },
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+      resyncMinIntervalMs: 0,
+      runPendingWatchdogMs: 10_000,
+    });
+    hooks!.onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A")] });
+
+    // Attempt #1 under c1 — its POST stays pending.
+    hub.selectRun("A", RUN_A);
+    await flush();
+    expect(calls.filter((c) => c.method === "runSubscribe")).toHaveLength(1);
+
+    // The SSE reconnects: hello hands out a NEW clientId, the run re-subscribes (attempt #2).
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush();
+    expect(calls.filter((c) => c.method === "runSubscribe").map((c) => c.args[0])).toEqual(["c1", "c2"]);
+    expect(txOf(hub)).toMatchObject({ history: "waiting", pendingSince: expect.any(Number) as unknown });
+
+    // NOW attempt #1's promise resolves with a hard failure — a stale generation's result: it
+    // must be dropped (no error state, no teardown of the live attempt, no E_BUSY self-heal).
+    deferreds[0]!.resolve({ ok: false, error: "E_NOT_FOUND", reason: "unknown_run" });
+    await flush();
+    expect(txOf(hub).history).toBe("waiting"); // not poisoned into error
+    expect(calls.some((c) => c.method === "runUnsubscribe")).toBe(false); // finishRunError never ran
+
+    // Attempt #2 is the second deferred; resolving it with E_BUSY must ALSO be generation-safe
+    // once superseded — one more hello supersedes it, then it resolves stale.
+    hub.dispatch({ event: "hello", data: { clientId: "c3" } });
+    await flush();
+    expect(calls.filter((c) => c.method === "runSubscribe").map((c) => c.args[0])).toEqual(["c1", "c2", "c3"]);
+    deferreds[1]!.resolve({ ok: false, error: "E_BUSY" });
+    await flush();
+    expect(txOf(hub).history).toBe("waiting"); // stale E_BUSY did NOT trigger dropOtherRuns/retry/error
+    expect(calls.some((c) => c.method === "runUnsubscribe")).toBe(false);
+
+    // The live generation (#3, immediate {ok:true}) still settles normally.
+    hub.dispatch({
+      event: "run_history",
+      data: {
+        agentKey: "A",
+        runId: RUN_A,
+        entries: [entry("e1", 1001)],
+        tailMessages: [],
+        tapId: "tap_3",
+        fromSeq: 5,
+        hasMore: false,
+        source: "live",
+        terminal: false,
+        status: "running",
+        live: true,
+      },
+    });
+    await flush();
+    expect(txOf(hub)).toMatchObject({ history: "loaded", lastSeq: 4 });
     hub.dispose();
   });
 });

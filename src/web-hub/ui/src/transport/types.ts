@@ -8,6 +8,7 @@
  * 78dd76b was: password client missing `subscribe`/`page`).
  */
 import type { PreviewDims, PreviewImageMime } from "@protocol/preview.js";
+import type { RunTxReason } from "@protocol/run-transcript.js";
 import type {
   DirEntryWire,
   SpawnAccepted,
@@ -81,6 +82,15 @@ export interface HubTransport {
   subscribe(clientId: string, agentKey: string): Promise<{ ok: boolean; error?: string }>;
   unsubscribe(clientId: string, agentKey: string): Promise<void>;
   page<T = unknown>(agentKey: string, before: string, limit?: number): Promise<Result<T>>;
+  /** fleet-drawer plan §3.4/§6.5 (F5): POST /api/run/subscribe. Optional per the frozen-transport
+   * convention (test fakes / future transports may omit it) — `useHub` degrades a missing
+   * method to an `E_UNSUPPORTED` error state in `runTx`. Both real adapters always provide it. */
+  runSubscribe?(clientId: string, agentKey: string, runId: string): Promise<RunSubResult>;
+  /** fleet-drawer §3.4/§6.5 (F5): POST /api/run/unsubscribe — idempotent, fire-and-forget. */
+  runUnsubscribe?(clientId: string, agentKey: string, runId: string): Promise<void>;
+  /** fleet-drawer §3.4/§6.5 (F5): GET /api/run/history — one older page (§3.6's `message` denial
+   * reason rides `reason` so the UI can disable "load older" for the deny classes). */
+  runPage?<T = unknown>(agentKey: string, runId: string, before: string, limit?: number): Promise<RunPageResult<T>>;
   command(req: CmdRequest): Promise<CmdOutcome>;
   dialog(req: DialogRequest): Promise<CmdOutcome>;
   /** web-hub-upload plan §1.2/§4.3 (package U4b): the chunked-upload endpoints. Optional so
@@ -109,6 +119,21 @@ export interface PasswordTransport extends HubTransport {
   login(username: string, password: string): Promise<LoginResult>;
   logout(): Promise<void>;
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-fleet-drawer plan §3.4/§6.5 (package F5) — the `/api/run/*` transport surface
+// ---------------------------------------------------------------------------
+
+/** `runSubscribe`'s outcome — 202 `{ok:true}` (the snapshot rides SSE `run_history`), or the
+ * §3.4/§3.6 error body with its `message` denial reason mapped to `reason`. */
+export type RunSubResult =
+  { readonly ok: true } | { readonly ok: false; readonly error: string; readonly reason?: RunTxReason };
+
+/** `runPage`'s outcome — a `RunHistoryPayload` page (`live` always false per §3.4), or the same
+ * error shape as `RunSubResult`. */
+export type RunPageResult<T = unknown> =
+  | { readonly ok: true; readonly data: T }
+  | { readonly ok: false; readonly error: string; readonly reason?: RunTxReason };
 
 // ---------------------------------------------------------------------------
 // web-hub-spawn plan SP11 / arch §8.2–§8.3 — the `/api/headless*` transport surface
