@@ -2,10 +2,18 @@
  * web-hub upload protocol (plan `docs/dev/web-hub-upload/plan.md` §包 U1 — frozen interface).
  *
  * Pure, `node:fs`-free: endpoint path constants, §2.4 limits, the §1.3 chunk-size/deadline
- * constants, filename sanitization (§2.3), mime format-validation (§1.2 #2), the fixed-English
- * prompt attachment block (§3.1), the bucket-naming rule (§2.1), and the `meta.json` v1 schema +
- * strict parser (§2.2.3). `hub/uploads.ts` (U2) and the browser UI both import this module so the
- * rules never drift between the two sides.
+ * constants, filename sanitization (§2.3), the on-disk extension rule (`uploadDiskExt` — the
+ * generated `<uploadId>.<ext>` disk names keep only this much of the client's name), mime
+ * format-validation (§1.2 #2), the fixed-English prompt attachment block (§3.1), the
+ * bucket-naming rule (§2.1), and the `meta.json` v1 schema + strict parser (§2.2.3).
+ * `hub/uploads.ts` (U2) and the browser UI both import this module so the rules never drift
+ * between the two sides.
+ *
+ * Disk naming (2026-10 rework): the on-disk file name is server-generated — `<uploadId>.<ext>`,
+ * `ext` from `uploadDiskExt(rawName)`, extension-less when absent/reserved. The client's
+ * original name NEVER reaches the filesystem; `sanitizeUploadName(raw)` remains only as the
+ * canonical form of the client-declared display name (begin-idempotency comparison, the §2.5
+ * dedup key, and the `meta.json` record of what the user called the file).
  */
 
 // ---------------------------------------------------------------------------
@@ -74,6 +82,18 @@ function extractExt(name: string): string | undefined {
   return EXT_RE.test(ext) ? ext : undefined;
 }
 
+/**
+ * The on-disk extension rule for generated disk names: the substring after the last `.` of the
+ * RAW client name, kept only when it is 1-16 ASCII alphanumerics (`<id>.<ext>`); anything else
+ * — non-string name, no dot, leading dot, over-long, non-ASCII, or a path fragment in the
+ * suffix — yields `undefined` and the file lands extension-less as the bare `<uploadId>`.
+ * Takes the raw name, not the sanitized one: `sanitizeUploadName`'s leading-dot stripping can
+ * hide or mangle an extension, and the disk name is derived independently of sanitization.
+ */
+export function uploadDiskExt(rawName: unknown): string | undefined {
+  return typeof rawName === "string" ? extractExt(rawName) : undefined;
+}
+
 /** Truncate `s` to at most `maxBytes` UTF-8 bytes without splitting a code point. */
 function truncateUtf8(s: string, maxBytes: number): string {
   if (byteLength(s) <= maxBytes) return s;
@@ -100,10 +120,16 @@ function truncatePreservingExt(name: string, maxBytes: number): string {
 }
 
 /**
- * Sanitize an arbitrary (attacker-controlled) upload filename into a safe basename (§2.3):
+ * Canonicalize an arbitrary (attacker-controlled) upload filename into the §2.3 safe form:
  * last path segment only, Unicode-letter/number/`._-` whitelist (everything else ⇒ `_`, runs
  * collapsed), no leading `.`/`-`, no trailing `.`, ≤120 UTF-8 bytes (extension preserved when
  * possible), never empty/`.`/`..`, never ends with `.part`, never equals `meta.json`.
+ *
+ * NOT the on-disk name (2026-10 rework) — disk files are `<uploadId>.<ext>` via `uploadDiskExt`.
+ * This is the canonical form of the client-declared *display* name, used by `hub/uploads.ts`
+ * for the begin-idempotency parameter comparison, the §2.5 content-dedup key, and the
+ * `meta.json` `safeName` record. The raw original name keeps flowing through the wire unchanged
+ * (UI display, e.g. the AttachmentTray, is client-side).
  */
 export function sanitizeUploadName(raw: unknown): string {
   if (typeof raw !== "string" || raw.length === 0) return "file";
@@ -272,7 +298,12 @@ export interface UploadMetaV1 {
   principal: string;
   agentKey: string;
   bucket: string;
+  /** Canonical client-declared display name (§2.3 `sanitizeUploadName`) — dedup key part and
+   *  the record of what the user called the file; never an fs path component. */
   safeName: string;
+  /** Actual on-disk file name inside `<id>/` (`<uploadId>.<ext>`, or the bare id). Absent on
+   *  metas written before generated disk names (legacy layout: the file sits under `safeName`). */
+  diskName?: string;
   size: number;
   mime: string | null;
   sha256: string;
@@ -304,6 +335,8 @@ export function parseUploadMeta(json: unknown): { ok: true; meta: UploadMetaV1 }
   if (!isNonEmptyString(obj["agentKey"])) return { ok: false, error: "bad-agentKey" };
   if (!isNonEmptyString(obj["bucket"])) return { ok: false, error: "bad-bucket" };
   if (!isNonEmptyString(obj["safeName"])) return { ok: false, error: "bad-safeName" };
+  const diskName = obj["diskName"];
+  if (diskName !== undefined && !isNonEmptyString(diskName)) return { ok: false, error: "bad-diskName" };
   if (!isNonNegativeFiniteNumber(obj["size"])) return { ok: false, error: "bad-size" };
   const mime = obj["mime"];
   if (mime !== null && typeof mime !== "string") return { ok: false, error: "bad-mime" };
@@ -324,6 +357,7 @@ export function parseUploadMeta(json: unknown): { ok: true; meta: UploadMetaV1 }
       agentKey: obj["agentKey"] as string,
       bucket: obj["bucket"] as string,
       safeName: obj["safeName"] as string,
+      ...(diskName === undefined ? {} : { diskName }),
       size: obj["size"] as number,
       mime: mime as string | null,
       sha256,

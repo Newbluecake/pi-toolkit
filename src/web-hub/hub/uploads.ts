@@ -35,6 +35,7 @@ import {
   parseAttachmentBlock,
   parseUploadMeta,
   sanitizeUploadName,
+  uploadDiskExt,
   UPLOAD_BUCKET_MAX_BYTES,
   UPLOAD_FILE_MAX_BYTES,
   UPLOAD_INFLIGHT_HUB,
@@ -386,7 +387,12 @@ interface BaseRec {
   readonly principal: string;
   readonly agentKey: string;
   readonly bucket: string;
+  /** Canonical client-declared display name (`sanitizeUploadName`) — begin-idempotency
+   *  comparison, dedup key, and the `meta.json` record. Never an fs path component. */
   readonly safeName: string;
+  /** Generated on-disk file name (`<id>.<ext>` / bare `<id>`) — every fs path in this module
+   *  (`.part`, final, scan) is built from this, never from the client's name. */
+  readonly diskName: string;
   readonly size: number;
   readonly mime: string | null;
   readonly dirChain: DirChain;
@@ -427,15 +433,22 @@ function errCodeOf(err: unknown): string | undefined {
   return typeof err === "object" && err !== null && "code" in err ? String((err as { code: unknown }).code) : undefined;
 }
 
-function extOf(safeName: string): string | null {
-  const idx = safeName.lastIndexOf(".");
-  if (idx <= 0 || idx === safeName.length - 1) return null;
-  const ext = safeName.slice(idx + 1);
-  return /^[A-Za-z0-9]{1,16}$/.test(ext) ? ext : null;
-}
-
 function mimeClassOf(mime: string | null): string | null {
   return mime === null ? null : (mime.split("/")[0] ?? null);
+}
+
+/**
+ * Generated on-disk file name: `<uploadId>[.<ext>]` with `ext` from `uploadDiskExt(rawName)`.
+ * The id is unique per upload and its exclusive `<id>/` directory already rules out collisions,
+ * so the attacker-controlled original name never reaches the filesystem (2026-10 rework; the id
+ * is `[A-Za-z0-9_-]{16,64}` — no dots, so the generated name can never collide with `meta.json`
+ * or a `.meta.*.tmp` either). `part` is RESERVED for the in-flight `<diskName>.part` suffix: a
+ * final named `<id>.part` would match the startup scan's orphan filter and be swept, so such
+ * uploads (and every name without a legal ext) land extension-less as the bare id.
+ */
+function diskNameFor(id: string, rawName: unknown): string {
+  const ext = uploadDiskExt(rawName);
+  return ext === undefined || ext === "part" ? id : `${id}.${ext}`;
 }
 
 const pbKey = (principal: string, bucket: string): string => `${principal}|${bucket}`;
@@ -945,6 +958,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     agentKey: string;
     bucket: string;
     safeName: string;
+    diskName: string;
     size: number;
     mime: string | null;
     sha256: string;
@@ -958,6 +972,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       agentKey: p.agentKey,
       bucket: p.bucket,
       safeName: p.safeName,
+      diskName: p.diskName,
       size: p.size,
       mime: p.mime,
       sha256: p.sha256,
@@ -1063,6 +1078,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       }
       const bucket = bucketFor({ sessionId: p.sessionId, agentKey: p.agentKey });
       const safeName = sanitizeUploadName(p.name);
+      const diskName = diskNameFor(p.id, p.name);
       const mime = normalizeMime(p.mime) ?? null;
       const mimeDropped = p.mime !== undefined && mime === null;
 
@@ -1071,6 +1087,12 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       if (existing !== undefined) {
         if (existing.principal !== p.principal) throw new UploadStoreError("E_NOT_FOUND", "no such upload");
         if (existing.state === "poisoned") throw new UploadStoreError("E_NOT_FOUND", "upload invalidated");
+        // The name comparison deliberately stays on the SANITIZED ORIGINAL name (safeName), not
+        // on the generated disk name: `name` remains a client-declared begin parameter (it feeds
+        // the display name, the dedup key and the disk extension), while comparing generated
+        // names would degenerate to an extension-only comparison (the id is already equal) and
+        // silently accept a retry that declared a different name. sanitizeUploadName's NFC /
+        // path-segment canonicalization keeps its pre-rework comparison meaning byte-for-byte.
         if (
           existing.agentKey === p.agentKey &&
           existing.bucket === bucket &&
@@ -1150,6 +1172,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
         agentKey: p.agentKey,
         bucket,
         safeName,
+        diskName,
         size: p.size,
         mime,
         dirChain: [rootEntry!, bucketEntry, idEntry],
@@ -1176,7 +1199,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
         agentKey: p.agentKey,
         principal: p.principal,
         bytes: p.size,
-        ext: extOf(safeName),
+        ext: uploadDiskExt(diskName),
         mimeClass: mimeClassOf(mime),
         ...(mimeDropped ? { mimeDropped: true } : {}),
         ms: now() - t0,
@@ -1223,7 +1246,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     }
 
     const tfs = trackedDeps(rec);
-    const partName = `${rec.safeName}.part`;
+    const partName = `${rec.diskName}.part`;
     // create only when no part exists yet — a truncate-back retry re-opens the same part
     const create = !rec.partCreated;
     let fh: UploadFileHandle;
@@ -1330,8 +1353,8 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     }
     const tfs = trackedDeps(rec);
     const dir = rec.dirChain[rec.dirChain.length - 1]!.path;
-    const partName = `${rec.safeName}.part`;
-    const finalPath = `${dir}/${rec.safeName}`;
+    const partName = `${rec.diskName}.part`;
+    const finalPath = `${dir}/${rec.diskName}`;
     if (!resolvePath(finalPath).startsWith(rootResolved + sep)) {
       // §2.3 line 7 — final defense; unreachable with our own names
       poisonInflight(rec, "commit", "anomaly", true);
@@ -1403,7 +1426,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
           chunks: rec.chunkCount,
           dupChunks: rec.dupChunks,
           dedup: true,
-          ext: extOf(rec.safeName),
+          ext: uploadDiskExt(rec.diskName),
           mimeClass: mimeClassOf(rec.mime),
           ms: now() - t0,
         });
@@ -1458,6 +1481,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
           agentKey: rec.agentKey,
           bucket: rec.bucket,
           safeName: rec.safeName,
+          diskName: rec.diskName,
           size: rec.size,
           mime: rec.mime,
           sha256,
@@ -1494,6 +1518,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       agentKey: rec.agentKey,
       bucket: rec.bucket,
       safeName: rec.safeName,
+      diskName: rec.diskName,
       size: rec.size,
       mime: rec.mime,
       dirChain: rec.dirChain,
@@ -1527,7 +1552,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       bytes: rec.size,
       chunks: rec.chunkCount,
       dupChunks: rec.dupChunks,
-      ext: extOf(rec.safeName),
+      ext: uploadDiskExt(rec.diskName),
       mimeClass: mimeClassOf(rec.mime),
       ms: now() - t0,
     });
@@ -1670,6 +1695,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
               agentKey: live.agentKey,
               bucket: live.bucket,
               safeName: live.safeName,
+              diskName: live.diskName,
               size: live.size,
               mime: live.mime,
               sha256: live.sha256,
@@ -1891,20 +1917,23 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     } catch {
       meta = null;
     }
-    if (
-      meta === null ||
-      meta.id !== id ||
-      meta.bucket !== bucket ||
-      !files.includes(meta.safeName) ||
-      parts.length > 0
-    ) {
+    if (meta === null) {
+      report.anomalies++;
+      await rmIdQuiet("anomaly");
+      return false;
+    }
+    // Generated disk names: the committed file sits at `diskName` (`<id>.<ext>`); metas written
+    // before the rework carry no `diskName` and their file sits under `safeName` (legacy layout —
+    // still indexed unchanged). The dedup key below stays on `safeName` for both layouts.
+    const diskName = meta.diskName ?? meta.safeName;
+    if (meta.id !== id || meta.bucket !== bucket || !files.includes(diskName) || parts.length > 0) {
       report.anomalies++;
       await rmIdQuiet("anomaly");
       return false;
     }
     let fst: FileStat;
     try {
-      fst = await fsStep(() => fs.lstat(`${idPath}/${meta!.safeName}`), stepDl(), now);
+      fst = await fsStep(() => fs.lstat(`${idPath}/${diskName}`), stepDl(), now);
     } catch {
       report.anomalies++;
       await rmIdQuiet("anomaly");
@@ -1922,13 +1951,14 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
         warnCleanup("web-hub upload scan: meta tmp litter cleanup failed", err, { uploadId: id, name: t }),
       );
     }
-    const finalPath = `${idPath}/${meta.safeName}`;
+    const finalPath = `${idPath}/${diskName}`;
     const rec: CommittedRec = {
       id: meta.id,
       principal: meta.principal,
       agentKey: meta.agentKey,
       bucket: meta.bucket,
       safeName: meta.safeName,
+      diskName,
       size: meta.size,
       mime: meta.mime,
       dirChain: [rootEntry!, bucketEntry, idEntry],

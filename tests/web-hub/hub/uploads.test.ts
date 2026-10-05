@@ -218,8 +218,9 @@ describe("begin/chunk/commit happy path (§1.2/§2.2)", () => {
     const meta = readJson(`${root}/s-sess123/${p.id}/meta.json`) as UploadMetaV1;
     expect(meta.v).toBe(1);
     expect(meta.safeName).toBe("f.txt");
+    expect(meta.diskName).toBe(`${p.id}.txt`);
     expect(meta.size).toBe(9);
-    expect(existsSync(`${root}/s-sess123/${p.id}/f.txt.part`)).toBe(false);
+    expect(existsSync(`${root}/s-sess123/${p.id}/${p.id}.txt.part`)).toBe(false);
     expect(store.inflight()).toBe(0);
     expect(store.stats().committedFiles).toBe(1);
     expect(store.stats().committedBytes).toBe(9);
@@ -667,7 +668,7 @@ describe("hard gate 1: symlink hardening (§2.2.1 #3)", () => {
     writeFileSync(victim, "untouched");
     const p = beginP({ size: 3 });
     await store.begin(p, dl());
-    symlinkSync(victim, `${root}/s-sess123/${p.id}/f.txt.part`);
+    symlinkSync(victim, `${root}/s-sess123/${p.id}/${p.id}.txt.part`);
     await expectCode(
       () => store.chunk({ principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abc") }, dl()),
       "E_INTERNAL",
@@ -695,7 +696,7 @@ describe("hard gate 1: symlink hardening (§2.2.1 #3)", () => {
     );
     // not deleted by path (identity mismatch): our moved directory is untouched
     expect(existsSync(`${root}/s-sess123.real/${p.id}`)).toBe(true);
-    const strayPart = `${root}/s-sess123.real/${p.id}/f.txt.part`;
+    const strayPart = `${root}/s-sess123.real/${p.id}/${p.id}.txt.part`;
     if (existsSync(strayPart)) expect(statSync(strayPart).size).toBe(0); // never written through
     expect(
       log.lines.some((l) => l.level === "error" && /chain mismatch/.test(`${l.msg}${JSON.stringify(l.data ?? {})}`)),
@@ -724,9 +725,9 @@ describe("hard gate 2: no-replace commit (§2.2.3 v3 #4)", () => {
     await store.begin(p, dl());
     await store.chunk({ principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abc") }, dl());
     const idDir = `${root}/s-sess123/${p.id}`;
-    writeFileSync(`${idDir}/f.txt`, "PLANTED"); // external pre-creation
+    writeFileSync(`${idDir}/${p.id}.txt`, "PLANTED"); // external pre-creation
     const witness = `${root}/witness.txt`;
-    linkSync(`${idDir}/f.txt`, witness); // the inode survives the id-dir removal
+    linkSync(`${idDir}/${p.id}.txt`, witness); // the inode survives the id-dir removal
     await expectCode(() => store.commit({ principal: P1, id: p.id }, dl()), "E_UPLOAD_CONFLICT");
     expect(readFileSync(witness, "utf8")).toBe("PLANTED");
     expect(existsSync(idDir)).toBe(false);
@@ -741,7 +742,7 @@ describe("hard gate 2: no-replace commit (§2.2.3 v3 #4)", () => {
     await store.chunk({ principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abc") }, dl());
     const victim = `${root}/victim2.txt`;
     writeFileSync(victim, "V");
-    symlinkSync(victim, `${root}/s-sess123/${p.id}/f.txt`);
+    symlinkSync(victim, `${root}/s-sess123/${p.id}/${p.id}.txt`);
     await expectCode(() => store.commit({ principal: P1, id: p.id }, dl()), "E_UPLOAD_CONFLICT");
     expect(readFileSync(victim, "utf8")).toBe("V");
   });
@@ -771,7 +772,7 @@ describe("hard gate 2: no-replace commit (§2.2.3 v3 #4)", () => {
         reason: "no-hardlink",
       });
       expect(existsSync(idDir)).toBe(false);
-      expect(renames.filter((r) => r.to === `${idDir}/f.txt`)).toEqual([]);
+      expect(renames.filter((r) => r.to === `${idDir}/${p.id}.txt`)).toEqual([]);
     });
   }
 
@@ -820,6 +821,69 @@ describe("hard gate 2: no-replace commit (§2.2.3 v3 #4)", () => {
     expect(r2).toEqual(r1);
     expect(linkCalls.length).toBe(1);
     expect(readFileSync(r1.path, "utf8")).toBe("abc");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generated disk names (2026-10 rework: `<uploadId>.<ext>`, never the client's name)
+// ---------------------------------------------------------------------------
+
+describe("generated disk names (2026-10 rework)", () => {
+  it("lands as <id>.<ext>; the sanitized original name survives in the record, not on disk", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "hello", { name: "final report.pdf" });
+    expect(res.path).toBe(join(root, "s-sess123", res.id, `${res.id}.pdf`));
+    expect(readFileSync(res.path, "utf8")).toBe("hello");
+    // the dir holds exactly the generated file + meta.json — nothing named after the original
+    expect(readdirSync(join(root, "s-sess123", res.id)).sort()).toEqual(["meta.json", `${res.id}.pdf`]);
+    const meta = readJson(join(root, "s-sess123", res.id, "meta.json")) as UploadMetaV1;
+    expect(meta.safeName).toBe("final_report.pdf"); // sanitized display name — the user's record
+    expect(meta.diskName).toBe(`${res.id}.pdf`); // actual on-disk name
+  });
+
+  it("names without a legal ext land as the bare <id> (no dot, non-ASCII, over-long ext)", async () => {
+    const store = mkStore();
+    await store.recover();
+    const a = await upload(store, "a", { name: "\u30ce\u30fc\u30c8\u8cc7\u6599" });
+    expect(a.path).toBe(join(root, "s-sess123", a.id, a.id));
+    const b = await upload(store, "b", { name: "a.\u65e5\u672c\u8a9e" });
+    expect(b.path).toBe(join(root, "s-sess123", b.id, b.id));
+    const c = await upload(store, "c", { name: `a.${"x".repeat(17)}` });
+    expect(c.path).toBe(join(root, "s-sess123", c.id, c.id));
+    for (const r of [a, b, c]) {
+      const meta = readJson(join(root, "s-sess123", r.id, "meta.json")) as UploadMetaV1;
+      expect(meta.diskName).toBe(r.id);
+    }
+  });
+
+  it("a .part ext is reserved: the final lands as the bare <id> and survives the startup scan", async () => {
+    const store = mkStore();
+    await store.recover();
+    const res = await upload(store, "xx", { name: "notes.part" });
+    expect(res.path).toBe(join(root, "s-sess123", res.id, res.id));
+    // a final named <id>.part would match the scan's orphan filter — this pins that it cannot
+    const fresh = mkStore();
+    const report = await fresh.recover();
+    expect(report.committed).toBe(1);
+    expect(report.anomalies).toBe(0);
+    expect(existsSync(res.path)).toBe(true);
+    const again = await upload(fresh, "xx", { name: "notes.part" });
+    expect(again.dedup).toBe(true); // dedup key still the sanitized original name
+    expect(again.path).toBe(res.path);
+  });
+
+  it("begin idempotency compares the SANITIZED ORIGINAL name, not the generated disk name", async () => {
+    const store = mkStore();
+    await store.recover();
+    const p = beginP({ size: 3 });
+    await store.begin(p, dl());
+    // "./f.txt" sanitizes to "f.txt" (path-segment canonicalization) ⇒ idempotent resume
+    const r2 = await store.begin({ ...p, name: "./f.txt" }, dl());
+    expect(r2.received).toBe(0);
+    // "g.txt" yields the SAME generated disk name (`${id}.txt`) yet is a different declared
+    // name ⇒ conflict (comparing generated names would silently accept the swap)
+    await expectCode(() => store.begin({ ...p, name: "g.txt" }, dl()), "E_UPLOAD_CONFLICT");
   });
 });
 
@@ -948,6 +1012,37 @@ describe("hard gate 3: crash recovery (§2.2.4)", () => {
     expect(existsSync(dc)).toBe(false);
   });
 
+  it("row 4 (generated-name layout): diskName locates the file; dedup key stays on safeName", async () => {
+    const sha = createHash("sha256").update("abc").digest("hex");
+    const a = nid();
+    const da = idDir(a);
+    writeFileSync(join(da, `${a}.pdf`), "abc");
+    writeFileSync(
+      join(da, "meta.json"),
+      JSON.stringify({
+        ...validMeta({ id: a, size: 3, sha256: sha }),
+        safeName: "final_report.pdf",
+        diskName: `${a}.pdf`,
+      }),
+    );
+    const b = nid();
+    const db = idDir(b);
+    writeFileSync(join(db, "f.txt"), "abc"); // present only under the legacy safeName
+    writeFileSync(
+      join(db, "meta.json"),
+      JSON.stringify({ ...validMeta({ id: b, size: 3, sha256: sha }), diskName: `${b}.txt` }),
+    );
+    const { store, report } = await recoverOn();
+    expect(report.committed).toBe(1);
+    expect(report.anomalies).toBe(1);
+    expect(existsSync(da)).toBe(true);
+    expect(existsSync(db)).toBe(false);
+    // dedup key rebuilt from safeName (not diskName): same content + same declared name hits
+    const again = await upload(store, "abc", { name: "final_report.pdf" });
+    expect(again.dedup).toBe(true);
+    expect(again.path).toBe(join(da, `${a}.pdf`));
+  });
+
   it("row 6: a symlinked <id>/ dir is not followed and not deleted", async () => {
     const outside = mkdtempSync(join(tmpdir(), "wh-out-"));
     try {
@@ -1052,7 +1147,7 @@ describe("hard gate 4: short write (§2.2.2 #6)", () => {
       () => store.chunk({ principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abcd") }, dl()),
       "E_INTERNAL",
     );
-    expect(statSync(`${root}/s-sess123/${p.id}/f.txt.part`).size).toBe(0); // truncated back to received=0
+    expect(statSync(`${root}/s-sess123/${p.id}/${p.id}.txt.part`).size).toBe(0); // truncated back to received=0
     const retry = await store.chunk({ principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abcd") }, dl());
     expect(retry.received).toBe(4);
     const res = await store.commit({ principal: P1, id: p.id }, dl());

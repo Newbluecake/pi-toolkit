@@ -21,6 +21,7 @@ import {
   parseAttachmentBlock,
   parseUploadMeta,
   sanitizeUploadName,
+  uploadDiskExt,
   type AttachmentItem,
   type UploadMetaV1,
 } from "../../../src/web-hub/protocol/upload.js";
@@ -295,6 +296,16 @@ describe("parseUploadMeta (§2.2.3)", () => {
     expect(parseUploadMeta(meta)).toEqual({ ok: true, meta });
   });
 
+  it("round-trips an optional diskName (generated-name layout); rejects a bad one", () => {
+    const withDisk = { ...validMeta(), diskName: "cmd-abc123.png" };
+    expect(parseUploadMeta(withDisk)).toEqual({ ok: true, meta: withDisk });
+    // absent ⇒ legacy layout (the file sits under safeName) — still valid
+    expect(parseUploadMeta(validMeta())).toEqual({ ok: true, meta: validMeta() });
+    for (const bad of ["", 7, null, {}, []]) {
+      expect(parseUploadMeta({ ...validMeta(), diskName: bad }).ok, `diskName=${JSON.stringify(bad)}`).toBe(false);
+    }
+  });
+
   it("rejects non-objects", () => {
     for (const v of [null, undefined, 42, "x", [], true]) {
       expect(parseUploadMeta(v).ok).toBe(false);
@@ -334,5 +345,31 @@ describe("parseUploadMeta (§2.2.3)", () => {
     expect(parseUploadMeta({ ...validMeta(), mime: "text/plain\nx" }).ok).toBe(false);
     expect(parseUploadMeta({ ...validMeta(), sha256: "not-hex" }).ok).toBe(false);
     expect(parseUploadMeta({ ...validMeta(), sha256: "A".repeat(64) }).ok).toBe(false); // must be lowercase
+  });
+});
+
+describe("uploadDiskExt (on-disk extension rule for generated disk names)", () => {
+  it.each([
+    ["a.png", "png"],
+    ["a.tar.gz", "gz"], // last ext only
+    ["archive.ZIP", "ZIP"], // case preserved
+    ["dir/a b.webp", "webp"], // raw name, no path-segment split — ext is the last dot's suffix
+    ["x", undefined],
+    ["", undefined],
+    [".png", undefined], // leading dot ⇒ no ext
+    ["a.", undefined], // trailing dot ⇒ no ext
+    [`a.${"x".repeat(17)}`, undefined], // over 16 chars
+    ["a.日本語", undefined], // non-ASCII
+    ["a.b/c", undefined], // path fragment in the suffix
+  ])("uploadDiskExt(%j) === %j", (raw, want) => {
+    expect(uploadDiskExt(raw)).toBe(want);
+  });
+
+  it('returns "part" as-is — the .part reservation lives in the disk-name generator', () => {
+    expect(uploadDiskExt("notes.part")).toBe("part");
+  });
+
+  it("non-string names yield undefined", () => {
+    for (const v of [undefined, null, 42, {}, []]) expect(uploadDiskExt(v)).toBeUndefined();
   });
 });

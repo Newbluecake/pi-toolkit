@@ -362,13 +362,41 @@ describe("POST /api/upload/* — loopback happy path (plan §1.2)", () => {
     expect(reply).not.toHaveProperty("sha256");
   });
 
+  it("the committed path is the generated <id>.<ext>; the original name survives only in meta.json", async () => {
+    const h = await harness();
+    const content = Buffer.from("named on the wire, generated on disk", "utf8");
+    const id = nid();
+    // the original name keeps flowing on the wire exactly as before (display/UI)
+    const begin = await uploadBegin(h, {
+      agentKey: AGENT,
+      id,
+      name: "quarterly report.pdf",
+      size: content.length,
+    });
+    expect(begin.status).toBe(200);
+    await postChunk(h, { id, offset: 0, bytes: content });
+    const commit = await uploadCommit(h, id);
+    expect(commit.status).toBe(200);
+    const reply = JSON.parse(commit.body) as { path: string };
+    expect(reply.path).toBe(join(h.uploadsRoot, `a-${AGENT}`, id, `${id}.pdf`));
+    expect(readFileSync(reply.path)).toEqual(content);
+    // the record keeps what the user called the file (sanitized); the disk never sees it
+    const meta = JSON.parse(readFileSync(join(dirname(reply.path), "meta.json"), "utf8")) as {
+      safeName: string;
+      diskName: string;
+    };
+    expect(meta.safeName).toBe("quarterly_report.pdf");
+    expect(meta.diskName).toBe(`${id}.pdf`);
+    expect(readdirSync(dirname(reply.path)).sort()).toEqual([`${id}.pdf`, "meta.json"]);
+  });
+
   it("abort removes the in-flight dir; a later commit 404s", async () => {
     const h = await harness();
     const id = nid();
     await uploadBegin(h, { agentKey: AGENT, id, name: "x.bin", size: 4 });
     await postChunk(h, { id, offset: 0, bytes: Buffer.from("ab") });
     const dir = join(h.uploadsRoot, `a-${AGENT}`, id);
-    expect(existsSync(join(dir, "x.bin.part"))).toBe(true);
+    expect(existsSync(join(dir, `${id}.bin.part`))).toBe(true);
     const res = await uploadAbort(h, id);
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ ok: true });
@@ -1299,7 +1327,7 @@ async function seedUploads(store: UploadStore, home: string): Promise<{ committe
   await store.begin({ principal: "loopback:token", agentKey: "a1", id: dropId, name: "drop.txt", size: 4 }, dl);
   await store.chunk({ principal: "loopback:token", id: dropId, offset: 0, bytes: Buffer.from("dr") }, dl);
   const inflightDir = join(webHubUploadsDir(home), "a-a1", dropId);
-  expect(existsSync(join(inflightDir, "drop.txt.part"))).toBe(true);
+  expect(existsSync(join(inflightDir, `${dropId}.txt.part`))).toBe(true);
   return { committedPath: committed.path, inflightDir };
 }
 
