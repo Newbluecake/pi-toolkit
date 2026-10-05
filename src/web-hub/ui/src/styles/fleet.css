@@ -77,10 +77,10 @@
 
 .run {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
   grid-template-areas:
-    "icon name nums"
-    ". activity activity";
+    "icon name nums toggle"
+    ". activity activity .";
   align-items: center;
   column-gap: var(--sp-2);
   min-height: 44px;
@@ -133,11 +133,23 @@ details[open] > summary.run .chev {
   min-width: 0;
 }
 
+/* `.run-name` 是 flex 行;flex item 默认 `min-width: auto`(内容撑开,不收缩),ellipsis 必须
+ * 配 `min-width: 0` 才生效 —— `b` 既可能是 `.run-open` 的直接 flex item(有按钮包裹),也可能是
+ * `.run-name` 的直接 flex item(裸 `<b>`),两种嵌套深度都要覆盖,这条 descendant 选择器天然
+ * 两者都选中。`flex: 1 1 auto` 让 name 文本吃满剩余空间并在变窄时先于 chip 收缩。 */
 .run-name b {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: var(--fw-semibold);
+}
+
+/* chip(类型徽标/孤儿徽标)固定尺寸,不参与收缩 —— 空间不足时让 name 文本先让路,chip 永远
+ * 完整可读(极窄容器下由 `@container` 兜底加 max-width,见文件尾)。 */
+.run-name .chip {
+  flex: none;
 }
 
 /* fleet-drawer §6.3 (F6): transcript 入口开放时 run 名包一层按钮(纯文本外观,点击在抽屉里
@@ -145,6 +157,7 @@ details[open] > summary.run .chev {
 .run-open {
   display: inline-flex;
   align-items: center;
+  flex: 1 1 auto;
   min-width: 0;
   max-width: 100%;
   margin: 0;
@@ -213,6 +226,13 @@ details[open] > summary.run .chev {
   text-align: right;
   color: var(--c-text-2);
   font-family: var(--font-mono);
+}
+
+/* 「⋯」行内操作按钮:显式占一个 grid 列,不靠自动布局(auto-placement 落进哪个空格要看模板,
+ * 容易和 nums/activity 的隐式空格撞在一起)。每档模板都把它放在行尾同一个 `toggle` 区域。 */
+.run-actions-toggle {
+  grid-area: toggle;
+  justify-self: end;
 }
 
 .run.is-terminal .run-name b,
@@ -298,7 +318,7 @@ details[open] > summary.run .chev {
   }
 }
 
-/* ================================================================ tablet 481–1024 */
+/* ================================================================ tablet 481–1024 (viewport) */
 @media (min-width: 481px) {
   .tree ul {
     margin-left: 21px;
@@ -306,10 +326,10 @@ details[open] > summary.run .chev {
   }
 
   .run {
-    grid-template-columns: 18px 20px minmax(0, 1fr) auto;
+    grid-template-columns: 18px 20px minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "chev icon name nums"
-      ". . activity activity";
+      "chev icon name nums toggle"
+      ". . activity activity .";
   }
 
   .run .chev {
@@ -317,16 +337,58 @@ details[open] > summary.run .chev {
   }
 }
 
-/* ================================================================ desktop >1024: single-line rows */
+/* ================================================================ desktop >1024 (viewport): single-line rows */
 @media (min-width: 1025px) {
   .run {
-    grid-template-columns: 18px 20px minmax(120px, 1.2fr) minmax(0, 2fr) auto;
-    grid-template-areas: "chev icon name activity nums";
+    grid-template-columns: 18px 20px minmax(120px, 1.2fr) minmax(0, 2fr) auto auto;
+    grid-template-areas: "chev icon name activity nums toggle";
     min-height: 36px;
     padding: 4px var(--sp-2);
   }
 }
 
-/* 2026-10-05 用户现场反馈：子 agent 行的模型名在 <1280px 被隐藏，手机上完全看不到各自用的
- * 模型——用户明确要求显示。窄档布局是双行网格（name 列 minmax(0,1fr) 会先截断），模型名放出来
- * 不会撑破行宽。 */
+/* 2026-10-05 用户现场反馈：子 agent 行的模型名在 <1280px 被隐藏，手机上完全看不到各自用的模型
+ * ——用户明确要求显示(见下方 @container 的 <360px 档才隐藏)。
+ *
+ * ================================================================ 容器查询:修正 docked/overlay
+ * 实际渲染宽度 ≠ viewport 宽度
+ * ----------------------------------------------------------------------------------------------
+ * 上面三档全部按 **viewport** 宽度分档,但 fleet 抽屉本身的内联尺寸和 viewport 宽度脱节
+ * (drawer.css):docked 在 ≥1280px viewport 下也只有 clamp(360px,30vw,520px) 列宽,overlay 在
+ * 768–1279px viewport 下只有 min(420px,85%) —— 两者都稳定落在 ≤520px,却会命中上面 ≥1025px
+ * 的「单行桌面布局」断点,name 列被挤到几乎 0,是 2026-10 现场重叠反馈的根因之一(另一个根因是
+ * flex item 默认 min-width:auto 吃掉了 ellipsis,见上面 `.run-name b`)。
+ *
+ * `.tree-scroll`(drawer.css)设了 `container-type: inline-size`,这里按它的实际内联尺寸
+ * (而不是 viewport)重新收紧/降级,写在文件尾用源码顺序 + 同优先级覆盖上面按 viewport 定的档位
+ * ——不支持容器查询的旧浏览器优雅退化回上面的 viewport 档(功能仍可用,只是窄 viewport 下的
+ * docked/overlay 可能回退到旧的挤压表现)。 */
+@container (max-width: 559px) {
+  .run {
+    grid-template-columns: 18px 20px minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "chev icon name nums toggle"
+      ". . activity activity .";
+    min-height: 44px;
+    padding: 6px var(--sp-2);
+  }
+
+  .run .chev {
+    display: block;
+  }
+}
+
+/* 容器实际内联尺寸 <360px(320–359px 的最窄 overlay/fullscreen 场景)时,name+chip+nums 三者
+ * 一起放不下 model 还要留足 ellipsis 空间——隐藏 model,只留 time/cost;chip 再加一道
+ * max-width 兜底(超长 `type` 字符串的边界情况,正常 token 不会触发)。 */
+@container (max-width: 359px) {
+  .run-nums .model {
+    display: none;
+  }
+
+  .run-name .chip {
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}

@@ -83,8 +83,13 @@
   font-weight: var(--fw-semibold);
 }
 
-/* §6.3: 浮层删除后,`.tree-scroll` 是抽屉内的静态滚动容器 */
+/* §6.3: 浮层删除后，`.tree-scroll` 是抽屉内的静态滚动容器。`container-type: inline-size`
+ * 让 fleet.css 的 `.run` 能按这个容器的实际内联宽度(而不是 viewport 宽度)做 @container 断点 ——
+ * docked/overlay 两模式的抽屉实际宽度(360–520px)与它们生效的 viewport 区间(≥1280px /
+ * 768–1279px)差距极大,单靠 viewport 媒体查询会误判成宽行,把 name 列挤没(fleet.css 容器查询
+ * 部分的注释有详细背景)。 */
 .tree-scroll {
+  container-type: inline-size;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
