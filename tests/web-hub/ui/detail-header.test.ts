@@ -4,7 +4,7 @@
  * chain (session name → sessionId prefix → "(no session name)"), the back button's `narrow`
  * gating, and the context/cost metrics.
  */
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import DetailHeader from "../../../src/web-hub/ui/src/components/detail/DetailHeader.vue";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
@@ -96,5 +96,155 @@ describe("DetailHeader.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     const summary = wrapper.find(".session-sum").text();
     expect(summary).toContain("ai/pi-toolkit");
     expect(summary).toContain("cr-anthropic/claude-opus-5-5 · high");
+  });
+});
+
+/**
+ * web-hub-spawn SP12 (arch §9.1): a spawn record managing the header's agent adds the
+ * 「停止会话」 two-step-arm button (wired to `useSpawn.stop`); a terminal failed/expired first
+ * prompt whose body went back into the draft (useNewSession `refilled:"draft"`) shows a
+ * one-time dismissible note. Inject-only — the frozen DetailHeaderProps are untouched.
+ */
+import { ref } from "vue";
+import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import type { HubHandle, HubState, NewSessionFlow } from "../../../src/web-hub/ui/src/types.js";
+import type { SpawnRecordPublic, SpawnsPayload } from "../../../src/web-hub/protocol/spawn.js";
+import type { SpawnStopOutcome } from "../../../src/web-hub/ui/src/transport/types.js";
+
+function spawnRec(over: Partial<SpawnRecordPublic> = {}): SpawnRecordPublic {
+  return {
+    spawnId: "sp9",
+    state: "live",
+    createdAt: 1000,
+    updatedAt: 1000,
+    cwdLabel: "proj",
+    agentKey: "agent-1",
+    origin: { listener: "loopback", reqId: "req-aaaaaaaaaaaaaaaa" },
+    ...over,
+  };
+}
+
+function hubWithSpawn(opts: {
+  spawns?: SpawnsPayload | null;
+  flow?: NewSessionFlow;
+  stop?: (spawnId: string, force?: boolean) => Promise<SpawnStopOutcome>;
+}): HubHandle {
+  return {
+    state: ref({ agents: new Map(), spawns: opts.spawns ?? null } as unknown as HubState),
+    dispatch: () => {},
+    spawn: {
+      list: async () => ({ ok: true, policy: {} as never, items: opts.spawns?.items ?? [] }),
+      dirs: async () => ({ ok: true, recent: [] }),
+      start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
+      stop: opts.stop ?? (async () => ({ ok: true, state: "stopping" })),
+      newSession: {
+        flow: ref(opts.flow ?? { phase: "idle" }),
+        submit: async () => true,
+        confirm: async () => {},
+        cancel: () => {},
+        retry: async () => false,
+        noteSpawns: () => {},
+        dispose: () => {},
+        stats: () => ({ retainedTexts: 0 }),
+      },
+    },
+  };
+}
+
+describe("DetailHeader.vue — managed session stop (SP12)", () => {
+  it("no managed record (or no HUB_CTX) ⇒ no stop button", () => {
+    const plain = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
+    expect(plain.find(".spawn-stop-btn").exists()).toBe(false);
+
+    const hub = hubWithSpawn({ spawns: { items: [spawnRec({ state: "exited" })], active: 0, max: 4 } });
+    const terminal = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    expect(terminal.find(".spawn-stop-btn").exists()).toBe(false);
+  });
+
+  it("managed live record ⇒ two-step arm, second click calls stop(spawnId)", async () => {
+    const stopped: string[] = [];
+    const hub = hubWithSpawn({
+      spawns: { items: [spawnRec()], active: 1, max: 4 },
+      stop: async (spawnId) => {
+        stopped.push(spawnId);
+        return { ok: true, state: "stopping" };
+      },
+    });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".spawn-stop-btn");
+    expect(btn.text()).toContain("Stop session");
+    await btn.trigger("click"); // arm
+    expect(btn.text()).toContain("Click again");
+    expect(stopped).toHaveLength(0);
+    await btn.trigger("click"); // confirm
+    await wrapper.vm.$nextTick();
+    expect(stopped).toEqual(["sp9"]);
+  });
+
+  it("a failed stop surfaces the error code inline", async () => {
+    const hub = hubWithSpawn({
+      spawns: { items: [spawnRec()], active: 1, max: 4 },
+      stop: async () => ({ ok: false, error: "E_GONE" }),
+    });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    await wrapper.get(".spawn-stop-btn").trigger("click");
+    await wrapper.get(".spawn-stop-btn").trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".spawn-stop-note").text()).toContain("E_GONE");
+  });
+
+  it("stopping record ⇒ the button is disabled with the stopping label", () => {
+    const hub = hubWithSpawn({ spawns: { items: [spawnRec({ state: "stopping" })], active: 1, max: 4 } });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".spawn-stop-btn");
+    expect(btn.attributes("disabled")).toBeDefined();
+    expect(btn.text()).toContain("stopping");
+  });
+});
+
+describe("DetailHeader.vue — first-prompt refill notice (SP12, §3.2)", () => {
+  it("done flow with a failed, draft-refilled first prompt for THIS agent ⇒ one-time note; dismiss hides it", async () => {
+    const flow: NewSessionFlow = {
+      phase: "done",
+      spawnId: "sp9",
+      agentKey: "agent-1",
+      firstPrompt: { state: "failed", refilled: "draft" },
+    };
+    const hub = hubWithSpawn({ flow });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const note = wrapper.get(".spawn-fp-note");
+    expect(note.text()).toContain("back in the draft");
+    await note.get("button").trigger("click");
+    expect(wrapper.find(".spawn-fp-note").exists()).toBe(false);
+  });
+
+  it("a note for ANOTHER agent never shows here", () => {
+    const flow: NewSessionFlow = {
+      phase: "done",
+      spawnId: "sp9",
+      agentKey: "agent-2",
+      firstPrompt: { state: "failed", refilled: "draft" },
+    };
+    const hub = hubWithSpawn({ flow });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    expect(wrapper.find(".spawn-fp-note").exists()).toBe(false);
   });
 });

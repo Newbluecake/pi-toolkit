@@ -4,7 +4,7 @@
  * P3). Filter substring matching, the live vs. "Stale & Offline" grouping, the empty state, and
  * `aria-current` on the selected card.
  */
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it } from "vitest";
 import AgentList from "../../../src/web-hub/ui/src/components/agents/AgentList.vue";
 import type { AgentCardView } from "../../../src/web-hub/ui/src/types.js";
@@ -274,5 +274,301 @@ describe("AgentList.vue — 'New session' header button", () => {
     const note = wrapper.get(".new-session-note");
     expect(note.attributes("data-kind")).toBe("err");
     expect(note.text()).toBe("boom");
+  });
+});
+
+/**
+ * web-hub-spawn SP12 (arch §9.1): the header button is now `NewSessionMenu` (split button over
+ * SP11's `newSessionActions`), the EmptyState grows a pick-dir entry (0 agents), pending
+ * `spawns` records render as `SpawnRow` placeholders, and a managed agent card shows the `web`
+ * badge. Fakes below extend the same `hubWithAgent` pattern with a `spawn` handle.
+ */
+import type { SpawnPolicyWire, SpawnRecordPublic, SpawnsPayload } from "../../../src/web-hub/protocol/spawn.js";
+import type { HubSpawnHandle, NewSessionFlow } from "../../../src/web-hub/ui/src/types.js";
+import type { SpawnListOutcome } from "../../../src/web-hub/ui/src/transport/types.js";
+import type { Ref } from "vue";
+
+const spawnPolicy: SpawnPolicyWire = {
+  allowed: true,
+  confirm: "unknown-dir",
+  scope: "known",
+  max: 4,
+  maxPerPrincipal: 2,
+  active: 0,
+  activeMine: 0,
+  registerTimeoutS: 30,
+  maxLifetimeMinutes: 720,
+};
+
+function spawnRec(over: Partial<SpawnRecordPublic> = {}): SpawnRecordPublic {
+  return {
+    spawnId: "sp1",
+    state: "starting",
+    createdAt: 1000,
+    updatedAt: 1000,
+    cwdLabel: "proj",
+    origin: { listener: "loopback", reqId: "req-aaaaaaaaaaaaaaaa" },
+    ...over,
+  };
+}
+
+function fakeNewSessionHandle(flow: Ref<NewSessionFlow>) {
+  return {
+    flow,
+    submit: async () => true,
+    confirm: async () => {},
+    cancel: () => {},
+    retry: async () => false,
+    noteSpawns: () => {},
+    dispose: () => {},
+    stats: () => ({ retainedTexts: 0 }),
+  };
+}
+
+function fakeSpawnHandle(over: Partial<HubSpawnHandle> = {}): HubSpawnHandle {
+  return {
+    list: async () => ({ ok: false, error: "E_NOT_FOUND", status: 404 }),
+    dirs: async () => ({ ok: true, recent: [] }),
+    start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
+    stop: async () => ({ ok: true, state: "stopping" }),
+    newSession: fakeNewSessionHandle(ref({ phase: "idle" })),
+    ...over,
+  };
+}
+
+function hubWithSpawn(
+  opts: {
+    caps?: readonly string[];
+    list?: () => Promise<SpawnListOutcome>;
+    spawns?: SpawnsPayload | null;
+    agents?: Map<string, unknown>;
+    control?: ControlHandle;
+  } = {},
+): HubHandle {
+  return {
+    state: ref({
+      control: true,
+      hub: { caps: opts.caps ?? [] },
+      agents: opts.agents ?? new Map(),
+      spawns: opts.spawns ?? null,
+    } as unknown as HubState),
+    dispatch: () => {},
+    ...(opts.control ? { control: opts.control } : {}),
+    spawn: fakeSpawnHandle({ ...(opts.list ? { list: opts.list } : {}) }),
+  };
+}
+
+describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
+  it("no spawn.v1 cap ⇒ the caret toggle is hidden (main /new button unchanged)", () => {
+    const hub = hubWithSpawn({ caps: ["cmd.v1"] });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    expect(wrapper.find(".new-session-btn").exists()).toBe(true);
+    expect(wrapper.find(".nsmenu-toggle").exists()).toBe(false);
+  });
+
+  it("GET /api/headless 404 ⇒ pick-dir hidden (arch §8.3), toggle hidden", async () => {
+    const hub = hubWithSpawn({ caps: ["spawn.v1"] }); // default fake list() is 404
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    expect(wrapper.find(".nsmenu-toggle").exists()).toBe(false);
+  });
+
+  it("policy.allowed ⇒ pick-dir item enabled in the dropdown; picking it opens the DirPicker", async () => {
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1"],
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    const toggle = wrapper.get(".nsmenu-toggle");
+    expect(toggle.attributes("aria-haspopup")).toBe("menu");
+    expect(toggle.attributes("aria-expanded")).toBe("false");
+
+    await toggle.trigger("click");
+    const items = wrapper.findAll(".nsmenu-item");
+    const pickDir = items.find((i) => i.text().includes("Choose a directory"));
+    expect(pickDir).toBeDefined();
+    expect(pickDir!.attributes("disabled")).toBeUndefined();
+
+    await pickDir!.trigger("click");
+    expect(wrapper.find(".spawn-picker").exists()).toBe(true);
+    expect(wrapper.find(".nsmenu-menu").exists()).toBe(false); // menu closed after pick
+  });
+
+  it("policy denied ⇒ pick-dir item disabled with the reason; Escape closes the menu", async () => {
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1"],
+      list: async () => ({ ok: true, policy: { ...spawnPolicy, allowed: false, reason: "cooldown" }, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    await wrapper.get(".nsmenu-toggle").trigger("click");
+    const items = wrapper.findAll(".nsmenu-item");
+    const pickDir = items.find((i) => i.text().includes("Choose a directory"));
+    expect(pickDir!.attributes("disabled")).toBeDefined();
+    expect(pickDir!.text()).toContain("Cooling down");
+
+    await wrapper.get(".nsmenu").trigger("keydown", { key: "Escape" });
+    expect(wrapper.find(".nsmenu-menu").exists()).toBe(false);
+  });
+
+  it("menu lists the same-cwd item with the selected agent's short cwd", async () => {
+    const agents = new Map([["a1", agentState()]]);
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1"],
+      agents,
+      control: fakeControlHandle(),
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1", shortCwd: "ai/pi-toolkit" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    await wrapper.get(".nsmenu-toggle").trigger("click");
+    const sameCwd = wrapper.findAll(".nsmenu-item").find((i) => i.text().includes("(/new)"));
+    expect(sameCwd).toBeDefined();
+    expect(sameCwd!.text()).toContain("ai/pi-toolkit");
+    expect(sameCwd!.attributes("disabled")).toBeUndefined();
+  });
+
+  it("main button click still runs /new via the same-cwd action (menu regression)", async () => {
+    let captured: [string, string, string] | undefined;
+    const control = fakeControlHandle({
+      runCommand: async (agentKey, name, args) => {
+        captured = [agentKey, name, args];
+        return { ok: true };
+      },
+    });
+    const agents = new Map([["a1", agentState()]]);
+    const hub = hubWithSpawn({ caps: [], agents, control });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await wrapper.get(".new-session-btn").trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(captured).toEqual(["a1", "new", ""]);
+  });
+});
+
+describe("AgentList.vue — EmptyState pick-dir entry (SP12; 0 agents)", () => {
+  it("0 agents + policy.allowed ⇒ the EmptyState offers the pick-dir entry; click opens DirPicker", async () => {
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1"],
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    const entry = wrapper.get(".empty .spawn-empty-pick");
+    expect(entry.text()).toContain("Choose a directory");
+    await entry.trigger("click");
+    expect(wrapper.find(".spawn-picker").exists()).toBe(true);
+  });
+
+  it("0 agents without the cap ⇒ no pick-dir entry", () => {
+    const hub = hubWithSpawn({ caps: [] });
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    expect(wrapper.find(".spawn-empty-pick").exists()).toBe(false);
+  });
+});
+
+describe("AgentList.vue — pending SpawnRow placeholders (SP12)", () => {
+  it("starting/failed records render above the list; dismiss removes a failed row locally", async () => {
+    const spawns: SpawnsPayload = {
+      items: [
+        spawnRec({ spawnId: "sp-new", state: "starting", createdAt: 2000 }),
+        spawnRec({ spawnId: "sp-old", state: "failed", createdAt: 1000, hint: "register-timeout-hello" }),
+        spawnRec({ spawnId: "sp-live", state: "live", createdAt: 3000 }), // not a pending row
+      ],
+      active: 1,
+      max: 4,
+    };
+    const hub = hubWithSpawn({ caps: ["spawn.v1"], spawns });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    const rows = wrapper.findAll(".spawn-pending .spawn-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.attributes("data-state")).toBe("starting"); // newest first
+    expect(rows[1]!.attributes("data-state")).toBe("failed");
+    expect(rows[1]!.text()).toContain("never registered"); // hint mapping
+
+    const dismiss = rows[1]!.findAll("button").find((b) => b.text() === "Dismiss");
+    await dismiss!.trigger("click");
+    expect(wrapper.findAll(".spawn-pending .spawn-row")).toHaveLength(1);
+  });
+});
+
+describe("AgentCard.vue — managed `web` badge (SP12, arch §9.1)", () => {
+  function hubWithSpawns(spawns: SpawnsPayload | null): HubHandle {
+    return {
+      state: ref({ agents: new Map(), spawns } as unknown as HubState),
+      dispatch: () => {},
+    };
+  }
+
+  it("a live record managing the card's key ⇒ web badge; terminal/unrelated ⇒ none", () => {
+    const live: SpawnsPayload = {
+      items: [spawnRec({ state: "live", agentKey: "agent-1" })],
+      active: 1,
+      max: 4,
+    };
+    const withBadge = mount(AgentCard, {
+      props: { card: card(), selected: false },
+      global: { provide: { [HUB_CTX as symbol]: hubWithSpawns(live) } },
+    });
+    expect(withBadge.find(".chip-web").exists()).toBe(true);
+    expect(withBadge.find(".chip-web").text()).toBe("web");
+
+    const terminal: SpawnsPayload = {
+      items: [spawnRec({ state: "exited", agentKey: "agent-1" })],
+      active: 0,
+      max: 4,
+    };
+    const noBadge = mount(AgentCard, {
+      props: { card: card(), selected: false },
+      global: { provide: { [HUB_CTX as symbol]: hubWithSpawns(terminal) } },
+    });
+    expect(noBadge.find(".chip-web").exists()).toBe(false);
+
+    const otherAgent: SpawnsPayload = {
+      items: [spawnRec({ state: "live", agentKey: "agent-2" })],
+      active: 1,
+      max: 4,
+    };
+    const unrelated = mount(AgentCard, {
+      props: { card: card(), selected: false },
+      global: { provide: { [HUB_CTX as symbol]: hubWithSpawns(otherAgent) } },
+    });
+    expect(unrelated.find(".chip-web").exists()).toBe(false);
+  });
+
+  it("a starting record never badges (no agentKey until the bind completes)", () => {
+    const starting: SpawnsPayload = { items: [spawnRec({ state: "starting" })], active: 1, max: 4 };
+    const wrapper = mount(AgentCard, {
+      props: { card: card(), selected: false },
+      global: { provide: { [HUB_CTX as symbol]: hubWithSpawns(starting) } },
+    });
+    expect(wrapper.find(".chip-web").exists()).toBe(false);
   });
 });

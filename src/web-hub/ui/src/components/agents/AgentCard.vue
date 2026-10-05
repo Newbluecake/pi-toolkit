@@ -9,6 +9,7 @@ import { computed, inject } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { formatPercent } from "../../format.js";
+import { managedFor } from "../../logic/spawn.js";
 import type { AgentCardProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
 
@@ -23,6 +24,10 @@ const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
   return Array.isArray(dialogs?.open) && dialogs.open.length > 0;
 });
+
+// web-hub-spawn SP12 (arch §9.1): a non-terminal spawn record managing this card's agent adds
+// the `web` badge — same inject channel as needsAnswer (the frozen props stay untouched).
+const managed = computed(() => managedFor(hub?.state.value.spawns ?? null, props.card.key));
 
 const dotClass = computed(() => {
   switch (props.card.visualState) {
@@ -52,6 +57,9 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       <span class="dot" :class="dotClass"></span>
       <span class="agent-title" translate="no">{{ card.shortCwd }}</span>
       <span class="chip" translate="no">{{ kindLabel }}</span>
+      <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
+        {{ t("spawn.badgeWeb") }}
+      </span>
       <span class="agent-cost num">{{ card.costLabel }}</span>
     </span>
 

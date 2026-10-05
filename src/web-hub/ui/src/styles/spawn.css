@@ -1,0 +1,357 @@
+/*
+ * pi web-hub — headless-spawn UI (web-hub-spawn plan SP12 / arch §9.1 — components/spawn/**).
+ * Styles for the NewSessionMenu split button, the DirPicker panel, SpawnConfirm, the pending
+ * SpawnRow placeholders, AgentCard's `web` badge and DetailHeader's managed-session stop
+ * button / first-prompt notice. Imported by the spawn components themselves (same discipline
+ * as Composer.vue → upload.css). Depends on tokens.css + base.css + primitives.css.
+ * All colours/sizes come from tokens.css; no fixed positioning (the menu is an absolute
+ * dropdown inside the sidebar header, the picker an inline panel).
+ */
+
+/* ---------------------------------------------------------------- NewSessionMenu (split button) */
+.nsmenu {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.nsmenu .new-session-btn {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.nsmenu-toggle {
+  margin-left: -1px;
+  padding: 0 var(--sp-2);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.nsmenu-menu {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  min-width: 240px;
+  padding: var(--sp-1);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+}
+
+.nsmenu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+
+.nsmenu-item:hover:not(:disabled),
+.nsmenu-item:focus-visible {
+  background: var(--c-surface-2);
+}
+
+.nsmenu-item:disabled {
+  color: var(--c-text-3);
+  cursor: not-allowed;
+}
+
+.nsmenu-item-reason {
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+/* ---------------------------------------------------------------- DirPicker (inline panel) */
+.spawn-picker {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-3) var(--sp-2);
+  padding: var(--sp-3);
+  /* safe-area: the panel can sit at the bottom of the mobile drawer — same max() wrapping as
+   * control.css/dock.css. */
+  padding-bottom: max(var(--sp-3), env(safe-area-inset-bottom));
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+}
+
+.spawn-picker-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.spawn-field {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.spawn-field-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-2);
+}
+
+.spawn-recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.spawn-recent-btn {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spawn-prompt-input {
+  width: 100%;
+  min-height: 64px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  resize: vertical;
+}
+
+.spawn-prompt-input:focus-visible {
+  border-color: var(--c-focus);
+  outline: none;
+}
+
+.spawn-picker-status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.spawn-picker-error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-danger-border);
+  border-radius: var(--r-sm);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
+.spawn-picker-note {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.spawn-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* ---------------------------------------------------------------- SpawnConfirm */
+.spawn-confirm {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.spawn-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+.spawn-confirm-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.spawn-confirm-body {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.spawn-confirm-cwd {
+  display: block;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.spawn-confirm-reason {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.spawn-plain-warning {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-warning-border);
+  border-radius: var(--r-sm);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- SpawnRow (pending rows) */
+.spawn-pending {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0 var(--sp-3) var(--sp-2);
+  list-style: none;
+}
+
+.spawn-row {
+  display: grid;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  border: 1px dashed var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+}
+
+.spawn-row-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.spawn-row-cwd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spawn-row-actions {
+  display: flex;
+  flex: none;
+  gap: var(--sp-1);
+}
+
+.spawn-row-hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.spawn-row-detail {
+  margin: 0;
+  padding: var(--sp-2);
+  max-height: 160px;
+  overflow: auto;
+  border-radius: var(--r-xs);
+  background: var(--c-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* spawn state chips reuse primitives' .chip; only the per-state tint lives here */
+.chip-spawn[data-state="starting"] {
+  border-color: var(--c-info);
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
+.chip-spawn[data-state="failed"] {
+  border-color: var(--c-danger-border);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+/* ---------------------------------------------------------------- AgentCard managed badge */
+.chip-web {
+  border-color: var(--c-primary);
+  background: var(--c-primary-soft);
+  color: var(--c-on-primary-soft);
+}
+
+/* ---------------------------------------------------------------- DetailHeader (managed session) */
+.spawn-stop-btn.armed {
+  border-color: var(--c-danger);
+  background: var(--c-danger);
+  color: var(--c-on-primary);
+}
+
+.spawn-stop-note {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-danger);
+}
+
+.spawn-fp-note {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-warning-border);
+  border-radius: var(--r-sm);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+.spawn-fp-note button {
+  margin-left: auto;
+}
+
+/* --- desktop collapsed rail: hide the whole split button (agents.css owns the same rule for
+ * `.new-session-btn` itself; the wrapper must go too or the lone toggle would stay) --- */
+@media (min-width: 768px) {
+  .sidebar.is-collapsed .nsmenu {
+    display: none;
+  }
+}
+
+/* --- coarse pointers: every new interactive target ≥44px (ui-design §3.12 先例) --- */
+@media (pointer: coarse) {
+  .nsmenu-toggle,
+  .nsmenu .new-session-btn {
+    min-height: 44px;
+  }
+
+  .nsmenu-item {
+    min-height: 44px;
+    justify-content: center;
+  }
+
+  .spawn-recent-btn,
+  .spawn-row-actions .btn,
+  .spawn-picker-actions .btn,
+  .spawn-confirm-actions .btn {
+    min-height: 44px;
+  }
+}
