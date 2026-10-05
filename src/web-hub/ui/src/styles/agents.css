@@ -3,9 +3,12 @@
  * `AgentList.vue` / `AgentCard.vue` render against these classes; ported from
  * `docs/dev/web-hub/ui-mockups/app.css`'s "sidebar / agent list" section, with the
  * "desktop list-in-sidebar" look (transparent card borders, hover highlight, block layout)
- * moved from the mockup's 1025px breakpoint down to **768px** (plan §0.3 — see `shell.css`'s
- * header comment for the full rationale). 481–767px keeps the mockup's tablet card-grid look
- * (still full-width list navigation at that width, per §0.3's "481–767 单栏 + 卡片网格").
+ * applying in two contexts (mobile-adaptation package, todo #7 — before it, a single 768px
+ * breakpoint): the **≥1025px fixed split** (media query, matching `shell.css`'s split
+ * breakpoint) and the **481–1024px overlay drawer** (`.sidebar-drawer` class, applied by
+ * `DashboardView.vue` only inside that band — see `shell.css`'s header comment). Everywhere
+ * else ≥481px the list is a full-width card grid (the mockup's tablet look, kept per §0.3's
+ * "481–767 单栏 + 卡片网格"), and <481px it is the phone's single-column list.
  */
 
 .sidebar {
@@ -34,7 +37,7 @@
 }
 
 /* Desktop-only collapse toggle (mobile/tablet keep the always-expanded drawer behaviour — the
- * toggle itself only appears, and `.is-collapsed` only takes effect, at/above the same 768px
+ * toggle itself only appears, and `.is-collapsed` only takes effect, at/above the same 1025px
  * split breakpoint `shell.css` uses, so a narrower viewport can never get stuck hidden). */
 .sidebar-collapse-toggle {
   display: none;
@@ -277,7 +280,41 @@
   }
 }
 
-@media (min-width: 768px) {
+/* The 481–1024px overlay drawer (todo #7): same "list-in-sidebar" look as the ≥1025 split
+ * below, scoped to the `.sidebar-drawer` class `DashboardView.vue` applies only inside that
+ * band (the un-scoped base at these widths is the full-width card grid, which the list ROUTE
+ * keeps). No media query here on purpose — the class itself is the band guard. The desktop
+ * collapse toggle is meaningless in an overlay (there is no grid column to reclaim). */
+.sidebar-drawer .sidebar-head {
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+}
+
+.sidebar-drawer .sidebar-collapse-toggle {
+  display: none;
+}
+
+.sidebar-drawer .agent-list {
+  display: block;
+  padding: var(--sp-1) var(--sp-2) var(--sp-4);
+}
+
+.sidebar-drawer .agent-list > li > .agent-card {
+  margin: 2px 0;
+  border-color: transparent;
+  background: transparent;
+}
+
+.sidebar-drawer .agent-list > li > .agent-card:hover {
+  background: var(--c-surface-2);
+  border-color: var(--c-border);
+}
+
+.sidebar-drawer .agent-list > li > .agent-card[aria-current="page"] {
+  background: var(--c-primary-soft);
+  border-color: color-mix(in srgb, var(--c-primary) 28%, transparent);
+}
+
+@media (min-width: 1025px) {
   .sidebar {
     background: var(--c-surface);
     border-right: 1px solid var(--c-border);

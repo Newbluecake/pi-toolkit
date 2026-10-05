@@ -248,3 +248,68 @@ describe("DetailHeader.vue — first-prompt refill notice (SP12, §3.2)", () => 
     expect(wrapper.find(".spawn-fp-note").exists()).toBe(false);
   });
 });
+
+/**
+ * Mobile-adaptation package (todo #7): the ≤480px metrics fold (`.metrics-wrap`'s
+ * `data-collapsed` + the one-line `.metrics-summary` toggle — CSS decides at which widths the
+ * fold is honored, the component only carries the state) and the mid-band drawer toggle
+ * (DashboardView-provided `SIDEBAR_DRAWER` context, inject-only like SP12).
+ */
+import { computed } from "vue";
+import { SIDEBAR_DRAWER } from "../../../src/web-hub/ui/src/components/shell/sidebarDrawer.js";
+
+describe("DetailHeader.vue — ≤480px metrics fold (todo #7)", () => {
+  it("starts collapsed with a one-line percent · cost summary", () => {
+    const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: true } });
+    const wrap = wrapper.get(".metrics-wrap");
+    expect(wrap.attributes("data-collapsed")).toBe("true");
+    const summary = wrapper.get(".metrics-summary");
+    expect(summary.text()).toContain("62%");
+    expect(summary.text()).toContain("$195.54");
+    expect(summary.attributes("aria-expanded")).toBe("false");
+    // the full panel stays in the DOM (CSS hides it ≤480px; ≥481px the fold state is inert)
+    expect(wrapper.find(".metrics").exists()).toBe(true);
+  });
+
+  it("falls back to dashes when no context usage has been reported yet", () => {
+    const wrapper = mount(DetailHeader, { props: { agent: agent({ status: undefined }), narrow: true } });
+    expect(wrapper.get(".metrics-summary").text()).toContain("—");
+  });
+
+  it("clicking the summary toggles the fold and aria-expanded", async () => {
+    const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: true } });
+    const summary = wrapper.get(".metrics-summary");
+    await summary.trigger("click");
+    expect(wrapper.get(".metrics-wrap").attributes("data-collapsed")).toBe("false");
+    expect(summary.attributes("aria-expanded")).toBe("true");
+    await summary.trigger("click");
+    expect(wrapper.get(".metrics-wrap").attributes("data-collapsed")).toBe("true");
+  });
+});
+
+describe("DetailHeader.vue — mid-band drawer toggle (todo #7)", () => {
+  function drawerCtx(active: boolean, open: () => void = () => {}) {
+    return { active: computed(() => active), open };
+  }
+
+  it("renders the toggle and the back button while the drawer context is active, even when not narrow", async () => {
+    let opened = 0;
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [SIDEBAR_DRAWER as symbol]: drawerCtx(true, () => opened++) } },
+    });
+    expect(wrapper.find(".detail-back").exists()).toBe(true);
+    const toggle = wrapper.get(".detail-drawer-toggle");
+    await toggle.trigger("click");
+    expect(opened).toBe(1);
+  });
+
+  it("no drawer context (or an inactive one) ⇒ no toggle, and the back button follows `narrow`", () => {
+    const inactive = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [SIDEBAR_DRAWER as symbol]: drawerCtx(false) } },
+    });
+    expect(inactive.find(".detail-drawer-toggle").exists()).toBe(false);
+    expect(inactive.find(".detail-back").exists()).toBe(false);
+  });
+});

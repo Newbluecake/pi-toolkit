@@ -2,7 +2,8 @@
  * P3's assertion module for the visual harness (vue-plan.md v2.1 §4.4.2, §5.2, §5.3 — P3
  * exclusive). Covers the shell/agent-list/detail-header/login rows of ui-design.md §6's
  * per-item table: §6.1 (breakpoints/no horizontal scroll/split vs. single view/sidebar width),
- * §6.2 (deep link → detail, list vs. detail mutual exclusivity below 768px), §6.3 (coarse-
+ * §6.2 (deep link → detail, list vs. detail mutual exclusivity below 1025px — todo #7 re-cut
+ * the split from 768 to 1025 and added the 481–1024 overlay-drawer checks), §6.3 (coarse-
  * pointer touch targets, no `[title]` tooltips), §6.5 (viewport meta, app-shell height, the
  * dock never `position: fixed`/`sticky`), §6.7 (mobile login card + plaintext-HTTP banner
  * clamp/expand). `checks-body.ts` (P4) and `checks-e2e.ts` (P6) cover the rest.
@@ -23,8 +24,10 @@ async function checkNoHorizontalScroll(ctx: CheckContext): Promise<CheckOutcome>
   );
 }
 
-/** §6.1/§6.2/§6.3: below 768px only one of `.sidebar`/`.detail` is ever mounted at a time;
- * at/above 768px both are mounted side by side. Only meaningful for scenarios that reach the
+/** §6.1/§6.2/§6.3 + todo #7's mid band: below 1025px only one of `.sidebar`/`.detail` is ever
+ * mounted at a time (≤767 single-view; 481–1024 single-view with the sidebar closed by
+ * default — it only mounts as the overlay drawer, which no scenario opens by default); at/above
+ * 1025px both are mounted side by side. Only meaningful for scenarios that reach the
  * authenticated dashboard shell at all (`login` never does). */
 async function checkListDetailSplit(ctx: CheckContext): Promise<CheckOutcome | null> {
   if (ctx.scenario === "login") return null;
@@ -38,28 +41,65 @@ async function checkListDetailSplit(ctx: CheckContext): Promise<CheckOutcome | n
       detailVisible: detailRect !== null && detailRect.width > 0 && detailRect.height > 0,
     };
   });
-  if (ctx.width < 768) {
+  if (ctx.width < 1025) {
     const exactlyOne = info.sidebarVisible !== info.detailVisible;
-    return outcome("shell-single-view-below-768", exactlyOne, JSON.stringify(info));
+    return outcome("shell-single-view-below-1025", exactlyOne, JSON.stringify(info));
   }
-  return outcome("shell-split-view-at-768-plus", info.sidebarVisible && info.detailVisible, JSON.stringify(info));
+  return outcome("shell-split-view-at-1025-plus", info.sidebarVisible && info.detailVisible, JSON.stringify(info));
 }
 
-/** §6.1: sidebar width narrows to 260px at the plan's (v2.1 §0.3, moved from the mockup's
- * 1025px) 768px split breakpoint, back up to 288px at 1025 and 340px at 1280+. */
+/** §6.1: sidebar width is 288px at the todo-#7 1025px split breakpoint, 340px at 1280+
+ * (below 1025 there is no fixed sidebar column at all — the mid band's drawer is overlay-sized
+ * and covered by `checkMidDrawer` instead). */
 function expectedSidebarWidth(width: number): number | null {
-  if (width < 768) return null;
-  if (width < 1025) return 260;
+  if (width < 1025) return null;
   if (width < 1280) return 288;
   return 340;
 }
 
 async function checkSidebarWidth(ctx: CheckContext): Promise<CheckOutcome | null> {
-  if (ctx.scenario === "login" || ctx.width < 768) return null;
+  if (ctx.scenario === "login" || ctx.width < 1025) return null;
   const expected = expectedSidebarWidth(ctx.width);
   if (expected === null) return null;
   const actual = await ctx.page.evaluate(() => document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0);
   return outcome("shell-sidebar-width", Math.abs(actual - expected) <= 1, `expected=${expected} actual=${actual}`);
+}
+
+/** todo #7's 481–1024 mid band: on the detail route the sidebar opens as an overlay drawer
+ * (toggle button in the detail header → `.sidebar-drawer` + scrim above the still-mounted
+ * detail pane), and Escape closes it without navigating anywhere. */
+async function checkMidDrawer(ctx: CheckContext): Promise<CheckOutcome[]> {
+  if (ctx.scenario !== "detail" || ctx.width < 481 || ctx.width > 1024) return [];
+  const toggle = await ctx.page.$(".detail-drawer-toggle");
+  if (toggle === null) return [outcome("shell-mid-drawer-toggle-present", false, "no .detail-drawer-toggle")];
+  await toggle.click();
+  const open = await ctx.page.evaluate(() => {
+    const sidebar = document.querySelector(".sidebar");
+    const rect = sidebar?.getBoundingClientRect();
+    return {
+      drawerClass: sidebar?.classList.contains("sidebar-drawer") ?? false,
+      visible: rect !== undefined && rect !== null && rect.width > 0 && rect.height > 0,
+      overlay: sidebar !== null && getComputedStyle(sidebar).position === "absolute",
+      scrim: document.querySelector(".drawer-scrim") !== null,
+      detailKept: document.querySelector(".detail") !== null,
+    };
+  });
+  const outcomes: CheckOutcome[] = [
+    outcome("shell-mid-drawer-opens-overlay", open.drawerClass && open.visible && open.overlay, JSON.stringify(open)),
+    outcome("shell-mid-drawer-scrim", open.scrim, "no .drawer-scrim"),
+    outcome("shell-mid-drawer-detail-kept", open.detailKept, ".detail unmounted while drawer open"),
+  ];
+  await ctx.page.keyboard.press("Escape");
+  await ctx.page.waitForTimeout(100);
+  const closed = await ctx.page.evaluate(() => ({
+    sidebarGone: document.querySelector(".sidebar") === null,
+    hash: window.location.hash,
+  }));
+  outcomes.push(
+    outcome("shell-mid-drawer-esc-closes", closed.sidebarGone, JSON.stringify(closed)),
+    outcome("shell-mid-drawer-esc-keeps-route", closed.hash.includes("/agent/"), closed.hash),
+  );
+  return outcomes;
 }
 
 /** §6.3: any coarse pointer, any width — every interactive element's hit box is ≥44×44, and no
@@ -223,6 +263,7 @@ export const check: CheckModule = {
     ]);
     for (const o of optional) if (o !== null) outcomes.push(o);
     outcomes.push(...(await checkTouchTargets(ctx)));
+    outcomes.push(...(await checkMidDrawer(ctx)));
     outcomes.push(...(await checkLoginPlaintextBanner(ctx)));
     outcomes.push(...(await checkLoginCardMobile(ctx)));
     return outcomes;

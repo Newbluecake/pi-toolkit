@@ -20,6 +20,7 @@ const detail = {
   contextLabel: "上下文",
   contextAria: "已用上下文",
   costLabel: "花费",
+  metricsToggleAria: "切换上下文与花费指标",
   subCost: "子代理 {v}",
   waitingOnDialog: "正在等待终端中的对话框：",
   waitingMore: "（+{n} 更多）",

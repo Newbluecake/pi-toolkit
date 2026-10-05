@@ -16,6 +16,7 @@ const agents = {
   noSessionName: "(no session name)",
   collapseSidebar: "Collapse sidebar",
   expandSidebar: "Expand sidebar",
+  openDrawer: "Show agents list",
   newSession: "New session",
   newSessionAria: "Start a new session for the selected agent (runs /new)",
   newSessionOk: "New session started",

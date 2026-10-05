@@ -9,7 +9,7 @@
   variable `shell.css`'s `.layout` grid already reads (overridden here, at the highest-specificity
   inline level, when collapsed; removed — falling back to the stylesheet's own breakpoint values
   — when expanded), persisted across reloads in `localStorage`. The toggle itself (and the whole
-  collapse effect) is CSS-gated to `min-width: 768px` (`agents.css`) rather than JS/`narrow`-gated,
+  collapse effect) is CSS-gated to `min-width: 1025px` (`agents.css`) rather than JS/`narrow`-gated,
   so mobile's existing full-screen list/drawer behaviour is untouched by construction — collapsing
   on desktop and then shrinking the window never leaves the list stuck hidden.
 
@@ -56,7 +56,7 @@ function onFilterInput(ev: Event): void {
 }
 
 // ---------------------------------------------------------------------------
-// desktop collapse (persisted, CSS-gated to >=768px — see header comment)
+// desktop collapse (persisted, CSS-gated to >=1025px — see header comment)
 // ---------------------------------------------------------------------------
 
 const COLLAPSE_KEY = "webhub.agentList.collapsed";

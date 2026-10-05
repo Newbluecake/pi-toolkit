@@ -1,6 +1,6 @@
 /**
  * `matchMedia` as a reactive boolean (vue-plan.md v2.1 §3.6, §3.9, §5.2 — P1). Used for the
- * mobile transcript-window default (`(max-width: 480px)`), the ≥768 split-pane breakpoint, and
+ * mobile transcript-window default (`(max-width: 480px)`), the ≥1025 split-pane breakpoint, and
  * `(pointer: coarse)` touch-target sizing (§3.12/§6.3) — one small composable instead of four
  * bespoke `resize`/`matchMedia` listeners.
  */

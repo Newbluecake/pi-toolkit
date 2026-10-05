@@ -17,6 +17,7 @@ const detail = {
   contextLabel: "Context",
   contextAria: "Context used",
   costLabel: "Cost",
+  metricsToggleAria: "Toggle context and cost metrics",
   subCost: "sub {v}",
   waitingOnDialog: "Waiting on a dialog in the terminal:",
   waitingMore: "(+{n} more)",

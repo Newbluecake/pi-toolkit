@@ -127,3 +127,14 @@
     display: inline;
   }
 }
+
+/* landscape phones (todo #7): reclaim vertical space — 52px bar compresses to 40px. The
+ * interactive controls inside (`.switch`, `.jump-latest`) keep their own 44px hit boxes, so
+ * `shell-touch-targets-44px` is unaffected; the safe-area `max()` convention is kept. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .dock {
+    min-height: 40px;
+    padding-top: 0;
+    padding-bottom: max(0px, env(safe-area-inset-bottom));
+  }
+}

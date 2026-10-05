@@ -18,9 +18,21 @@ import type { HubHandle, HubState, Route } from "../../../src/web-hub/ui/src/typ
  *    same `onBack()` a real back-button click uses.
  */
 
-function stubMatchMedia(matches: boolean): void {
+/**
+ * Query-aware `matchMedia` stub (todo #7: DashboardView now reads THREE queries —
+ * `(max-width: 767px)` narrow, `(min-width: 1025px)` wide split, and the 481–1024 drawer
+ * band — so a single boolean no longer describes every query). The boolean API is kept for
+ * the pre-existing cases: `true` = phone (narrow only), `false` = ≥1025 split (wide only).
+ */
+function stubMatchMedia(narrow: boolean): void {
+  const map: Record<string, boolean> = {
+    "(max-width: 767px)": narrow,
+    "(max-width: 480px)": narrow,
+    "(min-width: 1025px)": !narrow,
+    "(min-width: 481px) and (max-width: 1024px)": false,
+  };
   vi.stubGlobal("matchMedia", (query: string) => ({
-    matches,
+    matches: map[query] ?? false,
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},

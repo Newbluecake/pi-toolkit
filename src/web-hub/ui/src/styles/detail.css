@@ -10,11 +10,18 @@
  * `DetailBody.vue`'s root `<section>`), so P4 only has to lay out *inside* an already flex:1,
  * min-height:0, column-flex box — never having to duplicate this file's own sizing rules.
  *
- * Breakpoint note (plan §0.3): the mockup's "desktop, one-line title / back button hidden"
- * treatment used a 1025px breakpoint, coupled to the sidebar/detail split. This build moves it
- * to **768px** to match `shell.css`'s split breakpoint — below 768 only one of the agent list /
- * detail pane is ever mounted at a time (so the back button is meaningful), at/above 768 both
- * are mounted permanently side by side (so it is not).
+ * Breakpoint note (plan §0.3 + todo #7): the mockup's "desktop, one-line title / back button
+ * hidden" treatment used a 1025px breakpoint, coupled to the sidebar/detail split. The P3
+ * build moved it to 768px to match the then-current split; todo #7's re-cut (split back at
+ * 1025px, 481–1024 single-view + overlay drawer) keeps the one-line title at ≥768 but the
+ * back button is now shown on BOTH single-view bands — its `v-if` is component-driven
+ * (`narrow` prop ∨ the injected drawer context, see `DetailHeader.vue`), and the CSS hide
+ * below is a second guard aligned with the 1025px split.
+ *
+ * ≤480px metrics fold (todo #7): `.metrics-wrap` carries `data-collapsed` and a one-line
+ * `.metrics-summary` toggle ("62% · $195.54"); the fold only applies below 481px — at/above
+ * it the summary button is hidden and the full `.metrics` panel always shows, exactly the
+ * pre-fold layout.
  */
 
 .detail {
@@ -34,13 +41,20 @@
   border-bottom: 1px solid var(--c-border);
 }
 
-.detail-back {
+.detail-back,
+.detail-drawer-toggle {
   display: inline-flex;
   flex: none;
   width: 44px;
   min-height: 44px;
   margin-left: -12px;
   padding: 0;
+}
+
+/* two icon buttons sit at the titlebar's left edge in the mid band — only the first one gets
+ * the negative margin that optically aligns it with the title text */
+.detail-drawer-toggle + .detail-back {
+  margin-left: 0;
 }
 
 .detail-titlebar {
@@ -149,6 +163,48 @@
   user-select: all; /* fallback copy path: navigator.clipboard is unavailable on plain-HTTP LAN */
 }
 
+/* ≤480px the wrap is the sunken box; ≥481px (below) the box look moves off again and the wrap
+ * becomes a plain grid item, identical to the pre-fold `.metrics` placement. */
+.metrics-wrap {
+  border-radius: var(--r-md);
+  background: var(--c-sunken);
+}
+
+/* one-line summary toggle ("62% · $195.54") — phones only; display:none ≥481px below */
+.metrics-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 40px;
+  padding: var(--sp-1) var(--sp-3);
+  border: 0;
+  background: none;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.metrics-summary .chev {
+  margin-left: auto;
+  color: var(--c-text-3);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.metrics-wrap[data-collapsed="false"] .metrics-summary {
+  padding-bottom: 0;
+}
+
+.metrics-wrap[data-collapsed="false"] .metrics-summary .chev {
+  transform: rotate(90deg);
+}
+
+.metrics-wrap[data-collapsed="true"] .metrics {
+  display: none;
+}
+
 .metrics {
   display: flex;
   flex-wrap: wrap;
@@ -157,8 +213,6 @@
   gap: var(--sp-2) var(--sp-4);
   margin: 0;
   padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-md);
-  background: var(--c-sunken);
 }
 
 .metric {
@@ -210,29 +264,42 @@
 
 @media (min-width: 481px) {
   .detail-head {
-    /* `minmax(0, 1fr)` let `.metrics`' auto column (whose max-content width grows once the
-     * token-count aside — `.hide-sm` — turns on at this exact breakpoint) crush column 1 down
-     * to 0px, taking `.session-info`'s `summary.session-sum` touch target with it
+    /* `minmax(0, 1fr)` let `.metrics-wrap`'s auto column (whose max-content width grows once
+     * the token-count aside — `.hide-sm` — turns on at this exact breakpoint) crush column 1
+     * down to 0px, taking `.session-info`'s `summary.session-sum` touch target with it
      * (checks-shell.ts's `shell-touch-targets-44px`, only ever observed right at 481px). A
-     * fixed floor keeps the title/session-info column usable; `.metrics` overflowing its own
-     * `auto` track at the narrowest widths is the lesser regression. */
+     * fixed floor keeps the title/session-info column usable; `.metrics-wrap` overflowing its
+     * own `auto` track at the narrowest widths is the lesser regression. */
     grid-template-columns: minmax(180px, 1fr) auto;
     gap: var(--sp-1) var(--sp-6);
     padding: var(--sp-1) var(--sp-6) var(--sp-3);
   }
 
   .detail-back,
+  .detail-drawer-toggle,
   .detail-titlebar,
   .session-info {
     grid-column: 1;
   }
 
-  .metrics {
+  .metrics-wrap {
     grid-column: 2;
     grid-row: 2 / span 2;
     align-self: center;
-    padding: 0;
     background: none;
+  }
+
+  .metrics-summary {
+    display: none;
+  }
+
+  /* phones-only fold state is inert at/above 481px: the full panel always shows */
+  .metrics-wrap[data-collapsed="true"] .metrics {
+    display: flex;
+  }
+
+  .metrics {
+    padding: 0;
     gap: var(--sp-6);
   }
 
@@ -246,10 +313,6 @@
 }
 
 @media (min-width: 768px) {
-  .detail-back {
-    display: none;
-  }
-
   .detail-title {
     -webkit-line-clamp: 1;
     line-clamp: 1;
@@ -259,13 +322,46 @@
     padding-top: var(--sp-3);
   }
 
-  .metrics {
+  .metrics-wrap {
     grid-row: 1 / span 2;
+  }
+}
+
+@media (min-width: 1025px) {
+  /* split view: the component already never renders the back/drawer buttons here (no drawer
+   * context active, `narrow` false) — this is a second, CSS-only guard of the same line */
+  .detail-back,
+  .detail-drawer-toggle {
+    display: none;
+  }
+}
+
+/* landscape phones (todo #7): the header collapses to a single titlebar line — session info
+ * and the metrics panel hide outright (both remain one tap away in portrait / on taller
+ * viewports), paddings tighten. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .detail-head {
+    gap: 0;
+    padding: var(--sp-1) var(--sp-3) var(--sp-1);
+  }
+
+  .detail-head .session-info,
+  .detail-head .metrics-wrap {
+    display: none;
+  }
+
+  .detail-title {
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
   }
 }
 
 @media (pointer: coarse) {
   .session-sum {
+    min-height: 44px;
+  }
+
+  .metrics-summary {
     min-height: 44px;
   }
 }

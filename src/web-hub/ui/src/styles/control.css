@@ -678,3 +678,29 @@
     min-height: 44px;
   }
 }
+
+/* --- landscape phones (todo #7): composer compaction — vertical gaps/paddings shrink; the
+ * textarea and send button keep their 44px min-height hit boxes, and `.composer-sub`'s own
+ * controls stay mounted (command mode's send-as-text checkbox is interactive) --- */
+@media (orientation: landscape) and (max-height: 500px) {
+  .composer {
+    gap: 0;
+  }
+
+  /* dock.css's landscape `.dock` padding override loses the cascade to `.dock-ctl` below
+   * (same specificity, this file imports later) — repeat it here so the live control dock
+   * actually compresses (61px → ~45px; the 44px hit boxes inside are untouched). */
+  .dock-ctl {
+    padding-top: 0;
+    padding-bottom: max(0px, env(safe-area-inset-bottom));
+  }
+
+  .composer textarea {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .composer-sub {
+    gap: var(--sp-2);
+  }
+}

@@ -18,6 +18,7 @@ const agents = {
   noSessionName: "（无会话名称）",
   collapseSidebar: "收起侧边栏",
   expandSidebar: "展开侧边栏",
+  openDrawer: "显示代理列表",
   newSession: "新建会话",
   newSessionAria: "为当前选中的 agent 开启新会话（执行 /new）",
   newSessionOk: "已开启新会话",
