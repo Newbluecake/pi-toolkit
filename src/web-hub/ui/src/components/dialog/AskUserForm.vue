@@ -20,7 +20,7 @@
   terminal / …" from `dialogs.closed[].by`) — this component only emits.
 -->
 <script setup lang="ts">
-import { computed, inject, provide, reactive, ref, watch } from "vue";
+import { computed, inject, nextTick, provide, reactive, ref, watch } from "vue";
 import { buildDialogAnswers, dialogComplete } from "@logic/control.js";
 import type { AskUserQuestionWire, DialogWire } from "@protocol/messages.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -72,6 +72,34 @@ function saveDraft(): void {
 
 const suspended = computed(() => props.suspended === true);
 
+// --- auto-advance (multi-question; 2026-10 mobile UX) ---------------------------------------
+// A single-select answer on one tab jumps to the next unanswered tab (forward, wrapping back to
+// the start) so a phone user never has to reach for the tab row between questions. multiSelect
+// toggles and Other free text never call this (askFormContext.ts's AskFormCtx.onAnswered doc) —
+// there is no reliable "this question is done" moment for either. Manual tab clicks are
+// untouched (this only ever WRITES `activeTab`, same ref the tab buttons already use).
+const submitBtn = ref<HTMLButtonElement | null>(null);
+
+function isAnswered(sel: AskSelection | undefined): boolean {
+  if (sel === undefined) return false;
+  return sel.selected.length > 0 || (typeof sel.other === "string" && sel.other.trim() !== "");
+}
+
+function onQuestionAnswered(index: number): void {
+  if (!multi.value) return; // single-question dialogs have no tab to advance to
+  const n = questions.value.length;
+  for (let step = 1; step <= n; step++) {
+    const next = (index + step) % n;
+    if (!isAnswered(selections[next])) {
+      activeTab.value = next;
+      return;
+    }
+  }
+  // every question answered: stay put, move focus to Submit (nextTick — it may have just
+  // flipped from disabled to enabled this same tick).
+  void nextTick(() => submitBtn.value?.focus());
+}
+
 // accfix-N1: `questions` must stay a LIVE view, not a one-time snapshot of `questions.value` —
 // this component's <script setup> runs once per mount, but `props.dialog` (and therefore
 // `questions.value`) can be replaced with a new array (same dialogId, different array/item
@@ -89,6 +117,7 @@ provide(ASK_FORM, {
   selections,
   suspended,
   saveDraft,
+  onAnswered: onQuestionAnswered,
 });
 
 // --- tabs (multi-question; §7.4 "多题 = 顶部 tab（header）") ---
@@ -168,6 +197,7 @@ watch(draftKey, () => {
 
     <div class="ask-actions">
       <button
+        ref="submitBtn"
         class="btn btn-primary"
         type="button"
         data-submit

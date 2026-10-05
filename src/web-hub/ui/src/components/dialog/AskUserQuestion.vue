@@ -61,6 +61,11 @@ function onToggle(label: string, ev: Event): void {
 
 function onRadio(label: string): void {
   setSelected([label]);
+  // 2026-10 mobile UX: auto-advance multi-question dialogs to the next unanswered tab. Only
+  // fired for this single-select path — setSelected() alone (shared with the multiSelect
+  // checkbox toggle above) has no "this question is done" signal of its own.
+  const i = index.value;
+  if (form && i >= 0 && !form.suspended.value) form.onAnswered?.(i);
 }
 
 function onOtherInput(ev: Event): void {

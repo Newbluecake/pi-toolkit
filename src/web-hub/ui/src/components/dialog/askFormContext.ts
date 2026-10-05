@@ -21,6 +21,14 @@ export interface AskFormCtx {
   readonly suspended: ComputedRef<boolean>;
   /** Persist the current selections into the draft map (called on every change). */
   saveDraft(): void;
+  /**
+   * A single-select (radio) answer was just picked for question `index` (2026-10 mobile UX:
+   * multi-question dialogs auto-advance to the next unanswered tab). Never called for a
+   * `multiSelect` toggle or an Other free-text edit — neither has a reliable "done" moment, so
+   * forcing a tab switch there would yank focus out from under a user still typing/picking.
+   * Optional so isolated `AskUserQuestion` tests (mounted without a form context) stay inert.
+   */
+  onAnswered?(index: number): void;
 }
 
 export const ASK_FORM: InjectionKey<AskFormCtx> = Symbol("web-hub-ask-form");

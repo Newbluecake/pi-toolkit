@@ -14,6 +14,15 @@
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   background: var(--c-warning-soft);
+  /* 2026-10 mobile UX: a long option list / long descriptions can make the form taller than
+   * the viewport. Instead of letting the WHOLE page scroll past the Submit/Cancel row (the
+   * actual bug report — a phone user had to hunt for the buttons below everything else), the
+   * form becomes its own scrollport, bounded well under typical viewport heights, and
+   * `.ask-actions` below sticks to its bottom edge (sticky needs a scrolling ancestor; this IS
+   * one). When content fits, nothing scrolls and this is a no-op — byte-identical to before. */
+  max-height: min(70vh, 640px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ask-user-form[data-suspended] {
@@ -159,10 +168,31 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  /* Always-visible submit/cancel row (2026-10 mobile UX): sticks to the bottom of
+   * `.ask-user-form`'s own scrollport (see its `max-height`/`overflow-y` above) instead of
+   * requiring a scroll to the end of a long question list to find it. `background: inherit`
+   * picks up the plain/`[data-suspended]` form background automatically so the sticky bar never
+   * shows transcript/options bleeding through underneath it in either theme. No-op when the
+   * form doesn't scroll — it just renders in its normal flow position, same as before. */
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-2);
+  background: inherit;
+  border-top: 1px solid var(--c-border);
 }
 
 .ask-actions .btn {
   min-height: 44px;
+}
+
+/* Narrow phones: a right-aligned pair of compact buttons is easy to miss/mis-tap one-handed.
+ * Let the primary action (Submit) grow to fill the row — Cancel keeps its own size next to it. */
+@media (max-width: 480px) {
+  .ask-actions .btn-primary {
+    flex: 1 1 auto;
+  }
 }
 
 .ask-actions .btn.armed {

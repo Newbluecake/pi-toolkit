@@ -1,4 +1,7 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -92,9 +95,10 @@ function fakeView(): ControlView {
   };
 }
 
-function mountForm(dialog: unknown, opts: { suspended?: boolean; env?: ControlEnv } = {}) {
+function mountForm(dialog: unknown, opts: { suspended?: boolean; env?: ControlEnv; attachTo?: Element } = {}) {
   const wrapper = mount(AskUserForm, {
     props: { dialog, suspended: opts.suspended ?? false },
+    attachTo: opts.attachTo,
     global: {
       provide: {
         [CONTROL_VIEW as symbol]: fakeView(),
@@ -290,5 +294,95 @@ describe("AskUserForm.vue — restored dialog reference stays selectable (accfix
         ],
       ],
     ]);
+  });
+});
+
+describe("AskUserForm.vue — auto-advance on single-select (2026-10 mobile UX)", () => {
+  function radioOf(w: ReturnType<typeof mountForm>, qi: number) {
+    return w.findAll(".ask-question")[qi]!.find("input[type='radio']");
+  }
+  function checkboxesOf(w: ReturnType<typeof mountForm>, qi: number) {
+    return w.findAll(".ask-question")[qi]!.findAll("input[type='checkbox']");
+  }
+  function activeIndex(w: ReturnType<typeof mountForm>): number {
+    return w.findAll("[data-question-tab]").findIndex((b) => b.attributes("aria-selected") === "true");
+  }
+
+  it("a single-select pick on tab 0 jumps to the next unanswered tab (tab 1)", async () => {
+    const w = mountForm(MULTI);
+    expect(activeIndex(w)).toBe(0);
+    await radioOf(w, 0).setValue(true);
+    expect(activeIndex(w)).toBe(1);
+  });
+
+  it("skips an already-answered tab and wraps back to the start to find the next gap", async () => {
+    const w = mountForm(MULTI);
+    await radioOf(w, 0).setValue(true); // q0 answered → auto-advances to tab 1 (Gates)
+    expect(activeIndex(w)).toBe(1);
+    await checkboxesOf(w, 1)[0]!.setValue(true); // multiSelect: answered, but no auto-advance
+    expect(activeIndex(w)).toBe(1);
+    await w.findAll("[data-question-tab]")[2]!.trigger("click"); // manual move to q2 (last)
+    await radioOf(w, 2).setValue(true); // q2 answered; q0 and q1 already answered → nothing left
+    expect(activeIndex(w)).toBe(2); // stays put (every question already answered)
+  });
+
+  it("a multiSelect checkbox toggle never auto-advances", async () => {
+    const w = mountForm(MULTI);
+    await w.findAll("[data-question-tab]")[1]!.trigger("click");
+    expect(activeIndex(w)).toBe(1);
+    await checkboxesOf(w, 1)[0]!.setValue(true);
+    expect(activeIndex(w)).toBe(1);
+    await checkboxesOf(w, 1)[1]!.setValue(true);
+    expect(activeIndex(w)).toBe(1);
+  });
+
+  it("typing free text into Other never auto-advances", async () => {
+    const w = mountForm(MULTI);
+    await w.findAll("[data-question-tab]")[2]!.trigger("click");
+    expect(activeIndex(w)).toBe(2);
+    await w.findAll(".ask-question")[2]!.find("[data-other]").setValue("custom answer");
+    expect(activeIndex(w)).toBe(2);
+  });
+
+  it("once every question is answered, the tab stays put and focus moves to Submit", async () => {
+    const w = mountForm(MULTI, { attachTo: document.body });
+    await radioOf(w, 0).setValue(true); // → tab 1
+    await checkboxesOf(w, 1)[0]!.setValue(true); // multiSelect: no auto-advance, still tab 1
+    await w.findAll("[data-question-tab]")[2]!.trigger("click"); // manual → tab 2 (last unanswered)
+    await radioOf(w, 2).setValue(true); // last answer — nothing left to advance to
+    await vi.waitFor(() => expect(document.activeElement).toBe(w.find("[data-submit]").element));
+    expect(activeIndex(w)).toBe(2);
+  });
+
+  it("single-question dialogs never try to switch tabs (no tabs exist)", async () => {
+    const w = mountForm(SINGLE);
+    await radioOf(w, 0).setValue(true);
+    expect(w.find("[data-question-tab]").exists()).toBe(false);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+  });
+});
+
+describe("AskUserForm.vue — sticky submit/cancel dock (2026-10 mobile UX, structural only)", () => {
+  it("renders `.ask-actions` as the form's own last child so a CSS sticky-footer rule can target it", () => {
+    const w = mountForm(SINGLE);
+    const form = w.find(".ask-user-form");
+    const children = form.element.children;
+    expect(children.length).toBeGreaterThan(0);
+    expect(children[children.length - 1]!.className).toContain("ask-actions");
+  });
+
+  it("dialog.css: the form is its own bounded scrollport and the actions row sticks to its bottom", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/dialog.css"),
+      "utf8",
+    );
+    const formRule = /\.ask-user-form\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(formRule).toMatch(/overflow-y:\s*auto/);
+    expect(formRule).toMatch(/max-height:/);
+    const actionsRule = /\.ask-actions\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(actionsRule).toMatch(/position:\s*sticky/);
+    expect(actionsRule).toMatch(/bottom:\s*0/);
+    // must not go transparent over whatever scrolled underneath it
+    expect(actionsRule).toMatch(/background:/);
   });
 });
