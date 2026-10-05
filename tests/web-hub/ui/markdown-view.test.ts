@@ -90,3 +90,58 @@ describe("MarkdownView.vue", () => {
     expect(wrapper.text()).toBe("Hello world");
   });
 });
+
+describe("MarkdownView.vue — whitelist extension (table/quote/del/task list)", () => {
+  it("renders GFM tables with alignment classes inside a focusable horizontal-scroll wrapper", () => {
+    const wrapper = mount(MarkdownView, {
+      props: { text: "| name | age |\n|:-----|----:|\n| amy | 3 |" },
+    });
+    // axe scrollable-region-focusable: the horizontally scrollable wrapper must be focusable.
+    expect(wrapper.get(".md-table-wrap").attributes("tabindex")).toBe("0");
+    const ths = wrapper.findAll("th");
+    expect(ths.map((t) => t.text())).toEqual(["name", "age"]);
+    expect(ths[0]!.attributes("scope")).toBe("col");
+    expect(ths[1]!.classes()).toContain("md-tr");
+    expect(wrapper.findAll("td").map((t) => t.text())).toEqual(["amy", "3"]);
+  });
+
+  it("malformed tables render as literal text, never a <table>", () => {
+    const wrapper = mount(MarkdownView, { props: { text: "| a | b |\n| --- | x |\n| 1 | 2 |" } });
+    expect(wrapper.find("table").exists()).toBe(false);
+    expect(wrapper.text()).toContain("| a | b |");
+  });
+
+  it("table cell HTML stays inert text (no element created)", () => {
+    const wrapper = mount(MarkdownView, { props: { text: "| a |\n|---|\n| <img src=x onerror=alert(1)> |" } });
+    expect(wrapper.find("table").exists()).toBe(true);
+    expect(wrapper.find("img").exists()).toBe(false);
+    expect(wrapper.text()).toContain("<img src=x onerror=alert(1)>");
+  });
+
+  it("renders blockquotes recursively (inline marks and nested lists)", () => {
+    const wrapper = mount(MarkdownView, { props: { text: "> quoted **bold**\n> - item" } });
+    const bq = wrapper.get("blockquote");
+    expect(bq.get("strong").text()).toBe("bold");
+    expect(bq.get("li").text()).toBe("item");
+  });
+
+  it("renders ~~strikethrough~~ as a <del> element", () => {
+    const wrapper = mount(MarkdownView, { props: { text: "this is ~~gone~~ kept" } });
+    expect(wrapper.get("del").text()).toBe("gone");
+    expect(wrapper.text()).toContain("kept");
+  });
+
+  it("renders task items as read-only checkbox semantics, never an interactive <input>", () => {
+    const wrapper = mount(MarkdownView, { props: { text: "- [ ] todo\n- [x] done\n- plain" } });
+    const boxes = wrapper.findAll('[role="checkbox"]');
+    expect(boxes.length).toBe(2);
+    expect(boxes[0]!.attributes("aria-checked")).toBe("false");
+    expect(boxes[1]!.attributes("aria-checked")).toBe("true");
+    for (const b of boxes) expect(b.attributes("aria-disabled")).toBe("true");
+    expect(wrapper.find("input").exists()).toBe(false);
+    const lis = wrapper.findAll("li");
+    expect(lis[0]!.classes()).toContain("md-task");
+    expect(lis[2]!.classes()).not.toContain("md-task");
+    expect(lis.map((li) => li.text())).toEqual(["☐todo", "☑done", "plain"]);
+  });
+});

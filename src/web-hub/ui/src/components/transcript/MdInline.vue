@@ -18,6 +18,7 @@ defineProps<{ readonly nodes: readonly Inline[] }>();
     <code v-else-if="n.type === 'code'" class="md-code">{{ n.text }}</code>
     <strong v-else-if="n.type === 'strong'"><MdInline :nodes="n.children" /></strong>
     <em v-else-if="n.type === 'em'"><MdInline :nodes="n.children" /></em>
+    <del v-else-if="n.type === 'del'"><MdInline :nodes="n.children" /></del>
     <a v-else-if="n.type === 'link'" :href="n.href" rel="noopener noreferrer nofollow" target="_blank"
       ><MdInline :nodes="n.children"
     /></a>

@@ -227,6 +227,62 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   overflow-wrap: anywhere;
 }
 
+/* blockquote (recursive; nests lists/code/tables) */
+.md-quote {
+  margin: 0;
+  padding: 1px 0 1px var(--sp-3);
+  border-left: 3px solid var(--c-border-strong);
+  color: var(--c-text-2);
+}
+
+.md-quote > * + * {
+  margin-top: var(--sp-2);
+}
+
+/* GFM pipe table — the wrapper scrolls horizontally on narrow viewports instead of
+   squeezing the message column (mobile-first: applies at ≤480px and up) */
+.md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.md-table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+
+.md-table th,
+.md-table td {
+  padding: 3px var(--sp-2);
+  border: 1px solid var(--c-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-table th {
+  background: var(--c-sunken);
+  font-weight: 600;
+}
+
+.md-table .md-tc {
+  text-align: center;
+}
+
+.md-table .md-tr {
+  text-align: right;
+}
+
+/* task list items — read-only checkbox glyph (span[role=checkbox]), no bullet */
+.md li.md-task {
+  list-style: none;
+  margin-left: -22px; /* counteract .md ul/ol padding-left so text stays column-aligned */
+}
+
+.md-task-check {
+  margin-right: 6px;
+  user-select: none;
+}
+
 .caret {
   display: inline-block;
   width: 8px;
