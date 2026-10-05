@@ -137,6 +137,16 @@ describe("UTF-8 byte caps (schema prefilter + exact byte check)", () => {
     expect(parseSpawnRequestBody(body({ firstPrompt: { text: "a".repeat(48 * 1024) } }))).toMatchObject({ ok: true });
     expect(parseSpawnRequestBody(body({ firstPrompt: { text: "中".repeat(16 * 1024) } }))).toMatchObject({ ok: true });
   });
+
+  it("SP9 / SP1 leftover P3①: expectCwd passing the UTF-16 prefilter but exceeding 4096 UTF-8 bytes is rejected by bytes", () => {
+    // 2048 chars × 3 bytes = 6144 bytes; UTF-16 length 2048 ≤ 4096 so the schema alone lets it by —
+    // the exact byte re-check in parseSpawnRequestBody (same path as cwd) must catch it.
+    const wide = "中".repeat(2048);
+    expect(Value.Check(SpawnRequestSchema, body({ expectCwd: wide }))).toBe(true);
+    expect(parseSpawnRequestBody(body({ expectCwd: wide }))).toEqual({ ok: false, error: "cwd-too-long" });
+    // boundary: exactly 4096 bytes still passes
+    expect(parseSpawnRequestBody(body({ expectCwd: "中".repeat(1365) + "a" }))).toMatchObject({ ok: true });
+  });
 });
 
 describe("同源常量 pins (plan §SP1 验收)", () => {

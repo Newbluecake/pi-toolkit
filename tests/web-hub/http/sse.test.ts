@@ -1,7 +1,11 @@
 import { createServer, type Server } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createSseHub, formatSseFrame, type SseClient, type SseHub } from "../../../src/web-hub/hub/sse.js";
-import { openSse, type SseConn } from "./helpers.js";
+import { fakeDeps, login, openSse, type SseConn } from "./helpers.js";
 
 let server: Server | undefined;
 let hub: SseHub | undefined;
@@ -266,5 +270,69 @@ describe("SseHub auth / revoke / list (plan §4.2)", () => {
     a.close();
     await vi.waitFor(() => expect(h.count()).toBe(0));
     expect(h.list()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn plan §SP9: the `spawns` SSE slot through the real frontend
+// ---------------------------------------------------------------------------
+
+describe("spawns SSE slot (web-hub-spawn §SP9, arch §6.4/§8.2)", () => {
+  it("connect snapshot sends `spawns` right after `agents`; bus events are forwarded; absent deps.spawn ⇒ no frame", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pwh-sse-spawn-"));
+    try {
+      // 1) with deps.spawn: snapshot order hub → agents → spawns
+      const withSpawn = fakeDeps(tmp);
+      const payload = {
+        items: [
+          {
+            spawnId: "s1",
+            state: "starting",
+            createdAt: 1,
+            updatedAt: 1,
+            cwdLabel: "p",
+            origin: { listener: "loopback" as const, reqId: "r" },
+          },
+        ],
+        active: 1,
+        max: 4,
+      };
+      withSpawn.spawn = {
+        handle: async () => {},
+        publicPayload: (listener) => (listener === "loopback" ? payload : undefined),
+      };
+      let fe = createHttpFrontend(withSpawn);
+      let port = (await fe.listen()).port;
+      let cookie = await login(port, withSpawn.paths.tokenFile);
+      let conn = await openSse(port, { cookie });
+      conns.push(conn);
+      await conn.waitFor((e) => e.event === "spawns");
+      const names = conn.events.map((e) => e.event);
+      expect(names.indexOf("spawns")).toBe(names.indexOf("agents") + 1); // 紧跟 agents 之后
+      expect(conn.events.find((e) => e.event === "spawns")!.data).toEqual(payload);
+      // live push: a bus `spawns` event is forwarded to connected clients
+      withSpawn.emit({ type: "spawns", payload: { items: [], active: 0, max: 4 } });
+      await conn.waitFor((_e, all) => all.filter((x) => x.event === "spawns").length === 2);
+      const live = conn.events.filter((e) => e.event === "spawns").at(-1)!;
+      expect(live.data).toEqual({ items: [], active: 0, max: 4 });
+      conn.close();
+      await fe.close();
+
+      // 2) without deps.spawn: no spawns frame, ever — even when the bus carries the event
+      const bare = fakeDeps(tmp);
+      fe = createHttpFrontend(bare);
+      port = (await fe.listen()).port;
+      cookie = await login(port, bare.paths.tokenFile);
+      conn = await openSse(port, { cookie });
+      conns.push(conn);
+      await conn.waitFor((e) => e.event === "agents");
+      bare.emit({ type: "spawns", payload: { items: [], active: 0, max: 4 } });
+      await new Promise((r) => setTimeout(r, 80));
+      expect(conn.events.some((e) => e.event === "spawns")).toBe(false);
+      conn.close();
+      await fe.close();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

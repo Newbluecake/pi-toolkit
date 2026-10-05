@@ -204,6 +204,12 @@ export function parseSpawnRequestBody(
   if (!Value.Check(SpawnRequestSchema, raw)) return { ok: false, error: "schema" };
   const body: SpawnRequestBody = Value.Decode(SpawnRequestSchema, raw);
   if (byteLength(body.cwd) > SPAWN_CWD_MAX_BYTES) return { ok: false, error: "cwd-too-long" };
+  // SP9 (SP1 acceptance leftover P3①): `expectCwd` gets the same exact UTF-8 byte re-check as
+  // `cwd` — the typebox `maxLength` above is only a UTF-16-unit prefilter, so e.g. 2048 astral
+  // chars (4096 units, 8192 bytes) would slip through it otherwise.
+  if (body.expectCwd !== undefined && byteLength(body.expectCwd) > SPAWN_CWD_MAX_BYTES) {
+    return { ok: false, error: "cwd-too-long" };
+  }
   if (body.firstPrompt !== undefined && byteLength(body.firstPrompt.text) > PROMPT_TEXT_MAX_BYTES) {
     return { ok: false, error: "first-prompt-too-long" };
   }

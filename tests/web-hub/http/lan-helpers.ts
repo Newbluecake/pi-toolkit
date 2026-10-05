@@ -20,6 +20,7 @@ import { createKdfAdmission } from "../../../src/web-hub/hub/kdf-admission.js";
 import { createLoginLimiter, type LoginLimiter } from "../../../src/web-hub/hub/ratelimit.js";
 import type { HubEvent, HubLanConfig, HttpFrontend, LanStatus } from "../../../src/web-hub/hub/ports.js";
 import type { CommandRouter } from "../../../src/web-hub/hub/ports.js";
+import type { SpawnFrontendPort } from "../../../src/web-hub/hub/spawn/ports.js";
 import { PROTO } from "../../../src/web-hub/protocol/version.js";
 import { captureLog, type LogLine } from "./helpers.js";
 import { testHubPaths } from "../helpers/paths.js";
@@ -78,6 +79,9 @@ export async function startLan(
      * omitted (undefined) preserves every existing caller's behavior byte-for-byte (those
      * endpoints answer 501, same as before this option existed). */
     commands?: CommandRouter;
+    /** web-hub-spawn plan §SP9: the spawn route frontend (`createSpawnRoutes` over the
+     * spawn-kit fakes) — omitted keeps the LAN face byte-identical to not-enabled. */
+    spawn?: SpawnFrontendPort;
   } = {},
 ): Promise<LanHarness> {
   const clock = opts.clock ?? fakeClock();
@@ -138,6 +142,7 @@ export async function startLan(
     now: clock.now,
     lan: { cfg, store, kdf, limiter, admission, hosts, scope, onStatus: (s) => (lastStatus = s) },
     ...(opts.commands === undefined ? {} : { commands: opts.commands }),
+    ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
   });
 
   if (fe.lan === undefined) throw new Error("test bug: fe.lan not constructed");

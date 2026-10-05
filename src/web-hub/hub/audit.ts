@@ -10,6 +10,7 @@
 /** UploadStats is imported type-only: `uploads.ts` never imports this module (the store's audit
  * seam is the `deps.audit` callback), so there is no cycle. */
 import type { UploadStats } from "./uploads.js";
+import type { SpawnAuditRecord } from "./spawn/supervisor.js";
 
 // ---------------------------------------------------------------------------
 // HTTP-layer upload metrics (plan §5.4 stats row, U3 P2-2)
@@ -231,4 +232,63 @@ export function auditUpload(log: { info(msg: string, data?: object): void }, rec
     if (v !== undefined) out[key] = v;
   }
   log.info("upload", out);
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn plan §SP9 (arch v2 §6.6): spawn audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * Spawn audit record (arch §6.6, verbatim). The SHAPE lives in `hub/spawn/supervisor.ts` (SP7
+ * defined it next to every writer the supervisor already has — its `deps.audit` callback and the
+ * first-prompt forwarder's own lines); SP9 re-exports it here so `auditSpawn`'s callers import
+ * the audit channel, not the supervisor module. Type-only import: erased at runtime, so this
+ * adds no module-graph edge (same pattern as `UploadStats` above).
+ *
+ * NEVER carries the first-prompt text, stderr content, the raw request `cwd` string (the
+ * sanctioned exception is the RESOLVED realpath, for forensics) or extension dialog titles —
+ * `SPAWN_AUDIT_KEYS` is the runtime whitelist that enforces this even if a call site passes
+ * more (same discipline as `UPLOAD_AUDIT_KEYS`).
+ */
+export type { SpawnAuditRecord };
+
+/** Runtime whitelist for `auditSpawn` — anything not listed here is dropped, even if passed. */
+export const SPAWN_AUDIT_KEYS = [
+  "phase",
+  "endpoint",
+  "reqId",
+  "listener",
+  "ip",
+  "user",
+  "spawnId",
+  "cwd",
+  "known",
+  "confirmed",
+  "dup",
+  "pid",
+  "state",
+  "code",
+  "endReason",
+  "exitCode",
+  "signal",
+  "ms",
+  "limit",
+  "active",
+  "max",
+  "firstPrompt",
+  "textLen",
+  "attempts",
+  "identity",
+  "reaper",
+] as const;
+
+/** `log.info("spawn", { audit: "spawn", ...pick(record, SPAWN_AUDIT_KEYS) })` (arch §6.6). */
+export function auditSpawn(log: { info(msg: string, data?: object): void }, record: SpawnAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "spawn" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of SPAWN_AUDIT_KEYS) {
+    const v = raw[key];
+    if (v !== undefined) out[key] = v;
+  }
+  log.info("spawn", out);
 }

@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   auditAdmin,
   auditControl,
+  auditSpawn,
   auditUpload,
   createUploadHttpMetrics,
+  SPAWN_AUDIT_KEYS,
   uploadStatsFields,
+  type SpawnAuditRecord,
   type UploadAuditRecord,
 } from "../../../src/web-hub/hub/audit.js";
 import { memLog } from "./helpers.js";
@@ -238,5 +242,123 @@ describe("auditUpload (web-hub-upload plan §5.4, #11/#17, U3)", () => {
       rateLimited: 2,
       maxRetryAfterS: 4,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn plan §SP9 (arch §6.6): the spawn audit channel
+// ---------------------------------------------------------------------------
+
+describe("auditSpawn (web-hub-spawn plan §SP9, arch §6.6)", () => {
+  it("writes a single structured line tagged audit:spawn, preserving whitelisted fields", () => {
+    const log = memLog();
+    auditSpawn(log, {
+      audit: "spawn",
+      phase: "reject",
+      endpoint: "spawn",
+      reqId: "reqid-0000-aaaaaaaa",
+      listener: "lan",
+      ip: "10.0.0.9",
+      user: "u3",
+      code: "E_CONFIRM_REQUIRED",
+      cwd: "/srv/real/proj",
+      known: false,
+      confirmed: false,
+    });
+    auditSpawn(log, {
+      audit: "spawn",
+      phase: "request",
+      endpoint: "stop",
+      spawnId: "stopme00-0000-0001",
+      state: "stopping",
+      limit: "global",
+      active: 4,
+      max: 4,
+      firstPrompt: "pending",
+      textLen: 128,
+      attempts: 2,
+    });
+    expect(log.lines).toHaveLength(2);
+    expect(log.lines[0]!.msg).toBe("spawn");
+    expect(log.lines[0]!.data).toEqual({
+      audit: "spawn",
+      phase: "reject",
+      endpoint: "spawn",
+      reqId: "reqid-0000-aaaaaaaa",
+      listener: "lan",
+      ip: "10.0.0.9",
+      user: "u3",
+      code: "E_CONFIRM_REQUIRED",
+      cwd: "/srv/real/proj",
+      known: false,
+      confirmed: false,
+    });
+    expect(log.lines[1]!.data).toMatchObject({
+      phase: "request",
+      endpoint: "stop",
+      state: "stopping",
+      limit: "global",
+      active: 4,
+      max: 4,
+    });
+  });
+
+  it("runtime whitelist: any non-listed key is stripped even when passed (same discipline as UPLOAD_AUDIT_KEYS)", () => {
+    const log = memLog();
+    const rec: SpawnAuditRecord & { text?: string; stderr?: string; title?: string } = {
+      audit: "spawn",
+      phase: "state",
+      spawnId: "s1",
+      state: "failed",
+      text: "FIRST PROMPT BODY",
+      stderr: "some stderr blob",
+      title: "Dialog Title",
+    };
+    auditSpawn(log, rec);
+    const line = log.lines[0]!.data as Record<string, unknown>;
+    expect(Object.keys(line).sort()).toEqual(["audit", "phase", "spawnId", "state"].sort());
+    expect(line["text"]).toBeUndefined();
+    expect(line["stderr"]).toBeUndefined();
+    expect(line["title"]).toBeUndefined();
+  });
+
+  it("SPAWN_AUDIT_KEYS is exactly arch §6.6's field set — no text/stderr/title column exists", () => {
+    expect(SPAWN_AUDIT_KEYS).toEqual([
+      "phase",
+      "endpoint",
+      "reqId",
+      "listener",
+      "ip",
+      "user",
+      "spawnId",
+      "cwd",
+      "known",
+      "confirmed",
+      "dup",
+      "pid",
+      "state",
+      "code",
+      "endReason",
+      "exitCode",
+      "signal",
+      "ms",
+      "limit",
+      "active",
+      "max",
+      "firstPrompt",
+      "textLen",
+      "attempts",
+      "identity",
+      "reaper",
+    ]);
+    // negative (U7): neither the keys nor the audit source may carry raw text/stderr writers
+    expect(SPAWN_AUDIT_KEYS).not.toContain("text");
+    expect(SPAWN_AUDIT_KEYS.filter((k) => k.startsWith("stderr"))).toEqual([]);
+    const src = readFileSync(new URL("../../../src/web-hub/hub/audit.ts", import.meta.url), "utf8");
+    expect(src).not.toContain("firstPrompt.text");
+    expect(src).not.toContain("stderrTail");
+    const routesSrc = readFileSync(new URL("../../../src/web-hub/hub/spawn/routes.ts", import.meta.url), "utf8");
+    expect(routesSrc).not.toContain("stderr"); // stderr never flows through the route layer at all
+    expect(routesSrc).not.toMatch(/\btext:\s*intent\.firstPrompt\.text/); // only LENGTHS may be fed in
   });
 });

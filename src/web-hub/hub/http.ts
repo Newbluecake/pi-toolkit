@@ -67,8 +67,10 @@ import { createConnGuard } from "./conn-guard.js";
 import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
+import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
 import type { PinToken, UploadStore } from "./uploads.js";
+import type { SpawnFrontendPort } from "./spawn/ports.js";
 import type {
   AgentView,
   CommandRouter,
@@ -224,10 +226,12 @@ function safeErrorDetail(
 function statusFor(code: string): number {
   switch (code) {
     case "E_BAD_REQUEST":
+    case "E_DIR": // web-hub-spawn arch §8.2: admit rejection ⇒ 400 (reason rides the body)
       return 400;
     case "E_AUTH":
       return 401;
     case "E_CSRF":
+    case "E_SPAWN_DENIED": // web-hub-spawn arch §8.2: policy/platform refusal, no record created
       return 403;
     case "E_NOT_FOUND":
       return 404;
@@ -237,6 +241,10 @@ function statusFor(code: string): number {
       return 421;
     case "E_RATE":
       return 429;
+    case "E_LIMIT": // web-hub-spawn arch §6.5: resource limits exhausted ⇒ 409
+      return 409;
+    case "E_LAUNCHER": // web-hub-spawn arch §6.5: launcher/persist/reaper/breaker ⇒ 503
+      return 503;
     case "E_NOT_IMPLEMENTED":
       return 501;
     case "E_DEADLINE":
@@ -632,6 +640,11 @@ function createRouteSet(
     info: () => HubInfo;
     port: () => number;
     isClosed: () => boolean;
+    /** web-hub-spawn plan §SP9 (arch §6.4/§8.2): this listener's `spawns` SSE snapshot —
+     * `undefined` (deps.spawn absent, or LAN policy `off`) means the listener never sends a
+     * `spawns` frame, byte-identical to the not-enabled matrix. Also doubles as the live-push
+     * gate in `onHubEvent`'s `case "spawns"`. */
+    spawns?: () => SpawnsPayload | undefined;
   },
 ): RouteSet {
   const pending = new Map<string, Map<string, PendingSub>>();
@@ -732,6 +745,15 @@ function createRouteSet(
             ...(e.data === undefined ? {} : { data: e.data }),
           });
           break;
+        // web-hub-spawn plan §SP9 (arch §6.4/§8.2): the supervisor's `spawns` broadcast carries
+        // the Public projection only. `routeDeps.spawns?.()` is the LISTENER gate, not the
+        // payload: LAN policy `off` ⇒ undefined ⇒ this listener's clients never see a `spawns`
+        // frame — byte-identical to the not-enabled matrix row.
+        case "spawns": {
+          const p = routeDeps.spawns?.();
+          if (p !== undefined) sse.publish("spawns", e.payload);
+          break;
+        }
         case "hub":
           // acc32-B6: mirrors `openEvents`' own connect-time "hub" send below — same shape, so
           // the frontend's `case "hub"` reducer (already written for repeated frames) needs no
@@ -777,6 +799,10 @@ function createRouteSet(
     const client = sse.attach(req, res, lastEventId, auth);
     client.send("hub", { ...routeDeps.info(), port: routeDeps.port() });
     client.send("agents", { agents: routeDeps.registry.list().map(toCard) });
+    // web-hub-spawn plan §SP9: the `spawns` snapshot rides right after `agents`, so a
+    // (re)connecting browser gets the full fleet + spawn-board picture in one connect burst.
+    const sp = routeDeps.spawns?.();
+    if (sp !== undefined) client.send("spawns", sp);
     for (const [agentKey, runs] of fleetCache) client.send("fleet", { agentKey, runs });
     res.once("close", () => pending.delete(client.id));
     return client;
@@ -867,6 +893,11 @@ export interface LanRuntime {
    * throttle key's reject line is written at most once per `RATE_AUDIT_WINDOW_MS` regardless of
    * which listener the flood is coming from. */
   rejectAudit429?: Map<string, number>;
+  /** web-hub-spawn plan §SP9 (arch §8.2): the spawn route frontend, same instance as the
+   * loopback listener's. `handleLanRequestInner` only dispatches to it when its own LAN-policy
+   * gate (`publicPayload("lan") !== undefined`, i.e. `cfg.lan !== "off"`) passes — absent ⇒ the
+   * LAN face stays byte-identical to the not-enabled matrix. */
+  spawn?: SpawnFrontendPort | undefined;
 }
 
 function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
@@ -1095,6 +1126,12 @@ function csrfOkLan(req: IncomingMessage, ctx: RequestContext): boolean {
   return canonicalOrigin(parsed.scheme, parsed.hostKey) === ctx.externalOrigin;
 }
 
+/** web-hub-spawn arch §8.2: every route the spawn frontend owns (single source for both the
+ * SP9 dispatch sites and the legacy 501 fallback below). */
+function isHeadlessPath(path: string): boolean {
+  return path === "/api/headless" || path.startsWith("/api/headless/");
+}
+
 async function handleLanRequestInner(
   rt: LanRuntime,
   req: IncomingMessage,
@@ -1137,6 +1174,32 @@ async function handleLanRequestInner(
   }
 
   res.setHeader("Cache-Control", "no-store");
+
+  // web-hub-spawn plan §SP9 (arch §8.2): `/api/headless*` — dispatched before the generic
+  // method branches, exactly like the `/api/cmd`/`/api/upload` branches below, and gated on the
+  // spawn frontend's own LAN-policy verdict (`publicPayload("lan")` is undefined when
+  // `cfg.lan === "off"`) so a policy-off LAN face falls through to the ORIGINAL paths and stays
+  // byte-identical to the not-enabled matrix. `authorize` copies the :cmd segment below.
+  if (rt.spawn !== undefined && isHeadlessPath(path) && rt.spawn.publicPayload("lan") !== undefined) {
+    return rt.spawn.handle(req, res, method, path, query, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      scheme: ctx.scheme,
+      viaTrustedProxy: ctx.viaTrustedProxy,
+      strictCsrfOk: () => strictCsrfOk(req, ctx.externalOrigin),
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, LAN_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      readJson,
+      sendJson,
+      sendError,
+      HttpError,
+    });
+  }
 
   if (method === "POST") {
     if (path === "/api/cmd" || path === "/api/dialog") {
@@ -1984,6 +2047,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   const cmdLimit = createCmdLimit(now);
   // C3 P1 fix (§6.4): shared 429-audit throttle map for both listeners, same lifetime as `cmdLimit`.
   const rejectAudit429 = new Map<string, number>();
+  // web-hub-spawn plan §SP9 (arch §4.1/§8.2): the managed-spawn route frontend — absent ⇒
+  // `/api/headless*` keeps its legacy replies (404/501 per the §8.2 not-enabled matrix) and no
+  // `spawns` SSE frame is ever sent, byte-identical to pre-SP9.
+  const spawnRoutes = deps.spawn;
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -2004,6 +2071,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     info: deps.info,
     port: () => port,
     isClosed: () => closed,
+    ...(spawnRoutes === undefined ? {} : { spawns: () => spawnRoutes.publicPayload("loopback") }),
   });
 
   // ---- LAN facade (§2.5/§6/§7) ------------------------------------------
@@ -2024,6 +2092,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       info: deps.info,
       port: () => lan.cfg.port,
       isClosed: () => lanClosed,
+      // LAN policy `off` ⇒ publicPayload("lan") is undefined ⇒ no `spawns` snapshot, no live
+      // forward — the LAN SSE face stays byte-identical to not-enabled (arch §8.2 matrix).
+      ...(spawnRoutes === undefined ? {} : { spawns: () => spawnRoutes.publicPayload("lan") }),
     });
     let lanClosed = false;
     const unsubscribeLanBus = bus.subscribe(lanRoutes.onHubEvent);
@@ -2047,6 +2118,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       uploadMetrics: deps.uploadMetrics,
       cmdLimit,
       rejectAudit429,
+      spawn: deps.spawn,
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -2244,6 +2316,32 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     query: URLSearchParams,
   ): Promise<void> {
     res.setHeader("Cache-Control", "no-store");
+    // web-hub-spawn plan §SP9 (arch §8.2): `/api/headless*` routes own their whole pipeline
+    // (strict CSRF → auth → policy → body → admit → confirm → re-auth → sync start) through
+    // the injected io below — the same helpers the cmd/dialog branch uses, one instance per
+    // request. Inserted before the method branches; the legacy 501 line further down stays as
+    // the not-enabled fallback (spawnRoutes absent).
+    if (spawnRoutes !== undefined && isHeadlessPath(path)) {
+      return spawnRoutes.handle(req, res, method, path, query, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        scheme: "http",
+        viaTrustedProxy: false,
+        strictCsrfOk: () =>
+          strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        readJson,
+        sendJson,
+        sendError,
+        HttpError,
+      });
+    }
     if (method === "POST") {
       if (path === "/api/cmd" || path === "/api/dialog") {
         return dispatchCmdOrDialog(req, res, path, {
@@ -2325,7 +2423,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
       if (path === "/api/subscribe") return routes.subscribe(body, res);
       if (path === "/api/unsubscribe") return routes.unsubscribe(body, res);
-      if (path === "/api/headless" || path.startsWith("/api/headless/")) throw new HttpError(501, "E_NOT_IMPLEMENTED"); // P3 — middleware already applied
+      if (isHeadlessPath(path)) throw new HttpError(501, "E_NOT_IMPLEMENTED"); // P3 — spawn frontend not wired (SP9 matrix: not-enabled)
       throw new HttpError(404, "E_NOT_FOUND");
     }
     if (method === "GET") {
