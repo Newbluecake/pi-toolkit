@@ -144,6 +144,28 @@ describe("createControl (§7.3)", () => {
     expect(h.calls[5]!.req).toMatchObject({ dialogId: "ask:t1", action: "cancel" });
   });
 
+  it("runCommand: E_CONFIRM_REQUIRED discards the queue item (DetailDock's CommandConfirm re-issues with a NEW id + confirm:true; a zombie failed card's retry could never pass)", async () => {
+    const h = harness({
+      commandResult: {
+        ok: false,
+        error: "E_CONFIRM_REQUIRED",
+        retryable: false,
+        effect: "none",
+        message: "/new requires confirmation — this changes the session. Resend with confirm:true to proceed.",
+      },
+    });
+    const outcome = await h.control.runCommand("A", "new", "");
+    expect(outcome.ok).toBe(false);
+    const id = (h.calls[0]!.req as CmdRequest).id;
+    const events = h.dispatched.map((d) => d.event);
+    expect(events).toEqual(["ctl_send", "ctl_result", "ctl_discard"]);
+    expect(h.dispatched[2]).toMatchObject({ event: "ctl_discard", data: { agentKey: "A", id } });
+    // a subsequent query for the discarded id is a local miss (retention entry also dropped)
+    const q = await h.control.query("A", id);
+    expect(q.ok).toBe(false);
+    expect(q.error).toBe("E_UNKNOWN_ID");
+  });
+
   it("every user action mints a fresh id (§3.4: 修改后再提交是新动作)", async () => {
     const h = harness();
     await h.control.sendPrompt("A", "same text", "steer");

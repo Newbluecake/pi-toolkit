@@ -167,7 +167,17 @@ export function createControl(
           ...(cmdOpts?.confirm === true ? { confirm: true as const } : {}),
           ...expectFor(agentKey),
         },
-      );
+      ).then((outcome) => {
+        // 2026-10-05 field report: E_CONFIRM_REQUIRED means the command never executed and the
+        // caller (DetailDock) drives the CommandConfirm dialog, then re-issues with a NEW id +
+        // confirm:true. Without this discard the ctl_result leaves a zombie "failed" queue card
+        // whose 重试 re-sends the SAME id WITHOUT confirm:true — it can only fail again.
+        if (!outcome.ok && outcome.error === "E_CONFIRM_REQUIRED") {
+          requests.delete(keyOf(agentKey, id));
+          dispatch({ event: "ctl_discard", data: { agentKey, id } });
+        }
+        return outcome;
+      });
     },
     /** §3.4/§3.5: queryOnly — ask the agent ledger for the outcome of `id`, never re-execute. */
     query: async (agentKey, id) => {
