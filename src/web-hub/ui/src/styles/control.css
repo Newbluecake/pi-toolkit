@@ -273,6 +273,13 @@
   background: transparent;
 }
 
+/* user request: the square at 2.25× the standard icon AREA (24px vs 16px side) — it's the
+ * whole affordance now, so it must read at a glance. */
+.stop-btn .icon {
+  width: calc(24px * var(--fs-scale, 1));
+  height: calc(24px * var(--fs-scale, 1));
+}
+
 .stop-queue-note {
   color: var(--c-text-3);
   font-size: var(--fs-xs);
@@ -547,6 +554,61 @@
   font-size: var(--fs-xs);
 }
 
+/* --- @mention completion (task #11) — mirrors the command palette's shape; it renders before
+ * the composer row so it opens upward from the bottom-pinned composer --- */
+
+.mention-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-bottom: 1px solid var(--c-border);
+  background: transparent;
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mention-item:last-child {
+  border-bottom: 0;
+}
+
+.mention-item:hover,
+.mention-item.active {
+  background: var(--c-surface-2);
+}
+
+.mention-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-weight: var(--fw-semibold);
+}
+
+.mention-empty {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
 /* --- command confirm (§7.7) --- */
 
 .command-confirm {
@@ -741,6 +803,7 @@
 
   .btn-xs,
   .command-item,
+  .mention-item,
   .run-actions-toggle {
     min-height: 44px;
   }
