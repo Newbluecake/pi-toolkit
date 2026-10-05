@@ -322,13 +322,11 @@ describe("sendGate 三路径一致 (#12) — deny conditions refuse Enter, Alt+E
     expect(w.emitted("send")).toBeUndefined();
   });
 
-  it("coarse pointer: Enter stays a newline even with a ready attachment; the button still sends", async () => {
+  it('coarse pointer: Enter sends with a ready attachment (enterkeyhint="send" promise)', async () => {
     stubMatchMedia(true);
     const { w } = mountComposer({ tray: [readyAttachment()] });
     await typeText(w, "mobile text");
     await w.find("textarea").trigger("keydown", { key: "Enter" });
-    expect(w.emitted("send")).toBeUndefined();
-    await w.find("[data-send]").trigger("click");
     expect(w.emitted("send")).toHaveLength(1);
   });
 });

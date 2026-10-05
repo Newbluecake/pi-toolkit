@@ -89,14 +89,16 @@ export function mergeQueue(serverQueue = [], optimistic = [], dropped = []) {
 }
 
 /**
- * Composer key map (§7.4): IME composition (`isComposing` / keyCode 229) never sends; coarse
- * pointers Enter = newline (button sends); Alt+Enter = followUp (TUI 同键); Enter = send in the
- * current mode (steer while busy, a fresh prompt while idle); Shift+Enter = newline.
- * @param {any} event @param {{ coarse?: boolean, busy?: boolean }} [ctx]
+ * Composer key map (§7.4): IME composition (`isComposing` / keyCode 229) never sends; Enter =
+ * send in the current mode on ALL pointers (the textarea advertises `enterkeyhint="send"`, so the
+ * soft-keyboard action button must keep that promise — coarse=newline was retired 2026-10-05 on a
+ * field report that phone users expect the keyboard send button to send); Alt+Enter = followUp
+ * (TUI 同键); Shift+Enter = newline.
+ * @param {any} event @param {{ busy?: boolean }} [ctx]
  * @returns {"newline" | "followUp" | "steer" | "prompt"}
  */
-export function composerKeyAction(event, { coarse = false, busy = false } = {}) {
-  if (coarse || event?.isComposing || event?.keyCode === 229) return "newline";
+export function composerKeyAction(event, { busy = false } = {}) {
+  if (event?.isComposing || event?.keyCode === 229) return "newline";
   if (event?.key === "Enter" && event?.altKey) return "followUp";
   if (event?.key === "Enter" && !event?.shiftKey) return busy ? "steer" : "prompt";
   return "newline";

@@ -41,7 +41,6 @@ import { commandPolicyFor, composerKeyAction, parseSlash } from "@logic/control.
 import { canSendWithAttachments, classifyPaste, collectDrop, pastedName, uploadAvailability } from "@logic/upload.js";
 import { UPLOAD_ATTACH_MAX_PER_MSG } from "@protocol/upload.js";
 import { useI18n } from "../../composables/useI18n.js";
-import { useMedia } from "../../composables/useMedia.js";
 import type { ComposerEmits, ComposerProps } from "../../contracts.js";
 import type { AddReject, ControlHandle } from "../../types.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
@@ -79,8 +78,6 @@ function onCompositionStart(): void {
 function onCompositionEnd(): void {
   composing.value = false;
 }
-
-const coarse = useMedia(window, "(pointer: coarse)").matches;
 
 const busy = computed(() => props.busy === true);
 const commands = computed(() => view?.commands.value ?? []);
@@ -334,7 +331,7 @@ function doSend(mode: "steer" | "followUp"): void {
 
 function onKeydown(ev: KeyboardEvent): void {
   if (composing.value) return; // inside an IME session: no key ever sends
-  const action = composerKeyAction(ev, { coarse: coarse.value, busy: busy.value });
+  const action = composerKeyAction(ev, { busy: busy.value });
   if (action === "newline") return; // default behaviour (insert a newline)
   ev.preventDefault();
   // No local deny early-exit anymore (§3.2): a denied command is `command-policy` in sendGate.

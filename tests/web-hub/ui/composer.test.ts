@@ -135,13 +135,11 @@ describe("Composer.vue key map (§7.4)", () => {
     expect(w.emitted("send")).toBeUndefined();
   });
 
-  it("coarse pointer: Enter is a newline (button-only send, §7.4)", async () => {
+  it("coarse pointer: Enter sends (the soft keyboard's 发送 button keeps its enterkeyhint promise)", async () => {
     stubMatchMedia(true);
     const w = mountComposer({});
     await w.find("textarea").setValue("mobile text");
     await w.find("textarea").trigger("keydown", { key: "Enter" });
-    expect(w.emitted("send")).toBeUndefined();
-    await w.find("[data-send]").trigger("click");
     expect(w.emitted("send")).toEqual([["mobile text", "steer"]]);
   });
 

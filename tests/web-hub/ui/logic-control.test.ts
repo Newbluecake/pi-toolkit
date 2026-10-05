@@ -107,7 +107,12 @@ describe("composerKeyAction (§7.4 key map)", () => {
     [{ key: "Enter", shiftKey: true }, {}, "newline", "Shift+Enter ⇒ newline"],
     [{ key: "Enter", isComposing: true }, {}, "newline", "IME composition never sends"],
     [{ key: "Enter", keyCode: 229 }, {}, "newline", "keyCode 229 (IME) never sends"],
-    [{ key: "Enter" }, { coarse: true }, "newline", "coarse pointer: Enter = newline, button sends"],
+    [
+      { key: "Enter" },
+      { coarse: true },
+      "prompt",
+      'coarse pointer: Enter also sends (enterkeyhint="send" promise; coarse=newline retired 2026-10-05)',
+    ],
     [{ key: "a" }, {}, "newline", "any other key"],
   ])("%j %j ⇒ %s (%s)", (event, ctx, expected) => {
     expect(composerKeyAction(event, ctx)).toBe(expected);
