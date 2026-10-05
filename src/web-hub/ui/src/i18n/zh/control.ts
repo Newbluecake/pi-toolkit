@@ -17,8 +17,8 @@ const control = {
   noticeCollapse: "收起详情",
   noticeDismiss: "关闭此提醒",
 
-  placeholderIdle: "输入消息（将开始新一轮）",
-  placeholderBusy: "输入消息（插话当前轮；Alt+Enter 排到之后）",
+  placeholderIdle: "输入消息",
+  placeholderBusy: "插话当前轮",
   send: "发送",
   sendAria: "发送消息",
   deliverGroup: "投递方式",

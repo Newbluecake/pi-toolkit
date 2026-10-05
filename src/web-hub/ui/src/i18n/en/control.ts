@@ -16,8 +16,8 @@ const control = {
   noticeDismiss: "Dismiss this notice",
 
   // --- composer (§7.4/§7.6) ---
-  placeholderIdle: "Message — starts a new turn",
-  placeholderBusy: "Message — steers the current turn (Alt+Enter: follow-up)",
+  placeholderIdle: "Message",
+  placeholderBusy: "Steer this turn",
   send: "Send",
   sendAria: "Send message",
   deliverGroup: "Delivery",
