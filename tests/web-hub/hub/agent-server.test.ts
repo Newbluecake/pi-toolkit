@@ -57,7 +57,7 @@ describe("agent-server handshake", () => {
       t: "hello_ack",
       hubVersion: "9.9.9",
       buildId: "9.9.9@hub",
-      proto: { major: 1, minor: 1 },
+      proto: { major: 1, minor: 2 },
       agentKey: "a4242-nonceA",
       pingMs: TIMING.pingMs,
       leaseMs: TIMING.staleMs,

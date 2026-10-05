@@ -115,3 +115,38 @@ describe("web/contract.js API headless endpoints (web-hub-spawn SP11 / arch §8.
     expect(s.spawns).toEqual({ items: [{ spawnId: "sp1", state: "starting" }], active: 1, max: 4 });
   });
 });
+
+// web-hub-fleet-drawer plan §3.1/§3.2/§3.4 (F0): the run-transcript browser surface.
+describe("web/contract.js run-transcript surface (fleet-drawer F0)", () => {
+  it("API.run* literals are pinned against protocol RUN_API both ways (hand-written mirror)", async () => {
+    const runTx = await import("../../../src/web-hub/protocol/run-transcript.js");
+    expect(web.API.runSubscribe).toBe(runTx.RUN_API.subscribe);
+    expect(web.API.runUnsubscribe).toBe(runTx.RUN_API.unsubscribe);
+    expect(web.API.runHistory).toBe(runTx.RUN_API.history);
+    expect(web.API.runSubscribe).toBe("/api/run/subscribe");
+    expect(web.API.runUnsubscribe).toBe("/api/run/unsubscribe");
+    expect(web.API.runHistory).toBe("/api/run/history");
+  });
+
+  it("SSE_EVENTS carries the three run events (the browser mirror is the same array)", () => {
+    for (const name of ["run_history", "run_ev", "run_end"]) {
+      expect(proto.SSE_EVENTS).toContain(name);
+      expect(web.SSE_EVENTS).toContain(name);
+    }
+  });
+
+  it("the F5-era reducer ignores run_* events identity-wise (compat matrix row 3: old reducers drop unknown events)", () => {
+    const s = initialState();
+    expect(reduce(s, { event: "run_history", data: { agentKey: "a", runId: "r_ABCD1234", entries: [] } })).toBe(s);
+    expect(
+      reduce(s, {
+        event: "run_ev",
+        data: { agentKey: "a", runId: "r_ABCD1234", tapId: "t", seq: 1, e: { type: "message_end" } },
+      }),
+    ).toBe(s);
+    expect(
+      reduce(s, { event: "run_end", data: { agentKey: "a", runId: "r_ABCD1234", lastSeq: 1, status: "ok" } }),
+    ).toBe(s);
+    expect(reduce(s, { event: "run_history", data: { error: "E_BUSY", reason: "resync_storm" } })).toBe(s);
+  });
+});

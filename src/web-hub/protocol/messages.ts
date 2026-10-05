@@ -10,6 +10,20 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { MAX_FRAME_BYTES } from "./ndjson.js";
+import {
+  type RunEndFrame,
+  RunEndSchema,
+  type RunEvFrame,
+  RunEvSchema,
+  type RunGapFrame,
+  RunGapSchema,
+  type RunTxReplyFrame,
+  RunTxReplySchema,
+  type RunTxReqFrame,
+  RunTxReqSchema,
+  type RunWatchFrame,
+  RunWatchSchema,
+} from "./run-transcript.js";
 import type { LanStatus } from "./lan.js";
 
 // ---------------------------------------------------------------------------
@@ -99,6 +113,16 @@ export interface FleetRowWire {
   streamLine?: string;
   highlight: "none" | "warn" | "crit";
   terminal: boolean;
+}
+
+/**
+ * web-hub-fleet-drawer plan §3.2/#12: counts of fleet rows the 64-active/8-terminal projection
+ * caps dropped from `fleet.runs` ("另有 N 个未列出" / “父 run 未列出” UI derives from this).
+ * Optional on the `fleet` frame — absent when nothing was omitted.
+ */
+export interface FleetOmitted {
+  active: number;
+  terminal: number;
 }
 
 export interface WireEvent {
@@ -343,7 +367,7 @@ export type AgentFrame =
   | { t: "session_detached"; reason: string }
   | { t: "ev"; seq: number; e: WireEvent }
   | ({ t: "status" } & StatusInfo)
-  | { t: "fleet"; runs: FleetRowWire[] }
+  | { t: "fleet"; runs: FleetRowWire[]; omitted?: FleetOmitted }
   | ({ t: "snapshot_reply"; rid: string } & SnapshotReplyBody)
   | { t: "branch_reply"; rid: string; entries: WireEntry[]; truncated: boolean }
   | { t: "gap"; fromSeq: number }
@@ -354,6 +378,12 @@ export type AgentFrame =
   | DialogsFrame
   | CtlFrame
   | CommandsFrame
+  // web-hub-fleet-drawer plan §3.1 (F0): run-transcript frames — schema bodies and the
+  // authoritative interfaces live in protocol/run-transcript.ts; only folded in here.
+  | RunTxReplyFrame
+  | RunEvFrame
+  | RunGapFrame
+  | RunEndFrame
   | LanReqFrame
   | HubCtlFrame;
 
@@ -402,6 +432,8 @@ export type HubFrame =
   | { t: "hello_reject"; code: "E_PROTO" | "E_BAD_HELLO" | "E_TICKET"; message: string; retryAfterMs: number }
   | { t: "snapshot_req"; rid: string }
   | { t: "branch_req"; rid: string; maxBytes: number }
+  | RunTxReqFrame
+  | RunWatchFrame
   | CmdFrame
   | SupersededFrame
   | { t: "ping"; ts: number }
@@ -572,6 +604,10 @@ const StatusFrameSchema = Type.Object({ t: Type.Literal("status"), ...StatusInfo
 const FleetFrameSchema = Type.Object({
   t: Type.Literal("fleet"),
   runs: Type.Array(FleetRowSchema),
+  // fleet-drawer §3.2 (F0): optional visibility block — present only when rows were dropped.
+  omitted: Type.Optional(
+    Type.Object({ active: Type.Integer(), terminal: Type.Integer() }, { additionalProperties: false }),
+  ),
 });
 
 const SnapshotReplySchema = Type.Object({
@@ -1023,6 +1059,11 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   dialogs: DialogsSchema,
   ctl: CtlSchema,
   commands: CommandsSchema,
+  // fleet-drawer §3.1 (F0): schemas imported from protocol/run-transcript.ts
+  run_tx_reply: RunTxReplySchema,
+  run_ev: RunEvSchema,
+  run_gap: RunGapSchema,
+  run_end: RunEndSchema,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -1030,6 +1071,9 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   hello_reject: HelloRejectSchema,
   snapshot_req: SnapshotReqSchema,
   branch_req: BranchReqSchema,
+  // fleet-drawer §3.1 (F0): schemas imported from protocol/run-transcript.ts
+  run_tx_req: RunTxReqSchema,
+  run_watch: RunWatchSchema,
   cmd: CmdSchema,
   superseded: SupersededSchema,
   ping: PingSchema,

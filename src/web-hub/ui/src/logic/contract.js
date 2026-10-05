@@ -62,6 +62,14 @@ export const API = Object.freeze({
   // web-hub-preview plan v3 §4.1 (PV4): the single content-preview endpoint, imported from
   // `protocol/preview.ts` — same anti-drift rule as the upload paths above.
   preview: PREVIEW_PATH,
+  // web-hub-fleet-drawer plan §3.1 (F0): the three run-transcript endpoints. Hand-written
+  // literals, NOT imported from `protocol/run-transcript.ts`: that module also carries the
+  // typebox frame schemas, and importing it here would drag `@sinclair/typebox` into the
+  // browser bundle (the same reason `http-contract.ts` above pulls only `messages.js`'s
+  // TYPES). `tests/web-hub/ui/logic-contract.test.ts` pins both literals against `RUN_API`.
+  runSubscribe: "/api/run/subscribe",
+  runUnsubscribe: "/api/run/unsubscribe",
+  runHistory: "/api/run/history",
 });
 
 /** Client-side SSE silence limit: no frame (hub pings every 15s) for this long ⇒ reconnect. */

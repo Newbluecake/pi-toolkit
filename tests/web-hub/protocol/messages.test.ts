@@ -9,6 +9,7 @@ import {
   type HubFrame,
 } from "../../../src/web-hub/protocol/messages.js";
 import { MAX_FRAME_BYTES } from "../../../src/web-hub/protocol/ndjson.js";
+import { RUN_TX_REASONS } from "../../../src/web-hub/protocol/run-transcript.js";
 import { RESERVED_FRAME_TYPES } from "../../../src/web-hub/protocol/version.js";
 
 const nonce16 = "abcdefghijklmnop";
@@ -373,6 +374,297 @@ describe("constants", () => {
       deltaCoalesceMs: 50,
       toolUpdateMs: 250,
       fleetMs: 1_000,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub-fleet-drawer plan §3.1 (F0): run-transcript frames. Schema bodies live in
+// protocol/run-transcript.ts and are folded into the two decode tables above; these tests
+// pin decode behavior through the public entry points (including the local loose mirrors'
+// accept/reject parity with ev / branch_reply / snapshot_reply).
+// ---------------------------------------------------------------------------
+
+describe("decodeAgentFrame — run-transcript frames (fleet-drawer §3.1, F0)", () => {
+  const runId = "r_ABCD1234";
+  const tapId = "tap0123456789ab";
+  const runEntry = {
+    id: "e1",
+    parentId: null,
+    type: "custom_message",
+    timestamp: "2026-10-01T00:00:00.000Z",
+    customType: "probe:custom",
+    content: "hello",
+    display: true,
+  } as const;
+
+  const liveReply = {
+    t: "run_tx_reply",
+    rid: "req-1",
+    runId,
+    ok: true,
+    source: "live",
+    status: "running",
+    tapId,
+    seq: 7,
+    watching: true,
+    entries: [runEntry],
+    truncated: false,
+    hasMore: true,
+    inflight: {
+      message: { role: "assistant", content: "partial" },
+      tools: [{ toolCallId: "c1", toolName: "read", args: { path: "a" }, partial: "…" }],
+    },
+  };
+
+  it("accepts the live snapshot reply (loose entries/inflight pass through)", () => {
+    expect(decodeAgentFrame(liveReply)).toMatchObject({ t: "run_tx_reply", source: "live", seq: 7, watching: true });
+    expect(decodeAgentFrame({ ...liveReply, tapId: undefined })).toMatchObject({ t: "run_tx_reply", tapId: undefined });
+  });
+
+  it("rejects malformed live replies", () => {
+    for (const over of [
+      { tapId: "bad id!" }, // TAP_ID_PATTERN
+      { seq: 1.5 },
+      { watching: "yes" },
+      { entries: runEntry },
+      { entries: [{ ...runEntry, type: "context_edit" }] },
+      { inflight: { tools: [{ toolCallId: "c" }] } },
+      { runId: "run_1" }, // RUN_ID_PATTERN
+    ]) {
+      expect(decodeAgentFrame({ ...liveReply, ...over })).toBeUndefined();
+    }
+    const { truncated: _t, ...noTruncated } = liveReply;
+    expect(decodeAgentFrame(noTruncated)).toBeUndefined();
+  });
+
+  it("accepts the file reply and keeps the three branches mutually exclusive", () => {
+    const fileReply = {
+      t: "run_tx_reply",
+      rid: "req-1",
+      runId,
+      ok: true,
+      source: "file",
+      status: "ok",
+      sessionFile: "/home/u/.pi/sessions/a.jsonl",
+      finalLeafId: "e9",
+    };
+    expect(decodeAgentFrame(fileReply)).toMatchObject({ t: "run_tx_reply", source: "file", finalLeafId: "e9" });
+    // file branch without finalLeafId / sessionFile ⇒ no branch matches
+    const { finalLeafId: _leaf, ...noLeaf } = fileReply;
+    expect(decodeAgentFrame(noLeaf)).toBeUndefined();
+    // live fields on the file branch (and vice versa) ⇒ rejected by additionalProperties:false
+    expect(decodeAgentFrame({ ...fileReply, entries: [runEntry] })).toBeUndefined();
+    expect(decodeAgentFrame({ ...liveReply, sessionFile: "/a.jsonl" })).toBeUndefined();
+  });
+
+  it("accepts every denial reason on both codes, and rejects anything else", () => {
+    for (const code of ["E_NOT_FOUND", "E_UNSUPPORTED"] as const) {
+      for (const reason of RUN_TX_REASONS) {
+        expect(decodeAgentFrame({ t: "run_tx_reply", rid: "req-1", runId, ok: false, code, reason })).toMatchObject({
+          ok: false,
+          code,
+          reason,
+        });
+      }
+    }
+    expect(
+      decodeAgentFrame({ t: "run_tx_reply", rid: "r", runId, ok: false, code: "E_BUSY", reason: "busy" }),
+    ).toBeUndefined();
+    expect(
+      decodeAgentFrame({ t: "run_tx_reply", rid: "r", runId, ok: false, code: "E_NOT_FOUND", reason: "bogus" }),
+    ).toBeUndefined();
+    expect(
+      decodeAgentFrame({
+        t: "run_tx_reply",
+        rid: "r",
+        runId,
+        ok: false,
+        code: "E_NOT_FOUND",
+        reason: "unknown_run",
+        status: "ok",
+      }),
+    ).toBeUndefined(); // err branch carries nothing else
+  });
+
+  it("accepts run_ev for every whitelisted event type and passes e through unchecked", () => {
+    const payload = { a: 1, nested: { deep: true } };
+    for (const type of FORWARDED_EVENTS) {
+      const f = decodeAgentFrame({ t: "run_ev", runId, tapId, seq: 1, e: { type, ...payload } });
+      expect(f).toMatchObject({ t: "run_ev", e: { type } });
+    }
+    const passthrough = decodeAgentFrame({ t: "run_ev", runId, tapId, seq: 1, e: { type: "message_end", ...payload } });
+    expect(passthrough).toEqual({ t: "run_ev", runId, tapId, seq: 1, e: { type: "message_end", ...payload } });
+  });
+
+  it("rejects malformed run_ev (unknown type / bad ids / bad seq / extra frame fields)", () => {
+    expect(decodeAgentFrame({ t: "run_ev", runId, tapId, seq: 1, e: { type: "not_an_event" } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_ev", runId, tapId, seq: 1, e: { kind: "no type" } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_ev", runId, tapId, seq: 1.5, e: { type: "turn_end" } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_ev", runId, tapId, e: { type: "turn_end" } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_ev", runId: "run_1", tapId, seq: 1, e: { type: "turn_end" } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_ev", runId, tapId: "x", seq: 1, e: { type: "turn_end" } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_ev", runId, tapId, seq: 1, e: { type: "turn_end" }, extra: 1 })).toBeUndefined();
+  });
+
+  it("accepts run_gap / run_end and rejects malformed ones", () => {
+    expect(decodeAgentFrame({ t: "run_gap", runId, tapId, fromSeq: 3 })).toMatchObject({ t: "run_gap", fromSeq: 3 });
+    expect(decodeAgentFrame({ t: "run_gap", runId, tapId, fromSeq: 0 })).toMatchObject({ fromSeq: 0 }); // epoch sentinel
+    expect(decodeAgentFrame({ t: "run_gap", runId, tapId, fromSeq: "3" })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_gap", runId, fromSeq: 3 })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_end", runId, tapId, lastSeq: 42, status: "ok" })).toMatchObject({
+      t: "run_end",
+      lastSeq: 42,
+      status: "ok",
+    });
+    expect(decodeAgentFrame({ t: "run_end", runId, tapId, lastSeq: 42 })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_end", runId, tapId, lastSeq: -1, status: "ok" })).toBeDefined(); // seq domain is agent-owned
+  });
+
+  it("keeps the direction split: run agent frames never decode as hub frames", () => {
+    expect(decodeHubFrame(liveReply)).toBeUndefined();
+    expect(decodeHubFrame({ t: "run_ev", runId, tapId, seq: 1, e: { type: "turn_end" } })).toBeUndefined();
+    expect(decodeHubFrame({ t: "run_gap", runId, tapId, fromSeq: 1 })).toBeUndefined();
+    expect(decodeHubFrame({ t: "run_end", runId, tapId, lastSeq: 1, status: "ok" })).toBeUndefined();
+  });
+
+  it("returns undefined for run frames over the byte budget", () => {
+    const big = { t: "run_ev", runId, tapId, seq: 1, e: { type: "message_end", pad: "x".repeat(MAX_FRAME_BYTES) } };
+    expect(decodeAgentFrame(big)).toBeUndefined();
+  });
+
+  it("entries/inflight validation parity with branch_reply / snapshot_reply (local-mirror pin)", () => {
+    const candidates = [
+      "message",
+      "custom_message",
+      "custom",
+      "compaction",
+      "branch_summary",
+      "model_change",
+      "thinking_level_change",
+      "context_edit", // never a valid wire entry type
+      "",
+    ];
+    for (const type of candidates) {
+      const entry = { ...runEntry, type };
+      const branch = decodeAgentFrame({ t: "branch_reply", rid: "r2", entries: [entry], truncated: false });
+      const runReply = decodeAgentFrame({ ...liveReply, inflight: undefined, entries: [entry] });
+      expect(runReply !== undefined, type).toBe(branch !== undefined);
+    }
+    // inflight: same accept/reject as snapshot_reply's inflight
+    const good = { message: { role: "assistant" }, tools: [] };
+    const bad = { tools: [{ toolCallId: "c" }] };
+    expect(decodeAgentFrame({ ...liveReply, inflight: good })).toBeDefined();
+    expect(decodeAgentFrame({ ...liveReply, inflight: bad })).toBeUndefined();
+  });
+});
+
+describe("decodeHubFrame — run_tx_req / run_watch (fleet-drawer §3.1, F0)", () => {
+  it("accepts run_tx_req with and without before", () => {
+    const base = { t: "run_tx_req", rid: "req-9", runId: "r_ABCD1234", limit: 200, maxBytes: 2 << 20 };
+    expect(decodeHubFrame(base)).toMatchObject({ t: "run_tx_req", limit: 200 });
+    expect(decodeHubFrame({ ...base, before: "e7" })).toMatchObject({ before: "e7" });
+  });
+
+  it("rejects malformed run_tx_req / run_watch", () => {
+    for (const over of [
+      { runId: "run_1" },
+      { runId: "r_ABCD123" }, // 7 body chars
+      { limit: 1.5 },
+      { limit: "200" },
+      { maxBytes: "2097152" },
+      { rid: 7 },
+      { unexpected: true },
+    ]) {
+      expect(
+        decodeHubFrame({ t: "run_tx_req", rid: "req-9", runId: "r_ABCD1234", limit: 200, maxBytes: 1 << 20, ...over }),
+      ).toBeUndefined();
+    }
+    const { maxBytes: _m, ...noMax } = { t: "run_tx_req", rid: "req-9", runId: "r_ABCD1234", limit: 200 } as Record<
+      string,
+      unknown
+    >;
+    expect(decodeHubFrame(noMax)).toBeUndefined();
+    expect(decodeHubFrame({ t: "run_watch", runId: "r_ABCD1234", on: true })).toMatchObject({
+      t: "run_watch",
+      on: true,
+    });
+    expect(decodeHubFrame({ t: "run_watch", runId: "r_ABCD1234", on: false })).toBeDefined(); // idempotent off
+    expect(decodeHubFrame({ t: "run_watch", runId: "r_ABCD1234" })).toBeUndefined();
+    expect(decodeHubFrame({ t: "run_watch", runId: "r_ABCD1234", on: "true" })).toBeUndefined();
+    expect(decodeHubFrame({ t: "run_watch", runId: "run_1", on: true })).toBeUndefined();
+  });
+
+  it("keeps the direction split: hub run frames never decode as agent frames", () => {
+    expect(decodeAgentFrame({ t: "run_tx_req", rid: "r", runId: "r_ABCD1234", limit: 1, maxBytes: 1 })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "run_watch", runId: "r_ABCD1234", on: true })).toBeUndefined();
+  });
+});
+
+describe("fleet omitted (fleet-drawer §3.2 #12, F0)", () => {
+  it("round-trips omitted and keeps it optional", () => {
+    expect(decodeAgentFrame({ t: "fleet", runs: [fleetRow] })).toMatchObject({ t: "fleet" });
+    const withOmitted = decodeAgentFrame({ t: "fleet", runs: [fleetRow], omitted: { active: 6, terminal: 4 } });
+    expect(withOmitted).toMatchObject({ omitted: { active: 6, terminal: 4 } });
+    expect(decodeAgentFrame({ t: "fleet", runs: [], omitted: { active: 0, terminal: 0 } })).toBeDefined();
+  });
+
+  it("rejects malformed omitted blocks but not the frame's legacy shape", () => {
+    expect(decodeAgentFrame({ t: "fleet", runs: [fleetRow], omitted: { active: 6 } })).toBeUndefined();
+    expect(
+      decodeAgentFrame({ t: "fleet", runs: [fleetRow], omitted: { active: 6, terminal: 4, extra: 1 } }),
+    ).toBeUndefined();
+    expect(decodeAgentFrame({ t: "fleet", runs: [fleetRow], omitted: { active: 1.5, terminal: 4 } })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "fleet", runs: [fleetRow], omitted: { active: "6", terminal: 4 } })).toBeUndefined();
+  });
+});
+
+describe("unknown run-family frames are silently ignored (compat matrix, fleet-drawer §3.2 F0)", () => {
+  // Pins the protocol-layer half of plan §3.2's compat matrix (旧 hub/旧 agent + 新帧): a peer
+  // built before fleet F0 receiving a run-transcript frame it has no schema for must decode it
+  // to undefined and ignore it — never throw, never prefix-match. The second test guards the
+  // other direction: real run frames must still decode (the ignore path must not over-reach).
+  it("returns undefined for unknown future run_* frame types in both directions, without throwing", () => {
+    const unknownAgent = {
+      t: "run_future_2099",
+      runId: "r_ABCD1234",
+      tapId: "tap0123456789ab",
+      seq: 1,
+      payload: { deep: true },
+    };
+    const unknownHub = { t: "run_future_2099", rid: "req-1", runId: "r_ABCD1234", limit: 1, maxBytes: 1 };
+    expect(() => decodeAgentFrame(unknownAgent)).not.toThrow();
+    expect(() => decodeHubFrame(unknownHub)).not.toThrow();
+    expect(decodeAgentFrame(unknownAgent)).toBeUndefined();
+    expect(decodeHubFrame(unknownHub)).toBeUndefined();
+    // a typo'd but plausible name is equally unknown — decode never prefix-matches on `t`
+    expect(
+      decodeAgentFrame({
+        t: "run_tx_repl",
+        rid: "r",
+        runId: "r_ABCD1234",
+        ok: false,
+        code: "E_NOT_FOUND",
+        reason: "unknown_run",
+      }),
+    ).toBeUndefined();
+    expect(decodeHubFrame({ t: "run_wach", runId: "r_ABCD1234", on: true })).toBeUndefined();
+  });
+
+  it("still decodes real run frames (the ignore path must not over-reach)", () => {
+    expect(
+      decodeAgentFrame({
+        t: "run_tx_reply",
+        rid: "req-1",
+        runId: "r_ABCD1234",
+        ok: false,
+        code: "E_NOT_FOUND",
+        reason: "unknown_run",
+      }),
+    ).toMatchObject({ t: "run_tx_reply", ok: false, reason: "unknown_run" });
+    expect(decodeHubFrame({ t: "run_watch", runId: "r_ABCD1234", on: true })).toMatchObject({
+      t: "run_watch",
+      on: true,
     });
   });
 });

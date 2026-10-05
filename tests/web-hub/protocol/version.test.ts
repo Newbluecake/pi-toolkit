@@ -4,6 +4,8 @@ import {
   P1_CAPS,
   PROTO,
   RESERVED_FRAME_TYPES,
+  RUNTX_AGENT_CAPS,
+  RUNTX_HUB_CAPS,
   compareVersions,
   protoCompatible,
 } from "../../../src/web-hub/protocol/version.js";
@@ -54,10 +56,19 @@ describe("constants", () => {
   it("P1_CAPS / RESERVED_FRAME_TYPES are stable", () => {
     expect([...P1_CAPS]).toEqual(["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"]);
     expect([...RESERVED_FRAME_TYPES]).toEqual(["dialog_open", "dialog_closed", "dialog_answer"]);
-    expect(PROTO).toEqual({ major: 1, minor: 1 });
+    // fleet-drawer F0 (plan §3.2): first minor bump since 1.0 — fleet adds agent↔hub frames
+    // (upload/spawn/preview only added caps/endpoints and kept 1.1).
+    expect(PROTO).toEqual({ major: 1, minor: 2 });
   });
 
   it("DIALOG_BG_HUB_CAPS is stable (ask-user-async §7.2, P3)", () => {
     expect([...DIALOG_BG_HUB_CAPS]).toEqual(["dialog.bg.v1"]);
+  });
+
+  it("RUNTX caps are stable (fleet-drawer §3.2/§7.1, F0)", () => {
+    expect([...RUNTX_AGENT_CAPS]).toEqual(["runtx.v1", "runtx.lan.v1"]);
+    expect([...RUNTX_HUB_CAPS]).toEqual(["runtx.v1"]);
+    // LAN availability is NOT a hub cap — §7.1 gates per-request against the AGENT's caps.
+    expect(RUNTX_HUB_CAPS).not.toContain("runtx.lan.v1");
   });
 });

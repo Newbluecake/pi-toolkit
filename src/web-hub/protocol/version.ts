@@ -7,7 +7,12 @@
  */
 
 /** Wire protocol version negotiated in `hello` / `hello_ack`. */
-export const PROTO = { major: 1, minor: 1 } as const;
+// fleet-drawer F0 (plan §3.2) raises minor 1.1 → 1.2: fleet adds the first NEW agent↔hub frames
+// since 1.0 (run_tx_req/run_watch hub→agent; run_tx_reply/run_ev/run_gap/run_end agent→hub).
+// upload/spawn/preview never bumped it — they only added caps and HTTP endpoints, no frames
+// (see the SPAWN_HUB_CAP / PREVIEW_HUB_CAP notes below). `protoCompatible` still compares
+// major only, so old/new mix freely (compat matrix plan §3.2).
+export const PROTO = { major: 1, minor: 2 } as const;
 
 /** Capabilities advertised by a P1 agent in `hello.caps`. */
 export const P1_CAPS = ["ev.v1", "fleet.v1", "snapshot.v1", "branch.v1"] as const;
@@ -38,8 +43,8 @@ export const DIALOG_BG_HUB_CAPS = ["dialog.bg.v1"] as const;
  * web-hub-spawn plan §SP1 (arch §8.2): the hub cap advertising the managed-spawn feature set
  * (`GET/POST /api/headless*`). Advertised only when `config.spawn` exists (SP10 folds it into
  * `HubInfo.caps`/`hello_ack.caps` via `extraHubCaps`); a browser that doesn't see it hides the
- * “选择目录新建” entry. Spawn adds NO agent↔hub frames, so PROTO stays 1.1 (§2.3: spawn 不升
- * PROTO).
+ * “选择目录新建” entry. Spawn itself triggered no PROTO bump — it adds no agent↔hub frames
+ * (§2.3: 帧只加不改); the 1.1 → 1.2 minor bump later came from fleet F0 alone.
  */
 export const SPAWN_HUB_CAP = "spawn.v1";
 
@@ -49,11 +54,24 @@ export const SPAWN_HUB_CAP = "spawn.v1";
  * (`webHub.preview` = `"loopback"` or `"on"`); `PREVIEW_LAN_HUB_CAP` only when the mode is
  * `"on"` (the default, U1) — under the defaults BOTH are declared, on both hub cap surfaces
  * (`HubInfo.caps` / `hello_ack.caps`; PV3's `extraHubCaps` fold, §4.7 caps 对照). A browser that
- * doesn't see them renders paths as plain text. Preview adds NO agent↔hub frames and no SSE
- * event, so PROTO stays 1.1 (same §2.3 rule as spawn).
+ * doesn't see them renders paths as plain text. Preview likewise added no frames and no SSE
+ * event, so it triggered no bump of its own (same §2.3 rule as spawn; the 1.1 → 1.2 bump is
+ * fleet F0's, see PROTO above).
  */
 export const PREVIEW_HUB_CAP = "preview.v1";
 export const PREVIEW_LAN_HUB_CAP = "preview.lan.v1";
+
+/**
+ * web-hub-fleet-drawer plan §3.2/§7.1 (F0): the run-transcript caps. An agent advertises a
+ * subset of `RUNTX_AGENT_CAPS` depending on `webHub.subagentTranscript` (`"all"` ⇒ both,
+ * `"loopback"` ⇒ `runtx.v1` only, `"off"` ⇒ neither — F2 wires `capsExtra`); the hub
+ * advertises `RUNTX_HUB_CAPS` on both of its cap surfaces (`HubInfo.caps` /
+ * `hello_ack.caps`). LAN availability is deliberately NOT its own hub cap: §7.1 enforces the
+ * gate per-request against the AGENT's caps by listener (`runtx.v1` for loopback, plus
+ * `runtx.lan.v1` for LAN); the `AgentCard.runTranscript*` fields are UX-only.
+ */
+export const RUNTX_AGENT_CAPS = ["runtx.v1", "runtx.lan.v1"] as const;
+export const RUNTX_HUB_CAPS = ["runtx.v1"] as const;
 
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {

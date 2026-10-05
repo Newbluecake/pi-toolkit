@@ -20,8 +20,9 @@ import {
 const origin = { listener: "loopback", ip: "127.0.0.1", reqId: "0123456789abcdef" } as const;
 
 describe("version.ts P2 constants", () => {
-  it("PROTO is 1.1 (major-only compat, minor is documentation)", () => {
-    expect(PROTO).toEqual({ major: 1, minor: 1 });
+  it("PROTO is 1.2 (major-only compat, minor is documentation)", () => {
+    // fleet-drawer F0 raised minor 1.1 → 1.2 (first new agent↔hub frames since 1.0).
+    expect(PROTO).toEqual({ major: 1, minor: 2 });
   });
   it("P2_AGENT_CAPS / P2_HUB_CAPS are the frozen cap names", () => {
     expect([...P2_AGENT_CAPS]).toEqual(["cmd.v1", "dialog.v1", "command.v1"]);

@@ -38,13 +38,29 @@ import type { SseEventName } from "../../../src/web-hub/hub/sse.js";
 import type { FenceLoss, SingletonResult } from "../../../src/web-hub/hub/singleton.js";
 import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
 import type {
+  AgentFrame,
   CmdArgs,
   CmdData,
   CmdErrorCode,
   CmdFrame,
   CommandOutputWire,
+  FleetOmitted,
   HubCtlFrame,
+  HubFrame,
+  WireEntry,
+  WireEvent,
 } from "../../../src/web-hub/protocol/messages.js";
+import type {
+  RunEndFrame,
+  RunEvFrame,
+  RunGapFrame,
+  RunHistoryError,
+  RunHistoryPayload,
+  RunTxReason,
+  RunTxReplyFrame,
+  RunTxReqFrame,
+  RunWatchFrame,
+} from "../../../src/web-hub/protocol/run-transcript.js";
 import type {
   DirEntryWire,
   FirstPromptState,
@@ -335,5 +351,82 @@ describe("types.test-d.ts (web-hub-spawn SP1 ports & wire surface)", () => {
       textLen: number;
       attempts: number;
     }>();
+  });
+});
+
+// web-hub-fleet-drawer plan §3.1/§3.2 (F0): the run-transcript wire surface. These pins live
+// here (not in tests/web-hub/protocol/*) for the same reason as the spawn block above — only
+// this file is covered by `npm run typecheck`'s second tsc pass.
+describe("types.test-d.ts (fleet-drawer F0 run-transcript wire surface)", () => {
+  it("RunTxReason is exactly the 10 frozen §3.6 literals", () => {
+    expectTypeOf<RunTxReason>().toEqualTypeOf<
+      | "unknown_run"
+      | "not_persisted"
+      | "file_missing"
+      | "leaf_unknown"
+      | "leaf_missing"
+      | "too_large"
+      | "parse_error"
+      | "unsupported"
+      | "busy"
+      | "resync_storm"
+    >();
+  });
+
+  it("RunTxReplyFrame is three mutually exclusive branches (ok×source keyed, LanRes-style)", () => {
+    type Live = Extract<RunTxReplyFrame, { ok: true; source: "live" }>;
+    expectTypeOf<Live["entries"]>().toEqualTypeOf<WireEntry[]>();
+    expectTypeOf<Live["tapId"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<Live["seq"]>().toEqualTypeOf<number>();
+    expectTypeOf<Live["watching"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<Live>().not.toHaveProperty("sessionFile");
+    expectTypeOf<Live>().not.toHaveProperty("finalLeafId");
+    type File = Extract<RunTxReplyFrame, { ok: true; source: "file" }>;
+    expectTypeOf<File["sessionFile"]>().toEqualTypeOf<string>();
+    expectTypeOf<File["finalLeafId"]>().toEqualTypeOf<string>();
+    expectTypeOf<File>().not.toHaveProperty("entries");
+    type Err = Extract<RunTxReplyFrame, { ok: false }>;
+    expectTypeOf<Err["code"]>().toEqualTypeOf<"E_NOT_FOUND" | "E_UNSUPPORTED">();
+    expectTypeOf<Err["reason"]>().toEqualTypeOf<RunTxReason>();
+    expectTypeOf<Err>().not.toHaveProperty("entries");
+  });
+
+  it("RunTxReqFrame / RunWatchFrame / RunEvFrame / RunGapFrame / RunEndFrame keep their §3.1 shapes", () => {
+    expectTypeOf<RunTxReqFrame["t"]>().toEqualTypeOf<"run_tx_req">();
+    expectTypeOf<RunTxReqFrame["before"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<RunTxReqFrame["limit"]>().toEqualTypeOf<number>();
+    expectTypeOf<RunTxReqFrame["maxBytes"]>().toEqualTypeOf<number>();
+    expectTypeOf<RunWatchFrame["t"]>().toEqualTypeOf<"run_watch">();
+    expectTypeOf<RunWatchFrame["on"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<RunEvFrame["e"]>().toEqualTypeOf<WireEvent>();
+    expectTypeOf<RunEvFrame["tapId"]>().toEqualTypeOf<string>();
+    expectTypeOf<RunGapFrame["fromSeq"]>().toEqualTypeOf<number>();
+    expectTypeOf<RunEndFrame["lastSeq"]>().toEqualTypeOf<number>();
+    expectTypeOf<RunEndFrame["status"]>().toEqualTypeOf<string>();
+  });
+
+  it("RunHistoryPayload never carries sessionFile/finalLeafId (§5.2 strips them before the browser)", () => {
+    expectTypeOf<RunHistoryPayload>().not.toHaveProperty("sessionFile");
+    expectTypeOf<RunHistoryPayload>().not.toHaveProperty("finalLeafId");
+    expectTypeOf<RunHistoryPayload["source"]>().toEqualTypeOf<"live" | "file">();
+    expectTypeOf<NonNullable<RunHistoryPayload["resync"]>>().toEqualTypeOf<true>();
+    expectTypeOf<RunHistoryError["error"]>().toEqualTypeOf<
+      "E_NOT_FOUND" | "E_UNSUPPORTED" | "E_BUSY" | "E_DEADLINE" | "E_AGENT_GONE"
+    >();
+  });
+
+  it("AgentFrame carries the four agent→hub run frames; HubFrame the two hub→agent ones", () => {
+    expectTypeOf<Extract<AgentFrame, { t: "run_tx_reply" }>>().toEqualTypeOf<RunTxReplyFrame>();
+    expectTypeOf<Extract<AgentFrame, { t: "run_ev" }>>().toEqualTypeOf<RunEvFrame>();
+    expectTypeOf<Extract<AgentFrame, { t: "run_gap" }>>().toEqualTypeOf<RunGapFrame>();
+    expectTypeOf<Extract<AgentFrame, { t: "run_end" }>>().toEqualTypeOf<RunEndFrame>();
+    expectTypeOf<Extract<HubFrame, { t: "run_tx_req" }>>().toEqualTypeOf<RunTxReqFrame>();
+    expectTypeOf<Extract<HubFrame, { t: "run_watch" }>>().toEqualTypeOf<RunWatchFrame>();
+  });
+
+  it("the fleet frame's omitted is an optional FleetOmitted (§3.2 #12)", () => {
+    type Fleet = Extract<AgentFrame, { t: "fleet" }>;
+    expectTypeOf<Fleet["omitted"]>().toEqualTypeOf<FleetOmitted | undefined>();
+    expectTypeOf<FleetOmitted>().toEqualTypeOf<{ active: number; terminal: number }>();
   });
 });

@@ -37,6 +37,13 @@ export const SSE_EVENTS = [
   "commands",
   "cmd_late",
   "ping",
+  // web-hub-fleet-drawer §3.4 (F0): the three run-transcript browser events (direct-send
+  // only, never into the replay ring). Slot in BEFORE "spawns" rather than at the tail:
+  // tests/web-hub/protocol/spawn.test.ts pins `SSE_EVENTS.at(-1) === "spawns"`, and that
+  // file is frozen for F0 — existing entries keep their relative order, spawn keeps the tail.
+  "run_history",
+  "run_ev",
+  "run_end",
   "spawns", // web-hub-spawn arch §8.2: `SpawnsPayload` snapshot/broadcast (Public projection only)
 ] as const;
 
@@ -117,6 +124,13 @@ export interface AgentCard {
    * `upload.lan.v1` (derived from its hello caps, same pattern as `control`). */
   upload?: boolean;
   uploadLan?: boolean;
+  /** web-hub-fleet-drawer plan §3.2/§7.1 (F0): whether this agent advertises `runtx.v1` /
+   * `runtx.lan.v1` (derived from its hello caps, same pattern as `upload`/`uploadLan`).
+   * UX-only — the hub re-checks the cap per-request by listener; the UI hides the drawer's
+   * transcript entry when the field for the active listener is absent (a missing entry is
+   * never a security boundary, §7.1 layer 3). */
+  runTranscript?: boolean;
+  runTranscriptLan?: boolean;
 }
 
 export interface HistoryPayload {

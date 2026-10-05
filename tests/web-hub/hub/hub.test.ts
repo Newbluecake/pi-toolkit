@@ -66,13 +66,13 @@ describe("startHub", () => {
       pid: process.pid,
       version: "1.2.3",
       buildId: "1.2.3@abc",
-      proto: { major: 1, minor: 1 },
+      proto: { major: 1, minor: 2 },
       socket: hub.paths.socketPath,
       port: 43210,
       startedAt: hub.info.startedAt,
     });
     expect(typeof json["nonce"]).toBe("string");
-    expect(hub.info).toMatchObject({ version: "1.2.3", pid: process.pid, proto: { major: 1, minor: 1 } });
+    expect(hub.info).toMatchObject({ version: "1.2.3", pid: process.pid, proto: { major: 1, minor: 2 } });
     const deps = fe.deps[0]!;
     expect(deps.paths).toEqual(hub.paths);
     expect(deps.info()).toEqual(hub.info);
