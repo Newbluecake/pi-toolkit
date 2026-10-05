@@ -72,7 +72,15 @@ function assistantBlocks(m: Record<string, unknown>, idx: ToolIndex): AssistantB
     if (block.type === "text" && typeof block.text === "string") {
       out.push({ kind: "text", text: block.text });
     } else if (block.type === "thinking" && isNonEmptyString(block.thinking)) {
-      out.push({ kind: "thinking", text: block.thinking });
+      // Claude may emit several consecutive thinking blocks in one message (each with its own
+      // signature); rendering each as its own pill shows two "Thinking" headers back to back.
+      // Merge adjacent ones into a single block — they are one continuous chain of thought.
+      const prev = out[out.length - 1];
+      if (prev?.kind === "thinking") {
+        out[out.length - 1] = { kind: "thinking", text: `${prev.text.trimEnd()}\n\n${block.thinking}` };
+      } else {
+        out.push({ kind: "thinking", text: block.thinking });
+      }
     } else if (block.type === "toolCall") {
       const id = typeof block.id === "string" ? block.id : "";
       out.push({ kind: "toolCall", view: toolView(block, idx.results.get(id), idx.live.get(id)) as ToolView });
