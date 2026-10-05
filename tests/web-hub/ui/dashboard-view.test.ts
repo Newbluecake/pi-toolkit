@@ -168,3 +168,41 @@ describe("DashboardView.vue — narrow (<768px) Escape returns to the list", () 
     expect(window.location.hash).toBe("#/agent/agent-a");
   });
 });
+
+describe("DashboardView.vue — settings route back navigation (field report: must restore the source route)", () => {
+  it("renders the standalone settings page on the settings route", () => {
+    stubMatchMedia(false);
+    const hub = hubWithOneAgent();
+    const wrapper = mountDashboard({ name: "settings" }, hub);
+    expect(wrapper.find(".settings-page").exists()).toBe(true);
+    expect(wrapper.find(".layout").exists()).toBe(false); // list/detail split fully replaced
+  });
+
+  it("agent detail ⇒ gear ⇒ settings ⇒ back ⇒ returns to #/agent/<key> (history.back)", async () => {
+    stubMatchMedia(false);
+    const hub = hubWithOneAgent();
+    window.location.hash = "#/";
+    const wrapper = mountDashboard({ name: "settings" }, hub);
+    // simulate the real path: list ⇒ agent detail ⇒ settings (two in-app pushes AFTER mount,
+    // so history.length outgrew DashboardView's historyFloor)
+    window.history.pushState({}, "", "#/agent/agent-a");
+    window.history.pushState({}, "", "#/settings");
+
+    await wrapper.find("button.settings-back").trigger("click");
+    await new Promise((r) => setTimeout(r, 0)); // happy-dom applies history.back() async
+
+    expect(window.location.hash).toBe("#/agent/agent-a");
+  });
+
+  it("direct #/settings deep link ⇒ back ⇒ dashboard #/ (no in-app history to return to)", async () => {
+    stubMatchMedia(false);
+    const hub = hubWithOneAgent();
+    window.location.hash = "#/settings";
+    const wrapper = mountDashboard({ name: "settings" }, hub); // floor == length ⇒ replace fallback
+
+    await wrapper.find("button.settings-back").trigger("click");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(window.location.hash).toBe("#/");
+  });
+});

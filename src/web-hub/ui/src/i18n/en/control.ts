@@ -1,8 +1,10 @@
 /**
  * `control` i18n namespace (control-plan.md v2.1 §7.6, §12.3 — C5): the control plane —
- * composer, delivery switch, stop button, queue list, command mode, and the persistent risk
- * notice. Compact inline markers (mode/source/state/policy badges) stay English tokens in BOTH
- * languages (AGENTS.md UI-text split); prose blocks get real translations.
+ * composer, stop button, queue list, command mode, and the persistent risk notice. Compact
+ * inline markers (mode/source/state/policy badges) stay English tokens in BOTH languages
+ * (AGENTS.md UI-text split); prose blocks get real translations. (2026-10: the per-message
+ * delivery switch moved to the settings page — its labels now live in the `settings`
+ * namespace.)
  */
 const control = {
   // --- persistent risk notice (§7.6 table, verbatim) ---
@@ -18,12 +20,9 @@ const control = {
   // --- composer (§7.4/§7.6) ---
   placeholderIdle: "Message",
   placeholderBusy: "Steer this turn",
+  placeholderBusyFollowUp: "Follow-up",
   send: "Send",
   sendAria: "Send message",
-  deliverGroup: "Delivery",
-  deliverSteer: "Steer",
-  deliverFollowUp: "Follow-up",
-  idleHint: "Idle — starts a new turn",
 
   // --- stop button (two-step, §7.4) ---
   stop: "Stop",

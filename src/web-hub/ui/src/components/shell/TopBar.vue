@@ -1,11 +1,13 @@
 <!--
-  Top bar: brand, connection pill, hub version, read-only/Control chip, theme toggle, sign out
-  (vue-plan.md v2.1 §3.2, §7, §5.2 — P3 exclusive, `components/shell/**`; Control chip per
-  control-plan.md v2.1 §7.4 — C5). `TopBarProps` is frozen with no `user`/username field
-  (`contracts.ts`), so — unlike the static mockup, which also showed a `.user-chip` — this
-  build has no username slot to render; §7's connection pill states are otherwise ported
-  verbatim (states.html: `connecting` = spinning loader icon, `open`/`reconnecting` = the same
-  live dot, `auth` = an unlock icon with no dot).
+  Top bar: brand, connection pill, hub version, read-only/Control chip, settings entry (gear),
+  sign out (vue-plan.md v2.1 §3.2, §7, §5.2 — P3 exclusive, `components/shell/**`; Control chip
+  per control-plan.md v2.1 §7.4 — C5). 2026-10 (user-decided): the theme dropdown and the
+  font-size popover moved into the standalone `#/settings` page — the bar now carries a single
+  gear link there (a real hash navigation, so browser back returns). `TopBarProps` is frozen
+  with no `user`/username field (`contracts.ts`), so — unlike the static mockup, which also
+  showed a `.user-chip` — this build has no username slot to render; §7's connection pill
+  states are otherwise ported verbatim (states.html: `connecting` = spinning loader icon,
+  `open`/`reconnecting` = the same live dot, `auth` = an unlock icon with no dot).
 
   C5: the chip switches on the hub's negotiated control plane (`HUB_CTX.state.control`) —
   `Read-only` when off, a warn-coloured `Control` button when on; clicking it expands the
@@ -21,8 +23,6 @@ import { UI_BUILD } from "../../build-info.js";
 import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
-import ThemeToggle from "./ThemeToggle.vue";
-import FontScaleToggle from "./FontScaleToggle.vue";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -79,8 +79,14 @@ function onControlChipClick(): void {
 
     <span class="topbar-spacer"></span>
 
-    <ThemeToggle :model-value="theme" @update:model-value="emit('update:theme', $event)" />
-    <FontScaleToggle />
+    <a
+      class="btn btn-ghost btn-icon settings-link"
+      href="#/settings"
+      :aria-label="t('settings.title')"
+      :title="t('settings.title')"
+    >
+      <AppIcon name="gear" />
+    </a>
 
     <button
       v-if="canSignOut"

@@ -7,6 +7,10 @@
   `pointer: coarse` ⇒ Enter = newline (button-only send); IME composition (`isComposing` /
   keyCode 229) never sends.
 
+  Delivery mode (2026-10, user-decided): the per-message DeliverSwitch dropdown is retired —
+  a busy send goes with the STORED default from the settings page (`useDeliverDefault`,
+  `pwh_deliver`, fallback steer); desktop Alt+Enter still flips to followUp per message.
+
   Auto-grow 1–8 lines: CSS `field-sizing: content` where supported, else a CSSOM
   `el.style.height` fallback (CSSOM is not governed by `style-src 'self'` — CSP stays put).
 
@@ -47,8 +51,9 @@ import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
-import DeliverSwitch from "./DeliverSwitch.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
+import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import "../../styles/upload.css";
 
 const props = defineProps<ComposerProps>();
@@ -64,7 +69,10 @@ const text = ref(props.draft ?? "");
 // §7.1: restore the in-memory per-agent draft when no explicit draft prop was given.
 if (props.draft === undefined && ctx) text.value = ctx.control.draft(ctx.agentKey);
 
-const deliver = ref<"steer" | "followUp">("steer");
+// 2026-10 (user-decided): no per-message mode state — busy sends read the settings page's
+// stored default (`pwh_deliver`, fallback steer). Read once at mount; the settings page and
+// the composer are never mounted at the same time (different routes).
+const deliverDefault = useDeliverDefault({ storage: browserLocalStorage() });
 const sendAsText = ref(false);
 const textareaEl = ref<HTMLTextAreaElement | null>(null);
 
@@ -91,8 +99,15 @@ const policy = computed(() =>
 );
 const paletteOpen = computed(() => commandMode.value && slash.value !== undefined);
 
-/** §7.6 placeholders: idle announces "starts a new turn" (D4), busy the steer/follow-up keys. */
-const placeholder = computed(() => (busy.value ? t("control.placeholderBusy") : t("control.placeholderIdle")));
+/** §7.6 placeholders: idle announces "starts a new turn" (D4). Busy follows the STORED
+ * delivery default (acceptance P2: a fixed "steer" placeholder lied when the settings page
+ * default was followUp — Enter actually queues then). */
+const placeholder = computed(() => {
+  if (!busy.value) return t("control.placeholderIdle");
+  return deliverDefault.deliver.value === "followUp"
+    ? t("control.placeholderBusyFollowUp")
+    : t("control.placeholderBusy");
+});
 
 // ---------------------------------------------------------------------------
 // attachments (web-hub-upload §3.2/§4.1 — U5)
@@ -335,11 +350,11 @@ function onKeydown(ev: KeyboardEvent): void {
   if (action === "newline") return; // default behaviour (insert a newline)
   ev.preventDefault();
   // No local deny early-exit anymore (§3.2): a denied command is `command-policy` in sendGate.
-  doSend(action === "followUp" ? "followUp" : deliver.value);
+  doSend(action === "followUp" ? "followUp" : deliverDefault.deliver.value);
 }
 
 function onSendClick(): void {
-  doSend(deliver.value);
+  doSend(deliverDefault.deliver.value);
 }
 
 function onPalettePick(name: string): void {
@@ -419,7 +434,6 @@ watch(
         @compositionstart="onCompositionStart"
         @compositionend="onCompositionEnd"
       ></textarea>
-      <DeliverSwitch v-if="busy" :busy="busy" v-model="deliver" />
       <button
         class="btn btn-primary composer-send"
         type="button"

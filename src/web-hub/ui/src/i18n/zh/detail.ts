@@ -29,7 +29,6 @@ const detail = {
   versionMismatch: "界面构建于 {c1}，hub 为 {c2} — 建议重新运行 npm run build:web。",
   loadingHistory: "正在加载历史记录…",
   dockLong: "· 请在终端中回复",
-  follow: "跟随",
   latest: "最新",
   newCount: "{n} 条新消息",
 } satisfies Messages<typeof en>;

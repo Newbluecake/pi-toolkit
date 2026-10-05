@@ -18,7 +18,6 @@ import type {
   Notice,
   Route,
   RunVisualState,
-  ThemePref,
   ToolView,
 } from "./types.js";
 
@@ -53,18 +52,9 @@ export interface TopBarProps {
   readonly conn: ConnState;
   readonly hubVersion: string | null;
   readonly canSignOut: boolean;
-  readonly theme: ThemePref;
 }
 export interface TopBarEmits {
   signout: [];
-  "update:theme": [value: ThemePref];
-}
-
-export interface ThemeToggleProps {
-  readonly modelValue: ThemePref;
-}
-export interface ThemeToggleEmits {
-  "update:modelValue": [value: ThemePref];
 }
 
 export interface NoticeStackProps {
@@ -158,13 +148,6 @@ export interface ComposerProps {
 }
 export interface ComposerEmits {
   send: [text: string, deliver: "steer" | "followUp"];
-}
-export interface DeliverSwitchProps {
-  readonly busy: boolean;
-  readonly modelValue: "steer" | "followUp";
-}
-export interface DeliverSwitchEmits {
-  "update:modelValue": [value: "steer" | "followUp"];
 }
 export interface StopButtonProps {
   readonly busy: boolean;

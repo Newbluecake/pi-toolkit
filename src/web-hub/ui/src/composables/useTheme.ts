@@ -2,7 +2,8 @@
  * Three-state theme preference (vue-plan.md v2.1 §3.9, §5.2 — P1). `public/theme-init.js` (P0)
  * already applies the persisted class before first paint; this composable is the *runtime*
  * counterpart — reading the same `pwh_theme` localStorage key, applying the same two classes,
- * and persisting further changes made through `ThemeToggle.vue` (P3). This file's path matches
+ * and persisting further changes made through the settings page (`shell/SettingsView.vue`,
+ * 2026-10 — the top-bar `ThemeToggle.vue` dropdown is retired). This file's path matches
  * `source-scan.test.ts`'s `LOCALSTORAGE_ALLOWED` exemption (`/theme|token-client/i`) — the one
  * place in `src/web-hub/ui/**` (besides the frozen `theme-init.js`) allowed to touch
  * `localStorage`.

@@ -35,7 +35,6 @@ describe("TopBar build stamps", () => {
   const baseProps = {
     conn: "open",
     hubVersion: null,
-    theme: "system",
     canSignOut: false,
   } as const;
 

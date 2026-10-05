@@ -1,5 +1,5 @@
 /*
- * pi web-hub — bottom dock (follow-live switch + jump-to-latest, vue-plan.md v2.1 §3.2, §5.2,
+ * pi web-hub — bottom dock (jump-to-latest; the follow-live switch is retired 2026-10, vue-plan.md v2.1 §3.2, §5.2,
  * §6.5 — P3 exclusive). Ported from `docs/dev/web-hub/ui-mockups/app.css`'s "bottom dock"
  * section. Lives in the document flow (the last item of `.detail`'s column flex, per
  * `detail.css`) rather than as a `position: fixed` overlay — so it can never cover the
@@ -52,75 +52,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* switch = native checkbox (role="switch"), whole label is the 44px hit area */
-.switch {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-height: 44px;
-  padding: 0 var(--sp-2);
-  border-radius: var(--r-sm);
-  color: var(--c-text-2);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  cursor: pointer;
-  user-select: none;
-}
-
-/* switch = native checkbox (role="switch"), whole label is the 44px hit area. The visible pill
- * track is 34x20 (unchanged from the mockup), but the `<input>` element's own hit box is grown
- * to 44x44 (transparent padding drawn via `::before`) so a bare-`input` element scan (the visual
- * checker's `shell-touch-targets-44px`, which measures every `a,button,input,summary,...`
- * individually, not just the wrapping `label.switch`) doesn't flag the *nested* control as its
- * own undersized target on top of the label's already-\u226544px one. */
-.switch input {
-  appearance: none;
-  position: relative;
-  width: 44px;
-  height: 44px;
-  margin: 0;
-  flex: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-.switch input::before {
-  content: "";
-  position: absolute;
-  top: 12px;
-  left: 5px;
-  width: 34px;
-  height: 20px;
-  border-radius: var(--r-pill);
-  background: var(--c-border-strong);
-  transition: background-color var(--dur-base) var(--ease-out);
-}
-
-.switch input::after {
-  content: "";
-  position: absolute;
-  top: 14px;
-  left: 7px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
-  transition: transform var(--dur-base) var(--ease-out);
-}
-
-.switch input:checked::before {
-  background: var(--c-primary);
-}
-
-.switch input:checked::after {
-  transform: translateX(14px);
-}
-
-.switch input:focus-visible {
-  outline: 2px solid var(--c-focus);
-  outline-offset: 2px;
-}
+/* switch (follow toggle): RETIRED 2026-10 — DetailDock no longer renders it (the transcript's
+ * auto-follow is symmetric; jump-latest covers the manual case). */
 
 @media (min-width: 481px) {
   .dock .readonly .long {
@@ -129,7 +62,7 @@
 }
 
 /* landscape phones (todo #7): reclaim vertical space — 52px bar compresses to 40px. The
- * interactive controls inside (`.switch`, `.jump-latest`) keep their own 44px hit boxes, so
+ * interactive controls inside (`.jump-latest`) keep their own 44px hit boxes, so
  * `shell-touch-targets-44px` is unaffected; the safe-area `max()` convention is kept. */
 @media (orientation: landscape) and (max-height: 500px) {
   .dock {

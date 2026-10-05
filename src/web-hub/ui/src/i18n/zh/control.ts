@@ -19,12 +19,9 @@ const control = {
 
   placeholderIdle: "输入消息",
   placeholderBusy: "插话当前轮",
+  placeholderBusyFollowUp: "排到之后",
   send: "发送",
   sendAria: "发送消息",
-  deliverGroup: "投递方式",
-  deliverSteer: "Steer",
-  deliverFollowUp: "Follow-up",
-  idleHint: "空闲——将开始新一轮",
 
   stop: "Stop",
   stopConfirm: "确认中止",

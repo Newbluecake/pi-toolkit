@@ -31,6 +31,7 @@ import { toAgentCardView } from "../agents/agentCardModel.js";
 import AgentList from "../agents/AgentList.vue";
 import AgentDetail from "../detail/AgentDetail.vue";
 import EmptyState from "./EmptyState.vue";
+import SettingsView from "./SettingsView.vue";
 import { SIDEBAR_DRAWER } from "./sidebarDrawer.js";
 
 const props = defineProps<DashboardViewProps>();
@@ -165,7 +166,14 @@ function onLoadOlder(agentKey: string): void {
 </script>
 
 <template>
-  <div class="layout">
+  <!-- settings route (user-decided 2026-10): full-width standalone page in EVERY band — the
+       list/detail split below is skipped entirely, so the preferences stay reachable one
+       handed on phones and never share the pane with an agent detail. The back button rides
+       the same `onBack` as the agent detail's (field report: returning from settings must
+       restore the session the user came from — `history.back()` when in-app history exists,
+       `location.replace("#/")` only for a direct deep link with nothing to return to). -->
+  <SettingsView v-if="route.name === 'settings'" @back="onBack" />
+  <div v-else class="layout">
     <!-- list: full-width page on the list route of every single-view band, permanent column in
          the ≥1025 split, overlay drawer (`.sidebar-drawer` + scrim) in the 481–1024 mid band -->
     <AgentList

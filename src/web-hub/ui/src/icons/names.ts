@@ -21,6 +21,7 @@ export type IconName =
   | "eye"
   | "file"
   | "folder"
+  | "gear"
   | "hash"
   | "image"
   | "inbox"
@@ -63,6 +64,7 @@ export const ICON_NAMES: readonly IconName[] = [
   "eye",
   "file",
   "folder",
+  "gear",
   "hash",
   "image",
   "inbox",

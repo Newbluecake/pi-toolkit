@@ -26,7 +26,6 @@ const detail = {
   versionMismatch: "UI built at {c1}, hub is {c2} — consider rebuilding with npm run build:web.",
   loadingHistory: "Loading history…",
   dockLong: "· reply from the terminal",
-  follow: "Follow",
   latest: "Latest",
   newCount: "{n} new",
 } satisfies Record<string, string>;

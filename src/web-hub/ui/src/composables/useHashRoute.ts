@@ -1,7 +1,9 @@
 /**
  * Hash-based deep-link routing (vue-plan.md v2.1 §3.7, §5.2 — P0). `#/` ⇒ list; `#/agent/<key>`
- * (percent-encoded) ⇒ that agent; anything else (including a lingering `#t=` token fragment)
- * parses as `list` — never as an agent key.
+ * (percent-encoded) ⇒ that agent; `#/settings` ⇒ the standalone settings page (user-decided
+ * 2026-10: theme / font size / default delivery mode moved here off the top bar and composer);
+ * anything else (including a lingering `#t=` token fragment) parses as `list` — never as an
+ * agent key.
  *
  * **Ordering constraint (plan §3.7)**: in token mode, `@logic/token-client.js`'s `start()`
  * consumes and clears any `#t=` fragment (via `history.replaceState`) before this composable's
@@ -23,6 +25,7 @@ export interface HashRouteHandle {
 }
 
 export function parseRouteHash(hash: string): Route {
+  if (hash === "#/settings") return { name: "settings" };
   const prefix = "#/agent/";
   if (hash.startsWith(prefix)) {
     const raw = hash.slice(prefix.length);
@@ -38,6 +41,7 @@ export function parseRouteHash(hash: string): Route {
 }
 
 export function routeToHash(route: Route): string {
+  if (route.name === "settings") return "#/settings";
   return route.name === "list" ? "#/" : `#/agent/${encodeURIComponent(route.key)}`;
 }
 

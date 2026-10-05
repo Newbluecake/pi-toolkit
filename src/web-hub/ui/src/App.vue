@@ -46,7 +46,7 @@ import { usePasswordAuth } from "./composables/usePasswordAuth.js";
 import { useTheme } from "./composables/useTheme.js";
 import { createTokenTransport } from "./transport/token.js";
 import type { HubTransport, TransportHooks } from "./transport/types.js";
-import type { ConnState, Notice, ThemePref } from "./types.js";
+import type { ConnState, Notice } from "./types.js";
 
 type AuthMode = "token" | "password" | "unknown";
 
@@ -58,7 +58,11 @@ function detectAuthMode(): AuthMode {
 const authMode = detectAuthMode();
 const { t } = useI18n();
 
-const theme = useTheme({
+// Boot-time theme assert (classes + meta theme-color; `public/theme-init.js` already applied
+// the persisted class pre-paint). 2026-10 (user-decided): runtime theme CHANGES moved to the
+// settings page (`shell/SettingsView.vue` owns its own `useTheme` instance) — the top bar no
+// longer carries a theme control, so nothing here consumes the handle.
+useTheme({
   storage: browserLocalStorage(),
   doc: document,
   metaThemeColor: document.querySelector('meta[name="theme-color"]'),
@@ -200,10 +204,6 @@ async function onSignOut(): Promise<void> {
   await passwordAuth?.signOut();
 }
 
-function onThemeChange(next: ThemePref): void {
-  theme.setPref(next);
-}
-
 onMounted(() => {
   if (hub) void hub.start();
   hashRoute?.start();
@@ -225,14 +225,7 @@ onUnmounted(() => {
     <a v-if="showDashboard" class="skip-link" href="#transcript">{{ t("shell.skipToConversation") }}</a>
 
     <div v-if="showDashboard" class="app">
-      <TopBar
-        :conn="conn"
-        :hub-version="hubVersion"
-        :can-sign-out="authMode === 'password'"
-        :theme="theme.pref.value"
-        @update:theme="onThemeChange"
-        @signout="onSignOut"
-      />
+      <TopBar :conn="conn" :hub-version="hubVersion" :can-sign-out="authMode === 'password'" @signout="onSignOut" />
       <HubStateBanner />
       <ControlNotice v-if="controlOn" />
       <NoticeStack :notices="globalNotices" @action="() => {}" />

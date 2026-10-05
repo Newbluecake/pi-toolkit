@@ -491,8 +491,11 @@ export interface LoginErrorView {
   readonly countdownS?: number;
 }
 
-/** `useHashRoute.ts` (§3.7) — the single source of truth for "which agent is selected". */
-export type Route = { readonly name: "list" } | { readonly name: "agent"; readonly key: string };
+/** `useHashRoute.ts` (§3.7) — the single source of truth for "which agent is selected".
+ * `#/settings` (user-decided 2026-10) is the standalone preferences page (theme / font size /
+ * default delivery mode) — reached from the top bar's gear entry, left via browser back. */
+export type Route =
+  { readonly name: "list" } | { readonly name: "agent"; readonly key: string } | { readonly name: "settings" };
 
 /** §3.9 — three-state theme preference persisted under the `pwh_theme` localStorage key. */
 export type ThemePref = "system" | "light" | "dark";

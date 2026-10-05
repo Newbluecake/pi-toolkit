@@ -25,6 +25,7 @@ vi.stubGlobal("matchMedia", (query: string) => ({
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   vi.useRealTimers();
+  window.localStorage.clear();
   for (const w of mounted.splice(0)) w.unmount();
 });
 
@@ -137,14 +138,27 @@ describe("DetailDock.vue — read-only reasons (§7.4)", () => {
     expect(off.find(".readonly").text()).toContain("Agent offline");
   });
 
-  it("control ON ⇒ composer + queue list, Follow switch kept", () => {
+  it("control ON ⇒ composer + queue list; Follow switch retired (2026-10), Latest jump kept", () => {
     const { control } = fakeControl();
     const w = mountDock(control, {
       queue: [{ id: "q1", text: "queued", deliver: "steer", source: "web", cmdId: "c1", at: 1 }],
     });
     expect(w.find(".composer").exists()).toBe(true);
     expect(w.find(".queue-list").exists()).toBe(true);
-    expect(w.find(".switch input").exists()).toBe(true);
+    expect(w.find(".switch").exists()).toBe(false); // auto-follow is symmetric; jump-latest covers manual
+  });
+
+  it("jump-to-latest still renders in BOTH dock branches when behind (following=false, newCount>0)", () => {
+    const { control } = fakeControl();
+    const on = mountDock(control, {}, { following: false, newCount: 3 });
+    expect(on.find(".jump-latest").exists()).toBe(true);
+    const off = mountDock(
+      control,
+      { enabled: false, readonlyReason: "control.dockReadonlyHub" },
+      { following: false, newCount: 3 },
+    );
+    expect(off.find(".jump-latest").exists()).toBe(true);
+    expect(off.find(".switch").exists()).toBe(false);
   });
 });
 

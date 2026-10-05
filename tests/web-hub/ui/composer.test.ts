@@ -24,6 +24,7 @@ function stubMatchMedia(matches: boolean): void {
 
 beforeEach(() => {
   stubMatchMedia(false); // fine pointer by default; the coarse test re-stubs
+  window.localStorage.clear(); // pwh_deliver must not leak between cases
 });
 
 function fakeControl(): ControlHandle & { drafts: Map<string, string> } {
@@ -67,6 +68,7 @@ function controlView(over: Partial<ControlView> = {}): ControlView {
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   vi.unstubAllGlobals();
+  window.localStorage.clear();
   for (const w of mounted.splice(0)) w.unmount();
 });
 
@@ -97,19 +99,28 @@ describe("Composer.vue key map (§7.4)", () => {
     expect((w.find("textarea").element as HTMLTextAreaElement).value).toBe(""); // cleared on send
   });
 
-  it("busy ⇒ Enter sends with the DeliverSwitch mode (default steer), switchable to followUp", async () => {
-    const w = mountComposer({ busy: true });
-    expect(w.find(".deliver-trigger").exists()).toBe(true);
-    await w.find("textarea").setValue("steer this");
-    await w.find("textarea").trigger("keydown", { key: "Enter" });
-    await w.find("textarea").setValue("queued for later");
-    await w.find(".deliver-trigger").trigger("click"); // open the dropdown
-    await w.findAll(".deliver-item")[1]!.trigger("click"); // Follow-up
-    await w.find("textarea").trigger("keydown", { key: "Enter" });
-    expect(w.emitted("send")).toEqual([
-      ["steer this", "steer"],
-      ["queued for later", "followUp"],
-    ]);
+  it("busy ⇒ Enter sends with the stored deliver default (settings page); no per-message switch", async () => {
+    const steer = mountComposer({ busy: true });
+    expect(steer.find(".deliver-trigger").exists()).toBe(false); // DeliverSwitch retired (2026-10)
+    await steer.find("textarea").setValue("steer this");
+    await steer.find("textarea").trigger("keydown", { key: "Enter" });
+    expect(steer.emitted("send")).toEqual([["steer this", "steer"]]); // unset storage ⇒ fallback steer
+
+    window.localStorage.setItem("pwh_deliver", "followUp"); // settings page stored followUp
+    const queued = mountComposer({ busy: true });
+    await queued.find("textarea").setValue("queued for later");
+    await queued.find("textarea").trigger("keydown", { key: "Enter" });
+    expect(queued.emitted("send")).toEqual([["queued for later", "followUp"]]);
+  });
+
+  it("busy placeholder follows the stored deliver default (acceptance P2)", async () => {
+    const steer = mountComposer({ busy: true });
+    expect(steer.find("textarea").attributes("placeholder")).toBe("Steer this turn");
+
+    window.localStorage.setItem("pwh_deliver", "followUp");
+    const queued = mountComposer({ busy: true });
+    expect(queued.find("textarea").attributes("placeholder")).toBe("Follow-up");
+    expect(queued.find("textarea").attributes("aria-label")).toBe("Follow-up");
   });
 
   it("Shift+Enter inserts a newline and never sends", async () => {

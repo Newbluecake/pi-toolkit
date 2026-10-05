@@ -3,8 +3,8 @@
  * precedent: `public/theme-init.js` already applies the persisted value as the `--fs-scale`
  * custom property on `<html>` before first paint (no flash of the wrong text size); this
  * composable is the *runtime* counterpart — reading the same `pwh_fontscale` storage key,
- * writing the same property, and persisting changes made through `FontScaleToggle.vue`'s
- * slider popover. Like `useTheme.ts`, it never touches the storage global directly (deps are
+ * writing the same property, and persisting changes made through the settings page's
+ * (`shell/SettingsView.vue`, 2026-10) font-size slider. Like `useTheme.ts`, it never touches the storage global directly (deps are
  * injected, the toggle passes `shell/themeStorage.ts`'s `browserLocalStorage()`), so this
  * file stays clean under `source-scan.test.ts`'s storage-identifier rule without needing a
  * path exemption.

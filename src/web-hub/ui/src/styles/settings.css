@@ -1,0 +1,160 @@
+/*
+ * pi web-hub — settings page (user-decided 2026-10: theme / font size / default delivery mode
+ * moved off the top bar and composer into a standalone `#/settings` route). Imported by
+ * `components/shell/SettingsView.vue` only (late-package precedent: `control/Composer.vue`
+ * imports `upload.css` the same way). Cards use the existing tokens (`--c-surface` /
+ * `--c-border` / `--r-md` / `--sp-*`); coarse-pointer interactive targets are ≥44px.
+ */
+
+.settings-page {
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--c-bg);
+}
+
+.settings-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--sp-4);
+  padding-bottom: max(var(--sp-8), env(safe-area-inset-bottom));
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.settings-back {
+  flex: none;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  letter-spacing: -0.01em;
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+}
+
+.settings-h {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.settings-note {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+/* option rows (theme three-choice, delivery two-choice) — radio semantics on real buttons */
+.settings-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.settings-option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 40px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-option:hover {
+  background: var(--c-surface-2);
+}
+
+.settings-option[aria-checked="true"] {
+  color: var(--c-primary);
+  font-weight: var(--fw-semibold);
+}
+
+.settings-option-label {
+  flex: none;
+}
+
+.settings-option-hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+}
+
+.settings-option-check {
+  margin-left: auto;
+  color: var(--c-primary);
+}
+
+/* font-size row: slider + live readout + reset (mirrors the retired top-bar popover's split:
+ * `input` live-previews without persisting, `change`/reset persist).
+ *
+ * Slider immunity (user field report + acceptance P1): the row must be IMMUNE to the very
+ * scale it controls — otherwise the slider's own geometry (track height, readout font, row
+ * width) shifts under the user's finger mid-drag. `--fs-scale: 1` ALONE is not enough: CSS
+ * custom properties substitute var() at the DECLARING element's computed value, so the
+ * `--fs-*` tokens inherited from :root arrive ALREADY substituted with :root's scale
+ * (e.g. `--fs-sm: calc(13px * 1.8)`) and a descendant's `--fs-scale` override never triggers
+ * re-substitution. The fix is to RE-DECLARE every font token this subtree uses, with values
+ * referencing the container's own `--fs-scale: 1` — same pixel values as tokens.css's :root
+ * block (11/12/13/14px), so at 100% the row renders identically to the rest of the page. */
+.settings-font {
+  --fs-scale: 1;
+  --fs-2xs: calc(11px * var(--fs-scale, 1));
+  --fs-xs: calc(12px * var(--fs-scale, 1));
+  --fs-sm: calc(13px * var(--fs-scale, 1));
+  --fs-md: calc(14px * var(--fs-scale, 1));
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.settings-font input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--c-primary);
+}
+
+.settings-font-readout {
+  min-width: 4ch;
+  text-align: right;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (pointer: coarse) {
+  .settings-option,
+  .settings-font input[type="range"],
+  .settings-font .btn,
+  .settings-back {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}

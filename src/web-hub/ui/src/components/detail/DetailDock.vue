@@ -5,7 +5,10 @@
   keyboard interaction is a W5 真机 item).
 
   Control ON (`CONTROL_VIEW.enabled`): QueueList (mergeQueue model) + Composer + StopButton
-  replace the read-only line; the Follow switch and Latest button are kept. Command mode
+  replace the read-only line; the Latest button is kept. (2026-10, user-decided: the Follow
+  switch is retired — the transcript already auto-follows symmetrically: scrolling up turns
+  follow off, returning to the bottom turns it back on, and the jump-to-latest button covers
+  the manual case.) Command mode
   orchestration lives HERE because the frozen `DetailDockEmits` has no send/stop/retry/discard
   events (C0 froze only the props side) — the dock calls the `ControlHandle` straight from the
   injected `CONTROL_VIEW` instead of emitting up:
@@ -251,10 +254,6 @@ function onQueueDiscard(id: string): void {
 onUnmounted(() => {
   if (waitPromptTimer !== undefined) clearTimeout(waitPromptTimer);
 });
-
-function onToggle(ev: Event): void {
-  emit("update:following", (ev.target as HTMLInputElement).checked);
-}
 </script>
 
 <template>
@@ -283,11 +282,6 @@ function onToggle(ev: Event): void {
       <Composer :enabled="true" :busy="busy" @send="onSend" />
       <StopButton :busy="busy" :queue-count="queueItems.length" @stop="onStop" />
       <div class="dock-actions">
-        <label class="switch"
-          ><input type="checkbox" role="switch" name="follow" :checked="following" @change="onToggle" />{{
-            t("detail.follow")
-          }}</label
-        >
         <button
           v-if="!following && newCount > 0"
           class="btn btn-primary jump-latest"
@@ -307,11 +301,6 @@ function onToggle(ev: Event): void {
       }}<span v-if="reasonKey === null" class="long"> {{ t("detail.dockLong") }}</span></span
     >
     <div class="dock-actions">
-      <label class="switch"
-        ><input type="checkbox" role="switch" name="follow" :checked="following" @change="onToggle" />{{
-          t("detail.follow")
-        }}</label
-      >
       <button v-if="!following && newCount > 0" class="btn btn-primary jump-latest" type="button" @click="emit('jump')">
         <AppIcon name="arrow-down" />{{ t("detail.latest")
         }}<span class="badge-new">{{ t("detail.newCount", { n: newCount }) }}</span>

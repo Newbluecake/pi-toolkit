@@ -37,6 +37,8 @@ describe("parseRouteHash", () => {
     ["#/agent/", { name: "list" }],
     ["#/agent/abc", { name: "agent", key: "abc" }],
     ["#/agent/a%2Fb", { name: "agent", key: "a/b" }],
+    ["#/settings", { name: "settings" }],
+    ["#/settings/extra", { name: "list" }], // only the exact hash is the settings route
     ["#t=some-token", { name: "list" }], // §3.7: a lingering token fragment must never parse as an agent key
     ["#/agent/%", { name: "list" }], // malformed percent-encoding degrades to list, never throws
     ["#unrelated", { name: "list" }],
@@ -48,6 +50,7 @@ describe("parseRouteHash", () => {
 describe("routeToHash", () => {
   it("round-trips through parseRouteHash", () => {
     expect(routeToHash({ name: "list" })).toBe("#/");
+    expect(routeToHash({ name: "settings" })).toBe("#/settings");
     expect(parseRouteHash(routeToHash({ name: "agent", key: "a/b c" }))).toEqual({ name: "agent", key: "a/b c" });
   });
 });
