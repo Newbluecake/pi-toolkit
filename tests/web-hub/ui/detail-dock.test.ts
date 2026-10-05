@@ -75,6 +75,7 @@ interface ViewOver {
   commandsEnabled?: boolean;
   pendingCtl?: readonly Record<string, unknown>[];
   queue?: readonly unknown[];
+  fleet?: readonly unknown[];
 }
 
 function fakeView(control: ControlHandle, over: ViewOver = {}): { view: ControlView; agent: { value: AgentState } } {
@@ -82,6 +83,7 @@ function fakeView(control: ControlHandle, over: ViewOver = {}): { view: ControlV
     pendingCtl: over.pendingCtl ?? [],
     queue: over.queue ?? [],
     prompts: [],
+    fleet: over.fleet ?? [],
   } as unknown as AgentState);
   const view: ControlView = {
     agentKey: "agent-a",
@@ -217,7 +219,7 @@ describe("DetailDock.vue — orchestration (§7.4/§7.7)", () => {
     expect(runs[1]!.args[3]).toEqual({ confirm: true });
   });
 
-  it("StopButton emits ⇒ abort; queue retry/discard ⇒ control.retry/discard", async () => {
+  it("inline StopButton (inside Composer since 2026-10) ⇒ abort; queue retry/discard ⇒ control.retry/discard", async () => {
     const pendingCtl = [{ id: "f1", kind: "prompt", text: "x", state: "failed", error: "E_NETWORK", at: 0 }];
     const { control, calls } = fakeControl();
     const w = mountDock(control, { busy: true, pendingCtl });
@@ -240,5 +242,91 @@ describe("DetailDock.vue — orchestration (§7.4/§7.7)", () => {
     expect(calls.map((c) => c.method)).toEqual(["sendPrompt", "discard"]);
     expect(calls[0]!.args).toEqual(["agent-a", "never ran", "followUp"]);
     expect(calls[1]!.args).toEqual(["agent-a", "n1"]);
+  });
+});
+
+describe("DetailDock.vue — @mention send routing (task #11)", () => {
+  const fleet = [
+    { runId: "r1", label: "bot", status: "running", terminal: false },
+    { runId: "r2", label: "old", status: "completed", terminal: true },
+  ];
+
+  it("`@running-label msg` ⇒ steerSub with the STRIPPED message (never sendPrompt)", async () => {
+    const { control, calls } = fakeControl();
+    const w = mountDock(control, { fleet, busy: true });
+    await w.find(".composer textarea").setValue("@bot please rebase");
+    await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls).toEqual([{ method: "steerSub", args: ["agent-a", "r1", "please rebase"] }]);
+  });
+
+  it("idle (not busy) still steers — interjecting IS the steer semantics", async () => {
+    const { control, calls } = fakeControl();
+    const w = mountDock(control, { fleet, busy: false });
+    await w.find(".composer textarea").setValue("@bot ping");
+    await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls.map((c) => c.method)).toEqual(["steerSub"]);
+  });
+
+  it("terminal label / unknown label ⇒ plain sendPrompt with the raw text", async () => {
+    const { control, calls } = fakeControl();
+    const w = mountDock(control, { fleet });
+    for (const text of ["@old hi", "@ghost hi"]) {
+      await w.find(".composer textarea").setValue(text);
+      await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
+    }
+    await flush();
+    expect(calls).toEqual([
+      { method: "sendPrompt", args: ["agent-a", "@old hi", "steer"] },
+      { method: "sendPrompt", args: ["agent-a", "@ghost hi", "steer"] },
+    ]);
+  });
+
+  it("bare `@label` (no message): Enter COMPLETES while the panel is open; Esc then Enter sends raw", async () => {
+    const { control, calls } = fakeControl();
+    const w = mountDock(control, { fleet });
+    await w.find(".composer textarea").setValue("@bot");
+    const ta = w.find(".composer textarea");
+    (ta.element as HTMLTextAreaElement).setSelectionRange(4, 4);
+    await ta.trigger("input");
+    await ta.trigger("keydown", { key: "Enter" }); // panel open ⇒ pick, not send
+    expect((ta.element as HTMLTextAreaElement).value).toBe("@bot ");
+    expect(calls).toEqual([]);
+    // restore the bare form and dismiss: now Enter sends the raw text (TUI parity)
+    await ta.setValue("@bot");
+    (ta.element as HTMLTextAreaElement).setSelectionRange(4, 4);
+    await ta.trigger("input");
+    await ta.trigger("keydown", { key: "Escape" });
+    await ta.trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls).toEqual([{ method: "sendPrompt", args: ["agent-a", "@bot", "steer"] }]);
+  });
+
+  it("slash command mode still wins over mention routing (disjoint prefixes, pinned)", async () => {
+    const commands = [{ name: "bot", kind: "skill", policy: "allow" }];
+    const { control, calls } = fakeControl(() => ({
+      ok: true,
+      data: { op: "command", completion: "sync", output: null },
+    }));
+    const w = mountDock(control, { fleet, commands, commandsEnabled: true });
+    await w.find(".composer textarea").setValue("/bot do it");
+    await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls.map((c) => c.method)).toEqual(["runCommand"]);
+  });
+
+  it("steerSub failure stays on the standard path: no crash, no sendPrompt fallback", async () => {
+    const { control, calls } = fakeControl(() => ({
+      ok: false,
+      error: "E_NOT_RUNNING",
+      retryable: false,
+      effect: "none" as const,
+    }));
+    const w = mountDock(control, { fleet, busy: true });
+    await w.find(".composer textarea").setValue("@bot too late");
+    await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls).toEqual([{ method: "steerSub", args: ["agent-a", "r1", "too late"] }]);
   });
 });

@@ -99,6 +99,10 @@ const control = {
   // --- fleet inline sub-agent actions (§7.4) ---
   fleetActionsAria: "Sub-agent actions",
 
+  // --- @mention completion (task #11) ---
+  mentionAria: "Running sub-agents",
+  mentionEmpty: "No matching sub-agent",
+
   // --- transcript web badge (§7.7, best-effort) ---
   badgeWeb: "web",
 } satisfies Record<string, string>;

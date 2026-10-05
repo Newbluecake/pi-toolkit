@@ -89,6 +89,9 @@ const control = {
 
   fleetActionsAria: "子 agent 操作",
 
+  mentionAria: "在跑的子 agent",
+  mentionEmpty: "无匹配的子 agent",
+
   badgeWeb: "web",
 } satisfies Messages<typeof en>;
 

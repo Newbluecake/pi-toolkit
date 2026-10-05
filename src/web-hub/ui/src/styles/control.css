@@ -98,6 +98,34 @@
   padding-right: 58px;
 }
 
+/* Stop button inside the input (2026-10 user request): absolute, left of the ring, vertically
+ * centered, frameless — the armed danger state keeps its background via .stop-btn.armed. */
+.composer-input .stop-wrap {
+  position: absolute;
+  right: 60px;
+  top: 0;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.composer-input .stop-btn {
+  align-self: center; /* overrides the dock-row stretch; the wrap owns vertical centering */
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+}
+
+/* textarea `padding-right` tiers (2026-10): ring only 58px (above) · stop only 52px ·
+ * ring+stop 108px. Later, more specific rules win over the ring-only base. */
+.composer-input:has(.stop-btn):not(:has(.ctx-ring)) textarea {
+  padding-right: 52px;
+}
+
+.composer-input:has(.ctx-ring):has(.stop-btn) textarea {
+  padding-right: 108px;
+}
+
 .ctx-ring {
   position: absolute;
   right: var(--sp-1); /* 2026-10-05 field report: ring hugged the input's right border */

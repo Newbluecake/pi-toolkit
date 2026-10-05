@@ -229,3 +229,42 @@ describe("Composer.vue command mode (§7.7)", () => {
     expect((w.find("textarea").element as HTMLTextAreaElement).value).toBe("/session ");
   });
 });
+
+describe("Composer.vue — inline StopButton (2026-10 user request: stop lives inside the input edge)", () => {
+  function abortingControl(calls: Array<{ method: string; args: readonly unknown[] }>): ControlHandle {
+    const base = fakeControl();
+    return {
+      ...base,
+      abort: ((key: string) => {
+        calls.push({ method: "abort", args: [key] });
+        return Promise.resolve({ ok: true as const });
+      }) as ControlHandle["abort"],
+    };
+  }
+
+  it("busy + CONTROL_VIEW with control ⇒ stop button renders INSIDE .composer-input", async () => {
+    const calls: Array<{ method: string; args: readonly unknown[] }> = [];
+    const w = mountComposer({ busy: true, view: controlView({ control: abortingControl(calls) }) });
+    const wrap = w.find(".composer-input");
+    expect(wrap.exists()).toBe(true);
+    expect(wrap.find(".stop-btn").exists()).toBe(true);
+  });
+
+  it("two-step click ⇒ view.control.abort(view.agentKey) — the dock's old channel, unchanged", async () => {
+    const calls: Array<{ method: string; args: readonly unknown[] }> = [];
+    const w = mountComposer({ busy: true, view: controlView({ control: abortingControl(calls) }) });
+    await w.find(".stop-btn").trigger("click"); // arm
+    expect(calls).toEqual([]);
+    await w.find(".stop-btn").trigger("click"); // confirm
+    expect(calls).toEqual([{ method: "abort", args: ["agent-a"] }]);
+  });
+
+  it("idle ⇒ no stop button; no CONTROL_VIEW (or null control) ⇒ no stop button even when busy", async () => {
+    const idle = mountComposer({ busy: false, view: controlView({ control: fakeControl() }) });
+    expect(idle.find(".stop-btn").exists()).toBe(false);
+    const noView = mountComposer({ busy: true });
+    expect(noView.find(".stop-btn").exists()).toBe(false);
+    const nullCtl = mountComposer({ busy: true, view: controlView({ control: null }) });
+    expect(nullCtl.find(".stop-btn").exists()).toBe(false);
+  });
+});

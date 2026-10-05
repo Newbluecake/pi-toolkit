@@ -44,8 +44,15 @@
   `DETAIL_METRICS` itself and self-hides without a provider — nothing here reads the metrics.
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { commandPolicyFor, composerKeyAction, parseSlash } from "@logic/control.js";
+import {
+  applyMentionPick,
+  filterMentionTargets,
+  mentionCompletion,
+  moveMentionActive,
+  runningMentionTargets,
+} from "@logic/mention.js";
 import { canSendWithAttachments, classifyPaste, collectDrop, pastedName, uploadAvailability } from "@logic/upload.js";
 import { UPLOAD_ATTACH_MAX_PER_MSG } from "@protocol/upload.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -56,6 +63,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
 import ContextRing from "./ContextRing.vue";
+import StopButton from "./StopButton.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
@@ -99,6 +107,93 @@ const sending = computed(() => view?.sending.value === true);
 
 const slash = computed(() => parseSlash(text.value));
 const commandMode = computed(() => slash.value !== undefined && commandsEnabled.value && !sendAsText.value);
+
+// ---------------------------------------------------------------------------
+// @mention completion (web-hub task #11)
+// ---------------------------------------------------------------------------
+// A line-initial `@partial` token opens a panel of the session's RUNNING sub-agents (the
+// CONTROL_VIEW agent's fleet rows, `status === "running"` only — anything else would steer
+// into a guaranteed E_NOT_RUNNING agent-side). Picking inserts `@label `; the actual send
+// routing lives in DetailDock (`mentionSendRoute`), this component only completes text.
+// With no running sub-agent the panel never pops at all (user-confirmed: cleaner than an
+// empty-state row).
+const rootEl = ref<HTMLElement | null>(null);
+const caret = ref(text.value.length);
+const mentionDismissed = ref(false); // Esc / outside-pointerdown latch, reset on any input
+const mentionActive = ref(0);
+
+function syncCaret(): void {
+  caret.value = textareaEl.value?.selectionStart ?? text.value.length;
+}
+
+const mentionState = computed(() => mentionCompletion(text.value, caret.value));
+const runningTargets = computed(() => runningMentionTargets([...(view?.agent.value.fleet ?? [])]));
+const mentionRows = computed(() =>
+  mentionState.value.open ? filterMentionTargets(runningTargets.value, mentionState.value.query) : [],
+);
+const mentionOpen = computed(
+  () => mentionState.value.open && !mentionDismissed.value && !commandMode.value && runningTargets.value.length > 0,
+);
+// Reset the highlight only when the QUERY (or open) changes; a fleet wire refresh (~1Hz)
+// rebuilds the rows array with identical content — resetting on that would yank the user's
+// arrow-key selection back to the first row (verifier P3, 2026-10-05).
+watch(
+  () => (mentionState.value.open ? mentionState.value.query : null),
+  () => {
+    mentionActive.value = 0;
+  },
+);
+watch(mentionRows, (rows) => {
+  if (mentionActive.value > rows.length - 1) mentionActive.value = Math.max(0, rows.length - 1);
+});
+
+function pickMention(label: string): void {
+  const applied = applyMentionPick(text.value, caret.value, label);
+  text.value = applied.text;
+  persistDraft();
+  void nextTick(() => {
+    const el = textareaEl.value;
+    if (el) {
+      el.focus();
+      el.setSelectionRange(applied.caret, applied.caret);
+    }
+    caret.value = applied.caret;
+    grow();
+  });
+}
+
+function onDocPointerDown(ev: Event): void {
+  if (!mentionOpen.value) return;
+  const root = rootEl.value;
+  if (root !== null && ev.target instanceof Node && root.contains(ev.target)) return;
+  mentionDismissed.value = true;
+}
+onMounted(() => document.addEventListener("pointerdown", onDocPointerDown, true));
+
+/** Mention key layer, called from `onKeydown` while the panel is open. Returns true when the
+ * event was consumed (never reaches `composerKeyAction` — Enter picks instead of sending). */
+function mentionKeydown(ev: KeyboardEvent): boolean {
+  if (!mentionOpen.value) return false;
+  if (ev.key === "Escape") {
+    mentionDismissed.value = true;
+    return true;
+  }
+  if (ev.key === "ArrowDown") {
+    mentionActive.value = moveMentionActive(mentionActive.value, 1, mentionRows.value.length);
+    return true;
+  }
+  if (ev.key === "ArrowUp") {
+    mentionActive.value = moveMentionActive(mentionActive.value, -1, mentionRows.value.length);
+    return true;
+  }
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.altKey) {
+    const row = mentionRows.value[mentionActive.value] ?? mentionRows.value[0];
+    if (row === undefined) return false; // zero matches: fall through to the normal key map
+    pickMention(row.label);
+    return true;
+  }
+  return false;
+}
 const policy = computed(() =>
   commandMode.value && slash.value ? commandPolicyFor([...commands.value], slash.value.name, busy.value) : null,
 );
@@ -171,6 +266,7 @@ function showHint(msg: string): void {
 }
 onUnmounted(() => {
   if (hintTimer !== undefined) clearTimeout(hintTimer);
+  document.removeEventListener("pointerdown", onDocPointerDown, true);
 });
 
 function fileNameOf(file: unknown): string {
@@ -317,6 +413,8 @@ function persistDraft(): void {
 }
 
 function onInput(): void {
+  syncCaret();
+  mentionDismissed.value = false; // any edit re-arms the completion after Esc/outside-click
   persistDraft();
   void nextTick(grow);
 }
@@ -351,6 +449,10 @@ function doSend(mode: "steer" | "followUp"): void {
 
 function onKeydown(ev: KeyboardEvent): void {
   if (composing.value) return; // inside an IME session: no key ever sends
+  if (mentionKeydown(ev)) {
+    ev.preventDefault();
+    return;
+  }
   const action = composerKeyAction(ev, { busy: busy.value });
   if (action === "newline") return; // default behaviour (insert a newline)
   ev.preventDefault();
@@ -360,6 +462,14 @@ function onKeydown(ev: KeyboardEvent): void {
 
 function onSendClick(): void {
   doSend(deliverDefault.deliver.value);
+}
+
+/** Stop (2026-10 user request: moved INTO the input's inner edge): same channel the dock used —
+ * `CONTROL_VIEW`'s `ControlHandle` straight from the inject, no emit hop. Renders only when a
+ * view with a live control handle is present (the dock's control-ON context). */
+function onStopInline(): void {
+  if (view === null || view.control === null) return;
+  void view.control.abort(view.agentKey).catch(() => {});
 }
 
 function onPalettePick(name: string): void {
@@ -381,6 +491,7 @@ watch(
 
 <template>
   <div
+    ref="rootEl"
     class="composer"
     :class="{ 'cmd-mode': commandMode }"
     @paste="onPaste"
@@ -396,6 +507,26 @@ watch(
       :busy="busy"
       @pick="onPalettePick"
     />
+    <!-- @mention completion (task #11): rendered before the input row so it opens UPWARD from
+         the bottom-pinned composer. Rows are the session's running sub-agents; Enter/click
+         inserts `@label `, Esc/outside-pointerdown closes. -->
+    <div v-if="mentionOpen" class="mention-panel" role="listbox" :aria-label="t('control.mentionAria')">
+      <button
+        v-for="(row, i) in mentionRows"
+        :key="row.runId"
+        type="button"
+        role="option"
+        class="mention-item"
+        :class="{ active: i === mentionActive }"
+        :aria-selected="i === mentionActive"
+        @click="pickMention(row.label)"
+        @mousemove="mentionActive = i"
+      >
+        <span class="mention-label" translate="no">@{{ row.label }}</span>
+        <span class="chip chip-muted mention-status">{{ t("control.stateRunning") }}</span>
+      </button>
+      <p v-if="mentionRows.length === 0" class="mention-empty">{{ t("control.mentionEmpty") }}</p>
+    </div>
     <AttachmentTray
       v-if="trayItems.length > 0"
       :items="trayItems"
@@ -437,9 +568,19 @@ watch(
           enterkeyhint="send"
           @input="onInput"
           @keydown="onKeydown"
+          @keyup="syncCaret"
+          @click="syncCaret"
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
         ></textarea>
+        <!-- Stop button (2026-10 user request): moved INTO the input's inner edge, left of the
+             context ring — absolute positioning + textarea `padding-right` tiers in control.css. -->
+        <StopButton
+          v-if="view?.control != null"
+          :busy="busy"
+          :queue-count="view.queueItems.value.length"
+          @stop="onStopInline"
+        />
         <!-- Context ring (2026-10-05 用户现场拍板): lives INSIDE the textarea's right edge;
              self-hides when no DETAIL_METRICS provider/contextUsage exists. -->
         <ContextRing />

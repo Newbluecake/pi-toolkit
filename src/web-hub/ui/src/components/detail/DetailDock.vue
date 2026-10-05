@@ -4,11 +4,12 @@
   `dock.css`), never `position: fixed`, so it can never cover the transcript (K19's soft-
   keyboard interaction is a W5 真机 item).
 
-  Control ON (`CONTROL_VIEW.enabled`): QueueList (mergeQueue model) + Composer + StopButton
-  replace the read-only line; the Latest button is kept. (2026-10, user-decided: the Follow
+  Control ON (`CONTROL_VIEW.enabled`): QueueList (mergeQueue model) + Composer replace the
+  read-only line; the Latest button is kept. (2026-10, user-decided: the Follow
   switch is retired — the transcript already auto-follows symmetrically: scrolling up turns
   follow off, returning to the bottom turns it back on, and the jump-to-latest button covers
-  the manual case.) Command mode
+  the manual case. The Stop button later moved INTO the composer's input edge — same
+  `CONTROL_VIEW` channel.) Command mode
   orchestration lives HERE because the frozen `DetailDockEmits` has no send/stop/retry/discard
   events (C0 froze only the props side) — the dock calls the `ControlHandle` straight from the
   injected `CONTROL_VIEW` instead of emitting up:
@@ -28,6 +29,7 @@
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref, watch } from "vue";
 import { commandPolicyFor, parseSlash } from "@logic/control.js";
+import { mentionSendRoute } from "@logic/mention.js";
 import type { CommandOutputWire } from "@protocol/messages.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
@@ -36,7 +38,6 @@ import Composer from "../control/Composer.vue";
 import CommandConfirm from "../control/CommandConfirm.vue";
 import CommandResult from "../control/CommandResult.vue";
 import QueueList from "../control/QueueList.vue";
-import StopButton from "../control/StopButton.vue";
 import { CONTROL_VIEW } from "../control/controlContext.js";
 
 const props = defineProps<DetailDockProps>();
@@ -209,14 +210,18 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
     void runCommand(slash.name, slash.args, false);
     return;
   }
+  // @mention routing (task #11): a leading `@label msg` resolving to a RUNNING fleet row
+  // steers that sub-agent instead of opening a new turn (steer works in both busy and idle —
+  // interjecting IS the steer semantics). Terminal/unknown labels stay plain text, exactly
+  // like the terminal's own mention interceptor, so web and TUI never diverge. Failures ride
+  // the standard pendingCtl path (QueueList's "steer sub" item with retry), same as
+  // FleetActions' inline steer.
+  const mention = mentionSendRoute(text, view?.agent.value.fleet ?? []);
+  if (mention.kind === "steer") {
+    void c.steerSub(key, mention.runId, mention.message).catch(() => {});
+    return;
+  }
   void c.sendPrompt(key, text, deliver).catch(() => {});
-}
-
-function onStop(): void {
-  const c = handle();
-  const key = agentKey();
-  if (!c || key === null) return;
-  void c.abort(key).catch(() => {});
 }
 
 function findPending(id: string): Record<string, unknown> | undefined {
@@ -280,7 +285,6 @@ onUnmounted(() => {
     />
     <div class="dock-row">
       <Composer :enabled="true" :busy="busy" @send="onSend" />
-      <StopButton :busy="busy" :queue-count="queueItems.length" @stop="onStop" />
       <div class="dock-actions">
         <button
           v-if="!following && newCount > 0"
