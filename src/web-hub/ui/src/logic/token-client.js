@@ -22,6 +22,8 @@
  */
 import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
+import { PREVIEW_CLIENT_TIMEOUT_MS, PREVIEW_IMAGE_MAX_BYTES } from "@protocol/preview.ts";
+import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 
 export const TOKEN_KEY = "pwh_token";
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -591,6 +593,122 @@ export function createClient(deps) {
     },
   };
 
+  // -------------------------------------------------------------------------
+  // content-preview endpoint (web-hub-preview plan v3 §3.2/§4.6, package PV4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * `GET /api/preview` (§4.6). Header-driven: the response's `X-PWH-Preview-*` /
+   * `Content-Length` / `Content-Type` are validated by `checkPreviewHeaders` BEFORE the body
+   * is read — an over-budget image (client `maxPixels`, or Content-Length over the loopback
+   * 16 MiB cap) aborts the fetch locally and returns the mirrored error without ever pulling
+   * the bytes. One 40s deadline (`PREVIEW_CLIENT_TIMEOUT_MS`, §0 客户端超时) spans headers AND
+   * body, merged with the caller's `signal` (usePreview's per-open controller) exactly like
+   * `request()` does. A 401 rides `withRelogin` (silent re-login + same-URL replay, GET ⇒
+   * side-effect free); the FINAL 401 surfaces as `E_AUTH` and `transport/token.ts`'s
+   * `withAuthNotice` flips the login view. A body whose byte count doesn't match
+   * `Content-Length` ⇒ `E_PREVIEW_CHANGED` (the hub `destroy()`s a mid-stream identity/hash
+   * failure, plan §4.5.2 — an incomplete body must never be shown as complete).
+   * @param {{ agentKey: string, sessionId: string, path: string }} req
+   * @param {{ signal?: any, maxPixels?: number }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function previewFetch(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    const maxPixels = opts !== undefined && typeof opts.maxPixels === "number" ? opts.maxPixels : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.preview}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&path=${encodeURIComponent(req.path)}`;
+    const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
+    const ac = AC ? new AC() : undefined;
+    let expired = false;
+    /** @type {any} */
+    let deadlineTimer = null;
+    /** @type {Promise<never>} */
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = timer(() => {
+        expired = true;
+        ac?.abort();
+        reject(new Error("E_DEADLINE"));
+      }, PREVIEW_CLIENT_TIMEOUT_MS);
+    });
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onExternalAbort = () => ac?.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    /** Fetch-level failure ⇒ local code (status 0): the caller's abort, our own deadline, or network. @param {unknown} e */
+    const fromError = (e) => {
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+        return { ok: false, status: 0, error: "E_DEADLINE" };
+      return { ok: false, status: 0, error: "E_NETWORK" };
+    };
+    try {
+      const send = () =>
+        deps.fetch(url, {
+          credentials: "same-origin",
+          method: "GET",
+          headers: { "X-PWH": "1" },
+          ...(ac ? { signal: ac.signal } : {}),
+        });
+      /** @type {any} */
+      let r;
+      try {
+        r = await Promise.race([withRelogin(send), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (!r.ok) return await previewOutcomeFromResponse(r);
+      const chk = checkPreviewHeaders(r.headers, {
+        imageMaxBytes: PREVIEW_IMAGE_MAX_BYTES.loopback,
+        ...(maxPixels !== undefined ? { maxPixels } : {}),
+      });
+      if (!chk.ok) {
+        // Pre-body refusal: abort so the server stops sending, never touch the body.
+        ac?.abort();
+        return { ok: false, status: 0, ...chk };
+      }
+      /** @type {any} */
+      let buf;
+      try {
+        buf = await Promise.race([r.arrayBuffer(), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (!buf || typeof buf.byteLength !== "number" || buf.byteLength !== chk.size) {
+        return { ok: false, status: r.status, error: "E_PREVIEW_CHANGED" };
+      }
+      if (chk.kind === "image") {
+        return {
+          ok: true,
+          kind: "image",
+          mime: chk.mime,
+          size: chk.size,
+          dims: chk.dims,
+          blob: new Blob([buf], { type: chk.mime }),
+        };
+      }
+      return {
+        ok: true,
+        kind: "text",
+        size: chk.totalSize,
+        truncated: chk.truncated,
+        text: new TextDecoder().decode(buf),
+      };
+    } finally {
+      deps.clearTimeout(deadlineTimer);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
+    }
+  }
+
+  const preview = { fetch: previewFetch };
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -640,6 +758,7 @@ export function createClient(deps) {
     dialog,
     upload,
     spawn,
+    preview,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

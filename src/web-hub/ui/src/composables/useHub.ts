@@ -255,6 +255,10 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     state: state as Readonly<ShallowRef<HubState>>,
     control,
     spawn,
+    // PV4 (web-hub-preview plan v3 §4.6): the preview call surface rides the handle iff the
+    // transport offers it — `usePreview`'s scope derivation treats its absence as "nothing
+    // is clickable" (`previewScopeOf`'s `hasTransport`).
+    ...(transport.preview === undefined ? {} : { preview: transport.preview }),
     dispatch,
     transport,
     loadOlder,

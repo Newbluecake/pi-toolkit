@@ -23,6 +23,7 @@
  * also import `./contract.js` as a plain `.js`→`.js` sibling, the same broken direction).
  */
 import { API_ERRORS as PROTOCOL_API_ERRORS, SSE_EVENTS as PROTOCOL_SSE_EVENTS } from "@protocol/http-contract.ts";
+import { PREVIEW_PATH } from "@protocol/preview.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 
 /** SSE `event:` names pushed by the hub (order irrelevant, set must match) — same array as
@@ -58,6 +59,9 @@ export const API = Object.freeze({
   // the stop endpoint is `${headless}/<spawnId>/stop` (built at the call site).
   headless: "/api/headless",
   headlessDirs: "/api/headless/dirs",
+  // web-hub-preview plan v3 §4.1 (PV4): the single content-preview endpoint, imported from
+  // `protocol/preview.ts` — same anti-drift rule as the upload paths above.
+  preview: PREVIEW_PATH,
 });
 
 /** Client-side SSE silence limit: no frame (hub pings every 15s) for this long ⇒ reconnect. */

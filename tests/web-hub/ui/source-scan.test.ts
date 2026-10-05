@@ -57,6 +57,10 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
   // crypto.getRandomValues (@logic/control.js's newCmdId). The prose mentions above are
   // stripped with the comments, so this only ever fires on real usage.
   ["crypto.randomUUID (banned — K18: absent on LAN plaintext; use getRandomValues)", /\brandomUUID\s*\(/],
+  // web-hub-preview plan v3 §6.1 HP8 (PV4): previewed images convert through FileReader's
+  // readAsDataURL (`data:` rides the existing `img-src 'self' data:` CSP) — a `blob:` URL
+  // would need CSP relaxed, so the API that creates one is banned outright (D1).
+  ["createObjectURL (banned — preview uses data: URLs; blob: would need CSP relaxed, D1/HP8)", /\bcreateObjectURL\b/],
 ];
 
 /** localStorage is only legitimate for the theme preference, the token-mode transport, and a

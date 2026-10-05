@@ -16,7 +16,8 @@
  * here, so this file doesn't need a change for it).
  */
 import type { Ref } from "vue";
-import type { ConnState } from "./transport/types.js";
+import type { PreviewDims } from "@protocol/preview.js";
+import type { ConnState, PreviewTransport } from "./transport/types.js";
 import type {
   SpawnDirsOutcome,
   SpawnListOutcome,
@@ -229,7 +230,76 @@ export interface HubHandle {
    * provides it; component-level fakes may omit it (menus then hide every pick-dir entry via
    * `spawnAvailability`'s no-cap/unknown states). */
   readonly spawn?: HubSpawnHandle;
+  /** web-hub-preview plan v3 §4.6 (PV4): the `GET /api/preview` call surface. Optional per
+   * the frozen-types convention — `useHub` provides it iff the underlying transport does;
+   * `usePreview`'s scope derivation (`previewScopeOf`'s `hasTransport`) yields `null` without
+   * it and every path in the transcript renders as plain text. */
+  readonly preview?: PreviewTransport;
   dispatch(msg: { event: string; data?: unknown; id?: number }): void;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-preview plan v3 §3.2/§4.6 (package PV4) — preview overlay view models
+// ---------------------------------------------------------------------------
+
+/** Mirrors `@logic/preview.js`'s (PV4) `PathScope` JSDoc typedef (that module stays the
+ * behavioral source of truth — same mirror discipline as the `@logic/state.js` shapes above). */
+export interface PreviewPathScope {
+  readonly agentKey: string;
+  readonly sessionId: string;
+  readonly cwd: string | null;
+  readonly uploads: boolean;
+}
+
+/** plan §3.2's UI-side state machine (state lives in `usePreview`, App-level — never in the
+ * reducer). `image.dataUrl` is a `data:` URL (D1: CSP is not relaxed; no `blob:`). */
+export type PreviewView =
+  | { readonly phase: "closed" }
+  | { readonly phase: "loading"; readonly path: string }
+  | {
+      readonly phase: "image";
+      readonly path: string;
+      readonly dataUrl: string;
+      readonly mime: string;
+      readonly dims: PreviewDims;
+      readonly size: number;
+    }
+  | {
+      readonly phase: "text";
+      readonly path: string;
+      readonly text: string;
+      readonly truncated: boolean;
+      readonly size: number;
+    }
+  | { readonly phase: "unsupported"; readonly path: string; readonly reason?: string; readonly size?: number }
+  | {
+      readonly phase: "tooLarge";
+      readonly path: string;
+      readonly reason?: string;
+      readonly size?: number;
+      readonly max?: number;
+      readonly dims?: PreviewDims;
+    }
+  | {
+      readonly phase: "error";
+      readonly path: string;
+      readonly error: string;
+      readonly retryable: boolean;
+      readonly retryAfterS?: number;
+    };
+
+/** `usePreview`'s (PV4) handle — provided at the App level by PV6 for PathText/PreviewHost. */
+export interface PreviewHandle {
+  readonly view: Readonly<Ref<PreviewView>>;
+  /** The §4.6 scope derivation (`null` ⇒ no path is clickable). */
+  readonly scope: Readonly<Ref<PreviewPathScope | null>>;
+  /** closed/any ⇒ loading (a no-op without a scope); aborts whatever was in flight. */
+  open(ref: { readonly path: string }): void;
+  /** Any ⇒ closed; aborts the in-flight fetch (§3.2 作用域失效 uses the same path). */
+  close(): void;
+  /** error(retryable) ⇒ re-open the same path; a no-op in every other phase. */
+  retry(): void;
+  dispose(): void;
 }
 
 // ---------------------------------------------------------------------------

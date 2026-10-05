@@ -12,6 +12,8 @@ import { createPasswordClient } from "@logic/password-client.js";
 import type {
   CmdOutcome,
   PasswordTransport,
+  PreviewOutcome,
+  PreviewTransport,
   Result,
   SpawnDirsOutcome,
   SpawnListOutcome,
@@ -54,7 +56,14 @@ function isRestAuthEndpoint(url: string): boolean {
   // set — the password client's spawn namespace deliberately does NOT fire it itself (the
   // way upload's does), so this wrapper is the single reporter and nothing double-fires.
   // `url.startsWith(API.headless)` covers `headless`, `headlessDirs` and `<id>/stop`.
-  return REST_AUTH_PATHS.has(url) || url.startsWith(API.history) || url.startsWith(API.headless);
+  // PV4 (web-hub-preview plan v3 §4.6): `/api/preview` is the same class — the client's
+  // preview namespace never fires onConn itself, this wrapper is the single reporter.
+  return (
+    REST_AUTH_PATHS.has(url) ||
+    url.startsWith(API.history) ||
+    url.startsWith(API.headless) ||
+    url.startsWith(API.preview)
+  );
 }
 
 export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTransport {
@@ -97,5 +106,11 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       start: (req) => client.spawn.start(req) as Promise<SpawnOutcome>,
       stop: (spawnId, force) => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>,
     } satisfies SpawnTransport,
+    preview: {
+      // PV4 (web-hub-preview plan v3 §4.6): thin cast over the logic client's preview
+      // namespace. 401 ⇒ onConn("auth") is reported by the fetch wrapper above
+      // (`isRestAuthEndpoint` covers `/api/preview`) — never inside the client.
+      fetch: (req, opts) => client.preview.fetch(req, opts) as Promise<PreviewOutcome>,
+    } satisfies PreviewTransport,
   } satisfies PasswordTransport;
 }

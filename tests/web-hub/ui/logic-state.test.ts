@@ -316,6 +316,27 @@ describe("state.reduce", () => {
     expect(A(s).items.map((i) => i.entryId)).toEqual(["n1"]);
   });
 
+  it("cwd change with same sessionId/sessionFile counts as a session replacement (PV4 v3-2 cwd 双保险)", () => {
+    let s = loaded();
+    // same sessionId + sessionFile + cwd ⇒ untouched (现状一致)
+    const same = reduce(s, {
+      event: "session",
+      data: { agentKey: "A", session: { ...card("A").session, name: "renamed" } },
+    });
+    expect(A(same).items).toHaveLength(1);
+    expect(A(same).session.name).toBe("renamed");
+    // cwd drift ⇒ scope invalidation: transcript dropped, fresh history awaited
+    s = reduce(s, {
+      event: "session",
+      data: { agentKey: "A", session: { ...card("A").session, cwd: "/tmp/other" } },
+    });
+    expect(A(s).items).toHaveLength(0);
+    expect(A(s).session.cwd).toBe("/tmp/other");
+    expect(A(s).history).toBe("waiting");
+    expect(A(s).needsResync).toBe(true);
+    expect(needsSubscribe(s)).toBe("A");
+  });
+
   it("history: tailMessages appended after entries, deduped against them; custom(data)/hidden skipped", () => {
     const s = loaded({
       entries: [

@@ -7,6 +7,7 @@
  * adapters so the two transports can never silently diverge again (the exact regression class
  * 78dd76b was: password client missing `subscribe`/`page`).
  */
+import type { PreviewDims, PreviewImageMime } from "@protocol/preview.js";
 import type {
   DirEntryWire,
   SpawnAccepted,
@@ -90,6 +91,10 @@ export interface HubTransport {
    * the same reason `upload` is — test fakes / future transports may omit it; `useSpawn`
    * degrades to `E_UNSUPPORTED` then. Both real adapters always provide it. */
   readonly spawn?: SpawnTransport;
+  /** web-hub-preview plan v3 §4.6 (PV4): `GET /api/preview`. Optional for the same reason as
+   * `upload`/`spawn` — `usePreview`'s scope derivation (`previewScopeOf`) yields `null`
+   * without it and every path renders as plain text. Both real adapters always provide it. */
+  readonly preview?: PreviewTransport;
 }
 
 /** `@logic/password-client.js`'s `login()` return shape (JSDoc-documented there; mirrored here). */
@@ -220,4 +225,63 @@ export interface UploadTransport {
   commit(p: { readonly id: string }, signal?: AbortSignal): Promise<UploadOutcome<UploadCommitOk>>;
   /** Best-effort tray-removal cleanup (§4.2); takes no signal by design. */
   abort(p: { readonly id: string }): Promise<UploadOutcome<{ readonly ok: boolean }>>;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-preview plan v3 §4.6 (package PV4) — the `GET /api/preview` transport surface
+// ---------------------------------------------------------------------------
+
+/**
+ * §4.6's frozen `PreviewOutcome`. The success halves are HEADER-driven (§3.2/D2: metadata
+ * rides `X-PWH-Preview-*`, the body is raw bytes): `image` carries the sniffed mime/dims plus
+ * the body as a `Blob` (never a `blob:` URL — D1: CSP is not relaxed; `usePreview` converts
+ * via FileReader to a `data:` URL); `text.size` is the FILE size (≥ body bytes when
+ * `truncated`). The error half keeps the wire body's `reason`/`size`/`max`/`dims` so the
+ * unsupported/tooLarge phases can render the server's detail; `status` is 0 for client-local
+ * codes (`E_ABORT` / `E_DEADLINE` / `E_NETWORK` / `E_BAD_RESPONSE` — the last is a header-
+ * contract violation: Kind/Content-Length/Content-Type malformed, checked BEFORE the body is
+ * read, plan §4.6 transport paragraph) and for client-mirrored budget refusals
+ * (`E_PREVIEW_TOO_LARGE` from `checkPreviewHeaders` keeps the server's 413 code with
+ * `status: 0` — the request was aborted before the body ever left the server).
+ */
+export type PreviewOutcome =
+  | {
+      readonly ok: true;
+      readonly kind: "image";
+      readonly mime: PreviewImageMime;
+      readonly size: number;
+      readonly dims: PreviewDims;
+      readonly blob: Blob;
+    }
+  | {
+      readonly ok: true;
+      readonly kind: "text";
+      readonly size: number;
+      readonly truncated: boolean;
+      readonly text: string;
+    }
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly error: string;
+      readonly reason?: string;
+      readonly size?: number;
+      readonly max?: number;
+      readonly dims?: PreviewDims;
+      readonly retryAfterS?: number;
+    };
+
+/**
+ * §4.6's `PreviewTransport` — one endpoint, same shape on both adapters (the shared suite in
+ * `tests/web-hub/ui/transport-contract.test.ts` pins parity, SP11's spawn-namespace precedent).
+ * The request carries `X-PWH: 1`; `signal` is `usePreview`'s per-open controller (a new open /
+ * close / scope invalidation aborts the in-flight fetch); `maxPixels` is the CLIENT budget
+ * (`clientImageBudget` — touch 20MP / desktop 40MP) checked against `X-PWH-Preview-Dims`
+ * BEFORE the body is read, aborting locally with `E_PREVIEW_TOO_LARGE` when exceeded.
+ */
+export interface PreviewTransport {
+  fetch(
+    req: { readonly agentKey: string; readonly sessionId: string; readonly path: string },
+    opts: { readonly signal: AbortSignal; readonly maxPixels: number },
+  ): Promise<PreviewOutcome>;
 }

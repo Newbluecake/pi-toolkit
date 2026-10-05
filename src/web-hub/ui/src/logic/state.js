@@ -515,9 +515,21 @@ function mergeCard(a, card) {
   return next;
 }
 
-/** @param {any} a @param {any} b */
+/**
+ * web-hub-preview plan v3-2 (§7-D13 cwd 双保险, PV4): same sessionId is SUPPOSED to pin cwd
+ * (sessionManager 创建时钉住), but comparing `cwd` here too costs one line and treats any
+ * cwd drift as a session replacement — clearing the transcript and forcing a refetch, which
+ * is also exactly what `usePreview`'s scopeKey watcher needs to invalidate clickable paths.
+ * @param {any} a @param {any} b
+ */
 function sameSession(a, b) {
-  return !!a && !!b && a.sessionId === b.sessionId && (a.sessionFile ?? null) === (b.sessionFile ?? null);
+  return (
+    !!a &&
+    !!b &&
+    a.sessionId === b.sessionId &&
+    (a.sessionFile ?? null) === (b.sessionFile ?? null) &&
+    (a.cwd ?? null) === (b.cwd ?? null)
+  );
 }
 
 /**

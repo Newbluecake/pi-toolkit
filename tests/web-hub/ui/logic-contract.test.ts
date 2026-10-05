@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as proto from "../../../src/web-hub/protocol/http-contract.js";
+import * as previewProto from "../../../src/web-hub/protocol/preview.js";
 import * as uploadProto from "../../../src/web-hub/protocol/upload.js";
 import * as web from "../../../src/web-hub/ui/src/logic/contract.js";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
@@ -47,6 +48,13 @@ describe("web/contract.js mirrors protocol/http-contract.ts", () => {
     expect(web.API.uploadChunk).toBe("/api/upload/chunk");
     expect(web.API.uploadCommit).toBe("/api/upload/commit");
     expect(web.API.uploadAbort).toBe("/api/upload/abort");
+  });
+
+  // PV4 (web-hub-preview plan v3 §4.1): the preview endpoint is imported from
+  // `protocol/preview.ts` — same anti-drift rule as the upload endpoints above.
+  it("API.preview is the protocol module's frozen PREVIEW_PATH (PV4 §4.1)", () => {
+    expect(web.API.preview).toBe(previewProto.PREVIEW_PATH);
+    expect(web.API.preview).toBe("/api/preview");
   });
 
   it("reduce accepts every SSE event name without throwing (minimal / garbage payloads)", () => {

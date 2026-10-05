@@ -914,3 +914,234 @@ describe("token transport: spawn() 401 recovery (withRelogin, same-id replay is 
     expect(h.onConnCalls).not.toContain("auth"); // recovered — no login-view flash
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-preview plan v3 §4.6 (package PV4): the shared preview suite — both adapters.
+// ---------------------------------------------------------------------------
+
+/** A FetchResponse whose body is raw bytes; tracks whether `arrayBuffer()` was ever called. */
+function respBytes(status: number, bytes: Uint8Array, headers: Record<string, string>, body: unknown = {}) {
+  let arrayBufferCalls = 0;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (n: string) => headers[n] ?? null },
+    json: async () => body,
+    arrayBuffer: async () => {
+      arrayBufferCalls++;
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    },
+    arrayBufferCalls: () => arrayBufferCalls,
+  };
+}
+
+const PREVIEW_REQ = { agentKey: "A", sessionId: "s1", path: "/home/u/proj/a b.png" };
+const PREVIEW_URL = `/api/preview?agentKey=A&sessionId=s1&path=${encodeURIComponent("/home/u/proj/a b.png")}`;
+const PNG_HEADERS = {
+  "Content-Type": "image/png",
+  "Content-Length": "3",
+  "X-PWH-Preview-Kind": "image",
+  "X-PWH-Preview-Size": "3",
+  "X-PWH-Preview-Dims": "10x10",
+};
+const previewOpts = () => ({ signal: new AbortController().signal, maxPixels: 40_000_000 });
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: preview (web-hub-preview plan v3 §4.6, PV4)", (mode, make) => {
+  it("implements the PreviewTransport surface on every adapter", () => {
+    expect(typeof make().transport.preview?.fetch).toBe("function");
+  });
+
+  it('fetch(): GET /api/preview?agentKey&sessionId&path (encoded) with X-PWH:"1"', async () => {
+    const h = make(async () => respBytes(200, new Uint8Array([80, 78, 71]), PNG_HEADERS));
+    await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    const call = h.fetchCalls.find((c) => c.url === PREVIEW_URL);
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("GET");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it("image 200 ⇒ ok image: mime/dims/size from the headers, body bytes in the Blob", async () => {
+    const h = make(async () => respBytes(200, new Uint8Array([80, 78, 71]), PNG_HEADERS));
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toMatchObject({ ok: true, kind: "image", mime: "image/png", size: 3, dims: { w: 10, h: 10 } });
+    if (out.ok && out.kind === "image") {
+      expect(new Uint8Array(await out.blob.arrayBuffer())).toEqual(new Uint8Array([80, 78, 71]));
+      expect(out.blob.type).toBe("image/png");
+    }
+  });
+
+  it("text 200 ⇒ ok text: decoded body, truncated flag, display size from X-PWH-Preview-Size", async () => {
+    const bytes = new TextEncoder().encode("hello 预览");
+    const h = make(async () =>
+      respBytes(200, bytes, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Length": String(bytes.byteLength),
+        "X-PWH-Preview-Kind": "text",
+        "X-PWH-Preview-Size": "999999",
+        "X-PWH-Preview-Truncated": "1",
+      }),
+    );
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toEqual({ ok: true, kind: "text", size: 999999, truncated: true, text: "hello 预览" });
+  });
+
+  it("dims over the client maxPixels budget ⇒ E_PREVIEW_TOO_LARGE pixels, aborts BEFORE reading the body", async () => {
+    const r200 = respBytes(200, new Uint8Array([80, 78, 71]), { ...PNG_HEADERS, "X-PWH-Preview-Dims": "8000x4000" });
+    const h = make(async () => r200);
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, {
+      signal: new AbortController().signal,
+      maxPixels: 20_000_000,
+    });
+    expect(out).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_PREVIEW_TOO_LARGE",
+      reason: "pixels",
+      size: 3,
+      max: 20_000_000,
+      dims: { w: 8000, h: 4000 },
+    });
+    expect(r200.arrayBufferCalls()).toBe(0);
+  });
+
+  it("Content-Length over the listener image cap (token 16 MiB / LAN 4 MiB) ⇒ E_PREVIEW_TOO_LARGE bytes, body never read", async () => {
+    const cap = mode === "token" ? 16 * 1024 * 1024 : 4 * 1024 * 1024;
+    const r200 = respBytes(200, new Uint8Array([80, 78, 71]), { ...PNG_HEADERS, "Content-Length": String(cap + 1) });
+    const h = make(async () => r200);
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toMatchObject({ ok: false, status: 0, error: "E_PREVIEW_TOO_LARGE", reason: "bytes", max: cap });
+    expect(r200.arrayBufferCalls()).toBe(0);
+  });
+
+  it("image dims missing ⇒ E_PREVIEW_UNSUPPORTED dims-unknown, body never read", async () => {
+    const { "X-PWH-Preview-Dims": _dropped, ...noDims } = PNG_HEADERS;
+    const r200 = respBytes(200, new Uint8Array([80, 78, 71]), noDims);
+    const h = make(async () => r200);
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toMatchObject({ ok: false, status: 0, error: "E_PREVIEW_UNSUPPORTED", reason: "dims-unknown" });
+    expect(r200.arrayBufferCalls()).toBe(0);
+  });
+
+  it("out-of-contract headers (Kind missing) ⇒ E_BAD_RESPONSE, body never read", async () => {
+    const { "X-PWH-Preview-Kind": _dropped, ...noKind } = PNG_HEADERS;
+    const r200 = respBytes(200, new Uint8Array([80, 78, 71]), noKind);
+    const h = make(async () => r200);
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toMatchObject({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    expect(r200.arrayBufferCalls()).toBe(0);
+  });
+
+  it("a body shorter than Content-Length (hub destroy mid-stream, §4.5.2) ⇒ E_PREVIEW_CHANGED", async () => {
+    const h = make(async () => respBytes(200, new Uint8Array([80]), PNG_HEADERS)); // 1 byte vs Content-Length 3
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toEqual({ ok: false, status: 200, error: "E_PREVIEW_CHANGED" });
+  });
+
+  it("415 E_PREVIEW_UNSUPPORTED / 409 E_SESSION_CHANGED ride the body verbatim", async () => {
+    const h415 = make(async (url) =>
+      url.startsWith("/api/preview")
+        ? respBytes(415, new Uint8Array(), {}, { error: "E_PREVIEW_UNSUPPORTED", reason: "binary", size: 42 })
+        : resp(200),
+    );
+    expect(await h415.transport.preview!.fetch(PREVIEW_REQ, previewOpts())).toEqual({
+      ok: false,
+      status: 415,
+      error: "E_PREVIEW_UNSUPPORTED",
+      reason: "binary",
+      size: 42,
+    });
+    const h409 = make(async (url) =>
+      url.startsWith("/api/preview") ? respBytes(409, new Uint8Array(), {}, { error: "E_SESSION_CHANGED" }) : resp(200),
+    );
+    expect(await h409.transport.preview!.fetch(PREVIEW_REQ, previewOpts())).toEqual({
+      ok: false,
+      status: 409,
+      error: "E_SESSION_CHANGED",
+    });
+  });
+
+  it("429 folds Retry-After into retryAfterS", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/preview")
+        ? respBytes(429, new Uint8Array(), { "Retry-After": "2" }, { error: "E_RATE" })
+        : resp(200),
+    );
+    expect(await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts())).toMatchObject({
+      ok: false,
+      status: 429,
+      error: "E_RATE",
+      retryAfterS: 2,
+    });
+  });
+
+  it("a PRE-aborted signal never issues the request at all", async () => {
+    const h = make(async () => resp(200));
+    const ac = new AbortController();
+    ac.abort();
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, { signal: ac.signal, maxPixels: 40_000_000 });
+    expect(out).toEqual({ ok: false, status: 0, error: "E_ABORT" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/preview"))).toHaveLength(0);
+  });
+
+  it("an external abort mid-flight ⇒ E_ABORT (the fetch's own abort rejection surfaces)", async () => {
+    const h = make(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          (init as { signal?: AbortSignal } | undefined)?.signal?.addEventListener("abort", () =>
+            reject(new Error("AbortError")),
+          );
+        }) as never,
+    );
+    const ac = new AbortController();
+    const p = h.transport.preview!.fetch(PREVIEW_REQ, { signal: ac.signal, maxPixels: 40_000_000 });
+    ac.abort();
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_ABORT" });
+  });
+
+  it("client timeout (40s, §0 客户端超时) ⇒ E_DEADLINE status 0, exactly one attempt", async () => {
+    const h = make(async () => new Promise<never>(() => {}));
+    const p = h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    h.clock.advance(40_000);
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/preview"))).toHaveLength(1);
+  });
+});
+
+describe("token transport: preview() 401 recovery (withRelogin, GET replay is side-effect free)", () => {
+  it("a 401 with a stored token silently re-logs in and replays the SAME GET (no login-view flash)", async () => {
+    const h = makeToken(async (url) => {
+      if (url === "/api/login") return resp(200);
+      if (url.startsWith("/api/preview")) {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn ? respBytes(200, new Uint8Array([80, 78, 71]), PNG_HEADERS) : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toMatchObject({ ok: true, kind: "image" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/preview"))).toHaveLength(2);
+    expect(h.onConnCalls).not.toContain("auth");
+  });
+
+  it("a FINAL 401 (no stored token) surfaces E_AUTH and reports onConn('auth') exactly once", async () => {
+    const h = makeToken(async (url) => (url.startsWith("/api/preview") ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+describe("password transport: preview() 401 (one-shot — the cookie session is gone)", () => {
+  it("a 401 surfaces E_AUTH and reports onConn('auth') exactly once (fetch wrapper, never double-fired)", async () => {
+    const h = makePassword(async (url) =>
+      url.startsWith("/api/preview") ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});

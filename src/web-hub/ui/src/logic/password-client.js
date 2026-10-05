@@ -39,6 +39,8 @@
  */
 import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
+import { PREVIEW_CLIENT_TIMEOUT_MS, PREVIEW_IMAGE_MAX_BYTES } from "@protocol/preview.ts";
+import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
@@ -803,6 +805,119 @@ export function createPasswordClient(deps) {
     armWatchdog();
   }
 
+  // -------------------------------------------------------------------------
+  // content-preview endpoint (web-hub-preview plan v3 §3.2/§4.6, package PV4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * `GET /api/preview` (§4.6) — same flow as the token client's, minus the relogin dance
+   * (password mode has none; a 401 means the cookie session is gone and is reported by
+   * `transport/password.ts`'s fetch wrapper via `isRestAuthEndpoint`, which covers
+   * `/api/preview`). Header-driven pre-body gate (`checkPreviewHeaders`, LAN 4 MiB image
+   * cap), one 40s deadline (`PREVIEW_CLIENT_TIMEOUT_MS`) spanning headers AND body, merged
+   * with the caller's `signal`; an incomplete body ⇒ `E_PREVIEW_CHANGED` (§4.5.2: the hub
+   * `destroy()`s a mid-stream identity/hash failure).
+   * @param {{ agentKey: string, sessionId: string, path: string }} req
+   * @param {{ signal?: any, maxPixels?: number }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function previewFetch(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    const maxPixels = opts !== undefined && typeof opts.maxPixels === "number" ? opts.maxPixels : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.preview}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&path=${encodeURIComponent(req.path)}`;
+    const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
+    const ac = AC ? new AC() : undefined;
+    let expired = false;
+    /** @type {any} */
+    let deadlineTimer = null;
+    /** @type {Promise<never>} */
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = timer(() => {
+        expired = true;
+        ac?.abort();
+        reject(new Error("E_DEADLINE"));
+      }, PREVIEW_CLIENT_TIMEOUT_MS);
+    });
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onExternalAbort = () => ac?.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    /** Fetch-level failure ⇒ local code (status 0): the caller's abort, our own deadline, or network. @param {unknown} e */
+    const fromError = (e) => {
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+        return { ok: false, status: 0, error: "E_DEADLINE" };
+      return { ok: false, status: 0, error: "E_NETWORK" };
+    };
+    try {
+      /** @type {any} */
+      let r;
+      try {
+        r = await Promise.race([
+          deps.fetch(url, {
+            credentials: "same-origin",
+            method: "GET",
+            headers: { "X-PWH": "1" },
+            ...(ac ? { signal: ac.signal } : {}),
+          }),
+          deadline,
+        ]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (!r.ok) return await previewOutcomeFromResponse(r);
+      const chk = checkPreviewHeaders(r.headers, {
+        imageMaxBytes: PREVIEW_IMAGE_MAX_BYTES.lan,
+        ...(maxPixels !== undefined ? { maxPixels } : {}),
+      });
+      if (!chk.ok) {
+        // Pre-body refusal: abort so the server stops sending, never touch the body.
+        ac?.abort();
+        return { ok: false, status: 0, ...chk };
+      }
+      /** @type {any} */
+      let buf;
+      try {
+        buf = await Promise.race([r.arrayBuffer(), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (!buf || typeof buf.byteLength !== "number" || buf.byteLength !== chk.size) {
+        return { ok: false, status: r.status, error: "E_PREVIEW_CHANGED" };
+      }
+      if (chk.kind === "image") {
+        return {
+          ok: true,
+          kind: "image",
+          mime: chk.mime,
+          size: chk.size,
+          dims: chk.dims,
+          blob: new Blob([buf], { type: chk.mime }),
+        };
+      }
+      return {
+        ok: true,
+        kind: "text",
+        size: chk.totalSize,
+        truncated: chk.truncated,
+        text: new TextDecoder().decode(buf),
+      };
+    } finally {
+      deps.clearTimeout(deadlineTimer);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
+    }
+  }
+
+  const preview = { fetch: previewFetch };
+
   return {
     /** Clear a stray `#t=` (never read/sent in password mode), fetch session info, then open the stream. */
     async start() {
@@ -822,6 +937,7 @@ export function createPasswordClient(deps) {
     dialog,
     upload,
     spawn,
+    preview,
     close() {
       closed = true;
       closeStream();

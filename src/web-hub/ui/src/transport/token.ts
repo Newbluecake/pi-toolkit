@@ -19,6 +19,8 @@ import { createClient } from "@logic/token-client.js";
 import type {
   CmdOutcome,
   HubTransport,
+  PreviewOutcome,
+  PreviewTransport,
   Result,
   SpawnDirsOutcome,
   SpawnListOutcome,
@@ -129,5 +131,12 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       stop: (spawnId, force) =>
         withAuthNotice(deps, () => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>),
     } satisfies SpawnTransport,
+    preview: {
+      // PV4 (web-hub-preview plan v3 §4.6): thin cast over the logic client's preview
+      // namespace. The client already replayed once through `withRelogin` on a 401 (GET ⇒
+      // side-effect free), so a final `E_AUTH` means the stored token is dead — same
+      // `withAuthNotice` rule as upload/spawn.
+      fetch: (req, opts) => withAuthNotice(deps, () => client.preview.fetch(req, opts) as Promise<PreviewOutcome>),
+    } satisfies PreviewTransport,
   } satisfies HubTransport;
 }
