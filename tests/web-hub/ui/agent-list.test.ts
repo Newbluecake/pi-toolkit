@@ -4,6 +4,9 @@
  * P3). Filter substring matching, the live vs. "Stale & Offline" grouping, the empty state, and
  * `aria-current` on the selected card.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it } from "vitest";
 import AgentList from "../../../src/web-hub/ui/src/components/agents/AgentList.vue";
@@ -855,5 +858,32 @@ describe("AgentList.vue — pre-first-snapshot connecting state (deep-link refre
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
     expect(wrapper.find(".empty h2").text()).toBe("No pi sessions connected");
+  });
+});
+
+describe("agents.css 搜索框放大镜与文字防重叠(2026-10 手机现场:--fs-scale 放大字号时图标压字)", () => {
+  const css = readFileSync(
+    resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/agents.css"),
+    "utf8",
+  );
+  const rule = (selector: string): string => {
+    const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`).exec(css);
+    return m?.[0] ?? "";
+  };
+
+  it("图标 left 与输入框 padding-left 都随 --fs-scale 等比缩放(base.css 的 .icon 宽 = 16px·scale)", () => {
+    // 写死 px 时:图标宽 = 16·scale 而文字起点恒为 32px,scale ≥1.4 必相交(实测 1.5 叠 1px、2.0 叠 9px)
+    expect(rule(".search .icon")).toMatch(/left:\s*calc\(10px \* var\(--fs-scale, 1\)\)/);
+    expect(rule(".search .input")).toMatch(/padding-left:\s*calc\(32px \* var\(--fs-scale, 1\)\)/);
+    // 不得回退为无缩放的写死值
+    expect(rule(".search .icon")).not.toMatch(/left:\s*10px/);
+    expect(rule(".search .input")).not.toMatch(/padding-left:\s*32px/);
+  });
+
+  it("图标绝对定位但不可点(pointer-events:none),容器保持 flex 居中(图标垂直居中来自 flex 静态位)", () => {
+    expect(rule(".search")).toMatch(/display:\s*flex/);
+    expect(rule(".search")).toMatch(/align-items:\s*center/);
+    expect(rule(".search .icon")).toMatch(/position:\s*absolute/);
+    expect(rule(".search .icon")).toMatch(/pointer-events:\s*none/);
   });
 });

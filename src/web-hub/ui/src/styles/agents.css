@@ -84,16 +84,20 @@
   align-items: center;
 }
 
+/* 图标与输入框左侧留白都随 `--fs-scale` 等比缩放(base.css 的 `.icon` 尺寸是
+ * `calc(16px * var(--fs-scale,1))`):若 left/padding-left 写死 px,字号偏好 >100% 时放大镜变宽
+ * 但文字起点不动,图标直接压上 placeholder/输入文字(2026-10 手机现场反馈,实测 fs-scale 1.5
+ * 相交 1px、2.0 相交 9px)。等比缩放后任何档位下文字起点 = 图标右缘 + 6·scale px,恒不相交。 */
 .search .icon {
   position: absolute;
-  left: 10px;
+  left: calc(10px * var(--fs-scale, 1));
   color: var(--c-text-3);
   pointer-events: none;
 }
 
 .search .input {
   min-height: 32px;
-  padding-left: 32px;
+  padding-left: calc(32px * var(--fs-scale, 1));
   background: var(--c-sunken);
   border-color: transparent;
   font-size: var(--fs-sm);
