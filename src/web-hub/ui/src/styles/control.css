@@ -110,8 +110,8 @@
 
 /* The card takes the focus ring now that the textarea has no box of its own. */
 .composer-input:focus-within {
-  outline: 2px solid var(--c-focus);
-  outline-offset: 1px;
+  /* 2026-10-06 ("输入框两层边框只留一层"): border-color ONLY — outline+border read as two
+   * concentric frames around the card. */
   border-color: var(--c-focus);
 }
 
@@ -139,9 +139,10 @@
 }
 
 .composer-input:has(.model-switcher):not(.has-text) .composer-bottom {
-  /* 44px ring hit row + sp-1 bottom air, with slack — the ring button's fixed 44px min-height
-   * dominates at every `--fs-scale` (the 15px chips never exceed it). */
-  max-height: 52px;
+  /* chip-high row (15px chips + sp-1 bottom air + slack): the ring's 44px hit box used to
+   * inflate the row to 52px, leaving big air above AND below the chips (2026-10-06 field
+   * report) — the ring now overflows symmetrically via negative margins instead (see below). */
+  max-height: 24px;
 }
 
 /* Expanded state only: the ring leaves its absolute mid-right anchor and joins the bottom
@@ -154,6 +155,10 @@
   right: auto;
   bottom: auto;
   flex: none;
+  /* keep the ≥44px touch target without letting it set the row height: the 44px min box
+   * overflows ~10px into the textarea above and ~10px below the row. Nothing clips it (the
+   * collapsed-row comment documents why .composer-bottom has no overflow:hidden). */
+  margin-block: -10px;
 }
 
 /* Model/thinking chips in the bottom row (2026-10 card rework — supersedes the 5cc081d

@@ -344,7 +344,8 @@ describe("Composer.vue — input CARD: chips + ring bottom row (2026-10 user-pic
     expect(css).not.toMatch(/padding-top:\s*22px/);
     // Focus indication moved from the (now borderless) textarea to the card.
     expect(rule(".composer textarea:focus-visible")).toBe("");
-    expect(rule(".composer-input:focus-within")).toMatch(/outline:\s*2px solid var\(--c-focus\)/);
+    expect(rule(".composer-input:focus-within")).toMatch(/border-color:\s*var\(--c-focus\)/);
+    expect(rule(".composer-input:focus-within")).not.toMatch(/outline:/); // 2026-10-06: single ring only
     // The chips host is in-flow now (no absolute overlay), but keeps its hide transition.
     expect(rule(".composer-chips")).not.toMatch(/position:\s*absolute/);
     expect(rule(".composer-chips")).toMatch(/transition:/);
