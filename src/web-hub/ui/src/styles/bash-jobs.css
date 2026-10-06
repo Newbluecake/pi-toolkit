@@ -1,0 +1,281 @@
+/*
+ * Background bash-jobs panel styles (bash-jobs-panel plan §3 包 B / D4) — token-only,
+ * imported by `components/detail/BashJobsPanel.vue`. Deliberately its own file (same
+ * precedent as `styles/todo.css` / `styles/worktrees.css`): `styles/detail.css` is owned by
+ * another in-flight line and source-scan.test.ts bans scoped <style> blocks outright. The
+ * summary row mirrors the `.todo-sum` / `.wt-sum` grammar, incl. the chevron rotate-on-open
+ * transition and the 40px (20px under `pointer: coarse`) min-height family rule; the
+ * expanded list caps its height and scrolls inside, same as `.todo-list` / `.wt-list`.
+ */
+
+.bj-panel {
+  margin-top: var(--sp-1);
+}
+
+.bj-sum {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  text-align: left;
+}
+
+.bj-sum:hover {
+  background: var(--c-surface-2);
+}
+
+.bj-sum .icon-sm:first-child {
+  flex: none;
+}
+
+.bj-sum-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.bj-sum .chev {
+  margin-left: auto;
+  flex: none;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.bj-panel[data-open="true"] .bj-sum .chev {
+  transform: rotate(90deg);
+}
+
+.bj-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 6px 0;
+  /* Same cap-and-scroll-inside ruling as `.todo-list` / `.wt-list`: the panel sits in the
+   * detail header, so an unbounded job list would push the transcript off-screen. */
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.bj-item {
+  padding: 1px 0;
+}
+
+/* The whole row is the tail toggle (rows without a tail are disabled buttons — same grid,
+ * no dead click target). Button reset mirrors `.bj-sum`. */
+.bj-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 3px 6px;
+  margin: 0 -6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bj-row:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.bj-row:disabled {
+  cursor: default;
+  opacity: 1; /* a non-expandable row is data, not a greyed-out action */
+  color: inherit;
+}
+
+.bj-ico {
+  flex: none;
+  color: var(--c-text-3);
+}
+
+.bj-ico[data-kind="running"] {
+  color: var(--st-running);
+}
+
+.bj-ico[data-kind="done"] {
+  color: var(--st-done);
+}
+
+.bj-ico[data-kind="failed"] {
+  color: var(--st-failed);
+}
+
+/* running rows' loader spins; §3.5 bans requestAnimationFrame repo-wide, but a plain CSS
+ * animation is fine (same ruling as fleet.css's `.spin`). */
+.bj-ico.spin {
+  animation: bj-spin 1s linear infinite;
+}
+
+@keyframes bj-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bj-ico.spin {
+    animation: none;
+  }
+}
+
+.bj-id {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+}
+
+/* The redacted command is the row's main content: mono, single-line, end-ellipsis; the full
+ * redacted text rides `title` (D4). Long commands reflow under ≤480px (below). */
+.bj-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.bj-status {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+}
+
+.bj-status[data-kind="running"] {
+  color: var(--st-running);
+}
+
+.bj-status[data-kind="done"] {
+  color: var(--st-done);
+}
+
+.bj-status[data-kind="failed"] {
+  color: var(--st-failed);
+}
+
+.bj-exit {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.bj-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  max-width: 100%;
+  min-height: calc(18px * var(--fs-scale, 1));
+  padding: 0 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bj-elapsed,
+.bj-bytes {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+}
+
+.bj-fresh {
+  flex: none;
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+}
+
+.bj-fresh[data-kind="stale"],
+.bj-fresh[data-kind="unavailable"] {
+  color: var(--c-warning-text);
+}
+
+/* Plain-text tail (D4): pre-wrap so long lines never overflow horizontally, capped and
+ * scrolled inside like the list itself. Content is interpolated text — never v-html. */
+.bj-tail {
+  margin: 2px 0 4px calc(16px + var(--sp-2)); /* aligns under the id column (icon + gap) */
+  padding: var(--sp-2);
+  max-height: 200px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.bj-more {
+  padding: 3px 0 3px calc(16px + var(--sp-2));
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* D2a: fixed sensitive-info hint at the expanded list's foot — always visible while open. */
+.bj-sensitive {
+  padding: 3px 0 3px calc(16px + var(--sp-2));
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+/* ≤480px (same reflow ruling as `.wt-label`): the command drops to its own full-width line
+ * in smaller muted type so a long redacted command never overflows the panel; DOM order
+ * stays untouched (the cmd is simply ordered last and given a full flex-basis). */
+@media (max-width: 480px) {
+  .bj-cmd {
+    order: 10;
+    flex-basis: 100%;
+    padding-left: calc(16px + var(--sp-2)); /* aligns under the id column */
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-size: var(--fs-2xs);
+    color: var(--c-text-3);
+  }
+}
+
+/* coarse pointers: the fold toggle keeps the summary-row family compaction and expandable
+ * rows keep a ≥44px hit box (ui-design §3.12, §7.5 precedent; see worktrees.css). */
+@media (pointer: coarse) {
+  .bj-sum {
+    min-height: 20px; /* summary-row family compaction — see detail.css */
+  }
+
+  .bj-row {
+    min-height: 44px;
+  }
+}

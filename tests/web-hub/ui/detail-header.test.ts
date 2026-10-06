@@ -413,3 +413,77 @@ describe("DetailHeader.vue — worktree panel mount (worktree-web W4)", () => {
     expect(wrapper.find(".wt-panel").exists()).toBe(false);
   });
 });
+
+/**
+ * bash-jobs-panel plan §3 包 B (D4): the header mounts `BashJobsPanel` straight from
+ * `status.bashJobs` (no state.js mirror — same posture as the worktree panel), after the
+ * WorktreePanel slot; no wire (or zero rows) ⇒ no panel.
+ */
+describe("DetailHeader.vue — bash-jobs panel mount (bash-jobs-panel 包 B)", () => {
+  const bj = {
+    rows: [
+      {
+        id: "job-aaaa1111",
+        cmd: "sleep 60",
+        status: "running",
+        exitCode: null,
+        createdAt: 1_700_000_000_000,
+        elapsedMs: 5_000,
+        logBytes: 0,
+      },
+    ],
+    total: 1,
+    running: 1,
+    failed: 0,
+    sampledAt: 1_700_000_005_000,
+  };
+
+  it("mounts the panel after the worktree slot when status.bashJobs is present", () => {
+    const wrapper = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, bashJobs: bj } as never }),
+        narrow: false,
+      },
+    });
+    const panel = wrapper.find(".bj-panel");
+    expect(panel.exists()).toBe(true);
+    expect(wrapper.find(".bj-sum-text").text()).toBe("bash 1 running");
+    // mounted at the header's bottom, after the (absent here) worktree slot
+    const kids = wrapper.find(".detail-head").element.children;
+    expect(kids[kids.length - 1]).toBe(panel.element);
+  });
+
+  it("renders after the worktree panel when both wires are present", () => {
+    const wt = {
+      rows: [{ label: "~/repo", path: "/home/dev/repo", branch: "master", head: "0123456", current: true, main: true }],
+      total: 1,
+      probed: 1,
+      dirtyCount: 0,
+      agentCount: 0,
+      sampledAt: 1_700_000_000_000,
+    };
+    const wrapper = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, worktrees: wt, bashJobs: bj } as never }),
+        narrow: false,
+      },
+    });
+    const kids = [...wrapper.find(".detail-head").element.children];
+    const wtIdx = kids.findIndex((el) => el.classList.contains("wt-panel"));
+    const bjIdx = kids.findIndex((el) => el.classList.contains("bj-panel"));
+    expect(wtIdx).toBeGreaterThanOrEqual(0);
+    expect(bjIdx).toBe(wtIdx + 1);
+  });
+
+  it("renders no panel when the wire is absent or carries zero rows", () => {
+    const absent = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
+    expect(absent.find(".bj-panel").exists()).toBe(false);
+    const empty = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, bashJobs: { ...bj, rows: [] } } as never }),
+        narrow: false,
+      },
+    });
+    expect(empty.find(".bj-panel").exists()).toBe(false);
+  });
+});

@@ -40,6 +40,8 @@ import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
 import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
+import BashJobsPanel from "./BashJobsPanel.vue";
+import { bashJobsOf } from "./bashJobsView.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -56,6 +58,10 @@ const statusLabel = computed(() => t(`common.status.${visual.value}`));
 // worktree-web W4: the repo's git worktrees ride `StatusInfo.worktrees` (no state.js mirror —
 // the status reducer replaces `agent.status` wholesale); undefined ⇒ the panel renders nothing.
 const worktrees = computed(() => worktreesOf(props.agent));
+
+// bash-jobs-panel 包 B (D4): the session's own background bash jobs ride `StatusInfo.bashJobs`
+// (same no-state.js-mirror posture as worktrees); undefined ⇒ the panel renders nothing.
+const bashJobs = computed(() => bashJobsOf(props.agent));
 
 const title = computed(() => {
   const name = session.value?.name;
@@ -249,5 +255,9 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
     <!-- worktree-web W4: git worktrees of the session cwd's repo, straight from
          `status.worktrees`; renders nothing when the wire is absent or has zero rows. -->
     <WorktreePanel v-if="worktrees" :worktrees="worktrees" />
+
+    <!-- bash-jobs-panel 包 B (D4): the session's own background bash jobs, straight from
+         `status.bashJobs`; renders nothing when the wire is absent or has zero rows. -->
+    <BashJobsPanel v-if="bashJobs" :jobs="bashJobs" />
   </header>
 </template>
