@@ -45,6 +45,21 @@
   the ring's whole zone is the two-step stop button (stop wins — nothing else intercepts taps
   there). It injects `DETAIL_METRICS` itself and self-hides the ring without a provider (then
   falls back to the standalone stop look) — nothing here reads the metrics.
+
+  Model/thinking chips INSIDE the input (2026-10 user request "把模型切换和思考等级放到输入框里
+  面，输入内容的时候自动隐藏" — supersedes web-model-switch plan v2 §5.1's slim `.dock-tools`
+  strip above the composer, which is gone): `ModelSwitcher` (which renders `ThinkingChip`
+  itself) lives in `.composer-chips`, ABSOLUTELY positioned at the textarea's top-left, so
+  `.composer-input`'s height stays exactly the textarea's box and the context ring's
+  top:0/bottom:0 centering keeps landing on the textarea's own vertical center. The textarea
+  reserves the chip band with a CONSTANT `padding-top` (CSS `:has(.model-switcher)` tier in
+  control.css — only when the switcher actually rendered; it self-hides in the §5.4
+  not-rendered states, and then an empty composer pays no reserve). While `text` is non-empty
+  the chips get `.chips-off` (fade/slide out, `visibility:hidden` — out of the tab order and
+  the a11y tree, `pointer-events:none`); the constant padding means hiding never moves the
+  text (no layout jump as `field-sizing: content` grows). Pickers still open upward from the
+  chips and keep their usePopoverClamp viewport fitting — opening one moves focus into the
+  panel, which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
@@ -68,6 +83,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
 import ContextRing from "./ContextRing.vue";
+import ModelSwitcher from "./ModelSwitcher.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
@@ -682,6 +698,15 @@ watch(
         @change="onFilePick"
       />
       <div class="composer-input">
+        <!-- Model/thinking chips overlay (see the header comment): absolute top-left INSIDE
+             the input box, slim chips (models.css), auto-hidden via `.chips-off` while the
+             input has content. Rendered before the textarea so tab order runs chips → input;
+             `visibility:hidden` in `.chips-off` removes them from the tab order while hidden.
+             ModelSwitcher self-hides (§5.4) — the padding-top reserve is `:has`-gated on
+             `.model-switcher` so an empty composer pays nothing then. -->
+        <div class="composer-chips" :class="{ 'chips-off': text !== '' }">
+          <ModelSwitcher />
+        </div>
         <textarea
           ref="textareaEl"
           v-model="text"
@@ -716,7 +741,7 @@ watch(
         :aria-label="t('control.sendAria')"
         @click="onSendClick"
       >
-        <AppIcon name="arrow-up" class="icon-sm send-icon" />
+        <AppIcon name="send-plane" class="icon-sm send-icon" />
         <span class="lbl-md">{{ t("control.send") }}</span>
       </button>
     </div>

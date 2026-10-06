@@ -9,6 +9,7 @@ export type IconName =
   | "alert"
   | "arrow-down"
   | "arrow-up"
+  | "send-plane"
   | "ban"
   | "branch"
   | "check"
@@ -53,6 +54,7 @@ export const ICON_NAMES: readonly IconName[] = [
   "alert",
   "arrow-down",
   "arrow-up",
+  "send-plane",
   "ban",
   "branch",
   "check",

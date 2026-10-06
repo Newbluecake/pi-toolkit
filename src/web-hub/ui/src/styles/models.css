@@ -1,7 +1,10 @@
 /*
  * pi web-hub — model switcher (web-model-switch plan v2 §5.1, package M3a exclusive; M3b
  * appended the thinking chip + Teleport'd bottom sheet at the bottom).
- * The chip lives in DetailDock's slim `.dock-tools` row above the composer (user 拍板 Q2).
+ * The chips live INSIDE the composer's input box now (2026-10 user request: 模型切换/思考等级
+ * 放进输入框，输入时自动隐藏 — supersedes §5.1's slim `.dock-tools` strip above the composer,
+ * which is deleted): Composer.vue's `.composer-chips` overlay (geometry + hide transition in
+ * control.css) hosts `.model-switcher` (which renders `.thinking-chip-host` itself).
  * Two form factors (#16): viewport >640px = absolute popover above the chip; viewport ≤640px
  * = `PickerSheet.vue`'s Teleport'd bottom sheet (`.picker-scrim`/`.picker-sheet`, 75vh +
  * safe-area inset). `(pointer: coarse)` only raises row hit-areas to ≥44px, it never decides
@@ -11,22 +14,11 @@
  * NEVER overflow the viewport): model popover min(720px) / 70vh, thinking min(360px); both
  * stay left-anchored under the chip and `composables/usePopoverClamp.ts` shifts the panel
  * back inside the viewport when the chip sits near the right edge.
-
-/* Slim tool row above the composer (DetailDock control branch). */
-.dock-tools {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-height: 28px;
-  padding: var(--sp-1) var(--sp-3) 0;
-  /* 2026-10-06: align the chips with the composer INPUT's left edge (not the attach button's):
-   * dock padding sp-3 + attach 36px + row gap sp-2 = 56px. */
-  padding-left: max(calc(var(--sp-3) + 56px), calc(env(safe-area-inset-left) + 56px));
-  padding-right: max(var(--sp-3), env(safe-area-inset-right));
-  background: var(--c-surface);
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-}
+ * 2026-10 chip size (field reports ×2 — "模型切换太高了" → slim strip → "再缩小为三分之二",
+ * then the move INTO the input): the 15px slim chips are the DEFAULT everywhere now (not a
+ * ≤767px tier anymore) — they overlay the textarea's reserved top band and must stay slim;
+ * the PICKERS keep their ≥44px rows on coarse pointers, only the trigger chips stay small.
+ */
 
 .model-switcher {
   position: relative;
@@ -38,13 +30,16 @@
 
 /* --- chip ------------------------------------------------------------ */
 
+/* 15px slim chip — the DEFAULT on every viewport now (the old ≤767px-only tier and the
+ * coarse-pointer 40px bump are gone: the chips overlay the input's reserved top band, the
+ * pickers carry the touch targets instead). */
 .model-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  min-height: 24px;
+  gap: 4px;
+  min-height: 15px;
   max-width: 100%;
-  padding: 1px 8px;
+  padding: 0 6px;
   border: 1px solid var(--c-border);
   border-radius: var(--r-pill);
   background: var(--c-surface-2);
@@ -417,38 +412,10 @@
   }
 }
 
-/* --- coarse pointers: ≥44px rows (form factor stays viewport-driven, #16) --- */
-/* Narrow phones (2026-10-06 field reports ×2: "模型切换太高了" → slim strip → "再缩小为三分之二"):
- * the chips strip above the composer collapses to a ~16px row — chips 15px tall at fs-2xs, zero
- * row padding. The pickers themselves keep their ≥44px rows; only the trigger chips slim down. */
-@media (max-width: 767px) {
-  .dock-tools {
-    min-height: 0;
-    padding-top: 0;
-    /* attach button is 32px on phones: sp-3 + 32 + sp-2 = 52px */
-    padding-left: max(calc(var(--sp-3) + 52px), calc(env(safe-area-inset-left) + 52px));
-  }
-
-  .dock-tools .model-chip {
-    min-height: 15px; /* more specific than the coarse-pointer 40px below, so phones win */
-    padding: 0 6px;
-    font-size: var(--fs-2xs);
-  }
-}
-
+/* --- coarse pointers: ≥44px rows (form factor stays viewport-driven, #16) ---
+ * The trigger chips stay 15px slim even on coarse pointers (they live inside the input's
+ * reserved band — see the header comment); only the PICKER rows/tabs get the touch targets. */
 @media (pointer: coarse) {
-  /* Coarse bumps the composer row gap (sp-3) and attach width (44px), shifting the input's
-   * left edge to 12+44+12 = 68px — keep the chips aligned with it. On ≤767px the composer
-   * geometry is pinned (attach 32px, gap sp-2), so the narrow block's 52px already holds and
-   * the extra rule below re-asserts it. */
-  .dock-tools {
-    padding-left: max(calc(var(--sp-3) + 68px), calc(env(safe-area-inset-left) + 68px));
-  }
-
-  .model-chip {
-    min-height: 40px;
-  }
-
   .model-row {
     min-height: 44px;
   }
@@ -456,12 +423,5 @@
   .model-tabs button {
     min-height: 40px;
     padding: 6px 14px;
-  }
-}
-
-/* narrow + coarse: the pinned composer geometry keeps the input's left edge at 52px */
-@media (max-width: 767px) and (pointer: coarse) {
-  .dock-tools {
-    padding-left: max(calc(var(--sp-3) + 52px), calc(env(safe-area-inset-left) + 52px));
   }
 }

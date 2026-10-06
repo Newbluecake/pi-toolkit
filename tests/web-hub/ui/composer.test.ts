@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -266,5 +268,77 @@ describe("Composer.vue — inline StopButton (2026-10 user request: stop lives i
     expect(noView.find(".stop-btn").exists()).toBe(false);
     const nullCtl = mountComposer({ busy: true, view: controlView({ control: null }) });
     expect(nullCtl.find(".stop-btn").exists()).toBe(false);
+  });
+});
+
+describe("Composer.vue — model/thinking chips INSIDE the input (2026-10 user request: 放进输入框, 输入时自动隐藏)", () => {
+  const session = {
+    sessionId: "s1",
+    model: { provider: "zai", id: "glm-5" },
+    models: {
+      status: "ok",
+      items: [{ provider: "zai", id: "glm-5" }],
+      total: 1,
+      levels: ["low", "high"],
+      policy: { model: "allow", thinking: "allow" },
+      sampledAt: 1,
+    },
+  };
+  const chipView = () =>
+    controlView({
+      agent: computed(() => ({ pendingCtl: [], session }) as unknown as AgentState),
+      commandsEnabled: computed(() => true),
+    });
+
+  it("chips render INSIDE .composer-input, before the textarea (tab order runs chips → input)", () => {
+    const w = mountComposer({ view: chipView() });
+    const input = w.find(".composer-input");
+    expect(input.find(".composer-chips .model-switcher button.model-chip").exists()).toBe(true);
+    expect(input.find(".composer-chips .thinking-chip-host").exists()).toBe(true);
+    const kids = Array.from(input.element.children) as HTMLElement[];
+    expect(kids[0]!.classList.contains("composer-chips")).toBe(true);
+    expect(kids[1]!.tagName).toBe("TEXTAREA");
+  });
+
+  it("chips auto-hide while the input has content and reappear when cleared", async () => {
+    const w = mountComposer({ view: chipView() });
+    const chips = () => w.find(".composer-chips");
+    expect(chips().classes()).not.toContain("chips-off"); // empty ⇒ visible
+    await w.find("textarea").setValue("hello");
+    expect(chips().classes()).toContain("chips-off"); // content ⇒ hidden
+    await w.find("textarea").setValue("");
+    expect(chips().classes()).not.toContain("chips-off"); // cleared ⇒ visible again
+  });
+
+  it("no CONTROL_VIEW ⇒ ModelSwitcher self-hides: the chips host stays empty (padding reserve is :has-gated)", () => {
+    const w = mountComposer({});
+    expect(w.find(".composer-chips").exists()).toBe(true);
+    expect(w.find(".composer-chips .model-switcher").exists()).toBe(false);
+    expect(w.find(".model-chip").exists()).toBe(false);
+  });
+
+  it("control.css pins: absolute chips (ring-centering invariant), :has-gated constant 22px reserve, hidden-state a11y", () => {
+    const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/control.css"), "utf8");
+    const rule = (sel: string): string =>
+      new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}").exec(css)?.[1] ?? "";
+    // Chips ABSOLUTE ⇒ the wrapper's height stays exactly the textarea's own box, so the
+    // ring's top:0/bottom:0 centering keeps landing on the textarea's vertical center
+    // (user requirement: 上下文进度条在输入框里垂直居中 — the chips band must never skew it).
+    expect(rule(".composer-chips")).toMatch(/position:\s*absolute/);
+    expect(rule(".composer-chips")).toMatch(/transition:/);
+    // Hidden while typing: no layout property touched; visibility drops tab order + a11y tree.
+    const off = rule(".composer-chips.chips-off");
+    expect(off).toMatch(/opacity:\s*0/);
+    expect(off).toMatch(/visibility:\s*hidden/);
+    expect(off).toMatch(/pointer-events:\s*none/);
+    // Reserve ONLY when the switcher rendered (self-hide ⇒ empty composer pays nothing),
+    // and CONSTANT ⇒ hiding the chips never shifts the text (no layout jump).
+    expect(rule(".composer-input:has(.composer-chips .model-switcher) textarea")).toMatch(/padding-top:\s*22px/);
+    expect(rule(".composer textarea")).not.toMatch(/padding-top:\s*22px/); // base rule (first match) stays unreserved
+    // The ring itself still centers on the full textarea box.
+    const ring = /^\.ctx-ring\s*\{[^}]*\}/m.exec(css)?.[0] ?? "";
+    expect(ring).toMatch(/top:\s*0/);
+    expect(ring).toMatch(/bottom:\s*0/);
+    expect(ring).toMatch(/align-items:\s*center/);
   });
 });

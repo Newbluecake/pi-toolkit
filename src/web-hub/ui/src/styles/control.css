@@ -92,6 +92,47 @@
   display: flex;
 }
 
+/* Model/thinking chips INSIDE the input (2026-10 user request: 模型切换+思考等级放进输入框,
+ * 输入内容时自动隐藏 — supersedes the `.dock-tools` strip above the composer, deleted in
+ * models.css). ABSOLUTE at the textarea's top-left: the wrapper's height stays EXACTLY the
+ * textarea's own box, so the context ring's `top:0; bottom:0` centering below keeps landing
+ * on the textarea's vertical center (user requirement: 进度条在输入框里垂直居中 — the chips
+ * band must never skew it). The textarea reserves the band with a CONSTANT padding-top via
+ * the `:has` tier below, so hiding the chips while typing never moves the text (no layout
+ * jump as `field-sizing: content` grows downward from the reserved first line). */
+.composer-chips {
+  position: absolute;
+  top: 4px; /* 1px border + 3px air above the 15px chips inside the 22px band */
+  left: calc(var(--sp-3) + 1px); /* textarea border + text padding — chips align with the caret */
+  right: 40px; /* keep clear of the ring's fixed 36px slot */
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out),
+    visibility var(--dur-base) var(--ease-out);
+}
+
+/* Hidden while the input has content: fade/slide out WITHOUT touching layout (padding-top
+ * is constant). `visibility:hidden` drops the chips from the tab order and the a11y tree;
+ * it interpolates discretely, so it flips to hidden at the END of the fade and back to
+ * visible at the START of the reveal. */
+.composer-chips.chips-off {
+  opacity: 0;
+  transform: translateY(-4px);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Reserve the chip band ONLY when the switcher actually rendered — ModelSwitcher self-hides
+ * in the §5.4 not-rendered states (no control / offline / no command cap), and an empty
+ * composer pays no reserve then. 22px = 3px air + 15px chip + 4px air. */
+.composer-input:has(.composer-chips .model-switcher) textarea {
+  padding-top: 22px;
+}
+
 /* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
  * no padding). `:has` keeps the component itself free of any padding logic. Single 36px slot
  * covers BOTH states of the merged control (2026-10 user request "stop 图标放进上下文圆圈"):
@@ -985,8 +1026,7 @@
 
   /* Pin the narrow geometry even on coarse pointers: upload.css's `(pointer: coarse)` rule
    * (attach 44px) loads LATER at equal specificity, and the coarse block above bumps
-   * `.composer-row` gap to sp-3 — both would silently shift the input's left edge (the chips
-   * strip in models.css left-aligns to it). */
+   * `.composer-row` gap to sp-3 — both would silently shift the input's geometry on phones. */
   .composer-row .composer-attach {
     width: 32px;
     min-height: 34px;

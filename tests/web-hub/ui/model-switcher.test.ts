@@ -668,6 +668,22 @@ describe("ModelSwitcher.vue — widened desktop popover (2026-10 user 拍板)", 
     expect(thinking![1]).toContain("width: min(360px, calc(100vw - 2 * var(--sp-4)))");
   });
 
+  it("models.css: the .dock-tools strip is deleted; the 15px slim chip is the DEFAULT on every viewport", () => {
+    const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/models.css"), "utf8");
+    expect(css).not.toMatch(/\.dock-tools\s*[{,]/); // the strip's RULES are gone (comments may still reference it)
+    const chip = css.match(/\.model-chip \{([\s\S]*?)\n\}/);
+    expect(chip).not.toBeNull();
+    expect(chip![1]).toContain("min-height: 15px");
+    expect(chip![1]).toContain("padding: 0 6px");
+    // The old ≤767px-only slim tier and the coarse-pointer 40px chip bump are gone — the
+    // pickers carry the ≥44px touch targets, the trigger chips stay 15px everywhere.
+    const coarse = css.match(/@media \(pointer: coarse\) \{([\s\S]*?)\n\}/);
+    expect(coarse).not.toBeNull();
+    expect(coarse![1]).not.toContain(".model-chip");
+    expect(coarse![1]).toContain("min-height: 44px"); // .model-row keeps its touch target
+    expect(css).not.toContain("@media (max-width: 767px)");
+  });
+
   it("clampPopoverX shifts a viewport-overflowing panel back inside; fitting panels stay anchored", () => {
     vi.stubGlobal("innerWidth", 1000);
     const el = document.createElement("div");

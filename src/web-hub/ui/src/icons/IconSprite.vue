@@ -21,6 +21,15 @@
     </symbol>
     <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6" /></symbol>
     <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" /></symbol>
+    <!-- send: FILLED paper plane (2026-10-06 user picked variant A over the stroked lucide one;
+         own fill/stroke attrs beat the .icon fill:none inheritance, same as i-stop). -->
+    <symbol id="i-send-plane" viewBox="0 0 24 24">
+      <path
+        d="M2.7 3.3a1 1 0 0 1 1.1-.2l17 8a1 1 0 0 1 0 1.8l-17 8A1 1 0 0 1 2.5 20l1.8-6.7L14 12 4.3 10.7 2.5 4a1 1 0 0 1 .2-1z"
+        fill="currentColor"
+        stroke="none"
+      />
+    </symbol>
     <symbol id="i-ban" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="8.5" />
       <path d="M6 6l12 12" />

@@ -44,7 +44,6 @@ import type { DetailDockEmits, DetailDockProps } from "../../contracts.js";
 import Composer from "../control/Composer.vue";
 import CommandConfirm from "../control/CommandConfirm.vue";
 import CommandResult from "../control/CommandResult.vue";
-import ModelSwitcher from "../control/ModelSwitcher.vue";
 import QueueList from "../control/QueueList.vue";
 import { CONTROL_ENV, CONTROL_VIEW } from "../control/controlContext.js";
 import { HUB_CTX } from "../control/controlContext.js";
@@ -359,11 +358,6 @@ onUnmounted(() => {
       @confirm="void runCommand(pendingConfirm!.name, pendingConfirm!.args, true)"
       @cancel="pendingConfirm = null"
     />
-    <div class="dock-tools">
-      <!-- web-model-switch plan v2 §5.1 (user 拍板 Q2): slim tool row above the composer;
-           ModelSwitcher self-hides in the §5.4 not-rendered states, so the row is inert then. -->
-      <ModelSwitcher />
-    </div>
     <div class="dock-row">
       <Composer :enabled="true" :busy="busy" @send="onSend" />
       <div class="dock-actions">

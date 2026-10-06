@@ -1,7 +1,8 @@
 <!--
   Model switcher chip (web-model-switch plan v2 §5, package M3a; M3b added the ThinkingChip
-  sibling and the Teleport'd mobile sheet). Lives in DetailDock's slim `.dock-tools` row
-  above the composer (user 拍板 Q2). Two form factors (#16): viewport >640px = popover above
+  sibling and the Teleport'd mobile sheet). Lives INSIDE the composer's input box now
+  (2026-10 user request — Composer.vue's `.composer-chips` top-left overlay, auto-hidden
+  while the input has content; supersedes DetailDock's slim `.dock-tools` strip, user 拍板 Q2). Two form factors (#16): viewport >640px = popover above
   the chip; ≤640px = `PickerSheet` bottom sheet Teleport'd to `<body>` (M3b — same slot
   content, the search box deliberately NOT autofocused there so the mobile keyboard stays
   down; focus lands on the listbox via `[data-autofocus]`). CSS in `styles/models.css`;

@@ -333,7 +333,7 @@ describe("DetailDock.vue — @mention send routing (task #11)", () => {
   });
 });
 
-describe("DetailDock.vue — model switcher tool row (web-model-switch plan v2 §5.1, M3a)", () => {
+describe("DetailDock.vue — model/thinking chips inside the composer input (2026-10: 放进输入框)", () => {
   const models = {
     status: "ok",
     items: [{ provider: "zai", id: "glm-5" }],
@@ -352,34 +352,35 @@ describe("DetailDock.vue — model switcher tool row (web-model-switch plan v2 �
     models,
   };
 
-  it("control ON + command cap ⇒ slim .dock-tools row with the model chip above the composer", () => {
+  it("control ON + command cap ⇒ chips INSIDE .composer-input; the old .dock-tools strip is gone", () => {
     const { control } = fakeControl();
     const w = mountDock(control, { commandsEnabled: true, session });
-    const tools = w.find(".dock-tools");
-    expect(tools.exists()).toBe(true);
-    expect(tools.find(".model-switcher button.model-chip").exists()).toBe(true);
-    expect(tools.find(".model-chip").text()).toContain("glm-5");
-    // the row sits between CommandConfirm's slot and the composer row
-    expect(w.find(".dock-tools + .dock-row").exists()).toBe(true);
+    expect(w.find(".dock-tools").exists()).toBe(false); // superseded (2026-10 user request)
+    const chips = w.find(".composer-input .composer-chips");
+    expect(chips.exists()).toBe(true);
+    expect(chips.find(".model-switcher button.model-chip").exists()).toBe(true);
+    expect(chips.find(".model-chip").text()).toContain("glm-5");
+    expect(chips.find(".thinking-chip-host").exists()).toBe(true);
   });
 
-  it("control ON but no session.models (old agent) ⇒ read-only chip; command cap missing ⇒ empty row", () => {
+  it("control ON but no session.models (old agent) ⇒ read-only chip; command cap missing ⇒ empty chips host", () => {
     const { control } = fakeControl();
     const oldAgent = mountDock(control, {
       commandsEnabled: true,
       session: { ...session, models: undefined },
     });
-    expect(oldAgent.find(".dock-tools .model-chip-static").exists()).toBe(true);
-    expect(oldAgent.find(".dock-tools button.model-chip").exists()).toBe(false);
+    expect(oldAgent.find(".composer-chips .model-chip-static").exists()).toBe(true);
+    expect(oldAgent.find(".composer-chips button.model-chip").exists()).toBe(false);
 
     const noCap = mountDock(control, { commandsEnabled: false, session });
-    expect(noCap.find(".dock-tools .model-switcher").exists()).toBe(false);
+    expect(noCap.find(".composer-chips .model-switcher").exists()).toBe(false);
   });
 
-  it("read-only dock branch ⇒ no tool row at all", () => {
+  it("read-only dock branch ⇒ no composer, no chips at all", () => {
     const { control } = fakeControl();
     const w = mountDock(control, { enabled: false, readonlyReason: "control.dockReadonlyHub" });
     expect(w.find(".dock-tools").exists()).toBe(false);
+    expect(w.find(".composer-chips").exists()).toBe(false);
     expect(w.find(".model-switcher").exists()).toBe(false);
   });
 
