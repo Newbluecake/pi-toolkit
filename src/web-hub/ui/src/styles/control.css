@@ -38,6 +38,14 @@
   padding-bottom: max(var(--sp-2), env(safe-area-inset-bottom));
 }
 
+/* 2026-10-06 field report ("输入框底部边距" too big on phones): halve the dock's bottom air. */
+@media (max-width: 767px) {
+  .dock-ctl {
+    padding-top: var(--sp-1);
+    padding-bottom: max(var(--sp-1), env(safe-area-inset-bottom));
+  }
+}
+
 .dock-ctl .dock-row {
   display: flex;
   align-items: center;
@@ -71,6 +79,8 @@
   /* border/radius/background moved to the CARD (`.composer-input`, 2026-10 user-picked mock
    * option 1): the textarea is borderless/transparent inside the card. */
   border: 0;
+  outline: none; /* UA focus ring doubled as an inner frame inside the card (2026-10-06);
+                  * focus is shown by `.composer-input:focus-within` below */
   background: transparent;
   color: var(--c-text);
   font: inherit;

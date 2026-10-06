@@ -35,7 +35,8 @@
   height: var(--topbar-h);
   padding: 0 var(--sp-4);
   padding-left: max(var(--sp-4), env(safe-area-inset-left));
-  padding-right: max(var(--sp-4), env(safe-area-inset-right));
+  /* 2026-10-06 ×2 ("登出按钮向右贴近屏幕" + "右边距缩小为四分之一"): sp-4 → sp-1 */
+  padding-right: max(var(--sp-1), env(safe-area-inset-right));
   background: var(--c-surface);
   border-bottom: 1px solid var(--c-border);
 }
