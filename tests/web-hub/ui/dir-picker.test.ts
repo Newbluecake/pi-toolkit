@@ -15,13 +15,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it } from "vitest";
-import { ref } from "vue";
+import { ref, shallowRef, type ShallowRef } from "vue";
 import DirPicker from "../../../src/web-hub/ui/src/components/spawn/DirPicker.vue";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { createNewSession } from "../../../src/web-hub/ui/src/composables/useNewSession.js";
 import type { HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
 import type { SpawnOutcome } from "../../../src/web-hub/ui/src/transport/types.js";
-import type { DirEntryWire, SpawnRequestBody } from "../../../src/web-hub/protocol/spawn.js";
+import type { DirEntryWire, SpawnPrefsWire, SpawnRequestBody } from "../../../src/web-hub/protocol/spawn.js";
 
 function fakeClock() {
   let now = 1_700_000_000_000;
@@ -41,24 +41,38 @@ function fakeClock() {
 interface Harness {
   readonly hub: HubHandle;
   readonly starts: SpawnRequestBody[];
+  /** F1/F2: the spawn handle's prefs mirror — tests mutate it to simulate an arriving GET. */
+  readonly prefs: ShallowRef<SpawnPrefsWire | null>;
+  readonly refreshCalls: { n: number };
 }
 
-/** HUB_CTX with a real §3.2 orchestrator over a scripted `start`; dirs() returns `recent`. */
-function harness(opts: { start: (req: SpawnRequestBody) => Promise<SpawnOutcome>; recent?: DirEntryWire[] }): Harness {
+/** HUB_CTX with a real §3.2 orchestrator over a scripted `start`; dirs() returns `recent`.
+ * `caps` drives both the picker's `spawn.model.v1` gate and the orchestrator's second cap
+ * guard (`modelCap` dep) — the body only ever carries `model` when it is advertised. */
+function harness(opts: {
+  start: (req: SpawnRequestBody) => Promise<SpawnOutcome>;
+  recent?: DirEntryWire[];
+  caps?: string[];
+  prefs?: SpawnPrefsWire | null;
+}): Harness {
   const starts: SpawnRequestBody[] = [];
   const clock = fakeClock();
+  const caps = opts.caps ?? [];
+  const prefs = shallowRef<SpawnPrefsWire | null>(opts.prefs ?? null);
+  const refreshCalls = { n: 0 };
   const newSession = createNewSession({
     start: (req) => {
       starts.push(req);
       return opts.start(req);
     },
+    modelCap: () => caps.includes("spawn.model.v1"),
     now: clock.now,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
     newId: () => `req-${starts.length}-aaaaaaaaaaaa`,
   });
   const hub: HubHandle = {
-    state: ref({ agents: new Map(), spawns: null } as unknown as HubState),
+    state: ref({ agents: new Map(), spawns: null, hub: { caps } } as unknown as HubState),
     dispatch: () => {},
     spawn: {
       list: async () => ({ ok: false, error: "E_NOT_FOUND", status: 404 }),
@@ -66,9 +80,15 @@ function harness(opts: { start: (req: SpawnRequestBody) => Promise<SpawnOutcome>
       start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
       stop: async () => ({ ok: true, state: "stopping" }),
       newSession,
+      prefs,
+      refreshPrefs: async () => {
+        refreshCalls.n += 1;
+        return { ok: false, error: "E_NOT_FOUND", status: 404 };
+      },
+      setDefaultModel: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
     },
   };
-  return { hub, starts };
+  return { hub, starts, prefs, refreshCalls };
 }
 
 // --- Teleport'd-DOM helpers (the dialog lives at document.body) ------------------------------
@@ -365,5 +385,194 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
     expect(coarse![1]).toContain(".spawn-recent-btn");
     expect(coarse![1]).toContain(".spawn-picker-actions .btn");
     expect(css).not.toContain("v-html");
+  });
+});
+
+describe("DirPicker.vue — 「本次模型」 (default-model plan F2, D6/D7)", () => {
+  const MODEL_CAPS = ["spawn.v1", "spawn.model.v1"];
+
+  it("no spawn.model.v1 cap ⇒ the field is absent, refreshPrefs is never called, and the submit body has no `model` key", async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
+      caps: ["spawn.v1"],
+      prefs: { defaultModel: "anthropic/claude-opus-4-5" },
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    expect(document.body.querySelector("#spawn-model")).toBeNull();
+    expect(h.refreshCalls.n).toBe(0);
+    await click(q(".spawn-picker-actions .btn-primary"));
+    expect(h.starts.length).toBeGreaterThan(0);
+    expect(h.starts[0]).not.toHaveProperty("model");
+  });
+
+  it("cap present ⇒ the field initializes from prefs.defaultModel and the submit sends it explicitly", async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
+      caps: MODEL_CAPS,
+      prefs: { defaultModel: "anthropic/claude-opus-4-5" },
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    expect(q<HTMLInputElement>("#spawn-model").value).toBe("anthropic/claude-opus-4-5");
+    expect(h.refreshCalls.n).toBe(1); // mounted ⇒ prefs refetched (cap present)
+    await click(q(".spawn-picker-actions .btn-primary"));
+    expect(h.starts[0]!.model).toBe("anthropic/claude-opus-4-5");
+  });
+
+  it("prefs arriving after mount initialize the field exactly once — a later prefs change never clobbers an edit", async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
+      caps: MODEL_CAPS,
+      prefs: null,
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    expect(q<HTMLInputElement>("#spawn-model").value).toBe(""); // unknown prefs ⇒ empty
+    h.prefs.value = { defaultModel: "p/m" }; // the GET settles
+    await flushPromises();
+    expect(q<HTMLInputElement>("#spawn-model").value).toBe("p/m");
+    await setValue(q<HTMLInputElement>("#spawn-model"), "openai/gpt-5");
+    h.prefs.value = { defaultModel: "zai/glm-5" }; // another tab saved a new default
+    await flushPromises();
+    expect(q<HTMLInputElement>("#spawn-model").value).toBe("openai/gpt-5");
+  });
+
+  it("prefs arriving after the user already typed never overwrite that edit (touched-latch)", async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
+      caps: MODEL_CAPS,
+      prefs: null, // the GET is still in flight
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await setValue(q<HTMLInputElement>("#spawn-model"), "openai/gpt-5"); // typed before prefs land
+    h.prefs.value = { defaultModel: "p/m" }; // the GET settles afterwards
+    await flushPromises();
+    expect(q<HTMLInputElement>("#spawn-model").value).toBe("openai/gpt-5");
+  });
+
+  it('an empty field submits model:"" (the explicit pi-default tri-state)', async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
+      caps: MODEL_CAPS,
+      prefs: { defaultModel: null },
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-picker-actions .btn-primary"));
+    expect(h.starts[0]).toHaveProperty("model", "");
+  });
+
+  it("an invalid ref disables submit and shows the validation note; a valid one re-enables", async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
+      caps: MODEL_CAPS,
+      prefs: { defaultModel: null },
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    const submit = q<HTMLButtonElement>(".spawn-picker-actions .btn-primary");
+    expect(submit.disabled).toBe(false);
+    await setValue(q<HTMLInputElement>("#spawn-model"), "noslash");
+    expect(submit.disabled).toBe(true);
+    expect(q<HTMLInputElement>("#spawn-model").getAttribute("aria-invalid")).toBe("true");
+    expect(q(".spawn-model-warn").textContent).toContain("Not a valid provider/id");
+    await click(submit);
+    expect(h.starts).toHaveLength(0); // never hits the wire
+    await setValue(q<HTMLInputElement>("#spawn-model"), "openai/gpt-5");
+    expect(submit.disabled).toBe(false);
+    expect(document.body.querySelector(".spawn-model-warn")).toBeNull();
+  });
+
+  it("the datalist unions online agents' session.models (D7)", async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
+      caps: MODEL_CAPS,
+      prefs: { defaultModel: null },
+    });
+    (h.hub.state.value as { agents: Map<string, unknown> }).agents.set("a1", {
+      down: false,
+      session: {
+        models: {
+          status: "ok",
+          items: [{ provider: "anthropic", id: "claude-opus-4-5", name: "Claude Opus 4.5" }],
+          total: 1,
+          policy: { model: "allow", thinking: "allow" },
+          sampledAt: 1,
+        },
+      },
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    const options = qa("#spawn-model-options option");
+    expect(options.map((o) => o.getAttribute("value"))).toEqual(["anthropic/claude-opus-4-5"]);
+  });
+
+  it("400 E_BAD_REQUEST{reason:model-invalid} ⇒ the errModelInvalid line; the typed model survives like cwd; retry resends it", async () => {
+    let calls = 0;
+    const h = harness({
+      start: async () => {
+        calls += 1;
+        return { ok: false, error: "E_BAD_REQUEST", reason: "model-invalid", retryable: false };
+      },
+      caps: MODEL_CAPS,
+      prefs: { defaultModel: null },
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await setValue(q<HTMLInputElement>("#spawn-model"), "typo/model");
+    await click(q(".spawn-picker-actions .btn-primary"));
+    expect(q(".spawn-picker-error").textContent).toContain("The model was rejected");
+    expect(q<HTMLInputElement>("#spawn-model").value).toBe("typo/model"); // 失败保留输入
+    await click(q(".spawn-picker-actions .btn:not(.btn-primary):not(.btn-ghost)"));
+    expect(calls).toBe(2);
+    expect(h.starts[1]!.model).toBe("typo/model");
+  });
+});
+
+describe("DirPicker.vue — document-level keydown (a11y fix)", () => {
+  it("Escape dispatched on document.body after a phase switch still closes (focus fell out of the dialog)", async () => {
+    const h = harness({
+      start: async () => ({
+        ok: false,
+        error: "E_CONFIRM_REQUIRED",
+        resolvedCwd: "/real/path",
+        reason: "unknown-dir",
+        retryable: false,
+      }),
+    });
+    const wrapper = mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-picker-actions .btn-primary")); // phase switch ⇒ SpawnConfirm swaps in
+    expect(document.body.querySelector(".spawn-confirm")).not.toBeNull();
+    // the focused submit button is gone — focus is now nowhere inside the dialog
+    await keydown(document.body, { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    expect(h.hub.spawn!.newSession.flow.value.phase).not.toBe("confirming"); // cancel() ran first
+  });
+
+  it("Escape on document.body does NOT close the picker while a sibling overlay is on top (topmost-only)", async () => {
+    const h = harness({ start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }) });
+    const wrapper = mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    // a later-mounted overlay (e.g. the preview) — appended after the picker's scrim
+    const overlay = document.createElement("div");
+    overlay.className = "preview-overlay";
+    document.body.appendChild(overlay);
+    await keydown(document.body, { key: "Escape" });
+    expect(wrapper.emitted("close") ?? []).toHaveLength(0);
+    overlay.remove();
+    await keydown(document.body, { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+  });
+
+  it("Tab on document.body (focus fell out) wraps focus back into the dialog", async () => {
+    const h = harness({ start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }) });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    await keydown(document.body, { key: "Tab" });
+    expect(document.activeElement).toBe(q("#spawn-cwd")); // wrapped to the first focusable
   });
 });

@@ -132,6 +132,20 @@
   font-family: var(--font-mono);
 }
 
+/* 「本次模型」 (default-model plan F2, D6/D7) — same mono free-typed input as the settings
+ * card's default-model field; the invalid state rides aria-invalid. */
+.spawn-model-input {
+  font-family: var(--font-mono);
+}
+
+.spawn-model-input[aria-invalid="true"] {
+  border-color: var(--c-danger-border);
+}
+
+.spawn-model-warn {
+  color: var(--c-warning-text);
+}
+
 /* recent directories: a multi-column grid of cards (label + full path, ellipsized) */
 .spawn-recent {
   display: grid;

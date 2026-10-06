@@ -22,6 +22,17 @@
   inside, focus returns to the opener and the body scroll lock is released on close. Rendered
   only while the parent holds it open; closing mid-`awaiting` never cancels the flow
   (SpawnRow keeps showing progress) — Escape only resolves a pending `confirming` first.
+  Keydown is handled BOTH at the scrim (content keydowns bubbling up) and at document level
+  (capture) while open: a phase switch can drop the focused element (disabled submit /
+  SpawnConfirm swap), and without the document listener focus sits on `<body>` where Escape
+  and the Tab trap no longer reach the dialog (a11y fix — `ownsDocumentKeydown` keeps Escape
+  closing only the topmost overlay).
+
+  default-model plan F2 (D6/D7): a 「本次模型」 field (`SpawnModelField`) sits between the
+  recent list and the first prompt, rendered only when the hub advertises `spawn.model.v1`.
+  Its initial value is the hub preference (`prefs.defaultModel ?? ""`), the submit always
+  sends `model` explicitly (D2 — `""` = explicit pi default), an invalid ref disables
+  submit, and a failed flow restores it from `flow.input` exactly like cwd.
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
@@ -31,8 +42,12 @@ import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import type { DirEntryWire } from "@protocol/spawn.js";
 import { PROMPT_TEXT_MAX_BYTES } from "@protocol/spawn.js";
 import { HUB_CTX } from "../control/controlContext.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
+import { isSpawnModelRef, knownModelRefs, readModelCache, writeModelCache } from "../../logic/models.js";
+import { spawnModelSupported } from "../../logic/spawn.js";
 import type { NewSessionInput } from "../../types.js";
 import SpawnConfirm from "./SpawnConfirm.vue";
+import SpawnModelField from "./SpawnModelField.vue";
 import "../../styles/spawn.css";
 
 const props = defineProps<{
@@ -56,6 +71,61 @@ const newSession = computed(() => hub?.spawn?.newSession ?? null);
 const flow = computed(() => newSession.value?.flow.value ?? ({ phase: "idle" } as const));
 
 // ---------------------------------------------------------------------------
+// 「本次模型」 (default-model plan F2, D6/D7): rendered only when the hub advertises
+// `spawn.model.v1`; the initial value is the hub preference (`prefs.defaultModel ?? ""`),
+// the submit always sends `model` explicitly (D2 — incl. `""` = explicit pi default), and
+// an invalid ref (hub's own `parseSpawnModelRef` gate via `isSpawnModelRef`) disables
+// submit. The cap check / datalist union / cache mirror SettingsView's default-model card.
+// ---------------------------------------------------------------------------
+const spawn = hub?.spawn;
+const hubCaps = computed<unknown>(() => {
+  const h = hub?.state.value.hub;
+  return h !== null && h !== undefined && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+});
+const modelCap = computed(() => spawnModelSupported(hubCaps.value));
+
+const model = ref("");
+const modelTrimmed = computed(() => model.value.trim());
+const modelInvalid = computed(
+  () => modelCap.value && modelTrimmed.value !== "" && !isSpawnModelRef(modelTrimmed.value),
+);
+/** The hub-wide default, for SpawnModelField's placeholder (`null` ⇒ pi default). The
+ * `prefs?.` chain stays defensive: pre-F1 fakes/partial handles may lack the slot. */
+const prefsDefaultModel = computed(() => spawn?.prefs?.value?.defaultModel ?? null);
+
+// Initialize once from the hub preference when it arrives — a later prefs change (or a
+// settings-card save in another tab) must never clobber an in-progress edit. The
+// touched-latch covers the narrow window where prefs are still in flight but the user
+// has already typed (verifier finding: the first arrival would otherwise overwrite it).
+let modelInitialized = false;
+function onModelInput(v: string): void {
+  modelInitialized = true;
+  model.value = v;
+}
+watch(
+  () => spawn?.prefs?.value,
+  (p) => {
+    if (modelInitialized || p === null || p === undefined) return;
+    modelInitialized = true;
+    model.value = p.defaultModel ?? "";
+  },
+  { immediate: true },
+);
+
+// D7's list: union of online agents' `session.models.items` (cache refreshed whenever it is
+// non-empty); the last non-empty cache covers the no-online-agent case.
+const modelStorage = browserLocalStorage();
+const knownRefs = computed(() => knownModelRefs(hub?.state.value.agents));
+watch(
+  knownRefs,
+  (refs) => {
+    if (refs.length > 0) writeModelCache(modelStorage, refs);
+  },
+  { immediate: true },
+);
+const modelOptions = computed(() => (knownRefs.value.length > 0 ? knownRefs.value : readModelCache(modelStorage)));
+
+// ---------------------------------------------------------------------------
 // form state (local; restored from flow.input on failure — plan §3.2 保留输入)
 // ---------------------------------------------------------------------------
 const cwd = ref(props.prefillCwd ?? "~");
@@ -72,6 +142,12 @@ watch(flow, (f) => {
     restoredReqId = f.reqId;
     cwd.value = f.input.cwd;
     firstPrompt.value = f.input.firstPrompt?.text ?? "";
+    // F2: restore the 「本次模型」 exactly like cwd (失败保留输入) — an untouched field keeps
+    // its value, since the restore runs only once per reqId.
+    if (f.input.model !== undefined) {
+      modelInitialized = true;
+      model.value = f.input.model;
+    }
   }
   if (f.phase === "idle") restoredReqId = null;
   if (f.phase === "done") emit("done");
@@ -88,6 +164,7 @@ onMounted(async () => {
   returnFocus = document.activeElement;
   // Shared ref-counted lock (useScrollLock.ts) — composes with other overlays' locks.
   releaseScrollLock = acquireBodyScrollLock();
+  document.addEventListener("keydown", onDocumentKeydown, true);
   await nextTick();
   if (props.focusSubmit === true) {
     submitBtn.value?.focus();
@@ -96,6 +173,9 @@ onMounted(async () => {
   }
   const spawn = hub?.spawn;
   if (spawn === undefined) return;
+  // F2: make sure the hub preference is known (it also rides every list(), but the picker
+  // may open before the first one settles).
+  if (modelCap.value) void spawn.refreshPrefs();
   try {
     const r = await spawn.dirs();
     if (r.ok) {
@@ -117,11 +197,13 @@ function pickRecent(dir: DirEntryWire): void {
 // dialog shell (Teleport'd — see header comment; the PickerSheet contract)
 // ---------------------------------------------------------------------------
 const panelEl = ref<HTMLElement | null>(null);
+const scrimEl = ref<HTMLElement | null>(null);
 const cwdInput = ref<HTMLInputElement | null>(null);
 let returnFocus: Element | null = null;
 let releaseScrollLock: (() => void) | null = null;
 
 onUnmounted(() => {
+  document.removeEventListener("keydown", onDocumentKeydown, true);
   // Close and unmount are one path (the parent renders the dialog only while open), so this
   // covers both — the scroll lock release is idempotent and focus returns to the opener.
   releaseScrollLock?.();
@@ -163,7 +245,12 @@ const busyPhase = computed(() => {
   return p === "submitting" || p === "awaiting" || p === "unknown" || p === "confirming";
 });
 const submitDisabled = computed(
-  () => newSession.value === null || busyPhase.value || cwd.value.trim() === "" || promptTooLong.value,
+  () =>
+    newSession.value === null ||
+    busyPhase.value ||
+    cwd.value.trim() === "" ||
+    promptTooLong.value ||
+    modelInvalid.value,
 );
 
 const submitBtn = ref<HTMLButtonElement | null>(null);
@@ -174,6 +261,10 @@ function onSubmit(): void {
   const text = firstPrompt.value;
   const input: NewSessionInput = {
     cwd: cwd.value.trim(),
+    // F2/D2: the picker ALWAYS sends `model` explicitly when the cap exists — `""` is the
+    // deliberate 「pi 默认」 tri-state, not "absent ⇒ hub preference" (the field's initial
+    // value already materialized the preference).
+    ...(modelCap.value ? { model: modelTrimmed.value } : {}),
     ...(text !== "" ? { firstPrompt: { text } } : {}),
   };
   void ns.submit(input);
@@ -191,6 +282,7 @@ const ERR_KEYS: Record<string, string> = {
   spawn: "spawn.errSpawn",
   "first-prompt": "spawn.errFirstPrompt",
   confirm: "spawn.errNetwork",
+  model: "spawn.errModelInvalid", // F2: hub-side 400 E_BAD_REQUEST{reason:"model-invalid"}
 };
 const HINT_KEYS: Record<string, string> = {
   "register-timeout-hello": "spawn.hintRegisterTimeoutHello",
@@ -200,6 +292,7 @@ const HINT_KEYS: Record<string, string> = {
   "cwd-mismatch": "spawn.hintCwdMismatch",
   "protocol-error": "spawn.hintProtocolError",
   "launcher-changed": "spawn.hintLauncherChanged",
+  "model-rejected": "spawn.hintModelRejected", // F2/D5: pi refused the model at boot
 };
 
 const failure = computed(() => {
@@ -245,11 +338,55 @@ function onScrimKeydown(ev: KeyboardEvent): void {
   }
   if (ev.key === "Tab") trapTab(ev);
 }
+
+// ---------------------------------------------------------------------------
+// document-level keydown (a11y fix, verifier finding on the modal redesign): the scrim
+// handler above only sees keydowns that BUBBLE through it — i.e. only while focus is inside
+// the dialog. A phase switch that disables the submit button or swaps the form for
+// SpawnConfirm drops the focused element, focus falls to `<body>`, and from then on Escape
+// no longer closed the dialog and Tab escaped into the background page. While open, the
+// dialog therefore also listens at document level (capture), covering exactly the
+// focus-fell-out case; content-originated keydowns keep taking the bubbling scrim path, so
+// inner `stopPropagation` semantics are unchanged.
+// ---------------------------------------------------------------------------
+
+/** Every Teleport'd overlay root this dialog can stack with (PickerSheet, preview, a second picker). */
+const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay";
+
+/**
+ * Escape/Tab belong to this dialog only while it is the TOPMOST open overlay: teleported
+ * overlays append to `<body>` in mount order, so the last one in document order is on top —
+ * Escape must close exactly that one (and a keydown targeted inside a sibling overlay is
+ * that overlay's business regardless of order).
+ */
+function ownsDocumentKeydown(ev: KeyboardEvent): boolean {
+  const panel = panelEl.value;
+  if (panel === null) return false;
+  // Focus inside our dialog ⇒ the keydown bubbles to the scrim's own handler (see above).
+  if (ev.target instanceof Node && panel.contains(ev.target)) return false;
+  const roots = Array.from(document.querySelectorAll(OVERLAY_ROOTS));
+  for (const root of roots) {
+    if (root !== scrimEl.value && ev.target instanceof Node && root.contains(ev.target)) return false;
+  }
+  const last = roots[roots.length - 1];
+  return last === undefined || last === scrimEl.value;
+}
+
+function onDocumentKeydown(ev: KeyboardEvent): void {
+  if (ev.key !== "Escape" && ev.key !== "Tab") return;
+  if (!ownsDocumentKeydown(ev)) return;
+  if (ev.key === "Escape") {
+    ev.stopPropagation();
+    onCancelOrClose();
+    return;
+  }
+  trapTab(ev);
+}
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="newSession" class="spawn-scrim" @click.self="onCancelOrClose" @keydown="onScrimKeydown">
+    <div v-if="newSession" ref="scrimEl" class="spawn-scrim" @click.self="onCancelOrClose" @keydown="onScrimKeydown">
       <section
         ref="panelEl"
         class="spawn-picker"
@@ -308,6 +445,15 @@ function onScrimKeydown(ev: KeyboardEvent): void {
             <p v-if="recentPartial" class="spawn-picker-note">{{ t("spawn.pickerRecentPartial") }}</p>
           </div>
           <p v-else-if="recentFailed" class="spawn-picker-note">{{ t("spawn.pickerRecentError") }}</p>
+
+          <SpawnModelField
+            v-if="modelCap"
+            :model-value="model"
+            :default-model="prefsDefaultModel"
+            :options="modelOptions"
+            :disabled="busyPhase"
+            @update:model-value="onModelInput"
+          />
 
           <div class="spawn-field">
             <label class="spawn-field-label" for="spawn-first-prompt">{{ t("spawn.pickerPromptLabel") }}</label>
