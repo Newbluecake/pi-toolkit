@@ -105,7 +105,8 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
       {{ t(connLabelKey) }}
     </span>
 
-    <span v-if="hubVersion" class="topbar-meta" translate="no">{{ t("shell.hubVersion", { v: hubVersion }) }}</span>
+    <!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
+         the brand's title tooltip. -->
     <span v-if="uiStamp" class="topbar-meta" translate="no">{{ t("shell.uiBuild", { v: uiStamp }) }}</span>
     <button
       v-if="controlOn"

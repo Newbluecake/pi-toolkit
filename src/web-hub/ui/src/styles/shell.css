@@ -112,6 +112,12 @@
   flex: 1;
 }
 
+/* 2026-10-06 field report ("设置按钮离 logout 太远"): pull the gear and sign-out into one tight
+ * control cluster — the bar's sp-3 gap reads as a gulf between two icon buttons. */
+.topbar .settings-anchor {
+  margin-right: calc(-1 * var(--sp-2));
+}
+
 .user-chip {
   display: inline-flex;
   align-items: center;

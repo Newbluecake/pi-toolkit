@@ -38,11 +38,12 @@ describe("TopBar build stamps", () => {
     canSignOut: false,
   } as const;
 
-  it("renders the hub stamp and the baked UI build stamp (vitest define)", () => {
+  it("renders only the baked UI build stamp (2026-10-06: 只展示前端版本); hub stamp stays in the brand tooltip", () => {
     const wrapper = mount(TopBar, { props: { ...baseProps, hubVersion: "0.2.1@6451c63" } });
     const metas = wrapper.findAll(".topbar-meta").map((m) => m.text());
-    expect(metas).toContain("hub 0.2.1@6451c63");
+    expect(metas.some((m) => m.includes("hub 0.2.1@6451c63"))).toBe(false);
     expect(metas.some((m) => m.startsWith("ui 0.0.0-test@0123456 · 01-02 "))).toBe(true);
+    expect(wrapper.get(".brand").attributes("title")).toContain("hub 0.2.1@6451c63");
   });
 
   it("hides the hub stamp without a hub version but always shows the UI stamp", () => {
