@@ -39,9 +39,12 @@
   composed text (body + §3.1 attachment block, ≤48 KiB) and clears the tray via
   `uploads.discard` — NEVER `remove`, which would abort-delete the just-referenced hub files.
 
-  Context ring (2026-10-05, user 现场拍板): `ContextRing` sits inside the textarea's right edge
-  (`.composer-input` wrapper; the textarea's `padding-right` makes room via `:has`). It injects
-  `DETAIL_METRICS` itself and self-hides without a provider — nothing here reads the metrics.
+  Context ring + stop, merged (2026-10 user request "把 stop 图标放到上下文比例圆圈中"):
+  `ContextRing` sits inside the textarea's right edge (`.composer-input` wrapper; the
+  textarea's `padding-right` makes room via `:has`). IDLE ⇒ the ring's details toggle; BUSY ⇒
+  the ring's whole zone is the two-step stop button (stop wins — nothing else intercepts taps
+  there). It injects `DETAIL_METRICS` itself and self-hides the ring without a provider (then
+  falls back to the standalone stop look) — nothing here reads the metrics.
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
@@ -65,7 +68,6 @@ import AppIcon from "../../icons/AppIcon.vue";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
 import ContextRing from "./ContextRing.vue";
-import StopButton from "./StopButton.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
@@ -695,17 +697,16 @@ watch(
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
         ></textarea>
-        <!-- Stop button (2026-10 user request): moved INTO the input's inner edge, left of the
-             context ring — absolute positioning + textarea `padding-right` tiers in control.css. -->
-        <StopButton
-          v-if="view?.control != null"
-          :busy="busy"
-          :queue-count="view.queueItems.value.length"
+        <!-- Context ring + stop, merged (2026-10 user request): lives INSIDE the textarea's
+             right edge. Idle ⇒ ring details toggle; busy + live control ⇒ the whole ring zone
+             is the two-step stop button. Self-hides the ring when no DETAIL_METRICS provider/
+             contextUsage exists, falling back to the standalone stop look so stop stays
+             reachable. Same stop channel the dock used — no emit hop (see `onStopInline`). -->
+        <ContextRing
+          :busy="busy && view?.control != null"
+          :queue-count="view === null ? 0 : view.queueItems.value.length"
           @stop="onStopInline"
         />
-        <!-- Context ring (2026-10-05 用户现场拍板): lives INSIDE the textarea's right edge;
-             self-hides when no DETAIL_METRICS provider/contextUsage exists. -->
-        <ContextRing />
       </div>
       <button
         class="btn btn-primary composer-send"

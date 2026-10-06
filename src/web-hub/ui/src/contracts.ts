@@ -157,6 +157,15 @@ export interface StopButtonProps {
 export interface StopButtonEmits {
   stop: [];
 }
+/** Merged ring+stop control (2026-10 user request): `busy`/`queueCount`/`stop` only matter
+ * while the agent is busy — idle renders the plain context ring, no stop affordance. */
+export interface ContextRingProps {
+  readonly busy?: boolean;
+  readonly queueCount?: number;
+}
+export interface ContextRingEmits {
+  stop: [];
+}
 export interface QueueListProps {
   readonly items: readonly unknown[];
 }

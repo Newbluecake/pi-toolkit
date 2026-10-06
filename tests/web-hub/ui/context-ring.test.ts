@@ -8,7 +8,7 @@
  */
 import { flushPromises, mount } from "@vue/test-utils";
 import { computed } from "vue";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import ContextRing from "../../../src/web-hub/ui/src/components/control/ContextRing.vue";
 import {
   DETAIL_METRICS,
@@ -35,18 +35,27 @@ function metrics(over: {
   };
 }
 
-function mountRing(m?: DetailMetricsView) {
-  return mount(ContextRing, {
+function mountRing(m?: DetailMetricsView, props?: { busy?: boolean; queueCount?: number }) {
+  const wrapper = mount(ContextRing, {
+    props,
     global: m ? { provide: { [DETAIL_METRICS as symbol]: m } } : {},
     attachTo: document.body,
   });
+  mounted.push(wrapper);
+  return wrapper;
 }
 
+const mounted: Array<ReturnType<typeof mount>> = [];
+afterEach(() => {
+  vi.useRealTimers();
+  for (const w of mounted.splice(0)) w.unmount();
+});
+
 describe("ContextRing.vue — render gating (2026-10-05)", () => {
-  it("no DETAIL_METRICS provider (dashboard / read-only dock) ⇒ renders nothing", () => {
+  it("no DETAIL_METRICS provider (dashboard / read-only dock) ⇒ no ring, no stop (idle)", () => {
     const wrapper = mountRing();
     expect(wrapper.find(".ctx-ring").exists()).toBe(false);
-    expect(wrapper.html()).toBe("<!--v-if-->");
+    expect(wrapper.find(".stop-btn").exists()).toBe(false);
   });
 
   it("provider without contextUsage yet ⇒ renders nothing", () => {
@@ -130,5 +139,81 @@ describe("ContextRing.vue — details panel", () => {
     panel.element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushPromises();
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+  });
+});
+
+describe("ContextRing.vue — merged stop mode (2026-10 user request: stop 图标放进上下文圆圈)", () => {
+  it("busy + ring ⇒ ONE merged button: stop aria-label + arc still shows usage; click ARMS instead of opening the panel (stop wins the whole zone)", async () => {
+    const wrapper = mountRing(metrics({ percent: 62 }), { busy: true });
+    const btn = wrapper.get(".ctx-ring-stop-btn");
+    expect(btn.attributes("aria-label")).toBe("Stop the current turn"); // control.stopAria
+    expect(btn.attributes("aria-expanded")).toBeUndefined();
+    // arc keeps rendering the live usage around the icon
+    expect(wrapper.get(".ctx-ring-bar").attributes("stroke-dasharray")).toBe(`${0.62 * CIRC} ${CIRC}`);
+    expect(wrapper.get(".ctx-ring-stop-icon").exists()).toBe(true);
+    expect(wrapper.get(".ctx-ring").attributes("data-stop")).toBe("true");
+    await btn.trigger("click"); // arms — must NOT open the details panel
+    expect(btn.attributes("data-armed")).toBe("true");
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+    expect(wrapper.find(".stop-live").exists()).toBe(true); // aria-live announcement preserved
+  });
+
+  it("two-step: first click arms (no emit), second click emits stop", async () => {
+    const wrapper = mountRing(metrics({}), { busy: true });
+    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
+    expect(wrapper.emitted("stop")).toBeUndefined();
+    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
+    expect(wrapper.emitted("stop")).toHaveLength(1);
+    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
+  });
+
+  it("auto-reverts after 4s; Esc disarms without emitting", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountRing(metrics({}), { busy: true });
+    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
+    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBe("true");
+    vi.advanceTimersByTime(4100);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
+    await wrapper.get(".ctx-ring-stop-btn").trigger("click"); // arm again
+    await wrapper.get(".ctx-ring-stop-btn").trigger("keydown", { key: "Escape" });
+    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
+    expect(wrapper.emitted("stop")).toBeUndefined();
+  });
+
+  it("armed queue note floats above the ring when queueCount > 0 (K12 copy preserved)", async () => {
+    const wrapper = mountRing(metrics({}), { busy: true, queueCount: 3 });
+    expect(wrapper.find(".ctx-ring-stop-note").exists()).toBe(false); // not armed yet
+    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
+    expect(wrapper.get(".ctx-ring-stop-note").text()).toContain("3");
+  });
+
+  it("busy flipping true force-closes an open details panel (the panel must not compete with stop)", async () => {
+    const wrapper = mountRing(metrics({}), { busy: false });
+    await wrapper.get(".ctx-ring-btn").trigger("click");
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    await wrapper.setProps({ busy: true });
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+    expect(wrapper.get(".ctx-ring-stop-btn").exists()).toBe(true);
+    expect(wrapper.find(".ctx-ring-btn:not(.ctx-ring-stop-btn)").exists()).toBe(false); // no competing handler
+  });
+
+  it("busy + NO ring (no provider / no usage) ⇒ standalone StopButton fallback (stop stays reachable)", async () => {
+    const noProvider = mountRing(undefined, { busy: true });
+    expect(noProvider.find(".ctx-ring").exists()).toBe(false);
+    await noProvider.get(".stop-btn").trigger("click"); // arm
+    await noProvider.get(".stop-btn").trigger("click"); // confirm
+    expect(noProvider.emitted("stop")).toHaveLength(1);
+
+    const noUsage = mountRing(metrics({ noUsage: true }), { busy: true });
+    expect(noUsage.find(".ctx-ring").exists()).toBe(false);
+    expect(noUsage.find(".stop-btn").exists()).toBe(true);
+  });
+
+  it("idle + ring ⇒ no stop affordance at all (today's plain ring, unchanged)", () => {
+    const wrapper = mountRing(metrics({}), { busy: false });
+    expect(wrapper.find(".ctx-ring-stop-btn").exists()).toBe(false);
+    expect(wrapper.find(".stop-btn").exists()).toBe(false);
+    expect(wrapper.get(".ctx-ring").attributes("data-stop")).toBeUndefined();
   });
 });

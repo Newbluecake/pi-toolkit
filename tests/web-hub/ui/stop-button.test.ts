@@ -158,14 +158,33 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     );
   });
 
-  it("ring+stop 档(宽屏)拆开为 ring 固定段(56px) + stop 段按 --fs-scale 缩放并在 70px 封顶", () => {
-    expect(rule(".composer-input:has(.ctx-ring):has(.stop-btn) textarea")).toMatch(
-      /padding-right:\s*calc\(56px \+ min\(calc\(52px \* var\(--fs-scale,\s*1\)\),\s*70px\)\)/,
-    );
+  it("ring 在场时只有 58px 一档(2026-10 合并档: 忙碌时 stop 合入圈内, 不再为 stop 预留第二段); 旧的 ring+stop 双段公式已删除", () => {
+    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*58px/);
+    // 合并后 .ctx-ring 与 .stop-btn 不会同时渲染(stop 在圈内是 .ctx-ring-stop-btn; 无 ring 时才是独立 .stop-btn)
+    expect(rule(".composer-input:has(.ctx-ring):has(.stop-btn) textarea")).toBe("");
+    expect(css).not.toMatch(/calc\(56px \+ min\(calc\(52px \* var\(--fs-scale/);
   });
 
-  it("stop-wrap 的 right 偏移按 ring 是否在场分两式: 有 ring 时贴着 ring 的固定 60px 段(不缩放); 单独出现时贴边(--sp-1, 同 ctx-ring 自己的边缘间距约定)", () => {
-    expect(rule(".composer-input:has(.ctx-ring) .stop-wrap")).toMatch(/right:\s*60px/);
+  it("合并的圈内 stop 按钮: 固定 px 图标(不跟 --fs-scale), 隐形命中区 stretch 填满 ring 槽(≥44px coarse), armed 时弧被强制 danger 且规则位于 [data-tone] 之后(同优先级靠源序胜出)", () => {
+    const btn = rule(".ctx-ring-stop-btn");
+    expect(btn).toMatch(/align-self:\s*stretch/);
+    expect(btn).toMatch(/color:\s*var\(--c-danger\)/);
+    expect(btn).not.toMatch(/var\(--fs-scale/);
+    const icon = rule(".ctx-ring-stop-btn .ctx-ring-stop-icon");
+    expect(icon).toMatch(/width:\s*24px/);
+    expect(icon).toMatch(/height:\s*24px/);
+    expect(icon).not.toMatch(/var\(--fs-scale/);
+    expect(rule(".ctx-ring-stop-btn.armed .ctx-ring-bar")).toMatch(/stroke:\s*var\(--c-danger\)/);
+    const toneIdx = css.indexOf('.ctx-ring[data-tone="danger"] .ctx-ring-bar');
+    const armedIdx = css.indexOf(".ctx-ring-stop-btn.armed .ctx-ring-bar");
+    expect(toneIdx).toBeGreaterThanOrEqual(0);
+    expect(armedIdx).toBeGreaterThan(toneIdx);
+    // 命中区宽度继承 .ctx-ring-btn 的 56px(原有锗定保持), min-height 44px
+    expect(rule(".ctx-ring-btn")).toMatch(/min-height:\s*44px/);
+  });
+
+  it("stop-wrap 只余无 ring 回退一式(贴边 --sp-1, 同 ctx-ring 自己的边缘间距约定); 有 ring 时的 right:60px 偏移已随合并删除(stop 在圈内)", () => {
+    expect(rule(".composer-input:has(.ctx-ring) .stop-wrap")).toBe("");
     expect(rule(".composer-input:not(:has(.ctx-ring)) .stop-wrap")).toMatch(/right:\s*var\(--sp-1\)/);
   });
 

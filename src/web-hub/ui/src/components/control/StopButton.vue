@@ -6,7 +6,8 @@
   (pi has no clearQueue extension surface), so the armed copy says so when `queueCount > 0`.
 -->
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { computed } from "vue";
+import { useArmedConfirm } from "../../composables/useArmedConfirm.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { StopButtonEmits, StopButtonProps } from "../../contracts.js";
 import AppIcon from "../../icons/AppIcon.vue";
@@ -15,38 +16,14 @@ const props = defineProps<StopButtonProps>();
 const emit = defineEmits<StopButtonEmits>();
 const { t } = useI18n();
 
-const ARM_MS = 4000;
-
-const armed = ref(false);
-let armTimer: ReturnType<typeof setTimeout> | undefined;
-
-function disarm(): void {
-  armed.value = false;
-  if (armTimer !== undefined) {
-    clearTimeout(armTimer);
-    armTimer = undefined;
-  }
-}
+// Two-step armed state machine — shared with ContextRing.vue's merged stop mode via
+// `useArmedConfirm` (single source for the C5 grammar).
+const { armed, trigger, onKeydown } = useArmedConfirm(() => emit("stop"));
 
 function onClick(): void {
   if (!props.busy) return;
-  if (!armed.value) {
-    armed.value = true;
-    armTimer = setTimeout(disarm, ARM_MS);
-    return;
-  }
-  disarm();
-  emit("stop");
+  trigger();
 }
-
-function onKeydown(ev: KeyboardEvent): void {
-  if (ev.key === "Escape" && armed.value) {
-    ev.stopPropagation();
-    disarm();
-  }
-}
-
-onUnmounted(disarm);
 
 const label = computed(() => (armed.value ? t("control.stopConfirm") : t("control.stop")));
 const queueNote = computed(() =>

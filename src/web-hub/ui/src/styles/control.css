@@ -93,34 +93,27 @@
 }
 
 /* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
- * no padding). `:has` keeps the component itself free of any padding logic. */
+ * no padding). `:has` keeps the component itself free of any padding logic. Single 58px slot
+ * covers BOTH states of the merged control (2026-10 user request "stop 图标放进上下文圆圈"):
+ * idle ring and busy stop-in-ring share the same 56px button — the stop icon inside is fixed
+ * px like the ring itself, so nothing here needs a second, scaled stop segment anymore. */
 .composer-input:has(.ctx-ring) textarea {
   padding-right: 58px;
 }
 
-/* Stop button inside the input (2026-10 user request): absolute, left of the ring, vertically
+/* Standalone stop button inside the input — now only the NO-RING fallback (ContextRing renders
+ * `StopButton` when no DETAIL_METRICS provider/contextUsage exists; with a ring the stop lives
+ * INSIDE it as `.ctx-ring-stop-btn` and this rule never matches). Absolute, vertically
  * centered, frameless — the armed danger state keeps its background via .stop-btn.armed.
  * fs-scale field report (2026-10-06, package 3, verifier r2): the stop icon keeps scaling with
  * `--fs-scale` off its existing 24px base (`.stop-btn .icon` below, §7.4's "2.25× area" design —
  * package 1's flat 16px pin regressed BELOW that baseline and made it look too small; package 2's
- * unbounded scale then left 0px of visible textarea text at fs=3 on a 390px phone — the ring
- * segment (56px, fixed) + an unbounded stop segment + send/attach controls simply don't fit).
+ * unbounded scale then left 0px of visible textarea text at fs=3 on a 390px phone).
  * This package caps the icon's growth (see `.stop-btn .icon` below) and gives the reserved
  * segment a matching narrow-screen-aware cap (see the `padding-right` tiers below) so a visibly
  * bigger-than-baseline icon still leaves real text room at the extreme end on a phone.
- * `.ctx-ring`'s own geometry (comment below) stays FIXED by design — only the stop segment
- * scales+caps; with both controls present the stop button still clears the ring's fixed 60px
- * segment (`right: 60px`, unchanged). Alone (no ring), it hugs the edge with the same unscaled
+ * Alone (no ring — the only case left), it hugs the edge with the same unscaled
  * `--sp-1` gap `.ctx-ring` itself uses when it's the only control. */
-.composer-input:has(.ctx-ring) .stop-wrap {
-  position: absolute;
-  right: 60px;
-  top: 0;
-  bottom: 0;
-  display: inline-flex;
-  align-items: center;
-}
-
 .composer-input:not(:has(.ctx-ring)) .stop-wrap {
   position: absolute;
   right: var(--sp-1);
@@ -137,22 +130,18 @@
   background: transparent;
 }
 
-/* textarea `padding-right` tiers (package 3, verifier r2, field report 2026-10-06): ring-only
- * 58px stays fixed (the ring never scales). Stop-only and ring+stop both scale their stop
- * segment by `--fs-scale` off the same 52px base as before, but now CAP that growth at 70px so
- * the icon's own growth (capped below at `.stop-btn .icon`) never runs away unbounded. This tier
- * only matters above the narrow-phone breakpoint (>480px, below which the `@media` block further
- * down moves both controls onto their own row and resets this to a plain `--sp-3` instead — see
- * its comment for why capping alone can't satisfy the phone's text-width floor). `56px` in the
- * ring+stop tier is the ring's own fixed segment (gap `--sp-1` + 56px button, unscaled); only the
- * trailing capped term is the stop segment. Later, more specific rules win over the ring-only
- * base (verified 0.8–3.0 — see stop-button.test.ts). */
+/* textarea `padding-right` tiers (package 3, verifier r2, field report 2026-10-06; merged
+ * ring+stop rework 2026-10): ring-present ⇒ the single fixed 58px slot above covers idle AND
+ * busy (the merged stop-in-ring icon is fixed px, part of the ring graphic — the old
+ * `:has(.ctx-ring):has(.stop-btn)` two-slot tier is gone because `.stop-btn` and `.ctx-ring`
+ * never co-render). Stop-only (the no-ring fallback) scales its segment by `--fs-scale` off
+ * the same 52px base as before, CAPPED at 70px so the icon's own growth (capped below at
+ * `.stop-btn .icon`) never runs away unbounded. This tier only matters above the narrow-phone
+ * breakpoint (>480px, below which the `@media` block further down moves the controls onto
+ * their own row and resets this to a plain `--sp-3` instead — see its comment for why capping
+ * alone can't satisfy the phone's text-width floor). */
 .composer-input:has(.stop-btn):not(:has(.ctx-ring)) textarea {
   padding-right: min(calc(52px * var(--fs-scale, 1)), 70px);
-}
-
-.composer-input:has(.ctx-ring):has(.stop-btn) textarea {
-  padding-right: calc(56px + min(calc(52px * var(--fs-scale, 1)), 70px));
 }
 
 /* Narrow phones (<=480px, verifier r2, 2026-10-06): ring(56px, fixed) + the stop button's own
@@ -160,11 +149,12 @@
  * at fs>=2 — capping the stop segment alone (above) can shave it down but can't clear >=120px /
  * >=40% real text width AND stay overlap-free at the same time (the textarea itself keeps
  * shrinking with `--fs-scale` from the composer's other controls, independent of this fix).
- * Move both controls OUT of the textarea's horizontal box onto their own row below it instead —
+ * Move the control OUT of the textarea's horizontal box onto its own row below it instead —
  * the `padding-right` reserve goes back to a plain `--sp-3`, so text gets the textarea's near-
- * full width regardless of icon size. DOM order is already textarea → StopButton → ContextRing
- * (`Composer.vue`), so `flex-wrap` alone puts them on the wrapped second row in the right order;
- * `margin-left: auto` right-aligns them there. */
+ * full width regardless of icon size. DOM order is already textarea → ContextRing (the merged
+ * ring/stop control, or the standalone StopButton fallback without a ring) (`Composer.vue`),
+ * so `flex-wrap` alone puts it on the wrapped second row; `margin-left: auto` right-aligns it
+ * there. */
 @media (max-width: 480px) {
   .composer-input {
     flex-wrap: wrap;
@@ -172,13 +162,11 @@
 
   .composer-input textarea,
   .composer-input:has(.ctx-ring) textarea,
-  .composer-input:has(.stop-btn):not(:has(.ctx-ring)) textarea,
-  .composer-input:has(.ctx-ring):has(.stop-btn) textarea {
+  .composer-input:has(.stop-btn):not(:has(.ctx-ring)) textarea {
     flex: 1 1 100%;
     padding-right: var(--sp-3);
   }
 
-  .composer-input:has(.ctx-ring) .stop-wrap,
   .composer-input:not(:has(.ctx-ring)) .stop-wrap {
     position: static;
     margin-left: auto;
@@ -186,6 +174,7 @@
 
   .composer-input .ctx-ring {
     position: static;
+    margin-left: auto;
   }
 }
 
@@ -241,6 +230,61 @@
 
 .ctx-ring[data-tone="danger"] .ctx-ring-bar {
   stroke: var(--c-danger);
+}
+
+/* Merged stop-in-ring (2026-10 user request "把 stop 图标放到上下文比例圆圈中"): while busy the
+ * ring's ENTIRE zone is the two-step stop button — the arc keeps showing context usage around
+ * the centered icon, but nothing else may intercept taps inside the zone (stop wins; the
+ * details panel never opens while busy). The button inherits `.ctx-ring-btn`'s 56px width and
+ * 44px min-height; `align-self: stretch` enlarges the INVISIBLE hit zone to the ring slot's
+ * full height so the coarse-pointer target stays ≥44px without growing the visual. Resting
+ * colour is danger — same convention as the standalone `.stop-btn` (the red square IS the
+ * affordance). The icon is FIXED px like the ring itself (part of the same graphic, immune to
+ * `--fs-scale`) — which is exactly why the single 58px textarea slot suffices at every font
+ * scale. */
+.ctx-ring-stop-btn {
+  position: relative; /* anchors the centered icon */
+  align-self: stretch;
+  color: var(--c-danger);
+}
+
+.ctx-ring-stop-btn .ctx-ring-stop-icon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 24px;
+}
+
+/* Armed (two-step confirm), per the existing `.armed` conventions MINUS the filled danger
+ * background (`.stop-btn.armed`) that would swallow the ring graphic: the icon stays danger,
+ * the arc is forced to danger regardless of the usage tone (this rule must come AFTER the
+ * `[data-tone]` rules above — equal specificity, source order wins), and a danger inset frame
+ * marks the whole zone. */
+.ctx-ring-stop-btn.armed {
+  box-shadow: inset 0 0 0 2px var(--c-danger);
+}
+
+.ctx-ring-stop-btn.armed .ctx-ring-bar {
+  stroke: var(--c-danger);
+}
+
+/* Armed queue note (K12: queued messages survive an abort) floats ABOVE the ring — same
+ * upward orientation as the details panel, the composer hugs the screen's bottom edge. */
+.ctx-ring-stop-note {
+  position: absolute;
+  bottom: calc(100% + var(--sp-1));
+  right: 0;
+  z-index: 40;
+  max-width: 240px;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
 }
 
 /* Details panel — opens UPWARD (the composer hugs the screen's bottom edge; same orientation
