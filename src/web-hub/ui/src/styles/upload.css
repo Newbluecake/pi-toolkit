@@ -14,8 +14,9 @@
  * switcher). Frameless — a bordered box inside the card's own border read as a double frame;
  * `top:0;bottom:0` stretches the hit zone to the card's full height (≥44px floor state), the
  * same trick `.ctx-ring-btn` uses, so the §4.4 coarse-pointer target survives without the old
- * standalone 44px box (the coarse width bump is gone with it — the slot math in control.css
- * assumes a 36px slot). */
+ * standalone 44px box (the coarse width bump is gone with it). Slot widths follow the
+ * 2026-10-07 「附近图标可视间隔减半」 set: attach 24px (glyph air 5px/side), ring 32px
+ * (2.5px/side) — glyph-to-glyph ≈7.5px, half of the original ≈15.5px. */
 .composer-attach {
   position: absolute;
   right: var(--sp-1); /* rightmost control when no ring renders (no DETAIL_METRICS provider) */
@@ -24,7 +25,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
+  width: 24px;
   border: 0;
   border-radius: var(--r-sm);
   background: transparent;
@@ -32,9 +33,9 @@
   cursor: pointer;
 }
 
-/* Left of the ring's fixed 36px edge slot. */
+/* Left of the ring's fixed 32px edge slot. */
 .composer-input:has(.ctx-ring) .composer-attach {
-  right: calc(var(--sp-1) + 36px);
+  right: calc(var(--sp-1) + 32px);
 }
 
 /* Left of the standalone stop button instead (the no-ring fallback). */
@@ -54,12 +55,12 @@
   margin-block: -10px;
 }
 
-/* fs-scale: the paperclip grows like every icon-sm, but CAPPED at 28px (200%) — the 36px
- * slot is fixed px, and at fs=3 an uncapped 42px glyph would overlap the neighbouring ring
- * (same runaway class `.stop-btn .icon` got capped for, control.css). */
+/* fs-scale: the paperclip grows like every icon-sm, but CAPPED at 20px — the 24px slot is
+ * fixed px, and an uncapped glyph (28px at fs=2, 42px at fs=3) would overlap the neighbouring
+ * ring (same runaway class `.stop-btn .icon` got capped for, control.css). */
 .composer-attach .icon {
-  width: min(calc(14px * var(--fs-scale, 1)), 28px);
-  height: min(calc(14px * var(--fs-scale, 1)), 28px);
+  width: min(calc(14px * var(--fs-scale, 1)), 20px);
+  height: min(calc(14px * var(--fs-scale, 1)), 20px);
 }
 
 /* 2026-10-07 ×2 (「去掉附件的边框，只保留图标自身」): hover is a COLOR-only change — the

@@ -393,11 +393,11 @@ describe("Composer.vue — input CARD: chips + ring bottom row (2026-10 user-pic
     expect(css).not.toMatch(/\.ctx-ring\s*\{[^}]*position:\s*static/);
   });
 
-  it("control.css pins: the textarea's 36px ring slot is CONSTANT — not scoped to either ring placement", () => {
+  it("control.css pins: the textarea's 32px ring slot is CONSTANT — not scoped to either ring placement", () => {
     const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/control.css"), "utf8");
     const rule = (sel: string): string =>
       new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}").exec(css)?.[1] ?? "";
-    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*36px/);
+    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*32px/);
     // No state-scoped variant may exist — the slot must not change when the row collapses
     // (text would reflow horizontally otherwise).
     expect(css).not.toMatch(/\.has-text[^,{]*textarea\s*\{[^}]*padding-right/);

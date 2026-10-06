@@ -211,13 +211,14 @@
 /* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
  * no padding). `:has` keeps the component itself free of any padding logic. CONSTANT in both
  * ring placements (bottom row when the row is expanded, mid-right overlay otherwise): the
- * 36px slot never goes away while the ring exists, so text never reflows horizontally when
- * the row collapses/expands. Single 36px slot also covers BOTH states of the merged control
+ * 32px slot never goes away while the ring exists, so text never reflows horizontally when
+ * the row collapses/expands. Single 32px slot also covers BOTH states of the merged control
  * (2026-10 user request "stop 图标放进上下文圆圈"): idle ring and busy stop-in-ring share the
- * same 36px button — the stop icon inside is fixed px like the ring itself.
- * (2026-10-06: ring 50→40px → 27px per field reports; slot 58→50→36px.) */
+ * same 32px button — the stop icon inside is fixed px like the ring itself.
+ * (2026-10-06: ring 50→40px → 27px per field reports; slot 58→50→36→32px, the last step
+ * 2026-10-07's 「附近图标可视间隔减半」 — ring air 4.5→2.5px/side.) */
 .composer-input:has(.ctx-ring) textarea {
-  padding-right: 36px;
+  padding-right: 32px;
 }
 
 /* Standalone stop button inside the input — now only the NO-RING fallback (ContextRing renders
@@ -260,28 +261,29 @@
   padding-right: min(calc(52px * var(--fs-scale, 1)), 70px);
 }
 
-/* Attach INSIDE the card (2026-10-07 「附件按钮放到上下文进度的左侧」): its fixed 36px slot
+/* Attach INSIDE the card (2026-10-07 「附件按钮放到上下文进度的左侧」): its fixed 24px slot
  * stacks left of whatever right-edge control already reserves space — same constant-slot
  * philosophy as the ring (the slot never goes away while the attach button exists, so text
- * never reflows horizontally between the collapsed/expanded row states). */
+ * never reflows horizontally between the collapsed/expanded row states). Slot widths are the
+ * 「附近图标可视间隔减半」 set: attach 24px, ring 32px. */
 .composer-input:has(.composer-attach) textarea {
-  padding-right: 40px; /* attach alone (no ring, no stop) */
+  padding-right: 28px; /* attach alone (no ring, no stop) */
 }
 
 .composer-input:has(.composer-attach):has(.ctx-ring) textarea {
-  padding-right: 76px; /* ring 36 + attach 36 + edge air */
+  padding-right: 60px; /* ring 32 + attach 24 + edge air */
 }
 
 .composer-input:has(.composer-attach):has(.stop-btn):not(:has(.ctx-ring)) textarea {
-  /* the standalone-stop tier above + attach's 40px */
-  padding-right: calc(min(calc(52px * var(--fs-scale, 1)), 70px) + 40px);
+  /* the standalone-stop tier above + attach's 28px */
+  padding-right: calc(min(calc(52px * var(--fs-scale, 1)), 70px) + 28px);
 }
 
 /* 2026-10-06 field report (main-page screenshot): the ≤480px unwrap that used to move the
  * ring/stop onto their own row below the textarea looked broken — the ring floated in dead
  * space and the send button stretched to the wrapped two-row height. The ring is back INSIDE
- * the textarea's right edge at ALL widths now: it is a fixed 36px graphic slot (padding-right
- * 36px above), so it never grows with `--fs-scale`, and the tradeoff it used to solve (text
+ * the textarea's right edge at ALL widths now: it is a fixed 32px graphic slot (padding-right
+ * 32px above), so it never grows with `--fs-scale`, and the tradeoff it used to solve (text
  * width at fs≥2 on ~230px textareas) is accepted — text wraps inside the remaining width
  * instead of the control leaving the input box. */
 
@@ -302,7 +304,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px; /* the 27px ring's slot (2026-10-06); vertical hit stays ≥44px via stretch */
+  width: 32px; /* the 27px ring's slot (36→32px, 2026-10-07 间隔减半); vertical hit stays ≥44px via stretch */
   min-height: 44px;
   margin: 0;
   padding: 0;
@@ -346,12 +348,12 @@
 /* Merged stop-in-ring (2026-10 user request "把 stop 图标放到上下文比例圆圈中"): while busy the
  * ring's ENTIRE zone is the two-step stop button — the arc keeps showing context usage around
  * the centered icon, but nothing else may intercept taps inside the zone (stop wins; the
- * details panel never opens while busy). The button inherits `.ctx-ring-btn`'s 36px width and
+ * details panel never opens while busy). The button inherits `.ctx-ring-btn`'s 32px width and
  * 44px min-height; `align-self: stretch` enlarges the INVISIBLE hit zone to the ring slot's
  * full height so the coarse-pointer target stays ≥44px without growing the visual. Resting
  * colour is danger — same convention as the standalone `.stop-btn` (the red square IS the
  * affordance). The icon is FIXED px like the ring itself (part of the same graphic, immune to
- * `--fs-scale`) — which is exactly why the single 36px textarea slot suffices at every font
+ * `--fs-scale`) — which is exactly why the single 32px textarea slot suffices at every font
  * scale. */
 .ctx-ring-stop-btn {
   position: relative; /* anchors the centered icon */
@@ -1117,14 +1119,10 @@
     min-height: 34px;
   }
 
-  /* Pin the narrow geometry even on coarse pointers: the attach button lives INSIDE the card
-   * now (2026-10-07) — its slot is the fixed 36px of the base rule, shrunk to 32px here so the
-   * phone's tighter right edge keeps text room; the hit zone stays the card's full height.
-   * The coarse block above still bumps `.composer-row` gap to sp-3 for the send button. */
-  .composer-attach {
-    width: 32px;
-  }
-
+  /* The attach button lives INSIDE the card (2026-10-07): its slot is the base rule's fixed
+   * 24px at every width (the 间隔减半 set), the hit zone the card's full height — no phone
+   * override needed. The coarse block above still bumps `.composer-row` gap to sp-3 for the
+   * send button. */
   .composer-row {
     gap: var(--sp-2);
   }
