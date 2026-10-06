@@ -183,7 +183,10 @@
 @media (max-width: 480px) {
   .wt-label {
     order: 10;
-    flex-basis: 100%;
+    /* 2026-10-06 field report (copy button stranded on its own row): the label GROWS instead
+     * of taking a full 100% basis, so the copy button shares its line (right end). */
+    flex: 1 1 auto;
+    min-width: 0;
     padding-left: calc(14px + var(--sp-2)); /* aligns under the branch column */
     white-space: normal;
     overflow-wrap: anywhere;
@@ -192,10 +195,9 @@
   }
 
   .wt-copy {
-    /* keep the copy affordance next to the label it copies, not stranded on line 1 */
     order: 11;
     margin-left: 0;
-    padding-left: calc(14px + var(--sp-2));
+    align-self: flex-start;
   }
 }
 

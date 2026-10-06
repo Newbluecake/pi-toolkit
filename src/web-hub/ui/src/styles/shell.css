@@ -112,10 +112,32 @@
   flex: 1;
 }
 
-/* 2026-10-06 field report ("设置按钮离 logout 太远"): pull the gear and sign-out into one tight
- * control cluster — the bar's sp-3 gap reads as a gulf between two icon buttons. */
+/* 2026-10-06 field reports ×2 ("设置按钮离 logout 太远", still far after the gap fix): the
+ * buttons were already adjacent — the GULF was optical: each is a 44px coarse hit box with a
+ * small centered icon. Kill the flex gap between the pair entirely and push each icon toward
+ * its sibling (gear right-aligned, logout left-aligned) so the GLYPHS sit close while the
+ * hit boxes stay 44px. */
 .topbar .settings-anchor {
-  margin-right: calc(-1 * var(--sp-2));
+  margin-right: calc(-1 * var(--sp-3));
+}
+
+.topbar .settings-anchor .btn-icon {
+  justify-content: flex-end;
+}
+
+.topbar .settings-anchor + .btn {
+  justify-content: flex-start;
+}
+
+/* 2026-10-06 field report ("登出按钮比设置按钮小"): on phones the label is hidden anyway —
+ * make the sign-out button the same square icon button as the gear (44px coarse hit box). */
+@media (max-width: 480px) {
+  .topbar .settings-anchor + .btn {
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+    /* keeps the gear→logout flex-end/flex-start icon clustering above (glyphs nearly touch) */
+  }
 }
 
 .user-chip {
