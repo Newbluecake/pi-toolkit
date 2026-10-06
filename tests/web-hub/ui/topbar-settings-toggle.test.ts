@@ -3,7 +3,13 @@ import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import TopBar from "../../../src/web-hub/ui/src/components/shell/TopBar.vue";
 
-/** Gear = toggle (user 2026-10): second click while `#/settings` shows closes it. */
+/**
+ * Settings gear toggle (revised 2026-10 field report: settings is a floating panel, not a
+ * route — opening it no longer unmounts the session view behind it). The gear is a plain
+ * `aria-expanded`/`aria-controls` toggle button that mounts/unmounts `SettingsOverlay.vue`;
+ * an old `#/settings` deep link (or hash edited while the app is already running) opens the
+ * panel and is immediately replaced with `#/`.
+ */
 const baseProps = { conn: "open", hubVersion: null, canSignOut: false } as const;
 
 function setHash(h: string): void {
@@ -17,81 +23,77 @@ afterEach(() => {
 });
 
 describe("TopBar settings gear toggle", () => {
-  it("first click (not on settings) lets the href navigate and marks no aria-current", async () => {
-    setHash("#/agent/a1");
+  it("is a plain button (not a link) — no more href-based navigation", () => {
     const wrapper = mount(TopBar, { props: baseProps });
-    const gear = wrapper.get("a.settings-link");
-    expect(gear.attributes("aria-current")).toBeUndefined();
-    const ev = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
-    gear.element.dispatchEvent(ev);
-    expect(ev.defaultPrevented).toBe(false);
+    const gear = wrapper.get(".settings-link");
+    expect(gear.element.tagName).toBe("BUTTON");
+    expect(gear.attributes("href")).toBeUndefined();
     wrapper.unmount();
   });
 
-  it("second click after opening in-app goes history.back()", async () => {
-    setHash("#/agent/a1");
+  it("starts closed, aria-expanded false, no panel mounted", () => {
     const wrapper = mount(TopBar, { props: baseProps });
-    const gear = wrapper.get("a.settings-link");
-    gear.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    const gear = wrapper.get(".settings-link");
+    expect(gear.attributes("aria-expanded")).toBe("false");
+    expect(gear.attributes("aria-controls")).toBe("settings-panel");
+    expect(wrapper.find("#settings-panel").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("click opens the panel (aria-expanded true, panel mounted); click again closes it", async () => {
+    const wrapper = mount(TopBar, { props: baseProps });
+    const gear = wrapper.get(".settings-link");
+    await gear.trigger("click");
+    expect(gear.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find("#settings-panel").exists()).toBe(true);
+    await gear.trigger("click");
+    expect(gear.attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find("#settings-panel").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("the panel's own close emit closes it and aria-expanded flips back to false", async () => {
+    const wrapper = mount(TopBar, { props: baseProps });
+    await wrapper.get(".settings-link").trigger("click");
+    expect(wrapper.find("#settings-panel").exists()).toBe(true);
+    await wrapper.find("button.settings-close").trigger("click");
+    expect(wrapper.find("#settings-panel").exists()).toBe(false);
+    expect(wrapper.get(".settings-link").attributes("aria-expanded")).toBe("false");
+    wrapper.unmount();
+  });
+
+  it("deep-linked #/settings: panel opens on mount and the hash is replaced with #/", async () => {
     setHash("#/settings");
-    await wrapper.vm.$nextTick();
-    expect(gear.attributes("aria-current")).toBe("page");
-    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    const ev = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
-    gear.element.dispatchEvent(ev);
-    expect(ev.defaultPrevented).toBe(true);
-    expect(back).toHaveBeenCalledTimes(1);
-    wrapper.unmount();
-  });
-
-  it("deep-linked #/settings: click replaces to #/ instead of leaving the app", async () => {
-    setHash("#/settings");
+    const replace = vi.spyOn(window.history, "replaceState");
     const wrapper = mount(TopBar, { props: baseProps });
-    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    const replace = vi.spyOn(window.location, "replace").mockImplementation(() => {});
-    const ev = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
-    wrapper.get("a.settings-link").element.dispatchEvent(ev);
-    expect(ev.defaultPrevented).toBe(true);
-    expect(back).not.toHaveBeenCalled();
-    expect(replace).toHaveBeenCalledWith("#/");
+    expect(wrapper.get(".settings-link").attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find("#settings-panel").exists()).toBe(true);
+    expect(replace).toHaveBeenCalledWith(null, "", "#/");
     wrapper.unmount();
   });
 
-  it("modifier / non-left clicks are never intercepted, even on settings", () => {
-    setHash("#/settings");
-    const wrapper = mount(TopBar, { props: baseProps });
-    const replace = vi.spyOn(window.location, "replace").mockImplementation(() => {});
-    const gear = wrapper.get("a.settings-link").element;
-    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
-      const ev = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ...init });
-      gear.dispatchEvent(ev);
-      expect(ev.defaultPrevented).toBe(false);
-    }
-    expect(replace).not.toHaveBeenCalled();
-    wrapper.unmount();
-  });
-
-  it("matches the router exactly: #/settings/foo is not the settings page", async () => {
+  it("matches the router exactly: #/settings/foo never opens the panel on mount", () => {
     setHash("#/settings/foo");
     const wrapper = mount(TopBar, { props: baseProps });
-    expect(wrapper.get("a.settings-link").attributes("aria-current")).toBeUndefined();
+    expect(wrapper.get(".settings-link").attributes("aria-expanded")).toBe("false");
     wrapper.unmount();
   });
 
-  it("leaving settings by other means resets the in-app flag (next close replaces)", async () => {
-    setHash("#/agent/a1");
+  it("hash becoming #/settings WHILE the app is already running opens the panel and replaces the hash", async () => {
     const wrapper = mount(TopBar, { props: baseProps });
-    const gear = wrapper.get("a.settings-link");
-    gear.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    const replace = vi.spyOn(window.history, "replaceState");
     setHash("#/settings");
-    setHash("#/agent/a1"); // left via SettingsView's own back button
-    setHash("#/settings"); // re-entered without the gear (e.g. browser forward)
     await wrapper.vm.$nextTick();
-    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    const replace = vi.spyOn(window.location, "replace").mockImplementation(() => {});
-    gear.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-    expect(back).not.toHaveBeenCalled();
-    expect(replace).toHaveBeenCalledWith("#/");
+    expect(wrapper.get(".settings-link").attributes("aria-expanded")).toBe("true");
+    expect(replace).toHaveBeenCalledWith(null, "", "#/");
+    wrapper.unmount();
+  });
+
+  it("a hashchange to a non-settings hash never opens the panel", async () => {
+    const wrapper = mount(TopBar, { props: baseProps });
+    setHash("#/agent/a1");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get(".settings-link").attributes("aria-expanded")).toBe("false");
     wrapper.unmount();
   });
 });

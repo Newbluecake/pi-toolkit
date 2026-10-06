@@ -1,13 +1,21 @@
 <!--
   Top bar: brand, connection pill, hub version, read-only/Control chip, settings entry (gear),
   sign out (vue-plan.md v2.1 §3.2, §7, §5.2 — P3 exclusive, `components/shell/**`; Control chip
-  per control-plan.md v2.1 §7.4 — C5). 2026-10 (user-decided): the theme dropdown and the
-  font-size popover moved into the standalone `#/settings` page — the bar now carries a single
-  gear link there (a real hash navigation, so browser back returns). `TopBarProps` is frozen
-  with no `user`/username field (`contracts.ts`), so — unlike the static mockup, which also
-  showed a `.user-chip` — this build has no username slot to render; §7's connection pill
-  states are otherwise ported verbatim (states.html: `connecting` = spinning loader icon,
-  `open`/`reconnecting` = the same live dot, `auth` = an unlock icon with no dot).
+  per control-plan.md v2.1 §7.4 — C5). `TopBarProps` is frozen with no `user`/username field
+  (`contracts.ts`), so — unlike the static mockup, which also showed a `.user-chip` — this build
+  has no username slot to render; §7's connection pill states are otherwise ported verbatim
+  (states.html: `connecting` = spinning loader icon, `open`/`reconnecting` = the same live dot,
+  `auth` = an unlock icon with no dot).
+
+  Settings is a floating panel, not a route (user field report 2026-10: "settings 那个页面应该是
+  悬浮的，现在点击 setting 会导致会话页面消失，不是很合理" — a standalone `#/settings` page used
+  to unmount the whole session view underneath it). The gear is a plain toggle button —
+  `aria-expanded`/`aria-controls` instead of the retired `href="#/settings"` + `aria-current`
+  history dance — that mounts/unmounts `SettingsOverlay.vue` inside the `.settings-anchor` span
+  right after it; `shell.css` anchors the desktop popover to that span with plain CSS (no
+  geometry math). An old `#/settings` deep link (or anyone setting that hash while the app is
+  already running) is translated into "open the panel, replace the hash with `#/`" the moment it
+  is observed — `#/settings` itself is never a route `DashboardView` has to render around.
 
   C5: the chip switches on the hub's negotiated control plane (`HUB_CTX.state.control`) —
   `Read-only` when off, a warn-coloured `Control` button when on; clicking it expands the
@@ -24,6 +32,7 @@ import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import { parseRouteHash } from "../../composables/useHashRoute.js";
+import SettingsOverlay from "./SettingsOverlay.vue";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -50,29 +59,34 @@ function onControlChipClick(): void {
   if (env) env.noticeExpanded.value = !env.noticeExpanded.value;
 }
 
-// Gear = toggle (user 2026-10): a second click while `#/settings` is showing closes it, back to
-// where the user came from. `openedInApp` records whether THIS gear opened it (so in-app history
-// has an entry to pop); a direct deep link to `#/settings` has none ⇒ replace to `#/` instead of
-// `history.back()` leaving the app. Self-contained — `TopBarProps` stays untouched.
-const onSettings = ref(isSettingsHash());
-let openedInApp = false;
-function isSettingsHash(): boolean {
-  return parseRouteHash(window.location.hash).name === "settings"; // same rule as the router
+// Settings panel (floating, not a route): `open` drives SettingsOverlay's mount/unmount
+// directly. `#/settings` is only ever a transitional signal — whenever it is observed (at
+// startup, or via a later hashchange) it is immediately replaced with `#/` so no other part of
+// the app (DashboardView included) ever has to special-case that hash.
+function isSettingsHash(hash: string): boolean {
+  return parseRouteHash(hash).name === "settings"; // same rule as the router
 }
+
+const initialSettingsOpen = isSettingsHash(window.location.hash);
+if (initialSettingsOpen) window.history.replaceState(null, "", "#/");
+
+const open = ref(initialSettingsOpen);
+const gearEl = ref<HTMLButtonElement | null>(null);
+
 function onHashChange(): void {
-  onSettings.value = isSettingsHash();
-  if (!onSettings.value) openedInApp = false;
+  if (!isSettingsHash(window.location.hash)) return;
+  open.value = true;
+  window.history.replaceState(null, "", "#/");
 }
-function onSettingsClick(ev: MouseEvent): void {
-  if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
-  if (!onSettings.value) {
-    openedInApp = true; // the href navigation itself proceeds
-    return;
-  }
-  ev.preventDefault();
-  if (openedInApp) window.history.back();
-  else window.location.replace("#/");
+
+function onToggle(): void {
+  open.value = !open.value;
 }
+
+function onClose(): void {
+  open.value = false;
+}
+
 onMounted(() => window.addEventListener("hashchange", onHashChange));
 onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 </script>
@@ -108,16 +122,22 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 
     <span class="topbar-spacer"></span>
 
-    <a
-      class="btn btn-ghost btn-icon settings-link"
-      href="#/settings"
-      :aria-label="t('settings.title')"
-      :title="t('settings.title')"
-      :aria-current="onSettings ? 'page' : undefined"
-      @click="onSettingsClick"
-    >
-      <AppIcon name="gear" />
-    </a>
+    <span class="settings-anchor">
+      <button
+        ref="gearEl"
+        type="button"
+        class="btn btn-ghost btn-icon settings-link"
+        :aria-label="t('settings.title')"
+        :title="t('settings.title')"
+        aria-haspopup="dialog"
+        :aria-expanded="open"
+        aria-controls="settings-panel"
+        @click="onToggle"
+      >
+        <AppIcon name="gear" />
+      </button>
+      <SettingsOverlay v-if="open" :anchor-el="gearEl" @close="onClose" />
+    </span>
 
     <button
       v-if="canSignOut"

@@ -1,7 +1,10 @@
 <!--
-  Standalone settings page (`#/settings` — user-decided 2026-10): every preference that used to
-  live behind top-bar popovers (theme dropdown, font-size slider) or the composer (per-message
-  delivery switch) now has one home here. Three cards:
+  Settings panel content (floating panel, revised 2026-10 field report: the previous standalone
+  `#/settings` route unmounted the whole session view when opened — this content now lives
+  inside `shell/SettingsOverlay.vue`'s desktop popover / mobile bottom sheet instead, so the
+  session underneath stays mounted). Every preference that used to live behind top-bar popovers
+  (theme dropdown, font-size slider) or the composer (per-message delivery switch) has one home
+  here. Three cards:
 
     1. Theme — three radio rows (system / light / dark) driving `useTheme`'s `pref`/`setPref`
        (same `pwh_theme` persistence the retired `ThemeToggle.vue` used).
@@ -12,13 +15,11 @@
        the composer reads the same key for busy sends (Alt+Enter still flips per message).
 
   Self-wired (`browserLocalStorage()` + `document`), exactly like the retired toggles — no new
-  props, so the frozen `contracts.ts` surface stays untouched. Back navigation (field report:
-  returning from settings must land on the session the user came FROM, not the dashboard
-  list): the back button only emits `back`; the owner (`DashboardView`, which mounts this
-  page) applies its proven `onBack` — `history.back()` when the settings entry was pushed on
-  top of in-app history (gear click from an agent detail ⇒ back to that agent), a
-  `location.replace("#/")` fallback when a direct `#/settings` deep link has nothing to
-  return to.
+  props, so the frozen `contracts.ts` surface stays untouched. The header's × button only emits
+  `close` — there is no "back" destination to return to any more (the panel floats over
+  whatever the session view already showed); the owner (`SettingsOverlay.vue`) decides how to
+  tear the panel down (unmount for the desktop popover, `PickerSheet`'s own close path on
+  mobile). `settings-panel-title` is the `aria-labelledby` target the desktop popover points at.
 -->
 <script setup lang="ts">
 import { computed } from "vue";
@@ -39,7 +40,7 @@ import type { ThemePref } from "../../types.js";
 import "../../styles/settings.css";
 
 const { t } = useI18n();
-const emit = defineEmits<{ back: [] }>();
+const emit = defineEmits<{ close: [] }>();
 
 const theme = useTheme({
   storage: browserLocalStorage(),
@@ -79,16 +80,16 @@ function onRangeChange(ev: Event): void {
   <div class="settings-page">
     <div class="settings-inner">
       <header class="settings-head">
+        <h2 id="settings-panel-title" class="settings-title">{{ t("settings.title") }}</h2>
         <button
           type="button"
-          class="btn btn-ghost settings-back"
-          :aria-label="t('settings.back')"
-          @click="emit('back')"
+          class="btn btn-ghost btn-icon settings-close"
+          :aria-label="t('settings.close')"
+          :title="t('settings.close')"
+          @click="emit('close')"
         >
-          <AppIcon name="chev-left" />
-          <span aria-hidden="true">{{ t("settings.back") }}</span>
+          <AppIcon name="x" />
         </button>
-        <h2 class="settings-title">{{ t("settings.title") }}</h2>
       </header>
 
       <section class="settings-card" :aria-label="t('settings.themeSection')">

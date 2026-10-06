@@ -1,12 +1,16 @@
 /*
- * pi web-hub — settings page (user-decided 2026-10: theme / font size / default delivery mode
- * moved off the top bar and composer into a standalone `#/settings` route). Imported by
- * `components/shell/SettingsView.vue` only (late-package precedent: `control/Composer.vue`
- * imports `upload.css` the same way). Cards use the existing tokens (`--c-surface` /
- * `--c-border` / `--r-md` / `--sp-*`); coarse-pointer interactive targets are ≥44px.
+ * pi web-hub — settings panel content (revised 2026-10 field report: moved off the standalone
+ * `#/settings` route into a floating panel — a desktop popover anchored under the top bar's
+ * gear, a near-full bottom sheet on phones — rendered over the session view, which stays
+ * mounted underneath; see `shell/SettingsOverlay.vue` and shell.css's `.settings-anchor`/
+ * `.settings-panel` for the floating chrome itself). Imported by `components/shell/
+ * SettingsView.vue` only (late-package precedent: `control/Composer.vue` imports `upload.css`
+ * the same way). Cards use the existing tokens (`--c-surface` / `--c-border` / `--r-md` /
+ * `--sp-*`); coarse-pointer interactive targets are ≥44px.
  */
 
 .settings-page {
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
   background: var(--c-bg);
@@ -29,11 +33,14 @@
   gap: var(--sp-3);
 }
 
-.settings-back {
+.settings-close {
   flex: none;
+  margin-left: auto;
 }
 
 .settings-title {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: var(--fs-lg);
   font-weight: var(--fw-semibold);
@@ -153,7 +160,7 @@
   .settings-option,
   .settings-font input[type="range"],
   .settings-font .btn,
-  .settings-back {
+  .settings-close {
     min-height: 44px;
     min-width: 44px;
   }

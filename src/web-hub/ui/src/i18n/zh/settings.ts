@@ -8,7 +8,7 @@ type Messages<T> = { [K in keyof T]: string };
 
 const settings = {
   title: "设置",
-  back: "返回",
+  close: "关闭",
   themeSection: "主题",
   fontSection: "字号",
   deliverSection: "默认投递方式",

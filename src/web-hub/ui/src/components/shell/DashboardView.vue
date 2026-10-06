@@ -19,6 +19,17 @@
   agent closes it), aligned with the fleet drawer's 768–1279 overlay precedent
   (docs/dev/web-hub-fleet-drawer/plan.md). The drawer toggle itself lives in `DetailHeader.vue`,
   wired through the provided `SIDEBAR_DRAWER` context (frozen `contracts.ts` untouched).
+
+  Settings is NOT one of the routes this component ever renders around (field report 2026-10:
+  `#/settings` used to be a fourth, full-width branch here that replaced this entire layout —
+  the moment the user opened settings, the session view it came from was unmounted). It is now
+  a floating panel owned by `TopBar.vue`'s gear toggle (`shell/SettingsOverlay.vue`), rendered
+  ON TOP of whatever this component already shows; `TopBar` also intercepts the `#/settings`
+  hash itself (at startup and on every `hashchange`) and replaces it with `#/` before
+  `useHashRoute.ts`'s own listener ever resolves it into a `route` prop — so `route.name ===
+  "settings"` is not a value this component needs to special-case; `Route`'s `"settings"`
+  variant stays in `types.ts`/`useHashRoute.ts` purely so that transitional hash can still be
+  *parsed* (`parseRouteHash`'s existing behavior, unchanged) on the way to being redirected away.
 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
@@ -31,7 +42,6 @@ import { toAgentCardView } from "../agents/agentCardModel.js";
 import AgentList from "../agents/AgentList.vue";
 import AgentDetail from "../detail/AgentDetail.vue";
 import EmptyState from "./EmptyState.vue";
-import SettingsView from "./SettingsView.vue";
 import { SIDEBAR_DRAWER } from "./sidebarDrawer.js";
 
 const props = defineProps<DashboardViewProps>();
@@ -182,14 +192,7 @@ function onLoadOlder(agentKey: string): void {
 </script>
 
 <template>
-  <!-- settings route (user-decided 2026-10): full-width standalone page in EVERY band — the
-       list/detail split below is skipped entirely, so the preferences stay reachable one
-       handed on phones and never share the pane with an agent detail. The back button rides
-       the same `onBack` as the agent detail's (field report: returning from settings must
-       restore the session the user came from — `history.back()` when in-app history exists,
-       `location.replace("#/")` only for a direct deep link with nothing to return to). -->
-  <SettingsView v-if="route.name === 'settings'" @back="onBack" />
-  <div v-else class="layout">
+  <div class="layout">
     <!-- list: full-width page on the list route of every single-view band, permanent column in
          the ≥1025 split, overlay drawer (`.sidebar-drawer` + scrim) in the 481–1024 mid band -->
     <AgentList

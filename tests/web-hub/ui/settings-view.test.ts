@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 /**
- * `shell/SettingsView.vue` (user-decided 2026-10): the standalone `#/settings` page — theme
- * radio rows (`useTheme`), font-size slider (`useFontScale`), and the composer's default
- * delivery mode (`useDeliverDefault`, `pwh_deliver`). Also covers:
+ * `shell/SettingsView.vue` (floating panel content, revised 2026-10 field report: settings is
+ * no longer the standalone `#/settings` page — it is a panel floated over the session view by
+ * `shell/SettingsOverlay.vue`) — theme radio rows (`useTheme`), font-size slider
+ * (`useFontScale`), and the composer's default delivery mode (`useDeliverDefault`,
+ * `pwh_deliver`). Also covers:
  *
  *  - the `theme-init.js` early-boot font-scale half (moved here from the retired
  *    `font-scale-toggle.test.ts`): a persisted in-range `pwh_fontscale` must reach `<html>`'s
@@ -12,7 +14,7 @@
  *    half — computed style in a real browser — is asserted by the playwright screenshot pass;
  *    here we pin the stylesheet declaration itself, same source-pinning precedent as
  *    `hash-route.test.ts`'s App.vue wiring pin);
- *  - the TopBar gear entry that replaced the two retired toggles.
+ *  - the TopBar gear toggle that mounts/unmounts the panel.
  */
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -194,24 +196,26 @@ describe("SettingsView.vue — default delivery section", () => {
 });
 
 describe("SettingsView.vue — navigation", () => {
-  it("back button only emits `back` — the owner (DashboardView) decides history.back vs #/ fallback", async () => {
+  it("close button only emits `close` — the owner (SettingsOverlay/TopBar) decides how to tear the panel down", async () => {
     const w = mountSettings();
-    const back = w.find("button.settings-back");
-    expect(back.exists()).toBe(true);
-    await back.trigger("click");
-    expect(w.emitted("back")).toHaveLength(1);
+    const close = w.find("button.settings-close");
+    expect(close.exists()).toBe(true);
+    await close.trigger("click");
+    expect(w.emitted("close")).toHaveLength(1);
   });
 });
 
-describe("TopBar settings entry (theme/font toggles retired 2026-10)", () => {
+describe("TopBar settings entry (floating panel, revised 2026-10)", () => {
   const baseProps = { conn: "open", hubVersion: null, canSignOut: false } as const;
 
-  it("gear link navigates to #/settings with an i18n aria-label; old toggles gone", () => {
+  it("gear is a toggle button with an i18n aria-label; old href/toggles gone", () => {
     const wrapper = mount(TopBar, { props: baseProps });
     mounted.push(wrapper);
-    const gear = wrapper.find("a.settings-link");
+    const gear = wrapper.find("button.settings-link");
     expect(gear.exists()).toBe(true);
-    expect(gear.attributes("href")).toBe("#/settings");
+    expect(gear.attributes("href")).toBeUndefined();
+    expect(gear.attributes("aria-expanded")).toBe("false");
+    expect(gear.attributes("aria-controls")).toBe("settings-panel");
     expect(gear.attributes("aria-label")).toBe("Settings");
     expect(gear.find("use").attributes("href")).toBe("#i-gear");
     expect(wrapper.find(".theme-trigger").exists()).toBe(false);

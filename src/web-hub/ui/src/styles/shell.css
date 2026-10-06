@@ -120,14 +120,40 @@
   font-size: var(--fs-sm);
 }
 
-/* theme dropdown / font-size popover: RETIRED 2026-10 (user-decided) — both controls moved
- * into the standalone settings page (`#/settings`); their styles live in `settings.css`. The
- * top bar now carries a single gear link (`.settings-link`, primitives' `.btn-icon`). */
+/* Settings gear + floating panel anchor (revised 2026-10 field report: the previous standalone
+ * `#/settings` route unmounted the whole session view behind it — settings is now a panel that
+ * floats ON TOP of it). `.settings-anchor` wraps just the gear button so the desktop popover
+ * (`.settings-panel`, mounted by `shell/SettingsOverlay.vue`) can be positioned purely with CSS,
+ * right-aligned under the gear, with no JS geometry measurement. On ≤767px `SettingsOverlay`
+ * renders the mobile bottom sheet instead (Teleport'd to `<body>` by `control/PickerSheet.vue`,
+ * unrelated to this anchor), so `.settings-panel` only ever exists in the DOM at ≥768px. */
+.settings-anchor {
+  position: relative;
+  display: inline-flex;
+}
 
-/* gear while `#/settings` is showing: pressed look — a second click closes the page */
-.settings-link[aria-current="page"] {
+/* pressed look while the panel is open — aria-expanded replaces the retired aria-current
+ * ("page") the old `#/settings` route used. */
+.settings-link[aria-expanded="true"] {
   background: var(--c-primary-soft);
   color: var(--c-primary);
+}
+
+.settings-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40; /* popover layer — same tier as `control/PickerSheet.vue`'s `.picker-scrim` */
+  display: flex;
+  flex-direction: column;
+  width: min(400px, calc(100vw - 24px));
+  max-height: calc(100dvh - var(--topbar-h) - 24px);
+  overflow: hidden;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  outline: none;
 }
 
 .banners {
