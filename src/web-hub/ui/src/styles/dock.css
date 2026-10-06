@@ -37,10 +37,22 @@
 }
 
 .dock-actions {
-  margin-left: auto;
+  /* Floating overlay above the dock's top-right at ALL widths (2026-10-07 user request
+   * 「电脑模式下的最新x条消息也应该像手机模式一样展示」 — was the ≤767px-only placement):
+   * it floats over the transcript's tail, never takes layout space in the dock row, and
+   * keeps its own ≥44px hit box. Nothing else ever renders in `.dock-actions`, so dropping
+   * the in-flow `margin-left: auto` placement costs nothing. */
+  position: absolute;
+  right: max(var(--sp-3), env(safe-area-inset-right));
+  bottom: calc(100% + var(--sp-2));
+  z-index: 20; /* above the transcript, below drawers/overlays (30+) */
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+.dock-actions .jump-latest {
+  box-shadow: var(--shadow-3);
 }
 
 .jump-latest .badge-new {
@@ -55,24 +67,6 @@
 
 /* switch (follow toggle): RETIRED 2026-10 — DetailDock no longer renders it (the transcript's
  * auto-follow is symmetric; jump-latest covers the manual case). */
-
-/* Narrow phones (2026-10-06 field report): an inline jump-latest pill in the dock row crushes
- * the composer (input + send squeezed to slivers). Overlay it above the dock's top-right
- * instead — it floats over the transcript's tail, never takes layout space, and keeps its
- * own ≥44px hit box. ≥768px keeps the in-flow placement (there's room). */
-@media (max-width: 767px) {
-  .dock-actions {
-    position: absolute;
-    right: max(var(--sp-3), env(safe-area-inset-right));
-    bottom: calc(100% + var(--sp-2));
-    z-index: 20; /* above the transcript, below drawers/overlays (30+) */
-    margin-left: 0;
-  }
-
-  .dock-actions .jump-latest {
-    box-shadow: var(--shadow-3);
-  }
-}
 
 @media (min-width: 481px) {
   .dock .readonly .long {
