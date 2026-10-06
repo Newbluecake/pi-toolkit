@@ -306,7 +306,7 @@ describe("DetailHeader.vue — ≤480px metrics fold (todo #7)", () => {
 });
 
 // verify:detail-header-cost-merge P1 ②: the whole summary-row family (`.session-sum` /
-// `.todo-sum` / `.wt-sum` / `.metrics-summary`) shares a 40px default min-height (36px under
+// `.todo-sum` / `.wt-sum` / `.metrics-summary`) shares a 20px default min-height (16px under
 // `pointer: coarse`) so the cost row never reads shorter/taller than its siblings in the same
 // info stack — asserted straight off the real stylesheets (component mounts can't see CSS).
 describe("summary-row touch target parity (verify:detail-header-cost-merge P1 ②)", () => {
@@ -316,14 +316,14 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 �
     return m?.[0] ?? "";
   };
 
-  it("default (non-coarse) min-height is 40px for .session-sum / .metrics-summary (detail.css), .todo-sum (todo.css), .wt-sum (worktrees.css)", () => {
+  it("default (non-coarse) min-height is 20px for .session-sum / .metrics-summary (detail.css), .todo-sum (todo.css), .wt-sum (worktrees.css)", () => {
     const detailCss = read("../../../../src/web-hub/ui/src/styles/detail.css");
     const todoCss = read("../../../../src/web-hub/ui/src/styles/todo.css");
     const wtCss = read("../../../../src/web-hub/ui/src/styles/worktrees.css");
-    expect(rule(detailCss, ".session-sum")).toMatch(/min-height:\s*40px/);
-    expect(rule(detailCss, ".metrics-summary")).toMatch(/min-height:\s*40px/);
-    expect(rule(todoCss, ".todo-sum")).toMatch(/min-height:\s*40px/);
-    expect(rule(wtCss, ".wt-sum")).toMatch(/min-height:\s*40px/);
+    expect(rule(detailCss, ".session-sum")).toMatch(/min-height:\s*20px/);
+    expect(rule(detailCss, ".metrics-summary")).toMatch(/min-height:\s*20px/);
+    expect(rule(todoCss, ".todo-sum")).toMatch(/min-height:\s*20px/);
+    expect(rule(wtCss, ".wt-sum")).toMatch(/min-height:\s*20px/);
   });
 
   it("`@media (pointer: coarse)` bumps every one of them to 16px (2026-10-06 compaction ×5)", () => {

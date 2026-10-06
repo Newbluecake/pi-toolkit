@@ -28,8 +28,8 @@
 .detail-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-4) var(--sp-3);
+  gap: 2px; /* ×1/4 (2026-10-06 desktop field report, red-box row gaps) */
+  padding: var(--sp-1) var(--sp-4);
   background: var(--c-surface);
   border-bottom: 1px solid var(--c-border);
 }
@@ -84,7 +84,7 @@
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
-  min-height: 40px;
+  min-height: 20px; /* desktop ×1/4 compaction (2026-10-06) */
   margin: 0 -6px;
   padding: 0 6px;
   border-radius: var(--r-sm);
@@ -192,7 +192,7 @@
   gap: var(--sp-2);
   width: 100%;
   min-width: 0;
-  min-height: 40px;
+  min-height: 20px; /* desktop ×1/4 compaction (2026-10-06) */
   margin: 0 -6px;
   padding: 0 6px;
   border: 0;

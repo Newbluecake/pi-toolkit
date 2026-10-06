@@ -19,7 +19,7 @@
   gap: var(--sp-2);
   width: 100%;
   min-width: 0;
-  min-height: 40px;
+  min-height: 20px; /* desktop ×1/4 compaction (2026-10-06) */
   margin: 0 -6px;
   padding: 0 6px;
   border: 0;
