@@ -165,3 +165,41 @@ hook 对 `reason === "threshold" | "overflow"` 只在 `pendingHandoff` **新鲜*
 `tests/tools/switch-context-tool.test.ts`、`tests/integration/compact-hint-wiring.test.ts` 新增
 “switch_context mode” 块（demand → 回落、handoff 在途不抢、计数归零、forceDemandTurns=0 等价旧行为、
 文案路由、buildSessionStack 映射），共 3035 个用例全绿。
+
+## 8. 在役 skill 提示
+
+switch_context 丢弃历史后，本段读过的 SKILL.md 正文随之丢失；系统提示里只永久保留 skill 清单与路径
+（正文不会回来），新上下文常常忘记重新 read。为此机械附录在文件清单**之前**多输出一行强提示
+（`src/context-switch/skills.ts`）：
+
+```
+- 在役 skill（正文已随切换丢失；继续前先重新 read 这些 SKILL.md）：
+  - dev-flow — /home/u/.agents/skills/dev-flow/SKILL.md
+```
+
+识别有三种来源，合并后按 name 去重（保留首次出现）：
+
+1. **本段读/改过的 `*/SKILL.md`**：compact 模式取自本次压缩事件携带的
+   `CompactionPreparation.fileOps`（read/written/edited）；boundary 模式扫被丢弃区间
+   （`[dropFromIdx, dropToIdx]`）内的 assistant 工具调用。name 优先 frontmatter `name`
+   字段——读取用 openSync/readSync 只读头部 8 KiB（`MAX_SKILL_SNIFF_BYTES`，不整文载入），
+   读不到或解析不出 name 时静默回退**父目录名**。
+2. **pi 展开 `/skill:xxx` 生成的 user 消息块**：只匹配被丢弃范围内 user 消息的
+   `<skill name="…" location="…">` 开头标签（与 pi `parseSkillBlock` 的头部正则一致）；
+   compact 模式扫 `messagesToSummarize`，boundary 模式扫同一被丢弃区间的 user 消息。
+3. **`switch_context` 新可选参数 `skills?: string[]`**（模型自报）：≤8 项、每项 ≤512 字符
+   （typebox schema 同限），名字或 SKILL.md 路径；路径同样走来源①的 frontmatter 解析。
+   单条截断发生在路径判定之前——超长路径截断后不再以 `/SKILL.md` 结尾，退化为裸名字处理。
+
+边界与规则：
+
+- **只扫描本次被丢弃的范围**（compact：本次 fileOps + `messagesToSummarize`；boundary：被丢弃
+  区间），不看系统提示的 `<available_skills>` 清单（常驻提示，正文本就不在其中），也不看保留的
+  历史（keep_recent 保留段里可见的 skill 并未丢失）。
+- **只提示、不搬正文**：附录绝不包含 SKILL.md 正文；已在 skill 行列出 location 的 SKILL.md
+  不再重复出现在「本段读过（未改）的文件」清单里。
+- **上限与清洗**：三种来源的 name/location 统一经 `sanitizeSkillRef` 清洗——压缩空白、去
+  C0/C1 控制字符（含 ANSI ESC）、name ≤80 / location ≤512 截断（加 `…`），name 清洗后为空
+  则整条丢弃；附录最多列 8 条（超出写「…另 N 个」）。
+- **无 skill 时附录字节不变**：未识别到任何来源且 `skills` 缺省/为空时，`renderAppendix`
+  输出与引入本特性前逐字节一致（`tests/context-switch/handoff.test.ts` 钉住）。

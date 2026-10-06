@@ -147,7 +147,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   (`session_before_compact` returns `{ compaction }` so pi skips its summarizer and uses the model's
   text verbatim; `firstKeptEntryId` is pi's cut point, or a sentinel that drops everything before it
   for `keep_recent:false`), `session-facts.ts` (live runs / bash jobs / open todos / session file —
-  every port degrades silently). Tool surface: `src/tools/switch-context-tool.ts`. Design:
+  every port degrades silently). The mechanical appendix also carries an "in-service skills" reminder
+  (`skills.ts`): SKILL.md files touched or `/skill:xxx`-expanded within the dropped range (plus a bounded
+  optional `skills` param) are listed for re-reading — never injected — and the appendix stays
+  byte-identical when none are found. Tool surface: `src/tools/switch-context-tool.ts`. Design:
   `docs/dev/context-switch/context-switch-plan.md`. **Child-session switch_context** (child-context-switch
   plan §2/§3, `src/context-switch/child.ts` + `capability.ts`): every non-consult child run is granted
   `switch_context` (turn_end handler commits a boundary draft on top of `event.entries`), gated by a

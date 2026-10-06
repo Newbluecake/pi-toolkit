@@ -4,10 +4,12 @@ import {
   MAX_KEY_FILES,
   MAX_KEY_FILE_CHARS,
   MAX_HANDOFF_CHARS,
+  MAX_APPENDIX_SKILLS,
   composeHandoff,
   fileListsFromFileOps,
   renderAppendix,
   renderHandoffCore,
+  skillBlocksFromBranch,
   validateHandoff,
 } from "../../src/context-switch/handoff.js";
 
@@ -143,5 +145,78 @@ describe("context-switch/handoff", () => {
     // 无附录时不产生空的分隔线。
     const bare = composeHandoff("CORE", {});
     expect(bare).toBe("CORE");
+  });
+
+  it("renders no skills line and stays byte-identical to the pre-skills appendix when skills is absent/empty", () => {
+    const base = {
+      sessionFile: "/tmp/s.jsonl",
+      tokensBefore: 123_400,
+      modifiedFiles: ["a.ts"],
+      readFiles: ["b.ts"],
+      runs: ["dev-1 (abcd1234) — running/working"],
+    };
+    const withoutField = renderAppendix(base);
+    const withUndefined = renderAppendix({ ...base, skills: undefined });
+    const withEmpty = renderAppendix({ ...base, skills: [] });
+    expect(withoutField).not.toContain("在役 skill");
+    expect(withUndefined).toBe(withoutField);
+    expect(withEmpty).toBe(withoutField);
+  });
+
+  it("renders the in-service-skills line before the file lists, capped at MAX_APPENDIX_SKILLS", () => {
+    const skills = Array.from({ length: MAX_APPENDIX_SKILLS + 3 }, (_, i) => ({
+      name: `skill-${i}`,
+      location: `/a/skills/skill-${i}/SKILL.md`,
+    }));
+    const rendered = renderAppendix({ skills, modifiedFiles: ["x.ts"] });
+    expect(rendered).toContain("在役 skill（正文已随切换丢失；继续前先重新 read 这些 SKILL.md）：");
+    expect(rendered).toContain("  - skill-0 — /a/skills/skill-0/SKILL.md");
+    expect(rendered).toContain("…另 3 个");
+    const skillsIdx = rendered.indexOf("在役 skill");
+    const filesIdx = rendered.indexOf("改写过的文件");
+    expect(skillsIdx).toBeGreaterThanOrEqual(0);
+    expect(filesIdx).toBeGreaterThan(skillsIdx);
+  });
+
+  it("renders a bare skill name (no location) without a dash suffix", () => {
+    const rendered = renderAppendix({ skills: [{ name: "agent-handoff" }] });
+    expect(rendered).toContain("  - agent-handoff");
+    expect(rendered).not.toContain("agent-handoff —");
+  });
+
+  it("drops a skill's SKILL.md from the read-files list to avoid duplication", () => {
+    const rendered = renderAppendix({
+      skills: [{ name: "dev-flow", location: "/a/skills/dev-flow/SKILL.md" }],
+      readFiles: ["/a/skills/dev-flow/SKILL.md", "/a/other.ts"],
+    });
+    const skillLines = rendered.split("\n").filter((l) => l.includes("/a/skills/dev-flow/SKILL.md"));
+    expect(skillLines).toHaveLength(1);
+    expect(rendered).toContain("/a/other.ts");
+  });
+
+  describe("skillBlocksFromBranch", () => {
+    function userEntry(content: string) {
+      return { type: "message", message: { role: "user", content } };
+    }
+
+    it("scans user messages in range for pi's expanded /skill:xxx block header", () => {
+      const branch = [
+        userEntry("hello"),
+        userEntry('<skill name="dev-flow" location="/a/skills/dev-flow/SKILL.md">\nbody\n</skill>'),
+        { type: "message", message: { role: "assistant", content: [] } },
+      ];
+      expect(skillBlocksFromBranch(branch, 0, branch.length - 1)).toEqual([
+        { name: "dev-flow", location: "/a/skills/dev-flow/SKILL.md" },
+      ]);
+    });
+
+    it("ignores entries outside the range and non-user/malformed entries", () => {
+      const branch = [
+        userEntry('<skill name="out-of-range" location="/x/SKILL.md">\nbody\n</skill>'),
+        userEntry("plain"),
+        { type: "compaction" },
+      ];
+      expect(skillBlocksFromBranch(branch, 1, 2)).toEqual([]);
+    });
   });
 });

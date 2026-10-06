@@ -417,3 +417,81 @@ describe("buildChildSwitchDrafts (plan §2.1, V1-V6)", () => {
     expect(elapsed).toBeLessThan(2_000);
   });
 });
+
+describe("buildChildSwitchDrafts — in-service skills (context-switch-skills)", () => {
+  it("identifies a SKILL.md touched via a read tool call and an expanded /skill:xxx user block, merged with reported skills", () => {
+    const sm = makeSession();
+    const header = sm.getHeader();
+    // 一条带 /skill:xxx 展开块的 user 消息 + 一条读过 SKILL.md 的 assistant 回合。
+    sm.appendMessage({
+      role: "user",
+      content: '<skill name="agent-handoff" location="/a/skills/agent-handoff/SKILL.md">\nbody\n</skill>',
+      timestamp: Date.now(),
+    });
+    sm.appendMessage({
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "call-read-1", name: "read", arguments: { path: "/a/skills/dev-flow/SKILL.md" } },
+      ],
+      api: "chat",
+      provider: "test",
+      model: "m",
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+      stopReason: "toolCalls",
+      timestamp: Date.now(),
+    });
+    sm.appendMessage({
+      role: "toolResult",
+      toolCallId: "call-read-1",
+      toolName: "read",
+      content: [{ type: "text", text: "file body" }],
+      isError: false,
+      timestamp: Date.now(),
+    });
+    const toolCallId = "call-switch-skills";
+    const messageEntryId = appendAssistantWithToolCall(sm, toolCallId);
+    const toolResultEntryId = appendToolResult(sm, toolCallId);
+    const branch = sm.getBranch();
+    const readSkillFile = (path: string) => (path.includes("dev-flow") ? "---\nname: dev-flow\n---\n" : undefined);
+    const input = {
+      header,
+      branch,
+      cwd: CWD,
+      turn: {
+        messageEntryId,
+        toolResultEntryIds: [toolResultEntryId],
+        toolResults: toolResultsFor(toolCallId),
+        priorDrafts: [],
+      },
+      staged: {
+        toolCallId,
+        core: "core text ".repeat(20),
+        keepRecent: false,
+        seq: 1,
+        nonce: "n",
+        reportedSkills: [{ name: "manual-skill" }],
+      },
+      keepRecentTokens: 50,
+      facts: {},
+      tokensBefore: 1000,
+      readSkillFile,
+    };
+    const result = buildChildSwitchDrafts(input as never);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const compaction = result.entries.find((e) => e.type === "compaction") as { summary: string };
+    expect(compaction.summary).toContain("在役 skill");
+    expect(compaction.summary).toContain("dev-flow — /a/skills/dev-flow/SKILL.md");
+    expect(compaction.summary).toContain("agent-handoff — /a/skills/agent-handoff/SKILL.md");
+    expect(compaction.summary).toContain("manual-skill");
+  });
+
+  it("omits the skills line when nothing in range touched a SKILL.md and nothing was reported", () => {
+    const input = baseInput({ staged: { ...baseInput().staged, keepRecent: false } });
+    const result = buildChildSwitchDrafts(input as never);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const compaction = result.entries.find((e) => e.type === "compaction") as { summary: string };
+    expect(compaction.summary).not.toContain("在役 skill");
+  });
+});

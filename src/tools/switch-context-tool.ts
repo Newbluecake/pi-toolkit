@@ -3,6 +3,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { CapabilityStatus } from "../context-switch/capability.js";
 import { renderHandoffCore, validateHandoff } from "../context-switch/handoff.js";
+import { normalizeReportedSkills, readSkillFileSniffSync, type SkillFileReader } from "../context-switch/skills.js";
 import { countChildSwitches, type ChildSwitchStore, type PendingHandoffStore } from "../context-switch/store.js";
 import { buildHandoffAdvisory, type TodoTrackerSnapshot } from "../todo/nudge.js";
 
@@ -57,6 +58,17 @@ export const SwitchContextToolParams = Type.Object({
   resume: Type.Optional(
     Type.Boolean({ description: "Automatically continue the current task after the switch. Default true." }),
   ),
+  // 自动识别之外的补充通道：本段读/改过的 SKILL.md 和 pi 展开的 /skill:xxx 块会被自动识别并写进
+  // 附录；这里只是为了表1模型自己知道还在用但未通过上述两条通道被自动看到的 skill。
+  skills: Type.Optional(
+    Type.Array(Type.String({ maxLength: 512 }), {
+      maxItems: 8,
+      description:
+        "Skills you are actively relying on that the automatic detection above might miss — each entry is " +
+        "either a skill name or a SKILL.md path. The next context will be told to re-read these (their full " +
+        "text is lost on switch). At most 8 entries, 512 chars each.",
+    }),
+  ),
 });
 export type SwitchContextToolParams = Static<typeof SwitchContextToolParams>;
 
@@ -84,6 +96,8 @@ export interface SwitchContextToolDeps {
   getCapabilityStatus?: () => CapabilityStatus;
   /** boundary 模式：每 run 切换上限（settings 层已钳在 [1,20]，默认 5）。 */
   childMaxSwitches?: number;
+  /** 在役 skill来源①/③的文件读取实现；缺省用真实 fs 读取，单测可注入假实现。 */
+  readSkillFile?: SkillFileReader;
 }
 
 export const SWITCH_RESUME_TEXT =
@@ -270,7 +284,8 @@ export function createSwitchContextTool(deps: SwitchContextToolDeps): ToolDefini
         }
         const keepRecent = params.keep_recent !== false;
         const core = renderHandoffCore(validation.value);
-        const { seq, nonce } = childStore.stageForTool({ toolCallId, core, keepRecent });
+        const reportedSkills = normalizeReportedSkills(params.skills, deps.readSkillFile ?? readSkillFileSniffSync);
+        const { seq, nonce } = childStore.stageForTool({ toolCallId, core, keepRecent, reportedSkills });
         lastTriggeredAt = now();
         // resume 在子会话里永远被忽略（§2.1）：不继续等于 run 以切换前那句话结束，没有意义。
         let advisory: string | undefined;
@@ -333,7 +348,8 @@ export function createSwitchContextTool(deps: SwitchContextToolDeps): ToolDefini
       const keepRecent = params.keep_recent !== false;
       const resume = params.resume !== false;
       const core = renderHandoffCore(validation.value);
-      const seq = deps.store.stage({ core, keepRecent, resume });
+      const reportedSkills = normalizeReportedSkills(params.skills, deps.readSkillFile ?? readSkillFileSniffSync);
+      const seq = deps.store.stage({ core, keepRecent, resume, reportedSkills });
 
       const usage = ctx.getContextUsage();
       const usageText = usage?.tokens != null ? ` (~${Math.round(usage.tokens / 1000)}k tokens)` : "";

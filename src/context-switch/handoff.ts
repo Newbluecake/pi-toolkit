@@ -7,6 +7,8 @@
  * 不再有第二次 LLM 摘要来补救——校验必须在这里把"敷衍的交接"挡住。
  */
 
+import { skillRefFromExpandedBlockText, type SkillRef } from "./skills.js";
+
 /** 模型撰写的交接内容（工具参数的纯数据投影）。 */
 export interface HandoffInput {
   goal: string;
@@ -106,6 +108,9 @@ export interface HandoffAppendix {
   modifiedFiles?: readonly string[];
   /** 只读过、未改动的文件。 */
   readFiles?: readonly string[];
+  /** 在役 skill：本段读/改过的 SKILL.md、/skill:xxx 展开块、模型自报的合并去重结果——
+   *  正文已随切换丢失，这里只提醒「重新 read」，绝不搬运正文（src/context-switch/skills.ts）。 */
+  skills?: readonly SkillRef[];
   /** 未终结的 subagent run（"label(status)" 形式）。 */
   runs?: readonly string[];
   /** 仍在跑的后台 bash job。 */
@@ -148,9 +153,9 @@ export function fileListsFromFileOps(fileOps: unknown): { modifiedFiles: string[
 export const CHILD_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(["write", "edit", "multi_edit", "multiedit"]);
 export const CHILD_READ_TOOL_NAMES: ReadonlySet<string> = new Set(["read"]);
 
-interface BranchMessageLike {
+export interface BranchMessageLike {
   type?: unknown;
-  message?: { role?: unknown; content?: readonly unknown[] };
+  message?: { role?: unknown; content?: unknown };
 }
 
 function toolCallPathArg(args: unknown): string | undefined {
@@ -192,6 +197,43 @@ export function fileListsFromBranch(
   return { modifiedFiles: [...written], readFiles: readOnly };
 }
 
+/**
+ * 子会话 boundary 模式来源②的扫描：同一个 [fromIndex, toIndex] 区间里，user 消息（pi 展开
+ * `/skill:xxx` 生成）的 skill 块头部。与 fileListsFromBranch 同形状的区间语义，供
+ * boundary.ts 直接复用。只解析消息 content 为纯字符串的情形（展开块本身就是纯文本 user 消息）。
+ */
+export function skillBlocksFromBranch(
+  branch: readonly BranchMessageLike[],
+  fromIndex: number,
+  toIndex: number,
+): SkillRef[] {
+  const out: SkillRef[] = [];
+  const start = Math.max(0, fromIndex);
+  const end = Math.min(branch.length - 1, toIndex);
+  for (let i = start; i <= end; i++) {
+    const entry = branch[i];
+    if (!entry || entry.type !== "message") continue;
+    const message = entry.message as { role?: unknown; content?: unknown } | undefined;
+    if (!message || message.role !== "user") continue;
+    const content = message.content;
+    if (typeof content !== "string") continue;
+    const ref = skillRefFromExpandedBlockText(content);
+    if (ref) out.push(ref);
+  }
+  return out;
+}
+
+/** 附录里「在役 skill」一行的展示上限（超出写“…另 N 个”）；与 src/context-switch/skills.ts 的
+ *  MAX_APPENDIX_SKILLS 同值，重复声明是为了不让 handoff.ts 依赖它的运行时常量。 */
+export const MAX_APPENDIX_SKILLS = 8;
+
+function bulletListSkills(items: readonly SkillRef[], max: number): string {
+  const shown = items.slice(0, max);
+  const rest = items.length - shown.length;
+  const body = shown.map((item) => `  - ${item.name}${item.location ? ` — ${item.location}` : ""}`).join("\n");
+  return rest > 0 ? `${body}\n  - …另 ${rest} 个` : body;
+}
+
 export function renderAppendix(appendix: HandoffAppendix): string {
   const lines: string[] = [];
   if (appendix.sessionFile) {
@@ -200,11 +242,20 @@ export function renderAppendix(appendix: HandoffAppendix): string {
   if (appendix.tokensBefore != null && Number.isFinite(appendix.tokensBefore) && appendix.tokensBefore > 0) {
     lines.push(`- 切换前上下文规模：约 ${Math.round(appendix.tokensBefore / 1000)}k tokens`);
   }
+  const skills = appendix.skills ?? [];
+  // 已在「在役 skill」里列出 location 的 SKILL.md，不再在「读过的文件」里重复出现。
+  const skillLocations = new Set(skills.map((skill) => skill.location).filter((loc): loc is string => !!loc));
+  if (skills.length > 0) {
+    lines.push(
+      `- 在役 skill（正文已随切换丢失；继续前先重新 read 这些 SKILL.md）：\n${bulletListSkills(skills, MAX_APPENDIX_SKILLS)}`,
+    );
+  }
   if (appendix.modifiedFiles && appendix.modifiedFiles.length > 0) {
     lines.push(`- 本段改写过的文件：\n${bulletList(appendix.modifiedFiles, MAX_APPENDIX_FILES)}`);
   }
-  if (appendix.readFiles && appendix.readFiles.length > 0) {
-    lines.push(`- 本段读过（未改）的文件：\n${bulletList(appendix.readFiles, MAX_APPENDIX_FILES)}`);
+  const readFiles = (appendix.readFiles ?? []).filter((path) => !skillLocations.has(path));
+  if (readFiles.length > 0) {
+    lines.push(`- 本段读过（未改）的文件：\n${bulletList(readFiles, MAX_APPENDIX_FILES)}`);
   }
   if (appendix.runs && appendix.runs.length > 0) {
     lines.push(`- 仍在运行的 subagent：\n${bulletList(appendix.runs, MAX_APPENDIX_FILES)}`);

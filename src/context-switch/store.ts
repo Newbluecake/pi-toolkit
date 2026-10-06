@@ -8,6 +8,8 @@
  * 消费一次即清空。
  */
 
+import type { SkillRef } from "./skills.js";
+
 export interface PendingHandoff {
   /** 单调递增序号：工具侧可据此确认"自己这次"的暂存是否仍有效。 */
   seq: number;
@@ -17,6 +19,8 @@ export interface PendingHandoff {
   keepRecent: boolean;
   /** 压缩完成后是否自动发 resume 消息继续任务。 */
   resume: boolean;
+  /** 模型通过 `skills` 参数自报的在役 skill（已归一化），hook.ts 与自动识别结果合并。 */
+  reportedSkills: readonly SkillRef[];
   createdAt: number;
 }
 
@@ -40,13 +44,14 @@ export class PendingHandoffStore {
   }
 
   /** 暂存一份交接文本，返回其序号（覆盖任何未消费的旧文本）。 */
-  stage(input: { core: string; keepRecent: boolean; resume: boolean }): number {
+  stage(input: { core: string; keepRecent: boolean; resume: boolean; reportedSkills?: readonly SkillRef[] }): number {
     this.seqCounter += 1;
     this.pending = {
       seq: this.seqCounter,
       core: input.core,
       keepRecent: input.keepRecent,
       resume: input.resume,
+      reportedSkills: input.reportedSkills ?? [],
       createdAt: this.now(),
     };
     return this.seqCounter;
@@ -96,6 +101,8 @@ export interface ChildStagedSwitch {
   toolCallId: string;
   core: string;
   keepRecent: boolean;
+  /** 模型通过 `skills` 参数自报的在役 skill（已归一化）。 */
+  reportedSkills: readonly SkillRef[];
   createdAt: number;
 }
 
@@ -123,7 +130,12 @@ export class ChildSwitchStore {
   }
 
   /** 暂存一次 boundary 切换请求（覆盖任何未消费的旧暂存——同一时刻只应有一个在途请求）。 */
-  stageForTool(input: { toolCallId: string; core: string; keepRecent: boolean }): { seq: number; nonce: string } {
+  stageForTool(input: {
+    toolCallId: string;
+    core: string;
+    keepRecent: boolean;
+    reportedSkills?: readonly SkillRef[];
+  }): { seq: number; nonce: string } {
     this.seqCounter += 1;
     const nonce = this.makeNonce();
     this.pending = {
@@ -132,6 +144,7 @@ export class ChildSwitchStore {
       toolCallId: input.toolCallId,
       core: input.core,
       keepRecent: input.keepRecent,
+      reportedSkills: input.reportedSkills ?? [],
       createdAt: this.now(),
     };
     return { seq: this.pending.seq, nonce };

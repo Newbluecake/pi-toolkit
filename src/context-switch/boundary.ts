@@ -22,8 +22,21 @@ import type { SessionBoundaryDraft, SessionEntry, SessionHeader } from "@earendi
 // L0（`probeBoundaryStatic`，`src/adapters/pi-compat.ts`）负责在真正调用这条路径之前先判 unavailable。
 import * as pi from "@earendil-works/pi-coding-agent";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
-import { composeHandoff, fileListsFromBranch, type HandoffAppendix } from "./handoff.js";
+import {
+  composeHandoff,
+  fileListsFromBranch,
+  skillBlocksFromBranch,
+  type BranchMessageLike,
+  type HandoffAppendix,
+} from "./handoff.js";
 import { computeDroppedFingerprints, type DroppedFingerprintSet, type FingerprintableMessage } from "./selfcheck.js";
+import {
+  mergeSkillRefs,
+  readSkillFileSniffSync,
+  skillRefsFromTouchedPaths,
+  type SkillFileReader,
+  type SkillRef,
+} from "./skills.js";
 import { CHILD_SWITCH_SOURCE } from "./store.js";
 
 /** 子会话切换的 resume 消息 customType；不进模型上下文的可读标记（自证探针另有自己的 type）。 */
@@ -76,12 +89,16 @@ export interface BuildChildSwitchDraftsInput {
     keepRecent: boolean;
     seq: number;
     nonce: string;
+    /** 模型通过 `skills` 参数自报的在役 skill（已归一化），缺省视作空。 */
+    reportedSkills?: readonly SkillRef[];
   };
   /** pi-settings 读取，缺省 DEFAULT_COMPACTION_SETTINGS.keepRecentTokens。 */
   keepRecentTokens: number;
   facts: Pick<HandoffAppendix, "sessionFile" | "runs" | "bashJobs" | "todos">;
   /** ctx.getContextUsage()?.tokens。 */
   tokensBefore: number | undefined;
+  /** 在役 skill来源①的文件读取实现；缺省用真实 fs 读取，单测可注入假实现。 */
+  readSkillFile?: SkillFileReader;
 }
 
 export type BuildChildSwitchDraftsResult =
@@ -183,10 +200,17 @@ export function buildChildSwitchDrafts(input: BuildChildSwitchDraftsInput): Buil
     dropFromIdx,
     dropToIdx,
   );
+  const readSkillFile = input.readSkillFile ?? readSkillFileSniffSync;
+  const skills = mergeSkillRefs(
+    skillRefsFromTouchedPaths([...modifiedFiles, ...readFiles], readSkillFile),
+    skillBlocksFromBranch(branch as readonly BranchMessageLike[], dropFromIdx, dropToIdx),
+    staged.reportedSkills ?? [],
+  );
   const appendix: HandoffAppendix = {
     ...facts,
     ...(modifiedFiles.length > 0 ? { modifiedFiles } : {}),
     ...(readFiles.length > 0 ? { readFiles } : {}),
+    ...(skills.length > 0 ? { skills } : {}),
     ...(tokensBefore != null && Number.isFinite(tokensBefore) && tokensBefore > 0 ? { tokensBefore } : {}),
     ...(staged.keepRecent ? {} : { droppedEverything: true }),
   };

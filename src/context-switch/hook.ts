@@ -13,6 +13,13 @@
  */
 
 import { composeHandoff, type HandoffAppendix, fileListsFromFileOps } from "./handoff.js";
+import {
+  mergeSkillRefs,
+  readSkillFileSniffSync,
+  skillRefsFromTouchedPaths,
+  skillRefsFromUserMessages,
+  type SkillFileReader,
+} from "./skills.js";
 import type { PendingHandoffStore } from "./store.js";
 
 /** 不匹配任何会话条目的哨兵 id：等价于"压缩点之前全部丢弃"。 */
@@ -24,6 +31,9 @@ export interface SwitchCompactEventView {
     firstKeptEntryId?: string;
     tokensBefore?: number;
     fileOps?: unknown;
+    /** pi 的 `CompactionPreparation.messagesToSummarize`：被此次压缩丢弃的消息，
+     *  来源②的扫描对象（user 消息中 pi 展开 `/skill:xxx` 生成的块）。 */
+    messagesToSummarize?: readonly unknown[];
   };
   reason?: "manual" | "threshold" | "overflow";
 }
@@ -45,6 +55,8 @@ export type SessionFactsProvider = (
 export interface SwitchCompactHookDeps {
   store: PendingHandoffStore;
   sessionFacts?: SessionFactsProvider;
+  /** 在役 skill来源①的文件读取实现；缺省用真实 fs 读取，单测可注入假实现。 */
+  readSkillFile?: SkillFileReader;
   /** 应用成功后的回调（日志 / toast）。 */
   onApplied?: (info: { seq: number; keepRecent: boolean; chars: number; reason: string }) => void;
   debug?: boolean;
@@ -71,6 +83,12 @@ export function createSwitchContextCompactHook(
       : DROP_ALL_SENTINEL;
 
     const { modifiedFiles, readFiles } = fileListsFromFileOps(preparation.fileOps);
+    const readSkillFile = deps.readSkillFile ?? readSkillFileSniffSync;
+    const skills = mergeSkillRefs(
+      skillRefsFromTouchedPaths([...modifiedFiles, ...readFiles], readSkillFile),
+      skillRefsFromUserMessages((preparation.messagesToSummarize ?? []) as never),
+      pending.reportedSkills,
+    );
     let facts: ReturnType<SessionFactsProvider> = {};
     try {
       facts = deps.sessionFacts?.(ctx) ?? {};
@@ -82,6 +100,7 @@ export function createSwitchContextCompactHook(
       ...facts,
       ...(modifiedFiles.length > 0 ? { modifiedFiles } : {}),
       ...(readFiles.length > 0 ? { readFiles } : {}),
+      ...(skills.length > 0 ? { skills } : {}),
       ...(tokensBefore > 0 ? { tokensBefore } : {}),
       ...(pending.keepRecent ? {} : { droppedEverything: true }),
     };

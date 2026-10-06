@@ -84,6 +84,35 @@ describe("tools/switch-context-tool", () => {
     expect(h.store.peek()?.keepRecent).toBe(false);
   });
 
+  it("normalizes the skills param and stores it on the pending handoff", async () => {
+    const h = harness();
+    await h.execute(params({ skills: ["dev-flow", "  agent-handoff  "] }));
+    expect(h.store.peek()?.reportedSkills).toEqual([{ name: "dev-flow" }, { name: "agent-handoff" }]);
+  });
+
+  it("resolves a reported SKILL.md path's name via the injected reader", async () => {
+    const readSkillFile = vi.fn(() => "---\nname: dev-flow\n---\n");
+    const store = new PendingHandoffStore();
+    const compact = vi.fn();
+    const ctx = { compact, getContextUsage: () => ({ tokens: 1000 }), ui: { notify: vi.fn() } };
+    const tool = createSwitchContextTool({ store, sendUserMessage: vi.fn(), readSkillFile });
+    await tool.execute!(
+      "call",
+      params({ skills: ["/a/skills/dev-flow/SKILL.md"] }) as never,
+      undefined as never,
+      undefined as never,
+      ctx as never,
+    );
+    expect(readSkillFile).toHaveBeenCalledWith("/a/skills/dev-flow/SKILL.md");
+    expect(store.peek()?.reportedSkills).toEqual([{ name: "dev-flow", location: "/a/skills/dev-flow/SKILL.md" }]);
+  });
+
+  it("defaults reportedSkills to an empty array when skills is omitted", async () => {
+    const h = harness();
+    await h.execute(params());
+    expect(h.store.peek()?.reportedSkills).toEqual([]);
+  });
+
   it("rejects a second call while a switch is in flight, and honours the cooldown", async () => {
     let now = 100_000;
     const h = harness({ now: () => now, cooldownMs: 1_000 });
@@ -296,6 +325,12 @@ describe("tools/switch-context-tool boundary mode (child-context-switch plan §2
     expect(staged?.core).toContain("## 当前目标");
     expect(staged?.keepRecent).toBe(true);
     expect(typeof staged?.nonce).toBe("string");
+  });
+
+  it("normalizes and stages the skills param on the child store too", async () => {
+    const h = boundaryHarness();
+    await h.execute(params({ skills: ["dev-flow"] }), "call-skills");
+    expect(h.childStore.peek()?.reportedSkills).toEqual([{ name: "dev-flow" }]);
   });
 
   it("rejects an under-specified handoff without staging anything", async () => {

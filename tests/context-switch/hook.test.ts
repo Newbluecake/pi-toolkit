@@ -103,4 +103,81 @@ describe("context-switch/hook", () => {
     expect(sessionFacts).toHaveBeenCalledWith(ctx);
     expect(result?.compaction.summary).toContain("/tmp/s.jsonl");
   });
+
+  it("identifies in-service skills from touched SKILL.md paths in fileOps", () => {
+    const store = new PendingHandoffStore();
+    store.stage({ core: "CORE", keepRecent: true, resume: true });
+    const readSkillFile = () => "---\nname: dev-flow\n---\n";
+    const hook = createSwitchContextCompactHook({ store, readSkillFile });
+    const result = hook(
+      event({
+        preparation: {
+          firstKeptEntryId: "entry-42",
+          tokensBefore: 1000,
+          fileOps: { read: new Set(["/a/skills/dev-flow/SKILL.md"]), written: new Set(), edited: new Set() },
+        },
+      }),
+    );
+    expect(result?.compaction.summary).toContain("在役 skill");
+    expect(result?.compaction.summary).toContain("dev-flow — /a/skills/dev-flow/SKILL.md");
+    // 该 SKILL.md 也在 readFiles 里，不应在「本段读过的文件」里重复出现（整个附录里不应有 "本段读过（未改）的文件" 这条字样行）。
+    expect(result?.compaction.summary).not.toContain("本段读过（未改）的文件");
+  });
+
+  it("identifies in-service skills from pi's expanded /skill:xxx message blocks in messagesToSummarize", () => {
+    const store = new PendingHandoffStore();
+    store.stage({ core: "CORE", keepRecent: true, resume: true });
+    const hook = createSwitchContextCompactHook({ store });
+    const result = hook(
+      event({
+        preparation: {
+          firstKeptEntryId: "entry-42",
+          tokensBefore: 1000,
+          fileOps: {},
+          messagesToSummarize: [
+            {
+              role: "user",
+              content: '<skill name="agent-handoff" location="/a/skills/agent-handoff/SKILL.md">\nbody\n</skill>',
+            },
+            { role: "assistant", content: [] },
+          ],
+        },
+      }),
+    );
+    expect(result?.compaction.summary).toContain("agent-handoff");
+  });
+
+  it("merges auto-detected skills with the model's reported skills, deduping by name", () => {
+    const store = new PendingHandoffStore();
+    store.stage({
+      core: "CORE",
+      keepRecent: true,
+      resume: true,
+      reportedSkills: [{ name: "dev-flow", location: "/a/skills/dev-flow/SKILL.md" }, { name: "manual-skill" }],
+    });
+    const readSkillFile = () => "---\nname: dev-flow\n---\n";
+    const hook = createSwitchContextCompactHook({ store, readSkillFile });
+    const result = hook(
+      event({
+        preparation: {
+          firstKeptEntryId: "entry-42",
+          tokensBefore: 1000,
+          fileOps: { read: new Set(["/a/skills/dev-flow/SKILL.md"]), written: new Set(), edited: new Set() },
+        },
+      }),
+    );
+    const summary = result?.compaction.summary ?? "";
+    expect(summary).toContain("manual-skill");
+    // 并非重复两次 dev-flow条目（自动识别和模型自报指向同一个 name）：只应有一条 "- dev-flow — " 开头的行。
+    const devFlowBullets = summary.split("\n").filter((line) => line.trim().startsWith("- dev-flow —"));
+    expect(devFlowBullets).toHaveLength(1);
+  });
+
+  it("omits the skills line when nothing touched a SKILL.md and nothing was reported", () => {
+    const store = new PendingHandoffStore();
+    store.stage({ core: "CORE", keepRecent: true, resume: true });
+    const hook = createSwitchContextCompactHook({ store });
+    const result = hook(event());
+    expect(result?.compaction.summary).not.toContain("在役 skill");
+  });
 });

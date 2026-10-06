@@ -429,6 +429,7 @@ export function wireChildContextSwitch(
               keepRecent: staged.keepRecent,
               seq: staged.seq,
               nonce: staged.nonce,
+              reportedSkills: staged.reportedSkills,
             },
             keepRecentTokens,
             facts,

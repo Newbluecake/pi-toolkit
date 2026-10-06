@@ -61,4 +61,14 @@ describe("context-switch/store", () => {
     expect(pending?.keepRecent).toBe(false);
     expect(pending?.resume).toBe(false);
   });
+
+  it("defaults reportedSkills to an empty array and otherwise keeps it verbatim", () => {
+    const s = new PendingHandoffStore();
+    s.stage({ core: "A", keepRecent: true, resume: true });
+    expect(s.peek()?.reportedSkills).toEqual([]);
+    const t = new PendingHandoffStore();
+    const skills = [{ name: "dev-flow", location: "/a/SKILL.md" }];
+    t.stage({ core: "B", keepRecent: true, resume: true, reportedSkills: skills });
+    expect(t.peek()?.reportedSkills).toEqual(skills);
+  });
 });
