@@ -122,6 +122,32 @@ describe("createSpawnStore: 往返与文件属性 (plan §SP5)", () => {
     b.saveNow([rec()]);
     expect((readJson(file()).gen as number) > genAfterTwo).toBe(true);
   });
+
+  it("web-hub-delete-session plan v2 §2.2/§2.6/§2.1(C1): removeIntent/noProcess roundtrip", () => {
+    const records = [
+      rec({ spawnId: "sp_rm1", state: "stopping", removeIntent: true }),
+      rec({ spawnId: "sp_rm2", state: "failed", endReason: "spawn_error", noProcess: "never-forked" }),
+      rec({ spawnId: "sp_rm3", state: "exited", endReason: "orphan", noProcess: "boot-changed" }),
+      rec({ spawnId: "sp_rm4" }), // neither field — absent, not false
+    ];
+    const s = createSpawnStore({ file: file(), log, now: () => 1 });
+    expect(s.saveNow(records)).toEqual({ ok: true });
+    const loaded = createSpawnStore({ file: file(), log, now: () => 2 }).load(d());
+    expect(loaded.records).toEqual(records);
+    expect(loaded.records[0]!.removeIntent).toBe(true);
+    expect(loaded.records[1]!.noProcess).toBe("never-forked");
+    expect(loaded.records[2]!.noProcess).toBe("boot-changed");
+    expect("removeIntent" in loaded.records[3]!).toBe(false);
+    expect("noProcess" in loaded.records[3]!).toBe(false);
+  });
+
+  it("an old-format file with neither field reads back fine (forward-compat — absent is always ok)", () => {
+    const { removeIntent: _ri, noProcess: _np, ...plain } = rec({ spawnId: "sp_old" });
+    writeFileSync(file(), JSON.stringify({ v: 2, records: [plain] }), { mode: 0o600 });
+    const loaded = createSpawnStore({ file: file(), log, now: () => 1 }).load(d());
+    expect(loaded.corrupt).toBeUndefined();
+    expect(loaded.records).toEqual([plain]);
+  });
 });
 
 describe("损坏与防御性读取 (plan §SP5 / arch §7.7)", () => {
@@ -149,6 +175,10 @@ describe("损坏与防御性读取 (plan §SP5 / arch §7.7)", () => {
       JSON.stringify({ v: 2, records: [{ spawnId: "x", state: "zombie" }] }),
       JSON.stringify({ v: 2, records: [{ spawnId: "x", state: "live", owner: { listener: "wan" } }] }),
       JSON.stringify({ v: 2, records: [rec({ pid: "not-a-number" as unknown as number })] }),
+      // web-hub-delete-session plan v2 §2.2/§2.6/§2.1(C1): invalid values for the two new fields
+      JSON.stringify({ v: 2, records: [rec({ removeIntent: false as unknown as true })] }),
+      JSON.stringify({ v: 2, records: [rec({ removeIntent: "true" as unknown as true })] }),
+      JSON.stringify({ v: 2, records: [rec({ noProcess: "crashed" as unknown as "never-forked" })] }),
     ]) {
       writeFileSync(file(), bad, { mode: 0o600 });
       expect(createSpawnStore({ file: file(), log, now: () => 1 }).load(d())).toEqual({ records: [], corrupt: true });

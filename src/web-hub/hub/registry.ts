@@ -66,6 +66,19 @@ export interface Registry extends RegistryView {
    * degrade (e.g. the run-transcript service leaves `watchOn` unset so unwatch won't send a
    * spurious `{on:false}`), never an error. */
   send(agentKey: string, frame: HubFrame): boolean;
+  /**
+   * web-hub-delete-session plan v2 §2.3: delete a card and broadcast `agent_removed` (hub
+   * §4.1's route, and the supervisor's own death-confirmed path via `onRemoved`, share this ONE
+   * entry point). `"online"` refuses a connected (`live`/`claiming`) agent when `allowConnected`
+   * is false — the normal case for a browser-initiated delete of an unmanaged/offline card
+   * (B-alive: never silently drop a card whose process may still be running).
+   * `allowConnected:true` is safe ONLY for the supervisor's `onRemoved` hook, which calls this
+   * strictly after its OWN death confirmation — a registry record still `live`/`claiming` at
+   * that point just means its socket-close bookkeeping hasn't caught up yet, not that the
+   * process is alive. Idempotent: an absent key still broadcasts `agent_removed` (`"absent"`) so
+   * a late/duplicate caller observes the same outcome every time.
+   */
+  remove(agentKey: string, opts: { allowConnected: boolean }): "removed" | "absent" | "online";
 }
 
 export interface AgentConn {
@@ -291,6 +304,20 @@ export function createRegistry(deps: {
 
     getLinkGen(agentKey) {
       return records.get(agentKey)?.linkGen;
+    },
+
+    remove(agentKey, opts) {
+      const r = records.get(agentKey);
+      if (r === undefined) {
+        publish({ type: "agent_removed", agentKey });
+        return "absent";
+      }
+      if ((r.phase === "live" || r.phase === "claiming") && !opts.allowConnected) {
+        return "online";
+      }
+      down(r, "removed");
+      publish({ type: "agent_removed", agentKey });
+      return "removed";
     },
 
     register(hello, conn) {

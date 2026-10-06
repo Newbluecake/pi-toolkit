@@ -42,6 +42,7 @@ import {
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
+import { createAgentRemoveService } from "./agent-remove.js";
 import { auditSpawn, auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
 import { createCmdLimit } from "./cmd-limit.js";
 import { createCommandRouter } from "./commands.js";
@@ -536,6 +537,14 @@ export async function startHub(
         },
         onLink: (spawnId, linked) => firstPromptFwd?.onLink(spawnId, linked),
         onTerminal: (spawnId, reason) => firstPromptFwd?.onTerminal(spawnId, reason),
+        // web-hub-delete-session plan v2 §2.2/§2.9: a managed record's death was confirmed and it
+        // was actually deleted — drop the matching agent card too. `allowConnected:true` is safe
+        // here specifically because `deleteRecord` only ever runs AFTER the supervisor's own
+        // death confirmation (§2.1); a registry record still `live`/`claiming` at that instant
+        // just means its socket-close bookkeeping hasn't caught up yet.
+        onRemoved: (_spawnId, agentKey) => {
+          if (agentKey !== undefined) registry.remove(agentKey, { allowConnected: true });
+        },
         ...(deps.spawnSeams?.spawnFn === undefined ? {} : { spawnFn: deps.spawnSeams.spawnFn }),
       });
       spawnSup =
@@ -614,6 +623,18 @@ export async function startHub(
             log,
             now,
           });
+    // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
+    // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
+    // managed spawn being enabled at all; `managed` is simply absent when it isn't, and
+    // `agentKey`-form requests fall straight to `registry.remove` (§2.4 row 6).
+    const agentRemoveService = createAgentRemoveService({
+      registry,
+      ...(spawnSup !== undefined && config.spawn !== undefined
+        ? { managed: { sup: spawnSup, lan: config.spawn.lan } }
+        : {}),
+      log,
+      now,
+    });
     const fe = frontend({
       config,
       paths,
@@ -631,6 +652,7 @@ export async function startHub(
       // stub. `registry` (constructed above) is the same instance the agent socket layer feeds.
       commands: commandRouter,
       uploadMetrics,
+      agentRemove: agentRemoveService,
       ...(uploads === undefined ? {} : { uploads }),
       ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
       ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),

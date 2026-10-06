@@ -119,6 +119,20 @@ export interface StoredRecord {
   firstPrompt?: StoredFirstPrompt;
   /** Basename of the stderr log inside the spawn logDir (SP5 `stderr-sink.ts`). */
   stderrLog?: string;
+  /** web-hub-delete-session plan v2 §2.2/§2.6 (r1 #6): a delete was requested for this record
+   * and has not yet been resolved (deleted, or abandoned per B-alive) — written synchronously
+   * (`saveNow`, same L1 discipline as the intent/identity writes) BEFORE any further state
+   * change, so a hub crash mid-delete still recovers the intent on the next boot. Absent means
+   * "no delete in flight"; there is no `false` value on disk. */
+  removeIntent?: true;
+  /** web-hub-delete-session plan v2 §2.1 (C1): persisted evidence that this record's process was
+   * NEVER forked (so a `pid === undefined` record can be judged `confirmed` dead instead of the
+   * fail-closed `unknown` default) — `"never-forked"` when ①/③ failed before/during the fork
+   * attempt itself, `"boot-changed"` when `init()` recovered the record after a machine reboot
+   * (no process from a previous boot can possibly be this one). A `launching` record whose
+   * crash-recovery environ scan merely found nothing (true miss vs. an inconclusive scan are
+   * indistinguishable) carries NO evidence here on purpose — it stays `unknown`. */
+  noProcess?: "never-forked" | "boot-changed";
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +277,14 @@ function isRecordShapeOk(v: unknown): v is StoredRecord {
   if (v["bootId"] !== undefined && typeof v["bootId"] !== "string") return false;
   if (v["agentKey"] !== undefined && typeof v["agentKey"] !== "string") return false;
   if (v["stderrLog"] !== undefined && typeof v["stderrLog"] !== "string") return false;
+  // web-hub-delete-session plan v2 §2.2/§2.6/§2.1(C1): unknown-to-an-old-hub fields, so an
+  // absent key is always fine (forward-compat); when present the value must be exactly what
+  // this format defines — a shape violation anywhere treats the WHOLE file as corrupt (same
+  // rule as every other field here, this file feeds kill decisions).
+  const removeIntent = v["removeIntent"];
+  if (removeIntent !== undefined && removeIntent !== true) return false;
+  const noProcess = v["noProcess"];
+  if (noProcess !== undefined && noProcess !== "never-forked" && noProcess !== "boot-changed") return false;
   const endReason = v["endReason"];
   if (endReason !== undefined && endReason !== null && !END_REASONS.has(String(endReason))) return false;
   const hint = v["hint"];

@@ -429,6 +429,93 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     await new Promise((r) => setTimeout(r, 5_000)); // a mis-sent TERM would have landed by now
     expect(pidAlive(child2)).toBe(true); // L5: wrong starttime ⇒ no signal, process untouched
   }, 90_000);
+
+  it("web-hub-delete-session plan v2 §7.3-4 (A9): live managed session remove() persists removeIntent → hub SIGKILL → next hub's boot recovery (TERM→KILL) + the §2.6 reconciliation timer confirm-delete it; the session jsonl is never touched", async () => {
+    sandbox = sandboxHome();
+    const hub = await bootHub(sandbox.home);
+    // ignore-eof + ignore-term: the child must still be ALIVE the instant we SIGKILL the hub
+    // (otherwise a plain stdin-EOF exit would race the crash and prove nothing about recovery).
+    const cwd = projDir(sandbox.home, "proj", ["--ignore-eof", "--ignore-term"]);
+    const accepted = await spawnFake(hub, cwd);
+    const childPid = await waitPidOf(hub, accepted.spawnId);
+    extraPids.add(childPid);
+
+    // A real `pi` would own a session transcript under `<home>/.pi/agent/sessions/*.jsonl`;
+    // fake-pi speaks no session protocol and writes none, so a sentinel file stands in for it —
+    // the point is proving the WHOLE delete+recovery pipeline never touches anything outside
+    // `spawns.json`, not re-deriving pi's own session-file naming scheme.
+    const sessionsDir = join(sandbox.home, ".pi", "agent", "sessions");
+    mkdirSync(sessionsDir, { recursive: true });
+    const jsonlFile = join(sessionsDir, "dummy-session.jsonl");
+    const jsonlSentinel = `{"sentinel":"${Date.now().toString(36)}"}\n`;
+    writeFileSync(jsonlFile, jsonlSentinel);
+
+    // live: hello+session negotiate normally (only EOF/TERM are ignored)
+    await waitUntil(() => recordOf(hub.stateDir, accepted.spawnId)?.state === "live", 15_000, "managed child live");
+
+    const ownerRes = await rawRequest(hub.port, {
+      path: "/api/headless",
+      headers: { Cookie: hub.cookie, "X-PWH": "1" },
+    });
+    expect(ownerRes.status).toBe(200);
+    const owner = JSON.parse(ownerRes.body) as { items: SpawnRecordOwner[] };
+    const agentKey = owner.items.find((i) => i.spawnId === accepted.spawnId)?.agentKey;
+    expect(agentKey).toBeDefined();
+
+    const rm = await postJson(
+      hub.port,
+      "/api/agents/remove",
+      { agentKey },
+      { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}` },
+    );
+    expect(rm.status).toBe(202);
+    expect(JSON.parse(rm.body)).toMatchObject({ removed: false, pending: true, state: "stopping" });
+
+    // §2.2 L1 discipline: the remove intent is synced to spawns.json BEFORE anything else, so it
+    // survives a crash landing anywhere after the 202.
+    await waitUntil(
+      () => recordOf(hub.stateDir, accepted.spawnId)?.state === "stopping",
+      5_000,
+      "record entered stopping",
+    );
+    const spawnsFile = webHubSpawnFiles(hub.stateDir).spawnsJson;
+    const onDiskBeforeKill = JSON.parse(readFileSync(spawnsFile, "utf8")) as {
+      records?: Array<Record<string, unknown>>;
+    };
+    const recBeforeKill = (onDiskBeforeKill.records ?? []).find((r) => r["spawnId"] === accepted.spawnId);
+    expect(recBeforeKill?.["removeIntent"]).toBe(true);
+    expect(pidAlive(childPid)).toBe(true); // ignore-eof/ignore-term: still alive, deletion only pending
+
+    // crash the hub mid-delete — the intent is already on disk, the child is still orphaned-alive
+    kill9(hub.pid);
+    hubPids.delete(hub.pid);
+    await waitUntil(() => !pidAlive(hub.pid), 3_000, "hub dead");
+    expect(pidAlive(childPid)).toBe(true); // orphaned, not yet reaped
+
+    // the next hub's init() owns the recovery: boot-recovery TERM→KILL (same ladder as H3) kills
+    // the orphan, and the §2.6 reconciliation timer (RECOVER_KILL_AFTER_MS + EXIT_GUARD_MS ≈ 8s
+    // after boot) deletes the now-confirmed-dead record once probeIdentity sees it gone.
+    const hub2 = await bootHub(sandbox.home, hub.pid);
+    await waitPidGone(childPid, 14_000, "§7.3-4 orphan killed by boot recovery (setImmediate TERM, +3s KILL)");
+    extraPids.delete(childPid);
+    await waitUntil(
+      () => recordOf(hub2.stateDir, accepted.spawnId) === undefined,
+      15_000,
+      "§2.6 reconciliation timer deleted the confirmed-dead record",
+    );
+
+    // the new hub's own card/record listing never carries the deleted session
+    const after = await rawRequest(hub2.port, {
+      path: "/api/headless",
+      headers: { Cookie: hub2.cookie, "X-PWH": "1" },
+    });
+    const afterBody = JSON.parse(after.body) as { items: SpawnRecordOwner[] };
+    expect(afterBody.items.find((i) => i.spawnId === accepted.spawnId)).toBeUndefined();
+
+    // B-alive/B-stream were exercised above; the session jsonl — the one file the whole feature
+    // is forbidden from ever touching — is byte-identical to what it was before any of this ran.
+    expect(readFileSync(jsonlFile, "utf8")).toBe(jsonlSentinel);
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -714,6 +801,97 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     const rec = await waitRecord(h.stateDir, accepted.spawnId, (r) => r.state === "failed", 12_000, "register timeout");
     expect(rec.endReason).toBe("register_timeout");
     expect(rec.hint).toBe("register-timeout-hello");
+  }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // web-hub-delete-session plan v2 §7.3 (P3): real-process delete-session acceptance
+  // -------------------------------------------------------------------------
+
+  async function removeOverHttp(h: ProcHub, body: Record<string, unknown>): Promise<{ status: number; body: string }> {
+    return postJson(h.port, "/api/agents/remove", body, { Cookie: h.cookie, Origin: originOf(h.port) });
+  }
+
+  it("§7.3-1 (A4): live managed session remove(agentKey) → 202 pending → confirmed exit → removed; spawns.json loses the record; the hub keeps serving", async () => {
+    const h = await bringUp();
+    const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
+    const sse = await openSse(h.port, { cookie: h.cookie });
+    sseConns.push(sse);
+    await sse.waitFor((e) => e.event === "hello");
+    const accepted = await spawnOverHttp(h, cwd);
+    await waitRecord(h.stateDir, accepted.spawnId, (r) => r.state === "live", 15_000, "live");
+    const pid = await trackChild(h, accepted.spawnId);
+    const owner = await getHeadless(h.port, h.cookie);
+    const mine = owner.items.find((i) => i.spawnId === accepted.spawnId)!;
+    const agentKey = mine.agentKey!;
+    expect(agentKey).toBeDefined();
+
+    const res = await removeOverHttp(h, { agentKey });
+    expect(res.status).toBe(202);
+    expect(JSON.parse(res.body)).toMatchObject({ removed: false, pending: true, state: "stopping" });
+
+    // B-stream: the hub broadcasts agent_removed once death is confirmed (stdin EOF ⇒ the fake
+    // exits promptly, so this settles well inside the escalation ladder's first stage).
+    await sse.waitFor((e) => e.event === "agent_removed" && e.data.agentKey === agentKey, 15_000);
+    await waitPidGone(pid, 15_000, "removed child exited");
+    await waitUntil(() => recordOf(h.stateDir, accepted.spawnId) === undefined, 15_000, "spawns.json record gone");
+
+    // the hub itself is unharmed — GET reflects the deletion, no crash
+    const after = await getHeadless(h.port, h.cookie);
+    expect(after.status).toBe(200);
+    expect(after.items.find((i) => i.spawnId === accepted.spawnId)).toBeUndefined();
+  }, 30_000);
+
+  it("§7.3-2 (A5): starting-phase (no hello yet) remove(spawnId) → 202 pending → the child is stopped → record deleted", async () => {
+    const h = await bringUp((home) => procSpawnCfg({ roots: [home], registerTimeoutS: 30 }));
+    const cwd = projDir(sandbox!.home, "proj", ["--no-hello"]);
+    const accepted = await spawnOverHttp(h, cwd);
+    expect(accepted.state).toBe("starting");
+    const pid = await trackChild(h, accepted.spawnId);
+
+    const res = await removeOverHttp(h, { spawnId: accepted.spawnId });
+    expect(res.status).toBe(202);
+    expect(JSON.parse(res.body)).toMatchObject({
+      removed: false,
+      pending: true,
+      spawnId: accepted.spawnId,
+      state: "stopping",
+    });
+
+    await waitPidGone(pid, 15_000, "starting child stopped by remove()");
+    await waitUntil(() => recordOf(h.stateDir, accepted.spawnId) === undefined, 15_000, "record deleted");
+  }, 30_000);
+
+  it("§7.3-3 (A7/B-fork): replaying the same create id after delete ⇒ 409 spawn-gone, no fresh fork, no new record", async () => {
+    const h = await bringUp();
+    const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
+    const headers = { Cookie: h.cookie, Origin: originOf(h.port) };
+    const id = spawnReqId();
+
+    let first = await postJson(h.port, "/api/headless", { id, cwd }, headers);
+    if (first.status === 409) {
+      const resolved = JSON.parse(first.body) as { resolvedCwd: string };
+      first = await postJson(
+        h.port,
+        "/api/headless",
+        { id, cwd, confirm: true, expectCwd: resolved.resolvedCwd },
+        headers,
+      );
+    }
+    expect(first.status).toBe(202);
+    const spawnId = (JSON.parse(first.body) as { spawnId: string }).spawnId;
+    const pid = await trackChild(h, spawnId);
+
+    const rm = await removeOverHttp(h, { spawnId });
+    expect(rm.status).toBe(202);
+    await waitPidGone(pid, 15_000, "deleted child stopped");
+    await waitUntil(() => recordOf(h.stateDir, spawnId) === undefined, 15_000, "record gone");
+
+    // replay the SAME id+cwd within the 10-minute idempotency TTL ⇒ 409 spawn-gone, never a
+    // fresh fork (B-fork) — the idempotency LRU hit is detected but the record is gone.
+    const replay = await postJson(h.port, "/api/headless", { id, cwd }, headers);
+    expect(replay.status).toBe(409);
+    expect(JSON.parse(replay.body)).toEqual({ error: "E_BAD_REQUEST", reason: "spawn-gone" });
+    expect(readSpawnsJson(h.stateDir)).toHaveLength(0); // no new record of any spawnId appeared
   }, 30_000);
 
   it("H5: 1 MiB ui lines answered cancelled from the head ≤1.5s; bad head ⇒ failed{protocol_error} and the child is stopped", async () => {

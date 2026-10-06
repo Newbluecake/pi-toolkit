@@ -28,6 +28,7 @@ function makeRecord(partial: Partial<InternalRecord> & Pick<InternalRecord, "spa
     hintDetail: undefined,
     uiCancelled: [],
     stderrTail: () => undefined,
+    removePending: false,
     ...partial,
   };
 }
@@ -105,6 +106,13 @@ describe("toPublic — the SSE/broadcast column (arch §6.4)", () => {
     const p = toPublic(makeRecord({ spawnId: "s3", state: "launching" }));
     expect(p.state).toBe("starting");
   });
+
+  it("web-hub-delete-session plan v2 §2.2: removePending ⇒ removing:true; absent otherwise", () => {
+    const removing = toPublic(makeRecord({ spawnId: "s-rm", state: "stopping", removePending: true }));
+    expect(removing.removing).toBe(true);
+    const notRemoving = toPublic(makeRecord({ spawnId: "s-keep", state: "stopping", removePending: false }));
+    expect("removing" in notRemoving).toBe(false);
+  });
 });
 
 describe("toViewer — the GET columns (arch §6.4)", () => {
@@ -160,6 +168,12 @@ describe("toViewer — the GET columns (arch §6.4)", () => {
   it("owner view without a forwarder view falls back to the persisted slice (textLen/attempts from disk)", () => {
     const v = toViewer(rich, OWNER_PRINCIPAL, false);
     expect(v.firstPrompt).toEqual({ state: "pending", textLen: 96, attempts: 0 });
+  });
+
+  it("web-hub-delete-session plan v2 §2.2: removing rides BOTH the owner and non-owner views", () => {
+    const removingRec = makeRecord({ spawnId: "s-rm2", state: "stopping", removePending: true });
+    expect(toViewer(removingRec, OWNER_PRINCIPAL, false).removing).toBe(true);
+    expect(toViewer(removingRec, OTHER_PRINCIPAL, false).removing).toBe(true);
   });
 });
 

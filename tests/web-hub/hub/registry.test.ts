@@ -654,3 +654,68 @@ describe("registry: run-transcript frames (fleet-drawer §5.3, F3b)", () => {
     expect(h.reg.send(agentKey, { t: "run_watch", runId: "r_ABCDEFGH", on: true })).toBe(false);
   });
 });
+
+// web-hub-delete-session plan v2 §2.3/§7.1: `remove()`'s four branches.
+describe("registry.remove (web-hub-delete-session plan v2 §2.3)", () => {
+  it("live, allowConnected:false ⇒ 'online', record untouched, no agent_removed", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.events.length = 0;
+    expect(h.reg.remove(agentKey, { allowConnected: false })).toBe("online");
+    expect(h.reg.get(agentKey)).not.toBeUndefined();
+    expect(types(h.events)).toEqual([]);
+  });
+
+  it("claiming, allowConnected:false ⇒ 'online' too (a disconnected-but-not-yet-stale record is still 'connected')", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.reg.onClose(agentKey, false); // → claiming
+    h.events.length = 0;
+    expect(h.reg.remove(agentKey, { allowConnected: false })).toBe("online");
+    expect(h.reg.get(agentKey)).not.toBeUndefined();
+  });
+
+  it("stale, allowConnected:false ⇒ 'removed': down() cleanup runs, agent_removed is published", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.reg.onClose(agentKey, false);
+    h.clock.t += TIMING.detachGraceMs; // → stale
+    h.reg.tick(h.clock.t);
+    h.events.length = 0;
+    expect(h.reg.remove(agentKey, { allowConnected: false })).toBe("removed");
+    expect(h.reg.get(agentKey)).toBeUndefined();
+    expect(types(h.events)).toEqual(["agent_down", "agent_removed"]);
+    expect(h.events[1]).toEqual({ type: "agent_removed", agentKey });
+  });
+
+  it("absent key ⇒ 'absent', still publishes agent_removed (idempotent for a late/duplicate caller)", () => {
+    const h = harness();
+    h.events.length = 0;
+    expect(h.reg.remove("a0000-nobody", { allowConnected: false })).toBe("absent");
+    expect(types(h.events)).toEqual(["agent_removed"]);
+    expect(h.reg.remove("a0000-nobody", { allowConnected: false })).toBe("absent");
+  });
+
+  it("live, allowConnected:true (the supervisor's onRemoved path) ⇒ 'removed' even though the agent is still live", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello(), fakeConn());
+    h.events.length = 0;
+    expect(h.reg.remove(agentKey, { allowConnected: true })).toBe("removed");
+    expect(h.reg.get(agentKey)).toBeUndefined();
+    expect(types(h.events)).toEqual(["agent_down", "agent_removed"]);
+  });
+
+  it("stale → remove → same agentId re-registers ⇒ a NEW record (reclaimed:false), fresh agent_up, no stale subscription carries over", () => {
+    const h = harness();
+    const { agentKey: firstKey } = h.reg.register(hello(), fakeConn());
+    h.reg.onClose(firstKey, false);
+    h.clock.t += TIMING.detachGraceMs;
+    h.reg.tick(h.clock.t);
+    h.reg.remove(firstKey, { allowConnected: false });
+    h.events.length = 0;
+    const { agentKey: secondKey, reclaimed } = h.reg.register(hello(), fakeConn());
+    expect(reclaimed).toBe(false);
+    expect(secondKey).toBe(firstKey); // same pid+nonce ⇒ same derived agentKey, but a brand-new Rec
+    expect(types(h.events)).toEqual(["agent_up"]);
+  });
+});

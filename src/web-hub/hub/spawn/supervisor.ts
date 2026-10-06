@@ -96,8 +96,8 @@ import {
 
 export interface SpawnAuditRecord {
   audit: "spawn";
-  phase: "request" | "reject" | "state";
-  endpoint?: "list" | "dirs" | "spawn" | "stop";
+  phase: "request" | "reject" | "state" | "remove";
+  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove";
   reqId?: string;
   listener?: "loopback" | "lan";
   ip?: string;
@@ -168,6 +168,26 @@ export function spawnPrincipal(owner: StoredOwner): string {
 }
 
 // ---------------------------------------------------------------------------
+// web-hub-delete-session plan v2 §2.1/§2.2: death confirmation & deletion result shapes
+// ---------------------------------------------------------------------------
+
+/**
+ * §2.1's three-way death verdict for a TERMINAL record: `"confirmed"` means the process is
+ * provably gone (a real exit event, or `probeIdentity`'s `/proc` evidence); `"alive"` means
+ * `/proc` evidence says it is still running; `"unknown"` means neither can be shown — B-alive
+ * treats `"alive"` and `"unknown"` identically (fail closed, never delete).
+ */
+export type Death = "confirmed" | "alive" | "unknown";
+
+/** `supervisor.remove()`'s result (§2.2) — the ONLY entry point `hub/agent-remove.ts` drives. */
+export type RemoveResult =
+  | { ok: true; outcome: "removed" }
+  | { ok: true; outcome: "pending"; state: "stopping" }
+  | { ok: false; code: "E_AGENT_ONLINE"; reason: "exit-unconfirmed" }
+  | { ok: false; code: "E_NOT_FOUND" }
+  | { ok: false; code: "E_DEADLINE" };
+
+// ---------------------------------------------------------------------------
 // records
 // ---------------------------------------------------------------------------
 
@@ -193,6 +213,11 @@ export interface InternalRecord extends StoredRecord {
   readonly uiCancelled: ReadonlyArray<{ method: string; title?: string; at: number }>;
   /** Owner projection `stderrTail` (≤4 KiB); undefined once the sink is gone. */
   stderrTail(): string | undefined;
+  /** web-hub-delete-session plan v2 §2.2: a delete was requested and has not yet been resolved
+   * (deleted, or abandoned per B-alive) — mirrors `StoredRecord.removeIntent` in memory as a
+   * definite boolean (never `undefined`). Drives `SpawnRecordPublic.removing` in both
+   * projections (`project.ts`'s `toPublic` and this module's own `publicItem`). */
+  removePending: boolean;
 }
 
 interface StopState {
@@ -249,6 +274,18 @@ export interface SpawnSupervisor {
   busyCount(): number;
   /** SP8's `onChange` landing: same-tick merged `spawns` push + debounced persist. */
   noteSpawnChanged(spawnId: string): void;
+  /** web-hub-delete-session plan v2 §2.2: the remove router's managed lookup — the LATEST
+   * record (any state, not just non-terminal — unlike the private `findByAgentKey`) bound to
+   * `agentKey`. Undefined when no record was ever bound to that key. */
+  lookupByAgentKey(agentKey: string): { spawnId: string } | undefined;
+  /** web-hub-delete-session plan v2 §2.2: the single deletion entry point for a managed record
+   * (by `spawnId`). Non-terminal ⇒ persists a remove intent and enters (or confirms) the stop
+   * grace, `"pending"`; terminal ⇒ judged immediately by `deathOf` — `"removed"` or refused
+   * `E_AGENT_ONLINE{reason:"exit-unconfirmed"}` with the record untouched (B-alive). */
+  remove(spawnId: string, deadline: ReqDeadline): RemoveResult;
+  /** web-hub-delete-session plan v2 §2.4: read-only death verdict for a record, by `spawnId` —
+   * shares `remove()`'s private judgment (§2.1). Undefined when no such record exists. */
+  deathOf(spawnId: string): Death | undefined;
   /** arch §7.6 graded shutdown: bounded graceful wait → verified SIGTERM → flush → reaper EOF. */
   shutdown(deadline: ReqDeadline): Promise<void>;
 }
@@ -278,6 +315,12 @@ export interface SpawnSupervisorDeps {
   onLink?: (spawnId: string, linked: boolean) => void;
   /** Record went terminal without ever being live (SP8's `expired{never_live|stopped}`). */
   onTerminal?: (spawnId: string, reason: "never_live" | "stopped") => void;
+  /** web-hub-delete-session plan v2 §2.2: fired exactly once per record actually deleted from
+   * memory (`deleteRecord`, the ONLY call site) — `agentKey` is whatever the record had bound
+   * (possibly undefined for a record that died before ever linking). `hub.ts` wires this to
+   * `registry.remove(key, { allowConnected: true })` so an agent card disappears in lockstep
+   * with its spawn record once death is confirmed. */
+  onRemoved?: (spawnId: string, agentKey: string | undefined) => void;
   // ---- additive seams beyond the plan's literal dep list (all optional; wiring & test doubles)
   /** fs seams for launcher-check (default: real fs). */
   launcherFs?: LauncherFs;
@@ -349,6 +392,10 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
   let initialized = false;
   let closedFlag = false;
   let shutdownPromise: Promise<void> | undefined;
+  /** web-hub-delete-session plan v2 §2.6: the single deferred "did the boot-recovered remove
+   * intents actually die" timer armed by `init()`; cleared on `shutdown()` like every other
+   * record timer. */
+  let removeConfirmTimer: NodeJS.Timeout | undefined;
   let platformFail = false;
   let launcherCheck: LauncherCheckResult | undefined;
   let launcherChanged = false;
@@ -461,6 +508,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (rec.hint !== undefined) out.hint = rec.hint;
     if (rec.firstPrompt !== undefined) out.firstPrompt = rec.firstPrompt;
     if (rec.stderrLog !== undefined) out.stderrLog = rec.stderrLog;
+    if (rec.removePending) out.removeIntent = true;
+    if (rec.noProcess !== undefined) out.noProcess = rec.noProcess;
     return out;
   }
 
@@ -491,6 +540,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (rec.hint !== undefined && rec.hint !== null) item.hint = rec.hint;
     if (rec.uiCancelled.length > 0) item.uiCancelledCount = rec.uiCancelled.length;
     if (rec.firstPrompt !== undefined) item.firstPrompt = { state: rec.firstPrompt.state };
+    if (rec.removePending) item.removing = true;
     return item;
   }
 
@@ -661,6 +711,98 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     }
   }
 
+  // ----------------------------------------------------------------- §2.1 death confirmation
+
+  function errCodeOf(err: unknown): string | undefined {
+    if (typeof err === "object" && err !== null && "code" in err && typeof err.code === "string") return err.code;
+    return undefined;
+  }
+
+  /** `/proc/<pid>/stat` state char (field 3, after `pid (comm)`) — `Z`/`X` mean the kernel has
+   *  already torn the process down even though it may not be reaped yet (plan v2 §2.1). */
+  function parseStatStateChar(stat: string): string | undefined {
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return undefined;
+    const rest = stat
+      .slice(close + 1)
+      .trim()
+      .split(/\s+/);
+    return rest[0];
+  }
+
+  /**
+   * web-hub-delete-session plan v2 §2.1's read-only death probe. Deliberately NOT
+   * `verifyIdentityById`: that one collapses "doesn't exist" and "can't tell" into one `false`,
+   * which is exactly the ambiguity a delete decision must not have (B-alive: "alive" and
+   * "unknown" are handled identically by the caller, but the DISTINCTION from "confirmed" is the
+   * whole point). Never sends a signal, so it needs none of L5's same-synchronous-segment
+   * discipline. Order mirrors the plan's table: identity quadruple → platform/bootId →
+   * `/proc/<pid>/stat` existence → starttime (pid reuse) → zombie state → `/proc/<pid>/status` uid.
+   */
+  function probeIdentity(rec: Supervised): Death {
+    if (
+      rec.pid === undefined ||
+      rec.procStartTicks === undefined ||
+      rec.bootId === undefined ||
+      rec.uid === undefined
+    ) {
+      return "unknown"; // identity quadruple incomplete (e.g. ④'s /proc was unreadable at fork time)
+    }
+    const platform = procDeps.platform ?? process.platform;
+    if (platform !== "linux" || hubBootId === "") return "unknown";
+    if (rec.bootId !== hubBootId) return "confirmed"; // the machine rebooted since this was forked
+    let stat: string;
+    try {
+      stat = readProc(`/proc/${rec.pid}/stat`);
+    } catch (err) {
+      const code = errCodeOf(err);
+      return code === "ENOENT" || code === "ESRCH" ? "confirmed" : "unknown";
+    }
+    const startTicks = parseStartTicks(stat);
+    if (startTicks === undefined) return "unknown"; // malformed /proc content — fail closed
+    if (startTicks !== rec.procStartTicks) return "confirmed"; // the pid has been reused
+    const state = parseStatStateChar(stat);
+    if (state === "Z" || state === "X") return "confirmed";
+    let status: string;
+    try {
+      status = readProc(`/proc/${rec.pid}/status`);
+    } catch {
+      return "unknown";
+    }
+    const uid = parseUidLine(status);
+    if (uid === undefined) return "unknown";
+    return uid.real !== rec.uid ? "confirmed" : "alive"; // not the same process — someone reused the pid
+  }
+
+  /**
+   * web-hub-delete-session plan v2 §2.1: the ONE place that judges whether a record's process is
+   * actually gone. A real (non-`unconfirmed`) exit event is authoritative on its own; a
+   * `pid === undefined` record needs persisted `noProcess` evidence to be `confirmed` (C1: a
+   * crash between fork and pid persist must never be assumed dead); everything else falls to the
+   * `/proc` probe above.
+   */
+  function computeDeath(rec: Supervised): Death {
+    if (rec.pid === undefined) {
+      return rec.noProcess === "never-forked" || rec.noProcess === "boot-changed" ? "confirmed" : "unknown";
+    }
+    if (rec.exit !== undefined && rec.exit !== null && rec.exit.unconfirmed !== true) return "confirmed";
+    return probeIdentity(rec);
+  }
+
+  /**
+   * web-hub-delete-session plan v2 §2.2: the ONLY place a managed record is ever deleted from
+   * memory. Guards against a double-delete/trim race (the record may have already been evicted
+   * by `trimTerminalRecords()` moments earlier in the SAME synchronous turn).
+   */
+  function deleteRecord(rec: Supervised): void {
+    if (records.get(rec.spawnId) !== rec) return;
+    records.delete(rec.spawnId);
+    persistDebounced();
+    schedulePush();
+    deps.audit({ audit: "spawn", phase: "remove", spawnId: rec.spawnId });
+    deps.onRemoved?.(rec.spawnId, rec.agentKey);
+  }
+
   // ----------------------------------------------------------------- per-record plumbing
 
   function writeStdin(rec: Supervised, line: string): boolean {
@@ -737,6 +879,19 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     persistDebounced();
     schedulePush();
     trimTerminalRecords();
+    // web-hub-delete-session plan v2 §2.2: a pending delete's verdict is pinned to the SAME
+    // termination this function already handles — crash, guard timeout, spawn_error, user stop,
+    // all of them — never a separate code path. `deleteRecord` guards its own trim race.
+    if (rec.removePending && records.get(rec.spawnId) === rec) {
+      if (computeDeath(rec) === "confirmed") {
+        deleteRecord(rec);
+      } else {
+        rec.removePending = false;
+        persistDebounced();
+        schedulePush();
+        deps.audit({ audit: "spawn", phase: "remove", spawnId: rec.spawnId, code: "E_EXIT_UNCONFIRMED" });
+      }
+    }
   }
 
   function failSpawnError(rec: Supervised, detail: string): void {
@@ -1059,6 +1214,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       stopTimer: undefined,
       lastOpenCount: 0,
       stop: undefined,
+      removePending: false,
     };
 
     // ① intent — L1: on disk BEFORE the fork
@@ -1075,9 +1231,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       // Review re-run #5: ONE terminal entry point — finalizeTerminal drives the audit, the
       // pushes, the retention trim AND the SP8 onTerminal bridge (never_live), so the
       // forwarder's pending prompt expires instead of leaking. breakerExempt keeps §3.1 ②'s
-      // "cwd raced away under the user" out of the launcher breaker.
+      // "cwd raced away under the user" out of the launcher breaker. web-hub-delete-session plan
+      // v2 §2.1 (C1): pid never existed for this record — `noProcess:"never-forked"` lets a
+      // later delete be `confirmed` instead of fail-closed `unknown`.
       rec.breakerExempt = true;
       rec.endReason = "spawn_error";
+      rec.noProcess = "never-forked";
       rec.stop = { reason: "spawn_error", terminalState: "failed", stage: 3 };
       finalizeTerminal(rec);
       return { ok: false, code: "E_DIR", reason: pin.reason };
@@ -1109,11 +1268,14 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       }
     } catch (err) {
       // §3.1 ③ + its note: the record exists (① built it), so the route still answers 202 —
-      // the failure rides the spawns SSE. Breaker counts.
+      // the failure rides the spawns SSE. Breaker counts. web-hub-delete-session plan v2 §2.1
+      // (C1): node's synchronous `spawn` throw only happens before the fork itself.
+      rec.noProcess = "never-forked";
       failSpawnError(rec, err instanceof Error ? err.message : String(err));
       return { ok: true, spawnId: rec.spawnId };
     }
     if (child === undefined) {
+      rec.noProcess = "never-forked";
       failSpawnError(rec, "spawnFn returned no child");
       return { ok: true, spawnId: rec.spawnId };
     }
@@ -1213,6 +1375,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       stopTimer: undefined,
       lastOpenCount: 0,
       stop: undefined,
+      removePending: stored.removeIntent === true,
     };
     return rec;
   }
@@ -1344,6 +1507,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       if (isTerminalSpawnState(stored.state)) continue;
       mutated = true;
       if (bootChanged) {
+        rec.noProcess = "boot-changed"; // web-hub-delete-session plan v2 §2.1 (C1)
         finalizeRecovered(rec, "boot-mismatch"); // machine rebooted — no signal is meaningful
         continue;
       }
@@ -1377,6 +1541,41 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       }
       // non-terminal without a full identity (e.g. ④'s unreadable /proc) — fail closed, no signal
       finalizeRecovered(rec);
+    }
+
+    // web-hub-delete-session plan v2 §2.6 (r1 #6): every record recovered with a persisted
+    // remove intent gets ONE more verdict before it resumes normal life. By this point every
+    // record above is terminal (either it already was, or the recovery branches above just
+    // finalized it) — an already-`confirmed` one (e.g. a genuine exit recorded before the crash,
+    // or `noProcess` evidence) deletes immediately; everything else waits
+    // `RECOVER_KILL_AFTER_MS + EXIT_GUARD_MS` for `recoverEscalate`'s TERM→KILL ladder (armed
+    // above) to actually land before judging "still alive" (giving up clears the intent, same
+    // outcome as the live guard-timeout path — the card reappears via the next `agent_up`).
+    const pendingRemoveConfirm: string[] = [];
+    for (const rec of records.values()) {
+      if (!rec.removePending) continue;
+      if (computeDeath(rec) === "confirmed") {
+        deleteRecord(rec);
+        continue;
+      }
+      pendingRemoveConfirm.push(rec.spawnId);
+    }
+    if (pendingRemoveConfirm.length > 0) {
+      removeConfirmTimer = arm(RECOVER_KILL_AFTER_MS + EXIT_GUARD_MS, () => {
+        removeConfirmTimer = undefined;
+        for (const spawnId of pendingRemoveConfirm) {
+          const rec = records.get(spawnId);
+          if (rec === undefined || !rec.removePending) continue;
+          if (computeDeath(rec) === "confirmed") {
+            deleteRecord(rec);
+          } else {
+            rec.removePending = false;
+            persistDebounced();
+            schedulePush();
+            deps.audit({ audit: "spawn", phase: "remove", spawnId: rec.spawnId, code: "E_EXIT_UNCONFIRMED" });
+          }
+        }
+      });
     }
 
     launcherCheck = await checkLauncherAsync(deps.launcher, deadline, deps.launcherFs);
@@ -1418,6 +1617,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (shutdownPromise !== undefined) return shutdownPromise;
     closedFlag = true;
     unsubscribeBus();
+    removeConfirmTimer = clearHandle(removeConfirmTimer);
     shutdownPromise = (async () => {
       const waitBudget = deriveBudget(deadline.remaining(), 3000, 6500);
       const pending = [...records.values()].filter((r) => !isTerminalSpawnState(r.state));
@@ -1558,6 +1758,45 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       // lines); the stored slice is advisory for SP9's accept path only.
       if (!records.has(spawnId)) return;
       schedulePush();
+    },
+    lookupByAgentKey(agentKey: string): { spawnId: string } | undefined {
+      let best: Supervised | undefined;
+      for (const rec of records.values()) {
+        if (rec.agentKey !== agentKey) continue;
+        if (best === undefined || rec.updatedAt > best.updatedAt) best = rec;
+      }
+      return best === undefined ? undefined : { spawnId: best.spawnId };
+    },
+    remove(spawnId: string, deadline: ReqDeadline): RemoveResult {
+      const rec = records.get(spawnId);
+      if (rec === undefined) return { ok: false, code: "E_NOT_FOUND" };
+      if (!isTerminalSpawnState(rec.state)) {
+        if (rec.removePending) return { ok: true, outcome: "pending", state: "stopping" };
+        if (deadline.remaining() < INTENT_MIN_REMAINING_MS) return { ok: false, code: "E_DEADLINE" };
+        rec.removePending = true;
+        const saved = store.saveNow(storedSnapshot());
+        if (!saved.ok) {
+          // web-hub-delete-session plan v2 §2.2/§2.6 degrade D-6: the intent lives in memory only
+          // until the next successful write — the three safety invariants are unaffected either
+          // way (the record is never deleted without a CONFIRMED death), deletion just proceeds.
+          log.warn("spawn supervisor: remove-intent persist failed, continuing in-memory only", {
+            spawnId: rec.spawnId,
+            code: saved.code,
+          });
+        }
+        if (rec.state !== "stopping") enterStopping(rec, "user");
+        schedulePush();
+        return { ok: true, outcome: "pending", state: "stopping" };
+      }
+      if (computeDeath(rec) === "confirmed") {
+        deleteRecord(rec);
+        return { ok: true, outcome: "removed" };
+      }
+      return { ok: false, code: "E_AGENT_ONLINE", reason: "exit-unconfirmed" };
+    },
+    deathOf(spawnId: string): Death | undefined {
+      const rec = records.get(spawnId);
+      return rec === undefined ? undefined : computeDeath(rec);
     },
     shutdown,
   };

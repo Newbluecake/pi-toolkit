@@ -381,6 +381,26 @@ describe("POST /api/headless — idempotency (plan §SP9)", () => {
     const start = kit.supervisor.startCalls[0]!;
     expect(start.firstPrompt).toEqual({ textLen: 2, deliver: "followUp" });
   });
+
+  it("web-hub-delete-session plan v2 §2.5 (r1 #3, B-fork): dup LRU hit but the record was deleted ⇒ 409 spawn-gone, no fork, no new record, creation token untouched", async () => {
+    const first = await spawnPost(BODY);
+    expect(first.status).toBe(202);
+    const spawnId = JSON.parse(first.body).spawnId as string;
+    // simulate the record having been deleted (web-hub-delete-session supervisor.remove()) —
+    // the in-memory map outliving every LRU entry is exactly the scenario this guards against.
+    kit.supervisor.recordsOut.length = 0;
+    const replay = await spawnPost(BODY);
+    expect(replay.status).toBe(409);
+    expect(JSON.parse(replay.body)).toEqual({ error: "E_BAD_REQUEST", reason: "spawn-gone" });
+    expect(kit.supervisor.startCalls).toHaveLength(1); // no fresh fork
+    expect(kit.supervisor.recordsOut).toHaveLength(0); // no new record appeared
+    // a different digest for the SAME id is still a normal digest conflict, unaffected
+    const differentIntent = await spawnPost({ ...BODY, cwd: "/home/u/other" });
+    expect(differentIntent.status).toBe(409);
+    expect(JSON.parse(differentIntent.body)).toMatchObject({ error: "E_BAD_REQUEST" });
+    expect(JSON.parse(differentIntent.body).reason).toBeUndefined();
+    void spawnId;
+  });
 });
 
 describe("POST /api/headless — rate + supervisor results", () => {

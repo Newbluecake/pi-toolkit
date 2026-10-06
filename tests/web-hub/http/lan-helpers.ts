@@ -21,6 +21,8 @@ import { createLoginLimiter, type LoginLimiter } from "../../../src/web-hub/hub/
 import type { HubEvent, HubLanConfig, HttpFrontend, LanStatus } from "../../../src/web-hub/hub/ports.js";
 import type { CommandRouter } from "../../../src/web-hub/hub/ports.js";
 import type { SpawnFrontendPort } from "../../../src/web-hub/hub/spawn/ports.js";
+import type { AgentRemoveFrontendPort } from "../../../src/web-hub/hub/agent-remove.js";
+import type { RegistryView } from "../../../src/web-hub/hub/ports.js";
 import { PROTO } from "../../../src/web-hub/protocol/version.js";
 import { captureLog, type LogLine } from "./helpers.js";
 import { testHubPaths } from "../helpers/paths.js";
@@ -82,6 +84,13 @@ export async function startLan(
     /** web-hub-spawn plan §SP9: the spawn route frontend (`createSpawnRoutes` over the
      * spawn-kit fakes) — omitted keeps the LAN face byte-identical to not-enabled. */
     spawn?: SpawnFrontendPort;
+    /** web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend
+     * — omitted keeps `POST /api/agents/remove` on LAN at its legacy 404 (not-enabled). */
+    agentRemove?: AgentRemoveFrontendPort;
+    /** web-hub-delete-session plan v2 §2.9: lets a test supply a registry with a working
+     * `.remove()` (the LAN `agentRemove` path's row-6 fallback needs one) — omitted keeps the
+     * pre-existing empty stub (`list`/`get` only, no agents ever present). */
+    registry?: RegistryView;
   } = {},
 ): Promise<LanHarness> {
   const clock = opts.clock ?? fakeClock();
@@ -111,7 +120,7 @@ export async function startLan(
   const fe = createHttpFrontend({
     config: { v: 1, home: dir, port: 0, idleExitMinutes: 10, pluginVersion: "0.0.0-test", buildId: "b1" },
     paths,
-    registry: { list: () => [], get: () => undefined },
+    registry: opts.registry ?? { list: () => [], get: () => undefined },
     bus: {
       subscribe: (fn) => {
         subs.add(fn);
@@ -143,6 +152,7 @@ export async function startLan(
     lan: { cfg, store, kdf, limiter, admission, hosts, scope, onStatus: (s) => (lastStatus = s) },
     ...(opts.commands === undefined ? {} : { commands: opts.commands }),
     ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
+    ...(opts.agentRemove === undefined ? {} : { agentRemove: opts.agentRemove }),
   });
 
   if (fe.lan === undefined) throw new Error("test bug: fe.lan not constructed");

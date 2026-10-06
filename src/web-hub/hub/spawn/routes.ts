@@ -62,6 +62,7 @@ import {
 import {
   FIRST_PROMPT_GRACE_MS,
   SPAWN_BODY_MAX,
+  SPAWN_GONE_REASON,
   SPAWN_ID_RE,
   parseSpawnRequestBody,
   type HubSpawnConfig,
@@ -510,8 +511,15 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
         });
         return;
       }
-      // record gone (defensive — the in-memory map outlives every LRU entry): fall through and
-      // create a fresh one under a new spawnId.
+      // record gone (defensive — the in-memory map outlives every LRU entry): web-hub-delete-
+      // session plan v2 §2.5 (r1 #3, B-fork) — a dup replay must NEVER fork fresh under the old
+      // intent id once the record has been deleted (the LRU hit is the only thing that used to
+      // make this distinguishable from a brand-new id; deletion breaks that assumption, so the
+      // reject has to be explicit). Rejected before the creation-rate gate (gate 7): no token
+      // spent, matching the dup-hit's own "幂等命中不扣令牌" rule.
+      rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, spawnId: dup.spawnId, code: "E_BAD_REQUEST" });
+      io.sendJson(res, 409, { error: "E_BAD_REQUEST", reason: SPAWN_GONE_REASON });
+      return;
     }
 
     // gate 7 — creation rate bucket (capacity ratePerMinute, refill 60s/ratePerMinute)

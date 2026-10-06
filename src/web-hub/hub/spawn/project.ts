@@ -103,6 +103,7 @@ export function toPublic(rec: InternalRecord, fpOf?: FirstPromptViewOf): SpawnRe
   if (rec.uiCancelled.length > 0) item.uiCancelledCount = rec.uiCancelled.length;
   const fp = publicFirstPrompt(rec, fpOf);
   if (fp !== undefined) item.firstPrompt = fp;
+  if (rec.removePending) item.removing = true;
   return item;
 }
 
@@ -145,6 +146,7 @@ export function toViewer(
     ...(pub.exit !== undefined ? { exit: pub.exit } : {}),
     ...(pub.hint !== undefined ? { hint: pub.hint } : {}),
     ...(pub.uiCancelledCount !== undefined ? { uiCancelledCount: pub.uiCancelledCount } : {}),
+    ...(pub.removing !== undefined ? { removing: pub.removing } : {}),
     ...(pub.firstPrompt !== undefined
       ? {
           firstPrompt:

@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FrontendDeps, FrontendFactory, HubConfig, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { installProcessHandlers, startHub, type RunningHub, type StartHubDeps } from "../../../src/web-hub/hub/hub.js";
 import { SPAWN_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
-import { webHubSpawnFiles } from "../../../src/web-hub/protocol/paths.js";
+import { webHubSpawnFiles, webHubStateDir } from "../../../src/web-hub/protocol/paths.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import type { Reaper, ReaperTrackRecord } from "../../../src/web-hub/hub/spawn/reaper.js";
 import type { SpawnSupervisor } from "../../../src/web-hub/hub/spawn/supervisor.js";
@@ -189,6 +189,11 @@ interface StartKitOpts {
   /** SP13 (SP10 acceptance leftover P3): make `fe.listen()` reject — startHub then runs the
    * reverse-order startup-failure unwind, whose spawn-shutdown/fe.close ORDER this kit pins. */
   listenFails?: boolean;
+  /** web-hub-delete-session plan v2 §2.6/A9: called with `home` right after it is created, before
+   * `startHub()` runs — lets a test pre-seed a REAL `spawns.json` file (simulating a previous
+   * hub process that crashed mid-delete) so the restart-recovery path runs end-to-end through
+   * the real file store, not just the fake-store unit matrix in `spawn/supervisor.test.ts`. */
+  beforeStart?: (home: string) => void;
 }
 
 /** SP13 P3: the `order` capture of the most recent FAILED startKit (the kit object never
@@ -197,6 +202,7 @@ let lastFailureOrder: string[] | undefined;
 
 async function startKit(opts: StartKitOpts = {}): Promise<HubKit> {
   const home = tmp.make("wh-hubspawn-");
+  opts.beforeStart?.(home);
   const order: string[] = [];
   const fe = fakeFrontend(order, opts.listenFails === true);
   const spy = opts.withAssembly === true ? supSpy(order) : undefined;
@@ -501,5 +507,48 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
       exitSpy.mockRestore();
       for (const l of listeners) process.on("uncaughtException", l);
     }
+  });
+
+  it("web-hub-delete-session plan v2 §2.6/A9: a REAL spawns.json with a terminal removeIntent record (confirmed exit) is reconciled — deleted — during the real file-store restart", async () => {
+    let spawnsJsonPath = "";
+    const kit = await startKit({
+      spawn: SPAWN_CFG,
+      withAssembly: true,
+      beforeStart: (home) => {
+        const stateDir = webHubStateDir(home);
+        mkdirSync(stateDir, { recursive: true });
+        const files = webHubSpawnFiles(stateDir);
+        spawnsJsonPath = files.spawnsJson;
+        const envelope = {
+          v: 2,
+          gen: 1,
+          writer: { pid: 1, startedAt: 0, bootId: "previous-crashed-hub-boot-id" },
+          records: [
+            {
+              spawnId: "sp_PrevHubDeleted01",
+              state: "exited",
+              cwd: "/tmp/does-not-matter",
+              dev: 1,
+              ino: 1,
+              createdAt: 1,
+              updatedAt: 1,
+              owner: { listener: "loopback", reqId: "r1" },
+              pid: 999999, // irrelevant: a real (non-unconfirmed) exit short-circuits deathOf to "confirmed"
+              endReason: "crash",
+              exit: { code: 1, signal: null },
+              removeIntent: true,
+            },
+          ],
+        };
+        writeFileSync(spawnsJsonPath, JSON.stringify(envelope), { mode: 0o600 });
+      },
+    });
+    // init() already ran (startHub awaits it) — the confirmed-dead record must be gone, both in
+    // memory and in the very file it was loaded from (the reconciliation's own persistDebounced
+    // write settles on the 200ms debounce; give it room).
+    expect(kit.sup!.records().find((r) => r.spawnId === "sp_PrevHubDeleted01")).toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const onDisk = JSON.parse(readFileSync(spawnsJsonPath, "utf8")) as { records: Array<{ spawnId: string }> };
+    expect(onDisk.records.find((r) => r.spawnId === "sp_PrevHubDeleted01")).toBeUndefined();
   });
 });

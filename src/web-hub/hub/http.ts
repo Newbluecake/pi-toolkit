@@ -46,7 +46,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { randomBytes } from "node:crypto";
-import { API_ERRORS, type AgentCard, type HistoryPayload } from "../protocol/http-contract.js";
+import { API_ERRORS, AGENT_REMOVE_PATH, type AgentCard, type HistoryPayload } from "../protocol/http-contract.js";
 import { canonicalHostKey, canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
 import type {
   CmdArgs,
@@ -65,6 +65,7 @@ import { auditControl, auditUpload, type UploadHttpMetrics } from "./audit.js";
 import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import { createConnGuard } from "./conn-guard.js";
 import { createFileSearchRoutes, FILE_SEARCH_AUTH_RESERVE_MS, FILE_SEARCH_PATH } from "./file-search.js";
+import type { AgentRemoveFrontendPort, AgentRemoveIo } from "./agent-remove.js";
 import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
@@ -740,6 +741,16 @@ function createRouteSet(
         case "agent_stale":
           sse.publish("agent_stale", { agentKey: e.agentKey });
           break;
+        // web-hub-delete-session plan v2 §2.3/§4.3 (r1 #4): a card was deleted — the EXACT order
+        // matters (dropAgent BEFORE clearing scoped subscriptions BEFORE the broadcast) so that
+        // a client still subscribed to this agentKey never receives an `ev`/`append` for it
+        // after this point; the eventual `spawns` push (queued separately, supervisor-side) no
+        // longer carries the record either way.
+        case "agent_removed":
+          dropAgent(e.agentKey);
+          for (const c of sse.list()) c.subscribed.delete(e.agentKey);
+          sse.publish("agent_removed", { agentKey: e.agentKey });
+          break;
         case "session":
           sse.publish("session", { agentKey: e.agentKey, session: e.session });
           break;
@@ -972,6 +983,10 @@ export interface LanRuntime {
   /** @文件补全 (file-mention): the file-search route frontend, same instance as the loopback
    * listener's; same §4.7 gate as preview above (`mode === "on"` only, else original 404). */
   fileSearch?: FileSearchRoutes | undefined;
+  /** web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend, same
+   * instance as the loopback listener's. Absent ⇒ `POST /api/agents/remove` on LAN keeps its
+   * original 404, byte-identical to not-enabled. */
+  agentRemove?: AgentRemoveFrontendPort | undefined;
 }
 
 function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
@@ -1315,6 +1330,29 @@ async function handleLanRequestInner(
         return { ip: ctx.clientIp, user: `u${session.userId}` };
       },
       sendJson,
+    });
+  }
+
+  // web-hub-delete-session plan v2 §2.9/§4.1: `POST /api/agents/remove` — same insertion point
+  // class as headless/preview/file-search above (after every GET-shaped special route, before
+  // the generic `POST` branch). `authorize` copies the `/api/cmd` LAN segment verbatim (single
+  // auth, same as stop).
+  if (rt.agentRemove !== undefined && method === "POST" && path === AGENT_REMOVE_PATH) {
+    return rt.agentRemove.handle(req, res, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      strictCsrfOk: () => strictCsrfOk(req, ctx.externalOrigin),
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, LAN_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      readJson,
+      sendJson,
+      sendError,
+      HttpError,
     });
   }
 
@@ -2182,6 +2220,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // keeps its legacy replies (401/404 per the §4.7 not-enabled matrix) and no `X-PWH-Preview-*`
   // header is ever sent, byte-identical to pre-PV3.
   const previewRoutes = deps.preview;
+  // web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend —
+  // absent ⇒ `POST /api/agents/remove` keeps its legacy reply (404, not-enabled), byte-identical.
+  const agentRemoveRoutes = deps.agentRemove;
   // @文件补全 (file-mention): the `GET /api/files/search` route frontend. Default-constructed
   // from the preview line's presence/mode (the search endpoint is preview's completion
   // sibling — same cwd-root security surface, same §4.7 listener matrix), so `hub.ts` needs no
@@ -2278,6 +2319,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       /** @文件补全 (file-mention): same instance as the loopback listener's (or undefined when
        * preview/file-search is not enabled — the LAN face then keeps its original 404). */
       fileSearch: fileSearchRoutes,
+      /** web-hub-delete-session plan v2 §2.9: same instance as the loopback listener's. */
+      agentRemove: deps.agentRemove,
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -2549,6 +2592,28 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
+      });
+    }
+    // web-hub-delete-session plan v2 §2.9/§4.1: `POST /api/agents/remove` — same insertion point
+    // class as headless/preview/file-search above, before the generic `POST` branch. authorize
+    // is the same sync cookie-map lookup every other loopback branch uses.
+    if (agentRemoveRoutes !== undefined && method === "POST" && path === AGENT_REMOVE_PATH) {
+      return agentRemoveRoutes.handle(req, res, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        strictCsrfOk: () =>
+          strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        readJson,
+        sendJson,
+        sendError,
+        HttpError,
       });
     }
     if (method === "POST") {

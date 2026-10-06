@@ -365,3 +365,54 @@ export function auditPreview(log: { info(msg: string, data?: object): void }, re
   }
   log.info("preview", out);
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-delete-session plan v2 §4.2: remove audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * Remove audit record (plan v2 §4.2, A13: "每次请求一行 audit:'remove'"). ONE line per
+ * `POST /api/agents/remove` request, written by `hub/agent-remove.ts` — a channel SEPARATE from
+ * the supervisor's own `audit:"spawn"` `phase:"remove"` lines (those record the state-machine
+ * transition that deletes/abandons a managed record; these record the HTTP-layer decision, which
+ * may never reach the supervisor at all — e.g. an unmanaged offline card, or an early CSRF/
+ * auth/rate reject). Never carries anything beyond identifiers/outcomes (same U7 discipline as
+ * every other audit channel here).
+ */
+export interface RemoveAuditRecord {
+  phase: "request" | "reject";
+  listener?: "loopback" | "lan";
+  ip?: string;
+  user?: string;
+  agentKey?: string;
+  spawnId?: string;
+  /** `"removed" | "pending" | "absent"` (§2.4's success outcomes) — a free string, not a union,
+   * so a future outcome never needs a schema change here. */
+  outcome?: string;
+  code?: string;
+  reason?: string;
+}
+
+/** Runtime whitelist for `auditRemove` — anything not listed here is dropped, even if passed. */
+export const REMOVE_AUDIT_KEYS = [
+  "phase",
+  "listener",
+  "ip",
+  "user",
+  "agentKey",
+  "spawnId",
+  "outcome",
+  "code",
+  "reason",
+] as const;
+
+/** `log.info("remove", { audit: "remove", ...pick(record, REMOVE_AUDIT_KEYS) })` (§4.2). */
+export function auditRemove(log: { info(msg: string, data?: object): void }, record: RemoveAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "remove" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of REMOVE_AUDIT_KEYS) {
+    const v = raw[key];
+    if (v !== undefined) out[key] = v;
+  }
+  log.info("remove", out);
+}

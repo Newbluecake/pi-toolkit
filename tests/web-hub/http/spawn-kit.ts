@@ -14,7 +14,9 @@ import type { FirstPromptForwarder, FirstPromptStateView } from "../../../src/we
 import type { SpawnFrontendPort } from "../../../src/web-hub/hub/spawn/ports.js";
 import type {
   AdmittedRequest,
+  Death,
   InternalRecord,
+  RemoveResult,
   SpawnSupervisor,
   StartResult,
 } from "../../../src/web-hub/hub/spawn/supervisor.js";
@@ -42,6 +44,14 @@ export interface FakeSpawnSupervisor extends SpawnSupervisor {
   setStopResult(result: { ok: true; state: SpawnState } | { ok: false; code: "E_NOT_FOUND" }): void;
   seedRecord(rec: Partial<InternalRecord> & Pick<InternalRecord, "spawnId">): InternalRecord;
   recordsOut: InternalRecord[];
+  /** web-hub-delete-session plan v2 §2.4/§7.1: `remove()`'s call log + controllable result
+   * (default: look up the seeded record in `recordsOut` and mirror the real supervisor's
+   * non-terminal→pending / terminal+confirmed→removed behavior off its `state`/`exit`). */
+  removeCalls: Array<{ spawnId: string }>;
+  setRemoveResult(resultOrFn: RemoveResult | ((spawnId: string) => RemoveResult)): void;
+  /** Controllable `lookupByAgentKey`/`deathOf` — default lookup scans `recordsOut` by agentKey
+   * (latest `updatedAt`); default deathOf is "unknown" unless overridden. */
+  setDeathOf(resultOrFn: Death | undefined | ((spawnId: string) => Death | undefined)): void;
 }
 
 export const ALLOWED_POLICY: SpawnPolicyWire = {
@@ -67,11 +77,21 @@ export function fakeSpawnSupervisor(): FakeSpawnSupervisor {
     state: "stopping",
   };
   const recordsOut: InternalRecord[] = [];
+  const removeCalls: FakeSpawnSupervisor["removeCalls"] = [];
+  let removeFn: ((spawnId: string) => RemoveResult) | undefined;
+  let deathFn: (spawnId: string) => Death | undefined = () => "unknown";
   return {
     startCalls,
     stopCalls,
     policyCalls,
     recordsOut,
+    removeCalls,
+    setRemoveResult(resultOrFn) {
+      removeFn = typeof resultOrFn === "function" ? resultOrFn : () => resultOrFn;
+    },
+    setDeathOf(resultOrFn) {
+      deathFn = typeof resultOrFn === "function" ? resultOrFn : () => resultOrFn;
+    },
     setPolicy(policyOrFn) {
       policyFn = typeof policyOrFn === "function" ? policyOrFn : () => ({ ...policyOrFn });
     },
@@ -96,6 +116,7 @@ export function fakeSpawnSupervisor(): FakeSpawnSupervisor {
         hintDetail: undefined,
         uiCancelled: [],
         stderrTail: () => undefined,
+        removePending: false,
         ...partial,
       };
       recordsOut.push(rec);
@@ -130,6 +151,7 @@ export function fakeSpawnSupervisor(): FakeSpawnSupervisor {
           hintDetail: undefined,
           uiCancelled: [],
           stderrTail: () => undefined,
+          removePending: false,
         });
         return { ok: true, spawnId: req.spawnId };
       }
@@ -151,6 +173,31 @@ export function fakeSpawnSupervisor(): FakeSpawnSupervisor {
       return 0;
     },
     noteSpawnChanged() {},
+    lookupByAgentKey(agentKey) {
+      let best: InternalRecord | undefined;
+      for (const rec of recordsOut) {
+        if (rec.agentKey !== agentKey) continue;
+        if (best === undefined || rec.updatedAt > best.updatedAt) best = rec;
+      }
+      return best === undefined ? undefined : { spawnId: best.spawnId };
+    },
+    remove(spawnId, deadline) {
+      removeCalls.push({ spawnId });
+      if (removeFn !== undefined) return removeFn(spawnId);
+      const rec = recordsOut.find((r) => r.spawnId === spawnId);
+      if (rec === undefined) return { ok: false, code: "E_NOT_FOUND" };
+      const terminal = rec.state === "exited" || rec.state === "failed";
+      if (!terminal) {
+        if (deadline.remaining() < 500) return { ok: false, code: "E_DEADLINE" };
+        return { ok: true, outcome: "pending", state: "stopping" };
+      }
+      const d = deathFn(spawnId);
+      if (d === "confirmed") return { ok: true, outcome: "removed" };
+      return { ok: false, code: "E_AGENT_ONLINE", reason: "exit-unconfirmed" };
+    },
+    deathOf(spawnId) {
+      return deathFn(spawnId);
+    },
     async shutdown() {},
   };
 }

@@ -239,6 +239,9 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "cmd_late"
       | "hub"
       | "spawns"
+      // web-hub-delete-session plan v2 §2.3: card-removal broadcast (hub-facing bus event; wire
+      // payload is `AgentRemovedPayload` in protocol/http-contract.ts).
+      | "agent_removed"
       // fleet-drawer plan §5.3 (F3b): the run-transcript bus events (direct-fanout, never
       // SSE-broadcast) + the caps-change event (§5.2 re-validation trigger).
       | "run_ev"

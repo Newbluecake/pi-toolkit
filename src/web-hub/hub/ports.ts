@@ -39,6 +39,7 @@ import type {
   WireEvent,
 } from "../protocol/messages.js";
 import type { HubPaths } from "../protocol/paths.js";
+import type { AgentRemoveFrontendPort } from "./agent-remove.js";
 import type {
   RunEndFrame,
   RunEvFrame,
@@ -413,6 +414,11 @@ export type HubEvent =
   | { type: "agent_up"; agent: AgentCard }
   | { type: "agent_down"; agentKey: string; reason: string }
   | { type: "agent_stale"; agentKey: string }
+  /** web-hub-delete-session plan v2 §2.3: a card was deleted (hub-broadcast, `registry.remove`)
+   * — the browser drops `agentKey` from `agents`/`order`, remembers it in the reducer's
+   * `removed` set, and clears any scoped subscription for it (§2.3/§4.3's `AgentRemovedPayload`
+   * is the wire shape; this is the internal bus event `http.ts`'s `onHubEvent` forwards from). */
+  | { type: "agent_removed"; agentKey: string }
   | { type: "session"; agentKey: string; session: SessionInfo }
   | { type: "ev"; agentKey: string; seq: number; e: WireEvent }
   | { type: "status"; agentKey: string; status: StatusInfo }
@@ -620,6 +626,11 @@ export interface FrontendDeps {
    * and pre-F4 assemblies keep compiling — when absent there is no `/api/run/*` wiring (F4
    * builds `createRunRoutes` off this) and everything else is byte-identical. */
   runTx?: RunTranscriptService;
+  /** web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend
+   * (`hub/agent-remove.ts`'s `createAgentRemoveService`). Optional so test doubles and
+   * pre-feature assemblies keep compiling — when absent, `POST /api/agents/remove` answers 404
+   * on both listeners, byte-identical to not-enabled. */
+  agentRemove?: AgentRemoveFrontendPort;
 }
 
 export interface HttpFrontend {

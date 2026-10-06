@@ -5,10 +5,12 @@ import {
   auditAdmin,
   auditControl,
   auditPreview,
+  auditRemove,
   auditSpawn,
   auditUpload,
   createUploadHttpMetrics,
   PREVIEW_AUDIT_KEYS,
+  REMOVE_AUDIT_KEYS,
   SPAWN_AUDIT_KEYS,
   uploadStatsFields,
   type SpawnAuditRecord,
@@ -427,5 +429,47 @@ describe("auditPreview (web-hub-preview plan v3 §4.5, PV3)", () => {
     // the routes only ever feed pathTag (HMAC-12) / ext into the audit accumulator
     expect(src).toMatch(/acc\.pathTag = pathTagOf\(path\)/);
     expect(src).not.toMatch(/acc\.(path|name|content)\b/);
+  });
+});
+
+describe("auditRemove (web-hub-delete-session plan v2 §4.2, A13)", () => {
+  it('writes the whitelisted key set under audit:"remove" and drops unknown keys', () => {
+    const log = memLog();
+    auditRemove(log, {
+      phase: "request",
+      listener: "loopback",
+      ip: "127.0.0.1",
+      user: "u1",
+      agentKey: "a4242-abcdef",
+      spawnId: "sp_0123456789abcdef",
+      outcome: "removed",
+      code: "E_AGENT_ONLINE",
+      reason: "exit-unconfirmed",
+      // a deliberately smuggled extra field — must be dropped by the whitelist
+      ...({ cwd: "/home/user/project", text: "secret" } as unknown as Record<string, never>),
+    } as never);
+    expect(log.lines).toHaveLength(1);
+    const line = log.lines[0]!;
+    expect(line.msg).toBe("remove");
+    const data = line.data as Record<string, unknown>;
+    expect(data["audit"]).toBe("remove");
+    expect(Object.keys(data).sort()).toEqual(
+      ["audit", "phase", "listener", "ip", "user", "agentKey", "spawnId", "outcome", "code", "reason"].sort(),
+    );
+    expect(data["cwd"]).toBeUndefined();
+    expect(data["text"]).toBeUndefined();
+  });
+
+  it("omits absent optional fields entirely (no null/undefined keys land in the log line)", () => {
+    const log = memLog();
+    auditRemove(log, { phase: "reject", listener: "lan", ip: "10.0.0.5", code: "E_CSRF" });
+    const data = log.lines[0]!.data as Record<string, unknown>;
+    expect(Object.keys(data).sort()).toEqual(["audit", "phase", "listener", "ip", "code"].sort());
+  });
+
+  it("REMOVE_AUDIT_KEYS never carries a prompt/text-bearing key (U7 discipline)", () => {
+    expect(REMOVE_AUDIT_KEYS).not.toContain("cwd");
+    expect(REMOVE_AUDIT_KEYS).not.toContain("text");
+    expect(REMOVE_AUDIT_KEYS).not.toContain("textLen");
   });
 });

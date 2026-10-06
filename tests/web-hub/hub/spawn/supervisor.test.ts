@@ -1517,3 +1517,490 @@ describe("supervisor init recovery (arch §7.7)", () => {
     expect(h.sup.liveCount()).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-delete-session plan v2 §2.1/§2.2/§2.6/§2.7 (r1 #1/#5/#6, C1)
+// ---------------------------------------------------------------------------
+
+function termRecord(over: Partial<StoredRecord> = {}): StoredRecord {
+  return {
+    spawnId: "spterm0000000001",
+    state: "exited",
+    cwd: REALPATH,
+    dev: 9,
+    ino: 99,
+    createdAt: 1_000,
+    updatedAt: 1_000,
+    owner: { listener: "loopback", reqId: "r1" },
+    pid: 1000,
+    procStartTicks: 100,
+    bootId: BOOT,
+    uid: 1000,
+    endReason: "user",
+    exit: { code: null, signal: null, unconfirmed: true },
+    ...over,
+  };
+}
+
+describe("supervisor §2.1: deathOf (web-hub-delete-session plan v2)", () => {
+  it("pid undefined, no noProcess evidence ⇒ unknown (C1: never treat a bare pid-less record as confirmed)", async () => {
+    const h = makeHarness();
+    h.store.loaded = {
+      records: [
+        termRecord({ pid: undefined, procStartTicks: undefined, bootId: undefined, uid: undefined, exit: undefined }),
+      ],
+    };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("unknown");
+  });
+
+  it("pid undefined + noProcess:never-forked ⇒ confirmed", async () => {
+    const h = makeHarness();
+    h.store.loaded = {
+      records: [
+        termRecord({
+          pid: undefined,
+          procStartTicks: undefined,
+          bootId: undefined,
+          uid: undefined,
+          exit: undefined,
+          noProcess: "never-forked",
+        }),
+      ],
+    };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("pid undefined + noProcess:boot-changed ⇒ confirmed", async () => {
+    const h = makeHarness();
+    h.store.loaded = {
+      records: [
+        termRecord({
+          pid: undefined,
+          procStartTicks: undefined,
+          bootId: undefined,
+          uid: undefined,
+          exit: undefined,
+          noProcess: "boot-changed",
+        }),
+      ],
+    };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("a real (non-unconfirmed) exit event ⇒ confirmed, regardless of /proc", async () => {
+    const h = makeHarness();
+    h.store.loaded = { records: [termRecord({ exit: { code: 0, signal: null } })] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("unconfirmed exit, /proc says the pid matches and is alive ⇒ alive", async () => {
+    const h = makeHarness();
+    h.store.loaded = { records: [termRecord()] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("alive");
+  });
+
+  it("unconfirmed exit, /proc/<pid>/stat ENOENT ⇒ confirmed", async () => {
+    const procRead = (path: string): string => {
+      if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT}\n`;
+      if (path === "/proc/1000/stat") throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      throw new Error(`unexpected read: ${path}`);
+    };
+    const h = makeHarness({ proc: { readFileSync: procRead, platform: "linux" } });
+    h.store.loaded = { records: [termRecord()] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("unconfirmed exit, /proc/<pid>/stat read fails with a non-ENOENT/ESRCH error ⇒ unknown (fail closed)", async () => {
+    const procRead = (path: string): string => {
+      if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT}\n`;
+      if (path === "/proc/1000/stat") throw Object.assign(new Error("denied"), { code: "EACCES" });
+      throw new Error(`unexpected read: ${path}`);
+    };
+    const h = makeHarness({ proc: { readFileSync: procRead, platform: "linux" } });
+    h.store.loaded = { records: [termRecord()] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("unknown");
+  });
+
+  it("unconfirmed exit, starttime mismatch (pid reused) ⇒ confirmed", async () => {
+    const h = makeHarness();
+    h.procCorrupt = true; // the fixture's starttime drifts to 424242 ≠ the record's 100
+    h.store.loaded = { records: [termRecord()] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("unconfirmed exit, zombie state (Z) ⇒ confirmed", async () => {
+    const zombieStat = (pid: number, ppid: number, startTicks: number): string => {
+      const rest = ["Z", String(ppid), String(pid)];
+      while (rest.length < 19) rest.push("0");
+      rest.push(String(startTicks));
+      return `${pid} (pi) ${rest.join(" ")}`;
+    };
+    const procRead = (path: string): string => {
+      if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT}\n`;
+      if (path === "/proc/1000/stat") return zombieStat(1000, 999, 100);
+      if (path === "/proc/1000/status") return statusLine(1000, 1000);
+      throw new Error(`unexpected read: ${path}`);
+    };
+    const h = makeHarness({ proc: { readFileSync: procRead, platform: "linux" } });
+    h.store.loaded = { records: [termRecord()] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("unconfirmed exit, /proc/<pid>/status uid differs ⇒ confirmed (pid reused by another user)", async () => {
+    const h = makeHarness();
+    h.store.loaded = { records: [termRecord({ uid: 2000 })] }; // fixture status always says uid 1000
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("unconfirmed exit, stored bootId differs from the hub's own ⇒ confirmed (machine rebooted)", async () => {
+    const h = makeHarness();
+    h.store.loaded = { records: [termRecord({ bootId: "some-other-boot-id" })] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("confirmed");
+  });
+
+  it("unconfirmed exit, identity quadruple incomplete (uid missing) ⇒ unknown", async () => {
+    const h = makeHarness();
+    h.store.loaded = { records: [termRecord({ uid: undefined })] };
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("spterm0000000001")).toBe("unknown");
+  });
+
+  it("unknown spawnId ⇒ undefined", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    expect(h.sup.deathOf("nope")).toBeUndefined();
+  });
+
+  it("r1 #1 regression: exit undefined (failSpawnError's own path, e.g. ⑤ spawn-event timeout) still routes through the probe, never naively confirmed", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await vi.advanceTimersByTimeAsync(5_000); // ⑤ timeout → verified SIGKILL + failed{spawn_error}
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "spawn_error" });
+    expect(rec0(h)?.exit).toBeUndefined();
+    // the fixture's /proc still reports pid 1000 as alive — the harness never simulates the kill
+    // actually taking effect, so this is exactly the "probe, don't assume" case the plan requires.
+    expect(h.sup.deathOf(r.spawnId)).toBe("alive");
+  });
+});
+
+describe("supervisor §2.1 (C1): noProcess evidence is written at every pid-less failure site", () => {
+  it("② pin changed ⇒ noProcess:never-forked; a subsequent remove() succeeds (confirmed, never 409)", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    h.dirs.pinResult = { ok: false, reason: "changed" };
+    const r = req();
+    const res = h.sup.start(r, deadline());
+    expect(res).toEqual({ ok: false, code: "E_DIR", reason: "changed" });
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "spawn_error", noProcess: "never-forked" });
+    expect(h.sup.remove(r.spawnId, deadline())).toEqual({ ok: true, outcome: "removed" });
+    expect(h.sup.records()).toHaveLength(0);
+  });
+
+  it("③ spawnFn sync throw ⇒ noProcess:never-forked", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    h.spawnImpl = () => {
+      throw new Error("EAGAIN");
+    };
+    const r = req();
+    h.sup.start(r, deadline());
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "spawn_error", noProcess: "never-forked" });
+    expect(h.sup.remove(r.spawnId, deadline())).toEqual({ ok: true, outcome: "removed" });
+  });
+
+  it("③ spawnFn returns no child ⇒ noProcess:never-forked", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    h.spawnImpl = (() => undefined) as unknown as Harness["spawnImpl"];
+    const r = req();
+    h.sup.start(r, deadline());
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "spawn_error", noProcess: "never-forked" });
+  });
+
+  it("init() bootChanged recovery ⇒ noProcess:boot-changed on the recovered record", async () => {
+    const h = makeHarness();
+    h.store.loaded = {
+      records: [termRecord({ state: "starting", exit: undefined })],
+      writer: { pid: 1, startedAt: 0, bootId: "a-different-boot-id" },
+    };
+    await h.sup.init(deadline());
+    expect(rec0(h)).toMatchObject({ state: "exited", endReason: "orphan", noProcess: "boot-changed" });
+  });
+
+  it("a launching record whose crash-recovery environ scan merely misses carries NO noProcess evidence — stays unknown, delete refused (R9)", async () => {
+    const h = makeHarness();
+    h.store.loaded = {
+      records: [
+        termRecord({
+          spawnId: "splaunch000001",
+          state: "launching",
+          pid: undefined,
+          procStartTicks: undefined,
+          bootId: undefined,
+          uid: undefined,
+          exit: undefined,
+        }),
+      ],
+    };
+    await h.sup.init(deadline());
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "spawn_error" });
+    expect(rec0(h)?.noProcess).toBeUndefined();
+    expect(h.sup.deathOf("splaunch000001")).toBe("unknown");
+    expect(h.sup.remove("splaunch000001", deadline())).toEqual({
+      ok: false,
+      code: "E_AGENT_ONLINE",
+      reason: "exit-unconfirmed",
+    });
+    expect(h.sup.records()).toHaveLength(1); // refused — record kept
+  });
+});
+
+describe("supervisor §2.2: remove() (web-hub-delete-session plan v2)", () => {
+  it("unknown spawnId ⇒ E_NOT_FOUND", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    expect(h.sup.remove("nope", deadline())).toEqual({ ok: false, code: "E_NOT_FOUND" });
+  });
+
+  it("non-terminal ⇒ pending: persists removeIntent synchronously (L1-style), enters stopping, removing:true rides the spawns push", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h, "k1000");
+    const savesBefore = h.store.calls.filter((c) => c.op === "saveNow").length;
+    const res = h.sup.remove(r.spawnId, deadline());
+    expect(res).toEqual({ ok: true, outcome: "pending", state: "stopping" });
+    expect(rec0(h)).toMatchObject({ state: "stopping", removePending: true });
+    const saves = h.store.calls.filter((c) => c.op === "saveNow");
+    expect(saves.length).toBe(savesBefore + 1);
+    expect(saves.at(-1)?.records?.find((x) => x.spawnId === r.spawnId)?.removeIntent).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const push = h.registry.events.filter((e) => e.type === "spawns").at(-1);
+    expect(push?.type).toBe("spawns");
+    if (push?.type === "spawns") {
+      const item = push.payload.items.find((i) => i.spawnId === r.spawnId);
+      expect(item?.removing).toBe(true);
+      expect(item?.state).toBe("stopping");
+    }
+  });
+
+  it("repeated remove() while pending is idempotent — no extra saveNow, same pending reply", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h, "k1000");
+    h.sup.remove(r.spawnId, deadline());
+    const savesAfterFirst = h.store.calls.filter((c) => c.op === "saveNow").length;
+    expect(h.sup.remove(r.spawnId, deadline())).toEqual({ ok: true, outcome: "pending", state: "stopping" });
+    expect(h.store.calls.filter((c) => c.op === "saveNow").length).toBe(savesAfterFirst);
+  });
+
+  it("insufficient deadline on a non-pending non-terminal record ⇒ E_DEADLINE, no write, record untouched", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h, "k1000");
+    const savesBefore = h.store.calls.filter((c) => c.op === "saveNow").length;
+    const res = h.sup.remove(
+      r.spawnId,
+      createReqDeadline(() => Date.now(), 100),
+    );
+    expect(res).toEqual({ ok: false, code: "E_DEADLINE" });
+    expect(rec0(h)).toMatchObject({ state: "live", removePending: false });
+    expect(h.store.calls.filter((c) => c.op === "saveNow").length).toBe(savesBefore);
+  });
+
+  it("non-terminal remove() completes once the process confirms dead — deleteRecord fires onRemoved exactly once", async () => {
+    const removed: Array<{ spawnId: string; agentKey: string | undefined }> = [];
+    const h = makeHarness({ onRemoved: (spawnId, agentKey) => removed.push({ spawnId, agentKey }) });
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h, "k1000");
+    h.sup.remove(r.spawnId, deadline());
+    h.children[0]?.emit("exit", 0, null); // a REAL (confirmed) exit — not the unconfirmed guard
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sup.records()).toHaveLength(0);
+    expect(removed).toEqual([{ spawnId: r.spawnId, agentKey: "k1000" }]);
+  });
+
+  it("terminal + confirmed dead ⇒ removed", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    const child = await driveToLive(h, "k1000");
+    child.emit("exit", 1, null); // live crash — a REAL exit event, confirmed
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)).toMatchObject({ state: "exited", endReason: "crash" });
+    expect(h.sup.remove(r.spawnId, deadline())).toEqual({ ok: true, outcome: "removed" });
+    expect(h.sup.records()).toHaveLength(0);
+  });
+
+  it("r1 #1 regression (B-alive, A6): terminal + unconfirmed/alive ⇒ 409 exit-unconfirmed, record kept; a second call still refuses; once /proc confirms gone, the SAME call succeeds", async () => {
+    let dead = false;
+    const procRead = (path: string): string => {
+      if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT}\n`;
+      if (path === "/proc/1000/stat") {
+        if (dead) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return statLine(1000, 1000, 100);
+      }
+      if (path === "/proc/1000/status") return statusLine(1000, 1000);
+      throw new Error(`unexpected read: ${path}`);
+    };
+    const h = makeHarness({ proc: { readFileSync: procRead, platform: "linux" } });
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h, "k1000");
+    h.sup.remove(r.spawnId, deadline()); // stdin.end → TERM → KILL → guard, no "exit" ever fires
+    await vi.advanceTimersByTimeAsync(13_000);
+    expect(rec0(h)).toMatchObject({ state: "exited", exit: { unconfirmed: true } });
+    // finalizeTerminal's own removePending resolution already ran: the process still reads
+    // "alive", so removePending must have been cleared and the record kept (not silently deleted).
+    expect(rec0(h)?.removePending).toBe(false);
+    expect(h.sup.remove(r.spawnId, deadline())).toEqual({
+      ok: false,
+      code: "E_AGENT_ONLINE",
+      reason: "exit-unconfirmed",
+    });
+    expect(h.sup.records()).toHaveLength(1);
+    dead = true; // the process finally died
+    expect(h.sup.remove(r.spawnId, deadline())).toEqual({ ok: true, outcome: "removed" });
+    expect(h.sup.records()).toHaveLength(0);
+  });
+});
+
+describe("supervisor §2.7 (r1 #5): delete event ordering is frozen", () => {
+  it("within one macrotask: onRemoved (agent_down?+agent_removed, simulating registry.remove) fires BEFORE the deferred spawns push, which never carries the deleted record", async () => {
+    const removedKeys: string[] = [];
+    const h = makeHarness({
+      onRemoved: (_spawnId, agentKey) => {
+        if (agentKey === undefined) return;
+        // Mirrors hub.ts's real wiring: registry.remove() → down() → agent_down → agent_removed,
+        // all synchronous, all on registry's own bus (asserted here through the fake's `publish`).
+        h.registry.publish({ type: "agent_down", agentKey, reason: "removed" });
+        h.registry.publish({ type: "agent_removed", agentKey });
+        removedKeys.push(agentKey);
+      },
+    });
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    const child = await driveToLive(h, "k1000");
+    h.registry.events.length = 0;
+    h.sup.remove(r.spawnId, deadline());
+    child.emit("exit", 0, null); // confirmed exit → finalizeTerminal → deleteRecord → onRemoved, all sync
+    // Still inside the synchronous turn: onRemoved's publishes already landed, the spawns push
+    // (queued by schedulePush's queueMicrotask) has NOT fired yet.
+    expect(h.registry.events.map((e) => e.type)).toEqual(["agent_down", "agent_removed"]);
+    await vi.advanceTimersByTimeAsync(0); // flush the microtask
+    const types = h.registry.events.map((e) => e.type);
+    expect(types).toEqual(["agent_down", "agent_removed", "spawns"]);
+    const spawnsEvent = h.registry.events.find((e) => e.type === "spawns");
+    expect(spawnsEvent?.type).toBe("spawns");
+    if (spawnsEvent?.type === "spawns") {
+      expect(spawnsEvent.payload.items.find((i) => i.spawnId === r.spawnId)).toBeUndefined();
+    }
+    expect(removedKeys).toEqual(["k1000"]);
+  });
+});
+
+describe("supervisor §2.6 (r1 #6): init recovery reconciles a persisted remove intent", () => {
+  it("terminal record + removeIntent, confirmed dead on disk (real exit) ⇒ deleted immediately at init, no 8s wait needed", async () => {
+    const h = makeHarness();
+    h.store.loaded = {
+      records: [termRecord({ removeIntent: true, exit: { code: 0, signal: null } })],
+    };
+    await h.sup.init(deadline());
+    expect(h.sup.records()).toHaveLength(0);
+  });
+
+  it("terminal record + removeIntent, unconfirmed exit and /proc still says alive ⇒ waits; at the deadline, process is still alive ⇒ intent abandoned, record kept, removePending cleared", async () => {
+    const h = makeHarness();
+    h.store.loaded = { records: [termRecord({ removeIntent: true })] }; // exit.unconfirmed:true, /proc alive
+    await h.sup.init(deadline());
+    expect(h.sup.records()).toHaveLength(1); // not resolved yet
+    await vi.advanceTimersByTimeAsync(8_000); // RECOVER_KILL_AFTER_MS(3s) + EXIT_GUARD_MS(5s)
+    expect(h.sup.records()).toHaveLength(1);
+    expect(rec0(h)).toMatchObject({ state: "exited", removePending: false });
+  });
+
+  it("terminal record + removeIntent, unconfirmed exit but /proc confirms gone before the deadline fires ⇒ deleted exactly when the reconciliation timer runs (not sooner, not later)", async () => {
+    let dead = false;
+    const procRead = (path: string): string => {
+      if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT}\n`;
+      if (path === "/proc/1000/stat") {
+        if (dead) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return statLine(1000, 1000, 100);
+      }
+      if (path === "/proc/1000/status") return statusLine(1000, 1000);
+      throw new Error(`unexpected read: ${path}`);
+    };
+    const h = makeHarness({ proc: { readFileSync: procRead, platform: "linux" } });
+    h.store.loaded = { records: [termRecord({ removeIntent: true })] };
+    await h.sup.init(deadline());
+    expect(h.sup.records()).toHaveLength(1); // alive at init — queued into the pending-confirm set
+    dead = true; // the process finally dies sometime before the 8s reconciliation deadline
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(h.sup.records()).toHaveLength(1); // the timer has not fired yet
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.sup.records()).toHaveLength(0);
+  });
+
+  it("non-terminal record + removeIntent ⇒ finalizeRecovered + recoverEscalate run as usual, THEN reconciled at the deadline (still alive ⇒ abandoned)", async () => {
+    const h = makeHarness();
+    h.store.loaded = {
+      records: [termRecord({ state: "live", exit: undefined, removeIntent: true })],
+      writer: { pid: 1, startedAt: 0, bootId: BOOT },
+    };
+    await h.sup.init(deadline());
+    expect(rec0(h)).toMatchObject({ state: "exited", endReason: "orphan", removePending: true }); // sync bookkeeping
+    await vi.advanceTimersByTimeAsync(0); // the setImmediate signal task (TERM)
+    expect(h.kills).toEqual([{ pid: -1000, signal: "SIGTERM" }]);
+    await vi.advanceTimersByTimeAsync(8_000); // +3s KILL, then the reconciliation deadline fires
+    expect(h.sup.records()).toHaveLength(1); // /proc still says alive — abandoned, not deleted
+    expect(rec0(h)?.removePending).toBe(false);
+  });
+
+  it("saveNow failure during a live remove() (D-6 degrade) never blocks the eventual delete once the process dies", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h, "k1000");
+    h.store.saveNowResults.push({ ok: false, code: "ENOSPC" });
+    const res = h.sup.remove(r.spawnId, deadline());
+    expect(res).toEqual({ ok: true, outcome: "pending", state: "stopping" }); // degrade, not a failure
+    expect(rec0(h)).toMatchObject({ state: "stopping", removePending: true });
+    h.children[0]?.emit("exit", 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sup.records()).toHaveLength(0); // the in-memory intent still resolved it
+  });
+
+  it("shutdown() clears the pending reconciliation timer (no stray fire after close)", async () => {
+    const h = makeHarness();
+    h.store.loaded = { records: [termRecord({ removeIntent: true })] };
+    await h.sup.init(deadline());
+    await h.sup.shutdown(deadline());
+    await vi.advanceTimersByTimeAsync(8_000);
+    // no throw, no crash; the record's fate was whatever shutdown's own flush left it as
+    expect(() => h.sup.records()).not.toThrow();
+  });
+});
