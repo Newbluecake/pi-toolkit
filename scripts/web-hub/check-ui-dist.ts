@@ -54,8 +54,12 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // (`assets/highlight-impl-*.js`, ~21 KB gz, loaded only when a highlightable code view
 // mounts, never first-screen) while the main chunk grows by the renderer/logic/wiring;
 // workspace-measured total ≈165 KB gz (含在途 model-switch M3a), a few KB of slack on top.
+// bumped to 190 KiB by spawn-default-model + picker-widen (2026-10-06) — DirPicker goes
+// modal + per-spawn SpawnModelField, the settings card pulls @sinclair/typebox's runtime
+// parser (`parseSpawnModelRef` via protocol) into the bundle, plus popover clamp/flip and
+// the full-page login; release gate measured 177,597 B gz, ~13 KiB slack on top.
 // Precise per-build numbers drift with in-flight packages — re-measure before the next bump.
-const JS_BUDGET_GZIP_BYTES = 169 * 1024;
+const JS_BUDGET_GZIP_BYTES = 190 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}
