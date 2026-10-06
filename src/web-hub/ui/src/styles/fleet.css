@@ -378,12 +378,21 @@ details[open] > summary.run .chev {
   }
 }
 
-/* 容器实际内联尺寸 <360px(320–359px 的最窄 overlay/fullscreen 场景)时,name+chip+nums 三者
- * 一起放不下 model 还要留足 ellipsis 空间——隐藏 model,只留 time/cost;chip 再加一道
- * max-width 兜底(超长 `type` 字符串的边界情况,正常 token 不会触发)。 */
+/* 容器实际内联尺寸 <360px(320–359px 的最窄手机全屏抽屉)时,name+chip+nums 一行放不下。
+ * 用户明确要求手机上必须看得到各子 agent 的模型名(2026-10-05)——所以不隐藏 model,而是把
+ * nums(model/time/cost)整体挤到第二行,activity 顺延到第三行;第一行只留 icon+name+toggle,
+ * name 拿到整行宽度。chip 再加一道 max-width 兜底(超长 `type` 字符串的边界情况)。 */
 @container (max-width: 359px) {
-  .run-nums .model {
-    display: none;
+  .run {
+    grid-template-columns: 18px 20px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "chev icon name toggle"
+      ". . nums nums"
+      ". . activity activity";
+  }
+
+  .run-nums {
+    justify-content: flex-start;
   }
 
   .run-name .chip {
