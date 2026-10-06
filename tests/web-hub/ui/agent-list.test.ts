@@ -8,12 +8,19 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import AgentList from "../../../src/web-hub/ui/src/components/agents/AgentList.vue";
 import type { AgentCardView } from "../../../src/web-hub/ui/src/types.js";
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+afterEach(() => {
+  // DirPicker Teleports to <body> — drop any leaked dialog DOM / scroll-lock styling between
+  // tests (picker-opening tests unmount their wrapper to release the ref-counted lock itself)
+  document.body.style.overflow = "";
+  document.body.innerHTML = "";
 });
 
 function card(over: Partial<AgentCardView> = {}): AgentCardView {
@@ -528,8 +535,10 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1; 2026-10 redesign)"
     expect(pickDir!.attributes("disabled")).toBeUndefined();
 
     await pickDir!.trigger("click");
-    expect(wrapper.find(".spawn-picker").exists()).toBe(true);
+    // DirPicker is Teleport'd to <body> (2026-10 modal dialog) — query the document
+    expect(document.body.querySelector(".spawn-picker")).not.toBeNull();
     expect(wrapper.find(".nsmenu-menu").exists()).toBe(false); // menu closed after pick
+    wrapper.unmount(); // releases the dialog's body scroll lock
   });
 
   it("policy denied ⇒ pick-dir item disabled with the reason; Escape closes the menu", async () => {
@@ -588,11 +597,13 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1; 2026-10 redesign)"
     await flushPromises();
     await wrapper.get(".new-session-btn").trigger("click");
     await flushPromises();
-    const picker = wrapper.get(".spawn-picker");
-    expect((picker.get("#spawn-cwd").element as HTMLInputElement).value).toBe("/home/u/proj");
-    const submit = picker.get(".spawn-picker-actions .btn-primary");
-    expect(submit.text()).toBe("Start");
-    expect(document.activeElement).toBe(submit.element);
+    // DirPicker is Teleport'd to <body> (2026-10 modal dialog) — query the document
+    const picker = document.body.querySelector(".spawn-picker");
+    expect(picker).not.toBeNull();
+    expect((picker!.querySelector("#spawn-cwd") as HTMLInputElement).value).toBe("/home/u/proj");
+    const submit = picker!.querySelector(".spawn-picker-actions .btn-primary") as HTMLElement;
+    expect(submit.textContent).toBe("Start");
+    expect(document.activeElement).toBe(submit);
     wrapper.unmount();
   });
 
@@ -651,7 +662,9 @@ describe("AgentList.vue — EmptyState pick-dir entry (SP12; 0 agents)", () => {
     const entry = wrapper.get(".empty .spawn-empty-pick");
     expect(entry.text()).toContain("Choose a directory");
     await entry.trigger("click");
-    expect(wrapper.find(".spawn-picker").exists()).toBe(true);
+    // DirPicker is Teleport'd to <body> (2026-10 modal dialog) — query the document
+    expect(document.body.querySelector(".spawn-picker")).not.toBeNull();
+    wrapper.unmount(); // releases the dialog's body scroll lock
   });
 
   it("0 agents without the cap ⇒ no pick-dir entry", () => {

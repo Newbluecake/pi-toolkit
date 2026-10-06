@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -384,6 +386,13 @@ describe("ThinkingChip.vue — policy (§5.2, execution result overrides pre-jud
 });
 
 describe("ThinkingChip.vue — narrow viewport bottom sheet (§5.1 M3b, A10)", () => {
+  it("desktop thinking popover pins min(360px) (2026-10 widening — the model panel carries the shell)", () => {
+    const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/models.css"), "utf8");
+    const panel = css.match(/\.thinking-panel \{([\s\S]*?)\n\}/);
+    expect(panel).not.toBeNull();
+    expect(panel![1]).toContain("width: min(360px, calc(100vw - 2 * var(--sp-4)))");
+  });
+
   it("≤640px: opens as a Teleport'd PickerSheet; busy footnote inside; scrim close returns focus", async () => {
     stubNarrow(true);
     const { control } = fakeControl();

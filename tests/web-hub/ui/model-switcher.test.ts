@@ -5,6 +5,7 @@ import { mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ModelSwitcher from "../../../src/web-hub/ui/src/components/control/ModelSwitcher.vue";
+import { clampPopoverX } from "../../../src/web-hub/ui/src/composables/usePopoverClamp.js";
 import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import type { AgentState, CmdOutcome, ControlHandle } from "../../../src/web-hub/ui/src/types.js";
 
@@ -652,5 +653,43 @@ describe("ModelSwitcher.vue — narrow viewport bottom sheet (§5.1 M3b, #16/A10
     expect(calls).toHaveLength(1);
     expect(calls[0]!.args.slice(0, 3)).toEqual(["agent-a", "model", "zai/glm-5"]);
     expect(document.body.querySelector(".picker-sheet")).toBeNull();
+  });
+});
+
+describe("ModelSwitcher.vue — widened desktop popover (2026-10 user 拍板)", () => {
+  it("models.css pins the wider shell: min(720px) panel at 70vh, min(360px) thinking panel", () => {
+    const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/models.css"), "utf8");
+    const panel = css.match(/\.model-panel \{([\s\S]*?)\n\}/);
+    expect(panel).not.toBeNull();
+    expect(panel![1]).toContain("width: min(720px, calc(100vw - 2 * var(--sp-4)))");
+    expect(panel![1]).toContain("max-height: 70vh");
+    const thinking = css.match(/\.thinking-panel \{([\s\S]*?)\n\}/);
+    expect(thinking).not.toBeNull();
+    expect(thinking![1]).toContain("width: min(360px, calc(100vw - 2 * var(--sp-4)))");
+  });
+
+  it("clampPopoverX shifts a viewport-overflowing panel back inside; fitting panels stay anchored", () => {
+    vi.stubGlobal("innerWidth", 1000);
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const rect = (l: number, r: number) =>
+      ({ left: l, right: r, top: 0, bottom: 0, width: r - l, height: 0, x: l, y: 0, toJSON: () => ({}) }) as DOMRect;
+    const spy = vi.spyOn(el, "getBoundingClientRect");
+
+    spy.mockReturnValue(rect(700, 1120)); // right edge past 1000 - 8 margin
+    clampPopoverX(el);
+    expect(el.style.left).toBe("-128px");
+
+    spy.mockReturnValue(rect(10, 400)); // fits ⇒ inline left cleared, nothing applied
+    clampPopoverX(el);
+    expect(el.style.left).toBe("");
+
+    spy.mockReturnValue(rect(-50, 700)); // left edge past the margin ⇒ shift right to it
+    clampPopoverX(el);
+    expect(el.style.left).toBe("58px");
+
+    spy.mockRestore();
+    el.remove();
+    vi.unstubAllGlobals();
   });
 });

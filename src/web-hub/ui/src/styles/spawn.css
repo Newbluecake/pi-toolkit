@@ -1,11 +1,13 @@
 /*
  * pi web-hub — headless-spawn UI (web-hub-spawn plan SP12 / arch §9.1 — components/spawn/**).
- * Styles for the NewSessionMenu split button, the DirPicker panel, SpawnConfirm, the pending
+ * Styles for the NewSessionMenu split button, the DirPicker dialog, SpawnConfirm, the pending
  * SpawnRow placeholders, AgentCard's `web` badge and DetailHeader's managed-session stop
  * button / first-prompt notice. Imported by the spawn components themselves (same discipline
  * as Composer.vue → upload.css). Depends on tokens.css + base.css + primitives.css.
- * All colours/sizes come from tokens.css; no fixed positioning (the menu is an absolute
- * dropdown inside the sidebar header, the picker an inline panel).
+ * All colours/sizes come from tokens.css; the only fixed positioning is the DirPicker's
+ * `.spawn-scrim` overlay (2026-10: the picker grew from an inline sidebar panel into a
+ * Teleport'd modal dialog — 新建会话可以占满页面); the menu stays an absolute dropdown inside
+ * the sidebar header.
  */
 
 /* ---------------------------------------------------------------- NewSessionMenu (split button) */
@@ -74,24 +76,43 @@
   color: var(--c-text-3);
 }
 
-/* ---------------------------------------------------------------- DirPicker (inline panel) */
+/* ---------------------------------------------------------------- DirPicker (modal dialog)
+ * Teleport'd to <body> (DirPicker.vue owns the focus trap / scroll lock / focus return, the
+ * PickerSheet contract). `.spawn-scrim` sits on z-index 40 — the popover layer, above the
+ * drawer scrim (30), below the preview overlay (60); preview.css's contract. Desktop: a
+ * centered min(760px) dialog with internal scroll; ≤640px: a bottom sheet like PickerSheet. */
+.spawn-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  /* safe-area: the dialog can cover the whole viewport — same max() wrapping as
+   * control.css/dock.css. */
+  padding-top: max(var(--sp-4), env(safe-area-inset-top));
+  padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
+  background: rgb(19 32 38 / 0.45);
+}
+
 .spawn-picker {
   display: grid;
-  gap: var(--sp-2);
-  margin: 0 var(--sp-3) var(--sp-2);
-  padding: var(--sp-3);
-  /* safe-area: the panel can sit at the bottom of the mobile drawer — same max() wrapping as
-   * control.css/dock.css. */
-  padding-bottom: max(var(--sp-3), env(safe-area-inset-bottom));
+  gap: var(--sp-3);
+  width: min(760px, calc(100vw - 2 * var(--sp-4)));
+  max-height: 85dvh;
+  overflow-y: auto;
+  padding: var(--sp-4);
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-md);
   background: var(--c-surface);
-  box-shadow: var(--shadow-1);
+  box-shadow: var(--shadow-3);
+  outline: none;
 }
 
 .spawn-picker-title {
   margin: 0;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-lg);
   font-weight: var(--fw-semibold);
 }
 
@@ -106,21 +127,78 @@
   color: var(--c-text-2);
 }
 
+/* the directory the session will run in — monospace, full dialog width */
+.spawn-cwd-input {
+  font-family: var(--font-mono);
+}
+
+/* recent directories: a multi-column grid of cards (label + full path, ellipsized) */
 .spawn-recent {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-1);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: var(--sp-2);
 }
 
 .spawn-recent-btn {
-  max-width: 100%;
+  display: grid;
+  grid-template-areas:
+    "icon label"
+    "icon path";
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.spawn-recent-btn:hover:not(:disabled),
+.spawn-recent-btn:focus-visible {
+  background: var(--c-surface-2);
+}
+
+/* the entry matching the typed cwd is visually highlighted */
+.spawn-recent-btn.is-current {
+  border-color: var(--c-primary);
+  background: var(--c-primary-soft);
+}
+
+.spawn-recent-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.spawn-recent-btn .icon-sm {
+  grid-area: icon;
+}
+
+.spawn-recent-label {
+  grid-area: label;
   overflow: hidden;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spawn-recent-path {
+  grid-area: path;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .spawn-prompt-input {
   width: 100%;
-  min-height: 64px;
+  min-height: 140px;
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-sm);
@@ -333,6 +411,24 @@
 @media (min-width: 768px) {
   .sidebar.is-collapsed .nsmenu {
     display: none;
+  }
+}
+
+/* ≤640px: bottom sheet (same form factor as PickerSheet — full width, rounded top, safe-area) */
+@media (max-width: 640px) {
+  .spawn-scrim {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .spawn-picker {
+    width: 100%;
+    border-radius: 12px 12px 0 0;
+    padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
+  }
+
+  .spawn-prompt-input {
+    min-height: 96px;
   }
 }
 

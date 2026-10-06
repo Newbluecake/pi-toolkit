@@ -32,6 +32,7 @@ import {
 import { modelCommandArg } from "@protocol/models.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePopoverClamp } from "../../composables/usePopoverClamp.js";
 import PickerSheet from "./PickerSheet.vue";
 import ThinkingChip from "./ThinkingChip.vue";
 import { CONTROL_VIEW } from "./controlContext.js";
@@ -103,7 +104,16 @@ const activeIdx = ref(-1);
 const root = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 const searchEl = ref<HTMLInputElement | null>(null);
+const panelEl = ref<unknown>(null);
 const nowTick = ref(Date.now());
+
+// Widened desktop popover (2026-10): never overflow the viewport — shift the left-anchored
+// panel back inside when the chip sits near the right edge (composables/usePopoverClamp.ts).
+usePopoverClamp(
+  open,
+  () => !narrow.value,
+  () => panelEl.value,
+);
 
 /** Global row id for `aria-activedescendant` (rows render in two template branches, so the id
  * comes from the row's index in the flat `selectable` list, not the v-for index). */
@@ -451,6 +461,7 @@ onBeforeUnmount(() => {
       <component
         :is="narrow ? PickerSheet : 'div'"
         v-if="open"
+        ref="panelEl"
         v-bind="
           narrow
             ? { label: t('control.modelListAria') }

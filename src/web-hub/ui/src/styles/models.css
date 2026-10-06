@@ -2,11 +2,15 @@
  * pi web-hub — model switcher (web-model-switch plan v2 §5.1, package M3a exclusive; M3b
  * appended the thinking chip + Teleport'd bottom sheet at the bottom).
  * The chip lives in DetailDock's slim `.dock-tools` row above the composer (user 拍板 Q2).
- * Two form factors (#16): viewport >640px = absolute popover above the chip (360px / 50vh);
- * viewport ≤640px = `PickerSheet.vue`'s Teleport'd bottom sheet (`.picker-scrim`/
- * `.picker-sheet`, 75vh + safe-area inset). `(pointer: coarse)` only raises row hit-areas to
- * ≥44px, it never decides the form factor. The sheet rules are pinned by
+ * Two form factors (#16): viewport >640px = absolute popover above the chip; viewport ≤640px
+ * = `PickerSheet.vue`'s Teleport'd bottom sheet (`.picker-scrim`/`.picker-sheet`, 75vh +
+ * safe-area inset). `(pointer: coarse)` only raises row hit-areas to ≥44px, it never decides
+ * the form factor. The sheet rules are pinned by
  * `tests/web-hub/ui/model-switcher.test.ts` and `picker-sheet.test.ts`.
+ * 2026-10 widening (user 拍板: the pickers may cover other content — the only hard rule is
+ * NEVER overflow the viewport): model popover min(720px) / 70vh, thinking min(360px); both
+ * stay left-anchored under the chip and `composables/usePopoverClamp.ts` shifts the panel
+ * back inside the viewport when the chip sits near the right edge.
 
 /* Slim tool row above the composer (DetailDock control branch). */
 .dock-tools {
@@ -138,13 +142,12 @@
 .model-panel {
   position: absolute;
   bottom: calc(100% + 6px);
-  left: 0;
+  left: 0; /* usePopoverClamp may override with an inline `left` to stay inside the viewport */
   z-index: 30;
   display: flex;
   flex-direction: column;
-  width: 360px;
-  max-width: calc(100vw - 2 * var(--sp-3));
-  max-height: 50vh;
+  width: min(720px, calc(100vw - 2 * var(--sp-4)));
+  max-height: 70vh;
   border: 1px solid var(--c-border);
   border-radius: var(--r-md);
   background: var(--c-surface);
@@ -363,7 +366,7 @@
 
 /* Desktop thinking popover: same shell as the model popover, narrower. */
 .thinking-panel {
-  width: 220px;
+  width: min(360px, calc(100vw - 2 * var(--sp-4)));
 }
 
 .model-note-clamp {

@@ -20,6 +20,7 @@ import { newCmdId } from "@logic/control.js";
 import { CLAMP_SETTLE_MS, modelsOf, thinkingErrorKey, thinkingGate, thinkingLevelOf } from "@logic/models.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePopoverClamp } from "../../composables/usePopoverClamp.js";
 import PickerSheet from "./PickerSheet.vue";
 import { CONTROL_VIEW } from "./controlContext.js";
 import "../../styles/models.css";
@@ -111,6 +112,14 @@ const activeIdx = ref(-1);
 const root = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
+const panelEl = ref<unknown>(null);
+
+// Widened desktop popover (2026-10): never overflow the viewport (composables/usePopoverClamp.ts).
+usePopoverClamp(
+  open,
+  () => !narrow.value,
+  () => panelEl.value,
+);
 
 const activeDescendant = computed(() =>
   activeIdx.value >= 0 && activeIdx.value < levels.value.length ? `thinking-opt-${activeIdx.value}` : undefined,
@@ -358,6 +367,7 @@ onBeforeUnmount(() => {
       <component
         :is="narrow ? PickerSheet : 'div'"
         v-if="open"
+        ref="panelEl"
         v-bind="
           narrow
             ? { label: t('control.thinkingListAria') }

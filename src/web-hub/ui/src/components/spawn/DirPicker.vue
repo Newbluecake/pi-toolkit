@@ -1,8 +1,10 @@
 <!--
-  DirPicker — the 「选择目录新建…」 inline panel (web-hub-spawn plan SP12 / arch §9.1, plan
-  §3.2). Renders the `useNewSession` (SP11) flow phases and forwards every user intent to that
-  orchestrator — no wire calls, no verdicts of its own beyond the §8.2 48 KiB client-side
-  precheck (the same `PROMPT_TEXT_MAX_BYTES` constant the protocol exports):
+  DirPicker — the 「选择目录新建…」 modal dialog (web-hub-spawn plan SP12 / arch §9.1, plan
+  §3.2; 2026-10 redesigned from an inline sidebar panel to a Teleport'd dialog — user 拍板:
+  新建会话可以占满页面,不需要担心遮挡其他会话). Renders the `useNewSession` (SP11) flow
+  phases and forwards every user intent to that orchestrator — no wire calls, no verdicts of
+  its own beyond the §8.2 48 KiB client-side precheck (the same `PROMPT_TEXT_MAX_BYTES`
+  constant the protocol exports):
 
   - `idle` — the form: cwd input (prefilled with the selected agent's cwd or `~`), the
     `GET /api/headless/dirs` recent list, an optional first-prompt textarea.
@@ -14,13 +16,18 @@
     same way), Retry resubmits under a NEW id via `newSession.retry()`.
   - `done` — a success line and a `done` emit so the parent can close the panel.
 
-  Rendered only while the parent holds it open; closing mid-`awaiting` never cancels the flow
+  Dialog shell mirrors `control/PickerSheet.vue`'s contract: Teleport'd to `<body>`, scrim
+  `@click.self` closes (same as cancel — a pending `confirming` flow IS cancelled), Escape
+  closes, focus enters on open (`focusSubmit` ⇒ 「启动」, otherwise the cwd input), Tab cycles
+  inside, focus returns to the opener and the body scroll lock is released on close. Rendered
+  only while the parent holds it open; closing mid-`awaiting` never cancels the flow
   (SpawnRow keeps showing progress) — Escape only resolves a pending `confirming` first.
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import type { DirEntryWire } from "@protocol/spawn.js";
 import { PROMPT_TEXT_MAX_BYTES } from "@protocol/spawn.js";
 import { HUB_CTX } from "../control/controlContext.js";
@@ -78,11 +85,16 @@ const recentPartial = ref(false);
 const recentFailed = ref(false);
 
 onMounted(async () => {
-  const spawn = hub?.spawn;
+  returnFocus = document.activeElement;
+  // Shared ref-counted lock (useScrollLock.ts) — composes with other overlays' locks.
+  releaseScrollLock = acquireBodyScrollLock();
+  await nextTick();
   if (props.focusSubmit === true) {
-    await nextTick();
     submitBtn.value?.focus();
+  } else {
+    (cwdInput.value ?? panelEl.value)?.focus();
   }
+  const spawn = hub?.spawn;
   if (spawn === undefined) return;
   try {
     const r = await spawn.dirs();
@@ -99,6 +111,48 @@ onMounted(async () => {
 
 function pickRecent(dir: DirEntryWire): void {
   cwd.value = dir.cwd;
+}
+
+// ---------------------------------------------------------------------------
+// dialog shell (Teleport'd — see header comment; the PickerSheet contract)
+// ---------------------------------------------------------------------------
+const panelEl = ref<HTMLElement | null>(null);
+const cwdInput = ref<HTMLInputElement | null>(null);
+let returnFocus: Element | null = null;
+let releaseScrollLock: (() => void) | null = null;
+
+onUnmounted(() => {
+  // Close and unmount are one path (the parent renders the dialog only while open), so this
+  // covers both — the scroll lock release is idempotent and focus returns to the opener.
+  releaseScrollLock?.();
+  releaseScrollLock = null;
+  const target = returnFocus;
+  returnFocus = null;
+  if (target instanceof HTMLElement && document.contains(target)) target.focus();
+});
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function trapTab(ev: KeyboardEvent): void {
+  const panel = panelEl.value;
+  if (panel === null) return;
+  const items = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (first === undefined || last === undefined) {
+    ev.preventDefault();
+    return;
+  }
+  const active = document.activeElement;
+  const outside = active === null || !panel.contains(active);
+  if (ev.shiftKey && (outside || active === first)) {
+    ev.preventDefault();
+    last.focus();
+  } else if (!ev.shiftKey && (outside || active === last)) {
+    ev.preventDefault();
+    first.focus();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,114 +236,129 @@ function onCancelOrClose(): void {
   emit("close");
 }
 
-function onKeydown(ev: KeyboardEvent): void {
-  if (ev.key !== "Escape") return;
-  ev.stopPropagation();
-  onCancelOrClose();
+/** Scrim keydown: Escape closes (content keydowns bubble up); Tab cycles inside the dialog. */
+function onScrimKeydown(ev: KeyboardEvent): void {
+  if (ev.key === "Escape") {
+    ev.stopPropagation();
+    onCancelOrClose();
+    return;
+  }
+  if (ev.key === "Tab") trapTab(ev);
 }
 </script>
 
 <template>
-  <section v-if="newSession" class="spawn-picker" :aria-label="t('spawn.pickerAria')" @keydown="onKeydown">
-    <template v-if="flow.phase === 'confirming'">
-      <SpawnConfirm
-        :resolved-cwd="flow.resolvedCwd"
-        :reason="flow.reason"
-        :plaintext="plaintext === true"
-        @confirm="newSession.confirm()"
-        @cancel="newSession.cancel()"
-      />
-    </template>
+  <Teleport to="body">
+    <div v-if="newSession" class="spawn-scrim" @click.self="onCancelOrClose" @keydown="onScrimKeydown">
+      <section
+        ref="panelEl"
+        class="spawn-picker"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('spawn.pickerAria')"
+        tabindex="-1"
+      >
+        <template v-if="flow.phase === 'confirming'">
+          <SpawnConfirm
+            :resolved-cwd="flow.resolvedCwd"
+            :reason="flow.reason"
+            :plaintext="plaintext === true"
+            @confirm="newSession.confirm()"
+            @cancel="newSession.cancel()"
+          />
+        </template>
 
-    <template v-else>
-      <h3 class="spawn-picker-title">{{ t("spawn.pickerTitle") }}</h3>
+        <template v-else>
+          <h3 class="spawn-picker-title">{{ t("spawn.pickerTitle") }}</h3>
 
-      <div class="spawn-field">
-        <label class="spawn-field-label" for="spawn-cwd">{{ t("spawn.pickerCwdLabel") }}</label>
-        <input
-          id="spawn-cwd"
-          v-model="cwd"
-          class="input"
-          type="text"
-          name="spawn-cwd"
-          :placeholder="t('spawn.pickerCwdPlaceholder')"
-          autocomplete="off"
-          spellcheck="false"
-          :disabled="busyPhase"
-        />
-      </div>
+          <div class="spawn-field">
+            <label class="spawn-field-label" for="spawn-cwd">{{ t("spawn.pickerCwdLabel") }}</label>
+            <input
+              id="spawn-cwd"
+              ref="cwdInput"
+              v-model="cwd"
+              class="input spawn-cwd-input"
+              type="text"
+              name="spawn-cwd"
+              :placeholder="t('spawn.pickerCwdPlaceholder')"
+              autocomplete="off"
+              spellcheck="false"
+              :disabled="busyPhase"
+            />
+          </div>
 
-      <div v-if="recent.length > 0" class="spawn-field">
-        <span class="spawn-field-label">{{ t("spawn.pickerRecentLabel") }}</span>
-        <div class="spawn-recent">
-          <button
-            v-for="dir in recent"
-            :key="dir.cwd"
-            class="btn btn-xs spawn-recent-btn"
-            type="button"
-            :title="dir.cwd"
-            :disabled="busyPhase"
-            @click="pickRecent(dir)"
-          >
-            <AppIcon name="folder" class="icon-sm" />{{ dir.label }}
-          </button>
-        </div>
-        <p v-if="recentPartial" class="spawn-picker-note">{{ t("spawn.pickerRecentPartial") }}</p>
-      </div>
-      <p v-else-if="recentFailed" class="spawn-picker-note">{{ t("spawn.pickerRecentError") }}</p>
+          <div v-if="recent.length > 0" class="spawn-field">
+            <span class="spawn-field-label">{{ t("spawn.pickerRecentLabel") }}</span>
+            <div class="spawn-recent">
+              <button
+                v-for="dir in recent"
+                :key="dir.cwd"
+                class="spawn-recent-btn"
+                :class="{ 'is-current': dir.cwd === cwd.trim() }"
+                type="button"
+                :title="dir.cwd"
+                :disabled="busyPhase"
+                @click="pickRecent(dir)"
+              >
+                <AppIcon name="folder" class="icon-sm" />
+                <span class="spawn-recent-label">{{ dir.label }}</span>
+                <span class="spawn-recent-path" translate="no">{{ dir.cwd }}</span>
+              </button>
+            </div>
+            <p v-if="recentPartial" class="spawn-picker-note">{{ t("spawn.pickerRecentPartial") }}</p>
+          </div>
+          <p v-else-if="recentFailed" class="spawn-picker-note">{{ t("spawn.pickerRecentError") }}</p>
 
-      <div class="spawn-field">
-        <label class="spawn-field-label" for="spawn-first-prompt">{{ t("spawn.pickerPromptLabel") }}</label>
-        <textarea
-          id="spawn-first-prompt"
-          v-model="firstPrompt"
-          class="spawn-prompt-input"
-          name="spawn-first-prompt"
-          :placeholder="t('spawn.pickerPromptPlaceholder')"
-          :disabled="busyPhase"
-        ></textarea>
-        <p v-if="promptTooLong" class="spawn-picker-error" role="alert">
-          {{ t("spawn.pickerPromptTooLong", { n: promptBytes }) }}
-        </p>
-      </div>
+          <div class="spawn-field">
+            <label class="spawn-field-label" for="spawn-first-prompt">{{ t("spawn.pickerPromptLabel") }}</label>
+            <textarea
+              id="spawn-first-prompt"
+              v-model="firstPrompt"
+              class="spawn-prompt-input"
+              name="spawn-first-prompt"
+              :placeholder="t('spawn.pickerPromptPlaceholder')"
+              :disabled="busyPhase"
+            ></textarea>
+            <p v-if="promptTooLong" class="spawn-picker-error" role="alert">
+              {{ t("spawn.pickerPromptTooLong", { n: promptBytes }) }}
+            </p>
+          </div>
 
-      <p v-if="flow.phase === 'submitting'" class="spawn-picker-status" role="status">
-        <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.pickerSubmitting") }}
-      </p>
-      <p v-else-if="flow.phase === 'awaiting'" class="spawn-picker-status" role="status">
-        <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.pickerAwaiting") }}
-        <span v-if="flow.firstPrompt" class="chip chip-spawn" translate="no">{{
-          flow.firstPrompt.state === "sending" ? t("spawn.fpSending") : t("spawn.fpPending")
-        }}</span>
-      </p>
-      <p v-else-if="flow.phase === 'unknown'" class="spawn-picker-status" role="status">
-        {{ t("spawn.pickerUnknown") }}
-      </p>
-      <p v-else-if="flow.phase === 'done'" class="spawn-picker-status" role="status">{{ t("spawn.pickerDone") }}</p>
+          <p v-if="flow.phase === 'submitting'" class="spawn-picker-status" role="status">
+            <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.pickerSubmitting") }}
+          </p>
+          <p v-else-if="flow.phase === 'awaiting'" class="spawn-picker-status" role="status">
+            <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.pickerAwaiting") }}
+            <span v-if="flow.firstPrompt" class="chip chip-spawn" translate="no">{{
+              flow.firstPrompt.state === "sending" ? t("spawn.fpSending") : t("spawn.fpPending")
+            }}</span>
+          </p>
+          <p v-else-if="flow.phase === 'unknown'" class="spawn-picker-status" role="status">
+            {{ t("spawn.pickerUnknown") }}
+          </p>
+          <p v-else-if="flow.phase === 'done'" class="spawn-picker-status" role="status">
+            {{ t("spawn.pickerDone") }}
+          </p>
 
-      <div v-if="failureText" class="spawn-picker-error" role="alert">
-        <p class="spawn-picker-note">{{ failureText }}</p>
-        <p v-if="failureDetail" class="spawn-picker-note">{{ failureDetail }}</p>
-        <p v-if="failureRetryAfter !== null" class="spawn-picker-note">
-          {{ t("spawn.errRetryAfter", { n: failureRetryAfter }) }}
-        </p>
-      </div>
+          <div v-if="failureText" class="spawn-picker-error" role="alert">
+            <p class="spawn-picker-note">{{ failureText }}</p>
+            <p v-if="failureDetail" class="spawn-picker-note">{{ failureDetail }}</p>
+            <p v-if="failureRetryAfter !== null" class="spawn-picker-note">
+              {{ t("spawn.errRetryAfter", { n: failureRetryAfter }) }}
+            </p>
+          </div>
 
-      <div class="spawn-picker-actions">
-        <button v-if="failure" class="btn btn-xs" type="button" @click="onRetry">{{ t("spawn.pickerRetry") }}</button>
-        <button class="btn btn-ghost btn-xs" type="button" @click="onCancelOrClose">
-          {{ busyPhase ? t("spawn.pickerClose") : t("spawn.pickerCancel") }}
-        </button>
-        <button
-          ref="submitBtn"
-          class="btn btn-primary btn-xs"
-          type="button"
-          :disabled="submitDisabled"
-          @click="onSubmit"
-        >
-          {{ t("spawn.pickerSubmit") }}
-        </button>
-      </div>
-    </template>
-  </section>
+          <div class="spawn-picker-actions">
+            <button v-if="failure" class="btn" type="button" @click="onRetry">{{ t("spawn.pickerRetry") }}</button>
+            <button class="btn btn-ghost" type="button" @click="onCancelOrClose">
+              {{ busyPhase ? t("spawn.pickerClose") : t("spawn.pickerCancel") }}
+            </button>
+            <button ref="submitBtn" class="btn btn-primary" type="button" :disabled="submitDisabled" @click="onSubmit">
+              {{ t("spawn.pickerSubmit") }}
+            </button>
+          </div>
+        </template>
+      </section>
+    </div>
+  </Teleport>
 </template>

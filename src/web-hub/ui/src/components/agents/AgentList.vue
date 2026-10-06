@@ -15,7 +15,8 @@
 
   "New session" (2026-10 redesign of the web-hub-spawn SP12 split button): the header's
   `NewSessionMenu` main button is now a MANAGED SPAWN in the selected session's cwd — it opens
-  the inline `DirPicker` prefilled with that cwd and focused on 「启动」, so the whole
+  the `DirPicker` modal dialog (Teleport'd to `<body>`, it may cover the whole page) prefilled
+  with that cwd and focused on 「启动」, so the whole
   `useNewSession` flow (incl. the arch §6.3 409 confirm) is reused unchanged; with no selection
   the main button is the blank pick-dir flow. When spawn is unavailable (no-cap / 404 / error)
   the button stays clickable and shows an inline how-to-enable hint instead (denied policies
