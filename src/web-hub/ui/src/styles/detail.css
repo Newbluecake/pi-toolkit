@@ -363,11 +363,11 @@
    * padding minimal — the header should read as one tight info strip on touch, not a stack of
    * airy cards. */
   .session-sum {
-    min-height: 28px;
+    min-height: 20px; /* ×2/3 again (2026-10-06: "缩小为现在的三分之二") */
   }
 
   .metrics-summary {
-    min-height: 28px;
+    min-height: 20px;
   }
 
   .detail-head {

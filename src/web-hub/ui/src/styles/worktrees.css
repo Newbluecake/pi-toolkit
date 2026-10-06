@@ -203,6 +203,6 @@
  * (ui-design §3.12, §7.5 precedent; `.btn`/`btn-icon` get theirs from primitives.css) */
 @media (pointer: coarse) {
   .wt-sum {
-    min-height: 28px; /* summary-row family compaction — see detail.css */
+    min-height: 20px; /* summary-row family compaction — see detail.css */
   }
 }

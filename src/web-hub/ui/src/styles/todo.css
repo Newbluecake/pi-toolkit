@@ -132,6 +132,6 @@
 /* coarse pointers: the fold toggle keeps a 44px hit box (ui-design §3.12, §7.5 precedent) */
 @media (pointer: coarse) {
   .todo-sum {
-    min-height: 28px; /* summary-row family compaction — see detail.css */
+    min-height: 20px; /* summary-row family compaction — see detail.css */
   }
 }
