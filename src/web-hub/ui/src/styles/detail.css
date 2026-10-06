@@ -359,14 +359,19 @@
 }
 
 @media (pointer: coarse) {
-  /* 2026-10-06 field report ("顶部的垂直间隔比较大"): 44px rows stacked three-deep made the
-   * detail header eat the phone's first screen — 36px keeps a serviceable touch target while
-   * giving the transcript its space back. */
+  /* 2026-10-06 field reports ("顶部的垂直间隔比较大" ×2): the summary rows compact to 32px on
+   * touch — tap targets stay serviceable, the transcript gets its space back. */
   .session-sum {
-    min-height: 36px;
+    min-height: 32px;
   }
 
   .metrics-summary {
-    min-height: 36px;
+    min-height: 32px;
+  }
+
+  /* The whole header stack tightens too: grid gap sp-2 → sp-1, bottom padding sp-3 → sp-2. */
+  .detail-head {
+    gap: var(--sp-1);
+    padding-bottom: var(--sp-2);
   }
 }

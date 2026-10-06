@@ -326,7 +326,7 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 â‘
     expect(rule(wtCss, ".wt-sum")).toMatch(/min-height:\s*40px/);
   });
 
-  it("`@media (pointer: coarse)` bumps every one of them to 36px (2026-10-06 compaction)", () => {
+  it("`@media (pointer: coarse)` bumps every one of them to 32px (2026-10-06 compaction Ã—2)", () => {
     const detailCss = read("../../../../src/web-hub/ui/src/styles/detail.css");
     const todoCss = read("../../../../src/web-hub/ui/src/styles/todo.css");
     const wtCss = read("../../../../src/web-hub/ui/src/styles/worktrees.css");
@@ -334,10 +334,10 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 â‘
       const start = css.indexOf("@media (pointer: coarse)");
       return start < 0 ? "" : css.slice(start);
     };
-    expect(coarseBlock(detailCss)).toMatch(/\.session-sum\s*\{\s*min-height:\s*36px/);
-    expect(coarseBlock(detailCss)).toMatch(/\.metrics-summary\s*\{\s*min-height:\s*36px/);
-    expect(coarseBlock(todoCss)).toMatch(/\.todo-sum\s*\{\s*min-height:\s*36px/);
-    expect(coarseBlock(wtCss)).toMatch(/\.wt-sum\s*\{\s*min-height:\s*36px/);
+    expect(coarseBlock(detailCss)).toMatch(/\.session-sum\s*\{\s*min-height:\s*32px/);
+    expect(coarseBlock(detailCss)).toMatch(/\.metrics-summary\s*\{\s*min-height:\s*32px/);
+    expect(coarseBlock(todoCss)).toMatch(/\.todo-sum\s*\{\s*min-height:\s*32px/);
+    expect(coarseBlock(wtCss)).toMatch(/\.wt-sum\s*\{\s*min-height:\s*32px/);
   });
 });
 

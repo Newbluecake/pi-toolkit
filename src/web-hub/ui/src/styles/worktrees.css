@@ -203,6 +203,6 @@
  * (ui-design §3.12, §7.5 precedent; `.btn`/`btn-icon` get theirs from primitives.css) */
 @media (pointer: coarse) {
   .wt-sum {
-    min-height: 36px; /* 2026-10-06 field report: 44px rows stacked three-deep ate the phone's first screen — 36px across the whole summary-row family (see detail.css). */
+    min-height: 32px; /* summary-row family compaction — see detail.css */
   }
 }
