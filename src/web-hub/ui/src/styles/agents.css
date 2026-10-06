@@ -277,9 +277,18 @@
   margin-top: 2px;
 }
 
-.agent-flags .pill {
+.agent-flags .pill,
+.agent-meta .pill-inline {
   min-height: calc(20px * var(--fs-scale, 1)); /* font-scale clipping fix, same as primitives .pill */
   font-size: var(--fs-2xs);
+}
+
+/* 2026-10-06 field report: the status pill moved INTO the meta row (no standalone line). */
+.agent-meta .pill-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
 }
 
 @media (min-width: 481px) {

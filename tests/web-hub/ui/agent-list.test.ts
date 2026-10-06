@@ -102,7 +102,7 @@ describe("AgentList.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     const withLabel = mount(AgentList, {
       props: { cards: [card({ statusLabel: "Working" })], selectedKey: null, filter: "" },
     });
-    expect(withLabel.find(".agent-flags .pill").text()).toBe("Working");
+    expect(withLabel.find(".agent-meta .pill-inline").text()).toBe("Working");
 
     const withoutLabel = mount(AgentList, {
       props: { cards: [card({ statusLabel: null })], selectedKey: null, filter: "" },

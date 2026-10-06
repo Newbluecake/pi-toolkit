@@ -983,9 +983,17 @@
     min-height: 34px;
   }
 
-  .composer-attach {
+  /* Pin the narrow geometry even on coarse pointers: upload.css's `(pointer: coarse)` rule
+   * (attach 44px) loads LATER at equal specificity, and the coarse block above bumps
+   * `.composer-row` gap to sp-3 — both would silently shift the input's left edge (the chips
+   * strip in models.css left-aligns to it). */
+  .composer-row .composer-attach {
     width: 32px;
     min-height: 34px;
+  }
+
+  .composer-row {
+    gap: var(--sp-2);
   }
 }
 

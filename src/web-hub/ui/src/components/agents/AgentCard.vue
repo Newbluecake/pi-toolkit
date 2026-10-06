@@ -73,7 +73,10 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       card.sessionLabel
     }}</span>
 
-    <span v-if="card.modelShort || card.contextPercent !== null || card.runningSubCount > 0" class="agent-meta">
+    <span
+      v-if="card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.statusLabel"
+      class="agent-meta"
+    >
       <span v-if="card.modelShort" class="model" translate="no">{{ card.modelShort }}</span>
       <span v-if="card.modelShort && card.contextPercent !== null" class="sep" aria-hidden="true">·</span>
       <span v-if="card.contextPercent !== null">
@@ -97,17 +100,25 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
           }}</span></span
         >
       </template>
+      <template v-if="card.statusLabel">
+        <span
+          v-if="card.modelShort || card.contextPercent !== null || card.runningSubCount > 0"
+          class="sep"
+          aria-hidden="true"
+          >·</span
+        >
+        <span class="pill pill-inline" :data-st="card.visualState">
+          <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
+          <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
+          <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
+          {{ card.statusLabel }}
+        </span>
+      </template>
     </span>
 
-    <span v-if="card.statusLabel || needsAnswer" class="agent-flags">
+    <span v-if="needsAnswer" class="agent-flags">
       <span v-if="needsAnswer" class="pill badge-answer">
         <AppIcon name="message" class="icon-sm" />{{ t("common.needsAnswer") }}
-      </span>
-      <span v-if="card.statusLabel" class="pill" :data-st="card.visualState">
-        <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
-        <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
-        <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
-        {{ card.statusLabel }}
       </span>
     </span>
   </a>

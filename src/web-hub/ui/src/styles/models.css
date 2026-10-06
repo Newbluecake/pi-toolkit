@@ -437,6 +437,14 @@
 }
 
 @media (pointer: coarse) {
+  /* Coarse bumps the composer row gap (sp-3) and attach width (44px), shifting the input's
+   * left edge to 12+44+12 = 68px — keep the chips aligned with it. On ≤767px the composer
+   * geometry is pinned (attach 32px, gap sp-2), so the narrow block's 52px already holds and
+   * the extra rule below re-asserts it. */
+  .dock-tools {
+    padding-left: max(calc(var(--sp-3) + 68px), calc(env(safe-area-inset-left) + 68px));
+  }
+
   .model-chip {
     min-height: 40px;
   }
@@ -448,5 +456,12 @@
   .model-tabs button {
     min-height: 40px;
     padding: 6px 14px;
+  }
+}
+
+/* narrow + coarse: the pinned composer geometry keeps the input's left edge at 52px */
+@media (max-width: 767px) and (pointer: coarse) {
+  .dock-tools {
+    padding-left: max(calc(var(--sp-3) + 52px), calc(env(safe-area-inset-left) + 52px));
   }
 }
