@@ -59,6 +59,8 @@ import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
 import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
+import { createGitRunner, type GitRunner } from "../../git/run.js";
+import { createWorktreeSampler } from "./worktree-sampler.js";
 import { todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
@@ -162,6 +164,14 @@ export interface WebHubDeps {
   // ---- test seams (optional; production leaves them unset) ----
   netConnect?: typeof import("node:net").connect;
   spawnImpl?: typeof import("node:child_process").spawn;
+  /** worktree-web plan §4.4 (W3): test seam for `createWorktreeSampler`'s `GitRunner` —
+   * production leaves this unset (`createGitRunner()` is used). */
+  gitRunner?: GitRunner;
+  /** worktree-web plan §4.3/§4.4 (W3): test seam for `createWorktreeSampler`'s `realpath` —
+   * production leaves this unset (`fs.promises.realpath`, real I/O). Overriding it in tests
+   * avoids a genuine libuv round trip the fake-timer `advanceTimersByTimeAsync` loop can't
+   * deterministically wait out under load. */
+  gitRealpath?: (p: string) => Promise<string>;
   paths?: HubPaths;
   buildInfo?: () => Promise<{ pluginVersion: string; buildId: string }>;
   argv1?: string;
@@ -223,6 +233,9 @@ export const WEB_HUB_STATUS_KEY = "pi-subagent:web-hub";
 const BUILD_INFO_WAIT_MS = 3_000;
 
 const STATUS_EVENTS = new Set(["agent_start", "agent_end", "agent_settled", "turn_end", "session_compact"]);
+// worktree-web plan §4.4: these two also deserve a fresher worktree sample than the baseline
+// interval (a turn/subagent finishing is a natural point for repo state to have moved).
+const WT_KICK_EVENTS = new Set(["turn_end", "agent_settled"]);
 const SESSION_EVENTS = new Set(["model_select", "thinking_level_select", "session_info_changed"]);
 
 type AnyHandler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -298,6 +311,20 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       attributePrompt: (e) => e,
     },
   );
+
+  // worktree-web plan §4.3/§4.4 (W3): per-activate sampler, closure-local state only
+  // (AGENTS.md: no module-scope mutable state). `isLive`/`onChange` are late-bound refs
+  // into this same closure's `conn`/`publishStatus` — defined after `publishStatus` exists,
+  // referenced here through the `publishStatus` call wrapped in a thunk so declaration order
+  // doesn't matter.
+  const wtSampler = createWorktreeSampler({
+    run: deps.gitRunner ?? createGitRunner(),
+    home,
+    now,
+    isLive: () => conn?.status().state === "live",
+    onChange: () => publishStatus(),
+    ...(deps.gitRealpath !== undefined ? { realpath: deps.gitRealpath } : {}),
+  });
 
   const commandLedger = createCommandLedger();
   const queueMirror = createQueueMirror();
@@ -384,7 +411,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const c = conn;
     const x = ctx;
     if (c === undefined || x === undefined) return;
-    const s = readStatus(x, tap, readFleet(), queueMirror, deps.todo);
+    const s = readStatus(x, tap, readFleet(), queueMirror, deps.todo, () => wtSampler.current());
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
   };
@@ -467,8 +494,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     if (fp !== lastFleetFp) {
       lastFleetFp = fp;
       c.setSlot("fleet", { t: "fleet", runs: rows, ...(rows.omitted !== undefined ? { omitted: rows.omitted } : {}) });
+      wtSampler.kick(); // worktree-web plan §4.4: a fleet shape change (e.g. a pi-agent-* run
+      // starting/ending) is worth a fresher worktree sample sooner than the baseline interval.
     }
     runTx.tick(); // §3.3 #3/#4: 1Hz gap retries + endedPending redelivery
+    // worktree-web plan §4.3/§4.4 (W3): baseline/backoff scan cadence + staleMin recompute,
+    // driven off this same existing 1Hz tick (no second interval is created for it).
+    if (wtSampler.tick(now())) publishStatus();
     modelsTick += 1;
     if (modelsTick % 5 === 0) refreshModelsIfChanged();
   };
@@ -582,7 +614,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           seq: c.seq,
           ctx: x,
           tap,
-          status: readStatus(x, tap, snaps, queueMirror, deps.todo),
+          status: readStatus(x, tap, snaps, queueMirror, deps.todo, () => wtSampler.current()),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
       );
@@ -727,6 +759,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     publishStatus();
     publishCtl();
     onTick();
+    wtSampler.kick(); // worktree-web plan §4.4: a (re)connect is worth a fresh sample promptly.
     setStatusLine(statusLineText(c.status(), readStatusTheme(x)));
   };
 
@@ -756,6 +789,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     modelsTick = 0;
     tap.resetForSession(Number.NaN);
     commandHandler.onSessionBoundary();
+    wtSampler.start(safe(() => c.cwd, "")); // worktree-web plan §4.4: first sample attempt
+    // happens immediately (subject to isLive()); same-cwd /new・/resume・/fork keeps the cache.
     // O(branch entries) cost sum, deferred so session_start returns at once.
     const im = setImmediate(() => {
       if (gen !== generation) return;
@@ -781,6 +816,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     attached = false;
     generation += 1;
     stopTick();
+    wtSampler.stop(); // worktree-web plan §4.4: abort any in-flight scan, no leaked process/thread.
     commandHandler.onSessionBoundary();
     dialogBridge.detachAll();
     tap.dispose();
@@ -830,6 +866,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         });
       }
       if (STATUS_EVENTS.has(type)) publishStatus();
+      if (WT_KICK_EVENTS.has(type)) wtSampler.kick();
       if (SESSION_EVENTS.has(type)) publishSession(sessionOverride(type, event));
     });
   }

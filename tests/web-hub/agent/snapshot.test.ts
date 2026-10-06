@@ -217,6 +217,30 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     const noGetter = readStatus(ctx, tap, []);
     expect("todo" in noGetter).toBe(false);
   });
+
+  // worktree-web plan §4.4/§7 (W3): the optional 6th seam, same sampled-atomically /
+  // key-absence-on-undefined posture as the todo seam above.
+  it("readStatus: worktrees getter ⇒ status.worktrees sampled atomically; undefined/no getter ⇒ key missing", () => {
+    const { ctx } = fakeCtx({ leaf: "L9" });
+    const tap = noopTap();
+    tap.resetForSession(Number.NaN);
+    const wire = {
+      rows: [{ label: "~/repo", path: "/home/u/repo", main: true as const, current: true as const }],
+      total: 1,
+      probed: 0,
+      dirtyCount: 0,
+      agentCount: 0,
+      sampledAt: 123,
+    };
+    const s = readStatus(ctx, tap, [], undefined, undefined, () => wire);
+    expect(s.worktrees).toEqual(wire);
+
+    const absent = readStatus(ctx, tap, [], undefined, undefined, () => undefined);
+    expect("worktrees" in absent).toBe(false);
+
+    const noGetter = readStatus(ctx, tap, []);
+    expect("worktrees" in noGetter).toBe(false);
+  });
 });
 
 describe("leaf probe + slots (wiring, fake timers)", () => {
@@ -277,5 +301,55 @@ describe("leaf probe + slots (wiring, fake timers)", () => {
     snaps = [];
     await vi.advanceTimersByTimeAsync(1_000);
     expect(count("fleet")).toBe(2);
+  });
+
+  // worktree-web plan §4.4/§7 (W3): `onSnapshotReq`'s `readStatus(...)` call also threads the
+  // worktrees getter — a snapshot_reply's embedded status must carry whatever the sampler's
+  // cache held at that instant, same as the live status slot would.
+  it("snapshot_reply.status.worktrees matches what the status slot would carry", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    const run = (async (args: readonly string[]) => {
+      if (args.includes("rev-parse")) return { code: 0, stdout: "/repo\n", stdoutCapped: false, stderr: "" };
+      if (args.includes("list")) {
+        return {
+          code: 0,
+          stdout: `worktree /repo\nHEAD ${"a".repeat(40)}\nbranch refs/heads/master\n\n`,
+          stdoutCapped: false,
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "# branch.head master\n", stdoutCapped: false, stderr: "" };
+    }) as unknown as import("../../../src/git/run.js").GitRunner;
+    wireWebHub(pi, {
+      settings: SETTINGS,
+      fleet: () => [],
+      env: { HOME: tmp.dir },
+      paths: pathsIn(tmp.dir),
+      netConnect: n.netConnect,
+      gitRunner: run,
+      gitRealpath: async (p: string) => p,
+      buildInfo: async () => ({ pluginVersion: "1", buildId: "1@t" }),
+      argv1: "/none",
+    });
+    const { ctx } = fakeCtx({ leaf: "A" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(1_000); // first tick-driven scan after the link goes live
+    for (let i = 0; i < 60; i++) await vi.advanceTimersByTimeAsync(0); // drain the scan's microtask chain
+    const lastStatus = s
+      .frames()
+      .filter((f) => f.t === "status")
+      .at(-1) as { worktrees?: unknown };
+    expect(lastStatus.worktrees).toMatchObject({ rows: [expect.objectContaining({ label: "/repo" })] });
+
+    s.hub({ t: "snapshot_req", rid: "r1" });
+    await vi.advanceTimersByTimeAsync(0);
+    const reply = s.frames().find((f) => f.t === "snapshot_reply") as { status?: { worktrees?: unknown } };
+    expect(reply.status?.worktrees).toEqual(lastStatus.worktrees);
   });
 });

@@ -386,3 +386,182 @@ describe("todo slot + 1Hz fingerprint gate (todo-web T3)", () => {
     expect(replayed.at(-1)).toMatchObject({ todo: { total: 1 } });
   });
 });
+
+// ---------------------------------------------------------------------------
+// worktree-web plan §4.4 (W3): StatusInfo.worktrees through the same status-slot
+// pipeline, driven by `createWorktreeSampler` wired into `wireWebHub`.
+// ---------------------------------------------------------------------------
+describe("worktree slot + sampler wiring (worktree-web W3)", () => {
+  let tmp: ReturnType<typeof tmpDir>;
+  beforeEach(() => {
+    tmp = tmpDir("wh-d-wt-");
+    resetGlobals();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    resetGlobals();
+    vi.useRealTimers();
+    tmp.cleanup();
+  });
+
+  function cleanRunner(): { run: import("../../../src/git/run.js").GitRunner; calls: () => number } {
+    let calls = 0;
+    const run = (async (args: readonly string[]) => {
+      calls++;
+      if (args.includes("rev-parse")) return { code: 0, stdout: "/repo\n", stdoutCapped: false, stderr: "" };
+      if (args.includes("list")) {
+        return {
+          code: 0,
+          stdout: `worktree /repo\nHEAD ${"a".repeat(40)}\nbranch refs/heads/master\n\n`,
+          stdoutCapped: false,
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "# branch.head master\n", stdoutCapped: false, stderr: "" };
+    }) as unknown as import("../../../src/git/run.js").GitRunner;
+    return { run, calls: () => calls };
+  }
+
+  async function goLive(n: ReturnType<typeof fakeNet>) {
+    await vi.advanceTimersByTimeAsync(0);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(0);
+    return s;
+  }
+
+  /** Drains both vi's fake-timer queue AND any already-pending microtask chain (the sampler's
+   * scan settlement is several `.then`/`await` hops deep) without advancing wall-clock time. */
+  async function drain(): Promise<void> {
+    for (let i = 0; i < 60; i++) await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it("live ⇒ status slot carries worktrees; an unchanged re-sample doesn't resend", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    const { run } = cleanRunner();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, gitRunner: run, gitRealpath: async (p: string) => p }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+    // The sampler's isLive() gate means its very first scan attempt (session_start, then the
+    // premature connectWith() kick while still "connecting") is a no-op; the next 1Hz tick after
+    // the link actually reaches "live" is what starts it (same posture as fleet/todo's tick-driven
+    // publish — see agent/index.ts's wtSampler.tick() call inside onTick).
+    await vi.advanceTimersByTimeAsync(1_000);
+    await drain();
+
+    const statusFrames = () => s.frames().filter((f) => f.t === "status");
+    expect(statusFrames().at(-1)).toMatchObject({
+      worktrees: { rows: [expect.objectContaining({ label: "/repo", main: true, current: true })], total: 1 },
+    });
+
+    const before = statusFrames().length;
+    await vi.advanceTimersByTimeAsync(30_000); // the baseline re-scan interval elapses
+    // Same content, same minute bucket ⇒ fingerprint unchanged ⇒ no extra status frame
+    // beyond whatever the 1Hz tick's OTHER fingerprints (fleet/todo, both static here) emit.
+    const after = statusFrames().length;
+    expect(after - before).toBeLessThanOrEqual(1);
+  });
+
+  it("turn_end kicks a fresh sample", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    const { run, calls } = cleanRunner();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, gitRunner: run, gitRealpath: async (p: string) => p }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await goLive(n);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await drain(); // first tick-driven scan after the link goes live
+    const callsAfterFirst = calls();
+    expect(callsAfterFirst).toBeGreaterThan(0);
+
+    await vi.advanceTimersByTimeAsync(6_000); // past the kick debounce window
+    fire("turn_end", { type: "turn_end", turnIndex: 0, messageEntryId: "e1", toolResultEntryIds: [] }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls()).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it("a sample that goes stale eventually re-publishes the status frame with staleMin (clock-only skew, no real socket-keepalive lapse)", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    let hang = false;
+    const run = (async (args: readonly string[]) => {
+      if (hang) return new Promise(() => {}); // the repo "goes away" (NFS-style hang)
+      if (args.includes("rev-parse")) return { code: 0, stdout: "/repo\n", stdoutCapped: false, stderr: "" };
+      if (args.includes("list")) {
+        return {
+          code: 0,
+          stdout: `worktree /repo\nHEAD ${"a".repeat(40)}\nbranch refs/heads/master\n\n`,
+          stdoutCapped: false,
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "# branch.head master\n", stdoutCapped: false, stderr: "" };
+    }) as unknown as import("../../../src/git/run.js").GitRunner;
+    // The sampler's `now()` is jumped forward directly (simulating "a lot of time has passed
+    // since the last successful sample") WITHOUT advancing vi's fake timers by the same amount —
+    // that keeps the fake hub's own ping/silence keepalive countdowns (which run off real,
+    // vi-advanced elapsed time, not this injected clock) from lapsing and tearing the test's
+    // socket down for an unrelated reason.
+    let fakeNow = Date.now();
+    wireWebHub(
+      pi,
+      deps({ netConnect: n.netConnect, gitRunner: run, now: () => fakeNow, gitRealpath: async (p: string) => p }),
+    );
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await drain(); // first tick-driven scan after the link goes live
+    const statusFrames = () => s.frames().filter((f) => f.t === "status");
+    expect(statusFrames().at(-1)).toMatchObject({ worktrees: { rows: expect.any(Array) } });
+    expect("staleMin" in (statusFrames().at(-1) as { worktrees?: { staleMin?: number } }).worktrees!).toBe(false);
+
+    hang = true; // any new scan attempt from here on would time out at the sampler's hard deadline
+    fakeNow += 2 * 60_000; // jump the sampler's clock past the 90s staleness threshold
+    await vi.advanceTimersByTimeAsync(1_000); // one more real 1Hz tick observes the jumped clock
+    await drain();
+    const last = statusFrames().at(-1) as { worktrees?: { staleMin?: number; rows: unknown[] } };
+    expect(last.worktrees?.staleMin).toBeGreaterThanOrEqual(1);
+    // stale-while-error (or stale-while-in-flight here): the last known rows are still there.
+    expect(last.worktrees?.rows.length).toBeGreaterThan(0);
+  });
+
+  it("print mode: zero runner calls", async () => {
+    const n = fakeNet();
+    const { run, calls } = cleanRunner();
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, gitRunner: run, gitRealpath: async (p: string) => p }));
+    const { ctx } = fakeCtx({ mode: "print" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls()).toBe(0);
+  });
+
+  it("session_shutdown aborts the in-flight scan and stops further runner calls", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    let seenSignal: AbortSignal | undefined;
+    const run = ((args: readonly string[], opts: { signal?: AbortSignal }) => {
+      if (args.includes("rev-parse")) {
+        seenSignal = opts.signal;
+        return new Promise(() => {}); // hang forever
+      }
+      return new Promise(() => {});
+    }) as unknown as import("../../../src/git/run.js").GitRunner;
+    wireWebHub(pi, deps({ netConnect: n.netConnect, gitRunner: run, gitRealpath: async (p: string) => p }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await goLive(n);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await drain(); // first tick-driven scan after the link goes live
+    expect(seenSignal).toBeDefined();
+    expect(seenSignal?.aborted).toBe(false);
+    fire("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+    expect(seenSignal?.aborted).toBe(true);
+  });
+});

@@ -10,7 +10,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
-import type { FleetOmitted, FleetRowWire, StatusInfo } from "../protocol/messages.js";
+import type { FleetOmitted, FleetRowWire, StatusInfo, WorktreesWire } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
 import { projectTodo } from "./todo.js";
@@ -26,6 +26,7 @@ export function readStatus(
   fleet: readonly RunSnapshot[],
   queueMirror?: QueueMirror,
   todo?: () => TodoState,
+  worktrees?: () => WorktreesWire | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -60,6 +61,13 @@ export function readStatus(
   if (todo !== undefined) {
     const projected = projectTodo(todo());
     if (projected !== undefined) status.todo = projected;
+  }
+  // worktree-web plan §4.4 (W3): sampled in the same call, same overwrite-only-slot
+  // rationale as todo above — no getter (session cwd not a git repo / not sampled
+  // yet / web-hub off) ⇒ the field stays absent, byte-equal to the pre-feature shape.
+  if (worktrees !== undefined) {
+    const wire = worktrees();
+    if (wire !== undefined) status.worktrees = wire;
   }
   return status;
 }
