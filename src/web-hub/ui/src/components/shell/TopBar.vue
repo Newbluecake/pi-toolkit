@@ -16,13 +16,14 @@
   to either).
 -->
 <script setup lang="ts">
-import { computed, inject } from "vue";
+import { computed, inject, onMounted, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { UI_BUILD } from "../../build-info.js";
 import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
+import { parseRouteHash } from "../../composables/useHashRoute.js";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -48,6 +49,32 @@ const brandTitle = computed(() => {
 function onControlChipClick(): void {
   if (env) env.noticeExpanded.value = !env.noticeExpanded.value;
 }
+
+// Gear = toggle (user 2026-10): a second click while `#/settings` is showing closes it, back to
+// where the user came from. `openedInApp` records whether THIS gear opened it (so in-app history
+// has an entry to pop); a direct deep link to `#/settings` has none ⇒ replace to `#/` instead of
+// `history.back()` leaving the app. Self-contained — `TopBarProps` stays untouched.
+const onSettings = ref(isSettingsHash());
+let openedInApp = false;
+function isSettingsHash(): boolean {
+  return parseRouteHash(window.location.hash).name === "settings"; // same rule as the router
+}
+function onHashChange(): void {
+  onSettings.value = isSettingsHash();
+  if (!onSettings.value) openedInApp = false;
+}
+function onSettingsClick(ev: MouseEvent): void {
+  if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+  if (!onSettings.value) {
+    openedInApp = true; // the href navigation itself proceeds
+    return;
+  }
+  ev.preventDefault();
+  if (openedInApp) window.history.back();
+  else window.location.replace("#/");
+}
+onMounted(() => window.addEventListener("hashchange", onHashChange));
+onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 </script>
 
 <template>
@@ -86,6 +113,8 @@ function onControlChipClick(): void {
       href="#/settings"
       :aria-label="t('settings.title')"
       :title="t('settings.title')"
+      :aria-current="onSettings ? 'page' : undefined"
+      @click="onSettingsClick"
     >
       <AppIcon name="gear" />
     </a>

@@ -124,6 +124,12 @@
  * into the standalone settings page (`#/settings`); their styles live in `settings.css`. The
  * top bar now carries a single gear link (`.settings-link`, primitives' `.btn-icon`). */
 
+/* gear while `#/settings` is showing: pressed look — a second click closes the page */
+.settings-link[aria-current="page"] {
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+}
+
 .banners {
   display: flex;
   flex-direction: column;
