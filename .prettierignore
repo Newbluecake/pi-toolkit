@@ -13,3 +13,6 @@ tests/fixtures/memory/current-5/
 # real /mem tidy apply path ever runs prettier on proposal content) — same
 # rationale as current-5/ above.
 tests/fixtures/memory/current-5-migrated/
+
+# local preview scratchpad (untracked; never part of the format gate)
+.preview-scratch/
