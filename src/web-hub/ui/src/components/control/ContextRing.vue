@@ -55,9 +55,10 @@ const subCost = computed(() => {
 });
 
 /* Fixed-px geometry (see the header comment): r=16 / stroke 4.5 inside a 40×40 viewBox.
- * Size history: 22px → 50px (2026-10-05 "too small") → 40px (2026-10-06 "圆圈也比较大") → 27px
- * (2026-10-06 "直径缩小为三分之二"). r=11 / stroke 4.5 in a 27×27 viewBox (outer 13.25 ≤ 13.5). */
-const R = 11;
+ * Size history: 22px → 50px (2026-10-05 "too small") → 40px (2026-10-06) → 27px → 20px
+ * (2026-10-06 "直径再缩小四分之一" — at 27px the arc crowded the halved-padding input border).
+ * r=7.5 / stroke 4 in a 20×20 viewBox (outer 9.5 ≤ 10). */
+const R = 7.5;
 const CIRC = 2 * Math.PI * R;
 const dash = computed(() => {
   const p = percent.value;
@@ -140,16 +141,9 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       @click="trigger"
       @keydown="onStopKeydown"
     >
-      <svg class="ctx-ring-svg" width="27" height="27" viewBox="0 0 27 27" aria-hidden="true" focusable="false">
-        <circle class="ctx-ring-track" cx="13.5" cy="13.5" :r="R" />
-        <circle
-          class="ctx-ring-bar"
-          cx="13.5"
-          cy="13.5"
-          :r="R"
-          :stroke-dasharray="dash"
-          transform="rotate(-90 13.5 13.5)"
-        />
+      <svg class="ctx-ring-svg" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+        <circle class="ctx-ring-track" cx="10" cy="10" :r="R" />
+        <circle class="ctx-ring-bar" cx="10" cy="10" :r="R" :stroke-dasharray="dash" transform="rotate(-90 10 10)" />
       </svg>
       <AppIcon name="stop" class="ctx-ring-stop-icon" />
     </button>
@@ -164,16 +158,9 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       @click="open = !open"
       @keydown="onKeydown"
     >
-      <svg class="ctx-ring-svg" width="27" height="27" viewBox="0 0 27 27" aria-hidden="true" focusable="false">
-        <circle class="ctx-ring-track" cx="13.5" cy="13.5" :r="R" />
-        <circle
-          class="ctx-ring-bar"
-          cx="13.5"
-          cy="13.5"
-          :r="R"
-          :stroke-dasharray="dash"
-          transform="rotate(-90 13.5 13.5)"
-        />
+      <svg class="ctx-ring-svg" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+        <circle class="ctx-ring-track" cx="10" cy="10" :r="R" />
+        <circle class="ctx-ring-bar" cx="10" cy="10" :r="R" :stroke-dasharray="dash" transform="rotate(-90 10 10)" />
       </svg>
     </button>
     <span v-if="armed" class="stop-live sr-only" role="status">{{ t("control.stopArmed") }}</span>

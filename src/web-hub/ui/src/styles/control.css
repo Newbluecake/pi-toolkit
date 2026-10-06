@@ -185,13 +185,13 @@
 .ctx-ring-track {
   fill: none;
   stroke: var(--c-border);
-  stroke-width: 4.5;
+  stroke-width: 4; /* proportional to the 20px ring (2026-10-06) */
 }
 
 .ctx-ring-bar {
   fill: none;
   stroke: var(--c-primary);
-  stroke-width: 4.5;
+  stroke-width: 4;
   stroke-linecap: round;
   transition: stroke var(--dur-base) var(--ease-out);
 }
@@ -225,8 +225,8 @@
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 14px; /* fits inside the 27px ring (inner diameter ≈18px) */
-  height: 14px;
+  width: 11px; /* fits inside the 20px ring (inner diameter ≈12px) */
+  height: 11px;
 }
 
 /* Armed (two-step confirm), per the existing `.armed` conventions MINUS the filled danger

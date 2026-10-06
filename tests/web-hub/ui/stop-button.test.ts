@@ -171,8 +171,8 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     expect(btn).toMatch(/color:\s*var\(--c-danger\)/);
     expect(btn).not.toMatch(/var\(--fs-scale/);
     const icon = rule(".ctx-ring-stop-btn .ctx-ring-stop-icon");
-    expect(icon).toMatch(/width:\s*14px/);
-    expect(icon).toMatch(/height:\s*14px/);
+    expect(icon).toMatch(/width:\s*11px/);
+    expect(icon).toMatch(/height:\s*11px/);
     expect(icon).not.toMatch(/var\(--fs-scale/);
     expect(rule(".ctx-ring-stop-btn.armed .ctx-ring-bar")).toMatch(/stroke:\s*var\(--c-danger\)/);
     const toneIdx = css.indexOf('.ctx-ring[data-tone="danger"] .ctx-ring-bar');
