@@ -23,10 +23,52 @@
         "leafId": "e-alpha-2",
         "model": {
           "provider": "cr-anthropic",
-          "id": "claude-sonnet-5"
+          "id": "claude-opus-5-5"
         },
-        "thinkingLevel": "medium",
-        "mode": "tui"
+        "thinkingLevel": "high",
+        "mode": "tui",
+        "models": {
+          "status": "ok",
+          "items": [
+            {
+              "provider": "cr-anthropic",
+              "id": "claude-opus-5-5",
+              "name": "Claude Opus 5.5",
+              "ctx": 1000000,
+              "reasoning": true,
+              "scoped": true
+            },
+            {
+              "provider": "cr-anthropic",
+              "id": "claude-sonnet-5",
+              "name": "Claude Sonnet 5",
+              "ctx": 400000,
+              "reasoning": true,
+              "scoped": true
+            },
+            {
+              "provider": "zai",
+              "id": "glm-5",
+              "name": "GLM 5",
+              "scoped": true
+            },
+            {
+              "provider": "openai",
+              "id": "gpt-5",
+              "name": "GPT 5",
+              "ctx": 400000,
+              "reasoning": true
+            }
+          ],
+          "total": 4,
+          "scoped": true,
+          "levels": ["off", "low", "medium", "high"],
+          "policy": {
+            "model": "allow",
+            "thinking": "allow"
+          },
+          "sampledAt": 1700000000000
+        }
       },
       "status": {
         "leafId": "e-alpha-2",
