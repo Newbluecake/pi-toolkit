@@ -10,6 +10,7 @@ import {
   TMP_SOCKET_DIR_POLICY,
   ensurePrivateDir,
   resolveHubPaths,
+  webHubSpawnFiles,
   webHubStateDir,
 } from "../../../src/web-hub/protocol/paths.js";
 
@@ -18,6 +19,18 @@ const SUFFIX = "/.pi/agent/web-hub/hub.sock";
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "webhub-paths-"));
 }
+
+describe("webHubSpawnFiles", () => {
+  it("resolves spawns.json / spawn logDir / spawn-prefs.json under stateDir (arch §7.7/§7.8 + default-model plan §2/D1)", () => {
+    expect(webHubSpawnFiles("/home/u/.pi/agent/web-hub")).toEqual({
+      spawnsJson: "/home/u/.pi/agent/web-hub/spawns.json",
+      logDir: "/home/u/.pi/agent/web-hub/spawn",
+      prefsJson: "/home/u/.pi/agent/web-hub/spawn-prefs.json",
+    });
+    // the prefs file sits in the SAME stateDir webHubStateDir resolves — never re-derived
+    expect(webHubSpawnFiles(webHubStateDir("/home/u")).prefsJson).toBe("/home/u/.pi/agent/web-hub/spawn-prefs.json");
+  });
+});
 
 describe("resolveHubPaths", () => {
   it("uses stateDir for a short HOME", () => {

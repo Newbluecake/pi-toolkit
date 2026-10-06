@@ -10,9 +10,15 @@
  * the `spawns` SSE event; owner-only fields (`cwd`, `origin.user`, `hintDetail`, `stderrTail`,
  * `uiCancelled[].title`, `firstPrompt.textLen`) live on `SpawnRecordOwner` and are added
  * per-request by `hub/spawn/project.ts` (SP9). The first-prompt BODY never appears at any layer.
+ *
+ * default-model plan §2 (H1) freezes its additions here too: the `model` tri-state on the POST
+ * body, `parseSpawnModelRef` + `SPAWN_MODEL_MAX_BYTES`, the `model`/`"model-rejected"` record
+ * vocabulary, and the whole `POST /api/headless/prefs` body surface — H2 (hub) and F1 (browser)
+ * develop against this file in parallel, so names/types must match the plan exactly.
  */
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { isValidModelId, isValidProvider } from "./models.js";
 
 // ---------------------------------------------------------------------------
 // states & enums (arch §8.1, verbatim)
@@ -40,7 +46,12 @@ export type SpawnHint =
   | "newer-plugin"
   | "cwd-mismatch"
   | "protocol-error"
-  | "launcher-changed";
+  | "launcher-changed"
+  /** default-model plan D5: pi rejected `--model` at startup (`Model "…" not found.` /
+   * `… is ambiguous across providers`). A post-terminal annotation on the terminal
+   * `failed{exited_early}` record — settled by the hub's delayed breaker verdict, never a
+   * state transition, so it can arrive (or be persisted) shortly AFTER the terminal state. */
+  | "model-rejected";
 
 export type FirstPromptState = "pending" | "sending" | "delivered" | "failed" | "expired";
 
@@ -54,6 +65,10 @@ export interface SpawnRecordPublic {
   createdAt: number;
   updatedAt: number;
   cwdLabel: string;
+  /** default-model plan D3: the effective `provider/id` the child was forked with
+   * (`--model`), absent ⇒ pi's own default. Non-sensitive by design — public so SpawnRow can
+   * badge it and a faithful retry can replay it (`rec.model ?? ""`). */
+  model?: string;
   pid?: number;
   agentKey?: string;
   linked?: boolean;
@@ -110,6 +125,11 @@ export interface SpawnRequestBody {
   cwd: string; // ≤4096 bytes
   confirm?: true;
   expectCwd?: string;
+  /** default-model plan D2 tri-state: absent ⇒ hub preference (`spawn-prefs.json`);
+   * `""` ⇒ explicit pi default (fork WITHOUT `--model`); `provider/id` ⇒ parseSpawnModelRef-
+   * valid, used as-is. Old-cached UIs / retries / clients that omit unknown fields just get
+   * the preference — that is the point of the tri-state. */
+  model?: string;
   firstPrompt?: { text: string; deliver?: "steer" | "followUp" }; // text ≤48 KiB, UTF-8
 }
 
@@ -117,6 +137,11 @@ export interface SpawnAccepted {
   spawnId: string;
   state: "starting";
   cwd: string;
+  /** default-model plan D2/v2-R2-2: the EFFECTIVE value — body `model` when given, else the
+   * hub preference resolved at admit time; absent ⇒ pi default (no `--model`). A `dup:true`
+   * replay returns the ORIGINAL record's value — a later preference change never rewrites an
+   * already-admitted record. */
+  model?: string;
   dup?: true;
   firstPrompt?: "accepted";
 }
@@ -181,6 +206,57 @@ function byteLength(s: string): number {
   return textEncoder.encode(s).length;
 }
 
+// ---------------------------------------------------------------------------
+// model ref (default-model plan §2 — 「新建会话默认模型」)
+// ---------------------------------------------------------------------------
+
+/**
+ * Byte cap for a `provider/id` model ref, UTF-8. Exactly
+ * `MODEL_REF_MAX_BYTES + 1 ("/") + MODEL_REF_MAX_BYTES` = 257: `isValidProvider` and
+ * `isValidModelId` each cap their half at 128 bytes, so a parsed ref can never exceed it —
+ * the constant is the frozen wire budget and the request schema's `maxLength` prefilter.
+ */
+export const SPAWN_MODEL_MAX_BYTES = 257;
+
+/**
+ * Provider half of {@link parseSpawnModelRef}: starts alnum, then alnum/`.`/`_`/`-`. The
+ * alnum start rejects a leading `-` (and any other flag-looking prefix) so the value can
+ * never masquerade as an argv flag when the hub appends it to `pi --mode rpc --model <ref>`
+ * (default-model plan §3.1 「argv 安全」 — no shell, value validated, still defense-in-depth).
+ */
+const SPAWN_PROVIDER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * A validated `provider/id` ref. The `id` may itself contain `/`, `:`, `.`, `@` — the split
+ * is at the FIRST `/`, and `:<thinking>`-style suffixes are pi's to interpret, not the hub's.
+ * Reassembling `provider + "/" + id` reproduces the input byte-for-byte: the split carries
+ * no normalization, the parsed value IS the wire value.
+ */
+export interface SpawnModelRef {
+  provider: string;
+  id: string;
+}
+
+/**
+ * Validate a `provider/id` model ref (default-model plan §2): split at the first `/`, then
+ * `isValidProvider && isValidModelId`, the provider additionally pinned to
+ * `^[A-Za-z0-9][A-Za-z0-9._-]*$`, whole ref ≤ {@link SPAWN_MODEL_MAX_BYTES} UTF-8 bytes.
+ * `null` for: no `/`, empty provider, empty id, a leading `-` provider, any whitespace or
+ * control/format char (zero-width U+200B included), and over-budget refs. `""` is NOT valid
+ * here — callers treat it as the explicit 「pi 默认」 tri-state BEFORE calling this.
+ * Never throws.
+ */
+export function parseSpawnModelRef(s: string): SpawnModelRef | null {
+  const slash = s.indexOf("/");
+  if (slash <= 0) return null; // -1: no `/` at all; 0: empty provider
+  const provider = s.slice(0, slash);
+  const id = s.slice(slash + 1);
+  if (!isValidProvider(provider) || !isValidModelId(id)) return null;
+  if (!SPAWN_PROVIDER_RE.test(provider)) return null;
+  if (byteLength(s) > SPAWN_MODEL_MAX_BYTES) return null;
+  return { provider, id };
+}
+
 /**
  * Strict POST body schema (`additionalProperties: false`). The typebox `maxLength` guards are
  * UTF-16-unit PREFILTERS only (UTF-16 length ≤ UTF-8 byte length, so they never over-reject);
@@ -193,6 +269,7 @@ export const SpawnRequestSchema = Type.Object(
     cwd: Type.String({ maxLength: SPAWN_CWD_MAX_BYTES }),
     confirm: Type.Optional(Type.Literal(true)),
     expectCwd: Type.Optional(Type.String({ maxLength: SPAWN_CWD_MAX_BYTES })),
+    model: Type.Optional(Type.String({ maxLength: SPAWN_MODEL_MAX_BYTES })),
     firstPrompt: Type.Optional(
       Type.Object(
         {
@@ -206,7 +283,7 @@ export const SpawnRequestSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export type SpawnBodyError = "not-an-object" | "schema" | "cwd-too-long" | "first-prompt-too-long";
+export type SpawnBodyError = "not-an-object" | "schema" | "cwd-too-long" | "model-invalid" | "first-prompt-too-long";
 
 /** Validate + parse an arbitrary JSON value into a `SpawnRequestBody`. Never throws. */
 export function parseSpawnRequestBody(
@@ -222,8 +299,64 @@ export function parseSpawnRequestBody(
   if (body.expectCwd !== undefined && byteLength(body.expectCwd) > SPAWN_CWD_MAX_BYTES) {
     return { ok: false, error: "cwd-too-long" };
   }
+  // default-model plan §2: `model` is a tri-state — only a non-`""` value must parse as a
+  // `provider/id` ref (`""` = explicit pi default, absent = hub preference).
+  if (body.model !== undefined && body.model !== "" && parseSpawnModelRef(body.model) === null) {
+    return { ok: false, error: "model-invalid" };
+  }
   if (body.firstPrompt !== undefined && byteLength(body.firstPrompt.text) > PROMPT_TEXT_MAX_BYTES) {
     return { ok: false, error: "first-prompt-too-long" };
+  }
+  return { ok: true, body };
+}
+
+// ---------------------------------------------------------------------------
+// spawn prefs (default-model plan §2/§3.1 — the hub-wide 「新建会话默认模型」 preference)
+// ---------------------------------------------------------------------------
+
+/**
+ * The prefs projection: `GET /api/headless`'s `prefs` field and `POST /api/headless/prefs`'s
+ * `{prefs}` reply body. D1: ONE global value under `<stateDir>/spawn-prefs.json` — every
+ * authenticated principal that can reach `/api/headless*` is equally trusted with it
+ * (user ruling U1), so there is deliberately no per-principal field here. `lan:"off"` keeps
+ * the whole surface 404 for LAN principals (route guard, H2).
+ */
+export interface SpawnPrefsWire {
+  /** The default `provider/id` forked with when a POST body omits `model`; `null` ⇒ no
+   * preference (fork WITHOUT `--model`). */
+  defaultModel: string | null;
+}
+
+/** POST /api/headless/prefs body cap, UTF-8 bytes (plan §3 ④: `readJson(≤1 KiB)`). */
+export const SPAWN_PREFS_BODY_MAX = 1024;
+
+/** POST /api/headless/prefs body shape: strict; `""` is the explicit 「清空」 request. */
+export interface SpawnPrefsRequestBody {
+  defaultModel: string;
+}
+
+/**
+ * Strict POST body schema (`additionalProperties: false`). Deliberately NO `maxLength`
+ * prefilter: an over-long value fails `parseSpawnModelRef` inside
+ * {@link parseSpawnPrefsRequest} and surfaces as the same `"model-invalid"` 400 as any other
+ * bad ref (plan §3 ⑤), instead of a separate schema error.
+ */
+export const SpawnPrefsRequestSchema = Type.Object({ defaultModel: Type.String() }, { additionalProperties: false });
+
+export type SpawnPrefsError = "not-an-object" | "schema" | "model-invalid";
+
+/**
+ * Validate + parse an arbitrary JSON value into a `SpawnPrefsRequestBody`. `""` parses OK
+ * (clear); any non-empty `defaultModel` must pass {@link parseSpawnModelRef}. Never throws.
+ */
+export function parseSpawnPrefsRequest(
+  raw: unknown,
+): { ok: true; body: SpawnPrefsRequestBody } | { ok: false; error: SpawnPrefsError } {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "not-an-object" };
+  if (!Value.Check(SpawnPrefsRequestSchema, raw)) return { ok: false, error: "schema" };
+  const body: SpawnPrefsRequestBody = Value.Decode(SpawnPrefsRequestSchema, raw);
+  if (body.defaultModel !== "" && parseSpawnModelRef(body.defaultModel) === null) {
+    return { ok: false, error: "model-invalid" };
   }
   return { ok: true, body };
 }
@@ -306,3 +439,13 @@ type _SpawnRequestStaticMatches =
     : never;
 const _spawnRequestStaticMatches: _SpawnRequestStaticMatches = true;
 void _spawnRequestStaticMatches;
+
+/** Fails to compile if the prefs schema and `SpawnPrefsRequestBody` ever drift apart. */
+type _SpawnPrefsStaticMatches =
+  Static<typeof SpawnPrefsRequestSchema> extends SpawnPrefsRequestBody
+    ? SpawnPrefsRequestBody extends Static<typeof SpawnPrefsRequestSchema>
+      ? true
+      : never
+    : never;
+const _spawnPrefsStaticMatches: _SpawnPrefsStaticMatches = true;
+void _spawnPrefsStaticMatches;

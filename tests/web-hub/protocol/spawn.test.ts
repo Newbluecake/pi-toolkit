@@ -25,9 +25,12 @@ import {
   SPAWN_CWD_MAX_BYTES,
   SPAWN_FAIL_WINDOW_MS,
   SPAWN_ID_RE,
+  SPAWN_MODEL_MAX_BYTES,
   SPAWN_NONTERMINAL_MAX,
+  SPAWN_PREFS_BODY_MAX,
   SPAWN_STARTING_MAX,
   SPAWN_TERMINAL_KEEP,
+  SpawnPrefsRequestSchema,
   STDERR_FILE_MAX,
   STDERR_FILES_MAX,
   STDERR_QUEUE_BYTES,
@@ -43,6 +46,8 @@ import {
   REAPER_GRACE_MS,
   SPAWN_EVENT_MS,
   SpawnRequestSchema,
+  parseSpawnModelRef,
+  parseSpawnPrefsRequest,
   parseSpawnRequestBody,
   type SpawnRequestBody,
 } from "../../../src/web-hub/protocol/spawn.js";
@@ -70,7 +75,11 @@ describe("SpawnRequestSchema 正反例 (plan §SP1)", () => {
   });
 
   it("rejects extra fields at BOTH levels (additionalProperties:false)", () => {
-    expect(Value.Check(SpawnRequestSchema, { ...body(), model: "anthropic/claude" })).toBe(false);
+    // `model` became a REAL field in the default-model plan (§2) — the unknown-field probe
+    // uses `force` instead. A KNOWN-key probe with an invalid VALUE is covered below
+    // ("non-\"\" invalid value ⇒ model-invalid").
+    expect(Value.Check(SpawnRequestSchema, { ...body(), force: true })).toBe(false);
+    expect(Value.Check(SpawnRequestSchema, { ...body(), modelz: "anthropic/claude" })).toBe(false);
     expect(Value.Check(SpawnRequestSchema, body({ firstPrompt: { text: "x", ttl: 5 } }))).toBe(false);
     expect(parseSpawnRequestBody({ ...body(), force: true })).toEqual({ ok: false, error: "schema" });
   });
@@ -146,6 +155,131 @@ describe("UTF-8 byte caps (schema prefilter + exact byte check)", () => {
     expect(parseSpawnRequestBody(body({ expectCwd: wide }))).toEqual({ ok: false, error: "cwd-too-long" });
     // boundary: exactly 4096 bytes still passes
     expect(parseSpawnRequestBody(body({ expectCwd: "中".repeat(1365) + "a" }))).toMatchObject({ ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan §2/§6 (H1): parseSpawnModelRef, the `model` tri-state, the prefs surface.
+// ---------------------------------------------------------------------------
+
+describe("parseSpawnModelRef 正反例 (default-model plan §2/§6)", () => {
+  it.each([
+    ["anthropic/claude-opus-4-5", "anthropic", "claude-opus-4-5"],
+    ["openrouter/openai/gpt-4o:extended", "openrouter", "openai/gpt-4o:extended"],
+    ["vertex/claude@2024", "vertex", "claude@2024"],
+    ["p1/typo-xyz", "p1", "typo-xyz"],
+    // provider charset: `.`, `_`, `-` INSIDE the provider are fine (alnum start)
+    ["prov._-2/m", "prov._-2", "m"],
+  ])("accepts %s", (ref, provider, id) => {
+    expect(parseSpawnModelRef(ref)).toEqual({ provider, id });
+    // split is at the FIRST `/` and carries no normalization — reassembly is identity
+    const parsed = parseSpawnModelRef(ref);
+    expect(parsed && `${parsed.provider}/${parsed.id}`).toBe(ref);
+  });
+
+  it.each([
+    ["empty provider", "/claude-opus-4-5"],
+    ["empty id", "anthropic/"],
+    ["no slash", "anthropic"],
+    ["leading dash provider (flag confusion)", "-x/y"],
+    ["provider starting with dot", ".a/x"],
+    ["provider with colon", "a:b/c"],
+    ["non-ASCII provider", "中/x"],
+    ["plain space", "anthropic /claude"],
+    ["tab in id", "anthropic/\tclaude"],
+    ["newline", "anthropic/claude\n"],
+    ["zero-width space U+200B", "anthropic/claude\u200b"],
+    ["provider over 128 bytes", `${"p".repeat(129)}/${"m".repeat(128)}`],
+    ["id over 128 bytes", `p/${"m".repeat(129)}`],
+    ["empty string", ""],
+  ])("rejects %s: %j", (_name, ref) => {
+    expect(parseSpawnModelRef(ref)).toBeNull();
+  });
+
+  it("each half at exactly 128 bytes ⇒ whole ref exactly SPAWN_MODEL_MAX_BYTES (257) parses", () => {
+    const ref = `${"p".repeat(128)}/${"m".repeat(128)}`;
+    expect(new TextEncoder().encode(ref).length).toBe(SPAWN_MODEL_MAX_BYTES);
+    expect(parseSpawnModelRef(ref)).toEqual({ provider: "p".repeat(128), id: "m".repeat(128) });
+  });
+});
+
+describe("SpawnRequestBody.model 三态 + model-invalid (default-model plan D2)", () => {
+  it("absent ⇒ hub preference: parses OK, body.model stays undefined", () => {
+    const res = parseSpawnRequestBody(body());
+    expect(res).toEqual({ ok: true, body: body() });
+    if (res.ok) expect(res.body.model).toBeUndefined();
+  });
+
+  it('"" ⇒ explicit pi default: schema and parse accept, kept verbatim', () => {
+    const b = body({ model: "" });
+    expect(Value.Check(SpawnRequestSchema, b)).toBe(true);
+    expect(parseSpawnRequestBody(b)).toEqual({ ok: true, body: b });
+  });
+
+  it('"provider/id" ⇒ accepted verbatim (id may carry / : . @)', () => {
+    const b = body({ model: "openrouter/openai/gpt-4o:extended" });
+    expect(Value.Check(SpawnRequestSchema, b)).toBe(true);
+    expect(parseSpawnRequestBody(b)).toEqual({ ok: true, body: b });
+  });
+
+  it.each([
+    ["empty provider", "/x"],
+    ["leading dash", "-x/y"],
+    ["whitespace", "a b/c"],
+    ["newline", "a/b\n"],
+    ["zero-width space", "a/b\u200b"],
+    ["no slash", "ab"],
+  ])('non-"" invalid value ⇒ model-invalid: %s', (_name, model) => {
+    expect(parseSpawnRequestBody(body({ model }))).toEqual({ ok: false, error: "model-invalid" });
+  });
+
+  it("UTF-16 prefilter escape: ≤257 units but >257 UTF-8 bytes ⇒ model-invalid (not schema)", () => {
+    // 87 chars (≤257 units) so the schema prefilter lets it by; 43×3 + 1 + 43×3 = 259 bytes,
+    // and each half is 129 bytes > the 128-byte per-part cap — parseSpawnModelRef must reject.
+    const ref = `${"中".repeat(43)}/${"中".repeat(43)}`;
+    expect(Value.Check(SpawnRequestSchema, body({ model: ref }))).toBe(true);
+    expect(parseSpawnRequestBody(body({ model: ref }))).toEqual({ ok: false, error: "model-invalid" });
+  });
+
+  it(">257 UTF-16 units ⇒ schema prefilter rejects (schema, not model-invalid)", () => {
+    expect(parseSpawnRequestBody(body({ model: "a".repeat(SPAWN_MODEL_MAX_BYTES + 1) }))).toEqual({
+      ok: false,
+      error: "schema",
+    });
+  });
+});
+
+describe("spawn prefs wire (default-model plan §2: SpawnPrefsWire/schema/parse/max)", () => {
+  it('SpawnPrefsRequestSchema is strict: "" and valid refs pass, extra fields / non-strings fail', () => {
+    expect(Value.Check(SpawnPrefsRequestSchema, { defaultModel: "" })).toBe(true);
+    expect(Value.Check(SpawnPrefsRequestSchema, { defaultModel: "anthropic/claude-opus-4-5" })).toBe(true);
+    expect(Value.Check(SpawnPrefsRequestSchema, { defaultModel: "x", extra: 1 })).toBe(false);
+    expect(Value.Check(SpawnPrefsRequestSchema, {})).toBe(false);
+    expect(Value.Check(SpawnPrefsRequestSchema, { defaultModel: 5 })).toBe(false);
+    expect(Value.Check(SpawnPrefsRequestSchema, { defaultModel: null })).toBe(false);
+  });
+
+  it("parseSpawnPrefsRequest: not-an-object / schema / model-invalid / ok", () => {
+    for (const raw of [undefined, null, "x", 42, [], [{ defaultModel: "" }]]) {
+      expect(parseSpawnPrefsRequest(raw)).toEqual({ ok: false, error: "not-an-object" });
+    }
+    expect(parseSpawnPrefsRequest({ defaultModel: "x", extra: 1 })).toEqual({ ok: false, error: "schema" });
+    expect(parseSpawnPrefsRequest({ defaultModel: 5 })).toEqual({ ok: false, error: "schema" });
+    // non-empty values ride parseSpawnModelRef — same rejection vocabulary as the POST body
+    expect(parseSpawnPrefsRequest({ defaultModel: "-x/y" })).toEqual({ ok: false, error: "model-invalid" });
+    expect(parseSpawnPrefsRequest({ defaultModel: "anthropic/" })).toEqual({ ok: false, error: "model-invalid" });
+    expect(parseSpawnPrefsRequest({ defaultModel: "a".repeat(600) })).toEqual({ ok: false, error: "model-invalid" });
+    // "" = the explicit 「清空」 request — parses OK, the route maps it to null
+    expect(parseSpawnPrefsRequest({ defaultModel: "" })).toEqual({ ok: true, body: { defaultModel: "" } });
+    expect(parseSpawnPrefsRequest({ defaultModel: "vertex/claude@2024" })).toEqual({
+      ok: true,
+      body: { defaultModel: "vertex/claude@2024" },
+    });
+  });
+
+  it("caps: SPAWN_MODEL_MAX_BYTES / SPAWN_PREFS_BODY_MAX", () => {
+    expect(SPAWN_MODEL_MAX_BYTES).toBe(257); // 128 (provider) + 1 (/) + 128 (id)
+    expect(SPAWN_PREFS_BODY_MAX).toBe(1024);
   });
 });
 

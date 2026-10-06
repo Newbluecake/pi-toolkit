@@ -339,6 +339,9 @@ describe("types.test-d.ts (web-hub-spawn SP1 ports & wire surface)", () => {
       | "cwd-mismatch"
       | "protocol-error"
       | "launcher-changed"
+      // default-model plan §2/D5 (H1): pi rejected `--model` at startup (not found /
+      // ambiguous) — post-terminal annotation on `failed{exited_early}`.
+      | "model-rejected"
     >();
     expectTypeOf<FirstPromptState>().toEqualTypeOf<"pending" | "sending" | "delivered" | "failed" | "expired">();
     expectTypeOf<DirEntryWire>().toEqualTypeOf<{ cwd: string; label: string; at: number }>();

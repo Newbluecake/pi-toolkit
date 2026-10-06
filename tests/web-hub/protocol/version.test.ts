@@ -6,6 +6,8 @@ import {
   RESERVED_FRAME_TYPES,
   RUNTX_AGENT_CAPS,
   RUNTX_HUB_CAPS,
+  SPAWN_HUB_CAP,
+  SPAWN_MODEL_HUB_CAP,
   compareVersions,
   protoCompatible,
 } from "../../../src/web-hub/protocol/version.js";
@@ -70,5 +72,13 @@ describe("constants", () => {
     expect([...RUNTX_HUB_CAPS]).toEqual(["runtx.v1"]);
     // LAN availability is NOT a hub cap — §7.1 gates per-request against the AGENT's caps.
     expect(RUNTX_HUB_CAPS).not.toContain("runtx.lan.v1");
+  });
+
+  it("spawn caps are stable (web-hub-spawn SP1 + default-model plan §2/D4)", () => {
+    expect(SPAWN_HUB_CAP).toBe("spawn.v1");
+    // the 「新建会话默认模型」 feature set: prefs endpoint + `model` tri-state + the
+    // model/model-rejected record vocabulary. A browser without it MUST NOT send `model`
+    // (old hubs' additionalProperties:false ⇒ 400); an old browser ignores the unknown cap.
+    expect(SPAWN_MODEL_HUB_CAP).toBe("spawn.model.v1");
   });
 });

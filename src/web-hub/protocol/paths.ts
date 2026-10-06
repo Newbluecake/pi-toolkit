@@ -194,12 +194,19 @@ export function webHubUploadsDir(home: string): string {
 
 /**
  * web-hub-spawn arch §7.7/§7.8: `<stateDir>/spawns.json` (the 0600 spawn-intent/record store,
- * SP5) and `<stateDir>/spawn/` (the 0700 stderr-log dir, one file per spawn). Takes the SAME
- * `stateDir` the callers already resolved via `webHubStateDir(home)` so it never re-derives the
- * prefix — additive, does not touch the frozen `HubPaths` shape.
+ * SP5) and `<stateDir>/spawn/` (the 0700 stderr-log dir, one file per spawn). The
+ * default-model plan (§2/D1/§3.1) adds `<stateDir>/spawn-prefs.json` — the 0600 single-value
+ * 「新建会话默认模型」 preference (`{"v":1,"defaultModel":string|null}`) owned by H2's
+ * `hub/spawn/prefs.ts`. Takes the SAME `stateDir` the callers already resolved via
+ * `webHubStateDir(home)` so it never re-derives the prefix — additive, does not touch the
+ * frozen `HubPaths` shape.
  */
-export function webHubSpawnFiles(stateDir: string): { spawnsJson: string; logDir: string } {
-  return { spawnsJson: `${stateDir}/spawns.json`, logDir: `${stateDir}/spawn` };
+export function webHubSpawnFiles(stateDir: string): { spawnsJson: string; logDir: string; prefsJson: string } {
+  return {
+    spawnsJson: `${stateDir}/spawns.json`,
+    logDir: `${stateDir}/spawn`,
+    prefsJson: `${stateDir}/spawn-prefs.json`,
+  };
 }
 
 function dirnameOf(p: string): string {

@@ -49,6 +49,20 @@ export const DIALOG_BG_HUB_CAPS = ["dialog.bg.v1"] as const;
 export const SPAWN_HUB_CAP = "spawn.v1";
 
 /**
+ * web-hub-spawn default-model plan §2/D4: the hub cap advertising the 「新建会话默认模型」
+ * feature set — `POST /api/headless/prefs`, the `model` tri-state on `POST /api/headless`,
+ * and the record/accepted `model` + `"model-rejected"` hint vocabulary. Advertised exactly
+ * like `SPAWN_HUB_CAP`: only when `config.spawn` exists (H2 folds it into `extraHubCaps` on
+ * both cap surfaces). A browser that does NOT see it MUST NOT send `model` anywhere — the
+ * pre-feature request schema is `additionalProperties: false`, so an old hub would 400 the
+ * body — and hides/disables the settings entry with an upgrade hint; an old browser facing a
+ * new hub just ignores the unknown cap string (every consumer is a `caps.includes(...)`
+ * check). Like `SPAWN_HUB_CAP` itself, this added no agent↔hub frames, so no PROTO bump
+ * (same §2.3 只加帧不改 rule; see PROTO above for the 1.2 bump's actual owner, fleet F0).
+ */
+export const SPAWN_MODEL_HUB_CAP = "spawn.model.v1";
+
+/**
  * web-hub-preview plan v3 §4.1 (PV1): the two hub caps advertising the read-only content-preview
  * endpoint (`GET /api/preview`). `PREVIEW_HUB_CAP` is declared whenever the feature is on
  * (`webHub.preview` = `"loopback"` or `"on"`); `PREVIEW_LAN_HUB_CAP` only when the mode is
