@@ -311,6 +311,15 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   `config.spawn` exists. SP13's `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
   child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.test.ts` (real pi) are the
   S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`.
+  **Delete session (`POST /api/agents/remove`, web-hub-delete-session plan v2)**: an AgentCard / SpawnRow two-step
+  delete removes the card (and, for a managed session, stops the process first); the session jsonl is never deleted.
+  Three invariants: **B-alive** — a record/card is dropped only after a read-only identity probe confirms death (or
+  `noProcess` evidence); alive/unknown ⇒ 409 `E_AGENT_ONLINE{exit-unconfirmed}` and the card comes back, an online TUI
+  is refused (`online`), an offline TUI/external rpc card is dropped with no signal at all; **B-fork** — replaying the
+  same create `id` within the dedup TTL after a delete ⇒ 409 `E_BAD_REQUEST{spawn-gone}`, never a fresh fork;
+  **B-stream** — `agent_removed` is published only after dropAgent + clearing that agent's SSE subscriptions.
+  `removeIntent` persists synchronously so a hub crash mid-delete converges on the next boot. LAN with `spawn.lan:"off"`
+  cannot delete a live managed card (403 `lan-off`). Design: `docs/dev/web-hub-delete-session/plan.md`.
   **Content preview (web-hub-preview plan v3, setting `webHub.preview` — `"on" | "loopback" | "off"`, default
   `"on"` per the 2026-10-05 user ruling U1: sole LAN user behind password auth, risk explicitly accepted; change
   is non-live — `/reload` then `/webhub restart`)**: an absolute path in a settled message (assistant text, user
