@@ -33,6 +33,8 @@ const agents = {
   "removeErr.rate": "too many requests, retry shortly",
   "removeErr.unsupported": "hub does not support this, reload the page",
   "removeErr.network": "network error",
+  // Deep-link refresh flicker fix: pre-first-`agents`-snapshot loading state (AgentList).
+  loadingTitle: "Connecting…",
 } satisfies Record<string, string>;
 
 export default agents;

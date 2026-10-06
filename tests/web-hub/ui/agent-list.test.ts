@@ -817,3 +817,43 @@ describe("SpawnRow.vue — delete entry (web-hub-delete-session v2 §0.3/§5.4)"
     expect(wrapper.findAll(".spawn-pending .spawn-row")).toHaveLength(0);
   });
 });
+
+/**
+ * Deep-link refresh flicker fix: with an empty card list but no first `agents` snapshot yet
+ * (`HUB_CTX` state's `synced === false`), the list renders a connecting state instead of
+ * flashing 「No pi sessions connected」. A missing hub/field defaults to synced (old behavior).
+ */
+describe("AgentList.vue — pre-first-snapshot connecting state (deep-link refresh flicker fix)", () => {
+  function hubWithSynced(synced: boolean): HubHandle {
+    return { state: ref({ agents: new Map(), synced } as unknown as HubState), dispatch: () => {} };
+  }
+
+  it("empty cards + not yet synced ⇒ connecting state, not the no-sessions empty state", () => {
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hubWithSynced(false) } },
+    });
+    expect(wrapper.find(".empty h2").text()).toBe("Connecting…");
+    expect(wrapper.find("ul.agent-list").exists()).toBe(false);
+  });
+
+  it("empty cards + synced ⇒ the no-sessions empty state (unchanged)", () => {
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hubWithSynced(true) } },
+    });
+    expect(wrapper.find(".empty h2").text()).toBe("No pi sessions connected");
+  });
+
+  it("empty cards + never synced + reconnecting (hub unreachable) ⇒ the no-sessions empty state", () => {
+    const hub: HubHandle = {
+      state: ref({ agents: new Map(), synced: false, conn: "reconnecting" } as unknown as HubState),
+      dispatch: () => {},
+    };
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    expect(wrapper.find(".empty h2").text()).toBe("No pi sessions connected");
+  });
+});

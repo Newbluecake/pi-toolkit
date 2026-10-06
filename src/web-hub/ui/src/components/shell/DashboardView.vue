@@ -71,6 +71,16 @@ const selectedAgent = computed(() =>
 const selectedRemoved = computed(
   () => selectedKey.value !== null && (props.hub.state.value.removed?.has(selectedKey.value) ?? false),
 );
+// First-`agents`-snapshot gate (deep-link refresh flicker fix): before the hub's first snapshot
+// lands, an agent-route deep link renders a loading state instead of flashing 「未连接」 —
+// `synced` stays true across reconnects, so a reconnect never falls back into it. The gate only
+// holds while the FIRST connection attempt is in flight: once the transport reports
+// `reconnecting` without ever having synced (hub down / network unreachable), the loading state
+// gives way to the pre-fix 「未连接」 empty state instead of spinning on 「Connecting…」 forever.
+const synced = computed(() => {
+  const st = props.hub.state.value;
+  return st.synced === true || st.conn === "reconnecting";
+});
 
 // plan §3.3's `route` compatibility event — dispatched on every route change (incl. the very
 // first one, `immediate: true`, so a direct deep link is honored before any `agents` frame
@@ -210,6 +220,9 @@ function onLoadOlder(agentKey: string): void {
           </template>
         </EmptyState>
       </div>
+      <div v-else-if="route.name === 'agent' && !synced" class="detail">
+        <EmptyState icon="loader" :title="t('detail.loadingTitle')" :body="t('detail.loadingBody')" />
+      </div>
       <div v-else-if="route.name === 'agent'" class="detail">
         <EmptyState icon="inbox" :title="t('detail.notConnectedTitle')" :body="t('detail.notConnectedBody')">
           <template #actions>
@@ -238,6 +251,9 @@ function onLoadOlder(agentKey: string): void {
             <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
           </template>
         </EmptyState>
+      </div>
+      <div v-else-if="!synced" class="detail">
+        <EmptyState icon="loader" :title="t('detail.loadingTitle')" :body="t('detail.loadingBody')" />
       </div>
       <div v-else class="detail">
         <EmptyState icon="inbox" :title="t('detail.notConnectedTitle')" :body="t('detail.notConnectedBody')">

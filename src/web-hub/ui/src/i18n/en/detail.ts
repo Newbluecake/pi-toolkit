@@ -65,6 +65,9 @@ const detail = {
   // the file's end — another package inserts before `todoTitle`, never here).
   removedTitle: "Session removed from the list",
   removedBody: "The session file is kept; resume it from a terminal with pi.",
+  // Deep-link refresh flicker fix: pre-first-`agents`-snapshot loading state (DashboardView).
+  loadingTitle: "Connecting…",
+  loadingBody: "Waiting for the hub's first snapshot.",
 } satisfies Record<string, string>;
 
 export default detail;

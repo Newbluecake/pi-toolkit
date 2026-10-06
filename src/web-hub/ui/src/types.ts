@@ -201,6 +201,10 @@ export interface HubState {
    * on a pre-delete-session reducer snapshot (none exists pre-feature), so every reader treats
    * a missing field the same as an empty set. */
   readonly removed?: ReadonlySet<string>;
+  /** First-`agents`-snapshot-arrived flag (deep-link refresh flicker fix): `false` until the
+   * hub's first `agents` frame lands, stays `true` across reconnects (the old cards are kept).
+   * DashboardView/AgentList render a loading state instead of their empty states while falsy. */
+  readonly synced?: boolean;
 }
 
 /**

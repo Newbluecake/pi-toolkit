@@ -1025,3 +1025,32 @@ describe("state.reduce — session.models preservation (web-model-switch §9 #20
     expect(A(s).session.models).toBeUndefined();
   });
 });
+
+describe("State.synced — first-agents-snapshot flag (deep-link refresh flicker fix)", () => {
+  it("initialState().synced is false", () => {
+    expect(initialState().synced).toBe(false);
+  });
+
+  it("the first `agents` snapshot flips it to true", () => {
+    const s = reduce(initialState(), { event: "agents", data: [card("A")] });
+    expect(s.synced).toBe(true);
+  });
+
+  it("an empty `agents` snapshot also flips it (a valid zero-agent hub is synced, not loading)", () => {
+    const s = reduce(initialState(), { event: "agents", data: [] });
+    expect(s.synced).toBe(true);
+  });
+
+  it("`hello` before any snapshot keeps it false", () => {
+    const s = reduce(initialState(), { event: "hello", data: { clientId: "c1" } });
+    expect(s.synced).toBe(false);
+  });
+
+  it("a reconnect (`conn` close + `hello`) keeps it true — old cards stay, never back to loading", () => {
+    let s = reduce(initialState(), { event: "agents", data: [card("A")] });
+    s = reduce(s, { event: "conn", data: { state: "closed" } });
+    s = reduce(s, { event: "hello", data: { clientId: "c2" } });
+    expect(s.synced).toBe(true);
+    expect(s.agents.has("A")).toBe(true);
+  });
+});

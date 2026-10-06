@@ -257,3 +257,80 @@ describe("DashboardView.vue — removed empty state (web-hub-delete-session v2 �
     expect(window.location.hash).toBe("#/agent/gone-3");
   });
 });
+
+/**
+ * Deep-link refresh flicker fix: before the hub's first `agents` snapshot lands
+ * (`state.synced === false`), an agent-route deep link renders a loading state instead of
+ * flashing 「This agent is not connected」. `synced` survives reconnects, so a reconnect never
+ * falls back into the loading state; everything past the first snapshot is unchanged.
+ */
+describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refresh flicker fix)", () => {
+  function hubPreSnapshot(): HubHandle {
+    const s = run([{ event: "hello", data: { clientId: "c1" } }]);
+    return { state: ref(s as unknown as HubState), dispatch: () => {} };
+  }
+
+  it("split view: a deep link before the first agents snapshot renders loading, not not-connected", () => {
+    stubMatchMedia(false);
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hubPreSnapshot());
+    // scope to the detail pane — the sidebar's own empty state also uses `.empty` (no HUB_CTX
+    // provide in this mount defaults the list to its synced behavior, same as production).
+    expect(wrapper.find(".detail .empty h2").text()).toBe("Connecting…");
+    expect(wrapper.find(".detail .empty h2").text()).not.toBe("This agent is not connected");
+  });
+
+  it("narrow view: same loading state before the first snapshot", () => {
+    stubMatchMedia(true);
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hubPreSnapshot());
+    expect(wrapper.find(".empty h2").text()).toBe("Connecting…");
+  });
+
+  it("a synced snapshot without the key ⇒ not-connected (unchanged)", () => {
+    stubMatchMedia(false);
+    const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hubWithOneAgent());
+    expect(wrapper.find(".empty h2").text()).toBe("This agent is not connected");
+  });
+
+  it("a synced snapshot WITH the key ⇒ the real detail view (unchanged)", () => {
+    stubMatchMedia(false);
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hubWithOneAgent());
+    expect(wrapper.find(".empty").exists()).toBe(false);
+    expect(wrapper.find(".detail-head").exists()).toBe(true);
+  });
+
+  it("a reconnect (conn close + hello) after the snapshot never falls back to loading", () => {
+    stubMatchMedia(false);
+    const s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [card("agent-a")] },
+      { event: "conn", data: { state: "closed" } },
+      { event: "hello", data: { clientId: "c2" } },
+    ]);
+    const hub: HubHandle = { state: ref(s as unknown as HubState), dispatch: () => {} };
+    const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hub);
+    expect(wrapper.find(".empty h2").text()).toBe("This agent is not connected");
+  });
+
+  it("never synced + transport reconnecting (hub unreachable) ⇒ not-connected, not an endless loading state", () => {
+    stubMatchMedia(false);
+    const s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "conn", data: { state: "reconnecting" } },
+    ]);
+    const hub: HubHandle = { state: ref(s as unknown as HubState), dispatch: () => {} };
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hub);
+    expect(wrapper.find(".detail .empty h2").text()).toBe("This agent is not connected");
+  });
+
+  it("never synced + a removed key ⇒ the removed state still wins over loading", () => {
+    stubMatchMedia(false);
+    const s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agent_removed", data: { agentKey: "agent-a" } },
+    ]);
+    const hub: HubHandle = { state: ref(s as unknown as HubState), dispatch: () => {} };
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hub);
+    expect(wrapper.find(".detail .empty h2").text()).not.toBe("Connecting…");
+    expect(wrapper.find(".detail .empty h2").text()).not.toBe("This agent is not connected");
+  });
+});

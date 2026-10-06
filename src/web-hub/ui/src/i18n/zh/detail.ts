@@ -65,6 +65,8 @@ const detail = {
   todoMore: "（+{n} 更多）",
   removedTitle: "会话已从列表删除",
   removedBody: "会话文件仍保留，可在终端用 pi 恢复。",
+  loadingTitle: "正在连接…",
+  loadingBody: "正在等待 hub 的首个快照。",
 } satisfies Messages<typeof en>;
 
 export default detail;

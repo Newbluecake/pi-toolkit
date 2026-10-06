@@ -103,6 +103,15 @@ onBeforeUnmount(() => applySidebarWidth(false));
 
 const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
+// First-`agents`-snapshot gate (deep-link refresh flicker fix): before the hub's first snapshot
+// lands, an empty card list is "still connecting", not 「暂无会话」. Missing hub/field defaults
+// to synced so pre-feature snapshots and hub-less test mounts keep the old behavior; a
+// `reconnecting` transport that never synced (hub unreachable) also falls back to the old
+// empty state rather than an endless 「Connecting…」.
+const synced = computed(() => {
+  const st = hub?.state.value;
+  return st === undefined || st.synced !== false || st.conn === "reconnecting";
+});
 
 const selectedAgent = computed(() =>
   props.selectedKey === null ? undefined : hub?.state.value.agents.get(props.selectedKey),
@@ -276,8 +285,9 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
       </li>
     </ul>
 
+    <EmptyState v-if="cards.length === 0 && !synced" icon="loader" :title="t('agents.loadingTitle')" />
     <EmptyState
-      v-if="cards.length === 0"
+      v-else-if="cards.length === 0"
       icon="terminal"
       :title="t('agents.emptyTitle')"
       :body="`${t('agents.emptyBodyLead')} webHub.enabled ${t('agents.emptyBodyTail')}`"

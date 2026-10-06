@@ -34,6 +34,7 @@ const agents = {
   "removeErr.rate": "操作太频繁，稍后再试",
   "removeErr.unsupported": "hub 版本不支持，请刷新页面",
   "removeErr.network": "网络错误",
+  loadingTitle: "正在连接…",
 } satisfies Messages<typeof en>;
 
 export default agents;

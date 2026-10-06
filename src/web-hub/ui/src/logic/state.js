@@ -72,7 +72,7 @@
  *   nextVersion?: string | undefined, supersedePending: boolean,
  *   supersedeDeadlineAt?: number | undefined, forced: boolean, draining: boolean,
  *   spawns: import("../../../protocol/spawn.js").SpawnsPayload | null,
- *   removed: ReadonlySet<string>,
+ *   removed: ReadonlySet<string>, synced: boolean,
  * }} State
  * @typedef {{ event: string, data: any, id?: number }} Msg
  */
@@ -153,6 +153,11 @@ export function initialState() {
     supersedeBlocked: undefined,
     spawns: null,
     removed: new Set(),
+    // first-`agents`-snapshot-arrived flag (deep-link refresh flicker fix): DashboardView/
+    // AgentList render a loading state instead of 「未连接」/「暂无会话」 until the hub's first
+    // snapshot lands. `hello` keeps it (the old cards stay on screen across a reconnect), so
+    // a reconnect never falls back into the loading state.
+    synced: false,
   };
 }
 
@@ -377,7 +382,7 @@ function reduceInner(s, event, d) {
       // web-hub-delete-session plan v2 §5.1: a fresh snapshot carrying a previously-removed key
       // (§3: the same pi process re-„hello“s) clears it from `removed` — the card is genuinely back.
       const removed = clearRemoved(s.removed, agents.keys());
-      return withSelection({ ...s, agents, order, removed });
+      return withSelection({ ...s, agents, order, removed, synced: true });
     }
     case "agent_up": {
       const card = d.agent && typeof d.agent === "object" ? d.agent : d;
