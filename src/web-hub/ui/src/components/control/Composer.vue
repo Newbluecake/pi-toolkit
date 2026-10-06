@@ -694,17 +694,6 @@ watch(
     <div v-if="dropActive" class="drop-overlay">{{ t("upload.dropHint") }}</div>
     <div class="composer-row">
       <span v-if="commandMode" class="chip cmd-badge" translate="no">{{ t("control.cmdBadge") }}</span>
-      <button
-        v-if="uploadsHandle !== undefined"
-        class="composer-attach"
-        type="button"
-        data-attach
-        :disabled="!uploadOn"
-        :aria-label="t('upload.attachAria')"
-        @click="onAttachClick"
-      >
-        <AppIcon name="paperclip" class="icon-sm" />
-      </button>
       <input
         ref="fileInputEl"
         class="file-input sr-only"
@@ -745,17 +734,34 @@ watch(
           <div class="composer-chips" :class="{ 'chips-off': text !== '' }">
             <ModelSwitcher />
           </div>
-          <!-- Context ring + stop, merged (right end of the bottom row while the row is
-               expanded; absolute mid-right overlay otherwise — control.css's `:not(.has-text)`
-               tier). Idle ⇒ ring details toggle; busy + live control ⇒ the whole ring zone is
-               the two-step stop button. Self-hides the ring when no DETAIL_METRICS provider/
-               contextUsage exists, falling back to the standalone stop look so stop stays
-               reachable. Same stop channel the dock used — no emit hop (see `onStopInline`). -->
-          <ContextRing
-            :busy="busy && view?.control != null"
-            :queue-count="view === null ? 0 : view.queueItems.value.length"
-            @stop="onStopInline"
-          />
+          <div class="composer-end">
+            <!-- Attach (2026-10-07 user request 「附件按钮放到上下文进度的左侧」): moved INSIDE
+                 the card, immediately left of the ring, following the ring's two placements —
+                 absolute mid-right while the row is collapsed (upload.css), in-flow here when
+                 expanded. Frameless inside the card; the hit zone stretches full card height. -->
+            <button
+              v-if="uploadsHandle !== undefined"
+              class="composer-attach"
+              type="button"
+              data-attach
+              :disabled="!uploadOn"
+              :aria-label="t('upload.attachAria')"
+              @click="onAttachClick"
+            >
+              <AppIcon name="paperclip" class="icon-sm" />
+            </button>
+            <!-- Context ring + stop, merged (right end of the bottom row while the row is
+                 expanded; absolute mid-right overlay otherwise — control.css's `:not(.has-text)`
+                 tier). Idle ⇒ ring details toggle; busy + live control ⇒ the whole ring zone is
+                 the two-step stop button. Self-hides the ring when no DETAIL_METRICS provider/
+                 contextUsage exists, falling back to the standalone stop look so stop stays
+                 reachable. Same stop channel the dock used — no emit hop (see `onStopInline`). -->
+            <ContextRing
+              :busy="busy && view?.control != null"
+              :queue-count="view === null ? 0 : view.queueItems.value.length"
+              @stop="onStopInline"
+            />
+          </div>
         </div>
       </div>
       <button

@@ -158,6 +158,16 @@
   max-height: 24px;
 }
 
+/* Right-end group (2026-10-07: attach moved inside the card, immediately left of the ring):
+ * keeps `attach + ring` together at the row's right end while `space-between` pushes the
+ * chips left. Both children are absolute while the row is collapsed, so the group itself is
+ * a 0×0 point then — exactly like the ring's lone-wrapper days. */
+.composer-end {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
 /* Expanded state only: the ring leaves its absolute mid-right anchor and joins the bottom
  * row in normal flow (right end via the row's space-between). `position: relative` (not
  * `static`) keeps it the containing block for the details panel / armed queue note, so both
@@ -248,6 +258,23 @@
  * `.stop-btn .icon`) never runs away unbounded. */
 .composer-input:has(.stop-btn):not(:has(.ctx-ring)) textarea {
   padding-right: min(calc(52px * var(--fs-scale, 1)), 70px);
+}
+
+/* Attach INSIDE the card (2026-10-07 「附件按钮放到上下文进度的左侧」): its fixed 36px slot
+ * stacks left of whatever right-edge control already reserves space — same constant-slot
+ * philosophy as the ring (the slot never goes away while the attach button exists, so text
+ * never reflows horizontally between the collapsed/expanded row states). */
+.composer-input:has(.composer-attach) textarea {
+  padding-right: 40px; /* attach alone (no ring, no stop) */
+}
+
+.composer-input:has(.composer-attach):has(.ctx-ring) textarea {
+  padding-right: 76px; /* ring 36 + attach 36 + edge air */
+}
+
+.composer-input:has(.composer-attach):has(.stop-btn):not(:has(.ctx-ring)) textarea {
+  /* the standalone-stop tier above + attach's 40px */
+  padding-right: calc(min(calc(52px * var(--fs-scale, 1)), 70px) + 40px);
 }
 
 /* 2026-10-06 field report (main-page screenshot): the ≤480px unwrap that used to move the
@@ -1090,12 +1117,12 @@
     min-height: 34px;
   }
 
-  /* Pin the narrow geometry even on coarse pointers: upload.css's `(pointer: coarse)` rule
-   * (attach 44px) loads LATER at equal specificity, and the coarse block above bumps
-   * `.composer-row` gap to sp-3 — both would silently shift the input's geometry on phones. */
-  .composer-row .composer-attach {
+  /* Pin the narrow geometry even on coarse pointers: the attach button lives INSIDE the card
+   * now (2026-10-07) — its slot is the fixed 36px of the base rule, shrunk to 32px here so the
+   * phone's tighter right edge keeps text room; the hit zone stays the card's full height.
+   * The coarse block above still bumps `.composer-row` gap to sp-3 for the send button. */
+  .composer-attach {
     width: 32px;
-    min-height: 34px;
   }
 
   .composer-row {

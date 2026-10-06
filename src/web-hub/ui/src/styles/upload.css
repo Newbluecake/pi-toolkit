@@ -6,21 +6,60 @@
  * the UI (no per-file dark overrides needed: every color below is a `tokens.css` var).
  */
 
-/* --- attach button (§4.1 entry 3; §4.4: coarse pointers get a ≥44px target, always shown) --- */
-
+/* --- attach button (§4.1 entry 3) ---
+ * 2026-10-07 user request 「附件按钮放到上下文进度的左侧」: moved INSIDE the composer card,
+ * immediately left of the context ring, following the ring's two-placement pattern
+ * (control.css `.ctx-ring`): ABSOLUTE mid-right while the bottom row is collapsed (typing or
+ * no model switcher), in-flow at the row's right end when the row is expanded (empty +
+ * switcher). Frameless — a bordered box inside the card's own border read as a double frame;
+ * `top:0;bottom:0` stretches the hit zone to the card's full height (≥44px floor state), the
+ * same trick `.ctx-ring-btn` uses, so the §4.4 coarse-pointer target survives without the old
+ * standalone 44px box (the coarse width bump is gone with it — the slot math in control.css
+ * assumes a 36px slot). */
 .composer-attach {
-  flex: none;
+  position: absolute;
+  right: var(--sp-1); /* rightmost control when no ring renders (no DETAIL_METRICS provider) */
+  top: 0;
+  bottom: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: center; /* 2026-10-05: user field report — flex-end left the paperclip hugging the textarea's bottom edge once it auto-grows */
   width: 36px;
-  min-height: 44px; /* match .composer-send / textarea touch target (§7.4) */
-  border: 1px solid var(--c-border-strong);
-  border-radius: var(--r-md);
-  background: var(--c-surface);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
   color: var(--c-text-3);
   cursor: pointer;
+}
+
+/* Left of the ring's fixed 36px edge slot. */
+.composer-input:has(.ctx-ring) .composer-attach {
+  right: calc(var(--sp-1) + 36px);
+}
+
+/* Left of the standalone stop button instead (the no-ring fallback). */
+.composer-input:has(.stop-btn):not(:has(.ctx-ring)) .composer-attach {
+  right: calc(var(--sp-1) + 48px);
+}
+
+/* Expanded bottom row (empty + switcher): join the ring in normal flow at the row's right
+ * end; the ≥44px hit box overflows the 24px row via the same negative-margin trick the ring
+ * uses (nothing clips it — `.composer-bottom` deliberately has no overflow:hidden). */
+.composer-input:has(.model-switcher):not(.has-text) .composer-attach {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  min-height: 44px;
+  margin-block: -10px;
+}
+
+/* fs-scale: the paperclip grows like every icon-sm, but CAPPED at 28px (200%) — the 36px
+ * slot is fixed px, and at fs=3 an uncapped 42px glyph would overlap the neighbouring ring
+ * (same runaway class `.stop-btn .icon` got capped for, control.css). */
+.composer-attach .icon {
+  width: min(calc(14px * var(--fs-scale, 1)), 28px);
+  height: min(calc(14px * var(--fs-scale, 1)), 28px);
 }
 
 .composer-attach:hover:not(:disabled) {
@@ -39,11 +78,8 @@
   cursor: default;
 }
 
-@media (pointer: coarse) {
-  .composer-attach {
-    width: 44px; /* §4.4: coarse pointers keep the full touch target */
-  }
-}
+/* (the coarse-pointer width bump for `.composer-attach` was retired with the in-card move —
+ * see the block above.) */
 
 /* --- drop overlay (§4.1 entry 2; .composer itself gets position:relative here) --- */
 
