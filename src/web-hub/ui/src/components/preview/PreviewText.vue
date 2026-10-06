@@ -6,16 +6,26 @@
   部分" — `CopyButton`'s `value` is `text`, never the path).
 -->
 <script setup lang="ts">
+import { computed } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { resolveFileLang } from "@logic/highlight.js";
 import CopyButton from "../detail/CopyButton.vue";
+import HighlightedCode from "../shared/HighlightedCode.vue";
 
-defineProps<{
+const props = defineProps<{
   readonly text: string;
   readonly truncated: boolean;
   /** Host-formatted byte count of the shown body (drives the truncated note). */
   readonly sizeLabel?: string | undefined;
+  /**
+   * Basename of the previewed file (from `PreviewHost`'s header basename) — drives the
+   * syntax-highlight language guess (`@logic/highlight.js`'s `resolveFileLang`). Absent /
+   * unknown extension ⇒ plain text, DOM identical to pre-highlight.
+   */
+  readonly filename?: string | undefined;
 }>();
 const { t } = useI18n();
+const highlightLang = computed(() => resolveFileLang(props.filename ?? ""));
 </script>
 
 <template>
@@ -24,7 +34,7 @@ const { t } = useI18n();
       <span class="preview-badge">{{ t("preview.truncatedBadge") }}</span>
       <span>{{ t("preview.truncatedNote", { size: sizeLabel ?? "" }) }}</span>
     </p>
-    <pre class="preview-text-body" tabindex="0">{{ text }}</pre>
+    <pre class="preview-text-body" tabindex="0"><HighlightedCode :text="text" :lang="highlightLang" /></pre>
     <div class="preview-text-actions">
       <CopyButton :value="text" :label="t('common.copy')" />
     </div>

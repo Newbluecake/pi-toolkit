@@ -1,0 +1,158 @@
+/*
+ * web-hub syntax-highlight tokens (syntax-highlight package, 2026-10). Token colors are CSS
+ * variables with light/dark variants following `tokens.css`'s exact theme mechanism: light
+ * default, `@media (prefers-color-scheme: dark) :root:not(.theme-light)`, and the forced
+ * `:root.theme-dark` class. Colors are picked for ≥4.5:1 contrast against the code surface
+ * (`--c-sunken`: #eef3f3 light / #10171a dark). Classes are `tok-*` (never Prism's `token
+ * *` classes) and are emitted as VNode spans by `HighlightedCode.vue`.
+ */
+
+:root {
+  --tok-comment: #5a6a72; /* = --c-text-3, 5.6:1 on surface */
+  --tok-keyword: #0b5bd3; /* 6.0:1 on --c-sunken */
+  --tok-string: #177a3e; /* = --c-success */
+  --tok-number: #9a5a06; /* = --c-warning */
+  --tok-boolean: #9a5a06;
+  --tok-function: #7046d8; /* = --c-accent */
+  --tok-operator: #b02a87; /* 5.6:1 on --c-sunken */
+  --tok-punctuation: #3b4a52; /* = --c-text-2 */
+  --tok-class-name: #7a4604; /* = --c-warning-text */
+  --tok-tag: #0b7a70; /* = --c-primary */
+  --tok-attr-name: #1f5fc4; /* = --c-info */
+  --tok-attr-value: #177a3e;
+  --tok-property: #1f5fc4;
+  --tok-selector: #7046d8;
+  --tok-regex: #7a4604;
+  --tok-inserted: #177a3e;
+  --tok-deleted: #c0262d; /* = --c-danger */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.theme-light) {
+    --tok-comment: #8d9da4; /* = --c-text-3 */
+    --tok-keyword: #72a7f5; /* = --c-info */
+    --tok-string: #4cc77e; /* = --c-success */
+    --tok-number: #f0c77a; /* = --c-warning-text */
+    --tok-boolean: #f0c77a;
+    --tok-function: #a98bf5; /* = --c-accent */
+    --tok-operator: #f2767a; /* = --c-danger */
+    --tok-punctuation: #b6c3c8; /* = --c-text-2 */
+    --tok-class-name: #f0c77a;
+    --tok-tag: #3ccbb9; /* = --c-primary */
+    --tok-attr-name: #72a7f5;
+    --tok-attr-value: #4cc77e;
+    --tok-property: #72a7f5;
+    --tok-selector: #a98bf5;
+    --tok-regex: #f0c77a;
+    --tok-inserted: #4cc77e;
+    --tok-deleted: #f2767a;
+  }
+}
+
+:root.theme-dark {
+  --tok-comment: #8d9da4;
+  --tok-keyword: #72a7f5;
+  --tok-string: #4cc77e;
+  --tok-number: #f0c77a;
+  --tok-boolean: #f0c77a;
+  --tok-function: #a98bf5;
+  --tok-operator: #f2767a;
+  --tok-punctuation: #b6c3c8;
+  --tok-class-name: #f0c77a;
+  --tok-tag: #3ccbb9;
+  --tok-attr-name: #72a7f5;
+  --tok-attr-value: #4cc77e;
+  --tok-property: #72a7f5;
+  --tok-selector: #a98bf5;
+  --tok-regex: #f0c77a;
+  --tok-inserted: #4cc77e;
+  --tok-deleted: #f2767a;
+}
+
+/* ---------------------------------------------------------------- class → variable map */
+/* Groups mirror Prism's common token types (several ids per group keeps the map small). */
+
+.tok-comment,
+.tok-prolog,
+.tok-doctype,
+.tok-cdata {
+  color: var(--tok-comment);
+  font-style: italic;
+}
+
+.tok-keyword,
+.tok-important,
+.tok-rule,
+.tok-atrule {
+  color: var(--tok-keyword);
+}
+
+.tok-string,
+.tok-char,
+.tok-template-string,
+.tok-attr-value,
+.tok-url {
+  color: var(--tok-string);
+}
+
+.tok-number,
+.tok-unit {
+  color: var(--tok-number);
+}
+
+.tok-boolean,
+.tok-constant,
+.tok-symbol {
+  color: var(--tok-boolean);
+}
+
+.tok-function,
+.tok-function-variable {
+  color: var(--tok-function);
+}
+
+.tok-operator {
+  color: var(--tok-operator);
+}
+
+.tok-punctuation {
+  color: var(--tok-punctuation);
+}
+
+.tok-class-name,
+.tok-builtin,
+.tok-maybe-class-name,
+.tok-attr-name,
+.tok-namespace {
+  color: var(--tok-class-name);
+}
+
+.tok-attr-name {
+  color: var(--tok-attr-name);
+}
+
+.tok-tag {
+  color: var(--tok-tag);
+}
+
+.tok-property,
+.tok-variable {
+  color: var(--tok-property);
+}
+
+.tok-selector {
+  color: var(--tok-selector);
+}
+
+.tok-regex,
+.tok-regex-flags {
+  color: var(--tok-regex);
+}
+
+.tok-inserted {
+  color: var(--tok-inserted);
+}
+
+.tok-deleted {
+  color: var(--tok-deleted);
+}

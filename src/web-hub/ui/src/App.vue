@@ -29,6 +29,8 @@ import "./styles/control.css";
 import "./styles/dialog.css";
 // PV6 (web-hub-preview plan v3 §4.6): path-ref segments + the preview overlay.
 import "./styles/preview.css";
+// syntax-highlight (2026-10): tok-* token colors (CSS vars, light/dark per tokens.css).
+import "./styles/highlight.css";
 import IconSprite from "./icons/IconSprite.vue";
 import { browserLocalStorage } from "./components/shell/themeStorage.js";
 import { hubVersionStamp } from "@logic/build-stamp.js";

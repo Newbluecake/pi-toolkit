@@ -50,7 +50,12 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // (FleetDrawer/FleetTree/FleetSummaryBar/RunTranscript/RunHeader + summary.ts) and todo-web is
 // in flight in the same workspace (工作区实测 134388 B gzip,含在途 todo-web);the slack above
 // the measurement absorbs todo-web's landing without another immediate bump.
-const JS_BUDGET_GZIP_BYTES = 144 * 1024;
+// bumped to 169 KiB by syntax-highlight (2026-10) — Prism rides a LAZY chunk
+// (`assets/highlight-impl-*.js`, ~21 KB gz, loaded only when a highlightable code view
+// mounts, never first-screen) while the main chunk grows by the renderer/logic/wiring;
+// workspace-measured total ≈165 KB gz (含在途 model-switch M3a), a few KB of slack on top.
+// Precise per-build numbers drift with in-flight packages — re-measure before the next bump.
+const JS_BUDGET_GZIP_BYTES = 169 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}

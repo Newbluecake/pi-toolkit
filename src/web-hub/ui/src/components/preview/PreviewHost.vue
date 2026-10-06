@@ -180,6 +180,7 @@ function onKeydown(ev: KeyboardEvent): void {
             :text="view.text"
             :truncated="view.truncated"
             :size-label="formatBytes(view.size)"
+            :filename="basename"
           />
           <div v-else-if="view.phase === 'unsupported'" class="preview-note">
             <AppIcon name="ban" class="preview-note-icon" />

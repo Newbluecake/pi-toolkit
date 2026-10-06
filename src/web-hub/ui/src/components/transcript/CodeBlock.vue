@@ -6,14 +6,18 @@
   so the user can still copy manually, with a toast-style status message next to the button.
 -->
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import type { CodeBlockProps } from "../../contracts.js";
 import { useClipboard } from "../../composables/useClipboard.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { resolveFenceLang } from "@logic/highlight.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import HighlightedCode from "../shared/HighlightedCode.vue";
 
 const props = defineProps<CodeBlockProps>();
 const { t } = useI18n();
+/** Prism grammar id for the fence info string (unknown ⇒ plain text, DOM unchanged). */
+const highlightLang = computed(() => resolveFenceLang(props.lang));
 
 const clipboard = useClipboard(window);
 const preEl = ref<HTMLElement | null>(null);
@@ -60,6 +64,10 @@ async function copy(): Promise<void> {
         <AppIcon name="copy" />
       </button>
     </div>
-    <pre ref="preEl" translate="no" tabindex="0"><code>{{ text }}</code></pre>
+    <pre
+      ref="preEl"
+      translate="no"
+      tabindex="0"
+    ><code><HighlightedCode :text="text" :lang="highlightLang" /></code></pre>
   </div>
 </template>

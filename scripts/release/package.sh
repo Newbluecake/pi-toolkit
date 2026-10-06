@@ -24,7 +24,7 @@ rm -rf "$OUT_DIR/stage"
 mkdir -p "$STAGE_DIR"
 cp -r dist "$STAGE_DIR/dist"
 cp -r src skills "$STAGE_DIR/"
-cp index.ts index.js package.json README.md README.en.md LICENSE CHANGELOG.md "$STAGE_DIR/"
+cp index.ts index.js package.json README.md README.en.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md "$STAGE_DIR/"
 
 mkdir -p "$OUT_DIR"
 rm -f "$ZIP" "$ZIP.sha256"
