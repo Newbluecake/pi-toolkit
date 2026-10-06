@@ -13,13 +13,19 @@
   - `SIDEBAR_DRAWER` (DashboardView-provided): while the 481–1024px mid band shows a detail
     route, a 「show agents list」 toggle opens the sidebar as an overlay drawer, and the back
     button renders even though `narrow` is false (single-view navigation needs it).
-  - ≤480px metrics fold: the COST panel collapses to a one-line summary ("$195.54") by default,
-    tap to expand — a local `metricsCollapsed` ref plus `data-collapsed` on `.metrics-wrap`;
-    `detail.css` hides the summary button and ignores the fold state entirely at/above 481px, so
-    no media JS is needed here.
+  - Metrics fold: the cost panel collapses to a one-line summary ("$195.54") by default, tap to
+    expand — a local `metricsCollapsed` ref plus `data-collapsed` on `.metrics-wrap`.
+
+  2026-10 (user field report, fold-into-info-stack revision): `.metrics-wrap` used to live in
+  its own grid column to the right of the title/session-info stack from 481px up (full panel
+  always open ≥1025px) — read as visually disconnected and crowded out cwd/model text. It is
+  now a plain row in the same vertical stack as `SessionInfo`/`TodoPanel`/`WorktreePanel`, at
+  every width, with the SAME collapsed-summary-button / expanded-panel grammar as those — the
+  fold is no longer phone-only, `detail.css` has no breakpoint for it at all. `metricsCollapsed`
+  still starts `true` (same default the other panels use for their own `open` ref).
 -->
 <script setup lang="ts">
-import { computed, inject, onUnmounted, ref } from "vue";
+import { computed, inject, onUnmounted, ref, useId } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -70,9 +76,14 @@ const subCostLabel = computed(() => {
 const drawer = inject(SIDEBAR_DRAWER, null);
 const showBack = computed(() => props.narrow || drawer?.active.value === true);
 
-/** Default-collapsed on phones; `detail.css` only honors `data-collapsed` below 481px. */
+/** Default-collapsed at every width, same as `TodoPanel`/`WorktreePanel`'s own `open` ref. */
 const metricsCollapsed = ref(true);
 const metricsSummary = computed(() => formatUsd(status.value?.costUsd));
+// verify:detail-header-cost-merge P1 ①: neither TodoPanel nor WorktreePanel's own toggle
+// buttons wire aria-controls (no same-component precedent to mirror), so this is the row's
+// own fix — `useId()` keeps the id stable and unique even if several DetailHeader instances
+// ever mount at once.
+const metricsPanelId = useId();
 function toggleMetrics(): void {
   metricsCollapsed.value = !metricsCollapsed.value;
 }
@@ -212,13 +223,15 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
         class="metrics-summary"
         type="button"
         :aria-expanded="!metricsCollapsed"
+        :aria-controls="metricsPanelId"
         :aria-label="t('detail.metricsToggleAria')"
         @click="toggleMetrics"
       >
+        <span class="metrics-summary-label">{{ t("detail.costLabel") }}</span>
         <span class="metrics-summary-text num">{{ metricsSummary }}</span>
         <AppIcon name="chev-right" class="icon-sm chev" />
       </button>
-      <dl class="metrics">
+      <dl :id="metricsPanelId" class="metrics">
         <div class="metric">
           <dt>{{ t("detail.costLabel") }}</dt>
           <dd>

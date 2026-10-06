@@ -4,7 +4,10 @@
  * the in-flight fleet-drawer F6 line owns detail.css edits, and source-scan.test.ts bans
  * scoped <style> blocks outright, so a dedicated stylesheet keeps T4's file domain disjoint.
  * The summary row mirrors `.session-sum` / `.metrics-summary` grammar (detail.css), incl.
- * the chevron rotate-on-open transition.
+ * the chevron rotate-on-open transition. min-height 40px (44px under `pointer: coarse`,
+ * below) is shared across the whole summary-row family — verify:detail-header-cost-merge P1
+ * ② bumped it from 32px everywhere at once so the cost row never reads taller/shorter than
+ * its siblings.
  */
 
 .todo-panel {
@@ -17,7 +20,7 @@
   gap: var(--sp-2);
   width: 100%;
   min-width: 0;
-  min-height: 32px;
+  min-height: 40px;
   margin: 0 -6px;
   padding: 0 6px;
   border: 0;

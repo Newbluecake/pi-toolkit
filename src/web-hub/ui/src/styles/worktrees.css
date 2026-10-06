@@ -4,7 +4,9 @@
  * `styles/todo.css`): `styles/detail.css` is owned by another in-flight line and
  * source-scan.test.ts bans scoped <style> blocks outright. The summary row mirrors
  * `.todo-sum` / `.session-sum` grammar, incl. the chevron rotate-on-open transition; the
- * expanded list caps its height and scrolls inside, same as `.todo-list`.
+ * expanded list caps its height and scrolls inside, same as `.todo-list`. min-height 40px
+ * (44px under `pointer: coarse`, below) matches the whole summary-row family — see
+ * `todo.css`'s header comment (verify:detail-header-cost-merge P1 ②).
  */
 
 .wt-panel {
@@ -17,7 +19,7 @@
   gap: var(--sp-2);
   width: 100%;
   min-width: 0;
-  min-height: 32px;
+  min-height: 40px;
   margin: 0 -6px;
   padding: 0 6px;
   border: 0;

@@ -10,19 +10,11 @@
  * `DetailBody.vue`'s root `<section>`), so P4 only has to lay out *inside* an already flex:1,
  * min-height:0, column-flex box — never having to duplicate this file's own sizing rules.
  *
- * Breakpoint note (plan §0.3 + todo #7): the mockup's "desktop, one-line title / back button
- * hidden" treatment used a 1025px breakpoint, coupled to the sidebar/detail split. The P3
- * build moved it to 768px to match the then-current split; todo #7's re-cut (split back at
- * 1025px, 481–1024 single-view + overlay drawer) keeps the one-line title at ≥768 but the
- * back button is now shown on BOTH single-view bands — its `v-if` is component-driven
- * (`narrow` prop ∨ the injected drawer context, see `DetailHeader.vue`), and the CSS hide
- * below is a second guard aligned with the 1025px split.
- *
- * ≤480px metrics fold (todo #7): `.metrics-wrap` carries `data-collapsed` and a one-line
- * `.metrics-summary` toggle ("$195.54" — cost-only since 2026-10-05, when the context metric
- * moved into the composer's `ContextRing`); the fold only applies below 481px — at/above
- * it the summary button is hidden and the full `.metrics` panel always shows, exactly the
- * pre-fold layout.
+ * The cost metric (`.metrics-wrap`) flows as a plain row in the same info stack as
+ * `.session-info` / the task and worktree panels, at every width — it mirrors their
+ * collapsed-summary-button / expanded-panel grammar exactly instead of living in its own
+ * grid column aside them (2026-10 user field report: the aside column crowded out
+ * cwd/model text and read as visually disconnected from the rest of the session info).
  */
 
 .detail {
@@ -92,7 +84,7 @@
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
-  min-height: 32px;
+  min-height: 40px;
   margin: 0 -6px;
   padding: 0 6px;
   border-radius: var(--r-sm);
@@ -187,38 +179,44 @@
   }
 }
 
-/* ≤480px the wrap is the sunken box; ≥481px (below) the box look moves off again and the wrap
- * becomes a plain grid item, identical to the pre-fold `.metrics` placement. */
+/* The cost row: same grammar as `.session-sum` / `.todo-sum` / `.wt-sum` (margin.-6px/padding
+ * 6px flat button, hover surface-2, chev rotates on expand) at every width — no sunken box,
+ * no separate grid column, just another row in the info stack. */
 .metrics-wrap {
-  border-radius: var(--r-md);
-  background: var(--c-sunken);
+  margin-top: var(--sp-1);
 }
 
-/* one-line summary toggle ("$195.54") — phones only; display:none ≥481px below */
 .metrics-summary {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   width: 100%;
+  min-width: 0;
   min-height: 40px;
-  padding: var(--sp-1) var(--sp-3);
+  margin: 0 -6px;
+  padding: 0 6px;
   border: 0;
+  border-radius: var(--r-sm);
   background: none;
-  color: var(--c-text-2);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-semibold);
-  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
   cursor: pointer;
+  text-align: left;
+}
+
+.metrics-summary:hover {
+  background: var(--c-surface-2);
+}
+
+.metrics-summary-text {
+  color: var(--c-text-2);
+  font-weight: var(--fw-semibold);
 }
 
 .metrics-summary .chev {
   margin-left: auto;
-  color: var(--c-text-3);
+  flex: none;
   transition: transform var(--dur-base) var(--ease-out);
-}
-
-.metrics-wrap[data-collapsed="false"] .metrics-summary {
-  padding-bottom: 0;
 }
 
 .metrics-wrap[data-collapsed="false"] .metrics-summary .chev {
@@ -229,14 +227,18 @@
   display: none;
 }
 
+/* expanded panel: mirrors `.kv`'s sunken-box look (SessionInfo's own expanded panel) so the
+ * cost detail reads as the same family of "tap to expand" rows. */
 .metrics {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: var(--sp-2) var(--sp-4);
-  margin: 0;
+  margin: var(--sp-1) 0 0;
   padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
 }
 
 .metric {
@@ -308,72 +310,11 @@
 
 @media (min-width: 481px) {
   .detail-head {
-    /* `minmax(0, 1fr)` let `.metrics-wrap`'s auto column (whose max-content width grows once
-     * the token-count aside — `.hide-sm` — turns on at this exact breakpoint) crush column 1
-     * down to 0px, taking `.session-info`'s `summary.session-sum` touch target with it
-     * (checks-shell.ts's `shell-touch-targets-44px`, only ever observed right at 481px). A
-     * fixed floor keeps the title/session-info column usable; `.metrics-wrap` overflowing its
-     * own `auto` track at the narrowest widths is the lesser regression. */
-    grid-template-columns: minmax(180px, 1fr) auto;
-    gap: var(--sp-1) var(--sp-6);
     padding: var(--sp-1) var(--sp-6) var(--sp-3);
-  }
-
-  .detail-back,
-  .detail-drawer-toggle,
-  .detail-titlebar,
-  .session-info {
-    grid-column: 1;
-  }
-
-  .metrics-wrap {
-    grid-column: 2;
-    grid-row: 2 / span 2;
-    align-self: center;
-    background: none;
   }
 
   .detail-title {
     font-size: var(--fs-xl);
-  }
-}
-
-/* 481–1024px mid-band (2026-10-05 field report: at 150%+ font scales the expanded metrics
- * panel wraps into a misaligned label/value jumble): the phone-style fold stays available —
- * the one-line summary chip lives in column 2, and EXPANDING it spans the panel full-width
- * on its own row instead of squeezing into the auto column. */
-@media (min-width: 481px) and (max-width: 1024px) {
-  .metrics-wrap[data-collapsed="false"] {
-    grid-column: 1 / -1;
-    grid-row: auto;
-    align-self: stretch;
-    background: var(--c-sunken);
-    border-radius: var(--r-md);
-  }
-}
-
-/* ≥1025px desktop: fold inert — full metrics panel always visible, no summary chip. */
-@media (min-width: 1025px) {
-  .metrics-summary {
-    display: none;
-  }
-
-  /* phones/mid-band fold state is inert here: the full panel always shows */
-  .metrics-wrap[data-collapsed="true"] .metrics {
-    display: flex;
-  }
-
-  .metrics {
-    padding: 0;
-    gap: var(--sp-6);
-  }
-
-  .metric {
-    justify-items: end;
-  }
-
-  .metrics-wrap {
-    grid-row: 1 / span 2;
   }
 }
 

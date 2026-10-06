@@ -6,6 +6,9 @@
  * for the composer's `ContextRing` (covered by context-ring.test.ts) — the metrics panel here
  * carries cost only.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import DetailHeader from "../../../src/web-hub/ui/src/components/detail/DetailHeader.vue";
@@ -287,6 +290,54 @@ describe("DetailHeader.vue — ≤480px metrics fold (todo #7)", () => {
     expect(summary.attributes("aria-expanded")).toBe("true");
     await summary.trigger("click");
     expect(wrapper.get(".metrics-wrap").attributes("data-collapsed")).toBe("true");
+  });
+
+  // verify:detail-header-cost-merge P1 ①: the toggle must point `aria-controls` at the panel
+  // it expands — neither `TodoPanel` nor `WorktreePanel` wire this on their own toggle buttons
+  // (checked: no same-component precedent to mirror), so this is the row's own fix.
+  it("wires aria-controls on the toggle to the expanded panel's id", () => {
+    const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: true } });
+    const summary = wrapper.get(".metrics-summary");
+    const panel = wrapper.get(".metrics");
+    const controls = summary.attributes("aria-controls");
+    expect(controls).toBeTruthy();
+    expect(panel.attributes("id")).toBe(controls);
+  });
+});
+
+// verify:detail-header-cost-merge P1 ②: the whole summary-row family (`.session-sum` /
+// `.todo-sum` / `.wt-sum` / `.metrics-summary`) shares a 40px default min-height (44px under
+// `pointer: coarse`) so the cost row never reads shorter/taller than its siblings in the same
+// info stack — asserted straight off the real stylesheets (component mounts can't see CSS).
+describe("summary-row touch target parity (verify:detail-header-cost-merge P1 ②)", () => {
+  const read = (relPath: string): string => readFileSync(resolve(fileURLToPath(import.meta.url), relPath), "utf8");
+  const rule = (css: string, selector: string): string => {
+    const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`).exec(css);
+    return m?.[0] ?? "";
+  };
+
+  it("default (non-coarse) min-height is 40px for .session-sum / .metrics-summary (detail.css), .todo-sum (todo.css), .wt-sum (worktrees.css)", () => {
+    const detailCss = read("../../../../src/web-hub/ui/src/styles/detail.css");
+    const todoCss = read("../../../../src/web-hub/ui/src/styles/todo.css");
+    const wtCss = read("../../../../src/web-hub/ui/src/styles/worktrees.css");
+    expect(rule(detailCss, ".session-sum")).toMatch(/min-height:\s*40px/);
+    expect(rule(detailCss, ".metrics-summary")).toMatch(/min-height:\s*40px/);
+    expect(rule(todoCss, ".todo-sum")).toMatch(/min-height:\s*40px/);
+    expect(rule(wtCss, ".wt-sum")).toMatch(/min-height:\s*40px/);
+  });
+
+  it("`@media (pointer: coarse)` still bumps every one of them to 44px", () => {
+    const detailCss = read("../../../../src/web-hub/ui/src/styles/detail.css");
+    const todoCss = read("../../../../src/web-hub/ui/src/styles/todo.css");
+    const wtCss = read("../../../../src/web-hub/ui/src/styles/worktrees.css");
+    const coarseBlock = (css: string): string => {
+      const start = css.indexOf("@media (pointer: coarse)");
+      return start < 0 ? "" : css.slice(start);
+    };
+    expect(coarseBlock(detailCss)).toMatch(/\.session-sum\s*\{\s*min-height:\s*44px/);
+    expect(coarseBlock(detailCss)).toMatch(/\.metrics-summary\s*\{\s*min-height:\s*44px/);
+    expect(coarseBlock(todoCss)).toMatch(/\.todo-sum\s*\{\s*min-height:\s*44px/);
+    expect(coarseBlock(wtCss)).toMatch(/\.wt-sum\s*\{\s*min-height:\s*44px/);
   });
 });
 
