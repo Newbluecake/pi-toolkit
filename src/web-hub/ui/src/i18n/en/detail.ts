@@ -28,7 +28,7 @@ const detail = {
   dockLong: "· reply from the terminal",
   latest: "Latest",
   newCount: "{n} new",
-  todoTitle: "Tasks {done}/{total} · {active} active",
+  todoTitle: "Tasks {total} · {done} done · {active} active",
   todoToggleAria: "Toggle the task list",
   todoStatusPending: "Pending",
   todoStatusInProgress: "In progress",

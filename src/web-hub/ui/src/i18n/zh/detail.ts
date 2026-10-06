@@ -31,7 +31,7 @@ const detail = {
   dockLong: "· 请在终端中回复",
   latest: "最新",
   newCount: "{n} 条新消息",
-  todoTitle: "任务 {done}/{total} · {active} 进行中",
+  todoTitle: "任务 {total} · {done} 已完成 · {active} 进行中",
   todoToggleAria: "展开或收起任务列表",
   todoStatusPending: "待办",
   todoStatusInProgress: "进行中",

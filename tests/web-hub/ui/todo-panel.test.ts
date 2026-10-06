@@ -36,7 +36,7 @@ describe("TodoPanel.vue (todo-web plan §4, T4)", () => {
 
   it("shows the summary line and starts collapsed", () => {
     const wrapper = mount(TodoPanel, { props: { todo: todoFixture() } });
-    expect(wrapper.find(".todo-sum-text").text()).toBe("Tasks 3/8 · 2 active");
+    expect(wrapper.find(".todo-sum-text").text()).toBe("Tasks 8 · 3 done · 2 active");
     expect(wrapper.find(".todo-sum").attributes("aria-expanded")).toBe("false");
     expect(wrapper.find(".todo-list").exists()).toBe(false);
     expect(wrapper.find(".todo-panel").attributes("aria-readonly")).toBe("true");
@@ -122,7 +122,7 @@ describe("DetailHeader todo mount (todo-web plan §4, T4)", () => {
     const wrapper = mount(DetailHeader, { props: { agent: agent(todoFixture()), narrow: false } });
     const panel = wrapper.find(".todo-panel");
     expect(panel.exists()).toBe(true);
-    expect(wrapper.find(".todo-sum-text").text()).toBe("Tasks 3/8 · 2 active");
+    expect(wrapper.find(".todo-sum-text").text()).toBe("Tasks 8 · 3 done · 2 active");
     // mounted after the metrics block — the header's bottom
     const kids = wrapper.find(".detail-head").element.children;
     expect(kids[kids.length - 1]).toBe(panel.element);
