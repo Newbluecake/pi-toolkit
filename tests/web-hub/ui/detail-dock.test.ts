@@ -76,6 +76,7 @@ interface ViewOver {
   pendingCtl?: readonly Record<string, unknown>[];
   queue?: readonly unknown[];
   fleet?: readonly unknown[];
+  session?: Record<string, unknown>;
 }
 
 function fakeView(control: ControlHandle, over: ViewOver = {}): { view: ControlView; agent: { value: AgentState } } {
@@ -84,6 +85,7 @@ function fakeView(control: ControlHandle, over: ViewOver = {}): { view: ControlV
     queue: over.queue ?? [],
     prompts: [],
     fleet: over.fleet ?? [],
+    ...(over.session !== undefined ? { session: over.session } : {}),
   } as unknown as AgentState);
   const view: ControlView = {
     agentKey: "agent-a",
@@ -328,5 +330,68 @@ describe("DetailDock.vue — @mention send routing (task #11)", () => {
     await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
     await flush();
     expect(calls).toEqual([{ method: "steerSub", args: ["agent-a", "r1", "too late"] }]);
+  });
+});
+
+describe("DetailDock.vue — model switcher tool row (web-model-switch plan v2 §5.1, M3a)", () => {
+  const models = {
+    status: "ok",
+    items: [{ provider: "zai", id: "glm-5" }],
+    total: 1,
+    policy: { model: "allow", thinking: "allow" },
+    sampledAt: 1,
+  };
+  const session = {
+    sessionId: "s1",
+    sessionFile: "/tmp/s1.jsonl",
+    cwd: "/tmp/p",
+    reason: "startup",
+    leafId: null,
+    mode: "tui",
+    model: { provider: "zai", id: "glm-5" },
+    models,
+  };
+
+  it("control ON + command cap ⇒ slim .dock-tools row with the model chip above the composer", () => {
+    const { control } = fakeControl();
+    const w = mountDock(control, { commandsEnabled: true, session });
+    const tools = w.find(".dock-tools");
+    expect(tools.exists()).toBe(true);
+    expect(tools.find(".model-switcher button.model-chip").exists()).toBe(true);
+    expect(tools.find(".model-chip").text()).toContain("glm-5");
+    // the row sits between CommandConfirm's slot and the composer row
+    expect(w.find(".dock-tools + .dock-row").exists()).toBe(true);
+  });
+
+  it("control ON but no session.models (old agent) ⇒ read-only chip; command cap missing ⇒ empty row", () => {
+    const { control } = fakeControl();
+    const oldAgent = mountDock(control, {
+      commandsEnabled: true,
+      session: { ...session, models: undefined },
+    });
+    expect(oldAgent.find(".dock-tools .model-chip-static").exists()).toBe(true);
+    expect(oldAgent.find(".dock-tools button.model-chip").exists()).toBe(false);
+
+    const noCap = mountDock(control, { commandsEnabled: false, session });
+    expect(noCap.find(".dock-tools .model-switcher").exists()).toBe(false);
+  });
+
+  it("read-only dock branch ⇒ no tool row at all", () => {
+    const { control } = fakeControl();
+    const w = mountDock(control, { enabled: false, readonlyReason: "control.dockReadonlyHub" });
+    expect(w.find(".dock-tools").exists()).toBe(false);
+    expect(w.find(".model-switcher").exists()).toBe(false);
+  });
+
+  it("notExecuted command retry re-sends with the item's OWN args (§R addendum: /model keeps its argument)", async () => {
+    const pendingCtl = [{ id: "n2", kind: "command", name: "model", args: "zai/glm-5", state: "notExecuted", at: 0 }];
+    const { control, calls } = fakeControl(() => ({ ok: true, data: { completion: "sync" } }));
+    const w = mountDock(control, { pendingCtl });
+    await w.find(".queue-actions .btn").trigger("click"); // resend
+    await flush();
+    const run = calls.find((c) => c.method === "runCommand");
+    expect(run).toBeDefined();
+    expect(run!.args.slice(0, 3)).toEqual(["agent-a", "model", "zai/glm-5"]);
+    expect(calls.some((c) => c.method === "discard" && c.args[1] === "n2")).toBe(true);
   });
 });

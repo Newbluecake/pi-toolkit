@@ -154,10 +154,13 @@ export function createControl(
       );
     },
     runCommand: (agentKey, name, args, cmdOpts) => {
-      const id = newCmdId();
+      // web-model-switch §5.2 #6: a caller-generated id (exact tracking) wins; otherwise mint
+      // one here — behavior for id-less callers is unchanged. The optimistic item now also
+      // carries `args` so QueueList's notExecuted retry can re-send the FULL command line.
+      const id = cmdOpts?.id ?? newCmdId();
       return sendCmd(
         agentKey,
-        { id, kind: "command", name, state: "sending", at: now() },
+        { id, kind: "command", name, args, state: "sending", at: now() },
         {
           agentKey,
           id,

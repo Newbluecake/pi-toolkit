@@ -95,6 +95,36 @@ const control = {
   mentionEmpty: "无匹配的子 agent 或文件",
 
   badgeWeb: "web",
+
+  // model switcher（web-model-switch §5，M3a）——tab/徽标/snapshot 保持英文 token
+  modelChipAria: "切换模型",
+  modelListAria: "模型列表",
+  modelSearch: "搜索模型",
+  modelTabScoped: "scoped",
+  modelTabAll: "all",
+  modelCurrentBadge: "current",
+  modelEmpty: "没有已配置凭据的模型",
+  modelNoMatch: "没有匹配的模型",
+  modelReadError: "无法读取完整模型列表",
+  modelBusyNote: "当前正在输出的回复不受影响，之后的请求使用新模型",
+  modelOmitted: "+{n} omitted",
+  modelInvalidCount: "{n} invalid",
+  modelSnapshot: "snapshot {t}",
+  modelOldAgent: "升级 pi-toolkit 后可在此选择模型——或在下方输入 /model provider/id",
+  modelDeniedPolicy: "webCommandPolicy 已禁用切换模型",
+  modelDeniedShadowed: "/model 被扩展同名命令遮蔽——请在终端切换模型",
+  modelConfirm: "切换到 {id}？",
+  modelConfirmRun: "切换",
+  modelConfirmCancel: "取消",
+  modelErrRejected: "该模型的 provider 未配置凭据，或请求被拒绝",
+  modelErrUnknown: "找不到模型——列表可能已过期",
+  modelErrDenied: "webCommandPolicy 已禁用切换模型",
+  modelErrSession: "会话已切换——请重新选择",
+  modelErrInvalidRef: "模型引用无效——未发送",
+  modelUnconfirmed: "尚未确认——请查看会话确认结果",
+  modelErrGeneric: "切换模型失败（{code}）",
+  modelCheck: "check",
+  modelDismiss: "关闭",
 } satisfies Messages<typeof en>;
 
 export default control;

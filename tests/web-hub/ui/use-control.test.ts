@@ -298,3 +298,39 @@ describe("createControl: uploads mount (web-hub-upload plan §6 U4b)", () => {
     expect(control.uploads).toBeUndefined();
   });
 });
+
+describe("createControl: caller-generated cmdId + command args (web-model-switch §5.2 #6, M3a)", () => {
+  it("runCommand: a caller-passed id is used verbatim on the wire AND the optimistic item; the item carries args", async () => {
+    const h = harness({ getSessionId: () => "sess-1", now: () => 7 });
+    await h.control.runCommand("A", "model", "zai/glm-5", { id: "caller-id-1" });
+    expect((h.calls[0]!.req as CmdRequest).id).toBe("caller-id-1");
+    expect(h.calls[0]!.req).toMatchObject({ op: "command", name: "model", args: "zai/glm-5" });
+    const item = h.dispatched[0]!.data.item;
+    expect(item).toMatchObject({
+      id: "caller-id-1",
+      kind: "command",
+      name: "model",
+      args: "zai/glm-5",
+      state: "sending",
+      at: 7,
+    });
+    // the retained payload is queryable under the caller id (exact tracking, §5.2)
+    const q = await h.control.query("A", "caller-id-1");
+    expect(q.ok).toBe(true);
+    expect((h.calls[1]!.req as CmdRequest).queryOnly).toBe(true);
+  });
+
+  it("runCommand: caller id + confirm:true compose; no id ⇒ fresh id (behavior unchanged)", async () => {
+    const h = harness();
+    await h.control.runCommand("A", "model", "zai/glm-5", { id: "caller-id-2", confirm: true });
+    expect(h.calls[0]!.req).toMatchObject({ id: "caller-id-2", confirm: true });
+
+    await h.control.runCommand("A", "compact", "keep it short");
+    const req = h.calls[1]!.req as CmdRequest;
+    expect(req.id).toMatch(ID_RE);
+    expect(req.id).not.toBe("caller-id-2");
+    // the optimistic item now always carries args (QueueList's notExecuted retry re-sends them)
+    const item = h.dispatched.find((d) => d.event === "ctl_send" && d.data.item.name === "compact")!.data.item;
+    expect(item.args).toBe("keep it short");
+  });
+});

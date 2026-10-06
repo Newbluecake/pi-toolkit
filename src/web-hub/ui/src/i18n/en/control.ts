@@ -107,6 +107,37 @@ const control = {
 
   // --- transcript web badge (§7.7, best-effort) ---
   badgeWeb: "web",
+
+  // --- model switcher (web-model-switch plan v2 §5, M3a) — tabs/badges/snapshot stay English
+  // tokens in both languages; errors and notes are prose ---
+  modelChipAria: "Switch model",
+  modelListAria: "Model list",
+  modelSearch: "Search models",
+  modelTabScoped: "scoped",
+  modelTabAll: "all",
+  modelCurrentBadge: "current",
+  modelEmpty: "No models with credentials",
+  modelNoMatch: "No matching model",
+  modelReadError: "Couldn't read the full model list",
+  modelBusyNote: "Current reply is unaffected; later requests use the new model",
+  modelOmitted: "+{n} omitted",
+  modelInvalidCount: "{n} invalid",
+  modelSnapshot: "snapshot {t}",
+  modelOldAgent: "Update pi-toolkit to pick models here — or type /model provider/id",
+  modelDeniedPolicy: "Model switching is disabled by webCommandPolicy",
+  modelDeniedShadowed: "/model is shadowed by an extension command — pick models in the terminal",
+  modelConfirm: "Switch to {id}?",
+  modelConfirmRun: "Switch",
+  modelConfirmCancel: "Cancel",
+  modelErrRejected: "No credentials for this model's provider, or it was rejected",
+  modelErrUnknown: "Model not found — the list may be out of date",
+  modelErrDenied: "Model switching is disabled by webCommandPolicy",
+  modelErrSession: "The session changed — pick again",
+  modelErrInvalidRef: "Invalid model reference — not sent",
+  modelUnconfirmed: "Not confirmed yet — check the session",
+  modelErrGeneric: "Couldn't switch model ({code})",
+  modelCheck: "check",
+  modelDismiss: "Dismiss",
 } satisfies Record<string, string>;
 
 export default control;

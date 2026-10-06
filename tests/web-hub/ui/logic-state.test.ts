@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   initialState,
@@ -979,5 +980,48 @@ describe("state.reduce: agent_removed (web-hub-delete-session plan v2 §5.1)", (
     expect(s.removed.size).toBe(64);
     expect(s.removed.has("k0")).toBe(false); // oldest evicted
     expect(s.removed.has("k64")).toBe(true); // newest kept
+  });
+});
+
+// web-model-switch plan v2 §9 (#20, package M3a): the reducer/card snapshot paths preserve
+// `session.models` verbatim (A15: refresh / second tab sees list + current model immediately).
+// The wire fixture is IMPORTED from M1's frozen tests/fixtures/web-hub-models (#19).
+describe("state.reduce — session.models preservation (web-model-switch §9 #20, M3a)", () => {
+  const models = JSON.parse(
+    readFileSync(new URL("../../fixtures/web-hub-models/v1-session.json", import.meta.url), "utf8"),
+  ) as Record<string, unknown>;
+
+  it("SSE session WITH models ⇒ a.session.models deep-equals the wire object; WITHOUT ⇒ cleared", () => {
+    let s = loaded();
+    s = reduce(s, {
+      event: "session",
+      data: { agentKey: "A", session: { ...card("A").session, models } },
+    });
+    expect(A(s).session.models).toEqual(models);
+    expect(A(s).session.models).toBe(models); // whole-object pass-through, no projection
+    // a same-session frame without the field clears it (整帧替换 semantics, §3.1)
+    s = reduce(s, {
+      event: "session",
+      data: { agentKey: "A", session: { ...card("A").session, name: "renamed" } },
+    });
+    expect(A(s).session.models).toBeUndefined();
+    expect(A(s).session.name).toBe("renamed");
+    // …and the same-session frame never touched the transcript
+    expect(A(s).items).toHaveLength(1);
+  });
+
+  it("agents / agent_up card snapshot path carries session.models (and clears it when absent)", () => {
+    const withModels = card("A", { session: { ...card("A").session, models } });
+    let s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [withModels] },
+    ]);
+    expect(A(s).session.models).toEqual(models);
+
+    s = reduce(s, { event: "agent_up", data: { agent: withModels } });
+    expect(A(s).session.models).toEqual(models);
+
+    s = reduce(s, { event: "agent_up", data: { agent: card("A") } }); // refresh without models
+    expect(A(s).session.models).toBeUndefined();
   });
 });

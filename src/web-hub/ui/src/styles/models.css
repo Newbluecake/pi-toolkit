@@ -1,0 +1,387 @@
+/*
+ * pi web-hub — model switcher (web-model-switch plan v2 §5.1, package M3a exclusive).
+ * The chip lives in DetailDock's slim `.dock-tools` row above the composer (user 拍板 Q2).
+ * One panel DOM serves both form factors (#16): viewport >640px = absolute popover above the
+ * chip (360px / 50vh); viewport ≤640px = full-width bottom-raised panel (M3a — M3b upgrades
+ * it to a Teleport'd sheet). `(pointer: coarse)` only raises row hit-areas to ≥44px, it never
+ * decides the form factor. The mobile full-width rule at the bottom is pinned by
+ * `tests/web-hub/ui/model-switcher.test.ts` (A-锚点「窄屏全宽上弹面板」).
+ */
+
+/* Slim tool row above the composer (DetailDock control branch). */
+.dock-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 28px;
+  padding: var(--sp-1) var(--sp-3) 0;
+  padding-left: max(var(--sp-3), env(safe-area-inset-left));
+  padding-right: max(var(--sp-3), env(safe-area-inset-right));
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.model-switcher {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* --- chip ------------------------------------------------------------ */
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.model-chip:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+  background: var(--c-sunken);
+}
+
+.model-chip:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.model-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+/* §5.4 state ④ (old agent): read-only chip — no chevron, no click. */
+.model-chip-static {
+  cursor: default;
+}
+
+.model-chip-label {
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-spin {
+  animation: model-spin 1s linear infinite;
+}
+
+@keyframes model-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.model-chip-state {
+  font-weight: var(--fw-semibold);
+  color: var(--c-warning-text);
+}
+
+.model-chip .icon-sm {
+  flex: none;
+}
+
+/* Inline switch outcome next to the chip (error = role=alert, unknown = role=status). */
+.model-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-2xs);
+  line-height: var(--lh-tight);
+}
+
+.model-note-error {
+  color: var(--c-danger);
+}
+
+.model-note-unknown {
+  color: var(--c-warning-text);
+}
+
+.model-note-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-note-x,
+.model-note-check {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  color: inherit;
+  font: inherit;
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* --- panel (desktop popover / narrow full-width — same DOM) ----------- */
+
+.model-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-width: calc(100vw - 2 * var(--sp-3));
+  max-height: 50vh;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: 0 8px 28px rgb(19 32 38 / 0.18);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+}
+
+.model-banner {
+  padding: 6px 10px;
+  background: var(--c-warning-soft);
+  border-bottom: 1px solid var(--c-warning-border);
+  color: var(--c-warning-text);
+  font-weight: var(--fw-semibold);
+}
+
+.model-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.model-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-sunken);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+
+.model-search:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.model-tabs {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.model-tabs button {
+  border: none;
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  padding: 3px 10px;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+
+.model-tabs button.active {
+  background: var(--c-primary-soft);
+  color: var(--c-on-primary-soft);
+}
+
+.model-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-info-soft);
+  color: var(--c-text-2);
+}
+
+.model-confirm-msg {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--c-text-3);
+}
+
+.model-list {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.model-group {
+  position: sticky;
+  top: -4px;
+  z-index: 1;
+  padding: 6px 8px 2px;
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.model-row:hover,
+.model-row.active {
+  background: var(--c-surface-2);
+}
+
+.model-row[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.model-row .row-check {
+  flex: none;
+  width: 16px;
+  color: var(--c-primary);
+  visibility: hidden;
+}
+
+.model-row[aria-selected="true"] .row-check {
+  visibility: visible;
+}
+
+.model-row .row-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--c-text);
+}
+
+.model-row .row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-3);
+}
+
+.model-row .row-badges {
+  margin-left: auto;
+  display: inline-flex;
+  flex: none;
+  gap: 4px;
+}
+
+.model-badge {
+  padding: 0 5px;
+  border-radius: var(--r-pill);
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-badge-reasoning {
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+
+.model-badge-current {
+  background: var(--c-primary-soft);
+  color: var(--c-on-primary-soft);
+}
+
+.model-empty {
+  padding: 14px 10px;
+  color: var(--c-text-3);
+  text-align: center;
+}
+
+.model-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--c-border);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.model-foot .model-busy {
+  flex-basis: 100%;
+  color: var(--c-warning-text);
+}
+
+.model-foot .model-snapshot {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- narrow viewport: full-width bottom-raised panel (M3a; same DOM, no Teleport) --- */
+
+@media (max-width: 640px) {
+  .model-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-width: none;
+    max-height: 75vh;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    border-radius: 12px 12px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* --- coarse pointers: ≥44px rows (form factor stays viewport-driven, #16) --- */
+@media (pointer: coarse) {
+  .model-chip {
+    min-height: 40px;
+  }
+
+  .model-row {
+    min-height: 44px;
+  }
+
+  .model-tabs button {
+    min-height: 40px;
+    padding: 6px 14px;
+  }
+}
