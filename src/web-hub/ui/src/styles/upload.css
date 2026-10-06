@@ -62,15 +62,16 @@
   height: min(calc(14px * var(--fs-scale, 1)), 28px);
 }
 
+/* 2026-10-07 ×2 (「去掉附件的边框，只保留图标自身」): hover is a COLOR-only change — the
+ * surface-2 wash read as a box appearing around the glyph. Keyboard focus keeps its outline
+ * (a11y — every control has one; it never shows on pointer use). */
 .composer-attach:hover:not(:disabled) {
-  background: var(--c-surface-2);
   color: var(--c-text-2);
 }
 
 .composer-attach:focus-visible {
   outline: 2px solid var(--c-focus);
   outline-offset: 1px;
-  border-color: var(--c-focus);
 }
 
 .composer-attach:disabled {
