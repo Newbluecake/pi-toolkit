@@ -17,11 +17,12 @@ const control = {
   noticeCollapse: "收起详情",
   noticeDismiss: "关闭此提醒",
 
-  // 2026-10-07（用户反馈「插话当前轮的提示不优雅」）：完整句式占位；busy 两条仍跟随设置页
-  // 的默认投递方式（验收 P2——固定写死插话文案在默认为 follow-up 时会说谎）。
+  // 2026-10-07（用户反馈「插话当前轮的提示不优雅」×2「太长了，需要精简」）：简短句式；
+  // busy 两条仍跟随设置页的默认投递方式（验收 P2——固定写死插话文案在默认为 follow-up 时
+  // 会说谎）。
   placeholderIdle: "请输入消息…",
-  placeholderBusy: "请输入插话内容，将插入当前轮…",
-  placeholderBusyFollowUp: "请输入排队消息，将在本轮后发送…",
+  placeholderBusy: "请输入插话内容…",
+  placeholderBusyFollowUp: "请输入排队消息…",
   send: "发送",
   sendAria: "发送消息",
 
