@@ -187,6 +187,56 @@ export interface WorktreesWire {
   staleMin?: number; // agent-computed: whole minutes since sampledAt, present only when > 90 s
 }
 
+/**
+ * bash-jobs-panel plan §2 (包 A0, D2/D2a): one row of `StatusInfo.bashJobs` — the session's own
+ * background bash jobs only (no child sessions, D1). `cmd` and `tail` are agent-side redacted
+ * (`redactSecrets`, best-effort hygiene — NOT a security boundary, D2a) and byte/char capped by
+ * the projection (cmd ≤200 chars / ≤600 B, tail ≤1024 B / ≤10 lines, D6). Deliberately **open**
+ * (no `additionalProperties:false`, see `BashJobsWireSchema`): same posture as `WorktreeRowWire`.
+ * `logPath` was cut in plan v2 (#2) — it never crosses the wire; the notification card already
+ * carries it. `status` is the agent's job-status literal as a plain string (open enum: a future
+ * status value must not be dropped by an older peer; unknown values render generic in the UI, D4).
+ */
+export interface BashJobRowWire {
+  id: string; // projection cap 32 B
+  cmd: string; // redacted, ≤200 chars / ≤600 B
+  /** Present only when `cmd` was char-truncated by the projection (D6 caps). */
+  cmdTruncated?: true;
+  status: string; // e.g. "running" | "exited" | "failed" | "timeout" | "orphaned" | "exited_unknown" …
+  exitCode: number | null; // null while running / killed without a code
+  createdAt: number; // agent-clock epoch ms
+  endedAt?: number; // terminal rows only
+  elapsedMs: number; // agent clock at projection − createdAt (terminal rows freeze at endedAt)
+  logBytes: number; // record's known log size; `+`-truncated view ⇒ logTruncated
+  /** Tail starts mid-file (read offset > 0): earlier output existed but is not in `tail`. */
+  logTruncated?: true;
+  grace?: true; // job entered a bash-job timeout-grace window (deadline.ts)
+  tail?: string; // redacted, ≤1024 B / ≤10 lines
+  tailAt?: number; // agent clock when that tail was sampled
+  tailBytes?: number; // file size seen by that sample (footer-race detection, D3-2)
+  /** Sampler gave up (read failures ×3) at the recorded logBytes; never co-present with tailCurrent. */
+  tailUnavailable?: true;
+  /** Agent-judged freshness (D3-3): UI must NOT compare clocks itself — sampling…/stale markers derive from this flag (+ tailAt age). */
+  tailCurrent?: true;
+}
+
+/**
+ * bash-jobs-panel plan §2 (包 A0): `StatusInfo.bashJobs`' body. Absent ⇒ no background jobs /
+ * bash-jobs disabled / web-hub disabled / source manager missing (byte-equal to the pre-feature
+ * status shape, D5). `rows` is the ≤20-row, ranked (running first, then terminal newest-first),
+ * byte-budgeted (24 KiB, D6) projection; `total`/`running`/`failed` are full-population counts
+ * over the selected rows' source set — never trimmed by the row cap or the wire budget.
+ */
+export interface BashJobsWire {
+  rows: BashJobRowWire[]; // ≤ 20 (D1); schema headroom 64
+  total: number; // selected rows before the 20/12 caps (D1)
+  running: number; // non-terminal rows
+  failed: number; // terminal rows the agent counts as failed
+  /** Dropped by the 20-row/12-terminal caps (D1) or the five-pass byte budget (D6); absent when 0. */
+  omitted?: number;
+  sampledAt: number; // agent-clock epoch ms of the projection that produced this content
+}
+
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -205,6 +255,11 @@ export interface StatusInfo {
    *  riding the same status slot lifecycle as `todo`/`models`. Absent = cwd not in a git repo /
    *  not sampled yet / web-hub disabled. */
   worktrees?: WorktreesWire;
+  /** bash-jobs-panel plan §2 (包 A0): optional read-only background-bash-jobs summary of the
+   *  session's own BashJobManager, riding the same status slot lifecycle as `todo`/`worktrees`.
+   *  Absent = no background jobs / bash-jobs disabled / web-hub disabled / source missing
+   *  (byte-equal to the pre-feature shape, D5). Decode side stays open-ended (same as `todo`). */
+  bashJobs?: BashJobsWire;
 }
 
 export interface FleetRowWire {
@@ -733,6 +788,47 @@ export const WorktreesWireSchema = Type.Object(
   },
   { additionalProperties: true },
 );
+// bash-jobs-panel plan §2/§3 包 A0 (D5): same open posture as WorktreesWireSchema above (Q4
+// precedent) — a `decodeWith` failure drops the WHOLE status frame, and the hub replacement
+// window can pair a new agent with an old hub, so the nested schemas stay open with hard safety
+// upper bounds deliberately WIDER than the projection's own caps (rows ≤20, cmd ≤200 chars/
+// 600 B, tail ≤1024 B/10 lines, id ≤32 B, status ≤32 B — plan §2/D6): a future field addition
+// cannot shrink these and reject frames an older/newer peer already emits. Schema bounds named
+// by the plan: rows maxItems 64, cmd maxLength 1024, tail maxLength 8192, status 32.
+export const BashJobRowSchema = Type.Object(
+  {
+    id: Type.String({ maxLength: 128 }),
+    cmd: Type.String({ maxLength: 1024 }),
+    cmdTruncated: Type.Optional(Type.Literal(true)),
+    // Open-ended (vs. a Union of literals): same reasoning as WorktreeRowSchema.unprobed —
+    // an older peer must not reject a future job status; unknown values display generic (D4).
+    status: Type.String({ maxLength: 32 }),
+    exitCode: Type.Union([Type.Number(), Type.Null()]),
+    createdAt: Type.Number(),
+    endedAt: Type.Optional(Type.Number()),
+    elapsedMs: Type.Number({ minimum: 0 }),
+    logBytes: Type.Integer({ minimum: 0 }),
+    logTruncated: Type.Optional(Type.Literal(true)),
+    grace: Type.Optional(Type.Literal(true)),
+    tail: Type.Optional(Type.String({ maxLength: 8192 })),
+    tailAt: Type.Optional(Type.Number()),
+    tailBytes: Type.Optional(Type.Integer({ minimum: 0 })),
+    tailUnavailable: Type.Optional(Type.Literal(true)),
+    tailCurrent: Type.Optional(Type.Literal(true)),
+  },
+  { additionalProperties: true },
+);
+export const BashJobsWireSchema = Type.Object(
+  {
+    rows: Type.Array(BashJobRowSchema, { maxItems: 64 }),
+    total: Type.Integer({ minimum: 0 }),
+    running: Type.Integer({ minimum: 0 }),
+    failed: Type.Integer({ minimum: 0 }),
+    omitted: Type.Optional(Type.Integer({ minimum: 0 })),
+    sampledAt: Type.Number({ minimum: 0 }),
+  },
+  { additionalProperties: true },
+);
 const StatusInfoSchema = Type.Object({
   leafId: Type.Union([Type.String(), Type.Null()]),
   busy: Type.Boolean(),
@@ -746,6 +842,7 @@ const StatusInfoSchema = Type.Object({
   queueDropped: Type.Optional(Type.Array(Type.String())),
   todo: Type.Optional(TodoWireSchema),
   worktrees: Type.Optional(WorktreesWireSchema),
+  bashJobs: Type.Optional(BashJobsWireSchema),
 });
 
 const FleetRowSchema = Type.Object({

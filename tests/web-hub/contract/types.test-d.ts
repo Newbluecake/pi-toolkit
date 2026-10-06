@@ -39,6 +39,8 @@ import type { FenceLoss, SingletonResult } from "../../../src/web-hub/hub/single
 import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
 import type {
   AgentFrame,
+  BashJobRowWire,
+  BashJobsWire,
   CmdArgs,
   CmdData,
   CmdErrorCode,
@@ -47,6 +49,7 @@ import type {
   FleetOmitted,
   HubCtlFrame,
   HubFrame,
+  StatusInfo,
   WireEntry,
   WireEvent,
 } from "../../../src/web-hub/protocol/messages.js";
@@ -440,5 +443,38 @@ describe("types.test-d.ts (fleet-drawer F0 run-transcript wire surface)", () => 
     type Fleet = Extract<AgentFrame, { t: "fleet" }>;
     expectTypeOf<Fleet["omitted"]>().toEqualTypeOf<FleetOmitted | undefined>();
     expectTypeOf<FleetOmitted>().toEqualTypeOf<{ active: number; terminal: number }>();
+  });
+});
+
+describe("types.test-d.ts (bash-jobs-panel 包 A0 frozen status-slot surface)", () => {
+  it("StatusInfo.bashJobs is optional — pre-A0 StatusInfo shapes stay assignable (D5)", () => {
+    expectTypeOf<Omit<StatusInfo, "bashJobs">>().toMatchTypeOf<StatusInfo>();
+    expectTypeOf<Extract<AgentFrame, { t: "status" }>["bashJobs"]>().toEqualTypeOf<BashJobsWire | undefined>();
+  });
+
+  it("BashJobsWire is exactly the frozen §2 shape (packages A/B code against these names)", () => {
+    expectTypeOf<BashJobsWire>().toEqualTypeOf<{
+      rows: BashJobRowWire[];
+      total: number;
+      running: number;
+      failed: number;
+      omitted?: number;
+      sampledAt: number;
+    }>();
+    expectTypeOf<BashJobRowWire["exitCode"]>().toEqualTypeOf<number | null>();
+    expectTypeOf<BashJobRowWire["cmdTruncated"]>().toEqualTypeOf<true | undefined>();
+    expectTypeOf<BashJobRowWire["logTruncated"]>().toEqualTypeOf<true | undefined>();
+    expectTypeOf<BashJobRowWire["grace"]>().toEqualTypeOf<true | undefined>();
+    expectTypeOf<BashJobRowWire["tail"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<BashJobRowWire["tailAt"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<BashJobRowWire["tailBytes"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<BashJobRowWire["tailUnavailable"]>().toEqualTypeOf<true | undefined>();
+    expectTypeOf<BashJobRowWire["tailCurrent"]>().toEqualTypeOf<true | undefined>();
+    expectTypeOf<BashJobRowWire["status"]>().toEqualTypeOf<string>(); // open enum (D4)
+  });
+
+  it("BashJobRowWire carries no logPath (v2 cut, D2)", () => {
+    expectTypeOf<BashJobRowWire>().not.toHaveProperty("logPath");
+    expectTypeOf<BashJobsWire>().not.toHaveProperty("logPath");
   });
 });
