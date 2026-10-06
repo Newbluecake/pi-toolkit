@@ -61,8 +61,10 @@ function onSubmit(): void {
         <p>{{ t("login.subtitle") }}</p>
       </div>
 
-      <NoticeBanner v-if="plaintext" :notice="plaintextNotice" />
-      <NoticeBanner v-if="initialPasswordHint" :notice="initialPasswordNotice" />
+      <div v-if="plaintext || initialPasswordHint" class="login-notices">
+        <NoticeBanner v-if="plaintext" :notice="plaintextNotice" />
+        <NoticeBanner v-if="initialPasswordHint" :notice="initialPasswordNotice" />
+      </div>
 
       <form class="form" novalidate @submit.prevent="onSubmit">
         <div class="field">
@@ -110,7 +112,7 @@ function onSubmit(): void {
       </form>
 
       <div class="login-foot">
-        <span>{{ t("common.readonly") }}</span>
+        <span class="chip login-mode-chip"><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span>
       </div>
     </div>
   </main>

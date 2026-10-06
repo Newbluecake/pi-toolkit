@@ -13,39 +13,45 @@
   padding: var(--sp-6) var(--sp-4);
   padding-bottom: max(var(--sp-6), env(safe-area-inset-bottom));
   background:
-    radial-gradient(1200px 600px at 15% -10%, color-mix(in srgb, var(--c-primary) 12%, transparent), transparent 60%),
-    radial-gradient(900px 500px at 110% 110%, color-mix(in srgb, var(--c-accent) 8%, transparent), transparent 60%),
+    radial-gradient(1200px 600px at 15% -10%, color-mix(in srgb, var(--c-primary) 14%, transparent), transparent 60%),
+    radial-gradient(900px 500px at 110% 110%, color-mix(in srgb, var(--c-accent) 10%, transparent), transparent 60%),
     var(--c-bg);
 }
 
 .login-card {
-  width: min(400px, 100%);
+  width: min(400px, 100% - 32px);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   padding: var(--sp-6) var(--sp-5) var(--sp-5);
   border: 1px solid var(--c-border);
   border-radius: var(--r-lg);
   background: var(--c-surface);
-  box-shadow: var(--shadow-3);
+  /* extra soft top highlight on top of the shared shadow-3 depth so the card reads as a
+   * raised sheet rather than a flat panel pasted onto the gradient backdrop (field report:
+   * "缺少层次"). */
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 16%, transparent),
+    var(--shadow-3);
 }
 
 .login-brand {
   display: grid;
   justify-items: center;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   text-align: center;
 }
 
 .login-brand .brand-mark {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--c-primary) 55%, transparent);
 }
 
 .login-brand .brand-mark .icon {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
 }
 
 .login-brand h1 {
@@ -55,13 +61,62 @@
 }
 
 .login-brand p {
+  max-width: 30ch;
+  margin-inline: auto;
   color: var(--c-text-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+  text-wrap: pretty;
+}
+
+.login-notices {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+/* The plaintext-HTTP / initial-password safety notices are real warnings, but on the sign-in
+ * card they must read as a quiet inline caution, not a second call-to-action button sitting
+ * right above "Sign In" (field report: "像一个突兀的按钮"). Tone down the shared
+ * `.notice-compact` chrome here only: thinner fill, a left accent instead of a full-bleed
+ * background, regular-weight title, a smaller/dimmer chevron. The `<details>` expand
+ * behaviour, icon and copy are untouched. */
+.login-notices .notice.notice-compact {
+  border: 1px solid var(--n-border, var(--c-border));
+  border-left: 3px solid var(--n-fg);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--n-bg) 45%, var(--c-surface));
+}
+
+.login-notices .notice.notice-compact > summary {
+  min-height: 40px;
+  padding: 0 var(--sp-3);
+  gap: var(--sp-2);
+}
+
+.login-notices .notice.notice-compact .notice-line {
+  padding: var(--sp-1) 0;
+  font-size: var(--fs-sm);
+}
+
+.login-notices .notice.notice-compact .notice-line strong {
+  font-weight: var(--fw-regular);
+  color: var(--n-text, var(--c-text-2));
+}
+
+.login-notices .notice.notice-compact .chev {
+  color: var(--c-text-3);
+}
+
+.login-notices .notice.notice-compact .notice-more {
+  padding-left: var(--sp-3);
   font-size: var(--fs-sm);
 }
 
 .form {
   display: grid;
   gap: var(--sp-4);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--c-border);
 }
 
 .field {
@@ -85,13 +140,17 @@
 }
 
 .input-wrap .input {
-  padding-right: 44px;
+  padding-right: 48px;
 }
 
+/* show-password toggle: a full 44×44 touch target (the shared `.btn-icon` is 32px), sitting
+ * inside the input's 48px right padding so it never covers typed text. */
 .input-wrap .btn-icon {
   position: absolute;
-  right: 4px;
+  right: 2px;
   top: 50%;
+  width: 44px;
+  height: 44px;
   transform: translateY(-50%);
 }
 
@@ -111,9 +170,16 @@
 .login-foot {
   display: flex;
   justify-content: center;
-  gap: var(--sp-2);
+  padding-top: var(--sp-1);
+}
+
+.login-foot .login-mode-chip {
+  gap: var(--sp-1);
   color: var(--c-text-3);
-  font-size: var(--fs-xs);
+}
+
+.login-foot .login-mode-chip .icon {
+  color: var(--c-text-3);
 }
 
 @media (min-width: 481px) {
