@@ -125,6 +125,26 @@ const control = {
   modelErrGeneric: "切换模型失败（{code}）",
   modelCheck: "check",
   modelDismiss: "关闭",
+
+  // thinking chip（web-model-switch §5.1/§6，M3b）——档位名与 clamp 标记保持英文 token
+  thinkingChipAria: "切换思考档位",
+  thinkingListAria: "思考档位",
+  thinkingCurrentBadge: "current",
+  thinkingOldAgent: "升级 pi-toolkit 后可在此选择思考档位——或在下方输入 /thinking <level>",
+  thinkingNoLevels: "未上报思考档位——请升级 pi-toolkit，或输入 /thinking <level>",
+  thinkingUnsupported: "当前模型不支持思考档位",
+  thinkingDeniedPolicy: "webCommandPolicy 已禁用切换思考档位",
+  thinkingDeniedShadowed: "/thinking 被扩展同名命令遮蔽——请在终端设置档位",
+  thinkingConfirm: "设为 {level}？",
+  thinkingConfirmRun: "设置",
+  thinkingConfirmCancel: "取消",
+  thinkingClamped: "clamped to {level}",
+  thinkingBusyNote: "当前正在输出的回复不受影响，之后的请求使用新档位",
+  thinkingErrBadLevel: "未知思考档位",
+  thinkingErrDenied: "webCommandPolicy 已禁用切换思考档位",
+  thinkingErrSession: "会话已切换——请重新选择",
+  thinkingErrGeneric: "设置思考档位失败（{code}）",
+  thinkingDismiss: "关闭",
 } satisfies Messages<typeof en>;
 
 export default control;

@@ -4,6 +4,7 @@ import { nextTick, ref, type Ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import PreviewHost from "../../../src/web-hub/ui/src/components/preview/PreviewHost.vue";
 import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
+import { resetBodyScrollLock } from "../../../src/web-hub/ui/src/composables/useScrollLock.js";
 import { MESSAGES } from "../../../src/web-hub/ui/src/i18n/index.js";
 import type { PreviewHandle, PreviewView } from "../../../src/web-hub/ui/src/types.js";
 
@@ -52,6 +53,9 @@ const tick = async (): Promise<void> => {
 };
 
 afterEach(() => {
+  // Tests that leave a phase open never unmount their wrapper, leaking a scroll-lock hold
+  // into the shared ref count (useScrollLock.ts) — reset it before touching overflow.
+  resetBodyScrollLock();
   document.body.style.overflow = "";
   document.body.innerHTML = "";
 });

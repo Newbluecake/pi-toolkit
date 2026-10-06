@@ -1,9 +1,11 @@
 <!--
-  Model switcher chip (web-model-switch plan v2 §5, package M3a — thinking chip and the
-  Teleport'd mobile sheet are M3b, deliberately NOT here). Lives in DetailDock's slim
-  `.dock-tools` row above the composer (user 拍板 Q2). One panel DOM, two form factors (#16):
-  viewport >640px = popover above the chip, ≤640px = full-width bottom-raised panel — CSS in
-  `styles/models.css` decides; `(pointer: coarse)` only raises hit areas.
+  Model switcher chip (web-model-switch plan v2 §5, package M3a; M3b added the ThinkingChip
+  sibling and the Teleport'd mobile sheet). Lives in DetailDock's slim `.dock-tools` row
+  above the composer (user 拍板 Q2). Two form factors (#16): viewport >640px = popover above
+  the chip; ≤640px = `PickerSheet` bottom sheet Teleport'd to `<body>` (M3b — same slot
+  content, the search box deliberately NOT autofocused there so the mobile keyboard stays
+  down; focus lands on the listbox via `[data-autofocus]`). CSS in `styles/models.css`;
+  `(pointer: coarse)` only raises hit areas.
 
   §5.4 four-state table (①② not-rendered / ③ not-rendered / ④ read-only chip / ⑤ full) is
   driven entirely off the injected CONTROL_VIEW + `modelsOf(session)`; the switch execution
@@ -13,7 +15,7 @@
   barred until the id settles; session switch drops tracking).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { newCmdId } from "@logic/control.js";
 import {
   currentModelOf,
@@ -30,6 +32,8 @@ import {
 import { modelCommandArg } from "@protocol/models.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import PickerSheet from "./PickerSheet.vue";
+import ThinkingChip from "./ThinkingChip.vue";
 import { CONTROL_VIEW } from "./controlContext.js";
 import "../../styles/models.css";
 
@@ -75,6 +79,21 @@ const busy = computed(() => view?.busy.value === true);
 /** §5.4 ①②③: control off / offline / command cap missing ⇒ render NOTHING. */
 const visible = computed(() => view !== null && view.enabled.value && view.commandsEnabled.value);
 
+// --- narrow viewport ⇒ Teleport'd bottom sheet (M3b; viewport decides the form factor, #16) -
+
+const narrow = ref(false);
+let mq: MediaQueryList | undefined;
+const onMqChange = (): void => {
+  narrow.value = mq?.matches === true;
+};
+onMounted(() => {
+  if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+    mq = window.matchMedia("(max-width: 640px)");
+    onMqChange();
+    mq.addEventListener?.("change", onMqChange);
+  }
+});
+
 // --- panel open/close (ContextRing.vue's Esc + outside-click pattern) -------------------------
 
 const open = ref(false);
@@ -113,9 +132,11 @@ function togglePanel(): void {
   tab.value = "scoped";
   nowTick.value = Date.now();
   open.value = true;
-  // Focus path (#verify P1): opening moves focus INTO the panel — the search input — so the
-  // panel's ↑↓/Enter/Esc keydown handler actually receives keys; closing returns it (closePanel).
-  void nextTick(() => searchEl.value?.focus());
+  // Focus path (#verify P1): opening moves focus INTO the panel — the search input on
+  // desktop — so the panel's ↑↓/Enter/Esc keydown handler actually receives keys; closing
+  // returns it (closePanel). Narrow sheet: do NOT focus the search box (it would pop the
+  // mobile keyboard, §5.1/A10) — PickerSheet focuses the `[data-autofocus]` listbox itself.
+  if (!narrow.value) void nextTick(() => searchEl.value?.focus());
 }
 
 function onChipKeydown(ev: KeyboardEvent): void {
@@ -140,7 +161,9 @@ function onDocClick(ev: MouseEvent): void {
 
 let ageTimer: ReturnType<typeof setInterval> | undefined;
 watch(open, (v) => {
-  if (v) {
+  // Desktop only: the narrow sheet's scrim covers outside clicks itself (@click.self), and
+  // the Teleport'd sheet is OUTSIDE `root` — a document listener would misread sheet taps.
+  if (v && !narrow.value) {
     document.addEventListener("click", onDocClick, true);
     ageTimer = setInterval(() => {
       nowTick.value = Date.now();
@@ -384,6 +407,7 @@ function onPanelKeydown(ev: KeyboardEvent): void {
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", onDocClick, true);
+  mq?.removeEventListener?.("change", onMqChange);
   if (ageTimer !== undefined) clearInterval(ageTimer);
   clearTimers();
 });
@@ -424,11 +448,15 @@ onBeforeUnmount(() => {
         <span class="model-note-text">{{ noteText }}</span>
         <button type="button" class="model-note-check" @click="checkNow">{{ t("control.modelCheck") }}</button>
       </span>
-      <div
+      <component
+        :is="narrow ? PickerSheet : 'div'"
         v-if="open"
-        class="model-panel"
-        role="dialog"
-        :aria-label="t('control.modelListAria')"
+        v-bind="
+          narrow
+            ? { label: t('control.modelListAria') }
+            : { class: 'model-panel', role: 'dialog', 'aria-label': t('control.modelListAria') }
+        "
+        @close="closePanel(true)"
         @keydown="onPanelKeydown"
       >
         <div v-if="models.status === 'error'" class="model-banner" role="status">{{ t("control.modelReadError") }}</div>
@@ -473,7 +501,7 @@ onBeforeUnmount(() => {
             {{ t("control.modelConfirmCancel") }}
           </button>
         </div>
-        <ul class="model-list" role="listbox" :aria-label="t('control.modelListAria')">
+        <ul class="model-list" role="listbox" :aria-label="t('control.modelListAria')" tabindex="-1" data-autofocus>
           <li v-if="pinnedCurrent" class="model-row" role="option" aria-selected="true" @click="closePanel(false)">
             <AppIcon name="check" class="icon-sm row-check" />
             <span class="row-id" translate="no">{{ pinnedCurrent.id }}</span>
@@ -536,7 +564,9 @@ onBeforeUnmount(() => {
           }}</span>
           <span class="model-snapshot">{{ t("control.modelSnapshot", { t: ageLabel }) }}</span>
         </div>
-      </div>
+      </component>
     </template>
+    <!-- user 拍板 Q1: thinking chip sits right next to the model chip (M3b) -->
+    <ThinkingChip />
   </div>
 </template>

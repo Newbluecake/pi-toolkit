@@ -33,6 +33,16 @@
 export const SWITCH_TIMEOUT_MS = 20_000;
 
 /**
+ * §6 clamp settle window (M3b): after a sync-ok `/thinking <level>`, the session frame that
+ * proves the final level may arrive BEFORE or AFTER the cmd_result (agent sends
+ * `thinking_level_select` and the cmd result independently — the two orders must converge to
+ * the same UI). The chip waits this long for a `session.thinkingLevel` change, then judges
+ * with the then-current level (a never-arriving frame means the level was already final —
+ * pi skips the event when the clamped value equals the previous one, which IS a clamp).
+ */
+export const CLAMP_SETTLE_MS = 4_000;
+
+/**
  * Defensive narrow of `session.models` (§5.5). `null` when the field is absent, null, or not
  * an object — the §5.4 state ④ "old agent" case. Everything else degrades field-by-field:
  * malformed items are dropped, malformed scalars fall back, and `policy` (required on the
@@ -238,6 +248,56 @@ export function trackSwitch(track, input) {
   }
 
   return timedOut ? { kind: "unknown" } : { kind: "pending" };
+}
+
+/**
+ * The session's current thinking level (`session.thinkingLevel`), `null` when absent or not
+ * a string — the chip renders "off" for that (§5.1).
+ * @param {unknown} session @returns {string | null}
+ */
+export function thinkingLevelOf(session) {
+  if (!session || typeof session !== "object") return null;
+  const v = /** @type {Record<string, unknown>} */ (session).thinkingLevel;
+  return typeof v === "string" && v !== "" ? v : null;
+}
+
+/**
+ * §5.4/§6 thinking-chip gate (M3b), driven off the narrowed `ModelsView`:
+ * - `"old-agent"` — `session.models` absent entirely (state ④): read-only chip showing
+ *   `session.thinkingLevel` when there is one, nothing otherwise;
+ * - `"no-levels"` — models present but `levels` not delivered (pi-ai probe unavailable, #2):
+ *   read-only, never derive a list locally;
+ * - `"unsupported"` — `levels` delivered with ≤1 entry (`["off"]`, non-reasoning model):
+ *   read-only;
+ * - `"pick"` — a real list to choose from.
+ * @param {ModelsView | null} models
+ * @returns {"old-agent" | "no-levels" | "unsupported" | "pick"}
+ */
+export function thinkingGate(models) {
+  if (models === null) return "old-agent";
+  if (!Array.isArray(models.levels) || models.levels.length === 0) return "no-levels";
+  if (models.levels.length === 1) return "unsupported";
+  return "pick";
+}
+
+/**
+ * §5.2 error-code → i18n leaf mapping for the thinking chip (`control.*` namespace, M3b).
+ * `/thinking` is sync (bridge `:236-246`), so the async-only codes never surface here;
+ * `E_BAD_REQUEST` = the level name itself was rejected.
+ * @param {unknown} code
+ * @returns {"thinkingErrBadLevel" | "thinkingErrDenied" | "thinkingErrSession" | "thinkingErrGeneric"}
+ */
+export function thinkingErrorKey(code) {
+  switch (code) {
+    case "E_BAD_REQUEST":
+      return "thinkingErrBadLevel";
+    case "E_COMMAND_DENIED":
+      return "thinkingErrDenied";
+    case "E_SESSION_CHANGED":
+      return "thinkingErrSession";
+    default:
+      return "thinkingErrGeneric";
+  }
 }
 
 /**

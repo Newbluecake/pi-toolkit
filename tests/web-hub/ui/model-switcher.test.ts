@@ -568,19 +568,89 @@ describe("ModelSwitcher.vue — policy (§5.2, A7/A8)", () => {
   });
 });
 
-describe("ModelSwitcher.vue — narrow viewport full-width panel (§5.1 M3a CSS)", () => {
-  it("models.css pins the ≤640px full-width bottom-raised panel + ≥40px coarse rows", () => {
+describe("ModelSwitcher.vue — narrow viewport bottom sheet (§5.1 M3b, #16/A10)", () => {
+  let origMatchMedia: typeof window.matchMedia | undefined;
+  afterEach(() => {
+    if (origMatchMedia !== undefined) {
+      window.matchMedia = origMatchMedia;
+      origMatchMedia = undefined;
+    }
+  });
+
+  function stubNarrow(matches: boolean): void {
+    if (origMatchMedia === undefined) origMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  it("models.css pins the Teleport'd sheet shell (75vh + safe-area) and ≥44px sheet rows", () => {
     const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/models.css"), "utf8");
+    expect(css).toContain(".picker-scrim");
+    const sheet = css.match(/\.picker-sheet \{([\s\S]*?)\n\}/);
+    expect(sheet).not.toBeNull();
+    expect(sheet![1]).toContain("max-height: 75vh");
+    expect(sheet![1]).toContain("env(safe-area-inset-bottom)");
+    // the M3a full-width in-place panel is gone — ≤640px uses the Teleport'd sheet now
     const narrow = css.match(/@media \(max-width: 640px\) \{([\s\S]*?)\n\}/);
     expect(narrow).not.toBeNull();
-    expect(narrow![1]).toContain("position: fixed");
-    expect(narrow![1]).toContain("left: 0");
-    expect(narrow![1]).toContain("right: 0");
-    expect(narrow![1]).toContain("bottom: 0");
+    expect(narrow![1]).not.toContain("position: fixed");
+    expect(narrow![1]).toContain("min-height: 44px");
     // viewport decides the form factor (#16); coarse pointer only raises hit areas
     const coarse = css.match(/@media \(pointer: coarse\) \{([\s\S]*?)\n\}/);
     expect(coarse).not.toBeNull();
     expect(coarse![1]).toContain("min-height: 44px");
     expect(css).not.toContain("v-html");
+  });
+
+  it("≤640px: opens as a Teleport'd PickerSheet — search NOT autofocused (keyboard stays down), listbox is", async () => {
+    stubNarrow(true);
+    const { control } = fakeControl();
+    const { wrapper } = mountSwitcher(control);
+    const chip = wrapper.find("button.model-chip");
+    (chip.element as HTMLButtonElement).focus();
+    await chip.trigger("click");
+    await flush();
+    const sheet = document.body.querySelector(".picker-sheet");
+    expect(sheet).not.toBeNull();
+    expect(wrapper.find(".model-panel").exists()).toBe(false); // no desktop popover
+    // the search box exists but is NOT focused (§5.1: avoid popping the mobile keyboard);
+    // focus landed on the [data-autofocus] listbox instead
+    const search = sheet!.querySelector(".model-search");
+    expect(search).not.toBeNull();
+    expect(document.activeElement).not.toBe(search);
+    expect(document.activeElement).toBe(sheet!.querySelector("ul.model-list"));
+    // scroll locked while open, restored on scrim close; focus returns to the chip
+    expect(document.body.style.overflow).toBe("hidden");
+    document.body
+      .querySelector<HTMLElement>(".picker-scrim")!
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+    expect(document.body.querySelector(".picker-sheet")).toBeNull();
+    expect(document.body.style.overflow).toBe("");
+    expect(document.activeElement).toBe(chip.element);
+  });
+
+  it("≤640px: picking a row inside the sheet still sends the switch command", async () => {
+    stubNarrow(true);
+    const calls: Call[] = [];
+    const { agent, mountWith } = harness();
+    const wrapper = mountWith(asyncSwitchControl(calls, agent));
+    await wrapper.find("button.model-chip").trigger("click");
+    await flush();
+    const row = document.body.querySelector<HTMLElement>(".picker-sheet .model-row");
+    expect(row).not.toBeNull();
+    row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args.slice(0, 3)).toEqual(["agent-a", "model", "zai/glm-5"]);
+    expect(document.body.querySelector(".picker-sheet")).toBeNull();
   });
 });

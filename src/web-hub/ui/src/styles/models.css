@@ -1,12 +1,12 @@
 /*
- * pi web-hub — model switcher (web-model-switch plan v2 §5.1, package M3a exclusive).
+ * pi web-hub — model switcher (web-model-switch plan v2 §5.1, package M3a exclusive; M3b
+ * appended the thinking chip + Teleport'd bottom sheet at the bottom).
  * The chip lives in DetailDock's slim `.dock-tools` row above the composer (user 拍板 Q2).
- * One panel DOM serves both form factors (#16): viewport >640px = absolute popover above the
- * chip (360px / 50vh); viewport ≤640px = full-width bottom-raised panel (M3a — M3b upgrades
- * it to a Teleport'd sheet). `(pointer: coarse)` only raises row hit-areas to ≥44px, it never
- * decides the form factor. The mobile full-width rule at the bottom is pinned by
- * `tests/web-hub/ui/model-switcher.test.ts` (A-锚点「窄屏全宽上弹面板」).
- */
+ * Two form factors (#16): viewport >640px = absolute popover above the chip (360px / 50vh);
+ * viewport ≤640px = `PickerSheet.vue`'s Teleport'd bottom sheet (`.picker-scrim`/
+ * `.picker-sheet`, 75vh + safe-area inset). `(pointer: coarse)` only raises row hit-areas to
+ * ≥44px, it never decides the form factor. The sheet rules are pinned by
+ * `tests/web-hub/ui/model-switcher.test.ts` and `picker-sheet.test.ts`.
 
 /* Slim tool row above the composer (DetailDock control branch). */
 .dock-tools {
@@ -351,22 +351,64 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* --- narrow viewport: full-width bottom-raised panel (M3a; same DOM, no Teleport) --- */
+/* --- M3b: thinking chip + Teleport'd bottom sheet (≤640px, shared by both chips) ---------- */
 
+.thinking-chip-host {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* Desktop thinking popover: same shell as the model popover, narrower. */
+.thinking-panel {
+  width: 220px;
+}
+
+.model-note-clamp {
+  color: var(--c-warning-text);
+}
+
+/* Bottom sheet shell (`PickerSheet.vue`, Teleport'd to <body>). z-index 40 = popover layer,
+ * above the drawer scrim (30), below the preview overlay (60) — preview.css's contract. */
+.picker-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  background: rgb(19 32 38 / 0.45);
+}
+
+.picker-sheet {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: 75vh;
+  border-top: 1px solid var(--c-border);
+  border-radius: 12px 12px 0 0;
+  background: var(--c-surface);
+  box-shadow: 0 -8px 28px rgb(19 32 38 / 0.18);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom);
+  outline: none;
+}
+
+.picker-sheet .model-list {
+  flex: 1 1 auto;
+}
+
+/* Narrow viewport: sheet rows meet the ≥44px touch target (A10) even on fine pointers. */
 @media (max-width: 640px) {
-  .model-panel {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: auto;
-    max-width: none;
-    max-height: 75vh;
-    border-left: none;
-    border-right: none;
-    border-bottom: none;
-    border-radius: 12px 12px 0 0;
-    padding-bottom: env(safe-area-inset-bottom);
+  .picker-sheet .model-row {
+    min-height: 44px;
+  }
+
+  .picker-sheet .model-search {
+    min-height: 40px;
   }
 }
 

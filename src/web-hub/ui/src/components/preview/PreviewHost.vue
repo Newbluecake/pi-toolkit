@@ -15,6 +15,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { PreviewView } from "../../types.js";
@@ -69,13 +70,13 @@ function close(): void {
 // --- focus management + scroll lock (§4.6: 焦点进入、循环、归还；滚动锁一定会清理) ---
 const panelEl = ref<HTMLElement | null>(null);
 let returnFocus: Element | null = null;
-let savedOverflow: string | null = null;
+// Shared ref-counted lock (useScrollLock.ts — verify:model-switch-M3b): composes with
+// PickerSheet's lock when overlays stack; only the LAST release restores the overflow.
+let releaseScrollLock: (() => void) | null = null;
 
 function restoreScroll(): void {
-  if (savedOverflow !== null) {
-    document.body.style.overflow = savedOverflow;
-    savedOverflow = null;
-  }
+  releaseScrollLock?.(); // idempotent
+  releaseScrollLock = null;
 }
 
 watch(
@@ -83,8 +84,7 @@ watch(
   async (open) => {
     if (open) {
       returnFocus = document.activeElement;
-      savedOverflow = document.body.style.overflow;
-      document.body.style.overflow = "hidden";
+      releaseScrollLock = acquireBodyScrollLock();
       await nextTick();
       panelEl.value?.focus();
       return;

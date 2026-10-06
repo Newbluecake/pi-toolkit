@@ -138,6 +138,27 @@ const control = {
   modelErrGeneric: "Couldn't switch model ({code})",
   modelCheck: "check",
   modelDismiss: "Dismiss",
+
+  // --- thinking chip (web-model-switch plan v2 §5.1/§6, M3b) — level names and the clamp
+  // marker stay English tokens in both languages; errors and notes are prose ---
+  thinkingChipAria: "Switch thinking level",
+  thinkingListAria: "Thinking levels",
+  thinkingCurrentBadge: "current",
+  thinkingOldAgent: "Update pi-toolkit to pick thinking levels here — or type /thinking <level>",
+  thinkingNoLevels: "Thinking levels not reported — update pi-toolkit, or type /thinking <level>",
+  thinkingUnsupported: "This model doesn't support thinking levels",
+  thinkingDeniedPolicy: "Thinking level switching is disabled by webCommandPolicy",
+  thinkingDeniedShadowed: "/thinking is shadowed by an extension command — set levels in the terminal",
+  thinkingConfirm: "Set thinking to {level}?",
+  thinkingConfirmRun: "Set",
+  thinkingConfirmCancel: "Cancel",
+  thinkingClamped: "clamped to {level}",
+  thinkingBusyNote: "Current reply is unaffected; later requests use the new level",
+  thinkingErrBadLevel: "Unknown thinking level",
+  thinkingErrDenied: "Thinking level switching is disabled by webCommandPolicy",
+  thinkingErrSession: "The session changed — pick again",
+  thinkingErrGeneric: "Couldn't set thinking level ({code})",
+  thinkingDismiss: "Dismiss",
 } satisfies Record<string, string>;
 
 export default control;
