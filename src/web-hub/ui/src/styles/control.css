@@ -971,10 +971,20 @@
 /* --- landscape phones (todo #7): composer compaction — vertical gaps/paddings shrink; the
  * textarea and send button keep their 44px min-height hit boxes, and `.composer-sub`'s own
  * controls stay mounted (command mode's send-as-text checkbox is interactive) --- */
-/* Narrow phones (2026-10-06): with the vertical padding halved the 44px floor still ruled the
- * visual height — drop it to 34px on phones so the empty composer is actually shorter. */
+/* Narrow phones (2026-10-06 ×2): with the vertical padding halved the 44px floor still ruled
+ * the visual height — drop it to 34px on phones so the empty composer is actually shorter, and
+ * shrink the sibling send/attach buttons to match (field report: "附件、发送按钮没有同步调整"). */
 @media (max-width: 767px) {
   .composer textarea {
+    min-height: 34px;
+  }
+
+  .composer-send {
+    min-height: 34px;
+  }
+
+  .composer-attach {
+    width: 32px;
     min-height: 34px;
   }
 }

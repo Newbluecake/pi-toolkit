@@ -19,7 +19,9 @@
   gap: var(--sp-2);
   min-height: 28px;
   padding: var(--sp-1) var(--sp-3) 0;
-  padding-left: max(var(--sp-3), env(safe-area-inset-left));
+  /* 2026-10-06: align the chips with the composer INPUT's left edge (not the attach button's):
+   * dock padding sp-3 + attach 36px + row gap sp-2 = 56px. */
+  padding-left: max(calc(var(--sp-3) + 56px), calc(env(safe-area-inset-left) + 56px));
   padding-right: max(var(--sp-3), env(safe-area-inset-right));
   background: var(--c-surface);
   color: var(--c-text-3);
@@ -423,6 +425,8 @@
   .dock-tools {
     min-height: 0;
     padding-top: 0;
+    /* attach button is 32px on phones: sp-3 + 32 + sp-2 = 52px */
+    padding-left: max(calc(var(--sp-3) + 52px), calc(env(safe-area-inset-left) + 52px));
   }
 
   .dock-tools .model-chip {
