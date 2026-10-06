@@ -1,4 +1,7 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
@@ -321,5 +324,68 @@ describe("FleetSummaryBar.vue(§6.3 摘要行)", () => {
   it("没有行时不渲染(不占位,沿用 ui-design §9)", () => {
     const wrapper = mount(FleetSummaryBar, { props: { rows: [], open: false } });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(false);
+  });
+});
+
+describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场:c6bc7b3/1c5ff54 之后的根治)", () => {
+  const css = readFileSync(
+    resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/fleet.css"),
+    "utf8",
+  );
+  const rule = (selector: string): string => {
+    const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`).exec(css);
+    return m?.[0] ?? "";
+  };
+
+  it("chip 可收缩截断(flex:none 会让 chip 溢出 name 格子压到模型名上,是重叠根因)", () => {
+    const r = rule(".run-name .chip");
+    expect(r).toMatch(/flex:\s*0 1 auto/);
+    expect(r).toMatch(/min-width:\s*0/);
+    expect(r).toMatch(/text-overflow:\s*ellipsis/);
+    expect(r).not.toMatch(/flex:\s*none/);
+  });
+
+  it("模型名可截断(time/cost 不可收缩,永远完整)", () => {
+    const model = rule(".run-nums .model");
+    expect(model).toMatch(/min-width:\s*0/);
+    expect(model).toMatch(/text-overflow:\s*ellipsis/);
+    expect(rule(".run-nums .time")).toMatch(/flex:\s*none/);
+    expect(rule(".run-nums")).toMatch(/min-width:\s*0/);
+  });
+
+  it("容器 <480px 时 nums(model/time/cost) 挪到第二行,activity 第三行(真实抽屉全在 360–559px)", () => {
+    const m = /@container\s*\(max-width:\s*479px\)\s*\{([\s\S]*)\}\s*$/.exec(css);
+    expect(m).not.toBeNull();
+    const block = m![1]!;
+    expect(block).toMatch(
+      /grid-template-areas:[^;]*"chev icon name toggle"[^;]*"\. \. nums nums"[^;]*"\. \. activity activity"/,
+    );
+    // 旧的 <360px 阈值覆盖不到 docked/overlay/手机全屏抽屉,不得回退
+    expect(css).not.toMatch(/@container\s*\(max-width:\s*359px\)/);
+  });
+
+  it("思考/活动预览行(.run-activity):单行 nowrap + ellipsis + min-width:0,与费用/时间分行不相交", () => {
+    const r = rule(".run-activity");
+    expect(r).toMatch(/grid-area:\s*activity/); // 独占网格行,不与 nums 同轨道
+    expect(r).toMatch(/min-width:\s*0/);
+    expect(r).toMatch(/overflow:\s*hidden/);
+    expect(r).toMatch(/text-overflow:\s*ellipsis/);
+    expect(r).toMatch(/white-space:\s*nowrap/);
+    // <480px 档的 grid-template-areas 必须把 activity 与 nums 放在不同行(上一用例已钉模板,
+    // 这里再钉一遍行数:模板字符串里恰好三行,activity 在最后一行)
+    const m = /@container\s*\(max-width:\s*479px\)\s*\{([\s\S]*)\}\s*$/.exec(css);
+    const areas = /grid-template-areas:\s*([^;]+);/.exec(m![1]!)?.[1] ?? "";
+    const lines = [...areas.matchAll(/"[^"]+"/g)].map((x) => x[0]);
+    expect(lines.length).toBe(3);
+    expect(lines[2]).toContain("activity");
+    expect(lines[2]).not.toContain("nums");
+  });
+
+  it("行内元素不靠绝对定位/负 margin 排布(叠字禁令)", () => {
+    for (const sel of [".run-name", ".run-nums", ".run-activity", ".run-name .chip", ".run-nums .model"]) {
+      const r = rule(sel);
+      expect(r).not.toMatch(/position:\s*absolute/);
+      expect(r).not.toMatch(/margin(-\w+)?:\s*-/);
+    }
   });
 });

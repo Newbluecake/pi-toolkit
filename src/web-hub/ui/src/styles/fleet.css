@@ -146,10 +146,17 @@ details[open] > summary.run .chev {
   font-weight: var(--fw-semibold);
 }
 
-/* chip(类型徽标/孤儿徽标)固定尺寸,不参与收缩 —— 空间不足时让 name 文本先让路,chip 永远
- * 完整可读(极窄容器下由 `@container` 兜底加 max-width,见文件尾)。 */
+/* chip(类型徽标/孤儿徽标)可收缩:窄容器里 name 列被压到比 chip 还窄时,`flex: none` 会让 chip
+ * 溢出自己的格子、叠到右侧 `.run-nums` 的模型名上(2026-10 手机现场重叠反馈的根因)。改为
+ * `flex: 0 1 auto` + `min-width: 0` + ellipsis:空间不足时 chip 与 label 一起截断,任何宽度下
+ * 都结构性不可能叠字;极窄容器另由 @container 加 max-width 兜底(见文件尾)。 */
 .run-name .chip {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* fleet-drawer §6.3 (F6): transcript 入口开放时 run 名包一层按钮(纯文本外观,点击在抽屉里
@@ -211,14 +218,25 @@ details[open] > summary.run .chev {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  min-width: 0;
   color: var(--c-text-3);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+/* 模型名是 nums 里唯一可伸缩的项:空间不足时截断省略(time/cost 是短数字,永远完整可读)。
+ * 模板在 `<span class="model">` 上挂了完整 model 串的 `title`,截断后 hover/长按仍能看到全名。 */
 .run-nums .model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-family: var(--font-mono);
+}
+
+.run-nums .time {
+  flex: none;
 }
 
 .run-nums .cost {
@@ -378,11 +396,13 @@ details[open] > summary.run .chev {
   }
 }
 
-/* 容器实际内联尺寸 <360px(320–359px 的最窄手机全屏抽屉)时,name+chip+nums 一行放不下。
- * 用户明确要求手机上必须看得到各子 agent 的模型名(2026-10-05)——所以不隐藏 model,而是把
- * nums(model/time/cost)整体挤到第二行,activity 顺延到第三行;第一行只留 icon+name+toggle,
- * name 拿到整行宽度。chip 再加一道 max-width 兜底(超长 `type` 字符串的边界情况)。 */
-@container (max-width: 359px) {
+/* 容器实际内联尺寸 <480px 时,name+chip+nums(model+time+cost) 一行放不下:nums 仅自身就要
+ * ~200px,加上 chev/icon/缩进后 name 列被压到小于 chip 宽 —— 360–479px 正是真实抽屉的主战场
+ * (docked clamp(360,30vw,520) 的下段、overlay min(420px,85%)、360–430px 手机全屏抽屉),旧的
+ * <360px 阈值完全覆盖不到这个区间,是 2026-10 手机重叠反馈久治不愈的漏洞。布局降级为三行:
+ * 第一行 icon+name+toggle(name 拿整行宽),nums 整体挪第二行,activity 第三行 —— 行与行之间
+ * 由网格轨道隔开,不可能重叠;行内截断由上面的 chip/model 收缩规则兜底。 */
+@container (max-width: 479px) {
   .run {
     grid-template-columns: 18px 20px minmax(0, 1fr) auto;
     grid-template-areas:
@@ -397,7 +417,5 @@ details[open] > summary.run .chev {
 
   .run-name .chip {
     max-width: 72px;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 }

@@ -154,13 +154,21 @@ function toggleActions(runId: string): void {
             </button>
             <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
             <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
-            <span v-if="typeChipOf(rowOf(node))" class="chip" translate="no">{{ typeChipOf(rowOf(node)) }}</span>
+            <span v-if="typeChipOf(rowOf(node))" class="chip" translate="no" :title="typeChipOf(rowOf(node))">{{
+              typeChipOf(rowOf(node))
+            }}</span>
           </span>
           <span v-if="fleetActivity(rowOf(node))" class="run-activity"
             ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
           >
           <span class="run-nums">
-            <span v-if="modelShortOf(rowOf(node))" class="model" translate="no">{{ modelShortOf(rowOf(node)) }}</span>
+            <span
+              v-if="modelShortOf(rowOf(node))"
+              class="model"
+              translate="no"
+              :title="String(rowOf(node).model ?? '')"
+              >{{ modelShortOf(rowOf(node)) }}</span
+            >
             <span class="time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
             <span class="cost">{{ costLabelOf(rowOf(node)) }}</span>
           </span>
@@ -207,13 +215,21 @@ function toggleActions(runId: string): void {
           </button>
           <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
           <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
-          <span v-if="typeChipOf(rowOf(node))" class="chip" translate="no">{{ typeChipOf(rowOf(node)) }}</span>
+          <span v-if="typeChipOf(rowOf(node))" class="chip" translate="no" :title="typeChipOf(rowOf(node))">{{
+            typeChipOf(rowOf(node))
+          }}</span>
         </span>
         <span v-if="fleetActivity(rowOf(node))" class="run-activity"
           ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
         >
         <span class="run-nums">
-          <span v-if="modelShortOf(rowOf(node))" class="model" translate="no">{{ modelShortOf(rowOf(node)) }}</span>
+          <span
+            v-if="modelShortOf(rowOf(node))"
+            class="model"
+            translate="no"
+            :title="String(rowOf(node).model ?? '')"
+            >{{ modelShortOf(rowOf(node)) }}</span
+          >
           <span class="time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
           <span class="cost">{{ costLabelOf(rowOf(node)) }}</span>
         </span>
