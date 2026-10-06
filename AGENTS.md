@@ -320,6 +320,12 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   **B-stream** — `agent_removed` is published only after dropAgent + clearing that agent's SSE subscriptions.
   `removeIntent` persists synchronously so a hub crash mid-delete converges on the next boot. LAN with `spawn.lan:"off"`
   cannot delete a live managed card (403 `lan-off`). Design: `docs/dev/web-hub-delete-session/plan.md`.
+  **Worktree panel (worktree-web plan v1.1)**: `agent/worktree-sampler.ts` samples the session cwd's repo through
+  `src/git/` (local commands only — never fetch; hard per-scan deadline, single-flight, zombie guard across
+  stop/start, all timers unref'd, inert in print mode) and rides the optional `StatusInfo.worktrees` slot
+  (append-only, open-but-bounded schema, `agent/worktrees.ts` byte-budgeted projection, fingerprint-gated
+  publish) to a read-only `WorktreePanel` on the web detail header (absolute paths shown, 1 worktree included).
+  Design: `docs/dev/worktree-web/plan.md`.
   **Content preview (web-hub-preview plan v3, setting `webHub.preview` — `"on" | "loopback" | "off"`, default
   `"on"` per the 2026-10-05 user ruling U1: sole LAN user behind password auth, risk explicitly accepted; change
   is non-live — `/reload` then `/webhub restart`)**: an absolute path in a settled message (assistant text, user
@@ -336,6 +342,8 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   preview reads never pin or extend upload TTLs. `mode:"loopback"` keeps the endpoint LAN-absent (404, byte-
   identical to `off` on LAN) while loopback keeps previewing. Design + real-device acceptance:
   `docs/dev/web-hub-preview/{plan,acceptance}.md`.
+- `src/git/` — pi-free bounded git executor (`run.ts`: hard deadline, process-group kill, stdout/stderr caps,
+  unref'd timers) + `git worktree list --porcelain` parse/scan (`worktrees.ts`) + `~` path labels (`path-label.ts`).
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
   (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses

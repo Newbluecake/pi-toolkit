@@ -1,6 +1,6 @@
 # 会话仓库 git worktree 列表上 web 页：实施方案 v1.1（r1 评审修订）
 
-> 状态：方案 v1.1（未开工）。v1 经 `review:worktree-web`（r1：0 Blocker / 5 Major / 3 Minor）打回，本版按主会话裁定逐条修订，处置见 §12「r1 评审处置」；用户最终决策见文末「用户拍板」（以它为准）。
+> 状态：**已实施**（W1 482e54b、W2 04021a9、W3 40f2e37、W4 fd234eb、W5 文档；各包 verifier 通过；W6 HUD 迁移为后续项）。方案 v1.1。v1 经 `review:worktree-web`（r1：0 Blocker / 5 Major / 3 Minor）打回，本版按主会话裁定逐条修订，处置见 §12「r1 评审处置」；用户最终决策见文末「用户拍板」（以它为准）。
 > 需求：在 web-hub 浏览器 UI 的会话详情页看到「该会话 cwd 所在仓库的 git worktree 列表」。
 > **基线：`c6bc7b3`（master HEAD）**。行号只作参考，以符号名为准；本文只写方案，不改实现。
 > **照抄先例**：todo 上网页（`docs/dev/todo-web/plan.md`，T1–T4 已合入 `183f825`/`09cbeec`）——
