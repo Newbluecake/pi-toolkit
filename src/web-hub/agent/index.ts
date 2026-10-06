@@ -68,7 +68,9 @@ import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
 import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
-import { listSlashCommands } from "./slash.js";
+import { classifyCommand, listSlashCommands } from "./slash.js";
+import { modelsFingerprint, projectModels } from "./models.js";
+import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js";
 import { createDialogBridge } from "./dialogs.js";
 import { createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
@@ -229,6 +231,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const env = deps.env ?? process.env;
   const now = deps.now ?? Date.now;
   const settings = deps.settings;
+  const modelsEnabled = settings.control !== false && settings.webCommands !== false;
   const home = env.HOME !== undefined && env.HOME !== "" ? env.HOME : homedir();
   const paths =
     deps.paths ??
@@ -250,6 +253,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // todo-web plan §3.3 (T3): the todo fingerprint gate — same lifecycle as lastFleetFp
   // (reset on session_start so the first tick after a /new・/resume・/fork always re-aligns).
   let lastTodoFp: string | undefined;
+  let connGen = 0;
+  let lastModelsKey: string | undefined;
+  let modelsTick = 0;
   let tick: NodeJS.Timeout | undefined;
   let statusText: string | undefined;
   let buildInfo: Promise<{ pluginVersion: string; buildId: string }> | undefined;
@@ -383,11 +389,51 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     c.setSlot("status", { t: "status", ...s });
   };
 
-  const publishSession = (override?: Partial<SessionInfo>): void => {
+  const projectCurrentModels = (x: ExtensionContext) =>
+    projectModels({
+      available: () => x.modelRegistry.getAvailable(),
+      registryError: () => {
+        const getError = (x.modelRegistry as unknown as { getError?: () => string | undefined }).getError;
+        return typeof getError === "function" ? getError.call(x.modelRegistry) : undefined;
+      },
+      scoped: () => safe(() => x.scopedModels, []),
+      current: () => safe(() => x.model, undefined),
+      policy: (name) => effectivePolicy(parameterizedBuiltinPolicy(name, deps.settings.webCommandPolicy), false),
+      shadowed: (name) =>
+        classifyCommand(pi, name)?.kind !== undefined && classifyCommand(pi, name)?.kind !== "builtin",
+      now,
+    });
+
+  /** The only session-frame construction path. Model snapshots are deliberately recomputed from
+   * live ctx here so stale pi getters become an explicit error snapshot rather than disappearing. */
+  const emitSession = (mode: "attach" | "update", override?: Partial<SessionInfo>): void => {
     const c = conn;
     const x = ctx;
     if (c === undefined || x === undefined) return;
-    c.setSlot("session", { t: "session", ...sessionInfo(x, sessionReason), ...override });
+    const info: SessionInfo = { ...sessionInfo(x, sessionReason), ...override };
+    if (modelsEnabled) {
+      const models = projectCurrentModels(x);
+      info.models = models;
+      lastModelsKey = `${connGen}|${info.sessionId}|${modelsFingerprint(models)}`;
+    } else {
+      delete info.models;
+      lastModelsKey = undefined;
+    }
+    if (mode === "attach") c.attach(binding, info);
+    else c.setSlot("session", { t: "session", ...info });
+  };
+
+  const refreshModelsIfChanged = (): void => {
+    if (!modelsEnabled || !attached || conn === undefined || ctx === undefined) return;
+    const models = projectCurrentModels(ctx);
+    const sessionId = safe(() => ctx?.sessionManager.getSessionId() ?? "", "");
+    const key = `${connGen}|${sessionId}|${modelsFingerprint(models)}`;
+    if (key === lastModelsKey) return;
+    emitSession("update");
+  };
+
+  const publishSession = (override?: Partial<SessionInfo>): void => {
+    emitSession("update", override);
   };
 
   const onTick = (): void => {
@@ -423,6 +469,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       c.setSlot("fleet", { t: "fleet", runs: rows, ...(rows.omitted !== undefined ? { omitted: rows.omitted } : {}) });
     }
     runTx.tick(); // §3.3 #3/#4: 1Hz gap retries + endedPending redelivery
+    modelsTick += 1;
+    if (modelsTick % 5 === 0) refreshModelsIfChanged();
   };
 
   const publishCtl = (): void => {
@@ -670,7 +718,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       capsExtra,
     });
     conn = c;
-    c.attach(binding, sessionInfo(x, sessionReason));
+    connGen += 1;
+    emitSession("attach");
     // The dialogs slot exists (D14-gated, only actually sent once the hub advertises dialog.v1) so
     // C2 only replaces `dialogBridge.frame()`'s content, not this call.
     c.setSlot("dialogs", dialogBridge.frame());
@@ -703,6 +752,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lastLeaf = undefined;
     lastFleetFp = undefined;
     lastTodoFp = undefined;
+    lastModelsKey = undefined;
+    modelsTick = 0;
     tap.resetForSession(Number.NaN);
     commandHandler.onSessionBoundary();
     // O(branch entries) cost sum, deferred so session_start returns at once.
@@ -748,7 +799,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // FORWARDED_EVENTS' fire-and-forget loop; we only use it as the signal to refresh the
   // commands slot (mid-session extension loads change the slash palette).
   pi.on("resources_discover", () => {
-    if (attached) publishCommands();
+    if (attached) {
+      publishCommands();
+      refreshModelsIfChanged();
+    }
     return {};
   });
 
