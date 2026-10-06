@@ -12,10 +12,13 @@
  *   - a KNOWN dir on LAN still requires confirmation (confirm:"always").
  */
 import { afterEach, describe, expect, it } from "vitest";
+import { request as httpRequest } from "node:http";
 import { lanPostJson, lanRequest, seedLanUser, startLan, fakeClock, type LanHarness } from "./lan-helpers.js";
 import { openSse } from "./helpers.js";
 import type { SseConn } from "./helpers.js";
 import { spawnKit } from "./spawn-kit.js";
+import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
+import { fakeDeps, login, makeTmp, postJson, rawRequest } from "./helpers.js";
 import type { SpawnPolicyWire } from "../../../src/web-hub/protocol/spawn.js";
 import { ALLOWED_POLICY } from "./spawn-kit.js";
 
@@ -247,5 +250,111 @@ describe("LAN scope threading (arch §6.4: roots capped to known on plaintext di
       viaTrustedProxy: true,
     });
     expect(kit.dirs.admitCalls.at(-1)?.scope).toBe("roots");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan §3 ④ / D1 (U1): the global shared preference + its LAN semantics
+// ---------------------------------------------------------------------------
+
+describe("default-model prefs — global share (U1) and the second-authorize race", () => {
+  it("U1: Alice (LAN) writes ⇒ Bob (LAN) and the loopback face see the SAME value; a loopback spawn forks with it; the audit carries the principal", async () => {
+    const kit = spawnKit({ lan: "known" }, fakeClock());
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    kit.dirs.setAdmitResult({ ok: true, realpath: "/home/u/proj", dev: 1, ino: 2, known: true });
+    kit.supervisor.setPolicy(policyFn(() => "known"));
+
+    const alice = await loginAs(h, "alice", 1);
+    const bob = await loginAs(h, "bob", 2);
+
+    // Alice writes the preference over LAN
+    const write = await lanPostJson(h.port, "/api/headless/prefs", { defaultModel: "p1/shared" }, { Cookie: alice });
+    expect(write.status).toBe(200);
+    expect(JSON.parse(write.body)).toEqual({ prefs: { defaultModel: "p1/shared" } });
+
+    // the audit line carries the WRITING principal (U1/A9: 全局单值 + principal 审计)
+    const line = kit.log.lines
+      .map((l) => l.data as Record<string, unknown>)
+      .find((d) => d["endpoint"] === "prefs" && d["phase"] === "request");
+    expect(line).toMatchObject({ listener: "lan", user: "u1", from: null, to: "p1/shared" });
+
+    // Bob (a DIFFERENT LAN principal) reads the same value off his own GET
+    const bobGet = await lanRequest(h.port, {
+      path: "/api/headless",
+      headers: { Cookie: bob, "X-PWH": "1", Host: `127.0.0.1:${h.port}` },
+    });
+    expect(JSON.parse(bobGet.body).prefs).toEqual({ defaultModel: "p1/shared" });
+
+    // the loopback face of the SAME hub sees it too, and forks with it
+    const tmpLoop = makeTmp("pwh-prefs-loop-");
+    try {
+      const depsLoop = fakeDeps(tmpLoop.dir);
+      depsLoop.spawn = kit.spawn;
+      const feLoop = createHttpFrontend(depsLoop);
+      const portLoop = (await feLoop.listen()).port;
+      try {
+        const cookieLoop = await login(portLoop, depsLoop.paths.tokenFile);
+        const get = await rawRequest(portLoop, {
+          path: "/api/headless",
+          headers: { Cookie: cookieLoop, "X-PWH": "1" },
+        });
+        expect(JSON.parse(get.body).prefs).toEqual({ defaultModel: "p1/shared" });
+        const origin = `http://127.0.0.1:${portLoop}`;
+        kit.supervisor.setPolicy(() => ({ ...ALLOWED_POLICY })); // loopback: known dir needs no confirm
+        const spawn = await postJson(portLoop, "/api/headless", BODY_A, { Cookie: cookieLoop, Origin: origin });
+        expect(spawn.status).toBe(202);
+        expect(JSON.parse(spawn.body).model).toBe("p1/shared");
+        expect(kit.supervisor.startCalls[0]!.model).toBe("p1/shared");
+      } finally {
+        await feLoop.close();
+      }
+    } finally {
+      tmpLoop.cleanup();
+    }
+  });
+
+  it("LAN revokeAllSessions racing the prefs body read ⇒ 401, prefs.set never called, value unchanged", async () => {
+    const kit = spawnKit({ lan: "known" }, fakeClock());
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    kit.prefs.setValue("p1/old");
+    const cookie = await loginAs(h, "alice", 1);
+    const host = `127.0.0.1:${h.port}`;
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: h.port,
+          method: "POST",
+          path: "/api/headless/prefs",
+          headers: {
+            Host: host,
+            "Content-Type": "application/json",
+            "X-PWH": "1",
+            Cookie: cookie,
+            Origin: `http://${host}`,
+          },
+          agent: false,
+        },
+        (r) => {
+          const chunks: Buffer[] = [];
+          r.on("data", (c: Buffer) => chunks.push(c));
+          r.on("end", () => resolve({ status: r.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+          r.on("error", reject);
+        },
+      );
+      req.on("error", reject);
+      const body = JSON.stringify({ defaultModel: "p1/new" });
+      req.write(body.slice(0, 5));
+      void (async () => {
+        await new Promise((r2) => setTimeout(r2, 50));
+        await h.store.deleteAllSessions(1); // a landed rotation revokes every LAN session row (alice=u1)
+        req.end(body.slice(5));
+      })();
+    });
+    expect(res.status).toBe(401);
+    expect(kit.prefs.setCalls).toHaveLength(0);
+    expect(kit.prefs.get()).toBe("p1/old");
   });
 });

@@ -148,6 +148,37 @@ describe("createSpawnStore: 往返与文件属性 (plan §SP5)", () => {
     expect(loaded.corrupt).toBeUndefined();
     expect(loaded.records).toEqual([plain]);
   });
+
+  it("default-model plan D3: model roundtrips; a persisted model that no longer parses is DROPPED, record kept; the new hint reads back", () => {
+    const records = [
+      rec({ spawnId: "sp_m1", model: "p1/my-model", hint: "model-rejected", state: "failed" }),
+      rec({ spawnId: "sp_m2" }), // no model — absent, not undefined-valued
+    ];
+    const s = createSpawnStore({ file: file(), log, now: () => 1 });
+    expect(s.saveNow(records)).toEqual({ ok: true });
+    const loaded = createSpawnStore({ file: file(), log, now: () => 2 }).load(d());
+    expect(loaded.records[0]).toMatchObject({ spawnId: "sp_m1", model: "p1/my-model", hint: "model-rejected" });
+    expect("model" in loaded.records[1]!).toBe(false);
+
+    // a hand-edited / drifted file: the TYPE is fine (string) but parseSpawnModelRef fails — the
+    // FIELD is dropped from that one record, the record (and every other) survives intact.
+    const drifted = JSON.parse(readFileSync(file(), "utf8")) as { records: StoredRecord[] };
+    drifted.records[0]!.model = "no-slash-garbage";
+    writeFileSync(file(), JSON.stringify(drifted), { mode: 0o600 });
+    const reloaded = createSpawnStore({ file: file(), log, now: () => 3 }).load(d());
+    expect(reloaded.corrupt).toBeUndefined();
+    expect(reloaded.records).toHaveLength(2);
+    expect("model" in reloaded.records[0]!).toBe(false);
+    expect(reloaded.records[0]!.spawnId).toBe("sp_m1");
+  });
+
+  it("default-model plan D3: a NON-string model is still a whole-file shape violation (corrupt)", () => {
+    const bad = JSON.stringify({ v: 2, records: [rec({ spawnId: "sp_bad", model: 7 })] });
+    writeFileSync(file(), bad, { mode: 0o600 });
+    const loaded = createSpawnStore({ file: file(), log, now: () => 1 }).load(d());
+    expect(loaded.corrupt).toBe(true);
+    expect(loaded.records).toEqual([]);
+  });
 });
 
 describe("损坏与防御性读取 (plan §SP5 / arch §7.7)", () => {

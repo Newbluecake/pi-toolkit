@@ -162,7 +162,7 @@ state.js ◀── SSE "spawns"（脱敏投影）◀── registry.publish ◀�
 **argv 与环境**：
 
 ```ts
-argv = [launcher[1], "--mode", "rpc"]; // S1 不支持 --model / --session（S2）
+argv = [launcher[1], "--mode", "rpc", ...(model ? ["--model", model] : [])]; // 固定前缀 + 可选 --model 尾部（default-model plan D2/§3）；S1 不支持 --session（S2）
 cwdFd = openSync(admitted.realpath, O_RDONLY | O_DIRECTORY); // 同步；fstat dev/ino 必须等于 admit 记录
 spawn(launcher[0], argv, {
   cwd: `/proc/self/fd/${cwdFd}`, // 钉住 inode（Linux；node 22 + libuv 1.51 已验证子进程 cwd = realpath）
@@ -272,20 +272,20 @@ fork 前的同步复核（§4.2）：`open(O_DIRECTORY)` + `fstat`，dev/ino 必
 
 基线：已登录主体本来就能经 `prompt` 让 agent 执行 bash。spawn 没有带来新的能力类别，只扩大了两样东西：可以选择任意 cwd、无需任何在线 agent 即可执行。
 
-| 威胁                                       | 对策                                                                                                                                         |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 跨站伪造 / DNS rebinding                   | Host 白名单（421）；写端点用 `strictCsrfOk`（`http.ts:1481-1493`）；GET 端点要求 `X-PWH:1`；`SameSite=Strict` cookie                         |
-| 未登录访问 / 登出竞态                      | loopback `auth.check`、LAN `requireLanSession`；POST 在 fork 前二次鉴权（照抄 `dispatchCmdOrDialog` 步骤 ⑦），二次鉴权到 fork 之间没有 await |
-| 在任意目录执行（加载恶意 `.pi` 扩展）      | 准入限定 known ∪ roots（§4.5）；rpc 模式下项目信任默认 false，未信任的项目资源不加载；绝不传 `--approve`                                     |
-| 参数注入                                   | cwd 不进 argv；S1 argv 固定为 `[launcher[1], "--mode", "rpc"]`                                                                               |
-| 符号链接 / 路径穿越 / 检查后替换（TOCTOU） | realpath 后按段对齐判定；fork 前 `open(O_DIRECTORY)` + dev/ino 复核并以 fd 路径为 cwd；绑定时核对 `hello.cwd`（§4.2、§4.3）                  |
-| 资源耗尽                                   | §6.5                                                                                                                                         |
-| 目录枚举                                   | S1 没有子目录浏览；已知目录列表只返回 realpath，最多 50 条                                                                                   |
-| LAN 明文嗅探 cookie 后重放                 | LAN 默认 `off`；明文直连时封顶为 `known`；LAN 上每次都要 confirm                                                                             |
-| 伪造受管 agent（同 uid 进程伪造 hello）    | 同 uid 视为完全可信；绑定只认 hub 自己的 child pid + cwd                                                                                     |
-| 误杀无关进程                               | 任何信号发送前都在同一同步段内重新核验身份（§7.4）                                                                                           |
-| 孤儿进程                                   | §7.2–§7.3                                                                                                                                    |
-| 拉起的进程反过来拉起 hub                   | `PI_WEBHUB_HEADLESS=1`（`launcher.ts:148`）                                                                                                  |
+| 威胁                                       | 对策                                                                                                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 跨站伪造 / DNS rebinding                   | Host 白名单（421）；写端点用 `strictCsrfOk`（`http.ts:1481-1493`）；GET 端点要求 `X-PWH:1`；`SameSite=Strict` cookie                                                                 |
+| 未登录访问 / 登出竞态                      | loopback `auth.check`、LAN `requireLanSession`；POST 在 fork 前二次鉴权（照抄 `dispatchCmdOrDialog` 步骤 ⑦），二次鉴权到 fork 之间没有 await                                         |
+| 在任意目录执行（加载恶意 `.pi` 扩展）      | 准入限定 known ∪ roots（§4.5）；rpc 模式下项目信任默认 false，未信任的项目资源不加载；绝不传 `--approve`                                                                             |
+| 参数注入                                   | cwd 不进 argv；固定前缀 `[launcher[1], "--mode", "rpc"]` + 可选 `--model <ref>` 尾部（default-model plan：无 shell、值经 `parseSpawnModelRef` 拒空白/控制/前导 `-`，独立 argv 元素） |
+| 符号链接 / 路径穿越 / 检查后替换（TOCTOU） | realpath 后按段对齐判定；fork 前 `open(O_DIRECTORY)` + dev/ino 复核并以 fd 路径为 cwd；绑定时核对 `hello.cwd`（§4.2、§4.3）                                                          |
+| 资源耗尽                                   | §6.5                                                                                                                                                                                 |
+| 目录枚举                                   | S1 没有子目录浏览；已知目录列表只返回 realpath，最多 50 条                                                                                                                           |
+| LAN 明文嗅探 cookie 后重放                 | LAN 默认 `off`；明文直连时封顶为 `known`；LAN 上每次都要 confirm                                                                                                                     |
+| 伪造受管 agent（同 uid 进程伪造 hello）    | 同 uid 视为完全可信；绑定只认 hub 自己的 child pid + cwd                                                                                                                             |
+| 误杀无关进程                               | 任何信号发送前都在同一同步段内重新核验身份（§7.4）                                                                                                                                   |
+| 孤儿进程                                   | §7.2–§7.3                                                                                                                                                                            |
+| 拉起的进程反过来拉起 hub                   | `PI_WEBHUB_HEADLESS=1`（`launcher.ts:148`）                                                                                                                                          |
 
 ### 6.2 策略配置（`webHub.spawn`，经 `HubConfig.spawn` 下发）
 

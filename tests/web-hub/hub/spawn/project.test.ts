@@ -56,6 +56,17 @@ const OWNER_PRINCIPAL = "lan:u7";
 const OTHER_PRINCIPAL = "lan:u9";
 
 describe("toPublic — the SSE/broadcast column (arch §6.4)", () => {
+  it("default-model plan D3: `model` rides the Public projection and the owner view (SpawnRow badge + faithful retry)", () => {
+    const withModel = makeRecord({ spawnId: "s-m", model: "p1/my-model" });
+    const pub = toPublic(withModel);
+    expect(pub.model).toBe("p1/my-model");
+    const owner = toViewer(withModel, OWNER_PRINCIPAL, false);
+    expect(owner.model).toBe("p1/my-model");
+    const nonOwner = toViewer(withModel, OTHER_PRINCIPAL, false);
+    expect("model" in nonOwner).toBe(true); // non-sensitive — public by design
+    // absent stays absent (never an explicit undefined on the wire)
+    expect("model" in toPublic(rich)).toBe(false);
+  });
   it("carries exactly the lifecycle fields, never an owner-only field", () => {
     const p = toPublic(rich, fpOf);
     expect(p).toMatchObject({

@@ -9,6 +9,7 @@ import {
   PREVIEW_HUB_CAP,
   RUNTX_HUB_CAPS,
   SPAWN_HUB_CAP,
+  SPAWN_MODEL_HUB_CAP,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
@@ -105,6 +106,7 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
       expect(browserCaps).toContain(cap);
     }
     expect(browserCaps).not.toContain(SPAWN_HUB_CAP);
+    expect(browserCaps).not.toContain(SPAWN_MODEL_HUB_CAP);
     expect(browserCaps).not.toContain(PREVIEW_HUB_CAP);
   });
 
@@ -121,16 +123,20 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
       registerTimeoutS: 30,
       lan: "off",
     });
-    const browserCaps = [...hub.info.caps].sort();
+    const browserCaps = [...hub.info.caps]; // UNSORTED — the tail order is part of the pin
 
     const c = await connectClient(hub.paths.socketPath);
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    const agentCaps = [...(ack["caps"] as string[])].sort();
+    const agentCaps = [...(ack["caps"] as string[])]; // UNSORTED — order is part of the pin
     c.sock.destroy();
 
     expect(browserCaps).toEqual(agentCaps);
     expect(browserCaps).toContain(SPAWN_HUB_CAP);
+    expect(browserCaps).toContain(SPAWN_MODEL_HUB_CAP); // default-model D4: same conditional tail
+    // the two caps ride ADJACENT in the same order on both surfaces (spawn.v1 then spawn.model.v1)
+    expect(browserCaps.indexOf(SPAWN_MODEL_HUB_CAP)).toBe(browserCaps.indexOf(SPAWN_HUB_CAP) + 1);
+    expect(agentCaps.indexOf(SPAWN_MODEL_HUB_CAP)).toBe(agentCaps.indexOf(SPAWN_HUB_CAP) + 1);
     // the runtx group still rides along (the whole point of coexistence)
     for (const cap of RUNTX_HUB_CAPS) expect(browserCaps).toContain(cap);
   });

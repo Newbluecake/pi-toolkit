@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PROTO } from "../../src/web-hub/protocol/version.js";
+import { MODEL_REJECT_RE, stripAnsiCodes } from "../../src/web-hub/hub/spawn/supervisor.js";
 import { parseStartTicks, readStatSync, verifySpawnedIdentity } from "../../src/web-hub/protocol/proc-identity.js";
 import { NdjsonDecoder } from "../../src/web-hub/protocol/ndjson.js";
 
@@ -235,4 +236,271 @@ describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — real pi --mode r
     expect(exitLine).toContain("code=0");
     expect(Date.now() - t0).toBeLessThanOrEqual(8_000);
   }, 45_000);
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan §6/§10 R2-1: CM1–CM5 — the REAL pi `--model` startup contract.
+//
+// The hub forks `pi --mode rpc --model <ref>` and D5's delayed breaker verdict trusts TWO
+// pi-side facts: (a) the exact wording of the two startup rejections the regex exempts, and
+// (b) that a known-provider + typo'd id degrades to a custom model with only a WARNING (stays
+// live — R1/A6b, never exempt). These five pin both against the real devDependency CLI, with a
+// temp HOME whose models.json declares two custom providers (`p1`/`p2`) that share the id
+// `dup/m` — the ambiguity probe. If CM1/CM2 ever fail after a pi upgrade, D5 degrades to
+// fail-safe (count + no hint) and A6 must NOT be claimed as verified (plan §6 conformance row).
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — real pi --model (default-model plan CM1–CM5)", () => {
+  const MODELS_JSON = {
+    providers: {
+      p1: {
+        baseUrl: "http://127.0.0.1:9",
+        api: "anthropic-messages",
+        apiKey: "test-key-p1",
+        models: [
+          {
+            id: "dup/m",
+            name: "Dup M p1",
+            contextWindow: 100_000,
+            maxTokens: 4_096,
+            input: ["text"],
+            cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1.25 },
+          },
+          {
+            id: "real/m",
+            name: "Real M",
+            contextWindow: 100_000,
+            maxTokens: 4_096,
+            input: ["text"],
+            cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1.25 },
+          },
+        ],
+      },
+      p2: {
+        baseUrl: "http://127.0.0.1:9",
+        api: "anthropic-messages",
+        apiKey: "test-key-p2",
+        models: [
+          {
+            id: "dup/m",
+            name: "Dup M p2",
+            contextWindow: 100_000,
+            maxTokens: 4_096,
+            input: ["text"],
+            cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1.25 },
+          },
+        ],
+      },
+    },
+  };
+
+  interface ModelRun {
+    child: ChildProcess;
+    home: string;
+    stderr: string;
+    helloSeen: HelloLike[];
+    sessionsSeen: SessionLike[];
+    stdoutLines: string[];
+    exit: Promise<{ code: number | null; signal: string | null }>;
+    cleanup(): void;
+  }
+
+  /** Boot a real `pi --mode rpc --model <ref>` against a fresh temp HOME + fake hub socket. */
+  function launchModelRun(modelRef: string, opts: { forceColor?: boolean } = {}): ModelRun {
+    const home = mkdtempSync(join(tmpdir(), "pwh-conf-m-"));
+    const agentDir = join(home, ".pi", "agent");
+    mkdirSync(join(agentDir, "sessions"), { recursive: true });
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [REPO_ROOT] }));
+    writeFileSync(join(agentDir, "pi-subagent.json"), JSON.stringify({ webHub: { enabled: true } }));
+    writeFileSync(join(agentDir, "models.json"), JSON.stringify(MODELS_JSON));
+
+    const stateDir = join(agentDir, "web-hub");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const socketPath = join(stateDir, "hub.sock");
+    rmSync(socketPath, { force: true });
+    const helloSeen: HelloLike[] = [];
+    const sessionsSeen: SessionLike[] = [];
+    const stdoutLines: string[] = [];
+    const server = net.createServer((sock) => {
+      const dec = new NdjsonDecoder({
+        maxFrameBytes: 512 * 1024,
+        onFrame: (raw: unknown) => {
+          const frame = raw as Record<string, unknown>;
+          if (frame["t"] === "hello") {
+            helloSeen.push(frame as unknown as HelloLike);
+            sock.write(
+              `${JSON.stringify({
+                t: "hello_ack",
+                hubVersion: "1.2.3",
+                buildId: "1.2.3@conf",
+                proto: { major: PROTO.major, minor: PROTO.minor },
+                agentKey: `a-conf-model-${helloSeen.length}`,
+                pingMs: 10_000,
+                leaseMs: 30_000,
+                http: { port: 0 },
+                caps: ["ctl.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
+              })}\n`,
+            );
+            return;
+          }
+          if (frame["t"] === "session") sessionsSeen.push(frame as unknown as SessionLike);
+        },
+        onError: () => {},
+      });
+      sock.on("data", (c: Buffer) => dec.push(c));
+      sock.on("error", () => {});
+    });
+    server.listen(socketPath);
+
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v === undefined || k.startsWith("PI_WEBHUB_") || k === "FORCE_COLOR") continue;
+      env[k] = v;
+    }
+    env["HOME"] = home;
+    env["PI_WEBHUB_HEADLESS"] = "1";
+    env["PI_WEBHUB_SPAWN_ID"] = `conf-model-${Date.now().toString(36)}`;
+    if (opts.forceColor === true) env["FORCE_COLOR"] = "1";
+
+    const child = spawn(process.execPath, [PI_CLI, "--mode", "rpc", "--model", modelRef], {
+      cwd: home,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stderrChunks: Buffer[] = [];
+    child.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
+    child.stdout?.setEncoding("utf8");
+    let buf = "";
+    child.stdout?.on("data", (chunk: string) => {
+      buf += chunk;
+      for (;;) {
+        const nl = buf.indexOf("\n");
+        if (nl < 0) break;
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.length > 0) stdoutLines.push(line);
+      }
+    });
+    const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    return {
+      child,
+      home,
+      get stderr() {
+        return Buffer.concat(stderrChunks).toString("utf8");
+      },
+      helloSeen,
+      sessionsSeen,
+      stdoutLines,
+      exit,
+      cleanup() {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        server.close();
+        server.closeAllConnections?.();
+        rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      },
+    };
+  }
+
+  const until2 = async (pred: () => boolean, ms: number, what: string): Promise<void> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (pred()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`timeout waiting for ${what}`);
+  };
+
+  it("CM1: unknown-provider ref ⇒ exit 1, NO session, stderr matches MODEL_REJECT_RE", async () => {
+    const run = launchModelRun("nosuch-prov/zz-nope");
+    try {
+      const exited = await Promise.race([
+        run.exit,
+        new Promise<{ code: number | null; signal: string | null }>((_, rej) =>
+          setTimeout(() => rej(new Error("CM1: child did not exit")), 20_000),
+        ),
+      ]);
+      expect(exited.code).toBe(1);
+      expect(run.helloSeen).toHaveLength(0);
+      expect(MODEL_REJECT_RE.test(run.stderr)).toBe(true);
+      expect(run.stderr).toContain('Model "nosuch-prov/zz-nope" not found.');
+    } finally {
+      run.cleanup();
+    }
+  }, 40_000);
+
+  it("CM2: bare ambiguous id across two authenticated providers ⇒ exit 1, ambiguous branch", async () => {
+    const run = launchModelRun("dup/m");
+    try {
+      const exited = await Promise.race([
+        run.exit,
+        new Promise<{ code: number | null; signal: string | null }>((_, rej) =>
+          setTimeout(() => rej(new Error("CM2: child did not exit")), 20_000),
+        ),
+      ]);
+      expect(exited.code).toBe(1);
+      expect(run.helloSeen).toHaveLength(0);
+      expect(run.stderr).toContain('Model "dup/m" is ambiguous across providers');
+      expect(MODEL_REJECT_RE.test(run.stderr)).toBe(true);
+    } finally {
+      run.cleanup();
+    }
+  }, 40_000);
+
+  it("CM3: known provider + typo'd id ⇒ WARNING-only custom model, child goes LIVE (R1/A6b — never exempt)", async () => {
+    const run = launchModelRun("p1/typo-xyz");
+    try {
+      await until2(() => run.sessionsSeen.length > 0, 30_000, "CM3 session frame");
+      await until2(() => run.stderr.includes("Using custom model id."), 10_000, "CM3 custom-id warning");
+      expect(run.stderr.startsWith("Warning:") || run.stderr.includes("\nWarning:")).toBe(true);
+      expect(MODEL_REJECT_RE.test(run.stderr)).toBe(false); // the Warning line can NEVER match
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("CM4: FORCE_COLOR=1 paints the CM1 diagnostic — stripped, MODEL_REJECT_RE still matches", async () => {
+    const run = launchModelRun("nosuch-prov/zz-nope", { forceColor: true });
+    try {
+      const exited = await Promise.race([
+        run.exit,
+        new Promise<{ code: number | null; signal: string | null }>((_, rej) =>
+          setTimeout(() => rej(new Error("CM4: child did not exit")), 20_000),
+        ),
+      ]);
+      expect(exited.code).toBe(1);
+      expect(run.stderr).toContain("\x1b["); // chalk actually painted it
+      expect(MODEL_REJECT_RE.test(run.stderr)).toBe(false); // raw: escape sits BEFORE "Error:"
+      expect(MODEL_REJECT_RE.test(stripAnsiCodes(run.stderr))).toBe(true); // stripped: matches
+    } finally {
+      run.cleanup();
+    }
+  }, 40_000);
+
+  it("CM5: a valid provider/id ⇒ rpc get_state reports that exact model (the A3 evidence cmdline can't give)", async () => {
+    const run = launchModelRun("p1/real/m");
+    try {
+      await until2(() => run.sessionsSeen.length > 0, 30_000, "CM5 session frame");
+      run.child.stdin?.write(`${JSON.stringify({ id: "cm5-get-state", type: "get_state" })}\n`);
+      await until2(
+        () => run.stdoutLines.some((l) => l.includes('"command":"get_state"')),
+        15_000,
+        "CM5 get_state response",
+      );
+      const line = run.stdoutLines.find((l) => l.includes('"command":"get_state"'))!;
+      const resp = JSON.parse(line) as { success?: boolean; data?: { model?: unknown } };
+      expect(resp.success).toBe(true);
+      // `session.model` is a Model OBJECT — serialize and pin its identity fields
+      const modelJson = JSON.stringify(resp.data?.model);
+      expect(modelJson).toContain('"id":"real/m"');
+      expect(modelJson).toContain('"provider":"p1"');
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
 });

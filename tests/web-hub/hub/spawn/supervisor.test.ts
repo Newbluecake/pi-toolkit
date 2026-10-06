@@ -23,6 +23,7 @@ import type {
 import type { LauncherFs } from "../../../../src/web-hub/hub/spawn/launcher-check.js";
 import {
   createSpawnSupervisor,
+  MODEL_VERDICT_GRACE_MS,
   type AdmittedRequest,
   type SpawnAuditRecord,
   type SpawnSupervisor,
@@ -2002,5 +2003,347 @@ describe("supervisor §2.6 (r1 #6): init recovery reconciles a persisted remove 
     await vi.advanceTimersByTimeAsync(8_000);
     // no throw, no crash; the record's fate was whatever shutdown's own flush left it as
     expect(() => h.sup.records()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan D2/D3/D5: the --model fork tail + the delayed breaker verdict
+// ---------------------------------------------------------------------------
+
+describe("supervisor default-model: argv tail, persistence, projections (D2/D3)", () => {
+  it("no model ⇒ argv element-for-element identical to the pre-feature fork, opts has no shell", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    h.sup.start(req(), deadline());
+    const call = h.spawnCalls[0]!;
+    expect(call.args).toEqual([LAUNCHER[1], "--mode", "rpc"]);
+    expect(call.args).toHaveLength(3);
+    expect(call.opts.shell).toBeUndefined();
+    expect(call.opts.detached).toBe(true);
+    expect(call.opts.cwd).toBe("/proc/self/fd/7");
+  });
+
+  it("with model ⇒ two INDEPENDENT trailing elements (--model, ref), no shell, never concatenated", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    h.sup.start(req({ model: "p1/my-model:high" }), deadline());
+    const call = h.spawnCalls[0]!;
+    expect(call.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--model", "p1/my-model:high"]);
+    expect(call.args[3]).toBe("--model"); // an argv ELEMENT, not a joined string
+    expect(call.args[4]).toBe("p1/my-model:high");
+    expect(call.opts.shell).toBeUndefined();
+  });
+
+  it("model persists in the stored snapshot, the state audit line and both public projections", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    h.sup.start(req({ model: "p1/m" }), deadline());
+    await driveToLive(h, "k1000");
+    const stored = h.store.calls
+      .filter((c) => c.op === "saveNow")
+      .at(-1)
+      ?.records?.find((r) => r.model !== undefined);
+    expect(stored?.model).toBe("p1/m");
+    expect(h.audits.some((a) => a.phase === "state" && a.state === "live" && a.model === "p1/m")).toBe(true);
+    expect(h.sup.records()[0]).toMatchObject({ model: "p1/m" });
+    expect(h.registry.events.some((e) => e.type === "spawns")).toBe(true);
+  });
+});
+
+describe("supervisor default-model D5: delayed breaker verdict matrix", () => {
+  const MODEL = "p1/my-model";
+  const REJECT_NOT_FOUND = 'Error: Model "nosuch/x" not found. Use --list-models to see available models.\n';
+  const REJECT_AMBIGUOUS =
+    'Error: Model "dup/m" is ambiguous across providers: p1/dup/m, p2/dup/m. Use --provider or provider/model.\n';
+  const WARN_CUSTOM_ID = 'Warning: Model "typo-xyz" not found for provider "p1". Using custom model id.\n';
+
+  /** Start a fork (model or plain) and return its fake child + spawnId. */
+  function startFork(h: Harness, model?: string): { spawnId: string; child: FakeChild } {
+    const r = req(model === undefined ? {} : { model });
+    const res = h.sup.start(r, deadline());
+    if (!res.ok) throw new Error(`start rejected: ${JSON.stringify(res)}`);
+    return { spawnId: r.spawnId, child: h.children[h.children.length - 1]! };
+  }
+
+  /** Exactly-one-terminal-settlement assertion: one `failed`/`exited` state line per record
+   *  (the verdict's own `model-rejected` annotation line deliberately excluded — it is a
+   *  post-terminal note, never a second settlement). */
+  function terminalLines(h: Harness, spawnId: string): number {
+    return h.audits.filter(
+      (a) =>
+        a.phase === "state" &&
+        a.spawnId === spawnId &&
+        (a.state === "failed" || a.state === "exited") &&
+        a.code === undefined,
+    ).length;
+  }
+
+  /**
+   * The observable breaker count of a scenario: append ONE deterministic count (sync spawnFn
+   * throw ⇒ failed{spawn_error}) and read the NEXT start's gate. Totals: 1 (scenario 0) ⇒
+   * allowed; 2 (scenario 1) ⇒ cooldown 5s; 3 (scenario 2) ⇒ cooldown 30s; ≥4 ⇒ breaker.
+   */
+  function scenarioCount(h: Harness): number {
+    const impl = h.spawnImpl;
+    h.spawnImpl = () => {
+      throw new Error("boom");
+    };
+    void h.sup.start(req(), deadline());
+    h.spawnImpl = impl;
+    const gate = h.sup.start(req(), deadline());
+    if (gate.ok) return 0;
+    if (gate.reason === "breaker") return 3;
+    return gate.retryAfterS === 5 ? 1 : 2;
+  }
+
+  async function fresh(): Promise<Harness> {
+    const h = makeHarness({ cfg: baseCfg({ maxProcesses: 64, maxPerPrincipal: 64 }) });
+    await h.sup.init(deadline());
+    return h;
+  }
+
+  it("data(reject)→exit→close: terminal once, breaker 0, post-terminal hint + audit + no cooldown", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8"));
+    child.emit("exit", 1, null);
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "exited_early", hint: "model-rejected" });
+    expect(terminalLines(h, spawnId)).toBe(1); // 终态恰一次
+    expect(h.onTerminal).toEqual([{ spawnId, reason: "never_live" }]);
+    expect(h.audits.some((a) => a.code === "model-rejected" && a.spawnId === spawnId)).toBe(true);
+    expect(scenarioCount(h)).toBe(0); // 熔断计数恰 0 次
+  });
+
+  it("exit→data(reject)→close (stderr AFTER exit, sink already dropped): same verdict", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.emit("exit", 1, null); // finalizeTerminal ran; cleanupHandles dropped the sink
+    child.stderr.emit("data", Buffer.from(REJECT_AMBIGUOUS, "utf8")); // probe still captures
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)).toMatchObject({ state: "failed", hint: "model-rejected" });
+    expect(terminalLines(h, spawnId)).toBe(1);
+    expect(scenarioCount(h)).toBe(0);
+  });
+
+  it("exit→close with NO rejection stderr ⇒ terminal once, breaker counted once (fail-safe)", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from("some unrelated launcher noise\n", "utf8"));
+    child.emit("exit", 1, null);
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "exited_early" });
+    expect(rec0(h)?.hint).toBeUndefined();
+    expect(terminalLines(h, spawnId)).toBe(1);
+    expect(scenarioCount(h)).toBe(1); // 熔断计数恰 1 次
+  });
+
+  it("close never comes ⇒ the 250ms grace settles from the already-received tail", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8"));
+    child.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)?.hint).toBeUndefined(); // not settled yet — no hint before the grace
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS);
+    expect(rec0(h)).toMatchObject({ hint: "model-rejected" });
+    expect(terminalLines(h, spawnId)).toBe(1);
+    expect(scenarioCount(h)).toBe(0);
+  });
+
+  it("grace settles, then a LATE close/data pair ⇒ no second settlement (count stays 1/0)", async () => {
+    const h = await fresh();
+    const { child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS); // grace counts it (no rejection)
+    child.emit("close");
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8")); // too late — cannot exempt
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS * 2);
+    expect(rec0(h)?.hint).toBeUndefined();
+    expect(scenarioCount(h)).toBe(1); // exactly one count, despite the late events
+  });
+
+  it("close settles, then the grace timer fires ⇒ no second settlement", async () => {
+    const h = await fresh();
+    const { child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8"));
+    child.emit("exit", 1, null);
+    child.emit("close"); // settles now (0 counts)
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS * 2); // grace fires into a done verdict
+    expect(rec0(h)?.hint).toBe("model-rejected");
+    expect(scenarioCount(h)).toBe(0);
+  });
+
+  it("ANSI-colored rejection (FORCE_COLOR shape: escape BEFORE the text) still matches after strip", async () => {
+    const h = await fresh();
+    const { child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(`\x1b[31m${REJECT_NOT_FOUND.trim()}\x1b[39m\n`, "utf8"));
+    child.emit("exit", 1, null);
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)?.hint).toBe("model-rejected");
+    expect(scenarioCount(h)).toBe(0);
+  });
+
+  it("`Warning: … Using custom model id.` (known provider, typo'd id) is NOT exempt ⇒ counted", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(WARN_CUSTOM_ID, "utf8"));
+    child.emit("exit", 1, null);
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)?.hint).toBeUndefined(); // no model-rejected hint (R1/A6b territory)
+    expect(terminalLines(h, spawnId)).toBe(1);
+    expect(scenarioCount(h)).toBe(1);
+  });
+
+  it("record deleted during pending (remove() of the terminal record) ⇒ verdict still settles, no annotation", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8"));
+    child.emit("exit", 1, null); // failed + pending
+    const removed = h.sup.remove(spawnId, deadline()); // confirmed exit ⇒ deleted from memory
+    expect(removed).toEqual({ ok: true, outcome: "removed" });
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS); // verdict runs on the dead record
+    expect(h.sup.records().find((r) => r.spawnId === spawnId)).toBeUndefined();
+    expect(scenarioCount(h)).toBe(0); // matching rejection — still no count, but no hint anywhere either
+    expect(h.audits.some((a) => a.code === "model-rejected" && a.spawnId === spawnId)).toBe(false);
+  });
+
+  it("record deleted during pending with NON-matching tail ⇒ the count still settles", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.emit("exit", 1, null);
+    expect(h.sup.remove(spawnId, deadline())).toEqual({ ok: true, outcome: "removed" });
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS);
+    expect(scenarioCount(h)).toBe(1); // counted exactly once even though the record is gone
+  });
+
+  it("no-model exited_early counts SYNCHRONOUSLY (pre-feature behavior, no deferral)", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h); // no model
+    child.emit("spawn");
+    child.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "exited_early" });
+    expect(terminalLines(h, spawnId)).toBe(1);
+    expect(scenarioCount(h)).toBe(1);
+  });
+
+  it("model record dying in `stopping` (user stop) ⇒ original path, no pending, no hint", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8"));
+    h.sup.stop(spawnId, false); // user stop → stopping
+    child.emit("exit", 0, null); // exit during stopping → exited{user}
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS);
+    expect(rec0(h)).toMatchObject({ state: "exited", endReason: "user" });
+    expect(rec0(h)?.hint).toBeUndefined();
+    expect(scenarioCount(h)).toBe(0); // user stops never entered the breaker to begin with
+  });
+
+  it("register_timeout with a model ⇒ counted immediately (no deferral), rejection text grants nothing", async () => {
+    const h = await fresh();
+    const { spawnId, child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8"));
+    await vi.advanceTimersByTimeAsync(10_000); // registerTimeoutS: 10 → stopping{register_timeout}
+    child.emit("exit", 0, null); // the escalated child dies → failed{register_timeout}
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS);
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "register_timeout" });
+    expect(rec0(h)?.hint).toBe("register-timeout-hello"); // the timeout hint, never model-rejected
+    expect(terminalLines(h, spawnId)).toBe(1);
+    expect(scenarioCount(h)).toBe(1);
+  });
+
+  it("spawn_error (sync fork throw) with a model ⇒ counted immediately", async () => {
+    const h = await fresh();
+    h.spawnImpl = () => {
+      throw new Error("boom");
+    };
+    h.sup.start(req({ model: MODEL }), deadline());
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS);
+    expect(rec0(h)).toMatchObject({ state: "failed", endReason: "spawn_error" });
+    expect(scenarioCount(h)).toBe(1);
+  });
+
+  it("FIVE consecutive model rejections never open the breaker; FOUR plain early exits still do", async () => {
+    const h = await fresh();
+    for (let i = 0; i < 5; i++) {
+      const { child } = startFork(h, MODEL);
+      child.emit("spawn");
+      child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8"));
+      child.emit("exit", 1, null);
+      child.emit("close");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    // no breaker, no cooldown — a healthy next start goes straight through
+    expect(scenarioCount(h)).toBe(0);
+    expect(h.sup.policy("loopback:token", "loopback", "http", false).allowed).toBe(true);
+
+    const h2 = await fresh();
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(i === 1 ? 5_000 : i === 2 || i === 3 ? 30_000 : 0); // climb the cooldown ladder
+      const { child } = startFork(h2);
+      child.emit("spawn");
+      child.emit("exit", 1, null);
+      child.emit("close");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(h2.sup.start(req(), deadline())).toMatchObject({ code: "E_LAUNCHER", reason: "breaker" });
+  });
+
+  it("shutdown() while pending ⇒ the verdict still settles afterwards (count observable via policy)", async () => {
+    const h = await fresh();
+    // 2 plain counts first (→ cooldown 5s), then a pending model verdict that must add #3 and #4
+    for (let i = 0; i < 2; i++) {
+      const { child } = startFork(h);
+      child.emit("spawn");
+      child.emit("exit", 1, null);
+      child.emit("close");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    await vi.advanceTimersByTimeAsync(5_000); // clear the 2-count cooldown before the model forks
+    for (let i = 0; i < 2; i++) {
+      const { child } = startFork(h, MODEL);
+      child.emit("spawn");
+      child.emit("exit", 1, null); // NO close — pending on the grace
+    }
+    await h.sup.shutdown(deadline());
+    await vi.advanceTimersByTimeAsync(MODEL_VERDICT_GRACE_MS);
+    // 4 counts ⇒ breaker OPEN (had the pending verdicts never settled, policy would say cooldown)
+    expect(h.sup.policy("loopback:token", "loopback", "http", false)).toMatchObject({
+      allowed: false,
+      reason: "breaker",
+    });
+  });
+
+  it("probe caps at 4 KiB (tail kept) — a late rejection line inside the window still matches", async () => {
+    const h = await fresh();
+    const { child } = startFork(h, MODEL);
+    child.emit("spawn");
+    child.stderr.emit("data", Buffer.concat([Buffer.alloc(8 * 1024, 0x65), Buffer.from("\n", "utf8")])); // 8 KiB junk, newline-terminated
+    child.stderr.emit("data", Buffer.from(REJECT_NOT_FOUND, "utf8")); // the tail must survive
+    child.emit("exit", 1, null);
+    child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(h)?.hint).toBe("model-rejected");
+    expect(scenarioCount(h)).toBe(0);
   });
 });

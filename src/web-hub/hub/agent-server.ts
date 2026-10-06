@@ -173,8 +173,9 @@ export function createAgentServer(
             // position as hub.ts's HubInfo.caps fold so the two lists stay byte-identical
             // (§8.4's caps-coexist test pins the set equality).
             ...RUNTX_HUB_CAPS,
-            // web-hub-spawn plan §SP10: conditional cap tail (spawn.v1) — same array instance
-            // hub.ts feeds HubInfo.caps, so the two surfaces can never drift.
+            // web-hub-spawn plan §SP10: conditional cap tail (spawn.v1 + spawn.model.v1) —
+            // 同源数组展开（集合/顺序一致，非同一实例）：hub.ts spreads the SAME source array into
+            // HubInfo.caps, so the two surfaces can never drift.
             ...(deps.extraHubCaps ?? []),
           ],
         });

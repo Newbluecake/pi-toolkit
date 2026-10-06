@@ -64,11 +64,14 @@ import {
   SPAWN_BODY_MAX,
   SPAWN_GONE_REASON,
   SPAWN_ID_RE,
+  SPAWN_PREFS_BODY_MAX,
+  parseSpawnPrefsRequest,
   parseSpawnRequestBody,
   type HubSpawnConfig,
 } from "../../protocol/spawn.js";
 import type { DirService } from "./dirs.js";
 import type { FirstPromptForwarder } from "./first-prompt.js";
+import type { SpawnPrefs } from "./prefs.js";
 import type { SpawnFrontendPort, SpawnRouteIo } from "./ports.js";
 import { toPublicPayload, toViewer } from "./project.js";
 import { spawnPrincipal, type AdmittedRequest, type SpawnSupervisor, type StartResult } from "./supervisor.js";
@@ -106,6 +109,10 @@ export interface SpawnRoutesDeps {
   supervisor: SpawnSupervisor;
   dirs: DirService;
   firstPrompt: FirstPromptForwarder;
+  /** default-model plan §3 ③/④: the hub-wide 「新建会话默认模型」 store (GET rides it on the
+   *  list reply; POST /api/headless/prefs writes it). Injected by hub.ts from
+   *  `<stateDir>/spawn-prefs.json` (createSpawnPrefs). */
+  prefs: SpawnPrefs;
   cfg: HubSpawnConfig;
   limit: CmdLimit;
   /** Shared 429-audit throttle map (same instance `dispatchCmdOrDialog` uses). */
@@ -126,6 +133,9 @@ interface SpawnIntent {
   cwd: string;
   confirmed: boolean;
   expectCwd: string | undefined;
+  /** default-model plan §3 ①: the request's tri-state, verbatim — `undefined` (absent) vs `""`
+   *  (explicit pi default) vs a parsed `provider/id` are THREE different intents. */
+  model: string | undefined;
   firstPrompt: { text: string; deliver: "steer" | "followUp" } | undefined;
 }
 
@@ -138,14 +148,20 @@ function matchStopPath(path: string): string | undefined {
   return SPAWN_ID_RE.test(id) ? id : undefined;
 }
 
-/** sha256 over a canonical (fixed-key-order) rendering of {cwd, firstPrompt} — confirm/expectCwd excluded. */
+/** sha256 over a canonical (fixed-key-order) rendering of the intent. `confirm`/`expectCwd`
+ *  are excluded (plan §SP9: "只多 confirm 视为同一意图"); `model` joins ONLY when present
+ *  (default-model plan §3 ①) — a request without it hashes byte-identically to pre-feature,
+ *  so old digests (and their LRU entries) keep hitting across a hub upgrade. */
 function intentDigest(intent: SpawnIntent): string {
+  const parts: string[] = [`"cwd":${JSON.stringify(intent.cwd)}`];
+  if (intent.model !== undefined) parts.push(`"model":${JSON.stringify(intent.model)}`);
   const fp = intent.firstPrompt;
-  const canonical =
-    fp === undefined
-      ? `{"cwd":${JSON.stringify(intent.cwd)}}`
-      : `{"cwd":${JSON.stringify(intent.cwd)},"firstPrompt":{"deliver":${JSON.stringify(fp.deliver)},"text":${JSON.stringify(fp.text)}}}`;
-  return createHash("sha256").update(canonical).digest("hex");
+  if (fp !== undefined) {
+    parts.push(`"firstPrompt":{"deliver":${JSON.stringify(fp.deliver)},"text":${JSON.stringify(fp.text)}}`);
+  }
+  return createHash("sha256")
+    .update(`{${parts.join(",")}}`)
+    .digest("hex");
 }
 
 /** HttpError-shaped test without `as` (source-scan contract). */
@@ -155,7 +171,7 @@ function statusOf(err: unknown): number | undefined {
 }
 
 export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
-  const { supervisor, dirs, firstPrompt, cfg, limit, log, now } = deps;
+  const { supervisor, dirs, firstPrompt, prefs, cfg, limit, log, now } = deps;
   const idem = new Map<string, IdemEntry>();
 
   // ------------------------------------------------------------- idempotency LRU
@@ -183,7 +199,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   // ------------------------------------------------------------- audit (arch §6.6)
 
   interface RejectFields {
-    endpoint: "list" | "dirs" | "spawn" | "stop";
+    endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs";
     code: string;
     reqId?: string;
     spawnId?: string;
@@ -346,7 +362,9 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     const items = supervisor
       .records()
       .map((rec) => toViewer(rec, principal, isLoopback, (id) => firstPrompt.state(id)));
-    io.sendJson(res, 200, { policy, items });
+    // default-model plan §3 ③: the hub-wide preference rides the list reply (D1: ONE global
+    // value — every principal reaching this endpoint is equally trusted with it, U1).
+    io.sendJson(res, 200, { policy, items, prefs: { defaultModel: prefs.get() } });
   }
 
   async function handleDirs(
@@ -452,10 +470,16 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       const message =
         parsed.error === "cwd-too-long"
           ? "cwd too long"
-          : parsed.error === "first-prompt-too-long"
-            ? "first prompt too large"
-            : "bad spawn request body";
-      io.sendJson(res, 400, { error: "E_BAD_REQUEST", message });
+          : parsed.error === "model-invalid"
+            ? "invalid model ref"
+            : parsed.error === "first-prompt-too-long"
+              ? "first prompt too large"
+              : "bad spawn request body";
+      io.sendJson(res, 400, {
+        error: "E_BAD_REQUEST",
+        ...(parsed.error === "model-invalid" ? { reason: "model-invalid" } : {}),
+        message,
+      });
       return;
     }
     const body = parsed.body;
@@ -464,6 +488,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       cwd: body.cwd,
       confirmed: body.confirm === true,
       expectCwd: body.expectCwd,
+      model: body.model,
       firstPrompt:
         body.firstPrompt === undefined
           ? undefined
@@ -506,6 +531,9 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
           spawnId: rec.spawnId,
           state,
           cwd: rec.cwd,
+          // default-model plan §3 ② / R2-2: a dup replay answers the ORIGINAL record's model —
+          // a later preference change never rewrites an already-admitted record.
+          ...(rec.model === undefined ? {} : { model: rec.model }),
           dup: true,
           ...(rec.firstPrompt === undefined ? {} : { firstPrompt: "accepted" }),
         });
@@ -571,12 +599,19 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     const stillAuthed = await authorizeOrAudit(io, reqDeadline, "spawn", intent.id);
     if (stillAuthed === undefined) return;
 
+    // default-model plan §3 ②: the EFFECTIVE model resolves HERE — after the second authorize,
+    // before gate 11's fork, all synchronous (`prefs.get()` is a memory read; no await can
+    // interpose). Tri-state: body value > hub preference > "" (pi's own default). A dup hit
+    // above already returned, so a preference change after admission never rewrites a record.
+    const effectiveModel = intent.model !== undefined ? intent.model : (prefs.get() ?? "");
+
     // gate 11 — supervisor.start(): limits + intent persist + fork, fully synchronous
     const spawnId = randomBytes(12).toString("base64url");
     const startReq: AdmittedRequest = {
       spawnId,
       admitted: { realpath: admitted.realpath, dev: admitted.dev, ino: admitted.ino, known: admitted.known },
       owner: ownerOf(intent.id),
+      ...(effectiveModel === "" ? {} : { model: effectiveModel }),
       ...(intent.firstPrompt === undefined
         ? {}
         : {
@@ -634,13 +669,107 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       ...(intent.firstPrompt === undefined
         ? {}
         : { firstPrompt: "pending", textLen: Buffer.byteLength(intent.firstPrompt.text, "utf8") }),
+      ...(effectiveModel === "" ? {} : { model: effectiveModel }),
     });
     io.sendJson(res, 202, {
       spawnId,
       state: "starting",
       cwd: admitted.realpath,
+      // default-model plan §3 ②: the EFFECTIVE value the child was forked with; absent ⇒ pi
+      // default (no --model on the argv).
+      ...(effectiveModel === "" ? {} : { model: effectiveModel }),
       ...(intent.firstPrompt === undefined ? {} : { firstPrompt: "accepted" }),
     });
+  }
+
+  // ------------------------------------------------------------- POST /api/headless/prefs (default-model §3 ④)
+
+  /** Write bucket for prefs writes (§3 ④: 10/min per principal). */
+  const PREFS_CAPACITY = 10;
+  const PREFS_REFILL_MS = 6_000;
+
+  async function handlePrefs(req: IncomingMessage, res: ServerResponse, io: SpawnRouteIo): Promise<void> {
+    const reqDeadline = createReqDeadline(now, WRITE_TOTAL_MS);
+
+    // gate 1 — strict CSRF (same grade as every other spawn write)
+    if (!io.strictCsrfOk()) {
+      rejectAudit(io, { ip: io.ip }, { endpoint: "prefs", code: "E_CSRF" });
+      throw new io.HttpError(403, "E_CSRF");
+    }
+
+    // gate 2 — auth #1
+    const auth = await authorizeOrAudit(io, reqDeadline, "prefs");
+    if (auth === undefined) return;
+
+    // gate 3 — rate bucket
+    const owner = { listener: io.listener, reqId: "", ...(auth.user === undefined ? {} : { user: auth.user }) };
+    const principal = spawnPrincipal(owner);
+    const rate = limit.admit(`${principal}:spawn-prefs`, PREFS_CAPACITY, PREFS_REFILL_MS);
+    if (!rate.ok) {
+      rateAudit(io, auth, `spawn-prefs:${principal}`, { endpoint: "prefs", code: "E_RATE" });
+      sendRateLimited(io, res, rate.retryAfterMs);
+      return;
+    }
+
+    // gate 4 — body read (≤ SPAWN_PREFS_BODY_MAX, bounded like every write endpoint)
+    const bodyMs = deriveBudget(reqDeadline.remaining(), BODY_CAP_MS, BODY_RESERVE_MS);
+    if (bodyMs <= 0) {
+      rejectAudit(io, auth, { endpoint: "prefs", code: "E_DEADLINE" });
+      sendConnClosing(io, req, res, 408, "E_DEADLINE", "no budget left to read the request body");
+      return;
+    }
+    let raw: unknown;
+    try {
+      raw = await io.readJson(req, SPAWN_PREFS_BODY_MAX, bodyMs);
+    } catch (err) {
+      const status = statusOf(err);
+      if (status === 413) {
+        rejectAudit(io, auth, { endpoint: "prefs", code: "E_BAD_REQUEST" });
+        sendConnClosing(io, req, res, 413, "E_BAD_REQUEST", "body too large");
+      } else if (status === 408) {
+        rejectAudit(io, auth, { endpoint: "prefs", code: "E_DEADLINE" });
+        sendConnClosing(io, req, res, 408, "E_DEADLINE", "body read timeout");
+      } else {
+        rejectAudit(io, auth, { endpoint: "prefs", code: "E_BAD_REQUEST" });
+        io.sendJson(res, 400, { error: "E_BAD_REQUEST", message: "request error" });
+      }
+      return;
+    }
+
+    // gate 5 — strict schema + `parseSpawnModelRef` ("" = the explicit clear request)
+    const parsed = parseSpawnPrefsRequest(raw);
+    if (!parsed.ok) {
+      rejectAudit(io, auth, { endpoint: "prefs", code: "E_BAD_REQUEST" });
+      io.sendJson(res, 400, { error: "E_BAD_REQUEST", reason: parsed.error });
+      return;
+    }
+    const to = parsed.body.defaultModel === "" ? null : parsed.body.defaultModel;
+
+    // gate 6 — second authorize (§3 ④, the `routes.ts:569-572` pattern): logout/rotate raced the
+    // body read; the synchronous `prefs.set` follows IMMEDIATELY — no await in between.
+    const stillAuthed = await authorizeOrAudit(io, reqDeadline, "prefs");
+    if (stillAuthed === undefined) return;
+
+    // gate 7 — synchronous persist; `from` is read in the SAME sync stretch so the audit line
+    // records the true transition even against a concurrent writer.
+    const from = prefs.get();
+    const saved = prefs.set(to);
+    if (!saved.ok) {
+      rejectAudit(io, stillAuthed, { endpoint: "prefs", code: "E_LAUNCHER" });
+      sendLauncher(io, res, "persist");
+      return;
+    }
+    auditSpawn(log, {
+      audit: "spawn",
+      phase: "request",
+      endpoint: "prefs",
+      listener: io.listener,
+      ip: auth.ip,
+      ...(auth.user === undefined ? {} : { user: auth.user }),
+      from,
+      to,
+    });
+    io.sendJson(res, 200, { prefs: { defaultModel: prefs.get() } });
   }
 
   // ------------------------------------------------------------- POST /api/headless/:id/stop
@@ -732,6 +861,13 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     }
     if (path === "/api/headless/dirs") {
       if (method === "GET") return handleDirs(req, res, query, io);
+      io.sendError(res, 404, "E_NOT_FOUND");
+      return;
+    }
+    // default-model plan §3 ④: write-only — GET rides `GET /api/headless`'s `prefs` field, so a
+    // GET here is a plain 404 (and `lan:"off"` already fell through the guard above).
+    if (path === "/api/headless/prefs") {
+      if (method === "POST") return handlePrefs(req, res, io);
       io.sendError(res, 404, "E_NOT_FOUND");
       return;
     }

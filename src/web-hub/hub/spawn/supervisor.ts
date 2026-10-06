@@ -42,6 +42,18 @@
  * The hub NEVER ends an existing session to admit a new one (arch §6.5) — a full table just
  * fails the new start, existing records untouched.
  *
+ * default-model plan D5 (delayed breaker verdict): the terminal settlement stays immediate,
+ * unique and untouched — only the BREAKER COUNT is deferred, and only for
+ * `reason === "exited_early" && rec.model !== undefined`: `finalizeTerminal` marks
+ * `breakerVerdict:"pending"` + arms an unref'd 250ms grace, a per-record stderr probe (independent
+ * of the sink, so it survives `cleanupHandles` and a missing `stderrDir`) plus the child's
+ * `close` event (fires after `exit` AND stdio drain — the complete early tail) settle it once:
+ * pi's `Error: Model "…" not found.` / `… is ambiguous across providers` ⇒ NOT a launcher
+ * failure (no count, post-terminal `hint:"model-rejected"` annotation while the record lives);
+ * anything else ⇒ `noteLaunchFailure()` exactly as before. Register-timeout / spawn_error /
+ * user stops never enter pending. Accepted cost: within the ≤250ms window a concurrent `start()`
+ * may miss this one failure; a pi wording change degrades to count-without-hint (fail-safe).
+ *
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
 import { type ChildProcess, spawn } from "node:child_process";
@@ -97,7 +109,7 @@ import {
 export interface SpawnAuditRecord {
   audit: "spawn";
   phase: "request" | "reject" | "state" | "remove";
-  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove";
+  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove" | "prefs";
   reqId?: string;
   listener?: "loopback" | "lan";
   ip?: string;
@@ -122,6 +134,11 @@ export interface SpawnAuditRecord {
   attempts?: number;
   identity?: "ok" | SpawnIdentityRejectReason;
   reaper?: "track" | "untrack" | "escalate";
+  /** default-model plan D3: the effective `--model` ref this record was forked with (state lines). */
+  model?: string;
+  /** default-model plan §3 ④ (prefs writes): the value BEFORE / AFTER — `null` = 「no preference」. */
+  from?: string | null;
+  to?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +161,10 @@ export interface AdmittedRequest {
   /** `dirs.admit()`'s success result — pinSync re-verifies dev/ino at fork time. */
   admitted: { realpath: string; dev: number; ino: number; known: boolean };
   owner: StoredOwner;
+  /** default-model plan D2/§3 ②: the EFFECTIVE `provider/id` (body value, else the hub
+   *  preference, both resolved by the routes in the post-second-authorize sync stretch);
+   * absent ⇒ fork without `--model` (pi's own default). */
+  model?: string;
   firstPrompt?: AdmittedFirstPrompt;
 }
 
@@ -231,6 +252,17 @@ interface Supervised extends InternalRecord {
   child: ChildProcess | undefined;
   stdio: RpcStdio | undefined;
   sink: StderrSink | undefined;
+  /** default-model plan D5: the `--model` ref this child was forked with (undefined ⇒ no flag).
+   *  Inherited off `StoredRecord.model` so persistence comes along for free. */
+  model?: string;
+  /** D5's independent stderr probe (≤4 KiB tail), initialized ONLY for `model` records —
+   *  deliberately not the sink (survives `cleanupHandles` and a missing `stderrDir`). */
+  rejectProbe: Buffer | undefined;
+  /** D5 verdict state: `"pending"` between finalizeTerminal and the ONE settlement. */
+  breakerVerdict: "pending" | "done" | undefined;
+  /** D5 grace timer — unref'd, deliberately NOT in `clearRecordTimers` (terminal timers are all
+   *  cleared exactly once by finalizeTerminal; the verdict outlives them by design). */
+  verdictTimer: NodeJS.Timeout | undefined;
   /** ⑤ settled: the `spawn` (or `error`) event arrived — later `error` events are noise. */
   spawnEventSettled: boolean;
   everLive: boolean;
@@ -354,6 +386,32 @@ export const RECOVER_SCAN_BUDGET_MS = 1_000;
 export const RECOVER_KILL_AFTER_MS = STOP_KILL_MS;
 /** arch §7.7 recovery: max procs examined in one environ scan. */
 export const RECOVER_SCAN_MAX_PROCS = 4096;
+/** default-model plan D5: grace window for the delayed breaker verdict — `close` (the complete
+ *  early-tail moment) usually settles first; this bounds the wait when it never comes. */
+export const MODEL_VERDICT_GRACE_MS = 250;
+/** D5: the stderr probe keeps only this many tail bytes — plenty for pi's one-line diagnostic. */
+const MODEL_PROBE_CAP_BYTES = 4096;
+/**
+ * default-model plan D5: pi's startup model-rejection diagnostics (the ONLY rejections the hub
+ * can pre-identify — §0: known-provider + typo'd id degrades to a custom model with a warning
+ * and stays live, R1/A6b). Pinned against real pi by the conformance suite CM1/CM2/CM4; if pi
+ * ever changes the wording, this misses and D5 degrades to fail-safe (count, no hint) — it can
+ * never EXEMPT a real launcher failure. Exported for the tests to share.
+ */
+export const MODEL_REJECT_RE = /^Error: Model "[^\n]{1,300}" (not found\.|is ambiguous across providers)/m;
+/** CSI + single-char ANSI escapes (chalk's FORCE_COLOR output) — stripped before the probe match. */
+const ANSI_RE = /\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+/** Strip ANSI escapes from a stderr tail (D5: FORCE_COLOR diagnostics must still match). */
+export function stripAnsiCodes(s: string): string {
+  return s.replace(ANSI_RE, "");
+}
+
+/** D5's bounded stderr-tail append: concat then keep the last `cap` bytes. */
+function appendCapped(prev: Buffer | undefined, chunk: Buffer, cap: number): Buffer {
+  const joined = prev === undefined ? chunk : Buffer.concat([prev, chunk]);
+  return joined.length > cap ? joined.subarray(joined.length - cap) : joined;
+}
 /** arch §7.4 USER_HZ — `/proc/<pid>/stat` starttime is in 1/100 s units. */
 const PROC_CLOCK_HZ = 100;
 
@@ -503,6 +561,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (rec.bootId !== undefined) out.bootId = rec.bootId;
     if (rec.uid !== undefined) out.uid = rec.uid;
     if (rec.agentKey !== undefined) out.agentKey = rec.agentKey;
+    if (rec.model !== undefined) out.model = rec.model;
     if (rec.endReason !== undefined) out.endReason = rec.endReason;
     if (rec.exit !== undefined) out.exit = rec.exit;
     if (rec.hint !== undefined) out.hint = rec.hint;
@@ -533,6 +592,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     };
     if (rec.pid !== undefined) item.pid = rec.pid;
     if (rec.agentKey !== undefined) item.agentKey = rec.agentKey;
+    if (rec.model !== undefined) item.model = rec.model;
     if (rec.agentKey !== undefined) item.linked = rec.linked;
     if (rec.state === "live" && rec.control !== undefined) item.control = rec.control;
     if (rec.endReason !== undefined && rec.endReason !== null) item.endReason = rec.endReason;
@@ -578,6 +638,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       state: rec.state === "launching" ? "starting" : rec.state,
     };
     if (rec.pid !== undefined) entry.pid = rec.pid;
+    if (rec.model !== undefined) entry.model = rec.model;
     if (rec.endReason !== undefined && rec.endReason !== null) entry.endReason = rec.endReason;
     if (rec.exit !== undefined && rec.exit !== null) {
       entry.exitCode = rec.exit.code;
@@ -870,7 +931,17 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     clearRecordTimers(rec);
     if (rec.pid !== undefined) reaper.untrack(rec.pid);
     const reason = rec.endReason;
-    if (BREAKER_REASONS.has(reason) && !rec.breakerExempt) noteLaunchFailure();
+    // default-model plan D5: defer ONLY the breaker count, and only for an early exit of a
+    // `--model` fork — pi may have rejected the model itself, which is a user-input problem,
+    // not a launcher problem (4 such rejections must NOT open the breaker). Everything else
+    // (register_timeout / spawn_error / cwd_mismatch / no-model early exits) counts right here,
+    // exactly as before — the terminal settlement itself is unchanged and still one-shot.
+    const verdictDeferred = reason === "exited_early" && rec.model !== undefined;
+    if (BREAKER_REASONS.has(reason) && !rec.breakerExempt && !verdictDeferred) noteLaunchFailure();
+    if (verdictDeferred) {
+      rec.breakerVerdict = "pending";
+      rec.verdictTimer = arm(MODEL_VERDICT_GRACE_MS, () => settleVerdict(rec));
+    }
     if (!rec.everLive) {
       deps.onTerminal?.(rec.spawnId, NEVER_LIVE_REASONS.has(reason) ? "never_live" : "stopped");
     }
@@ -900,6 +971,42 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.hintDetail = detail;
     rec.stop = { reason: "spawn_error", terminalState: "failed", stage: 3 };
     finalizeTerminal(rec);
+  }
+
+  /**
+   * default-model plan D5: the ONE settlement of a deferred breaker verdict. `close` (armed in
+   * start()'s sync segment) and the 250ms grace race for it — whoever arrives first wins, the
+   * other returns on the `!== "pending"` guard, so the count lands exactly 0 or 1 times. A
+   * matching pi rejection ⇒ no count (+ a post-terminal `model-rejected` hint while the record
+   * still lives in THIS supervisor); anything else ⇒ `noteLaunchFailure()` as if it had never
+   * been deferred. Runs after the terminal state is already visible — this annotates, never
+   * transitions (the record may legitimately have been trimmed/deleted meanwhile).
+   */
+  function settleVerdict(rec: Supervised): void {
+    if (rec.breakerVerdict !== "pending") return;
+    rec.breakerVerdict = "done";
+    rec.verdictTimer = clearHandle(rec.verdictTimer);
+    const probe = rec.rejectProbe;
+    rec.rejectProbe = undefined;
+    const text = stripAnsiCodes(probe === undefined ? "" : probe.toString("utf8"));
+    if (MODEL_REJECT_RE.test(text)) {
+      if (records.get(rec.spawnId) === rec && !closedFlag) {
+        rec.hint = "model-rejected";
+        rec.updatedAt = now();
+        persistDebounced();
+        schedulePush();
+        deps.audit({
+          audit: "spawn",
+          phase: "state",
+          spawnId: rec.spawnId,
+          state: "failed",
+          code: "model-rejected",
+          ...(rec.model === undefined ? {} : { model: rec.model }),
+        });
+      }
+      return;
+    }
+    noteLaunchFailure();
   }
 
   // ----------------------------------------------------------------- ⑩ stop escalation
@@ -1191,6 +1298,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
         reqId: req.owner.reqId,
         ...(req.owner.user !== undefined ? { user: req.owner.user } : {}),
       },
+      // default-model plan D3/D5: the effective --model ref + its verdict machinery (probe
+      // initialized ONLY for model forks — every other record keeps the plain old behavior).
+      ...(req.model === undefined ? {} : { model: req.model }),
+      rejectProbe: req.model === undefined ? undefined : Buffer.alloc(0),
+      breakerVerdict: undefined,
+      verdictTimer: undefined,
       ...(req.firstPrompt !== undefined
         ? { firstPrompt: { state: "pending" as const, textLen: req.firstPrompt.textLen } }
         : {}),
@@ -1255,7 +1368,14 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
         childEnv.PI_WEBHUB_HEADLESS = "1";
         childEnv.PI_WEBHUB_SPAWN_ID = rec.spawnId;
         childEnv.PWD = rec.cwd;
-        child = spawnFn(launcher[0], [launcher[1], "--mode", "rpc"], {
+        // default-model plan §3 (supervisor row): fixed prefix + optional `--model <ref>` tail —
+        // TWO independent argv elements, never string-concatenated; without a model the argv is
+        // element-for-element identical to the pre-feature fork (byte-compat invariant).
+        const argv: readonly string[] =
+          rec.model === undefined
+            ? [launcher[1], "--mode", "rpc"]
+            : [launcher[1], "--mode", "rpc", "--model", rec.model];
+        child = spawnFn(launcher[0], argv, {
           cwd: pin.cwdArg,
           detached: true,
           stdio: ["pipe", "pipe", "pipe"],
@@ -1308,6 +1428,11 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     child.stdin?.on("error", () => {}); // EPIPE is the orderly path, never an error here
     child.on("error", (err) => onChildError(rec, err));
     child.on("exit", (code, signal) => onChildExit(rec, code, signal));
+    // default-model plan D5: `close` fires after `exit` AND every stdio pipe has drained — the
+    // authoritative "the early stderr tail is complete" moment for the deferred verdict. Armed
+    // in this same synchronous segment (Node never dispatches events mid-sync-stretch), and a
+    // `close` that somehow races ahead of finalizeTerminal simply no-ops on the pending guard.
+    child.once("close", () => settleVerdict(rec));
     if (!saved2.ok) {
       log.error("spawn supervisor: L1 pid persist failed — stopping the fresh child", {
         spawnId: rec.spawnId,
@@ -1331,7 +1456,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       now,
     });
     child.stdout?.on("data", (chunk: Buffer) => rec.stdio?.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => rec.sink?.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => {
+      rec.sink?.push(chunk);
+      // D5's probe is independent of the sink — it still captures after cleanupHandles dropped
+      // the sink (terminal record) and when stderrDir was never configured at all.
+      if (rec.rejectProbe !== undefined) rec.rejectProbe = appendCapped(rec.rejectProbe, chunk, MODEL_PROBE_CAP_BYTES);
+    });
     child.once("spawn", () => {
       rec.spawnEventSettled = true;
       rec.spawnEventTimer = clearHandle(rec.spawnEventTimer);
@@ -1364,6 +1494,11 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       child: undefined,
       stdio: undefined,
       sink: undefined,
+      // D5: a recovered record's model is display-only data (recovery never re-forks) and its
+      // breaker contribution is already exempt — no verdict machinery is re-armed.
+      rejectProbe: undefined,
+      breakerVerdict: undefined,
+      verdictTimer: undefined,
       spawnEventSettled: true,
       everLive: stored.state === "live" || stored.state === "stopping",
       breakerExempt: true, // recovered records never re-trip the breaker

@@ -28,10 +28,12 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  lstatSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer as createNetServer } from "node:http";
@@ -616,6 +618,7 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     const id = spawnReqId();
     const headers = { Cookie: h.cookie, Origin: originOf(h.port) };
     const first = await postJson(h.port, "/api/headless", { id, cwd, ...body }, headers);
+    if (first.status === 503) console.error(`[H9] first POST 503: ${first.body}`);
     expect([202, 409]).toContain(first.status);
     if (first.status === 202) return JSON.parse(first.body) as { spawnId: string; state: string };
     const resolved = JSON.parse(first.body) as { resolvedCwd: string };
@@ -1222,3 +1225,247 @@ describe.skipIf(!IS_LINUX || NO_NODE_SQLITE)("web-hub headless e2e — H7 LAN vi
     expect(stderrLog(hub.stateDir, spawnId)).not.toContain(secret);
   }, 90_000);
 });
+
+// ---------------------------------------------------------------------------
+// H9 — default-model plan (hub side): argv tail, delayed-verdict end-to-end, prefs persistence
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!IS_LINUX)("web-hub headless e2e — H9 default model, in-process assembly (plan §6)", () => {
+  let sandbox: ReturnType<typeof sandboxHome> | undefined;
+  let hub: ProcHub | undefined;
+  const argvFileOf = (): string => join(hub!.stateDir, "h9-argv.json");
+
+  afterEach(async () => {
+    delete process.env.FAKE_ARGV_OUT;
+    if (hub !== undefined) await hub.hub.close("test-teardown").catch(() => undefined);
+    hub = undefined;
+    for (const h of procHubs.splice(0)) await h.close("test-teardown").catch(() => undefined);
+    await waitChildrenGone();
+    cleanupHome(sandbox);
+    sandbox = undefined;
+  });
+
+  const originOf = (port: number): string => `http://127.0.0.1:${port}`;
+
+  async function bringUp(): Promise<ProcHub> {
+    cleanupHome(sandbox);
+    sandbox = sandboxHome();
+    hub = await bootProcHub(procSpawnCfg({ roots: [sandbox.home], maxProcesses: 8, maxPerPrincipal: 8 }), sandbox.home);
+    return hub;
+  }
+
+  async function setPrefs(h: ProcHub, defaultModel: string): Promise<void> {
+    const res = await postJson(
+      h.port,
+      "/api/headless/prefs",
+      { defaultModel },
+      { Cookie: h.cookie, Origin: originOf(h.port) },
+    );
+    expect(res.status).toBe(200);
+  }
+
+  async function readArgv(): Promise<string[]> {
+    await waitUntil(() => existsSync(argvFileOf()), 5_000, "fake-pi wrote FAKE_ARGV_OUT");
+    return JSON.parse(readFileSync(argvFileOf(), "utf8")) as string[];
+  }
+
+  /** The same two-step loopback spawn the H5–H8 suite uses (local copy — that describe's helper
+   *  is a closure over its own sandbox). */
+  async function spawnTwoStep(
+    h: ProcHub,
+    cwd: string,
+    body: Record<string, unknown> = {},
+  ): Promise<{ spawnId: string; state: string }> {
+    const id = spawnReqId();
+    const headers = { Cookie: h.cookie, Origin: originOf(h.port) };
+    const first = await postJson(h.port, "/api/headless", { id, cwd, ...body }, headers);
+    if (first.status === 503) console.error(`[H9] first POST 503: ${first.body}`);
+    expect([202, 409]).toContain(first.status);
+    if (first.status === 202) return JSON.parse(first.body) as { spawnId: string; state: string };
+    const resolved = JSON.parse(first.body) as { resolvedCwd: string };
+    const second = await postJson(
+      h.port,
+      "/api/headless",
+      { id, cwd, confirm: true, expectCwd: resolved.resolvedCwd, ...body },
+      headers,
+    );
+    expect(second.status).toBe(202);
+    return JSON.parse(second.body) as { spawnId: string; state: string };
+  }
+
+  it('H9a: preference ⇒ argv carries `--model <ref>` as TWO independent elements; body model wins; "" forks with no tail', async () => {
+    const h = await bringUp();
+    process.env.FAKE_ARGV_OUT = argvFileOf();
+    await setPrefs(h, "p1/pref-model");
+    rmSync(argvFileOf(), { force: true });
+    await spawnTwoStep(h, projDir(sandbox!.home, "h9a-pref"));
+    let argv = await readArgv();
+    expect(argv.slice(-2)).toEqual(["--model", "p1/pref-model"]);
+    expect(argv).toContain("--mode");
+    expect(argv[argv.indexOf("--model") + 1]).toBe("p1/pref-model"); // separate element, never joined
+
+    rmSync(argvFileOf(), { force: true });
+    await spawnTwoStep(h, projDir(sandbox!.home, "h9a-body"), { model: "p2/explicit-model" });
+    argv = await readArgv();
+    expect(argv.slice(-2)).toEqual(["--model", "p2/explicit-model"]);
+
+    rmSync(argvFileOf(), { force: true });
+    await spawnTwoStep(h, projDir(sandbox!.home, "h9a-clear"), { model: "" });
+    argv = await readArgv();
+    expect(argv.includes("--model")).toBe(false); // explicit pi default — no tail at all
+    expect(argv.slice(-2)).toEqual(["--mode", "rpc"]);
+  }, 30_000);
+
+  it("H9b: nosuch/* preference ⇒ failed{exited_early, hint:model-rejected} per child; FIVE in a row never open the breaker; a normal spawn still works", async () => {
+    const h = await bringUp();
+    await setPrefs(h, "nosuch/x");
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const spawned = await spawnTwoStep(h, projDir(sandbox!.home, `h9b-${i}`));
+      ids.push(spawned.spawnId);
+      // pace past SPAWN_STARTING_MAX: the rejected child dies ~instantly, but the exit event
+      // settles asynchronously — wait for THIS record to reach its terminal state first
+      await waitUntil(
+        () => recordOf(h.stateDir, spawned.spawnId)?.state === "failed",
+        10_000,
+        `h9b-${i} settled failed`,
+      );
+    }
+    await waitUntil(
+      () => ids.every((id) => recordOf(h.stateDir, id)?.hint === "model-rejected"),
+      15_000,
+      "all five records carry the model-rejected hint",
+    );
+    for (const id of ids) {
+      expect(recordOf(h.stateDir, id)).toMatchObject({
+        state: "failed",
+        endReason: "exited_early",
+        hint: "model-rejected",
+        model: "nosuch/x",
+      });
+    }
+    // the breaker never opened: clearing the preference lets a plain spawn go straight through
+    await setPrefs(h, "");
+    const normal = await spawnTwoStep(h, projDir(sandbox!.home, "h9b-normal"));
+    expect(normal.state).toBe("starting");
+  }, 60_000);
+});
+
+describe.skipIf(!IS_LINUX || PLAN === undefined)(
+  "web-hub headless e2e — H9 prefs persistence across real hub restarts (plan §6)",
+  () => {
+    let sandbox: ReturnType<typeof sandboxHome> | undefined;
+    const hubPids = new Set<number>();
+
+    afterEach(async () => {
+      for (const pid of hubPids) kill9(pid);
+      await waitUntil(() => [...hubPids].every((p) => !pidAlive(p)), 5_000, "hubs killed").catch(() => undefined);
+      hubPids.clear();
+      cleanupHome(sandbox);
+      sandbox = undefined;
+    });
+
+    async function boot(home: string, excludePid?: number): Promise<ChildHub> {
+      const cfg = hubConfig({
+        home,
+        port: 0,
+        idleExitMinutes: 10,
+        pluginVersion: "1.2.3",
+        launcher: fakeLauncher(home),
+        spawn: {
+          roots: [home],
+          maxProcesses: 4,
+          maxPerPrincipal: 2,
+          ratePerMinute: 30,
+          maxLifetimeMinutes: 720,
+          registerTimeoutS: 30,
+          lan: "off",
+        },
+      });
+      spawnHub(PLAN!, HUB_MAIN, cfg);
+      await waitUntil(
+        () => {
+          const { pid } = hubJsonOf(home);
+          return pid !== undefined && pid !== excludePid && pidAlive(pid);
+        },
+        15_000,
+        `child hub up (exclude ${excludePid ?? "-"})`,
+      );
+      const { pid, port } = hubJsonOf(home);
+      if (pid === undefined || port === undefined) throw new Error("hub.json missing pid/port");
+      hubPids.add(pid);
+      const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
+      const cookie = await login(port, paths.tokenFile);
+      return { home, stateDir: paths.stateDir, pid, port, cookie };
+    }
+
+    const originOf = (h: ChildHub): string => `http://127.0.0.1:${h.port}`;
+    const prefsJsonOf = (h: ChildHub): string => webHubSpawnFiles(h.stateDir).prefsJson;
+
+    async function writePrefs(h: ChildHub, defaultModel: string): Promise<void> {
+      const res = await postJson(
+        h.port,
+        "/api/headless/prefs",
+        { defaultModel },
+        { Cookie: h.cookie, Origin: originOf(h) },
+      );
+      expect(res.status).toBe(200);
+    }
+
+    async function readPrefs(h: ChildHub): Promise<string | null> {
+      const res = await rawRequest(h.port, { path: "/api/headless", headers: { Cookie: h.cookie, "X-PWH": "1" } });
+      expect(res.status).toBe(200);
+      const prefs = (JSON.parse(res.body) as { prefs: { defaultModel: string | null } }).prefs;
+      return prefs.defaultModel;
+    }
+
+    it("H9c: POST ⇒ SIGTERM ⇒ reboot ⇒ value kept (graceful); POST 200 then immediate SIGKILL ⇒ value kept (rename-before-200)", async () => {
+      sandbox = sandboxHome();
+      const home = sandbox.home;
+
+      const h1 = await boot(home);
+      await writePrefs(h1, "p1/survives-term");
+      process.kill(h1.pid, "SIGTERM");
+      await waitPidGone(h1.pid, 8_000, "hub exited on SIGTERM");
+      const h2 = await boot(home, h1.pid);
+      expect(await readPrefs(h2)).toBe("p1/survives-term");
+
+      await writePrefs(h2, "p1/survives-kill");
+      kill9(h2.pid); // crash right after the 200 — the rename already landed
+      await waitPidGone(h2.pid, 5_000, "hub killed");
+      const h3 = await boot(home, h2.pid);
+      expect(await readPrefs(h3)).toBe("p1/survives-kill");
+    }, 60_000);
+
+    it("H9d: leftover `.tmp-*` residue is swept at boot (regular only); a symlinked prefs file reads as null, untouched", async () => {
+      sandbox = sandboxHome();
+      const home = sandbox.home;
+
+      const h1 = await boot(home);
+      await writePrefs(h1, "p1/real");
+      const prefsJson = prefsJsonOf(h1);
+      kill9(h1.pid);
+      await waitPidGone(h1.pid, 5_000, "hub killed");
+
+      // plant a regular tmp residue + a non-regular one; only the regular file may vanish
+      writeFileSync(`${prefsJson}.tmp-residue`, "partial", { mode: 0o600 });
+      mkdirSync(`${prefsJson}.tmp-dir`);
+      // swap the real file for a symlink (an attacker-planted or accidentally linked prefs)
+      const target = join(home, "prefs-target.json");
+      writeFileSync(target, JSON.stringify({ v: 1, defaultModel: "evil/model" }), { mode: 0o600 });
+      rmSync(prefsJson);
+      symlinkSync(target, prefsJson);
+
+      const h2 = await boot(home, h1.pid);
+      expect(await readPrefs(h2)).toBe(null); // read as null — never followed the symlink
+      expect(existsSync(`${prefsJson}.tmp-residue`)).toBe(false); // swept
+      expect(existsSync(`${prefsJson}.tmp-dir`)).toBe(true); // non-regular residue untouched
+      expect(lstatSync(prefsJson).isSymbolicLink()).toBe(true); // the file itself untouched (lstat never follows)
+      // and a fresh write replaces the symlink with a real 0600 file
+      await writePrefs(h2, "p1/fresh");
+      expect(lstatSync(prefsJson).isSymbolicLink()).toBe(false);
+      expect(lstatSync(prefsJson).mode & 0o777).toBe(0o600);
+      rmSync(`${prefsJson}.tmp-dir`, { recursive: true });
+    }, 60_000);
+  },
+);

@@ -280,6 +280,9 @@ export const SPAWN_AUDIT_KEYS = [
   "attempts",
   "identity",
   "reaper",
+  "model",
+  "from",
+  "to",
 ] as const;
 
 /** `log.info("spawn", { audit: "spawn", ...pick(record, SPAWN_AUDIT_KEYS) })` (arch §6.6). */

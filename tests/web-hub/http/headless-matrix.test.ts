@@ -120,6 +120,46 @@ describe("matrix rows: 启用 (deps.spawn wired) × LAN policy × availability",
     await sse.waitFor((e) => e.event === "agents");
     await new Promise((r) => setTimeout(r, 100));
     expect(sse.events.some((e) => e.event === "spawns")).toBe(false);
+
+    // default-model plan §3 ④ (D1/A9): the prefs surface obeys the same LAN guard — POST (and
+    // GET /api/headless, already covered above) 404 pre-auth on LAN, byte-identical to off,
+    // while the loopback face of the SAME hub keeps reading and writing normally.
+    expect(
+      (
+        await lanRequest(h.port, {
+          method: "POST",
+          path: "/api/headless/prefs",
+          headers: { Host: `127.0.0.1:${h.port}`, "Content-Type": "application/json", "X-PWH": "1" },
+          body: JSON.stringify({ defaultModel: "p1/m" }),
+        })
+      ).status,
+    ).toBe(403); // no cookie + no Origin ⇒ the LAN gate's own CSRF tripped first (pre-dispatch)
+    const lanAuthed = await lanPostJson(h.port, "/api/headless/prefs", { defaultModel: "p1/m" }, { Cookie: cookie });
+    expect(lanAuthed.status).toBe(404);
+    expect(JSON.parse(lanAuthed.body)).toEqual({ error: "E_NOT_FOUND" });
+
+    const tmpLoop = makeTmp("pwh-matrix-prefs-");
+    const depsLoop = fakeDeps(tmpLoop.dir);
+    depsLoop.spawn = kit.spawn;
+    const feLoop = createHttpFrontend(depsLoop);
+    const portLoop = (await feLoop.listen()).port;
+    try {
+      const cookieLoop = await login(portLoop, depsLoop.paths.tokenFile);
+      const origin = `http://127.0.0.1:${portLoop}`;
+      const write = await postJson(
+        portLoop,
+        "/api/headless/prefs",
+        { defaultModel: "p1/m" },
+        { Cookie: cookieLoop, Origin: origin },
+      );
+      expect(write.status).toBe(200);
+      expect(JSON.parse(write.body)).toEqual({ prefs: { defaultModel: "p1/m" } });
+      const get = await rawRequest(portLoop, { path: "/api/headless", headers: { Cookie: cookieLoop, "X-PWH": "1" } });
+      expect(JSON.parse(get.body).prefs).toEqual({ defaultModel: "p1/m" });
+    } finally {
+      await feLoop.close();
+      tmpLoop.cleanup();
+    }
   });
 
   it.each(["platform", "launcher", "persist", "reaper"] as const)(

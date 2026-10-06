@@ -17,7 +17,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FrontendDeps, FrontendFactory, HubConfig, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { installProcessHandlers, startHub, type RunningHub, type StartHubDeps } from "../../../src/web-hub/hub/hub.js";
-import { SPAWN_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import { webHubSpawnFiles, webHubStateDir } from "../../../src/web-hub/protocol/paths.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import type { Reaper, ReaperTrackRecord } from "../../../src/web-hub/hub/spawn/reaper.js";
@@ -319,6 +319,7 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     // assertion for the browser-facing surface.
     expect(browserCaps).toEqual(agentCaps);
     expect(browserCaps).not.toContain(SPAWN_HUB_CAP);
+    expect(browserCaps).not.toContain(SPAWN_MODEL_HUB_CAP); // default-model D4: rides config.spawn too
     c.sock.destroy();
 
     expect(readHubJson(kit)["spawn"]).toBeUndefined();
@@ -337,8 +338,11 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     const agentCaps = ack["caps"] as string[];
-    expect(agentCaps[agentCaps.length - 1]).toBe(SPAWN_HUB_CAP);
-    expect([...agentCaps].sort()).toEqual([...kit.hub.info.caps].sort());
+    // default-model plan D4: spawn.model.v1 rides the SAME conditional tail, directly after
+    // spawn.v1 — both surfaces carry the same SET in the same ORDER (同源数组展开).
+    expect(agentCaps[agentCaps.length - 2]).toBe(SPAWN_HUB_CAP);
+    expect(agentCaps[agentCaps.length - 1]).toBe(SPAWN_MODEL_HUB_CAP);
+    expect(agentCaps).toEqual(kit.hub.info.caps); // order included — the two surfaces never drift
     c.sock.destroy();
 
     expect(readHubJson(kit)["spawn"]).toEqual({ count: 0 }); // launcher fixture ok + fake reaper up ⇒ allowed

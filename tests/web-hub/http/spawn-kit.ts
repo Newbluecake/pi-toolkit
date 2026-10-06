@@ -11,6 +11,7 @@ import type { HubLog } from "../../../src/web-hub/hub/ports.js";
 import { createSpawnRoutes } from "../../../src/web-hub/hub/spawn/routes.js";
 import type { AdmitResult, DirService } from "../../../src/web-hub/hub/spawn/dirs.js";
 import type { FirstPromptForwarder, FirstPromptStateView } from "../../../src/web-hub/hub/spawn/first-prompt.js";
+import type { SpawnPrefs } from "../../../src/web-hub/hub/spawn/prefs.js";
 import type { SpawnFrontendPort } from "../../../src/web-hub/hub/spawn/ports.js";
 import type {
   AdmittedRequest,
@@ -142,6 +143,7 @@ export function fakeSpawnSupervisor(): FakeSpawnSupervisor {
           createdAt: 1,
           updatedAt: 1,
           owner: { ...req.owner },
+          ...(req.model === undefined ? {} : { model: req.model }),
           ...(req.firstPrompt === undefined
             ? {}
             : { firstPrompt: { state: "pending" as const, textLen: req.firstPrompt.textLen } }),
@@ -276,6 +278,52 @@ export function fakeFirstPrompt(): FakeFirstPrompt {
 }
 
 // ---------------------------------------------------------------------------
+// fake prefs (default-model plan §3 ④: memory-only, controllable persist failures)
+// ---------------------------------------------------------------------------
+
+export interface FakeSpawnPrefs extends SpawnPrefs {
+  setCalls: Array<string | null>;
+  setPersistResult: { ok: true } | { ok: false; code: string };
+  setPersistResultOrFn: ((v: string | null) => { ok: true } | { ok: false; code: string }) | undefined;
+  setValue(value: string | null): void;
+  setPersistResultTo(
+    resultOrFn:
+      { ok: true } | { ok: false; code: string } | ((v: string | null) => { ok: true } | { ok: false; code: string }),
+  ): void;
+}
+
+export function fakeSpawnPrefs(initial: string | null = null): FakeSpawnPrefs {
+  const setCalls: FakeSpawnPrefs["setCalls"] = [];
+  let current = initial;
+  let persistResult: FakeSpawnPrefs["setPersistResult"] = { ok: true };
+  let persistFn: ((v: string | null) => { ok: true } | { ok: false; code: string }) | undefined;
+  return {
+    setCalls,
+    setPersistResult: { ok: true },
+    setPersistResultOrFn: undefined,
+    get: () => current,
+    set(v) {
+      setCalls.push(v);
+      const r = persistFn !== undefined ? persistFn(v) : persistResult;
+      if (r.ok) current = v;
+      return r;
+    },
+    close() {},
+    setValue(value: string | null) {
+      current = value;
+    },
+    setPersistResultTo(resultOrFn) {
+      if (typeof resultOrFn === "function") {
+        persistFn = resultOrFn;
+      } else {
+        persistFn = undefined;
+        persistResult = resultOrFn;
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // wiring
 // ---------------------------------------------------------------------------
 
@@ -283,6 +331,7 @@ export interface SpawnKit {
   supervisor: FakeSpawnSupervisor;
   dirs: FakeDirs;
   firstPrompt: FakeFirstPrompt;
+  prefs: FakeSpawnPrefs;
   log: HubLog & { lines: ReturnType<typeof captureLog>["lines"] };
   clock: FakeClock;
   spawn: SpawnFrontendPort;
@@ -300,7 +349,11 @@ export const KIT_CFG: HubSpawnConfig = {
 };
 
 /** Real `createSpawnRoutes` over the fakes, with a controllable clock (rate/idempotency-TTL tests). */
-export function spawnKit(cfg: Partial<HubSpawnConfig> = {}, clock: FakeClock): SpawnKit {
+export function spawnKit(
+  cfg: Partial<HubSpawnConfig> = {},
+  clock: FakeClock,
+  prefs: FakeSpawnPrefs = fakeSpawnPrefs(),
+): SpawnKit {
   const supervisor = fakeSpawnSupervisor();
   const dirs = fakeDirs();
   const firstPrompt = fakeFirstPrompt();
@@ -310,11 +363,12 @@ export function spawnKit(cfg: Partial<HubSpawnConfig> = {}, clock: FakeClock): S
     supervisor,
     dirs,
     firstPrompt,
+    prefs,
     cfg: full,
     limit: createCmdLimit(clock.now),
     rejectAudit429: new Map(),
     log,
     now: clock.now,
   });
-  return { supervisor, dirs, firstPrompt, log, clock, spawn, cfg: full };
+  return { supervisor, dirs, firstPrompt, prefs, log, clock, spawn, cfg: full };
 }

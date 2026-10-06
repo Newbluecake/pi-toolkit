@@ -87,6 +87,9 @@ export function toPublic(rec: InternalRecord, fpOf?: FirstPromptViewOf): SpawnRe
     item.agentKey = rec.agentKey;
     item.linked = rec.linked;
   }
+  // default-model plan D3: non-sensitive by design — public so SpawnRow can badge it and a
+  // faithful retry can replay `rec.model ?? ""`.
+  if (rec.model !== undefined) item.model = rec.model;
   if (rec.state === "live" && rec.control !== undefined) item.control = rec.control;
   const endReason: SpawnEndReason | null | undefined = rec.endReason;
   if (endReason !== undefined && endReason !== null) item.endReason = endReason;
@@ -140,6 +143,7 @@ export function toViewer(
     updatedAt: pub.updatedAt,
     cwdLabel: pub.cwdLabel,
     ...(pub.pid !== undefined ? { pid: pub.pid } : {}),
+    ...(pub.model !== undefined ? { model: pub.model } : {}),
     ...(pub.agentKey !== undefined ? { agentKey: pub.agentKey, linked: pub.linked } : {}),
     ...(pub.control !== undefined ? { control: pub.control } : {}),
     ...(pub.endReason !== undefined ? { endReason: pub.endReason } : {}),

@@ -13,6 +13,7 @@
  * `lan-headless.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
@@ -63,13 +64,18 @@ function headlessGet(path: string, headers: Record<string, string> = {}): Promis
 /** POST whose body arrives in two tranches (no Content-Length) — parks the body read so another
  *  request (e.g. logout) can land between the first and second authorize. */
 function parkedSpawnPost(body: string, midway: () => Promise<unknown>): Promise<RawResponse> {
+  return parkedPost("/api/headless", body, midway);
+}
+
+/** The parked-body trick for an arbitrary path (the prefs race test below). */
+function parkedPost(path: string, body: string, midway: () => Promise<unknown>): Promise<RawResponse> {
   return new Promise<RawResponse>((resolve, reject) => {
     const req = httpRequest(
       {
         host: "127.0.0.1",
         port,
         method: "POST",
-        path: "/api/headless",
+        path,
         headers: {
           Host: `127.0.0.1:${port}`,
           "Content-Type": "application/json",
@@ -561,6 +567,248 @@ describe("methods with no spawn route keep the legacy fall-through", () => {
 
   it("GET /api/headless/nonsense ⇒ 404 after auth", async () => {
     const res = await headlessGet("/api/headless/nonsense");
+    expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan §2/§3 (D2 tri-state, prefs endpoint, R2-2 SpawnAccepted.model)
+// ---------------------------------------------------------------------------
+
+describe("POST /api/headless — default-model tri-state (plan D2)", () => {
+  beforeEach(() => {
+    kit.dirs.setAdmitResult({ ok: true, realpath: "/home/u/proj", dev: 1, ino: 2, known: true });
+  });
+
+  it("absent body model ⇒ the hub preference is forked with; 202 carries the effective model", async () => {
+    kit.prefs.setValue("p1/preferred");
+    const res = await spawnPost(BODY);
+    expect(res.status).toBe(202);
+    expect(JSON.parse(res.body).model).toBe("p1/preferred");
+    expect(kit.supervisor.startCalls[0]!.model).toBe("p1/preferred");
+  });
+
+  it('body "" ⇒ explicit pi default — NO --model even with a preference set; no `model` key in the reply', async () => {
+    kit.prefs.setValue("p1/preferred");
+    const res = await spawnPost({ ...BODY, model: "" });
+    expect(res.status).toBe(202);
+    expect("model" in JSON.parse(res.body)).toBe(false);
+    expect(kit.supervisor.startCalls[0]!.model).toBeUndefined();
+  });
+
+  it("body provider/id wins over the preference (R2-2: reply/persisted record/argv input all agree)", async () => {
+    kit.prefs.setValue("p1/preferred");
+    const res = await spawnPost({ ...BODY, model: "p2/explicit" });
+    expect(res.status).toBe(202);
+    const parsed = JSON.parse(res.body);
+    expect(parsed.model).toBe("p2/explicit");
+    expect(kit.supervisor.startCalls[0]!.model).toBe("p2/explicit");
+    // the fake supervisor auto-owns the record — the persisted record's model matches too
+    const rec = kit.supervisor.recordsOut.find((r) => r.spawnId === parsed.spawnId);
+    expect(rec?.model).toBe("p2/explicit");
+  });
+
+  it('invalid model (no `/`, leading `-`, whitespace, zero-width) ⇒ 400 E_BAD_REQUEST{reason:"model-invalid"}; >257B is caught by the schema prefilter first', async () => {
+    for (const [i, model] of ["x", "-flag/value", "p1/ mo del", "p1/\u200bzero", "\u00a0p1/m"].entries()) {
+      const id = `reqid-0000-mv${i}`.padEnd(20, "x").slice(0, 20);
+      const res = await spawnPost({ ...BODY, id, model });
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.body)).toEqual({
+        error: "E_BAD_REQUEST",
+        reason: "model-invalid",
+        message: "invalid model ref",
+      });
+    }
+    // >257 UTF-8 bytes trips the request schema's maxLength PREFILTER (the prefs body has none
+    // by design — plan §2 — so the same value surfaces as model-invalid there instead)
+    const huge = await spawnPost({ ...BODY, model: `p1/${"x".repeat(300)}` });
+    expect(huge.status).toBe(400);
+    expect(JSON.parse(huge.body)).toEqual({ error: "E_BAD_REQUEST", message: "bad spawn request body" });
+    expect(kit.supervisor.startCalls).toHaveLength(0);
+  });
+
+  it("same id + different model ⇒ 409 (the model joined the intent digest)", async () => {
+    await spawnPost(BODY);
+    const res = await spawnPost({ ...BODY, model: "p1/other" });
+    expect(res.status).toBe(409);
+    expect(JSON.parse(res.body)).toMatchObject({ error: "E_BAD_REQUEST" });
+    expect(kit.supervisor.startCalls).toHaveLength(1);
+  });
+
+  it("same id + same model ⇒ dup 202 replaying the record; a later preference change never rewrites it", async () => {
+    kit.prefs.setValue("p1/a");
+    const first = await spawnPost({ ...BODY, model: "p1/a" });
+    expect(JSON.parse(first.body).model).toBe("p1/a");
+    kit.prefs.setValue("p2/b");
+    const replay = await spawnPost({ ...BODY, model: "p1/a" });
+    expect(replay.status).toBe(202);
+    const parsed = JSON.parse(replay.body);
+    expect(parsed.dup).toBe(true);
+    expect(parsed.model).toBe("p1/a"); // R2-2: the ORIGINAL record's value
+    expect(kit.supervisor.startCalls).toHaveLength(1);
+  });
+
+  it("absent-model replay after a preference change still dups (digest unchanged — model joins only when present)", async () => {
+    kit.prefs.setValue("p1/a");
+    const first = await spawnPost(BODY); // record forked with p1/a
+    expect(JSON.parse(first.body).model).toBe("p1/a");
+    kit.prefs.setValue("p2/b");
+    const replay = await spawnPost(BODY); // same absent-model intent ⇒ dup, still p1/a
+    const parsed = JSON.parse(replay.body);
+    expect(parsed.dup).toBe(true);
+    expect(parsed.model).toBe("p1/a");
+    expect(kit.supervisor.startCalls).toHaveLength(1);
+  });
+
+  it("digest canonicalization is key-order independent (a reordered body is the SAME intent)", async () => {
+    await spawnPost(BODY);
+    const reordered = `{"cwd":"/home/u/proj","id":"${ID}"}`; // cwd BEFORE id vs the helper's id-first
+    const res = await rawRequest(port, {
+      method: "POST",
+      path: "/api/headless",
+      headers: { "Content-Type": "application/json", "X-PWH": "1", Cookie: cookie, Origin: ORIGIN(port) },
+      body: reordered,
+    });
+    expect(res.status).toBe(202);
+    expect(JSON.parse(res.body).dup).toBe(true);
+    expect(kit.supervisor.startCalls).toHaveLength(1);
+  });
+
+  it("the no-model digest keeps the pre-feature canonical shape (pinned hex)", async () => {
+    // sha256 of the EXACT pre-feature canonical strings — plan §3 ①'s byte-compat invariant.
+    // (Behavioral guard: the dup tests above; this documents/pins the literal form.)
+    expect(createHash("sha256").update('{"cwd":"/home/u/proj"}').digest("hex")).toBe(
+      "b40c162fcda128763acf957b44c09cbbcb8cc97cf3fdc9b653eb5c31fee10cb5",
+    );
+  });
+});
+
+describe("GET /api/headless — prefs field (plan §3 ③)", () => {
+  it("rides the list reply: null when unset, the value once written", async () => {
+    const before = await headlessGet("/api/headless");
+    expect(JSON.parse(before.body).prefs).toEqual({ defaultModel: null });
+    kit.prefs.setValue("p1/m");
+    const after = await headlessGet("/api/headless");
+    expect(JSON.parse(after.body).prefs).toEqual({ defaultModel: "p1/m" });
+  });
+});
+
+describe("POST /api/headless/prefs (plan §3 ④)", () => {
+  const prefsPost = (body: unknown, headers: Record<string, string> = {}): Promise<RawResponse> =>
+    postJson(port, "/api/headless/prefs", body, { Cookie: cookie, Origin: ORIGIN(port), ...headers });
+
+  it("CSRF quartet ⇒ 403, no write", async () => {
+    expect((await prefsPost({ defaultModel: "p1/m" }, { Origin: "http://evil.example" })).status).toBe(403);
+    expect((await postJson(port, "/api/headless/prefs", { defaultModel: "p1/m" }, { Cookie: cookie })).status).toBe(
+      403,
+    ); // no Origin
+    expect((await prefsPost({ defaultModel: "p1/m" }, { "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
+    const noPwh = await rawRequest(port, {
+      method: "POST",
+      path: "/api/headless/prefs",
+      headers: { "Content-Type": "application/json", Cookie: cookie, Origin: ORIGIN(port) },
+      body: JSON.stringify({ defaultModel: "p1/m" }),
+    });
+    expect(noPwh.status).toBe(403);
+    expect(kit.prefs.setCalls).toHaveLength(0);
+  });
+
+  it("unauthenticated ⇒ 401", async () => {
+    const res = await postJson(port, "/api/headless/prefs", { defaultModel: "p1/m" }, { Origin: ORIGIN(port) });
+    expect(res.status).toBe(401);
+  });
+
+  it("200 write + audit {listener, ip, from, to}; GET list reflects it; the next spawn forks with it", async () => {
+    const res = await prefsPost({ defaultModel: "p1/m" });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ prefs: { defaultModel: "p1/m" } });
+    expect(kit.prefs.setCalls).toEqual(["p1/m"]);
+    const line = kit.log.lines
+      .map((l) => l.data as Record<string, unknown>)
+      .find((d) => d["endpoint"] === "prefs" && d["phase"] === "request");
+    expect(line).toMatchObject({ listener: "loopback", from: null, to: "p1/m" });
+    const list = await headlessGet("/api/headless");
+    expect(JSON.parse(list.body).prefs).toEqual({ defaultModel: "p1/m" });
+    // clear: "" is the explicit 「清空」
+    const cleared = await prefsPost({ defaultModel: "" });
+    expect(JSON.parse(cleared.body)).toEqual({ prefs: { defaultModel: null } });
+    const clearLine = kit.log.lines
+      .map((l) => l.data as Record<string, unknown>)
+      .findLast((d) => d["endpoint"] === "prefs" && d["phase"] === "request");
+    expect(clearLine).toMatchObject({ from: "p1/m", to: null });
+  });
+
+  it("schema: array/string body ⇒ not-an-object; unknown/missing field ⇒ schema; bad ref ⇒ model-invalid", async () => {
+    expect((await prefsPost([1, 2])).status).toBe(400);
+    expect(JSON.parse((await prefsPost([1, 2])).body)).toEqual({ error: "E_BAD_REQUEST", reason: "not-an-object" });
+    expect(JSON.parse((await prefsPost({ nope: 1 })).body)).toEqual({ error: "E_BAD_REQUEST", reason: "schema" });
+    expect(JSON.parse((await prefsPost({ defaultModel: "p1/m", extra: 1 })).body)).toEqual({
+      error: "E_BAD_REQUEST",
+      reason: "schema",
+    });
+    expect(JSON.parse((await prefsPost({ defaultModel: 7 })).body)).toEqual({
+      error: "E_BAD_REQUEST",
+      reason: "schema",
+    });
+    expect(JSON.parse((await prefsPost({ defaultModel: "garbage" })).body)).toEqual({
+      error: "E_BAD_REQUEST",
+      reason: "model-invalid",
+    });
+    expect(kit.prefs.setCalls).toHaveLength(0);
+  });
+
+  it('persist failure ⇒ 503 E_LAUNCHER{reason:"persist"}, memory unchanged', async () => {
+    kit.prefs.setValue("p1/old");
+    kit.prefs.setPersistResultTo({ ok: false, code: "ENOSPC" });
+    const res = await prefsPost({ defaultModel: "p1/new" });
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toEqual({ error: "E_LAUNCHER", reason: "persist" });
+    expect(kit.prefs.get()).toBe("p1/old"); // value NOT flipped
+    const list = await headlessGet("/api/headless");
+    expect(JSON.parse(list.body).prefs).toEqual({ defaultModel: "p1/old" });
+    expect(
+      kit.log.lines.some(
+        (l) =>
+          (l.data as Record<string, unknown>)["endpoint"] === "prefs" &&
+          (l.data as Record<string, unknown>)["phase"] === "reject",
+      ),
+    ).toBe(true);
+  });
+
+  it("write bucket: the 11th write in a minute ⇒ 429", async () => {
+    for (let i = 0; i < 10; i++) await prefsPost({ defaultModel: "" });
+    const burst = await prefsPost({ defaultModel: "p1/m" });
+    expect(burst.status).toBe(429);
+    expect(burst.headers["retry-after"]).toBe("6");
+  });
+
+  it("body over 1 KiB ⇒ 413 + connection close", async () => {
+    const res = await rawRequest(port, {
+      method: "POST",
+      path: "/api/headless/prefs",
+      headers: { "Content-Type": "application/json", "X-PWH": "1", Cookie: cookie, Origin: ORIGIN(port) },
+      body: JSON.stringify({ defaultModel: `p1/${"a".repeat(1200)}` }),
+    });
+    expect(res.status).toBe(413);
+    expect(String(res.headers["connection"] ?? "").toLowerCase()).toBe("close");
+  });
+
+  it("logout racing the body read: second authorize 401s, prefs.set NEVER called, value unchanged", async () => {
+    kit.prefs.setValue("p1/old");
+    const res = await parkedPost("/api/headless/prefs", JSON.stringify({ defaultModel: "p1/new" }), async () => {
+      await sleep(50);
+      await postJson(port, "/api/logout", {}, { Cookie: cookie, Origin: ORIGIN(port) });
+    });
+    // same mechanism as the cmd plane's §6.3 step ⑥: the second authorize() re-reads the loopback
+    // session map, which /api/logout (and a landed token rotation — it clears the same map) emptied.
+    expect(res.status).toBe(401);
+    expect(JSON.parse(res.body)).toEqual({ error: "E_AUTH" });
+    expect(kit.prefs.setCalls).toHaveLength(0);
+    expect(kit.prefs.get()).toBe("p1/old");
+  });
+
+  it("GET /api/headless/prefs ⇒ 404 after auth (the prefs ride GET /api/headless)", async () => {
+    const res = await headlessGet("/api/headless/prefs");
     expect(res.status).toBe(404);
   });
 });

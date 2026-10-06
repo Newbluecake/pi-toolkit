@@ -354,6 +354,9 @@ describe("auditSpawn (web-hub-spawn plan §SP9, arch §6.6)", () => {
       "attempts",
       "identity",
       "reaper",
+      "model",
+      "from",
+      "to",
     ]);
     // negative (U7): neither the keys nor the audit source may carry raw text/stderr writers
     expect(SPAWN_AUDIT_KEYS).not.toContain("text");

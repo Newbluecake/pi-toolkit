@@ -24,6 +24,7 @@
 import { readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import {
+  parseSpawnModelRef,
   SPAWN_NONTERMINAL_MAX,
   SPAWN_TERMINAL_KEEP,
   type FirstPromptState,
@@ -63,6 +64,7 @@ const HINTS: ReadonlySet<string> = new Set([
   "cwd-mismatch",
   "protocol-error",
   "launcher-changed",
+  "model-rejected",
 ]);
 const FIRST_PROMPT_STATES: ReadonlySet<string> = new Set(["pending", "sending", "delivered", "failed", "expired"]);
 
@@ -113,6 +115,10 @@ export interface StoredRecord {
   bootId?: string;
   uid?: number;
   agentKey?: string;
+  /** default-model plan D3: the effective `provider/id` the child was forked with (`--model`);
+   * absent ⇒ pi's own default. Non-sensitive (parseSpawnModelRef-validated before it ever got
+   * here); recovery never re-forks, so it is purely display + faithful-retry data. */
+  model?: string;
   endReason?: SpawnEndReason | null;
   exit?: StoredExit | null;
   hint?: SpawnHint | null;
@@ -277,6 +283,10 @@ function isRecordShapeOk(v: unknown): v is StoredRecord {
   if (v["bootId"] !== undefined && typeof v["bootId"] !== "string") return false;
   if (v["agentKey"] !== undefined && typeof v["agentKey"] !== "string") return false;
   if (v["stderrLog"] !== undefined && typeof v["stderrLog"] !== "string") return false;
+  // default-model plan D3: TYPE only here — a string that fails parseSpawnModelRef is dropped
+  // from that ONE record after load (see `sanitizeModel` below), never corrupt-whole-file: the
+  // rest of the record still feeds kill decisions that must not be lost over a display field.
+  if (v["model"] !== undefined && typeof v["model"] !== "string") return false;
   // web-hub-delete-session plan v2 §2.2/§2.6/§2.1(C1): unknown-to-an-old-hub fields, so an
   // absent key is always fine (forward-compat); when present the value must be exactly what
   // this format defines — a shape violation anywhere treats the WHOLE file as corrupt (same
@@ -505,6 +515,11 @@ export function createSpawnStore(deps: SpawnStoreDeps): SpawnStore {
         for (const item of rawRecords) {
           if (!isRecordShapeOk(item)) throw new Error("bad-record");
           loadedRecords.push(item);
+        }
+        // default-model plan §3 (store row): a persisted `model` that no longer parses is
+        // dropped from that record — the record itself stays ("非法丢字段留记录").
+        for (const rec of loadedRecords) {
+          if (rec.model !== undefined && parseSpawnModelRef(rec.model) === null) delete rec.model;
         }
         const rawWriter = parsed["writer"];
         if (rawWriter !== undefined) {

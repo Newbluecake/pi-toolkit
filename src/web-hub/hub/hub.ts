@@ -37,6 +37,7 @@ import {
   DIALOG_BG_HUB_CAPS,
   RUNTX_HUB_CAPS,
   SPAWN_HUB_CAP,
+  SPAWN_MODEL_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
 } from "../protocol/version.js";
@@ -62,6 +63,7 @@ import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/f
 import type { SpawnFrontendPort } from "./spawn/ports.js";
 import { createReaper, type Reaper } from "./spawn/reaper.js";
 import { createSpawnRoutes } from "./spawn/routes.js";
+import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
 import { createSpawnStore } from "./spawn/store.js";
 import { createSpawnSupervisor, type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
@@ -206,12 +208,18 @@ export async function startHub(
     // `config.spawn` exists — even when the platform probe or launcher check failed (the UI
     // needs the cap to explain WHY spawn is unavailable, `GET /api/headless` carries the
     // `policy.reason`). Absent (feature off) ⇒ caps stay byte-identical to pre-SP10.
+    // web-hub-spawn default-model plan §2/D4: `spawn.model.v1` joins the SAME conditional tail
+    // (prefs endpoint + `model` tri-state + the record vocabulary) — an old browser ignores the
+    // unknown string (`caps.includes`), and a browser without it MUST NOT send `model` anywhere
+    // (the pre-feature schema is `additionalProperties:false` ⇒ an old hub would 400).
     // web-hub-preview plan v3 §4.1/§4.7 (PV3): the two preview caps ride the same two surfaces
-    // (same array instance — the §4.7 "两处声明的集合必须一致" invariant): `preview.v1` whenever
-    // `config.preview` exists (mode loopback OR on), `preview.lan.v1` only when mode is on.
-    // Absent (mode off) ⇒ caps stay byte-identical to pre-PV3.
+    // (同源数组展开，集合与顺序一致 — the §4.7 "两处声明的集合必须一致" invariant; the two consumers
+    // each SPREAD this one source array, so they are not the same array instance, but the sets
+    // and order can never drift): `preview.v1` whenever `config.preview` exists (mode loopback
+    // OR on), `preview.lan.v1` only when mode is on. Absent (mode off) ⇒ caps stay
+    // byte-identical to pre-PV3.
     const extraHubCaps: readonly string[] = [
-      ...(config.spawn === undefined ? [] : [SPAWN_HUB_CAP]),
+      ...(config.spawn === undefined ? [] : [SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP]),
       ...(config.preview === undefined ? [] : [PREVIEW_HUB_CAP]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
     ];
@@ -309,9 +317,10 @@ export async function startHub(
       now,
       httpPort: () => httpPort,
       admin,
-      // web-hub-spawn plan §SP10 (arch §7.1): the SAME array instance feeds both this
+      // web-hub-spawn plan §SP10 (arch §7.1): the SAME source array feeds both this
       // agent-facing `hello_ack.caps` and the browser-facing `HubInfo.caps` below — the two
-      // surfaces are frozen-protocol twins (§3.1 compat matrix) and can never drift.
+      // consumers each spread it (同源数组展开，集合/顺序一致，非同一实例), so the two surfaces are
+      // frozen-protocol twins (§3.1 compat matrix) and can never drift.
       extraHubCaps,
       // C10/C8: every hello is also a rotate-intent recovery opportunity. The
       // callback is assigned before the first listener can accept a connection.
@@ -337,9 +346,10 @@ export async function startHub(
       // ask-user-async plan §7.2 (P3): DIALOG_BG_HUB_CAPS joins the same two surfaces the same
       // way — it gates `dialogs.closed[].by === "background"` (agents degrade to "abort"
       // against hubs without the cap).
-      // web-hub-spawn plan §SP10: `extraHubCaps` (spawn.v1, only when `config.spawn` exists) is
-      // the same array instance `agent-server.ts` appends to `hello_ack.caps` — same
-      // append-only pattern as UPLOAD/DIALOG_BG before it.
+      // web-hub-spawn plan §SP10: `extraHubCaps` (spawn.v1 + spawn.model.v1, only when
+      // `config.spawn` exists) is the same source array `agent-server.ts` spreads into
+      // `hello_ack.caps` — 同源数组展开（集合/顺序一致，非同一实例），same append-only pattern as
+      // UPLOAD/DIALOG_BG before it.
       // fleet-drawer plan §5.3 (F3b): RUNTX_HUB_CAPS joins the same two surfaces the same way
       // (§8.4's caps-coexist test pins the set equality).
       caps: [
@@ -470,6 +480,12 @@ export async function startHub(
     if (config.spawn !== undefined) {
       const spawnCfg = config.spawn;
       const spawnFiles = webHubSpawnFiles(paths.stateDir);
+      // default-model plan §3/§3.1 (D1): the hub-wide 「新建会话默认模型」 preference — one
+      // global value under <stateDir>/spawn-prefs.json, loaded synchronously HERE (hub boot,
+      // the one and only load), served by GET /api/headless's `prefs` and written synchronously
+      // by POST /api/headless/prefs. `close()` is a no-op by design (no pending writes), so it
+      // needs no cleanup entry.
+      const spawnPrefs = createSpawnPrefs({ file: spawnFiles.prefsJson, log });
       const platform = probePlatform(deps.spawnSeams?.probe);
       if (!platform.ok) {
         // §7.1 fail closed: caps still carry spawn.v1 (so the UI can explain), but supervisor
@@ -556,6 +572,7 @@ export async function startHub(
         supervisor: spawnSup,
         dirs: spawnDirs,
         firstPrompt: firstPromptFwd,
+        prefs: spawnPrefs,
         cfg: spawnCfg,
         limit: createCmdLimit(now),
         rejectAudit429: new Map(),

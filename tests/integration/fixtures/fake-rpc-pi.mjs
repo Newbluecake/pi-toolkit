@@ -20,6 +20,14 @@
  * so `/proc/<pid>/cmdline` shows neither the script path nor `--mode` — the exact reason identity
  * verification (arch §7.4) never trusts cmdline.
  *
+ * default-model plan (H9): the hub forks a FIXED PREFIX + an optional `--model <ref>` TAIL
+ * (`<entry> --mode rpc [--model <ref>]`, two independent argv elements — never joined), so this
+ * fake honors `--model` too:
+ *   - `FAKE_ARGV_OUT=<path>` (env): write `process.argv` as JSON to that file, then continue.
+ *   - `--model nosuch/<…>`: pi's startup model-rejection shape — print
+ *     `Error: Model "nosuch/<…>" not found. Use --list-models to see available models.` to
+ *     stderr and exit 1 BEFORE the socket half (the D5 delayed-verdict cells).
+ *
  * Switches (all optional):
  *   --ignore-eof           stdin EOF does NOT exit (orphan-kill tests)
  *   --ignore-term          SIGTERM does NOT exit (reaper/recovery KILL ladder)
@@ -49,7 +57,8 @@ const require = createRequire(import.meta.url);
 process.title = "pi"; // real pi rewrites argv; cmdline must not leak "--mode" (arch §7.4)
 
 const argv = process.argv.slice(2);
-// Per-spawn switches: the hub forks a FIXED argv (`<entry> --mode rpc`), so behavior switches
+// Per-spawn switches: the hub forks a fixed-prefix argv (`<entry> --mode rpc` + the optional
+// default-model `--model <ref>` tail), so behavior switches
 // ride a file in the child's cwd (`.fake-pi-switches`, one switch per line) keyed by the test
 // that created the directory — the hub-side argv/env stay byte-identical to production.
 try {
@@ -70,6 +79,17 @@ const valueOf = (flag, fallback) => {
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fallback;
 };
 
+// default-model plan H9: dump the received argv (JSON) before anything else can exit.
+try {
+  const out = process.env.FAKE_ARGV_OUT;
+  if (out) {
+    const fs2 = await import("node:fs");
+    fs2.writeFileSync(out, JSON.stringify(process.argv));
+  }
+} catch {
+  /* argv dump is best-effort */
+}
+
 const log = (line) => {
   try {
     process.stderr.write(`${line}\n`);
@@ -77,6 +97,16 @@ const log = (line) => {
     /* stderr gone — nothing to do */
   }
 };
+
+// default-model plan H9: the startup model-rejection shape (a `nosuch/*` provider can never
+// resolve — pi prints `Error: Model "…" not found. …` and exits 1 before going live).
+{
+  const modelRef = valueOf("--model", "");
+  if (modelRef.startsWith("nosuch/")) {
+    log(`Error: Model "${modelRef}" not found. Use --list-models to see available models.`);
+    process.exit(1);
+  }
+}
 
 const now = () => Date.now();
 const nonce = `fp${process.pid.toString(36).padStart(8, "0").slice(-8)}nonceAAAAAAAA`;
