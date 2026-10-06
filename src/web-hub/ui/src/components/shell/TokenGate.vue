@@ -19,14 +19,14 @@ function reload(): void {
 
 <template>
   <main class="login-page">
-    <div v-if="reason === 'token-invalid'" class="login-card">
+    <div v-if="reason === 'token-invalid'" class="login-card login-card--center">
       <EmptyState
         icon="key"
         :title="t('login.tokenInvalidTitle')"
         :body="`${t('login.tokenInvalidLead')} /webhub ${t('login.tokenInvalidTail')}`"
       />
     </div>
-    <div v-else class="login-card">
+    <div v-else class="login-card login-card--center">
       <div class="notice notice--danger" role="alert">
         <AppIcon name="alert" />
         <span class="notice-body">{{ t("notices.authUnknown") }}</span>
