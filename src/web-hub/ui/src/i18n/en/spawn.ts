@@ -42,6 +42,9 @@ const spawn = {
   pickerRecentError: "Could not load recent directories.",
   pickerPromptLabel: "First message (optional)",
   pickerPromptPlaceholder: "Sent automatically once the session is live",
+  // default-model plan F2 keys (added in F1 so F2 never touches i18n, plan §4)
+  pickerModelLabel: "Model (this session only)",
+  pickerModelDefault: "Default: {model}",
   pickerPromptTooLong: "First message is {n} bytes — over the 48 KiB limit",
   pickerSubmit: "Start",
   pickerSubmitting: "Starting…",
@@ -68,6 +71,9 @@ const spawn = {
   errFirstPrompt: "The first message could not be delivered",
   errUnsupported: "This hub does not offer headless sessions",
   errRetryAfter: "Retry in {n}s",
+  // default-model plan F1: hub-side 400 E_BAD_REQUEST{reason:"model-invalid"} (drift-only —
+  // the UI validates locally first)
+  errModelInvalid: "The model was rejected — use a valid provider/id",
 
   // --- SpawnConfirm ---
   confirmTitle: "Confirm the real directory",
@@ -99,6 +105,8 @@ const spawn = {
   hintCwdMismatch: "The process started in a different directory — it was stopped",
   hintProtocolError: "The process spoke an unexpected protocol — it was stopped",
   hintLauncherChanged: "The pi launcher changed on disk — run /webhub restart",
+  // default-model plan D5: pi rejected `--model` at startup (not found / ambiguous)
+  hintModelRejected: "The model was rejected by pi — pick another default in Settings",
 
   // --- AgentCard managed badge (inline marker — English token in both languages) ---
   badgeWeb: "web",

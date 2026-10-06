@@ -26,7 +26,7 @@
  * `@protocol/spawn.ts` itself is only ever referenced through JSDoc `import()` TYPES here —
  * it pulls typebox at runtime and this module doesn't need a single runtime value from it.
  */
-import { SPAWN_HUB_CAP } from "@protocol/version.ts";
+import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP } from "@protocol/version.ts";
 
 /**
  * @typedef {import("../../../protocol/spawn.js").SpawnPolicyWire} SpawnPolicyWire
@@ -64,6 +64,40 @@ const DENIED_KEYS = {
   reaper: "spawn.deniedReaper",
   cooldown: "spawn.deniedCooldown",
   breaker: "spawn.deniedBreaker",
+};
+
+/**
+ * default-model plan F1 (D4): does the hub advertise `spawn.model.v1` — i.e. may the UI send
+ * `model` on `POST /api/headless` and call `POST /api/headless/prefs` at all? A hub WITHOUT
+ * the cap must never see either (the pre-feature schema is `additionalProperties: false` ⇒
+ * 400), so every producer gates on this; unknown caps are ignored by construction.
+ * @param {unknown} hubCaps @returns {boolean}
+ */
+export function spawnModelSupported(hubCaps) {
+  return Array.isArray(hubCaps) && hubCaps.includes(SPAWN_MODEL_HUB_CAP);
+}
+
+/**
+ * `SpawnHint` → its `spawn.hint*` i18n key (SpawnRow's hint line, DirPicker's failure detail).
+ * default-model plan F1 adds `"model-rejected"` (D5's post-terminal annotation). An unknown
+ * hint degrades safely to `undefined` — callers fall back to the raw hint string / message.
+ * @param {unknown} hint @returns {string | undefined}
+ */
+export function spawnHintKey(hint) {
+  if (typeof hint !== "string") return undefined;
+  return HINT_KEYS[hint];
+}
+
+/** @type {Record<string, string>} */
+const HINT_KEYS = {
+  "register-timeout-hello": "spawn.hintRegisterTimeoutHello",
+  "register-timeout-session": "spawn.hintRegisterTimeoutSession",
+  "control-off": "spawn.hintControlOff",
+  "newer-plugin": "spawn.hintNewerPlugin",
+  "cwd-mismatch": "spawn.hintCwdMismatch",
+  "protocol-error": "spawn.hintProtocolError",
+  "launcher-changed": "spawn.hintLauncherChanged",
+  "model-rejected": "spawn.hintModelRejected",
 };
 
 /**
@@ -154,7 +188,7 @@ export function newSessionActions({ hubCaps, listResult, selected } = {}) {
  * typebox at runtime; this file stays typebox-free, same rationale as every other hardcoded
  * wire literal already here).
  * @param {any} outcome
- * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "deadline" | "network" | "gone" | undefined}
+ * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "deadline" | "network" | "gone" | "model" | undefined}
  */
 export function classifySpawnError(outcome) {
   if (!outcome || typeof outcome !== "object" || outcome.ok === true) return undefined;
@@ -162,6 +196,10 @@ export function classifySpawnError(outcome) {
     case "E_CONFIRM_REQUIRED":
       return "confirm";
     case "E_BAD_REQUEST":
+      // default-model plan F1: the hub rejected the `model` ref (`parseSpawnModelRef` failed
+      // hub-side — the UI validates locally first, so reaching this means drift). Own bucket,
+      // checked alongside spawn-gone before the generic "dir" fallback.
+      if (outcome.reason === "model-invalid") return "model";
       return outcome.reason === "spawn-gone" ? "gone" : "dir";
     case "E_DIR":
       return "dir";

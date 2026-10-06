@@ -14,6 +14,7 @@ import type {
   DirEntryWire,
   SpawnAccepted,
   SpawnPolicyWire,
+  SpawnPrefsWire,
   SpawnRecordPublic,
   SpawnRequestBody,
   SpawnState,
@@ -165,9 +166,35 @@ export type SpawnOutcome =
     };
 
 export type SpawnListOutcome =
-  | { readonly ok: true; readonly policy: SpawnPolicyWire; readonly items: readonly SpawnRecordPublic[] }
+  | {
+      readonly ok: true;
+      readonly policy: SpawnPolicyWire;
+      readonly items: readonly SpawnRecordPublic[];
+      /** default-model plan F1 (D1/D2): the hub-wide 「新建会话默认模型」 preference riding
+       * `GET /api/headless` (H2). Absent on a pre-feature hub — every reader treats a missing
+       * field as "unknown", never as "cleared". */
+      readonly prefs?: SpawnPrefsWire;
+    }
   /** 404 rides verbatim (arch §8.3: feature off / LAN `lan:"off"` ⇒ UI treats pick-dir as unavailable). */
   | { readonly ok: false; readonly error: string; readonly status: number };
+
+/**
+ * default-model plan F1 (§3 ④): `POST /api/headless/prefs`'s outcome — 200 `{prefs}` rides as
+ * the ok half; the error half keeps the wire `reason` (`"model-invalid"` on a 400
+ * `E_BAD_REQUEST`) and `status` so the settings card can distinguish a local-validation echo
+ * from a persist failure (503 `E_LAUNCHER{reason:"persist"}`). `status` is 0 for client-local
+ * codes (`E_NETWORK` / `E_DEADLINE` / `E_UNSUPPORTED`).
+ */
+export type SpawnPrefsOutcome =
+  | { readonly ok: true; readonly prefs: SpawnPrefsWire }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly message?: string;
+      readonly retryable: boolean;
+      readonly reason?: string;
+      readonly status?: number;
+    };
 
 export type SpawnDirsOutcome =
   | { readonly ok: true; readonly recent: readonly DirEntryWire[]; readonly partial?: true }
@@ -182,6 +209,12 @@ export interface SpawnTransport {
   dirs(): Promise<SpawnDirsOutcome>;
   start(req: SpawnRequestBody): Promise<SpawnOutcome>;
   stop(spawnId: string, force?: boolean): Promise<SpawnStopOutcome>;
+  /** default-model plan F1 (§3 ④): `POST /api/headless/prefs` — set (`provider/id`) or clear
+   * (`""`) the hub-wide default model. Optional per the frozen-transport convention (test
+   * fakes / a pre-feature transport may omit it — `createSpawn` degrades a missing method to
+   * `E_UNSUPPORTED`, and the settings card never calls it without the `spawn.model.v1` cap).
+   * Both real adapters always provide it. */
+  setPrefs?(defaultModel: string): Promise<SpawnPrefsOutcome>;
 }
 
 // ---------------------------------------------------------------------------

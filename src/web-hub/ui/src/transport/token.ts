@@ -29,6 +29,7 @@ import type {
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
+  SpawnPrefsOutcome,
   SpawnStopOutcome,
   SpawnTransport,
   UploadBeginOk,
@@ -153,6 +154,10 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       start: (req) => withAuthNotice(deps, () => client.spawn.start(req) as Promise<SpawnOutcome>),
       stop: (spawnId, force) =>
         withAuthNotice(deps, () => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>),
+      // default-model plan F1 (§3 ④): POST /api/headless/prefs — same thin-cast rule (the
+      // client already replayed a 401 through `withRelogin`; the write is idempotent).
+      setPrefs: (defaultModel) =>
+        withAuthNotice(deps, () => client.spawn.setPrefs(defaultModel) as Promise<SpawnPrefsOutcome>),
     } satisfies SpawnTransport,
     // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`
     // — the same final-E_AUTH rule as upload/spawn (the client already replayed once through

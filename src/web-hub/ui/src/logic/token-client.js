@@ -547,6 +547,19 @@ export function createClient(deps) {
   }
 
   /**
+   * default-model plan F1 (D1): narrow `GET /api/headless`'s optional `prefs` slot — only a
+   * well-formed `{defaultModel: string|null}` rides through; anything else (a pre-feature hub
+   * sends nothing, a corrupt one sends garbage) drops the field entirely so every reader can
+   * trust the typed shape.
+   * @param {any} d
+   */
+  function narrowPrefs(d) {
+    const p = d !== null && typeof d === "object" ? d.prefs : undefined;
+    if (p === null || typeof p !== "object") return {};
+    return { prefs: { defaultModel: typeof p.defaultModel === "string" ? p.defaultModel : null } };
+  }
+
+  /**
    * The four `/api/headless*` endpoints (arch §8.2). All ride `withRelogin` — a 401 re-logs in
    * silently with the stored token and replays: `start` is idempotent by `id` (hub LRU ⇒
    * `dup:true`, plan §3.2), `stop` is idempotent on a terminal record (202 with the current
@@ -563,7 +576,7 @@ export function createClient(deps) {
         const out = await spawnFromResponse(r);
         if (out.ok === false) return { ok: false, error: out.error, status: out.status };
         const d = out.data;
-        return { ok: true, policy: d.policy, items: Array.isArray(d.items) ? d.items : [] };
+        return { ok: true, policy: d.policy, items: Array.isArray(d.items) ? d.items : [], ...narrowPrefs(d) };
       } catch (e) {
         return spawnFromError(e);
       }
@@ -613,6 +626,30 @@ export function createClient(deps) {
         return { ok: true, state: typeof d.state === "string" ? d.state : "stopping" };
       } catch (e) {
         return { ok: false, error: spawnFromError(e).error };
+      }
+    },
+    /**
+     * default-model plan F1 (§3 ④): `POST /api/headless/prefs`. `""` clears the preference
+     * (explicit pi default); a non-empty value is a `parseSpawnModelRef`-valid `provider/id`
+     * (the settings card validates locally first — a 400 `E_BAD_REQUEST{reason:"model-invalid"}`
+     * here means the two sides drifted). Rides `withRelogin` like the other four endpoints
+     * (idempotent: the same value simply re-persists). 200 `{prefs}` is the authoritative
+     * post-write value and rides back verbatim (narrowed).
+     * @param {string} defaultModel @returns {Promise<any>}
+     */
+    async setPrefs(defaultModel) {
+      try {
+        const r = await withRelogin(() => postRaw(API.headlessPrefs, { defaultModel }, CMD_REQUEST_TIMEOUT_MS));
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) {
+          const { status: _status, ...rest } = out;
+          return rest;
+        }
+        const p = out.data && typeof out.data.prefs === "object" && out.data.prefs !== null ? out.data.prefs : {};
+        return { ok: true, prefs: { defaultModel: typeof p.defaultModel === "string" ? p.defaultModel : null } };
+      } catch (e) {
+        const { status: _status, ...rest } = spawnFromError(e);
+        return rest;
       }
     },
   };

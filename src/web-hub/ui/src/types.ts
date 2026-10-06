@@ -25,16 +25,20 @@ import type {
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
+  SpawnPrefsOutcome,
   SpawnStopOutcome,
   SpawnTransport,
 } from "./transport/types.js";
-import type { FirstPromptState, SpawnsPayload } from "@protocol/spawn.js";
+import type { FirstPromptState, SpawnPrefsWire, SpawnsPayload } from "@protocol/spawn.js";
 
 export type { ConnState };
 // Re-exported so a component only needs `import type { … } from "./types.js"` — never a
 // second, possibly-drifting import path for the same type (same rule as `HistoryPayload` in
 // `contracts.ts`).
 export type { RemoveAgentOutcome, RemoveTarget, SpawnDirsOutcome, SpawnListOutcome, SpawnOutcome, SpawnStopOutcome };
+// default-model plan F1: the prefs outcome/wire shapes (SpawnRow/SettingsView consume them
+// through this single re-export, same no-second-import-path rule as above).
+export type { SpawnPrefsOutcome, SpawnPrefsWire };
 // todo-web §4 (T4): the detail TodoPanel's prop type. `import type` only — the protocol
 // module never becomes a runtime dependency of the UI bundle through this file.
 export type { TodoTaskWire, TodoWire };
@@ -413,12 +417,18 @@ export type NewSessionFailKind =
   | "deadline"
   | "network"
   | "gone"
+  | "model" // default-model plan F1: hub-side 400 E_BAD_REQUEST{reason:"model-invalid"}
   | "spawn" // the record itself went failed/exited (hint/endReason carry the detail)
   | "first-prompt"; // the session died before/while the first prompt could be delivered
 
 export interface NewSessionInput {
   readonly cwd: string;
   readonly firstPrompt?: { readonly text: string; readonly deliver?: "steer" | "followUp" };
+  /** default-model plan F1 (D2 tri-state): `provider/id` ⇒ use it; `""` ⇒ explicit pi default;
+   * ABSENT ⇒ the hub preference resolves. `useNewSession` only ever puts it on the wire when
+   * the hub advertises `spawn.model.v1` (the second cap guard — D4), so a caller may set it
+   * unconditionally. */
+  readonly model?: string;
 }
 
 /** The flow's mirror of the record's `firstPrompt` slot (plan §3.2 首条消息结果 row). */
@@ -504,6 +514,14 @@ export interface NewSessionHandle {
 /** `HubHandle.spawn` — arch §8.3's `SpawnTransport` plus the §3.2 orchestrator. */
 export interface HubSpawnHandle extends SpawnTransport {
   readonly newSession: NewSessionHandle;
+  /** default-model plan F1 (D1/D2): the last prefs any successful `list()`/`setDefaultModel()`
+   * returned (`null` until one does — a pre-feature hub never carries the slot). */
+  readonly prefs: Readonly<Ref<SpawnPrefsWire | null>>;
+  /** Refetch `GET /api/headless` and fold its `prefs` slot into {@link HubSpawnHandle.prefs}. */
+  refreshPrefs(): Promise<SpawnListOutcome>;
+  /** `POST /api/headless/prefs` (`""` clears); on success `prefs` updates to the 200 echo.
+   * Degrades to `E_UNSUPPORTED` on a transport without `setPrefs`. */
+  setDefaultModel(defaultModel: string): Promise<SpawnPrefsOutcome>;
 }
 
 // ---------------------------------------------------------------------------

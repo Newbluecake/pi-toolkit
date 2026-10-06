@@ -22,6 +22,7 @@ import type {
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
+  SpawnPrefsOutcome,
   SpawnStopOutcome,
   SpawnTransport,
   UploadBeginOk,
@@ -133,6 +134,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       dirs: () => client.spawn.dirs() as Promise<SpawnDirsOutcome>,
       start: (req) => client.spawn.start(req) as Promise<SpawnOutcome>,
       stop: (spawnId, force) => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>,
+      // default-model plan F1 (§3 ④): POST /api/headless/prefs — one-shot like the rest (the
+      // fetch wrapper's `isRestAuthEndpoint` covers `/api/headless*`, incl. `/prefs`).
+      setPrefs: (defaultModel) => client.spawn.setPrefs(defaultModel) as Promise<SpawnPrefsOutcome>,
     } satisfies SpawnTransport,
     // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`.
     // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an

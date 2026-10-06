@@ -20,6 +20,7 @@ import { computed, inject, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { removalTargetForSpawn } from "../../logic/remove.js";
+import { spawnHintKey, spawnModelSupported } from "../../logic/spawn.js";
 import type { SpawnRecordPublic } from "@protocol/spawn.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import "../../styles/spawn.css";
@@ -31,19 +32,10 @@ const { t } = useI18n();
 
 const hub = inject(HUB_CTX, null);
 
-const HINT_KEYS: Record<string, string> = {
-  "register-timeout-hello": "spawn.hintRegisterTimeoutHello",
-  "register-timeout-session": "spawn.hintRegisterTimeoutSession",
-  "control-off": "spawn.hintControlOff",
-  "newer-plugin": "spawn.hintNewerPlugin",
-  "cwd-mismatch": "spawn.hintCwdMismatch",
-  "protocol-error": "spawn.hintProtocolError",
-  "launcher-changed": "spawn.hintLauncherChanged",
-};
 const hintLabel = computed(() => {
   const hint = props.rec.hint;
   if (hint === undefined) return null;
-  const key = HINT_KEYS[hint];
+  const key = spawnHintKey(hint);
   return key !== undefined ? t(key) : hint;
 });
 const stateLabel = computed(() => (props.rec.state === "failed" ? t("spawn.stateFailed") : t("spawn.stateStarting")));
@@ -123,6 +115,14 @@ async function onToggleDetail(): Promise<void> {
 const retryBusy = ref(false);
 const retryDenied = ref(false);
 
+/** default-model plan F1 (D4): the hub frame's `spawn.model.v1` cap — gates the retry's
+ * `model` field (an old hub must never see it, its schema is `additionalProperties: false`). */
+const modelCap = computed(() => {
+  const h = hub?.state.value.hub;
+  const caps = h !== null && h !== undefined && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+  return spawnModelSupported(caps);
+});
+
 async function onRetry(): Promise<void> {
   const spawn = hub?.spawn;
   if (spawn === undefined || retryBusy.value) return;
@@ -134,7 +134,13 @@ async function onRetry(): Promise<void> {
       retryDenied.value = true;
       return;
     }
-    await spawn.newSession.submit({ cwd: owner.cwd });
+    await spawn.newSession.submit({
+      cwd: owner.cwd,
+      // default-model plan F1 (D2/D3): faithful retry replays the record's effective model
+      // (`""` = explicit pi default) — but ONLY while the hub advertises `spawn.model.v1`
+      // (D4; `useNewSession` re-guards the same cap before anything hits the wire).
+      ...(modelCap.value ? { model: props.rec.model ?? "" } : {}),
+    });
   } finally {
     retryBusy.value = false;
   }
@@ -148,6 +154,9 @@ async function onRetry(): Promise<void> {
       <AppIcon v-else name="alert" class="icon-sm" />
       <span class="chip chip-spawn" :data-state="rec.state" translate="no">{{ stateLabel }}</span>
       <span class="spawn-row-cwd" :title="rec.cwdLabel" translate="no">{{ rec.cwdLabel }}</span>
+      <!-- default-model plan F1 (D3): the effective fork model as an inline marker (English
+           token in both languages, AGENTS.md UI-text split) -->
+      <span v-if="rec.model" class="chip chip-mono" :title="rec.model" translate="no">{{ rec.model }}</span>
       <RemoveButton
         v-if="removeTarget"
         :target="{ spawnId: removeTarget.spawnId }"

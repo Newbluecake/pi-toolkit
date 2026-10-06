@@ -146,7 +146,10 @@
   z-index: 40; /* popover layer — same tier as `control/PickerSheet.vue`'s `.picker-scrim` */
   display: flex;
   flex-direction: column;
-  width: min(400px, calc(100vw - 24px));
+  /* default-model plan F1 (A1): widened from 400px so theme+font sit side by side and the
+   * default-model row breathes; the `32px` is a LITERAL (plan §9 #7 — no token indirection),
+   * so the computed width is exactly `min(720, innerWidth − 32)` px at every viewport. */
+  width: min(720px, calc(100vw - 32px));
   max-height: calc(100dvh - var(--topbar-h) - 24px);
   overflow: hidden;
   background: var(--c-surface);

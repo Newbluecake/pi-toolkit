@@ -17,6 +17,17 @@
  *   results for OTHER ids never affect it. Pure: the component feeds `{pendingCtl, ctl,
  *   session, now}` and renders the returned state.
  *
+ * default-model plan F1 (D7) additions — the settings card's model list:
+ * - `knownModelRefs(agents)` — union of every online agent's `session.models.items`, deduped
+ *   by `provider/id`, capped at {@link KNOWN_MODEL_REFS_CAP}.
+ * - `readModelCache(storage)` / `writeModelCache(storage, items)` — the `pwh_spawn_models_cache`
+ *   localStorage fallback for when no agent is online (storage INJECTED — this module stays
+ *   DOM-free; the source-scan localStorage allowlist never names it).
+ * - `isSpawnModelRef(s)` — reuses `@protocol/spawn.ts`'s frozen `parseSpawnModelRef` (default-
+ *   model plan §4's explicit call: the UI's local check and the hub's 400 gate can never
+ *   drift). Runtime imports keep the literal `.ts` extension — the same `.js`-importer
+ *   constraint `./contract.js` documents.
+ *
  * @typedef {{ provider: string, id: string, name?: string, ctx?: number,
  *   reasoning?: true, scoped?: true }} ModelOption
  * @typedef {{ status: string, items: ModelOption[], total: number, omitted?: number,
@@ -28,6 +39,12 @@
  * @typedef {{ kind: "idle" } | { kind: "pending" } | { kind: "unknown" }
  *   | { kind: "error", code: string, message?: string }} SwitchState
  */
+
+// The `.ts` extension is deliberate (see the header): a plain `.js` importer's `./foo.js`
+// specifier resolves literally, so the protocol module must be spelled out. This DOES pull
+// `@sinclair/typebox` into the browser bundle — sanctioned by default-model plan §4 (the
+// frozen parser is reused verbatim rather than hand-mirrored).
+import { parseSpawnModelRef } from "@protocol/spawn.ts";
 
 /** §5.2: no convergence evidence within this window ⇒ `unknown` (chip shows `?`, resend barred). */
 export const SWITCH_TIMEOUT_MS = 20_000;
@@ -328,4 +345,129 @@ export function snapshotAge(now, sampledAt) {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h`;
   return `${Math.floor(h / 24)}d`;
+}
+
+// ---------------------------------------------------------------------------
+// default-model plan F1 (D7) — the settings card's known-model list + cache
+// ---------------------------------------------------------------------------
+
+/** D7: the union of online agents' model lists is capped at this many entries. */
+export const KNOWN_MODEL_REFS_CAP = 160;
+
+/** D7: localStorage key for the last non-empty known-model list (`{provider,id,name?}[]`). */
+export const SPAWN_MODELS_CACHE_KEY = "pwh_spawn_models_cache";
+
+/**
+ * The settings card's datalist options (D7): the union of every ONLINE agent's
+ * `session.models.items` (via {@link modelsOf}'s defensive narrow), deduped by `provider/id`
+ * (first-seen order wins), capped at {@link KNOWN_MODEL_REFS_CAP}. Only `{provider, id, name?}`
+ * is kept — the cache never stores ctx/reasoning. `agents` is anything iterable of agent-ish
+ * values OR a Map (its `.values()` are used); offline (`down === true`) and malformed entries
+ * are skipped. Garbage in ⇒ `[]` out.
+ * @param {unknown} agents @returns {ModelOption[]}
+ */
+export function knownModelRefs(agents) {
+  /** @type {unknown} */
+  let iterable = agents;
+  if (agents !== null && typeof agents === "object" && typeof agents.values === "function") {
+    iterable = agents.values();
+  }
+  if (iterable === null || typeof iterable !== "object" || typeof iterable[Symbol.iterator] !== "function") return [];
+  /** @type {ModelOption[]} */
+  const out = [];
+  const seen = new Set();
+  for (const agent of /** @type {Iterable<unknown>} */ (iterable)) {
+    if (out.length >= KNOWN_MODEL_REFS_CAP) break;
+    if (!agent || typeof agent !== "object") continue;
+    const a = /** @type {Record<string, unknown>} */ (agent);
+    if (a.down === true) continue; // D7: 在线 agents only
+    const models = modelsOf(a.session);
+    if (models === null) continue;
+    for (const m of models.items) {
+      if (out.length >= KNOWN_MODEL_REFS_CAP) break;
+      const ref = `${m.provider}/${m.id}`;
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      /** @type {ModelOption} */
+      const item = { provider: m.provider, id: m.id };
+      if (typeof m.name === "string" && m.name !== "") item.name = m.name;
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+/**
+ * Read the cached model list (D7 fallback when no agent is online). Fully tolerant: a missing
+ * key, bad JSON, a non-array, or entries that fail {@link parseSpawnModelRef} all degrade to
+ * `[]` (entries are dropped individually, the rest survive). Never throws.
+ * @param {{ getItem(key: string): string | null } | null | undefined} storage
+ * @returns {ModelOption[]}
+ */
+export function readModelCache(storage) {
+  if (storage === null || storage === undefined || typeof storage.getItem !== "function") return [];
+  let raw;
+  try {
+    raw = storage.getItem(SPAWN_MODELS_CACHE_KEY);
+  } catch {
+    return [];
+  }
+  if (typeof raw !== "string" || raw === "") return [];
+  /** @type {unknown} */
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  /** @type {ModelOption[]} */
+  const out = [];
+  for (const it of parsed) {
+    if (out.length >= KNOWN_MODEL_REFS_CAP) break;
+    if (!it || typeof it !== "object" || Array.isArray(it)) continue;
+    const o = /** @type {Record<string, unknown>} */ (it);
+    if (typeof o.provider !== "string" || typeof o.id !== "string") continue;
+    if (parseSpawnModelRef(`${o.provider}/${o.id}`) === null) continue;
+    /** @type {ModelOption} */
+    const item = { provider: o.provider, id: o.id };
+    if (typeof o.name === "string" && o.name !== "") item.name = o.name;
+    out.push(item);
+  }
+  return out;
+}
+
+/**
+ * Persist the known list (D7: written only when NON-EMPTY — an empty online union must never
+ * clobber the last good cache). Strips every field but `{provider, id, name?}` and caps at
+ * {@link KNOWN_MODEL_REFS_CAP}. Best-effort: a throwing/quota-full storage is swallowed.
+ * @param {{ setItem(key: string, value: string): void } | null | undefined} storage
+ * @param {readonly ModelOption[]} items @returns {boolean} whether a write happened
+ */
+export function writeModelCache(storage, items) {
+  if (storage === null || storage === undefined || typeof storage.setItem !== "function") return false;
+  if (!Array.isArray(items) || items.length === 0) return false;
+  const slim = items.slice(0, KNOWN_MODEL_REFS_CAP).map((m) => {
+    /** @type {ModelOption} */
+    const item = { provider: m.provider, id: m.id };
+    if (typeof m.name === "string" && m.name !== "") item.name = m.name;
+    return item;
+  });
+  try {
+    storage.setItem(SPAWN_MODELS_CACHE_KEY, JSON.stringify(slim));
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Local validation for the settings card's free-typed model (default-model plan §4): exactly
+ * the hub's own gate (`@protocol/spawn.ts`'s frozen `parseSpawnModelRef`) — the UI never
+ * 400s itself on a ref the hub would have accepted, nor vice versa. `""` is NOT valid here;
+ * callers treat it as the explicit 「pi 默认」 tri-state BEFORE calling this.
+ * @param {unknown} s @returns {boolean}
+ */
+export function isSpawnModelRef(s) {
+  return typeof s === "string" && parseSpawnModelRef(s) !== null;
 }

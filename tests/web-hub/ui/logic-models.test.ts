@@ -6,11 +6,17 @@ import {
   ctxBadge,
   filterModels,
   groupByProvider,
+  isSpawnModelRef,
+  knownModelRefs,
   modelsOf,
+  readModelCache,
   shortModelLabel,
   snapshotAge,
   switchErrorKey,
   trackSwitch,
+  writeModelCache,
+  KNOWN_MODEL_REFS_CAP,
+  SPAWN_MODELS_CACHE_KEY,
   SWITCH_TIMEOUT_MS,
 } from "../../../src/web-hub/ui/src/logic/models.js";
 
@@ -293,5 +299,144 @@ describe("ctxBadge / snapshotAge (compact English tokens)", () => {
     expect(snapshotAge(t0 + 2 * 86_400_000, t0)).toBe("2d");
     expect(snapshotAge(t0, 0)).toBe("?");
     expect(snapshotAge("x", t0)).toBe("?");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan F1 (D7): knownModelRefs / model cache / isSpawnModelRef
+// ---------------------------------------------------------------------------
+
+describe("knownModelRefs (D7 union of online agents' session.models.items)", () => {
+  const agent = (items: unknown[], extra: Record<string, unknown> = {}) => ({
+    down: false,
+    session: {
+      models: {
+        status: "ok",
+        items,
+        total: (items as unknown[]).length,
+        policy: { model: "allow", thinking: "allow" },
+        sampledAt: 1,
+      },
+    },
+    ...extra,
+  });
+  const opt = (provider: string, id: string, name?: string) => ({
+    provider,
+    id,
+    ...(name !== undefined ? { name } : {}),
+  });
+
+  it("unions across agents, dedupes by provider/id (first-seen wins), keeps {provider,id,name?} only", () => {
+    const agents = new Map([
+      ["A", agent([opt("anthropic", "claude-opus-4-5", "Opus"), opt("openai", "gpt-5")])],
+      ["B", agent([opt("openai", "gpt-5", "GPT 5 (other name)"), opt("zai", "glm-5")])],
+    ]);
+    expect(knownModelRefs(agents)).toEqual([
+      { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" },
+      { provider: "openai", id: "gpt-5" },
+      { provider: "zai", id: "glm-5" },
+    ]);
+  });
+
+  it("skips offline (down) and models-less agents; accepts a plain array too", () => {
+    const online = agent([opt("p1", "m1")]);
+    expect(knownModelRefs([agent([opt("p0", "m0")], { down: true }), online, { down: false }, null])).toEqual([
+      { provider: "p1", id: "m1" },
+    ]);
+  });
+
+  it("caps at KNOWN_MODEL_REFS_CAP (160)", () => {
+    expect(KNOWN_MODEL_REFS_CAP).toBe(160); // plan D7's frozen cap
+    const items = Array.from({ length: 200 }, (_, i) => opt("p", `m${i}`));
+    expect(knownModelRefs([agent(items)])).toHaveLength(160);
+  });
+
+  it("garbage in ⇒ []", () => {
+    expect(knownModelRefs(undefined)).toEqual([]);
+    expect(knownModelRefs(null)).toEqual([]);
+    expect(knownModelRefs(42)).toEqual([]);
+    expect(knownModelRefs("agents")).toEqual([]);
+  });
+});
+
+describe("readModelCache / writeModelCache (D7 pwh_spawn_models_cache)", () => {
+  function fakeStorage(initial: Record<string, string> = {}) {
+    const map = new Map(Object.entries(initial));
+    return {
+      map,
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => void map.set(k, v),
+    };
+  }
+
+  it("round-trips a non-empty list, stripping extra fields", () => {
+    const s = fakeStorage();
+    const written = writeModelCache(s, [
+      { provider: "anthropic", id: "claude-opus-4-5", name: "Opus", ctx: 200000, reasoning: true },
+      { provider: "openai", id: "gpt-5" },
+    ] as never);
+    expect(written).toBe(true);
+    expect(JSON.parse(s.map.get(SPAWN_MODELS_CACHE_KEY)!)).toEqual([
+      { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" },
+      { provider: "openai", id: "gpt-5" },
+    ]);
+    expect(readModelCache(s)).toEqual([
+      { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" },
+      { provider: "openai", id: "gpt-5" },
+    ]);
+  });
+
+  it("an empty list is NEVER written (D7: must not clobber the last good cache)", () => {
+    const s = fakeStorage({ [SPAWN_MODELS_CACHE_KEY]: JSON.stringify([{ provider: "p", id: "m" }]) });
+    expect(writeModelCache(s, [])).toBe(false);
+    expect(readModelCache(s)).toEqual([{ provider: "p", id: "m" }]);
+  });
+
+  it("read tolerates a missing key, bad JSON, non-array, and invalid entries (dropped individually)", () => {
+    expect(readModelCache(fakeStorage())).toEqual([]);
+    expect(readModelCache(fakeStorage({ [SPAWN_MODELS_CACHE_KEY]: "not json" }))).toEqual([]);
+    expect(readModelCache(fakeStorage({ [SPAWN_MODELS_CACHE_KEY]: "{}" }))).toEqual([]);
+    const mixed = fakeStorage({
+      [SPAWN_MODELS_CACHE_KEY]: JSON.stringify([
+        { provider: "p", id: "m" },
+        { provider: "bad provider", id: "m" }, // whitespace ⇒ parseSpawnModelRef rejects
+        { provider: "p2" }, // no id
+        "garbage",
+        { provider: "p3", id: "m3", name: 42 }, // non-string name dropped
+      ]),
+    });
+    expect(readModelCache(mixed)).toEqual([
+      { provider: "p", id: "m" },
+      { provider: "p3", id: "m3" },
+    ]);
+  });
+
+  it("a throwing storage degrades both ways (never throws)", () => {
+    const boom = {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("quota");
+      },
+    };
+    expect(readModelCache(boom)).toEqual([]);
+    expect(writeModelCache(boom, [{ provider: "p", id: "m" }])).toBe(false);
+    expect(readModelCache(null)).toEqual([]);
+    expect(writeModelCache(undefined, [{ provider: "p", id: "m" }])).toBe(false);
+  });
+});
+
+describe("isSpawnModelRef (the hub's own parseSpawnModelRef, reused via @protocol)", () => {
+  it("accepts real refs and rejects exactly what the hub would", () => {
+    expect(isSpawnModelRef("anthropic/claude-opus-4-5")).toBe(true);
+    expect(isSpawnModelRef("openrouter/openai/gpt-4o:extended")).toBe(true);
+    expect(isSpawnModelRef("")).toBe(false); // "" is the tri-state clear, handled BEFORE this call
+    expect(isSpawnModelRef("no-slash")).toBe(false);
+    expect(isSpawnModelRef("-x/y")).toBe(false); // leading-dash provider (argv-flag confusion)
+    expect(isSpawnModelRef("a/ b")).toBe(false);
+    expect(isSpawnModelRef("a/b\n")).toBe(false);
+    expect(isSpawnModelRef(undefined)).toBe(false);
+    expect(isSpawnModelRef(42)).toBe(false);
   });
 });

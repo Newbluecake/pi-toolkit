@@ -669,6 +669,17 @@ export function createPasswordClient(deps) {
   }
 
   /**
+   * default-model plan F1 (D1): narrow `GET /api/headless`'s optional `prefs` slot (same rule
+   * as token-client's — only a well-formed `{defaultModel: string|null}` rides through).
+   * @param {any} d
+   */
+  function narrowPrefs(d) {
+    const p = d !== null && typeof d === "object" ? d.prefs : undefined;
+    if (p === null || typeof p !== "object") return {};
+    return { prefs: { defaultModel: typeof p.defaultModel === "string" ? p.defaultModel : null } };
+  }
+
+  /**
    * The four `/api/headless*` endpoints (arch §8.2), one-shot `postApi`/`request` calls — no
    * relogin dance (password mode has none). Unlike the upload namespace above, a 401 does NOT
    * call `deps.onConn("auth")` here: `transport/password.ts`'s fetch-wrapper `REST_AUTH_PATHS`
@@ -684,7 +695,7 @@ export function createPasswordClient(deps) {
         const out = await spawnFromResponse(r);
         if (out.ok === false) return { ok: false, error: out.error, status: out.status };
         const d = out.data;
-        return { ok: true, policy: d.policy, items: Array.isArray(d.items) ? d.items : [] };
+        return { ok: true, policy: d.policy, items: Array.isArray(d.items) ? d.items : [], ...narrowPrefs(d) };
       } catch (e) {
         return spawnFromError(e);
       }
@@ -732,6 +743,27 @@ export function createPasswordClient(deps) {
         return { ok: true, state: typeof d.state === "string" ? d.state : "stopping" };
       } catch (e) {
         return { ok: false, error: spawnFromError(e).error };
+      }
+    },
+    /**
+     * default-model plan F1 (§3 ④): `POST /api/headless/prefs`, one-shot like the rest of this
+     * client's spawn surface (the `isRestAuthEndpoint` wrapper covers `/api/headless*` — a 401
+     * is reported there, never here). `""` clears; 200 `{prefs}` rides back (narrowed).
+     * @param {string} defaultModel @returns {Promise<any>}
+     */
+    async setPrefs(defaultModel) {
+      try {
+        const r = await postApi(API.headlessPrefs, { defaultModel }, CMD_REQUEST_TIMEOUT_MS);
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) {
+          const { status: _status, ...rest } = out;
+          return rest;
+        }
+        const p = out.data && typeof out.data.prefs === "object" && out.data.prefs !== null ? out.data.prefs : {};
+        return { ok: true, prefs: { defaultModel: typeof p.defaultModel === "string" ? p.defaultModel : null } };
+      } catch (e) {
+        const { status: _status, ...rest } = spawnFromError(e);
+        return rest;
       }
     },
   };

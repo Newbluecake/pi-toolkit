@@ -1374,3 +1374,120 @@ describe("token transport: run-method 401 recovery (fleet-drawer §6.5 — withR
     expect(h.onConnCalls).not.toContain("auth");
   });
 });
+
+// ---------------------------------------------------------------------------
+// spawn prefs — default-model plan F1 (§3 ④: POST /api/headless/prefs), same suite both modes
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: spawn prefs (default-model plan F1 — identical wire both modes)", (_mode, make) => {
+  it("implements setPrefs on every adapter", () => {
+    const h = make(async () => resp(200));
+    expect(typeof h.transport.spawn!.setPrefs).toBe("function");
+  });
+
+  it("list(): a well-formed prefs slot rides; absent/malformed drops the field (unknown ≠ cleared)", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless"
+        ? resp(200, { policy: { allowed: true }, items: [], prefs: { defaultModel: "anthropic/claude-opus-4-5" } })
+        : resp(200),
+    );
+    expect(await h.transport.spawn!.list()).toEqual({
+      ok: true,
+      policy: { allowed: true },
+      items: [],
+      prefs: { defaultModel: "anthropic/claude-opus-4-5" },
+    });
+    const h2 = make(async (url) =>
+      url === "/api/headless" ? resp(200, { policy: { allowed: true }, items: [] }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.list()).toEqual({ ok: true, policy: { allowed: true }, items: [] });
+    const h3 = make(async (url) =>
+      url === "/api/headless"
+        ? resp(200, { policy: { allowed: true }, items: [], prefs: { defaultModel: 42 } })
+        : resp(200),
+    );
+    expect(await h3.transport.spawn!.list()).toEqual({
+      ok: true,
+      policy: { allowed: true },
+      items: [],
+      prefs: { defaultModel: null },
+    });
+  });
+
+  it("setPrefs(): POST /api/headless/prefs with X-PWH:1 and the verbatim {defaultModel} body; 200 {prefs} rides", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/prefs" ? resp(200, { prefs: { defaultModel: "openai/gpt-5" } }) : resp(200),
+    );
+    const r = await h.transport.spawn!.setPrefs!("openai/gpt-5");
+    expect(r).toEqual({ ok: true, prefs: { defaultModel: "openai/gpt-5" } });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless/prefs")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["Content-Type"]).toBe("application/json");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual({ defaultModel: "openai/gpt-5" });
+  });
+
+  it('setPrefs(""): the clear tri-state goes on the wire verbatim', async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/prefs" ? resp(200, { prefs: { defaultModel: null } }) : resp(200),
+    );
+    const r = await h.transport.spawn!.setPrefs!("");
+    expect(r).toEqual({ ok: true, prefs: { defaultModel: null } });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless/prefs")!;
+    expect(JSON.parse(call.init.body as string)).toEqual({ defaultModel: "" });
+  });
+
+  it('setPrefs(): 400 E_BAD_REQUEST{reason:"model-invalid"} keeps reason; 503 E_LAUNCHER{reason:"persist"} is retryable', async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/prefs" ? resp(400, { error: "E_BAD_REQUEST", reason: "model-invalid" }) : resp(200),
+    );
+    expect(await h.transport.spawn!.setPrefs!("bad ref")).toMatchObject({
+      ok: false,
+      error: "E_BAD_REQUEST",
+      reason: "model-invalid",
+      retryable: false,
+    });
+    const h2 = make(async (url) =>
+      url === "/api/headless/prefs" ? resp(503, { error: "E_LAUNCHER", reason: "persist" }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.setPrefs!("p/m")).toMatchObject({
+      ok: false,
+      error: "E_LAUNCHER",
+      reason: "persist",
+      retryable: true,
+    });
+  });
+
+  it("setPrefs(): network error ⇒ E_NETWORK retryable; a final 401 reports onConn('auth') once per call", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/prefs" ? Promise.reject(new TypeError("fetch failed")) : resp(200),
+    );
+    expect(await h.transport.spawn!.setPrefs!("p/m")).toMatchObject({ ok: false, error: "E_NETWORK", retryable: true });
+    const h2 = make(async (url) => (url === "/api/headless/prefs" ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    expect(await h2.transport.spawn!.setPrefs!("p/m")).toMatchObject({ ok: false, error: "E_AUTH" });
+    expect(h2.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+describe("token transport: setPrefs() 401 recovery (withRelogin — the write replays verbatim, same value re-persists)", () => {
+  it("a 401 with a stored token silently re-logs in and replays the SAME prefs body", async () => {
+    const h = makeToken(async (url) => {
+      if (url === "/api/login") return resp(200);
+      if (url === "/api/headless/prefs") {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn ? resp(200, { prefs: { defaultModel: "p/m" } }) : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const r = await h.transport.spawn!.setPrefs!("p/m");
+    expect(r).toEqual({ ok: true, prefs: { defaultModel: "p/m" } });
+    const posts = h.fetchCalls.filter((c) => c.url === "/api/headless/prefs");
+    expect(posts).toHaveLength(2);
+    expect(posts[0]!.init.body).toBe(posts[1]!.init.body);
+    expect(h.onConnCalls).not.toContain("auth");
+  });
+});

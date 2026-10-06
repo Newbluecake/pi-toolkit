@@ -22,7 +22,7 @@
   mobile). `settings-panel-title` is the `aria-labelledby` target the desktop popover points at.
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, inject, onMounted, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { IconName } from "../../icons/names.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -36,6 +36,10 @@ import {
 } from "../../composables/useFontScale.js";
 import { useDeliverDefault, type DeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "./themeStorage.js";
+import { isSpawnModelRef, knownModelRefs, readModelCache, writeModelCache } from "../../logic/models.js";
+import { spawnModelSupported } from "../../logic/spawn.js";
+import { SPAWN_HUB_CAP } from "@protocol/version.js";
+import { HUB_CTX } from "../control/controlContext.js";
 import type { ThemePref } from "../../types.js";
 import "../../styles/settings.css";
 
@@ -74,6 +78,92 @@ function onRangeInput(ev: Event): void {
 function onRangeChange(ev: Event): void {
   fontScale.setScale(rangeValue(ev)); // released — persist
 }
+
+// ---------------------------------------------------------------------------
+// default-model card (web-hub-spawn default-model plan F1, D1/D2/D4/D7): the hub-wide
+// 「新建会话默认模型」. Rendered only when the hub advertises `spawn.v1` at all; without
+// `spawn.model.v1` (an old hub) the card stays visible but DISABLED with an upgrade hint —
+// and the UI never sends `model`/`POST /api/headless/prefs` to such a hub (D4).
+// ---------------------------------------------------------------------------
+const hub = inject(HUB_CTX, null);
+const spawn = hub?.spawn;
+
+const hubCaps = computed<unknown>(() => {
+  const h = hub?.state.value.hub;
+  return h !== null && h !== undefined && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+});
+/** No `spawn.v1` ⇒ the whole card is absent (the hub has no managed sessions at all). */
+const spawnCap = computed(() => Array.isArray(hubCaps.value) && hubCaps.value.includes(SPAWN_HUB_CAP));
+/** No `spawn.model.v1` ⇒ disabled + upgrade hint; nothing model-shaped ever hits the wire. */
+const modelCap = computed(() => spawnModelSupported(hubCaps.value));
+
+const modelInput = ref("");
+type ModelSaveState = "idle" | "saving" | "saved" | "failed";
+const modelSaveState = ref<ModelSaveState>("idle");
+
+// D7's list: union of online agents' `session.models.items` (cache refreshed whenever it is
+// non-empty); the last non-empty cache covers the no-online-agent case.
+const storage = browserLocalStorage();
+const knownRefs = computed(() => knownModelRefs(hub?.state.value.agents));
+watch(
+  knownRefs,
+  (refs) => {
+    if (refs.length > 0) writeModelCache(storage, refs);
+  },
+  { immediate: true },
+);
+const modelOptions = computed(() => (knownRefs.value.length > 0 ? knownRefs.value : readModelCache(storage)));
+
+const modelTrimmed = computed(() => modelInput.value.trim());
+/** Live local validation (the hub's own `parseSpawnModelRef`, via `@logic/models.js`). */
+const modelInvalid = computed(() => modelTrimmed.value !== "" && !isSpawnModelRef(modelTrimmed.value));
+/** D7/R1 soft warning: a valid ref that no known list entry offers (typo-prone free input). */
+const modelNotInList = computed(
+  () =>
+    modelTrimmed.value !== "" &&
+    !modelInvalid.value &&
+    modelOptions.value.length > 0 &&
+    !modelOptions.value.some((m) => `${m.provider}/${m.id}` === modelTrimmed.value),
+);
+
+// Initialize the input from the hub preference once it is known (a later re-arrival must not
+// clobber an in-progress edit — after the first fill, only a successful save re-syncs).
+let modelInitialized = false;
+watch(
+  () => spawn?.prefs.value,
+  (p) => {
+    if (modelInitialized || p === null || p === undefined) return;
+    modelInitialized = true;
+    modelInput.value = p.defaultModel ?? "";
+  },
+  { immediate: true },
+);
+
+onMounted(() => {
+  if (modelCap.value && spawn !== undefined) void spawn.refreshPrefs();
+});
+
+watch(modelInput, () => {
+  if (modelSaveState.value !== "saving") modelSaveState.value = "idle";
+});
+
+async function saveDefaultModel(value: string): Promise<void> {
+  if (spawn === undefined || !modelCap.value || modelSaveState.value === "saving") return;
+  if (value !== "" && !isSpawnModelRef(value)) return; // the live invalid note already shows
+  modelSaveState.value = "saving";
+  const r = await spawn.setDefaultModel(value);
+  modelSaveState.value = r.ok ? "saved" : "failed";
+}
+
+function onModelSave(): void {
+  void saveDefaultModel(modelTrimmed.value);
+}
+
+/** 「使用 pi 默认」: clear the preference (the POST's `""` tri-state) and persist immediately. */
+function onModelUsePi(): void {
+  modelInput.value = "";
+  void saveDefaultModel("");
+}
 </script>
 
 <template>
@@ -92,69 +182,132 @@ function onRangeChange(ev: Event): void {
         </button>
       </header>
 
-      <section class="settings-card" :aria-label="t('settings.themeSection')">
-        <h2 class="settings-h">{{ t("settings.themeSection") }}</h2>
-        <div class="settings-options" role="radiogroup" :aria-label="t('settings.themeSection')">
-          <button
-            v-for="opt in THEME_OPTIONS"
-            :key="opt.value"
-            type="button"
-            role="radio"
-            :aria-checked="theme.pref.value === opt.value"
-            class="settings-option"
-            @click="theme.setPref(opt.value)"
-          >
-            <AppIcon :name="opt.icon" class="icon-sm" />
-            <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
-            <AppIcon v-if="theme.pref.value === opt.value" name="check" class="icon-sm settings-option-check" />
-          </button>
-        </div>
-      </section>
+      <div class="settings-grid">
+        <section class="settings-card" :aria-label="t('settings.themeSection')">
+          <h2 class="settings-h">{{ t("settings.themeSection") }}</h2>
+          <div class="settings-options" role="radiogroup" :aria-label="t('settings.themeSection')">
+            <button
+              v-for="opt in THEME_OPTIONS"
+              :key="opt.value"
+              type="button"
+              role="radio"
+              :aria-checked="theme.pref.value === opt.value"
+              class="settings-option"
+              @click="theme.setPref(opt.value)"
+            >
+              <AppIcon :name="opt.icon" class="icon-sm" />
+              <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
+              <AppIcon v-if="theme.pref.value === opt.value" name="check" class="icon-sm settings-option-check" />
+            </button>
+          </div>
+        </section>
 
-      <section class="settings-card" :aria-label="t('settings.fontSection')">
-        <h2 class="settings-h">{{ t("settings.fontSection") }}</h2>
-        <div class="settings-font">
-          <input
-            type="range"
-            :min="FONT_SCALE_MIN"
-            :max="FONT_SCALE_MAX"
-            :step="FONT_SCALE_STEP"
-            :value="fontScale.scale.value"
-            :aria-label="t('settings.fontSection')"
-            :aria-valuetext="`${pct}%`"
-            @input="onRangeInput"
-            @change="onRangeChange"
-          />
-          <span class="settings-font-readout" aria-hidden="true">{{ pct }}%</span>
-          <button type="button" class="btn btn-ghost settings-font-reset" @click="fontScale.reset()">
-            {{ t("shell.fontScale.reset") }}
-          </button>
-        </div>
-      </section>
-
-      <section class="settings-card" :aria-label="t('settings.deliverSection')">
-        <h2 class="settings-h">{{ t("settings.deliverSection") }}</h2>
-        <p class="settings-note">{{ t("settings.deliverHint") }}</p>
-        <div class="settings-options" role="radiogroup" :aria-label="t('settings.deliverSection')">
-          <button
-            v-for="opt in DELIVER_OPTIONS"
-            :key="opt.value"
-            type="button"
-            role="radio"
-            :aria-checked="deliverDefault.deliver.value === opt.value"
-            class="settings-option"
-            @click="deliverDefault.setDeliver(opt.value)"
-          >
-            <span class="settings-option-label" translate="no">{{ t(opt.labelKey) }}</span>
-            <span class="settings-option-hint">{{ t(opt.hintKey) }}</span>
-            <AppIcon
-              v-if="deliverDefault.deliver.value === opt.value"
-              name="check"
-              class="icon-sm settings-option-check"
+        <section class="settings-card" :aria-label="t('settings.fontSection')">
+          <h2 class="settings-h">{{ t("settings.fontSection") }}</h2>
+          <div class="settings-font">
+            <input
+              type="range"
+              :min="FONT_SCALE_MIN"
+              :max="FONT_SCALE_MAX"
+              :step="FONT_SCALE_STEP"
+              :value="fontScale.scale.value"
+              :aria-label="t('settings.fontSection')"
+              :aria-valuetext="`${pct}%`"
+              @input="onRangeInput"
+              @change="onRangeChange"
             />
-          </button>
-        </div>
-      </section>
+            <span class="settings-font-readout" aria-hidden="true">{{ pct }}%</span>
+            <button type="button" class="btn btn-ghost settings-font-reset" @click="fontScale.reset()">
+              {{ t("shell.fontScale.reset") }}
+            </button>
+          </div>
+        </section>
+
+        <section class="settings-card settings-card-wide" :aria-label="t('settings.deliverSection')">
+          <h2 class="settings-h">{{ t("settings.deliverSection") }}</h2>
+          <p class="settings-note">{{ t("settings.deliverHint") }}</p>
+          <div class="settings-options" role="radiogroup" :aria-label="t('settings.deliverSection')">
+            <button
+              v-for="opt in DELIVER_OPTIONS"
+              :key="opt.value"
+              type="button"
+              role="radio"
+              :aria-checked="deliverDefault.deliver.value === opt.value"
+              class="settings-option"
+              @click="deliverDefault.setDeliver(opt.value)"
+            >
+              <span class="settings-option-label" translate="no">{{ t(opt.labelKey) }}</span>
+              <span class="settings-option-hint">{{ t(opt.hintKey) }}</span>
+              <AppIcon
+                v-if="deliverDefault.deliver.value === opt.value"
+                name="check"
+                class="icon-sm settings-option-check"
+              />
+            </button>
+          </div>
+        </section>
+
+        <section
+          v-if="spawnCap"
+          class="settings-card settings-card-wide"
+          :aria-label="t('settings.defaultModelSection')"
+        >
+          <h2 class="settings-h">{{ t("settings.defaultModelSection") }}</h2>
+          <p class="settings-note">{{ t("settings.defaultModelHint") }}</p>
+          <p class="settings-note">{{ t("settings.defaultModelShared") }}</p>
+          <p v-if="!modelCap" class="settings-note settings-model-warn">{{ t("settings.defaultModelUnsupported") }}</p>
+          <div class="settings-model-row">
+            <input
+              v-model="modelInput"
+              type="text"
+              class="settings-model-input"
+              list="settings-model-options"
+              :placeholder="t('settings.defaultModelPlaceholder')"
+              :aria-label="t('settings.defaultModelSection')"
+              :disabled="!modelCap || modelSaveState === 'saving'"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              translate="no"
+            />
+            <datalist id="settings-model-options">
+              <option v-for="m in modelOptions" :key="`${m.provider}/${m.id}`" :value="`${m.provider}/${m.id}`">
+                {{ m.name ?? `${m.provider}/${m.id}` }}
+              </option>
+            </datalist>
+            <button
+              type="button"
+              class="btn btn-ghost"
+              :disabled="!modelCap || modelSaveState === 'saving'"
+              @click="onModelUsePi"
+            >
+              {{ t("settings.defaultModelUsePi") }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary"
+              :disabled="!modelCap || modelSaveState === 'saving' || modelInvalid"
+              @click="onModelSave"
+            >
+              {{ t("settings.defaultModelSave") }}
+            </button>
+          </div>
+          <p v-if="modelInvalid" class="settings-note settings-model-warn">{{ t("settings.defaultModelInvalid") }}</p>
+          <p v-else-if="modelNotInList" class="settings-note settings-model-warn">
+            {{ t("settings.defaultModelNotInList") }}
+          </p>
+          <p v-else-if="modelOptions.length === 0" class="settings-note">{{ t("settings.defaultModelNoList") }}</p>
+          <p v-if="modelSaveState !== 'idle'" class="settings-model-status" role="status">
+            {{
+              modelSaveState === "saving"
+                ? t("settings.defaultModelSaving")
+                : modelSaveState === "saved"
+                  ? t("settings.defaultModelSaved")
+                  : t("settings.defaultModelSaveFailed")
+            }}
+          </p>
+        </section>
+      </div>
     </div>
   </div>
 </template>

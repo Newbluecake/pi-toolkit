@@ -19,10 +19,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mount } from "@vue/test-utils";
+import { mount, flushPromises } from "@vue/test-utils";
+import { ref, shallowRef } from "vue";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import SettingsView from "../../../src/web-hub/ui/src/components/shell/SettingsView.vue";
 import TopBar from "../../../src/web-hub/ui/src/components/shell/TopBar.vue";
+import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 
 // NOTE: resolve via path, not `new URL(...)` — happy-dom replaces the URL global with one
 // that rejects file: URLs.
@@ -220,5 +222,232 @@ describe("TopBar settings entry (floating panel, revised 2026-10)", () => {
     expect(gear.find("use").attributes("href")).toBe("#i-gear");
     expect(wrapper.find(".theme-trigger").exists()).toBe(false);
     expect(wrapper.find(".fontscale-toggle").exists()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan F1 — the 「新建会话默认模型」 card
+// ---------------------------------------------------------------------------
+
+describe("SettingsView.vue — default model card (default-model plan F1)", () => {
+  const CAP = "spawn.v1";
+  const MODEL_CAP = "spawn.model.v1";
+
+  interface FakeHub {
+    hub: unknown;
+    prefs: import("vue").ShallowRef<{ defaultModel: string | null } | null>;
+    calls: { refresh: number; set: string[] };
+  }
+
+  function agentWithModels(items: Array<{ provider: string; id: string; name?: string }>) {
+    return {
+      down: false,
+      session: {
+        models: {
+          status: "ok",
+          items,
+          total: items.length,
+          policy: { model: "allow", thinking: "allow" },
+          sampledAt: 1,
+        },
+      },
+    };
+  }
+
+  function fakeHub(opts: {
+    caps: string[];
+    agents?: Map<string, unknown>;
+    prefs?: { defaultModel: string | null } | null;
+    listPrefs?: { defaultModel: string | null };
+    saveImpl?: (
+      v: string,
+    ) => Promise<{ ok: true; prefs: { defaultModel: string | null } } | { ok: false; error: string }>;
+  }): FakeHub {
+    const prefs = shallowRef(opts.prefs ?? null);
+    const calls = { refresh: 0, set: [] as string[] };
+    const hub = {
+      state: ref({ hub: { caps: opts.caps }, agents: opts.agents ?? new Map() }),
+      dispatch: () => {},
+      spawn: {
+        prefs,
+        refreshPrefs: async () => {
+          calls.refresh++;
+          if (opts.listPrefs !== undefined) prefs.value = opts.listPrefs;
+          return { ok: true, policy: { allowed: true }, items: [] };
+        },
+        setDefaultModel: async (v: string) => {
+          calls.set.push(v);
+          const r =
+            opts.saveImpl !== undefined
+              ? await opts.saveImpl(v)
+              : { ok: true as const, prefs: { defaultModel: v === "" ? null : v } };
+          if (r.ok) prefs.value = r.prefs;
+          return r;
+        },
+      },
+    };
+    return { hub, prefs, calls };
+  }
+
+  function mountWithHub(f: FakeHub) {
+    const wrapper = mount(SettingsView, {
+      attachTo: document.body,
+      global: { provide: { [HUB_CTX as symbol]: f.hub } },
+    });
+    mounted.push(wrapper);
+    return wrapper;
+  }
+
+  it("no spawn.v1 cap ⇒ the card is not rendered at all", () => {
+    const w = mountWithHub(fakeHub({ caps: [] }));
+    expect(w.find(".settings-model-input").exists()).toBe(false);
+    expect(w.text()).not.toContain("Default model for new sessions");
+  });
+
+  it("no hub injected (standalone mount) ⇒ the card is not rendered", () => {
+    const w = mountSettings();
+    expect(w.find(".settings-model-input").exists()).toBe(false);
+  });
+
+  it("spawn.v1 WITHOUT spawn.model.v1 (old hub) ⇒ disabled with the upgrade hint; nothing hits the wire", async () => {
+    const f = fakeHub({ caps: [CAP], prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    const input = w.find(".settings-model-input");
+    expect(input.exists()).toBe(true);
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(w.text()).toContain("/webhub restart"); // defaultModelUnsupported
+    expect(f.calls.refresh).toBe(0); // refreshPrefs gated on the model cap
+    const buttons = w.findAll(".settings-model-row button");
+    expect(buttons.every((b) => b.attributes("disabled") !== undefined)).toBe(true);
+  });
+
+  it("spawn.model.v1 ⇒ refreshPrefs on mount; the input initializes from the arriving prefs exactly once", async () => {
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], listPrefs: { defaultModel: "anthropic/claude-opus-4-5" } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    expect(f.calls.refresh).toBe(1);
+    const input = w.find(".settings-model-input").element as HTMLInputElement;
+    expect(input.value).toBe("anthropic/claude-opus-4-5");
+    // a later prefs change must not clobber an in-progress edit
+    await w.find(".settings-model-input").setValue("openai/gpt-5");
+    f.prefs.value = { defaultModel: "zai/glm-5" };
+    await flushPromises();
+    expect((w.find(".settings-model-input").element as HTMLInputElement).value).toBe("openai/gpt-5");
+  });
+
+  it("local validation: an invalid ref shows the invalid note, disables save, and never calls setPrefs", async () => {
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await w.find(".settings-model-input").setValue("bad ref");
+    expect(w.text()).toContain("Not a valid provider/id");
+    const save = w.findAll(".settings-model-row button").at(-1)!;
+    expect(save.attributes("disabled")).toBeDefined();
+    await save.trigger("click");
+    expect(f.calls.set).toEqual([]);
+  });
+
+  it("save success: setPrefs receives the trimmed ref; the status line reads Saved (role=status)", async () => {
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await w.find(".settings-model-input").setValue(" openai/gpt-5 ");
+    const save = w.findAll(".settings-model-row button").at(-1)!;
+    await save.trigger("click");
+    await flushPromises();
+    expect(f.calls.set).toEqual(["openai/gpt-5"]);
+    const status = w.find(".settings-model-status");
+    expect(status.attributes("role")).toBe("status");
+    expect(status.text()).toBe("Saved.");
+    // editing again resets the status line
+    await w.find(".settings-model-input").setValue("openai/gpt-5-turbo");
+    expect(w.find(".settings-model-status").exists()).toBe(false);
+  });
+
+  it("save failure surfaces the failed status", async () => {
+    const f = fakeHub({
+      caps: [CAP, MODEL_CAP],
+      prefs: { defaultModel: null },
+      saveImpl: async () => ({ ok: false as const, error: "E_LAUNCHER" }),
+    });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await w.find(".settings-model-input").setValue("p/m");
+    await w.findAll(".settings-model-row button").at(-1)!.trigger("click");
+    await flushPromises();
+    expect(w.find(".settings-model-status").text()).toContain("Save failed");
+  });
+
+  it('「使用 pi 默认」 clears the input and saves the "" tri-state', async () => {
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: "p/m" } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    const usePi = w.findAll(".settings-model-row button")[0]!;
+    expect(usePi.text()).toBe("Use pi default");
+    await usePi.trigger("click");
+    await flushPromises();
+    expect(f.calls.set).toEqual([""]);
+    expect((w.find(".settings-model-input").element as HTMLInputElement).value).toBe("");
+    expect(f.prefs.value).toEqual({ defaultModel: null });
+  });
+
+  it("datalist unions online agents' models (deduped) and refreshes the localStorage cache", async () => {
+    const agents = new Map([
+      [
+        "A",
+        agentWithModels([
+          { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" },
+          { provider: "openai", id: "gpt-5" },
+        ]),
+      ],
+      [
+        "B",
+        agentWithModels([
+          { provider: "openai", id: "gpt-5" },
+          { provider: "zai", id: "glm-5" },
+        ]),
+      ],
+    ]);
+    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } }));
+    await flushPromises();
+    const values = w.findAll("#settings-model-options option").map((o) => o.attributes("value"));
+    expect(values).toEqual(["anthropic/claude-opus-4-5", "openai/gpt-5", "zai/glm-5"]);
+    const cache = window.localStorage.getItem("pwh_spawn_models_cache");
+    expect(cache).not.toBeNull();
+    expect(JSON.parse(cache!)).toEqual([
+      { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" },
+      { provider: "openai", id: "gpt-5" },
+      { provider: "zai", id: "glm-5" },
+    ]);
+  });
+
+  it("no online agent ⇒ the datalist falls back to the last cached list (D7)", async () => {
+    window.localStorage.setItem(
+      "pwh_spawn_models_cache",
+      JSON.stringify([{ provider: "cached", id: "model-1", name: "Cached" }]),
+    );
+    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } }));
+    await flushPromises();
+    const values = w.findAll("#settings-model-options option").map((o) => o.attributes("value"));
+    expect(values).toEqual(["cached/model-1"]);
+  });
+
+  it("no list at all ⇒ the no-list note shows instead of a warning", async () => {
+    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } }));
+    await flushPromises();
+    expect(w.text()).toContain("No online session");
+  });
+
+  it("a valid ref outside the known list gets the soft warning; a listed one does not", async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
+    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } }));
+    await flushPromises();
+    await w.find(".settings-model-input").setValue("anthropic/claude-opus-4-5");
+    expect(w.text()).toContain("Not in the known model list");
+    // ...but the save button stays enabled (soft warning, not a blocker)
+    expect(w.findAll(".settings-model-row button").at(-1)!.attributes("disabled")).toBeUndefined();
+    await w.find(".settings-model-input").setValue("openai/gpt-5");
+    expect(w.text()).not.toContain("Not in the known model list");
   });
 });

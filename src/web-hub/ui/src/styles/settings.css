@@ -21,10 +21,23 @@
   flex-direction: column;
   gap: var(--sp-4);
   width: 100%;
-  max-width: 640px;
   margin: 0 auto;
   padding: var(--sp-4);
   padding-bottom: max(var(--sp-8), env(safe-area-inset-bottom));
+}
+
+/* default-model plan F1 (A1): the card grid — theme + font sit side by side whenever the
+ * widened desktop panel allows (`auto-fit` collapses to one column on the ≤767px bottom
+ * sheet, which is why the mobile layout needs no rule of its own); the delivery and
+ * default-model cards always span the full row. */
+.settings-grid {
+  display: grid;
+  gap: var(--sp-4);
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+.settings-card-wide {
+  grid-column: 1 / -1;
 }
 
 .settings-head {
@@ -154,6 +167,56 @@
   font-weight: var(--fw-semibold);
   color: var(--c-text-2);
   font-variant-numeric: tabular-nums;
+}
+
+/* default-model card (web-hub-spawn default-model plan F1): free-typed input + datalist +
+ * 「使用 pi 默认」/保存. The input takes the remaining width and a long `provider/id` wraps
+ * instead of overflowing (A1: no horizontal scroll at any acceptance viewport). */
+.settings-model-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.settings-model-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.settings-model-input:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 1px;
+}
+
+.settings-model-input:disabled {
+  opacity: 0.6;
+}
+
+.settings-model-warn {
+  color: var(--c-warning-text);
+}
+
+.settings-model-status {
+  margin: 0;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+@media (pointer: coarse) {
+  .settings-model-input,
+  .settings-model-row .btn {
+    min-height: 44px;
+  }
 }
 
 @media (pointer: coarse) {

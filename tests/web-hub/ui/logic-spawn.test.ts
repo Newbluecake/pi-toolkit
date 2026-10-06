@@ -8,6 +8,8 @@ import {
   pendingRows,
   spawnAvailability,
   spawnDeniedKey,
+  spawnHintKey,
+  spawnModelSupported,
 } from "../../../src/web-hub/ui/src/logic/spawn.js";
 import { SPAWN_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { SpawnPolicyWire, SpawnRecordPublic, SpawnsPayload } from "../../../src/web-hub/protocol/spawn.js";
@@ -348,5 +350,74 @@ describe("managedFor (web badge / 停止会话 lookup)", () => {
   it("null/garbage payloads ⇒ undefined", () => {
     expect(managedFor(null, "A")).toBeUndefined();
     expect(managedFor({} as unknown as SpawnsPayload, "A")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// default-model plan F1: spawnModelSupported / model-invalid bucket / spawnHintKey
+// ---------------------------------------------------------------------------
+
+describe("spawnModelSupported (default-model plan D4 — the spawn.model.v1 gate)", () => {
+  it("true iff the hub caps include spawn.model.v1 (the real protocol constant)", async () => {
+    const { SPAWN_MODEL_HUB_CAP } = await import("../../../src/web-hub/protocol/version.js");
+    expect(SPAWN_MODEL_HUB_CAP).toBe("spawn.model.v1"); // the literal spawnModelSupported must track
+    expect(spawnModelSupported([SPAWN_MODEL_HUB_CAP])).toBe(true);
+    expect(spawnModelSupported([SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP])).toBe(true);
+    expect(spawnModelSupported([SPAWN_HUB_CAP])).toBe(false);
+    expect(spawnModelSupported([])).toBe(false);
+    expect(spawnModelSupported(undefined)).toBe(false);
+    expect(spawnModelSupported("spawn.model.v1")).toBe(false);
+  });
+
+  it("an extra UNKNOWN cap changes nothing (D4: old UI on a new hub ignores it)", () => {
+    const listResult = { ok: true as const, policy: policy(), items: [] as readonly SpawnRecordPublic[] };
+    expect(spawnAvailability({ hubCaps: [SPAWN_HUB_CAP, "spawn.future.v9"], listResult })).toEqual(
+      spawnAvailability({ hubCaps: [SPAWN_HUB_CAP], listResult }),
+    );
+    // ...and spawnModelSupported ignores unknowns both ways
+    expect(spawnModelSupported(["spawn.future.v9"])).toBe(false);
+  });
+});
+
+describe("classifySpawnError — model-invalid (default-model plan F1)", () => {
+  it('E_BAD_REQUEST with reason:"model-invalid" ⇒ "model" (not the generic "dir")', () => {
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: "model-invalid", retryable: false })).toBe(
+      "model",
+    );
+  });
+
+  it("the other E_BAD_REQUEST reasons still resolve to their own buckets", () => {
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: "spawn-gone", retryable: false })).toBe(
+      "gone",
+    );
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: "cwd-rejected", retryable: false })).toBe(
+      "dir",
+    );
+  });
+});
+
+describe("spawnHintKey (SpawnHint → spawn.hint* i18n key; F1 adds model-rejected)", () => {
+  it("maps every frozen SpawnHint, including model-rejected", async () => {
+    const proto = await import("../../../src/web-hub/protocol/spawn.js");
+    // The full frozen union, exercised by value (a protocol rename trips the mapped key).
+    const hints = [
+      "register-timeout-hello",
+      "register-timeout-session",
+      "control-off",
+      "newer-plugin",
+      "cwd-mismatch",
+      "protocol-error",
+      "launcher-changed",
+      "model-rejected",
+    ] as const;
+    for (const h of hints) expect(spawnHintKey(h), h).toMatch(/^spawn\.hint/);
+    expect(spawnHintKey("model-rejected")).toBe("spawn.hintModelRejected");
+    void proto;
+  });
+
+  it("unknown hints degrade safely to undefined (callers fall back to the raw string)", () => {
+    expect(spawnHintKey("some-future-hint")).toBeUndefined();
+    expect(spawnHintKey(undefined)).toBeUndefined();
+    expect(spawnHintKey(42)).toBeUndefined();
   });
 });

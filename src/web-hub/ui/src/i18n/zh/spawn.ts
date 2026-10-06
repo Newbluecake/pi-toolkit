@@ -35,6 +35,9 @@ const spawn = {
   pickerRecentError: "最近目录加载失败。",
   pickerPromptLabel: "首条消息（可选）",
   pickerPromptPlaceholder: "会话上线后自动发送",
+  // default-model plan F2 的键（F1 一并加齐，F2 不再动 i18n）
+  pickerModelLabel: "模型（仅本次会话）",
+  pickerModelDefault: "默认：{model}",
   pickerPromptTooLong: "首条消息为 {n} 字节 — 超出 48 KiB 上限",
   pickerSubmit: "启动",
   pickerSubmitting: "正在启动…",
@@ -59,6 +62,7 @@ const spawn = {
   errFirstPrompt: "首条消息未能送达",
   errUnsupported: "此 hub 不提供网页新建会话",
   errRetryAfter: "请在 {n} 秒后重试",
+  errModelInvalid: "模型被拒绝 — 请使用合法的 provider/id",
 
   confirmTitle: "确认真实目录",
   confirmBody: "hub 将你输入的目录解析为以下真实路径，将在其中启动新的 pi 会话。",
@@ -87,6 +91,7 @@ const spawn = {
   hintCwdMismatch: "进程启动在了不同的目录 — 已被停止",
   hintProtocolError: "进程输出了非预期协议 — 已被停止",
   hintLauncherChanged: "pi 启动器在磁盘上发生变化 — 请运行 /webhub restart",
+  hintModelRejected: "pi 启动时拒绝了该模型 — 请在设置中更换默认模型",
 
   badgeWeb: "web",
   badgeWebTitle: "由网页启动 — 受此 hub 管理",

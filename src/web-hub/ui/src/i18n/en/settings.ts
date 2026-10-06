@@ -19,6 +19,23 @@ const settings = {
   deliverFollowUp: "Follow-up",
   deliverSteerHint: "Interrupt the current turn",
   deliverFollowUpHint: "Queue until the turn ends",
+  // default-model plan F1 — the 「新建会话默认模型」 card. The model ref itself
+  // (`provider/id`) is an English token in both languages; prose blocks translate.
+  defaultModelSection: "Default model for new sessions",
+  defaultModelHint:
+    "Used when a session is started from this hub (the web pick-dir/new-session entries). It never touches ~/.pi/agent/settings.json and never changes an already-running session.",
+  defaultModelShared: "One value shared by every signed-in device of this hub.",
+  defaultModelPlaceholder: "provider/id — empty means pi's own default",
+  defaultModelUsePi: "Use pi default",
+  defaultModelSave: "Save",
+  defaultModelSaving: "Saving…",
+  defaultModelSaved: "Saved.",
+  defaultModelInvalid: "Not a valid provider/id — e.g. anthropic/claude-opus-4-5",
+  defaultModelUnsupported:
+    "This hub is too old for the default-model preference — run /webhub restart after upgrading.",
+  defaultModelSaveFailed: "Save failed — the hub rejected or could not persist it; retry.",
+  defaultModelNoList: "No online session to take the model list from — you can still type a provider/id.",
+  defaultModelNotInList: "Not in the known model list — double-check the spelling before saving.",
 } satisfies Record<string, string>;
 
 export default settings;

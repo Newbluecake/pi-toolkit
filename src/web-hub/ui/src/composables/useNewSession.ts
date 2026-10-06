@@ -47,6 +47,10 @@ export interface NewSessionDeps<TTimer = ReturnType<typeof setTimeout>> {
   start(req: SpawnRequestBody): Promise<SpawnOutcome>;
   /** Latest known policy (from the last successful `list()`) — drives the awaiting watchdog. */
   policy?(): SpawnPolicyWire | undefined;
+  /** default-model plan F1 (D4 二次 cap 守卫): may `model` go on the wire at all (`spawn.model.v1`
+   * advertised)? Absent/false ⇒ the field is silently dropped from the POST body — the caller
+   * (SpawnRow retry, F2's DirPicker) may set `input.model` unconditionally. */
+  modelCap?(): boolean;
   /** Draft refill target (§3.2 首条消息结果 row). Absent ⇒ picker refill instead. */
   control?: ControlHandle | undefined;
   /** `live` navigation target (`#/agent/<key>` — useHub wires the route event / hash). */
@@ -314,6 +318,7 @@ export function createNewSession<TTimer = ReturnType<typeof setTimeout>>(
       const body: SpawnRequestBody = {
         id: reqId,
         cwd: input.cwd,
+        ...(input.model !== undefined && deps.modelCap?.() === true ? { model: input.model } : {}),
         ...(input.firstPrompt !== undefined ? { firstPrompt: input.firstPrompt } : {}),
       };
       const outcome = await sendWithOneRetry(body);
@@ -331,6 +336,7 @@ export function createNewSession<TTimer = ReturnType<typeof setTimeout>>(
         cwd: cur.input.cwd,
         confirm: true,
         expectCwd: cur.resolvedCwd,
+        ...(cur.input.model !== undefined && deps.modelCap?.() === true ? { model: cur.input.model } : {}),
         ...(cur.input.firstPrompt !== undefined ? { firstPrompt: cur.input.firstPrompt } : {}),
       };
       const outcome = await sendWithOneRetry(body);

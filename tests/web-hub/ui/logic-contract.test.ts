@@ -57,6 +57,15 @@ describe("web/contract.js mirrors protocol/http-contract.ts", () => {
     expect(web.API.preview).toBe("/api/preview");
   });
 
+  // @文件补全 (file-mention): hand-written literal (the hub constant lives in the hub-side
+  // `hub/file-search.ts`, which must never reach the browser bundle) — pinned against BOTH the
+  // hub constant and the route table, same situation as the headless literals below.
+  it("API.filesSearch points at the hub file-search endpoint", async () => {
+    const hubConst = await import("../../../src/web-hub/hub/file-search.js");
+    expect(web.API.filesSearch).toBe(hubConst.FILE_SEARCH_PATH);
+    expect(web.API.filesSearch).toBe("/api/files/search");
+  });
+
   it("reduce accepts every SSE event name without throwing (minimal / garbage payloads)", () => {
     for (const name of proto.SSE_EVENTS) {
       for (const data of [undefined, null, {}, [], "x", { agentKey: "nope" }]) {
@@ -164,5 +173,13 @@ describe("web/contract.js run-transcript surface (fleet-drawer F0)", () => {
       reduce(s, { event: "run_end", data: { agentKey: "a", runId: "r_ABCD1234", lastSeq: 1, status: "ok" } }),
     ).toBe(s);
     expect(reduce(s, { event: "run_history", data: { error: "E_BUSY", reason: "resync_storm" } })).toBe(s);
+  });
+});
+
+// default-model plan F1 (§3 ④): the prefs endpoint literal is hand-written like the other
+// headless paths above (protocol/spawn.ts freezes body types, not paths) — pinned here.
+describe("web/contract.js API.headlessPrefs (default-model plan F1)", () => {
+  it("points at POST /api/headless/prefs", () => {
+    expect(web.API.headlessPrefs).toBe("/api/headless/prefs");
   });
 });

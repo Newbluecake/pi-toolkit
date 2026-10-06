@@ -19,11 +19,18 @@ import { shallowRef, type ShallowRef } from "vue";
 import { initialState, needsRunSubscribe, needsSubscribe, reduce } from "@logic/state.js";
 import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
 import { createRenderGate, type RenderPriority } from "./renderGate.js";
-import type { HubTransport, RemoveAgentOutcome, RemoveTarget, TransportHooks } from "../transport/types.js";
+import type {
+  HubTransport,
+  RemoveAgentOutcome,
+  RemoveTarget,
+  SpawnListOutcome,
+  TransportHooks,
+} from "../transport/types.js";
 import { createControl } from "./useControl.js";
 import { createSpawn } from "./useSpawn.js";
 import { createNewSession } from "./useNewSession.js";
 import type { SpawnsPayload, SpawnPolicyWire } from "@protocol/spawn.js";
+import { SPAWN_MODEL_HUB_CAP } from "@protocol/version.js";
 import type { HubHandle, HubSpawnHandle, HubState } from "../types.js";
 
 /** Whatever `@logic/state.js`'s JSDoc `initialState()`/`reduce()` actually traffic in — kept
@@ -536,9 +543,22 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
   // ---------------------------------------------------------------------------
   const spawnBase = createSpawn(transport);
   let latestSpawnPolicy: SpawnPolicyWire | undefined;
+  const listWithPolicy = async (): Promise<SpawnListOutcome> => {
+    const r = await spawnBase.list();
+    if (r.ok) latestSpawnPolicy = r.policy;
+    return r;
+  };
   const newSession = createNewSession({
     start: (req) => spawnBase.start(req),
     policy: () => latestSpawnPolicy,
+    // default-model plan F1 (D4): the second cap guard — `model` only reaches the wire while
+    // the CURRENT hub frame still advertises `spawn.model.v1` (a hub downgrade mid-session
+    // silently drops it instead of 400ing).
+    modelCap: () => {
+      const h = raw.hub;
+      const caps = h !== null && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+      return Array.isArray(caps) && caps.includes(SPAWN_MODEL_HUB_CAP);
+    },
     control,
     navigate: (agentKey) => {
       if (opts.navigate !== undefined) opts.navigate(agentKey);
@@ -549,14 +569,15 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     clearTimeout: opts.clearTimeout,
   });
   const spawn: HubSpawnHandle = {
-    list: async () => {
-      const r = await spawnBase.list();
-      if (r.ok) latestSpawnPolicy = r.policy;
-      return r;
-    },
+    // default-model plan F1: `spawnBase.list` already folds a well-formed `prefs` slot into
+    // the ref, so both names can share this one wrapped path (policy tracking + prefs fold).
+    list: listWithPolicy,
+    refreshPrefs: listWithPolicy,
     dirs: () => spawnBase.dirs(),
     start: (req) => spawnBase.start(req),
     stop: (spawnId, force) => spawnBase.stop(spawnId, force),
+    prefs: spawnBase.prefs,
+    setDefaultModel: (defaultModel) => spawnBase.setDefaultModel(defaultModel),
     newSession,
   };
 

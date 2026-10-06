@@ -354,3 +354,92 @@ describe("useNewSession (plan §3.2 — #15 hard gate)", () => {
     expect(await h.ns.submit(input())).toBe(false); // disposed ⇒ never submits again
   });
 });
+
+// ---------------------------------------------------------------------------
+// default-model plan F1 (D2/D4): NewSessionInput.model — on the wire ONLY under spawn.model.v1
+// ---------------------------------------------------------------------------
+
+describe("default-model F1: the model field's second cap guard (D4)", () => {
+  function makeWithCap(modelCap: boolean) {
+    const clock = fakeClock();
+    const starts: SpawnRequestBody[] = [];
+    let idSeq = 0;
+    let startImpl: (req: SpawnRequestBody) => Promise<SpawnOutcome> = async () => ({
+      ok: true,
+      data: { spawnId: "sp1", state: "starting", cwd: "/real/proj" },
+    });
+    const ns = createNewSession({
+      start: (req) => {
+        starts.push(req);
+        return startImpl(req);
+      },
+      policy: () => policy,
+      modelCap: () => modelCap,
+      now: clock.now,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      newId: () => `req-${++idSeq}-aaaaaaaaaaaa`,
+    });
+    return { ns, starts, setStartImpl: (impl: typeof startImpl) => (startImpl = impl) };
+  }
+
+  it("no modelCap (or cap false) ⇒ the body NEVER carries a `model` key, even when input sets one", async () => {
+    const off = makeWithCap(false);
+    await off.ns.submit({ cwd: "~/proj", model: "anthropic/claude-opus-4-5" });
+    expect(off.starts).toHaveLength(1);
+    expect("model" in off.starts[0]!).toBe(false);
+
+    // A deps object without modelCap at all (older wiring) behaves identically.
+    const clock = fakeClock();
+    const starts: SpawnRequestBody[] = [];
+    const ns = createNewSession({
+      start: (req) => {
+        starts.push(req);
+        return Promise.resolve({ ok: true, data: { spawnId: "sp1", state: "starting", cwd: "/r" } });
+      },
+      now: clock.now,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      newId: () => "req-x-aaaaaaaaaaaa",
+    });
+    await ns.submit({ cwd: "~/proj", model: "p/m" });
+    expect("model" in starts[0]!).toBe(false);
+  });
+
+  it('cap present ⇒ input.model rides the POST body verbatim (provider/id AND the "" tri-state)', async () => {
+    const h = makeWithCap(true);
+    await h.ns.submit({ cwd: "~/proj", model: "openai/gpt-5" });
+    expect(h.starts[0]!.model).toBe("openai/gpt-5");
+    await h.ns.submit({ cwd: "~/proj", model: "" });
+    expect(h.starts[1]!.model).toBe("");
+  });
+
+  it("a 409 confirm resend keeps the same id AND the model", async () => {
+    const h = makeWithCap(true);
+    h.setStartImpl(async () => ({
+      ok: false,
+      error: "E_CONFIRM_REQUIRED",
+      retryable: false,
+      resolvedCwd: "/real/proj",
+      reason: "unknown-dir",
+    }));
+    await h.ns.submit({ cwd: "~/proj", model: "p/m" });
+    expect(h.ns.flow.value.phase).toBe("confirming");
+    h.setStartImpl(async () => ({ ok: true, data: { spawnId: "sp1", state: "starting", cwd: "/real/proj" } }));
+    await h.ns.confirm();
+    expect(h.starts).toHaveLength(2);
+    expect(h.starts[1]).toMatchObject({ id: h.starts[0]!.id, confirm: true, expectCwd: "/real/proj", model: "p/m" });
+  });
+
+  it("retry after failure uses a NEW id and still carries the model (cap on)", async () => {
+    const h = makeWithCap(true);
+    h.setStartImpl(async () => ({ ok: false, error: "E_LIMIT", retryable: false }));
+    await h.ns.submit({ cwd: "~/proj", model: "p/m" });
+    expect(h.ns.flow.value.phase).toBe("failed");
+    h.setStartImpl(async () => ({ ok: true, data: { spawnId: "sp2", state: "starting", cwd: "/real/proj" } }));
+    await h.ns.retry();
+    expect(h.starts).toHaveLength(2);
+    expect(h.starts[1]!.id).not.toBe(h.starts[0]!.id);
+    expect(h.starts[1]!.model).toBe("p/m");
+  });
+});

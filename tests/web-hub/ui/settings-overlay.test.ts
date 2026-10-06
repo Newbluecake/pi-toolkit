@@ -1,4 +1,7 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SettingsOverlay from "../../../src/web-hub/ui/src/components/shell/SettingsOverlay.vue";
@@ -149,5 +152,39 @@ describe("SettingsOverlay.vue — mobile sheet (delegates to PickerSheet)", () =
     scrim!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(wrapper.emitted("close")).toHaveLength(1);
     wrapper.unmount();
+  });
+});
+
+// default-model plan F1 (A1, §9 #7): the desktop popover's width rule is a FROZEN literal —
+// `min(720px, calc(100vw - 32px))`, the 32px written literally (never via a token) so the
+// computed width is exactly `min(720, innerWidth − 32)` px at the 1440/1024/768 acceptance
+// viewports. happy-dom never applies the stylesheet, so the declaration is pinned here (same
+// source-pinning precedent as settings-view.test.ts's slider-immunity block); the computed-
+// style half is the DevEye real-browser walkthrough (plan A1).
+describe("SettingsOverlay desktop panel width (default-model plan F1 A1)", () => {
+  it(".settings-panel is exactly min(720px, calc(100vw - 32px))", () => {
+    const css = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../../../src/web-hub/ui/src/styles/shell.css"),
+      "utf8",
+    );
+    const block = /\.settings-panel\s*\{([^}]*)\}/.exec(css);
+    expect(block).not.toBeNull();
+    expect(block![1]).toMatch(/width:\s*min\(720px,\s*calc\(100vw - 32px\)\)\s*;/);
+  });
+
+  it("settings.css has the F1 card grid (theme+font side by side, wide cards span) and dropped the 640px cap", () => {
+    const css = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../../../src/web-hub/ui/src/styles/settings.css"),
+      "utf8",
+    );
+    const inner = /\.settings-inner\s*\{([^}]*)\}/.exec(css);
+    expect(inner).not.toBeNull();
+    expect(inner![1]).not.toMatch(/max-width/);
+    const grid = /\.settings-grid\s*\{([^}]*)\}/.exec(css);
+    expect(grid).not.toBeNull();
+    expect(grid![1]).toMatch(/grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(300px,\s*1fr\)\)/);
+    expect(css).toMatch(/\.settings-card-wide\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
+    // the model row's long provider/id must never overflow horizontally (A1)
+    expect(css).toMatch(/\.settings-model-input\s*\{[^}]*overflow-wrap:\s*anywhere/);
   });
 });
