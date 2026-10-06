@@ -6,8 +6,8 @@
  *
  * | 模式       | 视觉                                                                        |
  * | ---------- | --------------------------------------------------------------------------- |
- * | docked     | ≥1280px:split 变 grid,右列 `--drawer-w`(clamp(360px,30vw,520px));关闭即收列 |
- * | overlay    | 768–1279px:absolute 浮在主栏右侧,min(420px,85%),z-index 30                  |
+ * | docked     | ≥1280px:split 变 grid,右列 `--drawer-w`(clamp(480px,38vw,760px));关闭即收列 |
+ * | overlay    | 768–1279px:absolute 浮在主栏右侧,min(640px,92%),z-index 30                  |
  * | fullscreen | ≤767px:fixed 占满全屏,z-index 40(低于 base.css 跳转链接的 50)               |
  *
  * 抽屉关闭时三模式一律 `display:none`(对辅助技术同样隐藏,不需要额外的 aria-hidden)。
@@ -33,7 +33,7 @@
 
 /* ---- docked(≥1280px):grid 右列 ------------------------------------------------ */
 .detail[data-drawer="docked"] {
-  --drawer-w: clamp(360px, 30vw, 520px);
+  --drawer-w: clamp(480px, 38vw, 760px);
 }
 
 .detail[data-drawer="docked"] .detail-split {
@@ -50,7 +50,7 @@
   position: absolute;
   inset-block: 0;
   right: 0;
-  width: min(420px, 85%);
+  width: min(640px, 92%);
   z-index: 30;
   box-shadow: var(--shadow-3);
 }

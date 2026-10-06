@@ -446,11 +446,23 @@
   }
 }
 
-/* --- coarse pointers: every new interactive target ≥44px (ui-design §3.12 先例) --- */
+/* --- coarse pointers: every new interactive target ≥44px (ui-design §3.12 先例). The
+ * 新建会话 split button gets a bigger bump (48px + wider padding + larger label): at
+ * `btn-xs` it is the most-tapped yet smallest control on the page, and a desktop-mode
+ * phone scales the whole layout down, shrinking it further (2026-10-06 field report). --- */
 @media (pointer: coarse) {
   .nsmenu-toggle,
   .nsmenu .new-session-btn {
-    min-height: 44px;
+    min-height: 48px;
+  }
+
+  .nsmenu .new-session-btn {
+    padding: 0 var(--sp-4);
+    font-size: var(--fs-sm);
+  }
+
+  .nsmenu-toggle {
+    padding: 0 var(--sp-3);
   }
 
   .nsmenu-item {

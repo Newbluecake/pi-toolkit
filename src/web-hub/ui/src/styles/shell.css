@@ -8,7 +8,7 @@
  * the 481–1024px mid band into single-view navigation with the sidebar as an **overlay
  * drawer** over the detail pane (scrim click / Escape / picking an agent closes it — the same
  * overlay grammar docs/dev/web-hub-fleet-drawer/plan.md froze for its 768–1279 drawer).
- * `--sidebar-w` is 288px at the 1025 split and 340px at 1280 (tokens.css's own default of
+ * `--sidebar-w` is 320px at the 1025 split and 400px at 1280 (tokens.css's own default of
  * 320px is a dead fallback below 1025 — no `.layout` split ever reads it there).
  *
  * List↔detail visibility is decided by `DashboardView.vue`'s own `v-if` (driven by three
@@ -206,7 +206,7 @@
     bottom: 0;
     left: 0;
     z-index: 40;
-    width: min(320px, 84vw);
+    width: min(480px, 92vw);
     padding-left: env(safe-area-inset-left);
     border-right: 1px solid var(--c-border);
     background: var(--c-surface);
@@ -223,7 +223,7 @@
    * silently win over this media-scoped override at every width — verified against a real
    * built bundle (`grep sidebar-w dist/web-hub-ui/assets/*.css`) before landing this fix. */
   html:root {
-    --sidebar-w: 288px;
+    --sidebar-w: 320px;
   }
 
   .layout {
@@ -233,7 +233,7 @@
 
 @media (min-width: 1280px) {
   html:root {
-    --sidebar-w: 340px;
+    --sidebar-w: 400px;
   }
 }
 
