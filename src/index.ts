@@ -27,6 +27,7 @@ import {
   createCompactHintHook,
   createBackgroundCompletionEventHook,
   createNotificationReceiptHook,
+  readBashJobTail,
   type Stack,
 } from "./stack.js";
 import { installMentionInput } from "./mention/mention.js";
@@ -61,7 +62,7 @@ import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-too
 import { createBashTool } from "./tools/bash-tool.js";
 import { createBashJobTool } from "./tools/bash-job-tool.js";
 import type { BashJobManager } from "./bash/manager.js";
-import { isTerminalJobStatus } from "./bash/types.js";
+import { isTerminalJobStatus, type JobRecord } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
@@ -906,6 +907,28 @@ export default function activate(rawPi: ExtensionAPI): void {
       // already implicit — this block only runs with webHub.enabled, and todoWiring
       // only exists with todo.enabled).
       ...(todoWiring ? { todo: () => todoWiring.getTodoSnapshot() } : {}),
+      // bash-jobs-panel plan §3.8 (包 A, D3-4): late-bound bash-jobs source — `current()` re-reads
+      // the holder on EVERY call (the stack rebuild swaps the manager per session_start, and an
+      // activate/session_start-time capture would go stale after /new・/resume・/fork); `gen` is
+      // the manager instance itself, `tail` binds the same instance so one generation's list and
+      // tails can never mix. `bashJobsEnabled=false` ⇒ no port ⇒ the slot stays absent (D5).
+      ...(bashJobsEnabled(settings)
+        ? {
+            bashJobs: {
+              current: () => {
+                const m = holder.current?.bashJobs;
+                return m === undefined
+                  ? undefined
+                  : {
+                      gen: m,
+                      list: () => m.list(),
+                      tail: (record: JobRecord) => readBashJobTail(m, record),
+                    };
+              },
+              retentionMs: () => settings.bashJobs.retentionMs,
+            },
+          }
+        : {}),
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;

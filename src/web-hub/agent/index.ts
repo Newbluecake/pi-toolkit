@@ -61,6 +61,9 @@ import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createWorktreeSampler } from "./worktree-sampler.js";
+import { bashJobsLightFingerprint, bashJobsRowSignature, projectBashJobs, selectJobs } from "./bash-jobs.js";
+import { createBashJobsSampler, type BashJobsSource } from "./bash-jobs-sampler.js";
+import type { BashJobsWire } from "../protocol/messages.js";
 import { todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
@@ -158,6 +161,14 @@ export interface WebHubDeps {
    *  projection. Unset (todo.enabled=false ⇒ `wireTodo` never ran) ⇒ the field is never
    *  set — the status frame stays byte-equal to the pre-feature shape. */
   todo?: () => TodoState;
+  /** bash-jobs-panel plan §3.7/§3.8 (包 A, D3-4): late-bound bash-jobs source port. `current()`
+   *  re-reads the holder on every call (NEVER captures a manager — each session_start/stack
+   *  rebuild swaps the instance, and a disposed manager's `list()` keeps returning stale
+   *  entries); unset (bashJobsEnabled=false in src/index.ts) ⇒ the whole slot stays absent. */
+  bashJobs?: {
+    current(): BashJobsSource | undefined;
+    retentionMs(): number;
+  };
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -266,6 +277,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // todo-web plan §3.3 (T3): the todo fingerprint gate — same lifecycle as lastFleetFp
   // (reset on session_start so the first tick after a /new・/resume・/fork always re-aligns).
   let lastTodoFp: string | undefined;
+  // bash-jobs-panel plan §3.7 (包 A): the bash-jobs light-fingerprint gate + its per-row
+  // signature diff (which rows a fingerprint edge should kick) — same lifecycle as lastTodoFp.
+  let lastBashFp: string | undefined;
+  let lastBashSigs: Map<string, string> | undefined;
   let connGen = 0;
   let lastModelsKey: string | undefined;
   let modelsTick = 0;
@@ -325,6 +340,28 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     onChange: () => publishStatus(),
     ...(deps.gitRealpath !== undefined ? { realpath: deps.gitRealpath } : {}),
   });
+
+  // bash-jobs-panel plan §3.7 (包 A): per-activate sampler, closure-local state only — same
+  // late-bound isLive/onChange refs as wtSampler above (declaration order resolved at call time).
+  // All tail I/O goes through the deps.bashJobs holder port (D3-4); `retentionMs` is read fresh
+  // from settings every call, never cached.
+  const bashSampler = createBashJobsSampler({
+    source: () => deps.bashJobs?.current(),
+    retentionMs: () => deps.bashJobs?.retentionMs() ?? 0,
+    now,
+    isLive: () => conn?.status().state === "live",
+    onChange: () => publishStatus(),
+  });
+  /** `readStatus`'s bash-jobs projection closure (hot path: source read + in-memory list + cache
+   *  — zero fs I/O; the sampler owns every read). Rows and tails provably share one source
+   *  generation: `tails(src.gen)` reconciles on mismatch (D3-4 ③/④). */
+  const bashJobsProjection = (): BashJobsWire | undefined => {
+    const d = deps.bashJobs;
+    if (d === undefined) return undefined;
+    const src = d.current();
+    if (src === undefined) return undefined;
+    return projectBashJobs(src.list(), bashSampler.tails(src.gen), now(), d.retentionMs());
+  };
 
   const commandLedger = createCommandLedger();
   const queueMirror = createQueueMirror();
@@ -411,7 +448,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const c = conn;
     const x = ctx;
     if (c === undefined || x === undefined) return;
-    const s = readStatus(x, tap, readFleet(), queueMirror, deps.todo, () => wtSampler.current());
+    const s = readStatus(
+      x,
+      tap,
+      readFleet(),
+      queueMirror,
+      deps.todo,
+      () => wtSampler.current(),
+      deps.bashJobs !== undefined ? bashJobsProjection : undefined,
+    );
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
   };
@@ -483,6 +528,31 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       lastTodoFp = todoFp;
       publishStatus();
     }
+    // bash-jobs-panel plan §3.7 (包 A, D3-1): the manager has no events, so the same 1Hz tick
+    // carries a light-fingerprint gate over the selectJobs result (running logBytes and
+    // second-level elapsed stay OUT; terminal logBytes — the footer patch — is IN, R3-2). A
+    // change publishes the status frame IMMEDIATELY (state is authoritative, tails follow) and
+    // kicks exactly the changed rows into the sampler.
+    if (deps.bashJobs !== undefined) {
+      const src = deps.bashJobs.current();
+      let fp = "";
+      const sigs = new Map<string, string>();
+      if (src !== undefined) {
+        const selected = selectJobs(src.list(), now(), deps.bashJobs.retentionMs());
+        fp = bashJobsLightFingerprint(selected, now());
+        for (const r of selected.rows) sigs.set(r.jobId, bashJobsRowSignature(r, now()));
+      }
+      if (fp !== lastBashFp) {
+        const changed: string[] = [];
+        for (const [id, sig] of sigs) {
+          if (lastBashSigs === undefined || lastBashSigs.get(id) !== sig) changed.push(id);
+        }
+        lastBashFp = fp;
+        lastBashSigs = sigs;
+        bashSampler.kick(changed);
+        publishStatus();
+      }
+    }
     try {
       commandHandler.onPendingSample(x.hasPendingMessages());
     } catch {
@@ -501,6 +571,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // worktree-web plan §4.3/§4.4 (W3): baseline/backoff scan cadence + staleMin recompute,
     // driven off this same existing 1Hz tick (no second interval is created for it).
     if (wtSampler.tick(now())) publishStatus();
+    // bash-jobs-panel plan §3.7 (包 A, D3-2): needs-sample recomputation + round scheduling off
+    // the same 1Hz tick; completions publish through the sampler's onChange instead.
+    if (bashSampler.tick(now())) publishStatus();
     modelsTick += 1;
     if (modelsTick % 5 === 0) refreshModelsIfChanged();
   };
@@ -614,7 +687,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           seq: c.seq,
           ctx: x,
           tap,
-          status: readStatus(x, tap, snaps, queueMirror, deps.todo, () => wtSampler.current()),
+          status: readStatus(
+            x,
+            tap,
+            snaps,
+            queueMirror,
+            deps.todo,
+            () => wtSampler.current(),
+            deps.bashJobs !== undefined ? bashJobsProjection : undefined,
+          ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
       );
@@ -760,6 +841,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     publishCtl();
     onTick();
     wtSampler.kick(); // worktree-web plan §4.4: a (re)connect is worth a fresh sample promptly.
+    bashSampler.kick(); // bash-jobs-panel plan §3.7: reconnect replays the slot and re-samples.
     setStatusLine(statusLineText(c.status(), readStatusTheme(x)));
   };
 
@@ -785,12 +867,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lastLeaf = undefined;
     lastFleetFp = undefined;
     lastTodoFp = undefined;
+    lastBashFp = undefined;
+    lastBashSigs = undefined;
     lastModelsKey = undefined;
     modelsTick = 0;
     tap.resetForSession(Number.NaN);
     commandHandler.onSessionBoundary();
     wtSampler.start(safe(() => c.cwd, "")); // worktree-web plan §4.4: first sample attempt
     // happens immediately (subject to isLive()); same-cwd /new・/resume・/fork keeps the cache.
+    bashSampler.start(); // bash-jobs-panel plan §3.7: clear cache/generations + re-kick — a new
+    // stack means a new manager instance anyway (D3-4 session boundaries).
     // O(branch entries) cost sum, deferred so session_start returns at once.
     const im = setImmediate(() => {
       if (gen !== generation) return;
@@ -817,6 +903,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     generation += 1;
     stopTick();
     wtSampler.stop(); // worktree-web plan §4.4: abort any in-flight scan, no leaked process/thread.
+    bashSampler.stop(); // bash-jobs-panel plan §3.7: discard in-flight results by generation.
     commandHandler.onSessionBoundary();
     dialogBridge.detachAll();
     tap.dispose();

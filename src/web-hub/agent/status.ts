@@ -10,7 +10,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
-import type { FleetOmitted, FleetRowWire, StatusInfo, WorktreesWire } from "../protocol/messages.js";
+import type { BashJobsWire, FleetOmitted, FleetRowWire, StatusInfo, WorktreesWire } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
 import { projectTodo } from "./todo.js";
@@ -27,6 +27,7 @@ export function readStatus(
   queueMirror?: QueueMirror,
   todo?: () => TodoState,
   worktrees?: () => WorktreesWire | undefined,
+  bashJobs?: () => BashJobsWire | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -68,6 +69,13 @@ export function readStatus(
   if (worktrees !== undefined) {
     const wire = worktrees();
     if (wire !== undefined) status.worktrees = wire;
+  }
+  // bash-jobs-panel plan §3.6 (包 A): same overwrite-only-slot rationale as todo/worktrees —
+  // no getter (bash-jobs disabled / no background jobs / source manager missing) ⇒ the field
+  // stays absent, byte-equal to the pre-feature status shape (D5).
+  if (bashJobs !== undefined) {
+    const wire = bashJobs();
+    if (wire !== undefined) status.bashJobs = wire;
   }
   return status;
 }

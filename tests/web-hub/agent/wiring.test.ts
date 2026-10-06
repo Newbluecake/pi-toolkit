@@ -565,3 +565,251 @@ describe("worktree slot + sampler wiring (worktree-web W3)", () => {
     expect(seenSignal?.aborted).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// bash-jobs-panel plan §3.9 (包 A): deps.bashJobs → StatusInfo.bashJobs through the
+// same status-slot pipeline — fingerprint gate, sampler wiring, session boundaries,
+// reconnect replay, snapshot_req, byte-equality without the port.
+// ---------------------------------------------------------------------------
+describe("bash-jobs slot + sampler wiring (bash-jobs-panel 包 A)", () => {
+  let tmp: ReturnType<typeof tmpDir>;
+  beforeEach(() => {
+    tmp = tmpDir("wh-d-bj-");
+    resetGlobals();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    resetGlobals();
+    vi.useRealTimers();
+    tmp.cleanup();
+  });
+
+  interface FakeManager {
+    gen: object;
+    records: import("../../../src/bash/types.js").JobRecord[];
+    tailCalls: number;
+    /** Simulates a stack rebuild (/new・/resume・/fork): fresh instance, fresh rows. */
+    rebuild(records: import("../../../src/bash/types.js").JobRecord[]): void;
+    port: NonNullable<WebHubDeps["bashJobs"]>;
+  }
+
+  function fakeManager(records: import("../../../src/bash/types.js").JobRecord[]): FakeManager {
+    const m: FakeManager = {
+      gen: {},
+      records,
+      tailCalls: 0,
+      rebuild(next) {
+        m.gen = {};
+        m.records = next;
+      },
+      port: {
+        current: () => {
+          const gen = m.gen;
+          const records = m.records;
+          return {
+            gen,
+            list: () => records,
+            tail: async (r) => {
+              m.tailCalls += 1;
+              return { text: `tail of ${r.jobId} TOKEN=x`, logBytes: r.logBytes };
+            },
+          };
+        },
+        retentionMs: () => 0,
+      },
+    };
+    return m;
+  }
+
+  function bjJob(
+    jobId: string,
+    over: Partial<import("../../../src/bash/types.js").JobRecord> = {},
+  ): import("../../../src/bash/types.js").JobRecord {
+    return {
+      v: 1,
+      jobId,
+      command: `echo ${jobId}`,
+      cwd: "/w",
+      sessionId: "sess-1",
+      hostPid: process.pid,
+      status: "running",
+      createdAt: 1,
+      spawnedAt: 1,
+      backgroundedAt: 1,
+      exitCode: null,
+      logPath: `/log/${jobId}.log`,
+      logBytes: 10,
+      outputTruncated: false,
+      readCursor: 0,
+      ...over,
+    };
+  }
+
+  async function goLive(n: ReturnType<typeof fakeNet>) {
+    await vi.advanceTimersByTimeAsync(0);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s.hub(ackFrame());
+    await vi.advanceTimersByTimeAsync(0);
+    return s;
+  }
+
+  /** One 1Hz tick plus drains for the sampler's microtask chains and its 0/1ms timers. */
+  async function tick(n = 1): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+  }
+
+  const statusFrames = (s: ReturnType<typeof fakeNet>["sockets"][number]) => s.frames().filter((f) => f.t === "status");
+
+  it("port ⇒ status frames carry bashJobs; a state change publishes immediately (non-current), then current", async () => {
+    const n = fakeNet();
+    const m = fakeManager([bjJob("b_run1")]);
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, bashJobs: m.port }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+
+    await tick(2); // first live tick: fingerprint flips ⇒ immediate frame; sampler reads
+    const frames = statusFrames(s);
+    expect(frames.length).toBeGreaterThan(0);
+    const withJobs = frames.filter((f) => "bashJobs" in f);
+    expect(withJobs.length).toBeGreaterThan(0);
+    // The immediate frame is authoritative-but-not-current (state first, tails follow)…
+    const first = withJobs[0] as { bashJobs?: { rows: Array<{ id: string; tail?: string; tailCurrent?: true }> } };
+    expect(first.bashJobs!.rows[0]!.id).toBe("b_run1");
+    // …and a later frame carries the redacted, current tail (sampler → onChange → publish).
+    await tick(2);
+    const last = statusFrames(s).at(-1) as {
+      bashJobs?: { rows: Array<{ tail?: string; tailCurrent?: true }> };
+    };
+    expect(last.bashJobs!.rows[0]!.tail).toContain("tail of b_run1 TOKEN=***");
+    expect(last.bashJobs!.rows[0]!.tailCurrent).toBe(true);
+  });
+
+  it("no port ⇒ the bashJobs key never appears (byte-equal to pre-feature status shape)", async () => {
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+    await tick(3);
+    for (const f of statusFrames(s)) expect("bashJobs" in f).toBe(false);
+  });
+
+  it("current() undefined ⇒ field absent (holder empty, e.g. bash-jobs feature off mid-session)", async () => {
+    const n = fakeNet();
+    const m = fakeManager([]);
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, bashJobs: m.port }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+    await tick(2);
+    for (const f of statusFrames(s)) expect("bashJobs" in f).toBe(false);
+    expect(m.tailCalls).toBe(0);
+  });
+
+  it("snapshot_req returns bashJobs alongside the rest of the status", async () => {
+    const n = fakeNet();
+    const m = fakeManager([bjJob("b_snap")]);
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, bashJobs: m.port }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+    await tick(2);
+    s.hub({ t: "snapshot_req", rid: "r-bj" });
+    await tick(1);
+    const reply = s.frames().find((f) => f.t === "snapshot_reply") as {
+      status?: { bashJobs?: { rows: Array<{ id: string }> } };
+    };
+    expect(reply?.status?.bashJobs?.rows.map((r) => r.id)).toEqual(["b_snap"]);
+  });
+
+  it("manager rebuild (/new・/resume stack swap): next frames carry only the new manager's rows, old tails gone", async () => {
+    const n = fakeNet();
+    const m = fakeManager([bjJob("b_old")]);
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, bashJobs: m.port }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+    await tick(2);
+    const before = statusFrames(s).at(-1) as { bashJobs?: { rows: Array<{ id: string }> } };
+    expect(before.bashJobs!.rows.map((r) => r.id)).toEqual(["b_old"]);
+    const oldTailCalls = m.tailCalls;
+
+    // Stack rebuild: fresh manager instance (new gen) with a fresh row set.
+    m.rebuild([bjJob("b_new1"), bjJob("b_new2")]);
+    await tick(2);
+    const after = statusFrames(s).at(-1) as { bashJobs?: { rows: Array<{ id: string; tail?: string }> } };
+    expect(after.bashJobs!.rows.map((r) => r.id)).toEqual(["b_new1", "b_new2"]); // same createdAt ⇒ jobId tiebreak
+    for (const r of after.bashJobs!.rows) {
+      if (r.tail !== undefined) expect(r.tail).toContain("b_new");
+    }
+    expect(m.tailCalls).toBeGreaterThan(oldTailCalls);
+  });
+
+  it("reconnect replays the bashJobs slot and kicks exactly one catch-up sample while a round is in flight", async () => {
+    const n = fakeNet();
+    const m = fakeManager([bjJob("b_re")]);
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, bashJobs: m.port }));
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const s = await goLive(n);
+    await tick(2);
+    const callsBefore = m.tailCalls;
+
+    s.fail("ECONNRESET");
+    // The job's log grew while the link was down — the reconnect kick now has real work.
+    m.records[0] = { ...m.records[0]!, logBytes: 20 };
+    await vi.advanceTimersByTimeAsync(700); // past the 0.5s±20% backoff
+    const s2 = n.sockets.at(-1)!;
+    expect(s2).not.toBe(s);
+    s2.emit("connect");
+    await vi.advanceTimersByTimeAsync(0);
+    s2.hub(ackFrame());
+    await tick(2);
+
+    const replayed = statusFrames(s2).filter((f) => "bashJobs" in f);
+    expect(replayed.length).toBeGreaterThan(0);
+    // One reconnect kick, exactly one catch-up sample for it (no burst).
+    expect(m.tailCalls - callsBefore).toBe(1);
+  });
+
+  it("/reload simulation (old wiring shutdown + new wiring): the old sampler never reads a tail again", async () => {
+    const n = fakeNet();
+    const m = fakeManager([bjJob("b_rl")]);
+    const a = fakePi();
+    wireWebHub(a.pi, deps({ netConnect: n.netConnect, bashJobs: m.port }));
+    const c1 = fakeCtx({ mode: "tui" });
+    a.fire("session_start", { type: "session_start", reason: "startup" }, c1.ctx);
+    await goLive(n);
+    await tick(2);
+    const callsAtShutdown = m.tailCalls;
+    expect(callsAtShutdown).toBeGreaterThan(0);
+
+    a.fire("session_shutdown", { type: "session_shutdown", reason: "reload" }, c1.ctx);
+    const b = fakePi();
+    wireWebHub(b.pi, deps({ netConnect: n.netConnect, bashJobs: m.port }));
+    const c2 = fakeCtx({ mode: "tui", sessionId: "sess-2" });
+    b.fire("session_start", { type: "session_start", reason: "startup" }, c2.ctx);
+    await tick(3);
+    // The old activation's sampler is stopped (generation-discarded); only the new one reads.
+    // Both share the same fake manager here, so total calls keep growing — the assertion that
+    // matters is below: after ANOTHER shutdown, calls freeze.
+    const c3 = fakeCtx({ mode: "tui", sessionId: "sess-3" });
+    b.fire("session_shutdown", { type: "session_shutdown", reason: "quit" }, c2.ctx);
+    const frozen = m.tailCalls;
+    await tick(3);
+    expect(m.tailCalls).toBe(frozen); // no wiring left alive ⇒ zero reads
+  });
+});
