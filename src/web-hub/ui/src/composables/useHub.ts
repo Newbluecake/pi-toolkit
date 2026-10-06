@@ -19,7 +19,7 @@ import { shallowRef, type ShallowRef } from "vue";
 import { initialState, needsRunSubscribe, needsSubscribe, reduce } from "@logic/state.js";
 import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
 import { createRenderGate, type RenderPriority } from "./renderGate.js";
-import type { HubTransport, TransportHooks } from "../transport/types.js";
+import type { HubTransport, RemoveAgentOutcome, RemoveTarget, TransportHooks } from "../transport/types.js";
 import { createControl } from "./useControl.js";
 import { createSpawn } from "./useSpawn.js";
 import { createNewSession } from "./useNewSession.js";
@@ -560,10 +560,20 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     newSession,
   };
 
+  // ---------------------------------------------------------------------------
+  // web-hub-delete-session plan v2 §5.3/§5.4: `removeAgent` — a transport without it (test
+  // fakes) degrades to `E_UNSUPPORTED`, same discipline as `createSpawn`'s UNSUPPORTED_*.
+  // ---------------------------------------------------------------------------
+  const UNSUPPORTED_REMOVE: RemoveAgentOutcome = { ok: false, error: "E_UNSUPPORTED" };
+  function removeAgent(target: RemoveTarget): Promise<RemoveAgentOutcome> {
+    return transport.removeAgent === undefined ? Promise.resolve(UNSUPPORTED_REMOVE) : transport.removeAgent(target);
+  }
+
   return {
     state: state as Readonly<ShallowRef<HubState>>,
     control,
     spawn,
+    removeAgent,
     // PV4 (web-hub-preview plan v3 §4.6): the preview call surface rides the handle iff the
     // transport offers it — `usePreview`'s scope derivation treats its absence as "nothing
     // is clickable" (`previewScopeOf`'s `hasTransport`).

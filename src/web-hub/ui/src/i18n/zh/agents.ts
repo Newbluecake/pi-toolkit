@@ -22,6 +22,18 @@ const agents = {
   newSession: "新建会话",
   newSessionAria: "为当前选中的 agent 开启新会话（执行 /new）",
   newSessionOk: "已开启新会话",
+  remove: "删除",
+  removeConfirm: "再次点击确认删除",
+  removeAria: "从列表中删除这个会话（会话文件保留）",
+  removeManagedAria: "停止并删除这个由网页启动的会话（会话文件保留）",
+  removing: "removing\u2026",
+  removeFailed: "删除失败：{reason}",
+  "removeErr.online": "会话仍在线",
+  "removeErr.unconfirmed": "无法确认进程已退出，已保留",
+  "removeErr.managedLan": "网页托管的会话，局域网侧无权停止",
+  "removeErr.rate": "操作太频繁，稍后再试",
+  "removeErr.unsupported": "hub 版本不支持，请刷新页面",
+  "removeErr.network": "网络错误",
 } satisfies Messages<typeof en>;
 
 export default agents;

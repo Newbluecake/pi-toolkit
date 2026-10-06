@@ -736,6 +736,39 @@ export function createPasswordClient(deps) {
     },
   };
 
+  // -------------------------------------------------------------------------
+  // card removal (web-hub-delete-session plan v2 §4.1/§5.3): POST /api/agents/remove, one-shot
+  // like `spawn.stop` above (password mode has no relogin dance; a 401 is reported by the
+  // `isRestAuthEndpoint` fetch wrapper in `transport/password.ts`, never fired here).
+  // -------------------------------------------------------------------------
+
+  /**
+   * @param {{agentKey: string} | {spawnId: string}} target
+   * @returns {Promise<any>}
+   */
+  async function removeAgent(target) {
+    try {
+      const r = await postApi(API.agentRemove, target, CMD_REQUEST_TIMEOUT_MS);
+      const out = await spawnFromResponse(r);
+      if (out.ok === false) {
+        /** @type {any} */
+        const err = { ok: false, error: out.error };
+        if (typeof out.message === "string") err.message = out.message;
+        if (typeof out.reason === "string") err.reason = out.reason;
+        if (typeof out.retryAfterS === "number") err.retryAfterS = out.retryAfterS;
+        return err;
+      }
+      const d = out.data;
+      /** @type {any} */
+      const ok = { ok: true, removed: d.removed === true };
+      if (d.pending === true) ok.pending = true;
+      if (typeof d.spawnId === "string") ok.spawnId = d.spawnId;
+      return ok;
+    } catch (e) {
+      return { ok: false, error: spawnFromError(e).error };
+    }
+  }
+
   function closeStream() {
     if (watchdog !== null) deps.clearTimeout(watchdog);
     if (reopenTimer !== null) deps.clearTimeout(reopenTimer);
@@ -1019,6 +1052,7 @@ export function createPasswordClient(deps) {
     dialog,
     upload,
     spawn,
+    removeAgent,
     preview,
     close() {
       closed = true;

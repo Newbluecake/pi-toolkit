@@ -382,3 +382,123 @@
     min-height: 44px;
   }
 }
+
+/* ---------------------------------------------------------------- delete entry (web-hub-
+ * delete-session plan v2 §5.4): the `<li>` wrapping AgentCard + RemoveButton as siblings (a
+ * button can't nest inside AgentCard's `<a>`). `.removable` (only present when a target
+ * exists) reserves room on the card so the absolutely-positioned button never overlaps text;
+ * plain `.agent-item` (no button) needs none. */
+.agent-item {
+  position: relative;
+}
+
+.removable > .agent-card {
+  padding-right: calc(60px * var(--fs-scale, 1));
+}
+
+.remove-wrap {
+  display: inline-grid;
+  flex: none;
+  justify-items: end;
+  gap: 2px;
+}
+
+/* AgentList context only: absolutely positioned over the card's bottom-right corner (a button
+ * can't nest inside AgentCard's `<a>`). SpawnRow renders the same component inline among its
+ * other action buttons — no positioning override there, it just flows with the flex row. */
+.agent-item .remove-wrap {
+  position: absolute;
+  right: var(--sp-2);
+  bottom: 8px;
+  z-index: 2;
+}
+
+.remove-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  /* verifier P2 r1 #1: ≥40×40 default hit area (plan §5.4/A12) — 32×32 was too small. Coarse
+   * pointers bump to 44×44 below; `(hover: none)` always-visible is its own rule further down. */
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  color: var(--c-text-3);
+  /* Default (SpawnRow, any future context): always visible — same as its sibling action
+   * buttons. `.agent-item` below is the only context that hides it until interacted with. */
+  opacity: 1;
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.remove-btn.armed {
+  border-color: var(--c-danger);
+  background: var(--c-danger);
+  color: var(--c-on-primary);
+}
+
+.remove-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* AgentList context, hover-capable pointers: hidden until the card (or the button itself, for
+ * keyboard focus) is interacted with, or the button is mid-confirm/busy — never permanently
+ * obscuring the card. */
+@media (hover: hover) {
+  .agent-item .remove-btn {
+    opacity: 0;
+  }
+
+  .agent-item:hover .remove-btn,
+  .agent-item:focus-within .remove-btn,
+  .remove-btn:focus-visible,
+  .remove-btn.armed,
+  .remove-btn.busy {
+    opacity: 1;
+  }
+}
+
+/* verifier P2 r1 #3: any device with NO hover capability (touch, and some stylus/hybrid inputs
+ * `pointer: coarse` alone doesn't catch) must always show the button — independent of, and
+ * stronger than, the `(hover: hover)` opacity:0 default above. */
+@media (hover: none) {
+  .remove-btn {
+    opacity: 1;
+  }
+}
+
+/* coarse pointers (touch): ≥44px (ui-design §3.12 先例), same precedent as spawn.css's
+ * coarse-pointer rules. Visibility itself is `(hover: none)`'s job above — this is size only. */
+@media (pointer: coarse) {
+  .remove-btn {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.remove-note {
+  margin: 0;
+  max-width: 220px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-xs);
+  color: var(--c-danger);
+  font-size: var(--fs-2xs);
+  overflow-wrap: anywhere;
+}
+
+/* AgentList context: floats over the card, right-aligned text on a solid backdrop. */
+.agent-item .remove-note {
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+  text-align: right;
+}
+
+/* AgentCard's row1 chip for a managed record mid-delete (removing:true) */
+.chip-removing {
+  border-color: var(--c-warning-border);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}

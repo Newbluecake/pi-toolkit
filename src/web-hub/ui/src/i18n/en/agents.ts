@@ -20,6 +20,19 @@ const agents = {
   newSession: "New session",
   newSessionAria: "Start a new session for the selected agent (runs /new)",
   newSessionOk: "New session started",
+  // --- web-hub-delete-session plan v2 §5.4: AgentCard's two-step delete button ---
+  remove: "Delete",
+  removeConfirm: "Click again to delete",
+  removeAria: "Delete this session from the list (session file is kept)",
+  removeManagedAria: "Stop and delete this web-started session (session file is kept)",
+  removing: "removing\u2026",
+  removeFailed: "Delete failed: {reason}",
+  "removeErr.online": "the session is still online",
+  "removeErr.unconfirmed": "could not confirm the process exited; kept",
+  "removeErr.managedLan": "web-managed session; cannot be stopped from the LAN",
+  "removeErr.rate": "too many requests, retry shortly",
+  "removeErr.unsupported": "hub does not support this, reload the page",
+  "removeErr.network": "network error",
 } satisfies Record<string, string>;
 
 export default agents;

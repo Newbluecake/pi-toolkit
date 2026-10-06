@@ -63,6 +63,9 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
         {{ t("spawn.badgeWeb") }}
       </span>
+      <span v-if="managed?.removing" class="chip chip-removing" translate="no">
+        {{ t("agents.removing") }}
+      </span>
       <span class="agent-cost num">{{ card.costLabel }}</span>
     </span>
 

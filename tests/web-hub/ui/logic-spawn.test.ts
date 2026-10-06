@@ -211,6 +211,38 @@ describe("classifySpawnError (§3.2 DirPicker taxonomy)", () => {
     expect(classifySpawnError(null)).toBeUndefined();
     expect(classifySpawnError("x")).toBeUndefined();
   });
+
+  // web-hub-delete-session plan v2 §2.5: the idempotent-replay-but-record-deleted rejection
+  // gets its own "gone" bucket — checked BEFORE the generic E_BAD_REQUEST⇒"dir" fallback.
+  it('E_BAD_REQUEST with reason:"spawn-gone" ⇒ "gone" (not the generic "dir")', () => {
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: "spawn-gone", retryable: false })).toBe(
+      "gone",
+    );
+  });
+
+  it('E_BAD_REQUEST with any OTHER reason (or none) still falls back to "dir"', () => {
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: "cwd-rejected", retryable: false })).toBe(
+      "dir",
+    );
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", retryable: false })).toBe("dir");
+  });
+});
+
+// Anti-drift (verifier r1 #2, P2 打回): `SPAWN_GONE_REASON` has a real runtime export in
+// `protocol/spawn.ts`, but `@logic/spawn.js` deliberately does NOT import it in production code
+// (importing anything from that module drags `@sinclair/typebox` into the browser bundle — the
+// rationale `SPAWN_GONE_REASON`'s own export comment documents), so the hardcoded `"spawn-gone"`
+// literal is pinned HERE instead, by feeding the REAL protocol value through the function under
+// test. A protocol rename trips this test (the literal comparison inside `classifySpawnError`
+// would stop matching and fall through to the generic "dir" bucket).
+describe("classifySpawnError × protocol/spawn.ts's SPAWN_GONE_REASON (anti-drift pin)", () => {
+  it('the real protocol constant, fed through classifySpawnError, still resolves to "gone"', async () => {
+    const { SPAWN_GONE_REASON } = await import("../../../src/web-hub/protocol/spawn.js");
+    expect(SPAWN_GONE_REASON).toBe("spawn-gone"); // the value @logic/spawn.js's literal must track
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: SPAWN_GONE_REASON, retryable: false })).toBe(
+      "gone",
+    );
+  });
 });
 
 describe("isMine (§3.2 「我发起的」)", () => {

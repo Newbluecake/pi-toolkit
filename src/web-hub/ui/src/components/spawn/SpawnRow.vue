@@ -19,9 +19,11 @@
 import { computed, inject, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { removalTargetForSpawn } from "../../logic/remove.js";
 import type { SpawnRecordPublic } from "@protocol/spawn.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import "../../styles/spawn.css";
+import RemoveButton from "../agents/RemoveButton.vue";
 
 const props = defineProps<{ readonly rec: SpawnRecordPublic }>();
 const emit = defineEmits<{ dismiss: [] }>();
@@ -45,6 +47,13 @@ const hintLabel = computed(() => {
   return key !== undefined ? t(key) : hint;
 });
 const stateLabel = computed(() => (props.rec.state === "failed" ? t("spawn.stateFailed") : t("spawn.stateStarting")));
+
+// ---------------------------------------------------------------------------
+// delete entry (web-hub-delete-session plan v2 §0.3/§5.4, user 拍板 #7): starting/failed rows
+// get the same two-step delete as AgentCard, by spawnId; the existing 「关闭」 (local, memory-
+// only dismiss, emitted above) is UNCHANGED — this is a second, independent action.
+// ---------------------------------------------------------------------------
+const removeTarget = computed(() => removalTargetForSpawn(props.rec));
 
 // ---------------------------------------------------------------------------
 // owner detail (「详情」— GET /api/headless rides the owner projection, arch §6.4)
@@ -139,6 +148,12 @@ async function onRetry(): Promise<void> {
       <AppIcon v-else name="alert" class="icon-sm" />
       <span class="chip chip-spawn" :data-state="rec.state" translate="no">{{ stateLabel }}</span>
       <span class="spawn-row-cwd" :title="rec.cwdLabel" translate="no">{{ rec.cwdLabel }}</span>
+      <RemoveButton
+        v-if="removeTarget"
+        :target="{ spawnId: removeTarget.spawnId }"
+        :removing="removeTarget.removing"
+        ariaKind="spawn"
+      />
       <span v-if="rec.state === 'failed'" class="spawn-row-actions">
         <button
           class="btn btn-ghost btn-xs"

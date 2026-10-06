@@ -35,6 +35,10 @@ const detail = {
   todoStatusCompleted: "Completed",
   todoBlockedBy: "blocked by {ids}",
   todoMore: "(+{n} more)",
+  // web-hub-delete-session plan v2 §5.4: DashboardView's 「已删除」 empty state (appended at
+  // the file's end — another package inserts before `todoTitle`, never here).
+  removedTitle: "Session removed from the list",
+  removedBody: "The session file is kept; resume it from a terminal with pi.",
 } satisfies Record<string, string>;
 
 export default detail;

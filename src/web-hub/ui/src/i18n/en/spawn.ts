@@ -104,6 +104,12 @@ const spawn = {
   stopSessionFailed: "Stop failed ({code})",
   fpRefilled: "The first message was not delivered ({state}) — its text is back in the draft.",
   fpRefilledDismiss: "Dismiss",
+
+  // --- SpawnRow's two-step delete button (web-hub-delete-session plan v2 §0.3/§5.4) ---
+  removeAria: "Stop and delete this web-started session record",
+
+  // --- DirPicker / idempotent-replay-but-record-gone error (§2.5) ---
+  errGone: "This session was deleted; start a new one",
 } satisfies Record<string, string>;
 
 export default spawn;

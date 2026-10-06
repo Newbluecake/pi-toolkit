@@ -9,6 +9,7 @@
  */
 import type { PreviewDims, PreviewImageMime } from "@protocol/preview.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
+import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type {
   DirEntryWire,
   SpawnAccepted,
@@ -101,6 +102,10 @@ export interface HubTransport {
    * the same reason `upload` is — test fakes / future transports may omit it; `useSpawn`
    * degrades to `E_UNSUPPORTED` then. Both real adapters always provide it. */
   readonly spawn?: SpawnTransport;
+  /** web-hub-delete-session plan v2 §4.1/§5.3: `POST /api/agents/remove`. Optional per the
+   * frozen-transport convention — a transport without it (test fakes) degrades to
+   * `E_UNSUPPORTED` in `useHub.ts`'s `removeAgent`. Both real adapters always provide it. */
+  removeAgent?(target: RemoveTarget): Promise<RemoveAgentOutcome>;
   /** web-hub-preview plan v3 §4.6 (PV4): `GET /api/preview`. Optional for the same reason as
    * `upload`/`spawn` — `usePreview`'s scope derivation (`previewScopeOf`) yields `null`
    * without it and every path renders as plain text. Both real adapters always provide it. */
@@ -178,6 +183,53 @@ export interface SpawnTransport {
   start(req: SpawnRequestBody): Promise<SpawnOutcome>;
   stop(spawnId: string, force?: boolean): Promise<SpawnStopOutcome>;
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-delete-session plan v2 §4.1/§5.3 — the `POST /api/agents/remove` transport surface
+// ---------------------------------------------------------------------------
+
+/** `AgentCard` sends `{agentKey}`, `SpawnRow` sends `{spawnId}` — the same wire union as
+ * `protocol/http-contract.ts`'s `AgentRemoveRequest` (not imported: this module's spawn types
+ * above already set the precedent of hand-mirroring narrow wire unions rather than reaching
+ * into the frozen protocol face for every last shape). */
+export type RemoveTarget = { readonly agentKey: string } | { readonly spawnId: string };
+
+/**
+ * `removeAgent()`'s outcome (§5.3): 200 ⇒ `{removed:true}` (deletion done, or already absent —
+ * idempotent), 202 ⇒ `{removed:false, pending:true, spawnId, state:"stopping"}` (entered, or
+ * already in, the stop grace). The error half mirrors `SpawnOutcome`'s without the
+ * spawn-specific `resolvedCwd` field: `reason` carries `AgentRemoveErrorReason` ("online" |
+ * "exit-unconfirmed" | "lan-off") for `classifyRemoveError` (`@logic/remove.js`) to bucket.
+ */
+export type RemoveAgentOutcome =
+  | { readonly ok: true; readonly removed: boolean; readonly pending?: true; readonly spawnId?: string }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly message?: string;
+      readonly reason?: string;
+      readonly retryAfterS?: number;
+    };
+
+/**
+ * Anti-drift pin for `AgentRemoveErrorReason` (verifier r1 #2, P2 打回): the protocol type has
+ * no runtime export (it is a bare TS union, nothing to `import` at runtime), so this exhaustive
+ * record is the enforcement mechanism instead — TypeScript's excess/missing-property check on
+ * `{ [K in AgentRemoveErrorReason]: true }` makes it a COMPILE ERROR the moment the protocol
+ * union gains or loses a member without this file being updated in lockstep. The three named
+ * constants below (not just the derived array) give `@logic/remove.js` typo-safe, individually
+ * importable literals — `classifyRemoveError` imports THESE, never re-typing the strings.
+ */
+const AGENT_REMOVE_REASON_SET: { readonly [K in AgentRemoveErrorReason]: true } = {
+  online: true,
+  "exit-unconfirmed": true,
+  "lan-off": true,
+};
+/** Derived from the exhaustiveness record above — every `AgentRemoveErrorReason` member, once. */
+export const AGENT_REMOVE_ERROR_REASONS = Object.keys(AGENT_REMOVE_REASON_SET) as readonly AgentRemoveErrorReason[];
+export const AGENT_REMOVE_REASON_ONLINE: AgentRemoveErrorReason = "online";
+export const AGENT_REMOVE_REASON_UNCONFIRMED: AgentRemoveErrorReason = "exit-unconfirmed";
+export const AGENT_REMOVE_REASON_LAN_OFF: AgentRemoveErrorReason = "lan-off";
 
 // ---------------------------------------------------------------------------
 // web-hub-upload plan §1.2 (package U4b) — the chunked-upload transport surface

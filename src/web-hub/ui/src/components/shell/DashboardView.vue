@@ -65,6 +65,12 @@ const selectedKey = computed(() => (props.route.name === "agent" ? props.route.k
 const selectedAgent = computed(() =>
   selectedKey.value === null ? undefined : props.hub.state.value.agents.get(selectedKey.value),
 );
+// web-hub-delete-session plan v2 §2.3/§5.1, 用户拍板 #2: a selected key the hub just broadcast
+// `agent_removed` for renders the 「已删除」 empty state instead of 「未连接」 — never an
+// automatic jump back to the list (the session jsonl is kept; only the card is gone).
+const selectedRemoved = computed(
+  () => selectedKey.value !== null && (props.hub.state.value.removed?.has(selectedKey.value) ?? false),
+);
 
 // plan §3.3's `route` compatibility event — dispatched on every route change (incl. the very
 // first one, `immediate: true`, so a direct deep link is honored before any `agents` frame
@@ -197,6 +203,13 @@ function onLoadOlder(agentKey: string): void {
         @retry="onRetry(selectedAgent!.key)"
         @load-older="onLoadOlder(selectedAgent!.key)"
       />
+      <div v-else-if="selectedRemoved" class="detail">
+        <EmptyState icon="inbox" :title="t('detail.removedTitle')" :body="t('detail.removedBody')">
+          <template #actions>
+            <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
+          </template>
+        </EmptyState>
+      </div>
       <div v-else-if="route.name === 'agent'" class="detail">
         <EmptyState icon="inbox" :title="t('detail.notConnectedTitle')" :body="t('detail.notConnectedBody')">
           <template #actions>
@@ -219,6 +232,13 @@ function onLoadOlder(agentKey: string): void {
         @retry="onRetry(selectedAgent!.key)"
         @load-older="onLoadOlder(selectedAgent!.key)"
       />
+      <div v-else-if="selectedRemoved" class="detail">
+        <EmptyState icon="inbox" :title="t('detail.removedTitle')" :body="t('detail.removedBody')">
+          <template #actions>
+            <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
+          </template>
+        </EmptyState>
+      </div>
       <div v-else class="detail">
         <EmptyState icon="inbox" :title="t('detail.notConnectedTitle')" :body="t('detail.notConnectedBody')">
           <template #actions>

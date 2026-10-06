@@ -38,6 +38,8 @@ const detail = {
   todoStatusCompleted: "已完成",
   todoBlockedBy: "被 {ids} 阻塞",
   todoMore: "（+{n} 更多）",
+  removedTitle: "会话已从列表删除",
+  removedBody: "会话文件仍保留，可在终端用 pi 恢复。",
 } satisfies Messages<typeof en>;
 
 export default detail;

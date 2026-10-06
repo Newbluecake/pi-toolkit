@@ -116,6 +116,22 @@ describe("web/contract.js API headless endpoints (web-hub-spawn SP11 / arch §8.
   });
 });
 
+// web-hub-delete-session plan v2 §4.1/§5.3: `API.agentRemove` is imported from the protocol
+// module (same anti-drift rule as SSE_EVENTS/API_ERRORS — same reference target), not a copy.
+describe("web/contract.js API.agentRemove (web-hub-delete-session plan v2 §4.1/§5.3)", () => {
+  it("is the same reference as protocol/http-contract.ts's AGENT_REMOVE_PATH", () => {
+    expect(web.API.agentRemove).toBe(proto.AGENT_REMOVE_PATH);
+    expect(web.API.agentRemove).toBe("/api/agents/remove");
+  });
+
+  it("reduce tolerates the agent_removed SSE event (registered, drops agents/order, records removed)", () => {
+    const s0 = reduce(initialState(), { event: "agents", data: [{ agentKey: "a1", kind: "tui", prompts: [] }] });
+    const s1 = reduce(s0, { event: "agent_removed", data: { agentKey: "a1" } });
+    expect(s1.agents.has("a1")).toBe(false);
+    expect(s1.removed.has("a1")).toBe(true);
+  });
+});
+
 // web-hub-fleet-drawer plan §3.1/§3.2/§3.4 (F0): the run-transcript browser surface.
 describe("web/contract.js run-transcript surface (fleet-drawer F0)", () => {
   it("API.run* literals are pinned against protocol RUN_API both ways (hand-written mirror)", async () => {

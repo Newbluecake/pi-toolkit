@@ -117,16 +117,24 @@ export function newSessionActions({ hubCaps, listResult, selected } = {}) {
 
 /**
  * §3.2's DirPicker error taxonomy. Returns `undefined` for a non-error outcome.
+ *
+ * web-hub-delete-session plan v2 §2.5: `E_BAD_REQUEST` with `reason:"spawn-gone"` (the
+ * idempotent-replay-but-record-deleted rejection) is its own `"gone"` bucket, checked before
+ * the generic `E_BAD_REQUEST"⇒"dir"` fallback — the literal is hand-copied rather than
+ * importing `protocol/spawn.ts`'s `SPAWN_GONE_REASON` runtime value (that module pulls
+ * typebox at runtime; this file stays typebox-free, same rationale as every other hardcoded
+ * wire literal already here).
  * @param {any} outcome
- * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "deadline" | "network" | undefined}
+ * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "deadline" | "network" | "gone" | undefined}
  */
 export function classifySpawnError(outcome) {
   if (!outcome || typeof outcome !== "object" || outcome.ok === true) return undefined;
   switch (outcome.error) {
     case "E_CONFIRM_REQUIRED":
       return "confirm";
-    case "E_DIR":
     case "E_BAD_REQUEST":
+      return outcome.reason === "spawn-gone" ? "gone" : "dir";
+    case "E_DIR":
       return "dir";
     case "E_SPAWN_DENIED":
       return "denied";

@@ -14,6 +14,8 @@ import type {
   PasswordTransport,
   PreviewOutcome,
   PreviewTransport,
+  RemoveAgentOutcome,
+  RemoveTarget,
   Result,
   RunPageResult,
   RunSubResult,
@@ -61,6 +63,10 @@ const REST_AUTH_PATHS: ReadonlySet<string> = new Set([
   // session entirely. The GET (API.runHistory) rides the prefix rule below, next to API.history.
   API.runSubscribe,
   API.runUnsubscribe,
+  // web-hub-delete-session plan v2 §4.1/§5.3: `POST /api/agents/remove` is a one-shot call like
+  // subscribe/cmd above (the password client's `removeAgent` never fires onConn itself) — an
+  // exact-match entry (not a prefix, unlike `/api/headless*`: this endpoint has no sub-paths).
+  API.agentRemove,
 ]);
 
 function isRestAuthEndpoint(url: string): boolean {
@@ -128,6 +134,10 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       start: (req) => client.spawn.start(req) as Promise<SpawnOutcome>,
       stop: (spawnId, force) => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>,
     } satisfies SpawnTransport,
+    // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`.
+    // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an
+    // exact-match entry) — never inside the client.
+    removeAgent: (target: RemoveTarget) => client.removeAgent(target) as Promise<RemoveAgentOutcome>,
     preview: {
       // PV4 (web-hub-preview plan v3 §4.6): thin cast over the logic client's preview
       // namespace. 401 ⇒ onConn("auth") is reported by the fetch wrapper above

@@ -206,3 +206,54 @@ describe("DashboardView.vue — settings route back navigation (field report: mu
     expect(window.location.hash).toBe("#/");
   });
 });
+
+/**
+ * web-hub-delete-session plan v2 §2.3/§5.4/§8-A10 (user 拍板 #2): a selected key the reducer
+ * has recorded in `removed` (an `agent_removed` broadcast already dropped its card) renders the
+ * 「已删除」 empty state instead of the generic 「未连接」 one — in BOTH layout branches — and
+ * never auto-navigates back to the list.
+ */
+function hubWithRemoved(key: string): HubHandle {
+  // keep a second, un-removed agent present so AgentList's own 0-agents EmptyState (same
+  // `.empty` class) never shadows the detail pane's — mirrors `hubWithOneAgent`'s shape.
+  const s = run([
+    { event: "hello", data: { clientId: "c1" } },
+    { event: "agents", data: [card(key), card("other-agent")] },
+    { event: "agent_removed", data: { agentKey: key } },
+  ]);
+  return { state: ref(s as unknown as HubState), dispatch: () => {} };
+}
+
+describe("DashboardView.vue — removed empty state (web-hub-delete-session v2 §5.4, A10)", () => {
+  it("split view (!narrow): a removed key shows 「已删除」, not 「未连接」, with a back link", () => {
+    stubMatchMedia(false);
+    const hub = hubWithRemoved("gone-1");
+    const wrapper = mountDashboard({ name: "agent", key: "gone-1" }, hub);
+    expect(wrapper.find(".empty h2").text()).toBe("Session removed from the list");
+    expect(wrapper.text()).toContain("resume it from a terminal with pi");
+    expect(wrapper.find('a[href="#/"]').exists()).toBe(true);
+    expect(wrapper.find(".empty h2").text()).not.toBe("This agent is not connected");
+  });
+
+  it("narrow (<768px) single view: same removed empty state", () => {
+    stubMatchMedia(true);
+    const hub = hubWithRemoved("gone-2");
+    const wrapper = mountDashboard({ name: "agent", key: "gone-2" }, hub);
+    expect(wrapper.find(".empty h2").text()).toBe("Session removed from the list");
+  });
+
+  it("a key that was never removed still gets the generic not-connected empty state", () => {
+    stubMatchMedia(false);
+    const hub = hubWithOneAgent();
+    const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hub);
+    expect(wrapper.find(".empty h2").text()).toBe("This agent is not connected");
+  });
+
+  it("a removed key never auto-navigates back to the list (stays on the agent route)", () => {
+    stubMatchMedia(false);
+    window.location.hash = "#/agent/gone-3";
+    const hub = hubWithRemoved("gone-3");
+    mountDashboard({ name: "agent", key: "gone-3" }, hub);
+    expect(window.location.hash).toBe("#/agent/gone-3");
+  });
+});

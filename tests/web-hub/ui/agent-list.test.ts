@@ -585,3 +585,235 @@ describe("AgentCard.vue — managed `web` badge (SP12, arch §9.1)", () => {
     expect(wrapper.find(".chip-web").exists()).toBe(false);
   });
 });
+
+/**
+ * web-hub-delete-session plan v2 §5.4/§7.2: the two-step delete button rendered as a sibling
+ * of `AgentCard` (never nested in its `<a>`), driven by `removalTargetForAgent` reading the
+ * full `AgentState` off the injected hub (the frozen `AgentCardView` prop has no down/card.state
+ * fields rich enough for the target function).
+ */
+import type { RemoveAgentOutcome, RemoveTarget } from "../../../src/web-hub/ui/src/types.js";
+
+function fullAgentState(key: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { key, down: false, card: { state: "live" }, ...over };
+}
+
+function hubForRemove(opts: {
+  agents?: Map<string, unknown>;
+  spawns?: SpawnsPayload | null;
+  removeAgent?: (target: RemoveTarget) => Promise<RemoveAgentOutcome>;
+}): HubHandle {
+  return {
+    state: ref({
+      control: false,
+      hub: { caps: [] },
+      agents: opts.agents ?? new Map(),
+      spawns: opts.spawns ?? null,
+    } as unknown as HubState),
+    dispatch: () => {},
+    spawn: {
+      list: async () => ({ ok: false, error: "E_NOT_FOUND", status: 404 }),
+      dirs: async () => ({ ok: true, recent: [] }),
+      start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
+      stop: async () => ({ ok: true, state: "stopping" }),
+      newSession: fakeNewSessionHandle(ref({ phase: "idle" })),
+    },
+    ...(opts.removeAgent ? { removeAgent: opts.removeAgent } : {}),
+  };
+}
+
+describe("AgentList.vue — delete entry (web-hub-delete-session v2 §5.4)", () => {
+  it("an online, unmanaged card gets no delete button at all", () => {
+    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]) });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    expect(wrapper.find(".remove-btn").exists()).toBe(false);
+  });
+
+  it("an offline card gets a delete button; two-step confirm calls removeAgent({agentKey})", async () => {
+    const calls: RemoveTarget[] = [];
+    const hub = hubForRemove({
+      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true, card: { state: "stale" } })]]),
+      removeAgent: async (target) => {
+        calls.push(target);
+        return { ok: true, removed: true };
+      },
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".remove-btn");
+    await btn.trigger("click"); // arm
+    expect(calls).toHaveLength(0);
+    await btn.trigger("click"); // confirm
+    await flushPromises();
+    expect(calls).toEqual([{ agentKey: "agent-1" }]);
+  });
+
+  it("a managed card (live/stopping/starting record) deletes by spawnId instead, with aria-kind managed", async () => {
+    const spawns: SpawnsPayload = {
+      items: [spawnRec({ state: "live", agentKey: "agent-1", spawnId: "sp9" })],
+      active: 1,
+      max: 4,
+    };
+    const calls: RemoveTarget[] = [];
+    const hub = hubForRemove({
+      agents: new Map([["agent-1", fullAgentState("agent-1")]]),
+      spawns,
+      removeAgent: async (target) => {
+        calls.push(target);
+        return { ok: true, removed: true };
+      },
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".remove-btn");
+    expect(btn.attributes("aria-label")).toBe("Stop and delete this web-started session (session file is kept)");
+    await btn.trigger("click");
+    await btn.trigger("click");
+    await flushPromises();
+    expect(calls).toEqual([{ spawnId: "sp9" }]);
+  });
+
+  it("Esc disarms before the second click; no call is made", async () => {
+    const calls: RemoveTarget[] = [];
+    const hub = hubForRemove({
+      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]),
+      removeAgent: async (target) => {
+        calls.push(target);
+        return { ok: true, removed: true };
+      },
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".remove-btn");
+    await btn.trigger("click"); // arm
+    expect(btn.attributes("aria-label")).toContain("Click again");
+    await btn.trigger("keydown", { key: "Escape" });
+    expect(btn.attributes("aria-label")).not.toContain("Click again");
+    await btn.trigger("click"); // this is now a FIRST click again (re-arm), not a confirm
+    await flushPromises();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a removing:true managed record disables the button and shows the removing note", () => {
+    const spawns: SpawnsPayload = {
+      items: [spawnRec({ state: "stopping", agentKey: "agent-1", spawnId: "sp9", removing: true })],
+      active: 1,
+      max: 4,
+    };
+    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".remove-btn");
+    expect(btn.attributes("disabled")).toBeDefined();
+    expect(wrapper.find(".remove-note").text()).toBe("removing…");
+    // AgentCard's own row1 chip also shows removing
+    expect(wrapper.find(".chip-removing").exists()).toBe(true);
+  });
+
+  it("a failed delete shows an inline error bucket derived from classifyRemoveError", async () => {
+    const hub = hubForRemove({
+      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]),
+      removeAgent: async () => ({ ok: false, error: "E_AGENT_ONLINE", reason: "online" }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".remove-btn");
+    await btn.trigger("click");
+    await btn.trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".remove-note").text()).toBe("Delete failed: the session is still online");
+  });
+
+  it("no removeAgent on the hub (older hub / test fake) ⇒ unsupported note, no throw", async () => {
+    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]) });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    const btn = wrapper.get(".remove-btn");
+    await btn.trigger("click");
+    await btn.trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".remove-note").text()).toBe("Delete failed: hub does not support this, reload the page");
+  });
+
+  it("the button is never nested inside the card's <a> (buttons can't nest in anchors)", () => {
+    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]) });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    expect(wrapper.find("a.agent-card .remove-btn").exists()).toBe(false);
+    expect(wrapper.find("li.agent-item > .remove-wrap > .remove-btn").exists()).toBe(true);
+  });
+});
+
+describe("SpawnRow.vue — delete entry (web-hub-delete-session v2 §0.3/§5.4)", () => {
+  it.each(["starting", "failed"] as const)(
+    "%s row gets a delete button; confirm calls removeAgent({spawnId})",
+    async (state) => {
+      const calls: RemoveTarget[] = [];
+      const spawns: SpawnsPayload = {
+        items: [spawnRec({ state, spawnId: "sp-x", createdAt: 1000 })],
+        active: 0,
+        max: 4,
+      };
+      const hub = hubForRemove({
+        removeAgent: async (target) => {
+          calls.push(target);
+          return { ok: true, removed: true };
+        },
+        spawns,
+      });
+      const wrapper = mount(AgentList, {
+        props: { cards: [], selectedKey: null, filter: "" },
+        global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+      });
+      const row = wrapper.get(".spawn-row");
+      const btn = row.get(".remove-btn");
+      await btn.trigger("click");
+      await btn.trigger("click");
+      await flushPromises();
+      expect(calls).toEqual([{ spawnId: "sp-x" }]);
+    },
+  );
+
+  it("live/stopping/exited records never get the SpawnRow delete button (they aren't rendered as rows at all)", () => {
+    const spawns: SpawnsPayload = { items: [spawnRec({ state: "live", spawnId: "sp-live" })], active: 1, max: 4 };
+    const hub = hubForRemove({ spawns });
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    expect(wrapper.find(".spawn-pending").exists()).toBe(false);
+  });
+
+  it("the existing 「关闭」 dismiss still works independently of the delete button", async () => {
+    const spawns: SpawnsPayload = {
+      items: [spawnRec({ state: "failed", spawnId: "sp-f", hint: "register-timeout-hello" })],
+      active: 0,
+      max: 4,
+    };
+    const hub = hubForRemove({ spawns });
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    const dismiss = wrapper.findAll("button").find((b) => b.text() === "Dismiss");
+    await dismiss!.trigger("click");
+    expect(wrapper.findAll(".spawn-pending .spawn-row")).toHaveLength(0);
+  });
+});

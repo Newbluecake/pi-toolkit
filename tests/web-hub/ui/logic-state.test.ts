@@ -901,3 +901,83 @@ describe("state.reduce — main-session pins across the F5 kernel extraction (fl
     expect(noTx.agents.get("A")!.runSel).toBe("r_AB12CD34");
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-delete-session plan v2 §2.3/§5.1/§7.2: `agent_removed` and `removed`'s interaction
+// with `agents`/`agent_up` reappearance.
+// ---------------------------------------------------------------------------
+
+describe("state.reduce: agent_removed (web-hub-delete-session plan v2 §5.1)", () => {
+  it("initialState().removed is an empty set", () => {
+    expect(initialState().removed.size).toBe(0);
+  });
+
+  it("drops the key from agents/order and records it in removed; clears the selection", () => {
+    let s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [card("A"), card("B")] },
+      { event: "select", data: { agentKey: "A" } },
+    ]);
+    expect(s.selected).toBe("A");
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "A" } });
+    expect(s.agents.has("A")).toBe(false);
+    expect(s.order).toEqual(["B"]);
+    expect(s.removed.has("A")).toBe(true);
+    expect(s.selected).toBe("B"); // withSelection auto-picks the next live agent
+  });
+
+  it("is idempotent: a repeat agent_removed for an already-gone key only touches removed once", () => {
+    let s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [card("A")] },
+    ]);
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "A" } });
+    const afterFirst = s;
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "A" } });
+    expect(s).toBe(afterFirst); // no-op ⇒ same-state invariant
+  });
+
+  it("a missing/non-string agentKey is a no-op", () => {
+    const s0 = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [card("A")] },
+    ]);
+    expect(reduce(s0, { event: "agent_removed", data: {} })).toBe(s0);
+    expect(reduce(s0, { event: "agent_removed", data: { agentKey: 5 } })).toBe(s0);
+  });
+
+  it("a reappearing agents snapshot clears the key from removed", () => {
+    let s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [card("A")] },
+    ]);
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "A" } });
+    expect(s.removed.has("A")).toBe(true);
+    s = reduce(s, { event: "agents", data: [card("A")] });
+    expect(s.agents.has("A")).toBe(true);
+    expect(s.removed.has("A")).toBe(false);
+  });
+
+  it("a reappearing agent_up clears the key from removed; the fresh card is newAgent (sub:null, history:none)", () => {
+    let s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [card("A")] },
+    ]);
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "A" } });
+    s = reduce(s, { event: "agent_up", data: { agent: card("A") } });
+    expect(s.removed.has("A")).toBe(false);
+    const a = s.agents.get("A")!;
+    expect(a.sub).toBeNull();
+    expect(a.history).toBe("none");
+  });
+
+  it("removed is bounded (FIFO cap 64): the oldest entry drops once the cap is exceeded", () => {
+    let s = initialState();
+    for (let i = 0; i < 65; i++) {
+      s = reduce(s, { event: "agent_removed", data: { agentKey: `k${i}` } });
+    }
+    expect(s.removed.size).toBe(64);
+    expect(s.removed.has("k0")).toBe(false); // oldest evicted
+    expect(s.removed.has("k64")).toBe(true); // newest kept
+  });
+});

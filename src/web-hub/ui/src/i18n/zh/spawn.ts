@@ -93,6 +93,10 @@ const spawn = {
   stopSessionFailed: "停止失败（{code}）",
   fpRefilled: "首条消息未能送达（{state}）— 正文已放回草稿。",
   fpRefilledDismiss: "关闭",
+
+  removeAria: "停止并删除这个网页发起的会话记录",
+
+  errGone: "该会话已被删除，请重新发起",
 } satisfies Messages<typeof en>;
 
 export default spawn;

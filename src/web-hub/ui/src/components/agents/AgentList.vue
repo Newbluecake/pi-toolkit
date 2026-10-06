@@ -30,7 +30,9 @@ import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { newSessionActions, pendingRows, spawnAvailability, type NewSessionAction } from "../../logic/spawn.js";
+import { removalTargetForAgent } from "../../logic/remove.js";
 import type { SpawnListOutcome } from "../../transport/types.js";
+import type { AgentCardView } from "../../types.js";
 import type { AgentListEmits, AgentListProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import EmptyState from "../shell/EmptyState.vue";
@@ -38,6 +40,7 @@ import DirPicker from "../spawn/DirPicker.vue";
 import NewSessionMenu from "../spawn/NewSessionMenu.vue";
 import SpawnRow from "../spawn/SpawnRow.vue";
 import AgentCard from "./AgentCard.vue";
+import RemoveButton from "./RemoveButton.vue";
 
 const props = defineProps<AgentListProps>();
 const emit = defineEmits<AgentListEmits>();
@@ -194,6 +197,27 @@ function dismissSpawn(spawnId: string): void {
 const spawnRows = computed(() =>
   pendingRows(hub?.state.value.spawns ?? null).filter((r) => !dismissedSpawns.value.has(r.spawnId)),
 );
+
+// ---------------------------------------------------------------------------
+// delete entry (web-hub-delete-session plan v2 §5.4): the full `AgentState` (down/card.state)
+// backing each card lives in the injected hub state, not the frozen `AgentCardView` prop —
+// `removalTargetForAgent` wants that richer shape, same injection pattern as `managed` above.
+// `target: null` (online, unmanaged card) hides the button entirely (user 拍板: 在线 TUI 会话
+// 不可删). Precomputed per row (rather than called inline from the template) so the union
+// narrowing on `target.kind` only has to happen once per card.
+// ---------------------------------------------------------------------------
+interface AgentRow {
+  readonly card: AgentCardView;
+  readonly target: ReturnType<typeof removalTargetForAgent>;
+}
+function toRow(c: AgentCardView): AgentRow {
+  return {
+    card: c,
+    target: removalTargetForAgent(hub?.state.value.agents.get(c.key), hub?.state.value.spawns ?? null),
+  };
+}
+const liveRows = computed<AgentRow[]>(() => live.value.map(toRow));
+const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
 </script>
 
 <template>
@@ -265,12 +289,24 @@ const spawnRows = computed(() =>
       </template>
     </EmptyState>
     <ul v-else class="agent-list">
-      <li v-for="card in live" :key="card.key">
-        <AgentCard :card="card" :selected="card.key === selectedKey" />
+      <li v-for="row in liveRows" :key="row.card.key" class="agent-item" :class="{ removable: !!row.target }">
+        <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
+        <RemoveButton
+          v-if="row.target"
+          :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"
+          :removing="row.target.kind === 'managed' && row.target.removing"
+          :ariaKind="row.target.kind === 'managed' ? 'managed' : 'agent'"
+        />
       </li>
       <li v-if="staleOrDown.length > 0" class="agent-group">{{ t("agents.staleOffline") }}</li>
-      <li v-for="card in staleOrDown" :key="card.key">
-        <AgentCard :card="card" :selected="card.key === selectedKey" />
+      <li v-for="row in staleRows" :key="row.card.key" class="agent-item" :class="{ removable: !!row.target }">
+        <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
+        <RemoveButton
+          v-if="row.target"
+          :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"
+          :removing="row.target.kind === 'managed' && row.target.removing"
+          :ariaKind="row.target.kind === 'managed' ? 'managed' : 'agent'"
+        />
       </li>
     </ul>
   </nav>

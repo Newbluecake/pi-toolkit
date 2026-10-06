@@ -916,6 +916,107 @@ describe("token transport: spawn() 401 recovery (withRelogin, same-id replay is 
 });
 
 // ---------------------------------------------------------------------------
+// removeAgent() — web-hub-delete-session plan v2 §4.1/§5.3, same suite both modes
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: removeAgent() (web-hub-delete-session v2 §4.1 — identical wire both modes)", (_mode, make) => {
+  it("implements removeAgent on every adapter", () => {
+    const h = make(async () => resp(200));
+    expect(typeof h.transport.removeAgent).toBe("function");
+  });
+
+  it("POSTs /api/agents/remove with X-PWH:1 and the verbatim JSON target; 200 {removed:true} rides", async () => {
+    const h = make(async (url) => (url === "/api/agents/remove" ? resp(200, { removed: true }) : resp(200)));
+    const r = await h.transport.removeAgent!({ agentKey: "a1" });
+    expect(r).toEqual({ ok: true, removed: true });
+    const call = h.fetchCalls.find((c) => c.url === "/api/agents/remove")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["Content-Type"]).toBe("application/json");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual({ agentKey: "a1" });
+  });
+
+  it("spawnId target rides verbatim too (SpawnRow's call shape)", async () => {
+    const h = make(async (url) => (url === "/api/agents/remove" ? resp(200, { removed: true }) : resp(200)));
+    await h.transport.removeAgent!({ spawnId: "sp1" });
+    const call = h.fetchCalls.find((c) => c.url === "/api/agents/remove")!;
+    expect(JSON.parse(call.init.body as string)).toEqual({ spawnId: "sp1" });
+  });
+
+  it("202 {removed:false,pending:true,spawnId,state} rides as pending/spawnId", async () => {
+    const h = make(async (url) =>
+      url === "/api/agents/remove"
+        ? resp(202, { removed: false, pending: true, spawnId: "sp1", state: "stopping" })
+        : resp(200),
+    );
+    const r = await h.transport.removeAgent!({ agentKey: "a1" });
+    expect(r).toEqual({ ok: true, removed: false, pending: true, spawnId: "sp1" });
+  });
+
+  it("409 E_AGENT_ONLINE keeps its reason (online vs exit-unconfirmed)", async () => {
+    const h = make(async (url) =>
+      url === "/api/agents/remove" ? resp(409, { error: "E_AGENT_ONLINE", reason: "online" }) : resp(200),
+    );
+    expect(await h.transport.removeAgent!({ agentKey: "a1" })).toEqual({
+      ok: false,
+      error: "E_AGENT_ONLINE",
+      reason: "online",
+    });
+    const h2 = make(async (url) =>
+      url === "/api/agents/remove" ? resp(409, { error: "E_AGENT_ONLINE", reason: "exit-unconfirmed" }) : resp(200),
+    );
+    expect(await h2.transport.removeAgent!({ agentKey: "a1" })).toEqual({
+      ok: false,
+      error: "E_AGENT_ONLINE",
+      reason: "exit-unconfirmed",
+    });
+  });
+
+  it("403 E_SPAWN_DENIED{lan-off} / 404 E_NOT_FOUND / 429 E_RATE surface verbatim", async () => {
+    const h = make(async (url) =>
+      url === "/api/agents/remove" ? resp(403, { error: "E_SPAWN_DENIED", reason: "lan-off" }) : resp(200),
+    );
+    expect(await h.transport.removeAgent!({ agentKey: "a1" })).toEqual({
+      ok: false,
+      error: "E_SPAWN_DENIED",
+      reason: "lan-off",
+    });
+    const h2 = make(async (url) => (url === "/api/agents/remove" ? resp(404, { error: "E_NOT_FOUND" }) : resp(200)));
+    expect(await h2.transport.removeAgent!({ spawnId: "sp-gone" })).toEqual({ ok: false, error: "E_NOT_FOUND" });
+    const h3 = make(async (url) =>
+      url === "/api/agents/remove" ? resp(429, { error: "E_RATE" }, { "Retry-After": "3" }) : resp(200),
+    );
+    expect(await h3.transport.removeAgent!({ agentKey: "a1" })).toEqual({
+      ok: false,
+      error: "E_RATE",
+      retryAfterS: 3,
+    });
+  });
+
+  it("fetch timeout ⇒ E_DEADLINE and exactly one attempt; network error ⇒ E_NETWORK", async () => {
+    const h = make(async (url) => (url === "/api/agents/remove" ? new Promise<FetchResponse>(() => {}) : resp(200)));
+    const p = h.transport.removeAgent!({ agentKey: "a1" });
+    h.clock.advance(16_000);
+    expect(await p).toEqual({ ok: false, error: "E_DEADLINE" });
+    expect(h.fetchCalls.filter((c) => c.url === "/api/agents/remove")).toHaveLength(1);
+
+    const h2 = make(async (url) =>
+      url === "/api/agents/remove" ? Promise.reject(new TypeError("fetch failed")) : resp(200),
+    );
+    expect(await h2.transport.removeAgent!({ agentKey: "a1" })).toEqual({ ok: false, error: "E_NETWORK" });
+  });
+
+  it("a final 401 reports onConn('auth') exactly once", async () => {
+    const h = make(async (url) => (url === "/api/agents/remove" ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    expect(await h.transport.removeAgent!({ agentKey: "a1" })).toMatchObject({ ok: false, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // web-hub-preview plan v3 §4.6 (package PV4): the shared preview suite — both adapters.
 // ---------------------------------------------------------------------------
 

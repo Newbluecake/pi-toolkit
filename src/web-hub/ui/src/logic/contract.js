@@ -22,7 +22,11 @@
  * correctly — without renaming this file (would cascade: `password-client.js`/`token-client.js`
  * also import `./contract.js` as a plain `.js`→`.js` sibling, the same broken direction).
  */
-import { API_ERRORS as PROTOCOL_API_ERRORS, SSE_EVENTS as PROTOCOL_SSE_EVENTS } from "@protocol/http-contract.ts";
+import {
+  AGENT_REMOVE_PATH,
+  API_ERRORS as PROTOCOL_API_ERRORS,
+  SSE_EVENTS as PROTOCOL_SSE_EVENTS,
+} from "@protocol/http-contract.ts";
 import { PREVIEW_PATH } from "@protocol/preview.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 
@@ -59,6 +63,10 @@ export const API = Object.freeze({
   // the stop endpoint is `${headless}/<spawnId>/stop` (built at the call site).
   headless: "/api/headless",
   headlessDirs: "/api/headless/dirs",
+  // web-hub-delete-session plan v2 §4.1/§5.3: POST /api/agents/remove — imported from the
+  // protocol module (same anti-drift rule as the upload/preview paths above), never a hand
+  // copy of the literal.
+  agentRemove: AGENT_REMOVE_PATH,
   // web-hub-preview plan v3 §4.1 (PV4): the single content-preview endpoint, imported from
   // `protocol/preview.ts` — same anti-drift rule as the upload paths above.
   preview: PREVIEW_PATH,

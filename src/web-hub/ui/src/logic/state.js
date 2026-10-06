@@ -72,10 +72,32 @@
  *   nextVersion?: string | undefined, supersedePending: boolean,
  *   supersedeDeadlineAt?: number | undefined, forced: boolean, draining: boolean,
  *   spawns: import("../../../protocol/spawn.js").SpawnsPayload | null,
+ *   removed: ReadonlySet<string>,
  * }} State
  * @typedef {{ event: string, data: any, id?: number }} Msg
  */
 import { pendingTransition } from "./control.js";
+import { SSE_EVENTS } from "@protocol/http-contract.ts";
+
+/**
+ * Anti-drift pin (verifier r1 #2, P2 打回): `"agent_removed"` has no standalone named export in
+ * `protocol/http-contract.ts` — it only exists as one entry of the frozen `SSE_EVENTS` array.
+ * This throws at MODULE LOAD TIME (not just in a test someone remembers to write) if the
+ * protocol ever renames/removes it without updating this file. `SSE_EVENTS` is free to import
+ * here — `http-contract.ts` only TYPE-imports `messages.js` (zero runtime typebox cost), same
+ * rationale `./contract.js`'s header already documents.
+ * @param {string} name @returns {string}
+ */
+function pinnedEvent(name) {
+  if (!SSE_EVENTS.includes(name)) {
+    throw new Error(
+      `@logic/state.js: protocol drift — "${name}" is no longer in protocol/http-contract.ts's SSE_EVENTS`,
+    );
+  }
+  return name;
+}
+
+const AGENT_REMOVED_EVENT = pinnedEvent("agent_removed");
 
 /** Local (non-SSE) events understood by `reduce`. */
 export const LOCAL_EVENTS = Object.freeze([
@@ -130,7 +152,46 @@ export function initialState() {
     draining: false,
     supersedeBlocked: undefined,
     spawns: null,
+    removed: new Set(),
   };
+}
+
+/**
+ * web-hub-delete-session plan v2 §5.1: bounded FIFO membership set for `agent_removed`'s
+ * `State.removed` — caps unbounded growth from a long-lived tab that watches many delete/
+ * reappear cycles. Idempotent (a duplicate `agent_removed` for the same key is a no-op, same
+ * object back) so callers keep the reducer's no-op \u21d2 same-state invariant.
+ * @param {ReadonlySet<string>} set @param {string} key @returns {ReadonlySet<string>}
+ */
+const REMOVED_CAP = 64;
+function addRemoved(set, key) {
+  if (set.has(key)) return set;
+  const next = new Set(set);
+  next.add(key);
+  while (next.size > REMOVED_CAP) {
+    const oldest = next.values().next().value;
+    if (oldest === undefined) break;
+    next.delete(oldest);
+  }
+  return next;
+}
+
+/**
+ * A key reappearing (a fresh `agents`/`agent_up` snapshot carries it again, §3: the same pi
+ * process re-`hello`s after a removed-card reconnect) clears it from `removed` — the reducer's
+ * no-op \u21d2 same-state invariant holds (returns the SAME set when nothing changes).
+ * @param {ReadonlySet<string>} set @param {Iterable<string>} keys @returns {ReadonlySet<string>}
+ */
+function clearRemoved(set, keys) {
+  if (set.size === 0) return set;
+  let next = set;
+  for (const k of keys) {
+    if (next.has(k)) {
+      if (next === set) next = new Set(set);
+      next.delete(k);
+    }
+  }
+  return next;
 }
 
 /**
@@ -313,7 +374,10 @@ function reduceInner(s, event, d) {
         agents.set(card.agentKey, old ? mergeCard(old, card) : newAgent(card));
         order.push(card.agentKey);
       }
-      return withSelection({ ...s, agents, order });
+      // web-hub-delete-session plan v2 §5.1: a fresh snapshot carrying a previously-removed key
+      // (§3: the same pi process re-„hello“s) clears it from `removed` — the card is genuinely back.
+      const removed = clearRemoved(s.removed, agents.keys());
+      return withSelection({ ...s, agents, order, removed });
     }
     case "agent_up": {
       const card = d.agent && typeof d.agent === "object" ? d.agent : d;
@@ -322,7 +386,8 @@ function reduceInner(s, event, d) {
       const old = s.agents.get(card.agentKey);
       agents.set(card.agentKey, old ? mergeCard(old, card) : newAgent(card));
       const order = old ? s.order : [...s.order, card.agentKey];
-      return withSelection({ ...s, agents, order });
+      const removed = clearRemoved(s.removed, [card.agentKey]);
+      return withSelection({ ...s, agents, order, removed });
     }
     case "agent_down":
       if (!key) return s;
@@ -341,6 +406,21 @@ function reduceInner(s, event, d) {
     case "agent_stale":
       if (!key) return s;
       return updateAgent(s, key, (a) => ({ ...a, card: { ...a.card, state: "stale" } }));
+    case AGENT_REMOVED_EVENT: {
+      // web-hub-delete-session plan v2 §2.3/§5.1: hub-broadcast card removal. Drops the key from
+      // `agents`/`order` (if still present — a prior `agent_down` or `agents` snapshot may have
+      // already dropped it) and records it in `removed` so `DashboardView.vue` can render the
+      // 「已删除」 empty state instead of 「未连接」 for a tab still viewing it. `withSelection` settles
+      // the selection (the removed agent can never stay selected via auto-pick; a `route`-pinned
+      // deep link to it resolves to `null`, same as any other vanished key).
+      if (!key) return s;
+      const removed = addRemoved(s.removed, key);
+      if (!s.agents.has(key)) return removed === s.removed ? s : withSelection({ ...s, removed });
+      const agents = new Map(s.agents);
+      agents.delete(key);
+      const order = s.order.filter((k) => k !== key);
+      return withSelection({ ...s, agents, order, removed });
+    }
 
     // ---------------------------------------------------------------- per agent
     case "session":

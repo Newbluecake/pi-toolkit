@@ -652,6 +652,45 @@ describe("useHub: spawn wiring (web-hub-spawn SP11)", () => {
   });
 });
 
+describe("useHub: removeAgent wiring (web-hub-delete-session plan v2 §5.3/§5.4)", () => {
+  function baseTransport(): Omit<HubTransport, "removeAgent"> {
+    return {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: async () => ({ ok: true }),
+      unsubscribe: async () => {},
+      page: async () => ({ ok: true, data: {} }),
+      command: async () => ({ ok: true }),
+      dialog: async () => ({ ok: true }),
+    };
+  }
+
+  it("delegates to transport.removeAgent when the transport provides one", async () => {
+    const calls: unknown[] = [];
+    const transport: HubTransport = {
+      ...baseTransport(),
+      removeAgent: async (target) => {
+        calls.push(target);
+        return { ok: true, removed: true };
+      },
+    };
+    const hub = useHub({ createTransport: () => transport, ...alwaysVisible(), setTimeout, clearTimeout });
+    const r = await hub.removeAgent!({ agentKey: "a1" });
+    expect(r).toEqual({ ok: true, removed: true });
+    expect(calls).toEqual([{ agentKey: "a1" }]);
+    hub.dispose();
+  });
+
+  it("degrades to E_UNSUPPORTED when the transport lacks removeAgent (test fakes, future transports)", async () => {
+    const transport: HubTransport = baseTransport();
+    const hub = useHub({ createTransport: () => transport, ...alwaysVisible(), setTimeout, clearTimeout });
+    const r = await hub.removeAgent!({ spawnId: "sp1" });
+    expect(r).toEqual({ ok: false, error: "E_UNSUPPORTED" });
+    hub.dispose();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // fleet-drawer plan §3.3/§6.5 (package F5): run-transcript wiring — subscription ownership,
 // watchdog, E_BUSY self-heal, hello re-subscribe, agent-switch ordering (§6.4 #7), paging.

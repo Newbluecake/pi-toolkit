@@ -20,6 +20,8 @@ import type { PreviewDims } from "@protocol/preview.js";
 import type { FleetRowWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { ConnState, PreviewTransport } from "./transport/types.js";
 import type {
+  RemoveAgentOutcome,
+  RemoveTarget,
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
@@ -32,7 +34,7 @@ export type { ConnState };
 // Re-exported so a component only needs `import type { … } from "./types.js"` — never a
 // second, possibly-drifting import path for the same type (same rule as `HistoryPayload` in
 // `contracts.ts`).
-export type { SpawnDirsOutcome, SpawnListOutcome, SpawnOutcome, SpawnStopOutcome };
+export type { RemoveAgentOutcome, RemoveTarget, SpawnDirsOutcome, SpawnListOutcome, SpawnOutcome, SpawnStopOutcome };
 // todo-web §4 (T4): the detail TodoPanel's prop type. `import type` only — the protocol
 // module never becomes a runtime dependency of the UI bundle through this file.
 export type { TodoTaskWire, TodoWire };
@@ -193,6 +195,12 @@ export interface HubState {
    * projection only). `null` until the first valid `spawns` frame arrives (a hub with spawn
    * disabled never sends one — the slot stays `null`, matching "feature off"). */
   readonly spawns?: SpawnsPayload | null;
+  /** web-hub-delete-session plan v2 §5.1: agent keys removed by a hub `agent_removed`
+   * broadcast, bounded FIFO (`@logic/state.js`'s `REMOVED_CAP`). `DashboardView.vue` reads
+   * this to render the 「已删除」 empty state for a selected key instead of 「未连接」 — absent
+   * on a pre-delete-session reducer snapshot (none exists pre-feature), so every reader treats
+   * a missing field the same as an empty set. */
+  readonly removed?: ReadonlySet<string>;
 }
 
 /**
@@ -307,6 +315,11 @@ export interface HubHandle {
    * them (the drawer then renders its not-connected state). */
   readonly selectRun?: (agentKey: string, runId: string | null) => void;
   readonly pageRun?: (agentKey: string) => void;
+  /** web-hub-delete-session plan v2 §5.3/§5.4: `POST /api/agents/remove`, called from
+   * `RemoveButton.vue`. Optional per the frozen-types convention — `useHub` always provides
+   * it (degrading to `E_UNSUPPORTED` when the transport lacks `removeAgent`); component-level
+   * fakes may omit it entirely (the button then shows the `unsupported` failure text). */
+  removeAgent?(target: RemoveTarget): Promise<RemoveAgentOutcome>;
   dispatch(msg: { event: string; data?: unknown; id?: number }): void;
 }
 
@@ -378,7 +391,10 @@ export interface PreviewHandle {
 // web-hub-spawn plan SP11 / arch §8.3, plan §3.2 — new-session flow view models
 // ---------------------------------------------------------------------------
 
-/** `classifySpawnError`'s (`@logic/spawn.js`) taxonomy plus the two flow-local failure classes. */
+/** `classifySpawnError`'s (`@logic/spawn.js`) taxonomy plus the two flow-local failure classes.
+ * `"gone"` (web-hub-delete-session plan v2 §2.5) joined the taxonomy when a replayed spawn
+ * request hits the hub's idempotency LRU but the record was deleted — `useNewSession.ts`
+ * folds `classifySpawnError`'s result straight into this field, so the union must track it. */
 export type NewSessionFailKind =
   | "confirm"
   | "dir"
@@ -388,6 +404,7 @@ export type NewSessionFailKind =
   | "launcher"
   | "deadline"
   | "network"
+  | "gone"
   | "spawn" // the record itself went failed/exited (hint/endReason carry the detail)
   | "first-prompt"; // the session died before/while the first prompt could be delivered
 

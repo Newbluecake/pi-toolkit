@@ -21,6 +21,8 @@ import type {
   HubTransport,
   PreviewOutcome,
   PreviewTransport,
+  RemoveAgentOutcome,
+  RemoveTarget,
   Result,
   RunPageResult,
   RunSubResult,
@@ -152,6 +154,11 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       stop: (spawnId, force) =>
         withAuthNotice(deps, () => client.spawn.stop(spawnId, force) as Promise<SpawnStopOutcome>),
     } satisfies SpawnTransport,
+    // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`
+    // — the same final-E_AUTH rule as upload/spawn (the client already replayed once through
+    // `withRelogin`; the endpoint is idempotent so the replay is always safe).
+    removeAgent: (target: RemoveTarget) =>
+      withAuthNotice(deps, () => client.removeAgent(target) as Promise<RemoveAgentOutcome>),
     preview: {
       // PV4 (web-hub-preview plan v3 §4.6): thin cast over the logic client's preview
       // namespace. The client already replayed once through `withRelogin` on a 401 (GET ⇒
