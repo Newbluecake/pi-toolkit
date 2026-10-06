@@ -1,10 +1,11 @@
 /*
  * pi web-hub — model switcher (web-model-switch plan v2 §5.1, package M3a exclusive; M3b
  * appended the thinking chip + Teleport'd bottom sheet at the bottom).
- * The chips live INSIDE the composer's input box now (2026-10 user request: 模型切换/思考等级
+ * The chips live INSIDE the composer's input card now (2026-10 user request: 模型切换/思考等级
  * 放进输入框，输入时自动隐藏 — supersedes §5.1's slim `.dock-tools` strip above the composer,
- * which is deleted): Composer.vue's `.composer-chips` overlay (geometry + hide transition in
- * control.css) hosts `.model-switcher` (which renders `.thinking-chip-host` itself).
+ * which is deleted): Composer.vue's `.composer-chips` host sits at the left end of the card's
+ * bottom row `.composer-bottom` (geometry + hide transition + height collapse in control.css)
+ * and holds `.model-switcher` (which renders `.thinking-chip-host` itself).
  * Two form factors (#16): viewport >640px = absolute popover above the chip; viewport ≤640px
  * = `PickerSheet.vue`'s Teleport'd bottom sheet (`.picker-scrim`/`.picker-sheet`, 75vh +
  * safe-area inset). `(pointer: coarse)` only raises row hit-areas to ≥44px, it never decides
@@ -16,7 +17,7 @@
  * back inside the viewport when the chip sits near the right edge.
  * 2026-10 chip size (field reports ×2 — "模型切换太高了" → slim strip → "再缩小为三分之二",
  * then the move INTO the input): the 15px slim chips are the DEFAULT everywhere now (not a
- * ≤767px tier anymore) — they overlay the textarea's reserved top band and must stay slim;
+ * ≤767px tier anymore) — they sit in the card's bottom row and must stay slim;
  * the PICKERS keep their ≥44px rows on coarse pointers, only the trigger chips stay small.
  */
 

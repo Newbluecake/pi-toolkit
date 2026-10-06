@@ -1,10 +1,14 @@
 <!--
   Context-ring indicator (2026-10-05, user 现场拍板): the detail header's context metric moved
-  HERE — a small SVG progress ring pinned inside the composer textarea's right edge, wrapped in
-  a 44px touch button (coarse-pointer compliant). Clicking toggles an UPWARD details panel (the
-  composer hugs the screen's bottom edge — same orientation as the retired DeliverSwitch menu)
-  carrying the full former header metrics: context % + used/total tokens, cost, and the
-  sub-agent cost aside (read-only; `formatUsd`/`formatPercent`/`formatNumber` throughout).
+  HERE — a small SVG progress ring inside the composer input card, wrapped in
+  a 44px touch button (coarse-pointer compliant). It sits at the right end of the card's
+  bottom row while that row is expanded (switcher rendered + input empty) and re-anchors to
+  the card's right-edge vertical center whenever the row collapses (typing / no switcher —
+  control.css's `:has(.model-switcher):not(.has-text)` tier). Clicking toggles an UPWARD
+  details panel (the composer hugs the screen's bottom edge — same orientation as the retired
+  DeliverSwitch menu) carrying the full former header metrics: context % + used/total tokens,
+  cost, and the sub-agent cost aside (read-only; `formatUsd`/`formatPercent`/`formatNumber`
+  throughout).
 
   MERGED STOP (2026-10 user request "把 stop 图标放到上下文比例圆圈中"): while the agent is
   BUSY the ring's ENTIRE zone becomes the two-step stop button — the arc keeps showing context

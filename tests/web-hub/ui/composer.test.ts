@@ -271,7 +271,7 @@ describe("Composer.vue — inline StopButton (2026-10 user request: stop lives i
   });
 });
 
-describe("Composer.vue — model/thinking chips INSIDE the input (2026-10 user request: 放进输入框, 输入时自动隐藏)", () => {
+describe("Composer.vue — input CARD: chips + ring bottom row (2026-10 user-picked mock option 1 + collapse refinement)", () => {
   const session = {
     sessionId: "s1",
     model: { provider: "zai", id: "glm-5" },
@@ -290,55 +290,116 @@ describe("Composer.vue — model/thinking chips INSIDE the input (2026-10 user r
       commandsEnabled: computed(() => true),
     });
 
-  it("chips render INSIDE .composer-input, before the textarea (tab order runs chips → input)", () => {
+  it("bottom row renders when the switcher is present: chips left + ring host right, INSIDE the card", () => {
     const w = mountComposer({ view: chipView() });
     const input = w.find(".composer-input");
-    expect(input.find(".composer-chips .model-switcher button.model-chip").exists()).toBe(true);
-    expect(input.find(".composer-chips .thinking-chip-host").exists()).toBe(true);
+    expect(input.exists()).toBe(true);
+    // Card structure: textarea on top, `.composer-bottom` below it, both inside the card.
     const kids = Array.from(input.element.children) as HTMLElement[];
-    expect(kids[0]!.classList.contains("composer-chips")).toBe(true);
-    expect(kids[1]!.tagName).toBe("TEXTAREA");
+    expect(kids[0]!.tagName).toBe("TEXTAREA");
+    expect(kids[1]!.classList.contains("composer-bottom")).toBe(true);
+    const bottom = w.find(".composer-bottom");
+    expect(bottom.find(".composer-chips .model-switcher button.model-chip").exists()).toBe(true);
+    expect(bottom.find(".composer-chips .thinking-chip-host").exists()).toBe(true);
+    // Chips are the row's left cell (first child); ContextRing is mounted into the row's right end.
+    const bottomKids = Array.from(bottom.element.children) as HTMLElement[];
+    expect(bottomKids[0]!.classList.contains("composer-chips")).toBe(true);
   });
 
-  it("chips auto-hide while the input has content and reappear when cleared", async () => {
+  it("typing collapses the row: chips get .chips-off AND the card gets .has-text; clearing restores both", async () => {
     const w = mountComposer({ view: chipView() });
     const chips = () => w.find(".composer-chips");
+    const card = () => w.find(".composer-input");
     expect(chips().classes()).not.toContain("chips-off"); // empty ⇒ visible
+    expect(card().classes()).not.toContain("has-text"); // empty ⇒ bottom row expanded
     await w.find("textarea").setValue("hello");
     expect(chips().classes()).toContain("chips-off"); // content ⇒ hidden
+    expect(card().classes()).toContain("has-text"); // content ⇒ row collapses + ring re-anchors
     await w.find("textarea").setValue("");
     expect(chips().classes()).not.toContain("chips-off"); // cleared ⇒ visible again
+    expect(card().classes()).not.toContain("has-text");
   });
 
-  it("no CONTROL_VIEW ⇒ ModelSwitcher self-hides: the chips host stays empty (padding reserve is :has-gated)", () => {
+  it("no CONTROL_VIEW ⇒ ModelSwitcher self-hides: the bottom row stays (CSS-collapsed) with an empty chips host", () => {
     const w = mountComposer({});
+    expect(w.find(".composer-bottom").exists()).toBe(true);
     expect(w.find(".composer-chips").exists()).toBe(true);
     expect(w.find(".composer-chips .model-switcher").exists()).toBe(false);
     expect(w.find(".model-chip").exists()).toBe(false);
   });
 
-  it("control.css pins: absolute chips (ring-centering invariant), :has-gated constant 22px reserve, hidden-state a11y", () => {
+  it("control.css pins: the card carries border/radius/background; the textarea is borderless with NO chip reserve", () => {
     const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/control.css"), "utf8");
     const rule = (sel: string): string =>
       new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}").exec(css)?.[1] ?? "";
-    // Chips ABSOLUTE ⇒ the wrapper's height stays exactly the textarea's own box, so the
-    // ring's top:0/bottom:0 centering keeps landing on the textarea's vertical center
-    // (user requirement: 上下文进度条在输入框里垂直居中 — the chips band must never skew it).
-    expect(rule(".composer-chips")).toMatch(/position:\s*absolute/);
+    const card = rule(".composer-input");
+    expect(card).toMatch(/border:\s*1px solid var\(--c-border-strong\)/);
+    expect(card).toMatch(/border-radius:\s*var\(--r-md\)/);
+    expect(card).toMatch(/background:\s*var\(--c-surface\)/);
+    const ta = rule(".composer textarea");
+    expect(ta).toMatch(/border:\s*0/);
+    expect(ta).toMatch(/background:\s*transparent/);
+    // The 5cc081d top-left overlay's constant 22px padding-top reserve is GONE (padding is normal now).
+    expect(rule(".composer-input:has(.composer-chips .model-switcher) textarea")).toBe("");
+    expect(css).not.toMatch(/padding-top:\s*22px/);
+    // Focus indication moved from the (now borderless) textarea to the card.
+    expect(rule(".composer textarea:focus-visible")).toBe("");
+    expect(rule(".composer-input:focus-within")).toMatch(/outline:\s*2px solid var\(--c-focus\)/);
+    // The chips host is in-flow now (no absolute overlay), but keeps its hide transition.
+    expect(rule(".composer-chips")).not.toMatch(/position:\s*absolute/);
     expect(rule(".composer-chips")).toMatch(/transition:/);
-    // Hidden while typing: no layout property touched; visibility drops tab order + a11y tree.
     const off = rule(".composer-chips.chips-off");
     expect(off).toMatch(/opacity:\s*0/);
     expect(off).toMatch(/visibility:\s*hidden/);
     expect(off).toMatch(/pointer-events:\s*none/);
-    // Reserve ONLY when the switcher rendered (self-hide ⇒ empty composer pays nothing),
-    // and CONSTANT ⇒ hiding the chips never shifts the text (no layout jump).
-    expect(rule(".composer-input:has(.composer-chips .model-switcher) textarea")).toMatch(/padding-top:\s*22px/);
-    expect(rule(".composer textarea")).not.toMatch(/padding-top:\s*22px/); // base rule (first match) stays unreserved
-    // The ring itself still centers on the full textarea box.
+  });
+
+  it("control.css pins: the bottom row is COLLAPSED by default and expands only when the switcher rendered AND the input is empty", () => {
+    const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/control.css"), "utf8");
+    const rule = (sel: string): string =>
+      new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}").exec(css)?.[1] ?? "";
+    // Base = collapsed (no dead strip while typing / no-control fallback), with a height transition.
+    const base = rule(".composer-bottom");
+    expect(base).toMatch(/max-height:\s*0/);
+    expect(base).toMatch(/transition:\s*max-height/);
+    // No overflow:hidden — it would clip the absolutely-positioned ring the collapsed row still contains.
+    expect(base).not.toMatch(/overflow/);
+    // Expanded tier: gated on BOTH conditions, so the no-control fallback never grows a row.
+    const expanded = rule(".composer-input:has(.model-switcher):not(.has-text) .composer-bottom");
+    expect(expanded).not.toBe("");
+    expect(expanded).toMatch(/max-height:\s*\d+px/);
+    expect(expanded).not.toMatch(/max-height:\s*0;/);
+  });
+
+  it("control.css pins: the ring re-anchors to its absolute mid-right geometry in every collapsed state", () => {
+    const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/control.css"), "utf8");
+    // Base `.ctx-ring` stays the pre-card overlay: absolute, right edge, vertically centered
+    // (applies whenever the bottom row is collapsed — typing OR no switcher).
     const ring = /^\.ctx-ring\s*\{[^}]*\}/m.exec(css)?.[0] ?? "";
+    expect(ring).toMatch(/position:\s*absolute/);
+    expect(ring).toMatch(/right:\s*var\(--sp-1\)/);
     expect(ring).toMatch(/top:\s*0/);
     expect(ring).toMatch(/bottom:\s*0/);
     expect(ring).toMatch(/align-items:\s*center/);
+    // The ONLY in-flow placement is the expanded tier (switcher rendered + input empty):
+    // position:relative (not static) so the details panel / queue note keep anchoring to it.
+    const inFlow =
+      /\.composer-input:has\(\.model-switcher\):not\(\.has-text\) \.composer-bottom \.ctx-ring\s*\{([^}]*)\}/.exec(
+        css,
+      )?.[1] ?? "";
+    expect(inFlow).toMatch(/position:\s*relative/);
+    // No other rule may pull `.ctx-ring` into flow (narrow media blocks stay clean).
+    expect(css).not.toMatch(/\.ctx-ring\s*\{[^}]*position:\s*static/);
+  });
+
+  it("control.css pins: the textarea's 36px ring slot is CONSTANT — not scoped to either ring placement", () => {
+    const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/control.css"), "utf8");
+    const rule = (sel: string): string =>
+      new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}").exec(css)?.[1] ?? "";
+    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*36px/);
+    // No state-scoped variant may exist — the slot must not change when the row collapses
+    // (text would reflow horizontally otherwise).
+    expect(css).not.toMatch(/\.has-text[^,{]*textarea\s*\{[^}]*padding-right/);
+    expect(css).not.toMatch(/:not\(\.has-text\)[^,{]*textarea\s*\{[^}]*padding-right/);
   });
 });

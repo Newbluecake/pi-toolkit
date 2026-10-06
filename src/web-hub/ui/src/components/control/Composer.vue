@@ -40,26 +40,32 @@
   `uploads.discard` — NEVER `remove`, which would abort-delete the just-referenced hub files.
 
   Context ring + stop, merged (2026-10 user request "把 stop 图标放到上下文比例圆圈中"):
-  `ContextRing` sits inside the textarea's right edge (`.composer-input` wrapper; the
-  textarea's `padding-right` makes room via `:has`). IDLE ⇒ the ring's details toggle; BUSY ⇒
+  `ContextRing` lives in the card's bottom row while that row is expanded, and re-anchors to
+  the card's right-edge vertical center whenever the row is collapsed (typing / no switcher —
+  the `.composer-input` wrapper; the textarea's constant `padding-right` makes room via `:has`
+  in BOTH states). IDLE ⇒ the ring's details toggle; BUSY ⇒
   the ring's whole zone is the two-step stop button (stop wins — nothing else intercepts taps
   there). It injects `DETAIL_METRICS` itself and self-hides the ring without a provider (then
   falls back to the standalone stop look) — nothing here reads the metrics.
 
-  Model/thinking chips INSIDE the input (2026-10 user request "把模型切换和思考等级放到输入框里
-  面，输入内容的时候自动隐藏" — supersedes web-model-switch plan v2 §5.1's slim `.dock-tools`
-  strip above the composer, which is gone): `ModelSwitcher` (which renders `ThinkingChip`
-  itself) lives in `.composer-chips`, ABSOLUTELY positioned at the textarea's top-left, so
-  `.composer-input`'s height stays exactly the textarea's box and the context ring's
-  top:0/bottom:0 centering keeps landing on the textarea's own vertical center. The textarea
-  reserves the chip band with a CONSTANT `padding-top` (CSS `:has(.model-switcher)` tier in
-  control.css — only when the switcher actually rendered; it self-hides in the §5.4
-  not-rendered states, and then an empty composer pays no reserve). While `text` is non-empty
-  the chips get `.chips-off` (fade/slide out, `visibility:hidden` — out of the tab order and
-  the a11y tree, `pointer-events:none`); the constant padding means hiding never moves the
-  text (no layout jump as `field-sizing: content` grows). Pickers still open upward from the
-  chips and keep their usePopoverClamp viewport fitting — opening one moves focus into the
-  panel, which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
+  Model/thinking chips + context ring as an input CARD (2026-10 user-picked mock option 1, with
+  the user's collapse refinement — supersedes the 5cc081d top-left chips overlay and, before it,
+  web-model-switch plan v2 §5.1's slim `.dock-tools` strip): `.composer-input` IS the card — the
+  border/radius/background live on it, the textarea is borderless inside, and a bottom row
+  (`.composer-bottom`) INSIDE the same border carries `ModelSwitcher` (which renders
+  `ThinkingChip` itself) on the left and the `ContextRing` on the right, in NORMAL flow. While
+  `text` is non-empty (`.has-text`) the chips fade/slide out (`.chips-off`, `visibility:hidden`
+  — out of the tab order and the a11y tree, `pointer-events:none`) AND the row's height
+  collapses to 0 (max-height transition — no dead strip), and the ring re-anchors to its base
+  absolute geometry: the card's right edge, vertically centered (the card's height is then
+  exactly the textarea's, so this is byte-identical to the pre-card mid-right overlay). The
+  textarea keeps a CONSTANT `padding-right:36px` ring slot in BOTH states, so text never
+  reflows horizontally, and the row sits BELOW the textarea, so the switch never moves existing
+  text vertically either. The expanded row is `:has(.model-switcher)`-gated in CSS: when
+  ModelSwitcher self-hides (the §5.4 not-rendered states) there is no bottom row at all and the
+  ring overlays mid-right exactly as before 5cc081d. Pickers still open upward from the chips
+  and keep their usePopoverClamp viewport fitting — opening one moves focus into the panel,
+  which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
@@ -697,16 +703,14 @@ watch(
         aria-hidden="true"
         @change="onFilePick"
       />
-      <div class="composer-input">
-        <!-- Model/thinking chips overlay (see the header comment): absolute top-left INSIDE
-             the input box, slim chips (models.css), auto-hidden via `.chips-off` while the
-             input has content. Rendered before the textarea so tab order runs chips → input;
-             `visibility:hidden` in `.chips-off` removes them from the tab order while hidden.
-             ModelSwitcher self-hides (§5.4) — the padding-top reserve is `:has`-gated on
-             `.model-switcher` so an empty composer pays nothing then. -->
-        <div class="composer-chips" :class="{ 'chips-off': text !== '' }">
-          <ModelSwitcher />
-        </div>
+      <!-- composer-input is the CARD (2026-10 user-picked mock option 1 + collapse
+           refinement): border/radius/background here; the textarea is borderless inside;
+           `.composer-bottom` (chips left, ring right, normal flow) sits INSIDE the same
+           border. `has-text` collapses the row (max-height→0, no dead strip) and the ring
+           falls back to its absolute mid-right geometry; no `.model-switcher`
+           (ModelSwitcher self-hide, §5.4) never expands the row at all. Constant
+           padding-right:36px ring slot on the textarea in every state (control.css). -->
+      <div class="composer-input" :class="{ 'has-text': text !== '' }">
         <textarea
           ref="textareaEl"
           v-model="text"
@@ -722,16 +726,26 @@ watch(
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
         ></textarea>
-        <!-- Context ring + stop, merged (2026-10 user request): lives INSIDE the textarea's
-             right edge. Idle ⇒ ring details toggle; busy + live control ⇒ the whole ring zone
-             is the two-step stop button. Self-hides the ring when no DETAIL_METRICS provider/
-             contextUsage exists, falling back to the standalone stop look so stop stays
-             reachable. Same stop channel the dock used — no emit hop (see `onStopInline`). -->
-        <ContextRing
-          :busy="busy && view?.control != null"
-          :queue-count="view === null ? 0 : view.queueItems.value.length"
-          @stop="onStopInline"
-        />
+        <div class="composer-bottom">
+          <!-- Chips (left end of the bottom row): fade/slide out via `.chips-off` while the
+               input has content; `visibility:hidden` removes them from the tab order and the
+               a11y tree while hidden. ModelSwitcher self-hides (§5.4) — the row's expanded
+               state is `:has(.model-switcher)`-gated, so an empty composer pays nothing then. -->
+          <div class="composer-chips" :class="{ 'chips-off': text !== '' }">
+            <ModelSwitcher />
+          </div>
+          <!-- Context ring + stop, merged (right end of the bottom row while the row is
+               expanded; absolute mid-right overlay otherwise — control.css's `:not(.has-text)`
+               tier). Idle ⇒ ring details toggle; busy + live control ⇒ the whole ring zone is
+               the two-step stop button. Self-hides the ring when no DETAIL_METRICS provider/
+               contextUsage exists, falling back to the standalone stop look so stop stays
+               reachable. Same stop channel the dock used — no emit hop (see `onStopInline`). -->
+          <ContextRing
+            :busy="busy && view?.control != null"
+            :queue-count="view === null ? 0 : view.queueItems.value.length"
+            @stop="onStopInline"
+          />
+        </div>
       </div>
       <button
         class="btn btn-primary composer-send"

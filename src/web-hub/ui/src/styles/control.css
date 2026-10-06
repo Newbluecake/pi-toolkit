@@ -65,13 +65,13 @@
 }
 
 .composer textarea {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
   min-height: 44px; /* touch target (§7.4) */
   padding: 5px var(--sp-3); /* vertical halved (2026-10-06 "输入框上下边界缩小为二分之一") */
-  border: 1px solid var(--c-border-strong);
-  border-radius: var(--r-md);
-  background: var(--c-surface);
+  /* border/radius/background moved to the CARD (`.composer-input`, 2026-10 user-picked mock
+   * option 1): the textarea is borderless/transparent inside the card. */
+  border: 0;
+  background: transparent;
   color: var(--c-text);
   font: inherit;
   font-size: var(--fs-lg); /* 16px — iOS doesn't zoom on focus (§7.4/K19) */
@@ -81,31 +81,75 @@
   field-sizing: content; /* auto-grow where supported; CSSOM fallback in Composer.vue */
 }
 
-/* --- composer context ring (2026-10-05, user 现场拍板: the detail header's context metric
- * moved here — `control/ContextRing.vue`). The ring's geometry (radius/stroke/svg size) is
- * FIXED px — a graphic, not text, deliberately immune to `--fs-scale` (pwh_fontscale). --- */
+/* --- composer card (2026-10 user-picked mock option 1 + collapse refinement): `.composer-input
+ * IS the card — it carries the border/radius/background that used to be the textarea's own, and
+ * holds the borderless textarea plus a bottom row (`.composer-bottom`: chips left, ring right).
+ * The ring's geometry (radius/stroke/svg size) is FIXED px — a graphic, not text, deliberately
+ * immune to `--fs-scale` (pwh_fontscale). --- */
 
 .composer-input {
-  position: relative;
+  position: relative; /* anchors the ring's absolute mid-right geometry (collapsed states) */
   flex: 1;
   min-width: 0;
   display: flex;
+  flex-direction: column;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
 }
 
-/* Model/thinking chips INSIDE the input (2026-10 user request: 模型切换+思考等级放进输入框,
- * 输入内容时自动隐藏 — supersedes the `.dock-tools` strip above the composer, deleted in
- * models.css). ABSOLUTE at the textarea's top-left: the wrapper's height stays EXACTLY the
- * textarea's own box, so the context ring's `top:0; bottom:0` centering below keeps landing
- * on the textarea's vertical center (user requirement: 进度条在输入框里垂直居中 — the chips
- * band must never skew it). The textarea reserves the band with a CONSTANT padding-top via
- * the `:has` tier below, so hiding the chips while typing never moves the text (no layout
- * jump as `field-sizing: content` grows downward from the reserved first line). */
+/* The card takes the focus ring now that the textarea has no box of its own. */
+.composer-input:focus-within {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+  border-color: var(--c-focus);
+}
+
+/* Bottom row INSIDE the card: model/thinking chips left, context ring right (normal flow).
+ * COLLAPSED BY DEFAULT (max-height clamps the border-box, padding included): the row expands
+ * only in the `:has(.model-switcher):not(.has-text)` tier below — switcher actually rendered
+ * AND input empty. Every other state — typing (`.has-text`, the user's refinement: chips hide
+ * AND their vertical space collapses, no dead strip) or a self-hidden ModelSwitcher (§5.4
+ * no-control fallback) — keeps the row at 0 height and the ring on its base absolute
+ * mid-right geometry, byte-identical to the pre-card behavior. NO overflow:hidden here: the
+ * collapsed row must not clip the absolutely-positioned ring it still contains (the chips are
+ * invisible then anyway — `.chips-off`). The row sits BELOW the textarea, so collapsing it
+ * never moves existing text vertically. */
+.composer-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-width: 0;
+  /* left = textarea text padding (chips align with the caret); right = the ring's own edge
+   * gap (sp-1) so the ring sits at the SAME horizontal spot in both states. */
+  padding: 0 var(--sp-1) var(--sp-1) var(--sp-3);
+  max-height: 0;
+  transition: max-height var(--dur-base) var(--ease-out);
+}
+
+.composer-input:has(.model-switcher):not(.has-text) .composer-bottom {
+  /* 44px ring hit row + sp-1 bottom air, with slack — the ring button's fixed 44px min-height
+   * dominates at every `--fs-scale` (the 15px chips never exceed it). */
+  max-height: 52px;
+}
+
+/* Expanded state only: the ring leaves its absolute mid-right anchor and joins the bottom
+ * row in normal flow (right end via the row's space-between). `position: relative` (not
+ * `static`) keeps it the containing block for the details panel / armed queue note, so both
+ * keep opening straight above the ring in every state. */
+.composer-input:has(.model-switcher):not(.has-text) .composer-bottom .ctx-ring {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  flex: none;
+}
+
+/* Model/thinking chips in the bottom row (2026-10 card rework — supersedes the 5cc081d
+ * top-left absolute overlay and its constant 22px textarea padding-top reserve, both gone):
+ * in-flow flex host; the hide transition is unchanged. */
 .composer-chips {
-  position: absolute;
-  top: 4px; /* 1px border + 3px air above the 15px chips inside the 22px band */
-  left: calc(var(--sp-3) + 1px); /* textarea border + text padding — chips align with the caret */
-  right: 40px; /* keep clear of the ring's fixed 36px slot */
-  z-index: 2;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -115,10 +159,10 @@
     visibility var(--dur-base) var(--ease-out);
 }
 
-/* Hidden while the input has content: fade/slide out WITHOUT touching layout (padding-top
- * is constant). `visibility:hidden` drops the chips from the tab order and the a11y tree;
- * it interpolates discretely, so it flips to hidden at the END of the fade and back to
- * visible at the START of the reveal. */
+/* Hidden while the input has content: fade/slide out WITHOUT touching layout themselves —
+ * the height collapse is the bottom row's own max-height transition above. `visibility:hidden`
+ * drops the chips from the tab order and the a11y tree; it interpolates discretely, so it
+ * flips to hidden at the END of the fade and back to visible at the START of the reveal. */
 .composer-chips.chips-off {
   opacity: 0;
   transform: translateY(-4px);
@@ -126,18 +170,13 @@
   pointer-events: none;
 }
 
-/* Reserve the chip band ONLY when the switcher actually rendered — ModelSwitcher self-hides
- * in the §5.4 not-rendered states (no control / offline / no command cap), and an empty
- * composer pays no reserve then. 22px = 3px air + 15px chip + 4px air. */
-.composer-input:has(.composer-chips .model-switcher) textarea {
-  padding-top: 22px;
-}
-
 /* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
- * no padding). `:has` keeps the component itself free of any padding logic. Single 36px slot
- * covers BOTH states of the merged control (2026-10 user request "stop 图标放进上下文圆圈"):
- * idle ring and busy stop-in-ring share the same 36px button — the stop icon inside is fixed
- * px like the ring itself, so nothing here needs a second, scaled stop segment anymore.
+ * no padding). `:has` keeps the component itself free of any padding logic. CONSTANT in both
+ * ring placements (bottom row when the row is expanded, mid-right overlay otherwise): the
+ * 36px slot never goes away while the ring exists, so text never reflows horizontally when
+ * the row collapses/expands. Single 36px slot also covers BOTH states of the merged control
+ * (2026-10 user request "stop 图标放进上下文圆圈"): idle ring and busy stop-in-ring share the
+ * same 36px button — the stop icon inside is fixed px like the ring itself.
  * (2026-10-06: ring 50→40px → 27px per field reports; slot 58→50→36px.) */
 .composer-input:has(.ctx-ring) textarea {
   padding-right: 36px;
@@ -191,6 +230,10 @@
  * width at fs≥2 on ~230px textareas) is accepted — text wraps inside the remaining width
  * instead of the control leaving the input box. */
 
+/* Base ring geometry — the COLLAPSED-state placement (typing, or no model switcher): absolute
+ * at the card's right edge, vertically centered on the card (whose height is then exactly the
+ * textarea's, the bottom row being 0-height). The expanded bottom-row tier above overrides
+ * this into normal flow. Geometry stays FIXED px (fs-scale immune). */
 .ctx-ring {
   position: absolute;
   right: var(--sp-1); /* 2026-10-05 field report: ring hugged the input's right border */
@@ -347,12 +390,6 @@
   color: var(--c-text-3);
   font-size: var(--fs-xs);
   font-weight: var(--fw-regular);
-}
-
-.composer textarea:focus-visible {
-  outline: 2px solid var(--c-focus);
-  outline-offset: 1px;
-  border-color: var(--c-focus);
 }
 
 .composer textarea:disabled {
