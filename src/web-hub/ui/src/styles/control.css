@@ -418,7 +418,11 @@
 }
 
 .composer-send .send-icon {
-  display: none;
+  display: inline-flex; /* icon at every width (desktop matches mobile, 2026-10-06) */
+}
+
+.composer-send .lbl-md {
+  display: none; /* aria-label carries the accessible name */
 }
 
 .cmd-badge {
@@ -1005,13 +1009,8 @@
 /* --- narrow (≤480px): iconified Stop/Send in one row (§7.5) --- */
 
 @media (max-width: 480px) {
-  .composer-send .lbl-md,
   .stop-btn .lbl-md {
     display: none;
-  }
-
-  .composer-send .send-icon {
-    display: inline-flex;
   }
 
   .composer-send,

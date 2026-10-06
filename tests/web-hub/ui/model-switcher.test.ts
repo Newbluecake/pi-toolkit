@@ -592,22 +592,22 @@ describe("ModelSwitcher.vue — narrow viewport bottom sheet (§5.1 M3b, #16/A10
     })) as unknown as typeof window.matchMedia;
   }
 
-  it("models.css pins the Teleport'd sheet shell (75vh + safe-area) and ≥44px sheet rows", () => {
+  it("models.css pins the Teleport'd sheet shell (50vh + safe-area) and compacted 29px sheet rows", () => {
     const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/models.css"), "utf8");
     expect(css).toContain(".picker-scrim");
     const sheet = css.match(/\.picker-sheet \{([\s\S]*?)\n\}/);
     expect(sheet).not.toBeNull();
-    expect(sheet![1]).toContain("max-height: 75vh");
+    expect(sheet![1]).toContain("max-height: 50vh");
     expect(sheet![1]).toContain("env(safe-area-inset-bottom)");
     // the M3a full-width in-place panel is gone — ≤640px uses the Teleport'd sheet now
     const narrow = css.match(/@media \(max-width: 640px\) \{([\s\S]*?)\n\}/);
     expect(narrow).not.toBeNull();
     expect(narrow![1]).not.toContain("position: fixed");
-    expect(narrow![1]).toContain("min-height: 44px");
+    expect(narrow![1]).toContain("min-height: 29px"); // ×2/3 (2026-10-06 menu height compaction)
     // viewport decides the form factor (#16); coarse pointer only raises hit areas
     const coarse = css.match(/@media \(pointer: coarse\) \{([\s\S]*?)\n\}/);
     expect(coarse).not.toBeNull();
-    expect(coarse![1]).toContain("min-height: 44px");
+    expect(coarse![1]).toContain("min-height: 29px");
     expect(css).not.toContain("v-html");
   });
 
@@ -680,7 +680,7 @@ describe("ModelSwitcher.vue — widened desktop popover (2026-10 user 拍板)", 
     const coarse = css.match(/@media \(pointer: coarse\) \{([\s\S]*?)\n\}/);
     expect(coarse).not.toBeNull();
     expect(coarse![1]).not.toContain(".model-chip");
-    expect(coarse![1]).toContain("min-height: 44px"); // .model-row keeps its touch target
+    expect(coarse![1]).toContain("min-height: 29px"); // ×2/3 (2026-10-06 menu height compaction)
     expect(css).not.toContain("@media (max-width: 767px)");
   });
 

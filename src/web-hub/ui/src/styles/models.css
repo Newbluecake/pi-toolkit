@@ -167,7 +167,7 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 8px 10px;
+  padding: 5px 10px; /* ×2/3 (2026-10-06) */
   border-bottom: 1px solid var(--c-border);
 }
 
@@ -231,7 +231,7 @@
 .model-list {
   flex: 1 1 auto;
   margin: 0;
-  padding: 4px;
+  padding: 2px; /* rows↔panel-border air ×1/2 (2026-10-06) */
   list-style: none;
   overflow-y: auto;
   min-height: 0;
@@ -239,9 +239,9 @@
 
 .model-group {
   position: sticky;
-  top: -4px;
+  top: -2px;
   z-index: 1;
-  padding: 6px 8px 2px;
+  padding: 4px 8px 1px;
   background: var(--c-surface);
   color: var(--c-text-3);
   font-size: var(--fs-2xs);
@@ -254,8 +254,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 32px;
-  padding: 4px 8px;
+  min-height: 21px; /* ×2/3 (2026-10-06 desktop compaction, same ruling as mobile) */
+  padding: 2px 8px;
   border-radius: var(--r-sm);
   cursor: pointer;
 }
@@ -386,7 +386,7 @@
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-height: 75vh;
+  max-height: 50vh; /* ×2/3 (2026-10-06 "菜单高度减少三分之一") */
   border-top: 1px solid var(--c-border);
   border-radius: 12px 12px 0 0;
   background: var(--c-surface);
@@ -405,11 +405,11 @@
 /* Narrow viewport: sheet rows meet the ≥44px touch target (A10) even on fine pointers. */
 @media (max-width: 640px) {
   .picker-sheet .model-row {
-    min-height: 44px;
+    min-height: 29px; /* ×2/3 (2026-10-06 menu height compaction) */
   }
 
   .picker-sheet .model-search {
-    min-height: 40px;
+    min-height: 27px;
   }
 }
 
@@ -418,11 +418,11 @@
  * reserved band — see the header comment); only the PICKER rows/tabs get the touch targets. */
 @media (pointer: coarse) {
   .model-row {
-    min-height: 44px;
+    min-height: 29px; /* ×2/3 (2026-10-06 menu height compaction) */
   }
 
   .model-tabs button {
-    min-height: 40px;
-    padding: 6px 14px;
+    min-height: 27px;
+    padding: 4px 12px;
   }
 }
