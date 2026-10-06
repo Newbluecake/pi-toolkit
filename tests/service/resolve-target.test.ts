@@ -39,7 +39,46 @@ describe("model-facing target resolution", () => {
     const result = resolveRunId(exact, deps([snapshot(exact), snapshot(other)], new Map([[exact, { runId: other }]])));
     expect(result).toEqual({ ok: true, runId: exact });
   });
+});
 
+/** Restart-reseed label fallback (2026-10 incident): after a process restart the label index
+ * is empty, but seeded durable snapshots still carry `diag.label` — a by-label resolve must
+ * succeed instead of printing that very label in its own "not found" candidate list. */
+describe("label fallback via diag.label (restart reseed)", () => {
+  function labeled(runId: string, label: string, updatedAt = 0): RunSnapshot {
+    const snap = snapshot(runId);
+    return { ...snap, diag: { ...snap.diag, label }, updatedAt };
+  }
+
+  it("resolveRunId resolves a label the process-local index never heard of", () => {
+    const result = resolveRunId("sp3-0a5ad8", deps([labeled("r_0C5TWJ0D", "sp3-0a5ad8")]));
+    expect(result).toEqual({ ok: true, runId: "r_0C5TWJ0D" });
+  });
+
+  it("resolveResumeTarget resolves the same label to the seeded session file", () => {
+    const result = resolveResumeTarget("sp3-0a5ad8", deps([labeled("r_0C5TWJ0D", "sp3-0a5ad8")]));
+    expect(result).toEqual({ ok: true, runId: "r_0C5TWJ0D", sessionFile });
+  });
+
+  it("a reused label resolves to the latest run (spawn-time repoint semantics)", () => {
+    const result = resolveRunId("x", deps([labeled("r_old0001", "x", 1), labeled("r_new0001", "x", 2)]));
+    expect(result).toEqual({ ok: true, runId: "r_new0001" });
+  });
+
+  it("the live label index still wins over a stale snapshot carrying the same label", () => {
+    const result = resolveRunId("x", deps([labeled("r_old0001", "x", 1)], new Map([["x", { runId: "r_live001" }]])));
+    expect(result).toEqual({ ok: true, runId: "r_live001" });
+  });
+
+  it("an unknown label still misses, and the candidate list keeps printing seeded labels", () => {
+    const result = resolveRunId("nope", deps([labeled("r_0C5TWJ0D", "sp3-0a5ad8")]));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("sp3-0a5ad8 → r_0C5TWJ0D");
+  });
+});
+
+describe("model-facing target resolution (cont.)", () => {
   it("rejects an ambiguous prefix and reports only resumable terminal candidates", () => {
     const result = resolveResumeTarget("r_", deps([snapshot("r_ABCDEFGH"), snapshot("r_ABCDEFGJ", "running")]));
     expect(result.ok).toBe(false);

@@ -72,6 +72,22 @@ function labelsByRunId(deps: ResolveTargetDeps): Map<RunId, string> {
   for (const [label, target] of deps.labels) if (!labels.has(target.runId)) labels.set(target.runId, label);
   return labels;
 }
+
+/** Label match when the process-local index misses: scan the snapshots' own `diag.label`.
+ * The label index never survives a process restart (spawn-service only writes it in
+ * `spawn()`), but the seeded durable snapshots carry their labels — without this fallback a
+ * by-label resolve after a restart always missed while the error's own candidate list printed
+ * that very label (2026-10 restart-resume incident: `resume target not found: sp3-0a5ad8.
+ * Resumable targets: [sp3-0a5ad8 → r_0C5TWJ0D …]`). Latest `updatedAt` wins on collisions,
+ * mirroring spawn-time label-repoint semantics. */
+function labelFallback(handle: string, deps: ResolveTargetDeps): RunId | undefined {
+  let best: RunSnapshot | undefined;
+  for (const snapshot of sourceSnapshots(deps)) {
+    if (snapshot.diag.label !== handle) continue;
+    if (best === undefined || snapshot.updatedAt > best.updatedAt) best = snapshot;
+  }
+  return best?.runId;
+}
 function candidateList(deps: ResolveTargetDeps): readonly ResumeCandidate[] {
   const now = deps.now?.() ?? Date.now();
   const byId = new Map<RunId, ResumeCandidate>();
@@ -128,7 +144,7 @@ export function matchRunId(handle: string, deps: ResolveTargetDeps): { runId?: R
   return { ambiguous: prefixes.length > 1 };
 }
 
-/** Resolve an id, its unique prefix, or finally an exact registered label. */
+/** Resolve an id, its unique prefix, or finally a registered label. */
 export function resolveRunId(handle: string, deps: ResolveTargetDeps): ResolveRunResult {
   const candidates = candidateList(deps);
   const matched = matchRunId(handle, deps);
@@ -143,6 +159,8 @@ export function resolveRunId(handle: string, deps: ResolveTargetDeps): ResolveRu
   // A just-started run may not have emitted its first live snapshot yet, but
   // its label registration is already authoritative for the running hint.
   if (labelTarget) return { ok: true, runId: labelTarget.runId };
+  const seeded = labelFallback(handle, deps);
+  if (seeded !== undefined) return { ok: true, runId: seeded };
   return {
     ok: false,
     error: `run target not found: ${oneLine(handle)}. Candidates: [${formatCandidates(candidates)}]`,
@@ -159,7 +177,7 @@ export function resolveResumeTarget(handle: string, deps: ResolveTargetDeps): Re
   const candidates = candidateList(deps);
   const matched = matchRunId(handle, deps);
   let runId = matched.runId;
-  if (!runId && !matched.ambiguous) runId = deps.labels.get(handle)?.runId;
+  if (!runId && !matched.ambiguous) runId = deps.labels.get(handle)?.runId ?? labelFallback(handle, deps);
   if (!runId || matched.ambiguous) return { ok: false, error: resumeError(handle, candidates), candidates };
 
   const sessionFile = snapshotWithSessionFile(deps, runId)?.diag.sessionFile ?? deps.tombstones.get(runId)?.sessionFile;
