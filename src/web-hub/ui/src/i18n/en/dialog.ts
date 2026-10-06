@@ -32,6 +32,8 @@ const dialog = {
   cancelledWeb: "Cancelled in another browser",
   cancelledHere: "Cancelled",
   closedGeneric: "Dialog closed",
+  // multi-question tabs: an answered tab's ✓ mark is decorative; screen readers get this suffix
+  answeredMark: "answered",
 } satisfies Record<string, string>;
 
 export default dialog;

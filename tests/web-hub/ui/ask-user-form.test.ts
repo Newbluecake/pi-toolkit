@@ -173,9 +173,17 @@ describe("AskUserForm.vue — submit gating + payload (§7.4)", () => {
     expect(w.emitted("answer")).toEqual([[[{ selected: [], other: "  plan C, actually " }]]]);
   });
 
+  it("actions DOM order is Cancel → Submit (Tab order matches the visual left → right)", () => {
+    const w = mountForm(SINGLE);
+    const btns = w.findAll(".ask-actions button");
+    expect(btns.length).toBe(2);
+    expect(btns[0]!.attributes("data-submit")).toBeUndefined();
+    expect(btns[1]!.attributes("data-submit")).toBeDefined();
+  });
+
   it("allowCancel ⇒ two-step cancel (arm → emit), Esc disarms", async () => {
     const w = mountForm(SINGLE);
-    const btn = w.findAll(".ask-actions button")[1]!;
+    const btn = w.find(".ask-actions button:not([data-submit])");
     await btn.trigger("click");
     expect(w.emitted("cancel")).toBeUndefined();
     expect(btn.attributes("data-armed")).toBe("true");
@@ -442,5 +450,117 @@ describe("AskUserForm.vue — sticky submit/cancel dock (2026-10 mobile UX, stru
     expect(actionsRule).toMatch(/bottom:\s*0/);
     // must not go transparent over whatever scrolled underneath it
     expect(actionsRule).toMatch(/background:/);
+  });
+});
+
+describe("AskUserForm.vue — revision UX: revising an answered question never auto-advances (2026-10)", () => {
+  function radioOf(w: ReturnType<typeof mountForm>, qi: number, ri = 0) {
+    return w.findAll(".ask-question")[qi]!.findAll("input[type='radio']")[ri]!;
+  }
+  function activeIndex(w: ReturnType<typeof mountForm>): number {
+    return w.findAll("[data-question-tab]").findIndex((b) => b.attributes("aria-selected") === "true");
+  }
+
+  it("a first answer still auto-advances (unanswered → answered is the only advance trigger)", async () => {
+    const w = mountForm(MULTI);
+    expect(activeIndex(w)).toBe(0);
+    await radioOf(w, 0).setValue(true);
+    expect(activeIndex(w)).toBe(1);
+  });
+
+  it("revising an already-answered question updates the answer in place and stays on that tab", async () => {
+    const env = fakeEnv();
+    const w = mountForm(MULTI, { env });
+    await radioOf(w, 0, 0).setValue(true); // q0 first answer → auto-advance to tab 1
+    expect(activeIndex(w)).toBe(1);
+    await w.findAll("[data-question-tab]")[0]!.trigger("click"); // user navigates back
+    expect(activeIndex(w)).toBe(0);
+    await radioOf(w, 0, 1).setValue(true); // revise: staging → canary
+    expect(activeIndex(w)).toBe(0); // stays put
+    expect((radioOf(w, 0, 1).element as HTMLInputElement).checked).toBe(true);
+    // the revision really landed in the draft (saveDraft still runs on every change)
+    const key = dialogDraftKey("agent-a", "epoch-1", "ask:tc-multi-1");
+    const draft = env.dialogDrafts.get(key) as Array<{ selected: string[] }>;
+    expect(draft[0]!.selected).toEqual(["canary"]);
+  });
+
+  it("revising after EVERY question is answered also stays put (no focus yank to Submit)", async () => {
+    const w = mountForm(MULTI);
+    await radioOf(w, 0).setValue(true); // → tab 1
+    await w.findAll(".ask-question")[1]!.findAll("input[type='checkbox']")[0]!.setValue(true);
+    await w.findAll("[data-question-tab]")[2]!.trigger("click");
+    await radioOf(w, 2).setValue(true); // all answered
+    await w.findAll("[data-question-tab]")[0]!.trigger("click");
+    await radioOf(w, 0, 1).setValue(true); // revise q0
+    expect(activeIndex(w)).toBe(0);
+  });
+
+  it("re-picking the already-selected option is a harmless no-op (no error, no advance)", async () => {
+    const w = mountForm(MULTI);
+    await radioOf(w, 0, 0).setValue(true); // first answer → advance
+    expect(activeIndex(w)).toBe(1);
+    await w.findAll("[data-question-tab]")[0]!.trigger("click");
+    // real browsers fire no `change` for an already-checked radio; force one to prove the
+    // handler itself is idempotent
+    await radioOf(w, 0, 0).trigger("change");
+    expect(activeIndex(w)).toBe(0);
+    expect((radioOf(w, 0, 0).element as HTMLInputElement).checked).toBe(true);
+  });
+});
+
+describe("AskUserForm.vue — answered tab mark (2026-10 revision UX)", () => {
+  it("answered tabs get a ✓ icon, an `answered` class, and an aria-label suffix; unanswered don't", async () => {
+    const w = mountForm(MULTI);
+    await w.findAll(".ask-question")[0]!.find("input[type='radio']").setValue(true);
+    const tabs = w.findAll("[data-question-tab]");
+    expect(tabs[0]!.classes()).toContain("answered");
+    expect(tabs[0]!.find("svg use").exists()).toBe(true);
+    expect(tabs[0]!.find("svg use").attributes("href")).toBe("#i-check");
+    expect(tabs[0]!.attributes("aria-label")).toMatch(/answered|已回答/);
+    expect(tabs[1]!.classes()).not.toContain("answered");
+    expect(tabs[1]!.find("svg").exists()).toBe(false);
+    expect(tabs[1]!.attributes("aria-label")).not.toMatch(/answered|已回答/);
+  });
+
+  it("clearing back to unanswered removes the mark (multiSelect untick)", async () => {
+    const w = mountForm(MULTI);
+    const boxes = w.findAll(".ask-question")[1]!.findAll("input[type='checkbox']");
+    await boxes[0]!.setValue(true);
+    expect(w.findAll("[data-question-tab]")[1]!.classes()).toContain("answered");
+    await boxes[0]!.setValue(false);
+    expect(w.findAll("[data-question-tab]")[1]!.classes()).not.toContain("answered");
+  });
+});
+
+describe("AskUserForm.vue — sticky tabs + right-aligned actions CSS pinboard (2026-10)", () => {
+  const css = readFileSync(
+    resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/dialog.css"),
+    "utf8",
+  );
+
+  it("the tab row sticks to the top of the form's own scrollport with an opaque background", () => {
+    const rule = /\.ask-tabs\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(rule).toMatch(/position:\s*sticky/);
+    expect(rule).toMatch(/top:\s*calc\(-1 \* var\(--sp-2\)\)/); // covers the form's top padding strip
+    expect(rule).toMatch(/background:\s*var\(--c-sunken\)/); // opaque hex in every theme
+    expect(rule).toMatch(/flex:\s*none/); // column-flex shrink guard (overflow-x:auto zeroes min-size)
+  });
+
+  it("tabs meet touch sizing (≥40px, fs-sm; 44px on coarse pointers)", () => {
+    const rule = /\.ask-tabs button\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(rule).toMatch(/min-height:\s*40px/);
+    expect(rule).toMatch(/font-size:\s*var\(--fs-sm\)/);
+    const coarse = /@media \(pointer: coarse\) \{[^]*?\.ask-tabs button \{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(coarse).toMatch(/min-height:\s*44px/);
+  });
+
+  it("the actions row is right-aligned, buttons ≥48px tall, no visual reorder", () => {
+    const actions = /\.ask-actions\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(actions).toMatch(/justify-content:\s*flex-end/);
+    const btn = /\.ask-actions \.btn\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(btn).toMatch(/min-height:\s*48px/);
+    expect(btn).toMatch(/min-width:\s*112px/);
+    // DOM order already is Cancel → Submit (Tab order == visual order); no CSS `order` games.
+    expect(css).not.toMatch(/\.ask-actions[^{]*\{[^}]*\border:/);
   });
 });

@@ -60,12 +60,18 @@ function onToggle(label: string, ev: Event): void {
 }
 
 function onRadio(label: string): void {
+  const i = index.value;
+  // Snapshot BEFORE the mutation (2026-10 revision UX): auto-advance is a first-answer
+  // convenience only — revising an already-answered question must keep the user on that tab,
+  // so the form needs to know whether this pick is the question's first answer or a revision.
+  // Re-picking the already-selected option fires no `change` event at all, so this path never
+  // double-fires for a no-op click.
+  const wasAnswered = form !== null && i >= 0 && form.isAnswered(i);
   setSelected([label]);
   // 2026-10 mobile UX: auto-advance multi-question dialogs to the next unanswered tab. Only
   // fired for this single-select path — setSelected() alone (shared with the multiSelect
   // checkbox toggle above) has no "this question is done" signal of its own.
-  const i = index.value;
-  if (form && i >= 0 && !form.suspended.value) form.onAnswered?.(i);
+  if (form && i >= 0 && !form.suspended.value) form.onAnswered?.(i, wasAnswered);
 }
 
 function onOtherInput(ev: Event): void {

@@ -47,25 +47,50 @@
 .ask-tabs {
   display: flex;
   gap: 2px;
+  /* Full-width opaque bar (not a compact flex-start pill): anything narrower lets scrolled
+   * options bleed through BESIDE the stuck row. */
   padding: 2px;
   border-radius: var(--r-sm);
+  /* Sticky within `.ask-user-form`'s own scrollport (2026-10 revision UX): a long question
+   * scrolls the tab row out of view, stranding a phone user who wants to revisit an answered
+   * question. `--c-sunken` is an opaque hex in every theme, so scrolled-through options never
+   * bleed through underneath the stuck row. `top` is negative the form's own top padding:
+   * Chromium sticks the BORDER box against the scrollport's content box, so `top: 0` would
+   * leave an 8px strip of scrolling text visible above the stuck row; pulling the stick line
+   * up by the padding covers it. No-op when the form doesn't scroll. */
+  position: sticky;
+  top: calc(-1 * var(--sp-2));
+  z-index: 1;
+  /* The form is a COLUMN flex container capped by max-height, and this row's `overflow-x:auto`
+   * zeroes its automatic minimum size — with the default `flex-shrink: 1` a too-tall form
+   * crushed the row to a 4px padding sliver (buttons clipped). Never shrink. */
+  flex: none;
   background: var(--c-sunken);
-  align-self: flex-start;
   max-width: 100%;
   overflow-x: auto;
 }
 
 .ask-tabs button {
-  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 40px; /* touch target; coarse pointers get 44px below */
   padding: 0 var(--sp-3);
   border: 0;
   border-radius: calc(var(--r-sm) - 2px);
   background: transparent;
   color: var(--c-text-3);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   white-space: nowrap;
   cursor: pointer;
+}
+
+/* Answered tabs get a ✓ mark (decorative — the state is also in the aria-label) so revisiting
+ * a finished question is findable at a glance; the check uses the success hue in both themes. */
+.ask-tabs button .ask-tab-check {
+  color: var(--c-success);
+  flex: none;
 }
 
 .ask-tabs button[aria-selected="true"] {
@@ -167,7 +192,9 @@
 .ask-actions {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  /* Right-aligned (user 2026-10): primary action sits at the right edge, Cancel to its left. */
+  justify-content: flex-end;
+  gap: var(--sp-3);
   /* Always-visible submit/cancel row (2026-10 mobile UX): sticks to the bottom of
    * `.ask-user-form`'s own scrollport (see its `max-height`/`overflow-y` above) instead of
    * requiring a scroll to the end of a long question list to find it. `background: inherit`
@@ -184,7 +211,10 @@
 }
 
 .ask-actions .btn {
-  min-height: 44px;
+  min-height: 48px;
+  min-width: 112px;
+  padding: 0 var(--sp-5);
+  font-size: var(--fs-md);
 }
 
 /* Narrow phones: a right-aligned pair of compact buttons is easy to miss/mis-tap one-handed.

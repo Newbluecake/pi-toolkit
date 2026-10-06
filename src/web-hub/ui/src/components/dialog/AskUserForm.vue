@@ -26,6 +26,7 @@ import type { AskUserQuestionWire, DialogWire } from "@protocol/messages.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { AskUserFormEmits, AskUserFormProps } from "../../contracts.js";
 import { CONTROL_ENV, CONTROL_VIEW, dialogDraftKey } from "../control/controlContext.js";
+import AppIcon from "../../icons/AppIcon.vue";
 import AskUserQuestion from "./AskUserQuestion.vue";
 import { ASK_FORM, type AskSelection } from "./askFormContext.js";
 
@@ -78,6 +79,9 @@ const suspended = computed(() => props.suspended === true);
 // toggles and Other free text never call this (askFormContext.ts's AskFormCtx.onAnswered doc) —
 // there is no reliable "this question is done" moment for either. Manual tab clicks are
 // untouched (this only ever WRITES `activeTab`, same ref the tab buttons already use).
+// 2026-10 revision UX: the advance fires ONLY on a question's first answer — `wasAnswered`
+// (snapshotted by AskUserQuestion before mutating the selection) means the user deliberately
+// navigated back to revise, so the answer updates in place and the tab stays put.
 const submitBtn = ref<HTMLButtonElement | null>(null);
 
 function isAnswered(sel: AskSelection | undefined): boolean {
@@ -85,8 +89,14 @@ function isAnswered(sel: AskSelection | undefined): boolean {
   return sel.selected.length > 0 || (typeof sel.other === "string" && sel.other.trim() !== "");
 }
 
-function onQuestionAnswered(index: number): void {
+// Context-facing form (askFormContext.ts's AskFormCtx.isAnswered): by INDEX, not by selection.
+function isQuestionAnswered(index: number): boolean {
+  return isAnswered(selections[index]);
+}
+
+function onQuestionAnswered(index: number, wasAnswered: boolean): void {
   if (!multi.value) return; // single-question dialogs have no tab to advance to
+  if (wasAnswered) return; // revising an answered question: stay put (2026-10 revision UX)
   const n = questions.value.length;
   for (let step = 1; step <= n; step++) {
     const next = (index + step) % n;
@@ -117,6 +127,7 @@ provide(ASK_FORM, {
   selections,
   suspended,
   saveDraft,
+  isAnswered: isQuestionAnswered,
   onAnswered: onQuestionAnswered,
 });
 
@@ -125,6 +136,11 @@ const activeTab = ref(0);
 const multi = computed(() => questions.value.length > 1);
 function tabLabel(q: AskUserQuestionWire, i: number): string {
   return typeof q.header === "string" && q.header !== "" ? q.header : t("dialog.questionTab", { n: i + 1 });
+}
+// Screen readers get the answered state too — the ✓ icon is decorative (aria-hidden) only.
+function tabAriaLabel(q: AskUserQuestionWire, i: number): string {
+  const base = tabLabel(q, i);
+  return isAnswered(selections[i]) ? `${base} — ${t("dialog.answeredMark")}` : base;
 }
 
 // --- completion / submit ---
@@ -186,9 +202,11 @@ watch(draftKey, () => {
         role="tab"
         data-question-tab
         :aria-selected="activeTab === i"
-        :class="{ active: activeTab === i }"
+        :aria-label="tabAriaLabel(q, i)"
+        :class="{ active: activeTab === i, answered: isAnswered(selections[i]) }"
         @click="activeTab = i"
       >
+        <AppIcon v-if="isAnswered(selections[i])" name="check" class="icon-sm ask-tab-check" />
         {{ tabLabel(q, i) }}
       </button>
     </div>
@@ -196,17 +214,7 @@ watch(draftKey, () => {
     <AskUserQuestion v-for="(q, i) in questions" v-show="!multi || activeTab === i" :key="i" :question="q" />
 
     <div class="ask-actions">
-      <button
-        ref="submitBtn"
-        class="btn btn-primary"
-        type="button"
-        data-submit
-        :disabled="!complete || suspended"
-        :aria-label="t('dialog.submitAria')"
-        @click="onSubmit"
-      >
-        {{ t("dialog.submit") }}
-      </button>
+      <!-- DOM order = visual order (Cancel left, Submit right) so Tab order matches -->
       <template v-if="dialog.allowCancel">
         <button
           class="btn btn-ghost"
@@ -222,6 +230,17 @@ watch(draftKey, () => {
         </button>
         <span v-if="cancelArmed" class="sr-only" role="status">{{ t("dialog.cancelArmed") }}</span>
       </template>
+      <button
+        ref="submitBtn"
+        class="btn btn-primary"
+        type="button"
+        data-submit
+        :disabled="!complete || suspended"
+        :aria-label="t('dialog.submitAria')"
+        @click="onSubmit"
+      >
+        {{ t("dialog.submit") }}
+      </button>
     </div>
   </section>
 </template>

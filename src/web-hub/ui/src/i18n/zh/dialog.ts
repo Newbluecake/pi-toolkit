@@ -32,6 +32,8 @@ const dialog = {
   cancelledWeb: "已在另一个浏览器取消",
   cancelledHere: "已取消",
   closedGeneric: "对话框已关闭",
+  // multi-question tabs: an answered tab's ✓ mark is decorative; screen readers get this suffix
+  answeredMark: "已回答",
 } satisfies Messages<typeof en>;
 
 export default dialog;
