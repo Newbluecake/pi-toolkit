@@ -188,13 +188,20 @@
  * `pointer: coarse`, so the full-page treatment reaches it too — 2026-10-06 field report:
  * a desktop-mode phone kept seeing the floating card). The card loses its border/radius/shadow and
  * becomes a full-height flex column over the same soft gradient backdrop (kept so the
- * boot splash → sign-in transition stays seamless): brand up top with comfortable,
- * viewport-relative headroom, form full-width with ≥44px targets (`.field .input` and
- * `.input-wrap .btn-icon` above, `.btn-lg` submit below), foot pinned to the bottom via
- * `margin-top: auto`. Nothing here is a fixed height: `min-height: 100dvh` + natural
- * document flow keeps the page scrollable when the on-screen keyboard shrinks the
- * visible area, instead of overflowing. TokenGate.vue's `.login-card--center` variant
- * vertically centers its short gate content instead. */
+ * boot splash → sign-in transition stays seamless). Vertical rhythm (2026-10-06 field
+ * report: "表单挤在顶部，下面一大片空白"): brand up top with comfortable viewport-relative
+ * headroom, the form riding optically centered in the remaining space — its
+ * `margin-top: auto` splits the free space evenly with the foot's `margin-top: auto`, so
+ * the dead zone no longer pools under the form — and the foot pinned to the bottom.
+ * Coarse pointers also get a typography/controls bump (bigger title/brand mark, 16px
+ * labels and subtitle, 52px inputs and submit with 18px text): a phone whose browser
+ * requests the desktop site scales the whole layout down, so base-size text renders tiny
+ * there. The sizes derive from the `--fs-*` tokens with a multiplier, so a user's
+ * `--fs-scale` preference keeps scaling proportionally instead of being clobbered.
+ * Nothing here is a fixed height: `min-height: 100dvh` + natural document flow keeps the
+ * page scrollable when the on-screen keyboard shrinks the visible area (the auto margins
+ * simply collapse to 0) instead of overflowing. TokenGate.vue's `.login-card--center`
+ * variant vertically centers its short gate content instead. */
 @media (max-width: 640px), (pointer: coarse) {
   .login-page {
     place-items: stretch;
@@ -206,7 +213,7 @@
     flex-direction: column;
     width: 100%;
     min-height: 100dvh;
-    gap: var(--sp-6);
+    gap: var(--sp-8);
     padding: max(var(--sp-6), env(safe-area-inset-top)) max(var(--sp-5), env(safe-area-inset-right))
       max(var(--sp-6), env(safe-area-inset-bottom)) max(var(--sp-5), env(safe-area-inset-left));
     border: 0;
@@ -219,7 +226,57 @@
    * growing on tall phones — a clamp, not a fixed header height, so a small landscape
    * viewport or an open keyboard just scrolls instead of clipping. */
   .login-brand {
-    padding-top: clamp(var(--sp-8), 8dvh, var(--sp-12));
+    gap: var(--sp-4);
+    padding-top: clamp(var(--sp-8), 10dvh, var(--sp-12));
+  }
+
+  .login-brand .brand-mark {
+    width: 64px;
+    height: 64px;
+    border-radius: 18px;
+  }
+
+  .login-brand .brand-mark .icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .login-brand h1 {
+    font-size: calc(var(--fs-2xl) * 1.18); /* ~26px at the default scale */
+  }
+
+  .login-brand p {
+    max-width: 34ch;
+    font-size: var(--fs-lg); /* 16px: stays legible when a desktop-mode phone scales the page down */
+  }
+
+  /* Free space splits evenly between this and the foot's `margin-top: auto` below, so
+   * the form sits optically centered between brand and foot instead of hugging the top
+   * with a dead zone underneath. When the keyboard eats the viewport there is no free
+   * space, the margin collapses to 0 and the page just scrolls. */
+  .form {
+    gap: var(--sp-5);
+    margin-top: auto;
+  }
+
+  .field label {
+    font-size: var(--fs-lg);
+  }
+
+  .field .input {
+    min-height: 52px;
+    /* 18px at the default scale — comfortably above the 16px iOS zoom-on-focus floor. */
+    font-size: calc(var(--fs-lg) * 1.125);
+  }
+
+  .form-error {
+    min-height: 24px; /* reserves the (now taller) line so a late error never shifts the layout */
+    font-size: var(--fs-md);
+  }
+
+  .form .btn-lg {
+    min-height: 52px;
+    font-size: calc(var(--fs-lg) * 1.125);
   }
 
   .login-foot {
