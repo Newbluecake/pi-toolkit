@@ -72,9 +72,9 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--sp-2);
-  min-height: 32px;
-  padding: 3px 0;
+  gap: 2px var(--sp-1); /* row pitch ×1/5 (2026-10-06 "worktree 行间间距缩小为五分之一") */
+  min-height: 24px;
+  padding: 1px 0;
 }
 
 .wt-marker {
@@ -205,6 +205,7 @@
  * (ui-design §3.12, §7.5 precedent; `.btn`/`btn-icon` get theirs from primitives.css) */
 @media (pointer: coarse) {
   .wt-sum {
-    min-height: 20px; /* summary-row family compaction — see detail.css */
+    min-height: 16px; /* summary-row family compaction — see detail.css */
+    line-height: 1.2;
   }
 }

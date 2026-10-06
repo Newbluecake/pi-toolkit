@@ -362,8 +362,8 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 28px;
-  padding: 0 10px 0 8px;
+  min-height: 19px; /* ×2/3 (2026-10-06 "思考胶囊高度缩小三分之一") */
+  padding: 0 8px 0 6px;
   border-radius: var(--r-pill);
   background: var(--st-thinking-soft);
   color: var(--st-thinking);
