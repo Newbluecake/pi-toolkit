@@ -117,12 +117,12 @@ describe("Composer.vue key map (§7.4)", () => {
 
   it("busy placeholder follows the stored deliver default (acceptance P2)", async () => {
     const steer = mountComposer({ busy: true });
-    expect(steer.find("textarea").attributes("placeholder")).toBe("Steer this turn");
+    expect(steer.find("textarea").attributes("placeholder")).toBe("Type to interject this turn…");
 
     window.localStorage.setItem("pwh_deliver", "followUp");
     const queued = mountComposer({ busy: true });
-    expect(queued.find("textarea").attributes("placeholder")).toBe("Follow-up");
-    expect(queued.find("textarea").attributes("aria-label")).toBe("Follow-up");
+    expect(queued.find("textarea").attributes("placeholder")).toBe("Type to queue behind this turn…");
+    expect(queued.find("textarea").attributes("aria-label")).toBe("Type to queue behind this turn…");
   });
 
   it("Shift+Enter inserts a newline and never sends", async () => {

@@ -18,9 +18,12 @@ const control = {
   noticeDismiss: "Dismiss this notice",
 
   // --- composer (§7.4/§7.6) ---
-  placeholderIdle: "Message",
-  placeholderBusy: "Steer this turn",
-  placeholderBusyFollowUp: "Follow-up",
+  // 2026-10-07 (user request 「插话当前轮的提示不优雅，应该是请输入…」): full-sentence
+  // prompts instead of terse mode names; the busy pair still mirrors the stored delivery
+  // default (acceptance P2 — a fixed steer text lied when the default was follow-up).
+  placeholderIdle: "Type a message…",
+  placeholderBusy: "Type to interject this turn…",
+  placeholderBusyFollowUp: "Type to queue behind this turn…",
   send: "Send",
   sendAria: "Send message",
 
