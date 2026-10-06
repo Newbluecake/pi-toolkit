@@ -183,7 +183,10 @@
 }
 
 /* Narrow / touch viewports: no floating card — the sign-in sheet fills the whole viewport
- * (field report: "登录框扩充到整个页面"). The card loses its border/radius/shadow and
+ * (field report: "登录框扩充到整个页面"). Two triggers, either one: a ≤640px viewport,
+ * or a coarse primary pointer (a phone whose browser requests the DESKTOP site still reports
+ * `pointer: coarse`, so the full-page treatment reaches it too — 2026-10-06 field report:
+ * a desktop-mode phone kept seeing the floating card). The card loses its border/radius/shadow and
  * becomes a full-height flex column over the same soft gradient backdrop (kept so the
  * boot splash → sign-in transition stays seamless): brand up top with comfortable,
  * viewport-relative headroom, form full-width with ≥44px targets (`.field .input` and
@@ -192,7 +195,7 @@
  * document flow keeps the page scrollable when the on-screen keyboard shrinks the
  * visible area, instead of overflowing. TokenGate.vue's `.login-card--center` variant
  * vertically centers its short gate content instead. */
-@media (max-width: 640px) {
+@media (max-width: 640px), (pointer: coarse) {
   .login-page {
     place-items: stretch;
     padding: 0;
@@ -230,8 +233,10 @@
 
 /* Desktop card padding bump. Was `min-width: 481px`; the 481–640px band now belongs to
  * the full-viewport treatment above, so the raised-card chrome only applies where the
- * card actually floats (desktop look unchanged — this is the same padding it had). */
-@media (min-width: 641px) {
+ * card actually floats (desktop look unchanged — this is the same padding it had).
+ * `pointer: fine` is required too: both queries would otherwise match on a desktop-mode
+ * phone and this later block would override the full-page padding/gap above. */
+@media (min-width: 641px) and (pointer: fine) {
   .login-card {
     gap: var(--sp-5);
     padding: var(--sp-8) var(--sp-8) var(--sp-6);

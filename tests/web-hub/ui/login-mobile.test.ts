@@ -49,6 +49,15 @@ function rule(scope: string, selector: string): string {
 describe("login.css mobile full-viewport treatment (≤640px)", () => {
   const mobile = mediaBlock("(max-width: 640px)");
 
+  it("the full-page block also triggers on a coarse pointer (desktop-mode phones)", () => {
+    // 2026-10-06 field report: a phone whose browser requests the desktop site (viewport
+    // >640px) kept seeing the floating card; `pointer: coarse` reaches it too.
+    expect(css).toContain("@media (max-width: 640px), (pointer: coarse) {");
+    // …and the desktop padding bump must NOT also fire there (it would override the
+    // full-page padding/gap, since it appears later in the file).
+    expect(css).toContain("@media (min-width: 641px) and (pointer: fine) {");
+  });
+
   it("the page stops centering a floating box and drops its padding", () => {
     const page = rule(mobile, ".login-page");
     expect(page).toContain("place-items: stretch");
