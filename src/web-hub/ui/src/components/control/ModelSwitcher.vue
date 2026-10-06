@@ -108,11 +108,15 @@ const panelEl = ref<unknown>(null);
 const nowTick = ref(Date.now());
 
 // Widened desktop popover (2026-10): never overflow the viewport — shift the left-anchored
-// panel back inside when the chip sits near the right edge (composables/usePopoverClamp.ts).
+// panel back inside when the chip sits near the right edge, and fit it vertically (flip below
+// the chip / cap max-height) when opening above would run off the top of the viewport; keeps
+// re-clamping on resize / visualViewport (mobile keyboard) while open
+// (composables/usePopoverClamp.ts).
 usePopoverClamp(
   open,
   () => !narrow.value,
   () => panelEl.value,
+  () => trigger.value,
 );
 
 /** Global row id for `aria-activedescendant` (rows render in two template branches, so the id

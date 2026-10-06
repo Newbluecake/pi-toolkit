@@ -418,3 +418,44 @@ describe("ThinkingChip.vue — narrow viewport bottom sheet (§5.1 M3b, A10)", (
     expect(document.activeElement).toBe(chip.element);
   });
 });
+
+describe("ThinkingChip.vue — desktop popover vertical fit (2026-10-13)", () => {
+  it("chip near the top flips the panel below it with a capped max-height; fitting chips stay above", async () => {
+    vi.stubGlobal("innerHeight", 800);
+    vi.stubGlobal("visualViewport", undefined);
+    const rectOf = (left: number, top: number, right: number, bottom: number): DOMRect =>
+      ({
+        left,
+        top,
+        right,
+        bottom,
+        width: right - left,
+        height: bottom - top,
+        x: left,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    let chipR = rectOf(0, 30, 100, 62);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("model-chip")) return chipR;
+      if (this.classList.contains("model-panel")) return rectOf(0, 0, 360, 250);
+      return rectOf(0, 0, 0, 0);
+    });
+    const { control } = fakeControl();
+    const { wrapper } = mountChip(control);
+    await wrapper.find("button.model-chip").trigger("click");
+    await flush();
+    const panelEl = wrapper.find(".thinking-panel").element as HTMLElement;
+    expect(panelEl.style.top).toBe("calc(100% + 6px)"); // flipped BELOW the chip
+    expect(panelEl.style.bottom).toBe("auto");
+    expect(panelEl.style.maxHeight).toBe("560px"); // min(0.7*800, below: 800-62-8-6=724)
+
+    // chip with enough room above stays anchored above (CSS position), height capped to fit
+    chipR = rectOf(0, 500, 100, 532);
+    window.dispatchEvent(new Event("resize"));
+    await flush();
+    expect(panelEl.style.top).toBe("");
+    expect(panelEl.style.maxHeight).toBe("486px"); // min(560, above: 500-8-6)
+    vi.unstubAllGlobals();
+  });
+});

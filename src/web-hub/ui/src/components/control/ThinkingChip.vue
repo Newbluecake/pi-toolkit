@@ -114,11 +114,14 @@ const trigger = ref<HTMLButtonElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
 const panelEl = ref<unknown>(null);
 
-// Widened desktop popover (2026-10): never overflow the viewport (composables/usePopoverClamp.ts).
+// Widened desktop popover (2026-10): never overflow the viewport — horizontal clamp plus
+// vertical fit (flip below the chip / cap max-height when opening above would overflow),
+// re-clamped on resize / visualViewport changes while open (composables/usePopoverClamp.ts).
 usePopoverClamp(
   open,
   () => !narrow.value,
   () => panelEl.value,
+  () => trigger.value,
 );
 
 const activeDescendant = computed(() =>

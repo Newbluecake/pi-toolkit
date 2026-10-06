@@ -692,4 +692,115 @@ describe("ModelSwitcher.vue — widened desktop popover (2026-10 user 拍板)", 
     el.remove();
     vi.unstubAllGlobals();
   });
+
+  // --- vertical fit (2026-10-13: chip near the TOP of a short page ran the panel off-screen) -
+
+  function rectOf(left: number, top: number, right: number, bottom: number): DOMRect {
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: right - left,
+      height: bottom - top,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect;
+  }
+
+  it("chip near the top: flips below + caps max-height; resize re-clamps while open; close removes listeners", async () => {
+    vi.stubGlobal("innerHeight", 800);
+    vi.stubGlobal("visualViewport", undefined);
+    let chipR = rectOf(0, 30, 100, 62); // chip near the top of the page (short transcript)
+    let panelR = rectOf(0, 0, 720, 400);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("model-chip")) return chipR;
+      if (this.classList.contains("model-panel")) return panelR;
+      return rectOf(0, 0, 0, 0);
+    });
+    const { control } = fakeControl();
+    const { wrapper } = mountSwitcher(control);
+    await wrapper.find("button.model-chip").trigger("click");
+    await flush();
+    const panelEl = wrapper.find(".model-panel").element as HTMLElement;
+    expect(panelEl.style.top).toBe("calc(100% + 6px)"); // flipped BELOW the chip
+    expect(panelEl.style.bottom).toBe("auto");
+    expect(panelEl.style.maxHeight).toBe("560px"); // min(0.7*800, below: 800-62-8-6=724)
+
+    // geometry changes while open (scroll, keyboard closed): window resize re-clamps both ways
+    chipR = rectOf(0, 500, 100, 532);
+    panelR = rectOf(0, 0, 720, 200);
+    window.dispatchEvent(new Event("resize"));
+    await flush();
+    expect(panelEl.style.top).toBe(""); // fits above again ⇒ CSS anchor restored
+    expect(panelEl.style.maxHeight).toBe("486px"); // min(560, above: 500-8-6)
+
+    // closing removes the listeners — a later resize is a no-op (no errors, nothing reopens)
+    await wrapper.find("button.model-chip").trigger("click");
+    await flush();
+    chipR = rectOf(0, 30, 100, 62);
+    window.dispatchEvent(new Event("resize"));
+    await flush();
+    expect(wrapper.find(".model-panel").exists()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("crossing the 640px boundary while open re-clamps the re-created desktop panel", async () => {
+    vi.stubGlobal("innerHeight", 800);
+    vi.stubGlobal("visualViewport", undefined);
+    const mqListeners: Array<() => void> = [];
+    const mq = {
+      matches: false,
+      media: "(max-width: 640px)",
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: (_t: string, fn: () => void) => {
+        mqListeners.push(fn);
+      },
+      removeEventListener: (_t: string, fn: () => void) => {
+        const i = mqListeners.indexOf(fn);
+        if (i >= 0) mqListeners.splice(i, 1);
+      },
+      dispatchEvent: () => false,
+    };
+    const setNarrow = (m: boolean): void => {
+      mq.matches = m;
+      for (const fn of [...mqListeners]) fn();
+    };
+    const origMq = window.matchMedia;
+    window.matchMedia = (() => mq) as unknown as typeof window.matchMedia;
+    try {
+      const chipR = rectOf(0, 30, 100, 62);
+      const panelR = rectOf(0, 0, 720, 400);
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains("model-chip")) return chipR;
+        if (this.classList.contains("model-panel")) return panelR;
+        return rectOf(0, 0, 0, 0);
+      });
+      const { control } = fakeControl();
+      const { wrapper } = mountSwitcher(control);
+      await wrapper.find("button.model-chip").trigger("click");
+      await flush();
+      expect((wrapper.find(".model-panel").element as HTMLElement).style.top).toBe("calc(100% + 6px)");
+
+      // shrink past 640px while open ⇒ the desktop panel is replaced by the Teleport'd sheet
+      setNarrow(true);
+      await flush();
+      expect(wrapper.find(".model-panel").exists()).toBe(false);
+      expect(document.body.querySelector(".picker-sheet")).not.toBeNull();
+
+      // grow back while STILL open ⇒ the re-created desktop panel element gets clamped too
+      setNarrow(false);
+      await flush();
+      const panel = wrapper.find(".model-panel");
+      expect(panel.exists()).toBe(true);
+      expect((panel.element as HTMLElement).style.top).toBe("calc(100% + 6px)");
+      expect(document.body.querySelector(".picker-sheet")).toBeNull();
+    } finally {
+      window.matchMedia = origMq;
+      vi.unstubAllGlobals();
+    }
+  });
 });
