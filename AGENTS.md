@@ -329,6 +329,13 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   (append-only, open-but-bounded schema, `agent/worktrees.ts` byte-budgeted projection, fingerprint-gated
   publish) to a read-only `WorktreePanel` on the web detail header (absolute paths shown, 1 worktree included).
   Design: `docs/dev/worktree-web/plan.md`.
+  **Bash-jobs panel (bash-jobs-panel plan v3/v4)**: `agent/bash-jobs-sampler.ts` samples the main session's
+  background bash jobs (`BashJobManager`, source-generation pinned, single-flight with per-job deadlines, all
+  timers unref'd) and `agent/bash-jobs.ts` projects to the optional `StatusInfo.bashJobs` slot (D1 row
+  selection, D6 24 KiB budget with a five-step reduction ladder, fingerprint-gated publish, hot path zero I/O)
+  to a read-only `BashJobsPanel` on the web detail header. Command + log tail are kept per the U1 sole-LAN-user
+  ruling — `agent/redact.ts`'s secret scrubbing is HYGIENE ONLY, never a security boundary. Design:
+  `docs/dev/web-hub/bash-jobs-panel-plan.md`.
   **Content preview (web-hub-preview plan v3, setting `webHub.preview` — `"on" | "loopback" | "off"`, default
   `"on"` per the 2026-10-05 user ruling U1: sole LAN user behind password auth, risk explicitly accepted; change
   is non-live — `/reload` then `/webhub restart`)**: an absolute path in a settled message (assistant text, user

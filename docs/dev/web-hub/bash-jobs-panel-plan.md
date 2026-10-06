@@ -1,5 +1,7 @@
 # 会话详情页「后台 bash 任务」只读面板：实施方案 v3
 
+> 状态：**已实施**（A0 协议 `384ad91` · A agent 侧 `468c8c8` · B UI `16a6c39`；conformance
+> `tests/conformance/rpc-bash-jobs.test.ts` 随 A 交付）。
 > 基线 `2c37815`（v1 `965b8fd`），以符号名为准。照 todo-web/worktree-web：agent 投影 → 可选 `StatusInfo.bashJobs`（不 bump
 > PROTO、不加 caps）→ 详情头只读面板；零 hub/`state.js`/settings 改动。评审处理见文末「v2/v3 修订记录」。
 
