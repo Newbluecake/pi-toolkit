@@ -610,6 +610,17 @@ function onPalettePick(name: string): void {
   });
 }
 
+/** The 44px touch-target floor lives on the CARD (control.css, 2026-10-07 symmetric-gap
+ * ruling), so a single-line composer has a few px of centering slack above/below the
+ * textarea where a tap lands on the card itself — refocus the textarea so the whole card
+ * stays the hit target. Interactive children (ring/stop/chips) are excluded by the target
+ * check; preventDefault keeps the press from starting a text selection or shifting focus. */
+function onCardMousedown(e: MouseEvent): void {
+  if (e.target !== e.currentTarget) return;
+  e.preventDefault();
+  textareaEl.value?.focus();
+}
+
 watch(
   () => props.draft,
   (d) => {
@@ -710,7 +721,7 @@ watch(
            falls back to its absolute mid-right geometry; no `.model-switcher`
            (ModelSwitcher self-hide, §5.4) never expands the row at all. Constant
            padding-right:36px ring slot on the textarea in every state (control.css). -->
-      <div class="composer-input" :class="{ 'has-text': text !== '' }">
+      <div class="composer-input" :class="{ 'has-text': text !== '' }" @mousedown="onCardMousedown">
         <textarea
           ref="textareaEl"
           v-model="text"

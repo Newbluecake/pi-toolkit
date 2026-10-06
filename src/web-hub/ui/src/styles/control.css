@@ -74,7 +74,10 @@
 
 .composer textarea {
   width: 100%;
-  min-height: 44px; /* touch target (§7.4) */
+  /* NO min-height here (2026-10-07 "输入的时候底部的空白区域应该和顶部一样"): the touch-target
+   * floor lives on the CARD (`.composer-input` below) — text inside a textarea always aligns
+   * to the top padding, so a min-height here parked all the single-line slack UNDER the text
+   * (top gap 5px, bottom ~17px). The card distributes that slack symmetrically instead. */
   padding: 5px var(--sp-3); /* vertical halved (2026-10-06 "输入框上下边界缩小为二分之一") */
   /* border/radius/background moved to the CARD (`.composer-input`, 2026-10 user-picked mock
    * option 1): the textarea is borderless/transparent inside the card. */
@@ -103,6 +106,14 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
+  /* The 44px touch-target floor, moved here from the textarea (2026-10-07): with a single
+   * line the content (~32px) is shorter than the floor, and `justify-content: center`
+   * splits the slack into EQUAL top/bottom bands — the textarea's own min-height could only
+   * park it at the bottom. Multi-line content or the expanded bottom row exceeds the floor,
+   * so centering is a no-op there. The slack bands stay clickable — Composer.vue's
+   * `onCardMousedown` refocuses the textarea when the card itself is hit. */
+  min-height: 44px;
+  justify-content: center;
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-md);
   background: var(--c-surface);
@@ -123,8 +134,10 @@
  * no-control fallback) — keeps the row at 0 height and the ring on its base absolute
  * mid-right geometry, byte-identical to the pre-card behavior. NO overflow:hidden here: the
  * collapsed row must not clip the absolutely-positioned ring it still contains (the chips are
- * invisible then anyway — `.chips-off`). The row sits BELOW the textarea, so collapsing it
- * never moves existing text vertically. */
+ * invisible then anyway — `.chips-off`). The row sits BELOW the textarea; while it collapses
+ * (56px → 44px card) the text keeps its top edge, then the card's centering glides it a few
+ * px down over the tail of the transition — the deliberate trade-off of the symmetric-gap
+ * ruling on `.composer-input`. */
 .composer-bottom {
   display: flex;
   align-items: center;
@@ -1061,13 +1074,15 @@
 }
 
 /* --- landscape phones (todo #7): composer compaction — vertical gaps/paddings shrink; the
- * textarea and send button keep their 44px min-height hit boxes, and `.composer-sub`'s own
+ * textarea and send button keep their 44px hit boxes (the floor is the CARD's min-height
+ * now — see the base `.composer-input` rule), and `.composer-sub`'s own
  * controls stay mounted (command mode's send-as-text checkbox is interactive) --- */
 /* Narrow phones (2026-10-06 ×2): with the vertical padding halved the 44px floor still ruled
  * the visual height — drop it to 34px on phones so the empty composer is actually shorter, and
  * shrink the sibling send/attach buttons to match (field report: "附件、发送按钮没有同步调整"). */
 @media (max-width: 767px) {
-  .composer textarea {
+  /* The floor lives on the card now (see the base rule) — shrink the CARD, not the textarea. */
+  .composer-input {
     min-height: 34px;
   }
 
