@@ -197,14 +197,16 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     expect(rule(".ctx-ring-btn")).not.toMatch(/var\(--fs-scale/);
   });
 
-  it("窄屏(<=480px)降级: ring/stop 移到 textarea 下方的独立一行, padding-right 重置为普通 --sp-3(不再需要为它们预留宽度), 两者改为 position:static(脱离绝对定位覆盖文字)", () => {
-    const block = mediaBlock480();
-    expect(block).not.toBe("");
-    expect(block).toMatch(/\.composer-input\s*\{\s*flex-wrap:\s*wrap;/);
-    expect(block).toMatch(/padding-right:\s*var\(--sp-3\);/);
-    expect(block).toMatch(/\.stop-wrap[\s\S]*?position:\s*static;/);
-    expect(block).toMatch(/\.ctx-ring\s*\{\s*position:\s*static;/);
-    // 不得在窄屏档里残留 package3 切被捦正的旧封顶 padding 公式(56px cap)
-    expect(block).not.toMatch(/56px\)\)/);
+  it("窄屏(<=480px)不再拆行: ring/stop 始终留在 textarea 右缘内(2026-10-06 主页截图死区回归修复), 仅保留 stop 图标的窄屏封顶覆盖", () => {
+    const blocks = allMediaBlocks480();
+    // 布局拆行块已删除：不再存在把 .ctx-ring/.stop-wrap 挪出输入框的 media 块。
+    expect(blocks.every((b) => !/\.composer-input\s*\{\s*flex-wrap:\s*wrap/.test(b))).toBe(true);
+    expect(blocks.every((b) => !/\.ctx-ring\s*\{[^}]*position:\s*static/.test(b))).toBe(true);
+    expect(blocks.every((b) => !/\.stop-wrap[\s\S]*?position:\s*static/.test(b))).toBe(true);
+    // 仅存的 ≤480px 块是 stop 图标的封顶覆盖（宽度收窄）。
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks.some((b) => /\.stop-btn \.icon/.test(b))).toBe(true);
+    // 窄屏下 textarea 仍为 ring 预留 58px 槽位（无条件基准规则）。
+    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*58px/);
   });
 });

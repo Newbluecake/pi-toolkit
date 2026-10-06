@@ -136,47 +136,18 @@
  * `:has(.ctx-ring):has(.stop-btn)` two-slot tier is gone because `.stop-btn` and `.ctx-ring`
  * never co-render). Stop-only (the no-ring fallback) scales its segment by `--fs-scale` off
  * the same 52px base as before, CAPPED at 70px so the icon's own growth (capped below at
- * `.stop-btn .icon`) never runs away unbounded. This tier only matters above the narrow-phone
- * breakpoint (>480px, below which the `@media` block further down moves the controls onto
- * their own row and resets this to a plain `--sp-3` instead — see its comment for why capping
- * alone can't satisfy the phone's text-width floor). */
+ * `.stop-btn .icon`) never runs away unbounded. */
 .composer-input:has(.stop-btn):not(:has(.ctx-ring)) textarea {
   padding-right: min(calc(52px * var(--fs-scale, 1)), 70px);
 }
 
-/* Narrow phones (<=480px, verifier r2, 2026-10-06): ring(56px, fixed) + the stop button's own
- * unavoidable minimum reserve already eat well over half of a phone's ~230–240px-wide textarea
- * at fs>=2 — capping the stop segment alone (above) can shave it down but can't clear >=120px /
- * >=40% real text width AND stay overlap-free at the same time (the textarea itself keeps
- * shrinking with `--fs-scale` from the composer's other controls, independent of this fix).
- * Move the control OUT of the textarea's horizontal box onto its own row below it instead —
- * the `padding-right` reserve goes back to a plain `--sp-3`, so text gets the textarea's near-
- * full width regardless of icon size. DOM order is already textarea → ContextRing (the merged
- * ring/stop control, or the standalone StopButton fallback without a ring) (`Composer.vue`),
- * so `flex-wrap` alone puts it on the wrapped second row; `margin-left: auto` right-aligns it
- * there. */
-@media (max-width: 480px) {
-  .composer-input {
-    flex-wrap: wrap;
-  }
-
-  .composer-input textarea,
-  .composer-input:has(.ctx-ring) textarea,
-  .composer-input:has(.stop-btn):not(:has(.ctx-ring)) textarea {
-    flex: 1 1 100%;
-    padding-right: var(--sp-3);
-  }
-
-  .composer-input:not(:has(.ctx-ring)) .stop-wrap {
-    position: static;
-    margin-left: auto;
-  }
-
-  .composer-input .ctx-ring {
-    position: static;
-    margin-left: auto;
-  }
-}
+/* 2026-10-06 field report (main-page screenshot): the ≤480px unwrap that used to move the
+ * ring/stop onto their own row below the textarea looked broken — the ring floated in dead
+ * space and the send button stretched to the wrapped two-row height. The ring is back INSIDE
+ * the textarea's right edge at ALL widths now: it is a fixed 56px graphic slot (padding-right
+ * 58px above), so it never grows with `--fs-scale`, and the tradeoff it used to solve (text
+ * width at fs≥2 on ~230px textareas) is accepted — text wraps inside the remaining width
+ * instead of the control leaving the input box. */
 
 .ctx-ring {
   position: absolute;
@@ -421,11 +392,11 @@
 /* IconSprite's `#i-stop` only fills the middle 10/24 of its viewBox (a 24px icon box ⇒ a 10px
  * visible square) — field report history (b991879) already doubled the box once because the
  * square read too small; the 36px cap above (1.5x the 24px base) still only shows a 15px
- * square, and users keep flagging it as too small on a real phone. Now that <=480px moves
- * stop+ring onto their own row below the textarea (`@media (max-width: 480px)` above, outside
- * the textarea's horizontal budget entirely), there's no `padding-right` tradeoff left to
- * protect — raise the cap to 48px (a 20px visible square at fs>=2) on narrow viewports only;
- * >480px keeps the 36px cap untouched. This rule MUST come after the unconditional one above
+ * square, and users keep flagging it as too small on a real phone. Raise the cap to 48px
+ * (a 20px visible square at fs>=2) on narrow viewports only; >480px keeps the 36px cap
+ * untouched. (History: this override originally leaned on the ≤480px unwrap that moved
+ * stop/ring below the textarea; the unwrap was removed 2026-10-06 — the merged ring is a
+ * fixed 56px slot, so a 48px icon still fits inside it.) This rule MUST come after the unconditional one above
  * (same specificity — later source wins once the media query is active) to actually override
  * it. `.stop-btn`'s own `min-height: 44px` still bounds the touch target ≥ 44px regardless
  * (icon-driven button height only grows past that, never under it). */
