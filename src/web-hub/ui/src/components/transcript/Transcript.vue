@@ -62,6 +62,49 @@ function scrollToBottom(): void {
   if (box) box.scrollTop = box.scrollHeight;
 }
 
+// ---------------------------------------------------------------------------
+// touch-scroll pin suppression (mobile field report: a slow finger drag while pinned at the
+// bottom got fought by the follow-pin machinery — every streaming re-render / status tick
+// re-forced `scrollTop = scrollHeight` mid-drag → jitter/flicker; a fast fling escaped
+// NEAR_BOTTOM_PX before the next pin landed, so only slow drags hurt). While a touch scroll
+// is active — and for a short settle window after release so momentum/settle doesn't race the
+// next pin — ALL programmatic pins (follow-on jump, scroll-anchor follow-branch, in-place
+// growth pin) are SKIPPED, not queued: the next real content change after the settle pins
+// again if still following. `onScroll`'s following-flip logic is untouched (a drag that
+// crosses NEAR_BOTTOM_PX still turns following off naturally). Mouse/wheel/keyboard behavior
+// is unchanged: a pointerdown only arms the flag for pointerType "touch".
+// ---------------------------------------------------------------------------
+const TOUCH_SCROLL_SETTLE_MS = 200;
+let userTouchScrolling = false;
+let touchSettleTimer: ReturnType<typeof setTimeout> | undefined;
+
+function clearTouchSettleTimer(): void {
+  if (touchSettleTimer !== undefined) {
+    clearTimeout(touchSettleTimer);
+    touchSettleTimer = undefined;
+  }
+}
+
+function beginTouchScroll(): void {
+  userTouchScrolling = true;
+  // A re-grip inside the settle window keeps suppression alive instead of letting the
+  // pending settle timer release mid-drag.
+  clearTouchSettleTimer();
+}
+
+function onPointerDown(e: PointerEvent): void {
+  if (e.pointerType === "touch") beginTouchScroll();
+}
+
+function endTouchScroll(): void {
+  if (!userTouchScrolling) return;
+  clearTouchSettleTimer();
+  touchSettleTimer = setTimeout(() => {
+    touchSettleTimer = undefined;
+    userTouchScrolling = false;
+  }, TOUCH_SCROLL_SETTLE_MS);
+}
+
 // Turning Follow on (the dock switch, or the "↓ Latest · N new" button — both just set the same
 // `following` prop true from the caller's side) IS "jump to latest": reset the window to the
 // tail and scroll to the bottom.
@@ -70,7 +113,9 @@ watch(
   (isFollowing) => {
     if (isFollowing) {
       transcriptWindow.resetToLatest();
-      void nextTick(scrollToBottom);
+      void nextTick(() => {
+        if (!userTouchScrolling) scrollToBottom();
+      });
     } else {
       notFollowingBaselineLen = totalLen.value;
     }
@@ -113,7 +158,9 @@ watch(
   () => {
     if (scrollBox.value)
       applyScrollCompensation(scrollBox.value, pendingSnapshot ?? captureScroll(scrollBox.value), {
-        following: props.following,
+        // A prepended page still anchors even mid-touch-drag (it protects the user's reading
+        // position); only the follow-pin branch — the one that fights the finger — is gated.
+        following: props.following && !userTouchScrolling,
         prepended,
       });
     prepended = false;
@@ -141,7 +188,7 @@ function schedulePin(): void {
   void Promise.resolve().then(() => {
     pinQueued = false;
     const box = scrollBox.value;
-    if (box && props.following) box.scrollTop = box.scrollHeight;
+    if (box && props.following && !userTouchScrolling) box.scrollTop = box.scrollHeight;
   });
 }
 
@@ -154,6 +201,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   contentResizeObserver?.disconnect();
   contentResizeObserver = undefined;
+  clearTouchSettleTimer();
 });
 
 // A server page landing while the client window was already sitting at `start === 0` (the only
@@ -188,6 +236,12 @@ function jumpToLatest(): void {
     tabindex="-1"
     :aria-label="ariaLabel ?? t('transcript.ariaLabel')"
     @scroll="onScroll"
+    @touchstart.passive="beginTouchScroll"
+    @touchend.passive="endTouchScroll"
+    @touchcancel.passive="endTouchScroll"
+    @pointerdown.passive="onPointerDown"
+    @pointerup.passive="endTouchScroll"
+    @pointercancel.passive="endTouchScroll"
   >
     <div ref="innerBox" class="tx-inner">
       <TxHiddenGap v-if="view.hiddenBefore > 0" direction="before" :count="view.hiddenBefore" @action="showEarlier" />

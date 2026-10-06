@@ -307,36 +307,48 @@ describe("Transcript.vue — follow / new-count / load-older (ui-design.md §5.4
  * the callback by hand; the component coalesces the resulting pin through a microtask (rAF is
  * banned repo-wide, `source-scan.test.ts`), hence the double `await Promise.resolve()` flush.
  */
+/**
+ * Fake `ResizeObserver` shared by the follow-pin describes below: happy-dom ships a
+ * `ResizeObserver` global but (like jsdom) never actually fires it from real layout, so tests
+ * install this fake — it records `observe()` calls and lets the test fire the callback by hand.
+ */
+type RoCallback = (entries: readonly unknown[], observer: unknown) => void;
+
+class FakeResizeObserver {
+  static instances: FakeResizeObserver[] = [];
+  readonly observed: Element[] = [];
+  constructor(private readonly cb: RoCallback) {
+    FakeResizeObserver.instances.push(this);
+  }
+  observe(el: Element): void {
+    this.observed.push(el);
+  }
+  unobserve(): void {}
+  disconnect(): void {}
+  fire(): void {
+    this.cb([], this);
+  }
+}
+
+async function withFakeResizeObserver<T>(fn: () => Promise<T>): Promise<T> {
+  const original = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+  FakeResizeObserver.instances = [];
+  (globalThis as { ResizeObserver?: unknown }).ResizeObserver = FakeResizeObserver;
+  try {
+    return await fn();
+  } finally {
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver = original;
+  }
+}
+
+/** The component coalesces pins through a microtask (rAF is banned repo-wide,
+ * `source-scan.test.ts`), hence the double flush. */
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe("Transcript.vue — follow-pin on in-place content growth (ResizeObserver, bug fix)", () => {
-  type RoCallback = (entries: readonly unknown[], observer: unknown) => void;
-
-  class FakeResizeObserver {
-    static instances: FakeResizeObserver[] = [];
-    readonly observed: Element[] = [];
-    constructor(private readonly cb: RoCallback) {
-      FakeResizeObserver.instances.push(this);
-    }
-    observe(el: Element): void {
-      this.observed.push(el);
-    }
-    unobserve(): void {}
-    disconnect(): void {}
-    fire(): void {
-      this.cb([], this);
-    }
-  }
-
-  async function withFakeResizeObserver<T>(fn: () => Promise<T>): Promise<T> {
-    const original = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-    FakeResizeObserver.instances = [];
-    (globalThis as { ResizeObserver?: unknown }).ResizeObserver = FakeResizeObserver;
-    try {
-      return await fn();
-    } finally {
-      (globalThis as { ResizeObserver?: unknown }).ResizeObserver = original;
-    }
-  }
-
   it("pins scrollTop to scrollHeight when following and the content box resizes (no totalLen change)", async () => {
     await withFakeResizeObserver(async () => {
       const agent = agentWith(manyUserMessages(5));
@@ -378,6 +390,180 @@ describe("Transcript.vue — follow-pin on in-place content growth (ResizeObserv
       wrapper.unmount();
       expect(disconnectSpy).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/**
+ * Touch-scroll pin suppression (mobile field report: a slow finger drag while pinned at the
+ * bottom flickered because every streaming re-render re-forced `scrollTop = scrollHeight`
+ * mid-drag). While a touch scroll is active (plus a ~200ms settle after release), all
+ * programmatic pins are skipped; mouse/wheel input never arms the suppression. happy-dom has
+ * no `TouchEvent`/`PointerEvent` constructors, so the tests dispatch plain `Event`s (with an
+ * own `pointerType` property for the pointer path) directly on the scroll box — the handlers
+ * only read `pointerType`, so this is exactly what the component sees in a real browser.
+ */
+describe("Transcript.vue — touch-scroll pin suppression (mobile slow-drag flicker fix)", () => {
+  function fireTouch(el: Element, type: string): void {
+    el.dispatchEvent(new Event(type));
+  }
+
+  function firePointer(el: Element, type: string, pointerType: string): void {
+    const ev = new Event(type);
+    Object.defineProperty(ev, "pointerType", { value: pointerType });
+    el.dispatchEvent(ev);
+  }
+
+  it("skips the in-place growth pin while a touch drag is active, and resumes after the release settle", async () => {
+    vi.useFakeTimers();
+    try {
+      await withFakeResizeObserver(async () => {
+        const agent = agentWith(manyUserMessages(5));
+        const wrapper = await mountTx(agent, { following: true });
+        const box = wrapper.get("#transcript").element;
+        const ro = FakeResizeObserver.instances[0]!;
+        // finger lands — a slow drag starts
+        fireTouch(box, "touchstart");
+        // streaming text grows the content while the finger is down: the pin must NOT fight it
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 500, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(0);
+        // finger lifts, but the settle window (momentum) is still running
+        fireTouch(box, "touchend");
+        vi.advanceTimersByTime(100);
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 800, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(0);
+        // settle window over — the next content change pins again (still following)
+        vi.advanceTimersByTime(150); // 250ms total > 200ms settle
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 900, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(900);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a re-grip inside the settle window keeps suppression alive (settle timer resets)", async () => {
+    vi.useFakeTimers();
+    try {
+      await withFakeResizeObserver(async () => {
+        const agent = agentWith(manyUserMessages(5));
+        const wrapper = await mountTx(agent, { following: true });
+        const box = wrapper.get("#transcript").element;
+        const ro = FakeResizeObserver.instances[0]!;
+        fireTouch(box, "touchstart");
+        fireTouch(box, "touchend");
+        vi.advanceTimersByTime(150); // inside the 200ms settle
+        fireTouch(box, "touchstart"); // re-grip before the settle elapses
+        fireTouch(box, "touchend");
+        vi.advanceTimersByTime(150); // 300ms since the first release, but only 150 since the second
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 500, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(0);
+        vi.advanceTimersByTime(100); // now 250ms past the second release
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 600, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(600);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips the follow-on jump-to-bottom while touching; pins again on the next toggle after settle", async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = agentWith(manyUserMessages(50));
+      const wrapper = await mountTx(agent, { following: false });
+      const box = wrapper.get("#transcript").element;
+      setScrollGeometry(box, { scrollTop: 0, scrollHeight: 1000, clientHeight: 500 });
+      fireTouch(box, "touchstart");
+      await wrapper.setProps({ following: true });
+      await flushMicrotasks();
+      expect(box.scrollTop).toBe(0); // follow-on pin skipped, not queued
+      fireTouch(box, "touchcancel");
+      vi.advanceTimersByTime(250);
+      await wrapper.setProps({ following: false });
+      await wrapper.setProps({ following: true });
+      await flushMicrotasks();
+      expect(box.scrollTop).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips the scroll-anchor follow-branch on content append while touching, and resumes after settle", async () => {
+    vi.useFakeTimers();
+    try {
+      const wrapper = await mountTx(agentWith(manyUserMessages(5)), { following: true });
+      const box = wrapper.get("#transcript").element;
+      // parked near the bottom: captureScroll computes nearBottom = (1000-90-1000) < 64 → true
+      setScrollGeometry(box, { scrollTop: 90, scrollHeight: 1000, clientHeight: 1000 });
+      fireTouch(box, "touchstart");
+      await wrapper.setProps({ agent: agentWith(manyUserMessages(6)) });
+      await flushMicrotasks();
+      expect(box.scrollTop).toBe(90); // follow-branch compensation skipped
+      fireTouch(box, "touchend");
+      vi.advanceTimersByTime(250);
+      await wrapper.setProps({ agent: agentWith(manyUserMessages(7)) });
+      await flushMicrotasks();
+      expect(box.scrollTop).toBe(1000); // compensation pins again once the settle elapsed
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a mouse pointerdown never suppresses pinning; a touch pointerdown/pointerup pair does", async () => {
+    vi.useFakeTimers();
+    try {
+      await withFakeResizeObserver(async () => {
+        const agent = agentWith(manyUserMessages(5));
+        const wrapper = await mountTx(agent, { following: true });
+        const box = wrapper.get("#transcript").element;
+        const ro = FakeResizeObserver.instances[0]!;
+        // mouse (scrollbar drag / selection): pinning must keep working — desktop unaffected
+        firePointer(box, "pointerdown", "mouse");
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 500, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(500);
+        // touch pointer events arm/release the same suppression as touchstart/touchend
+        firePointer(box, "pointerdown", "touch");
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 800, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(0);
+        firePointer(box, "pointerup", "touch");
+        vi.advanceTimersByTime(250);
+        setScrollGeometry(box, { scrollTop: 0, scrollHeight: 900, clientHeight: 100 });
+        ro.fire();
+        await flushMicrotasks();
+        expect(box.scrollTop).toBe(900);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the pending settle timer on unmount (no leaked timer)", async () => {
+    vi.useFakeTimers();
+    try {
+      const wrapper = await mountTx(agentWith(manyUserMessages(5)), { following: true });
+      const box = wrapper.get("#transcript").element;
+      fireTouch(box, "touchstart");
+      fireTouch(box, "touchend");
+      expect(vi.getTimerCount()).toBe(1);
+      wrapper.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
