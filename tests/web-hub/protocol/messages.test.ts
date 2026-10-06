@@ -271,6 +271,96 @@ describe("decodeAgentFrame", () => {
     expect(decodeAgentFrame({ ...reply, status: { ...reply.status, todo: { tasks: "nope" } } })).toBeUndefined();
   });
 
+  // worktree-web plan §3.2/§7 (W2): StatusInfo.worktrees rides the same open-ended status frame
+  // as todo/models. Unlike TodoWireSchema, the nested worktree schemas stay OPEN
+  // (additionalProperties: true, Q4) — see WorktreeRowWire's docstring for why.
+  const worktreesWire = {
+    rows: [
+      {
+        label: "~/ai/pi-toolkit",
+        path: "/home/u/ai/pi-toolkit",
+        branch: "master",
+        head: "abc1234",
+        current: true,
+        main: true,
+        dirty: 0,
+      },
+      {
+        label: "~/ai/pi-toolkit.wt/x",
+        path: "/home/u/ai/pi-toolkit.wt/x",
+        branch: "pi-agent-r1",
+        head: "def5678",
+        agentRunId: "r1",
+        dirty: 2,
+        ahead: 1,
+        behind: 0,
+      },
+    ],
+    total: 2,
+    probed: 2,
+    dirtyCount: 1,
+    agentCount: 1,
+    sampledAt: 1790000000000,
+  } as const;
+
+  it("status frame with a well-formed worktrees body passes and keeps the field", () => {
+    const decoded = decodeAgentFrame({ t: "status", ...status, worktrees: worktreesWire });
+    expect(decoded).toMatchObject({ t: "status", costUsd: 0.12 });
+    expect((decoded as { worktrees?: unknown }).worktrees).toEqual(worktreesWire);
+  });
+
+  it("worktree rows and the enclosing body stay open to unknown fields (Q4)", () => {
+    const withFuture = {
+      ...worktreesWire,
+      staleMin: 3,
+      futureBodyField: "kept",
+      rows: [{ ...worktreesWire.rows[0], unprobed: "slow-fs", futureRowField: "kept" }],
+    };
+    const decoded = decodeAgentFrame({ t: "status", ...status, worktrees: withFuture }) as
+      { worktrees?: unknown } | undefined;
+    expect(decoded?.worktrees).toEqual(withFuture);
+  });
+
+  it("status frame with a malformed worktrees body is rejected whole; omitted worktrees still passes", () => {
+    expect(decodeAgentFrame({ t: "status", ...status, worktrees: 5 })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "status", ...status, worktrees: { ...worktreesWire, rows: "nope" } })).toBeUndefined();
+    expect(
+      decodeAgentFrame({ t: "status", ...status, worktrees: { ...worktreesWire, rows: [{ label: "x", dirty: -1 }] } }),
+    ).toBeUndefined();
+    expect(
+      decodeAgentFrame({
+        t: "status",
+        ...status,
+        worktrees: { ...worktreesWire, rows: [{ label: "x", path: "a".repeat(4097) }] },
+      }),
+    ).toBeUndefined();
+    expect(
+      decodeAgentFrame({
+        t: "status",
+        ...status,
+        worktrees: { ...worktreesWire, rows: Array.from({ length: 65 }, () => ({ label: "x" })) },
+      }),
+    ).toBeUndefined();
+    expect(decodeAgentFrame({ t: "status", ...status })).toBeDefined(); // pre-feature shape stays valid
+  });
+
+  it("snapshot_reply carries status.worktrees through (worktree-web W2)", () => {
+    const reply = {
+      t: "snapshot_reply",
+      rid: "r1",
+      seq: 7,
+      leafId: "leaf1",
+      recent: [],
+      prompts: [],
+      status: { leafId: "leaf1", busy: false, pending: false, worktrees: worktreesWire },
+      fleet: [],
+    };
+    const decoded = decodeAgentFrame(reply) as { status?: { worktrees?: unknown } } | undefined;
+    expect(decoded).toMatchObject({ t: "snapshot_reply", rid: "r1" });
+    expect(decoded?.status?.worktrees).toEqual(worktreesWire);
+    expect(decodeAgentFrame({ ...reply, status: { ...reply.status, worktrees: { rows: "nope" } } })).toBeUndefined();
+  });
+
   it("accepts branch_reply with loose WireEntry payloads", () => {
     const entry = {
       id: "e1",

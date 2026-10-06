@@ -1,0 +1,275 @@
+{
+  "t": "status",
+  "leafId": null,
+  "busy": false,
+  "pending": false,
+  "worktrees": {
+    "rows": [
+      {
+        "label": "wt-0",
+        "path": "/tmp/wt-0"
+      },
+      {
+        "label": "wt-1",
+        "path": "/tmp/wt-1"
+      },
+      {
+        "label": "wt-2",
+        "path": "/tmp/wt-2"
+      },
+      {
+        "label": "wt-3",
+        "path": "/tmp/wt-3"
+      },
+      {
+        "label": "wt-4",
+        "path": "/tmp/wt-4"
+      },
+      {
+        "label": "wt-5",
+        "path": "/tmp/wt-5"
+      },
+      {
+        "label": "wt-6",
+        "path": "/tmp/wt-6"
+      },
+      {
+        "label": "wt-7",
+        "path": "/tmp/wt-7"
+      },
+      {
+        "label": "wt-8",
+        "path": "/tmp/wt-8"
+      },
+      {
+        "label": "wt-9",
+        "path": "/tmp/wt-9"
+      },
+      {
+        "label": "wt-10",
+        "path": "/tmp/wt-10"
+      },
+      {
+        "label": "wt-11",
+        "path": "/tmp/wt-11"
+      },
+      {
+        "label": "wt-12",
+        "path": "/tmp/wt-12"
+      },
+      {
+        "label": "wt-13",
+        "path": "/tmp/wt-13"
+      },
+      {
+        "label": "wt-14",
+        "path": "/tmp/wt-14"
+      },
+      {
+        "label": "wt-15",
+        "path": "/tmp/wt-15"
+      },
+      {
+        "label": "wt-16",
+        "path": "/tmp/wt-16"
+      },
+      {
+        "label": "wt-17",
+        "path": "/tmp/wt-17"
+      },
+      {
+        "label": "wt-18",
+        "path": "/tmp/wt-18"
+      },
+      {
+        "label": "wt-19",
+        "path": "/tmp/wt-19"
+      },
+      {
+        "label": "wt-20",
+        "path": "/tmp/wt-20"
+      },
+      {
+        "label": "wt-21",
+        "path": "/tmp/wt-21"
+      },
+      {
+        "label": "wt-22",
+        "path": "/tmp/wt-22"
+      },
+      {
+        "label": "wt-23",
+        "path": "/tmp/wt-23"
+      },
+      {
+        "label": "wt-24",
+        "path": "/tmp/wt-24"
+      },
+      {
+        "label": "wt-25",
+        "path": "/tmp/wt-25"
+      },
+      {
+        "label": "wt-26",
+        "path": "/tmp/wt-26"
+      },
+      {
+        "label": "wt-27",
+        "path": "/tmp/wt-27"
+      },
+      {
+        "label": "wt-28",
+        "path": "/tmp/wt-28"
+      },
+      {
+        "label": "wt-29",
+        "path": "/tmp/wt-29"
+      },
+      {
+        "label": "wt-30",
+        "path": "/tmp/wt-30"
+      },
+      {
+        "label": "wt-31",
+        "path": "/tmp/wt-31"
+      },
+      {
+        "label": "wt-32",
+        "path": "/tmp/wt-32"
+      },
+      {
+        "label": "wt-33",
+        "path": "/tmp/wt-33"
+      },
+      {
+        "label": "wt-34",
+        "path": "/tmp/wt-34"
+      },
+      {
+        "label": "wt-35",
+        "path": "/tmp/wt-35"
+      },
+      {
+        "label": "wt-36",
+        "path": "/tmp/wt-36"
+      },
+      {
+        "label": "wt-37",
+        "path": "/tmp/wt-37"
+      },
+      {
+        "label": "wt-38",
+        "path": "/tmp/wt-38"
+      },
+      {
+        "label": "wt-39",
+        "path": "/tmp/wt-39"
+      },
+      {
+        "label": "wt-40",
+        "path": "/tmp/wt-40"
+      },
+      {
+        "label": "wt-41",
+        "path": "/tmp/wt-41"
+      },
+      {
+        "label": "wt-42",
+        "path": "/tmp/wt-42"
+      },
+      {
+        "label": "wt-43",
+        "path": "/tmp/wt-43"
+      },
+      {
+        "label": "wt-44",
+        "path": "/tmp/wt-44"
+      },
+      {
+        "label": "wt-45",
+        "path": "/tmp/wt-45"
+      },
+      {
+        "label": "wt-46",
+        "path": "/tmp/wt-46"
+      },
+      {
+        "label": "wt-47",
+        "path": "/tmp/wt-47"
+      },
+      {
+        "label": "wt-48",
+        "path": "/tmp/wt-48"
+      },
+      {
+        "label": "wt-49",
+        "path": "/tmp/wt-49"
+      },
+      {
+        "label": "wt-50",
+        "path": "/tmp/wt-50"
+      },
+      {
+        "label": "wt-51",
+        "path": "/tmp/wt-51"
+      },
+      {
+        "label": "wt-52",
+        "path": "/tmp/wt-52"
+      },
+      {
+        "label": "wt-53",
+        "path": "/tmp/wt-53"
+      },
+      {
+        "label": "wt-54",
+        "path": "/tmp/wt-54"
+      },
+      {
+        "label": "wt-55",
+        "path": "/tmp/wt-55"
+      },
+      {
+        "label": "wt-56",
+        "path": "/tmp/wt-56"
+      },
+      {
+        "label": "wt-57",
+        "path": "/tmp/wt-57"
+      },
+      {
+        "label": "wt-58",
+        "path": "/tmp/wt-58"
+      },
+      {
+        "label": "wt-59",
+        "path": "/tmp/wt-59"
+      },
+      {
+        "label": "wt-60",
+        "path": "/tmp/wt-60"
+      },
+      {
+        "label": "wt-61",
+        "path": "/tmp/wt-61"
+      },
+      {
+        "label": "wt-62",
+        "path": "/tmp/wt-62"
+      },
+      {
+        "label": "wt-63",
+        "path": "/tmp/wt-63"
+      },
+      {
+        "label": "wt-64",
+        "path": "/tmp/wt-64"
+      }
+    ],
+    "total": 65,
+    "probed": 0,
+    "dirtyCount": 0,
+    "agentCount": 0,
+    "sampledAt": 1700000000000
+  }
+}

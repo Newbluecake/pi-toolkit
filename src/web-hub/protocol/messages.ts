@@ -143,6 +143,50 @@ export interface TodoWire {
   updatedAt: number;
 }
 
+/**
+ * worktree-web plan §3.1 (W2): one row of `StatusInfo.worktrees` (ranked: current → main →
+ * others → `pi-agent-*` → prunable). Deliberately **open** (no `additionalProperties:false`,
+ * see `WorktreesWireSchema`) — a `decodeWith` failure drops the *whole* status frame, and the hub
+ * replacement window can leave a new agent talking to an old hub for up to 30 min (control-plan
+ * D25), so a closed nested schema would freeze this shape across every future field addition.
+ */
+export interface WorktreeRowWire {
+  label: string; // home-abbreviated path (`~/ai/pi-toolkit`), projection cap 200 B
+  path?: string; // absolute path, projection cap 1024 B; FIRST field dropped under budget pressure (pass 2)
+  branch?: string; // `refs/heads/` stripped, projection cap 200 B; absent ⇒ detached or bare
+  head?: string; // 7-char short sha; absent for bare / unborn
+  current?: true; // realpath(row.path) === realpath(toplevel)
+  main?: true; // first entry of `git worktree list` (the main worktree)
+  agentRunId?: string; // branch `pi-agent-<id>` ⇒ `<id>` (safeRunId form), projection cap 64 B
+  bare?: true;
+  locked?: true;
+  prunable?: true; // never probed
+  dirty?: number; // status probe produced a count (exact, or a lower bound when dirtyCapped)
+  dirtyCapped?: true; // status stdout hit the 64 KiB cap: dirty is a LOWER BOUND (UI `*N+`)
+  untrackedSkipped?: true; // degraded probe (`-uno`): untracked files not counted (UI `~`)
+  ahead?: number; // probe OK AND upstream configured only
+  behind?: number;
+  unprobed?: "cap" | "timeout" | "error"; // no dirty/ab: beyond probe cap / probe timed out / probe failed
+}
+
+/**
+ * worktree-web plan §3.1 (W2): `StatusInfo.worktrees`' body. Absent ⇒ cwd not in a git repo /
+ * not sampled yet / web-hub off. `rows` is the ≤24-row, ranked, byte-budgeted projection;
+ * `total`/`probed`/`dirtyCount`/`agentCount` are full-population counts (never trimmed by the
+ * 16 KiB wire budget or the 24-row cap).
+ */
+export interface WorktreesWire {
+  rows: WorktreeRowWire[]; // ≤ WT_MAX_ROWS (24), ranked
+  total: number; // full parsed `git worktree list` population (a lower bound when listCapped)
+  listCapped?: true; // `worktree list` stdout hit its cap; only complete records were parsed
+  omitted?: number; // total - rows.length, when > 0
+  probed: number; // full-population rows with a dirty count
+  dirtyCount: number; // probed rows with dirty > 0
+  agentCount: number; // full-population pi-agent-* rows
+  sampledAt: number; // agent-clock epoch ms of the successful sample that produced this content
+  staleMin?: number; // agent-computed: whole minutes since sampledAt, present only when > 90 s
+}
+
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -157,6 +201,10 @@ export interface StatusInfo {
    *  the pre-feature shape). Decode side stays open-ended: `StatusFrameSchema` deliberately has
    *  no `additionalProperties:false`, so older hubs pass newer frames through untouched. */
   todo?: TodoWire;
+  /** worktree-web plan §3 (W2): optional git-worktree summary of the session cwd's repo,
+   *  riding the same status slot lifecycle as `todo`/`models`. Absent = cwd not in a git repo /
+   *  not sampled yet / web-hub disabled. */
+  worktrees?: WorktreesWire;
 }
 
 export interface FleetRowWire {
@@ -644,6 +692,47 @@ const TodoWireSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+// worktree-web plan §3.2 (W2): deliberately open (Q4) — see WorktreeRowWire's docstring for why.
+// `maxLength`/`maxItems`/`minimum` are hard safety upper bounds, wider than the projection's own
+// cap (table in plan §3.2), left as evolution headroom so a future field addition cannot shrink
+// these and reject frames an older/newer peer already emits.
+const WorktreeRowSchema = Type.Object(
+  {
+    label: Type.String({ maxLength: 512 }),
+    path: Type.Optional(Type.String({ maxLength: 4096 })),
+    branch: Type.Optional(Type.String({ maxLength: 512 })),
+    head: Type.Optional(Type.String({ maxLength: 64 })),
+    current: Type.Optional(Type.Literal(true)),
+    main: Type.Optional(Type.Literal(true)),
+    agentRunId: Type.Optional(Type.String({ maxLength: 128 })),
+    bare: Type.Optional(Type.Literal(true)),
+    locked: Type.Optional(Type.Literal(true)),
+    prunable: Type.Optional(Type.Literal(true)),
+    dirty: Type.Optional(Type.Integer({ minimum: 0 })),
+    dirtyCapped: Type.Optional(Type.Literal(true)),
+    untrackedSkipped: Type.Optional(Type.Literal(true)),
+    ahead: Type.Optional(Type.Integer({ minimum: 0 })),
+    behind: Type.Optional(Type.Integer({ minimum: 0 })),
+    // Open-ended enum (vs. a Union of literals): an older UI must not reject a future reason value;
+    // an unrecognized string just displays as "error" (plan §3.2).
+    unprobed: Type.Optional(Type.String({ maxLength: 32 })),
+  },
+  { additionalProperties: true },
+);
+export const WorktreesWireSchema = Type.Object(
+  {
+    rows: Type.Array(WorktreeRowSchema, { maxItems: 64 }),
+    total: Type.Integer({ minimum: 0 }),
+    listCapped: Type.Optional(Type.Literal(true)),
+    omitted: Type.Optional(Type.Integer({ minimum: 0 })),
+    probed: Type.Integer({ minimum: 0 }),
+    dirtyCount: Type.Integer({ minimum: 0 }),
+    agentCount: Type.Integer({ minimum: 0 }),
+    sampledAt: Type.Number({ minimum: 0 }),
+    staleMin: Type.Optional(Type.Integer({ minimum: 0 })),
+  },
+  { additionalProperties: true },
+);
 const StatusInfoSchema = Type.Object({
   leafId: Type.Union([Type.String(), Type.Null()]),
   busy: Type.Boolean(),
@@ -656,6 +745,7 @@ const StatusInfoSchema = Type.Object({
   queue: Type.Optional(Type.Array(QueueItemSchema)),
   queueDropped: Type.Optional(Type.Array(Type.String())),
   todo: Type.Optional(TodoWireSchema),
+  worktrees: Type.Optional(WorktreesWireSchema),
 });
 
 const FleetRowSchema = Type.Object({

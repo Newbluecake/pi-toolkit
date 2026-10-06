@@ -1,0 +1,27 @@
+{
+  "t": "status",
+  "leafId": "leaf1",
+  "busy": false,
+  "pending": false,
+  "worktrees": {
+    "rows": [
+      {
+        "label": "~/ai/pi-toolkit",
+        "path": "/home/dev/ai/pi-toolkit",
+        "branch": "master",
+        "head": "0123456",
+        "current": true,
+        "main": true,
+        "unprobed": "slow-fs",
+        "foo": "unexpected-future-row-field"
+      }
+    ],
+    "total": 1,
+    "probed": 0,
+    "dirtyCount": 0,
+    "agentCount": 0,
+    "sampledAt": 1700000000000,
+    "staleMin": 2,
+    "futureBodyField": "unexpected-future-body-field"
+  }
+}

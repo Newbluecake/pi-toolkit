@@ -1,0 +1,41 @@
+{
+  "t": "status",
+  "leafId": null,
+  "busy": false,
+  "pending": false,
+  "worktrees": {
+    "rows": [
+      {
+        "label": "~/ai/pi-toolkit",
+        "path": "/home/dev/ai/pi-toolkit",
+        "branch": "master",
+        "head": "0123456",
+        "current": true,
+        "main": true,
+        "dirty": 0,
+        "ahead": 1,
+        "behind": 0
+      },
+      {
+        "label": "~/ai/pi-toolkit.wt/feature-x",
+        "path": "/home/dev/ai/pi-toolkit.wt/feature-x",
+        "branch": "feature-x",
+        "head": "89abcde",
+        "dirty": 3
+      },
+      {
+        "label": "/tmp/pi-subagent-worktrees/run-abc123",
+        "path": "/tmp/pi-subagent-worktrees/run-abc123",
+        "branch": "pi-agent-run-abc123",
+        "head": "fedcba9",
+        "agentRunId": "run-abc123",
+        "dirty": 0
+      }
+    ],
+    "total": 3,
+    "probed": 3,
+    "dirtyCount": 1,
+    "agentCount": 1,
+    "sampledAt": 1700000000000
+  }
+}
