@@ -47,6 +47,79 @@ describe("createQueueMirror — enqueue/dequeue", () => {
   });
 });
 
+describe("createQueueMirror — full-text match key (wire clip leak fix)", () => {
+  // The wire `text` is display-only (plan §4.4 "截 200 字符"); the dequeue match key is the
+  // FULL enqueue text pi replays in `message_start`. Before the fix a >200-char steer could
+  // never dequeue and the grace expiry marked it `dropped` even though pi had consumed it.
+  const longA = "A".repeat(300);
+  const longB = "B".repeat(300);
+
+  it("wire text stays clipped at 200 chars, yet dequeueByText(fullText) returns the item", () => {
+    const q = createQueueMirror();
+    q.enqueue({ text: longA, deliver: "steer", source: "web", cmdId: "c1" });
+    const wire = q.items()[0];
+    expect(wire?.text).toHaveLength(200); // wire byte-identical: still the clipped copy
+    expect(wire?.text).toBe(longA.slice(0, 200));
+    const dequeued = q.dequeueByText(longA); // pi's message_start carries the full text
+    expect(dequeued).toMatchObject({ cmdId: "c1", deliver: "steer" });
+    expect(q.items()).toEqual([]);
+    expect(q.fullTextCount()).toBe(0);
+  });
+
+  it("two long messages sharing a 200-char prefix do not cross-consume (why the key is full text)", () => {
+    const q = createQueueMirror();
+    const shared = "S".repeat(250);
+    q.enqueue({ text: shared + "-one", deliver: "steer", source: "web", cmdId: "c1" });
+    q.enqueue({ text: shared + "-two", deliver: "steer", source: "web", cmdId: "c2" });
+    expect(q.dequeueByText(`${shared}-two`)?.cmdId).toBe("c2"); // exact full text, not prefix
+    expect(q.dequeueByText(`${shared}-two`)).toBeUndefined(); // already consumed
+    expect(q.dequeueByText(`${shared}-one`)?.cmdId).toBe("c1");
+  });
+
+  it("dequeueByText(fullText) works for followUp too, and a miss on the clipped prefix leaves the queue untouched", () => {
+    const q = createQueueMirror();
+    q.enqueue({ text: longB, deliver: "followUp", source: "tui" });
+    expect(q.dequeueByText(longB.slice(0, 200))).toBeUndefined(); // clipped prefix is not a key
+    expect(q.items()).toHaveLength(1);
+    expect(q.dequeueByText(longB)?.deliver).toBe("followUp");
+  });
+
+  it("fullText entries are removed on every removal path — fullTextCount always mirrors items().length (no leak)", () => {
+    // dequeue path
+    const q = createQueueMirror({ maxItems: 3 });
+    q.enqueue({ text: longA, deliver: "steer", source: "web", cmdId: "c1" });
+    q.enqueue({ text: longB, deliver: "followUp", source: "tui" });
+    q.enqueue({ text: "short", deliver: "steer", source: "tui" });
+    expect(q.fullTextCount()).toBe(3);
+    q.dequeueByText(longA);
+    expect(q.fullTextCount()).toBe(q.items().length).toBe(2);
+
+    // overflow-shift GC path (maxItems 3): the two oldest leave queue and map together
+    q.enqueue({ text: "new1", deliver: "steer", source: "tui" });
+    q.enqueue({ text: "new2", deliver: "steer", source: "tui" });
+    expect(q.fullTextCount()).toBe(q.items().length).toBe(3);
+
+    // clearAll path
+    q.clearAll();
+    expect(q.fullTextCount()).toBe(0);
+
+    // dispose path
+    q.enqueue({ text: longA, deliver: "steer", source: "web", cmdId: "c2" });
+    q.dispose();
+    expect(q.fullTextCount()).toBe(0);
+
+    // clearIfEmpty grace-clear path
+    const { q: g, t } = clockMirror();
+    g.enqueue({ text: longB, deliver: "steer", source: "web", cmdId: "c9" });
+    expect(g.fullTextCount()).toBe(1);
+    g.clearIfEmpty(false); // arm
+    expect(g.fullTextCount()).toBe(1); // within grace: nothing removed yet
+    t(2000); // past the 1.5s grace
+    expect(g.clearIfEmpty(false)).toHaveLength(1);
+    expect(g.fullTextCount()).toBe(0);
+  });
+});
+
 /** Deterministic clock for the grace-window tests below. */
 function clockMirror(startAt = 0): { q: ReturnType<typeof createQueueMirror>; t: (ms: number) => void } {
   let clock = startAt;

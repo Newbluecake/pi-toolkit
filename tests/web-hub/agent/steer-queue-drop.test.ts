@@ -199,6 +199,50 @@ describe("busy web steer — legitimate queue-empty states still reach dropped (
   });
 });
 
+describe("long steer text (>200 chars) — dequeue matches full text, not the wire-clipped copy", () => {
+  // Field bug: a steer whose full text exceeds the wire clip (plan §4.4 "截 200 字符") was
+  // delivered and answered by pi, but `dequeueByText` compared the full `message_start` text
+  // against the clipped store, so it never matched — the mirror item survived and the
+  // clearIfEmpty grace expiry marked it `dropped` ("已退回终端编辑器或被丢弃"). The clip is a
+  // wire-display concern; the match key is now the retained full text.
+  const long = "先看这里：".repeat(60) + "尾部标记"; // > 200 chars, realistic multi-byte text
+
+  it("a delivered 300+ char steer is consumed by the full message_start text and never dropped", () => {
+    const h = makeHarness();
+    expect(long.length).toBeGreaterThan(200);
+    h.handler.handle(frame("c1", { op: "prompt", text: long, deliver: "steer" }));
+    h.handler.onInputEvent({ text: long, source: "extension", streamingBehavior: "steer" });
+    // wire stays display-clipped…
+    expect(h.deps.queueMirror.items()[0]?.text).toHaveLength(200);
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "queued" });
+
+    // …but pi's full-text delivery dequeues it
+    h.handler.onMessageStart({ message: { role: "user", content: long } });
+    expect(h.deps.queueMirror.items()).toHaveLength(0);
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed" });
+
+    // far past the grace window over a now-empty queue: nothing resurrected as dropped
+    h.advance(5000);
+    h.handler.onPendingSample(false);
+    expect(h.deps.queueMirror.takeDropped()).toEqual([]);
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed" });
+  });
+
+  it("regression complement: a long steer whose message_start never arrives is still dropped after the grace", () => {
+    const h = makeHarness();
+    h.handler.handle(frame("c1", { op: "prompt", text: long, deliver: "steer" }));
+    h.handler.onInputEvent({ text: long, source: "extension", streamingBehavior: "steer" });
+    h.advance(100);
+    h.handler.onPendingSample(false); // arm the grace
+    expect(h.deps.queueMirror.items()).toHaveLength(1);
+    h.advance(1600); // past the grace — the TUI-Esc-style real drop is still detected
+    h.handler.onPendingSample(false);
+    expect(h.deps.queueMirror.items()).toHaveLength(0);
+    expect(h.deps.queueMirror.takeDropped()).toEqual(["c1"]);
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "dropped" });
+  });
+});
+
 describe("regressions — existing semantics preserved", () => {
   it("followUp queued while busy dequeues normally on message_start, with a mid-grace empty sample not dropping it", () => {
     const h = makeHarness();

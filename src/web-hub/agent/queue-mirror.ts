@@ -60,7 +60,10 @@ export interface QueueMirror {
    * "仅下一帧携带"). */
   takeDropped(): string[];
   enqueue(entry: { text: string; deliver: "steer" | "followUp"; source: QueueSource; cmdId?: string }): QueueItemWire;
-  /** FIFO dequeue by exact text: steer first, then followUp (K17 fallback order). */
+  /** FIFO dequeue by exact full text: steer first, then followUp (K17 fallback order).
+   * Matches the FULL enqueue text, never the wire-clipped copy — pi's `message_start` carries
+   * the whole message, and a >`clipChars` steer can never equal its own clipped wire text
+   * (field bug: long steers stayed queued and the grace expiry marked them `dropped`). */
   dequeueByText(text: string): QueueItemWire | undefined;
   /** `hasPendingMessages()===false` sample (§4.4 row 3): once the empty condition has persisted
    * past the grace window, clears everything and records any web-sourced cmdIds as dropped. A
@@ -70,6 +73,9 @@ export interface QueueMirror {
   /** Unconditional clear (§4.4 row 4: session_start/detach). Does not touch `takeDropped`'s
    * bookkeeping — callers decide what a session-boundary clear means for their own state. */
   clearAll(): QueueItemWire[];
+  /** Retained full-text match keys — always equals `items().length`; any mismatch is a
+   * removal-path leak (tests pin this invariant for every removal path). */
+  fullTextCount(): number;
   dispose(): void;
 }
 
@@ -82,6 +88,12 @@ export function createQueueMirror(deps: QueueMirrorDeps = {}): QueueMirror {
   const clearGraceMs = deps.clearGraceMs ?? 1_500;
   let queue: QueueItemWire[] = [];
   let dropped: string[] = [];
+  /** Full (un-clipped) enqueue text by item id — the `dequeueByText` match key. The wire `text`
+   * is a display-only clipped copy (plan §4.4 "截 200 字符"), so a >`clipChars` message would
+   * otherwise never match its own delivery and survive until the grace expiry marks it
+   * `dropped`. Removed on every queue-removal path (overflow shift, dequeue, grace clear,
+   * clearAll, dispose) so entries can't outlive their item. */
+  const fullTextById = new Map<string, string>();
   /** `now()` of the first empty sample of the current empty window, `undefined` while not armed.
    * Reset by any signal of queue activity (true sample, enqueue, dequeue hit, actual clear,
    * clearAll, dispose) so a stale window can never leak into a later item's lifetime. */
@@ -105,15 +117,20 @@ export function createQueueMirror(deps: QueueMirrorDeps = {}): QueueMirror {
       };
       if (entry.cmdId !== undefined) item.cmdId = entry.cmdId;
       queue.push(item);
-      if (queue.length > maxItems) queue.shift();
+      fullTextById.set(item.id, entry.text);
+      if (queue.length > maxItems) {
+        const evicted = queue.shift();
+        if (evicted !== undefined) fullTextById.delete(evicted.id); // GC path: evicted items keep no key
+      }
       emptySince = undefined; // fresh activity: a new item must never inherit a stale empty window
       return item;
     },
     dequeueByText(text) {
-      let idx = queue.findIndex((q) => q.deliver === "steer" && q.text === text);
-      if (idx === -1) idx = queue.findIndex((q) => q.deliver === "followUp" && q.text === text);
+      let idx = queue.findIndex((q) => q.deliver === "steer" && fullTextById.get(q.id) === text);
+      if (idx === -1) idx = queue.findIndex((q) => q.deliver === "followUp" && fullTextById.get(q.id) === text);
       if (idx === -1) return undefined;
       const [item] = queue.splice(idx, 1);
+      if (item !== undefined) fullTextById.delete(item.id);
       emptySince = undefined; // the queue moved — re-arm on the next empty sample
       return item;
     },
@@ -135,18 +152,24 @@ export function createQueueMirror(deps: QueueMirrorDeps = {}): QueueMirror {
       const cleared = queue;
       queue = [];
       emptySince = undefined;
-      for (const item of cleared) if (item.cmdId !== undefined) dropped.push(item.cmdId);
+      for (const item of cleared) {
+        fullTextById.delete(item.id);
+        if (item.cmdId !== undefined) dropped.push(item.cmdId);
+      }
       return cleared;
     },
     clearAll() {
       const cleared = queue;
       queue = [];
+      fullTextById.clear();
       emptySince = undefined;
       return cleared;
     },
+    fullTextCount: () => fullTextById.size,
     dispose() {
       queue = [];
       dropped = [];
+      fullTextById.clear();
       emptySince = undefined;
     },
   };
