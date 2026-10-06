@@ -93,12 +93,13 @@
 }
 
 /* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
- * no padding). `:has` keeps the component itself free of any padding logic. Single 58px slot
+ * no padding). `:has` keeps the component itself free of any padding logic. Single 50px slot
  * covers BOTH states of the merged control (2026-10 user request "stop 图标放进上下文圆圈"):
- * idle ring and busy stop-in-ring share the same 56px button — the stop icon inside is fixed
- * px like the ring itself, so nothing here needs a second, scaled stop segment anymore. */
+ * idle ring and busy stop-in-ring share the same 48px button — the stop icon inside is fixed
+ * px like the ring itself, so nothing here needs a second, scaled stop segment anymore.
+ * (2026-10-06: ring shrunk 50→40px per field report "圆圈也比较大"; slot 58→50px.) */
 .composer-input:has(.ctx-ring) textarea {
-  padding-right: 58px;
+  padding-right: 50px;
 }
 
 /* Standalone stop button inside the input — now only the NO-RING fallback (ContextRing renders
@@ -131,7 +132,7 @@
 }
 
 /* textarea `padding-right` tiers (package 3, verifier r2, field report 2026-10-06; merged
- * ring+stop rework 2026-10): ring-present ⇒ the single fixed 58px slot above covers idle AND
+ * ring+stop rework 2026-10): ring-present ⇒ the single fixed 50px slot above covers idle AND
  * busy (the merged stop-in-ring icon is fixed px, part of the ring graphic — the old
  * `:has(.ctx-ring):has(.stop-btn)` two-slot tier is gone because `.stop-btn` and `.ctx-ring`
  * never co-render). Stop-only (the no-ring fallback) scales its segment by `--fs-scale` off
@@ -144,8 +145,8 @@
 /* 2026-10-06 field report (main-page screenshot): the ≤480px unwrap that used to move the
  * ring/stop onto their own row below the textarea looked broken — the ring floated in dead
  * space and the send button stretched to the wrapped two-row height. The ring is back INSIDE
- * the textarea's right edge at ALL widths now: it is a fixed 56px graphic slot (padding-right
- * 58px above), so it never grows with `--fs-scale`, and the tradeoff it used to solve (text
+ * the textarea's right edge at ALL widths now: it is a fixed 48px graphic slot (padding-right
+ * 50px above), so it never grows with `--fs-scale`, and the tradeoff it used to solve (text
  * width at fs≥2 on ~230px textareas) is accepted — text wraps inside the remaining width
  * instead of the control leaving the input box. */
 
@@ -162,7 +163,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px; /* fits the 50px ring (field report) while staying a generous touch target */
+  width: 48px; /* fits the 40px ring (2026-10-06 shrink) while staying a generous touch target */
   min-height: 44px;
   margin: 0;
   padding: 0;
@@ -206,12 +207,12 @@
 /* Merged stop-in-ring (2026-10 user request "把 stop 图标放到上下文比例圆圈中"): while busy the
  * ring's ENTIRE zone is the two-step stop button — the arc keeps showing context usage around
  * the centered icon, but nothing else may intercept taps inside the zone (stop wins; the
- * details panel never opens while busy). The button inherits `.ctx-ring-btn`'s 56px width and
+ * details panel never opens while busy). The button inherits `.ctx-ring-btn`'s 48px width and
  * 44px min-height; `align-self: stretch` enlarges the INVISIBLE hit zone to the ring slot's
  * full height so the coarse-pointer target stays ≥44px without growing the visual. Resting
  * colour is danger — same convention as the standalone `.stop-btn` (the red square IS the
  * affordance). The icon is FIXED px like the ring itself (part of the same graphic, immune to
- * `--fs-scale`) — which is exactly why the single 58px textarea slot suffices at every font
+ * `--fs-scale`) — which is exactly why the single 50px textarea slot suffices at every font
  * scale. */
 .ctx-ring-stop-btn {
   position: relative; /* anchors the centered icon */
@@ -224,8 +225,8 @@
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 24px;
-  height: 24px;
+  width: 20px; /* fits inside the 40px ring (inner diameter ≈31px) */
+  height: 20px;
 }
 
 /* Armed (two-step confirm), per the existing `.armed` conventions MINUS the filled danger

@@ -23,7 +23,7 @@
   Ring geometry (radius/stroke) is FIXED px, never token-derived: it is a graphic, not text, so
   it stays the same size at any `--fs-scale` (the `pwh_fontscale` preference must not blow it
   up). The merged stop icon is fixed px for the same reason — it is part of the ring graphic,
-  which is exactly why the single 58px textarea `padding-right` slot suffices at every font
+  which is exactly why the single 50px textarea `padding-right` slot suffices at every font
   scale. Esc / outside click close the panel; Esc refocuses the trigger (DeliverSwitch/
   ThemeToggle conventions — no timers, no rAF).
 -->
@@ -54,9 +54,10 @@ const subCost = computed(() => {
   return typeof sub === "number" && sub > 0 ? sub : null;
 });
 
-/* Fixed-px geometry (see the header comment): r=21 / stroke 4.5 inside a 50×50 viewBox (2026-10-05: +20px diameter per user).
- * (2026-10-05 field report: the original 22px ring read too small next to the input box.) */
-const R = 21;
+/* Fixed-px geometry (see the header comment): r=16 / stroke 4.5 inside a 40×40 viewBox.
+ * Size history: 22px → 50px (2026-10-05 "too small") → 40px (2026-10-06 "圆圈也比较大" — the
+ * 50px ring dominated the phone composer; 40px keeps the arc legible without looming). */
+const R = 16;
 const CIRC = 2 * Math.PI * R;
 const dash = computed(() => {
   const p = percent.value;
@@ -139,9 +140,9 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       @click="trigger"
       @keydown="onStopKeydown"
     >
-      <svg class="ctx-ring-svg" width="50" height="50" viewBox="0 0 50 50" aria-hidden="true" focusable="false">
-        <circle class="ctx-ring-track" cx="25" cy="25" :r="R" />
-        <circle class="ctx-ring-bar" cx="25" cy="25" :r="R" :stroke-dasharray="dash" transform="rotate(-90 25 25)" />
+      <svg class="ctx-ring-svg" width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+        <circle class="ctx-ring-track" cx="20" cy="20" :r="R" />
+        <circle class="ctx-ring-bar" cx="20" cy="20" :r="R" :stroke-dasharray="dash" transform="rotate(-90 20 20)" />
       </svg>
       <AppIcon name="stop" class="ctx-ring-stop-icon" />
     </button>
@@ -156,9 +157,9 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       @click="open = !open"
       @keydown="onKeydown"
     >
-      <svg class="ctx-ring-svg" width="50" height="50" viewBox="0 0 50 50" aria-hidden="true" focusable="false">
-        <circle class="ctx-ring-track" cx="25" cy="25" :r="R" />
-        <circle class="ctx-ring-bar" cx="25" cy="25" :r="R" :stroke-dasharray="dash" transform="rotate(-90 25 25)" />
+      <svg class="ctx-ring-svg" width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+        <circle class="ctx-ring-track" cx="20" cy="20" :r="R" />
+        <circle class="ctx-ring-bar" cx="20" cy="20" :r="R" :stroke-dasharray="dash" transform="rotate(-90 20 20)" />
       </svg>
     </button>
     <span v-if="armed" class="stop-live sr-only" role="status">{{ t("control.stopArmed") }}</span>

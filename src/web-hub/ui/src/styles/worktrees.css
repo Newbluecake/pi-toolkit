@@ -5,7 +5,7 @@
  * source-scan.test.ts bans scoped <style> blocks outright. The summary row mirrors
  * `.todo-sum` / `.session-sum` grammar, incl. the chevron rotate-on-open transition; the
  * expanded list caps its height and scrolls inside, same as `.todo-list`. min-height 40px
- * (44px under `pointer: coarse`, below) matches the whole summary-row family — see
+ * (36px under `pointer: coarse`, below) matches the whole summary-row family — see
  * `todo.css`'s header comment (verify:detail-header-cost-merge P1 ②).
  */
 
@@ -203,6 +203,6 @@
  * (ui-design §3.12, §7.5 precedent; `.btn`/`btn-icon` get theirs from primitives.css) */
 @media (pointer: coarse) {
   .wt-sum {
-    min-height: 44px;
+    min-height: 36px; /* 2026-10-06 field report: 44px rows stacked three-deep ate the phone's first screen — 36px across the whole summary-row family (see detail.css). */
   }
 }

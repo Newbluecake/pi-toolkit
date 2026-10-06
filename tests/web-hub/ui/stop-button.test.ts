@@ -148,8 +148,8 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     expect(iconBlockIdx).toBeGreaterThan(baseIdx);
   });
 
-  it("ring-only 档(58px)仍维持固定 px 不缩放(ctx-ring 本身不跟 --fs-scale)", () => {
-    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*58px/);
+  it("ring-only 档(50px)仍维持固定 px 不缩放(ctx-ring 本身不跟 --fs-scale)", () => {
+    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*50px/);
   });
 
   it("stop-only 档(宽屏, 未命中窄屏 media)按 --fs-scale 缩放, 在 70px 封顶", () => {
@@ -158,8 +158,8 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     );
   });
 
-  it("ring 在场时只有 58px 一档(2026-10 合并档: 忙碌时 stop 合入圈内, 不再为 stop 预留第二段); 旧的 ring+stop 双段公式已删除", () => {
-    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*58px/);
+  it("ring 在场时只有 50px 一档(2026-10 合并档: 忙碌时 stop 合入圈内, 不再为 stop 预留第二段); 旧的 ring+stop 双段公式已删除", () => {
+    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*50px/);
     // 合并后 .ctx-ring 与 .stop-btn 不会同时渲染(stop 在圈内是 .ctx-ring-stop-btn; 无 ring 时才是独立 .stop-btn)
     expect(rule(".composer-input:has(.ctx-ring):has(.stop-btn) textarea")).toBe("");
     expect(css).not.toMatch(/calc\(56px \+ min\(calc\(52px \* var\(--fs-scale/);
@@ -171,15 +171,15 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     expect(btn).toMatch(/color:\s*var\(--c-danger\)/);
     expect(btn).not.toMatch(/var\(--fs-scale/);
     const icon = rule(".ctx-ring-stop-btn .ctx-ring-stop-icon");
-    expect(icon).toMatch(/width:\s*24px/);
-    expect(icon).toMatch(/height:\s*24px/);
+    expect(icon).toMatch(/width:\s*20px/);
+    expect(icon).toMatch(/height:\s*20px/);
     expect(icon).not.toMatch(/var\(--fs-scale/);
     expect(rule(".ctx-ring-stop-btn.armed .ctx-ring-bar")).toMatch(/stroke:\s*var\(--c-danger\)/);
     const toneIdx = css.indexOf('.ctx-ring[data-tone="danger"] .ctx-ring-bar');
     const armedIdx = css.indexOf(".ctx-ring-stop-btn.armed .ctx-ring-bar");
     expect(toneIdx).toBeGreaterThanOrEqual(0);
     expect(armedIdx).toBeGreaterThan(toneIdx);
-    // 命中区宽度继承 .ctx-ring-btn 的 56px(原有锗定保持), min-height 44px
+    // 命中区宽度继承 .ctx-ring-btn 的 48px(原有锗定保持), min-height 44px
     expect(rule(".ctx-ring-btn")).toMatch(/min-height:\s*44px/);
   });
 
@@ -193,7 +193,7 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     const baseCtxRing = /^\.ctx-ring\s*\{[^}]*\}/m.exec(css)?.[0] ?? "";
     expect(baseCtxRing).toMatch(/right:\s*var\(--sp-1\)/);
     expect(baseCtxRing).not.toMatch(/var\(--fs-scale/);
-    expect(rule(".ctx-ring-btn")).toMatch(/width:\s*56px/);
+    expect(rule(".ctx-ring-btn")).toMatch(/width:\s*48px/);
     expect(rule(".ctx-ring-btn")).not.toMatch(/var\(--fs-scale/);
   });
 
@@ -206,7 +206,7 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     // 仅存的 ≤480px 块是 stop 图标的封顶覆盖（宽度收窄）。
     expect(blocks.length).toBeGreaterThan(0);
     expect(blocks.some((b) => /\.stop-btn \.icon/.test(b))).toBe(true);
-    // 窄屏下 textarea 仍为 ring 预留 58px 槽位（无条件基准规则）。
-    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*58px/);
+    // 窄屏下 textarea 仍为 ring 预留 50px 槽位（无条件基准规则）。
+    expect(rule(".composer-input:has(.ctx-ring) textarea")).toMatch(/padding-right:\s*50px/);
   });
 });

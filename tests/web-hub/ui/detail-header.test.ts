@@ -306,7 +306,7 @@ describe("DetailHeader.vue — ≤480px metrics fold (todo #7)", () => {
 });
 
 // verify:detail-header-cost-merge P1 ②: the whole summary-row family (`.session-sum` /
-// `.todo-sum` / `.wt-sum` / `.metrics-summary`) shares a 40px default min-height (44px under
+// `.todo-sum` / `.wt-sum` / `.metrics-summary`) shares a 40px default min-height (36px under
 // `pointer: coarse`) so the cost row never reads shorter/taller than its siblings in the same
 // info stack — asserted straight off the real stylesheets (component mounts can't see CSS).
 describe("summary-row touch target parity (verify:detail-header-cost-merge P1 ②)", () => {
@@ -326,7 +326,7 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 �
     expect(rule(wtCss, ".wt-sum")).toMatch(/min-height:\s*40px/);
   });
 
-  it("`@media (pointer: coarse)` still bumps every one of them to 44px", () => {
+  it("`@media (pointer: coarse)` bumps every one of them to 36px (2026-10-06 compaction)", () => {
     const detailCss = read("../../../../src/web-hub/ui/src/styles/detail.css");
     const todoCss = read("../../../../src/web-hub/ui/src/styles/todo.css");
     const wtCss = read("../../../../src/web-hub/ui/src/styles/worktrees.css");
@@ -334,10 +334,10 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 �
       const start = css.indexOf("@media (pointer: coarse)");
       return start < 0 ? "" : css.slice(start);
     };
-    expect(coarseBlock(detailCss)).toMatch(/\.session-sum\s*\{\s*min-height:\s*44px/);
-    expect(coarseBlock(detailCss)).toMatch(/\.metrics-summary\s*\{\s*min-height:\s*44px/);
-    expect(coarseBlock(todoCss)).toMatch(/\.todo-sum\s*\{\s*min-height:\s*44px/);
-    expect(coarseBlock(wtCss)).toMatch(/\.wt-sum\s*\{\s*min-height:\s*44px/);
+    expect(coarseBlock(detailCss)).toMatch(/\.session-sum\s*\{\s*min-height:\s*36px/);
+    expect(coarseBlock(detailCss)).toMatch(/\.metrics-summary\s*\{\s*min-height:\s*36px/);
+    expect(coarseBlock(todoCss)).toMatch(/\.todo-sum\s*\{\s*min-height:\s*36px/);
+    expect(coarseBlock(wtCss)).toMatch(/\.wt-sum\s*\{\s*min-height:\s*36px/);
   });
 });
 

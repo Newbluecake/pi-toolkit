@@ -359,11 +359,14 @@
 }
 
 @media (pointer: coarse) {
+  /* 2026-10-06 field report ("顶部的垂直间隔比较大"): 44px rows stacked three-deep made the
+   * detail header eat the phone's first screen — 36px keeps a serviceable touch target while
+   * giving the transcript its space back. */
   .session-sum {
-    min-height: 44px;
+    min-height: 36px;
   }
 
   .metrics-summary {
-    min-height: 44px;
+    min-height: 36px;
   }
 }

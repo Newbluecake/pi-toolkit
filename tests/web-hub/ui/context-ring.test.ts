@@ -15,7 +15,7 @@ import {
   type DetailMetricsView,
 } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 
-const CIRC = 2 * Math.PI * 21; // matches ContextRing.vue (R=21)
+const CIRC = 2 * Math.PI * 16; // matches ContextRing.vue (R=16)
 
 function metrics(over: {
   percent?: number;
