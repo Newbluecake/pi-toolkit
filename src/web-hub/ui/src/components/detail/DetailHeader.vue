@@ -33,6 +33,8 @@ import { cardOf, sessionOf, statusOf } from "./agentViews.js";
 import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
 import TodoPanel from "./TodoPanel.vue";
+import WorktreePanel from "./WorktreePanel.vue";
+import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
 const emit = defineEmits<DetailHeaderEmits>();
@@ -44,6 +46,10 @@ const status = computed(() => statusOf(props.agent));
 
 const visual = computed(() => agentVisualState(props.agent));
 const statusLabel = computed(() => t(`common.status.${visual.value}`));
+
+// worktree-web W4: the repo's git worktrees ride `StatusInfo.worktrees` (no state.js mirror —
+// the status reducer replaces `agent.status` wholesale); undefined ⇒ the panel renders nothing.
+const worktrees = computed(() => worktreesOf(props.agent));
 
 const title = computed(() => {
   const name = session.value?.name;
@@ -226,5 +232,9 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
     <!-- todo-web T4: the main session's task list, mirrored onto `agent.todo` by the status
          reducer; the panel renders nothing when the wire is absent or empty. -->
     <TodoPanel v-if="agent.todo" :todo="agent.todo" />
+
+    <!-- worktree-web W4: git worktrees of the session cwd's repo, straight from
+         `status.worktrees`; renders nothing when the wire is absent or has zero rows. -->
+    <WorktreePanel v-if="worktrees" :worktrees="worktrees" />
   </header>
 </template>

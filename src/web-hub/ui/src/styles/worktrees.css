@@ -1,0 +1,206 @@
+/*
+ * Git-worktree panel styles (worktree-web plan §5, package W4) — token-only, imported by
+ * `components/detail/WorktreePanel.vue`. Deliberately its own file (same precedent as
+ * `styles/todo.css`): `styles/detail.css` is owned by another in-flight line and
+ * source-scan.test.ts bans scoped <style> blocks outright. The summary row mirrors
+ * `.todo-sum` / `.session-sum` grammar, incl. the chevron rotate-on-open transition; the
+ * expanded list caps its height and scrolls inside, same as `.todo-list`.
+ */
+
+.wt-panel {
+  margin-top: var(--sp-1);
+}
+
+.wt-sum {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  text-align: left;
+}
+
+.wt-sum:hover {
+  background: var(--c-surface-2);
+}
+
+.wt-sum .icon-sm:first-child {
+  flex: none;
+}
+
+.wt-sum-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.wt-sum .chev {
+  margin-left: auto;
+  flex: none;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.wt-panel[data-open="true"] .wt-sum .chev {
+  transform: rotate(90deg);
+}
+
+.wt-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 6px 0;
+  /* Same cap-and-scroll-inside ruling as `.todo-list`: the panel sits in the detail header, so
+   * an unbounded worktree list would push the transcript off-screen. */
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.wt-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 3px 0;
+}
+
+.wt-marker {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.wt-item[data-current="true"] .wt-marker {
+  color: var(--st-running);
+}
+
+/* The home-abbreviated label is the wide-layout path display: mono, end-ellipsis, full
+ * absolute path on `title` and via the row's copy button. Long paths may wrap on narrow
+ * screens (see the ≤480px block below) and must never overflow the panel. */
+.wt-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text);
+}
+
+.wt-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  max-width: 100%;
+  min-height: calc(18px * var(--fs-scale, 1));
+  padding: 0 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wt-branch {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  color: var(--c-text-2);
+}
+
+.wt-head {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.wt-status {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+}
+
+.wt-status[data-kind="dirty"] {
+  color: var(--c-warning-text);
+}
+
+.wt-status[data-kind="clean"] {
+  color: var(--st-done);
+}
+
+.wt-ab {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+}
+
+.wt-flag {
+  color: var(--c-text-3);
+}
+
+.wt-copy {
+  margin-left: auto;
+  flex: none;
+}
+
+.wt-more {
+  padding: 3px 0 3px calc(14px + var(--sp-2)); /* aligns with the label column (marker + gap) */
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.wt-foot {
+  padding: 3px 0 3px calc(14px + var(--sp-2));
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+/* ≤480px (plan §5): rows reflow to two lines — line 1 carries marker + branch/status/ahead/
+ * flag chips, line 2 the label in smaller muted type, allowed to wrap so a long absolute path
+ * never overflows. No JS media query; the DOM order stays untouched (the label is simply
+ * ordered last and given a full flex-basis). */
+@media (max-width: 480px) {
+  .wt-label {
+    order: 10;
+    flex-basis: 100%;
+    padding-left: calc(14px + var(--sp-2)); /* aligns under the branch column */
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-size: var(--fs-2xs);
+    color: var(--c-text-3);
+  }
+
+  .wt-copy {
+    /* keep the copy affordance next to the label it copies, not stranded on line 1 */
+    order: 11;
+    margin-left: 0;
+    padding-left: calc(14px + var(--sp-2));
+  }
+}
+
+/* coarse pointers: the fold toggle and per-row copy buttons keep a ≥44px hit box
+ * (ui-design §3.12, §7.5 precedent; `.btn`/`btn-icon` get theirs from primitives.css) */
+@media (pointer: coarse) {
+  .wt-sum {
+    min-height: 44px;
+  }
+}

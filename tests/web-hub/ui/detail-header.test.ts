@@ -316,3 +316,49 @@ describe("DetailHeader.vue — mid-band drawer toggle (todo #7)", () => {
     expect(inactive.find(".detail-back").exists()).toBe(false);
   });
 });
+
+/**
+ * worktree-web plan §5 (package W4): the header mounts `WorktreePanel` straight from
+ * `status.worktrees` (no state.js mirror — the status reducer replaces `agent.status`
+ * wholesale), after the TodoPanel slot; no wire (or zero rows) ⇒ no panel.
+ */
+describe("DetailHeader.vue — worktree panel mount (worktree-web W4)", () => {
+  const wt = {
+    rows: [
+      {
+        label: "~/ai/pi-toolkit",
+        path: "/home/bluecake/ai/pi-toolkit",
+        branch: "master",
+        head: "0123456",
+        current: true,
+        main: true,
+        dirty: 0,
+      },
+    ],
+    total: 1,
+    probed: 1,
+    dirtyCount: 0,
+    agentCount: 0,
+    sampledAt: 1_700_000_000_000,
+  };
+
+  it("mounts the panel at the header bottom when status.worktrees is present (single worktree included, Q2)", () => {
+    const wrapper = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, worktrees: wt } as never }),
+        narrow: false,
+      },
+    });
+    const panel = wrapper.find(".wt-panel");
+    expect(panel.exists()).toBe(true);
+    expect(wrapper.find(".wt-sum-text").text()).toBe("master@0123456 · worktrees 1");
+    // mounted after the metrics block — the header's bottom
+    const kids = wrapper.find(".detail-head").element.children;
+    expect(kids[kids.length - 1]).toBe(panel.element);
+  });
+
+  it("renders no panel when the wire is absent (not a git repo / not sampled / web-hub off)", () => {
+    const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
+    expect(wrapper.find(".wt-panel").exists()).toBe(false);
+  });
+});
