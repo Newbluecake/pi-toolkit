@@ -13,23 +13,32 @@
   so mobile's existing full-screen list/drawer behaviour is untouched by construction — collapsing
   on desktop and then shrinking the window never leaves the list stuck hidden.
 
-  "New session" (web control-plane parity + web-hub-spawn SP12 / arch §9.1): the header's
-  `NewSessionMenu` split button consumes SP11's `newSessionActions` — the main button / same-cwd
-  item re-runs the exact same `/new` command (`ControlHandle.runCommand(agentKey, "new", "")`,
-  the identical channel/whitelisted name `DetailDock.vue`'s command mode uses) against the
-  currently SELECTED agent (never a bulk/all-agents action; the enable formula stays byte-identical
-  to `AgentDetail.vue`'s `controlEnabled` via the action's `enabled`), while the pick-dir item
-  (hub cap `spawn.v1` ∧ `GET /api/headless` policy, refreshed on mount/cap change/menu open) opens
-  the inline `DirPicker` panel that drives `useNewSession` (plan §3.2). `pendingRows` of the SSE
+  "New session" (2026-10 redesign of the web-hub-spawn SP12 split button): the header's
+  `NewSessionMenu` main button is now a MANAGED SPAWN in the selected session's cwd — it opens
+  the inline `DirPicker` prefilled with that cwd and focused on 「启动」, so the whole
+  `useNewSession` flow (incl. the arch §6.3 409 confirm) is reused unchanged; with no selection
+  the main button is the blank pick-dir flow. When spawn is unavailable (no-cap / 404 / error)
+  the button stays clickable and shows an inline how-to-enable hint instead (denied policies
+  show their `spawn.denied*` reason). The old main-button behavior — the `/new` rerun against
+  the SELECTED agent (`ControlHandle.runCommand(agentKey, "new", "", { confirm: true })`, the
+  identical channel/whitelisted name `DetailDock.vue`'s command mode uses, enable formula
+  byte-identical to `AgentDetail.vue`'s `controlEnabled`) — moved into the dropdown as
+  「替换当前会话（/new）」 behind an inline two-step confirm bar. `pendingRows` of the SSE
   `spawns` slot render as `SpawnRow` placeholders above the list (also with 0 agents); a local,
-  memory-only dismissed set powers their 「关闭」. No dedicated result UI for same-cwd: one inline
+  memory-only dismissed set powers their 「关闭」. No dedicated result UI for `/new`: one inline
   ok/err line (same convention as `FleetActions.vue`'s `note`), not a toast.
 -->
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { newSessionActions, pendingRows, spawnAvailability, type NewSessionAction } from "../../logic/spawn.js";
+import {
+  newSessionActions,
+  pendingRows,
+  spawnAvailability,
+  spawnDeniedKey,
+  type NewSessionAction,
+} from "../../logic/spawn.js";
 import { removalTargetForAgent } from "../../logic/remove.js";
 import type { SpawnListOutcome } from "../../transport/types.js";
 import type { AgentCardView } from "../../types.js";
@@ -116,7 +125,6 @@ const synced = computed(() => {
 const selectedAgent = computed(() =>
   props.selectedKey === null ? undefined : hub?.state.value.agents.get(props.selectedKey),
 );
-const selectedShortCwd = computed(() => props.cards.find((c) => c.key === props.selectedKey)?.shortCwd);
 
 /** The hub SSE frame's caps (`spawn.v1` ⇒ the pick-dir entry can exist at all, arch §8.2). */
 const hubCaps = computed<unknown>(() => {
@@ -156,16 +164,71 @@ const sessionActions = computed<readonly NewSessionAction[]>(() =>
 );
 const pickDirEnabled = computed(() => sessionActions.value.some((a) => a.kind === "pick-dir" && a.enabled));
 
-const newSessionNote = ref<{ kind: "ok" | "err"; text: string } | null>(null);
+const newSessionNote = ref<{ kind: "ok" | "err" | "hint"; text: string } | null>(null);
 const newSessionBusy = ref(false);
 const pickerOpen = ref(false);
+/** Main-button opens focus DirPicker's 「启动」 (the menu's pick-dir keeps the neutral form). */
+const pickerFocusSubmit = ref(false);
 const pickerPrefill = computed(() => {
   const card = selectedAgent.value?.card as { cwd?: unknown } | undefined;
   return typeof card?.cwd === "string" && card.cwd !== "" ? card.cwd : "~";
 });
 const plaintext = computed(() => env?.plaintext ?? false);
 
-/** same-cwd — the pre-SP12 `/new` button behavior, byte-identical (plan SP12: 原样搬进). */
+/** Inline hint for a click on a spawn entry whose capability isn't there (redesign point 3). */
+function showSpawnHint(): void {
+  const avail = spawnAvailability({ hubCaps: hubCaps.value, listResult: spawnListResult.value });
+  if (avail.state === "denied") {
+    newSessionNote.value = { kind: "hint", text: t(spawnDeniedKey(avail.policy.reason)) };
+  } else if (avail.state === "unknown") {
+    void refreshSpawnList(); // race the click against the still-missing policy
+    newSessionNote.value = { kind: "hint", text: t("spawn.retryHint") };
+  } else {
+    newSessionNote.value = { kind: "hint", text: t("spawn.unavailableHint") };
+  }
+}
+
+/** 「替换当前会话（/new）」 — armed from the menu, executed only by the inline confirm bar. */
+const replaceConfirm = ref(false);
+const replaceRunBtn = ref<HTMLButtonElement | null>(null);
+const sidebarEl = ref<HTMLElement | null>(null);
+async function armReplace(): Promise<void> {
+  replaceConfirm.value = true;
+  newSessionNote.value = null;
+  await nextTick();
+  replaceRunBtn.value?.focus();
+}
+/**
+ * Return focus after the bar closes. The menu item that armed it unmounts with the dropdown,
+ * so the stable restore target is the caret toggle (rendered whenever the replace item exists
+ * — `menuAvailable` in NewSessionMenu), falling back to the main button. Never lands on BODY.
+ */
+function restoreReplaceFocus(): void {
+  const root = sidebarEl.value;
+  const btn =
+    root?.querySelector<HTMLButtonElement>(".nsmenu-toggle") ??
+    root?.querySelector<HTMLButtonElement>(".new-session-btn");
+  btn?.focus();
+}
+function disarmReplace(): void {
+  if (!replaceConfirm.value) return;
+  replaceConfirm.value = false;
+  restoreReplaceFocus();
+}
+async function confirmReplace(): Promise<void> {
+  if (newSessionBusy.value) return;
+  replaceConfirm.value = false;
+  await onNewSession();
+  restoreReplaceFocus();
+}
+function onReplaceKeydown(ev: KeyboardEvent): void {
+  if (ev.key === "Escape") {
+    ev.stopPropagation();
+    disarmReplace();
+  }
+}
+
+/** `/new` execution — the pre-SP12 button behavior, byte-identical (plan SP12: 原样搬进). */
 async function onNewSession(): Promise<void> {
   const key = props.selectedKey;
   const c = hub?.control;
@@ -189,10 +252,22 @@ async function onNewSession(): Promise<void> {
 
 function onMenuSelect(action: NewSessionAction): void {
   if (action.kind === "pick-dir") {
-    if (action.enabled) pickerOpen.value = true;
+    if (!action.enabled) return showSpawnHint();
+    openPicker(false);
     return;
   }
-  void onNewSession();
+  if (action.kind === "spawn-cwd") {
+    if (!action.enabled) return showSpawnHint();
+    openPicker(true);
+    return;
+  }
+  // same-cwd — 「替换当前会话（/new）」 goes through the inline confirm bar, never directly.
+  if (action.enabled && !newSessionBusy.value) void armReplace();
+}
+
+function openPicker(focusSubmit: boolean): void {
+  pickerFocusSubmit.value = focusSubmit;
+  pickerOpen.value = true;
 }
 
 // --- pending spawn rows (SpawnRow; 「关闭」 is a local, memory-only dismiss — the hub keeps
@@ -230,7 +305,7 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
 </script>
 
 <template>
-  <nav class="sidebar" :class="{ 'is-collapsed': collapsed }" aria-label="Agents">
+  <nav ref="sidebarEl" class="sidebar" :class="{ 'is-collapsed': collapsed }" aria-label="Agents">
     <div class="sidebar-head">
       <div class="sidebar-headrow">
         <button
@@ -248,7 +323,6 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
         <NewSessionMenu
           :actions="sessionActions"
           :busy="newSessionBusy"
-          :short-cwd="selectedShortCwd"
           @select="onMenuSelect"
           @open="refreshSpawnList"
         />
@@ -270,11 +344,37 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
       <p v-if="newSessionNote" class="new-session-note" :data-kind="newSessionNote.kind" role="status">
         {{ newSessionNote.text }}
       </p>
+      <div
+        v-if="replaceConfirm"
+        class="replace-confirm"
+        role="alertdialog"
+        aria-labelledby="replace-confirm-title"
+        aria-describedby="replace-confirm-body"
+        @keydown="onReplaceKeydown"
+      >
+        <p id="replace-confirm-title" class="replace-confirm-title">{{ t("spawn.replaceConfirmTitle") }}</p>
+        <p id="replace-confirm-body" class="replace-confirm-body">{{ t("spawn.replaceConfirmBody") }}</p>
+        <div class="replace-confirm-actions">
+          <button class="btn btn-ghost btn-xs" type="button" :disabled="newSessionBusy" @click="disarmReplace">
+            {{ t("dialog.cancel") }}
+          </button>
+          <button
+            ref="replaceRunBtn"
+            class="btn btn-primary btn-xs"
+            type="button"
+            :disabled="newSessionBusy"
+            @click="confirmReplace"
+          >
+            {{ t("spawn.replaceConfirmRun") }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <DirPicker
       v-if="pickerOpen"
       :prefill-cwd="pickerPrefill"
+      :focus-submit="pickerFocusSubmit"
       :plaintext="plaintext"
       @close="pickerOpen = false"
       @done="pickerOpen = false"
@@ -293,7 +393,7 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
       :body="`${t('agents.emptyBodyLead')} webHub.enabled ${t('agents.emptyBodyTail')}`"
     >
       <template v-if="pickDirEnabled" #actions>
-        <button class="btn spawn-empty-pick" type="button" @click="pickerOpen = true">
+        <button class="btn spawn-empty-pick" type="button" @click="openPicker(false)">
           {{ t("spawn.itemPickDir") }}
         </button>
       </template>

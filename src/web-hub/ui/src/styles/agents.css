@@ -59,6 +59,34 @@
   color: var(--c-danger);
 }
 
+/* 「替换当前会话（/new）」 inline confirm bar (2026-10 redesign — AgentList, next to the note) */
+.replace-confirm {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.replace-confirm-title {
+  margin: 0;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.replace-confirm-body {
+  margin: 0;
+}
+
+.replace-confirm-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+}
+
 .sidebar-title {
   display: flex;
   align-items: center;
@@ -345,6 +373,7 @@
   .sidebar.is-collapsed .new-session-btn,
   .sidebar.is-collapsed .search,
   .sidebar.is-collapsed .new-session-note,
+  .sidebar.is-collapsed .replace-confirm,
   .sidebar.is-collapsed > .agent-list,
   .sidebar.is-collapsed > .empty {
     display: none;

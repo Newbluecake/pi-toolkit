@@ -18,7 +18,7 @@ const agents = {
   expandSidebar: "Expand sidebar",
   openDrawer: "Show agents list",
   newSession: "New session",
-  newSessionAria: "Start a new session for the selected agent (runs /new)",
+  newSessionAria: "Start a new session in the selected session's directory; pick a directory when none is selected",
   newSessionOk: "New session started",
   // --- web-hub-delete-session plan v2 §5.4: AgentCard's two-step delete button ---
   remove: "Delete",

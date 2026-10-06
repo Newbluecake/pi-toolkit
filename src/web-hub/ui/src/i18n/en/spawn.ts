@@ -11,9 +11,17 @@ const spawn = {
   // --- NewSessionMenu (split button; the main button reuses agents.newSession) ---
   menuAria: "New session options",
   menuToggleAria: "More ways to start a session",
-  itemSameCwd: "New in {cwd} (/new)",
-  itemSameCwdNoCwd: "New session for the selected agent (/new)",
+  itemSameCwd: "Replace current session (/new)",
   itemPickDir: "Choose a directory…",
+  // main-button clicks while spawn is unavailable (2026-10 redesign point 3)
+  unavailableHint:
+    'Headless sessions are off: set webHub.spawn.enabled: true in ~/.pi/agent/pi-subagent.json (over LAN also webHub.spawn.lan: "known"), then /reload and /webhub restart.',
+  retryHint: "Checking whether this hub supports headless sessions — click again.",
+  // 「替换当前会话（/new）」 inline confirm bar (AgentList)
+  replaceConfirmTitle: "Replace current session",
+  replaceConfirmBody:
+    "The current session will be replaced by a fresh one. The old session file is kept (resume it with /resume); a terminal attached to the same session switches too.",
+  replaceConfirmRun: "Replace",
 
   // --- pick-dir disabled reasons (SpawnPolicyWire.reason, arch §8.1) ---
   deniedPlatform: "Not supported on this hub's platform",

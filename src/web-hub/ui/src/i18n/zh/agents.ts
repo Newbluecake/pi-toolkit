@@ -20,7 +20,7 @@ const agents = {
   expandSidebar: "展开侧边栏",
   openDrawer: "显示代理列表",
   newSession: "新建会话",
-  newSessionAria: "为当前选中的 agent 开启新会话（执行 /new）",
+  newSessionAria: "在选中会话的目录新建独立会话；无选中时选择目录新建",
   newSessionOk: "已开启新会话",
   remove: "删除",
   removeConfirm: "再次点击确认删除",

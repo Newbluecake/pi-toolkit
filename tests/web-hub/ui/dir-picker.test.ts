@@ -64,14 +64,28 @@ function harness(opts: { start: (req: SpawnRequestBody) => Promise<SpawnOutcome>
   return { hub, starts };
 }
 
-function mountPicker(h: Harness, props: { prefillCwd?: string; plaintext?: boolean } = {}) {
+function mountPicker(h: Harness, props: { prefillCwd?: string; focusSubmit?: boolean; plaintext?: boolean } = {}) {
   return mount(DirPicker, {
     props,
+    attachTo: document.body,
     global: { provide: { [HUB_CTX as symbol]: h.hub } },
   });
 }
 
 describe("DirPicker.vue (SP12)", () => {
+  it("focusSubmit (NewSessionMenu main-button open) focuses 「Start」 on mount; default does not", async () => {
+    const h = harness({ start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }) });
+    const focused = mountPicker(h, { prefillCwd: "/home/u/proj", focusSubmit: true });
+    await flushPromises();
+    expect(document.activeElement).toBe(focused.get(".spawn-picker-actions .btn-primary").element);
+    focused.unmount();
+
+    const plain = mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    expect(document.activeElement).not.toBe(plain.get(".spawn-picker-actions .btn-primary").element);
+    plain.unmount();
+  });
+
   it("prefills the cwd input and lists recent directories; clicking one fills the input", async () => {
     const h = harness({
       start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),

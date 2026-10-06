@@ -18,7 +18,7 @@
   (SpawnRow keeps showing progress) — Escape only resolves a pending `confirming` first.
 -->
 <script setup lang="ts">
-import { computed, inject, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import type { DirEntryWire } from "@protocol/spawn.js";
@@ -31,6 +31,8 @@ import "../../styles/spawn.css";
 const props = defineProps<{
   /** Selected agent's cwd, or `~` — the initial value of the directory input. */
   readonly prefillCwd?: string | undefined;
+  /** Opened from the NewSessionMenu main button ⇒ focus 「启动」 so it's click-click-spawn. */
+  readonly focusSubmit?: boolean;
   /** LAN plaintext HTTP — forwarded to SpawnConfirm's warning. */
   readonly plaintext?: boolean;
 }>();
@@ -77,6 +79,10 @@ const recentFailed = ref(false);
 
 onMounted(async () => {
   const spawn = hub?.spawn;
+  if (props.focusSubmit === true) {
+    await nextTick();
+    submitBtn.value?.focus();
+  }
   if (spawn === undefined) return;
   try {
     const r = await spawn.dirs();
@@ -105,6 +111,8 @@ const busyPhase = computed(() => {
 const submitDisabled = computed(
   () => newSession.value === null || busyPhase.value || cwd.value.trim() === "" || promptTooLong.value,
 );
+
+const submitBtn = ref<HTMLButtonElement | null>(null);
 
 function onSubmit(): void {
   const ns = newSession.value;
@@ -272,7 +280,13 @@ function onKeydown(ev: KeyboardEvent): void {
         <button class="btn btn-ghost btn-xs" type="button" @click="onCancelOrClose">
           {{ busyPhase ? t("spawn.pickerClose") : t("spawn.pickerCancel") }}
         </button>
-        <button class="btn btn-primary btn-xs" type="button" :disabled="submitDisabled" @click="onSubmit">
+        <button
+          ref="submitBtn"
+          class="btn btn-primary btn-xs"
+          type="button"
+          :disabled="submitDisabled"
+          @click="onSubmit"
+        >
           {{ t("spawn.pickerSubmit") }}
         </button>
       </div>

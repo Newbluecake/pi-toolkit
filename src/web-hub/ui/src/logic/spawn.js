@@ -50,9 +50,30 @@ import { SPAWN_HUB_CAP } from "@protocol/version.ts";
  */
 
 /**
- * @typedef {{ kind: "same-cwd", agentKey: string, cwd: string, enabled: boolean }
+ * @typedef {{ kind: "spawn-cwd", agentKey: string, cwd: string, enabled: boolean,
+ *   reason?: SpawnPolicyWire["reason"] | "unavailable" }
+ *   | { kind: "same-cwd", agentKey: string, cwd: string, enabled: boolean }
  *   | { kind: "pick-dir", enabled: boolean, reason?: SpawnPolicyWire["reason"] | "unavailable" }} NewSessionAction
  */
+
+/** `SpawnPolicyWire.reason` → its `spawn.denied*` i18n key (NewSessionMenu + AgentList hint). */
+const DENIED_KEYS = {
+  platform: "spawn.deniedPlatform",
+  launcher: "spawn.deniedLauncher",
+  persist: "spawn.deniedPersist",
+  reaper: "spawn.deniedReaper",
+  cooldown: "spawn.deniedCooldown",
+  breaker: "spawn.deniedBreaker",
+};
+
+/**
+ * @param {string | undefined} reason
+ * @returns {string}
+ */
+export function spawnDeniedKey(reason) {
+  const key = reason !== undefined ? DENIED_KEYS[reason] : undefined;
+  return key ?? "spawn.deniedUnknown";
+}
 
 /**
  * The availability truth table (arch §8.2 response matrix + §8.3's 404 rule).
@@ -72,11 +93,14 @@ export function spawnAvailability({ hubCaps, listResult } = {}) {
 }
 
 /**
- * arch §8.3's `NewSessionAction[]`. `selected` carries everything the same-cwd formula needs
+ * arch §8.3's `NewSessionAction[]` (2026-10 redesign: the main button is a managed spawn in the
+ * selected session's cwd — `spawn-cwd`; the old `/new` rerun moved into the menu as `same-cwd`
+ * behind an inline confirm). `selected` carries everything the same-cwd formula needs
  * (`agent` = the reducer's AgentState-ish view, `hubControl` = the hub frame's cmd.v1
  * negotiation, `controlPresent` = a ControlHandle exists) so this stays a pure function.
- * same-cwd is omitted entirely without a selected agent; pick-dir is always present (the
- * 0-agent EmptyState entry, arch §9.1).
+ * spawn-cwd/same-cwd are omitted entirely without a selected agent; pick-dir is always present
+ * (the 0-agent EmptyState entry, arch §9.1). spawn-cwd's enablement is the spawn availability
+ * alone (it never touches the selected agent's control plane).
  * @param {{ hubCaps?: unknown, listResult?: SpawnListResult | null | undefined,
  *   selected?: { agent?: any, hubControl?: boolean, controlPresent?: boolean } | null }} p
  * @returns {NewSessionAction[]}
@@ -84,23 +108,28 @@ export function spawnAvailability({ hubCaps, listResult } = {}) {
 export function newSessionActions({ hubCaps, listResult, selected } = {}) {
   /** @type {NewSessionAction[]} */
   const out = [];
+  const avail = spawnAvailability({ hubCaps, listResult });
+  const spawnReason =
+    avail.state === "denied" ? (avail.policy.reason !== undefined ? avail.policy.reason : undefined) : "unavailable";
   const agent = selected && typeof selected === "object" ? selected.agent : undefined;
   if (agent && typeof agent === "object" && typeof agent.key === "string") {
     const card = agent.card && typeof agent.card === "object" ? agent.card : {};
+    const cwd = typeof card.cwd === "string" ? card.cwd : "";
+    out.push({
+      kind: "spawn-cwd",
+      agentKey: agent.key,
+      cwd,
+      enabled: avail.state === "available",
+      ...(avail.state === "available" || spawnReason === undefined ? {} : { reason: spawnReason }),
+    });
     const enabled =
       selected.controlPresent === true &&
       selected.hubControl === true &&
       card.control === true &&
       agent.down !== true &&
       card.state !== "stale";
-    out.push({
-      kind: "same-cwd",
-      agentKey: agent.key,
-      cwd: typeof card.cwd === "string" ? card.cwd : "",
-      enabled,
-    });
+    out.push({ kind: "same-cwd", agentKey: agent.key, cwd, enabled });
   }
-  const avail = spawnAvailability({ hubCaps, listResult });
   if (avail.state === "available") {
     out.push({ kind: "pick-dir", enabled: true });
   } else if (avail.state === "denied") {

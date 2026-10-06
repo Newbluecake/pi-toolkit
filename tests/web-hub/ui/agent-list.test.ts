@@ -178,15 +178,17 @@ describe("AgentList.vue — desktop collapse toggle", () => {
 });
 
 /**
- * "New session" header button (web control-plane parity for `/new`): reuses the existing
- * `ControlHandle.runCommand` channel against the SELECTED agent only; enabled mirrors
- * `AgentDetail.vue`'s `controlEnabled` formula.
+ * "New session" header button (2026-10 redesign): the MAIN button is a managed spawn in the
+ * selected session's cwd (opens DirPicker prefilled + 「启动」 focused) or — with no selection —
+ * the blank pick-dir flow; it is never capability-disabled, an unavailable spawn yields an
+ * inline hint. The old `/new` rerun moved into the dropdown as 「替换当前会话（/new）」 behind
+ * an inline confirm bar; only the confirm calls `ControlHandle.runCommand(key, "new", "")`.
  */
 import { HUB_CTX as HUB_CTX_KEY } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import type { ControlHandle } from "../../../src/web-hub/ui/src/types.js";
 
 function agentState(over: Record<string, unknown> = {}): Record<string, unknown> {
-  return { key: "a1", card: { control: true, state: "live" }, down: false, ...over };
+  return { key: "a1", card: { control: true, state: "live", cwd: "/home/u/proj" }, down: false, ...over };
 }
 
 function fakeControlHandle(over: Partial<ControlHandle> = {}): ControlHandle {
@@ -220,46 +222,27 @@ function hubWithAgent(
   };
 }
 
-describe("AgentList.vue — 'New session' header button", () => {
-  it("disabled with no selected agent, even with control fully negotiated", () => {
+describe("AgentList.vue — 'New session' main button (2026-10 redesign)", () => {
+  it("stays enabled with no selected agent — click falls back to pick-dir (spawn off ⇒ hint)", async () => {
     const hub = hubWithAgent("a1", {}, { control: fakeControlHandle() });
     const wrapper = mount(AgentList, {
       props: { cards: [card({ key: "a1" })], selectedKey: null, filter: "" },
       global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
     });
-    expect(wrapper.get(".new-session-btn").attributes("disabled")).toBeDefined();
+    const btn = wrapper.get(".new-session-btn");
+    expect(btn.attributes("disabled")).toBeUndefined();
+    await btn.trigger("click");
+    const note = wrapper.get(".new-session-note");
+    expect(note.attributes("data-kind")).toBe("hint");
+    expect(note.text()).toContain("webHub.spawn.enabled");
+    expect(wrapper.find(".spawn-picker").exists()).toBe(false);
   });
 
-  it("disabled when the hub never negotiated cmd.v1", () => {
-    const hub = hubWithAgent("a1", {}, { hubControl: false, control: fakeControlHandle() });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
-      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
-    });
-    expect(wrapper.get(".new-session-btn").attributes("disabled")).toBeDefined();
-  });
-
-  it("disabled when the selected agent card lacks control, or is down", () => {
-    const hub1 = hubWithAgent("a1", { card: { control: false, state: "live" } }, { control: fakeControlHandle() });
-    const w1 = mount(AgentList, {
-      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
-      global: { provide: { [HUB_CTX_KEY as symbol]: hub1 } },
-    });
-    expect(w1.get(".new-session-btn").attributes("disabled")).toBeDefined();
-
-    const hub2 = hubWithAgent("a1", { down: true }, { control: fakeControlHandle() });
-    const w2 = mount(AgentList, {
-      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
-      global: { provide: { [HUB_CTX_KEY as symbol]: hub2 } },
-    });
-    expect(w2.get(".new-session-btn").attributes("disabled")).toBeDefined();
-  });
-
-  it("enabled for a live, controllable, selected agent — click runs runCommand(key, 'new', '')", async () => {
-    let captured: [string, string, string, unknown] | undefined;
+  it("selected agent but no spawn.v1 cap ⇒ click shows the how-to-enable hint, never /new", async () => {
+    let called = 0;
     const control = fakeControlHandle({
-      runCommand: async (agentKey, name, args, opts) => {
-        captured = [agentKey, name, args, opts];
+      runCommand: async () => {
+        called += 1;
         return { ok: true };
       },
     });
@@ -268,28 +251,155 @@ describe("AgentList.vue — 'New session' header button", () => {
       props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
       global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
     });
-    const btn = wrapper.get(".new-session-btn");
-    expect(btn.attributes("disabled")).toBeUndefined();
-    await btn.trigger("click");
+    await wrapper.get(".new-session-btn").trigger("click");
+    const note = wrapper.get(".new-session-note");
+    expect(note.attributes("data-kind")).toBe("hint");
+    expect(note.text()).toContain("webHub.spawn.enabled");
+    expect(called).toBe(0);
+  });
+});
+
+describe("AgentList.vue — 「替换当前会话（/new）」 menu item + inline confirm (2026-10 redesign)", () => {
+  function mountReplace(hub: HubHandle) {
+    return mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      attachTo: document.body, // focus assertions need a real activeElement
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+  }
+
+  async function armViaMenu(wrapper: ReturnType<typeof mountReplace>) {
+    await wrapper.get(".nsmenu-toggle").trigger("click");
+    await wrapper
+      .findAll(".nsmenu-item")
+      .find((i) => i.text().includes("(/new)")!)!
+      .trigger("click");
     await wrapper.vm.$nextTick();
-    expect(captured).toEqual(["a1", "new", "", { confirm: true }]);
-    expect(wrapper.get(".new-session-note").attributes("data-kind")).toBe("ok");
+  }
+
+  it("menu item exists for a controllable selected agent even without spawn.v1; click arms the confirm bar", async () => {
+    const hub = hubWithAgent("a1", {}, { control: fakeControlHandle() });
+    const wrapper = mountReplace(hub);
+    await wrapper.get(".nsmenu-toggle").trigger("click");
+    const item = wrapper.findAll(".nsmenu-item").find((i) => i.text().includes("(/new)"));
+    expect(item).toBeDefined();
+    expect(item!.text()).toBe("Replace current session (/new)");
+    await item!.trigger("click");
+    const bar = wrapper.get(".replace-confirm");
+    expect(bar.attributes("role")).toBe("alertdialog");
+    expect(bar.text()).toContain("replaced by a fresh one");
+    expect(wrapper.find(".nsmenu-menu").exists()).toBe(false); // menu closed after pick
+    wrapper.unmount();
   });
 
-  it("a failed call shows an inline err note (no toast)", async () => {
+  it("alertdialog is named/described by stable-id nodes (aria-labelledby/describedby, no bare aria-label)", async () => {
+    const wrapper = mountReplace(hubWithAgent("a1", {}, { control: fakeControlHandle() }));
+    await armViaMenu(wrapper);
+    const bar = wrapper.get(".replace-confirm");
+    expect(bar.attributes("aria-label")).toBeUndefined();
+    const labelledby = bar.attributes("aria-labelledby");
+    const describedby = bar.attributes("aria-describedby");
+    expect(labelledby).toBe("replace-confirm-title");
+    expect(describedby).toBe("replace-confirm-body");
+    const title = bar.get(`#${labelledby}`);
+    const body = bar.get(`#${describedby}`);
+    expect(title.text()).toBe("Replace current session");
+    expect(body.text()).toContain("replaced by a fresh one");
+    wrapper.unmount();
+  });
+
+  it("focus: armed ⇒ the confirm button; cancel/Escape/confirm ⇒ back to the caret toggle (never BODY)", async () => {
+    const control = fakeControlHandle();
+    const wrapper = mountReplace(hubWithAgent("a1", {}, { control }));
+    const toggle = () => wrapper.get(".nsmenu-toggle").element;
+
+    // armed ⇒ focus moves into the dialog's primary button
+    await armViaMenu(wrapper);
+    expect(document.activeElement).toBe(wrapper.get(".replace-confirm .btn-primary").element);
+    // cancel ⇒ back to the toggle
+    await wrapper.get(".replace-confirm .btn-ghost").trigger("click");
+    expect(document.activeElement).toBe(toggle());
+    // Escape ⇒ back to the toggle
+    await armViaMenu(wrapper);
+    await wrapper.get(".replace-confirm").trigger("keydown", { key: "Escape" });
+    expect(document.activeElement).toBe(toggle());
+    // confirm ⇒ after the /new round-trip, back to the toggle
+    await armViaMenu(wrapper);
+    await wrapper.get(".replace-confirm .btn-primary").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".replace-confirm").exists()).toBe(false);
+    expect(document.activeElement).toBe(toggle());
+    wrapper.unmount();
+  });
+
+  it("confirm runs runCommand(key, 'new', '', {confirm:true}) and shows the ok note", async () => {
+    let captured: [string, string, string, unknown] | undefined;
+    const control = fakeControlHandle({
+      runCommand: async (agentKey, name, args, opts) => {
+        captured = [agentKey, name, args, opts];
+        return { ok: true };
+      },
+    });
+    const wrapper = mountReplace(hubWithAgent("a1", {}, { control }));
+    await armViaMenu(wrapper);
+    expect(captured).toBeUndefined(); // not yet — the bar is armed, nothing sent
+    await wrapper.get(".replace-confirm .btn-primary").trigger("click");
+    await flushPromises();
+    expect(captured).toEqual(["a1", "new", "", { confirm: true }]);
+    expect(wrapper.find(".replace-confirm").exists()).toBe(false);
+    expect(wrapper.get(".new-session-note").attributes("data-kind")).toBe("ok");
+    wrapper.unmount();
+  });
+
+  it("cancel (button or Escape) never sends /new", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const wrapper = mountReplace(hubWithAgent("a1", {}, { control }));
+    // cancel via button
+    await armViaMenu(wrapper);
+    await wrapper.get(".replace-confirm .btn-ghost").trigger("click");
+    expect(wrapper.find(".replace-confirm").exists()).toBe(false);
+    expect(called).toBe(0);
+    // cancel via Escape
+    await armViaMenu(wrapper);
+    await wrapper.get(".replace-confirm").trigger("keydown", { key: "Escape" });
+    expect(wrapper.find(".replace-confirm").exists()).toBe(false);
+    expect(called).toBe(0);
+    wrapper.unmount();
+  });
+
+  it("a failed /new call shows an inline err note (no toast)", async () => {
     const control = fakeControlHandle({
       runCommand: async () => ({ ok: false, error: "E_FAILED", message: "boom" }),
     });
-    const hub = hubWithAgent("a1", {}, { control });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
-      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
-    });
-    await wrapper.get(".new-session-btn").trigger("click");
-    await wrapper.vm.$nextTick();
+    const wrapper = mountReplace(hubWithAgent("a1", {}, { control }));
+    await armViaMenu(wrapper);
+    await wrapper.get(".replace-confirm .btn-primary").trigger("click");
+    await flushPromises();
     const note = wrapper.get(".new-session-note");
     expect(note.attributes("data-kind")).toBe("err");
     expect(note.text()).toBe("boom");
+    wrapper.unmount();
+  });
+
+  it("the replace item stays disabled when the selected agent lacks control / is down", async () => {
+    const hub = hubWithAgent(
+      "a1",
+      { card: { control: false, state: "live", cwd: "/home/u/proj" } },
+      { control: fakeControlHandle() },
+    );
+    const wrapper = mountReplace(hub);
+    await wrapper.get(".nsmenu-toggle").trigger("click");
+    const item = wrapper.findAll(".nsmenu-item").find((i) => i.text().includes("(/new)"));
+    expect(item!.attributes("disabled")).toBeDefined();
+    await item!.trigger("click");
+    expect(wrapper.find(".replace-confirm").exists()).toBe(false);
+    wrapper.unmount();
   });
 });
 
@@ -374,8 +484,8 @@ function hubWithSpawn(
   };
 }
 
-describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
-  it("no spawn.v1 cap ⇒ the caret toggle is hidden (main /new button unchanged)", () => {
+describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1; 2026-10 redesign)", () => {
+  it("no spawn.v1 cap + no selection ⇒ the caret toggle is hidden; the main button stays (hint on click)", async () => {
     const hub = hubWithSpawn({ caps: ["cmd.v1"] });
     const wrapper = mount(AgentList, {
       props: { cards: [card()], selectedKey: null, filter: "" },
@@ -383,9 +493,11 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
     });
     expect(wrapper.find(".new-session-btn").exists()).toBe(true);
     expect(wrapper.find(".nsmenu-toggle").exists()).toBe(false);
+    await wrapper.get(".new-session-btn").trigger("click");
+    expect(wrapper.get(".new-session-note").attributes("data-kind")).toBe("hint");
   });
 
-  it("GET /api/headless 404 ⇒ pick-dir hidden (arch §8.3), toggle hidden", async () => {
+  it("GET /api/headless 404 ⇒ pick-dir hidden (arch §8.3), toggle hidden without a selection", async () => {
     const hub = hubWithSpawn({ caps: ["spawn.v1"] }); // default fake list() is 404
     const wrapper = mount(AgentList, {
       props: { cards: [card()], selectedKey: null, filter: "" },
@@ -440,7 +552,7 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
     expect(wrapper.find(".nsmenu-menu").exists()).toBe(false);
   });
 
-  it("menu lists the same-cwd item with the selected agent's short cwd", async () => {
+  it("menu lists the 「替换当前会话（/new）」 item for a selected, controllable agent", async () => {
     const agents = new Map([["a1", agentState()]]);
     const hub = hubWithSpawn({
       caps: ["spawn.v1"],
@@ -454,13 +566,57 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
     });
     await flushPromises();
     await wrapper.get(".nsmenu-toggle").trigger("click");
-    const sameCwd = wrapper.findAll(".nsmenu-item").find((i) => i.text().includes("(/new)"));
-    expect(sameCwd).toBeDefined();
-    expect(sameCwd!.text()).toContain("ai/pi-toolkit");
-    expect(sameCwd!.attributes("disabled")).toBeUndefined();
+    const replace = wrapper.findAll(".nsmenu-item").find((i) => i.text().includes("(/new)"));
+    expect(replace).toBeDefined();
+    expect(replace!.text()).toBe("Replace current session (/new)");
+    expect(replace!.attributes("disabled")).toBeUndefined();
   });
 
-  it("main button click still runs /new via the same-cwd action (menu regression)", async () => {
+  it("main button + selected agent + spawn available ⇒ DirPicker opens prefilled with its cwd, 「Start」 focused", async () => {
+    const agents = new Map([["a1", agentState()]]);
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1"],
+      agents,
+      control: fakeControlHandle(),
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      attachTo: document.body,
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    await wrapper.get(".new-session-btn").trigger("click");
+    await flushPromises();
+    const picker = wrapper.get(".spawn-picker");
+    expect((picker.get("#spawn-cwd").element as HTMLInputElement).value).toBe("/home/u/proj");
+    const submit = picker.get(".spawn-picker-actions .btn-primary");
+    expect(submit.text()).toBe("Start");
+    expect(document.activeElement).toBe(submit.element);
+    wrapper.unmount();
+  });
+
+  it("main button + selected agent + policy denied ⇒ the denied reason as an inline hint (no picker)", async () => {
+    const agents = new Map([["a1", agentState()]]);
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1"],
+      agents,
+      control: fakeControlHandle(),
+      list: async () => ({ ok: true, policy: { ...spawnPolicy, allowed: false, reason: "cooldown" }, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: "a1", filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    await wrapper.get(".new-session-btn").trigger("click");
+    const note = wrapper.get(".new-session-note");
+    expect(note.attributes("data-kind")).toBe("hint");
+    expect(note.text()).toContain("Cooling down");
+    expect(wrapper.find(".spawn-picker").exists()).toBe(false);
+  });
+
+  it("main button click no longer runs /new directly (the /new path needs the menu confirm)", async () => {
     let captured: [string, string, string, unknown] | undefined;
     const control = fakeControlHandle({
       runCommand: async (agentKey, name, args, opts) => {
@@ -476,7 +632,8 @@ describe("AgentList.vue — NewSessionMenu (SP12, arch §9.1)", () => {
     });
     await wrapper.get(".new-session-btn").trigger("click");
     await wrapper.vm.$nextTick();
-    expect(captured).toEqual(["a1", "new", "", { confirm: true }]);
+    expect(captured).toBeUndefined(); // spawn off ⇒ hint, not a /new
+    expect(wrapper.get(".new-session-note").attributes("data-kind")).toBe("hint");
   });
 });
 

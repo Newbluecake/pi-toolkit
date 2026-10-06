@@ -1,0 +1,315 @@
+{
+  "$comment": "Dev-hub fixture (dev-hub.ts): control-plane agents + hub caps INCLUDING spawn.v1, so the web frontend's NewSessionMenu spawn path is exercisable; the /api/headless* endpoints themselves are answered by the driving harness (route interception), not dev-hub.",
+  "hubState": {
+    "caps": [
+      "ev.v1",
+      "fleet.v1",
+      "snapshot.v1",
+      "branch.v1",
+      "cmd.v1",
+      "dialog.v1",
+      "command.v1",
+      "ctl.v2",
+      "spawn.v1"
+    ],
+    "state": "running"
+  },
+  "agents": [
+    {
+      "agentKey": "agent-alpha",
+      "kind": "tui",
+      "pid": 42001,
+      "cwd": "/home/dev/pi-toolkit",
+      "state": "live",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-alpha-1",
+      "session": {
+        "sessionId": "sess-alpha-1",
+        "sessionFile": "/home/dev/.pi/agent/sessions/sess-alpha-1.jsonl",
+        "name": "web control plane",
+        "cwd": "/home/dev/pi-toolkit",
+        "reason": "user",
+        "leafId": "e-alpha-4",
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
+        "thinkingLevel": "medium",
+        "mode": "tui"
+      },
+      "status": {
+        "leafId": "e-alpha-4",
+        "busy": true,
+        "pending": true,
+        "contextUsage": {
+          "tokens": 96000,
+          "contextWindow": 200000,
+          "percent": 48
+        },
+        "costUsd": 2.04,
+        "queue": [
+          {
+            "id": "q-alpha-1",
+            "text": "keep going: finish the queue mirror first",
+            "deliver": "steer",
+            "source": "web",
+            "cmdId": "webcmd_alpha_0001aa",
+            "at": 1700000100000
+          },
+          {
+            "id": "q-alpha-2",
+            "text": "then run the full gate suite",
+            "deliver": "followUp",
+            "source": "web",
+            "cmdId": "webcmd_alpha_0002bb",
+            "at": 1700000105000
+          },
+          {
+            "id": "q-alpha-3",
+            "text": "check git status before anything else",
+            "deliver": "steer",
+            "source": "tui",
+            "at": 1700000110000
+          }
+        ]
+      },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-beta",
+      "kind": "tui",
+      "pid": 42002,
+      "cwd": "/home/dev/service-beta",
+      "state": "live",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-beta-1",
+      "session": {
+        "sessionId": "sess-beta-1",
+        "name": "idle scratch session",
+        "cwd": "/home/dev/service-beta",
+        "reason": "user",
+        "leafId": "e-beta-2",
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
+        "mode": "tui"
+      },
+      "status": {
+        "leafId": "e-beta-2",
+        "busy": false,
+        "pending": false,
+        "costUsd": 0.18
+      },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-old",
+      "kind": "tui",
+      "pid": 42003,
+      "cwd": "/home/dev/legacy-app",
+      "state": "live",
+      "pluginVersion": "1.4.0",
+      "outdated": false,
+      "session": {
+        "sessionId": "sess-old-1",
+        "name": "old pi-toolkit (no control caps)",
+        "cwd": "/home/dev/legacy-app",
+        "reason": "user",
+        "leafId": "e-old-2",
+        "model": {
+          "provider": "cr-anthropic",
+          "id": "claude-sonnet-5"
+        },
+        "mode": "tui"
+      },
+      "status": {
+        "leafId": "e-old-2",
+        "busy": false,
+        "pending": false
+      },
+      "prompts": []
+    },
+    {
+      "agentKey": "agent-stale",
+      "kind": "rpc",
+      "pid": 42004,
+      "cwd": "/home/dev/Detached",
+      "state": "stale",
+      "pluginVersion": "1.5.0",
+      "outdated": false,
+      "control": true,
+      "epoch": "epoch-stale-1",
+      "session": {
+        "sessionId": "sess-stale-1",
+        "name": "lost connection",
+        "cwd": "/home/dev/Detached",
+        "reason": "user",
+        "leafId": "e-stale-1",
+        "mode": "rpc"
+      },
+      "status": {
+        "leafId": "e-stale-1",
+        "busy": true,
+        "pending": false
+      },
+      "prompts": []
+    }
+  ],
+  "history": {
+    "agent-alpha": {
+      "agentKey": "agent-alpha",
+      "entries": [
+        {
+          "id": "e-alpha-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "timestamp": 1700000000000,
+            "content": "wire the P2 control plane"
+          }
+        },
+        {
+          "id": "e-alpha-2",
+          "parentId": "e-alpha-1",
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:05.000Z",
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000005000,
+            "content": "Starting with the fake dev-hub endpoints so the frontend has something to talk to."
+          }
+        },
+        {
+          "id": "e-alpha-3",
+          "parentId": "e-alpha-2",
+          "type": "message",
+          "timestamp": "2026-01-01T00:01:00.000Z",
+          "message": {
+            "role": "user",
+            "timestamp": 1700000060000,
+            "content": "also keep the queue visible"
+          }
+        },
+        {
+          "id": "e-alpha-4",
+          "parentId": "e-alpha-3",
+          "type": "message",
+          "timestamp": "2026-01-01T00:01:10.000Z",
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000070000,
+            "content": "Queue mirror is next — web and terminal entries share one FIFO.\n\n```sh\nnpm run build:web && npm run check:web\n```"
+          }
+        }
+      ],
+      "tailMessages": [
+        {
+          "role": "user",
+          "timestamp": 1700000060000,
+          "content": "also keep the queue visible"
+        },
+        {
+          "role": "assistant",
+          "timestamp": 1700000070000,
+          "content": "Queue mirror is next — web and terminal entries share one FIFO.\n\n```sh\nnpm run build:web && npm run check:web\n```"
+        }
+      ],
+      "fromSeq": 1,
+      "hasMore": false,
+      "oldestEntryId": "e-alpha-1",
+      "source": "file"
+    },
+    "agent-beta": {
+      "agentKey": "agent-beta",
+      "entries": [
+        {
+          "id": "e-beta-1",
+          "parentId": null,
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "timestamp": 1700000000000,
+            "content": "idle scratch session"
+          }
+        },
+        {
+          "id": "e-beta-2",
+          "parentId": "e-beta-1",
+          "type": "message",
+          "timestamp": "2026-01-01T00:00:03.000Z",
+          "message": {
+            "role": "assistant",
+            "timestamp": 1700000003000,
+            "content": "Ready when you are."
+          }
+        }
+      ],
+      "tailMessages": [
+        {
+          "role": "assistant",
+          "timestamp": 1700000003000,
+          "content": "Ready when you are."
+        }
+      ],
+      "fromSeq": 1,
+      "hasMore": false,
+      "oldestEntryId": "e-beta-1",
+      "source": "file"
+    }
+  },
+  "ctl": {
+    "agent-alpha": {
+      "epoch": "epoch-alpha-1",
+      "sessionId": "sess-alpha-1",
+      "items": [
+        {
+          "cmdId": "webcmd_alpha_0002bb",
+          "op": "prompt",
+          "state": "queued",
+          "behavior": "followUp",
+          "at": 1700000105000,
+          "updatedAt": 1700000105000
+        },
+        {
+          "cmdId": "webcmd_alpha_0001aa",
+          "op": "prompt",
+          "state": "queued",
+          "behavior": "steer",
+          "at": 1700000100000,
+          "updatedAt": 1700000100000
+        },
+        {
+          "cmdId": "webcmd_alpha_0000cc",
+          "op": "prompt",
+          "state": "consumed",
+          "behavior": "steer",
+          "at": 1700000090000,
+          "updatedAt": 1700000098000
+        },
+        {
+          "cmdId": "webcmd_alpha_9999dd",
+          "op": "prompt",
+          "state": "unconfirmed",
+          "reason": "unobserved",
+          "at": 1700000080000,
+          "updatedAt": 1700000110000
+        },
+        {
+          "cmdId": "webcmd_alpha_8888ee",
+          "op": "steer_subagent",
+          "state": "late_ok",
+          "at": 1700000070000,
+          "updatedAt": 1700000076000
+        }
+      ]
+    }
+  }
+}

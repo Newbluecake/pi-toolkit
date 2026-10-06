@@ -1,17 +1,20 @@
 <!--
   NewSessionMenu — the sidebar's split "New session" button (web-hub-spawn plan SP12 / arch
-  §9.1). Pure presentation + event forwarding over `@logic/spawn.js`'s `newSessionActions`
-  output (SP11): the parent (AgentList) computes the `NewSessionAction[]` and executes the
-  picked one; this component never re-derives enablement itself.
+  §9.1; 2026-10 redesign). Pure presentation + event forwarding over `@logic/spawn.js`'s
+  `newSessionActions` output (SP11): the parent (AgentList) computes the `NewSessionAction[]`
+  and executes the picked one; this component never re-derives enablement itself.
 
-  - Main button keeps the pre-SP12 contract byte-for-byte: same `.new-session-btn` class, same
-    label/aria keys (`agents.newSession*`), same disabled semantics — clicking it selects the
-    `same-cwd` action (the `/new` rerun against the selected agent).
-  - The caret toggle (`aria-haspopup="menu"`) opens a `role="menu"` dropdown. The pick-dir
-    item follows arch §8.3: `reason:"unavailable"` (hub without `spawn.v1`, GET 404, error, or
-    not-yet-fetched) ⇒ HIDDEN, never shown disabled; a denied policy shows the item disabled
-    with its reason. The toggle itself only exists while the pick-dir item is visible — a
-    one-item menu that duplicates the main button is never rendered.
+  - Main button = managed spawn in the SELECTED session's cwd (the `spawn-cwd` action; the
+    parent opens DirPicker prefilled, which drives `useNewSession` incl. the 409 confirm flow).
+    With no selection it falls back to `pick-dir` (blank DirPicker). It is never hidden and
+    never disabled for capability reasons — when spawn is unavailable the click still emits the
+    action and the parent shows an inline how-to-enable hint; `busy` (the `/new` round-trip)
+    is the only disabled state.
+  - The caret toggle (`aria-haspopup="menu"`) opens a `role="menu"` dropdown: 「替换当前会话
+    （/new）」 (the old main-button action, `same-cwd` — the parent runs it behind an inline
+    confirm) plus 「选择目录新建…」 (`pick-dir`, arch §8.3: `reason:"unavailable"` ⇒ HIDDEN;
+    a denied policy shows it disabled with its reason). The toggle exists while any menu item
+    is renderable.
   - Keyboard: Enter/Space activate natively; ArrowDown on the closed toggle opens and focuses
     the first enabled item; ArrowUp/ArrowDown cycle focus between enabled items; Escape closes
     and returns focus to the toggle. Outside click closes. No timers, no rAF.
@@ -20,25 +23,24 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
-import type { NewSessionAction } from "../../logic/spawn.js";
+import { spawnDeniedKey, type NewSessionAction } from "../../logic/spawn.js";
 import "../../styles/spawn.css";
 
 const props = defineProps<{
-  /** `newSessionActions(...)` output (SP11) — same-cwd omitted without a selected agent. */
+  /** `newSessionActions(...)` output — spawn-cwd/same-cwd omitted without a selected agent. */
   readonly actions: readonly NewSessionAction[];
-  /** same-cwd in flight (the `/new` runCommand round-trip) — gates the main button. */
+  /** `/new` runCommand round-trip in flight — gates the main button and the replace item. */
   readonly busy?: boolean;
-  /** Selected agent's short cwd, for the same-cwd menu label. */
-  readonly shortCwd?: string | undefined;
 }>();
 const emit = defineEmits<{
-  /** The user picked an action (main button ⇒ same-cwd; menu item ⇒ that action). */
+  /** The user picked an action (main button ⇒ spawn-cwd, or pick-dir without a selection). */
   select: [action: NewSessionAction];
   /** The dropdown opened — the parent refreshes the spawn policy (`list()`). */
   open: [];
 }>();
 const { t } = useI18n();
 
+const spawnCwd = computed(() => props.actions.find((a) => a.kind === "spawn-cwd"));
 const sameCwd = computed(() => props.actions.find((a) => a.kind === "same-cwd"));
 const pickDir = computed(() => props.actions.find((a) => a.kind === "pick-dir"));
 /** arch §8.3: a 404/unavailable pick-dir is hidden, not shown disabled. */
@@ -46,28 +48,13 @@ const pickDirVisible = computed(() => {
   const a = pickDir.value;
   return a !== undefined && a.kind === "pick-dir" && a.reason !== "unavailable";
 });
+/** The dropdown renders while either item is renderable (same-cwd needs a selected agent). */
+const menuAvailable = computed(() => sameCwd.value !== undefined || pickDirVisible.value);
 
-const mainDisabled = computed(() => sameCwd.value === undefined || !sameCwd.value.enabled || props.busy === true);
-
-const sameCwdLabel = computed(() =>
-  props.shortCwd !== undefined && props.shortCwd !== ""
-    ? t("spawn.itemSameCwd", { cwd: props.shortCwd })
-    : t("spawn.itemSameCwdNoCwd"),
-);
-
-const DENIED_KEYS: Record<string, string> = {
-  platform: "spawn.deniedPlatform",
-  launcher: "spawn.deniedLauncher",
-  persist: "spawn.deniedPersist",
-  reaper: "spawn.deniedReaper",
-  cooldown: "spawn.deniedCooldown",
-  breaker: "spawn.deniedBreaker",
-};
 const pickDirReason = computed(() => {
   const a = pickDir.value;
   if (a === undefined || a.kind !== "pick-dir" || a.enabled || a.reason === undefined) return null;
-  const key = DENIED_KEYS[a.reason];
-  return key !== undefined ? t(key) : t("spawn.deniedUnknown");
+  return t(spawnDeniedKey(a.reason));
 });
 
 // ---------------------------------------------------------------------------
@@ -104,8 +91,11 @@ function onToggleClick(): void {
 }
 
 function onMainClick(): void {
-  const a = sameCwd.value;
-  if (a !== undefined && a.enabled && props.busy !== true) emit("select", a);
+  if (props.busy === true) return;
+  // Selected agent ⇒ managed spawn in its cwd; none ⇒ the pick-dir flow (blank DirPicker).
+  // Enablement is the parent's call — a disabled action still emits so it can show the hint.
+  const a = spawnCwd.value ?? pickDir.value;
+  if (a !== undefined) emit("select", a);
 }
 
 function onItemClick(action: NewSessionAction): void {
@@ -121,7 +111,7 @@ function onKeydown(ev: KeyboardEvent): void {
     closeMenu(true);
     return;
   }
-  if (ev.key === "ArrowDown" && !open.value && pickDirVisible.value) {
+  if (ev.key === "ArrowDown" && !open.value && menuAvailable.value) {
     ev.preventDefault();
     void openMenu(true);
     return;
@@ -162,14 +152,14 @@ onBeforeUnmount(() => {
     <button
       class="btn btn-ghost btn-xs new-session-btn"
       type="button"
-      :disabled="mainDisabled"
+      :disabled="busy === true"
       :aria-label="t('agents.newSessionAria')"
       @click="onMainClick"
     >
       {{ t("agents.newSession") }}
     </button>
     <button
-      v-if="pickDirVisible"
+      v-if="menuAvailable"
       class="btn btn-ghost btn-xs nsmenu-toggle"
       type="button"
       aria-haspopup="menu"
@@ -188,7 +178,7 @@ onBeforeUnmount(() => {
         :disabled="!sameCwd.enabled || busy === true"
         @click="onItemClick(sameCwd)"
       >
-        {{ sameCwdLabel }}
+        {{ t("spawn.itemSameCwd") }}
       </button>
       <button
         v-if="pickDir && pickDirVisible"

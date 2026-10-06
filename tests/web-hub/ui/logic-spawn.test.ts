@@ -7,6 +7,7 @@ import {
   newSessionActions,
   pendingRows,
   spawnAvailability,
+  spawnDeniedKey,
 } from "../../../src/web-hub/ui/src/logic/spawn.js";
 import { SPAWN_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { SpawnPolicyWire, SpawnRecordPublic, SpawnsPayload } from "../../../src/web-hub/protocol/spawn.js";
@@ -116,16 +117,42 @@ describe("newSessionActions (arch §8.3 NewSessionAction[])", () => {
     expect(actions).toEqual([{ kind: "pick-dir", enabled: true }]);
   });
 
-  it("no caps ⇒ pick-dir disabled with reason unavailable; same-cwd still follows its own formula", () => {
+  it("no caps ⇒ spawn-cwd/pick-dir disabled with reason unavailable; same-cwd still follows its own formula", () => {
     const actions = newSessionActions({
       hubCaps: [],
       listResult: okList,
       selected: { agent: agent(), hubControl: true, controlPresent: true },
     });
     expect(actions).toEqual([
+      { kind: "spawn-cwd", agentKey: "A", cwd: "/home/u/proj", enabled: false, reason: "unavailable" },
       { kind: "same-cwd", agentKey: "A", cwd: "/home/u/proj", enabled: true },
       { kind: "pick-dir", enabled: false, reason: "unavailable" },
     ]);
+  });
+
+  it("spawn available ⇒ spawn-cwd (the main button) enabled with the selected agent's cwd", () => {
+    const actions = newSessionActions({
+      hubCaps: [SPAWN_HUB_CAP],
+      listResult: okList,
+      selected: { agent: agent(), hubControl: false, controlPresent: false },
+    });
+    // spawn-cwd never touches the selected agent's control plane — availability alone decides
+    expect(actions[0]).toEqual({ kind: "spawn-cwd", agentKey: "A", cwd: "/home/u/proj", enabled: true });
+  });
+
+  it("policy denied ⇒ spawn-cwd disabled carrying the policy reason", () => {
+    const actions = newSessionActions({
+      hubCaps: [SPAWN_HUB_CAP],
+      listResult: { ok: true, policy: policy({ allowed: false, reason: "cooldown" }), items: [] },
+      selected: { agent: agent(), hubControl: true, controlPresent: true },
+    });
+    expect(actions[0]).toEqual({
+      kind: "spawn-cwd",
+      agentKey: "A",
+      cwd: "/home/u/proj",
+      enabled: false,
+      reason: "cooldown",
+    });
   });
 
   it("list 404 ⇒ pick-dir unavailable (arch §8.3)", () => {
@@ -151,7 +178,7 @@ describe("newSessionActions (arch §8.3 NewSessionAction[])", () => {
 
   it("same-cwd enable formula is byte-identical to AgentList.vue's newSessionEnabled", () => {
     const run = (sel: Record<string, unknown>) =>
-      newSessionActions({ hubCaps: [], listResult: undefined, selected: sel })[0];
+      newSessionActions({ hubCaps: [], listResult: undefined, selected: sel }).find((a) => a.kind === "same-cwd");
     // all good ⇒ enabled
     expect(run({ agent: agent(), hubControl: true, controlPresent: true })).toMatchObject({ enabled: true });
     // hub cmd.v1 missing ⇒ disabled
@@ -283,6 +310,16 @@ describe("pendingRows (SpawnRow model: starting/failed, newest first)", () => {
     expect(pendingRows(null)).toEqual([]);
     expect(pendingRows(undefined)).toEqual([]);
     expect(pendingRows({} as unknown as SpawnsPayload)).toEqual([]);
+  });
+});
+
+describe("spawnDeniedKey (policy reason → spawn.denied* i18n key)", () => {
+  it("known reasons map to their key; unknown/missing ⇒ deniedUnknown", () => {
+    expect(spawnDeniedKey("platform")).toBe("spawn.deniedPlatform");
+    expect(spawnDeniedKey("cooldown")).toBe("spawn.deniedCooldown");
+    expect(spawnDeniedKey("breaker")).toBe("spawn.deniedBreaker");
+    expect(spawnDeniedKey("something-new")).toBe("spawn.deniedUnknown");
+    expect(spawnDeniedKey(undefined)).toBe("spawn.deniedUnknown");
   });
 });
 
