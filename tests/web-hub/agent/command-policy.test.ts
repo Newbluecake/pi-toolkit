@@ -2,11 +2,26 @@
  * §4.6 policy table tests (plan control-plan.md §4.6, package C11).
  */
 import { describe, expect, it } from "vitest";
-import { effectivePolicy, resolveCommandPolicy } from "../../../src/web-hub/agent/command-policy.js";
+import {
+  parameterizedBuiltinPolicy,
+  effectivePolicy,
+  resolveCommandPolicy,
+} from "../../../src/web-hub/agent/command-policy.js";
 
 function resolve(name: string, args: string, kind: "extension" | "template" | "skill" | "builtin") {
   return resolveCommandPolicy({ name, args, kind });
 }
+
+describe("parameterizedBuiltinPolicy", () => {
+  it("allows argument-bearing model and thinking commands", () => {
+    expect(parameterizedBuiltinPolicy("model")).toEqual({ policy: "allow" });
+    expect(parameterizedBuiltinPolicy("thinking")).toEqual({ policy: "allow" });
+  });
+
+  it("lets explicit overrides win", () => {
+    expect(parameterizedBuiltinPolicy("model", { model: "confirm" })).toEqual({ policy: "confirm" });
+  });
+});
 
 describe("resolveCommandPolicy — templates/skills always allow", () => {
   it("prompt templates and skills allow regardless of name", () => {

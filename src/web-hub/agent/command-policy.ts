@@ -62,15 +62,14 @@ export const BUILTIN_DENY_NAMES: ReadonlySet<string> = new Set([
   "dementedelves",
 ]);
 
-function builtinPolicy(name: string, args: string): PolicyDecision | undefined {
+function builtinPolicyFor(name: string, hasArgs: boolean): PolicyDecision | undefined {
   switch (name) {
     case "session":
       return { policy: "allow" };
     case "name":
     case "thinking":
     case "model":
-      // No argument opens a TUI selector pi has no extension-facing equivalent for (§4.6 rows).
-      return { policy: args.trim() === "" ? "deny" : "allow" };
+      return { policy: hasArgs ? "allow" : "deny" };
     case "compact":
       return { policy: "allow", policyBusy: "confirm" };
     case "new":
@@ -79,6 +78,19 @@ function builtinPolicy(name: string, args: string): PolicyDecision | undefined {
     default:
       return BUILTIN_DENY_NAMES.has(name) ? { policy: "deny" } : undefined;
   }
+}
+
+function builtinPolicy(name: string, args: string): PolicyDecision | undefined {
+  return builtinPolicyFor(name, args.trim() !== "");
+}
+
+/** Policy for a builtin command whose web surface always supplies arguments. */
+export function parameterizedBuiltinPolicy(
+  name: "model" | "thinking",
+  overrides?: Record<string, CommandPolicy>,
+): PolicyDecision {
+  const override = overrides?.[name];
+  return override === undefined ? (builtinPolicyFor(name, true) ?? { policy: "deny" }) : { policy: override };
 }
 
 /**

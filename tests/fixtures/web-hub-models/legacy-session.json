@@ -1,0 +1,8 @@
+{
+  "t": "session",
+  "sessionId": "legacy-1",
+  "cwd": "/tmp/project",
+  "reason": "startup",
+  "leafId": null,
+  "mode": "rpc"
+}

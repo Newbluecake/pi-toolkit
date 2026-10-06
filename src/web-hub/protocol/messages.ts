@@ -66,6 +66,27 @@ export interface WireEntry {
   thinkingLevel?: string; // thinking_level_change
 }
 
+export interface ModelOptionWire {
+  provider: string;
+  id: string;
+  name?: string;
+  ctx?: number;
+  reasoning?: true;
+  scoped?: true;
+}
+
+export interface SessionModelsWire {
+  status: string;
+  items: ModelOptionWire[];
+  total: number;
+  omitted?: number;
+  invalid?: number;
+  scoped?: true;
+  levels?: string[];
+  policy: { model: string; thinking: string };
+  shadowed?: { model?: true; thinking?: true };
+  sampledAt: number;
+}
 export interface SessionInfo {
   sessionId: string;
   sessionFile?: string;
@@ -76,6 +97,7 @@ export interface SessionInfo {
   model?: { provider: string; id: string };
   thinkingLevel?: string;
   mode: "tui" | "rpc";
+  models?: SessionModelsWire;
 }
 
 export interface QueueItemWire {
@@ -534,6 +556,41 @@ const WireEntrySchema = Type.Object(
   { additionalProperties: true },
 );
 
+const ModelOptionSchema = Type.Object(
+  {
+    provider: Type.String({ minLength: 1, maxLength: 256 }),
+    id: Type.String({ minLength: 1, maxLength: 256 }),
+    name: Type.Optional(Type.String({ maxLength: 192 })),
+    ctx: Type.Optional(Type.Number({ minimum: 0 })),
+    reasoning: Type.Optional(Type.Boolean()),
+    scoped: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: true },
+);
+export const SessionModelsSchema = Type.Object(
+  {
+    status: Type.String({ maxLength: 32 }),
+    items: Type.Array(ModelOptionSchema, { maxItems: 320 }),
+    total: Type.Integer({ minimum: 0 }),
+    omitted: Type.Optional(Type.Integer({ minimum: 0 })),
+    invalid: Type.Optional(Type.Integer({ minimum: 0 })),
+    scoped: Type.Optional(Type.Boolean()),
+    levels: Type.Optional(Type.Array(Type.String({ maxLength: 32 }), { maxItems: 16 })),
+    policy: Type.Object(
+      { model: Type.String({ maxLength: 16 }), thinking: Type.String({ maxLength: 16 }) },
+      { additionalProperties: true },
+    ),
+    shadowed: Type.Optional(
+      Type.Object(
+        { model: Type.Optional(Type.Boolean()), thinking: Type.Optional(Type.Boolean()) },
+        { additionalProperties: true },
+      ),
+    ),
+    sampledAt: Type.Number(),
+  },
+  { additionalProperties: true },
+);
+
 const SessionInfoSchema = Type.Object({
   sessionId: Type.String(),
   sessionFile: Type.Optional(Type.String()),
@@ -544,6 +601,7 @@ const SessionInfoSchema = Type.Object({
   model: Type.Optional(Type.Object({ provider: Type.String(), id: Type.String() })),
   thinkingLevel: Type.Optional(Type.String()),
   mode: Type.Union([Type.Literal("tui"), Type.Literal("rpc")]),
+  models: Type.Optional(SessionModelsSchema),
 });
 
 const QueueItemSchema = Type.Object(

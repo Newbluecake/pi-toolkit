@@ -1,0 +1,20 @@
+{
+  "status": "future-status",
+  "items": [
+    {
+      "provider": "openai",
+      "id": "gpt-5",
+      "futureOption": {
+        "enabled": true
+      }
+    }
+  ],
+  "total": 1,
+  "policy": {
+    "model": "allow",
+    "thinking": "allow",
+    "futurePolicy": "audit"
+  },
+  "sampledAt": 1,
+  "futureModelsField": "kept"
+}
