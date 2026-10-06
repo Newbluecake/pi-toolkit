@@ -1,5 +1,5 @@
 /*
- * pi web-hub — detail pane header + session info + metrics + the DetailBody wrapper
+ * pi web-hub — detail pane header + session info (incl. cost) + the DetailBody wrapper
  * (vue-plan.md v2.1 §3.2, §5.2, §5.3 — P3 exclusive). Ported from
  * `docs/dev/web-hub/ui-mockups/app.css`'s "detail pane" section (up to, but excluding, the
  * "subagent tree" section — `.fleet`/`.panel-*`/`.tree-scroll`/`.run*` belong to P4's
@@ -10,11 +10,9 @@
  * `DetailBody.vue`'s root `<section>`), so P4 only has to lay out *inside* an already flex:1,
  * min-height:0, column-flex box — never having to duplicate this file's own sizing rules.
  *
- * The cost metric (`.metrics-wrap`) flows as a plain row in the same info stack as
- * `.session-info` / the task and worktree panels, at every width — it mirrors their
- * collapsed-summary-button / expanded-panel grammar exactly instead of living in its own
- * grid column aside them (2026-10 user field report: the aside column crowded out
- * cwd/model text and read as visually disconnected from the rest of the session info).
+ * The session cost rides `.session-info` itself (2026-10-07 user request): a `$…` chip on
+ * the summary line, the detail row (with sub-agent aside) in the expanded `.kv` panel — the
+ * standalone `.metrics-wrap` row that used to sit in this stack is deleted.
  */
 
 .detail {
@@ -158,8 +156,8 @@
 
 /* ≤1024px field-report fix (2026-10-05): inside the header's minmax(180px,1fr) column the open
  * kv panel's value cell was crushed to char-per-line wrapping. The OPEN details spans both
- * columns (the summary keeps full width too — metrics drop to their own row, same as ≤480px),
- * and each kv row stacks: label on its own line, value + copy button below. */
+ * columns (the summary keeps full width too), and each kv row stacks: label on its own line,
+ * value + copy button below. */
 @media (max-width: 1024px) {
   .session-info[open] {
     grid-column: 1 / -1;
@@ -179,96 +177,14 @@
   }
 }
 
-/* The cost row: same grammar as `.session-sum` / `.todo-sum` / `.wt-sum` (margin.-6px/padding
- * 6px flat button, hover surface-2, chev rotates on expand) at every width — no sunken box,
- * no separate grid column, just another row in the info stack. */
-.metrics-wrap {
-  margin-top: var(--sp-1);
-}
-
-.metrics-summary {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  width: 100%;
-  min-width: 0;
-  min-height: 20px; /* desktop ×1/4 compaction (2026-10-06) */
-  margin: 0 -6px;
-  padding: 0 6px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: none;
+/* 2026-10-07 (user request 「花费合并到第一行的会话详情」): the standalone cost row
+ * (`.metrics-wrap` / `.metrics-summary` / `.metrics` / `.metric`) is DELETED — the cost
+ * chip lives on `.session-sum` (unstyled beyond the shared chip grammar: no icon, the
+ * "$" prefix is the marker) and its detail row lives in `.kv`, whose sub-agent aside
+ * mirrors the retired `.metric .aside` look. */
+.kv dd .aside {
+  margin-left: var(--sp-2);
   color: var(--c-text-3);
-  font-size: var(--fs-xs);
-  cursor: pointer;
-  text-align: left;
-}
-
-.metrics-summary:hover {
-  background: var(--c-surface-2);
-}
-
-.metrics-summary-text {
-  color: var(--c-text-2);
-  font-weight: var(--fw-semibold);
-}
-
-.metrics-summary .chev {
-  margin-left: auto;
-  flex: none;
-  transition: transform var(--dur-base) var(--ease-out);
-}
-
-.metrics-wrap[data-collapsed="false"] .metrics-summary .chev {
-  transform: rotate(90deg);
-}
-
-.metrics-wrap[data-collapsed="true"] .metrics {
-  display: none;
-}
-
-/* expanded panel: mirrors `.kv`'s sunken-box look (SessionInfo's own expanded panel) so the
- * cost detail reads as the same family of "tap to expand" rows. */
-.metrics {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-2) var(--sp-4);
-  margin: var(--sp-1) 0 0;
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-md);
-  background: var(--c-surface-2);
-}
-
-.metric {
-  display: grid;
-  gap: 4px;
-  justify-items: start;
-}
-
-.metric dt {
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-  font-weight: var(--fw-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.metric dd {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-size: var(--fs-md);
-  font-weight: var(--fw-semibold);
-  font-variant-numeric: tabular-nums;
-}
-
-.metric .aside {
-  color: var(--c-text-3);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-regular);
 }
 
 .detail-body {
@@ -339,16 +255,15 @@
 }
 
 /* landscape phones (todo #7): the header collapses to a single titlebar line — session info
- * and the metrics panel hide outright (both remain one tap away in portrait / on taller
- * viewports), paddings tighten. */
+ * (now including the cost chip/row, 2026-10-07) hides outright (one tap away in portrait /
+ * on taller viewports), paddings tighten. */
 @media (orientation: landscape) and (max-height: 500px) {
   .detail-head {
     gap: 0;
     padding: var(--sp-1) var(--sp-3) var(--sp-1);
   }
 
-  .detail-head .session-info,
-  .detail-head .metrics-wrap {
+  .detail-head .session-info {
     display: none;
   }
 
@@ -364,11 +279,6 @@
    * airy cards. */
   .session-sum {
     min-height: 16px; /* ×1/4 pitch (2026-10-06: "会话详情间隔缩小为四分之一") */
-    line-height: 1.2;
-  }
-
-  .metrics-summary {
-    min-height: 16px;
     line-height: 1.2;
   }
 

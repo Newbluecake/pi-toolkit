@@ -123,6 +123,11 @@ export interface DetailHeaderEmits {
 export interface SessionInfoProps {
   readonly session: WireSessionInfo | undefined;
   readonly card: AgentCard | undefined;
+  /** 2026-10-07 user request (「花费合并到第一行的会话详情」): the header's separate cost row
+   * folded into this component — the summary line gains a cost chip, the expanded kv panel
+   * gains the cost row (incl. the sub-agent aside). Absent/undefined ⇒ neither renders. */
+  readonly costUsd?: number;
+  readonly subagentCostUsd?: number;
 }
 
 export interface CopyButtonProps {

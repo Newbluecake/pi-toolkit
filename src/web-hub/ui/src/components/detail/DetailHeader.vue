@@ -1,35 +1,34 @@
 <!--
   Detail pane header: back button (single-view bands: ≤767 via `narrow`, 481–1024 mid band via
   the injected `SIDEBAR_DRAWER` context), mid-band drawer toggle, title, status pill, session
-  info, cost metric (ui-design.md §5.2, vue-plan.md v2.1 §3.2, §5.2 — P3 exclusive,
+  info, session cost (ui-design.md §5.2, vue-plan.md v2.1 §3.2, §5.2 — P3 exclusive,
   `components/detail/**`). 2026-10-05 (user 现场拍板): the CONTEXT metric moved out of this
-  header into the composer as `control/ContextRing.vue` (inject-only via `DETAIL_METRICS`); the
-  header's metrics panel now carries cost only. web-hub-spawn SP12 adds, via `HUB_CTX` inject
+  header into the composer as `control/ContextRing.vue` (inject-only via `DETAIL_METRICS`).
+  web-hub-spawn SP12 adds, via `HUB_CTX` inject
   only (frozen props untouched, kept deliberately local so the pending mobile-collapse line can
   still reflow this header freely): the managed session's 「停止会话」 button and the
   first-prompt refill notice (arch §9.1).
 
-  Mobile-adaptation package (todo #7), both additions inject/local-only like SP12:
-  - `SIDEBAR_DRAWER` (DashboardView-provided): while the 481–1024px mid band shows a detail
-    route, a 「show agents list」 toggle opens the sidebar as an overlay drawer, and the back
-    button renders even though `narrow` is false (single-view navigation needs it).
-  - Metrics fold: the cost panel collapses to a one-line summary ("$195.54") by default, tap to
-    expand — a local `metricsCollapsed` ref plus `data-collapsed` on `.metrics-wrap`.
+  Mobile-adaptation package (todo #7), inject/local-only like SP12:
+  `SIDEBAR_DRAWER` (DashboardView-provided): while the 481–1024px mid band shows a detail
+  route, a 「show agents list」 toggle opens the sidebar as an overlay drawer, and the back
+  button renders even though `narrow` is false (single-view navigation needs it).
+  (Its second addition — the `.metrics-wrap` fold — is gone again, see 2026-10-07 below.)
 
   2026-10 (user field report, fold-into-info-stack revision): `.metrics-wrap` used to live in
   its own grid column to the right of the title/session-info stack from 481px up (full panel
-  always open ≥1025px) — read as visually disconnected and crowded out cwd/model text. It is
-  now a plain row in the same vertical stack as `SessionInfo`/`TodoPanel`/`WorktreePanel`, at
-  every width, with the SAME collapsed-summary-button / expanded-panel grammar as those — the
-  fold is no longer phone-only, `detail.css` has no breakpoint for it at all. `metricsCollapsed`
-  still starts `true` (same default the other panels use for their own `open` ref).
+  always open ≥1025px) — read as visually disconnected and crowded out cwd/model text.
+
+  2026-10-07 (user request 「花费合并到第一行的会话详情」): the cost row is GONE from this
+  header altogether — `SessionInfo`'s summary line carries a `$…` chip and its expanded kv
+  panel carries the cost row (incl. the sub-agent aside). The `metricsCollapsed` fold state,
+  the `.metrics-summary` toggle and `detail.metricsToggleAria` went with it.
 -->
 <script setup lang="ts">
-import { computed, inject, onUnmounted, ref, useId } from "vue";
+import { computed, inject, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
-import { formatUsd } from "../../format.js";
 import { managedFor } from "../../logic/spawn.js";
 import type { DetailHeaderEmits, DetailHeaderProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
@@ -81,18 +80,6 @@ const subCostLabel = computed(() => {
 
 const drawer = inject(SIDEBAR_DRAWER, null);
 const showBack = computed(() => props.narrow || drawer?.active.value === true);
-
-/** Default-collapsed at every width, same as `TodoPanel`/`WorktreePanel`'s own `open` ref. */
-const metricsCollapsed = ref(true);
-const metricsSummary = computed(() => formatUsd(status.value?.costUsd));
-// verify:detail-header-cost-merge P1 ①: neither TodoPanel nor WorktreePanel's own toggle
-// buttons wire aria-controls (no same-component precedent to mirror), so this is the row's
-// own fix — `useId()` keeps the id stable and unique even if several DetailHeader instances
-// ever mount at once.
-const metricsPanelId = useId();
-function toggleMetrics(): void {
-  metricsCollapsed.value = !metricsCollapsed.value;
-}
 
 // ---------------------------------------------------------------------------
 // web-hub-spawn SP12 (arch §9.1) — additive, inject-only (the frozen DetailHeaderProps stay
@@ -222,31 +209,12 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
       </button>
     </p>
 
-    <SessionInfo :session="session" :card="card" />
-
-    <div class="metrics-wrap" :data-collapsed="metricsCollapsed">
-      <button
-        class="metrics-summary"
-        type="button"
-        :aria-expanded="!metricsCollapsed"
-        :aria-controls="metricsPanelId"
-        :aria-label="t('detail.metricsToggleAria')"
-        @click="toggleMetrics"
-      >
-        <span class="metrics-summary-label">{{ t("detail.costLabel") }}</span>
-        <span class="metrics-summary-text num">{{ metricsSummary }}</span>
-        <AppIcon name="chev-right" class="icon-sm chev" />
-      </button>
-      <dl :id="metricsPanelId" class="metrics">
-        <div class="metric">
-          <dt>{{ t("detail.costLabel") }}</dt>
-          <dd>
-            {{ formatUsd(status?.costUsd) }}
-            <span v-if="subCostLabel" class="aside">{{ subCostLabel }}</span>
-          </dd>
-        </div>
-      </dl>
-    </div>
+    <SessionInfo
+      :session="session"
+      :card="card"
+      :cost-usd="status?.costUsd"
+      :subagent-cost-usd="status?.subagentCostUsd"
+    />
 
     <!-- todo-web T4: the main session's task list, mirrored onto `agent.todo` by the status
          reducer; the panel renders nothing when the wire is absent or empty. -->

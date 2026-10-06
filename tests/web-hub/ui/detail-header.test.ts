@@ -2,9 +2,11 @@
 /**
  * `DetailHeader.vue` (ui-design.md §5.2, vue-plan.md v2.1 §3.2, §5.2 — P3). Title fallback
  * chain (session name → sessionId prefix → "(no session name)"), the back button's `narrow`
- * gating, and the cost metric. 2026-10-05 (user 现场拍板): the CONTEXT metric left this header
- * for the composer's `ContextRing` (covered by context-ring.test.ts) — the metrics panel here
- * carries cost only.
+ * gating, and the session cost. 2026-10-05 (user 现场拍板): the CONTEXT metric left this header
+ * for the composer's `ContextRing` (covered by context-ring.test.ts); 2026-10-07 (user request
+ * 「花费合并到第一行的会话详情」): the COST row folded into `SessionInfo` — a `$…` chip on the
+ * summary line plus a kv row (with sub-agent aside) in the expanded panel. The `.metrics-*`
+ * row, its fold state and `detail.metricsToggleAria` are gone.
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -88,13 +90,19 @@ describe("DetailHeader.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
     expect(wrapper.emitted("back")).toHaveLength(1);
   });
 
-  it("renders the cost with the sub-agent cost aside — and NO context metric (moved to the composer's ContextRing)", () => {
+  it("shows the cost as a chip on the session-summary row — and NO context metric (moved to the composer's ContextRing)", () => {
     const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
-    const metrics = wrapper.find(".metrics");
-    expect(metrics.text()).toContain("$195.54");
-    expect(metrics.text()).toContain("$36.17");
-    expect(metrics.text()).not.toContain("62%");
+    const summary = wrapper.get(".session-sum");
+    expect(summary.text()).toContain("$195.54");
+    expect(summary.text()).not.toContain("62%");
     expect(wrapper.find("meter").exists()).toBe(false);
+    // the detail (incl. the sub-agent aside) lives in the expanded kv panel now
+    const kv = wrapper.get(".kv");
+    expect(kv.text()).toContain("$195.54");
+    expect(kv.text()).toContain("$36.17");
+    // the standalone metrics row is gone
+    expect(wrapper.find(".metrics-wrap").exists()).toBe(false);
+    expect(wrapper.find(".metrics-summary").exists()).toBe(false);
   });
 
   it("session summary shows the short cwd and model/thinking level", () => {
@@ -256,59 +264,43 @@ describe("DetailHeader.vue — first-prompt refill notice (SP12, §3.2)", () => 
 });
 
 /**
- * Mobile-adaptation package (todo #7): the ≤480px metrics fold (`.metrics-wrap`'s
- * `data-collapsed` + the one-line `.metrics-summary` toggle — CSS decides at which widths the
- * fold is honored, the component only carries the state) and the mid-band drawer toggle
- * (DashboardView-provided `SIDEBAR_DRAWER` context, inject-only like SP12).
+ * 2026-10-07 (user request 「花费合并到第一行的会话详情」): the cost merged into `SessionInfo` —
+ * the summary line carries a `$…` chip, the expanded kv panel the cost row with the sub-agent
+ * aside; an unreported cost renders NEITHER (no bare "—" chip in the row).
  */
-import { computed } from "vue";
-import { SIDEBAR_DRAWER } from "../../../src/web-hub/ui/src/components/shell/sidebarDrawer.js";
-
-describe("DetailHeader.vue — ≤480px metrics fold (todo #7)", () => {
-  it("starts collapsed with a one-line cost-only summary (context moved to the composer's ContextRing)", () => {
+describe("DetailHeader.vue — cost merged into the session-info row (2026-10-07)", () => {
+  it("summary chip + kv row render when a cost is reported, sub-agent cost aside in the kv", () => {
     const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: true } });
-    const wrap = wrapper.get(".metrics-wrap");
-    expect(wrap.attributes("data-collapsed")).toBe("true");
-    const summary = wrapper.get(".metrics-summary");
-    expect(summary.text()).toContain("$195.54");
-    expect(summary.text()).not.toContain("62%");
-    expect(summary.attributes("aria-expanded")).toBe("false");
-    // the full panel stays in the DOM (CSS hides it ≤480px; ≥481px the fold state is inert)
-    expect(wrapper.find(".metrics").exists()).toBe(true);
+    expect(wrapper.get(".session-sum .cost-chip").text()).toContain("$195.54");
+    const kv = wrapper.get(".kv");
+    expect(kv.text()).toContain("Cost");
+    expect(kv.text()).toContain("$195.54");
+    expect(kv.get(".aside").text()).toContain("$36.17");
   });
 
-  it("falls back to a dash when no cost has been reported yet", () => {
+  it("renders no chip and no kv cost row while no cost has been reported yet", () => {
     const wrapper = mount(DetailHeader, { props: { agent: agent({ status: undefined }), narrow: true } });
-    expect(wrapper.get(".metrics-summary").text()).toContain("—");
+    expect(wrapper.find(".session-sum .cost-chip").exists()).toBe(false);
+    expect(wrapper.find(".kv .aside").exists()).toBe(false);
+    expect(wrapper.get(".kv").text()).not.toContain("Cost");
   });
 
-  it("clicking the summary toggles the fold and aria-expanded", async () => {
-    const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: true } });
-    const summary = wrapper.get(".metrics-summary");
-    await summary.trigger("click");
-    expect(wrapper.get(".metrics-wrap").attributes("data-collapsed")).toBe("false");
-    expect(summary.attributes("aria-expanded")).toBe("true");
-    await summary.trigger("click");
-    expect(wrapper.get(".metrics-wrap").attributes("data-collapsed")).toBe("true");
-  });
-
-  // verify:detail-header-cost-merge P1 ①: the toggle must point `aria-controls` at the panel
-  // it expands — neither `TodoPanel` nor `WorktreePanel` wire this on their own toggle buttons
-  // (checked: no same-component precedent to mirror), so this is the row's own fix.
-  it("wires aria-controls on the toggle to the expanded panel's id", () => {
-    const wrapper = mount(DetailHeader, { props: { agent: agent(), narrow: true } });
-    const summary = wrapper.get(".metrics-summary");
-    const panel = wrapper.get(".metrics");
-    const controls = summary.attributes("aria-controls");
-    expect(controls).toBeTruthy();
-    expect(panel.attributes("id")).toBe(controls);
+  it("omits the sub-agent aside when there is no sub-agent cost", () => {
+    const wrapper = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, costUsd: 1.5 } as never }),
+        narrow: true,
+      },
+    });
+    expect(wrapper.get(".session-sum .cost-chip").text()).toContain("$1.50");
+    expect(wrapper.find(".kv .aside").exists()).toBe(false);
   });
 });
 
 // verify:detail-header-cost-merge P1 ②: the whole summary-row family (`.session-sum` /
-// `.todo-sum` / `.wt-sum` / `.metrics-summary`) shares a 20px default min-height (16px under
-// `pointer: coarse`) so the cost row never reads shorter/taller than its siblings in the same
-// info stack — asserted straight off the real stylesheets (component mounts can't see CSS).
+// `.todo-sum` / `.wt-sum`) shares a 20px default min-height (16px under `pointer: coarse`) —
+// asserted straight off the real stylesheets (component mounts can't see CSS). (2026-10-07:
+// `.metrics-summary` left the family when the cost merged into `.session-sum` itself.)
 describe("summary-row touch target parity (verify:detail-header-cost-merge P1 ②)", () => {
   const read = (relPath: string): string => readFileSync(resolve(fileURLToPath(import.meta.url), relPath), "utf8");
   const rule = (css: string, selector: string): string => {
@@ -316,12 +308,11 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 �
     return m?.[0] ?? "";
   };
 
-  it("default (non-coarse) min-height is 20px for .session-sum / .metrics-summary (detail.css), .todo-sum (todo.css), .wt-sum (worktrees.css)", () => {
+  it("default (non-coarse) min-height is 20px for .session-sum (detail.css), .todo-sum (todo.css), .wt-sum (worktrees.css)", () => {
     const detailCss = read("../../../../src/web-hub/ui/src/styles/detail.css");
     const todoCss = read("../../../../src/web-hub/ui/src/styles/todo.css");
     const wtCss = read("../../../../src/web-hub/ui/src/styles/worktrees.css");
     expect(rule(detailCss, ".session-sum")).toMatch(/min-height:\s*20px/);
-    expect(rule(detailCss, ".metrics-summary")).toMatch(/min-height:\s*20px/);
     expect(rule(todoCss, ".todo-sum")).toMatch(/min-height:\s*20px/);
     expect(rule(wtCss, ".wt-sum")).toMatch(/min-height:\s*20px/);
   });
@@ -335,11 +326,13 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 �
       return start < 0 ? "" : css.slice(start);
     };
     expect(coarseBlock(detailCss)).toMatch(/\.session-sum\s*\{\s*min-height:\s*16px/);
-    expect(coarseBlock(detailCss)).toMatch(/\.metrics-summary\s*\{\s*min-height:\s*16px/);
     expect(coarseBlock(todoCss)).toMatch(/\.todo-sum\s*\{\s*min-height:\s*16px/);
     expect(coarseBlock(wtCss)).toMatch(/\.wt-sum\s*\{\s*min-height:\s*16px/);
   });
 });
+
+import { computed } from "vue";
+import { SIDEBAR_DRAWER } from "../../../src/web-hub/ui/src/components/shell/sidebarDrawer.js";
 
 describe("DetailHeader.vue — mid-band drawer toggle (todo #7)", () => {
   function drawerCtx(active: boolean, open: () => void = () => {}) {

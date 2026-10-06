@@ -4,11 +4,17 @@
   + thinking level, session id prefix) plus a `dl.kv` of full copyable values when expanded.
   No hover tooltips (ui-design §6.3) — everything reachable is either always visible in the
   summary or one tap away in the `kv` list.
+
+  2026-10-07 (user request 「花费可以合并到第一行的会话详情」): the header's standalone cost row
+  (`.metrics-wrap`, now deleted) merged into THIS component — a `$…` chip on the summary line
+  (no icon: the "$" prefix IS the marker; the P0-frozen sprite has no coin glyph) and a cost
+  row (with the sub-agent aside) in the expanded kv panel. Unknown cost hides both.
 -->
 <script setup lang="ts">
 import { computed } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { formatUsd } from "../../format.js";
 import type { SessionInfoProps } from "../../contracts.js";
 import CopyButton from "./CopyButton.vue";
 
@@ -37,6 +43,14 @@ const processLine = computed(() => {
   ];
   return parts.filter((p): p is string => p !== undefined).join(" · ");
 });
+
+/** Cost chip + kv row (see the file header): null while no cost has been reported — an
+ * unreported cost must not render a bare "—" chip in the summary row. */
+const costText = computed(() => (typeof props.costUsd === "number" ? formatUsd(props.costUsd) : null));
+const subCostText = computed(() => {
+  const sub = props.subagentCostUsd;
+  return typeof sub === "number" && sub > 0 ? t("detail.subCost", { v: formatUsd(sub) }) : null;
+});
 </script>
 
 <template>
@@ -52,6 +66,9 @@ const processLine = computed(() => {
       >
       <span v-if="sessionIdShort" class="hide-sm"
         ><AppIcon name="hash" class="icon-sm" /><span class="trunc" translate="no">{{ sessionIdShort }}</span></span
+      >
+      <span v-if="costText !== null" class="cost-chip"
+        ><span class="trunc num" translate="no">{{ costText }}</span></span
       >
       <AppIcon name="chev-right" class="icon-sm chev" />
     </summary>
@@ -74,6 +91,14 @@ const processLine = computed(() => {
       <div v-if="processLine">
         <dt>{{ t("detail.kvProcess") }}</dt>
         <dd translate="no">{{ processLine }}</dd>
+        <span></span>
+      </div>
+      <div v-if="costText !== null">
+        <dt>{{ t("detail.costLabel") }}</dt>
+        <dd>
+          <span translate="no">{{ costText }}</span>
+          <span v-if="subCostText" class="aside">{{ subCostText }}</span>
+        </dd>
         <span></span>
       </div>
     </dl>
