@@ -8,8 +8,9 @@
  * the 481–1024px mid band into single-view navigation with the sidebar as an **overlay
  * drawer** over the detail pane (scrim click / Escape / picking an agent closes it — the same
  * overlay grammar docs/dev/web-hub-fleet-drawer/plan.md froze for its 768–1279 drawer).
- * `--sidebar-w` is 320px at the 1025 split and 400px at 1280 (tokens.css's own default of
- * 320px is a dead fallback below 1025 — no `.layout` split ever reads it there).
+ * `--sidebar-w` is 240px at the 1025 split and 300px at 1280 (2026-10: desktop defaults
+ * shrunk by a quarter from 320/400; tokens.css's own default of 320px is a dead fallback
+ * below 1025 — no `.layout` split ever reads it there).
  *
  * List↔detail visibility is decided by `DashboardView.vue`'s own `v-if` (driven by three
  * `useMedia` queries — `(max-width: 767px)` narrow, `(min-width: 1025px)` wide, and the
@@ -252,17 +253,67 @@
    * silently win over this media-scoped override at every width — verified against a real
    * built bundle (`grep sidebar-w dist/web-hub-ui/assets/*.css`) before landing this fix. */
   html:root {
-    --sidebar-w: 320px;
+    --sidebar-w: 240px;
   }
 
   .layout {
     grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    /* positioning context for `.sidebar-resizer` (absolute; straddles the split border).
+     * Scoped to this media query so the 481–1024 drawer band and ≤480 phone band keep
+     * their byte-identical rules. */
+    position: relative;
   }
+
+  /* draggable sidebar separator (`useSidebarWidth.ts`): a 1px line with a 6px hit zone
+   * centered on the sidebar/detail border. Rendered only at ≥1025px (`v-if="wide"` in
+   * DashboardView.vue); absolutely positioned so it never joins the two-track grid. */
+  .sidebar-resizer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--sidebar-w) - 3px);
+    width: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: col-resize;
+    z-index: 20; /* below the mid-band drawer's scrim/overlay tier (30/40) */
+    touch-action: none; /* pointer-drag must not scroll the panes on touch screens */
+  }
+
+  .sidebar-resizer::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 2px; /* visually centered inside the 6px hit zone */
+    width: 1px;
+    background: var(--c-border);
+    transition: background 0.12s ease;
+  }
+
+  .sidebar-resizer:hover::before,
+  .sidebar-resizer:active::before,
+  .sidebar-resizer:focus-visible::before {
+    background: var(--c-primary);
+  }
+
+  .sidebar-resizer:focus-visible {
+    outline: 2px solid var(--c-primary);
+    outline-offset: -2px;
+  }
+}
+
+/* while a sidebar drag is in flight (`useSidebarWidth.ts` toggles this on <body>): kill
+ * text selection across both panes and keep the resize cursor everywhere. */
+body.pwh-sidebar-resizing {
+  user-select: none;
+  cursor: col-resize;
 }
 
 @media (min-width: 1280px) {
   html:root {
-    --sidebar-w: 400px;
+    --sidebar-w: 300px;
   }
 }
 

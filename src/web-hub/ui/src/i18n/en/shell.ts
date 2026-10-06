@@ -13,6 +13,8 @@ const shell = {
   "conn.reconnecting": "Reconnecting…",
   "conn.auth": "Signed out",
   booting: "Loading…",
+  sidebarResize: "Resize sidebar",
+  sidebarResizeHint: "Drag to resize · double-click to reset",
   "theme.system": "System",
   "theme.light": "Light",
   "theme.dark": "Dark",

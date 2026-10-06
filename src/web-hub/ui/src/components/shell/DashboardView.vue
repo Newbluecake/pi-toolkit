@@ -35,6 +35,7 @@
 import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
+import { useSidebarWidth } from "../../composables/useSidebarWidth.js";
 import { useTicker } from "../../composables/useTicker.js";
 import type { UseHubHandle } from "../../composables/useHub.js";
 import type { DashboardViewProps } from "../../contracts.js";
@@ -43,6 +44,7 @@ import AgentList from "../agents/AgentList.vue";
 import AgentDetail from "../detail/AgentDetail.vue";
 import EmptyState from "./EmptyState.vue";
 import { SIDEBAR_DRAWER } from "./sidebarDrawer.js";
+import { browserLocalStorage } from "./themeStorage.js";
 
 const props = defineProps<DashboardViewProps>();
 const { t } = useI18n();
@@ -50,6 +52,25 @@ const { t } = useI18n();
 const narrow = useMedia(window, "(max-width: 767px)").matches;
 const wide = useMedia(window, "(min-width: 1025px)").matches;
 const drawerBand = useMedia(window, "(min-width: 481px) and (max-width: 1024px)").matches;
+
+// ---------------------------------------------------------------------------
+// draggable sidebar width (desktop ≥1025px split only — `useSidebarWidth.ts`)
+// ---------------------------------------------------------------------------
+// The override reaches the DOM as an inline `--sidebar-w` on `.layout` (inline style beats
+// shell.css's media-scoped `html:root` rules by cascade) and ONLY while `wide` — in the
+// 481–1024 drawer band and the ≤480 phone band no handle is rendered and no inline style is
+// written, leaving those bands byte-identical to before this feature.
+const layoutEl = ref<HTMLElement | null>(null);
+const sidebarResize = useSidebarWidth({
+  storage: browserLocalStorage(),
+  win: window,
+  target: layoutEl,
+  body: document.body,
+});
+const layoutStyle = computed(() =>
+  wide.value && sidebarResize.width.value !== null ? { "--sidebar-w": `${sidebarResize.width.value}px` } : undefined,
+);
+const sidebarAriaNow = computed(() => sidebarResize.width.value ?? sidebarResize.currentWidth());
 
 const ticker = useTicker({
   doc: document,
@@ -192,7 +213,7 @@ function onLoadOlder(agentKey: string): void {
 </script>
 
 <template>
-  <div class="layout">
+  <div ref="layoutEl" class="layout" :style="layoutStyle">
     <!-- list: full-width page on the list route of every single-view band, permanent column in
          the ≥1025 split, overlay drawer (`.sidebar-drawer` + scrim) in the 481–1024 mid band -->
     <AgentList
@@ -204,6 +225,22 @@ function onLoadOlder(agentKey: string): void {
       @update:filter="filter = $event"
       @click="onListClick"
     />
+    <!-- draggable split separator (≥1025px only; absolutely positioned, never a grid track) -->
+    <div
+      v-if="wide"
+      class="sidebar-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      tabindex="0"
+      :aria-label="t('shell.sidebarResize')"
+      :aria-valuenow="sidebarAriaNow"
+      :aria-valuemin="sidebarResize.ariaMin"
+      :aria-valuemax="sidebarResize.ariaMax()"
+      :title="t('shell.sidebarResizeHint')"
+      @pointerdown="sidebarResize.onPointerDown"
+      @keydown="sidebarResize.onKeyDown"
+      @dblclick="sidebarResize.reset"
+    ></div>
     <div v-if="drawerVisible" class="drawer-scrim" aria-hidden="true" @click="closeDrawer"></div>
 
     <template v-if="wide">

@@ -16,6 +16,8 @@ const shell = {
   "conn.reconnecting": "重新连接中…",
   "conn.auth": "已注销",
   booting: "加载中…",
+  sidebarResize: "调整会话列表宽度",
+  sidebarResizeHint: "拖动调整宽度 · 双击恢复默认",
   "theme.system": "跟随系统",
   "theme.light": "浅色",
   "theme.dark": "暗色",
