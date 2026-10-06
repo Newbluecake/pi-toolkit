@@ -416,6 +416,23 @@
 }
 
 /* --- coarse pointers: ≥44px rows (form factor stays viewport-driven, #16) --- */
+/* Narrow phones (2026-10-06 field report "模型切换太高了,缩小到现在的三分之一"): the chips
+ * strip above the composer collapses to a slim ~24px row — chips 22px tall at fs-2xs, no row
+ * padding. The pickers themselves keep their ≥44px rows; only the trigger chips slim down. */
+@media (max-width: 767px) {
+  .dock-tools {
+    min-height: 0;
+    padding-top: 2px;
+  }
+
+  .dock-tools .model-chip {
+    min-height: 22px; /* overrides the coarse-pointer 40px below — both match on phones, this
+                         * block comes first but is more specific (.dock-tools prefix) */
+    padding: 0 8px;
+    font-size: var(--fs-2xs);
+  }
+}
+
 @media (pointer: coarse) {
   .model-chip {
     min-height: 40px;
