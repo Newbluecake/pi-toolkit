@@ -208,4 +208,11 @@
     min-height: 16px; /* summary-row family compaction — see detail.css */
     line-height: 1.2;
   }
+
+  .wt-copy {
+    /* 2026-10-06 field report (expanded rows still airy): the copy button's 44px coarse hit
+     * box was the TALLEST thing on the label line, centering the tiny path text in 44px of
+     * air. Negative vertical margins keep the hit box while the line collapses to text height. */
+    margin-block: -12px;
+  }
 }

@@ -523,7 +523,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--sp-2);
+  gap: 2px var(--sp-2); /* note row spacing ×1/4 (2026-10-06 "提示部分的行间距缩小为四分之一") */
   padding: var(--sp-1) var(--sp-2);
   border: 1px solid var(--c-border);
   border-radius: var(--r-sm);

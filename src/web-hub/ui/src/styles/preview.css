@@ -38,7 +38,12 @@ code.md-code.path-ref {
   .path-ref {
     display: inline-flex;
     align-items: center;
-    min-height: 44px;
+    /* 2026-10-06 wrap-safety rework: the old `min-height: 44px` + fixed negative margin pulled
+     * the NEXT line up into a multi-line (wrapped) ref's box — the "(image/jpeg, 592 KB)" meta
+     * overlapped the path's last-line underline. Padding grows the box to the same 44px on
+     * single-line refs, and on wrapped refs the pull-up lands in the link's own (empty)
+     * padding instead of on text. */
+    padding-block: calc((44px - 1.4em) / 2);
     margin-block: calc((44px - 1.4em) / -2);
     padding-inline: var(--sp-1);
     margin-inline: calc(-1 * var(--sp-1));
