@@ -19,6 +19,7 @@ import type {
   ExtendSource,
   LifecycleEvent,
   Millis,
+  TimeoutPolicy,
   ObserveRunResult,
   RunEffect,
   RunExitFacts,
@@ -64,6 +65,14 @@ export interface ResolvedSpawnRequest extends SessionSpec {
    * for the compile-time guard against exactly that.
    */
   deadlineAt?: Millis;
+  /**
+   * Timeout-policy (agent-explicit-timeout-extend plan §2.2): threaded from
+   * `SpawnRequest.timeoutPolicy` — spawn admission resolves it to a definite
+   * value ("fixed" | "extendable") before the run starts. Type-only in this
+   * batch; consumed by P1 (runner `enqueued` dispatch mirrors it into
+   * `diag.timeoutPolicy`).
+   */
+  timeoutPolicy?: TimeoutPolicy;
   /**
    * consult (plan §4.3/§4.4): threaded verbatim from
    * `SpawnRequest.forkSessionFrom`. The runner uses it for two things:

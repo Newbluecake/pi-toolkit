@@ -31,6 +31,9 @@ const THREADED = [
   "parentRunId",
   "deadlineAt",
   "forkSessionFrom",
+  // Timeout-policy (agent-explicit-timeout-extend plan §2.2/C10): must reach the
+  // runner so the `enqueued` dispatch can mirror it into diag.timeoutPolicy.
+  "timeoutPolicy",
 ] as const;
 
 /**

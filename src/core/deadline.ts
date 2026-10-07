@@ -248,3 +248,23 @@ export function withDeadline<T>(p: Promise<T>, ms: Millis, clock: Clock, label: 
     );
   });
 }
+
+/**
+ * Maximum allowed deadline span (agent-explicit-timeout-extend plan §3.3):
+ * one year in millis. Deadline arithmetic (deadlineAt / hardDeadlineAt
+ * derived from totalMs × maxTotalFactor) can overflow into Infinity or a
+ * span Node's setTimeout cannot represent usefully; spans are clamped to
+ * this bound before they are persisted or armed.
+ */
+export const MAX_DEADLINE_SPAN_MS = 365 * 86_400_000;
+
+/**
+ * Clamp a deadline span (relative duration in millis) to
+ * {@link MAX_DEADLINE_SPAN_MS}. Non-finite / negative / zero inputs yield
+ * `undefined` (invalid span). STUB in batch 0 (agent-explicit-timeout-extend
+ * plan §3.1): currently returns the input verbatim; the real implementation
+ * lands in P1 alongside the reducer `enqueued` / hardDeadlineAtFor wiring.
+ */
+export function clampSpanMs(ms: number): Millis | undefined {
+  return ms;
+}

@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import type { RunId, RunSnapshot, RunStatus } from "../core/types.js";
+import type { RunId, RunSnapshot, RunStatus, TimeoutPolicy } from "../core/types.js";
 import type { Tombstone, TombstoneStore } from "./tombstone.js";
 
 // RPC intentionally keeps exact-string semantics. This resolver is only for
@@ -25,7 +25,18 @@ export type ResolveRunResult =
   | { readonly ok: true; readonly runId: RunId }
   | { readonly ok: false; readonly error: string; readonly candidates: readonly ResumeCandidate[] };
 export type ResolveResumeResult =
-  | { readonly ok: true; readonly runId: RunId; readonly sessionFile: string }
+  | {
+      readonly ok: true;
+      readonly runId: RunId;
+      readonly sessionFile: string;
+      /**
+       * Timeout-policy of the resumed run (agent-explicit-timeout-extend plan §2.7):
+       * `snapshotWithSessionFile(...)?.diag.timeoutPolicy ?? tombstones.get(runId)?.timeoutPolicy`.
+       * Absent for old entries lacking the field. Type-only in this batch;
+       * `resolveResumeTarget` fills it in P1.
+       */
+      readonly timeoutPolicy?: TimeoutPolicy;
+    }
   | { readonly ok: false; readonly error: string; readonly candidates: readonly ResumeCandidate[] };
 
 const TERMINAL = new Set<RunStatus>(["completed", "failed", "timed_out", "aborted"]);

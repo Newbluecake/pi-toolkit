@@ -1,4 +1,4 @@
-import type { RunId, RunSnapshot } from "../core/types.js";
+import type { RunId, RunSnapshot, TimeoutPolicy } from "../core/types.js";
 
 export interface Tombstone {
   readonly runId: RunId;
@@ -6,6 +6,13 @@ export interface Tombstone {
   readonly sessionFile: string;
   readonly createdAt: number;
   readonly expiresAt: number;
+  /**
+   * Timeout-policy persisted from `snapshot.diag.timeoutPolicy` at eviction
+   * (agent-explicit-timeout-extend plan §2.7): a resume of an evicted run
+   * within the TTL inherits the original run's policy. Absent on old entries.
+   * Type-only in this batch; `register()` copies it in P1.
+   */
+  readonly timeoutPolicy?: TimeoutPolicy;
 }
 
 /** In-memory terminal handle index. Entries are intentionally bounded by TTL. */

@@ -61,3 +61,22 @@ export class FakeClock implements Clock {
     return this.entries.size;
   }
 }
+
+/**
+ * Maximum delay setTimeout accepts before Node fires it after ~1ms
+ * (2^31 − 1 ms ≈ 24.8 days). Delays beyond this must be split into
+ * chained segments (agent-explicit-timeout-extend plan §3.3/P4, C16).
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * Wraps a raw Clock so `setTimer(delayMs, fn)` works for ANY non-negative
+ * delay: delays beyond {@link MAX_TIMER_DELAY_MS} are armed as chained
+ * segments, eliminating the 1ms busy-wait re-arm loop (C16).
+ * STUB in batch 0 (agent-explicit-timeout-extend plan §3.1): currently
+ * passes through to the raw clock verbatim; the segmented implementation
+ * lands in P4.
+ */
+export function createSegmentedClock(raw: Clock): Clock {
+  return raw;
+}

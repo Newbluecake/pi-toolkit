@@ -72,7 +72,7 @@ export interface DeadlineBudget {
   totalGraceMs: Millis;
   /** 单个 run 允许的 deadline 延长次数上限；0 = 禁止延长（同时也禁用宽限：graceWindow 经 extendability 判额度）。 */
   maxExtensions: number;
-  /** 硬天花板倍数：hardDeadlineAt = enqueuedAt + ceil(totalMs * maxTotalFactor)（≥ 1）。显式预算 run 被 applyBudgetPolicy 钳为 1。 */
+  /** 硬天花板倍数：hardDeadlineAt = enqueuedAt + ceil(totalMs * maxTotalFactor)（≥ 1）。被 applyBudgetPolicy({ fixedDeadline: true }) 钳为 1（fixed-deadline run：H = D0，无宽限无延长；agent-explicit-timeout-extend plan §2.2）。 */
   maxTotalFactor: number;
 }
 export interface RunDeadlines {
@@ -98,6 +98,14 @@ export interface RunDeadlines {
  */
 export const THINKING_LEVELS = ["off", "low", "medium", "high"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+/**
+ * Timeout-policy 分类的取值（agent-explicit-timeout-extend plan §2.2）。
+ * - "fixed": 硬顶 —— 不宽限、不延长（applyBudgetPolicy 钳 maxTotalFactor = 1，⇒ H === D0）。
+ * - "extendable": 复用默认预算旋钮（totalGraceMs / maxExtensions / maxTotalFactor）宽限与延长。
+ * 缺省语义 = "fixed"（fail-safe + 兼容：workflow 子 run / consult / goal / tidy / RPC 全部程序派生显式预算保持硬顶）。
+ */
+export type TimeoutPolicy = "fixed" | "extendable";
 
 export interface AgentTypeConfig {
   name: AgentTypeName;
@@ -253,9 +261,14 @@ export interface SpawnRequest {
    */
   thinkingOverride?: ThinkingLevel;
   /**
-   * Per-spawn budget override. `totalMs` 有值 ⇒ 该 run 为显式预算 run：
-   * spawn-service 用 applyBudgetPolicy 钳 maxTotalFactor = 1（硬顶，无宽限无延长）。
+   * Per-spawn budget override. `totalMs` 有值 ⇒ 该 run 为显式预算 run：spawn-service
+   * 用 applyBudgetPolicy 钳 maxTotalFactor = 1（硬顶，无宽限无延长）。
+   * timeoutPolicy（agent-explicit-timeout-extend plan §2.2）：spawn admission 按解析式
+   * （req.timeoutPolicy ?? resume 继承 ?? 按 budgetOverride.totalMs 形状推导 "fixed"/"extendable"）
+   * 把它解析成确定值写回 resolvedReq；此后 run 生命周期内恒为确定值（"fixed" 或 "extendable"），
+   * 模型面只有 Agent 工具传 timeout_s 时写 "extendable"，其余调用方不写（缺省按形状推导为 "fixed"）。
    */
+  timeoutPolicy?: TimeoutPolicy;
   budgetOverride?: Partial<DeadlineBudget>;
   slotless?: boolean;
   parentRunId?: RunId;
@@ -771,7 +784,7 @@ export type ExtendOutcome =
         | "not_started" // queue_wait / resolve_config / session_create / extension_bind（D-14）
         | "uncapped" // 防御性：deadlineAt/hardDeadlineAt 缺席（配置层已禁止 totalMs ≤ 0，见 D-11）
         | "limit_reached"
-        | "no_headroom" // 含 D-10 显式预算 run（H = deadlineAt）
+        | "no_headroom" // 含 D-10 fixed-deadline run（timeoutPolicy "fixed" ⇒ H = deadlineAt；agent-explicit-timeout-extend plan §2.2）
         | "unsupported";
       detail?: string;
     };
@@ -859,6 +872,13 @@ export interface RunDiagnostics {
   orphaned: boolean;
   generation: number;
   deadlineAt?: Millis;
+  /**
+   * Timeout-policy 作为 run 的持久事实（agent-explicit-timeout-extend plan §2.7）：
+   * reducer `enqueued` 分支把 input.timeoutPolicy 镜像进来（写一次，此后永不改写）；
+   * 随所有持久化面走（终态快照、非终态 journal、tombstone、resume 解析）；resume 继承源；
+   * 旧条目（升级前）可缺——读侧对缺席字段走中性文案，不做形状推断。
+   */
+  timeoutPolicy?: TimeoutPolicy;
   /** hardDeadlineAt 的展示镜像（与 diag.deadlineAt 同款），enqueue 时写一次；spawn-service 终态重建从此处恢复（BL-5）。 */
   hardDeadlineAt?: Millis;
   /** 超时宽限/延长的审计记录；从未发生过时整个字段缺席。 */
@@ -1039,7 +1059,14 @@ export interface RunSnapshot {
 }
 
 export type RunInput =
-  | { kind: "enqueued"; at: Millis; budget: DeadlineBudget; deadlineCapAt?: Millis; meta?: RunDisplayMeta }
+  | {
+      kind: "enqueued";
+      at: Millis;
+      budget: DeadlineBudget;
+      deadlineCapAt?: Millis;
+      timeoutPolicy?: TimeoutPolicy;
+      meta?: RunDisplayMeta;
+    }
   | { kind: "slot_acquired"; at: Millis }
   | { kind: "slot_denied"; at: Millis; reason: "queue_timeout" | "aborted" }
   | { kind: "phase_entered"; at: Millis; phase: RunPhase }
