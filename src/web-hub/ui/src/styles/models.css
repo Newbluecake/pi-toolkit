@@ -402,6 +402,25 @@
   flex: 1 1 auto;
 }
 
+/* Settings' mobile presentation (2026-10-07 field report 「设置弹窗在手机模式下离设置按钮太远
+ * （位置太低）」): a TOP sheet dropping from just under the top bar — the scrim starts BELOW
+ * the bar (the topbar keeps its own layer above the scrim, so the gear stays visible and
+ * clickable as the toggle) and the sheet hugs its underside. The bottom-sheet form factor
+ * above is untouched: the model/thinking pickers keep it. */
+.picker-scrim--top {
+  top: var(--topbar-h);
+  align-items: flex-start;
+}
+
+.picker-sheet--top {
+  max-height: 70vh; /* settings' cards need more than the pickers' 50vh */
+  border-top: 0;
+  border-bottom: 1px solid var(--c-border);
+  border-radius: 0 0 12px 12px;
+  box-shadow: 0 8px 28px rgb(19 32 38 / 0.18);
+  padding-bottom: 0;
+}
+
 /* Narrow viewport: sheet rows meet the ≥44px touch target (A10) even on fine pointers. */
 @media (max-width: 640px) {
   .picker-sheet .model-row {

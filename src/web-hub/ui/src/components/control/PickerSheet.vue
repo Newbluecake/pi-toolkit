@@ -21,7 +21,11 @@ import { nextTick, onMounted, onUnmounted, ref } from "vue";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 
 defineOptions({ inheritAttrs: false });
-defineProps<{ label: string }>();
+const props = defineProps<{
+  label: string; /** 2026-10-07: settings' mobile presentation is a
+   * TOP sheet (「设置弹窗离设置按钮太远」) — pickers keep the default bottom sheet. */
+  side?: "bottom" | "top";
+}>();
 const emit = defineEmits<{ close: [] }>();
 
 const panelEl = ref<HTMLElement | null>(null);
@@ -88,8 +92,22 @@ function onKeydown(ev: KeyboardEvent): void {
 
 <template>
   <Teleport to="body">
-    <div class="picker-scrim" v-bind="$attrs" @click.self="emit('close')" @keydown="onKeydown">
-      <div ref="panelEl" class="picker-sheet" role="dialog" aria-modal="true" :aria-label="label" tabindex="-1">
+    <div
+      class="picker-scrim"
+      :class="{ 'picker-scrim--top': props.side === 'top' }"
+      v-bind="$attrs"
+      @click.self="emit('close')"
+      @keydown="onKeydown"
+    >
+      <div
+        ref="panelEl"
+        class="picker-sheet"
+        :class="{ 'picker-sheet--top': props.side === 'top' }"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="label"
+        tabindex="-1"
+      >
         <slot />
       </div>
     </div>

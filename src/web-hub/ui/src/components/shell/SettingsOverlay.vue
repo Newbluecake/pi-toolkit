@@ -84,7 +84,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <PickerSheet v-if="mobile" id="settings-panel" :label="t('settings.title')" @close="emit('close')">
+  <PickerSheet v-if="mobile" id="settings-panel" side="top" :label="t('settings.title')" @close="emit('close')">
     <SettingsView @close="emit('close')" />
   </PickerSheet>
   <div

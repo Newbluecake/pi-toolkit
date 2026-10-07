@@ -116,15 +116,13 @@
 
 /* 2026-10-06 field reports ×2 ("设置按钮离 logout 太远", still far after the gap fix): the
  * buttons were already adjacent — the GULF was optical: each is a 44px coarse hit box with a
- * small centered icon. Kill the flex gap between the pair entirely and push each icon toward
- * its sibling (gear right-aligned, logout left-aligned) so the GLYPHS sit close while the
- * hit boxes stay 44px. */
+ * small centered icon. Kill the flex gap between the pair entirely and push the logout icon
+ * toward its sibling (left-aligned) so the GLYPHS sit close while the hit boxes stay 44px.
+ * (2026-10-07 ×2 「设置按钮的左侧和右侧不对称」: the gear glyph is CENTERED again — with the
+ * panel open the pressed background makes the whole 44px box visible and a right-aligned
+ * glyph read lopsided. The logout glyph keeps hugging the gear side.) */
 .topbar .settings-anchor {
   margin-right: calc(-1 * var(--sp-3));
-}
-
-.topbar .settings-anchor .btn-icon {
-  justify-content: flex-end;
 }
 
 .topbar .settings-anchor + .btn {
