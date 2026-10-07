@@ -35,6 +35,9 @@ const transcript = {
   "tool.error": "error",
   "tool.lines": "{n} lines",
   "tool.showFull": "Show full output",
+  "tool.diffEdit": "Edit {i}/{m}",
+  "tool.diffFold": "… {n} rows omitted",
+  "tool.diffExpand": "Expand",
 } satisfies Record<string, string>;
 
 export default transcript;

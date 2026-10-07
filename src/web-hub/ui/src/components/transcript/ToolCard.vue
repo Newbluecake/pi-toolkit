@@ -12,9 +12,17 @@
   details toggle), and Live/Output stay plain (read-only preview has no jump value there).
   With no preview ctx/scope the `<pre>`'s DOM is identical to before, so select-all/copy are
   unaffected.
+
+  Edit-diff view (2026-10 用户需求「edit 直接呈现改了哪些内容」): an `edit` call whose args
+  parse (`@logic/diff.js`'s `buildEditDiff`) swaps the Input section's raw JSON for a
+  unified-diff presentation — hunk header `编辑 N/M`, `-`/`+` rows with inline marks, the file
+  path still through `PathText`. A hunk over `DIFF_FOLD.threshold` rows renders folded
+  (head/tail around a `… N rows omitted` marker whose Expand button flips per-hunk state);
+  any parse miss keeps the raw-JSON `<pre>` byte-identical to before.
 -->
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { buildEditDiff, foldRows } from "@logic/diff.js";
 import { safeJson, summarizeArgs } from "@logic/tools.js";
 import type { ToolCardProps } from "../../contracts.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -51,6 +59,23 @@ const partialTail = computed(() => tailLines(props.view.partial ?? ""));
 const displayedPartial = computed(() => (showFullPartial.value ? (props.view.partial ?? "") : partialTail.value.text));
 const partialIsTruncated = computed(() => !showFullPartial.value && partialTail.value.truncated);
 
+type EditDiff = NonNullable<ReturnType<typeof buildEditDiff>>;
+type DiffHunk = EditDiff["edits"][number];
+type DiffRow = DiffHunk["rows"][number];
+
+const editDiff = computed(() => buildEditDiff(props.view.toolName, props.view.args));
+
+/** Per-hunk expand state for the fold guard — index-aligned with `editDiff.edits`. */
+const expandedHunks = ref<boolean[]>([]);
+
+function displayRows(hunk: DiffHunk, index: number): DiffRow[] {
+  return expandedHunks.value[index] === true ? hunk.rows : foldRows(hunk.rows).rows;
+}
+
+function expandHunk(index: number): void {
+  expandedHunks.value[index] = true;
+}
+
 const hasBody = computed(
   () =>
     argsText.value !== undefined ||
@@ -75,7 +100,42 @@ const hasBody = computed(
       <AppIcon name="chev-right" class="icon icon-sm chev" />
     </summary>
     <div v-if="hasBody" class="tool-body">
-      <div v-if="argsText !== undefined" class="tool-section">
+      <div v-if="editDiff !== null" class="tool-section">
+        <div class="tool-label">{{ t("transcript.tool.input") }}</div>
+        <div class="diff" translate="no">
+          <div v-if="editDiff.path !== null" class="diff-path"><PathText :text="editDiff.path" /></div>
+          <div v-for="(hunk, hi) in editDiff.edits" :key="hi" class="diff-hunk">
+            <div class="diff-hunk-head">
+              {{ t("transcript.tool.diffEdit", { i: hi + 1, m: editDiff.edits.length }) }}
+            </div>
+            <template v-for="(row, ri) in displayRows(hunk, hi)" :key="ri">
+              <div v-if="row.kind === 'fold'" class="diff-row diff-fold-row">
+                <span class="diff-fold-text">{{ t("transcript.tool.diffFold", { n: row.count }) }}</span>
+                <button class="btn btn-ghost btn-xs" type="button" @click="expandHunk(hi)">
+                  {{ t("transcript.tool.diffExpand") }}
+                </button>
+              </div>
+              <div v-else-if="row.kind === 'common'" class="diff-row diff-ctx">
+                <span class="diff-sign" aria-hidden="true"></span><span class="diff-text">{{ row.text }}</span>
+              </div>
+              <div v-else :class="row.kind === 'del' ? 'diff-row diff-del' : 'diff-row diff-add'">
+                <span class="diff-sign" aria-hidden="true">{{ row.kind === "del" ? "-" : "+" }}</span
+                ><span class="diff-text"
+                  ><span
+                    v-for="(seg, si) in row.segs"
+                    :key="si"
+                    :class="
+                      seg.hl ? (row.kind === 'del' ? 'diff-mark diff-mark-del' : 'diff-mark diff-mark-add') : undefined
+                    "
+                    >{{ seg.text }}</span
+                  ></span
+                >
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+      <div v-else-if="argsText !== undefined" class="tool-section">
         <div class="tool-label">{{ t("transcript.tool.input") }}</div>
         <pre class="pre" translate="no" tabindex="0"><PathText v-if="argsText !== undefined" :text="argsText" /></pre>
       </div>

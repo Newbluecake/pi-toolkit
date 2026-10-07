@@ -529,6 +529,121 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   background: var(--c-danger-soft);
 }
 
+/* edit-tool diff view (logic in `@logic/diff.js`, rendered by `ToolCard.vue`): replaces the
+   Input section's raw JSON for parseable `edit` args. Two highlight tiers per side — soft row
+   background + a deeper inline-fragment chip (`--diff-*-soft` / `--diff-*-strong`, tokens.css) —
+   so both light and dark themes read without new hard-coded colors here. */
+.diff {
+  max-height: 420px;
+  margin: var(--sp-2) var(--sp-3) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  overflow: auto;
+  overscroll-behavior: contain;
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-code);
+  tab-size: 2;
+}
+
+.diff-path {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-sunken);
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.diff-hunk + .diff-hunk {
+  border-top: 1px solid var(--c-border);
+}
+
+.diff-hunk-head {
+  padding: 2px var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+  font-family: var(--font-sans);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+}
+
+.diff-row {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+}
+
+.diff-sign {
+  flex: none;
+  width: 1ch;
+  text-align: center;
+  user-select: none;
+}
+
+.diff-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* keep blank lines ("" rows / trailing-newline lines) at full row height */
+.diff-text:empty::after {
+  content: " ";
+}
+
+.diff-ctx .diff-text {
+  color: var(--c-text-2);
+}
+
+.diff-del {
+  background: var(--diff-del-soft);
+}
+
+.diff-add {
+  background: var(--diff-add-soft);
+}
+
+.diff-del .diff-sign {
+  color: var(--c-danger);
+}
+
+.diff-add .diff-sign {
+  color: var(--c-success);
+}
+
+.diff-mark {
+  border-radius: var(--r-xs);
+}
+
+.diff-del .diff-mark {
+  background: var(--diff-del-strong);
+}
+
+.diff-add .diff-mark {
+  background: var(--diff-add-strong);
+}
+
+.diff-fold-row {
+  align-items: center;
+  padding-block: 2px;
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+  font-family: var(--font-sans);
+}
+
+.diff-fold-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-2xs);
+}
+
 .tool-progress {
   position: absolute;
   left: 0;

@@ -1,7 +1,10 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { ref, type Ref } from "vue";
+import { describe, expect, it, vi } from "vitest";
 import ToolCard from "../../../src/web-hub/ui/src/components/transcript/ToolCard.vue";
+import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
+import type { PreviewHandle, PreviewPathScope, PreviewView } from "../../../src/web-hub/ui/src/types.js";
 import type { ToolView } from "../../../src/web-hub/ui/src/types.js";
 
 /**
@@ -9,6 +12,11 @@ import type { ToolView } from "../../../src/web-hub/ui/src/types.js";
  * args/result rendering (via `@logic/render/tools.js`'s tested `summarizeArgs`/`safeJson`), the
  * truncated-payload badge, and the running-tool partial output's tail truncation (200 lines /
  * 16 KiB, `tail-lines.ts`) with its "Show full output" toggle.
+ *
+ * The edit-diff view (2026-10): a parseable `edit` args replaces the Input section's raw JSON
+ * with `@logic/diff.js`'s rows (hunk headers `Edit i/m`, `-`/`+` rows, inline marks, the file
+ * path still through `PathText`) and the fold guard collapses oversized hunks behind an
+ * Expand button; any gate miss keeps the raw-JSON `<pre>` exactly as before.
  */
 function view(v: Partial<ToolView> & Pick<ToolView, "toolCallId" | "toolName" | "state">): ToolView {
   return { args: undefined, ...v };
@@ -91,5 +99,122 @@ describe("ToolCard.vue", () => {
     const wrapper = mount(ToolCard, { props: { view: view({ toolCallId: "7", toolName: "bash", state: "pending" }) } });
     expect(wrapper.get("details.tool").attributes("data-st")).toBe("pending");
     expect(wrapper.find(".tool-body").exists()).toBe(false);
+  });
+});
+
+describe("ToolCard.vue — edit diff view", () => {
+  it("parseable edit args: diff rows replace the raw-JSON Input section, inline marks included", () => {
+    const wrapper = mount(ToolCard, {
+      props: {
+        view: view({
+          toolCallId: "d1",
+          toolName: "edit",
+          state: "done",
+          args: { path: "/p/src/a.ts", edits: [{ oldText: "foo(bar);", newText: "foo(baz);" }] },
+          result: "ok",
+        }),
+      },
+    });
+    expect(wrapper.find(".diff").exists()).toBe(true);
+    const input = wrapper.findAll(".tool-section")[0]!;
+    expect(input.find(".pre").exists()).toBe(false);
+    expect(input.text()).not.toContain("oldText");
+    expect(input.get(".diff-del .diff-text").text()).toBe("foo(bar);");
+    expect(input.get(".diff-del .diff-mark").text()).toBe("r");
+    expect(input.get(".diff-add .diff-mark").text()).toBe("z");
+    // the Output section is untouched
+    expect(wrapper.findAll(".tool-section")[1]!.get(".pre").text()).toBe("ok");
+  });
+
+  it("multiple edits render ordered hunk headers (Edit i/m) and context rows", () => {
+    const wrapper = mount(ToolCard, {
+      props: {
+        view: view({
+          toolCallId: "d2",
+          toolName: "edit",
+          state: "done",
+          args: {
+            edits: [
+              { oldText: "a\nb\nc", newText: "a\nB\nc" },
+              { oldText: "", newText: "new" },
+            ],
+          },
+        }),
+      },
+    });
+    const heads = wrapper.findAll(".diff-hunk-head").map((h) => h.text());
+    expect(heads).toEqual(["Edit 1/2", "Edit 2/2"]);
+    const first = wrapper.findAll(".diff-hunk")[0]!;
+    expect(first.findAll(".diff-ctx").map((r) => r.get(".diff-text").text())).toEqual(["a", "c"]);
+    expect(
+      wrapper
+        .findAll(".diff-hunk")[1]!
+        .findAll(".diff-row")
+        .map((r) => r.get(".diff-text").text()),
+    ).toEqual(["new"]);
+  });
+
+  it("gate misses keep the raw-JSON Input section (malformed edit args / other tools)", () => {
+    const malformed = view({ toolCallId: "d3", toolName: "edit", state: "done", args: { edits: [] } });
+    const w1 = mount(ToolCard, { props: { view: malformed } });
+    expect(w1.find(".diff").exists()).toBe(false);
+    expect(w1.get(".tool-section .pre").text()).toContain("edits");
+
+    const w2 = mount(ToolCard, {
+      props: { view: view({ toolCallId: "d4", toolName: "bash", state: "done", args: { command: "ls" } }) },
+    });
+    expect(w2.find(".diff").exists()).toBe(false);
+    expect(w2.get(".tool-section .pre").text()).toContain("command");
+  });
+
+  it("the file path renders through PathText (plain without ctx, .path-ref with one)", () => {
+    const args = { path: "/p/src/a.ts", edits: [{ oldText: "a", newText: "b" }] };
+    const plain = mount(ToolCard, {
+      props: { view: view({ toolCallId: "d5", toolName: "edit", state: "done", args }) },
+    });
+    expect(plain.get(".diff-path").text()).toBe("/p/src/a.ts");
+    expect(plain.find(".diff-path .path-ref").exists()).toBe(false);
+
+    const scope: PreviewPathScope = { agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true };
+    const viewRef = ref({ phase: "closed" }) as Ref<PreviewView>;
+    const handle: PreviewHandle = {
+      view: viewRef,
+      scope: ref(scope),
+      open: vi.fn(),
+      close: vi.fn(),
+      retry: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const ctx: PreviewContext = { handle, plaintext: false };
+    const linked = mount(ToolCard, {
+      props: { view: view({ toolCallId: "d6", toolName: "edit", state: "done", args }) },
+      global: { provide: { [PREVIEW_CTX as symbol]: ctx } },
+    });
+    expect(linked.get(".diff-path .path-ref").attributes("role")).toBe("button");
+  });
+
+  it("a hunk over the fold threshold collapses; Expand restores every row", async () => {
+    const lines = Array.from({ length: 250 }, (_, i) => `line-${i}`);
+    const wrapper = mount(ToolCard, {
+      props: {
+        view: view({
+          toolCallId: "d7",
+          toolName: "edit",
+          state: "done",
+          args: { edits: [{ oldText: "", newText: lines.join("\n") }] },
+        }),
+      },
+    });
+    const hunk = () => wrapper.findAll(".diff-hunk")[0]!;
+    // 250 rows > threshold 200 ⇒ head 20 + marker + tail 20
+    expect(hunk().findAll(".diff-row").length).toBe(41);
+    const fold = hunk().get(".diff-fold-row");
+    expect(fold.text()).toContain("210");
+    expect(fold.text()).toContain("omitted");
+
+    await fold.get("button").trigger("click");
+    expect(hunk().findAll(".diff-row").length).toBe(250);
+    expect(hunk().find(".diff-fold-row").exists()).toBe(false);
+    expect(hunk().get(".diff-row").get(".diff-text").text()).toBe("line-0");
   });
 });

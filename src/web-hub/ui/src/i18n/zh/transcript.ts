@@ -38,6 +38,9 @@ const transcript = {
   "tool.error": "错误",
   "tool.lines": "{n} 行",
   "tool.showFull": "显示完整输出",
+  "tool.diffEdit": "编辑 {i}/{m}",
+  "tool.diffFold": "… 已省略 {n} 行",
+  "tool.diffExpand": "展开",
 } satisfies Messages<typeof en>;
 
 export default transcript;

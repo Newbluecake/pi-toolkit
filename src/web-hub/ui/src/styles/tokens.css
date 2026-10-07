@@ -47,6 +47,12 @@
   --c-info: #1f5fc4;
   --c-info-soft: #e8f0fc;
 
+  /* ---------------------------------------------------------------- diff (edit-tool card) */
+  --diff-del-soft: #fdeeee; /* `-` row background (light red) */
+  --diff-del-strong: #f8d4d6; /* removed inline fragment, one tier deeper */
+  --diff-add-soft: #e6f4ea; /* `+` row background (light green) */
+  --diff-add-strong: #c9ecd3; /* added inline fragment, one tier deeper */
+
   /* ---------------------------------------------------------------- run / agent state */
   --st-running: #0b7a70;
   --st-running-soft: #e3f4f1;
@@ -160,6 +166,10 @@
     --c-danger-border: #52282b;
     --c-info: #72a7f5;
     --c-info-soft: #16243a;
+    --diff-del-soft: #2e1719;
+    --diff-del-strong: #471f23;
+    --diff-add-soft: #13291c;
+    --diff-add-strong: #1b3a26;
     --st-running: #3ccbb9;
     --st-running-soft: #12302d;
     --st-thinking: #a98bf5;
@@ -215,6 +225,10 @@
   --c-danger-border: #52282b;
   --c-info: #72a7f5;
   --c-info-soft: #16243a;
+  --diff-del-soft: #2e1719;
+  --diff-del-strong: #471f23;
+  --diff-add-soft: #13291c;
+  --diff-add-strong: #1b3a26;
   --st-running: #3ccbb9;
   --st-running-soft: #12302d;
   --st-thinking: #a98bf5;
