@@ -69,11 +69,6 @@ const title = computed(() => {
   return typeof sessionId === "string" && sessionId !== "" ? sessionId.slice(0, 8) : t("agents.noSessionName");
 });
 
-const subCostLabel = computed(() => {
-  const sub = status.value?.subagentCostUsd;
-  return typeof sub === "number" && sub > 0 ? t("detail.subCost", { v: formatUsd(sub) }) : null;
-});
-
 // ---------------------------------------------------------------------------
 // todo #7 (see the file header): mid-band drawer toggle + ≤480px metrics fold
 // ---------------------------------------------------------------------------

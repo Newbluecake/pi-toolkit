@@ -126,8 +126,8 @@ export interface SessionInfoProps {
   /** 2026-10-07 user request (「花费合并到第一行的会话详情」): the header's separate cost row
    * folded into this component — the summary line gains a cost chip, the expanded kv panel
    * gains the cost row (incl. the sub-agent aside). Absent/undefined ⇒ neither renders. */
-  readonly costUsd?: number;
-  readonly subagentCostUsd?: number;
+  readonly costUsd?: number | undefined;
+  readonly subagentCostUsd?: number | undefined;
 }
 
 export interface CopyButtonProps {
