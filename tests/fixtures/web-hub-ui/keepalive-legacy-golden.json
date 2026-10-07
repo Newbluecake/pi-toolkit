@@ -1,0 +1,1518 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "A→B",
+      "steps": [
+        {
+          "label": "conn open + hello c1",
+          "calls": [],
+          "projection": {
+            "selected": null,
+            "agents": {}
+          },
+          "render": {
+            "selected": null
+          }
+        },
+        {
+          "label": "agents [A,B] → auto-select A, subscribe",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "route B",
+          "calls": [
+            {
+              "method": "unsubscribe",
+              "args": ["c1", "A"]
+            },
+            {
+              "method": "subscribe",
+              "args": ["c1", "B"]
+            }
+          ],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "skeleton"
+          }
+        },
+        {
+          "label": "history B (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "A→null",
+      "steps": [
+        {
+          "label": "conn open + hello c1",
+          "calls": [],
+          "projection": {
+            "selected": null,
+            "agents": {}
+          },
+          "render": {
+            "selected": null
+          }
+        },
+        {
+          "label": "agents [A,B] → auto-select A, subscribe",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "route null",
+          "calls": [
+            {
+              "method": "unsubscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": null,
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": null,
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "A→B→A (in window)",
+      "steps": [
+        {
+          "label": "conn open + hello c1",
+          "calls": [],
+          "projection": {
+            "selected": null,
+            "agents": {}
+          },
+          "render": {
+            "selected": null
+          }
+        },
+        {
+          "label": "agents [A,B] → auto-select A, subscribe",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "route B",
+          "calls": [
+            {
+              "method": "unsubscribe",
+              "args": ["c1", "A"]
+            },
+            {
+              "method": "subscribe",
+              "args": ["c1", "B"]
+            }
+          ],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "skeleton"
+          }
+        },
+        {
+          "label": "history B (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        },
+        {
+          "label": "route A (still inside the 2s window) — resubscribe deferred",
+          "calls": [
+            {
+              "method": "unsubscribe",
+              "args": ["c1", "B"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        },
+        {
+          "label": "advance 2000 — the deferred resubscribe fires",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:1"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:1",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "A→B→A (after window)",
+      "steps": [
+        {
+          "label": "conn open + hello c1",
+          "calls": [],
+          "projection": {
+            "selected": null,
+            "agents": {}
+          },
+          "render": {
+            "selected": null
+          }
+        },
+        {
+          "label": "agents [A,B] → auto-select A, subscribe",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "route B",
+          "calls": [
+            {
+              "method": "unsubscribe",
+              "args": ["c1", "A"]
+            },
+            {
+              "method": "subscribe",
+              "args": ["c1", "B"]
+            }
+          ],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "skeleton"
+          }
+        },
+        {
+          "label": "history B (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        },
+        {
+          "label": "advance 2000",
+          "calls": [],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        },
+        {
+          "label": "route A — immediate resubscribe",
+          "calls": [
+            {
+              "method": "unsubscribe",
+              "args": ["c1", "B"]
+            },
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:1"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:1",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "hello → switch",
+      "steps": [
+        {
+          "label": "conn open + hello c1",
+          "calls": [],
+          "projection": {
+            "selected": null,
+            "agents": {}
+          },
+          "render": {
+            "selected": null
+          }
+        },
+        {
+          "label": "agents [A,B] → auto-select A, subscribe",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "hello c2 — resubscribe deferred by the window",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "advance 2000",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c2", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c2",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c2",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:1",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "route B",
+          "calls": [
+            {
+              "method": "unsubscribe",
+              "args": ["c2", "A"]
+            },
+            {
+              "method": "subscribe",
+              "args": ["c2", "B"]
+            }
+          ],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:1",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c2",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "skeleton"
+          }
+        },
+        {
+          "label": "history B (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:1",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c2",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "switch with run",
+      "steps": [
+        {
+          "label": "conn open + hello c1",
+          "calls": [],
+          "projection": {
+            "selected": null,
+            "agents": {}
+          },
+          "render": {
+            "selected": null
+          }
+        },
+        {
+          "label": "agents [A,B] → auto-select A, subscribe",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "selectRun(A, r1)",
+          "calls": [
+            {
+              "method": "runSubscribe",
+              "args": ["c1", "A", "r_AB12CD34"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "run_history (loaded)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "route B",
+          "calls": [
+            {
+              "method": "runUnsubscribe",
+              "args": ["c1", "A", "r_AB12CD34"]
+            },
+            {
+              "method": "unsubscribe",
+              "args": ["c1", "A"]
+            },
+            {
+              "method": "subscribe",
+              "args": ["c1", "B"]
+            }
+          ],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "skeleton"
+          }
+        },
+        {
+          "label": "history B (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "B",
+            "agents": {
+              "A": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:f1:0",
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "B",
+            "A": "transcript:1",
+            "B": "transcript:1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "session replacement (selected)",
+      "steps": [
+        {
+          "label": "conn open + hello c1",
+          "calls": [],
+          "projection": {
+            "selected": null,
+            "agents": {}
+          },
+          "render": {
+            "selected": null
+          }
+        },
+        {
+          "label": "agents [A,B] → auto-select A, subscribe",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s1)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "advance 2000 (clear the resubscribe window)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:e1:0",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "session → s2 (replacement)",
+          "calls": [
+            {
+              "method": "subscribe",
+              "args": ["c1", "A"]
+            }
+          ],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "waiting",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "skeleton",
+            "B": "transcript:0"
+          }
+        },
+        {
+          "label": "history A (s2)",
+          "calls": [],
+          "projection": {
+            "selected": "A",
+            "agents": {
+              "A": {
+                "sub": {
+                  "clientId": "c1",
+                  "pending": false
+                },
+                "history": "loaded",
+                "needsResync": false,
+                "itemsLen": 1,
+                "firstItemId": "e:g1:1",
+                "hasMore": false
+              },
+              "B": {
+                "sub": null,
+                "history": "none",
+                "needsResync": false,
+                "itemsLen": 0,
+                "firstItemId": null,
+                "hasMore": false
+              }
+            }
+          },
+          "render": {
+            "selected": "A",
+            "A": "transcript:1",
+            "B": "transcript:0"
+          }
+        }
+      ]
+    }
+  ]
+}
