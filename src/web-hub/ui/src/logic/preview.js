@@ -11,6 +11,24 @@
  *   `/`) OR contains the upload-store marker. Segments returned by `findPathRefs` always
  *   concatenate back to the exact input (property-tested). A trailing `:line[:col]` is kept
  *   in the DISPLAY text but stripped from the request path (rule 3, display-only).
+ * - **Relative paths (rule 1b, 2026-10-07 addition — tool-call args carry mostly relative
+ *   paths, not absolute ones)**: a candidate that does NOT start with `/` is ALSO recognized
+ *   when (a) its leading segment starts in a whitespace / START_CHARS context (deliberately
+ *   NARROWER than the absolute rule's `/` — a bare text-node start does NOT count, only an
+ *   actual preceding whitespace/opener/quote char does; this is what keeps `"x/home/..."` and
+ *   `"1/home/..."`, both already-frozen "not clickable" absolute fixtures, from picking up a
+ *   NEW relative match merely because they happen to sit at a text-node boundary — see
+ *   `relativeWordStartContext`), (b) it contains at least one `/`, (c) its last segment has a
+ *   plausible extension (`.` + 1–10 of `[A-Za-z0-9_-]`, with ≥1 char before the dot — so
+ *   `"src/components/detail"` alone is never recognized: an accepted, documented trade-off),
+ *   and (d) its leading segment is not a URI scheme (containing `:` — covers
+ *   `http://`/`https://`/`mailto:`/any custom scheme uniformly, cheaper and more robust than
+ *   an enumerated word list) nor empty (which also structurally rules out a `//`-prefixed candidate). A
+ *   recognized relative candidate resolves to `scope.cwd + "/" + candidate` (never when
+ *   `scope.cwd` is `null`/`""`/`"/"` — same disablement the absolute cwd rule already has) and
+ *   the RESOLVED absolute path must still pass `isClickable` (rules 4–5) like any other
+ *   candidate; only the resolved `path` differs from the displayed `text` — the `:line[:col]`
+ *   suffix stays display-only exactly as for absolute candidates.
  * - `previewScopeOf(...)` — the §4.6 作用域推导 truth table: a scope exists only when the
  *   transport offers `preview`, the hub caps carry `preview.v1` (token) / `preview.lan.v1`
  *   (password), and the selected agent has a live session. Under the default `mode:"on"`
@@ -99,6 +117,21 @@ function isTerminator(ch) {
 }
 
 /**
+ * Rule 1b's backward-scan stop condition: a word boundary is a terminator OR a START_CHARS
+ * opener. The latter addition matters because some START_CHARS (`=`, `(`, …) are NOT
+ * terminators (an absolute candidate's forward scan must keep going past them when they
+ * appear mid-path), so using `isTerminator` alone here would let the backward scan walk PAST
+ * an opener like `=` into whatever precedes it — e.g. `foo=/home/...` would wrongly compute
+ * `foo=` as part of the leading identifier instead of stopping right at the `/` (correctly
+ * yielding an empty leading segment, since that slash's candidate is already `=`'s absolute
+ * territory).
+ * @param {string | undefined} ch
+ */
+function isWordBoundary(ch) {
+  return isTerminator(ch) || (ch !== undefined && START_CHARS.has(ch));
+}
+
+/**
  * §4.6 rule 1: the candidate's leading `/` must sit at line start (string start counts) or
  * right after whitespace / a START_CHARS opener.
  * @param {string} text @param {number} slash
@@ -107,6 +140,56 @@ function isStartContext(text, slash) {
   if (slash === 0) return true;
   const prev = text[slash - 1];
   return prev !== undefined && (WS_RE.test(prev) || START_CHARS.has(prev));
+}
+
+/**
+ * §4.6 rule 1b (relative paths): same whitespace/START_CHARS test as `isStartContext`, but
+ * deliberately WITHOUT its `position === 0 ⇒ true` shortcut — a bare text-node boundary is
+ * not, by itself, good enough evidence that a leading identifier (`x`, `1`, `src`, …) is the
+ * start of a path rather than the middle of a sentence this call only sees a fragment of.
+ * This is what keeps the already-frozen absolute "not clickable" fixtures `"x/home/..."` /
+ * `"1/home/..."` from picking up a brand-new relative match. Tool-call args (the feature's
+ * main target) are always quote-delimited (`"path": "src/foo.ts"`), so they hit the
+ * `START_CHARS.has('"')` branch regardless.
+ * @param {string} text @param {number} wordStart
+ */
+function relativeStartContext(text, wordStart) {
+  if (wordStart <= 0) return false;
+  const prev = text[wordStart - 1];
+  return prev !== undefined && (WS_RE.test(prev) || START_CHARS.has(prev));
+}
+
+/** §4.6 rule 1b: last segment's extension shape — `.` + 1–10 "reasonable" chars, ≥1 char before it. */
+const RELATIVE_EXT_RE = /\.[A-Za-z0-9_-]{1,10}$/;
+
+/**
+ * §4.6 rule 1b: pure shape check for a RELATIVE candidate (no scope/cwd yet) — at least one
+ * `/` with a non-empty leading segment, a plausible extension on the last segment, and a
+ * leading segment that is not a URI scheme (any segment containing `:` — covers `http://`,
+ * `mailto:a@b`, custom schemes alike; cheaper and more robust than enumerating scheme words).
+ * @param {string} candidate
+ */
+function looksLikeRelativePath(candidate) {
+  const slash = candidate.indexOf("/");
+  if (slash <= 0) return false;
+  const firstSeg = candidate.slice(0, slash);
+  if (firstSeg.includes(":")) return false;
+  const lastSeg = candidate.slice(candidate.lastIndexOf("/") + 1);
+  const m = RELATIVE_EXT_RE.exec(lastSeg);
+  return m !== null && lastSeg.length > m[0].length;
+}
+
+/**
+ * §4.6 rule 1b: resolve a relative candidate against `scope.cwd`. Returns `null` (never
+ * clickable) when `cwd` is `null`/`""`/`"/"` (relative recognition is off the same way the
+ * absolute cwd-prefix rule already disables itself for those cwds) or the shape check fails.
+ * @param {string} candidate @param {string | null} cwd
+ */
+function resolveRelativePath(candidate, cwd) {
+  if (typeof cwd !== "string" || cwd === "" || cwd === "/") return null;
+  if (!looksLikeRelativePath(candidate)) return null;
+  const base = cwd.endsWith("/") ? cwd.slice(0, -1) : cwd;
+  return base === "" || base === "/" ? null : `${base}/${candidate}`;
 }
 
 /**
@@ -195,14 +278,16 @@ export function findPathRefs(text, scope) {
   let spanLine;
   /** @type {number | undefined} */
   let spanCol;
+  // Relative-path memo (rule 1b): computed once per run too (symmetric backward scan, same
+  // amortized-O(n) argument as the forward scan above), and only when a relative route is even
+  // possible (`cwdPrefix !== null`) — a disabled scope pays nothing extra for this.
+  let spanFirstSlash = -1; // the slash that triggered this run's memo (relative is tried ONLY there)
+  let spanWordStart = -1; // backward boundary of the leading identifier before `spanFirstSlash`
 
   while (i < n && refs < PREVIEW_MAX_REFS_PER_NODE) {
     const slash = text.indexOf("/", i);
     if (slash === -1) break;
-    if (!isStartContext(text, slash)) {
-      i = slash + 1;
-      continue;
-    }
+    const startOk = isStartContext(text, slash);
     if (slash >= spanEnd) {
       // New terminator-free run: scan its end once, then analyze its tail once.
       let end = slash + 1;
@@ -221,6 +306,14 @@ export function findPathRefs(text, scope) {
         spanLine = undefined;
         spanCol = undefined;
       }
+      spanFirstSlash = slash;
+      if (cwdPrefix !== null) {
+        let ws = slash;
+        while (ws > 0 && !isWordBoundary(text[ws - 1])) ws--;
+        spanWordStart = ws;
+      } else {
+        spanWordStart = slash;
+      }
     }
     // Per-candidate results from the memo, exactly mirroring the original per-candidate
     // strip (its "> 1 char remains" guard is start-relative) and line:col split (its
@@ -228,7 +321,7 @@ export function findPathRefs(text, scope) {
     const strippedEnd = Math.max(spanStrippedEnd, slash + 1);
     const hasLineCol = spanLineColStart !== -1 && slash < spanLineColStart;
     const pathEnd = hasLineCol ? spanLineColStart : strippedEnd;
-    if (pathEnd - slash <= PREVIEW_PATH_MAX_BYTES) {
+    if (startOk && pathEnd - slash <= PREVIEW_PATH_MAX_BYTES) {
       let scopePossible = cwdPrefix !== null && text.startsWith(cwdPrefix, slash);
       if (!scopePossible && uploads) {
         if (markerNext === -2) markerNext = text.indexOf(PREVIEW_UPLOADS_MARKER, slash);
@@ -255,6 +348,31 @@ export function findPathRefs(text, scope) {
         }
       }
     }
+    // Rule 1b (relative paths): tried exactly once per run, at its first slash, using the
+    // backward-scanned leading identifier (`spanWordStart`) instead of `slash` itself.
+    if (
+      cwdPrefix !== null &&
+      slash === spanFirstSlash &&
+      spanWordStart < slash &&
+      relativeStartContext(text, spanWordStart) &&
+      pathEnd - spanWordStart <= PREVIEW_PATH_MAX_BYTES
+    ) {
+      const resolved = resolveRelativePath(text.slice(spanWordStart, pathEnd), cwd);
+      if (resolved !== null && isClickable(resolved, scope)) {
+        if (textStart < spanWordStart) segments.push({ kind: "text", text: text.slice(textStart, spanWordStart) });
+        /** @type {PathSegment} */
+        const seg = { kind: "ref", text: text.slice(spanWordStart, strippedEnd), path: resolved };
+        if (hasLineCol) {
+          seg.line = spanLine;
+          if (spanCol !== undefined) seg.col = spanCol;
+        }
+        segments.push(seg);
+        refs++;
+        textStart = strippedEnd;
+        i = strippedEnd;
+        continue;
+      }
+    }
     i = slash + 1;
   }
   if (textStart < n) segments.push({ kind: "text", text: text.slice(textStart) });
@@ -267,8 +385,10 @@ export function findPathRefs(text, scope) {
  * span is the candidate (no start-context rule — the backticks already delimit it), held to
  * the same terminator/validation/scope rules so a path is never clickable in code but dead in
  * prose or vice versa. Trailing sentence punctuation is NOT stripped here (code content is
- * verbatim) — only the `:line[:col]` display suffix splits off. Returns `null` when the code
- * span is not a single clickable path.
+ * verbatim) — only the `:line[:col]` display suffix splits off. A relative candidate (rule
+ * 1b) resolves against `scope.cwd` the same way `findPathRefs` does; the DISPLAYED `text` is
+ * always the original (unresolved) code span. Returns `null` when the code span is not a
+ * single clickable path.
  * @param {string} text @param {PathScope | null | undefined} scope
  * @returns {{ text: string, path: string, line?: number, col?: number } | null}
  */
@@ -278,9 +398,10 @@ export function pathRefOfCode(text, scope) {
     if (isTerminator(ch)) return null;
   }
   const { path, line, col } = splitLineCol(text);
-  if (!isClickable(path, scope)) return null;
+  const resolved = path.startsWith("/") ? path : resolveRelativePath(path, scope.cwd);
+  if (resolved === null || !isClickable(resolved, scope)) return null;
   /** @type {{ text: string, path: string, line?: number, col?: number }} */
-  const out = { text, path };
+  const out = { text, path: resolved };
   if (line !== undefined) out.line = line;
   if (col !== undefined) out.col = col;
   return out;

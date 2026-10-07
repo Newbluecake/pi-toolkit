@@ -570,6 +570,8 @@ export function classifyPreviewError(status, body);
 5. 必须按路径段对齐地落在 `scope.cwd` 之下（`scope.cwd` 不为 `/`），或者路径中含 `PREVIEW_UPLOADS_MARKER`。
 6. 每个节点最多 100 个，单个路径不超过 4096 字节。
 
+**规则 1b（相对路径，2026-10-07 补充）**：工具调用 args 里大量是相对路径（如 `"path":"src/foo.ts"`），只认绝对路径覆盖不到。追加规则：不以 `/` 起始的候选，当 ① 候选起点的上下文复用规则 1 的 START_CHARS/空白判定，但**不**把“文本节点自身的起始位置”算作合法起点（避免 `"x/home/..."`、`"1/home/..."` 这类已冻结的绝对路径反例，仅因恰好落在文本片段边界就被相对规则误判为可点击）；② 候选含至少一个 `/`；③ 末段带“看起来合理”的扩展名（`.` + 1–10 个 `[A-Za-z0-9_-]`，`.` 前至少 1 个字符 —— 因此 `src/components/detail` 这种无扩展名目录不识别，是明确接受的取舍）；④ 首段（第一个 `/` 之前）不含 `:`（覆盖 `http://`、`mailto:`、任意自定义协议，比枚举协议词更稳）。都满足时解析为 `scope.cwd + "/" + 候选`（`scope.cwd` 为 `null`/`""`/`"/"` 时不启用），解析后的绝对路径仍须过规则 4–5；显示文本保持原始相对形式，`:行号[:列号]` 仍是 display-only。
+
 **作用域推导**：`capOk` = password 模式下要求有 `preview.lan.v1`，否则要求有 `preview.v1`；若 `transport.preview` 存在、`capOk` 成立且 `card.session` 存在，则作用域为 `{agentKey, sessionId, cwd: card.session.cwd, uploads: true}`，否则为 `null`。按默认 `mode:"on"`，LAN 上也能得到作用域。
 
 **cwd 双保险（v3-2）**：不变量是同一个 sessionId 内 cwd 不会变。在此基础上，① `scopeKeyOf` 带上 cwd；② `sameSession` 改为 `sessionId`、`sessionFile`、`cwd` 三者都相等才算同一会话，cwd 一变即清空 transcript 并重拉。

@@ -273,6 +273,96 @@ describe("logic/preview.js findPathRefs — property & performance", () => {
   });
 });
 
+describe("logic/preview.js findPathRefs — relative paths (§4.6 rule 1b, 2026-10-07)", () => {
+  const REL = "src/web-hub/ui/src/components/detail/DetailDock.vue";
+  const REL_PATH = `${SCOPE.cwd}/${REL}`;
+
+  it.each([
+    ["after space", `see ${REL} ok`],
+    ["after tab", `see\t${REL} ok`],
+    ["after newline", `see\n${REL} ok`],
+    ["after (", `x(${REL})`],
+    ["after [", `x[${REL}]`],
+    ['after "', `x"${REL}"`],
+    ["after '", `x'${REL}'`],
+    ["after =", `path=${REL},`],
+    ["JSON-quoted tool args", `{"path": "${REL}"}`],
+  ])("clickable: %s", (_label, text) => {
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs).map((r) => r.path)).toEqual([REL_PATH]);
+    expect(refs(segs).map((r) => r.text)).toEqual([REL]);
+  });
+
+  it.each([
+    ["bare line start (no preceding context)", REL],
+    ["mid-word (preceded by a plain letter)", `x${REL}`],
+    ["preceded by a digit", `1${REL}`],
+  ])("not clickable (conservative line-start exclusion): %s", (_label, text) => {
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs)).toEqual([]);
+  });
+
+  it("no extension on the last segment is never recognized (accepted trade-off)", () => {
+    const text = '"path": "src/components/detail"';
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(refs(segs)).toEqual([]);
+  });
+
+  it("a leading URI scheme is rejected, not misread as a relative path", () => {
+    expect(refs(findPathRefs('"url": "http://example.com/foo.ts"', SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs('"url": "mailto:a@b.com/x.ts"', SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("a //-prefixed candidate is never read as relative (empty leading segment)", () => {
+    expect(refs(findPathRefs(`"p": "//${REL}"`, SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("scope.cwd === null disables relative recognition entirely", () => {
+    const noCwd = { ...SCOPE, cwd: null };
+    expect(refs(findPathRefs(`"path": "${REL}"`, noCwd) as Seg[])).toEqual([]);
+  });
+
+  it("scope.cwd === '/' also disables relative recognition (root too broad)", () => {
+    const rootCwd = { ...SCOPE, cwd: "/" };
+    expect(refs(findPathRefs(`"path": "${REL}"`, rootCwd) as Seg[])).toEqual([]);
+  });
+
+  it(":line[:col] stays display-only for a relative candidate too", () => {
+    const text = `at "${REL}:12:3" end`;
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs)).toEqual([{ kind: "ref", text: `${REL}:12:3`, path: REL_PATH, line: 12, col: 3 }]);
+  });
+
+  it("resolves against scope.cwd with a trailing slash the same way", () => {
+    const trailing = { ...SCOPE, cwd: `${SCOPE.cwd}/` };
+    const segs = findPathRefs(`"path": "${REL}"`, trailing) as Seg[];
+    expect(refs(segs).map((r) => r.path)).toEqual([REL_PATH]);
+  });
+
+  it("an absolute candidate still wins over a would-be relative reading at the same run", () => {
+    // `/home/u/proj/a.ts` starts with `/` so the absolute rule applies; the relative rule
+    // never even gets a chance (there is no non-empty leading segment before this slash).
+    const segs = findPathRefs('"path": "/home/u/proj/a.ts"', SCOPE) as Seg[];
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "/home/u/proj/a.ts", path: "/home/u/proj/a.ts" }]);
+  });
+
+  it("segments concatenate back to the exact input across mixed absolute+relative text (seeded)", () => {
+    const tokens = [REL, "/home/u/proj/a.ts", '"', ":", " ", "=", "text", "http://x/y.ts", "src/components"];
+    for (let seed = 1; seed <= 20; seed++) {
+      const rand = rng(seed);
+      const parts: string[] = [];
+      const count = 3 + Math.floor(rand() * 12);
+      for (let i = 0; i < count; i++) parts.push(tokens[Math.floor(rand() * tokens.length)]!);
+      const text = parts.join("");
+      const segs = findPathRefs(text, SCOPE) as Seg[];
+      expect(concat(segs)).toBe(text);
+    }
+  });
+});
+
 describe("logic/preview.js pathRefOfCode (inline-code twin)", () => {
   it("a whole-code path is clickable with the same scope rules", () => {
     expect(pathRefOfCode("/home/u/proj/a.ts", SCOPE)).toEqual({ text: "/home/u/proj/a.ts", path: "/home/u/proj/a.ts" });
@@ -296,6 +386,25 @@ describe("logic/preview.js pathRefOfCode (inline-code twin)", () => {
 
   it("code content is verbatim: trailing punctuation is NOT stripped (unlike prose)", () => {
     expect(pathRefOfCode("/home/u/proj/a.ts.", SCOPE)?.path).toBe("/home/u/proj/a.ts.");
+  });
+
+  it("a relative code span resolves against scope.cwd (rule 1b) — display text stays relative", () => {
+    expect(pathRefOfCode("src/web-hub/ui/src/components/detail/DetailDock.vue", SCOPE)).toEqual({
+      text: "src/web-hub/ui/src/components/detail/DetailDock.vue",
+      path: "/home/u/proj/src/web-hub/ui/src/components/detail/DetailDock.vue",
+    });
+    expect(pathRefOfCode("src/foo.ts:5", SCOPE)).toEqual({
+      text: "src/foo.ts:5",
+      path: "/home/u/proj/src/foo.ts",
+      line: 5,
+    });
+  });
+
+  it("rejects relative code spans with no extension, a URI scheme, or a null/root cwd", () => {
+    expect(pathRefOfCode("src/components/detail", SCOPE)).toBeNull();
+    expect(pathRefOfCode("http://example.com/foo.ts", SCOPE)).toBeNull();
+    expect(pathRefOfCode("src/foo.ts", { ...SCOPE, cwd: null })).toBeNull();
+    expect(pathRefOfCode("src/foo.ts", { ...SCOPE, cwd: "/" })).toBeNull();
   });
 });
 
