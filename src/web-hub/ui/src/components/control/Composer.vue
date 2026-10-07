@@ -710,7 +710,7 @@ watch(
            falls back to its absolute mid-right geometry; no `.model-switcher`
            (ModelSwitcher self-hide, §5.4) never expands the row at all. Constant
            padding-right:36px ring slot on the textarea in every state (control.css). -->
-      <div class="composer-input" :class="{ 'has-text': text !== '' }" @mousedown="onCardMousedown">
+      <div class="composer-input" :class="{ 'has-text': text !== '', busy }" @mousedown="onCardMousedown">
         <textarea
           ref="textareaEl"
           v-model="text"

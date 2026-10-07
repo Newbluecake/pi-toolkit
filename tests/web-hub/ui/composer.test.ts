@@ -252,6 +252,13 @@ describe("Composer.vue — inline StopButton (2026-10 user request: stop lives i
     expect(wrap.find(".stop-btn").exists()).toBe(true);
   });
 
+  it("busy ⇒ the card carries .busy (呼吸动画挂钩); idle ⇒ it does not", async () => {
+    const busyW = mountComposer({ busy: true, view: controlView({ control: abortingControl([]) }) });
+    expect(busyW.find(".composer-input").classes()).toContain("busy");
+    const idleW = mountComposer({ view: controlView({ control: abortingControl([]) }) });
+    expect(idleW.find(".composer-input").classes()).not.toContain("busy");
+  });
+
   it("two-step click ⇒ view.control.abort(view.agentKey) — the dock's old channel, unchanged", async () => {
     const calls: Array<{ method: string; args: readonly unknown[] }> = [];
     const w = mountComposer({ busy: true, view: controlView({ control: abortingControl(calls) }) });

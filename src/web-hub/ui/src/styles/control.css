@@ -126,6 +126,30 @@
   border-color: var(--c-focus);
 }
 
+/* BUSY 呼吸（2026-10-07，用户在 6 个候选中选定 F「组合弱版 A+B」）：agent loop 运行中卡片
+ * 细边框呼吸 + 极轻光晕，2.8s。动画优先于 :focus-within 的静态边框色——busy 期间呼吸
+ * 就是要盖住焦点色；busy 结束动画移除，焦点色自然回来。 */
+.composer-input.busy {
+  animation: composer-busy-breathe 2.8s ease-in-out infinite;
+}
+@keyframes composer-busy-breathe {
+  0%,
+  100% {
+    border-color: var(--c-border-strong);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    border-color: color-mix(in srgb, var(--st-running) 65%, var(--c-border-strong));
+    box-shadow: 0 0 9px 0 color-mix(in srgb, var(--st-running) 22%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-input.busy {
+    animation: none;
+    border-color: color-mix(in srgb, var(--st-running) 65%, var(--c-border-strong));
+  }
+}
+
 /* Bottom row INSIDE the card: model/thinking chips left, context ring right (normal flow).
  * COLLAPSED BY DEFAULT (max-height clamps the border-box, padding included): the row expands
  * only in the `:has(.model-switcher):not(.has-text)` tier below — switcher actually rendered
