@@ -42,6 +42,7 @@ import {
   type RunTxReason,
 } from "../protocol/run-transcript.js";
 import type { HubLog, ListenerKind, RegistryView, RunSink, RunTranscriptService } from "./ports.js";
+import { sendJsonNegotiated } from "./gzip.js";
 import { HubError } from "./registry.js";
 import type { SseClient, SseEventName, SseHub } from "./sse.js";
 
@@ -126,13 +127,11 @@ function field(body: unknown, name: string): string | undefined {
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  if (res.headersSent || res.destroyed) return;
-  const text = JSON.stringify(body);
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": String(Buffer.byteLength(text)),
-  });
-  res.end(text);
+  // gzip.ts's negotiation (same exit as http.ts's sendJson — `GET /api/run/history` pages can
+  // reach the same multi-hundred-KB scale as /api/history): identity stays byte-identical, a
+  // ≥2 KiB body for a gzip-offering client compresses on the thread pool. SSE frames emitted by
+  // this module (`client.send`) never pass through here.
+  sendJsonNegotiated(res, status, body);
 }
 
 /** HTTP error body per §3.4: known codes keep their (reason) message; unknown ⇒ E_INTERNAL. */

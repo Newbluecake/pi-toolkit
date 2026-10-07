@@ -11,6 +11,12 @@
  *      `E_CSRF`; body ≤ 64 KiB (413) read under a deadline (408)
  *   4. `/api/login` (token) · `/api/logout`; everything else needs the `pwh_sid` cookie ⇒ 401 `E_AUTH`
  *
+ * Every JSON body leaves through ONE exit — `sendJson` (delegating to `gzip.ts`'s negotiation):
+ * a ≥2 KiB body for a client offering gzip (q>0) is compressed on the thread pool and answered
+ * with `Content-Encoding: gzip` + `Vary: Accept-Encoding`; everything else is byte-identical
+ * identity. SSE frames never pass through it (flush semantics), and the static UI keeps its own
+ * compress-once cache in `static.ts`.
+ *
  * SSE payload shapes (`event` → `data`), for the frontend mirror:
  *   hello{clientId} · hub{version,buildId,pid,startedAt,proto,port} · agents{agents:AgentCard[]}
  *   agent_up{agentKey,agent} · agent_down{agentKey,reason} · agent_stale{agentKey}
@@ -72,6 +78,7 @@ import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { PREVIEW_PATH } from "../protocol/preview.js";
 import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
+import { sendJsonNegotiated } from "./gzip.js";
 import type { PinToken, UploadStore } from "./uploads.js";
 import type { SpawnFrontendPort } from "./spawn/ports.js";
 import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
@@ -291,14 +298,12 @@ function setSecurityHeaders(res: ServerResponse): void {
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  if (res.headersSent || res.destroyed) return;
-  const text = JSON.stringify(body);
-  res.writeHead(status, {
-    ...headers,
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": String(Buffer.byteLength(text)),
-  });
-  res.end(text);
+  // gzip.ts's unified negotiation point for EVERY /api JSON body (this same function instance is
+  // injected into the spawn/preview/file-search/agent-remove/upload route modules below): identity
+  // responses are byte-identical to the pre-gzip behavior; a ≥2 KiB body for a client offering
+  // gzip (q>0) is compressed on the thread pool with Content-Encoding/Vary and a post-compression
+  // Content-Length. SSE (`sse.ts`) never passes through here — its flush semantics stay untouched.
+  sendJsonNegotiated(res, status, body, headers);
 }
 
 function sendError(res: ServerResponse, status: number, code: string, message?: string): void {

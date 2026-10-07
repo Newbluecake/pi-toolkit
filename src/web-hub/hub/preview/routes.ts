@@ -516,6 +516,8 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
 
       // ⑨ write-out (§4.5.2) — from here on readAndStream owns the handle.
       streamed = true;
+      const rawAcceptEncoding = req.headers["accept-encoding"];
+      const acceptEncoding = Array.isArray(rawAcceptEncoding) ? rawAcceptEncoding[0] : rawAcceptEncoding;
       const outcome: StreamOutcome = await readAndStream(
         {
           fh: opened.fh,
@@ -525,7 +527,14 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
           ...(opened.verify === undefined ? {} : { verify: opened.verify }),
         },
         resSink(res),
-        { signal, streamAt: PREVIEW_STREAM_MS[io.listener], textMax: PREVIEW_TEXT_MAX_BYTES, now, verifier },
+        {
+          signal,
+          streamAt: PREVIEW_STREAM_MS[io.listener],
+          textMax: PREVIEW_TEXT_MAX_BYTES,
+          now,
+          verifier,
+          ...(acceptEncoding === undefined ? {} : { acceptEncoding }),
+        },
       );
       if (outcome.ok) {
         acc.ok = true;

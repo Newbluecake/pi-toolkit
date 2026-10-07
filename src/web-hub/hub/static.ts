@@ -51,6 +51,12 @@ import {
   type VerifiedUiRoot,
 } from "./ui-root.js";
 import type { HubLog } from "./ports.js";
+import { acceptsGzip } from "./gzip.js";
+
+/** Parses an `Accept-Encoding` header: is `gzip` offered with a non-zero quality value? —
+ * lifted to `gzip.ts` (shared with the dynamic-response negotiation) and re-exported here so
+ * the static-layer import path (`tests/web-hub/http/static.test.ts`) keeps working. */
+export { acceptsGzip };
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".html": "text/html; charset=utf-8",
@@ -65,20 +71,6 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
  * already-compressed format in the table. In lockstep with CONTENT_TYPES / `isAllowedUiPath`
  * (there is no `.json`/`.ico` in the whitelist, so none to consider here). */
 const GZIP_EXTENSIONS: ReadonlySet<string> = new Set([".html", ".js", ".css", ".svg", ".webmanifest"]);
-
-/** Parses an `Accept-Encoding` header: is `gzip` offered with a non-zero quality value? */
-export function acceptsGzip(acceptEncoding: string | undefined): boolean {
-  if (acceptEncoding === undefined) return false;
-  for (const part of acceptEncoding.split(",")) {
-    const [name, ...params] = part.trim().split(";");
-    if (name === undefined || name.trim().toLowerCase() !== "gzip") continue;
-    const qParam = params.map((p) => p.trim()).find((p) => p.toLowerCase().startsWith("q="));
-    if (qParam === undefined) return true;
-    const q = Number.parseFloat(qParam.slice(2));
-    return Number.isFinite(q) && q > 0;
-  }
-  return false;
-}
 
 const AUTH_MODE_PLACEHOLDER = 'data-auth-mode="__AUTH_MODE__"';
 

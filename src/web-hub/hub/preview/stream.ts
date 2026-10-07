@@ -16,7 +16,11 @@
  * - TEXT: everything happens BEFORE the head — read up to `textMax`, cut on a UTF-8 character
  *   boundary (`utf8SafeCut`), then cwd-class re-stat identity check or upload-class
  *   `verifyWhole` (identity cache first, single-flight behind it). Only a fully verified
- *   buffer is ever headed and written.
+ *   buffer is ever headed and written. A gzip-offering request gets that verified buffer
+ *   compressed first (shared `hub/gzip.ts` negotiation, ≥2 KiB floor, async thread-pool gzip
+ *   raced against the write-out deadline) — `Content-Length` names the compressed length while
+ *   the `X-PWH-Preview-*` metadata headers keep describing the original bytes; a body that
+ *   fails to shrink stays identity, byte-for-byte.
  *
  * Lifecycle: the whole write-out is bounded by `streamAt` (absolute deadline captured at
  * entry; every read/stat/drain races it); `signal` aborts classify as `hub-close` (abort
@@ -30,6 +34,7 @@
 
 import { createHash } from "node:crypto";
 import { PREVIEW_HDR, PREVIEW_VERIFY_MS } from "../../protocol/preview.js";
+import { acceptsGzip, GZIP_MIN_BYTES, gzipAsync } from "../gzip.js";
 import { isPreviewIoError, racePreviewIo } from "./fs.js";
 import type { PreviewHandle } from "./admit.js";
 import { utf8SafeCut } from "./sniff.js";
@@ -82,6 +87,11 @@ interface StreamOpts {
   textMax: number;
   now(): number;
   verifier: UploadVerifier;
+  /** The request's `Accept-Encoding` (routes.ts threads it in). Present-and-gzip (q>0) lets the
+   * TEXT flow compress its fully-verified buffer through the shared negotiation (≥2 KiB floor,
+   * async thread-pool gzip raced against the write-out deadline); images never compress — they
+   * are already-compressed formats and their flow streams instead of buffering. */
+  acceptEncoding?: string;
 }
 
 interface FlowState {
@@ -95,6 +105,7 @@ interface FlowCtx {
   readonly deadlineAt: number;
   readonly state: FlowState;
   fail(reason: StreamFailReason): StreamOutcome;
+  classify(err: unknown): StreamFailReason;
   race<T>(p: Promise<T>): Promise<T>;
   writeChunk(chunk: Buffer): Promise<void>;
 }
@@ -137,7 +148,7 @@ export function readAndStream(src: StreamSrc, sink: PreviewSink, opts: StreamOpt
   const writeChunk = async (chunk: Buffer): Promise<void> => {
     if (!sink.write(chunk)) await race(sink.waitDrain(opts.signal));
   };
-  const ctx: FlowCtx = { src, sink, opts, deadlineAt, state, fail, race, writeChunk };
+  const ctx: FlowCtx = { src, sink, opts, deadlineAt, state, fail, classify, race, writeChunk };
 
   return (async (): Promise<StreamOutcome> => {
     try {
@@ -219,7 +230,7 @@ async function streamText(ctx: FlowCtx): Promise<StreamOutcome> {
   // source-order contract (ruling #4, pinned by tests): this is the ONLY flow that touches the
   // verifier, and its `verifyWhole` call must precede `writeHead` — after the head there is no
   // whole-file-verify path, ever.
-  const { src, sink, opts, state, fail, race, writeChunk } = ctx;
+  const { src, sink, opts, state, fail, classify, race, writeChunk } = ctx;
 
   const pre = await race(src.fh.stat());
 
@@ -253,13 +264,35 @@ async function streamText(ctx: FlowCtx): Promise<StreamOutcome> {
     if (!sameIdentity(identityOf(post), identityOf(pre))) return fail("identity-changed");
   }
 
+  // Dynamic gzip (shared negotiation, hub/gzip.ts): compression happens AFTER verification and
+  // BEFORE the head — the text flow is fully buffered at this point, so Content-Length can name
+  // the compressed length while every `X-PWH-Preview-*` metadata header still describes the
+  // ORIGINAL bytes (kind/size/truncated are content facts, not transport facts). The gzip runs
+  // on the thread pool and races the same write-out deadline as every read/stat/drain; a race
+  // rejection (deadline/abort) fails through the standard classify path, a body that fails to
+  // shrink (or any zlib error, caught inside the eligibility gate) keeps the identity bytes.
+  let out = body.subarray(0, cut);
+  let gz: Buffer | undefined;
+  if (out.length >= GZIP_MIN_BYTES && acceptsGzip(opts.acceptEncoding)) {
+    try {
+      const compressed = await race(gzipAsync(out));
+      gz = compressed.length < out.length ? compressed : undefined;
+    } catch (err) {
+      return fail(classify(err));
+    }
+  }
+
   const headers = baseHeaders("text", "text/plain; charset=utf-8", src.size, cut < src.size);
-  headers["Content-Length"] = String(cut);
+  headers["Content-Length"] = String(gz === undefined ? cut : gz.length);
+  if (gz !== undefined) {
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+  }
   sink.writeHead(200, headers);
   state.headSent = true;
 
-  const out = body.subarray(0, cut);
-  if (out.length > 0) await writeChunk(out);
+  const send = gz === undefined ? out : gz;
+  if (send.length > 0) await writeChunk(send);
   sink.end();
   return verifyTag === undefined
     ? { ok: true, bytes: cut, truncated: cut < src.size }
