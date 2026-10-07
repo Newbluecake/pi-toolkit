@@ -60,7 +60,7 @@ metadata:
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | sonnet        | `cr-anthropic/claude-sonnet-5`                                                                                                        |
 | kimi-k3       | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                          |
-| glm-5.3       | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`                                                                                               |
+| glm-5.3       | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）                                 |
 | opus-5.5      | `cr-anthropic/claude-opus-5-5`（**opus 档首选**：$4/$20，比 opus-5 更强且更便宜）                                                     |
 | opus-5        | `cr-anthropic/claude-opus-5`（仅作 opus-5.5 不可用时的替补）                                                                          |
 | fable         | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                          |
@@ -86,7 +86,7 @@ sonnet → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [ask
   2.5 倍）。用户未点头就继续用 opus-5.5 迭代，不得自行升 fable。
 - 例外：用户主动点名要用 fable 时视为已批准，无需再问。
 
-派单前参考系统注入的 [quota] 行：订阅额度窗口内不用就作废，**优先用完订阅**——L1/L2（预警）只是提示，派单照常；只有 L3（≥90% 或即将耗尽）才跳过该 provider。[quota] 给出的替代只是**候选**（按订阅优先排序），额度层不知道任务需求：先判断候选是否胜任本阶段任务（对照本表的阶段→模型路由），胜任就优先用订阅；不胜任就按本表另选合适模型，不为用额度而硬凑。额度行不存在时按本表默认顺序。
+派单前参考系统注入的 [quota] 行：订阅额度窗口内不用就作废，**优先用完订阅**——L1/L2（预警）只是提示，派单照常；只有 L3（≥90% 或即将耗尽）才跳过该 provider。**GLM 订阅优先（2026-10-07 用户拍板）**：zai 订阅有余量时，凡 GLM 在候选内的阶段（代码探索、前端开发、开发实施、任务验收的回退链），GLM 直接升为该阶段**首选**，排在 sonnet / gpt 系等按量线之前；唯一的例外是异源约束——开发用了 GLM 的包，验收不得再派 GLM（改走 Claude 系或 gpt 系）。其余情况 [quota] 给出的替代仍只是**候选**（按订阅优先排序），额度层不知道任务需求：先判断候选是否胜任本阶段任务（对照本表的阶段→模型路由），胜任就优先用订阅；不胜任就按本表另选合适模型，不为用额度而硬凑。额度行不存在时按本表默认顺序。
 
 ## 第 0 步：需求澄清（dev-clarify）
 
@@ -141,23 +141,22 @@ sonnet → opus-5.5（疑难默认天花板；不可用时退 opus-5） → [ask
 
 ## 各阶段模型分工
 
-| 阶段                   | 首选               | 次选                                              | 说明                                                                                                                           |
-| ---------------------- | ------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **核心调度**（主会话） | opus-5.5           | opus-5 → kimi-k3（有订阅额度时）                  | 任务拆解、派单、汇总、裁定                                                                                                     |
-| **代码探索**           | sonnet             | glm-5.3 / kimi-k3（有订阅额度时优先）             | `subagent_type=Explore`，只读定位代码/梳理调用链                                                                               |
-| **架构设计**           | opus-5.5           | opus-5 → gpt-6-astra（兜底）                      | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                          |
-| **方案制定**           | opus-5.5           | opus-5 → sonnet（简单方案）                       | `subagent_type=Plan`                                                                                                           |
-| **前端开发**           | sonnet             | opus-5.5（视觉设计/疑难）→ kimi-k3                | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                         |
-| **复杂任务方案**       | opus-5.5           | opus-5 → gpt-6-astra（兜底）                      | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                      |
-| **疑难攻坚**           | opus-5.5           | gpt-6-astra（兜底）                               | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                 |
-| **方案评审**           | gpt-6-sol          | gpt-5.6-sol → opus-5（方案非 opus 系时）→ kimi-k3 | `subagent_type=reviewer`；必须与方案模型异源                                                                                   |
-| **开发实施**           | sonnet ⇄ gpt-6-sol | kimi-k3 / glm-5.3（有订阅额度时）→ opus-5.5       | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                    |
-| **任务验收**           | gpt-6-sol          | gpt-5.6-sol → kimi-k3 → glm-5.3                   | `subagent_type=verifier`；必须与开发模型异源（gpt-6-sol 做开发时验收改派 Claude 系或 kimi）；打回后复验优先 resume 原 verifier |
+| 阶段                   | 首选                                                | 次选                                                                      | 说明                                                                                                                           |
+| ---------------------- | --------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **核心调度**（主会话） | opus-5.5                                            | opus-5 → kimi-k3（有订阅额度时）                                          | 任务拆解、派单、汇总、裁定                                                                                                     |
+| **代码探索**           | glm-5.3（zai 订阅有余量时首选）→ sonnet             | kimi-k3（订阅有余量时）                                                   | `subagent_type=Explore`，只读定位代码/梳理调用链                                                                               |
+| **架构设计**           | opus-5.5                                            | opus-5 → gpt-6-astra（兜底）                                              | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                          |
+| **方案制定**           | opus-5.5                                            | opus-5 → sonnet（简单方案）                                               | `subagent_type=Plan`                                                                                                           |
+| **前端开发**           | glm-5.3（zai 订阅有余量时首选）→ sonnet             | opus-5.5（视觉设计/疑难）→ kimi-k3（订阅有余量时）                        | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                         |
+| **复杂任务方案**       | opus-5.5                                            | opus-5 → gpt-6-astra（兜底）                                              | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                      |
+| **疑难攻坚**           | opus-5.5                                            | gpt-6-astra（兜底）                                                       | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                 |
+| **方案评审**           | gpt-6-sol                                           | gpt-5.6-sol → opus-5（方案非 opus 系时）→ kimi-k3                         | `subagent_type=reviewer`；必须与方案模型异源                                                                                   |
+| **开发实施**           | glm-5.3（zai 订阅有余量时首选）→ sonnet ⇄ gpt-6-sol | kimi-k3（订阅有余量时）→ opus-5.5                                         | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                    |
+| **任务验收**           | gpt-6-sol                                           | gpt-5.6-sol → glm-5.3（订阅有余量时提前；开发用了 GLM 的包禁派）→ kimi-k3 | `subagent_type=verifier`；必须与开发模型异源（gpt-6-sol 做开发时验收改派 Claude 系或 kimi）；打回后复验优先 resume 原 verifier |
 
 开发双首选（2026-09）：sonnet 与 gpt-6-sol 并列，多个开发包并行时按包分摊（gpt-6-sol 更便宜、上下文 1.05M）；**gpt-6-sol 开发的包，验收改派 Claude 系（sonnet）**，不派任何 GPT 系。
 
-路由现状（2026-09）：kimi-coding / zai 订阅常耗尽，默认表以按量线（cr-anthropic / cr-response /
-zhipu-pool）为准；[quota] 显示订阅有余量且候选胜任时可替换同阶段首选。
+路由现状（2026-10）：zai 订阅有余量时 GLM 按上方「GLM 订阅优先」规则升为候选阶段首选；kimi-coding / zai 订阅常耗尽，额度耗尽或 L3 预警时回退到按量线（cr-anthropic / cr-response / zhipu-pool）的默认顺序。
 
 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier /
 general / Explore），自带角色 prompt 与工具约束；调用时传 `subagent_type` 并按本表传 `model`。
