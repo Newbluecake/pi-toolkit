@@ -35,6 +35,7 @@
 import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
+import { createScrollMemory, SCROLL_MEMORY } from "../../composables/useScrollMemory.js";
 import { useSidebarWidth } from "../../composables/useSidebarWidth.js";
 import { useTicker } from "../../composables/useTicker.js";
 import type { UseHubHandle } from "../../composables/useHub.js";
@@ -163,6 +164,12 @@ function onListClick(ev: MouseEvent): void {
 }
 
 provide(SIDEBAR_DRAWER, { active: drawerAvailable, open: openDrawer });
+
+// Scroll-position memory (session-switch plan §1.4 E1-6): one pure in-memory LRU per mounted
+// dashboard — AgentDetail reads the following 初值 from it, the main Transcript (via
+// DetailBody's `memory-key`) saves/restores the reading position. Not persisted: a page reload
+// legitimately starts fresh.
+provide(SCROLL_MEMORY, createScrollMemory());
 
 // ---------------------------------------------------------------------------
 // back navigation / retry / loadOlder

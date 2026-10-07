@@ -7,10 +7,11 @@
  * functions (`messageText`, `itemRenderKey`) and `render/tools.js`'s `toolView`/`safeJson`, plus
  * `state.js`'s `resultText` — never re-implements them. `indexTools` is duplicated from
  * `tool-index.ts` (see that file's header for why).
+ * Scroll-memory anchors (`anchors`/`anchorIdsOf`, E1-1): docs/dev/web-hub-session-switch/plan.md §1.4.
  */
 import { itemRenderKey, messageText } from "@logic/transcript.js";
 import { safeJson, toolView } from "@logic/tools.js";
-import { resultText } from "@logic/state.js";
+import { resultText, messageKey } from "@logic/state.js";
 import type { Item, ToolView } from "../../types.js";
 import type { TranscriptSource } from "../../contracts.js";
 import { indexTools, type ToolIndex } from "./tool-index.js";
@@ -180,17 +181,42 @@ export interface TxBuild {
    * `entries` (streaming/orphan-live entries have no history counterpart) — the `v-memo` cache
    * key a finalized entry's subtree is keyed on. */
   readonly renderKeys: readonly string[];
+  /** Anchor id SETS (`useScrollMemory.ts`'s E1-1 rule), aligned 1:1 by index with `entries`
+   * (unlike `renderKeys`: these are IDENTITY ids for scroll-position anchoring, not v-memo
+   * cache keys — no content digest, and streaming/live-tool entries contribute `[]` because
+   * they have no stable identity). docs/dev/web-hub-session-switch/plan.md §1.4. */
+  readonly anchors: readonly (readonly string[])[];
+}
+
+/**
+ * Anchor ids for one item (session-switch plan §1.4 E1-1): `e:<entryId>` when the backing entry
+ * has an id; `k:<messageKey>` only for NON-custom messages with a finite numeric timestamp
+ * (a missing/garbage timestamp yields a meaningless `role:` key, and custom messages are
+ * never keyed). Items with neither (live streamed messages without a final entry, orphan live
+ * tools, custom live messages) return `[]` and can never serve as scroll anchors.
+ */
+export function anchorIdsOf(it: Item): string[] {
+  const ids: string[] = [];
+  if (typeof it.entryId === "string" && it.entryId !== "") ids.push(`e:${it.entryId}`);
+  const m = it.message;
+  if (m !== undefined && m.role !== "custom" && typeof m.timestamp === "number" && Number.isFinite(m.timestamp)) {
+    const key = messageKey(m);
+    if (key !== undefined) ids.push(`k:${key}`);
+  }
+  return ids;
 }
 
 export function buildTxEntries(a: TranscriptSource): TxBuild {
   const idx = indexTools(a);
   const entries: TxEntry[] = [];
   const renderKeys: string[] = [];
+  const anchors: (readonly string[])[] = [];
   for (const it of a.items) {
     const entry = itemEntry(it, idx);
     if (!entry) continue;
     entries.push(entry);
     renderKeys.push(itemRenderKey(it, idx));
+    anchors.push(anchorIdsOf(it));
   }
   if (a.streaming) {
     entries.push({
@@ -200,6 +226,7 @@ export function buildTxEntries(a: TranscriptSource): TxBuild {
       truncated: false,
     });
     renderKeys.push("streaming");
+    anchors.push([]);
   }
   for (const t of a.tools) {
     if (idx.called.has(t.toolCallId) || idx.results.has(t.toolCallId)) continue;
@@ -209,6 +236,7 @@ export function buildTxEntries(a: TranscriptSource): TxBuild {
       view: toolView(undefined, undefined, t) as ToolView,
     });
     renderKeys.push(`live:${t.toolCallId}:${t.done ? "d" : "l"}:${String(t.partial ?? "").length}`);
+    anchors.push([]);
   }
-  return { entries, renderKeys };
+  return { entries, renderKeys, anchors };
 }

@@ -597,3 +597,248 @@ describe("TxCustom.vue — markdown rendering", () => {
     expect(wrapper.find(".badge-trunc").exists()).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// scroll memory v1 (docs/dev/web-hub-session-switch/plan.md §1.4 — E1). The coordinate system
+// change (entries vs items+streaming+tools) is invisible to the tests above (pure user-message
+// agents: entries === items), which is exactly why they must stay green — the cases below pin
+// the opt-in read/write lifecycle, the writer mutex (W1–W4) and the gesture cancel rules.
+// ---------------------------------------------------------------------------
+import {
+  createScrollMemory,
+  type ScrollMemory,
+  SCROLL_MEMORY,
+} from "../../../src/web-hub/ui/src/composables/useScrollMemory.js";
+
+function makeRect(top: number, height: number): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    left: 0,
+    right: 0,
+    width: 0,
+    height,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** Mount a Transcript with a fresh (or given) scroll-memory store provided. NOT awaited —
+ * callers must patch element geometry while the restore nextTick is still pending. */
+function mountTxMem(agent: AgentState, mem: ScrollMemory, extraProps: Record<string, unknown> = {}) {
+  return mount(Transcript, {
+    props: { agent, following: false, narrow: false, memoryKey: "agent-a", ...extraProps },
+    global: { provide: { [SCROLL_MEMORY as symbol]: mem } },
+  });
+}
+
+/** The W4 restore runs as a nextTick callback chained on the mount flush — flush a few
+ * microtask generations so it has certainly executed (and any W2b/W3 microtask has settled). */
+async function flushRestore(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function patchRect(el: Element, top: number, height: number): void {
+  (el as HTMLElement).getBoundingClientRect = () => makeRect(top, height);
+}
+
+/** The .tx-item row whose data-anchor-ids contains `id`. */
+function anchorRowOf(wrapper: VueWrapper, id: string): Element {
+  for (const row of wrapper.findAll(".tx-item")) {
+    const raw = row.attributes("data-anchor-ids");
+    if (raw !== undefined && raw.split("\u001f").includes(id)) return row.element;
+  }
+  throw new Error(`no row carries anchor id ${id}`);
+}
+
+describe("Transcript.vue — scroll memory v1 (session-switch plan §1.4)", () => {
+  it("① unmount while not following saves the first visible anchorable row's ids + offset", async () => {
+    const mem = createScrollMemory();
+    const wrapper = mountTxMem(agentWith(manyUserMessages(50)), mem);
+    const box = wrapper.get("#transcript").element;
+    setScrollGeometry(box, { scrollTop: 250, scrollHeight: 3000, clientHeight: 600 });
+    patchRect(box, 0, 600);
+    // rects are VIEWPORT-relative (⇒ subtract scrollTop to place row i at content top 100·i)
+    wrapper.findAll(".tx-item").forEach((row, i) => patchRect(row.element, 100 * i - 250, 60));
+    wrapper.unmount();
+    const rec = mem.get("agent-a");
+    expect(rec?.following).toBe(false);
+    // content tops 0/100 end at 60/160 ≤ 250; row 2 (entry e2, content top 200) straddles the fold
+    expect(rec?.anchorIds).toEqual(["e:e2", `k:user:${1_700_000_000_000 + 2 * 1000}`]);
+    expect(rec?.anchorOffsetPx).toBe(200 - 250);
+  });
+
+  it("② unmount while following saves just {following:true}", async () => {
+    const mem = createScrollMemory();
+    const wrapper = mountTxMem(agentWith(manyUserMessages(50)), mem, { following: true });
+    wrapper.unmount();
+    expect(mem.get("agent-a")).toEqual({ following: true });
+  });
+
+  it("③ a saved record restores the window start AND the pixel position at mount", async () => {
+    const mem = createScrollMemory();
+    mem.set("agent-a", { following: false, anchorIds: ["e:e150"], anchorOffsetPx: 40 });
+    const wrapper = mountTxMem(agentWith(manyUserMessages(400)), mem);
+    // restoreStart(150, 400, 200): 150 < defaultStart 200 ⇒ start = 150 - 100 = 50
+    expect(wrapper.text()).toContain("message 50");
+    expect(wrapper.text()).not.toContain("message 49");
+    const box = wrapper.get("#transcript").element;
+    setScrollGeometry(box, { scrollTop: 0, scrollHeight: 5000, clientHeight: 600 });
+    patchRect(box, 100, 600);
+    patchRect(anchorRowOf(wrapper, "e:e150"), 600, 50);
+    await wrapper.vm.$nextTick();
+    await flushRestore();
+    // contentTop = 600 − 100 + 0 = 500; scrollTop = 500 − 40
+    expect(box.scrollTop).toBe(460);
+    expect(wrapper.emitted("update:following")).toBeUndefined(); // restore is not a flip
+  });
+
+  it("④ an anchor outside the snapshot (tail truncated) degrades: emit following=true", async () => {
+    const mem = createScrollMemory();
+    mem.set("agent-a", { following: false, anchorIds: ["e:gone"], anchorOffsetPx: 0 });
+    const wrapper = mountTxMem(agentWith(manyUserMessages(50)), mem);
+    await wrapper.vm.$nextTick();
+    await flushRestore();
+    expect(wrapper.emitted("update:following")).toEqual([[true]]);
+  });
+
+  it("⑤ an ambiguous anchor (same id in two entries) degrades: emit following=true", async () => {
+    const base = agentWith(manyUserMessages(50));
+    const dup = { ...base, items: [...base.items, base.items[10]] } as unknown as AgentState;
+    const mem = createScrollMemory();
+    mem.set("agent-a", { following: false, anchorIds: ["e:e10"], anchorOffsetPx: 0 });
+    const wrapper = mountTxMem(dup, mem);
+    await wrapper.vm.$nextTick();
+    await flushRestore();
+    expect(wrapper.emitted("update:following")).toEqual([[true]]);
+  });
+
+  it("⑥ no memoryKey ⇒ neither reads nor writes even when a store is provided (drawer isolation)", async () => {
+    const mem: ScrollMemory = { get: vi.fn(), set: vi.fn(), delete: vi.fn(), size: 0 };
+    const wrapper = mount(Transcript, {
+      props: { agent: agentWith(manyUserMessages(5)), following: true, narrow: false },
+      global: { provide: { [SCROLL_MEMORY as symbol]: mem } },
+    });
+    await wrapper.vm.$nextTick();
+    wrapper.unmount();
+    expect(mem.get).not.toHaveBeenCalled();
+    expect(mem.set).not.toHaveBeenCalled();
+  });
+
+  it("⑦ writer mutex: a content change and a resize before the restore nextTick — only W4 writes", async () => {
+    await withFakeResizeObserver(async () => {
+      const mem = createScrollMemory();
+      mem.set("agent-a", { following: false, anchorIds: ["e:e30"], anchorOffsetPx: 0 });
+      const wrapper = mountTxMem(agentWith(manyUserMessages(60)), mem);
+      const box = wrapper.get("#transcript").element;
+      setScrollGeometry(box, { scrollTop: 0, scrollHeight: 900, clientHeight: 300 });
+      patchRect(box, 100, 300);
+      patchRect(anchorRowOf(wrapper, "e:e30"), 600, 50);
+      // before the restore lands: the content grows (domSignal fires → W2b) AND the resize
+      // observer fires (W3) — both must let go; the restore (W4) is the surviving writer.
+      void wrapper.setProps({ agent: agentWith(manyUserMessages(61)) });
+      FakeResizeObserver.instances[0]!.fire();
+      await wrapper.vm.$nextTick();
+      await flushRestore();
+      expect(box.scrollTop).toBe(500); // W4's anchor value — not scrollHeight(900), not 0
+    });
+  });
+
+  it("⑧ the restore write's scroll event is consumed by the token; the next one behaves normally", async () => {
+    const mem = createScrollMemory();
+    mem.set("agent-a", { following: false, anchorIds: ["e:e10"], anchorOffsetPx: 0 });
+    const wrapper = mountTxMem(agentWith(manyUserMessages(60), { hasMore: true, oldestEntryId: "e0" }), mem);
+    const box = wrapper.get("#transcript").element;
+    patchRect(box, 50, 600);
+    patchRect(anchorRowOf(wrapper, "e:e10"), 100, 50); // restored scrollTop = 100 − 50 = 50 < 96
+    await wrapper.vm.$nextTick();
+    await flushRestore();
+    expect(box.scrollTop).toBe(50);
+    setScrollGeometry(box, { scrollTop: 50, scrollHeight: 3000, clientHeight: 600 }); // distance ≫ 64
+    await wrapper.get("#transcript").trigger("scroll"); // the restore's own event: token eaten
+    expect(wrapper.emitted("update:following")).toBeUndefined();
+    expect(wrapper.emitted("load-older")).toBeUndefined();
+    await wrapper.get("#transcript").trigger("scroll"); // second event: normal handling —
+    expect(wrapper.emitted("load-older")).toEqual([[]]); // auto load-older near the top fires
+  });
+
+  it("⑨ gestures: pointerdown(mouse)/wheel/PageUp cancel a pending restore; a letter key does not", async () => {
+    const fireWheel = (el: Element): void => {
+      el.dispatchEvent(new Event("wheel"));
+    };
+    const fireKey = (el: Element, key: string): void => {
+      el.dispatchEvent(new KeyboardEvent("keydown", { key }));
+    };
+    for (const gesture of ["pointer", "wheel", "key"] as const) {
+      const mem = createScrollMemory();
+      mem.set("agent-a", { following: false, anchorIds: ["e:e10"], anchorOffsetPx: 0 });
+      const wrapper = mountTxMem(agentWith(manyUserMessages(60)), mem);
+      const box = wrapper.get("#transcript").element;
+      patchRect(box, 0, 600);
+      patchRect(anchorRowOf(wrapper, "e:e10"), 300, 50);
+      if (gesture === "pointer") {
+        const ev = new Event("pointerdown");
+        Object.defineProperty(ev, "pointerType", { value: "mouse" });
+        box.dispatchEvent(ev);
+      } else if (gesture === "wheel") {
+        fireWheel(box);
+      } else {
+        fireKey(box, "PageUp");
+      }
+      await wrapper.vm.$nextTick();
+      await flushRestore();
+      expect(wrapper.emitted("update:following")).toEqual([[true]]);
+      expect(box.scrollTop).toBe(0); // restore cancelled — nothing wrote
+      wrapper.unmount();
+    }
+    // a non-scrolling key press is NOT a gesture: the restore completes untouched
+    const mem = createScrollMemory();
+    mem.set("agent-a", { following: false, anchorIds: ["e:e10"], anchorOffsetPx: 0 });
+    const wrapper = mountTxMem(agentWith(manyUserMessages(60)), mem);
+    const box = wrapper.get("#transcript").element;
+    patchRect(box, 0, 600);
+    patchRect(anchorRowOf(wrapper, "e:e10"), 300, 50);
+    fireKey(box, "a");
+    await wrapper.vm.$nextTick();
+    await flushRestore();
+    expect(wrapper.emitted("update:following")).toBeUndefined();
+    expect(box.scrollTop).toBe(300);
+  });
+
+  it("⑨b a wheel AFTER the restore write clears the token — the scroll event counts as user scrolling", async () => {
+    const mem = createScrollMemory();
+    mem.set("agent-a", { following: false, anchorIds: ["e:e10"], anchorOffsetPx: 0 });
+    const wrapper = mountTxMem(agentWith(manyUserMessages(60)), mem);
+    const box = wrapper.get("#transcript").element;
+    patchRect(box, 50, 600);
+    patchRect(anchorRowOf(wrapper, "e:e10"), 100, 50); // restored scrollTop = 50
+    await wrapper.vm.$nextTick();
+    await flushRestore();
+    expect(box.scrollTop).toBe(50);
+    // near the bottom: distance ≤ 64 would flip following back ON — if the token were still
+    // armed it would swallow this; the wheel cleared it, so this counts as user scrolling.
+    setScrollGeometry(box, { scrollTop: 2900, scrollHeight: 3000, clientHeight: 600 });
+    box.dispatchEvent(new Event("wheel")); // user intent arrives before the scroll event
+    await wrapper.get("#transcript").trigger("scroll");
+    expect(wrapper.emitted("update:following")).toEqual([[true]]); // NOT swallowed by the token
+  });
+
+  it("⑩ following flipped true by the parent during the restore window cancels it (W1 wins)", async () => {
+    const mem = createScrollMemory();
+    mem.set("agent-a", { following: false, anchorIds: ["e:e10"], anchorOffsetPx: 0 });
+    const wrapper = mountTxMem(agentWith(manyUserMessages(60)), mem);
+    const box = wrapper.get("#transcript").element;
+    setScrollGeometry(box, { scrollTop: 0, scrollHeight: 3000, clientHeight: 600 });
+    patchRect(box, 0, 600);
+    patchRect(anchorRowOf(wrapper, "e:e10"), 300, 50);
+    void wrapper.setProps({ following: true }); // external intent, before the restore lands
+    await wrapper.vm.$nextTick();
+    await flushRestore();
+    expect(box.scrollTop).toBe(3000); // W1's jump to bottom — not the anchor's 300
+    expect(wrapper.emitted("update:following")).toBeUndefined();
+  });
+});

@@ -307,6 +307,9 @@ export interface TranscriptProps {
   readonly anchorId?: string;
   /** 覆盖 `transcript.ariaLabel` 的地标名(抽屉里用 `drawer.runTranscriptAria`)。 */
   readonly ariaLabel?: string;
+  /** session-switch plan §1.4 (E1-6): 滚动位置记忆的 opt-in key —— 只有主会话的
+   * DetailBody 传 `agent.key`;抽屉 RunTranscript 不传 ⇒ 不读写滚动记忆(天然隔离)。 */
+  readonly memoryKey?: string;
 }
 export interface TranscriptEmits {
   "load-older": [];

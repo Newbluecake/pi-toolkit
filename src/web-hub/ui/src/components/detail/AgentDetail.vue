@@ -27,6 +27,10 @@
   + `FleetDrawer`)。FleetDrawer 位于本组件 provide 的 CONTROL_CTX 作用域内(§6.1),树里的
   FleetActions 才能拿到控制面上下文。关闭抽屉时若有选中 run,一并 `selectRun(null)` 退订
   (「没人看就不推」,§2);run 订阅的 transport 归 useHub 管,组件只走 HubHandle。
+
+  Scroll-position memory (docs/dev/web-hub-session-switch/plan.md §1.4 — E1-6): the following
+  初值 comes from the DashboardView-provided `SCROLL_MEMORY` store keyed by agentKey, and the
+  defensive agent-key watcher re-reads it.
 -->
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
@@ -34,6 +38,7 @@ import { mergeQueue, newCmdId } from "@logic/control.js";
 import { restoringKeys } from "../../logic/spawn.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
+import { SCROLL_MEMORY } from "../../composables/useScrollMemory.js";
 import type { AgentDetailEmits, AgentDetailProps } from "../../contracts.js";
 import type { CmdOutcome, Notice } from "../../types.js";
 import type { DialogClosedWire, DialogWire } from "@protocol/messages.js";
@@ -393,9 +398,12 @@ function onDialogCancel(dialogId: string): void {
   dialogOutcome(c.cancelDialog(props.agent.key, dialogId, dialogsEpoch.value, id));
 }
 
-// --- follow-scroll plumbing (P3 original) ---------------------------------------------------
+// --- follow-scroll plumbing (P3 original; following 初值 now seeds from the scroll-position
+// memory, docs/dev/web-hub-session-switch/plan.md §1.4 E1-6) ------------------------------
 
-const following = ref(true);
+/** DashboardView 提供的 per-agentKey 滚动记忆(未提供 ⇒ null,行为回退到旧的 true)。 */
+const scrollMemory = inject(SCROLL_MEMORY, null);
+const following = ref(scrollMemory?.get(props.agent.key)?.following ?? true);
 const newCount = ref(0);
 
 // AgentDetail is remounted per agent by DashboardView's `:key="agent.key"`; reset defensively
@@ -403,7 +411,7 @@ const newCount = ref(0);
 watch(
   () => props.agent.key,
   () => {
-    following.value = true;
+    following.value = scrollMemory?.get(props.agent.key)?.following ?? true;
     newCount.value = 0;
   },
 );

@@ -144,4 +144,11 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     const txAfter = wrapper.findComponent({ name: "Transcript" });
     expect(txBefore.vm).not.toBe(txAfter.vm);
   });
+
+  // session-switch plan §1.4 (E1-6): the seam opts the MAIN-session Transcript into scroll memory.
+  it("passes memoryKey === agent.key to the main-session Transcript (scroll-memory opt-in)", async () => {
+    const agent = agentWith([]);
+    const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
+    expect(wrapper.findComponent({ name: "Transcript" }).props("memoryKey")).toBe("agent-a");
+  });
 });

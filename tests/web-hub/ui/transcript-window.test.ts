@@ -140,5 +140,40 @@ describe("useTranscriptWindow (vue-plan.md v2.1 §3.6, §5.2 — P1)", () => {
       });
       scope.stop();
     });
+
+    // session-switch plan §1.4 (E1-4): the restore path passes a computed start; the window
+    // computed clamps it, and omitting it keeps the default tail window.
+    describe("initialStart (session-switch plan §1.4 — E1)", () => {
+      it("is used verbatim as the start", () => {
+        const scope = effectScope();
+        scope.run(() => {
+          const handle = useTranscriptWindow(ref(500), ref(false), TRANSCRIPT_CAP, 95);
+          expect(handle.start.value).toBe(95);
+          expect(handle.window.value).toEqual({ start: 95, end: 395, hiddenBefore: 95, hiddenAfter: 105 });
+        });
+        scope.stop();
+      });
+
+      it("out-of-range values are clamped by the window computed (start into [0, len])", () => {
+        const scope = effectScope();
+        scope.run(() => {
+          const tooBig = useTranscriptWindow(ref(100), ref(false), TRANSCRIPT_CAP, 999);
+          expect(tooBig.start.value).toBe(999); // raw value kept; the WINDOW clamps
+          expect(tooBig.window.value).toEqual({ start: 100, end: 100, hiddenBefore: 100, hiddenAfter: 0 });
+          const negative = useTranscriptWindow(ref(100), ref(false), TRANSCRIPT_CAP, -7);
+          expect(negative.window.value).toEqual({ start: 0, end: 100, hiddenBefore: 0, hiddenAfter: 0 });
+        });
+        scope.stop();
+      });
+
+      it("omitted ⇒ the default tail window (byte-identical to the pre-E1 default)", () => {
+        const scope = effectScope();
+        scope.run(() => {
+          const handle = useTranscriptWindow(ref(500), ref(false), TRANSCRIPT_CAP, undefined);
+          expect(handle.start.value).toBe(300);
+        });
+        scope.stop();
+      });
+    });
   });
 });

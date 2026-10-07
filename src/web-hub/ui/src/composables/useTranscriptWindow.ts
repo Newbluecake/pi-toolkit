@@ -1,10 +1,12 @@
 /**
  * Client-side transcript windowing (vue-plan.md v2.1 §3.6, §5.2 — P1). Pure math only — no DOM,
  * no scroll handling (that's `useFollowScroll.ts`) — so it's trivially property-testable: given
- * the total item count and a window `start`, decide which slice actually mounts, capped at
- * `TRANSCRIPT_CAP` (300) mounted `.tx-item`s regardless of how far back the user has scrolled.
- * The hub already caps its snapshot at `DEFAULT_TAIL_ENTRIES` (400, unchanged wire protocol) —
- * this is the second, purely client-side cap that keeps a long-lived mobile tab's DOM bounded.
+ * the total ENTRY count (`buildTxEntries(agent).entries.length` — E1-2's single coordinate
+ * system, docs/dev/web-hub-session-switch/plan.md §1.4) and a window `start`, decide which slice
+ * actually mounts, capped at `TRANSCRIPT_CAP` (300) mounted `.tx-item`s regardless of how far
+ * back the user has scrolled. The hub already caps its snapshot at `DEFAULT_TAIL_ENTRIES` (400,
+ * unchanged wire protocol) — this is the second, purely client-side cap that keeps a long-lived
+ * mobile tab's DOM bounded.
  */
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 
@@ -16,7 +18,7 @@ export const DESKTOP_DEFAULT_WINDOW = 200;
 export const TRANSCRIPT_CAP = 300;
 
 export interface ComputeWindowInput {
-  /** Total number of items currently available (`agent.items.length` plus any live/streaming tail). */
+  /** Total number of entries currently available (`buildTxEntries(agent).entries.length`). */
   readonly len: number;
   /** Current window start index (0-based, oldest-first); clamped into `[0, len]`. */
   readonly start: number;
@@ -59,6 +61,27 @@ export function revealEarlier(currentStart: number, pageSize: number): number {
   return Math.max(0, Math.floor(currentStart) - Math.floor(pageSize));
 }
 
+/**
+ * Reposition the window start after a load-older page landed (session-switch plan §1.4
+ * E1-2): prefer re-anchoring on the KEY of the entry that was the window's first mounted row
+ * when paging started — the page may fold existing entries (an orphan `toolResult` pairs up
+ * with the just-arrived `toolCall`), so a plain length-delta shift no longer keeps the same
+ * entries mounted. Falls back to the delta shift when the key itself was folded away.
+ */
+export function repositionAfterPage(
+  start: number,
+  firstKey: string | undefined,
+  entries: ReadonlyArray<{ readonly key: string }>,
+  lenAtPagingStart: number,
+): number {
+  if (firstKey !== undefined) {
+    const idx = entries.findIndex((e) => e.key === firstKey);
+    if (idx >= 0) return idx;
+  }
+  const delta = entries.length - lenAtPagingStart;
+  return delta > 0 ? start + delta : start;
+}
+
 /** `matchMedia("(max-width: 480px)")` ⇒ the mobile default, else the desktop one. */
 export function defaultWindowSize(isMobile: boolean): number {
   return isMobile ? MOBILE_DEFAULT_WINDOW : DESKTOP_DEFAULT_WINDOW;
@@ -79,15 +102,19 @@ export interface TranscriptWindowHandle {
 }
 
 /**
- * @param len live total item count (`agent.items.length` [+1 for an in-flight streaming message]).
+ * @param len live total entry count (`buildTxEntries(agent).entries.length`, E1-2's single
+ * coordinate system — NOT `items.length + streaming + tools`).
  * @param isMobile `matchMedia("(max-width: 480px)").matches`, e.g. from `useMedia.ts`.
+ * @param initialStart restore-time start (E1-4's `restoreStart`); omitted ⇒ the default tail
+ * window. Used as-is (the `window` computed clamps it into `[0, len]`).
  */
 export function useTranscriptWindow(
   len: Ref<number>,
   isMobile: Ref<boolean>,
   cap: number = TRANSCRIPT_CAP,
+  initialStart?: number,
 ): TranscriptWindowHandle {
-  const start = ref(defaultWindowStart(len.value, defaultWindowSize(isMobile.value))) as Ref<number>;
+  const start = ref(initialStart ?? defaultWindowStart(len.value, defaultWindowSize(isMobile.value))) as Ref<number>;
   const window = computed(() => computeWindow({ len: len.value, start: start.value, cap }));
   function showEarlier(pageSize?: number): void {
     start.value = revealEarlier(start.value, pageSize ?? defaultWindowSize(isMobile.value));
