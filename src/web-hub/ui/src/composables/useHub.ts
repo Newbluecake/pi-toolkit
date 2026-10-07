@@ -14,9 +14,20 @@
  * stale imperative `render()` call hitting removed DOM (the vanilla-JS failure mode that
  * bookkeeping guarded against) cannot happen — Vue's own component teardown handles it. The
  * `disposed` flag here only guards against a message/promise resolving after `dispose()`.
+ *
+ * D2 — main-subscription LRU keep-alive (web-hub-session-switch plan §1.2/§2.2 step 3): the
+ * single-slot "switch away ⇒ always unsubscribe" rule is gone. Whether the OLD session's main
+ * subscription survives a switch is decided ONLY by `planKeepAlive()` (K = keep-alive cap,
+ * product default 3, library default 1 — see `UseHubOptions.keepAliveSessions`); the LRU, the
+ * `mainSubs` ledger, and the `mainOps` same-key serialization chain live in this closure (see
+ * the D2 block comment in the body for the full contract, incl. R2-1's hello-time op voiding).
+ * Hub-side semantics this relies on (plan §0.1): subscriptions are per (clientId, agentKey)
+ * with no per-client main-subscription cap; a superseded or unsubscribed snapshot attempt
+ * never delivers; `hello` means every old-client subscription is already gone server-side.
  */
 import { shallowRef, type ShallowRef } from "vue";
 import { initialState, needsRunSubscribe, needsSubscribe, reduce } from "@logic/state.js";
+import { planKeepAlive } from "@logic/sessionKeepAlive.js";
 import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
 import { createRenderGate, type RenderPriority } from "./renderGate.js";
 import type {
@@ -68,6 +79,12 @@ export interface UseHubOptions<TTimer = ReturnType<typeof setTimeout>> {
    * (`#/agent/<key>`). Default: a `route` dispatch (selection-level only — App.vue's hash
    * router remains the URL owner; SP12/SP13 wires the real hash navigate). */
   navigate?(agentKey: string): void;
+  /** D2 (web-hub-session-switch plan §1.2 D2-2/D2-5): max sessions kept subscribed on the
+   * hub, INCLUDING the selected one (⇒ at most K-1 background). Read on every selection
+   * change, so shrinking the preference takes effect on the next switch. ABSENT ⇒ 1 — the
+   * library-level default keeps the pre-D2 single-slot behavior for every existing embed and
+   * test; only App.vue's wiring lifts the product default to 3 via `loadKeepAlive()`. */
+  keepAliveSessions?(): number;
 }
 
 export interface UseHubHandle extends HubHandle {
@@ -84,6 +101,12 @@ export interface UseHubHandle extends HubHandle {
    * unless its `runTx` is loaded, has more, and isn't already paging (or the transport lacks
    * `runPage`). */
   pageRun(agentKey: string): void;
+  /** D2 diag/test surface (plan §3.2 invariants I1/I2): this tab's main-subscription ledger —
+   * every agentKey it believes the hub holds a (possibly pending) subscription for, with the
+   * clientId each attempt was issued under. Never used by any decision path — decisions read
+   * the live closure map; this is the read-only mirror the randomized model test asserts
+   * against (ledger size ≤ K; quiescent ledger keys == the fake hub's subscription set). */
+  mainSubLedger(): ReadonlyArray<{ key: string; clientId: string }>;
   start(): Promise<void>;
   dispose(): void;
 }
@@ -104,6 +127,80 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
   const now = opts.now ?? Date.now;
   const resyncMinIntervalMs = opts.resyncMinIntervalMs ?? 2_000;
   const runPendingWatchdogMs = opts.runPendingWatchdogMs ?? 10_000;
+
+  // ---------------------------------------------------------------------------
+  // D2 (web-hub-session-switch plan §1.2 / §2.2 step 3): main-subscription keep-alive state.
+  //   `sessionLru` — the MRU-last order of sessions worth keeping subscribed; planning is the
+  //     pure `planKeepAlive()` (logic/sessionKeepAlive.ts), this closure only commits and
+  //     executes the resulting evictions.
+  //   `mainSubs` — the LEDGER: what this tab believes the hub holds for (clientId, agentKey),
+  //     pending included. The ONE source of truth for transport decisions — never the
+  //     reducer's `sub` (which survives hello/evict for rendering). Mirrors the run side's
+  //     `runSubs` + `runAttemptLive` discipline (Major-3): a subscribe POST's result is only
+  //     committed when the ledger entry is still this attempt (same gen, same clientId, and
+  //     the clientId is still current).
+  //   `mainOps` — same-key SERIALIZATION (D2-4): a key with an in-flight op chains the next op
+  //     behind it (a slow `unsubscribe(A)` must never overtake a newer `subscribe(A)` on the
+  //     wire — the hub would kill the fresh subscription). A key with no in-flight op calls its
+  //     op SYNCHRONOUSLY, byte-identical to the pre-D2 call order (K=1 golden). R2-1: on hello
+  //     every queued (not yet executing) op of the OLD client is voided and unlinked from its
+  //     key, so the current client's subscribe never queues behind a dead client's op; each
+  //     queued op re-validates its client immediately before executing anyway (double
+  //     insurance — an in-flight op cannot be unsent, but its clientId scoping makes it
+  //     harmless to the new client).
+  // ---------------------------------------------------------------------------
+  let sessionLru: string[] = [];
+  const mainSubs = new Map<string, { clientId: string; gen: number }>();
+  let mainGenSeq = 0;
+  interface MainOp {
+    clientId: string;
+    cancelled: boolean;
+  }
+  const mainOps = new Map<string, { op: MainOp; promise: Promise<void> }>();
+  let prevMainClientId: string | null = null;
+
+  const keepAliveCap = (): number => {
+    const get = opts.keepAliveSessions;
+    if (get === undefined) return 1; // library default = legacy single-slot (plan D2-5)
+    const v = get();
+    return typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.min(5, Math.floor(v))) : 1;
+  };
+
+  /** D2-4/R2-1: serialize same-key main ops; see the block comment above for the full contract. */
+  function enqueueMain(key: string, clientId: string, fn: () => Promise<unknown>): void {
+    const op: MainOp = { clientId, cancelled: false };
+    const exec = (): Promise<unknown> | undefined => {
+      if (op.cancelled || clientId !== raw.clientId) return undefined; // R2-1 pre-exec re-validation
+      return fn();
+    };
+    const prev = mainOps.get(key);
+    // No in-flight op ⇒ `exec()` (the transport call) runs SYNCHRONOUSLY as this expression
+    // is built — the pre-D2 call order. Chained ⇒ it runs once the previous op settles.
+    const attempt: Promise<unknown> = prev === undefined ? Promise.resolve(exec()) : prev.promise.then(exec);
+    const settled: Promise<void> = attempt.then(
+      () => {},
+      () => {},
+    ); // an op failure must never poison the chain
+    const entry = { op, promise: settled };
+    mainOps.set(key, entry);
+    void settled.then(() => {
+      if (mainOps.get(key) === entry) mainOps.delete(key); // only the chain tail unlinks
+    });
+  }
+
+  /** D2: tear one session's main subscription down — ledger first, transport second (only if
+   * the ledger actually held the key under the CURRENT client), reducer last. An agent whose
+   * ledger entry is gone (failed POST, hello, agent_removed) sends nothing. */
+  function evictSession(key: string): void {
+    const m = mainSubs.get(key);
+    const a = raw.agents.get(key);
+    if (m !== undefined) {
+      mainSubs.delete(key);
+      if (m.clientId === raw.clientId) enqueueMain(key, m.clientId, () => transport.unsubscribe(m.clientId, key));
+    }
+    if (a !== undefined && (a.sub !== null || m !== undefined))
+      dispatch({ event: "unsubscribed", data: { agentKey: key } });
+  }
 
   let raw: LogicState = initialState();
   const state = shallowRef<HubState>(raw as unknown as HubState) as ShallowRef<HubState>;
@@ -212,14 +309,37 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
   }
 
   function runEffects(): void {
+    if (raw.clientId !== prevMainClientId) {
+      // hello: the old client's subscriptions died with the SSE connection — the ledger and
+      // every QUEUED (not yet executing) op of the old client go with it (R2-1). Unlinking the
+      // map entries means the current client's next op on that key runs immediately instead of
+      // queueing behind a dead client's op; an old op already mid-flight cannot be unsent, but
+      // it is scoped to the old clientId and its POST result fails the ledger check below.
+      mainSubs.clear();
+      prevMainClientId = raw.clientId;
+      for (const [k, entry] of [...mainOps]) {
+        if (entry.op.clientId !== raw.clientId) {
+          entry.op.cancelled = true;
+          mainOps.delete(k);
+        }
+      }
+    }
+    // D2-11/一般-10: ledger entries for agents that no longer exist die on EVERY pass — a
+    // background keep-alive agent can vanish via `agent_removed` without any selection change
+    // (the hub already cleared its subscriptions for everyone; the stale belief must not
+    // count toward the cap nor produce a later useless unsubscribe... which would be harmless
+    // anyway, but the ledger stays the one source of truth).
+    if (mainSubs.size > 0) {
+      for (const k of [...mainSubs.keys()]) if (!raw.agents.has(k)) mainSubs.delete(k);
+    }
     if (raw.selected !== prevSelected) {
       const old = prevSelected;
       prevSelected = raw.selected;
+      const runIds: string[] = [];
       if (old !== null && raw.clientId) {
-        // F5 (fleet-drawer §6.4 #7): the OLD agent's run subscription is torn down FIRST —
-        // before the main `unsubscribe` below — so the transport call order is exactly
+        // F5 (fleet-drawer §6.4 #7): the OLD agent's run subscriptions tear down FIRST — before
+        // any main-subscription call below — so the transport call order stays
         // runUnsubscribe(old run) → unsubscribe(old) → (nested effects) subscribe(new) …
-        const runIds: string[] = [];
         for (const [k, v] of [...runSubs]) {
           if (v.agentKey !== old) continue;
           runSubs.delete(k);
@@ -228,13 +348,24 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
           runIds.push(v.runId);
           void transport.runUnsubscribe?.(raw.clientId, old, v.runId);
         }
-        const oldAgent = raw.agents.get(old);
-        if (oldAgent?.sub) {
-          void transport.unsubscribe(raw.clientId, old);
-          dispatch({ event: "unsubscribed", data: { agentKey: old } });
-        }
-        for (const runId of runIds) dispatch({ event: "run_unsubscribed", data: { agentKey: old, runId } });
       }
+      // D2 (v2 Blocker-1): switching away only tears the old session's RUN subscriptions (above)
+      // — whether its MAIN subscription survives is decided solely by the LRU plan below.
+      const plan = planKeepAlive({
+        lru: sessionLru,
+        selected: raw.selected,
+        old,
+        cap: keepAliveCap(),
+        exists: (k) => raw.agents.has(k),
+        failed: (k) => raw.agents.get(k)?.history === "error",
+      });
+      // Commit the LRU BEFORE evicting: evictSession's dispatch re-enters runEffects, where the
+      // selection is no longer changed — no re-planning — so a re-entrant pass must see the
+      // post-switch LRU, not the pre-switch one.
+      sessionLru = plan.lru;
+      for (const k of plan.evict) evictSession(k);
+      if (old !== null)
+        for (const runId of runIds) dispatch({ event: "run_unsubscribed", data: { agentKey: old, runId } });
     }
     runControlEffects();
     runSessionEffects();
@@ -259,14 +390,37 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
       return;
     }
     lastSubAt.set(key, now());
+    // D2-3: ledger before POST — the attempt is registered under (clientId, gen) and every
+    // async continuation below re-validates it, so an evicted/re-subscribed/hello-superseded
+    // attempt's result is dropped silently instead of poisoning the new generation's state.
+    const gen = ++mainGenSeq;
+    mainSubs.set(key, { clientId, gen });
     dispatch({ event: "subscribing", data: { agentKey: key, clientId } });
-    void transport.subscribe(clientId, key).then((r) => {
-      dispatch(
-        r.ok
-          ? { event: "subscribed", data: { agentKey: key } }
-          : { event: "subscribe_failed", data: { agentKey: key, error: r.error } },
-      );
-    });
+    enqueueMain(key, clientId, () =>
+      transport.subscribe(clientId, key).then(
+        (r) => {
+          if (disposed) return;
+          const cur = mainSubs.get(key);
+          if (cur === undefined || cur.gen !== gen || cur.clientId !== clientId || clientId !== raw.clientId) return; // superseded attempt — drop the stale result
+          if (!r.ok) mainSubs.delete(key); // hub never registered it — nothing to unsubscribe later
+          dispatch(
+            r.ok
+              ? { event: "subscribed", data: { agentKey: key } }
+              : { event: "subscribe_failed", data: { agentKey: key, error: r.error } },
+          );
+        },
+        () => {
+          // transport-level failure (POST never answered): same discipline as `!r.ok` — the hub
+          // never registered this attempt, so the ledger entry must not survive it (the pre-D2
+          // code just dropped an unhandled rejection here).
+          if (disposed) return;
+          const cur = mainSubs.get(key);
+          if (cur === undefined || cur.gen !== gen || cur.clientId !== clientId || clientId !== raw.clientId) return;
+          mainSubs.delete(key);
+          dispatch({ event: "subscribe_failed", data: { agentKey: key, error: "E_TRANSPORT" } });
+        },
+      ),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -620,10 +774,16 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     loadOlder,
     selectRun,
     pageRun,
+    mainSubLedger: () => [...mainSubs.entries()].map(([key, m]) => ({ key, clientId: m.clientId })),
     start: () => transport.start(),
     dispose() {
       if (disposed) return;
       disposed = true;
+      // D2/R2-1: queued (not yet executing) main ops die with the handle — their continuations
+      // would otherwise fire transport calls into a closed client.
+      for (const [, entry] of mainOps) entry.op.cancelled = true;
+      mainOps.clear();
+      mainSubs.clear();
       if (subTimer !== null) {
         opts.clearTimeout(subTimer);
         subTimer = null;

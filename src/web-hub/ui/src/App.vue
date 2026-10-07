@@ -47,6 +47,7 @@ import { PREVIEW_CTX } from "./components/preview/previewContext.js";
 import { createAnnouncer } from "./composables/useAnnouncer.js";
 import { useHashRoute } from "./composables/useHashRoute.js";
 import { useHub } from "./composables/useHub.js";
+import { loadKeepAlive } from "@logic/sessionKeepAlive.js";
 import { useI18n } from "./composables/useI18n.js";
 import { useMedia } from "./composables/useMedia.js";
 import { usePasswordAuth } from "./composables/usePasswordAuth.js";
@@ -136,11 +137,15 @@ if (authMode !== "unknown") {
   // web-hub-spawn SP13（SP11/SP12 移交，plan §3.2）：「我发起的」记录 live 时的新会话跳转接到
   // 真实 hash 路由（`#/agent/<key>`）——useHub 的 navigate 选项未接时只发一个内存 route 事件，
   // URL/后退键从不感知；接到 hashRoute.navigate 后是真实 location.hash 变更。
+  // D2（web-hub-session-switch plan §1.2 D2-5）：产品默认 K=3 的会话订阅 LRU 保活在此接线 ——
+  // useHub 的库级缺省仍是 1（旧行为），浏览器设置 pwh_keepalive 每次切换时重读（改小在下一次
+  // 切换时生效）。
   hub = useHub({
     createTransport,
     doc: document,
     win: window,
     ...sharedTimers,
+    keepAliveSessions: () => loadKeepAlive(browserLocalStorage()),
     navigate: (agentKey) => {
       hashRoute?.navigate({ name: "agent", key: agentKey });
     },

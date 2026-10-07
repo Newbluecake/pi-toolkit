@@ -20,6 +20,11 @@ export function buildSnapshotReply(
   const sm = parts.ctx.sessionManager;
   const leafId = safe(() => sm.getLeafId(), null);
   const sessionFile = safe(() => sm.getSessionFile(), undefined);
+  // D2-7 (web-hub-session-switch plan §2.2 step 4): read in the SAME tick as leafId above —
+  // the pair is the browser's session-identity guard for in-flight snapshots. Absent (getter
+  // threw / returned a non-string / empty) ⇒ the field stays off and old-client behavior
+  // holds (the hub's `gap` self-heals any staleness).
+  const sessionId = safe(() => sm.getSessionId(), undefined);
   const reply: Extract<AgentFrame, { t: "snapshot_reply" }> = {
     t: "snapshot_reply",
     rid,
@@ -30,6 +35,7 @@ export function buildSnapshotReply(
     status: { ...parts.status, leafId },
     fleet: parts.fleet,
   };
+  if (typeof sessionId === "string" && sessionId !== "") reply.sessionId = sessionId;
   if (sessionFile !== undefined) reply.sessionFile = sessionFile;
   const inflight = parts.tap.inflight();
   if (inflight !== undefined) reply.inflight = inflight;

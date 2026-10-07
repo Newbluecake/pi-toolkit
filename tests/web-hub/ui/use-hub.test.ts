@@ -1338,3 +1338,557 @@ describe("useHub: restore successor follow (spawn-restore plan §9.1)", () => {
     hub.dispose();
   });
 });
+
+// ---------------------------------------------------------------------------
+// D2 (web-hub-session-switch plan §1.2/§1.3/§2.2 step 3, §3.2 + R2-1): main-subscription LRU
+// keep-alive, the mainSubs ledger, same-key op serialization, and hello-time op voiding.
+// Existing suites above never pass `keepAliveSessions` ⇒ K=1 ⇒ the legacy single-slot
+// behavior (pinned by keepalive-golden.test.ts). Everything below passes it explicitly.
+// ---------------------------------------------------------------------------
+
+describe("useHub: D2 keep-alive (session LRU / ledger / serialization / R2-1)", () => {
+  /** Deferred transport: subscribe/unsubscribe POSTs park on manually-resolved promises so a
+   * test can interleave hello/switches BETWEEN the call and its settlement. Resolution is
+   * addressed by (clientId, agentKey) — never by call index — so a rewrite of the op chain
+   * cannot silently re-target a test's resolution. */
+  function deferredTransport() {
+    const calls: Call[] = [];
+    let hooksRef: TransportHooks | undefined;
+    const subCtls: Array<{
+      clientId: string;
+      agentKey: string;
+      resolve: (r: { ok: boolean; error?: string }) => void;
+    }> = [];
+    const unsubCtls: Array<{ clientId: string; agentKey: string; resolve: () => void }> = [];
+    const transport: HubTransport = {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: (clientId, agentKey) => {
+        calls.push({ method: "subscribe", args: [clientId, agentKey] });
+        return new Promise((resolve) => void subCtls.push({ clientId, agentKey, resolve }));
+      },
+      unsubscribe: (clientId, agentKey) => {
+        calls.push({ method: "unsubscribe", args: [clientId, agentKey] });
+        return new Promise<void>((resolve) => void unsubCtls.push({ clientId, agentKey, resolve }));
+      },
+      page: async () => ({ ok: true, data: {} }),
+      runSubscribe: async (clientId, agentKey, runId) => {
+        calls.push({ method: "runSubscribe", args: [clientId, agentKey, runId] });
+        return { ok: true };
+      },
+      runUnsubscribe: async (clientId, agentKey, runId) => {
+        calls.push({ method: "runUnsubscribe", args: [clientId, agentKey, runId] });
+      },
+      runPage: async () => ({ ok: true, data: {} }),
+      command: async () => ({ ok: true }),
+      dialog: async () => ({ ok: true }),
+    };
+    const subFor = (clientId: string, agentKey: string) => {
+      const c = subCtls.find((x) => !x.done && x.clientId === clientId && x.agentKey === agentKey);
+      if (c === undefined) throw new Error(`no pending subscribe for ${clientId}/${agentKey}`);
+      (c as { done?: boolean }).done = true;
+      return c;
+    };
+    const unsubFor = (clientId: string, agentKey: string) => {
+      const c = unsubCtls.find((x) => !x.done && x.clientId === clientId && x.agentKey === agentKey);
+      if (c === undefined) throw new Error(`no pending unsubscribe for ${clientId}/${agentKey}`);
+      (c as { done?: boolean }).done = true;
+      return c;
+    };
+    return {
+      calls,
+      hooks: () => hooksRef!,
+      createTransport: (hooks: TransportHooks): HubTransport => {
+        hooksRef = hooks;
+        return transport;
+      },
+      okSub: (clientId: string, agentKey: string) => subFor(clientId, agentKey).resolve({ ok: true }),
+      failSub: (clientId: string, agentKey: string, error = "E_AGENT_GONE") =>
+        subFor(clientId, agentKey).resolve({ ok: false, error }),
+      settleUnsub: (clientId: string, agentKey: string) => unsubFor(clientId, agentKey).resolve(),
+      parkedSubs: () => subCtls.filter((c) => !(c as { done?: boolean }).done).length,
+      parkedUnsubs: () => unsubCtls.filter((c) => !(c as { done?: boolean }).done).length,
+    };
+  }
+
+  function makeD2(opts: { k?: number; resync?: number; deferred?: boolean } = {}) {
+    const clock = fakeClock();
+    const t = fakeTransport();
+    const d = deferredTransport();
+    const k = opts.k ?? 1;
+    const hub = useHub({
+      createTransport: opts.deferred ? d.createTransport : t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+      ...(opts.resync === undefined ? {} : { resyncMinIntervalMs: opts.resync }),
+      keepAliveSessions: () => k,
+    });
+    (opts.deferred ? d : t).hooks().onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A"), card("B"), card("C"), card("D")] });
+    return { hub, clock, t, d, calls: opts.deferred ? d.calls : t.calls };
+  }
+
+  const hist = (hub: ReturnType<typeof useHub>, key: string, id = "e1") =>
+    hub.dispatch({
+      event: "history",
+      data: {
+        agentKey: key,
+        entries: [
+          {
+            id,
+            parentId: null,
+            type: "message",
+            timestamp: new Date(1000 + id.charCodeAt(1)).toISOString(),
+            message: { role: "user", content: `m-${id}`, timestamp: 1000 + id.charCodeAt(1) },
+          },
+        ],
+        tailMessages: [],
+        fromSeq: 10,
+        hasMore: false,
+        source: "file",
+        sessionId: "s1",
+      },
+    });
+
+  const agent = (hub: ReturnType<typeof useHub>, key: string) =>
+    hub.state.value.agents.get(key) as unknown as Record<string, any>;
+
+  // ---- ①②③④ Blocker-1: a switch's transport sequence is decided ONLY by the LRU ----
+  it("① K=3 A→B: exactly [subscribe(B)] — no unsubscribe(A)", async () => {
+    const { hub, calls } = makeD2({ k: 3 });
+    await flush();
+    calls.length = 0;
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    expect(calls).toEqual([{ method: "subscribe", args: ["c1", "B"] }]);
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c1", pending: false }); // keep-alive, sub intact
+    hub.dispose();
+  });
+
+  it("② K=3 A→B→A: the return switch sends nothing and A stays loaded (warm cache)", async () => {
+    const { hub, calls } = makeD2({ k: 3 });
+    await flush();
+    hist(hub, "A", "a1");
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    calls.length = 0;
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush();
+    expect(calls).toEqual([]);
+    expect(agent(hub, "A").history).toBe("loaded");
+    hub.dispose();
+  });
+
+  it("③ K=3 A→B→C→D: switching to D sends [unsubscribe(A), subscribe(D)] and A drops to none", async () => {
+    const { hub, calls } = makeD2({ k: 3 });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    hist(hub, "B", "b1");
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "C" } });
+    await flush();
+    calls.length = 0;
+    hub.dispatch({ event: "route", data: { agentKey: "D" } });
+    await flush();
+    expect(calls).toEqual([
+      { method: "unsubscribe", args: ["c1", "A"] },
+      { method: "subscribe", args: ["c1", "D"] },
+    ]);
+    expect(agent(hub, "A").history).toBe("none");
+    expect(agent(hub, "B").history).toBe("loaded"); // still keep-alive
+    hub.dispose();
+  });
+
+  it("④ route(null): K=3 keeps two background sessions with zero calls; K=1 unsubscribes", async () => {
+    const keep3 = makeD2({ k: 3 });
+    await flush();
+    keep3.hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    keep3.calls.length = 0;
+    keep3.hub.dispatch({ event: "route", data: { agentKey: null } });
+    await flush();
+    expect(keep3.calls).toEqual([]);
+    keep3.hub.dispose();
+
+    const drop1 = makeD2({ k: 1 });
+    await flush();
+    drop1.calls.length = 0;
+    drop1.hub.dispatch({ event: "route", data: { agentKey: null } });
+    await flush();
+    expect(drop1.calls).toEqual([{ method: "unsubscribe", args: ["c1", "A"] }]);
+    drop1.hub.dispose();
+  });
+
+  // ---- ⑤⑥⑦⑧ Major-3: deferred-Promise interleaving against the ledger ----
+  it("⑤ a superseded attempt's late {ok:false} is dropped — the fresh attempt does not error", async () => {
+    const { hub, d, calls } = makeD2({ k: 1, resync: 0, deferred: true });
+    await flush(); // subscribe(c1,A) parked
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush(); // A evicted: unsubscribe(c1,A) queued behind the parked subscribe
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush(); // back to A: a fresh subscribe queued behind the unsubscribe
+    expect(d.parkedUnsubs()).toBe(0); // nothing executed yet
+    d.failSub("c1", "A"); // the OLD attempt fails — dropped by the ledger, no error state
+    await flush();
+    expect(agent(hub, "A").history).not.toBe("error");
+    d.settleUnsub("c1", "A"); // the queued unsubscribe now runs and settles
+    await flush();
+    d.okSub("c1", "A"); // the fresh attempt for A succeeds
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c1", pending: false });
+    expect(calls.filter((c) => c.method === "unsubscribe")).toEqual([{ method: "unsubscribe", args: ["c1", "A"] }]);
+    hub.dispose();
+  });
+
+  it("⑥ a superseded attempt's late {ok:true} does not prematurely clear the new attempt's pending", async () => {
+    const { hub, d } = makeD2({ k: 1, resync: 0, deferred: true });
+    await flush(); // subscribe(c1,A) parked
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush();
+    d.okSub("c1", "A"); // first attempt settles ok → its queued unsubscribe fires next…
+    await flush();
+    d.settleUnsub("c1", "A");
+    await flush(); // …then the fresh subscribe(c1,A) #2 is parked
+    d.okSub("c1", "A"); // (nothing parked from the old attempt anymore — this is the new one)
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c1", pending: false });
+    // Now the precise interleaving: a THIRD attempt parked, then the (already settled) old
+    // promise cannot clear it — re-verify with a fresh eviction cycle.
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush(); // unsubscribe queued again (A evicted)
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush(); // fresh subscribe queued behind that unsubscribe
+    d.settleUnsub("c1", "A");
+    await flush(); // fresh subscribe(c1,A) now PARKED (pending:true)
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c1", pending: true });
+    d.okSub("c1", "A");
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c1", pending: false });
+    hub.dispose();
+  });
+
+  it("⑦ (§1.3 difference 5) same-key serialization: the re-subscribe waits for the in-flight unsubscribe to settle", async () => {
+    const { hub, d, calls } = makeD2({ k: 1, resync: 0, deferred: true });
+    d.okSub("c1", "A"); // A subscribed
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush(); // unsubscribe(c1,A) called — parked, unsettled
+    expect(calls.filter((c) => c.method === "unsubscribe")).toHaveLength(1);
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush(); // A wanted again — must queue behind the unsettled unsubscribe
+    const subsOfA = () => calls.filter((c) => c.method === "subscribe" && c.args[1] === "A");
+    expect(subsOfA()).toHaveLength(1); // only the boot one (B's own subscribe is unrelated)
+    d.settleUnsub("c1", "A");
+    await flush();
+    expect(subsOfA()).toHaveLength(2); // NOW it fires
+    d.okSub("c1", "A");
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c1", pending: false });
+    hub.dispose();
+  });
+
+  it("⑧ after hello, an old-clientId POST result is dropped (ledger clientId mismatch)", async () => {
+    const { hub, d } = makeD2({ resync: 0, deferred: true });
+    await flush(); // subscribe(c1,A) parked
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush(); // re-subscribes under c2 immediately
+    d.okSub("c1", "A"); // the c1 attempt lands late — dropped
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c2", pending: true });
+    d.okSub("c2", "A");
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c2", pending: false });
+    hub.dispose();
+  });
+
+  // ---- ⑨⑩⑪⑫⑬⑭⑮ behavior ----
+  it("⑨ D2-8: a failed subscription is evicted on switch-away regardless of quota, and switching back re-subscribes once", async () => {
+    const clock = fakeClock();
+    const t = fakeTransport();
+    t.setSubscribeResult({ ok: false, error: "E_X" });
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+      resyncMinIntervalMs: 0,
+      keepAliveSessions: () => 3,
+    });
+    t.hooks().onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A"), card("B")] });
+    await flush();
+    expect(agent(hub, "A").history).toBe("error");
+    t.calls.length = 0;
+    t.setSubscribeResult({ ok: true });
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    // evicted despite K=3 (failed); the ledger was already cleared on !ok ⇒ no unsubscribe POST
+    expect(t.calls).toEqual([{ method: "subscribe", args: ["c1", "B"] }]);
+    expect(agent(hub, "A").history).toBe("none");
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush();
+    expect(t.calls.filter((c) => c.method === "subscribe")).toEqual([
+      { method: "subscribe", args: ["c1", "B"] },
+      { method: "subscribe", args: ["c1", "A"] },
+    ]); // exactly one automatic re-subscribe
+    hub.dispose();
+  });
+
+  it("⑩ hello re-subscribes only the selected session; a warm switch-back is ONE subscribe and never flashes a skeleton", async () => {
+    const { hub, clock, calls } = makeD2({ k: 3 });
+    await flush();
+    hist(hub, "A", "a1");
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    hist(hub, "B", "b1");
+    await flush();
+    calls.length = 0;
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush();
+    clock.advance(2_000); // the resubscribe window
+    await flush();
+    expect(calls).toEqual([{ method: "subscribe", args: ["c2", "B"] }]); // only the selected one
+    calls.length = 0;
+    hub.dispatch({ event: "route", data: { agentKey: "A" } }); // warm switch-back
+    await flush();
+    expect(agent(hub, "A").history).toBe("loaded"); // subscribing kept it loaded — no skeleton
+    expect(calls).toEqual([{ method: "subscribe", args: ["c2", "A"] }]); // exactly one (the earlier advance cleared the window)
+    hub.dispose();
+  });
+
+  it("⑩b evicting a cold item after hello sends no transport call (the ledger is empty)", async () => {
+    const { hub, calls } = makeD2({ k: 2 });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "C" } });
+    await flush();
+    calls.length = 0;
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush();
+    // ledger is empty now; overflow the LRU (cap 2) with keys the ledger never held
+    hub.dispatch({ event: "route", data: { agentKey: "D" } });
+    await flush();
+    expect(calls.filter((c) => c.method === "unsubscribe")).toEqual([]);
+    hub.dispose();
+  });
+
+  it("⑪ a background keep-alive session still ingests ev frames (items update while unselected)", async () => {
+    const { hub } = makeD2({ k: 3 });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    hist(hub, "B", "b1");
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush(); // A selected again; B stays subscribed in the background
+    const before = (agent(hub, "B").items as unknown[]).length;
+    hub.dispatch({
+      event: "ev",
+      data: {
+        agentKey: "B",
+        seq: 11,
+        e: { type: "message_end", message: { role: "user", content: "bg", timestamp: 42 } },
+      },
+    });
+    await flush();
+    expect((agent(hub, "B").items as unknown[]).length).toBe(before + 1);
+    expect(hub.state.value.selected).toBe("A");
+    hub.dispose();
+  });
+
+  it("⑫ a keep-alive session's gap does NOT re-subscribe while unselected; switching back does, rate-limited", async () => {
+    const { hub, clock, calls } = makeD2({ k: 3 });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    hist(hub, "B", "b1");
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush();
+    calls.length = 0;
+    hub.dispatch({ event: "gap", data: { agentKey: "B" } });
+    await flush();
+    expect(calls).toEqual([]); // no synchronous attempt while unselected
+    hub.dispatch({ event: "route", data: { agentKey: "B" } }); // switch back INSIDE the 2s window
+    await flush();
+    expect(calls.filter((c) => c.method === "subscribe")).toEqual([]); // rate-limited…
+    clock.advance(2_000);
+    await flush();
+    // exactly one subscribe; a phantom timer armed at gap time would ALSO fire here and fail
+    expect(calls.filter((c) => c.method === "subscribe")).toEqual([{ method: "subscribe", args: ["c1", "B"] }]);
+    hub.dispose();
+  });
+
+  it("⑬ (一般-10) agent_removed in the selection-changing dispatch: no unsubscribe, no unsubscribed event, stale POST dropped", async () => {
+    const { hub, d, calls } = makeD2({ k: 3, deferred: true });
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush(); // subscribe(c1,A) parked
+    hub.dispatch({ event: "agent_removed", data: { agentKey: "A" } });
+    await flush();
+    expect(hub.state.value.agents.has("A")).toBe(false);
+    expect(hub.state.value.selected).toBeNull();
+    expect(calls.filter((c) => c.method === "unsubscribe")).toEqual([]);
+    d.okSub("c1", "A"); // the stale attempt lands late — dropped silently
+    await flush();
+    expect(hub.state.value.agents.has("A")).toBe(false); // nothing resurrected, nothing threw
+    hub.dispose();
+  });
+
+  it("⑭ switching away with a live run: runUnsubscribe goes out, no unsubscribe(A) at K=3, run_unsubscribed dispatches after the evict pass", async () => {
+    const RUN = "r_AB12CD34";
+    const { hub, calls } = makeD2({ k: 3 });
+    await flush();
+    hub.selectRun("A", RUN);
+    await flush();
+    calls.length = 0;
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    expect(calls).toEqual([
+      { method: "runUnsubscribe", args: ["c1", "A", RUN] },
+      { method: "subscribe", args: ["c1", "B"] },
+    ]);
+    expect(calls.some((c) => c.method === "unsubscribe")).toBe(false); // K=3 keeps A's main sub
+    const a = agent(hub, "A"); // run_unsubscribed DID dispatch (after the evict pass ran)
+    expect((a.runTx as Record<string, unknown> | null)?.pendingSince).toBeUndefined();
+    expect(a.history).not.toBe("none"); // main sub survived
+    hub.dispose();
+  });
+
+  it("⑮ shrinking the getter (3→1) evicts the surplus on the NEXT switch (multi-evict order: each evict's dispatch re-enters effects, so the new selection's subscribe lands after the FIRST eviction)", async () => {
+    let k = 3;
+    const clock = fakeClock();
+    const t = fakeTransport();
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+      keepAliveSessions: () => k,
+    });
+    t.hooks().onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A"), card("B"), card("C"), card("D")] });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "C" } });
+    await flush();
+    t.calls.length = 0;
+    k = 1;
+    hub.dispatch({ event: "route", data: { agentKey: "D" } });
+    await flush();
+    expect(t.calls).toEqual([
+      { method: "unsubscribe", args: ["c1", "A"] },
+      { method: "subscribe", args: ["c1", "D"] }, // the unsubscribed dispatch re-entered effects
+      { method: "unsubscribe", args: ["c1", "B"] },
+      { method: "unsubscribe", args: ["c1", "C"] },
+    ]);
+    hub.dispose();
+  });
+
+  // ---- ⑯ §1.3 intentional K=1 differences (each pinned ONCE, on purpose) ----
+  it("⑯-1 (§1.3 #1) after a failed subscribe, switching away sends NO unsubscribe (the ledger already dropped it)", async () => {
+    const clock = fakeClock();
+    const t = fakeTransport();
+    t.setSubscribeResult({ ok: false, error: "E_X" });
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      now: clock.now,
+      keepAliveSessions: () => 1,
+    });
+    t.hooks().onConn("open");
+    hub.dispatch({ event: "hello", data: { clientId: "c1" } });
+    hub.dispatch({ event: "agents", data: [card("A"), card("B")] });
+    await flush();
+    expect(t.calls.filter((c) => c.method === "unsubscribe")).toEqual([]); // the old code sent one here
+    hub.dispose();
+  });
+
+  it("⑯-2 (§1.3 #2) after a manual retry, switching away within the window DOES unsubscribe (the ledger still holds the attempt)", async () => {
+    const { hub, calls } = makeD2({ k: 1 }); // default 2s window
+    await flush(); // A subscribed ok
+    hub.dispatch({ event: "retry", data: { agentKey: "A" } });
+    await flush(); // needsResync set, but the resubscribe is rate-limited — no subscribe call
+    calls.length = 0;
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush();
+    expect(calls).toEqual([
+      { method: "unsubscribe", args: ["c1", "A"] },
+      { method: "subscribe", args: ["c1", "B"] },
+    ]);
+    hub.dispose(); // (the old code sent NO unsubscribe here — sub was null after retry)
+  });
+
+  // ---- R2-1 (v3 ruling): hello voids queued old-client ops; the current client never waits ----
+  it("R2-1a hello while an old-client unsubscribe is pending: the selected session re-subscribes NOW, not behind it", async () => {
+    const { hub, d, calls } = makeD2({ k: 1, resync: 0, deferred: true });
+    d.okSub("c1", "A"); // A subscribed under c1
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush(); // unsubscribe(c1,A) called — parked, unsettled
+    expect(calls.filter((c) => c.method === "unsubscribe")).toHaveLength(1);
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush();
+    // B (selected) re-subscribes under c2 during the hello dispatch — without waiting
+    expect(calls.filter((c) => c.method === "subscribe").at(-1)).toEqual({ method: "subscribe", args: ["c2", "B"] });
+    d.settleUnsub("c1", "A"); // the old op settles whenever it wants — no further transport calls
+    await flush();
+    expect(calls.filter((c) => c.method === "unsubscribe")).toHaveLength(1);
+    hub.dispose();
+  });
+
+  it("R2-1b hello while an old-client subscribe is pending: the fresh subscribe fires immediately and the stale result is dropped", async () => {
+    const { hub, d, calls } = makeD2({ resync: 0, deferred: true });
+    await flush(); // subscribe(c1,A) parked
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush();
+    expect(calls.filter((c) => c.method === "subscribe")).toEqual([
+      { method: "subscribe", args: ["c1", "A"] },
+      { method: "subscribe", args: ["c2", "A"] }, // fired during the hello dispatch — not queued
+    ]);
+    d.okSub("c1", "A"); // stale c1 result — dropped by the ledger clientId check
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c2", pending: true });
+    d.okSub("c2", "A");
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c2", pending: false });
+    hub.dispose();
+  });
+
+  it("R2-1c hello with same-key ops already queued: every queued old-client op is voided, none ever executes", async () => {
+    const { hub, d, calls } = makeD2({ k: 1, resync: 0, deferred: true });
+    await flush(); // subscribe(c1,A) parked in flight
+    hub.dispatch({ event: "route", data: { agentKey: "B" } });
+    await flush(); // unsubscribe(c1,A) QUEUED behind it
+    hub.dispatch({ event: "route", data: { agentKey: "A" } });
+    await flush(); // subscribe(c1,A) QUEUED behind the unsubscribe
+    expect(d.parkedUnsubs()).toBe(0); // nothing executed yet
+    hub.dispatch({ event: "hello", data: { clientId: "c2" } });
+    await flush(); // all c1 ops dead; A (selected) subscribes under c2 right now
+    expect(calls.filter((c) => c.method === "subscribe").at(-1)).toEqual({ method: "subscribe", args: ["c2", "A"] });
+    d.okSub("c1", "A"); // the in-flight c1 POST settles → its queued followers must NOT execute
+    await flush();
+    expect(calls.filter((c) => c.method === "unsubscribe")).toEqual([]); // the queued one never ran
+    expect(calls.filter((c) => c.args[0] === "c1" && c.args[1] === "A")).toHaveLength(1); // only A’s original subscribe
+    d.okSub("c2", "A"); // the c2 attempt settles normally
+    await flush();
+    expect(agent(hub, "A").sub).toEqual({ clientId: "c2", pending: false });
+    hub.dispose();
+  });
+});

@@ -17,6 +17,13 @@ const settings = {
   deliverFollowUp: "Follow-up",
   deliverSteerHint: "插话当前轮",
   deliverFollowUpHint: "排队等本轮结束",
+  // D2 (web-hub-session-switch plan §2.2 步骤 6)——「会话缓存」卡片。数字标记两种语言都是
+  // 英文 token（AGENTS.md UI 文本分层）；散文部分翻译。
+  keepAliveSection: "会话缓存",
+  keepAliveHint: "最近访问的会话保持订阅，来回切换无需重新加载；下次切换时生效",
+  keepAliveOff: "关闭（每次切换重新加载）",
+  keepAlive3: "3 个（默认）",
+  keepAlive5: "5 个",
   // default-model plan F1 —「新建会话默认模型」卡片。
   defaultModelSection: "新建会话默认模型",
   defaultModelHint:

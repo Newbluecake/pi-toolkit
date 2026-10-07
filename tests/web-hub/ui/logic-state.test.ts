@@ -470,8 +470,14 @@ describe("state.reduce", () => {
     s = reduce(s, { event: "select", data: { agentKey: "B" } });
     expect(s.selected).toBe("B");
     expect(reduce(s, { event: "select", data: { agentKey: "nope" } })).toBe(s);
-    s = reduce(loaded(), { event: "unsubscribed", data: { agentKey: "A" } });
+    const before = loaded();
+    s = reduce(before, { event: "unsubscribed", data: { agentKey: "A" } });
     expect(A(s).history).toBe("none");
+    // D2-9 (web-hub-session-switch plan §1.5): items are RETAINED on unsubscribe, and the
+    // internal `abandoned` flag is set (a late snapshot of the dropped attempt is dropped —
+    // pinned in detail by logic-state-subscription.test.ts).
+    expect(A(s).items.map((i) => i.id)).toEqual(A(before).items.map((i) => i.id));
+    expect(A(s).abandoned).toBe(true);
   });
 
   it("messageKey mirrors protocol rules for non-custom roles", () => {

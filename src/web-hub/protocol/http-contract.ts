@@ -149,6 +149,12 @@ export interface HistoryPayload {
   hasMore: boolean;
   oldestEntryId?: string;
   source: "file" | "agent";
+  /** web-hub-session-switch plan §1.2 D2-7(c): forwarded from the agent's snapshot_reply —
+   *  the browser drops an in-flight history whose session no longer matches the agent's
+   *  current one (a /new //resume //fork racing the snapshot). Optional: an old agent never
+   *  supplies it and the client passes such frames through (compat window). Do NOT bump the
+   *  proto version for this — additive optional field, same precedent as `StatusInfo.todo`. */
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------

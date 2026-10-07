@@ -276,6 +276,25 @@ describe("POST /api/subscribe", () => {
     expect((await postJson(port, "/api/subscribe", "str", h)).status).toBe(400);
   });
 
+  it("D2 (web-hub-session-switch plan §0.1): one client subscribing a1 AND a2 receives both scoped streams; unsubscribing a1 keeps a2 flowing", async () => {
+    const { conn, clientId } = await events();
+    const h = { Cookie: cookie };
+    await postJson(port, "/api/subscribe", { clientId, agentKey: "a1" }, h);
+    await postJson(port, "/api/subscribe", { clientId, agentKey: "a2" }, h);
+    await conn.waitFor((_e, all) => all.filter((x) => x.event === "history").length === 2);
+    conn.events.length = 0;
+    deps.emit(ev("a1", 5));
+    await conn.waitFor((e) => e.event === "ev" && e.data.agentKey === "a1");
+    deps.emit(ev("a2", 7));
+    await conn.waitFor((e) => e.event === "ev" && e.data.agentKey === "a2");
+    expect((await postJson(port, "/api/unsubscribe", { clientId, agentKey: "a1" }, h)).status).toBe(200);
+    const after = conn.events.length;
+    deps.emit(ev("a1", 6));
+    deps.emit(ev("a2", 8));
+    await conn.waitFor((e) => e.event === "ev" && e.data.agentKey === "a2" && e.data.seq === 8);
+    expect(conn.events.slice(after).some((e) => e.event === "ev" && e.data.agentKey === "a1")).toBe(false);
+  });
+
   it("unsubscribe stops scoped frames; re-subscribe re-snapshots", async () => {
     const { conn, clientId } = await events();
     const h = { Cookie: cookie };

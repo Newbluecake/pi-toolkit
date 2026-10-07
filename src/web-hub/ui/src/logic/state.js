@@ -19,6 +19,17 @@
  * supersede fields surface as top-level `control`/`hubState`/… — all ADDITIVE cases; no
  * pre-P2 event's semantics changed.
  *
+ * Session keep-alive (web-hub-session-switch plan §1.2 D2-7 / §1.5, R2-2): every agent carries
+ * a reducer-INTERNAL `abandoned` flag — "no live subscription attempt exists for this agent
+ * right now". `unsubscribed` / `subscribe_failed` / `hello` set it, `subscribing` clears it;
+ * while it is set, any `history` (including `{error}`), `ev`, and `append` frame is a residue
+ * of an attempt this tab already gave up on and is DROPPED (items stay as-is). Additionally a
+ * `history`/`ev`/`append` frame whose `sessionId` is present on BOTH sides and differs from
+ * the agent's current session is dropped as a stale in-flight snapshot (the fresh attempt
+ * re-fetches); a missing `sessionId` on either side passes through — old hub/agent peers never
+ * send the field and must keep working (compat window, plan R2-2's honest residual). It is
+ * deliberately NOT part of the `types.ts` `HubState` view (same class as `routed`/`wanted`).
+ *
  * Fleet drawer (fleet-drawer plan §3.3/§6.5, package F5): every agent additionally carries the
  * drawer's selected run (`runSel`) and its transcript (`runTx`). The runTx seq rules mirror §3.3's
  * browser column: `run_history` wholesale REPLACES the state (`lastSeq = fromSeq - 1`), `run_ev`
@@ -58,7 +69,7 @@
  *   lastSeq: number, streaming: any | null, tools: LiveTool[],
  *   history: "none" | "waiting" | "loaded" | "error", historyError?: string | undefined,
  *   hasMore: boolean, oldestEntryId?: string | undefined, paging: boolean,
- *   needsResync: boolean, sub: Sub | null,
+ *   needsResync: boolean, sub: Sub | null, abandoned: boolean,
  *   dialogs?: DialogsState | undefined, queue?: any[] | undefined,
  *   pendingCtl: PendingCtlItem[], ctl?: any[] | undefined, commands?: any[] | undefined,
  *   runSel: string | null, runTx: RunTxState | null, fleetOmitted?: FleetOmitted | undefined,
@@ -109,10 +120,10 @@ export const LOCAL_EVENTS = Object.freeze([
   // and instead only honors the last routed `agentKey` (or clears selection if it isn't/isn't
   // yet present). The legacy UI never dispatches this event, so `routed` stays permanently
   // false there and behavior is byte-for-byte unchanged.
-  "subscribing", // {agentKey, clientId}
+  "subscribing", // {agentKey, clientId} — also CLEARS the D2 `abandoned` flag (§1.5): a live attempt exists again
   "subscribed", // {agentKey}
-  "subscribe_failed", // {agentKey, error}
-  "unsubscribed", // {agentKey}
+  "subscribe_failed", // {agentKey, error} — also SETS `abandoned` (§1.5): late snapshots of the dead attempt are dropped
+  "unsubscribed", // {agentKey} — also SETS `abandoned` (§1.5); items are retained (D2-9)
   "retry", // {agentKey}
   "paging", // {agentKey}
   "page", // HistoryPayload from GET /api/history
@@ -238,6 +249,7 @@ function newAgent(card) {
     paging: false,
     needsResync: false,
     sub: null,
+    abandoned: false,
     pendingCtl: [],
     // fleet-drawer §6.5 (F5): the drawer's selected run + its transcript state.
     runSel: null,
@@ -302,6 +314,19 @@ function updateAgent(s, key, fn) {
 }
 
 /**
+ * D2-7(c) / R2-2: is this `history`/`ev`/`append` frame a stale in-flight snapshot of a session
+ * that has since been REPLACED? True only when the frame carries a `sessionId` AND the agent's
+ * current session carries one AND they differ — a missing field on EITHER side passes (old
+ * hub/agent peers never send it; plan R2-2's declared compat-window residual, not a hole).
+ * @param {AgentState} a @param {any} d @returns {boolean}
+ */
+function sessionFrameStale(a, d) {
+  if (typeof d.sessionId !== "string") return false;
+  const cur = a.session && typeof a.session === "object" ? a.session.sessionId : undefined;
+  return typeof cur === "string" && cur !== d.sessionId;
+}
+
+/**
  * @param {State} s
  * @param {Msg} msg
  * @returns {State}
@@ -327,9 +352,11 @@ function reduceInner(s, event, d) {
   switch (event) {
     // ---------------------------------------------------------------- global
     case "hello": {
-      // New SSE connection ⇒ new clientId; subscriptions of the old client are gone.
+      // New SSE connection ⇒ new clientId; subscriptions of the old client are gone. D2-7(b):
+      // agents that held a subscription are now `abandoned` — a late `history`/`ev`/`append`
+      // from the old connection must not pollute the retained transcript (R2-2).
       const agents = new Map();
-      for (const [k, a] of s.agents) agents.set(k, a.sub ? { ...a, sub: null } : a);
+      for (const [k, a] of s.agents) agents.set(k, a.sub ? { ...a, sub: null, abandoned: true } : a);
       return { ...s, clientId: typeof d.clientId === "string" ? d.clientId : null, agents };
     }
     case "hub": {
@@ -467,13 +494,25 @@ function reduceInner(s, event, d) {
       return updateAgent(s, key, (a) => (a.history === "none" || a.needsResync ? a : { ...a, needsResync: true }));
     case "history":
       if (!key) return s;
-      return updateAgent(s, key, (a) => applyHistory(a, d));
+      return updateAgent(s, key, (a) => {
+        if (a.abandoned) return a; // D2-7(b): the attempt this snapshot belongs to was given up
+        if (sessionFrameStale(a, d))
+          // D2-7(c): in-flight snapshot of a replaced session — drop and re-arm
+          return { ...a, sub: a.sub ? { ...a.sub, pending: false } : a.sub, needsResync: true };
+        return applyHistory(a, d);
+      });
     case "ev":
       if (!key || typeof d.seq !== "number" || !d.e || typeof d.e.type !== "string") return s;
-      return updateAgent(s, key, (a) => applyEv(a, d.seq, d.e));
+      // R2-2: ev shares history's gating — abandoned attempts' frames and stale-session frames
+      // are dropped instead of polluting the retained transcript.
+      return updateAgent(s, key, (a) => (a.abandoned || sessionFrameStale(a, d) ? a : applyEv(a, d.seq, d.e)));
     case "append":
       if (!key || !Array.isArray(d.entries)) return s;
-      return updateAgent(s, key, (a) => (a.history === "loaded" ? appendEntries(a, d.entries) : a));
+      // R2-2: same standard gate as history (abandoned / stale session) ahead of the existing
+      // `history==="loaded"` check.
+      return updateAgent(s, key, (a) =>
+        a.abandoned || sessionFrameStale(a, d) ? a : a.history === "loaded" ? appendEntries(a, d.entries) : a,
+      );
 
     // ------------------------------------------------- fleet drawer run transcript (§3.3/§6.5, F5)
     // Every wrapper preserves the reducer's no-op ⇒ same-state invariant: the apply* helper
@@ -586,6 +625,7 @@ function reduceInner(s, event, d) {
         needsResync: false,
         history: a.history === "loaded" ? "loaded" : "waiting",
         historyError: undefined,
+        abandoned: false,
       }));
     case "subscribed":
       if (!key) return s;
@@ -597,10 +637,20 @@ function reduceInner(s, event, d) {
         sub: a.sub ? { ...a.sub, pending: false, failed: true } : null,
         history: "error",
         historyError: String(d.error ?? "E_SUBSCRIBE"),
+        abandoned: true,
       }));
     case "unsubscribed":
       if (!key) return s;
-      return updateAgent(s, key, (a) => ({ ...a, sub: null, history: "none", needsResync: false, paging: false }));
+      // D2-9 (v2): items are RETAINED (same as the old reducer) — only the subscription fields
+      // reset; `abandoned` marks that a late snapshot of the dropped attempt must not land.
+      return updateAgent(s, key, (a) => ({
+        ...a,
+        sub: null,
+        history: "none",
+        needsResync: false,
+        paging: false,
+        abandoned: true,
+      }));
     case "retry":
       if (!key) return s;
       return updateAgent(s, key, (a) => ({ ...a, sub: null, needsResync: true, historyError: undefined }));

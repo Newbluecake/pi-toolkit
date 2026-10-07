@@ -375,6 +375,22 @@ describe("history.snapshot", () => {
     h.dispose();
   });
 
+  it("D2-7 (web-hub-session-switch plan §2.2 step 4): forwards the agent-reported sessionId; absent when the reply omits it", async () => {
+    const a = agent(writeFixture());
+    const h = createHistoryService({ registry: a.reg, log: memLog() });
+    a.replyWith({ recent: [], seq: 4, sessionId: "sess-42" });
+    const p = await h.snapshot(a.agentKey);
+    expect(p.sessionId).toBe("sess-42");
+    h.dispose();
+
+    const a2 = agent(writeFixture());
+    const h2 = createHistoryService({ registry: a2.reg, log: memLog() });
+    a2.replyWith({ recent: [], seq: 4 }); // old agent — no sessionId on the wire
+    const p2 = await h2.snapshot(a2.agentKey);
+    expect("sessionId" in p2).toBe(false);
+    h2.dispose();
+  });
+
   it("keeps only the last tailEntries entries (hasMore + oldestEntryId)", async () => {
     const a = agent(writeFixture());
     const h = createHistoryService({ registry: a.reg, log: memLog(), tailEntries: 3 });

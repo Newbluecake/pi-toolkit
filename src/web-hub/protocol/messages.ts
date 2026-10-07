@@ -324,6 +324,11 @@ export interface InflightState {
 export interface SnapshotReplyBody {
   seq: number;
   leafId: string | null;
+  /** web-hub-session-switch plan §1.2 D2-7: the session identity read in the SAME tick as
+   *  `leafId` — the hub forwards it on the history payload so the browser can drop in-flight
+   *  snapshots of a session that was replaced mid-flight. Optional by design: an old agent
+   *  never sends it and old/new peers mix freely during the rollout window. */
+  sessionId?: string;
   sessionFile?: string;
   recent: Array<{ seq: number; message: WireMessage }>;
   inflight?: InflightState;
@@ -933,6 +938,10 @@ const SnapshotReplySchema = Type.Object({
   rid: Type.String(),
   seq: Type.Integer(),
   leafId: Type.Union([Type.String(), Type.Null()]),
+  // D2-7 (web-hub-session-switch plan §2.2 step 4): optional, additive — no proto bump (same
+  // precedent as the todo/worktrees StatusInfo slots). The schema is open, so an old hub
+  // receiving a frame carrying it is unaffected.
+  sessionId: Type.Optional(Type.String()),
   sessionFile: Type.Optional(Type.String()),
   recent: Type.Array(Type.Object({ seq: Type.Integer(), message: WireMessageSchema })),
   inflight: Type.Optional(InflightSchema),

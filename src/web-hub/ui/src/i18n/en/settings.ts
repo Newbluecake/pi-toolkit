@@ -19,6 +19,13 @@ const settings = {
   deliverFollowUp: "Follow-up",
   deliverSteerHint: "Interrupt the current turn",
   deliverFollowUpHint: "Queue until the turn ends",
+  // D2 (web-hub-session-switch plan §2.2 step 6) — the 「会话缓存」 card. The numeric token
+  // stays an English token in both languages (AGENTS.md UI-text split); prose translates.
+  keepAliveSection: "Session cache",
+  keepAliveHint: "Recently viewed sessions stay subscribed so switching back is instant; applies on the next switch.",
+  keepAliveOff: "Off (reload on every switch)",
+  keepAlive3: "3 sessions (default)",
+  keepAlive5: "5 sessions",
   // default-model plan F1 — the 「新建会话默认模型」 card. The model ref itself
   // (`provider/id`) is an English token in both languages; prose blocks translate.
   defaultModelSection: "Default model for new sessions",

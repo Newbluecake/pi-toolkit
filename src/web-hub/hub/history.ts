@@ -518,6 +518,11 @@ export function createHistoryService(deps: {
                 merged.entries.length > entries.length || base.truncated || candidateEntries.length < entries.length,
               source: base.source,
             };
+            // D2-7(c) (web-hub-session-switch plan §2.2 step 4): forward the agent-reported
+            // session identity — a few dozen bytes, already inside the byte budget below via
+            // the frame renderer. (`page()` deliberately does NOT forward it: the browser's
+            // guard targets in-flight snapshots, not paged history of the current session.)
+            if (reply.sessionId !== undefined) payload.sessionId = reply.sessionId;
             if (merged.inflight !== undefined) payload.inflight = merged.inflight;
             const oldest = candidateEntries[0]?.id;
             if (oldest !== undefined) payload.oldestEntryId = oldest;

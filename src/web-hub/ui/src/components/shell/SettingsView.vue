@@ -35,6 +35,7 @@ import {
   useFontScale,
 } from "../../composables/useFontScale.js";
 import { useDeliverDefault, type DeliverDefault } from "../../composables/useDeliverDefault.js";
+import { KEEPALIVE_CHOICES, loadKeepAlive, setKeepAlivePref } from "@logic/sessionKeepAlive.js";
 import { browserLocalStorage } from "./themeStorage.js";
 import { isSpawnModelRef, knownModelRefs, readModelCache, writeModelCache } from "../../logic/models.js";
 import { spawnModelSupported } from "../../logic/spawn.js";
@@ -53,6 +54,20 @@ const theme = useTheme({
 });
 const fontScale = useFontScale({ storage: browserLocalStorage(), doc: document });
 const deliverDefault = useDeliverDefault({ storage: browserLocalStorage() });
+
+// D2（web-hub-session-switch plan §1.2 D2-5 / §2.2 步骤 6）：「会话缓存」单选组。偏好读在挂载
+// 时一次、写在点击时持久化（useHub 每次切换时重读 pwh_keepalive，改小在下一次切换时生效）。
+// 纯逻辑（校验/读写）在 @logic/sessionKeepAlive.js —— 本组件只持 ref 与 i18n 标签。
+const keepAliveStorage = browserLocalStorage();
+const keepAlive = ref<number>(loadKeepAlive(keepAliveStorage));
+const KEEPALIVE_OPTIONS: readonly { value: number; labelKey: string }[] = KEEPALIVE_CHOICES.map((v) => ({
+  value: v,
+  labelKey: v === 1 ? "settings.keepAliveOff" : v === 3 ? "settings.keepAlive3" : "settings.keepAlive5",
+}));
+function setKeepAlive(v: number): void {
+  keepAlive.value = v;
+  setKeepAlivePref(keepAliveStorage, v);
+}
 
 const THEME_OPTIONS: readonly { value: ThemePref; icon: IconName; labelKey: string }[] = [
   { value: "system", icon: "monitor", labelKey: "shell.theme.system" },
@@ -243,6 +258,25 @@ function onModelUsePi(): void {
                 name="check"
                 class="icon-sm settings-option-check"
               />
+            </button>
+          </div>
+        </section>
+
+        <section class="settings-card settings-card-wide" :aria-label="t('settings.keepAliveSection')">
+          <h2 class="settings-h">{{ t("settings.keepAliveSection") }}</h2>
+          <p class="settings-note">{{ t("settings.keepAliveHint") }}</p>
+          <div class="settings-options" role="radiogroup" :aria-label="t('settings.keepAliveSection')">
+            <button
+              v-for="opt in KEEPALIVE_OPTIONS"
+              :key="opt.value"
+              type="button"
+              role="radio"
+              :aria-checked="keepAlive === opt.value"
+              class="settings-option"
+              @click="setKeepAlive(opt.value)"
+            >
+              <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
+              <AppIcon v-if="keepAlive === opt.value" name="check" class="icon-sm settings-option-check" />
             </button>
           </div>
         </section>

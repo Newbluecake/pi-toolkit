@@ -197,6 +197,31 @@ describe("SettingsView.vue — default delivery section", () => {
   });
 });
 
+describe("SettingsView.vue — session cache section (D2, pwh_keepalive)", () => {
+  it("renders the 1/3/5 radios with the persisted value checked; invalid storage selects 3", () => {
+    window.localStorage.setItem("pwh_keepalive", "5");
+    const w = mountSettings();
+    const radios = w.findAll('[role="radiogroup"]')[2]!.findAll('[role="radio"]');
+    expect(radios).toHaveLength(3);
+    expect(radios.map((r) => r.attributes("aria-checked"))).toEqual(["false", "false", "true"]);
+    expect(radios.map((r) => r.text())).toEqual(["Off (reload on every switch)", "3 sessions (default)", "5 sessions"]);
+    w.unmount();
+
+    window.localStorage.setItem("pwh_keepalive", "bogus");
+    const bad = mountSettings();
+    const badRadios = bad.findAll('[role="radiogroup"]')[2]!.findAll('[role="radio"]');
+    expect(badRadios.map((r) => r.attributes("aria-checked"))).toEqual(["false", "true", "false"]);
+  });
+
+  it("clicking Off persists pwh_keepalive = 1", async () => {
+    const w = mountSettings();
+    const radios = w.findAll('[role="radiogroup"]')[2]!.findAll('[role="radio"]');
+    await radios[0]!.trigger("click"); // Off = legacy single-slot
+    expect(window.localStorage.getItem("pwh_keepalive")).toBe("1");
+    expect(radios[0]!.attributes("aria-checked")).toBe("true");
+  });
+});
+
 describe("SettingsView.vue — navigation", () => {
   it("close button only emits `close` — the owner (SettingsOverlay/TopBar) decides how to tear the panel down", async () => {
     const w = mountSettings();

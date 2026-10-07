@@ -78,6 +78,46 @@ describe("buildSnapshotReply", () => {
     expect(reply.status.leafId).toBe("L7");
   });
 
+  it("D2-7 (web-hub-session-switch plan §2.2 step 4): backfills sessionId read in the same tick; a throwing getter or empty string omits it", () => {
+    const { ctx } = fakeCtx({ sessionId: "sess-1" });
+    const reply = buildSnapshotReply("r1", {
+      seq: 0,
+      ctx,
+      tap: noopTap(),
+      status: { leafId: null, busy: false, pending: false },
+      fleet: [],
+    });
+    expect(reply.sessionId).toBe("sess-1");
+
+    const throwing = {
+      sessionManager: {
+        getLeafId: () => "L1",
+        getSessionFile: () => "/tmp/s.jsonl",
+        getSessionId: () => {
+          throw new Error("stale");
+        },
+      },
+    } as never;
+    const r2 = buildSnapshotReply("r2", {
+      seq: 0,
+      ctx: throwing,
+      tap: noopTap(),
+      status: { leafId: null, busy: false, pending: false },
+      fleet: [],
+    });
+    expect(r2.sessionId).toBeUndefined();
+
+    const empty = fakeCtx({ sessionId: "" });
+    const r3 = buildSnapshotReply("r3", {
+      seq: 0,
+      ctx: empty.ctx,
+      tap: noopTap(),
+      status: { leafId: null, busy: false, pending: false },
+      fleet: [],
+    });
+    expect(r3.sessionId).toBeUndefined();
+  });
+
   it("a stale ctx (throws) degrades to leafId null instead of throwing", () => {
     const ctx = {
       sessionManager: {

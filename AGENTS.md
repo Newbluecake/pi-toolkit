@@ -359,6 +359,14 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   preview reads never pin or extend upload TTLs. `mode:"loopback"` keeps the endpoint LAN-absent (404, byte-
   identical to `off` on LAN) while loopback keeps previewing. Design + real-device acceptance:
   `docs/dev/web-hub-preview/{plan,acceptance}.md`.
+  **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
+  the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
+  planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product
+  default), owns a main-subscription ledger with same-key op serialization and hello-time op voiding
+  (`useHub.ts`, K=1 transport order pinned by `tests/fixtures/web-hub-ui/keepalive-legacy-golden.json`), guards in-flight
+  snapshots with the optional `HistoryPayload.sessionId` (agent backfills `snapshot_reply.sessionId`; missing on either
+  side passes through — compat window), and remembers per-agentKey transcript scroll position on switch. Design:
+  `docs/dev/web-hub-session-switch/plan.md`.
 - `src/git/` — pi-free bounded git executor (`run.ts`: hard deadline, process-group kill, stdout/stderr caps,
   unref'd timers) + `git worktree list --porcelain` parse/scan (`worktrees.ts`) + `~` path labels (`path-label.ts`).
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
