@@ -634,6 +634,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       }
       let resolvedReq = req;
       let lockKeys: string[] = [];
+      // §2.2 解析式第 ② 项（R-inherit）：resume 目标已持久化的策略；旧条目缺字段
+      // 保持 undefined（落第 ③ 项按请求形状推导）。非 resume 请求恒 undefined。
+      let resumeTimeoutPolicy: SpawnRequest["timeoutPolicy"] = undefined;
       const runId = newRunId(
         (id) => records.has(id) || running.has(id) || tombstones.has(id) || deps.runIdTaken?.(id) === true,
       );
@@ -748,12 +751,21 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           };
         resumeLocks.add(targetId);
         resumeLocks.add(resume.sessionFile);
+        resumeTimeoutPolicy = resume.timeoutPolicy;
         resolvedReq = { ...req, resumeFrom: resume.sessionFile };
         lockKeys = [targetId, resume.sessionFile];
       }
+      // §2.2 解析式：新请求显式策略 > resume 继承（R-inherit）> 按请求形状推导
+      // （仅看请求，不从 run 快照做形状推断）。结果恒为确定值，写回 resolvedReq，
+      // 经 enqueued 输入镜像进 diag.timeoutPolicy，随所有持久化面走。
+      const resolvedPolicy: NonNullable<SpawnRequest["timeoutPolicy"]> =
+        req.timeoutPolicy ??
+        resumeTimeoutPolicy ??
+        (req.budgetOverride?.totalMs !== undefined ? "fixed" : "extendable");
       const budget = applyBudgetPolicy(mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride), {
-        // D-10：per-spawn 显式 totalMs ⇒ 硬顶（maxTotalFactor = 1，无宽限无延长）
-        explicitTotal: req.budgetOverride?.totalMs !== undefined,
+        // "fixed" ⇒ maxTotalFactor 钳 1（H = deadlineAt，无宽限无延长）；"extendable"
+        // 保留合并后的 factor（默认 2），Agent 工具的显式 timeout_s 与默认预算同权
+        fixedDeadline: resolvedPolicy === "fixed",
         extensionsEnabled: deps.extensionsEnabled ?? true,
       });
       const parent = req.parentRunId ?? "root";
@@ -810,6 +822,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         depth,
         ...(config.canSpawn && !req.forkSessionFrom ? { canSpawn: config.canSpawn } : {}),
       });
+      resolvedReq = { ...resolvedReq, timeoutPolicy: resolvedPolicy };
       if (req.expectAck) claimedRunIds.add(runId);
       if (req.parentRunId) {
         parentOf.set(runId, req.parentRunId);

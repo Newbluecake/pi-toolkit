@@ -124,3 +124,52 @@ describe("model-facing target resolution (cont.)", () => {
     expect(result.candidates[0]?.label.length).toBeLessThanOrEqual(40);
   });
 });
+
+/**
+ * agent-explicit-timeout-extend plan §2.7 (P-tomb): resolveResumeTarget is the
+ * R-inherit source — the terminal snapshot (live → durable record) first, the
+ * TTL-bounded tombstone once the snapshot is gone, undefined for old entries.
+ */
+describe("resolveResumeTarget timeoutPolicy (R-inherit source, §2.7)", () => {
+  function policySnapshot(runId: string, policy?: "fixed" | "extendable"): RunSnapshot {
+    const snap = snapshot(runId);
+    return { ...snap, diag: { ...snap.diag, ...(policy === undefined ? {} : { timeoutPolicy: policy }) } };
+  }
+
+  it("returns the policy from a live terminal snapshot (live wins over tombstone)", () => {
+    const tombstones = new TombstoneStore();
+    tombstones.register(policySnapshot("r_POL00001", "fixed"));
+    const d: ResolveTargetDeps = {
+      labels: new Map(),
+      liveSnapshots: [policySnapshot("r_POL00001", "extendable")],
+      records: [],
+      tombstones,
+      now: () => 60_000,
+    };
+    expect(resolveResumeTarget("r_POL00001", d)).toEqual({
+      ok: true,
+      runId: "r_POL00001",
+      sessionFile,
+      timeoutPolicy: "extendable",
+    });
+  });
+
+  it("falls back to the durable record when no live snapshot has a session file", () => {
+    const d = deps([policySnapshot("r_POL00002", "fixed")]);
+    expect(resolveResumeTarget("r_POL00002", d).timeoutPolicy).toBe("fixed");
+  });
+
+  it("falls back to the tombstone once every snapshot view is gone", () => {
+    const tombstones = new TombstoneStore();
+    tombstones.register(policySnapshot("r_POL00003", "fixed"));
+    const d: ResolveTargetDeps = { labels: new Map(), liveSnapshots: [], records: [], tombstones, now: () => 60_000 };
+    const result = resolveResumeTarget("r_POL00003", d);
+    expect(result).toEqual({ ok: true, runId: "r_POL00003", sessionFile, timeoutPolicy: "fixed" });
+  });
+
+  it("old entries without the field resolve fine and carry no policy key", () => {
+    const result = resolveResumeTarget("r_POL00004", deps([policySnapshot("r_POL00004")]));
+    expect(result).toEqual({ ok: true, runId: "r_POL00004", sessionFile });
+    expect(result).not.toHaveProperty("timeoutPolicy");
+  });
+});

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Value } from "@sinclair/typebox/value";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import {
@@ -345,7 +346,7 @@ describe("tools/agent-tool: nested blocking failure diagnostics", () => {
 });
 
 describe("tools/agent-tool: timeout_s budget override", () => {
-  it("threads timeout_s into budgetOverride.totalMs; omits it when absent", async () => {
+  it("threads timeout_s into budgetOverride.totalMs AND timeoutPolicy extendable; omits both when absent", async () => {
     const port = fakePort();
     const tool = createAgentTool({ spawn: port });
     await tool.execute(
@@ -355,7 +356,10 @@ describe("tools/agent-tool: timeout_s budget override", () => {
       undefined,
       {} as never,
     );
+    // U3：显式 timeout_s 是模型面显式 ⇒ 策略写 "extendable"（§2.2 ①），
+    // 与默认预算同权（宽限 + 延长），预算仍是 totalMs 覆盖。
     expect(port.seen?.budgetOverride).toEqual({ totalMs: 120_000 });
+    expect(port.seen?.timeoutPolicy).toBe("extendable");
 
     const port2 = fakePort();
     const tool2 = createAgentTool({ spawn: port2 });
@@ -367,6 +371,36 @@ describe("tools/agent-tool: timeout_s budget override", () => {
       {} as never,
     );
     expect(port2.seen?.budgetOverride).toBeUndefined();
+    expect(port2.seen?.timeoutPolicy).toBeUndefined();
+  });
+
+  it("U3: the nested path shares baseRequest — timeout_s ⇒ extendable there too", async () => {
+    // 嵌套 Agent 与顶层共用 baseRequest（§2.5），两条参数面同一策略。
+    const port = fakePort();
+    const tool = createAgentTool({
+      spawn: port,
+      allowedTypes: ["worker"],
+      parentRunId: "r-parent",
+      forceSlotless: true,
+    });
+    await tool.execute(
+      "tc3",
+      { description: "d", prompt: "p", subagent_type: "worker", timeout_s: 30 },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen?.timeoutPolicy).toBe("extendable");
+    expect(port.seen?.budgetOverride).toEqual({ totalMs: 30_000 });
+  });
+
+  it("U3/G5: timeout_s is capped at 604800 by the schema", () => {
+    expect(
+      Value.Check(AgentToolParams, { description: "d", prompt: "p", subagent_type: "worker", timeout_s: 604_800 }),
+    ).toBe(true);
+    expect(
+      Value.Check(AgentToolParams, { description: "d", prompt: "p", subagent_type: "worker", timeout_s: 604_801 }),
+    ).toBe(false);
   });
 });
 

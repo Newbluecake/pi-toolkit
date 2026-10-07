@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_BUDGET, remainingFor, withDeadline } from "../../src/core/deadline.js";
+import {
+  clampSpanMs,
+  DEFAULT_BUDGET,
+  MAX_DEADLINE_SPAN_MS,
+  remainingFor,
+  withDeadline,
+} from "../../src/core/deadline.js";
 import { FakeClock } from "../../src/core/clock.js";
 import { isTerminalStatus } from "../../src/core/status.js";
 import {
@@ -1366,8 +1372,17 @@ describe("P1-P14 property invariants", () => {
       };
     }
     // timeout-notify: random extension attempts (1s..1h), tool source only (D-13).
-    if (next() < 0.15)
-      return { kind: "deadline_extended", at, extendMs: 1_000 + Math.floor(next() * 3_600_000), source: "tool" };
+    // P16/§3.3 G4: 10% of the attempts are degenerate (NaN/±Infinity/0/negative)
+    // extendMs — the reducer must rule them illegal and never let a NaN near
+    // deadlineAt (C17's NaN hang vector).
+    if (next() < 0.15) {
+      const degenerate = [NaN, Infinity, -Infinity, 0, -5];
+      const extendMs =
+        next() < 0.1
+          ? (degenerate[Math.floor(next() * degenerate.length)] ?? 0)
+          : 1_000 + Math.floor(next() * 3_600_000);
+      return { kind: "deadline_extended", at, extendMs, source: "tool" };
+    }
     if (next() < 0.2) return { kind: "stop_requested", at, cause: causes[Math.floor(next() * causes.length)] };
     if (next() < 0.2)
       return {
@@ -1405,15 +1420,28 @@ describe("P1-P14 property invariants", () => {
     ["P12 deadline notices bounded by the extension budget (BL-3)", 12],
     ["P13 deadline_extended never touches phase clocks or frozen deadlines", 13],
     ["P14 entering grace emits no cancel_signal", 14],
+    ["P16 deadlines stay finite and timeoutPolicy stays constant under degenerate extensions", 16],
   ])("%s, 1000 random sequences", (name, property) => {
     for (let seed = 1; seed <= 1000; seed++) {
       const next = random(seed + property * 10000);
-      // P11-P14 exercise the grace machinery, which the shared baseline keeps
-      // off (totalGraceMs: 0); those four get a grace-enabled budget.
+      // P11-P16 exercise the grace machinery, which the shared baseline keeps
+      // off (totalGraceMs: 0); those get a grace-enabled budget.
       const propBudget: DeadlineBudget = property >= 11 ? { ...budget, totalGraceMs: 50 } : budget;
+      // P16 (§2.7): mirror a policy at enqueued — even parity fixed, odd
+      // extendable — so the constancy invariant is checked against a real
+      // value, not just against "absent stays absent".
+      const initialPolicy = seed % 2 === 0 ? ("fixed" as const) : ("extendable" as const);
       let state = reduce(
         createInitialState("r", 1, 0),
-        { generation: 1, input: { kind: "enqueued", at: 0, budget: propBudget } },
+        {
+          generation: 1,
+          input: {
+            kind: "enqueued",
+            at: 0,
+            budget: propBudget,
+            ...(property === 16 ? { timeoutPolicy: initialPolicy } : {}),
+          },
+        },
         propBudget,
       ).state;
       let prevDeadline = state.deadlines.deadlineAt;
@@ -1484,6 +1512,14 @@ describe("P1-P14 property invariants", () => {
           result.state.deadlines.graceUntil !== undefined
         )
           expect(result.effects.some((e) => e.effect.kind === "cancel_signal")).toBe(false);
+        if (property === 16) {
+          // §3.3 G4 / Z2：任意输入序列（含退化 extendMs）下截止恒有限；
+          // §2.7：策略自 enqueued 后恒定（reducer 永不改写）。
+          const { deadlineAt, hardDeadlineAt } = result.state.deadlines;
+          if (deadlineAt !== undefined) expect(Number.isFinite(deadlineAt)).toBe(true);
+          if (hardDeadlineAt !== undefined) expect(Number.isFinite(hardDeadlineAt)).toBe(true);
+          expect(result.state.diag.timeoutPolicy).toBe(initialPolicy);
+        }
         state = result.state;
       }
       if (property === 12) {
@@ -2244,7 +2280,7 @@ describe("timeout grace", () => {
       expectGrace: false,
     },
     {
-      name: "explicit-budget shape (maxTotalFactor: 1, D-10)",
+      name: "fixed-deadline shape (maxTotalFactor: 1)",
       budget: { ...graceBudget, maxTotalFactor: 1 },
       fireAt: 1_000,
       expectGrace: false,
@@ -2502,6 +2538,88 @@ describe("timeout grace", () => {
     expect(final.state.phase).toBe("abort_grace");
     expect(final.effects.some((e) => e.effect.kind === "notify_deadline")).toBe(false);
     expect(notices).toEqual(["grace", "extended", "grace", "extended", "grace", "extended"]);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * agent-explicit-timeout-extend P1：S1（timeoutPolicy 镜像）、F2（enqueued
+ * 跨度钳位）、F3（deadline_extended 非有限防御，§3.3 G4）。
+ * ------------------------------------------------------------------------- */
+describe("timeoutPolicy mirror & span guards (agent-explicit-timeout-extend §3.2/§3.3)", () => {
+  const enqueueWith = (b: DeadlineBudget, timeoutPolicy?: "fixed" | "extendable") =>
+    reduce(
+      createInitialState("r-tp", 1, 0),
+      {
+        generation: 1,
+        input: { kind: "enqueued", at: 0, budget: b, ...(timeoutPolicy === undefined ? {} : { timeoutPolicy }) },
+      },
+      b,
+    );
+
+  it("S1: enqueued{timeoutPolicy} mirrors into diag.timeoutPolicy exactly once; absent stays absent", () => {
+    for (const policy of ["fixed", "extendable"] as const) {
+      const out = enqueueWith(budget, policy);
+      expect(out.state.diag.timeoutPolicy).toBe(policy);
+      // 镜像后的任何后续输入都不改写它（terminalUpdate / grace / illegal 均不碰）
+      const settled = reduce(
+        out.state,
+        {
+          generation: out.state.generation,
+          input: { kind: "deadline_fired", at: 10, timer: "total", reason: "total" },
+        },
+        budget,
+      );
+      expect(settled.state.diag.timeoutPolicy).toBe(policy);
+    }
+    const absent = enqueueWith(budget);
+    expect(absent.state.diag).not.toHaveProperty("timeoutPolicy");
+  });
+
+  it("S1: effects are identical with and without the timeoutPolicy field (pure mirror, no behavior fork)", () => {
+    const with_ = enqueueWith(budget, "fixed");
+    const without = enqueueWith(budget);
+    expect(with_.effects.map((e) => e.effect.kind)).toEqual(without.effects.map((e) => e.effect.kind));
+    const { timeoutPolicy: _a, ...diagWith } = with_.state.diag;
+    const { timeoutPolicy: _b, ...diagWithout } = without.state.diag;
+    expect(diagWith).toEqual(diagWithout);
+    expect(with_.state.deadlines).toEqual(without.state.deadlines);
+  });
+
+  it("F2: enqueued totalMs = Infinity clamps the deadline span to MAX_DEADLINE_SPAN_MS; NaN keeps it absent", () => {
+    const infinite = enqueueWith({ ...budget, totalMs: Infinity });
+    expect(infinite.state.deadlines.deadlineAt).toBe(MAX_DEADLINE_SPAN_MS);
+    expect(infinite.state.deadlines.hardDeadlineAt).toBe(MAX_DEADLINE_SPAN_MS); // factor 2 钳后同限
+    expect(infinite.state.armedTimers).toContain("total");
+
+    const nan = enqueueWith({ ...budget, totalMs: NaN });
+    expect(nan.state.deadlines.deadlineAt).toBeUndefined();
+    expect(nan.state.deadlines.hardDeadlineAt).toBeUndefined();
+    expect(nan.state.armedTimers).not.toContain("total"); // 无 NaN due、无 timer（既有防御语义）
+    expect(Number.isNaN(nan.state.deadlines.deadlineAt as number)).toBe(false);
+  });
+
+  it("F3: deadline_extended with NaN/Infinity/0/−5 extendMs is illegal and leaves the deadline untouched", () => {
+    // 先进 model_turn（OVERTIME 相位），再打退化延长。
+    let s = enqueueWith(budget).state;
+    s = reduce(s, { generation: s.generation, input: { kind: "slot_acquired", at: 1 } }, budget).state;
+    s = reduce(
+      s,
+      { generation: s.generation, input: { kind: "phase_entered", at: 2, phase: "model_turn" } },
+      budget,
+    ).state;
+    const before = s.deadlines.deadlineAt;
+    expect(before).toBe(100);
+    for (const bad of [NaN, Infinity, -Infinity, 0, -5]) {
+      const out = reduce(
+        s,
+        { generation: s.generation, input: { kind: "deadline_extended", at: 5, extendMs: bad, source: "tool" } },
+        budget,
+      );
+      expect(out.state.deadlines.deadlineAt).toBe(before); // 不变
+      expect(out.state.diag.overtime).toBeUndefined(); // 未记延长
+      expect(out.effects).toEqual([]);
+      expect(Number.isFinite(out.state.deadlines.deadlineAt as number)).toBe(true);
+    }
   });
 });
 

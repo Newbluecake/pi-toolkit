@@ -33,6 +33,9 @@ export class TombstoneStore {
       sessionFile,
       createdAt,
       expiresAt: createdAt + this.ttlMs,
+      // §2.7：策略作为 run 的持久事实随逐出记录存活，TTL 内的 resume 继承它；
+      // 旧快照缺字段就不拷，读侧对缺席走中性文案。
+      ...(snapshot.diag.timeoutPolicy === undefined ? {} : { timeoutPolicy: snapshot.diag.timeoutPolicy }),
     });
   }
   has(runId: RunId): boolean {

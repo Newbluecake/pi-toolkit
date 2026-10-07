@@ -10,18 +10,26 @@ import type { WorkflowExtendOutcome } from "../workflow/deadline.js";
 import { resolveToolTarget, WORKFLOW_ID_PREFIX, type WorkflowQueryPort } from "./workflow-target.js";
 
 /**
- * timeout-notify (arch §4): extend a running subagent's soft deadline by a
- * number of SECONDS. The grant is clamped by the run's hard ceiling
- * (maxTotalFactor × totalMs, frozen at enqueue), so the model may get less
- * than it asked for — the result text always says exactly how much was
- * granted. Only default-budget runs are extendable; runs spawned with an
- * explicit timeout_s are hard-capped (no grace, no extension).
+ * timeout-notify (arch §4) + agent-explicit-timeout-extend (§3.5/§5.2): extend
+ * a running subagent's soft deadline by a number of SECONDS. The grant is
+ * clamped by the run's hard ceiling (maxTotalFactor × totalMs, frozen at
+ * enqueue), so the model may get less than it asked for — the result text
+ * always says exactly how much was granted. Default-budget runs AND runs
+ * dispatched with an explicit Agent timeout_s are both extendable (same
+ * rules); only fixed-deadline runs — consult, /goal verifier, RPC, and
+ * resumes that inherited a fixed policy — cannot be extended. The verdict
+ * is read from the persisted `diag.timeoutPolicy` field, never inferred
+ * from the `hardDeadlineAt === deadlineAt` shape (an extendable run can
+ * legitimately have H === D0 when budget.maxTotalFactor is 1 or an absolute
+ * deadline cap applies).
  *
  * workflow-agent-queue §4.5 (stage B): the same tool extends a background
  * SubagentWorkflow when `run_id` resolves to a workflow (`wf_…`, prefix or
  * script name — `resolveToolTarget`). A workflow's own children are pinned to
  * the workflow's hard ceiling and cannot be extended individually: the tool
- * refuses them and points at the owning workflow instead.
+ * refuses them and points at the owning workflow instead. Workflows carry no
+ * timeout-policy field; their no_headroom text states the configuration
+ * fact (budget.maxTotalFactor), never a hard-cap inference.
  */
 export const ExtendTimeoutParams = Type.Object({
   run_id: Type.String({
@@ -30,6 +38,7 @@ export const ExtendTimeoutParams = Type.Object({
   }),
   extend_s: Type.Integer({
     minimum: 1,
+    maximum: 604_800,
     description:
       "Extra wall-clock seconds to add on top of the run's current deadline. The grant is capped by the run's hard ceiling, so you may get less than you ask for — the result says exactly how much was granted.",
   }),
@@ -101,20 +110,30 @@ function rejectionMessage(
       );
     }
     case "no_headroom": {
+      // §3.5/§5.2：读 diag.timeoutPolicy 真字段，废弃 explicitCap 形状推断——
+      // extendable run 也会因 factor 1 / 绝对截止触顶而 H === deadlineAt；旧条目
+      // 缺字段（升级前）走既有 ceiling 变体，不声称成因。
       const d = snapshot?.deadlines;
-      const explicitCap =
+      const policy = snapshot?.diag.timeoutPolicy;
+      if (policy === "fixed") {
+        return (
+          `${name} has a fixed deadline (the system started it with a non-extendable time cap — e.g. a consult, ` +
+          `/goal verifier or RPC run, or a resume of one); it stops at its deadline ` +
+          `(in ${formatDuration(remainingMs(snapshot, now))}) and cannot be extended. Read what it has so far with ` +
+          `${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
+        );
+      }
+      const atConfigCeiling =
         d !== undefined &&
         d.hardDeadlineAt !== undefined &&
         d.deadlineAt !== undefined &&
         d.hardDeadlineAt === d.deadlineAt &&
-        (snapshot?.diag.overtime?.extensions ?? 0) === 0;
-      if (explicitCap) {
-        // D-10: spawned with an explicit timeout_s (or a workflow/RPC/goal
-        // derived totalMs) — the hard ceiling IS the original deadline.
+        (snapshot?.diag.overtime?.extensions ?? 0) === 0; // 触顶（延长用尽）走既有 ceiling 变体
+      if (policy === "extendable" && atConfigCeiling) {
         return (
-          `${name} was spawned with an explicit timeout, which is a hard cap; it stops at its deadline ` +
-          `(in ${formatDuration(remainingMs(snapshot, now))}) and cannot be extended. Read what it has so far with ` +
-          `${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
+          `${name} has no headroom above its deadline (budget.maxTotalFactor is 1, or an absolute deadline cap ` +
+          `applies); it stops at its deadline (in ${formatDuration(remainingMs(snapshot, now))}). Read what it has so ` +
+          `far with ${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
         );
       }
       const fromStart =
@@ -170,6 +189,8 @@ function workflowRejectionMessage(
       );
     }
     case "no_headroom": {
+      // R4 裁定：workflow 无策略字段，不认 H === deadlineAt 形状推断「显式 timeout
+      // 是硬顶」；统一陈述配置事实（factor 1 ⇒ 无 headroom）。
       const explicitCap =
         view !== undefined &&
         view.hardDeadlineAt !== undefined &&
@@ -178,7 +199,7 @@ function workflowRejectionMessage(
         (view.extensions ?? 0) === 0;
       if (explicitCap) {
         return (
-          `${name} was started with an explicit timeout_s, which is a hard cap; it stops at its deadline ` +
+          `${name} has no headroom above its deadline (budget.maxTotalFactor is 1); it stops at its deadline ` +
           `(in ${left}) and cannot be extended. Read what it produced with ${workflowReadHint(workflowId)} after the ` +
           `notification, ${workflowRestartHint}.`
         );
@@ -209,7 +230,7 @@ export function createExtendTimeoutTool(deps: {
     name: "extend_subagent_timeout",
     label: "Extend Subagent Timeout",
     description:
-      "Give a running subagent more wall-clock time by pushing its deadline forward (extend_s seconds, added on top of the current deadline). Only default-budget runs can be extended — a run spawned with an explicit timeout_s is a hard cap. Each run allows a limited number of extensions and an absolute ceiling, so a request may be clamped or refused; the result says exactly what was granted and how much headroom is left. Extending a run that is inside its timeout grace window rescues it back to normal execution. Also works on a background SubagentWorkflow (run_id: its wf_… id) with the same rules; the children of a workflow cannot be extended one by one — extend their workflow instead.",
+      "Give a running subagent more wall-clock time by pushing its deadline forward (extend_s seconds, added on top of the current deadline). Works for default-budget runs and runs dispatched with an explicit timeout_s alike; runs the system started with a fixed deadline (consult, /goal verifier, RPC) cannot be extended. Each run allows a limited number of extensions and an absolute ceiling, so a request may be clamped or refused; the result says exactly what was granted and how much headroom is left. Extending a run that is inside its timeout grace window rescues it back to normal execution. Also works on a background SubagentWorkflow (run_id: its wf_… id) with the same rules; the children of a workflow cannot be extended one by one — extend their workflow instead.",
     promptSnippet: "extend_subagent_timeout(run_id, extend_s, reason?) - give a running subagent more time",
     parameters: ExtendTimeoutParams,
     renderCall(args, theme, context) {

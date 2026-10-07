@@ -186,10 +186,18 @@ const leadingFields = {
   timeout_s: Type.Optional(
     Type.Integer({
       minimum: 1,
+      maximum: 604_800,
       description:
-        "Optional total wall-clock budget for this run in seconds (overrides the default 30min). " +
-        "An explicit timeout is a hard cap: the run always settles within it — no grace window, no extension. " +
-        "Omit it to use the default budget, which gets a grace window at expiry and can be extended with extend_subagent_timeout.",
+        "Optional total wall-clock budget for this run in seconds (1–604800; overrides the configured default budget). " +
+        "It follows the same grace and extension rules as the default budget: if it runs out while the run is working, " +
+        "the run gets a grace window (the budget.totalGraceS setting, in seconds; default 90) and the main session is " +
+        "notified; extend it with extend_subagent_timeout (a limited number of extensions) or let it stop when the " +
+        "grace window ends. The run never lives past 2× timeout_s by default (the budget.maxTotalFactor setting), " +
+        "nor past an absolute deadline imposed by whoever dispatched it — whichever is earlier. With extensions " +
+        "disabled (extend.enabled=false) the timeout is a hard cap and the run stops right at it. Inside a subagent " +
+        "the grace window is silent: nobody is notified and there is no extension tool there. Runs the system starts " +
+        "with a fixed deadline (consult, /goal verifier, RPC, workflow children) are not affected. To stop a run right " +
+        "at its deadline, abort_subagent it when the grace notice arrives.",
     }),
   ),
 };
@@ -397,7 +405,11 @@ function prepareSpawn(
     ...(nested?.parentRunId ? { parentRunId: nested.parentRunId } : {}),
     ...(nested?.forceSlotless ? { slotless: true } : {}),
     ...(params.resume ? { resumeFrom: params.resume } : {}),
-    ...(typeof params.timeout_s === "number" ? { budgetOverride: { totalMs: params.timeout_s * 1000 } } : {}),
+    // §2.2：显式 timeout_s ⇒ 模型面显式，策略写 "extendable"（与默认预算同权：
+    // 宽限 + 延长）；spawn admission 仍会按解析式把它定值写进 resolvedReq。
+    ...(typeof params.timeout_s === "number"
+      ? { budgetOverride: { totalMs: params.timeout_s * 1000 }, timeoutPolicy: "extendable" as const }
+      : {}),
     ...(params.isolation ? { isolation: params.isolation } : {}),
     ...(schema !== undefined ? { schema } : {}),
     ...(experts !== undefined && experts.refs.length > 0 ? { consultExperts: experts.refs } : {}),

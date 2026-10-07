@@ -100,29 +100,38 @@ export function effectiveDeadlineAt(d: RunDeadlines): Millis | undefined {
 }
 
 /**
- * spawn-service 在 mergeBudget 之后、传给 runner 之前调用一次（D-10 / D-16）。
- * - explicitTotal：per-spawn 覆盖了 totalMs ⇒ 硬顶：maxTotalFactor = 1（H = deadlineAt ⇒ no_headroom ⇒ 无宽限无延长）
+ * spawn-service 在 mergeBudget 之后、传给 runner 之前调用一次（D-10 / D-16 / §2.2）。
+ * - fixedDeadline：该 run 解析出的 timeoutPolicy 为 "fixed" ⇒ 硬顶：maxTotalFactor = 1
+ *   （H = deadlineAt ⇒ no_headroom ⇒ 无宽限无延长）。agent-explicit-timeout-extend 之前叫
+ *   explicitTotal（per-spawn 覆盖了 totalMs ⇒ 硬顶），v2 起策略由 §2.2 解析式先行定值，
+ *   本函数只负责把 "fixed" 落到 factor 上，不再自己看请求形状。
  * - extensionsEnabled = false：maxExtensions = 0（宽限与延长一并关闭，任何层的覆盖都盖不回来）
  */
 export function applyBudgetPolicy(
   budget: DeadlineBudget,
-  opts: { explicitTotal: boolean; extensionsEnabled: boolean },
+  opts: { fixedDeadline: boolean; extensionsEnabled: boolean },
 ): DeadlineBudget {
   let out = budget;
-  if (opts.explicitTotal && out.maxTotalFactor !== 1) out = { ...out, maxTotalFactor: 1 };
+  if (opts.fixedDeadline && out.maxTotalFactor !== 1) out = { ...out, maxTotalFactor: 1 };
   if (!opts.extensionsEnabled && out.maxExtensions !== 0) out = { ...out, maxExtensions: 0 };
   return out;
 }
 
-/** enqueue 时算一次。totalMs ≤ 0 只可能来自绕过 mergeBudget 的直接输入（测试）⇒ 防御性返回 undefined（D-11）。 */
+/**
+ * enqueue 时算一次（§3.3 G1）。totalMs 非法（≤0/NaN，只可能来自绕过 mergeBudget 的
+ * 直接输入，测试）⇒ 防御性返回 undefined（D-11）；超大跨度经 clampSpanMs 钳到
+ * MAX_DEADLINE_SPAN_MS（365 天）——非有限 factor 降级为 1（更紧），保证 raw 有限。
+ */
 export function hardDeadlineAtFor(
   enqueuedAt: Millis,
   budget: DeadlineBudget,
   capAt: Millis | undefined,
 ): Millis | undefined {
-  if (!(budget.totalMs > 0)) return undefined;
-  const factor = Math.max(1, budget.maxTotalFactor);
-  const raw = enqueuedAt + Math.ceil(budget.totalMs * factor);
+  const total = clampSpanMs(budget.totalMs);
+  if (total === undefined) return undefined;
+  const factor = Number.isFinite(budget.maxTotalFactor) ? Math.max(1, budget.maxTotalFactor) : 1;
+  const span = Math.max(total, clampSpanMs(Math.ceil(total * factor)) ?? total);
+  const raw = enqueuedAt + span;
   return capAt === undefined ? raw : Math.min(raw, capAt);
 }
 
@@ -147,7 +156,7 @@ export function extendability(
   if (deadlineAt === undefined || hardDeadlineAt === undefined) return { ok: false, reason: "uncapped" }; // 防御
   if ((state.diag.overtime?.extensions ?? 0) >= budget.maxExtensions) return { ok: false, reason: "limit_reached" };
   const headroom = hardDeadlineAt - Math.max(now, deadlineAt);
-  if (headroom <= 0) return { ok: false, reason: "no_headroom" }; // 含 D-10：显式预算 run 恒落此处
+  if (headroom <= 0) return { ok: false, reason: "no_headroom" }; // 含 fixed-deadline run（timeoutPolicy "fixed" ⇒ factor 1 ⇒ H = deadlineAt）
   return { ok: true, headroomMs: headroom };
 }
 
@@ -176,9 +185,18 @@ export function describeTimeout(diag: RunDiagnostics, killedAt: Millis): string 
   const reason = diag.timeoutReason;
   if (reason === "total") {
     if (diag.overtime !== undefined) return "total budget exceeded after grace";
-    const capped =
-      diag.hardDeadlineAt !== undefined && diag.deadlineAt !== undefined && diag.hardDeadlineAt <= diag.deadlineAt;
-    return capped ? "total budget exceeded (hard cap: no grace window)" : "total budget exceeded";
+    // §3.2：读 diag.timeoutPolicy 真字段，不做 H === deadlineAt 形状推断——
+    // extendable run 也会因 factor 1 / 绝对截止触顶而 H === D0，成因只有
+    // 持久化的策略知道。旧条目（升级前）缺字段 ⇒ 中性文案。
+    if (diag.timeoutPolicy === "fixed") return "total budget exceeded (fixed deadline: no grace window)";
+    if (
+      diag.timeoutPolicy === "extendable" &&
+      diag.hardDeadlineAt !== undefined &&
+      diag.deadlineAt !== undefined &&
+      diag.hardDeadlineAt <= diag.deadlineAt
+    )
+      return "total budget exceeded (no headroom above the deadline: no grace window)";
+    return "total budget exceeded";
   }
   if (reason === "idle") {
     const tool = diag.currentTool;
@@ -260,11 +278,12 @@ export const MAX_DEADLINE_SPAN_MS = 365 * 86_400_000;
 
 /**
  * Clamp a deadline span (relative duration in millis) to
- * {@link MAX_DEADLINE_SPAN_MS}. Non-finite / negative / zero inputs yield
- * `undefined` (invalid span). STUB in batch 0 (agent-explicit-timeout-extend
- * plan §3.1): currently returns the input verbatim; the real implementation
- * lands in P1 alongside the reducer `enqueued` / hardDeadlineAtFor wiring.
+ * {@link MAX_DEADLINE_SPAN_MS}（agent-explicit-timeout-extend plan §3.3 G1/G2）。
+ * NaN 以及 ≤0 的输入一律 invalid ⇒ `undefined`；`+Infinity` 是合法的「无界」
+ * 信号 ⇒ 钳到上限。core 层安全降级（钳位），模型面由 schema（maximum: 604_800）
+ * 拒绝——两种处置的理由见 plan §3.3 决策段。
  */
 export function clampSpanMs(ms: number): Millis | undefined {
-  return ms;
+  if (Number.isNaN(ms) || ms <= 0) return undefined;
+  return Math.min(ms, MAX_DEADLINE_SPAN_MS);
 }

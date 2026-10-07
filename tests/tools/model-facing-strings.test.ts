@@ -77,6 +77,52 @@ describe("model-facing tool strings", () => {
   });
 
   /**
+   * U4 (agent-explicit-timeout-extend §5.2/G7): the Agent timeout_s model
+   * contract is now "same grace/extension rules as the default budget, 2×
+   * ceiling by default" — every exception the old hard-cap wording hid must
+   * be stated, phrase by phrase, and the retired vocabulary must be gone.
+   */
+  it("U4: Agent timeout_s description carries the full §5.2 contract", () => {
+    const agent = tools().find((tool) => tool.name === "Agent")!;
+    const descriptions = collectDescriptions(agent.parameters);
+    const timeout = descriptions.find((text) => text.includes("wall-clock budget"));
+    expect(timeout).toBeDefined();
+    for (const phrase of [
+      "same grace and extension rules",
+      "budget.totalGraceS",
+      "in seconds",
+      "default 90",
+      "2× timeout_s",
+      "budget.maxTotalFactor",
+      "absolute deadline",
+      "extend.enabled=false",
+      "silent",
+      "fixed deadline",
+      "abort_subagent",
+      "604800",
+    ])
+      expect(timeout).toContain(phrase);
+    // "hard cap"只出现在 extend.enabled=false 那一句（写死不插值，§5.2）
+    expect(timeout!.split("hard cap").length - 1).toBe(1);
+    expect(timeout).toContain("With extensions disabled (extend.enabled=false) the timeout is a hard cap");
+    // 旧词汇退役：旧文案的 30min 默认与「always settles within it」硬顶承诺
+    expect(timeout).not.toContain("30min");
+    expect(timeout).not.toContain("always settles within it");
+  });
+
+  /**
+   * U4/§5.2 (extend tool): the extend_subagent_timeout description no longer
+   * claims explicit-timeout runs are hard-capped — extendable-by-policy is
+   * the new contract, fixed-deadline system runs are the exception.
+   */
+  it("U4: extend_subagent_timeout description covers timeout_s runs and names the fixed-deadline exception", () => {
+    const extendTimeout = tools().find((tool) => tool.name === "extend_subagent_timeout")!;
+    expect(extendTimeout.description).toContain("runs dispatched with an explicit timeout_s alike");
+    expect(extendTimeout.description).toContain("consult, /goal verifier, RPC");
+    expect(extendTimeout.description).not.toContain("Only default-budget runs");
+  });
+
+  /**
    * A blocking wait (get_subagent_result wait:true, bash_job wait) occupies
    * the agent loop for its whole duration — the user cannot type a new
    * message or command until it returns. The descriptions must state that

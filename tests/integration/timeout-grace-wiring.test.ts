@@ -253,7 +253,7 @@ describe("timeout grace wiring (V1-V6)", () => {
     expect(terminal?.deadlines.graceUntil).toBeUndefined();
   });
 
-  it("V20: an explicit budgetOverride.totalMs is a hard cap — no grace, no extension (D-10)", async () => {
+  it("V20a: a programmatic budgetOverride.totalMs (no timeoutPolicy) is fixed — no grace, no extension, diag fixed", async () => {
     const clock = new FakeClock();
     const driver: SessionDriver = {
       create: async () => handle(),
@@ -266,12 +266,48 @@ describe("timeout grace wiring (V1-V6)", () => {
     await drain(clock, 50); // t≈500：run 进行中，但延长必被拒（H = deadlineAt）
     const refused = stack.queryService.extendTimeout(spawned.runId, 1_000, { source: "tool" });
     expect(refused).toMatchObject({ ok: false, reason: "no_headroom" });
+    expect(stack.registry.get(spawned.runId)?.diag.timeoutPolicy).toBe("fixed");
 
     await drain(clock, 200); // t≈2500：到点直接终止，无宽限
     const terminal = stack.registry.get(spawned.runId);
     expect(terminal?.status).toBe("timed_out");
     expect(terminal?.deadlines.graceUntil).toBeUndefined();
     expect(stack.notices).toHaveLength(0);
+    expect(terminal?.diag.timeoutPolicy).toBe("fixed");
+  });
+
+  it("V20b: the same explicit totalMs with timeoutPolicy extendable — grace notice at T, timed_out at T+G (§2.1)", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const stack = buildGraceStack(clock, driver);
+    const spawned = await stack.spawnService.spawn({
+      type: "worker",
+      prompt: "hang",
+      budgetOverride: { totalMs: 2_000 },
+      timeoutPolicy: "extendable",
+    });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+
+    await drain(clock, 210); // t≈2000+tick：软截止到点 ⇒ 宽限通知，仍活着
+    expect(stack.notices).toHaveLength(1);
+    expect(stack.notices[0]?.kind).toBe("grace");
+    expect(stack.registry.get(spawned.runId)?.status).not.toBe("timed_out");
+    expect(stack.registry.get(spawned.runId)?.diag.timeoutPolicy).toBe("extendable");
+    // H = 0 + ceil(2 × 2000) = 4000；graceUntil = min(2000+1000, 4000) = 3000
+    expect(stack.registry.get(spawned.runId)?.deadlines.graceUntil).toBe(3_000);
+    expect(stack.registry.get(spawned.runId)?.deadlines.hardDeadlineAt).toBe(4_000);
+
+    // 无人延长：T+G 到点照杀，且只此一条通知
+    await drain(clock, 120); // t≈3200
+    const terminal = stack.registry.get(spawned.runId);
+    expect(terminal?.status).toBe("timed_out");
+    expect(terminal?.deadlines.graceUntil).toBe(3_000); // 审计痕迹保留（BL-5）
+    expect(stack.notices).toHaveLength(1);
+    expect(stack.pool.stats.inUse).toBe(0);
   });
 
   it("V19: a run in grace still holds its slot — a queued run times out on queueWaitMs (RK-4)", async () => {

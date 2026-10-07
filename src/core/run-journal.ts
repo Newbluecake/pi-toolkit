@@ -55,6 +55,7 @@ const JOURNAL_DIAG_FIELDS = [
   "stopRequestedAt",
   "stopCause",
   "timeoutReason",
+  "timeoutPolicy",
   "error",
   "orphaned",
   "generation",

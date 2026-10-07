@@ -410,8 +410,8 @@ describe("CC4/WC12c: an already-expired deadlineAt occupies zero resources at ea
   });
 });
 
-describe("timeout-notify: hardDeadlineAt and explicit-budget hard caps (D-10)", () => {
-  it("an explicit budgetOverride.totalMs clamps the hard ceiling to the soft deadline (factor = 1)", async () => {
+describe("timeout-notify: hardDeadlineAt and explicit-budget hard caps (D-10 / §2.2 timeoutPolicy)", () => {
+  it("X0: a programmatic budgetOverride.totalMs (no timeoutPolicy) is fixed — factor 1, diag.timeoutPolicy fixed", async () => {
     const clock = new FakeClock();
     const driver: SessionDriver = {
       create: async () => handle(),
@@ -426,8 +426,45 @@ describe("timeout-notify: hardDeadlineAt and explicit-budget hard caps (D-10)", 
 
     const terminal = snapshots.filter((s) => s.runId === spawned.runId && s.status === "completed").at(-1);
     expect(terminal?.deadlines.deadlineAt).toBe(10_000);
-    // D-10: explicit totalMs ⇒ applyBudgetPolicy clamps maxTotalFactor to 1 ⇒ H = deadlineAt.
+    // §2.2 解析式第 ③ 项：程序派生显式 totalMs（无 timeoutPolicy）⇒ "fixed"
+    // ⇒ applyBudgetPolicy 钳 maxTotalFactor = 1 ⇒ H = deadlineAt。
     expect(terminal?.deadlines.hardDeadlineAt).toBe(10_000);
+    expect(terminal?.diag.timeoutPolicy).toBe("fixed");
+  });
+
+  it("X0 contrast: the same budgetOverride.totalMs with timeoutPolicy extendable gets H = 2·T and grace", async () => {
+    const clock = new FakeClock();
+    let abortRequested = false;
+    const driver: SessionDriver = {
+      create: async () =>
+        handle({
+          prompt: () => new Promise(() => undefined), // never settles
+          requestAbort: async () => {
+            abortRequested = true;
+          },
+        }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const graceBudget = { ...fastBudget(2_000), totalGraceMs: 60_000 };
+    const { svc, snapshots } = buildFullStack(clock, driver, [], graceBudget);
+
+    const spawned = await svc.spawn({
+      type: "worker",
+      prompt: "x",
+      budgetOverride: { totalMs: 2_000 },
+      timeoutPolicy: "extendable",
+    });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+    await drain(clock, 25, 100); // t≈2500：越过 T=2000，仍在宽限（graceUntil=min(T+G, H)=4000）
+
+    const inGrace = snapshots.filter((s) => s.runId === spawned.runId).at(-1);
+    expect(inGrace?.diag.timeoutPolicy).toBe("extendable");
+    expect(inGrace?.diag.overtime?.graces).toBe(1);
+    // H = enqueuedAt + ceil(2 × 2000) = 4000（factor 保留，不再钳 1）
+    expect(inGrace?.deadlines.hardDeadlineAt).toBe(4_000);
+    expect(inGrace?.deadlines.graceUntil).toBe(4_000);
+    expect(inGrace?.status).not.toBe("timed_out");
   });
 
   it("a SpawnRequest.deadlineAt cap between totalMs and factor*totalMs binds only the ceiling", async () => {
@@ -449,7 +486,7 @@ describe("timeout-notify: hardDeadlineAt and explicit-budget hard caps (D-10)", 
     expect(terminal?.deadlines.hardDeadlineAt).toBe(45_000);
   });
 
-  it("an explicit-budget run gets NO grace window even when totalGraceMs is configured (D-10)", async () => {
+  it("X0: an explicit-budget run (policy fixed) gets NO grace window even when totalGraceMs is configured", async () => {
     const clock = new FakeClock();
     let abortRequested = false;
     const driver: SessionDriver = {

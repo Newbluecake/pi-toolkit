@@ -523,6 +523,19 @@ describe("timeout grace & extendDeadline (runner)", () => {
     expect((await runPromise).status).toBe("aborted");
   });
 
+  it("F4: extendDeadline with a non-finite or ≤0 extendMs is refused as no_headroom with no dispatch (§3.3 G4)", async () => {
+    const { runner, runPromise } = await startHanging("r-nan");
+    const before = runner.getRunState("r-nan");
+    for (const bad of [NaN, Infinity, -Infinity, 0, -5]) {
+      expect(runner.extendDeadline("r-nan", bad, { source: "tool" })).toEqual({ ok: false, reason: "no_headroom" });
+    }
+    const after = runner.getRunState("r-nan");
+    expect(after?.deadlines).toEqual(before?.deadlines); // 状态不变
+    expect(after?.diag.overtime).toBeUndefined(); // 未记任何延长（未 dispatch）
+    await runner.abortRun("r-nan", "user_stop"); // cleanup
+    expect((await runPromise).status).toBe("aborted");
+  });
+
   it("extendDeadline maps every reachable rejection reason", async () => {
     // unknown_run — no such run at all
     const idle = new RuntimeRunner(
@@ -779,20 +792,55 @@ describe("timeout cause in the terminal error message", () => {
     expect(outcome.error?.message).not.toContain("total");
   });
 
-  it("a total-budget kill without a grace window says so", async () => {
+  it("U5: a total-budget kill of a fixed-deadline run names the fixed policy (no grace window)", async () => {
     const clock = new FakeClock();
     const driver: SessionDriver = {
       create: async () => handle({ prompt: () => never() }),
       bind: async () => undefined,
       onLateArrival() {},
     };
-    // maxTotalFactor 1 ⇒ hardDeadlineAt == deadlineAt (explicit timeout_s, D-10).
+    // maxTotalFactor 1 ⇒ hardDeadlineAt == deadlineAt（fixed-deadline run，§2.2）。
     const runPromise = new RuntimeRunner(deps(clock, driver)).run(
-      { ...request, runId: "r-hard" },
+      { ...request, runId: "r-hard", timeoutPolicy: "fixed" },
       { ...budget, maxTotalFactor: 1 },
     );
     const outcome = await settle(runPromise, clock, 31);
     expect(outcome.timeoutReason).toBe("total");
-    expect(outcome.error?.message).toBe("total budget exceeded (hard cap: no grace window); prompt cancelled");
+    expect(outcome.error?.message).toBe("total budget exceeded (fixed deadline: no grace window); prompt cancelled");
+  });
+
+  it("U5: the same H === D0 shape under an extendable policy yields the no-headroom wording, not fixed", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    };
+    // factor 1 让 H === D0，但策略是 extendable ⇒ 文案读 diag.timeoutPolicy，
+    // 不再从形状推断成因（废弃启发式的回归锁）。
+    const runPromise = new RuntimeRunner(deps(clock, driver)).run(
+      { ...request, runId: "r-nohead", timeoutPolicy: "extendable" },
+      { ...budget, maxTotalFactor: 1 },
+    );
+    const outcome = await settle(runPromise, clock, 31);
+    expect(outcome.error?.message).toBe(
+      "total budget exceeded (no headroom above the deadline: no grace window); prompt cancelled",
+    );
+    expect(outcome.error?.message).not.toContain("fixed deadline");
+  });
+
+  it("U5: an old run without the policy field keeps the neutral total-budget wording", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    };
+    const runPromise = new RuntimeRunner(deps(clock, driver)).run(
+      { ...request, runId: "r-legacy" },
+      { ...budget, maxTotalFactor: 1 },
+    );
+    const outcome = await settle(runPromise, clock, 31);
+    expect(outcome.error?.message).toBe("total budget exceeded; prompt cancelled");
   });
 });

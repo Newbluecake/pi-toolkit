@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   applyBudgetPolicy,
+  clampSpanMs,
   DEFAULT_BUDGET,
   describeTimeout,
   effectiveDeadlineAt,
   extendability,
   graceWindow,
   hardDeadlineAtFor,
+  MAX_DEADLINE_SPAN_MS,
   OVERTIME_PHASES,
 } from "../../src/core/deadline.js";
 import { isTerminalStatus, TERMINAL_STATUSES } from "../../src/core/status.js";
@@ -81,25 +83,58 @@ describe("core/deadline: hardDeadlineAtFor", () => {
     expect(hardDeadlineAtFor(0, { ...budget, totalMs: 0 }, undefined)).toBeUndefined();
     expect(hardDeadlineAtFor(0, { ...budget, totalMs: -5 }, undefined)).toBeUndefined();
   });
+
+  // F1（§3.3 G1）：跨度钳位与非有限 factor 降级——core 层安全降级，不拒绝。
+  it("F1: spans clamp to MAX_DEADLINE_SPAN_MS; non-finite factor degrades to 1; NaN/−1/0 totalMs are undefined", () => {
+    // 1e308 × 2 溢出为 Infinity ⇒ 钳到 365 天
+    const huge = hardDeadlineAtFor(1_000, { ...budget, totalMs: 1e308, maxTotalFactor: 2 }, undefined);
+    expect(huge).toBe(1_000 + MAX_DEADLINE_SPAN_MS);
+    // 恰好超限的有限值同样被钳
+    const over = hardDeadlineAtFor(0, { ...budget, totalMs: MAX_DEADLINE_SPAN_MS + 1, maxTotalFactor: 1 }, undefined);
+    expect(over).toBe(MAX_DEADLINE_SPAN_MS);
+    // 非有限 factor ⇒ 降级 1（更紧），不是 NaN/Infinity
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: Infinity }, undefined)).toBe(100);
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: NaN }, undefined)).toBe(100);
+    // totalMs 非法 ⇒ undefined（防御语义保留）
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: NaN }, undefined)).toBeUndefined();
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: -1 }, undefined)).toBeUndefined();
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 0 }, undefined)).toBeUndefined();
+    // +Infinity 的 totalMs 是「无界」信号 ⇒ 钳到上限（不产出 Infinity 截止）
+    expect(hardDeadlineAtFor(5, { ...budget, totalMs: Infinity, maxTotalFactor: 2 }, undefined)).toBe(
+      5 + MAX_DEADLINE_SPAN_MS,
+    );
+  });
+
+  it("F1: clampSpanMs boundary table (NaN/0/negative → undefined; finite → min(ms, MAX); +Infinity → MAX)", () => {
+    expect(clampSpanMs(NaN)).toBeUndefined();
+    expect(clampSpanMs(0)).toBeUndefined();
+    expect(clampSpanMs(-1)).toBeUndefined();
+    expect(clampSpanMs(-Infinity)).toBeUndefined();
+    expect(clampSpanMs(1)).toBe(1);
+    expect(clampSpanMs(MAX_DEADLINE_SPAN_MS)).toBe(MAX_DEADLINE_SPAN_MS);
+    expect(clampSpanMs(MAX_DEADLINE_SPAN_MS + 1)).toBe(MAX_DEADLINE_SPAN_MS);
+    expect(clampSpanMs(1e308)).toBe(MAX_DEADLINE_SPAN_MS);
+    expect(clampSpanMs(Infinity)).toBe(MAX_DEADLINE_SPAN_MS);
+  });
 });
 
-describe("core/deadline: applyBudgetPolicy (D-10/D-16)", () => {
-  it("explicitTotal clamps maxTotalFactor to 1", () => {
-    const out = applyBudgetPolicy(budget, { explicitTotal: true, extensionsEnabled: true });
+describe("core/deadline: applyBudgetPolicy (D-10/D-16, §2.2)", () => {
+  it("fixedDeadline clamps maxTotalFactor to 1", () => {
+    const out = applyBudgetPolicy(budget, { fixedDeadline: true, extensionsEnabled: true });
     expect(out.maxTotalFactor).toBe(1);
     expect(out.maxExtensions).toBe(budget.maxExtensions);
   });
   it("extensionsEnabled=false clamps maxExtensions to 0", () => {
-    const out = applyBudgetPolicy(budget, { explicitTotal: false, extensionsEnabled: false });
+    const out = applyBudgetPolicy(budget, { fixedDeadline: false, extensionsEnabled: false });
     expect(out.maxExtensions).toBe(0);
     expect(out.maxTotalFactor).toBe(budget.maxTotalFactor);
   });
   it("both flags combine", () => {
-    const out = applyBudgetPolicy(budget, { explicitTotal: true, extensionsEnabled: false });
+    const out = applyBudgetPolicy(budget, { fixedDeadline: true, extensionsEnabled: false });
     expect(out).toMatchObject({ maxTotalFactor: 1, maxExtensions: 0 });
   });
   it("neither flag returns the budget untouched", () => {
-    expect(applyBudgetPolicy(budget, { explicitTotal: false, extensionsEnabled: true })).toBe(budget);
+    expect(applyBudgetPolicy(budget, { fixedDeadline: false, extensionsEnabled: true })).toBe(budget);
   });
 });
 
@@ -206,15 +241,40 @@ describe("describeTimeout", () => {
       "no model progress for 10m00s (budget.idleS / budget.modelTurnS)",
     );
   });
-  it("total: distinguishes plain, hard-capped (no grace) and after-grace", () => {
-    expect(describeTimeout(diag({ timeoutReason: "total" }), 100_000)).toBe("total budget exceeded");
-    expect(describeTimeout(diag({ timeoutReason: "total", hardDeadlineAt: 100_000 }), 100_000)).toBe(
-      "total budget exceeded (hard cap: no grace window)",
+  it("total: reads diag.timeoutPolicy — fixed / extendable-at-ceiling / after-grace / absent", () => {
+    // fixed 策略 ⇒ fixed-deadline 变体（不再看 H === D0 形状）
+    expect(describeTimeout(diag({ timeoutReason: "total", timeoutPolicy: "fixed" }), 100_000)).toBe(
+      "total budget exceeded (fixed deadline: no grace window)",
     );
+    // extendable 但无 headroom（factor 1 / 绝对截止触顶）⇒ no-headroom 变体
+    expect(
+      describeTimeout(diag({ timeoutReason: "total", timeoutPolicy: "extendable", hardDeadlineAt: 100_000 }), 100_000),
+    ).toBe("total budget exceeded (no headroom above the deadline: no grace window)");
+    // extendable 且 H > D0 ⇒ 普通文案；旧条目缺字段（升级前）⇒ 中性文案
+    expect(describeTimeout(diag({ timeoutReason: "total", timeoutPolicy: "extendable" }), 100_000)).toBe(
+      "total budget exceeded",
+    );
+    expect(describeTimeout(diag({ timeoutReason: "total" }), 100_000)).toBe("total budget exceeded");
     const overtime = { graces: 1, extensions: 0, grantedMs: 0 };
     expect(describeTimeout(diag({ timeoutReason: "total", overtime }), 190_000)).toBe(
       "total budget exceeded after grace",
     );
+  });
+
+  it("U1 regression lock: H === D0 with policy extendable never yields the fixed-deadline text (no shape inference)", () => {
+    const d = diag({
+      timeoutReason: "total",
+      timeoutPolicy: "extendable",
+      deadlineAt: 100_000,
+      hardDeadlineAt: 100_000, // H === D0 — the shape the old heuristic keyed on
+    });
+    expect(describeTimeout(d, 100_000)).not.toContain("fixed deadline");
+    expect(describeTimeout(d, 100_000)).not.toContain("hard cap");
+    expect(describeTimeout(d, 100_000)).toBe("total budget exceeded (no headroom above the deadline: no grace window)");
+    // 字段缺席时同一形状也回到中性文案（旧 run 不做任何成因声称）
+    const legacy = diag({ timeoutReason: "total", deadlineAt: 100_000, hardDeadlineAt: 100_000 });
+    expect(legacy).not.toHaveProperty("timeoutPolicy");
+    expect(describeTimeout(legacy, 100_000)).toBe("total budget exceeded");
   });
   it("other reasons and the unknown fallback", () => {
     expect(describeTimeout(diag({ timeoutReason: "compaction" }), 1)).toBe("compaction exceeded budget.compactionS");

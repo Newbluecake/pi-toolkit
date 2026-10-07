@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Value } from "@sinclair/typebox/value";
 import type { Text } from "@earendil-works/pi-tui";
 import { createExtendTimeoutTool, ExtendTimeoutParams } from "../../src/tools/extend-timeout-tool.js";
 import type { ExtendOutcome, RunSnapshot } from "../../src/core/types.js";
@@ -17,6 +18,7 @@ function snapshot(overrides: {
   hardDeadlineAt?: number;
   enqueuedAt?: number;
   extensions?: number;
+  timeoutPolicy?: "fixed" | "extendable";
 }): RunSnapshot {
   return {
     runId: overrides.runId ?? "r-abcdef123456",
@@ -41,6 +43,7 @@ function snapshot(overrides: {
       degraded: [],
       staleInputs: 0,
       unkillable: [],
+      ...(overrides.timeoutPolicy === undefined ? {} : { timeoutPolicy: overrides.timeoutPolicy }),
       ...(overrides.extensions === undefined
         ? {}
         : { overtime: { graces: 0, extensions: overrides.extensions, grantedMs: 0 } }),
@@ -103,6 +106,13 @@ describe("tools/extend-timeout-tool: schema", () => {
     expect(props.extend_s.minimum).toBe(1);
     expect(props.extend_s.description).toMatch(/seconds/);
     expect(props.run_id.description).toContain("label");
+  });
+
+  it("U6/G5: extend_s is capped at 604800", () => {
+    const props = ExtendTimeoutParams.properties;
+    expect(props.extend_s.maximum).toBe(604_800);
+    expect(Value.Check(ExtendTimeoutParams, { run_id: RUN_ID, extend_s: 604_800 })).toBe(true);
+    expect(Value.Check(ExtendTimeoutParams, { run_id: RUN_ID, extend_s: 604_801 })).toBe(false);
   });
 });
 
@@ -240,26 +250,71 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     expect(message).toContain("abort_subagent and respawn with a larger timeout_s"); // next step ②
   });
 
-  it("no_headroom with an explicit timeout (hardDeadlineAt === deadlineAt, no extensions) → hard-cap variant", async () => {
+  it("U6: no_headroom reads diag.timeoutPolicy — fixed policy → fixed-deadline variant", async () => {
     const { tool } = setup(
       rejected("no_headroom"),
-      snapshot({ deadlineAt: NOW + 42_000, hardDeadlineAt: NOW + 42_000 }), // H === deadlineAt, extensions 0
+      snapshot({ deadlineAt: NOW + 42_000, hardDeadlineAt: NOW + 300_000, timeoutPolicy: "fixed" }),
     );
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
-    expect(message).toContain("spawned with an explicit timeout, which is a hard cap");
+    expect(message).toContain("has a fixed deadline (the system started it with a non-extendable time cap");
+    expect(message).toContain("consult, /goal verifier or RPC run, or a resume of one");
     expect(message).toContain("it stops at its deadline (in 42s) and cannot be extended");
     expect(message).toContain("get_subagent_result"); // next step ①
-    expect(message).toContain("respawn with a larger timeout_s"); // next step ②
+    expect(message).toContain("abort_subagent and respawn with a larger timeout_s"); // next step ②
   });
 
-  it("no_headroom after extensions (at the ceiling) → ceiling variant", async () => {
+  it("U6: no_headroom with policy extendable and H === D0 → no-headroom-config variant, never the fixed text (regression lock)", async () => {
     const { tool } = setup(
       rejected("no_headroom"),
-      snapshot({ enqueuedAt: 0, deadlineAt: 3_600_000, hardDeadlineAt: 3_600_000, extensions: 2 }),
+      snapshot({ deadlineAt: NOW + 42_000, hardDeadlineAt: NOW + 42_000, timeoutPolicy: "extendable" }), // H === D0
+    );
+    const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
+    expect(message).toContain(
+      "has no headroom above its deadline (budget.maxTotalFactor is 1, or an absolute deadline cap applies)",
+    );
+    expect(message).toContain("it stops at its deadline (in 42s)");
+    expect(message).toContain("get_subagent_result"); // next step
+    // 废弃启发式的回归锁：同一 H === D0 形状不得再被推断为 fixed/hard cap
+    expect(message).not.toContain("fixed deadline");
+    expect(message).not.toContain("hard cap");
+    expect(message).not.toContain("explicit timeout");
+  });
+
+  it("U6: no_headroom with policy fixed and H === D0 → fixed variant (policy, not shape, decides)", async () => {
+    const { tool } = setup(
+      rejected("no_headroom"),
+      snapshot({ deadlineAt: NOW + 42_000, hardDeadlineAt: NOW + 42_000, timeoutPolicy: "fixed" }),
+    );
+    const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
+    expect(message).toContain("has a fixed deadline");
+    expect(message).not.toContain("no headroom above its deadline");
+  });
+
+  it("U6: no_headroom at the ceiling after extensions (extendable) → ceiling variant unchanged", async () => {
+    const { tool } = setup(
+      rejected("no_headroom"),
+      snapshot({
+        enqueuedAt: 0,
+        deadlineAt: 3_600_000,
+        hardDeadlineAt: 3_600_000,
+        extensions: 2,
+        timeoutPolicy: "extendable",
+      }),
     );
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
     expect(message).toContain("is at its hard ceiling (1h00m from start); no further extension is possible");
     expect(message).toContain("get_subagent_result"); // next step
+  });
+
+  it("U6: no_headroom on an old run without the policy field → neutral ceiling variant (no cause claim)", async () => {
+    const { tool } = setup(
+      rejected("no_headroom"),
+      snapshot({ enqueuedAt: 0, deadlineAt: 3_600_000, hardDeadlineAt: 3_600_000, extensions: 0 }),
+    );
+    const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
+    expect(message).toContain("is at its hard ceiling");
+    expect(message).not.toContain("fixed deadline");
+    expect(message).not.toContain("no headroom above its deadline (budget.maxTotalFactor");
   });
 });
 
@@ -375,17 +430,20 @@ describe("tools/extend-timeout-tool: SubagentWorkflow targets", () => {
     expect(result.details).toMatchObject({ ok: true, workflowId: WF, rescuedFromGrace: true });
   });
 
-  it("explicit timeout_s workflow → no_headroom with the hard-cap wording", async () => {
+  it("U6/R4: workflow no_headroom at H === D0 states the configuration fact — never a hard-cap inference", async () => {
     const { tool } = workflowSetup(
       { ok: false, reason: "no_headroom" },
       workflowView({ deadlineAt: 70_000, hardDeadlineAt: 70_000 }),
     );
     const message = await executeError(tool, { run_id: WF, extend_s: 60 });
     expect(message).toBe(
-      `workflow ${WF} ("review-flow") was started with an explicit timeout_s, which is a hard cap; it stops at its ` +
+      `workflow ${WF} ("review-flow") has no headroom above its deadline (budget.maxTotalFactor is 1); it stops at its ` +
         `deadline (in 1m00s) and cannot be extended. Read what it produced with get_subagent_result(run_id: "${WF}") ` +
         "after the notification, or abort_subagent and restart the workflow with a larger timeout_s.",
     );
+    // 主会话 R4 裁定锁：workflow 无策略字段，不得以 H === D0 形状推断「显式 timeout 是硬顶」
+    expect(message).not.toContain("hard cap");
+    expect(message).not.toContain("explicit timeout");
   });
 
   it("no_headroom after extensions → ceiling wording", async () => {

@@ -1,4 +1,5 @@
 import {
+  clampSpanMs,
   DEFAULT_BUDGET,
   describeTimeout,
   dueAtFor,
@@ -677,7 +678,10 @@ export function reduce(
         lastEventType: "config",
         error: { kind: "config", message: "deadlineAt already expired at enqueue", retryable: false },
       });
-    const raw = input.budget.totalMs === 0 ? undefined : input.at + input.budget.totalMs;
+    // §3.3 G2：totalMs 经 clampSpanMs（0/负/NaN ⇒ undefined —— 保留 totalMs === 0
+    // 的既有防御语义；超大值钳到 MAX_DEADLINE_SPAN_MS），不再产出 NaN deadlineAt。
+    const totalSpan = clampSpanMs(input.budget.totalMs);
+    const raw = totalSpan === undefined ? undefined : input.at + totalSpan;
     const cap = input.deadlineCapAt;
     // CC4/FF1: deadlineAt only ever tightens the run's deadline, never loosens it
     // — min() makes that automatic. Computed exactly once, right here (FF2: the
@@ -720,6 +724,9 @@ export function reduce(
         ...(input.meta?.agentType === undefined ? {} : { agentType: input.meta.agentType }),
         ...(input.meta?.taskPrompt === undefined ? {} : { taskPrompt: input.meta.taskPrompt }),
         ...(input.meta?.worktree === undefined ? {} : { worktree: input.meta.worktree }),
+        // §2.7：策略是 run 的持久事实，enqueued 写一次，此后永不改写；缺席
+        // （旧入口/直接构造的 RunInput）不写字段，读侧走中性文案。
+        ...(input.timeoutPolicy === undefined ? {} : { timeoutPolicy: input.timeoutPolicy }),
       },
       armedTimers,
     };
@@ -974,6 +981,9 @@ export function reduce(
   // single verdict source shared with the runner/tool layer (which rejects
   // first — this branch is defense in depth, including not_started).
   if (input.kind === "deadline_extended") {
+    // §3.3 G4：非有限或 ≤0 的 extendMs 直接 illegal——NaN 会在后面的 min(base+ms, H)
+    // 产出 NaN deadlineAt 且 NaN <= prev 比较为假，挂死 total 计时（C17 向量）。
+    if (!Number.isFinite(input.extendMs) || input.extendMs <= 0) return illegal(state, input);
     const verdict = extendability(state, budget, input.at);
     if (!verdict.ok) return illegal(state, input);
     const prev = state.deadlines.deadlineAt!; // extendability ok ⇒ defined
@@ -1036,7 +1046,7 @@ export function reduce(
     // timeout-notify (arch §3.5(b)): soft deadline reached in an overtime-eligible
     // phase with a grace window available ⇒ enter grace, the run keeps going
     // (phase/status unchanged). graceWindow() already embeds the D-6 (extension
-    // budget left), D-10 (explicit-budget runs never grace) and D-14 (overtime
+    // budget left), fixed-deadline shape (factor 1 ⇒ no headroom) and D-14 (overtime
     // phases only) verdicts. total_grace expiry gets NO special case: it falls
     // through to the generic kill path below (timerReason maps it to "total").
     if (input.timer === "total") {
@@ -1056,7 +1066,7 @@ export function reduce(
         ]);
       }
       // until === undefined ⇒ grace off / extension budget exhausted / at the
-      // hard ceiling / explicit-budget run ⇒ fall through to the kill path.
+      // hard ceiling / fixed-deadline run ⇒ fall through to the kill path.
     }
     // M4 前这里忽略 retry_backoff+idle（配合 dueAtFor 无 retry_backoff 分支的盲区）：
     // pi 自动重试一旦卡住（backoff 结束后迟迟不来 retry_end），run 会无界地挂到总预算。

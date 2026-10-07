@@ -397,6 +397,9 @@ export class RuntimeRunner implements Runner {
    * the one that actually moves deadlineAt; we only translate the outcome.
    */
   extendDeadline(runId: string, extendMs: number, opts: { source: ExtendSource; reason?: string }): ExtendOutcome {
+    // §3.3 G4 防御：非有限或 ≤0 的 extendMs 不许进入 reducer（工具 schema 已拦；
+    // NaN 在 reducer 的 min(base+ms, H) 会产出 NaN deadlineAt ⇒ total 永不触发）。
+    if (!Number.isFinite(extendMs) || extendMs <= 0) return { ok: false, reason: "no_headroom" };
     const state = this.states.get(runId);
     if (!state) return { ok: false, reason: "unknown_run" };
     const entry = this.dispatchers.get(runId);
@@ -759,6 +762,7 @@ export class RuntimeRunner implements Runner {
         at: this.d.clock.now(),
         budget,
         ...(req.deadlineAt === undefined ? {} : { deadlineCapAt: req.deadlineAt }),
+        ...(req.timeoutPolicy === undefined ? {} : { timeoutPolicy: req.timeoutPolicy }),
         ...(req.displayMeta === undefined ? {} : { meta: req.displayMeta }),
       });
       // CC4/CP3: an already-expired deadlineAt cap settles the run as

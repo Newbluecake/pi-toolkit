@@ -40,6 +40,7 @@ function richState(over: Partial<RunDiagnostics> = {}): RunState {
     stopRequestedAt: 1_041,
     stopCause: "user_stop",
     timeoutReason: "idle",
+    timeoutPolicy: "extendable",
     error: { kind: "model", message: "boom", retryable: false },
     escalation: [{ level: "L0", at: 1_042, ok: true }],
     orphaned: false,
@@ -90,6 +91,7 @@ const RETAINED = [
   "stopRequestedAt",
   "stopCause",
   "timeoutReason",
+  "timeoutPolicy",
   "error",
   "orphaned",
   "generation",
@@ -287,6 +289,22 @@ describe("interruptedFromJournal (run-persistence plan D4/D7)", () => {
     const none = interruptedFromJournal(journal({ worktree: undefined }, { kind: "session_created" }));
     expect(none.diag).not.toHaveProperty("worktree");
     expect(none.outcome!.error!.message).not.toContain("worktree");
+  });
+
+  it("P-journal (agent-explicit-timeout-extend §2.7): the journal whitelist retains diag.timeoutPolicy end to end", () => {
+    const snap = journalSnapshotFromState(richState(), 2_000, { kind: "session_created" });
+    expect(snap.diag.timeoutPolicy).toBe("extendable");
+    const out = interruptedFromJournal(snap);
+    expect(out.diag.timeoutPolicy).toBe("extendable"); // 恢复快照同样保留
+  });
+
+  it("P-journal: a journal entry missing timeoutPolicy projects it away (old-run compat)", () => {
+    const bare = richState();
+    delete bare.diag.timeoutPolicy;
+    const snap = journalSnapshotFromState(bare, 2_000, { kind: "session_created" });
+    expect(snap.diag).not.toHaveProperty("timeoutPolicy");
+    const out = interruptedFromJournal(snap);
+    expect(out.diag).not.toHaveProperty("timeoutPolicy");
   });
 
   it("message names the run id and points at resume", () => {

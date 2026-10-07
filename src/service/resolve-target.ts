@@ -194,7 +194,16 @@ export function resolveResumeTarget(handle: string, deps: ResolveTargetDeps): Re
   const sessionFile = snapshotWithSessionFile(deps, runId)?.diag.sessionFile ?? deps.tombstones.get(runId)?.sessionFile;
   if (!sessionFile || !existsSync(sessionFile) || !statIsFile(sessionFile))
     return { ok: false, error: resumeError(handle, candidates), candidates };
-  return { ok: true, runId, sessionFile };
+  // §2.7：R-inherit 的继承源——终态快照（live → durable record）优先，快照
+  // 被逐出后靠 tombstone；旧条目缺字段 ⇒ undefined，解析式落第 ③ 项（按请求形状）。
+  const timeoutPolicy =
+    snapshotWithSessionFile(deps, runId)?.diag.timeoutPolicy ?? deps.tombstones.get(runId)?.timeoutPolicy;
+  return {
+    ok: true,
+    runId,
+    sessionFile,
+    ...(timeoutPolicy === undefined ? {} : { timeoutPolicy }),
+  };
 }
 function statIsFile(path: string): boolean {
   try {
