@@ -499,6 +499,55 @@ describe("logic/preview.js parsePreviewDims / checkPreviewHeaders (pre-body gate
     expect(parsePreviewDims(null)).toBeNull();
   });
 
+  it("gzip text: the completeness oracle reads X-PWH-Preview-Bytes, not the compressed Content-Length", () => {
+    // 2026-10-07 regression: preview-text gzip made Content-Length name the COMPRESSED length
+    // while fetch transparently decompresses — keying the oracle on Content-Length mis-judged
+    // every ≥2KiB text preview as E_PREVIEW_CHANGED.
+    const r = checkPreviewHeaders(
+      hdrs({
+        [PREVIEW_HDR.kind]: "text",
+        [PREVIEW_HDR.size]: "7000",
+        [PREVIEW_HDR.bytes]: "7000",
+        [PREVIEW_HDR.truncated]: "0",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Length": "912", // compressed
+        "Content-Encoding": "gzip",
+      }),
+      { maxPixels: 40_000_000, imageMaxBytes: PREVIEW_IMAGE_MAX_BYTES.loopback },
+    );
+    expect(r).toEqual({ ok: true, kind: "text", size: 7000, totalSize: 7000, truncated: false });
+  });
+
+  it("gzip text without X-PWH-Preview-Bytes ⇒ E_BAD_RESPONSE (never fall back to the compressed length)", () => {
+    const r = checkPreviewHeaders(
+      hdrs({
+        [PREVIEW_HDR.kind]: "text",
+        [PREVIEW_HDR.size]: "7000",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Length": "912",
+        "Content-Encoding": "gzip",
+      }),
+      { maxPixels: 40_000_000, imageMaxBytes: PREVIEW_IMAGE_MAX_BYTES.loopback },
+    );
+    expect(r).toEqual({ ok: false, error: "E_BAD_RESPONSE" });
+  });
+
+  it("gzip truncated text: bytes (body) stays below size (total)", () => {
+    const r = checkPreviewHeaders(
+      hdrs({
+        [PREVIEW_HDR.kind]: "text",
+        [PREVIEW_HDR.size]: "999999",
+        [PREVIEW_HDR.bytes]: "262140",
+        [PREVIEW_HDR.truncated]: "1",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Length": "31000",
+        "Content-Encoding": "gzip",
+      }),
+      { maxPixels: 40_000_000, imageMaxBytes: PREVIEW_IMAGE_MAX_BYTES.loopback },
+    );
+    expect(r).toEqual({ ok: true, kind: "text", size: 262140, totalSize: 999999, truncated: true });
+  });
+
   it("image ok: kind/mime/size/dims from the headers", () => {
     const r = checkPreviewHeaders(
       hdrs({

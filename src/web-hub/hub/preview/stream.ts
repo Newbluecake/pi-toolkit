@@ -119,12 +119,14 @@ function baseHeaders(
   contentType: string,
   size: number,
   truncated: boolean,
+  bodyBytes: number,
 ): Record<string, string> {
   return {
     "Content-Type": contentType,
-    "Content-Length": "", // filled by the caller (image: size; text: the cut length)
+    "Content-Length": "", // filled by the caller (image: size; text: the cut or gzipped length)
     [PREVIEW_HDR.kind]: kind,
     [PREVIEW_HDR.size]: String(size),
+    [PREVIEW_HDR.bytes]: String(bodyBytes),
     [PREVIEW_HDR.truncated]: truncated ? "1" : "0",
     "Content-Disposition": 'attachment; filename="preview"',
     "Cross-Origin-Resource-Policy": "same-origin",
@@ -178,7 +180,7 @@ async function streamImage(ctx: FlowCtx): Promise<StreamOutcome> {
 
   const pre = await race(src.fh.stat());
 
-  const headers = baseHeaders("image", sniff.mime, src.size, false);
+  const headers = baseHeaders("image", sniff.mime, src.size, false, src.size);
   headers["Content-Length"] = String(src.size);
   headers[PREVIEW_HDR.dims] = `${sniff.dims.w}x${sniff.dims.h}`;
   sink.writeHead(200, headers);
@@ -282,7 +284,7 @@ async function streamText(ctx: FlowCtx): Promise<StreamOutcome> {
     }
   }
 
-  const headers = baseHeaders("text", "text/plain; charset=utf-8", src.size, cut < src.size);
+  const headers = baseHeaders("text", "text/plain; charset=utf-8", src.size, cut < src.size, cut);
   headers["Content-Length"] = String(gz === undefined ? cut : gz.length);
   if (gz !== undefined) {
     headers["Content-Encoding"] = "gzip";

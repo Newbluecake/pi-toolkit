@@ -53,6 +53,7 @@ describe("protocol/preview — constants (§4.1)", () => {
     expect(PREVIEW_HDR).toEqual({
       kind: "X-PWH-Preview-Kind",
       size: "X-PWH-Preview-Size",
+      bytes: "X-PWH-Preview-Bytes",
       truncated: "X-PWH-Preview-Truncated",
       dims: "X-PWH-Preview-Dims",
     });

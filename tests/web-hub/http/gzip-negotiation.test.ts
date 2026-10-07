@@ -263,6 +263,9 @@ describe("api preview gzip negotiation", () => {
     expect(r.headers["content-type"]).toBe("text/plain; charset=utf-8");
     expect(r.headers["x-pwh-preview-kind"]).toBe("text");
     expect(r.headers["x-pwh-preview-size"]).toBe(String(Buffer.byteLength(content)));
+    // The completeness oracle header: original body length, so a transparently-decompressing
+    // client can still exact-check the decoded body (Content-Length names the compressed bytes).
+    expect(r.headers["x-pwh-preview-bytes"]).toBe(String(Buffer.byteLength(content)));
     expect(r.headers["x-pwh-preview-truncated"]).toBe("0");
     expect(r.headers["content-encoding"]).toBe("gzip");
     expect(r.headers["vary"]).toBe("Accept-Encoding");
@@ -279,6 +282,7 @@ describe("api preview gzip negotiation", () => {
     expect(r.status).toBe(200);
     expect(r.headers["content-encoding"]).toBeUndefined();
     expect(r.headers["vary"]).toBeUndefined();
+    expect(r.headers["x-pwh-preview-bytes"]).toBe(String(Buffer.byteLength(content)));
     expect(r.body.toString("utf8")).toBe(content);
   });
 

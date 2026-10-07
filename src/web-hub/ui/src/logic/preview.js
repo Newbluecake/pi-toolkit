@@ -490,8 +490,15 @@ export function checkPreviewHeaders(headers, opts) {
     headers !== null && typeof headers === "object" && typeof headers.get === "function" ? headers.get(name) : null;
   const kind = get(PREVIEW_HDR.kind);
   if (kind !== "image" && kind !== "text") return { ok: false, error: "E_BAD_RESPONSE" };
-  const clRaw = get("Content-Length");
-  const size = clRaw === null || clRaw === "" ? NaN : Number(clRaw);
+  // Transport compression (dynamic preview-text gzip): `Content-Length` names the COMPRESSED
+  // length and fetch transparently decompresses, so the completeness oracle must compare the
+  // decoded body against `X-PWH-Preview-Bytes` (the original body length) instead. A short or
+  // corrupt stream fails gzip decoding before this check ever runs, so the container itself
+  // still guarantees integrity; this header restores the exact-length check on top.
+  const encoding = (get("Content-Encoding") ?? "").toLowerCase();
+  const compressed = encoding !== "" && encoding !== "identity";
+  const sizeRaw = compressed ? get(PREVIEW_HDR.bytes) : get("Content-Length");
+  const size = sizeRaw === null || sizeRaw === "" ? NaN : Number(sizeRaw);
   if (!Number.isInteger(size) || size < 0) return { ok: false, error: "E_BAD_RESPONSE" };
   const totalRaw = get(PREVIEW_HDR.size);
   const totalN = totalRaw === null || totalRaw === "" ? NaN : Number(totalRaw);

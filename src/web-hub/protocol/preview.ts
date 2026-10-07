@@ -101,10 +101,19 @@ export const PREVIEW_UPLOADS_MARKER = "/.pi/agent/web-hub/uploads/";
 
 export type PreviewImageMime = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
 
-/** The four `X-PWH-Preview-*` response header names (`PREVIEW_HDR.kind/size/truncated/dims`). */
+/** The `X-PWH-Preview-*` response header names (`PREVIEW_HDR.kind/size/bytes/truncated/dims`). */
 export const PREVIEW_HDR = {
   kind: "X-PWH-Preview-Kind",
   size: "X-PWH-Preview-Size",
+  /**
+   * Uncompressed BODY byte length (`X-PWH-Preview-Bytes`): the exact count of content bytes
+   * the response carries BEFORE transport compression. When `Content-Encoding: gzip` is on,
+   * `Content-Length` names the compressed length and the browser transparently decompresses,
+   * so the client completeness oracle (`buf.byteLength`) must compare against THIS header
+   * instead — the gzip container itself rejects a short/corrupt stream, and this header
+   * restores the exact-length check the pre-gzip `Content-Length` oracle provided.
+   */
+  bytes: "X-PWH-Preview-Bytes",
   truncated: "X-PWH-Preview-Truncated",
   dims: "X-PWH-Preview-Dims",
 } as const;
