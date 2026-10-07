@@ -374,11 +374,12 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 13px; /* ×2/3 again (2026-10-07 "思考xx行高度再缩小三分之一"); the first ×2/3 was
-                     * 2026-10-06. `line-height` must shrink WITH the floor: the inherited 1.55
-                     * body line-height alone (18.6px @12px) would defeat any smaller floor. */
-  line-height: 1.1;
-  padding: 0 8px 0 6px;
+  /* Height mirrors primitives.css `.pill`（2026-10-07「思考胶囊的高度参考生成中胶囊」）——
+   * 同一个 22px × --fs-scale 地板 + 1px 上下 padding + line-height:1，两个胶囊在一条
+   * transcript 里视觉同高。此前两次 ×2/3 压缩（13px 地板）就此作废。 */
+  min-height: calc(22px * var(--fs-scale, 1));
+  line-height: 1;
+  padding: 1px 8px;
   border-radius: var(--r-pill);
   background: var(--st-thinking-soft);
   color: var(--st-thinking);
