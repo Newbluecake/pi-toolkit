@@ -55,6 +55,15 @@
   min-width: 0;
 }
 
+/* 2026-10-07 ×2 (「标题离左边的<太远」→「二分之一更好」): pull the title 10px into the 44px
+ * hit box's empty right half — glyph-to-title visual gap halves (~20px → ~10px), the hit box
+ * itself untouched. Only when a button actually precedes (phones / mid band); on desktop the
+ * title leads the bar and keeps the padding edge. */
+.detail-back + .detail-title,
+.detail-drawer-toggle + .detail-title {
+  margin-left: -10px;
+}
+
 .detail-title {
   min-width: 0;
   overflow: hidden;
