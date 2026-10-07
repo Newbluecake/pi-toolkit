@@ -45,8 +45,17 @@ export const UI_MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 const COMMIT_UNKNOWN = "unknown";
 const COMMIT_RE = /^[0-9a-f]{12}(-dirty)?$|^unknown$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
-/** Toplevel files that ship without going through `assets/` (theme bootstrap, favicon, the SPA shell). */
-const TOP_LEVEL_ALLOW = new Set(["index.html", "theme-init.js", "favicon.svg"]);
+/** Toplevel files that ship without going through `assets/` (theme bootstrap, favicon, the SPA
+ * shell, and the 2026-10-07 Android-PWA set: install manifest + PNG icons). */
+const TOP_LEVEL_ALLOW = new Set([
+  "index.html",
+  "theme-init.js",
+  "favicon.svg",
+  "manifest.webmanifest",
+  "icon-192.png",
+  "icon-512.png",
+  "icon-maskable-512.png",
+]);
 /** `assets/<name>.<ext>` — Vite's hashed output naming (`index-<hash>.js` etc.). */
 const ASSET_RE = /^assets\/[A-Za-z0-9._-]+\.(js|css|svg)$/;
 

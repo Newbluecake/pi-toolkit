@@ -7,6 +7,12 @@
          Chrome's translate offer off even before/without that (the UI is bilingual i18n). -->
     <meta name="google" content="notranslate" />
     <meta name="theme-color" content="#0b7a70" />
+    <!-- Android PWA (2026-10-07): install manifest. No service worker on purpose — the data is
+         live and the hub serves bytes from memory; caching would only fight the hub's own
+         version-supersede checks. NOTE: Chrome's full standalone install needs a secure
+         context — plain-HTTP LAN users whitelist the origin once via
+         chrome://flags/#unsafely-treat-insecure-origin-as-secure. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>pi web-hub</title>
     <script src="/theme-init.js"></script>
