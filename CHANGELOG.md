@@ -7,8 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-07
+
+一个月的主线累积（652 commits）：web-hub 浏览器端从零到全功能、consult 专家请教、系统提示词冻结快照、cache-ttl 自适应、workflow 编排体系、subagent 崩溃恢复，以及一批移动端体验打磨。
+
+### Breaking / Migration
+
+- **主会话 `Agent` 工具改为后台制** — 每次调用立即返回 `run_id`，完成时推送通知，用 `get_subagent_result` 收取结果；派发后不再阻塞当前回合。嵌套 `Agent`（子会话内注入的那个）保持阻塞语义不变。
+- **`SubagentWorkflow` 同样改为后台制** — 返回 `wf_…` id，终态推送通知；同样经 `get_subagent_result` / `abort_subagent` 管理。
+- **任务清单面板命令更名**：`/tasklist`（原 `/tasklist clear` 语义不变）；旧命令名不再注册。
+- **模型面工具参数 `timeout_ms` 更名为 `timeout_s`**（`Agent` / `SubagentWorkflow`），语义不变。
+- **`compact_context` 默认不再注册**：`compact.switchTool`（默认 `true`）开启后，模型面只暴露 `switch_context`。需要旧工具并存时设 `compact.keepCompactTool: true`；要完全回到旧行为设 `compact.switchTool: false`。强制压缩安全网不受影响——它在扩展内部直接调用 pi 的压缩，不依赖工具是否注册。
+
+- Remove the standalone `@bluecake/pi-ask-user` package before enabling the merged entries. Existing Feishu configuration is reused; a startup conflict warning indicates the old package is still loaded.
+
 ### Added
 
+- **web-hub 浏览器端（`webHub.*`）** — 一台机器一个 hub 守护进程，浏览器里看/控所有 pi 会话：P1 只读面板（fleet 列表、会话详情、transcript 回放），P2 控制面（发 prompt、abort、steer/abort subagent、网页侧 slash 命令、ask_user 双通道抢答），LAN 模式（用户名密码 + SQLite 会话 + 可信反代源站），附件上传，会话内文件预览（cwd 子树 + 上传件，256KiB 文本 / 16MiB 图片上限），会话卡片两步删除（身份探针确认死亡才落删），worktree 面板、bash-jobs 面板、run transcript 抽屉、模型/thinking 切换 chips，managed spawn（hub 在用户选定目录里 fork `pi --mode rpc` 子会话，含孤子收割与身份核验），以及 **spawn restore**——hub 重启后 managed 会话经「停旧进程 + `--session` 重开」自动恢复，恢复上限 3 次防循环。配套移动端体验全线打磨（登录页、抽屉、composer 卡片、设置浮层、Prism 高亮、PWA manifest+图标）。
+- **`consult` 工具（in-turn 专家请教）** — 派发时挂 `experts` 白名单的 subagent 可在自己回合内同步请教已完成的专家 run（只读 fork 会话作答，首轮成本/上下文预检 + 回合边界上限）。保留字 `"main"` 让子 agent 以同样方式请教主会话（实时读 session 文件/模型/上下文用量，带一致性复检）。
+- **系统提示词稳定化（sysprompt-stable）** — 项目记忆 / agent 类型 / 可用模型三个动态段落不再每轮重 appended（整段缓存前缀失效），改为冻结快照 + 有界尾部更新消息（≤3 chunks / ≤32KB），快照经 `subagent:prompt-sections` 条目跨 /reload、跨进程续命。`systemPrompt.mode: stable|live|legacy` 三态，唤醒回放与外来 forced-prompt 各自有开关。
+- **cache-ttl 自适应 + 子会话保活** — 按实测经济学自动决定 5m/1h 缓存档位：美元边际预算门（`adaptiveWriteBudgetUsd`）为主、token 预算兜底；一次入场费独立预算；warm/cold 判据把保活的 proven-hit 读起点算进来；保活与 1h 按空档择一（`keepaliveGapHorizonMs`）；已覆盖前缀续期读崩塌时学习路由 1h 寿命上界。子会话保活 capture-only，11/窗 · 24/run · $1.5/run · $10/24h 限额，成本计入子 run。
+- **SubagentWorkflow 编排体系增强** — `agent()` 超并发上限时 FIFO 排队而非失败；`opts.model`/`opts.thinking` 真·按次覆盖且进 journal key；`experts` 让 workflow 子调用也能 consult（本 workflow 同名 call 优先）；`isolation:"worktree"` 真隔离（H2/H3 worktree，workflow 永不替你 merge）；`isolationReplay:"verify"` 下已提交分支的隔离调用可安全 replay（分支仍指向记录 commit 才命中）；journal 预加载有 5s 上限，超时降级为全 live。
+- **subagent 崩溃恢复（run-persistence + labelFallback）** — run 在 `session_created` 即落非终态 journal，pi 崩溃/重启后以 `aborted` 种回注册表，`resume` 可按 run_id **或 label**（重启后 label → run_id 映射丢失时回退扫描 journal）恢复；`get/steer/abort` 同享 label 回退。
+- **compact-hint 动态阈值** — 价格感知的动态提示线（`compact.dynamicThreshold.mode=on`），可用时取代静态线；窗口缩小时强制线自动上浮（1M→88，200k→91）；强制层先礼后兵——先要求模型本回合 `switch_context`，不照办才回落通用强制压缩。
+- **bash 超时宽限与子会话 settle-hold** — 带显式 `timeout` 的后台 job 到期先进入宽限窗口而非直接杀，`bash_job(action:"extend")` 可延期（`bashJobs.timeoutGraceS` / `maxExtensions` / `maxTimeoutFactor`）；子会话有非终态 job 时 `agent_before_settle` 挂住 run 完成，按有界轮次提醒。
+- **memory v2（cwd 键控项目记忆）** — tiered 注入布局 + v2 工具面为默认（legacy 设置字节兼容退出）；整文件/整段准入 + UTF-8 字节预算渲染；`/mem doctor`（D01-D14 体检）、`tidy`、`restore`；所有写操作串行于目录锁。
+- **子会话 `switch_context`（child-context-switch）** — 非 consult 子 run 按进程级能力状态机（unknown → static-ok → observed → ready → verifying → verified）授予上下文交接，L0-L3 逐级探针，任何 pre-verified 失败立即禁用；拒绝理由进 `diag.contextSwitches.rejected[]`。
+- **todo 面板上网页** — 只读摘要经 `StatusInfo.todo` 槽到 web 详情页头部的可折叠 TodoPanel（32 任务 / 240B 描述上限）。
+- **HUD 增补** — 版本戳（`toolkit v<ver>@<commit>`）、周期 `git fetch`（`hud.autoFetchMinutes`）、quota 常驻行。
 - **额度感知派单（`src/quota/`）** — 定时拉取 GLM / Kimi 订阅额度（懒触发、TTL 缓存，零周期定时器），turn_end 注入阶梯预警（L1 tick `[quota]` 合并行 → L2 建议「回退链降一位」 → L3 禁用建议），spawn 阶段对越过 `quota.gateLevel` 的 provider 快速失败（不消耗 run；陈旧快照只提示不阻断），HUD 常驻状态行（`·stale`/`⤓demoted` 标记）；降位标记持久化到 `~/.pi/agent/quota-state.json`，跨重启存活到窗口重置。`quota.*` settings 全量可关，设计见 `docs/dev/quota/`。
 
 - **`switch_context` tool（上下文切换）** — 模型把「要带到下一段上下文的状态」直接写进工具参数（`goal` / `progress` / `next_steps` / `decisions` / `key_files` / `pitfalls` / `open_questions`），这段文本经 `session_before_compact` 直接成为 pi 压缩条目的 summary：**不再跑第二次摘要 LLM**，保留什么完全由模型决定。`keep_recent:false` 时压缩点之前的消息全部丢弃（真正的「换到下一个会话」语义），但会话文件、在跑的 subagent、后台 bash 任务、todo 与成本统计都不受影响。扩展还会自动补一段机械附录：本段读/改过的文件、仍在跑的 subagent 与 bash 任务、未完成的 todo、上一段会话文件路径。交接内容过短或缺必填字段会被工具当场打回，不触发压缩。
@@ -22,12 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **message fabric** — an opt-in, fire-and-forget message protocol for subagent runs. The `message_agent` tool sends `progress`, `finding`, or `directive` messages through tree-edge routing with `canMessage` relationship gating; delivery is bounded by per-link quotas and throttling, with dead-letter handling for failed actionable messages and a root ingress gate for context traffic. Agent-type frontmatter can declare allowed relationships, and the 11-key `fabric.*` configuration surface is disabled by default for gradual rollout.
 
-### Breaking / Migration
-
-- **`compact_context` 默认不再注册**：`compact.switchTool`（默认 `true`）开启后，模型面只暴露 `switch_context`。需要旧工具并存时设 `compact.keepCompactTool: true`；要完全回到旧行为设 `compact.switchTool: false`。强制压缩安全网不受影响——它在扩展内部直接调用 pi 的压缩，不依赖工具是否注册。
-
-- Remove the standalone `@bluecake/pi-ask-user` package before enabling the merged entries. Existing Feishu configuration is reused; a startup conflict warning indicates the old package is still loaded.
-
 ### Changed
 
 - **compact-hint 三层改为催「自写交接」** — usage tick 与 L1 提示改为推荐 `switch_context`；L2 强制层改为先礼后兵：越过强制线时先硬性要求模型在本回合调用 `switch_context`（次数由 `compact.forceDemandTurns` 控制，默认 1），只有它不照办才回落到原来的通用强制压缩。交接文本已暂存、压缩尚未完成时，既不再催也不会抢先强制压缩。
@@ -35,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_subagent_result` description** — now states the poll-guard contract explicitly (reads never consume the run; rapid repeated polling of the same run returns a warning — await the completion notification), matching the wording `bash_job` has carried since the guard landed.
 
 - **poll guard retuned to real loop shapes** — the frequency window for non-blocking reads (`get_subagent_result` without wait, `bash_job` status) is now 120s/3 calls per key, up from 10s: each poll costs a full model turn (seconds to tens of seconds), so a 10s window only ever caught same-message bursts and never a real cross-turn polling loop. Blocking waits are no longer frequency-counted at all; instead a consecutive-timeout streak guards them — a wait blocks up to its budget by design, so the loop signal is the same run/job timing out again and again. The first timeout already states the two ways out (raise `wait_ms`, or end the turn and await the completion notification); from the 2nd consecutive timeout the message escalates with the streak count and cumulative time spent blocked, and any terminal outcome resets the streak.
+
+### Fixed
+
+- **web-hub 修复批次（111 项）** — 移动端排版/触控（登录节奏、抽屉宽度、composer chips、上下文环、标题行距）、协议与状态一致性（caps 两面同源、epoch 竞态、dialog 409/closed 语义）、上传/预览边界（sha256 复核、O_NOFOLLOW、/proc/self/fd 复验）、LAN 会话与代理源站校验等；另修复 fabric 路由/配额（11 项）、bash job 生命周期（11 项）、cache-ttl 判定（13 项）、quota 窗口与 HUD 计数（7 项）、workflow 终态与 journal 边角（6 项）。
+- **`/reload` 与重启后的状态存活** — fleet widget 闪烁、handover 竞态、cron 调度器跨 reload 交接、通知补投递（`subagent:workflow-notice` 条目由下一个 stack 重投）等一批重启/重载路径修复。
 
 ## [0.2.1] - 2026-09-05
 
