@@ -149,7 +149,7 @@ UI 渲染拆为 A-UI / B-UI，等 fleet-widget 的另一任务合入后再做。
 ### 4.1 语义（与 subagent 对称）
 
 - 默认预算（未传 `timeout_s`）：`hardAt = startedAt + ceil(workflowTotalMs × maxTotalFactor)`。软截止到点后若有额度（`extensions < maxExtensions` 且 headroom > 0）→ 进宽限 `graceUntil = min(now + totalGraceMs, hardAt)` 并发 grace 通知，否则 timed_out。宽限到点 → timed_out（`timeoutReason: "workflow_total"`）。宽限期内延长 = 救回（同 `rescuedFromGrace`）；延长后再次越过软截止且仍有额度可再进宽限。
-- 显式 `timeout_s`：`maxTotalFactor = 1` ⇒ `hardAt = softAt`，无宽限无延长（D-10）。
+- 显式 `timeout_s`：`maxTotalFactor = 1` ⇒ `hardAt = softAt`，无宽限无延长（D-10）。 **[superseded 2026-10-07 → docs/dev/agent-explicit-timeout-extend/plan.md：workflow 自身的显式 `timeout_s` 同样可宽限/延长（保留 base `maxTotalFactor`）]**
 - 配置复用 `settings.budget.{totalGraceMs, maxExtensions, maxTotalFactor}` 与 `settings.extend.{enabled, notify}`；`extend.enabled=false` ⇒ workflow `maxExtensions=0`、宽限与延长一并关闭、工具不注册（D-16）。
 
 ### 4.2 新增纯模块 `src/workflow/deadline.ts`（不 import pi）
@@ -200,7 +200,7 @@ UI 渲染拆为 A-UI / B-UI，等 fleet-widget 的另一任务合入后再做。
 - **确定终态**：stop / abort / worker 死亡 / runaway / timed_out 都经 `stopOwned` 或 `onTerminating` → `cancelAll` → `settleUnspawned`；phase 超时与 HR2 超时各走 `settleUnspawned`；「谁翻成 settled 谁记录」+ 全出口守卫 ⇒ 每个 callId 恰好一条 `children` 记录、至多一次 `host_settle`；迟到 spawn 一定走 bind → cancelNow → 孤儿 abort。
 - **不死锁**：`activeCount()` 排除 queued；`recordSettled` 中 `pump` 同步派发队首；活跃子任务受 watchdog 与 CC4 约束必然结算；HR2 残留已及时释放。
 - **replay / journal**：occurrence 与 chain digest 在入队**前**按到达顺序分配，与派发顺序无关（「至多复用一次」不变）；命中不排队；withheld 删除 journal meta、永不写入（RP3）。
-- **D-10 / CC4**：模型面显式 `timeout_s` 仍为硬顶；workflow 子任务不是模型面显式预算，由 owner 驱动延长、模型无法直接延长（工具层拦截）；子任务 hard = `W.hardAt` 且 workflow 终止时 `stopOwned` 会中止它们 ⇒「子任务不晚于 workflow 结束」仍是结构性保证；子任务截止靠 reducer 现有 `deadline_extended` 移动（watchdog 每 tick 读 deadlines、runner `guardUntil` 重 arm），**核心状态机与 watchdog 零改动**。
+- **D-10 / CC4**：模型面显式 `timeout_s` 仍为硬顶 **[superseded 2026-10-07 → docs/dev/agent-explicit-timeout-extend/plan.md：模型面 `timeout_s`（含 workflow 自身）可宽限/延长；「workflow 子任务仍 fixed、钉 `W.hardAt`、模型无法直接延长」的部分仍成立]**；workflow 子任务不是模型面显式预算，由 owner 驱动延长、模型无法直接延长（工具层拦截）；子任务 hard = `W.hardAt` 且 workflow 终止时 `stopOwned` 会中止它们 ⇒「子任务不晚于 workflow 结束」仍是结构性保证；子任务截止靠 reducer 现有 `deadline_extended` 移动（watchdog 每 tick 读 deadlines、runner `guardUntil` 重 arm），**核心状态机与 watchdog 零改动**。
 - **计时器卫生**：新增仅三类——每项派发 spawn 超时计时器（随 settle 清）、单个同步重试计时器、单个 controller 驱动的 WT8 计时器；终止时全部清掉，`FakeClock.pendingTimers` 应为 0。
 
 ## 7. 测试计划

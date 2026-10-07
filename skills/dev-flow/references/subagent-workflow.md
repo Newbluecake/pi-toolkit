@@ -84,7 +84,8 @@ gpt-5.6-terra / gpt-6-astra 只作兜底。以 SKILL.md「各阶段模型分工�
 workflow 内不做无脑 fallback。
 
 **超时**：默认预算的 workflow 到点先进宽限并通知主会话（头部 `⏳grace 58s`），可用
-`extend_subagent_timeout(run_id: "wf_…")` 延长；显式 `timeout_s` 是硬顶。
+`extend_subagent_timeout(run_id: "wf_…")` 延长；显式 `timeout_s` 同样可宽限/延长
+（规则与默认预算一致：宽限默认 90s、总寿命默认 ≤2× timeout_s；`extend.enabled=false` 时才回到硬顶）。
 
 ## 最小模板
 

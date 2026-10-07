@@ -74,7 +74,11 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   session's pieces are disposed at the top of the next build (no stack dispose hook).
 - `src/core/` — pure domain: state machine, deadline budgets, ids, types, and the worktree-origin
   registry (`worktree-origin.ts`: worktree path → original cwd, `Symbol.for` global, FIFO-capped;
-  written by `src/extensions/worktree.ts`, read by `src/memory/`). No pi imports.
+  written by `src/extensions/worktree.ts`, read by `src/memory/`). No pi imports. Deadline span
+  guards: `deadline.ts`'s `MAX_DEADLINE_SPAN_MS` (365d) + `clampSpanMs()` clamp every computed span
+  (non-finite/≤0 ⇒ undefined) so no NaN/Infinity deadline can ever reach a timer; `clock.ts`'s
+  `createSegmentedClock` re-arms delays beyond Node's 2³¹−1 ms `setTimeout` limit in segments
+  (no 1ms busy-loop), and `systemClock` is built on it (unref semantics preserved).
 - `src/runtime/` — runner, session driver, watchdog, reaper, slot pool (concurrency), dynamic
   tool scoping. **Child-extension-missing diagnostic (todo #27)**: `session-driver.ts` rediscovers
   extensions for every spawned child session purely from settings.json (the same `SettingsManager`/
@@ -106,6 +110,16 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `SpawnRequest.toolDomain: "readonly"`, which is consumed at admission/runtime and forces only the builtin
   read-only tools plus the runtime-owned `StructuredOutput`; the field is deliberately not threaded into child
   request prompts or ordinary runs.
+  `SpawnRequest.timeoutPolicy` (agent-explicit-timeout-extend plan): optional `"fixed" | "extendable"`,
+  default `fixed` — only the Agent tool (top-level and nested, when passing `timeout_s`) writes `"extendable"`;
+  spawn admission resolves it once (`req.timeoutPolicy` ?? resume-inherited ?? shape-derived from
+  `budgetOverride.totalMs`), applies it via `applyBudgetPolicy({ fixedDeadline })`, and the resolved value lands
+  in `diag.timeoutPolicy`, persisted through terminal entries, the non-terminal journal, tombstones and
+  terminal rebuilds, and inherited by resumes (R-inherit). Program-derived runs (workflow children, consult,
+  `/goal` verifier, tidy, RPC) stay fixed-deadline. **Known accepted trade-off**: a nested extendable run's
+  grace window notifies nobody (CC2 suppression) and child sessions have no `extend_subagent_timeout` —
+  it silently lives up to `min(G,(f−1)·T)` past its deadline while the parent turn keeps waiting; the main
+  session can still extend it by run id.
 - `src/ask-user/` — merged interactive `ask_user` tool and TUI/RPC question components; emits `ask-user:activity` while an active TUI component receives input. `normalize.ts` repairs presentation-layer input instead of failing the call: explicit headers are always trimmed/width-capped (a blank one is dropped so the RPC answer key falls back to the question text), and missing headers are derived + de-duplicated in multi-question calls **only** (a single question never gets one invented, so its answer key stays the question text). Headers the model duplicated verbatim are still rejected — they collide as RPC answer keys. `remote.ts`'s `AskUserRemotePort` (P2, #32) is a late-bound, optional web-hub port: when `webHub.remoteAskUser` is on and a browser is connected, `wireAskUser` races the TUI component against the remote answer for the same dialog (whichever settles first wins; the loser gets cancelled/closed) — `remote()` returning `undefined` (web-hub off or disconnected) reproduces pre-P2 behavior byte-for-byte.
 - `src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated — suppressed (never deferred) while subagents/background bash are still running, since a stopped main session with busy background is not task end.
 - `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →
@@ -401,8 +415,11 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   model ⇒ dispatch-failure reject with suggestions; both fields join the journal taskKey so a model swap never replays
   the old result); workflows share the subagent timeout grace + extension machinery
   (`deadline.ts`: pure deadline controller, `killAt()` bounds host calls/BW2/gate; `extend_subagent_timeout` accepts `wf_…`
-  ids — full/prefix/script name — and refuses a workflow's children, which are pinned to the workflow `hardAt`; explicit
-  `timeout_s` is a hard cap). `agent(prompt, opts?)` opts are strictly validated (`agent-opts.ts`: only
+  ids — full/prefix/script name — and refuses a workflow's children, which are pinned to the workflow `hardAt`;
+  an
+  explicit `timeout_s` follows the same grace/extension rules as the default budget — `hardAt = start +
+ceil(f·workflowTotalMs)` with the base `maxTotalFactor` preserved — while the workflow's children stay
+  fixed-deadline). `agent(prompt, opts?)` opts are strictly validated (`agent-opts.ts`: only
   `label`/`agentType`/`phase`/`fullResult`/`model`/`thinking`/`isolation`/`experts` — any other key, a non-plain-object
   `opts`, an accessor/Proxy/function-valued known key, or a malformed `experts` array reject with the full allowed-key
   list and a mistaken-key hint; the worker (`worker-source.ts`) takes its own structural snapshot first and never
