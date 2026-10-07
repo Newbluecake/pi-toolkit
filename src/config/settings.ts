@@ -351,7 +351,7 @@ export interface CacheTtlSettings {
 export interface ConsultSettings {
   /** 总开关。false = 不注入 consult 工具；派发后被关则工具返回 unavailable nack。Default true。 */
   enabled: boolean;
-  /** 请教 run 的总预算硬顶（budgetOverride.totalMs ⇒ maxTotalFactor=1，无宽限无延长）。Default 150s。 */
+  /** 请教 run 的固定截止（budgetOverride.totalMs 且无 timeoutPolicy ⇒ 解析为 fixed，maxTotalFactor=1，无宽限无延长）。Default 150s。 */
   timeoutMs: number;
   /** 回答截断上限（同时写进问题 prompt 的指令）。Default 2000。 */
   maxAnswerChars: number;
@@ -1183,7 +1183,7 @@ export function parseConsultSettings(input: unknown): ConsultSettings {
     typeof raw === "number" && Number.isFinite(raw) && Number.isInteger(raw) && raw >= 0 ? raw : fallback;
   return {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
-    // totalMs 硬顶：0 会让 applyBudgetPolicy 退回默认预算（无硬顶），所以下界是 1ms 而不是 0。
+    // totalMs 固定预算：0 会退回默认预算（可宽限/延长），所以下界是 1ms 而不是 0。
     timeoutMs: (() => {
       const parsed = int(value.timeoutMs, defaults.timeoutMs);
       return parsed > 0 ? parsed : defaults.timeoutMs;

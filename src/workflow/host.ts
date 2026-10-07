@@ -345,11 +345,14 @@ export interface HostCallHandlerDeps {
    * The workflow's static absolute **hard ceiling** (`W.hardAt`, fixed at
    * enqueue — workflow-agent-queue §0′ #1). Children are pinned to it: every
    * dispatched child gets `deadlineAt = W.hardAt` (CC4) and `budgetOverride.
-   * totalMs = W.hardAt − now` (explicit ⇒ a hard-capped child, D-10), and
-   * every `agent()` ack carries it as `deadlineAt` (the worker's settle-wait
-   * bound). Children still never outlive the workflow: it ends at `killAt()`
-   * and `stopOwned` structurally stops them. Without grace/extension
-   * configured this equals the soft deadline.
+   * totalMs = W.hardAt − now` with **no `timeoutPolicy`** — a program-derived
+   * explicit budget resolves to a fixed-deadline child
+   * (agent-explicit-timeout-extend §2.2: workflow children, like consult /
+   * /goal / RPC runs, stay non-extendable even though the workflow itself is
+   * extendable) — and every `agent()` ack carries it as `deadlineAt` (the
+   * worker's settle-wait bound). Children still never outlive the workflow:
+   * it ends at `killAt()` and `stopOwned` structurally stops them. Without
+   * grace/extension configured this equals the soft deadline.
    */
   readonly workflowDeadlineAt?: Millis;
   /**

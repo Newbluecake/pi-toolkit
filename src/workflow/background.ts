@@ -65,7 +65,7 @@ export interface BackgroundWorkflowView {
   readonly deadlineAt?: Millis;
   /** workflow-agent-queue §4.3 (stage B): end of the current timeout grace window (running workflows inside it only). */
   readonly graceUntil?: Millis;
-  /** Static hard ceiling (`deadlineAt === hardDeadlineAt` with no extensions ⇒ an explicit `timeout_s` hard cap). */
+  /** Static hard ceiling (`deadlineAt === hardDeadlineAt` with no extensions ⇒ a no-headroom configuration, e.g. `maxTotalFactor` 1). */
   readonly hardDeadlineAt?: Millis;
   /** Extensions granted so far (present once ≥ 1). */
   readonly extensions?: number;

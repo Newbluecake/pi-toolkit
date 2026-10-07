@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Value } from "@sinclair/typebox/value";
 import { systemClock } from "../../src/core/clock.js";
 import type { ChildOutcome, ChildSpawner } from "../../src/workflow/host.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
@@ -16,6 +17,7 @@ import {
   formatWorkflowSummary,
   renderOutcomeText,
   renderWorktreeBlock,
+  WorkflowToolParams,
 } from "../../src/tools/workflow-tool.js";
 
 /**
@@ -792,18 +794,25 @@ describe("SubagentWorkflow tool: grace & extension (workflow-agent-queue §4.1, 
     expect(started[0]!.maxTotalFactor).toBe(2);
   });
 
-  it("explicit timeout_s: hard cap (factor 1), no extendable suffix", async () => {
+  it("explicit timeout_s: keeps the base factor/grace knobs (extendable), and the schema caps it at 604800", async () => {
     const { runs, started } = recordingRuns();
     const tool = createWorkflowTool({ defaultBudget: EXTENDABLE, runs });
     const body = text(await tool.execute("c", { script, timeout_s: 30 }, undefined));
-    expect(body).toContain("budget: 30s)");
-    expect(body).not.toContain("extendable");
-    expect(started[0]).toMatchObject({ workflowTotalMs: 30_000, maxTotalFactor: 1 });
+    expect(body).toContain("budget: 30s (extendable up to 1m00s)");
+    expect(started[0]).toMatchObject({ workflowTotalMs: 30_000, maxTotalFactor: 2, maxExtensions: 3 });
+    // G5 (agent-explicit-timeout-extend §3.3): model-facing upper bound 7 days.
+    expect(Value.Check(WorkflowToolParams, { script, timeout_s: 604_800 })).toBe(true);
+    expect(Value.Check(WorkflowToolParams, { script, timeout_s: 604_801 })).toBe(false);
   });
 
-  it("the description tells the model about the grace notice, extend_subagent_timeout and the timeout_s hard cap", () => {
+  it("the description tells the model about the grace notice, extend_subagent_timeout and the explicit timeout_s rules", () => {
     const tool = createWorkflowTool({ defaultBudget: EXTENDABLE, runs: recordingRuns().runs });
     expect(tool.description).toContain("extend_subagent_timeout(run_id: <workflow id>, extend_s)");
-    expect(tool.description).toMatch(/explicit timeout_s is a hard cap/);
+    expect(tool.description).toMatch(/An explicit timeout_s follows the same grace\/extension rules/);
+    expect(tool.description).not.toMatch(/explicit timeout_s is a hard cap/);
+    // The param description carries the §5.2 model contract.
+    const timeoutSpec = WorkflowToolParams.properties["timeout_s"] as { description?: string };
+    expect(timeoutSpec.description).toContain("1–604800");
+    expect(timeoutSpec.description).toContain("Same rules as the default budget");
   });
 });

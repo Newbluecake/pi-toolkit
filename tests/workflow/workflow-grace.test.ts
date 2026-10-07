@@ -237,7 +237,7 @@ describe("workflow grace window (orchestrator WT8 driven by the deadline control
     expect(h.clock.pendingTimers).toBe(0);
   });
 
-  it("explicit timeout_s (maxTotalFactor 1) is a hard cap: no grace, extend → no_headroom, timed_out at the soft deadline", async () => {
+  it("maxTotalFactor 1 (no headroom): no grace, extend → no_headroom, timed_out at the soft deadline", async () => {
     const h = harness({ budget: { maxTotalFactor: 1 } });
     const { run } = await h.start();
     expect(h.orch.extend!("wf_grace", 30_000)).toEqual({ ok: false, reason: "no_headroom" });
@@ -339,7 +339,7 @@ describe("host bounds its own activity by killAt; children pinned to W.hardAt (�
     expect((await run).status).toBe("completed");
   });
 
-  it("explicit hard cap: killAt = soft deadline, gate bound = soft deadline", async () => {
+  it("maxTotalFactor 1 (no headroom): killAt = soft deadline, gate bound = soft deadline", async () => {
     const h = harness({ budget: { maxTotalFactor: 1 } });
     const { run } = await h.start();
     h.call("g1", "gate", { cmd: "true" });

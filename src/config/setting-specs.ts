@@ -110,7 +110,8 @@ const BUDGET_DESCRIPTIONS: Record<keyof DeadlineBudget, string> = {
   startupRetries: "Startup retry attempts",
   totalGraceMs: "Grace after the total budget before force-kill (default-budget runs only); 0 = off",
   maxExtensions: "Max deadline extensions per run; 0 = no extension and no grace",
-  maxTotalFactor: "Hard ceiling as a multiple of the total budget (explicit timeouts are always 1)",
+  maxTotalFactor:
+    "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, consult, /goal verifier, RPC — are always 1)",
 };
 
 /** One-line per-leaf descriptions for the workflow engine budget. */

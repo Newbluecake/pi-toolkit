@@ -1,3 +1,4 @@
+import { MAX_DEADLINE_SPAN_MS, clampSpanMs } from "../core/deadline.js";
 import type { Millis } from "../core/types.js";
 import type { WorkflowId } from "./types.js";
 
@@ -19,8 +20,12 @@ import type { WorkflowId } from "./types.js";
  *    totalGraceMs, hardAt)`; otherwise it expires. At `graceUntil` it expires.
  *  - `extend()` pushes `softAt` to `min(max(now, softAt) + extendMs, hardAt)`,
  *    clears any grace window (a rescue) and consumes one extension.
- *  - An explicit `timeout_s` workflow runs with `maxTotalFactor = 1` ⇒
- *    `hardAt === softAt` ⇒ `no_headroom` ⇒ no grace, no extension (D-10).
+ *  - `maxTotalFactor = 1` is a no-headroom configuration ⇒ `hardAt ===
+ *    softAt` ⇒ `no_headroom` ⇒ no grace, no extension. An explicit
+ *    `timeout_s` workflow now runs with the same factor as the default
+ *    budget and is equally grace-able/extendable
+ *    (agent-explicit-timeout-extend plan §2.6/E6 — mergeBudget no longer
+ *    forces factor 1; workflow children stay pinned & fixed-deadline).
  *  - `close()` (called synchronously by the orchestrator's `finish()`, review
  *    v2 #5) makes every later `extend()` fail with `already_terminal`.
  *
@@ -31,13 +36,13 @@ import type { WorkflowId } from "./types.js";
  */
 
 export interface WorkflowDeadlinePolicy {
-  /** The workflow's own total budget (WT8 `workflowTotalMs`). Must be > 0. */
+  /** The workflow's own total budget (WT8 `workflowTotalMs`). Must be > 0; non-finite/≤0 values degrade to 1ms (G3, fail-tight). */
   readonly totalMs: Millis;
   /** Grace window length; `0` disables grace. */
   readonly totalGraceMs: Millis;
   /** Extension budget; `0` disables grace and extension alike (D-6/D-16). */
   readonly maxExtensions: number;
-  /** Hard ceiling factor (`≥ 1`; values below 1 are treated as 1). `1` = hard cap (explicit `timeout_s`). */
+  /** Hard ceiling factor (`≥ 1`; values below 1 are treated as 1). `1` = no headroom above the deadline. */
   readonly maxTotalFactor: number;
 }
 
@@ -147,17 +152,36 @@ export interface WorkflowDeadlineController {
   close(): void;
 }
 
+/**
+ * G3 (agent-explicit-timeout-extend §3.3): a span feeding the deadline
+ * arithmetic must be finite, positive and ≤ MAX_DEADLINE_SPAN_MS — a NaN or
+ * ±Infinity reaching `softAt`/`hardAt` is a deadline no WT8 timer ever
+ * matches (C17's hang vector). Core's `clampSpanMs` owns that contract; the
+ * finite/positive/min guards re-verified here are no-ops once it implements
+ * its documented behavior and keep this controller safe even if a
+ * non-clamped value slips through (settings, programmatic callers, a stub).
+ */
+function boundedSpan(ms: number): Millis | undefined {
+  const clamped = clampSpanMs(ms);
+  return clamped !== undefined && Number.isFinite(clamped) && clamped > 0
+    ? Math.min(clamped, MAX_DEADLINE_SPAN_MS)
+    : undefined;
+}
+
 export function createWorkflowDeadlineController(
   workflowId: WorkflowId,
   startedAt: Millis,
   policy: WorkflowDeadlinePolicy,
 ): WorkflowDeadlineController {
-  const totalMs = Math.max(1, policy.totalMs);
+  // G3: clamp totalMs and the factor-derived hard span before adding them to
+  // startedAt — non-finite/degenerate inputs degrade fail-tight (totalMs → 1ms,
+  // factor → 1) instead of poisoning the deadlines with NaN/Infinity.
+  const totalMs = boundedSpan(policy.totalMs) ?? 1;
   const factor = Number.isFinite(policy.maxTotalFactor) ? Math.max(1, policy.maxTotalFactor) : 1;
   const maxExtensions = Math.max(0, Math.floor(policy.maxExtensions));
   const totalGraceMs = Math.max(0, policy.totalGraceMs);
   const normalized: WorkflowDeadlinePolicy = { totalMs, totalGraceMs, maxExtensions, maxTotalFactor: factor };
-  const hardAt = startedAt + Math.ceil(totalMs * factor);
+  const hardAt = startedAt + Math.max(totalMs, boundedSpan(Math.ceil(totalMs * factor)) ?? totalMs);
   let softAt = startedAt + totalMs;
   let graceUntil: Millis | undefined;
   let extensions = 0;
@@ -171,7 +195,7 @@ export function createWorkflowDeadlineController(
     if (stopping) return { ok: false, reason: "stopping" };
     if (extensions >= maxExtensions) return { ok: false, reason: "limit_reached" };
     const headroom = hardAt - Math.max(now, softAt);
-    if (headroom <= 0) return { ok: false, reason: "no_headroom" }; // incl. D-10: explicit timeout_s ⇒ hardAt === softAt
+    if (headroom <= 0) return { ok: false, reason: "no_headroom" }; // incl. the maxTotalFactor-1 no-headroom configuration
     return { ok: true, headroomMs: headroom };
   }
 
@@ -216,13 +240,19 @@ export function createWorkflowDeadlineController(
       return { kind: "grace", until };
     },
     extend(now, extendMs) {
+      // G4 (agent-explicit-timeout-extend §3.3): a non-finite or non-positive
+      // extendMs must never reach the deadline arithmetic (NaN ⇒ softAt = NaN
+      // ⇒ a deadline WT8 never matches). Reject at the entry, before any
+      // verdict, with no state change (the tool schema already rejects these;
+      // this is the controller-side defense).
+      if (!Number.isFinite(extendMs) || extendMs <= 0) return { ok: false, reason: "no_headroom" };
       const verdict = extendability(now);
       if (!verdict.ok) return { ok: false, reason: verdict.reason };
       const prev = softAt;
       // Base on max(now, prev): inside a grace window prev is already in the
       // past, so "+60s" measured from prev could be a zero net gain.
       const base = Math.max(now, prev);
-      const requested = Math.max(0, extendMs);
+      const requested = extendMs;
       const next = Math.min(base + requested, hardAt);
       if (next <= prev && next <= now) return { ok: false, reason: "no_headroom" }; // zero net gain
       const granted = next - base;

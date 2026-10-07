@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_DEADLINE_SPAN_MS } from "../../src/core/deadline.js";
 import {
   createWorkflowDeadlineController,
   type WorkflowDeadlineController,
@@ -8,9 +9,10 @@ import {
 /**
  * workflow-agent-queue plan §4.2 / §7 stage B: the pure workflow deadline
  * controller. Transition table {soft deadline fires, grace deadline fires,
- * extend} × {budget left, no budget, explicit timeout_s, closed} plus seeded
+ * extend} × {budget left, no budget, no-headroom config, closed} plus seeded
  * property invariants (softAt monotone, killAt ∈ [softAt, hardAt], bounded
- * WT8 re-arms).
+ * WT8 re-arms) and the G3/G4 span/non-finite guards
+ * (agent-explicit-timeout-extend §3.3).
  */
 
 const T0 = 1_000;
@@ -20,7 +22,7 @@ function make(policy: Partial<WorkflowDeadlinePolicy> = {}): WorkflowDeadlineCon
   return createWorkflowDeadlineController("wf_t", T0, { ...DEFAULT, ...policy });
 }
 
-type Ctx = "budget" | "no_budget" | "explicit" | "closed";
+type Ctx = "budget" | "no_budget" | "no_headroom" | "closed";
 
 /** Build a controller in the named context, positioned at its soft deadline (not yet fired). */
 function inContext(ctx: Ctx): WorkflowDeadlineController {
@@ -34,7 +36,7 @@ function inContext(ctx: Ctx): WorkflowDeadlineController {
       expect(c.extend(T0, 1_000).ok).toBe(true);
       return c;
     }
-    case "explicit":
+    case "no_headroom":
       return make({ maxTotalFactor: 1 });
     case "closed": {
       const c = make();
@@ -76,7 +78,7 @@ describe("workflow deadline controller: transition table", () => {
   it.each<[Ctx, "grace" | "expire"]>([
     ["budget", "grace"],
     ["no_budget", "expire"],
-    ["explicit", "expire"],
+    ["no_headroom", "expire"],
     ["closed", "expire"],
   ])("soft deadline fires × %s → %s", (ctx, expected) => {
     const c = inContext(ctx);
@@ -95,16 +97,19 @@ describe("workflow deadline controller: transition table", () => {
     }
   });
 
-  it.each<[Ctx]>([["budget"], ["no_budget"], ["explicit"], ["closed"]])("grace deadline fires × %s → expire", (ctx) => {
-    // Only a controller that actually entered grace can have its grace timer fire.
-    const c = ctx === "budget" ? make() : inContext(ctx);
-    const first = c.onTimer(c.state().softAt);
-    if (first.kind === "grace") {
-      expect(c.onTimer(first.until)).toEqual({ kind: "expire" });
-    } else {
-      expect(first.kind).toBe("expire"); // the other contexts never reach a grace window.
-    }
-  });
+  it.each<[Ctx]>([["budget"], ["no_budget"], ["no_headroom"], ["closed"]])(
+    "grace deadline fires × %s → expire",
+    (ctx) => {
+      // Only a controller that actually entered grace can have its grace timer fire.
+      const c = ctx === "budget" ? make() : inContext(ctx);
+      const first = c.onTimer(c.state().softAt);
+      if (first.kind === "grace") {
+        expect(c.onTimer(first.until)).toEqual({ kind: "expire" });
+      } else {
+        expect(first.kind).toBe("expire"); // the other contexts never reach a grace window.
+      }
+    },
+  );
 
   it("extend × budget (before the soft deadline): pushes softAt, not a rescue", () => {
     const c = make();
@@ -153,7 +158,7 @@ describe("workflow deadline controller: transition table", () => {
 
   it.each<[Ctx, string]>([
     ["no_budget", "limit_reached"],
-    ["explicit", "no_headroom"],
+    ["no_headroom", "no_headroom"],
     ["closed", "already_terminal"],
   ])("extend × %s → %s (state unchanged)", (ctx, reason) => {
     const c = inContext(ctx);
@@ -213,7 +218,7 @@ describe("workflow deadline controller: seeded properties", () => {
     let expiredRuns = 0;
     let rescuedRuns = 0;
     let graceRuns = 0;
-    let hardCapRuns = 0;
+    let noHeadroomRuns = 0;
     for (const seed of [1, 2, 3, 7, 42, 99, 1234, 4096, 31337, 0xc0ffee, 0xbeef, 2026]) {
       const next = random(seed);
       const policy: WorkflowDeadlinePolicy = {
@@ -224,7 +229,7 @@ describe("workflow deadline controller: seeded properties", () => {
       };
       const c = createWorkflowDeadlineController("wf_p", 0, policy);
       const hardAt = c.state().hardAt;
-      if (hardAt === c.state().softAt) hardCapRuns += 1;
+      if (hardAt === c.state().softAt) noHeadroomRuns += 1;
       let now = 0;
       let prevSoft = c.state().softAt;
       let arms = 1; // the initial WT8 arm
@@ -287,9 +292,66 @@ describe("workflow deadline controller: seeded properties", () => {
       expect(c.extend(now, 1_000).ok).toBe(false);
     }
     expect(expiredRuns).toBe(12);
-    // The generator must actually exercise grace, rescue and hard-cap branches.
+    // The generator must actually exercise grace, rescue and the maxTotalFactor-1 (no headroom) branches.
     expect(graceRuns).toBeGreaterThan(0);
     expect(rescuedRuns).toBeGreaterThan(0);
-    expect(hardCapRuns).toBeGreaterThan(0);
+    expect(noHeadroomRuns).toBeGreaterThan(0);
+  });
+});
+
+describe("workflow deadline controller: G3/G4 span & non-finite guards (agent-explicit-timeout-extend §3.3)", () => {
+  it("G3: totalMs = Infinity / 1e308 keeps hardAt finite — hardAt − startedAt ≤ MAX_DEADLINE_SPAN_MS", () => {
+    for (const totalMs of [Number.POSITIVE_INFINITY, 1e308]) {
+      const s = make({ totalMs }).state();
+      expect(Number.isFinite(s.softAt), `totalMs ${totalMs}: softAt finite`).toBe(true);
+      expect(Number.isFinite(s.hardAt), `totalMs ${totalMs}: hardAt finite`).toBe(true);
+      expect(s.hardAt - T0).toBeLessThanOrEqual(MAX_DEADLINE_SPAN_MS);
+      expect(s.softAt - T0).toBeLessThanOrEqual(MAX_DEADLINE_SPAN_MS);
+    }
+  });
+
+  it("G3: totalMs = NaN / 0 / negative degrades fail-tight to 1ms instead of poisoning the deadlines", () => {
+    for (const totalMs of [Number.NaN, 0, -5_000]) {
+      const s = make({ totalMs }).state();
+      expect(Number.isFinite(s.softAt)).toBe(true);
+      expect(Number.isFinite(s.hardAt)).toBe(true);
+      expect(s.softAt).toBe(T0 + 1); // clampSpanMs undefined ⇒ ?? 1
+      expect(s.hardAt).toBe(make({ totalMs: 1 }).state().hardAt); // identical to an honest 1ms budget
+    }
+  });
+
+  it("G3: a huge totalMs × huge factor stays finite on both deadlines", () => {
+    const s = make({ totalMs: 1e308, maxTotalFactor: 1e300 }).state();
+    expect(Number.isFinite(s.hardAt)).toBe(true);
+    expect(s.hardAt - T0).toBeLessThanOrEqual(MAX_DEADLINE_SPAN_MS);
+  });
+
+  it("G3: a non-finite factor degrades to 1 (hardAt === softAt, both finite)", () => {
+    for (const factor of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const s = make({ maxTotalFactor: factor }).state();
+      expect(s.hardAt).toBe(s.softAt);
+      expect(s.softAt).toBe(T0 + 60_000);
+    }
+  });
+
+  it("G4: extend(now, NaN / Infinity / 0 / negative) → no_headroom with no state change (no NaN hang vector)", () => {
+    const c = make();
+    const before = c.state();
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5_000]) {
+      expect(c.extend(T0 + 5_000, bad)).toEqual({ ok: false, reason: "no_headroom" });
+    }
+    // Also inside a grace window: the guard fires before the rescue path.
+    expect(c.onTimer(c.state().softAt).kind).toBe("grace");
+    const inGrace = c.state();
+    expect(c.extend(c.state().softAt! + 1, Number.NaN)).toEqual({ ok: false, reason: "no_headroom" });
+    expect(c.state()).toEqual(inGrace); // graceUntil intact, no extension consumed
+    expect(c.state().extensions).toBe(before.extensions);
+  });
+
+  it("G4 entry guard outranks the verdict order (defensive: NaN can never reach the arithmetic, whatever the state)", () => {
+    const c = make({ maxTotalFactor: 1 }); // no headroom AND extendable-budget absent
+    expect(c.extend(T0, Number.NaN)).toEqual({ ok: false, reason: "no_headroom" });
+    c.close();
+    expect(c.extend(T0, Number.NaN)).toEqual({ ok: false, reason: "no_headroom" });
   });
 });

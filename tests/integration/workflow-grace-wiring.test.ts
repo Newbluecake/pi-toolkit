@@ -1,9 +1,10 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
+import { PiSessionDriver } from "../../src/runtime/session-driver.js";
 import { WORKFLOW_NOTIFICATION_TYPE } from "../../src/adapters/workflow-notice.js";
 import { OUTBOX_CUSTOM_TYPE } from "../../src/adapters/pi-outbox-store.js";
 import { TIMEOUT_NOTICE_TYPE } from "../../src/delivery/deadline-notice.js";
@@ -92,9 +93,9 @@ function fakePi(branch: unknown[]) {
 const HELD_SCRIPT =
   'export const meta = { name: "slow-flow", description: "t" };\nphase("review");\nawait new Promise(() => {});\nreturn "never";';
 
-async function until(pred: () => boolean, ms = 15_000) {
+async function until(pred: () => boolean | Promise<boolean>, ms = 15_000) {
   const deadline = Date.now() + ms;
-  while (!pred()) {
+  while (!(await pred())) {
     if (Date.now() > deadline) throw new Error("condition not reached");
     await new Promise((r) => setTimeout(r, 20));
   }
@@ -229,5 +230,90 @@ describe("workflow grace + extension wiring (activate → stack)", () => {
     expect(timeoutNotices(host.sent)).toHaveLength(0);
     expect(host.busEvents.some((e) => e.channel === "subagent:workflow:deadline")).toBe(false);
     await host.emit("session_shutdown", { reason: "quit" });
+  }, 40_000);
+
+  // W4 (agent-explicit-timeout-extend §3.5/§7): an explicit timeout_s workflow
+  // has the SAME grace/extension rights as a default-budget one — mergeBudget
+  // no longer forces maxTotalFactor 1. A real child run (dispatched through
+  // the real SpawnService; only the child-session process is faked via the
+  // PiSessionDriver spy) proves the children-stay-pinned side of the change:
+  // the workflow is rescued mid-grace, then times out and structurally aborts
+  // its still-running child.
+  it("explicit timeout_s workflow enters grace and is extendable; its children stay pinned and are stopped with it", async () => {
+    // Short abort grace so the aborted child settles quickly (its prompt never resolves).
+    writeSettings({ budget: { totalGraceS: 2, maxExtensions: 1, maxTotalFactor: 10, abortGraceS: 1 } });
+    const neverResolvingHandle = () =>
+      ({
+        sessionId: "wf-child",
+        sessionFile: undefined,
+        prompt: () => new Promise<never>(() => undefined),
+        steer: () => Promise.resolve(),
+        requestAbort: () => Promise.resolve(),
+        dispose: () => ({ returned: true, killed: 0, unkillable: [] }),
+        killableHandles: new Set(),
+        setActiveTools: () => undefined,
+        getActiveTools: () => [],
+        getLastAssistantText: () => "",
+        getUsage: () => undefined,
+      }) as never;
+    const createSpy = vi
+      .spyOn(PiSessionDriver.prototype, "create")
+      .mockImplementation(async () => neverResolvingHandle());
+    vi.spyOn(PiSessionDriver.prototype, "bind").mockResolvedValue(undefined);
+    try {
+      const host = fakePi([]);
+      activate(host.pi);
+      await host.emit("session_start", { reason: "startup" });
+      const script =
+        'export const meta = { name: "explicit-flow", description: "t" };\nphase("work");\nconst r = await agent("child that never finishes");\nreturn r;';
+      const started = await host.call("SubagentWorkflow", { script, timeout_s: 1 });
+      const id = started.details.workflowId as string;
+      // The base factor survives the explicit timeout (10 × 1s), so the start
+      // text advertises extendability instead of a bare budget.
+      expect(started.content[0]!.text).toContain("budget: 1s (extendable up to 10s)");
+
+      // ~1s: the explicit soft deadline opens a grace window + notice.
+      await until(() => timeoutNotices(host.sent).length > 0);
+      const grace = timeoutNotices(host.sent)[0]!;
+      expect(grace.options).toEqual({ triggerTurn: true });
+      expect(grace.message.details).toMatchObject({
+        kind: "grace",
+        workflowId: id,
+        extensionsUsed: 0,
+        maxExtensions: 1,
+      });
+      // The child really dispatched through the real stack.
+      expect(createSpy).toHaveBeenCalled();
+
+      // Rescue through the real tool, then let the (now extension-less)
+      // extended deadline kill the workflow as timed_out.
+      const extended = await host.call("extend_subagent_timeout", { run_id: id, extend_s: 2, reason: "explicit flow" });
+      expect(extended.details).toMatchObject({ ok: true, workflowId: id, rescuedFromGrace: true });
+      await until(() => workflowNotices(host.sent).length > 0);
+      expect(workflowNotices(host.sent)[0]!.message.details).toMatchObject({ workflowId: id, status: "timed_out" });
+
+      // Children stay pinned: the live child run is listed and settles WITH
+      // the workflow's stop — the stopOwned abort carries the workflow's
+      // `timeout` cause, which lands the child as timed_out/aborted (owner
+      // stop), never left running past its owner. The timing assertion
+      // separates this from the child's own ~9.7s deadline (W.hardAt − now):
+      // it must already be terminal within seconds of the workflow settling.
+      const read = await host.call("get_subagent_result", { run_id: id });
+      expect(read.details).toMatchObject({ workflowId: id, status: "timed_out" });
+      const childIds = (read.details.runIds ?? []) as string[];
+      expect(childIds.length).toBeGreaterThanOrEqual(1);
+      const settledAt = Date.now();
+      let childStatus: string | undefined;
+      await until(async () => {
+        const child = await host.call("get_subagent_result", { run_id: childIds[0]! });
+        childStatus = child.details?.status;
+        return childStatus === "aborted" || childStatus === "timed_out";
+      });
+      expect(["aborted", "timed_out"]).toContain(childStatus);
+      expect(Date.now() - settledAt).toBeLessThan(6_000); // the owner's stop, not the child's own deadline
+      await host.emit("session_shutdown", { reason: "quit" });
+    } finally {
+      vi.restoreAllMocks();
+    }
   }, 40_000);
 });

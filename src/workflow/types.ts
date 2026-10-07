@@ -476,7 +476,8 @@ export interface WorkflowRunBudget {
    * maxExtensions, maxTotalFactor}` reused as-is (run-budget.ts; no
    * workflow-specific keys). All optional: absent ⇒ no grace, no extension,
    * `hardAt === softAt` (the pre-stage-B hard WT8 deadline). An explicit
-   * `timeout_s` forces `maxTotalFactor = 1` (hard cap, D-10); `extend.enabled
+   * `timeout_s` keeps these knobs as-is (same grace/extension rights as the
+   * default budget — agent-explicit-timeout-extend §2.6/E6); `extend.enabled
    * = false` forces `maxExtensions = 0` (D-16).
    */
   readonly totalGraceMs?: Millis;

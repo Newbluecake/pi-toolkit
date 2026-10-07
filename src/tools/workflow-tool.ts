@@ -124,10 +124,11 @@ export const WorkflowToolParams = Type.Object({
   timeout_s: Type.Optional(
     Type.Integer({
       minimum: 1,
+      maximum: 604_800,
       description:
-        "Total wall-clock budget for the whole workflow run, in seconds (overrides the default). An explicit " +
-        "timeout_s is a hard cap: no timeout grace window and no extension. Omit it to get the default budget, " +
-        "which can be extended.",
+        "Total wall-clock budget for the whole workflow run, in seconds (1–604800; overrides the default). " +
+        "Same rules as the default budget: grace window + notice at expiry, extendable with " +
+        "extend_subagent_timeout up to the hard ceiling (2× by default, budget.maxTotalFactor).",
     }),
   ),
 });
@@ -135,15 +136,20 @@ export type WorkflowToolParams = Static<typeof WorkflowToolParams>;
 
 /**
  * Exported for tests. `timeoutMs <= 0` (or non-finite) falls back to the base budget — BW10 (a 0 = unbounded workflow
- * cap) is unsupported, same rule as the settings layer. An explicit `timeout_s` is a **hard cap** (workflow-agent-queue
- * §4.1, D-10 for workflows): `maxTotalFactor = 1` ⇒ hard ceiling = soft deadline ⇒ no grace window, no extension.
+ * cap) is unsupported, same rule as the settings layer. An explicit `timeout_s` keeps the base budget's factor and
+ * grace/extension knobs (agent-explicit-timeout-extend §2.6/E6, §5.2): the workflow is grace-able and extendable up
+ * to `ceil(timeout_s × maxTotalFactor)` exactly like a default-budget run. Workflow *children* stay fixed-deadline
+ * (program-derived `budgetOverride.totalMs`, pinned to `W.hardAt`) — that is host.ts's job, not this merge.
  */
 export function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): WorkflowRunBudget {
   if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return base;
-  return { ...base, workflowTotalMs: timeoutMs, maxTotalFactor: 1 };
+  return { ...base, workflowTotalMs: timeoutMs };
 }
 
-/** `" (extendable up to 2h)"` for a default-budget run that can be extended past its budget; empty for a hard cap. */
+/**
+ * `" (extendable up to 2h)"` for a run (default budget or explicit `timeout_s` alike) that can be extended past its
+ * budget; empty when the configuration leaves no headroom (factor 1 or extensions disabled).
+ */
 function extendableSuffix(budget: WorkflowRunBudget): string {
   const factor = budget.maxTotalFactor ?? 1;
   if (!(factor > 1) || !((budget.maxExtensions ?? 0) > 0)) return "";
@@ -557,8 +563,8 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "own .catch(). Timeouts work like a subagent's: with the default budget, a workflow that reaches its " +
       "deadline gets a short grace window and you receive a notice — extend it with extend_subagent_timeout(run_id: " +
       "<workflow id>, extend_s) (a limited number of extensions, capped by a hard ceiling) or let it stop as " +
-      "timed_out; its children are aborted with it. A workflow started with an explicit timeout_s is a hard cap " +
-      "(no grace, no extension). One exception: a script gate() shell call keeps the deadline it was given when it " +
+      "timed_out; its children are aborted with it. An explicit timeout_s follows the same grace/extension rules. " +
+      "One exception: a script gate() shell call keeps the deadline it was given when it " +
       "started, so extending the workflow does not lengthen a gate already in flight. Use this only when a single Agent call's own multi-step " +
       "reasoning is not enough and you specifically need several independently-prompted subagents coordinated by " +
       "real control flow.",
