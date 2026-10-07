@@ -361,6 +361,18 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 .thinking > summary {
   display: inline-flex;
   align-items: center;
+  min-height: 13px;
+  cursor: pointer;
+}
+
+/* The visible pill is the SPAN, not the summary (2026-10-07 「手机模式思考展开按钮上下空白太多」):
+ * the coarse-pointer 44px `min-height` below then buys pure HIT-ZONE air around an unchanged
+ * compact pill — the same invisible-hit-zone pattern as `.ctx-ring-stop-btn`. The two earlier
+ * height compactions only ever touched this base rule, so phones (coarse) kept the full 44px
+ * pill. */
+.thinking > summary > span {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
   min-height: 13px; /* ×2/3 again (2026-10-07 "思考xx行高度再缩小三分之一"); the first ×2/3 was
                      * 2026-10-06. `line-height` must shrink WITH the floor: the inherited 1.55
@@ -372,7 +384,6 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   color: var(--st-thinking);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
-  cursor: pointer;
 }
 
 .thinking-text {
