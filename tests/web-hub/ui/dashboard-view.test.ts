@@ -4,6 +4,7 @@ import { ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import DashboardView from "../../../src/web-hub/ui/src/components/shell/DashboardView.vue";
+import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDetail.vue";
 import type { HubHandle, HubState, Route } from "../../../src/web-hub/ui/src/types.js";
 
 /**
@@ -70,6 +71,18 @@ function hubWithOneAgent(): HubHandle {
     { event: "agents", data: [card("agent-a")] },
     { event: "subscribing", data: { agentKey: "agent-a", clientId: "c1" } },
     { event: "history", data: { agentKey: "agent-a", entries: [], tailMessages: [], fromSeq: 0, hasMore: false } },
+  ]);
+  return { state: ref(s as unknown as HubState), dispatch: () => {} };
+}
+
+function hubWithTwoAgents(): HubHandle {
+  const s = run([
+    { event: "hello", data: { clientId: "c1" } },
+    { event: "agents", data: [card("agent-a"), card("agent-b")] },
+    { event: "subscribing", data: { agentKey: "agent-a", clientId: "c1" } },
+    { event: "history", data: { agentKey: "agent-a", entries: [], tailMessages: [], fromSeq: 0, hasMore: false } },
+    { event: "subscribing", data: { agentKey: "agent-b", clientId: "c1" } },
+    { event: "history", data: { agentKey: "agent-b", entries: [], tailMessages: [], fromSeq: 0, hasMore: false } },
   ]);
   return { state: ref(s as unknown as HubState), dispatch: () => {} };
 }
@@ -357,5 +370,25 @@ describe("DashboardView.vue — restoring empty state (spawn-restore plan §9.1)
     stubMatchMedia(false);
     const wrapper = mountDashboard({ name: "agent", key: "old-3" }, hubRestoring("old-3", false));
     expect(wrapper.find("[data-restoring]").exists()).toBe(false);
+  });
+});
+
+describe("DashboardView.vue — agent switch remounts AgentDetail (2026-10-07 regression)", () => {
+  // Root cause pinned here: without `:key="selectedAgent.key"` the same AgentDetail instance was
+  // reused across session switches while its setup-captured `CONTROL_VIEW/CONTROL_CTX.agentKey`
+  // stayed frozen on the FIRST session — send/model-switch/drafts all routed there.
+  it.each([
+    ["wide (≥1025px)", false],
+    ["narrow (≤767px)", true],
+  ] as const)("%s branch: switching the route to another agent remounts AgentDetail", async (_label, narrow) => {
+    stubMatchMedia(narrow);
+    const hub = hubWithTwoAgents();
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hub);
+    // NOTE: compare instance uids, NOT `.vm` — VTU hands out a fresh proxy per findComponent
+    // call, so `.vm` identity is always unequal and would make this assertion vacuous.
+    const beforeUid = wrapper.findComponent(AgentDetail).vm.$.uid;
+    await wrapper.setProps({ route: { name: "agent", key: "agent-b" } });
+    const afterUid = wrapper.findComponent(AgentDetail).vm.$.uid;
+    expect(afterUid).not.toBe(beforeUid);
   });
 });

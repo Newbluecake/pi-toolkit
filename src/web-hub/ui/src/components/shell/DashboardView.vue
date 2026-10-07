@@ -251,8 +251,12 @@ function onLoadOlder(agentKey: string): void {
     <div v-if="drawerVisible" class="drawer-scrim" aria-hidden="true" @click="closeDrawer"></div>
 
     <template v-if="wide">
+      <!-- `:key` 必须保留（2026-10-07 回归修复）：AgentDetail 的 setup 把 agentKey 作为静态
+           字符串捕获进 provide（CONTROL_VIEW/CONTROL_CTX），没有 key 时切会话不重建实例，
+           发消息/切模型/草稿全部路由到第一个打开的会话。 -->
       <AgentDetail
         v-if="selectedAgent"
+        :key="selectedAgent.key"
         :agent="selectedAgent"
         :now="ticker.now.value"
         :narrow="false"
@@ -288,6 +292,7 @@ function onLoadOlder(agentKey: string): void {
     <template v-else-if="route.name === 'agent'">
       <AgentDetail
         v-if="selectedAgent"
+        :key="selectedAgent.key"
         :agent="selectedAgent"
         :now="ticker.now.value"
         :narrow="narrow"

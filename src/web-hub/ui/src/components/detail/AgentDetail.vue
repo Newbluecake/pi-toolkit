@@ -136,7 +136,13 @@ function isWebMessage(timestamp: number | undefined): boolean {
 }
 
 const controlView: ControlView = {
-  agentKey: props.agent.key,
+  // 2026-10-07 回归加固：agentKey 必须是 getter 而非 setup 时一次性求值的普通字段——
+  // DashboardView 若某天又丢了 `:key="selectedAgent.key"`，实例复用时会把这个值冻结在
+  // 第一个挂载的会话上（当时发消息/切模型/草稿全部串台的根因，见 dashboard-view.test.ts
+  // 的回归用例）。getter 让标识自身具备响应性，不再依赖上游重建实例的隐藏契约。
+  get agentKey() {
+    return props.agent.key;
+  },
   get control() {
     return control.value;
   },
@@ -166,7 +172,9 @@ provide(DETAIL_METRICS, detailMetrics);
 // mount. FleetActions treats a missing inject as "don't render" (component test pins this).
 if (control.value !== null) {
   provide(CONTROL_CTX, {
-    agentKey: props.agent.key,
+    get agentKey() {
+      return props.agent.key;
+    },
     control: control.value,
     get enabled() {
       return controlEnabled.value;
