@@ -1,6 +1,6 @@
 {
-  "name": "pi web-hub",
-  "short_name": "pi hub",
+  "name": "Pi",
+  "short_name": "Pi",
   "description": "pi agent sessions, from your phone",
   "start_url": "/",
   "scope": "/",
