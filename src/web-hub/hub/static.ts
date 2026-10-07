@@ -21,6 +21,16 @@
  * candidate — see `INDEX_CACHE_GENERATION` below for how this module tells two same-`realDir`
  * roots apart without touching P5a's frozen `ui-root.ts`).
  *
+ * gzip (compress-once-at-assembly, negotiate-per-request): the verified bytes above are the only
+ * input — `gzipSync` pre-compresses every text-ish file (`.html/.js/.css/.svg/.webmanifest`;
+ * `.png` is already-compressed and skipped) into the same per-root variants cache, eagerly at
+ * `refresh()` (hub startup awaits it before serving) and lazily on the first `serve()` that sees
+ * a not-yet-cached root. A request whose `Accept-Encoding` offers `gzip` (case-insensitive,
+ * `q>0`) on a compressible type gets the cached gzip bytes + `Content-Encoding: gzip` + `Vary:
+ * Accept-Encoding`; every other response (no header, no `gzip` token, `q=0`, or an incompressible
+ * type) is byte-identical to the pre-gzip behavior. Scope: static UI resources only — SSE and
+ * every `/api` endpoint (incl. `/api/preview`) never pass through `serve()` at all.
+ *
  * URL mapping (tightened from the legacy server — the old `/assets/<p>` → `<root>/<p>` dual-path
  * fallback and "any top-level `.js`" allowance are both gone): `/` and `/index.html` → the cached,
  * `authMode`-substituted index; any other path must be `isAllowedUiPath` *and* present in the
@@ -29,6 +39,7 @@
  */
 import type { ServerResponse } from "node:http";
 import { dirname, extname } from "node:path";
+import { gzipSync } from "node:zlib";
 import { PROTO } from "../protocol/version.js";
 import { isAllowedUiPath } from "../protocol/ui-manifest.js";
 import { detectUiLang, renderUnbuiltPage } from "./unbuilt.js";
@@ -49,6 +60,25 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".webmanifest": "application/manifest+json",
   ".png": "image/png",
 };
+
+/** Extensions eligible for gzip negotiation — every CONTENT_TYPES entry except `.png`, the one
+ * already-compressed format in the table. In lockstep with CONTENT_TYPES / `isAllowedUiPath`
+ * (there is no `.json`/`.ico` in the whitelist, so none to consider here). */
+const GZIP_EXTENSIONS: ReadonlySet<string> = new Set([".html", ".js", ".css", ".svg", ".webmanifest"]);
+
+/** Parses an `Accept-Encoding` header: is `gzip` offered with a non-zero quality value? */
+export function acceptsGzip(acceptEncoding: string | undefined): boolean {
+  if (acceptEncoding === undefined) return false;
+  for (const part of acceptEncoding.split(",")) {
+    const [name, ...params] = part.trim().split(";");
+    if (name === undefined || name.trim().toLowerCase() !== "gzip") continue;
+    const qParam = params.map((p) => p.trim()).find((p) => p.toLowerCase().startsWith("q="));
+    if (qParam === undefined) return true;
+    const q = Number.parseFloat(qParam.slice(2));
+    return Number.isFinite(q) && q > 0;
+  }
+  return false;
+}
 
 const AUTH_MODE_PLACEHOLDER = 'data-auth-mode="__AUTH_MODE__"';
 
@@ -80,7 +110,11 @@ export interface UiServer {
   serve(
     urlPath: string,
     res: ServerResponse,
-    opts: { readonly authMode: "token" | "password"; readonly acceptLanguage?: string },
+    opts: {
+      readonly authMode: "token" | "password";
+      readonly acceptLanguage?: string;
+      readonly acceptEncoding?: string;
+    },
   ): Promise<boolean>;
   /** Forces a full re-resolve (e.g. hub startup, §2.1: "await ui.refresh()"). */
   refresh(): Promise<UiStatus>;
@@ -133,10 +167,21 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
   });
 
   let lastLoggedSignature: string | undefined;
-  /** Invalidated whenever the verified root's `info` (version/commit/builtAt/file set) changes —
-   * cheaper and more precise than trusting `realDir` alone to differ across a redeploy of the
-   * same candidate (see the module doc comment). */
-  let indexCache: { info: VerifiedUiRoot["info"]; token: Buffer; password: Buffer } | undefined;
+
+  /** Per-root serving variants, keyed by the verified root's `info` object identity and rebuilt
+   * only when a redeploy produces a fresh `info` (same generation logic the pre-gzip `indexCache`
+   * used — see the module doc comment). Holds the authMode-substituted index bytes (identity +
+   * gzip for both auth modes) and the pre-compressed gzip bytes of every other compressible
+   * manifest file; compression happens exactly once per generation, never per request. */
+  interface UiRootVariants {
+    readonly info: VerifiedUiRoot["info"];
+    readonly indexToken: Buffer;
+    readonly indexPassword: Buffer;
+    readonly gzipIndexToken: Buffer;
+    readonly gzipIndexPassword: Buffer;
+    readonly gzipFiles: ReadonlyMap<string, Buffer>;
+  }
+  let variants: UiRootVariants | undefined;
 
   function logStatus(status: UiStatus): void {
     const sig = statusSignature(status);
@@ -161,28 +206,50 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
     return Buffer.from(body, "utf8");
   }
 
-  function indexVariantsOf(root: VerifiedUiRoot): { token: Buffer; password: Buffer } {
-    if (indexCache !== undefined && indexCache.info === root.info) return indexCache;
+  function variantsOf(root: VerifiedUiRoot): UiRootVariants {
+    if (variants !== undefined && variants.info === root.info) return variants;
     const bytes = root.files.get("index.html")?.bytes ?? Buffer.alloc(0);
-    const built = {
+    const indexToken = substituteAuthMode(bytes, "token");
+    const indexPassword = substituteAuthMode(bytes, "password");
+    const gzipFiles = new Map<string, Buffer>();
+    for (const [rel, file] of root.files) {
+      if (rel === "index.html") continue; // served as the substituted variants below, never raw
+      if (!GZIP_EXTENSIONS.has(extname(rel).toLowerCase())) continue; // .png etc. stay identity-only
+      gzipFiles.set(rel, gzipSync(file.bytes));
+    }
+    const built: UiRootVariants = {
       info: root.info,
-      token: substituteAuthMode(bytes, "token"),
-      password: substituteAuthMode(bytes, "password"),
+      indexToken,
+      indexPassword,
+      gzipIndexToken: gzipSync(indexToken),
+      gzipIndexPassword: gzipSync(indexPassword),
+      gzipFiles,
     };
-    indexCache = built;
+    variants = built;
     return built;
   }
 
-  function writeBuffer(res: ServerResponse, data: Buffer, contentType: string, cacheControl: string): void {
+  function writeBuffer(
+    res: ServerResponse,
+    data: Buffer,
+    contentType: string,
+    cacheControl: string,
+    extra?: Readonly<{ "Content-Encoding"?: string; Vary?: string }>,
+  ): void {
     if (res.headersSent || res.destroyed) return;
-    res.writeHead(200, { "Content-Type": contentType, "Content-Length": data.length, "Cache-Control": cacheControl });
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Content-Length": data.length,
+      "Cache-Control": cacheControl,
+      ...(extra ?? {}),
+    });
     res.end(data);
   }
 
   async function serve(
     urlPath: string,
     res: ServerResponse,
-    o: { readonly authMode: "token" | "password"; readonly acceptLanguage?: string },
+    o: { readonly authMode: "token" | "password"; readonly acceptLanguage?: string; readonly acceptEncoding?: string },
   ): Promise<boolean> {
     const result = await svc.maybeRefresh(urlPath);
     logStatus(result.status);
@@ -216,12 +283,20 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
 
     if (rel === undefined) return false;
     if (rel === "index.html") {
-      const variants = indexVariantsOf(result.root);
+      const v = variantsOf(result.root);
+      const gzipped = acceptsGzip(o.acceptEncoding);
       writeBuffer(
         res,
-        o.authMode === "token" ? variants.token : variants.password,
+        gzipped
+          ? o.authMode === "token"
+            ? v.gzipIndexToken
+            : v.gzipIndexPassword
+          : o.authMode === "token"
+            ? v.indexToken
+            : v.indexPassword,
         CONTENT_TYPES[".html"]!,
         "no-cache",
+        gzipped ? { "Content-Encoding": "gzip", Vary: "Accept-Encoding" } : undefined,
       );
       return true;
     }
@@ -230,18 +305,20 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
     if (file === undefined) return false;
     const contentType = CONTENT_TYPES[extname(rel).toLowerCase()];
     if (contentType === undefined) return false; // defensive; isAllowedUiPath already restricts extensions
-    writeBuffer(
-      res,
-      file.bytes,
-      contentType,
-      isImmutableAsset(rel) ? "public, max-age=31536000, immutable" : "no-cache",
-    );
+    const gzipBytes = acceptsGzip(o.acceptEncoding) ? variantsOf(result.root).gzipFiles.get(rel) : undefined;
+    const cacheControl = isImmutableAsset(rel) ? "public, max-age=31536000, immutable" : "no-cache";
+    if (gzipBytes !== undefined) {
+      writeBuffer(res, gzipBytes, contentType, cacheControl, { "Content-Encoding": "gzip", Vary: "Accept-Encoding" });
+    } else {
+      writeBuffer(res, file.bytes, contentType, cacheControl);
+    }
     return true;
   }
 
   async function refresh(): Promise<UiStatus> {
     const result = await svc.resolve();
     logStatus(result.status);
+    if (result.root !== undefined) variantsOf(result.root); // compress-once at startup (hub.ts awaits refresh() before serving)
     return result.status;
   }
 

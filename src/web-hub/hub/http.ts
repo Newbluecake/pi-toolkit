@@ -1251,10 +1251,12 @@ async function handleLanRequestInner(
   if (path !== "/api" && !path.startsWith("/api/")) {
     if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
     const acceptLanguage = req.headers["accept-language"];
+    const acceptEncoding = req.headers["accept-encoding"];
     if (
       !(await rt.ui.serve(path, res, {
         authMode: "password",
         ...(typeof acceptLanguage === "string" ? { acceptLanguage } : {}),
+        ...(typeof acceptEncoding === "string" ? { acceptEncoding } : {}),
       }))
     ) {
       throw new HttpError(404, "E_NOT_FOUND");
@@ -2728,10 +2730,12 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       return;
     }
     const acceptLanguage = req.headers["accept-language"];
+    const acceptEncoding = req.headers["accept-encoding"];
     if (
       !(await ui.serve(path, res, {
         authMode: "token",
         ...(typeof acceptLanguage === "string" ? { acceptLanguage } : {}),
+        ...(typeof acceptEncoding === "string" ? { acceptEncoding } : {}),
       }))
     ) {
       throw new HttpError(404, "E_NOT_FOUND");

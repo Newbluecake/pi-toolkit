@@ -10,10 +10,11 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
-import { createUiServer, uiRelPath, type UiServer } from "../../../src/web-hub/hub/static.js";
+import { acceptsGzip, createUiServer, uiRelPath, type UiServer } from "../../../src/web-hub/hub/static.js";
 import type { UiCandidatePlan } from "../../../src/web-hub/hub/ui-root.js";
 import { fakeDeps, makeTmp, rawRequest } from "./helpers.js";
 
@@ -252,6 +253,143 @@ describe("createUiServer: a verified root", () => {
   });
 });
 
+describe("acceptsGzip", () => {
+  it("accepts gzip under any casing / list position, honoring q values", () => {
+    expect(acceptsGzip(undefined)).toBe(false);
+    expect(acceptsGzip("")).toBe(false);
+    expect(acceptsGzip("gzip")).toBe(true);
+    expect(acceptsGzip("GZIP")).toBe(true);
+    expect(acceptsGzip("br, gzip, deflate")).toBe(true);
+    expect(acceptsGzip("deflate, gzip;q=0.5, br")).toBe(true);
+    expect(acceptsGzip("gzip;q=0")).toBe(false);
+    expect(acceptsGzip("gzip;q=0.000")).toBe(false);
+    expect(acceptsGzip("deflate, br")).toBe(false);
+    expect(acceptsGzip("x-gzip")).toBe(false);
+    expect(acceptsGzip("gzipp")).toBe(false);
+  });
+});
+
+describe("createUiServer: gzip negotiation (compress once per root, negotiate per request)", () => {
+  const CSS = "body{color:#123456;margin:0}";
+  const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M1 1"/></svg>';
+  const PNG = "\u0089PNG-fake-bytes-not-a-real-image";
+  /** Large enough that gzip's ~20-byte framing overhead is amortized — the shrink assertion is meaningful. */
+  const BIG_JS = `export function boot(){ const msg = "pi web hub asset payload"; ${Array.from({ length: 200 }, (_, i) => `if(${i}===${i}){console.log(msg,${i});}`).join("")} }`;
+  let root: string;
+  let cleanup: () => void;
+
+  beforeEach(() => {
+    ({ root, cleanup } = rootDir());
+    writeValidRoot(root, {
+      files: [
+        { path: "index.html", content: DEFAULT_INDEX },
+        { path: "assets/index-abcd1234.js", content: DEFAULT_ASSET },
+        { path: "assets/chunk-abcd1234.js", content: BIG_JS },
+        { path: "assets/index-abcd1234.css", content: CSS },
+        { path: "assets/logo-abcd1234.svg", content: SVG },
+        { path: "theme-init.js", content: "try{}catch{}" },
+        { path: "favicon.svg", content: SVG },
+        { path: "manifest.webmanifest", content: '{"name":"pi web hub","start_url":"/"}' },
+        { path: "icon-512.png", content: PNG },
+      ],
+    });
+  });
+  afterEach(() => cleanup());
+
+  it("Accept-Encoding: gzip on a hashed js asset → gzip bytes + Content-Encoding + Vary; gunzip round-trips to the exact original bytes", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    const { body, headers } = await responseOfServe(ui, "/assets/chunk-abcd1234.js", {
+      authMode: "token",
+      acceptEncoding: "gzip, deflate, br",
+    });
+    expect(headers["content-encoding"]).toBe("gzip");
+    expect(headers["vary"]).toBe("Accept-Encoding");
+    expect(headers["content-length"]).toBe(String(body.length)); // Content-Length is the gzip length
+    expect(Buffer.compare(gunzipSync(body), Buffer.from(BIG_JS, "utf8"))).toBe(0);
+    expect(body.length).toBeLessThan(Buffer.byteLength(BIG_JS) / 2); // and it actually shrank
+    // immutable cache header survives the gzip path
+    expect(headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+  });
+
+  it("no Accept-Encoding → identity bytes, no Content-Encoding, no Vary (byte-identical to pre-gzip behavior)", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    const { body, headers } = await responseOfServe(ui, "/assets/index-abcd1234.js", { authMode: "token" });
+    expect(headers["content-encoding"]).toBeUndefined();
+    expect(headers["vary"]).toBeUndefined();
+    expect(body.toString("utf8")).toBe(DEFAULT_ASSET);
+  });
+
+  it("Accept-Encoding without a gzip token (br/deflate only) and gzip;q=0 stay identity", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    for (const ae of ["br, deflate", "gzip;q=0", "identity"]) {
+      const { body, headers } = await responseOfServe(ui, "/theme-init.js", {
+        authMode: "token",
+        acceptEncoding: ae,
+      });
+      expect(headers["content-encoding"], ae).toBeUndefined();
+      expect(headers["vary"], ae).toBeUndefined();
+      expect(body.toString("utf8"), ae).toBe("try{}catch{}");
+    }
+  });
+
+  it("png is never compressed even when gzip is offered (already-compressed format)", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    const { body, headers } = await responseOfServe(ui, "/icon-512.png", {
+      authMode: "token",
+      acceptEncoding: "gzip, br",
+    });
+    expect(headers["content-encoding"]).toBeUndefined();
+    expect(headers["content-type"]).toBe("image/png");
+    expect(body.toString("utf8")).toBe(PNG);
+  });
+
+  it("css / svg / webmanifest also gzip when offered", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    for (const [path, raw] of [
+      ["/assets/index-abcd1234.css", CSS],
+      ["/favicon.svg", SVG],
+      ["/manifest.webmanifest", '{"name":"pi web hub","start_url":"/"}'],
+    ] as const) {
+      const { body, headers } = await responseOfServe(ui, path, { authMode: "token", acceptEncoding: "gzip" });
+      expect(headers["content-encoding"], path).toBe("gzip");
+      expect(gunzipSync(body).toString("utf8"), path).toBe(raw);
+    }
+  });
+
+  it("index.html gzips the authMode-substituted variant, not the raw placeholder bytes", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    const { body, headers } = await responseOfServe(ui, "/", { authMode: "password", acceptEncoding: "gzip" });
+    expect(headers["content-encoding"]).toBe("gzip");
+    expect(headers["vary"]).toBe("Accept-Encoding");
+    const text = gunzipSync(body).toString("utf8");
+    expect(text).toContain('data-auth-mode="password"');
+    expect(text).not.toContain("__AUTH_MODE__");
+  });
+
+  it("refresh() (the hub-startup entry) pre-builds the gzip variants — the first served request is already compressed", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    await ui.refresh(); // hub.ts awaits this before serving
+    const { body, headers } = await responseOfServe(ui, "/assets/index-abcd1234.js", {
+      authMode: "token",
+      acceptEncoding: "gzip",
+    });
+    expect(headers["content-encoding"]).toBe("gzip");
+    expect(Buffer.compare(gunzipSync(body), Buffer.from(DEFAULT_ASSET, "utf8"))).toBe(0);
+  });
+
+  it("the unbuilt placeholder page stays identity (out of gzip scope)", async () => {
+    const { root: missing, cleanup: clean } = rootDir(); // never written
+    try {
+      const ui = createUiServer({ candidates: onlyCandidate(missing), hubVersion: HUB_VERSION, log: noopLog() });
+      const { headers } = await responseOfServe(ui, "/", { authMode: "token", acceptEncoding: "gzip" });
+      expect(headers["content-encoding"]).toBeUndefined();
+      expect(headers["x-pwh-ui"]).toBe("unbuilt");
+    } finally {
+      clean();
+    }
+  });
+});
+
 describe("static serving through the frontend (createHttpFrontend's default UI server)", () => {
   let fe: HttpFrontend | undefined;
   let tmp: ReturnType<typeof makeTmp>;
@@ -300,6 +438,29 @@ describe("static serving through the frontend (createHttpFrontend's default UI s
       const res = await rawRequest(p, { path: "/" });
       expect(res.status).toBe(200);
       expect(res.body).toContain('data-auth-mode="token"');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("the loopback listener plumbs Accept-Encoding through to the UiServer (curl-style request gets real gzip)", async () => {
+    tmp = makeTmp("pwh-static-fe-gzip-");
+    const { root, cleanup } = rootDir();
+    writeValidRoot(root, { version: "0.0.0-test" });
+    try {
+      const deps = fakeDeps(tmp.dir);
+      fe = createHttpFrontend({
+        ...deps,
+        ui: createUiServer({ candidates: onlyCandidate(root), hubVersion: "0.0.0-test", log: noopLog() }),
+      });
+      const p = (await fe.listen()).port;
+      const gz = await rawGetWith(p, "/assets/index-abcd1234.js", { "Accept-Encoding": "gzip, br" });
+      expect(gz.headers["content-encoding"]).toBe("gzip");
+      expect(gz.headers["vary"]).toBe("Accept-Encoding");
+      expect(gunzipSync(gz.body).toString("utf8")).toBe(DEFAULT_ASSET);
+      const plain = await rawGetWith(p, "/assets/index-abcd1234.js", {});
+      expect(plain.headers["content-encoding"]).toBeUndefined();
+      expect(plain.body.toString("utf8")).toBe(DEFAULT_ASSET);
     } finally {
       cleanup();
     }
@@ -357,6 +518,47 @@ function rawGet(port: number): Promise<{ body: string; headers: Record<string, s
       res.on("data", (c: Buffer) => chunks.push(c));
       res.on("end", () => resolve({ body: Buffer.concat(chunks).toString("utf8"), headers: res.headers }));
     });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/** Serves one `ui.serve(...)` call through a throwaway HTTP server and captures the raw response
+ * bytes (a Buffer — needed to gunzip gzip bodies) + headers. */
+async function responseOfServe(
+  ui: UiServer,
+  urlPath: string,
+  opts: { readonly authMode: "token" | "password"; readonly acceptLanguage?: string; readonly acceptEncoding?: string },
+): Promise<{ body: Buffer; headers: Record<string, string | string[] | undefined> }> {
+  let out: { body: Buffer; headers: Record<string, string | string[] | undefined> } = {
+    body: Buffer.alloc(0),
+    headers: {},
+  };
+  const server: Server = createServer((_req, res) => {
+    void ui.serve(urlPath, res, opts);
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const addr = server.address();
+  const port = addr !== null && typeof addr === "object" ? addr.port : 0;
+  const headers: Record<string, string> = {};
+  if (opts.acceptEncoding !== undefined) headers["Accept-Encoding"] = opts.acceptEncoding;
+  out = await rawGetWith(port, urlPath, headers);
+  await new Promise<void>((r) => server.close(() => r()));
+  return out;
+}
+
+function rawGetWith(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ body: Buffer; headers: Record<string, string | string[] | undefined> }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => resolve({ body: Buffer.concat(chunks), headers: res.headers }));
+    });
+    req.setTimeout(5_000, () => req.destroy(new Error("request timeout")));
     req.on("error", reject);
     req.end();
   });
