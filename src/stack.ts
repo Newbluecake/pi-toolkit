@@ -48,9 +48,12 @@ import type {
   DeadlineNotice,
   DeliveryPayload,
   RunId,
+  RunSnapshot,
+  RunStatus,
   SubagentExtensionPoints,
   WorktreeDisposal,
 } from "./core/types.js";
+import { TERMINAL_STATUSES } from "./core/status.js";
 import { probeReadBackEntries } from "./adapters/pi-compat.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE } from "./adapters/pi-outbox-store.js";
@@ -62,7 +65,7 @@ import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
 import { createFabricTree } from "./fabric/tree.js";
 import { formatMessage, type FabricRecord } from "./core/message.js";
-import { wrapWithRunLog, seedRunStoreFromEntries } from "./adapters/pi-run-log.js";
+import { wrapWithRunLog, seedRunStoreFromEntries, WORKTREE_DISPOSITION_CUSTOM_TYPE } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
 import {
   readScopedModels,
@@ -468,18 +471,30 @@ function buildFabric(
     onDegraded: (key, reason) => console.warn(`[pi-subagent] fabric persistence degraded for ${key}: ${reason}`),
   });
   const tree = createFabricTree();
+  // run-persistence plan D6 (fabric row): fold the run log per runId first —
+  // terminal entries win, otherwise the latest non-terminal (journal) entry —
+  // then append each edge ONCE and tombstone every node. No run from a
+  // previous stack can still be alive at build time (session_shutdown stopped
+  // them all and this runner is a fresh instance); without the tombstone a
+  // journal-only (crashed) run would sit in `pending_start` forever and the
+  // mailbox would hold messages addressed to it indefinitely.
+  const replayed = new Map<string, { parentRunId?: string; terminal: boolean }>();
   for (const entry of prefetched) {
-    if (entry.type === "custom" && entry.customType === "subagent:run") {
-      const snapshot = entry.data as { runId?: string; parentRunId?: string; status?: string } | undefined;
-      if (snapshot?.runId) tree.appendEdge(snapshot.parentRunId ?? "root", snapshot.runId);
-      if (snapshot?.runId && snapshot.status === "running") tree.markRunning(snapshot.runId);
-      if (
-        snapshot?.runId &&
-        snapshot.status &&
-        ["completed", "failed", "timed_out", "aborted"].includes(snapshot.status)
-      )
-        tree.tombstone(snapshot.runId, systemClock.now(), settings.reconcileTtlMs);
-    }
+    if (entry.type !== "custom" || entry.customType !== "subagent:run") continue;
+    const snapshot = entry.data as { runId?: unknown; parentRunId?: unknown; status?: unknown } | undefined;
+    if (typeof snapshot?.runId !== "string" || snapshot.runId === "") continue;
+    const terminal = typeof snapshot.status === "string" && TERMINAL_STATUSES.has(snapshot.status as RunStatus);
+    const prev = replayed.get(snapshot.runId);
+    if (prev?.terminal && !terminal) continue;
+    replayed.set(snapshot.runId, {
+      terminal,
+      ...(typeof snapshot.parentRunId === "string" ? { parentRunId: snapshot.parentRunId } : {}),
+    });
+  }
+  const replayAt = systemClock.now();
+  for (const [runId, info] of replayed) {
+    tree.appendEdge(info.parentRunId ?? "root", runId);
+    tree.tombstone(runId, replayAt, settings.reconcileTtlMs);
   }
   const capabilities = detectPiCapabilities(pi);
   const throttle = createFabricThrottle({
@@ -871,6 +886,13 @@ export interface Stack {
   models: StackModelPort;
   spawn: SpawnService;
   query: QueryService;
+  /**
+   * run-persistence plan D5/§4: session_shutdown's synchronous, best-effort
+   * flush of still-non-terminal runs (one `shutdown_flush` journal entry
+   * each, written into THIS session's log before pi invalidates the ctx).
+   * Returns the number of entries written.
+   */
+  runJournal: { flushPending(runIds: readonly RunId[], shutdownReason: string): number };
   orphans: OrphanRegistry;
   notifier: Notifier;
   contextReceipt: ContextReceiptTracker;
@@ -1541,7 +1563,8 @@ export function buildSessionStack(
   // 写穿包装，避免旧条目被重复 appendEntry。
   const baseStore = new MemoryRunStore();
   if (readBack) seedRunStoreFromEntries(baseStore, prefetchedEntries);
-  const store = readBack ? wrapWithRunLog(baseStore, runLogHost) : baseStore;
+  const runLog = readBack ? wrapWithRunLog(baseStore, runLogHost) : undefined;
+  const store = runLog ?? baseStore;
   const pool = new SingleSlotPool(systemClock, settings.concurrencyLimit);
   const reaper = new EscalatingReaper(systemClock);
   // M4: watchdog 不再是空壳——通过 runnerRef 晚绑定到真实 runner（watchdog 先于
@@ -1824,6 +1847,10 @@ export function buildSessionStack(
     watchdog,
     reaper,
     notifier,
+    // run-persistence plan D2: non-terminal journal entries go straight to the
+    // session log (never the in-memory store, J1). readBack=false ⇒ absent,
+    // journaling off — same degradation as the run-log itself.
+    ...(runLog ? { journal: (snapshot: RunSnapshot) => runLog.journal(snapshot) } : {}),
     ...(fabric
       ? {
           fabric: {
@@ -2029,7 +2056,7 @@ export function buildSessionStack(
   const worktreeSinkToken = {};
   registerDispositionSink(worktreeSinkToken, (entry) => {
     try {
-      pi.appendEntry("subagent:worktree-disposition", entry);
+      pi.appendEntry(WORKTREE_DISPOSITION_CUSTOM_TYPE, entry);
     } catch {
       /* best effort — see worktree-disposition-sink.ts's own doc comment */
     }
@@ -2594,6 +2621,10 @@ export function buildSessionStack(
     models,
     spawn,
     query,
+    runJournal: {
+      flushPending: (runIds, shutdownReason) =>
+        runner.flushJournal?.(runIds, { kind: "shutdown_flush", shutdownReason }) ?? 0,
+    },
     contextReceipt,
     orphans: reaper.registry,
     notifier,

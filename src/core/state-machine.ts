@@ -7,6 +7,7 @@ import {
   hardDeadlineAtFor,
 } from "./deadline.js";
 import { deliveryKey } from "./delivery-key.js";
+import { journalSnapshotFromState } from "./run-journal.js";
 import { isTerminalStatus } from "./status.js";
 import type {
   CompactionFailureRecord,
@@ -771,22 +772,32 @@ export function reduce(
     return { state: { ...state, diag: { ...state.diag, lastEventType: input.error.kind } }, effects: [] };
   if (input.kind === "session_created" && state.phase === "abort_grace")
     return { state: { ...state, diag: { ...state.diag, lastEventType: "session_created" } }, effects: [] };
-  if (input.kind === "session_created" && startingPhase(state.phase))
-    return {
-      state: {
-        ...state,
-        sessionId: input.sessionId,
-        diag: {
-          ...state.diag,
-          lastEventType: "session_created",
-          ...(input.sessionFile === undefined ? {} : { sessionFile: input.sessionFile }),
-          // M-B2: the live session's actual model overrides spawn-time display
-          // metadata (ground truth; also fills pi-default-model runs).
-          ...(input.model === undefined ? {} : { model: input.model }),
-        },
+  if (input.kind === "session_created" && startingPhase(state.phase)) {
+    const next: RunState = {
+      ...state,
+      sessionId: input.sessionId,
+      diag: {
+        ...state.diag,
+        lastEventType: "session_created",
+        ...(input.sessionFile === undefined ? {} : { sessionFile: input.sessionFile }),
+        // M-B2: the live session's actual model overrides spawn-time display
+        // metadata (ground truth; also fills pi-default-model runs).
+        ...(input.model === undefined ? {} : { model: input.model }),
       },
-      effects: [],
     };
+    // run-persistence plan D1/D2: the first time a sessionFile becomes known,
+    // journal a slim non-terminal snapshot (best_effort; never enters the
+    // in-memory store — J1). A repeated dispatch with the same file, or one
+    // without a file, stays zero-effect.
+    if (input.sessionFile !== undefined && input.sessionFile !== state.diag.sessionFile)
+      return emit(next, [
+        {
+          kind: "journal_snapshot",
+          snapshot: journalSnapshotFromState(next, input.at, { kind: "session_created" }),
+        },
+      ]);
+    return { state: next, effects: [] };
+  }
   if (input.kind === "startup_failed" && state.phase === input.phase) {
     if (input.error.kind === "startup_transient" && input.error.retryable && state.diag.turns < budget.startupRetries)
       return {

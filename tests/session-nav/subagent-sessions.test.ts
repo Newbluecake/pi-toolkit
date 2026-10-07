@@ -132,6 +132,34 @@ describe("collectSubagentMarks", () => {
     expect(cached.size).toBe(1);
   });
 
+  test("run-persistence plan D6: a non-terminal journal entry + its terminal entry yield one identical mark; journal-only runs are marked too", async () => {
+    const childPath = join(sessionDir, "child.jsonl");
+    const crashedPath = join(sessionDir, "crashed.jsonl");
+    await writeFile(childPath, "", "utf8");
+    await writeFile(crashedPath, "", "utf8");
+    const journalLine = (diag: Record<string, unknown>) =>
+      JSON.stringify({
+        type: "custom",
+        customType: "subagent:run",
+        data: { status: "starting", journal: { kind: "session_created" }, diag },
+      });
+    const mainPath = join(sessionDir, "main.jsonl");
+    await writeFile(
+      mainPath,
+      [
+        '{"type":"session"}',
+        journalLine({ sessionFile: childPath, agentType: "verifier", label: "派单描述" }),
+        runEntry({ sessionFile: childPath, agentType: "verifier", label: "派单描述" }),
+        journalLine({ sessionFile: crashedPath, agentType: "explorer", label: "崩溃前" }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    const marks = await collectSubagentMarks([mainPath, childPath, crashedPath], sessionDir);
+    expect(marks.get(resolve(childPath))).toEqual({ agentType: "verifier", label: "派单描述" });
+    expect(marks.get(resolve(crashedPath))).toEqual({ agentType: "explorer", label: "崩溃前" });
+    expect(marks.size).toBe(2);
+  });
+
   test("returns an empty map when no file contains subagent:run entries", async () => {
     const mainPath = join(sessionDir, "main.jsonl");
     await writeFile(mainPath, '{"type":"session"}\n{"type":"message"}\n', "utf8");

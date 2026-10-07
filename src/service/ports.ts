@@ -15,6 +15,7 @@ import type {
   RunSnapshot,
   RunState,
   RunInput,
+  RunJournalMark,
   SpawnRequest,
   StopCause,
 } from "../core/types.js";
@@ -105,6 +106,14 @@ export interface Runner {
    * Runner fakes/tests stay valid.
    */
   dispose?(): void;
+  /**
+   * run-persistence plan D5/§4: synchronous, best-effort; returns the number
+   * of journal entries actually written. Only writes runs that are still
+   * non-terminal, have a sessionFile, are not readonly-domain, and have not
+   * been flushed by this runner before. Optional so existing Runner fakes stay
+   * valid.
+   */
+  flushJournal?(runIds: readonly RunId[], mark: RunJournalMark): number;
 }
 export interface RunRegistry {
   get(runId: RunId): RunSnapshot | undefined;

@@ -2,6 +2,7 @@ import { statSync } from "node:fs";
 import { applyBudgetPolicy } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
+import { isLiveSessionFile } from "../core/live-session-files.js";
 import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
 import { toErrorInfo } from "../core/errors.js";
 import { formatSlots, slotsInfo, type SlotsInfo } from "../core/format.js";
@@ -729,6 +730,18 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           };
         const resume = resolveResume(req.resumeFrom);
         if (!resume.ok) return { error: { kind: "config", message: resume.error, retryable: false } };
+        // run-persistence plan D8: a same-process stack rebuild (/reload whose
+        // shutdown drain timed out) can leave the previous stack's run still
+        // closing — and writing — this very session file. Refuse (never wait)
+        // until that run is physically reaped.
+        if (isLiveSessionFile(resume.sessionFile))
+          return {
+            error: {
+              kind: "config",
+              message: `run ${targetId}'s session is still being closed by the previous session stack; retry in a few seconds`,
+              retryable: false,
+            },
+          };
         if (resumeLocks.has(targetId) || resumeLocks.has(resume.sessionFile))
           return {
             error: { kind: "config", message: `run ${targetId} already has a resume in progress`, retryable: false },

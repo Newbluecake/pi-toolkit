@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { markLiveSessionFile, releaseLiveSessionFile } from "../../src/core/live-session-files.js";
 import { createSpawnService } from "../../src/service/spawn-service.js";
 import { TombstoneStore } from "../../src/service/tombstone.js";
 import type { AgentTypeConfig, RunOutcome } from "../../src/core/types.js";
@@ -308,5 +309,53 @@ describe("X2 resume lock lifecycle: CC4 CP1 must not leak the resume lock", () =
     // A real (non-expired) resume of the same target must still succeed afterwards.
     const real = await service.spawn({ type: "worker", prompt: "again", resumeFrom: "cp1" });
     expect(real).toHaveProperty("runId");
+  });
+});
+
+/**
+ * run-persistence plan D8 / §5 P4: a resume whose session file is still held
+ * live by a not-yet-reaped run (the previous stack after a timed-out /reload
+ * drain) is refused at admission — without writing resumeLocks or a label —
+ * and succeeds once the hold is released.
+ */
+describe("X2 resume: same-process live-session-file guard (run-persistence plan D8)", () => {
+  afterEach(() => {
+    releaseLiveSessionFile(sessionFile, "r_previous_stack");
+  });
+
+  it("refuses while live, writes no lock/label, and resumes once released", async () => {
+    const resumedFiles: string[] = [];
+    const runner: Runner = {
+      run: async (spec) => {
+        if (spec.request.resumeFrom) resumedFiles.push(spec.request.resumeFrom);
+        return outcome(spec.runId);
+      },
+    };
+    const labels: string[] = [];
+    const service = createSpawnService({
+      ...deps(runner, new TombstoneStore()),
+      onLabel: (label: string) => labels.push(label),
+    });
+    const first = await service.spawnAndWait({ type: "worker", prompt: "first", label: "closing" });
+    expect(labels).toEqual(["closing"]);
+
+    markLiveSessionFile(sessionFile, "r_previous_stack");
+    const refused = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: "closing" });
+    expect(refused).toEqual({
+      error: {
+        kind: "config",
+        message: `run ${first.runId}'s session is still being closed by the previous session stack; retry in a few seconds`,
+        retryable: false,
+      },
+    });
+    expect(labels).toEqual(["closing"]); // no label registered for the refused request
+    expect(resumedFiles).toEqual([]);
+
+    releaseLiveSessionFile(sessionFile, "r_previous_stack");
+    // No leaked resumeLocks entry: the very next resume of the same target is admitted.
+    const resumed = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: "closing" });
+    expect(resumed).toHaveProperty("runId");
+    await service.waitAll({ waitMs: 10 });
+    expect(resumedFiles).toEqual([sessionFile]);
   });
 });

@@ -71,6 +71,46 @@ describe("background-status host wiring", () => {
     await second.emit("session_shutdown", { reason: "test" });
   });
 
+  it("run-persistence plan D6: a seeded journal-only (in-flight at restart) run never counts as running", async () => {
+    const existingFile = new URL("../../package.json", import.meta.url).pathname;
+    const journalEntry = {
+      type: "custom",
+      customType: "subagent:run",
+      data: {
+        runId: "r_journal1",
+        generation: 1,
+        status: "running",
+        phase: "model_turn",
+        deadlines: { enqueuedAt: 1, deadlineAt: 100_000, queueDeadlineAt: undefined },
+        diag: {
+          createdAt: 1,
+          phase: "model_turn",
+          phaseEnteredAt: 2,
+          pendingTools: 0,
+          turns: 1,
+          escalation: [],
+          orphaned: false,
+          generation: 1,
+          degraded: [],
+          staleInputs: 0,
+          unkillable: [],
+          sessionFile: existingFile,
+        },
+        updatedAt: 3,
+        journal: { kind: "session_created" },
+      },
+    };
+    const ctx = {
+      ...sessionContext,
+      sessionManager: { ...sessionContext.sessionManager, getEntries: () => [journalEntry] },
+    } as unknown as ExtensionContext;
+    const host = fakePi();
+    activate(host.pi);
+    await host.emit("session_start", {}, ctx);
+    expect(readBackgroundStatus()?.runningSubagents).toBe(0);
+    await host.emit("session_shutdown", { reason: "test" }, ctx);
+  });
+
   it("reports null bash status when bash jobs are disabled", async () => {
     const host = fakePi();
     activate(host.pi);

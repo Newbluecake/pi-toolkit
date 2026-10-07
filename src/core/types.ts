@@ -957,6 +957,37 @@ export interface RunDiagnostics {
    * (dedup'd) the first time it observes the event.
    */
   childExtensionMissing?: true;
+  /**
+   * run-persistence plan D4 (§4): present ONLY on the in-memory terminal
+   * snapshot that `seedRunStoreFromEntries` synthesizes (via
+   * `interruptedFromJournal`, core/run-journal.ts) from a run whose session
+   * log holds nothing but non-terminal journal entries — i.e. the run was
+   * still in flight when the previous pi process died or its stack was torn
+   * down. Never produced by the reducer and never persisted. StopCause stays
+   * closed (E19): the precise "restart interrupted" distinction lives here.
+   */
+  restartInterrupted?: RestartInterruptedInfo;
+}
+/**
+ * run-persistence plan D3: marks a NON-terminal `subagent:run` journal entry
+ * (written once at session_created, and at most once more by the
+ * session_shutdown flush). Terminal snapshots never carry it.
+ */
+export interface RunJournalMark {
+  kind: "session_created" | "shutdown_flush";
+  /** shutdown_flush only: pi's session_shutdown reason ("reload" | "new" | "resume" | "fork" | "quit"). */
+  shutdownReason?: string;
+}
+/** run-persistence plan D4: why a seeded terminal snapshot was synthesized from a journal entry. */
+export interface RestartInterruptedInfo {
+  /** The journal entry's status (starting/running/stopping/queued). */
+  lastStatus: RunStatus;
+  lastPhase: RunPhase;
+  /** = the journal entry's updatedAt. */
+  lastSeenAt: Millis;
+  /** The journal entry's mark kind ("session_created" when the entry carries no `journal` field). */
+  source: RunJournalMark["kind"];
+  shutdownReason?: string;
 }
 export interface DiagSummary {
   phase: RunPhase;
@@ -1003,6 +1034,8 @@ export interface RunSnapshot {
   updatedAt: Millis;
   /** Set when the run was spawned as a nested/child run (X3 slotless nesting). */
   parentRunId?: RunId;
+  /** run-persistence plan D3: present only on non-terminal journal entries (never on terminal snapshots). */
+  journal?: RunJournalMark;
 }
 
 export type RunInput =
@@ -1056,7 +1089,14 @@ export type RunEffect =
   | { kind: "emit_lifecycle"; event: LifecycleEvent }
   | { kind: "enqueue_delivery"; payload: DeliveryPayload }
   | { kind: "notify_deadline"; notice: DeadlineNotice }
-  | { kind: "persist_snapshot"; snapshot: RunSnapshot };
+  | { kind: "persist_snapshot"; snapshot: RunSnapshot }
+  /**
+   * run-persistence plan D2: best-effort, non-terminal journal entry
+   * (session_created). Never enters the in-memory SnapshotStore (J1) — the
+   * adapter only appends it to the session log (J2), synchronously and
+   * never throwing (J7).
+   */
+  | { kind: "journal_snapshot"; snapshot: RunSnapshot };
 export interface EffectEnvelope {
   readonly effectId: string;
   readonly effect: RunEffect;

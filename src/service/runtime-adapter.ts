@@ -25,6 +25,8 @@ import type { Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
 import { writeLateWorktreeDisposition } from "../adapters/worktree-disposition-sink.js";
 import { TASK_PROMPT_CAP } from "../core/state-machine.js";
+import { journalSnapshotFromState } from "../core/run-journal.js";
+import { isTerminalStatus } from "../core/status.js";
 import {
   BasicEffectInterpreter,
   RuntimeRunner,
@@ -179,6 +181,13 @@ export interface RuntimeAdapterDeps {
    * to the feature not existing).
    */
   childSwitchContextGrant?: () => boolean;
+  /**
+   * run-persistence plan D2/§4: sink for non-terminal `journal_snapshot`
+   * entries (stack.ts wires it to `wrapWithRunLog(...).journal`, i.e. a bare
+   * `pi.appendEntry`). Never `store.put` (J1/I4). Absent ⇒ journaling is off
+   * entirely (in-memory run-log degradation).
+   */
+  journal?: (snapshot: RunSnapshot) => void;
 }
 
 /**
@@ -341,6 +350,23 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   const notificationSuppressedRunIds = new Set<string>();
   const schemaRunIds = new Set<string>();
   const policyPendingRunIds = new Map<string, number>();
+  // run-persistence plan D10: readonly-domain runs (consult forks, toolDomain
+  // "readonly") never journal — a consult copy must never be seeded as
+  // resumable, and /mem tidy has no continuation semantics. Same lifecycle as
+  // notificationSuppressedRunIds (added once readonlyDomain is known, removed
+  // in the run's finally).
+  const journalSuppressedRunIds = new Set<string>();
+  // J3: the shutdown flush writes at most one entry per run per adapter.
+  const journalFlushed = new Set<string>();
+  const writeJournal = (snapshot: RunSnapshot): boolean => {
+    // J7: synchronous, never throws, never reaches effect_failed.
+    try {
+      deps.journal?.(snapshot);
+      return true;
+    } catch {
+      return false; // best effort — see RuntimeAdapterDeps.journal
+    }
+  };
   let runtime!: RuntimeRunner;
   const effects = new BasicEffectInterpreter(
     {
@@ -348,6 +374,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         if (e.kind !== "persist_snapshot") return;
         deps.store.put(e.snapshot);
         perRun.get(e.snapshot.runId)?.onSnapshot?.(e.snapshot);
+      },
+      // run-persistence plan D2: log-only — never store.put (J1/I4).
+      journal_snapshot: (e) => {
+        if (e.kind !== "journal_snapshot") return;
+        if (journalSuppressedRunIds.has(e.snapshot.runId)) return;
+        writeJournal(e.snapshot);
       },
       enqueue_delivery: (e) => {
         if (e.kind !== "enqueue_delivery") return;
@@ -555,6 +587,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       // readonlyDomain — consult's OWN prompt/displayMeta/onReaped branches
       // (L819/843/889-area) stay on isConsultRun, unaffected by tidy.
       const readonlyDomain = isConsultRun || spec.request.toolDomain === "readonly";
+      if (readonlyDomain) journalSuppressedRunIds.add(spec.runId); // run-persistence plan D10
       // consult §4.4 early-exit bookkeeping: set right before the runner is
       // entered. Every return/throw before that point (settleConfigFailure,
       // pre-runner sync throws) never reaches the runner's own finally, so
@@ -1002,6 +1035,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         }
         perRun.delete(spec.runId);
         notificationSuppressedRunIds.delete(spec.runId); // CC2 + caller-owned
+        journalSuppressedRunIds.delete(spec.runId); // run-persistence plan D10
         const generation = policyPendingRunIds.get(spec.runId);
         if (generation !== undefined) {
           policyPendingRunIds.delete(spec.runId);
@@ -1068,6 +1102,23 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     },
     fireDeadline(runId, generation, input) {
       runtime.fireDeadline(runId, generation, input);
+    },
+    // run-persistence plan D5/§4: synchronous, best-effort shutdown flush.
+    // Writes one `shutdown_flush` journal entry per still-non-terminal run
+    // that has a sessionFile, is not readonly-domain, and was not flushed by
+    // this adapter before (J3). Returns the number of entries written.
+    flushJournal(runIds, mark) {
+      if (deps.journal === undefined) return 0;
+      let written = 0;
+      for (const runId of runIds) {
+        if (journalSuppressedRunIds.has(runId) || journalFlushed.has(runId)) continue;
+        const state = runtime.getRunState(runId);
+        if (state === undefined || isTerminalStatus(state.status)) continue;
+        if (state.diag.sessionFile === undefined) continue;
+        journalFlushed.add(runId);
+        if (writeJournal(journalSnapshotFromState(state, deps.clock.now(), mark))) written++;
+      }
+      return written;
     },
     // D13 (v2.1 condition 2): idempotent. Flips the redirect above; stack.ts
     // calls this at the top of a rebuild (handing off from the PREVIOUS

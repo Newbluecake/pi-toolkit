@@ -9,6 +9,7 @@ import {
 import type { Clock } from "../core/clock.js";
 import { createInitialState, reduce } from "../core/state-machine.js";
 import { isTerminalStatus } from "../core/status.js";
+import { markLiveSessionFile, releaseLiveSessionFile } from "../core/live-session-files.js";
 import type {
   DeadlineBudget,
   DeliveryPayload,
@@ -708,6 +709,9 @@ export class RuntimeRunner implements Runner {
     if (req.detachSignalOnStart) cancel.detach();
     let ticket: SlotTicket | undefined;
     let handle: SessionHandle | undefined;
+    // run-persistence plan D8: the child session file this run marked live
+    // (released once the run is physically reaped — see notifyReaped).
+    let liveSessionFile: string | undefined;
     let createP: Promise<SessionHandle> | undefined;
     // child-context-switch plan P0 (§2.3.1 point 3): the FIRST
     // switch_selfcheck_failed reason observed for this (runId, generation),
@@ -841,6 +845,13 @@ export class RuntimeRunner implements Runner {
       // M-B2: the session's actual model — authoritative over spawn-time
       // displayMeta (covers pi-default-model runs and resume).
       const modelRef = handle.getModelRef?.();
+      // run-persistence plan D8: mark the child session file live BEFORE the
+      // session_created dispatch journals it as resumable — a same-process
+      // resume of it is refused at admission until this run is reaped.
+      if (handle.sessionFile !== undefined) {
+        markLiveSessionFile(handle.sessionFile, req.runId);
+        liveSessionFile = handle.sessionFile;
+      }
       dispatch({
         kind: "session_created",
         at: this.d.clock.now(),
@@ -1039,7 +1050,15 @@ export class RuntimeRunner implements Runner {
       };
       void runReap()
         .catch(() => undefined)
-        .then(() => this.notifyReaped(req, handle?.sessionId));
+        // run-persistence plan D8: an unkillable (L4) orphan may still be
+        // writing its session file, so it keeps the live mark forever.
+        .then((reaped) =>
+          this.notifyReaped(
+            req,
+            handle?.sessionId,
+            reaped !== undefined && reaped.unkillable.length > 0 ? undefined : liveSessionFile,
+          ),
+        );
       const dEntry = this.dispatchers.get(req.runId);
       if (dEntry && dEntry.gen === gen) this.dispatchers.delete(req.runId);
       const cEntry = this.activeCancels.get(req.runId);
@@ -1057,7 +1076,9 @@ export class RuntimeRunner implements Runner {
     }
   }
   /** consult (§4.4): post-reap cleanup seam. Swallows everything — a cleanup callback must never affect the runner. */
-  private notifyReaped(req: ResolvedSpawnRequest, sessionId?: string) {
+  private notifyReaped(req: ResolvedSpawnRequest, sessionId?: string, liveSessionFile?: string) {
+    // run-persistence plan D8: release this run's live child-session mark.
+    if (liveSessionFile !== undefined) releaseLiveSessionFile(liveSessionFile, req.runId);
     try {
       this.d.onReaped?.(req.runId, req.forkSessionFrom, sessionId);
     } catch {

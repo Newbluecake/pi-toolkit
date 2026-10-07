@@ -158,6 +158,26 @@ describe("consult/expert-index: admission filter (T-1)", () => {
   });
 });
 
+describe("consult/expert-index: non-terminal journal entries (run-persistence plan D6)", () => {
+  it("ignores a raw non-terminal journal entry; the same run's later terminal entry is admitted", () => {
+    const journal = {
+      ...runSnapshot({ runId: "r_JOURNAL01", status: "starting", sessionFile: "/s/j.jsonl", label: "j" }),
+      phase: "session_create" as const,
+      journal: { kind: "session_created" as const },
+    };
+    const onlyJournal = createExpertIndex({ consultDir: CONSULT_DIR });
+    onlyJournal.rebuildFromEntries([entry(journal)]);
+    expect(onlyJournal.list()).toEqual([]);
+
+    const both = createExpertIndex({ consultDir: CONSULT_DIR });
+    both.rebuildFromEntries([
+      entry(journal),
+      entry(runSnapshot({ runId: "r_JOURNAL01", sessionFile: "/s/j.jsonl", label: "j", updatedAt: 3000 })),
+    ]);
+    expect(both.list().map((r) => [r.runId, r.status])).toEqual([["r_JOURNAL01", "completed"]]);
+  });
+});
+
 describe("consult/expert-index: id resolution matches resolve-target exactly (T-1)", () => {
   // The same fixture, fed to both implementations: matchRunId gets a
   // ResolveTargetDeps built over the same runId set the index admitted.

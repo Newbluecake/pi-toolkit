@@ -3173,3 +3173,147 @@ describe("P15a/P15b: final_leaf session_event isolation (fleet-drawer plan §4.1
     expect(postTerminalChecks).toBeGreaterThan(0);
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * run-persistence plan D1/D2 (docs/dev/subagent-run-persistence/plan.md):
+ * session_created emits a single best_effort `journal_snapshot` the first time
+ * a sessionFile becomes known. The 168-cell matrix above is intentionally
+ * unchanged — its buildInput never carries a sessionFile, so those cells keep
+ * `effects=[]`; the cases below exercise the file-carrying sub-case.
+ * ------------------------------------------------------------------------- */
+describe("run journal: session_created → journal_snapshot (run-persistence plan D1/D2)", () => {
+  const created = (sessionFile?: string): RunInput => ({
+    kind: "session_created",
+    at: 7,
+    sessionId: "s",
+    ...(sessionFile === undefined ? {} : { sessionFile }),
+  });
+
+  it.each(["session_create", "extension_bind", "prompt_dispatch"] as const)(
+    "%s + sessionFile emits exactly one best_effort journal_snapshot (non-terminal, no outcome)",
+    (phase) => {
+      const before = fixture(phase);
+      const result = reduce(before, { generation: 1, input: created("/tmp/s.jsonl") }, budget);
+      expect(result.effects).toHaveLength(1);
+      const env = result.effects[0]!;
+      expect(env.effect.kind).toBe("journal_snapshot");
+      expect(env.criticality).toBe("best_effort");
+      expect(env.effectId).toBe(`r:1:${before.effectSeq}`);
+      expect(result.state.effectSeq).toBe(before.effectSeq + 1);
+      if (env.effect.kind !== "journal_snapshot") throw new Error("unreachable");
+      const snap = env.effect.snapshot;
+      expect(snap.status).toBe("starting");
+      expect(snap.phase).toBe(phase);
+      expect(snap).not.toHaveProperty("outcome");
+      expect(snap.updatedAt).toBe(7);
+      expect(snap.diag.sessionFile).toBe("/tmp/s.jsonl");
+      expect(snap.journal).toEqual({ kind: "session_created" });
+      // State side is identical to the zero-effect branch.
+      expect(result.state.status).toBe(before.status);
+      expect(result.state.phase).toBe(before.phase);
+      expect(result.state.sessionId).toBe("s");
+      expect(result.state.diag.sessionFile).toBe("/tmp/s.jsonl");
+      expect(result.state.diag.lastEventType).toBe("session_created");
+    },
+  );
+
+  it("a repeated dispatch with the same sessionFile is zero-effect; a changed file journals again", () => {
+    const first = reduce(fixture("session_create"), { generation: 1, input: created("/tmp/s.jsonl") }, budget);
+    const again = reduce(first.state, { generation: 1, input: created("/tmp/s.jsonl") }, budget);
+    expect(again.effects).toEqual([]);
+    const moved = reduce(again.state, { generation: 1, input: created("/tmp/other.jsonl") }, budget);
+    expect(moved.effects.map((e) => e.effect.kind)).toEqual(["journal_snapshot"]);
+  });
+
+  it("no sessionFile ⇒ zero effect", () => {
+    const result = reduce(fixture("session_create"), { generation: 1, input: created() }, budget);
+    expect(result.effects).toEqual([]);
+    expect(result.state.sessionId).toBe("s");
+  });
+
+  it("abort_grace and terminal phases ⇒ zero effect even with a sessionFile", () => {
+    for (const phase of ["abort_grace", "settled", "reap"] as const) {
+      const result = reduce(fixture(phase), { generation: 1, input: created("/tmp/s.jsonl") }, budget);
+      expect(result.effects).toEqual([]);
+    }
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * P15 (run-journal, run-persistence plan §5 P1): over random sequences whose
+ * session_created inputs randomly carry or omit a sessionFile, per generation
+ * `journal_snapshot` appears at most once (one file per run in practice — the
+ * generator re-dispatches the same file), only ever from a non-terminal
+ * state, never critical, and never after the run reached a terminal state.
+ * Same independent-numbering convention as the other P15 suites in this file.
+ * ------------------------------------------------------------------------- */
+describe("P15 (run-journal): journal_snapshot bounded, non-terminal, best_effort", () => {
+  function rng(seed: number): () => number {
+    let value = seed >>> 0;
+    return () => {
+      value = (Math.imul(value ^ (value >>> 15), 1 | value) + 0x6d2b79f5) | 0;
+      return ((value ^ (value >>> 13)) >>> 0) / 4294967296;
+    };
+  }
+  const phases = ["session_create", "extension_bind", "prompt_dispatch", "model_turn"] as const;
+  function randomInput(state: RunState, next: () => number, at: number): RunInput {
+    if (state.phase === "queue_wait" && next() < 0.5) return { kind: "slot_acquired", at };
+    const r = next();
+    if (r < 0.3)
+      return { kind: "session_created", at, sessionId: "s", ...(next() < 0.5 ? { sessionFile: "/tmp/s.jsonl" } : {}) };
+    if (r < 0.55) return { kind: "phase_entered", at, phase: phases[Math.floor(next() * phases.length)]! };
+    if (r < 0.62) return { kind: "stop_requested", at, cause: "shutdown" };
+    if (r < 0.68) return { kind: "prompt_settled", at };
+    if (r < 0.74 && state.armedTimers.length) {
+      const timer = state.armedTimers[Math.floor(next() * state.armedTimers.length)]!;
+      return { kind: "deadline_fired", at, timer, reason: timer === "queue" ? "queue_timeout" : "idle" };
+    }
+    if (r < 0.8)
+      return {
+        kind: "startup_failed",
+        at,
+        phase: (["session_create", "extension_bind", "prompt_dispatch"] as const)[Math.floor(next() * 3)]!,
+        error: { kind: "startup_transient", message: "t", retryable: next() < 0.5 },
+      };
+    if (r < 0.86) return { kind: "escalation_done", at, level: "L0", ok: true };
+    if (r < 0.92) return { kind: "reap_finished", at, disposed: true, orphaned: false };
+    if (r < 0.96)
+      return {
+        kind: "effect_failed",
+        at,
+        effect: "journal_snapshot",
+        error: { kind: "internal", message: "e", retryable: false },
+      };
+    return { kind: "session_event", at, event: { t: "text_delta", delta: "x" } };
+  }
+
+  it("1000 random sequences", () => {
+    let journaled = 0;
+    for (let seed = 1; seed <= 1000; seed++) {
+      const next = rng(seed * 31 + 7);
+      let state = enqueued();
+      let count = 0;
+      let terminalSeen = false;
+      for (let step = 0; step < 30; step++) {
+        const event = randomInput(state, next, step + 1);
+        const result = reduce(state, { generation: state.generation, input: event }, budget);
+        for (const env of result.effects) {
+          if (env.effect.kind !== "journal_snapshot") continue;
+          count++;
+          expect(env.criticality).toBe("best_effort");
+          expect(isTerminalStatus(state.status)).toBe(false);
+          expect(terminalSeen).toBe(false);
+          expect(isTerminalStatus(env.effect.snapshot.status)).toBe(false);
+          expect(env.effect.snapshot.outcome).toBeUndefined();
+          expect(event.kind).toBe("session_created");
+        }
+        if (isTerminalStatus(result.state.status)) terminalSeen = true;
+        state = result.state;
+      }
+      expect(count).toBeLessThanOrEqual(1);
+      journaled += count;
+    }
+    // The generator really reaches the journaling branch (not a vacuous pass).
+    expect(journaled).toBeGreaterThan(100);
+  });
+});

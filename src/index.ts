@@ -818,6 +818,12 @@ export default function activate(rawPi: ExtensionAPI): void {
       stack.query.waitAll({ runIds: pending.map((s) => s.runId), waitMs: drainMs }),
       stack.workflow.runs.drain(drainMs),
     ]);
+    // run-persistence plan D5: synchronous best-effort journal flush for runs the drain did not
+    // settle — written into THIS session while pi has not yet invalidated the ctx.
+    stack.runJournal.flushPending(
+      pending.map((s) => s.runId),
+      event.reason,
+    );
     stack.workflow.runs.seal();
     // workflow-worktree plan D13 (v2.1 condition 2): tear down THIS stack's
     // spawn-service worktree waiters/timers, flip the runtime-adapter's

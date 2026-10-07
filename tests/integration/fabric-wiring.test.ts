@@ -129,6 +129,28 @@ describe("fabric stack wiring", () => {
     stack.fabric!.dispose();
   });
 
+  it("run-persistence plan D6: a journal-only (non-terminal) run replays as gone — messages to it are dropped as target_gone, never held", () => {
+    const orig = record({ kind: "finding", to: target, key: makeMessageKey(run, target, 1, 1) });
+    const entries: Entry[] = [
+      runEntry("completed"),
+      // The target only ever got its session_created journal entry (the
+      // previous process died before it settled).
+      { type: "custom", customType: "subagent:run", data: { runId: target, parentRunId: "root", status: "starting" } },
+      { type: "custom", customType: "subagent:fabric", data: orig },
+    ];
+    const h = harness(entries);
+    const stack = buildSessionStack(h.pi, h.ctx, settings(true), types, []);
+    stack.fabric!.pump();
+    const latest = entries
+      .filter((entry) => entry.customType === "subagent:fabric")
+      .map((entry) => entry.data as FabricRecord)
+      .filter((entry) => entry.key === orig.key)
+      .at(-1)!;
+    expect(latest.state).toBe("dropped");
+    expect(latest.deadLetter?.reason).toBe("target_gone");
+    stack.fabric!.dispose();
+  });
+
   it("T19 fabric.enabled=false creates no fabric, mailbox, or fabric outbox writes", () => {
     const h = harness();
     const stack = buildSessionStack(h.pi, h.ctx, settings(false), types, []);
