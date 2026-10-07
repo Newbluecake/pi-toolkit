@@ -999,10 +999,23 @@
   padding: var(--sp-1) var(--sp-2);
 }
 
+/* 2026-10-07 (「agent插话的输入框和stop按钮ui有点丑」): the steer row adopts the composer
+ * card's grammar — ONE bordered card around a borderless input, frameless ghost buttons at
+ * the right edge (the stop button had no ghost class before: a bordered box next to a ghost
+ * send, at a different height than the bordered input — the whole row read as three unrelated
+ * boxes). Text labels hide ≤480px, same iconification as the composer's own row. */
 .fleet-steer {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
+  padding-right: var(--sp-1);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.fleet-steer:focus-within {
+  border-color: var(--c-focus);
 }
 
 .fleet-steer-input {
@@ -1010,11 +1023,17 @@
   min-width: 0;
   min-height: 36px;
   padding: 0 var(--sp-2);
-  border: 1px solid var(--c-border-strong);
-  border-radius: var(--r-sm);
-  background: var(--c-surface);
+  border: 0;
+  outline: none;
+  background: transparent;
   color: var(--c-text);
   font-size: var(--fs-sm);
+}
+
+/* The danger tint comes from the class here (the composer scopes its own) — armed keeps the
+ * global filled-danger `.stop-btn.armed` (primitives' shared rule). */
+.fleet-steer .stop-btn:not(.armed) {
+  color: var(--c-danger);
 }
 
 .fleet-actions-note[data-kind="err"] {
@@ -1051,7 +1070,8 @@
 /* --- narrow (≤480px): iconified Stop/Send in one row (§7.5) --- */
 
 @media (max-width: 480px) {
-  .stop-btn .lbl-md {
+  .stop-btn .lbl-md,
+  .fleet-steer .lbl-md {
     display: none;
   }
 

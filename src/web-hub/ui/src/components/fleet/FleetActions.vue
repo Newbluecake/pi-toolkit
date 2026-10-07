@@ -100,10 +100,10 @@ onUnmounted(disarm);
         :aria-label="t('control.sendAria')"
         @click="onSteerSend"
       >
-        <AppIcon name="arrow-up" class="icon-sm" />{{ t("control.send") }}
+        <AppIcon name="arrow-up" class="icon-sm" /><span class="lbl-md">{{ t("control.send") }}</span>
       </button>
       <button
-        class="btn stop-btn btn-xs"
+        class="btn btn-ghost stop-btn btn-xs"
         :class="{ armed }"
         type="button"
         :disabled="!active"
@@ -112,7 +112,7 @@ onUnmounted(disarm);
         @click="onStopClick"
         @keydown="onStopKeydown"
       >
-        <AppIcon name="ban" class="icon-sm" />{{ armed ? t("control.stopConfirm") : t("control.stop") }}
+        <AppIcon name="ban" class="icon-sm" /><span class="lbl-md">{{ armed ? t("control.stopConfirm") : t("control.stop") }}</span>
       </button>
     </div>
     <p v-if="armed" class="fleet-actions-live sr-only" role="status">{{ t("control.stopArmed") }}</p>
