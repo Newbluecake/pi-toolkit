@@ -112,7 +112,9 @@ onUnmounted(disarm);
         @click="onStopClick"
         @keydown="onStopKeydown"
       >
-        <AppIcon name="ban" class="icon-sm" /><span class="lbl-md">{{ armed ? t("control.stopConfirm") : t("control.stop") }}</span>
+        <AppIcon name="ban" class="icon-sm" /><span class="lbl-md">{{
+          armed ? t("control.stopConfirm") : t("control.stop")
+        }}</span>
       </button>
     </div>
     <p v-if="armed" class="fleet-actions-live sr-only" role="status">{{ t("control.stopArmed") }}</p>
