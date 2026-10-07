@@ -6,7 +6,9 @@
  * and NO file may contain `readFile(` (whole-file reads are architecturally banned: previews
  * stream bounded windows, verification streams 64 KiB chunks). PV3's `routes.ts` joins the
  * scanned set with the same rules — it reaches disk exclusively through the PV2a kernels
- * and PV2b's store.
+ * and PV2b's store. The 2026-10-07 修订 adds `open.ts` (the shared ⑤–⑦ pipeline) and
+ * `probe.ts` (the batch existence probe) under the SAME rules — both reach disk only
+ * through `fs.ts`/the admitter/the upload store.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -15,7 +17,7 @@ import { describe, expect, it } from "vitest";
 
 const PREVIEW_DIR = fileURLToPath(new URL("../../../../src/web-hub/hub/preview/", import.meta.url));
 const FS_FILE = "fs.ts";
-const KERNEL_FILES = ["sniff.ts", "admit.ts", "stream.ts", "verify.ts", "routes.ts"] as const;
+const KERNEL_FILES = ["sniff.ts", "admit.ts", "stream.ts", "verify.ts", "routes.ts", "open.ts", "probe.ts"] as const;
 
 /** Matches `node:fs` / `fs` / `node:fs/promises` (static, dynamic, require); `import type` is exempt. */
 const FS_MODULE_RE = /^(?:node:)?fs(?:\/promises)?$/;

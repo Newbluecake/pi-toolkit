@@ -22,6 +22,7 @@
  */
 import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import { classifyPreviewError, clientImageBudget, previewScopeOf, scopeKeyOf } from "@logic/preview.js";
+import { usePreviewProbe, type PreviewProbeHandle } from "./usePreviewProbe.js";
 import type { PreviewOutcome, PreviewTransport } from "../transport/types.js";
 import type { HubState, PreviewHandle, PreviewPathScope, PreviewView } from "../types.js";
 
@@ -214,5 +215,21 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   }
   onScopeDispose(dispose, true); // failSilently: safe to call outside a component/effect scope (unit tests)
 
-  return { view: view as Readonly<Ref<PreviewView>>, scope, open, close, retry, dispose };
+  // 2026-10-07 修订「先探测后标记」: the batch probe controller rides the SAME handle iff the
+  // transport implements `probe` — otherwise `handle.probe` stays absent and `PathText` keeps
+  // the legacy always-clickable rendering (component-level fakes never break).
+  const probeHandle: PreviewProbeHandle | undefined =
+    opts.preview !== undefined && opts.preview.probe !== undefined
+      ? usePreviewProbe({ probe: opts.preview.probe, scope })
+      : undefined;
+
+  return {
+    view: view as Readonly<Ref<PreviewView>>,
+    scope,
+    open,
+    close,
+    retry,
+    dispose,
+    ...(probeHandle !== undefined ? { probe: probeHandle } : {}),
+  };
 }

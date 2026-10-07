@@ -1248,6 +1248,94 @@ describe("password transport: preview() 401 (one-shot — the cookie session is 
 });
 
 // ---------------------------------------------------------------------------
+// web-hub-preview 2026-10-07 修订「先探测后标记」: the probe method — same suite both modes.
+// Wire shape pinned against `hub/preview/probe.ts` + `routes.ts`'s handleProbe: POST
+// `${PREVIEW_PROBE_PATH}?agentKey&sessionId` with `{paths:[…]}` JSON + `X-PWH:"1"`, 200 body
+// `{results:[{kind}…]}` (validated by `parseProbeResults`), one 5s deadline.
+// ---------------------------------------------------------------------------
+
+const PROBE_REQ = { agentKey: "A", sessionId: "s1", paths: ["/home/u/proj/a b.ts", "/home/u/proj/gone.ts"] };
+const PROBE_URL = "/api/preview/probe?agentKey=A&sessionId=s1";
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: probe (web-hub-preview 2026-10-07 修订)", (_mode, make) => {
+  it("implements probe() on every adapter", () => {
+    expect(typeof make().transport.preview?.probe).toBe("function");
+  });
+
+  it("POSTs {paths} JSON with X-PWH:1 and returns the kinds in request order", async () => {
+    const h = make(async () => resp(200, { results: [{ kind: "text" }, { kind: "missing" }] }));
+    const out = await h.transport.preview!.probe(PROBE_REQ);
+    expect(out).toEqual({ ok: true, results: ["text", "missing"] });
+    const call = h.fetchCalls.find((c) => c.url.startsWith(PROBE_URL));
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("POST");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(String(call!.init.body))).toEqual({ paths: PROBE_REQ.paths });
+  });
+
+  it("a non-200 surfaces the error half (status/error, retryAfterS folded from 429)", async () => {
+    const h = make(async () => resp(429, { error: "E_RATE" }, { "Retry-After": "2" }));
+    const out = await h.transport.preview!.probe(PROBE_REQ);
+    expect(out).toEqual({ ok: false, status: 429, error: "E_RATE", retryAfterS: 2 });
+  });
+
+  it("a malformed 200 body (wrong length / bad kind) ⇒ local E_BAD_RESPONSE, status 0", async () => {
+    const h1 = make(async () => resp(200, { results: [{ kind: "text" }] }));
+    expect(await h1.transport.preview!.probe(PROBE_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+    const h2 = make(async () => resp(200, { results: [{ kind: "binary" }, { kind: "text" }] }));
+    expect(await h2.transport.preview!.probe(PROBE_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("client timeout (5s, 修订 spec) ⇒ E_DEADLINE status 0, exactly one attempt", async () => {
+    const h = make(async () => new Promise<never>(() => {}));
+    const p = h.transport.preview!.probe(PROBE_REQ);
+    h.clock.advance(5_000);
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith(PROBE_URL))).toHaveLength(1);
+  });
+
+  it("a PRE-aborted signal never issues the request", async () => {
+    const h = make(async () => resp(200, { results: [] }));
+    const ac = new AbortController();
+    ac.abort();
+    const out = await h.transport.preview!.probe(PROBE_REQ, { signal: ac.signal });
+    expect(out).toEqual({ ok: false, status: 0, error: "E_ABORT" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith(PROBE_URL))).toHaveLength(0);
+  });
+});
+
+describe("token transport: probe() 401 recovery (withRelogin — replay is read-only)", () => {
+  it("a 401 with a stored token silently re-logs in and replays the SAME probe", async () => {
+    const h = makeToken(async (url) => {
+      if (url === "/api/login") return resp(200);
+      if (url.startsWith(PROBE_URL)) {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn
+          ? resp(200, { results: [{ kind: "text" }, { kind: "missing" }] })
+          : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const out = await h.transport.preview!.probe(PROBE_REQ);
+    expect(out).toMatchObject({ ok: true });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith(PROBE_URL))).toHaveLength(2);
+    expect(h.onConnCalls).not.toContain("auth");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // run-transcript endpoints (fleet-drawer plan §3.4/§6.5, package F5) — same suite both modes.
 // The wire shapes below are pinned against the F4 routes (`hub/run-routes.ts`: POST bodies
 // {clientId, agentKey, runId}, GET `/api/run/history?agent=&run=&before=&limit=`) and the

@@ -13,6 +13,7 @@ import type {
   CmdOutcome,
   PasswordTransport,
   PreviewOutcome,
+  PreviewProbeOutcome,
   PreviewTransport,
   RemoveAgentOutcome,
   RemoveTarget,
@@ -147,6 +148,10 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // namespace. 401 ⇒ onConn("auth") is reported by the fetch wrapper above
       // (`isRestAuthEndpoint` covers `/api/preview`) — never inside the client.
       fetch: (req, opts) => client.preview.fetch(req, opts) as Promise<PreviewOutcome>,
+      // 2026-10-07 修订「先探测后标记」: same wrapper rule — the fetch wrapper above reports
+      // 401 ⇒ onConn("auth") (`isRestAuthEndpoint`'s `/api/preview` prefix covers the probe
+      // path too).
+      probe: (req, opts) => client.preview.probe(req, opts) as Promise<PreviewProbeOutcome>,
     } satisfies PreviewTransport,
   } satisfies PasswordTransport;
 }

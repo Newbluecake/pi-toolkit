@@ -681,12 +681,17 @@ export interface PreviewRouteIo {
 
 /** The frontend surface `createHttpFrontend` optionally carries (PV3 wires `FrontendDeps.preview`):
  * `handle` dispatches `GET /api/preview` for ONE listener (LAN only when `mode === "on"`, §4.7);
- * `dispose` is the bounded (≤1s), idempotent teardown `hub.close()` awaits between
- * `spawnSup.shutdown` and `fe.close()`, and the startup-failure cleanup runs before `fe.close()`
- * (§4.5.1's three exit paths). */
+ * `handleProbe` (2026-10-07 修订) dispatches `POST /api/preview/probe` under the same listener
+ * matrix — the batch existence probe that lets the UI mark a path clickable only after the
+ * backend confirms it; `dispose` is the bounded (≤1s), idempotent teardown `hub.close()` awaits
+ * between `spawnSup.shutdown` and `fe.close()`, and the startup-failure cleanup runs before
+ * `fe.close()` (§4.5.1's three exit paths). */
 export interface PreviewRoutes {
   readonly mode: "on" | "loopback";
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** `POST /api/preview/probe?agentKey=&sessionId=` — body `{paths:[…]}` (≤100 entries,
+   * ≤8 KiB), answer `{results:[{kind:"text"|"image"|"missing"}…]}` in request order. */
+  handleProbe(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
   /** Idempotent; aborts every active request ("hub-close") and single-flight verify task. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
 }

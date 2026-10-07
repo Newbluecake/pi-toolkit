@@ -27,7 +27,7 @@ import {
   API_ERRORS as PROTOCOL_API_ERRORS,
   SSE_EVENTS as PROTOCOL_SSE_EVENTS,
 } from "@protocol/http-contract.ts";
-import { PREVIEW_PATH } from "@protocol/preview.ts";
+import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 
 /** SSE `event:` names pushed by the hub (order irrelevant, set must match) — same array as
@@ -73,6 +73,8 @@ export const API = Object.freeze({
   // web-hub-preview plan v3 §4.1 (PV4): the single content-preview endpoint, imported from
   // `protocol/preview.ts` — same anti-drift rule as the upload paths above.
   preview: PREVIEW_PATH,
+  // web-hub-preview 2026-10-07 修订: the batch existence-probe endpoint — same anti-drift rule.
+  previewProbe: PREVIEW_PROBE_PATH,
   // @文件补全 (file-mention): the composer's file-search endpoint. Hand-written literal, NOT
   // imported from `hub/file-search.ts` — that module is hub-side (imports `node:fs*`) and must
   // never reach the browser bundle; `tests/web-hub/ui/logic-file-mention.test.ts` pins this

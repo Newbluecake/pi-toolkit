@@ -39,8 +39,10 @@ import { createCmdLimit, type CmdLimit } from "../cmd-limit.js";
 import type { HubLog, PreviewRouteIo, PreviewRoutes, RegistryView } from "../ports.js";
 import { createReqDeadline, type ReqDeadline } from "../req-deadline.js";
 import type { UploadStore } from "../uploads.js";
-import { createCwdAdmitter, type CwdAdmitter, type PreviewHandle, type PreviewStat } from "./admit.js";
+import { createCwdAdmitter, type CwdAdmitter, type PreviewHandle } from "./admit.js";
 import { previewFsStep } from "./fs.js";
+import { openAdmittedPath, type Opened } from "./open.js";
+import { readProbeBody, runPreviewProbe } from "./probe.js";
 import { needsMoreForDims, sniff, type SniffResult } from "./sniff.js";
 import { readAndStream, type PreviewSink, type StreamOutcome } from "./stream.js";
 import { createUploadVerifier, type UploadVerifier } from "./verify.js";
@@ -129,38 +131,9 @@ function extOf(path: string): string | undefined {
   return /^[A-Za-z0-9]{1,16}$/.test(ext) ? ext.toLowerCase() : undefined;
 }
 
-/** PV2b hand-off: `ReadableUploadFileHandle` → PV2a's `PreviewHandle`. At runtime the real
- * `fs.promises.FileHandle` satisfies both (its `stat()` returns a full `Stats`); the UPLOAD
- * layer's *type slice* (`FileStat`) just doesn't declare `fd`/`ctimeMs`/`nlink`, so the adapter
- * reads them back defensively — a fake without them degrades to fd:-1/ctimeMs:0, which only
- * matters for /proc re-opens and identity precision, never for the sha256 gate. */
-function adaptUploadHandle(fh: {
-  read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
-  stat(): Promise<{ dev: number; ino: number; size: number; isFile(): boolean }>;
-  close(): Promise<void>;
-}): PreviewHandle {
-  const fdRaw = (fh as { fd?: unknown }).fd;
-  const fd = typeof fdRaw === "number" ? fdRaw : -1;
-  return {
-    fd,
-    stat: async (): Promise<PreviewStat> => {
-      const st = await fh.stat();
-      const ctime = (st as { ctimeMs?: unknown }).ctimeMs;
-      const nlink = (st as { nlink?: unknown }).nlink;
-      const isFile = st.isFile();
-      return {
-        dev: st.dev,
-        ino: st.ino,
-        size: st.size,
-        ctimeMs: typeof ctime === "number" ? ctime : 0,
-        nlink: typeof nlink === "number" ? nlink : 1,
-        isFile: () => isFile,
-      };
-    },
-    read: (buf, off, len, pos) => fh.read(buf, off, len, pos),
-    close: () => fh.close(),
-  };
-}
+/** PV2b hand-off moved to `open.ts` (2026-10-07 修订): `adaptUploadHandle` + the `Opened`
+ * shape now live with the shared ⑤–⑦ pipeline so `routes.ts` and `probe.ts` consume the
+ * SAME open result — see `./open.ts`. */
 
 /** §3.1 ⑨: the `PreviewSink` over the real `ServerResponse`. `waitDrain` resolves on drain OR
  * close OR the caller's abort signal (the stream layer races it against its own deadline
@@ -202,15 +175,6 @@ function resSink(res: ServerResponse): PreviewSink {
 interface ActiveRequest {
   readonly ctl: AbortController;
   done: Promise<void>;
-}
-
-/** §3.1 ⑦u result after the handle adaptation (everything ⑧/⑨ need, both classes in one shape). */
-interface Opened {
-  fh: PreviewHandle;
-  size: number;
-  cls: "upload" | "cwd";
-  verify?: { uploadId: string; sha256: string };
-  shared?: boolean;
 }
 
 export interface PreviewRoutesDeps {
@@ -365,26 +329,11 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       inflightByPrincipal.set(principal, mine + 1);
       inflightGlobal += 1;
 
-      // ⑤ session (§3.1 ⑤ — both classes require the named session to be currently visible)
-      const view = registry.get(agentKey);
-      if (view === undefined) {
-        acc.code = "E_NOT_FOUND";
-        send("E_NOT_FOUND", { error: "E_NOT_FOUND" });
-        return;
-      }
-      const session = view.session;
-      if (session === undefined || session.sessionId !== sessionId) {
-        acc.code = "E_SESSION_CHANGED";
-        send("E_SESSION_CHANGED", { error: "E_SESSION_CHANGED" });
-        return;
-      }
-
-      // ⑥ classify (§3.1 ⑥ — literal prefix, zero fs)
-      const uploadClass = path.startsWith(`${uploadsRoot}/`);
-      acc.cls = uploadClass ? "upload" : "cwd";
-
+      // ⑤ session → ⑥ classify → ⑦ admit+open (SHARED pipeline, open.ts — the ONE copy of
+      // the security decision; `probe.ts` runs the very same function per entry, 2026-10-07
+      // 修订). `abortAnswer` lives here (not in open.ts) because only this layer knows the
+      // signal's reason — client-abort stays silent, hub-close answers 503 pre-head (§4.3 map).
       const abortAnswer = (): boolean => {
-        // §4.3 map: abort (client disconnect) ⇒ no answer; abort (hub close) ⇒ 503 pre-head.
         if (signal.aborted) {
           acc.code = "E_ABORT";
           acc.reason = signal.reason === "hub-close" ? "hub-close" : "client-abort";
@@ -394,63 +343,39 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
         return false;
       };
 
-      if (uploadClass) {
-        // ⑦u upload class — the whole §4.2 open lives inside PV2b's store.
-        if (uploads === undefined) {
-          acc.code = "E_NOT_FOUND";
-          send("E_NOT_FOUND", { error: "E_NOT_FOUND" });
+      const op = await openAdmittedPath(
+        { uploadsRoot, registry, uploads, admitter, log },
+        { agentKey, sessionId, path, listener: io.listener, principal },
+        r,
+        signal,
+      );
+      // ⑥ audit mirror: the ORIGINAL inline code classified at step ⑥ (before the open), so a
+      // rejected upload-class request still audited cls:"upload" — keep that (the
+      // authoritative classification lives in open.ts; this is display-only).
+      acc.cls = path.startsWith(`${uploadsRoot}/`) ? "upload" : "cwd";
+      if (!op.ok) {
+        if (op.abort === true) {
+          abortAnswer();
           return;
         }
-        const u = await uploads.openForPreview(
-          { principal, listener: io.listener, path, agentKey, sessionId },
-          { deadline: r, signal },
-        );
-        if (!u.ok) {
-          // The store's own abort race may have LOST (the open settled first and the ctx.signal
-          // abort arrived in the microtask gap) — an aborted request is never answered with a
-          // mapped code (client-abort stays silent, hub-close answers 503).
-          if (abortAnswer()) return;
-          acc.code = u.code;
-          if (u.code === "E_BUSY") {
-            acc.reason = "store";
-            send("E_BUSY", { error: "E_BUSY" }, { "Retry-After": "1" });
-          } else {
-            send(u.code, { error: u.code });
-          }
+        acc.code = op.code;
+        acc.reason = op.reason;
+        if (op.busy === true) {
+          acc.reason = "store";
+          send("E_BUSY", { error: "E_BUSY" }, { "Retry-After": "1" });
           return;
         }
-        // Ownership of `u.fh` transfers to the route layer HERE — register it on `opened`
-        // BEFORE any other check: a `dispose()`/client-abort landing in the microtask window
-        // between the await settling and this point is caught by the post-classification
-        // `abortAnswer()` below, whose ⑩-finally path closes `opened.fh` (§4.5.1 "fd 全部回
-        // 收" — never dropped unregistered). The store only late-closes the fd of an open
-        // that lost ITS race; once the promise resolved ok, closing is this layer's job.
-        opened = {
-          fh: adaptUploadHandle(u.fh),
-          size: u.size,
-          cls: "upload",
-          verify: { uploadId: u.uploadId, sha256: u.sha256 },
-          shared: u.shared,
-        };
-        acc.shared = u.shared;
-        acc.total = u.size;
-      } else {
-        // ⑦c cwd class — §4.3's 13-step admission stack.
-        const a = await admitter.admit({ path, root: session.cwd }, r, signal);
-        if (!a.ok) {
-          if (a.status === 0) {
-            abortAnswer();
-            return;
-          }
-          acc.code = a.code;
-          acc.reason = a.reason;
-          const body = a.reason === undefined ? { error: a.code } : { error: a.code, reason: a.reason };
-          io.sendJson(res, a.status, body);
-          return;
-        }
-        opened = { fh: a.fh, size: a.size, cls: "cwd" };
-        acc.total = a.size;
+        const body = op.reason === undefined ? { error: op.code } : { error: op.code, reason: op.reason };
+        io.sendJson(res, PREVIEW_STATUS[op.code] ?? 500, body);
+        return;
       }
+      // Ownership of the handle transfers to the route layer HERE — registered on `opened`
+      // BEFORE anything else can interleave: a `dispose()`/client-abort landing in the
+      // microtask window after the open settled is caught by the `abortAnswer()` below, whose
+      // ⑩-finally path closes `opened.fh` (§4.5.1 "fd 全部回收" — never dropped unregistered).
+      opened = op.opened;
+      acc.shared = opened.shared;
+      acc.total = opened.size;
       if (abortAnswer()) return;
 
       // ⑧ sniff (§3.1 ⑧ — the two reads stay inside the shared admission deadline)
@@ -629,9 +554,166 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     return sample;
   }
 
+  /**
+   * `POST /api/preview/probe` (2026-10-07 修订「先探测后标记」): the batch existence probe.
+   * Same request lifecycle as `handle` — ⓪ closing → ① CSRF (BEFORE auth) → ② authorize →
+   * ③ params → ④ rate limit (its OWN bucket line `…:probe`, same D14-private limiter) +
+   * in-flight slot (one probe request = one slot, same caps) → body read/validate (probe.ts)
+   * → `runPreviewProbe` (the SHARED ⑤–⑦ open per entry + head sniff) → one JSON answer —
+   * plus the same ⑩ teardown: an abort is answered only for hub-close (503), a client
+   * disconnect stays silent, and exactly one `phase:"probe"` audit line is written (no raw
+   * path — only the count in `total`, same §4.5 discipline).
+   */
+  async function handleProbe(
+    req: IncomingMessage,
+    res: ServerResponse,
+    query: URLSearchParams,
+    io: PreviewRouteIo,
+  ): Promise<void> {
+    const ctl = new AbortController();
+    const signal = ctl.signal;
+    const entry: ActiveRequest = { ctl, done: Promise.resolve() };
+    active.add(entry);
+    res.once("close", () => {
+      if (!res.writableFinished) ctl.abort("client-abort");
+    });
+    const startedAt = now();
+    const acc: AuditAcc = { listener: io.listener, ip: io.ip, ok: false };
+    let slotTaken = false;
+    let principal = "";
+    let skipAudit = false;
+
+    entry.done = (async (): Promise<void> => {
+      const send = (code: string, body: unknown, headers?: Record<string, string>): void => {
+        const status = PREVIEW_STATUS[code] ?? 500;
+        io.sendJson(res, status, body, headers);
+      };
+
+      if (closing) {
+        acc.code = "E_HUB_RESTARTING";
+        send("E_HUB_RESTARTING", { error: "E_HUB_RESTARTING" });
+        return;
+      }
+      if (!previewCsrfOk(req, io.expectedOrigin)) {
+        acc.code = "E_CSRF";
+        send("E_CSRF", { error: "E_CSRF" });
+        return;
+      }
+      const r = createReqDeadline(now, PREVIEW_ADMIT_TOTAL_MS);
+      const authed = await io.authorize(r);
+      if ("handled" in authed) {
+        acc.code = authed.code;
+        return;
+      }
+      acc.user = authed.user;
+      principal = `${io.listener}:${authed.user ?? "token"}`;
+
+      const agentKey = query.get("agentKey") ?? "";
+      const sessionId = query.get("sessionId") ?? "";
+      if (!AGENT_KEY_RE.test(agentKey) || !SESSION_ID_RE.test(sessionId)) {
+        acc.code = "E_BAD_REQUEST";
+        send("E_BAD_REQUEST", { error: "E_BAD_REQUEST" });
+        return;
+      }
+      acc.agentKey = agentKey;
+
+      const admitted = limit.admit(`${principal}:probe`, PREVIEW_BUCKET_CAPACITY, PREVIEW_BUCKET_REFILL_MS);
+      if (!admitted.ok) {
+        const throttleKey = `probe:${principal}`;
+        const t = now();
+        const last = rateAuditedAt.get(throttleKey);
+        if (last !== undefined && t - last < RATE_AUDIT_WINDOW_MS) {
+          skipAudit = true;
+        } else {
+          rateAuditedAt.set(throttleKey, t);
+        }
+        acc.code = "E_RATE";
+        send(
+          "E_RATE",
+          { error: "E_RATE" },
+          { "Retry-After": String(Math.max(1, Math.ceil(admitted.retryAfterMs / 1000))) },
+        );
+        return;
+      }
+      const mine = inflightByPrincipal.get(principal) ?? 0;
+      if (mine >= PREVIEW_INFLIGHT_PER_PRINCIPAL || inflightGlobal >= PREVIEW_INFLIGHT_GLOBAL) {
+        acc.code = "E_BUSY";
+        acc.reason = "inflight";
+        send("E_BUSY", { error: "E_BUSY" }, { "Retry-After": "1" });
+        return;
+      }
+      slotTaken = true;
+      inflightByPrincipal.set(principal, mine + 1);
+      inflightGlobal += 1;
+
+      // ⑤ session (request-level, mirroring preview's step ⑤ placement): the named session
+      // must be currently visible BEFORE any body is read — unknown agent 404, mismatched
+      // sessionId 409, byte-identical with `GET /api/preview`. (The shared per-path pipeline
+      // re-checks too — a session dying MID-batch degrades those entries to missing, not 409.)
+      const view = registry.get(agentKey);
+      if (view === undefined) {
+        acc.code = "E_NOT_FOUND";
+        send("E_NOT_FOUND", { error: "E_NOT_FOUND" });
+        return;
+      }
+      const session = view.session;
+      if (session === undefined || session.sessionId !== sessionId) {
+        acc.code = "E_SESSION_CHANGED";
+        send("E_SESSION_CHANGED", { error: "E_SESSION_CHANGED" });
+        return;
+      }
+
+      const body = await readProbeBody(req);
+      if (!body.ok) {
+        acc.code = body.code;
+        acc.reason = body.reason;
+        io.sendJson(res, body.status, { error: body.code, reason: body.reason });
+        return;
+      }
+
+      const run = await runPreviewProbe(
+        { uploadsRoot, registry, uploads, admitter, log, now },
+        { agentKey, sessionId, paths: body.body.paths, listener: io.listener, principal },
+        r,
+        signal,
+      );
+      if (!run.ok) {
+        // §4.3 abort map, exactly like handle(): client-abort stays silent, hub-close 503.
+        acc.code = "E_ABORT";
+        acc.reason = signal.reason === "hub-close" ? "hub-close" : "client-abort";
+        if (signal.reason === "hub-close") send("E_HUB_RESTARTING", { error: "E_HUB_RESTARTING" });
+        return;
+      }
+      acc.ok = true;
+      acc.total = body.body.paths.length;
+      // Wire contract (2026-10-07): one `{kind}` object per entry, request order.
+      io.sendJson(res, 200, { results: run.results.map((kind) => ({ kind })) });
+    })().catch((err: unknown) => {
+      acc.code = "E_INTERNAL";
+      log.error("preview probe route: unexpected pipeline failure", { error: String(err) });
+      if (!res.headersSent && !res.destroyed) io.sendJson(res, 500, { error: "E_INTERNAL" });
+      else res.destroy();
+    });
+
+    try {
+      await entry.done;
+    } finally {
+      if (slotTaken) {
+        inflightGlobal = Math.max(0, inflightGlobal - 1);
+        const left = (inflightByPrincipal.get(principal) ?? 1) - 1;
+        if (left <= 0) inflightByPrincipal.delete(principal);
+        else inflightByPrincipal.set(principal, left);
+      }
+      active.delete(entry);
+      acc.ms = now() - startedAt;
+      if (!skipAudit) auditPreview(log, { phase: "probe", ...acc });
+    }
+  }
+
   const routes: PreviewRoutes = {
     mode,
     handle,
+    handleProbe,
     dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void> {
       if (disposePromise !== undefined) return disposePromise; // 幂等，两路径共用同一个 promise
       closing = true;

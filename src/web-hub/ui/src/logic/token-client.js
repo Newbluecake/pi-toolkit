@@ -22,8 +22,13 @@
  */
 import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
-import { PREVIEW_CLIENT_TIMEOUT_MS, PREVIEW_IMAGE_MAX_BYTES } from "@protocol/preview.ts";
+import {
+  PREVIEW_CLIENT_TIMEOUT_MS,
+  PREVIEW_IMAGE_MAX_BYTES,
+  PREVIEW_PROBE_CLIENT_TIMEOUT_MS,
+} from "@protocol/preview.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
+import { parseProbeResults } from "./previewProbe.js";
 
 export const TOKEN_KEY = "pwh_token";
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -803,7 +808,94 @@ export function createClient(deps) {
     }
   }
 
-  const preview = { fetch: previewFetch };
+  /**
+   * `POST /api/preview/probe` (2026-10-07 修订「先探测后标记」) — the batch existence probe.
+   * Same auth/CSRF surface as `previewFetch` (cookie credentials + `X-PWH: 1`, 401 rides
+   * `withRelogin` — POST /api/preview/probe is idempotent read-only probing, replay-safe);
+   * ONE request carries a whole message's candidates. One 5s deadline
+   * (`PREVIEW_PROBE_CLIENT_TIMEOUT_MS`) spans headers+body, merged with the caller's
+   * `signal`; the 200 body is validated by `parseProbeResults` (length + kinds) and ANY
+   * deviation maps to a local `E_BAD_RESPONSE`. The caller (usePreviewProbe) degrades a
+   * failed batch wholesale to plain text — never a retry storm.
+   * @param {{ agentKey: string, sessionId: string, paths: readonly string[] }} req
+   * @param {{ signal?: any }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function probePost(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.previewProbe}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}`;
+    const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
+    const ac = AC ? new AC() : undefined;
+    let expired = false;
+    /** @type {any} */
+    let deadlineTimer = null;
+    /** @type {Promise<never>} */
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = timer(() => {
+        expired = true;
+        ac?.abort();
+        reject(new Error("E_DEADLINE"));
+      }, PREVIEW_PROBE_CLIENT_TIMEOUT_MS);
+    });
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onExternalAbort = () => ac?.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    /** Fetch-level failure ⇒ local code (status 0). @param {unknown} e */
+    const fromError = (e) => {
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+        return { ok: false, status: 0, error: "E_DEADLINE" };
+      return { ok: false, status: 0, error: "E_NETWORK" };
+    };
+    try {
+      const send = () =>
+        deps.fetch(url, {
+          credentials: "same-origin",
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-PWH": "1" },
+          body: JSON.stringify({ paths: req.paths }),
+          ...(ac ? { signal: ac.signal } : {}),
+        });
+      /** @type {any} */
+      let r;
+      try {
+        r = await Promise.race([withRelogin(send), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (!r.ok) {
+        const o = await previewOutcomeFromResponse(r);
+        /** @type {any} */
+        const out = { ok: false, status: o.status, error: o.error };
+        if (typeof o.retryAfterS === "number") out.retryAfterS = o.retryAfterS;
+        return out;
+      }
+      /** @type {any} */
+      let body;
+      try {
+        body = await Promise.race([r.json(), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      const parsed = parseProbeResults(body, req.paths.length);
+      if (!parsed.ok) return { ok: false, status: 0, error: parsed.error };
+      return { ok: true, results: parsed.kinds };
+    } finally {
+      deps.clearTimeout(deadlineTimer);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
+    }
+  }
+
+  const preview = { fetch: previewFetch, probe: probePost };
 
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */

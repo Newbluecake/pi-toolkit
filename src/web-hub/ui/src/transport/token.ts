@@ -20,6 +20,7 @@ import type {
   CmdOutcome,
   HubTransport,
   PreviewOutcome,
+  PreviewProbeOutcome,
   PreviewTransport,
   RemoveAgentOutcome,
   RemoveTarget,
@@ -170,6 +171,10 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // side-effect free), so a final `E_AUTH` means the stored token is dead — same
       // `withAuthNotice` rule as upload/spawn.
       fetch: (req, opts) => withAuthNotice(deps, () => client.preview.fetch(req, opts) as Promise<PreviewOutcome>),
+      // 2026-10-07 修订「先探测后标记」: same final-E_AUTH rule for the batch probe — the
+      // client already replayed once through `withRelogin` (a probe POST is read-only,
+      // replay-safe).
+      probe: (req, opts) => withAuthNotice(deps, () => client.preview.probe(req, opts) as Promise<PreviewProbeOutcome>),
     } satisfies PreviewTransport,
   } satisfies HubTransport;
 }

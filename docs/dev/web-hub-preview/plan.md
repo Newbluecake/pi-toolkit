@@ -843,3 +843,34 @@ caps 对照：off 时与现状深相等；loopback 时多出 `preview.v1`；on �
 | 哈希单飞                                  | 文本复核按 `(uploadId, identity)` 单飞                                            | 主会话 2026-10-05     |
 | `:行号` 跳转定位                          | S1 不做                                                                           | v3 收敛               |
 | 与 fleet 的合入顺序                       | 默认 preview 在前；PV1 开工前与 fleet 对齐，对方不同意时回退（§2.3）              | v3 收敛               |
+
+---
+
+## 修订（2026-10-07）：批量探测 probe 端点与「先探测后标记」
+
+背景：§4.6 的识别规则是纯形状匹配（含 2026-10-07 上午的规则 1b 相对路径），点击后 hub 端 `GET /api/preview` 才发现文件不存在——用户点开才知道。本修订把「存在性/可预览性」的判定前移到渲染层标记**之前**：后端批量探测确认，确认过的才渲染为可点。
+
+### 端点契约（`POST /api/preview/probe`）
+
+- 请求：`POST /api/preview/probe?agentKey=&sessionId=`，body `{ "paths": ["/abs/path", …] }`；**≤100 条**（超 ⇒ 400 `E_BAD_REQUEST{reason:"too-many"}`）、**请求体 ≤8 KiB**（Content-Length 预检 + 流式累计，超 ⇒ 413 `E_BAD_REQUEST{reason:"body"}`）；JSON 形状错误 ⇒ 400（`json`/`shape`）。单条路径非法**不是**请求错误——该条自身答 `missing`（一条坏候选不拖垮整条消息的探测）。
+- 应答：`200 { "results": [{ "kind": "text"|"image"|"missing" }, …] }`，与请求**同序同长**。
+- `kind` 判定：与 preview **完全相同的准入链**——§3.1 ⑤（会话可见性，请求级：未知 agent ⇒ 404、sessionId 不符 ⇒ 409）→ ⑥ 分类 → ⑦ 开启（cwd 类走 §4.3 十三步 admitter；upload 类走 §4.2 `openForPreview` 全链含 sha256 复核）——之后读文件头 `min(size, 8 KiB)`（§4.4 嗅探头部即可：magic number + 文本判定，不做 JPEG 续读、不要 dims）用**既有 `sniff()`** 判型。准入失败/不存在/非普通文件/binary/预算耗尽 ⇒ 一律 `missing`（「点了也打不开」全部折叠进 missing，UI 保持纯文本）。安全规则只有一份：⑤⑥⑦ 被抽成 `hub/preview/open.ts` 的 `openAdmittedPath`，preview 原端点改为复用（本修订前是 routes.ts 内联），probe 逐条调用同一函数——不存在第二份准入代码。
+- 认证/来源：与 `GET /api/preview` 完全对齐——① `X-PWH: 1` + Origin/Sec-Fetch-Site CSRF（认证**之前**）→ ② listener 自己的 authorize（loopback cookie / LAN `requireLanSession`，同一 §3.1② reserve）→ ④ 独立令牌桶（key `…:probe`，同一 D14 私有 limiter）+ in-flight 占一席 → 派发矩阵同 §4.7（LAN 仅 `mode === "on"`；`mode:"loopback"` LAN 404 与未启用字节一致）。整请求一条 `audit:"preview", phase:"probe"` 审计行（`total` = 路径数，永不含原始路径）。deadline 共用 `PREVIEW_ADMIT_TOTAL_MS`：批次中途耗尽的条目降级 `missing`，请求仍 200。
+- 常量（`protocol/preview.ts` 冻结）：`PREVIEW_PROBE_PATH`、`PREVIEW_PROBE_MAX_PATHS=100`、`PREVIEW_PROBE_MAX_BODY_BYTES=8192`、`PreviewProbeKind`、`PREVIEW_PROBE_CLIENT_TIMEOUT_MS=5000`。
+
+### UI 探测流水线（先探测后标记）
+
+- `PathText.vue`：识别出的候选**先按纯文本渲染**（与今天的非 ref 片段 DOM 等价），经 `handle.probe.stateOf(path)` 查态——`confirmed` 才升级为 `.path-ref` 按钮；`pending`/`missing`/`failed`/未入队全部保持纯文本。handle 不带 `probe`（transport 未实现）时保持旧版「识别即可点」，冻结的组件 fake 全部不受影响。流式抑制（§4.6）不变：流式期间不探测，settle 后一次扫描 + 一次探测。
+- 批量合并：`usePreviewProbe`（App 级，挂在 `usePreview` 返回的 handle 上）只在 flush 窗口收集候选——一条消息的所有 `PathText` 片段在同一渲染 tick 内提交，合并为**一次** probe 请求（超限由 `planProbeBatches` 按 100 条/8 KiB 切批）。
+- 缓存与状态机（`logic/previewProbe.js`，纯逻辑）：按 `scopeKey`（§4.6 的 `agentKey|sessionId|cwd`）键控的 LRU（cap 256，跨 scope 统一淘汰）；状态 `pending → confirmed | missing | failed` 皆终态（除 pending），已决路径永不重发（LRU 命中即免请求）。**scope 变化 ⇒ 天然作废**：key 已换，旧结果留在 LRU 里自灭，新 scope 重新探测。
+- 失败降级：请求失败（断线/超时 5s/非 200/应答形状不符）⇒ 该批整体 `failed`，全部按纯文本渲染，**不阻塞渲染、不自动重试**（failed 终态，仅 scope 变化后才会再探）。
+- 相对路径候选（规则 1b）：探测前已由 `findPathRefs`/`pathRefOfCode` 解析为 `scope.cwd + "/" + 候选`，probe 发的是解析后的绝对路径；显示文本保持原始相对形式（与点击时请求的路径一致）。
+- transport：`PreviewTransport.probe?`（可选成员，冻结面只增不改）；token/password 两 client 各自实现（POST + `X-PWH:1` + cookie，5s deadline，token 走 withRelogin 重放——探测只读、重放安全），`transport-contract.test.ts` 共享套件钉两侧一致。
+
+### 不改的部分
+
+`findPathRefs`/`pathRefOfCode` 识别规则本身（它只是候选生成器）；preview 准入安全链语义（仅把 ⑤⑥⑦ 抽成共享函数，判定逐字节不变，`routes.test.ts` 全量钉住）；上传件路径走同一探测链路；`GET /api/preview` 的流式/复核行为。
+
+### 测试锚点
+
+`tests/web-hub/hub/preview/probe.test.ts`（逐条 kind/准入同链/请求级拒绝/上限/dispose/审计）、`tests/web-hub/http/api-preview-probe.test.ts`（真实 frontend 派发 + 认证对齐 + 方法钉）、`tests/web-hub/ui/logic-preview-probe.test.ts`（store/LRU/切批/应答解析）、`tests/web-hub/ui/use-preview-probe.test.ts`（状态机/单请求合并/LRU 免重发/失败降级/scope 重探/dispose）、`tests/web-hub/ui/preview-probe-path-text.test.ts`（组件渲染升级、missing 保持纯文本、相对路径按绝对路径探测、无 probe 旧版行为、TxAssistant 单批合并、流式不探测）。

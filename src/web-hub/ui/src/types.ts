@@ -18,6 +18,7 @@
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
 import type { FleetRowWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
+import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
 import type { ConnState, PreviewTransport } from "./transport/types.js";
 import type {
   RemoveAgentOutcome,
@@ -397,6 +398,10 @@ export interface PreviewHandle {
   /** error(retryable) ⇒ re-open the same path; a no-op in every other phase. */
   retry(): void;
   dispose(): void;
+  /** 2026-10-07 修订「先探测后标记」: the batch probe controller — present iff the transport
+   * implements `probe`. Absent ⇒ `PathText` keeps the legacy always-clickable rendering
+   * (every frozen component fake stays valid). */
+  readonly probe?: PreviewProbeHandle;
 }
 
 // ---------------------------------------------------------------------------

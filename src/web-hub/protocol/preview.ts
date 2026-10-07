@@ -16,6 +16,28 @@
 /** The single preview endpoint (§0/§4.7: dispatched only for `GET` + this exact path). */
 export const PREVIEW_PATH = "/api/preview";
 
+/** The batch existence-probe endpoint (2026-10-07 修订「先探测后标记」): `POST` + this exact
+ * path. Dispatched by the same listener matrix as `GET /api/preview` (LAN only when the
+ * preview mode is `"on"`); every entry walks the SAME admission chain as a real preview. */
+export const PREVIEW_PROBE_PATH = "/api/preview/probe";
+
+/** Probe request cap: at most this many paths per request (`paths.length` over ⇒ 400). */
+export const PREVIEW_PROBE_MAX_PATHS = 100;
+
+/** Probe request cap: request BODY (JSON incl. every path) capped at 8 KiB (over ⇒ 413). */
+export const PREVIEW_PROBE_MAX_BODY_BYTES = 8 * 1024;
+
+/** Probe per-entry wire kinds (2026-10-07): `text`/`image` use the §4.4 sniff on the file's
+ * head; `missing` covers not-found, not-admitted (cwd defences / upload store refusal) AND
+ * sniffed-binary — every "a preview click could not have succeeded" case collapses to it so
+ * the UI keeps the candidate as plain text. */
+export type PreviewProbeKind = "text" | "image" | "missing";
+
+/** §3.2 probe client timeout (2026-10-07): a probe is advisory UI metadata, never worth
+ * blocking a transcript on — on this deadline (or any transport failure) every entry of the
+ * batch degrades to plain text ("failed"), no retry storm. */
+export const PREVIEW_PROBE_CLIENT_TIMEOUT_MS = 5_000;
+
 /** `webHub.preview` setting / availability tri-value (§0 LAN 策略). */
 export type PreviewMode = "on" | "loopback" | "off";
 

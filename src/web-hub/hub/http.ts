@@ -75,7 +75,7 @@ import type { AgentRemoveFrontendPort, AgentRemoveIo } from "./agent-remove.js";
 import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
-import { PREVIEW_PATH } from "../protocol/preview.js";
+import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
 import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
 import { sendJsonNegotiated } from "./gzip.js";
@@ -1305,6 +1305,26 @@ async function handleLanRequestInner(
   // least 4s of the 8s admission budget must remain for the fs phases).
   if (rt.preview !== undefined && rt.preview.mode === "on" && method === "GET" && path === PREVIEW_PATH) {
     return rt.preview.handle(req, res, query, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, PREVIEW_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      sendJson,
+    });
+  }
+
+  // web-hub-preview 2026-10-07 修订「先探测后标记」: `POST /api/preview/probe` — the batch
+  // existence probe, dispatched right after the preview branch with the IDENTICAL §4.7 LAN
+  // gate (`mode === "on"`; `mode:"loopback"` falls through to the original 404, byte-
+  // identical to not-enabled) and the same authorize segment (preview's §3.1 ② reserve).
+  if (rt.preview !== undefined && rt.preview.mode === "on" && method === "POST" && path === PREVIEW_PROBE_PATH) {
+    return rt.preview.handleProbe(req, res, query, {
       listener: "lan",
       ip: ctx.clientIp,
       expectedOrigin: ctx.externalOrigin,
@@ -2570,6 +2590,24 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     // budgeting, same as every other loopback branch).
     if (previewRoutes !== undefined && method === "GET" && path === PREVIEW_PATH) {
       return previewRoutes.handle(req, res, query, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        sendJson,
+      });
+    }
+    // web-hub-preview 2026-10-07 修订: `POST /api/preview/probe` — same insertion point as the
+    // preview branch above (loopback answers whenever the route frontend exists; the loopback
+    // authorize segment is the same sync cookie lookup every other loopback branch uses).
+    if (previewRoutes !== undefined && method === "POST" && path === PREVIEW_PROBE_PATH) {
+      return previewRoutes.handleProbe(req, res, query, {
         listener: "loopback",
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),

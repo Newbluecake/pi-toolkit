@@ -11,9 +11,17 @@
   Click and Enter/Space (native button grammar on `role="button"`) open the preview through
   the App-level `usePreview` handle; the `:line[:col]` display suffix stays in the visible
   text but is stripped from the request path (§4.6 rule 3).
+
+  2026-10-07 修订「先探测后标记」: when the handle carries `probe` (the transport implements
+  `POST /api/preview/probe`), a recognized candidate is NO LONGER clickable on sight — it
+  renders plain text until the backend confirms the resource exists and sniffs text/image
+  (`stateOf(path) === "confirmed"`); pending/missing/failed all keep the plain rendering
+  (identical DOM to today's non-ref segments). Candidates are submitted once per render tick
+  through `probe.ensure(...)` — one message's segments merge into ONE batched request in the
+  composable. Without `probe` the legacy always-clickable behavior is byte-identical.
 -->
 <script setup lang="ts">
-import { computed, inject } from "vue";
+import { computed, inject, watch } from "vue";
 import { findPathRefs, pathRefOfCode } from "@logic/preview.js";
 import { PATH_REFERENCES_SUSPENDED, PREVIEW_CTX } from "./previewContext.js";
 
@@ -35,11 +43,45 @@ const plain = computed(
   () => props.noRefs === true || suspended?.value === true || ctx === null || scope.value === null,
 );
 
+/** 2026-10-07 修订: the probe controller — absent ⇒ legacy always-clickable rendering. */
+const probe = computed(() => ctx?.handle.probe ?? null);
+
 type Segments = ReturnType<typeof findPathRefs>;
 const segments = computed<Segments | null>(() =>
   props.code === true || plain.value ? null : findPathRefs(props.text, scope.value),
 );
 const codeRef = computed(() => (props.code === true && !plain.value ? pathRefOfCode(props.text, scope.value) : null));
+
+/** A candidate is clickable iff confirmed by the backend (or no probe pipeline exists). */
+function clickable(path: string): boolean {
+  const p = probe.value;
+  return p === null ? true : p.stateOf(path) === "confirmed";
+}
+
+/** Candidates of this instance, in render order — submitted to the probe pipeline so the
+ * composable can batch ONE request per tick. Empty whenever plain (streaming included —
+ * §4.6 流式抑制 keeps probe traffic off half-typed messages too). */
+const candidates = computed<string[]>(() => {
+  const p = probe.value;
+  if (p === null || plain.value) return [];
+  const list: string[] = [];
+  if (props.code === true) {
+    const cr = codeRef.value;
+    if (cr !== null) list.push(cr.path);
+    return list;
+  }
+  const segs = segments.value;
+  if (segs !== null) for (const seg of segs) if (seg.kind === "ref") list.push(seg.path);
+  return list;
+});
+
+watch(
+  candidates,
+  (paths) => {
+    if (paths.length > 0) probe.value?.ensure(paths);
+  },
+  { immediate: true },
+);
 
 function openPath(path: string): void {
   ctx?.handle.open({ path });
@@ -56,7 +98,7 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
 
 <template>
   <code
-    v-if="code === true && codeRef !== null"
+    v-if="code === true && codeRef !== null && clickable(codeRef.path)"
     class="md-code path-ref"
     role="button"
     tabindex="0"
@@ -69,7 +111,7 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
   <template v-else>
     <template v-for="(seg, i) in segments" :key="i">
       <span
-        v-if="seg.kind === 'ref'"
+        v-if="seg.kind === 'ref' && clickable(seg.path)"
         class="path-ref"
         role="button"
         tabindex="0"

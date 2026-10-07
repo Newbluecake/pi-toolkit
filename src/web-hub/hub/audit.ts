@@ -314,7 +314,10 @@ export function auditSpawn(log: { info(msg: string, data?: object): void }, reco
  * (429 repeats are throttled by the routes to one line per `preview:${principal}` per 60s).
  */
 export interface PreviewAuditRecord {
-  phase: "request";
+  /** `"request"` = a `GET /api/preview` pipeline run; `"probe"` = a `POST
+   * /api/preview/probe` batch (2026-10-07 修订 — `total` carries the path count, never a
+   * path). */
+  phase: "request" | "probe";
   listener?: "loopback" | "lan" | undefined;
   ip?: string | undefined;
   user?: string | undefined;

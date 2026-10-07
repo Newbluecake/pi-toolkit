@@ -394,4 +394,23 @@ export interface PreviewTransport {
     req: { readonly agentKey: string; readonly sessionId: string; readonly path: string },
     opts: { readonly signal: AbortSignal; readonly maxPixels: number },
   ): Promise<PreviewOutcome>;
+  /** 2026-10-07 修订「先探测后标记」: `POST /api/preview/probe` — batch existence probe, same
+   * auth/CSRF surface as `fetch` (cookie credentials + `X-PWH: 1`), ONE request for a whole
+   * message's candidates. Optional per the frozen-types convention — an older/foreign
+   * transport without it simply keeps the legacy always-clickable rendering (`usePreview`
+   * omits `handle.probe` and `PathText` degrades to pre-probe behavior). */
+  probe?(
+    req: { readonly agentKey: string; readonly sessionId: string; readonly paths: readonly string[] },
+    opts?: { readonly signal?: AbortSignal },
+  ): Promise<PreviewProbeOutcome>;
 }
+
+/**
+ * 2026-10-07: the probe outcome. Success carries the per-entry sniff kinds in request order
+ * (`"missing"` = not found / not admitted / binary); the error half is the same shape as
+ * `PreviewOutcome`'s (status 0 for client-local codes) — the composable maps ANY error half
+ * to a batch-wide "failed" degrade, so only `status`/`error`/`retryAfterS` are kept.
+ */
+export type PreviewProbeOutcome =
+  | { readonly ok: true; readonly results: ReadonlyArray<"text" | "image" | "missing"> }
+  | { readonly ok: false; readonly status: number; readonly error: string; readonly retryAfterS?: number };
