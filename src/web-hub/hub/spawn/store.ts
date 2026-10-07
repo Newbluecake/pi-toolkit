@@ -24,10 +24,17 @@
 import { readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import {
+  isValidRestoreSessionFile,
   parseSpawnModelRef,
+  RESTORE_FAILURES,
+  RESTORE_MAX_ATTEMPTS,
+  RESTORE_PHASES,
+  RESTORE_SESSION_ID_RE,
   SPAWN_NONTERMINAL_MAX,
   SPAWN_TERMINAL_KEEP,
   type FirstPromptState,
+  type RestoreFailure,
+  type RestorePhase,
   type SpawnEndReason,
   type SpawnHint,
   type SpawnState,
@@ -43,8 +50,17 @@ import type { ReqDeadline } from "../req-deadline.js";
 export type StoredSpawnState = "launching" | SpawnState;
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set(["exited", "failed"]);
-const ALL_STATES: ReadonlySet<string> = new Set(["launching", "starting", "live", "stopping", "exited", "failed"]);
-const END_REASONS: ReadonlySet<string> = new Set([
+/** Exported read-only for the D11 rollback pin — NEVER extend. */
+export const ALL_STATES: ReadonlySet<string> = new Set([
+  "launching",
+  "starting",
+  "live",
+  "stopping",
+  "exited",
+  "failed",
+]);
+/** Exported read-only for the D11 rollback pin (store.test.ts) — NEVER extend (web-hub-spawn-restore D11). */
+export const END_REASONS: ReadonlySet<string> = new Set([
   "user",
   "lifetime",
   "hub",
@@ -56,7 +72,8 @@ const END_REASONS: ReadonlySet<string> = new Set([
   "exited_early",
   "cwd_mismatch",
 ]);
-const HINTS: ReadonlySet<string> = new Set([
+/** Exported read-only for the D11 rollback pin (store.test.ts) — NEVER extend (web-hub-spawn-restore D11). */
+export const HINTS: ReadonlySet<string> = new Set([
   "register-timeout-hello",
   "register-timeout-session",
   "control-off",
@@ -139,6 +156,78 @@ export interface StoredRecord {
    * crash-recovery environ scan merely found nothing (true miss vs. an inconclusive scan are
    * indistinguishable) carries NO evidence here on purpose — it stays `unknown`. */
   noProcess?: "never-forked" | "boot-changed";
+  // ---- web-hub-spawn-restore plan v1 §5.1: all optional, unknown to an old hub (it ignores them
+  // and drops them on its next write — D11: no version bump, no persisted enum grows).
+  /** The bound agent's session id (written at goLive / live session switch, only when restore is on). */
+  sessionId?: string | undefined;
+  /** Absolute session file path (`isValidRestoreSessionFile`); absent ⇒ restore uses `--session-id`. */
+  sessionFile?: string;
+  /** The session file was once observed on disk (D7's "it existed, now it is gone" evidence). */
+  sessionPersisted?: true;
+  /** D4: tagged by a graceful restore-mode shutdown (saveNow BEFORE any stdin EOF). */
+  restoreIntent?: true;
+  /** §5.1 restore bookkeeping; see `StoredRestore`. */
+  restore?: StoredRestore;
+}
+
+/** web-hub-spawn-restore plan §5.1: a record's restore state machine slice. */
+export interface StoredRestore {
+  /** Restore forks started (incremented when the fork intent is written, BEFORE the fork).
+   * 0..RESTORE_MAX_ATTEMPTS — 0 is a candidate still reaping its first old process, or one that
+   * failed preflight before its first fork (plan §5.1 says 1..3; 0 is required by §6.4/§6.5's own
+   * flow, which persists `restore` before the first fork intent — see the delivery report). */
+  attempts: number;
+  lastAt: number;
+  /** Restore in flight; undefined ⇒ back to live (stability window) or failed. */
+  phase?: RestorePhase;
+  /** `forking`: lower bound for the crash-recovery environ scan (spawnId is reused, §7 L1). */
+  forkIntentAt?: number;
+  /** The previous process's agentKey (UI successor mapping, registry removal after death). */
+  prevAgentKey?: string;
+  failure?: RestoreFailure;
+  restoredAt?: number;
+}
+
+const RESTORE_PHASE_SET: ReadonlySet<string> = new Set(RESTORE_PHASES);
+const RESTORE_FAILURE_SET: ReadonlySet<string> = new Set(RESTORE_FAILURES);
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+/** §5.2: the new fields are STRICT — present ⇒ must be exactly valid, else the whole file is corrupt. */
+function isRestoreFieldsOk(v: Record<string, unknown>): boolean {
+  const sessionId = v["sessionId"];
+  if (sessionId !== undefined && (typeof sessionId !== "string" || !RESTORE_SESSION_ID_RE.test(sessionId))) {
+    return false;
+  }
+  const sessionFile = v["sessionFile"];
+  if (sessionFile !== undefined && (typeof sessionFile !== "string" || !isValidRestoreSessionFile(sessionFile))) {
+    return false;
+  }
+  const sessionPersisted = v["sessionPersisted"];
+  if (sessionPersisted !== undefined && sessionPersisted !== true) return false;
+  const restoreIntent = v["restoreIntent"];
+  if (restoreIntent !== undefined && restoreIntent !== true) return false;
+  const restore = v["restore"];
+  if (restore === undefined) return true;
+  if (!isRecord(restore)) return false;
+  const attempts = restore["attempts"];
+  if (typeof attempts !== "number" || !Number.isInteger(attempts) || attempts < 0 || attempts > RESTORE_MAX_ATTEMPTS) {
+    return false;
+  }
+  if (!isFiniteNumber(restore["lastAt"])) return false;
+  const phase = restore["phase"];
+  if (phase !== undefined && (typeof phase !== "string" || !RESTORE_PHASE_SET.has(phase))) return false;
+  const failure = restore["failure"];
+  if (failure !== undefined && (typeof failure !== "string" || !RESTORE_FAILURE_SET.has(failure))) return false;
+  const forkIntentAt = restore["forkIntentAt"];
+  if (forkIntentAt !== undefined && !isFiniteNumber(forkIntentAt)) return false;
+  const restoredAt = restore["restoredAt"];
+  if (restoredAt !== undefined && !isFiniteNumber(restoredAt)) return false;
+  const prevAgentKey = restore["prevAgentKey"];
+  if (prevAgentKey !== undefined && typeof prevAgentKey !== "string") return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +408,7 @@ function isRecordShapeOk(v: unknown): v is StoredRecord {
     const attempts = firstPrompt["attempts"];
     if (attempts !== undefined && (typeof attempts !== "number" || !Number.isFinite(attempts))) return false;
   }
+  if (!isRestoreFieldsOk(v)) return false;
   return true;
 }
 

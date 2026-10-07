@@ -156,6 +156,22 @@
 | B8  | 带一个运行中 subagent 时停止（V4）               | 记录是否进入 SIGTERM 阶段与总耗时                                                                  | 待真机                                                                      |
 | B9  | supersede：网页会话忙时安装新版本                | banner 提示「N 个网页会话将结束」；会话空闲后才替换（或 30 分钟强制）                              | 单测（supersede `managedBusy`；SP13 已并入首条消息在途分量 `sendingCount`） |
 
+## R：restore（受管会话跨 hub 重启恢复）
+
+设计：`docs/dev/web-hub-spawn-restore/plan.md`（§12.4）。前置：`webHub.spawn.enabled: true`，`webHub.spawn.restore`
+保持默认 `true`；沿用 §1 的 tmux 会话与临时 `$HOME`。每步结束都用 §5 的方法对比进程基线，并核对
+`pgrep -fa PI_WEBHUB_SPAWN_ID`（或 `/proc/*/environ`）中同一 spawnId 的 pi 进程**任何时刻至多一个**（L6）。
+
+| #   | 步骤                                                            | 预期                                                                                                                                                                         |
+| --- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | 网页起两个会话（两个目录），各聊一轮 → TUI 里 `/webhub restart` | 两行 `restoring` SpawnRow（阶段提示 reaping → forking → registering）后，两张卡片回到 live（`web` + `restored` 徽标）；历史完整、模型未变；新 pid ≠ 旧 pid；记录实测恢复耗时 |
+| R2  | `kill -9 <hub pid>`（至少一个 TUI 在线，等它自动拉起 hub）      | 自动拉起后恢复到 live；旧 pi 被核验后 TERM（必要时 KILL）结束，不出现两个同 spawnId 的 pi                                                                                    |
+| R3  | 恢复进行中刷新浏览器                                            | 只看到 `restoring` 行，没有重复卡片；旧卡片若短暂重连，显示 `restoring` 徽标且 composer 只读（「会话正在恢复中，恢复完成前无法发送。」）                                     |
+| R4  | `/webhub stop` → `/webhub start`                                | **不恢复**：记录照旧结局（`exited{hub}`），`<stateDir>/spawn/restore.veto` 被新 hub 消费删除；随后再 `/webhub restart` 时恢复功能照常（restart 先删 veto）                   |
+| R5  | 正在查看某受管会话详情时 `/webhub restart`                      | 详情页先显示「正在恢复会话」，恢复完成后自动切到新卡片（URL `#/agent/<新 key>`），不出现「已删除」空态；发起该会话的其它标签页不会被拽走                                     |
+| R6  | 失败路径抽查：恢复前手动移走某会话文件后 `/webhub restart`      | 该记录显示 `failed` + 「会话文件已不存在，无法恢复」；其它会话照常恢复                                                                                                       |
+| R7  | `webHub.spawn.restore: false` → `/reload` → `/webhub restart`   | 行为与恢复功能上线前一致：受管会话随旧 hub 结束（`exited{hub}`），`spawns.json` 中不出现 `sessionId`/`restore` 等新字段                                                      |
+
 ## 4. S2 验收（不阻塞 S1）
 
 | #   | 项目                       | 预期                                                                          |

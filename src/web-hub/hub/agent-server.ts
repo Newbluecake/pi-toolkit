@@ -61,6 +61,9 @@ export function createAgentServer(
     admin?: AdminHandler;
     /** C8/C10: scan rotate.intent on every successful hello. */
     onHello?: () => void;
+    /** spawn-restore §9.3: when set, a `shutdown{reason:"restart"}` ack carries the hub's
+     * restore-candidate count (`restoreCount`) so the TUI can say how many sessions come back. */
+    restoreCount?: () => number;
     /** web-hub-spawn plan §SP10（arch §7.1）：hub 装配层逆来的追加 cap（`[SPAWN_HUB_CAP]`，仅
      * `config.spawn` 存在时）——与 hub.ts 的 `HubInfo.caps` 共用同一个数组，保持两面字节一致
      * （§3.1 compat matrix 不变量，同 UPLOAD/DIALOG_BG 的追加模式）。可选：缺省时 caps 与
@@ -217,7 +220,11 @@ export function createAgentServer(
           }
           return;
         }
-        write({ t: "hub_ctl_ack", rid: frame.rid });
+        const rc = frame.reason === "restart" ? deps.restoreCount?.() : undefined;
+        // 0 is omitted entirely — exact-shape ack consumers (and older TUI code reading the
+        // frame) only ever see the field when there is something to restore.
+        const restoreCount = rc !== undefined && rc > 0 ? rc : undefined;
+        write({ t: "hub_ctl_ack", rid: frame.rid, ...(restoreCount === undefined ? {} : { restoreCount }) });
         deps.admin?.handleShutdown(meta, frame.reason);
         return;
       }

@@ -28,6 +28,17 @@
  *     `Error: Model "nosuch/<…>" not found. Use --list-models to see available models.` to
  *     stderr and exit 1 BEFORE the socket half (the D5 delayed-verdict cells).
  *
+ * web-hub-spawn-restore plan RS8: the restore fork's argv TAIL is a session coordinate, honored too:
+ *   - `--session <abs file>`: read the file's header line (`{type:"session", id, cwd}`), report
+ *     `sessionId = header.id` + `sessionFile = <file>` (a missing/garbage file ⇒ a fresh id, like
+ *     pi's F22 "opens an empty session at that path").
+ *   - `--session-id <id>`: report that id (no sessionFile — pi creates it lazily).
+ *   - `--write-session` (switch): report `sessionFile = $HOME/.pi/agent/sessions/fake/<id>.jsonl`,
+ *     write its header right after going live, then emit `status{busy:true}` → `status{busy:false}`
+ *     (one completed "turn" — the hub's sessionPersisted evidence path).
+ *   Argv is still dumped to `FAKE_ARGV_OUT` (default-model H9) and, per process, appended as one
+ *   JSON line (`{pid, argv}`) to `<cwd>/.fake-pi-argv.log` (restore tests read every fork's argv).
+ *
  * Switches (all optional):
  *   --ignore-eof           stdin EOF does NOT exit (orphan-kill tests)
  *   --ignore-term          SIGTERM does NOT exit (reaper/recovery KILL ladder)
@@ -89,6 +100,17 @@ try {
 } catch {
   /* argv dump is best-effort */
 }
+// web-hub-spawn-restore RS8: every fork's argv, one JSON line per process (cwd-local file so
+// the hub's env stays byte-identical to production — the switch file pattern again).
+try {
+  const fs3 = await import("node:fs");
+  fs3.appendFileSync(
+    `${process.cwd()}/.fake-pi-argv.log`,
+    `${JSON.stringify({ pid: process.pid, argv: process.argv.slice(2) })}\n`,
+  );
+} catch {
+  /* best-effort */
+}
 
 const log = (line) => {
   try {
@@ -110,7 +132,27 @@ const log = (line) => {
 
 const now = () => Date.now();
 const nonce = `fp${process.pid.toString(36).padStart(8, "0").slice(-8)}nonceAAAAAAAA`;
-const sessionId = `sess-fake-${process.pid.toString(36)}`;
+// web-hub-spawn-restore RS8: session coordinates from the restore argv tail (see header).
+let sessionId = `sess-fake-${process.pid.toString(36)}`;
+let sessionFile;
+{
+  const fs4 = await import("node:fs");
+  const file = valueOf("--session", "");
+  const byId = valueOf("--session-id", "");
+  if (file !== "") {
+    sessionFile = file;
+    try {
+      const header = JSON.parse(fs4.readFileSync(file, "utf8").split("\n")[0]);
+      if (header && header.type === "session" && typeof header.id === "string") sessionId = header.id;
+    } catch {
+      /* missing/garbage file: pi opens an empty session at that path (F22) — fresh id */
+    }
+  } else if (byId !== "") {
+    sessionId = byId;
+  } else if (has("--write-session")) {
+    sessionFile = `${process.env.HOME ?? "/nonexistent"}/.pi/agent/sessions/fake/${sessionId}.jsonl`;
+  }
+}
 const epoch = `fake-epoch-${process.pid}`;
 
 log(`FAKE-PI pid=${process.pid} umask=0o${process.umask().toString(8).padStart(3, "0")} cwd=${process.cwd()}`);
@@ -173,6 +215,7 @@ function connectAndHello() {
         sockSend({
           t: "session",
           sessionId,
+          ...(sessionFile === undefined ? {} : { sessionFile }),
           cwd: process.cwd(),
           reason: "startup",
           leafId: null,
@@ -349,7 +392,7 @@ const diagFile = `${process.cwd()}/.fake-pi-diag`;
 const diag = (line) => {
   try {
     const fs = require("node:fs");
-    fs.appendFileSync(diagFile, `${Date.now()} ${line}\n`);
+    fs.appendFileSync(diagFile, `${Date.now()} pid=${process.pid} ${line}\n`);
   } catch {}
 };
 // Broken-pipe hardening: after the hub dies, ANY stdout/stderr write rejects asynchronously
@@ -385,6 +428,25 @@ process.on("SIGINT", () => {
 
 function afterLive() {
   // fired once hello_ack arrived and the session frame went out — the record is `live`
+  if (has("--write-session") && sessionFile !== undefined && valueOf("--session", "") === "") {
+    // one simulated turn: the session file appears, then status busy → idle (RS3 evidence path)
+    setTimeout(() => {
+      try {
+        const fs5 = require("node:fs");
+        const dir = sessionFile.slice(0, sessionFile.lastIndexOf("/"));
+        fs5.mkdirSync(dir, { recursive: true });
+        fs5.writeFileSync(
+          sessionFile,
+          `${JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() })}\n`,
+        );
+        log(`SESSION-WRITTEN ${sessionFile}`);
+      } catch (err) {
+        log(`SESSION-WRITE-FAILED ${String(err && err.message)}`);
+      }
+      sockSend({ t: "status", leafId: null, busy: true, pending: false });
+      setTimeout(() => sockSend({ t: "status", leafId: null, busy: false, pending: false }), 50);
+    }, 50);
+  }
   const huge = valueOf("--emit-ui-huge", "");
   if (huge !== "") emitHugeUi(huge);
   if (has("--emit-ui-bad-head")) emitBadHead();

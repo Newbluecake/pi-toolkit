@@ -58,6 +58,27 @@ describe("restartHub (plan §8.2; LE)", () => {
     expect(readStartTicksNow).not.toHaveBeenCalled();
   });
 
+  it("ctl.v1 ack carrying restoreCount ⇒ the outcome reports it (spawn-restore §9.3)", async () => {
+    const record: HubIdentityRecord = { pid: 555, procStartTicks: 1, argv: ["a", "b", "c"] };
+    let alive = true;
+    const spawn = vi.fn();
+    const deps = baseDeps({
+      isLiveWithCap: (cap) => cap === "ctl.v1",
+      request: async (frame): Promise<HubCtlAckFrame> => ({ t: "hub_ctl_ack", rid: frame.rid, restoreCount: 2 }),
+      readHubRecord: () => record,
+      pidAlive: () => alive,
+      spawn,
+      now: () => Date.now(),
+    });
+    const done = vi.fn();
+    void restartHub(deps).then(done);
+    await vi.advanceTimersByTimeAsync(50);
+    alive = false;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(done).toHaveBeenCalledWith({ kind: "restarted", restoreCount: 2 });
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
   it("ctl.v1 acked but pid never exits within 5s ⇒ failed, no spawn, no /proc reads", async () => {
     const record: HubIdentityRecord = { pid: 555, procStartTicks: 1, argv: ["a", "b", "c"] };
     const kill = vi.fn();

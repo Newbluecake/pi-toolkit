@@ -9,7 +9,7 @@ import { computed, inject } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { formatPercent } from "../../format.js";
-import { managedFor } from "../../logic/spawn.js";
+import { isFreshlyRestored, managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { AgentCardProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
 
@@ -28,6 +28,10 @@ const needsAnswer = computed(() => {
 // web-hub-spawn SP12 (arch §9.1): a non-terminal spawn record managing this card's agent adds
 // the `web` badge — same inject channel as needsAnswer (the frozen props stay untouched).
 const managed = computed(() => managedFor(hub?.state.value.spawns ?? null, props.card.key));
+// spawn-restore plan §9.1: the OLD card of a restore in flight (F20 brief reconnect) shows
+// `restoring`; a freshly restored card shows `restored` for the stability window.
+const restoring = computed(() => restoringKeys(hub?.state.value.spawns ?? null).has(props.card.key));
+const restored = computed(() => managed.value !== undefined && isFreshlyRestored(managed.value));
 
 const dotClass = computed(() => {
   switch (props.card.visualState) {
@@ -62,6 +66,12 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       </span>
       <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
         {{ t("spawn.badgeWeb") }}
+      </span>
+      <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
+        {{ t("spawn.badgeRestoring") }}
+      </span>
+      <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
+        {{ t("spawn.badgeRestored") }}
       </span>
       <span v-if="managed?.removing" class="chip chip-removing" translate="no">
         {{ t("agents.removing") }}

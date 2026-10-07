@@ -1057,3 +1057,65 @@ describe("agents.css 搜索框放大镜与文字防重叠(2026-10 手机现场:-
     expect(rule(".search .icon")).toMatch(/pointer-events:\s*none/);
   });
 });
+
+/** spawn-restore plan §9.1: `restoring` (old card of a restore in flight, F20) / `restored`
+ * (managed live record inside its stability window) badges — English tokens in both languages. */
+describe("AgentCard.vue restore badges (spawn-restore plan §9.1)", () => {
+  const hubWithSpawns = (items: unknown[]): HubHandle =>
+    ({
+      state: ref({ agents: new Map(), spawns: { items, active: items.length, max: 4 } }),
+      dispatch: () => {},
+    }) as unknown as HubHandle;
+  const base = { createdAt: 1, updatedAt: 2, cwdLabel: "p" };
+
+  it("old key of an in-flight restore ⇒ `restoring`; freshly restored managed card ⇒ `restored` + `web`", () => {
+    const old = mount(AgentCard, {
+      props: { card: card({ key: "agent-old" }), selected: false },
+      global: {
+        provide: {
+          [HUB_CTX as symbol]: hubWithSpawns([
+            {
+              ...base,
+              spawnId: "s",
+              state: "starting",
+              restore: { phase: "forking", attempt: 1, prevAgentKey: "agent-old" },
+            },
+          ]),
+        },
+      },
+    });
+    expect(old.find(".chip-restoring").text()).toBe("restoring");
+    expect(old.find(".chip-restored").exists()).toBe(false);
+
+    const fresh = mount(AgentCard, {
+      props: { card: card({ key: "agent-new" }), selected: false },
+      global: {
+        provide: {
+          [HUB_CTX as symbol]: hubWithSpawns([
+            {
+              ...base,
+              spawnId: "s",
+              state: "live",
+              agentKey: "agent-new",
+              restore: { attempt: 1, prevAgentKey: "agent-old", restoredAt: 5 },
+            },
+          ]),
+        },
+      },
+    });
+    expect(fresh.find(".chip-restored").text()).toBe("restored");
+    expect(fresh.find(".chip-web").exists()).toBe(true);
+    expect(fresh.find(".chip-restoring").exists()).toBe(false);
+
+    const plain = mount(AgentCard, {
+      props: { card: card({ key: "agent-new" }), selected: false },
+      global: {
+        provide: {
+          [HUB_CTX as symbol]: hubWithSpawns([{ ...base, spawnId: "s", state: "live", agentKey: "agent-new" }]),
+        },
+      },
+    });
+    expect(plain.find(".chip-restored").exists()).toBe(false);
+    expect(plain.find(".chip-restoring").exists()).toBe(false);
+  });
+});

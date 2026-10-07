@@ -306,3 +306,56 @@ describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refr
     expect(wrapper.find(".detail .empty h2").text()).not.toBe("This agent is not connected");
   });
 });
+
+/**
+ * spawn-restore plan §9.1: a selected key that is the OLD agent of a restore in flight — even
+ * after `agent_removed` already dropped it — shows 「正在恢复」 instead of 「已删除」 (both layout
+ * branches); useHub's successor follow then moves the route (tested in use-hub.test.ts).
+ */
+function hubRestoring(key: string, removed: boolean): HubHandle {
+  const s = run([
+    { event: "hello", data: { clientId: "c1" } },
+    { event: "agents", data: [card(key), card("other-agent")] },
+    ...(removed ? [{ event: "agent_removed", data: { agentKey: key } }] : []),
+    {
+      event: "spawns",
+      data: {
+        items: [
+          {
+            spawnId: "sp-r",
+            state: "starting",
+            createdAt: 1,
+            updatedAt: 2,
+            cwdLabel: "p",
+            restore: { phase: "forking", attempt: 1, prevAgentKey: key },
+          },
+        ],
+        active: 1,
+        max: 4,
+      },
+    },
+  ] as Msg[]);
+  return { state: ref(s as unknown as HubState), dispatch: () => {} };
+}
+
+describe("DashboardView.vue — restoring empty state (spawn-restore plan §9.1)", () => {
+  it("split view: a reaped OLD key mid-restore shows 「restoring」, not 「已删除」", () => {
+    stubMatchMedia(false);
+    const wrapper = mountDashboard({ name: "agent", key: "old-1" }, hubRestoring("old-1", true));
+    expect(wrapper.find("[data-restoring]").exists()).toBe(true);
+    expect(wrapper.find("[data-restoring] .empty h2").text()).toBe("Restoring session");
+    expect(wrapper.text()).not.toContain("Session removed from the list");
+  });
+
+  it("narrow single view: same restoring state", () => {
+    stubMatchMedia(true);
+    const wrapper = mountDashboard({ name: "agent", key: "old-2" }, hubRestoring("old-2", true));
+    expect(wrapper.find("[data-restoring] .empty h2").text()).toBe("Restoring session");
+  });
+
+  it("an un-reaped old card still renders its real detail (badge + read-only dock live there)", () => {
+    stubMatchMedia(false);
+    const wrapper = mountDashboard({ name: "agent", key: "old-3" }, hubRestoring("old-3", false));
+    expect(wrapper.find("[data-restoring]").exists()).toBe(false);
+  });
+});

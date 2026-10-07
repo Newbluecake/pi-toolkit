@@ -49,6 +49,7 @@ describe("web-hub settings", () => {
         maxLifetimeMinutes: 720,
         registerTimeoutS: 30,
         lan: "off",
+        restore: true,
       },
     });
   });
@@ -517,12 +518,21 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       maxLifetimeMinutes: 720,
       registerTimeoutS: 30,
       lan: "off",
+      restore: true,
     });
     expect(parseWebHubSettings({}).spawn).toEqual(spawnDefaults);
     expect(parseWebHubSettings(undefined).spawn).toEqual(spawnDefaults);
     // non-object spawn blocks fall back wholesale, never throw
     for (const garbage of [null, 0, "nope", true, [], ["/x"]]) {
       expect(parseWebHubSettings({ spawn: garbage }).spawn, JSON.stringify(garbage)).toEqual(spawnDefaults);
+    }
+  });
+
+  it("web-hub-spawn-restore D18: restore keeps a real boolean, defaults to true for anything else", () => {
+    expect(parseWebHubSettings({ spawn: { restore: false } }).spawn?.restore).toBe(false);
+    expect(parseWebHubSettings({ spawn: { restore: true } }).spawn?.restore).toBe(true);
+    for (const garbage of ["no", 0, null, undefined, []]) {
+      expect(parseWebHubSettings({ spawn: { restore: garbage } }).spawn?.restore, JSON.stringify(garbage)).toBe(true);
     }
   });
 
@@ -618,6 +628,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
           maxLifetimeMinutes: 1440,
           registerTimeoutS: 45,
           lan: "known",
+          restore: false,
         },
       },
     }).webHub.spawn;
@@ -630,6 +641,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       maxLifetimeMinutes: 1440,
       registerTimeoutS: 45,
       lan: "known",
+      restore: false,
     });
   });
 
@@ -643,6 +655,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       "webHub.spawn.maxLifetimeMinutes",
       "webHub.spawn.registerTimeoutS",
       "webHub.spawn.lan",
+      "webHub.spawn.restore",
     ];
     for (const key of keys) {
       expect(isKnownSettingKey(key), key).toBe(true);

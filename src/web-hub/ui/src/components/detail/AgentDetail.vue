@@ -31,6 +31,7 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
 import { mergeQueue, newCmdId } from "@logic/control.js";
+import { restoringKeys } from "../../logic/spawn.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
 import type { AgentDetailEmits, AgentDetailProps } from "../../contracts.js";
@@ -88,13 +89,18 @@ const hubControl = computed(() => hub?.state.value.control === true);
 const cardControl = computed(() => (props.agent.card as { control?: unknown }).control === true);
 const cardState = computed(() => (props.agent.card as { state?: unknown }).state);
 const agentLive = computed(() => !props.agent.down && cardState.value !== "stale");
+// spawn-restore plan §9.1 (F20): this card is the OLD agent of a restore in flight (it may
+// reconnect for a moment before it is reaped) — anything sent to it dies with it, so the
+// whole control surface goes read-only with its own reason.
+const restoring = computed(() => restoringKeys(hub?.state.value.spawns ?? null).has(props.agent.key));
 const controlEnabled = computed(
-  () => control.value !== null && hubControl.value && cardControl.value && agentLive.value,
+  () => control.value !== null && hubControl.value && cardControl.value && agentLive.value && !restoring.value,
 );
 
 /** §7.4 DetailDock read-only reasons, in the plan table's order: hub caps → agent caps → liveness. */
 const readonlyReason = computed<string | null>(() => {
   if (controlEnabled.value) return null;
+  if (restoring.value) return "spawn.composerRestoring";
   if (!hubControl.value || control.value === null) return "control.dockReadonlyHub";
   if (!cardControl.value) return "control.dockReadonlyAgent";
   return "control.dockReadonlyOffline";

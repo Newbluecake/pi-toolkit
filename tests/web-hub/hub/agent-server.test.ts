@@ -63,6 +63,41 @@ const fakeTimers = (): void => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
 };
 
+describe("agent-server: hub_ctl shutdown ack (spawn-restore §9.3)", () => {
+  it("restart ack carries restoreCount; stop ack does not", async () => {
+    await agentServer.close();
+    await new Promise<void>((r) => server.close(() => r()));
+    const shutdowns: string[] = [];
+    server = net.createServer();
+    await new Promise<void>((r) => server.listen(sockPath, () => r()));
+    agentServer = createAgentServer(server, {
+      registry,
+      config: config({ pluginVersion: "9.9.9", buildId: "9.9.9@hub" }),
+      log: memLog(),
+      now: () => Date.now(),
+      httpPort: () => 7878,
+      admin: {
+        caps: () => [],
+        handleShutdown: (_meta: unknown, reason: string) => {
+          shutdowns.push(reason);
+        },
+      } as never,
+      restoreCount: () => 3,
+    });
+
+    const c = await client();
+    c.send(hello());
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+    c.send({ t: "hub_ctl", rid: "r1", op: "shutdown", reason: "restart" });
+    const ack1 = await c.waitFrame((f) => f["t"] === "hub_ctl_ack" && f["rid"] === "r1");
+    expect(ack1).toEqual({ t: "hub_ctl_ack", rid: "r1", restoreCount: 3 });
+    c.send({ t: "hub_ctl", rid: "r2", op: "shutdown", reason: "stop" });
+    const ack2 = await c.waitFrame((f) => f["t"] === "hub_ctl_ack" && f["rid"] === "r2");
+    expect(ack2).toEqual({ t: "hub_ctl_ack", rid: "r2" });
+    expect(shutdowns).toEqual(["restart", "stop"]);
+  });
+});
+
 describe("agent-server handshake", () => {
   it("hello ⇒ hello_ack with agentKey, timings and http.port", async () => {
     const c = await client();

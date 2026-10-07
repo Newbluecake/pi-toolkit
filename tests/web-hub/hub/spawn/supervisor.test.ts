@@ -2347,3 +2347,856 @@ describe("supervisor default-model D5: delayed breaker verdict matrix", () => {
     expect(scenarioCount(h)).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn-restore plan v1 (RS3/RS4/RS5): session persistence, restore-mode shutdown, boot
+// classification + restore jobs. A controllable /proc world: pids 1000-1999 are the fake children
+// this supervisor forks (alive unless listed dead); everything else exists only when `alive` says.
+// ---------------------------------------------------------------------------
+
+interface ProcWorld {
+  alive: Map<number, { start: number; state?: string }>;
+  dead: Set<number>;
+  /** a verified SIGTERM / SIGKILL actually kills the target */
+  termKills: boolean;
+  killKills: boolean;
+  unreadable: boolean;
+  environ: Map<number, string>;
+}
+
+function procWorld(): ProcWorld {
+  return { alive: new Map(), dead: new Set(), termKills: true, killKills: true, unreadable: false, environ: new Map() };
+}
+
+function enoent(path: string): Error {
+  return Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+}
+
+function worldProc(world: ProcWorld): (path: string) => string {
+  const entry = (pid: number): { start: number; state?: string } | undefined => {
+    if (pid >= 1000 && pid < 2000) return world.dead.has(pid) ? undefined : { start: 100 };
+    return world.alive.get(pid);
+  };
+  return (path: string): string => {
+    if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT}\n`;
+    if (path === "/proc/stat") return "btime 1759000000\n";
+    const m = /^\/proc\/(\d+)\/(stat|status|environ|comm)$/.exec(path);
+    if (m === null) throw enoent(path);
+    if (world.unreadable) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    const pid = Number(m[1]);
+    const e = entry(pid);
+    if (e === undefined) throw enoent(path);
+    if (m[2] === "stat") {
+      const line = statLine(pid, pid, e.start);
+      return e.state === undefined ? line : line.replace(") S ", `) ${e.state} `);
+    }
+    if (m[2] === "status") return statusLine(1000, 1000);
+    if (m[2] === "comm") return "pi\n";
+    const env = world.environ.get(pid);
+    if (env === undefined) throw enoent(path);
+    return env;
+  };
+}
+
+interface FakeSessionFile {
+  head: string;
+  uid?: number;
+  symlink?: true;
+  dir?: true;
+}
+
+function fakeSessionFs(files: Map<string, FakeSessionFile>) {
+  return {
+    lstatSync: (p: string) => {
+      const f = files.get(p);
+      if (f === undefined) throw enoent(p);
+      return {
+        isFile: () => f.dir !== true && f.symlink !== true,
+        isSymbolicLink: () => f.symlink === true,
+        uid: f.uid ?? 1000,
+      };
+    },
+    readHeadSync: (p: string, n: number) => {
+      const f = files.get(p);
+      if (f === undefined) throw enoent(p);
+      return f.head.slice(0, n);
+    },
+  };
+}
+
+const SESS_FILE = "/home/u/.pi/agent/sessions/--w-proj--/2026_sess-old.jsonl";
+const sessHeader = (id = "sess-old", cwd = REALPATH): string =>
+  `${JSON.stringify({ type: "session", version: 3, id, timestamp: "t", cwd })}\n{"type":"message"}\n`;
+
+interface RestoreKit {
+  h: Harness;
+  world: ProcWorld;
+  files: Map<string, FakeSessionFile>;
+  gone: Array<{ spawnId: string; key: string }>;
+  vetoUnlinks: number;
+}
+
+function restoreKit(over: Partial<SpawnSupervisorDeps> = {}, cfgOver: Partial<HubSpawnConfig> = {}): RestoreKit {
+  const world = procWorld();
+  const files = new Map<string, FakeSessionFile>();
+  const gone: Array<{ spawnId: string; key: string }> = [];
+  const kit: RestoreKit = { h: undefined as unknown as Harness, world, files, gone, vetoUnlinks: 0 };
+  const kills: Array<{ pid: number; signal: string }> = [];
+  kit.h = makeHarness({
+    cfg: baseCfg({ restore: true, ...cfgOver }),
+    proc: { readFileSync: worldProc(world), platform: "linux" },
+    sessionFs: fakeSessionFs(files),
+    onPrevAgentGone: (spawnId, key) => gone.push({ spawnId, key }),
+    kill: (pid, signal) => {
+      kills.push({ pid, signal });
+      const target = Math.abs(pid);
+      if ((signal === "SIGTERM" && world.termKills) || (signal === "SIGKILL" && world.killKills)) {
+        world.alive.delete(target);
+        if (target >= 1000 && target < 2000) world.dead.add(target);
+      }
+    },
+    ...over,
+  });
+  // the harness' own kills array is bypassed by the override above — alias it
+  kit.h.kills = kills;
+  return kit;
+}
+
+function liveStored(over: Partial<StoredRecord> = {}): StoredRecord {
+  const t = Date.now();
+  return {
+    spawnId: "sprestore0000001",
+    state: "live",
+    cwd: REALPATH,
+    dev: 9,
+    ino: 99,
+    createdAt: t - 60_000,
+    updatedAt: t - 1_000,
+    owner: { listener: "loopback", reqId: "r-old" },
+    pid: 5001,
+    procStartTicks: 77,
+    bootId: BOOT,
+    uid: 1000,
+    agentKey: "kold",
+    model: "anthropic/claude-x",
+    sessionId: "sess-old",
+    sessionFile: SESS_FILE,
+    sessionPersisted: true,
+    ...over,
+  };
+}
+
+function loadInto(kit: RestoreKit, records: StoredRecord[]): void {
+  kit.h.store.loaded = { records, writer: { pid: 1, startedAt: 0, bootId: BOOT } };
+}
+
+/** The saveNow snapshot of one record, in call order. */
+function savesOf(h: Harness, spawnId: string): StoredRecord[] {
+  return h.store.calls
+    .filter((c) => c.op === "saveNow")
+    .map((c) => c.records?.find((r) => r.spawnId === spawnId))
+    .filter((r): r is StoredRecord => r !== undefined);
+}
+
+describe("spawn restore RS3: session coordinates persistence + projections", () => {
+  it("restore on: goLive persists sessionId/sessionFile with exactly ONE synchronous saveNow; sessionPersisted only when the file exists", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    const savesBefore = h.store.calls.filter((c) => c.op === "saveNow").length;
+    const child = h.children[0]!;
+    h.registry.seed("k1000", { pid: child.pid, cwd: REALPATH }, ["cmd.v1"]);
+    child.emit("spawn");
+    h.registry.publish({
+      type: "agent_up",
+      agent: {
+        agentKey: "k1000",
+        kind: "rpc",
+        pid: child.pid,
+        cwd: REALPATH,
+        state: "live",
+        pluginVersion: "1.0.2",
+        outdated: false,
+        prompts: [],
+      },
+    });
+    h.registry.publish({ type: "session", agentKey: "k1000", session: { ...sessionInfo(), sessionFile: SESS_FILE } });
+    await vi.advanceTimersByTimeAsync(0);
+    const saves = h.store.calls.filter((c) => c.op === "saveNow");
+    expect(saves.length - savesBefore).toBe(1);
+    const stored = saves[saves.length - 1]!.records!.find((x) => x.spawnId === r.spawnId)!;
+    expect(stored).toMatchObject({ state: "live", sessionId: "sess-1", sessionFile: SESS_FILE });
+    expect(stored.sessionPersisted).toBeUndefined(); // the file does not exist yet
+  });
+
+  it("status busy→idle stats the session file once; once observed it sticks (no further stats)", async () => {
+    const kit = restoreKit();
+    const { h, files } = kit;
+    let lstats = 0;
+    const fs = fakeSessionFs(files);
+    const counting = { ...fs, lstatSync: (p: string) => (lstats++, fs.lstatSync(p)) };
+    const kit2 = restoreKit({ sessionFs: counting });
+    void h;
+    const h2 = kit2.h;
+    await h2.sup.init(deadline());
+    h2.sup.start(req(), deadline());
+    const child = h2.children[0]!;
+    h2.registry.seed("k1000", { pid: child.pid, cwd: REALPATH }, ["cmd.v1"]);
+    child.emit("spawn");
+    h2.registry.publish({
+      type: "agent_up",
+      agent: {
+        agentKey: "k1000",
+        kind: "rpc",
+        pid: child.pid,
+        cwd: REALPATH,
+        state: "live",
+        pluginVersion: "1.0.2",
+        outdated: false,
+        prompts: [],
+      },
+    });
+    h2.registry.publish({ type: "session", agentKey: "k1000", session: { ...sessionInfo(), sessionFile: SESS_FILE } });
+    await vi.advanceTimersByTimeAsync(0);
+    const base = lstats;
+    const status = (busy: boolean): HubEvent => ({
+      type: "status",
+      agentKey: "k1000",
+      status: { leafId: null, busy, pending: false },
+    });
+    h2.registry.publish(status(true));
+    h2.registry.publish(status(false)); // file still absent ⇒ one stat, no evidence
+    expect(lstats - base).toBe(1);
+    expect(h2.sup.records()[0]!.sessionPersisted).toBeUndefined();
+    files.set(SESS_FILE, { head: sessHeader("sess-1") });
+    h2.registry.publish(status(true));
+    h2.registry.publish(status(false));
+    expect(lstats - base).toBe(2);
+    expect(h2.sup.records()[0]!.sessionPersisted).toBe(true);
+    h2.registry.publish(status(true));
+    h2.registry.publish(status(false));
+    expect(lstats - base).toBe(2); // sticks: no more stats
+  });
+
+  it("a live session switch moves the coordinates (saveNow) and re-judges sessionPersisted", async () => {
+    const kit = restoreKit();
+    const { h, files } = kit;
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h);
+    const other = "/home/u/.pi/agent/sessions/--w-proj--/2026_sess-2.jsonl";
+    files.set(other, { head: sessHeader("sess-2") });
+    const n = h.store.calls.filter((c) => c.op === "saveNow").length;
+    h.registry.publish({
+      type: "session",
+      agentKey: "k1000",
+      session: { ...sessionInfo(), sessionId: "sess-2", sessionFile: other },
+    });
+    const saves = h.store.calls.filter((c) => c.op === "saveNow");
+    expect(saves.length).toBe(n + 1);
+    expect(saves[saves.length - 1]!.records![0]).toMatchObject({
+      sessionId: "sess-2",
+      sessionFile: other,
+      sessionPersisted: true,
+    });
+    // the same coordinates again ⇒ no write
+    h.registry.publish({
+      type: "session",
+      agentKey: "k1000",
+      session: { ...sessionInfo(), sessionId: "sess-2", sessionFile: other },
+    });
+    expect(h.store.calls.filter((c) => c.op === "saveNow").length).toBe(n + 1);
+  });
+
+  it("restore off: every write is byte-identical to a cfg without the key (no session/restore fields, goLive stays debounced)", async () => {
+    const run = async (cfg: HubSpawnConfig): Promise<string> => {
+      vi.setSystemTime(1_760_000_000_000);
+      seq = 9000;
+      const h = makeHarness({ cfg });
+      await h.sup.init(deadline());
+      h.sup.start(req(), deadline());
+      await driveToLive(h);
+      h.registry.publish({
+        type: "session",
+        agentKey: "k1000",
+        session: { ...sessionInfo(), sessionId: "s2", sessionFile: SESS_FILE },
+      });
+      const p = h.sup.shutdown(deadline(), { mode: "restore" });
+      h.children[0]!.emit("exit", 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      await p;
+      const writes = h.store.calls.filter((c) => c.op === "saveNow").map((c) => JSON.stringify(c.records));
+      writes.push(JSON.stringify(h.store.dirtyGet()));
+      return writes.join("\n");
+    };
+    const withoutKey = await run(baseCfg());
+    const off = await run(baseCfg({ restore: false }));
+    expect(off).toBe(withoutKey);
+    for (const k of ["sessionId", "sessionFile", "sessionPersisted", "restoreIntent", '"restore"']) {
+      expect(off).not.toContain(k);
+    }
+    expect(off).toContain('"endReason":"hub"'); // terminate path: exited{hub}
+  });
+
+  it("projections: restore slice is public (SSE + GET), sessionId/sessionFile appear in NO projection; reaping hides pid/exit", async () => {
+    const { toPublic, toViewer } = await import("../../../../src/web-hub/hub/spawn/project.js");
+    const kit = restoreKit();
+    kit.world.alive.set(5001, { start: 77 });
+    kit.world.termKills = false;
+    kit.world.killKills = false;
+    loadInto(kit, [liveStored()]);
+    await kit.h.sup.init(deadline());
+    const rec = kit.h.sup.records()[0]!;
+    expect(rec.restore?.phase).toBe("reaping");
+    const pub = toPublic(rec);
+    expect(pub.restore).toEqual({ phase: "reaping", attempt: 0, prevAgentKey: "kold" });
+    expect(pub.pid).toBeUndefined();
+    const owner = toViewer(rec, "loopback:token", true);
+    expect(owner.restore).toEqual(pub.restore);
+    expect(owner.pid).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0);
+    const ev = kit.h.registry.events.filter((e) => e.type === "spawns").pop();
+    const sse = JSON.stringify(ev);
+    expect(sse).toContain('"restore":{"attempt":0,"phase":"reaping","prevAgentKey":"kold"}');
+    for (const blob of [JSON.stringify(pub), JSON.stringify(owner), sse]) {
+      expect(blob).not.toContain("sess-old");
+      expect(blob).not.toContain(SESS_FILE);
+      expect(blob).not.toContain("sessionId");
+      expect(blob).not.toContain("sessionFile");
+    }
+  });
+});
+
+describe("spawn restore RS4: restore-mode shutdown (tag → saveNow → EOF, park)", () => {
+  async function twoLive(kit: RestoreKit): Promise<{ a: string; b: string; fresh: string }> {
+    const { h } = kit;
+    await h.sup.init(deadline());
+    const a = req();
+    h.sup.start(a, deadline());
+    await driveToLive(h, "k1000");
+    const b = req();
+    h.sup.start(b, deadline());
+    await driveToLive(h, "k1001");
+    const fresh = req(); // never live ⇒ no session ⇒ not eligible (D3)
+    expect(h.sup.start(fresh, deadline())).toEqual({ ok: true, spawnId: fresh.spawnId });
+    return { a: a.spawnId, b: b.spawnId, fresh: fresh.spawnId };
+  }
+
+  it("saveNow (with restoreIntent) lands BEFORE any stdin.end; removePending and fresh starting are never tagged", async () => {
+    const kit = restoreKit({}, { maxPerPrincipal: 4 });
+    const { h } = kit;
+    const ids = await twoLive(kit);
+    expect(h.sup.remove(ids.b, deadline())).toMatchObject({ ok: true, outcome: "pending" });
+    const order: string[] = [];
+    for (const c of h.children) {
+      const orig = c.stdin.end.bind(c.stdin);
+      c.stdin.end = ((...args: unknown[]) => {
+        order.push(`end:${c.pid}`);
+        return orig(...(args as []));
+      }) as typeof c.stdin.end;
+    }
+    const origSave = h.store.port.saveNow;
+    h.store.port.saveNow = (recs) => {
+      order.push("saveNow");
+      return origSave(recs);
+    };
+    const p = h.sup.shutdown(deadline(), { mode: "restore" });
+    expect(order[0]).toBe("saveNow");
+    const tagSave = h.store.calls.filter((c) => c.op === "saveNow").pop()!.records!;
+    expect(tagSave.find((r) => r.spawnId === ids.a)).toMatchObject({
+      state: "stopping",
+      endReason: "hub",
+      restoreIntent: true,
+    });
+    expect(tagSave.find((r) => r.spawnId === ids.b)?.restoreIntent).toBeUndefined(); // D12
+    expect(tagSave.find((r) => r.spawnId === ids.b)?.removeIntent).toBe(true);
+    expect(tagSave.find((r) => r.spawnId === ids.fresh)?.restoreIntent).toBeUndefined(); // D3
+    expect(order.filter((x) => x.startsWith("end:")).length).toBeGreaterThan(0);
+    for (const c of h.children) c.emit("exit", 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await p;
+  });
+
+  it("an exit inside the window PARKS the tagged record: stays stopping, exit recorded, reaper.untrack, no onTerminal, not trimmed", async () => {
+    const kit = restoreKit({}, { maxPerPrincipal: 4 });
+    const { h } = kit;
+    const ids = await twoLive(kit);
+    const p = h.sup.shutdown(deadline(), { mode: "restore" });
+    const childA = h.children[0]!;
+    childA.emit("exit", 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    const recA = h.sup.records().find((r) => r.spawnId === ids.a)!;
+    expect(recA).toMatchObject({ state: "stopping", restoreIntent: true, exit: { code: 0, signal: null } });
+    expect(h.reaper.untracks).toContain(childA.pid);
+    expect(h.onTerminal.find((t) => t.spawnId === ids.a)).toBeUndefined();
+    // the untagged fresh record still terminalizes the legacy way when it exits
+    h.children[2]!.emit("exit", 0, null);
+    h.children[1]!.emit("exit", 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await p;
+    const fresh = h.sup.records().find((r) => r.spawnId === ids.fresh)!;
+    expect(fresh).toMatchObject({ state: "exited", endReason: "hub" });
+    const flushed = h.store.dirtyGet()!;
+    expect(flushed.find((r) => r.spawnId === ids.a)).toMatchObject({
+      state: "stopping",
+      restoreIntent: true,
+      sessionId: "sess-1",
+    });
+  });
+
+  it("terminate mode (and restore mode with cfg.restore off) never tags", async () => {
+    for (const [cfgRestore, mode] of [
+      [true, "terminate"],
+      [false, "restore"],
+    ] as const) {
+      const kit = restoreKit({}, { restore: cfgRestore });
+      const { h } = kit;
+      await h.sup.init(deadline());
+      h.sup.start(req(), deadline());
+      await driveToLive(h);
+      const p = h.sup.shutdown(deadline(), { mode });
+      h.children[0]!.emit("exit", 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      await p;
+      expect(h.sup.records()[0]).toMatchObject({ state: "exited", endReason: "hub" });
+      expect(h.sup.records()[0]!.restoreIntent).toBeUndefined();
+    }
+  });
+});
+
+describe("spawn restore RS5: boot classification + restore jobs (L1/L5/L6)", () => {
+  it("parked graceful record (stopping+restoreIntent, real exit): fork intent (attempts+1) saved BEFORE spawnFn; argv = --session <file>, no --model; prev key dropped after death", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [
+      liveStored({ state: "stopping", endReason: "hub", restoreIntent: true, exit: { code: 0, signal: null } }),
+    ]);
+    await h.sup.init(deadline());
+    const rec = h.sup.records()[0]!;
+    expect(rec).toMatchObject({ state: "starting", restore: { phase: "reaping", attempts: 0, prevAgentKey: "kold" } });
+    expect(rec.agentKey).toBeUndefined();
+    expect(h.spawnCalls).toHaveLength(0); // D17: nothing forks inside init
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.spawnCalls[0]!.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session", SESS_FILE]);
+    expect(h.spawnCalls[0]!.opts.env).toMatchObject({ PI_WEBHUB_SPAWN_ID: "sprestore0000001" });
+    expect(h.kills).toHaveLength(0); // already confirmed dead (real exit) ⇒ no signal at all
+    // L1: the forking write precedes spawnFn and carries attempts=1 and no pid
+    const iFork = h.order.indexOf("spawnFn");
+    const saveIdx = h.order.slice(0, iFork).lastIndexOf("saveNow");
+    expect(saveIdx).toBeGreaterThanOrEqual(0);
+    const saves = savesOf(h, "sprestore0000001");
+    const forking = saves.find((r) => r.restore?.phase === "forking")!;
+    expect(forking.restore).toMatchObject({ attempts: 1 });
+    expect(forking.pid).toBeUndefined();
+    const registering = saves.find((r) => r.restore?.phase === "registering")!;
+    expect(registering.pid).toBe(1000); // L1 #2 identity in the same segment
+    expect(kit.gone).toEqual([{ spawnId: "sprestore0000001", key: "kold" }]);
+  });
+
+  it("crash path, old process ALIVE and ignoring TERM: verified TERM → 3s → verified KILL → dies ⇒ fork (L5 verify before every signal)", async () => {
+    const kit = restoreKit();
+    const { h, world } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    world.alive.set(5001, { start: 77 });
+    world.termKills = false;
+    loadInto(kit, [liveStored()]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.kills).toEqual([{ pid: -5001, signal: "SIGTERM" }]);
+    expect(kit.gone).toHaveLength(0); // prev card stays until death is confirmed
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(h.spawnCalls).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.kills).toEqual([
+      { pid: -5001, signal: "SIGTERM" },
+      { pid: -5001, signal: "SIGKILL" },
+    ]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(kit.gone).toHaveLength(1);
+    expect(h.reaper.untracks).toContain(5001);
+  });
+
+  it("L6: SIGKILL does not land within 2s ⇒ prev-alive, exited{orphan}, spawnFn NEVER called", async () => {
+    const kit = restoreKit();
+    const { h, world } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    world.alive.set(5001, { start: 77 });
+    world.termKills = false;
+    world.killKills = false;
+    loadInto(kit, [liveStored()]);
+    await h.sup.init(deadline());
+    expect(h.reaper.trackCalls.map((t) => t.pid)).toContain(5001); // L2: old identity guarded
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.spawnCalls).toHaveLength(0);
+    const rec = h.sup.records()[0]!;
+    expect(rec).toMatchObject({ state: "exited", endReason: "orphan", restore: { failure: "prev-alive" } });
+    expect(rec.restore?.phase).toBeUndefined();
+    expect(kit.gone).toHaveLength(0);
+  });
+
+  it("unreadable /proc (unknown) ⇒ prev-unknown: no signal, no fork", async () => {
+    const kit = restoreKit();
+    const { h, world } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored()]);
+    await h.sup.init(deadline());
+    world.unreadable = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.kills).toHaveLength(0);
+    expect(h.spawnCalls).toHaveLength(0);
+    expect(h.sup.records()[0]).toMatchObject({ state: "exited", restore: { failure: "prev-unknown" } });
+  });
+
+  it("wrong starttime on disk (pid reused) ⇒ no signal sent to that pid, confirmed ⇒ normal fork", async () => {
+    const kit = restoreKit();
+    const { h, world } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    world.alive.set(5001, { start: 999 }); // someone else owns pid 5001 now
+    loadInto(kit, [liveStored()]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.kills).toHaveLength(0);
+    expect(h.spawnCalls).toHaveLength(1);
+  });
+
+  it("goLive of a restore: phase cleared, restoredAt set; register deadline from FORK time; lifetime anchored at createdAt; stable window drops `restore`", async () => {
+    const kit = restoreKit({ restoreStableMs: 5_000 });
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    const stored = liveStored({ state: "stopping", restoreIntent: true, exit: { code: 0, signal: null } });
+    loadInto(kit, [stored]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    const child = h.children[0]!;
+    h.registry.seed("knew", { pid: child.pid, cwd: REALPATH }, ["cmd.v1"]);
+    child.emit("spawn");
+    h.registry.publish({
+      type: "agent_up",
+      agent: {
+        agentKey: "knew",
+        kind: "rpc",
+        pid: child.pid,
+        cwd: REALPATH,
+        state: "live",
+        pluginVersion: "1.0.2",
+        outdated: false,
+        prompts: [],
+      },
+    });
+    h.registry.publish({
+      type: "session",
+      agentKey: "knew",
+      session: { ...sessionInfo(), sessionId: "sess-old", sessionFile: SESS_FILE },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const rec = h.sup.records()[0]!;
+    expect(rec.state).toBe("live");
+    expect(rec.restore).toMatchObject({ attempts: 1, prevAgentKey: "kold" });
+    expect(rec.restore?.phase).toBeUndefined();
+    expect(typeof rec.restore?.restoredAt).toBe("number");
+    expect(h.onLive).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(h.sup.records()[0]!.restore).toBeUndefined();
+    // lifetime: createdAt + 720min (not restoredAt + …)
+    const lifetimeLeft = stored.createdAt + 720 * 60_000 - Date.now();
+    await vi.advanceTimersByTimeAsync(lifetimeLeft - 1_000);
+    expect(h.sup.records()[0]!.state).toBe("live");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(h.sup.records()[0]!.state).toBe("stopping");
+  });
+
+  it("restore register deadline = forkAt + min(2×registerTimeoutS, 240s) ⇒ failed{register_timeout} + failure register-timeout, breaker untouched", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored({ state: "stopping", restoreIntent: true, exit: { code: 0, signal: null } })]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    h.children[0]!.emit("spawn");
+    await vi.advanceTimersByTimeAsync(19_000); // 2×10s
+    expect(h.sup.records()[0]!.state).toBe("starting");
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(h.sup.records()[0]!.state).toBe("stopping");
+    h.children[0]!.emit("exit", null, "SIGTERM");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sup.records()[0]).toMatchObject({
+      state: "failed",
+      endReason: "register_timeout",
+      restore: { failure: "register-timeout" },
+    });
+    expect(h.sup.policy("p", "loopback", "http", false).allowed).toBe(true); // D16: no breaker count
+  });
+
+  it("D7: session file once persisted but gone ⇒ failed{spawn_error}+never-forked+session-missing, spawnFn 0, delete confirms", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    loadInto(kit, [liveStored({ state: "stopping", restoreIntent: true, exit: { code: 0, signal: null } })]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.spawnCalls).toHaveLength(0);
+    const rec = h.sup.records()[0]!;
+    expect(rec).toMatchObject({
+      state: "failed",
+      endReason: "spawn_error",
+      noProcess: "never-forked",
+      restore: { failure: "session-missing" },
+    });
+    expect(rec.pid).toBeUndefined();
+    expect(h.sup.deathOf(rec.spawnId)).toBe("confirmed");
+    expect(h.sup.remove(rec.spawnId, deadline())).toEqual({ ok: true, outcome: "removed" });
+  });
+
+  it("D7: file never observed and absent ⇒ --session-id <id>; header id/cwd mismatch ⇒ session-invalid", async () => {
+    const kit = restoreKit();
+    loadInto(kit, [
+      liveStored({
+        state: "stopping",
+        restoreIntent: true,
+        exit: { code: 0, signal: null },
+        sessionPersisted: undefined,
+      }),
+    ]);
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kit.h.spawnCalls[0]!.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session-id", "sess-old"]);
+
+    const kit2 = restoreKit();
+    kit2.files.set(SESS_FILE, { head: sessHeader("sess-other") });
+    loadInto(kit2, [liveStored({ state: "stopping", restoreIntent: true, exit: { code: 0, signal: null } })]);
+    await kit2.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kit2.h.spawnCalls).toHaveLength(0);
+    expect(kit2.h.sup.records()[0]).toMatchObject({ state: "failed", restore: { failure: "session-invalid" } });
+  });
+
+  it("§6.4 filters: lifetime <5min left / attempts exhausted ⇒ legacy orphan recovery + failure; veto / restore off / removeIntent ⇒ pure legacy", async () => {
+    const cases: Array<{
+      name: string;
+      stored: Partial<StoredRecord>;
+      cfg?: Partial<HubSpawnConfig>;
+      veto?: boolean;
+      failure?: string;
+    }> = [
+      { name: "lifetime", stored: { createdAt: Date.now() - (720 - 4) * 60_000 }, failure: "lifetime" },
+      { name: "exhausted", stored: { restore: { attempts: 3, lastAt: 1 } }, failure: "exhausted" },
+      { name: "veto", stored: {}, veto: true },
+      { name: "off", stored: {}, cfg: { restore: false } },
+      { name: "removeIntent", stored: { removeIntent: true } },
+      { name: "no sessionId", stored: { sessionId: undefined } },
+    ];
+    for (const c of cases) {
+      const veto = `/tmp/never-${c.name}`;
+      const unlinked: string[] = [];
+      const kit = restoreKit(c.veto === true ? { restoreVetoFile: veto } : {}, c.cfg ?? {});
+      if (c.veto === true) {
+        const fs = await import("node:fs");
+        const dir = fs.mkdtempSync("/tmp/veto-");
+        const file = `${dir}/restore.veto`;
+        fs.writeFileSync(file, "x");
+        const kitV = restoreKit({ restoreVetoFile: file }, c.cfg ?? {});
+        kitV.files.set(SESS_FILE, { head: sessHeader() });
+        kitV.world.alive.set(5001, { start: 77 });
+        loadInto(kitV, [liveStored(c.stored)]);
+        await kitV.h.sup.init(deadline());
+        expect(fs.existsSync(file), c.name).toBe(false); // consumed
+        await vi.advanceTimersByTimeAsync(4_000);
+        expect(kitV.h.spawnCalls, c.name).toHaveLength(0);
+        expect(kitV.h.sup.records()[0], c.name).toMatchObject({ state: "exited", endReason: "orphan" });
+        expect(kitV.h.sup.records()[0]!.restore, c.name).toBeUndefined();
+        fs.rmSync(dir, { recursive: true, force: true });
+        unlinked.push(file);
+        continue;
+      }
+      kit.files.set(SESS_FILE, { head: sessHeader() });
+      kit.world.alive.set(5001, { start: 77 });
+      loadInto(kit, [liveStored(c.stored)]);
+      await kit.h.sup.init(deadline());
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(kit.h.spawnCalls, c.name).toHaveLength(0);
+      const rec = kit.h.sup.records()[0];
+      if (c.name !== "removeIntent") {
+        expect(rec, c.name).toMatchObject({ state: "exited", endReason: "orphan" });
+        // legacy recovery: TERM (+3s KILL) on the verified old identity
+        expect(kit.h.kills[0], c.name).toEqual({ pid: -5001, signal: "SIGTERM" });
+      }
+      if (c.failure !== undefined) expect(rec?.restore?.failure, c.name).toBe(c.failure);
+      else if (rec !== undefined) expect(rec.restore, c.name).toBeUndefined();
+    }
+  });
+
+  it("starting{forking} after a crash: environ scan lower bound = forkIntentAt - 1s (not createdAt); miss ⇒ scan-miss, no signal", async () => {
+    const btimeMs = 1_759_000_000 * 1000;
+    const t = Date.now();
+    const forkIntentAt = t - 10_000;
+    const startTicksAt = (ms: number): number => Math.floor(((ms - btimeMs) * 100) / 1000);
+    const build = (procStartMs: number) => {
+      const kit = restoreKit({ readdirSync: () => ["7001"] });
+      kit.world.alive.set(7001, { start: startTicksAt(procStartMs) });
+      kit.world.environ.set(7001, "A=1\0PI_WEBHUB_SPAWN_ID=sprestore0000001\0");
+      kit.files.set(SESS_FILE, { head: sessHeader() });
+      loadInto(kit, [
+        liveStored({
+          state: "starting",
+          pid: undefined,
+          procStartTicks: undefined,
+          bootId: undefined,
+          uid: undefined,
+          agentKey: undefined,
+          createdAt: t - 600_000,
+          restore: { attempts: 1, lastAt: forkIntentAt, phase: "forking", forkIntentAt, prevAgentKey: "kold" },
+        }),
+      ]);
+      return kit;
+    };
+    // a same-spawnId process older than the fork intent (e.g. a leftover of the ORIGINAL fork) ⇒ miss
+    const miss = build(forkIntentAt - 60_000);
+    await miss.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(miss.h.kills).toHaveLength(0);
+    expect(miss.h.spawnCalls).toHaveLength(0);
+    expect(miss.h.sup.records()[0]).toMatchObject({
+      state: "failed",
+      endReason: "spawn_error",
+      restore: { failure: "scan-miss" },
+    });
+    // a process started after the intent ⇒ hit ⇒ candidate (old identity = the hit) ⇒ reaped ⇒ fork
+    const hit = build(forkIntentAt + 500);
+    await hit.h.sup.init(deadline());
+    expect(hit.h.sup.records()[0]).toMatchObject({
+      state: "starting",
+      pid: 7001,
+      restore: { phase: "reaping", attempts: 1 },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hit.h.kills[0]).toEqual({ pid: -7001, signal: "SIGTERM" });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(hit.h.spawnCalls).toHaveLength(1);
+  });
+
+  it("shutdown during reaping ⇒ the job stops at its next checkpoint: no further signal, no fork", async () => {
+    const kit = restoreKit();
+    const { h, world } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    world.alive.set(5001, { start: 77 });
+    world.termKills = false;
+    loadInto(kit, [liveStored()]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.kills).toHaveLength(1); // TERM
+    const p = h.sup.shutdown(
+      createReqDeadline(() => Date.now(), 2_500),
+      { mode: "restore" },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await p;
+    const killsAtClose = h.kills.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.kills.filter((k) => k.signal === "SIGKILL")).toHaveLength(0);
+    expect(h.kills.length).toBe(killsAtClose);
+    expect(h.spawnCalls).toHaveLength(0);
+    // persisted as a restore intent for the next boot (attempts unchanged — nothing forked)
+    const flushed = h.store.dirtyGet() ?? h.store.calls.filter((c) => c.op === "saveNow").pop()!.records!;
+    expect(flushed[0]).toMatchObject({ state: "stopping", restoreIntent: true, restore: { attempts: 0 } });
+  });
+
+  it("D12: remove() during reaping ⇒ removeIntent persisted, ladder on the OLD identity from the signal stage, job exits (no fork), record deleted once dead", async () => {
+    const kit = restoreKit();
+    const { h, world } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    world.alive.set(5001, { start: 77 });
+    world.termKills = false;
+    world.killKills = false;
+    loadInto(kit, [liveStored()]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0); // job TERM #1
+    expect(h.sup.remove("sprestore0000001", deadline())).toEqual({ ok: true, outcome: "pending", state: "stopping" });
+    expect(savesOf(h, "sprestore0000001").pop()).toMatchObject({ removeIntent: true });
+    expect(h.kills.filter((k) => k.signal === "SIGTERM")).toHaveLength(2); // stage 1 immediately
+    world.killKills = true;
+    await vi.advanceTimersByTimeAsync(3_000); // stage 2 KILL
+    expect(h.kills.some((k) => k.signal === "SIGKILL")).toBe(true);
+    await vi.advanceTimersByTimeAsync(6_000); // guard terminal ⇒ confirmed ⇒ delete
+    expect(h.spawnCalls).toHaveLength(0);
+    expect(h.sup.records()).toHaveLength(0);
+  });
+
+  it("§8.5: the reaping record's prev agentKey counts as managed (never a supersede trigger)", async () => {
+    const kit = restoreKit();
+    kit.world.alive.set(5001, { start: 77 });
+    kit.world.termKills = false;
+    kit.world.killKills = false;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored()]);
+    await kit.h.sup.init(deadline());
+    expect(kit.h.sup.isManaged("kold")).toBe(true);
+    expect(kit.h.sup.isManaged("kother")).toBe(false);
+  });
+
+  it("D16: reaper unavailable at boot ⇒ every candidate degrades to legacy recovery with failure reaper", async () => {
+    const kit = restoreKit();
+    kit.h.reaper.startOk = false;
+    kit.world.alive.set(5001, { start: 77 });
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored()]);
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kit.h.sup.records()[0]).toMatchObject({
+      state: "exited",
+      endReason: "orphan",
+      restore: { failure: "reaper" },
+    });
+    expect(kit.h.kills[0]).toEqual({ pid: -5001, signal: "SIGTERM" }); // recoverEscalate
+    expect(kit.h.spawnCalls).toHaveLength(0);
+  });
+
+  it("D17: at most RESTORE_CONCURRENCY (2) restore jobs in flight; the third forks after one goes live", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    const mk = (i: number, createdOffset: number): StoredRecord =>
+      liveStored({
+        spawnId: `sprestore000000${i}`,
+        pid: 5000 + i,
+        agentKey: `kold${i}`,
+        createdAt: Date.now() - createdOffset,
+        state: "stopping",
+        restoreIntent: true,
+        exit: { code: 0, signal: null },
+        sessionPersisted: undefined,
+        sessionFile: undefined,
+      });
+    loadInto(kit, [mk(3, 1_000), mk(1, 3_000), mk(2, 2_000)]);
+    await h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.spawnCalls).toHaveLength(2); // FIFO by createdAt: 1 then 2
+    expect(h.spawnCalls.map((c) => c.opts.env?.["PI_WEBHUB_SPAWN_ID"])).toEqual([
+      "sprestore0000001",
+      "sprestore0000002",
+    ]);
+    const child = h.children[0]!;
+    h.registry.seed("knew1", { pid: child.pid, cwd: REALPATH }, ["cmd.v1"]);
+    child.emit("spawn");
+    h.registry.publish({
+      type: "agent_up",
+      agent: {
+        agentKey: "knew1",
+        kind: "rpc",
+        pid: child.pid,
+        cwd: REALPATH,
+        state: "live",
+        pluginVersion: "1.0.2",
+        outdated: false,
+        prompts: [],
+      },
+    });
+    h.registry.publish({ type: "session", agentKey: "knew1", session: { ...sessionInfo(), sessionId: "sess-old" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.spawnCalls).toHaveLength(3);
+  });
+});

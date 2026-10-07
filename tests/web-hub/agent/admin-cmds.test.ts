@@ -225,3 +225,75 @@ describe("createAdminCommands().start()", () => {
     expect(outcome).toEqual({ kind: "started" });
   });
 });
+
+describe("web-hub-spawn-restore D13: the one-shot restore.veto", () => {
+  const vetoOf = (): string => join(paths().stateDir, "spawn", "restore.veto");
+
+  it("stop() writes the veto (0600, spawn dir 0700) after the stop marker, before signaling the hub", async () => {
+    const { createAdminCommands } = await import("../../../src/web-hub/agent/admin-cmds.js");
+    const { existsSync, statSync } = await import("node:fs");
+    let vetoAtRequest: boolean | undefined;
+    mockCurrentConnection.mockReturnValue(
+      fakeConn({
+        caps: ["ctl.v1", "ctl.v2"],
+        request: async (frame) => {
+          vetoAtRequest = existsSync(vetoOf());
+          return { t: "hub_ctl_ack", rid: (frame as { rid: string }).rid };
+        },
+      }),
+    );
+    const outcome = await createAdminCommands().stop();
+    expect(outcome).toEqual({ kind: "stopped" });
+    expect(vetoAtRequest).toBe(true); // on disk BEFORE the hub_ctl{stop} went out
+    expect(statSync(vetoOf()).mode & 0o777).toBe(0o600);
+    expect(statSync(join(paths().stateDir, "spawn")).mode & 0o777).toBe(0o700);
+  });
+
+  it("a veto write failure never blocks the stop", async () => {
+    const { createAdminCommands } = await import("../../../src/web-hub/agent/admin-cmds.js");
+    const p = paths();
+    mkdirSync(p.stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(p.stateDir, "spawn"), "not a dir"); // mkdir/write under it must fail
+    const requested: unknown[] = [];
+    mockCurrentConnection.mockReturnValue(
+      fakeConn({
+        caps: ["ctl.v1", "ctl.v2"],
+        request: async (frame) => {
+          requested.push(frame);
+          return { t: "hub_ctl_ack", rid: (frame as { rid: string }).rid };
+        },
+      }),
+    );
+    const outcome = await createAdminCommands().stop();
+    expect(outcome).toEqual({ kind: "stopped" });
+    expect(requested[0]).toMatchObject({ op: "shutdown", reason: "stop" });
+    const { writeRestoreVetoSync } = await import("../../../src/web-hub/agent/admin-cmds.js");
+    const direct = writeRestoreVetoSync(p.stateDir);
+    expect(direct.ok).toBe(false);
+  });
+
+  it("start() never touches the veto; clearRestoreVetoSync removes it (ENOENT = success)", async () => {
+    const { createAdminCommands, writeRestoreVetoSync, clearRestoreVetoSync } =
+      await import("../../../src/web-hub/agent/admin-cmds.js");
+    const { existsSync } = await import("node:fs");
+    const p = paths();
+    expect(writeRestoreVetoSync(p.stateDir)).toEqual({ ok: true });
+    await createAdminCommands().start();
+    expect(existsSync(vetoOf())).toBe(true); // /webhub start does not clear it (plan §8.3)
+    expect(clearRestoreVetoSync(p.stateDir)).toEqual({ ok: true });
+    expect(existsSync(vetoOf())).toBe(false);
+    expect(clearRestoreVetoSync(p.stateDir)).toEqual({ ok: true }); // already gone
+  });
+});
+
+describe("web-hub-spawn-restore D13: /webhub restart clears the veto BEFORE restartHub (wiring pin)", () => {
+  it("agent/index.ts's restart() calls clearRestoreVetoSync(paths.stateDir) ahead of the hub_ctl path", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("src/web-hub/agent/index.ts", "utf8");
+    const m = /const restart = \(\): Promise<RestartOutcome> => \{([\s\S]*?)\n  \};/.exec(src);
+    expect(m).not.toBeNull();
+    const body = m![1]!;
+    expect(body.indexOf("clearRestoreVetoSync(paths.stateDir)")).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf("clearRestoreVetoSync")).toBeLessThan(body.indexOf("restartHubWithDeps()"));
+  });
+});

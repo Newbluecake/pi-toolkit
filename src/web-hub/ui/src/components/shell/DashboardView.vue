@@ -39,6 +39,7 @@ import { useSidebarWidth } from "../../composables/useSidebarWidth.js";
 import { useTicker } from "../../composables/useTicker.js";
 import type { UseHubHandle } from "../../composables/useHub.js";
 import type { DashboardViewProps } from "../../contracts.js";
+import { restoringKeys } from "../../logic/spawn.js";
 import { toAgentCardView } from "../agents/agentCardModel.js";
 import AgentList from "../agents/AgentList.vue";
 import AgentDetail from "../detail/AgentDetail.vue";
@@ -101,6 +102,12 @@ const selectedAgent = computed(() =>
 // automatic jump back to the list (the session jsonl is kept; only the card is gone).
 const selectedRemoved = computed(
   () => selectedKey.value !== null && (props.hub.state.value.removed?.has(selectedKey.value) ?? false),
+);
+// spawn-restore plan §9.1: the selected key is the OLD agent of a restore in flight — once it is
+// reaped (agent_removed) the view waits on a 「正在恢复」 state instead of 「已删除」; useHub's
+// `successorOf` follow then moves the route to the new key when the restored session goes live.
+const selectedRestoring = computed(
+  () => selectedKey.value !== null && restoringKeys(props.hub.state.value.spawns ?? null).has(selectedKey.value),
 );
 // First-`agents`-snapshot gate (deep-link refresh flicker fix): before the hub's first snapshot
 // lands, an agent-route deep link renders a loading state instead of flashing 「未连接」 —
@@ -253,6 +260,9 @@ function onLoadOlder(agentKey: string): void {
         @retry="onRetry(selectedAgent!.key)"
         @load-older="onLoadOlder(selectedAgent!.key)"
       />
+      <div v-else-if="selectedRestoring" class="detail" data-restoring="">
+        <EmptyState icon="loader" :title="t('spawn.restoringTitle')" :body="t('spawn.restoringBody')" />
+      </div>
       <div v-else-if="selectedRemoved" class="detail">
         <EmptyState icon="inbox" :title="t('detail.removedTitle')" :body="t('detail.removedBody')">
           <template #actions>
@@ -285,6 +295,9 @@ function onLoadOlder(agentKey: string): void {
         @retry="onRetry(selectedAgent!.key)"
         @load-older="onLoadOlder(selectedAgent!.key)"
       />
+      <div v-else-if="selectedRestoring" class="detail" data-restoring="">
+        <EmptyState icon="loader" :title="t('spawn.restoringTitle')" :body="t('spawn.restoringBody')" />
+      </div>
       <div v-else-if="selectedRemoved" class="detail">
         <EmptyState icon="inbox" :title="t('detail.removedTitle')" :body="t('detail.removedBody')">
           <template #actions>

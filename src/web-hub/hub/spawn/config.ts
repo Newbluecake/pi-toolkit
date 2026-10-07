@@ -88,6 +88,13 @@ export function parseHubSpawnConfig(raw: unknown): { ok: true; spawn: HubSpawnCo
     return { ok: false, detail: `lan=${String(lan)}: must be off|known|roots` };
   }
 
+  // web-hub-spawn-restore plan D18/RS2: optional bool; absent ⇒ false (an older pi launching a
+  // newer hub never restores on its own); any non-bool ⇒ the whole block is rejected.
+  const restoreRaw = raw["restore"];
+  if (restoreRaw !== undefined && typeof restoreRaw !== "boolean") {
+    return { ok: false, detail: `restore=${String(restoreRaw)}: must be a boolean` };
+  }
+
   return {
     ok: true,
     spawn: {
@@ -98,6 +105,8 @@ export function parseHubSpawnConfig(raw: unknown): { ok: true; spawn: HubSpawnCo
       maxLifetimeMinutes: maxLifetimeMinutes.value,
       registerTimeoutS: registerTimeoutS.value,
       lan,
+      // present ⇒ verbatim; absent stays absent (consumers read `cfg.restore === true`).
+      ...(restoreRaw === undefined ? {} : { restore: restoreRaw }),
     },
   };
 }

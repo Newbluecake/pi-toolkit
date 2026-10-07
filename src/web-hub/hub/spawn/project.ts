@@ -32,6 +32,7 @@ import {
   type SpawnsPayload,
 } from "../../protocol/spawn.js";
 import type { FirstPromptStateView } from "./first-prompt.js";
+import { hidesIdentityOnWire, restoreWireOf } from "./restore-plan.js";
 import { isTerminalSpawnState, type StoredOwner } from "./store.js";
 import type { InternalRecord } from "./supervisor.js";
 
@@ -82,7 +83,9 @@ export function toPublic(rec: InternalRecord, fpOf?: FirstPromptViewOf): SpawnRe
     cwdLabel: basename(rec.cwd),
     origin: { listener: rec.owner.listener, reqId: rec.owner.reqId },
   };
-  if (rec.pid !== undefined) item.pid = rec.pid;
+  // web-hub-spawn-restore §9.1: while reaping, pid/exit still describe the OLD process — hidden.
+  const hideOld = hidesIdentityOnWire(rec.restore);
+  if (rec.pid !== undefined && !hideOld) item.pid = rec.pid;
   if (rec.agentKey !== undefined) {
     item.agentKey = rec.agentKey;
     item.linked = rec.linked;
@@ -94,7 +97,7 @@ export function toPublic(rec: InternalRecord, fpOf?: FirstPromptViewOf): SpawnRe
   const endReason: SpawnEndReason | null | undefined = rec.endReason;
   if (endReason !== undefined && endReason !== null) item.endReason = endReason;
   const exit = rec.exit;
-  if (exit !== undefined && exit !== null) {
+  if (exit !== undefined && exit !== null && !hideOld) {
     item.exit = {
       code: exit.code,
       signal: exit.signal,
@@ -107,6 +110,9 @@ export function toPublic(rec: InternalRecord, fpOf?: FirstPromptViewOf): SpawnRe
   const fp = publicFirstPrompt(rec, fpOf);
   if (fp !== undefined) item.firstPrompt = fp;
   if (rec.removePending) item.removing = true;
+  // web-hub-spawn-restore §9.2: public to every principal; sessionId/sessionFile NEVER copied.
+  const restore = restoreWireOf(rec.restore);
+  if (restore !== undefined) item.restore = restore;
   return item;
 }
 
@@ -151,6 +157,7 @@ export function toViewer(
     ...(pub.hint !== undefined ? { hint: pub.hint } : {}),
     ...(pub.uiCancelledCount !== undefined ? { uiCancelledCount: pub.uiCancelledCount } : {}),
     ...(pub.removing !== undefined ? { removing: pub.removing } : {}),
+    ...(pub.restore !== undefined ? { restore: pub.restore } : {}),
     ...(pub.firstPrompt !== undefined
       ? {
           firstPrompt:

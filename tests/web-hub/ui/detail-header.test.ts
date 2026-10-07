@@ -480,3 +480,32 @@ describe("DetailHeader.vue — bash-jobs panel mount (bash-jobs-panel 包 B)", (
     expect(empty.find(".bj-panel").exists()).toBe(false);
   });
 });
+
+describe("DetailHeader.vue — restoring badge (spawn-restore plan §9.1, F20)", () => {
+  it("the OLD agent of a restore in flight shows the `restoring` token badge; others don't", () => {
+    const hub = hubWithSpawn({
+      spawns: {
+        items: [
+          spawnRec({
+            spawnId: "sp-r",
+            state: "starting",
+            agentKey: undefined as unknown as string,
+            restore: { phase: "registering", attempt: 1, prevAgentKey: "agent-1" },
+          }),
+        ],
+        active: 1,
+        max: 4,
+      },
+    });
+    const old = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    expect(old.find(".chip-restoring").text()).toBe("restoring");
+    const other = mount(DetailHeader, {
+      props: { agent: agent({ key: "agent-2" }), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    expect(other.find(".chip-restoring").exists()).toBe(false);
+  });
+});

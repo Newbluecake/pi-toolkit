@@ -140,8 +140,12 @@ export function formatRestartOutcomeMessage(outcome: RestartOutcome): {
   level: "info" | "warning" | "error";
 } {
   switch (outcome.kind) {
-    case "restarted":
-      return { message: "hub 已重启（旧进程已退出，新进程已启动）。", level: "info" };
+    case "restarted": {
+      // spawn-restore §9.3: say how many managed web sessions come back (and what they lose).
+      const n = outcome.restoreCount;
+      const hint = n !== undefined && n > 0 ? ` ${n} 个网页会话将在 hub 重启后恢复（进行中的一轮输出会丢失）。` : "";
+      return { message: `hub 已重启（旧进程已退出，新进程已启动）。${hint}`, level: "info" };
+    }
     case "signalled":
       return { message: "旧 hub 身份校验通过，已发送 SIGTERM；新进程将自动拉起。", level: "info" };
     case "manual":

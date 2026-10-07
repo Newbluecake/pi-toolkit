@@ -735,6 +735,9 @@ export const DEFAULT_WEBHUB_SPAWN_SETTINGS: WebHubSpawnSettings = {
   maxLifetimeMinutes: 720,
   registerTimeoutS: 30,
   lan: "off",
+  // web-hub-spawn-restore plan D18: restore managed sessions across hub restarts — default ON,
+  // effective only under an explicitly enabled spawn block.
+  restore: true,
 };
 
 export const DEFAULT_SETTINGS: AgentSettings = {
@@ -1729,6 +1732,7 @@ export function parseWebHubSpawnBlock(input: unknown): WebHubSpawnSettings {
     maxLifetimeMinutes: clampSpawnInt(record.maxLifetimeMinutes, 10, 10_080, defaults.maxLifetimeMinutes),
     registerTimeoutS: clampSpawnInt(record.registerTimeoutS, 10, 120, defaults.registerTimeoutS),
     lan: lan === "off" || lan === "known" || lan === "roots" ? lan : defaults.lan,
+    restore: typeof record.restore === "boolean" ? record.restore : defaults.restore,
   };
 }
 

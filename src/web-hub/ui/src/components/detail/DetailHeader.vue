@@ -29,7 +29,7 @@ import { computed, inject, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
-import { managedFor } from "../../logic/spawn.js";
+import { managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { DetailHeaderEmits, DetailHeaderProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { SIDEBAR_DRAWER } from "../shell/sidebarDrawer.js";
@@ -84,6 +84,9 @@ const showBack = computed(() => props.narrow || drawer?.active.value === true);
 // ---------------------------------------------------------------------------
 const hub = inject(HUB_CTX, null);
 const managed = computed(() => managedFor(hub?.state.value.spawns ?? null, props.agent.key));
+// spawn-restore plan §9.1 (F20): the OLD agent of a restore in flight — `restoring` badge here,
+// the composer itself goes read-only through AgentDetail's readonlyReason.
+const restoring = computed(() => restoringKeys(hub?.state.value.spawns ?? null).has(props.agent.key));
 
 const stopArmed = ref(false);
 const stopBusy = ref(false);
@@ -173,6 +176,9 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
       </button>
       <h2 class="detail-title" id="detail-title">{{ title }}</h2>
       <StatusPill :state="visual" :label="statusLabel" />
+      <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
+        t("spawn.badgeRestoring")
+      }}</span>
       <button
         v-if="managed"
         class="btn spawn-stop-btn"

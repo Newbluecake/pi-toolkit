@@ -102,6 +102,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       maxLifetimeMinutes: 10_080,
       registerTimeoutS: 120,
       lan: "roots",
+      restore: true,
     };
     const settings: WebHubSettings = { ...SETTINGS, autoStart: true, nodeLoader: fakeNodeLoader(), spawn };
     const config = await hubConfigFor(settings);
@@ -109,7 +110,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
     expect("spawn" in config).toBe(false);
   });
 
-  it("settings.spawn.enabled: true ⇒ config.spawn carries exactly the 7 HubSpawnConfig fields", async () => {
+  it("settings.spawn.enabled: true ⇒ config.spawn carries exactly the 7 HubSpawnConfig fields + restore (field count +1)", async () => {
     const spawn: WebHubSpawnSettings = {
       enabled: true,
       roots: ["~/proj", "/srv/work"],
@@ -119,6 +120,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       maxLifetimeMinutes: 480,
       registerTimeoutS: 45,
       lan: "known",
+      restore: false,
     };
     const settings: WebHubSettings = { ...SETTINGS, autoStart: true, nodeLoader: fakeNodeLoader(), spawn };
     const config = await hubConfigFor(settings);
@@ -130,6 +132,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       maxLifetimeMinutes: 480,
       registerTimeoutS: 45,
       lan: "known" as const,
+      restore: false,
     };
     expect(config).toEqual({ ...baselineConfig(), spawn: expectedSpawn });
     // pin the exact key set — `enabled` never crosses the wire, nothing else sneaks in
@@ -141,6 +144,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
         "maxProcesses",
         "ratePerMinute",
         "registerTimeoutS",
+        "restore",
         "roots",
       ].sort(),
     );
@@ -160,6 +164,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
         maxLifetimeMinutes: 720,
         registerTimeoutS: 30,
         lan: "off",
+        restore: true,
       },
     };
     const config = await hubConfigFor(settings);
@@ -171,6 +176,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       maxLifetimeMinutes: 720,
       registerTimeoutS: 30,
       lan: "off",
+      restore: true,
     });
   });
 });

@@ -107,6 +107,32 @@ const spawn = {
   removeAria: "停止并删除这个网页发起的会话记录",
 
   errGone: "该会话已被删除，请重新发起",
+
+  stateRestoring: "restoring",
+  badgeRestoring: "restoring",
+  badgeRestored: "restored",
+  badgeRestoringTitle: "hub 重启后正在恢复 — 此时发送的消息会丢失",
+  badgeRestoredTitle: "已在 hub 重启后恢复",
+  restorePhaseReaping: "正在停止旧进程…",
+  restorePhaseForking: "正在基于已保存的会话启动 pi…",
+  restorePhaseRegistering: "正在等待恢复的会话注册…",
+  restoreAttempt: "第 {n} 次尝试",
+  restoringTitle: "正在恢复会话",
+  restoringBody: "hub 已重启，这个网页会话正在基于已保存的历史恢复，完成后会自动切换过去。",
+  composerRestoring: "会话正在恢复中，恢复完成前无法发送。",
+  restoreFailSessionMissing: "会话文件已不存在，无法恢复",
+  restoreFailSessionInvalid: "会话文件无法读取或不匹配，无法恢复",
+  restoreFailPrevAlive: "旧进程无法停止，已取消恢复",
+  restoreFailPrevUnknown: "无法确认旧进程已退出，已取消恢复",
+  restoreFailScanMiss: "无法识别旧进程，已取消恢复",
+  restoreFailExhausted: "多次恢复失败，已放弃",
+  restoreFailLifetime: "会话剩余时限过短，不再恢复",
+  restoreFailLauncher: "pi 启动器不可用 — 请运行 /webhub restart",
+  restoreFailReaper: "hub 的孤儿回收器不可用，已取消恢复",
+  restoreFailPersist: "hub 无法保存状态，已取消恢复",
+  restoreFailCwdChanged: "会话目录已变化或不存在，无法恢复",
+  restoreFailRegisterTimeout: "恢复的会话一直未注册",
+  restoreFailExitedEarly: "恢复的 pi 进程在启动期间退出",
 } satisfies Messages<typeof en>;
 
 export default spawn;

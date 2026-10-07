@@ -4,8 +4,10 @@
   (`pendingRows`) is computed by the parent from the `spawns` SSE slot.
 
   - `starting` — spinner chip + `cwdLabel`, no actions (the record has no agentKey yet; arch
-    §7.5 binding is hub-side).
-  - `failed` — hint line (`SpawnHint` mapping, arch §8.1) plus:
+    §7.5 binding is hub-side). A restore in flight (spawn-restore plan §9.1: `restore.phase`)
+    shows the `restoring` token plus a phase hint line instead.
+  - `failed` — hint line (`SpawnHint` mapping, arch §8.1; a failed restore adds the localized
+    `restore.failure` line first) plus:
       · 「详情」— fetches `useSpawn.list()` and shows the OWNER-only fields (`hintDetail`,
         `stderrTail`, arch §6.4) when this principal owns the record; otherwise an owner-only
         note. Everything renders through interpolation ⇒ textContent.
@@ -20,7 +22,13 @@ import { computed, inject, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { removalTargetForSpawn } from "../../logic/remove.js";
-import { spawnHintKey, spawnModelSupported } from "../../logic/spawn.js";
+import {
+  isRestoring,
+  restoreFailureKey,
+  restorePhaseKey,
+  spawnHintKey,
+  spawnModelSupported,
+} from "../../logic/spawn.js";
 import type { SpawnRecordPublic } from "@protocol/spawn.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import "../../styles/spawn.css";
@@ -38,7 +46,30 @@ const hintLabel = computed(() => {
   const key = spawnHintKey(hint);
   return key !== undefined ? t(key) : hint;
 });
-const stateLabel = computed(() => (props.rec.state === "failed" ? t("spawn.stateFailed") : t("spawn.stateStarting")));
+const restoring = computed(() => isRestoring(props.rec));
+const stateLabel = computed(() =>
+  props.rec.state === "failed"
+    ? t("spawn.stateFailed")
+    : restoring.value
+      ? t("spawn.stateRestoring")
+      : t("spawn.stateStarting"),
+);
+// spawn-restore plan §9.1: the restore phase hint (`restoring` rows) and the localized
+// `restore.failure` line (failed rows) — both plain prose, interpolated ⇒ textContent.
+const restorePhaseLabel = computed(() => {
+  if (!restoring.value) return null;
+  const key = restorePhaseKey(props.rec.restore?.phase);
+  if (key === undefined) return null;
+  const attempt = props.rec.restore?.attempt ?? 0;
+  return attempt > 1 ? `${t(key)} (${t("spawn.restoreAttempt", { n: String(attempt) })})` : t(key);
+});
+const restoreFailureLabel = computed(() => {
+  if (props.rec.state !== "failed") return null;
+  const failure = props.rec.restore?.failure;
+  if (failure === undefined) return null;
+  const key = restoreFailureKey(failure);
+  return key !== undefined ? t(key) : failure;
+});
 
 // ---------------------------------------------------------------------------
 // delete entry (web-hub-delete-session plan v2 §0.3/§5.4, user 拍板 #7): starting/failed rows
@@ -152,7 +183,9 @@ async function onRetry(): Promise<void> {
     <div class="spawn-row-line">
       <AppIcon v-if="rec.state === 'starting'" name="loader" class="icon-sm spin" />
       <AppIcon v-else name="alert" class="icon-sm" />
-      <span class="chip chip-spawn" :data-state="rec.state" translate="no">{{ stateLabel }}</span>
+      <span class="chip chip-spawn" :data-state="restoring ? 'restoring' : rec.state" translate="no">{{
+        stateLabel
+      }}</span>
       <span class="spawn-row-cwd" :title="rec.cwdLabel" translate="no">{{ rec.cwdLabel }}</span>
       <!-- default-model plan F1 (D3): the effective fork model as an inline marker (English
            token in both languages, AGENTS.md UI-text split) -->
@@ -192,6 +225,8 @@ async function onRetry(): Promise<void> {
         </button>
       </span>
     </div>
+    <p v-if="restorePhaseLabel" class="spawn-row-hint" data-restore="phase">{{ restorePhaseLabel }}</p>
+    <p v-if="restoreFailureLabel" class="spawn-row-hint" data-restore="failure">{{ restoreFailureLabel }}</p>
     <p v-if="hintLabel" class="spawn-row-hint">{{ hintLabel }}</p>
     <p v-if="retryDenied" class="spawn-row-hint">{{ t("spawn.rowOwnerOnly") }}</p>
     <template v-if="detailOpen">

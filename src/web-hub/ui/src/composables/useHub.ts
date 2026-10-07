@@ -29,6 +29,7 @@ import type {
 import { createControl } from "./useControl.js";
 import { createSpawn } from "./useSpawn.js";
 import { createNewSession } from "./useNewSession.js";
+import { successorOf } from "@logic/spawn.js";
 import type { SpawnsPayload, SpawnPolicyWire } from "@protocol/spawn.js";
 import { SPAWN_MODEL_HUB_CAP } from "@protocol/version.js";
 import type { HubHandle, HubSpawnHandle, HubState } from "../types.js";
@@ -174,6 +175,12 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     win: opts.win,
   });
 
+  /** The single navigation sink (new-session `live` jump + restore successor follow). */
+  function navigateTo(agentKey: string): void {
+    if (opts.navigate !== undefined) opts.navigate(agentKey);
+    else dispatch({ event: "route", data: { agentKey } });
+  }
+
   function dispatch(msg: DispatchMsg): void {
     if (disposed) return;
     const next = reduce(
@@ -187,7 +194,19 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     raw = next;
     // SP11: every `spawns` slot change (snapshot on reconnect, live broadcast) feeds the
     // new-session orchestrator — it settles awaiting flows / refills retained first prompts.
-    if (raw.spawns !== prevSpawns) newSession.noteSpawns(raw.spawns);
+    if (raw.spawns !== prevSpawns) {
+      newSession.noteSpawns(raw.spawns);
+      // spawn-restore plan §9.1: a viewer of a restored session's OLD key follows its successor
+      // (`restore.prevAgentKey === wanted`, live) instead of landing on 「已删除」. Deferred so the
+      // navigation (hash change / route event) never re-enters this dispatch.
+      const successor = successorOf(raw.spawns, raw.wanted);
+      if (successor !== undefined && successor !== raw.wanted) {
+        const from = raw.wanted;
+        queueMicrotask(() => {
+          if (!disposed && raw.wanted === from) navigateTo(successor);
+        });
+      }
+    }
     runEffects();
     gate.request(priorityFor(msg));
   }
@@ -560,10 +579,7 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
       return Array.isArray(caps) && caps.includes(SPAWN_MODEL_HUB_CAP);
     },
     control,
-    navigate: (agentKey) => {
-      if (opts.navigate !== undefined) opts.navigate(agentKey);
-      else dispatch({ event: "route", data: { agentKey } });
-    },
+    navigate: (agentKey) => navigateTo(agentKey),
     now,
     setTimeout: opts.setTimeout,
     clearTimeout: opts.clearTimeout,

@@ -171,7 +171,8 @@ export type RestoreFailure =
   | "register-timeout" | "exited-early"; // fork 之后没能回到 live
 
 export interface StoredRestore {
-  /** 已发起的恢复 fork 次数（fork 意图写盘时 +1，先于 fork）；1..RESTORE_MAX_ATTEMPTS。 */
+  /** 已发起的恢复 fork 次数（fork 意图写盘时 +1，先于 fork）；0..RESTORE_MAX_ATTEMPTS——
+   * reaping 阶段（首个 fork 意图写入之前）为 0，开始 fork 后为 1..3。 */
   attempts: number;
   /** 最近一次状态变化时刻（审计 / 诊断用）。 */
   lastAt: number;
@@ -197,7 +198,7 @@ restore?: StoredRestore;
 
 ### 5.2 形状校验（`isRecordShapeOk` 追加）
 
-新 hub 对新字段**严格**：存在就必须合法，否则整文件 corrupt（与该文件现有「喂给 kill 决策，宁可不信」的口径一致，`store.ts:216-219` 注释）。`sessionId` 用上面的正则，`sessionFile` 按上面的规则，`sessionPersisted`/`restoreIntent` 只能是 `true`，`restore` 必须是对象且 `attempts` 为 1..`RESTORE_MAX_ATTEMPTS` 的整数、`lastAt` 为有限数、`phase`/`failure` 属于枚举、`forkIntentAt`/`restoredAt` 为有限数、`prevAgentKey` 为字符串。
+新 hub 对新字段**严格**：存在就必须合法，否则整文件 corrupt（与该文件现有「喂给 kill 决策，宁可不信」的口径一致，`store.ts:216-219` 注释）。`sessionId` 用上面的正则，`sessionFile` 按上面的规则，`sessionPersisted`/`restoreIntent` 只能是 `true`，`restore` 必须是对象且 `attempts` 为 0..`RESTORE_MAX_ATTEMPTS` 的整数（0 = reaping，尚未发起任何恢复 fork）、`lastAt` 为有限数、`phase`/`failure` 属于枚举、`forkIntentAt`/`restoredAt` 为有限数、`prevAgentKey` 为字符串。
 
 `toStored()`：仅当 `cfg.restore` 为真时写 `sessionId`/`sessionFile`/`sessionPersisted`；**终态且无 `restore` 的记录不写会话字段**（无用，还占预算）。`revive()` 原样带回。
 

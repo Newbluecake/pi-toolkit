@@ -283,6 +283,10 @@ export const SPAWN_AUDIT_KEYS = [
   "model",
   "from",
   "to",
+  // web-hub-spawn-restore plan §10.6 (never sessionId / sessionFile)
+  "restore",
+  "restoreFailure",
+  "attempt",
 ] as const;
 
 /** `log.info("spawn", { audit: "spawn", ...pick(record, SPAWN_AUDIT_KEYS) })` (arch §6.6). */

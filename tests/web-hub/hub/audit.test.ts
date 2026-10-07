@@ -357,7 +357,14 @@ describe("auditSpawn (web-hub-spawn plan §SP9, arch §6.6)", () => {
       "model",
       "from",
       "to",
+      // web-hub-spawn-restore plan §10.6
+      "restore",
+      "restoreFailure",
+      "attempt",
     ]);
+    // web-hub-spawn-restore §10.6: session coordinates are never audit columns
+    expect(SPAWN_AUDIT_KEYS).not.toContain("sessionId");
+    expect(SPAWN_AUDIT_KEYS).not.toContain("sessionFile");
     // negative (U7): neither the keys nor the audit source may carry raw text/stderr writers
     expect(SPAWN_AUDIT_KEYS).not.toContain("text");
     expect(SPAWN_AUDIT_KEYS.filter((k) => k.startsWith("stderr"))).toEqual([]);

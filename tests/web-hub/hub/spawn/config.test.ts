@@ -105,6 +105,21 @@ describe("parseHubSpawnConfig (web-hub-spawn §SP2, hub-side strict re-validatio
     expect(zero.ok).toBe(false);
   });
 
+  it("web-hub-spawn-restore D18: restore is an optional bool — absent stays absent (⇒ false), present round-trips, non-bool rejects the block", () => {
+    const absent = parseHubSpawnConfig(valid);
+    expect(absent.ok && absent.spawn.restore).toBeUndefined();
+    expect(absent.ok && absent.spawn.restore === true).toBe(false);
+    for (const v of [true, false]) {
+      const r = parseHubSpawnConfig({ ...valid, restore: v });
+      expect(r).toEqual({ ok: true, spawn: { ...valid, restore: v } });
+    }
+    for (const bad of ["true", 1, null, {}]) {
+      const r = parseHubSpawnConfig({ ...valid, restore: bad });
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+      expect(!r.ok && r.detail).toMatch(/^restore=/);
+    }
+  });
+
   it("rejects a bad lan value", () => {
     for (const lan of ["OFF", "any", 42, undefined, null]) {
       const r = parseHubSpawnConfig({ ...valid, lan });

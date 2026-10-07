@@ -314,6 +314,13 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   `config.spawn` exists. SP13's `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
   child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.test.ts` (real pi) are the
   S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`.
+  **Restore across hub restarts (`webHub.spawn.restore`, default true, only under `spawn.enabled`)**: a
+  graceful restart / crash re-forks every recoverable managed session on the new hub as kill-old-then-fork
+  (`--session <file>` or `--session-id <id>`, never `--model`), same spawnId, new agentKey carrying
+  `restore.prevAgentKey`; L6 — never fork while the old identity's death is not `confirmed`; intent persisted
+  before every fork; `/webhub stop` leaves a one-shot `<stateDir>/spawn/restore.veto` (restart clears it);
+  `restore:false` is byte-identical to pre-restore behavior. HR1–HR7 / CR1–CR3 gates — design:
+  `docs/dev/web-hub-spawn-restore/plan.md`.
   **Delete session (`POST /api/agents/remove`, web-hub-delete-session plan v2)**: an AgentCard / SpawnRow two-step
   delete removes the card (and, for a managed session, stops the process first); the session jsonl is never deleted.
   Three invariants: **B-alive** — a record/card is dropped only after a read-only identity probe confirms death (or

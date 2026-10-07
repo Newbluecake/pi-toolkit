@@ -121,6 +121,12 @@ export const HUB_START_DEADLINE_MS = 20_000;
 export const HUB_CLOSE_DEADLINE_MS = 10_000;
 /** Per-step bound for cleanup/close steps; kept separate from the crash-only hard exit in `installProcessHandlers`. */
 const STEP_DEADLINE_MS = 3_000;
+/**
+ * web-hub-spawn-restore plan D2/§10.4: the `close(reason)` reasons whose spawn shutdown runs in
+ * `restore` mode (only when `config.spawn.restore === true`). `stop` / `signal` / `fence` / `idle`
+ * (and anything else) terminate exactly as before.
+ */
+export const RESTORE_REASONS: ReadonlySet<string> = new Set(["restart", "superseded", "crash"]);
 /** web-hub-spawn plan §SP10: supervisor `init()`'s own startup budget (store load + orphan
  * recovery + launcher check ≤1s + reaper ready ≤2s — see arch §4.2/§7.3), folded into the
  * hub's overall `HUB_START_DEADLINE_MS` via `withSignal`. */
@@ -155,6 +161,8 @@ export interface StartHubDeps {
     spawnFn?: SpawnSupervisorDeps["spawnFn"];
     wrapSupervisor?: (sup: SpawnSupervisor) => SpawnSupervisor;
     wrapFirstPrompt?: (fwd: FirstPromptForwarder) => FirstPromptForwarder;
+    /** web-hub-spawn-restore plan HR1 test hook: the restore stability window. */
+    restoreStableMs?: number;
   };
 }
 
@@ -325,6 +333,8 @@ export async function startHub(
       // C10/C8: every hello is also a rotate-intent recovery opportunity. The
       // callback is assigned before the first listener can accept a connection.
       onHello: () => recoverRotateOnHello?.(),
+      // spawn-restore §9.3: restart acks carry the restore-candidate count for the TUI hint.
+      restoreCount: () => spawnSup?.restoreCandidateCount() ?? 0,
     });
     cleanup.push(() => agentServer.close());
 
@@ -561,6 +571,14 @@ export async function startHub(
         onRemoved: (_spawnId, agentKey) => {
           if (agentKey !== undefined) registry.remove(agentKey, { allowConnected: true });
         },
+        // web-hub-spawn-restore plan D9/§10.4: a restore confirmed the OLD process dead — its card
+        // (if it ever reconnected to this hub) goes too; `agent_removed` lets the UI switch to the
+        // successor. Same post-death-confirmation safety argument as `onRemoved` above.
+        onPrevAgentGone: (_spawnId, prevAgentKey) => {
+          registry.remove(prevAgentKey, { allowConnected: true });
+        },
+        restoreVetoFile: spawnFiles.restoreVeto,
+        ...(deps.spawnSeams?.restoreStableMs === undefined ? {} : { restoreStableMs: deps.spawnSeams.restoreStableMs }),
         ...(deps.spawnSeams?.spawnFn === undefined ? {} : { spawnFn: deps.spawnSeams.spawnFn }),
       });
       spawnSup =
@@ -1074,7 +1092,11 @@ export async function startHub(
         // The forwarder is disposed first: unsent first prompts become `expired{hub_restart}`
         // (arch §4.6) while the bus is still live enough for the final `spawns` push.
         firstPromptFwd?.dispose("hub_restart");
-        if (spawnSup !== undefined) await spawnSup.shutdown(deadline);
+        // web-hub-spawn-restore plan §10.4: reason → mode, in this ONE place (D2).
+        if (spawnSup !== undefined) {
+          const mode = config.spawn?.restore === true && RESTORE_REASONS.has(reason) ? "restore" : "terminate";
+          await spawnSup.shutdown(deadline, { mode });
+        }
         // web-hub-preview plan v3 §4.5.1 (PV3): preview dispose — after the spawn domain shuts
         // down, BEFORE the HTTP face stops accepting. Bounded (≤1s inside dispose itself:
         // verifier tasks aborted, every active request aborted "hub-close", head-sent streams

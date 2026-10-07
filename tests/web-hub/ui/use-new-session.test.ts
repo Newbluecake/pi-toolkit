@@ -342,6 +342,23 @@ describe("useNewSession (plan §3.2 — #15 hard gate)", () => {
     expect(h.flow().phase).toBe("done"); // still settles (no firstPrompt), just no hijack
   });
 
+  it("spawn-restore plan §9.1: MY record carrying `restore` (spawnId reused, reqId kept) never navigates this tab", async () => {
+    const h = make();
+    await h.ns.submit(input());
+    h.ns.noteSpawns(
+      payload(
+        rec({
+          state: "live",
+          agentKey: "A2",
+          origin: { listener: "loopback", reqId: "req-1-aaaaaaaaaaaa" }, // mine
+          restore: { attempt: 1, prevAgentKey: "A1", restoredAt: 2000 },
+        }),
+      ),
+    );
+    expect(h.navigations).toHaveLength(0);
+    expect(h.flow().phase).toBe("done");
+  });
+
   it("dispose() clears the watchdog and the retention Map; late snapshots are inert", async () => {
     const h = make();
     await h.ns.submit(input("body"));

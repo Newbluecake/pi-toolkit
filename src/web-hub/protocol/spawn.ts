@@ -56,6 +56,88 @@ export type SpawnHint =
 export type FirstPromptState = "pending" | "sending" | "delivered" | "failed" | "expired";
 
 // ---------------------------------------------------------------------------
+// spawn restore (web-hub-spawn-restore plan v1 §5.1/§10.1 — append-only; NO persisted enum
+// (`SpawnState`/`SpawnEndReason`/`SpawnHint`) grows, D11: a rolled-back hub must never read a
+// newer spawns.json as corrupt)
+// ---------------------------------------------------------------------------
+
+/** Where a restoring record is: reaping the old identity → fork intent written → registering. */
+export type RestorePhase = "reaping" | "forking" | "registering";
+
+/** Why a restore did not happen / did not finish (rides next to an EXISTING endReason, D11). */
+export type RestoreFailure =
+  | "session-missing"
+  | "session-invalid"
+  | "prev-alive"
+  | "prev-unknown"
+  | "scan-miss"
+  | "exhausted"
+  | "lifetime"
+  | "launcher"
+  | "reaper"
+  | "persist"
+  | "cwd-changed"
+  | "register-timeout"
+  | "exited-early";
+
+/** Runtime list of {@link RestoreFailure} (store shape check + UI i18n key map). */
+export const RESTORE_FAILURES: readonly RestoreFailure[] = [
+  "session-missing",
+  "session-invalid",
+  "prev-alive",
+  "prev-unknown",
+  "scan-miss",
+  "exhausted",
+  "lifetime",
+  "launcher",
+  "reaper",
+  "persist",
+  "cwd-changed",
+  "register-timeout",
+  "exited-early",
+];
+
+/** Runtime list of {@link RestorePhase}. */
+export const RESTORE_PHASES: readonly RestorePhase[] = ["reaping", "forking", "registering"];
+
+/** `SpawnRecordPublic.restore` (plan §9.2): visible to every principal — no path, no body. */
+export interface SpawnRestoreWire {
+  phase?: RestorePhase;
+  attempt: number;
+  failure?: RestoreFailure;
+  prevAgentKey?: string;
+  restoredAt?: number;
+}
+
+/** D15: consecutive restore forks allowed before `exhausted`. */
+export const RESTORE_MAX_ATTEMPTS = 3;
+/** D15: a restored record live this long clears its `restore` field (attempt counter reset). */
+export const RESTORE_STABLE_MS = 120_000;
+/** D14: a candidate needs at least this much of its createdAt-anchored lifetime left. */
+export const RESTORE_MIN_LIFETIME_MS = 300_000;
+/** §6.5 reaping: verified SIGTERM → poll for confirmed death at most this long. */
+export const RESTORE_TERM_WAIT_MS = 3_000;
+/** §6.5 reaping: verified SIGKILL → poll for confirmed death at most this long. */
+export const RESTORE_KILL_WAIT_MS = 2_000;
+/** §6.5 reaping: death poll interval. */
+export const RESTORE_POLL_MS = 100;
+/** D17: restore jobs run at most this many at once (FIFO by createdAt). */
+export const RESTORE_CONCURRENCY = 2;
+/** §6.5 ④: a restore's register deadline is `forkAt + min(2×registerTimeoutS, this)`. */
+export const RESTORE_REGISTER_MAX_MS = 240_000;
+/** §5.1: a longer `sessionFile` is not persisted (restore degrades to `--session-id`). */
+export const RESTORE_SESSION_FILE_MAX_BYTES = 1024;
+/** §5.1: the only `sessionId` shape ever persisted / passed to `--session-id`. */
+export const RESTORE_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/** §5.1's `sessionFile` rule: absolute, UTF-8 ≤1024 B, no NUL/newline, ends in `.jsonl`. */
+export function isValidRestoreSessionFile(p: string): boolean {
+  if (!p.startsWith("/") || !p.endsWith(".jsonl")) return false;
+  if (p.includes("\0") || p.includes("\n") || p.includes("\r")) return false;
+  return new TextEncoder().encode(p).length <= RESTORE_SESSION_FILE_MAX_BYTES;
+}
+
+// ---------------------------------------------------------------------------
 // record projections (arch §6.4 visibility matrix)
 // ---------------------------------------------------------------------------
 
@@ -84,6 +166,9 @@ export interface SpawnRecordPublic {
    * awaiting death confirmation). Absent once the record is gone (the browser never sees
    * `removing:false`; it just stops receiving the record). */
   removing?: true;
+  /** web-hub-spawn-restore plan §9.2: present while a restore is in flight, failed, or inside
+   * its 2-minute stability window. Never carries `sessionId`/`sessionFile`. */
+  restore?: SpawnRestoreWire;
 }
 
 export interface SpawnRecordOwner extends SpawnRecordPublic {
@@ -171,6 +256,9 @@ export interface HubSpawnConfig {
   maxLifetimeMinutes: number;
   registerTimeoutS: number;
   lan: "off" | "known" | "roots";
+  /** web-hub-spawn-restore plan D18: restore managed sessions across hub restarts. Absent ⇒
+   * false hub-side (an older pi launching a newer hub never restores on its own). */
+  restore?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -390,6 +390,20 @@
   color: var(--c-on-primary-soft);
 }
 
+/* spawn-restore plan §9.1: `restoring` (row chip + old-card badge) / `restored` (stability window) */
+.chip-spawn[data-state="restoring"],
+.chip-restoring {
+  border-color: var(--c-warning-border);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.chip-restored {
+  border-color: var(--c-info);
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
 /* ---------------------------------------------------------------- DetailHeader (managed session) */
 .spawn-stop-btn.armed {
   border-color: var(--c-danger);

@@ -57,7 +57,7 @@
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
 import { type ChildProcess, spawn } from "node:child_process";
-import { closeSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, constants, lstatSync, openSync, readdirSync, readFileSync, readSync, unlinkSync } from "node:fs";
 import { basename } from "node:path";
 import type { HubEvent, HubLog } from "../ports.js";
 import { createReqDeadline, deriveBudget, type ReqDeadline } from "../req-deadline.js";
@@ -72,6 +72,14 @@ import {
 } from "../../protocol/proc-identity.js";
 import {
   EXIT_GUARD_MS,
+  isValidRestoreSessionFile,
+  RESTORE_CONCURRENCY,
+  RESTORE_KILL_WAIT_MS,
+  RESTORE_POLL_MS,
+  RESTORE_REGISTER_MAX_MS,
+  RESTORE_SESSION_ID_RE,
+  RESTORE_STABLE_MS,
+  RESTORE_TERM_WAIT_MS,
   SPAWN_BACKOFF_MS,
   SPAWN_BREAKER_OPEN_MS,
   SPAWN_EVENT_MS,
@@ -82,6 +90,7 @@ import {
   STOP_TERM_MS,
   type FirstPromptState,
   type HubSpawnConfig,
+  type RestoreFailure,
   type SpawnEndReason,
   type SpawnPolicyWire,
   type SpawnRecordPublic,
@@ -94,6 +103,13 @@ import { createRpcStdio, type RpcStdio } from "./rpc-stdio.js";
 import { createStderrSink, type StderrSink } from "./stderr-sink.js";
 import { isTerminalSpawnState, type SpawnStore, type StoredOwner, type StoredRecord } from "./store.js";
 import type { DirService } from "./dirs.js";
+import {
+  classifyForRestore,
+  hidesIdentityOnWire,
+  planSessionArgv,
+  restoreWireOf,
+  type RestoreSessionFs,
+} from "./restore-plan.js";
 import {
   checkLauncherAsync,
   compareDotVersions,
@@ -139,6 +155,10 @@ export interface SpawnAuditRecord {
   /** default-model plan §3 ④ (prefs writes): the value BEFORE / AFTER — `null` = 「no preference」. */
   from?: string | null;
   to?: string | null;
+  /** web-hub-spawn-restore plan §10.6: restore lifecycle step (never sessionId/sessionFile). */
+  restore?: "intent" | "reap" | "fork" | "live" | "stable" | "fail" | "veto";
+  restoreFailure?: RestoreFailure;
+  attempt?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +296,22 @@ interface Supervised extends InternalRecord {
   stopTimer: NodeJS.Timeout | undefined;
   lastOpenCount: number;
   stop: StopState | undefined;
+  /** web-hub-spawn-restore plan §6.5 ⑤: RESTORE_STABLE_MS after a restored goLive ⇒ drop `restore`. */
+  stableTimer: NodeJS.Timeout | undefined;
+  /** Last `status.busy` seen for the bound agent (RS3: busy→idle triggers the sessionPersisted stat). */
+  lastBusy: boolean;
+  /** D17: releases this record's restore-job concurrency slot (live / terminal / stopping / close). */
+  restoreSlot: (() => void) | undefined;
+}
+
+/** web-hub-spawn-restore plan §10.2: `shutdown`'s mode — `restore` only tags + parks, the
+ *  graded ladder itself is identical to `terminate`. */
+export type ShutdownMode = "terminate" | "restore";
+
+/** The slice of the bus `SessionInfo` the supervisor keeps (RS3). */
+interface SessionCoords {
+  sessionId: string;
+  sessionFile?: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +338,9 @@ export interface SpawnSupervisor {
   noteVersion(agentKey: string, pluginVersion: string): void;
   /** Non-terminal record count (idle/supersede gating; arch §7.8 "子进程存在时"). */
   liveCount(): number;
+  /** spawn-restore §9.3: records that WOULD be tagged `restoreIntent` by a restart-mode
+   * shutdown right now (`eligibleAtShutdown`) — the TUI hint's "N 个网页会话将在重启后恢复". */
+  restoreCandidateCount(): number;
   /** Live records whose bound agent reports `status.busy` (supersede quiet, plan §SP10). */
   busyCount(): number;
   /** SP8's `onChange` landing: same-tick merged `spawns` push + debounced persist. */
@@ -318,8 +357,10 @@ export interface SpawnSupervisor {
   /** web-hub-delete-session plan v2 §2.4: read-only death verdict for a record, by `spawnId` —
    * shares `remove()`'s private judgment (§2.1). Undefined when no such record exists. */
   deathOf(spawnId: string): Death | undefined;
-  /** arch §7.6 graded shutdown: bounded graceful wait → verified SIGTERM → flush → reaper EOF. */
-  shutdown(deadline: ReqDeadline): Promise<void>;
+  /** arch §7.6 graded shutdown: bounded graceful wait → verified SIGTERM → flush → reaper EOF.
+   *  web-hub-spawn-restore plan §10.2: `mode:"restore"` (only honored when `cfg.restore`) first
+   *  tags eligible records `restoreIntent` and persists synchronously; absent ⇒ terminate. */
+  shutdown(deadline: ReqDeadline, opts?: { mode?: ShutdownMode }): Promise<void>;
 }
 
 export interface SpawnSupervisorDeps {
@@ -370,6 +411,16 @@ export interface SpawnSupervisorDeps {
   pluginVersion?: string;
   /** stderr logDir (SP5's sink); undefined ⇒ stderr data is dropped (no disk touch). */
   stderrDir?: string;
+  // ---- web-hub-spawn-restore plan §10.2 (all optional)
+  /** Fired once per restore after the OLD process is confirmed dead; hub.ts wires it to
+   *  `registry.remove(prevAgentKey, { allowConnected: true })`. Never sends a signal. */
+  onPrevAgentGone?: (spawnId: string, prevAgentKey: string) => void;
+  /** Session-file preflight seam (default node:fs, `O_NOFOLLOW` head read). */
+  sessionFs?: RestoreSessionFs;
+  /** `<stateDir>/spawn/restore.veto` (D13); undefined ⇒ never checked. */
+  restoreVetoFile?: string;
+  /** Test hook: the stability window (default RESTORE_STABLE_MS). */
+  restoreStableMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +495,21 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
   const getuidFn = deps.getuid ?? (() => process.getuid?.() ?? 0);
   const readdirFn = deps.readdirSync ?? ((path: string) => readdirSync(path));
   const readProc = procDeps.readFileSync ?? ((path: string) => readFileSync(path, { encoding: "utf8" }));
+  const restoreOn = cfg.restore === true;
+  const restoreStableMs = deps.restoreStableMs ?? RESTORE_STABLE_MS;
+  const sessionFs: RestoreSessionFs = deps.sessionFs ?? {
+    lstatSync: (p) => lstatSync(p),
+    readHeadSync: (p, maxBytes) => {
+      const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const buf = Buffer.alloc(maxBytes);
+        const n = readSync(fd, buf, 0, maxBytes, 0);
+        return buf.subarray(0, n).toString("utf8");
+      } finally {
+        closeSync(fd);
+      }
+    },
+  };
 
   const records = new Map<string, Supervised>();
 
@@ -512,6 +578,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.registerTimer = clearHandle(rec.registerTimer);
     rec.lifetimeTimer = clearHandle(rec.lifetimeTimer);
     rec.stopTimer = clearHandle(rec.stopTimer);
+    rec.stableTimer = clearHandle(rec.stableTimer);
   }
 
   /** Absolute-deadline timer that distrusts timer precision (arch §7.5): an early wake re-arms. */
@@ -569,6 +636,19 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (rec.stderrLog !== undefined) out.stderrLog = rec.stderrLog;
     if (rec.removePending) out.removeIntent = true;
     if (rec.noProcess !== undefined) out.noProcess = rec.noProcess;
+    // web-hub-spawn-restore plan §5.2/D6: the restore fields exist on disk ONLY when restore is on
+    // (restore off ⇒ spawns.json byte-identical to the pre-feature format). A terminal record
+    // without a `restore` slice carries no session coordinates (useless, costs budget).
+    if (restoreOn) {
+      const keepSession = !isTerminalSpawnState(rec.state) || rec.restore !== undefined;
+      if (keepSession && rec.sessionId !== undefined && RESTORE_SESSION_ID_RE.test(rec.sessionId)) {
+        out.sessionId = rec.sessionId;
+        if (rec.sessionFile !== undefined) out.sessionFile = rec.sessionFile;
+        if (rec.sessionPersisted === true) out.sessionPersisted = true;
+      }
+      if (rec.restoreIntent === true) out.restoreIntent = true;
+      if (rec.restore !== undefined) out.restore = { ...rec.restore };
+    }
     return out;
   }
 
@@ -590,17 +670,20 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       cwdLabel: basename(rec.cwd),
       origin: { listener: rec.owner.listener, reqId: rec.owner.reqId },
     };
-    if (rec.pid !== undefined) item.pid = rec.pid;
+    const hideOld = hidesIdentityOnWire(rec.restore); // §9.1: reaping ⇒ pid/exit are the OLD process
+    if (rec.pid !== undefined && !hideOld) item.pid = rec.pid;
     if (rec.agentKey !== undefined) item.agentKey = rec.agentKey;
     if (rec.model !== undefined) item.model = rec.model;
     if (rec.agentKey !== undefined) item.linked = rec.linked;
     if (rec.state === "live" && rec.control !== undefined) item.control = rec.control;
     if (rec.endReason !== undefined && rec.endReason !== null) item.endReason = rec.endReason;
-    if (rec.exit !== undefined && rec.exit !== null) item.exit = rec.exit;
+    if (rec.exit !== undefined && rec.exit !== null && !hideOld) item.exit = rec.exit;
     if (rec.hint !== undefined && rec.hint !== null) item.hint = rec.hint;
     if (rec.uiCancelled.length > 0) item.uiCancelledCount = rec.uiCancelled.length;
     if (rec.firstPrompt !== undefined) item.firstPrompt = { state: rec.firstPrompt.state };
     if (rec.removePending) item.removing = true;
+    const restore = restoreWireOf(rec.restore);
+    if (restore !== undefined) item.restore = restore;
     return item;
   }
 
@@ -925,6 +1008,30 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
 
   function finalizeTerminal(rec: Supervised): void {
     if (isTerminalSpawnState(rec.state)) return;
+    if (closedFlag && rec.restoreIntent === true) {
+      // web-hub-spawn-restore plan D5 (park): a child exiting inside a restore-mode shutdown
+      // window keeps its record NON-terminal (`stopping` + `restoreIntent`, real `exit` already
+      // recorded ⇒ `computeDeath` says confirmed at the next boot) — never `exited{hub}`, never
+      // onTerminal / trim / breaker. Only the per-process plumbing is released here.
+      clearRecordTimers(rec);
+      if (rec.pid !== undefined) reaper.untrack(rec.pid);
+      cleanupHandles(rec);
+      releaseRestoreSlot(rec);
+      persistDebounced();
+      return;
+    }
+    // web-hub-spawn-restore plan §6.5 ⑥: a restore that dies after its fork records why (on top of
+    // an EXISTING endReason — D11), and stops being "in flight".
+    if (rec.restore?.phase !== undefined) {
+      const why = rec.endReason ?? rec.stop?.reason;
+      if (why === "register_timeout") rec.restore.failure = "register-timeout";
+      else if (why === "exited_early") rec.restore.failure = "exited-early";
+      delete rec.restore.phase;
+      rec.restore.lastAt = now();
+      if (rec.restore.failure !== undefined) auditRestore(rec, "fail");
+    }
+    delete rec.restoreIntent;
+    releaseRestoreSlot(rec);
     rec.state = rec.stop?.terminalState ?? "exited";
     rec.endReason = rec.endReason ?? rec.stop?.reason ?? "crash";
     rec.updatedAt = now();
@@ -936,7 +1043,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     // not a launcher problem (4 such rejections must NOT open the breaker). Everything else
     // (register_timeout / spawn_error / cwd_mismatch / no-model early exits) counts right here,
     // exactly as before — the terminal settlement itself is unchanged and still one-shot.
-    const verdictDeferred = reason === "exited_early" && rec.model !== undefined;
+    // web-hub-spawn-restore D16: a breaker-exempt record (restore forks) never enters the deferred
+    // verdict either — settleVerdict would otherwise count it after the fact.
+    const verdictDeferred = reason === "exited_early" && rec.model !== undefined && !rec.breakerExempt;
     if (BREAKER_REASONS.has(reason) && !rec.breakerExempt && !verdictDeferred) noteLaunchFailure();
     if (verdictDeferred) {
       rec.breakerVerdict = "pending";
@@ -1022,6 +1131,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.state = "stopping";
     rec.endReason = reason;
     rec.stop = { reason, terminalState: failure ? "failed" : "exited", stage: 0 };
+    releaseRestoreSlot(rec);
     rec.updatedAt = now();
     rec.registerTimer = clearHandle(rec.registerTimer);
     rec.lifetimeTimer = clearHandle(rec.lifetimeTimer);
@@ -1125,10 +1235,67 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     enterStopping(rec, "lifetime");
   }
 
-  function goLive(rec: Supervised, sessionId: string): void {
+  /** RS3: does the session file exist right now (lstat, never follows)? Any error ⇒ false. */
+  function sessionFileExists(file: string): boolean {
+    try {
+      sessionFs.lstatSync(file);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * web-hub-spawn-restore plan RS3/D6: adopt the bound agent's session coordinates. Returns true
+   * when anything changed. `sessionPersisted` is re-judged against the (possibly new) file.
+   */
+  function adoptSessionCoords(rec: Supervised, session: SessionCoords): boolean {
+    const file =
+      session.sessionFile !== undefined && isValidRestoreSessionFile(session.sessionFile)
+        ? session.sessionFile
+        : undefined;
+    const changed = rec.sessionId !== session.sessionId || rec.sessionFile !== file;
+    rec.sessionId = session.sessionId;
+    if (rec.sessionFile !== file) {
+      delete rec.sessionPersisted;
+      if (file === undefined) delete rec.sessionFile;
+      else rec.sessionFile = file;
+    }
+    if (file !== undefined && rec.sessionPersisted !== true && sessionFileExists(file)) {
+      rec.sessionPersisted = true;
+      return true;
+    }
+    return changed;
+  }
+
+  function auditRestore(rec: Supervised, step: NonNullable<SpawnAuditRecord["restore"]>): void {
+    const entry: SpawnAuditRecord = { audit: "spawn", phase: "state", spawnId: rec.spawnId, restore: step };
+    if (rec.restore !== undefined) entry.attempt = rec.restore.attempts;
+    if (rec.restore?.failure !== undefined) entry.restoreFailure = rec.restore.failure;
+    if (rec.pid !== undefined) entry.pid = rec.pid;
+    deps.audit(entry);
+  }
+
+  function releaseRestoreSlot(rec: Supervised): void {
+    const release = rec.restoreSlot;
+    rec.restoreSlot = undefined;
+    release?.();
+  }
+
+  function goLive(rec: Supervised, session: SessionCoords): void {
     if (isTerminalSpawnState(rec.state) || rec.state !== "starting") return;
+    const sessionId = session.sessionId;
     rec.state = "live";
     rec.everLive = true;
+    if (restoreOn) {
+      const persisted = rec.sessionId;
+      if (rec.restore?.phase !== undefined && persisted !== undefined && persisted !== sessionId) {
+        // D7 makes this impossible in the normal case — defensive: adopt the new id, say so.
+        log.warn("spawn supervisor: restored session id differs from the persisted one", { spawnId: rec.spawnId });
+        deps.audit({ audit: "spawn", phase: "state", spawnId: rec.spawnId, code: "restore-session-mismatch" });
+      }
+      adoptSessionCoords(rec, session);
+    }
     rec.sessionId = sessionId;
     rec.control = rec.agentKey !== undefined && (registry.getCaps(rec.agentKey) ?? []).includes("cmd.v1");
     if (rec.control !== true) rec.hint = "control-off";
@@ -1138,9 +1305,38 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     clearBreaker(); // §3.1 ⑦: live ⇒ 熔断计数清零
     rec.updatedAt = now();
     auditState(rec);
-    persistDebounced();
+    if (restoreOn) {
+      if (rec.restore?.phase !== undefined) {
+        // §6.5 ⑤: back to live — the stability window starts; the attempt counter survives it.
+        delete rec.restore.phase;
+        rec.restore.restoredAt = rec.updatedAt;
+        rec.restore.lastAt = rec.updatedAt;
+        auditRestore(rec, "live");
+        armStableTimer(rec);
+        releaseRestoreSlot(rec);
+      }
+      // D6: the coordinates are what a crash-path restore needs — synchronous, not debounced.
+      const saved = store.saveNow(storedSnapshot());
+      if (!saved.ok) persistDebounced();
+    } else {
+      persistDebounced();
+    }
     schedulePush();
     deps.onLive?.(rec);
+  }
+
+  function armStableTimer(rec: Supervised): void {
+    rec.stableTimer = clearHandle(rec.stableTimer);
+    rec.stableTimer = arm(restoreStableMs, () => {
+      rec.stableTimer = undefined;
+      if (records.get(rec.spawnId) !== rec || rec.state !== "live" || rec.restore === undefined) return;
+      if (rec.restore.phase !== undefined) return;
+      auditRestore(rec, "stable");
+      delete rec.restore;
+      rec.updatedAt = now();
+      persistDebounced();
+      schedulePush();
+    });
   }
 
   // ----------------------------------------------------------------- bus
@@ -1179,7 +1375,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
             continue;
           }
           const sess = registry.get(e.agent.agentKey)?.session;
-          if (sess !== undefined) goLive(rec, sess.sessionId);
+          if (sess !== undefined) goLive(rec, sess);
           else {
             persistDebounced();
             schedulePush();
@@ -1190,7 +1386,31 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     }
     if (e.type === "session") {
       const rec = findByAgentKey(e.agentKey);
-      if (rec !== undefined && rec.state === "starting") goLive(rec, e.session.sessionId);
+      if (rec !== undefined && rec.state === "starting") goLive(rec, e.session);
+      else if (rec !== undefined && rec.state === "live" && restoreOn) {
+        // RS3 (F11): a live session switch (web /new, switch_session) moves the restore target.
+        if (adoptSessionCoords(rec, e.session)) {
+          rec.updatedAt = now();
+          const saved = store.saveNow(storedSnapshot());
+          if (!saved.ok) persistDebounced();
+        }
+      }
+      return;
+    }
+    if (e.type === "status") {
+      if (!restoreOn) return;
+      const rec = findByAgentKey(e.agentKey);
+      if (rec === undefined || rec.state !== "live") return;
+      const busy = e.status.busy;
+      // RS3: a turn just ended ⇒ pi has written the session file if it ever will — one stat, and
+      // once observed the evidence sticks (no further stats for this file).
+      if (rec.lastBusy && !busy && rec.sessionPersisted !== true && rec.sessionFile !== undefined) {
+        if (sessionFileExists(rec.sessionFile)) {
+          rec.sessionPersisted = true;
+          persistDebounced();
+        }
+      }
+      rec.lastBusy = busy;
       return;
     }
     if (e.type === "dialogs") {
@@ -1328,6 +1548,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       lastOpenCount: 0,
       stop: undefined,
       removePending: false,
+      stableTimer: undefined,
+      lastBusy: false,
+      restoreSlot: undefined,
     };
 
     // ① intent — L1: on disk BEFORE the fork
@@ -1355,6 +1578,36 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       return { ok: false, code: "E_DIR", reason: pin.reason };
     }
 
+    // ③④⑤⑥ — shared with the restore path (web-hub-spawn-restore plan §10.3); start()'s argv
+    // tail is the default-model `--model <ref>` (TWO independent elements) or nothing at all.
+    forkInto(
+      rec,
+      launcher,
+      pin,
+      rec.model === undefined ? [] : ["--model", rec.model],
+      t0 + cfg.registerTimeoutS * 1000,
+      () => {
+        rec.state = "starting";
+      },
+    );
+    return { ok: true, spawnId: rec.spawnId };
+  }
+
+  type ForkResult = "ok" | "spawn-threw" | "no-child" | "persist-failed";
+
+  /**
+   * web-hub-spawn-restore plan §10.3: start()'s ③–⑥ stretch, extracted verbatim so the restore
+   * path forks through the SAME code (L1 second write, L2 track, listeners, ⑤ timer, register
+   * deadline). Every failure is already settled on the record when this returns.
+   */
+  function forkInto(
+    rec: Supervised,
+    launcher: readonly [string, string],
+    pin: { fd: number; cwdArg: string },
+    argvTail: readonly string[],
+    registerDeadlineAt: number,
+    onPersistedIdentity: () => void,
+  ): ForkResult {
     // ③ fork — umask swap around a fully synchronous spawn, fd closed in finally
     let child: ChildProcess | undefined;
     try {
@@ -1368,13 +1621,10 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
         childEnv.PI_WEBHUB_HEADLESS = "1";
         childEnv.PI_WEBHUB_SPAWN_ID = rec.spawnId;
         childEnv.PWD = rec.cwd;
-        // default-model plan §3 (supervisor row): fixed prefix + optional `--model <ref>` tail —
-        // TWO independent argv elements, never string-concatenated; without a model the argv is
-        // element-for-element identical to the pre-feature fork (byte-compat invariant).
-        const argv: readonly string[] =
-          rec.model === undefined
-            ? [launcher[1], "--mode", "rpc"]
-            : [launcher[1], "--mode", "rpc", "--model", rec.model];
+        // default-model plan §3 (supervisor row): fixed prefix + optional tail — independent argv
+        // elements, never string-concatenated; with an empty tail the argv is element-for-element
+        // identical to the pre-feature fork (byte-compat invariant).
+        const argv: readonly string[] = [launcher[1], "--mode", "rpc", ...argvTail];
         child = spawnFn(launcher[0], argv, {
           cwd: pin.cwdArg,
           detached: true,
@@ -1392,12 +1642,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       // (C1): node's synchronous `spawn` throw only happens before the fork itself.
       rec.noProcess = "never-forked";
       failSpawnError(rec, err instanceof Error ? err.message : String(err));
-      return { ok: true, spawnId: rec.spawnId };
+      return "spawn-threw";
     }
     if (child === undefined) {
       rec.noProcess = "never-forked";
       failSpawnError(rec, "spawnFn returned no child");
-      return { ok: true, spawnId: rec.spawnId };
+      return "no-child";
     }
 
     // ④ identity — same synchronous segment as the fork (L1's second save)
@@ -1411,7 +1661,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
         rec.uid = getuidFn();
       }
     }
-    rec.state = "starting";
+    onPersistedIdentity();
     rec.updatedAt = now();
     // L1 write #2 (review re-run #2): the pid+identity MUST land on disk in this same
     // synchronous segment — a failed write means the child can never be recovered from
@@ -1440,7 +1690,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       });
       // The record exists (① built it), so the 202 contract holds — the failure rides the SSE.
       enterStopping(rec, "spawn_error");
-      return { ok: true, spawnId: rec.spawnId };
+      return "persist-failed";
     }
 
     // stdio listeners — stdout drained from the fork instant on (arch §4.4)
@@ -1472,12 +1722,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.spawnEventTimer = arm(SPAWN_EVENT_MS, () => onSpawnEventTimeout(rec));
 
     // ⑥⑦ shared register deadline
-    rec.registerDeadlineAt = t0 + cfg.registerTimeoutS * 1000;
+    rec.registerDeadlineAt = registerDeadlineAt;
     armRegisterTimer(rec);
 
     auditState(rec);
     schedulePush();
-    return { ok: true, spawnId: rec.spawnId };
+    return "ok";
   }
 
   // ----------------------------------------------------------------- init / recovery
@@ -1487,7 +1737,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       ...stored,
       linked: false,
       control: undefined,
-      sessionId: undefined,
+      // web-hub-spawn-restore plan §5.2: the persisted coordinates come back with the record.
+      sessionId: stored.sessionId,
       hintDetail: undefined,
       uiCancelled: [],
       stderrTail: () => (rec.sink !== undefined ? rec.sink.tail() : undefined),
@@ -1511,6 +1762,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       lastOpenCount: 0,
       stop: undefined,
       removePending: stored.removeIntent === true,
+      stableTimer: undefined,
+      lastBusy: false,
+      restoreSlot: undefined,
     };
     return rec;
   }
@@ -1635,12 +1889,51 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     const writerBoot = loaded.writer?.bootId;
     const bootChanged = writerBoot !== undefined && writerBoot !== "" && hubBootId !== "" && writerBoot !== hubBootId;
 
+    // web-hub-spawn-restore plan D13/§6.4: the one-shot veto is read (and consumed) in the read
+    // phase; a failed unlink is only logged — this boot still honors it.
+    const vetoed = restoreOn && deps.restoreVetoFile !== undefined && consumeRestoreVeto(deps.restoreVetoFile);
+    const classifyCtx = {
+      restoreOn,
+      vetoed,
+      now: now(),
+      maxLifetimeMs: cfg.maxLifetimeMinutes * 60_000,
+    };
+
     let mutated = false;
     for (const stored of loaded.records) {
       const rec = revive(stored);
       records.set(rec.spawnId, rec);
       if (isTerminalSpawnState(stored.state)) continue;
       mutated = true;
+      // §6.4: bootChanged and removeIntent rows win over everything — legacy recovery untouched.
+      if (!bootChanged && !rec.removePending) {
+        const verdict = classifyForRestore(stored, classifyCtx);
+        if (verdict.kind === "candidate") {
+          enterRestoreCandidate(rec);
+          continue;
+        }
+        if (verdict.kind === "scan") {
+          // §7 L1: a crash between the restore fork intent and its identity write — the spawnId is
+          // reused, so the scan's lower bound is the fork intent, never createdAt.
+          const hit = scanEnvironForSpawnId(stored.spawnId, verdict.forkIntentAt);
+          if (hit !== undefined) {
+            rec.pid = hit.pid;
+            rec.procStartTicks = hit.procStartTicks;
+            rec.bootId = hit.bootId;
+            rec.uid = hit.uid;
+            enterRestoreCandidate(rec);
+            continue;
+          }
+          noteRestoreSkip(rec, "scan-miss"); // fail closed: no signal, no fork
+          rec.state = "failed";
+          rec.endReason = "spawn_error";
+          rec.stop = { reason: "spawn_error", terminalState: "failed", stage: 3 };
+          rec.updatedAt = now();
+          continue;
+        }
+        if (verdict.kind === "skip") noteRestoreSkip(rec, verdict.failure);
+      }
+      clearRestoreInFlight(rec); // a non-candidate is never "restoring" on the wire
       if (bootChanged) {
         rec.noProcess = "boot-changed"; // web-hub-delete-session plan v2 §2.1 (C1)
         finalizeRecovered(rec, "boot-mismatch"); // machine rebooted — no signal is meaningful
@@ -1731,6 +2024,287 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       persistDebounced();
       schedulePush();
     }
+    scheduleRestores(reaperOk);
+  }
+
+  // ----------------------------------------------------------------- restore (web-hub-spawn-restore v1)
+
+  /** D13: read + delete the one-shot veto. Present ⇒ true even when the unlink fails. */
+  function consumeRestoreVeto(file: string): boolean {
+    try {
+      unlinkSync(file);
+      log.info("spawn supervisor: restore veto consumed — no restore this boot");
+      deps.audit({ audit: "spawn", phase: "state", restore: "veto" });
+      return true;
+    } catch (err) {
+      const code = errCodeOf(err);
+      if (code === "ENOENT") return false;
+      // Present but undeletable (EACCES/EPERM/…): this boot honors it; the next one re-checks.
+      log.warn("spawn supervisor: restore veto present but not removable", { code: code ?? "unknown" });
+      try {
+        lstatSync(file);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  /** §6.4: a non-candidate leaves the read phase with no in-flight restore marks. */
+  function clearRestoreInFlight(rec: Supervised): void {
+    delete rec.restoreIntent;
+    if (rec.restore?.phase !== undefined) delete rec.restore.phase;
+  }
+
+  /** §6.4 filter failure / scan miss: annotate, then the legacy path (or caller) settles the record. */
+  function noteRestoreSkip(rec: Supervised, failure: RestoreFailure): void {
+    rec.restore = { attempts: rec.restore?.attempts ?? 0, lastAt: now(), failure };
+    delete rec.restoreIntent;
+    auditRestore(rec, "fail");
+  }
+
+  /** §6.4's read-phase rewrite: `starting{reaping}`, identity (pid/starttime/bootId/uid/exit) KEPT. */
+  function enterRestoreCandidate(rec: Supervised): void {
+    const prevKey = rec.agentKey ?? rec.restore?.prevAgentKey;
+    rec.state = "starting";
+    rec.restore = {
+      attempts: rec.restore?.attempts ?? 0,
+      lastAt: now(),
+      phase: "reaping",
+      ...(prevKey === undefined ? {} : { prevAgentKey: prevKey }),
+    };
+    delete rec.agentKey;
+    delete rec.firstPrompt;
+    delete rec.restoreIntent;
+    delete rec.hint;
+    delete rec.endReason;
+    rec.linked = false;
+    rec.everLive = true;
+    rec.breakerExempt = true;
+    rec.hintDetail = undefined;
+    rec.uiCancelled = [];
+    rec.stop = undefined;
+    rec.updatedAt = now();
+    auditRestore(rec, "intent");
+  }
+
+  const restoreQueue: Supervised[] = [];
+  let restoreRunning = 0;
+
+  /** §6.5 step 0: after launcher check + reaper start; signals/forks run AFTER init returns (D17). */
+  function scheduleRestores(reaperOk: boolean): void {
+    const cands = [...records.values()]
+      .filter((r) => r.state === "starting" && r.restore?.phase === "reaping")
+      .sort((a, b) => a.createdAt - b.createdAt);
+    if (cands.length === 0) return;
+    const launcherOk = deps.launcher !== undefined && launcherCheck !== undefined && launcherCheck.ok;
+    if (!reaperOk || !launcherOk) {
+      // D16: L1/L2 preconditions are never waived — degrade every candidate to legacy recovery.
+      for (const rec of cands) {
+        const id = identityOf(rec);
+        if (rec.restore !== undefined) {
+          rec.restore.failure = reaperOk ? "launcher" : "reaper";
+          delete rec.restore.phase;
+          rec.restore.lastAt = now();
+        }
+        finalizeRecovered(rec);
+        if (id !== undefined) recoverEscalate(id);
+        auditRestore(rec, "fail");
+      }
+      persistDebounced();
+      schedulePush();
+      return;
+    }
+    for (const rec of cands) {
+      const t = trackIdentityOf(rec);
+      if (t !== undefined) reaper.track(t); // L2: the OLD process is guarded while we reap it
+      restoreQueue.push(rec);
+    }
+    const task = setImmediate(pumpRestores);
+    task.unref?.();
+  }
+
+  function pumpRestores(): void {
+    while (!closedFlag && restoreRunning < RESTORE_CONCURRENCY && restoreQueue.length > 0) {
+      const rec = restoreQueue.shift();
+      if (rec === undefined) break;
+      restoreRunning += 1;
+      void runRestoreJob(rec)
+        .catch((err: unknown) => {
+          log.error("spawn supervisor: restore job failed", { spawnId: rec.spawnId, error: String(err) });
+        })
+        .finally(() => {
+          restoreRunning -= 1;
+          pumpRestores();
+        });
+    }
+  }
+
+  /** §6.5 step 1's checkpoint: any mismatch ⇒ the job exits silently (the current state's own
+   *  path owns the record from here). */
+  function restoreJobAlive(rec: Supervised): boolean {
+    return (
+      !closedFlag &&
+      records.get(rec.spawnId) === rec &&
+      rec.state === "starting" &&
+      rec.restore?.phase === "reaping" &&
+      !rec.removePending
+    );
+  }
+
+  async function pollDeath(rec: Supervised, budgetMs: number): Promise<Death> {
+    const until = now() + budgetMs;
+    for (;;) {
+      const d = computeDeath(rec);
+      if (d === "confirmed" || now() >= until || !restoreJobAlive(rec)) return d;
+      await sleepBounded(RESTORE_POLL_MS);
+    }
+  }
+
+  /** §6.5 reaping failure: the record ends `exited{orphan}` (no fork — L6); the reaper keeps the
+   *  old identity tracked, so a later hub death still escalates it. */
+  function failRestoreOrphan(rec: Supervised, failure: RestoreFailure): void {
+    if (rec.restore !== undefined) {
+      rec.restore.failure = failure;
+      delete rec.restore.phase;
+      rec.restore.lastAt = now();
+    }
+    finalizeRecovered(rec);
+    auditRestore(rec, "fail");
+    persistDebounced();
+    schedulePush();
+  }
+
+  /** §6.5 step 2/3/4 failure before a new process exists: `failed{spawn_error}` + never-forked
+   *  (the old process is confirmed dead, the new one never existed ⇒ a delete can confirm). */
+  function failRestorePreflight(rec: Supervised, failure: RestoreFailure, detail?: string): false {
+    delete rec.pid;
+    delete rec.procStartTicks;
+    delete rec.bootId;
+    delete rec.uid;
+    delete rec.exit;
+    rec.noProcess = "never-forked";
+    if (rec.restore !== undefined) {
+      rec.restore.failure = failure;
+      delete rec.restore.phase;
+      rec.restore.lastAt = now();
+    }
+    if (detail !== undefined) rec.hintDetail = detail; // owner-only
+    rec.endReason = "spawn_error";
+    rec.stop = { reason: "spawn_error", terminalState: "failed", stage: 3 };
+    auditRestore(rec, "fail");
+    finalizeTerminal(rec);
+    return false;
+  }
+
+  /** §6.5 steps 2–4, fully synchronous: preflight → fork intent (L1 #1) → forkInto (L1 #2). */
+  function restoreForkSync(rec: Supervised): boolean {
+    if (closedFlag) return false;
+    if (!store.healthy) return failRestorePreflight(rec, "persist");
+    if (!reaper.available || reaperDown) return failRestorePreflight(rec, "reaper");
+    const launcher = deps.launcher;
+    if (launcher === undefined || launcherChanged || launcherCheck === undefined || !launcherCheck.ok) {
+      return failRestorePreflight(rec, "launcher");
+    }
+    if (!recheckLauncherSync(launcherCheck.fp, deps.launcherFs)) {
+      launcherChanged = true; // arch §4.2: same degrade as start()
+      return failRestorePreflight(rec, "launcher");
+    }
+    const plan = planSessionArgv(
+      { sessionId: rec.sessionId, sessionFile: rec.sessionFile, sessionPersisted: rec.sessionPersisted, cwd: rec.cwd },
+      sessionFs,
+      getuidFn(),
+    );
+    if (!plan.ok) return failRestorePreflight(rec, plan.failure, plan.detail);
+    if (rec.restore === undefined) return failRestorePreflight(rec, "persist"); // unreachable: candidates carry it
+
+    // ③ forking — L1 write #1: the intent (attempts+1, forkIntentAt) is on disk BEFORE the fork.
+    delete rec.pid;
+    delete rec.procStartTicks;
+    delete rec.bootId;
+    delete rec.uid;
+    delete rec.exit;
+    delete rec.endReason;
+    delete rec.noProcess;
+    rec.stop = undefined;
+    const t = now();
+    rec.restore.phase = "forking";
+    rec.restore.forkIntentAt = t;
+    rec.restore.attempts += 1;
+    rec.restore.lastAt = t;
+    rec.updatedAt = t;
+    const saved = store.saveNow(storedSnapshot());
+    if (!saved.ok) return failRestorePreflight(rec, "persist");
+
+    // ④ forkInto — pin first (dev/ino re-check), then the shared fork stretch.
+    const pin = dirs.pinSync({ realpath: rec.cwd, dev: rec.dev, ino: rec.ino });
+    if (!pin.ok) return failRestorePreflight(rec, "cwd-changed", `cwd ${pin.reason}`);
+    rec.spawnEventSettled = false;
+    rec.rejectProbe = undefined; // D8: never `--model` on restore ⇒ no model verdict machinery
+    rec.breakerVerdict = undefined;
+    rec.lastOpenCount = 0;
+    rec.lastBusy = false;
+    rec.linked = false;
+    rec.control = undefined;
+    const forkAt = now();
+    const res = forkInto(
+      rec,
+      launcher,
+      pin,
+      plan.tail, // D8: no `--model` — pi restores the session's own model
+      forkAt + Math.min(2 * cfg.registerTimeoutS * 1000, RESTORE_REGISTER_MAX_MS),
+      () => {
+        if (rec.restore !== undefined) {
+          rec.restore.phase = "registering";
+          rec.restore.lastAt = now();
+        }
+      },
+    );
+    if (res === "persist-failed" && rec.restore !== undefined) rec.restore.failure = "persist";
+    if (res !== "ok") return false;
+    auditRestore(rec, "fork");
+    return true;
+  }
+
+  async function runRestoreJob(rec: Supervised): Promise<void> {
+    if (!restoreJobAlive(rec)) return;
+    const oldId = identityOf(rec);
+    let death = computeDeath(rec);
+    if (death === "unknown") {
+      failRestoreOrphan(rec, "prev-unknown"); // fail closed: no signal, no fork
+      return;
+    }
+    if (death === "alive") {
+      // L5: verify and signal in ONE synchronous segment, every time.
+      if (oldId !== undefined) {
+        const v = verifyIdentityById(oldId, true);
+        if (v.ok) groupKill(v.pid, "SIGTERM");
+      }
+      death = await pollDeath(rec, RESTORE_TERM_WAIT_MS);
+      if (!restoreJobAlive(rec)) return;
+      if (death !== "confirmed") {
+        if (oldId !== undefined) {
+          const v = verifyIdentityById(oldId, true);
+          if (v.ok) groupKill(v.pid, "SIGKILL");
+        }
+        death = await pollDeath(rec, RESTORE_KILL_WAIT_MS);
+        if (!restoreJobAlive(rec)) return;
+      }
+      if (death !== "confirmed") {
+        failRestoreOrphan(rec, "prev-alive"); // L6: never fork while the old identity may live
+        return;
+      }
+    }
+    // L6 satisfied: the old identity is confirmed dead.
+    if (oldId !== undefined) reaper.untrack(oldId.pid);
+    auditRestore(rec, "reap");
+    const prevKey = rec.restore?.prevAgentKey;
+    if (prevKey !== undefined) deps.onPrevAgentGone?.(rec.spawnId, prevKey);
+    if (!restoreForkSync(rec)) return;
+    // D17: hold the concurrency slot until the restored child is live / terminal / stopping.
+    await new Promise<void>((resolve) => {
+      rec.restoreSlot = resolve;
+    });
   }
 
   // ----------------------------------------------------------------- shutdown (§7.6)
@@ -1748,23 +2322,53 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     });
   }
 
-  function shutdown(deadline: ReqDeadline): Promise<void> {
+  /** web-hub-spawn-restore plan §10.2's tagging predicate (D12: removeIntent always wins). */
+  function eligibleAtShutdown(rec: Supervised): boolean {
+    if (!restoreOn || rec.removePending) return false;
+    if (rec.sessionId === undefined || !RESTORE_SESSION_ID_RE.test(rec.sessionId)) return false;
+    return rec.state === "live" || (rec.state === "starting" && rec.restore?.phase !== undefined);
+  }
+
+  function shutdown(deadline: ReqDeadline, opts?: { mode?: ShutdownMode }): Promise<void> {
     if (shutdownPromise !== undefined) return shutdownPromise;
     closedFlag = true;
     unsubscribeBus();
     removeConfirmTimer = clearHandle(removeConfirmTimer);
+    restoreQueue.length = 0;
+    const restoreMode = opts?.mode === "restore" && restoreOn;
     shutdownPromise = (async () => {
       const waitBudget = deriveBudget(deadline.remaining(), 3000, 6500);
       const pending = [...records.values()].filter((r) => !isTerminalSpawnState(r.state));
       const exitWaits: Array<Promise<void>> = [];
+      let tagged = 0;
       for (const rec of pending) {
         clearRecordTimers(rec);
+        releaseRestoreSlot(rec);
+        if (restoreMode && eligibleAtShutdown(rec)) {
+          // D4: tag for restore — same `stopping{hub}` the terminate path writes, plus the intent.
+          rec.state = "stopping";
+          rec.endReason = "hub";
+          rec.stop = { reason: "hub", terminalState: "exited", stage: 0 };
+          rec.restoreIntent = true;
+          rec.updatedAt = now();
+          tagged += 1;
+          continue;
+        }
         if (rec.stop === undefined) {
           rec.state = "stopping";
           rec.endReason = "hub";
           rec.stop = { reason: "hub", terminalState: "exited", stage: 0 };
           rec.updatedAt = now();
         }
+      }
+      if (tagged > 0) {
+        // D4: the intent is on disk BEFORE any stdin EOF (removeIntent's discipline). A failed
+        // write leaves the intent in memory only — the outcome degrades to legacy recovery (safe).
+        const saved = store.saveNow(storedSnapshot());
+        if (!saved.ok) log.warn("spawn supervisor: restore-intent persist failed", { code: saved.code });
+        for (const rec of pending) if (rec.restoreIntent === true) auditRestore(rec, "intent");
+      }
+      for (const rec of pending) {
         writeStdinEnd(rec); // EOF is the orderly lever; the reaper's EOF escalation backs us up
         if (rec.child !== undefined) exitWaits.push(onceExit(rec.child));
       }
@@ -1858,15 +2462,26 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       const wire = (): SpawnState => (rec.state === "launching" ? "starting" : rec.state);
       if (isTerminalSpawnState(rec.state)) return { ok: true, state: wire() };
       if (rec.state === "stopping") return { ok: true, state: "stopping" };
+      // web-hub-spawn-restore §8.1: a reaping record has no child pipe — stage 0's EOF would be a
+      // no-op wait; its ladder runs on the OLD identity starting at the signal stage.
+      const reaping = rec.restore?.phase === "reaping";
       enterStopping(rec, "user");
-      if (force) escalateStep(rec, 1); // force: skip the stdin grace, the signal path starts now
+      if (force || reaping) escalateStep(rec, 1); // force: skip the stdin grace, the signal path starts now
       return { ok: true, state: wire() };
     },
     records(): readonly InternalRecord[] {
       return [...records.values()];
     },
     isManaged(agentKey: string): boolean {
-      return findByAgentKey(agentKey) !== undefined;
+      if (findByAgentKey(agentKey) !== undefined) return true;
+      // web-hub-spawn-restore §8.5: the OLD process of a reaping record may reconnect and report a
+      // version — it is still ours, never a supersede trigger.
+      for (const rec of records.values()) {
+        if (rec.state === "starting" && rec.restore?.phase === "reaping" && rec.restore.prevAgentKey === agentKey) {
+          return true;
+        }
+      }
+      return false;
     },
     noteVersion(agentKey: string, pluginVersion: string): void {
       const rec = findByAgentKey(agentKey);
@@ -1880,6 +2495,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     },
     liveCount(): number {
       return countNonTerminal();
+    },
+    restoreCandidateCount(): number {
+      return countNonTerminalWhere((r) => eligibleAtShutdown(r));
     },
     busyCount(): number {
       return countNonTerminalWhere((r) => {
@@ -1919,7 +2537,11 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
             code: saved.code,
           });
         }
-        if (rec.state !== "stopping") enterStopping(rec, "user");
+        if (rec.state !== "stopping") {
+          const reaping = rec.restore?.phase === "reaping"; // §8.1: start at the signal stage
+          enterStopping(rec, "user");
+          if (reaping) escalateStep(rec, 1);
+        }
         schedulePush();
         return { ok: true, outcome: "pending", state: "stopping" };
       }

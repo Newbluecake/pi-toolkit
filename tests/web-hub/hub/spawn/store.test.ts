@@ -22,6 +22,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SPAWN_NONTERMINAL_MAX, SPAWN_TERMINAL_KEEP } from "../../../../src/web-hub/protocol/spawn.js";
 import {
+  ALL_STATES,
+  END_REASONS,
+  HINTS,
   SPAWNS_DEBOUNCE_MS,
   SPAWNS_FILE_TARGET_BYTES,
   SPAWNS_READ_MAX_BYTES,
@@ -178,6 +181,128 @@ describe("createSpawnStore: 往返与文件属性 (plan §SP5)", () => {
     const loaded = createSpawnStore({ file: file(), log, now: () => 1 }).load(d());
     expect(loaded.corrupt).toBe(true);
     expect(loaded.records).toEqual([]);
+  });
+});
+
+describe("web-hub-spawn-restore plan §5.1/§5.2/D11: restore fields", () => {
+  const restoreRec = (over: Partial<StoredRecord> = {}): StoredRecord =>
+    rec({
+      spawnId: "sp_restore1",
+      state: "starting",
+      sessionId: "019a-aaaa_bbbb",
+      sessionFile: "/home/u/.pi/agent/sessions/--home-u-proj--/2026_019a.jsonl",
+      sessionPersisted: true,
+      restoreIntent: true,
+      restore: {
+        attempts: 2,
+        lastAt: 9_000,
+        phase: "registering",
+        forkIntentAt: 8_000,
+        prevAgentKey: "a1-old",
+        restoredAt: 9_500,
+      },
+      ...over,
+    });
+
+  it("every new field roundtrips through saveNow → load", () => {
+    const records = [
+      restoreRec(),
+      rec({
+        spawnId: "sp_restore2",
+        state: "failed",
+        endReason: "spawn_error",
+        noProcess: "never-forked",
+        restore: { attempts: 1, lastAt: 1, failure: "session-missing" },
+      }),
+    ];
+    const store = createSpawnStore({ file: file(), log, now: () => 1 });
+    expect(store.saveNow(records)).toEqual({ ok: true });
+    const loaded = createSpawnStore({ file: file(), log, now: () => 2 }).load(d());
+    expect(loaded.corrupt).toBeUndefined();
+    expect(loaded.records).toEqual(records);
+  });
+
+  const badCases: Array<[string, Record<string, unknown>]> = [
+    ["sessionId bad shape", { sessionId: "-leading-dash" }],
+    ["sessionId non-string", { sessionId: 7 }],
+    ["sessionId too long", { sessionId: `a${"b".repeat(128)}` }],
+    ["sessionFile relative", { sessionFile: "sessions/x.jsonl" }],
+    ["sessionFile not .jsonl", { sessionFile: "/home/u/x.json" }],
+    ["sessionFile with newline", { sessionFile: "/home/u/a\nb.jsonl" }],
+    ["sessionFile with NUL", { sessionFile: "/home/u/a\u0000b.jsonl" }],
+    ["sessionFile 1025 bytes", { sessionFile: `/${"a".repeat(1024 - 6)}.jsonl` }],
+    ["sessionPersisted false", { sessionPersisted: false }],
+    ["restoreIntent false", { restoreIntent: false }],
+    ["restore not an object", { restore: 1 }],
+    ["restore attempts -1", { restore: { attempts: -1, lastAt: 1 } }],
+    ["restore attempts 4", { restore: { attempts: 4, lastAt: 1 } }],
+    ["restore attempts fraction", { restore: { attempts: 1.5, lastAt: 1 } }],
+    ["restore lastAt missing", { restore: { attempts: 1 } }],
+    ["restore phase unknown", { restore: { attempts: 1, lastAt: 1, phase: "restoring" } }],
+    ["restore failure unknown", { restore: { attempts: 1, lastAt: 1, failure: "nope" } }],
+    ["restore forkIntentAt NaN-ish", { restore: { attempts: 1, lastAt: 1, forkIntentAt: "1" } }],
+    ["restore restoredAt string", { restore: { attempts: 1, lastAt: 1, restoredAt: "x" } }],
+    ["restore prevAgentKey number", { restore: { attempts: 1, lastAt: 1, prevAgentKey: 3 } }],
+  ];
+  for (const [name, patch] of badCases) {
+    it(`an invalid new field ⇒ whole file corrupt: ${name}`, () => {
+      const raw = JSON.parse(
+        JSON.stringify({ v: 2, records: [rec({ spawnId: "sp_ok" }), { ...rec({ spawnId: "sp_bad" }) }] }),
+      ) as { records: Array<Record<string, unknown>> };
+      Object.assign(raw.records[1]!, JSON.parse(JSON.stringify(patch)) as Record<string, unknown>);
+      writeFileSync(file(), JSON.stringify(raw), { mode: 0o600 });
+      const loaded = createSpawnStore({ file: file(), log, now: () => 1 }).load(d());
+      expect(loaded.corrupt).toBe(true);
+      expect(loaded.records).toEqual([]);
+    });
+  }
+
+  it("a 1024-byte sessionFile is accepted (the cap is inclusive)", () => {
+    const sessionFile = `/${"a".repeat(1024 - 7)}.jsonl`;
+    expect(Buffer.byteLength(sessionFile)).toBe(1024);
+    writeFileSync(file(), JSON.stringify({ v: 2, records: [rec({ sessionFile })] }), { mode: 0o600 });
+    const loaded = createSpawnStore({ file: file(), log, now: () => 1 }).load(d());
+    expect(loaded.corrupt).toBeUndefined();
+    expect(loaded.records[0]?.sessionFile).toBe(sessionFile);
+  });
+
+  it("D11 rollback pin: the persisted enum sets are exactly the 547635d ones (state / endReason / hint)", () => {
+    expect([...ALL_STATES].sort()).toEqual(["exited", "failed", "launching", "live", "starting", "stopping"]);
+    expect([...END_REASONS].sort()).toEqual(
+      [
+        "user",
+        "lifetime",
+        "hub",
+        "crash",
+        "orphan",
+        "protocol_error",
+        "spawn_error",
+        "register_timeout",
+        "exited_early",
+        "cwd_mismatch",
+      ].sort(),
+    );
+    expect([...HINTS].sort()).toEqual(
+      [
+        "register-timeout-hello",
+        "register-timeout-session",
+        "control-off",
+        "newer-plugin",
+        "cwd-mismatch",
+        "protocol-error",
+        "launcher-changed",
+        "model-rejected",
+      ].sort(),
+    );
+  });
+
+  it("D11: an old-format file (no restore fields) still loads; the envelope version stays 2", () => {
+    writeFileSync(file(), JSON.stringify({ v: 2, records: [rec()] }), { mode: 0o600 });
+    const loaded = createSpawnStore({ file: file(), log, now: () => 1 }).load(d());
+    expect(loaded.corrupt).toBeUndefined();
+    const store = createSpawnStore({ file: file(), log, now: () => 1 });
+    store.saveNow([restoreRec()]);
+    expect(readJson(file())["v"]).toBe(2);
   });
 });
 

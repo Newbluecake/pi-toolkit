@@ -77,7 +77,7 @@ import { classifyCommand, listSlashCommands } from "./slash.js";
 import { modelsFingerprint, projectModels } from "./models.js";
 import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js";
 import { createDialogBridge } from "./dialogs.js";
-import { createAdminCommands, type AdminCommands } from "./admin-cmds.js";
+import { clearRestoreVetoSync, createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 
 export interface WebHubLanSettings {
@@ -96,6 +96,9 @@ export interface WebHubLanSettings {
  */
 export interface WebHubSpawnSettings extends HubSpawnConfig {
   enabled: boolean;
+  /** web-hub-spawn-restore plan D18: settings-layer default `true`; crosses the wire as
+   * `HubSpawnConfig.restore` only inside an enabled spawn block. */
+  restore: boolean;
 }
 
 export interface WebHubSettings {
@@ -777,6 +780,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         maxLifetimeMinutes: settings.spawn.maxLifetimeMinutes,
         registerTimeoutS: settings.spawn.registerTimeoutS,
         lan: settings.spawn.lan,
+        // web-hub-spawn-restore plan §10.5: the eighth field, only inside an enabled block.
+        restore: settings.spawn.restore,
       };
       config.spawn = spawn;
     }
@@ -1090,7 +1095,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
   };
 
-  const restart = (): Promise<RestartOutcome> =>
+  const restart = (): Promise<RestartOutcome> => {
+    // web-hub-spawn-restore plan D13/§10.5: an explicit restart overrides an earlier `/webhub
+    // stop`'s one-shot restore veto — removed BEFORE the hub_ctl goes out (failure: best-effort).
+    clearRestoreVetoSync(paths.stateDir);
+    return restartHubWithDeps();
+  };
+
+  const restartHubWithDeps = (): Promise<RestartOutcome> =>
     restartHub({
       isLiveWithCap: (cap) => conn?.status().state === "live" && (conn?.caps.includes(cap) ?? false),
       request: async (frame, cap) => {

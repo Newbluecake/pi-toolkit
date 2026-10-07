@@ -104,6 +104,7 @@ function fakeReaper(order: string[]): Reaper {
 interface SupSpy {
   order: string[];
   shutdownRemaining: number[];
+  shutdownModes: Array<string | undefined>;
   noteChanged: string[];
   sup: SpawnSupervisor | undefined;
   wrap(sup: SpawnSupervisor): SpawnSupervisor;
@@ -113,6 +114,7 @@ function supSpy(order: string[]): SupSpy {
   const spy: SupSpy = {
     order,
     shutdownRemaining: [],
+    shutdownModes: [],
     noteChanged: [],
     sup: undefined,
     wrap: () => {
@@ -123,10 +125,11 @@ function supSpy(order: string[]): SupSpy {
     spy.sup = sup;
     return {
       ...sup,
-      shutdown: (d: ReqDeadline) => {
+      shutdown: (d: ReqDeadline, opts?: { mode?: "terminate" | "restore" }) => {
         order.push("spawn-shutdown:start");
         spy.shutdownRemaining.push(d.remaining());
-        return sup.shutdown(d).finally(() => order.push("spawn-shutdown:end"));
+        spy.shutdownModes.push(opts?.mode);
+        return sup.shutdown(d, opts).finally(() => order.push("spawn-shutdown:end"));
       },
       noteSpawnChanged: (spawnId: string) => {
         spy.noteChanged.push(spawnId);
@@ -176,6 +179,7 @@ interface HubKit {
   sup: SpawnSupervisor | undefined;
   child: FakeChild | undefined;
   shutdownRemaining: number[];
+  shutdownModes: Array<string | undefined>;
   noteChanged: string[];
   fwd: FirstPromptForwarder | undefined;
 }
@@ -258,6 +262,7 @@ async function startKit(opts: StartKitOpts = {}): Promise<HubKit> {
     sup: spy?.sup,
     child,
     shutdownRemaining: spy?.shutdownRemaining ?? [],
+    shutdownModes: spy?.shutdownModes ?? [],
     noteChanged: spy?.noteChanged ?? [],
     fwd,
   };
@@ -458,6 +463,36 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     expect(kit.order.indexOf("spawn-shutdown:end")).toBeLessThan(kit.order.indexOf("fe.close"));
     expect(kit.shutdownRemaining[0]).toBeGreaterThanOrEqual(9_500);
     await kit.hub.closed;
+  });
+
+  it("web-hub-spawn-restore D2/§10.4: close(restart|superseded|crash) ⇒ shutdown mode restore; stop|signal|fence|idle ⇒ terminate; spawn.restore off ⇒ always terminate", async () => {
+    const cases: Array<[string, boolean | undefined, string]> = [
+      ["restart", true, "restore"],
+      ["superseded", true, "restore"],
+      ["crash", true, "restore"],
+      ["stop", true, "terminate"],
+      ["signal", true, "terminate"],
+      ["fence", true, "terminate"],
+      ["idle", true, "terminate"],
+      ["restart", false, "terminate"],
+      ["restart", undefined, "terminate"], // hub-side absent ⇒ false (D18)
+    ];
+    for (const [reason, restore, mode] of cases) {
+      const spawn = restore === undefined ? SPAWN_CFG : { ...SPAWN_CFG, restore };
+      const kit = await startKit({ spawn, withAssembly: true });
+      hubs.length = 0;
+      await kit.hub.close(reason);
+      expect(kit.shutdownModes, `${reason}/${String(restore)}`).toEqual([mode]);
+      await kit.hub.closed;
+    }
+  });
+
+  it("web-hub-spawn-restore D9/§10.4 wiring pin: onPrevAgentGone ⇒ registry.remove(prevKey, {allowConnected:true}); veto file wired", () => {
+    const src = readFileSync("src/web-hub/hub/hub.ts", "utf8");
+    expect(src).toMatch(
+      /onPrevAgentGone:\s*\(_spawnId, prevAgentKey\)\s*=>\s*\{\s*registry\.remove\(prevAgentKey, \{ allowConnected: true \}\);/,
+    );
+    expect(src).toContain("restoreVetoFile: spawnFiles.restoreVeto");
   });
 
   it("startup failure (fe.listen rejects): reverse-order unwind still shuts the spawn domain down BEFORE fe.close (SP13 P3)", async () => {

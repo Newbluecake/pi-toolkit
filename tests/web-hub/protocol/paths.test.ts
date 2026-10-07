@@ -26,6 +26,8 @@ describe("webHubSpawnFiles", () => {
       spawnsJson: "/home/u/.pi/agent/web-hub/spawns.json",
       logDir: "/home/u/.pi/agent/web-hub/spawn",
       prefsJson: "/home/u/.pi/agent/web-hub/spawn-prefs.json",
+      // web-hub-spawn-restore plan D13: the one-shot stop veto lives next to the stderr logs
+      restoreVeto: "/home/u/.pi/agent/web-hub/spawn/restore.veto",
     });
     // the prefs file sits in the SAME stateDir webHubStateDir resolves — never re-derived
     expect(webHubSpawnFiles(webHubStateDir("/home/u")).prefsJson).toBe("/home/u/.pi/agent/web-hub/spawn-prefs.json");

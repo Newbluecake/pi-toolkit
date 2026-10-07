@@ -369,3 +369,43 @@ describe("响应矩阵词汇表 (arch §8.2, SP9 之前先钉在类型层)", () 
     expect(SPAWN_HUB_CAP).toBe("spawn.v1");
   });
 });
+
+describe("web-hub-spawn-restore plan §10.1: restore constants + session coordinate validators", async () => {
+  const m = await import("../../../src/web-hub/protocol/spawn.js");
+  it("constants carry the plan's values (§14.2 ③: not settings)", () => {
+    expect(m.RESTORE_MAX_ATTEMPTS).toBe(3);
+    expect(m.RESTORE_STABLE_MS).toBe(120_000);
+    expect(m.RESTORE_MIN_LIFETIME_MS).toBe(300_000);
+    expect(m.RESTORE_TERM_WAIT_MS).toBe(3_000);
+    expect(m.RESTORE_KILL_WAIT_MS).toBe(2_000);
+    expect(m.RESTORE_POLL_MS).toBe(100);
+    expect(m.RESTORE_CONCURRENCY).toBe(m.SPAWN_STARTING_MAX);
+    expect(m.RESTORE_REGISTER_MAX_MS).toBe(240_000);
+    expect(m.RESTORE_SESSION_FILE_MAX_BYTES).toBe(1024);
+  });
+  it("RESTORE_SESSION_ID_RE: alnum start, [A-Za-z0-9_-], ≤128 chars", () => {
+    const re = m.RESTORE_SESSION_ID_RE;
+    expect(re.test("019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b")).toBe(true);
+    expect(re.test("sess-fake-abc")).toBe(true);
+    expect(re.test("a".repeat(128))).toBe(true);
+    expect(re.test("a".repeat(129))).toBe(false);
+    expect(re.test("-x")).toBe(false);
+    expect(re.test("_x")).toBe(false);
+    expect(re.test("")).toBe(false);
+    expect(re.test("a/b")).toBe(false);
+    expect(re.test("a.b")).toBe(false);
+    expect(re.test("a b")).toBe(false);
+  });
+  it("isValidRestoreSessionFile: absolute, .jsonl, no NUL/newline, ≤1024 UTF-8 bytes", () => {
+    const ok = m.isValidRestoreSessionFile;
+    expect(ok("/home/u/.pi/agent/sessions/--p--/x.jsonl")).toBe(true);
+    expect(ok("relative/x.jsonl")).toBe(false);
+    expect(ok("/x.json")).toBe(false);
+    expect(ok("/a\nb.jsonl")).toBe(false);
+    expect(ok("/a\0b.jsonl")).toBe(false);
+    expect(ok(`/${"a".repeat(1017)}.jsonl`)).toBe(true); // exactly 1024
+    expect(ok(`/${"a".repeat(1018)}.jsonl`)).toBe(false); // 1025
+    expect(ok(`/${"é".repeat(508)}.jsonl`)).toBe(true); // UTF-8 bytes: 1 + 1016 + 6 = 1023
+    expect(ok(`/${"é".repeat(509)}.jsonl`)).toBe(false); // 1 + 1018 + 6 = 1025
+  });
+});

@@ -251,6 +251,13 @@ describe("/webhub unlock", () => {
 });
 
 describe("/webhub restart", () => {
+  it("restarted with restoreCount ⇒ the hint names the count and the lost turn (spawn-restore §9.3)", () => {
+    const { message, level } = formatRestartOutcomeMessage({ kind: "restarted", restoreCount: 3 });
+    expect(level).toBe("info");
+    expect(message).toContain("3 个网页会话将在 hub 重启后恢复");
+    expect(message).toContain("进行中的一轮输出会丢失");
+  });
+
   it.each<[RestartOutcome, "info" | "warning" | "error"]>([
     [{ kind: "restarted" }, "info"],
     [{ kind: "signalled" }, "info"],

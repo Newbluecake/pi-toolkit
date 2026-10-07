@@ -1251,3 +1251,90 @@ describe("useHub: run wiring acceptance fixes", () => {
     hub.dispose();
   });
 });
+
+describe("useHub: restore successor follow (spawn-restore plan §9.1)", () => {
+  const restoreSpawns = (state: string, extra: Record<string, unknown>) => ({
+    items: [
+      {
+        spawnId: "sp1",
+        state,
+        createdAt: 1,
+        updatedAt: 2,
+        cwdLabel: "p",
+        origin: { listener: "loopback", reqId: "req-mine" },
+        ...extra,
+      },
+    ],
+    active: 1,
+    max: 4,
+  });
+
+  function makeHub() {
+    const t = fakeTransport();
+    const clock = fakeClock();
+    const navigated: string[] = [];
+    const hub = useHub({
+      createTransport: t.createTransport,
+      ...alwaysVisible(),
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      navigate: (k) => navigated.push(k),
+    });
+    return { hub, navigated };
+  }
+
+  it("a viewer of the OLD key is moved to the new key once the restored record is live — exactly once", async () => {
+    const { hub, navigated } = makeHub();
+    hub.dispatch({ event: "route", data: { agentKey: "a-old" } });
+    hub.dispatch({
+      event: "spawns",
+      data: restoreSpawns("starting", { restore: { phase: "registering", attempt: 1, prevAgentKey: "a-old" } }),
+    });
+    await flush();
+    expect(navigated).toEqual([]); // still restoring: no successor yet
+    hub.dispatch({
+      event: "spawns",
+      data: restoreSpawns("live", {
+        agentKey: "a-new",
+        restore: { attempt: 1, prevAgentKey: "a-old", restoredAt: 3 },
+      }),
+    });
+    await flush();
+    expect(navigated).toEqual(["a-new"]);
+    // the hash router answers with a route event; a later spawns frame must not re-navigate
+    hub.dispatch({ event: "route", data: { agentKey: "a-new" } });
+    hub.dispatch({
+      event: "spawns",
+      data: restoreSpawns("live", {
+        agentKey: "a-new",
+        updatedAt: 9,
+        restore: { attempt: 1, prevAgentKey: "a-old", restoredAt: 3 },
+      }),
+    });
+    await flush();
+    expect(navigated).toEqual(["a-new"]);
+    hub.dispose();
+  });
+
+  it("a viewer of some OTHER key (or the list) is never moved — not even the originating tab", async () => {
+    const { hub, navigated } = makeHub();
+    hub.dispatch({ event: "route", data: { agentKey: "a-elsewhere" } });
+    hub.dispatch({
+      event: "spawns",
+      data: restoreSpawns("live", { agentKey: "a-new", restore: { attempt: 1, prevAgentKey: "a-old", restoredAt: 3 } }),
+    });
+    await flush();
+    hub.dispatch({ event: "route", data: { agentKey: null } });
+    hub.dispatch({
+      event: "spawns",
+      data: restoreSpawns("live", {
+        agentKey: "a-new",
+        updatedAt: 5,
+        restore: { attempt: 1, prevAgentKey: "a-old", restoredAt: 3 },
+      }),
+    });
+    await flush();
+    expect(navigated).toEqual([]);
+    hub.dispose();
+  });
+});

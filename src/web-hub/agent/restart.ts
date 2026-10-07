@@ -54,7 +54,7 @@ export interface RestartDeps {
 }
 
 export type RestartOutcome =
-  | { kind: "restarted" } // ctl.v1 acked, pid exited, respawned
+  | { kind: "restarted"; restoreCount?: number } // ctl.v1 acked, pid exited, respawned
   | { kind: "signalled" } // fallback SIGTERM, identity verified
   | { kind: "manual"; message: string } // can't be verified — caller must act by hand
   | { kind: "failed"; message: string }; // ctl.v1 acked but the pid never exited, and no safe fallback
@@ -66,12 +66,22 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function raceAck(deps: Pick<RestartDeps, "request">, frame: HubCtlFrame, cap: string): Promise<boolean> {
+/** `restoreCount` rides the ack (spawn-restore §9.3); `acked` stays explicit so a bare ack
+ * (stop acks, older hubs) never reads as a timeout. */
+async function raceAck(
+  deps: Pick<RestartDeps, "request">,
+  frame: HubCtlFrame,
+  cap: string,
+): Promise<{ acked: boolean; restoreCount?: number }> {
   const acked = deps
     .request(frame, cap)
-    .then((res) => res.t === "hub_ctl_ack")
-    .catch(() => false);
-  const timedOut = delay(ACK_DEADLINE_MS).then(() => false);
+    .then((res) =>
+      res.t === "hub_ctl_ack"
+        ? { acked: true as const, ...(res.restoreCount === undefined ? {} : { restoreCount: res.restoreCount }) }
+        : { acked: false as const },
+    )
+    .catch(() => ({ acked: false as const }));
+  const timedOut = delay(ACK_DEADLINE_MS).then(() => ({ acked: false as const }));
   return Promise.race([acked, timedOut]);
 }
 
@@ -141,13 +151,15 @@ export function ctlLivenessProbe(pid: number, kill?: (pid: number, signal: 0) =>
 export async function restartHub(deps: RestartDeps): Promise<RestartOutcome> {
   if (deps.isLiveWithCap("ctl.v1")) {
     const frame: HubCtlFrame = { t: "hub_ctl", rid: randomUUID(), op: "shutdown", reason: "restart" };
-    if (await raceAck(deps, frame, "ctl.v1")) {
+    const ack = await raceAck(deps, frame, "ctl.v1");
+    if (ack.acked) {
       const record = deps.readHubRecord();
       const pid = record?.pid;
       const exited = pid === undefined ? true : await waitExit(deps, pid);
       if (exited) {
         deps.spawn();
-        return { kind: "restarted" };
+        const rc = ack.restoreCount;
+        return rc !== undefined && rc > 0 ? { kind: "restarted", restoreCount: rc } : { kind: "restarted" };
       }
       return {
         kind: "failed",
@@ -179,7 +191,7 @@ export async function stopHub(deps: RestartDeps): Promise<RestartOutcome> {
   if (cap !== undefined) {
     const reason: "stop" | "restart" = cap === "ctl.v2" ? "stop" : "restart";
     const frame: HubCtlFrame = { t: "hub_ctl", rid: randomUUID(), op: "shutdown", reason };
-    if (await raceAck(deps, frame, cap)) {
+    if ((await raceAck(deps, frame, cap)).acked) {
       const record = deps.readHubRecord();
       const pid = record?.pid;
       const exited = pid === undefined ? true : await waitExit(deps, pid);

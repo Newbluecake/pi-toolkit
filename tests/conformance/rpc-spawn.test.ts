@@ -504,3 +504,240 @@ describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — real pi --model 
     }
   }, 60_000);
 });
+
+/**
+ * web-hub-spawn-restore plan v1 §12.3 — CR1–CR3: the pi-side facts the restore fork leans on.
+ *
+ *  CR1 `--session <abs path>` opens THAT file: the session frame's sessionId = the header id and
+ *      sessionFile = the path; stdout stays pure JSON (no readline prompt — F21 is the id form
+ *      only); history is there (`get_messages` returns the user message); stdin EOF ⇒ exit ≤8s.
+ *  CR2 `--session-id <new id>` (no such session in the project) ⇒ a session with exactly that id,
+ *      stdout pure JSON, pi's "creating a new session with that id" warning on stderr (F23).
+ *  CR3 `--session <missing abs path>` ⇒ pi goes LIVE on an EMPTY session (F22) — the reason the
+ *      hub preflights the file itself. If pi ever starts refusing instead, this fails as a hint
+ *      that the preflight could be simplified.
+ */
+describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — restore argv tails (spawn-restore plan CR1–CR3)", () => {
+  interface SessionFrame {
+    sessionId?: unknown;
+    sessionFile?: unknown;
+    mode?: unknown;
+  }
+  interface RestoreRun {
+    child: ChildProcess;
+    home: string;
+    workdir: string;
+    stderr: string;
+    sessionsSeen: SessionFrame[];
+    stdoutLines: string[];
+    exit: Promise<{ code: number | null; signal: string | null }>;
+    cleanup(): void;
+  }
+
+  function prepareHome(): { home: string; workdir: string; agentDir: string } {
+    const home = mkdtempSync(join(tmpdir(), "pwh-conf-r-"));
+    const workdir = join(home, "work");
+    mkdirSync(workdir, { recursive: true });
+    const agentDir = join(home, ".pi", "agent");
+    mkdirSync(join(agentDir, "sessions"), { recursive: true });
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [REPO_ROOT] }));
+    writeFileSync(join(agentDir, "pi-subagent.json"), JSON.stringify({ webHub: { enabled: true } }));
+    return { home, workdir, agentDir };
+  }
+
+  function launch(prepared: { home: string; workdir: string; agentDir: string }, tail: readonly string[]): RestoreRun {
+    const { home, workdir, agentDir } = prepared;
+    const stateDir = join(agentDir, "web-hub");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const socketPath = join(stateDir, "hub.sock");
+    rmSync(socketPath, { force: true });
+    const sessionsSeen: SessionFrame[] = [];
+    const stdoutLines: string[] = [];
+    const server = net.createServer((sock) => {
+      const dec = new NdjsonDecoder({
+        maxFrameBytes: 512 * 1024,
+        onFrame: (raw: unknown) => {
+          const frame = raw as Record<string, unknown>;
+          if (frame["t"] === "hello") {
+            sock.write(
+              `${JSON.stringify({
+                t: "hello_ack",
+                hubVersion: "1.2.3",
+                buildId: "1.2.3@conf",
+                proto: { major: PROTO.major, minor: PROTO.minor },
+                agentKey: "a-conf-restore-00001",
+                pingMs: 10_000,
+                leaseMs: 30_000,
+                http: { port: 0 },
+                caps: ["ctl.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
+              })}\n`,
+            );
+            return;
+          }
+          if (frame["t"] === "session") sessionsSeen.push(frame as unknown as SessionFrame);
+        },
+        onError: () => {},
+      });
+      sock.on("data", (c: Buffer) => dec.push(c));
+      sock.on("error", () => {});
+    });
+    server.listen(socketPath);
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v === undefined || k.startsWith("PI_WEBHUB_") || k === "FORCE_COLOR") continue;
+      env[k] = v;
+    }
+    env["HOME"] = home;
+    env["PI_WEBHUB_HEADLESS"] = "1";
+    env["PI_WEBHUB_SPAWN_ID"] = `conf-restore-${Date.now().toString(36)}`;
+    // the restore fork shape: fixed prefix + session tail, never --model (D8)
+    const child = spawn(process.execPath, [PI_CLI, "--mode", "rpc", ...tail], {
+      cwd: workdir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stderrChunks: Buffer[] = [];
+    child.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
+    child.stdout?.setEncoding("utf8");
+    let buf = "";
+    child.stdout?.on("data", (chunk: string) => {
+      buf += chunk;
+      for (;;) {
+        const nl = buf.indexOf("\n");
+        if (nl < 0) break;
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.length > 0) stdoutLines.push(line);
+      }
+    });
+    const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    return {
+      child,
+      home,
+      workdir,
+      get stderr() {
+        return Buffer.concat(stderrChunks).toString("utf8");
+      },
+      sessionsSeen,
+      stdoutLines,
+      exit,
+      cleanup() {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        server.close();
+        server.closeAllConnections?.();
+        rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      },
+    };
+  }
+
+  const until = async (pred: () => boolean, ms: number, what: string): Promise<void> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (pred()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`timeout waiting for ${what}`);
+  };
+
+  function allJson(lines: readonly string[]): boolean {
+    return lines.every((l) => {
+      try {
+        JSON.parse(l);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  async function messagesOf(run: RestoreRun): Promise<unknown[]> {
+    run.child.stdin?.write(`${JSON.stringify({ id: "cr-get-messages", type: "get_messages" })}\n`);
+    await until(() => run.stdoutLines.some((l) => l.includes('"command":"get_messages"')), 15_000, "get_messages");
+    const line = run.stdoutLines.find((l) => l.includes('"command":"get_messages"'))!;
+    const parsed = JSON.parse(line) as { success?: boolean; data?: { messages?: unknown[] } };
+    expect(parsed.success).toBe(true);
+    return parsed.data?.messages ?? [];
+  }
+
+  it("CR1: --session <abs path> opens that file (header id, same path), pure-JSON stdout, history present, EOF exit ≤8s", async () => {
+    const prepared = prepareHome();
+    // a REAL pi session file written through pi's own SessionManager (one user message ⇒ persisted)
+    const pi = (await import("@earendil-works/pi-coding-agent")) as unknown as {
+      SessionManager: {
+        create(
+          cwd: string,
+          sessionDir?: string,
+        ): {
+          appendMessage(m: unknown): string;
+          getSessionFile(): string | undefined;
+          getSessionId(): string;
+        };
+      };
+    };
+    const sessionDir = join(prepared.agentDir, "sessions", "--work--");
+    mkdirSync(sessionDir, { recursive: true });
+    const sm = pi.SessionManager.create(prepared.workdir, sessionDir);
+    sm.appendMessage({ role: "user", content: [{ type: "text", text: "restore me" }], timestamp: Date.now() });
+    const file = sm.getSessionFile()!;
+    const id = sm.getSessionId();
+    expect(existsSync(file)).toBe(true);
+    expect(file.startsWith("/")).toBe(true);
+    // the hub only persists coordinates passing these (§5.1) — pin that pi's real ones do
+    const { RESTORE_SESSION_ID_RE, isValidRestoreSessionFile } = await import("../../src/web-hub/protocol/spawn.js");
+    expect(RESTORE_SESSION_ID_RE.test(id)).toBe(true);
+    expect(isValidRestoreSessionFile(file)).toBe(true);
+    const run = launch(prepared, ["--session", file]);
+    try {
+      await until(() => run.sessionsSeen.length > 0, 25_000, "CR1 session frame");
+      expect(run.sessionsSeen[0]).toMatchObject({ sessionId: id, sessionFile: file, mode: "rpc" });
+      const messages = await messagesOf(run);
+      expect(JSON.stringify(messages)).toContain("restore me");
+      expect(allJson(run.stdoutLines)).toBe(true);
+      expect(run.stdoutLines.join("\n")).not.toContain("Fork this session");
+      run.child.stdin?.end();
+      const t0 = Date.now();
+      await Promise.race([
+        run.exit,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("CR1: no exit within 8s of EOF")), 8_000)),
+      ]);
+      expect(Date.now() - t0).toBeLessThan(8_000);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("CR2: --session-id <new id> ⇒ that exact id, pure-JSON stdout, pi's new-session warning on stderr", async () => {
+    const prepared = prepareHome();
+    const id = `crtwo-${Date.now().toString(36)}`;
+    const run = launch(prepared, ["--session-id", id]);
+    try {
+      await until(() => run.sessionsSeen.length > 0, 25_000, "CR2 session frame");
+      expect(run.sessionsSeen[0]).toMatchObject({ sessionId: id, mode: "rpc" });
+      expect(allJson(run.stdoutLines)).toBe(true);
+      expect(run.stderr).toContain(`No project session found with id '${id}'`);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("CR3: --session <missing abs path> ⇒ LIVE on an EMPTY session at that path (F22 — why the hub preflights)", async () => {
+    const prepared = prepareHome();
+    const missing = join(prepared.agentDir, "sessions", "--work--", "gone-session.jsonl");
+    const run = launch(prepared, ["--session", missing]);
+    try {
+      await until(() => run.sessionsSeen.length > 0, 25_000, "CR3 session frame");
+      expect(run.sessionsSeen[0]).toMatchObject({ mode: "rpc" });
+      expect(typeof run.sessionsSeen[0]!.sessionId).toBe("string");
+      expect(await messagesOf(run)).toEqual([]);
+      expect(allJson(run.stdoutLines)).toBe(true);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+});

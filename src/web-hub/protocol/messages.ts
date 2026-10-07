@@ -566,6 +566,10 @@ export interface HubCtlAckFrame {
   t: "hub_ctl_ack";
   rid: string;
   revoked?: { loopback: number; lan: number };
+  /** spawn-restore §9.3: on a `shutdown{reason:"restart"}` ack only — how many managed records
+   * the hub tagged for restore (`eligibleAtShutdown`), so the TUI can say "N 个网页会话将在
+   * hub 重启后恢复". Absent on stop acks, older hubs, and when spawn is off. */
+  restoreCount?: number;
 }
 
 /** `lan_res{ok:true}.info` (§8.1); `lan` 字段是 `hub.json.lan` 同样的 `LanStatus`（定义在 `protocol/lan.ts`，避免与 `hub/ports.ts` 循环引用）。 */

@@ -126,6 +126,35 @@ const spawn = {
 
   // --- DirPicker / idempotent-replay-but-record-gone error (§2.5) ---
   errGone: "This session was deleted; start a new one",
+
+  // --- spawn-restore plan §9.1 (RS7): restore across hub restarts ---
+  // inline markers (English token in both languages)
+  stateRestoring: "restoring",
+  badgeRestoring: "restoring",
+  badgeRestored: "restored",
+  badgeRestoringTitle: "Restoring after a hub restart — messages sent now would be lost",
+  badgeRestoredTitle: "Restored after a hub restart",
+  restorePhaseReaping: "Stopping the previous process…",
+  restorePhaseForking: "Starting pi on the saved session…",
+  restorePhaseRegistering: "Waiting for the restored session to register…",
+  restoreAttempt: "attempt {n}",
+  restoringTitle: "Restoring session",
+  restoringBody:
+    "The hub restarted; this web session is being restored on its saved history. The view switches to it automatically.",
+  composerRestoring: "This session is being restored — sending is disabled until it is back.",
+  restoreFailSessionMissing: "The session file no longer exists — cannot restore",
+  restoreFailSessionInvalid: "The session file is unreadable or does not match — cannot restore",
+  restoreFailPrevAlive: "The previous process could not be stopped — restore cancelled",
+  restoreFailPrevUnknown: "Could not confirm the previous process exited — restore cancelled",
+  restoreFailScanMiss: "The previous process could not be identified — restore cancelled",
+  restoreFailExhausted: "Restore failed repeatedly — gave up",
+  restoreFailLifetime: "Too little of the session's lifetime is left to restore it",
+  restoreFailLauncher: "The pi launcher is unavailable — run /webhub restart",
+  restoreFailReaper: "The hub's orphan reaper is unavailable — restore cancelled",
+  restoreFailPersist: "The hub could not save its state — restore cancelled",
+  restoreFailCwdChanged: "The session directory changed or is gone — cannot restore",
+  restoreFailRegisterTimeout: "The restored session never registered",
+  restoreFailExitedEarly: "The restored pi process exited during startup",
 } satisfies Record<string, string>;
 
 export default spawn;

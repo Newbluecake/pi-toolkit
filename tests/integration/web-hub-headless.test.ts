@@ -36,6 +36,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { spawn as spawnChild } from "node:child_process";
 import { createServer as createNetServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -60,6 +61,7 @@ import { login, openSse, postJson, rawRequest, type SseConn } from "../web-hub/h
 import { lanPostJson, lanRequest } from "../web-hub/http/lan-helpers.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
+import { writeRestoreVetoSync } from "../../src/web-hub/agent/admin-cmds.js";
 
 const PI_CLI = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
 const HUB_MAIN = resolve("src/web-hub/hub/main.ts");
@@ -1467,5 +1469,638 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
       expect(lstatSync(prefsJson).mode & 0o777).toBe(0o600);
       rmSync(`${prefsJson}.tmp-dir`, { recursive: true });
     }, 60_000);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// web-hub-spawn-restore plan v1 §12.2 — HR1–HR7 (restore across hub restarts). H9 is taken by
+// default-model, hence the HR prefix. Graceful paths run in-process (mode B: the hub restarts in
+// this process, children are real fake-pi processes); crash paths need a hub PROCESS to SIGKILL
+// (mode A).
+// ---------------------------------------------------------------------------
+
+interface RestoreStored extends StoredRecord {
+  agentKey?: string;
+  sessionId?: string;
+  sessionFile?: string;
+  sessionPersisted?: true;
+  restoreIntent?: true;
+  removeIntent?: true;
+  noProcess?: string;
+  restore?: { attempts: number; phase?: string; failure?: string; prevAgentKey?: string; restoredAt?: number };
+}
+
+function restoreRecOf(stateDir: string, spawnId: string): RestoreStored | undefined {
+  return readSpawnsJson(stateDir).find((r) => r.spawnId === spawnId) as RestoreStored | undefined;
+}
+
+async function waitRestoreRec(
+  stateDir: string,
+  spawnId: string,
+  pred: (r: RestoreStored) => boolean,
+  ms: number,
+  what: string,
+): Promise<RestoreStored> {
+  let last: RestoreStored | undefined;
+  await waitUntil(
+    () => {
+      last = restoreRecOf(stateDir, spawnId);
+      return last !== undefined && pred(last);
+    },
+    ms,
+    what,
+  );
+  return last!;
+}
+
+/** Every fork's argv as the fake logged it (`<cwd>/.fake-pi-argv.log`, one JSON line per process). */
+function forkArgvs(cwd: string): Array<{ pid: number; argv: string[] }> {
+  const file = join(cwd, ".fake-pi-argv.log");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l) as { pid: number; argv: string[] });
+}
+
+/** Pids whose environ carries `PI_WEBHUB_SPAWN_ID=<spawnId>` and whose comm is `pi` (HR2's L6 sampler). */
+function spawnIdProcs(spawnId: string): number[] {
+  const out: number[] = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^[0-9]+$/.test(name)) continue;
+    try {
+      if (readFileSync(`/proc/${name}/comm`, "utf8").trim() !== "pi") continue;
+      if (!readFileSync(`/proc/${name}/environ`, "utf8").includes(`PI_WEBHUB_SPAWN_ID=${spawnId}\0`)) continue;
+      out.push(Number(name));
+    } catch {
+      /* gone / other uid / zombie */
+    }
+  }
+  return out;
+}
+
+function diagSignals(cwd: string, pid: number): string[] {
+  const file = join(cwd, ".fake-pi-diag");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((l) => l.includes(`pid=${pid} SIG`));
+}
+
+function startTicksOf(pid: number): number {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return Number(rest[19]);
+}
+
+/** The reaper watchdog whose parent is `hubPid` (several may coexist while old ones wind down). */
+function findReaperOf(hubPid: number): number | undefined {
+  for (const name of readdirSync("/proc")) {
+    if (!/^[0-9]+$/.test(name)) continue;
+    try {
+      if (!readFileSync(`/proc/${name}/cmdline`, "utf8").includes("web-hub spawn reaper")) continue;
+      const stat = readFileSync(`/proc/${name}/stat`, "utf8");
+      const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+      if (ppid === hubPid) return Number(name);
+    } catch {
+      /* gone */
+    }
+  }
+  return undefined;
+}
+
+describe.skipIf(!IS_LINUX)("web-hub spawn restore — in-process graceful paths (HR1, HR3, HR4, HR5a, HR5c)", () => {
+  let sandbox: ReturnType<typeof sandboxHome> | undefined;
+  const hubs: RunningHub[] = [];
+
+  async function boot(home: string, stableMs?: number): Promise<ProcHub> {
+    const cfg: HubConfig = hubConfig({
+      home,
+      port: 0,
+      idleExitMinutes: 10,
+      pluginVersion: "1.2.3",
+      launcher: fakeLauncher(home),
+      spawn: procSpawnCfg({ roots: [home], registerTimeoutS: 10, restore: true }),
+    });
+    const started = await startHub(cfg, createHttpFrontend, {
+      uid: process.getuid?.() ?? 0,
+      childUmask: 0o022,
+      ...(stableMs === undefined ? {} : { spawnSeams: { restoreStableMs: stableMs } }),
+    });
+    if ("exists" in started) throw new Error("unexpected singleton collision");
+    hubs.push(started);
+    const cookie = await login(started.httpPort, started.paths.tokenFile);
+    return { hub: started, port: started.httpPort, stateDir: started.paths.stateDir, cookie };
+  }
+
+  async function closeHub(h: ProcHub, reason: string): Promise<void> {
+    await h.hub.close(reason);
+    await h.hub.closed;
+    hubs.splice(hubs.indexOf(h.hub), 1);
+  }
+
+  async function spawnIt(h: ProcHub, cwd: string): Promise<string> {
+    const id = spawnReqId();
+    const headers = { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` };
+    const first = await postJson(h.port, "/api/headless", { id, cwd }, headers);
+    if (first.status === 202) return (JSON.parse(first.body) as { spawnId: string }).spawnId;
+    expect(first.status).toBe(409);
+    const resolved = JSON.parse(first.body) as { resolvedCwd: string };
+    const second = await postJson(
+      h.port,
+      "/api/headless",
+      { id, cwd, confirm: true, expectCwd: resolved.resolvedCwd },
+      headers,
+    );
+    expect(second.status).toBe(202);
+    return (JSON.parse(second.body) as { spawnId: string }).spawnId;
+  }
+
+  async function ownerItem(h: ProcHub, spawnId: string): Promise<SpawnRecordOwner | undefined> {
+    const res = await rawRequest(h.port, { path: "/api/headless", headers: { Cookie: h.cookie, "X-PWH": "1" } });
+    return (JSON.parse(res.body) as { items: SpawnRecordOwner[] }).items.find((i) => i.spawnId === spawnId);
+  }
+
+  /** `/webhub restart|stop` exactly as an agent sends it: hub_ctl over the agent socket. */
+  async function hubCtl(h: ProcHub, reason: "restart" | "stop"): Promise<void> {
+    const c = await connectClient(h.hub.paths.socketPath);
+    c.send(hello({ agentId: { pid: process.pid, nonce: "nonceRESTORECTLAAAAA" }, cwd: sandbox!.home }));
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+    c.send({ t: "hub_ctl", rid: `rid-${reason}-${Date.now()}`, op: "shutdown", reason });
+    await c.waitFrame((f) => f["t"] === "hub_ctl_ack");
+    await h.hub.closed;
+    hubs.splice(hubs.indexOf(h.hub), 1);
+    c.sock.destroy();
+  }
+
+  afterEach(async () => {
+    for (const c of sseConns.splice(0)) c.close();
+    for (const h of hubs.splice(0)) await h.close("test-teardown").catch(() => undefined);
+    await waitChildrenGone();
+    cleanupHome(sandbox);
+    sandbox = undefined;
+  });
+
+  it("HR1: graceful /webhub restart (hub_ctl) ⇒ same spawnId back to live via `--session <abs file>`, new pid + agentKey, prevAgentKey = old key, session continuous, no --model, restore cleared after the stability window", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    let h = await boot(home, 3_000);
+    const cwd = projDir(home, "proj", ["--cmd-echo", "--write-session"]);
+    const spawnId = await spawnIt(h, cwd);
+    const r1 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.sessionPersisted === true,
+      15_000,
+      "live + session file observed (one turn)",
+    );
+    const oldPid = r1.pid!;
+    procChildren.add(oldPid);
+    expect(r1.sessionFile).toMatch(/^\/.*\.jsonl$/);
+    const oldKey = (await ownerItem(h, spawnId))?.agentKey;
+    expect(oldKey).toBeDefined();
+
+    await hubCtl(h, "restart");
+    await waitPidGone(oldPid, 8_000, "old child exits on the shutdown EOF");
+    expect(restoreRecOf(h.stateDir, spawnId)).toMatchObject({ state: "stopping", restoreIntent: true });
+
+    h = await boot(home, 3_000);
+    const r2 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.pid !== undefined && r.pid !== oldPid,
+      20_000,
+      "restored live",
+    );
+    procChildren.add(r2.pid!);
+    expect(r2.sessionId).toBe(r1.sessionId); // the restored session frame carries the same id
+    expect(r2.sessionFile).toBe(r1.sessionFile);
+    expect(r2.restore).toMatchObject({ attempts: 1, prevAgentKey: oldKey });
+    const item = await ownerItem(h, spawnId);
+    expect(item?.agentKey).toBeDefined();
+    expect(item?.agentKey).not.toBe(oldKey);
+    expect(item?.restore).toMatchObject({ attempt: 1, prevAgentKey: oldKey });
+    expect(JSON.stringify(item)).not.toContain(r1.sessionFile!);
+    const argvs = forkArgvs(cwd);
+    expect(argvs).toHaveLength(2);
+    expect(argvs[1]!.argv).toEqual(["--mode", "rpc", "--session", r1.sessionFile!]);
+    expect(argvs[1]!.argv).not.toContain("--model");
+    await waitRestoreRec(h.stateDir, spawnId, (r) => r.restore === undefined, 10_000, "stability window cleared");
+  }, 60_000);
+
+  it("HR3: legacy spawns.json (v2, live, full identity, NO sessionId) + a real orphan ⇒ exactly H3's outcome: TERM, exited{orphan}, no fork, no restore field", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    const cwd = projDir(home, "legacy", ["--no-hello", "--ignore-eof"]);
+    const spawnId = spawnReqId();
+    const child = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc"], {
+      cwd,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, HOME: home, PI_WEBHUB_SPAWN_ID: spawnId },
+    });
+    const pid = child.pid!;
+    procChildren.add(pid);
+    await waitUntil(() => forkArgvs(cwd).length === 1, 5_000, "orphan up");
+    const st = statSync(cwd);
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
+    mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+    const t = Date.now();
+    writeFileSync(
+      webHubSpawnFiles(paths.stateDir).spawnsJson,
+      JSON.stringify({
+        v: 2,
+        gen: 1,
+        writer: { pid: 1, startedAt: 0, bootId },
+        records: [
+          {
+            spawnId,
+            state: "live",
+            cwd,
+            dev: st.dev,
+            ino: st.ino,
+            createdAt: t - 60_000,
+            updatedAt: t - 1_000,
+            owner: { listener: "loopback", reqId: "r-legacy-0000001" },
+            pid,
+            procStartTicks: startTicksOf(pid),
+            bootId,
+            uid: process.getuid?.() ?? 0,
+            agentKey: "k-legacy",
+          },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    const h = await boot(home);
+    await waitRestoreRec(h.stateDir, spawnId, (r) => r.endReason === "orphan", 10_000, "orphan finalized");
+    await waitPidGone(pid, 12_000, "HR3 orphan killed by the legacy recovery");
+    const rec = restoreRecOf(h.stateDir, spawnId)!;
+    expect(rec.state).toBe("exited");
+    expect(rec.restore).toBeUndefined();
+    expect(forkArgvs(cwd)).toHaveLength(1); // spawnFn never ran for it
+  }, 45_000);
+
+  it("HR4: the session file was observed, then deleted ⇒ restart ends failed{spawn_error}+never-forked+session-missing, no fork; remove ⇒ 200", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    let h = await boot(home);
+    const cwd = projDir(home, "proj", ["--write-session"]);
+    const spawnId = await spawnIt(h, cwd);
+    const r1 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.sessionPersisted === true,
+      15_000,
+      "session observed",
+    );
+    procChildren.add(r1.pid!);
+    rmSync(r1.sessionFile!);
+    await closeHub(h, "restart");
+    await waitPidGone(r1.pid, 8_000, "old child gone");
+    h = await boot(home);
+    const r2 = await waitRestoreRec(h.stateDir, spawnId, (r) => r.state === "failed", 10_000, "restore failed");
+    expect(r2).toMatchObject({
+      endReason: "spawn_error",
+      noProcess: "never-forked",
+      restore: { failure: "session-missing" },
+    });
+    expect(forkArgvs(cwd)).toHaveLength(1);
+    const rm = await postJson(
+      h.port,
+      "/api/agents/remove",
+      { spawnId },
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(rm.status).toBe(200);
+  }, 45_000);
+
+  it("HR5a: /webhub stop (veto + hub_ctl stop) ⇒ the next hub never restores and consumes the veto", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    let h = await boot(home);
+    const cwd = projDir(home, "proj");
+    const spawnId = await spawnIt(h, cwd);
+    const r1 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.sessionId !== undefined,
+      15_000,
+      "live",
+    );
+    procChildren.add(r1.pid!);
+    expect(writeRestoreVetoSync(h.stateDir)).toEqual({ ok: true }); // what admin-cmds' stop() writes first
+    await hubCtl(h, "stop");
+    await waitPidGone(r1.pid, 8_000, "child gone");
+    expect(restoreRecOf(h.stateDir, spawnId)).toMatchObject({ state: "exited", endReason: "hub" });
+    h = await boot(home);
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(existsSync(webHubSpawnFiles(h.stateDir).restoreVeto)).toBe(false); // consumed
+    const rec = restoreRecOf(h.stateDir, spawnId)!;
+    expect(rec).toMatchObject({ state: "exited", endReason: "hub" });
+    expect(rec.restore).toBeUndefined();
+    expect(forkArgvs(cwd)).toHaveLength(1);
+  }, 45_000);
+
+  it("HR5c: delete in flight (stop ladder mid-way) then a restart ⇒ the record is deleted, never restored (removeIntent wins)", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    let h = await boot(home);
+    const cwd = projDir(home, "proj", ["--ignore-eof"]);
+    const spawnId = await spawnIt(h, cwd);
+    const r1 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.sessionId !== undefined,
+      15_000,
+      "live",
+    );
+    procChildren.add(r1.pid!);
+    let sawRestore = false;
+    const sampler = setInterval(() => {
+      if (readSpawnsJson(h.stateDir).some((r) => (r as RestoreStored).restore !== undefined)) sawRestore = true;
+    }, 100);
+    try {
+      const rm = await postJson(
+        h.port,
+        "/api/agents/remove",
+        { spawnId },
+        { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+      );
+      expect(rm.status).toBe(202);
+      await waitRestoreRec(h.stateDir, spawnId, (r) => r.removeIntent === true, 5_000, "remove intent on disk");
+      await closeHub(h, "restart"); // EOF ignored ⇒ the ladder is mid-way when the hub goes down
+      await waitPidGone(r1.pid, 10_000, "child stopped (shutdown SIGTERM)");
+      h = await boot(home);
+      await waitUntil(() => restoreRecOf(h.stateDir, spawnId) === undefined, 15_000, "record deleted at boot");
+    } finally {
+      clearInterval(sampler);
+    }
+    expect(sawRestore).toBe(false);
+    expect(forkArgvs(cwd)).toHaveLength(1);
+  }, 60_000);
+});
+
+describe.skipIf(!IS_LINUX || PLAN === undefined)(
+  "web-hub spawn restore — real hub child processes (HR2, HR5b, HR6, HR7)",
+  () => {
+    let sandbox: ReturnType<typeof sandboxHome> | undefined;
+    const hubPids = new Set<number>();
+    const extraPids = new Set<number>();
+
+    async function bootHub(home: string, excludePid?: number): Promise<ChildHub> {
+      const cfg = hubConfig({
+        home,
+        port: 0,
+        idleExitMinutes: 10,
+        pluginVersion: "1.2.3",
+        launcher: fakeLauncher(home),
+        spawn: {
+          roots: [home],
+          maxProcesses: 4,
+          maxPerPrincipal: 4,
+          ratePerMinute: 30,
+          maxLifetimeMinutes: 720,
+          registerTimeoutS: 30,
+          lan: "off",
+          restore: true,
+        },
+      });
+      spawnHub(PLAN!, HUB_MAIN, cfg);
+      await waitUntil(
+        () => {
+          const { pid } = hubJsonOf(home);
+          return pid !== undefined && pid !== excludePid && pidAlive(pid);
+        },
+        15_000,
+        `child hub up (exclude ${excludePid ?? "-"})`,
+      );
+      const { pid, port } = hubJsonOf(home);
+      if (pid === undefined || port === undefined) throw new Error("hub.json missing pid/port");
+      hubPids.add(pid);
+      const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
+      const cookie = await login(port, paths.tokenFile);
+      return { home, stateDir: paths.stateDir, pid, port, cookie };
+    }
+
+    async function spawnIt(hub: ChildHub, cwd: string): Promise<string> {
+      const id = spawnReqId();
+      const headers = { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}` };
+      const first = await postJson(hub.port, "/api/headless", { id, cwd }, headers);
+      if (first.status === 202) return (JSON.parse(first.body) as { spawnId: string }).spawnId;
+      const resolved = JSON.parse(first.body) as { resolvedCwd: string };
+      const second = await postJson(
+        hub.port,
+        "/api/headless",
+        { id, cwd, confirm: true, expectCwd: resolved.resolvedCwd },
+        headers,
+      );
+      expect(second.status).toBe(202);
+      return (JSON.parse(second.body) as { spawnId: string }).spawnId;
+    }
+
+    async function ownerKey(hub: ChildHub, spawnId: string): Promise<string | undefined> {
+      const res = await rawRequest(hub.port, { path: "/api/headless", headers: { Cookie: hub.cookie, "X-PWH": "1" } });
+      return (JSON.parse(res.body) as { items: SpawnRecordOwner[] }).items.find((i) => i.spawnId === spawnId)?.agentKey;
+    }
+
+    function crash(hub: ChildHub): void {
+      kill9(hub.pid);
+      hubPids.delete(hub.pid);
+    }
+
+    afterEach(async () => {
+      for (const c of sseConns.splice(0)) c.close();
+      for (const pid of hubPids) kill9(pid);
+      await waitUntil(() => [...hubPids].every((p) => !pidAlive(p)), 5_000, "child hubs killed").catch(() => undefined);
+      hubPids.clear();
+      // children of the last hub get its EOF; ignore-eof ones are killed explicitly
+      for (const pid of extraPids) kill9(pid);
+      extraPids.clear();
+      cleanupHome(sandbox);
+      sandbox = undefined;
+    });
+
+    it("HR2: hub SIGKILL (reaper alive), slow-exit child ⇒ restored live; at most ONE pi process per spawnId at every 50ms sample (L6); old pid ended", async () => {
+      sandbox = sandboxHome();
+      const home = sandbox.home;
+      const hub = await bootHub(home);
+      const cwd = projDir(home, "proj", ["--ignore-eof"]);
+      const spawnId = await spawnIt(hub, cwd);
+      const r1 = await waitRestoreRec(
+        hub.stateDir,
+        spawnId,
+        (r) => r.state === "live" && r.sessionId !== undefined,
+        15_000,
+        "live",
+      );
+      const oldPid = r1.pid!;
+      extraPids.add(oldPid);
+      let maxProcs = 0;
+      const sampler = setInterval(() => {
+        maxProcs = Math.max(maxProcs, spawnIdProcs(spawnId).length);
+      }, 50);
+      try {
+        crash(hub);
+        const hub2 = await bootHub(home, hub.pid);
+        const r2 = await waitRestoreRec(
+          hub2.stateDir,
+          spawnId,
+          (r) => r.state === "live" && r.pid !== undefined && r.pid !== oldPid,
+          25_000,
+          "restored live after crash",
+        );
+        extraPids.add(r2.pid!);
+        expect(pidAlive(oldPid)).toBe(false);
+        expect(r2.restore).toMatchObject({ attempts: 1 });
+        expect(r2.sessionId).toBe(r1.sessionId);
+        await new Promise((r) => setTimeout(r, 500));
+      } finally {
+        clearInterval(sampler);
+      }
+      expect(maxProcs).toBeGreaterThanOrEqual(1);
+      expect(maxProcs).toBeLessThanOrEqual(1);
+    }, 60_000);
+
+    it("HR5b: veto written, then hub SIGKILL ⇒ next boot does NOT restore (legacy orphan path) and consumes the veto", async () => {
+      sandbox = sandboxHome();
+      const home = sandbox.home;
+      const hub = await bootHub(home);
+      const cwd = projDir(home, "proj");
+      const spawnId = await spawnIt(hub, cwd);
+      const r1 = await waitRestoreRec(
+        hub.stateDir,
+        spawnId,
+        (r) => r.state === "live" && r.sessionId !== undefined,
+        15_000,
+        "live",
+      );
+      expect(writeRestoreVetoSync(hub.stateDir)).toEqual({ ok: true });
+      crash(hub);
+      await waitPidGone(r1.pid, 5_000, "child exits on EOF");
+      const hub2 = await bootHub(home, hub.pid);
+      await waitRestoreRec(hub2.stateDir, spawnId, (r) => r.endReason === "orphan", 10_000, "legacy recovery");
+      expect(existsSync(webHubSpawnFiles(hub2.stateDir).restoreVeto)).toBe(false);
+      expect(restoreRecOf(hub2.stateDir, spawnId)!.restore).toBeUndefined();
+      expect(forkArgvs(cwd)).toHaveLength(1);
+    }, 45_000);
+
+    it("HR6: crash right after every restore ⇒ attempts 1,2,3 land on disk; the 4th boot gives up with failure exhausted (legacy recovery)", async () => {
+      sandbox = sandboxHome();
+      const home = sandbox.home;
+      let hub = await bootHub(home);
+      const cwd = projDir(home, "proj");
+      const spawnId = await spawnIt(hub, cwd);
+      let rec = await waitRestoreRec(
+        hub.stateDir,
+        spawnId,
+        (r) => r.state === "live" && r.sessionId !== undefined,
+        15_000,
+        "live",
+      );
+      for (let n = 1; n <= 3; n++) {
+        const prevPid = rec.pid;
+        crash(hub);
+        hub = await bootHub(home, hub.pid);
+        rec = await waitRestoreRec(
+          hub.stateDir,
+          spawnId,
+          (r) => r.state === "live" && r.pid !== prevPid && r.restore?.attempts === n,
+          25_000,
+          `restore #${n} live`,
+        );
+        expect(forkArgvs(cwd)).toHaveLength(n + 1);
+      }
+      crash(hub);
+      hub = await bootHub(home, hub.pid);
+      const last = await waitRestoreRec(
+        hub.stateDir,
+        spawnId,
+        (r) => r.restore?.failure === "exhausted",
+        15_000,
+        "exhausted",
+      );
+      expect(last).toMatchObject({ state: "exited", endReason: "orphan", restore: { attempts: 3 } });
+      await new Promise((r) => setTimeout(r, 1_000));
+      expect(forkArgvs(cwd)).toHaveLength(4); // no 4th restore fork
+    }, 120_000);
+
+    it("HR7: double-team safety — TERM/KILL-ignoring child + live old reaper ⇒ old ended, the restored child never receives a signal, agent_removed{old key}; doctored starttime ⇒ no signal to that pid, normal fork", async () => {
+      sandbox = sandboxHome();
+      const home = sandbox.home;
+      const hub = await bootHub(home);
+      const cwd = projDir(home, "proj", ["--ignore-eof", "--ignore-term"]);
+      const spawnId = await spawnIt(hub, cwd);
+      const r1 = await waitRestoreRec(
+        hub.stateDir,
+        spawnId,
+        (r) => r.state === "live" && r.sessionId !== undefined,
+        15_000,
+        "live",
+      );
+      const oldPid = r1.pid!;
+      extraPids.add(oldPid);
+      const oldKey = await ownerKey(hub, spawnId);
+      expect(oldKey).toBeDefined();
+      crash(hub);
+      const hub2 = await bootHub(home, hub.pid); // inside the old reaper's 5s grace
+      const sse = await openSse(hub2.port, { cookie: hub2.cookie });
+      sseConns.push(sse);
+      const r2 = await waitRestoreRec(
+        hub2.stateDir,
+        spawnId,
+        (r) => r.state === "live" && r.pid !== undefined && r.pid !== oldPid,
+        30_000,
+        "restored live",
+      );
+      const newPid = r2.pid!;
+      extraPids.add(newPid);
+      await waitPidGone(oldPid, 15_000, "old child ended (TERM ignored ⇒ verified KILL)");
+      await sse.waitFor(
+        (e) => e.event === "agent_removed" && (e.data as { agentKey?: string }).agentKey === oldKey,
+        10_000,
+      );
+      await new Promise((r) => setTimeout(r, 6_000)); // old reaper's TERM(5s)/KILL(8s) window passes
+      expect(pidAlive(newPid)).toBe(true);
+      expect(diagSignals(cwd, newPid)).toEqual([]);
+
+      // ---- round 2: doctored starttime, no reaper left to signal anyone ----
+      const cwd2 = projDir(home, "proj2", ["--ignore-eof", "--ignore-term"]);
+      const spawn2 = await spawnIt(hub2, cwd2);
+      const q1 = await waitRestoreRec(
+        hub2.stateDir,
+        spawn2,
+        (r) => r.state === "live" && r.sessionId !== undefined,
+        15_000,
+        "live 2",
+      );
+      const child2 = q1.pid!;
+      extraPids.add(child2);
+      await waitUntil(() => findReaperOf(hub2.pid) !== undefined, 8_000, "hub2 reaper visible");
+      kill9(findReaperOf(hub2.pid));
+      crash(hub2);
+      await waitUntil(() => !pidAlive(hub2.pid), 3_000, "hub2 dead");
+      const file = webHubSpawnFiles(hub2.stateDir).spawnsJson;
+      const raw = JSON.parse(readFileSync(file, "utf8")) as { records: RestoreStored[] };
+      const doctored = raw.records.find((r) => r.spawnId === spawn2)!;
+      doctored.procStartTicks = (doctored.procStartTicks ?? 0) + 40;
+      writeFileSync(file, JSON.stringify(raw));
+      const hub3 = await bootHub(home, hub2.pid);
+      const q2 = await waitRestoreRec(
+        hub3.stateDir,
+        spawn2,
+        (r) => r.state === "live" && r.pid !== undefined && r.pid !== child2,
+        30_000,
+        "doctored record restored (pid judged reused ⇒ confirmed)",
+      );
+      extraPids.add(q2.pid!);
+      await new Promise((r) => setTimeout(r, 3_000));
+      expect(pidAlive(child2)).toBe(true); // L5: verify failed ⇒ never signaled
+      expect(diagSignals(cwd2, child2)).toEqual([]);
+      for (const r of readSpawnsJson(hub3.stateDir) as RestoreStored[]) {
+        if (r.state === "live" && r.pid !== undefined) extraPids.add(r.pid);
+      }
+    }, 150_000);
   },
 );

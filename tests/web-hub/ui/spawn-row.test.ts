@@ -120,3 +120,47 @@ describe("SpawnRow.vue — faithful retry (default-model plan F1 D2/D4)", () => 
     expect("model" in f.submits[0]!).toBe(false);
   });
 });
+
+describe("SpawnRow.vue — restore (spawn-restore plan §9.1)", () => {
+  it("a restore in flight shows the `restoring` token chip and a phase hint line (attempt > 1 annotated)", () => {
+    const f = fakeHub({ caps: ["spawn.v1"] });
+    const w = mountRow(
+      { ...BASE_REC, state: "starting", restore: { phase: "reaping", attempt: 0, prevAgentKey: "a-old" } },
+      f,
+    );
+    const chip = w.find(".chip-spawn");
+    expect(chip.text()).toBe("restoring");
+    expect(chip.attributes("data-state")).toBe("restoring");
+    expect(w.find('[data-restore="phase"]').text()).toBe("Stopping the previous process…");
+    w.unmount();
+    const w2 = mountRow(
+      { ...BASE_REC, state: "starting", restore: { phase: "forking", attempt: 2, prevAgentKey: "a-old" } },
+      f,
+    );
+    expect(w2.find('[data-restore="phase"]').text()).toBe("Starting pi on the saved session… (attempt 2)");
+  });
+
+  it("a plain starting row is unchanged (no restore slot ⇒ `starting`, no phase line)", () => {
+    const w = mountRow({ ...BASE_REC, state: "starting" }, fakeHub({ caps: ["spawn.v1"] }));
+    expect(w.find(".chip-spawn").text()).toBe("starting");
+    expect(w.find(".chip-spawn").attributes("data-state")).toBe("starting");
+    expect(w.find('[data-restore="phase"]').exists()).toBe(false);
+  });
+
+  it("a failed restore shows the localized restore.failure line; unknown codes fall back to the raw code", () => {
+    const f = fakeHub({ caps: ["spawn.v1"] });
+    const w = mountRow({ ...BASE_REC, state: "failed", restore: { attempt: 1, failure: "session-missing" } }, f);
+    expect(w.find(".chip-spawn").text()).toBe("failed");
+    expect(w.find('[data-restore="failure"]').text()).toBe("The session file no longer exists — cannot restore");
+    w.unmount();
+    const w2 = mountRow(
+      {
+        ...BASE_REC,
+        state: "failed",
+        restore: { attempt: 1, failure: "future-code" as unknown as "exhausted" },
+      },
+      f,
+    );
+    expect(w2.find('[data-restore="failure"]').text()).toBe("future-code");
+  });
+});

@@ -19,6 +19,8 @@
  * - `pendingRows(spawns)` — SpawnRow's model: `starting`/`failed` records, newest first.
  * - `managedFor(spawns, agentKey)` — the non-terminal record managing a given agent (the
  *   `web` badge / 「停止会话」 button lookup, arch §9.1).
+ * - spawn-restore plan §9.1: `isRestoring` / `restoringKeys` / `successorOf` /
+ *   `isFreshlyRestored` / `restorePhaseKey` / `restoreFailureKey` (see the section at the end).
  *
  * Runtime imports use the literal `.ts` extension (`@protocol/version.ts`) — the same
  * `.js`-importer constraint `./contract.js` documents: Vite/esbuild only remap `./foo.js` →
@@ -225,6 +227,10 @@ export function classifySpawnError(outcome) {
  */
 export function isMine(rec, localIds) {
   if (!rec || typeof rec !== "object") return false;
+  // spawn-restore plan §9.1: a restored record reuses its spawnId and keeps `origin.reqId` —
+  // without this exclusion the originating tab would be yanked to the new key after a hub
+  // restart. Restore navigation is `successorOf`'s job (only for a viewer of the OLD key).
+  if (rec.restore !== undefined && rec.restore !== null) return false;
   const origin = rec.origin;
   if (!origin || typeof origin !== "object" || typeof origin.reqId !== "string") return false;
   if (localIds && typeof localIds.has === "function") return localIds.has(origin.reqId);
@@ -276,4 +282,113 @@ export function managedFor(spawns, agentKey) {
     }
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// spawn-restore plan §9.1 (RS7): restore-aware helpers. Every one reads the Public
+// `restore` slot only (`{ phase?, attempt, failure?, prevAgentKey?, restoredAt? }`).
+// ---------------------------------------------------------------------------
+
+/** @param {SpawnsPayload | null | undefined} spawns @returns {any[]} */
+function itemsOf(spawns) {
+  return spawns && typeof spawns === "object" && Array.isArray(spawns.items) ? spawns.items : [];
+}
+
+/** @param {any} rec @returns {any} the record's restore slot when it is an object */
+function restoreOf(rec) {
+  if (!rec || typeof rec !== "object") return undefined;
+  const r = rec.restore;
+  return r && typeof r === "object" ? r : undefined;
+}
+
+/**
+ * A record mid-restore (`starting` + `restore.phase` — reaping / forking / registering).
+ * @param {any} rec @returns {boolean}
+ */
+export function isRestoring(rec) {
+  const r = restoreOf(rec);
+  return rec?.state === "starting" && r !== undefined && typeof r.phase === "string";
+}
+
+/**
+ * The OLD agent keys a restore is currently replacing (F20: the old process may reconnect for
+ * a moment — its card gets a `restoring` badge and a disabled composer).
+ * @param {SpawnsPayload | null | undefined} spawns @returns {Set<string>}
+ */
+export function restoringKeys(spawns) {
+  /** @type {Set<string>} */
+  const out = new Set();
+  for (const rec of itemsOf(spawns)) {
+    if (!isRestoring(rec)) continue;
+    const prev = restoreOf(rec)?.prevAgentKey;
+    if (typeof prev === "string" && prev !== "") out.add(prev);
+  }
+  return out;
+}
+
+/**
+ * The new agent key that replaced `oldKey` after a successful restore (`restore.prevAgentKey
+ * === oldKey`, state `live`, bound `agentKey`), or `undefined`. A viewer of the old key's
+ * detail page follows it instead of landing on the 「已删除」 empty state.
+ * @param {SpawnsPayload | null | undefined} spawns @param {string | null | undefined} oldKey
+ * @returns {string | undefined}
+ */
+export function successorOf(spawns, oldKey) {
+  if (typeof oldKey !== "string" || oldKey === "") return undefined;
+  /** @type {any} */
+  let best;
+  for (const rec of itemsOf(spawns)) {
+    if (rec?.state !== "live" || typeof rec.agentKey !== "string" || rec.agentKey === oldKey) continue;
+    if (restoreOf(rec)?.prevAgentKey !== oldKey) continue;
+    if (best === undefined || (Number(rec.updatedAt) || 0) >= (Number(best.updatedAt) || 0)) best = rec;
+  }
+  return best?.agentKey;
+}
+
+/**
+ * A live record inside its stability window after a restore (`restoredAt` set, no phase) —
+ * the optional `restored` badge.
+ * @param {any} rec @returns {boolean}
+ */
+export function isFreshlyRestored(rec) {
+  const r = restoreOf(rec);
+  return rec?.state === "live" && r !== undefined && r.phase === undefined && typeof r.restoredAt === "number";
+}
+
+/** @type {Record<string, string>} */
+const RESTORE_PHASE_KEYS = {
+  reaping: "spawn.restorePhaseReaping",
+  forking: "spawn.restorePhaseForking",
+  registering: "spawn.restorePhaseRegistering",
+};
+
+/** @param {unknown} phase @returns {string | undefined} */
+export function restorePhaseKey(phase) {
+  return typeof phase === "string" ? RESTORE_PHASE_KEYS[phase] : undefined;
+}
+
+/** `RestoreFailure` → `spawn.restoreFail*` (literal copy of protocol/spawn.ts's RESTORE_FAILURES —
+ * that module pulls typebox at runtime; tests pin the two lists equal). @type {Record<string, string>} */
+const RESTORE_FAILURE_KEYS = {
+  "session-missing": "spawn.restoreFailSessionMissing",
+  "session-invalid": "spawn.restoreFailSessionInvalid",
+  "prev-alive": "spawn.restoreFailPrevAlive",
+  "prev-unknown": "spawn.restoreFailPrevUnknown",
+  "scan-miss": "spawn.restoreFailScanMiss",
+  exhausted: "spawn.restoreFailExhausted",
+  lifetime: "spawn.restoreFailLifetime",
+  launcher: "spawn.restoreFailLauncher",
+  reaper: "spawn.restoreFailReaper",
+  persist: "spawn.restoreFailPersist",
+  "cwd-changed": "spawn.restoreFailCwdChanged",
+  "register-timeout": "spawn.restoreFailRegisterTimeout",
+  "exited-early": "spawn.restoreFailExitedEarly",
+};
+
+/** Keys of {@link RESTORE_FAILURE_KEYS} (test anchor). */
+export const RESTORE_FAILURE_CODES = Object.freeze(Object.keys(RESTORE_FAILURE_KEYS));
+
+/** @param {unknown} failure @returns {string | undefined} */
+export function restoreFailureKey(failure) {
+  return typeof failure === "string" ? RESTORE_FAILURE_KEYS[failure] : undefined;
 }

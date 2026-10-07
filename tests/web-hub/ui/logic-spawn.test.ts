@@ -2,10 +2,17 @@
 import { describe, expect, it } from "vitest";
 import {
   classifySpawnError,
+  isFreshlyRestored,
   isMine,
+  isRestoring,
   managedFor,
   newSessionActions,
   pendingRows,
+  RESTORE_FAILURE_CODES,
+  restoreFailureKey,
+  restorePhaseKey,
+  restoringKeys,
+  successorOf,
   spawnAvailability,
   spawnDeniedKey,
   spawnHintKey,
@@ -419,5 +426,106 @@ describe("spawnHintKey (SpawnHint → spawn.hint* i18n key; F1 adds model-reject
     expect(spawnHintKey("some-future-hint")).toBeUndefined();
     expect(spawnHintKey(undefined)).toBeUndefined();
     expect(spawnHintKey(42)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// spawn-restore plan §9.1 (RS7)
+// ---------------------------------------------------------------------------
+describe("spawn-restore helpers (plan §9.1)", () => {
+  const payload = (items: SpawnRecordPublic[]): SpawnsPayload => ({ active: items.length, max: 4, items });
+
+  it("isMine excludes any record carrying `restore` — even when origin.reqId is mine (no yank after restart)", () => {
+    const mine = new Set(["req-9"]);
+    const restored = rec({
+      state: "live",
+      agentKey: "a-new",
+      origin: { listener: "loopback", reqId: "req-9" },
+      restore: { attempt: 1, prevAgentKey: "a-old", restoredAt: 5 },
+    });
+    expect(isMine(restored, mine)).toBe(false);
+    const { restore: _drop, ...plain } = restored;
+    expect(isMine(plain, mine)).toBe(true);
+  });
+
+  it("isRestoring: starting + restore.phase only", () => {
+    expect(isRestoring(rec({ state: "starting", restore: { phase: "reaping", attempt: 0 } }))).toBe(true);
+    expect(isRestoring(rec({ state: "starting", restore: { phase: "registering", attempt: 1 } }))).toBe(true);
+    expect(isRestoring(rec({ state: "starting" }))).toBe(false);
+    expect(isRestoring(rec({ state: "failed", restore: { attempt: 1, failure: "exhausted" } }))).toBe(false);
+    expect(isRestoring(rec({ state: "live", restore: { attempt: 1, restoredAt: 1 } }))).toBe(false);
+    expect(isRestoring(null)).toBe(false);
+  });
+
+  it("restoringKeys collects prevAgentKey of in-flight restores only", () => {
+    const keys = restoringKeys(
+      payload([
+        rec({ spawnId: "a", state: "starting", restore: { phase: "forking", attempt: 1, prevAgentKey: "a-old1" } }),
+        rec({ spawnId: "b", state: "starting", restore: { phase: "reaping", attempt: 0 } }), // no prev key
+        rec({ spawnId: "c", state: "failed", restore: { attempt: 1, failure: "prev-alive", prevAgentKey: "a-old2" } }),
+        rec({ spawnId: "d", state: "live", agentKey: "a-n", restore: { attempt: 1, prevAgentKey: "a-old3" } }),
+      ]),
+    );
+    expect([...keys]).toEqual(["a-old1"]);
+    expect(restoringKeys(null).size).toBe(0);
+    expect(restoringKeys({ items: "junk" } as unknown as SpawnsPayload).size).toBe(0);
+  });
+
+  it("successorOf: live record whose restore.prevAgentKey is the old key ⇒ its new agentKey", () => {
+    const spawns = payload([
+      rec({ spawnId: "x", state: "starting", restore: { phase: "registering", attempt: 1, prevAgentKey: "a-old" } }),
+    ]);
+    expect(successorOf(spawns, "a-old")).toBeUndefined(); // not live yet
+    const live = payload([
+      rec({
+        spawnId: "x",
+        state: "live",
+        agentKey: "a-new",
+        restore: { attempt: 1, prevAgentKey: "a-old", restoredAt: 9 },
+      }),
+      rec({ spawnId: "y", state: "live", agentKey: "a-other" }),
+    ]);
+    expect(successorOf(live, "a-old")).toBe("a-new");
+    expect(successorOf(live, "a-new")).toBeUndefined();
+    expect(successorOf(live, null)).toBeUndefined();
+    expect(successorOf(live, "")).toBeUndefined();
+    // a terminal record never redirects
+    const dead = payload([
+      rec({ spawnId: "x", state: "exited", agentKey: "a-new", restore: { attempt: 1, prevAgentKey: "a-old" } }),
+    ]);
+    expect(successorOf(dead, "a-old")).toBeUndefined();
+  });
+
+  it("isFreshlyRestored: live + restoredAt + no phase", () => {
+    expect(isFreshlyRestored(rec({ state: "live", restore: { attempt: 1, restoredAt: 3 } }))).toBe(true);
+    expect(isFreshlyRestored(rec({ state: "live" }))).toBe(false);
+    expect(
+      isFreshlyRestored(rec({ state: "starting", restore: { phase: "forking", attempt: 1, restoredAt: 3 } })),
+    ).toBe(false);
+  });
+
+  it("restoreFailureKey covers exactly the protocol's RESTORE_FAILURES, each with an en+zh string", async () => {
+    const { RESTORE_FAILURES, RESTORE_PHASES } = await import("../../../src/web-hub/protocol/spawn.js");
+    const en = (await import("../../../src/web-hub/ui/src/i18n/en/spawn.js")).default as Record<string, string>;
+    const zh = (await import("../../../src/web-hub/ui/src/i18n/zh/spawn.js")).default as Record<string, string>;
+    expect([...RESTORE_FAILURE_CODES].sort()).toEqual([...RESTORE_FAILURES].sort());
+    for (const f of RESTORE_FAILURES) {
+      const key = restoreFailureKey(f);
+      expect(key, f).toMatch(/^spawn\.restoreFail/);
+      const leaf = key!.slice("spawn.".length);
+      expect(typeof en[leaf]).toBe("string");
+      expect(typeof zh[leaf]).toBe("string");
+    }
+    for (const p of RESTORE_PHASES) {
+      const key = restorePhaseKey(p);
+      expect(key, p).toMatch(/^spawn\.restorePhase/);
+      expect(typeof zh[key!.slice("spawn.".length)]).toBe("string");
+    }
+    expect(restoreFailureKey("nope")).toBeUndefined();
+    expect(restorePhaseKey(42)).toBeUndefined();
+    // inline markers stay English tokens in BOTH languages (AGENTS.md UI-text split)
+    expect(zh["stateRestoring"]).toBe("restoring");
+    expect(zh["badgeRestoring"]).toBe("restoring");
+    expect(zh["badgeRestored"]).toBe("restored");
   });
 });

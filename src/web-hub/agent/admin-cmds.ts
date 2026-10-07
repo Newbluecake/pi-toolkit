@@ -16,10 +16,11 @@
  * Every op writes the stop/rotate marker files directly (protocol-level, pure fs) and/or talks to
  * the hub over the existing `HubConnection.request()` channel — no new I/O primitives.
  */
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname } from "node:path";
 import type { HubCtlAckFrame, HubCtlFrame, LanResFrame } from "../protocol/messages.js";
-import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
+import { resolveHubPaths, webHubSpawnFiles, type HubPaths } from "../protocol/paths.js";
 import {
   advanceRotateIntentSync,
   newRotateIntentId,
@@ -157,6 +158,34 @@ function restartDeps(): Parameters<typeof restartHub>[0] {
   };
 }
 
+/**
+ * web-hub-spawn-restore plan D13/§10.5: `/webhub stop` leaves a one-shot `restore.veto` the next
+ * hub boot consumes, so a stop that had to fall back to SIGTERM (a wedged hub that never ran its
+ * close handler, records still `live` on disk) is still never followed by a restore. Best-effort:
+ * a failure never blocks the stop (returned for the caller/tests, never thrown).
+ */
+export function writeRestoreVetoSync(stateDir: string): { ok: true } | { ok: false; code: string } {
+  const file = webHubSpawnFiles(stateDir).restoreVeto;
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, `${JSON.stringify({ v: 1, at: Date.now(), pid: process.pid })}\n`, { mode: 0o600 });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, code: (err as NodeJS.ErrnoException).code ?? "EUNKNOWN" };
+  }
+}
+
+/** D13: an explicit `/webhub restart` overrides an earlier stop's veto (ENOENT counts as success). */
+export function clearRestoreVetoSync(stateDir: string): { ok: true } | { ok: false; code: string } {
+  try {
+    unlinkSync(webHubSpawnFiles(stateDir).restoreVeto);
+    return { ok: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "EUNKNOWN";
+    return code === "ENOENT" ? { ok: true } : { ok: false, code };
+  }
+}
+
 /** §6.7.2 "unknown" classification helper — used both for the initial read and (defensively) if
  * the intermediate write/advance throws. */
 function stopMarkerReadable(read: StopMarkerRead): boolean {
@@ -174,6 +203,8 @@ export function createAdminCommands(): AdminCommands {
       } catch (err) {
         return { kind: "marker-write-failed", message: err instanceof Error ? err.message : String(err) };
       }
+      // web-hub-spawn-restore D13: after the stop marker, before stopHub(); failure never blocks.
+      writeRestoreVetoSync(paths.stateDir);
       const outcome = await stopHub(restartDeps());
       if (outcome.kind === "restarted") {
         // stopHub() itself never spawns; "restarted" cannot actually happen from it. Defensive

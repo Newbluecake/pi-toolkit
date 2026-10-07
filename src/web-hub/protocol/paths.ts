@@ -201,11 +201,19 @@ export function webHubUploadsDir(home: string): string {
  * `webHubStateDir(home)` so it never re-derives the prefix — additive, does not touch the
  * frozen `HubPaths` shape.
  */
-export function webHubSpawnFiles(stateDir: string): { spawnsJson: string; logDir: string; prefsJson: string } {
+export function webHubSpawnFiles(stateDir: string): {
+  spawnsJson: string;
+  logDir: string;
+  prefsJson: string;
+  restoreVeto: string;
+} {
   return {
     spawnsJson: `${stateDir}/spawns.json`,
     logDir: `${stateDir}/spawn`,
     prefsJson: `${stateDir}/spawn-prefs.json`,
+    // web-hub-spawn-restore plan D13/§10.5: one-shot veto `/webhub stop` writes and the next hub
+    // boot consumes (never restore after a stop, even when the stop fell back to SIGTERM).
+    restoreVeto: `${stateDir}/spawn/restore.veto`,
   };
 }
 
