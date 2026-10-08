@@ -63,10 +63,11 @@
   margin: 0;
   padding: var(--sp-1) 6px 0;
   /* Same cap-and-scroll-inside ruling as `.todo-list` / `.wt-list`: the panel sits in the
-   * detail header, so an unbounded job list would push the transcript off-screen. */
+   * detail header, so an unbounded job list would push the transcript off-screen. NO
+   * `overscroll-behavior: contain` (2026-10 scroll-freeze fix, see `.todo-list`): the chain
+   * must pass through once the list edge is hit. */
   max-height: min(40vh, 320px);
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .bj-item {
@@ -230,7 +231,6 @@
   padding: var(--sp-2);
   max-height: 200px;
   overflow: auto;
-  overscroll-behavior: contain;
   border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
   background: var(--c-surface);
@@ -240,6 +240,8 @@
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* NO `overscroll-behavior: contain` (2026-10 scroll-freeze fix, see `.todo-list`): let the
+   * wheel/touch chain pass to the outer scroller once the tail hits its cap. */
 }
 
 .bj-more {

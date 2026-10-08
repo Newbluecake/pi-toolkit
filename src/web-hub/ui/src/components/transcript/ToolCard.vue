@@ -25,9 +25,11 @@ import { computed, ref } from "vue";
 import { buildEditDiff, foldRows } from "@logic/diff.js";
 import { safeJson, summarizeArgs } from "@logic/tools.js";
 import type { ToolCardProps } from "../../contracts.js";
+import { useCoarseClamp } from "../../composables/useCoarseClamp.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import PathText from "../preview/PathText.vue";
+import ClampToggle from "./ClampToggle.vue";
 import { tailLines } from "./tail-lines.js";
 
 const props = defineProps<ToolCardProps>();
@@ -82,6 +84,20 @@ const hasBody = computed(
     (props.view.partial !== undefined && props.view.partial !== "") ||
     props.view.result !== undefined,
 );
+
+/* --- coarse-pointer clamps (2026-10 scroll-freeze fix) -------------------------------------
+ * The four capped regions (edit-diff box, Input/Live/Output `<pre>`s) must not be their own
+ * vertical scrollports on touch devices (gesture latching freezes the transcript): each gets
+ * a `useCoarseClamp` handle bound as `:data-cc`, plus the shared `ClampToggle`. Sections are
+ * v-if'd, so the handles tolerate a null target until the node exists. Desktop is inert. */
+const diffBox = ref<HTMLElement | null>(null);
+const inputPre = ref<HTMLElement | null>(null);
+const partialPre = ref<HTMLElement | null>(null);
+const resultPre = ref<HTMLElement | null>(null);
+const diffClamp = useCoarseClamp(() => diffBox.value, [() => editDiff.value, () => expandedHunks.value]);
+const inputClamp = useCoarseClamp(() => inputPre.value, [() => argsText.value]);
+const partialClamp = useCoarseClamp(() => partialPre.value, [() => displayedPartial.value]);
+const resultClamp = useCoarseClamp(() => resultPre.value, [() => props.view.result]);
 </script>
 
 <template>
@@ -102,7 +118,7 @@ const hasBody = computed(
     <div v-if="hasBody" class="tool-body">
       <div v-if="editDiff !== null" class="tool-section">
         <div class="tool-label">{{ t("transcript.tool.input") }}</div>
-        <div class="diff" translate="no">
+        <div ref="diffBox" class="diff" :data-cc="diffClamp.dataCc" translate="no">
           <div v-if="editDiff.path !== null" class="diff-path"><PathText :text="editDiff.path" /></div>
           <div v-for="(hunk, hi) in editDiff.edits" :key="hi" class="diff-hunk">
             <div class="diff-hunk-head">
@@ -134,10 +150,19 @@ const hasBody = computed(
             </template>
           </div>
         </div>
+        <ClampToggle :clamp="diffClamp" />
       </div>
       <div v-else-if="argsText !== undefined" class="tool-section">
         <div class="tool-label">{{ t("transcript.tool.input") }}</div>
-        <pre class="pre" translate="no" tabindex="0"><PathText v-if="argsText !== undefined" :text="argsText" /></pre>
+        <pre
+          ref="inputPre"
+          class="pre"
+          :data-cc="inputClamp.dataCc"
+          translate="no"
+          tabindex="0"
+        ><PathText v-if="argsText !== undefined" :text="argsText"
+        /></pre>
+        <ClampToggle :clamp="inputClamp" />
       </div>
       <div v-if="view.partial !== undefined && view.partial !== ''" class="tool-section">
         <div class="tool-label">
@@ -146,13 +171,19 @@ const hasBody = computed(
             {{ t("transcript.tool.showFull") }}
           </button>
         </div>
-        <pre class="pre" translate="no" tabindex="0">{{ displayedPartial }}</pre>
+        <pre ref="partialPre" class="pre" :data-cc="partialClamp.dataCc" translate="no" tabindex="0">{{
+          displayedPartial
+        }}</pre>
+        <ClampToggle :clamp="partialClamp" />
       </div>
       <div v-if="view.result !== undefined" class="tool-section" :class="{ 'is-error': view.state === 'error' }">
         <div class="tool-label">
           {{ view.state === "error" ? t("transcript.tool.result") : t("transcript.tool.output") }}
         </div>
-        <pre class="pre" translate="no" tabindex="0">{{ view.result }}</pre>
+        <pre ref="resultPre" class="pre" :data-cc="resultClamp.dataCc" translate="no" tabindex="0">{{
+          view.result
+        }}</pre>
+        <ClampToggle :clamp="resultClamp" />
       </div>
     </div>
   </details>

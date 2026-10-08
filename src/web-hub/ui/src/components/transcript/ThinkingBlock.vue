@@ -15,7 +15,9 @@
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useCoarseClamp } from "../../composables/useCoarseClamp.js";
 import { useI18n } from "../../composables/useI18n.js";
+import ClampToggle from "./ClampToggle.vue";
 
 /** Thresholds above which a finished thinking block auto-collapses instead of staying open. */
 const AUTO_COLLAPSE_LINES = 12;
@@ -85,6 +87,13 @@ watch(
   },
   { immediate: true, flush: "post" },
 );
+
+/* --- coarse-pointer clamp (2026-10 scroll-freeze fix) -------------------------------------
+ * On touch devices `.thinking-text` must not be its own scrollport (gesture latching freezes
+ * the transcript): `useCoarseClamp` clamps it with `overflow: hidden` + fade + the toggle
+ * below, and "expanded" drops the cap so the text flows with the page. The streaming follow
+ * above is unaffected — under a clamp there is nothing to scroll (its scrollTop writes no-op). */
+const clamp = useCoarseClamp(() => body.value, [() => props.text, () => isOpen.value]);
 </script>
 
 <template>
@@ -92,6 +101,7 @@ watch(
     <summary @click="onSummaryClick">
       <span>{{ t("transcript.thinking", { n: lineCount }) }}</span>
     </summary>
-    <div ref="body" class="thinking-text" @scroll.passive="onBodyScroll">{{ shown }}</div>
+    <div ref="body" class="thinking-text" :data-cc="clamp.dataCc" @scroll.passive="onBodyScroll">{{ shown }}</div>
+    <ClampToggle :clamp="clamp" />
   </details>
 </template>

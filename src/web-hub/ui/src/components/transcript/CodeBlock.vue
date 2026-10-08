@@ -8,11 +8,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
 import type { CodeBlockProps } from "../../contracts.js";
+import { useCoarseClamp } from "../../composables/useCoarseClamp.js";
 import { useClipboard } from "../../composables/useClipboard.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { resolveFenceLang } from "@logic/highlight.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import HighlightedCode from "../shared/HighlightedCode.vue";
+import ClampToggle from "./ClampToggle.vue";
 
 const props = defineProps<CodeBlockProps>();
 const { t } = useI18n();
@@ -51,10 +53,19 @@ async function copy(): Promise<void> {
     status.value = "";
   }, 2000);
 }
+
+/* --- coarse-pointer vertical clamp (2026-10 scroll-freeze fix) ------------------------------
+ * `overflow-x: auto` + no explicit overflow-y computes overflow-y to `auto`, so on touch
+ * devices this pre IS a nested vertical scroller that latches swipes. The clamp state rides
+ * BOTH this pre (vertical clip + cap lift) and the `.codeblock` wrapper (the fade anchor —
+ * the wrapper never scrolls horizontally, so the fade stays put while code pans). Horizontal
+ * scrolling is untouched: the base `overflow-x: auto` + `overscroll-behavior-x: contain`
+ * stay exactly as they are, and code is never force-wrapped. */
+const clamp = useCoarseClamp(() => preEl.value, [() => props.text]);
 </script>
 
 <template>
-  <div class="codeblock">
+  <div class="codeblock" :data-cc="clamp.dataCc">
     <div class="codeblock-head">
       <span translate="no">{{ lang || t("transcript.plainText") }}</span>
       <span v-if="status" class="codeblock-status" role="status">{{
@@ -68,6 +79,8 @@ async function copy(): Promise<void> {
       ref="preEl"
       translate="no"
       tabindex="0"
+      :data-cc="clamp.dataCc"
     ><code><HighlightedCode :text="text" :lang="highlightLang" /></code></pre>
+    <ClampToggle :clamp="clamp" />
   </div>
 </template>

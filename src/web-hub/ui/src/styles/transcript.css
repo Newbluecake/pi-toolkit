@@ -397,7 +397,10 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   overflow-wrap: anywhere;
   max-height: 320px;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  /* NO `overscroll-behavior: contain` here (2026-10 scroll-freeze fix): a nested scroller that
+   * swallows the wheel/touch chain strands the gesture once its edge is hit (browser scroll
+   * latching), freezing the transcript. Let the chain pass to `.transcript`, which contains it.
+   * Coarse pointers don't scroll here at all — see the `@media (pointer: coarse)` clamp block. */
 }
 
 /* tool card */
@@ -539,7 +542,9 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
   overflow: auto;
-  overscroll-behavior: contain;
+  /* NO `overscroll-behavior: contain` (2026-10 scroll-freeze fix, same ruling as
+   * `.thinking-text` above): chain to `.transcript` once this box hits its edge; coarse
+   * pointers don't scroll here at all — see the `@media (pointer: coarse)` clamp block. */
   color: var(--c-text);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
@@ -772,6 +777,90 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   .thinking > summary,
   details.tx-divider-wrap > summary {
     min-height: 44px;
+  }
+
+  /* --- coarse-pointer vertical clamp (2026-10 scroll-freeze fix, part 2) --------------------
+   * Touch devices get NO nested vertical scrolling inside the transcript (a capped inner
+   * scroller latches the gesture and the page looks frozen): the four capped regions render
+   * clamped with `overflow: hidden` + a bottom fade and a Show-all toggle
+   * (`useCoarseClamp` + `ClampToggle.vue`); "expanded" just drops the cap — under
+   * `max-height: none` the element grows to its content, so the base `overflow-y: auto` can
+   * never actually scroll vertically and the content flows with the page. `data-cc` is absent
+   * on desktop (fine pointer) and on content that fits under the cap, so this whole block is
+   * inert there. The thinking/tool/diff regions wrap long lines (`pre-wrap` +
+   * `overflow-wrap: anywhere`), so clamping `overflow` never takes away a horizontal pan;
+   * code blocks are the one deliberate exception — see their own rule group below. */
+  .thinking-text[data-cc="clamped"],
+  .tool-section .pre[data-cc="clamped"],
+  .diff[data-cc="clamped"] {
+    position: relative; /* the fade ::after's containing block */
+    overflow: hidden;
+  }
+
+  .thinking-text[data-cc="clamped"]::after,
+  .tool-section .pre[data-cc="clamped"]::after,
+  .diff[data-cc="clamped"]::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 44px;
+    pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--c-bg));
+  }
+
+  /* the tool-card regions sit on the `.tool` card surface; the error variant's pre carries
+   * its own danger tint the fade must blend into */
+  .tool-section .pre[data-cc="clamped"]::after,
+  .diff[data-cc="clamped"]::after {
+    background: linear-gradient(to bottom, transparent, var(--c-surface));
+  }
+
+  .tool-section.is-error .pre[data-cc="clamped"]::after {
+    background: linear-gradient(to bottom, transparent, var(--c-danger-soft));
+  }
+
+  .thinking-text[data-cc="expanded"],
+  .tool-section .pre[data-cc="expanded"],
+  .diff[data-cc="expanded"] {
+    max-height: none;
+  }
+
+  /* Code blocks (`.codeblock pre`, max-height 420px) are the exception: code must NOT be
+   * force-wrapped, so the horizontal pan stays — base `overflow-x: auto` +
+   * `overscroll-behavior-x: contain` are untouched and only the VERTICAL axis is clamped
+   * (`overflow-y: hidden`; a bare `overflow-x: auto` would compute overflow-y to `auto` and
+   * re-create the nested vertical scroller). Because the pre pans horizontally, the fade
+   * CANNOT live inside it (an abspos child scrolls away with the content) — it rides the
+   * `.codeblock` wrapper, which never pans, via the same handle's `data-cc`. Expanded lifts
+   * the cap only: overflow-y still computes to `auto`, but with nothing to overflow it can
+   * never actually scroll, so the code flows with the page vertically and pans horizontally. */
+  .codeblock pre[data-cc="clamped"] {
+    overflow-y: hidden;
+  }
+
+  .codeblock[data-cc="clamped"] {
+    position: relative; /* the fade ::after's containing block */
+  }
+
+  .codeblock[data-cc="clamped"]::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 44px;
+    pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--c-sunken));
+  }
+
+  .codeblock pre[data-cc="expanded"] {
+    max-height: none;
+  }
+
+  .cc-toggle {
+    margin: var(--sp-1) var(--sp-3) var(--sp-2);
   }
 }
 

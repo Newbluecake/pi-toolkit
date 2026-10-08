@@ -62,10 +62,11 @@
   margin: 0;
   padding: var(--sp-1) 6px 0;
   /* Same cap-and-scroll-inside ruling as `.todo-list`: the panel sits in the detail header, so
-   * an unbounded worktree list would push the transcript off-screen. */
+   * an unbounded worktree list would push the transcript off-screen. NO
+   * `overscroll-behavior: contain` (2026-10 scroll-freeze fix, see `todo.css`): the chain must
+   * pass through once the list edge is hit. */
   max-height: min(40vh, 320px);
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .wt-item {

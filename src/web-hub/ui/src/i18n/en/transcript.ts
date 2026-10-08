@@ -28,6 +28,8 @@ const transcript = {
   copyCode: "Copy code",
   copyCopied: "Copied!",
   copySelected: "Selected — press Copy",
+  showAll: "Show all",
+  collapse: "Collapse",
   "tool.input": "Input",
   "tool.liveOutput": "Live output",
   "tool.output": "Output",

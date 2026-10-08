@@ -73,11 +73,12 @@
   margin: 0;
   padding: var(--sp-1) 6px 0;
   /* Many tasks (2026-10 user report): the expanded list sits in the detail header, so an
-   * unbounded list pushes the transcript off-screen. Cap it and scroll inside instead;
-   * `overscroll-behavior` keeps a fling at the end from scrolling the page underneath. */
+   * unbounded list pushes the transcript off-screen. Cap it and scroll inside instead.
+   * NO `overscroll-behavior: contain` (2026-10 scroll-freeze fix): containing the wheel/touch
+   * chain strands the gesture at the list's edge (scroll latching) and freezes the outer
+   * scroll — let the chain pass through instead. */
   max-height: min(40vh, 320px);
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .todo-item {

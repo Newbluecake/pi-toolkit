@@ -31,6 +31,8 @@ const transcript = {
   copyCode: "复制代码",
   copyCopied: "已复制！",
   copySelected: "已选中 — 按复制",
+  showAll: "展开全部",
+  collapse: "收起",
   "tool.input": "输入",
   "tool.liveOutput": "实时输出",
   "tool.output": "输出",

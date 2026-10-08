@@ -49,11 +49,14 @@
   padding: 0;
 }
 
-/* §4.2: >200 entries cap the height and scroll inside. */
+/* §4.2: >200 entries cap the height and scroll inside. NO `overscroll-behavior: contain`
+ * (2026-10 scroll-freeze fix): this list lives in the detail header (WorktreePanel's expanded
+ * row), not a modal — containing the wheel/touch chain freezes the outer scroll once the edge
+ * is hit. The DIALOG body `.wtd-body` below keeps its contain: a modal's scroll must never
+ * chain to the page behind it. */
 .wtd-file-list.is-tall {
   max-height: min(40vh, 320px);
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .wtd-file-item + .wtd-file-item {
