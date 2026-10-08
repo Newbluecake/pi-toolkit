@@ -222,8 +222,10 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
     <TodoPanel v-if="agent.todo" :todo="agent.todo" />
 
     <!-- worktree-web W4: git worktrees of the session cwd's repo, straight from
-         `status.worktrees`; renders nothing when the wire is absent or has zero rows. -->
-    <WorktreePanel v-if="worktrees" :worktrees="worktrees" />
+         `status.worktrees`; renders nothing when the wire is absent or has zero rows.
+         worktree-diff D5 (§4.1): `agentKey`/`session` are the wtdiff scope inputs — absent
+         (old mounts) or a missing hub cap keeps the panel byte-identical (I8). -->
+    <WorktreePanel v-if="worktrees" :worktrees="worktrees" :agent-key="agent.key" :session="session" />
 
     <!-- bash-jobs-panel 包 B (D4): the session's own background bash jobs, straight from
          `status.bashJobs`; renders nothing when the wire is absent or has zero rows. -->

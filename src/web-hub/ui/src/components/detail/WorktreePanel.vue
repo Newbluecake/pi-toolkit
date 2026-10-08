@@ -1,24 +1,35 @@
 <!--
-  Git-worktree panel (worktree-web plan §5/D5, package W4): a read-only summary of the git
-  worktrees of the repo the session cwd lives in, fed by `StatusInfo.worktrees` (W2 wire,
-  commit 04021a9) via `worktreesOf(agent)` — no `state.js` mirror, no `types.ts` change.
+  Git-worktree panel (worktree-web plan §5/D5, package W4; worktree-diff plan v3.1 §4.1,
+  package D5): a read-only summary of the git worktrees of the repo the session cwd lives in,
+  fed by `StatusInfo.worktrees` (W2 wire, commit 04021a9) via `worktreesOf(agent)` — no
+  `state.js` mirror, no `types.ts` change (beyond D4's additive `worktreeDiff` passthrough).
   Collapsed by default: the one-line summary (`master@053387d ↑1 · worktrees 3 · 1 dirty ·
   stale 2m`) is the glance surface; expanding lists every row with its home-abbreviated label
   (the full absolute path rides the row's `title` and a per-row CopyButton — 用户拍板 Q1:
   absolute paths are shown/copyable), branch chip, short HEAD, dirty token (`*N` / `*N+` /
   `*N~` / `clean` / `?`), ahead/behind and flag chips (main/agent/locked/prunable/bare).
 
+  worktree-diff D5 (§4.1): a row whose dirty token is EXPANDABLE (`rowDiffable`: wtdiff scope
+  + usable `path` + not bare/prunable + possibly-dirty) renders that token as
+  `<button class="wt-status wtd-toggle" aria-expanded>` — `*N` + chevron — embedding
+  `WorktreeFileList` below the row when open; the whole ROW stays unclickable (it hosts the
+  per-row CopyButton). Rows without a scope / without `path` / clean rows keep today's exact
+  `<span class="wt-status">` (I8 — the no-cap DOM is byte-identical, pinned by
+  `worktree-panel.test.ts`). Expansion state lives in `useWorktreeDiff` (not persisted); the
+  diff dialog (`WorktreeDiffDialog`) is teleported to `<body>` from here, mounted only when a
+  scope exists.
+
   V1 rulings (plan §10 / 用户拍板): strictly read-only — no write path, no preview link,
-  `aria-readonly` on the section; shown even for a single worktree (Q2 — the web has no other
-  branch/dirty display); no settings toggle (Q3); ahead/behind is vs the local remote-tracking
-  ref and the web UI never fetches (Q5, tooltip `worktreesAbHint`). A single worktree still
-  renders the panel; a wire with zero rows (or none at all) renders nothing — `DetailHeader`'s
-  `v-if` plus `worktreesOf`'s non-empty-rows guard.
+  `aria-readonly` on the section; shown even for a single worktree (Q2); no settings toggle
+  (Q3); ahead/behind is vs the local remote-tracking ref and the web UI never fetches (Q5,
+  tooltip `worktreesAbHint`). A single worktree still renders the panel; a wire with zero rows
+  (or none at all) renders nothing — `DetailHeader`'s `v-if` plus `worktreesOf`'s non-empty
+  -rows guard.
 
   Fold state is a plain local ref — NOT persisted across reloads, same precedent as
   `TodoPanel` (source-scan.test.ts's persistence allowlist doesn't cover this component).
-  Styles live in `styles/worktrees.css` (imported below), not scoped `<style>` — source-scan
-  bans `<style>` blocks outright.
+  Styles live in `styles/worktrees.css` (imported below) + `styles/diff.css` (via the diff
+  components), not scoped `<style>` — source-scan bans `<style>` blocks outright.
 
   Compact inline markers (summary segments, `*N+`/`?` tokens, flag chips) are English-token-only
   in BOTH locales per the AGENTS.md UI-text rule; only tooltips/aria labels are translated prose.
@@ -27,20 +38,103 @@
   are never read, so a newer agent can't break an older UI.
 -->
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, inject, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
-import type { WorktreeRowWire, WorktreesWire } from "@protocol/messages.js";
+import { useMedia } from "../../composables/useMedia.js";
+import { useWorktreeDiff, type ListState } from "../../composables/useWorktreeDiff.js";
+import type { WorktreeRowWire, WorktreesWire, SessionInfo } from "@protocol/messages.js";
+import { rowDiffable, wtdiffScopeOf } from "@logic/wtdiff.js";
+import type { WtDiffFileEntry } from "@protocol/worktree-diff.js";
+import type { WtDiffScope } from "../../transport/types.js";
+import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import CopyButton from "./CopyButton.vue";
+import WorktreeDiffDialog from "../diff/WorktreeDiffDialog.vue";
+import WorktreeFileList from "../diff/WorktreeFileList.vue";
 import { currentRowOf, formatSampleTime, rowStatus } from "./worktreesView.js";
 import "../../styles/worktrees.css";
 
 // Deliberately local props interface (same escape hatch as TodoPanel): contracts.ts is owned
 // by another in-flight line and `WorktreesWire` comes straight from `@protocol/messages.js`.
-const props = defineProps<{ readonly worktrees: WorktreesWire }>();
+// `agentKey`/`session` (D5 §4.1, optional — absent in every pre-D5 mount, e.g. old snapshots)
+// are the wtdiff scope inputs alongside the injected hub/transport.
+const props = defineProps<{
+  readonly worktrees: WorktreesWire;
+  readonly agentKey?: string;
+  readonly session?: SessionInfo | undefined;
+}>();
 const { t } = useI18n();
 
 const open = ref(false);
+
+// ---------------------------------------------------------------------------
+// worktree-diff D5 §4.1: scope derivation + the diff state machine. Inject-only (HUB_CTX /
+// CONTROL_ENV), no new provider — a missing hub/context/transport/cap collapses `scope` to
+// null and the panel renders byte-identical to the pre-D5 DOM (I8).
+// ---------------------------------------------------------------------------
+const hub = inject(HUB_CTX, null);
+const env = inject(CONTROL_ENV, null);
+
+function hubCaps(): unknown {
+  const h = hub?.state.value.hub;
+  return h !== null && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+}
+
+const scope = computed<WtDiffScope | null>(() =>
+  wtdiffScopeOf({
+    mode: env?.authMode,
+    hubCaps: hubCaps(),
+    hasTransport: hub?.worktreeDiff !== undefined,
+    agentKey: props.agentKey,
+    session: props.session,
+  }),
+);
+
+const {
+  lists,
+  dialog,
+  mode: viewMode,
+  isExpanded,
+  toggleRow,
+  refreshList,
+  openFile,
+  refreshDialog,
+  closeDialog,
+  setMode,
+  onRowsChanged,
+} = useWorktreeDiff({ transport: hub?.worktreeDiff, scope });
+
+/** §4.4: ≤767px drives the dialog's full-screen/unified degradation (mockup W4). */
+const mobile = useMedia(window, "(max-width: 767px)").matches;
+
+const plaintext = computed(() => env?.plaintext === true);
+
+// D13: every status frame re-samples the rows — sig moves re-pull expanded lists (debounced
+// in the composable) and raise the dialog's stale banner.
+watch(
+  () => props.worktrees.rows,
+  (rows) => onRowsChanged(rows),
+);
+
+function rowKey(row: WorktreeRowWire): string {
+  return typeof row.path === "string" ? row.path : "";
+}
+
+function listStateOf(row: WorktreeRowWire): ListState {
+  return lists.get(rowKey(row)) ?? { phase: "idle", sig: "" };
+}
+
+function listId(i: number): string {
+  return `wtd-files-${i}`;
+}
+
+function onOpen(row: WorktreeRowWire, entry: WtDiffFileEntry): void {
+  openFile(rowKey(row), entry);
+}
+
+function onRefresh(row: WorktreeRowWire): void {
+  refreshList(rowKey(row));
+}
 
 const current = computed(() => currentRowOf(props.worktrees));
 
@@ -145,9 +239,10 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
     </button>
     <ul v-if="open" class="wt-list">
       <li
-        v-for="row in worktrees.rows"
+        v-for="(row, i) in worktrees.rows"
         :key="row.path ?? row.label"
         class="wt-item"
+        :class="{ 'is-expanded': rowDiffable(scope, row) && isExpanded(rowKey(row)) }"
         :data-current="row.current === true ? 'true' : undefined"
       >
         <span class="wt-marker" aria-hidden="true">{{ row.current === true ? "●" : "○" }}</span>
@@ -157,13 +252,31 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
         <span v-if="row.branch !== undefined && row.head !== undefined" class="wt-head" translate="no">{{
           row.head
         }}</span>
-        <span
-          v-if="statusToken(row) !== null"
-          class="wt-status"
-          :data-kind="statusToken(row)?.kind"
-          :title="statusToken(row)?.title ?? undefined"
-          >{{ statusToken(row)?.text }}</span
-        >
+        <template v-if="statusToken(row) !== null">
+          <template v-if="rowDiffable(scope, row)">
+            <button
+              class="wt-status wtd-toggle"
+              type="button"
+              :data-kind="statusToken(row)?.kind"
+              :title="t('diff.toggleTitle')"
+              :aria-expanded="isExpanded(rowKey(row)) ? 'true' : 'false'"
+              :aria-controls="isExpanded(rowKey(row)) ? listId(i) : undefined"
+              @click="toggleRow(row)"
+            >
+              {{ statusToken(row)?.text }}<AppIcon name="chev-right" class="wtd-chev" aria-hidden="true" />
+            </button>
+            <div v-if="isExpanded(rowKey(row))" :id="listId(i)" class="wt-files-slot">
+              <WorktreeFileList :state="listStateOf(row)" @open="(e) => onOpen(row, e)" @refresh="onRefresh(row)" />
+            </div>
+          </template>
+          <span
+            v-else
+            class="wt-status"
+            :data-kind="statusToken(row)?.kind"
+            :title="statusToken(row)?.title ?? undefined"
+            >{{ statusToken(row)?.text }}</span
+          >
+        </template>
         <span v-if="abLabel(row) !== null" class="wt-ab" :title="t('detail.worktreesAbHint')">{{ abLabel(row) }}</span>
         <span v-for="flag in flagChips(row)" :key="flag" class="wt-chip wt-flag">{{ flag }}</span>
         <CopyButton class="wt-copy" :value="row.path ?? row.label" :label="t('detail.worktreesCopyPath')" />
@@ -176,4 +289,20 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
       </li>
     </ul>
   </section>
+  <!-- worktree-diff D5: the diff dialog mounts as a SECOND root (a fragment sibling of the
+       section, so the panel's own DOM stays byte-identical when no scope exists — I8), only
+       when a scope does; it teleports to <body> and renders nothing while closed. -->
+  <template v-if="scope !== null">
+    <Teleport to="body">
+      <WorktreeDiffDialog
+        :state="dialog"
+        :mode="viewMode"
+        :mobile="mobile"
+        :plaintext="plaintext"
+        @close="closeDialog"
+        @refresh="refreshDialog"
+        @set-mode="setMode"
+      />
+    </Teleport>
+  </template>
 </template>

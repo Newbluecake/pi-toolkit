@@ -216,3 +216,58 @@
     margin-block: -12px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * worktree-diff plan v3.1 §4.1 (package D5): the expandable dirty token + the expanded
+ * file-list slot. Everything else diff-related lives in styles/diff.css (`wtd-` prefix).
+ * --------------------------------------------------------------------------- */
+
+/* The dirty/probe token promoted to an expand button on diffable rows: keeps the span
+ * family's metrics (font, tabular numerals, dirty/clean tints) so the glance surface is
+ * unchanged; adds only the chevron + pointer affordance. */
+button.wtd-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 20px; /* same hit box as the summary-row family (desktop compaction) */
+  margin: 0;
+  padding: 0 3px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  font-family: inherit; /* native buttons don't inherit the font by default */
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  /* no `color`: the .wt-status base + [data-kind] tints cascade onto the button as-is */
+}
+
+button.wtd-toggle:hover {
+  background: var(--c-surface-2);
+}
+
+.wtd-toggle .wtd-chev {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--c-text-3);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.wt-item.is-expanded .wtd-toggle .wtd-chev {
+  transform: rotate(90deg);
+}
+
+/* The expanded slot wraps the row's own line: `.wt-item` is a wrapping flex row, so the slot
+ * takes a full basis; the file list itself (styles/diff.css) aligns under the label column. */
+.wt-files-slot {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+@media (pointer: coarse) {
+  button.wtd-toggle {
+    min-height: 44px; /* the expand toggle is a primary touch target on mobile */
+    margin-block: -10px; /* keep the hit box without inflating the row (wt-copy precedent) */
+  }
+}

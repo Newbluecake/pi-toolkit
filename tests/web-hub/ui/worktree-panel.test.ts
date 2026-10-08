@@ -254,3 +254,211 @@ describe("WorktreePanel.vue — expanded rows (plan §5)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan v3.1 §4.1/§5 D5: the expandable dirty token, the expanded file list and
+// the I8 byte pin (no scope / no path / clean rows keep the exact pre-D5 DOM).
+// ---------------------------------------------------------------------------
+
+import { ref } from "vue";
+import { afterEach, vi } from "vitest";
+import { flushPromises } from "@vue/test-utils";
+import { HUB_CTX, CONTROL_ENV } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import type { WtDiffFileList } from "../../../src/web-hub/protocol/worktree-diff.js";
+
+const wtdList = (over: Partial<WtDiffFileList> = {}): WtDiffFileList => ({
+  base: "b".repeat(40),
+  entries: [
+    { path: "src/a.ts", status: "M", add: 3, del: 1 },
+    { path: "src/new.ts", status: "A", add: 9, del: 0 },
+  ],
+  total: 2,
+  truncated: false,
+  limits: { status: false, files: false, bytes: false },
+  ...over,
+});
+
+const wtdTransport = () => ({
+  files: vi.fn().mockResolvedValue({ ok: true, value: wtdList() }),
+  file: vi.fn().mockResolvedValue({
+    ok: true,
+    value: { base: "b".repeat(40), path: "src/a.ts", kind: "empty", patch: "", bytes: 0, truncated: false },
+  }),
+});
+
+const session = { sessionId: "s-1", cwd: "/home/dev/repo" };
+
+/** Mount with the D5 injection surface (HUB_CTX + CONTROL_ENV), caps on, transport present. */
+const mountScoped = (w: WorktreesWire, transport: ReturnType<typeof wtdTransport> = wtdTransport()) => {
+  const hub = {
+    state: ref({
+      clientId: null,
+      hub: { caps: ["wtdiff.v1"] },
+      conn: "connected",
+      selected: "a-1",
+      agents: new Map(),
+      order: [],
+    }),
+    worktreeDiff: transport,
+  };
+  const env = { authMode: "token" as const, plaintext: false, dialogDrafts: new Map(), noticeExpanded: ref(false) };
+  const wrapper = mount(WorktreePanel, {
+    props: { worktrees: w, agentKey: "a-1", session },
+    global: { provide: { [HUB_CTX as symbol]: hub, [CONTROL_ENV as symbol]: env } },
+  });
+  return { wrapper, transport };
+};
+
+const dirtyWire = (): WorktreesWire =>
+  wire({
+    rows: [
+      {
+        label: "~/repo",
+        path: "/home/dev/repo",
+        branch: "master",
+        head: "0123456",
+        current: true,
+        main: true,
+        dirty: 3,
+      },
+    ],
+    total: 1,
+    dirtyCount: 1,
+  });
+
+describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = "";
+  });
+
+  it("I8 byte pin — no scope: the dirty row's DOM is byte-identical to pre-D5", async () => {
+    const wrapper = mountPanel(dirtyWire()); // NO HUB_CTX provide ⇒ scope null
+    await wrapper.find(".wt-sum").trigger("click");
+    const token = wrapper.find(".wt-status");
+    expect(token.element.tagName).toBe("SPAN");
+    expect(token.element.outerHTML).toBe('<span class="wt-status" data-kind="dirty">*3</span>');
+    expect(wrapper.findAll(".wtd-toggle")).toHaveLength(0);
+    expect(wrapper.find(".wt-files-slot").exists()).toBe(false);
+    expect(wrapper.html()).not.toContain("wtd-");
+  });
+
+  it("I8 byte pin — no scope: a full dirty row (marker→copy button) renders the pre-D5 literal", async () => {
+    const wrapper = mountPanel(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
+    expect(wrapper.find(".wt-item").element.outerHTML).toBe(
+      '<li class="wt-item" data-current="true"><span class="wt-marker" aria-hidden="true">●</span><span class="sr-only">current</span><span class="wt-label" translate="no" title="/home/dev/repo">~/repo</span><span class="wt-chip wt-branch" translate="no">master</span><span class="wt-head" translate="no">0123456</span><span class="wt-status" data-kind="dirty">*3</span><!--v-if--><span class="wt-chip wt-flag">main</span><span class="wt-copy"><button class="btn btn-ghost btn-icon" type="button" aria-label="Copy worktree path"><svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg></button><span class="sr-only" role="status"></span></span></li>',
+    );
+    // the section itself carries no diff markup either
+    const html = wrapper.find(".wt-panel").element.outerHTML;
+    expect(html.endsWith("</ul></section>")).toBe(true);
+  });
+
+  it("I8 byte pin — no path / clean rows render the pre-D5 span even WITH a scope", async () => {
+    const w = wire({
+      rows: [
+        { label: "~/nop", branch: "x", head: "1111111", dirty: 4 }, // dirty but NO path
+        { label: "~/clean", path: "/home/dev/clean", branch: "y", head: "2222222", dirty: 0 }, // clean
+      ],
+      total: 2,
+      dirtyCount: 1,
+    });
+    const { wrapper } = mountScoped(w);
+    await wrapper.find(".wt-sum").trigger("click");
+    const tokens = wrapper.findAll(".wt-status");
+    expect(tokens).toHaveLength(2);
+    for (const tk of tokens) expect(tk.element.tagName).toBe("SPAN");
+    expect(tokens[0]!.element.outerHTML).toBe('<span class="wt-status" data-kind="dirty">*4</span>');
+    expect(tokens[1]!.element.outerHTML).toBe('<span class="wt-status" data-kind="clean">clean</span>');
+    expect(wrapper.findAll(".wtd-toggle")).toHaveLength(0);
+  });
+
+  it("a diffable row renders button[aria-expanded] with the toggle affordance", async () => {
+    const { wrapper } = mountScoped(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
+    const btn = wrapper.find(".wtd-toggle");
+    expect(btn.element.tagName).toBe("BUTTON");
+    expect(btn.attributes("aria-expanded")).toBe("false");
+    expect(btn.attributes("data-kind")).toBe("dirty");
+    expect(btn.attributes("title")).toBe("Show changed files");
+    expect(btn.text()).toBe("*3");
+    expect(btn.find(".wtd-chev").exists()).toBe(true);
+  });
+
+  it("expanding pulls the list once; collapsing keeps the data and never re-pulls", async () => {
+    const { wrapper, transport } = mountScoped(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
+    const btn = wrapper.find(".wtd-toggle");
+
+    await btn.trigger("click");
+    expect(transport.files).toHaveBeenCalledTimes(1); // 展开拉一次
+    expect(btn.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find(".wt-files-slot").exists()).toBe(true);
+    await flushPromises();
+    expect(wrapper.findAll(".wtd-file").length).toBe(2); // the pulled entries
+
+    await btn.trigger("click"); // 收起
+    expect(btn.attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find(".wt-files-slot").exists()).toBe(false);
+    expect(transport.files).toHaveBeenCalledTimes(1); // 收起不重拉
+
+    await btn.trigger("click"); // re-expand: the kept data, still no new pull
+    expect(transport.files).toHaveBeenCalledTimes(1);
+    expect(wrapper.find(".wt-files-slot").exists()).toBe(true);
+  });
+
+  it("a row sig change re-pulls the expanded list after the 3 s debounce (not before)", async () => {
+    vi.useFakeTimers();
+    const { wrapper, transport } = mountScoped(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
+    await wrapper.find(".wtd-toggle").trigger("click");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.files).toHaveBeenCalledTimes(1);
+
+    const changed = dirtyWire();
+    (changed.rows[0] as { dirty: number }).dirty = 9; // the sig moved (head|dirty|…|…)
+    await wrapper.setProps({ worktrees: changed });
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(transport.files).toHaveBeenCalledTimes(1); // still inside the window
+    await vi.advanceTimersByTimeAsync(2);
+    expect(transport.files).toHaveBeenCalledTimes(2); // debounced re-pull fired
+  });
+
+  it("clicking a file entry opens the teleported diff dialog", async () => {
+    const { wrapper, transport } = mountScoped(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
+    await wrapper.find(".wtd-toggle").trigger("click");
+    await flushPromises();
+    await wrapper.find(".wtd-file").trigger("click");
+    await flushPromises();
+    expect(transport.file).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".wtd-panel")).not.toBeNull(); // teleported to <body>
+    expect(document.querySelector(".wtd-panel")!.getAttribute("role")).toBe("dialog");
+    // closing through the dialog's close button tears it down
+    (document.querySelector(".wtd-close") as HTMLElement).click();
+    await flushPromises();
+    expect(document.querySelector(".wtd-panel")).toBeNull();
+  });
+
+  it("without the wtdiff.v1 cap the panel DOM matches the no-scope byte pin", async () => {
+    const hub = {
+      state: ref({
+        clientId: null,
+        hub: { caps: [] },
+        conn: "connected",
+        selected: "a-1",
+        agents: new Map(),
+        order: [],
+      }),
+      worktreeDiff: wtdTransport(),
+    };
+    const env = { authMode: "token" as const, plaintext: false, dialogDrafts: new Map(), noticeExpanded: ref(false) };
+    const wrapper = mount(WorktreePanel, {
+      props: { worktrees: dirtyWire(), agentKey: "a-1", session },
+      global: { provide: { [HUB_CTX as symbol]: hub, [CONTROL_ENV as symbol]: env } },
+    });
+    await wrapper.find(".wt-sum").trigger("click");
+    expect(wrapper.find(".wt-status").element.outerHTML).toBe('<span class="wt-status" data-kind="dirty">*3</span>');
+    expect(wrapper.findAll(".wtd-toggle")).toHaveLength(0);
+  });
+});

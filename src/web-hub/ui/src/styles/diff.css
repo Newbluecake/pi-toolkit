@@ -1,0 +1,552 @@
+/*
+ * diff.css — worktree-diff plan v3.1 §4.2/§4.3/§4.4 (package D5): the expanded row's
+ * changed-file list, the diff dialog (shell, header, banners, six-state body) and the
+ * split/unified row grid. Token-driven only (same discipline as preview.css); every class
+ * carries the `wtd-` prefix — `.diff*` is already taken by the edit-tool card
+ * (transcript.css). Imported by `components/diff/WorktreeFileList.vue` and
+ * `components/diff/WorktreeDiffDialog.vue`.
+ *
+ * Stacking: the dialog overlay sits at z-index 60, the same modal tier as the preview overlay
+ * (preview.css) — the two are never open at once (no clickable refs inside a diff).
+ */
+
+/* ---------------------------------------------------------------- changed-file list (§4.2) */
+.wtd-files {
+  flex: 1 1 100%;
+  margin: 2px 0 2px calc(14px + var(--sp-2)); /* aligns under the label column */
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  overflow: hidden;
+}
+
+.wtd-files-state,
+.wtd-files-error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.wtd-files-error {
+  color: var(--c-text);
+}
+
+.wtd-files-error-title {
+  margin: 0 0 2px;
+  font-weight: var(--fw-semibold);
+}
+
+.wtd-files-error-text {
+  margin: 0 0 var(--sp-2);
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.wtd-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* §4.2: >200 entries cap the height and scroll inside. */
+.wtd-file-list.is-tall {
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.wtd-file-item + .wtd-file-item {
+  border-top: 1px solid var(--c-border);
+}
+
+.wtd-file {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px var(--sp-2);
+  border: 0;
+  background: none;
+  color: var(--c-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wtd-file:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.wtd-file:disabled {
+  color: var(--c-text-3);
+  cursor: not-allowed;
+}
+
+/* the eight §4.2 badges (cls = the lowercase status letter, "?" → "q") */
+.wtd-badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-xs);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+}
+
+.wtd-badge.is-m,
+.wtd-badge.is-t {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.wtd-badge.is-a {
+  background: var(--diff-add-soft);
+  color: var(--st-done);
+}
+
+.wtd-badge.is-d {
+  background: var(--diff-del-soft);
+  color: var(--c-danger);
+}
+
+.wtd-badge.is-r,
+.wtd-badge.is-c {
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
+.wtd-badge.is-u {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.wtd-badge.is-q {
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+}
+
+.wtd-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.wtd-chip {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.wtd-file-stat {
+  flex: none;
+  display: inline-flex;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wtd-file-stat .is-add,
+.wtd-stat .is-add {
+  color: var(--st-done);
+}
+
+.wtd-file-stat .is-del,
+.wtd-stat .is-del {
+  color: var(--c-danger);
+}
+
+.wtd-note {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2) 0;
+  color: var(--c-warning-text);
+  font-size: var(--fs-2xs);
+}
+
+.wtd-foot {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2);
+  border-top: 1px solid var(--c-border);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.wtd-files-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--sp-1) var(--sp-2);
+  border-top: 1px solid var(--c-border);
+}
+
+/* the `wtd-toggle` button that replaced the dirty row's span lives in worktrees.css */
+
+/* ---------------------------------------------------------------- dialog overlay (§4.3) */
+.wtd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60; /* same modal tier as the preview overlay */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: var(--c-scrim);
+}
+
+.wtd-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(1080px, 100%);
+  max-height: min(88vh, 960px);
+  overflow: hidden;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  outline: none;
+}
+
+/* §4.4: ≤767px goes full-screen, honoring safe-area and the dynamic viewport height. */
+@media (max-width: 767px) {
+  .wtd-overlay {
+    padding: 0;
+  }
+
+  .wtd-panel {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* ---------------------------------------------------------------- dialog header */
+.wtd-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 48px;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  flex-wrap: wrap;
+}
+
+.wtd-head .wtd-badge {
+  width: 20px;
+  height: 20px;
+}
+
+.wtd-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.wtd-stat {
+  flex: none;
+  display: inline-flex;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wtd-seg {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.wtd-seg-btn {
+  border: 0;
+  padding: 3px 10px;
+  background: none;
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.wtd-seg-btn[aria-pressed="true"] {
+  background: var(--c-text);
+  color: var(--c-surface);
+}
+
+.wtd-copy {
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- dialog body: states + banners */
+.wtd-plaintext {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+.wtd-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  overscroll-behavior: contain;
+  min-height: 160px;
+}
+
+.wtd-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  min-height: 200px;
+  padding: var(--sp-4);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+.wtd-state-icon {
+  color: var(--c-text-3);
+}
+
+.wtd-state-title {
+  margin: 0;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.wtd-state-text {
+  margin: 0;
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.wtd-state-retry {
+  margin-top: var(--sp-1);
+}
+
+.wtd-spinner {
+  width: 24px;
+  height: 24px;
+  color: var(--c-primary);
+  animation: wtd-spin 1s linear infinite;
+}
+
+@keyframes wtd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wtd-spinner {
+    animation: none;
+  }
+}
+
+.wtd-banner {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- diff rows (§3.4/§3.5/§3.7) */
+.wtd-rows {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  min-width: 480px; /* below this the panel body scrolls horizontally instead of crushing */
+}
+
+.wtd-row {
+  display: grid;
+  align-items: stretch;
+}
+
+.wtd-rows[data-mode="split"] .wtd-row {
+  grid-template-columns: 4.5ch minmax(0, 1fr) 4.5ch minmax(0, 1fr);
+}
+
+.wtd-rows[data-mode="unified"] .wtd-row {
+  grid-template-columns: 4.5ch 4.5ch 2ch minmax(0, 1fr);
+}
+
+.wtd-cell {
+  min-width: 0;
+}
+
+.wtd-span {
+  grid-column: 1 / -1;
+  padding: 2px var(--sp-2);
+}
+
+/* §4.3 split side heads — sticky at the body's scroll top. */
+.wtd-split-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.wtd-split-head .wtd-span {
+  padding: 3px var(--sp-2);
+}
+
+.wtd-split-head .wtd-span + .wtd-span {
+  grid-column: 3 / 5;
+  border-left: 1px solid var(--c-border);
+}
+
+.wtd-split-head .wtd-span:first-child {
+  grid-column: 1 / 3;
+}
+
+.wtd-ln {
+  padding: 0 4px 0 2px;
+  text-align: right;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  user-select: none; /* §4.3: line numbers are not part of a copied line */
+  -webkit-user-select: none;
+}
+
+/* the split halves' divider rides the right half's first cell */
+.wtd-rows[data-mode="split"] .wtd-row > .wtd-cell:nth-child(3) {
+  border-left: 1px solid var(--c-border);
+}
+
+.wtd-tx {
+  padding: 0 var(--sp-2) 0 6px;
+  white-space: pre-wrap; /* D10: long lines wrap inside their own row — both halves stay
+                            equal-height because one element carries the whole row */
+  overflow-wrap: anywhere;
+}
+
+.wtd-rows[data-mode="split"] .wtd-row > .wtd-tx:nth-child(2) {
+  padding-right: var(--sp-2);
+}
+
+.wtd-cell.wtd-del {
+  background: var(--diff-del-soft);
+}
+
+.wtd-cell.wtd-add {
+  background: var(--diff-add-soft);
+}
+
+.wtd-cell.wtd-empty {
+  background: var(--c-surface-2); /* mockup's paired empty slot */
+}
+
+.wtd-tx.is-del {
+  background: var(--diff-del-soft);
+}
+
+.wtd-tx.is-add {
+  background: var(--diff-add-soft);
+}
+
+.wtd-sign {
+  text-align: center;
+  color: var(--c-text-3);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.wtd-sign.is-del {
+  color: var(--c-danger);
+}
+
+.wtd-sign.is-add {
+  color: var(--st-done);
+}
+
+.wtd-fileh {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+  border-top: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.wtd-hunk {
+  background: var(--c-info-soft);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.wtd-cr {
+  color: var(--c-text-3); /* §3.7: a trailing \r renders as the dim ␍ glyph */
+}
+
+.wtd-noeol {
+  padding-left: var(--sp-2);
+  color: var(--c-text-3);
+  font-style: italic;
+}
+
+.wtd-more-row {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-2);
+  position: sticky;
+  bottom: 0;
+  background: var(--c-surface);
+  border-top: 1px solid var(--c-border);
+}
+
+/* §4.4 mobile: line-number columns shrink to the plan's 3.5ch; file entries keep a ≥40px
+ * touch target; the desktop min-width gives way so long lines WRAP instead of forcing a
+ * horizontal scroll on a phone (mockup W4: full-screen unified, no horizontal panning). */
+@media (max-width: 767px) {
+  .wtd-rows {
+    min-width: 0;
+  }
+
+  .wtd-rows[data-mode="split"] .wtd-row {
+    grid-template-columns: 3.5ch minmax(0, 1fr) 3.5ch minmax(0, 1fr);
+  }
+
+  .wtd-rows[data-mode="unified"] .wtd-row {
+    grid-template-columns: 3.5ch 3.5ch 1.5ch minmax(0, 1fr);
+  }
+
+  .wtd-file {
+    min-height: 40px;
+  }
+}

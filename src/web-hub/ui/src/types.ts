@@ -19,7 +19,7 @@ import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
 import type { FleetRowWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
-import type { ConnState, PreviewTransport } from "./transport/types.js";
+import type { ConnState, PreviewTransport, WorktreeDiffTransport } from "./transport/types.js";
 import type {
   RemoveAgentOutcome,
   RemoveTarget,
@@ -323,6 +323,11 @@ export interface HubHandle {
    * `usePreview`'s scope derivation (`previewScopeOf`'s `hasTransport`) yields `null` without
    * it and every path in the transcript renders as plain text. */
   readonly preview?: PreviewTransport;
+  /** worktree-diff plan v3.1 §4.6 (D4/D5): the `GET /api/worktree-diff/*` call surface.
+   * Optional per the frozen-types convention (additive member only) — `useHub` provides it
+   * iff the transport does; `WorktreePanel`'s scope derivation (`wtdiffScopeOf`'s
+   * `hasTransport`) yields `null` without it and the panel stays byte-identical (I8). */
+  readonly worktreeDiff?: WorktreeDiffTransport;
   /** fleet-drawer plan §6.5 (F5): run-transcript selection + paging. Optional per the
    * frozen-types convention — `useHub` always provides both; component-level fakes may omit
    * them (the drawer then renders its not-connected state). */
