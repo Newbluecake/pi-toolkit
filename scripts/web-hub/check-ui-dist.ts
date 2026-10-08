@@ -58,8 +58,12 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // modal + per-spawn SpawnModelField, the settings card pulls @sinclair/typebox's runtime
 // parser (`parseSpawnModelRef` via protocol) into the bundle, plus popover clamp/flip and
 // the full-page login; release gate measured 177,597 B gz, ~13 KiB slack on top.
+// bumped to 208 KiB by worktree-diff D4 (2026-10-08) — the token/password wtdiff transport
+// (~460 lines, mostly duplicated boilerplate that gzips well) lands at 194,621 B gz,
+// 61 B over the old budget; the ~13 KiB of slack on top absorbs D5 (diff dialog components
+// + wtdiff.js logic becoming reachable) landing without another immediate bump.
 // Precise per-build numbers drift with in-flight packages — re-measure before the next bump.
-const JS_BUDGET_GZIP_BYTES = 190 * 1024;
+const JS_BUDGET_GZIP_BYTES = 208 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}
