@@ -444,6 +444,11 @@ const drawerMode = useFleetDrawerMode(window).mode;
 const { open: drawerOpen, toggle: toggleDrawerState, close: closeDrawerState } = useFleetDrawerOpen(drawerMode);
 const hasFleet = computed(() => props.agent.fleet.length > 0);
 const selectedRunId = computed(() => props.agent.runSel ?? null);
+/** 2026-10-08 (user field report: fresh session's composer sat in a squashed left column):
+ * `data-drawer-open` must only be set when the drawer will actually RENDER (the `v-if` below
+ * gates on `hasFleet || selectedRunId !== null`). The persisted docked-open pref defaults to
+ * true, so without this gate a fleet-less session got the docked grid's `1fr var(--drawer-w)`
+ * tracks with an unmounted drawer — a dead 480-760px column on the pane's right side. */
 
 /** 退选正在看的 run(「没人看就不推」,§2;transport 拆除在 useHub 里)。所有关闭入口统一
  * 走这个语义 —— Esc/外点/关闭按钮(onCloseDrawer)和摘要行按钮的关方向(onToggleDrawer)
@@ -469,7 +474,7 @@ function onCloseDrawer(): void {
     class="detail"
     aria-labelledby="detail-title"
     :data-drawer="drawerMode"
-    :data-drawer-open="drawerOpen || undefined"
+    :data-drawer-open="(drawerOpen && (hasFleet || selectedRunId !== null)) || undefined"
   >
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 

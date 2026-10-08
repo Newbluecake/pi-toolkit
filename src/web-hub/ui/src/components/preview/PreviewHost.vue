@@ -149,7 +149,13 @@ function onKeydown(ev: KeyboardEvent): void {
         <header class="preview-header">
           <AppIcon name="file" class="icon-sm preview-header-icon" />
           <span class="preview-title" translate="no">{{ basename }}</span>
-          <span class="preview-path" :title="path" translate="no">{{ path }}</span>
+          <!-- `<bdi dir="ltr">` isolates the path from `.preview-path`'s `direction: rtl`
+               front-ellipsis trick: without it the Unicode bidi algorithm reorders the
+               absolute path's LEADING "/" to the visual end (user field report 2026-10-08:
+               the header showed "…Tf4uhhFX.png/"). The stored/requested path is unaffected. -->
+          <span class="preview-path" :title="path" translate="no"
+            ><bdi dir="ltr">{{ path }}</bdi></span
+          >
           <button
             class="btn btn-ghost btn-icon preview-close"
             type="button"
