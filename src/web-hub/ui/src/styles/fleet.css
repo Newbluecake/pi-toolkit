@@ -358,7 +358,11 @@ details[open] > summary.run .chev {
 /* ================================================================ desktop >1024 (viewport): single-line rows */
 @media (min-width: 1025px) {
   .run {
-    grid-template-columns: 18px 20px minmax(120px, 1.2fr) minmax(0, 2fr) auto auto;
+    /* 2026-10-08 field report (drawer user-resized to ~650px): name floor 120px + activity 2fr
+     * starved the name column — "dev:p1a-admission"+type chip (~200px of identity info) clipped
+     * to "dev:p1a-a…"/"gener…" while the activity prose sat on 208px it mostly ellipsizes
+     * anyway. Identity wins over prose: name floor 220px and the fr ratio flips to 1.5:1. */
+    grid-template-columns: 18px 20px minmax(220px, 1.5fr) minmax(0, 1fr) auto auto;
     grid-template-areas: "chev icon name activity nums toggle";
     min-height: 36px;
     padding: 4px var(--sp-2);
@@ -381,7 +385,7 @@ details[open] > summary.run .chev {
  * (而不是 viewport)重新收紧/降级,写在文件尾用源码顺序 + 同优先级覆盖上面按 viewport 定的档位
  * ——不支持容器查询的旧浏览器优雅退化回上面的 viewport 档(功能仍可用,只是窄 viewport 下的
  * docked/overlay 可能回退到旧的挤压表现)。 */
-@container (max-width: 559px) {
+@container (max-width: 599px) {
   .run {
     grid-template-columns: 18px 20px minmax(0, 1fr) auto auto;
     grid-template-areas:
