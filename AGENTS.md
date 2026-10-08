@@ -357,22 +357,37 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   to a read-only `BashJobsPanel` on the web detail header. Command + log tail are kept per the U1 sole-LAN-user
   ruling — `agent/redact.ts`'s secret scrubbing is HYGIENE ONLY, never a security boundary. Design:
   `docs/dev/web-hub/bash-jobs-panel-plan.md`.
-  **Content preview (web-hub-preview plan v3, setting `webHub.preview` — `"on" | "loopback" | "off"`, default
+  **Content preview (web-hub-preview plan v3 + dir-plan v3.1, setting `webHub.preview` — `"on" | "loopback" | "off"`, default
   `"on"` per the 2026-10-05 user ruling U1: sole LAN user behind password auth, risk explicitly accepted; change
   is non-live — `/reload` then `/webhub restart`)**: an absolute path in a settled message (assistant text, user
   bubble, or a ToolCard's Input section, all rendered through `ui/src/components/preview/PathText.vue` — never
   `markdown.js`; streaming replies stay plain text until they settle) opens a read-only dialog via the single
   endpoint `GET /api/preview` (`X-PWH: 1`; raw bytes + `X-PWH-Preview-*` metadata headers; no new SSE/frames).
-  Two admission classes: **upload attachments** (`hub/uploads.ts`'s `openForPreview`: structural re-check of the
-  generated `<uploadId>.<ext>` / legacy `<id>/<safeName>` layouts, sha256 re-verification) are shared with the
-  **session's viewers** (U3 — revises upload-plan §5.1's "uploader-only" read rule; writes/abort/dedup/pinning
-  stay principal-bound, recorded as an appended note in that plan), and **cwd files** (`hub/preview/admit.ts`:
-  the session.cwd subtree — home as cwd allowed per U2, guarded by the virtual-root + literal denylist — plus
-  realpath×2, dev/ino re-check, `O_NOFOLLOW` open, `/proc/self/fd` re-verification). Caps: text 256 KiB (UTF-8
+  **Admission (dir-plan U4, 2026-10-08): uploads + ANY absolute path** — an authenticated user (LAN included) may
+  read any file the hub uid can read that the denylist does not name, and browse directories; that boundary is
+  deliberately accepted (U1/U4), and the denylist (`hub/preview/admit.ts`, `PREVIEW_DENYLIST_VERSION`) is a
+  best-effort credential BLACKLIST, not a whitelist — changing a rule means bumping the version, refreshing
+  `tests/fixtures/preview-denylist-corpus.json` in the same PR, and running `node scripts/dev/preview-denylist-audit.mjs`
+  before release. Defence stack on every fs-class request (all steps bounded, zombie-IO tracker ⇒ 503 busy):
+  literal denylist + virtual roots (zero-fs) → realpath → denylist/virtual-root re-check on the resolved path
+  (home/agentDir checked in literal AND canonical forms — the startup `resolvePreviewDenyContext`, degraded
+  members backstopped by home-independent twin rules) → stat → `O_NOFOLLOW` open → fstat dev/ino →
+  `/proc/self/fd` re-check. **Upload attachments** (`hub/uploads.ts`'s `openForPreview`: structural re-check of
+  the generated `<uploadId>.<ext>` / legacy `<id>/<safeName>` layouts, sha256 re-verification) are shared with
+  the **session's viewers** (U3 — revises upload-plan §5.1's "uploader-only" read rule; writes/abort/dedup/pinning
+  stay principal-bound, recorded as an appended note in that plan). **Directories**: `&dir=1` opt-in answers a
+  JSON listing (`X-PWH-Preview-Kind: dir`) — dirs-first sort, dotfiles dimmed but listed, denylist hits vanish
+  from both entries and counts, triple caps (scan 10 000 → entries 1 000 → body 512 KiB); the dialog drills down
+  (in-dialog back/up history, cap 64) and each child click re-runs the full admission chain. Caps `preview.abs.v1`
+  (abs-path recognition) and `preview.dir.v1` (dir listing + recognition; NOT declared on platforms without
+  `/proc/self/fd` — fail-closed, directories stay 415 there). Markdown files (`.md`/`.markdown`) render by
+  default with a source-code toggle (reset per open, path-keyed; parser stays `v-html`-free with a 20 000-node
+  budget degrading to source). File caps: text 256 KiB (UTF-8
   boundary), images 16 MiB loopback / 4 MiB LAN / 40 MP (unparseable dims ⇒ reject; touch clients budget 20 MP);
-  preview reads never pin or extend upload TTLs. `mode:"loopback"` keeps the endpoint LAN-absent (404, byte-
+  preview reads never pin or extend upload TTLs; the audit line's `cls` is `upload|cwd|abs` (literal prefix,
+  stats only — never a path or entry name). `mode:"loopback"` keeps the endpoint LAN-absent (404, byte-
   identical to `off` on LAN) while loopback keeps previewing. Design + real-device acceptance:
-  `docs/dev/web-hub-preview/{plan,acceptance}.md`.
+  `docs/dev/web-hub-preview/{plan,dir-plan,acceptance}.md`.
   **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
   the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
   planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product

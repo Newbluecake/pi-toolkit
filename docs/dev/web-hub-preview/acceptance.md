@@ -255,3 +255,145 @@ LAN/loopback 各抽：未认证（LAN 直连 ⇒ **404** 而非 401，现状不�
 
 - 2026-10-XX（待真机首轮）：桌面 loopback A1–A5 ☐；手机 LAN B1–B8 ☐；C1–C6 ☐。
   自动化基线：PV1–PV7 各包测试 + 全局闸门（format:check / typecheck / test / build / build:web）全绿。
+
+---
+
+## 7. dir-plan v3.1 增补——E/D/M 系列（U4 全局准入 · 目录预览 · Markdown 渲染）
+
+> 配套：`dir-plan.md` v3.1（P0–P4 已全部合入；自动化基线含 `tests/web-hub/http/preview-e2e.test.ts`
+> 的 P4 六例——cwd 外预览 / HTTP 级下钻 / `.ssh` 隐藏不计数 / gzip 解码 / `/proc/self/environ` 403 /
+> symlink home 双拼法 403）。本系列是 A（目录）、B（Markdown）、C（U4 全局准入）的真机终裁；
+> 判读口径 = `dir-plan.md` §11.1 的边界声明（已认证用户可读 hub uid 可读且未命中 denylist 的任意
+> 文件并浏览目录；denylist 是尽力而为的凭据黑名单）。前置沿用 §1（隔离 HOME / 正规安装 / preview "on"）。
+
+### 7.0 增补素材（在 §1 的会话 cwd `~/acc-pv` 里执行）
+
+```sh
+mkdir -p ~/acc-pv/dirproj/docs ~/acc-pv/dirproj/src ~/acc-pv/.ssh
+printf '# dirproj\n\nsample\n' > ~/acc-pv/dirproj/readme.md
+printf 'node_modules\n' > ~/acc-pv/dirproj/.gitignore
+printf 'design notes\n' > ~/acc-pv/dirproj/docs/design.md
+printf 'fake-key-material\n' > ~/acc-pv/.ssh/id_ed25519        # 拒绝面样本（验收后删除）
+printf 'acc-log-line\n' > /tmp/x.log                            # E1 的 cwd 外文件之二
+mkdir -p ~/acc-pv/hugedir && for i in $(seq 1 20000); do : > ~/acc-pv/hugedir/f$i.txt; done   # D4（≈15 s）
+python3 - <<'PY'
+open("acc-pv/md-big.md", "w").write(("## 段落\n\n- 项目一\n- 项目二\n\n" + "正文 " * 40 + "\n\n") * 1000)  # ≈307 KiB > 256 KiB，M3
+open("acc-pv/md-patho.md", "w").write("*a " * 87000)                                    # ≈256 KiB 病态强调，M5
+open("acc-pv/md-xss.md", "w").write("# x\n\n<script>alert(1)</script>\n\n![img](x)\n\n[a](javascript:alert(2))\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n")  # M1/M4
+PY
+mkdir -p ~/acc-pv/longnames && python3 -c "
+import os
+for i in range(600):
+    open(os.path.expanduser('~/acc-pv/longnames/') + ('n%03d' % i) + 'x' * 900, 'w').close()"   # D7：单名字 ≈900 B
+```
+
+### 7.1 E 系列——U4 全局准入（cwd 外任意绝对路径）
+
+#### E1 cwd 外可预览 / 拒绝面不可点但 GET 有鉴别的 403
+
+| 步  | 操作                                                                                         | 超时 | 预期                                                                                                                |
+| --- | -------------------------------------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------- |
+| 1   | 发：`用 read 读取 /etc/hostname 和 /tmp/x.log，然后在回复里写出它们的绝对路径`，点击两条路径 | 60s  | 两条都呈可点样式并弹出文本预览（U4：cwd 与 home 之外）                                                              |
+| 2   | 同法让模型写出 `/etc/shadow`、`~/.ssh/id_ed25519`、`/proc/self/environ`                      | 60s  | 三者**保持纯文本**：`~` 拼法不识别；另两条被 probe 折叠为 missing（「先探测后标记」不点亮）                         |
+| 3   | 桌面终端带 cookie 直接 `GET /api/preview?…path=…` 三者                                       | —    | 全部 **403** `E_PREVIEW_DENIED`（依次 reason `denylist` / `denylist` / `virtual-fs`）——错误码区分是有意保留（§2.8） |
+
+#### E2 LAN 同宽（U1）
+
+手机 LAN（`mode:"on"`）重复 E1 全部三步，逐条周同一预期；再按 B7 的步骤切 `mode:"loopback"`
+⇒ 手机端**所有**预览路径回到纯文本、`/api/preview*` 404（与 off 逐字节一致），桌面 loopback 不受影响。
+
+#### E3 斜杠命令不成候选
+
+发一条同时提到 `/reload` 与 `/help` 的消息（如「帮我解释 /reload 和 /help」）⇒ 两者保持纯文本
+（识别层 ≥2 段冻结口径 + 斜杠命令排除；一条段路径永远不是候选）。
+
+#### E4 存在性 oracle 与审计（有意保留的区分）
+
+LAN 上（`ua` 登录）依次直接 GET：不存在的 `/tmp/pwh-no-such-file`、字面 denylist 的
+`/etc/shadow`、以及不可读文件（`printf x > ~/acc-pv/noread.txt && chmod 000 ~/acc-pv/noread.txt`）
+⇒ 分别 **404 / 403 denylist / 403 unreadable**。再点开 `~`（home 目录本身）⇒ 清单与计数里都
+**看不到** `.ssh`/`.gnupg`/`.env`，只有静态脚注「受保护条目不显示」。最后
+`grep '"preview"' ~/.pi/agent/web-hub/hub.log | tail -5` ⇒ 审计行只有 `cls/kind/code/reason/total`
+等统计字段与 12 位 hex `pathTag`，**无任何路径或文件名**。验收后 `chmod 644 && rm ~/acc-pv/noread.txt`。
+
+#### E5 uid 0 告警
+
+普通用户运行 hub：`grep preview.root_uid ~/.pi/agent/web-hub/hub.log` ⇒ 无输出（root 场景由
+`hub-preview.test.ts` 自动化覆盖，真机不要求）。
+
+### 7.2 D 系列——目录预览（A）
+
+#### D1 目录可点 ⇒ 清单
+
+让模型写出 `/home/<user>/acc-pv/dirproj`（再补一条尾斜杠写法 `/home/<user>/acc-pv/dirproj/`）⇒
+两种写法都可点；点击 ⇒ 目录清单：目录在前（`docs`、`src`），文件按名排序，`.gitignore` 在列但置灰；
+头部有「返回/上级」；每行显示名称/类型/大小/mtime。
+
+#### D2 相对目录候选（dirs 识别）
+
+ToolCard Input 区的 `"path": "src/components"`（引号包住）、用户气泡与助手消息里的
+`` `src/components` ``（反引号包住）都可点；散文里的 `and/or` **不可点**；裸写的 `src/components`
+（无引号/反引号包住）也不可点。
+
+#### D3 下钻 / 返回 / 上级
+
+点 `dirproj` ⇒ 点 `docs` ⇒ 点 `design.md` 打开文件 ⇒ 「返回」回到 `docs` 清单 ⇒ 再「返回」回到
+`dirproj`；「上级」从 `dirproj` 一路可走到 `/home/<user>`、再到 `/home`，之后置灰（`/` 本身不可列）。
+
+#### D4 大目录三重上限（scan 层）
+
+点 `~/acc-pv/hugedir`（2 万文件）⇒ 显示「只读取了前 10 000 项」（`limits.scan`），本地盘 <1 s 出清单。
+
+#### D5 home 目录的隐藏面
+
+点 `~` 路径（home 作为 cwd 的会话或 U2 场景）⇒ 清单里没有 `.ssh`/`.gnupg`/`.env`，**计数里也没有**
+（total 不含被过滤项），只有静态脚注；其余目录（如 `.config`）正常列出（中间目录不隐藏，只隐藏命中规则的条目）。
+
+#### D6 旧标签页兼容（cap 门控）
+
+hub 升级前加载的旧 bundle 标签页（或 DevTools 里手工剔除 `preview.dir.v1` 后重连）：目录路径
+仍纯文本，**无错误面板**（probe 对未 opt-in 的目录答 missing；`dir=1` 永不发出）。
+
+#### D7 bytes 层截断
+
+点 `~/acc-pv/longnames`（600 × ≈900 B 名字）⇒ 显示「名字过长，只显示前 K 项」（`limits.bytes`，
+K < 600）；清单可正常浏览、返回。
+
+### 7.3 M 系列——Markdown 渲染（B）
+
+#### M1 默认渲染 + 切换
+
+点开本仓库 `README.md`（或 `md-xss.md`）⇒ 默认**渲染**视图（表格、任务列表、围栏代码高亮）；
+工具栏切「源码」⇒ `HighlightedCode` 的 markdown 高亮；关闭后重新打开 ⇒ 仍是渲染视图（每次打开重置）。
+
+#### M2 md 内路径的对话框内导航
+
+在渲染视图里点击引用的源码路径（如 `src/index.ts`）⇒ 在**同一对话框内**打开该文件 ⇒ 「返回」
+回到渲染视图（B6/M2 的栈语义）。
+
+#### M3 截断的 md
+
+点 `md-big.md`（≈300 KiB）⇒ 截断徽标 + 「结尾可能不完整」提示；末尾无残缺半行（截断行被剥）；
+「复制」得到的是已显示部分的源码。
+
+#### M4 字面化安全
+
+`md-xss.md` 渲染视图里 `<script>alert(1)</script>`、`![img](x)`、`[a](javascript:alert(2))` 全部
+以字面文本显示；无 `v-html`（源码扫描钉住）、无网络请求。
+
+#### M5 病态 md 不卡顿
+
+点 `md-patho.md`（`"*a "`×≈87k，≈256 KiB）⇒ <0.5 s 出结果（渲染或自动降级源码 + 提示），
+滚动不卡。
+
+### 7.4 发布前——denylist audit（必做）
+
+```sh
+node scripts/dev/preview-denylist-audit.mjs          # 只读；可选 --deep（6 层）
+```
+
+输出只进本地终端：列出「当前 uid 可读、denylist 未拒、名字命中凭据启发式
+（token|secret|credential|passw|auth|.pem|.key|.cookies）」的文件。逐行人工判断：真凭据 ⇒
+`src/web-hub/hub/preview/admit.ts` 加规则 + **bump `PREVIEW_DENYLIST_VERSION`** + 同 PR 刷新
+`tests/fixtures/preview-denylist-corpus.json`（`denylist-corpus.test.ts` 钉版本一致，改规则不更新
+语料直接红）。`OK: no readable credential-heuristic file…` 才算过。

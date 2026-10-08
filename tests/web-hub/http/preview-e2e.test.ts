@@ -16,12 +16,20 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
-import { PREVIEW_PATH, PREVIEW_TEXT_MAX_BYTES } from "../../../src/web-hub/protocol/preview.js";
+import {
+  parsePreviewDirListing,
+  PREVIEW_DIR_BODY_MAX_BYTES,
+  PREVIEW_DIR_QUERY,
+  PREVIEW_PATH,
+  PREVIEW_TEXT_MAX_BYTES,
+} from "../../../src/web-hub/protocol/preview.js";
+import { GZIP_MIN_BYTES } from "../../../src/web-hub/hub/gzip.js";
 import { webHubUploadsDir } from "../../../src/web-hub/protocol/paths.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
@@ -224,6 +232,9 @@ interface Live {
 
 interface Kit {
   home: string;
+  /** dir-plan §5 P4: for the `symlinkHome` kit — the realpath the `home` symlink points at
+   * (equal to `home` for every other kit). */
+  realHome: string;
   cwd: string;
   uploadsRoot: string;
   legacyPath: string | undefined;
@@ -235,7 +246,7 @@ interface Kit {
   upload(content: Buffer, over?: { name?: string; lanCookie?: string }): Promise<{ id: string; path: string }>;
   preview(
     p: string,
-    over?: { sessionId?: string; agentKey?: string; headers?: Record<string, string> },
+    over?: { sessionId?: string; agentKey?: string; headers?: Record<string, string>; dir?: boolean },
   ): Promise<RawResponse>;
   previewCollect(
     p: string,
@@ -245,6 +256,7 @@ interface Kit {
       onData?: (n: number) => void;
       pauseAfterFirstChunk?: boolean;
       throttleMs?: number;
+      dir?: boolean;
     },
   ): Promise<CollectResult>;
   /** Agent switches to a new session (a second `session` frame) — resolves once the registry
@@ -274,8 +286,19 @@ async function freeLanPort(): Promise<number> {
   });
 }
 
-async function startKit(opts: { lan?: boolean; legacy?: Buffer } = {}): Promise<Kit> {
-  const home = mkdtempSync(join(tmpdir(), "pwh-preview-e2e-"));
+async function startKit(opts: { lan?: boolean; legacy?: Buffer; symlinkHome?: boolean } = {}): Promise<Kit> {
+  // dir-plan §5 P4 (symlink-home case): the hub's `config.home` may itself BE a symlink —
+  // exactly §2.6's scenario, where a literal-only deny context would miss every canonical-
+  // spelled request. `realHome` is the realpath; the hub sees only `home` (the link).
+  const realHome = mkdtempSync(join(tmpdir(), "pwh-preview-e2e-"));
+  const home =
+    opts.symlinkHome === true
+      ? (() => {
+          const link = join(dirname(realHome), `${basename(realHome)}-link`);
+          symlinkSync(realHome, link);
+          return link;
+        })()
+      : realHome;
   const cwd = join(home, "work");
   mkdirSync(cwd, { recursive: true });
   writeFileSync(join(cwd, "probe.txt"), "probe");
@@ -309,6 +332,7 @@ async function startKit(opts: { lan?: boolean; legacy?: Buffer } = {}): Promise<
 
   const kit: Kit = {
     home,
+    realHome,
     cwd,
     uploadsRoot,
     legacyPath,
@@ -370,12 +394,12 @@ async function startKit(opts: { lan?: boolean; legacy?: Buffer } = {}): Promise<
     },
     preview(
       p: string,
-      over: { sessionId?: string; agentKey?: string; headers?: Record<string, string> } = {},
+      over: { sessionId?: string; agentKey?: string; headers?: Record<string, string>; dir?: boolean } = {},
     ): Promise<RawResponse> {
       const { port, cookie } = kit.live();
       return rawRequest(port, {
         method: "GET",
-        path: `${PREVIEW_PATH}?agentKey=${encodeURIComponent(over.agentKey ?? AGENT_KEY)}&sessionId=${encodeURIComponent(over.sessionId ?? kit.sessionId)}&path=${encodeURIComponent(p)}`,
+        path: `${PREVIEW_PATH}?agentKey=${encodeURIComponent(over.agentKey ?? AGENT_KEY)}&sessionId=${encodeURIComponent(over.sessionId ?? kit.sessionId)}&path=${encodeURIComponent(p)}${over.dir === true ? `&${PREVIEW_DIR_QUERY}=1` : ""}`,
         headers: { "X-PWH": "1", Cookie: cookie, ...(over.headers ?? {}) },
       });
     },
@@ -387,11 +411,12 @@ async function startKit(opts: { lan?: boolean; legacy?: Buffer } = {}): Promise<
         onData?: (n: number) => void;
         pauseAfterFirstChunk?: boolean;
         throttleMs?: number;
+        dir?: boolean;
       } = {},
     ): Promise<CollectResult> {
       const { port, cookie } = kit.live();
       return collect(port, {
-        path: `${PREVIEW_PATH}?agentKey=${encodeURIComponent(AGENT_KEY)}&sessionId=${encodeURIComponent(over.sessionId ?? kit.sessionId)}&path=${encodeURIComponent(p)}`,
+        path: `${PREVIEW_PATH}?agentKey=${encodeURIComponent(AGENT_KEY)}&sessionId=${encodeURIComponent(over.sessionId ?? kit.sessionId)}&path=${encodeURIComponent(p)}${over.dir === true ? `&${PREVIEW_DIR_QUERY}=1` : ""}`,
         headers: { "X-PWH": "1", Cookie: cookie, ...(over.headers ?? {}) },
         ...(over.onData === undefined ? {} : { onData: over.onData }),
         ...(over.pauseAfterFirstChunk === undefined ? {} : { pauseAfterFirstChunk: over.pauseAfterFirstChunk }),
@@ -438,6 +463,9 @@ async function startKit(opts: { lan?: boolean; legacy?: Buffer } = {}): Promise<
       kit.destroyAgent();
       if (current !== undefined) await current.hub.close("test");
       current = undefined;
+      // `home` may itself be a symlink (symlinkHome kit) — rmSync never follows it, so the
+      // realpath tree needs its own explicit removal or the tmpdir would leak it.
+      if (realHome !== home) rmSync(realHome, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
     },
   };
@@ -742,4 +770,227 @@ describe("PV7 e2e — close destroys an in-flight stream", () => {
     expect(r.bytes.length).toBeLessThan(Number(r.headers["content-length"])); // ...body destroyed
     expect(r.cleanEnd).toBe(false);
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// P4 (dir-plan v3.1 §5 P4) — the preview EXTENSION's end-to-end integration:
+// U4 global admission (cwd-external files), the HTTP-level directory drill-down
+// (dir=1 listing → file inside), denylist surfaces (a .ssh entry vanishing from
+// the listing AND its count; /proc/self/environ refused zero-fs), the dir JSON
+// surviving the gzip negotiation, and §2.6's symlink-home auth.json under BOTH
+// spellings — every case against the REAL hub + REAL filesystem, no scripted fakes.
+// The PV7 cases above stay untouched; these ride the same harness.
+// ---------------------------------------------------------------------------
+
+describe("P4 e2e — U4: files outside the session cwd preview (dir-plan §5 P4 / §6 E1)", () => {
+  it("a system file far outside home AND cwd (/etc/hostname) previews 200 byte-exact", async () => {
+    const k = await kit();
+    const disk = readFileSync("/etc/hostname");
+    const r = await k.previewCollect("/etc/hostname");
+    previewOk(r);
+    expect(r.headers["x-pwh-preview-kind"]).toBe("text");
+    expect(r.headers["x-pwh-preview-truncated"]).toBe("0");
+    expect(sha256(r.bytes)).toBe(sha256(disk));
+    expect(r.cleanEnd).toBe(true);
+  }, 30_000);
+
+  it("an absolute file outside cwd in a sibling tmpdir (not under home) previews 200", async () => {
+    const k = await kit();
+    const outside = mkdtempSync(join(tmpdir(), "pwh-preview-e2e-out-"));
+    try {
+      const body = "outside-cwd absolute-path body Δ中文Δ\n";
+      const p = join(outside, "x.log");
+      writeFileSync(p, body);
+      const r = await k.preview(p);
+      previewOk(r);
+      expect(r.headers["x-pwh-preview-kind"]).toBe("text");
+      expect(r.body).toBe(body);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+describe("P4 e2e — directory drill-down over HTTP: dir=1 listing → the file inside (dir-plan §5 P4 / §6 D1–D3)", () => {
+  it(
+    "dir=1 answers 200 JSON (kind:dir, dirs-first sorted, dotfiles listed) and the entries " +
+      "drill: subdirectory lists again, the file inside fetches 200 without the opt-in",
+    async () => {
+      const k = await kit();
+      const root = join(k.cwd, "proj");
+      mkdirSync(join(root, "docs"), { recursive: true });
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "readme.md"), "# proj\n\nreadme body\n");
+      writeFileSync(join(root, ".gitignore"), "node_modules\n");
+      writeFileSync(join(root, "docs", "design.md"), "design notes Δ\n");
+
+      // level 1: the listing (dirs first — casefolded, codepoint tiebreak; dotfiles shown)
+      const r = await k.preview(root, { dir: true });
+      previewOk(r);
+      expect(r.headers["x-pwh-preview-kind"]).toBe("dir");
+      expect(r.headers["cache-control"]).toBe("no-store");
+      expect(r.headers["cross-origin-resource-policy"]).toBe("same-origin");
+      const listing = parsePreviewDirListing(JSON.parse(r.body), Buffer.byteLength(r.body));
+      expect(listing).not.toBeNull();
+      expect(listing!.entries.map((e) => `${e.type}:${e.name}`)).toEqual([
+        "dir:docs",
+        "dir:src",
+        "file:.gitignore",
+        "file:readme.md",
+      ]);
+      expect(listing!.total).toBe(4);
+      expect(listing!.scanned).toBe(4);
+      expect(listing!.complete).toBe(true);
+      expect(listing!.truncated).toBe(false);
+      expect(listing!.limits).toEqual({ scan: false, entries: false, bytes: false });
+      // file rows carry their lstat facts (size present; mtime floored to an integer)
+      const readme = listing!.entries.find((e) => e.name === "readme.md")!;
+      expect(readme.size).toBe("# proj\n\nreadme body\n".length);
+      expect(Number.isInteger(readme.mtimeMs!)).toBe(true);
+
+      // level 2: a subdirectory taken FROM the listing lists again
+      const sub = await k.preview(join(root, "docs"), { dir: true });
+      previewOk(sub);
+      expect(sub.headers["x-pwh-preview-kind"]).toBe("dir");
+      const subListing = parsePreviewDirListing(JSON.parse(sub.body), Buffer.byteLength(sub.body));
+      expect(subListing!.entries.map((e) => e.name)).toEqual(["design.md"]);
+
+      // the leaf: the file inside, fetched WITHOUT dir — the plain text preview
+      const file = await k.preview(join(root, "docs", "design.md"));
+      previewOk(file);
+      expect(file.headers["x-pwh-preview-kind"]).toBe("text");
+      expect(file.body).toBe("design notes Δ\n");
+
+      // and a directory WITHOUT the opt-in keeps the pre-P1b byte shape: 415 not-regular
+      const noOptIn = await k.preview(root);
+      expect(noOptIn.status).toBe(415);
+      expect(noOptIn.body).toBe('{"error":"E_PREVIEW_UNSUPPORTED","reason":"not-regular"}');
+    },
+    30_000,
+  );
+});
+
+describe("P4 e2e — denylist surfaces over the real hub (dir-plan §5 P4 / §6 E4·D5)", () => {
+  it(
+    "a .ssh entry vanishes from the listing AND its count (scanned sees it, total does not); " +
+      "a direct GET of the key inside answers 403 denylist",
+    async () => {
+      const k = await kit();
+      const garden = join(k.cwd, "secret-garden");
+      mkdirSync(join(garden, ".ssh"), { recursive: true });
+      writeFileSync(join(garden, ".ssh", "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n");
+      writeFileSync(join(garden, "ok.txt"), "public data\n");
+      writeFileSync(join(garden, "keep.md"), "also public\n");
+
+      const r = await k.preview(garden, { dir: true });
+      previewOk(r);
+      const listing = parsePreviewDirListing(JSON.parse(r.body), Buffer.byteLength(r.body));
+      expect(listing).not.toBeNull();
+      expect(listing!.entries.map((e) => e.name)).toEqual(["keep.md", "ok.txt"]); // .ssh absent…
+      expect(listing!.entries.some((e) => e.name === ".ssh")).toBe(false);
+      expect(listing!.scanned).toBe(3); // …though readdir DID read it…
+      expect(listing!.total).toBe(2); // …and it never counted (no hidden.denied oracle, §2.8)
+      expect(listing!.complete).toBe(true);
+
+      const denied = await k.preview(join(garden, ".ssh", "id_ed25519"));
+      expect(denied.status).toBe(403);
+      expect(denied.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"denylist"}');
+
+      // the .ssh DIRECTORY itself is equally refused — listing or not
+      const dirDenied = await k.preview(join(garden, ".ssh"), { dir: true });
+      expect(dirDenied.status).toBe(403);
+      expect(dirDenied.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"denylist"}');
+    },
+    30_000,
+  );
+
+  it("GET /proc/self/environ ⇒ 403 virtual-fs — the literal zero-fs step refuses it even though the file is readable", async () => {
+    const k = await kit();
+    const r = await k.preview("/proc/self/environ");
+    expect(r.status).toBe(403);
+    expect(r.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"virtual-fs"}');
+  }, 30_000);
+});
+
+describe("P4 e2e — gzip negotiation carries the dir JSON intact (dir-plan §5 P4)", () => {
+  it(
+    "a ≥2 KiB listing answered to Accept-Encoding: gzip decodes back through the UI parser; " +
+      "the same request without the offer stays identity",
+    async () => {
+      const k = await kit();
+      const big = join(k.cwd, "gzip-garden");
+      mkdirSync(big);
+      const names: string[] = [];
+      for (let i = 0; i < 40; i += 1) {
+        const name = `gzip-e2e-entry-with-a-deliberately-longish-name-${String(i).padStart(3, "0")}.log`;
+        writeFileSync(join(big, name), `body ${i}\n`);
+        names.push(name);
+      }
+
+      // no offer ⇒ identity, byte-identical JSON (the pre-gzip shape)
+      const identity = await k.previewCollect(big, { dir: true });
+      previewOk(identity);
+      expect(identity.headers["content-encoding"]).toBeUndefined();
+      const identityListing = parsePreviewDirListing(
+        JSON.parse(identity.bytes.toString("utf8")),
+        identity.bytes.length,
+      );
+      expect(identityListing).not.toBeNull();
+      expect(identityListing!.total).toBe(40);
+
+      // gzip offered (and the body over the 2 KiB floor) ⇒ compressed transport
+      const gz = await k.previewCollect(big, { dir: true, headers: { "Accept-Encoding": "gzip" } });
+      previewOk(gz);
+      expect(gz.headers["x-pwh-preview-kind"]).toBe("dir");
+      expect(gz.headers["content-encoding"]).toBe("gzip");
+      expect(String(gz.headers["vary"]).toLowerCase()).toBe("accept-encoding");
+      expect(gz.bytes.length).toBeLessThan(identity.bytes.length); // actually shipped compressed
+
+      // gunzip → JSON → the UI's own parser accepts it with the DECODED byteLength
+      const decodedBytes = gunzipSync(gz.bytes);
+      expect(decodedBytes.length).toBeGreaterThan(GZIP_MIN_BYTES); // proves the compressed regime
+      expect(decodedBytes.length).toBeLessThanOrEqual(PREVIEW_DIR_BODY_MAX_BYTES);
+      const decoded = JSON.parse(decodedBytes.toString("utf8")) as unknown;
+      const listing = parsePreviewDirListing(decoded, decodedBytes.length);
+      expect(listing).not.toBeNull();
+      expect(listing!.total).toBe(40);
+      expect(listing!.entries.map((e) => e.name)).toEqual(names); // already ascending (zero-padded)
+      expect(listing!.complete).toBe(true);
+    },
+    30_000,
+  );
+});
+
+describe("P4 e2e — symlink home: auth.json denied under BOTH spellings (dir-plan §5 P4 / §2.6)", () => {
+  it(
+    "a hub whose config.home is itself a symlink: the literal (via-link) and realpath (direct) " +
+      "requests for .pi/agent/auth.json both answer 403; a benign realpath file previews 200",
+    async () => {
+      const k = await kit({ symlinkHome: true });
+      expect(k.realHome).not.toBe(k.home); // the kit really booted the hub through the link
+      // the hub already created <home>/.pi/agent/web-hub through the link at boot; drop the
+      // credential next to it — under the REALPATH tree, reachable through BOTH spellings.
+      const agentDirReal = join(k.realHome, ".pi", "agent");
+      mkdirSync(agentDirReal, { recursive: true });
+      writeFileSync(join(agentDirReal, "auth.json"), '{"token":"must-never-preview"}');
+      const viaLink = join(k.home, ".pi", "agent", "auth.json");
+      const viaReal = join(agentDirReal, "auth.json");
+
+      const linkRead = await k.preview(viaLink);
+      expect(linkRead.status).toBe(403);
+      expect(linkRead.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"denylist"}');
+
+      const realRead = await k.preview(viaReal);
+      expect(realRead.status).toBe(403);
+      expect(realRead.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"denylist"}');
+
+      // control: the canonical spelling of a BENIGN file under the same home previews fine —
+      // the widened admission really serves realpath spellings; only the denylist refuses
+      const control = await k.preview(join(k.realHome, "work", "probe.txt"));
+      previewOk(control);
+      expect(control.headers["x-pwh-preview-kind"]).toBe("text");
+      expect(control.body).toBe("probe");
+    },
+    30_000,
+  );
 });

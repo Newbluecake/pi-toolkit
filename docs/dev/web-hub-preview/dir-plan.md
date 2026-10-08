@@ -757,3 +757,92 @@ Wave 5:  P4 集成 + 文档
 | 12  | 契约项   | `PreviewProbeKind`（含 `"dir"`）唯一来源 = `protocol/preview.ts` + `PREVIEW_PROBE_KINDS` 元组；三层同步（类型 import 链 / `types.test-d.ts` 类型契约 / hub 输出 ⇄ UI parser 运行时契约）；`dirs` 缺省收到 `dir` ⇒ probePost 单点折叠为 `missing`（理由：条目级错配不应整批降级，且对该客户端点击确实不可能成功），fetch 路径仍 `E_BAD_RESPONSE` 并说明差别；旧 parser 迁移 = typecheck（含 vue-tsc）+ UI source-scan 两条规则的编译验收                                                        | §1.1、§1.3 |
 
 **主会话裁定申请：无**（第一轮 14 条 + 第二轮 4 条全部在方案内闭合；#10 采用评审允许的「简化方案」处置）。
+
+---
+
+## 11. 落地修订记录（P0–P4 合入后由 P4 追加；只增不改）
+
+> 本节是收尾包（P4 集成 + 文档）落下的永久记录：上文 §0–§10 是评审定稿文本，一字未动。
+> 内容：U4 安全边界声明原文存档、各包落地时的裁定缝隙 / 打回修复 / 偏离裁定的最终形态，
+> 以及 P4 本包的落地摘要。各包提交：P0 `72c777e` · PM `65708f1` · P1a `ebc8f22` · P1b `deeed44` ·
+> P2 `bf3cd2b` · P3 `83d6fc0` · P4 本包。注意上表按包号排列，**实际合入顺序**是
+> P0 → PM → P1a → P2 → P3 → P1b（P1b 因 §11.3 的打回修复最后合入；P2/P3 与 P1b 的文件域
+> 互斥，次序交换无影响）。
+
+### 11.1 U4 安全边界声明（原文存档，§2.7 / §0.1 C10）
+
+> 「web-hub preview 允许已认证用户（含 LAN，U1）读取 hub 进程 uid 可读、且未命中 denylist
+> 的任意文件，并浏览目录。denylist 是**尽力而为的凭据黑名单**，不是白名单边界；它不完整
+> 是**已知的残余风险**（例如未知应用的 token 文件、浏览器以外的 cookie 库）。需要更严格
+> 时，使用 `webHub.preview:"loopback"` 或 `"off"`。」
+
+同口径的 C10 存档：已认证用户（含 LAN）可读取 hub 进程用户能读到、且未命中 denylist 的任何
+文件，并能浏览目录；路径存在性 / 类型可被推断（oracle 规则见 §2.8）。**这是 U1/U4 有意接受
+的边界，不是防线遗漏。** 声明已同步写入 `AGENTS.md` 的 web-hub「Content preview」段与
+`acceptance.md`（E4 判读口径）。
+
+### 11.2 P1a 裁定缝隙 — `file-search.ts` 的 `NO_TRACKER` 3 行
+
+§2.4 把 `previewFsStep` 的 `tracker` 定为必填后，遇到方案迁移表漏列的调用方：`file-search.ts`
+（§2.1 迁移表标「不动」——它只 import `isVirtualFsPath`，不是 admitter 调用方，但 P1a 重构
+`fs.ts` 后它调用的辅助函数签名带上了必填 tracker，编译不过）。**主会话裁定**（2026-10-08
+amendment）：允许 `file-search.ts` 增加 3 行功能代码（`NO_TRACKER` import + 两个调用点显式传
+`tracker: NO_TRACKER`），file-search 本身**仍不纳入熔断**（§2.4 未纳入清单原文有效：独立端点、
+cwd 范围）；§2.4 source-scan 规则 2 的 `NO_TRACKER` 白名单因此加上该文件。Verifier（r_W9MA2SJE）
+报告的第 8 条（file-search diff 体积超出冻结面预期）由主会话裁定接受。
+
+### 11.3 P1b 打回修复 — statPartial 扇出守卫
+
+首版实现的 lstat 阶段在预算耗尽后仍会发出新的 lstat（只在结果上标 `statPartial`）——verifier
+（r_AEFZ6XMD）以 §3.2 伪代码不变量「deadline/busy ⇒ **停止发起新的 lstat**」打回；修复 run
+（r_Q70W7ZN8）落下守卫 + mutation-tested 回归测试，主会话复跑全量绿。最终形态：deadline 耗尽
+或熔断 ⇒ 不再发起新的 lstat，剩余条目保持 dirent 类型并标 `statPartial:true`——与 §3.2 原文
+逐字一致，本条仅为存档（实现无偏离）。
+
+### 11.4 P2 偏离裁定的最终形态（verifier r_YF3TG06H conditional pass，四条全部裁定接受）
+
+四条偏离均由主会话裁定接受；落地记录（提交 `bf3cd2b` + 代码注释）可确证其中三条的最终形态：
+
+1. **`PreviewDirOutcome` 过渡别名 + fetch 返回型两步翻转**：P2 的逻辑 client 运行时已能返回
+   dir 变体，但 `PreviewOutcome` 保持 file-only（其唯一消费者 `usePreview` 当时冻结、只能窄化
+   `kind !== "text" ⇒ image`）；P2 先定义 `PreviewDirOutcome = PreviewOutcome | {ok;kind:"dir";
+listing}` 作为类型化过渡点，P3 重写 `usePreview` 时把 `fetch` 的声明返回翻转为它——两步各自
+   有契约测试钉住，不存在无人看守的窗口。P3 如约落地（`PreviewTransport.fetch()` 返回
+   `PreviewDirOutcome`）。
+2. **`PreviewHandle` 的 `navigate`/`back`/`up` 成员提前到 P2 落型**（全部可选，冻结类型约定）：
+   让 contract（`types.test-d.ts`）在 P2 就钉住 P3 组件要消费的面，而不是 P3 再改一次类型。
+3. **`tsconfig.typecheck.json` 追加 `@protocol/*` paths 别名**（additive；生产 pass 与 Vite 构建
+   不动）：contract pass 要解析 transport → protocol 的 import 链，而它不跑 Vite 的 alias 解析；
+   代价（该 pass 因此能见到 DOM `Blob`/`AbortSignal`）由注释写明——src 误用 DOM 类型仍被第一道
+   （无 DOM 的）pass 拦住。
+
+第四条偏离同属该次裁定接受集，未单独改代码路径（见 P2 提交信息「all four reported deviations
+adjudicated accepted」）。
+
+### 11.5 P3 偏离裁定的最终形态（verifier r_AF3WXAN1 10/10，无打回）
+
+P3 实现与 §5 P3 清单一致，两处「实现优于清单」的最终形态存档：
+
+1. **目录判定零额外往返**：`usePreview` 直接用 probe 的 `kindOf(path) === "dir"` 决定 `dir=1`
+   opt-in（probe 已确认候选，不再多打一 shot）；无 probe / kind 过期时的兑底是一次性的
+   `415 not-regular ⇒ 带 dir=1 重取`（真非常规文件两次 415 后进错误相，不会循环）。
+2. **`back` 零重取**：navigate 压栈的是快照，back 弹栈后字节级还原当前视图，不重新 fetch；
+   在途加载在 back 时 abort。
+
+### 11.6 P4 本包落地摘要
+
+- **`tests/web-hub/http/preview-e2e.test.ts`**：在 PV7 同一 harness（真 hub / 真 tmpdir / 真
+  socket agent）上追加 §5 P4 清单六例——cwd 外文件（`/etc/hostname` 与 home 外的兄弟 tmpdir）
+  200；HTTP 级下钻链（`dir=1` 拿清单 → 子目录再列 → 取其中文件 200，含无 opt-in 时 415 逐字节
+  不变）；`.ssh` 不在清单也不计数（`scanned=3 / total=2` 钉住「读到了但被过滤且不计数」）且直接
+  GET ⇒ 403 denylist；gzip 下 ≥2 KiB 清单 `Content-Encoding: gzip` 且 gunzip 后过
+  `parsePreviewDirListing`，无 offer 时逐字节 identity；`/proc/self/environ` ⇒ 403 virtual-fs
+  （零 fs 字面步）；symlink home 下 `auth.json` 字面（经链接）与 realpath（直写）两种表示都
+  403，且同 home 下良性 realpath 文件 200 作对照。kit 局部扩展：`preview(dir:true)` 拼
+  `&dir=1`；`symlinkHome` 变体（`config.home` 本身是符号链接，realpath 树由 close 一并清理）。
+- **`docs/dev/web-hub-preview/acceptance.md`**：追加 §7 ——E/D/M 系列真机步骤（§6 全文展开）
+  与发布前 denylist audit 步骤。
+- **`AGENTS.md`**：web-hub「Content preview」段改写——边界声明（U4 + 防线清单）、denylist
+  维护规则（版本号 + 语料 + 发布前 audit）、`dir=1` / 双 cap / fail-closed、md 默认渲染 + 切换、
+  目录下钻。
+- 验收：`npm test` / `typecheck` / `build` / `build:web` / `format:check` 全绿（见提交信息）。
