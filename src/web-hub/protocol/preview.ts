@@ -30,8 +30,28 @@ export const PREVIEW_PROBE_MAX_BODY_BYTES = 8 * 1024;
 /** Probe per-entry wire kinds (2026-10-07): `text`/`image` use the §4.4 sniff on the file's
  * head; `missing` covers not-found, not-admitted (cwd defences / upload store refusal) AND
  * sniffed-binary — every "a preview click could not have succeeded" case collapses to it so
- * the UI keeps the candidate as plain text. */
-export type PreviewProbeKind = "text" | "image" | "missing";
+ * the UI keeps the candidate as plain text.
+ *
+ * dir-plan §1.1 (P0): `"dir"` joins the union — a directory answers it ONLY when the request
+ * opted in (`dirs: true` on the probe body, §3.5); a dirs-less request never sees it. */
+export type PreviewProbeKind = "text" | "image" | "dir" | "missing";
+
+/** dir-plan §1.3: the single source of the probe-kind enum — the hub's response construction,
+ * the UI transport types and the UI parser all import THIS tuple (element type /
+ * `.includes()`); no local literal union may compete with it. */
+export const PREVIEW_PROBE_KINDS = ["text", "image", "dir", "missing"] as const;
+
+/** dir-plan §1.1: the probe request body. `dirs: true` asks directories to answer `"dir"`
+ * instead of `"missing"`; absent keeps the pre-dir behavior byte-identical. */
+export interface PreviewProbeRequestBody {
+  paths: string[];
+  dirs?: true;
+}
+
+/** dir-plan §1.1: the probe response body (the hub constructs it `satisfies` this type, §1.3). */
+export interface PreviewProbeResponseBody {
+  results: Array<{ kind: PreviewProbeKind }>;
+}
 
 /** §3.2 probe client timeout (2026-10-07): a probe is advisory UI metadata, never worth
  * blocking a transcript on — on this deadline (or any transport failure) every entry of the
@@ -101,6 +121,10 @@ export const PREVIEW_UPLOADS_MARKER = "/.pi/agent/web-hub/uploads/";
 
 export type PreviewImageMime = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
 
+/** dir-plan §1.1: the complete value set of the `X-PWH-Preview-Kind` response header —
+ * `text`/`image` bodies (plan v3) plus `dir` (dir-plan A; opt-in `dir=1` requests only). */
+export type PreviewResponseKind = "text" | "image" | "dir";
+
 /** The `X-PWH-Preview-*` response header names (`PREVIEW_HDR.kind/size/bytes/truncated/dims`). */
 export const PREVIEW_HDR = {
   kind: "X-PWH-Preview-Kind",
@@ -168,17 +192,179 @@ const textEncoder = new TextEncoder();
  * §4.1: the request `path` gate — must start with `/`, be ≤4096 UTF-8 bytes, contain no NUL /
  * `\r` / `\n`, have at least 2 non-empty segments, and no `.`/`..` segment. Returns a boolean
  * (never throws); callers map `false` to their own error (hub: 400 `E_BAD_REQUEST`; UI: no ref).
+ *
+ * dir-plan §1.1 (P0): `opts.minSegments` loosens ONLY the segment-count rule — `1` admits
+ * single-segment paths (`/home`) for the hub request gate, the probe's per-entry check and UI
+ * navigation; everything else (empty/`.`/`..` segments, NUL/CR/LF, the 4096-byte cap) is
+ * unaffected. The default stays `2` — the recognition layer's frozen behavior (`/help`,
+ * `/reload` never become click candidates) is byte-identical to pre-dir-plan.
  */
-export function validatePreviewPath(p: string): boolean {
+export function validatePreviewPath(p: string, opts?: { minSegments?: 1 | 2 }): boolean {
+  const minSegments = opts?.minSegments ?? 2;
   if (typeof p !== "string" || !p.startsWith("/")) return false;
   if (p.includes("\0") || p.includes("\r") || p.includes("\n")) return false;
   if (textEncoder.encode(p).length > PREVIEW_PATH_MAX_BYTES) return false;
   const segments = p.slice(1).split("/");
-  if (segments.length < 2) return false;
+  if (segments.length < minSegments) return false;
   for (const segment of segments) {
     if (segment === "" || segment === "." || segment === "..") return false;
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// directory listing (dir-plan §1.1/§3.2 — opt-in `dir=1`; frozen wire surface)
+// ---------------------------------------------------------------------------
+
+/** The opt-in query flag name: only the exact value `"1"` turns a directory path into a
+ * listing request (§3.5); absent (or any other value) keeps today's byte-identical behavior. */
+export const PREVIEW_DIR_QUERY = "dir";
+
+/** ① Scan cap: at most this many dirents are read from the handle (`limits.scan` flags the cut). */
+export const PREVIEW_DIR_SCAN_MAX = 10_000;
+
+/** ② Entries cap: at most this many entries survive into `entries` (after sorting). */
+export const PREVIEW_DIR_ENTRIES_MAX = 1_000;
+
+/** ③ Response cap: the serialized listing JSON's UTF-8 byte budget (the UNCOMPRESSED body). */
+export const PREVIEW_DIR_BODY_MAX_BYTES = 512 * 1024;
+
+/** Single-name cap: a dirent name longer than this is dropped server-side and counted in
+ * `dropped` — the hub never emits it, so the parser must never accept it. */
+export const PREVIEW_DIR_NAME_MAX_BYTES = 1_024;
+
+/** Listing-phase wall clock (§3.4) — appended INDEPENDENTLY after the admission budget. */
+export const PREVIEW_DIR_LIST_MS = 5_000;
+
+/** lstat fan-out width during the listing phase (§3.2). */
+export const PREVIEW_DIR_STAT_CONCURRENCY = 8;
+
+/** Bounded close of a dir handle / directory fd (§3.3) — its OWN deadline, never the request's. */
+export const PREVIEW_DIR_CLOSE_MS = 1_000;
+
+/** §3.4 budget relation: the wall clock reserved for LAN transfer after admit + listing.
+ * Pinned in tests/web-hub/protocol/preview.test.ts:
+ * `PREVIEW_ADMIT_TOTAL_MS + PREVIEW_DIR_LIST_MS + PREVIEW_DIR_LAN_TRANSFER_RESERVE_MS
+ * <= PREVIEW_CLIENT_TIMEOUT_MS`. */
+export const PREVIEW_DIR_LAN_TRANSFER_RESERVE_MS = 20_000;
+
+/** A dirent's type as reported on the wire (`other` covers FIFO / socket / device files). */
+export type PreviewDirEntryType = "dir" | "file" | "symlink" | "other";
+
+/** One directory entry. `lossy` marks a name that survived a lossy decode (contains U+FFFD);
+ * such entries render but are never clickable (A3). */
+export interface PreviewDirEntry {
+  name: string;
+  type: PreviewDirEntryType;
+  size?: number;
+  mtimeMs?: number;
+  lossy?: true;
+}
+
+/** The `dir=1` response body (§3.2). Truncation priority is fixed: scan → filter → entries →
+ * bytes; `truncated` MUST equal `entries.length < total || !complete` (parser-enforced). */
+export interface PreviewDirListing {
+  /** Sorted: `dir`-type entries first, then name order (case-folded compare + codepoint tiebreak). */
+  entries: PreviewDirEntry[];
+  /** Filtered entries in the scanned portion (always ≥ `entries.length`). */
+  total: number;
+  /** Dirents actually read (≤ `PREVIEW_DIR_SCAN_MAX`). */
+  scanned: number;
+  /** Whether the directory end was reached (scan cap not hit, no readdir error). */
+  complete: boolean;
+  /** `entries.length < total || !complete`. */
+  truncated: boolean;
+  /** Which of the three caps actually fired. */
+  limits: { scan: boolean; entries: boolean; bytes: boolean };
+  /** Entries that vanished between readdir and lstat. */
+  vanished: number;
+  /** Entries dropped for an over-long name (`> PREVIEW_DIR_NAME_MAX_BYTES`). */
+  dropped: number;
+  /** lstat budget ran out mid-fan-out — some entries lack size/mtime. */
+  statPartial?: true;
+}
+
+const PREVIEW_DIR_ENTRY_TYPES: readonly PreviewDirEntryType[] = ["dir", "file", "symlink", "other"];
+
+function isNonNegFinite(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+}
+
+function isNonNegSafeInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+}
+
+/**
+ * dir-plan §1.1: strict validation + aggregate size check of a `dir=1` response body.
+ * `byteLength` is the DECODED body's UTF-8 byte count (the transport may have carried it
+ * gzip'd, so the 512 KiB cap is judged on this number, never on Content-Length). Anything
+ * off-contract ⇒ `null`; unknown fields are ignored (room for later additive extensions).
+ * Never throws.
+ */
+export function parsePreviewDirListing(raw: unknown, byteLength: number): PreviewDirListing | null {
+  if (typeof byteLength !== "number" || !Number.isSafeInteger(byteLength) || byteLength < 0) return null;
+  if (byteLength > PREVIEW_DIR_BODY_MAX_BYTES) return null;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+
+  // entries: array of well-shaped entries, at most ENTRIES_MAX
+  const rawEntries = o.entries;
+  if (!Array.isArray(rawEntries) || rawEntries.length > PREVIEW_DIR_ENTRIES_MAX) return null;
+  const entries: PreviewDirEntry[] = [];
+  for (const rawEntry of rawEntries) {
+    if (rawEntry === null || typeof rawEntry !== "object" || Array.isArray(rawEntry)) return null;
+    const e = rawEntry as Record<string, unknown>;
+    const name = e.name;
+    if (typeof name !== "string" || name === "" || name.includes("/") || name.includes("\0")) return null;
+    if (textEncoder.encode(name).length > PREVIEW_DIR_NAME_MAX_BYTES) return null;
+    const type = e.type;
+    if (typeof type !== "string" || !PREVIEW_DIR_ENTRY_TYPES.includes(type as PreviewDirEntryType)) return null;
+    const hasSize = e.size !== undefined;
+    if (hasSize && !isNonNegFinite(e.size)) return null;
+    const hasMtime = e.mtimeMs !== undefined;
+    if (hasMtime && !isNonNegFinite(e.mtimeMs)) return null;
+    if (e.lossy !== undefined && e.lossy !== true) return null;
+    const entry: PreviewDirEntry = { name, type: type as PreviewDirEntryType };
+    if (hasSize) entry.size = e.size as number;
+    if (hasMtime) entry.mtimeMs = e.mtimeMs as number;
+    if (e.lossy === true) entry.lossy = true;
+    entries.push(entry);
+  }
+
+  // scalar counters / flags
+  const total = o.total;
+  const scanned = o.scanned;
+  const complete = o.complete;
+  const truncated = o.truncated;
+  const limits = o.limits;
+  const vanished = o.vanished;
+  const dropped = o.dropped;
+  const statPartial = o.statPartial;
+  if (!isNonNegSafeInt(total) || !isNonNegSafeInt(scanned)) return null;
+  if (typeof complete !== "boolean" || typeof truncated !== "boolean") return null;
+  if (limits === null || typeof limits !== "object" || Array.isArray(limits)) return null;
+  const l = limits as Record<string, unknown>;
+  if (typeof l.scan !== "boolean" || typeof l.entries !== "boolean" || typeof l.bytes !== "boolean") return null;
+  if (!isNonNegSafeInt(vanished) || !isNonNegSafeInt(dropped)) return null;
+  if (statPartial !== undefined && statPartial !== true) return null;
+
+  // aggregate relations (§1.1)
+  if (total < entries.length) return null;
+  if (scanned > PREVIEW_DIR_SCAN_MAX) return null;
+  if (truncated !== (entries.length < total || !complete)) return null;
+
+  const listing: PreviewDirListing = {
+    entries,
+    total,
+    scanned,
+    complete,
+    truncated,
+    limits: { scan: l.scan, entries: l.entries, bytes: l.bytes },
+    vanished,
+    dropped,
+  };
+  if (statPartial === true) listing.statPartial = true;
+  return listing;
 }
 
 // ---------------------------------------------------------------------------

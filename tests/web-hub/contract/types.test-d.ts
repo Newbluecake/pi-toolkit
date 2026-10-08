@@ -37,6 +37,19 @@ import type {
 import type { SseEventName } from "../../../src/web-hub/hub/sse.js";
 import type { FenceLoss, SingletonResult } from "../../../src/web-hub/hub/singleton.js";
 import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
+import {
+  parsePreviewDirListing,
+  PREVIEW_PROBE_KINDS,
+  validatePreviewPath,
+  type PreviewDirEntry,
+  type PreviewDirEntryType,
+  type PreviewDirListing,
+  type PreviewProbeKind,
+  type PreviewProbeRequestBody,
+  type PreviewProbeResponseBody,
+  type PreviewResponseKind,
+} from "../../../src/web-hub/protocol/preview.js";
+import { PREVIEW_ABS_HUB_CAP, PREVIEW_DIR_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type {
   AgentFrame,
   BashJobRowWire,
@@ -476,5 +489,71 @@ describe("types.test-d.ts (bash-jobs-panel 包 A0 frozen status-slot surface)", 
   it("BashJobRowWire carries no logPath (v2 cut, D2)", () => {
     expectTypeOf<BashJobRowWire>().not.toHaveProperty("logPath");
     expectTypeOf<BashJobsWire>().not.toHaveProperty("logPath");
+  });
+});
+
+// web-hub-preview dir-plan §1.1–§1.3 (P0 协议冻结): the frozen dir/abs protocol surface.
+// Only the protocol-side pins live here — the transport-side assertions (transport results
+// element type ≡ PreviewProbeKind, PreviewOutcome's dir-variant listing ≡ PreviewDirListing)
+// are P2's half of the contract and land with `ui/src/transport/types.ts`.
+describe("types.test-d.ts (web-hub-preview dir-plan P0 protocol surface)", () => {
+  it("PreviewResponseKind is exactly text | image | dir (X-PWH-Preview-Kind's full set, §1.1)", () => {
+    expectTypeOf<PreviewResponseKind>().toEqualTypeOf<"text" | "image" | "dir">();
+  });
+
+  it("PreviewProbeKind gains dir and IS the PREVIEW_PROBE_KINDS tuple's union (§1.3 single source)", () => {
+    expectTypeOf<PreviewProbeKind>().toEqualTypeOf<"text" | "image" | "dir" | "missing">();
+    expectTypeOf<PreviewProbeKind>().toEqualTypeOf<(typeof PREVIEW_PROBE_KINDS)[number]>();
+    expectTypeOf<typeof PREVIEW_PROBE_KINDS>().toEqualTypeOf<readonly ["text", "image", "dir", "missing"]>();
+  });
+
+  it("probe request/response bodies keep their §1.1 shapes (dirs?: true, results[].kind)", () => {
+    expectTypeOf<PreviewProbeRequestBody>().toEqualTypeOf<{ paths: string[]; dirs?: true }>();
+    expectTypeOf<PreviewProbeResponseBody>().toEqualTypeOf<{ results: Array<{ kind: PreviewProbeKind }> }>();
+  });
+
+  it("PreviewDirEntryType / PreviewDirEntry are exactly the frozen §1.1 shapes", () => {
+    expectTypeOf<PreviewDirEntryType>().toEqualTypeOf<"dir" | "file" | "symlink" | "other">();
+    expectTypeOf<PreviewDirEntry>().toEqualTypeOf<{
+      name: string;
+      type: PreviewDirEntryType;
+      size?: number;
+      mtimeMs?: number;
+      lossy?: true;
+    }>();
+  });
+
+  it("PreviewDirListing is exactly the frozen §1.1 shape (limits tri-bool, statPartial?: true)", () => {
+    expectTypeOf<PreviewDirListing>().toEqualTypeOf<{
+      entries: PreviewDirEntry[];
+      total: number;
+      scanned: number;
+      complete: boolean;
+      truncated: boolean;
+      limits: { scan: boolean; entries: boolean; bytes: boolean };
+      vanished: number;
+      dropped: number;
+      statPartial?: true;
+    }>();
+  });
+
+  it("validatePreviewPath takes (p, opts?: { minSegments?: 1 | 2 }) and returns boolean", () => {
+    // the second tuple element is OPTIONAL (Parameters<> preserves the `?`) — the default call
+    // shape `validatePreviewPath("/a/b")` must stay legal, so the pin is `[string, O?]`, not
+    // `[string, O | undefined]`.
+    expectTypeOf<Parameters<typeof validatePreviewPath>>().toEqualTypeOf<
+      [string, ({ minSegments?: 1 | 2 } | undefined)?]
+    >();
+    expectTypeOf<ReturnType<typeof validatePreviewPath>>().toEqualTypeOf<boolean>();
+  });
+
+  it("parsePreviewDirListing takes (unknown, number) and returns PreviewDirListing | null", () => {
+    expectTypeOf<Parameters<typeof parsePreviewDirListing>>().toEqualTypeOf<[unknown, number]>();
+    expectTypeOf<ReturnType<typeof parsePreviewDirListing>>().toEqualTypeOf<PreviewDirListing | null>();
+  });
+
+  it("dir/abs hub caps are the frozen literal strings (§1.2)", () => {
+    expectTypeOf<typeof PREVIEW_DIR_HUB_CAP>().toEqualTypeOf<"preview.dir.v1">();
+    expectTypeOf<typeof PREVIEW_ABS_HUB_CAP>().toEqualTypeOf<"preview.abs.v1">();
   });
 });

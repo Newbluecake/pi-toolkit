@@ -76,6 +76,22 @@ export const PREVIEW_HUB_CAP = "preview.v1";
 export const PREVIEW_LAN_HUB_CAP = "preview.lan.v1";
 
 /**
+ * web-hub-preview dir-plan §1.2 (P0, review N1 note): the two caps added by the directory (A)
+ * and any-absolute-path (C) enhancements.
+ *
+ * `PREVIEW_DIR_HUB_CAP` (A): `GET /api/preview?dir=1` directory listings and the probe's
+ * `dirs:true` / `"dir"` answers are available (also requires `/proc/self/fd` to be usable at
+ * hub start — fail-closed without it, §3.6). `PREVIEW_ABS_HUB_CAP` (C): the hub admits ANY
+ * absolute path; the UI relaxes path recognition off this cap. Both are declared by the SAME
+ * feature gate as `PREVIEW_HUB_CAP` (the mere presence of `config.preview`), in lockstep on
+ * both cap surfaces — the caps are NOT user configuration switches, they exist only for
+ * client recognition / version compatibility. Like every cap above they add no frames, so no
+ * PROTO bump (the 1.1 → 1.2 bump is fleet F0's alone, see PROTO above).
+ */
+export const PREVIEW_DIR_HUB_CAP = "preview.dir.v1";
+export const PREVIEW_ABS_HUB_CAP = "preview.abs.v1";
+
+/**
  * web-hub-fleet-drawer plan §3.2/§7.1 (F0): the run-transcript caps. An agent advertises a
  * subset of `RUNTX_AGENT_CAPS` depending on `webHub.subagentTranscript` (`"all"` ⇒ both,
  * `"loopback"` ⇒ `runtx.v1` only, `"off"` ⇒ neither — F2 wires `capsExtra`); the hub
