@@ -75,6 +75,7 @@ import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
 import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
+import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool-timing.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
 import { classifyCommand, listSlashCommands } from "./slash.js";
 import { modelsFingerprint, projectModels } from "./models.js";
@@ -452,6 +453,19 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     armExec,
   });
   registerOriginEntryRenderer(pi);
+  // tool-duration plan: the TUI must render NOTHING for the per-turn timing entries (the
+  // renderer's `undefined` return is pi's sanctioned "no content" — see tool-timing.ts).
+  registerToolTimingEntryRenderer(pi);
+
+  /** Tool-duration plan: persist the turn's completed tool timings as bounded custom entries.
+   *  Drains the tap; never throws, never blocks (appendToolTimingEntries swallows everything). */
+  const flushToolTimings = (): void => {
+    try {
+      appendToolTimingEntries(pi, tap.drainToolTimings());
+    } catch {
+      /* a failed flush must never affect the turn */
+    }
+  };
 
   const readFleet = (): readonly RunSnapshot[] => {
     try {
@@ -977,6 +991,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (!attached) return;
       if (c !== undefined) ctx = c;
       tap.handle(event as { type: string } & Record<string, unknown>);
+      // tool-duration plan: `turn_end` fires after the turn's tool executions (pi-agent-core
+      // emits it from the loop right after executeToolCalls), so it is the flush point.
+      if (type === "turn_end") flushToolTimings();
       if (type === "input") commandHandler.onInputEvent(event as InputEventLike);
       if (type === "message_start") commandHandler.onMessageStart(event as MessageStartLike);
       if ((type === "session_compact" || type === "session_compact_failed") && reasonOf(event) === "manual") {

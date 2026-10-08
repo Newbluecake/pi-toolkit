@@ -32,6 +32,10 @@ export interface EventTap {
   setBaseCost(usd: number): void;
   /** Emit every coalesced delta / pending tool update now (before a snapshot takes its seq). */
   flush(): void;
+  /** Tool-duration plan: per-toolCallId durations (agent clock) completed since the last drain —
+   *  the caller (web-hub wiring) persists them as `subagent:web-tool-timing` entries at
+   *  `turn_end`. Returns and CLEARS the accumulated map (empty when nothing completed). */
+  drainToolTimings(): Map<string, number>;
   dispose(): void;
 }
 
@@ -51,6 +55,8 @@ interface InflightTool {
   args: unknown;
   latestPartial?: unknown;
   hasPartial: boolean;
+  /** Agent-clock epoch ms of `tool_execution_start`; absent when only an update was seen. */
+  startedAt?: number;
 }
 
 export function createEventTap(
@@ -71,6 +77,9 @@ export function createEventTap(
   let promptStack: Array<{ kind: string; title?: string; since: number; dialogId?: string }> = [];
   let baseCost = 0;
   let addedCost = 0;
+  // Tool-duration plan: toolCallId → durationMs for tools whose `tool_execution_end` fired
+  // since the last drain (persisted by the wiring at `turn_end`; cleared on session reset).
+  let completedTimings = new Map<string, number>();
 
   let pendingDeltas: PendingDelta[] = [];
   let deltaTimer: { cancel(): void } | undefined;
@@ -224,25 +233,41 @@ export function createEventTap(
       }
       case "tool_execution_start": {
         const id = str(event.toolCallId);
-        tools.set(id, { toolCallId: id, toolName: str(event.toolName), args: event.args, hasPartial: false });
+        const startedAt = opts.now();
+        tools.set(id, {
+          toolCallId: id,
+          toolName: str(event.toolName),
+          args: event.args,
+          hasPartial: false,
+          startedAt,
+        });
         e = {
           type: "tool_execution_start",
           toolCallId: id,
           toolName: str(event.toolName),
           args: truncateDeep(event.args, flag),
+          ...(Number.isFinite(startedAt) ? { startedAt } : {}),
         };
         break;
       }
       case "tool_execution_end": {
         const id = str(event.toolCallId);
+        const prev = tools.get(id);
+        const endedAt = opts.now();
+        // durationMs only when the start was seen on this clock (≥0, finite — a backwards
+        // clock clamps to 0, never negative); an end without a start stays duration-less.
+        const raw = prev !== undefined && prev.startedAt !== undefined ? endedAt - prev.startedAt : undefined;
+        const durationMs = raw !== undefined && Number.isFinite(raw) ? Math.max(0, raw) : undefined;
         tools.delete(id);
         pendingToolUpdates.delete(id); // end supersedes any pending partial
+        if (durationMs !== undefined) completedTimings.set(id, durationMs);
         e = {
           type: "tool_execution_end",
           toolCallId: id,
           toolName: str(event.toolName),
           isError: event.isError === true,
           result: truncateDeep(event.result, flag),
+          ...(durationMs !== undefined ? { durationMs } : {}),
         };
         break;
       }
@@ -340,6 +365,7 @@ export function createEventTap(
     inflightMessage = undefined;
     tools.clear();
     promptStack = [];
+    completedTimings.clear();
   };
 
   return {
@@ -373,6 +399,11 @@ export function createEventTap(
       baseCost = usd;
     },
     flush: flushAll,
+    drainToolTimings: () => {
+      const out = completedTimings;
+      completedTimings = new Map<string, number>(); // swap: every call returns an owned map
+      return out;
+    },
     dispose: resetState,
   };
 }

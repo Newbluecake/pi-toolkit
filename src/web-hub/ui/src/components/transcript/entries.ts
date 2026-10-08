@@ -84,7 +84,10 @@ function assistantBlocks(m: Record<string, unknown>, idx: ToolIndex): AssistantB
       }
     } else if (block.type === "toolCall") {
       const id = typeof block.id === "string" ? block.id : "";
-      out.push({ kind: "toolCall", view: toolView(block, idx.results.get(id), idx.live.get(id)) as ToolView });
+      out.push({
+        kind: "toolCall",
+        view: toolView(block, idx.results.get(id), idx.live.get(id), idx.durations) as ToolView,
+      });
     } else if (block.type === "image") {
       out.push({ kind: "image" });
     }
@@ -157,7 +160,7 @@ function itemEntry(it: Item, idx: ToolIndex): TxEntry | undefined {
     case "toolResult": {
       const toolCallId = typeof m.toolCallId === "string" ? m.toolCallId : "";
       if (idx.called.has(toolCallId)) return undefined; // shown inside its own tool card
-      return { type: "toolOrphan", key: it.id, view: toolView(undefined, m, undefined) as ToolView };
+      return { type: "toolOrphan", key: it.id, view: toolView(undefined, m, undefined, idx.durations) as ToolView };
     }
     case "custom": {
       if (m.display === false) return undefined;
@@ -233,7 +236,7 @@ export function buildTxEntries(a: TranscriptSource): TxBuild {
     entries.push({
       type: "toolOrphan",
       key: `live:${t.toolCallId}`,
-      view: toolView(undefined, undefined, t) as ToolView,
+      view: toolView(undefined, undefined, t, idx.durations) as ToolView,
     });
     renderKeys.push(`live:${t.toolCallId}:${t.done ? "d" : "l"}:${String(t.partial ?? "").length}`);
     anchors.push([]);

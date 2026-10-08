@@ -119,6 +119,40 @@ describe("event tap — tools", () => {
     expect(tap.inflight()?.tools.map((t) => t.toolCallId)).toEqual(["c1"]);
   });
 
+  it("tool-duration plan: start carries startedAt, end carries durationMs (agent clock, ≥0)", () => {
+    const { tap, out, setNow } = harness();
+    tap.handle({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: {} });
+    expect(out[0]!.e).toMatchObject({ type: "tool_execution_start", toolCallId: "c1", startedAt: 1_000 });
+    setNow(2_500);
+    tap.handle({ type: "tool_execution_end", toolCallId: "c1", toolName: "bash", result: "ok", isError: false });
+    expect(out[1]!.e).toMatchObject({ type: "tool_execution_end", toolCallId: "c1", durationMs: 1_500 });
+    // end WITHOUT a seen start (only an update arrived first): no durationMs on the wire
+    tap.handle({ type: "tool_execution_update", toolCallId: "c2", toolName: "read", partialResult: "p" });
+    tap.handle({ type: "tool_execution_end", toolCallId: "c2", toolName: "read", result: "r", isError: false });
+    const end2 = out.find((o) => o.e.type === "tool_execution_end" && o.e.toolCallId === "c2")!;
+    expect(end2.e.durationMs).toBeUndefined();
+    // a backwards clock clamps to 0, never a negative duration
+    tap.handle({ type: "tool_execution_start", toolCallId: "c3", toolName: "edit", args: {} });
+    setNow(1_000);
+    tap.handle({ type: "tool_execution_end", toolCallId: "c3", toolName: "edit", result: "r", isError: false });
+    expect(out.find((o) => o.e.type === "tool_execution_end" && o.e.toolCallId === "c3")!.e.durationMs).toBe(0);
+  });
+
+  it("tool-duration plan: drainToolTimings hands over completed durations and resets (drain-twice ⇒ empty)", () => {
+    const { tap, setNow } = harness();
+    tap.handle({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: {} });
+    setNow(1_400);
+    tap.handle({ type: "tool_execution_end", toolCallId: "c1", toolName: "bash", result: "ok", isError: false });
+    expect(tap.drainToolTimings()).toEqual(new Map([["c1", 400]]));
+    expect(tap.drainToolTimings().size).toBe(0);
+    // resetForSession drops anything still pending
+    tap.handle({ type: "tool_execution_start", toolCallId: "c2", toolName: "bash", args: {} });
+    setNow(2_000);
+    tap.handle({ type: "tool_execution_end", toolCallId: "c2", toolName: "bash", result: "ok", isError: false });
+    tap.resetForSession(0);
+    expect(tap.drainToolTimings().size).toBe(0);
+  });
+
   it("> 64 KiB strings are truncated and flagged", () => {
     const { tap, out } = harness();
     const big = "y".repeat(100 * 1024);

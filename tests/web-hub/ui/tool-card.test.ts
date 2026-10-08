@@ -102,6 +102,58 @@ describe("ToolCard.vue", () => {
   });
 });
 
+describe("ToolCard.vue — tool-duration chip", () => {
+  it("done/error with durationMs renders the muted chip; unknown duration renders NO element", () => {
+    const done = mount(ToolCard, {
+      props: { view: view({ toolCallId: "c1", toolName: "read", state: "done", durationMs: 2_400, result: "x" }) },
+    });
+    const chip = done.get(".tool-dur");
+    expect(chip.text()).toBe("2.4s");
+    expect(chip.attributes("translate")).toBe("no");
+
+    const err = mount(ToolCard, {
+      props: {
+        view: view({ toolCallId: "c2", toolName: "bash", state: "error", durationMs: 185_000, result: "boom" }),
+      },
+    });
+    expect(err.get(".tool-dur").text()).toBe("3m 05s");
+
+    const unknown = mount(ToolCard, {
+      props: { view: view({ toolCallId: "c3", toolName: "read", state: "done", result: "x" }) },
+    });
+    expect(unknown.find(".tool-dur").exists()).toBe(false);
+  });
+
+  it("running with runningSince ticks the elapsed at 1 Hz (browser clock only)", async () => {
+    vi.useFakeTimers();
+    try {
+      const started = Date.now() - 3_400;
+      const wrapper = mount(ToolCard, {
+        props: { view: view({ toolCallId: "c4", toolName: "bash", state: "running", runningSince: started }) },
+      });
+      expect(wrapper.get(".tool-dur").text()).toBe("3.4s");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(wrapper.get(".tool-dur").text()).toBe("4.4s");
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(wrapper.get(".tool-dur").text()).toBe("6.4s");
+      // finishing swaps the ticking chip for the final agent-measured duration
+      await wrapper.setProps({
+        view: view({ toolCallId: "c4", toolName: "bash", state: "done", durationMs: 6_900, result: "x" }),
+      });
+      expect(wrapper.get(".tool-dur").text()).toBe("6.9s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("running without runningSince (fresh attach / snapshot inflight) renders NO chip", () => {
+    const wrapper = mount(ToolCard, {
+      props: { view: view({ toolCallId: "c5", toolName: "bash", state: "running" }) },
+    });
+    expect(wrapper.find(".tool-dur").exists()).toBe(false);
+  });
+});
+
 describe("ToolCard.vue — edit diff view", () => {
   it("parseable edit args: diff rows replace the raw-JSON Input section, inline marks included", () => {
     const wrapper = mount(ToolCard, {

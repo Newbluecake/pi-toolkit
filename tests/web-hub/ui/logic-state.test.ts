@@ -8,7 +8,7 @@ import {
   selectedAgent,
 } from "../../../src/web-hub/ui/src/logic/state.js";
 
-type Msg = { event: string; data: any; id?: number };
+type Msg = { event: string; data: any; id?: number; at?: number };
 const run = (msgs: Msg[], s = initialState()) => msgs.reduce((acc, m) => reduce(acc, m), s);
 
 const card = (agentKey: string, extra: Record<string, unknown> = {}) => ({
@@ -438,6 +438,113 @@ describe("state.reduce", () => {
     );
     expect(A(s).tools).toHaveLength(0);
     expect(A(s).items.at(-1)!.key).toBe("toolResult:7:t1");
+  });
+
+  it("tool-duration plan: live durationMs lands in toolDurations and survives the toolResult message_end", () => {
+    let s = run(
+      [
+        {
+          event: "ev",
+          data: { agentKey: "A", seq: 10, e: { type: "tool_execution_start", toolCallId: "t1", toolName: "bash" } },
+          at: 5_000,
+        },
+        {
+          event: "ev",
+          data: {
+            agentKey: "A",
+            seq: 11,
+            e: { type: "tool_execution_end", toolCallId: "t1", result: "ok", durationMs: 1_500 },
+          },
+        },
+      ],
+      loaded(),
+    );
+    // start stamped the BROWSER-clock receipt (msg.at), end merged the agent-clock duration
+    expect(A(s).tools[0]).toMatchObject({ toolCallId: "t1", done: true, seenAt: 5_000 });
+    expect(A(s).toolDurations.get("t1")).toBe(1_500);
+    // the toolResult message_end drops the live tool — the duration map is what survives
+    s = run(
+      [
+        {
+          event: "ev",
+          data: {
+            agentKey: "A",
+            seq: 12,
+            e: {
+              type: "message_end",
+              message: { role: "toolResult", toolCallId: "t1", toolName: "bash", content: "ok", timestamp: 7 },
+            },
+          },
+        },
+      ],
+      s,
+    );
+    expect(A(s).tools).toHaveLength(0);
+    expect(A(s).toolDurations.get("t1")).toBe(1_500);
+    // an end WITHOUT durationMs (old agent peer) changes nothing in the map
+    s = run(
+      [
+        {
+          event: "ev",
+          data: { agentKey: "A", seq: 13, e: { type: "tool_execution_end", toolCallId: "t2", durationMs: -3 } },
+        },
+      ],
+      s,
+    );
+    expect(A(s).toolDurations.has("t2")).toBe(false);
+  });
+
+  it("tool-duration plan: history/append timing entries fold into toolDurations and NEVER render as items", () => {
+    const timingEntry = (id: string, t: Record<string, number>) => ({
+      id,
+      parentId: null,
+      type: "custom",
+      timestamp: "2026-10-08T00:00:00.000Z",
+      customType: "subagent:web-tool-timing",
+      dataKey: `custom:subagent:web-tool-timing:${id}`,
+      display: false,
+      timing: t,
+    });
+    let s = run(
+      [
+        {
+          event: "history",
+          data: {
+            agentKey: "A",
+            entries: [timingEntry("e2", { h1: 4200, h2: 61_000 }), userEntry("e1", 1000)],
+            tailMessages: [],
+            fromSeq: 10,
+            hasMore: false,
+          },
+        },
+      ],
+      run([
+        { event: "hello", data: { clientId: "c1" } },
+        { event: "agents", data: [card("A")] },
+        { event: "subscribing", data: { agentKey: "A", clientId: "c1" } },
+        { event: "subscribed", data: { agentKey: "A" } },
+      ]),
+    );
+    expect(A(s).toolDurations.get("h1")).toBe(4200);
+    expect(A(s).toolDurations.get("h2")).toBe(61_000);
+    // hidden: no item for the timing entry (custom(data) tombstones never render)
+    expect(A(s).items.map((i: any) => i.entryId)).toEqual(["e1"]);
+    expect(A(s).items.some((i: any) => i.kind === "custom")).toBe(false);
+    // a later live duration for the same id wins (latest observation)
+    s = run(
+      [
+        {
+          event: "ev",
+          data: { agentKey: "A", seq: 10, e: { type: "tool_execution_end", toolCallId: "h1", durationMs: 99 } },
+        },
+      ],
+      s,
+    );
+    expect(A(s).toolDurations.get("h1")).toBe(99);
+    // append-carried timing entries merge too
+    s = run([{ event: "append", data: { agentKey: "A", entries: [timingEntry("e3", { h3: 250 })] } }], s);
+    expect(A(s).toolDurations.get("h3")).toBe(250);
+    expect(A(s).items.some((i: any) => i.kind === "custom")).toBe(false);
   });
 
   it("status / fleet / prompt update the agent; session_compact adds a separator once", () => {

@@ -29,6 +29,40 @@ export function customKey(customType: string, payload: unknown): string {
   return `custom:${customType}:${fnv1a32(canonicalJson(payload))}`;
 }
 
+/**
+ * tool-duration plan: the agent-written per-turn tool-timing entry's customType (same
+ * `subagent:web-*` family as `subagent:web-origin`). Data shape: `{ v: 1, t: { [toolCallId]:
+ * durationMs } }` (≤ TOOL_TIMING_ENTRY_IDS ids per entry; overflow splits into further entries).
+ * The projection keeps the default display:false tombstone shape but carries the bounded
+ * `timing` map alongside `dataKey` — the browser folds it into its tool-duration index while
+ * still never rendering the entry as a transcript row.
+ */
+export const WEB_TOOL_TIMING_ENTRY_TYPE = "subagent:web-tool-timing";
+
+/** Wire-side cap for one projected `timing` map (write side caps at the same number). */
+export const TOOL_TIMING_WIRE_PAIRS = 256;
+
+/** toolCallId length cap on the wire (ids are short generated strings; longer = hostile/garbage). */
+const TOOL_TIMING_ID_MAX_CHARS = 128;
+
+/** Upper bound for one projected duration (≈ 24.8 days) — beyond it the value is garbage. */
+const TOOL_TIMING_MS_MAX = 2_147_483_647;
+
+/** Sanitize a raw entry `data` into the bounded `{[toolCallId]: durationMs}` wire map (empty ⇒ undefined). */
+export function toolTimingMap(data: unknown): Record<string, number> | undefined {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+  const t = (data as Record<string, unknown>).t;
+  if (t === null || typeof t !== "object" || Array.isArray(t)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [id, ms] of Object.entries(t as Record<string, unknown>)) {
+    if (id === "" || id.length > TOOL_TIMING_ID_MAX_CHARS) continue;
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 || ms > TOOL_TIMING_MS_MAX) continue;
+    out[id] = ms;
+    if (Object.keys(out).length >= TOOL_TIMING_WIRE_PAIRS) break;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
 /** message → messageKey；custom_message → customKey(type, content)；custom → e.dataKey 已预算；其他类型 undefined。 */
 export function entryKey(e: WireEntry): string | undefined {
   switch (e.type) {
@@ -120,6 +154,23 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
     }
     case "custom": {
       if (typeof r.customType !== "string") return undefined;
+      // tool-duration plan: `subagent:web-tool-timing` keeps the tombstone shape (display:false,
+      // dataKey over the full data — dedupe/reconciliation semantics unchanged) but additionally
+      // carries the bounded timing map so a freshly-attached browser can fold per-tool durations
+      // from history without ever rendering the entry as a row.
+      if (r.customType === WEB_TOOL_TIMING_ENTRY_TYPE) {
+        const timing = toolTimingMap(r.data);
+        return {
+          id: r.id,
+          parentId,
+          type: "custom",
+          timestamp: r.timestamp,
+          customType: r.customType,
+          dataKey: customKey(r.customType, r.data),
+          display: false,
+          ...(timing !== undefined ? { timing } : {}),
+        };
+      }
       // message_agent → root 的 display 面（progress/finding 等，progressChannel:"display"）：
       // TUI 靠 fabric-entry-renderer 渲染 record，web 端若走默认墓碑投影则正文永不可见
       // （2026-10-07 用户报告：@mention 后收不到 subagent 的 message_agent 回复）。

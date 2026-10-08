@@ -186,6 +186,49 @@ describe("projectSessionEntry over the fixture", () => {
     );
   });
 
+  it("tool-duration plan: subagent:web-tool-timing keeps the tombstone shape but carries the bounded timing map", () => {
+    const data = { v: 1, t: { t1: 1_500, t2: 61_000 } };
+    const e = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:web-tool-timing",
+      data,
+      id: "tt1",
+      parentId: null,
+      timestamp: "2026-10-08T00:00:00.000Z",
+    });
+    expect(e).toMatchObject({
+      id: "tt1",
+      type: "custom",
+      customType: "subagent:web-tool-timing",
+      display: false,
+      dataKey: customKey("subagent:web-tool-timing", data),
+      timing: { t1: 1_500, t2: 61_000 },
+    });
+    expect("data" in e!).toBe(false); // data body still never crosses the wire
+  });
+
+  it("tool-duration plan: malformed/oversized timing data degrades to a bare tombstone (no timing field)", () => {
+    const base = {
+      type: "custom",
+      customType: "subagent:web-tool-timing",
+      id: "tt2",
+      parentId: null,
+      timestamp: "2026-10-08T00:00:00.000Z",
+    } as const;
+    // non-object t / negative / NaN values are dropped; everything dropped ⇒ no timing field
+    expect(projectSessionEntry({ ...base, data: { v: 1, t: "nope" } })!.timing).toBeUndefined();
+    expect(
+      projectSessionEntry({ ...base, data: { v: 1, t: { a: -1, b: Number.NaN, c: "x" } } })!.timing,
+    ).toBeUndefined();
+    // bounded at 256 pairs even if the writer lied
+    const big: Record<string, number> = {};
+    for (let i = 0; i < 400; i += 1) big[`t${i}`] = i;
+    const capped = projectSessionEntry({ ...base, data: { v: 1, t: big } })!;
+    expect(Object.keys(capped.timing!)).toHaveLength(256);
+    expect(capped.timing!.t255).toBe(255);
+    expect(capped.timing!.t399).toBeUndefined();
+  });
+
   it("projects custom_message(content) with display and no details", () => {
     const e = projected[4]!;
     expect(e).toEqual({

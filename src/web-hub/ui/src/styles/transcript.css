@@ -490,6 +490,16 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   font-variant-numeric: tabular-nums;
 }
 
+/* tool-duration plan: muted auto-scaled duration chip after the badges (before the chevron).
+ * Same muted tone/size as .tool-end; tabular-nums keeps the 1 Hz tick from jittering. */
+.tool-dur {
+  flex: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .tool-head .chev {
   color: var(--c-text-3);
   transition: transform var(--dur-base) var(--ease-out);

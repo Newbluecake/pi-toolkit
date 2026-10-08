@@ -59,6 +59,10 @@ export interface WireEntry {
   customType?: string;
   content?: unknown; // custom_message 的载荷（渲染用）
   dataKey?: string; // custom(data)：customKey(customType, data) 预算值，data 本体不下发
+  /** tool-duration plan: `subagent:web-tool-timing` custom(data) entries carry their bounded
+   *  `{[toolCallId]: durationMs}` map here (the entry otherwise stays a display:false tombstone —
+   *  never a transcript row). Absent on every other entry shape; ≤ TOOL_TIMING_WIRE_PAIRS pairs. */
+  timing?: Record<string, number>;
   display?: boolean;
   truncated?: boolean;
   provider?: string; // model_change
@@ -343,7 +347,9 @@ export interface FleetOmitted {
 export interface WireEvent {
   type: (typeof FORWARDED_EVENTS)[number];
   [k: string]: unknown;
-} // payload 只校验 type + 大小
+} // payload 只校验 type + 大小；tool_execution_start 可选携带 `startedAt`（agent 钟 epoch
+// ms），tool_execution_end 可选携带 `durationMs`（end−start，≥0，有限）—— 均为 append-only
+// 扩展字段，旧 hub/UI 无感（WireEventSchema additionalProperties:true，hub 原样转发）。
 
 export const FORWARDED_EVENTS = [
   /* arch §4.1.1 白名单 */ "agent_start",

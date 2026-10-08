@@ -132,6 +132,41 @@ describe("tools/toolView", () => {
     ).toMatchObject({ state: "error", truncated: true });
     expect(toolView(call)).toMatchObject({ state: "pending" });
   });
+
+  it("tool-duration plan: durations map feeds done/error durationMs; live seenAt feeds runningSince", () => {
+    const call = { type: "toolCall", id: "t1", name: "bash", arguments: {} };
+    const durs = new Map([
+      ["t1", 2_400],
+      ["bad", -1],
+    ]);
+    expect(toolView(call, { role: "toolResult", toolCallId: "t1" }, undefined, durs)).toMatchObject({
+      state: "done",
+      durationMs: 2_400,
+    });
+    expect(toolView(call, { role: "toolResult", toolCallId: "t1", isError: true }, undefined, durs)).toMatchObject({
+      state: "error",
+      durationMs: 2_400,
+    });
+    // running: browser-clock seenAt becomes runningSince (never an agent-clock mix)
+    expect(
+      toolView(call, undefined, { toolCallId: "t1", toolName: "bash", done: false, seenAt: 1_234 }, durs),
+    ).toMatchObject({ state: "running", runningSince: 1_234 });
+    expect(
+      "durationMs" in toolView(call, undefined, { toolCallId: "t1", toolName: "bash", done: false, seenAt: 5 }, durs),
+    ).toBe(false);
+    // a live DONE tool without a durations entry: no durationMs (unknown ⇒ no chip)
+    expect(
+      toolView({ ...call, id: "nope" }, undefined, { toolCallId: "nope", toolName: "bash", done: true }, durs)
+        .durationMs,
+    ).toBeUndefined();
+    // invalid map values are ignored; no map at all behaves like absent
+    expect(
+      toolView({ ...call, id: "bad" }, { role: "toolResult", toolCallId: "bad" }, undefined, durs).durationMs,
+    ).toBeUndefined();
+    expect(toolView(call, { role: "toolResult", toolCallId: "t1" }, undefined, undefined)).toMatchObject({
+      state: "done",
+    });
+  });
 });
 
 describe("transcript/messageText", () => {

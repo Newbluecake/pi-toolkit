@@ -15,6 +15,9 @@ export interface ToolIndex {
   readonly results: Map<string, Record<string, unknown>>;
   readonly called: ReadonlySet<string>;
   readonly live: Map<string, LiveTool>;
+  /** Tool-duration plan: toolCallId → durationMs (agent clock) from the reducer's merged map —
+   *  absent (undefined entries allowed, `get` returns undefined) on sources without one. */
+  readonly durations: ReadonlyMap<string, number> | undefined;
 }
 
 function scanToolCalls(m: Record<string, unknown> | null | undefined, called: Set<string>): void {
@@ -39,5 +42,5 @@ export function indexTools(a: TranscriptSource): ToolIndex {
   if (a.streaming) scanToolCalls(a.streaming, called);
   const live = new Map<string, LiveTool>();
   for (const t of a.tools) live.set(t.toolCallId, t);
-  return { results, called, live };
+  return { results, called, live, durations: a.toolDurations };
 }

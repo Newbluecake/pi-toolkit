@@ -295,7 +295,7 @@ export interface RunTranscriptProps {
  */
 export type TranscriptSource = Pick<
   AgentState,
-  "key" | "items" | "streaming" | "tools" | "history" | "historyError" | "hasMore" | "paging"
+  "key" | "items" | "streaming" | "tools" | "toolDurations" | "history" | "historyError" | "hasMore" | "paging"
 >;
 
 export interface TranscriptProps {

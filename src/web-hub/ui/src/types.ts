@@ -63,6 +63,10 @@ export interface LiveTool {
   readonly isError?: boolean;
   readonly done: boolean;
   readonly truncated?: boolean;
+  /** Tool-duration plan: browser-clock epoch ms of the `tool_execution_start` receipt —
+   *  elapsed for a RUNNING tool is derived purely browser-side (never mixed with the agent
+   * clock). Absent for tools whose start frame wasn't seen (fresh attach, snapshot inflight). */
+  readonly seenAt?: number;
 }
 
 export type ItemKind = "message" | "custom" | "compaction" | "branch_summary" | "model_change";
@@ -101,6 +105,12 @@ export interface AgentState {
   readonly lastSeq: number;
   readonly streaming: Record<string, unknown> | null;
   readonly tools: readonly LiveTool[];
+  /** Tool-duration plan: toolCallId → durationMs (agent clock), merged from live
+   *  `tool_execution_end.durationMs` frames and history `subagent:web-tool-timing` entries.
+   *  Reducer-internal-ish (like `keys`/`entryIds`, components read it only through
+   *  `TranscriptSource`/`toolView`), but it rides `TranscriptSource` so both transcript
+   *  surfaces (main + run drawer) feed their tool cards. */
+  readonly toolDurations?: ReadonlyMap<string, number>;
   readonly history: HistoryState;
   readonly historyError?: string;
   readonly hasMore: boolean;
@@ -159,6 +169,7 @@ export interface RunTxState {
   readonly uid: number;
   readonly streaming: Record<string, unknown> | null;
   readonly tools: readonly LiveTool[];
+  readonly toolDurations?: ReadonlyMap<string, number>;
   readonly history: HistoryState;
   readonly historyError?: string;
   /** §3.6 denial reason (`not_persisted` …) — error states and disabled "load older" paging. */
@@ -565,6 +576,12 @@ export interface ToolView {
   readonly partial?: string;
   readonly result?: string;
   readonly truncated?: boolean;
+  /** Tool-duration plan: final duration (agent clock) for done/error cards; absent = unknown
+   *  (no chip). */
+  readonly durationMs?: number;
+  /** Tool-duration plan: browser-clock epoch ms for RUNNING cards (ticking elapsed); absent =
+   *  unknown (no chip until it finishes). */
+  readonly runningSince?: number;
 }
 
 /** ui-design.md §3.2's run/agent state vocabulary — one shared enum for cards, pills, fleet rows and tool cards. */

@@ -14,7 +14,8 @@ import { resultText } from "./state.js";
 /**
  * @typedef {{ toolCallId: string, toolName: string, args: unknown,
  *   state: "running" | "done" | "error" | "pending",
- *   partial?: string, result?: string, truncated?: boolean }} ToolView
+ *   partial?: string, result?: string, truncated?: boolean,
+ *   durationMs?: number, runningSince?: number }} ToolView
  */
 
 const SUMMARY_KEYS = ["command", "path", "file_path", "pattern", "query", "url", "description", "prompt"];
@@ -44,13 +45,16 @@ export function safeJson(v, pretty) {
 
 /**
  * Build a ToolView from a transcript toolCall block + optional toolResult
- * message + optional live tool state (from `tool_execution_*`).
+ * message + optional live tool state (from `tool_execution_*`) + the optional
+ * toolCallId → durationMs map (tool-duration plan: live `tool_execution_end.durationMs`
+ * frames and history `subagent:web-tool-timing` entries merged by the reducer).
  * @param {any} call  `{ id, name, arguments }` content block (may be undefined for orphan results)
  * @param {any} [resultMsg]  toolResult message
  * @param {any} [live]  LiveTool
+ * @param {ReadonlyMap<string, number>} [durations]  toolCallId → durationMs (agent clock)
  * @returns {ToolView}
  */
-export function toolView(call, resultMsg, live) {
+export function toolView(call, resultMsg, live, durations) {
   const toolCallId = String(call?.id ?? resultMsg?.toolCallId ?? live?.toolCallId ?? "");
   const toolName = String(call?.name ?? resultMsg?.toolName ?? live?.toolName ?? "tool");
   const args = call?.arguments ?? live?.args ?? (call?.partialJson ? call.partialJson : undefined);
@@ -64,10 +68,16 @@ export function toolView(call, resultMsg, live) {
     if (live.done) {
       view.state = live.isError ? "error" : "done";
       view.result = resultText(live.result);
-    } else view.state = "running";
+    } else {
+      view.state = "running";
+      // browser-clock receipt: the ticking chip computes elapsed against a local ticker's now
+      if (typeof live.seenAt === "number" && Number.isFinite(live.seenAt)) view.runningSince = live.seenAt;
+    }
     if (typeof live.partial === "string" && !live.done) view.partial = live.partial;
     if (live.truncated === true) view.truncated = true;
   }
+  const dur = durations?.get(toolCallId);
+  if (view.state !== "running" && typeof dur === "number" && Number.isFinite(dur) && dur >= 0) view.durationMs = dur;
   if (!view.truncated && /\[truncated\b/i.test(view.result ?? "")) view.truncated = true;
   return view;
 }

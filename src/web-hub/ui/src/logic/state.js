@@ -49,7 +49,8 @@
  * @typedef {{ epoch: string, open: any[], closed: any[] }} DialogsState
  * @typedef {import("./control.js").PendingItem} PendingCtlItem
  * @typedef {{ toolCallId: string, toolName: string, args: unknown, partial?: string,
- *   result?: unknown, isError?: boolean, done: boolean, truncated?: boolean }} LiveTool
+ *   result?: unknown, isError?: boolean, done: boolean, truncated?: boolean,
+ *   seenAt?: number }} LiveTool
  * @typedef {{ id: string, kind: "message" | "custom" | "compaction" | "branch_summary" | "model_change",
  *   entryId?: string | undefined, seq?: number | undefined, key?: string | undefined, message?: any, entry?: any,
  *   truncated?: boolean | undefined }} Item
@@ -57,6 +58,7 @@
  * @typedef {{ active: number, terminal: number }} FleetOmitted
  * @typedef {{ runId: string, tapId?: string | undefined, lastSeq: number, items: Item[],
  *   keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[],
+ *   toolDurations: Map<string, number>,
  *   history: "none" | "waiting" | "loaded" | "error", historyError?: string | undefined,
  *   reason?: string | undefined, hasMore: boolean, oldestEntryId?: string | undefined, paging: boolean,
  *   terminal: boolean, status: string, live: boolean, source?: "live" | "file" | undefined,
@@ -67,6 +69,7 @@
  *   session?: any, status?: any, prompts: Prompt[], fleet: any[],
  *   items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number,
  *   lastSeq: number, streaming: any | null, tools: LiveTool[],
+ *   toolDurations: Map<string, number>,
  *   history: "none" | "waiting" | "loaded" | "error", historyError?: string | undefined,
  *   hasMore: boolean, oldestEntryId?: string | undefined, paging: boolean,
  *   needsResync: boolean, sub: Sub | null, abandoned: boolean,
@@ -85,7 +88,7 @@
  *   spawns: import("../../../protocol/spawn.js").SpawnsPayload | null,
  *   removed: ReadonlySet<string>, synced: boolean,
  * }} State
- * @typedef {{ event: string, data: any, id?: number }} Msg
+ * @typedef {{ event: string, data: any, id?: number, at?: number }} Msg
  */
 import { pendingTransition } from "./control.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
@@ -244,6 +247,7 @@ function newAgent(card) {
     lastSeq: -1,
     streaming: null,
     tools: [],
+    toolDurations: new Map(),
     history: "none",
     hasMore: false,
     paging: false,
@@ -334,7 +338,11 @@ function sessionFrameStale(a, d) {
 export function reduce(s, msg) {
   if (!msg || typeof msg.event !== "string") return s;
   const d = msg.data && typeof msg.data === "object" ? msg.data : {};
-  const next = reduceInner(s, msg.event, d);
+  // Tool-duration plan: a caller-stamped browser-clock receipt time (tests pass `msg.at` for
+  // determinism; SSE dispatch leaves it undefined and takes Date.now() HERE — one read per
+  // message, never inside eventCore, so the reducer stays a pure (state, msg, at) function).
+  const at = typeof msg.at === "number" && Number.isFinite(msg.at) ? msg.at : Date.now();
+  const next = reduceInner(s, msg.event, d, at);
   if (typeof msg.id === "number" && Number.isFinite(msg.id) && next.lastEventId !== msg.id) {
     return { ...next, lastEventId: msg.id };
   }
@@ -345,9 +353,10 @@ export function reduce(s, msg) {
  * @param {State} s
  * @param {string} event
  * @param {any} d
+ * @param {number} at browser-clock epoch ms (tool `seenAt` stamping)
  * @returns {State}
  */
-function reduceInner(s, event, d) {
+function reduceInner(s, event, d, at) {
   const key = typeof d.agentKey === "string" ? d.agentKey : undefined;
   switch (event) {
     // ---------------------------------------------------------------- global
@@ -505,7 +514,7 @@ function reduceInner(s, event, d) {
       if (!key || typeof d.seq !== "number" || !d.e || typeof d.e.type !== "string") return s;
       // R2-2: ev shares history's gating — abandoned attempts' frames and stale-session frames
       // are dropped instead of polluting the retained transcript.
-      return updateAgent(s, key, (a) => (a.abandoned || sessionFrameStale(a, d) ? a : applyEv(a, d.seq, d.e)));
+      return updateAgent(s, key, (a) => (a.abandoned || sessionFrameStale(a, d) ? a : applyEv(a, d.seq, d.e, at)));
     case "append":
       if (!key || !Array.isArray(d.entries)) return s;
       // R2-2: same standard gate as history (abandoned / stale session) ahead of the existing
@@ -532,7 +541,7 @@ function reduceInner(s, event, d) {
         return s;
       return updateAgent(s, key, (a) => {
         if (!a.runTx || a.runTx.runId !== d.runId) return a;
-        const tx = applyRunEv(a.runTx, d);
+        const tx = applyRunEv(a.runTx, d, at);
         return tx === a.runTx ? a : { ...a, runTx: tx };
       });
     case "run_end":
@@ -845,7 +854,8 @@ function sameSession(a, b) {
 function applySession(a, session) {
   const card = { ...a.card, session };
   if (sameSession(a.session, session) || a.session === undefined) return { ...a, session, card };
-  if (a.history === "none") return { ...a, session, card, items: [], keys: new Set(), entryIds: new Set() };
+  if (a.history === "none")
+    return { ...a, session, card, items: [], keys: new Set(), entryIds: new Set(), toolDurations: new Map() };
   return {
     ...a,
     session,
@@ -856,6 +866,7 @@ function applySession(a, session) {
     lastSeq: -1,
     streaming: null,
     tools: [],
+    toolDurations: new Map(),
     history: "waiting",
     hasMore: false,
     oldestEntryId: undefined,
@@ -895,9 +906,12 @@ function entryItem(entry) {
 
 /**
  * Build items from entries, skipping ones already present (entry id, or
- * non-custom messageKey).
+ * non-custom messageKey). Tool-duration plan: `custom` entries carrying a `timing` map
+ * (the projected `subagent:web-tool-timing` tombstones) still render nothing, but their
+ * toolCallId → durationMs pairs are collected into `durations` (this batch only — callers
+ * own the merge) so history-reloaded tool cards can show their durations.
  * @param {AgentState} a @param {any[]} entries
- * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number }}
+ * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, durations: Map<string, number> }}
  */
 function buildItems(a, entries) {
   const keys = new Set(a.keys);
@@ -905,9 +919,17 @@ function buildItems(a, entries) {
   let uid = a.uid;
   /** @type {Item[]} */
   const items = [];
+  /** @type {Map<string, number>} */
+  const durations = new Map();
   for (const entry of entries) {
     if (!entry || typeof entry.id !== "string" || entryIds.has(entry.id)) continue;
     entryIds.add(entry.id);
+    if (entry.type === "custom" && entry.timing && typeof entry.timing === "object") {
+      for (const [id, ms] of Object.entries(entry.timing)) {
+        if (typeof id === "string" && id !== "" && typeof ms === "number" && Number.isFinite(ms) && ms >= 0)
+          durations.set(id, ms);
+      }
+    }
     const it = entryItem(entry);
     if (!it) continue;
     if (it.key !== undefined) {
@@ -916,7 +938,7 @@ function buildItems(a, entries) {
     }
     items.push({ ...it, id: `e:${entry.id}:${uid++}` });
   }
-  return { items, keys, entryIds, uid };
+  return { items, keys, entryIds, uid, durations };
 }
 
 // ---------------------------------------------------------------------------
@@ -968,6 +990,7 @@ function historyCore(_c, d) {
     lastSeq: fromSeq - 1,
     streaming: inflight?.message ? cloneMessage(inflight.message) : null,
     tools,
+    toolDurations: built.durations,
     hasMore: d.hasMore === true,
     oldestEntryId: typeof d.oldestEntryId === "string" ? d.oldestEntryId : undefined,
   };
@@ -975,17 +998,22 @@ function historyCore(_c, d) {
 
 /**
  * One older page prepends its entries ahead of the existing items; dedupe state carries over.
- * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, oldestEntryId?: string | undefined }} c
+ * Tool-duration plan: timing entries in the older page MERGE into the existing duration map
+ * (same map reference kept when the page carried none — no-op ⇒ same-state stays intact).
+ * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, toolDurations: Map<string, number>, oldestEntryId?: string | undefined }} c
  * @param {any} d
- * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, hasMore: boolean, oldestEntryId: string | undefined }}
+ * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, toolDurations: Map<string, number>, hasMore: boolean, oldestEntryId: string | undefined }}
  */
 function pageCore(c, d) {
   const built = buildItems(c, Array.isArray(d.entries) ? d.entries : []);
+  const toolDurations =
+    built.durations.size === 0 ? c.toolDurations : new Map([...c.toolDurations, ...built.durations]);
   return {
     items: [...built.items, ...c.items],
     keys: built.keys,
     entryIds: built.entryIds,
     uid: built.uid,
+    toolDurations,
     hasMore: d.hasMore === true,
     oldestEntryId: typeof d.oldestEntryId === "string" ? d.oldestEntryId : c.oldestEntryId,
   };
@@ -1014,11 +1042,21 @@ function applyPage(a, d) {
   return { ...a, ...pageCore(a, d), paging: false };
 }
 
-/** SSE `append` (spike K7④): entries the event stream never carried. @param {AgentState} a @param {any[]} entries */
+/** SSE `append` (spike K7④): entries the event stream never carried. Timing entries fold
+ *  their durations in the same pass. @param {AgentState} a @param {any[]} entries */
 function appendEntries(a, entries) {
   const built = buildItems(a, entries);
-  if (built.items.length === 0 && built.entryIds.size === a.entryIds.size) return a;
-  return { ...a, items: [...a.items, ...built.items], keys: built.keys, entryIds: built.entryIds, uid: built.uid };
+  if (built.items.length === 0 && built.entryIds.size === a.entryIds.size && built.durations.size === 0) return a;
+  const toolDurations =
+    built.durations.size === 0 ? a.toolDurations : new Map([...a.toolDurations, ...built.durations]);
+  return {
+    ...a,
+    items: [...a.items, ...built.items],
+    keys: built.keys,
+    entryIds: built.entryIds,
+    uid: built.uid,
+    toolDurations,
+  };
 }
 
 /**
@@ -1045,12 +1083,12 @@ function messageItem(m, keys, id, seq) {
 // live events
 // ---------------------------------------------------------------------------
 
-/** @param {AgentState} a @param {number} seq @param {any} e @returns {AgentState} */
-function applyEv(a, seq, e) {
+/** @param {AgentState} a @param {number} seq @param {any} e @param {number} now browser-clock epoch ms */
+function applyEv(a, seq, e, now) {
   if (a.history !== "loaded") return a; // buffered by the hub and replayed after `history`
   if (seq <= a.lastSeq) return a; // duplicate (ring replay / buffered overlap)
   const jumped = a.lastSeq >= 0 && seq > a.lastSeq + 1;
-  const next = applyEvent({ ...a, lastSeq: seq }, seq, e);
+  const next = applyEvent({ ...a, lastSeq: seq }, seq, e, now);
   return jumped && !next.needsResync ? { ...next, needsResync: true } : next;
 }
 
@@ -1117,10 +1155,10 @@ function applyDelta(streaming, e) {
  * deliberately NOT here — they mutate the agent's session/card slots and stay in the
  * main-session wrapper below (a run transcript has no session slot; those events are ignored
  * for runs, exactly like they are when `a.session` is absent for the main session).
- * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[] }} c
- * @param {number} seq @param {any} e
+ * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[], toolDurations: Map<string, number> }} c
+ * @param {number} seq @param {any} e @param {number} now browser-clock epoch ms (running tools' `seenAt`)
  */
-function eventCore(c, seq, e) {
+function eventCore(c, seq, e, now) {
   switch (e.type) {
     case "message_start":
       if (e.message && e.message.role === "assistant") return { ...c, streaming: cloneMessage(e.message) };
@@ -1143,7 +1181,15 @@ function eventCore(c, seq, e) {
     }
     case "tool_execution_start": {
       if (typeof e.toolCallId !== "string") return c;
-      const tool = { toolCallId: e.toolCallId, toolName: String(e.toolName ?? ""), args: e.args, done: false };
+      // Tool-duration plan: browser-local receipt time (NOT the agent's startedAt — clocks are
+      // never assumed to agree); the ticking chip derives elapsed purely browser-side.
+      const tool = {
+        toolCallId: e.toolCallId,
+        toolName: String(e.toolName ?? ""),
+        args: e.args,
+        done: false,
+        seenAt: now,
+      };
       return { ...c, tools: [...c.tools.filter((t) => t.toolCallId !== e.toolCallId), tool] };
     }
     case "tool_execution_update": {
@@ -1156,8 +1202,17 @@ function eventCore(c, seq, e) {
     }
     case "tool_execution_end": {
       if (typeof e.toolCallId !== "string") return c;
+      // Tool-duration plan: the agent-clock duration lands in the durable per-tool map (the
+      // live tool entry is dropped at its toolResult message_end, the map is what survives —
+      // for this tab AND, via the persisted timing entries, for a freshly-attached one).
+      const dur =
+        typeof e.durationMs === "number" && Number.isFinite(e.durationMs) && e.durationMs >= 0
+          ? e.durationMs
+          : undefined;
+      const toolDurations = dur === undefined ? c.toolDurations : new Map(c.toolDurations).set(e.toolCallId, dur);
       return {
         ...c,
+        toolDurations,
         tools: upsertTool(c.tools, e, (t) => ({
           ...t,
           done: true,
@@ -1189,8 +1244,8 @@ function eventCore(c, seq, e) {
   }
 }
 
-/** @param {AgentState} a @param {number} seq @param {any} e @returns {AgentState} */
-function applyEvent(a, seq, e) {
+/** @param {AgentState} a @param {number} seq @param {any} e @param {number} now */
+function applyEvent(a, seq, e, now) {
   switch (e.type) {
     case "session_info_changed":
       if (typeof e.name === "string" && a.session) {
@@ -1215,8 +1270,9 @@ function applyEvent(a, seq, e) {
         uid: a.uid,
         streaming: a.streaming,
         tools: a.tools,
+        toolDurations: a.toolDurations,
       };
-      const next = eventCore(c, seq, e);
+      const next = eventCore(c, seq, e, now);
       return next === c ? a : { ...a, ...next };
     }
   }
@@ -1242,6 +1298,7 @@ function newRunTx(runId) {
     uid: 0,
     streaming: null,
     tools: [],
+    toolDurations: new Map(),
     history: "waiting",
     hasMore: false,
     paging: false,
@@ -1333,10 +1390,10 @@ function applyRunHistory(tx, d, fleetRows) {
  * a hole (`seq !== lastSeq + 1`) ⇒ set `needsResync` (useHub re-subscribes, rate-limited) and
  * drop the frame — the re-snapshot replays it; `seq === lastSeq + 1` ⇒ apply via the shared
  * event core and advance the watermark.
- * @param {RunTxState} tx @param {{ tapId?: unknown, seq: number, e: any }} d
+ * @param {RunTxState} tx @param {{ tapId?: unknown, seq: number, e: any }} d @param {number} now browser-clock epoch ms
  * @returns {RunTxState}
  */
-function applyRunEv(tx, d) {
+function applyRunEv(tx, d, now) {
   if (tx.history !== "loaded") return tx; // buffered hub-side until run_history
   if (tx.tapId !== undefined && d.tapId !== tx.tapId) return tx; // stale tap (pre-resync frame)
   if (d.seq <= tx.lastSeq) return tx; // duplicate
@@ -1348,8 +1405,9 @@ function applyRunEv(tx, d) {
     uid: tx.uid,
     streaming: tx.streaming,
     tools: tx.tools,
+    toolDurations: tx.toolDurations,
   };
-  const next = eventCore(c, d.seq, d.e);
+  const next = eventCore(c, d.seq, d.e, now);
   return { ...tx, ...next, lastSeq: d.seq };
 }
 

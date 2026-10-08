@@ -21,12 +21,14 @@
   any parse miss keeps the raw-JSON `<pre>` byte-identical to before.
 -->
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { buildEditDiff, foldRows } from "@logic/diff.js";
+import { formatDuration } from "@logic/duration.js";
 import { safeJson, summarizeArgs } from "@logic/tools.js";
 import type { ToolCardProps } from "../../contracts.js";
 import { useCoarseClamp } from "../../composables/useCoarseClamp.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { useTicker, type TickerHandle } from "../../composables/useTicker.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import PathText from "../preview/PathText.vue";
 import ClampToggle from "./ClampToggle.vue";
@@ -57,6 +59,66 @@ const endLabel = computed(() => {
 });
 
 const showFullPartial = ref(false);
+
+/* --- tool-duration chip (tool-duration plan, 2026-10) -------------------------------------
+ * A muted auto-scaled duration (`340ms`/`2.4s`/`12s`/`3m 05s`/`1h 02m`) after the badges.
+ * Done/error cards show the agent-measured `durationMs`; a running card ticks its elapsed at
+ * 1 Hz purely browser-side (`runningSince` is a BROWSER-clock receipt — agent and browser
+ * clocks are never mixed) off a `useTicker` created only while this card runs and disposed on
+ * unmount (same lifecycle as BashJobsPanel's live ticker). Unknown ⇒ NO element at all. */
+const durRunning = computed(
+  () =>
+    props.view.state === "running" &&
+    typeof props.view.runningSince === "number" &&
+    Number.isFinite(props.view.runningSince),
+);
+const nowMs = ref(0);
+let durTicker: TickerHandle | null = null;
+let stopNowBridge: (() => void) | null = null;
+
+function stopDurTicker(): void {
+  stopNowBridge?.();
+  stopNowBridge = null;
+  durTicker?.dispose();
+  durTicker = null;
+}
+
+watch(
+  durRunning,
+  (on) => {
+    if (on && durTicker === null) {
+      durTicker = useTicker({
+        doc: document,
+        win: window,
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: (h) => window.clearTimeout(h),
+        now: () => Date.now(),
+      });
+      nowMs.value = durTicker.now.value;
+      stopNowBridge = watch(durTicker.now, (v) => {
+        nowMs.value = v;
+      });
+    } else if (!on) {
+      stopDurTicker();
+    }
+  },
+  { immediate: true },
+);
+onUnmounted(stopDurTicker);
+
+const durText = computed<string | null>(() => {
+  const v = props.view;
+  if (v.state === "running") {
+    if (!durRunning.value) return null;
+    return formatDuration(nowMs.value - v.runningSince!);
+  }
+  if (v.state === "done" || v.state === "error") {
+    return typeof v.durationMs === "number" && Number.isFinite(v.durationMs) && v.durationMs >= 0
+      ? formatDuration(v.durationMs)
+      : null;
+  }
+  return null; // pending: never a chip
+});
 const partialTail = computed(() => tailLines(props.view.partial ?? ""));
 const displayedPartial = computed(() => (showFullPartial.value ? (props.view.partial ?? "") : partialTail.value.text));
 const partialIsTruncated = computed(() => !showFullPartial.value && partialTail.value.truncated);
@@ -113,6 +175,7 @@ const resultClamp = useCoarseClamp(() => resultPre.value, [() => props.view.resu
       <span v-if="endLabel" class="tool-end"
         ><span>{{ endLabel }}</span></span
       >
+      <span v-if="durText" class="tool-dur" translate="no">{{ durText }}</span>
       <AppIcon name="chev-right" class="icon icon-sm chev" />
     </summary>
     <div v-if="hasBody" class="tool-body">
