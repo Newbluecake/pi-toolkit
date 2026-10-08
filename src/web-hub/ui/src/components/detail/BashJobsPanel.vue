@@ -13,9 +13,9 @@
 
   Rows with a `tail` are buttons: clicking expands a `<pre>` with the tail as PLAIN TEXT
   (never `v-html` — source-scan bans it repo-wide; the tail is redacted agent-side but is
-  still arbitrary process output). The expanded list always ends with the sensitive-info
-  hint (D2a: 「命令与输出可能含敏感信息；脱敏仅尽力而为」— redaction is best-effort hygiene,
-  NOT a security boundary) and an `(+N more)` line when the wire carries `omitted`.
+  still arbitrary process output; redaction is best-effort hygiene, NOT a security boundary —
+  D2a, its standing UI hint was dropped by user ruling 2026-10-08). The expanded list ends
+  with an `(+N more)` line when the wire carries `omitted`.
 
   Elapsed 走时 baseline (D4, same grammar as FleetTree's tickBaselines): a Map keyed by job
   id holds `{elapsedMs, at}`; a new wire frame (the row's `elapsedMs` changes) resets `at` to
@@ -212,8 +212,6 @@ function toggleRow(row: BashJobRowWire): void {
       <li v-if="jobs.omitted !== undefined && jobs.omitted > 0" class="bj-more">
         {{ t("detail.bashJobsMore", { n: jobs.omitted }) }}
       </li>
-      <!-- D2a: fixed sensitive-info hint, always visible while the panel is expanded. -->
-      <li class="bj-sensitive">{{ t("detail.bashJobsSensitiveHint") }}</li>
     </ul>
   </section>
 </template>

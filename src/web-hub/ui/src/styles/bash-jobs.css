@@ -248,13 +248,6 @@
   font-size: var(--fs-xs);
 }
 
-/* D2a: fixed sensitive-info hint at the expanded list's foot — always visible while open. */
-.bj-sensitive {
-  padding: 3px 0 3px calc(16px + var(--sp-2));
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-}
-
 /* ≤480px (same reflow ruling as `.wt-label`): the command drops to its own full-width line
  * in smaller muted type so a long redacted command never overflows the panel; DOM order
  * stays untouched (the cmd is simply ordered last and given a full flex-basis). */

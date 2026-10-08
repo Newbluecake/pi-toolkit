@@ -56,7 +56,7 @@ const detail = {
   // bash-jobs-panel plan §3 包 B (D4): the background bash-jobs panel. Compact inline markers
   // (summary segments, status/exit/grace/bytes/freshness tokens) stay English-token-only in
   // BOTH locales per the AGENTS.md UI-text rule — zh keeps them byte-identical; only the
-  // aria label and the sensitive-info hint get real translations.
+  // aria label gets a real translation.
   bashJobsTitle: "bash",
   bashJobsSummary: "Background bash jobs: {running} running, {done} done, {failed} failed",
   bashJobsRunning: "{n} running",
@@ -69,8 +69,6 @@ const detail = {
   bashJobsTailAge: "tail {n}s old",
   bashJobsUnavailable: "unavailable",
   bashJobsMore: "(+{n} more)",
-  bashJobsSensitiveHint:
-    "Commands and output may contain sensitive information; redaction is best-effort only, not a security boundary.",
   todoTitle: "Tasks {total} · {done} done · {active} active",
   todoToggleAria: "Toggle the task list",
   todoStatusPending: "Pending",

@@ -212,10 +212,10 @@ describe("BashJobsPanel.vue — expanded rows (D4)", () => {
     expectToken("orphaned", "orphaned", false);
   });
 
-  it("omitted ⇒ `(+N more)`; sensitive hint always visible while open; no logPath/CopyButton", async () => {
+  it("omitted ⇒ `(+N more)`; no sensitive hint (dropped 2026-10-08); no logPath/CopyButton", async () => {
     const wrapper = await openPanel(wire([row()], { omitted: 7 }));
     expect(wrapper.find(".bj-more").text()).toBe("(+7 more)");
-    expect(wrapper.find(".bj-sensitive").text()).toContain("redaction is best-effort");
+    expect(wrapper.find(".bj-sensitive").exists()).toBe(false);
     expect(wrapper.html()).not.toContain("logPath");
     expect(wrapper.findAll("button").every((b) => !b.classes().includes("copy-btn"))).toBe(true);
     // the only buttons are the summary toggle and the per-row tail toggles
