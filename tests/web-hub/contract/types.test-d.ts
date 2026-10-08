@@ -51,6 +51,12 @@ import {
 } from "../../../src/web-hub/protocol/preview.js";
 import { PREVIEW_ABS_HUB_CAP, PREVIEW_DIR_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type {
+  PreviewDirOutcome,
+  PreviewOutcome,
+  PreviewProbeOutcome,
+  PreviewTransport,
+} from "../../../src/web-hub/ui/src/transport/types.js";
+import type {
   AgentFrame,
   BashJobRowWire,
   BashJobsWire,
@@ -555,5 +561,41 @@ describe("types.test-d.ts (web-hub-preview dir-plan P0 protocol surface)", () =>
   it("dir/abs hub caps are the frozen literal strings (§1.2)", () => {
     expectTypeOf<typeof PREVIEW_DIR_HUB_CAP>().toEqualTypeOf<"preview.dir.v1">();
     expectTypeOf<typeof PREVIEW_ABS_HUB_CAP>().toEqualTypeOf<"preview.abs.v1">();
+  });
+});
+
+// web-hub-preview dir-plan §1.3 layer 2 / §5 P2: the TRANSPORT-side half of the contract
+// (the protocol-side pins live in the describe above). NOTE: importing the UI's transport
+// types pulls the `@protocol/*` alias and the DOM `Blob`/`AbortSignal` globals into this
+// tsc pass — `tsconfig.typecheck.json` carries the matching `paths` entry and DOM lib for
+// exactly this file; the production passes (`tsconfig.json`, the Vite build) are untouched,
+// so a src file accidentally using DOM types still fails the first (DOM-less) pass.
+describe("types.test-d.ts (web-hub-preview dir-plan P2 transport surface)", () => {
+  it("PreviewProbeOutcome's results element type IS the protocol's PreviewProbeKind (§1.3 single source, no local union)", () => {
+    type Results = Extract<PreviewProbeOutcome, { ok: true }>["results"];
+    expectTypeOf<Results[number]>().toEqualTypeOf<PreviewProbeKind>();
+    // and the full array shape is a ReadonlyArray of exactly that
+    expectTypeOf<Results>().toEqualTypeOf<ReadonlyArray<PreviewProbeKind>>();
+  });
+
+  it("PreviewDirOutcome's dir variant carries listing: PreviewDirListing (the protocol's own type)", () => {
+    type Dir = Extract<PreviewDirOutcome, { ok: true; kind: "dir" }>;
+    expectTypeOf<Dir["listing"]>().toEqualTypeOf<PreviewDirListing>();
+    // the full success union is exactly image | text | dir; PreviewOutcome (fetch's declared
+    // return until P3 rewrites its consumer) is the file-only subset image | text.
+    expectTypeOf<Extract<PreviewDirOutcome, { ok: true }>["kind"]>().toEqualTypeOf<"image" | "text" | "dir">();
+    expectTypeOf<Extract<PreviewOutcome, { ok: true }>["kind"]>().toEqualTypeOf<"image" | "text">();
+  });
+
+  it("fetch's dir and probe's dirs are OPTIONAL additive request members (pre-P2 shapes stay assignable)", () => {
+    type FetchReq = Parameters<NonNullable<PreviewTransport["fetch"]>>[0];
+    type ProbeReq = Parameters<NonNullable<PreviewTransport["probe"]>>[0];
+    expectTypeOf<FetchReq["dir"]>().toEqualTypeOf<true | undefined>();
+    expectTypeOf<ProbeReq["dirs"]>().toEqualTypeOf<true | undefined>();
+    // a caller omitting the members (the pre-dir-plan call shapes) is still fine.
+    type FetchReqNoDir = Omit<FetchReq, "dir">;
+    type ProbeReqNoDirs = Omit<ProbeReq, "dirs">;
+    expectTypeOf<FetchReqNoDir>().toMatchTypeOf<FetchReq>();
+    expectTypeOf<ProbeReqNoDirs>().toMatchTypeOf<ProbeReq>();
   });
 });

@@ -13,7 +13,7 @@ import {
   PROBE_BATCH_BYTES,
   PROBE_LRU_CAP,
 } from "../../../src/web-hub/ui/src/logic/previewProbe.js";
-import { PREVIEW_PROBE_MAX_PATHS } from "@protocol/preview.ts";
+import { PREVIEW_PROBE_KINDS, PREVIEW_PROBE_MAX_PATHS } from "@protocol/preview.ts";
 
 describe("PreviewProbeStore — states", () => {
   it("unknown ⇒ undefined; markPending stages only unknown paths (dedup within the call)", () => {
@@ -116,6 +116,27 @@ describe("parseProbeResults — 200-body contract", () => {
   it("accepts {kind} objects in request order", () => {
     const out = parseProbeResults({ results: [{ kind: "text" }, { kind: "image" }, { kind: "missing" }] }, 3);
     expect(out).toEqual({ ok: true, kinds: ["text", "image", "missing"] });
+  });
+
+  // dir-plan §1.3 (P2): "dir" joins the wire kind set — the parser judges membership by the
+  // protocol's single-source PREVIEW_PROBE_KINDS tuple; whether a dirs-less request SHOULD
+  // see it is the clients' fold, never the parser's business.
+  it('accepts "dir" entries (a dirs:true probe\'s directory answers)', () => {
+    const out = parseProbeResults(
+      { results: [{ kind: "text" }, { kind: "dir" }, { kind: "missing" }, { kind: "image" }] },
+      4,
+    );
+    expect(out).toEqual({ ok: true, kinds: ["text", "dir", "missing", "image"] });
+  });
+
+  it("traverses PREVIEW_PROBE_KINDS: every tuple member accepted, any other string rejected", () => {
+    expect([...PREVIEW_PROBE_KINDS]).toEqual(["text", "image", "dir", "missing"]);
+    for (const kind of PREVIEW_PROBE_KINDS) {
+      expect(parseProbeResults({ results: [{ kind }] }, 1)).toEqual({ ok: true, kinds: [kind] });
+    }
+    for (const kind of ["binary", "DIR", "", "tex", "folder", "dirr"]) {
+      expect(parseProbeResults({ results: [{ kind }] }, 1)).toEqual({ ok: false, error: "E_BAD_RESPONSE" });
+    }
   });
 
   it("rejects: non-object body, missing/non-array results, length mismatch, bad kind, plain strings", () => {

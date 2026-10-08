@@ -1,13 +1,19 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { parseMarkdown } from "../../../src/web-hub/ui/src/logic/markdown.js";
+import { findPathRefsRef } from "./fixtures/preview-findpathrefs-ref.js";
 import {
+  __previewScanStats,
+  __resetPreviewScanStats,
   checkPreviewHeaders,
+  childPreviewPath,
   classifyPreviewError,
   clientImageBudget,
   countMdNodes,
   findPathRefs,
+  formatPreviewBytes,
   isMarkdownPath,
+  parentPreviewPath,
   parsePreviewDims,
   pathRefOfCode,
   prepareMarkdownPreview,
@@ -871,5 +877,706 @@ describe("logic/preview.js markdown pure functions (dir-plan §4.1/§4.3, PM pac
       expect(countMdNodes(null)).toBe(0);
       expect(countMdNodes([{ type: "paragraph", children: [] }], 0)).toBe(0); // cap ≤ 0 ⇒ 0
     });
+  });
+});
+
+/* ===========================================================================
+ * dir-plan v3.1 §2.5/§5 P2 additions — every block above this marker is FROZEN (旧用例一条
+ * 不改). New groups: abs scope, dirs scope (A5 a/b/c), §2.5.3 backticks, navigation truth
+ * tables, the header gate, formatPreviewBytes, the §2.5.2 operation-count performance gate
+ * and the differential correctness gates (legacy vs the frozen pre-P2 reference in
+ * fixtures/preview-findpathrefs-ref.js; abs/dirs/abs+dirs vs the naive in-file oracle).
+ * ======================================================================== */
+
+const ABS_SCOPE = { ...SCOPE, abs: true } as typeof SCOPE & { abs: true };
+const DIRS_SCOPE = { ...SCOPE, dirs: true } as typeof SCOPE & { dirs: true };
+const BOTH_SCOPE = { ...SCOPE, abs: true, dirs: true } as typeof SCOPE & { abs: true; dirs: true };
+
+describe("logic/preview.js findPathRefs — abs scope (dir-plan §2.5.1 C4, U4)", () => {
+  it("cwd-external absolute paths become clickable; protocol shape still required (≥2 segments)", () => {
+    const segs = findPathRefs("see /etc/hostname now", ABS_SCOPE) as Seg[];
+    expect(concat(segs)).toBe("see /etc/hostname now");
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "/etc/hostname", path: "/etc/hostname" }]);
+    const segs2 = findPathRefs("/tmp/x.log done", ABS_SCOPE) as Seg[];
+    expect(refs(segs2).map((r) => r.path)).toEqual(["/tmp/x.log"]);
+  });
+
+  it("one-segment paths stay unclickable even under abs (/help, /reload never become candidates)", () => {
+    expect(refs(findPathRefs("see /single now", ABS_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("/help /reload", ABS_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("invalid segments (empty / . / ..) and NUL stay unclickable under abs", () => {
+    expect(refs(findPathRefs("x /a/../b y", ABS_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("x //a/b y", ABS_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("x /a/./b y", ABS_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("cwd === null: absolute paths clickable, relative recognition stays off", () => {
+    const noCwd = { ...ABS_SCOPE, cwd: null };
+    expect(refs(findPathRefs("/etc/hostname", noCwd) as Seg[]).map((r) => r.path)).toEqual(["/etc/hostname"]);
+    expect(refs(findPathRefs('"path": "src/foo.ts"', noCwd) as Seg[])).toEqual([]);
+  });
+
+  it("the marker/cwd rules become moot but keep working; uploads:false does not narrow abs", () => {
+    const noUploads = { ...ABS_SCOPE, uploads: false };
+    expect(refs(findPathRefs(UPLOAD_PATH, noUploads) as Seg[]).map((r) => r.path)).toEqual([UPLOAD_PATH]);
+    // legacy + uploads:false keeps the cwd route (only the marker route is disabled)
+    expect(refs(findPathRefs("/home/u/proj/a.ts", { ...SCOPE, uploads: false }) as Seg[]).map((r) => r.path)).toEqual([
+      "/home/u/proj/a.ts",
+    ]);
+    expect(refs(findPathRefs(UPLOAD_PATH, { ...SCOPE, uploads: false }) as Seg[])).toEqual([]);
+  });
+
+  it("start contexts unchanged: mid-word still rejected, = and ( still openers", () => {
+    expect(refs(findPathRefs("x/etc/hostname", ABS_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("open=/etc/hostname,", ABS_SCOPE) as Seg[]).map((r) => r.path)).toEqual(["/etc/hostname"]);
+    expect(refs(findPathRefs("(/etc/hostname)", ABS_SCOPE) as Seg[]).map((r) => r.path)).toEqual(["/etc/hostname"]);
+  });
+
+  it("pathRefOfCode: any protocol-valid absolute code span is clickable under abs", () => {
+    expect(pathRefOfCode("/etc/hostname", ABS_SCOPE)).toEqual({ text: "/etc/hostname", path: "/etc/hostname" });
+    expect(pathRefOfCode("/etc/hostname:4", ABS_SCOPE)).toEqual({
+      text: "/etc/hostname:4",
+      path: "/etc/hostname",
+      line: 4,
+    });
+    // the trailing-slash form is a dirs (A5) rule, not an abs rule — stays rejected here
+    expect(pathRefOfCode("/etc/dir/", ABS_SCOPE)).toBeNull();
+  });
+});
+
+describe("logic/preview.js findPathRefs — dirs scope (dir-plan A5 (a)/(b)/(c))", () => {
+  it("(a) an absolute path with ONE trailing slash loses it in the request path, keeps it in the display", () => {
+    const segs = findPathRefs("/home/u/proj/dir/", DIRS_SCOPE) as Seg[];
+    expect(concat(segs)).toBe("/home/u/proj/dir/");
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "/home/u/proj/dir/", path: "/home/u/proj/dir" }]);
+  });
+
+  it("(a) trailing slash also works outside cwd under abs+dirs", () => {
+    const segs = findPathRefs("see /etc/nginx/ now", BOTH_SCOPE) as Seg[];
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "/etc/nginx/", path: "/etc/nginx" }]);
+  });
+
+  it("(a) more than one trailing slash is NOT folded — the second stays in the (invalid) path", () => {
+    expect(refs(findPathRefs("/home/u/proj/dir//", DIRS_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("(a) a slash-only tail right after the first segment never yields an empty/1-segment path", () => {
+    expect(refs(findPathRefs("x /home/ y", DIRS_SCOPE) as Seg[])).toEqual([]); // "/home/" → "/home" = 1 segment
+  });
+
+  it("(b) a relative path ENDING with a slash resolves without it; display keeps the slash", () => {
+    const segs = findPathRefs('"src/components/"', DIRS_SCOPE) as Seg[];
+    expect(concat(segs)).toBe('"src/components/"');
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "src/components/", path: "/home/u/proj/src/components" }]);
+    const single = findPathRefs('"src/"', DIRS_SCOPE) as Seg[]; // guard case: the slash IS s0
+    expect(refs(single)).toEqual([{ kind: "ref", text: "src/", path: "/home/u/proj/src" }]);
+  });
+
+  it("(c) paired-quote no-extension relative paths resolve (double, single, backtick)", () => {
+    expect(refs(findPathRefs('"src/components"', DIRS_SCOPE) as Seg[])).toEqual([
+      { kind: "ref", text: "src/components", path: "/home/u/proj/src/components" },
+    ]);
+    expect(refs(findPathRefs("'src/components'", DIRS_SCOPE) as Seg[])).toEqual([
+      { kind: "ref", text: "src/components", path: "/home/u/proj/src/components" },
+    ]);
+    expect(refs(findPathRefs("`src/components`", DIRS_SCOPE) as Seg[])).toEqual([
+      { kind: "ref", text: "src/components", path: "/home/u/proj/src/components" },
+    ]);
+  });
+
+  it("(c) the pair must CLOSE at the run's stripped end — mismatched quotes do not count", () => {
+    expect(refs(findPathRefs("\"src/components'", DIRS_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs('"src/components x"', DIRS_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("bare no-extension relative paths are STILL not recognized (A5: 裸写 src/components 不识别)", () => {
+    expect(refs(findPathRefs("bare src/components here", DIRS_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("bare src/components here", BOTH_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("extension-shaped relative paths keep their pre-dirs behavior under dirs", () => {
+    const segs = findPathRefs(`"path": "src/foo.ts"`, DIRS_SCOPE) as Seg[];
+    expect(refs(segs).map((r) => r.path)).toEqual(["/home/u/proj/src/foo.ts"]);
+  });
+
+  it(":line[:col] stays display-only for dirs candidates too (b) and (c)", () => {
+    const b = findPathRefs('"src/components/:12"', DIRS_SCOPE) as Seg[];
+    expect(refs(b)).toEqual([
+      { kind: "ref", text: "src/components/:12", path: "/home/u/proj/src/components", line: 12 },
+    ]);
+    const c = findPathRefs("`src/foo.ts:12:3`", DIRS_SCOPE) as Seg[];
+    expect(refs(c)).toEqual([
+      { kind: "ref", text: "src/foo.ts:12:3", path: "/home/u/proj/src/foo.ts", line: 12, col: 3 },
+    ]);
+  });
+
+  it("dirs alone does NOT make cwd-external absolute paths clickable (that is the abs cap)", () => {
+    expect(refs(findPathRefs("see /etc/hostname now", DIRS_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("pathRefOfCode under dirs: no-extension + trailing-slash relative code spans resolve", () => {
+    expect(pathRefOfCode("src/components", DIRS_SCOPE)).toEqual({
+      text: "src/components",
+      path: "/home/u/proj/src/components",
+    });
+    expect(pathRefOfCode("src/a/", DIRS_SCOPE)).toEqual({ text: "src/a/", path: "/home/u/proj/src/a" });
+    expect(pathRefOfCode("src/", DIRS_SCOPE)).toEqual({ text: "src/", path: "/home/u/proj/src" });
+    expect(pathRefOfCode("src/components:5", DIRS_SCOPE)).toEqual({
+      text: "src/components:5",
+      path: "/home/u/proj/src/components",
+      line: 5,
+    });
+    // guards: no slash, a URI scheme, a null cwd — all still rejected
+    expect(pathRefOfCode("components", DIRS_SCOPE)).toBeNull();
+    expect(pathRefOfCode("http://example.com/x", DIRS_SCOPE)).toBeNull();
+    expect(pathRefOfCode("src/components", { ...DIRS_SCOPE, cwd: null })).toBeNull();
+    expect(pathRefOfCode("src/components", { ...DIRS_SCOPE, cwd: "/" })).toBeNull();
+    // legacy scopes are untouched by the dirs rules
+    expect(pathRefOfCode("src/components", SCOPE)).toBeNull();
+    expect(pathRefOfCode("src/a/", SCOPE)).toBeNull();
+  });
+
+  it("pathRefOfCode under dirs: absolute code spans may carry one trailing slash", () => {
+    expect(pathRefOfCode("/home/u/proj/dir/", DIRS_SCOPE)).toEqual({
+      text: "/home/u/proj/dir/",
+      path: "/home/u/proj/dir",
+    });
+    expect(pathRefOfCode("/etc/dir/", BOTH_SCOPE)).toEqual({ text: "/etc/dir/", path: "/etc/dir" });
+  });
+});
+
+describe("logic/preview.js findPathRefs — §2.5.3 backticks (extended start set)", () => {
+  it("a backtick opens an ABSOLUTE candidate under abs/dirs (and still terminates it)", () => {
+    expect(refs(findPathRefs("`/etc/hostname`", ABS_SCOPE) as Seg[]).map((r) => r.path)).toEqual(["/etc/hostname"]);
+    expect(refs(findPathRefs("`/home/u/proj/dir/`", BOTH_SCOPE) as Seg[])).toEqual([
+      { kind: "ref", text: "/home/u/proj/dir/", path: "/home/u/proj/dir" },
+    ]);
+  });
+
+  it("prose `and/or` becomes a candidate (accepted cost — the probe answers missing)", () => {
+    expect(refs(findPathRefs("`and/or`", DIRS_SCOPE) as Seg[])).toEqual([
+      { kind: "ref", text: "and/or", path: "/home/u/proj/and/or" },
+    ]);
+  });
+
+  it("an UNPAIRED backtick does not recognize a relative candidate (foo`bar/baz)", () => {
+    expect(refs(findPathRefs("foo`bar/baz qux", DIRS_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("`src/foo.ts:12` keeps :12 in the display and drops it from the request path", () => {
+    const segs = findPathRefs("`src/foo.ts:12`", DIRS_SCOPE) as Seg[];
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "src/foo.ts:12", path: "/home/u/proj/src/foo.ts", line: 12 }]);
+  });
+
+  it("legacy scopes: a backtick is NOT a start char — behavior identical to today", () => {
+    expect(refs(findPathRefs("`/home/u/proj/a.ts`", SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("`src/components`", SCOPE) as Seg[])).toEqual([]);
+  });
+});
+
+describe("logic/preview.js previewScopeOf / scopeKeyOf — §2.5.1 abs/dirs caps", () => {
+  const session = { sessionId: "s1", cwd: "/home/u/proj" };
+  const base = { mode: "token" as const, hubCaps: ["preview.v1"], hasTransport: true, agentKey: "A", session };
+
+  it("previewScopeOf adds abs/dirs keys ONLY when the hub declares the caps", () => {
+    expect(previewScopeOf(base)).toEqual({ agentKey: "A", sessionId: "s1", cwd: "/home/u/proj", uploads: true });
+    expect(previewScopeOf({ ...base, hubCaps: ["preview.v1", "preview.abs.v1"] })).toEqual({
+      agentKey: "A",
+      sessionId: "s1",
+      cwd: "/home/u/proj",
+      uploads: true,
+      abs: true,
+    });
+    expect(previewScopeOf({ ...base, hubCaps: ["preview.v1", "preview.dir.v1"] })).toEqual({
+      agentKey: "A",
+      sessionId: "s1",
+      cwd: "/home/u/proj",
+      uploads: true,
+      dirs: true,
+    });
+    expect(previewScopeOf({ ...base, hubCaps: ["preview.v1", "preview.abs.v1", "preview.dir.v1"] })).toEqual({
+      agentKey: "A",
+      sessionId: "s1",
+      cwd: "/home/u/proj",
+      uploads: true,
+      abs: true,
+      dirs: true,
+    });
+  });
+
+  it("scopeKeyOf appends |abs / |dir for the flags — format unchanged when absent", () => {
+    expect(scopeKeyOf(SCOPE)).toBe("A|s1|/home/u/proj");
+    expect(scopeKeyOf(ABS_SCOPE)).toBe("A|s1|/home/u/proj|abs");
+    expect(scopeKeyOf(DIRS_SCOPE)).toBe("A|s1|/home/u/proj|dir");
+    expect(scopeKeyOf(BOTH_SCOPE)).toBe("A|s1|/home/u/proj|abs|dir");
+    // a cap change invalidates the key — the probe LRU partitions naturally
+    expect(scopeKeyOf(ABS_SCOPE)).not.toBe(scopeKeyOf(SCOPE));
+  });
+});
+
+describe("logic/preview.js checkPreviewHeaders — dir gate (dir-plan §1.3 fetch path)", () => {
+  const hdrs = (m: Record<string, string>) => ({ get: (n: string) => m[n] ?? null });
+
+  it("Kind: dir WITHOUT the opt-in ⇒ E_BAD_RESPONSE (a single-response contract violation)", () => {
+    expect(checkPreviewHeaders(hdrs({ [PREVIEW_HDR.kind]: "dir" }), {})).toEqual({
+      ok: false,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("Kind: dir WITH dir:true ⇒ ok dir — the body gate moves to the capped read + parser", () => {
+    expect(checkPreviewHeaders(hdrs({ [PREVIEW_HDR.kind]: "dir" }), { dir: true })).toEqual({
+      ok: true,
+      kind: "dir",
+    });
+  });
+
+  it("the dir flag never loosens the text/image paths (dir:true + Kind: text behaves as before)", () => {
+    const r = checkPreviewHeaders(
+      hdrs({
+        [PREVIEW_HDR.kind]: "text",
+        [PREVIEW_HDR.size]: "10",
+        [PREVIEW_HDR.truncated]: "0",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Length": "10",
+      }),
+      { dir: true },
+    );
+    expect(r).toEqual({ ok: true, kind: "text", size: 10, totalSize: 10, truncated: false });
+  });
+});
+
+describe("logic/preview.js childPreviewPath / parentPreviewPath — A3 navigation truth tables", () => {
+  it("childPreviewPath: joins one legal segment, normalizes the parent's trailing slash", () => {
+    expect(childPreviewPath("/home/u/proj", "a.ts")).toBe("/home/u/proj/a.ts");
+    expect(childPreviewPath("/home/u/proj/", "a.ts")).toBe("/home/u/proj/a.ts");
+    expect(childPreviewPath("/home", "u")).toBe("/home/u"); // one-segment parents are legal
+  });
+
+  it("childPreviewPath: rejects illegal names and non-absolute parents", () => {
+    for (const name of ["", ".", "..", "a/b", "a\0b"]) {
+      expect(childPreviewPath("/home/u", name)).toBeNull();
+    }
+    expect(childPreviewPath("home/u", "a")).toBeNull();
+    expect(childPreviewPath("/", "a")).toBeNull(); // "/" is never a listing parent
+    expect(childPreviewPath(undefined, "a")).toBeNull();
+    expect(childPreviewPath("/home/u", undefined)).toBeNull();
+  });
+
+  it('parentPreviewPath: walks up to ONE segment and stops ("/" itself is not listable)', () => {
+    expect(parentPreviewPath("/home/u/proj")).toBe("/home/u");
+    expect(parentPreviewPath("/home/u")).toBe("/home");
+    expect(parentPreviewPath("/home/u/proj/")).toBe("/home/u"); // trailing slash normalized
+    expect(parentPreviewPath("/home")).toBeNull(); // up would be "/"
+    expect(parentPreviewPath("/")).toBeNull();
+    expect(parentPreviewPath("home/u")).toBeNull();
+    expect(parentPreviewPath(42)).toBeNull();
+  });
+});
+
+describe("logic/preview.js formatPreviewBytes — A1 size column", () => {
+  it.each([
+    [0, "0 B"],
+    [1, "1 B"],
+    [512, "512 B"],
+    [1023, "1023 B"],
+    [1024, "1.0 KiB"],
+    [1536, "1.5 KiB"],
+    [2048, "2.0 KiB"],
+    [5 * 1024 * 1024, "5.0 MiB"],
+    [3 * 1024 ** 3, "3.0 GiB"],
+    [5 * 1024 ** 4, "5120.0 GiB"], // caps at GiB — a directory listing never reaches this anyway
+  ])("%i ⇒ %s", (n, expected) => {
+    expect(formatPreviewBytes(n)).toBe(expected);
+  });
+
+  it('non-finite / negative / non-number input degrades to "" (statPartial rows render nothing)', () => {
+    expect(formatPreviewBytes(undefined)).toBe("");
+    expect(formatPreviewBytes(null)).toBe("");
+    expect(formatPreviewBytes(-1)).toBe("");
+    expect(formatPreviewBytes(Number.NaN)).toBe("");
+    expect(formatPreviewBytes(Number.POSITIVE_INFINITY)).toBe("");
+    expect(formatPreviewBytes("12")).toBe("");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * §2.5.2's naive oracle (I3): an independent per-candidate reimplementation — every
+ * candidate's end P, validation and scope routing are recomputed from scratch with the
+ * protocol's own validatePreviewPath; nothing is memoized across candidates. It shares NO
+ * code with the live implementation except the protocol constants.
+ * ------------------------------------------------------------------------- */
+
+const O_TERMINATORS = new Set([
+  '"',
+  "'",
+  "<",
+  ">",
+  "(",
+  ")",
+  "[",
+  "]",
+  "{",
+  "}",
+  "|",
+  ",",
+  ";",
+  "`",
+  "，",
+  "。",
+  "；",
+  "：",
+  "！",
+  "？",
+  "、",
+  "）",
+  "」",
+  "』",
+  "】",
+  "》",
+]);
+const O_WS = /\s/;
+const O_START = new Set(["(", "[", "{", "<", '"', "'", "=", "（", "「", "『", "【", "《", "："]);
+const O_START_EXT = new Set([...O_START, "`"]);
+const O_TRAILING = /[.:!?]$/;
+const O_LINECOL = /:(\d+)(?::(\d+))?$/;
+const O_EXT_RE = /\.[A-Za-z0-9_-]{1,10}$/;
+const oTerm = (ch: string | undefined) => ch === undefined || O_WS.test(ch) || O_TERMINATORS.has(ch);
+const oWb = (ch: string | undefined, ss: Set<string>) => oTerm(ch) || (ch !== undefined && ss.has(ch));
+const oStartCtx = (t: string, i: number, ss: Set<string>) =>
+  i === 0 || (t[i - 1] !== undefined && (O_WS.test(t[i - 1]!) || ss.has(t[i - 1]!)));
+const oRelStartCtx = (t: string, i: number, ss: Set<string>) =>
+  i > 0 && t[i - 1] !== undefined && (O_WS.test(t[i - 1]!) || ss.has(t[i - 1]!));
+const oLooksLikeRelative = (cand: string) => {
+  const slash = cand.indexOf("/");
+  if (slash <= 0) return false;
+  if (cand.slice(0, slash).includes(":")) return false;
+  const lastSeg = cand.slice(cand.lastIndexOf("/") + 1);
+  const m = O_EXT_RE.exec(lastSeg);
+  return m !== null && lastSeg.length > m[0].length;
+};
+const oClickable = (path: string, scope: { abs?: true; dirs?: true; cwd: string | null; uploads: boolean }) => {
+  if (!validatePreviewPath(path)) return false;
+  if (scope.abs === true) return true;
+  if (scope.uploads === true && path.includes(PREVIEW_UPLOADS_MARKER)) return true;
+  const cwd = scope.cwd;
+  if (typeof cwd !== "string" || cwd === "" || cwd === "/") return false;
+  const base = cwd.endsWith("/") ? cwd.slice(0, -1) : cwd;
+  return base !== "" && base !== "/" && path.startsWith(`${base}/`);
+};
+/** the relative route's absolute-part prune (the impl's `lastBad < s0`), slow-scanned. */
+const oHasBadSeg = (t: string, s0: number, P: number) => {
+  let q = s0;
+  while (q < P) {
+    if (t[q] !== "/") {
+      q++;
+      continue;
+    }
+    let e = q + 1;
+    while (e < P && t[e] !== "/") e++;
+    const seg = t.slice(q + 1, e);
+    if (seg === "" || seg === "." || seg === "..") return true;
+    q = e;
+  }
+  return false;
+};
+
+function oracleFindPathRefs(text: string, scope: typeof SCOPE & { abs?: true; dirs?: true }): Seg[] {
+  const abs = scope.abs === true;
+  const dirs = scope.dirs === true;
+  const ss = abs || dirs ? O_START_EXT : O_START;
+  const cwd = scope.cwd;
+  const cwdPrefix =
+    typeof cwd === "string" && cwd !== "" && cwd !== "/" ? `${cwd.endsWith("/") ? cwd.slice(0, -1) : cwd}/` : null;
+  const cwdBase = cwdPrefix !== null ? cwdPrefix.slice(0, -1) : null;
+  const segments: Seg[] = [];
+  let refs = 0;
+  let textStart = 0;
+  let i = 0;
+  const n = text.length;
+  // per-run structure (terminator-free spans) — every candidate-level FACT is recomputed below
+  let spanEnd = -1;
+  let spanStrippedEnd = -1;
+  let spanLineColStart = -1;
+  let spanLine: number | undefined;
+  let spanCol: number | undefined;
+  let spanFirstSlash = -1;
+  let spanWordStart = -1;
+  while (i < n && refs < PREVIEW_MAX_REFS_PER_NODE) {
+    const slash = text.indexOf("/", i);
+    if (slash === -1) break;
+    if (slash >= spanEnd) {
+      let end = slash + 1;
+      while (end < n && !oTerm(text[end])) end++;
+      spanEnd = end;
+      let stripped = end;
+      while (stripped > slash + 1 && O_TRAILING.test(text[stripped - 1]!)) stripped--;
+      spanStrippedEnd = Math.max(slash + 1, stripped);
+      const m = O_LINECOL.exec(text.slice(slash, spanStrippedEnd));
+      if (m !== null && m.index > 0) {
+        spanLineColStart = slash + m.index;
+        spanLine = Number(m[1]);
+        spanCol = m[2] !== undefined ? Number(m[2]) : undefined;
+      } else {
+        spanLineColStart = -1;
+        spanLine = undefined;
+        spanCol = undefined;
+      }
+      spanFirstSlash = slash;
+      if (cwdPrefix !== null) {
+        let ws = slash;
+        while (ws > 0 && !oWb(text[ws - 1], ss)) ws--;
+        spanWordStart = ws;
+      } else {
+        spanWordStart = slash;
+      }
+    }
+    const strippedEnd = Math.max(spanStrippedEnd, slash + 1);
+    const hasLineCol = spanLineColStart !== -1 && slash < spanLineColStart;
+    // §2.5.2 ② — recomputed INDEPENDENTLY for THIS candidate (no shared run constants)
+    const p0 = hasLineCol ? spanLineColStart : strippedEnd;
+    const trailing = text[p0 - 1] === "/";
+    const P = dirs && !hasLineCol && p0 - 1 > slash && trailing ? p0 - 1 : p0;
+    if (oStartCtx(text, slash, ss) && slash < P && P - slash <= 4096) {
+      const path = text.slice(slash, P);
+      if (oClickable(path, scope)) {
+        if (textStart < slash) segments.push({ kind: "text", text: text.slice(textStart, slash) });
+        const seg = { kind: "ref", text: text.slice(slash, strippedEnd), path } as Seg;
+        if (hasLineCol) {
+          seg.line = spanLine;
+          if (spanCol !== undefined) seg.col = spanCol;
+        }
+        segments.push(seg);
+        refs++;
+        textStart = strippedEnd;
+        i = strippedEnd;
+        continue;
+      }
+    }
+    if (slash === spanFirstSlash && cwdPrefix !== null) {
+      const ws = spanWordStart;
+      if (ws < slash && oRelStartCtx(text, ws, ss) && P - ws <= 4096) {
+        const seg0 = text.slice(ws, slash);
+        // strip-aware prune: a trailing "/" that resolve strips never counts (window artifact)
+        const pruneEnd = dirs && text[P - 1] === "/" ? P - 1 : P;
+        const seg0ok =
+          seg0 !== "" &&
+          seg0 !== "." &&
+          seg0 !== ".." &&
+          !seg0.includes(":") &&
+          !seg0.includes("\0") &&
+          !oHasBadSeg(text, slash, pruneEnd);
+        const shape = oLooksLikeRelative(text.slice(ws, P));
+        const opener = text[ws - 1];
+        const dirsEx =
+          dirs && (trailing || ((opener === '"' || opener === "'" || opener === "`") && text[strippedEnd] === opener));
+        if (seg0ok && (shape || dirsEx)) {
+          const rel0 = text.slice(ws, P);
+          const rel = rel0.endsWith("/") ? rel0.slice(0, -1) : rel0;
+          const resolved = `${cwdBase}/${rel}`;
+          if (oClickable(resolved, scope)) {
+            if (textStart < ws) segments.push({ kind: "text", text: text.slice(textStart, ws) });
+            const seg = { kind: "ref", text: text.slice(ws, strippedEnd), path: resolved } as Seg;
+            if (hasLineCol) {
+              seg.line = spanLine;
+              if (spanCol !== undefined) seg.col = spanCol;
+            }
+            segments.push(seg);
+            refs++;
+            textStart = strippedEnd;
+            i = strippedEnd;
+            continue;
+          }
+        }
+      }
+    }
+    i = slash + 1;
+  }
+  if (textStart < n) segments.push({ kind: "text", text: text.slice(textStart) });
+  if (segments.length === 0) segments.push({ kind: "text", text });
+  return segments;
+}
+
+describe("logic/preview.js findPathRefs — §2.5.2 differential correctness gates", () => {
+  /** dir-plan's fuzz alphabet (length 0–200), fixed seed, 2 000 cases. */
+  const ALPHABET = ["/", ".", "a", "1", ":", "=", " ", '"', "'", "`", "é", "😀", "\0"];
+  const fuzzCases = (seed: number, count: number): string[] => {
+    const rand = rng(seed);
+    const out: string[] = [];
+    for (let c = 0; c < count; c++) {
+      const len = Math.floor(rand() * 201);
+      let s = "";
+      for (let k = 0; k < len; k++) s += ALPHABET[Math.floor(rand() * ALPHABET.length)];
+      out.push(s);
+    }
+    return out;
+  };
+  const FUZZ = fuzzCases(20261008, 2000);
+  /** every frozen fixture input from the pre-P2 suites (start contexts, terminators, scopes). */
+  const FROZEN_INPUTS = [
+    "/home/u/proj/a.ts rest",
+    "see /home/u/proj/a.ts ok",
+    "see\t/home/u/proj/a.ts ok",
+    "see\n/home/u/proj/a.ts ok",
+    "x(/home/u/proj/a.ts)",
+    "x[/home/u/proj/a.ts]",
+    "x{/home/u/proj/a.ts}",
+    "x</home/u/proj/a.ts>",
+    'x"/home/u/proj/a.ts"',
+    "x'/home/u/proj/a.ts'",
+    "path=/home/u/proj/a.ts,",
+    "x（/home/u/proj/a.ts）",
+    "x「/home/u/proj/a.ts」",
+    "x『/home/u/proj/a.ts』",
+    "x【/home/u/proj/a.ts】",
+    "x《/home/u/proj/a.ts》",
+    "路径：/home/u/proj/a.ts。",
+    "x/home/u/proj/a.ts",
+    "http://example.com/home/u/proj/a.ts",
+    "//home/u/proj/a.ts",
+    "1/home/u/proj/a.ts",
+    "看。/home/u/proj/a.ts",
+    "/home/u/proj/a.ts tail",
+    "/home/u/proj/a.ts, tail",
+    "/home/u/proj/a.ts; tail",
+    "/home/u/proj/a.ts`tail`",
+    "(/home/u/proj/a.ts)",
+    "/home/u/proj/a.ts|tail",
+    "/home/u/proj/a.ts。",
+    "/home/u/proj/a.ts，还有",
+    "【/home/u/proj/a.ts】",
+    "open /home/u/proj/a.ts.:! now",
+    "at /home/u/proj/a.ts:12:3 end",
+    "at /home/u/proj/a.ts:12 end",
+    "/home/u/proj/a.ts:12.",
+    "/home/u/proj2/a.ts /home/u/proj/a.ts",
+    "/home/u/proj",
+    "/etc/passwd",
+    "/home/u",
+    `附件 ${UPLOAD_PATH} 好了`,
+    "/single",
+    "//home/u/proj",
+    "/home/u/./a",
+    "/home/u/../a",
+    "src/web-hub/ui/src/components/detail/DetailDock.vue",
+    `see src/web-hub/ui/src/components/detail/DetailDock.vue ok`,
+    `x(src/web-hub/ui/src/components/detail/DetailDock.vue)`,
+    `{"path": "src/foo.ts"}`,
+    '"path": "src/components/detail"',
+    '"url": "http://example.com/foo.ts"',
+    '"url": "mailto:a@b.com/x.ts"',
+    `"p": "//src/foo.ts"`,
+    `at "src/foo.ts:12:3" end`,
+    `{"path": "/home/u/proj/a.ts"}`,
+    "/etc=/home/u/proj/a.ts",
+    "/x=/home/u/proj/a.ts:7.",
+  ];
+
+  const LEGACY_SCOPES: Array<[string, typeof SCOPE]> = [
+    ["cwd+uploads", SCOPE],
+    ["cwd=null", { ...SCOPE, cwd: null }],
+    ["uploads=false", { ...SCOPE, uploads: false }],
+    ["cwd=/", { ...SCOPE, cwd: "/" }],
+  ];
+
+  it("legacy scopes: deep-equal to the FROZEN pre-P2 reference on every frozen input + 2 000 fuzz cases", () => {
+    for (const [label, scope] of LEGACY_SCOPES) {
+      for (const text of [...FROZEN_INPUTS, ...FUZZ]) {
+        const live = findPathRefs(text, scope) as Seg[];
+        const ref = findPathRefsRef(text, scope) as Seg[];
+        expect(live, `scope=${label} text=${JSON.stringify(text)}`).toEqual(ref);
+      }
+    }
+  });
+
+  it.each([
+    ["abs", ABS_SCOPE],
+    ["dirs", DIRS_SCOPE],
+    ["abs+dirs", BOTH_SCOPE],
+  ] as Array<[string, typeof SCOPE & { abs?: true; dirs?: true }]>)(
+    "%s scope: deep-equal to the naive per-candidate oracle on every frozen input + 2 000 fuzz cases",
+    (_label, scope) => {
+      for (const text of [...FROZEN_INPUTS, ...FUZZ]) {
+        const live = findPathRefs(text, scope) as Seg[];
+        const want = oracleFindPathRefs(text, scope);
+        expect(live, `text=${JSON.stringify(text)}`).toEqual(want);
+      }
+    },
+  );
+
+  it("I1: segments concatenate back to the exact input in all four scopes (2 000 fuzz cases)", () => {
+    for (const scope of [SCOPE, ABS_SCOPE, DIRS_SCOPE, BOTH_SCOPE]) {
+      for (const text of FUZZ) {
+        expect(concat(findPathRefs(text, scope) as Seg[])).toBe(text);
+      }
+    }
+  });
+
+  it("I2: every emitted ref satisfies validatePreviewPath and its scope's routing rule", () => {
+    for (const scope of [SCOPE, ABS_SCOPE, DIRS_SCOPE, BOTH_SCOPE]) {
+      for (const text of FUZZ) {
+        for (const r of refs(findPathRefs(text, scope) as Seg[])) {
+          expect(validatePreviewPath(r.path!), `path=${r.path}`).toBe(true);
+          if (scope.abs === true) continue; // abs: any valid path
+          expect(r.path!.startsWith("/home/u/proj/") || r.path!.includes(PREVIEW_UPLOADS_MARKER)).toBe(true);
+        }
+      }
+    }
+  });
+});
+
+describe("logic/preview.js findPathRefs — §2.5.2 operation-count performance gate (machine-independent)", () => {
+  const PERF_SCOPES: Array<[string, typeof SCOPE & { abs?: true; dirs?: true }]> = [
+    ["legacy", SCOPE],
+    ["abs", ABS_SCOPE],
+    ["dirs", DIRS_SCOPE],
+    ["abs+dirs", BOTH_SCOPE],
+  ];
+  const PERF_INPUTS: Array<[string, string]> = [
+    ['"=/./".repeat(16384) — 64 KiB', "=/./".repeat(16_384)],
+    ['"/".repeat(1<<20)', "/".repeat(1 << 20)],
+    ['"=/".repeat(1<<19)', "=/".repeat(1 << 19)],
+    ['"/a".repeat(1<<19)', "/a".repeat(1 << 19)],
+    ['"é/".repeat(1<<19)', "é/".repeat(1 << 19)],
+    ['"😀=/".repeat(1<<18) — 1 Mi code units', "😀=/".repeat(1 << 18)],
+  ];
+
+  it.each(PERF_INPUTS.map(([label, text]) => [label, text] as const))(
+    "%s: charScans ≤ 10·n + 10 000 in all four scopes",
+    (_label, text) => {
+      for (const [scopeLabel, scope] of PERF_SCOPES) {
+        __resetPreviewScanStats();
+        findPathRefs(text, scope);
+        const bound = 10 * text.length + 10_000;
+        expect(
+          __previewScanStats.charScans,
+          `scope=${scopeLabel} scans=${__previewScanStats.charScans} n=${text.length} bound=${bound}`,
+        ).toBeLessThanOrEqual(bound);
+      }
+    },
+  );
+
+  it('growth ratio: charScans("=/./" 1 MiB) / charScans("=/./" 64 KiB) ∈ [8, 24] (linear ≈ 16)', () => {
+    const scan = (text: string): number => {
+      __resetPreviewScanStats();
+      findPathRefs(text, SCOPE);
+      return __previewScanStats.charScans;
+    };
+    const small = scan("=/./".repeat(16_384));
+    const big = scan("=/./".repeat(262_144));
+    expect(small).toBeGreaterThan(0);
+    const ratio = big / small;
+    expect(ratio).toBeGreaterThanOrEqual(8);
+    expect(ratio).toBeLessThanOrEqual(24);
+  });
+
+  it("5 s wall-clock hang sentinel: the whole input × scope matrix completes (guards exponential regressions only)", () => {
+    const t0 = Date.now();
+    for (const [, text] of PERF_INPUTS) {
+      for (const [, scope] of PERF_SCOPES) findPathRefs(text, scope);
+    }
+    expect(Date.now() - t0).toBeLessThan(5_000);
   });
 });

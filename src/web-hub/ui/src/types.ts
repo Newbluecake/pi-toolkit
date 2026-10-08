@@ -341,12 +341,20 @@ export interface HubHandle {
 // ---------------------------------------------------------------------------
 
 /** Mirrors `@logic/preview.js`'s (PV4) `PathScope` JSDoc typedef (that module stays the
- * behavioral source of truth — same mirror discipline as the `@logic/state.js` shapes above). */
+ * behavioral source of truth — same mirror discipline as the `@logic/state.js` shapes above).
+ *
+ * dir-plan §2.5.1 (P2): `abs` / `dirs` are the hub-cap flags (`preview.abs.v1` /
+ * `preview.dir.v1`) — optional per the frozen-types convention, and ABSENT means absent on
+ * the wire too (`previewScopeOf` only adds the key when the cap is present). */
 export interface PreviewPathScope {
   readonly agentKey: string;
   readonly sessionId: string;
   readonly cwd: string | null;
   readonly uploads: boolean;
+  /** C4: absolute-path recognition outside cwd (validatePreviewPath ≥2 segments only). */
+  readonly abs?: true;
+  /** A4/A5: directory candidates (`dir=1` / `dirs:true` + the (a)/(b)/(c) recognition rules). */
+  readonly dirs?: true;
 }
 
 /** plan §3.2's UI-side state machine (state lives in `usePreview`, App-level — never in the
@@ -402,6 +410,16 @@ export interface PreviewHandle {
    * implements `probe`. Absent ⇒ `PathText` keeps the legacy always-clickable rendering
    * (every frozen component fake stays valid). */
   readonly probe?: PreviewProbeHandle;
+  /** dir-plan §0.2 A3 (P2 types / P3 composable): in-dialog navigation — descend into a
+   * listed entry / a path ref clicked INSIDE the open dialog (path algebra from
+   * `childPreviewPath`/`parentPreviewPath` in `@logic/preview.js`). Optional per the
+   * frozen-types convention: a pre-dir-plan handle or component fake omits it and
+   * PreviewHost degrades to open-only navigation. */
+  navigate?(ref: { readonly path: string }): void;
+  /** A3: pop the in-dialog history stack (cap 64, P3) — a no-op at its bottom. */
+  back?(): void;
+  /** A3: go to `parentPreviewPath(view.path)` — a no-op / greyed at one-segment paths. */
+  up?(): void;
 }
 
 // ---------------------------------------------------------------------------

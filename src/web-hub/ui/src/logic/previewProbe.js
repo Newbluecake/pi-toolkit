@@ -18,14 +18,19 @@
  *   envelope headroom): byte lengths are REAL UTF-8 (`TextEncoder`), not UTF-16 units — a
  *   CJK path is 3 bytes per character on the wire.
  * - `parseProbeResults(raw, expectedCount)` — the `POST /api/preview/probe` 200-body
- *   contract: `{results:[{kind:"text"|"image"|"missing"}…]}`, same length and order as the
- *   request. ANY deviation is `E_BAD_RESPONSE` (the caller fails the whole batch — the hub
- *   is out of contract, not the paths).
+ *   contract: `{results:[{kind}…]}`, same length and order as the request. The kind set is
+ *   `PREVIEW_PROBE_KINDS` — dir-plan §1.3's SINGLE SOURCE ("text" | "image" | "dir" |
+ *   "missing"), imported from the protocol; this parser judges membership with the tuple's
+ *   `.includes()` and declares no local literal union of its own. A `"dir"` answer is legal
+ *   ONLY for a request that sent `dirs: true`; a dirs-less client folds it per-entry to
+ *   `"missing"` in ITS layer (the logic clients' `probePost`, §1.3's single fold point).
+ *   ANY other deviation is `E_BAD_RESPONSE` (the caller fails the whole batch — the hub is
+ *   out of contract, not the paths).
  *
  * Runtime imports use the literal `.ts` extension for the same reason `./preview.js`
  * documents (esbuild only remaps `./foo.js` for `.ts`/`.vue` importers).
  */
-import { PREVIEW_PROBE_MAX_BODY_BYTES, PREVIEW_PROBE_MAX_PATHS } from "@protocol/preview.ts";
+import { PREVIEW_PROBE_KINDS, PREVIEW_PROBE_MAX_BODY_BYTES, PREVIEW_PROBE_MAX_PATHS } from "@protocol/preview.ts";
 import { scopeKeyOf } from "./preview.js";
 
 /** LRU cap for probe results (2026-10-07 spec: ~256 entries, keyed per scopeKey+path). */
@@ -37,7 +42,8 @@ export const PROBE_LRU_CAP = 256;
 export const PROBE_BATCH_BYTES = PREVIEW_PROBE_MAX_BODY_BYTES - 512;
 
 /** @typedef {"pending" | "confirmed" | "missing" | "failed"} PreviewProbeState */
-/** @typedef {"text" | "image" | "missing"} PreviewProbeKindT */
+/** dir-plan §1.3: the wire kind set is the protocol tuple's element type — the single source. */
+/** @typedef {(typeof PREVIEW_PROBE_KINDS)[number]} PreviewProbeKindT */
 
 const textEncoder = new TextEncoder();
 
@@ -88,7 +94,8 @@ export function parseProbeResults(raw, expectedCount) {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
       return { ok: false, error: "E_BAD_RESPONSE" };
     const kind = /** @type {{ kind?: unknown }} */ (entry).kind;
-    if (kind !== "text" && kind !== "image" && kind !== "missing") return { ok: false, error: "E_BAD_RESPONSE" };
+    // dir-plan §1.3: judge by the protocol's single-source tuple — never a hand-written union.
+    if (typeof kind !== "string" || !PREVIEW_PROBE_KINDS.includes(kind)) return { ok: false, error: "E_BAD_RESPONSE" };
     kinds.push(kind);
   }
   return { ok: true, kinds };
@@ -154,8 +161,8 @@ export class PreviewProbeStore {
   }
 
   /**
-   * Fold one settled batch: entry kinds in request order (`"missing"` stays missing; text and
-   * image both confirm — the UI does not branch on the kind, only on confirmability).
+   * Fold one settled batch: entry kinds in request order (`"missing"` stays missing; text,
+   * image and dir all confirm — the UI does not branch on the kind, only on confirmability).
    * @param {string} scopeKey @param {readonly string[]} paths @param {readonly PreviewProbeKindT[]} kinds
    */
   settle(scopeKey, paths, kinds) {

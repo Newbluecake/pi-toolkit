@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { PREVIEW_DIR_BODY_MAX_BYTES } from "@protocol/preview.ts";
 import { createTokenTransport, TOKEN_KEY } from "../../../src/web-hub/ui/src/transport/token.js";
 import { createPasswordTransport } from "../../../src/web-hub/ui/src/transport/password.js";
 import { HISTORY_LIMIT_MAX } from "../../../src/web-hub/ui/src/logic/contract.js";
@@ -1577,5 +1578,186 @@ describe("token transport: setPrefs() 401 recovery (withRelogin — the write re
     expect(posts).toHaveLength(2);
     expect(posts[0]!.init.body).toBe(posts[1]!.init.body);
     expect(h.onConnCalls).not.toContain("auth");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub-preview dir-plan §5 P2: the `dir=1` fetch + `dirs:true` probe matrix — the SAME
+// suite on both adapters (the two logic clients' dir branches are verbatim symmetric by
+// construction; this matrix is the behavioral pin). §1.3's two paths are each pinned once:
+// the FETCH path (Kind: dir without opt-in ⇒ E_BAD_RESPONSE, body aborted unread) and the
+// PROBE path (dirs-less + "dir" ⇒ per-entry "missing" fold, never a batch failure).
+// ---------------------------------------------------------------------------
+
+/** A FetchResponse whose body streams via getReader() (the dir branch's preferred path). */
+function respStream(status: number, chunks: Uint8Array[], headers: Record<string, string>) {
+  let readerTaken = 0;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (n: string) => headers[n] ?? null },
+    json: async () => {
+      throw new Error("json() must not be called on a dir response");
+    },
+    arrayBuffer: async () => {
+      throw new Error("arrayBuffer() must not be called when body.getReader exists");
+    },
+    body: {
+      getReader() {
+        readerTaken++;
+        let i = 0;
+        return {
+          read: async () =>
+            i < chunks.length
+              ? { done: false as const, value: chunks[i++] }
+              : { done: true as const, value: undefined },
+          releaseLock(): void {},
+        };
+      },
+    },
+    readerTaken: () => readerTaken,
+  };
+}
+
+const DIR_HEADERS = { "Content-Type": "application/json", "X-PWH-Preview-Kind": "dir" };
+const LISTING = {
+  entries: [
+    { name: "src", type: "dir", size: 4096, mtimeMs: 1234567890123 },
+    { name: "a.ts", type: "file", size: 10, mtimeMs: 1234567890123 },
+  ],
+  total: 2,
+  scanned: 2,
+  complete: true,
+  truncated: false,
+  limits: { scan: false, entries: false, bytes: false },
+  vanished: 0,
+  dropped: 0,
+};
+const listingBytes = (listing: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(listing));
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: preview dir=1 (dir-plan §5 P2 — identical behavior both modes)", (_mode, make) => {
+  it("fetch({dir:true}) appends &dir=1 to the URL; a streamed dir 200 ⇒ ok dir with the parsed listing", async () => {
+    const h = make(async () => respStream(200, [listingBytes(LISTING)], DIR_HEADERS));
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toEqual({ ok: true, kind: "dir", listing: LISTING });
+    const call = h.fetchCalls.find((c) => c.url.startsWith("/api/preview"));
+    expect(call!.url).toBe(`${PREVIEW_URL}&dir=1`);
+    expect(call!.init.method).toBe("GET");
+  });
+
+  it("a dir 200 without a streaming body falls back to arrayBuffer() and parses the same way", async () => {
+    const bytes = listingBytes(LISTING);
+    const h = make(async () =>
+      respBytes(200, bytes, {
+        ...DIR_HEADERS,
+        "Content-Length": String(bytes.byteLength),
+      }),
+    );
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toEqual({ ok: true, kind: "dir", listing: LISTING });
+  });
+
+  it("§1.3 fetch path: Kind: dir WITHOUT the opt-in ⇒ E_BAD_RESPONSE, the body is never read", async () => {
+    const r200 = respStream(200, [listingBytes(LISTING)], DIR_HEADERS);
+    const h = make(async () => r200);
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    expect(r200.readerTaken()).toBe(0);
+    const h2 = make(async () => respBytes(200, listingBytes(LISTING), DIR_HEADERS));
+    // (the arrayBuffer fallback fake: assert via a counter-less variant — schema-level refusal
+    // happens in checkPreviewHeaders before any body access either way)
+    const out2 = await h2.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out2).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+  });
+
+  it("decoded bytes over PREVIEW_DIR_BODY_MAX_BYTES ⇒ abort + E_BAD_RESPONSE (streaming reader)", async () => {
+    const chunk = new Uint8Array(300 * 1024); // two of these = 600 KiB > 512 KiB
+    let sawAbort = false;
+    const h = make(async (_url, init) => {
+      init?.signal?.addEventListener?.("abort", () => {
+        sawAbort = true;
+      });
+      return respStream(200, [chunk, chunk, chunk], DIR_HEADERS);
+    });
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    expect(sawAbort).toBe(true); // the fetch was aborted so the server stops sending
+  });
+
+  it("the arrayBuffer fallback also refuses a body over the cap (byteLength checked after the read)", async () => {
+    const h = make(async () => respBytes(200, new Uint8Array(PREVIEW_DIR_BODY_MAX_BYTES + 1), DIR_HEADERS));
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+  });
+
+  it("gzip: the cap judges DECODED bytes, never Content-Length (small compressed length, larger decoded body)", async () => {
+    const decoded = listingBytes({
+      ...LISTING,
+      entries: Array.from({ length: 200 }, (_, i) => ({ name: `file-${i}.ts`, type: "file", size: i })),
+      total: 200,
+      scanned: 200,
+    });
+    const h = make(async () =>
+      respStream(
+        200,
+        [decoded],
+        { ...DIR_HEADERS, "Content-Encoding": "gzip", "Content-Length": "912" }, // compressed-looking length
+      ),
+    );
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toMatchObject({ ok: true, kind: "dir" });
+    if (out.ok && out.kind === "dir") expect(out.listing.entries).toHaveLength(200);
+  });
+
+  it("a non-JSON body ⇒ E_BAD_RESPONSE (undecodable, status 0)", async () => {
+    const h = make(async () => respStream(200, [new Uint8Array([0x89, 0x50, 0x4e, 0x47])], DIR_HEADERS));
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+  });
+
+  it("valid JSON but an off-schema listing ⇒ E_BAD_RESPONSE (parsePreviewDirListing's contract)", async () => {
+    const bad = { ...LISTING, truncated: true }; // violates truncated === (entries<total || !complete)
+    const h = make(async () => respStream(200, [listingBytes(bad)], DIR_HEADERS));
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+  });
+
+  it("non-200 dir-class errors ride the shared error mapping unchanged (403 E_PREVIEW_DENIED)", async () => {
+    const h = make(async (url) =>
+      url.includes("dir=1")
+        ? respBytes(403, new Uint8Array(), {}, { error: "E_PREVIEW_DENIED", reason: "denylist" })
+        : resp(200),
+    );
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true }, previewOpts());
+    expect(out).toEqual({ ok: false, status: 403, error: "E_PREVIEW_DENIED", reason: "denylist" });
+  });
+});
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: probe dirs:true (dir-plan §1.3/§5 P2 — identical behavior both modes)", (_mode, make) => {
+  it('probe({dirs:true}) sends {paths, dirs:true} and passes "dir" answers through', async () => {
+    const h = make(async () => resp(200, { results: [{ kind: "text" }, { kind: "dir" }, { kind: "missing" }] }));
+    const out = await h.transport.preview!.probe({ ...PROBE_REQ, paths: ["/a.ts", "/d", "/gone.ts"], dirs: true });
+    expect(out).toEqual({ ok: true, results: ["text", "dir", "missing"] });
+    const call = h.fetchCalls.find((c) => c.url.startsWith(PROBE_URL));
+    expect(call).toBeDefined();
+    expect(JSON.parse(String(call!.init.body))).toEqual({
+      paths: ["/a.ts", "/d", "/gone.ts"],
+      dirs: true,
+    });
+  });
+
+  it('§1.3 probe path: a dirs-LESS request folds a received "dir" per-entry to "missing" (never a batch error)', async () => {
+    const h = make(async () => resp(200, { results: [{ kind: "dir" }, { kind: "text" }, { kind: "dir" }] }));
+    const out = await h.transport.preview!.probe({ ...PROBE_REQ, paths: ["/d1", "/a.ts", "/d2"] });
+    expect(out).toEqual({ ok: true, results: ["missing", "text", "missing"] });
+    // and the body carries NO dirs key for a dirs-less request
+    const call = h.fetchCalls.find((c) => c.url.startsWith(PROBE_URL));
+    expect(JSON.parse(String(call!.init.body))).toEqual({ paths: ["/d1", "/a.ts", "/d2"] });
   });
 });

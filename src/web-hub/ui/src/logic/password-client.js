@@ -41,9 +41,11 @@ import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
   PREVIEW_CLIENT_TIMEOUT_MS,
+  PREVIEW_DIR_BODY_MAX_BYTES,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_PROBE_CLIENT_TIMEOUT_MS,
 } from "@protocol/preview.ts";
+import { parsePreviewDirListing } from "@protocol/preview.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 
@@ -966,7 +968,14 @@ export function createPasswordClient(deps) {
    * cap), one 40s deadline (`PREVIEW_CLIENT_TIMEOUT_MS`) spanning headers AND body, merged
    * with the caller's `signal`; an incomplete body ⇒ `E_PREVIEW_CHANGED` (§4.5.2: the hub
    * `destroy()`s a mid-stream identity/hash failure).
-   * @param {{ agentKey: string, sessionId: string, path: string }} req
+   *
+   * dir-plan §5 P2: `req.dir === true` appends `&dir=1` and unlocks the `Kind: dir` response
+   * — a capped JSON read under the SAME 40s deadline (never beyond
+   * `PREVIEW_DIR_BODY_MAX_BYTES` DECODED bytes — gzip included, the cap never judges
+   * Content-Length), then `parsePreviewDirListing` is the contract gate. An un-opt-in-ed
+   * request receiving `Kind: dir` fails `checkPreviewHeaders` (`E_BAD_RESPONSE`, §1.3's fetch
+   * path — a single-response contract violation, body aborted unread).
+   * @param {{ agentKey: string, sessionId: string, path: string, dir?: true }} req
    * @param {{ signal?: any, maxPixels?: number }} [opts]
    * @returns {Promise<any>}
    */
@@ -976,7 +985,7 @@ export function createPasswordClient(deps) {
     if (signal !== undefined && signal !== null && signal.aborted === true) {
       return { ok: false, status: 0, error: "E_ABORT" };
     }
-    const url = `${API.preview}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&path=${encodeURIComponent(req.path)}`;
+    const url = `${API.preview}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&path=${encodeURIComponent(req.path)}${req.dir === true ? "&dir=1" : ""}`;
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
     let expired = false;
@@ -1023,11 +1032,64 @@ export function createPasswordClient(deps) {
       const chk = checkPreviewHeaders(r.headers, {
         imageMaxBytes: PREVIEW_IMAGE_MAX_BYTES.lan,
         ...(maxPixels !== undefined ? { maxPixels } : {}),
+        dir: req.dir === true,
       });
       if (!chk.ok) {
         // Pre-body refusal: abort so the server stops sending, never touch the body.
         ac?.abort();
         return { ok: false, status: 0, ...chk };
+      }
+      if (chk.kind === "dir") {
+        // dir-plan §5 P2: a dir body is capped-and-parsed JSON, not a length-oracled byte
+        // stream — read it under the SAME 40s deadline, never beyond
+        // PREVIEW_DIR_BODY_MAX_BYTES decoded bytes (gzip included: the cap judges decoded
+        // bytes, never Content-Length). With a streaming body use the reader and count as the
+        // chunks arrive (aborting the fetch the moment the cap trips); without one read the
+        // whole ArrayBuffer first and check its byteLength after.
+        /** @type {any} */
+        let parsed;
+        let byteLength = 0;
+        try {
+          const body = r.body;
+          if (body && typeof body.getReader === "function") {
+            const reader = body.getReader();
+            /** @type {Uint8Array[]} */
+            const chunks = [];
+            for (;;) {
+              const step = await Promise.race([reader.read(), deadline]);
+              if (step.done === true) break;
+              const chunk = step.value;
+              const len = chunk && typeof chunk.byteLength === "number" ? chunk.byteLength : 0;
+              byteLength += len;
+              if (byteLength > PREVIEW_DIR_BODY_MAX_BYTES) {
+                ac?.abort(); // stop the server sending any more of an over-budget body
+                return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+              }
+              chunks.push(chunk);
+            }
+            const merged = new Uint8Array(byteLength);
+            let off = 0;
+            for (const c of chunks) {
+              merged.set(c, off);
+              off += c.byteLength;
+            }
+            parsed = JSON.parse(new TextDecoder().decode(merged));
+          } else {
+            const buf = await Promise.race([r.arrayBuffer(), deadline]);
+            byteLength = buf && typeof buf.byteLength === "number" ? buf.byteLength : 0;
+            if (byteLength > PREVIEW_DIR_BODY_MAX_BYTES) return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+            parsed = JSON.parse(new TextDecoder().decode(buf));
+          }
+        } catch (e) {
+          if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+          if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+            return { ok: false, status: 0, error: "E_DEADLINE" };
+          return { ok: false, status: 0, error: "E_BAD_RESPONSE" }; // undecodable / non-JSON body
+        }
+        if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+        const listing = parsePreviewDirListing(parsed, byteLength);
+        if (listing === null) return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+        return { ok: true, kind: "dir", listing };
       }
       /** @type {any} */
       let buf;
@@ -1073,7 +1135,14 @@ export function createPasswordClient(deps) {
    * ONE request for a whole message's candidates; 5s deadline (`PREVIEW_PROBE_CLIENT_TIMEOUT_MS`)
    * spanning headers+body, merged with the caller's `signal`; the 200 body is validated by
    * `parseProbeResults` and any deviation maps to a local `E_BAD_RESPONSE`.
-   * @param {{ agentKey: string, sessionId: string, paths: readonly string[] }} req
+   *
+   * dir-plan §1.3/§5 P2: `req.dirs === true` adds `dirs:true` to the JSON body (directories
+   * then answer `"dir"`); a dirs-LESS request that still receives `"dir"` folds that ENTRY
+   * to `"missing"` — a version mismatch is entry-level, and for this client the click
+   * genuinely could not succeed (it never sends `dir=1`), which is exactly probe `missing`'s
+   * definition. A whole-batch `E_BAD_RESPONSE` would degrade every candidate for one bad
+   * entry — deliberately NOT taken here.
+   * @param {{ agentKey: string, sessionId: string, paths: readonly string[], dirs?: true }} req
    * @param {{ signal?: any }} [opts]
    * @returns {Promise<any>}
    */
@@ -1082,6 +1151,7 @@ export function createPasswordClient(deps) {
     if (signal !== undefined && signal !== null && signal.aborted === true) {
       return { ok: false, status: 0, error: "E_ABORT" };
     }
+    const dirs = req.dirs === true;
     const url = `${API.previewProbe}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}`;
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
@@ -1118,7 +1188,7 @@ export function createPasswordClient(deps) {
             credentials: "same-origin",
             method: "POST",
             headers: { "Content-Type": "application/json", "X-PWH": "1" },
-            body: JSON.stringify({ paths: req.paths }),
+            body: JSON.stringify(dirs ? { paths: req.paths, dirs: true } : { paths: req.paths }),
             ...(ac ? { signal: ac.signal } : {}),
           }),
           deadline,
@@ -1143,7 +1213,9 @@ export function createPasswordClient(deps) {
       if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
       const parsed = parseProbeResults(body, req.paths.length);
       if (!parsed.ok) return { ok: false, status: 0, error: parsed.error };
-      return { ok: true, results: parsed.kinds };
+      // dir-plan §1.3 single fold point: dirs-less + "dir" ⇒ per-entry "missing".
+      const kinds = dirs ? parsed.kinds : parsed.kinds.map((k) => (k === "dir" ? "missing" : k));
+      return { ok: true, results: kinds };
     } finally {
       deps.clearTimeout(deadlineTimer);
       if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {

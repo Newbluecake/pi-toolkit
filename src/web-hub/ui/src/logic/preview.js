@@ -32,9 +32,14 @@
  * - `previewScopeOf(...)` — the §4.6 作用域推导 truth table: a scope exists only when the
  *   transport offers `preview`, the hub caps carry `preview.v1` (token) / `preview.lan.v1`
  *   (password), and the selected agent has a live session. Under the default `mode:"on"`
- *   (U1) BOTH caps are declared, so password mode gets a scope too.
+ *   (U1) BOTH caps are declared, so password mode gets a scope too. dir-plan §2.5.1 (P2):
+ *   `preview.abs.v1` / `preview.dir.v1` add the optional `abs` / `dirs` keys — ONLY when the
+ *   cap is present (absent ⇒ key absent, so every pre-dir-plan `toEqual` pin stays green).
  * - `scopeKeyOf(scope)` — `agentKey|sessionId|cwd` (v3-2 双保险: the same-sessionId-cwd-never-
  *   changes invariant PLUS the key carrying cwd, so a cwd change invalidates the scope).
+ *   dir-plan §2.5.1: `|abs` / `|dir` are appended for the respective flags — a cap change
+ *   invalidates the scope (and the probe LRU partitions naturally); the format is unchanged
+ *   when the flags are absent.
  * - `clientImageBudget({ coarse })` — §0/P2-13: touch devices cap at 20MP, desktop at the
  *   server's 40MP; checked from the response HEADERS before the body is ever read.
  * - `parsePreviewDims` / `checkPreviewHeaders` — the §4.6 transport pre-body gate: Kind must
@@ -62,10 +67,11 @@ import {
   PREVIEW_UPLOADS_MARKER,
   validatePreviewPath,
 } from "@protocol/preview.ts";
-import { PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP } from "@protocol/version.ts";
+import { PREVIEW_ABS_HUB_CAP, PREVIEW_DIR_HUB_CAP, PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP } from "@protocol/version.ts";
 
 /**
- * @typedef {{ agentKey: string, sessionId: string, cwd: string | null, uploads: boolean }} PathScope
+ * @typedef {{ agentKey: string, sessionId: string, cwd: string | null, uploads: boolean,
+ *   abs?: true, dirs?: true }} PathScope
  * @typedef {{ kind: "text", text: string }
  *   | { kind: "ref", text: string, path: string, line?: number, col?: number }} PathSegment
  * @typedef {{ w: number, h: number }} PreviewDimsT
@@ -74,8 +80,26 @@ import { PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP } from "@protocol/version.ts";
 /** §4.6 rule 6: at most this many refs are recognized per text node (the rest stays text). */
 export const PREVIEW_MAX_REFS_PER_NODE = 100;
 
+/** dir-plan §2.5.2's machine-independent performance gate: `charScans` counts every character
+ * the recognition layer examines (run forward/backward scans, `startsWith` calls, candidate
+ * slice lengths). Tests assert `charScans ≤ 10·n + 10_000` and a linear growth ratio — never
+ * absolute milliseconds. Test-only surface; production code paths never read it. */
+export const __previewScanStats = { charScans: 0 };
+
+/** Test-only: zero the §2.5.2 scan counter. */
+export function __resetPreviewScanStats() {
+  __previewScanStats.charScans = 0;
+}
+
 /** §4.6 rule 1: a candidate `/` may immediately follow one of these (besides line start / whitespace). */
 const START_CHARS = new Set(["(", "[", "{", "<", '"', "'", "=", "（", "「", "『", "【", "《", "："]);
+
+/** dir-plan §2.5.3: the EXTENDED start set, used only when the scope carries `abs`/`dirs` —
+ * a backtick becomes a legal opener in NON-markdown contexts (in markdown the parser already
+ * turns the span into a code node handled by `pathRefOfCode`). A backtick stays a TERMINATOR,
+ * so the candidate still ends at its closing twin; the no-extension relative pairing rule (c)
+ * is what actually requires the pair to close. */
+const START_CHARS_EXT = new Set([...START_CHARS, "`"]);
 
 /** §4.6 rule 2: a candidate ends at the first of these (besides any whitespace). */
 const TERMINATOR_CHARS = new Set([
@@ -117,46 +141,48 @@ function isTerminator(ch) {
 }
 
 /**
- * Rule 1b's backward-scan stop condition: a word boundary is a terminator OR a START_CHARS
- * opener. The latter addition matters because some START_CHARS (`=`, `(`, …) are NOT
+ * Rule 1b's backward-scan stop condition: a word boundary is a terminator OR a start-set
+ * opener. The latter addition matters because some start chars (`=`, `(`, …) are NOT
  * terminators (an absolute candidate's forward scan must keep going past them when they
  * appear mid-path), so using `isTerminator` alone here would let the backward scan walk PAST
  * an opener like `=` into whatever precedes it — e.g. `foo=/home/...` would wrongly compute
  * `foo=` as part of the leading identifier instead of stopping right at the `/` (correctly
  * yielding an empty leading segment, since that slash's candidate is already `=`'s absolute
- * territory).
- * @param {string | undefined} ch
+ * territory). dir-plan §2.5.3: the boundary set switches to `START_CHARS_EXT` together with
+ * the forward start set (a backtick opener also ends the leading identifier).
+ * @param {string | undefined} ch @param {Set<string>} startSet
  */
-function isWordBoundary(ch) {
-  return isTerminator(ch) || (ch !== undefined && START_CHARS.has(ch));
+function isWordBoundary(ch, startSet) {
+  return isTerminator(ch) || (ch !== undefined && startSet.has(ch));
 }
 
 /**
  * §4.6 rule 1: the candidate's leading `/` must sit at line start (string start counts) or
- * right after whitespace / a START_CHARS opener.
- * @param {string} text @param {number} slash
+ * right after whitespace / a start-set opener (dir-plan §2.5.3: `startSet` is
+ * `START_CHARS_EXT` when the scope carries `abs`/`dirs` — a backtick opener counts there).
+ * @param {string} text @param {number} slash @param {Set<string>} startSet
  */
-function isStartContext(text, slash) {
+function isStartContext(text, slash, startSet) {
   if (slash === 0) return true;
   const prev = text[slash - 1];
-  return prev !== undefined && (WS_RE.test(prev) || START_CHARS.has(prev));
+  return prev !== undefined && (WS_RE.test(prev) || startSet.has(prev));
 }
 
 /**
- * §4.6 rule 1b (relative paths): same whitespace/START_CHARS test as `isStartContext`, but
+ * §4.6 rule 1b (relative paths): same whitespace/start-set test as `isStartContext`, but
  * deliberately WITHOUT its `position === 0 ⇒ true` shortcut — a bare text-node boundary is
  * not, by itself, good enough evidence that a leading identifier (`x`, `1`, `src`, …) is the
  * start of a path rather than the middle of a sentence this call only sees a fragment of.
  * This is what keeps the already-frozen absolute "not clickable" fixtures `"x/home/..."` /
  * `"1/home/..."` from picking up a brand-new relative match. Tool-call args (the feature's
- * main target) are always quote-delimited (`"path": "src/foo.ts"`), so they hit the
- * `START_CHARS.has('"')` branch regardless.
- * @param {string} text @param {number} wordStart
+ * main target) are always quote-delimited (`"path": "src/foo.ts"`), so they hit the quote
+ * branch regardless.
+ * @param {string} text @param {number} wordStart @param {Set<string>} startSet
  */
-function relativeStartContext(text, wordStart) {
+function relativeStartContext(text, wordStart, startSet) {
   if (wordStart <= 0) return false;
   const prev = text[wordStart - 1];
-  return prev !== undefined && (WS_RE.test(prev) || START_CHARS.has(prev));
+  return prev !== undefined && (WS_RE.test(prev) || startSet.has(prev));
 }
 
 /** §4.6 rule 1b: last segment's extension shape — `.` + 1–10 "reasonable" chars, ≥1 char before it. */
@@ -194,16 +220,57 @@ function resolveRelativePath(candidate, cwd) {
 
 /**
  * §4.6 rules 4–5: protocol-valid AND (segment-aligned under `scope.cwd` — never `/` — OR
- * carrying the upload-store marker when the scope allows uploads).
+ * carrying the upload-store marker when the scope allows uploads). dir-plan §2.5.1 (C4):
+ * under `abs` the route is simply "protocol-valid" (`validatePreviewPath`, ≥2 segments —
+ * `/help` `/reload` never become candidates); a `null` scope still never reaches here and a
+ * `null` cwd keeps absolute paths clickable while relative recognition stays off.
  * @param {string} path @param {PathScope} scope
  */
 function isClickable(path, scope) {
   if (!validatePreviewPath(path)) return false;
+  if (scope.abs === true) return true;
   if (scope.uploads === true && path.includes(PREVIEW_UPLOADS_MARKER)) return true;
   const cwd = scope.cwd;
   if (typeof cwd !== "string" || cwd === "" || cwd === "/") return false;
   const base = cwd.endsWith("/") ? cwd.slice(0, -1) : cwd;
   return base !== "" && base !== "/" && path.startsWith(`${base}/`);
+}
+
+/**
+ * dir-plan §2.5.2 ④: the smallest start position `j` in `[s0, P]` whose `text[j, P)` slice is
+ * still ≤ 4096 UTF-8 bytes — scanning backward from `P` one CODEPOINT at a time (a surrogate
+ * pair is 4 bytes; a lone surrogate counts 3, matching `TextEncoder`'s U+FFFD replacement;
+ * BMP codepoints 1/2/3). Never looks past `s0`, and the byte budget caps the walk at ~4097
+ * bytes, so it is O(1)-bounded per run and O(text) summed over all runs (the walk never
+ * exceeds the run's own length). `bytes(s, P)` is non-increasing in `s`, hence
+ * `slash >= minStart ⇔ bytes(slash, P) ≤ 4096` for every slash in `[s0, P)`.
+ * @param {string} text @param {number} s0 @param {number} P
+ */
+function minStartOf(text, s0, P) {
+  let minStart = P;
+  let acc = 0;
+  let j = P;
+  while (j > s0) {
+    let k = j - 1;
+    const cu = text.charCodeAt(k);
+    /** @type {number} */
+    let size;
+    if (cu >= 0xdc00 && cu <= 0xdfff && k > s0) {
+      const hi = text.charCodeAt(k - 1);
+      if (hi >= 0xd800 && hi <= 0xdbff) {
+        k -= 1;
+        size = 4;
+      } else size = 3;
+    } else if (cu < 0x80) size = 1;
+    else if (cu < 0x800) size = 2;
+    else size = 3;
+    if (acc + size > PREVIEW_PATH_MAX_BYTES) break;
+    __previewScanStats.charScans += 1;
+    acc += size;
+    j = k;
+    minStart = j;
+  }
+  return minStart;
 }
 
 /**
@@ -230,23 +297,39 @@ function splitLineCol(raw) {
  * (PathText's no-ctx / no-scope DOM-equivalence rule). Recognition stops after
  * `PREVIEW_MAX_REFS_PER_NODE` refs; the remainder of the node stays plain text.
  *
- * **Linear-scan design (verifier P1 fix, 2026-10):** every candidate starting inside the same
- * terminator-free run ends at the SAME end index, so the end-scan, the trailing-punct strip
- * and the `:line[:col]` tail parse are memoized ONCE per run instead of being redone per
- * start position — the old `i = slash + 1` rescan made `"=/".repeat(n)` O(n²) (a remote
- * main-thread-freeze DoS over the transcript, U3). Per candidate the results are computed
- * from the memo with two O(1) adjustments (the strip's `> 1 char` guard and the line:col
- * split's `path must precede the suffix` guard are both start-relative — see the derivation
- * in `docs/dev/web-hub-preview/plan.md` §4.6; no start position can ever fall INSIDE a
- * `:line[:col]` match because the match contains no `/`). Two cheap rejections keep the
- * per-candidate cost O(1) whenever the full check would fail anyway (it is a pure AND, so
- * short-circuiting it changes no outcome):
- * - path longer than `PREVIEW_PATH_MAX_BYTES` UTF-16 units (units ≤ UTF-8 bytes ⇒
- *   `validatePreviewPath` would reject);
- * - no scope route possible: the cwd prefix misses on the raw text AND the uploads marker
- *   (tracked with an amortized forward cursor) does not occur inside `[slash, pathEnd)`.
- * Only candidates passing both do the real slice + `isClickable` (≤4096 units of work, and
- * at most ~4096 such starts per run — the rest of a huge run is skipped in O(1) each).
+ * **dir-plan §2.5.2 (P2) — provably linear, three-tier structure** (call-level → run-level →
+ * candidate-level; the full pseudocode + equivalence proof live in the plan):
+ *
+ * - **Run-level constants**: every candidate starting inside the same terminator-free run
+ *   ends at the SAME index — the unified end `spanP` (`hasLC ? spanLineColStart :
+ *   spanStrippedEnd`, minus ONE trailing `/` under `dirs` when it is not the run-triggering
+ *   slash — A5 (a)/(b)). `dirs === false` ⇒ `spanP` is byte-identical to the old per-candidate
+ *   `pathEnd` (the lemma: a `:line[:col]` match and a stripped `[.:!?]` tail contain no `/`),
+ *   which is what the legacy differential test pins. One forward pass over
+ *   `[spanFirstSlash, spanP)` then derives four constants: `lastBad` (max start of an
+ *   `""`/`"."`/`".."` segment), `lastNul`, `secondLastSlash` (≥2 segments ⇔ start ≤ it) and
+ *   `minStart` (smallest start whose slice to `spanP` is ≤ 4096 UTF-8 bytes, `minStartOf`).
+ * - **Candidate-level O(1)**: `fastOk(s) ⇔ validatePreviewPath(text.slice(s, spanP))` (minus
+ *   the leading-`/` and CR/LF items, both structurally guaranteed inside a run) — so the
+ *   main loop never slices+re-validates per start. Routing: `abs` ⇒ every `fastOk` candidate
+ *   (C4: `isClickable` under `abs` IS `validatePreviewPath`); otherwise the frozen cwd-prefix
+ *   `startsWith` fast path / the uploads-marker forward cursor, exactly as before. The
+ *   public `isClickable`/`pathRefOfCode` bodies are unchanged consumers of the SLOW
+ *   validation — only the main loop stopped repeating it.
+ * - **Relative candidates (rule 1b + §2.5 A5)**: still tried exactly once per run, at its
+ *   first slash, with the backward-scanned leading identifier. New under `dirs`: a trailing
+ *   `/` (b) or a paired `"…"`/`'…'`/`` `…` `` wrapper (c) substitutes for the last-segment
+ *   extension shape; the resolved path drops the trailing `/` while the DISPLAY text keeps
+ *   it (and any `:line[:col]`) exactly as before. `seg0ok` pre-prunes an invalid leading
+ *   segment (empty / `.` / `..` / `:`-scheme / NUL) — the final `isClickable(resolved)` call
+ *   remains the real gate, once per run ⇒ total linear.
+ * - **§2.5.3 backticks**: `abs`/`dirs` scopes widen the start set to `START_CHARS_EXT` (a
+ *   backtick opener counts for BOTH the absolute and the relative start context); a backtick
+ *   stays a terminator, so the candidate still ends at its closing twin.
+ *
+ * Two cheap rejections keep the per-candidate cost O(1) whenever the full check would fail
+ * anyway (it is a pure AND, so short-circuiting changes no outcome): the UTF-16 length
+ * pre-check (`spanP - slash ≤ 4096`) and `fastOk`.
  * @param {string} text @param {PathScope | null | undefined} scope
  * @returns {PathSegment[]}
  */
@@ -261,16 +344,18 @@ export function findPathRefs(text, scope) {
   let i = 0;
   const n = text.length;
 
-  // Per-call scope pre-computation (the scope never changes mid-scan): the exact cwd-prefix
-  // `isClickable` tests (`null` when the cwd route is impossible for every candidate), and a
-  // forward cursor for the uploads marker so `includes()` is never re-run from scratch.
+  // Per-call scope pre-computation (the scope never changes mid-scan): §2.5.2 call level.
+  const abs = scope.abs === true;
+  const dirs = scope.dirs === true;
+  const startSet = abs || dirs ? START_CHARS_EXT : START_CHARS;
   const cwd = scope.cwd;
   const cwdPrefix =
     typeof cwd === "string" && cwd !== "" && cwd !== "/" ? `${cwd.endsWith("/") ? cwd.slice(0, -1) : cwd}/` : null;
+  const cwdBase = cwdPrefix !== null ? cwdPrefix.slice(0, -1) : null;
   const uploads = scope.uploads === true;
   let markerNext = -2; // -2 = not computed yet; else first marker occurrence >= the last query
 
-  // Per-run memo (see the header): valid only for start positions < `spanEnd`.
+  // Per-run memo (§2.5.2 run level): valid only for start positions < `spanEnd`.
   let spanEnd = -1; // first terminator >= the run's first start (n when none)
   let spanStrippedEnd = -1; // spanEnd minus the trailing `. : ! ?` run (with the >1 guard)
   let spanLineColStart = -1; // absolute start of the `:line[:col]` tail match, -1 when none
@@ -278,25 +363,32 @@ export function findPathRefs(text, scope) {
   let spanLine;
   /** @type {number | undefined} */
   let spanCol;
-  // Relative-path memo (rule 1b): computed once per run too (symmetric backward scan, same
-  // amortized-O(n) argument as the forward scan above), and only when a relative route is even
-  // possible (`cwdPrefix !== null`) — a disabled scope pays nothing extra for this.
   let spanFirstSlash = -1; // the slash that triggered this run's memo (relative is tried ONLY there)
   let spanWordStart = -1; // backward boundary of the leading identifier before `spanFirstSlash`
+  // §2.5.2 ② the unified end (run-level constant) + the pre-adjustment trailing-`/` flag.
+  let spanP = -1;
+  let spanTrailingSlash = false;
+  // §2.5.2 ③ the four fastOk constants over [spanFirstSlash, spanP).
+  let lastBad = -1; // max start of a ""/"."/".." segment (slice has no bad segment ⇔ start > it)
+  let lastNul = -1; // last NUL in the window (slice is NUL-free ⇔ start > it)
+  let secondLastSlash = -1; // slice has ≥2 segments ⇔ start ≤ it
+  let minStart = -1; // smallest start with ≤4096 UTF-8 bytes to spanP (slice fits ⇔ start ≥ it)
 
   while (i < n && refs < PREVIEW_MAX_REFS_PER_NODE) {
     const slash = text.indexOf("/", i);
     if (slash === -1) break;
-    const startOk = isStartContext(text, slash);
     if (slash >= spanEnd) {
-      // New terminator-free run: scan its end once, then analyze its tail once.
+      // ① New terminator-free run: scan its end once, then analyze its tail once (unchanged).
       let end = slash + 1;
       while (end < n && !isTerminator(text[end])) end++;
+      __previewScanStats.charScans += end - (slash + 1);
       spanEnd = end;
       let stripped = end;
       while (stripped > slash + 1 && TRAILING_PUNCT_RE.test(text[stripped - 1])) stripped--;
       spanStrippedEnd = Math.max(slash + 1, stripped);
-      const m = LINE_COL_RE.exec(text.slice(slash, spanStrippedEnd));
+      const lcSlice = text.slice(slash, spanStrippedEnd);
+      __previewScanStats.charScans += lcSlice.length;
+      const m = LINE_COL_RE.exec(lcSlice);
       if (m !== null && m.index > 0) {
         spanLineColStart = slash + m.index;
         spanLine = Number(m[1]);
@@ -309,33 +401,85 @@ export function findPathRefs(text, scope) {
       spanFirstSlash = slash;
       if (cwdPrefix !== null) {
         let ws = slash;
-        while (ws > 0 && !isWordBoundary(text[ws - 1])) ws--;
+        while (ws > 0 && !isWordBoundary(text[ws - 1], startSet)) ws--;
+        __previewScanStats.charScans += slash - ws;
         spanWordStart = ws;
       } else {
         spanWordStart = slash;
       }
+      // ② The unified end: `dirs === false` ⇒ identical to the old per-candidate pathEnd for
+      //    every legal start in the run (the plan's lemma). Under `dirs`, ONE trailing `/` is
+      //    folded out of the window (A5 (a)/(b)) — except when it IS the run's first slash
+      //    (`p0 - 1 > slash` guard): the relative candidate then keeps its slash in the slice
+      //    and strips it at resolve time instead (never producing an empty candidate).
+      const hasLC = spanLineColStart !== -1 && slash < spanLineColStart;
+      const p0 = hasLC ? spanLineColStart : spanStrippedEnd;
+      spanTrailingSlash = text[p0 - 1] === "/";
+      spanP = dirs && !hasLC && p0 - 1 > slash && spanTrailingSlash ? p0 - 1 : p0;
+      // ③ One forward pass collects the window's slashes and NUL; a second O(#slashes) pass
+      //    over the collected list marks the bad segments (their ends are just the NEXT slash).
+      const slashes = [];
+      lastNul = -1;
+      for (let q = slash; q < spanP; q++) {
+        const ch = text[q];
+        if (ch === "/") slashes.push(q);
+        else if (ch === "\0") lastNul = q;
+      }
+      __previewScanStats.charScans += spanP - slash;
+      lastBad = -1;
+      for (let k = 0; k < slashes.length; k++) {
+        const q = slashes[k];
+        const segEnd = k + 1 < slashes.length ? slashes[k + 1] : spanP;
+        const segLen = segEnd - (q + 1);
+        let bad = segLen === 0;
+        if (!bad && segLen <= 2) {
+          __previewScanStats.charScans += segLen;
+          bad = text[q + 1] === "." && (segLen === 1 || text[q + 2] === ".");
+        }
+        if (bad) lastBad = q; // slashes ascend — the last assignment is the max
+      }
+      secondLastSlash = slashes.length >= 2 ? slashes[slashes.length - 2] : -1;
+      // ④ The byte-cap lower bound — O(1)-bounded per run (≤ ~4097 bytes, never past s0).
+      minStart = minStartOf(text, slash, spanP);
     }
-    // Per-candidate results from the memo, exactly mirroring the original per-candidate
-    // strip (its "> 1 char remains" guard is start-relative) and line:col split (its
-    // "path must precede the suffix" guard; no start can sit inside the match — it has no `/`).
+    // Per-candidate results from the memo, mirroring the original per-candidate strip (its
+    // "> 1 char remains" guard is start-relative) and line:col split (its "path must precede
+    // the suffix" guard; no start can sit inside the match — it has no `/`).
     const strippedEnd = Math.max(spanStrippedEnd, slash + 1);
     const hasLineCol = spanLineColStart !== -1 && slash < spanLineColStart;
-    const pathEnd = hasLineCol ? spanLineColStart : strippedEnd;
-    if (startOk && pathEnd - slash <= PREVIEW_PATH_MAX_BYTES) {
-      let scopePossible = cwdPrefix !== null && text.startsWith(cwdPrefix, slash);
-      if (!scopePossible && uploads) {
-        if (markerNext === -2) markerNext = text.indexOf(PREVIEW_UPLOADS_MARKER, slash);
-        while (markerNext !== -1 && markerNext < slash) {
-          markerNext = text.indexOf(PREVIEW_UPLOADS_MARKER, markerNext + 1);
+    const startOk = isStartContext(text, slash, startSet);
+    // —— §2.5.2 route 1: absolute candidates (each '/' start costs O(1)) ——
+    if (startOk && slash < spanP && spanP - slash <= PREVIEW_PATH_MAX_BYTES) {
+      // fastOk ⇔ validatePreviewPath(text.slice(slash, spanP)) minus the structurally
+      // guaranteed leading-`/` and CR/LF items — see the plan's item-by-item derivation.
+      const fastOk = slash > lastBad && slash > lastNul && slash <= secondLastSlash && slash >= minStart;
+      if (fastOk) {
+        let route = false;
+        if (abs) {
+          route = true; // C4: under `abs`, isClickable(path) IS validatePreviewPath(path)
+        } else {
+          let cwdHit = false;
+          if (cwdPrefix !== null) {
+            __previewScanStats.charScans += cwdPrefix.length;
+            cwdHit = text.startsWith(cwdPrefix, slash);
+          }
+          if (cwdHit) {
+            route = true;
+          } else if (uploads) {
+            if (markerNext === -2) markerNext = text.indexOf(PREVIEW_UPLOADS_MARKER, slash);
+            while (markerNext !== -1 && markerNext < slash) {
+              markerNext = text.indexOf(PREVIEW_UPLOADS_MARKER, markerNext + 1);
+            }
+            route = markerNext !== -1 && markerNext + PREVIEW_UPLOADS_MARKER.length <= spanP;
+          }
         }
-        scopePossible = markerNext !== -1 && markerNext + PREVIEW_UPLOADS_MARKER.length <= pathEnd;
-      }
-      if (scopePossible) {
-        const path = text.slice(slash, pathEnd);
-        if (isClickable(path, scope)) {
+        if (route) {
+          const path = text.slice(slash, spanP);
+          __previewScanStats.charScans += path.length;
           if (textStart < slash) segments.push({ kind: "text", text: text.slice(textStart, slash) });
           /** @type {PathSegment} */
           const seg = { kind: "ref", text: text.slice(slash, strippedEnd), path };
+          __previewScanStats.charScans += seg.text.length;
           if (hasLineCol) {
             seg.line = spanLine;
             if (spanCol !== undefined) seg.col = spanCol;
@@ -348,29 +492,69 @@ export function findPathRefs(text, scope) {
         }
       }
     }
-    // Rule 1b (relative paths): tried exactly once per run, at its first slash, using the
-    // backward-scanned leading identifier (`spanWordStart`) instead of `slash` itself.
-    if (
-      cwdPrefix !== null &&
-      slash === spanFirstSlash &&
-      spanWordStart < slash &&
-      relativeStartContext(text, spanWordStart) &&
-      pathEnd - spanWordStart <= PREVIEW_PATH_MAX_BYTES
-    ) {
-      const resolved = resolveRelativePath(text.slice(spanWordStart, pathEnd), cwd);
-      if (resolved !== null && isClickable(resolved, scope)) {
-        if (textStart < spanWordStart) segments.push({ kind: "text", text: text.slice(textStart, spanWordStart) });
-        /** @type {PathSegment} */
-        const seg = { kind: "ref", text: text.slice(spanWordStart, strippedEnd), path: resolved };
-        if (hasLineCol) {
-          seg.line = spanLine;
-          if (spanCol !== undefined) seg.col = spanCol;
+    // —— §2.5.2 route 2: relative candidates — exactly once per run, at its first slash, using
+    // the backward-scanned leading identifier (`spanWordStart`) instead of `slash` itself.
+    if (slash === spanFirstSlash && cwdPrefix !== null) {
+      const ws = spanWordStart;
+      if (ws < slash && relativeStartContext(text, ws, startSet) && spanP - ws <= PREVIEW_PATH_MAX_BYTES) {
+        // seg0ok: the leading segment must be a legal segment on its own (non-empty, not
+        // `.`/`..`, no `:` URI scheme, no NUL) AND the window's absolute part must carry no bad
+        // segment. The prune is STRIP-AWARE (§2.5 (b)): when the candidate still carries its
+        // trailing `/` into the window (`text[spanP-1] === "/"`), resolve strips that slash —
+        // its P-cut empty segment is a window artifact, not part of the resolved path — so the
+        // scan ends one char early. `lastBad` itself stays pure (route 1's slices DO include
+        // the edge); this dedicated once-per-run scan keeps the prune exactly "resolved has a
+        // bad segment". isClickable(resolved) remains the final gate either way.
+        const seg0 = text.slice(ws, slash);
+        __previewScanStats.charScans += seg0.length;
+        const pruneEnd = dirs && text[spanP - 1] === "/" ? spanP - 1 : spanP;
+        let absBad = false;
+        for (let q = slash; q < pruneEnd && !absBad;) {
+          if (text[q] !== "/") {
+            q++;
+            __previewScanStats.charScans += 1;
+            continue;
+          }
+          let e = q + 1;
+          while (e < pruneEnd && text[e] !== "/") e++;
+          __previewScanStats.charScans += e - q;
+          const segLen = e - (q + 1);
+          if (segLen === 0 || (segLen <= 2 && text[q + 1] === "." && (segLen === 1 || text[q + 2] === ".")))
+            absBad = true;
+          q = e;
         }
-        segments.push(seg);
-        refs++;
-        textStart = strippedEnd;
-        i = strippedEnd;
-        continue;
+        const seg0ok =
+          !absBad && seg0 !== "" && seg0 !== "." && seg0 !== ".." && !seg0.includes(":") && !seg0.includes("\0");
+        if (seg0ok) {
+          const rel0 = text.slice(ws, spanP);
+          __previewScanStats.charScans += rel0.length;
+          const shape = looksLikeRelativePath(rel0);
+          const opener = text[ws - 1];
+          const dirsEx =
+            dirs &&
+            (spanTrailingSlash ||
+              ((opener === '"' || opener === "'" || opener === "`") && text[strippedEnd] === opener));
+          if (shape || dirsEx) {
+            const rel = rel0.endsWith("/") ? rel0.slice(0, -1) : rel0; // §2.5 (b): drop the trailing /
+            const resolved = `${cwdBase}/${rel}`;
+            __previewScanStats.charScans += resolved.length;
+            if (isClickable(resolved, scope)) {
+              if (textStart < ws) segments.push({ kind: "text", text: text.slice(textStart, ws) });
+              /** @type {PathSegment} */
+              const seg = { kind: "ref", text: text.slice(ws, strippedEnd), path: resolved };
+              __previewScanStats.charScans += seg.text.length;
+              if (hasLineCol) {
+                seg.line = spanLine;
+                if (spanCol !== undefined) seg.col = spanCol;
+              }
+              segments.push(seg);
+              refs++;
+              textStart = strippedEnd;
+              i = strippedEnd;
+              continue;
+            }
+          }
+        }
       }
     }
     i = slash + 1;
@@ -389,6 +573,13 @@ export function findPathRefs(text, scope) {
  * 1b) resolves against `scope.cwd` the same way `findPathRefs` does; the DISPLAYED `text` is
  * always the original (unresolved) code span. Returns `null` when the code span is not a
  * single clickable path.
+ *
+ * dir-plan §2.5.3 (markdown context): under `dirs` the span may be a no-extension relative
+ * path containing `/` (the backticks are the pairing by construction — this is exactly the
+ * (c) rule's markdown-context counterpart) and may carry ONE trailing `/` (the (a)/(b)
+ * counterpart), which is dropped from the resolved path but kept in the displayed text.
+ * `abs` alone (without `dirs`) changes nothing here — the trailing-slash/no-extension rules
+ * are A5 additions gated on `dirs` only.
  * @param {string} text @param {PathScope | null | undefined} scope
  * @returns {{ text: string, path: string, line?: number, col?: number } | null}
  */
@@ -398,7 +589,30 @@ export function pathRefOfCode(text, scope) {
     if (isTerminator(ch)) return null;
   }
   const { path, line, col } = splitLineCol(text);
-  const resolved = path.startsWith("/") ? path : resolveRelativePath(path, scope.cwd);
+  const dirs = scope.dirs === true;
+  // §2.5.3: under `dirs` ONE trailing `/` is legal (dropped from the resolved path, kept in
+  // the displayed text). The `/`-containment test uses the PRE-strip span so a bare `seg0/`
+  // still qualifies (its stripped form has no slash left).
+  const hadSlash = path.indexOf("/") > 0;
+  let cand = path;
+  if (dirs && cand.length > 1 && cand.endsWith("/")) cand = cand.slice(0, -1);
+  /** @type {string | null} */
+  let resolved;
+  if (cand.startsWith("/")) {
+    resolved = cand;
+  } else if (dirs) {
+    // §2.5.3: no-extension relative spans are acceptable under `dirs` — require ≥1 `/` with a
+    // non-empty, scheme-free leading segment (mirroring `resolveRelativePath`'s cwd handling);
+    // segment validity is isClickable's job, as always.
+    const slash = path.indexOf("/");
+    const firstSeg = slash > 0 ? path.slice(0, slash) : "";
+    const base0 = typeof scope.cwd === "string" ? scope.cwd : "";
+    const base = base0.endsWith("/") ? base0.slice(0, -1) : base0;
+    resolved =
+      hadSlash && firstSeg !== "" && !firstSeg.includes(":") && base !== "" && base !== "/" ? `${base}/${cand}` : null;
+  } else {
+    resolved = resolveRelativePath(cand, scope.cwd);
+  }
   if (resolved === null || !isClickable(resolved, scope)) return null;
   /** @type {{ text: string, path: string, line?: number, col?: number }} */
   const out = { text, path: resolved };
@@ -410,12 +624,18 @@ export function pathRefOfCode(text, scope) {
 /**
  * v3-2 (§7-D13 双保险): the scope identity a watcher keys on — same sessionId is SUPPOSED to
  * imply same cwd, but carrying cwd in the key costs one string concat and invalidates the
- * scope (closing any open preview) if that invariant ever breaks.
+ * scope (closing any open preview) if that invariant ever breaks. dir-plan §2.5.1: `|abs` /
+ * `|dir` are appended when the respective flag is set — a hub cap change invalidates the
+ * scope and the probe LRU partitions naturally; the format is byte-identical when neither
+ * flag is set (every pre-dir-plan key pin stays green).
  * @param {PathScope | null | undefined} scope
  */
 export function scopeKeyOf(scope) {
   if (scope === null || scope === undefined) return "";
-  return `${scope.agentKey}|${scope.sessionId}|${scope.cwd ?? ""}`;
+  let key = `${scope.agentKey}|${scope.sessionId}|${scope.cwd ?? ""}`;
+  if (scope.abs === true) key += "|abs";
+  if (scope.dirs === true) key += "|dir";
+  return key;
 }
 
 /**
@@ -449,7 +669,15 @@ export function previewScopeOf(p) {
   const s = /** @type {{ sessionId?: unknown, cwd?: unknown }} */ (session);
   if (typeof s.sessionId !== "string" || s.sessionId === "") return null;
   const cwd = typeof s.cwd === "string" ? s.cwd : null;
-  return { agentKey, sessionId: s.sessionId, cwd, uploads: true };
+  /** @type {PathScope} */
+  const scope = { agentKey, sessionId: s.sessionId, cwd, uploads: true };
+  // dir-plan §2.5.1: the abs/dir caps ADD their keys only when present — `preview.abs.v1`
+  // unlocks absolute-path recognition outside cwd (C4), `preview.dir.v1` the directory
+  // candidate rules (A5) + `dir=1`/`dirs:true` on the wire. Absent cap ⇒ absent key, so a
+  // pre-dir-plan hub's scopes are deep-equal to before.
+  if (caps.includes(PREVIEW_ABS_HUB_CAP)) scope.abs = true;
+  if (caps.includes(PREVIEW_DIR_HUB_CAP)) scope.dirs = true;
+  return scope;
 }
 
 /**
@@ -479,16 +707,28 @@ const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
  *   over the listener's image cap / the 256KiB text cap;
  * - `E_PREVIEW_UNSUPPORTED` `dims-unknown` (mirrors the server 415): image dims unparseable;
  * - `E_PREVIEW_TOO_LARGE` `pixels`: dims fine but over `maxPixels` (the client budget).
+ *
+ * dir-plan §1.3/§5 P2 — the dir gate: `Kind: dir` is a LEGAL kind only for a request that
+ * opted in (`opts.dir === true`, the `&dir=1` GET). Without the opt-in it is a header-contract
+ * violation of THIS response ⇒ `E_BAD_RESPONSE` (the caller aborts before reading the body).
+ * With the opt-in the gate stops here: a dir body is capped-and-parsed JSON, not a
+ * length-oracled byte stream, so none of the Content-Length/Content-Type machinery below
+ * applies (`parsePreviewDirListing` is the real contract gate).
  * @param {{ get(name: string): string | null } | null | undefined} headers
- * @param {{ maxPixels?: number, imageMaxBytes?: number }} [opts]
+ * @param {{ maxPixels?: number, imageMaxBytes?: number, dir?: boolean }} [opts]
  * @returns {{ ok: true, kind: "image", mime: string, size: number, totalSize: number, dims: PreviewDimsT, truncated: false }
  *   | { ok: true, kind: "text", size: number, totalSize: number, truncated: boolean }
+ *   | { ok: true, kind: "dir" }
  *   | { ok: false, error: string, reason?: string, size?: number, max?: number, dims?: PreviewDimsT }}
  */
 export function checkPreviewHeaders(headers, opts) {
   const get = (/** @type {string} */ name) =>
     headers !== null && typeof headers === "object" && typeof headers.get === "function" ? headers.get(name) : null;
   const kind = get(PREVIEW_HDR.kind);
+  if (kind === "dir") {
+    if (!(opts !== undefined && opts.dir === true)) return { ok: false, error: "E_BAD_RESPONSE" };
+    return { ok: true, kind: "dir" };
+  }
   if (kind !== "image" && kind !== "text") return { ok: false, error: "E_BAD_RESPONSE" };
   // Transport compression (dynamic preview-text gzip): `Content-Length` names the COMPRESSED
   // length and fetch transparently decompresses, so the completeness oracle must compare the
@@ -626,6 +866,73 @@ export function classifyPreviewError(status, body) {
   const out = { kind: "error", error, status, retryable };
   if (typeof b.retryAfterS === "number" && b.retryAfterS >= 0) out.retryAfterS = b.retryAfterS;
   return out;
+}
+
+/* -------------------------------------------------------------------------
+ * Directory-preview navigation + sizing (dir-plan v3.1 §0.2 A3 + P2's `formatPreviewBytes`)
+ * — pure path algebra for the P3 composable's in-dialog navigation. Both functions are
+ * total (never throw) and validate through the protocol's own `validatePreviewPath` with
+ * `minSegments: 1`: navigation legitimately reaches ONE-segment directories (`/home`),
+ * while `/` itself is not listable (A3) and therefore never a navigation target.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * A3 “点子项”: join a listed entry name onto its directory path. `name` must be a single
+ * legal segment (non-empty, no `/`, no NUL, not `.`/`..`); the joined path must still be
+ * protocol-valid (≤4096 UTF-8 bytes, min 1 segment — the parent already guarantees ≥1, so
+ * the child always has ≥2). A `dir` carrying a trailing `/` (a (a)-rule display form) is
+ * normalized first. Returns `null` for anything else — the caller keeps the row inert.
+ * @param {string} dir @param {string} name
+ * @returns {string | null}
+ */
+export function childPreviewPath(dir, name) {
+  if (typeof dir !== "string" || typeof name !== "string") return null;
+  if (name === "" || name === "." || name === ".." || name.includes("/") || name.includes("\0")) return null;
+  const base = dir.length > 1 && dir.endsWith("/") ? dir.slice(0, -1) : dir;
+  if (!base.startsWith("/")) return null;
+  const child = `${base}/${name}`;
+  return validatePreviewPath(child, { minSegments: 1 }) ? child : null;
+}
+
+/**
+ * A3 “上级”: the parent path of a previewed directory — `/a/b/c` → `/a/b`, `/a/b` → `/a`.
+ * Stops at one segment: the parent of a one-segment path is `/`, which is NOT listable, so
+ * `null` is returned there (the UI greys the 上级 button). A trailing `/` is normalized
+ * first (`/a/b/` → parent `/a`, not `/a/b`). Returns `null` for non-strings and any result
+ * that is not itself a protocol-valid (≥1 segment) path.
+ * @param {string} path
+ * @returns {string | null}
+ */
+export function parentPreviewPath(path) {
+  if (typeof path !== "string") return null;
+  const base = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+  if (!base.startsWith("/")) return null;
+  const cut = base.lastIndexOf("/");
+  if (cut <= 0) return null; // "/a" → "/" is not listable; malformed → refuse
+  const parent = base.slice(0, cut);
+  return validatePreviewPath(parent, { minSegments: 1 }) ? parent : null;
+}
+
+/**
+ * dir-plan P2: human-readable byte size for a directory listing's file rows (A1) — plain
+ * ASCII units (`B`/`KiB`/`MiB`/`GiB`, binary 1024 steps, one fraction digit above 1 KiB),
+ * matching the UI's compact-marker language split. Non-finite/negative input (a missing
+ * `size` on a `statPartial` entry, a corrupt value) degrades to `""` so the caller renders
+ * nothing rather than a wrong number.
+ * @param {unknown} n
+ * @returns {string}
+ */
+export function formatPreviewBytes(n) {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return `${Math.floor(n)} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let v = n / 1024;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  return `${v.toFixed(1)} ${units[u]}`;
 }
 
 /* -------------------------------------------------------------------------

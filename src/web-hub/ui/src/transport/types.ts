@@ -7,7 +7,7 @@
  * adapters so the two transports can never silently diverge again (the exact regression class
  * 78dd76b was: password client missing `subscribe`/`page`).
  */
-import type { PreviewDims, PreviewImageMime } from "@protocol/preview.js";
+import type { PreviewDims, PreviewDirListing, PreviewImageMime, PreviewProbeKind } from "@protocol/preview.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type {
@@ -353,6 +353,16 @@ export interface UploadTransport {
  * read, plan §4.6 transport paragraph) and for client-mirrored budget refusals
  * (`E_PREVIEW_TOO_LARGE` from `checkPreviewHeaders` keeps the server's 413 code with
  * `status: 0` — the request was aborted before the body ever left the server).
+ *
+ * dir-plan §5 P2: `PreviewDirOutcome` adds the `dir` success variant — a `dir=1` response's
+ * capped-and-parsed listing (`PreviewDirListing`, the protocol's own type — never a hand
+ * mirror). `PreviewOutcome` itself stays the file-only union for now: its only consumer
+ * (`composables/usePreview.ts`, frozen for P2) narrows `kind !== "text" ⇒ image` and cannot
+ * see a dir variant yet, so `fetch` keeps its pre-dir-plan return type and P3 — which
+ * rewrites `usePreview` to pass `dir` and render the listing — merges the alias into
+ * `PreviewOutcome` in the same package. An un-opt-in-ed fetch never sees the variant at all:
+ * `Kind: dir` without `req.dir` is `E_BAD_RESPONSE` in `checkPreviewHeaders` (§1.3's fetch
+ * path).
  */
 export type PreviewOutcome =
   | {
@@ -382,6 +392,19 @@ export type PreviewOutcome =
     };
 
 /**
+ * dir-plan §5 P2: the FULL outcome union (`PreviewOutcome` plus the `dir` variant). The
+ * logic clients already RETURN dir outcomes for `dir: true` fetches at runtime; this alias
+ * is the typed transition point P3 consumes when it widens `fetch`'s declared return.
+ */
+export type PreviewDirOutcome =
+  | PreviewOutcome
+  | {
+      readonly ok: true;
+      readonly kind: "dir";
+      readonly listing: PreviewDirListing;
+    };
+
+/**
  * §4.6's `PreviewTransport` — one endpoint, same shape on both adapters (the shared suite in
  * `tests/web-hub/ui/transport-contract.test.ts` pins parity, SP11's spawn-namespace precedent).
  * The request carries `X-PWH: 1`; `signal` is `usePreview`'s per-open controller (a new open /
@@ -391,16 +414,34 @@ export type PreviewOutcome =
  */
 export interface PreviewTransport {
   fetch(
-    req: { readonly agentKey: string; readonly sessionId: string; readonly path: string },
+    req: {
+      readonly agentKey: string;
+      readonly sessionId: string;
+      readonly path: string;
+      /** dir-plan §5 P2: appends `&dir=1` (opt-in directory listing, A4) — absent keeps the
+       * request byte-identical to pre-dir-plan. The declared return stays the file-only
+       * `PreviewOutcome` until P3 rewrites its consumer (see `PreviewDirOutcome`); the logic
+       * clients already resolve `kind: "dir"` outcomes at runtime. */
+      readonly dir?: true;
+    },
     opts: { readonly signal: AbortSignal; readonly maxPixels: number },
   ): Promise<PreviewOutcome>;
   /** 2026-10-07 修订「先探测后标记」: `POST /api/preview/probe` — batch existence probe, same
    * auth/CSRF surface as `fetch` (cookie credentials + `X-PWH: 1`), ONE request for a whole
    * message's candidates. Optional per the frozen-types convention — an older/foreign
    * transport without it simply keeps the legacy always-clickable rendering (`usePreview`
-   * omits `handle.probe` and `PathText` degrades to pre-probe behavior). */
+   * omits `handle.probe` and `PathText` degrades to pre-probe behavior).
+   *
+   * dir-plan §1.3/§5 P2: `dirs: true` adds it to the JSON body (directories then answer
+   * `"dir"`); a dirs-less request folds a received `"dir"` per-entry to `"missing"`
+   * (§1.3's single fold point — the logic clients' `probePost`). */
   probe?(
-    req: { readonly agentKey: string; readonly sessionId: string; readonly paths: readonly string[] },
+    req: {
+      readonly agentKey: string;
+      readonly sessionId: string;
+      readonly paths: readonly string[];
+      readonly dirs?: true;
+    },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<PreviewProbeOutcome>;
 }
@@ -410,7 +451,11 @@ export interface PreviewTransport {
  * (`"missing"` = not found / not admitted / binary); the error half is the same shape as
  * `PreviewOutcome`'s (status 0 for client-local codes) — the composable maps ANY error half
  * to a batch-wide "failed" degrade, so only `status`/`error`/`retryAfterS` are kept.
+ *
+ * dir-plan §1.3: the results element type IS the protocol's `PreviewProbeKind` — imported
+ * from the single source (`protocol/preview.ts` + `PREVIEW_PROBE_KINDS`), never a local
+ * literal union here (a hand mirror could drift when the protocol union grows).
  */
 export type PreviewProbeOutcome =
-  | { readonly ok: true; readonly results: ReadonlyArray<"text" | "image" | "missing"> }
+  | { readonly ok: true; readonly results: ReadonlyArray<PreviewProbeKind> }
   | { readonly ok: false; readonly status: number; readonly error: string; readonly retryAfterS?: number };
