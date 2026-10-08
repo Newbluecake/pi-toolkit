@@ -255,6 +255,23 @@ describe("view-model: buildFleetViewModel", () => {
     expect(model.totalCount).toBe(4);
   });
 
+  it("a terminal row's elapsed freezes at its settle instant instead of growing with `now`", () => {
+    const done = snapshot({
+      runId: "settled-run",
+      status: "completed",
+      phase: "settled",
+      updatedAt: 9_000,
+      diag: diag({ createdAt: 1_000, settledAt: 7_000 }),
+    });
+    const at = (now: number) => buildFleetViewModel([done], { ...opts, now }).rows[0]!.elapsedMs;
+    expect(at(20_000)).toBe(6_000);
+    expect(at(900_000)).toBe(6_000); // a frame much later: still the run's real duration
+    const noSettledAt = snapshot({ ...done, diag: diag({ createdAt: 1_000 }) });
+    expect(buildFleetViewModel([noSettledAt], { ...opts, now: 900_000 }).rows[0]!.elapsedMs).toBe(8_000);
+    const running = snapshot({ diag: diag({ createdAt: 1_000 }) });
+    expect(buildFleetViewModel([running], { ...opts, now: 20_000 }).rows[0]!.elapsedMs).toBe(19_000);
+  });
+
   it("retains matching terminal rows beyond the recent cap and projects a folded prompt", () => {
     const old = snapshot({
       runId: "old-terminal",

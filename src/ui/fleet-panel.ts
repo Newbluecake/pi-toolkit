@@ -63,7 +63,7 @@ export interface FleetRow {
   phaseLabel: string;
   status: RunStatus;
   phase: RunPhase;
-  /** Total run age: now - diag.createdAt, clamped ≥ 0. Used for sorting and terminal rows. */
+  /** Total run age, clamped ≥ 0: now - diag.createdAt while active; frozen at (diag.settledAt ?? updatedAt) - createdAt once terminal. */
   elapsedMs: Millis;
   /** Current-phase age: now - diag.phaseEnteredAt, clamped ≥ 0. Active rows display this
    *  next to the phase label, so 💭思考 12s shows how long THIS model turn has been running
@@ -411,7 +411,12 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     phaseLabel: phaseLabel(snapshot.phase, snapshot.diag, opts.now),
     status: snapshot.status,
     phase: snapshot.phase,
-    elapsedMs: Math.max(0, opts.now - snapshot.diag.createdAt),
+    // Terminal rows freeze at their settle instant: `now - createdAt` kept growing on every
+    // later fleet frame, so a long-finished run's duration ticked on in the web drawer.
+    elapsedMs: Math.max(
+      0,
+      (terminal ? (snapshot.diag.settledAt ?? snapshot.updatedAt) : opts.now) - snapshot.diag.createdAt,
+    ),
     phaseMs: Math.max(0, opts.now - snapshot.diag.phaseEnteredAt),
     idleMs: idleOf(snapshot, opts.now),
     currentTool: terminal ? undefined : snapshot.diag.currentTool?.name,
