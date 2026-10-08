@@ -267,7 +267,7 @@ export interface HeldItemWire {
 }
 export interface StatusInfo {
   /* …existing… */
-  held?: HeldItemWire[]; // absent ⇔ empty / !holdCap() / steerRecall off
+  held?: HeldItemWire[]; // absent ⇔ empty / steerRecall off / holdWired false (NOT gated on holdCap(), D3)
   heldRev?: number; // monotonic per agent process; present iff `held` present
   heldEpoch?: string; // R-C merge scope: MODULE_INSTANCE of the publishing activate() (same value as CtlFrame.epoch); present iff `held` present
 }
