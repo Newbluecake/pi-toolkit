@@ -28,6 +28,8 @@ import type { QueueMirror } from "./queue-mirror.js";
 import type { CompactionState } from "./compaction-state.js";
 import type { OriginEntryPort } from "./origin-entry.js";
 import type { QueryControlPort, StopResult } from "./index.js";
+import type { HoldItem } from "./hold.js";
+import type { DispatchOutcome, HoldDriver } from "./hold-driver.js";
 import type { CmdData, CmdErrorCode, CmdFrame, CmdLateFrame, CmdOp, CmdResultFrame } from "../protocol/messages.js";
 
 export interface Timer {
@@ -50,6 +52,16 @@ export interface CommandHandlerDeps {
   /** Called after any ledger/queue mutation so the caller can republish the `status`/`ctl` slots. */
   onChanged(): void;
   setTimer(ms: number, fn: () => void): Timer;
+  /** web-hub-steer-recall plan §4.4 A3: the hold driver, when `webHub.steerRecall` is wired
+   * (`undefined` ⇔ disabled — prompts take the native path unconditionally and `recall` degrades
+   * to `E_UNSUPPORTED`, D22/S5). Looked up lazily (not captured once) so index.ts can construct
+   * the driver after the handler without a temporal-dead-zone cycle. */
+  hold?: () => HoldDriver | undefined;
+  /** v4.3 Y4/Y7.3: this module instance's identity, threaded into `ledger.begin`'s `owner` extra
+   * and `findDispatchedByText`'s scope so a stale (pre-`/reload`) owner's dispatched entry can
+   * never be mistaken for a current one even when `sessionId` happens to match. Optional so a
+   * caller that hasn't wired hold-recall yet (no `hold` dep either) still compiles unchanged. */
+  owner?: string;
 }
 
 export interface InputEventLike {
@@ -84,6 +96,12 @@ export interface CommandHandler {
   handleBridgeLate(frame: CmdFrame, result: LedgerResult): void;
   /** §4.4 row 4: session_start/session_shutdown boundary. */
   onSessionBoundary(): void;
+  /** web-hub-steer-recall plan §4.3 A2 / §5.3: the hold driver's `dispatchToPi` — P2-P5 only
+   * (precondition check, ledger write, origin entry, the actual `sendUserMessage` call). Never
+   * touches the hold buffer and never calls `onReturned` (D5: the driver owns both). Exposed on
+   * the handler (rather than free-standing) because it shares `pendingObservation`'s 30 s CAS
+   * timer machinery with the native prompt path. */
+  dispatchHeld(item: HoldItem): DispatchOutcome;
   dispose(): void;
 }
 
@@ -159,6 +177,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     const outcome = deps.ledger.begin(frame.id, frame.cmd.op, frame.cmd, deps.now(), {
       ...extra,
       sessionId: deps.getSessionId(),
+      ...(deps.owner !== undefined ? { owner: deps.owner } : {}),
     });
     switch (outcome.kind) {
       case "new":
@@ -210,7 +229,22 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     if (deps.compactionState.manualCompacting) {
       return settleAndReply(frame, errResult("E_BUSY_COMPACTING", true, "none"));
     }
-    deps.ledger.updatePrompt(frame.id, { promptState: "dispatched" }, deps.now());
+    // web-hub-steer-recall plan §4.4 A3 point 2: try the hold branch BEFORE the native dispatch—
+    // the ledger is written first (`held`), then the buffer; a `hold()` capacity-race failure
+    // falls through to the native path below (which re-asserts `text` since "held" doesn't retain
+    // it, §5.2 — "臺账先写，hold失败回滚到原生路径").
+    const drv = deps.hold?.();
+    if (drv !== undefined) {
+      const req = { cmdId: frame.id, text: cmd.text, deliver: cmd.deliver, origin: frame.origin };
+      if (drv.canHold(req, ctx)) {
+        deps.ledger.updatePrompt(frame.id, { promptState: "held", behavior: cmd.deliver }, deps.now());
+        if (drv.hold(req)) {
+          deps.onChanged();
+          return settleAndReply(frame, okResult({ op: "prompt", delivery: "held", behavior: cmd.deliver }));
+        }
+      }
+    }
+    deps.ledger.updatePrompt(frame.id, { promptState: "dispatched", text: cmd.text }, deps.now());
     deps.originEntry.appendOrigin("prompt", frame.id, frame.origin, cmd.deliver);
     // todo #32 finding 3: the pending-observation entry MUST exist before `sendUserMessage` is
     // called — on the real path `sendUserMessage` can synchronously fire the `input` event (same
@@ -226,6 +260,32 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
   }
 
+  /** Extracted so `dispatchHeld` (no HTTP reply pending) can reuse the exact same CAS-guarded 30 s
+   * display-timer the native path uses (§5.5: `promptState==="dispatched"` at fire time). */
+  function scheduleUnobservedFinalize(cmdId: string): void {
+    deps.setTimer(PROMPT_UNOBSERVED_FINALIZE_MS, () => {
+      const e = deps.ledger.get(cmdId);
+      if (e !== undefined && e.promptState === "dispatched") {
+        deps.ledger.updatePrompt(cmdId, { promptState: "unconfirmed", reason: "unobserved" }, deps.now());
+        deps.onChanged();
+      }
+    });
+  }
+
+  /** verifier r_BHFA552J P1 (Y7.3): the hold-attributed consumption-time dequeue. Resolves the
+   * UNIQUE `queued`-state ledger candidate for `text` (scoped by session/owner, same ambiguity
+   * safety as `onInputEvent`'s observe-time lookup), then removes ONLY that exact cmdId from the
+   * queue mirror — never a blind FIFO text match. A same-text TUI/other-extension mirror item (no
+   * cmdId, or a different cmdId) is NEVER touched. No unique candidate ⇒ dequeue NOTHING. */
+  function dequeueHoldAttributed(text: string): ReturnType<QueueMirror["dequeueByText"]> {
+    const candidate = deps.ledger.findQueuedByText(text, {
+      sessionId: deps.getSessionId(),
+      ...(deps.owner !== undefined ? { owner: deps.owner } : {}),
+    });
+    if (candidate === undefined) return undefined;
+    return deps.queueMirror.dequeueByCmdId(candidate.id, text);
+  }
+
   function registerObservation(
     frame: CmdFrame,
     deliver: "steer" | "followUp",
@@ -237,14 +297,49 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     });
     const entry = { frame, deliver, timer };
     pendingObservation.set(frame.id, entry);
-    deps.setTimer(PROMPT_UNOBSERVED_FINALIZE_MS, () => {
-      const e = deps.ledger.get(frame.id);
-      if (e !== undefined && e.promptState === "dispatched") {
-        deps.ledger.updatePrompt(frame.id, { promptState: "unconfirmed", reason: "unobserved" }, deps.now());
-        deps.onChanged();
-      }
-    });
+    scheduleUnobservedFinalize(frame.id);
     return entry;
+  }
+
+  /** web-hub-steer-recall plan §5.3 P2-P5, synchronous, no `await`. Precondition check → ledger
+   * write (dispatched + text restored) → origin entry (self-swallowing, P4) → the actual
+   * `sendUserMessage` call. Never touches the hold buffer, never calls `onReturned` — the driver
+   * (caller) owns P1/P6/P7 (D5). */
+  function dispatchHeld(item: HoldItem): DispatchOutcome {
+    try {
+      const ctx = deps.getCtx();
+      if (ctx === undefined) return "refused";
+      if (deps.getSessionId() !== item.sessionId) return "refused";
+      if (deps.compactionState.manualCompacting) return "refused";
+    } catch {
+      return "refused"; // P2
+    }
+    try {
+      deps.ledger.updatePrompt(item.cmdId, { promptState: "dispatched", text: item.text }, deps.now());
+      scheduleUnobservedFinalize(item.cmdId);
+    } catch {
+      return "refused"; // P3
+    }
+    try {
+      deps.originEntry.appendOrigin("prompt", item.cmdId, item.origin, item.deliver);
+    } catch {
+      /* P4: self-swallowing — never affects the outcome */
+    }
+    // v4.3 P5 fix (verifier r_BHFA552J P2): once we are ABOUT to call `sendUserMessage`, we commit
+    // to "sent" regardless of what happens inside it. The underlying runtime can synchronously fire
+    // real side effects (the `input` event, possibly even an enqueue) before throwing further down
+    // its own call chain, so a thrown exception here does NOT prove nothing was delivered. Treating
+    // it as "threw"/"refused" (⇒ the driver marks the item `returned{stale}`) would let the browser
+    // resend it while pi might already be about to process the first copy — a duplicate delivery.
+    // "sent" leaves the ledger entry at `dispatched`, which decays to `unconfirmed` via the existing
+    // 30s timer (already armed above) if no observation ever lands — exactly the "possibly-delivered"
+    // semantics called for, with no new state needed.
+    try {
+      deps.pi.sendUserMessage(item.text, { deliverAs: item.deliver, expandPromptTemplates: false });
+    } catch {
+      /* side-effect-then-throw: still reported as "sent" above/below — see comment. */
+    }
+    return "sent";
   }
 
   function scheduleIdleStartedTimeout(cmdId: string, text: string): void {
@@ -282,12 +377,48 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     let wasBusy: boolean;
     try {
       wasBusy = !ctx.isIdle();
+      deps.hold?.()?.onWebAbort();
       ctx.abort();
     } catch {
       return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
     }
     settleAndReply(frame, okResult({ op: "abort", wasBusy }));
     deps.originEntry.notify(ctx, "abort", frame.origin);
+  }
+
+  /** web-hub-steer-recall plan §4.4 A3 point 4 / §5.8. `toRecallResult` lives inline here — it is
+   * the single construction point for `RecallResultData`. */
+  function handleRecall(frame: CmdFrame): void {
+    if (frame.cmd.op !== "recall") return;
+    const cmd = frame.cmd;
+    if (!beginOrReply(frame)) return;
+    const drv = deps.hold?.();
+    if (drv === undefined) return settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+    const outcome = drv.recall(cmd.target);
+    if (outcome.kind === "recalled") {
+      deps.ledger.updatePrompt(cmd.target, { promptState: "recalled" }, deps.now());
+      return settleAndReply(
+        frame,
+        okResult({
+          op: "recall",
+          outcome: "recalled",
+          from: outcome.from,
+          deliver: outcome.item.deliver,
+          text: outcome.item.text,
+        }),
+      );
+    }
+    if (outcome.kind === "too_late") {
+      return settleAndReply(frame, okResult({ op: "recall", outcome: "too_late" }));
+    }
+    // outcome.kind === "unknown": the buffer no longer has it (never held, or already handed off
+    // and released). Consult the ledger to tell "too_late" (a real prompt, now past held) from a
+    // genuinely unknown/non-prompt target (S5).
+    const target = deps.ledger.get(cmd.target);
+    if (target !== undefined && target.op === "prompt") {
+      return settleAndReply(frame, okResult({ op: "recall", outcome: "too_late" }));
+    }
+    return settleAndReply(frame, errResult("E_NOT_FOUND", false, "none"));
   }
 
   function mapSteerError(r: { ok: false; reason: string; detail?: string }): LedgerResult {
@@ -481,6 +612,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       if (op === "steer_subagent") return handleSteer(frame);
       if (op === "abort_subagent") return handleStop(frame);
       if (op === "command") return handleCommand(frame);
+      if (op === "recall") return handleRecall(frame);
       // dialog_answer / dialog_cancel: routed straight to the dialog bridge by the caller.
     },
     onInputEvent(ev) {
@@ -495,7 +627,19 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         }
         return;
       }
-      const match = deps.ledger.findDispatchedByText(ev.text);
+      // v4.3 Y4/Y7.3 (verifier r_BHFA552J P2): the scoped + ambiguity-safe match is used ONLY when
+      // the hold feature is actually wired (a HoldDriver is attached) — with hold off this call is
+      // byte-identical to the pre-steer-recall native path (no `scope` arg → earliest-candidate,
+      // no session/owner filtering, no ambiguity rejection). A `undefined` result with hold on means
+      // either "no match" or "more than one candidate" (ambiguous) — both fall through to the same
+      // unattributed-enqueue path; no cmdId is ever guessed.
+      const holdOn = deps.hold?.() !== undefined;
+      const match = holdOn
+        ? deps.ledger.findDispatchedByText(ev.text, {
+            sessionId: deps.getSessionId(),
+            ...(deps.owner !== undefined ? { owner: deps.owner } : {}),
+          })
+        : deps.ledger.findDispatchedByText(ev.text);
       if (match === undefined) {
         if (ev.streamingBehavior !== undefined) {
           deps.queueMirror.enqueue({ text: ev.text, deliver: ev.streamingBehavior, source: "extension" });
@@ -505,6 +649,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       }
       const behavior = ev.streamingBehavior ?? "idle";
       deps.ledger.updatePrompt(match.id, { promptState: "observed", behavior }, deps.now());
+      deps.hold?.()?.onObserved(match.id); // E1 — display-only since Y1, never lifts B1.
       const pending = pendingObservation.get(match.id);
       if (pending !== undefined) {
         pending.timer.cancel();
@@ -536,13 +681,16 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
           // forever — 30min TTL/capacity aside — and the web UI's queue list showed it as
           // "queued" indefinitely).
           deps.ledger.updatePrompt(cmdId, { promptState: "consumed" }, deps.now());
+          deps.hold?.()?.onConsumed(cmdId); // E2 — the ONLY lift of B1 (Y1).
           changed = true;
         }
         break;
       }
-      const dequeued = deps.queueMirror.dequeueByText(text);
+      const holdOn = deps.hold?.() !== undefined;
+      const dequeued = holdOn ? dequeueHoldAttributed(text) : deps.queueMirror.dequeueByText(text);
       if (dequeued?.cmdId !== undefined) {
         deps.ledger.updatePrompt(dequeued.cmdId, { promptState: "consumed" }, deps.now());
+        deps.hold?.()?.onConsumed(dequeued.cmdId); // E2 — the ONLY lift of B1 (Y1).
         changed = true;
       }
       if (changed) deps.onChanged();
@@ -574,6 +722,9 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         changed = true;
       }
       if (changed) deps.onChanged();
+    },
+    dispatchHeld(item) {
+      return dispatchHeld(item);
     },
     dispose() {
       for (const p of pendingObservation.values()) {

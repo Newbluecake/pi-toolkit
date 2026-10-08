@@ -125,28 +125,182 @@ describe("createCommandLedger — prompt sub-state track (§4.3)", () => {
     expect(frame.items[0]).toMatchObject({ cmdId: "id1", op: "prompt", state: "observed", behavior: "idle" });
   });
 
-  it("findDispatchedByText returns the earliest still-dispatched entry with an exact text match", () => {
+  it("findDispatchedByText returns the single scoped candidate with an exact text match", () => {
     const ledger = createCommandLedger();
-    ledger.begin("id1", "prompt", { op: "prompt", text: "same" }, 1000, { text: "same" });
+    ledger.begin("id1", "prompt", { op: "prompt", text: "same" }, 1000, { text: "same", sessionId: "sess-1" });
     ledger.updatePrompt("id1", { promptState: "dispatched" }, 1000);
-    ledger.begin("id2", "prompt", { op: "prompt", text: "same", deliver: "steer" }, 1001, { text: "same" });
-    ledger.updatePrompt("id2", { promptState: "dispatched" }, 1001);
-    const match = ledger.findDispatchedByText("same");
+    const match = ledger.findDispatchedByText("same", { sessionId: "sess-1" });
     expect(match?.id).toBe("id1");
   });
 
-  it("findDispatchedByText ignores entries whose promptState already moved past 'dispatched'", () => {
+  it("v4.3 Y4: two scoped candidates with the same text are AMBIGUOUS — never picks the earliest", () => {
     const ledger = createCommandLedger();
-    ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, { text: "hi" });
-    ledger.updatePrompt("id1", { promptState: "observed" }, 1000);
+    ledger.begin("id1", "prompt", { op: "prompt", text: "same" }, 1000, { text: "same", sessionId: "sess-1" });
+    ledger.updatePrompt("id1", { promptState: "dispatched" }, 1000);
+    ledger.begin("id2", "prompt", { op: "prompt", text: "same", deliver: "steer" }, 1001, {
+      text: "same",
+      sessionId: "sess-1",
+    });
+    ledger.updatePrompt("id2", { promptState: "dispatched" }, 1001);
+    expect(ledger.findDispatchedByText("same", { sessionId: "sess-1" })).toBeUndefined();
+    // neither candidate was mutated by the ambiguous lookup itself.
+    expect(ledger.get("id1")?.promptState).toBe("dispatched");
+    expect(ledger.get("id2")?.promptState).toBe("dispatched");
+  });
+
+  it("verifier r_BHFA552J P2: WITHOUT a scope arg (native/hold-off path) two same-text candidates pick the EARLIEST — byte-identical to pre-steer-recall behavior, never ambiguous", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "same" }, 1000, { text: "same", sessionId: "sess-1" });
+    ledger.updatePrompt("id1", { promptState: "dispatched" }, 1000);
+    ledger.begin("id2", "prompt", { op: "prompt", text: "same", deliver: "steer" }, 1001, {
+      text: "same",
+      sessionId: "sess-1",
+    });
+    ledger.updatePrompt("id2", { promptState: "dispatched" }, 1001);
+    expect(ledger.findDispatchedByText("same")?.id).toBe("id1");
+  });
+
+  it("verifier r_BHFA552J P2: WITHOUT a scope arg, 'unconfirmed' is NOT matched (old behavior only knows 'dispatched')", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, { text: "hi", sessionId: "sess-1" });
+    ledger.updatePrompt("id1", { promptState: "unconfirmed", reason: "unobserved" }, 2000);
     expect(ledger.findDispatchedByText("hi")).toBeUndefined();
   });
 
-  it("updatePrompt past 'observed' clears the matching text (no longer needed)", () => {
+  it("findDispatchedByText also matches 'unconfirmed' (v4.3 R-A upgrade path) — ONLY when scope is passed", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, { text: "hi", sessionId: "sess-1" });
+    ledger.updatePrompt("id1", { promptState: "unconfirmed", reason: "unobserved" }, 2000);
+    expect(ledger.findDispatchedByText("hi", { sessionId: "sess-1" })?.id).toBe("id1");
+  });
+
+  it("findDispatchedByText never crosses sessionId scope (v4.3 Y4)", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, { text: "hi", sessionId: "sess-1" });
+    ledger.updatePrompt("id1", { promptState: "dispatched" }, 1000);
+    expect(ledger.findDispatchedByText("hi", { sessionId: "sess-2" })).toBeUndefined();
+  });
+
+  it("findDispatchedByText never crosses owner scope once an owner was recorded (v4.3 Y4/Y7.3 /reload)", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, {
+      text: "hi",
+      sessionId: "sess-1",
+      owner: "old-instance",
+    });
+    ledger.updatePrompt("id1", { promptState: "dispatched" }, 1000);
+    // same session, but a NEW module instance (post-/reload) asking — must not match a stale owner.
+    expect(ledger.findDispatchedByText("hi", { sessionId: "sess-1", owner: "new-instance" })).toBeUndefined();
+    expect(ledger.findDispatchedByText("hi", { sessionId: "sess-1", owner: "old-instance" })?.id).toBe("id1");
+    // back-compat: a caller that doesn't pass an owner still matches (no owner-based exclusion).
+    expect(ledger.findDispatchedByText("hi", { sessionId: "sess-1" })?.id).toBe("id1");
+  });
+
+  it("findDispatchedByText ignores entries whose promptState already moved past 'dispatched'/'unconfirmed'", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, { text: "hi", sessionId: "sess-1" });
+    ledger.updatePrompt("id1", { promptState: "observed" }, 1000);
+    expect(ledger.findDispatchedByText("hi", { sessionId: "sess-1" })).toBeUndefined();
+  });
+
+  it("updatePrompt past 'unconfirmed'/'observed' clears the matching text (no longer needed)", () => {
     const ledger = createCommandLedger();
     ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, { text: "hi" });
     ledger.updatePrompt("id1", { promptState: "started" }, 1000);
     expect(ledger.get("id1")?.text).toBeUndefined();
+  });
+
+  it("v4.3 Y6.2: 'unconfirmed' keeps the full text until consumed/dropped", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "hi" }, 1000, { text: "hi" });
+    ledger.updatePrompt("id1", { promptState: "dispatched" }, 1000);
+    ledger.updatePrompt("id1", { promptState: "unconfirmed", reason: "unobserved" }, 2000);
+    expect(ledger.get("id1")?.text).toBe("hi");
+    ledger.updatePrompt("id1", { promptState: "queued" }, 3000); // late observation upgrades it
+    // verifier r_BHFA552J P1: "queued" now ALSO retains text (findQueuedByText needs it for the
+    // hold-attributed consumption dequeue) — it only clears once truly terminal ("consumed").
+    expect(ledger.get("id1")?.text).toBe("hi");
+    ledger.updatePrompt("id1", { promptState: "consumed" }, 4000);
+    expect(ledger.get("id1")?.text).toBeUndefined();
+  });
+});
+
+describe("createCommandLedger — steer-recall states (v4.3 A4)", () => {
+  it("'held'/'recalled'/'returned' promptState round-trip through the ctl wire verbatim", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "a" }, 1000, { text: "a", sessionId: "s" });
+    ledger.updatePrompt("id1", { promptState: "held", behavior: "steer" }, 1000);
+    expect(ledger.frame("s", "e", 1001).items[0]).toMatchObject({ cmdId: "id1", state: "held" });
+    ledger.updatePrompt("id1", { promptState: "recalled" }, 1002);
+    expect(ledger.frame("s", "e", 1003).items[0]).toMatchObject({ cmdId: "id1", state: "recalled" });
+    ledger.begin("id2", "prompt", { op: "prompt", text: "b" }, 1000, { text: "b", sessionId: "s" });
+    ledger.updatePrompt("id2", { promptState: "returned", reason: "stale" }, 1004);
+    expect(ledger.frame("s", "e", 1005).items[0]).toMatchObject({ cmdId: "id2", state: "returned", reason: "stale" });
+  });
+
+  it("'held'/'recalled'/'aborted'/'reload' promptState clears text (not in the retaining set)", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "a" }, 1000, { text: "a" });
+    ledger.updatePrompt("id1", { promptState: "held" }, 1000);
+    expect(ledger.get("id1")?.text).toBeUndefined();
+  });
+
+  it("sweep protects a 'held' entry from TTL eviction within the 60 min grace window", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "a" }, 0, { sessionId: "s" });
+    ledger.settle("id1", { ok: true, data: { op: "prompt", delivery: "held" } }, 0);
+    ledger.updatePrompt("id1", { promptState: "held" }, 0);
+    // way past the normal 30 min LEDGER_TTL_MS, but inside the 60 min held grace.
+    ledger.begin("other", "abort", { op: "abort" }, 40 * 60_000);
+    expect(ledger.get("id1")?.promptState).toBe("held");
+  });
+
+  it("sweep evicts a 'held' entry once past the 60 min defensive cap", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "a" }, 0, { sessionId: "s" });
+    ledger.settle("id1", { ok: true, data: { op: "prompt", delivery: "held" } }, 0);
+    ledger.updatePrompt("id1", { promptState: "held" }, 0);
+    ledger.begin("other", "abort", { op: "abort" }, 61 * 60_000);
+    expect(ledger.get("id1")).toBeUndefined();
+  });
+
+  it("frame({filterHeld:true}) drops 'recall' op entries and 'held' state entries entirely", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("r1", "recall", { op: "recall", target: "x" }, 1000, { sessionId: "s" });
+    ledger.settle("r1", { ok: true, data: { op: "recall", outcome: "too_late" } }, 1001);
+    ledger.begin("h1", "prompt", { op: "prompt", text: "a" }, 1000, { sessionId: "s" });
+    ledger.updatePrompt("h1", { promptState: "held" }, 1000);
+    const frame = ledger.frame("s", "e", 1002, { filterHeld: true });
+    expect(frame.items).toHaveLength(0);
+  });
+
+  it("frame({filterHeld:true}) downgrades 'recalled'/'returned' to 'dropped'{not-delivered}", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "a" }, 1000, { sessionId: "s" });
+    ledger.updatePrompt("id1", { promptState: "recalled" }, 1000);
+    ledger.begin("id2", "prompt", { op: "prompt", text: "b" }, 1000, { sessionId: "s" });
+    ledger.updatePrompt("id2", { promptState: "returned", reason: "aborted" }, 1000);
+    const frame = ledger.frame("s", "e", 1001, { filterHeld: true });
+    const byId = new Map(frame.items.map((i) => [i.cmdId, i]));
+    expect(byId.get("id1")).toMatchObject({ state: "dropped", reason: "not-delivered" });
+    expect(byId.get("id2")).toMatchObject({ state: "dropped", reason: "not-delivered" });
+  });
+
+  it("frame({filterHeld:true}) masks aborted/reload/stale reasons to 'not-delivered' on other states", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "prompt", { op: "prompt", text: "a" }, 1000, { sessionId: "s" });
+    ledger.updatePrompt("id1", { promptState: "dropped", reason: "stale" }, 1000);
+    const frame = ledger.frame("s", "e", 1001, { filterHeld: true });
+    expect(frame.items[0]).toMatchObject({ state: "dropped", reason: "not-delivered" });
+  });
+
+  it("frame() without opts is byte-identical to the pre-steer-recall shape when no new states are present", () => {
+    const ledger = createCommandLedger();
+    ledger.begin("id1", "abort", { op: "abort" }, 1000, { sessionId: "s" });
+    ledger.settle("id1", OK, 1001);
+    const withOpts = ledger.frame("s", "e", 1002);
+    const explicit = ledger.frame("s", "e", 1002, { filterHeld: false });
+    expect(withOpts).toEqual(explicit);
   });
 });
 

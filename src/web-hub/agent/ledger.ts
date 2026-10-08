@@ -25,9 +25,32 @@ export type LedgerResult =
   | { ok: true; dup?: true; data: import("../protocol/messages.js").CmdData }
   | { ok: false; code: CmdErrorCode; message?: string; retryable: boolean; effect: "none" | "unknown" };
 
-export type PromptSubState = "dispatched" | "observed" | "started" | "queued" | "consumed" | "dropped" | "unconfirmed";
+export type PromptSubState =
+  | "dispatched"
+  | "observed"
+  | "started"
+  | "queued"
+  | "consumed"
+  | "dropped"
+  | "unconfirmed"
+  | "held"
+  | "recalled"
+  | "returned";
 export type PromptBehavior = "idle" | "steer" | "followUp";
-export type PromptReason = "unobserved" | "not-started" | "not-delivered" | "session" | "timeout";
+export type PromptReason =
+  "unobserved" | "not-started" | "not-delivered" | "session" | "timeout" | "aborted" | "reload" | "stale";
+/** promptState values that still need the matching `text` (v4.3 Y6.2 + verifier r_BHFA552J P1):
+ * `dispatched`/`unconfirmed` are what `findDispatchedByText` matches against, and `unconfirmed`
+ * must keep the FULL text until a late observation/consumption upgrades or drops it (R-A/M27).
+ * `observed` also keeps it (pre-existing behavior, unrelated to steer-recall: the idle-watch path
+ * matches on it). `queued` now ALSO keeps it so `findQueuedByText`'s hold-attributed consumption
+ * lookup (Y7.3) has something to match against between "queued" and "consumed". Every other state
+ * no longer needs it. */
+const TEXT_RETAINING_STATES: ReadonlySet<PromptSubState> = new Set(["dispatched", "observed", "queued", "unconfirmed"]);
+/** v4.3 §4.5 rule: a ledger entry pinned at `promptState:"held"` must not be evicted by TTL/
+ * capacity churn while it is still plausibly held (hold.ts's own HOLD_MAX_MS is 30 min; this is a
+ * generous 60 min defensive backstop in case the buffer and ledger ever disagree). */
+const HELD_EVICTION_GRACE_MS = 60 * 60_000;
 
 export interface LedgerEntry {
   readonly id: string;
@@ -47,6 +70,10 @@ export interface LedgerEntry {
   promptState?: PromptSubState;
   behavior?: PromptBehavior;
   reason?: PromptReason;
+  /** v4.3 Y4/Y7.3: the MODULE_INSTANCE that created this entry (undefined for callers that don't
+   * care, e.g. non-prompt ops) — `findDispatchedByText`'s scope check so a stale owner's (pre-
+   * `/reload`) dispatched entry never matches a new owner's incoming `input` event. */
+  owner?: string;
   readonly at: number;
   updatedAt: number;
 }
@@ -72,7 +99,7 @@ export interface CommandLedger {
     op: CmdOp,
     payload: unknown,
     now: number,
-    extra?: { text?: string; runId?: string; sessionId?: string },
+    extra?: { text?: string; runId?: string; sessionId?: string; owner?: string },
   ): BeginOutcome;
   get(id: string): LedgerEntry | undefined;
   /** Settle a running entry to a terminal state. A retryable, effect:"none" failure is deleted
@@ -80,12 +107,32 @@ export interface CommandLedger {
    * a post-timeout settlement (driving `cmd_late`, D15). */
   settle(id: string, result: LedgerResult, now: number, opts?: { late?: true }): void;
   /** Advance the prompt sub-state track (§4.3) without touching the generic `state`/`result`. */
-  updatePrompt(id: string, patch: Partial<Pick<LedgerEntry, "promptState" | "behavior" | "reason">>, now: number): void;
-  /** Earliest still-unobserved (`promptState === "dispatched"`) entry whose stored text matches
-   * exactly (§4.3 step 2 FIFO). */
-  findDispatchedByText(text: string): LedgerEntry | undefined;
+  updatePrompt(
+    id: string,
+    patch: Partial<Pick<LedgerEntry, "promptState" | "behavior" | "reason" | "text">>,
+    now: number,
+  ): void;
+  /** v4.3 Y4/Y7.3 (verifier r_BHFA552J P2): scope is OPTIONAL and selects between two genuinely
+   * different matching strategies, not just a stricter filter on the same one — passing `scope`
+   * must be BYTE-IDENTICAL to the pre-steer-recall behavior for every caller that still omits it
+   * (the native, non-hold prompt path keeps the original "earliest `at`" tie-break and never scans
+   * for ambiguity across sessions/owners). Only the hold-aware caller (`onInputEvent`, when a hold
+   * driver is actually attached) passes `scope`, switching to: entries matching `text` +
+   * `promptState ∈ {dispatched, unconfirmed}`, filtered by `sessionId`/`owner`, where MORE THAN
+   * ONE candidate after that filter is AMBIGUOUS and returns `undefined` — never "pick the
+   * earliest" (no attribution happens; the caller leaves every candidate as-is and B1 stays
+   * blocked until a later, unambiguous signal or `agent_end`'s unconditional return). */
+  findDispatchedByText(text: string, scope?: { sessionId: string; owner?: string }): LedgerEntry | undefined;
+  /** verifier r_BHFA552J P1 (Y7.3): the hold-attributed CONSUMPTION-time counterpart of
+   * `findDispatchedByText` — same scope+ambiguity-safety contract, but matches `promptState ===
+   * "queued"` (the state a web item sits in while mirrored in `queue-mirror.ts`, between
+   * `onInputEvent`'s enqueue and `onMessageStart`'s consumption). Scope is NOT optional here: this
+   * method only exists for the hold-aware caller (there is no legacy native-path equivalent to stay
+   * byte-identical with). Ambiguous (≥2 candidates) or no match ⇒ `undefined` — the caller's
+   * contract is to dequeue NOTHING and attribute NOTHING in that case, never guess. */
+  findQueuedByText(text: string, scope: { sessionId: string; owner?: string }): LedgerEntry | undefined;
   query(id: string): LedgerQuerySnapshot | undefined;
-  frame(sessionId: string, epoch: string, now: number): CtlFrame;
+  frame(sessionId: string, epoch: string, now: number, opts?: { filterHeld?: boolean }): CtlFrame;
   countRunning(op?: CmdOp): number;
   dispose(): void;
 }
@@ -130,16 +177,25 @@ function digestOf(payload: unknown): string {
   }
 }
 
+/** A `held` entry is never swept purely by "it's terminal and old" logic within its grace window
+ * (§4.5 rule — v4.3): the generic `state` goes `ok` immediately (D5: prompt's HTTP reply is
+ * unconditionally ok), so without this guard a busy ledger could otherwise evict a row that's
+ * still conceptually held well before hold.ts's own 30 min cap gets a chance to resolve it. */
+function heldWithinGrace(e: LedgerEntry, now: number): boolean {
+  return e.promptState === "held" && now - e.updatedAt <= HELD_EVICTION_GRACE_MS;
+}
+
 /** Evict TTL-expired terminal entries, then oldest-terminal-first down to capacity. Running
  * entries are never evicted (D7: "只淘汰终态项"). */
 function sweep(bag: LedgerBag, now: number): void {
   for (const [id, e] of bag.entries) {
-    if (e.state !== "running" && now - e.updatedAt > LEDGER_TTL_MS) bag.entries.delete(id);
+    if (e.state === "running" || heldWithinGrace(e, now)) continue;
+    if (now - e.updatedAt > LEDGER_TTL_MS) bag.entries.delete(id);
   }
   const over = bag.entries.size - LEDGER_CAPACITY;
   if (over <= 0) return;
   const terminal = [...bag.entries.values()]
-    .filter((e) => e.state !== "running")
+    .filter((e) => e.state !== "running" && !heldWithinGrace(e, now))
     .sort((a, b) => a.updatedAt - b.updatedAt);
   let remaining = over;
   for (const e of terminal) {
@@ -183,6 +239,7 @@ export function createCommandLedger(): CommandLedger {
         if (extra?.text !== undefined) entry.text = extra.text;
         if (extra?.runId !== undefined) entry.runId = extra.runId;
         if (extra?.sessionId !== undefined) entry.sessionId = extra.sessionId;
+        if (extra?.owner !== undefined) entry.owner = extra.owner;
         bag.entries.set(id, entry);
         return { kind: "new", entry };
       }
@@ -210,17 +267,51 @@ export function createCommandLedger(): CommandLedger {
       if (e === undefined) return;
       Object.assign(e, patch);
       e.updatedAt = now;
-      if (patch.promptState !== undefined && patch.promptState !== "dispatched" && patch.promptState !== "observed") {
-        delete e.text; // §4.3: matching text is no longer needed past this point.
+      if (patch.promptState !== undefined && !TEXT_RETAINING_STATES.has(patch.promptState)) {
+        delete e.text; // v4.3 Y6.2: only dispatched/observed/unconfirmed still need it.
       }
     },
-    findDispatchedByText(text) {
-      let best: LedgerEntry | undefined;
-      for (const e of bag.entries.values()) {
-        if (e.text !== text || e.promptState !== "dispatched") continue;
-        if (best === undefined || e.at < best.at) best = e;
+    findDispatchedByText(text, scope) {
+      if (scope === undefined) {
+        // pre-steer-recall, byte-identical native-path behavior (verifier r_BHFA552J P2): earliest
+        // still-dispatched entry, no session/owner scoping, no ambiguity rejection.
+        let best: LedgerEntry | undefined;
+        for (const e of bag.entries.values()) {
+          if (e.text !== text || e.promptState !== "dispatched") continue;
+          if (best === undefined || e.at < best.at) best = e;
+        }
+        return best;
       }
-      return best;
+      let match: LedgerEntry | undefined;
+      let ambiguous = false;
+      for (const e of bag.entries.values()) {
+        if (e.text !== text) continue;
+        if (e.promptState !== "dispatched" && e.promptState !== "unconfirmed") continue;
+        if (e.sessionId !== undefined && e.sessionId !== scope.sessionId) continue;
+        if (e.owner !== undefined && scope.owner !== undefined && e.owner !== scope.owner) continue;
+        if (match !== undefined) {
+          ambiguous = true;
+          break;
+        }
+        match = e;
+      }
+      return ambiguous ? undefined : match;
+    },
+    findQueuedByText(text, scope) {
+      let match: LedgerEntry | undefined;
+      let ambiguous = false;
+      for (const e of bag.entries.values()) {
+        if (e.text !== text) continue;
+        if (e.promptState !== "queued") continue;
+        if (e.sessionId !== undefined && e.sessionId !== scope.sessionId) continue;
+        if (e.owner !== undefined && scope.owner !== undefined && e.owner !== scope.owner) continue;
+        if (match !== undefined) {
+          ambiguous = true;
+          break;
+        }
+        match = e;
+      }
+      return ambiguous ? undefined : match;
     },
     query(id) {
       const e = bag.entries.get(id);
@@ -230,13 +321,30 @@ export function createCommandLedger(): CommandLedger {
       if (e.result !== undefined) out.result = e.result;
       return out;
     },
-    frame(sessionId, epoch, now) {
+    frame(sessionId, epoch, now, opts) {
       sweep(bag, now);
-      const items = [...bag.entries.values()]
-        .filter((e) => e.sessionId === undefined || e.sessionId === sessionId)
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, CTL_MAX_ITEMS)
-        .map(toWireItem);
+      const filterHeld = opts?.filterHeld === true;
+      let candidates = [...bag.entries.values()].filter((e) => e.sessionId === undefined || e.sessionId === sessionId);
+      if (filterHeld) candidates = candidates.filter((e) => e.op !== "recall");
+      candidates = candidates.sort((a, b) => b.updatedAt - a.updatedAt);
+      const items: CtlItemWire[] = [];
+      for (const e of candidates) {
+        if (items.length >= CTL_MAX_ITEMS) break;
+        const wire = toWireItem(e);
+        if (filterHeld) {
+          // v4.3 §4.5: downgrade every new-only (hold.v1) vocabulary member to the nearest
+          // pre-existing equivalent so a hub/UI with no hold.v1 cap (closed CtlItemSchema) never
+          // sees a state/reason it can't parse.
+          if (wire.state === "held") continue;
+          if (wire.state === "recalled" || wire.state === "returned") {
+            wire.state = "dropped";
+            wire.reason = "not-delivered";
+          } else if (wire.reason === "aborted" || wire.reason === "reload" || wire.reason === "stale") {
+            wire.reason = "not-delivered";
+          }
+        }
+        items.push(wire);
+      }
       return { t: "ctl", epoch, sessionId, items };
     },
     countRunning(op) {

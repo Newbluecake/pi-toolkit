@@ -37,6 +37,42 @@ describe("createQueueMirror — enqueue/dequeue", () => {
     expect(q.items()).toHaveLength(1);
   });
 
+  it("verifier r_BHFA552J P1 (Y7.3): dequeueByCmdId removes ONLY the exact cmdId, never a same-text TUI/other item", () => {
+    const q = createQueueMirror();
+    q.enqueue({ text: "same", deliver: "steer", source: "tui" }); // no cmdId, enqueued FIRST
+    q.enqueue({ text: "same", deliver: "steer", source: "web", cmdId: "c1" });
+    const dequeued = q.dequeueByCmdId("c1", "same");
+    expect(dequeued).toMatchObject({ cmdId: "c1", source: "web" });
+    // the TUI item (same text, enqueued earlier — a blind FIFO dequeueByText would have grabbed it)
+    // is untouched.
+    expect(q.items()).toHaveLength(1);
+    expect(q.items()[0]?.source).toBe("tui");
+    expect(q.items()[0]?.cmdId).toBeUndefined();
+  });
+
+  it("dequeueByCmdId with no matching cmdId returns undefined and leaves the queue COMPLETELY untouched", () => {
+    const q = createQueueMirror();
+    q.enqueue({ text: "a", deliver: "steer", source: "tui" });
+    q.enqueue({ text: "b", deliver: "steer", source: "web", cmdId: "c1" });
+    expect(q.dequeueByCmdId("ghost", "a")).toBeUndefined();
+    expect(q.items()).toHaveLength(2);
+  });
+
+  it("dequeueByCmdId also requires the text to match (defense in depth)", () => {
+    const q = createQueueMirror();
+    q.enqueue({ text: "real-text", deliver: "steer", source: "web", cmdId: "c1" });
+    expect(q.dequeueByCmdId("c1", "wrong-text")).toBeUndefined();
+    expect(q.items()).toHaveLength(1);
+  });
+
+  it("dequeueByCmdId keeps fullTextById in sync (no leak, same invariant as dequeueByText)", () => {
+    const q = createQueueMirror();
+    q.enqueue({ text: "x", deliver: "steer", source: "web", cmdId: "c1" });
+    expect(q.fullTextCount()).toBe(1);
+    q.dequeueByCmdId("c1", "x");
+    expect(q.fullTextCount()).toBe(0);
+  });
+
   it("caps at 32 items, dropping the oldest", () => {
     const q = createQueueMirror({ maxItems: 3 });
     q.enqueue({ text: "1", deliver: "steer", source: "tui" });

@@ -65,6 +65,15 @@ export interface QueueMirror {
    * the whole message, and a >`clipChars` steer can never equal its own clipped wire text
    * (field bug: long steers stayed queued and the grace expiry marked them `dropped`). */
   dequeueByText(text: string): QueueItemWire | undefined;
+  /** web-hub-steer-recall plan §4.4 A3 / Y7.3 (verifier r_BHFA552J P1): precise, IDENTITY-based
+   * dequeue for the hold-attribution consumption step. Unlike `dequeueByText`, this NEVER matches
+   * by text/FIFO position — it removes the item ONLY if one exists whose `cmdId` is EXACTLY
+   * `cmdId` (and, defensively, whose text still equals `text`). A same-text TUI/other-extension
+   * item (which never carries a web cmdId) or a different web item can never be mistaken for the
+   * one being asked for, regardless of enqueue/consumption ordering. Returns `undefined` (queue
+   * untouched) when no such item exists — the caller's contract is "dequeue NOTHING on a miss",
+   * never fall back to a blind text match. */
+  dequeueByCmdId(cmdId: string, text: string): QueueItemWire | undefined;
   /** `hasPendingMessages()===false` sample (§4.4 row 3): once the empty condition has persisted
    * past the grace window, clears everything and records any web-sourced cmdIds as dropped. A
    * no-op while pending is still true, the mirror is empty, or the grace is still running (the
@@ -132,6 +141,14 @@ export function createQueueMirror(deps: QueueMirrorDeps = {}): QueueMirror {
       const [item] = queue.splice(idx, 1);
       if (item !== undefined) fullTextById.delete(item.id);
       emptySince = undefined; // the queue moved — re-arm on the next empty sample
+      return item;
+    },
+    dequeueByCmdId(cmdId, text) {
+      const idx = queue.findIndex((q) => q.cmdId === cmdId && fullTextById.get(q.id) === text);
+      if (idx === -1) return undefined; // miss: queue left COMPLETELY untouched
+      const [item] = queue.splice(idx, 1);
+      if (item !== undefined) fullTextById.delete(item.id);
+      emptySince = undefined;
       return item;
     },
     clearIfEmpty(hasPending) {
