@@ -380,6 +380,76 @@ describe("commands router: recall op (steer-recall §2.3 S4)", () => {
       data: { op: "query", state: "ok", result: { ok: false, code: "E_UNSUPPORTED", effect: "unknown" } },
     });
   });
+  it("late cmd_result after a hub-side wait timeout: a violating recall result is rewritten BEFORE it lands in the LRU (schema / 48 KiB); a valid one is kept verbatim", async () => {
+    // Verifier condition for the THIRD recall-validation site: registry.setLateResultHandler's
+    // callback — the path a cmd_result takes when the hub's own wait already resolved the
+    // request as `unknown`. The observable is the LRU replay (a retry reads exactly what the
+    // late handler cached): a violating body must surface as the rewritten
+    // E_UNSUPPORTED{effect:"unknown", message:"bad recall result"}, never the raw data.
+    const h = harness(["ev.v1", "cmd.v1", "hold.v1"]);
+    const mk = (last: string): CmdFrame => ({
+      ...recallFrame(),
+      id: `${"a".repeat(15)}${last}`,
+      deadlineMs: 20, // registry wait = 20 + 1000 grace ⇒ E_DEADLINE, LRU left "unknown"
+      cmd: { op: "recall", target: "t".repeat(15) + last },
+    });
+    const badSchema = mk("1"); // extra key ⇒ fails RecallResultDataSchema
+    const overCap = mk("2"); // text one byte over the 48 KiB cap
+    const valid = mk("3"); // positive control — kept verbatim
+    const ps = [badSchema, overCap, valid].map((f) => h.router.request(f, h.agentKey));
+    const ridOf = (id: string): string =>
+      (h.conn.sent.find((f) => (f as { t: string; id?: string }).t === "cmd" && f.id === id) as { rid: string }).rid;
+    // hub-side wait timeouts: all three requests reject E_DEADLINE, entries sit at "unknown"
+    for (const p of ps) await expect(p).rejects.toMatchObject({ code: "E_DEADLINE" });
+    expect(h.conn.sent.filter((f) => (f as { t: string }).t === "cmd")).toHaveLength(3);
+
+    // the agent's answers arrive LATE (their rids are gone from `pending` ⇒ setLateResultHandler)
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: ridOf(badSchema.id),
+      id: badSchema.id,
+      ok: true,
+      data: { op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "x", extra: 1 },
+    } as never);
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: ridOf(overCap.id),
+      id: overCap.id,
+      ok: true,
+      data: {
+        op: "recall",
+        outcome: "recalled",
+        from: "held",
+        deliver: "followUp",
+        text: "x".repeat(48 * 1024 + 1),
+      },
+    } as never);
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: ridOf(valid.id),
+      id: valid.id,
+      ok: true,
+      data: { op: "recall", outcome: "too_late" },
+    } as never);
+
+    // retries replay whatever the late handler cached — the rewritten error, never the raw data
+    const rewritten = {
+      ok: false,
+      code: "E_UNSUPPORTED",
+      retryable: false,
+      effect: "unknown",
+      message: "bad recall result",
+    };
+    expect(await h.router.request(badSchema, h.agentKey)).toMatchObject(rewritten);
+    expect(await h.router.request(overCap, h.agentKey)).toMatchObject(rewritten);
+    expect(await h.router.request(valid, h.agentKey)).toMatchObject({
+      ok: true,
+      dup: true,
+      data: { op: "recall", outcome: "too_late" },
+    });
+    // nothing was ever re-forwarded to the agent
+    expect(h.conn.sent.filter((f) => (f as { t: string }).t === "cmd")).toHaveLength(3);
+  });
 });
 
 describe("commands router: output byte budget (v2.1 \u00a74.9)", () => {
