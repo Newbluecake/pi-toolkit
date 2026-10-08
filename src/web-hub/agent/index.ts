@@ -103,6 +103,9 @@ export interface WebHubSpawnSettings extends HubSpawnConfig {
   /** web-hub-spawn-restore plan D18: settings-layer default `true`; crosses the wire as
    * `HubSpawnConfig.restore` only inside an enabled spawn block. */
   restore: boolean;
+  /** web-hub-session-history plan §3.7 (P-cfg): settings-layer default `true`; crosses the
+   * wire as `HubSpawnConfig.history` only inside an enabled spawn block. */
+  history: boolean;
 }
 
 export interface WebHubSettings {
@@ -820,8 +823,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     }
     // web-hub-spawn §SP2: only an explicitly enabled spawn block reaches the hub — `undefined`
     // and `enabled:false` alike leave `config.spawn` unset, so the hub's "not enabled" response
-    // matrix (arch §8.2) stays byte-identical to a pre-spawn hub. Exactly the seven policy
-    // fields; `enabled` itself never crosses the wire.
+    // matrix (arch §8.2) stays byte-identical to a pre-spawn hub. Exactly the nine policy
+    // fields (the ninth, `history`, is session-history plan §3.7/P-cfg); `enabled` itself
+    // never crosses the wire.
     if (settings.spawn?.enabled === true) {
       const spawn: HubSpawnConfig = {
         roots: settings.spawn.roots,
@@ -833,6 +837,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         lan: settings.spawn.lan,
         // web-hub-spawn-restore plan §10.5: the eighth field, only inside an enabled block.
         restore: settings.spawn.restore,
+        // web-hub-session-history plan §3.7 (P-cfg): the ninth field, only inside an enabled block.
+        history: settings.spawn.history,
       };
       config.spawn = spawn;
     }

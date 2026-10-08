@@ -25,7 +25,7 @@ const lanDefaults = defaults.lan!;
 const spawnDefaults = defaults.spawn!;
 
 describe("web-hub settings", () => {
-  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {}; web-hub-spawn §SP2: 补 spawn 八键默认值)", () => {
+  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {}; web-hub-spawn §SP2: 补 spawn 九键默认值（session-history §3.7 P-cfg +history）)", () => {
     expect(defaults).toEqual({
       enabled: false,
       autoStart: true,
@@ -51,6 +51,7 @@ describe("web-hub settings", () => {
         registerTimeoutS: 30,
         lan: "off",
         restore: true,
+        history: true,
       },
     });
   });
@@ -508,7 +509,7 @@ describe("webHub.preview (web-hub-preview plan v3 §4.1/U1)", () => {
 });
 
 // web-hub-spawn plan §SP2 / arch v2 §6.2: webHub.spawn.* — default off, tolerant per-field parse
-// (numeric clamps, root-entry drop), eight spec keys, all non-live.
+// (numeric clamps, root-entry drop), nine spec keys, all non-live.
 describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
   it("defaults: enabled=false, empty roots, arch §6.2 numeric defaults, lan off", () => {
     expect(spawnDefaults).toEqual({
@@ -521,6 +522,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       registerTimeoutS: 30,
       lan: "off",
       restore: true,
+      history: true,
     });
     expect(parseWebHubSettings({}).spawn).toEqual(spawnDefaults);
     expect(parseWebHubSettings(undefined).spawn).toEqual(spawnDefaults);
@@ -535,6 +537,14 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     expect(parseWebHubSettings({ spawn: { restore: true } }).spawn?.restore).toBe(true);
     for (const garbage of ["no", 0, null, undefined, []]) {
       expect(parseWebHubSettings({ spawn: { restore: garbage } }).spawn?.restore, JSON.stringify(garbage)).toBe(true);
+    }
+  });
+
+  it("session-history §3.7 (P-cfg): history keeps a real boolean, defaults to true for anything else", () => {
+    expect(parseWebHubSettings({ spawn: { history: false } }).spawn?.history).toBe(false);
+    expect(parseWebHubSettings({ spawn: { history: true } }).spawn?.history).toBe(true);
+    for (const garbage of ["no", 0, null, undefined, []]) {
+      expect(parseWebHubSettings({ spawn: { history: garbage } }).spawn?.history, JSON.stringify(garbage)).toBe(true);
     }
   });
 
@@ -631,6 +641,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
           registerTimeoutS: 45,
           lan: "known",
           restore: false,
+          history: false,
         },
       },
     }).webHub.spawn;
@@ -644,10 +655,11 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       registerTimeoutS: 45,
       lan: "known",
       restore: false,
+      history: false,
     });
   });
 
-  it("exposes the eight webHub.spawn.* keys in SETTING_SPECS, all non-live", () => {
+  it("exposes the nine webHub.spawn.* keys in SETTING_SPECS, all non-live", () => {
     const keys = [
       "webHub.spawn.enabled",
       "webHub.spawn.roots",
@@ -658,6 +670,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       "webHub.spawn.registerTimeoutS",
       "webHub.spawn.lan",
       "webHub.spawn.restore",
+      "webHub.spawn.history",
     ];
     for (const key of keys) {
       expect(isKnownSettingKey(key), key).toBe(true);
@@ -688,6 +701,10 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       kind: "enum",
       path: "webHub.spawn.lan",
       values: ["off", "known", "roots"],
+    });
+    expect(SETTING_SPECS["webHub.spawn.history"]).toMatchObject({
+      kind: "boolean",
+      path: "webHub.spawn.history",
     });
     // defaults surfaced in the editor (csv array → joined string)
     expect(defaultOf(SETTING_SPECS["webHub.spawn.roots"]!)).toBe("");

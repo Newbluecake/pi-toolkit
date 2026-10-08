@@ -95,6 +95,15 @@ export function parseHubSpawnConfig(raw: unknown): { ok: true; spawn: HubSpawnCo
     return { ok: false, detail: `restore=${String(restoreRaw)}: must be a boolean` };
   }
 
+  // session-history plan §3.7 (P-cfg): optional bool, same rule as `restore` — absent ⇒ false
+  // (an older pi launching a newer hub never exposes the history surface); any non-bool ⇒ the
+  // whole block is rejected. Unknown keys (seam names included) stay IGNORED — rejecting them
+  // would let a newer agent disable spawn on an older hub (dispatcher ruling over plan §SP2).
+  const historyRaw = raw["history"];
+  if (historyRaw !== undefined && typeof historyRaw !== "boolean") {
+    return { ok: false, detail: `history=${String(historyRaw)}: must be a boolean` };
+  }
+
   return {
     ok: true,
     spawn: {
@@ -107,6 +116,8 @@ export function parseHubSpawnConfig(raw: unknown): { ok: true; spawn: HubSpawnCo
       lan,
       // present ⇒ verbatim; absent stays absent (consumers read `cfg.restore === true`).
       ...(restoreRaw === undefined ? {} : { restore: restoreRaw }),
+      // present ⇒ verbatim; absent stays absent (consumers read `cfg.history === true`).
+      ...(historyRaw === undefined ? {} : { history: historyRaw }),
     },
   };
 }

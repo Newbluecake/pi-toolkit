@@ -738,6 +738,9 @@ export const DEFAULT_WEBHUB_SPAWN_SETTINGS: WebHubSpawnSettings = {
   // web-hub-spawn-restore plan D18: restore managed sessions across hub restarts — default ON,
   // effective only under an explicitly enabled spawn block.
   restore: true,
+  // web-hub-session-history plan §3.7 (P-cfg): browse all past sessions and resume/fork them
+  // from the web — default ON, effective only under an explicitly enabled spawn block.
+  history: true,
 };
 
 export const DEFAULT_SETTINGS: AgentSettings = {
@@ -1735,6 +1738,7 @@ export function parseWebHubSpawnBlock(input: unknown): WebHubSpawnSettings {
     registerTimeoutS: clampSpawnInt(record.registerTimeoutS, 10, 120, defaults.registerTimeoutS),
     lan: lan === "off" || lan === "known" || lan === "roots" ? lan : defaults.lan,
     restore: typeof record.restore === "boolean" ? record.restore : defaults.restore,
+    history: typeof record.history === "boolean" ? record.history : defaults.history,
   };
 }
 

@@ -120,6 +120,39 @@ describe("parseHubSpawnConfig (web-hub-spawn §SP2, hub-side strict re-validatio
     }
   });
 
+  it("session-history §3.7 (P-cfg): history is an optional bool — absent stays absent (⇒ false), present round-trips, non-bool rejects the block", () => {
+    const absent = parseHubSpawnConfig(valid);
+    expect(absent.ok && absent.spawn.history).toBeUndefined();
+    expect(absent.ok && absent.spawn.history === true).toBe(false);
+    for (const v of [true, false]) {
+      const r = parseHubSpawnConfig({ ...valid, history: v });
+      expect(r).toEqual({ ok: true, spawn: { ...valid, history: v } });
+    }
+    for (const bad of ["true", 1, null, {}]) {
+      const r = parseHubSpawnConfig({ ...valid, history: bad });
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+      expect(!r.ok && r.detail).toMatch(/^history=/);
+    }
+  });
+
+  it("dispatcher ruling (session-history P-cfg): unknown keys — seam names included — are ignored, never read or forwarded", () => {
+    // Rejecting unknown keys would let a newer agent disable spawn on an older hub; instead pin
+    // that the hub-internal seam/injection names can never leak from input into the parsed config.
+    const r = parseHubSpawnConfig({
+      ...valid,
+      history: true,
+      historyProcFs: { readDir: "evil" },
+      wrapHistory: (): undefined => undefined,
+      procFs: 42,
+      spawnSeams: "no",
+    });
+    expect(r).toEqual({ ok: true, spawn: { ...valid, history: true } });
+    const keys = Object.keys(r.ok ? r.spawn : {});
+    for (const seam of ["historyProcFs", "wrapHistory", "procFs", "spawnSeams"]) {
+      expect(keys, seam).not.toContain(seam);
+    }
+  });
+
   it("rejects a bad lan value", () => {
     for (const lan of ["OFF", "any", 42, undefined, null]) {
       const r = parseHubSpawnConfig({ ...valid, lan });

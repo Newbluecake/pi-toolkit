@@ -391,6 +391,11 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "webHub.spawn.restore",
     "web-hub spawn: restore browser-spawned sessions after a hub restart/crash (kill old + re-fork with --session; the in-flight turn is lost; default on; change: /reload then /webhub restart)",
   ),
+  // web-hub-session-history plan §3.7 (P-cfg): default on, only meaningful under webHub.spawn.enabled.
+  "webHub.spawn.history": bool(
+    "webHub.spawn.history",
+    "web-hub spawn: browse all past sessions and resume/fork them from the web (default on; change: /reload then /webhub restart)",
+  ),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   // Main-session todo staleness nudge (todo-nudge plan): all four keys are
