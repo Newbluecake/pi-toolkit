@@ -4,7 +4,9 @@
  * precedent as `styles/todo.css` / `styles/worktrees.css`): `styles/detail.css` is owned by
  * another in-flight line and source-scan.test.ts bans scoped <style> blocks outright. The
  * summary row mirrors the `.todo-sum` / `.wt-sum` grammar, incl. the chevron rotate-on-open
- * transition and the 40px (20px under `pointer: coarse`) min-height family rule; the
+ * transition and the compacted 20px (16px under `pointer: coarse`) min-height family rule
+ * (2026-10-08: aligned to `.wt-sum` — bash-jobs was missed by the 2026-10-06 desktop ×1/4
+ * compaction and sat at 40/20px, visibly taller than the worktree row above it); the
  * expanded list caps its height and scrolls inside, same as `.todo-list` / `.wt-list`.
  */
 
@@ -18,7 +20,7 @@
   gap: var(--sp-2);
   width: 100%;
   min-width: 0;
-  min-height: 40px;
+  min-height: 20px; /* summary-row family (was 40px — see header note) */
   margin: 0 -6px;
   padding: 0 6px;
   border: 0;
@@ -272,7 +274,8 @@
  * rows keep a ≥44px hit box (ui-design §3.12, §7.5 precedent; see worktrees.css). */
 @media (pointer: coarse) {
   .bj-sum {
-    min-height: 20px; /* summary-row family compaction — see detail.css */
+    min-height: 16px; /* summary-row family compaction — see detail.css */
+    line-height: 1.2;
   }
 
   .bj-row {
