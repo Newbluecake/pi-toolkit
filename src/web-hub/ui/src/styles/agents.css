@@ -244,7 +244,11 @@
 .agent-meta {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  /* 2026-10-08 field report: with the status pill inlined (see .pill-inline below), a narrow
+   * sidebar squeezed the nowrap meta row until the pill was clipped past the card edge
+   * (pillRight > cardRight). Wrapping keeps every item visible; only grows card height. */
+  flex-wrap: wrap;
+  gap: 2px var(--sp-2); /* row-gap tighter than the column gap (was var(--sp-2) both) */
   min-width: 0;
   padding-left: 16px;
   color: var(--c-text-3);
