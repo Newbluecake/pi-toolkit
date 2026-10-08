@@ -33,7 +33,7 @@ import {
   type PreviewProbeKind,
 } from "../../protocol/preview.js";
 import type { ReqDeadline } from "../req-deadline.js";
-import { previewFsStep, type PreviewIoTracker } from "./fs.js";
+import { boundedClose, previewFsStep, type PreviewIoTracker } from "./fs.js";
 import { openAdmittedPath, type OpenPathDeps, type OpenPathInput } from "./open.js";
 import { sniff } from "./sniff.js";
 import { PREVIEW_SNIFF_TEXT_BYTES } from "../../protocol/preview.js";
@@ -47,15 +47,19 @@ const PROBE_BODY_READ_MS = 4_000;
 
 export interface ProbeBodyInput {
   readonly paths: readonly string[];
+  /** dir-plan §1.1/§3.5 (P1b): `dirs: true` asks directories to answer `"dir"` instead of
+   * `"missing"` — threaded straight into the open's `allowDir`. */
+  readonly dirs?: true;
 }
 
 export type ProbeBodyResult =
-  | { ok: true; paths: string[] }
+  | { ok: true; paths: string[]; dirs?: true }
   | { ok: false; status: number; code: "E_BAD_REQUEST"; reason: "json" | "shape" | "too-many" };
 
 /**
  * Pure JSON-shape validation (exported for direct unit tests): body must be an object with a
- * `paths` ARRAY of strings, at most `PREVIEW_PROBE_MAX_PATHS` entries. Per-entry path
+ * `paths` ARRAY of strings, at most `PREVIEW_PROBE_MAX_PATHS` entries; `dirs` is legal only as
+ * the literal `true` (anything else is dropped, keeping the pre-dir behavior). Per-entry path
  * VALIDITY is deliberately NOT a body error — a single malformed entry answers `"missing"`
  * for itself (the UI only sends `isClickable`-validated paths; one hostile entry must not
  * kill the whole message's probe).
@@ -64,7 +68,8 @@ export function parseProbeBody(raw: unknown): ProbeBodyResult {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "shape" };
   }
-  const paths = (raw as { paths?: unknown }).paths;
+  const o = raw as { paths?: unknown; dirs?: unknown };
+  const paths = o.paths;
   if (!Array.isArray(paths)) return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "shape" };
   if (paths.length > PREVIEW_PROBE_MAX_PATHS) {
     return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "too-many" };
@@ -72,7 +77,7 @@ export function parseProbeBody(raw: unknown): ProbeBodyResult {
   for (const p of paths) {
     if (typeof p !== "string") return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "shape" };
   }
-  return { ok: true, paths };
+  return { ok: true, paths, ...(o.dirs === true ? { dirs: true as const } : {}) };
 }
 
 export type ProbeBodyRead =
@@ -117,7 +122,9 @@ export function readProbeBody(req: IncomingMessage): Promise<ProbeBodyRead> {
         }
       }
       const shape = parseProbeBody(parsed);
-      resolve(shape.ok ? { ok: true, body: { paths: shape.paths } } : shape);
+      resolve(
+        shape.ok ? { ok: true, body: { paths: shape.paths, ...(shape.dirs === true ? { dirs: true } : {}) } } : shape,
+      );
     };
     const onData = (chunk: Buffer): void => {
       size += chunk.length;
@@ -153,7 +160,7 @@ export type ProbeRunResult = { ok: true; results: PreviewProbeKind[] } | { ok: f
  */
 export async function runPreviewProbe(
   deps: ProbeKernelDeps,
-  params: Omit<OpenPathInput, "path"> & { paths: readonly string[] },
+  params: Omit<OpenPathInput, "path"> & { paths: readonly string[]; dirs?: boolean },
   deadline: ReqDeadline,
   signal: AbortSignal,
 ): Promise<ProbeRunResult> {
@@ -167,19 +174,32 @@ export async function runPreviewProbe(
   return { ok: true, results };
 }
 
-/** One entry: open through the SHARED pipeline, sniff the head, close. `undefined` = abort. */
+/** One entry: open through the SHARED pipeline, sniff the head, close. `undefined` = abort.
+ * dir-plan §3.5 (P1b): with `dirs:true` the open passes `allowDir` — an admitted directory
+ * answers `"dir"` WITHOUT any head read (a directory has no sniffable head), and its fd is
+ * released through `boundedClose` (§3.3's directory-fd rule; file entries keep today's
+ * plain close). */
 async function probeOne(
   deps: ProbeKernelDeps,
-  input: OpenPathInput,
+  input: OpenPathInput & { dirs?: boolean },
   deadline: ReqDeadline,
   signal: AbortSignal,
 ): Promise<PreviewProbeKind | undefined> {
   // dir-plan §2.2 (U4): single-segment absolute paths are now valid candidates too
   // (minSegments 1 — same loosening as routes' request gate ③).
   if (typeof input.path !== "string" || !validatePreviewPath(input.path, { minSegments: 1 })) return "missing";
-  const op = await openAdmittedPath(deps, input, deadline, signal);
+  const op = await openAdmittedPath(
+    deps,
+    { ...input, ...(input.dirs === true ? { allowDir: true } : {}) },
+    deadline,
+    signal,
+  );
   if (!op.ok) return op.abort === true ? undefined : "missing";
   const opened = op.opened;
+  if (opened.dir === true) {
+    await boundedClose(() => opened.fh.close(), { now: deps.now, tracker: deps.tracker, log: deps.log });
+    return "dir";
+  }
   try {
     const sample = await readHead(deps, opened.fh, opened.size, deadline, signal);
     if (signal.aborted) return undefined;

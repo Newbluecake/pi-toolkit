@@ -472,12 +472,12 @@ describe("admit: not-regular & unreadable", () => {
     expect(res).toMatchObject({ ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
   });
 
-  it("directory ⇒ 415 not-regular (P1a: allowDir is not implemented yet, §3.1 lands in P1b)", async () => {
+  it("directory WITHOUT allowDir ⇒ 415 not-regular (P1b: the opt-in is the only widening, §3.1)", async () => {
     const root = scratch();
     const sub = join(root, "sub");
     mkdirSync(sub);
     const { a } = admitter();
-    const res = await a.admit({ path: sub, allowDir: true }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: sub }, deadline(8000), neverAbort());
     expect(res).toMatchObject({ ok: false, status: 415, reason: "not-regular" });
   });
 
@@ -831,5 +831,76 @@ describe("admit: §2.4 tracker busy (zombie fs 熔断)", () => {
   it("busy maps with Retry-After semantics via mapFsError (503, retryAfterS 1)", () => {
     const m = mapFsError(new PreviewIoError("busy", "x"));
     expect(m).toEqual({ kind: "response", body: { status: 503, code: "E_BUSY", retryAfterS: 1 } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 §3.1/§3.6 (P1b) — the allowDir admission branch
+// ---------------------------------------------------------------------------
+
+describe("admit: §3.1 allowDir (P1b)", () => {
+  it("matrix: directory + allowDir + /proc ⇒ ok with dir:true (Linux CI)", async () => {
+    if (!defaultPreviewFs().procFdAvailable()) return; // §3.6 residual on /proc-less platforms
+    const root = scratch();
+    const sub = join(root, "sub");
+    mkdirSync(sub);
+    const { a } = admitter();
+    const res = await a.admit({ path: sub, allowDir: true }, deadline(8000), neverAbort());
+    expect(res).toMatchObject({ ok: true, dir: true, realpath: sub });
+    if (res.ok) await res.fh.close();
+  });
+
+  it("matrix: directory + allowDir but NO /proc ⇒ 415 not-regular (fail-closed, §3.6)", async () => {
+    const root = scratch();
+    const sub = join(root, "sub");
+    mkdirSync(sub);
+    const { a } = admitter({ counts: {}, override: { procFdAvailable: false } });
+    const res = await a.admit({ path: sub, allowDir: true }, deadline(8000), neverAbort());
+    expect(res).toMatchObject({ ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
+  });
+
+  it("matrix: allowDir never widens anything but directories — a FILE admits without dir", async () => {
+    const root = scratch();
+    const file = okPath(root);
+    const { a } = admitter();
+    const res = await a.admit({ path: file, allowDir: true }, deadline(8000), neverAbort());
+    expect(res).toMatchObject({ ok: true });
+    expect(res.ok && "dir" in res).toBe(false);
+    if (res.ok) await res.fh.close();
+  });
+
+  it("matrix: FIFO + allowDir + /proc stays 415 (only directories pass step 8)", async () => {
+    if (!defaultPreviewFs().procFdAvailable()) return;
+    const root = scratch();
+    const fifo = join(root, "pipe");
+    execSync(`mkfifo ${JSON.stringify(fifo)}`);
+    const { a } = admitter();
+    const res = await a.admit({ path: fifo, allowDir: true }, deadline(8000), neverAbort());
+    expect(res).toMatchObject({ ok: false, status: 415, reason: "not-regular" });
+  });
+
+  it("TOCTOU: the directory swapped for a symlink between open and fstat ⇒ 409 E_PREVIEW_CHANGED", async () => {
+    if (!defaultPreviewFs().procFdAvailable()) return;
+    const root = scratch();
+    const sub = join(root, "sub");
+    mkdirSync(sub);
+    writeFileSync(join(sub, "inner.txt"), "x");
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    // mutate right AFTER the open resolved: rename the real dir away, park a symlink at its path
+    const { a } = admitter({
+      counts: {},
+      after: {
+        open: (p) => {
+          if (p === sub) {
+            renameSync(sub, join(root, "sub-moved"));
+            symlinkSync(elsewhere, sub);
+          }
+        },
+      },
+    });
+    const res = await a.admit({ path: sub, allowDir: true }, deadline(8000), neverAbort());
+    // step 9's /proc re-check: the fd's readlink now names the MOVED path (≠ rp) ⇒ 409, fd closed
+    expect(res).toMatchObject({ ok: false, status: 409, code: "E_PREVIEW_CHANGED" });
   });
 });

@@ -25,6 +25,8 @@ import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import type { PreviewRouteIo, PreviewRoutes, RegistryView } from "../../../../src/web-hub/hub/ports.js";
 import type { OpenForPreviewResult, UploadStore } from "../../../../src/web-hub/hub/uploads.js";
 import { PREVIEW_PROBE_MAX_PATHS } from "../../../../src/web-hub/protocol/preview.js";
+import { parseProbeBody } from "../../../../src/web-hub/hub/preview/probe.js";
+import { FakeHandle } from "./helpers.js";
 import { memLog, type MemLog } from "../helpers.js";
 import { hookedFs } from "./helpers.js";
 
@@ -549,5 +551,74 @@ describe("P1a probe — global admission, busy, UI-parser contract", () => {
     const { parseProbeResults } = await import("../../../../src/web-hub/ui/src/logic/previewProbe.js");
     const parsed = parseProbeResults(res.json(), 3);
     expect(parsed).toEqual({ ok: true, kinds: ["text", "image", "missing"] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 §1.1/§3.5 (P1b) — `dirs:true`: directories answer "dir"
+// ---------------------------------------------------------------------------
+
+describe("P1b probe — dirs:true", () => {
+  it("parseProbeBody: dirs accepted ONLY as the literal true (anything else is dropped)", () => {
+    expect(parseProbeBody({ paths: ["/a/b"], dirs: true })).toEqual({ ok: true, paths: ["/a/b"], dirs: true });
+    expect(parseProbeBody({ paths: ["/a/b"] })).toEqual({ ok: true, paths: ["/a/b"] });
+    expect(parseProbeBody({ paths: ["/a/b"], dirs: false })).toEqual({ ok: true, paths: ["/a/b"] });
+    expect(parseProbeBody({ paths: ["/a/b"], dirs: "yes" })).toEqual({ ok: true, paths: ["/a/b"] });
+    expect(parseProbeBody({ paths: ["/a/b"], dirs: 1 })).toEqual({ ok: true, paths: ["/a/b"] });
+  });
+
+  it('dirs:true ⇒ a real directory answers "dir"; without dirs the SAME directory stays missing', async () => {
+    const fx = fixture();
+    const d = join(fx.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "x.txt"), "x");
+
+    const withDirs = await probe(routes(fx), { paths: [d], dirs: true });
+    expect(withDirs.status).toBe(200);
+    expect(withDirs.json()).toEqual({ results: [{ kind: "dir" }] });
+
+    const without = await probe(routes(fx), { paths: [d] });
+    expect(without.json()).toEqual({ results: [{ kind: "missing" }] }); // 415 folds to missing
+
+    const explicitFalse = await probe(routes(fx), { paths: [d], dirs: false });
+    expect(explicitFalse.json()).toEqual({ results: [{ kind: "missing" }] });
+  });
+
+  it("dirs:true mixes with files in request order (dir/file/text/missing preserved)", async () => {
+    const fx = fixture();
+    const d = join(fx.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    const f = fx.file("note.txt", "hi");
+    const res = await probe(routes(fx), { paths: [d, f, join(fx.cwd, "gone.txt")], dirs: true });
+    expect(res.json()).toEqual({ results: [{ kind: "dir" }, { kind: "text" }, { kind: "missing" }] });
+  });
+
+  it("a directory entry's fd is released through the BOUNDED close (§3.3 directory-fd rule)", async () => {
+    const fx = fixture();
+    let closes = 0;
+    const neverSettle = new FakeHandle(Buffer.alloc(0), { ino: 77, dev: 3 });
+    neverSettle.close = (): Promise<void> => {
+      closes += 1;
+      return new Promise(() => undefined);
+    };
+    const admitter: FsAdmitter = {
+      admit: async (input) =>
+        input.allowDir === true
+          ? { ok: true, fh: neverSettle, size: 4096, realpath: "/srv/d", dir: true }
+          : { ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" },
+    };
+    const t0 = Date.now();
+    const res = await probe(routes(fx, { admitter }), { paths: ["/srv/d"], dirs: true });
+    expect(res.json()).toEqual({ results: [{ kind: "dir" }] });
+    // probeOne answered "dir" but the handle's release waited the bounded 1 s before giving up
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
+    expect(closes).toBe(1);
+  });
+
+  it("an empty batch with dirs:true is still a legal no-op (200, [])", async () => {
+    const fx = fixture();
+    const res = await probe(routes(fx), { paths: [], dirs: true });
+    expect(res.status).toBe(200);
+    expect(res.json()).toEqual({ results: [] });
   });
 });

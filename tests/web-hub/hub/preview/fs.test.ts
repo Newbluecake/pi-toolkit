@@ -19,6 +19,7 @@ import { constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  boundedClose,
   createPreviewIoTracker,
   defaultPreviewFs,
   mapFsError,
@@ -30,6 +31,7 @@ import {
   previewProcFdAvailable,
   racePreviewIo,
   resolvePreviewDenyContext,
+  wrapDirHandle,
 } from "../../../../src/web-hub/hub/preview/fs.js";
 import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import { deadline, memLog, neverAbort } from "./helpers.js";
@@ -483,3 +485,161 @@ describe("previewProcFdAvailable (§3.6)", () => {
     expect(previewProcFdAvailable()).toBe(defaultPreviewFs().procFdAvailable());
   });
 });
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 §3.1/§3.3 (P1b) — the directory-listing fs primitives
+// ---------------------------------------------------------------------------
+
+describe("dir primitives (P1b: opendir wrapper / lstat / boundedClose)", () => {
+  it('REAL Linux: opendir("/proc/self/fd/N") lists the admitted directory fd\'s contents', async () => {
+    const fs = defaultPreviewFs();
+    if (!fs.procFdAvailable()) return; // §3.6 residual on /proc-less platforms
+    const root = mkdtempSync(join(tmpdir(), "wh-p1b-fs-"));
+    try {
+      writeFileSync(join(root, "a.txt"), "x");
+      mkdirSync(join(root, "kid"));
+      const fh = await fs.open(root, PREVIEW_READ_FLAGS);
+      try {
+        const dh = await fs.opendir(`/proc/self/fd/${fh.fd}`);
+        const names: string[] = [];
+        for (;;) {
+          const batch = await dh.readBatch(256);
+          if (batch === null) break;
+          for (const d of batch) names.push(d.name);
+        }
+        expect(names.sort()).toEqual(["a.txt", "kid"]);
+        await dh.close();
+      } finally {
+        await fh.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("REAL Linux: lstat through /proc/self/fd/N/<name> does NOT follow the entry's symlink", async () => {
+    const fs = defaultPreviewFs();
+    if (!fs.procFdAvailable()) return;
+    const root = mkdtempSync(join(tmpdir(), "wh-p1b-lstat-"));
+    try {
+      writeFileSync(join(root, "target.txt"), "0123456789");
+      symlinkSync("target.txt", join(root, "lnk"));
+      const fh = await fs.open(root, PREVIEW_READ_FLAGS);
+      try {
+        const st = await fs.lstat(`/proc/self/fd/${fh.fd}/lnk`);
+        expect(st.isSymbolicLink()).toBe(true); // the LINK itself, not its 10-byte target
+        expect(st.isFile()).toBe(false);
+        expect(st.size).toBe("target.txt".length);
+        const st2 = await fs.lstat(`/proc/self/fd/${fh.fd}/target.txt`);
+        expect(st2.isFile()).toBe(true);
+        expect(st2.size).toBe(10);
+        expect(st2.mtimeMs).toBeGreaterThan(0);
+      } finally {
+        await fh.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("the wrapper's close is SERIALIZED AFTER an in-flight read (never trusts Node's Dir queue)", async () => {
+    // scripted Dir-like source: the read parks until we release it
+    const events: string[] = [];
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((r) => {
+      releaseRead = r;
+    });
+    const source = {
+      read: () => {
+        events.push("read:start");
+        return readGate.then(() => null); // EOF once released
+      },
+      close: () => {
+        events.push("close");
+        return Promise.resolve();
+      },
+    };
+    const dh = wrapDirHandle(source);
+    const reading = dh.readBatch(4);
+    await new Promise((r) => setTimeout(r, 10).unref?.());
+    expect(events).toEqual(["read:start"]); // the read is genuinely in flight now
+    const closing = dh.close();
+    await new Promise((r) => setTimeout(r, 20).unref?.());
+    expect(events).toEqual(["read:start"]); // close parked BEHIND the in-flight read
+    releaseRead();
+    await Promise.all([reading, closing]);
+    expect(events).toEqual(["read:start", "close"]); // …and ran only after it settled
+  });
+
+  it("the wrapper's close is idempotent (double close ⇒ one underlying close)", async () => {
+    let closes = 0;
+    const dh = wrapDirHandle({
+      read: () => Promise.resolve(null),
+      close: () => {
+        closes += 1;
+        return Promise.resolve();
+      },
+    });
+    await dh.close();
+    await dh.close();
+    expect(closes).toBe(1);
+  });
+
+  it("readBatch batches N dirents and reports null at EOF (empty ⇒ immediate null)", async () => {
+    let i = 0;
+    const names = ["a", "b", "c"];
+    const dh = wrapDirHandle({
+      read: () => Promise.resolve(i < names.length ? fakeDirent(names[i++]!) : null),
+      close: () => Promise.resolve(),
+    });
+    const b1 = await dh.readBatch(2);
+    expect(b1?.map((d) => d.name)).toEqual(["a", "b"]);
+    const b2 = await dh.readBatch(2);
+    expect(b2?.map((d) => d.name)).toEqual(["c"]); // partial batch at EOF keeps its entries
+    expect(await dh.readBatch(2)).toBeNull();
+    await dh.close();
+  });
+
+  it("readBatch after close rejects (the wrapper refuses post-close reads)", async () => {
+    const dh = wrapDirHandle({ read: () => Promise.resolve(null), close: () => Promise.resolve() });
+    await dh.close();
+    await expect(dh.readBatch(1)).rejects.toThrow(/closed/);
+  });
+
+  it("boundedClose: gives up at ~1 s, counts its own zombie, and a late settle decrements", async () => {
+    const tracker = createPreviewIoTracker();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const t0 = Date.now();
+    await boundedClose(() => gate.then(() => undefined), { now: Date.now, tracker, log: memLog() });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(tracker.zombies).toBe(1);
+    release();
+    await new Promise((r) => setTimeout(r, 20).unref?.());
+    expect(tracker.zombies).toBe(0);
+  });
+
+  it("boundedClose: a rejecting close is swallowed (one path-free line, no throw)", async () => {
+    const log = memLog();
+    const tracker = createPreviewIoTracker();
+    await expect(
+      boundedClose(() => Promise.reject(new Error("ebadf")), { now: Date.now, tracker, log }),
+    ).resolves.toBeUndefined();
+    expect(tracker.zombies).toBe(0);
+    expect(log.lines.some((l) => l.msg.includes("bounded close"))).toBe(true);
+    expect(JSON.stringify(log.lines)).not.toMatch(/\/[a-z]+\//); // path-free
+  });
+});
+
+/** A minimal Dirent-shaped fake for the wrapper tests. */
+function fakeDirent(name: string): {
+  name: string;
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+} {
+  return { name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false };
+}

@@ -18,10 +18,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
+import { previewProcFdAvailable } from "../../../src/web-hub/hub/preview/fs.js";
 import {
   DIALOG_BG_HUB_CAPS,
   P2_HUB_CAPS,
   PREVIEW_ABS_HUB_CAP,
+  PREVIEW_DIR_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   RUNTX_HUB_CAPS,
@@ -150,7 +152,14 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     const agentCaps = ack["caps"] as string[];
     expect([...agentCaps].sort()).toEqual([...kit.hub.info.caps].sort());
-    expect([...kit.hub.info.caps]).toEqual([...baselineCaps(), PREVIEW_HUB_CAP, PREVIEW_ABS_HUB_CAP]);
+    // dir-plan §3.5/§3.6 (P1b): preview.dir.v1 joins ONLY when /proc/self/fd is available —
+    // the listing itself is proc-bound, so a /proc-less platform never declares it.
+    expect([...kit.hub.info.caps]).toEqual([
+      ...baselineCaps(),
+      PREVIEW_HUB_CAP,
+      PREVIEW_ABS_HUB_CAP,
+      ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
+    ]);
     c.sock.destroy();
   });
 
@@ -168,6 +177,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       ...baselineCaps(),
       PREVIEW_HUB_CAP,
       PREVIEW_ABS_HUB_CAP,
+      ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       PREVIEW_LAN_HUB_CAP,
     ]);
     c.sock.destroy();

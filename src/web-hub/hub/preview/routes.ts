@@ -26,6 +26,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { canonicalOrigin, parseOrigin } from "../../protocol/lan.js";
 import {
   PREVIEW_ADMIT_TOTAL_MS,
+  PREVIEW_DIR_QUERY,
+  PREVIEW_HDR,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_IMAGE_MAX_PIXELS,
   PREVIEW_JPEG_SCAN_MAX_BYTES,
@@ -33,6 +35,7 @@ import {
   PREVIEW_STREAM_MS,
   PREVIEW_TEXT_MAX_BYTES,
   validatePreviewPath,
+  type PreviewDirListing,
   type PreviewProbeResponseBody,
 } from "../../protocol/preview.js";
 import { auditPreview } from "../audit.js";
@@ -40,8 +43,15 @@ import { createCmdLimit, type CmdLimit } from "../cmd-limit.js";
 import type { HubLog, PreviewRouteIo, PreviewRoutes, RegistryView } from "../ports.js";
 import { createReqDeadline, type ReqDeadline } from "../req-deadline.js";
 import type { UploadStore } from "../uploads.js";
-import { createFsAdmitter, type FsAdmitter, type PreviewDenyContext, type PreviewHandle } from "./admit.js";
-import { createPreviewIoTracker, previewFsStep } from "./fs.js";
+import {
+  createFsAdmitter,
+  type FsAdmitter,
+  type PreviewDenyContext,
+  type PreviewFs,
+  type PreviewHandle,
+} from "./admit.js";
+import { boundedClose, createPreviewIoTracker, defaultPreviewFs, previewFsStep } from "./fs.js";
+import { listPreviewDir } from "./dir.js";
 import { openAdmittedPath, type Opened } from "./open.js";
 import { readProbeBody, runPreviewProbe } from "./probe.js";
 import { needsMoreForDims, sniff, type SniffResult } from "./sniff.js";
@@ -197,12 +207,27 @@ export interface PreviewRoutesDeps {
   limit?: CmdLimit | undefined;
   admitter?: FsAdmitter | undefined;
   verifier?: UploadVerifier | undefined;
+  /** dir-plan §3.5 (P1b): the fs the directory listing rides (opendir/lstat through the SAME
+   * injectable surface the admitter uses). Defaults to the real adapter; tests inject scripted
+   * handles to drive the §3.3 lifecycle cases. */
+  fs?: Partial<PreviewFs> | undefined;
 }
 
 /** §1.3 typed probe sender — `io.sendJson`'s `body: unknown` cannot catch a hub↔UI drift, this
  * thin wrapper routes the answer through `PreviewProbeResponseBody` so typecheck can. */
 function sendProbeResults(io: PreviewRouteIo, res: ServerResponse, body: PreviewProbeResponseBody): void {
   io.sendJson(res, 200, body);
+}
+
+/** §1.3/§3.5 (P1b) typed dir-listing sender — same rationale as `sendProbeResults`: the listing
+ * body goes through `PreviewDirListing` so a hub-side shape drift is a compile error. The
+ * listing itself was already asserted ≤ `PREVIEW_DIR_BODY_MAX_BYTES` by `listPreviewDir`. */
+function sendDirListing(io: PreviewRouteIo, res: ServerResponse, listing: PreviewDirListing): void {
+  io.sendJson(res, 200, listing, {
+    [PREVIEW_HDR.kind]: "dir",
+    "Cache-Control": "no-store",
+    "Cross-Origin-Resource-Policy": "same-origin",
+  });
 }
 
 export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
@@ -214,6 +239,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
   const tracker = createPreviewIoTracker();
   const admitter: FsAdmitter = deps.admitter ?? createFsAdmitter({ denyCtx: deps.denyCtx, tracker, log, now });
   const verifier: UploadVerifier = deps.verifier ?? createUploadVerifier({ log, now });
+  const dirFs: PreviewFs = { ...defaultPreviewFs(), ...deps.fs };
 
   let closing = false;
   let disposePromise: Promise<void> | undefined;
@@ -234,7 +260,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     user?: string | undefined;
     agentKey?: string | undefined;
     cls?: "upload" | "cwd" | "abs" | undefined;
-    kind?: "text" | "image" | undefined;
+    kind?: "text" | "image" | "dir" | undefined;
     ok: boolean;
     code?: string | undefined;
     reason?: string | undefined;
@@ -303,6 +329,10 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       const agentKey = query.get("agentKey") ?? "";
       const sessionId = query.get("sessionId") ?? "";
       const path = query.get("path") ?? "";
+      // dir-plan §3.5 (P1b): the opt-in directory flag — ONLY the exact value "1" turns an
+      // admitted directory into a listing request (§1.1); absent/any other value keeps the
+      // pre-P1b behavior byte-identical (a directory still answers 415 not-regular).
+      const wantDir = query.get(PREVIEW_DIR_QUERY) === "1";
       // dir-plan §2.2 (U4/§1.4): single-segment absolute paths (`/home`, `/etc/hostname`) now
       // enter admission — the recognition layer keeps its own ≥2-segment freeze (C4).
       if (
@@ -365,7 +395,14 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
 
       const op = await openAdmittedPath(
         { uploadsRoot, registry, uploads, admitter, log },
-        { agentKey, sessionId, path, listener: io.listener, principal },
+        {
+          agentKey,
+          sessionId,
+          path,
+          listener: io.listener,
+          principal,
+          ...(wantDir ? { allowDir: true } : {}),
+        },
         r,
         signal,
       );
@@ -406,6 +443,39 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       acc.shared = opened.shared;
       acc.total = opened.size;
       if (abortAnswer()) return;
+
+      // ⑧d dir branch (dir-plan §3.5, P1b): an admitted directory (only possible when the
+      // request opted in with dir=1 AND /proc is available, §3.6) skips sniff/stream entirely —
+      // the listing kernel owns the 5 s §3.4 budget, the answer is one JSON body, and ⑩'s
+      // release order (answer → bounded close → slot → active → audit) is the §3.3 contract.
+      if (opened.dir === true) {
+        const realpath = opened.realpath ?? path;
+        const dirRes = await listPreviewDir(
+          { fs: dirFs, now, log, tracker, denyCtx: deps.denyCtx },
+          { fh: opened.fh, realpath, requestPath: path },
+          signal,
+        );
+        if (!dirRes.ok) {
+          if (dirRes.abort === true) {
+            abortAnswer();
+            return;
+          }
+          acc.code = dirRes.code;
+          io.sendJson(
+            res,
+            PREVIEW_STATUS[dirRes.code] ?? 500,
+            { error: dirRes.code },
+            dirRes.code === "E_BUSY" || dirRes.retryAfterS !== undefined ? { "Retry-After": "1" } : undefined,
+          );
+          return;
+        }
+        acc.ok = true;
+        acc.kind = "dir";
+        acc.total = dirRes.listing.total; // §3.5: total/truncated ride the audit — never names
+        acc.truncated = dirRes.listing.truncated;
+        sendDirListing(io, res, dirRes.listing);
+        return;
+      }
 
       // ⑧ sniff (§3.1 ⑧ — the two reads stay inside the shared admission deadline)
       const sample = await readSample(opened.fh, opened.size, r, signal);
@@ -534,9 +604,18 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     try {
       await entry.done;
     } finally {
-      // ⑩ 收尾: close any handle readAndStream never took ownership of, release the in-flight
-      // slot, leave the active set, write the single audit line.
-      if (opened !== undefined && !streamed) await opened.fh.close().catch(() => undefined);
+      // ⑩ 收尾 (§3.3 P1b: the release order is FIXED — ①answer [done: entry.done settled after
+      // the response was sent] → ②bounded close of a DIRECTORY fd, ≤1 s, even if the request
+      // aborted; file requests keep today's plain close → ③in-flight slot → ④active set → ⑤
+      // the single audit line).
+      const held = opened;
+      if (held !== undefined && !streamed) {
+        if (held.dir === true) {
+          await boundedClose(() => held.fh.close(), { now, tracker, log });
+        } else {
+          await held.fh.close().catch(() => undefined);
+        }
+      }
       if (slotTaken) {
         inflightGlobal = Math.max(0, inflightGlobal - 1);
         const left = (inflightByPrincipal.get(principal) ?? 1) - 1;
@@ -704,7 +783,14 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
 
       const run = await runPreviewProbe(
         { uploadsRoot, registry, uploads, admitter, log, now, tracker },
-        { agentKey, sessionId, paths: body.body.paths, listener: io.listener, principal },
+        {
+          agentKey,
+          sessionId,
+          paths: body.body.paths,
+          listener: io.listener,
+          principal,
+          ...(body.body.dirs === true ? { dirs: true } : {}),
+        },
         r,
         signal,
       );

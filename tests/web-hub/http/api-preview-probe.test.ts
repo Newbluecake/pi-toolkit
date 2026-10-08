@@ -160,3 +160,39 @@ describe("POST /api/preview/probe — loopback dispatch (2026-10-07 修订)", ()
     expect(JSON.parse(tooBig.body)).toEqual({ error: "E_BAD_REQUEST", reason: "body" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1b: `dirs:true` over the real loopback socket
+// ---------------------------------------------------------------------------
+
+describe("POST /api/preview/probe — dirs:true (P1b)", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await setup();
+  });
+  afterEach(async () => {
+    await h.cleanup();
+  });
+
+  it("a directory answers dir ONLY when the body opts in; the same path stays missing without it", async () => {
+    const d = join(h.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "x.txt"), "x");
+    const withDirs = await post(h, { paths: [d], dirs: true });
+    expect(withDirs.status).toBe(200);
+    expect(JSON.parse(withDirs.body)).toEqual({ results: [{ kind: "dir" }] });
+    const without = await post(h, { paths: [d] });
+    expect(JSON.parse(without.body)).toEqual({ results: [{ kind: "missing" }] });
+    // a non-true `dirs` value keeps the pre-P1b behavior (dropped, not an error)
+    const falsy = await post(h, { paths: [d], dirs: false });
+    expect(JSON.parse(falsy.body)).toEqual({ results: [{ kind: "missing" }] });
+  });
+
+  it("dirs:true batch keeps request order across kinds (dir/text/missing)", async () => {
+    const d = join(h.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    const f = h.file("n.txt", "hi");
+    const r = await post(h, { paths: [d, f, join(h.cwd, "gone.txt")], dirs: true });
+    expect(JSON.parse(r.body)).toEqual({ results: [{ kind: "dir" }, { kind: "text" }, { kind: "missing" }] });
+  });
+});

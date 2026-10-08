@@ -28,15 +28,34 @@
  * §2.6 adds `resolvePreviewDenyContext` — the startup-time literal+canonical resolution of
  * home/agentDir for the admitter's deny context (each realpath is itself a tracked step; a
  * failure degrades that member to literal-only with a path-free WARN, never throws).
+ *
+ * dir-plan v3.1 §3.1/§3.3 (P1b) adds the DIRECTORY listing primitives: `wrapDirHandle`
+ * (the `PreviewDirHandle` adapter whose internal chain serializes `close` AFTER in-flight
+ * reads — never trusting Node's own Dir queue semantics — with an idempotent `close` and a
+ * `readBatch(max)` that batches readdir calls into one logical op returning `null` at EOF),
+ * the `lstat` adapter (never following the entry's own symlink) and `boundedClose` — the
+ * §3.3 bounded (≤`PREVIEW_DIR_CLOSE_MS`, its OWN deadline never the request's, no request
+ * signal — a close must always be attempted) tracked close shared by `dir.ts`'s handle and
+ * the route layer's directory fd.
  */
 
-import { constants as fsConstants, existsSync } from "node:fs";
-import { open, readlink, realpath, stat } from "node:fs/promises";
+import { constants as fsConstants, existsSync, type Dirent } from "node:fs";
+import { lstat, open, opendir, readlink, realpath, stat } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
+import type { PreviewDirEntryType } from "../../protocol/preview.js";
+import { PREVIEW_DIR_CLOSE_MS } from "../../protocol/preview.js";
 import type { HubLog } from "../ports.js";
 import type { ReqDeadline } from "../req-deadline.js";
 import { createReqDeadline } from "../req-deadline.js";
-import type { PreviewDenyContext, PreviewFs, PreviewHandle, PreviewStat } from "./admit.js";
+import type {
+  PreviewDenyContext,
+  PreviewDirDirent,
+  PreviewDirHandle,
+  PreviewFs,
+  PreviewHandle,
+  PreviewLstat,
+  PreviewStat,
+} from "./admit.js";
 
 // ---------------------------------------------------------------------------
 // flags
@@ -377,9 +396,40 @@ function toPreviewStat(st: {
   ctimeMs: number;
   nlink: number;
   isFile(): boolean;
+  isDirectory(): boolean;
 }): PreviewStat {
   const isFile = st.isFile();
-  return { dev: st.dev, ino: st.ino, size: st.size, ctimeMs: st.ctimeMs, nlink: st.nlink, isFile: () => isFile };
+  const isDirectory = st.isDirectory();
+  return {
+    dev: st.dev,
+    ino: st.ino,
+    size: st.size,
+    ctimeMs: st.ctimeMs,
+    nlink: st.nlink,
+    isFile: () => isFile,
+    isDirectory: () => isDirectory,
+  };
+}
+
+/** §3.1 (P1b): the lstat slice — the entry's OWN identity (`fs.lstat` never follows the
+ * entry's symlink; `size` of a symlink is its target-string length). */
+function toPreviewLstat(st: {
+  size: number;
+  mtimeMs: number;
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+}): PreviewLstat {
+  const isFile = st.isFile();
+  const isDirectory = st.isDirectory();
+  const isSymbolicLink = st.isSymbolicLink();
+  return {
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    isFile: () => isFile,
+    isDirectory: () => isDirectory,
+    isSymbolicLink: () => isSymbolicLink,
+  };
 }
 
 /** Real-`FileHandle` adapter: `close()` is idempotent so the stream layer's finally-close and a
@@ -416,7 +466,102 @@ export function defaultPreviewFs(): PreviewFs {
     open: (p, flags) => open(p, flags).then((h) => new RealPreviewHandle(h)),
     readlink: (p) => readlink(p),
     procFdAvailable: () => previewProcFdAvailable(),
+    opendir: (p) => opendir(p).then((dh) => wrapDirHandle(dh)),
+    lstat: (p) => lstat(p).then(toPreviewLstat),
   };
+}
+
+// ---------------------------------------------------------------------------
+// §3.1/§3.3 (P1b) — the directory-listing fs primitives
+// ---------------------------------------------------------------------------
+
+/** Dirent.type is a numeric UV constant; map onto the wire enum (`other` = FIFO / socket /
+ * device / unknown). */
+function direntType(d: Pick<Dirent, "isFile" | "isDirectory" | "isSymbolicLink">): PreviewDirEntryType {
+  if (d.isDirectory()) return "dir";
+  if (d.isFile()) return "file";
+  if (d.isSymbolicLink()) return "symlink";
+  return "other";
+}
+
+/** The structural slice of Node's `fs.Dir` the wrapper drives (kept loose so tests can hand
+ * the exported wrapper a scripted fake — `fs.test.ts` pins the serialization semantics on it). */
+export interface WrappedDirSource {
+  read(): Promise<Dirent | null>;
+  close(): Promise<void>;
+}
+
+class WrappedDirHandle implements PreviewDirHandle {
+  private closed = false;
+  /** the serialization chain: every op (readBatch's reads, close) runs after the previous one
+   * settled — §3.3's "close 排队在在途读之后", by OUR wrapper, not Node's Dir queue. */
+  private tail: Promise<void> = Promise.resolve();
+
+  constructor(private readonly dir: WrappedDirSource) {}
+
+  readBatch(max: number): Promise<PreviewDirDirent[] | null> {
+    if (this.closed) {
+      return Promise.reject(new Error("preview dir handle already closed"));
+    }
+    const run = async (): Promise<PreviewDirDirent[] | null> => {
+      if (this.closed) return null;
+      const out: PreviewDirDirent[] = [];
+      for (let i = 0; i < max; i += 1) {
+        const d = await this.dir.read();
+        if (d === null) return out.length === 0 ? null : out;
+        out.push({ name: d.name, type: direntType(d) });
+      }
+      return out;
+    };
+    const p = this.tail.then(run, run);
+    this.tail = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    return p;
+  }
+
+  close(): Promise<void> {
+    if (this.closed) return Promise.resolve(); // idempotent (§3.1)
+    this.closed = true;
+    const p = this.tail.then(
+      () => this.dir.close(),
+      () => this.dir.close(),
+    );
+    this.tail = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    return p;
+  }
+}
+
+/** §3.1 (P1b): wrap a `fs.promises.Dir` into the `PreviewDirHandle` surface — `readBatch(max)`
+ * batches up to `max` readdir results into ONE logical operation (null at EOF), `close` is
+ * idempotent and serialized after any in-flight read. Exported for the wrapper's own tests. */
+export function wrapDirHandle(dir: WrappedDirSource): PreviewDirHandle {
+  return new WrappedDirHandle(dir);
+}
+
+/** §3.3 (P1b): the bounded, tracked close shared by `dir.ts`'s handle and the route layer's
+ * directory fd. Its budget is ALWAYS a fresh `PREVIEW_DIR_CLOSE_MS` deadline of its own — the
+ * request's deadline may already be exhausted by then — and it takes NO signal: a close must
+ * be attempted even after a client abort or hub-close (the plan's "close 不受请求 abort 影响
+ * （必须尝试）"). A timeout counts its zombie on THIS race (a late settle decrements it); a
+ * rejection (or a raced-out close) is swallowed after one path-free log line — the response
+ * path never waits longer than the bound and never sees an error. */
+export function boundedClose(
+  close: () => Promise<void>,
+  deps: { now(): number; tracker: PreviewIoTracker; log: HubLog },
+): Promise<void> {
+  const deadline = createReqDeadline(deps.now, PREVIEW_DIR_CLOSE_MS);
+  return racePreviewIo(Promise.resolve().then(close), deadline.at, undefined, deps.now, deps.tracker).then(
+    () => undefined,
+    () => {
+      // timed out (zombie counted, late settle will decrement) or the close itself rejected
+      deps.log.info("preview bounded close gave up", { event: "preview.close_bounded" });
+    },
+  );
 }
 
 /** §3.1/§3.6 (P1b's cap gate, exported here since fs.ts owns the disk): synchronous `/proc/

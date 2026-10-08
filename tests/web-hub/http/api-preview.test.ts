@@ -15,7 +15,7 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PREVIEW_PATH, PREVIEW_TEXT_MAX_BYTES } from "../../../src/web-hub/protocol/preview.js";
+import { PREVIEW_PATH, PREVIEW_TEXT_MAX_BYTES, parsePreviewDirListing } from "../../../src/web-hub/protocol/preview.js";
 import { webHubUploadsDir } from "../../../src/web-hub/protocol/paths.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createPreviewRoutes } from "../../../src/web-hub/hub/preview/routes.js";
@@ -751,5 +751,71 @@ describe("loopback /api/preview — global admission (U4, dir-plan §1.4)", () =
     const r = await h.get(AGENT, SESSION, "/etc/ssh/ssh_host_ed25519_key");
     expect(r.status).toBe(403);
     expect(r.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"denylist"}');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1b: `GET /api/preview?dir=1` over the real loopback socket
+// ---------------------------------------------------------------------------
+
+describe("loopback /api/preview — dir=1 listings (P1b)", () => {
+  it("an opted-in directory serves a JSON listing the UI parser accepts; headers + audit clean", async () => {
+    const h = await harness();
+    const d = join(h.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "beta.txt"), "b");
+    writeFileSync(join(d, "alpha.txt"), "a");
+    mkdirSync(join(d, "sub"));
+    const r = await rawRequest(h.port, {
+      method: "GET",
+      path: `${PREVIEW_PATH}?agentKey=${AGENT}&sessionId=${SESSION}&path=${encodeURIComponent(d)}&dir=1`,
+      headers: { "X-PWH": "1", Cookie: h.cookie },
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers["x-pwh-preview-kind"]).toBe("dir");
+    expect(r.headers["cache-control"]).toBe("no-store");
+    expect(r.headers["content-type"]).toContain("application/json");
+    const listing = JSON.parse(r.body) as { entries: Array<{ name: string }>; complete: boolean };
+    expect(listing.entries.map((e) => e.name)).toEqual(["sub", "alpha.txt", "beta.txt"]);
+    expect(listing.complete).toBe(true);
+    expect(parsePreviewDirListing(JSON.parse(r.body), Buffer.byteLength(r.body))).not.toBeNull();
+    const preview = (h.previewLog.lines.at(-1)?.data ?? {}) as Record<string, unknown>;
+    expect(preview).toMatchObject({ audit: "preview", ok: true, kind: "dir", cls: "cwd", total: 3, truncated: false });
+    expect(JSON.stringify(preview)).not.toContain("alpha.txt");
+    expect(JSON.stringify(preview)).not.toContain("beta.txt");
+    await h.cleanup();
+  });
+
+  it("without the opt-in the same directory keeps the pre-P1b 415, byte-identical", async () => {
+    const h = await harness();
+    const d = join(h.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    const r = await h.get(AGENT, SESSION, d);
+    expect(r.status).toBe(415);
+    expect(r.body).toBe('{"error":"E_PREVIEW_UNSUPPORTED","reason":"not-regular"}');
+    await h.cleanup();
+  });
+
+  it("dir=1 on an upload-class path is ignored (upload class never widens, §1.4)", async () => {
+    // HP8's beforeFrontend pattern: the crafted record must exist before the store recovers
+    let craftedPath = "";
+    const h = await harness({
+      withStore: false,
+      beforeFrontend: async (ctx) => {
+        craftedPath = craft(ctx.uploadsRoot, Buffer.from("upload body")).path;
+        const store = createUploadStore({ root: ctx.uploadsRoot, now: Date.now, log: memLog(), audit: () => {} });
+        await store.recover();
+        ctx.setStore(store);
+      },
+    });
+    const r = await rawRequest(h.port, {
+      method: "GET",
+      path: `${PREVIEW_PATH}?agentKey=${AGENT}&sessionId=${SESSION}&path=${encodeURIComponent(craftedPath)}&dir=1`,
+      headers: { "X-PWH": "1", Cookie: h.cookie },
+    });
+    expect(r.status).toBe(200); // a FILE preview, exactly as without dir=1
+    expect(r.headers["x-pwh-preview-kind"]).toBe("text");
+    expect(r.body).toBe("upload body");
+    await h.cleanup();
   });
 });

@@ -122,3 +122,81 @@ function neverVerifier(): ReturnType<typeof createUploadVerifier> {
     dispose: () => undefined,
   };
 }
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1b (§3.2/§5): a 100k-entry directory lists with bounded RSS —
+// the scan cap (10 000 dirents), the entries cap (1 000) and the 512 KiB byte
+// budget mean no stage ever materializes the whole directory.
+// ---------------------------------------------------------------------------
+
+describe("P1b dir listing: memory ceiling", () => {
+  it("a 100 000-entry fake directory: Δrss stays bounded (scan-capped at 10 000, 1 000 kept)", async () => {
+    const { listPreviewDir } = await import("../../../../src/web-hub/hub/preview/dir.js");
+    const { denyCtxOf } = await import("../../../../src/web-hub/hub/preview/admit.js");
+    const { createPreviewIoTracker } = await import("../../../../src/web-hub/hub/preview/fs.js");
+    const { FakeHandle, neverAbort } = await import("./helpers.js");
+
+    // 256-byte names: materializing all 100 000 would cost ~25+ MiB — the caps keep the
+    // working set at 10 000 scanned + 1 000 kept + one ≤512 KiB body
+    const nameOf = (i: number): string => `f${String(i).padStart(6, "0")}` + "-".repeat(256 - 7);
+    let left = 100_000;
+    let eof = false;
+    const handle = {
+      readBatch: (max: number): Promise<Array<{ name: string; type: "dir" | "file" | "symlink" | "other" }> | null> => {
+        if (eof) return Promise.resolve(null);
+        const n = Math.min(max, left);
+        left -= n;
+        if (left === 0) eof = true;
+        const out: Array<{ name: string; type: "file" }> = [];
+        for (let i = 0; i < n; i += 1) out.push({ name: nameOf(left + i), type: "file" });
+        return Promise.resolve(out);
+      },
+      close: (): Promise<void> => Promise.resolve(),
+    };
+    const fs = {
+      opendir: () => Promise.resolve(handle),
+      lstat: () =>
+        Promise.resolve({
+          size: 256,
+          mtimeMs: 1,
+          isFile: () => true,
+          isDirectory: () => false,
+          isSymbolicLink: () => false,
+        }),
+    };
+    const fh = new FakeHandle(Buffer.alloc(0), { ino: 55, dev: 2 });
+    const deps = {
+      fs: fs as never,
+      now: Date.now,
+      log: memLog(),
+      tracker: createPreviewIoTracker(),
+      denyCtx: denyCtxOf("/home/nobody", "/home/nobody/.pi/agent"),
+    };
+    // warm-up passes let V8 size its nursery for this allocation pattern; the min of two
+    // measured passes then shows the steady state (an implementation that materialized the
+    // whole directory would add ~25+ MiB of RETAINED set on EVERY pass — min can't hide it).
+    const runOnce = async (): Promise<{ delta: number; ok: boolean; scanned: number; kept: number; bytes: number }> => {
+      left = 100_000;
+      eof = false;
+      const before = rss();
+      const res = await listPreviewDir(deps, { fh, realpath: "/srv/big", requestPath: "/srv/big" }, neverAbort());
+      return {
+        delta: rss() - before,
+        ok: res.ok,
+        scanned: res.ok ? res.listing.scanned : -1,
+        kept: res.ok ? res.listing.entries.length : -1,
+        bytes: res.ok ? Buffer.byteLength(JSON.stringify(res.listing)) : -1,
+      };
+    };
+    await runOnce();
+    await runOnce();
+    const passes = [await runOnce(), await runOnce()];
+    for (const p of passes) {
+      expect(p.ok).toBe(true);
+      expect(p.scanned).toBe(10_000);
+      expect(p.kept).toBe(1_000);
+      expect(p.bytes).toBeLessThanOrEqual(512 * 1024);
+    }
+    expect(Math.min(...passes.map((p) => p.delta))).toBeLessThan(12 * MIB);
+  });
+});

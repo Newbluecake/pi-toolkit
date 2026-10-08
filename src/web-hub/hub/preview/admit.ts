@@ -24,6 +24,7 @@
  * only it knows whether its controller aborted for a client disconnect or hub shutdown.
  */
 
+import type { PreviewDirEntryType } from "../../protocol/preview.js";
 import type { HubLog } from "../ports.js";
 import type { ReqDeadline } from "../req-deadline.js";
 import {
@@ -39,7 +40,8 @@ import {
 // §4.3 injectable fs surface (the ONLY disk boundary; real adapter lives in fs.ts)
 // ---------------------------------------------------------------------------
 
-/** Structural slice of `fs.Stats` the admission/stream/verify kernels rely on. */
+/** Structural slice of `fs.Stats` the admission/stream/verify kernels rely on. dir-plan
+ * §3.1 (P1b): `isDirectory()` joins — step 8's `allowDir` branch needs it. */
 export interface PreviewStat {
   dev: number;
   ino: number;
@@ -47,6 +49,7 @@ export interface PreviewStat {
   ctimeMs: number;
   nlink: number;
   isFile(): boolean;
+  isDirectory(): boolean;
 }
 
 /** Structural slice of `fs.promises.FileHandle` (fakes only need these; `read` is positioned —
@@ -58,12 +61,46 @@ export interface PreviewHandle {
   close(): Promise<void>;
 }
 
+/** One directory entry as the listing kernel consumes it (§3.1): `name` + the DIRENT type
+ * (readdir-level, pre-lstat — the lstat phase may revise it). `other` covers FIFO / socket /
+ * device files. */
+export interface PreviewDirDirent {
+  name: string;
+  type: PreviewDirEntryType;
+}
+
+/** §3.1/§3.3 the opendir surface: `readBatch(max)` reads up to `max` dirents in one logical
+ * operation (returning `null` at end-of-directory) and `close()` is IDEMPOTENT and — when an
+ * operation is still in flight — SERIALIZED AFTER IT by the wrapper's internal chain (never
+ * relying on Node's own Dir queue semantics). Both properties are fs.ts's wrapper's contract. */
+export interface PreviewDirHandle {
+  readBatch(max: number): Promise<PreviewDirDirent[] | null>;
+  close(): Promise<void>;
+}
+
+/** Structural slice of an lstat(2) result the listing needs (§3.1): the entry's OWN identity —
+ * `fs.lstat` never follows the entry's own symlink (type stays `symlink`, size stays the link
+ * length); the fan-out reads these through `/proc/self/fd/N/<name>`, bound to the admitted
+ * directory fd's inode. */
+export interface PreviewLstat {
+  size: number;
+  mtimeMs: number;
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+}
+
 export interface PreviewFs {
   realpath(p: string): Promise<string>;
   stat(p: string): Promise<PreviewStat>;
   open(p: string, flags: number): Promise<PreviewHandle>;
   readlink(p: string): Promise<string>;
   procFdAvailable(): boolean;
+  /** §3.1 (P1b): opens a directory handle (the real adapter follows the `/proc/self/fd/N`
+   * magic symlink the caller hands it). */
+  opendir(p: string): Promise<PreviewDirHandle>;
+  /** §3.1 (P1b): lstat — does NOT follow a final-segment symlink (entry typing). */
+  lstat(p: string): Promise<PreviewLstat>;
 }
 
 // ---------------------------------------------------------------------------
@@ -289,8 +326,9 @@ export interface FsAdmitterDeps {
 export interface FsAdmitInput {
   /** the request path, verbatim (absolute). */
   path: string;
-  /** §3.1 (P1b): admits a DIRECTORY instead of refusing 415 — only ever honoured when
-   * `/proc/self/fd` is available (§3.6 fail-closed). P1a keeps directories at 415. */
+  /** §3.1 (P1b): admits a DIRECTORY instead of refusing 415 — honoured only when the fstat
+   * says directory AND `/proc/self/fd` is available (§3.6 fail-closed: a platform without
+   * /proc keeps directories at 415 regardless, because the listing itself is proc-bound). */
   allowDir?: boolean;
 }
 
@@ -366,14 +404,18 @@ export function createFsAdmitter(deps: FsAdmitterDeps): FsAdmitter {
         fh = await openPromise;
         const h: PreviewHandle = fh;
 
-        // -- step 8: fstat identity + regular-file --------------------------------------------
-        // (§3.1/P1b will add the allowDir ∧ directory ∧ /proc branch here; P1b's land.)
+        // -- step 8: fstat identity + regular-file / allowDir directory ----------------------
         const fst = await step(() => h.stat());
         if (fst.dev !== st.dev || fst.ino !== st.ino) {
           await closeQuiet(h);
           return { ok: false, status: 409, code: "E_PREVIEW_CHANGED" };
         }
-        if (!fst.isFile()) {
+        // §3.1: a directory is admitted ONLY as allowDir ∧ /proc-available — everything else
+        // non-regular (directory without the opt-in, FIFO, socket, device) keeps its 415. The
+        // fd itself is NOT re-opened with O_DIRECTORY; step 9's /proc re-check runs for the
+        // directory fd exactly like a file's (a swapped/unlinked directory answers 409 there).
+        const isDir = fst.isDirectory();
+        if (!fst.isFile() && !(isDir && input.allowDir === true && fs.procFdAvailable())) {
           await closeQuiet(h);
           return { ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" };
         }
@@ -396,7 +438,13 @@ export function createFsAdmitter(deps: FsAdmitterDeps): FsAdmitter {
         }
 
         // -- step 10 --------------------------------------------------------------------------
-        return { ok: true, fh: h, size: fst.size, realpath: rp };
+        return {
+          ok: true,
+          fh: h,
+          size: fst.size,
+          realpath: rp,
+          ...(isDir ? { dir: true as const } : {}),
+        };
       } catch (err) {
         if (fh !== undefined) await closeQuiet(fh);
         if (signal.aborted || (isPreviewIoError(err) && err.ioFail === "abort")) {

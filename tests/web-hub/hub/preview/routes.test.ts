@@ -27,8 +27,14 @@ import { createUploadVerifier } from "../../../../src/web-hub/hub/preview/verify
 import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import type { PreviewRouteIo, PreviewRoutes, RegistryView } from "../../../../src/web-hub/hub/ports.js";
 import type { OpenForPreviewParams, OpenForPreviewResult, UploadStore } from "../../../../src/web-hub/hub/uploads.js";
-import { PREVIEW_IMAGE_MAX_PIXELS, PREVIEW_TEXT_MAX_BYTES } from "../../../../src/web-hub/protocol/preview.js";
+import {
+  PREVIEW_IMAGE_MAX_PIXELS,
+  PREVIEW_TEXT_MAX_BYTES,
+  parsePreviewDirListing,
+  type PreviewDirListing,
+} from "../../../../src/web-hub/protocol/preview.js";
 import { memLog, type MemLog } from "../helpers.js";
+import { FakeHandle } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // fakes
@@ -1376,3 +1382,317 @@ describe("P1a routes — global admission (U4)", () => {
 function neverAbort2(): AbortSignal {
   return new AbortController().signal;
 }
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1b: the dir=1 route branch, §3.4 budgets, §3.3 teardown order
+// ---------------------------------------------------------------------------
+
+describe("P1b routes — the dir=1 branch", () => {
+  const agentKey = "a4242-nonce12";
+  const sessionId = "sess123";
+
+  function fixture(): { cwd: string; dir(rel: string): string; registry: ReturnType<typeof makeRegistry> } {
+    const cwd = join(dir, "cwd");
+    mkdirSync(cwd, { recursive: true });
+    return {
+      cwd,
+      dir(rel) {
+        const p = join(cwd, rel);
+        mkdirSync(p, { recursive: true });
+        return p;
+      },
+      registry: makeRegistry({ agentKey, sessionId, cwd }),
+    };
+  }
+
+  function routes(
+    registry: Pick<RegistryView, "get">,
+    over: {
+      admitter?: FsAdmitter;
+      fs?: Partial<PreviewFs>;
+      now?: () => number;
+      uploads?: Pick<UploadStore, "openForPreview">;
+    } = {},
+  ): PreviewRoutes {
+    return createPreviewRoutes({
+      mode: "on",
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      uploadsRoot: join(dir, "uploads-root"),
+      registry,
+      log,
+      now: over.now ?? Date.now,
+      ...(over.admitter === undefined ? {} : { admitter: over.admitter }),
+      ...(over.fs === undefined ? {} : { fs: over.fs }),
+      ...(over.uploads === undefined ? {} : { uploads: over.uploads }),
+    });
+  }
+
+  function dirQuery(path: string, wantDir: boolean): URLSearchParams {
+    return new URLSearchParams(wantDir ? { agentKey, sessionId, path, dir: "1" } : { agentKey, sessionId, path });
+  }
+
+  it("200 JSON listing: headers, dirs-first body, parser acceptance, audit kind:dir with NO names", async () => {
+    const fx = fixture();
+    const d = fx.dir("proj");
+    writeFileSync(join(d, "beta.txt"), "b");
+    writeFileSync(join(d, "alpha.txt"), "a");
+    mkdirSync(join(d, "sub"));
+    const res = new FakeRes();
+    await routes(fx.registry).handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo());
+    expect(res.status).toBe(200);
+    expect(res.headers["X-PWH-Preview-Kind"]).toBe("dir");
+    expect(res.headers["Cache-Control"]).toBe("no-store");
+    expect(res.headers["Cross-Origin-Resource-Policy"]).toBe("same-origin");
+    expect(res.headers["Content-Type"]).toContain("application/json");
+    const listing = res.json<PreviewDirListing>();
+    expect(listing.entries.map((e) => e.name)).toEqual(["sub", "alpha.txt", "beta.txt"]);
+    expect(listing.complete).toBe(true);
+    expect(listing.truncated).toBe(false);
+    const serialized = JSON.stringify(listing);
+    expect(parsePreviewDirListing(JSON.parse(serialized), Buffer.byteLength(serialized))).toEqual(listing);
+    // audit: kind dir, the counters — and no entry name ever reaches the log
+    const line = previewAudits(log).at(-1)!;
+    expect(line).toMatchObject({ ok: true, cls: "cwd", kind: "dir", total: 3, truncated: false });
+    const dump = JSON.stringify(log.lines);
+    expect(dump.includes("alpha.txt")).toBe(false);
+    expect(dump.includes("beta.txt")).toBe(false);
+    expect(dump.includes("sub")).toBe(false);
+  });
+
+  it("without dir=1 a directory keeps today's 415 not-regular, byte-identical", async () => {
+    const fx = fixture();
+    const d = fx.dir("proj");
+    const res = new FakeRes();
+    await routes(fx.registry).handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, false), makeIo());
+    expect(res.status).toBe(415);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
+  });
+
+  it("dir=1 on a FILE is ignored (the opt-in only widens directories)", async () => {
+    const fx = fixture();
+    const f = join(fx.cwd, "plain.txt");
+    writeFileSync(f, "plain body\n");
+    const res = new FakeRes();
+    await routes(fx.registry).handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(f, true), makeIo());
+    expect(res.status).toBe(200);
+    expect(res.headers["X-PWH-Preview-Kind"]).toBe("text");
+    expect(res.body().toString("utf8")).toBe("plain body\n");
+  });
+
+  it("a directory OUTSIDE cwd lists as cls:abs (U4 + A, one flow)", async () => {
+    const fx = fixture();
+    const outside = join(dir, "elsewhere");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.log"), "x");
+    const res = new FakeRes();
+    await routes(fx.registry).handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(outside, true), makeIo());
+    expect(res.status).toBe(200);
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: true, cls: "abs", kind: "dir" });
+  });
+
+  it("denylisted children never appear in the listing nor its counts (§2.8 fold)", async () => {
+    const fx = fixture();
+    const d = fx.dir("home-ish");
+    mkdirSync(join(d, ".ssh"));
+    writeFileSync(join(d, "id_rsa"), "k");
+    writeFileSync(join(d, "readme.md"), "r");
+    const res = new FakeRes();
+    await routes(fx.registry).handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo());
+    expect(res.status).toBe(200);
+    const listing = res.json<PreviewDirListing>();
+    expect(listing.entries.map((e) => e.name)).toEqual(["readme.md"]);
+    expect(listing.total).toBe(1);
+    expect(listing.scanned).toBe(3);
+    const dump = JSON.stringify(log.lines);
+    expect(dump.includes(".ssh")).toBe(false);
+    expect(dump.includes("id_rsa")).toBe(false);
+  });
+
+  it("a listing error maps its code: hung readBatch ⇒ 504 E_DEADLINE (Retry-After only for busy)", async () => {
+    const fx = fixture();
+    const d = fx.dir("proj");
+    const hungDirFs: Partial<PreviewFs> = {
+      opendir: () =>
+        Promise.resolve({
+          readBatch: () => new Promise(() => undefined),
+          close: () => Promise.resolve(),
+        }),
+    };
+    const res = new FakeRes();
+    const r = routes(fx.registry, { fs: hungDirFs });
+    // real admission first, then the injected listing fs hangs ⇒ 504 after the 2 s step cap
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo());
+    expect(res.status).toBe(504);
+    expect(res.json()).toEqual({ error: "E_DEADLINE" });
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: false, code: "E_DEADLINE" });
+    expect(previewAudits(log).at(-1)!).not.toHaveProperty("kind");
+  });
+
+  // ---- §3.4: the listing budget is appended INDEPENDENTLY after admission ----------------
+
+  it("§3.4: admission that consumed 7 s leaves the listing its FULL 5 s (independent deadline)", async () => {
+    const fx = fixture();
+    const d = fx.dir("proj");
+    let offset = 0;
+    const now = (): number => Date.now() + offset; // fake clock the routes/admitter share
+    const admitter: FsAdmitter = {
+      admit: async (input) => {
+        offset += 7_000; // the (fake) admission burned 7 of its 8 s
+        return input.allowDir === true
+          ? { ok: true, fh: new FakeHandle(Buffer.alloc(0), { ino: 4242, dev: 9 }), size: 4096, realpath: d, dir: true }
+          : { ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" };
+      },
+    };
+    let firstBatch = true;
+    const slowBatch: PreviewFs = {
+      opendir: () =>
+        Promise.resolve({
+          readBatch: async () => {
+            await sleep(1_200);
+            if (firstBatch) {
+              firstBatch = false;
+              return [{ name: "only.txt", type: "file" as const }];
+            }
+            return null; // EOF — one slow batch, then the directory ends
+          },
+          close: () => Promise.resolve(),
+        }),
+      lstat: () =>
+        Promise.resolve({
+          size: 3,
+          mtimeMs: 5,
+          isFile: () => true,
+          isDirectory: () => false,
+          isSymbolicLink: () => false,
+        }),
+    };
+    const res = new FakeRes();
+    await routes(fx.registry, { admitter, fs: slowBatch, now }).handle(
+      fakeReq({ "x-pwh": "1" }),
+      res,
+      dirQuery(d, true),
+      makeIo(),
+    );
+    // a listing that shared the request deadline would see remaining = 1 000 ms and 504 the
+    // 1 200 ms batch; the independent 5 s budget lets it complete ⇒ 200
+    expect(res.status).toBe(200);
+    expect(res.json<PreviewDirListing>().entries.map((e) => e.name)).toEqual(["only.txt"]);
+  });
+
+  // ---- §3.3: teardown — bounded close, dispose, the FIXED release order ------------------
+
+  it("§3.3: the admitted fd's close never settles ⇒ 200 answered anyway, slot held through the close attempt, audit last", async () => {
+    const fx = fixture();
+    const d = fx.dir("proj");
+    // the admitted directory fd's close never settles — ⑩'s boundedClose is what must give up
+    let fhCloseAttempts = 0;
+    const neverCloseFh = new FakeHandle(Buffer.alloc(0), { ino: 4242, dev: 9 });
+    neverCloseFh.close = (): Promise<void> => {
+      fhCloseAttempts += 1;
+      return new Promise(() => undefined);
+    };
+    const admitter: FsAdmitter = {
+      admit: async (input) =>
+        input.allowDir === true
+          ? { ok: true, fh: neverCloseFh, size: 4096, realpath: d, dir: true }
+          : { ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" },
+    };
+    const okDirFs: Partial<PreviewFs> = {
+      opendir: () =>
+        Promise.resolve({
+          readBatch: async (max: number) => {
+            void max;
+            return first ? ((first = false), [{ name: "a.txt", type: "file" as const }]) : null;
+          },
+          close: () => Promise.resolve(),
+        }),
+      lstat: () =>
+        Promise.resolve({
+          size: 1,
+          mtimeMs: 5,
+          isFile: () => true,
+          isDirectory: () => false,
+          isSymbolicLink: () => false,
+        }),
+    };
+    let first = true;
+    // R1's parking lot: a store open that never settles until released (holds the 2nd slot)
+    const releaseR1 = deferred();
+    const uploads: Pick<UploadStore, "openForPreview"> = {
+      openForPreview: (_p, ctx) =>
+        new Promise((resolve) => {
+          const onAbort = (): void => resolve({ ok: false, code: "E_DEADLINE" });
+          if (ctx.signal.aborted) return onAbort();
+          ctx.signal.addEventListener("abort", onAbort, { once: true });
+          releaseR1.promise.then(() => resolve({ ok: false, code: "E_NOT_FOUND" }));
+        }),
+    };
+    const r = routes(fx.registry, { admitter, fs: okDirFs, uploads });
+    const res = new FakeRes();
+    const tAnswer = Date.now();
+    const done = r.handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo({ user: "u1" }));
+    await new Promise<void>((resolve) => res.once("close", resolve)); // ① the answer went out
+    expect(res.status).toBe(200);
+    expect(Date.now() - tAnswer).toBeLessThan(500); // the answer did NOT wait for the fd close
+
+    // ② the D request still HOLDS its in-flight slot while ⑩'s close attempt parks: R1 takes
+    // u1's second slot, R2 must answer 503 inflight
+    const r2 = new FakeRes();
+    const r2done = r.handle(
+      fakeReq({ "x-pwh": "1" }),
+      r2,
+      query(agentKey, sessionId, `${join(dir, "uploads-root")}/s/x/f`),
+      makeIo({ user: "u1" }),
+    );
+    const r3 = new FakeRes();
+    await r.handle(
+      fakeReq({ "x-pwh": "1" }),
+      r3,
+      query(agentKey, sessionId, `${join(dir, "uploads-root")}/s/x/f`),
+      makeIo({ user: "u1" }),
+    );
+    expect(r3.status).toBe(503); // inflight: D's slot NOT released at answer time
+    expect((r3.json() as { error: string }).error).toBe("E_BUSY");
+    expect(previewAudits(log).find((l) => l["kind"] === "dir")).toBeUndefined(); // ⑤ audit is LAST
+
+    const t0 = Date.now();
+    await done; // resolves only after ⑩'s bounded close gave up (~1 s) + slot + active + audit
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
+    expect(Date.now() - t0).toBeLessThan(2_500);
+    expect(fhCloseAttempts).toBe(1);
+    const dirLine = previewAudits(log).find((l) => l["kind"] === "dir");
+    expect(dirLine).toMatchObject({ ok: true, total: 1 });
+    releaseR1.resolve();
+    await r2done;
+  });
+
+  it("§3.3: dispose mid-listing ⇒ 503 pre-head, dispose ≤1 s, the late close settle is silent", async () => {
+    const fx = fixture();
+    const d = fx.dir("proj");
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((r) => {
+      releaseClose = r;
+    });
+    const parkedFs: Partial<PreviewFs> = {
+      opendir: () =>
+        Promise.resolve({
+          readBatch: () => new Promise(() => undefined), // parked mid-scan
+          close: () => closeGate.then(() => undefined), // …and the close parks past dispose
+        }),
+    };
+    const r = routes(fx.registry, { fs: parkedFs });
+    const res = new FakeRes();
+    const done = r.handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo());
+    await sleep(30); // parked inside the listing
+    const t0 = Date.now();
+    const disposeP = r.dispose("close", createReqDeadline(Date.now, 5_000));
+    await done;
+    await disposeP;
+    expect(Date.now() - t0).toBeLessThan(1_600);
+    expect(res.status).toBe(503);
+    expect(res.json()).toEqual({ error: "E_HUB_RESTARTING" });
+    releaseClose(); // the late settle must neither throw nor produce an unhandled rejection
+    await sleep(50);
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: false, code: "E_ABORT", reason: "hub-close" });
+  });
+});

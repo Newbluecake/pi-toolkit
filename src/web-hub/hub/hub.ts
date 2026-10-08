@@ -41,6 +41,7 @@ import {
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   PREVIEW_ABS_HUB_CAP,
+  PREVIEW_DIR_HUB_CAP,
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
@@ -66,7 +67,7 @@ import { createReaper, type Reaper } from "./spawn/reaper.js";
 import { createSpawnRoutes } from "./spawn/routes.js";
 import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
-import { createPreviewIoTracker, resolvePreviewDenyContext } from "./preview/fs.js";
+import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
 import { createSpawnStore } from "./spawn/store.js";
 import { createSpawnSupervisor, type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
 import { createUploadStore, type UploadStore } from "./uploads.js";
@@ -235,9 +236,14 @@ export async function startHub(
     // dir-plan v3.1 §2.2/§1.2 (P1a): `PREVIEW_ABS_HUB_CAP` rides the SAME `preview.v1` feature
     // gate (the mere presence of `config.preview`) — global-path admission is not a separate
     // setting, and the cap's only job is telling the UI it may widen recognition (C4).
+    // dir-plan §3.5/§3.6 (P1b): `PREVIEW_DIR_HUB_CAP` rides the same gate AND the /proc probe —
+    // the listing itself is `/proc/self/fd`-bound, so a platform without /proc never declares
+    // it (the UI then never sends `dir=1` / `dirs:true`, and directories stay 415 fail-closed).
     const extraHubCaps: readonly string[] = [
       ...(config.spawn === undefined ? [] : [SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP]),
-      ...(config.preview === undefined ? [] : [PREVIEW_HUB_CAP, PREVIEW_ABS_HUB_CAP]),
+      ...(config.preview === undefined
+        ? []
+        : [PREVIEW_HUB_CAP, PREVIEW_ABS_HUB_CAP, ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : [])]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
     ];
 

@@ -13,7 +13,13 @@
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PreviewFs, PreviewHandle, PreviewStat } from "../../../../src/web-hub/hub/preview/admit.js";
+import type {
+  PreviewDirHandle,
+  PreviewFs,
+  PreviewHandle,
+  PreviewLstat,
+  PreviewStat,
+} from "../../../../src/web-hub/hub/preview/admit.js";
 import { defaultPreviewFs } from "../../../../src/web-hub/hub/preview/fs.js";
 import type { PreviewSink } from "../../../../src/web-hub/hub/preview/stream.js";
 import { memLog, tmpDirs } from "../helpers.js";
@@ -48,7 +54,7 @@ export function abortAfter(
 // real-fs wrapper with hooks
 // ---------------------------------------------------------------------------
 
-export type FsMethodName = "realpath" | "stat" | "open" | "readlink" | "procFdAvailable";
+export type FsMethodName = "realpath" | "stat" | "open" | "readlink" | "procFdAvailable" | "opendir" | "lstat";
 
 export interface FsHooks {
   /** resolve the underlying call this many ms late (never later than the caller's step cap). */
@@ -87,6 +93,8 @@ export function hookedFs(hooks: FsHooks = { counts: {} }): PreviewFs & { counts:
     stat: (p) => apply("stat", p, () => real.stat(p)),
     open: (p, flags) => apply("open", p, () => real.open(p, flags)),
     readlink: (p) => apply("readlink", p, () => real.readlink(p)),
+    opendir: (p) => apply("opendir", p, () => real.opendir(p)),
+    lstat: (p) => apply("lstat", p, () => real.lstat(p)),
     procFdAvailable: () => {
       count("procFdAvailable");
       const override = hooks.override?.procFdAvailable;
@@ -127,6 +135,7 @@ export function symlinkInto(dir: string, rel: string, target: string): string {
 
 export function fakeStat(over: Partial<PreviewStat> = {}): PreviewStat {
   const isFile = over.isFile ?? (() => true);
+  const isDirectory = over.isDirectory ?? (() => false);
   return {
     dev: over.dev ?? 11,
     ino: over.ino ?? 22,
@@ -134,7 +143,47 @@ export function fakeStat(over: Partial<PreviewStat> = {}): PreviewStat {
     ctimeMs: over.ctimeMs ?? 1000,
     nlink: over.nlink ?? 1,
     isFile,
+    isDirectory,
   };
+}
+
+/** §3.1 (P1b): an lstat slice fake — defaults to a regular file. */
+export function fakeLstat(over: Partial<PreviewLstat> = {}): PreviewLstat {
+  const isFile = over.isFile ?? (() => true);
+  const isDirectory = over.isDirectory ?? (() => false);
+  const isSymbolicLink = over.isSymbolicLink ?? (() => false);
+  return {
+    size: over.size ?? 0,
+    mtimeMs: over.mtimeMs ?? 1234.5,
+    isFile,
+    isDirectory,
+    isSymbolicLink,
+  };
+}
+
+/** §3.2 (P1b): a fully scripted `PreviewDirHandle` — batches popped per readBatch call,
+ * `close()` never/late-settling on demand; records the call sequence for ordering asserts. */
+export class FakeDirHandle implements PreviewDirHandle {
+  readonly calls: string[] = [];
+  closeCount = 0;
+  /** when set, close() parks until this resolver fires (never-settle = leave undefined). */
+  closeGate: Promise<void> | undefined;
+
+  constructor(private batches: Array<Array<{ name: string; type: "dir" | "file" | "symlink" | "other" }> | null>) {}
+
+  readBatch(max: number): Promise<Array<{ name: string; type: "dir" | "file" | "symlink" | "other" }> | null> {
+    this.calls.push(`read:${max}`);
+    if (this.batches.length === 0) return Promise.resolve(null);
+    const b = this.batches.shift();
+    return Promise.resolve(b ?? null);
+  }
+
+  close(): Promise<void> {
+    this.closeCount += 1;
+    this.calls.push("close");
+    if (this.closeGate === undefined) return Promise.resolve();
+    return this.closeGate.then(() => undefined);
+  }
 }
 
 export class FakeHandle implements PreviewHandle {

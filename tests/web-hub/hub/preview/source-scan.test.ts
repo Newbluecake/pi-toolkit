@@ -28,7 +28,16 @@ const PREVIEW_DIR = fileURLToPath(new URL("../../../../src/web-hub/hub/preview/"
 const HUB_DIR = fileURLToPath(new URL("../../../../src/web-hub/hub/", import.meta.url));
 const SRC_DIR = fileURLToPath(new URL("../../../../src/", import.meta.url));
 const FS_FILE = "fs.ts";
-const KERNEL_FILES = ["sniff.ts", "admit.ts", "stream.ts", "verify.ts", "routes.ts", "open.ts", "probe.ts"] as const;
+const KERNEL_FILES = [
+  "sniff.ts",
+  "admit.ts",
+  "stream.ts",
+  "verify.ts",
+  "routes.ts",
+  "open.ts",
+  "probe.ts",
+  "dir.ts",
+] as const;
 
 /** dir-plan §2.4 rule 2's whitelist: files outside tests/ allowed to reference NO_TRACKER
  * (paths relative to hub/). */
@@ -115,8 +124,8 @@ describe("preview source scan (PV2a)", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("§2.4 rule 3: racePreviewIo call sites in admit/fs pass a tracker (verify/stream whitelisted)", () => {
-    const trackedFiles = ["admit.ts", "fs.ts"] as const; // dir.ts joins in P1b
+  it("§2.4 rule 3: racePreviewIo call sites in admit/fs/dir pass a tracker (verify/stream whitelisted)", () => {
+    const trackedFiles = ["admit.ts", "fs.ts", "dir.ts"] as const; // dir.ts joined in P1b
     for (const name of trackedFiles) {
       const source = readFileSync(PREVIEW_DIR + name, "utf8");
       let idx = source.indexOf("racePreviewIo(");

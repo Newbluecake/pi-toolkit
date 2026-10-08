@@ -33,6 +33,13 @@ export interface Opened {
   cls: "upload" | "cwd" | "abs";
   verify?: { uploadId: string; sha256: string };
   shared?: boolean;
+  /** dir-plan §3.5 (P1b): the fs admitter admitted a DIRECTORY (`allowDir` branch, §3.1) —
+   * the route layer switches to `listPreviewDir` instead of sniff/stream. Upload-class opens
+   * never set it (uploads are files; `dir=1` on an upload path is ignored, §1.4). */
+  dir?: true;
+  /** dir-plan §3.5 (P1b): the admission's realpath result (fs class only) — `listPreviewDir`'s
+   * denylist anchor for entry names. */
+  realpath?: string;
 }
 
 /** PV2b hand-off: `ReadableUploadFileHandle` → PV2a's `PreviewHandle`. At runtime the real
@@ -54,6 +61,8 @@ export function adaptUploadHandle(fh: {
       const ctime = (st as { ctimeMs?: unknown }).ctimeMs;
       const nlink = (st as { nlink?: unknown }).nlink;
       const isFile = st.isFile();
+      const isDir = (st as { isDirectory?: unknown }).isDirectory;
+      const isDirectory = typeof isDir === "function" ? (isDir as () => boolean).call(st) : false;
       return {
         dev: st.dev,
         ino: st.ino,
@@ -61,6 +70,7 @@ export function adaptUploadHandle(fh: {
         ctimeMs: typeof ctime === "number" ? ctime : 0,
         nlink: typeof nlink === "number" ? nlink : 1,
         isFile: () => isFile,
+        isDirectory: () => isDirectory,
       };
     },
     read: (buf, off, len, pos) => fh.read(buf, off, len, pos),
@@ -86,6 +96,8 @@ export interface OpenPathInput {
   listener: "loopback" | "lan";
   /** The authenticated principal the upload store's §4.2 visibility check charges to. */
   principal: string;
+  /** dir-plan §3.5 (P1b): forward ONLY to the fs admitter (upload class ignores it, §1.4). */
+  allowDir?: boolean;
 }
 
 /**
@@ -163,11 +175,24 @@ export async function openAdmittedPath(
 
   // ⑦c fs class — §2.1's global admission stack (U4: any absolute path; the cwd subtree is
   // no longer a boundary, only the audit class `cls` still records it, computed literally).
-  const a = await deps.admitter.admit({ path: input.path }, deadline, signal);
+  const a = await deps.admitter.admit(
+    { path: input.path, ...(input.allowDir === true ? { allowDir: true } : {}) },
+    deadline,
+    signal,
+  );
   if (!a.ok) {
     if (a.status === 0) return { ok: false, abort: true };
     return rejected(a.code, a.reason);
   }
   const cls = input.path === session.cwd || input.path.startsWith(`${session.cwd}/`) ? "cwd" : "abs";
-  return { ok: true, opened: { fh: a.fh, size: a.size, cls } };
+  return {
+    ok: true,
+    opened: {
+      fh: a.fh,
+      size: a.size,
+      cls,
+      ...(a.dir === true ? { dir: true as const } : {}),
+      realpath: a.realpath,
+    },
+  };
 }

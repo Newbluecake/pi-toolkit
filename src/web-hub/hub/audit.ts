@@ -326,8 +326,9 @@ export interface PreviewAuditRecord {
    * literally under the uploads root, `cwd` = literally under the session cwd, `abs` = any
    * other absolute path (U4's new class — statistics only, never an admission decision). */
   cls?: "upload" | "cwd" | "abs" | undefined;
-  /** sniffed content kind of the admitted file (undefined before ⑧ decided). */
-  kind?: "text" | "image" | undefined;
+  /** sniffed content kind of the admitted file (undefined before ⑧ decided); `"dir"` for a
+   * dir-plan §3.5 (P1b) listing answer. */
+  kind?: "text" | "image" | "dir" | undefined;
   ok: boolean;
   code?: string | undefined;
   reason?: string | undefined;
