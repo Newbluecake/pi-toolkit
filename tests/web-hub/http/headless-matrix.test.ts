@@ -18,7 +18,7 @@ import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { fakeDeps, login, makeTmp, openSse, postJson, rawRequest, type FakeDeps, type SseConn } from "./helpers.js";
 import { lanPostJson, lanRequest, seedLanUser, startLan, type LanHarness } from "./lan-helpers.js";
-import { spawnKit, ALLOWED_POLICY } from "./spawn-kit.js";
+import { fakeHistory, spawnKit, ALLOWED_POLICY } from "./spawn-kit.js";
 import type { SpawnPolicyWire } from "../../../src/web-hub/protocol/spawn.js";
 import { fakeClock } from "./lan-helpers.js";
 
@@ -239,6 +239,122 @@ describe("matrix rows: 启用 (deps.spawn wired) × LAN policy × availability",
       expect(spawns.data.items).toHaveLength(1);
       expect("cwd" in spawns.data.items[0]).toBe(false);
       sse.close();
+    } finally {
+      await fe.close();
+      tmp.cleanup();
+    }
+  });
+});
+
+describe("history rows (session-history plan §5, byte-identical when off/unavailable)", () => {
+  it("row ①: not enabled — GET /api/headless/history is byte-identical to GET /api/headless/dirs", async () => {
+    const tmp = makeTmp("pwh-matrix-hist-off-");
+    const deps = fakeDeps(tmp.dir);
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    try {
+      const cookie = await login(port, deps.paths.tokenFile);
+      const history = await rawRequest(port, {
+        path: "/api/headless/history",
+        headers: { Cookie: cookie, "X-PWH": "1" },
+      });
+      const dirs = await rawRequest(port, { path: "/api/headless/dirs", headers: { Cookie: cookie, "X-PWH": "1" } });
+      expect(history.status).toBe(dirs.status);
+      expect(history.body).toBe(dirs.body);
+      // unauthed too (401 before dispatch either way)
+      const historyNoAuth = await rawRequest(port, { path: "/api/headless/history" });
+      const dirsNoAuth = await rawRequest(port, { path: "/api/headless/dirs" });
+      expect(historyNoAuth.status).toBe(dirsNoAuth.status);
+    } finally {
+      await fe.close();
+      tmp.cleanup();
+    }
+  });
+
+  it("row ②: enabled but history defaults off — GET 404 byte-identical to /zzz; session POST byte-identical to a bogus-field POST", async () => {
+    const kit = spawnKit({}, fakeClock());
+    const tmp = makeTmp("pwh-matrix-hist-default-");
+    const deps = fakeDeps(tmp.dir);
+    deps.spawn = kit.spawn;
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    try {
+      const cookie = await login(port, deps.paths.tokenFile);
+      const origin = `http://127.0.0.1:${port}`;
+      const history = await rawRequest(port, {
+        path: "/api/headless/history",
+        headers: { Cookie: cookie, "X-PWH": "1" },
+      });
+      const zzz = await rawRequest(port, { path: "/api/headless/zzz", headers: { Cookie: cookie, "X-PWH": "1" } });
+      expect(history.status).toBe(404);
+      expect(history.status).toBe(zzz.status);
+      expect(history.body).toBe(zzz.body);
+      const sessionPost = await postJson(
+        port,
+        "/api/headless",
+        { id: "histmx00aaaaaaaaaaaa", cwd: "/home/u/proj", session: { key: "dir/a.jsonl", id: "sess-1" } },
+        { Cookie: cookie, Origin: origin },
+      );
+      const bogusPost = await postJson(
+        port,
+        "/api/headless",
+        { id: "histmx00aaaaaaaaaaaa", cwd: "/home/u/proj", bogus: true },
+        { Cookie: cookie, Origin: origin },
+      );
+      expect(sessionPost.status).toBe(bogusPost.status);
+      expect(sessionPost.body).toBe(bogusPost.body);
+    } finally {
+      await fe.close();
+      tmp.cleanup();
+    }
+  });
+
+  it("row ③: history:true but no service injected — same as row ②", async () => {
+    const kit = spawnKit({ history: true }, fakeClock());
+    const tmp = makeTmp("pwh-matrix-hist-noservice-");
+    const deps = fakeDeps(tmp.dir);
+    deps.spawn = kit.spawn;
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    try {
+      const cookie = await login(port, deps.paths.tokenFile);
+      const history = await rawRequest(port, {
+        path: "/api/headless/history",
+        headers: { Cookie: cookie, "X-PWH": "1" },
+      });
+      const zzz = await rawRequest(port, { path: "/api/headless/zzz", headers: { Cookie: cookie, "X-PWH": "1" } });
+      expect(history.status).toBe(404);
+      expect(history.body).toBe(zzz.body);
+    } finally {
+      await fe.close();
+      tmp.cleanup();
+    }
+  });
+
+  it('row ④: lan:"off" — LAN GET /api/headless/history returns 404', async () => {
+    const kit = spawnKit({ history: true, lan: "off" }, fakeClock(), undefined, fakeHistory());
+    const h = await startLan({ spawn: kit.spawn });
+    try {
+      const r = await lanRequest(h.port, { path: "/api/headless/history" });
+      expect(r.status).toBe(404);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("row ⑤: history on (service injected) — missing X-PWH ⇒ 403, unauthed ⇒ 401", async () => {
+    const kit = spawnKit({ history: true }, fakeClock(), undefined, fakeHistory());
+    const tmp = makeTmp("pwh-matrix-hist-on-");
+    const deps = fakeDeps(tmp.dir);
+    deps.spawn = kit.spawn;
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    try {
+      const cookie = await login(port, deps.paths.tokenFile);
+      const noCsrf = await rawRequest(port, { path: "/api/headless/history", headers: { Cookie: cookie } });
+      expect(noCsrf.status).toBe(403);
+      const noAuth = await rawRequest(port, { path: "/api/headless/history", headers: { "X-PWH": "1" } });
+      expect(noAuth.status).toBe(401);
     } finally {
       await fe.close();
       tmp.cleanup();

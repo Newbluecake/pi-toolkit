@@ -121,9 +121,12 @@ export const defaultDirFs: DirFs = {
 // results
 // ---------------------------------------------------------------------------
 
-/** arch §4.5's rejection reasons, in gate order (`empty`…`relative` are step 1's own checks). */
+/** arch §4.5's rejection reasons, in gate order (`empty`…`relative` are step 1's own checks).
+ * `"moved"` is session-history plan §4.6.1's session-backed addition: the realpath'd path no
+ * longer matches the literal path the caller resolved it from (header cwd became a symlink
+ * target, arch §14's gone/moved user ruling). */
 export type AdmitRejection =
-  "empty" | "nul" | "too-long" | "relative" | "not-found" | "not-dir" | "no-access" | "not-allowed";
+  "empty" | "nul" | "too-long" | "relative" | "not-found" | "not-dir" | "no-access" | "not-allowed" | "moved";
 
 /** `admit`'s verdict: on success carries the pinned identity fork will re-verify. */
 export type AdmitResult =
@@ -150,7 +153,20 @@ export interface DirServiceDeps {
 
 export interface DirService {
   known(deadline: ReqDeadline): Promise<{ entries: readonly DirEntryWire[]; partial: boolean }>;
-  admit(raw: string, scope: "known" | "roots", deadline: ReqDeadline): Promise<AdmitResult>;
+  /**
+   * session-history plan §4.6.1: `opts.sessionBacked` is set by the POST session branch. After
+   * step 2 (resolve, verify directory-ness, R|X access, dev/ino capture) a session-backed cwd is
+   * NOT required to be in `known`/`roots` membership (the session itself already proves the
+   * caller has standing for it) — it only has to still be the literal path the caller resolved
+   * (`rp !== expanded` ⇒ `"moved"`, the same gone/moved distinction history rows surface). Omitted
+   * `opts` ⇒ the exact pre-feature code path.
+   */
+  admit(
+    raw: string,
+    scope: "known" | "roots",
+    deadline: ReqDeadline,
+    opts?: { sessionBacked?: true },
+  ): Promise<AdmitResult>;
   pinSync(admitted: { realpath: string; dev: number; ino: number }): PinResult;
 }
 
@@ -359,7 +375,12 @@ export function createDirService(deps: DirServiceDeps): DirService {
     return { entries: st.entries, partial: st.partial };
   }
 
-  async function admit(raw: string, scope: "known" | "roots", deadline: ReqDeadline): Promise<AdmitResult> {
+  async function admit(
+    raw: string,
+    scope: "known" | "roots",
+    deadline: ReqDeadline,
+    opts?: { sessionBacked?: true },
+  ): Promise<AdmitResult> {
     // Step 1 — shape gates (arch §4.5): the wire layer already caps cwd, this re-checks.
     if (raw === "") return { ok: false, reason: "empty" };
     if (raw.includes("\0")) return { ok: false, reason: "nul" };
@@ -387,6 +408,15 @@ export function createDirService(deps: DirServiceDeps): DirService {
       await raceDeadline(fs.access(rp, constants.R_OK | constants.X_OK), Math.max(0, deadline.remaining()));
     } catch {
       return { ok: false, reason: "no-access" };
+    }
+
+    // session-history plan §4.6.1: a session-backed admit skips the known/roots membership scan
+    // entirely — the resolved session already proves standing. It only still has to be the exact
+    // literal path the caller handed in (a symlinked/moved header cwd ⇒ "moved", never silently
+    // followed).
+    if (opts?.sessionBacked === true) {
+      if (rp !== expanded) return { ok: false, reason: "moved" };
+      return { ok: true, realpath: rp, dev: st.dev, ino: st.ino, known: true };
     }
 
     // Step 3 — known membership (shared cache/scan; a partial scan is fail-closed).

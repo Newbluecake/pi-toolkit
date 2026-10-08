@@ -306,6 +306,54 @@ describe("admit: roots scope (step 4)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// admit — session-history plan §4.6.1: opts.sessionBacked
+// ---------------------------------------------------------------------------
+
+describe("admit: opts.sessionBacked (session-history plan §4.6.1)", () => {
+  it("skips the known/roots scan entirely — an unknown dir outside every root is admitted anyway", async () => {
+    const dir = mkdirp(join(root, "sess-unknown"));
+    const { service } = makeSvc({ roots: [] }); // no roots, no registry/history entries
+    const adm = await service.admit(dir, "roots", dl(), { sessionBacked: true });
+    expect(adm).toEqual({
+      ok: true,
+      realpath: realpathSync(dir),
+      dev: statSync(realpathSync(dir)).dev,
+      ino: statSync(realpathSync(dir)).ino,
+      known: true,
+    });
+  });
+
+  it("rp !== expanded (the literal resolved to a DIFFERENT path) ⇒ moved", async () => {
+    const target = mkdirp(join(root, "sess-moved-target"));
+    const link = join(root, "sess-moved-link");
+    symlinkSync(target, link);
+    const { service } = makeSvc();
+    const adm = await service.admit(link, "known", dl(), { sessionBacked: true });
+    expect(adm).toEqual({ ok: false, reason: "moved" });
+  });
+
+  it("still rejects not-found / not-dir / no-access the same as the non-session path (step 2 is shared)", async () => {
+    const { service } = makeSvc();
+    expect(await service.admit(join(root, "sess-missing"), "known", dl(), { sessionBacked: true })).toEqual({
+      ok: false,
+      reason: "not-found",
+    });
+    const file = join(root, "sess-a-file");
+    writeFileSync(file, "x");
+    expect(await service.admit(file, "known", dl(), { sessionBacked: true })).toEqual({
+      ok: false,
+      reason: "not-dir",
+    });
+  });
+
+  it("omitted opts ⇒ the exact pre-feature code path (known/roots scan still runs)", async () => {
+    const dir = mkdirp(join(root, "sess-no-opts"));
+    const { service } = makeSvc({ roots: [] });
+    expect(await service.admit(dir, "roots", dl())).toEqual({ ok: false, reason: "not-allowed" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // known() — the three sources
 // ---------------------------------------------------------------------------
 

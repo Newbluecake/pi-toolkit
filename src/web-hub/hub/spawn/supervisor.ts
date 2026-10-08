@@ -97,12 +97,14 @@ import {
   type SpawnState,
   type SpawnsPayload,
 } from "../../protocol/spawn.js";
+import type { ForkReason, HistoryKind, ProofGap } from "../../protocol/session-history.js";
 import type { Reaper, ReaperTrackRecord } from "./reaper.js";
 import type { SpawnRegistryPort } from "./ports.js";
 import { createRpcStdio, type RpcStdio } from "./rpc-stdio.js";
 import { createStderrSink, type StderrSink } from "./stderr-sink.js";
 import { isTerminalSpawnState, type SpawnStore, type StoredOwner, type StoredRecord } from "./store.js";
 import type { DirService } from "./dirs.js";
+import type { CaptureSessionPathPin, SessionPathPin, VerifySessionPathPin } from "./history/ports.js";
 import {
   classifyForRestore,
   hidesIdentityOnWire,
@@ -125,7 +127,7 @@ import {
 export interface SpawnAuditRecord {
   audit: "spawn";
   phase: "request" | "reject" | "state" | "remove";
-  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove" | "prefs";
+  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove" | "prefs" | "history";
   reqId?: string;
   listener?: "loopback" | "lan";
   ip?: string;
@@ -137,6 +139,9 @@ export interface SpawnAuditRecord {
   dup?: boolean;
   pid?: number;
   state?: SpawnState;
+  /** `code` is a memory/log-only enum (never persisted to spawns.json) — session-history plan
+   *  PD3 rides it with `"session-swapped"` / `"session-unexpected"` instead of growing
+   *  `SpawnEndReason`/`SpawnHint`'s persisted vocabulary. */
   code?: string | null;
   endReason?: SpawnEndReason;
   exitCode?: number | null;
@@ -159,6 +164,13 @@ export interface SpawnAuditRecord {
   restore?: "intent" | "reap" | "fork" | "live" | "stable" | "fail" | "veto";
   restoreFailure?: RestoreFailure;
   attempt?: number;
+  /** session-history plan §4.6.3: the finalized session mode this spawn/restore used. */
+  session?: "resume" | "fork";
+  /** session-history plan §4.6.3: the occupancy-proof live state seen at prove()/reprove() time. */
+  sessionLive?: "open" | "maybe" | "none";
+  sessionKind?: HistoryKind;
+  forkReason?: ForkReason;
+  proofGap?: ProofGap;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +186,28 @@ export interface AdmittedFirstPrompt {
   deliver: "steer" | "followUp";
 }
 
+/**
+ * session-history plan §4.6.3: the resolved session fork/resume request routes hands to
+ * `start()` after its own admit/resolve/prove/confirm/snapshot/auth2 gates — a request carrying
+ * this NEVER also carries `model` (PD13/gate-5: the two are mutually exclusive at the schema
+ * level already; `start()` re-checks defensively).
+ */
+export interface AdmittedSessionRequest {
+  mode: "resume" | "fork";
+  /** The literal path handed to pi: `pin.abs` for `"resume"`, the fork snapshot path for `"fork"`. */
+  abs: string;
+  /** The ORIGINAL session's id (the header id the resume/fork source was resolved against). */
+  id: string;
+  /** `"fork"` only: the new session id (`--session-id`), `RESTORE_SESSION_ID_RE`-shaped. */
+  newId?: string;
+  /** `"resume"` only: the fd-pinned path identity §4.5.6's post-live `verifySessionPathPin`
+   *  re-checks against pi's reported `sessionFile`. */
+  pathPin?: SessionPathPin;
+  /** `"fork"` only: the snapshot file path (unlinked once live, or on every terminal/failure
+   *  path — §4.6.3's `forkSnapshot` record field). */
+  snapshot?: string;
+}
+
 /** What SP9's routes hand to `start()` after their own admit/confirm/auth gates. */
 export interface AdmittedRequest {
   /** Routes generate it (SPAWN_ID_RE-shaped); the supervisor never invents ids. */
@@ -185,6 +219,10 @@ export interface AdmittedRequest {
    *  preference, both resolved by the routes in the post-second-authorize sync stretch);
    * absent ⇒ fork without `--model` (pi's own default). */
   model?: string;
+  /** session-history plan §4.6.2/§4.6.3: present iff the request carried a `session` ref — the
+   *  route's own occupancy/confirm/snapshot gates already resolved mode, path and (for fork) the
+   *  snapshot and new id. */
+  session?: AdmittedSessionRequest;
   firstPrompt?: AdmittedFirstPrompt;
 }
 
@@ -259,6 +297,25 @@ export interface InternalRecord extends StoredRecord {
    * definite boolean (never `undefined`). Drives `SpawnRecordPublic.removing` in both
    * projections (`project.ts`'s `toPublic` and this module's own `publicItem`). */
   removePending: boolean;
+  /**
+   * session-history plan §4.6.3: runtime-only fields a session-backed spawn/restore carries —
+   * NONE of these are copied by `toStored` (§3.4 note “运行时字段（不进入 toStored）”; v3.4 X1:
+   * there is deliberately no persisted history-origin/provenance field anywhere).
+   */
+  /** The session id/file this spawn/restore fork is targeting — `goLive`'s §4.6.3 step 1 checks
+   *  the bound agent's reported sessionId against it (`"session-unexpected"` on mismatch, still
+   *  goes live). */
+  sessionTarget?: { id: string; file?: string };
+  /** How this record came to exist from the history surface (`SpawnRecordPublic.from`'s source —
+   *  never persisted, PD15/project.ts). */
+  from?: "history" | "fork";
+  /** The fd-pinned path identity for a history resume (or, when history is on, a restore
+   *  re-fork) — `goLive`'s §4.6.3 step 2 `verifySessionPathPin` consumes and clears it exactly
+   *  once, regardless of outcome. */
+  sessionPathPin?: SessionPathPin;
+  /** The fork snapshot path (§4.5.6 PD12) this record's child was forked from — unlinked once
+   *  live (§4.6.3 step 3) or on every terminal path (`finalizeTerminal`), then cleared. */
+  forkSnapshot?: string;
 }
 
 interface StopState {
@@ -421,6 +478,18 @@ export interface SpawnSupervisorDeps {
   restoreVetoFile?: string;
   /** Test hook: the stability window (default RESTORE_STABLE_MS). */
   restoreStableMs?: number;
+  // ---- session-history plan §4.6.3 (all optional; absent ⇒ history is off hub-side — §5's
+  // byte-identical guarantee: no capture/verify ever runs, forkSrcDir is never swept/created)
+  /** `history/pin.ts`'s sync capture+verify pair, injected by hub.ts ONLY when
+   *  `webHub.spawn.history` is on. `capture` backs `restoreForkSync`'s re-fork preflight (v3.4
+   *  X1: every `--session <file>` restore gets the SAME check, no sessionsRoot requirement, no
+   *  history-origin distinction); `verify` backs `goLive`'s post-live path-pin re-check for BOTH
+   *  an original history resume (pin built by the route from the `HistoryService`'s `SessionPin`)
+   *  and a history-on restore re-fork (pin built by `capture`). */
+  sessionPathPin?: { capture: CaptureSessionPathPin; verify: VerifySessionPathPin };
+  /** `<stateDir>/spawn/fork-src/` (PD12); undefined ⇒ `init()` never touches it (§5: history off
+   *  or the dir was never created because no fork has ever happened yet). */
+  forkSrcDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +506,10 @@ export const RECOVER_SCAN_BUDGET_MS = 1_000;
 export const RECOVER_KILL_AFTER_MS = STOP_KILL_MS;
 /** arch §7.7 recovery: max procs examined in one environ scan. */
 export const RECOVER_SCAN_MAX_PROCS = 4096;
+/** session-history plan §6.1's budget-table row, this module's own cap: `init()`'s bounded
+ *  `forkSrcDir` sweep considers at most this many directory entries (lstat-only, unlinks
+ *  regular files; anything else — including a readdir failure — is skipped, never thrown). */
+export const FORK_SRC_SWEEP_MAX = 256;
 /** default-model plan D5: grace window for the delayed breaker verdict — `close` (the complete
  *  early-tail moment) usually settles first; this bounds the wait when it never comes. */
 export const MODEL_VERDICT_GRACE_MS = 250;
@@ -581,6 +654,43 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.stableTimer = clearHandle(rec.stableTimer);
   }
 
+  /** session-history plan §4.6.3: a fork snapshot has done its job once the real session file
+   *  exists (goLive) or the record is going terminal without ever reaching that point — unlink
+   *  it best-effort and clear the field exactly once. */
+  function cleanupForkSnapshot(rec: Supervised): void {
+    const path = rec.forkSnapshot;
+    if (path === undefined) return;
+    delete rec.forkSnapshot;
+    try {
+      unlinkSync(path);
+    } catch {
+      /* best effort — a missing/already-gone snapshot is not an error */
+    }
+  }
+
+  /** session-history plan §4.6.3: `init()`'s bounded `forkSrcDir` sweep — a hub crash between
+   *  writing a snapshot and unlinking it (goLive/finalizeTerminal) leaves it orphaned; every
+   *  boot clears up to `FORK_SRC_SWEEP_MAX` stale entries. lstat-only, regular files only, every
+   *  failure (readdir, lstat, unlink) is swallowed — this never throws and never blocks init(). */
+  function sweepForkSrcDir(dir: string): void {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names.slice(0, FORK_SRC_SWEEP_MAX)) {
+      const p = `${dir}/${name}`;
+      try {
+        const st = lstatSync(p);
+        if (!st.isFile()) continue;
+        unlinkSync(p);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
   /** Absolute-deadline timer that distrusts timer precision (arch §7.5): an early wake re-arms. */
   function armRegisterTimer(rec: Supervised): void {
     const at = rec.registerDeadlineAt;
@@ -674,6 +784,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (rec.pid !== undefined && !hideOld) item.pid = rec.pid;
     if (rec.agentKey !== undefined) item.agentKey = rec.agentKey;
     if (rec.model !== undefined) item.model = rec.model;
+    if (rec.from !== undefined) item.from = rec.from;
     if (rec.agentKey !== undefined) item.linked = rec.linked;
     if (rec.state === "live" && rec.control !== undefined) item.control = rec.control;
     if (rec.endReason !== undefined && rec.endReason !== null) item.endReason = rec.endReason;
@@ -1032,6 +1143,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     }
     delete rec.restoreIntent;
     releaseRestoreSlot(rec);
+    // session-history plan §4.6.3: a fork record going terminal without ever reaching live still
+    // needs its snapshot cleaned up (goLive already did this for the success path).
+    cleanupForkSnapshot(rec);
     rec.state = rec.stop?.terminalState ?? "exited";
     rec.endReason = rec.endReason ?? rec.stop?.reason ?? "crash";
     rec.updatedAt = now();
@@ -1285,6 +1399,33 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
   function goLive(rec: Supervised, session: SessionCoords): void {
     if (isTerminalSpawnState(rec.state) || rec.state !== "starting") return;
     const sessionId = session.sessionId;
+    // session-history plan §4.6.3 step 1: a forked/resumed session reporting an unexpected id —
+    // annotate only (owner-only hintDetail + a non-persisted audit code, PD3), still goes live.
+    if (rec.sessionTarget !== undefined && sessionId !== rec.sessionTarget.id) {
+      rec.hintDetail = "session-unexpected";
+      deps.audit({ audit: "spawn", phase: "state", spawnId: rec.spawnId, code: "session-unexpected" });
+    }
+    // step 2: the fd-pinned path (history resume, or a history-on restore re-fork) must still be
+    // what pi actually opened — any mismatch stops the process and never adopts the reported
+    // coordinates as a restore target ("session-swapped"). One-shot regardless of outcome.
+    if (rec.sessionPathPin !== undefined) {
+      const pin = rec.sessionPathPin;
+      delete rec.sessionPathPin;
+      const verify = deps.sessionPathPin?.verify;
+      const result =
+        verify !== undefined
+          ? verify(pin, session.sessionFile)
+          : { ok: false as const, detail: "session path verification unavailable" };
+      if (!result.ok) {
+        rec.hintDetail = `session-swapped: ${result.detail}`;
+        deps.audit({ audit: "spawn", phase: "state", spawnId: rec.spawnId, code: "session-swapped" });
+        enterStopping(rec, "protocol_error");
+        return;
+      }
+    }
+    // step 3: a fork's snapshot has done its job — unlink it now that the real file exists.
+    cleanupForkSnapshot(rec);
+    // step 4: the rest, unchanged.
     rec.state = "live";
     rec.everLive = true;
     if (restoreOn) {
@@ -1505,6 +1646,44 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       return { ok: false, code: "E_LAUNCHER", reason: "changed" };
     }
 
+    // session-history plan §4.6.3 start() defensive checks: routes.ts already enforces these at
+    // the schema/gate level (PD13, gate 5) — re-checked here in depth.
+    if (req.session !== undefined && req.model !== undefined) {
+      return { ok: false, code: "E_DIR", reason: "model-with-session" };
+    }
+    let sessionTarget: { id: string; file?: string } | undefined;
+    let sessionFrom: "history" | "fork" | undefined;
+    let sessionPathPin: SessionPathPin | undefined;
+    let forkSnapshot: string | undefined;
+    let sessionArgvTail: readonly string[] | undefined;
+    if (req.session !== undefined) {
+      const { abs, mode, newId } = req.session;
+      if (
+        abs === "" ||
+        !abs.startsWith("/") ||
+        !abs.endsWith(".jsonl") ||
+        abs.includes("\0") ||
+        abs.includes("\r") ||
+        abs.includes("\n")
+      ) {
+        return { ok: false, code: "E_DIR", reason: "session-invalid" };
+      }
+      if (mode === "resume") {
+        sessionTarget = { id: req.session.id, file: abs };
+        sessionFrom = "history";
+        sessionPathPin = req.session.pathPin;
+        sessionArgvTail = ["--session", abs];
+      } else {
+        if (newId === undefined || !RESTORE_SESSION_ID_RE.test(newId)) {
+          return { ok: false, code: "E_DIR", reason: "session-invalid" };
+        }
+        sessionTarget = { id: newId };
+        sessionFrom = "fork";
+        forkSnapshot = abs;
+        sessionArgvTail = ["--fork", abs, "--session-id", newId];
+      }
+    }
+
     const rec: Supervised = {
       spawnId: req.spawnId,
       state: "launching",
@@ -1520,6 +1699,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       },
       // default-model plan D3/D5: the effective --model ref + its verdict machinery (probe
       // initialized ONLY for model forks — every other record keeps the plain old behavior).
+      // session-history plan §4.6.3: `req.model` is never set alongside `req.session` (checked
+      // above), so a session-backed record never arms the model-verdict machinery either.
       ...(req.model === undefined ? {} : { model: req.model }),
       rejectProbe: req.model === undefined ? undefined : Buffer.alloc(0),
       breakerVerdict: undefined,
@@ -1551,6 +1732,10 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       stableTimer: undefined,
       lastBusy: false,
       restoreSlot: undefined,
+      ...(sessionTarget === undefined ? {} : { sessionTarget }),
+      ...(sessionFrom === undefined ? {} : { from: sessionFrom }),
+      ...(sessionPathPin === undefined ? {} : { sessionPathPin }),
+      ...(forkSnapshot === undefined ? {} : { forkSnapshot }),
     };
 
     // ① intent — L1: on disk BEFORE the fork
@@ -1579,12 +1764,14 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     }
 
     // ③④⑤⑥ — shared with the restore path (web-hub-spawn-restore plan §10.3); start()'s argv
-    // tail is the default-model `--model <ref>` (TWO independent elements) or nothing at all.
+    // tail is EITHER the session-history plan's `--session`/`--fork …` pair (§4.6.3, mutually
+    // exclusive with `--model` by construction above) OR the default-model `--model <ref>` (TWO
+    // independent elements) OR nothing at all.
     forkInto(
       rec,
       launcher,
       pin,
-      rec.model === undefined ? [] : ["--model", rec.model],
+      sessionArgvTail ?? (rec.model === undefined ? [] : ["--model", rec.model]),
       t0 + cfg.registerTimeoutS * 1000,
       () => {
         rec.state = "starting";
@@ -1884,6 +2071,10 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       platformFail = true;
       return;
     }
+    // session-history plan §4.6.3/§5: only ever touched when hub.ts injected it (history on) —
+    // history off or no fork has ever happened yet ⇒ `deps.forkSrcDir` is undefined and this is
+    // a complete no-op (no readdirSync call at all).
+    if (deps.forkSrcDir !== undefined) sweepForkSrcDir(deps.forkSrcDir);
 
     const loaded = store.load(deadline);
     const writerBoot = loaded.writer?.bootId;
@@ -2183,6 +2374,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     delete rec.bootId;
     delete rec.uid;
     delete rec.exit;
+    delete rec.sessionPathPin; // session-history plan §4.6.3: never leak a pin into a terminal record
     rec.noProcess = "never-forked";
     if (rec.restore !== undefined) {
       rec.restore.failure = failure;
@@ -2217,6 +2409,19 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     );
     if (!plan.ok) return failRestorePreflight(rec, plan.failure, plan.detail);
     if (rec.restore === undefined) return failRestorePreflight(rec, "persist"); // unreachable: candidates carry it
+
+    // session-history plan v3.4 X1/X2: EVERY `--session <file>` restore re-fork (history on) gets
+    // the SAME path capture the first resume's pinSession+verifyForSpawn impose — no history-
+    // origin distinction, no sessionsRoot requirement. Placed BEFORE the restore intent write
+    // (attempts+1 + saveNow, below) per X2: a capture failure must not bump attempts, touch disk
+    // or fork. `--session-id` restores (no literal path yet — pi creates the file) skip this.
+    if (plan.tail[0] === "--session" && deps.sessionPathPin !== undefined) {
+      const abs = plan.tail[1];
+      if (abs === undefined) return failRestorePreflight(rec, "session-invalid", "missing session path");
+      const captured = deps.sessionPathPin.capture(abs, getuidFn());
+      if (!captured.ok) return failRestorePreflight(rec, "session-invalid", captured.detail);
+      rec.sessionPathPin = captured.pin;
+    }
 
     // ③ forking — L1 write #1: the intent (attempts+1, forkIntentAt) is on disk BEFORE the fork.
     delete rec.pid;

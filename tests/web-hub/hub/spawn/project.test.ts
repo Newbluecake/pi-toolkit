@@ -67,6 +67,19 @@ describe("toPublic — the SSE/broadcast column (arch §6.4)", () => {
     // absent stays absent (never an explicit undefined on the wire)
     expect("model" in toPublic(rich)).toBe(false);
   });
+  it("session-history plan §4.6.4: `from` rides the Public projection and the owner view, same non-sensitive rule as `model`", () => {
+    const withFrom = makeRecord({ spawnId: "s-f", from: "history" });
+    const pub = toPublic(withFrom);
+    expect(pub.from).toBe("history");
+    const owner = toViewer(withFrom, OWNER_PRINCIPAL, false);
+    expect(owner.from).toBe("history");
+    const nonOwner = toViewer(withFrom, OTHER_PRINCIPAL, false);
+    expect("from" in nonOwner).toBe(true);
+    const withForkFrom = makeRecord({ spawnId: "s-f2", from: "fork" });
+    expect(toPublic(withForkFrom).from).toBe("fork");
+    // absent stays absent
+    expect("from" in toPublic(rich)).toBe(false);
+  });
   it("carries exactly the lifecycle fields, never an owner-only field", () => {
     const p = toPublic(rich, fpOf);
     expect(p).toMatchObject({

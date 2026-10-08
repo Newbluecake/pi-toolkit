@@ -46,7 +46,7 @@
  *
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { auditSpawn } from "../audit.js";
 import type { CmdLimit } from "../cmd-limit.js";
@@ -68,13 +68,32 @@ import {
   parseSpawnPrefsRequest,
   parseSpawnRequestBody,
   type HubSpawnConfig,
+  type SpawnPolicyWire,
 } from "../../protocol/spawn.js";
+import {
+  decodeHistoryCursor,
+  HISTORY_LIMIT_DEFAULT,
+  HISTORY_LIMIT_MAX,
+  HISTORY_Q_MAX_CHARS,
+  SESSION_OPEN_REASON,
+  type ForkReason,
+  type HistoryLiveWire,
+  type HistoryPage,
+  type ProofGap,
+} from "../../protocol/session-history.js";
+import type { ForkSnapshot, HistoryListQuery, HistoryService, OccupancyProof, SessionPin } from "./history/ports.js";
 import type { DirService } from "./dirs.js";
 import type { FirstPromptForwarder } from "./first-prompt.js";
 import type { SpawnPrefs } from "./prefs.js";
 import type { SpawnFrontendPort, SpawnRouteIo } from "./ports.js";
 import { toPublicPayload, toViewer } from "./project.js";
-import { spawnPrincipal, type AdmittedRequest, type SpawnSupervisor, type StartResult } from "./supervisor.js";
+import {
+  spawnPrincipal,
+  type AdmittedRequest,
+  type AdmittedSessionRequest,
+  type SpawnSupervisor,
+  type StartResult,
+} from "./supervisor.js";
 
 // ---------------------------------------------------------------------------
 // tunables (plan §SP9; every number the route gates are built from)
@@ -100,6 +119,21 @@ const ADMIT_RESERVE_MS = 3_000;
 const DIRS_BUDGET_MS = 2_000;
 /** Stop body cap (`{force?:true}` needs nothing near this; keeps parsing bounded). */
 const STOP_BODY_MAX = 4 * 1024;
+/** session-history plan §3.6: `GET /api/headless/history`'s own request budget — the list NEVER
+ *  504s (partial results instead), this is only the route's outer bound before `history.page()`
+ *  is even called. */
+const HISTORY_LIST_TOTAL_MS = 3_000;
+/** §3.6: `${principal}:spawn-history`'s own bucket (4 capacity, 1 token / 500ms). */
+const HISTORY_READ_CAPACITY = 4;
+const HISTORY_READ_REFILL_MS = 500;
+/** §4.6.2 gate 8: `history.resolve()`'s own slice of the admit budget, `min(800, admitMs)`. */
+const HISTORY_RESOLVE_CAP_MS = 800;
+/** §4.6.2 gate 8': `history.prove()`'s own budget, `deriveBudget(remaining, 300, 3000)`. */
+const PROVE_CAP_MS = 300;
+const PROVE_RESERVE_MS = 3_000;
+/** §4.6.2 gate 9": `history.snapshot()`'s own budget for a fork request. */
+const SNAPSHOT_CAP_MS = 4_000;
+const SNAPSHOT_RESERVE_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // deps & shape
@@ -119,6 +153,10 @@ export interface SpawnRoutesDeps {
   rejectAudit429: Map<string, number>;
   log: HubLog;
   now: () => number;
+  /** session-history plan §3.7/§4.6.2: injected by hub.ts ONLY when `webHub.spawn.history` is on
+   *  (P-int owns the construction — P-route only depends on this port's type). Absent ⇒
+   *  `historyOn` is false regardless of `cfg.history` (§5's byte-identical guarantee). */
+  history?: HistoryService;
 }
 
 interface IdemEntry {
@@ -128,7 +166,7 @@ interface IdemEntry {
 }
 
 /** The parsed intent everything downstream (LRU digest, admit, start) is built from. */
-interface SpawnIntent {
+export interface SpawnIntent {
   id: string;
   cwd: string;
   confirmed: boolean;
@@ -136,6 +174,10 @@ interface SpawnIntent {
   /** default-model plan §3 ①: the request's tri-state, verbatim — `undefined` (absent) vs `""`
    *  (explicit pi default) vs a parsed `provider/id` are THREE different intents. */
   model: string | undefined;
+  /** session-history plan §3.3/§4.6.2: present iff the body carried a `session` ref (only ever
+   *  parsed when `historyOn`); `mode` is normalized here — absent ⇒ `"resume"` (the hub decides
+   *  whether occupancy forces a fork via the 409 `session-open` round-trip, PD10'). */
+  session: { key: string; id: string; mode: "resume" | "fork" } | undefined;
   firstPrompt: { text: string; deliver: "steer" | "followUp" } | undefined;
 }
 
@@ -151,10 +193,18 @@ function matchStopPath(path: string): string | undefined {
 /** sha256 over a canonical (fixed-key-order) rendering of the intent. `confirm`/`expectCwd`
  *  are excluded (plan §SP9: "只多 confirm 视为同一意图"); `model` joins ONLY when present
  *  (default-model plan §3 ①) — a request without it hashes byte-identically to pre-feature,
- *  so old digests (and their LRU entries) keep hitting across a hub upgrade. */
-function intentDigest(intent: SpawnIntent): string {
+ *  so old digests (and their LRU entries) keep hitting across a hub upgrade. `session` joins
+ *  ONLY when present (session-history plan §4.6.6: different key/id/mode ⇒ a different digest
+ *  — a request without `session` hashes byte-identically to pre-feature too). */
+export function intentDigest(intent: SpawnIntent): string {
   const parts: string[] = [`"cwd":${JSON.stringify(intent.cwd)}`];
   if (intent.model !== undefined) parts.push(`"model":${JSON.stringify(intent.model)}`);
+  if (intent.session !== undefined) {
+    const s = intent.session;
+    parts.push(
+      `"session":{"key":${JSON.stringify(s.key)},"id":${JSON.stringify(s.id)},"mode":${JSON.stringify(s.mode)}}`,
+    );
+  }
   const fp = intent.firstPrompt;
   if (fp !== undefined) {
     parts.push(`"firstPrompt":{"deliver":${JSON.stringify(fp.deliver)},"text":${JSON.stringify(fp.text)}}`);
@@ -170,8 +220,24 @@ function statusOf(err: unknown): number | undefined {
   return undefined;
 }
 
+/** session-history plan §4.6.2: the occupancy-proof fields a 409 `session-open` reply and the
+ *  success-path audit line both read off the SAME `prove()`/`reprove()` result. */
+function occupancyAuditFields(p: OccupancyProof): {
+  sessionLive: "open" | "maybe" | "none";
+  forkReason?: ForkReason;
+  proofGap?: ProofGap;
+} {
+  if (p.free) return { sessionLive: "none" };
+  return {
+    sessionLive: p.live?.state ?? "none",
+    forkReason: p.reason,
+    ...(p.gap === undefined ? {} : { proofGap: p.gap }),
+  };
+}
+
 export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   const { supervisor, dirs, firstPrompt, prefs, cfg, limit, log, now } = deps;
+  const historyOn = cfg.history === true && deps.history !== undefined;
   const idem = new Map<string, IdemEntry>();
 
   // ------------------------------------------------------------- idempotency LRU
@@ -199,7 +265,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   // ------------------------------------------------------------- audit (arch §6.6)
 
   interface RejectFields {
-    endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs";
+    endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs" | "history";
     code: string;
     reqId?: string;
     spawnId?: string;
@@ -407,6 +473,103 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     io.sendJson(res, 200, { recent: known.entries, ...(known.partial ? { partial: true } : {}) });
   }
 
+  // ------------------------------------------------------------- GET /api/headless/history
+
+  /** session-history plan §3.6: query-string parse, in gate order. `null` ⇒ a 400 was already sent. */
+  function parseHistoryQuery(
+    query: URLSearchParams,
+    io: SpawnRouteIo,
+    res: ServerResponse,
+    auth: { ip: string; user?: string | undefined },
+  ): HistoryListQuery | undefined {
+    const qRaw = query.get("q");
+    const q = qRaw === null ? undefined : qRaw.trim();
+    if (q !== undefined && q.length > HISTORY_Q_MAX_CHARS) {
+      rejectAudit(io, auth, { endpoint: "history", code: "E_BAD_REQUEST" });
+      io.sendJson(res, 400, { error: "E_BAD_REQUEST", reason: "q" });
+      return undefined;
+    }
+    const kindRaw = query.get("kind");
+    if (kindRaw !== null && kindRaw !== "main" && kindRaw !== "all") {
+      rejectAudit(io, auth, { endpoint: "history", code: "E_BAD_REQUEST" });
+      io.sendJson(res, 400, { error: "E_BAD_REQUEST", reason: "kind" });
+      return undefined;
+    }
+    const kind: "main" | "all" = kindRaw === "all" ? "all" : "main";
+    const cursorRaw = query.get("cursor");
+    let cursor: { genId: string; pos: number } | undefined;
+    if (cursorRaw !== null) {
+      const decoded = decodeHistoryCursor(cursorRaw);
+      if (decoded === null) {
+        rejectAudit(io, auth, { endpoint: "history", code: "E_BAD_REQUEST" });
+        io.sendJson(res, 400, { error: "E_BAD_REQUEST", reason: "cursor" });
+        return undefined;
+      }
+      cursor = decoded;
+    }
+    const limitRaw = query.get("limit");
+    let limitN = HISTORY_LIMIT_DEFAULT;
+    if (limitRaw !== null) {
+      const n = Number(limitRaw);
+      if (!Number.isInteger(n) || n < 1 || n > HISTORY_LIMIT_MAX) {
+        rejectAudit(io, auth, { endpoint: "history", code: "E_BAD_REQUEST" });
+        io.sendJson(res, 400, { error: "E_BAD_REQUEST", reason: "limit" });
+        return undefined;
+      }
+      limitN = n;
+    }
+    return {
+      ...(q === undefined || q === "" ? {} : { q }),
+      kind,
+      ...(cursor === undefined ? {} : { cursor }),
+      limit: limitN,
+    };
+  }
+
+  async function handleHistory(
+    req: IncomingMessage,
+    res: ServerResponse,
+    query: URLSearchParams,
+    io: SpawnRouteIo,
+  ): Promise<void> {
+    if (!pwhHeaderOk(req)) {
+      rejectAudit(io, { ip: io.ip }, { endpoint: "history", code: "E_CSRF" });
+      io.sendError(res, 403, "E_CSRF");
+      return;
+    }
+    const reqDeadline = createReqDeadline(now, WRITE_TOTAL_MS);
+    const auth = await authorizeOrAudit(io, reqDeadline, "history");
+    if (auth === undefined) return;
+    const owner = { listener: io.listener, reqId: "", ...(auth.user === undefined ? {} : { user: auth.user }) };
+    const principal = spawnPrincipal(owner);
+    const read = limit.admit(`${principal}:spawn-history`, HISTORY_READ_CAPACITY, HISTORY_READ_REFILL_MS);
+    if (!read.ok) {
+      rateAudit(io, auth, `spawn-history:${principal}`, { endpoint: "history", code: "E_RATE" });
+      sendRateLimited(io, res, read.retryAfterMs);
+      return;
+    }
+    const q = parseHistoryQuery(query, io, res, auth);
+    if (q === undefined) return;
+    const history = deps.history;
+    if (history === undefined) {
+      // defensive: `handle()` only reaches here when `historyOn`, which already requires it.
+      io.sendError(res, 404, "E_NOT_FOUND");
+      return;
+    }
+    const result = await history.page(q, createReqDeadline(now, HISTORY_LIST_TOTAL_MS));
+    if (!result.ok) {
+      rejectAudit(io, auth, { endpoint: "history", code: "E_BAD_REQUEST" });
+      io.sendJson(res, 409, { error: "E_BAD_REQUEST", reason: "cursor-expired" });
+      return;
+    }
+    const policy = supervisor.policy(principal, io.listener, io.scheme, io.viaTrustedProxy);
+    const page: HistoryPage = policy.allowed
+      ? result.page
+      : { ...result.page, items: result.page.items.map((item) => ({ ...item, startable: false })) };
+    // success — no audit, no log (plan §3.6).
+    io.sendJson(res, 200, page);
+  }
+
   // ------------------------------------------------------------- POST /api/headless
 
   async function handleSpawn(req: IncomingMessage, res: ServerResponse, io: SpawnRouteIo): Promise<void> {
@@ -463,8 +626,10 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       return;
     }
 
-    // gate 5 — schema (parseSpawnRequestBody enforces the exact UTF-8 byte caps)
-    const parsed = parseSpawnRequestBody(raw);
+    // gate 5 — schema (parseSpawnRequestBody enforces the exact UTF-8 byte caps). `historyOn`
+    // selects the WithSession schema (session-history plan §3.3) — a hub with history off parses
+    // exactly like pre-feature (a `session` field is an `additionalProperties:false` violation).
+    const parsed = parseSpawnRequestBody(raw, { session: historyOn });
     if (!parsed.ok) {
       rejectAudit(io, auth, { endpoint: "spawn", code: "E_BAD_REQUEST" });
       const message =
@@ -474,10 +639,16 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
             ? "invalid model ref"
             : parsed.error === "first-prompt-too-long"
               ? "first prompt too large"
-              : "bad spawn request body";
+              : parsed.error === "session-ref"
+                ? "bad session ref"
+                : parsed.error === "model-with-session"
+                  ? "model cannot be set when resuming a session"
+                  : "bad spawn request body";
       io.sendJson(res, 400, {
         error: "E_BAD_REQUEST",
-        ...(parsed.error === "model-invalid" ? { reason: "model-invalid" } : {}),
+        ...(parsed.error === "model-invalid" || parsed.error === "session-ref" || parsed.error === "model-with-session"
+          ? { reason: parsed.error }
+          : {}),
         message,
       });
       return;
@@ -489,6 +660,10 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       confirmed: body.confirm === true,
       expectCwd: body.expectCwd,
       model: body.model,
+      session:
+        body.session === undefined
+          ? undefined
+          : { key: body.session.key, id: body.session.id, mode: body.session.mode ?? "resume" },
       firstPrompt:
         body.firstPrompt === undefined
           ? undefined
@@ -534,6 +709,12 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
           // default-model plan §3 ② / R2-2: a dup replay answers the ORIGINAL record's model —
           // a later preference change never rewrites an already-admitted record.
           ...(rec.model === undefined ? {} : { model: rec.model }),
+          // session-history plan §3.6: a dup replay carries the ORIGINAL record's session verdict
+          // too — `rec.sessionTarget.id` is already the right id for either mode (the original
+          // header id for resume, the new id for fork).
+          ...(rec.sessionTarget === undefined
+            ? {}
+            : { session: { mode: rec.from === "fork" ? "fork" : "resume", id: rec.sessionTarget.id } }),
           dup: true,
           ...(rec.firstPrompt === undefined ? {} : { firstPrompt: "accepted" }),
         });
@@ -566,6 +747,29 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       io.sendError(res, 504, "E_DEADLINE");
       return;
     }
+
+    // session-history plan §4.6.2: a session-backed request runs its OWN gate 8 onward (admit ∥
+    // resolve → prove → confirm → snapshot → auth2 → sync reprove/verify → start) — entirely
+    // separate from the code below so the non-session path stays byte-identical.
+    if (intent.session !== undefined) {
+      await doSessionBranch(
+        req,
+        res,
+        io,
+        intent.session,
+        reqDeadline,
+        auth,
+        intent,
+        admitMs,
+        policy,
+        ownerOf,
+        principal,
+        idemKey,
+        digest,
+      );
+      return;
+    }
+
     const admitted = await dirs.admit(intent.cwd, policy.scope, createReqDeadline(now, admitMs));
     if (!admitted.ok) {
       rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: "E_DIR" });
@@ -680,6 +884,272 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       ...(effectiveModel === "" ? {} : { model: effectiveModel }),
       ...(intent.firstPrompt === undefined ? {} : { firstPrompt: "accepted" }),
     });
+  }
+
+  // ------------------------------------------------------------- POST /api/headless (session branch)
+
+  function sendResolveFailure(
+    io: SpawnRouteIo,
+    res: ServerResponse,
+    resolved: Extract<Awaited<ReturnType<HistoryService["resolve"]>>, { ok: false }>,
+  ): void {
+    if (resolved.code === "E_DEADLINE") {
+      io.sendError(res, 504, "E_DEADLINE");
+      return;
+    }
+    io.sendJson(res, resolved.status, { error: resolved.code, reason: resolved.reason });
+  }
+
+  function sendSessionOpen(
+    io: SpawnRouteIo,
+    res: ServerResponse,
+    resolvedCwd: string,
+    info: { reason: ForkReason; gap?: ProofGap; live?: HistoryLiveWire },
+  ): void {
+    io.sendJson(res, 409, {
+      error: "E_CONFIRM_REQUIRED",
+      resolvedCwd,
+      reason: SESSION_OPEN_REASON,
+      forkReason: info.reason,
+      ...(info.gap === undefined ? {} : { proofGap: info.gap }),
+      ...(info.live === undefined ? {} : { live: info.live }),
+    });
+  }
+
+  /**
+   * session-history plan §4.6.2: gate 8 onward for a `session`-backed POST — admit ∥ resolve →
+   * prove → (409 session-open) → confirm → (fork) snapshot → auth2 → sync reprove/verify →
+   * supervisor.start(). `pin.release()` happens exactly once, in `finally`, from the moment
+   * `resolve()` hands one out.
+   */
+  async function doSessionBranch(
+    req: IncomingMessage,
+    res: ServerResponse,
+    io: SpawnRouteIo,
+    sessionIntent: { key: string; id: string; mode: "resume" | "fork" },
+    reqDeadline: ReqDeadline,
+    auth: { ip: string; user?: string | undefined },
+    intent: SpawnIntent,
+    admitMs: number,
+    policy: SpawnPolicyWire,
+    ownerOf: (reqId: string) => { listener: "loopback" | "lan"; reqId: string; user?: string },
+    principal: string,
+    idemKey: string,
+    digest: string,
+  ): Promise<void> {
+    const history = deps.history;
+    if (history === undefined) {
+      // defensive: `historyOn` already gated the schema parse that let `session` through.
+      rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: "E_BAD_REQUEST" });
+      io.sendJson(res, 400, { error: "E_BAD_REQUEST", message: "history unavailable" });
+      return;
+    }
+    const resolveMs = Math.min(HISTORY_RESOLVE_CAP_MS, admitMs);
+    const [admitted, resolved] = await Promise.all([
+      dirs.admit(intent.cwd, policy.scope, createReqDeadline(now, admitMs), { sessionBacked: true }),
+      history.resolve(
+        { key: sessionIntent.key, id: sessionIntent.id, mode: sessionIntent.mode },
+        intent.cwd,
+        createReqDeadline(now, resolveMs),
+      ),
+    ]);
+    // 拒绝优先级：resolved 失败（含 504）> admitted 失败（含 moved）（§4.6.2）
+    if (!resolved.ok) {
+      rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: resolved.code });
+      sendResolveFailure(io, res, resolved);
+      return;
+    }
+    if (!admitted.ok) {
+      rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: "E_DIR" });
+      io.sendJson(res, 400, { error: "E_DIR", reason: admitted.reason });
+      resolved.pin.release();
+      return;
+    }
+    const pin: SessionPin = resolved.pin;
+    try {
+      // gate 8' — occupancy proof (async, bounded, never rejects)
+      const proveMs = deriveBudget(reqDeadline.remaining(), PROVE_CAP_MS, PROVE_RESERVE_MS);
+      const proof: OccupancyProof = await history.prove(pin, createReqDeadline(now, proveMs));
+
+      // gate 9' — occupancy forces a fork unless the client already asked for one
+      if (!proof.free && sessionIntent.mode !== "fork") {
+        rejectAudit(io, auth, {
+          endpoint: "spawn",
+          reqId: intent.id,
+          cwd: admitted.realpath,
+          known: admitted.known,
+          code: "E_CONFIRM_REQUIRED",
+        });
+        sendSessionOpen(io, res, admitted.realpath, proof);
+        return;
+      }
+
+      // gate 9 — the EXISTING confirm gate (a session-backed admit's `known` is always true, so
+      // this only ever fires under `policy.confirm === "always"`, i.e. LAN — PD17).
+      const needConfirm = policy.confirm === "always" || (policy.confirm === "unknown-dir" && !admitted.known);
+      const confirmBound = intent.confirmed && intent.expectCwd === admitted.realpath;
+      if (needConfirm && !confirmBound) {
+        rejectAudit(io, auth, {
+          endpoint: "spawn",
+          reqId: intent.id,
+          cwd: admitted.realpath,
+          known: admitted.known,
+          confirmed: false,
+          code: "E_CONFIRM_REQUIRED",
+        });
+        io.sendJson(res, 409, {
+          error: "E_CONFIRM_REQUIRED",
+          resolvedCwd: admitted.realpath,
+          reason: intent.confirmed ? "changed" : policy.confirm,
+        });
+        return;
+      }
+
+      // gate 9" — fork mode needs a snapshot of the pinned file BEFORE the second authorize
+      let snap: ForkSnapshot | undefined;
+      if (sessionIntent.mode === "fork") {
+        const snapMs = deriveBudget(reqDeadline.remaining(), SNAPSHOT_CAP_MS, SNAPSHOT_RESERVE_MS);
+        const snapResult = await history.snapshot(pin, createReqDeadline(now, snapMs));
+        if (!snapResult.ok) {
+          rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: "E_DIR" });
+          if (snapResult.status === 504) io.sendError(res, 504, "E_DEADLINE");
+          else io.sendJson(res, 400, { error: "E_DIR", reason: snapResult.reason });
+          return;
+        }
+        snap = snapResult.snapshot;
+      }
+
+      // gate 10 — second authorize
+      const stillAuthed = await authorizeOrAudit(io, reqDeadline, "spawn", intent.id);
+      if (stillAuthed === undefined) {
+        snap?.discard();
+        return;
+      }
+
+      // 同步段 — from here to the 202 (or the next sync reject) there is zero `await`.
+      let sessionArgv: AdmittedSessionRequest;
+      if (sessionIntent.mode === "resume") {
+        if (!proof.free) {
+          // Defensive: unreachable given gate 9' above already forced a fork when occupied.
+          sendSessionOpen(io, res, admitted.realpath, proof);
+          return;
+        }
+        const p2 = history.reprove(pin, proof.scan);
+        if (!p2.free) {
+          sendSessionOpen(io, res, admitted.realpath, p2);
+          return;
+        }
+        const verified = history.verifyForSpawn(pin);
+        if (!verified.ok) {
+          io.sendJson(res, 409, { error: "E_DIR", reason: "session-changed" });
+          return;
+        }
+        sessionArgv = {
+          mode: "resume",
+          abs: pin.abs,
+          id: pin.id,
+          pathPin: { abs: pin.abs, root: pin.root, dir: pin.dir, file: pin.file },
+        };
+      } else {
+        if (snap === undefined) {
+          // unreachable: fork mode always obtains a snapshot above before reaching here
+          io.sendJson(res, 409, { error: "E_DIR", reason: "session-changed" });
+          return;
+        }
+        if (!history.verifySnapshot(snap)) {
+          snap.discard();
+          io.sendJson(res, 409, { error: "E_DIR", reason: "session-changed" });
+          return;
+        }
+        const newId = randomUUID();
+        sessionArgv = { mode: "fork", abs: snap.path, id: pin.id, newId, snapshot: snap.path };
+      }
+
+      // session-history plan PD13: a session-backed request NEVER applies the hub's default-model
+      // preference (even when the body omitted `model` and a preference is set).
+      const effectiveModel = "";
+
+      // gate 11 — supervisor.start(): limits + intent persist + fork, fully synchronous
+      const spawnId = randomBytes(12).toString("base64url");
+      const startReq: AdmittedRequest = {
+        spawnId,
+        admitted: { realpath: admitted.realpath, dev: admitted.dev, ino: admitted.ino, known: admitted.known },
+        owner: ownerOf(intent.id),
+        session: sessionArgv,
+        ...(intent.firstPrompt === undefined
+          ? {}
+          : {
+              firstPrompt: {
+                textLen: Buffer.byteLength(intent.firstPrompt.text, "utf8"),
+                deliver: intent.firstPrompt.deliver,
+              },
+            }),
+      };
+      const result = supervisor.start(startReq, reqDeadline);
+      if (!result.ok) {
+        snap?.discard();
+        rejectAudit(io, stillAuthed, {
+          endpoint: "spawn",
+          reqId: intent.id,
+          cwd: admitted.realpath,
+          known: admitted.known,
+          confirmed: true,
+          ...(result.code === "E_LIMIT"
+            ? { limit: result.limit ?? "global", active: result.active, max: result.max }
+            : {}),
+          code: result.code,
+        });
+        sendStartResult(io, res, result);
+        return;
+      }
+
+      // 202 — the record exists (①); hand the first-prompt BODY to the forwarder (memory only)
+      if (intent.firstPrompt !== undefined) {
+        firstPrompt.accept(
+          spawnId,
+          intent.firstPrompt,
+          {
+            listener: io.listener,
+            ip: auth.ip,
+            ...(auth.user === undefined ? {} : { user: auth.user }),
+            reqId: intent.id,
+          },
+          now() + cfg.registerTimeoutS * 1000 + FIRST_PROMPT_GRACE_MS,
+        );
+      }
+      idemPut(idemKey, spawnId, digest);
+      const occ = occupancyAuditFields(proof);
+      auditSpawn(log, {
+        audit: "spawn",
+        phase: "request",
+        endpoint: "spawn",
+        reqId: intent.id,
+        listener: io.listener,
+        ip: auth.ip,
+        ...(auth.user === undefined ? {} : { user: auth.user }),
+        spawnId,
+        cwd: admitted.realpath,
+        known: admitted.known,
+        confirmed: needConfirm ? true : false,
+        session: sessionArgv.mode,
+        sessionLive: occ.sessionLive,
+        sessionKind: pin.kind,
+        ...(occ.forkReason === undefined ? {} : { forkReason: occ.forkReason }),
+        ...(occ.proofGap === undefined ? {} : { proofGap: occ.proofGap }),
+        ...(intent.firstPrompt === undefined
+          ? {}
+          : { firstPrompt: "pending", textLen: Buffer.byteLength(intent.firstPrompt.text, "utf8") }),
+      });
+      io.sendJson(res, 202, {
+        spawnId,
+        state: "starting",
+        cwd: admitted.realpath,
+        session: { mode: sessionArgv.mode, id: sessionArgv.newId ?? sessionArgv.id },
+        ...(intent.firstPrompt === undefined ? {} : { firstPrompt: "accepted" }),
+      });
+    } finally {
+      pin.release();
+    }
   }
 
   // ------------------------------------------------------------- POST /api/headless/prefs (default-model §3 ④)
@@ -861,6 +1331,13 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     }
     if (path === "/api/headless/dirs") {
       if (method === "GET") return handleDirs(req, res, query, io);
+      io.sendError(res, 404, "E_NOT_FOUND");
+      return;
+    }
+    // session-history plan §3.6/§5: `historyOn` gate keeps this byte-identical to an unknown
+    // path (404) whenever history is off, missing, or `deps.history` was never injected.
+    if (path === "/api/headless/history") {
+      if (historyOn && method === "GET") return handleHistory(req, res, query, io);
       io.sendError(res, 404, "E_NOT_FOUND");
       return;
     }

@@ -328,6 +328,39 @@ describe("auditSpawn (web-hub-spawn plan §SP9, arch §6.6)", () => {
     expect(line["title"]).toBeUndefined();
   });
 
+  it("session-history plan §4.6.4: session/sessionLive/sessionKind/forkReason/proofGap are preserved; `code` carries the new memory-only values", () => {
+    const log = memLog();
+    auditSpawn(log, {
+      audit: "spawn",
+      phase: "request",
+      endpoint: "spawn",
+      spawnId: "s2",
+      session: "fork",
+      sessionLive: "open",
+      sessionKind: "main",
+      forkReason: "open",
+      proofGap: "unconnected-pi",
+    });
+    auditSpawn(log, { audit: "spawn", phase: "state", spawnId: "s2", code: "session-swapped" });
+    auditSpawn(log, { audit: "spawn", phase: "state", spawnId: "s2", code: "session-unexpected" });
+    expect(log.lines[0]!.data).toMatchObject({
+      session: "fork",
+      sessionLive: "open",
+      sessionKind: "main",
+      forkReason: "open",
+      proofGap: "unconnected-pi",
+    });
+    expect((log.lines[1]!.data as Record<string, unknown>)["code"]).toBe("session-swapped");
+    expect((log.lines[2]!.data as Record<string, unknown>)["code"]).toBe("session-unexpected");
+    // never a sessionId/sessionFile/key/title leak alongside them
+    for (const line of log.lines) {
+      const data = line.data as Record<string, unknown>;
+      expect(data["sessionId"]).toBeUndefined();
+      expect(data["sessionFile"]).toBeUndefined();
+      expect(data["key"]).toBeUndefined();
+    }
+  });
+
   it("SPAWN_AUDIT_KEYS is exactly arch §6.6's field set — no text/stderr/title column exists", () => {
     expect(SPAWN_AUDIT_KEYS).toEqual([
       "phase",
@@ -359,6 +392,12 @@ describe("auditSpawn (web-hub-spawn plan §SP9, arch §6.6)", () => {
       "model",
       "from",
       "to",
+      // session-history plan §4.6.4
+      "session",
+      "sessionLive",
+      "sessionKind",
+      "forkReason",
+      "proofGap",
       // web-hub-spawn-restore plan §10.6
       "restore",
       "restoreFailure",

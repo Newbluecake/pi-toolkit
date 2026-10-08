@@ -93,6 +93,8 @@ export function toPublic(rec: InternalRecord, fpOf?: FirstPromptViewOf): SpawnRe
   // default-model plan D3: non-sensitive by design — public so SpawnRow can badge it and a
   // faithful retry can replay `rec.model ?? ""`.
   if (rec.model !== undefined) item.model = rec.model;
+  // session-history plan §4.6.4: how this record came to exist from the history surface.
+  if (rec.from !== undefined) item.from = rec.from;
   if (rec.state === "live" && rec.control !== undefined) item.control = rec.control;
   const endReason: SpawnEndReason | null | undefined = rec.endReason;
   if (endReason !== undefined && endReason !== null) item.endReason = endReason;
@@ -150,6 +152,7 @@ export function toViewer(
     cwdLabel: pub.cwdLabel,
     ...(pub.pid !== undefined ? { pid: pub.pid } : {}),
     ...(pub.model !== undefined ? { model: pub.model } : {}),
+    ...(pub.from !== undefined ? { from: pub.from } : {}),
     ...(pub.agentKey !== undefined ? { agentKey: pub.agentKey, linked: pub.linked } : {}),
     ...(pub.control !== undefined ? { control: pub.control } : {}),
     ...(pub.endReason !== undefined ? { endReason: pub.endReason } : {}),

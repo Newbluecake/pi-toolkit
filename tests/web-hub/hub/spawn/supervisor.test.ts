@@ -8,6 +8,9 @@
  */
 import { EventEmitter } from "node:events";
 import { type ChildProcess, type SpawnOptions, spawn as realSpawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentView, HubEvent } from "../../../../src/web-hub/hub/ports.js";
@@ -2497,6 +2500,359 @@ function savesOf(h: Harness, spawnId: string): StoredRecord[] {
     .map((c) => c.records?.find((r) => r.spawnId === spawnId))
     .filter((r): r is StoredRecord => r !== undefined);
 }
+
+// ---------------------------------------------------------------------------
+// session-history plan §4.6.3: session resume/fork argv, from/sessionTarget/sessionPathPin/
+// forkSnapshot runtime fields (never persisted), goLive's path-pin verify + unexpected-id
+// annotation, and the history-on restore re-fork capture preflight (v3.4 X1/X2).
+// ---------------------------------------------------------------------------
+
+const SESS_ABS = "/home/u/.pi/agent/sessions/--w-proj--/sess-old.jsonl";
+const SNAP_PATH = "/home/u/.pi/agent/web-hub/spawn/fork-src/snap-aaa.jsonl";
+
+function pathPin(abs = SESS_ABS) {
+  return {
+    abs,
+    root: { dev: 1, ino: 1 },
+    dir: { dev: 1, ino: 2 },
+    file: { dev: 1, ino: 3 },
+  };
+}
+
+/** Drive one started record through spawn+agent_up, then send a CUSTOM first `session` event
+ *  (the one `goLive` consumes while the record is still `starting`) — lets tests control
+ *  `sessionFile` precisely, unlike `driveToLive`'s fixed `sessionInfo()`. */
+async function driveToLiveWith(
+  h: Harness,
+  session: { sessionId: string; sessionFile?: string },
+  key = "k1000",
+  cwd = REALPATH,
+): Promise<FakeChild> {
+  const child = h.children[h.children.length - 1];
+  if (child === undefined) throw new Error("no child");
+  h.registry.seed(key, { pid: child.pid, cwd }, ["cmd.v1", "dialog.v1"]);
+  child.emit("spawn");
+  h.registry.publish({
+    type: "agent_up",
+    agent: {
+      agentKey: key,
+      kind: "rpc",
+      pid: child.pid,
+      cwd,
+      state: "live",
+      pluginVersion: "1.0.2",
+      outdated: false,
+      prompts: [],
+    },
+  });
+  h.registry.publish({
+    type: "session",
+    agentKey: key,
+    session: { ...session, reason: "new", leafId: null, mode: "rpc" as const },
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  return child;
+}
+
+describe("session-history plan §4.6.3: start() session argv + runtime fields", () => {
+  it("mode:resume — argv is ['--session', abs], no --model; sessionTarget/from/sessionPathPin set", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req({ session: { mode: "resume", abs: SESS_ABS, id: "sess-old", pathPin: pathPin() } });
+    const res = h.sup.start(r, deadline());
+    expect(res).toEqual({ ok: true, spawnId: r.spawnId });
+    expect(h.spawnCalls[0]?.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session", SESS_ABS]);
+    const rec = rec0(h)!;
+    expect(rec.sessionTarget).toEqual({ id: "sess-old", file: SESS_ABS });
+    expect(rec.from).toBe("history");
+    expect(rec.sessionPathPin).toEqual(pathPin());
+    expect(rec.model).toBeUndefined();
+  });
+
+  it("mode:fork — argv is ['--fork', snapshotPath, '--session-id', newId]; forkSnapshot/from set, no pathPin", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req({ session: { mode: "fork", abs: SNAP_PATH, id: "sess-old", newId: "new-id-123" } });
+    const res = h.sup.start(r, deadline());
+    expect(res).toEqual({ ok: true, spawnId: r.spawnId });
+    expect(h.spawnCalls[0]?.args).toEqual([
+      LAUNCHER[1],
+      "--mode",
+      "rpc",
+      "--fork",
+      SNAP_PATH,
+      "--session-id",
+      "new-id-123",
+    ]);
+    const rec = rec0(h)!;
+    expect(rec.sessionTarget).toEqual({ id: "new-id-123" });
+    expect(rec.from).toBe("fork");
+    expect(rec.forkSnapshot).toBe(SNAP_PATH);
+    expect(rec.sessionPathPin).toBeUndefined();
+  });
+
+  it("session + model together ⇒ rejected E_DIR model-with-session (defensive, routes.ts already guards)", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req({
+      session: { mode: "resume", abs: SESS_ABS, id: "sess-old" },
+      model: "anthropic/claude",
+    });
+    const res = h.sup.start(r, deadline());
+    expect(res).toEqual({ ok: false, code: "E_DIR", reason: "model-with-session" });
+  });
+
+  it("an invalid abs (no .jsonl suffix) ⇒ E_DIR session-invalid", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req({ session: { mode: "resume", abs: "/home/u/not-a-session", id: "sess-old" } });
+    const res = h.sup.start(r, deadline());
+    expect(res).toEqual({ ok: false, code: "E_DIR", reason: "session-invalid" });
+  });
+
+  it("fork with a malformed newId ⇒ E_DIR session-invalid", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req({ session: { mode: "fork", abs: SNAP_PATH, id: "sess-old", newId: "bad id with spaces" } });
+    const res = h.sup.start(r, deadline());
+    expect(res).toEqual({ ok: false, code: "E_DIR", reason: "session-invalid" });
+  });
+
+  it("toStored()/spawns.json NEVER carries from/sessionTarget/sessionPathPin/forkSnapshot", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req({ session: { mode: "resume", abs: SESS_ABS, id: "sess-old", pathPin: pathPin() } });
+    h.sup.start(r, deadline());
+    const saved = savesOf(h, r.spawnId).at(-1)!;
+    expect(saved).not.toHaveProperty("from");
+    expect(saved).not.toHaveProperty("sessionTarget");
+    expect(saved).not.toHaveProperty("sessionPathPin");
+    expect(saved).not.toHaveProperty("forkSnapshot");
+  });
+});
+
+describe("session-history plan §4.6.3: goLive path-pin verify + unexpected-id annotation", () => {
+  it("session-unexpected: reported sessionId !== sessionTarget.id ⇒ hintDetail + audit, still goes live", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    // no pathPin here on purpose — this test isolates step 1 (sessionTarget mismatch) from
+    // step 2 (path-pin verify), which is covered by its own tests below.
+    const r = req({ session: { mode: "resume", abs: SESS_ABS, id: "sess-old" } });
+    h.sup.start(r, deadline());
+    await driveToLiveWith(h, { sessionId: "some-other-id", sessionFile: SESS_ABS });
+    const rec = rec0(h)!;
+    expect(rec.state).toBe("live");
+    expect(rec.hintDetail).toBe("session-unexpected");
+    expect(h.audits.some((a) => a.code === "session-unexpected")).toBe(true);
+  });
+
+  it("verify succeeds → live, sessionPathPin cleared", async () => {
+    const h = makeHarness({
+      sessionPathPin: { capture: () => ({ ok: true, pin: pathPin() }), verify: () => ({ ok: true }) },
+    });
+    await h.sup.init(deadline());
+    const r = req({ session: { mode: "resume", abs: SESS_ABS, id: "sess-old", pathPin: pathPin() } });
+    h.sup.start(r, deadline());
+    await driveToLiveWith(h, { sessionId: "sess-old", sessionFile: SESS_ABS });
+    const rec = rec0(h)!;
+    expect(rec.state).toBe("live");
+    expect(rec.sessionPathPin).toBeUndefined();
+  });
+
+  it("verify FAILS → stopping{protocol_error} + hintDetail + audit code session-swapped; never adopted", async () => {
+    const h = makeHarness({
+      sessionPathPin: {
+        capture: () => ({ ok: true, pin: pathPin() }),
+        verify: () => ({ ok: false, detail: "dev/ino mismatch" }),
+      },
+    });
+    await h.sup.init(deadline());
+    const r = req({ session: { mode: "resume", abs: SESS_ABS, id: "sess-old", pathPin: pathPin() } });
+    h.sup.start(r, deadline());
+    await driveToLiveWith(h, { sessionId: "sess-old", sessionFile: "/some/swapped/path.jsonl" });
+    const rec = rec0(h)!;
+    expect(rec.state).toBe("stopping");
+    expect(rec.endReason).toBe("protocol_error");
+    expect(rec.hintDetail).toContain("session-swapped");
+    expect(h.audits.some((a) => a.code === "session-swapped")).toBe(true);
+    // never adopted as restore coordinates
+    expect(rec.sessionFile).toBeUndefined();
+  });
+
+  it("deps.sessionPathPin absent (history off) — no capture/verify ever runs for a plain record", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const r = req();
+    h.sup.start(r, deadline());
+    await driveToLive(h);
+    const rec = rec0(h)!;
+    expect(rec.state).toBe("live");
+    expect(rec.hintDetail).toBeUndefined();
+  });
+});
+
+describe("session-history plan §4.6.3: fork snapshot cleanup (goLive / finalizeTerminal)", () => {
+  it("goLive unlinks the fork snapshot and clears the field", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "pwh-forksnap-"));
+    const snapPath = join(tmpDir, "snap-1.jsonl");
+    writeFileSync(snapPath, '{"type":"session"}\n');
+    try {
+      const h = makeHarness();
+      await h.sup.init(deadline());
+      const r = req({ session: { mode: "fork", abs: snapPath, id: "sess-old", newId: "new-id-456" } });
+      h.sup.start(r, deadline());
+      expect(existsSync(snapPath)).toBe(true);
+      await driveToLiveWith(h, { sessionId: "new-id-456", sessionFile: snapPath });
+      expect(rec0(h)!.forkSnapshot).toBeUndefined();
+      expect(existsSync(snapPath)).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("finalizeTerminal unlinks the fork snapshot when the record dies before ever going live", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "pwh-forksnap-"));
+    const snapPath = join(tmpDir, "snap-2.jsonl");
+    writeFileSync(snapPath, '{"type":"session"}\n');
+    try {
+      const h = makeHarness();
+      await h.sup.init(deadline());
+      const r = req({ session: { mode: "fork", abs: snapPath, id: "sess-old", newId: "new-id-789" } });
+      h.sup.start(r, deadline());
+      const child = h.children[0]!;
+      child.emit("spawn");
+      child.emit("exit", 1, null);
+      expect(rec0(h)!.state).toBe("failed");
+      expect(existsSync(snapPath)).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("session-history plan §4.6.3: init() forkSrcDir sweep", () => {
+  it("sweeps up to FORK_SRC_SWEEP_MAX regular files, best-effort, bounded", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "pwh-forksweep-"));
+    try {
+      writeFileSync(join(tmpDir, "snap-a.jsonl"), "x");
+      writeFileSync(join(tmpDir, "snap-b.jsonl"), "x");
+      const subdir = join(tmpDir, "subdir");
+      mkdirSync(subdir);
+      const h = makeHarness({ forkSrcDir: tmpDir });
+      await h.sup.init(deadline());
+      expect(existsSync(join(tmpDir, "snap-a.jsonl"))).toBe(false);
+      expect(existsSync(join(tmpDir, "snap-b.jsonl"))).toBe(false);
+      expect(existsSync(subdir)).toBe(true); // not a regular file — left alone
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("forkSrcDir undefined — init() never touches the filesystem for it (no throw, no-op)", async () => {
+    const h = makeHarness();
+    await expect(h.sup.init(deadline())).resolves.toBeUndefined();
+  });
+
+  it("forkSrcDir pointing at a missing directory — init() degrades silently (no throw)", async () => {
+    const h = makeHarness({ forkSrcDir: "/nonexistent/pwh-forksweep-dir" });
+    await expect(h.sup.init(deadline())).resolves.toBeUndefined();
+  });
+});
+
+describe("session-history plan v3.4 X1/X2: restore re-fork session path capture", () => {
+  it("history on, tail '--session' ⇒ capture is called BEFORE attempts+1/intent saveNow; success sets rec.sessionPathPin", async () => {
+    const sessionPathPin = {
+      capture: (abs: string, uid: number) => ({ ok: true as const, pin: pathPin(abs) }),
+      verify: () => ({ ok: true as const }),
+    };
+    const captureCalls: Array<{ abs: string; uid: number }> = [];
+    const kit = restoreKit({
+      sessionPathPin: {
+        capture: (abs, uid) => {
+          captureCalls.push({ abs, uid });
+          return sessionPathPin.capture(abs, uid);
+        },
+        verify: sessionPathPin.verify,
+      },
+    });
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored()]);
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(captureCalls).toEqual([{ abs: SESS_FILE, uid: 1000 }]);
+    const rec = rec0(kit.h)!;
+    expect(rec.sessionPathPin).toEqual(pathPin(SESS_FILE));
+    expect(rec.restore?.attempts).toBe(1); // capture succeeded — the fork intent still went through
+  });
+
+  it("capture returns {ok:false} ⇒ failRestorePreflight('session-invalid'), forkInto never called, attempts NOT bumped", async () => {
+    const kit = restoreKit({
+      sessionPathPin: {
+        capture: () => ({ ok: false as const, detail: "not under R" }),
+        verify: () => ({ ok: true as const }),
+      },
+    });
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored()]);
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    const rec = rec0(kit.h)!;
+    expect(rec.state).toBe("failed");
+    expect(rec.restore?.failure).toBe("session-invalid");
+    expect(rec.restore?.attempts).toBe(0); // X2: capture failure never bumps attempts
+    expect(kit.h.spawnCalls).toHaveLength(0); // forkInto (and hence spawn) never ran
+    expect(kit.h.audits.some((a) => a.restore === "fail" && a.restoreFailure === "session-invalid")).toBe(true);
+  });
+
+  it("tail '--session-id' (no literal path) — capture/verify never called", async () => {
+    const captureCalls: number[] = [];
+    const kit = restoreKit({
+      sessionPathPin: {
+        capture: () => {
+          captureCalls.push(1);
+          return { ok: true as const, pin: pathPin() };
+        },
+        verify: () => ({ ok: true as const }),
+      },
+    });
+    // no sessionFile ⇒ planSessionArgv falls back to --session-id
+    loadInto(kit, [liveStored({ sessionFile: undefined })]);
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(captureCalls).toHaveLength(0);
+  });
+
+  it("deps.sessionPathPin absent (history off) — existing restore RS/HR behavior zero-changed (no capture attempted)", async () => {
+    const kit = restoreKit();
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored()]);
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    const rec = rec0(kit.h)!;
+    // the pre-existing restore path still runs through to a fork attempt
+    expect(rec.restore?.attempts).toBe(1);
+    expect(rec.sessionPathPin).toBeUndefined();
+  });
+
+  it("capture is NOT restricted to sessionsRoot (v3.4 X1): a custom sessionDir file still captures fine", async () => {
+    const customFile = "/opt/custom-session-dir/sess-old.jsonl";
+    const captureCalls: string[] = [];
+    const kit = restoreKit({
+      sessionPathPin: {
+        capture: (abs) => {
+          captureCalls.push(abs);
+          return { ok: true as const, pin: pathPin(abs) };
+        },
+        verify: () => ({ ok: true as const }),
+      },
+    });
+    loadInto(kit, [liveStored({ sessionFile: customFile })]);
+    kit.files.set(customFile, { head: sessHeader("sess-old", REALPATH) });
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(captureCalls).toEqual([customFile]);
+  });
+});
 
 describe("spawn restore RS3: session coordinates persistence + projections", () => {
   it("restore on: goLive persists sessionId/sessionFile with exactly ONE synchronous saveNow; sessionPersisted only when the file exists", async () => {

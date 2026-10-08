@@ -17,6 +17,7 @@ import { lanPostJson, lanRequest, seedLanUser, startLan, fakeClock, type LanHarn
 import { openSse } from "./helpers.js";
 import type { SseConn } from "./helpers.js";
 import { spawnKit } from "./spawn-kit.js";
+import { fakeHistory, fakeSessionPin } from "./spawn-kit.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { fakeDeps, login, makeTmp, postJson, rawRequest } from "./helpers.js";
 import type { SpawnPolicyWire } from "../../../src/web-hub/protocol/spawn.js";
@@ -356,5 +357,86 @@ describe("default-model prefs — global share (U1) and the second-authorize rac
     expect(res.status).toBe(401);
     expect(kit.prefs.setCalls).toHaveLength(0);
     expect(kit.prefs.get()).toBe("p1/old");
+  });
+});
+
+describe("LAN session-backed POST (session-history plan §4.6.6)", () => {
+  const SESSION_REF = { key: "dir/sess-old.jsonl", id: "sess-old", mode: "resume" as const };
+
+  it("lan:'known': GET /api/headless/history returns 200", async () => {
+    const history = fakeHistory();
+    const kit = spawnKit({ lan: "known", history: true }, fakeClock(), undefined, history);
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    history.setPageResult({
+      ok: true,
+      page: { items: [], stats: { files: 0, indexed: 0, enum: { complete: true, dirsDone: 0, dirsTotal: 0 } } },
+    });
+    const alice = await loginAs(h, "alice", 1);
+    const r = await lanRequest(h.port, { path: "/api/headless/history", headers: { Cookie: alice, "X-PWH": "1" } });
+    expect(r.status).toBe(200);
+  });
+
+  it("resume ⇒ 409 always (LAN confirm), confirm resent ⇒ 202", async () => {
+    const history = fakeHistory();
+    const pin = fakeSessionPin();
+    history.setResolveResult({ ok: true, pin });
+    const kit = spawnKit({ lan: "known", history: true }, fakeClock(), undefined, history);
+    kit.supervisor.setPolicy(policyFn(() => "known"));
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    const alice = await loginAs(h, "alice", 1);
+    const body = { id: "lanhist00aaaaaaaaaa", cwd: pin.cwd, session: SESSION_REF };
+    const first = await lanPostJson(h.port, "/api/headless", body, { Cookie: alice });
+    expect(first.status).toBe(409);
+    const confirmed = await lanPostJson(
+      h.port,
+      "/api/headless",
+      { ...body, confirm: true, expectCwd: pin.cwd },
+      { Cookie: alice },
+    );
+    expect(confirmed.status).toBe(202);
+  });
+
+  it("fork + confirm ⇒ one 202 round-trip", async () => {
+    const history = fakeHistory();
+    const pin = fakeSessionPin();
+    history.setResolveResult({ ok: true, pin });
+    const kit = spawnKit({ lan: "known", history: true }, fakeClock(), undefined, history);
+    kit.supervisor.setPolicy(policyFn(() => "known"));
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    const alice = await loginAs(h, "alice", 1);
+    const body = {
+      id: "lanhist01aaaaaaaaaa",
+      cwd: pin.cwd,
+      confirm: true,
+      expectCwd: pin.cwd,
+      session: { ...SESSION_REF, mode: "fork" as const },
+    };
+    const r = await lanPostJson(h.port, "/api/headless", body, { Cookie: alice });
+    expect(r.status).toBe(202);
+    expect(JSON.parse(r.body).session.mode).toBe("fork");
+  });
+
+  it("scope 'roots' on plain HTTP is capped to 'known' for the legacy path, but a session-backed admit never reaches the roots branch at all (sessionBacked skips the scan)", async () => {
+    const history = fakeHistory();
+    const pin = fakeSessionPin();
+    history.setResolveResult({ ok: true, pin });
+    const kit = spawnKit({ lan: "roots", history: true }, fakeClock(), undefined, history);
+    kit.supervisor.setPolicy(policyFn((via) => (via.viaTrustedProxy ? "roots" : "known")));
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    const alice = await loginAs(h, "alice", 1);
+    const body = {
+      id: "lanhist02aaaaaaaaaa",
+      cwd: pin.cwd,
+      confirm: true,
+      expectCwd: pin.cwd,
+      session: SESSION_REF,
+    };
+    const r = await lanPostJson(h.port, "/api/headless", body, { Cookie: alice });
+    expect(r.status).toBe(202);
+    expect(kit.dirs.admitCalls[0]?.sessionBacked).toBe(true);
   });
 });

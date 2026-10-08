@@ -284,6 +284,13 @@ export const SPAWN_AUDIT_KEYS = [
   "model",
   "from",
   "to",
+  // session-history plan §4.6.4: session-backed spawn/restore request+state lines (never
+  // sessionId/sessionFile/key/title/search text — those never reach a `SpawnAuditRecord` at all).
+  "session",
+  "sessionLive",
+  "sessionKind",
+  "forkReason",
+  "proofGap",
   // web-hub-spawn-restore plan §10.6 (never sessionId / sessionFile)
   "restore",
   "restoreFailure",
