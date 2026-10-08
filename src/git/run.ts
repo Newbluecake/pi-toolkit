@@ -6,6 +6,22 @@ export interface GitRunOptions {
   maxStdoutBytes: number;
   maxStderrBytes?: number;
   signal?: AbortSignal;
+  /**
+   * Env policy (worktree-diff plan §2.7). Default (and "inherit") keeps today's
+   * behavior byte-for-byte. "minimal" passes ONLY the allowlisted keys to the
+   * child; PATH is NOT defaulted here — the caller supplies the fixed constant
+   * (WTDIFF_GIT_PATH) via `pathOverride` so this module never imports diff.js.
+   */
+  envPolicy?: "inherit" | "minimal";
+  /** Only honored with envPolicy:"minimal": the fixed PATH for the child env. */
+  pathOverride?: string;
+  /**
+   * Three pinned directory fds mapped to child fds 3/4/5 (worktree, gitdir,
+   * commondir). Pinned mode forces cwd:"/" and GIT_COMMON_DIR=/proc/self/fd/5
+   * (overriding any inherited/host value) and REQUIRES the argv to start with
+   * PINNED_PREFIX — otherwise no process is spawned and spawnError is returned.
+   */
+  pins?: { wt: number; git: number; common: number };
 }
 
 export interface GitRunResult {
@@ -18,6 +34,36 @@ export interface GitRunResult {
 }
 
 export type GitRunner = (args: readonly string[], opts: GitRunOptions) => Promise<GitRunResult>;
+
+/**
+ * The pinned argv prefix (worktree-diff plan §1.8): every pinned-mode call must
+ * start with exactly these four arguments. Mirrored as WT_PINNED_PREFIX in
+ * ./diff.js (this module must not import it); tests pin both copies equal.
+ */
+export const PINNED_PREFIX: readonly string[] = [
+  "-C",
+  "/proc/self/fd/3",
+  "--git-dir=/proc/self/fd/4",
+  "--work-tree=/proc/self/fd/3",
+];
+
+function hasPinnedPrefix(args: readonly string[]): boolean {
+  return args.length >= PINNED_PREFIX.length && PINNED_PREFIX.every((expected, index) => args[index] === expected);
+}
+
+function buildMinimalEnv(pathOverride: string | undefined, pinned: boolean): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  if (pathOverride !== undefined) env.PATH = pathOverride;
+  if (process.env.HOME !== undefined) env.HOME = process.env.HOME;
+  if (process.env.XDG_CONFIG_HOME !== undefined) env.XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME;
+  env.LC_ALL = "C";
+  env.LANG = "C";
+  env.GIT_OPTIONAL_LOCKS = "0";
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_ATTR_NOSYSTEM = "1";
+  if (pinned) env.GIT_COMMON_DIR = "/proc/self/fd/5";
+  return env;
+}
 
 interface SpawnedProcess {
   pid?: number;
@@ -60,8 +106,18 @@ export function createGitRunner(deps: { gitBinary?: string; spawnImpl?: typeof s
   const binary = deps.gitBinary ?? "git";
   const spawnProcess: SpawnImpl = (deps.spawnImpl ?? spawn) as unknown as SpawnImpl;
 
-  return (args, opts) =>
-    new Promise<GitRunResult>((resolve) => {
+  return (args, opts) => {
+    if (opts.pins !== undefined && !hasPinnedPrefix(args)) {
+      // Pinned mode contract violation: refuse to spawn at all.
+      return Promise.resolve({
+        code: null,
+        stdout: "",
+        stdoutCapped: false,
+        stderr: "",
+        spawnError: "pinned git run requires the argv to start with PINNED_PREFIX",
+      });
+    }
+    return new Promise<GitRunResult>((resolve) => {
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       const stdoutSize = { value: 0 };
@@ -82,21 +138,27 @@ export function createGitRunner(deps: { gitBinary?: string; spawnImpl?: typeof s
 
       let child: SpawnedProcess;
       try {
-        const env = {
-          ...process.env,
-          GIT_OPTIONAL_LOCKS: "0",
-          GIT_TERMINAL_PROMPT: "0",
-          LC_ALL: "C",
-        };
+        const pins = opts.pins;
+        const pinned = pins !== undefined;
+        const env: NodeJS.ProcessEnv =
+          opts.envPolicy === "minimal"
+            ? buildMinimalEnv(opts.pathOverride, pinned)
+            : {
+                ...process.env,
+                GIT_OPTIONAL_LOCKS: "0",
+                GIT_TERMINAL_PROMPT: "0",
+                LC_ALL: "C",
+                ...(pinned ? { GIT_COMMON_DIR: "/proc/self/fd/5" } : {}),
+              };
         child = spawnProcess(
           binary,
           ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
           {
-            cwd: opts.cwd,
+            cwd: pinned ? "/" : opts.cwd,
             env,
             shell: false,
             detached: true,
-            stdio: ["ignore", "pipe", "pipe"],
+            stdio: pinned ? ["ignore", "pipe", "pipe", pins.wt, pins.git, pins.common] : ["ignore", "pipe", "pipe"],
           },
         );
       } catch (error) {
@@ -164,4 +226,5 @@ export function createGitRunner(deps: { gitBinary?: string; spawnImpl?: typeof s
         else opts.signal.addEventListener("abort", abortListener, { once: true });
       }
     });
+  };
 }
