@@ -48,6 +48,7 @@ import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import EmptyState from "../shell/EmptyState.vue";
 import DirPicker from "../spawn/DirPicker.vue";
 import NewSessionMenu from "../spawn/NewSessionMenu.vue";
+import SessionHistoryDialog from "../spawn/SessionHistoryDialog.vue";
 import SpawnRow from "../spawn/SpawnRow.vue";
 import AgentCard from "./AgentCard.vue";
 import RemoveButton from "./RemoveButton.vue";
@@ -164,6 +165,9 @@ const sessionActions = computed<readonly NewSessionAction[]>(() =>
   }),
 );
 const pickDirEnabled = computed(() => sessionActions.value.some((a) => a.kind === "pick-dir" && a.enabled));
+/** session-history plan §4.7.2 / arch §7.1: the EmptyState 「历史会话」 entry — the menu's
+ * `history` action must be present AND enabled (a denied policy keeps it menu-only-disabled). */
+const historyEnabled = computed(() => sessionActions.value.some((a) => a.kind === "history" && a.enabled));
 
 const newSessionNote = ref<{ kind: "ok" | "err" | "hint"; text: string } | null>(null);
 const newSessionBusy = ref(false);
@@ -257,6 +261,13 @@ function onMenuSelect(action: NewSessionAction): void {
     openPicker(false);
     return;
   }
+  if (action.kind === "history") {
+    // 「历史会话…」 (session-history plan §4.7.2) — disabled entries show the policy hint.
+    if (!action.enabled) return showSpawnHint();
+    pickerOpen.value = false; // one overlay at a time
+    historyOpen.value = true;
+    return;
+  }
   if (action.kind === "spawn-cwd") {
     if (!action.enabled) return showSpawnHint();
     openPicker(true);
@@ -267,9 +278,14 @@ function onMenuSelect(action: NewSessionAction): void {
 }
 
 function openPicker(focusSubmit: boolean): void {
+  historyOpen.value = false; // one overlay at a time
   pickerFocusSubmit.value = focusSubmit;
   pickerOpen.value = true;
 }
+
+// --- 「历史会话…」 (session-history plan §4.7.2): the dialog is Teleport'd like DirPicker —
+// mounted only while open, so its fetch engine/timers live exactly as long as the dialog.
+const historyOpen = ref(false);
 
 // --- pending spawn rows (SpawnRow; 「关闭」 is a local, memory-only dismiss — the hub keeps
 // terminal records until they roll off its retention, so re-snapshots re-show un-dismissed rows)
@@ -380,6 +396,7 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
       @close="pickerOpen = false"
       @done="pickerOpen = false"
     />
+    <SessionHistoryDialog v-if="historyOpen" :plaintext="plaintext" @close="historyOpen = false" />
     <ul v-if="spawnRows.length > 0" class="spawn-pending" :aria-label="t('spawn.pendingAria')">
       <li v-for="rec in spawnRows" :key="rec.spawnId">
         <SpawnRow :rec="rec" @dismiss="dismissSpawn(rec.spawnId)" />
@@ -393,9 +410,12 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
       :title="t('agents.emptyTitle')"
       :body="`${t('agents.emptyBodyLead')} webHub.enabled ${t('agents.emptyBodyTail')}`"
     >
-      <template v-if="pickDirEnabled" #actions>
-        <button class="btn spawn-empty-pick" type="button" @click="openPicker(false)">
+      <template v-if="pickDirEnabled || historyEnabled" #actions>
+        <button v-if="pickDirEnabled" class="btn spawn-empty-pick" type="button" @click="openPicker(false)">
           {{ t("spawn.itemPickDir") }}
+        </button>
+        <button v-if="historyEnabled" class="btn spawn-empty-pick" type="button" @click="historyOpen = true">
+          {{ t("history.emptyStateItem") }}
         </button>
       </template>
     </EmptyState>

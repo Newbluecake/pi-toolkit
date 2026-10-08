@@ -38,6 +38,7 @@ import {
 } from "@protocol/worktree-diff.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
+import { historyOutcomeFromResponse } from "./sessionHistory.ts";
 
 export const TOKEN_KEY = "pwh_token";
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -664,6 +665,33 @@ export function createClient(deps) {
       } catch (e) {
         const { status: _status, ...rest } = spawnFromError(e);
         return rest;
+      }
+    },
+    /**
+     * session-history plan §4.7.1: `GET /api/headless/history`. Querystring built from the
+     * frozen `HistoryQueryWire` (blank `q` omitted — §3.6 treats it as unset; `kind` only
+     * when `"all"`; `cursor`/`limit` only when present). A 200 body runs through
+     * `narrowHistoryPage` (structural narrowing — non-conforming items dropped, a missing
+     * `stats.enum` counts as complete); a non-object body maps to `E_BAD_RESPONSE`. A 409
+     * keeps its `reason` (`"cursor-expired"`) so the list reducer can auto-restart once.
+     * Rides `withRelogin` like the other GETs (side-effect free, replay safe). The narrowing
+     * helper lives in `./session-history.ts` (this file's `.js`→`.ts` specifier rule, same
+     * as `contract.js`'s `@protocol/http-contract.ts`).
+     * @param {{ q?: string, kind?: "main" | "all", cursor?: string, limit?: number }} q
+     * @returns {Promise<any>}
+     */
+    async history(q) {
+      const params = new URLSearchParams();
+      if (typeof q?.q === "string" && q.q.trim() !== "") params.set("q", q.q.trim());
+      if (q?.kind === "all") params.set("kind", "all");
+      if (typeof q?.cursor === "string" && q.cursor !== "") params.set("cursor", q.cursor);
+      if (typeof q?.limit === "number" && Number.isFinite(q.limit)) params.set("limit", String(q.limit));
+      const url = `${API.headless}/history${params.size > 0 ? `?${params.toString()}` : ""}`;
+      try {
+        const r = await withRelogin(() => request(url, { method: "GET", headers: { "X-PWH": "1" } }));
+        return await historyOutcomeFromResponse(r);
+      } catch (e) {
+        return { ok: false, error: spawnFromError(e).error, status: 0 };
       }
     },
   };

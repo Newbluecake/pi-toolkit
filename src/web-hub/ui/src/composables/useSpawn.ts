@@ -18,9 +18,11 @@
  */
 import { shallowRef, type Ref } from "vue";
 import type { SpawnPrefsWire, SpawnRequestBody } from "@protocol/spawn.js";
+import type { HistoryQueryWire } from "@protocol/session-history.js";
 import type {
   HubTransport,
   SpawnDirsOutcome,
+  SpawnHistoryOutcome,
   SpawnListOutcome,
   SpawnOutcome,
   SpawnPrefsOutcome,
@@ -33,6 +35,10 @@ export interface SpawnCallSurface {
   dirs(): Promise<SpawnDirsOutcome>;
   start(req: SpawnRequestBody): Promise<SpawnOutcome>;
   stop(spawnId: string, force?: boolean): Promise<SpawnStopOutcome>;
+  /** session-history plan §4.7.1: the history list call — `E_UNSUPPORTED` when the transport
+   * (or its spawn namespace) lacks `history`; the 「历史会话…」 entry needs the
+   * `spawn.history.v1` cap anyway, so the degrade only ever shows through a stale tab. */
+  history(q: HistoryQueryWire): Promise<SpawnHistoryOutcome>;
   readonly prefs: Readonly<Ref<SpawnPrefsWire | null>>;
   refreshPrefs(): Promise<SpawnListOutcome>;
   setDefaultModel(defaultModel: string): Promise<SpawnPrefsOutcome>;
@@ -43,6 +49,7 @@ const UNSUPPORTED_DIRS: SpawnDirsOutcome = { ok: false, error: "E_UNSUPPORTED", 
 const UNSUPPORTED_START: SpawnOutcome = { ok: false, error: "E_UNSUPPORTED", retryable: false };
 const UNSUPPORTED_STOP: SpawnStopOutcome = { ok: false, error: "E_UNSUPPORTED" };
 const UNSUPPORTED_PREFS: SpawnPrefsOutcome = { ok: false, error: "E_UNSUPPORTED", retryable: false };
+const UNSUPPORTED_HISTORY: SpawnHistoryOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
 
 export function createSpawn(transport: HubTransport): SpawnCallSurface {
   const spawn = transport.spawn;
@@ -56,6 +63,7 @@ export function createSpawn(transport: HubTransport): SpawnCallSurface {
       start: () => Promise.resolve(UNSUPPORTED_START),
       stop: () => Promise.resolve(UNSUPPORTED_STOP),
       setDefaultModel: () => Promise.resolve(UNSUPPORTED_PREFS),
+      history: () => Promise.resolve(UNSUPPORTED_HISTORY),
     };
   }
   const sp = spawn; // narrowed alias — hoisted function declarations don't keep the guard's narrowing
@@ -81,6 +89,9 @@ export function createSpawn(transport: HubTransport): SpawnCallSurface {
     start: (req) => sp.start(req),
     stop: (spawnId, force) => sp.stop(spawnId, force),
     setDefaultModel,
+    // session-history plan §4.7.1: a transport-level spawn namespace without `history`
+    // (test fakes) degrades to E_UNSUPPORTED — never a TypeError inside the dialog.
+    history: (q) => (sp.history === undefined ? Promise.resolve(UNSUPPORTED_HISTORY) : sp.history(q)),
   };
 }
 

@@ -13,7 +13,9 @@
         note. Everything renders through interpolation ⇒ textContent.
       · 「重试」— resolves the owner-only `cwd` from the same `list()` detail and resubmits via
         `useNewSession.submit({ cwd })` (a NEW id, §3.2 失败后重试); without owner visibility an
-        inline note explains why nothing happened.
+        inline note explains why nothing happened. session-history plan PD15: hidden on records
+        with `from` (history resume/fork) — `submit({cwd})` would spawn a FRESH session, not
+        retry the same file; a `from` badge + the `history.fromRetryHidden` hint replace it.
       · 「关闭」— emits `dismiss`; the parent drops the row from its local view (the hub keeps
         the terminal record until it rolls off `SPAWN_TERMINAL_KEEP`).
 -->
@@ -47,6 +49,8 @@ const hintLabel = computed(() => {
   return key !== undefined ? t(key) : hint;
 });
 const restoring = computed(() => isRestoring(props.rec));
+/** session-history plan PD15: a history-originated record — retry-as-fresh-cwd is hidden. */
+const fromOrigin = computed(() => (typeof props.rec.from === "string" ? props.rec.from : null));
 const stateLabel = computed(() =>
   props.rec.state === "failed"
     ? t("spawn.stateFailed")
@@ -190,6 +194,10 @@ async function onRetry(): Promise<void> {
       <!-- default-model plan F1 (D3): the effective fork model as an inline marker (English
            token in both languages, AGENTS.md UI-text split) -->
       <span v-if="rec.model" class="chip chip-mono" :title="rec.model" translate="no">{{ rec.model }}</span>
+      <!-- session-history plan PD15: the origin marker (English token: history | fork) -->
+      <span v-if="fromOrigin" class="chip chip-mono" :title="t('history.fromRetryHidden')" translate="no">{{
+        fromOrigin
+      }}</span>
       <RemoveButton
         v-if="removeTarget"
         :target="{ spawnId: removeTarget.spawnId }"
@@ -207,6 +215,7 @@ async function onRetry(): Promise<void> {
           {{ t("spawn.rowDetails") }}
         </button>
         <button
+          v-if="fromOrigin === null"
           class="btn btn-ghost btn-xs"
           type="button"
           :aria-label="t('spawn.rowRetryAria', { cwd: rec.cwdLabel })"
@@ -228,6 +237,7 @@ async function onRetry(): Promise<void> {
     <p v-if="restorePhaseLabel" class="spawn-row-hint" data-restore="phase">{{ restorePhaseLabel }}</p>
     <p v-if="restoreFailureLabel" class="spawn-row-hint" data-restore="failure">{{ restoreFailureLabel }}</p>
     <p v-if="hintLabel" class="spawn-row-hint">{{ hintLabel }}</p>
+    <p v-if="fromOrigin" class="spawn-row-hint">{{ t("history.fromRetryHidden") }}</p>
     <p v-if="retryDenied" class="spawn-row-hint">{{ t("spawn.rowOwnerOnly") }}</p>
     <template v-if="detailOpen">
       <p v-if="detailFailed" class="spawn-row-hint">{{ t("spawn.rowDetailError") }}</p>

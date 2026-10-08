@@ -1,0 +1,279 @@
+/*
+ * pi web-hub — session-history dialog (session-history plan §4.7 — P-ui, components/spawn/
+ * SessionHistoryDialog.vue + HistoryForkConfirm.vue). Depends on tokens.css + base.css +
+ * primitives.css (+ spawn.css's `.spawn-scrim`/`.spawn-confirm` shell, which the dialog
+ * reuses — only the history-specific layout lives here). All colours/sizes come from
+ * tokens.css; the scrim/z-index contract is spawn.css's, unchanged.
+ */
+
+.history-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: min(680px, calc(100vw - var(--sp-6)));
+  max-height: min(78vh, 720px);
+  padding: var(--sp-4);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+}
+
+.history-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.history-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.history-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+  cursor: pointer;
+  user-select: none;
+}
+
+.history-search {
+  display: flex;
+  flex: 1 1 220px;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 180px;
+}
+
+.history-search .input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- rows (listbox) */
+
+.history-list {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 120px;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: var(--sp-1);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+}
+
+.history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.history-row[aria-selected="true"] {
+  background: var(--c-surface-2);
+}
+
+.history-row.is-greyed {
+  color: var(--c-text-3);
+  cursor: default;
+}
+
+.history-row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.history-row-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.history-badge {
+  flex: none;
+  font-size: var(--fs-2xs);
+}
+
+/* occupancy badges get a distinct tint; the purely-descriptive ones stay neutral */
+.history-badge[data-badge="live"],
+.history-badge[data-badge="maybe"] {
+  border-color: var(--c-warning-border);
+}
+
+.history-row.is-greyed .history-badge[data-badge="gone"],
+.history-row.is-greyed .history-badge[data-badge="moved"],
+.history-row.is-greyed .history-badge[data-badge="no-access"],
+.history-row.is-greyed .history-badge[data-badge="not-dir"] {
+  opacity: 0.7;
+}
+
+.history-row-sub {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.history-row-cwd {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-row-time {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-row-blocked {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.history-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-left: auto;
+}
+
+.history-row-actions a.btn {
+  text-decoration: none;
+}
+
+.history-overflow {
+  position: relative;
+  display: inline-flex;
+}
+
+.history-overflow-dots {
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+
+.history-overflow-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  min-width: 180px;
+  padding: var(--sp-1);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+}
+
+.history-overflow-item {
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-overflow-item:hover {
+  background: var(--c-surface-2);
+}
+
+/* ---------------------------------------------------------------- status / notes / footer */
+
+.history-status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.history-session-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  font-size: var(--fs-xs);
+}
+
+.history-session-error-title {
+  font-weight: 600;
+}
+
+.history-empty {
+  margin: 0;
+  padding: var(--sp-4) var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+  text-align: center;
+}
+
+.history-foot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.history-foot-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 26px;
+}
+
+.history-note {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.history-banner {
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
+.history-besteffort {
+  margin: 0;
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  opacity: 0.9;
+}
+
+@media (max-width: 640px) {
+  .history-dialog {
+    width: calc(100vw - var(--sp-4));
+    max-height: 88vh;
+  }
+
+  .history-list {
+    max-height: 44vh;
+  }
+}

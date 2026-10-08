@@ -26,6 +26,7 @@ import type {
   SpawnPrefsOutcome,
   SpawnStopOutcome,
   SpawnTransport,
+  SpawnHistoryOutcome,
   UploadBeginOk,
   UploadChunkOk,
   UploadCommitOk,
@@ -149,6 +150,10 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // default-model plan F1 (§3 ④): POST /api/headless/prefs — one-shot like the rest (the
       // fetch wrapper's `isRestAuthEndpoint` covers `/api/headless*`, incl. `/prefs`).
       setPrefs: (defaultModel) => client.spawn.setPrefs(defaultModel) as Promise<SpawnPrefsOutcome>,
+      // session-history plan §4.7.1: GET /api/headless/history — one-shot like the rest (the
+      // fetch wrapper's `/api/headless` prefix rule covers `/history`; the shared suite in
+      // `transport-contract.test.ts` pins wire parity with the token adapter).
+      history: (q) => client.spawn.history(q) as Promise<SpawnHistoryOutcome>,
     } satisfies SpawnTransport,
     // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`.
     // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an

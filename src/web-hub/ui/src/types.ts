@@ -18,6 +18,7 @@
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
 import type { FleetRowWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
+import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
 import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
 import type { ConnState, PreviewTransport, WorktreeDiffTransport } from "./transport/types.js";
 import type {
@@ -458,7 +459,8 @@ export type NewSessionFailKind =
   | "gone"
   | "model" // default-model plan F1: hub-side 400 E_BAD_REQUEST{reason:"model-invalid"}
   | "spawn" // the record itself went failed/exited (hint/endReason carry the detail)
-  | "first-prompt"; // the session died before/while the first prompt could be delivered
+  | "first-prompt" // the session died before/while the first prompt could be delivered
+  | "session"; // session-history plan §4.7.1: a session-ref rejection (`code` carries the reason)
 
 export interface NewSessionInput {
   readonly cwd: string;
@@ -466,8 +468,14 @@ export interface NewSessionInput {
   /** default-model plan F1 (D2 tri-state): `provider/id` ⇒ use it; `""` ⇒ explicit pi default;
    * ABSENT ⇒ the hub preference resolves. `useNewSession` only ever puts it on the wire when
    * the hub advertises `spawn.model.v1` (the second cap guard — D4), so a caller may set it
-   * unconditionally. */
+   * unconditionally. A `session` ref DISABLES the model entirely (PD13 — the body never
+   * carries `model` then, whatever this field says). */
   readonly model?: string;
+  /** session-history plan §4.7.1: resume/fork a listed past session instead of spawning fresh.
+   * Sent ONLY while the hub advertises `spawn.history.v1` (PD14 — no cap ⇒ local failure,
+   * never a silently-dropped field); `mode:"fork"` goes out in ONE shot with
+   * `confirm:true, expectCwd:cwd` (PD17). */
+  readonly session?: { readonly key: string; readonly id: string; readonly mode?: "resume" | "fork" };
 }
 
 /** The flow's mirror of the record's `firstPrompt` slot (plan §3.2 首条消息结果 row). */
@@ -495,6 +503,12 @@ export type NewSessionFlow =
       /** The admitted realpath from 409 `E_CONFIRM_REQUIRED` — rendered via textContent, echoed back as `expectCwd`. */
       readonly resolvedCwd: string;
       readonly reason?: string;
+      /** session-history plan §3.6 (409 `{reason:"session-open"}`): why the hub insists on a
+       * fork + why it could not establish "no occupancy detected" — HistoryForkConfirm's copy
+       * inputs. Optional per the frozen-types convention; absent on the dir-flow 409s. */
+      readonly forkReason?: ForkReason;
+      readonly proofGap?: ProofGap;
+      readonly live?: HistoryLiveWire;
     }
   | {
       readonly phase: "awaiting";
@@ -561,6 +575,12 @@ export interface HubSpawnHandle extends SpawnTransport {
   /** `POST /api/headless/prefs` (`""` clears); on success `prefs` updates to the 200 echo.
    * Degrades to `E_UNSUPPORTED` on a transport without `setPrefs`. */
   setDefaultModel(defaultModel: string): Promise<SpawnPrefsOutcome>;
+  /** session-history plan §4.7.1 (PD14): may a `session` ref go on the wire at all — the
+   * CURRENT hub frame still advertises `spawn.history.v1`? `useNewSession` fails locally
+   * (never silently drops the field) while this is false. Optional per the frozen-types
+   * convention (component-level fakes may omit it); `useHub` always provides it — the
+   * orchestrator's `historyCap` dep reads the SAME hub frame, this is the surfaced twin. */
+  historyCap?(): boolean;
 }
 
 // ---------------------------------------------------------------------------

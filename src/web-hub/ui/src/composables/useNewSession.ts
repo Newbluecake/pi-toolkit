@@ -51,6 +51,11 @@ export interface NewSessionDeps<TTimer = ReturnType<typeof setTimeout>> {
    * advertised)? Absent/false ⇒ the field is silently dropped from the POST body — the caller
    * (SpawnRow retry, F2's DirPicker) may set `input.model` unconditionally. */
   modelCap?(): boolean;
+  /** session-history plan §4.7.1 (PD14): may a `session` ref go on the wire at all
+   * (`spawn.history.v1` advertised)? Absent/false ⇒ a session-bearing submit fails LOCALLY
+   * (`failed{kind:"session", code:"unsupported"}`) — the field is never silently dropped
+   * (an old hub's schema would 400, and dropping it would spawn a FRESH session). */
+  historyCap?(): boolean;
   /** Draft refill target (§3.2 首条消息结果 row). Absent ⇒ picker refill instead. */
   control?: ControlHandle | undefined;
   /** `live` navigation target (`#/agent/<key>` — useHub wires the route event / hash). */
@@ -141,19 +146,29 @@ export function createNewSession<TTimer = ReturnType<typeof setTimeout>>(
         input,
         resolvedCwd: outcome.resolvedCwd ?? input.cwd,
         ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+        // session-history plan §3.6: the 409 session-open body's occupancy detail rides the
+        // flow so HistoryForkConfirm can render the specific warning (useHub's transport
+        // keeps the fields; a pre-feature hub never sends them).
+        ...(outcome.forkReason !== undefined ? { forkReason: outcome.forkReason } : {}),
+        ...(outcome.proofGap !== undefined ? { proofGap: outcome.proofGap } : {}),
+        ...(outcome.live !== undefined ? { live: outcome.live } : {}),
       };
       return;
     }
     // Start failed: no record will ever deliver the first prompt — drop the retention and
     // surface the taxonomy (§3.2: 其他错误 ⇒ DirPicker 内显示，保留输入).
     texts.delete(reqId);
+    const kind = classifySpawnError(outcome) ?? "network";
     flow.value = {
       phase: "failed",
-      kind: classifySpawnError(outcome) ?? "network",
+      kind,
       reqId,
       input,
       ...(outcome.message !== undefined ? { message: outcome.message } : {}),
       ...(outcome.retryAfterS !== undefined ? { retryAfterS: outcome.retryAfterS } : {}),
+      // session-history plan §4.7.1: session-class rejections carry their wire reason as
+      // `code` (the dialog maps it to a `history.err*` line and refreshes the list).
+      ...(kind === "session" && outcome.reason !== undefined ? { code: outcome.reason } : {}),
     };
   }
 
@@ -313,13 +328,36 @@ export function createNewSession<TTimer = ReturnType<typeof setTimeout>>(
       const prev = flow.value;
       if ("reqId" in prev && typeof prev.reqId === "string") texts.delete(prev.reqId);
       const reqId = newId();
+      // session-history plan PD14: without the `spawn.history.v1` cap a session-bearing submit
+      // NEVER reaches the wire — dropping the field would silently spawn a fresh session, and
+      // an old hub's `additionalProperties:false` schema would reject the body outright.
+      if (input.session !== undefined && deps.historyCap?.() !== true) {
+        flow.value = { phase: "failed", kind: "session", code: "unsupported", reqId, input };
+        return true;
+      }
       remember(reqId, input);
       flow.value = { phase: "submitting", reqId, input };
+      const session = input.session;
       const body: SpawnRequestBody = {
         id: reqId,
         cwd: input.cwd,
-        ...(input.model !== undefined && deps.modelCap?.() === true ? { model: input.model } : {}),
+        ...(session !== undefined
+          ? {
+              session: {
+                key: session.key,
+                id: session.id,
+                ...(session.mode !== undefined ? { mode: session.mode } : {}),
+              },
+            }
+          : {}),
+        // PD13: a session-bearing body NEVER carries `model` (ANY value, "" included).
+        ...(session === undefined && input.model !== undefined && deps.modelCap?.() === true
+          ? { model: input.model }
+          : {}),
         ...(input.firstPrompt !== undefined ? { firstPrompt: input.firstPrompt } : {}),
+        // PD17: a user-chosen fork goes out in ONE shot — `confirm:true` + `expectCwd` up front,
+        // so the only confirmation is the local one (HistoryForkConfirm) the UI already showed.
+        ...(session?.mode === "fork" ? { confirm: true as const, expectCwd: input.cwd } : {}),
       };
       const outcome = await sendWithOneRetry(body);
       if (disposed) return true;
@@ -331,12 +369,21 @@ export function createNewSession<TTimer = ReturnType<typeof setTimeout>>(
       const cur = flow.value;
       if (cur.phase !== "confirming") return;
       flow.value = { phase: "submitting", reqId: cur.reqId, input: cur.input };
+      const session = cur.input.session;
+      // session-history plan §4.7.1: a session-open confirm switches the SAME id to
+      // `mode:"fork"` (the hub re-uses its resolve/pin work; a fork never needs another 409).
+      const mode = session !== undefined && cur.reason === "session-open" ? "fork" : session?.mode;
       const body: SpawnRequestBody = {
         id: cur.reqId, // 同一 id + confirm + expectCwd (§3.2 confirming row)
         cwd: cur.input.cwd,
         confirm: true,
         expectCwd: cur.resolvedCwd,
-        ...(cur.input.model !== undefined && deps.modelCap?.() === true ? { model: cur.input.model } : {}),
+        ...(session !== undefined
+          ? { session: { key: session.key, id: session.id, ...(mode !== undefined ? { mode } : {}) } }
+          : {}),
+        ...(session === undefined && cur.input.model !== undefined && deps.modelCap?.() === true
+          ? { model: cur.input.model }
+          : {}),
         ...(cur.input.firstPrompt !== undefined ? { firstPrompt: cur.input.firstPrompt } : {}),
       };
       const outcome = await sendWithOneRetry(body);

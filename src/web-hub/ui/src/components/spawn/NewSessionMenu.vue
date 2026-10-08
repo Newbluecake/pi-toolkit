@@ -43,13 +43,23 @@ const { t } = useI18n();
 const spawnCwd = computed(() => props.actions.find((a) => a.kind === "spawn-cwd"));
 const sameCwd = computed(() => props.actions.find((a) => a.kind === "same-cwd"));
 const pickDir = computed(() => props.actions.find((a) => a.kind === "pick-dir"));
+/** session-history plan §4.7.2 / arch §7.1: 「历史会话…」 — after pick-dir; only produced while
+ * the hub advertises `spawn.history.v1` and a `GET /api/headless` succeeded. */
+const history = computed(() => props.actions.find((a) => a.kind === "history"));
+const historyReason = computed(() => {
+  const a = history.value;
+  if (a === undefined || a.kind !== "history" || a.enabled || a.reason === undefined) return null;
+  return t(spawnDeniedKey(a.reason));
+});
 /** arch §8.3: a 404/unavailable pick-dir is hidden, not shown disabled. */
 const pickDirVisible = computed(() => {
   const a = pickDir.value;
   return a !== undefined && a.kind === "pick-dir" && a.reason !== "unavailable";
 });
-/** The dropdown renders while either item is renderable (same-cwd needs a selected agent). */
-const menuAvailable = computed(() => sameCwd.value !== undefined || pickDirVisible.value);
+/** The dropdown renders while any item is renderable (same-cwd needs a selected agent). */
+const menuAvailable = computed(
+  () => sameCwd.value !== undefined || pickDirVisible.value || history.value !== undefined,
+);
 
 const pickDirReason = computed(() => {
   const a = pickDir.value;
@@ -100,6 +110,7 @@ function onMainClick(): void {
 
 function onItemClick(action: NewSessionAction): void {
   if (action.kind === "pick-dir" && !action.enabled) return;
+  if (action.kind === "history" && !action.enabled) return;
   if (action.kind === "same-cwd" && (!action.enabled || props.busy === true)) return;
   closeMenu(false);
   emit("select", action);
@@ -190,6 +201,17 @@ onBeforeUnmount(() => {
       >
         <span>{{ t("spawn.itemPickDir") }}</span>
         <span v-if="pickDirReason" class="nsmenu-item-reason">{{ pickDirReason }}</span>
+      </button>
+      <button
+        v-if="history"
+        class="nsmenu-item"
+        type="button"
+        role="menuitem"
+        :disabled="!history.enabled"
+        @click="onItemClick(history)"
+      >
+        <span>{{ t("history.menuItem") }}</span>
+        <span v-if="historyReason" class="nsmenu-item-reason">{{ historyReason }}</span>
       </button>
     </div>
   </span>

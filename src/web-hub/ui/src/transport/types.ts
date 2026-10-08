@@ -12,6 +12,13 @@ import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type {
+  ForkReason,
+  HistoryLiveWire,
+  HistoryPage,
+  HistoryQueryWire,
+  ProofGap,
+} from "@protocol/session-history.js";
+import type {
   DirEntryWire,
   SpawnAccepted,
   SpawnPolicyWire,
@@ -169,6 +176,12 @@ export type SpawnOutcome =
       /** 409 `E_CONFIRM_REQUIRED` (arch §6.3): the admitted realpath to echo back as `expectCwd`. */
       readonly resolvedCwd?: string;
       readonly reason?: string;
+      /** session-history plan §3.6 (409 `E_CONFIRM_REQUIRED{reason:"session-open"}`): why the
+       * hub insists on a fork + why it could not establish "no occupancy detected". Riding
+       * the outcome (not just the flow) keeps `useNewSession`'s confirming phase lossless. */
+      readonly forkReason?: ForkReason;
+      readonly proofGap?: ProofGap;
+      readonly live?: HistoryLiveWire;
     };
 
 export type SpawnListOutcome =
@@ -215,6 +228,13 @@ export interface SpawnTransport {
   dirs(): Promise<SpawnDirsOutcome>;
   start(req: SpawnRequestBody): Promise<SpawnOutcome>;
   stop(spawnId: string, force?: boolean): Promise<SpawnStopOutcome>;
+  /** session-history plan §4.7.1: `GET /api/headless/history` (X-PWH). The logic clients
+   * structurally narrow the 200 body (non-conforming items dropped; a missing `stats.enum`
+   * counts as complete); a 409 keeps its `reason` (`"cursor-expired"`). Optional per the
+   * frozen-transport convention — `useSpawn` degrades a missing method to `E_UNSUPPORTED`
+   * and the 「历史会话…」 entry never renders without the `spawn.history.v1` cap anyway. Both
+   * real adapters always provide it. */
+  history?(q: HistoryQueryWire): Promise<SpawnHistoryOutcome>;
   /** default-model plan F1 (§3 ④): `POST /api/headless/prefs` — set (`provider/id`) or clear
    * (`""`) the hub-wide default model. Optional per the frozen-transport convention (test
    * fakes / a pre-feature transport may omit it — `createSpawn` degrades a missing method to
@@ -222,6 +242,13 @@ export interface SpawnTransport {
    * Both real adapters always provide it. */
   setPrefs?(defaultModel: string): Promise<SpawnPrefsOutcome>;
 }
+
+/** session-history plan §4.7.1's frozen outcome: a narrowed `HistoryPage`, or the wire error
+ * half (`status` 0 for client-local codes — the same convention as `SpawnPrefsOutcome`; a
+ * 409 keeps `reason:"cursor-expired"`, a 503 is the retryable "busy" state). */
+export type SpawnHistoryOutcome =
+  | { readonly ok: true; readonly page: HistoryPage }
+  | { readonly ok: false; readonly error: string; readonly status: number; readonly reason?: string };
 
 // ---------------------------------------------------------------------------
 // web-hub-delete-session plan v2 §4.1/§5.3 — the `POST /api/agents/remove` transport surface

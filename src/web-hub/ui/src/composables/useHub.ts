@@ -43,7 +43,7 @@ import { createSpawn } from "./useSpawn.js";
 import { createNewSession } from "./useNewSession.js";
 import { successorOf } from "@logic/spawn.js";
 import type { SpawnsPayload, SpawnPolicyWire } from "@protocol/spawn.js";
-import { SPAWN_MODEL_HUB_CAP } from "@protocol/version.js";
+import { SPAWN_MODEL_HUB_CAP, SPAWN_HISTORY_HUB_CAP } from "@protocol/version.js";
 import type { HubHandle, HubSpawnHandle, HubState } from "../types.js";
 
 /** Whatever `@logic/state.js`'s JSDoc `initialState()`/`reduce()` actually traffic in — kept
@@ -722,6 +722,15 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
   // ---------------------------------------------------------------------------
   const spawnBase = createSpawn(transport);
   let latestSpawnPolicy: SpawnPolicyWire | undefined;
+  /** The CURRENT hub frame's caps array (or undefined) — one reader for every cap guard below. */
+  function hubCaps(): unknown {
+    const h = raw.hub;
+    return h !== null && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+  }
+  function hasCap(cap: string): boolean {
+    const caps = hubCaps();
+    return Array.isArray(caps) && caps.includes(cap);
+  }
   const listWithPolicy = async (): Promise<SpawnListOutcome> => {
     const r = await spawnBase.list();
     if (r.ok) latestSpawnPolicy = r.policy;
@@ -733,11 +742,11 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // default-model plan F1 (D4): the second cap guard — `model` only reaches the wire while
     // the CURRENT hub frame still advertises `spawn.model.v1` (a hub downgrade mid-session
     // silently drops it instead of 400ing).
-    modelCap: () => {
-      const h = raw.hub;
-      const caps = h !== null && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
-      return Array.isArray(caps) && caps.includes(SPAWN_MODEL_HUB_CAP);
-    },
+    modelCap: () => hasCap(SPAWN_MODEL_HUB_CAP),
+    // session-history plan §4.7.1 (PD14): the `spawn.history.v1` guard — a session-bearing
+    // submit fails locally while the CURRENT hub frame lacks the cap (a hub downgrade
+    // mid-session must never see a `session` field its schema rejects).
+    historyCap: () => hasCap(SPAWN_HISTORY_HUB_CAP),
     control,
     navigate: (agentKey) => navigateTo(agentKey),
     now,
@@ -754,6 +763,8 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     stop: (spawnId, force) => spawnBase.stop(spawnId, force),
     prefs: spawnBase.prefs,
     setDefaultModel: (defaultModel) => spawnBase.setDefaultModel(defaultModel),
+    history: (q) => spawnBase.history(q),
+    historyCap: () => hasCap(SPAWN_HISTORY_HUB_CAP),
     newSession,
   };
 

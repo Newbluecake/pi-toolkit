@@ -55,6 +55,7 @@ import {
 } from "@protocol/worktree-diff.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
+import { historyOutcomeFromResponse } from "./sessionHistory.ts";
 
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
@@ -778,6 +779,29 @@ export function createPasswordClient(deps) {
       } catch (e) {
         const { status: _status, ...rest } = spawnFromError(e);
         return rest;
+      }
+    },
+    /**
+     * session-history plan §4.7.1: `GET /api/headless/history` — the SAME wire behavior as the
+     * token client's `spawn.history` (the shared `historyOutcomeFromResponse` helper does the
+     * narrowing + error mapping; `transport-contract.test.ts` pins the two identical). One-shot
+     * like the rest of this client's spawn surface: a 401 is reported by the
+     * `isRestAuthEndpoint` fetch wrapper (`/api/headless*` prefix covers `/history`), never here.
+     * @param {{ q?: string, kind?: "main" | "all", cursor?: string, limit?: number }} q
+     * @returns {Promise<any>}
+     */
+    async history(q) {
+      const params = new URLSearchParams();
+      if (typeof q?.q === "string" && q.q.trim() !== "") params.set("q", q.q.trim());
+      if (q?.kind === "all") params.set("kind", "all");
+      if (typeof q?.cursor === "string" && q.cursor !== "") params.set("cursor", q.cursor);
+      if (typeof q?.limit === "number" && Number.isFinite(q.limit)) params.set("limit", String(q.limit));
+      const url = `${API.headless}/history${params.size > 0 ? `?${params.toString()}` : ""}`;
+      try {
+        const r = await request(url, { method: "GET", headers: { "X-PWH": "1" } }, REQUEST_TIMEOUT_MS);
+        return await historyOutcomeFromResponse(r);
+      } catch (e) {
+        return { ok: false, error: spawnFromError(e).error, status: 0 };
       }
     },
   };

@@ -12,6 +12,7 @@ import {
   restoreFailureKey,
   restorePhaseKey,
   restoringKeys,
+  SESSION_REJECT_REASON_CODES,
   successorOf,
   spawnAvailability,
   spawnDeniedKey,
@@ -527,5 +528,100 @@ describe("spawn-restore helpers (plan §9.1)", () => {
     expect(zh["stateRestoring"]).toBe("restoring");
     expect(zh["badgeRestoring"]).toBe("restoring");
     expect(zh["badgeRestored"]).toBe("restored");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// session-history plan §4.7.1 — the `history` action + the "session" error bucket
+// ---------------------------------------------------------------------------
+
+describe("newSessionActions: the 「历史会话…」 entry (session-history plan §4.7.1 / arch §7.1)", () => {
+  const okList = { ok: true as const, policy: policy(), items: [] as readonly SpawnRecordPublic[] };
+  const HIST = "spawn.history.v1";
+
+  it("cap + successful list ⇒ enabled, appended after pick-dir", () => {
+    const actions = newSessionActions({ hubCaps: [SPAWN_HUB_CAP, HIST], listResult: okList, selected: {} });
+    expect(actions[actions.length - 1]).toEqual({ kind: "history", enabled: true });
+  });
+
+  it("no cap ⇒ the entry does not exist at all (hidden)", () => {
+    const actions = newSessionActions({ hubCaps: [SPAWN_HUB_CAP], listResult: okList, selected: {} });
+    expect(actions.some((a) => a.kind === "history")).toBe(false);
+  });
+
+  it("cap but no list yet / list error / 404 ⇒ hidden (arch §7.1: GET /api/headless 成功才出现)", () => {
+    expect(
+      newSessionActions({ hubCaps: [SPAWN_HUB_CAP, HIST], listResult: null, selected: {} }).some(
+        (a) => a.kind === "history",
+      ),
+    ).toBe(false);
+    expect(
+      newSessionActions({
+        hubCaps: [SPAWN_HUB_CAP, HIST],
+        listResult: { ok: false, error: "E_NETWORK", status: 0 },
+        selected: {},
+      }).some((a) => a.kind === "history"),
+    ).toBe(false);
+    expect(
+      newSessionActions({
+        hubCaps: [SPAWN_HUB_CAP, HIST],
+        listResult: { ok: false, error: "E_NOT_FOUND", status: 404 },
+        selected: {},
+      }).some((a) => a.kind === "history"),
+    ).toBe(false);
+  });
+
+  it("cap + a denied policy ⇒ disabled with the policy reason (rendered via spawnDeniedKey)", () => {
+    const denied = {
+      ok: true as const,
+      policy: policy({ allowed: false, reason: "cooldown" as const }),
+      items: [] as readonly SpawnRecordPublic[],
+    };
+    const actions = newSessionActions({ hubCaps: [SPAWN_HUB_CAP, HIST], listResult: denied, selected: {} });
+    expect(actions[actions.length - 1]).toEqual({ kind: "history", enabled: false, reason: "cooldown" });
+  });
+});
+
+describe("classifySpawnError: session-class reasons (session-history plan §4.7.1)", () => {
+  const reasons = [
+    ["session-ref", "E_BAD_REQUEST"],
+    ["model-with-session", "E_BAD_REQUEST"],
+    ["session-missing", "E_DIR"],
+    ["session-mismatch", "E_DIR"],
+    ["session-invalid", "E_DIR"],
+    ["session-too-large", "E_DIR"],
+    ["moved", "E_DIR"],
+    ["session-changed", "E_DIR"],
+  ] as const;
+
+  it.each([...reasons])('%s (on %s) ⇒ the "session" bucket', (reason, error) => {
+    expect(classifySpawnError({ ok: false, error, reason, retryable: false })).toBe("session");
+  });
+
+  it("the pin set matches the frozen SessionSpawnRejectReason union (protocol session-history.ts)", async () => {
+    const protocol = await import("../../../src/web-hub/protocol/session-history.js");
+    // every protocol reject reason except the ones that are NOT outcome.reason carriers here
+    expect(SESSION_REJECT_REASON_CODES).toEqual([
+      "session-ref",
+      "model-with-session",
+      "session-missing",
+      "session-mismatch",
+      "session-invalid",
+      "session-too-large",
+      "moved",
+      "session-changed",
+    ]);
+    expect(typeof protocol.isValidSessionKey).toBe("function");
+  });
+
+  it("non-session reasons keep their old buckets (no regression)", () => {
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: "model-invalid", retryable: false })).toBe(
+      "model",
+    );
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", reason: "spawn-gone", retryable: false })).toBe(
+      "gone",
+    );
+    expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", retryable: false })).toBe("dir");
+    expect(classifySpawnError({ ok: false, error: "E_DIR", retryable: false })).toBe("dir");
   });
 });

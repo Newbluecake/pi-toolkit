@@ -460,3 +460,140 @@ describe("default-model F1: the model field's second cap guard (D4)", () => {
     expect(h.starts[1]!.model).toBe("p/m");
   });
 });
+
+// ---------------------------------------------------------------------------
+// session-history plan §4.7.1 — the `session` ref branch (PD13/PD14/PD17, session-open
+// confirm, session-class rejections)
+// ---------------------------------------------------------------------------
+
+interface SessionHarness {
+  readonly ns: ReturnType<typeof createNewSession>;
+  readonly starts: SpawnRequestBody[];
+  setStartImpl(impl: (req: SpawnRequestBody) => Promise<SpawnOutcome>): void;
+  setHistoryCap(cap: boolean): void;
+}
+
+function makeSession(): SessionHarness {
+  const starts: SpawnRequestBody[] = [];
+  let idSeq = 0;
+  let historyCap = true;
+  const clock = fakeClock();
+  let startImpl: (req: SpawnRequestBody) => Promise<SpawnOutcome> = async () => ({
+    ok: true,
+    data: { spawnId: "sp1", state: "starting", cwd: "/real/proj" },
+  });
+  const ns = createNewSession({
+    start: (req) => {
+      starts.push(req);
+      return startImpl(req);
+    },
+    policy: () => policy,
+    historyCap: () => historyCap,
+    now: clock.now,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    newId: () => `req-${++idSeq}-aaaaaaaaaaaa`,
+  });
+  return {
+    ns,
+    starts,
+    setStartImpl: (impl) => (startImpl = impl),
+    setHistoryCap: (cap) => (historyCap = cap),
+  };
+}
+
+const sessionInput = (mode?: "resume" | "fork", model?: string): NewSessionInput => ({
+  cwd: "/home/u/proj",
+  ...(model !== undefined ? { model } : {}),
+  session: { key: "2026-10/a.jsonl", id: "sess-1111-2222", ...(mode !== undefined ? { mode } : {}) },
+});
+
+describe("useNewSession: session branch (session-history plan §4.7.1)", () => {
+  it("PD14: without the history cap a session submit fails LOCALLY — no request ever leaves", async () => {
+    const h = makeSession();
+    h.setHistoryCap(false);
+    await h.ns.submit(sessionInput("resume"));
+    expect(h.starts).toHaveLength(0);
+    const f = h.ns.flow.value;
+    expect(f).toMatchObject({ phase: "failed", kind: "session", code: "unsupported" });
+  });
+
+  it("PD13: a session body NEVER carries model (any value, '' included) — even with the model cap on", async () => {
+    const h = makeSession();
+    await h.ns.submit(sessionInput("resume", "p/m"));
+    expect(h.starts[0]).toMatchObject({
+      cwd: "/home/u/proj",
+      session: { key: "2026-10/a.jsonl", id: "sess-1111-2222", mode: "resume" },
+    });
+    expect("model" in (h.starts[0] as object)).toBe(false);
+    expect("confirm" in (h.starts[0] as object)).toBe(false);
+  });
+
+  it("PD17: mode:fork goes out in ONE shot with confirm:true + expectCwd:cwd", async () => {
+    const h = makeSession();
+    await h.ns.submit(sessionInput("fork"));
+    expect(h.starts[0]).toMatchObject({
+      session: { mode: "fork" },
+      confirm: true,
+      expectCwd: "/home/u/proj",
+    });
+  });
+
+  it("409 session-open: confirming carries forkReason/proofGap/live; confirm resends the SAME id as mode:fork", async () => {
+    const h = makeSession();
+    h.setStartImpl(async () => ({
+      ok: false,
+      error: "E_CONFIRM_REQUIRED",
+      retryable: false,
+      resolvedCwd: "/real/proj",
+      reason: "session-open",
+      forkReason: "open",
+      proofGap: undefined,
+      live: { state: "open", by: "card", agentKey: "k1" },
+    }));
+    await h.ns.submit(sessionInput("resume"));
+    const f = h.ns.flow.value;
+    expect(f).toMatchObject({
+      phase: "confirming",
+      reason: "session-open",
+      forkReason: "open",
+      live: { state: "open", by: "card", agentKey: "k1" },
+    });
+    h.setStartImpl(async () => ({ ok: true, data: { spawnId: "sp2", state: "starting", cwd: "/real/proj" } }));
+    await h.ns.confirm();
+    expect(h.starts).toHaveLength(2);
+    expect(h.starts[1]).toMatchObject({
+      id: h.starts[0]!.id,
+      confirm: true,
+      expectCwd: "/real/proj",
+      session: { key: "2026-10/a.jsonl", id: "sess-1111-2222", mode: "fork" },
+    });
+    expect("model" in (h.starts[1] as object)).toBe(false);
+    expect(h.ns.flow.value.phase).toBe("awaiting");
+  });
+
+  it("session-class rejections ⇒ failed{kind:session, code} for every SessionSpawnRejectReason + moved", async () => {
+    const reasons = [
+      "session-ref",
+      "model-with-session",
+      "session-missing",
+      "session-mismatch",
+      "session-invalid",
+      "session-too-large",
+      "moved",
+      "session-changed",
+    ] as const;
+    for (const reason of reasons) {
+      const h = makeSession();
+      const error =
+        reason === "session-changed"
+          ? "E_DIR"
+          : reason === "session-ref" || reason === "model-with-session"
+            ? "E_BAD_REQUEST"
+            : "E_DIR";
+      h.setStartImpl(async () => ({ ok: false, error, reason, retryable: false }));
+      await h.ns.submit(sessionInput("resume"));
+      expect(h.ns.flow.value, reason).toMatchObject({ phase: "failed", kind: "session", code: reason });
+    }
+  });
+});

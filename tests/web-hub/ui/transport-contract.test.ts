@@ -2124,3 +2124,116 @@ describe("password transport: worktreeDiff() 401 (one-shot — the cookie sessio
     expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// spawn.history() — session-history plan §4.7.1, same wire both modes
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: spawn.history() (session-history plan §4.7.1 — identical wire both modes)", (_mode, make) => {
+  const ITEM = {
+    key: "2026-10/a.jsonl",
+    id: "sess-1111-2222",
+    cwd: "/home/u/proj",
+    cwdLabel: "proj",
+    startedAt: "2026-10-01T00:00:00.000Z",
+    mtimeMs: 1234,
+    size: 10,
+    title: "Fix",
+    titleSource: "first",
+    kind: "main",
+    cwdState: "ok",
+    startable: true,
+    indexed: true,
+  };
+
+  it('GET /api/headless/history with X-PWH:"1"; q/kind/cursor/limit in the querystring (kind:"main" and a blank q are omitted)', async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/headless/history")
+        ? resp(200, {
+            items: [ITEM],
+            stats: { files: 1, indexed: 1, enum: { complete: true, dirsDone: 1, dirsTotal: 1 } },
+          })
+        : resp(200),
+    );
+    const r = await h.transport.spawn!.history!({ q: "  fix ", kind: "main", cursor: "v1.abcdefghijk.3", limit: 25 });
+    expect(r.ok).toBe(true);
+    const call = h.fetchCalls.find((c) => c.url.startsWith("/api/headless/history"))!;
+    expect(call.init.method ?? "GET").toBe("GET");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(call.url).toBe("/api/headless/history?q=fix&cursor=v1.abcdefghijk.3&limit=25");
+    if (r.ok) {
+      expect(r.page.items).toHaveLength(1);
+      expect(r.page.items[0]?.key).toBe("2026-10/a.jsonl");
+    }
+    // kind:"all" rides; a blank q does not
+    await h.transport.spawn!.history!({ q: "  ", kind: "all" });
+    expect(h.fetchCalls.at(-1)?.url).toBe("/api/headless/history?kind=all");
+    await h.transport.spawn!.history!({});
+    expect(h.fetchCalls.at(-1)?.url).toBe("/api/headless/history");
+  });
+
+  it("the 200 body is structurally narrowed: non-conforming items dropped, a missing stats.enum counts as complete", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/headless/history")
+        ? resp(200, {
+            items: [ITEM, { key: "d/broken.jsonl" }, null],
+            stats: { files: 3, indexed: 1 },
+            incomplete: true,
+            partial: { reason: "io" },
+            liveness: "partial",
+          })
+        : resp(200),
+    );
+    const r = await h.transport.spawn!.history!({});
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.page.items).toHaveLength(1);
+      expect(r.page.stats.enum).toEqual({ complete: true, dirsDone: 0, dirsTotal: 0 });
+      expect(r.page.partial).toEqual({ reason: "io" });
+      expect(r.page.liveness).toBe("partial");
+      expect(r.page.incomplete).toBe(true);
+    }
+  });
+
+  it("409 cursor-expired keeps its reason (the list reducer's auto-restart input)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/headless/history")
+        ? resp(409, { error: "E_BAD_REQUEST", reason: "cursor-expired" })
+        : resp(200),
+    );
+    const r = await h.transport.spawn!.history!({ cursor: "v1.zzzzzzzzzzz.9" });
+    expect(r).toEqual({ ok: false, error: "E_BAD_REQUEST", status: 409, reason: "cursor-expired" });
+  });
+
+  it("503 busy / 429 rate ride their status verbatim (busy is the UI's retryable state)", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/headless/history") ? resp(503, { error: "E_BUSY" }) : resp(200),
+    );
+    expect(await h.transport.spawn!.history!({})).toEqual({ ok: false, error: "E_BUSY", status: 503 });
+    const h2 = make(async (url) =>
+      url.startsWith("/api/headless/history") ? resp(429, { error: "E_RATE" }, { "Retry-After": "7" }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.history!({})).toEqual({ ok: false, error: "E_RATE", status: 429 });
+  });
+
+  it("a non-object 200 body maps to E_BAD_RESPONSE (status 200 kept)", async () => {
+    const h = make(async (url) => (url.startsWith("/api/headless/history") ? resp(200, "nope") : resp(200)));
+    expect(await h.transport.spawn!.history!({})).toEqual({ ok: false, error: "E_BAD_RESPONSE", status: 200 });
+  });
+
+  it("401: the final outcome is E_AUTH (token mode re-logged in once through withRelogin first)", async () => {
+    let calls = 0;
+    const h = make(async (url) => {
+      if (url.startsWith("/api/headless/history")) {
+        calls++;
+        return resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    const r = await h.transport.spawn!.history!({});
+    expect(r).toEqual({ ok: false, error: "E_AUTH", status: 401 });
+  });
+});

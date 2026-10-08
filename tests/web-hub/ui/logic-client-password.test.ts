@@ -603,3 +603,67 @@ describe("createPasswordClient: command()/dialog() (§7.2: one-shot postApi, 16s
     e.client.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// session-history plan §4.7.1: `client.spawn.history` — one-shot GET (no relogin dance in
+// password mode); the shared `historyOutcomeFromResponse` narrowing is pinned by the token
+// client's suite + transport-contract's shared history suite, so this asserts the
+// password-specific halves.
+// ---------------------------------------------------------------------------
+
+describe("createPasswordClient: spawn.history (session-history plan §4.7.1)", () => {
+  const PAGE = {
+    items: [],
+    stats: { files: 0, indexed: 0, enum: { complete: true, dirsDone: 0, dirsTotal: 0 } },
+  };
+
+  it("GET /api/headless/history with X-PWH:1, one-shot (exactly one fetch per call)", async () => {
+    let hist = 0;
+    const e = env({
+      fetch: async (url: string) => {
+        if (url.startsWith("/api/headless/history")) {
+          hist++;
+          return resp(200, PAGE);
+        }
+        return resp(200);
+      },
+    });
+    const r = await e.client.spawn.history({ q: "x" });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.page.items).toEqual([]);
+    expect(hist).toBe(1);
+    expect(e.calls[0]!.url).toBe("/api/headless/history?q=x");
+    expect(e.calls[0]!.init.headers).toMatchObject({ "X-PWH": "1" });
+  });
+
+  it("a 401 is one-shot: E_AUTH surfaces, no replay (the transport wrapper reports onConn)", async () => {
+    let hist = 0;
+    const e = env({
+      fetch: async (url: string) => {
+        if (url.startsWith("/api/headless/history")) {
+          hist++;
+          return resp(401, { error: "E_AUTH" });
+        }
+        return resp(200);
+      },
+    });
+    expect(await e.client.spawn.history({})).toEqual({ ok: false, error: "E_AUTH", status: 401 });
+    expect(hist).toBe(1);
+    expect(e.conns).not.toContain("auth"); // the CLIENT never fires it — the transport wrapper does
+  });
+
+  it("409 keeps `reason` (cursor-expired)", async () => {
+    const e = env({
+      fetch: async (url: string) =>
+        url.startsWith("/api/headless/history")
+          ? resp(409, { error: "E_BAD_REQUEST", reason: "cursor-expired" })
+          : resp(200),
+    });
+    expect(await e.client.spawn.history({})).toEqual({
+      ok: false,
+      error: "E_BAD_REQUEST",
+      status: 409,
+      reason: "cursor-expired",
+    });
+  });
+});

@@ -164,3 +164,38 @@ describe("SpawnRow.vue — restore (spawn-restore plan §9.1)", () => {
     expect(w2.find('[data-restore="failure"]').text()).toBe("future-code");
   });
 });
+
+// ---------------------------------------------------------------------------
+// session-history plan PD15: the `from` marker — retry hidden, hint + badge shown
+// ---------------------------------------------------------------------------
+
+describe("SpawnRow.vue — the from marker (session-history plan PD15)", () => {
+  it('a record with from:"history" shows the badge and the fromRetryHidden hint, and hides Retry', () => {
+    const f = fakeHub({ caps: ["spawn.v1"] });
+    const w = mountRow({ ...BASE_REC, from: "history" }, f);
+    const chips = w.findAll(".chip-mono");
+    expect(chips.map((c) => c.text())).toContain("history");
+    expect(w.text()).toContain("This session was opened from history");
+    const buttons = w.findAll("button").map((b) => b.text());
+    expect(buttons).not.toContain("Retry");
+    expect(buttons).toContain("Details"); // the other actions stay
+  });
+
+  it('from:"fork" hides retry too; a from-less record keeps it', () => {
+    const f = fakeHub({ caps: ["spawn.v1"] });
+    const forked = mountRow({ ...BASE_REC, from: "fork" }, f);
+    expect(forked.findAll("button").map((b) => b.text())).not.toContain("Retry");
+    expect(forked.findAll(".chip-mono").map((c) => c.text())).toContain("fork");
+    forked.unmount();
+    const plain = mountRow(BASE_REC, f);
+    expect(plain.findAll("button").map((b) => b.text())).toContain("Retry");
+    expect(plain.findAll(".chip-mono")).toHaveLength(0);
+  });
+
+  it("the hint renders for a starting record too (not only failed)", () => {
+    const f = fakeHub({ caps: ["spawn.v1"] });
+    const w = mountRow({ ...BASE_REC, state: "starting", from: "history" }, f);
+    expect(w.text()).toContain("This session was opened from history");
+    expect(w.findAll(".chip-mono").map((c) => c.text())).toContain("history");
+  });
+});

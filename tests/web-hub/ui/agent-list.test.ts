@@ -1119,3 +1119,80 @@ describe("AgentCard.vue restore badges (spawn-restore plan §9.1)", () => {
     expect(plain.find(".chip-restoring").exists()).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// session-history plan §4.7.2: the 「历史会话…」 entries — the NewSessionMenu item, the
+// EmptyState entry, and the mounted SessionHistoryDialog (with a scripted history call).
+// ---------------------------------------------------------------------------
+
+describe("AgentList.vue — history entries (session-history plan §4.7.2)", () => {
+  const HIST = "spawn.history.v1";
+
+  function hubWithHistory(opts: { caps?: readonly string[]; history?: () => Promise<unknown> } = {}) {
+    return hubWithSpawn({
+      caps: opts.caps ?? ["spawn.v1", HIST],
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    }) as HubHandle & {
+      spawn: HubSpawnHandle & {
+        history?: (q: unknown) => Promise<unknown>;
+        historyCap?: () => boolean;
+      };
+    };
+  }
+
+  it("cap + policy allowed ⇒ 「History sessions…」 in the dropdown; picking it mounts the dialog", async () => {
+    const hub = hubWithHistory();
+    (hub.spawn as { history?: unknown }).history = async () => ({
+      ok: true,
+      page: { items: [], stats: { files: 0, indexed: 0, enum: { complete: true, dirsDone: 0, dirsTotal: 0 } } },
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    await wrapper.get(".nsmenu-toggle").trigger("click");
+    const item = wrapper.findAll(".nsmenu-item").find((b) => b.text().includes("History sessions"));
+    expect(item).toBeDefined();
+    await item!.trigger("click");
+    await flushPromises();
+    // the Teleport'd dialog landed on <body> with its aria label
+    expect(document.body.querySelector('.history-dialog[role="dialog"]')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it("no history cap ⇒ no menu item, and the EmptyState shows no history entry", async () => {
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1"],
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    await wrapper.get(".nsmenu-toggle").trigger("click");
+    expect(wrapper.findAll(".nsmenu-item").some((b) => b.text().includes("History sessions"))).toBe(false);
+    expect(wrapper.findAll(".spawn-empty-pick").some((b) => b.text().includes("History sessions"))).toBe(false);
+  });
+
+  it("cap + allowed + 0 agents ⇒ the EmptyState carries BOTH entries (pick-dir + history)", async () => {
+    const hub = hubWithSpawn({
+      caps: ["spawn.v1", HIST],
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    const labels = wrapper.findAll(".spawn-empty-pick").map((b) => b.text().trim());
+    expect(labels).toContain("Choose a directory…");
+    expect(labels).toContain("History sessions");
+    // and the history button mounts the dialog too
+    await wrapper.findAll(".spawn-empty-pick")[1]!.trigger("click");
+    await flushPromises();
+    expect(document.body.querySelector(".history-dialog")).not.toBeNull();
+    wrapper.unmount();
+  });
+});

@@ -28,7 +28,7 @@
  * `@protocol/spawn.ts` itself is only ever referenced through JSDoc `import()` TYPES here —
  * it pulls typebox at runtime and this module doesn't need a single runtime value from it.
  */
-import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP } from "@protocol/version.ts";
+import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP, SPAWN_HISTORY_HUB_CAP } from "@protocol/version.ts";
 
 /**
  * @typedef {import("../../../protocol/spawn.js").SpawnPolicyWire} SpawnPolicyWire
@@ -55,7 +55,8 @@ import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP } from "@protocol/version.ts";
  * @typedef {{ kind: "spawn-cwd", agentKey: string, cwd: string, enabled: boolean,
  *   reason?: SpawnPolicyWire["reason"] | "unavailable" }
  *   | { kind: "same-cwd", agentKey: string, cwd: string, enabled: boolean }
- *   | { kind: "pick-dir", enabled: boolean, reason?: SpawnPolicyWire["reason"] | "unavailable" }} NewSessionAction
+ *   | { kind: "pick-dir", enabled: boolean, reason?: SpawnPolicyWire["reason"] | "unavailable" }
+ *   | { kind: "history", enabled: boolean, reason?: SpawnPolicyWire["reason"] }} NewSessionAction
  */
 
 /** `SpawnPolicyWire.reason` → its `spawn.denied*` i18n key (NewSessionMenu + AgentList hint). */
@@ -144,6 +145,7 @@ export function spawnAvailability({ hubCaps, listResult } = {}) {
 export function newSessionActions({ hubCaps, listResult, selected } = {}) {
   /** @type {NewSessionAction[]} */
   const out = [];
+  const caps = Array.isArray(hubCaps) ? hubCaps : [];
   const avail = spawnAvailability({ hubCaps, listResult });
   const spawnReason =
     avail.state === "denied" ? (avail.policy.reason !== undefined ? avail.policy.reason : undefined) : "unavailable";
@@ -177,6 +179,21 @@ export function newSessionActions({ hubCaps, listResult, selected } = {}) {
   } else {
     out.push({ kind: "pick-dir", enabled: false, reason: "unavailable" });
   }
+  // session-history plan §4.7.1 / arch §7.1: the 「历史会话…」 entry exists ONLY while the hub
+  // advertises `spawn.history.v1` AND a `GET /api/headless` succeeded — available ⇒ enabled,
+  // a denied policy ⇒ disabled with its reason (spawnDeniedKey, same as pick-dir); every
+  // other availability state (no-cap / not-found / error / unknown) HIDES it entirely.
+  if (caps.includes(SPAWN_HISTORY_HUB_CAP)) {
+    if (avail.state === "available") {
+      out.push({ kind: "history", enabled: true });
+    } else if (avail.state === "denied") {
+      out.push({
+        kind: "history",
+        enabled: false,
+        ...(avail.policy.reason !== undefined ? { reason: avail.policy.reason } : {}),
+      });
+    }
+  }
   return out;
 }
 
@@ -189,11 +206,32 @@ export function newSessionActions({ hubCaps, listResult, selected } = {}) {
  * importing `protocol/spawn.ts`'s `SPAWN_GONE_REASON` runtime value (that module pulls
  * typebox at runtime; this file stays typebox-free, same rationale as every other hardcoded
  * wire literal already here).
+ *
+ * session-history plan §4.7.1: the `SessionSpawnRejectReason` set (`session-*` + `moved`, on
+ * 400 `E_BAD_REQUEST`/`E_DIR` and 409 `E_DIR` alike) maps to the `"session"` bucket — the
+ * history dialog renders `failed{kind:"session", code}` with its own `history.err*` lines.
+ * Literals hand-copied for the same typebox-free reason (pinned by logic-spawn tests against
+ * the protocol union).
  * @param {any} outcome
- * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "deadline" | "network" | "gone" | "model" | undefined}
+ * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "deadline" | "network" | "gone" | "model" | "session" | undefined}
  */
+const SESSION_REJECT_REASONS = new Set([
+  "session-ref",
+  "model-with-session",
+  "session-missing",
+  "session-mismatch",
+  "session-invalid",
+  "session-too-large",
+  "moved",
+  "session-changed",
+]);
+
+/** Keys of {@link SESSION_REJECT_REASONS} (test anchor against protocol drift). */
+export const SESSION_REJECT_REASON_CODES = Object.freeze([...SESSION_REJECT_REASONS]);
+
 export function classifySpawnError(outcome) {
   if (!outcome || typeof outcome !== "object" || outcome.ok === true) return undefined;
+  if (typeof outcome.reason === "string" && SESSION_REJECT_REASONS.has(outcome.reason)) return "session";
   switch (outcome.error) {
     case "E_CONFIRM_REQUIRED":
       return "confirm";

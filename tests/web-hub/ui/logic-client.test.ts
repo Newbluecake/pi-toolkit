@@ -413,3 +413,82 @@ describe("createClient: command()/dialog() (§7.2: withRelogin + 16s budget, §3
     e.client.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// session-history plan §4.7.1: `client.spawn.history` — the wire-level halves the transport
+// contract suite pins end-to-end; these assert the CLIENT's own request shape + narrowing.
+// ---------------------------------------------------------------------------
+
+describe("createClient: spawn.history (session-history plan §4.7.1)", () => {
+  const PAGE = {
+    items: [
+      {
+        key: "2026-10/a.jsonl",
+        id: "sess-1111-2222",
+        cwd: "/p",
+        cwdLabel: "p",
+        startedAt: "2026-10-01T00:00:00.000Z",
+        mtimeMs: 1,
+        size: 2,
+        titleSource: "none",
+        kind: "main",
+        cwdState: "ok",
+        startable: true,
+        indexed: true,
+      },
+    ],
+    stats: { files: 1, indexed: 1, enum: { complete: true, dirsDone: 1, dirsTotal: 1 } },
+  };
+
+  it("GET /api/headless/history with X-PWH:1; a 200 page rides narrowed (bad items dropped, missing enum ⇒ complete)", async () => {
+    const e = env({
+      fetch: async (url: string) =>
+        url.startsWith("/api/headless/history")
+          ? resp(200, { items: [...PAGE.items, { key: "d/x.jsonl" }], stats: { files: 2, indexed: 1 } })
+          : resp(200),
+    });
+    const r = await e.client.spawn.history({ q: "fix", kind: "all" });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.page.items).toHaveLength(1);
+      expect(r.page.stats.enum.complete).toBe(true);
+    }
+    const call = e.calls.find((c) => c.url.startsWith("/api/headless/history"))!;
+    expect(call.init.headers).toMatchObject({ "X-PWH": "1" });
+    expect(call.url).toBe("/api/headless/history?q=fix&kind=all");
+  });
+
+  it("a 409 keeps `reason` (cursor-expired) — the list reducer's auto-restart input", async () => {
+    const e = env({
+      fetch: async (url: string) =>
+        url.startsWith("/api/headless/history")
+          ? resp(409, { error: "E_BAD_REQUEST", reason: "cursor-expired" })
+          : resp(200),
+    });
+    expect(await e.client.spawn.history({ cursor: "v1.abcdefghijk.1" })).toEqual({
+      ok: false,
+      error: "E_BAD_REQUEST",
+      status: 409,
+      reason: "cursor-expired",
+    });
+  });
+
+  it("a 401 retries once through withRelogin with the STORED token, then replays the history GET", async () => {
+    let hist = 0;
+    const e = env({
+      stored: "tok-1",
+      fetch: async (url: string) => {
+        if (url.startsWith("/api/headless/history")) {
+          hist++;
+          return hist === 1 ? resp(401, { error: "E_AUTH" }) : resp(200, PAGE);
+        }
+        if (url === "/api/login") return resp(200, { ok: true });
+        return resp(200);
+      },
+    });
+    const r = await e.client.spawn.history({});
+    expect(r.ok).toBe(true);
+    expect(hist).toBe(2);
+    expect(e.calls.filter((c) => c.url === "/api/login")).toHaveLength(1);
+  });
+});
