@@ -22,11 +22,20 @@
 
 .app {
   display: grid;
+  /* 三行对应恒定的三个网格子项：TopBar / .app-notices（三条横幅的包裹容器，空时 0 高）/
+   * DashboardView(.layout)。横幅不得直接作 .app 的网格项——它们条件渲染，缺省时 .layout
+   * 会掉进 auto 行，短会话的 composer 悬在半空（2026-10-08 现场）。 */
   grid-template-rows: auto auto 1fr;
   grid-template-columns: minmax(0, 1fr); /* never let nowrap content widen the page */
   height: 100vh; /* fallback */
   height: 100dvh; /* tracks the mobile address bar */
   overflow: hidden;
+}
+
+.app-notices {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .topbar {

@@ -254,9 +254,14 @@ onUnmounted(() => {
 
     <div v-if="showDashboard" class="app">
       <TopBar :conn="conn" :hub-version="hubVersion" :can-sign-out="authMode === 'password'" @signout="onSignOut" />
-      <HubStateBanner />
-      <ControlNotice v-if="controlOn" />
-      <NoticeStack :notices="globalNotices" @action="() => {}" />
+      <!-- 2026-10-08 布局修复：三条横幅（HubStateBanner/ControlNotice/NoticeStack）各自条件渲染，
+           直接作 .app 的网格项会让 .layout 在它们缺省时掉进 auto 行（auto auto 1fr 的 1fr 行空掉，
+           短会话的 composer 悬在半空）。包一层永远存在的容器，保证网格项恒为 3 个。 -->
+      <div class="app-notices">
+        <HubStateBanner />
+        <ControlNotice v-if="controlOn" />
+        <NoticeStack :notices="globalNotices" @action="() => {}" />
+      </div>
       <DashboardView :hub="hub!" :route="route!" />
     </div>
     <div v-else-if="booting" class="boot-splash" role="status">
