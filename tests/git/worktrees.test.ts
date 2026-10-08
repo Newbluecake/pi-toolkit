@@ -135,6 +135,6 @@ describe("worktree parsing", () => {
     expect(result.worktrees[0]?.probe?.untrackedSkipped).toBe(true);
     expect(result.worktrees[1]?.unprobed).toBe("cap");
     expect(result.worktrees[2]?.prunable).toBe(true);
-    expect(calls.some((args) => args.includes("no"))).toBe(true);
+    expect(calls.some((args) => args.includes("--untracked-files=no"))).toBe(true);
   });
 });

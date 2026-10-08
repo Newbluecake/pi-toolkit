@@ -188,7 +188,9 @@ export async function scanWorktrees(
       if (row === undefined) return;
       const useDegraded = opts.degraded?.has(await realpath(row.path).catch(() => row.path)) ?? false;
       const status = await run(
-        ["-C", row.path, "status", "--porcelain=v2", "--branch", "--untracked-files", useDegraded ? "no" : "normal"],
+        // `--untracked-files` takes an OPTIONAL argument, so git only binds it in the `=` form; the
+        // space-separated form turns the mode into a pathspec and the probe sees no changes at all.
+        ["-C", row.path, "status", "--porcelain=v2", "--branch", `--untracked-files=${useDegraded ? "no" : "normal"}`],
         { cwd: row.path, timeoutMs, maxStdoutBytes: 64 * 1024, signal: opts.signal },
       );
       if (status.killed === "abort" || opts.signal.aborted) return;
