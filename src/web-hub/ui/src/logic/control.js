@@ -76,30 +76,102 @@ export function parseSlash(text) {
 }
 
 /**
- * QueueList model (§7.2/§7.4): local optimistic items first, then the server-side queue mirror
+ * Queue list model (§7.2/§7.4): local optimistic items first, then the server-side queue mirror
  * (D6 — includes TUI-typed entries). The server mirror is authoritative: an optimistic item
  * whose cmdId already appears as a server entry's `cmdId` is dropped (it left the "已发出未确认"
  * phase), and anything named by `dropped` (status.queueDropped cmdIds) is filtered out — the
  * reducer has already transitioned those optimistic items to `dropped` state for the one-shot
  * notice (§7.3).
+ *
+ * steer-recall (web-hub-steer-recall plan §7, P-ui): the 4th/5th parameters add the held block.
+ * `held` is the accepted `status.held` snapshot (see `acceptHeld`); its rows render after the
+ * server queue as hold rows. Dedup rules: a snapshot row whose cmdId an optimistic item
+ * already tracks is dropped (the optimistic item keeps the FULL local text and is transitioned
+ * by the ctl slot); a `kind:"recall"` optimistic item NEVER renders as its own row — it joins
+ * onto its target instead (`sending` ⇒ the row shows `recalling`, `tooLate` ⇒ the "already
+ * delivered" look); `dismissed` (U-MERGE tombstones + local hides) suppresses rows outright.
+ * `holdEnabled === false` (no `hold.v1` on agent card or hub — old peers) drops the whole held
+ * block, so a no-cap hub renders byte-identically to the pre-feature UI.
+ *
  * @param {any[]} [serverQueue] @param {any[]} [optimistic] @param {string[]} [dropped]
+ * @param {any[]} [held] @param {{ holdEnabled?: boolean, rowMode?: "recallable" | "unavailable",
+ *   dismissed?: ReadonlySet<string> | readonly string[], sessionId?: string }} [opts]
  * @returns {any[]}
  */
-export function mergeQueue(serverQueue = [], optimistic = [], dropped = []) {
+export function mergeQueue(serverQueue = [], optimistic = [], dropped = [], held = [], opts = {}) {
   const droppedSet = new Set(dropped);
   const serverCmdIds = new Set();
   for (const q of serverQueue) {
     if (q && typeof q.cmdId === "string") serverCmdIds.add(q.cmdId);
   }
+  const o = opts && typeof opts === "object" ? opts : {};
+  const holdEnabled = o.holdEnabled !== false;
+  const rowMode = o.rowMode === "recallable" ? "recallable" : "unavailable";
+  const dismissedSet =
+    o.dismissed instanceof Set ? o.dismissed : Array.isArray(o.dismissed) ? new Set(o.dismissed) : undefined;
+  const scopeSessionId = typeof o.sessionId === "string" ? o.sessionId : undefined;
+  // Pass 1: recall-request items exist only to decorate their target row (never a row).
+  const recallStates = new Map();
+  for (const opt of optimistic) {
+    if (opt && opt.kind === "recall" && typeof opt.target === "string" && typeof opt.state === "string") {
+      recallStates.set(opt.target, opt.state);
+    }
+  }
+  /** A hold-family display state joined from a recall item, or the raw state. */
+  const joinRecall = (cmdId, raw) => {
+    const r = recallStates.get(cmdId);
+    if (r === "sending") return "recalling";
+    if (r === "tooLate") return "tooLate";
+    return raw;
+  };
   const out = [];
-  for (const o of optimistic) {
-    if (!o || typeof o.id !== "string") continue;
-    if (droppedSet.has(o.id) || serverCmdIds.has(o.id)) continue;
-    out.push(o);
+  const optimisticIds = new Set();
+  for (const opt of optimistic) {
+    if (!opt || typeof opt.id !== "string") continue;
+    optimisticIds.add(opt.id);
+    if (opt.kind === "recall") continue; // §7: a recall request never renders as its own row
+    if (droppedSet.has(opt.id) || serverCmdIds.has(opt.id)) continue;
+    if (opt.kind === "prompt" && HOLD_ROW_STATES.has(opt.state)) {
+      // Our own held/returned message: keep the FULL local text, join the recall state, and
+      // carry the row mode so QueueList renders the right affordances without re-deriving.
+      // Rendered even while `holdEnabled` is false (mode "unavailable", copy-only) — such an
+      // item can only exist if the cap disappeared AFTER it was held.
+      out.push({
+        ...opt,
+        state: joinRecall(opt.id, opt.state),
+        holdBase: opt.state === "returned" ? "returned" : "held",
+        mode: holdEnabled ? rowMode : "unavailable",
+      });
+      continue;
+    }
+    out.push(opt);
   }
   for (const q of serverQueue) {
     if (q && typeof q.cmdId === "string" && droppedSet.has(q.cmdId)) continue;
     out.push(q);
+  }
+  if (holdEnabled && Array.isArray(held)) {
+    for (const h of held) {
+      if (!h || typeof h !== "object" || typeof h.cmdId !== "string" || h.cmdId === "") continue;
+      if (optimisticIds.has(h.cmdId)) continue; // this tab's optimistic item already renders it
+      if (dismissedSet !== undefined && dismissedSet.has(h.cmdId)) continue;
+      const rawState = h.state === "returned" ? "returned" : "held";
+      out.push({
+        held: true,
+        id: h.cmdId,
+        cmdId: h.cmdId,
+        text: typeof h.text === "string" ? h.text : "",
+        deliver: h.deliver === "followUp" ? "followUp" : "steer",
+        state: joinRecall(h.cmdId, rawState),
+        holdBase: rawState,
+        ...(typeof h.reason === "string" ? { reason: h.reason } : {}),
+        sessionId: typeof h.sessionId === "string" ? h.sessionId : "",
+        at: typeof h.at === "number" ? h.at : 0,
+        mode: h.gone === true || rowMode === "unavailable" ? "unavailable" : "recallable",
+        ...(h.gone === true ? { gone: true } : {}),
+        ...(scopeSessionId !== undefined && h.sessionId !== scopeSessionId ? { prevSession: true } : {}),
+      });
+    }
   }
   return out;
 }
@@ -182,6 +254,32 @@ export function dialogComplete(questions, answers) {
 /** Terminal-ish states a later merge (ctl slot / queueDropped / late) must not resurrect. */
 const CLOSED_STATES = new Set(["failed", "notExecuted", "dropped"]);
 
+/** steer-recall (plan §7): the hold-family row states — a queue row in one of these renders as a
+ * hold row (recall/edit/copy affordances) instead of the legacy optimistic/mirror look.
+ * `recalling` and `tooLate` are display-only joins (a `kind:"recall"` pending item onto its
+ * target), never stored on a pending item. Exported so `QueueList.vue` and tests share one
+ * set instead of re-typing it. */
+export const HOLD_ROW_STATES = Object.freeze(new Set(["held", "returned", "recalling", "handed", "tooLate"]));
+
+/** steer-recall U-MERGE: ctl entry states that tombstone a cmdId — once seen locally, the row
+ * can never be resurrected by any later `status.held` snapshot. "dispatched 及之后的 handed
+ * 态" plus `recalled`/`returned`/`unconfirmed` (v4.2 R-C). Kept broad on purpose: cmdIds that
+ * were never held simply never appear in a snapshot, so their tombstones are inert. */
+export const HELD_TOMB_CTL_STATES = Object.freeze(
+  new Set([
+    "dispatched",
+    "observed",
+    "started",
+    "queued",
+    "consumed",
+    "unconfirmed",
+    "ok",
+    "late_ok",
+    "recalled",
+    "returned",
+  ]),
+);
+
 /** @param {PendingItem} item @param {Record<string, unknown>} patch @returns {PendingItem} */
 function patchItem(item, patch) {
   return { ...item, ...patch };
@@ -200,8 +298,25 @@ export function pendingTransition(item, event) {
       const o = event.outcome;
       if (o && o.ok === true) {
         const data = o.data && typeof o.data === "object" ? o.data : {};
+        if (item.kind === "recall") {
+          // steer-recall §7/S5: the recall request's own item — never a queue row (`mergeQueue`
+          // joins it onto its target). `recalled` ⇒ done; `too_late` ⇒ sticky display state the
+          // target row renders as "already delivered" + copy (Q5: never differentiated).
+          return data.outcome === "too_late" ? patchItem(item, { state: "tooLate" }) : null;
+        }
         if (item.kind === "prompt") {
           // §7.3: prompt ok ⇒ observed/unobserved; everything after that comes from the ctl slot.
+          // steer-recall §7: `delivery:"held"` ⇒ the agent buffered it (recallable). "held 不倒退"
+          // — once held/handed/tooLate, a later ok result never regresses it (a dup or queryOnly
+          // replay re-answers the ORIGINAL delivery; anything else is stale). Y8.1: a degraded
+          // native delivery answers observed/unobserved here and never creates a held row.
+          if (data.delivery === "held") {
+            return patchItem(item, {
+              state: "held",
+              ...(typeof data.behavior === "string" ? { behavior: data.behavior } : {}),
+            });
+          }
+          if (item.state === "held" || item.state === "handed" || item.state === "tooLate") return item;
           return patchItem(item, {
             state: data.delivery === "observed" ? "observed" : "unobserved",
             ...(typeof data.behavior === "string" ? { behavior: data.behavior } : {}),
@@ -315,6 +430,31 @@ export function pendingTransition(item, event) {
     case "ctl": {
       if (CLOSED_STATES.has(item.state)) return item;
       const e = event.entry && typeof event.entry === "object" ? event.entry : {};
+      // steer-recall §7: a stale ctl entry (updatedAt earlier than the last applied one) is
+      // dropped — an out-of-order/truncated slot must not roll a held row back.
+      if (typeof e.updatedAt === "number" && typeof item.ctlAt === "number" && e.updatedAt < item.ctlAt) {
+        return item;
+      }
+      const ctlAtPatch = typeof e.updatedAt === "number" ? { ctlAt: e.updatedAt } : {};
+      // steer-recall §5.4/§7 hold-family transitions: a held/returned item leaves the buffer by
+      // recall (row gone), by being handed to pi (⇒ "handed" — dispatched and every later
+      // pre-consumption state), or by a return-reason update.
+      if (e.state === "recalled") return null;
+      if (item.state === "held" || item.state === "returned") {
+        if (e.state === "returned") {
+          return patchItem(item, {
+            state: "returned",
+            ...(typeof e.reason === "string" ? { reason: e.reason } : {}),
+            ...ctlAtPatch,
+          });
+        }
+        if (
+          item.state === "held" &&
+          (e.state === "dispatched" || e.state === "observed" || e.state === "started" || e.state === "queued")
+        ) {
+          return patchItem(item, { state: "handed", ...ctlAtPatch });
+        }
+      }
       switch (e.state) {
         case "observed":
           return patchItem(item, {
@@ -450,4 +590,171 @@ export function outcomeFromError(err) {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg === "E_DEADLINE") return { ok: false, error: "E_DEADLINE", retryable: true, effect: "unknown" };
   return { ok: false, error: "E_NETWORK", message: msg, retryable: true, effect: "unknown" };
+}
+
+// ---------------------------------------------------------------------------
+// steer-recall hold rows (web-hub-steer-recall plan §7 / v4.3 Y2 — P-ui)
+// ---------------------------------------------------------------------------
+
+/**
+ * §7: is the hold surface available at all? The agent card must advertise `hold` (S3 — the
+ * agent's hello caps include `hold.v1`, i.e. steerRecall on AND a new build) AND the hub must
+ * advertise `hold.v1` (an old hub cannot route `POST /api/cmd {op:"recall"}` — requiredCaps
+ * rejects it with 409). Strictly false when the hub caps are unknown: the affordance only
+ * appears once the `hub` frame named the cap.
+ * @param {any} card @param {readonly unknown[] | undefined} [hubCaps]
+ * @returns {boolean}
+ */
+export function holdAvailable(card, hubCaps) {
+  if (!card || card.hold !== true) return false;
+  return Array.isArray(hubCaps) && hubCaps.includes("hold.v1");
+}
+
+/**
+ * §7 row-mode table: a held row is `recallable` only while EVERY input holds — browser SSE
+ * live, card live, hold available on both sides, and (v4.3 Y2) the accepted held snapshot's
+ * scope still current (its `heldEpoch` equals the card's CURRENT epoch — after an agent
+ * restart//reload the old rows are copy-only until a new-scope snapshot or a terminal ctl
+ * entry arrives). Anything else ⇒ `unavailable` (copy only — never recallable: an edit-resend
+ * from a stale scope could double-deliver).
+ * @param {{ hubLive?: boolean, cardLive?: boolean, holdAvailable?: boolean, scopeOk?: boolean }} opts
+ * @returns {"recallable" | "unavailable"}
+ */
+export function heldRowMode(opts) {
+  const o = opts && typeof opts === "object" ? opts : {};
+  return o.hubLive === true && o.cardLive === true && o.holdAvailable === true && o.scopeOk !== false
+    ? "recallable"
+    : "unavailable";
+}
+
+/**
+ * U-MERGE / Y2: the single merge point for a `status.held` snapshot. Returns the accepted
+ * `{rows, rev, epoch}`, or `undefined` when the snapshot must be IGNORED (the caller keeps the
+ * previous rows):
+ *  - `status.held` absent and nothing stored ⇒ nothing to do;
+ *  - malformed (`held` without a numeric `heldRev` / string `heldEpoch`) ⇒ keep previous;
+ *  - Y2 scope mismatch (`heldEpoch` ≠ the CURRENT card epoch — epochs are random, NEVER
+ *    compared, just rejected) ⇒ keep previous; the old rows stay and render copy-only until a
+ *    new-scope snapshot or a terminal arrives;
+ *  - same scope with a smaller `heldRev` (a stale replay) ⇒ keep previous.
+ *
+ * When `status.held` is absent but rows were stored, the snapshot is a CLEAR: `{rows: [], …}`
+ * comes back with the previous rev/epoch RETAINED (the agent's buffer rev is monotonic per
+ * process — keeping it prevents a late in-flight frame from resurrecting cleared rows).
+ *
+ * Same-scope accepts are a UNION, not a replace (plan §7/U-KEEP: a row disappears only via a
+ * tombstone or user action): snapshot rows are added/updated; a stored row the snapshot no
+ * longer names is KEPT with `gone: true` — Y2's ctl-truncation ruling renders it copy-only
+ * ("已离开暂存区", never shown recallable). A scope change (new epoch) replaces wholesale —
+ * old-scope rows never carry over, tombstones still apply.
+ *
+ * @param {{ rows: any[], rev?: number, epoch?: string } | undefined} prev — the previously
+ *   accepted snapshot (rows + their scope bookkeeping).
+ * @param {any} status — the incoming StatusInfo.
+ * @param {{ epoch?: string, sessionId?: string } | undefined} [scope] — the CURRENT card epoch
+ *   + session id (Y2 gate; `undefined` disables the gate for unit tests).
+ * @param {ReadonlySet<string> | undefined} [tombs] — U-MERGE tombstones.
+ * @returns {{ rows: any[], rev?: number, epoch?: string } | undefined}
+ */
+export function acceptHeld(prev, status, scope, tombs) {
+  const st = status !== null && typeof status === "object" ? status : {};
+  const held = Array.isArray(st.held) ? st.held : undefined;
+  const hadPrev = prev !== undefined && prev.rows !== undefined && prev.rows.length > 0;
+  const tombSet = tombs instanceof Set ? tombs : undefined;
+  if (held === undefined) {
+    if (!hadPrev) return undefined;
+    // Drained / feature off — clear the rows, keep rev+epoch for monotonicity.
+    return { rows: [], rev: prev.rev, epoch: prev.epoch };
+  }
+  const rev = st.heldRev;
+  const epoch = st.heldEpoch;
+  if (typeof rev !== "number" || typeof epoch !== "string") return undefined; // malformed
+  if (scope !== undefined && typeof scope.epoch === "string" && epoch !== scope.epoch) {
+    return undefined; // Y2: wrong scope — dropped WITHOUT comparing revs
+  }
+  if (
+    prev !== undefined &&
+    prev.epoch === epoch &&
+    typeof prev.rev === "number" &&
+    typeof rev === "number" &&
+    rev < prev.rev
+  ) {
+    return undefined; // stale same-scope replay
+  }
+  const valid = [];
+  for (const row of held) {
+    if (row === null || typeof row !== "object") continue;
+    if (typeof row.cmdId !== "string" || row.cmdId === "") continue;
+    if (row.state !== "held" && row.state !== "returned") continue;
+    if (typeof row.text !== "string") continue;
+    // Held rows are always the CURRENT session's (returned rows may carry an older session —
+    // rendered with a "previous session" marker); unknown scope fields pass (compat window).
+    if (
+      row.state === "held" &&
+      scope !== undefined &&
+      typeof scope.sessionId === "string" &&
+      row.sessionId !== scope.sessionId
+    ) {
+      continue;
+    }
+    if (tombSet !== undefined && tombSet.has(row.cmdId)) continue; // U-MERGE: never resurrect
+    valid.push(row);
+  }
+  if (prev === undefined || prev.epoch !== epoch) {
+    return { rows: valid, rev, epoch }; // new scope — wholesale replace
+  }
+  // Same scope — union: add/update; rows the snapshot dropped stay as `gone` (copy-only).
+  const fresh = new Map();
+  for (const r of valid) fresh.set(r.cmdId, r);
+  const rows = [];
+  for (const old of prev.rows !== undefined ? prev.rows : []) {
+    if (tombSet !== undefined && tombSet.has(old.cmdId)) continue;
+    const next = fresh.get(old.cmdId);
+    if (next !== undefined) {
+      rows.push(next);
+      fresh.delete(old.cmdId);
+    } else {
+      rows.push({ ...old, gone: true });
+    }
+  }
+  for (const r of fresh.values()) rows.push(r);
+  return { rows, rev, epoch };
+}
+
+/**
+ * §7 re-edit flow: join a recalled body AHEAD of the current composer draft, dropping blank
+ * parts (an empty draft never grows a stray blank line — same shape as pi TUI's
+ * `restoreQueuedMessagesToEditor`).
+ * @param {unknown} recalled @param {unknown} draft
+ * @returns {string}
+ */
+export function mergeRecalledDraft(recalled, draft) {
+  const parts = [recalled, draft]
+    .filter((s) => typeof s === "string" && s.trim() !== "")
+    .map((s) => /** @type {string} */ (s));
+  return parts.join("\n\n");
+}
+
+/** Mirror of the protocol's `RECALL_TEXT_MAX_BYTES` (48 KiB) — hand-copied rather than imported
+ * so the browser bundle never pulls `protocol/messages.ts`'s typebox runtime along. */
+const RECALL_TEXT_MAX_BYTES = 48 * 1024;
+
+/**
+ * §5.8/R4 re-validation of a recall result body before it reaches the composer: non-empty
+ * string within the 48 KiB byte cap (the hub already enforces it; the UI re-checks so a
+ * hand-crafted peer can't push an unbounded inject into the draft).
+ * @param {unknown} text
+ * @returns {boolean}
+ */
+export function validRecallText(text) {
+  if (typeof text !== "string" || text.length === 0) return false;
+  let bytes = text.length * 2; // UTF-16 pessimistic — never under-counts
+  if (typeof TextEncoder === "function") {
+    try {
+      bytes = new TextEncoder().encode(text).length;
+    } catch {
+      /* keep the pessimistic estimate */
+    }
+  }
+  return bytes <= RECALL_TEXT_MAX_BYTES;
 }

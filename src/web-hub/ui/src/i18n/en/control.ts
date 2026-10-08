@@ -55,6 +55,33 @@ const control = {
   stateUnconfirmed: "unconfirmed",
   stateUnobserved: "sent · unconfirmed",
   stateRunning: "running",
+
+  // --- steer recall (web-hub-steer-recall plan §7, P-ui) — state chips stay English tokens
+  // in both languages; notes/arias are prose. ---
+  stateHeld: "held",
+  stateRecalling: "recalling",
+  stateReturned: "returned",
+  stateHanded: "handed",
+  stateUnavailable: "unavailable",
+  recall: "Recall",
+  recallAria: "Recall this held message: {text}",
+  edit: "Edit",
+  editAria: "Recall and edit this returned message: {text}",
+  discardHeldAria: "Discard this returned message",
+  copyHeld: "Copy",
+  copyHeldAria: "Copy this message's text",
+  heldNote: "Held until the current turn ends — recall it to edit or cancel.",
+  handedNote: "Handed to the model — no longer recallable.",
+  tooLate: "Already delivered (or recalled in another tab) — copy the text if you still need it.",
+  returnedAborted: "Returned: the turn was aborted before delivery.",
+  returnedSession: "Returned: the session ended before delivery.",
+  returnedReload: "Returned: the extension reloaded before delivery.",
+  returnedStale: "Returned without delivery — edit and resend if you still want it.",
+  previousSession: "from a previous session",
+  recalledAnnounce: "Message recalled to the composer.",
+  holdUnavailable:
+    "Connection unavailable: cannot recall. If it is still held it becomes recallable again once the link returns; otherwise it is handed to the model or returned here.",
+
   retry: "Retry",
   retryAria: "Retry this item",
   discard: "Discard",

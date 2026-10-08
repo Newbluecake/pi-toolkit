@@ -28,7 +28,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref, watch } from "vue";
-import { commandPolicyFor, parseSlash } from "@logic/control.js";
+import { commandPolicyFor, parseSlash, validRecallText } from "@logic/control.js";
 import { mentionSendRoute } from "@logic/mention.js";
 import { clientImageBudget, previewScopeOf } from "@logic/preview.js";
 import {
@@ -47,6 +47,7 @@ import CommandResult from "../control/CommandResult.vue";
 import QueueList from "../control/QueueList.vue";
 import { CONTROL_ENV, CONTROL_VIEW } from "../control/controlContext.js";
 import { HUB_CTX } from "../control/controlContext.js";
+import { useClipboard, type ClipboardWindow } from "../../composables/useClipboard.js";
 
 const props = defineProps<DetailDockProps>();
 const emit = defineEmits<DetailDockEmits>();
@@ -236,8 +237,10 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
   // attachment-style block (≤ the shared 48 KiB prompt cap). Never blocks the send: no
   // scope/transport, no tokens, or any failed fetch (image/binary/too large/timeout) just
   // leaves the token as plain text — the path itself is model-readable — with a console note.
+  // steer-recall §7 (「onSend 传原文」): the RAW composer text rides as the cached original so
+  // recall/copy always give back what the user typed, never the inlined file dump.
   void expandFileRefs(text).then((expanded) => {
-    c.sendPrompt(key, expanded, deliver).catch(() => {});
+    c.sendPrompt(key, expanded, deliver, text).catch(() => {});
   });
 }
 
@@ -331,6 +334,104 @@ function onQueueDiscard(id: string): void {
   c.discard(key, id);
 }
 
+// --- steer recall (web-hub-steer-recall plan §7, P-ui) --------------------------------------
+
+/** The dock's own recall guard inputs — AgentDetail computes them once (hold.v1 on agent card
+ * AND hub caps + SSE live + card live + snapshot scope current) and passes them down as props;
+ * the dock re-checks at call time so a click racing a disconnect never sends. */
+const holdOn = computed(() => props.holdEnabled === true);
+const holdLive = computed(() => props.holdLink === "live");
+
+/** §8.3: the first verdict is final — the same target is backfilled into the composer exactly
+ * once, even if a hub-LRU dup replays the same ok result. */
+const appliedRecalls = new Set<string>();
+/** Locally hidden returned rows (§7 discard) — a plain Set + bumping version ref. */
+const dismissedHeld = new Set<string>();
+const dismissedVersion = ref(0);
+/** §7 re-edit flow: the recalled body the Composer watches (rev, not text, is the trigger). */
+const injectDraft = ref<{ text: string; rev: number }>({ text: "", rev: 0 });
+/** Live-region text for the recall announcement (§7: 撤回成功后焦点在 composer 并播报). */
+const recallAnnounce = ref("");
+const clipboard = useClipboard(window as unknown as ClipboardWindow);
+
+const visibleQueue = computed<readonly unknown[]>(() => {
+  void dismissedVersion.value;
+  const items = queueItems.value;
+  if (dismissedHeld.size === 0) return items;
+  return items.filter((raw) => {
+    const it = raw as Record<string, unknown>;
+    if (it == null) return true;
+    // both spellings: snapshot rows carry `cmdId`, optimistic items use `id` (= the same cmdId)
+    const rowId = typeof it["cmdId"] === "string" ? it["cmdId"] : typeof it["id"] === "string" ? it["id"] : null;
+    return !(rowId !== null && dismissedHeld.has(rowId));
+  });
+});
+
+function sessionId(): string {
+  const s = view?.agent.value.session as { sessionId?: unknown } | undefined;
+  return typeof s?.sessionId === "string" ? s.sessionId : "";
+}
+
+function findRow(id: string): Record<string, unknown> | undefined {
+  for (const raw of queueItems.value) {
+    const it = raw as Record<string, unknown>;
+    if (it != null && it["cmdId"] === id) return it;
+  }
+  return undefined;
+}
+
+/** §7: recall a held/returned row back into the composer — the ONLY entry into the re-edit
+ * flow, shared by the 撤回 (held) and 编辑 (returned) buttons (same wire op, S5 recalls
+ * returned rows too). Guards: hold live (SSE ∧ card ∧ caps ∧ scope) and handle support; a
+ * failed call leaves the row's state untouched (buttons re-enable); `too_late` is surfaced by
+ * the pendingCtl join (the row flips to the "already delivered" look with copy). */
+async function recallHeldRow(id: string): Promise<void> {
+  const c = handle();
+  const key = agentKey();
+  if (!c || key === null || c.recall === undefined || !holdOn.value || !holdLive.value) return;
+  if (appliedRecalls.has(id)) return;
+  const outcome = await c.recall(key, id).catch(() => undefined);
+  if (outcome === undefined || !outcome.ok) return;
+  const data = (outcome.data ?? {}) as { outcome?: unknown; text?: unknown };
+  if (data.outcome !== "recalled" || typeof data.text !== "string" || !validRecallText(data.text)) return;
+  appliedRecalls.add(id);
+  // the row vanishes NOW (the reducer tombstones the snapshot row; the ctl frame removes the
+  // optimistic item — this local hide covers the gap until it lands)
+  dismissedHeld.add(id);
+  dismissedVersion.value += 1;
+  injectDraft.value = { text: data.text, rev: injectDraft.value.rev + 1 };
+  recallAnnounce.value = t("control.recalledAnnounce");
+}
+
+function onQueueRecall(id: string): void {
+  void recallHeldRow(id);
+}
+
+function onQueueEdit(id: string): void {
+  void recallHeldRow(id);
+}
+
+function onQueueDiscardHeld(id: string): void {
+  // Local hide only — the agent-side returned row stays (visible again after a refresh).
+  dismissedHeld.add(id);
+  dismissedVersion.value += 1;
+}
+
+async function onQueueCopyHeld(id: string): Promise<void> {
+  const c = handle();
+  const key = agentKey();
+  if (!c || key === null) return;
+  // 本地原文优先（recall 结果/本标签页发送时缓存），否则退回 wire 的截断文本。
+  const local = c.originalText?.(key, sessionId(), id);
+  if (typeof local === "string" && local !== "") {
+    await clipboard.copy(local);
+    return;
+  }
+  const row = findRow(id);
+  const text = typeof row?.["text"] === "string" ? row["text"] : null;
+  if (text !== null && text !== "") await clipboard.copy(text);
+}
+
 onUnmounted(() => {
   if (waitPromptTimer !== undefined) clearTimeout(waitPromptTimer);
 });
@@ -338,7 +439,20 @@ onUnmounted(() => {
 
 <template>
   <div v-if="ctlEnabled" class="dock dock-ctl">
-    <QueueList :items="queueItems" @retry="onQueueRetry" @discard="onQueueDiscard" />
+    <!-- steer-recall §7: a persistent live region — the text swap itself announces (a v-if
+         mount would not, since the region must exist BEFORE the update for SRs to read it). -->
+    <span class="sr-only" role="status" aria-live="polite">{{ recallAnnounce }}</span>
+    <QueueList
+      :items="visibleQueue"
+      :hold-enabled="holdOn"
+      :hold-link="holdLive ? 'live' : 'unavailable'"
+      @retry="onQueueRetry"
+      @discard="onQueueDiscard"
+      @recall="onQueueRecall"
+      @edit="onQueueEdit"
+      @discard-held="onQueueDiscardHeld"
+      @copy-held="onQueueCopyHeld"
+    />
     <CommandResult
       v-if="cmdResult"
       :name="cmdResult.name"
@@ -359,7 +473,7 @@ onUnmounted(() => {
       @cancel="pendingConfirm = null"
     />
     <div class="dock-row">
-      <Composer :enabled="true" :busy="busy" @send="onSend" />
+      <Composer :enabled="true" :busy="busy" :inject-draft="injectDraft" @send="onSend" />
       <div class="dock-actions">
         <button
           v-if="!following && newCount > 0"

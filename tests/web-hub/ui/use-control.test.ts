@@ -247,6 +247,89 @@ describe("createControl (§7.3)", () => {
   });
 });
 
+describe("createControl: steer recall (web-hub-steer-recall plan §7, P-ui)", () => {
+  it("recall(): optimistic kind:recall item + wire {op:recall, target} WITHOUT expect; the full body is cached under the TARGET on success", async () => {
+    const h = harness({ getSessionId: () => "sess-1" });
+    const p = h.control.recall?.("A", "cmd-target-1");
+    await p;
+    expect(h.calls[0]!.req).toEqual({
+      agentKey: "A",
+      id: (h.calls[0]!.req as CmdRequest).id,
+      op: "recall",
+      target: "cmd-target-1",
+    });
+    expect((h.calls[0]!.req as CmdRequest).expect).toBeUndefined(); // identify-only (S5)
+    expect(h.dispatched[0]).toMatchObject({
+      event: "ctl_send",
+      data: { agentKey: "A", item: { kind: "recall", target: "cmd-target-1", state: "sending" } },
+    });
+    // the recall result text becomes the target's cached original:
+    expect(h.control.originalText?.("A", "sess-1", "cmd-target-1")).toBeUndefined(); // not yet — harness returns {ok:true,data:{}}
+  });
+
+  it("recall(): a recalled outcome's FULL text is cached under the target (copy never degrades to the 200-char clip)", async () => {
+    const calls: Call[] = [];
+    const transport: HubTransport = {
+      mode: "token",
+      start: async () => {},
+      close: () => {},
+      subscribe: async () => ({ ok: true }),
+      unsubscribe: async () => {},
+      page: async () => ({ ok: true, data: {} }),
+      command: async (req) => {
+        calls.push({ method: "command", req });
+        return {
+          ok: true,
+          data: { op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "the FULL typed body" },
+        };
+      },
+      dialog: async () => ({ ok: true }),
+    };
+    const control = createControl(transport, () => {}, { getSessionId: () => "sess-1" });
+    await control.recall?.("A", "cmd-target-2");
+    expect(control.originalText?.("A", "sess-1", "cmd-target-2")).toBe("the FULL typed body");
+  });
+
+  it("sendPrompt caches the full text under the minted cmdId; the 4th arg overrides it (onSend 传原文)", async () => {
+    const h = harness({ getSessionId: () => "sess-1" });
+    await h.control.sendPrompt("A", "expanded body", "steer");
+    const id1 = (h.calls[0]!.req as CmdRequest).id;
+    expect(h.control.originalText?.("A", "sess-1", id1)).toBe("expanded body");
+    // omitted 4th param is fine; an explicit original (raw pre-expansion text) wins:
+    await h.control.sendPrompt("A", "expanded body 2", "followUp", "@raw typed text");
+    const id2 = (h.calls[1]!.req as CmdRequest).id;
+    expect(h.control.originalText?.("A", "sess-1", id2)).toBe("@raw typed text");
+  });
+
+  it("originals are session-partitioned: a /new switch never leaks the previous session's texts", async () => {
+    let sid = "sess-1";
+    const h = harness({ getSessionId: () => sid });
+    await h.control.sendPrompt("A", "for session one", "steer");
+    const id = (h.calls[0]!.req as CmdRequest).id;
+    expect(h.control.originalText?.("A", "sess-1", id)).toBe("for session one");
+    sid = "sess-2";
+    expect(h.control.originalText?.("A", "sess-2", id)).toBeUndefined();
+    expect(h.control.originalText?.("A", "sess-1", id)).toBe("for session one");
+  });
+
+  it("the per-agent originals cache is FIFO-capped at 128 across sessions", async () => {
+    const h = harness({ getSessionId: () => "sess-1" });
+    for (let i = 0; i < 130; i++) await h.control.sendPrompt("A", `body ${i}`, "steer");
+    const ids = h.calls.map((c) => (c.req as CmdRequest).id);
+    expect(h.control.originalText?.("A", "sess-1", ids[0]!)).toBeUndefined(); // evicted
+    expect(h.control.originalText?.("A", "sess-1", ids[2]!)).toBe("body 2"); // the oldest survivor
+    expect(h.control.originalText?.("A", "sess-1", ids[129]!)).toBe("body 129");
+  });
+
+  it("forgetAgent drops the agent's whole originals partition", async () => {
+    const h = harness({ getSessionId: () => "sess-1" });
+    await h.control.sendPrompt("A", "keep me", "steer");
+    const id = (h.calls[0]!.req as CmdRequest).id;
+    h.control.forgetAgent?.("A");
+    expect(h.control.originalText?.("A", "sess-1", id)).toBeUndefined();
+  });
+});
+
 describe("createControl: uploads mount (web-hub-upload plan §6 U4b)", () => {
   const fakeUpload: UploadTransport = {
     begin: async (p) =>

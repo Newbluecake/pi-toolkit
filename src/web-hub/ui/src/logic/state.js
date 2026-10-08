@@ -42,6 +42,15 @@
  * Todo panel (todo-web plan §4, package T4): the optional `StatusInfo.todo` task-list summary
  * is mirrored off the status slot onto `AgentState.todo` (absent-means-cleared, same semantics
  * as the `queue` mirror) for the detail header's read-only TodoPanel.
+ *
+ * Steer recall (web-hub-steer-recall plan §7, P-ui): the agent-side hold snapshot rides the
+ * open `status` slot. `acceptHeld` (./control.js) is the single merge point — its output lands
+ * on `held`/`heldRev`/`heldEpoch` (Y2 scope = the card's CURRENT epoch; a mismatched snapshot
+ * is dropped without comparing revs, and after a card-epoch flip the stored rows stay and
+ * render copy-only until a new-scope snapshot or a terminal arrives). Terminal hold outcomes
+ * seen on the ctl slot — or a successful local recall — tombstone the cmdId in `heldTombs`
+ * (bounded FIFO): a tombstoned row can never be resurrected by any later snapshot (U-MERGE) and
+ * is dropped from `held` immediately.
  */
 
 /**
@@ -77,6 +86,8 @@
  *   pendingCtl: PendingCtlItem[], ctl?: any[] | undefined, commands?: any[] | undefined,
  *   runSel: string | null, runTx: RunTxState | null, fleetOmitted?: FleetOmitted | undefined,
  *   todo?: import("../../../protocol/messages.js").TodoWire | undefined,
+ *   held?: any[] | undefined, heldRev?: number | undefined, heldEpoch?: string | undefined,
+ *   heldTombs: Set<string>,
  * }} AgentState
  * @typedef {{
  *   clientId: string | null, hub: any, conn: string, lastEventId?: number,
@@ -90,7 +101,7 @@
  * }} State
  * @typedef {{ event: string, data: any, id?: number, at?: number }} Msg
  */
-import { pendingTransition } from "./control.js";
+import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition } from "./control.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
 
 /**
@@ -227,6 +238,38 @@ function todoFromStatus(status) {
 }
 
 /**
+ * steer-recall Y2: the merge scope a `status.held` snapshot must match to be accepted — the
+ * card's CURRENT epoch and the agent's current session id. Members are `undefined` when
+ * unknown (acceptHeld treats an unknown member as "no gate", the compat window).
+ * @param {AgentState} a @returns {{ epoch?: string, sessionId?: string }}
+ */
+function heldScopeOf(a) {
+  const epoch = a.card && typeof a.card === "object" ? a.card.epoch : undefined;
+  const sid = a.session && typeof a.session === "object" ? a.session.sessionId : undefined;
+  return {
+    ...(typeof epoch === "string" ? { epoch } : {}),
+    ...(typeof sid === "string" ? { sessionId: sid } : {}),
+  };
+}
+
+/** steer-recall U-MERGE: bounded FIFO tombstone set (a terminal hold outcome — handed/recalled/
+ * returned/… on the ctl slot, or a local recall success) — once in, a cmdId never renders as a
+ * hold row again, whatever any later snapshot says. Idempotent (same set back on a dup). */
+const HELD_TOMBS_CAP = 256;
+/** @param {Set<string>} set @param {string} cmdId @returns {Set<string>} */
+function addTomb(set, cmdId) {
+  if (set.has(cmdId)) return set;
+  const next = new Set(set);
+  next.add(cmdId);
+  while (next.size > HELD_TOMBS_CAP) {
+    const oldest = next.values().next().value;
+    if (oldest === undefined) break;
+    next.delete(oldest);
+  }
+  return next;
+}
+
+/**
  * @param {any} card
  * @returns {AgentState}
  */
@@ -263,6 +306,9 @@ function newAgent(card) {
     // announced its `commands` slot (fresh tab, reconnect, second tab) must not sit without a
     // command palette until a live `commands` SSE event happens to fire again.
     ...(Array.isArray(card.commands) ? { commands: card.commands } : {}),
+    // steer-recall §7: the accepted `status.held` snapshot stays undefined until the first
+    // in-scope frame lands; the tombstone set always exists (empty on pre-feature agents).
+    heldTombs: new Set(),
   };
 }
 
@@ -490,6 +536,23 @@ function reduceInner(s, event, d, at) {
             dropped.has(it.id) ? pendingTransition(it, { type: "dropped" }) : it,
           );
         }
+        // steer-recall §7 (U-MERGE/Y2): the agent-side held snapshot rides this same open slot.
+        // acceptHeld is the single merge point — scope-gated (Y2: current card epoch),
+        // rev-monotonic inside one scope, tombstone-filtered, and same-scope UNION (an absent
+        // non-tombstoned row stays, marked `gone` ⇒ the queue renders it copy-only — Y2's
+        // ctl-truncation ruling). `undefined` (wrong scope / stale / malformed) keeps the
+        // previous rows untouched.
+        const acc = acceptHeld(
+          a.held === undefined ? undefined : { rows: a.held, rev: a.heldRev, epoch: a.heldEpoch },
+          d.status,
+          heldScopeOf(a),
+          a.heldTombs,
+        );
+        if (acc !== undefined) {
+          next.held = acc.rows;
+          next.heldRev = acc.rev;
+          next.heldEpoch = acc.epoch;
+        }
         return next;
       });
     case "fleet":
@@ -592,7 +655,20 @@ function reduceInner(s, event, d, at) {
           const entry = byCmdId.get(it.id);
           return entry ? pendingTransition(it, { type: "ctl", entry }) : it;
         });
-        return { ...a, ctl: items, pendingCtl };
+        // steer-recall U-MERGE: a terminal hold outcome on the ctl slot (dispatched-and-later
+        // handed states / recalled / returned / unconfirmed) tombstones the cmdId — the row
+        // leaves `held` NOW and no later snapshot can bring it back (ctl truncation after a
+        // reconnect cannot un-tombstone what was already seen).
+        let tombs = a.heldTombs;
+        for (const e of items) {
+          if (e && typeof e.cmdId === "string" && HELD_TOMB_CTL_STATES.has(e.state)) {
+            tombs = addTomb(tombs, e.cmdId);
+          }
+        }
+        const tombsChanged = tombs !== a.heldTombs;
+        const held = tombsChanged && a.held !== undefined ? a.held.filter((r) => !tombs.has(r.cmdId)) : a.held;
+        if (!tombsChanged && pendingCtl === a.pendingCtl) return { ...a, ctl: items };
+        return { ...a, ctl: items, pendingCtl, heldTombs: tombs, held };
       });
     }
     case "commands":
@@ -762,10 +838,27 @@ function reduceInner(s, event, d, at) {
       // ./control.js's pure state machine so components and tests share one definition.
       if (!key || typeof d.id !== "string" || !d.transition || typeof d.transition !== "object") return s;
       return updateAgent(s, key, (a) => {
+        // steer-recall §7 (U-MERGE): a successful recall request tombstones its TARGET — the
+        // row must vanish immediately and never come back from any later snapshot replay
+        // (§8.3: first verdict is final; the UI's appliedRecalls also backfills only once).
+        const src = a.pendingCtl.find((it) => it.id === d.id && it.kind === "recall");
+        let tombs = a.heldTombs;
+        let held = a.held;
+        if (src !== undefined && typeof src.target === "string") {
+          const tr = d.transition;
+          const outcome = tr !== null && typeof tr === "object" ? tr.outcome : undefined;
+          const data =
+            outcome && outcome.ok === true && outcome.data && typeof outcome.data === "object" ? outcome.data : null;
+          if (data !== null && data.outcome === "recalled") {
+            tombs = addTomb(tombs, src.target);
+            if (held !== undefined) held = held.filter((r) => r.cmdId !== src.target);
+          }
+        }
         const pendingCtl = transitionPending(a.pendingCtl, (it) =>
           it.id === d.id ? pendingTransition(it, d.transition) : it,
         );
-        return pendingCtl === a.pendingCtl ? a : { ...a, pendingCtl };
+        if (tombs === a.heldTombs && pendingCtl === a.pendingCtl) return a;
+        return { ...a, pendingCtl, heldTombs: tombs, held };
       });
     }
     case "ctl_retry":

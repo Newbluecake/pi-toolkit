@@ -778,6 +778,112 @@ describe("state.reduce — control plane (§7.3/§7.7)", () => {
     expect(A(s).queue).toEqual([]);
   });
 
+  // steer-recall plan §7 / v4.3 Y2 (P-ui): the held snapshot rides the open status slot and
+  // lands on agent.held via acceptHeld — scope-gated by the card's CURRENT epoch, rev
+  // monotonic inside one scope, tombstones never resurrected.
+  const heldFrame = (rows: unknown[], heldRev: number, heldEpoch = "e1") =>
+    ({
+      event: "status",
+      data: {
+        agentKey: "A",
+        status: {
+          leafId: null,
+          busy: true,
+          pending: false,
+          held: rows,
+          heldRev,
+          heldEpoch,
+        },
+      },
+    }) as Msg;
+  const heldRow = (cmdId: string, over: Record<string, unknown> = {}) => ({
+    cmdId,
+    text: "body",
+    deliver: "steer",
+    state: "held",
+    sessionId: "s1",
+    at: 1,
+    ...over,
+  });
+
+  it("status frame: held/heldRev land on the agent; an older same-scope rev is dropped; an absent held clears (§7/Y2)", () => {
+    let s = base(); // agent A, card without an epoch yet ⇒ scope epoch unknown ⇒ frames accepted
+    s = reduce(s, heldFrame([heldRow("h1"), heldRow("h2")], 3));
+    expect(A(s).held).toHaveLength(2);
+    expect(A(s).heldRev).toBe(3);
+    expect(A(s).heldEpoch).toBe("e1");
+    // stale same-scope replay (smaller rev) — dropped wholesale:
+    s = reduce(s, heldFrame([heldRow("h1"), heldRow("h2"), heldRow("h3")], 2));
+    expect(A(s).held).toHaveLength(2);
+    expect(A(s).heldRev).toBe(3);
+    // 缺省时清空 — the agent's buffer drained (status.ts omits `held` when empty):
+    s = reduce(s, { event: "status", data: { agentKey: "A", status: { leafId: null, busy: false, pending: false } } });
+    expect(A(s).held).toEqual([]);
+    // …and the retained rev keeps a late in-flight stale frame from resurrecting them:
+    s = reduce(s, heldFrame([heldRow("h1")], 2));
+    expect(A(s).held).toEqual([]);
+  });
+
+  it("Y2 scope: the card epoch gates acceptance — a flip keeps the old rows until a new-epoch snapshot arrives (agent_up refreshes the epoch, Y7.2)", () => {
+    let s = run([
+      { event: "hello", data: { clientId: "c1" } },
+      { event: "agents", data: [card("A", { epoch: "e1" })] },
+      { event: "subscribing", data: { agentKey: "A", clientId: "c1" } },
+      { event: "subscribed", data: { agentKey: "A" } },
+    ]);
+    s = reduce(s, heldFrame([heldRow("h1")], 5, "e1"));
+    expect(A(s).held).toHaveLength(1);
+    // agent restart: the hub (Y7.2) emits agent_up BEFORE gap; the reducer's mergeCard path
+    // replaces the card ⇒ the epoch is the new one and the old-epoch snapshot below is refused.
+    s = reduce(s, { event: "agent_up", data: { agent: card("A", { epoch: "e2" }) } });
+    expect((A(s).card as { epoch?: string }).epoch).toBe("e2");
+    s = reduce(s, heldFrame([heldRow("h1"), heldRow("h9")], 9, "e1")); // stale scope, higher rev
+    expect(A(s).held).toHaveLength(1); // kept — replaced only by a same/new-scope frame
+    // the first e2 frame lands — wholesale replace (old-scope rows never carry over):
+    s = reduce(s, heldFrame([heldRow("n1")], 1, "e2"));
+    expect(A(s).held).toEqual([heldRow("n1")]);
+    expect(A(s).heldEpoch).toBe("e2");
+  });
+
+  it("ctl terminals tombstone hold rows (U-MERGE): the row leaves held NOW and never comes back; a successful local recall does the same", () => {
+    let s = base();
+    s = reduce(s, heldFrame([heldRow("h1"), heldRow("h2")], 1));
+    s = reduce(s, {
+      event: "ctl",
+      data: {
+        agentKey: "A",
+        items: [{ cmdId: "h1", op: "prompt", state: "dispatched", at: 1, updatedAt: 2 }],
+      },
+    });
+    expect(A(s).held.map((r: any) => r.cmdId)).toEqual(["h2"]);
+    expect(A(s).heldTombs.has("h1")).toBe(true);
+    // a later snapshot tries to resurrect it (e.g. a replayed slot) — refused:
+    s = reduce(s, heldFrame([heldRow("h1"), heldRow("h2")], 2));
+    expect(A(s).held.map((r: any) => r.cmdId)).toEqual(["h2"]);
+    // a local recall success tombstones its target the same way:
+    s = reduce(s, {
+      event: "ctl_send",
+      data: { agentKey: "A", item: { id: "r1", kind: "recall", target: "h2", state: "sending", at: 3 } },
+    });
+    s = reduce(s, {
+      event: "ctl_result",
+      data: {
+        agentKey: "A",
+        id: "r1",
+        transition: {
+          type: "result",
+          outcome: {
+            ok: true,
+            data: { op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "body" },
+          },
+        },
+      },
+    });
+    expect(A(s).held).toEqual([]);
+    expect(A(s).heldTombs.has("h2")).toBe(true);
+    expect(A(s).pendingCtl).toEqual([]); // the recall item itself is removed
+  });
+
   it("dialogs frame: slot overwrite; agents-frame cards carry dialogs too (§6.6)", () => {
     let s = reduce(initialState(), {
       event: "agents",

@@ -436,6 +436,295 @@ describe("pendingTransition (§7.7)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// steer-recall hold rows (web-hub-steer-recall plan §7 / v4.3 Y2 — P-ui)
+// ---------------------------------------------------------------------------
+
+import {
+  acceptHeld,
+  holdAvailable,
+  heldRowMode,
+  mergeRecalledDraft,
+  validRecallText,
+} from "../../../src/web-hub/ui/src/logic/control.js";
+
+describe("holdAvailable / heldRowMode (§7 truth tables)", () => {
+  const card = { agentKey: "A", hold: true };
+  const caps = ["cmd.v1", "hold.v1"];
+
+  it("holdAvailable: card.hold AND hub cap; strict false on unknown/missing caps", () => {
+    expect(holdAvailable(card, caps)).toBe(true);
+    expect(holdAvailable({ ...card, hold: undefined }, caps)).toBe(false);
+    expect(holdAvailable(card, ["cmd.v1"])).toBe(false); // old hub — recall would 409
+    expect(holdAvailable(card, undefined)).toBe(false); // hub frame not seen yet
+    expect(holdAvailable(card, "not-an-array")).toBe(false);
+    expect(holdAvailable(null, caps)).toBe(false);
+  });
+
+  it("heldRowMode: 4-cell (hubLive × cardLive) with the rest true; every input alone forces unavailable", () => {
+    const base = { holdAvailable: true, scopeOk: true };
+    expect(heldRowMode({ ...base, hubLive: true, cardLive: true })).toBe("recallable");
+    expect(heldRowMode({ ...base, hubLive: false, cardLive: true })).toBe("unavailable");
+    expect(heldRowMode({ ...base, hubLive: true, cardLive: false })).toBe("unavailable");
+    expect(heldRowMode({ ...base, hubLive: false, cardLive: false })).toBe("unavailable");
+    expect(heldRowMode({ hubLive: true, cardLive: true, holdAvailable: false, scopeOk: true })).toBe("unavailable");
+    // Y2: a scope-stale snapshot (card epoch flipped) is copy-only even while fully live.
+    expect(heldRowMode({ hubLive: true, cardLive: true, holdAvailable: true, scopeOk: false })).toBe("unavailable");
+    expect(heldRowMode(undefined)).toBe("unavailable");
+  });
+});
+
+describe("mergeQueue — held block (§7)", () => {
+  const heldRow = (over = {}) => ({
+    cmdId: "cmd-h1",
+    text: "clip",
+    deliver: "steer",
+    state: "held",
+    sessionId: "s1",
+    at: 1,
+    ...over,
+  });
+
+  it("legacy 3-arg signature is unchanged (no hold opts ⇒ no held block)", () => {
+    const server = [{ id: "q1", text: "t", deliver: "steer", source: "tui", at: 1 }];
+    expect(mergeQueue(server, [], [])).toEqual(server);
+    // explicit opts with holdEnabled:false drops held rows even when passed
+    expect(mergeQueue(server, [], [], [heldRow()], { holdEnabled: false })).toEqual(server);
+  });
+
+  it("hold rows render after the server queue carrying their mode; `gone` rows are forced unavailable (Y2)", () => {
+    const out = mergeQueue([], [], [], [heldRow(), heldRow({ cmdId: "cmd-h2", gone: true })], {
+      holdEnabled: true,
+      rowMode: "recallable",
+    });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({
+      held: true,
+      id: "cmd-h1",
+      cmdId: "cmd-h1",
+      state: "held",
+      mode: "recallable",
+      holdBase: "held",
+    });
+    expect(out[1]).toMatchObject({ cmdId: "cmd-h2", mode: "unavailable", gone: true });
+  });
+
+  it("dedupes by held cmdId against the optimistic item (this tab's row keeps the full text)", () => {
+    const optimistic = [{ id: "cmd-h1", kind: "prompt", text: "the full typed body", state: "held", at: 2 }];
+    const out = mergeQueue([], optimistic, [], [heldRow()], { holdEnabled: true, rowMode: "recallable" });
+    expect(out).toHaveLength(1);
+    expect(out[0].text).toBe("the full typed body");
+    expect(out[0].state).toBe("held");
+  });
+
+  it("a recall request never renders as its own row — it joins its target (recalling / tooLate)", () => {
+    const optimistic = [{ id: "cmd-r1", kind: "recall", target: "cmd-h1", state: "sending", at: 3 }];
+    let out = mergeQueue([], optimistic, [], [heldRow()], { holdEnabled: true, rowMode: "recallable" });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ cmdId: "cmd-h1", state: "recalling", holdBase: "held" });
+
+    const too = [{ id: "cmd-r1", kind: "recall", target: "cmd-h1", state: "tooLate", at: 3 }];
+    out = mergeQueue([], too, [], [heldRow()], { holdEnabled: true, rowMode: "recallable" });
+    expect(out[0].state).toBe("tooLate");
+
+    // a FAILED recall leaves the row exactly as it was (buttons re-enable)
+    const failed = [{ id: "cmd-r1", kind: "recall", target: "cmd-h1", state: "failed", at: 3 }];
+    out = mergeQueue([], failed, [], [heldRow()], { holdEnabled: true, rowMode: "recallable" });
+    expect(out[0].state).toBe("held");
+  });
+
+  it("dismissed (U-MERGE tombstones + local hides) suppress held rows; returned rows keep reason + prevSession", () => {
+    const out = mergeQueue(
+      [],
+      [],
+      [],
+      [
+        heldRow(),
+        heldRow({ cmdId: "cmd-gone" }),
+        heldRow({ cmdId: "cmd-ret", state: "returned", reason: "reload", sessionId: "s0" }),
+      ],
+      { holdEnabled: true, rowMode: "recallable", dismissed: new Set(["cmd-gone"]), sessionId: "s1" },
+    );
+    expect(out.map((r) => r.cmdId)).toEqual(["cmd-h1", "cmd-ret"]);
+    expect(out[1]).toMatchObject({ state: "returned", reason: "reload", holdBase: "returned", prevSession: true });
+  });
+});
+
+describe("pendingTransition — hold-family states (§7)", () => {
+  it("prompt ok delivery:held ⇒ state held (+behavior); never regresses afterwards", () => {
+    const held = pendingTransition(item(), { type: "result", outcome: ok({ delivery: "held", behavior: "steer" }) });
+    expect(held).toMatchObject({ state: "held", behavior: "steer" });
+    // Y8.1: a degraded NATIVE delivery answers observed — never a held row.
+    expect(pendingTransition(item(), { type: "result", outcome: ok({ delivery: "observed" }) })).toMatchObject({
+      state: "observed",
+    });
+    // 不倒退: a stale ok result must not move held/handed/tooLate back to observed/unobserved.
+    for (const state of ["held", "handed", "tooLate"]) {
+      expect(
+        pendingTransition(item({ state }), { type: "result", outcome: ok({ delivery: "observed" }) }),
+      ).toMatchObject({
+        state,
+      });
+    }
+  });
+
+  it("recall item: ok recalled ⇒ removed; too_late ⇒ sticky tooLate; errors fall to the shared failed path", () => {
+    const r = item({ kind: "recall", target: "cmd-h1" });
+    expect(
+      pendingTransition(r, {
+        type: "result",
+        outcome: ok({ op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "hi" }),
+      }),
+    ).toBeNull();
+    expect(pendingTransition(r, { type: "result", outcome: ok({ op: "recall", outcome: "too_late" }) })).toMatchObject({
+      state: "tooLate",
+    });
+    expect(pendingTransition(r, { type: "result", outcome: err("E_NOT_FOUND") })).toMatchObject({
+      state: "failed",
+      error: "E_NOT_FOUND",
+    });
+  });
+
+  it("ctl dispatched/observed/started/queued on a held item ⇒ handed; recalled ⇒ removed; returned ⇒ returned{reason}", () => {
+    const held = item({ state: "held" });
+    for (const state of ["dispatched", "observed", "started", "queued"]) {
+      expect(pendingTransition(held, { type: "ctl", entry: { cmdId: "cmd-1", state, updatedAt: 5 } })).toMatchObject({
+        state: "handed",
+        ctlAt: 5,
+      });
+    }
+    expect(
+      pendingTransition(held, { type: "ctl", entry: { cmdId: "cmd-1", state: "recalled", updatedAt: 6 } }),
+    ).toBeNull();
+    expect(
+      pendingTransition(held, {
+        type: "ctl",
+        entry: { cmdId: "cmd-1", state: "returned", reason: "session", updatedAt: 7 },
+      }),
+    ).toMatchObject({ state: "returned", reason: "session" });
+    // non-held items keep the legacy behavior: dispatched stays a no-op.
+    const sending = item();
+    expect(
+      pendingTransition(sending, { type: "ctl", entry: { cmdId: "cmd-1", state: "dispatched", updatedAt: 5 } }),
+    ).toBe(sending);
+  });
+
+  it("ctl entries older than the last applied updatedAt are dropped (乱序丢弃)", () => {
+    const handed = pendingTransition(item({ state: "held" }), {
+      type: "ctl",
+      entry: { cmdId: "cmd-1", state: "dispatched", updatedAt: 9 },
+    });
+    expect(handed).toMatchObject({ state: "handed" });
+    expect(
+      pendingTransition(handed, {
+        type: "ctl",
+        entry: { cmdId: "cmd-1", state: "returned", reason: "stale", updatedAt: 4 },
+      }),
+    ).toBe(handed);
+  });
+});
+
+describe("acceptHeld (U-MERGE / Y2)", () => {
+  const snap = (rows, rev, epoch = "e1") => ({ held: rows, heldRev: rev, heldEpoch: epoch });
+  const row = (cmdId, over = {}) => ({
+    cmdId,
+    text: "t",
+    deliver: "steer",
+    state: "held",
+    sessionId: "s1",
+    at: 1,
+    ...over,
+  });
+
+  it("writes rows/rev/epoch; malformed or empty frames keep the previous state", () => {
+    const acc = acceptHeld(undefined, snap([row("c1")], 3), { epoch: "e1", sessionId: "s1" }, undefined);
+    expect(acc).toEqual({ rows: [row("c1")], rev: 3, epoch: "e1" });
+    expect(acceptHeld(undefined, { held: [row("c1")] }, undefined, undefined)).toBeUndefined(); // no rev/epoch
+    expect(acceptHeld(undefined, { queue: [] }, undefined, undefined)).toBeUndefined(); // no held at all
+  });
+
+  it("same scope: an older rev is dropped (旧 rev 丢弃); an equal/newer rev accepts", () => {
+    const prev = { rows: [row("c1")], rev: 5, epoch: "e1" };
+    expect(
+      acceptHeld(prev, snap([row("c1"), row("c2")], 4), { epoch: "e1", sessionId: "s1" }, undefined),
+    ).toBeUndefined();
+    expect(
+      acceptHeld(prev, snap([row("c1"), row("c2")], 5), { epoch: "e1", sessionId: "s1" }, undefined),
+    ).toMatchObject({
+      rev: 5,
+    });
+  });
+
+  it("Y2 scope gate: a snapshot from another epoch is dropped WITHOUT comparing revs; a new-epoch snapshot replaces wholesale", () => {
+    const prev = { rows: [row("c1")], rev: 1, epoch: "e1" };
+    // an OLD-epoch frame arriving after the card flipped to e2 — even with a higher rev:
+    expect(acceptHeld(prev, snap([row("c1")], 99, "e1"), { epoch: "e2", sessionId: "s1" }, undefined)).toBeUndefined();
+    // the card flips and the FIRST e2 frame lands — replace, no union with e1 rows:
+    expect(acceptHeld(prev, snap([row("c9")], 1, "e2"), { epoch: "e2", sessionId: "s1" }, undefined)).toEqual({
+      rows: [row("c9")],
+      rev: 1,
+      epoch: "e2",
+    });
+    // scope unknown (old peers/tests) ⇒ accepted as before
+    expect(acceptHeld(prev, snap([row("c2")], 2), undefined, undefined)).toMatchObject({ rev: 2 });
+  });
+
+  it("held rows from a foreign session are dropped; returned rows pass (previous session is visible by design)", () => {
+    const acc = acceptHeld(
+      undefined,
+      snap([row("c1", { sessionId: "s0" }), row("c2", { state: "returned", reason: "session", sessionId: "s0" })], 1),
+      { epoch: "e1", sessionId: "s1" },
+      undefined,
+    );
+    expect(acc.rows.map((r) => r.cmdId)).toEqual(["c2"]);
+  });
+
+  it("same-scope snapshots only ADD/UPDATE: an absent non-tombstoned row stays as gone (Y2 ctl-truncation), a tombstoned row never re-enters", () => {
+    const prev = { rows: [row("c1"), row("c2", { state: "returned" })], rev: 5, epoch: "e1" };
+    const tombs = new Set(["c2"]);
+    const acc = acceptHeld(prev, snap([row("c1")], 6), { epoch: "e1", sessionId: "s1" }, tombs);
+    // c2 tombstoned ⇒ gone entirely; c1 present ⇒ updated; nothing else
+    expect(acc.rows).toHaveLength(1);
+    expect(acc.rows[0]).toMatchObject({ cmdId: "c1" });
+    // now drop c1 from the snapshot WITHOUT a tombstone — it stays, marked gone (copy-only):
+    const acc2 = acceptHeld(acc, snap([], 7), { epoch: "e1", sessionId: "s1" }, tombs);
+    expect(acc2.rows).toHaveLength(1);
+    expect(acc2.rows[0]).toMatchObject({ cmdId: "c1", gone: true });
+    // and a tombstone beats a later snapshot that tries to resurrect it:
+    const tombs2 = new Set([...tombs, "c1"]);
+    expect(acceptHeld(acc2, snap([row("c1"), row("c2")], 8), { epoch: "e1", sessionId: "s1" }, tombs2).rows).toEqual(
+      [],
+    );
+  });
+
+  it("absent held on a live frame clears the rows but KEEPS rev+epoch (缺省时清空，rev 单调)", () => {
+    const prev = { rows: [row("c1")], rev: 5, epoch: "e1" };
+    expect(acceptHeld(prev, { queue: [] }, undefined, undefined)).toEqual({ rows: [], rev: 5, epoch: "e1" });
+    // …so a late in-flight frame with a SMALLER rev cannot resurrect the cleared rows:
+    expect(
+      acceptHeld({ rows: [], rev: 5, epoch: "e1" }, snap([row("c1")], 4), { epoch: "e1", sessionId: "s1" }, undefined),
+    ).toBeUndefined();
+  });
+});
+
+describe("mergeRecalledDraft / validRecallText (§7)", () => {
+  it("joins recalled ahead of the draft, dropping blanks (空草稿无多余空行)", () => {
+    expect(mergeRecalledDraft("recalled body", "current draft")).toBe("recalled body\n\ncurrent draft");
+    expect(mergeRecalledDraft("recalled body", "")).toBe("recalled body");
+    expect(mergeRecalledDraft("", "draft")).toBe("draft");
+    expect(mergeRecalledDraft("  ", undefined)).toBe("");
+    expect(mergeRecalledDraft(undefined, undefined)).toBe("");
+  });
+
+  it("validRecallText: non-empty string within the 48 KiB byte cap", () => {
+    expect(validRecallText("hi")).toBe(true);
+    expect(validRecallText("")).toBe(false);
+    expect(validRecallText(null)).toBe(false);
+    expect(validRecallText("x".repeat(48 * 1024))).toBe(true); // 1 byte per char
+    expect(validRecallText("€".repeat(48 * 1024))).toBe(false); // 3 bytes per char > cap
+  });
+});
+
+// ---------------------------------------------------------------------------
 // HTTP/exception → CmdOutcome (§6.2 table)
 // ---------------------------------------------------------------------------
 

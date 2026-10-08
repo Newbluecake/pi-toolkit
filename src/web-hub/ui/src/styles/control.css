@@ -655,6 +655,28 @@
   border-style: dashed;
 }
 
+/* --- steer-recall hold rows (web-hub-steer-recall plan §7, P-ui) ---
+ * `held` — recallable, accented border to stand out from the mirror rows.
+ * `returned` / `unavailable` — dashed (nothing is in flight for this row).
+ * `recalling` — the action is in flight; keep solid tokens (no opacity tricks, axe
+ * contrast) and lean on the disabled buttons for the affordance.
+ * `handed` — muted: the row is informational only. */
+.queue-item[data-state="held"],
+.queue-item[data-state="recalling"] {
+  border-color: var(--c-accent);
+  background: var(--c-accent-soft);
+}
+
+.queue-item[data-state="returned"],
+.queue-item[data-state="unavailable"],
+.queue-item[data-state="handed"] {
+  border-style: dashed;
+}
+
+.queue-item[data-state="handed"] .queue-text {
+  color: var(--c-text-3);
+}
+
 .queue-badges {
   display: inline-flex;
   gap: var(--sp-1);

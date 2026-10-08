@@ -151,6 +151,11 @@ export interface ComposerProps {
   readonly enabled: boolean;
   readonly draft?: string;
   readonly busy?: boolean;
+  /** steer-recall plan §7 (P-ui): a recalled body to backfill. Whenever `rev` bumps, the text
+   * is joined AHEAD of the current draft (`[recalled, draft].filter(nonblank).join("\n\n")`),
+   * persisted, focused and caret-at-end — a re-fired recall of the same body bumps `rev` so
+   * the watcher re-runs even with identical text. */
+  readonly injectDraft?: { readonly text: string; readonly rev: number };
 }
 export interface ComposerEmits {
   send: [text: string, deliver: "steer" | "followUp"];
@@ -173,10 +178,26 @@ export interface ContextRingEmits {
 }
 export interface QueueListProps {
   readonly items: readonly unknown[];
+  /** steer-recall plan §7 (P-ui): `false` (no `hold.v1` on the agent card or hub — old peers)
+   * hides every hold row entirely, so a no-cap hub renders DOM-identical to the pre-feature
+   * UI. Defaults to `true` when absent (standalone mounts); rows carry their own per-row mode
+   * when the merge attached one. */
+  readonly holdEnabled?: boolean;
+  /** "live" ⇒ hold rows are recallable (recalled back into the composer); "unavailable" ⇒
+   * copy-only (SSE down / card stale / hold cap missing / snapshot scope stale — never
+   * recallable from a stale view, an edit-resend could double-deliver). */
+  readonly holdLink?: "live" | "unavailable";
 }
 export interface QueueListEmits {
   retry: [id: string];
   discard: [id: string];
+  /** steer-recall §7: hold-row actions — `recall` (a held row back into the composer), `edit`
+   * (same wire op on a returned row), `discardHeld` (locally hide a returned row), `copyHeld`
+   * (the dock resolves the local original text, falling back to the wire's 200-char clip). */
+  recall: [id: string];
+  edit: [id: string];
+  discardHeld: [id: string];
+  copyHeld: [id: string];
 }
 export interface ControlNoticeProps {
   readonly plaintext?: boolean;
@@ -205,6 +226,12 @@ export interface DetailDockProps {
   readonly queue?: readonly unknown[];
   readonly busy?: boolean;
   readonly readonlyReason?: string;
+  /** steer-recall plan §7 (P-ui): the dock's hold gating, computed once in AgentDetail —
+   * `holdEnabled` false ⇒ no hold chrome at all (pre-feature behavior); `holdLink` drives
+   * QueueList's row modes AND the dock's own recall guard (§7: SSE down / stale card ⇒ the
+   * recall is never sent; the row stays copy-only). */
+  readonly holdEnabled?: boolean;
+  readonly holdLink?: "live" | "unavailable";
 }
 export interface DetailDockEmits {
   "update:following": [value: boolean];

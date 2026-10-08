@@ -55,13 +55,16 @@ export interface TransportHooks {
 export interface CmdRequest {
   agentKey: string;
   id: string;
-  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command";
+  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command" | "recall";
   text?: string;
   deliver?: "steer" | "followUp";
   runId?: string;
   name?: string;
   args?: string;
   confirm?: true;
+  /** steer-recall plan §2.3 S2 (P-ui): the held/returned row's cmdId to recall — identify-only,
+   * never carries `expect` (S5). */
+  target?: string;
   expect?: { sessionId?: string };
   queryOnly?: true;
 }

@@ -69,7 +69,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { commandPolicyFor, composerKeyAction, parseSlash } from "@logic/control.js";
+import { commandPolicyFor, composerKeyAction, mergeRecalledDraft, parseSlash } from "@logic/control.js";
 import {
   applyMentionPick,
   filterMentionTargets,
@@ -625,6 +625,30 @@ watch(
   () => props.draft,
   (d) => {
     if (d !== undefined) text.value = d;
+  },
+);
+
+// steer-recall §7 (P-ui): a recalled body backfills AHEAD of the current draft whenever `rev`
+// bumps (rev, not text, is the trigger — the same body re-recalled still re-fills), then the
+// composer persists, focuses itself and grows (the dock announces the recall separately).
+watch(
+  () => props.injectDraft?.rev,
+  (rev, prev) => {
+    const inj = props.injectDraft;
+    if (rev === undefined || rev === prev || inj === undefined) return;
+    if (typeof inj.text !== "string" || inj.text === "") return;
+    text.value = mergeRecalledDraft(inj.text, text.value);
+    persistDraft();
+    void nextTick(() => {
+      grow();
+      const el = textareaEl.value;
+      if (el) {
+        el.focus();
+        const end = el.value.length;
+        el.setSelectionRange(end, end);
+        caret.value = end;
+      }
+    });
   },
 );
 </script>

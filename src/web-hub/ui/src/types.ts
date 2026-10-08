@@ -137,6 +137,22 @@ export interface AgentState {
    * task-list summary). Absent = no tasks / todo disabled / web-hub off — the detail header's
    * TodoPanel renders nothing then. Optional per the frozen-types convention. */
   readonly todo?: TodoWire;
+  /** steer-recall plan §7 (P-ui): the ACCEPTED `status.held` snapshot rows (Y2 scope-gated,
+   * U-MERGE tombstone-filtered, same-scope union — a row the newest snapshot dropped but no
+   * tombstone covers keeps `gone: true`). `undefined` until the first in-scope frame; `[]`
+   * once cleared. Rows are `HeldItemWire`-shaped. */
+  readonly held?: readonly unknown[];
+  /** The accepted snapshot's `heldRev` — monotonic ONLY inside its scope; retained on clear
+   * (a late in-flight frame with a smaller rev must not resurrect cleared rows). */
+  readonly heldRev?: number;
+  /** The accepted snapshot's `heldEpoch` — compared against `card.epoch` at render time; a
+   * mismatch (card epoch flipped, new-scope snapshot not yet arrived) renders every row
+   * copy-only until a new-scope snapshot or a terminal ctl entry arrives (Y2). */
+  readonly heldEpoch?: string;
+  /** steer-recall U-MERGE tombstones: cmdIds that reached a terminal hold outcome (handed /
+   * recalled / returned / unconfirmed) via the ctl slot or a local recall success — a later
+   * snapshot can never resurrect them. Bounded FIFO in `@logic/state.js`. */
+  readonly heldTombs?: ReadonlySet<string>;
 }
 
 /** Mirrors `@logic/state.js`'s `FleetOmitted` JSDoc typedef (the `fleet` frame's `omitted`). */
@@ -300,7 +316,11 @@ export interface UploadsHandle {
 }
 
 export interface ControlHandle {
-  sendPrompt(agentKey: string, text: string, deliver: "steer" | "followUp"): Promise<CmdOutcome>;
+  /** steer-recall plan §7 (P-ui): `original` overrides the FULL text cached for the minted
+   * cmdId (defaults to `text`). The wire clips held-row text to 200 chars — this tab's cache
+   * keeps what the user actually typed so recall/copy never degrade to the clip. DetailDock
+   * passes the RAW composer text when file-mention expansion rewrote the outbound payload. */
+  sendPrompt(agentKey: string, text: string, deliver: "steer" | "followUp", original?: string): Promise<CmdOutcome>;
   abort(agentKey: string): Promise<CmdOutcome>;
   steerSub(agentKey: string, runId: string, text: string): Promise<CmdOutcome>;
   stopSub(agentKey: string, runId: string): Promise<CmdOutcome>;
@@ -319,6 +339,16 @@ export interface ControlHandle {
   discard(agentKey: string, id: string): void;
   draft(agentKey: string): string;
   setDraft(agentKey: string, text: string): void;
+  /** steer-recall plan §7/S5 (P-ui): recall a held/returned web steer/followUp by cmdId — the
+   * ok result carries the FULL body in `data.text` (cached under the target on success).
+   * Identify-only: never carries `expect`. Optional per the frozen-types convention (an older
+   * handle/test fake without it renders the queue copy-only). */
+  recall?(agentKey: string, target: string): Promise<CmdOutcome>;
+  /** steer-recall §7: this tab's full original text for a sent/held cmdId (session-scoped,
+   * per-agent capped); `undefined` when not retained (page reloaded / evicted / other tab's). */
+  originalText?(agentKey: string, sessionId: string, cmdId: string): string | undefined;
+  /** steer-recall §7: drop the agent's whole original-text partition (card removed). */
+  forgetAgent?(agentKey: string): void;
   /** Present only when the transport provides `upload` (U4b) — the attachment-tray driver. */
   readonly uploads?: UploadsHandle;
 }

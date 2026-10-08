@@ -124,3 +124,212 @@ describe("QueueList.vue", () => {
     expect(rows[1]!.text()).toContain("running");
   });
 });
+
+// ---------------------------------------------------------------------------
+// steer-recall (web-hub-steer-recall plan §7, P-ui): the hold-row renderings —
+// held / returned / recalling / handed / tooLate × recallable / unavailable, their notes,
+// aria labels, the disabled state while recalling, and the DOM-identical guarantee for a
+// no-cap hub (`holdEnabled: false` hides hold rows entirely). The 8 tests above are the
+// pre-feature contract and stay untouched.
+// ---------------------------------------------------------------------------
+
+function mountHoldQueue(
+  items: readonly unknown[],
+  props: { holdEnabled?: boolean; holdLink?: "live" | "unavailable" } = {},
+) {
+  const wrapper = mount(QueueList, {
+    props: {
+      items,
+      ...(props.holdEnabled !== undefined ? { holdEnabled: props.holdEnabled } : {}),
+      ...(props.holdLink !== undefined ? { holdLink: props.holdLink } : {}),
+    },
+  });
+  mounted.push(wrapper);
+  return wrapper;
+}
+
+const heldRow = (over: Record<string, unknown> = {}) => ({
+  held: true,
+  id: "cmd-h1",
+  cmdId: "cmd-h1",
+  text: "please rebase main",
+  deliver: "steer",
+  state: "held",
+  holdBase: "held",
+  sessionId: "s1",
+  at: 1,
+  mode: "recallable",
+  ...over,
+});
+
+describe("QueueList.vue — steer-recall hold rows (§7)", () => {
+  it("holdEnabled:false hides hold rows entirely (old agent/hub — DOM identical to pre-feature)", () => {
+    const w = mountHoldQueue([heldRow(), { id: "q1", text: "t", deliver: "steer", source: "tui", at: 1 }], {
+      holdEnabled: false,
+    });
+    expect(w.findAll(".queue-item")).toHaveLength(1);
+    expect(w.find("[data-recall]").exists()).toBe(false);
+    expect(w.find(".queue-item").attributes("data-state")).toBe("queued");
+  });
+
+  it("recallable held row: held chip + heldNote + recall button with aria-label carrying the text prefix", () => {
+    const w = mountHoldQueue([heldRow()], { holdEnabled: true, holdLink: "live" });
+    const li = w.find(".queue-item");
+    expect(li.attributes("data-state")).toBe("held");
+    expect(li.find(".state-chip").text()).toBe("held");
+    expect(li.find(".queue-note").text()).toContain("Held until the current turn ends");
+    const btn = li.find("[data-recall]");
+    expect(btn.attributes("aria-label")).toBe("Recall this held message: please rebase main");
+    expect(btn.text()).toContain("Recall");
+  });
+
+  it("recallable returned row: returned chip + per-reason note + edit/discard buttons", () => {
+    for (const [reason, note] of [
+      ["aborted", "aborted before delivery"],
+      ["session", "session ended before delivery"],
+      ["reload", "reloaded before delivery"],
+      ["stale", "Returned without delivery"],
+    ] as const) {
+      const w = mountHoldQueue([heldRow({ state: "returned", reason, holdBase: "returned", mode: "recallable" })], {
+        holdEnabled: true,
+        holdLink: "live",
+      });
+      const li = w.find(".queue-item");
+      expect(li.attributes("data-state")).toBe("returned");
+      expect(li.find(".queue-note").text()).toContain(note);
+      expect(li.find("[data-edit]").exists()).toBe(true);
+      expect(li.find("[data-discard-held]").exists()).toBe(true);
+      expect(li.find("[data-recall]").exists()).toBe(false);
+      expect(li.find("[data-copy-held]").exists()).toBe(false);
+    }
+  });
+
+  it("unavailable row (per-row mode OR the whole link down): ONLY copy + holdUnavailable note — never recall/edit/discard", () => {
+    const w = mountHoldQueue([heldRow({ mode: "unavailable" })], { holdEnabled: true, holdLink: "live" });
+    const li = w.find(".queue-item");
+    expect(li.attributes("data-state")).toBe("unavailable");
+    expect(li.find(".state-chip").text()).toBe("unavailable");
+    expect(li.find(".queue-note").text()).toContain("cannot recall");
+    expect(li.find("[data-copy-held]").exists()).toBe(true);
+    for (const sel of ["[data-recall]", "[data-edit]", "[data-discard-held]"]) {
+      expect(li.find(sel).exists()).toBe(false);
+    }
+    // and with the whole link down (SSE断开) the same copy-only rendering applies — a row the
+    // merge did not stamp explicitly (mode key absent) inherits the link mode:
+    const row = { ...heldRow() };
+    delete (row as Record<string, unknown>)["mode"];
+    const w2 = mountHoldQueue([row], { holdEnabled: true, holdLink: "unavailable" });
+    expect(w2.find(".queue-item").attributes("data-state")).toBe("unavailable");
+    expect(w2.find("[data-copy-held]").exists()).toBe(true);
+    expect(w2.find("[data-recall]").exists()).toBe(false);
+  });
+
+  it("a `gone` row (absent from the newest same-scope snapshot, Y2 ctl-truncation) is copy-only even while the link is live", () => {
+    const w = mountHoldQueue([heldRow({ mode: "unavailable", gone: true })], { holdEnabled: true, holdLink: "live" });
+    expect(w.find(".queue-item").attributes("data-state")).toBe("unavailable");
+    expect(w.find("[data-recall]").exists()).toBe(false);
+    expect(w.find("[data-copy-held]").exists()).toBe(true);
+  });
+
+  it("recalling row: buttons disabled + aria-disabled; data-state recalling; disabled never emits", async () => {
+    const w = mountHoldQueue([heldRow({ state: "recalling" })], { holdEnabled: true, holdLink: "live" });
+    const li = w.find(".queue-item");
+    expect(li.attributes("data-state")).toBe("recalling");
+    expect(li.find(".state-chip").text()).toBe("recalling");
+    const btn = li.find("[data-recall]");
+    expect(btn.attributes("disabled")).toBeDefined();
+    expect(btn.attributes("aria-disabled")).toBe("true");
+    await btn.trigger("click");
+    expect(w.emitted("recall")).toBeUndefined(); // disabled native buttons never emit
+  });
+
+  it("tooLate row: handed-style state + tooLate note + copy (Q5 undifferentiated 已交付 look)", () => {
+    const w = mountHoldQueue([heldRow({ state: "tooLate", holdBase: "held", mode: "recallable" })], {
+      holdEnabled: true,
+      holdLink: "live",
+    });
+    const li = w.find(".queue-item");
+    expect(li.attributes("data-state")).toBe("handed");
+    expect(li.find(".state-chip").text()).toBe("handed");
+    expect(li.find(".queue-note").text()).toContain("Already delivered");
+    expect(li.find("[data-copy-held]").exists()).toBe(true);
+    expect(li.find("[data-recall]").exists()).toBe(false);
+  });
+
+  it("handed row: handedNote, no actions at all", () => {
+    const w = mountHoldQueue([heldRow({ state: "handed", mode: "recallable" })], {
+      holdEnabled: true,
+      holdLink: "live",
+    });
+    const li = w.find(".queue-item");
+    expect(li.attributes("data-state")).toBe("handed");
+    expect(li.find(".queue-note").text()).toContain("Handed to the model");
+    expect(li.find(".queue-actions button").exists()).toBe(false);
+  });
+
+  it("buttons are keyboard-operable (native Enter/Space clicks emit) and copy emits copyHeld", async () => {
+    const w = mountHoldQueue([heldRow()], { holdEnabled: true, holdLink: "live" });
+    await w.find("[data-recall]").trigger("click");
+    expect(w.emitted("recall")).toEqual([["cmd-h1"]]);
+    const w2 = mountHoldQueue(
+      [heldRow({ state: "returned", reason: "stale", holdBase: "returned", mode: "recallable" })],
+      {
+        holdEnabled: true,
+        holdLink: "live",
+      },
+    );
+    await w2.find("[data-edit]").trigger("click");
+    expect(w2.emitted("edit")).toEqual([["cmd-h1"]]);
+    await w2.find("[data-discard-held]").trigger("click");
+    expect(w2.emitted("discardHeld")).toEqual([["cmd-h1"]]);
+    const w3 = mountHoldQueue([heldRow({ mode: "unavailable" })], { holdEnabled: true, holdLink: "live" });
+    await w3.find("[data-copy-held]").trigger("click");
+    expect(w3.emitted("copyHeld")).toEqual([["cmd-h1"]]);
+  });
+
+  it("follow-up badge + previous-session marker ride the hold row", () => {
+    const w = mountHoldQueue(
+      [
+        heldRow({
+          deliver: "followUp",
+          prevSession: true,
+          state: "returned",
+          reason: "session",
+          holdBase: "returned",
+          mode: "recallable",
+        }),
+      ],
+      { holdEnabled: true, holdLink: "live" },
+    );
+    const li = w.find(".queue-item");
+    expect(li.text()).toContain("follow-up");
+    expect(li.text()).toContain("from a previous session");
+  });
+
+  it("the text clips long bodies (like every queue row)", () => {
+    const w = mountHoldQueue([heldRow({ text: "x".repeat(300) })], { holdEnabled: true, holdLink: "live" });
+    expect(w.find(".queue-text").text().length).toBeLessThanOrEqual(160);
+  });
+
+  it("an optimistic hold item (this tab's own, full text) renders as a hold row too", () => {
+    const w = mountHoldQueue(
+      [
+        {
+          id: "cmd-own",
+          kind: "prompt",
+          text: "the full typed body",
+          deliver: "followUp",
+          state: "held",
+          at: 2,
+          mode: "recallable",
+          holdBase: "held",
+        },
+      ],
+      { holdEnabled: true, holdLink: "live" },
+    );
+    const li = w.find(".queue-item");
+    expect(li.attributes("data-state")).toBe("held");
+    expect(li.find(".queue-text").text()).toBe("the full typed body");
+    expect(li.find("[data-recall]").attributes("aria-label")).toContain("the full typed body");
+  });
+});

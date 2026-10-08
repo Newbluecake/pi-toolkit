@@ -173,7 +173,9 @@ describe("DetailDock.vue — orchestration (§7.4/§7.7)", () => {
     await w.find(".composer textarea").setValue("steer the turn");
     await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
     await flush();
-    expect(calls).toEqual([{ method: "sendPrompt", args: ["agent-a", "steer the turn", "steer"] }]);
+    // steer-recall §7: the 4th arg is the cached ORIGINAL text (「onSend 传原文」) — equal to
+    // the sent text unless file-mention expansion rewrote the outbound payload.
+    expect(calls).toEqual([{ method: "sendPrompt", args: ["agent-a", "steer the turn", "steer", "steer the turn"] }]);
   });
 
   it("slash text with a commands slot ⇒ runCommand (never sendPrompt)", async () => {
@@ -280,8 +282,8 @@ describe("DetailDock.vue — @mention send routing (task #11)", () => {
     }
     await flush();
     expect(calls).toEqual([
-      { method: "sendPrompt", args: ["agent-a", "@old hi", "steer"] },
-      { method: "sendPrompt", args: ["agent-a", "@ghost hi", "steer"] },
+      { method: "sendPrompt", args: ["agent-a", "@old hi", "steer", "@old hi"] },
+      { method: "sendPrompt", args: ["agent-a", "@ghost hi", "steer", "@ghost hi"] },
     ]);
   });
 
@@ -302,7 +304,7 @@ describe("DetailDock.vue — @mention send routing (task #11)", () => {
     await ta.trigger("keydown", { key: "Escape" });
     await ta.trigger("keydown", { key: "Enter" });
     await flush();
-    expect(calls).toEqual([{ method: "sendPrompt", args: ["agent-a", "@bot", "steer"] }]);
+    expect(calls).toEqual([{ method: "sendPrompt", args: ["agent-a", "@bot", "steer", "@bot"] }]);
   });
 
   it("slash command mode still wins over mention routing (disjoint prefixes, pinned)", async () => {

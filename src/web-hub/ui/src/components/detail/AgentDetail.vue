@@ -34,7 +34,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
-import { mergeQueue, newCmdId } from "@logic/control.js";
+import { holdAvailable, heldRowMode, mergeQueue, newCmdId } from "@logic/control.js";
 import { restoringKeys } from "../../logic/spawn.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
@@ -122,8 +122,68 @@ const pendingCtl = computed<readonly Record<string, unknown>[]>(() =>
   Array.isArray(props.agent.pendingCtl) ? (props.agent.pendingCtl as readonly Record<string, unknown>[]) : [],
 );
 const sending = computed(() => pendingCtl.value.some((it) => it.state === "sending"));
+
+// --- steer recall (web-hub-steer-recall plan §7, P-ui) ---------------------------------------
+
+/** §7 row-mode inputs, computed once here and passed down (DetailDock re-checks its own props
+ * at call time): browser SSE liveness, card liveness, hold.v1 on BOTH sides, and Y2's scope
+ * check — the accepted held snapshot's epoch vs the card's CURRENT epoch (a flip — agent
+ * restart / /reload — makes every stored row copy-only until a new-scope snapshot or a
+ * terminal ctl entry arrives). Y7.2: the hub now emits `agent_up` BEFORE `gap` on a claiming
+ * reconnect with a changed epoch, and the reducer's agent_up path replaces the card — so
+ * `card.epoch` here is already the new one and a new-epoch snapshot is accepted right after. */
+const hubLive = computed(() => hub?.state.value.conn === "open");
+const hubCaps = computed<readonly unknown[]>(() => {
+  const h = hub?.state.value.hub;
+  return h !== null && h !== undefined && Array.isArray((h as { caps?: unknown }).caps)
+    ? ((h as { caps?: unknown }).caps as readonly unknown[])
+    : [];
+});
+const holdOn = computed(() => holdAvailable(props.agent.card, hubCaps.value));
+const cardEpoch = computed(() => {
+  const e = (props.agent.card as { epoch?: unknown }).epoch;
+  return typeof e === "string" ? e : undefined;
+});
+const scopeOk = computed(
+  () =>
+    props.agent.heldEpoch === undefined || (cardEpoch.value !== undefined && props.agent.heldEpoch === cardEpoch.value),
+);
+const holdRowModeOf = computed(() =>
+  heldRowMode({
+    hubLive: hubLive.value,
+    cardLive: agentLive.value,
+    holdAvailable: holdOn.value,
+    scopeOk: scopeOk.value,
+  }),
+);
+const sessionKey = computed(() => {
+  const sid = (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId;
+  return typeof sid === "string" ? sid : undefined;
+});
 const queueItems = computed<readonly unknown[]>(() =>
-  mergeQueue(Array.isArray(props.agent.queue) ? [...props.agent.queue] : [], [...pendingCtl.value]),
+  mergeQueue(
+    Array.isArray(props.agent.queue) ? [...props.agent.queue] : [],
+    [...pendingCtl.value],
+    [],
+    [...(props.agent.held ?? [])],
+    {
+      holdEnabled: holdOn.value,
+      rowMode: holdRowModeOf.value,
+      ...(props.agent.heldTombs !== undefined ? { dismissed: props.agent.heldTombs } : {}),
+      ...(sessionKey.value !== undefined ? { sessionId: sessionKey.value } : {}),
+    },
+  ),
+);
+
+// §7: when the card is REMOVED (`agent_removed` — the reducer records it in `removed`), the
+// agent's original-text partition goes with it. Sync-flushed so it fires while this mount is
+// still alive (the unmount races the selection clear).
+watch(
+  () => hub?.state.value.removed?.has(props.agent.key) ?? false,
+  (gone) => {
+    if (gone) control.value?.forgetAgent?.(props.agent.key);
+  },
+  { flush: "sync" },
 );
 
 /** §7.7 transcript web badge: a user message counts as web-sent when a ctl ledger entry in a
@@ -436,6 +496,9 @@ const dockCtlProps = computed(() => ({
   queue: queueItems.value,
   busy: busy.value,
   ...(readonlyReason.value !== null ? { readonlyReason: readonlyReason.value } : {}),
+  // steer-recall §7: the dock's hold gating (see the row-mode inputs above).
+  holdEnabled: holdOn.value,
+  holdLink: holdRowModeOf.value === "recallable" ? ("live" as const) : ("unavailable" as const),
 }));
 
 // --- fleet drawer (fleet-drawer plan v2 §6.1/§6.2 — F6) --------------------------------------

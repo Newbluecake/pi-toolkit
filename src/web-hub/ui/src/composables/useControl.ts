@@ -30,6 +30,13 @@ export const CONTROL_CTX: InjectionKey<{ agentKey: string; control: ControlHandl
  */
 const REQUESTS_CAP = 128;
 
+/**
+ * steer-recall (plan §7): per-agent cap for the full original-text cache. Generous relative to
+ * the queue's visual cap (16 held + 32 ctl rows) — the cache exists so copy/edit never degrade
+ * to the wire's 200-char clip, not to reconstruct history (that is the transcript's job).
+ */
+const ORIGINALS_CAP = 128;
+
 export interface ControlOptions {
   /** Current session id of an agent (D21: prompt/abort/command carry `expect.sessionId`). */
   getSessionId?(agentKey: string): string | undefined;
@@ -50,6 +57,43 @@ export function createControl(
   const requests = new Map<string, StoredRequest>();
 
   const keyOf = (agentKey: string, id: string): string => `${agentKey}|${id}`;
+
+  // steer-recall §7: agentKey → sessionId → cmdId → {text, at}. Session-partitioned so a
+  // `/new`-switched session never leaks the previous session's originals into a lookup.
+  const originals = new Map<string, Map<string, Map<string, { text: string; at: number }>>>();
+
+  /** Cache a FULL recoverable text under `cmdId` (FIFO-capped per agent across sessions). */
+  function rememberOriginal(agentKey: string, cmdId: string, text: string): void {
+    if (text === "") return;
+    const sessionId = opts.getSessionId?.(agentKey) ?? "";
+    let bySession = originals.get(agentKey);
+    if (bySession === undefined) {
+      bySession = new Map();
+      originals.set(agentKey, bySession);
+    }
+    let byCmd = bySession.get(sessionId);
+    if (byCmd === undefined) {
+      byCmd = new Map();
+      bySession.set(sessionId, byCmd);
+    }
+    byCmd.delete(cmdId); // refresh insertion order — the freshest entry evicts last
+    byCmd.set(cmdId, { text, at: now() });
+    let size = 0;
+    for (const m of bySession.values()) size += m.size;
+    while (size > ORIGINALS_CAP) {
+      let evicted = false;
+      for (const m of bySession.values()) {
+        const oldest = m.keys().next().value;
+        if (oldest !== undefined) {
+          m.delete(oldest);
+          size -= 1;
+          evicted = true;
+          break;
+        }
+      }
+      if (!evicted) break;
+    }
+  }
 
   function remember(key: string, stored: StoredRequest): void {
     requests.delete(key); // refresh insertion order
@@ -100,8 +144,11 @@ export function createControl(
   const uploads = uploadTransport !== undefined ? createUploads({ upload: uploadTransport }) : undefined;
 
   return {
-    sendPrompt: (agentKey, text, deliver) => {
+    sendPrompt: (agentKey, text, deliver, original) => {
       const id = newCmdId();
+      // steer-recall §7: cache the FULL text under the minted cmdId BEFORE the wire call —
+      // the optimistic item lands synchronously, so a held row can be copied the same tick.
+      rememberOriginal(agentKey, id, original ?? text);
       return sendCmd(
         agentKey,
         { id, kind: "prompt", text, deliver, state: "sending", at: now() },
@@ -115,6 +162,34 @@ export function createControl(
         { id, kind: "abort", state: "sending", at: now() },
         { agentKey, id, op: "abort", ...expectFor(agentKey) },
       );
+    },
+    // steer-recall plan §2.3 S5 / §7: recall a held/returned row by cmdId. Identify-only — the
+    // wire frame is exactly {op:"recall", target}, never `expect` (a recall is not session-
+    // scoped the way a prompt is: the target itself is the identity). A successful result's
+    // FULL body is cached under the target so the row's copy affordance (and any later
+    // unavailable-mode copy) never degrades to the wire's 200-char clip.
+    recall: (agentKey, target) => {
+      const id = newCmdId();
+      return sendCmd(
+        agentKey,
+        { id, kind: "recall", target, state: "sending", at: now() },
+        { agentKey, id, op: "recall", target },
+      ).then((outcome) => {
+        if (outcome.ok) {
+          const data =
+            outcome.data !== null && typeof outcome.data === "object"
+              ? (outcome.data as { outcome?: unknown; text?: unknown })
+              : {};
+          if (data.outcome === "recalled" && typeof data.text === "string") {
+            rememberOriginal(agentKey, target, data.text);
+          }
+        }
+        return outcome;
+      });
+    },
+    originalText: (agentKey, sessionId, cmdId) => originals.get(agentKey)?.get(sessionId)?.get(cmdId)?.text,
+    forgetAgent: (agentKey) => {
+      originals.delete(agentKey);
     },
     steerSub: (agentKey, runId, text) => {
       const id = newCmdId();
