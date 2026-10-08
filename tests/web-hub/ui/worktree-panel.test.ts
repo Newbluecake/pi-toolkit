@@ -375,6 +375,7 @@ describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
 
   it("a diffable row renders button[aria-expanded] with the toggle affordance (auto-expanded)", async () => {
     const { wrapper } = mountScoped(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
     const btn = wrapper.find(".wtd-toggle");
     expect(btn.element.tagName).toBe("BUTTON");
     expect(btn.attributes("aria-expanded")).toBe("true");
@@ -384,17 +385,43 @@ describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
     expect(btn.find(".wtd-chev").exists()).toBe(true);
   });
 
-  it("diff shown by default: panel opens and the dirty row auto-expands (one pull) on mount", async () => {
+  it("diff lists shown by default: the panel stays collapsed but the dirty row is pre-expanded (one pull)", async () => {
     const { wrapper, transport } = mountScoped(dirtyWire());
-    expect(wrapper.find(".wt-sum").attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find(".wt-sum").attributes("aria-expanded")).toBe("false");
     expect(transport.files).toHaveBeenCalledTimes(1);
     await flushPromises();
+    await wrapper.find(".wt-sum").trigger("click"); // opening the panel shows the list straight away
     expect(wrapper.findAll(".wtd-file").length).toBe(2);
+    expect(transport.files).toHaveBeenCalledTimes(1);
+  });
+
+  it("refresh + the D14/D20 ⓘ ride the worktree row whenever its list is expanded (every state)", async () => {
+    const { wrapper, transport } = mountScoped(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
+    const text = "Protected entries are never listed; submodule changes are not shown.";
+    const actions = wrapper.find(".wt-item > .wtd-row-actions");
+    expect(actions.exists()).toBe(true);
+    expect(actions.find(".wtd-foot").attributes("title")).toBe(text);
+    expect(actions.find(".wtd-foot").attributes("aria-label")).toBe(text);
+    await flushPromises();
+    // ok state: refresh re-pulls; the list itself carries neither control
+    expect(wrapper.find(".wt-files-slot .wtd-refresh").exists()).toBe(false);
+    await wrapper.find(".wtd-row-actions .wtd-refresh").trigger("click");
+    expect(transport.files).toHaveBeenCalledTimes(2);
+    // ⓘ reveals the text inline under the list (touch has no hover) and toggles back
+    await wrapper.find(".wtd-row-actions .wtd-foot").trigger("click");
+    expect(wrapper.find(".wt-files-slot .wtd-foot-text").text()).toBe(text);
+    await wrapper.find(".wtd-row-actions .wtd-foot").trigger("click");
+    expect(wrapper.find(".wtd-foot-text").exists()).toBe(false);
+    // collapsing the row removes the row actions with the list
+    await wrapper.find(".wtd-toggle").trigger("click");
+    expect(wrapper.find(".wtd-row-actions").exists()).toBe(false);
   });
 
   it("a manual collapse (row or panel) is never undone by later status frames", async () => {
     const { wrapper, transport } = mountScoped(dirtyWire());
     await flushPromises();
+    await wrapper.find(".wt-sum").trigger("click"); // open the panel
     await wrapper.find(".wtd-toggle").trigger("click"); // collapse the row
     await wrapper.setProps({ worktrees: dirtyWire() }); // a fresh frame, same rows
     expect(wrapper.find(".wtd-toggle").attributes("aria-expanded")).toBe("false");
@@ -419,6 +446,7 @@ describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
 
   it("collapsing keeps the data and never re-pulls", async () => {
     const { wrapper, transport } = mountScoped(dirtyWire());
+    await wrapper.find(".wt-sum").trigger("click");
     const btn = wrapper.find(".wtd-toggle");
     expect(transport.files).toHaveBeenCalledTimes(1); // auto-expanded: 展开拉一次
     expect(btn.attributes("aria-expanded")).toBe("true");
@@ -454,6 +482,7 @@ describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
   it("clicking a file entry opens the teleported diff dialog", async () => {
     const { wrapper, transport } = mountScoped(dirtyWire());
     await flushPromises();
+    await wrapper.find(".wt-sum").trigger("click");
     await wrapper.find(".wtd-file").trigger("click");
     await flushPromises();
     expect(transport.file).toHaveBeenCalledTimes(1);

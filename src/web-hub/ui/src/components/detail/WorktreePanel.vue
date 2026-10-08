@@ -38,7 +38,7 @@
   are never read, so a newer agent can't break an older UI.
 -->
 <script setup lang="ts">
-import { computed, inject, ref, watch } from "vue";
+import { computed, inject, reactive, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
@@ -120,17 +120,19 @@ function rowKey(row: WorktreeRowWire): string {
   return typeof row.path === "string" ? row.path : "";
 }
 
-// Diff shown by default: a diffable (dirty) row's file list auto-expands ONCE per scope and
-// dirty episode, and the panel itself auto-opens while any row is diffable — until the user
-// toggles the panel. A manually collapsed row stays collapsed; a row that turns clean forgets
-// its auto-expansion so its next dirty episode expands again.
-const openTouched = ref(false);
+// Diff lists shown by default (2026-10-08 user ruling): a diffable (dirty) row's file list
+// auto-expands ONCE per scope and dirty episode, so opening the (still collapsed-by-default)
+// panel shows it straight away. A manually collapsed row stays collapsed; a row that turns
+// clean forgets its auto-expansion so its next dirty episode expands again.
 const autoSeen = new Set<string>();
 let autoScopeKey = "";
 
-function onSummaryClick(): void {
-  openTouched.value = true;
-  open.value = !open.value;
+/** Rows whose D14/D20 footnote text is revealed inline (the ⓘ toggle; touch has no hover). */
+const footOpen = reactive(new Set<string>());
+function toggleFoot(row: WorktreeRowWire): void {
+  const wt = rowKey(row);
+  if (footOpen.has(wt)) footOpen.delete(wt);
+  else footOpen.add(wt);
 }
 
 watch(
@@ -142,19 +144,16 @@ watch(
       autoScopeKey = key;
     }
     if (sc === null) return;
-    let anyDiffable = false;
     for (const row of rows) {
       const wt = rowKey(row);
       if (!rowDiffable(sc, row)) {
         autoSeen.delete(wt);
         continue;
       }
-      anyDiffable = true;
       if (autoSeen.has(wt)) continue;
       autoSeen.add(wt);
       if (!isExpanded(wt)) toggleRow(row);
     }
-    if (anyDiffable && !openTouched.value) open.value = true;
   },
   { immediate: true },
 );
@@ -270,7 +269,7 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
       type="button"
       :aria-expanded="open"
       :aria-label="t('detail.worktreesToggleAria')"
-      @click="onSummaryClick"
+      @click="open = !open"
     >
       <AppIcon name="branch" class="icon-sm" />
       <span class="wt-sum-text">{{ summary }}</span>
@@ -306,7 +305,32 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
             </button>
             <div v-if="isExpanded(rowKey(row))" :id="listId(i)" class="wt-files-slot">
               <WorktreeFileList :state="listStateOf(row)" @open="(e) => onOpen(row, e)" @refresh="onRefresh(row)" />
+              <p v-if="footOpen.has(rowKey(row))" class="wtd-foot-text">{{ t("diff.footnote") }}</p>
             </div>
+            <!-- The expanded list's actions ride the worktree's own line (2026-10-08 user ruling):
+                 refresh + the D14/D20 standing footnote ⓘ — rendered whenever the list is expanded,
+                 in every list state, never data-conditioned. Lives inside the diffable branch so the
+                 no-scope DOM stays byte-identical (I8); CSS `order` places it right before copy. -->
+            <span v-if="isExpanded(rowKey(row))" class="wtd-row-actions">
+              <button
+                class="btn btn-ghost btn-xs btn-icon wtd-foot"
+                type="button"
+                :title="t('diff.footnote')"
+                :aria-label="t('diff.footnote')"
+                :aria-expanded="footOpen.has(rowKey(row)) ? 'true' : 'false'"
+                @click="toggleFoot(row)"
+              >
+                <AppIcon name="info" class="icon-sm" aria-hidden="true" />
+              </button>
+              <button
+                class="btn btn-ghost btn-xs wtd-refresh"
+                type="button"
+                :disabled="listStateOf(row).phase === 'loading'"
+                @click="onRefresh(row)"
+              >
+                {{ t("diff.refresh") }}
+              </button>
+            </span>
           </template>
           <span
             v-else

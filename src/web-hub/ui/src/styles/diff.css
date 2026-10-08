@@ -179,7 +179,8 @@
   font-size: var(--fs-2xs);
 }
 
-/* D14/D20 standing footnote: an always-present, deliberately quiet ⓘ in the refresh row. */
+/* D14/D20 standing footnote: an always-present, deliberately quiet ⓘ beside the row's refresh
+ * (WorktreePanel.vue); its inline reveal sits under the expanded list. */
 .wtd-foot {
   color: var(--c-text-3);
   opacity: 0.6;
@@ -190,20 +191,10 @@
   opacity: 1;
 }
 .wtd-foot-text {
-  min-width: 0;
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2);
   color: var(--c-text-3);
   font-size: var(--fs-2xs);
-}
-
-.wtd-files-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-1) var(--sp-2);
-  border-top: 1px solid var(--c-border);
-}
-.wtd-files-actions .wtd-refresh {
-  margin-left: auto;
 }
 
 /* the `wtd-toggle` button that replaced the dirty row's span lives in worktrees.css */

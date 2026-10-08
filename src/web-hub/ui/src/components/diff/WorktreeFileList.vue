@@ -1,9 +1,10 @@
 <!--
   worktree-diff plan v3.1 §4.2 (package D5): the expanded worktree row's changed-file list,
   rendering one `useWorktreeDiff` ListState. States: loading / ok (entries or the empty note) /
-  error (mapped code+reason + retry when retryable). The D14/D20 static footnote — 「受保护条
-  目不显示；子模块变化不在此列出」 — is ALWAYS rendered (0 entries / entries / error alike):
-  it is a standing property of the listing, never a data-conditioned oracle.
+  error (mapped code+reason + retry when retryable). The D14/D20 standing footnote (「受保护条
+  目不显示；子模块变化不在此列出」) and the refresh button live on the worktree's own row in
+  `WorktreePanel.vue` (2026-10-08 user ruling) — rendered whenever this list is expanded, in
+  every state, never a data-conditioned oracle.
 
   Entries are native `<button>`s (keyboard-reachable); every `!isWtRequestableEntry` entry is
   DISABLED with a title distinguishing the reason (#7: filtered / undecodable bytes / CR-LF /
@@ -16,8 +17,7 @@
   Everything is plain-text interpolation; styles live in `styles/diff.css`.
 -->
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import AppIcon from "../../icons/AppIcon.vue";
+import { computed } from "vue";
 import { displayPath, formatStat, statusBadge } from "@logic/wtdiff.js";
 import { isWtRequestableEntry, type WtDiffFileEntry } from "@protocol/worktree-diff.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -27,8 +27,6 @@ import "../../styles/diff.css";
 const props = defineProps<{ readonly state: ListState }>();
 const emit = defineEmits<{ (e: "open", entry: WtDiffFileEntry): void; (e: "refresh"): void }>();
 const { t } = useI18n();
-/** The ⓘ footnote's inline reveal (touch has no hover title). Purely local, never data-driven. */
-const footOpen = ref(false);
 
 const entries = computed(() => (props.state.phase === "ok" ? (props.state.data?.entries ?? []) : []));
 
@@ -114,31 +112,5 @@ const notes = computed(() => {
       </ul>
       <p v-for="(note, i) in notes" :key="i" class="wtd-note">{{ note }}</p>
     </template>
-
-    <!-- D14/D20: the standing footnote — rendered in EVERY state (0 entries / entries / error),
-         never a data-conditioned signal. Presented as an always-present ⓘ (hover/aria carries
-         the text; click/tap reveals it inline for touch) sharing the refresh row, not a row of
-         its own. -->
-    <div class="wtd-files-actions">
-      <button
-        class="btn btn-ghost btn-xs btn-icon wtd-foot"
-        type="button"
-        :title="t('diff.footnote')"
-        :aria-label="t('diff.footnote')"
-        :aria-expanded="footOpen ? 'true' : 'false'"
-        @click="footOpen = !footOpen"
-      >
-        <AppIcon name="info" class="icon-sm" aria-hidden="true" />
-      </button>
-      <span v-if="footOpen" class="wtd-foot-text">{{ t("diff.footnote") }}</span>
-      <button
-        class="btn btn-ghost btn-xs wtd-refresh"
-        type="button"
-        :disabled="state.phase === 'loading'"
-        @click="emit('refresh')"
-      >
-        {{ t("diff.refresh") }}
-      </button>
-    </div>
   </div>
 </template>

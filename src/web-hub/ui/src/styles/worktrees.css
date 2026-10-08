@@ -263,6 +263,37 @@ button.wtd-toggle:hover {
 .wt-files-slot {
   flex: 1 1 100%;
   min-width: 0;
+  /* Always the LAST line of the row: it sits mid-row in the DOM (right after the toggle), so
+   * without an order every later item (ab, flags, row actions, copy) wrapped BELOW the list. */
+  order: 20;
+}
+
+/* The expanded list's refresh + ⓘ share the worktree's own line, right-aligned before copy.
+ * They sit right after the toggle in the DOM (inside the diffable branch, I8), so `order: 1`
+ * on both them and the copy button moves the pair after the ab/flag chips. */
+.wtd-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex: none;
+  order: 1;
+}
+.wt-item.is-expanded .wt-copy {
+  order: 1;
+  margin-left: 0;
+}
+
+/* ≤480px: the label drops to line 2 (order 10, see the reflow block above); the row actions and
+ * the expanded row's copy follow it there. Must come AFTER the desktop `order: 1` rules above —
+ * same specificity, so source order decides. */
+@media (max-width: 480px) {
+  .wtd-row-actions,
+  .wt-item.is-expanded .wt-copy {
+    order: 11;
+    margin-left: 0;
+    align-self: flex-start;
+  }
 }
 
 @media (pointer: coarse) {

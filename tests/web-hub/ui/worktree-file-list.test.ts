@@ -99,57 +99,22 @@ describe("WorktreeFileList — entries, badges, chips, stats (§4.2)", () => {
     expect(badges[4]).toContain("is-q");
   });
 
-  it("the refresh button emits refresh; entries emit open with the raw entry (path never pre-visualized)", async () => {
+  it("entries emit open with the raw entry (path never pre-visualized)", async () => {
     const entry: WtDiffFileEntry = { path: "src/a.ts", status: "M", add: 1, del: 2 };
     const w = mountList(okState([entry]));
-    await w.find(".wtd-refresh").trigger("click");
-    expect(w.emitted("refresh")).toHaveLength(1);
     await w.find(".wtd-file").trigger("click");
     expect(w.emitted("open")![0]![0]).toEqual(entry);
   });
 
-  it("the empty state renders its note (and still the footnote + refresh)", () => {
+  it("the empty state renders its note; refresh + footnote live on the panel row, not here", () => {
     const w = mountList(okState([]));
     expect(w.find(".wtd-files-state").text()).toBe("No changes to show.");
-    expect(w.find(".wtd-foot").exists()).toBe(true);
-    expect(w.find(".wtd-refresh").exists()).toBe(true);
+    expect(w.find(".wtd-foot").exists()).toBe(false);
+    expect(w.find(".wtd-refresh").exists()).toBe(false);
   });
 });
 
-describe("WorktreeFileList — standing footnote + degrade notes (D14/D20, §4.2)", () => {
-  it("the static footnote renders in the entries, loading AND error states alike", () => {
-    const withEntries = mountList(okState([{ path: "a.ts", status: "M" }]));
-    const foot = withEntries.find(".wtd-foot");
-    const text = "Protected entries are never listed; submodule changes are not shown.";
-    // quiet ⓘ in the refresh row: text rides title/aria-label, revealed inline only on click
-    expect(foot.attributes("title")).toBe(text);
-    expect(foot.attributes("aria-label")).toBe(text);
-    expect(withEntries.find(".wtd-foot-text").exists()).toBe(false);
-    expect(foot.element.parentElement?.classList.contains("wtd-files-actions")).toBe(true);
-
-    const loading = mountList({ phase: "loading", sig: "" });
-    expect(loading.find(".wtd-foot").exists()).toBe(true);
-    expect(loading.find(".wtd-files-state").attributes("role")).toBe("status");
-
-    const error = mountList({
-      phase: "error",
-      sig: "",
-      error: { code: "E_WTDIFF_UNSUPPORTED", reason: "git-too-old", retryable: true },
-    });
-    expect(error.find(".wtd-foot").exists()).toBe(true);
-  });
-
-  it("clicking the ⓘ reveals the footnote text inline (touch) and toggles it back", async () => {
-    const w = mountList(okState([]));
-    await w.find(".wtd-foot").trigger("click");
-    expect(w.find(".wtd-foot").attributes("aria-expanded")).toBe("true");
-    expect(w.find(".wtd-foot-text").text()).toBe(
-      "Protected entries are never listed; submodule changes are not shown.",
-    );
-    await w.find(".wtd-foot").trigger("click");
-    expect(w.find(".wtd-foot-text").exists()).toBe(false);
-  });
-
+describe("WorktreeFileList — degrade notes (§4.2)", () => {
   it("truncated / untrackedSkipped / numstatPartial / attrPartial each render their own note", () => {
     const w = mountList(
       okState([{ path: "a.ts", status: "M" }], {
