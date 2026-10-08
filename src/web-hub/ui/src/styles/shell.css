@@ -141,7 +141,13 @@
  * rule above (that rule targets `.settings-anchor + .btn`, i.e. the sign-out button). */
 .topbar .lang-toggle {
   min-width: 44px;
-  padding: 0 var(--sp-2);
+  /* 2026-10-09 「语言切换与设置的间距应参考设置与退出登录」: mirror the gear⇄logout clustering —
+   * kill the flex gap after the toggle and push its label toward the gear, with the toggle's
+   * right padding equal to the sign-out button's left padding (sp-3, 0 on phones below), so
+   * label→gear and gear→logout glyph gaps match while the 44px hit box stays. */
+  margin-right: calc(-1 * var(--sp-3));
+  justify-content: flex-end;
+  padding: 0 var(--sp-3) 0 var(--sp-2);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   white-space: nowrap;
@@ -154,6 +160,10 @@
 /* 2026-10-06 field report ("登出按钮比设置按钮小"): on phones the label is hidden anyway —
  * make the sign-out button the same square icon button as the gear (44px coarse hit box). */
 @media (max-width: 480px) {
+  .topbar .lang-toggle {
+    padding-right: 0;
+  }
+
   .topbar .settings-anchor + .btn {
     width: 44px;
     min-width: 44px;
