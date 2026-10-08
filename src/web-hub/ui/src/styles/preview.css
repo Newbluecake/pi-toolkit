@@ -79,6 +79,15 @@ code.md-code.path-ref {
   outline: none;
 }
 
+/* Directory browsing keeps a fixed panel height so the header (back / up / close) never moves
+ * when the next listing is shorter or while it loads (see PreviewHost.vue `holdTall`). */
+@media (min-width: 768px) {
+  /* desktop only: ≤767px is already full-screen (100dvh) and must not be overridden */
+  .preview-panel.is-hold-tall {
+    height: min(85vh, 900px);
+  }
+}
+
 /* §4.6: ≤767px goes full-screen, honoring safe-area and dynamic viewport height. */
 @media (max-width: 767px) {
   .preview-overlay {

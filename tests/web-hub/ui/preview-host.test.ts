@@ -577,3 +577,49 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     await tick();
   });
 });
+
+describe("PreviewHost.vue — directory browsing keeps the panel height stable", () => {
+  it("holds the tall panel after a dir listing (through loading / shorter listings) and resets on close", async () => {
+    const listing = (n: number) => ({
+      entries: Array.from({ length: n }, (_, i) => ({ name: `f${i}`, type: "file" })),
+      total: n,
+      scanned: n,
+      complete: true,
+      truncated: false,
+      limits: { scan: false, entries: false, bytes: false },
+      vanished: 0,
+      dropped: 0,
+    });
+    const view = ref<PreviewView>({ phase: "loading", path: "/p" } as unknown as PreviewView) as Ref<PreviewView>;
+    const handle: PreviewHandle = {
+      view,
+      scope: ref({ agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true }) as Ref<never>,
+      open: vi.fn(),
+      close: vi.fn(() => {
+        view.value = { phase: "closed" };
+      }),
+      retry: vi.fn(),
+      dispose: vi.fn(),
+    };
+    mountHost({ handle, plaintext: false });
+    await tick();
+    const panel = () => document.querySelector(".preview-panel") as HTMLElement | null;
+    expect(panel()!.classList.contains("is-hold-tall")).toBe(false); // nothing browsed yet
+    view.value = { phase: "dir", path: "/p", listing: listing(80) } as unknown as PreviewView;
+    await tick();
+    expect(panel()!.classList.contains("is-hold-tall")).toBe(true);
+    view.value = { phase: "loading", path: "/p/a" } as unknown as PreviewView;
+    await tick();
+    expect(panel()!.classList.contains("is-hold-tall")).toBe(true); // still tall while loading
+    view.value = { phase: "dir", path: "/p/a", listing: listing(2) } as unknown as PreviewView;
+    await tick();
+    expect(panel()!.classList.contains("is-hold-tall")).toBe(true); // short listing: no shrink
+    view.value = { phase: "closed" };
+    await tick();
+    view.value = { phase: "loading", path: "/p/x.ts" } as unknown as PreviewView;
+    await tick();
+    expect(panel()!.classList.contains("is-hold-tall")).toBe(false); // a fresh open starts compact
+    view.value = { phase: "closed" };
+    await tick();
+  });
+});

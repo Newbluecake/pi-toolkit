@@ -54,6 +54,19 @@ const basename = computed(() => {
   return slash >= 0 && slash < p.length - 1 ? p.slice(slash + 1) : p;
 });
 const isDirPhase = computed(() => view.value.phase === "dir");
+/** Once a directory listing has been shown in this open, the panel keeps its full height
+ * (2026-10-08 field report: browsing from a long listing to a short one — or through the
+ * loading phase in between — shrank the vertically-centered panel and made the header buttons
+ * jump under the cursor). Reset whenever the dialog closes. */
+const holdTall = ref(false);
+watch(
+  () => view.value.phase,
+  (phase) => {
+    if (phase === "dir") holdTall.value = true;
+    else if (phase === "closed") holdTall.value = false;
+  },
+  { immediate: true },
+);
 const backDisabled = computed(() => nav.value === null || nav.value.stackDepth.value === 0);
 const upDisabled = computed(() => parentPreviewPath(path.value) === null);
 
@@ -203,6 +216,7 @@ function onKeydown(ev: KeyboardEvent): void {
       <div
         ref="panelEl"
         class="preview-panel"
+        :class="{ 'is-hold-tall': holdTall }"
         role="dialog"
         aria-modal="true"
         :aria-label="t('preview.dialogLabel')"
