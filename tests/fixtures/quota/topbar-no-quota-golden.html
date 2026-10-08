@@ -1,0 +1,26 @@
+<!--
+  AUTO-GENERATED fixture — quota-web plan verification r_WV2Y9VQZ #3 (audit trail for the
+  "TopBar DOM byte-identical to pre-feature when there is no quota data" pin). DO NOT hand-edit.
+
+  What this is: the exact `outerHTML` produced by mounting the PRE-quota-web `TopBar.vue` (i.e.
+  the file as it stood at the HEAD commit below, before this feature's working-tree edit to that
+  file) with `@vue/test-utils` under `happy-dom`, using
+    props = { conn: "open", hubVersion: null, canSignOut: false }
+  — the same `baseProps` `tests/web-hub/ui/topbar-settings-toggle.test.ts` already used.
+
+  Captured from:  git show HEAD:src/web-hub/ui/src/components/shell/TopBar.vue
+  HEAD commit at capture time: fca7493d3ea6cb8b9131298dc75d930d763ad16e
+
+  Regenerate (only meaningful against a HEAD that still predates the quota-web pill — i.e.
+  before this feature's TopBar.vue edit itself is committed; regenerating afterwards would just
+  capture the post-feature file and defeat the whole point of the pin):
+
+      UPDATE_QUOTA_GOLDEN=1 npx vitest run tests/web-hub/ui/quota-pill.test.ts
+
+  See `tests/web-hub/ui/quota-pill.test.ts`'s "regenerates the golden fixture" test for the exact
+  (scripted, not hand-typed) capture procedure this file's content was produced by: it does the
+  same `git show HEAD:<path>` + temp-file dynamic `import()` + `mount()` dance as above,
+  programmatically, and overwrites this file including this header.
+-->
+<header class="topbar"><span class="brand" title="pi web-hub · ui 0.0.0-test@0123456 · 01-02 11:04"><span class="brand-mark" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-logo"></use></svg></span><span translate="no">pi web-hub</span></span><span class="pill conn" data-conn="open" role="status"><span class="dot dot-live"></span> Live</span><!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
+         the brand's title tooltip. --><span class="topbar-meta" translate="no">ui 0.0.0-test@0123456 · 01-02 11:04</span><span class="chip readonly-chip"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye"></use></svg>Read-only</span><span class="topbar-spacer"></span><button type="button" class="btn btn-ghost lang-toggle" aria-label="Switch language" title="Switch language">中文</button><span class="settings-anchor"><button type="button" class="btn btn-ghost btn-icon settings-link" aria-label="Settings" title="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings-panel"><svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg></button><!--v-if--></span><!--v-if--></header>

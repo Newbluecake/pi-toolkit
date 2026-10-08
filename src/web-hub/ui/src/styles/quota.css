@@ -1,0 +1,230 @@
+/*
+ * Subscription-quota pill + popover card styles (quota-web plan §3, D6/D7) — token-only,
+ * imported by `components/quota/QuotaPill.vue` / `QuotaCard.vue`. Deliberately its own file
+ * (same precedent as `styles/todo.css` / `styles/bash-jobs.css`): a dedicated stylesheet keeps
+ * this package's file domain disjoint from the in-flight diff/worktree lines.
+ *
+ * Four-tier color ladder (verification r_WV2Y9VQZ #1, 2026-10): L0 success (quiet dot only),
+ * L1 warning, L2 orange, L3 danger + `font-weight: var(--fw-semibold)` — matching the mockup
+ * exactly. `--c-orange`/`--c-orange-soft`/`--c-orange-border`/`--c-orange-text` live in
+ * `styles/tokens.css` (added alongside this change, light+dark, same shape as the existing
+ * warning/danger families) so L2 is never visually confused with L1 or L3 by color alone.
+ */
+
+.q-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 3px 9px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  background: var(--c-surface);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.q-pill:hover {
+  background: var(--c-surface-2);
+}
+
+.q-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--c-text-3);
+}
+
+.q-pill[data-level="0"] .q-dot {
+  background: var(--c-success);
+}
+
+.q-pill[data-level="1"] {
+  color: var(--c-warning-text);
+  background: var(--c-warning-soft);
+  border-color: var(--c-warning-border);
+}
+.q-pill[data-level="1"] .q-dot {
+  background: var(--c-warning);
+}
+
+.q-pill[data-level="2"] {
+  color: var(--c-orange-text);
+  background: var(--c-orange-soft);
+  border-color: var(--c-orange-border);
+}
+.q-pill[data-level="2"] .q-dot {
+  background: var(--c-orange);
+}
+
+.q-pill[data-level="3"] {
+  color: var(--c-danger);
+  background: var(--c-danger-soft);
+  border-color: var(--c-danger-border);
+  font-weight: var(--fw-semibold);
+}
+.q-pill[data-level="3"] .q-dot {
+  background: var(--c-danger);
+}
+
+.q-pill-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.q-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+/* ---------------------------------------------------------------- popover card */
+
+.q-card {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+}
+
+.q-card:focus {
+  outline: none;
+}
+
+.q-card-title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.q-prov {
+  padding: var(--sp-2) 0;
+}
+.q-prov + .q-prov {
+  border-top: 1px solid var(--c-border);
+}
+
+.q-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.q-name {
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.q-plan {
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-xs);
+  padding: 0 4px;
+}
+
+.q-badge {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--fs-2xs);
+  border-radius: var(--r-xs);
+  padding: 1px 5px;
+}
+.q-badge.q-demoted {
+  color: var(--c-warning-text);
+  background: var(--c-warning-soft);
+  border: 1px dashed var(--c-warning-border);
+}
+.q-badge.q-stale {
+  color: var(--c-text-3);
+  border: 1px solid var(--c-border);
+}
+
+.q-row {
+  display: grid;
+  grid-template-columns: 30px 1fr auto;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 3px 0;
+}
+
+.q-scope {
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.q-bar {
+  height: 6px;
+  border-radius: var(--r-xs);
+  background: var(--c-sunken);
+  border: 1px solid var(--c-border);
+  overflow: hidden;
+}
+.q-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-xs) 0 0 var(--r-xs);
+  background: var(--c-success);
+  font-style: normal; /* <i> used as a plain bar-fill element, not italic emphasis */
+}
+.q-bar[data-lv="1"] > i {
+  background: var(--c-warning);
+}
+.q-bar[data-lv="2"] > i {
+  background: var(--c-orange);
+}
+.q-bar[data-lv="3"] > i {
+  background: var(--c-danger);
+}
+
+.q-val {
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.q-sub {
+  grid-column: 2 / 4;
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+}
+.q-sub.q-warn {
+  color: var(--c-danger);
+  font-weight: var(--fw-semibold);
+}
+
+.q-foot {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+/* ---------------------------------------------------------------- mobile (≤767px) */
+
+@media (max-width: 767px) {
+  .q-card {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-width: none;
+  }
+}

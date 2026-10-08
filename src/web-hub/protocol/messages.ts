@@ -237,6 +237,52 @@ export interface BashJobsWire {
   sampledAt: number; // agent-clock epoch ms of the projection that produced this content
 }
 
+/**
+ * quota-web plan §1 (D1-D9): one window (`5h`/`week`, displayed as `7d`) of a provider's
+ * `StatusInfo.quota` row. `etaMs`/`resetAt` absent ⇒ no prediction / unknown reset — the UI
+ * must not synthesize either. The web pill/card renders countdowns from these absolute
+ * timestamps locally (D2: the agent side never re-pushes purely for a clock tick).
+ */
+export interface QuotaWindowWire {
+  scope: "5h" | "week";
+  usedPct: number; // 0..100
+  level: 0 | 1 | 2 | 3;
+  resetAt?: number; // epoch ms
+  etaMs?: number; // 预测耗尽还剩多久；不燃烧/样本不足时缺省
+}
+
+/**
+ * quota-web plan §1: one provider row. Deliberately **open** (no `additionalProperties:false`,
+ * see `QuotaWireSchema` below) — same forward-compat posture as `WorktreeRowWire`/`BashJobRowWire`:
+ * a `decodeWith` failure drops the whole status frame, which a stale hub during the replacement
+ * window could otherwise do forever.
+ */
+export interface QuotaProviderWire {
+  id: "zai-coding-cn" | "zai" | "kimi-coding";
+  plan?: string; // GLM 的档位（max/pro…）
+  level: 0 | 1 | 2 | 3; // provider 级 = 窗口 max
+  stale: boolean;
+  /** verification r_WV2Y9VQZ #2 (append-only, optional): the snapshot's own `fetchedAt`, so the
+   *  stale badge can show an age ("stale N min") instead of a bare marker. Absent on an older
+   *  agent peer, or defensively if the underlying verdict ever lacks one — the UI falls back to
+   *  a plain stale badge with no age in that case (never fabricates one). */
+  fetchedAt?: number;
+  demotedUntil?: number;
+  windows: QuotaWindowWire[];
+}
+
+/**
+ * quota-web plan §1/D4: `StatusInfo.quota`'s body. Absent ⇒ no credentials / quota feature off /
+ * not sampled yet (byte-equal to the pre-feature shape). `at` is the agent-clock instant the
+ * verdicts were read (D5: the UI hoists whichever subscribed session carries the largest `at`
+ * to the global TopBar pill).
+ */
+export interface QuotaWire {
+  v: 1;
+  at: number;
+  providers: QuotaProviderWire[];
+}
+
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -260,6 +306,11 @@ export interface StatusInfo {
    *  Absent = no background jobs / bash-jobs disabled / web-hub disabled / source missing
    *  (byte-equal to the pre-feature shape, D5). Decode side stays open-ended (same as `todo`). */
   bashJobs?: BashJobsWire;
+  /** quota-web plan §1/D4 (包 quota-web): optional subscription-quota summary (per-provider
+   *  5h/7d ladder verdicts), riding the same status slot lifecycle as `todo`/`worktrees`/
+   *  `bashJobs`. Absent = no credentials / quota feature off / `webHub.quota` off / not yet
+   *  sampled (byte-equal to the pre-feature shape). Decode side stays open-ended (same as `todo`). */
+  quota?: QuotaWire;
 }
 
 export interface FleetRowWire {
@@ -838,6 +889,38 @@ export const BashJobsWireSchema = Type.Object(
   },
   { additionalProperties: true },
 );
+// quota-web plan §1/D4: same open posture as WorktreesWireSchema/BashJobsWireSchema above (Q4
+// precedent) — a `decodeWith` failure drops the WHOLE status frame.
+const QuotaWindowSchema = Type.Object(
+  {
+    scope: Type.Union([Type.Literal("5h"), Type.Literal("week")]),
+    usedPct: Type.Number({ minimum: 0, maximum: 100 }),
+    level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
+    resetAt: Type.Optional(Type.Number()),
+    etaMs: Type.Optional(Type.Number()),
+  },
+  { additionalProperties: true },
+);
+const QuotaProviderSchema = Type.Object(
+  {
+    id: Type.Union([Type.Literal("zai-coding-cn"), Type.Literal("zai"), Type.Literal("kimi-coding")]),
+    plan: Type.Optional(Type.String({ maxLength: 64 })),
+    level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
+    stale: Type.Boolean(),
+    fetchedAt: Type.Optional(Type.Number()),
+    demotedUntil: Type.Optional(Type.Number()),
+    windows: Type.Array(QuotaWindowSchema, { maxItems: 8 }),
+  },
+  { additionalProperties: true },
+);
+export const QuotaWireSchema = Type.Object(
+  {
+    v: Type.Literal(1),
+    at: Type.Number({ minimum: 0 }),
+    providers: Type.Array(QuotaProviderSchema, { maxItems: 16 }),
+  },
+  { additionalProperties: true },
+);
 const StatusInfoSchema = Type.Object({
   leafId: Type.Union([Type.String(), Type.Null()]),
   busy: Type.Boolean(),
@@ -852,6 +935,7 @@ const StatusInfoSchema = Type.Object({
   todo: Type.Optional(TodoWireSchema),
   worktrees: Type.Optional(WorktreesWireSchema),
   bashJobs: Type.Optional(BashJobsWireSchema),
+  quota: Type.Optional(QuotaWireSchema),
 });
 
 const FleetRowSchema = Type.Object({

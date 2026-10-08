@@ -33,6 +33,8 @@ import type { TopBarEmits, TopBarProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import { parseRouteHash } from "../../composables/useHashRoute.js";
 import SettingsOverlay from "./SettingsOverlay.vue";
+import QuotaPill from "../quota/QuotaPill.vue";
+import { freshestQuota } from "@logic/quota.js";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -51,6 +53,23 @@ function toggleLang(): void {
 const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
 const controlOn = computed(() => hub?.state.value.control === true);
+
+/**
+ * quota-web plan §3/D5: cross-session hoist — computed fresh off `hub.state.value.agents` on
+ * every reactive tick (no reducer change needed: `@logic/state.js` already mirrors `StatusInfo`
+ * wholesale onto `AgentState.status`, so `status.quota` just rides along). Wrapped in a 0/1-item
+ * array (NOT a `v-if`) so the template below can mount `QuotaPill` with a plain `v-for`: Vue's
+ * compiled `v-if` always leaves a `<!--v-if-->` anchor comment in the DOM even when false
+ * (verified empirically against this exact component tree), but an empty `v-for` list produces
+ * truly zero extra nodes — the only way to satisfy quota-web plan's "no quota data ⇒ TopBar DOM
+ * byte-identical to pre-feature" requirement (pinned by `tests/web-hub/ui/quota-pill.test.ts`).
+ */
+const quotaList = computed(() => {
+  const agents = hub?.state.value.agents;
+  if (agents === undefined) return [];
+  const q = freshestQuota(agents.values());
+  return q === undefined ? [] : [q];
+});
 
 const connLabelKey = computed(() => `shell.conn.${props.conn}`);
 const uiStamp = computed(() => uiBuildStamp(UI_BUILD));
@@ -114,6 +133,8 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
       <span v-else class="dot dot-live"></span>
       {{ t(connLabelKey) }}
     </span>
+
+    <QuotaPill v-for="q in quotaList" :key="'quota'" :quota="q" />
 
     <!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
          the brand's title tooltip. -->

@@ -900,6 +900,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     uploads: "on",
     preview: "on",
     subagentTranscript: "all",
+    quota: true,
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
   },
@@ -1675,6 +1676,7 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
     subagentTranscript: parseSubagentTranscriptSetting(record.subagentTranscript, defaults.subagentTranscript),
+    quota: typeof record.quota === "boolean" ? record.quota : (defaults.quota ?? true),
     lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
   };

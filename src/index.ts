@@ -935,6 +935,12 @@ export default function activate(rawPi: ExtensionAPI): void {
             },
           }
         : {}),
+      // quota-web plan §2 (D3/D8): same late-bound-getter precedent as `todo` above. `holder.current`
+      // is re-read on every call (session_start/⁄reload rebuilds the stack); `settings.webHub.quota`
+      // defaults true, `false` ⇒ the getter is never threaded through at all (wireWebHub treats an
+      // absent `deps.quota` as "feature off", so the sampler never runs and the wire field never
+      // appears — byte-equal to the pre-feature shape).
+      ...(settings.webHub.quota !== false ? { quota: () => holder.current?.quota?.verdicts() ?? [] } : {}),
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;

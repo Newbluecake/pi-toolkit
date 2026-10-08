@@ -66,6 +66,9 @@ import { createBashJobsSampler, type BashJobsSource } from "./bash-jobs-sampler.
 import type { BashJobsWire } from "../protocol/messages.js";
 import { todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
+import { projectQuota, quotaFingerprint } from "./quota-sampler.js";
+import type { QuotaWire } from "../protocol/messages.js";
+import type { ProviderVerdict } from "../../quota/ladder.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
 import { createCommandLedger } from "./ledger.js";
@@ -125,6 +128,12 @@ export interface WebHubSettings {
    * `"all"` (default) advertises `runtx.v1` + `runtx.lan.v1`; `"loopback"` only `runtx.v1`;
    * `"off"` neither. This is the READ plane — deliberately independent of `control`. */
   subagentTranscript?: "all" | "loopback" | "off";
+  /** quota-web plan §2/D8: `StatusInfo.quota` availability. Default `true`; `false` ⇒ the agent
+   * never threads a `quota` getter into `WebHubDeps` at all — the sampler never runs, the
+   * `quota` field never appears on the wire (byte-equal to the pre-feature shape). Independent of
+   * `settings.quota.enabled` (the underlying `QuotaService` itself): with no verdicts the field
+   * is already absent, this flag is purely the web-hub-side kill switch. */
+  quota?: boolean;
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
   /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，
@@ -172,6 +181,11 @@ export interface WebHubDeps {
     current(): BashJobsSource | undefined;
     retentionMs(): number;
   };
+  /** quota-web plan §2 (包 quota-web, D3): live getter for the main session's `QuotaService`
+   *  verdicts — same late-bound-closure precedent as `todo` above (`src/index.ts` threads
+   *  `() => holder.current?.quota?.verdicts() ?? []`). Unset (webHub.quota=false, or the quota
+   *  feature itself produces no verdicts) ⇒ the `StatusInfo.quota` field is never set. */
+  quota?: () => readonly ProviderVerdict[];
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -284,6 +298,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // signature diff (which rows a fingerprint edge should kick) — same lifecycle as lastTodoFp.
   let lastBashFp: string | undefined;
   let lastBashSigs: Map<string, string> | undefined;
+  // quota-web plan §2 (D3): same lifecycle as lastTodoFp/lastBashFp — reset on session_start.
+  let lastQuotaFp: string | undefined;
   let connGen = 0;
   let lastModelsKey: string | undefined;
   let modelsTick = 0;
@@ -364,6 +380,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const src = d.current();
     if (src === undefined) return undefined;
     return projectBashJobs(src.list(), bashSampler.tails(src.gen), now(), d.retentionMs());
+  };
+
+  // quota-web plan §2 (D3): pure, stateless projection — `QuotaService.verdicts()` is already a
+  // synchronous in-memory read, so there is no sampler state to own here (see quota-sampler.ts's
+  // module docstring). Re-evaluated fresh on every call; the 1Hz tick below only decides whether
+  // a given evaluation is worth publishing.
+  const quotaProjection = (): QuotaWire | undefined => {
+    const d = deps.quota;
+    if (d === undefined) return undefined;
+    return projectQuota(d(), now());
   };
 
   const commandLedger = createCommandLedger();
@@ -459,6 +485,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       deps.todo,
       () => wtSampler.current(),
       deps.bashJobs !== undefined ? bashJobsProjection : undefined,
+      deps.quota !== undefined ? quotaProjection : undefined,
     );
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
@@ -530,6 +557,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     if (todoFp !== lastTodoFp) {
       lastTodoFp = todoFp;
       publishStatus();
+    }
+    // quota-web plan §2 (D3): `QuotaService` has no events either — same 1Hz tick fingerprint
+    // gate (quotaFingerprint excludes the ever-moving `at` field, see its own docstring).
+    if (deps.quota !== undefined) {
+      const quotaFp = quotaFingerprint(quotaProjection());
+      if (quotaFp !== lastQuotaFp) {
+        lastQuotaFp = quotaFp;
+        publishStatus();
+      }
     }
     // bash-jobs-panel plan §3.7 (包 A, D3-1): the manager has no events, so the same 1Hz tick
     // carries a light-fingerprint gate over the selectJobs result (running logBytes and
@@ -698,6 +734,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             deps.todo,
             () => wtSampler.current(),
             deps.bashJobs !== undefined ? bashJobsProjection : undefined,
+            deps.quota !== undefined ? quotaProjection : undefined,
           ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
@@ -874,6 +911,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lastTodoFp = undefined;
     lastBashFp = undefined;
     lastBashSigs = undefined;
+    lastQuotaFp = undefined;
     lastModelsKey = undefined;
     modelsTick = 0;
     tap.resetForSession(Number.NaN);

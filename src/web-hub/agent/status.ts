@@ -10,7 +10,14 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
-import type { BashJobsWire, FleetOmitted, FleetRowWire, StatusInfo, WorktreesWire } from "../protocol/messages.js";
+import type {
+  BashJobsWire,
+  FleetOmitted,
+  FleetRowWire,
+  QuotaWire,
+  StatusInfo,
+  WorktreesWire,
+} from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
 import { projectTodo } from "./todo.js";
@@ -28,6 +35,7 @@ export function readStatus(
   todo?: () => TodoState,
   worktrees?: () => WorktreesWire | undefined,
   bashJobs?: () => BashJobsWire | undefined,
+  quota?: () => QuotaWire | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -76,6 +84,13 @@ export function readStatus(
   if (bashJobs !== undefined) {
     const wire = bashJobs();
     if (wire !== undefined) status.bashJobs = wire;
+  }
+  // quota-web plan §2/D4: same overwrite-only-slot rationale as todo/worktrees/bashJobs above —
+  // no getter (quota disabled / webHub.quota off / no verdicts yet) ⇒ the field stays absent,
+  // byte-equal to the pre-feature status shape.
+  if (quota !== undefined) {
+    const wire = quota();
+    if (wire !== undefined) status.quota = wire;
   }
   return status;
 }

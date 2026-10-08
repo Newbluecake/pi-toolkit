@@ -44,6 +44,15 @@
   --c-danger: #c0262d;
   --c-danger-soft: #fdeeee;
   --c-danger-border: #f5c9cb;
+  /* quota-web plan D6 (verification r_WV2Y9VQZ #1): a 4th semantic tier so the quota ladder's
+   * L2 can be visually distinct from L1 (warning/amber) and L3 (danger/red) without relying on
+   * color alone (L3 still adds `font-weight`+`⚠` on top of this). Named/shaped exactly like the
+   * existing warning/danger families so any future consumer can follow the same three-token
+   * (+ -text) pattern. */
+  --c-orange: #b4490a;
+  --c-orange-soft: #fdf0e6;
+  --c-orange-border: #f5d3b8;
+  --c-orange-text: #8a3908; /* darker than --c-orange, same “text needs more contrast than a dot/bar” reasoning as --c-warning-text */
   --c-info: #1f5fc4;
   --c-info-soft: #e8f0fc;
 
@@ -164,6 +173,10 @@
     --c-danger: #f2767a;
     --c-danger-soft: #2e1719;
     --c-danger-border: #52282b;
+    --c-orange: #f2914a;
+    --c-orange-soft: #2e1f12;
+    --c-orange-border: #4a331c;
+    --c-orange-text: #f5b37d;
     --c-info: #72a7f5;
     --c-info-soft: #16243a;
     --diff-del-soft: #2e1719;
@@ -223,6 +236,10 @@
   --c-danger: #f2767a;
   --c-danger-soft: #2e1719;
   --c-danger-border: #52282b;
+  --c-orange: #f2914a;
+  --c-orange-soft: #2e1f12;
+  --c-orange-border: #4a331c;
+  --c-orange-text: #f5b37d;
   --c-info: #72a7f5;
   --c-info-soft: #16243a;
   --diff-del-soft: #2e1719;
