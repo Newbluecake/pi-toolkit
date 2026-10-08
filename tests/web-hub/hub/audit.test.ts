@@ -5,11 +5,13 @@ import {
   auditAdmin,
   auditControl,
   auditPreview,
+  auditWorktreeDiff,
   auditRemove,
   auditSpawn,
   auditUpload,
   createUploadHttpMetrics,
   PREVIEW_AUDIT_KEYS,
+  WTDIFF_AUDIT_KEYS,
   REMOVE_AUDIT_KEYS,
   SPAWN_AUDIT_KEYS,
   uploadStatsFields,
@@ -481,5 +483,100 @@ describe("auditRemove (web-hub-delete-session plan v2 §4.2, A13)", () => {
     expect(REMOVE_AUDIT_KEYS).not.toContain("cwd");
     expect(REMOVE_AUDIT_KEYS).not.toContain("text");
     expect(REMOVE_AUDIT_KEYS).not.toContain("textLen");
+  });
+});
+
+describe("auditWorktreeDiff (worktree-diff plan §2.9, D3)", () => {
+  it('writes the whitelisted key set under audit:"wtdiff" and drops smuggled path/driver fields', () => {
+    const log = memLog();
+    auditWorktreeDiff(log, {
+      phase: "files",
+      listener: "lan",
+      ip: "192.168.1.9",
+      user: "u2",
+      agentKey: "a1",
+      ok: true,
+      files: 3,
+      truncated: false,
+      ms: 42,
+      ext: "ts",
+      wtTag: "abc123def456",
+      pathTag: "789abc123def",
+      joined: true,
+      cached: false,
+      drivers: 2,
+      // deliberately smuggled — must be dropped by the whitelist
+      ...({
+        wt: "/w/repo",
+        path: "src/a.ts",
+        orig: "src/b.ts",
+        driverNames: ["lfs"],
+        oid: "abc",
+        patch: "diff --git",
+      } as unknown as Record<string, never>),
+    } as never);
+    expect(log.lines).toHaveLength(1);
+    const line = log.lines[0]!;
+    expect(line.msg).toBe("wtdiff");
+    const data = line.data as Record<string, unknown>;
+    expect(data["audit"]).toBe("wtdiff");
+    expect(Object.keys(data).sort()).toEqual(
+      [
+        "audit",
+        "phase",
+        "listener",
+        "ip",
+        "user",
+        "agentKey",
+        "ok",
+        "files",
+        "truncated",
+        "ms",
+        "ext",
+        "wtTag",
+        "pathTag",
+        "joined",
+        "cached",
+        "drivers",
+      ].sort(),
+    );
+    expect(data["wt"]).toBeUndefined();
+    expect(data["path"]).toBeUndefined();
+    expect(data["orig"]).toBeUndefined();
+    expect(data["driverNames"]).toBeUndefined();
+    expect(data["oid"]).toBeUndefined();
+    expect(data["patch"]).toBeUndefined();
+  });
+
+  it("WTDIFF_AUDIT_KEYS carries no path/driver-name/oid/patch-bearing key (§2.9 永不记录)", () => {
+    for (const banned of [
+      "wt",
+      "path",
+      "orig",
+      "base",
+      "oid",
+      "branch",
+      "patch",
+      "content",
+      "driverNames",
+      "name",
+      "stderr",
+    ]) {
+      expect(WTDIFF_AUDIT_KEYS, banned).not.toContain(banned);
+    }
+  });
+
+  it("omits absent optional fields entirely (no null/undefined keys land in the log line)", () => {
+    const log = memLog();
+    auditWorktreeDiff(log, {
+      phase: "file",
+      listener: "loopback",
+      ip: "127.0.0.1",
+      ok: false,
+      code: "E_STALE_CTX",
+      reason: "base",
+    });
+    const data = log.lines[0]!.data as Record<string, unknown>;
+    expect(Object.keys(data).sort()).toEqual(["audit", "code", "ip", "listener", "ok", "phase", "reason"].sort());
   });
 });

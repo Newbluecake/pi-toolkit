@@ -42,6 +42,7 @@ import {
   PREVIEW_LAN_HUB_CAP,
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
+  WTDIFF_HUB_CAP,
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
@@ -68,6 +69,8 @@ import { createSpawnRoutes } from "./spawn/routes.js";
 import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
 import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
+import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
+import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createSpawnStore } from "./spawn/store.js";
 import { createSpawnSupervisor, type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
 import { createUploadStore, type UploadStore } from "./uploads.js";
@@ -171,6 +174,10 @@ export interface StartHubDeps {
    * `preview.root_uid` WARN after the preview routes are built. Default: `process.getuid?.()`;
    * tests inject `() => 0` / `() => 1000` / leave it undefined (no getuid on the platform). */
   getuid?: () => number;
+  /** worktree-diff plan §1.6 (D3): the git runner the worktree-diff routes execute every
+   * hub-side git command through (D15). Default: the real `createGitRunner()`; tests inject a
+   * scripted fake so no git process is ever spawned. */
+  gitRunner?: GitRunner;
 }
 
 export async function startHub(
@@ -243,7 +250,15 @@ export async function startHub(
       ...(config.spawn === undefined ? [] : [SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP]),
       ...(config.preview === undefined
         ? []
-        : [PREVIEW_HUB_CAP, PREVIEW_ABS_HUB_CAP, ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : [])]),
+        : [
+            PREVIEW_HUB_CAP,
+            PREVIEW_ABS_HUB_CAP,
+            ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
+            // worktree-diff D21: `wtdiff.v1` rides the SAME preview gate AND the /proc probe —
+            // the three-fd pin is /proc-bound, so a platform without it never declares the cap
+            // (and hub.ts below never builds the routes at all).
+            ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
+          ]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
     ];
 
@@ -664,6 +679,7 @@ export async function startHub(
     // form + a path-free WARN, backstopped by the §2.3 global twins. agentDir shares the
     // spawn assembly's exact source (L512's SP3): `PI_CODING_AGENT_DIR ?? ${home}/.pi/agent`.
     let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined;
+    let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined;
     if (config.preview !== undefined) {
       const denyCtx = await withSignal(
         resolvePreviewDenyContext(
@@ -703,6 +719,22 @@ export async function startHub(
           { event: "preview.root_uid", mode: config.preview },
         );
       }
+      // worktree-diff plan §1.6 (D3): the worktree-diff route frontend — same feature gate as
+      // preview (`config.preview` exists) PLUS the /proc probe (D21: the three-fd pin is
+      // /proc-bound; without /proc the routes are never built and `wtdiff.v1` never declared —
+      // loopback AND LAN both fall back to the not-enabled matrix byte-identically). Shares the
+      // SAME denyCtx object preview just resolved (§2.5) and takes the hub-side git runner
+      // (D15). Pure closure building — nothing here can fail.
+      if (previewProcFdAvailable()) {
+        worktreeDiffRoutes = createWorktreeDiffRoutes({
+          mode: config.preview,
+          denyCtx,
+          registry,
+          run: deps.gitRunner ?? createGitRunner(),
+          log,
+          now,
+        });
+      }
     }
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
     // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
@@ -737,6 +769,7 @@ export async function startHub(
       ...(uploads === undefined ? {} : { uploads }),
       ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
       ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
+      ...(worktreeDiffRoutes === undefined ? {} : { worktreeDiff: worktreeDiffRoutes }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
       // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
       // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
@@ -750,6 +783,11 @@ export async function startHub(
     // fe.close).
     if (previewRoutes !== undefined) {
       cleanup.push(() => previewRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    }
+    // worktree-diff plan §1.6 (D3): right after preview's push — the startup-failure unwind
+    // disposes wtdiff AFTER preview and BEFORE `fe.close()`, mirroring the runtime order below.
+    if (worktreeDiffRoutes !== undefined) {
+      cleanup.push(() => worktreeDiffRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
     }
     // web-hub-spawn §SP10 (startup-failure path only — the runtime close() path wires its own
     // call inside `close`): pushed right after the frontend's entry so reverse-order release
@@ -1148,6 +1186,10 @@ export async function startHub(
         // verifier tasks aborted, every active request aborted "hub-close", head-sent streams
         // destroyed) and idempotent (shares the startup-failure promise).
         if (previewRoutes !== undefined) await bounded(previewRoutes.dispose("close", deadline));
+        // worktree-diff plan §1.6 (D3): after preview dispose, still BEFORE the HTTP face stops
+        // accepting — aborts every in-flight request and single-flight git execution, waits
+        // ≤1 s, idempotent (shares the startup-failure promise).
+        if (worktreeDiffRoutes !== undefined) await bounded(worktreeDiffRoutes.dispose("close", deadline));
         await bounded(fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files

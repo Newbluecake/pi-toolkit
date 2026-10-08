@@ -11,6 +11,7 @@
  * seam is the `deps.audit` callback), so there is no cycle. */
 import type { UploadStats } from "./uploads.js";
 import type { SpawnAuditRecord } from "./spawn/supervisor.js";
+import type { WtDiffFileKind, WtDiffStatus } from "../protocol/worktree-diff.js";
 
 // ---------------------------------------------------------------------------
 // HTTP-layer upload metrics (plan §5.4 stats row, U3 P2-2)
@@ -428,4 +429,79 @@ export function auditRemove(log: { info(msg: string, data?: object): void }, rec
     if (v !== undefined) out[key] = v;
   }
   log.info("remove", out);
+}
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan §2.9 (D3): the wtdiff audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * worktree-diff audit record (plan §2.9, verbatim field set). NEVER carries `wt`/`path`/`orig`
+ * verbatim, any driver name, branch name, oid, patch or content (same discipline as every other
+ * channel here): `wtTag`/`pathTag` are HMAC-12 tags under the routes instance's per-process key,
+ * `drivers` is only the neutralized COUNT, `files` only the visible entry count (denylist hits
+ * never reach ANY field, D14). One line per request, written in §1.7 ⑬'s finally; the single
+ * exception (I7) is 429, throttled by the routes to one line per `wtdiff:${principal}` per 60 s.
+ */
+export interface WtDiffAuditRecord {
+  phase: "files" | "file";
+  listener?: "loopback" | "lan";
+  ip?: string;
+  user?: string;
+  agentKey?: string;
+  ok: boolean;
+  code?: string;
+  reason?: string;
+  status?: WtDiffStatus;
+  kind?: WtDiffFileKind | "untracked";
+  files?: number;
+  truncated?: boolean;
+  bytes?: number;
+  ms?: number;
+  ext?: string;
+  /** HMAC-12(W) under the routes instance's random key — never the worktree path itself. */
+  wtTag?: string;
+  /** HMAC-12(W + "\\0" + rel) — never the repo-relative path itself. */
+  pathTag?: string;
+  /** true when this request joined another request's single-flight execution (§1.10). */
+  joined?: boolean;
+  /** true when the changeset came from the ≤5 s TTL cache (never: git output is never cached). */
+  cached?: boolean;
+  /** neutralized driver COUNT (never names, §2.9 永不记录驱动名). */
+  drivers?: number;
+}
+
+/** Runtime whitelist for `auditWorktreeDiff` — anything not listed here is dropped, even if passed. */
+export const WTDIFF_AUDIT_KEYS = [
+  "phase",
+  "listener",
+  "ip",
+  "user",
+  "agentKey",
+  "ok",
+  "code",
+  "reason",
+  "status",
+  "kind",
+  "files",
+  "truncated",
+  "bytes",
+  "ms",
+  "ext",
+  "wtTag",
+  "pathTag",
+  "joined",
+  "cached",
+  "drivers",
+] as const;
+
+/** `log.info("wtdiff", { audit: "wtdiff", ...pick(record, WTDIFF_AUDIT_KEYS) })` (§2.9). */
+export function auditWorktreeDiff(log: { info(msg: string, data?: object): void }, record: WtDiffAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "wtdiff" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of WTDIFF_AUDIT_KEYS) {
+    const v = raw[key];
+    if (v !== undefined) out[key] = v;
+  }
+  log.info("wtdiff", out);
 }

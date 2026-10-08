@@ -82,6 +82,8 @@ import { sendJsonNegotiated } from "./gzip.js";
 import type { PinToken, UploadStore } from "./uploads.js";
 import type { SpawnFrontendPort } from "./spawn/ports.js";
 import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
+import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
+import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
 import type {
   AgentView,
   CommandRouter,
@@ -105,6 +107,9 @@ import type {
   ListenerKind,
   FileSearchRoutes,
   PreviewRoutes,
+  PreviewAuthHandled,
+  PreviewAuthResult,
+  WorktreeDiffRoutes,
   RegistryView,
   RequestContext,
   RunSink,
@@ -988,6 +993,10 @@ export interface LanRuntime {
   /** @文件补全 (file-mention): the file-search route frontend, same instance as the loopback
    * listener's; same §4.7 gate as preview above (`mode === "on"` only, else original 404). */
   fileSearch?: FileSearchRoutes | undefined;
+  /** worktree-diff plan §1.6 (D3): the worktree-diff route frontend, same instance as the
+   * loopback listener's; same §4.7-style LAN gate as preview/file-search above (`mode === "on"`
+   * only — `mode:"loopback"` keeps the LAN 404 byte-identical to not-enabled, D6). */
+  worktreeDiff?: WorktreeDiffRoutes | undefined;
   /** web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend, same
    * instance as the loopback listener's. Absent ⇒ `POST /api/agents/remove` on LAN keeps its
    * original 404, byte-identical to not-enabled. */
@@ -1358,6 +1367,37 @@ async function handleLanRequestInner(
       },
       sendJson,
     });
+  }
+
+  // worktree-diff plan §1.6/§2.2 (D3): the two worktree-diff GETs — dispatched right after the
+  // file-search branch, same insertion-point class and the same LAN gate (`mode === "on"`;
+  // `mode:"loopback"` falls through to the original 404 below, byte-identical to not-enabled).
+  // The LAN authorize segment mirrors preview's, but with wtdiff's own §1.7 ② reserve
+  // (`WTDIFF_AUTH_RESERVE_MS`: after LAN auth at least 5 s of the 8 s admission budget must
+  // remain for membership + the three-fd pin).
+  if (
+    rt.worktreeDiff !== undefined &&
+    rt.worktreeDiff.mode === "on" &&
+    method === "GET" &&
+    (path === WTDIFF_FILES_PATH || path === WTDIFF_FILE_PATH)
+  ) {
+    const routes = rt.worktreeDiff;
+    const io = {
+      listener: "lan" as const,
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      authorize: async (deadline: ReqDeadline): Promise<PreviewAuthResult | PreviewAuthHandled> => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, WTDIFF_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      sendJson,
+    };
+    return path === WTDIFF_FILES_PATH
+      ? routes.handleFiles(req, res, query, io)
+      : routes.handleFile(req, res, query, io);
   }
 
   // web-hub-delete-session plan v2 §2.9/§4.1: `POST /api/agents/remove` — same insertion point
@@ -2260,6 +2300,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     (previewRoutes === undefined
       ? undefined
       : createFileSearchRoutes({ mode: previewRoutes.mode, registry, log, now }));
+  // worktree-diff plan §1.6 (D3): injected by hub.ts (never default-constructed — the routes
+  // need the preview deny context + the git runner, both hub.ts-owned). Absent ⇒ the endpoints
+  // keep their legacy replies, byte-identical.
+  const worktreeDiffRoutes: WorktreeDiffRoutes | undefined = deps.worktreeDiff;
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -2346,6 +2390,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       /** @文件补全 (file-mention): same instance as the loopback listener's (or undefined when
        * preview/file-search is not enabled — the LAN face then keeps its original 404). */
       fileSearch: fileSearchRoutes,
+      /** worktree-diff plan §1.6 (D3): same instance as the loopback listener's (or undefined
+       * when preview is off / /proc is unavailable — the LAN 404 stays byte-identical). */
+      worktreeDiff: deps.worktreeDiff,
       /** web-hub-delete-session plan v2 §2.9: same instance as the loopback listener's. */
       agentRemove: deps.agentRemove,
       markKdfInvalid: () => {
@@ -2638,6 +2685,32 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         },
         sendJson,
       });
+    }
+    // worktree-diff plan §1.6 (D3): the two worktree-diff GETs — same insertion point as the
+    // preview/file-search branches above; absent ⇒ falls through to the original paths
+    // (unauth GET ⇒ 401, authed ⇒ 404, byte-identical). The loopback authorize segment is the
+    // same sync cookie lookup every other loopback branch uses.
+    if (
+      worktreeDiffRoutes !== undefined &&
+      method === "GET" &&
+      (path === WTDIFF_FILES_PATH || path === WTDIFF_FILE_PATH)
+    ) {
+      const io = {
+        listener: "loopback" as const,
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        authorize: async (): Promise<PreviewAuthResult | PreviewAuthHandled> => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        sendJson,
+      };
+      return path === WTDIFF_FILES_PATH
+        ? worktreeDiffRoutes.handleFiles(req, res, query, io)
+        : worktreeDiffRoutes.handleFile(req, res, query, io);
     }
     // web-hub-delete-session plan v2 §2.9/§4.1: `POST /api/agents/remove` — same insertion point
     // class as headless/preview/file-search above, before the generic `POST` branch. authorize

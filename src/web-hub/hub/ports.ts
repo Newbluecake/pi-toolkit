@@ -622,6 +622,12 @@ export interface FrontendDeps {
    * security surface, same §4.7 listener matrix: LAN answers 404 unless `mode === "on"`),
    * so an assembly that injects neither gets the exact pre-feature behavior back. */
   fileSearch?: FileSearchRoutes;
+  /** worktree-diff plan §1.6 (D3): the worktree-diff route frontend
+   * (`hub/worktree-diff/routes.ts`'s `createWorktreeDiffRoutes`), constructed by hub.ts only
+   * when `config.preview` exists AND `/proc/self/fd` is usable (D21). Optional so test doubles
+   * and pre-D3 assemblies keep compiling — when absent, `/api/worktree-diff/*` answers exactly
+   * as today (loopback 401/404, LAN 404) and `wtdiff.v1` is never declared. */
+  worktreeDiff?: WorktreeDiffRoutes;
   /** fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service. Optional so test doubles
    * and pre-F4 assemblies keep compiling — when absent there is no `/api/run/*` wiring (F4
    * builds `createRunRoutes` off this) and everything else is byte-identical. */
@@ -712,4 +718,22 @@ export interface PreviewRoutes {
 export interface FileSearchRoutes {
   readonly mode: "on" | "loopback";
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan §1.6 (D3): the worktree-diff route frontend's frozen surface — same
+// declaration rationale as `PreviewRoutes`/`FileSearchRoutes` above (`FrontendDeps.worktreeDiff`
+// needs the type before hub/worktree-diff/routes.ts exists from ports.ts's perspective). The
+// io shape is REUSED from preview (`PreviewRouteIo`); `dispose` is the bounded (≤1 s),
+// idempotent teardown hub.close() awaits right after preview's, and the startup-failure
+// cleanup runs before `fe.close()` — the same three-exit-path contract as preview's.
+// ---------------------------------------------------------------------------
+export interface WorktreeDiffRoutes {
+  readonly mode: "on" | "loopback";
+  /** `GET /api/worktree-diff/files` — the file list (§1.2; `X-PWH: 1` required). */
+  handleFiles(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** `GET /api/worktree-diff/file` — the single-file patch envelope (§1.2). */
+  handleFile(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** Idempotent; aborts every active request and single-flight execution ("hub-close"), ≤1 s. */
+  dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
 }

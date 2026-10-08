@@ -28,6 +28,7 @@ import {
   PREVIEW_LAN_HUB_CAP,
   RUNTX_HUB_CAPS,
   UPLOAD_HUB_CAPS,
+  WTDIFF_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, tmpDirs } from "./helpers.js";
 
@@ -60,6 +61,13 @@ function fakeFrontend(order: string[], listenFails = false): FakeFrontend {
       const orig = deps.preview.dispose.bind(deps.preview);
       deps.preview.dispose = (reason, deadline): Promise<void> => {
         order.push(`preview.dispose:${reason}`);
+        return orig(reason, deadline);
+      };
+    }
+    if (deps.worktreeDiff !== undefined) {
+      const orig = deps.worktreeDiff.dispose.bind(deps.worktreeDiff);
+      deps.worktreeDiff.dispose = (reason, deadline): Promise<void> => {
+        order.push(`wtdiff.dispose:${reason}`);
         return orig(reason, deadline);
       };
     }
@@ -154,11 +162,13 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
     expect([...agentCaps].sort()).toEqual([...kit.hub.info.caps].sort());
     // dir-plan §3.5/§3.6 (P1b): preview.dir.v1 joins ONLY when /proc/self/fd is available —
     // the listing itself is proc-bound, so a /proc-less platform never declares it.
+    // worktree-diff D21: wtdiff.v1 joins the SAME /proc probe tail (three-fd pin is proc-bound).
     expect([...kit.hub.info.caps]).toEqual([
       ...baselineCaps(),
       PREVIEW_HUB_CAP,
       PREVIEW_ABS_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
     ]);
     c.sock.destroy();
   });
@@ -178,6 +188,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       PREVIEW_HUB_CAP,
       PREVIEW_ABS_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
       PREVIEW_LAN_HUB_CAP,
     ]);
     c.sock.destroy();
@@ -307,6 +318,59 @@ describe("hub assembly × preview deny-context resolution (§2.6)", () => {
     } finally {
       if (prev === undefined) delete process.env["PI_CODING_AGENT_DIR"];
       else process.env["PI_CODING_AGENT_DIR"] = prev;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan §1.6 (D3): hub-assembly wiring — same preview gate, same denyCtx,
+// same dispose ordering family (after preview, before fe.close on both exit paths).
+// ---------------------------------------------------------------------------
+
+describe("hub assembly × worktree-diff wiring (D3, §1.6)", () => {
+  it("preview configured + /proc ⇒ FrontendDeps.worktreeDiff is wired with the SAME mode", async () => {
+    const kit = await startKit({ preview: "loopback" });
+    if ("failed" in kit) throw new Error("startHub failed");
+    expect(kit.fe.deps[0]!.worktreeDiff?.mode).toBe("loopback");
+    expect(typeof kit.fe.deps[0]!.worktreeDiff?.handleFiles).toBe("function");
+    expect(typeof kit.fe.deps[0]!.worktreeDiff?.handleFile).toBe("function");
+    expect(typeof kit.fe.deps[0]!.worktreeDiff?.dispose).toBe("function");
+  });
+
+  it("preview off ⇒ worktreeDiff deps stay absent (the not-enabled matrix, D6)", async () => {
+    const kit = await startKit();
+    if ("failed" in kit) throw new Error("startHub failed");
+    expect(kit.fe.deps[0]!.worktreeDiff).toBeUndefined();
+  });
+
+  it("runtime close(): wtdiff dispose runs AFTER preview dispose and BEFORE fe.close", async () => {
+    const kit = await startKit({ preview: "on" });
+    if ("failed" in kit) throw new Error("startHub failed");
+    await kit.hub.close("test");
+    expect(kit.order).toContain("wtdiff.dispose:close");
+    expect(kit.order.indexOf("preview.dispose:close")).toBeLessThan(kit.order.indexOf("wtdiff.dispose:close"));
+    expect(kit.order.indexOf("wtdiff.dispose:close")).toBeLessThan(kit.order.indexOf("fe.close"));
+    // the source-order pin (the runtime body's textual order, same technique as preview's)
+    const src = readFileSync(new URL("../../../src/web-hub/hub/hub.ts", import.meta.url), "utf8");
+    const closeBody = src.slice(src.indexOf("hub closing"));
+    const at = {
+      spawn: closeBody.indexOf("spawnSup.shutdown"),
+      preview: closeBody.indexOf('previewRoutes.dispose("close"'),
+      wtdiff: closeBody.indexOf('worktreeDiffRoutes.dispose("close"'),
+      fe: closeBody.indexOf("fe.close"),
+    };
+    expect(at.spawn).toBeGreaterThan(-1);
+    expect(at.preview).toBeGreaterThan(at.spawn);
+    expect(at.wtdiff).toBeGreaterThan(at.preview);
+    expect(at.fe).toBeGreaterThan(at.wtdiff);
+  });
+
+  it("startup failure (fe.listen rejects): reverse-order unwind disposes wtdiff BEFORE fe.close", async () => {
+    const outcome = await startKit({ preview: "on", listenFails: true });
+    expect("failed" in outcome).toBe(true);
+    if ("failed" in outcome) {
+      expect(outcome.order).toContain("wtdiff.dispose:startup-failure");
+      expect(outcome.order.indexOf("wtdiff.dispose:startup-failure")).toBeLessThan(outcome.order.indexOf("fe.close"));
     }
   });
 });

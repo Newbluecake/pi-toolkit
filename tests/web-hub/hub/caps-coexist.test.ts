@@ -12,6 +12,9 @@ import {
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
   UPLOAD_HUB_CAPS,
+  WTDIFF_HUB_CAP,
+  PREVIEW_HUB_CAP,
+  PREVIEW_LAN_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import { config, connectClient, hello, tmpDirs, waitFor } from "./helpers.js";
@@ -209,5 +212,56 @@ describe("§8.4 registry card — upload/uploadLan/runTranscript/runTranscriptLa
       uploadLan: false,
     });
     await waitFor(() => true); // no async work; just exercising the sync path under async test
+  });
+});
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan §1.6 (D3): wtdiff.v1 rides the preview gate + the /proc probe on BOTH
+// cap surfaces — the fourth feature on the same shared-declaration seam.
+// ---------------------------------------------------------------------------
+
+describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
+  it("preview on: wtdiff.v1 joins BOTH surfaces (set-equal, alongside preview/spawn/runtx)", async () => {
+    const home = tmp.make("wh-coexist-wtd-");
+    const fe = fakeFrontend();
+    const hub = await startHub(config({ home, port: 0, preview: "on" }), fe.factory, { uid: process.getuid?.() ?? 0 });
+    if ("exists" in hub) throw new Error("unexpected exists");
+    const browserCaps = [...hub.info.caps];
+
+    const c = await connectClient(hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    const agentCaps = [...(ack["caps"] as string[])];
+    c.sock.destroy();
+
+    expect(browserCaps.sort()).toEqual(agentCaps.sort());
+    expect(browserCaps).toContain(WTDIFF_HUB_CAP);
+    for (const cap of [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...RUNTX_HUB_CAPS, PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP]) {
+      expect(browserCaps).toContain(cap);
+    }
+  });
+
+  it("preview loopback: wtdiff.v1 still declared (LAN availability rides preview.lan.v1, not its own cap)", async () => {
+    const home = tmp.make("wh-coexist-wtd-lb-");
+    const fe = fakeFrontend();
+    const hub = await startHub(config({ home, port: 0, preview: "loopback" }), fe.factory, {
+      uid: process.getuid?.() ?? 0,
+    });
+    if ("exists" in hub) throw new Error("unexpected exists");
+    expect(hub.info.caps).toContain(WTDIFF_HUB_CAP);
+    expect(hub.info.caps).not.toContain(PREVIEW_LAN_HUB_CAP);
+  });
+
+  it("preview off (default): wtdiff.v1 absent from BOTH surfaces", async () => {
+    const home = tmp.make("wh-coexist-wtd-off-");
+    const fe = fakeFrontend();
+    const hub = await start(fe.factory, home);
+    if ("exists" in hub) throw new Error("unexpected exists");
+    expect(hub.info.caps).not.toContain(WTDIFF_HUB_CAP);
+    const c = await connectClient(hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    expect(ack["caps"]).not.toContain(WTDIFF_HUB_CAP);
+    c.sock.destroy();
   });
 });
