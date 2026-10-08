@@ -21,11 +21,27 @@
  * Skipped when the pi devDependency CLI is not installed (CI without it).
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import {
+  appendFileSync,
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RESTORE_SESSION_ID_RE, isValidRestoreSessionFile } from "../../src/web-hub/protocol/spawn.js";
 import { PROTO } from "../../src/web-hub/protocol/version.js";
 import { MODEL_REJECT_RE, stripAnsiCodes } from "../../src/web-hub/hub/spawn/supervisor.js";
 import { parseStartTicks, readStatSync, verifySpawnedIdentity } from "../../src/web-hub/protocol/proc-identity.js";
@@ -49,6 +65,175 @@ interface SessionLike {
   sessionId?: unknown;
   mode?: unknown;
   cwd?: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// File-level CR/HC helpers (session-history plan §4.1): the restore-argv (CR)
+// section's prepareHome/launch/until/allJson/messagesOf, hoisted so the history
+// argv-tails section (HC1–HC7) reuses the exact same launch shape. `launch`
+// additionally records the hello frame (HC needs hello.cwd), accepts a cwd
+// override (HC1b's process cwd ≠ header cwd), and prepareHome realpath's the
+// temp home so byte-exact path comparisons hold under a symlinked tmpdir.
+// ---------------------------------------------------------------------------
+
+interface PreparedHome {
+  home: string;
+  workdir: string;
+  agentDir: string;
+}
+
+interface SessionFrame {
+  sessionId?: unknown;
+  sessionFile?: unknown;
+  mode?: unknown;
+}
+
+interface RestoreRun {
+  child: ChildProcess;
+  home: string;
+  workdir: string;
+  stderr: string;
+  helloSeen: HelloLike[];
+  sessionsSeen: SessionFrame[];
+  stdoutLines: string[];
+  exit: Promise<{ code: number | null; signal: string | null }>;
+  cleanup(): void;
+}
+
+function prepareHome(): PreparedHome {
+  // §4.1: home = realpathSync(mkdtempSync(…)) — HC1's byte-exact sessionFile
+  // equality assumes pi's resolvePath is the identity on the paths we hand it.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "pwh-conf-r-")));
+  const workdir = join(home, "work");
+  mkdirSync(workdir, { recursive: true });
+  const agentDir = join(home, ".pi", "agent");
+  mkdirSync(join(agentDir, "sessions"), { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [REPO_ROOT] }));
+  writeFileSync(join(agentDir, "pi-subagent.json"), JSON.stringify({ webHub: { enabled: true } }));
+  return { home, workdir, agentDir };
+}
+
+function launch(prepared: PreparedHome, tail: readonly string[], opts: { cwd?: string } = {}): RestoreRun {
+  const { home, workdir, agentDir } = prepared;
+  const stateDir = join(agentDir, "web-hub");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const socketPath = join(stateDir, "hub.sock");
+  rmSync(socketPath, { force: true });
+  const helloSeen: HelloLike[] = [];
+  const sessionsSeen: SessionFrame[] = [];
+  const stdoutLines: string[] = [];
+  const server = net.createServer((sock) => {
+    const dec = new NdjsonDecoder({
+      maxFrameBytes: 512 * 1024,
+      onFrame: (raw: unknown) => {
+        const frame = raw as Record<string, unknown>;
+        if (frame["t"] === "hello") {
+          helloSeen.push(frame as unknown as HelloLike);
+          sock.write(
+            `${JSON.stringify({
+              t: "hello_ack",
+              hubVersion: "1.2.3",
+              buildId: "1.2.3@conf",
+              proto: { major: PROTO.major, minor: PROTO.minor },
+              agentKey: "a-conf-restore-00001",
+              pingMs: 10_000,
+              leaseMs: 30_000,
+              http: { port: 0 },
+              caps: ["ctl.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
+            })}\n`,
+          );
+          return;
+        }
+        if (frame["t"] === "session") sessionsSeen.push(frame as unknown as SessionFrame);
+      },
+      onError: () => {},
+    });
+    sock.on("data", (c: Buffer) => dec.push(c));
+    sock.on("error", () => {});
+  });
+  server.listen(socketPath);
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || k.startsWith("PI_WEBHUB_") || k === "FORCE_COLOR") continue;
+    env[k] = v;
+  }
+  env["HOME"] = home;
+  env["PI_WEBHUB_HEADLESS"] = "1";
+  env["PI_WEBHUB_SPAWN_ID"] = `conf-restore-${Date.now().toString(36)}`;
+  // the restore fork shape: fixed prefix + session tail, never --model (D8)
+  const child = spawn(process.execPath, [PI_CLI, "--mode", "rpc", ...tail], {
+    cwd: opts.cwd ?? workdir,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const stderrChunks: Buffer[] = [];
+  child.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
+  child.stdout?.setEncoding("utf8");
+  let buf = "";
+  child.stdout?.on("data", (chunk: string) => {
+    buf += chunk;
+    for (;;) {
+      const nl = buf.indexOf("\n");
+      if (nl < 0) break;
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (line.length > 0) stdoutLines.push(line);
+    }
+  });
+  const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  return {
+    child,
+    home,
+    workdir,
+    get stderr() {
+      return Buffer.concat(stderrChunks).toString("utf8");
+    },
+    helloSeen,
+    sessionsSeen,
+    stdoutLines,
+    exit,
+    cleanup() {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      server.close();
+      server.closeAllConnections?.();
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    },
+  };
+}
+
+const until = async (pred: () => boolean, ms: number, what: string): Promise<void> => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`timeout waiting for ${what}`);
+};
+
+function allJson(lines: readonly string[]): boolean {
+  return lines.every((l) => {
+    try {
+      JSON.parse(l);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+async function messagesOf(run: RestoreRun): Promise<unknown[]> {
+  run.child.stdin?.write(`${JSON.stringify({ id: "cr-get-messages", type: "get_messages" })}\n`);
+  await until(() => run.stdoutLines.some((l) => l.includes('"command":"get_messages"')), 15_000, "get_messages");
+  const line = run.stdoutLines.find((l) => l.includes('"command":"get_messages"'))!;
+  const parsed = JSON.parse(line) as { success?: boolean; data?: { messages?: unknown[] } };
+  expect(parsed.success).toBe(true);
+  return parsed.data?.messages ?? [];
 }
 
 describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — real pi --mode rpc (plan §SP13 H4)", () => {
@@ -518,153 +703,6 @@ describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — real pi --model 
  *      that the preflight could be simplified.
  */
 describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — restore argv tails (spawn-restore plan CR1–CR3)", () => {
-  interface SessionFrame {
-    sessionId?: unknown;
-    sessionFile?: unknown;
-    mode?: unknown;
-  }
-  interface RestoreRun {
-    child: ChildProcess;
-    home: string;
-    workdir: string;
-    stderr: string;
-    sessionsSeen: SessionFrame[];
-    stdoutLines: string[];
-    exit: Promise<{ code: number | null; signal: string | null }>;
-    cleanup(): void;
-  }
-
-  function prepareHome(): { home: string; workdir: string; agentDir: string } {
-    const home = mkdtempSync(join(tmpdir(), "pwh-conf-r-"));
-    const workdir = join(home, "work");
-    mkdirSync(workdir, { recursive: true });
-    const agentDir = join(home, ".pi", "agent");
-    mkdirSync(join(agentDir, "sessions"), { recursive: true });
-    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [REPO_ROOT] }));
-    writeFileSync(join(agentDir, "pi-subagent.json"), JSON.stringify({ webHub: { enabled: true } }));
-    return { home, workdir, agentDir };
-  }
-
-  function launch(prepared: { home: string; workdir: string; agentDir: string }, tail: readonly string[]): RestoreRun {
-    const { home, workdir, agentDir } = prepared;
-    const stateDir = join(agentDir, "web-hub");
-    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    const socketPath = join(stateDir, "hub.sock");
-    rmSync(socketPath, { force: true });
-    const sessionsSeen: SessionFrame[] = [];
-    const stdoutLines: string[] = [];
-    const server = net.createServer((sock) => {
-      const dec = new NdjsonDecoder({
-        maxFrameBytes: 512 * 1024,
-        onFrame: (raw: unknown) => {
-          const frame = raw as Record<string, unknown>;
-          if (frame["t"] === "hello") {
-            sock.write(
-              `${JSON.stringify({
-                t: "hello_ack",
-                hubVersion: "1.2.3",
-                buildId: "1.2.3@conf",
-                proto: { major: PROTO.major, minor: PROTO.minor },
-                agentKey: "a-conf-restore-00001",
-                pingMs: 10_000,
-                leaseMs: 30_000,
-                http: { port: 0 },
-                caps: ["ctl.v1", "cmd.v1", "dialog.v1", "command.v1", "ctl.v2"],
-              })}\n`,
-            );
-            return;
-          }
-          if (frame["t"] === "session") sessionsSeen.push(frame as unknown as SessionFrame);
-        },
-        onError: () => {},
-      });
-      sock.on("data", (c: Buffer) => dec.push(c));
-      sock.on("error", () => {});
-    });
-    server.listen(socketPath);
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v === undefined || k.startsWith("PI_WEBHUB_") || k === "FORCE_COLOR") continue;
-      env[k] = v;
-    }
-    env["HOME"] = home;
-    env["PI_WEBHUB_HEADLESS"] = "1";
-    env["PI_WEBHUB_SPAWN_ID"] = `conf-restore-${Date.now().toString(36)}`;
-    // the restore fork shape: fixed prefix + session tail, never --model (D8)
-    const child = spawn(process.execPath, [PI_CLI, "--mode", "rpc", ...tail], {
-      cwd: workdir,
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stderrChunks: Buffer[] = [];
-    child.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
-    child.stdout?.setEncoding("utf8");
-    let buf = "";
-    child.stdout?.on("data", (chunk: string) => {
-      buf += chunk;
-      for (;;) {
-        const nl = buf.indexOf("\n");
-        if (nl < 0) break;
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (line.length > 0) stdoutLines.push(line);
-      }
-    });
-    const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
-      child.once("exit", (code, signal) => resolve({ code, signal }));
-    });
-    return {
-      child,
-      home,
-      workdir,
-      get stderr() {
-        return Buffer.concat(stderrChunks).toString("utf8");
-      },
-      sessionsSeen,
-      stdoutLines,
-      exit,
-      cleanup() {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already gone */
-        }
-        server.close();
-        server.closeAllConnections?.();
-        rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-      },
-    };
-  }
-
-  const until = async (pred: () => boolean, ms: number, what: string): Promise<void> => {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-      if (pred()) return;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    throw new Error(`timeout waiting for ${what}`);
-  };
-
-  function allJson(lines: readonly string[]): boolean {
-    return lines.every((l) => {
-      try {
-        JSON.parse(l);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  async function messagesOf(run: RestoreRun): Promise<unknown[]> {
-    run.child.stdin?.write(`${JSON.stringify({ id: "cr-get-messages", type: "get_messages" })}\n`);
-    await until(() => run.stdoutLines.some((l) => l.includes('"command":"get_messages"')), 15_000, "get_messages");
-    const line = run.stdoutLines.find((l) => l.includes('"command":"get_messages"'))!;
-    const parsed = JSON.parse(line) as { success?: boolean; data?: { messages?: unknown[] } };
-    expect(parsed.success).toBe(true);
-    return parsed.data?.messages ?? [];
-  }
-
   it("CR1: --session <abs path> opens that file (header id, same path), pure-JSON stdout, history present, EOF exit ≤8s", async () => {
     const prepared = prepareHome();
     // a REAL pi session file written through pi's own SessionManager (one user message ⇒ persisted)
@@ -736,6 +774,284 @@ describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — restore argv tai
       expect(typeof run.sessionsSeen[0]!.sessionId).toBe("string");
       expect(await messagesOf(run)).toEqual([]);
       expect(allJson(run.stdoutLines)).toBe(true);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// web-hub session-history plan §4.1 (P-conf) — HC1–HC7: the pi-side argv facts
+// the history resume/fork path leans on. HC1/HC1b pin §4.5.6's post-live
+// byte-exact sessionFile premise and the moved-gray basis (hello.cwd reports the
+// SESSION cwd even when the process cwd differs — E10). HC2/HC6 pin PD12: the
+// fork goes through a hub-rule snapshot (complete lines only, 0600, outside
+// sessionsRoot), leaving the source and the snapshot byte-identical. HC7 is the
+// counter-proof pinning E1 — a DIRECT --fork on a half-line source rewrites the
+// source (+1 byte "\n", loadEntriesFromFile's repair append). If pi ever fixes
+// that, HC7 goes red to force re-reviewing PD12's premise (the snapshot path
+// stays either way). Source sessions are always written through pi's own
+// SessionManager into the cwd's DEFAULT session dir — exactly what the hub scans.
+// ---------------------------------------------------------------------------
+describe.skipIf(!existsSync(PI_CLI))("history argv tails (session-history plan HC1–HC7)", () => {
+  /** A truncated JSON message line — what a concurrent writer's mid-write tail looks like. */
+  const HALF_LINE = '{"type":"message","id":"half-tail","role":"user","content":[{"type":"text","text":"half-wri';
+
+  function sha256(buf: Buffer): string {
+    return createHash("sha256").update(buf).digest("hex");
+  }
+
+  /** pi's getDefaultSessionDirPath: `--<cwd with "/", "\", ":" as "-">--` under <agentDir>/sessions. */
+  function encodedSessionDir(agentDir: string, cwd: string): string {
+    const safe = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+    return join(agentDir, "sessions", safe);
+  }
+
+  interface PiSessionManagerLike {
+    appendMessage(m: unknown): string;
+    getSessionFile(): string | undefined;
+    getSessionId(): string;
+  }
+
+  async function createSourceSession(
+    agentDir: string,
+    cwd: string,
+    text: string,
+  ): Promise<{ file: string; id: string }> {
+    const pi = (await import("@earendil-works/pi-coding-agent")) as unknown as {
+      SessionManager: { create(cwd: string, sessionDir?: string): PiSessionManagerLike };
+    };
+    // explicit sessionDir: getDefaultSessionDir() inside THIS process would use
+    // the real HOME, not the temp home — so mirror the encoding ourselves.
+    const sm = pi.SessionManager.create(cwd, encodedSessionDir(agentDir, cwd));
+    sm.appendMessage({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() });
+    const file = sm.getSessionFile();
+    expect(file).toBeDefined();
+    expect(existsSync(file!)).toBe(true);
+    return { file: file!, id: sm.getSessionId() };
+  }
+
+  /** The hub's fork-snapshot rule (PD12 / §4.5.7, mirrored): complete lines only, 0600, <home>/hubstate/fork-src/. */
+  function makeForkSnapshot(home: string, sourceFile: string): string {
+    const forkSrcDir = join(home, "hubstate", "fork-src");
+    mkdirSync(forkSrcDir, { recursive: true });
+    chmodSync(forkSrcDir, 0o700);
+    const raw = readFileSync(sourceFile);
+    const cut = raw.lastIndexOf(0x0a); // complete lines only — a half-written tail is dropped
+    const body = cut >= 0 ? raw.subarray(0, cut + 1) : Buffer.alloc(0);
+    const snap = join(forkSrcDir, `snap-${randomBytes(12).toString("base64url")}.jsonl`);
+    const fd = openSync(snap, "wx", 0o600);
+    try {
+      writeSync(fd, body);
+    } finally {
+      closeSync(fd);
+    }
+    return snap;
+  }
+
+  function firstHeaderLine(file: string): { type?: unknown; id?: unknown; cwd?: unknown; parentSession?: unknown } {
+    const first = readFileSync(file, "utf8").split("\n", 1)[0]!;
+    return JSON.parse(first) as { type?: unknown; id?: unknown; cwd?: unknown; parentSession?: unknown };
+  }
+
+  async function exitWithin(
+    run: RestoreRun,
+    ms: number,
+    what: string,
+  ): Promise<{ code: number | null; signal: string | null }> {
+    return Promise.race([
+      run.exit,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what}: no exit within ${ms}ms`)), ms)),
+    ]);
+  }
+
+  it("HC1: --session <abs> ⇒ sessionFile byte-exact, hello.cwd = header.cwd, pure-JSON stdout, no fork prompt, EOF exit ≤8s", async () => {
+    const prepared = prepareHome();
+    const src = await createSourceSession(prepared.agentDir, prepared.workdir, "hc1 resume source");
+    const header = firstHeaderLine(src.file);
+    const run = launch(prepared, ["--session", src.file]);
+    try {
+      await until(() => run.helloSeen.length > 0, 30_000, "HC1 hello frame");
+      expect(run.helloSeen[0]!.cwd).toBe(header.cwd);
+      await until(() => run.sessionsSeen.length > 0, 25_000, "HC1 session frame");
+      expect(run.sessionsSeen[0]!.sessionId).toBe(header.id);
+      expect(run.sessionsSeen[0]!.sessionFile).toBe(src.file); // byte-exact — §4.5.6 post-live check premise
+      expect(run.sessionsSeen[0]!.mode).toBe("rpc");
+      expect(allJson(run.stdoutLines)).toBe(true);
+      expect(run.stdoutLines.join("\n")).not.toContain("Fork this session");
+      run.child.stdin?.end();
+      const t0 = Date.now();
+      const exited = await exitWithin(run, 8_000, "HC1");
+      expect(exited.code).toBe(0);
+      expect(Date.now() - t0).toBeLessThanOrEqual(8_000);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("HC1b: --session with process cwd ≠ header cwd ⇒ hello.cwd reports the header cwd literally (E10, moved-gray basis)", async () => {
+    const prepared = prepareHome();
+    const sessionCwd = join(prepared.home, "project-a");
+    const procCwd = join(prepared.home, "project-b");
+    mkdirSync(sessionCwd, { recursive: true });
+    mkdirSync(procCwd, { recursive: true });
+    const src = await createSourceSession(prepared.agentDir, sessionCwd, "hc1b session cwd wins");
+    const header = firstHeaderLine(src.file);
+    const run = launch(prepared, ["--session", src.file], { cwd: procCwd });
+    try {
+      await until(() => run.helloSeen.length > 0, 30_000, "HC1b hello frame");
+      expect(run.helloSeen[0]!.cwd).toBe(header.cwd); // literal equality with the SESSION cwd…
+      expect(run.helloSeen[0]!.cwd).not.toBe(procCwd); // …even though the process cwd differs
+      await until(() => run.sessionsSeen.length > 0, 25_000, "HC1b session frame");
+      expect(run.sessionsSeen[0]!.sessionId).toBe(header.id);
+      expect(run.sessionsSeen[0]!.sessionFile).toBe(src.file);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("HC2: --fork <snapshot> --session-id <uuid> ⇒ new file in encoded dir before live, parentSession=snap, source+snapshot unchanged, history copied", async () => {
+    const prepared = prepareHome();
+    const src = await createSourceSession(prepared.agentDir, prepared.workdir, "hc2 fork through snapshot");
+    const snap = makeForkSnapshot(prepared.home, src.file);
+    const srcBefore = readFileSync(src.file);
+    const snapBefore = readFileSync(snap);
+    const uuid = randomUUID();
+    const run = launch(prepared, ["--fork", snap, "--session-id", uuid]);
+    try {
+      const newDir = encodedSessionDir(prepared.agentDir, realpathSync(prepared.workdir));
+      const matches = () => readdirSync(newDir).filter((f) => f.endsWith(`_${uuid}.jsonl`));
+      let sightedAtFrameCount = -1;
+      await until(
+        () => {
+          if (sightedAtFrameCount < 0 && existsSync(newDir) && matches().length > 0) {
+            sightedAtFrameCount = run.sessionsSeen.length; // 0 ⇒ the file existed BEFORE live
+          }
+          return run.sessionsSeen.length > 0;
+        },
+        25_000,
+        "HC2 session frame",
+      );
+      expect(sightedAtFrameCount).toBe(0);
+      expect(run.sessionsSeen[0]!.sessionId).toBe(uuid);
+      const newFile = join(newDir, matches()[0]!);
+      expect(firstHeaderLine(newFile)).toMatchObject({
+        type: "session",
+        id: uuid,
+        cwd: realpathSync(prepared.workdir),
+        parentSession: snap,
+      });
+      expect(RESTORE_SESSION_ID_RE.test(uuid)).toBe(true);
+      expect(isValidRestoreSessionFile(newFile)).toBe(true);
+      expect(sha256(readFileSync(src.file))).toBe(sha256(srcBefore)); // source untouched
+      expect(sha256(readFileSync(snap))).toBe(sha256(snapBefore)); // snapshot untouched
+      const messages = await messagesOf(run);
+      expect(JSON.stringify(messages)).toContain("hc2 fork through snapshot");
+    } finally {
+      run.cleanup();
+    }
+  }, 90_000);
+
+  it("HC3: --session <abs> with deleted header cwd ⇒ exit≠0 ≤15s, no session frame, missing-cwd stderr hint", async () => {
+    const prepared = prepareHome();
+    const goneCwd = join(prepared.home, "gone-project");
+    mkdirSync(goneCwd, { recursive: true });
+    const src = await createSourceSession(prepared.agentDir, goneCwd, "hc3 cwd is gone");
+    rmSync(goneCwd, { recursive: true, force: true });
+    const run = launch(prepared, ["--session", src.file]);
+    try {
+      const exited = await exitWithin(run, 15_000, "HC3");
+      expect(exited.code).not.toBe(0);
+      expect(run.sessionsSeen).toHaveLength(0);
+      expect(run.stderr).toContain("Stored session working directory does not exist");
+    } finally {
+      run.cleanup();
+    }
+  }, 40_000);
+
+  it("HC4: --fork <snap> --session-id <existing id> ⇒ exit 1, 'Session already exists with id'", async () => {
+    const prepared = prepareHome();
+    const src = await createSourceSession(prepared.agentDir, prepared.workdir, "hc4 id collision");
+    const snap = makeForkSnapshot(prepared.home, src.file);
+    const run = launch(prepared, ["--fork", snap, "--session-id", src.id]);
+    try {
+      const exited = await exitWithin(run, 15_000, "HC4");
+      expect(exited.code).toBe(1);
+      expect(run.stderr).toContain("Session already exists with id");
+      expect(run.sessionsSeen).toHaveLength(0);
+    } finally {
+      run.cleanup();
+    }
+  }, 40_000);
+
+  it("HC5: fork from snapshot with source header cwd deleted ⇒ still live (fork never reads the source cwd)", async () => {
+    const prepared = prepareHome();
+    const goneCwd = join(prepared.home, "hc5-gone-project");
+    mkdirSync(goneCwd, { recursive: true });
+    const src = await createSourceSession(prepared.agentDir, goneCwd, "hc5 orphaned source cwd");
+    const snap = makeForkSnapshot(prepared.home, src.file);
+    rmSync(goneCwd, { recursive: true, force: true });
+    const uuid = randomUUID();
+    const run = launch(prepared, ["--fork", snap, "--session-id", uuid]);
+    try {
+      await until(() => run.sessionsSeen.length > 0, 25_000, "HC5 session frame");
+      expect(run.sessionsSeen[0]!.sessionId).toBe(uuid);
+      expect(run.sessionsSeen[0]!.mode).toBe("rpc");
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("HC6: half-line source tail ⇒ snapshot drops it, fork leaves source byte-identical (sha256+size), new file fully parseable", async () => {
+    const prepared = prepareHome();
+    const src = await createSourceSession(prepared.agentDir, prepared.workdir, "hc6 writer mid-line");
+    appendFileSync(src.file, HALF_LINE); // a concurrent writer's half-written line
+    const srcBefore = readFileSync(src.file);
+    expect(srcBefore.length).toBeGreaterThan(Buffer.byteLength(HALF_LINE));
+    const snap = makeForkSnapshot(prepared.home, src.file);
+    const snapBytes = readFileSync(snap);
+    expect(snapBytes.includes(Buffer.from(HALF_LINE, "utf8"))).toBe(false); // no half-line in the snapshot
+    expect(snapBytes.length).toBe(srcBefore.length - Buffer.byteLength(HALF_LINE)); // exactly the complete lines
+    const uuid = randomUUID();
+    const run = launch(prepared, ["--fork", snap, "--session-id", uuid]);
+    try {
+      await until(() => run.sessionsSeen.length > 0, 25_000, "HC6 session frame");
+      const after = readFileSync(src.file);
+      expect(after.length).toBe(srcBefore.length); // size unchanged…
+      expect(sha256(after)).toBe(sha256(srcBefore)); // …and byte-for-byte unchanged
+      const newDir = encodedSessionDir(prepared.agentDir, realpathSync(prepared.workdir));
+      const name = readdirSync(newDir).find((f) => f.endsWith(`_${uuid}.jsonl`));
+      expect(name).toBeDefined();
+      const lines = readFileSync(join(newDir, name!), "utf8").split("\n");
+      expect(lines.length).toBeGreaterThan(2); // header + copied message + trailing ""
+      for (const [i, line] of lines.entries()) {
+        if (line.length === 0) continue;
+        let parsed = false;
+        try {
+          JSON.parse(line);
+          parsed = true;
+        } catch {
+          parsed = false;
+        }
+        expect(parsed, `HC6 new-file line ${i} is not JSON: ${line.slice(0, 80)}`).toBe(true);
+      }
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("HC7 (counter-proof, pins E1): DIRECT --fork <source with half-line tail> ⇒ pi rewrites the source (+1 byte newline)", async () => {
+    const prepared = prepareHome();
+    const src = await createSourceSession(prepared.agentDir, prepared.workdir, "hc7 direct fork rewrites source");
+    appendFileSync(src.file, HALF_LINE);
+    const before = readFileSync(src.file);
+    const run = launch(prepared, ["--fork", src.file]);
+    try {
+      await until(() => run.sessionsSeen.length > 0, 25_000, "HC7 session frame");
+      const after = readFileSync(src.file);
+      expect(after.length).toBe(before.length + 1); // exactly one extra byte…
+      expect(after.at(-1)).toBe(0x0a); // …a newline (loadEntriesFromFile's repair append)
+      expect(after.equals(Buffer.concat([before, Buffer.from("\n", "utf8")]))).toBe(true);
     } finally {
       run.cleanup();
     }
