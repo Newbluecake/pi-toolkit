@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -39,5 +39,18 @@ describe("scanWorktrees against a real git repo", () => {
     if (degraded.kind !== "ok") return;
     expect(degraded.worktrees[0]?.probe?.dirty).toBe(1);
     expect(degraded.worktrees[0]?.probe?.untrackedSkipped).toBe(true);
+  });
+
+  // 2026-10-09 field report: `*3` next to a 5-file diff list — `normal` collapsed an untracked
+  // directory into one record. The count must match the per-file list (`--untracked-files=all`).
+  it("counts every file inside an untracked directory, matching the per-file diff list", async () => {
+    mkdirSync(join(dir, "docs", "a"), { recursive: true });
+    writeFileSync(join(dir, "docs", "a", "x.md"), "x\n");
+    writeFileSync(join(dir, "docs", "a", "y.md"), "y\n");
+    const res = await scanWorktrees(createGitRunner(), dir, { signal: new AbortController().signal });
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    // tracked.txt (modified) + new.txt + docs/a/x.md + docs/a/y.md
+    expect(res.worktrees[0]?.probe?.dirty).toBe(4);
   });
 });

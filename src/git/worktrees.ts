@@ -190,7 +190,11 @@ export async function scanWorktrees(
       const status = await run(
         // `--untracked-files` takes an OPTIONAL argument, so git only binds it in the `=` form; the
         // space-separated form turns the mode into a pathspec and the probe sees no changes at all.
-        ["-C", row.path, "status", "--porcelain=v2", "--branch", `--untracked-files=${useDegraded ? "no" : "normal"}`],
+        // `all` (not `normal`): `normal` collapses an untracked directory into ONE `? dir/` record,
+        // so `*N` disagreed with the per-file diff list (src/git/diff.ts, also `all`) — 2026-10-09
+        // field report. Cost stays bounded by the 64 KiB stdout cap (`dirtyCapped`), the timeout and
+        // the degraded (`no`) fallback; ignored trees are never descended either way.
+        ["-C", row.path, "status", "--porcelain=v2", "--branch", `--untracked-files=${useDegraded ? "no" : "all"}`],
         { cwd: row.path, timeoutMs, maxStdoutBytes: 64 * 1024, signal: opts.signal },
       );
       if (status.killed === "abort" || opts.signal.aborted) return;
