@@ -6,7 +6,7 @@
  * when `mode === "on"`), `dispose()` is §4.5.1's bounded (≤1s), idempotent teardown with the
  * three exit paths (runtime close / startup failure / client disconnect) sharing one promise.
  *
- * Layering: this module reaches the disk ONLY through PV2a's kernels — `createCwdAdmitter`
+ * Layering: this module reaches the disk ONLY through PV2a's kernels — §2.1's fs admitter
  * (cwd-class admission, §4.3), `previewFsStep` (sniff reads), `readAndStream` (§4.5.2) and the
  * `UploadVerifier` (§4.5.3) — plus PV2b's `UploadStore.openForPreview` for the upload class.
  * The upload handle is adapted to `PreviewHandle` here (`ReadableUploadFileHandle` is a
@@ -33,14 +33,15 @@ import {
   PREVIEW_STREAM_MS,
   PREVIEW_TEXT_MAX_BYTES,
   validatePreviewPath,
+  type PreviewProbeResponseBody,
 } from "../../protocol/preview.js";
 import { auditPreview } from "../audit.js";
 import { createCmdLimit, type CmdLimit } from "../cmd-limit.js";
 import type { HubLog, PreviewRouteIo, PreviewRoutes, RegistryView } from "../ports.js";
 import { createReqDeadline, type ReqDeadline } from "../req-deadline.js";
 import type { UploadStore } from "../uploads.js";
-import { createCwdAdmitter, type CwdAdmitter, type PreviewHandle } from "./admit.js";
-import { previewFsStep } from "./fs.js";
+import { createFsAdmitter, type FsAdmitter, type PreviewDenyContext, type PreviewHandle } from "./admit.js";
+import { createPreviewIoTracker, previewFsStep } from "./fs.js";
 import { openAdmittedPath, type Opened } from "./open.js";
 import { readProbeBody, runPreviewProbe } from "./probe.js";
 import { needsMoreForDims, sniff, type SniffResult } from "./sniff.js";
@@ -179,7 +180,10 @@ interface ActiveRequest {
 
 export interface PreviewRoutesDeps {
   mode: "on" | "loopback";
-  home: string;
+  /** §2.1/§2.6: the fs admitter's deny context (homes[]/agentDirs[], literal+canonical) —
+   * REQUIRED; replaces the deleted `home` field, whose only use was constructing the default
+   * cwd admitter. hub.ts resolves it once at startup; tests use `denyCtxOf`. */
+  denyCtx: PreviewDenyContext;
   /** The uploads root (`webHubUploadsDir(home)`); a request path literally under it is
    * upload-class (§3.1 ⑥). */
   uploadsRoot: string;
@@ -191,14 +195,24 @@ export interface PreviewRoutesDeps {
   /** §7-D14: preview's OWN limiter — absent ⇒ a private `createCmdLimit` instance is created
    * here so preview bucket churn can never evict the cmd/upload lines' buckets. */
   limit?: CmdLimit | undefined;
-  admitter?: CwdAdmitter | undefined;
+  admitter?: FsAdmitter | undefined;
   verifier?: UploadVerifier | undefined;
 }
 
+/** §1.3 typed probe sender — `io.sendJson`'s `body: unknown` cannot catch a hub↔UI drift, this
+ * thin wrapper routes the answer through `PreviewProbeResponseBody` so typecheck can. */
+function sendProbeResults(io: PreviewRouteIo, res: ServerResponse, body: PreviewProbeResponseBody): void {
+  io.sendJson(res, 200, body);
+}
+
 export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
-  const { mode, home, uploadsRoot, registry, uploads, log, now } = deps;
+  const { mode, uploadsRoot, registry, uploads, log, now } = deps;
   const limit: CmdLimit = deps.limit ?? createCmdLimit(now);
-  const admitter: CwdAdmitter = deps.admitter ?? createCwdAdmitter({ home, log, now });
+  /** §2.4 instance ownership: ONE tracker per `createPreviewRoutes` instance, handed to the
+   * default admitter, both `readSample` loops and probe's `readHead` (dir.ts joins in P1b).
+   * Closure-local (never module scope) ⇒ a `/reload`-built sibling starts from 0 zombies. */
+  const tracker = createPreviewIoTracker();
+  const admitter: FsAdmitter = deps.admitter ?? createFsAdmitter({ denyCtx: deps.denyCtx, tracker, log, now });
   const verifier: UploadVerifier = deps.verifier ?? createUploadVerifier({ log, now });
 
   let closing = false;
@@ -219,7 +233,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     ip: string;
     user?: string | undefined;
     agentKey?: string | undefined;
-    cls?: "upload" | "cwd" | undefined;
+    cls?: "upload" | "cwd" | "abs" | undefined;
     kind?: "text" | "image" | undefined;
     ok: boolean;
     code?: string | undefined;
@@ -289,7 +303,13 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       const agentKey = query.get("agentKey") ?? "";
       const sessionId = query.get("sessionId") ?? "";
       const path = query.get("path") ?? "";
-      if (!AGENT_KEY_RE.test(agentKey) || !SESSION_ID_RE.test(sessionId) || !validatePreviewPath(path)) {
+      // dir-plan §2.2 (U4/§1.4): single-segment absolute paths (`/home`, `/etc/hostname`) now
+      // enter admission — the recognition layer keeps its own ≥2-segment freeze (C4).
+      if (
+        !AGENT_KEY_RE.test(agentKey) ||
+        !SESSION_ID_RE.test(sessionId) ||
+        !validatePreviewPath(path, { minSegments: 1 })
+      ) {
         acc.code = "E_BAD_REQUEST";
         send("E_BAD_REQUEST", { error: "E_BAD_REQUEST" });
         return;
@@ -351,8 +371,17 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       );
       // ⑥ audit mirror: the ORIGINAL inline code classified at step ⑥ (before the open), so a
       // rejected upload-class request still audited cls:"upload" — keep that (the
-      // authoritative classification lives in open.ts; this is display-only).
-      acc.cls = path.startsWith(`${uploadsRoot}/`) ? "upload" : "cwd";
+      // authoritative classification lives in open.ts; this is display-only). §2.2/C1: the
+      // class set is now three-valued — `upload` (literal uploads-root prefix) / `cwd`
+      // (literal session-cwd prefix) / `abs` (everything else, U4) — computed purely from
+      // strings, zero fs, statistics only.
+      const sessView = registry.get(agentKey);
+      const sessCwd = sessView?.session?.cwd;
+      acc.cls = path.startsWith(`${uploadsRoot}/`)
+        ? "upload"
+        : sessCwd !== undefined && (path === sessCwd || path.startsWith(`${sessCwd}/`))
+          ? "cwd"
+          : "abs";
       if (!op.ok) {
         if (op.abort === true) {
           abortAnswer();
@@ -536,6 +565,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     while (got < first) {
       const { bytesRead } = await previewFsStep(() => fh.read(sample, got, first - got, got), deadline, signal, {
         now,
+        tracker,
       });
       if (bytesRead === 0) break;
       got += bytesRead;
@@ -546,6 +576,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       const next = Buffer.alloc(Math.min(PREVIEW_SAMPLE_BYTES, cap - got));
       const { bytesRead } = await previewFsStep(() => fh.read(next, 0, next.length, got), deadline, signal, {
         now,
+        tracker,
       });
       if (bytesRead === 0) break;
       sample = Buffer.concat([sample, next.subarray(0, bytesRead)]);
@@ -672,7 +703,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       }
 
       const run = await runPreviewProbe(
-        { uploadsRoot, registry, uploads, admitter, log, now },
+        { uploadsRoot, registry, uploads, admitter, log, now, tracker },
         { agentKey, sessionId, paths: body.body.paths, listener: io.listener, principal },
         r,
         signal,
@@ -686,8 +717,10 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       }
       acc.ok = true;
       acc.total = body.body.paths.length;
-      // Wire contract (2026-10-07): one `{kind}` object per entry, request order.
-      io.sendJson(res, 200, { results: run.results.map((kind) => ({ kind })) });
+      // Wire contract (2026-10-07): one `{kind}` object per entry, request order — through the
+      // §1.3 typed sender so the hub side can never drift from `PreviewProbeResponseBody`.
+      const probeBody: PreviewProbeResponseBody = { results: run.results.map((kind) => ({ kind })) };
+      sendProbeResults(io, res, probeBody);
     })().catch((err: unknown) => {
       acc.code = "E_INTERNAL";
       log.error("preview probe route: unexpected pipeline failure", { error: String(err) });

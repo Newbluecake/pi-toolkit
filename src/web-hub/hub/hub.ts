@@ -40,6 +40,7 @@ import {
   SPAWN_MODEL_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
+  PREVIEW_ABS_HUB_CAP,
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
@@ -65,6 +66,7 @@ import { createReaper, type Reaper } from "./spawn/reaper.js";
 import { createSpawnRoutes } from "./spawn/routes.js";
 import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
+import { createPreviewIoTracker, resolvePreviewDenyContext } from "./preview/fs.js";
 import { createSpawnStore } from "./spawn/store.js";
 import { createSpawnSupervisor, type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
 import { createUploadStore, type UploadStore } from "./uploads.js";
@@ -164,6 +166,10 @@ export interface StartHubDeps {
     /** web-hub-spawn-restore plan HR1 test hook: the restore stability window. */
     restoreStableMs?: number;
   };
+  /** dir-plan v3.1 §2.9 (P1a): the uid the preview root-warning checks — `0` ⇒ the one-shot
+   * `preview.root_uid` WARN after the preview routes are built. Default: `process.getuid?.()`;
+   * tests inject `() => 0` / `() => 1000` / leave it undefined (no getuid on the platform). */
+  getuid?: () => number;
 }
 
 export async function startHub(
@@ -226,9 +232,12 @@ export async function startHub(
     // and order can never drift): `preview.v1` whenever `config.preview` exists (mode loopback
     // OR on), `preview.lan.v1` only when mode is on. Absent (mode off) ⇒ caps stay
     // byte-identical to pre-PV3.
+    // dir-plan v3.1 §2.2/§1.2 (P1a): `PREVIEW_ABS_HUB_CAP` rides the SAME `preview.v1` feature
+    // gate (the mere presence of `config.preview`) — global-path admission is not a separate
+    // setting, and the cap's only job is telling the UI it may widen recognition (C4).
     const extraHubCaps: readonly string[] = [
       ...(config.spawn === undefined ? [] : [SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP]),
-      ...(config.preview === undefined ? [] : [PREVIEW_HUB_CAP]),
+      ...(config.preview === undefined ? [] : [PREVIEW_HUB_CAP, PREVIEW_ABS_HUB_CAP]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
     ];
 
@@ -640,24 +649,55 @@ export async function startHub(
     // building: no fs, no I/O, nothing that can fail. The limiter is deliberately NOT passed —
     // `createPreviewRoutes` defaults to its own private `CmdLimit` (§7-D14: preview bucket
     // churn must never evict the cmd/upload lines' buckets).
-    const previewRoutes =
-      config.preview === undefined
-        ? undefined
-        : createPreviewRoutes({
-            mode: config.preview,
-            home: config.home,
-            uploadsRoot: webHubUploadsDir(config.home),
-            registry,
-            ...(uploads === undefined
-              ? {}
-              : {
-                  uploads: {
-                    openForPreview: (p, ctx) => uploads!.openForPreview(p, ctx),
-                  },
-                }),
-            log,
+    //
+    // dir-plan v3.1 §2.6 (P1a): BEFORE the routes are built, home/agentDir are resolved to
+    // their literal+canonical forms (each may itself be a symlink; under global admission a
+    // literal-only deny context would miss every canonical-path request). The resolution is
+    // tracked by its OWN startup tracker (never the request instance, §2.4's parameter-flow
+    // table), bounded at 2 s, and NEVER fails the hub — a degraded member keeps its literal
+    // form + a path-free WARN, backstopped by the §2.3 global twins. agentDir shares the
+    // spawn assembly's exact source (L512's SP3): `PI_CODING_AGENT_DIR ?? ${home}/.pi/agent`.
+    let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined;
+    if (config.preview !== undefined) {
+      const denyCtx = await withSignal(
+        resolvePreviewDenyContext(
+          { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
+          {
+            tracker: createPreviewIoTracker(),
             now,
-          });
+            log,
+            signal: startup.signal,
+          },
+        ),
+        startup.signal,
+      );
+      previewRoutes = createPreviewRoutes({
+        mode: config.preview,
+        denyCtx,
+        uploadsRoot: webHubUploadsDir(config.home),
+        registry,
+        ...(uploads === undefined
+          ? {}
+          : {
+              uploads: {
+                openForPreview: (p, ctx) => uploads!.openForPreview(p, ctx),
+              },
+            }),
+        log,
+        now,
+      });
+      // dir-plan v3.1 §2.9 (P1a): ONE stable WARN per hub process when preview runs as root —
+      // OS permission checks no longer bound what preview could read, only the denylist does
+      // (the §2.7 boundary). Only `event` and `mode` ride the line — never a path or username.
+      // `/webhub restart` produces a new process, which warns again by design.
+      const uid = deps.getuid?.() ?? process.getuid?.();
+      if (uid === 0) {
+        log.warn(
+          "web-hub preview: hub is running as root — OS permission checks no longer limit preview; only the denylist applies",
+          { event: "preview.root_uid", mode: config.preview },
+        );
+      }
+    }
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
     // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
     // managed spawn being enabled at all; `managed` is simply absent when it isn't, and

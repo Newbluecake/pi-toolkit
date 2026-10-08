@@ -22,6 +22,7 @@ import { webHubUploadsDir } from "../../../src/web-hub/protocol/paths.js";
 import { PREVIEW_PATH } from "../../../src/web-hub/protocol/preview.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createPreviewRoutes } from "../../../src/web-hub/hub/preview/routes.js";
+import { denyCtxOf } from "../../../src/web-hub/hub/preview/admit.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { fakeDeps, login, makeAgent, makeTmp, type FakeDeps } from "./helpers.js";
 import { memLog } from "../hub/helpers.js";
@@ -232,7 +233,7 @@ describe("api preview gzip negotiation", () => {
     );
     deps.preview = createPreviewRoutes({
       mode: "on",
-      home: deps.config.home,
+      denyCtx: denyCtxOf(deps.config.home, join(deps.config.home, ".pi/agent")),
       uploadsRoot: webHubUploadsDir(tmp.dir),
       registry: deps.registry,
       log: memLog(),

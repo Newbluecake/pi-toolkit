@@ -40,7 +40,7 @@ import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import type { HubLog, PreviewRouteIo, RegistryView } from "./ports.js";
 import { createReqDeadline } from "./req-deadline.js";
 import { isVirtualFsPath } from "./preview/admit.js";
-import { isPreviewIoError, previewFsStep } from "./preview/fs.js";
+import { isPreviewIoError, NO_TRACKER, previewFsStep } from "./preview/fs.js";
 import { withinRoot } from "./spawn/dirs.js";
 
 // ---------------------------------------------------------------------------
@@ -219,6 +219,9 @@ export async function walkFileSearch(
   const step = <T>(lazy: () => Promise<T>): Promise<T> =>
     previewFsStep(lazy, deadline, signal, {
       now: opts.now,
+      // dir-plan §2.4 "未纳入"清单：file-search 是独立端点、cwd 范围 — 不纳入 preview 的
+      // tracker 计数（显式 NO_TRACKER，白名单见 tests/web-hub/hub/preview/source-scan.test.ts）。
+      tracker: NO_TRACKER,
       ...(opts.stepCapMs === undefined ? {} : { stepCapMs: opts.stepCapMs }),
     });
 
@@ -495,7 +498,7 @@ export function createFileSearchRoutes(deps: FileSearchRoutesDeps): FileSearchRo
       // ⑦ realpath(root) + the bounded walk
       let rootReal: string;
       try {
-        rootReal = await previewFsStep(() => fs.realpath(root), r, signal, { now });
+        rootReal = await previewFsStep(() => fs.realpath(root), r, signal, { now, tracker: NO_TRACKER });
       } catch (err) {
         if (signal.aborted || (isPreviewIoError(err) && err.ioFail === "abort")) return; // 不应答
         if (isPreviewIoError(err)) {

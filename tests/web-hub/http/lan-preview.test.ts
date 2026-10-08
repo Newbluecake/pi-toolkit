@@ -22,6 +22,7 @@ import { createHostsPort } from "../../../src/web-hub/hub/net-hosts.js";
 import { createKdfAdmission } from "../../../src/web-hub/hub/kdf-admission.js";
 import { createLoginLimiter } from "../../../src/web-hub/hub/ratelimit.js";
 import { createPreviewRoutes } from "../../../src/web-hub/hub/preview/routes.js";
+import { denyCtxOf } from "../../../src/web-hub/hub/preview/admit.js";
 import { createUploadStore, type UploadMetaV1 } from "../../../src/web-hub/hub/uploads.js";
 import { PREVIEW_PATH, PREVIEW_IMAGE_MAX_BYTES } from "../../../src/web-hub/protocol/preview.js";
 import { PROTO } from "../../../src/web-hub/protocol/version.js";
@@ -131,7 +132,7 @@ async function startHarness(
   if (opts.previewOff !== true) {
     routes = createPreviewRoutes({
       mode,
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot,
       registry: { list: () => [...agents.values()], get: (k) => agents.get(k) },
       ...(store === undefined ? {} : { uploads: { openForPreview: (p, ctx) => store!.openForPreview(p, ctx) } }),
@@ -424,5 +425,36 @@ describe("LAN /api/preview — cwd class", () => {
     });
     expect(r.status).toBe(409);
     expect(r.body).toBe('{"error":"E_SESSION_CHANGED"}');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1a: global admission on LAN (U4 + C9 — LAN and loopback widen together)
+// ---------------------------------------------------------------------------
+
+describe("LAN /api/preview — global admission (U4, dir-plan §1.4/C9)", () => {
+  it('mode:"on": an authed LAN user reads a cwd-OUTSIDE file (LAN 同宽)', async () => {
+    const h = await harness();
+    const cookie = await h.cookieFor(1, "alice");
+    const outside = join(h.home, "elsewhere", "lan-abs.txt");
+    mkdirSync(join(h.home, "elsewhere"), { recursive: true });
+    writeFileSync(outside, "lan absolute body\n");
+    const r = await lanRequest(h.port, { path: previewPath(outside), headers: { "X-PWH": "1", Cookie: cookie } });
+    expect(r.status).toBe(200);
+    expect(r.body).toBe("lan absolute body\n");
+  });
+
+  it('mode:"loopback": LAN answers 404 for the SAME outside path — byte-identical to not-enabled', async () => {
+    const h = await harness({ mode: "loopback" });
+    const cookie = await h.cookieFor(1, "alice");
+    const outside = join(h.home, "elsewhere", "lan-abs.txt");
+    mkdirSync(join(h.home, "elsewhere"), { recursive: true });
+    writeFileSync(outside, "never on lan\n");
+    const loopback = await lanRequest(h.port, {
+      path: previewPath(outside),
+      headers: { "X-PWH": "1", Cookie: cookie },
+    });
+    expect(loopback.status).toBe(404);
+    expect(loopback.body).toBe('{"error":"E_NOT_FOUND"}');
   });
 });

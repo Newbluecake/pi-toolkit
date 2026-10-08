@@ -4,7 +4,7 @@
  * Direct `PreviewRoutes.handle()` calls over a fake req/res pair (the http-level matrix,
  * response headers and HP8 upload-tamper cases live in `tests/web-hub/http/api-preview.test.ts`
  * / `lan-preview.test.ts`; the hub-assembly wiring in `tests/web-hub/hub/hub-preview.test.ts`).
- * The cwd admitter/verifier run REAL (real tmpdir + real fs) unless a case injects hooks —
+ * The fs admitter/verifier run REAL (real tmpdir + real fs) unless a case injects hooks —
  * same strategy as PV2a's suites. Covers: §3.1 steps ⓪–⑩ incl. every reject mapping, the
  * §4.5.1 three dispose paths (HP7), rate-limit + in-flight caps with 429-audit throttling,
  * the 4097-principal flood, fd-leak (HP6), the text-verify single-flight audit (1 hashed +
@@ -19,11 +19,11 @@ import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPreviewRoutes } from "../../../../src/web-hub/hub/preview/routes.js";
-import { createCwdAdmitter } from "../../../../src/web-hub/hub/preview/admit.js";
-import type { CwdAdmitter } from "../../../../src/web-hub/hub/preview/admit.js";
+import { createFsAdmitter, denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
+import type { FsAdmitter, PreviewFs } from "../../../../src/web-hub/hub/preview/admit.js";
+import { createPreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
 import { defaultPreviewFs } from "../../../../src/web-hub/hub/preview/fs.js";
 import { createUploadVerifier } from "../../../../src/web-hub/hub/preview/verify.js";
-import type { PreviewFs } from "../../../../src/web-hub/hub/preview/admit.js";
 import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import type { PreviewRouteIo, PreviewRoutes, RegistryView } from "../../../../src/web-hub/hub/ports.js";
 import type { OpenForPreviewParams, OpenForPreviewResult, UploadStore } from "../../../../src/web-hub/hub/uploads.js";
@@ -223,7 +223,7 @@ describe("PV3 routes — §3.1 pipeline", () => {
     registry: Pick<RegistryView, "get">,
     over: {
       uploads?: Pick<UploadStore, "openForPreview">;
-      admitter?: CwdAdmitter;
+      admitter?: FsAdmitter;
       verifier?: ReturnType<typeof createUploadVerifier>;
       now?: () => number;
       mode?: "on" | "loopback";
@@ -231,7 +231,7 @@ describe("PV3 routes — §3.1 pipeline", () => {
   ): PreviewRoutes {
     return createPreviewRoutes({
       mode: over.mode ?? "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry,
       log,
@@ -338,7 +338,6 @@ describe("PV3 routes — §3.1 pipeline", () => {
     ["sessionId too long", { agentKey: "a1", sessionId: "s".repeat(129), path: "/x/y" }],
     ["relative path", { agentKey: "a1", sessionId: "s1", path: "x/y" }],
     ["dot segment", { agentKey: "a1", sessionId: "s1", path: "/x/../y" }],
-    ["single segment", { agentKey: "a1", sessionId: "s1", path: "/only" }],
     ["NUL in path", { agentKey: "a1", sessionId: "s1", path: "/x/y\0z" }],
   ])("③ %s ⇒ 400 E_BAD_REQUEST", async (_name, q) => {
     const fx = fixture();
@@ -351,6 +350,30 @@ describe("PV3 routes — §3.1 pipeline", () => {
     );
     expect(res.status).toBe(400);
     expect(res.json()).toEqual({ error: "E_BAD_REQUEST" });
+  });
+
+  it("③ U4: a single-segment path now ENTERS admission (was 400 pre-dir-plan; §1.4 wire change)", async () => {
+    const fx = fixture();
+    const missing = new FakeRes();
+    await routes(fx.registry).handle(
+      fakeReq({ "x-pwh": "1" }),
+      missing,
+      new URLSearchParams({ agentKey, sessionId, path: "/only" }),
+      makeIo(),
+    );
+    expect(missing.status).toBe(404); // realpath ENOTDIR/ENOENT — not the old 400
+    expect(missing.json()).toEqual({ error: "E_NOT_FOUND" });
+
+    // and a REAL single-segment file serves end-to-end (Linux CI fixture)
+    const real = new FakeRes();
+    await routes(fx.registry).handle(
+      fakeReq({ "x-pwh": "1" }),
+      real,
+      new URLSearchParams({ agentKey, sessionId, path: "/etc/hostname" }),
+      makeIo(),
+    );
+    expect(real.status).toBe(200);
+    expect(real.headers["X-PWH-Preview-Kind"]).toBe("text");
   });
 
   // ---- ⑤ session ------------------------------------------------------------
@@ -607,7 +630,15 @@ describe("PV3 routes — §3.1 pipeline", () => {
         return base.realpath(x);
       },
     };
-    const r = routes(fx.registry, { admitter: createCwdAdmitter({ home: dir, log, now: Date.now, fs: slowFs }) });
+    const r = routes(fx.registry, {
+      admitter: createFsAdmitter({
+        denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+        tracker: createPreviewIoTracker(),
+        log,
+        now: Date.now,
+        fs: slowFs,
+      }),
+    });
     const res = new FakeRes();
     const done = r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, p), makeIo());
     await sleep(50);
@@ -629,7 +660,15 @@ describe("PV3 routes — §3.1 pipeline", () => {
         return base.realpath(x);
       },
     };
-    const r = routes(fx.registry, { admitter: createCwdAdmitter({ home: dir, log, now: Date.now, fs: slowFs }) });
+    const r = routes(fx.registry, {
+      admitter: createFsAdmitter({
+        denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+        tracker: createPreviewIoTracker(),
+        log,
+        now: Date.now,
+        fs: slowFs,
+      }),
+    });
     const res = new FakeRes();
     const done = r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, p), makeIo());
     await sleep(50);
@@ -657,7 +696,7 @@ describe("PV3 routes — ④ rate limit and in-flight caps", () => {
     const fx = floodableRegistry();
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry: fx,
       log,
@@ -698,7 +737,7 @@ describe("PV3 routes — ④ rate limit and in-flight caps", () => {
     const fx = floodableRegistry();
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry: fx,
       log,
@@ -730,7 +769,7 @@ describe("PV3 routes — ④ rate limit and in-flight caps", () => {
     };
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry: fx,
       log,
@@ -785,7 +824,7 @@ describe("PV3 routes — ④ rate limit and in-flight caps", () => {
     };
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry: fx,
       log,
@@ -823,7 +862,7 @@ describe("PV3 routes — ④ rate limit and in-flight caps", () => {
     const fx = floodableRegistry();
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry: fx,
       log,
@@ -844,7 +883,7 @@ describe("PV3 routes — ④ rate limit and in-flight caps", () => {
     const mk = (): PreviewRoutes =>
       createPreviewRoutes({
         mode: "on",
-        home: dir,
+        denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
         uploadsRoot: join(dir, "uploads-root"),
         registry: fx,
         log,
@@ -889,7 +928,7 @@ describe("PV3 routes — HP6 fd leak / HP7 lifecycle", () => {
     const registry = makeRegistry({ agentKey, sessionId, cwd });
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry,
       log,
@@ -928,7 +967,7 @@ describe("PV3 routes — HP6 fd leak / HP7 lifecycle", () => {
     };
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry,
       log,
@@ -957,7 +996,7 @@ describe("PV3 routes — HP6 fd leak / HP7 lifecycle", () => {
     const registry = makeRegistry({ agentKey, sessionId, cwd });
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry,
       log,
@@ -993,7 +1032,7 @@ describe("PV3 routes — HP6 fd leak / HP7 lifecycle", () => {
     };
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: join(dir, "uploads-root"),
       registry,
       log,
@@ -1125,7 +1164,7 @@ describe("PV3 routes — text-verify single-flight (real store, slowed task open
 
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot,
       registry,
       log,
@@ -1189,7 +1228,7 @@ describe("PV3 routes — text-verify single-flight (real store, slowed task open
     };
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot,
       registry,
       log,
@@ -1228,4 +1267,112 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void } 
     resolve = r;
   });
   return { promise, resolve };
+}
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1a: global admission (U4) — cwd-OUTSIDE paths, audit cls:"abs", busy 503
+// ---------------------------------------------------------------------------
+
+describe("P1a routes — global admission (U4)", () => {
+  const agentKey = "a4242-nonce12";
+  const sessionId = "sess123";
+
+  function fixture(): { cwd: string; registry: ReturnType<typeof makeRegistry> } {
+    const cwd = join(dir, "cwd");
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(join(cwd, "inside.txt"), "inside\n");
+    return { cwd, registry: makeRegistry({ agentKey, sessionId, cwd }) };
+  }
+
+  function routes(registry: Pick<RegistryView, "get">, over: { admitter?: FsAdmitter } = {}): PreviewRoutes {
+    return createPreviewRoutes({
+      mode: "on",
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      uploadsRoot: join(dir, "uploads-root"),
+      registry,
+      log,
+      now: Date.now,
+      ...(over.admitter === undefined ? {} : { admitter: over.admitter }),
+    });
+  }
+
+  it("U4: a cwd-OUTSIDE file serves 200 (was 403 outside pre-dir-plan)", async () => {
+    const fx = fixture();
+    const outside = join(dir, "elsewhere", "out.txt");
+    mkdirSync(join(dir, "elsewhere"), { recursive: true });
+    writeFileSync(outside, "outside content\n");
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, outside), makeIo());
+    expect(res.status).toBe(200);
+    expect(res.body().toString("utf8")).toContain("outside content");
+    const audits = previewAudits(log).filter((l) => l.phase === "request" && l.ok === true);
+    expect(audits.at(-1)).toMatchObject({ cls: "abs", kind: "text" });
+    // audit discipline: the raw path never reaches the log
+    expect(JSON.stringify(audits.at(-1))).not.toContain("elsewhere");
+    expect(JSON.stringify(audits.at(-1))).not.toContain("out.txt");
+  });
+
+  it("cls audit classes: inside-cwd ⇒ cwd, uploads-root literal ⇒ upload, outside ⇒ abs", async () => {
+    const fx = fixture();
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, join(fx.cwd, "inside.txt")), makeIo());
+    expect(res.status).toBe(200);
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: true, cls: "cwd" });
+
+    // a denylisted outside path still audits cls:"abs" + the mapped code, no path
+    const denied = new FakeRes();
+    await r.handle(
+      fakeReq({ "x-pwh": "1" }),
+      denied,
+      query(agentKey, sessionId, join(dir, "elsewhere", "id_rsa")),
+      makeIo(),
+    );
+    expect(denied.status).toBe(403);
+    expect(denied.json()).toEqual({ error: "E_PREVIEW_DENIED", reason: "denylist" });
+    const last = previewAudits(log).at(-1);
+    expect(last).toMatchObject({ ok: false, cls: "abs", code: "E_PREVIEW_DENIED", reason: "denylist" });
+    expect(JSON.stringify(last)).not.toContain("id_rsa");
+  });
+
+  it("§2.4 busy: a tripped tracker maps through the admitter to 503 E_BUSY", async () => {
+    const fx = fixture();
+    // pre-trip a SHARED tracker with two raced-out realpath hangs (§2.4 max = 2)
+    const tracker = createPreviewIoTracker();
+    const hangFs = { ...defaultPreviewFs(), realpath: (): Promise<string> => new Promise<string>(() => undefined) };
+    const tripped = createFsAdmitter({
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      tracker,
+      log,
+      now: Date.now,
+      fs: hangFs,
+      stepCapMs: 40,
+    });
+    await expect(
+      tripped.admit({ path: "/etc/hostname" }, createReqDeadline(Date.now, 8000), neverAbort2()),
+    ).resolves.toMatchObject({ ok: false, status: 504 });
+    await expect(
+      tripped.admit({ path: "/etc/hostname" }, createReqDeadline(Date.now, 8000), neverAbort2()),
+    ).resolves.toMatchObject({ ok: false, status: 504 });
+    expect(tracker.zombies).toBe(2);
+
+    // an injected admitter carrying that same tripped tracker ⇒ every fs-class request 503s
+    const admitter = createFsAdmitter({
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      tracker,
+      log,
+      now: Date.now,
+    });
+    const r = routes(fx.registry, { admitter });
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, join(fx.cwd, "inside.txt")), makeIo());
+    expect(res.status).toBe(503);
+    expect(res.json()).toEqual({ error: "E_BUSY" });
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: false, code: "E_BUSY" });
+  });
+});
+
+function neverAbort2(): AbortSignal {
+  return new AbortController().signal;
 }

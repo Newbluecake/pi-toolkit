@@ -19,6 +19,7 @@ import { PREVIEW_PATH, PREVIEW_TEXT_MAX_BYTES } from "../../../src/web-hub/proto
 import { webHubUploadsDir } from "../../../src/web-hub/protocol/paths.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createPreviewRoutes } from "../../../src/web-hub/hub/preview/routes.js";
+import { denyCtxOf } from "../../../src/web-hub/hub/preview/admit.js";
 import { createUploadStore, type UploadMetaV1, type UploadStore } from "../../../src/web-hub/hub/uploads.js";
 import { PREVIEW_AUDIT_KEYS } from "../../../src/web-hub/hub/audit.js";
 import type { FrontendDeps, HttpFrontend, PreviewRoutes } from "../../../src/web-hub/hub/ports.js";
@@ -159,7 +160,7 @@ function previewDeps(
 ): PreviewRoutes {
   return createPreviewRoutes({
     mode: "on",
-    home: deps.config.home,
+    denyCtx: denyCtxOf(deps.config.home, join(deps.config.home, ".pi/agent")),
     uploadsRoot,
     registry: deps.registry,
     log,
@@ -419,7 +420,7 @@ describe("loopback /api/preview — ④ rate limit, in-flight, audit discipline"
       const t0 = Date.now();
       const routes = createPreviewRoutes({
         mode: "on",
-        home: tmp,
+        denyCtx: denyCtxOf(tmp, join(tmp, ".pi/agent")),
         uploadsRoot: webHubUploadsDir(tmp),
         registry: deps.registry,
         log,
@@ -497,7 +498,7 @@ describe("loopback /api/preview — ④ rate limit, in-flight, audit discipline"
       };
       const routes = createPreviewRoutes({
         mode: "on",
-        home: tmp,
+        denyCtx: denyCtxOf(tmp, join(tmp, ".pi/agent")),
         uploadsRoot,
         registry: deps.registry,
         log,
@@ -717,5 +718,38 @@ describe("loopback /api/preview — HP8 upload tampering (real store)", () => {
     const r = await h.get(AGENT, SESSION, made.path);
     expect(r.status).toBe(200);
     expect(r.body).toBe("legacy body");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1a: global admission over loopback HTTP (U4)
+// ---------------------------------------------------------------------------
+
+describe("loopback /api/preview — global admission (U4, dir-plan §1.4)", () => {
+  it("a cwd-OUTSIDE file serves 200 through the real socket; audit cls abs, no path", async () => {
+    const h = await harness();
+    const outside = join(h.tmp.dir, "outside", "abs.txt");
+    mkdirSync(join(h.tmp.dir, "outside"), { recursive: true });
+    writeFileSync(outside, "absolute path body\n");
+    const r = await h.get(AGENT, SESSION, outside);
+    expect(r.status).toBe(200);
+    expect(r.body).toBe("absolute path body\n");
+    const preview = (h.previewLog.lines.at(-1)?.data ?? {}) as Record<string, unknown>;
+    expect(preview).toMatchObject({ audit: "preview", cls: "abs", ok: true });
+    expect(JSON.stringify(preview)).not.toContain("abs.txt");
+    expect(JSON.stringify(preview)).not.toContain("outside");
+  });
+
+  it("a single-segment absolute path enters admission (was 400; /etc/hostname ⇒ 200)", async () => {
+    const h = await harness();
+    const r = await h.get(AGENT, SESSION, "/etc/hostname");
+    expect(r.status).toBe(200);
+  });
+
+  it("the denylist still answers 403 for a system secret reached by absolute path", async () => {
+    const h = await harness();
+    const r = await h.get(AGENT, SESSION, "/etc/ssh/ssh_host_ed25519_key");
+    expect(r.status).toBe(403);
+    expect(r.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"denylist"}');
   });
 });

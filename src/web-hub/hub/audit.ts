@@ -322,8 +322,10 @@ export interface PreviewAuditRecord {
   ip?: string | undefined;
   user?: string | undefined;
   agentKey?: string | undefined;
-  /** §3.1 ⑥ request class: upload-root vs session-cwd subtree. */
-  cls?: "upload" | "cwd" | undefined;
+  /** §3.1 ⑥ request class, computed LITERALLY (zero fs, dir-plan §2.2/C1): `upload` =
+   * literally under the uploads root, `cwd` = literally under the session cwd, `abs` = any
+   * other absolute path (U4's new class — statistics only, never an admission decision). */
+  cls?: "upload" | "cwd" | "abs" | undefined;
   /** sniffed content kind of the admitted file (undefined before ⑧ decided). */
   kind?: "text" | "image" | undefined;
   ok: boolean;

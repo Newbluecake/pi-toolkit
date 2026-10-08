@@ -19,6 +19,7 @@ import { PREVIEW_PROBE_MAX_PATHS, PREVIEW_PROBE_PATH } from "../../../src/web-hu
 import { webHubUploadsDir } from "../../../src/web-hub/protocol/paths.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createPreviewRoutes } from "../../../src/web-hub/hub/preview/routes.js";
+import { denyCtxOf } from "../../../src/web-hub/hub/preview/admit.js";
 import type { FrontendDeps, HttpFrontend, PreviewRoutes } from "../../../src/web-hub/hub/ports.js";
 import { fakeDeps, login, makeAgent, postJson, rawRequest, type FakeDeps, type RawResponse } from "./helpers.js";
 
@@ -48,7 +49,7 @@ async function setup(): Promise<Harness> {
   );
   const routes: PreviewRoutes = createPreviewRoutes({
     mode: "on",
-    home: dir,
+    denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
     uploadsRoot: webHubUploadsDir(dir),
     registry: deps.registry,
     log: deps.log,

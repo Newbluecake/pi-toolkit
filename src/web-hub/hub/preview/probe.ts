@@ -33,7 +33,7 @@ import {
   type PreviewProbeKind,
 } from "../../protocol/preview.js";
 import type { ReqDeadline } from "../req-deadline.js";
-import { previewFsStep } from "./fs.js";
+import { previewFsStep, type PreviewIoTracker } from "./fs.js";
 import { openAdmittedPath, type OpenPathDeps, type OpenPathInput } from "./open.js";
 import { sniff } from "./sniff.js";
 import { PREVIEW_SNIFF_TEXT_BYTES } from "../../protocol/preview.js";
@@ -139,6 +139,9 @@ export function readProbeBody(req: IncomingMessage): Promise<ProbeBodyRead> {
 
 export interface ProbeKernelDeps extends OpenPathDeps {
   now(): number;
+  /** §2.4: probe's head reads ride the SAME tracker instance preview uses (probe 与 preview
+   * 共用实例 — a hung head read trips the breaker for the whole routes instance). */
+  tracker: PreviewIoTracker;
 }
 
 export type ProbeRunResult = { ok: true; results: PreviewProbeKind[] } | { ok: false; abort: true };
@@ -171,7 +174,9 @@ async function probeOne(
   deadline: ReqDeadline,
   signal: AbortSignal,
 ): Promise<PreviewProbeKind | undefined> {
-  if (typeof input.path !== "string" || !validatePreviewPath(input.path)) return "missing";
+  // dir-plan §2.2 (U4): single-segment absolute paths are now valid candidates too
+  // (minSegments 1 — same loosening as routes' request gate ③).
+  if (typeof input.path !== "string" || !validatePreviewPath(input.path, { minSegments: 1 })) return "missing";
   const op = await openAdmittedPath(deps, input, deadline, signal);
   if (!op.ok) return op.abort === true ? undefined : "missing";
   const opened = op.opened;
@@ -206,6 +211,7 @@ async function readHead(
   while (got < want) {
     const { bytesRead } = await previewFsStep(() => fh.read(buf, got, want - got, got), deadline, signal, {
       now: deps.now,
+      tracker: deps.tracker,
     });
     if (bytesRead === 0) break; // EOF early (file shrank) — the partial head still sniffs
     got += bytesRead;

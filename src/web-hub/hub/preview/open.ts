@@ -1,14 +1,15 @@
 /**
  * web-hub content-preview — the SHARED open pipeline (web-hub-preview plan v3 §3.1 steps
- * ⑤–⑦, extracted 2026-10-07 修订「先探测后标记」).
+ * ⑤–⑦, extracted 2026-10-07 修订「先探测后标记」; dir-plan v3.1 §2.2/P1a: the fs class is
+ * now the GLOBAL `FsAdmitter`, U4).
  *
  * One copy of the security decision for "may this request read this path": `GET /api/preview`
  * (`routes.ts`) and `POST /api/preview/probe` (`probe.ts`) both reach the disk ONLY through
  * `openAdmittedPath` — session lookup (⑤: the named session must be currently visible) →
- * upload/cwd classification (⑥: literal prefix under the uploads root, zero fs) → admission
+ * upload/fs classification (⑥: literal prefix under the uploads root, zero fs) → admission
  * + open (⑦: PV2b's `UploadStore.openForPreview` for the upload class — structural re-check
- * + sha256 re-verification, the whole §4.2 chain — or PV2a's `createCwdAdmitter` 13-step
- * stack for the cwd class). The admission rules are NOT duplicated anywhere: a probe answer
+ * + sha256 re-verification, the whole §4.2 chain — or §2.1's `createFsAdmitter` stack for
+ * everything else). The admission rules are NOT duplicated anywhere: a probe answer
  * is by construction produced by the very chain a later preview of the same path walks.
  *
  * This module owns no HTTP surface: it maps every failure onto the `PreviewRouteIo` code
@@ -20,14 +21,16 @@
 import type { HubLog, RegistryView } from "../ports.js";
 import type { ReqDeadline } from "../req-deadline.js";
 import type { UploadStore } from "../uploads.js";
-import type { CwdAdmitter, PreviewHandle, PreviewStat } from "./admit.js";
+import type { FsAdmitter, PreviewHandle, PreviewStat } from "./admit.js";
 
 /** §3.1 ⑦ result after the handle adaptation (everything ⑧/⑨ — and probe's head read —
- * need, both classes in one shape). Owned HERE since both route layers consume it. */
+ * need, both classes in one shape). Owned HERE since both route layers consume it. `cls` is
+ * the literal, zero-fs audit class (§2.2/C1): `upload` = literally under the uploads root,
+ * `cwd` = literally under the session's cwd, `abs` = everything else (U4's new class). */
 export interface Opened {
   fh: PreviewHandle;
   size: number;
-  cls: "upload" | "cwd";
+  cls: "upload" | "cwd" | "abs";
   verify?: { uploadId: string; sha256: string };
   shared?: boolean;
 }
@@ -72,7 +75,7 @@ export interface OpenPathDeps {
   registry: Pick<RegistryView, "get">;
   /** PV2b's read-back open; absent ⇒ every upload-class request answers 404 (§4.2). */
   uploads: Pick<UploadStore, "openForPreview"> | undefined;
-  admitter: CwdAdmitter;
+  admitter: FsAdmitter;
   log: HubLog;
 }
 
@@ -158,11 +161,13 @@ export async function openAdmittedPath(
     };
   }
 
-  // ⑦c cwd class — §4.3's 13-step admission stack.
-  const a = await deps.admitter.admit({ path: input.path, root: session.cwd }, deadline, signal);
+  // ⑦c fs class — §2.1's global admission stack (U4: any absolute path; the cwd subtree is
+  // no longer a boundary, only the audit class `cls` still records it, computed literally).
+  const a = await deps.admitter.admit({ path: input.path }, deadline, signal);
   if (!a.ok) {
     if (a.status === 0) return { ok: false, abort: true };
     return rejected(a.code, a.reason);
   }
-  return { ok: true, opened: { fh: a.fh, size: a.size, cls: "cwd" } };
+  const cls = input.path === session.cwd || input.path.startsWith(`${session.cwd}/`) ? "cwd" : "abs";
+  return { ok: true, opened: { fh: a.fh, size: a.size, cls } };
 }

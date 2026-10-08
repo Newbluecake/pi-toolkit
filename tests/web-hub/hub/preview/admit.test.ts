@@ -1,13 +1,16 @@
 /**
- * web-hub-preview plan v3 §4.3 / PV2a acceptance — `hub/preview/admit.ts`.
+ * dir-plan v3.1 §2.1 (P1a) acceptance — `hub/preview/admit.ts`'s `createFsAdmitter`.
  *
- * Coverage per the plan's PV2a checklist: every §4.3 row; steps 1–4 make ZERO fs calls;
- * virtual roots (incl. a cwd symlink resolving into /proc and a `/proc/self/environ` symlink);
- * the denylist (every category, via the pure predicate AND through real admission); home as
- * cwd (U2 matrix); `/tmp/r` vs `/tmp/r2` segment alignment; cwd-as-symlink; FIFO; chmod 000;
- * the four TOCTOU cases (HP2) plus the `procFdAvailable=false` residual; per-step slow
- * injection ⇒ 504 within the step cap; the errno mapping table; the late-open recovery; and
- * the hardlink behaviour pinned per §5.3 (allowed, `nlink > 1` is not a refusal).
+ * Coverage per the plan's P1a checklist: §2.1's renumbered steps 1–5 make ZERO fs calls on the
+ * literal denylist/virtual-root rejections; U4 rows (paths outside any cwd are ADMITTED now —
+ * every such row is annotated "U4"); `rp === "/"` ⇒ root-too-broad; the denylist v2 matrix
+ * (§2.3 — every category, via the pure predicate AND through real admission); §2.6's
+ * literal+canonical double representation (real-tmpdir symlink homes, custom
+ * `PI_CODING_AGENT_DIR`, a third-party link into `.config/pi`, ctx degradation); realpath
+ * layers; not-regular/unreadable; the errno mapping table; TOCTOU (HP2) incl. the
+ * `procFdAvailable=false` residual; per-step slow injection ⇒ 504 within the step cap; §2.4's
+ * tracker busy circuit-breaker through a real admission; the late-open recovery; and the
+ * hardlink behaviour pinned per §5.3.
  *
  * Real kernel semantics wherever possible: syscalls are real (tmpdir), only timing/failures
  * are scripted through `hookedFs` — except the pure zero-fs rows and the late-open case.
@@ -18,9 +21,17 @@ import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createCwdAdmitter, denyListHit } from "../../../../src/web-hub/hub/preview/admit.js";
-import type { CwdAdmitterDeps, PreviewHandle } from "../../../../src/web-hub/hub/preview/admit.js";
 import {
+  createFsAdmitter,
+  denyCtxOf,
+  denyListHit,
+  PREVIEW_DENYLIST_VERSION,
+  type FsAdmitterDeps,
+  type PreviewDenyContext,
+  type PreviewHandle,
+} from "../../../../src/web-hub/hub/preview/admit.js";
+import {
+  createPreviewIoTracker,
   defaultPreviewFs,
   isPreviewIoError,
   mapFsError,
@@ -31,11 +42,13 @@ import { abortAfter, deadline, FakeHandle, hookedFs, memLog, neverAbort } from "
 import type { FsHooks, FsMethodName } from "./helpers.js";
 
 const HOME = "/home/tester";
+const AGENT_DIR = `${HOME}/.pi/agent`;
+const CTX: PreviewDenyContext = denyCtxOf(HOME, AGENT_DIR);
 
-function admitter(hooks?: FsHooks, over: Partial<CwdAdmitterDeps> = {}) {
+function admitter(hooks?: FsHooks, over: Partial<FsAdmitterDeps> = {}) {
   const log = memLog();
   const fs = hookedFs(hooks ?? { counts: {} });
-  const a = createCwdAdmitter({ home: HOME, fs, log, now: Date.now, ...over });
+  const a = createFsAdmitter({ denyCtx: CTX, tracker: createPreviewIoTracker(), fs, log, now: Date.now, ...over });
   return { a, fs, log };
 }
 
@@ -63,30 +76,54 @@ const okPath = (root: string, rel = "note.txt", content = "hello preview"): stri
 };
 
 // ---------------------------------------------------------------------------
-// steps 1–4: literal decisions, ZERO fs
+// steps 1–3: literal decisions, ZERO fs (§2.1 renumbered table)
 // ---------------------------------------------------------------------------
 
-describe("admit: steps 1–4 (literal, zero fs)", () => {
+describe("admit: steps 1–3 (literal, zero fs)", () => {
   it.each([
-    ["root not absolute", { root: "relative/root", path: "/etc/passwd", reason: "root-too-broad" }],
-    ["root is /", { root: "/", path: "/etc/passwd", reason: "root-too-broad" }],
-    ["root is /proc", { root: "/proc", path: "/proc/x", reason: "virtual-fs" }],
-    ["root under /sys", { root: "/sys/kernel", path: "/sys/kernel/a", reason: "virtual-fs" }],
-    ["path outside root prefix", { root: "/tmp/r", path: "/tmp/r2/f.txt", reason: "outside" }],
-    ["path is the root itself", { root: "/tmp/r", path: "/tmp/r", reason: "outside" }],
-    ["denylist literal", { root: "/tmp/r", path: "/tmp/r/.ssh/config", reason: "denylist" }],
-    ["path under /dev", { root: "/dev", path: "/dev/nullx", reason: "virtual-fs" }],
-  ])("%s ⇒ 403 %s, zero fs calls", async (_name, { root, path, reason }) => {
+    ["denylist literal (.ssh segment)", { path: "/tmp/r/.ssh/config", reason: "denylist" }],
+    ["denylist literal (agentDir auth.json)", { path: `${AGENT_DIR}/auth.json`, reason: "denylist" }],
+    ["denylist literal (absolute /etc/shadow)", { path: "/etc/shadow", reason: "denylist" }],
+    ["path under /proc", { path: "/proc/self/environ", reason: "virtual-fs" }],
+    ["path under /sys", { path: "/sys/kernel/a", reason: "virtual-fs" }],
+    ["path under /dev", { path: "/dev/nullx", reason: "virtual-fs" }],
+  ])("%s ⇒ 403 %s, zero fs calls", async (_name, { path, reason }) => {
     const { a, fs } = admitter();
-    const res = await a.admit({ root, path } as { root: string; path: string }, deadline(8000), neverAbort());
+    const res = await a.admit({ path }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 403, code: "E_PREVIEW_DENIED", reason });
     expect(Object.keys(fs.counts).filter((k) => (fs.counts[k] ?? 0) > 0)).toEqual([]);
   });
 
-  it("/tmp/r vs /tmp/r2 both directions (segment-aligned prefix)", async () => {
+  it("U4: a cwd-OUTSIDE path is no longer a literal reject — it enters admission (old 'outside' deleted)", async () => {
+    // U4 2026-10-08: 准入范围放宽为 uploads/任意绝对路径；root 包含判定随 root 一起删除。
+    // A real file far outside any "cwd" admits fine (the old admitter answered 403 outside
+    // here, zero fs — that row is intentionally gone).
+    const cwd = scratch();
+    const outside = scratch("wh-admit-outside-");
+    const f = okPath(outside);
+    const { a, fs } = admitter();
+    const res = await a.admit({ path: f }, deadline(8000), neverAbort());
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.realpath).toBe(f);
+      await res.fh.close();
+    }
+    expect((fs.counts.realpath ?? 0) + (fs.counts.stat ?? 0)).toBeGreaterThan(0); // really admitted
+  });
+
+  it("U4: a single-segment absolute path enters admission too (route ③ minSegments:1 partner)", async () => {
+    // /etc/hostname exists on Linux and is a regular readable file — the §1.4 wire-change row
+    // "GET path=/one 400 → 进入准入" ends in a real open here.
     const { a } = admitter();
-    const r2 = await a.admit({ root: "/tmp/r2", path: "/tmp/r/f.txt" }, deadline(8000), neverAbort());
-    expect(r2).toMatchObject({ ok: false, reason: "outside" });
+    const res = await a.admit({ path: "/etc/hostname" }, deadline(8000), neverAbort());
+    expect(res.ok).toBe(true);
+    if (res.ok) await res.fh.close();
+  });
+
+  it('rp === "/" (step 5) ⇒ 403 root-too-broad — "/" itself is the only such input', async () => {
+    const { a } = admitter();
+    const res = await a.admit({ path: "/" }, deadline(8000), neverAbort());
+    expect(res).toEqual({ ok: false, status: 403, code: "E_PREVIEW_DENIED", reason: "root-too-broad" });
   });
 });
 
@@ -95,11 +132,11 @@ describe("admit: steps 1–4 (literal, zero fs)", () => {
 // ---------------------------------------------------------------------------
 
 describe("admit: realpath layers", () => {
-  it("regular file inside cwd ⇒ ok (fd open, size, realpath)", async () => {
+  it("regular file ⇒ ok (fd open, size, realpath)", async () => {
     const root = scratch();
     const file = okPath(root);
     const { a } = admitter();
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res.ok).toBe(true);
     if (res.ok) {
       expect(res.size).toBe(13);
@@ -108,26 +145,13 @@ describe("admit: realpath layers", () => {
     }
   });
 
-  it("cwd itself is a symlink ⇒ still ok (root realpathed)", async () => {
-    const real = scratch();
-    const link = join(scratch(), "link");
-    symlinkSync(real, link);
-    const file = okPath(real);
+  it("a symlink chain to a regular file resolves and is allowed (U4: any absolute target)", async () => {
+    const holder = scratch();
+    const target = okPath(scratch("wh-admit-target-"));
+    const link = join(holder, "alias.txt");
+    symlinkSync(target, link);
     const { a } = admitter();
-    const res = await a.admit({ root: link, path: join(link, "note.txt") }, deadline(8000), neverAbort());
-    expect(res.ok).toBe(true);
-    if (res.ok) {
-      expect(res.realpath).toBe(file);
-      await res.fh.close();
-    }
-  });
-
-  it("a symlink INSIDE cwd to another file inside cwd resolves and is allowed", async () => {
-    const root = scratch();
-    const target = okPath(root, "real.txt");
-    symlinkSync("real.txt", join(root, "alias.txt"));
-    const { a } = admitter();
-    const res = await a.admit({ root, path: join(root, "alias.txt") }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: link }, deadline(8000), neverAbort());
     expect(res.ok).toBe(true);
     if (res.ok) {
       expect(res.realpath).toBe(target);
@@ -135,44 +159,88 @@ describe("admit: realpath layers", () => {
     }
   });
 
-  it("symlink escaping cwd (/proc/self/environ) ⇒ 403 outside via realpath", async () => {
+  it("symlink INTO a virtual root (/proc/self/environ) ⇒ 403 virtual-fs via realpath (U4: was 'outside')", async () => {
+    // U4: containment is gone, so the defence that catches this link moved from `outside`
+    // (root containment) to `virtual-fs` (realpath re-check) — same 403, different reason.
     const root = scratch();
     symlinkSync("/proc/self/environ", join(root, "env"));
     const { a } = admitter();
-    const res = await a.admit({ root, path: join(root, "env") }, deadline(8000), neverAbort());
-    expect(res).toMatchObject({ ok: false, status: 403, reason: "outside" });
+    const res = await a.admit({ path: join(root, "env") }, deadline(8000), neverAbort());
+    expect(res).toMatchObject({ ok: false, status: 403, reason: "virtual-fs" });
   });
 
-  it("cwd resolving INTO a virtual root (root realpath check, step 5) ⇒ virtual-fs", async () => {
+  it("a path THROUGH a symlink into /proc ⇒ 403 virtual-fs (realpath re-check, step 5)", async () => {
     const holder = scratch();
     const link = join(holder, "intoproc");
     symlinkSync("/proc/self", link);
     const { a } = admitter();
-    const res = await a.admit({ root: link, path: join(link, "cmdline") }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: join(link, "cmdline") }, deadline(8000), neverAbort());
     expect(res).toMatchObject({ ok: false, status: 403, reason: "virtual-fs" });
   });
 });
 
 // ---------------------------------------------------------------------------
-// denylist — pure predicate matrix + U2 (home as cwd)
+// denylist v2 — pure predicate matrix + §2.6 double representation
 // ---------------------------------------------------------------------------
 
-describe("admit: denylist (§4.3 拒绝列表)", () => {
-  it("prefixes under the hub's own home", () => {
-    for (const p of [
-      `${HOME}/.pi/agent/web-hub`,
-      `${HOME}/.pi/agent/web-hub/uploads/x`,
-      `${HOME}/.pi/agent/auth.json`,
-      `${HOME}/.pi/agent/models.json`,
-      `${HOME}/.config/pi/web-search.env`,
-    ]) {
-      expect(denyListHit(p, HOME)).toBe(true);
-    }
-    // segment alignment: a look-alike prefix must NOT hit
-    expect(denyListHit(`${HOME}/.pi/agent/web-hub-other/f`, HOME)).toBe(false);
+describe("admit: denylist v2 (§2.3/§2.6 拒绝列表)", () => {
+  it("version is 2 (corpus fixture pins the same number)", () => {
+    expect(PREVIEW_DENYLIST_VERSION).toBe(2);
   });
 
-  it("single segments", () => {
+  it("context prefixes under homes[]/agentDirs[] (literal spelling)", () => {
+    for (const p of [
+      `${AGENT_DIR}/web-hub`,
+      `${AGENT_DIR}/web-hub/uploads/x`,
+      `${AGENT_DIR}/auth.json`,
+      `${AGENT_DIR}/models.json`,
+      `${HOME}/.config/pi`,
+      `${HOME}/.config/pi/web-search.env`,
+    ]) {
+      expect(denyListHit(p, CTX)).toBe(true);
+    }
+    // segment alignment: a look-alike prefix must NOT hit
+    expect(denyListHit(`${HOME}/.pi/agent/web-hub-other/f`, CTX)).toBe(false);
+  });
+
+  it("context prefixes under a CANONICAL spelling (ctx carries both representations)", () => {
+    const ctx: PreviewDenyContext = {
+      homes: ["/home/tester", "/mnt/real-home"],
+      agentDirs: ["/home/tester/.pi/agent", "/mnt/agent-real"],
+    };
+    expect(denyListHit("/mnt/agent-real/auth.json", ctx)).toBe(true);
+    expect(denyListHit("/mnt/agent-real/web-hub/uploads/x", ctx)).toBe(true);
+    expect(denyListHit("/mnt/real-home/.config/pi/x", ctx)).toBe(true);
+    // ctx WITHOUT the canonical half still catches the default-shaped spellings via twins
+    const degraded: PreviewDenyContext = { homes: ["/home/tester"], agentDirs: ["/home/tester/.pi/agent"] };
+    expect(denyListHit("/mnt/real-home/.pi/agent/auth.json", degraded)).toBe(true); // .pi/agent/auth.json twin
+    expect(denyListHit("/mnt/real-home/.config/pi/x", degraded)).toBe(true); // .config/pi twin
+  });
+
+  it("absolute prefixes (§2.3 v2 additions)", () => {
+    for (const p of [
+      "/etc/shadow",
+      "/etc/shadow-",
+      "/etc/gshadow",
+      "/etc/gshadow-",
+      "/etc/sudoers",
+      "/etc/sudoers.d/some-rule",
+      "/etc/ssl/private/server.key",
+      "/etc/NetworkManager/system-connections/wifi.nmconnection",
+      "/etc/wireguard/wg0.conf",
+      "/root",
+      "/root/.bashrc",
+      "/var/lib/sss",
+      "/var/lib/sss/mc",
+    ]) {
+      expect(denyListHit(p, CTX)).toBe(true);
+    }
+    // segment alignment: /root2 is NOT /root
+    expect(denyListHit("/root2/x", CTX)).toBe(false);
+    expect(denyListHit("/etc/shadowplay", CTX)).toBe(false);
+  });
+
+  it("single segments (incl. the v2 .pki addition)", () => {
     for (const seg of [
       ".ssh",
       ".gnupg",
@@ -184,12 +252,15 @@ describe("admit: denylist (§4.3 拒绝列表)", () => {
       ".mozilla",
       ".thunderbird",
       ".terraform.d",
+      ".pki",
     ]) {
-      expect(denyListHit(`${HOME}/proj/${seg}/x`, HOME)).toBe(true);
+      expect(denyListHit(`${HOME}/proj/${seg}/x`, CTX)).toBe(true);
+      // home-independent: any prefix, including another user's home (U4 makes this reachable)
+      expect(denyListHit(`/home/other/proj/${seg}/x`, CTX)).toBe(true);
     }
   });
 
-  it("consecutive segment pairs", () => {
+  it("consecutive segment pairs (v1 + v2 additions)", () => {
     for (const pair of [
       ".config/gcloud",
       ".config/gh",
@@ -201,15 +272,28 @@ describe("admit: denylist (§4.3 拒绝列表)", () => {
       ".git/config",
       ".cargo/credentials",
       ".cargo/credentials.toml",
+      ".pi/agent/web-hub",
+      ".pi/agent/auth.json",
+      ".pi/agent/models.json",
+      ".config/pi",
+      ".config/op",
+      ".config/rclone",
+      ".config/sops",
+      ".config/age",
+      ".config/github-copilot",
+      ".claude/.credentials.json",
+      ".codex/auth.json",
+      ".local/share/password-store",
     ]) {
-      expect(denyListHit(`${HOME}/x/${pair}/y`, HOME)).toBe(true);
-      expect(denyListHit(`${HOME}/x/${pair}`, HOME)).toBe(true);
+      expect(denyListHit(`${HOME}/x/${pair}/y`, CTX)).toBe(true);
+      expect(denyListHit(`${HOME}/x/${pair}`, CTX)).toBe(true);
+      expect(denyListHit(`/home/other/${pair}/y`, CTX)).toBe(true); // home-independent twin
     }
     // non-consecutive must not hit
-    expect(denyListHit(`${HOME}/.config/other/gh/hosts.yml`, HOME)).toBe(false);
+    expect(denyListHit(`${HOME}/.config/other/gh/hosts.yml`, CTX)).toBe(false);
   });
 
-  it("basenames", () => {
+  it("basenames (incl. v2 additions)", () => {
     for (const base of [
       ".netrc",
       ".pgpass",
@@ -224,12 +308,15 @@ describe("admit: denylist (§4.3 拒绝列表)", () => {
       ".node_repl_history",
       ".lesshst",
       ".viminfo",
+      ".vault-token",
+      "kubeconfig",
+      ".terraformrc",
     ]) {
-      expect(denyListHit(`${HOME}/proj/${base}`, HOME)).toBe(true);
+      expect(denyListHit(`${HOME}/proj/${base}`, CTX)).toBe(true);
     }
   });
 
-  it("basename patterns (.env*, id_* keys)", () => {
+  it("basename patterns (.env*, id_* keys, v2 ssh_host_*_key / *.tfstate)", () => {
     for (const base of [
       ".env",
       ".env.local",
@@ -239,22 +326,28 @@ describe("admit: denylist (§4.3 拒绝列表)", () => {
       "id_ecdsa",
       "id_dsa",
       "id_rsa.pub",
+      "ssh_host_ed25519_key",
+      "ssh_host_rsa_key",
+      "prod.tfstate",
+      "prod.tfstate.backup",
     ]) {
-      expect(denyListHit(`${HOME}/p/${base}`, HOME)).toBe(true);
+      expect(denyListHit(`${HOME}/p/${base}`, CTX)).toBe(true);
     }
-    expect(denyListHit(`${HOME}/p/id_foo`, HOME)).toBe(false);
-    expect(denyListHit(`${HOME}/p/envy`, HOME)).toBe(false);
+    expect(denyListHit(`${HOME}/p/id_foo`, CTX)).toBe(false);
+    expect(denyListHit(`${HOME}/p/envy`, CTX)).toBe(false);
+    expect(denyListHit(`${HOME}/p/ssh_host_ed25519_key.pub.txt`, CTX)).toBe(false);
+    expect(denyListHit(`${HOME}/p/prod.tfstate.bak`, CTX)).toBe(false);
   });
 
   it("extensions, case-insensitive", () => {
     for (const base of ["cert.pem", "cert.PEM", "k.key", "a.p12", "b.pfx", "c.kdbx"]) {
-      expect(denyListHit(`${HOME}/p/${base}`, HOME)).toBe(true);
+      expect(denyListHit(`${HOME}/p/${base}`, CTX)).toBe(true);
     }
-    expect(denyListHit(`${HOME}/p/pemx`, HOME)).toBe(false);
-    expect(denyListHit(`${HOME}/p/cert.pemap`, HOME)).toBe(false);
+    expect(denyListHit(`${HOME}/p/pemx`, CTX)).toBe(false);
+    expect(denyListHit(`${HOME}/p/cert.pemap`, CTX)).toBe(false);
   });
 
-  it("U2 matrix: home as cwd — normal file ok, secrets denied", async () => {
+  it("U2 matrix: home as the request area — normal file ok, secrets denied", async () => {
     const home = scratch("wh-home-");
     const okFile = join(home, "notes", "todo.md");
     mkdirSync(join(home, "notes"));
@@ -266,29 +359,101 @@ describe("admit: denylist (§4.3 拒绝列表)", () => {
     writeFileSync(join(home, ".config", "gh", "hosts.yml"), "x");
 
     const { a, fs } = admitter();
-    const good = await a.admit({ root: home, path: okFile }, deadline(8000), neverAbort());
+    const good = await a.admit({ path: okFile }, deadline(8000), neverAbort());
     expect(good.ok).toBe(true);
     if (good.ok) await good.fh.close();
-    expect(fs.counts.realpath ?? 0).toBe(2); // the ok case really did fs work
+    expect(fs.counts.realpath ?? 0).toBe(1); // the ok case really did fs work
 
     for (const secret of [
       join(home, ".ssh", "config"),
       join(home, ".zsh_history"),
       join(home, ".config", "gh", "hosts.yml"),
     ]) {
-      const res = await a.admit({ root: home, path: secret }, deadline(8000), neverAbort());
+      const res = await a.admit({ path: secret }, deadline(8000), neverAbort());
       expect(res).toMatchObject({ ok: false, status: 403, reason: "denylist" });
     }
   });
 
-  it("denylist re-check on the RESOLVED path (step 8): in-cwd symlink to an in-cwd secret", async () => {
+  it("denylist re-check on the RESOLVED path (step 5): clean literal, denylisted target", async () => {
     const root = scratch();
     mkdirSync(join(root, ".ssh"));
     writeFileSync(join(root, ".ssh", "config"), "Host *");
     mkdirSync(join(root, "pub"));
     symlinkSync(join(root, ".ssh", "config"), join(root, "pub", "leak")); // literal path is clean
     const { a } = admitter();
-    const res = await a.admit({ root, path: join(root, "pub", "leak") }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: join(root, "pub", "leak") }, deadline(8000), neverAbort());
+    expect(res).toMatchObject({ ok: false, status: 403, reason: "denylist" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §2.6 — real-tmpdir symlink homes / custom agentDir / degradation
+// ---------------------------------------------------------------------------
+
+describe("admit: §2.6 home/agentDir canonical forms (real tmpdir)", () => {
+  it("home is a symlink: BOTH spellings of agent secrets are denied", async () => {
+    const t = scratch("wh-symhome-");
+    const realHome = join(t, "real-home");
+    mkdirSync(join(realHome, ".pi", "agent"), { recursive: true });
+    writeFileSync(join(realHome, ".pi", "agent", "auth.json"), "{}");
+    symlinkSync(realHome, join(t, "home-link"));
+
+    // ctx carries literal+canonical (resolvePreviewDenyContext's product — built by hand here)
+    const ctx: PreviewDenyContext = {
+      homes: [join(t, "home-link"), realHome],
+      agentDirs: [join(realHome, ".pi/agent")],
+    };
+    const { a } = admitter({ counts: {} }, { denyCtx: ctx });
+
+    const viaLink = await a.admit({ path: join(t, "home-link", ".pi/agent/auth.json") }, deadline(8000), neverAbort());
+    expect(viaLink).toMatchObject({ ok: false, reason: "denylist" }); // literal + twin both hit
+    const viaReal = await a.admit({ path: join(realHome, ".pi/agent/auth.json") }, deadline(8000), neverAbort());
+    expect(viaReal).toMatchObject({ ok: false, reason: "denylist" }); // twin hits even bare
+  });
+
+  it("a THIRD-party symlink into <home>/.config/pi ⇒ realpath hit ⇒ denied", async () => {
+    const t = scratch("wh-third-");
+    const realHome = join(t, "real-home");
+    mkdirSync(join(realHome, ".config", "pi"), { recursive: true });
+    writeFileSync(join(realHome, ".config", "pi", "web-search.env"), "KEY=x");
+    symlinkSync(join(realHome, ".config", "pi"), join(t, "x")); // T/x → T/real-home/.config/pi
+
+    const { a } = admitter(); // ctx is the fixture HOME — irrelevant: the TWIN catches this
+    const res = await a.admit({ path: join(t, "x", "web-search.env") }, deadline(8000), neverAbort());
+    expect(res).toMatchObject({ ok: false, status: 403, reason: "denylist" });
+  });
+
+  it("custom PI_CODING_AGENT_DIR (itself a symlink): auth.json denied in BOTH spellings", async () => {
+    const t = scratch("wh-customagent-");
+    const realAgent = join(t, "real-agent");
+    mkdirSync(realAgent, { recursive: true });
+    writeFileSync(join(realAgent, "auth.json"), "{}");
+    const customAgent = join(t, "custom-agent");
+    symlinkSync(realAgent, customAgent);
+
+    const ctx: PreviewDenyContext = { homes: [HOME], agentDirs: [customAgent, realAgent] };
+    const { a } = admitter({ counts: {} }, { denyCtx: ctx });
+
+    const viaLiteral = await a.admit({ path: join(customAgent, "auth.json") }, deadline(8000), neverAbort());
+    expect(viaLiteral).toMatchObject({ ok: false, reason: "denylist" });
+    const viaCanonical = await a.admit({ path: join(realAgent, "auth.json") }, deadline(8000), neverAbort());
+    expect(viaCanonical).toMatchObject({ ok: false, reason: "denylist" });
+  });
+
+  it("DEGRADED ctx (realpath failed at startup, literal-only): the §2.3 twins still hold the line", async () => {
+    const t = scratch("wh-degraded-");
+    const realHome = join(t, "real-home");
+    mkdirSync(join(realHome, ".config", "pi"), { recursive: true });
+    writeFileSync(join(realHome, ".config", "pi", "web-search.env"), "KEY=x");
+
+    // home's realpath failed ⇒ homes carries ONLY the literal "/home/tester" — a canonical
+    // request must still be denied by the home-independent `.config/pi` twin (§2.1 invariant).
+    const { a } = admitter();
+    const res = await a.admit(
+      { path: join(realHome, ".config", "pi", "web-search.env") },
+      deadline(8000),
+      neverAbort(),
+    );
     expect(res).toMatchObject({ ok: false, status: 403, reason: "denylist" });
   });
 });
@@ -303,16 +468,16 @@ describe("admit: not-regular & unreadable", () => {
     const fifo = join(root, "pipe");
     execSync(`mkfifo '${fifo}'`);
     const { a } = admitter();
-    const res = await a.admit({ root, path: fifo }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: fifo }, deadline(8000), neverAbort());
     expect(res).toMatchObject({ ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
   });
 
-  it("directory ⇒ 415 not-regular", async () => {
+  it("directory ⇒ 415 not-regular (P1a: allowDir is not implemented yet, §3.1 lands in P1b)", async () => {
     const root = scratch();
     const sub = join(root, "sub");
     mkdirSync(sub);
     const { a } = admitter();
-    const res = await a.admit({ root, path: sub }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: sub, allowDir: true }, deadline(8000), neverAbort());
     expect(res).toMatchObject({ ok: false, status: 415, reason: "not-regular" });
   });
 
@@ -321,7 +486,7 @@ describe("admit: not-regular & unreadable", () => {
     const f = okPath(root, "locked.txt");
     chmodSync(f, 0o000);
     const { a } = admitter();
-    const res = await a.admit({ root, path: f }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: f }, deadline(8000), neverAbort());
     expect(res).toMatchObject({ ok: false, status: 403, code: "E_PREVIEW_DENIED", reason: "unreadable" });
     chmodSync(f, 0o600);
   });
@@ -346,8 +511,8 @@ describe("admit: errno mapping table", () => {
     it(`${code} on realpath(path) ⇒ ${status} ${errCode}`, async () => {
       const root = scratch();
       const file = okPath(root);
-      const { a } = admitter({ counts: {}, failOn: { realpath: { call: 2, err: errnoError(code) } } });
-      const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+      const { a } = admitter({ counts: {}, failOn: { realpath: { call: 1, err: errnoError(code) } } });
+      const res = await a.admit({ path: file }, deadline(8000), neverAbort());
       expect(res).toEqual(
         reason === undefined ? { ok: false, status, code: errCode } : { ok: false, status, code: errCode, reason },
       );
@@ -358,7 +523,7 @@ describe("admit: errno mapping table", () => {
     const root = scratch();
     const file = okPath(root);
     const { a } = admitter({ counts: {}, failOn: { open: { call: 1, err: errnoError("ELOOP") } } });
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 409, code: "E_PREVIEW_CHANGED" });
   });
 
@@ -366,8 +531,17 @@ describe("admit: errno mapping table", () => {
     const root = scratch();
     const file = okPath(root);
     const { a } = admitter({ counts: {}, failOn: { open: { call: 1, err: errnoError("EISDIR") } } });
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 415, code: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
+  });
+
+  it("fail-closed to step 4: a realpath failure NEVER reaches the open (no rp ⇒ no step 6)", async () => {
+    const root = scratch();
+    const file = okPath(root);
+    const { a, fs } = admitter({ counts: {}, failOn: { realpath: { call: 1, err: errnoError("ENOENT") } } });
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
+    expect(res).toEqual({ ok: false, status: 404, code: "E_NOT_FOUND" });
+    expect(fs.counts.open ?? 0).toBe(0);
   });
 });
 
@@ -389,7 +563,7 @@ describe("admit: TOCTOU (HP2)", () => {
         },
       },
     });
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 409, code: "E_PREVIEW_CHANGED" });
   });
 
@@ -407,7 +581,7 @@ describe("admit: TOCTOU (HP2)", () => {
         },
       },
     });
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 409, code: "E_PREVIEW_CHANGED" });
   });
 
@@ -431,7 +605,7 @@ describe("admit: TOCTOU (HP2)", () => {
         },
       },
     });
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 409, code: "E_PREVIEW_CHANGED" });
   });
 
@@ -439,7 +613,7 @@ describe("admit: TOCTOU (HP2)", () => {
     const root = scratch();
     const file = okPath(root);
     const { a, log } = admitter({ counts: {}, failOn: { readlink: { call: 1, err: errnoError("EIO") } } });
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 409, code: "E_PREVIEW_CHANGED" });
     expect(log.lines.filter((l) => l.level === "warn")).toHaveLength(1);
   });
@@ -465,7 +639,7 @@ describe("admit: TOCTOU (HP2)", () => {
       },
     };
     const { a, fs } = admitter(hooks);
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res.ok).toBe(true); // §4.3 step 12 skipped — the documented residual, pinned
     expect(fs.counts.readlink ?? 0).toBe(0);
     if (res.ok) await res.fh.close();
@@ -477,7 +651,7 @@ describe("admit: TOCTOU (HP2)", () => {
 // ---------------------------------------------------------------------------
 
 describe("admit: hardlink (§5.3 — not in the threat model, pinned)", () => {
-  it("a hardlink inside cwd pointing at a file outside cwd ⇒ admitted (200 path)", async () => {
+  it("a hardlink anywhere pointing at a file elsewhere ⇒ admitted (200 path)", async () => {
     const root = scratch();
     const outside = scratch();
     const original = join(outside, "real.txt");
@@ -485,7 +659,7 @@ describe("admit: hardlink (§5.3 — not in the threat model, pinned)", () => {
     const inside = join(root, "link.txt");
     linkSync(original, inside);
     const { a } = admitter();
-    const res = await a.admit({ root, path: inside }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: inside }, deadline(8000), neverAbort());
     expect(res.ok).toBe(true);
     if (res.ok) {
       expect(res.size).toBe(14);
@@ -495,7 +669,7 @@ describe("admit: hardlink (§5.3 — not in the threat model, pinned)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// budgets: per-step caps, lazy initiation, late-open recovery, abort
+// budgets: per-step caps, lazy initiation, late-open recovery, abort, tracker
 // ---------------------------------------------------------------------------
 
 describe("admit: budgets & step racing", () => {
@@ -521,8 +695,9 @@ describe("admit: budgets & step racing", () => {
         close: () => h.close(),
       };
     };
-    const a = createCwdAdmitter({
-      home: HOME,
+    const a = createFsAdmitter({
+      denyCtx: CTX,
+      tracker: createPreviewIoTracker(),
       fs: { ...fs, open: wrappedOpen },
       log: memLog(),
       now: Date.now,
@@ -532,7 +707,6 @@ describe("admit: budgets & step racing", () => {
   };
 
   it.each([
-    ["realpath(root)", "realpath", false],
     ["realpath(path)", "realpath", false],
     ["stat(rp)", "stat", false],
     ["open", "open", false],
@@ -543,7 +717,7 @@ describe("admit: budgets & step racing", () => {
     const file = okPath(root);
     const { a } = slowAdmitter(method, wrapStat);
     const t0 = Date.now();
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     const elapsed = Date.now() - t0;
     expect(res).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
     expect(elapsed).toBeLessThan(STEP_CAP * 3);
@@ -553,7 +727,7 @@ describe("admit: budgets & step racing", () => {
     const root = scratch();
     const file = okPath(root);
     const { a, fs } = admitter();
-    const res = await a.admit({ root, path: file }, deadline(0), neverAbort());
+    const res = await a.admit({ path: file }, deadline(0), neverAbort());
     expect(res).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
     expect(fs.counts.realpath ?? 0).toBe(0);
   });
@@ -567,9 +741,16 @@ describe("admit: budgets & step racing", () => {
       t.unref();
     });
     const fs = { ...real, open: () => late, counts: {} as Record<string, number> };
-    const a = createCwdAdmitter({ home: HOME, fs, log: memLog(), now: Date.now, stepCapMs: 60 });
+    const a = createFsAdmitter({
+      denyCtx: CTX,
+      tracker: createPreviewIoTracker(),
+      fs,
+      log: memLog(),
+      now: Date.now,
+      stepCapMs: 60,
+    });
     const t0 = Date.now();
-    const res = await a.admit({ root, path: file }, deadline(8000), neverAbort());
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
     expect(res).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
     expect(Date.now() - t0).toBeLessThan(250);
     const handle = await late;
@@ -585,7 +766,7 @@ describe("admit: budgets & step racing", () => {
       { stepCapMs: 10_000 },
     );
     const { signal, cancel } = abortAfter(60, "client-abort");
-    const res = await a.admit({ root, path: file }, deadline(8000), signal);
+    const res = await a.admit({ path: file }, deadline(8000), signal);
     cancel();
     expect(res).toEqual({ ok: false, status: 0, code: "E_ABORT" });
   });
@@ -596,7 +777,7 @@ describe("admit: budgets & step racing", () => {
     const { a, fs } = admitter();
     const ctl = new AbortController();
     ctl.abort("hub-close");
-    const res = await a.admit({ root, path: file }, deadline(8000), ctl.signal);
+    const res = await a.admit({ path: file }, deadline(8000), ctl.signal);
     expect(res).toEqual({ ok: false, status: 0, code: "E_ABORT" });
     expect(Object.keys(fs.counts).filter((k) => (fs.counts[k] ?? 0) > 0)).toEqual([]);
   });
@@ -604,16 +785,51 @@ describe("admit: budgets & step racing", () => {
   it("steps 7/8 (sniff sample + JPEG continuation reads) race the same cap via previewFsStep", async () => {
     const dl = deadline(8000);
     const slow = new Promise<{ bytesRead: number }>(() => undefined);
-    await expect(previewFsStep(() => slow, dl, neverAbort(), { stepCapMs: 60, now: Date.now })).rejects.toSatisfy(
-      isPreviewIoError,
-    );
+    await expect(
+      previewFsStep(() => slow, dl, neverAbort(), { stepCapMs: 60, now: Date.now, tracker: createPreviewIoTracker() }),
+    ).rejects.toSatisfy(isPreviewIoError);
     expect(mapFsError(new PreviewIoError("deadline", "x"))).toEqual({
       kind: "response",
       body: { status: 504, code: "E_DEADLINE" },
     });
     // and the JPEG continuation variant: same helper, still inside the shared 8s budget
-    await expect(previewFsStep(() => slow, dl, neverAbort(), { stepCapMs: 60, now: Date.now })).rejects.toSatisfy(
-      (e: unknown) => isPreviewIoError(e) && e.ioFail === "deadline",
-    );
+    await expect(
+      previewFsStep(() => slow, dl, neverAbort(), { stepCapMs: 60, now: Date.now, tracker: createPreviewIoTracker() }),
+    ).rejects.toSatisfy((e: unknown) => isPreviewIoError(e) && e.ioFail === "deadline");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §2.4 tracker circuit-breaker through a real admission
+// ---------------------------------------------------------------------------
+
+describe("admit: §2.4 tracker busy (zombie fs 熔断)", () => {
+  it("two raced-out steps trip the shared tracker ⇒ the NEXT admission answers 503 E_BUSY", async () => {
+    const tracker = createPreviewIoTracker(); // §2.4 default max = 2
+    const root = scratch();
+    const file = okPath(root);
+    const log = memLog();
+    const { a } = { a: createFsAdmitter({ denyCtx: CTX, tracker, log, now: Date.now, stepCapMs: 60 }) };
+
+    // first admission: realpath hangs past the 60ms cap ⇒ raced out ⇒ 1 zombie (settle later)
+    const hangFs = { ...defaultPreviewFs(), realpath: () => new Promise<string>(() => undefined) };
+    const hanging = createFsAdmitter({ denyCtx: CTX, tracker, log, now: Date.now, fs: hangFs, stepCapMs: 60 });
+    const first = await hanging.admit({ path: file }, deadline(8000), neverAbort());
+    expect(first).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
+    expect(tracker.zombies).toBe(1);
+
+    // second raced-out step on the SAME tracker ⇒ zombies = 2 = max
+    const second = await hanging.admit({ path: file }, deadline(8000), neverAbort());
+    expect(second).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
+    expect(tracker.zombies).toBe(2);
+
+    // third admission: busy is checked BEFORE lazy ⇒ 503 E_BUSY, no new fs work
+    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
+    expect(res).toEqual({ ok: false, status: 503, code: "E_BUSY" });
+  });
+
+  it("busy maps with Retry-After semantics via mapFsError (503, retryAfterS 1)", () => {
+    const m = mapFsError(new PreviewIoError("busy", "x"));
+    expect(m).toEqual({ kind: "response", body: { status: 503, code: "E_BUSY", retryAfterS: 1 } });
   });
 });

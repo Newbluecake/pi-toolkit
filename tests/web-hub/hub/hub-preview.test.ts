@@ -12,13 +12,16 @@
  * - the startup-failure unwind (fe.listen rejects): preview dispose runs BEFORE fe.close.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import {
   DIALOG_BG_HUB_CAPS,
   P2_HUB_CAPS,
+  PREVIEW_ABS_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   RUNTX_HUB_CAPS,
@@ -87,9 +90,9 @@ interface Kit {
 }
 
 async function startKit(
-  opts: { preview?: "on" | "loopback"; listenFails?: boolean } = {},
+  opts: { preview?: "on" | "loopback"; listenFails?: boolean; getuid?: () => number; home?: string } = {},
 ): Promise<Kit | { failed: true; order: string[] }> {
-  const home = tmp.make("wh-hubpreview-");
+  const home = opts.home ?? tmp.make("wh-hubpreview-");
   const order: string[] = [];
   const fe = fakeFrontend(order, opts.listenFails === true);
   try {
@@ -100,7 +103,10 @@ async function startKit(
         ...(opts.preview === undefined ? {} : { preview: opts.preview }),
       }),
       fe,
-      { uid: process.getuid?.() ?? 0 },
+      {
+        uid: process.getuid?.() ?? 0,
+        ...(opts.getuid === undefined ? {} : { getuid: opts.getuid }),
+      },
     );
     if ("exists" in hub) throw new Error("unexpected exists");
     hubs.push(hub);
@@ -130,6 +136,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
     expect(browserCaps).toEqual(baselineCaps());
     expect(browserCaps).not.toContain(PREVIEW_HUB_CAP);
     expect(browserCaps).not.toContain(PREVIEW_LAN_HUB_CAP);
+    expect(browserCaps).not.toContain(PREVIEW_ABS_HUB_CAP);
     c.sock.destroy();
   });
 
@@ -143,7 +150,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     const agentCaps = ack["caps"] as string[];
     expect([...agentCaps].sort()).toEqual([...kit.hub.info.caps].sort());
-    expect([...kit.hub.info.caps]).toEqual([...baselineCaps(), PREVIEW_HUB_CAP]);
+    expect([...kit.hub.info.caps]).toEqual([...baselineCaps(), PREVIEW_HUB_CAP, PREVIEW_ABS_HUB_CAP]);
     c.sock.destroy();
   });
 
@@ -157,7 +164,12 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     const agentCaps = ack["caps"] as string[];
     expect([...agentCaps].sort()).toEqual([...kit.hub.info.caps].sort());
-    expect([...kit.hub.info.caps]).toEqual([...baselineCaps(), PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP]);
+    expect([...kit.hub.info.caps]).toEqual([
+      ...baselineCaps(),
+      PREVIEW_HUB_CAP,
+      PREVIEW_ABS_HUB_CAP,
+      PREVIEW_LAN_HUB_CAP,
+    ]);
     c.sock.destroy();
   });
 });
@@ -206,5 +218,85 @@ describe("hub assembly × preview dispose wiring (§4.5.1)", () => {
     if ("failed" in kit) throw new Error("startHub failed");
     await kit.hub.close("test");
     expect(kit.order).not.toContain("preview.dispose:close");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1a: uid-0 warning (§2.9) + deny-context degradation WARN (§2.6)
+// ---------------------------------------------------------------------------
+
+/** Parse the hub's own log file into JSON lines (createHubLog's format). */
+function hubLogLines(path: string): Array<Record<string, unknown>> {
+  const raw = readFileSync(path, "utf8");
+  return raw
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+describe("hub assembly × preview uid-0 warning (§2.9)", () => {
+  it("getuid ⇒ 0: EXACTLY one stable warn line, event+mode only, no path/username", async () => {
+    const kit = await startKit({ preview: "on", getuid: () => 0 });
+    if ("failed" in kit) throw new Error("startHub failed");
+    const warns = hubLogLines(kit.hub.paths.logFile).filter((l) => l["event"] === "preview.root_uid");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatchObject({
+      level: "warn",
+      event: "preview.root_uid",
+      mode: "on",
+      msg: "web-hub preview: hub is running as root — OS permission checks no longer limit preview; only the denylist applies",
+    });
+    // exactly the two data fields — nothing else rides the line
+    expect(
+      Object.keys(warns[0]!)
+        .filter((k) => !["t", "level", "pid", "msg"].includes(k))
+        .sort(),
+    ).toEqual(["event", "mode"]);
+  });
+
+  it("getuid ⇒ 1000: no warn line", async () => {
+    const kit = await startKit({ preview: "on", getuid: () => 1000 });
+    if ("failed" in kit) throw new Error("startHub failed");
+    expect(hubLogLines(kit.hub.paths.logFile).some((l) => l["event"] === "preview.root_uid")).toBe(false);
+  });
+
+  it("getuid undefined (platform without it): no warn line", async () => {
+    const kit = await startKit({ preview: "loopback", getuid: undefined });
+    if ("failed" in kit) throw new Error("startHub failed");
+    expect(hubLogLines(kit.hub.paths.logFile).some((l) => l["event"] === "preview.root_uid")).toBe(false);
+  });
+
+  it("preview off: no warn line even as root", async () => {
+    const kit = await startKit({ getuid: () => 0 });
+    if ("failed" in kit) throw new Error("startHub failed");
+    expect(hubLogLines(kit.hub.paths.logFile).some((l) => l["event"] === "preview.root_uid")).toBe(false);
+  });
+});
+
+describe("hub assembly × preview deny-context resolution (§2.6)", () => {
+  it("an agentDir whose realpath FAILS (ENOTDIR through a file) degrades with a path-free WARN", async () => {
+    const holder = tmp.make("wh-denyctx-hub-");
+    const blocker = join(holder, "plain-file");
+    writeFileSync(blocker, "x");
+    // `PI_CODING_AGENT_DIR` pointing through a regular file can never realpath ⇒ that member
+    // degrades to literal-only; home stays valid so the hub itself starts normally.
+    const prev = process.env["PI_CODING_AGENT_DIR"];
+    process.env["PI_CODING_AGENT_DIR"] = join(blocker, "sub");
+    try {
+      const kit = await startKit({ preview: "on", home: join(holder, "home") });
+      if ("failed" in kit) throw new Error("startHub failed");
+      const lines = hubLogLines(kit.hub.paths.logFile);
+      const degraded = lines.filter((l) => l["event"] === "preview.deny_ctx_degraded");
+      expect(degraded).toHaveLength(1);
+      expect(degraded[0]).toMatchObject({
+        level: "warn",
+        which: "agentDir",
+        msg: "preview deny context: realpath failed",
+      });
+      expect(JSON.stringify(degraded[0])).not.toContain(holder); // never a path
+    } finally {
+      if (prev === undefined) delete process.env["PI_CODING_AGENT_DIR"];
+      else process.env["PI_CODING_AGENT_DIR"] = prev;
+    }
   });
 });

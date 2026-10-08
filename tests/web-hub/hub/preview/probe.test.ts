@@ -18,10 +18,9 @@ import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPreviewRoutes } from "../../../../src/web-hub/hub/preview/routes.js";
-import { createCwdAdmitter } from "../../../../src/web-hub/hub/preview/admit.js";
-import type { CwdAdmitter } from "../../../../src/web-hub/hub/preview/admit.js";
-import type { PreviewFs } from "../../../../src/web-hub/hub/preview/admit.js";
-import { defaultPreviewFs } from "../../../../src/web-hub/hub/preview/fs.js";
+import { createFsAdmitter, denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
+import type { FsAdmitter, PreviewFs } from "../../../../src/web-hub/hub/preview/admit.js";
+import { createPreviewIoTracker, defaultPreviewFs } from "../../../../src/web-hub/hub/preview/fs.js";
 import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import type { PreviewRouteIo, PreviewRoutes, RegistryView } from "../../../../src/web-hub/hub/ports.js";
 import type { OpenForPreviewResult, UploadStore } from "../../../../src/web-hub/hub/uploads.js";
@@ -186,12 +185,12 @@ function routes(
   fx: ReturnType<typeof fixture>,
   over: {
     uploads?: Pick<UploadStore, "openForPreview">;
-    admitter?: CwdAdmitter;
+    admitter?: FsAdmitter;
   } = {},
 ): PreviewRoutes {
   return createPreviewRoutes({
     mode: "on",
-    home: dir,
+    denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
     uploadsRoot: fx.uploadsRoot,
     registry: fx.registry,
     log,
@@ -242,10 +241,10 @@ describe("POST /api/preview/probe — per-entry kinds (2026-10-07 修订)", () =
     expect(res.json()).toEqual({ results: [{ kind: "text" }, { kind: "missing" }] });
   });
 
-  it("outside-root / denylist / virtual-fs entries answer missing — the SAME cwd defences a preview walks", async () => {
+  it("U4: a cwd-OUTSIDE file probes its REAL kind now (was missing pre-dir-plan); denylist / virtual-fs stay missing", async () => {
     const fx = fixture();
     const outside = join(dir, "outside.txt");
-    writeFileSync(outside, "no\n");
+    writeFileSync(outside, "no\n"); // U4: outside-cwd no longer folds to missing — real answer
     const secret = join(fx.cwd, ".ssh", "id_rsa");
     mkdirSync(join(fx.cwd, ".ssh"), { recursive: true });
     writeFileSync(secret, "k");
@@ -254,7 +253,7 @@ describe("POST /api/preview/probe — per-entry kinds (2026-10-07 修订)", () =
     });
     expect(res.status).toBe(200);
     expect(res.json()).toEqual({
-      results: [{ kind: "missing" }, { kind: "missing" }, { kind: "missing" }],
+      results: [{ kind: "text" }, { kind: "missing" }, { kind: "missing" }],
     });
   });
 
@@ -429,7 +428,13 @@ describe("POST /api/preview/probe — lifecycle & audit", () => {
     const f = fx.file("slow.ts", "slow content\n");
     const counts: Record<string, number> = {};
     const fs: PreviewFs = hookedFs({ counts, delayMs: { realpath: 40 } });
-    const admitter = createCwdAdmitter({ home: dir, log, now: Date.now, fs });
+    const admitter = createFsAdmitter({
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      tracker: createPreviewIoTracker(),
+      log,
+      now: Date.now,
+      fs,
+    });
     const r = routes(fx, { admitter });
     const req = new FakeReq({ "x-pwh": "1" }, JSON.stringify({ paths: [f] }));
     const res = new FakeRes();
@@ -471,15 +476,78 @@ describe("POST /api/preview/probe — lifecycle & audit", () => {
     };
     const r = createPreviewRoutes({
       mode: "on",
-      home: dir,
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
       uploadsRoot: fx.uploadsRoot,
       registry: fx.registry,
       log,
       now,
-      admitter: createCwdAdmitter({ home: dir, log, now, fs: defaultPreviewFs() as PreviewFs }),
+      admitter: createFsAdmitter({
+        denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+        tracker: createPreviewIoTracker(),
+        log,
+        now,
+        fs: defaultPreviewFs() as PreviewFs,
+      }),
     });
     const res = await probe(r, { paths: [a, b] });
     expect(res.status).toBe(200);
     expect(res.json()).toEqual({ results: [{ kind: "missing" }, { kind: "missing" }] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 P1a: global admission (U4) + §2.4 busy + the §1.3 UI-parser contract
+// ---------------------------------------------------------------------------
+
+describe("P1a probe — global admission, busy, UI-parser contract", () => {
+  it("U4: an outside-cwd IMAGE answers image (the real result, not missing)", async () => {
+    const fx = fixture();
+    const img = join(dir, "elsewhere", "shot.png");
+    mkdirSync(join(dir, "elsewhere"), { recursive: true });
+    writeFileSync(img, pngBytes(3, 4));
+    const res = await probe(routes(fx), { paths: [img] });
+    expect(res.json()).toEqual({ results: [{ kind: "image" }] });
+  });
+
+  it("U4: a single-segment absolute path is a valid probe entry now (minSegments 1)", async () => {
+    const fx = fixture();
+    const res = await probe(routes(fx), { paths: ["/etc/hostname", "/only"] });
+    expect(res.json()).toEqual({ results: [{ kind: "text" }, { kind: "missing" }] });
+  });
+
+  it("§2.4 busy: a tripped tracker folds to missing (probe 中熔断降级为 missing, never a 4xx)", async () => {
+    const fx = fixture();
+    const tracker = createPreviewIoTracker();
+    const hangFs = { ...defaultPreviewFs(), realpath: (): Promise<string> => new Promise<string>(() => undefined) };
+    const tripped = createFsAdmitter({
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      tracker,
+      log,
+      now: Date.now,
+      fs: hangFs,
+      stepCapMs: 40,
+    });
+    const dl = createReqDeadline(Date.now, 8000);
+    const sig = new AbortController().signal;
+    await expect(tripped.admit({ path: "/etc/hostname" }, dl, sig)).resolves.toMatchObject({ ok: false, status: 504 });
+    await expect(tripped.admit({ path: "/etc/hostname" }, dl, sig)).resolves.toMatchObject({ ok: false, status: 504 });
+    expect(tracker.zombies).toBe(2);
+
+    const admitter = createFsAdmitter({ denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")), tracker, log, now: Date.now });
+    const good = fx.file("ok.md", "# ok\n");
+    const res = await probe(routes(fx, { admitter }), { paths: [good] });
+    expect(res.status).toBe(200);
+    expect(res.json()).toEqual({ results: [{ kind: "missing" }] }); // busy ⇒ missing, batch lives
+  });
+
+  it("§1.3 runtime contract: the hub's real answer body passes the UI's parseProbeResults", async () => {
+    const fx = fixture();
+    const a = fx.file("a.ts", "x");
+    const img = join(fx.cwd, "p.png");
+    writeFileSync(img, pngBytes(2, 2));
+    const res = await probe(routes(fx), { paths: [a, img, join(fx.cwd, "gone.zsh")] });
+    const { parseProbeResults } = await import("../../../../src/web-hub/ui/src/logic/previewProbe.js");
+    const parsed = parseProbeResults(res.json(), 3);
+    expect(parsed).toEqual({ ok: true, kinds: ["text", "image", "missing"] });
   });
 });

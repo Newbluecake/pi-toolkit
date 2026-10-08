@@ -6,6 +6,7 @@ import type { HubEvent } from "../../../src/web-hub/hub/ports.js";
 import {
   DIALOG_BG_HUB_CAPS,
   P2_HUB_CAPS,
+  PREVIEW_ABS_HUB_CAP,
   PREVIEW_HUB_CAP,
   RUNTX_HUB_CAPS,
   SPAWN_HUB_CAP,
@@ -108,6 +109,7 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     expect(browserCaps).not.toContain(SPAWN_HUB_CAP);
     expect(browserCaps).not.toContain(SPAWN_MODEL_HUB_CAP);
     expect(browserCaps).not.toContain(PREVIEW_HUB_CAP);
+    expect(browserCaps).not.toContain(PREVIEW_ABS_HUB_CAP); // dir-plan P1a: same gate, also absent
   });
 
   it("config.spawn: spawn.v1 joins BOTH surfaces (fail-closed probe) and they stay set-equal", async () => {
