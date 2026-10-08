@@ -16,7 +16,7 @@
  *   every await (the SAME discipline the previous pass already had, now made explicit/auditable
  *   via a single `commit()` choke point), and a validity failure `abandon()`s the call writing
  *   NOTHING to `gen.*` (closing/releasing only the fd THIS call itself opened fresh — a
- *   pre-existing `gen.rootHandle`/`gen.pending` inherited from an earlier committed call is
+ *   pre-existing `gen.rootOwner`/`gen.pending` inherited from an earlier committed call is
  *   `dispose()`'s job, never this call's).
  * - Finding 4 (c2): `GenHandle.commitPaging()` gives `index.ts`'s per-file paging loop the SAME
  *   lock protection `runAdvance` already has — every `recordX()`/sort/`markPaged` mutation now
@@ -37,6 +37,19 @@
  *   `gen.closed` CAS — serially chained bounded closes could stack up to 2×HISTORY_CLOSE_MS
  *   per gen past a caller's hard deadline (`service.ts`'s dispose() additionally no longer
  *   awaits `GenStore.dispose()` past its own bound; see there).
+ *
+ * Verifier round 4 (v3.4 X3.1) fix folded in here:
+ * - Exactly-once gen-fd release by construction. `closeGenFds()`'s `gen.closed` CAS protected
+ *   only the CLOSE-PATH side, not the fd itself: a `runAdvance` that INHERITED `gen.pending`'s
+ *   handle kept its own staged reference across an await, and when dispose() closed the ACTIVE
+ *   generation concurrently, BOTH paths closed the SAME handle and each called
+ *   `release(1,"gen")` — the ledger's silent zero-clamp masked the double release, and the
+ *   second `.close()` could even hit an unrelated fd had its number been recycled in between.
+ *   Every gen fd reservation is now bound to a `GenFdOwner` record (`{handle, closed}`); every
+ *   close path routes through ONE `closeOwned(owner)` whose synchronous check-and-set on
+ *   `owner.closed` makes "bounded close + ledger release" fire exactly once per reservation,
+ *   whichever side of the race wins. `fd-ledger.release()` stays assert-and-report (counts
+ *   over-releases instead of silently clamping) — the X3.1 tests prove the counter stays 0.
  */
 import { randomBytes } from "node:crypto";
 import type { ReqDeadline } from "../../req-deadline.js";
@@ -73,9 +86,26 @@ export interface FileStat {
 
 interface PendingDir {
   ref: DirRef;
-  handle: HistoryHandle;
+  /** v3.4 X3.1: the fd reservation this pending dir holds, bound to its owner record — the
+   * SAME `GenFdOwner` object a mid-flight `runAdvance` stages locally, so `closeGenFds()` and
+   * the advance's own close race on ONE CAS instead of double-closing the raw handle. */
+  owner: GenFdOwner;
   names: readonly string[];
   next: number;
+}
+
+/**
+ * v3.4 X3.1: one `kind:"gen"` fd reservation bound to an owner record. The ONLY legitimate way
+ * a gen fd is ever closed+released is `closeOwned()`: its synchronous check-and-set on `closed`
+ * makes "bounded close + `ledger.release(1,\"gen\")`" EXACTLY ONCE per reservation, even when
+ * `dispose()`'s `closeGenFds()` races a mid-flight `runAdvance()` that inherited the very same
+ * handle from `gen.pending`. The CAS must stay synchronous (check-and-set with no intervening
+ * await) — that is what makes the win/lose decision atomic even though the close itself is
+ * async and individually bounded.
+ */
+interface GenFdOwner {
+  readonly handle: HistoryHandle;
+  closed: boolean;
 }
 
 export interface GenEnumStats {
@@ -105,7 +135,7 @@ interface Gen {
   createdAt: number;
   lastUsed: number;
   R: string;
-  rootHandle: HistoryHandle;
+  rootOwner: GenFdOwner;
   root: { dev: number; ino: number };
   dirs: readonly string[];
   dirsTruncated: boolean;
@@ -202,6 +232,15 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
     return !disposed && !gen.closed;
   }
 
+  /** v3.4 X3.1: the ONE close path for every gen fd reservation (see `GenFdOwner`). */
+  function closeOwned(owner: GenFdOwner): Promise<void> {
+    if (owner.closed) return Promise.resolve(); // CAS lost — the winner owns close+release
+    owner.closed = true;
+    return boundedClose(() => owner.handle.close(), closeDeps).then(() => {
+      deps.ledger.release(1, "gen");
+    });
+  }
+
   async function closeGenFds(gen: Gen): Promise<void> {
     if (gen.closed) return; // CAS: at most one caller ever flips this
     gen.closed = true;
@@ -210,16 +249,13 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
     // Defect 3c: both closes fire AT ONCE — a serial root→pending chain could stack up to
     // 2×HISTORY_CLOSE_MS per gen past a caller's hard deadline. Each close is still individually
     // bounded (`boundedClose`) and each ledger reservation is released exactly once as its own
-    // close settles.
+    // close settles — v3.4 X3.1: "exactly once" is now by CONSTRUCTION (closeOwned's owner
+    // CAS), not by the ledger's clamp: a concurrent runAdvance holding the same inherited
+    // pending owner across an await loses the CAS here (or wins it, and this side loses) and
+    // can never double-close / double-release.
     await Promise.all([
-      boundedClose(() => gen.rootHandle.close(), closeDeps).then(() => {
-        deps.ledger.release(1, "gen");
-      }),
-      pending !== undefined
-        ? boundedClose(() => pending.handle.close(), closeDeps).then(() => {
-            deps.ledger.release(1, "gen");
-          })
-        : Promise.resolve(),
+      closeOwned(gen.rootOwner),
+      pending !== undefined ? closeOwned(pending.owner) : Promise.resolve(),
     ]);
   }
 
@@ -274,27 +310,25 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
 
     const openRes = await boundedFdOpen(1, "gen", () => deps.fs.open(R, HISTORY_DIR_OPEN_FLAGS), deadlineAt, openDeps);
     if (!openRes.ok) return undefined; // busy/deadline/error — boundedFdOpen already released
-    const rootHandle = openRes.handle;
+    const rootOwner: GenFdOwner = { handle: openRes.handle, closed: false };
 
     let root: { dev: number; ino: number };
     try {
-      const st = await step(() => rootHandle.stat());
+      const st = await step(() => rootOwner.handle.stat());
       if (!st.isDirectory() || st.uid !== deps.uid) throw new Error("sessionsRoot invalid");
       root = { dev: st.dev, ino: st.ino };
     } catch {
-      await boundedClose(() => rootHandle.close(), closeDeps);
-      deps.ledger.release(1, "gen");
+      await closeOwned(rootOwner);
       return undefined;
     }
 
     let dirs: string[];
     let dirsTruncated = false;
     try {
-      const ents = await step(() => deps.fs.readdir(fdPath(rootHandle.fd), { withFileTypes: true }));
+      const ents = await step(() => deps.fs.readdir(fdPath(rootOwner.handle.fd), { withFileTypes: true }));
       dirs = ents.filter((e) => e.isDirectory()).map((e) => e.name);
     } catch {
-      await boundedClose(() => rootHandle.close(), closeDeps);
-      deps.ledger.release(1, "gen");
+      await closeOwned(rootOwner);
       return undefined;
     }
     if (dirs.length > HISTORY_DIR_LIMIT) {
@@ -307,7 +341,7 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
       createdAt: deps.now(),
       lastUsed: deps.now(),
       R,
-      rootHandle,
+      rootOwner,
       root,
       dirs,
       dirsTruncated,
@@ -340,7 +374,7 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
       genId: gen.genId,
       createdAt: gen.createdAt,
       R: gen.R,
-      rootFd: gen.rootHandle.fd,
+      rootFd: gen.rootOwner.handle.fd,
       files: gen.files,
       skipped: gen.skipped + gen.filesSkipped,
       changed: gen.changed,
@@ -410,9 +444,12 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
     const newFiles: FileStat[] = [];
     const enumRetry = new Map(gen.enumRetry);
     // A value-copy of `gen.pending` — `next` is tracked as its OWN local var so advancing it
-    // never mutates a pre-existing, not-yet-committed `gen.pending` object in place.
+    // never mutates a pre-existing, not-yet-committed `gen.pending` object in place. v3.4 X3.1:
+    // the staged fd is the OWNER RECORD itself (never a bare handle) — every close of it goes
+    // through `closeOwned`'s CAS, so THIS call and a concurrent `closeGenFds()` can never both
+    // close/release the same reservation.
     let pendingRef = gen.pending?.ref;
-    let pendingHandle = gen.pending?.handle;
+    let pendingOwner = gen.pending?.owner;
     let pendingNames = gen.pending?.names;
     let pendingNext = gen.pending?.next ?? 0;
     let pendingFresh = false; // true once THIS call opened a NEW dir (not inherited)
@@ -422,16 +459,17 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
 
     const recordRecoverableStaged = (key: string): boolean => recordRecoverable(enumRetry, key);
 
-    // Pre-existing `gen.rootHandle`/`gen.pending` (inherited, never reassigned by THIS call
-    // unless committed) is dispose()'s job — never touched here. Only a FRESH dir handle this
-    // call itself opened is ours to clean up on abandonment.
+    // Pre-existing `gen.rootOwner`/`gen.pending` (inherited, never reassigned by THIS call
+    // unless committed) is dispose()'s job — never touched here. Only a FRESH dir fd this call
+    // itself opened (and never yet committed into `gen.pending`) is ours to clean up on
+    // abandonment — and even that goes through `closeOwned`, so a racing `closeGenFds()` cannot
+    // double-close it (X3.1).
     const abandon = async (): Promise<AdvanceResult> => {
-      if (pendingFresh && pendingHandle !== undefined) {
-        const h = pendingHandle;
-        pendingHandle = undefined;
+      if (pendingFresh && pendingOwner !== undefined) {
+        const owner = pendingOwner;
+        pendingOwner = undefined;
         pendingFresh = false;
-        await boundedClose(() => h.close(), closeDeps);
-        deps.ledger.release(1, "gen");
+        await closeOwned(owner);
       }
       return { partial: { reason: "busy" } };
     };
@@ -458,9 +496,9 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
       if (newFiles.length > 0) gen.files.push(...newFiles);
       gen.enumRetry = enumRetry;
       gen.pending =
-        pendingHandle === undefined || pendingRef === undefined || pendingNames === undefined
+        pendingOwner === undefined || pendingRef === undefined || pendingNames === undefined
           ? undefined
-          : { ref: pendingRef, handle: pendingHandle, names: pendingNames, next: pendingNext };
+          : { ref: pendingRef, owner: pendingOwner, names: pendingNames, next: pendingNext };
       return result;
     };
 
@@ -468,7 +506,7 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
       if (!isValid(gen)) return abandon();
       if (overBudget() && minimumMet()) return commit({ partial: { reason: "budget" } });
 
-      if (pendingHandle === undefined) {
+      if (pendingOwner === undefined) {
         const dirName = gen.dirs[cursorDir];
         if (dirName === undefined) {
           complete = true;
@@ -477,16 +515,12 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
         const openRes = await boundedFdOpen(
           1,
           "gen",
-          () => deps.fs.open(fdPath(gen.rootHandle.fd, dirName), HISTORY_DIR_OPEN_FLAGS),
+          () => deps.fs.open(fdPath(gen.rootOwner.handle.fd, dirName), HISTORY_DIR_OPEN_FLAGS),
           deadlineAt,
           openDeps,
         );
         if (!isValid(gen)) {
-          if (openRes.ok) {
-            const h = openRes.handle;
-            await boundedClose(() => h.close(), closeDeps);
-            deps.ledger.release(1, "gen");
-          }
+          if (openRes.ok) await closeOwned({ handle: openRes.handle, closed: false });
           return abandon();
         }
         if (!openRes.ok) {
@@ -515,25 +549,25 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
           errors += 1;
           return commit({ partial: { reason: "io" } });
         }
-        const handle = openRes.handle;
+        // v3.4 X3.1: the reservation is bound to its owner record the moment the open succeeds —
+        // every later close of it (the failure paths below included) is CAS-guarded exactly-once.
+        const owner: GenFdOwner = { handle: openRes.handle, closed: false };
         let ref: DirRef;
         let names: string[];
         try {
-          const st = await step(() => handle.stat());
+          const st = await step(() => owner.handle.stat());
           if (!st.isDirectory() || st.uid !== deps.uid) {
             throw Object.assign(new Error("dir replaced"), { code: "ENOTDIR" });
           }
           ref = { name: dirName, dev: st.dev, ino: st.ino };
           if (!isValid(gen)) {
-            await boundedClose(() => handle.close(), closeDeps);
-            deps.ledger.release(1, "gen");
+            await closeOwned(owner);
             return abandon();
           }
-          const ents = await step(() => deps.fs.readdir(fdPath(handle.fd), { withFileTypes: true }));
+          const ents = await step(() => deps.fs.readdir(fdPath(owner.handle.fd), { withFileTypes: true }));
           names = ents.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => e.name);
         } catch (err) {
-          await boundedClose(() => handle.close(), closeDeps);
-          deps.ledger.release(1, "gen");
+          await closeOwned(owner);
           if (!isValid(gen)) return abandon();
           const code = errCodeOf(err);
           if (code === "ENOENT") {
@@ -557,12 +591,11 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
           return commit({ partial: { reason: "io" } });
         }
         if (!isValid(gen)) {
-          await boundedClose(() => handle.close(), closeDeps);
-          deps.ledger.release(1, "gen");
+          await closeOwned(owner);
           return abandon();
         }
         pendingRef = ref;
-        pendingHandle = handle;
+        pendingOwner = owner;
         pendingNames = names;
         pendingNext = 0;
         pendingFresh = true;
@@ -573,19 +606,16 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
         if (!isValid(gen)) return abandon();
         if (gen.files.length + newFiles.length >= HISTORY_FILE_LIMIT) {
           filesTruncated = true;
-          const h = pendingHandle;
-          pendingHandle = undefined;
-          if (h !== undefined) {
-            await boundedClose(() => h.close(), closeDeps);
-            deps.ledger.release(1, "gen");
-          }
+          const owner = pendingOwner;
+          pendingOwner = undefined;
+          if (owner !== undefined) await closeOwned(owner);
           cursorDir = gen.dirs.length; // stop enumerating further dirs entirely
           complete = true;
           return commit({});
         }
         const name = names[pendingNext];
-        if (name === undefined || pendingHandle === undefined || pendingRef === undefined) break;
-        const dirFd = pendingHandle.fd;
+        if (name === undefined || pendingOwner === undefined || pendingRef === undefined) break;
+        const dirFd = pendingOwner.handle.fd;
         const dirRef = pendingRef;
         const key = `${dirRef.name}/${name}`;
         try {
@@ -621,15 +651,19 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
         if (overBudget() && minimumMet()) return commit({ partial: { reason: "budget" } });
       }
 
-      if (pendingHandle !== undefined && pendingNames !== undefined && pendingNext >= pendingNames.length) {
-        const h = pendingHandle;
-        await boundedClose(() => h.close(), closeDeps);
-        deps.ledger.release(1, "gen");
-        pendingHandle = undefined;
+      if (pendingOwner !== undefined && pendingNames !== undefined && pendingNext >= pendingNames.length) {
+        // v3.4 X3.1: detach the staged owner BEFORE the awaited close — if dispose()'s
+        // closeGenFds() closes the SAME (possibly inherited) owner while this await is pending,
+        // exactly one of the two closeOwned calls wins the CAS and the loser does nothing; the
+        // commit() validity recheck afterwards still discards the staged mirror on the loser's
+        // side, so the gen is never observed half-advanced either way.
+        const owner = pendingOwner;
+        pendingOwner = undefined;
+        await closeOwned(owner);
         cursorDir += 1;
         dirsDone += 1;
       }
-      complete = cursorDir >= gen.dirs.length && pendingHandle === undefined;
+      complete = cursorDir >= gen.dirs.length && pendingOwner === undefined;
     }
     return commit({});
   }

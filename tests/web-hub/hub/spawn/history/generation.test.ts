@@ -498,6 +498,199 @@ describe("createGenStore — commit-after-await validity (verifier round 3, defe
   }, 15_000);
 });
 
+describe("createGenStore — exactly-once gen-fd close+release (v3.4 X3.1)", () => {
+  // Both tests reuse the "commit-after-await validity" machinery above: 100 files in ONE dir,
+  // a clock that jumps huge after the 70th lstat so advance #1 budget-truncates MID-DIR
+  // (leaving gen.pending resident), and an advance #2 that parks on a controllable await while
+  // store.dispose() closes the ACTIVE generation underneath it. Before X3.1, BOTH closeGenFds()
+  // and runAdvance's own pending close closed the SAME inherited handle and each called
+  // release(1,"gen") — the fd-ledger's silent clamp masked the second release, and the second
+  // .close() could even hit an unrelated fd had its number been recycled in between.
+  function seed100(): void {
+    mkdirSync(join(sessionsDir, "d0"));
+    for (let f = 0; f < 100; f++) {
+      writeFileSync(
+        join(sessionsDir, "d0", `f${f}.jsonl`),
+        `${JSON.stringify({ type: "session", id: `s-${f}`, cwd: "/w", timestamp: "t" })}\n`,
+      );
+    }
+  }
+
+  it("dispose() landing while runAdvance is parked on the inherited pending close: that fd is closed exactly once, never over-released", async () => {
+    seed100();
+    let clock = 0;
+    let lstatCount = 0;
+    let clockArmed = true;
+    let hangClose = false;
+    let closeStarted = false;
+    let d0SeamCloses = 0; // seam close() invocations (what a double close would double)
+    const real = defaultHistoryFs();
+    const fs: HistoryFs = {
+      ...real,
+      lstat: async (p) => {
+        const st = await real.lstat(p);
+        if (clockArmed) {
+          lstatCount += 1;
+          if (lstatCount >= 70) {
+            clockArmed = false;
+            clock = 10_000_000;
+          }
+        }
+        return st;
+      },
+      open: async (p, flags, mode) => {
+        const h = await real.open(p, flags, mode);
+        if (!p.endsWith("/d0")) return h;
+        return {
+          fd: h.fd,
+          stat: () => h.stat(),
+          read: (buf: Buffer, offset: number, length: number, position: number) =>
+            h.read(buf, offset, length, position),
+          write: (buf: Buffer, offset: number, length: number, position: number) =>
+            h.write(buf, offset, length, position),
+          truncate: (len: number) => h.truncate(len),
+          close: () => {
+            d0SeamCloses += 1;
+            closeStarted = true;
+            void h.close(); // the REAL fd close always happens — count every invocation
+            if (!hangClose) return h.close();
+            return new Promise<void>(() => undefined); // only the RETURNED promise hangs
+          },
+        };
+      },
+    };
+    const ledger = createFdLedger(32);
+    const store = createGenStore({
+      agentDir: root,
+      uid: UID,
+      fs,
+      gate: createHistoryIoGate(4),
+      ledger,
+      now: () => clock,
+    });
+
+    const acq = await store.acquire(
+      undefined,
+      createReqDeadline(() => clock, 1000),
+    );
+    if (acq.kind !== "gen") throw new Error("unreachable");
+    const first = await acq.handle.advance(createReqDeadline(() => clock, 1000));
+    expect(first.partial).toEqual({ reason: "budget" });
+    expect(acq.handle.snapshot().files.length).toBe(70); // truncated mid-dir: gen.pending resident
+
+    clock = 0; // fresh budget for the resuming advance
+    hangClose = true;
+    const advanceP = acq.handle.advance(createReqDeadline(() => clock, 5000));
+    for (let i = 0; i < 400 && !closeStarted; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(closeStarted).toBe(true);
+    // runAdvance's closeOwned already won the pending owner's CAS when it started this close;
+    // dispose()'s closeGenFds must now LOSE that same CAS — no second close, no second release.
+    const disposeP = store.dispose();
+    const second = await advanceP;
+    expect(second).toEqual({ partial: { reason: "busy" } }); // staged state discarded
+    await disposeP;
+
+    expect(acq.handle.snapshot().files.length).toBe(70); // nothing half-advanced
+    expect(d0SeamCloses).toBe(1); // the pending fd was closed EXACTLY once
+    expect(ledger.counts()).toEqual({ gen: 0, pin: 0, temp: 0, max: 32 });
+    expect(ledger.overRelease()).toBe(0); // X3.1: exactly-once, never a masked over-release
+    acq.handle.release();
+  }, 15_000);
+
+  it("dispose() landing while runAdvance is parked INSIDE an lstat: closeGenFds wins the owner CAS, the advance never re-closes the inherited pending", async () => {
+    seed100();
+    let clock = 0;
+    let lstatCount = 0;
+    let clockArmed = true;
+    let hangLstat = false;
+    let lstatParked = false;
+    let releaseLstat = (): void => undefined;
+    const lstatGate = new Promise<void>((resolve) => {
+      releaseLstat = resolve;
+    });
+    let d0SeamCloses = 0;
+    const real = defaultHistoryFs();
+    const fs: HistoryFs = {
+      ...real,
+      lstat: async (p) => {
+        if (hangLstat) {
+          lstatParked = true;
+          await lstatGate;
+        }
+        const st = await real.lstat(p);
+        if (clockArmed) {
+          lstatCount += 1;
+          if (lstatCount >= 70) {
+            clockArmed = false;
+            clock = 10_000_000;
+          }
+        }
+        return st;
+      },
+      open: async (p, flags, mode) => {
+        const h = await real.open(p, flags, mode);
+        if (!p.endsWith("/d0")) return h;
+        return {
+          fd: h.fd,
+          stat: () => h.stat(),
+          read: (buf: Buffer, offset: number, length: number, position: number) =>
+            h.read(buf, offset, length, position),
+          write: (buf: Buffer, offset: number, length: number, position: number) =>
+            h.write(buf, offset, length, position),
+          truncate: (len: number) => h.truncate(len),
+          close: () => {
+            d0SeamCloses += 1;
+            return h.close();
+          },
+        };
+      },
+    };
+    const ledger = createFdLedger(32);
+    const store = createGenStore({
+      agentDir: root,
+      uid: UID,
+      fs,
+      gate: createHistoryIoGate(4),
+      ledger,
+      now: () => clock,
+    });
+
+    const acq = await store.acquire(
+      undefined,
+      createReqDeadline(() => clock, 1000),
+    );
+    if (acq.kind !== "gen") throw new Error("unreachable");
+    const first = await acq.handle.advance(createReqDeadline(() => clock, 1000));
+    expect(first.partial).toEqual({ reason: "budget" });
+    expect(acq.handle.snapshot().files.length).toBe(70);
+
+    clock = 0;
+    hangLstat = true;
+    const advanceP = acq.handle.advance(createReqDeadline(() => clock, 5000));
+    for (let i = 0; i < 400 && !lstatParked; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(lstatParked).toBe(true);
+    // dispose() closes root+pending while the advance hangs inside the lstat — closeGenFds
+    // wins the pending owner's CAS here; when the lstat resolves, runAdvance must abandon
+    // WITHOUT touching the already-closed inherited pending fd again.
+    const disposeP = store.dispose();
+    await new Promise((r) => setTimeout(r, 30)); // let closeGenFds' closes settle
+    releaseLstat();
+    const second = await advanceP;
+    expect(second).toEqual({ partial: { reason: "busy" } });
+    await disposeP;
+
+    expect(acq.handle.snapshot().files.length).toBe(70); // staged state discarded, as in defect 2
+    expect(d0SeamCloses).toBe(1); // closed exactly once — by closeGenFds alone
+    expect(ledger.counts()).toEqual({ gen: 0, pin: 0, temp: 0, max: 32 });
+    expect(ledger.overRelease()).toBe(0);
+    acq.handle.release();
+  }, 15_000);
+});
+
 describe("createGenStore — leases and dispose (v3.2 V1, v3.3 W3)", () => {
   it("dispose() closes all resident fds even with multiple leases outstanding, and is idempotent", async () => {
     seedTree(2, 2);
