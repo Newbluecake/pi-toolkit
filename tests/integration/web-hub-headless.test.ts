@@ -103,15 +103,20 @@ function kill9(pid: number | undefined): void {
   }
 }
 
-/** Scan /proc for the hub's reaper watchdog (its inline script carries this literal). */
-function findReaperPid(): number | undefined {
+/** Scan /proc for THIS hub's reaper watchdog — cmdline literal + PPid must match the test's
+ *  own hub child (a machine may run other web-hub hubs, e.g. the user's live daemon, whose
+ *  reapers carry the same inline-script cmdline and must never be picked up). */
+function findReaperPid(hubPid: number): number | undefined {
   if (!IS_LINUX) return undefined;
   try {
     for (const name of readdirSync("/proc")) {
       if (!/^[0-9]+$/.test(name)) continue;
       try {
         const cmdline = readFileSync(`/proc/${name}/cmdline`, "utf8");
-        if (cmdline.includes("web-hub spawn reaper")) return Number(name);
+        if (!cmdline.includes("web-hub spawn reaper")) continue;
+        const status = readFileSync(`/proc/${name}/status`, "utf8");
+        const ppid = /\nPPid:\s+(\d+)/.exec(status);
+        if (ppid !== null && Number(ppid[1]) === hubPid) return Number(name);
       } catch {
         /* other uid / gone */
       }
@@ -327,8 +332,8 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     const accepted = await spawnFake(hub, cwd);
     const childPid = await waitPidOf(hub, accepted.spawnId);
     extraPids.add(childPid);
-    await waitUntil(() => findReaperPid() !== undefined, 8_000, "reaper child visible in /proc");
-    const reaperPid = findReaperPid()!;
+    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper child visible in /proc");
+    const reaperPid = findReaperPid(hub.pid)!;
 
     kill9(hub.pid);
     hubPids.delete(hub.pid);
@@ -387,8 +392,8 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     const accepted = await spawnFake(hub, cwd);
     const childPid = await waitPidOf(hub, accepted.spawnId);
     extraPids.add(childPid);
-    await waitUntil(() => findReaperPid() !== undefined, 8_000, "reaper visible");
-    const reaperPid = findReaperPid()!;
+    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper visible");
+    const reaperPid = findReaperPid(hub.pid)!;
     kill9(reaperPid);
     kill9(hub.pid);
     hubPids.delete(hub.pid);
@@ -410,8 +415,8 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     const accepted2 = await spawnFake(hub, cwd2);
     const child2 = await waitPidOf(hub, accepted2.spawnId);
     extraPids.add(child2);
-    await waitUntil(() => findReaperPid() !== undefined, 8_000, "reaper 2 visible");
-    const reaper2 = findReaperPid()!;
+    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper 2 visible");
+    const reaper2 = findReaperPid(hub.pid)!;
     kill9(reaper2);
     kill9(hub.pid);
     hubPids.delete(hub.pid);
